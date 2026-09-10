@@ -117,11 +117,10 @@ enum, and nested inside another `brace_init` or typed literal (D6.5).
 ## 4. Types
 
 ```ebnf
-type         = [ "own" ] [ "mut" ] elem_type { array_suffix } { "*" [ "own" ] [ "mut" ] } ;
+type         = base_type [ "own" ] [ "mut" ] { ref_suffix } { array_suffix } { ref_suffix } ;
                                                             (* D3.6, D5.3, D17.2 *)
-elem_type    = base_type { "*" [ "own" ] [ "mut" ] } ;
-array_suffix = "[" const_expr "]"                               (* fixed array, D3.4 *)
-             | "[" "]" [ "own" ] [ "mut" ] ;                    (* slice, D3.5 *)
+ref_suffix   = ( "*" | "@" ) [ "own" ] [ "mut" ] ;             (* pointer D3.3, slice D3.5 *)
+array_suffix = "[" const_expr "]" [ "mut" ] ;                   (* fixed array, D3.4 *)
 base_type    = prim_type | "string" | "void" | fn_type | qualified_name ;
 prim_type    = "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
              | "f32" | "f64" | "bool" | "char" ;
@@ -131,22 +130,26 @@ qualified_name = identifier [ "." identifier ] ;                    (* D9.4 *)
 
 Reading rules (D3.6, D5.2, D5.3):
 
-- `*` suffixes directly after the base type make pointers to the base; `node*[16]` is an array
-  of 16 pointers.
-- Array suffixes read outside-in: `i32[3][4]` is three arrays of four; `i32[][4]` is a slice of
-  `i32[4]`.
-- `*` suffixes after the array group make pointers to the whole array or slice type: `u8[]*` is
-  a pointer to a slice, `i32[4]*` a pointer to an `i32[4]`. No array suffix may follow them
-  (`i32[4]*[2]` does not parse; wrap it in a struct).
+- A reference suffix (`*` pointer, `@` slice) applies to everything to its left, so they read
+  inside-out: `node*@` is a slice of pointers, `u8@*` a pointer to a slice, `u8@@` a slice of
+  slices.
+- Fixed-array suffixes form one group and read outside-in like C: `i32[3][4]` is three arrays of
+  four. Reference suffixes before the group make arrays of references (`node*[16]`, `node@[4]`);
+  after it, references to the whole array (`i32[4]*`, `i32[4]@` is a slice of `i32[4]`). No array
+  suffix may follow a trailing reference suffix (`i32[4]*[2]` does not parse; wrap it in a struct).
 - `void` is legal as a `base_type` only when followed by at least one `*` (D3.11).
 - A `fn_type` used as `base_type` may take suffixes: `fn i32(i32)[4]` is four function pointers.
-- A `mut` after `*` or `[]` marks the storage holding that pointer or slice header; a leading
-  `mut` marks every level. `mut` never follows a fixed-array suffix.
-- A leading `own` marks the outermost reference of the type, the one the binding holds; an `own`
-  after `*` or `[]` marks the reference that suffix introduces (D17.2). `own` precedes `mut` in
-  both positions, never follows a fixed-array suffix, and inside `new(...)` parses only after a
-  `*` of the element type (D17.3).
-- In a `fn_type`, a `mut` that would apply only to a parameter's own storage is ignored for type
+- A `mut` marks the storage of what it follows: after the base type, values of that type; after
+  a `*` or `@`, the pointer or slice header that suffix introduces (the storage holding it); after
+  `[N]`, the array, whose elements share its storage, so a `mut` between an element type and its
+  `[N]` is an error. Nothing precedes the base type. The outermost position is the binding:
+  `i32 mut x`, `node* mut p`, `u8@ mut s` (D5.3).
+- An `own` follows a `*` or an `@` and marks the reference that suffix introduces as owning its
+  target; after the base type it is legal only for `string`, the reference without a suffix
+  (`string own s`). It precedes `mut` in a position (`node* own mut p`), never follows a
+  fixed-array suffix, and inside `new(...)` parses only after a `*` of the element type (D17.2,
+  D17.3).
+- In a `fn_type`, a `mut` in the outermost position of a parameter type is ignored for type
   identity (D5.6).
 
 ## 5. Statements
@@ -237,11 +240,11 @@ primary_expr = int_literal | float_literal | char_literal | string_literal
 
 struct_literal = qualified_name brace_init ;                          (* D6.5 *)
 array_literal  = array_type brace_init ;                              (* D6.5 *)
-array_type     = elem_type "[" const_expr "]" { "[" const_expr "]" } ;
+array_type     = base_type { ref_suffix } "[" const_expr "]" { "[" const_expr "]" } ;
 cast_expr      = "cast" "(" expr "," type ")" ;                       (* D6.4 *)
 sizeof_expr    = "sizeof" "(" type ")" ;                              (* D3.15 *)
 new_expr       = "new" "(" alloc_type ")" ;                           (* D10.2 *)
-alloc_type     = base_type { "*" [ "own" ] } [ "[" expr "]" { "[" const_expr "]" } ] ;
+alloc_type     = base_type { "*" [ "own" ] } { "[" expr "]" } ;
 ```
 
 Notes:
@@ -250,12 +253,13 @@ Notes:
   postfix; the checker resolves module, type and enum qualification (D9.4, D3.9).
 - Comparison operators do not chain: `a < b < c` parses but is a type error (`bool < T`).
 - `-x` on an unsigned type, and `!`/`~` on the wrong types, are type errors, not parse errors.
-- `new(T[n])` always produces a slice; the first bracket after the element type holds a runtime
-  count, later brackets are fixed-array dimensions of the element (`new(i32[n][4])`). `mut` does
-  not parse inside `new(...)`, and `own` only after a `*` of the element type
-  (`new(node* own[n])`, D17.3); the result is always fully mutable and owned (D5.8, D17.3).
-- An `array_literal` type has only fixed dimensions and no trailing `*`: `i32[3][]{...}` and
-  `i32[3]*{...}` do not parse.
+- `new(T[n])` always produces a slice; the last bracket holds the element count, which may be a
+  runtime expression, and the brackets before it are fixed-array dimensions of the element type
+  and must be constants (`new(i32[4][n])` yields `i32[4] mut@ own`). `mut` does not parse inside
+  `new(...)`, and `own` only after a `*` of the element type (`new(node* own[n])`, D17.3); the
+  result is writable at every level and owned (D5.8, D17.3).
+- An `array_literal` type has only fixed dimensions and no trailing reference suffix:
+  `i32[3]@{...}` and `i32[3]*{...}` do not parse.
 
 ## 7. Disambiguation
 
