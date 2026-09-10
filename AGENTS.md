@@ -55,12 +55,15 @@ the repository. Before committing a change to `git`, make sure all tests pertine
 you are working on run successfully, and make sure that the code format and lint checks pass. Rebase
 on top of `main` frequently to reduce the chances of merge conflicts.
 
-Once done with a change, squash all commits on the branch into one via interactive rebase (`git
-rebase -i origin/main`, mark all but the first as `squash`). Write a meaningful commit message that
-describes _what_ and _why_ -- do not just collate the individual commit messages. Agents that
-cannot run an interactive rebase use the equivalent `git reset --soft main && git commit`. Until
-a remote exists, `main` plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is
-gitignored.
+Once done with a change that is a single unit of work, squash all commits on the branch into one
+via interactive rebase (`git rebase -i origin/main`, mark all but the first as `squash`). Write a
+meaningful commit message that describes _what_ and _why_ -- do not just collate the individual
+commit messages. Agents that cannot run an interactive rebase use the equivalent
+`git reset --soft main && git commit`. A feature branch made of several self-contained units of
+work (for example the language design, or a compiler pass plus its tests plus its documentation)
+keeps its individual commits and is merged into `main` with a merge commit
+(`git merge --no-ff`) whose message describes the whole feature. Until a remote exists, `main`
+plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitignored.
 
 ### Self-Updating Context (AGENTS.md Auto-Amendment)
 AGENTS.md MUST be amended whenever a learning or course correction occurs. This applies in two
