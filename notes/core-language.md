@@ -87,10 +87,10 @@ fort never needs an unbounded stack.
 
 `Type name = init;` declares an immutable binding and `mut Type name = init;` a mutable one
 (3.3 says what `mut` covers). One declarator per declaration. The initializer is mandatory;
-there is no definite-assignment analysis, and `= {}` zero-initializes any aggregate, slice or
-string (5.11). A declaration is recognized as a type-looking prefix followed by an identifier
-(`grammar.md`, Disambiguation). A name is in scope from the end of its declaration to the end
-of the enclosing block.
+there is no definite-assignment analysis, and `= {}` zero-initializes any aggregate, slice,
+string or enum (5.11). A declaration is recognized as a type-looking prefix followed by an
+identifier (`grammar.md`, Disambiguation). A name is in scope from the end of its declaration
+to the end of the enclosing block.
 
 ```fort
 i32 x;                    // error: declaration requires an initializer
@@ -120,7 +120,10 @@ A `mut` before the base type marks every level mutable, including the binding: r
 "fully mutable". A `mut` immediately after a `*` or `[]` suffix marks mutable exactly the
 storage that holds the pointer or slice header that suffix builds, the level just outside the
 one it introduces: read it as "this level only"; after the outermost suffix that storage is the
-binding, level 0. `mut` never follows a fixed-array suffix.
+binding, level 0. A `mut` that marks a level twice (`mut i32* mut p`) is an error ("redundant
+mut"), so every type has one spelling. `mut` never follows a fixed-array suffix; inside a
+fixed-array type a `mut` after `*` marks the array's slots, which are level 0 of the array value
+(`Node* mut[4] t` has assignable slots and immutable nodes, and `t[..]` is `Node* mut[]`).
 
 | Declaration              | rebind `p = ...` | write through `*p`, `p->f`, `p[i]` |
 |--------------------------|------------------|------------------------------------|
@@ -132,6 +135,8 @@ binding, level 0. `mut` never follows a fixed-array suffix.
 | `mut i32[] s`            | yes              | elements: yes                      |
 | `Node* mut[] t`          | no               | slots: yes, pointees: no           |
 | `Node* mut* pp`          | no               | `*pp`: yes, `**pp`: no             |
+| `mut u8[]* out`          | yes              | `*out`: yes, bytes: yes            |
+| `u8[] mut* out`          | no               | `*out`: yes, bytes: no             |
 | `mut string s`           | yes              | never                              |
 | `mut Point q`            | yes (and fields) | not applicable                     |
 
@@ -277,15 +282,16 @@ fn void f(i32 n) {
 | pointer     | `Node*`, `void*`    | 8        | `null`      | identity | D3.11-D3.13 |
 | function    | `fn i32(i32, i32)`  | 8        | `null`      | identity | D3.10       |
 
-Alignment equals size for primitives; structs use C/System V layout. `void` is not a value type
-(`void v = f();` is an error). Type suffixes (D3.6) come in three groups: `*` suffixes before
-the array group apply to the element (`Node*[16]` is sixteen pointers); array and slice suffixes
-read outside-in (`i32[3][4]` is indexed `a[i][j]` with `i < 3`, `i32[][4]` is a slice of
-`i32[4]`); a `*` after the array group points to the whole array or slice (`u8[]*` is a pointer
-to a slice, `i32[4]*` a pointer to an `i32[4]`), and no array suffix may follow it
-(`i32[4]*[2]` does not parse; wrap it in a struct). Suffixes after a function type apply to the
-function type. Identity, layout, conversions and the full constant rules are in
-`type-system.md`.
+Alignment equals size for primitives; pointers, function pointers, slices and strings align to
+8, arrays to their element and structs to their most-aligned field, with C/System V layout
+(D3.1, D3.8). `void` is not a value type (`void v = f();` is an error). Type suffixes (D3.6)
+come in three groups: `*` suffixes before the array group apply to the element (`Node*[16]` is
+sixteen pointers); array and slice suffixes read outside-in (`i32[3][4]` is indexed `a[i][j]`
+with `i < 3`, `i32[][4]` is a slice of `i32[4]`); a `*` after the array group points to the
+whole array or slice (`u8[]*` is a pointer to a slice, `i32[4]*` a pointer to an `i32[4]`), and
+no array suffix may follow it (`i32[4]*[2]` does not parse; wrap it in a struct). Suffixes after
+a function type apply to the function type. Identity, layout, conversions and the full constant
+rules are in `type-system.md`.
 
 ## 5. Expressions
 
@@ -325,10 +331,13 @@ a statement (6.1). There is no comma operator and no unary `+`. Comparisons do n
 | `! && \|\|`      | `bool`                                                 | `bool`       |
 
 Every mixed-type operation is an error: there is no promotion, not even for `u8` or `i8`. "Same
-type" includes the mutability levels of pointer and slice types (D3.12). Equality is defined on
-integers, floats, `bool`, `char`, enums, pointers (identity), function pointers (identity) and
-`string` (contents: `len` then bytes, so the zero string equals `""`); it is an error on
-structs, fixed arrays and slices. `>>` is arithmetic for signed and logical for unsigned types.
+type" for comparison and `?:` operands means identical, mutability levels included (D3.12): the
+implicit drop of 3.4 applies only to initialization, assignment, argument passing and `return`.
+Equality is defined on integers, floats, `bool`, `char`, enums, pointers (identity), function
+pointers (identity) and `string` (contents: `len` then bytes, so the zero string equals `""`);
+it is an error on structs, fixed arrays and slices. `>>` is arithmetic for signed and logical
+for unsigned types; `<<` discards the bits shifted out and never checks for overflow, so
+`1 << 31` on `i32` is `-2147483648` in both build modes; only the count is checked (below).
 `char` supports only comparisons (ordered by unsigned byte value), `switch` and `cast`; `bool`
 only `== != ! && ||` and `cast` to integers; enums only `== !=`, `switch` and `cast`, with no
 ordering.
@@ -361,7 +370,8 @@ i32 sh = a << b;          // ok: the count may have any integer type; the result
 Integer, float and char literals, and constant expressions built from them, are untyped
 constants. An untyped constant takes its type from context: the declared type of the variable
 being initialized or assigned, the other operand of a binary operator, the parameter type, the
-return type, the `case` operand type, or an index position (any integer type). `cast` is not a
+return type, the `case` operand type, or an index, slice-bound or `new` count position, where
+any integer type is accepted and a negative constant is a compile error. `cast` is not a
 context: an untyped operand of `cast` first takes its default type, then converts (5.9). The
 count operand of a shift is not a context for the left operand: in `u64 m = 1 << n;` the untyped
 `1` takes `u64` from the declaration whatever the type of `n`. The conversion is checked at
@@ -372,7 +382,7 @@ among untyped constants folds exactly (integers in `[-2^63, 2^64 - 1]`, floats a
 integer with integer stays an untyped integer, integer with float becomes an untyped float, and
 `~c` is `-c - 1`. With no context at all, an untyped integer becomes `i32` if it fits, else
 `i64`, else it is an error; an untyped float becomes `f64`; a char literal becomes `char`
-(D4.5). The full rules are in `type-system.md`, Constants.
+(D4.5). The full rules are in `type-system.md`, section 9.
 
 ```fort
 u8 b = 256;                       // error: constant 256 does not fit u8
@@ -398,18 +408,21 @@ Temporaries live until the end of the enclosing statement.
 
 ### 5.5 Lvalues, `&`, `*` and `null` (D6.7, D5.8, D3.10, D3.11, D10.4, D10.5)
 
-Lvalues are: variables and parameters; `*p`; `p->f`; `e.f` where `e` is an lvalue; `e[i]` where
-`e` is an lvalue fixed array or any slice or string expression; and parenthesized lvalues. `.len`
-and `.ptr` are never lvalues. Field access and indexing on an rvalue struct or array yield
-rvalues copied through a temporary. `&e` requires an lvalue and yields `T*` with the mutability
-of 3.6; `&f` for a function `f` is an error, because a function name is already a value. `*p`
-requires a pointer type other than `void*` or a function pointer and yields the pointee. There
-is no pointer arithmetic: `p + 1`, `p++` and `p[i]` are errors (D10.4); the only ways to obtain
-a pointer are `&`, `new`, `.ptr`, `cast` and extern calls. `null` is the zero pointer and
-function-pointer value (D10.5); it takes its type from context and is an error where no pointer
-type is expected. `== null` and `!= null` are allowed on pointers, `void*` and function pointers
-only; slices and strings compare `.len` or `.ptr`. Dereferencing `null`, and returning the
-address of a local or a slice of a local array, are undefined behavior and are not diagnosed.
+Lvalues are: variables and parameters; module-level constants and globals (a constant is an
+immutable lvalue: addressable and sliceable, never assignable); `*p`; `p->f`; `e.f` where `e` is
+an lvalue; `e[i]` where `e` is an lvalue fixed array or any slice or string expression; and
+parenthesized lvalues. `.len` and `.ptr` are never lvalues. Field access and indexing on an
+rvalue struct or array yield rvalues copied through a temporary. `&e` requires an lvalue and
+yields `T*` with the mutability of 3.6; `&f` for a function `f` is an error, because a function
+name is already a value. `*p` requires a pointer type other than `void*` or a function pointer
+and yields the pointee. There is no pointer arithmetic: `p + 1`, `p++` and `p[i]` are errors
+(D10.4); the only ways to obtain a pointer are `null`, `&`, `new`, `.ptr`, `cast`, a function
+name and calls. `null` is the zero pointer and function-pointer value (D10.5); it has no type of
+its own: it takes its type from context and is an error where no pointer, `void*` or
+function-pointer type is expected. `== null` and `!= null` are allowed on pointers, `void*` and
+function pointers only; slices and strings compare `.len` or `.ptr`. Dereferencing `null`, and
+returning the address of a local or a slice of a local array, are undefined behavior and are
+not diagnosed.
 
 ```fort
 i32* a = &(x + 1);        // error: '&' requires an lvalue
@@ -419,17 +432,23 @@ i32 d = *vp;              // error: cannot dereference 'void*'
 i32* e = p + 1;           // error: no pointer arithmetic
 bool f = s == null;       // error: 'null' compared with a slice; use 's.ptr == null'
 print(null);              // error: 'null' needs a pointer-typed context
+bool g = null == null;    // error: 'null' has no type of its own
 ```
 
 ### 5.6 Field access, `->`, `.len` and `.ptr` (D6.10, D3.4, D3.5, D3.7, D9.4)
 
 `e.f` accesses a field of a struct value. `p->f` is `(*p).f` and is required for pointers: `.`
 on a pointer is an error with a hint, and `->` on a non-pointer is an error; when `*p` is itself
-a pointer, write `(*p)->f`. Qualified names also use `.`: `io.read_file(path)`,
+a pointer, write `(*p)->f`. Through a pointer to a slice or string, `->` also reaches the `.len`
+and `.ptr` pseudo-fields (`out->len`); indexing through a pointer to an array or slice is
+written `(*p)[i]` (5.7). Qualified names also use `.`: `io.read_file(path)`,
 `geom.Point{1, 2}`, `Color.Red`, `m.Color.Red`. Read-only pseudo-fields: a fixed array has
-`.len`, an untyped integer constant; a slice has `.len` (`u64`) and `.ptr` (`T*`, or `mut T*`
-when level 1 of the slice is mutable); a string has `.len` (`u64`) and `.ptr` (`char*`). Fixed
-arrays have no `.ptr`, and `.len` of a slice or string is not a constant expression.
+`.len`, an untyped integer constant; a slice has `.len` (`u64`) and `.ptr`, a pointer to the
+element type carrying the element level's mutability (`i32*` for `i32[]`, `mut i32*` for
+`mut i32[]`, `Node* mut*` for `Node* mut[]`); a string has `.len` (`u64`) and `.ptr` (`char*`).
+Fixed arrays have no `.ptr`. `.len` of any expression of fixed-array type is a constant
+expression and its operand is not evaluated (`m[i].len` is `4` for `i32[3][4] m`); `.len` of
+a slice or string is not a constant expression.
 
 ```fort
 i32 x = p.value;          // error: '.' on pointer 'p'; use '->'
@@ -441,33 +460,37 @@ i32[arr.len] c = {};      // ok: '.len' of a fixed array is a constant
 
 ### 5.7 Indexing and slicing (D6.8, D6.9, D10.6, D10.7)
 
-`e[i]`: `e` is a fixed array, slice or string; `i` is any integer type or an untyped constant.
-Signed indices are sign-extended and unsigned ones zero-extended, and one unsigned comparison
-against the length catches negatives. Every index is bounds-checked in every build mode; the
-`--no-bounds-check` option removes the checks for benchmarking and is documented as unsafe
-(D10.6). Out of range is a runtime error; a constant index out of range for a fixed array is a
-compile error. Indexing a string yields `char`. Pointers cannot be indexed, not even pointers to
-arrays: write `(*p)[i]`.
+`e[i]`: `e` is a fixed array, slice or string; `i` is any integer type or an untyped constant,
+and a negative constant is a compile error (D4.1). Signed indices are sign-extended and unsigned
+ones zero-extended, and one unsigned comparison against the length catches negatives. Every
+index is bounds-checked in every build mode; the `--no-bounds-check` option removes the checks
+for benchmarking and is documented as unsafe (D10.6). Out of range is a runtime error
+(`index 5 out of range for length 3`, `memory-model.md` section 6); a constant index out of
+range for a fixed array is a compile error. Indexing a string yields `char`. Pointers cannot be
+indexed, not even pointers to arrays: write `(*p)[i]`.
 
 `e[lo..hi]`, `e[lo..]`, `e[..hi]`, `e[..]`: `e` is a fixed array (lvalue only), a slice or a
-string; the bounds are any integer type or untyped constants; a missing `lo` is 0 and a missing
-`hi` is the length. The result is a slice, or a `string` for a string operand, whose element
-mutability is that of `e`'s elements. The runtime check is `0 <= lo <= hi <= len` relative to
-the operand, not the original allocation; the result may be empty. `p[lo..hi]` on a `T*` or
-`mut T*` yields a `T[]` or `mut T[]` with no check: this is the explicit unsafe escape for
-foreign memory, and a range beyond the object is undefined behavior (D10.7). `void*` cannot be
-sliced.
+string; the bounds are any integer type or untyped constants (a negative constant is a compile
+error); a missing `lo` is 0 and a missing `hi` is the length. The result is a slice, or a
+`string` for a string operand, whose element mutability is that of `e`'s elements. The runtime
+check is `0 <= lo <= hi <= len` relative to the operand, not the original allocation; the result
+may be empty. `p[lo..hi]` on a `T*` or `mut T*` yields a `T[]` or `mut T[]` with no check: this
+is the explicit unsafe escape for foreign memory, and a range beyond the object is undefined
+behavior (D10.7). Only the two-bound form exists for pointers: `p[lo..]`, `p[..hi]` and `p[..]`
+are errors because a pointer has no length (D10.4). `void*` cannot be sliced.
 
 ```fort
 i32[4] a = {1, 2, 3, 4};
 i32 x = a[4];             // error: index 4 out of range for i32[4]
+i32 w = a[-1];            // error: negative constant index
 i32 y = a[i];             // runtime error when i >= 4
 mut i32[] s = a[1..3];    // error: cannot add mutability; 'a' is immutable
 i32[] t = a[1..3];        // {2, 3}
 i32[] u = t[1..2];        // {3}: bounds are relative to t
-i32[] v = t[2..1];        // runtime error: slice bounds 2..1
+i32[] v = t[2..1];        // runtime error: slice bounds 2..1 out of range for length 2
 i32 z = p[0];             // error: pointers cannot be indexed
 i32[] f = p[0..n];        // ok: unchecked view of n elements at p
+i32[] h = p[0..];         // error: a pointer has no length
 i32[] g = vp[0..n];       // error: 'void*' cannot be sliced
 ```
 
@@ -500,14 +523,17 @@ to guess whether a parenthesized name is a type, and it never traps. Allowed:
 - any pointer to any pointer or `void*`; mutability may be added, which is the cast-away-const
   escape, and writing through it into read-only memory is undefined behavior; pointer to and
   from `u64`; function pointer to and from `void*`;
-- among `string`, `char[]`, `u8[]` and their `mut` forms; `T[]` to `mut T[]`; identity.
+- among `string`, `char[]`, `u8[]`, `mut char[]` and `mut u8[]`; `T[]` to `mut T[]`; identity.
+  A binding-level `mut` is never part of a cast target: the `mut` in a target names the levels
+  behind the indirection, and `cast(s, u8[] mut)` is an error.
 
 Forbidden: integer to `bool`; any other slice-to-slice cast (the element type of a slice never
 changes, because `len` counts elements); pointer to slice; struct or array casts. An untyped
 constant operand first takes its default type (D4.5) and then converts with the semantics above,
-so `cast(0x80000000, i32)` is `-2147483648` and `cast(-1, u32)` is `4294967295`. There is no
-strict aliasing: reading an object through a pointer of another type, as in `*cast(&x, u64*)`
-for an `f64 x`, is defined.
+so `cast(0x80000000, i32)` is `-2147483648` and `cast(-1, u32)` is `4294967295`. `null` is not
+a valid operand, because it has no type of its own (D10.5). There is no strict aliasing:
+reading an object through a pointer of another type, as in `*cast(&x, u64*)` for an `f64 x`,
+is defined.
 
 ```fort
 bool b = cast(1, bool);            // error: cannot cast integer to bool; write '1 != 0'
@@ -528,11 +554,11 @@ for structs. `sizeof(void)` and `sizeof(expr)` are errors, and there is no `alig
 
 `new(T)` returns `mut T*` to zero-initialized heap storage. `new(T[n])` returns `mut T[]` of `n`
 zero-initialized elements, where `n` is any integer type or an untyped constant; later brackets
-are fixed-array dimensions of the element (`new(i32[n][4])` is `mut i32[][4]`). A negative `n`,
-a size that overflows, or allocation failure is a runtime error; `n == 0` is allowed and yields
-a slice with a non-null pointer. `mut` is never written inside `new(...)`: the result is fully
-mutable. `new(T{...})`, `new(T[])` and `new(void)` are errors. Heap storage is freed only by
-`del` (8.2).
+are fixed-array dimensions of the element (`new(i32[n][4])` is `mut i32[][4]`). A negative
+constant `n` is a compile error (D4.1); a negative `n` at run time, a size that overflows, or
+allocation failure is a runtime error; `n == 0` is allowed and yields a slice with a non-null
+pointer. `mut` is never written inside `new(...)`: the result is fully mutable. `new(T{...})`,
+`new(T[])` and `new(void)` are errors. Heap storage is freed only by `del` (8.2).
 
 ```fort
 u64 a = sizeof(x);                 // error: 'sizeof' takes a type
@@ -540,6 +566,7 @@ u64 b = sizeof(void);              // error: 'sizeof(void)'
 mut Point* p = new(Point{1, 2});   // error: 'new' takes a type; assign after allocation
 mut i32[] s = new(i32[]);          // error: 'new' of a slice needs a count
 mut i32[] t = new(i32[n]);         // ok; runtime error if n < 0
+mut i32[] u = new(i32[-1]);        // error: negative constant count
 mut Node** pp = new(Node* mut);    // error: 'mut' inside 'new'
 Point* q = new(Point);             // ok: mut Point* converts to Point*
 q->x = 1;                          // error: cannot write through immutable pointer 'q'
@@ -554,7 +581,7 @@ designators apply to structs only. `Point{}` is all-zero; qualified names work
 `{}`; further dimensions nest braces (`i32[2][2]{{1, 2}, {3, 4}}`). A bare `{...}` is allowed
 only as the initializer of a declaration (local, module-level or `for` init) whose type is a
 struct or fixed array, and nested inside another literal; `= {}` zero-initializes any aggregate,
-slice or string. Bare braces are not expressions: they cannot follow `=` in an assignment or
+slice, string or enum. Bare braces are not expressions: they cannot follow `=` in an assignment or
 appear as an argument or `return` operand. Trailing commas are allowed in brace lists and enum
 bodies, not in parameter or argument lists. Literals are rvalues; a literal whose leaves are
 constant expressions is a constant expression. `IDENT {` is never a block, because every
@@ -567,8 +594,9 @@ Point c = Point{1};               // error: positional literal needs every field
 Point d = Point{.x = 1, 2};       // error: cannot mix designated and positional
 Point e = Point{.x = 1, .x = 2};  // error: duplicate field 'x'
 i32[3] f = {1, 2};                // error: array literal for i32[3] needs 3 elements
-i32 h = {};                       // error: '{}' initializes aggregates, slices and strings only
+i32 h = {};                       // error: '{}' initializes aggregates, slices, strings, enums
 i32[] s = {};                     // ok: the zero slice
+Color m = {};                     // ok: holds 0, even if no member has that value
 Node* k = {};                     // error: '{}' does not initialize a pointer; use null
 Line l = {{0, 0}, {1, 1}};        // ok: nested bare literals
 n = {3, 4};                       // error: bare braces are not an expression; write Point{3, 4}
@@ -577,8 +605,9 @@ draw({1, 2});                     // error: bare braces are not an expression
 
 ### 5.12 Conditional and wrapping operators (D6.6, D11.2, D16)
 
-`c ? a : b` requires a `bool` condition and two operands of one type; an untyped constant
-operand adopts the other operand's type. It is right-associative and evaluates only the chosen
+`c ? a : b` requires a `bool` condition and two operands of one type, identical down to the
+mutability levels (the implicit drop of 3.4 does not apply, D6.2); an untyped constant operand
+adopts the other operand's type. It is right-associative and evaluates only the chosen
 operand. `+% -% *%` and `+%= -%= *%=` are integer-only and wrap in two's complement in both
 build modes, so hashes, checksums and counters can be written once and behave identically in
 checked and release builds; `/`, `%` and the shifts have no wrapping form. Unsigned subtraction
@@ -587,7 +616,8 @@ intended.
 
 ```fort
 i32 y = n ? 1 : 2;                // error: condition must be bool
-f64 z = flag ? x : 2.5;           // error: mismatched operand types i32 and f64
+f64 z = flag ? x : 2.5;           // error: 2.5 cannot take the type i32 of 'x'
+Node* w = flag ? p : q;           // error: mut Node* and Node* differ (cast or copy first)
 mut u32 h = 2166136261;
 h = h *% 16777619;                // ok in both modes
 u32 t = h *% 1.5;                 // error: wrapping operators are integer-only
@@ -852,9 +882,10 @@ including `panic`; an `if` with an `else` whose branches all terminate; `while (
 `for (;;)`, or any `for` with an empty condition, with no `break` targeting it; a `switch` all
 of whose cases terminate, when it has a `default` or is an exhaustive enum `switch` (D7.7); a
 block whose last statement terminates. A non-`void` function body must end in a terminating
-statement, or it is a compile error ("missing return"). The rule is structural, not a data-flow
-analysis: a loop that may run zero times does not terminate, however obvious its `return`.
-Catching this at compile time is a core "better than C" promise.
+statement, or it is a compile error ("missing return", reported at the body's closing brace).
+The rule is structural, not a data-flow analysis: a loop that may run zero times does not
+terminate, however obvious its `return`. Catching this at compile time is a core "better than
+C" promise.
 
 ```fort
 fn i32 sign(i32 x) {
@@ -930,8 +961,11 @@ interchangeable.
 `string`, reports `<file>:<line>:<col>: panic: <message>` and aborts; it is `noreturn`, so a
 `panic(...)` statement is terminating (7.3). Runtime error contract (D11.4): the runtime flushes
 buffered output, writes one line to stderr (`<file>:<line>:<col>: runtime error: <message>` for
-the bounds, overflow, shift, division and allocation checks) and calls `abort()`, so the process
-dies with SIGABRT, status 134 under a shell. Deferred code does not run.
+the bounds, overflow, shift, division and allocation checks, with the fixed message texts of
+`memory-model.md` section 6) and calls `abort()`, so the process dies with SIGABRT, status 134
+under a shell. `<file>` is the path the compiler opened; the column is that of the operator
+token, or of the builtin's name for `new`, `assert` and `panic`; the `assert` text is the
+source text of the expression, verbatim. Deferred code does not run.
 
 ```fort
 del(s);                       // error: cannot del a string; cast to u8[] first
@@ -947,8 +981,9 @@ assert(s.len > 0);            // runtime error when s is empty
 `print` and `println` accept zero or more arguments of integer, float, `bool`, `char`, enum,
 pointer, function pointer or `string` type and write them to stdout with no separators;
 `println` appends `\n`. `eprint` and `eprintln` do the same to stderr, `fprint` and `fprintln`
-to the `i32` descriptor `fd`. Each argument compiles to one per-type runtime call; an untyped
-constant argument takes its default type (D4.5). Structs, arrays and slices are not printable.
+to the `i32` descriptor `fd`. Each argument compiles to one per-type runtime call and is
+evaluated and written in turn, left to right; an untyped constant argument takes its default
+type (D4.5). Structs, arrays and slices are not printable.
 
 | Type      | Text                                                            |
 |-----------|-----------------------------------------------------------------|
@@ -956,21 +991,26 @@ constant argument takes its default type (D4.5). Structs, arrays and slices are 
 | `bool`    | `true` or `false`                                               |
 | `char`    | its byte                                                        |
 | enum      | the member name, or the number if no member matches             |
-| pointers  | `0x` plus lowercase hex, `0x0` for null (also `void*`, functions)|
+| pointers  | `0x` + lowercase hex; `0x0` for null; also `void*`, fn pointers   |
 | `string`  | its bytes                                                       |
-| floats    | shortest round-trip decimal, `%g`-style (see below)             |
+| floats    | shortest round-trip decimal in the argument's type, `%g`-style  |
 
-Floats use exponent form below 1e-4 or at 1e17 and above, get `.0` appended when the text has
-neither `.` nor `e`, and print as `inf`, `-inf` or `nan`. Output buffering (D11.5): `print` and
-`println` write to a runtime buffer for stdout; `eprint` and `eprintln` are unbuffered; `fprint`
-and `fprintln` use one buffer per descriptor. Buffers flush when full, on `io.close`, at exit,
-and before any runtime error.
+Floats print as the shortest decimal that round-trips in the argument's own type (`f32` or
+`f64`), in exponent form below 1e-4 or at 1e17 and above, the exponent written as `e`, a sign
+and at least two digits (`1e+21`, `1.5e-07`); `.0` is appended when the text has neither `.`
+nor `e`; `inf`, `-inf` and `nan` print as such. Output buffering (D11.5): `print` and `println`
+write to a runtime buffer for stdout, which `fprint(1, ...)` shares; `eprint` and `eprintln` are
+unbuffered; `fprint` and `fprintln` use one buffer per descriptor. An `extern` write to a
+descriptor bypasses the buffers. Buffers flush when full, at exit and before any runtime error;
+the runtime exports `fort_rt_flush(i32 fd)` and `fort_rt_flush_all()`, and `io.close` and
+`io.flush` call the former (`memory-model.md` section 7).
 
 ```fort
 println("x = ", 42, ", ok = ", true);       // x = 42, ok = true
 print('a');                                 // a
 print(cast('a', u8));                       // 97
 println(1.0, " ", 0.5, " ", 1e20);          // 1.0 0.5 1e+20
+println(cast(0.1, f32), " ", 0.00001);      // 0.1 1e-05
 println(Color.Green, " ", cast(7, Color));  // Green 7
 void* v = null;
 println(v);                                 // 0x0
