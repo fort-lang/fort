@@ -186,6 +186,15 @@ set_tests_properties(lang_selftest PROPERTIES
     LABELS unit
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+# The unit tests of tools/check_comments.py (label unit); the tool itself runs
+# as part of format-check below.
+add_test(NAME check_comments_selftest
+    COMMAND "${FORT_PYTHON3}" -m unittest check_comments_test
+    WORKING_DIRECTORY "${FORT_TEST_DIR}")
+set_tests_properties(check_comments_selftest PROPERTIES
+    LABELS unit
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 add_custom_target(check-lang
     COMMAND ${FORT_LANG_COMMAND}
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
@@ -203,6 +212,15 @@ file(GLOB_RECURSE FORT_LINT_SOURCES CONFIGURE_DEPENDS
     "${FORT_SRC_DIR}/*.c" "${FORT_SRC_DIR}/*.h"
     "${FORT_RUNTIME_DIR}/*.c" "${FORT_RUNTIME_DIR}/*.h"
     "${FORT_TEST_DIR}/*.c" "${FORT_TEST_DIR}/*.h"
+)
+
+# Block comments are not a comment form (D2.2), in fort or in the project's C
+# sources; format-check depends on the check so a `/* */` fails the gate.
+add_custom_target(check-comments
+    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/check_comments.py"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    COMMENT "Checking that no C source uses a block comment"
+    VERBATIM
 )
 
 find_program(FORT_CLANG_FORMAT NAMES clang-format clang-format-18)
@@ -223,6 +241,7 @@ else()
     add_custom_target(format COMMAND false COMMENT "format: clang-format not found")
     add_custom_target(format-check COMMAND false COMMENT "format-check: clang-format not found")
 endif()
+add_dependencies(format-check check-comments)
 
 find_program(FORT_RUN_CLANG_TIDY NAMES run-clang-tidy run-clang-tidy-18)
 if(FORT_RUN_CLANG_TIDY)
