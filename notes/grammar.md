@@ -13,7 +13,7 @@ by the speculative parse described under "Disambiguation" at the end.
 Tokens are produced greedily (longest match). Whitespace and comments separate tokens and are
 otherwise ignored. A token never spans a newline except inside a block comment.
 
-```
+```ebnf
 letter      = "A" ... "Z" | "a" ... "z" | "_" ;
 dec_digit   = "0" ... "9" ;
 oct_digit   = "0" ... "7" ;
@@ -68,7 +68,7 @@ Notes:
 
 ## 2. Module structure
 
-```
+```ebnf
 module      = { import_decl } { top_decl } ;               (* D9.3: imports first *)
 
 import_decl = "import" import_path [ "as" identifier ] ";"
@@ -84,7 +84,7 @@ Whether the last segment of an `import_path` names a module or a symbol is decid
 
 ## 3. Declarations
 
-```
+```ebnf
 fn_decl      = "fn" return_type identifier "(" [ param_list ] ")" block ;    (* D8.1 *)
 extern_decl  = "extern" "fn" return_type identifier "(" [ param_list ] ")" ";" ;  (* D9.8 *)
 return_type  = type | "void" | "noreturn" ;                                 (* D8.5 *)
@@ -115,7 +115,7 @@ nested inside another `brace_init` or typed literal (D6.5).
 
 ## 4. Types
 
-```
+```ebnf
 type         = [ "mut" ] elem_type { array_suffix } { "*" [ "mut" ] } ;   (* D3.6, D5.3 *)
 elem_type    = base_type { "*" [ "mut" ] } ;
 array_suffix = "[" const_expr "]"                               (* fixed array, D3.4 *)
@@ -145,7 +145,7 @@ Reading rules (D3.6, D5.2, D5.3):
 
 ## 5. Statements
 
-```
+```ebnf
 block        = "{" { statement } "}" ;
 
 statement    = var_decl
@@ -196,7 +196,7 @@ enforces D6.7. `call_expr` is a `postfix_expr` whose last postfix is a call. `co
 Precedence from lowest to highest (D6.1). All binary operators are left-associative; `?:` is
 right-associative.
 
-```
+```ebnf
 expr         = ternary_expr ;
 ternary_expr = or_expr [ "?" expr ":" ternary_expr ] ;
 or_expr      = and_expr { "||" and_expr } ;

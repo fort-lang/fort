@@ -19,8 +19,8 @@ A safe(r) C-like systems programming language.
 
 ## Technical Standards
 - **Markdown**: Line-wrap at 100 characters, including tables and code blocks. Check with
-  `awk 'length > 100 {print FILENAME": "FNR}' <files>`. Code fences use `fort`, `c`, `sh` or
-  `asm` as the language tag.
+  `awk 'length > 100 {print FILENAME": "FNR}' <files>`. Code fences use `fort`, `c`, `sh`,
+  `asm` or `ebnf` as the language tag.
 - **Language changes**: any change to the language is recorded in `notes/decisions.md` first
   (new decision number or amended decision with a note), then in the specification document that
   owns the topic, then in the tests under `test/lang/`. Specification text never contains "TBD",
