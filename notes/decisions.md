@@ -594,11 +594,12 @@ Owner: `memory-model.md`.
   array (`new(u8[4])` is a `u8[4] mut* own`); `new(T, n)` returns `T mut@ own` of `n` zero-
   initialized elements (D17.3), where `n` is any integer type; a negative `n`, a size that
   overflows, or allocation failure is a runtime error; `n == 0` is allowed and yields a non-null
-  pointer (the runtime allocates at least one byte). `new(T{...})`, `new(T@)`, `new(T*)`, `new(T
-  mut)` and `new(void)` are errors. Rationale for zero-initialization: keeps "no undefined values"
-  true at the cost of one `calloc`; the earlier "uninitialized" text is withdrawn. Amended
-  2026-09-10: the count was written inside the type (`new(T[n])`), which left no spelling for one
-  array object.
+  pointer (the runtime allocates at least one byte). `new(T{...})`, `new(T@)` and `new(void)` are
+  errors, and inside `new(...)` a `mut` never parses while an `own` parses only after a `*` (D17.3),
+  so `new(T mut)` and `new(string own)` do not parse; `new(T*)` allocates one pointer slot and is
+  legal. Rationale for zero-initialization: keeps "no undefined values" true at the cost of one
+  `calloc`; the earlier "uninitialized" text is withdrawn. Amended 2026-09-10: the count was written
+  inside the type (`new(T[n])`), which left no spelling for one array object.
 - **D10.3** `del(x)` frees the allocation designated by its operand, which must have an `own`
   type; the full rules, including that `del` empties an lvalue operand and that `del` of a view,
   sub-slice, `.ptr`, stack address or literal is a compile error, are D17.9. Allocation has no
