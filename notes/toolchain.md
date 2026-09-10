@@ -413,6 +413,7 @@ main.add:
         lea     .Lfile0(%rip), %rdi
         mov     $2, %esi
         mov     $14, %edx
+        xor     %eax, %eax
         call    fort_rt_fail_overflow@PLT
         ud2
         .size   main.add, .-main.add
