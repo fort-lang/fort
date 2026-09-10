@@ -160,7 +160,14 @@ A safe(r) C-like systems programming language.
   `bugprone-unused-return-value` takes function names, not patterns (patterns arrive in
   clang-tidy 19), so `.clang-tidy` lists the C library and POSIX functions and the project's own
   functions are unchecked; and `readability-magic-numbers` skips macro arguments, so
-  `TEST(name, { ... })` bodies are unchecked.
+  `TEST(name, { ... })` bodies are unchecked. The bootstrap must also stay transliterable into
+  fort: no unions, no macro tricks, and no compiler builtin fort lacks (function-pointer tables
+  are fine, the bootstrap subset has function pointers). `__builtin_add_overflow` and
+  `__builtin_mul_overflow` are the exception the exact constant folder needs; the port replaces
+  their three sites in `src/bootstrap/consts.c` by pre-checks, `am > UINT64_MAX - bm` in
+  `add_raw`, `a.mag != 0 && b.mag > UINT64_MAX / a.mag` in `cv_mul` and `a.mag == UINT64_MAX` in
+  `cv_not`, so no new builtin may be added without the same note. `__builtin_clzll` was removed
+  for that reason: `mag > (UINT64_MAX >> n)` says the same thing.
 - **fort sources**: identifier conventions per decision D1.4: everything is lower_case with
   underscores, struct and enum type names and enum members included; only module constants are
   UPPER_CASE. A variable never takes its type's name (`point p`, `box bx`, `mut list* l`); a
