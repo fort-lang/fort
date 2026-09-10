@@ -436,10 +436,12 @@ Owner: `module-system.md`.
 - **D9.3** Import forms, only at the top of a file before any declaration:
   `import a::b;` binds the short name `b` to the module; `import a::b as c;` renames it;
   `import a::b::sym;` binds the symbol `sym` from module `a::b`; `import a::b::sym as alias;`;
-  `import a::b::{s1, s2 as t};` is sugar for independent symbol imports. Resolution: the longest
-  prefix that names a file is the module; at most one trailing segment names a symbol; if both
-  the module reading and the symbol reading succeed it is an error. No wildcard imports. A
-  duplicate binding is an error.
+  `import a::b::{s1, s2 as t};` is sugar for independent symbol imports of `s1` and `s2` from
+  module `a::b` (the prefix must be a module; the braces never name modules). Resolution of a
+  path `p::last`: the module reading (`p/last.ft` exists) and the symbol reading (`p.ft` exists
+  and declares `last`) are both tried; exactly one must succeed, otherwise the import is an
+  error ("not found" or "ambiguous"). No wildcard imports. A duplicate binding is an error;
+  importing the same module under two names is allowed; import bindings are not re-exported.
 - **D9.4** Qualified access uses a dot in expressions and in type positions: `io.read_file(p)`,
   `math.Vector v = ...;`, `m.Color.Red`. Rationale: consistent with field access, and the
   resolver knows which identifiers are modules.
@@ -451,10 +453,12 @@ Owner: `module-system.md`.
   appear in identifiers, so the scheme is injective. Runtime symbols are prefixed `fort_rt_`;
   the compiler emits `fort_entry` in the entry module (D11.6). `extern` names are unmangled.
 - **D9.8** `extern fn i64 write(i32 fd, void* buf, u64 n);` declares a C function with the
-  System V x86-64 ABI. Extern signatures may use only integers, floats, `bool`, `char`, pointers
-  and function pointers: no slices, strings, structs or arrays, and no variadics. The compiler
-  zeroes `al` before every extern call so a fixed-prototype declaration of a variadic C function
-  is safe. Narrow integers and `bool` are normalized with zero- or sign-extension on both sides
+  System V x86-64 ABI. Extern signatures may use only integers, floats, `bool`, `char`, enums
+  (passed as `i32`), pointers and function pointers: no slices, strings, structs or arrays, and
+  no variadics. Before every extern call the compiler sets `al` to the number of vector
+  registers the call uses (zero when no float is passed), as the ABI requires of callers of
+  variadic functions, so a fixed-prototype declaration of a variadic C function is safe.
+  Narrow integers and `bool` are normalized with zero- or sign-extension on both sides
   of the boundary. C `char*` maps to `char*` (or `u8*`); `size_t` to `u64`; `ssize_t` and
   `off_t` to `i64`; `mode_t` to `u32`; `int` to `i32`; `long` to `i64`; `double` to `f64`. The
   same C symbol may be declared `extern` in several modules provided the signatures are
@@ -549,6 +553,9 @@ Owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime)
   which is how a library call flushes a buffer the runtime owns.
 - **D11.6** Process start: the C runtime owns `main(argc, argv)`, builds `string[] args`, calls
   the compiler-emitted `fort_entry(args)`, flushes, and exits with `status & 0xFF`.
+  `fort_entry` takes the argument slice by pointer and is the one compiler-emitted exception to
+  D9.8's ban on aggregates at the C boundary; `toolchain.md` fixes its C prototype and the names
+  of every other runtime entry point.
 - **D11.7** Value formatting by the print family: integers in decimal; `bool` as `true`/`false`;
   `char` as its byte; `u8` as a number; enums as the member name, or the number if no member
   matches; pointers, `void*` and function pointers as `0x` plus lowercase hex (`0x0` for
@@ -602,18 +609,22 @@ Owner: `toolchain.md`.
   emitting `<entry>.s`), `-c` (stop after the object file), `-I <dir>` (repeatable),
   `--std-dir <dir>` (default `$FORT_STD_DIR`, else `../std` relative to the binary),
   `--release` (D11.1), `--no-bounds-check` (D10.6), `-l<lib>` (passed to the linker),
-  `--cc <path>` (default `cc`). Exit status: 0 success, 1 compile error, 2 usage or internal
-  error.
+  `--cc <path>` (default `cc`), `--help`, `--version`. Exit status: 0 success, 1 compile error,
+  2 usage, toolchain (`cc` failed) or internal error; usage and toolchain errors are printed as
+  `fort: error: <message>`.
 - **D14.2** Diagnostics: `<file>:<line>:<col>: error: <message>` on stderr, one per line,
-  optionally followed by `note:` lines. All errors in a module are reported before stopping when
-  practical; the compiler never emits warnings in v1.
+  optionally followed by `note:` lines. Errors without a position in the file (a missing
+  `main`, an invalid module name) use `1:1`. All errors in a module are reported before stopping
+  when practical; the compiler never emits warnings in v1.
 - **D14.3** Generated assembly is GNU syntax, position-independent (RIP-relative data, `@PLT`
   calls for externs), and is assembled and linked by the system C compiler together with the
   runtime object.
 - **D14.4** Language tests live under `test/lang/`: `run/<area>/NNN_name.ft` (compile, run,
-  compare), `fail/<area>/NNN_name.ft` (must not compile), `run/modules/<name>/main.ft` for
-  multi-file tests (the harness compiles `main.ft` with the directory as root), `ffi/*.c` helpers,
-  `programs/*.ft` for larger programs. Compiler unit tests in C live in `test/` using `test.h`.
+  compare), `fail/<area>/NNN_name.ft` (must not compile), `run/modules/<name>/main.ft` and
+  `fail/modules/<name>/main.ft` for multi-file tests (the harness compiles `main.ft` with the
+  directory as root and collects `error` annotations from every `.ft` file in it), `ffi/*.c`
+  helpers, `programs/*.ft` for larger programs. Compiler unit tests in C live in `test/` using
+  `test.h`.
 - **D14.5** Test file directives, all at the top of the file (`//!`) except `error`:
   - `//! run` or `//! fail` (required, first line);
   - `//! flags: --release` (extra compiler flags);
