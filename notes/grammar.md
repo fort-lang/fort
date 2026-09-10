@@ -25,8 +25,8 @@ identifier  = letter { letter | dec_digit } ;          (* D2.3; not a keyword *)
 keyword     = "as" | "bool" | "break" | "case" | "cast" | "char" | "continue" | "default"
             | "defer" | "do" | "else" | "enum" | "extern" | "f32" | "f64" | "false" | "fn"
             | "for" | "i8" | "i16" | "i32" | "i64" | "if" | "import" | "mut" | "new"
-            | "noreturn" | "null" | "return" | "sizeof" | "string" | "struct" | "switch"
-            | "true" | "u8" | "u16" | "u32" | "u64" | "void" | "while" ;      (* D2.4 *)
+            | "noreturn" | "null" | "own" | "return" | "sizeof" | "string" | "struct"
+            | "switch" | "true" | "u8" | "u16" | "u32" | "u64" | "void" | "while" ;  (* D2.4 *)
 
 reserved    = "async" | "await" | "const" | "match" | "pub" | "priv" | "trait" | "type"
             | "union" | "yield" ;                        (* D2.4; usable nowhere *)
@@ -116,10 +116,11 @@ enum, and nested inside another `brace_init` or typed literal (D6.5).
 ## 4. Types
 
 ```ebnf
-type         = [ "mut" ] elem_type { array_suffix } { "*" [ "mut" ] } ;   (* D3.6, D5.3 *)
-elem_type    = base_type { "*" [ "mut" ] } ;
+type         = [ "own" ] [ "mut" ] elem_type { array_suffix } { "*" [ "own" ] [ "mut" ] } ;
+                                                            (* D3.6, D5.3, D17.2 *)
+elem_type    = base_type { "*" [ "own" ] [ "mut" ] } ;
 array_suffix = "[" const_expr "]"                               (* fixed array, D3.4 *)
-             | "[" "]" [ "mut" ] ;                              (* slice, D3.5 *)
+             | "[" "]" [ "own" ] [ "mut" ] ;                    (* slice, D3.5 *)
 base_type    = prim_type | "string" | "void" | fn_type | qualified_name ;
 prim_type    = "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
              | "f32" | "f64" | "bool" | "char" ;
@@ -140,6 +141,9 @@ Reading rules (D3.6, D5.2, D5.3):
 - A `fn_type` used as `base_type` may take suffixes: `fn i32(i32)[4]` is four function pointers.
 - A `mut` after `*` or `[]` marks the storage holding that pointer or slice header; a leading
   `mut` marks every level. `mut` never follows a fixed-array suffix.
+- A leading `own` marks the outermost reference of the type, the one the binding holds; an `own`
+  after `*` or `[]` marks the reference that suffix introduces (D17.2). `own` precedes `mut` in
+  both positions, never follows a fixed-array suffix, and does not parse inside `new(...)`.
 - In a `fn_type`, a `mut` that would apply only to a parameter's own storage is ignored for type
   identity (D5.6).
 
@@ -286,6 +290,6 @@ At the top level the first token decides: `import`, `fn`, `extern`, `struct`, `e
 | Functions and `extern` | D8.1, D8.5, D8.6, D9.8            |
 | Structs and enums      | D3.8, D3.9                        |
 | Declarations           | D7.1, D7.10, D6.5                 |
-| Types                  | D3.1 to D3.12, D5.2, D5.3         |
+| Types                  | D3.1 to D3.12, D5.2, D5.3, D17.2  |
 | Statements             | D7.2 to D7.8, D7.11               |
 | Expressions            | D6.1 to D6.13, D3.14, D3.15, D10.2 |

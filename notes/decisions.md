@@ -23,6 +23,7 @@ Sections:
 - D14 Toolchain and test conventions
 - D15 Not in v1
 - D16 Hazards not to re-litigate
+- D17 Ownership
 - Ready-to-implement checklist
 
 ## D1 Naming and files
@@ -46,8 +47,8 @@ Owner: `core-language.md` (Lexical structure), `grammar.md` (Lexical grammar).
   ordinary identifier. Keywords cannot be identifiers.
 - **D2.4** Keywords:
   `as bool break case cast char continue default defer do else enum extern f32 f64 false fn for
-  i8 i16 i32 i64 if import mut new noreturn null return sizeof string struct switch true u8 u16
-  u32 u64 void while`.
+  i8 i16 i32 i64 if import mut new noreturn null own return sizeof string struct switch true u8
+  u16 u32 u64 void while`.
   Reserved for future use, not usable as identifiers:
   `async await const match pub priv trait type union yield`.
 - **D2.5** Integer literals: decimal `123`, hex `0x7F`, octal `0o17`, binary `0b1010`. `_` may
@@ -89,11 +90,13 @@ Owner: `type-system.md`.
   assignment, parameter passing and return copy all elements. Different `N` are different types.
   `a.len` is an untyped integer constant. Fixed arrays have no `.ptr`.
 - **D3.5** Slices `T[]` replace the earlier "dynamic array". A slice is a fat pointer
-  `{T* ptr; u64 len}` with no ownership; all slices of the same element type (and element
-  mutability, D5) are one type; the zero value is `{null, 0}`. `.len` (type `u64`) and `.ptr`
+  `{T* ptr; u64 len}`; whether it owns its elements is part of its type (`own`, D17); all slices
+  of the same element type, element mutability (D5) and ownership are one type; the zero value
+  is `{null, 0}`. `.len` (type `u64`) and `.ptr`
   (a pointer to the element type, carrying the element level's mutability: `Node* mut[]` gives
-  `Node* mut*`) are read-only pseudo-fields. Slices are produced by `new(T[n])` (D10.2),
-  by slicing (D6.9) and by the zero initializer `{}`. A slice literal `{1, 2, 3}` does not exist.
+  `Node* mut*`) are read-only pseudo-fields. Slices are produced by `new(T[n])` (D10.2, as
+  `own mut T[]`), by slicing (D6.9, always a view) and by the zero initializer `{}`. A slice
+  literal `{1, 2, 3}` does not exist.
 - **D3.6** Type suffixes come in three groups, left to right. `*` suffixes directly after the
   base type make pointers to the base (`Node*`, `Node**`). Array and slice suffixes then apply
   outside-in like C declarators: `Node*[16]` is an array of 16 pointers, `i32[3][4]` is indexed
@@ -109,7 +112,7 @@ Owner: `type-system.md`.
   counted in `len`. Sub-strings are not NUL-terminated. Indexing yields `char`; slicing yields
   `string`; `.len` and `.ptr` (`char*`) exist; `==`/`!=` compare `len` then bytes, so the zero
   string equals `""`. Bytes are UTF-8 by convention and never validated. There is no `+`; the
-  standard library concatenates.
+  standard library concatenates and returns `own string`, the owned form (D17.12).
 - **D3.8** Structs: `struct Name { T1 f1; T2 f2; }` with no trailing semicolon, nominal typing,
   C/System V layout (fields in order, natural alignment, size rounded to alignment). No methods,
   no inheritance, no per-field `mut` at the field's own level (D5.5). An empty struct is an
@@ -144,8 +147,9 @@ Owner: `type-system.md`.
   may be added, this is the cast-away-const escape); pointer to and from `u64`; function pointer
   to and from `void*`; among `string`, `char[]`, `u8[]`, `mut char[]` and `mut u8[]` (a
   binding-level `mut` in a cast target is an error); `T[]` to `mut T[]` and `mut T[]` to `T[]`;
-  any cast that only drops mutability, at any level (a no-op, since the implicit conversion of
-  D5.4 covers it); identity. Forbidden:
+  any cast that only drops mutability or ownership, at any level (a no-op, since the implicit
+  conversions of D5.4 and D17.4 cover it); adding `own` to a pointer or slice (adoption, D17.3);
+  identity. Casts among the string and slice family preserve `own` (D17.12). Forbidden:
   integer to `bool`, any other slice-to-slice cast (the element
   type of a slice never changes, because `len` counts elements), pointer to slice, struct or
   array casts. Casts never trap.
@@ -250,7 +254,8 @@ Owner: `core-language.md` (Declarations and mutability), `type-system.md` (Mutab
   and `k - 1` is immutable in the target type. So `mut Node*[]` converts to `Node*[]` and to
   `Node* mut[] ` is refused (a mutable slot could then hold a pointer to what the source still
   sees as a mutable node). This closes the C `T** -> const T**` hole with a short recursive check.
-  Adding mutability requires `cast` (D3.14).
+  Adding mutability requires `cast` (D3.14). Dropping `own` (D17.4) is the other implicit
+  conversion and follows the same monotone shape.
 - **D5.5** Struct fields. A field's own storage is as mutable as the struct value that contains it
   (level 0 of the field is inherited from the access path). A leading `mut` in a field type
   therefore describes the levels behind the field's indirections; a `mut` that would apply only
@@ -333,8 +338,10 @@ Owner: `core-language.md` (Expressions).
   pseudo-fields (`out->len`). Indexing through a pointer to an array or slice is written
   `(*p)[i]`, never `p[i]` (D10.4). Rationale: C familiarity and an explicit dereference.
 - **D6.11** Calls: arguments are matched by position; no defaults, no named arguments, no
-  overloading, no variadics. A function name, a function-pointer-typed expression and a
-  qualified name `mod.f` are callable. A `noreturn` call is a terminating statement (D8.4).
+  overloading, no variadics. An `own` parameter takes ownership of its argument (D17.5): an
+  `own` lvalue argument must be written `move(x)`, an `own` rvalue passes as it is. A function
+  name, a function-pointer-typed expression and a qualified name `mod.f` are callable. A
+  `noreturn` call is a terminating statement (D8.4).
 - **D6.12** Floats follow IEEE 754: `NaN != NaN`, `-0.0 == 0.0`, division by zero yields
   infinities or NaN and never traps. There are no infinity or NaN literals; the standard library
   provides bit casts. `% ++ -- ~ & | ^ << >>` are errors on floats.
@@ -386,8 +393,11 @@ Owner: `core-language.md` (Statements).
   statement is ordinary code executed at exit (`defer del(p); p = q;` frees `q`). `return e`
   evaluates `e` before deferred code runs, so deferred code cannot change the returned value.
   `return`, `break` and `continue` inside deferred code, and `defer` at module level, are errors.
-  Runtime errors (D11.4) do not run deferred code. Rationale: fixes the multi-return cleanup
-  pitfall from memory-model.md with a purely static expansion, no runtime list.
+  Runtime errors (D11.4) do not run deferred code. Because `return x` of an `own` local empties
+  `x` before the deferred code runs (D17.5, D17.6), `defer del(buf);` followed later by
+  `return buf;` frees `buf` on every path except the one that hands it to the caller. Rationale:
+  fixes the multi-return cleanup pitfall from memory-model.md with a purely static expansion, no
+  runtime list.
 - **D7.9** Scoping and shadowing. One namespace per module holds functions, structs, enums,
   constants, globals, externs and import bindings; any collision is an error. Lookup goes from the
   innermost block outward, then the module namespace, then the universe (D12). A local or
@@ -499,18 +509,18 @@ Owner: `memory-model.md`.
 
 - **D10.1** Stack: locals, parameters, fixed arrays and struct values; freed at scope exit. Heap:
   only through `new`; freed only through `del`.
-- **D10.2** `new(T)` returns `mut T*` to zero-initialized storage; `new(T[n])` returns `mut T[]`
-  of `n` zero-initialized elements, where `n` is any integer type; a negative `n`, a size that
-  overflows, or allocation failure is a runtime error; `n == 0` is allowed and yields a
+- **D10.2** `new(T)` returns `own mut T*` to zero-initialized storage; `new(T[n])` returns
+  `own mut T[]` of `n` zero-initialized elements (D17.3), where `n` is any integer type; a
+  negative `n`, a size that overflows, or allocation failure is a runtime error; `n == 0` is
+  allowed and yields a
   non-null pointer (the runtime allocates at least one byte). `new(T{...})`,
   `new(T[])` and `new(void)` are errors. Rationale for zero-initialization: keeps "no undefined
   values" true at the cost of one `calloc`; the earlier "uninitialized" text is withdrawn.
-- **D10.3** `del(x)` accepts any pointer, `void*` or slice regardless of mutability and frees it.
-  `del(null)` and `del` of a zero-length slice with a null pointer are no-ops. `del` of a
-  `string` is a compile error (cast to `u8[]` first, and only if it came from `new`). `del` of a
-  sub-slice, an interior pointer, a stack address or a literal is undefined behavior, not
-  detected. `del` does not null its argument. Allocation has no header, so `new`/`del` and C
-  `malloc`/`free` are interchangeable.
+- **D10.3** `del(x)` frees the allocation designated by its operand, which must have an `own`
+  type; the full rules, including that `del` empties an lvalue operand and that `del` of a view,
+  sub-slice, `.ptr`, stack address or literal is a compile error, are D17.9. Allocation has no
+  header, so `new`/`del` and C `malloc`/`free` are interchangeable; memory from C is adopted with
+  `cast` (D17.3).
 - **D10.4** No pointer arithmetic: `p + 1`, `p++` and `p[i]` are errors. The only ways to get a
   pointer are `null`, `&`, `new`, `.ptr`, `cast`, a function name, and calls; the only way to
   get a slice from a raw pointer is the two-bound form `p[lo..hi]` (D6.9); `p[lo..]`, `p[..hi]`
@@ -522,9 +532,11 @@ Owner: `memory-model.md`.
   Dereferencing `null` is undefined behavior (a segfault in practice).
 - **D10.6** Bounds checks are performed on every index and slice operation, in every build mode;
   `--no-bounds-check` disables them for benchmarking and is documented as unsafe.
-- **D10.7** Undefined behavior in v1 is limited to: use after `del`, double `del`, `del` of a
-  non-allocation, dereferencing `null` or a dangling pointer, writing through a cast that added
-  mutability into read-only memory, `p[lo..hi]` beyond the object, calling a null function
+- **D10.7** Undefined behavior in v1 is limited to: using a view, or a copy made before a
+  `move` or `del`, after the allocation was freed; `del` of adopted memory (D17.3) that is not
+  the start of an allocation; dereferencing `null` or a dangling pointer; writing through a cast
+  that added mutability into read-only memory, `p[lo..hi]` beyond the object, calling a null
+  function
   pointer, and data races. Everything else is defined or a diagnosed error. In particular there
   is no strict-aliasing rule: reading an object through a pointer to another type of the same
   size (`*cast(&x, u64*)` for an `f64 x`) is defined and yields the bit pattern.
@@ -537,8 +549,9 @@ Owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime)
 
 - **D11.1** Two build modes. **Checked**, the default: `+ - *`, unary `-`, `++ --` and the
   compound assignments trap on overflow for signed and unsigned integers; a shift count that is
-  negative or at least the operand width traps. **Release** (`fort --release`): overflow wraps
-  in two's complement and the shift count is taken modulo the width. Programs must not rely on
+  negative or at least the operand width traps; storing over a live `own` value traps (D17.11).
+  **Release** (`fort --release`): overflow wraps in two's complement, the shift count is taken
+  modulo the width, and owned values are overwritten without a check. Programs must not rely on
   either behavior for correctness. Rationale: user decision ("trap in debug, wrap in release").
 - **D11.2** `+% -% *%` (and `+%= -%= *%=`) wrap in both modes. They exist so hashes, checksums and
   counters can be written once and behave identically in both modes. Recommended addition,
@@ -562,6 +575,7 @@ Owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime)
   | negative `new` count               | `negative allocation count -1`                     |
   | `new` size overflow                | `allocation size overflow`                         |
   | allocation failure                 | `out of memory`                                    |
+  | overwriting a live `own` value (D17.11) | `overwriting owned value`                     |
 
   The end of a `noreturn` function is guarded by a bare trap instruction (SIGILL, no message),
   since a conforming body never reaches it. `<file>` is the path the compiler opened (search
@@ -597,7 +611,9 @@ Owner: `core-language.md` (Builtins).
 - **D12.1** Keywords with type operands: `new(T)`, `new(T[n])`, `sizeof(T)`, `cast(e, T)`.
 - **D12.2** Universe-scope functions with ordinary call syntax and special typing. They may be
   shadowed by a module-level or local declaration (D7.9) and cannot be used as values:
-  - `del(x)` (D10.3);
+  - `del(x)`: frees an `own` operand and empties it (D17.9);
+  - `move(lv)`: yields an owning lvalue's value and empties it (D17.6); the one universe
+    function that yields a value;
   - `assert(cond)`: `bool` argument; failure is a runtime error with the expression text;
   - `panic(msg)`: `string` argument; `noreturn`;
   - `print(...)`, `println(...)`: zero or more arguments of integer, float, `bool`, `char`, enum,
@@ -605,9 +621,9 @@ Owner: `core-language.md` (Builtins).
   - `eprint(...)`, `eprintln(...)`: the same to stderr;
   - `fprint(fd, ...)`, `fprintln(fd, ...)`: the same to the descriptor `fd` (`i32`).
   Each argument compiles to one per-type runtime call. An untyped constant argument takes its
-  default type (D4.5). Universe functions yield no value: they are usable only as call
-  statements (including as `defer` operands and in `for` init and step positions). `assert` is
-  active in both build modes.
+  default type (D4.5). Universe functions other than `move` yield no value: they are usable
+  only as call statements (including as `defer` operands and in `for` init and step positions).
+  `assert` is active in both build modes.
 
 ## D13 Standard library scope
 
@@ -626,6 +642,12 @@ Owner: `stdlib.md`.
   `panic` for programming errors; `defer` for cleanup. No `Result` type in v1.
 - **D13.4** The stdlib never passes slices, strings or structs across an `extern` boundary; it
   unpacks `.ptr` and `.len`. Functions that hand a path to C copy it into a NUL-terminated buffer.
+- **D13.5** Ownership in the library (D17): every function that allocates returns an `own`
+  value (`str.dup`, `str.concat`, `strbuf.take`, `io.read_file_bytes`); containers hold their
+  storage as `own` fields (`StrBuf { own mut u8[] data; u64 len; }`, `PtrVec`, `IntVec`,
+  `StrMap`) and expose a `free` function that `del`s them; out-parameters that receive
+  ownership are pointers to `own` slots (`mut u8[] own* out`), which the caller initializes to
+  `{}` or `null`; `sys.args()` and every `view`-style accessor return borrowed values.
 
 ## D14 Toolchain and test conventions
 
@@ -692,7 +714,9 @@ alignment and packed attributes (idiom: an opaque `u8[N]` field and a C shim); s
 compilation and interface files; conditional compilation; labeled `break` (idiom: a flag or a
 helper function); raw strings; a blank identifier; compile-time function evaluation; `alignof`;
 `sizeof(expr)`; array suffixes after a trailing pointer suffix (`i32[4]*[2]`, idiom: a struct);
-string `switch`; `goto` (never).
+string `switch`; linear ownership, that is compile-time detection of leaks and of use after
+`move` (idiom: `defer del`, and the zeroing that `move` and `del` leave behind, D17); `goto`
+(never).
 
 ## D16 Hazards not to re-litigate
 
@@ -714,6 +738,108 @@ Findings from the design reviews that look like bugs but are deliberate.
 - `extern` signatures exclude aggregates so the compiler does not need System V aggregate
   classification in v1.
 - Generated code must be position-independent; do not rely on `-no-pie`.
+- Prefix `own` marks one level while prefix `mut` marks every level (D17.2); the asymmetry is
+  chosen for the failure mode, not by oversight.
+- `move` and `del` empty an immutable binding; that is ownership ending, not an assignment
+  (D17.6).
+- `mut Node* n = new(Node);` is an error: an owning temporary must land in an `own` place
+  (D17.8).
+
+
+## D17 Ownership
+
+Owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
+`del`, transfer, lending, the overwrite check), `core-language.md` (the `move` builtin,
+statements). Added after the v1 design review at the user's request; wherever an earlier
+decision or document says ownership is "by convention", this section supersedes it.
+
+- **D17.1** `own` is a qualifier on reference types: `own T*`, `own void*`, `own T[]`,
+  `own string`. It states that the reference designates the start of a live allocation obtained
+  from `new` (or adopted with `cast`, D17.3) and that `del` on it is meaningful. It is erased at
+  run time (same bits, layout and ABI) and is part of type identity: `own Node*` and `Node*` are
+  different types, as are `fn void(own Node*)` and `fn void(Node*)`. `own` on a non-reference
+  type (`own i32`, `own Point`, `own i32[4]`) or on a function-pointer type is an error; an
+  array or struct that *contains* an `own` reference is an owning aggregate (D17.7).
+- **D17.2** Placement. A `own` before the base type (and before any `mut`) marks the outermost
+  reference of the type, the one the binding holds. A `own` immediately after a `*` or `[]`
+  suffix (before any `mut` in that position) marks the reference that suffix introduces. Marking
+  one level twice is a "redundant own" error. Unlike prefix `mut`, prefix `own` marks one level
+  only: the safe failure mode for `own mut Node*[] kids` is that `del(kids[i])` does not compile
+  when the nodes belong to someone else (an arena, say).
+
+  | Declaration                 | Meaning                                                    |
+  |-----------------------------|------------------------------------------------------------|
+  | `own mut u8[] buf`          | owned slice of writable bytes                              |
+  | `own u8[] data`             | owned slice, read-only through this binding                |
+  | `own mut Node* n`           | owned node                                                 |
+  | `own mut Node*[] items`     | owned slice of borrowed pointers (a `PtrVec`, arena nodes) |
+  | `own mut Node* own[] kids`  | owned slice of owned nodes                                 |
+  | `Node* own[] view`          | borrowed slice of owned nodes                              |
+  | `mut u8[] own* out`         | borrowed pointer to an owned slot (an out-parameter)       |
+  | `own string name`           | owned immutable characters (`str.dup`, `strbuf.take`)      |
+
+- **D17.3** Producers. `new(T)` yields `own mut T*`; `new(T[n])` yields `own mut T[]` and
+  `new(T[n][K])` yields `own mut T[][K]`; standard-library functions that allocate return `own`
+  (D13.5). `cast` may add `own` to a pointer or slice, adopting memory that came from C
+  (`cast(libc.malloc(n), own mut u8*)`, the same unsafe escape as adding `mut`), and may drop
+  it. Slicing (`buf[..]`, `buf[lo..hi]`) and `.ptr` always yield views, as do `&`, literals and
+  the runtime's `args`.
+- **D17.4** Lending. `own X` converts implicitly to `X` wherever a value meets an expected type,
+  like dropping `mut` (D5.4); the two drops combine (`own mut u8[]` to `u8[]`). Dropping `own`
+  at an inner level while keeping it at an outer level (`own mut Node* own[]` to
+  `own mut Node*[]`) is an error, since the inner objects would then be owned by nobody; lend
+  the whole thing instead. Operands of `==`, `!=` and `?:` lend, so `own` never blocks a
+  comparison.
+- **D17.5** Transfer. Copying an `own` **lvalue** into an `own` place (a declaration's
+  initializer, an assignment, an `own` parameter, an `own` element or field of a literal, a
+  `return` operand that is not a local) requires `move(lv)`. An `own` **rvalue** (`new(...)`, a
+  call result, `move(...)`, `cast(...)` to an `own` type) flows into an `own` place without it.
+  `return x` where `x` is a local variable or parameter of `own` type is an implicit `move`.
+- **D17.6** `move(lv)` is a universe function (D12.2). Its operand is an lvalue of owning type
+  (an `own` reference or an owning aggregate, D17.7); it yields the operand's value and sets the
+  operand to its zero value (`null`, `{null, 0}`). Emptying is not an assignment: the binding
+  need not be `mut`, and after the move it still cannot be assigned to unless it is. When the
+  operand is reached through an indirection (`*p`, `p->f`, `s[i]`), that level must be mutable,
+  because the move changes storage that others can see: `move(v[0])` on a `Node* own[] v` is an
+  error, since nothing may be taken out of what was only lent. Fields and elements of a local
+  value count as the local. Moving a zero value yields a zero value.
+- **D17.7** Owning aggregates. A struct or fixed array that contains an `own` reference by value
+  (directly or through nested aggregates) is owning. Copying an owning lvalue into an owning
+  place (initialization, assignment, a by-value parameter, a literal element) requires `move`;
+  returning a local owning value is an implicit move. Functions therefore take `Vec*` or
+  `mut Vec*`. `del` of an aggregate is an error: `del` is shallow, and a struct frees its own
+  fields.
+- **D17.8** Temporaries must land. An `own` rvalue converted to a non-`own` type is a compile
+  error ("owning temporary would leak"): `mut Node* n = new(Node);` and `use(str.dup(x))` are
+  refused, because nothing could ever `del` them. Bind it, pass it to an `own` parameter, or
+  `del` it.
+- **D17.9** `del(x)` requires an `own` operand of any mutability: an `own` pointer, `own void*`,
+  `own` slice or `own string`, as an lvalue or an rvalue. On an lvalue, `del` empties the operand
+  under the rules of D17.6, with the same mutability requirement through indirections; on an
+  rvalue it only frees. `del(null)` and `del` of a zero slice or string are no-ops, so
+  `del(buf); del(buf);` frees once, and a use after `del` or `move` dereferences `null`. `del`
+  of a view, a sub-slice, a `.ptr`, a stack address or a literal is a compile error, because
+  none of them has an `own` type. This supersedes the earlier "del does not null its argument".
+- **D17.10** Loops. The variable of a range `for` over a collection whose elements are owning
+  lends: it is declared without `own` (`for (mut Node* c : kids)`), and an `own` loop variable
+  is an error. Moving an element out is written explicitly, `move(kids[i])`.
+- **D17.11** Overwrite check. In checked builds (D11.1), storing into an `own` reference-typed
+  lvalue whose current value is not the zero value is a runtime error, `overwriting owned
+  value` (D11.4), because the previous allocation would leak. `del` and `move` leave zero
+  behind, so `del(v.data); v.data = new(...)`, `a = move(b)` after `move(a)`, and initialization
+  from `{}` or `null` all pass. Release builds store without checking. Assignments of owning
+  aggregates are not checked field by field.
+- **D17.12** Strings. `own string` is an owned, immutable character sequence: `str.dup`,
+  `str.concat` and `strbuf.take` return it; literals, sub-strings and `sys.args()` are `string`.
+  `del(own string)` is legal and `del(string)` is not. Casts among `string`, `char[]`, `u8[]`
+  and their `mut` forms (D3.14) preserve `own`, so a string built in an `own mut u8[]` becomes
+  an `own string` with `cast(buf, own string)`.
+- **D17.13** `own` may appear in `extern` signatures. It is erased, and it documents the C
+  side's convention: `extern fn own mut void* malloc(u64 n);`, `extern fn void free(own void* p);`.
+- **D17.14** Not tracked, exactly as in C: a view, or a copy made before a `move` or `del`,
+  used after the allocation was freed; an `own` value that is never freed; two `own` copies made
+  through `cast`. The linear check that would make leaks and use after `move` compile errors is
+  deferred (D15); this design is its intended base and adds no syntax it would not need.
 
 ## Ready-to-implement checklist
 
@@ -726,3 +852,5 @@ Findings from the design reviews that look like bugs but are deliberate.
 - [ ] ABI, layout and mangling are stated.
 - [ ] Standard library signatures are fixed.
 - [ ] CLI, diagnostics and test conventions are fixed.
+- [ ] Ownership (D17) is reflected wherever a document mentions `new`, `del`, heap memory or a
+      function that allocates, and every `own` rule has a run test and a fail test.
