@@ -115,7 +115,7 @@ Owner: `type-system.md`.
   elements is part of its type (`own`, D17); all slices of the same element type, element mutability
   (D5) and ownership are one type; the zero value is `{null, 0}`. `.len` (type `u64`) and `.ptr` (a
   pointer to the element type, carrying the element level's mutability: `node* mut@` gives `node*
-  mut*`) are read-only pseudo-fields. Slices are produced by `new(T[n])` (D10.2, as `T mut@ own`),
+  mut*`) are read-only pseudo-fields. Slices are produced by `new(T, n)` (D10.2, as `T mut@ own`),
   by slicing (D6.9, always a view) and by the zero initializer `{}`. A slice literal `{1, 2, 3}`
   does not exist.
 - **D3.6** Type suffixes read as follows. A reference suffix, `*` (pointer, D3.3) or `@` (slice,
@@ -125,7 +125,7 @@ Owner: `type-system.md`.
   is three arrays of four, indexed `a[i][j]` with `i < 3`, `j < 4`. Reference suffixes may precede
   the array group, making arrays of references (`node*[16]` is sixteen pointers, `node@[4]` four
   slices), or follow it, making references to the whole array (`i32[4]*` points to an `i32[4]`,
-  `i32[4]@` is a slice of `i32[4]`, and `new(i32[4][n])` returns `i32[4] mut@ own`); no array suffix
+  `i32[4]@` is a slice of `i32[4]`, and `new(i32[4], n)` returns `i32[4] mut@ own`); no array suffix
   may follow a trailing reference suffix (`i32[4]*[2]` does not parse; wrap it in a struct). `u8@*`
   is the usual shape of an out-parameter (`fn bool read_file(string path, u8 mut@ own mut* out)`,
   D17.2). Suffixes after a function type apply to the function type: `fn i32(i32)[4]` is an array of
@@ -324,7 +324,7 @@ Owner: `core-language.md` (Declarations and mutability), `type-system.md` (Mutab
 - **D5.8** `&e` has type `T*` where the level-1 bit is the mutability of `e` and deeper levels come
   from `e`'s type. `new` returns the storage it allocates writable at every level and the reference
   it creates `own`, with no outermost `mut` (an rvalue has no binding): `new(T)` returns `T mut*
-  own`, `new(T[n])` returns `T mut@ own` (D17.3).
+  own`, `new(T, n)` returns `T mut@ own` (D17.3).
 - **D5.9** Shallow model. Immutability of a variable never propagates through a pointer or slice
   it contains; the levels behind an indirection are fixed by the type. `node n` with a field
   `node mut* next`: `n.value = 1` is an error, `n.next->value = 1` is allowed.
@@ -590,13 +590,15 @@ Owner: `memory-model.md`.
 
 - **D10.1** Stack: locals, parameters, fixed arrays and struct values; freed at scope exit. Heap:
   only through `new`; freed only through `del`.
-- **D10.2** `new(T)` returns `T mut* own` to zero-initialized storage; `new(T[n])` returns
-  `T mut@ own` of `n` zero-initialized elements (D17.3), where `n` is any integer type; a
-  negative `n`, a size that overflows, or allocation failure is a runtime error; `n == 0` is
-  allowed and yields a
-  non-null pointer (the runtime allocates at least one byte). `new(T{...})`,
-  `new(T@)` and `new(void)` are errors. Rationale for zero-initialization: keeps "no undefined
-  values" true at the cost of one `calloc`; the earlier "uninitialized" text is withdrawn.
+- **D10.2** `new(T)` returns `T mut* own` to one zero-initialized `T`, for every `T` including an
+  array (`new(u8[4])` is a `u8[4] mut* own`); `new(T, n)` returns `T mut@ own` of `n` zero-
+  initialized elements (D17.3), where `n` is any integer type; a negative `n`, a size that
+  overflows, or allocation failure is a runtime error; `n == 0` is allowed and yields a non-null
+  pointer (the runtime allocates at least one byte). `new(T{...})`, `new(T@)`, `new(T*)`, `new(T
+  mut)` and `new(void)` are errors. Rationale for zero-initialization: keeps "no undefined values"
+  true at the cost of one `calloc`; the earlier "uninitialized" text is withdrawn. Amended
+  2026-09-10: the count was written inside the type (`new(T[n])`), which left no spelling for one
+  array object.
 - **D10.3** `del(x)` frees the allocation designated by its operand, which must have an `own`
   type; the full rules, including that `del` empties an lvalue operand and that `del` of a view,
   sub-slice, `.ptr`, stack address or literal is a compile error, are D17.9. Allocation has no
@@ -692,7 +694,7 @@ Owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime)
 
 Owner: `core-language.md` (Builtins).
 
-- **D12.1** Keywords with type operands: `new(T)`, `new(T[n])`, `sizeof(T)`, `cast(e, T)`.
+- **D12.1** Keywords with type operands: `new(T)`, `new(T, n)`, `sizeof(T)`, `cast(e, T)`.
 - **D12.2** Universe-scope functions with ordinary call syntax and special typing. They may be
   shadowed by a module-level or local declaration (D7.9) and cannot be used as values:
   - `del(x)`: frees an `own` operand and empties it (D17.9);
@@ -904,15 +906,15 @@ decision or document says ownership is "by convention", this section supersedes 
   | `u8 mut@ own mut* out`         | borrowed pointer to an owned slot (an out-parameter)     |
   | `string own name`              | owned immutable characters (`str.dup`, `strbuf.take`)    |
 
-- **D17.3** Producers. `new(T)` yields `T mut* own`; `new(T[n])` yields `T mut@ own` and
-  `new(T[K][n])` yields `T[K] mut@ own`; standard-library functions that allocate return `own`
-  (D13.5). Inside `new(...)`, `own` may appear only after a `*` of the element type: `new(node*
-  own[n])` yields `node mut* own mut@ own` whose slots are null; an `own` in the outermost position
-  there does not parse, since the result is always `own`. `cast` may add `own` to a pointer or
-  slice, adopting memory that came from C (`cast(p, u8 mut* own)` for a `void*` from an extern that
-  does not say `own`, the same unsafe escape as adding `mut`), and may drop it; the target type of a
-  cast decides (D3.14). Slicing (`buf[..]`, `buf[lo..hi]`) and `.ptr` always yield views, as do `&`,
-  literals and the runtime's `args`.
+- **D17.3** Producers. `new(T)` yields `T mut* own` and `new(T, n)` yields `T mut@ own`, for any `T`
+  that is not itself `own`, `mut` or a reference to `void` (`new(u8[4], n)` is `u8[4] mut@ own`,
+  `new(node* own, n)` is `node mut* own mut@ own` whose slots are null; the result is always `own`
+  and writable at every level, D5.8); standard-library functions that allocate return `own` (D13.5).
+  `cast` may add `own` to a pointer or slice, adopting memory that came from C (`cast(p, u8 mut*
+  own)` for a `void*` from an extern that does not say `own`, the same unsafe escape as adding
+  `mut`), and may drop it; the target type of a cast decides (D3.14). Slicing (`buf[..]`,
+  `buf[lo..hi]`) and `.ptr` always yield views, as do `&`, literals and the runtime's `args`.
+  Amended 2026-09-10: the count moved out of the type, `new(T[n])` to `new(T, n)`.
 - **D17.4** Lending. `own X` converts implicitly to `X` wherever a value meets an expected type,
   like dropping `mut` (D5.4); the two drops combine (`u8 mut@ own` to `u8@`). Dropping `own`
   at a level `k` is allowed only if every level between 1 and `k - 1` is immutable in the target
@@ -945,7 +947,7 @@ decision or document says ownership is "by convention", this section supersedes 
   to an `own` parameter, or `del`ed. Anything else is a compile error ("owning temporary would
   leak"), because nothing could ever `del` it: converting or casting it to a non-`own` type
   (`node mut* n = new(node);`, `use(str.dup(x))`, `cast(new(node), node*)`), slicing, indexing or
-  taking `.ptr` of it (`new(u8[8])[..4]`, `new(i32[2])[0]`), accessing a field of an owning
+  taking `.ptr` of it (`new(u8, 8)[..4]`, `new(i32, 2)[0]`), accessing a field of an owning
   aggregate rvalue, and discarding it as an expression statement (`move(x);`, `str.dup(s);`).
 - **D17.9** `del(x)` requires an `own` operand of any mutability: an `own` pointer, `void* own`,
   `own` slice or `string own`, as an lvalue or an rvalue. On an lvalue, `del` empties the operand

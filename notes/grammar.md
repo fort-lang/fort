@@ -243,8 +243,8 @@ array_literal  = array_type brace_init ;                              (* D6.5 *)
 array_type     = base_type { ref_suffix } "[" const_expr "]" { "[" const_expr "]" } ;
 cast_expr      = "cast" "(" expr "," type ")" ;                       (* D6.4 *)
 sizeof_expr    = "sizeof" "(" type ")" ;                              (* D3.15 *)
-new_expr       = "new" "(" alloc_type ")" ;                           (* D10.2 *)
-alloc_type     = base_type { "*" [ "own" ] } { "[" expr "]" } ;
+new_expr       = "new" "(" alloc_type [ "," expr ] ")" ;              (* D10.2 *)
+alloc_type     = base_type { "*" [ "own" ] } { "[" const_expr "]" } ;
 ```
 
 Notes:
@@ -253,11 +253,10 @@ Notes:
   postfix; the checker resolves module, type and enum qualification (D9.4, D3.9).
 - Comparison operators do not chain: `a < b < c` parses but is a type error (`bool < T`).
 - `-x` on an unsigned type, and `!`/`~` on the wrong types, are type errors, not parse errors.
-- `new(T[n])` always produces a slice; the last bracket holds the element count, which may be a
-  runtime expression, and the brackets before it are fixed-array dimensions of the element type
-  and must be constants (`new(i32[4][n])` yields `i32[4] mut@ own`). `mut` does not parse inside
-  `new(...)`, and `own` only after a `*` of the element type (`new(node* own[n])`, D17.3); the
-  result is writable at every level and owned (D5.8, D17.3).
+- `new(T)` allocates one `T` and `new(T, n)` allocates `n` of them as a slice; the brackets in
+  an `alloc_type` are fixed-array dimensions of `T` (`new(i32[4], n)` yields `i32[4] mut@ own`).
+  `mut` does not parse inside `new(...)`, and `own` only after a `*` of the element type
+  (`new(node* own, n)`, D17.3); the result is writable at every level and owned (D5.8, D17.3).
 - An `array_literal` type has only fixed dimensions and no trailing reference suffix:
   `i32[3]@{...}` and `i32[3]*{...}` do not parse.
 
