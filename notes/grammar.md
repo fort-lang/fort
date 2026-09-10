@@ -110,8 +110,8 @@ designated   = "." identifier "=" initializer ;
 ```
 
 A `struct_decl` has no trailing semicolon. A `brace_init` is legal only as the `initializer` of a
-`var_decl_head` whose type is a struct or array, as `{}` for any aggregate, slice or string, and
-nested inside another `brace_init` or typed literal (D6.5).
+`var_decl_head` whose type is a struct or array, as `{}` for any aggregate, slice, string or
+enum, and nested inside another `brace_init` or typed literal (D6.5).
 
 ## 4. Types
 
