@@ -1,0 +1,240 @@
+#!/bin/bash
+# tools/vm: the only way to drive the fort development VM (see AGENTS.md,
+# Environment). Every worktree shares the VM defined by the main checkout's
+# Vagrantfile; commands run in the guest directory that matches the host cwd.
+set -eu
+
+usage() {
+    cat <<'EOF'
+usage: tools/vm <subcommand> [args]
+
+VM lifecycle (vagrant runs in the VM directory, see below):
+  up                      create, provision and start the VM; cache its ssh config
+  halt                    stop the VM
+  destroy [-f]            remove the VM (the box stays installed)
+  status                  show the VM state
+  provision               re-run tools/provision.sh in the VM
+  ssh                     open a login shell in the guest directory of the host cwd
+
+Commands in the guest (sourcing /etc/profile.d/fort.sh, ulimit -c 0):
+  run <cmd...>            run a shell command in the guest directory of the host cwd
+  configure [preset]      cmake --preset <preset>
+  build [preset] [target] cmake --build --preset <preset> [--target <target>]
+  test [preset]           ctest --preset <preset>
+  workflow [preset]       cmake --workflow --preset <preset>
+  check | check-lang | check-all | format | format-check | tidy | lines [preset]
+                          cmake --build --preset <preset> --target <name>
+  gate                    the merge gate: configure debug, format-check, tidy,
+                          then build and check-all under debug, asan and ubsan
+
+The cmake subcommands run at the top of the host git worktree; the preset
+defaults to debug. The VM directory is $FORT_VM_DIR, or else the main checkout
+of the current git repository; the host cwd must be inside it for ssh, run and
+the cmake subcommands. It appears as /vagrant in the guest. FORT_VM_CPUS and
+FORT_VM_MEMORY size the VM at `up`. A guest command that exits 255 is
+indistinguishable from a failed ssh connection and is re-run via vagrant ssh.
+EOF
+}
+
+die() {
+    echo "tools/vm: $*" >&2
+    exit 1
+}
+
+# Usage errors exit 2, like the bare `tools/vm`.
+usage_error() {
+    echo "tools/vm: $*" >&2
+    exit 2
+}
+
+# ---- VM directory and path mapping ---------------------------------------------
+physical_path() {
+    (CDPATH='' cd -- "$1" 2>/dev/null && pwd -P) || die "not a directory: $1"
+}
+
+find_vm_dir() {
+    if [ -n "${FORT_VM_DIR:-}" ]; then
+        physical_path "$FORT_VM_DIR"
+        return
+    fi
+    local common
+    common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) ||
+        die "not inside a git repository and FORT_VM_DIR is not set"
+    physical_path "$(dirname "$common")"
+}
+
+# Print the guest path of host directory $1 (must lie inside the VM directory).
+guest_path() {
+    local host
+    host=$(physical_path "$1") || return 1
+    if [ "$host" = "$VM_DIR" ]; then
+        echo /vagrant
+    elif [ "${host#"$VM_DIR"/}" != "$host" ]; then
+        echo "/vagrant/${host#"$VM_DIR"/}"
+    else
+        die "$host is not inside the VM directory $VM_DIR"
+    fi
+}
+
+# The directory the cmake subcommands run in: the top of the current worktree.
+worktree_top() {
+    git rev-parse --show-toplevel 2>/dev/null || pwd -P
+}
+
+# Help needs no VM directory; everything else does.
+[ $# -ge 1 ] || { usage >&2; exit 2; }
+case "$1" in
+-h | --help | help)
+    usage
+    exit 0
+    ;;
+esac
+
+VM_DIR=$(find_vm_dir) || exit 1
+[ -f "$VM_DIR/Vagrantfile" ] || die "no Vagrantfile in $VM_DIR"
+SSH_CONFIG="$VM_DIR/.vagrant/ssh-config"
+
+vagrant_cmd() {
+    VAGRANT_CWD="$VM_DIR" vagrant "$@"
+}
+
+cache_ssh_config() {
+    local tmp
+    mkdir -p "$VM_DIR/.vagrant"
+    tmp=$(mktemp "$SSH_CONFIG.XXXXXX") || return 1
+    if vagrant_cmd ssh-config > "$tmp"; then
+        mv "$tmp" "$SSH_CONFIG"
+    else
+        rm -f "$tmp"
+        return 1
+    fi
+}
+
+# ---- running commands in the guest ----------------------------------------------
+# guest_script <guest-dir> <command>: the shell text every guest command runs.
+guest_script() {
+    printf '. /etc/profile.d/fort.sh; ulimit -c 0; cd %q || exit 1; %s' "$1" "$2"
+}
+
+ssh_tty_flag() {
+    if [ -t 0 ] && [ -t 1 ]; then echo -t; else echo -T; fi
+}
+
+# guest_run <tty-flag> <guest-dir> <command>: run through the cached ssh config;
+# fall back to `vagrant ssh` (and refresh the cache) when the connection fails.
+# ssh exits 255 on a connection failure, so a guest command that itself exits
+# 255 is re-run through the fallback. The connect timeout keeps a paused or
+# stopped VM from hanging the wrapper before the fallback runs.
+guest_run() {
+    local script status
+    script=$(guest_script "$2" "$3")
+    if [ -f "$SSH_CONFIG" ]; then
+        status=0
+        ssh "$1" -o ConnectTimeout=10 -F "$SSH_CONFIG" default -- "$script" || status=$?
+        [ "$status" -ne 255 ] && return "$status"
+        echo "tools/vm: cached ssh config failed; falling back to vagrant ssh" >&2
+    fi
+    cache_ssh_config || true
+    # vagrant ssh allocates a pty unless -T is passed through to ssh.
+    vagrant_cmd ssh -c "$script" -- "$1"
+}
+
+# run_here <command>: run in the guest directory of the host cwd.
+# guest_path dies when the directory is outside the VM directory; the
+# assignment is a separate statement so that exit is not swallowed by the
+# command substitution.
+run_here() {
+    local dir
+    dir=$(guest_path "$PWD") || exit 1
+    guest_run "$(ssh_tty_flag)" "$dir" "$1"
+}
+
+# run_top <command>: run at the top of the current worktree.
+run_top() {
+    local dir
+    dir=$(guest_path "$(worktree_top)") || exit 1
+    guest_run "$(ssh_tty_flag)" "$dir" "$1"
+}
+
+cmake_target() {
+    local target=$1 preset=${2:-debug}
+    run_top "$(printf 'cmake --build --preset %q --target %q' "$preset" "$target")"
+}
+
+# ---- subcommands ---------------------------------------------------------------
+cmd=$1
+shift
+
+case "$cmd" in
+up)
+    vagrant_cmd up "$@"
+    cache_ssh_config
+    ;;
+halt | status | provision)
+    vagrant_cmd "$cmd" "$@"
+    ;;
+destroy)
+    vagrant_cmd destroy "$@"
+    rm -f "$SSH_CONFIG"
+    ;;
+ssh)
+    [ $# -eq 0 ] || usage_error "ssh takes no arguments (use run)"
+    dir=$(guest_path "$PWD") || exit 1
+    guest_run -t "$dir" 'exec bash -l'
+    ;;
+run)
+    [ $# -ge 1 ] || usage_error "run needs a command"
+    run_here "$*"
+    ;;
+configure)
+    [ $# -le 1 ] || usage_error "configure takes at most a preset"
+    run_top "$(printf 'cmake --preset %q' "${1:-debug}")"
+    ;;
+build)
+    [ $# -le 2 ] || usage_error "build takes at most a preset and a target"
+    if [ $# -eq 2 ]; then
+        cmake_target "$2" "$1"
+    else
+        run_top "$(printf 'cmake --build --preset %q' "${1:-debug}")"
+    fi
+    ;;
+test)
+    [ $# -le 1 ] || usage_error "test takes at most a preset"
+    run_top "$(printf 'ctest --preset %q' "${1:-debug}")"
+    ;;
+workflow)
+    [ $# -le 1 ] || usage_error "workflow takes at most a preset"
+    run_top "$(printf 'cmake --workflow --preset %q' "${1:-debug}")"
+    ;;
+check | check-lang | check-all | format | format-check | tidy | lines)
+    [ $# -le 1 ] || usage_error "$cmd takes at most a preset"
+    cmake_target "$cmd" "${1:-debug}"
+    ;;
+gate)
+    [ $# -eq 0 ] || usage_error "gate takes no arguments"
+    # AGENTS.md, Build and test: format-check, tidy, and check-all under
+    # debug, asan and ubsan. format-check and tidy are targets of the debug
+    # build directory, so debug is configured first and built afterwards.
+    echo "tools/vm gate: configure debug"
+    run_top 'cmake --preset debug'
+    for step in format-check tidy; do
+        echo "tools/vm gate: $step"
+        cmake_target "$step" debug
+    done
+    for preset in debug asan ubsan; do
+        if [ "$preset" != debug ]; then
+            echo "tools/vm gate: configure $preset"
+            run_top "$(printf 'cmake --preset %q' "$preset")"
+        fi
+        echo "tools/vm gate: build $preset"
+        run_top "$(printf 'cmake --build --preset %q' "$preset")"
+        echo "tools/vm gate: check-all $preset"
+        cmake_target check-all "$preset"
+    done
+    echo "tools/vm gate: green"
+    ;;
+*)
+    usage >&2
+    usage_error "unknown subcommand: $cmd"
+    ;;
+esac
