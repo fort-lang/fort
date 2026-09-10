@@ -17,7 +17,7 @@ fi
 # ---- packages ---------------------------------------------------------------
 apt-get update
 apt-get install -y --no-install-recommends \
-    build-essential clang clang-tidy clang-format llvm libclang-rt-18-dev \
+    build-essential clang clang-tidy clang-format llvm llvm-18 libclang-rt-18-dev \
     cmake ninja-build ccache gdb gdb-multiarch python3 git file shellcheck \
     gcc-x86-64-linux-gnu binutils-x86-64-linux-gnu libc6-dev-amd64-cross \
     qemu-user-static binfmt-support
@@ -76,6 +76,26 @@ status=0
 test "$status" = 42
 file "$tmp/x" | grep -q 'x86-64'
 grep -q enabled /proc/sys/fs/binfmt_misc/qemu-x86_64
+
+# The LLVM IR pipeline of toolchain.md 2: opt verifies a module, as every
+# emitted module must (D19.1), clang compiles and links it for x86-64 with
+# the line of D14.3 and qemu runs it.
+cat > "$tmp/ir.ll" <<'LL'
+target triple = "x86_64-unknown-linux-gnu"
+
+define dso_local i32 @main() {
+entry:
+  ret i32 42
+}
+LL
+opt-18 -passes=verify -disable-output "$tmp/ir.ll"
+clang --target=x86_64-linux-gnu -O1 -fPIE -pie -Wno-override-module -o "$tmp/ir" "$tmp/ir.ll"
+status=0
+"$tmp/ir" || status=$?
+test "$status" = 42
+file "$tmp/ir" | grep -q 'x86-64'
+llc-18 --version | grep -q 'LLVM version 18\.'
+llvm-as-18 --version | grep -q 'LLVM version 18\.'
 
 # Every sanitizer the presets use links and runs natively.
 for s in address memory thread undefined; do
