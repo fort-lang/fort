@@ -142,8 +142,9 @@ Owner: `type-system.md`.
   saturate at the target's range, NaN becomes 0); float to float; `bool` to integer; `char` to
   and from integer; enum to and from integer; any pointer to any pointer or `void*` (mutability
   may be added, this is the cast-away-const escape); pointer to and from `u64`; function pointer
-  to and from `void*`; among `string`, `char[]`, `u8[]` and their `mut` forms; `T[]` to
-  `mut T[]`; identity. Forbidden: integer to `bool`, any other slice-to-slice cast (the element
+  to and from `void*`; among `string`, `char[]`, `u8[]`, `mut char[]` and `mut u8[]` (a
+  binding-level `mut` is not part of a cast target); `T[]` to `mut T[]`; identity. Forbidden:
+  integer to `bool`, any other slice-to-slice cast (the element
   type of a slice never changes, because `len` counts elements), pointer to slice, struct or
   array casts. Casts never trap.
 - **D3.15** `sizeof(Type)` takes a type only, yields an untyped integer constant (D4). `sizeof` of
@@ -174,7 +175,8 @@ Owner: `type-system.md` (Constants), `core-language.md` (Literals).
 - **D4.4** Arithmetic among untyped constants folds at compile time: integer with integer stays an
   untyped integer (`1 / 2` is `0`, so `f64 d = 1 / 2;` is `0.0`); integer with float becomes an
   untyped float; `~c` on an untyped integer is `-c - 1`, so `u32 m = ~0;` is an error (write
-  `0xFFFFFFFF`). Untyped integers are evaluated exactly in the range `[-2^63, 2^64 - 1]`; any
+  `0xFFFFFFFF`); constant `/` and `%` truncate toward zero exactly as at runtime (D6.13).
+  Untyped integers are evaluated exactly in the range `[-2^63, 2^64 - 1]`; any
   intermediate outside it, and constant division by zero, are compile errors. Untyped floats are
   evaluated as `f64`. `cast` on a constant has runtime semantics (`cast(0x80000000, i32)` is
   `-2147483648`, `cast(-1, u32)` is `4294967295`). A float constant that is not finite in the
@@ -184,8 +186,9 @@ Owner: `type-system.md` (Constants), `core-language.md` (Literals).
   `f64`; a char literal becomes `char`.
 - **D4.6** Constant expressions (required for array lengths, `case` labels, enum values and
   module-level initializers): literals, `true`, `false`, `null`, module-level immutable
-  declarations with constant initializers (from any module), enum members, `sizeof`, `.len` of a
-  fixed-array-typed expression, unary `- ! ~`, the binary arithmetic, wrapping, bitwise, shift,
+  declarations with constant initializers (from any module), enum members, `sizeof`, `.len` of
+  any expression of fixed-array type (the operand is not evaluated, so `m[i].len` is constant
+  for `i32[3][4] m`), unary `- ! ~`, the binary arithmetic, wrapping, bitwise, shift,
   comparison and logical operators, `?:`, `cast` among numeric types, `char` and enums (so
   `cast(Color.Blue, i32) + 1` may size an array), parentheses, and struct or array literals whose
   leaves are constant expressions. Not constant: calls, `&` (except `&global` in module-level
@@ -215,7 +218,9 @@ Owner: `core-language.md` (Declarations and mutability), `type-system.md` (Mutab
   the binding. A `mut` **immediately after a `*` or `[]` suffix** marks mutable exactly the
   storage that holds the pointer or slice header introduced by that suffix. Read the front `mut`
   as "fully mutable" and any other `mut` as "this level only". A `mut` that marks a level twice
-  (`mut i32* mut p`) is an error ("redundant mut"), so every type has one spelling.
+  (`mut i32* mut p`) is an error ("redundant mut"), so every type has one spelling. Inside a
+  fixed-array type, a `mut` after `*` marks the array's slots, which are level 0 of the array
+  value (`Node* mut[4] t` has assignable slots and immutable nodes; `t[..]` is `Node* mut[]`).
 
   | Declaration              | rebind `p = ...` | write through `*p`, `p->f`, `p[i]` |
   |--------------------------|------------------|------------------------------------|
@@ -271,7 +276,9 @@ Owner: `core-language.md` (Expressions).
   integer type, or the same float type (`%` and the wrapping forms are integer-only). Unary `-`:
   signed integers and floats only. Bitwise `& | ^ ~`: integers only, same type. Shifts `<< >>`:
   left operand any integer type, right operand any integer type or untyped constant; the result
-  has the left operand's type; `>>` is arithmetic for signed and logical for unsigned types.
+  has the left operand's type; `>>` is arithmetic for signed and logical for unsigned types;
+  `<<` discards the bits shifted out and never checks for overflow (`1 << 31` on `i32` is
+  `-2147483648` in both build modes).
   Comparisons: same type, ordering only on integers, floats and `char`. `! && ||`: `bool` only.
   Every mixed-type operation is an error; there is no promotion, not even for `u8`/`i8`.
   "Same type" for comparison and `?:` operands means identical, mutability levels included;
@@ -290,16 +297,18 @@ Owner: `core-language.md` (Expressions).
   Typed array literals `i32[3]{1, 2, 3}`
   must have exactly `N` elements or be `{}`. A bare `{...}` is allowed only as the initializer of
   a declaration (local, global, `for` init) whose type is a struct or array, and nested inside
-  another literal; `= {}` zero-initializes any aggregate, slice or string; `i32 x = {};` is an
-  error. Trailing commas are allowed in brace lists and enum bodies, not in parameter or argument
-  lists. `IDENT {` is never a block because every control-flow condition is parenthesized and
-  every body is braced.
+  another literal; `= {}` zero-initializes any aggregate, slice, string or enum; `i32 x = {};`
+  is an error. Trailing commas are allowed in brace lists and enum bodies, not in parameter or
+  argument lists. `IDENT {` is never a block because every control-flow condition is
+  parenthesized and every body is braced.
 - **D6.6** `?:` requires a `bool` condition and two operands of one type; untyped constants adopt
   the other operand's type.
-- **D6.7** Lvalues: variables and parameters, `*p`, `p->f`, `e.f` where `e` is an lvalue, `e[i]`
-  where `e` is an lvalue fixed array or any slice or string expression, and parenthesized
-  lvalues. `.len` and `.ptr` are never lvalues. Field access and indexing on an rvalue struct or
-  array are allowed and yield rvalues (copied through a temporary). `&e` requires an lvalue.
+- **D6.7** Lvalues: variables and parameters, module-level constants and globals, `*p`, `p->f`,
+  `e.f` where `e` is an lvalue, `e[i]` where `e` is an lvalue fixed array or any slice or string
+  expression, and parenthesized lvalues (a constant is an immutable lvalue: addressable and
+  sliceable, never assignable). `.len` and `.ptr` are never lvalues. Field access and indexing
+  on an rvalue struct or array are allowed and yield rvalues (copied through a temporary). `&e`
+  requires an lvalue.
   Returning the address of a local or a slice of a local array is not diagnosed (documented
   undefined behavior, as in C).
 - **D6.8** Indexing `e[i]`: `e` is a fixed array, slice or string; `i` is any integer type or an
@@ -409,8 +418,9 @@ Owner: `core-language.md` (Functions).
   empty condition, with no `break` targeting it; a `switch` all of whose cases terminate and
   that either has a `default` or is an exhaustive enum switch (D7.7); a block whose last
   statement terminates. A non-`void` function body must end in a terminating statement or it is
-  a compile error ("missing return"). Rationale: catching this at compile time is a core "better
-  than C" promise, and the structural rule is a few dozen lines to implement.
+  a compile error ("missing return", reported at the body's closing brace). Rationale: catching
+  this at compile time is a core "better than C" promise, and the structural rule is a few dozen
+  lines to implement.
 - **D8.5** `noreturn` is a return type: `fn noreturn fatal(string msg) { ... }`. Such a function
   may not contain `return` and must end in a terminating statement; the compiler emits a trap
   after its body and after every call to it. `panic` and `sys.exit` are `noreturn`. Rationale:
@@ -545,10 +555,15 @@ Owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime)
   | allocation failure                 | `out of memory`                                    |
 
   The end of a `noreturn` function is guarded by a bare trap instruction (SIGILL, no message),
-  since a conforming body never reaches it.
+  since a conforming body never reaches it. `<file>` is the path the compiler opened (search
+  root as given plus the relative module path); the column of a check is that of its operator
+  token, or of the builtin's name for `new`, `assert` and `panic`; the `assert` text is the
+  source text of the expression, verbatim.
 - **D11.5** Output buffering: `print`/`println` write to a runtime buffer for stdout;
-  `eprint`/`eprintln` are unbuffered; `fprint`/`fprintln` use one runtime buffer per descriptor.
-  Buffers flush when full, at exit, and before any runtime error. The runtime exports
+  `eprint`/`eprintln` are unbuffered; `fprint`/`fprintln` use one runtime buffer per descriptor,
+  and `fprint(1, ...)` shares the stdout buffer with `print`. An `extern` write to a descriptor
+  bypasses the buffers. Buffers flush when full, at exit, and before any runtime error. The
+  runtime exports
   `fort_rt_flush(i32 fd)` and `fort_rt_flush_all()`; `io.close` and `io.flush` call the former,
   which is how a library call flushes a buffer the runtime owns.
 - **D11.6** Process start: the C runtime owns `main(argc, argv)`, builds `string[] args`, calls
@@ -559,10 +574,12 @@ Owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime)
 - **D11.7** Value formatting by the print family: integers in decimal; `bool` as `true`/`false`;
   `char` as its byte; `u8` as a number; enums as the member name, or the number if no member
   matches; pointers, `void*` and function pointers as `0x` plus lowercase hex (`0x0` for
-  `null`); `string` as its bytes; floats as the shortest
-  decimal that round-trips, `%g`-style (exponent form below 1e-4 or at 1e17 and above), with `.0`
-  appended when the text has neither `.` nor `e`; `inf`, `-inf`, `nan`. No separators are
-  inserted between arguments.
+  `null`); `string` as its bytes; floats as the shortest decimal that round-trips in the
+  argument's own type (`f32` or `f64`), `%g`-style (exponent form below 1e-4 or at 1e17 and
+  above, the exponent written as `e`, a sign, and at least two digits: `1e+21`, `1.5e-07`),
+  with `.0` appended when the text has neither `.` nor `e`; `inf`, `-inf`, `nan`. No separators
+  are inserted between arguments; each argument is evaluated and written in turn, left to
+  right.
 
 ## D12 Builtins
 
@@ -614,8 +631,9 @@ Owner: `toolchain.md`.
   `fort: error: <message>`.
 - **D14.2** Diagnostics: `<file>:<line>:<col>: error: <message>` on stderr, one per line,
   optionally followed by `note:` lines. Errors without a position in the file (a missing
-  `main`, an invalid module name) use `1:1`. All errors in a module are reported before stopping
-  when practical; the compiler never emits warnings in v1.
+  `main`, an invalid module name) use `1:1`. A syntax error stops the compilation of that file
+  after one diagnostic (no recovery in v1); semantic errors are all reported. The compiler never
+  emits warnings in v1.
 - **D14.3** Generated assembly is GNU syntax, position-independent (RIP-relative data, `@PLT`
   calls for externs), and is assembled and linked by the system C compiler together with the
   runtime object.
@@ -628,11 +646,13 @@ Owner: `toolchain.md`.
 - **D14.5** Test file directives, all at the top of the file (`//!`) except `error`:
   - `//! run` or `//! fail` (required, first line);
   - `//! flags: --release` (extra compiler flags);
-  - `//! args: a b c`; `//! link: ffi/helpers.c` (repeatable);
+  - `//! args: a b c`; `//! link: ffi/helpers.c` (repeatable, relative to `test/lang`);
   - `//! stdin:` followed by `//< ` lines;
-  - `//! stdout:` followed by `//| ` lines (compared exactly, including trailing spaces);
+  - `//! stdout:` followed by `//| ` lines: the expected output is each line's text after
+    `//| ` followed by a newline (a bare `//|` is an empty line); compared exactly, trailing
+    spaces included; output without a final newline cannot be expressed, use `println`;
   - `//! exit: N` (default 0) or `//! abort` (expect SIGABRT);
-  - `//! stderr: <substring>` (must appear in stderr);
+  - `//! stderr: <substring>` (repeatable; each must appear in stderr);
   - in `fail` tests, `//! error: <substring>` at the end of the offending line; every such line
     must produce a diagnostic on that line containing the substring, and no unannotated
     diagnostic may occur; `//! error-any: <substring>` at the top for errors without a useful
