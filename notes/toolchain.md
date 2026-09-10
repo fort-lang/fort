@@ -10,7 +10,7 @@ Sections: 1 Command line; 2 Build pipeline; 3 Build modes; 4 Diagnostics; 5 The 
 
 ## 1. Command line
 
-```
+```sh
 fort [options] entry.ft
 ```
 
@@ -28,6 +28,8 @@ file (D14.1). Options and the entry file may appear in any order.
 | `--no-bounds-check` | remove index and slice checks (D10.6); unsafe              | checks on  |
 | `-l<lib>`           | passed to the linker as given; repeatable, in order        | none       |
 | `--cc <path>`       | C compiler used to assemble and link                       | `cc`       |
+| `--help`            | print the usage line and exit 0                            |            |
+| `--version`         | print the compiler version and exit 0                      |            |
 
 - `-o`, `-I`, `--std-dir` and `--cc` take the following argument; `-l<lib>` is one argument.
   `-I` roots are searched in command-line order (D9.2). The last `-o` wins.
@@ -48,9 +50,10 @@ Exit status (D14.1):
 | 1      | at least one compile error was reported (section 4)                              |
 | 2      | usage error, unreadable entry file, internal error, or failure of the C compiler |
 
-Usage errors and C compiler failures are reported as `fort: error: <message>` on stderr, for
-example `fort: error: cannot read 'x.ft': No such file or directory` or `fort: error: cc failed
-with status 1`. `fort` with no arguments prints one usage line and exits with 2.
+Usage errors, internal errors and C compiler failures are reported as `fort: error: <message>`
+on stderr, for example `fort: error: cannot read 'x.ft': No such file or directory` or
+`fort: error: cc failed with status 1`. `fort` with no arguments prints one usage line and exits
+with 2; `--help` prints the same line and exits 0.
 
 ```sh
 fort main.ft -o main                          # build ./main in checked mode
@@ -91,7 +94,7 @@ Compilation is whole-program (D9.10):
 Where things live: `<std-dir>/*.ft` holds the standard library modules of D13.2 (`std::sys`,
 `std::libc`, `std::mem`, `std::io`, `std::str`, `std::strbuf`, `std::vec`, `std::strmap`,
 `std::math`) as source, compiled with every program that imports them; `<std-dir>/fort_rt.o` is
-the C runtime object, built from `rt/fort_rt.c` by the compiler's own build; `<bindir>/fort` is
+the C runtime object, built from `runtime/fort_rt.c` by the compiler's own build; `<bindir>/fort` is
 the compiler, and `<bindir>/../std` its fallback `--std-dir`. Only modules in the import closure
 are read (module-system.md 10).
 
@@ -125,7 +128,7 @@ D10.7 are undefined in every mode.
 
 Compile-time diagnostics (D14.2) are written to stderr, one per line:
 
-```
+```sh
 <file>:<line>:<col>: error: <message>
 <file>:<line>:<col>: note: <message>
 ```
@@ -135,13 +138,15 @@ Compile-time diagnostics (D14.2) are written to stderr, one per line:
   `lib/util.ft`; the entry directory is the entry path's directory part, or nothing).
 - `<line>` is 1-based; `<col>` is the 1-based column of the offending token's first byte, a tab
   counting as one column. A `note:` follows the `error:` it belongs to, with its own position.
+- An error without a position in the file (a missing `main`, an entry base name that is not a
+  valid module name) uses `1:1` (D14.2).
 - Parsing stops at a module's first syntax error; checking reports every error in a module.
   Modules are processed in dependency order and processing stops after the first module with
   errors, so one module's errors appear together (D14.2).
 - The compiler emits no warnings (D14.2): unused imports, unused variables and statements after
   a terminating statement are not diagnosed.
 
-```
+```sh
 main.ft:7:5: error: cannot assign to immutable 'x'
 main.ft:3:9: note: 'x' declared here
 util.ft:12:23: error: expected ';'
@@ -150,7 +155,7 @@ util.ft:12:23: error: expected ';'
 Runtime diagnostics (D11.4) use the same position syntax, followed by `abort()`, so the shell
 reports status 134:
 
-```
+```sh
 main.ft:12:14: runtime error: index 5 out of range for length 3
 main.ft:20:5: panic: queue empty
 main.ft:31:5: assertion failed: n > 0
@@ -163,11 +168,12 @@ argument. Runtime messages are listed in section 5.
 
 ## 5. The C runtime
 
-The runtime is `rt/fort_rt.c`, compiled to `<std-dir>/fort_rt.o`; it is C and permanent (D13.1).
-It owns process start and exit (D11.6), heap allocation (D10.2, D10.3), the runtime-error and
-panic paths (D11.4), formatting and buffering for the print family (D11.5, D11.7, D12.2), and the
-program arguments for `std::sys`. The compiler emits calls to the entry points below; the standard
-library declares the ones it needs with `extern fn` (module-system.md 7).
+The runtime is `runtime/fort_rt.c`, compiled to `<std-dir>/fort_rt.o`; it is C and permanent
+(D13.1). It owns process start and exit (D11.6), heap allocation (D10.2, D10.3), the
+runtime-error and panic paths (D11.4), formatting and buffering for the print family (D11.5,
+D11.7, D12.2), and the program arguments for `std::sys`. The compiler emits calls to the entry
+points below; the standard library declares the ones it needs with `extern fn`
+(module-system.md 7).
 
 ### 5.1 Entry points
 
@@ -221,8 +227,9 @@ void fort_rt_flush_all(void);
 /* Process (D11.6, D8.6). main builds the args slice from argv, calls fort_entry,
    calls fort_rt_flush_all and returns status & 0xFF. fort_entry is emitted by the
    compiler (module-system.md 11). The args slice lives for the whole process and
-   std::sys declares fort_rt_args_ptr and fort_rt_args_len to implement sys.args().
-   fort_rt_exit flushes every buffer, then exit(status & 0xFF); sys.exit declares it. */
+   std::libc declares fort_rt_args_ptr and fort_rt_args_len for sys.args().
+   fort_rt_exit flushes every buffer, then exit(status & 0xFF); std::libc declares
+   it for sys.exit. */
 int main(int argc, char** argv);
 int32_t fort_entry(const struct fort_slice* args);
 const struct fort_string* fort_rt_args_ptr(void);
@@ -230,8 +237,10 @@ uint64_t fort_rt_args_len(void);
 void fort_rt_exit(int32_t status);
 ```
 
-The standard library may declare further `fort_rt_*` helpers (for example errno access); those
-are specified in `stdlib.md`.
+This list is complete (D11.6): the standard library declares no other `fort_rt_*` symbol. It
+declares `fort_rt_args_ptr`, `fort_rt_args_len`, `fort_rt_flush`, `fort_rt_flush_all` and
+`fort_rt_exit` in `std::libc` (`stdlib.md` 3) and reaches `errno` through libc's
+`__errno_location`.
 
 ### 5.2 Messages
 
@@ -251,20 +260,24 @@ Each failure writes exactly one line, after `fort_rt_flush_all`, then calls `abo
 | `fort_rt_panic`             | `panic: <message bytes>`                                   |
 | `fort_rt_assert_fail`       | `assertion failed: <expression text>`                      |
 
-`<file>` is as in section 4. Numbers in messages are signed decimals. Falling off the end of a
+`<file>` is as in section 4. Numbers in messages are decimal; the index, the slice bounds and
+the allocation count are printed as signed values. Falling off the end of a
 `noreturn` function executes a bare trap instruction (D8.5): the process dies with SIGILL and no
 message.
 
 ### 5.3 Buffering
 
-| Descriptor | Used by                       | Policy (D11.5)                                   |
-|------------|-------------------------------|--------------------------------------------------|
-| 1          | `print`, `println`            | buffered; flushed when full, at exit, on failure |
-| 2          | `eprint`, `eprintln`          | unbuffered; every call writes immediately        |
-| other      | `fprint(fd, ...)`, `fprintln` | one buffer per descriptor, same policy as 1      |
+| fd    | Used by                              | Policy (D11.5)                                   |
+|-------|--------------------------------------|--------------------------------------------------|
+| 1     | `print`, `println`, `fprint(1, ...)` | buffered; flushed when full, at exit, on failure |
+| 2     | `eprint`, `eprintln`                 | unbuffered; every call writes immediately        |
+| other | `fprint(fd, ...)`, `fprintln`        | one buffer per descriptor, same policy as 1      |
 
-A write error on any descriptor is ignored; the bytes are dropped. The buffer size is the
-runtime's choice.
+`fprint(1, ...)` shares the stdout buffer with `print` (D11.5). The runtime tells descriptors
+apart by number alone, so `fprint(2, ...)` behaves as `eprint`. An `extern` write to a
+descriptor bypasses the buffers; a program that mixes the two on one descriptor flushes first
+(`io.flush`, D11.5). A write error on any descriptor is ignored; the bytes are dropped. The
+buffer size is the runtime's choice.
 
 ## 6. Code generation contract
 
@@ -386,7 +399,7 @@ main.add:
 
 ### 7.1 Layout (D14.4)
 
-```
+```sh
 test/
   test.h                       C unit-test macros
   common.h                     TALLY_UNUSED and shared helpers, provided by the implementation
@@ -401,8 +414,10 @@ test/
     programs/*.ft              larger programs, treated as run tests
 ```
 
-`<area>` is one of `lexer operators casts mutability control functions structs enums arrays
-slices strings pointers defer modules ffi globals builtins stdlib`. `NNN` is a three-digit
+`<area>` is one of `lexical constants operators mutability declarations control switch
+functions structs enums arrays slices strings pointers defer modules ffi globals builtins errors
+modes stdlib`: `errors` holds the `abort` tests of the runtime checks, `modes` the `--release`
+tests, and `stdlib` the tests of the standard library once it exists. `NNN` is a three-digit
 sequence number and `name` a short snake-case description. Paths in `link:` are relative to
 `test/lang/`.
 
@@ -415,14 +430,18 @@ All directives are `//!` lines at the top of the file, except `error`, which ann
 | `//! run` or `//! fail`         | required, first line                                     |
 | `//! flags: --release`          | extra compiler flags                                     |
 | `//! args: a b c`               | program arguments, split on spaces                       |
-| `//! link: ffi/helpers.c`       | C helper to link; repeatable                             |
+| `//! link: ffi/helpers.c`       | C helper to link, relative to `test/lang`; repeatable    |
 | `//! stdin:` then `//< ` lines  | standard input, one line per `//< ` line                 |
 | `//! stdout:` then `//| ` lines | expected stdout, compared exactly, trailing spaces included |
 | `//! exit: N`                   | expected exit status, default 0                          |
 | `//! abort`                     | expect termination by SIGABRT                            |
-| `//! stderr: <substring>`       | `<substring>` must appear in stderr                      |
+| `//! stderr: <substring>`       | `<substring>` must appear in stderr; repeatable          |
 | `//! error: <substring>`        | `fail` tests only, at the end of the offending line      |
 | `//! error-any: <substring>`    | `fail` tests only, at the top                            |
+
+The expected output is each `//| ` line's text after the marker followed by a newline; a bare
+`//|` is an empty line. Output without a final newline cannot be expressed, so tests end their
+output with `println`. Every `stderr:` substring must appear in stderr.
 
 In a `fail` test every `//! error:` line must produce a diagnostic on that line containing the
 substring, and no unannotated diagnostic may occur; `//! error-any:` requires some diagnostic to
@@ -436,8 +455,8 @@ temporary directory:
 
 | Directive    | Harness action                                                              |
 |--------------|-----------------------------------------------------------------------------|
-| `run`        | `fort <flags> -o prog main.ft` must exit 0; run `prog`; compare its output   |
-| `fail`       | `fort <flags> main.ft` must exit 1 with only annotated errors               |
+| `run`        | `fort <flags> -o prog <test>` must exit 0; run `prog`; compare its output    |
+| `fail`       | `fort <flags> <test>` must exit 1 with only annotated errors                |
 | `flags:`     | appended to the `fort` command line                                         |
 | `args:`      | appended to the program's command line                                      |
 | `link:`      | `fort -c`, then `cc -o prog prog.o <helpers> <std-dir>/fort_rt.o`           |
@@ -445,19 +464,21 @@ temporary directory:
 | `stdout:`    | the program's stdout must equal the `//| ` lines; with no directive, empty   |
 | `exit:`      | the program's exit status must equal `N`                                    |
 | `abort`      | the program must die with SIGABRT (status 134 from the shell)               |
-| `stderr:`    | the substring must occur in the program's (`run`) or compiler's (`fail`) stderr |
+| `stderr:`    | each substring must occur in the program's (`run`) or compiler's (`fail`) stderr |
 | `error:`     | an `error:` line with that file and line must contain the substring         |
 | `error-any:` | some `error:` line must contain the substring                               |
 
-For `error:` the harness also fails the test when the compiler reports an `error:` for a line
-that carries no annotation. In multi-file tests, directives are read from `main.ft`, `//! error:`
-annotations from every `.ft` file in the directory, and no `-I` is passed because the directory
-is the root (D9.2). The harness prints one `PASS`/`FAIL` line per test with the reason for a
-failure, then a summary, and exits with 1 if any test failed; `filter` selects tests by path.
+`<test>` is the test file, or `main.ft` in a multi-file test. For `error:` the harness also
+fails the test when the compiler reports an `error:` for a line that carries no annotation. In
+multi-file tests, directives are read from `main.ft`, `//! error:` annotations from every `.ft`
+file in the directory (D14.4), and no `-I` is passed because the directory is the root (D9.2).
+The harness prints one `PASS`/`FAIL` line per test with the reason for a failure, then a
+summary, and exits with 1 if any test failed; `filter` selects tests by path.
 
 ### 7.4 Examples
 
-A run test, `test/lang/run/arrays/001_index.ft`:
+The examples are abbreviated; the seed corpus holds full versions in the areas named. A run
+test under `test/lang/run/arrays/`:
 
 ```fort
 //! run
@@ -470,7 +491,7 @@ fn i32 main() {
 }
 ```
 
-A fail test, `test/lang/fail/mutability/003_assign_immutable.ft`:
+A fail test, `test/lang/fail/mutability/001_assign_immutable.ft`:
 
 ```fort
 //! fail
@@ -481,8 +502,8 @@ fn i32 main() {
 }
 ```
 
-An abort test with `stderr:`, `test/lang/run/slices/010_index_abort.ft`; `before` is flushed by
-the failure path (D11.4):
+An abort test with `stderr:` under `test/lang/run/errors/`; `before` is flushed by the failure
+path (D11.4):
 
 ```fort
 //! run
@@ -499,7 +520,7 @@ fn i32 main() {
 }
 ```
 
-A multi-file test, `test/lang/run/modules/import_symbol/main.ft` and `util.ft`:
+A multi-file test, `test/lang/run/modules/<name>/main.ft` with `util.ft` beside it:
 
 ```fort
 //! run
@@ -525,8 +546,8 @@ fn i32 inc(i32 x) {
 }
 ```
 
-A release-mode test, `test/lang/run/operators/040_add_wraps_release.ft`, whose checked-mode
-twin uses `//! abort` and `//! stderr: runtime error: integer overflow` instead:
+A release-mode test under `test/lang/run/modes/`, whose checked-mode twin uses `//! abort` and
+`//! stderr: runtime error: integer overflow` instead:
 
 ```fort
 //! run
@@ -541,7 +562,7 @@ fn i32 main() {
 }
 ```
 
-An FFI test, `test/lang/run/ffi/002_helper.ft`, with `test/lang/ffi/helpers.c`:
+An FFI test under `test/lang/run/ffi/`, with its helper in `test/lang/ffi/helpers.c`:
 
 ```fort
 //! run
@@ -557,7 +578,7 @@ fn i32 main() {
 ```
 
 ```c
-int helper_add(int a, int b) { return a + b; }
+int32_t helper_add(int32_t a, int32_t b) { return a + b; }
 ```
 
 `args:` and `exit:` are exercised by a `main(string[] args)` that returns `cast(args.len, i32)`
@@ -637,7 +658,7 @@ This section is not normative. It records the intended shape so that the other s
 implementable; the design is to be planned in the implementation phase.
 
 - **Language and dependencies.** C11, POSIX, no external libraries; one binary `fort`. The
-  repository holds `src/` (compiler), `rt/fort_rt.c` (runtime), `std/*.ft` (standard library),
+  repository holds `src/` (compiler), `runtime/fort_rt.c` (runtime), `std/*.ft` (standard library),
   `test/` (section 7) and a build script producing `build/fort` and `build/std/` with the library
   sources and `fort_rt.o`.
 - **Driver.** Parses options (section 1), owns the module table keyed by real path, runs the
