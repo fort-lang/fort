@@ -700,8 +700,11 @@ Owner: `toolchain.md`.
   directory as root and collects `error` annotations from every `.ft` file in it), `ffi/*.c`
   helpers, `programs/*.ft` for larger programs. The harness invokes `fort` on the test file
   itself (`main.ft` for multi-file tests) with `test/lang` as the working directory, so `<file>`
-  in diagnostics and runtime errors is the path relative to `test/lang`. Compiler unit tests in
-  C live in `test/` using `test.h`.
+  in diagnostics and runtime errors is the path relative to `test/lang`. Directory tests exist
+  only under `modules`. Verdicts: PASS, FAIL (the program or compiler misbehaved), ERROR (the
+  compiler exited 2, crashed, timed out, or the harness could not link or start the program),
+  XFAIL and XPASS for tests listed in `xfail.txt` (an ERROR on a listed test is XFAIL too).
+  Compiler unit tests in C live in `test/` using `test.h`.
 - **D14.5** Test file directives, all at the top of the file (`//!`) except `error`; in a
   multi-file test only `main.ft` carries directives and sibling modules carry none:
   - `//! run` or `//! fail` (required, first line);
@@ -712,7 +715,9 @@ Owner: `toolchain.md`.
     `//| ` followed by a newline (a bare `//|` is an empty line); compared exactly, trailing
     spaces included; output without a final newline cannot be expressed, use `println`;
   - `//! exit: N` (default 0) or `//! abort` (expect SIGABRT);
-  - `//! stderr: <substring>` (repeatable; each must appear in stderr);
+  - `//! stderr: <substring>` (repeatable; each must appear in stderr); `flags`, `args`,
+    `exit`, `abort`, `stdin` and `stdout` appear at most once, `link`, `stderr` and `error-any`
+    any number of times; a `fail` test carries at least one `error` or `error-any`;
   - in `fail` tests, `//! error: <substring>` at the end of the offending line; every such line
     must produce a diagnostic on that line containing the substring, and no unannotated
     diagnostic may occur; `//! error-any: <substring>` at the top for errors without a useful
