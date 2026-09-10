@@ -108,8 +108,8 @@ suffix introduces one more level, the storage reached through that indirection, 
 the binding inward: level 1 is reached through the outermost indirection, level 2 through the
 next, and so on. By the reading order of D3.6 (section 4), the outermost indirection is a `*`
 written after the array group if there is one (`u8[]*` is a pointer to a slice: level 1 holds
-the header, level 2 the bytes), otherwise the first `[]` (`Node*[]` is a slice of pointers,
-`i32[][]` a slice of slices), otherwise the last `*` (`Node**` is a pointer to a `Node*`). Fixed
+the header, level 2 the bytes), otherwise the first `[]` (`node*[]` is a slice of pointers,
+`i32[][]` a slice of slices), otherwise the last `*` (`node**` is a pointer to a `node*`). Fixed
 arrays and structs add no level: their elements and fields share the storage of the value that
 contains them. `string` has a single level, its characters never being mutable, and so does
 `void*`. Every level has its own mutability bit; the type of `*p`, `p->f` and `s[i]` is `p`'s
@@ -127,33 +127,33 @@ one it introduces: read it as "this level only"; after the outermost suffix that
 binding, level 0. A `mut` that marks a level twice (`mut i32* mut p`) is an error ("redundant
 mut"), so every type has one spelling. `mut` never follows a fixed-array suffix; inside a
 fixed-array type a `mut` after `*` marks the array's slots, which are level 0 of the array value
-(`Node* mut[4] t` has assignable slots and immutable nodes, and `t[..]` is `Node* mut[]`).
+(`node* mut[4] t` has assignable slots and immutable nodes, and `t[..]` is `node* mut[]`).
 
 | Declaration              | rebind `p = ...` | write through `*p`, `p->f`, `p[i]` |
 |--------------------------|------------------|------------------------------------|
-| `Node* p`                | no               | no                                 |
-| `Node* mut p`            | yes              | no                                 |
-| `mut Node* p`            | yes              | yes                                |
+| `node* p`                | no               | no                                 |
+| `node* mut p`            | yes              | no                                 |
+| `mut node* p`            | yes              | yes                                |
 | `i32[] s`                | no               | elements: no                       |
 | `i32[] mut s`            | yes              | elements: no                       |
 | `mut i32[] s`            | yes              | elements: yes                      |
-| `Node* mut[] t`          | no               | slots: yes, pointees: no           |
-| `Node* mut* pp`          | no               | `*pp`: yes, `**pp`: no             |
+| `node* mut[] t`          | no               | slots: yes, pointees: no           |
+| `node* mut* pp`          | no               | `*pp`: yes, `**pp`: no             |
 | `mut u8[]* out`          | yes              | `*out`: yes, bytes: yes            |
 | `u8[] mut* out`          | no               | `*out`: yes, bytes: no             |
 | `mut string s`           | yes              | never                              |
-| `mut Point q`            | yes (and fields) | not applicable                     |
+| `mut point q`            | yes (and fields) | not applicable                     |
 
 ```fort
-mut Node m = {};
-Node n = {};
-Node* p = &n;
-Node* mut q = &n;
-mut Node* r = &m;
+mut node m = {};
+node n = {};
+node* p = &n;
+node* mut q = &n;
+mut node* r = &m;
 p = &m;                   // error: cannot assign to immutable 'p'
 q = &m;                   // ok
 q->value = 1;             // error: cannot write through immutable pointer 'q'
-r->value = 1;             // ok; the common cursor 'mut Node* cur' can do both
+r->value = 1;             // ok; the common cursor 'mut node* cur' can do both
 fn bool read_file(string path, mut u8[] own* out) { ... }  // the own slot *out and its bytes
 fn bool peek(string path, u8[] mut* out) { ... }        // *out rebindable, bytes immutable
 ```
@@ -167,13 +167,13 @@ For a level `k >= 1`, mutability may be dropped only if every level from 1 to `k
 immutable in the target type. Adding mutability at any level requires `cast` (5.9).
 
 ```fort
-own mut Node*[] a = new(Node*[1]);   // slots (level 1) and pointees (level 2) mutable
-Node*[] b = a;                       // ok: lends 'a', dropping own, level 1 and level 2
-Node* mut[] c = a;                   // error: cannot drop level 2 behind mutable level 1
+own mut node*[] a = new(node*[1]);   // slots (level 1) and pointees (level 2) mutable
+node*[] b = a;                       // ok: lends 'a', dropping own, level 1 and level 2
+node* mut[] c = a;                   // error: cannot drop level 2 behind mutable level 1
 ```
 
-The third line is refused because `c[0]` would be a mutable slot holding a `Node*`, so
-`Node k = {}; c[0] = &k;` would store the address of the immutable `k`, and `a[0]->value = 1`
+The third line is refused because `c[0]` would be a mutable slot holding a `node*`, so
+`node k = {}; c[0] = &k;` would store the address of the immutable `k`, and `a[0]->value = 1`
 would then write to `k` through `a`, which still sees a mutable node. The check is a short
 recursion over the two type chains and closes the C hole of converting `T**` to `const T**`.
 
@@ -185,19 +185,19 @@ therefore describes only the levels behind the field's indirections, and a `mut`
 apply to the field's own slot is an error. A `mut` that would apply to level 0 of a return type
 is an error for the same reason. Parameters follow 3.3; at level 0 `mut` makes the callee's
 local copy assignable and is not part of the function's type (7.2). A field or a return type may
-be an `own` reference (`own mut u8[] data;`, `fn own mut Node* alloc()`); a struct with such a
+be an `own` reference (`own mut u8[] data;`, `fn own mut node* alloc()`); a struct with such a
 field is an owning aggregate (3.9).
 
 ```fort
-struct Node {
+struct node {
     i32 value;
-    mut Node* next;       // ok: the node reached through 'next' is mutable
-    Node* mut prev;       // error: 'mut' on a field's own storage
+    mut node* next;       // ok: the node reached through 'next' is mutable
+    node* mut prev;       // error: 'mut' on a field's own storage
     mut i32 count;        // error: 'mut' on a field's own storage
 }
 fn mut i32 f() { return 1; }                // error: 'mut' on a return type without indirection
-fn void h(Node* p) { p = p->next; }         // error: cannot assign to immutable parameter 'p'
-fn void k(Node* mut p) { p = p->next; }     // ok: level 0 of 'p' is mutable
+fn void h(node* p) { p = p->next; }         // error: cannot assign to immutable parameter 'p'
+fn void k(node* mut p) { p = p->next; }     // ok: level 0 of 'p' is mutable
 ```
 
 ### 3.6 Mutability of lvalues (D5.7, D6.7, D5.8, D5.9)
@@ -213,7 +213,7 @@ never `own` (D17.3). `new(T)` returns `own mut T*` and `new(T[n])` returns `own 
 pointer or slice it contains; the levels behind an indirection are fixed by the type.
 
 ```fort
-Node n = {};              // 'next' has type mut Node* (struct above)
+node n = {};              // 'next' has type mut node* (struct above)
 n.value = 1;              // error: cannot assign to field of immutable 'n'
 n.next->value = 1;        // ok: level 1 of 'next' is mutable
 mut i32* p = &n.value;    // error: '&n.value' has type i32*, not mut i32*
@@ -242,8 +242,8 @@ i32 SIZE = compute();             // error: initializer calls a function
 i32 A = B;                        // error: constant initializer cycle A -> B -> A
 i32 B = A;
 i32* PTR = &MAX;                  // ok
-own Node* ROOT = null;            // a constant: only the zero value is possible
-own mut Node* head = null;        // a global
+own node* ROOT = null;            // a constant: only the zero value is possible
+own mut node* head = null;        // a global
 fn void f() {
     i32 n = 3;
     i32[n] a = {};                // error: array length is not a constant expression
@@ -259,13 +259,13 @@ bindings; any collision is an error. Lookup goes from the innermost block outwar
 module namespace, then the universe (section 8). A local or parameter may not reuse the name of
 an enclosing local or parameter. It may shadow a module-level name (including an import binding)
 or a universe name, which then becomes inaccessible in that scope; a module-level declaration
-may shadow a universe name. Enum members live in their enum (`Color.Red`), not in the module
+may shadow a universe name. Enum members live in their enum (`color.red`), not in the module
 namespace. Sibling scopes may reuse names.
 
 ```fort
 import std::io;
-struct Point { i32 x; i32 y; }
-fn void Point() { }               // error: 'Point' is already declared in this module
+struct point { i32 x; i32 y; }
+fn void point() { }               // error: 'point' is already declared in this module
 fn void f(i32 n) {
     i32 n = 1;                    // error: 'n' shadows a parameter
     { i32 k = 1; }
@@ -280,7 +280,7 @@ fn void f(i32 n) {
 
 A pointer, `void*`, slice or `string` type may be qualified `own`. An `own` reference designates
 the start of a live heap allocation, obtained from `new` (5.10) or adopted with `cast` (5.9),
-that `del` (8.2) may free. `own` is part of the type, so `own Node*` and `Node*` are different
+that `del` (8.2) may free. `own` is part of the type, so `own node*` and `node*` are different
 types (`type-system.md` section 8), and it is erased at run time. `own` on a non-reference type
 or on a function-pointer type is an error; a struct or fixed array that contains an `own`
 reference by value is an owning aggregate (below). Ownership is a typing discipline, not a
@@ -290,11 +290,11 @@ the idiom is `defer del(x);` (6.6).
 **Placement (D17.2).** `own` before the base type, and before any `mut` there, marks the
 outermost reference of the type, the one the binding holds. `own` immediately after a `*` or
 `[]` suffix, before any `mut` in that position, marks the reference that suffix introduces.
-Unlike prefix `mut`, prefix `own` marks one reference only: in `own mut Node*[] items` the slice
+Unlike prefix `mut`, prefix `own` marks one reference only: in `own mut node*[] items` the slice
 is owned and the pointers in it are borrowed, so `del(items[i])` does not compile, which is the
 safe failure when the nodes belong to an arena. Marking one reference twice is an error
 ("redundant own"), and so is an `own` after the outermost suffix, whose reference the prefix
-position already names (write `own Node* p`, not `Node* own p`), so every type has one spelling.
+position already names (write `own node* p`, not `node* own p`), so every type has one spelling.
 `own` never follows a fixed-array suffix. The mutability of each level is spelled as in 3.3;
 `own` does not change it, and `del` or `move` through an indirection needs that level mutable.
 
@@ -302,12 +302,12 @@ position already names (write `own Node* p`, not `Node* own p`), so every type h
 |-----------------------------|----------|------------------------|--------------------------------|
 | `own mut u8[] buf`          | yes      | no: not references     | owned, writable bytes          |
 | `own u8[] data`             | yes      | no                     | owned bytes, read-only here    |
-| `own mut Node* n`           | yes      | no                     | owned node                     |
-| `own Node* mut n`           | yes      | no                     | read-only owned node, rebinds  |
-| `own mut Node*[] items`     | yes      | no: borrowed pointers  | owned slice of borrowed nodes  |
-| `own mut Node* own[] kids`  | yes      | yes                    | owned slice of owned nodes     |
-| `Node* own[] view`          | no       | no: slots immutable    | borrowed view of owned nodes   |
-| `mut Node* own[] v`         | no       | yes                    | mutable view of owned nodes    |
+| `own mut node* n`           | yes      | no                     | owned node                     |
+| `own node* mut n`           | yes      | no                     | read-only owned node, rebinds  |
+| `own mut node*[] items`     | yes      | no: borrowed pointers  | owned slice of borrowed nodes  |
+| `own mut node* own[] kids`  | yes      | yes                    | owned slice of owned nodes     |
+| `node* own[] view`          | no       | no: slots immutable    | borrowed view of owned nodes   |
+| `mut node* own[] v`         | no       | yes                    | mutable view of owned nodes    |
 | `mut u8[] own* out`         | no       | `del(*out)`: yes       | pointer to an owned slot       |
 | `own string name`           | yes      | no                     | owned characters               |
 
@@ -316,9 +316,9 @@ the same places as the drop of 3.4, and the two drops combine (`own mut u8[]` to
 operands of `==`, `!=` and `?:` are lent as well, so `own` never blocks a comparison (5.2, 5.12).
 The drop is monotone with the shape of 3.4: `own` may be dropped from a reference only if, in
 the target type, no reference outside it is `own` and every level between the binding and the
-storage holding that reference is immutable. `own mut Node* own[]` converts to
-`mut Node* own[]` (a view of the owned slots) and to `Node*[]`, but not to `own mut Node*[]`,
-whose nodes would belong to nobody once the slice is freed, and not to `mut Node*[]`, through
+storage holding that reference is immutable. `own mut node* own[]` converts to
+`mut node* own[]` (a view of the owned slots) and to `node*[]`, but not to `own mut node*[]`,
+whose nodes would belong to nobody once the slice is freed, and not to `mut node*[]`, through
 which a borrowed pointer could be stored into a slot the source still sees as owned. Adding
 `own` requires `cast`. Lending never empties the source, and a lent value must not outlive the
 allocation (D17.14).
@@ -338,7 +338,7 @@ way (8.2), and storing over a live `own` value is a runtime error in checked bui
 **Temporaries must land (D17.8).** An `own` rvalue may only be bound to an `own` place, passed
 to an `own` parameter, or `del`ed. Anything else is an error ("owning temporary would leak"),
 because nothing could ever `del` it: converting or casting it to a non-`own` type
-(`mut Node* n = new(Node);`, `println(str.dup(x))`, `cast(new(Node), Node*)`), slicing it or
+(`mut node* n = new(node);`, `println(str.dup(x))`, `cast(new(node), node*)`), slicing it or
 taking its `.ptr` (`new(u8[8])[..4]`, 5.6, 5.7), accessing a field of an owning aggregate rvalue
 (`make_vec().data`), and discarding it as an expression statement (`move(x);`, `str.dup(s);`,
 6.2).
@@ -349,11 +349,11 @@ of `own` type is an implicit `move(x)`, performed before deferred code runs (6.6
 one that hands it to the caller.
 
 ```fort
-struct Node { i32 value; mut Node* next; }
-fn void take(own mut Node* n) { del(n); }     // takes ownership
-fn void look(Node* n) { println(n->value); }  // borrows
-fn own mut Node* build() {                    // fn bool fill(mut Node* n) borrows too
-    own mut Node* n = new(Node);
+struct node { i32 value; mut node* next; }
+fn void take(own mut node* n) { del(n); }     // takes ownership
+fn void look(node* n) { println(n->value); }  // borrows
+fn own mut node* build() {                    // fn bool fill(mut node* n) borrows too
+    own mut node* n = new(node);
     defer del(n);                 // frees n on every path but the one that returns it
     if (!fill(n)) {
         return null;              // the deferred del(n) frees the node
@@ -361,21 +361,21 @@ fn own mut Node* build() {                    // fn bool fill(mut Node* n) borro
     return n;                     // implicit move: n is null when del(n) runs
 }
 fn void demo() {
-    own mut Node* a = build();    // ok: an own rvalue lands in an own place
-    own mut Node* b = a;          // error: copying own lvalue 'a' needs move(a)
-    own mut Node* c = move(a);    // ok: 'a' is now null
-    Node* v = c;                  // ok: lends; 'c' still owns the node
+    own mut node* a = build();    // ok: an own rvalue lands in an own place
+    own mut node* b = a;          // error: copying own lvalue 'a' needs move(a)
+    own mut node* c = move(a);    // ok: 'a' is now null
+    node* v = c;                  // ok: lends; 'c' still owns the node
     look(c);                      // ok: lends
     take(c);                      // error: 'take' takes ownership; write move(c)
     take(move(c));                // ok: 'c' is null afterwards
     take(build());                // ok: the temporary lands in the own parameter
-    mut Node* d = build();        // error: owning temporary would leak; declare own mut Node*
+    mut node* d = build();        // error: owning temporary would leak; declare own mut node*
     look(build());                // error: owning temporary would leak
-    own Node* own e = null;       // error: redundant own
-    Node* own f = null;           // error: 'own' after the outermost suffix; write own Node*
+    own node* own e = null;       // error: redundant own
+    node* own f = null;           // error: 'own' after the outermost suffix; write own node*
     own i32 g = 1;                // error: 'own' on a non-reference type
-    own Point h = {};             // error: 'own' on a struct; qualify a field instead
-    own fn void(Node*) i = look;  // error: 'own' on a function-pointer type
+    own point h = {};             // error: 'own' on a struct; qualify a field instead
+    own fn void(node*) i = look;  // error: 'own' on a function-pointer type
 }
 ```
 
@@ -384,19 +384,19 @@ value, directly or through nested aggregates, is owning (`type-system.md` sectio
 an owning lvalue into an owning place (initialization, assignment, a by-value parameter, a
 literal element) requires `move`, which empties the whole value; returning a local owning value
 is an implicit move; `del` of an aggregate is an error, because `del` is shallow. Functions
-therefore take `Vec*` or `mut Vec*`, and a struct frees its own fields.
+therefore take `vec*` or `mut vec*`, and a struct frees its own fields.
 
 ```fort
-struct Vec { own mut i32[] data; u64 len; }
-fn void steal(Node* own[] view, mut Node* own[] slots, Vec* v, mut Vec* w) {
-    own Node* a = move(view[0]);         // error: cannot move out of immutable slot 'view[0]'
-    own mut Node* b = move(slots[0]);    // ok: level 1 of 'slots' is mutable
+struct vec { own mut i32[] data; u64 len; }
+fn void steal(node* own[] view, mut node* own[] slots, vec* v, mut vec* w) {
+    own node* a = move(view[0]);         // error: cannot move out of immutable slot 'view[0]'
+    own mut node* b = move(slots[0]);    // ok: level 1 of 'slots' is mutable
     own mut i32[] c = move(v->data);     // error: cannot move through immutable pointer 'v'
     own mut i32[] d = move(w->data);     // ok
-    Vec local = {};
+    vec local = {};
     own mut i32[] e = move(local.data);  // ok: a field of a local counts as the local
-    Vec copy = local;                    // error: copying owning value 'local' needs move(local)
-    Vec taken = move(local);             // ok: 'local' is now all zero
+    vec copy = local;                    // error: copying owning value 'local' needs move(local)
+    vec taken = move(local);             // ok: 'local' is now all zero
     del(taken);                          // error: 'del' takes a reference, not an aggregate
     del(taken.data);                     // ok
 }
@@ -415,15 +415,15 @@ fn void steal(Node* own[] view, mut Node* own[] slots, Vec* v, mut Vec* w) {
 | fixed array | `i32[4]`            | N * elem | all zero    | no       | D3.4        |
 | slice       | `i32[]`             | 16       | `{null, 0}` | no       | D3.5        |
 | `string`    | `"abc"`             | 16       | `""`        | contents | D3.7        |
-| struct      | `Point`             | C layout | all zero    | no       | D3.8        |
-| enum        | `Color`             | 4        | `0`         | yes      | D3.9        |
-| pointer     | `Node*`, `void*`    | 8        | `null`      | identity | D3.11-D3.13 |
+| struct      | `point`             | C layout | all zero    | no       | D3.8        |
+| enum        | `color`             | 4        | `0`         | yes      | D3.9        |
+| pointer     | `node*`, `void*`    | 8        | `null`      | identity | D3.11-D3.13 |
 | function    | `fn i32(i32, i32)`  | 8        | `null`      | identity | D3.10       |
 
 Alignment equals size for primitives; pointers, function pointers, slices and strings align to
 8, arrays to their element and structs to their most-aligned field, with C/System V layout
 (D3.1, D3.8). `void` is not a value type (`void v = f();` is an error). Type suffixes (D3.6)
-come in three groups: `*` suffixes before the array group apply to the element (`Node*[16]` is
+come in three groups: `*` suffixes before the array group apply to the element (`node*[16]` is
 sixteen pointers); array and slice suffixes read outside-in (`i32[3][4]` is indexed `a[i][j]`
 with `i < 3`, `i32[][4]` is a slice of `i32[4]`); a `*` after the array group points to the
 whole array or slice (`u8[]*` is a pointer to a slice, `i32[4]*` a pointer to an `i32[4]`), and
@@ -474,7 +474,7 @@ Every mixed-type operation is an error: there is no promotion, not even for `u8`
 type" for comparison and `?:` operands means identical, mutability levels included (D3.12): the
 implicit drop of 3.4 applies only to initialization, assignment, argument passing and `return`.
 The `own` mark is the exception: the operands of `==`, `!=` and `?:` are lent first (D17.4), so
-`n == m` compares an `own Node*` with a `Node*`, while an `own` rvalue operand is an error
+`n == m` compares an `own node*` with a `node*`, while an `own` rvalue operand is an error
 (D17.8). Equality is defined on integers, floats, `bool`, `char`, enums, pointers (identity),
 function pointers (identity) and `string` (contents: `len` then bytes, so the zero string equals
 `""`); it is an error on structs, fixed arrays and slices. `>>` is arithmetic for signed and
@@ -505,8 +505,8 @@ bool lt = t < false;      // error: no ordering on bool
 i32 q = 7 / 0;            // error: constant division by zero
 i32 w = a / (a - 1);      // runtime error when a == 1: division by zero
 i32 sh = a << b;          // ok: the count may have any integer type; the result is i32
-bool same = n == m;       // ok: own Node* n is lent for the comparison with Node* m
-bool nu = new(Node) == null;  // error: owning temporary would leak
+bool same = n == m;       // ok: own node* n is lent for the comparison with node* m
+bool nu = new(node) == null;  // error: owning temporary would leak
 ```
 
 ### 5.3 Untyped constants in context (D4.1-D4.5)
@@ -573,14 +573,14 @@ not diagnosed.
 
 ```fort
 i32* a = &(x + 1);        // error: '&' requires an lvalue
-i32* b = &Point{1, 2}.x;  // error: '&' requires an lvalue
+i32* b = &point{1, 2}.x;  // error: '&' requires an lvalue
 fn i32(i32) c = &inc;     // error: '&' on a function; write 'inc'
 i32 d = *vp;              // error: cannot dereference 'void*'
 i32* e = p + 1;           // error: no pointer arithmetic
 bool f = s == null;       // error: 'null' compared with a slice; use 's.ptr == null'
 print(null);              // error: 'null' needs a pointer-typed context
 bool g = null == null;    // error: 'null' has no type of its own
-own Node* h = &n;         // error: '&' yields a borrowed pointer; cannot add own
+own node* h = &n;         // error: '&' yields a borrowed pointer; cannot add own
 ```
 
 ### 5.6 Field access, `->`, `.len` and `.ptr` (D6.10, D3.4, D3.5, D3.7, D9.4)
@@ -590,11 +590,11 @@ on a pointer is an error with a hint, and `->` on a non-pointer is an error; whe
 a pointer, write `(*p)->f`. Through a pointer to a slice or string, `->` also reaches the `.len`
 and `.ptr` pseudo-fields (`out->len`); indexing through a pointer to an array or slice is
 written `(*p)[i]` (5.7). Qualified names also use `.`: `io.read_file(path)`,
-`geom.Point{1, 2}`, `Color.Red`, `m.Color.Red`. Read-only pseudo-fields: a fixed array has
+`geom.point{1, 2}`, `color.red`, `m.color.red`. Read-only pseudo-fields: a fixed array has
 `.len`, an untyped integer constant; a slice has `.len` (`u64`) and `.ptr`, a pointer to the
 element type carrying the element level's mutability (`i32*` for `i32[]`, `mut i32*` for
-`mut i32[]`, `Node* mut*` for `Node* mut[]`) and never `own` at its outermost reference
-(`mut u8*` for `own mut u8[]`, `mut Node* own*` for `own mut Node* own[]`, D17.3); a string has
+`mut i32[]`, `node* mut*` for `node* mut[]`) and never `own` at its outermost reference
+(`mut u8*` for `own mut u8[]`, `mut node* own*` for `own mut node* own[]`, D17.3); a string has
 `.len` (`u64`) and `.ptr` (`char*`).
 Fixed arrays have no `.ptr`. `.len` of any expression of fixed-array type is a constant
 expression and its operand is not evaluated (`m[i].len` is `4` for `i32[3][4] m`); `.len` of
@@ -626,7 +626,7 @@ string; the bounds are any integer type or untyped constants (a negative constan
 error); a missing `lo` is 0 and a missing `hi` is the length. The result is a slice, or a
 `string` for a string operand, whose element mutability is that of `e`'s elements. It is always
 a view: never `own` at its outermost reference, while `own` marks inside the element type stay
-(`kids[1..]` on an `own mut Node* own[] kids` is `mut Node* own[]`) (D17.3). The runtime
+(`kids[1..]` on an `own mut node* own[] kids` is `mut node* own[]`) (D17.3). The runtime
 check is `0 <= lo <= hi <= len` relative to the operand, not the original allocation; the result
 may be empty. `p[lo..hi]` on a `T*` or `mut T*` yields a `T[]` or `mut T[]` with no check: this
 is the explicit unsafe escape for foreign memory, and a range beyond the object is undefined
@@ -666,12 +666,12 @@ are passed by value (7.1).
 add(1);                   // error: 'add' takes 2 arguments, 1 given
 add(1, 2.0);              // error: untyped float for parameter 'b' of type i32
 i32 t = table[i](3);      // ok: index, then call
-// fn void take(own mut Node* n); fn void look(Node* n); own mut Node* n
+// fn void take(own mut node* n); fn void look(node* n); own mut node* n
 take(n);                  // error: 'take' takes ownership of 'n'; write move(n)
 take(move(n));            // ok: 'n' is null afterwards
-take(new(Node));          // ok: the temporary lands in the own parameter
+take(new(node));          // ok: the temporary lands in the own parameter
 look(n);                  // ok: lends 'n'
-look(new(Node));          // error: owning temporary would leak
+look(new(node));          // error: owning temporary would leak
 ```
 
 ### 5.9 `cast` (D6.4, D3.14, D4.4, D10.7, D17.3, D17.12)
@@ -699,7 +699,7 @@ to guess whether a parenthesized name is a type, and it never traps. Allowed:
   `cast(line[0..n], own mut char[])`), the same unsafe escape as adding `mut`; a later `del` of
   adopted memory that is not the start of an allocation is undefined behavior (D10.7);
 - dropping `own` at any level: a no-op wherever 3.9 already converts, and the escape where the
-  monotone rule of 3.9 refuses the implicit form (`own mut Node* own[]` to `mut Node*[]`).
+  monotone rule of 3.9 refuses the implicit form (`own mut node* own[]` to `mut node*[]`).
 
 Forbidden: integer to `bool`; any other slice-to-slice cast (the element type of a slice never
 changes, because `len` counts elements); pointer to slice; struct or array casts. An untyped
@@ -718,7 +718,7 @@ place, which must be written `cast(move(x), ...)` (D17.5), so that the bytes kee
 bool b = cast(1, bool);            // error: cannot cast integer to bool; write '1 != 0'
 u32[] u = cast(s, u32[]);          // error: cannot cast i32[] to u32[]
 i32[] v = cast(p, i32[]);          // error: cannot cast pointer to slice; use 'p[0..n]'
-Point q = cast(r, Point);          // error: cannot cast to struct type Point
+point q = cast(r, point);          // error: cannot cast to struct type point
 mut i32* w = cast(cp, mut i32*);   // ok: adds mutability explicitly
 i32 c = cast('a', i32) - '0';      // 49
 u8 t = cast(300, u8);              // 44: 300 is i32, then truncated
@@ -745,35 +745,35 @@ constant; later brackets are fixed-array dimensions of the element (`new(i32[n][
 at run time, a size that overflows, or allocation failure is a runtime error; `n == 0` is
 allowed and yields a slice with a non-null pointer. `mut` is never written inside `new(...)`,
 and `own` only in postfix positions of the element type, after a `*`: the result is fully
-mutable and owned at its outermost reference, and `new(Node* own[n])` yields
-`own mut Node* own[]`, an owned slice of owned pointers whose slots are all `null` (D17.3); a
+mutable and owned at its outermost reference, and `new(node* own[n])` yields
+`own mut node* own[]`, an owned slice of owned pointers whose slots are all `null` (D17.3); a
 prefix `own` inside `new(...)` does not parse (`grammar.md` section 6).
 `new(T{...})`, `new(T[])` and `new(void)` are errors. The result is an `own` rvalue and must
-land in an `own` place (3.9): `Point* q = new(Point);` is an error, not a conversion. Heap
+land in an `own` place (3.9): `point* q = new(point);` is an error, not a conversion. Heap
 storage is freed only by `del` (8.2).
 
 ```fort
 u64 a = sizeof(x);                     // error: 'sizeof' takes a type
 u64 b = sizeof(void);                  // error: 'sizeof(void)'
-own mut Point* p = new(Point{1, 2});   // error: 'new' takes a type; assign after allocation
+own mut point* p = new(point{1, 2});   // error: 'new' takes a type; assign after allocation
 own mut i32[] s = new(i32[]);          // error: 'new' of a slice needs a count
 own mut i32[] t = new(i32[n]);         // ok; runtime error if n < 0
 own mut i32[] u = new(i32[-1]);        // error: negative constant count
-own mut Node** pp = new(Node* mut);    // error: 'mut' inside 'new'
-own mut Node* own[] k = new(Node* own[4]);   // ok: four null slots, each an owned Node*
-own mut Node* own[] k2 = new(own Node*[4]);  // error: prefix 'own' inside 'new' does not parse
-own mut Point* q = new(Point);         // ok
-Point* r = new(Point);                 // error: owning temporary would leak; write own mut Point*
-own Point* w = new(Point);             // ok: drops mut, keeps own
+own mut node** pp = new(node* mut);    // error: 'mut' inside 'new'
+own mut node* own[] k = new(node* own[4]);   // ok: four null slots, each an owned node*
+own mut node* own[] k2 = new(own node*[4]);  // error: prefix 'own' inside 'new' does not parse
+own mut point* q = new(point);         // ok
+point* r = new(point);                 // error: owning temporary would leak; write own mut point*
+own point* w = new(point);             // ok: drops mut, keeps own
 w->x = 1;                              // error: cannot write through immutable pointer 'w'
 ```
 
 ### 5.11 Struct and array literals (D6.5, D17.5)
 
-`Point{1, 2}` is positional: every field, in declaration order. `Point{.x = 1, .y = 2}` is
+`point{1, 2}` is positional: every field, in declaration order. `point{.x = 1, .y = 2}` is
 designated: any order, omitted fields zeroed, no mixing with positional, no duplicates;
-designators apply to structs only. `Point{}` is all-zero; qualified names work
-(`geom.Point{1, 2}`). Typed array literals `i32[3]{1, 2, 3}` have exactly `N` elements or are
+designators apply to structs only. `point{}` is all-zero; qualified names work
+(`geom.point{1, 2}`). Typed array literals `i32[3]{1, 2, 3}` have exactly `N` elements or are
 `{}`; further dimensions nest braces (`i32[2][2]{{1, 2}, {3, 4}}`). A bare `{...}` is allowed
 only as the initializer of a declaration (local, module-level or `for` init) whose type is a
 struct or fixed array, and nested inside another literal; `= {}` zero-initializes any aggregate,
@@ -787,23 +787,23 @@ rvalue leaf flows in directly. A literal is never itself `own`: `own string s = 
 because a string literal is borrowed, and the empty owned string or slice is `{}`.
 
 ```fort
-Point a = {1, 2};                 // ok
-Point b = Point{.y = 2};          // ok: x is 0
-Point c = Point{1};               // error: positional literal needs every field (2)
-Point d = Point{.x = 1, 2};       // error: cannot mix designated and positional
-Point e = Point{.x = 1, .x = 2};  // error: duplicate field 'x'
+point a = {1, 2};                 // ok
+point b = point{.y = 2};          // ok: x is 0
+point c = point{1};               // error: positional literal needs every field (2)
+point d = point{.x = 1, 2};       // error: cannot mix designated and positional
+point e = point{.x = 1, .x = 2};  // error: duplicate field 'x'
 i32[3] f = {1, 2};                // error: array literal for i32[3] needs 3 elements
 i32 h = {};                       // error: '{}' initializes aggregates, slices, strings, enums
 i32[] s = {};                     // ok: the zero slice
-Color m = {};                     // ok: holds 0, even if no member has that value
-Node* k = {};                     // error: '{}' does not initialize a pointer; use null
-Line l = {{0, 0}, {1, 1}};        // ok: nested bare literals
-n = {3, 4};                       // error: bare braces are not an expression; write Point{3, 4}
+color m = {};                     // ok: holds 0, even if no member has that value
+node* k = {};                     // error: '{}' does not initialize a pointer; use null
+line l = {{0, 0}, {1, 1}};        // ok: nested bare literals
+n = {3, 4};                       // error: bare braces are not an expression; write point{3, 4}
 draw({1, 2});                     // error: bare braces are not an expression
-// struct Vec { own mut i32[] data; u64 len; }   own mut i32[] buf
-Vec v = Vec{.data = buf, .len = 0};           // error: copying own lvalue 'buf' needs move(buf)
-Vec w = Vec{.data = move(buf), .len = 0};     // ok
-Vec u = Vec{.data = new(i32[8]), .len = 0};   // ok: an own rvalue lands in the own field
+// struct vec { own mut i32[] data; u64 len; }   own mut i32[] buf
+vec v = vec{.data = buf, .len = 0};           // error: copying own lvalue 'buf' needs move(buf)
+vec w = vec{.data = move(buf), .len = 0};     // ok
+vec u = vec{.data = new(i32[8]), .len = 0};   // ok: an own rvalue lands in the own field
 own mut u8[] z = {};              // ok: the zero slice, owned and empty
 own string e = "";                // error: a literal is not owned; write {}
 ```
@@ -825,10 +825,10 @@ intended.
 ```fort
 i32 y = n ? 1 : 2;                // error: condition must be bool
 f64 z = flag ? x : 2.5;           // error: 2.5 cannot take the type i32 of 'x'
-Node* w = flag ? p : q;           // error: mut Node* and Node* differ (cast or copy first)
-Node* v = flag ? a : b;           // ok: own Node* a and own Node* b are lent
-own mut Node* n = flag ? new(Node) : null;   // ok: both operands are own rvalues or null
-own mut Node* m = flag ? new(Node) : a;      // error: owning temporary would leak; 'a' is lent
+node* w = flag ? p : q;           // error: mut node* and node* differ (cast or copy first)
+node* v = flag ? a : b;           // ok: own node* a and own node* b are lent
+own mut node* n = flag ? new(node) : null;   // ok: both operands are own rvalues or null
+own mut node* m = flag ? new(node) : a;      // error: owning temporary would leak; 'a' is lent
 mut u32 h = 2166136261;
 h = h *% 16777619;                // ok in both modes
 u32 t = h *% 1.5;                 // error: wrapping operators are integer-only
@@ -864,9 +864,9 @@ y = y++ + 1;              // error: '++' is a statement, not an expression
 if (y = 5) { }            // error: assignment is not an expression
 a[i] = f();               // a[i] is addressed and bounds-checked before f() runs
 d++;                      // error: '++' on float type f64
-own mut Node* h = null;
-h = new(Node);            // ok: 'h' was null
-h = new(Node);            // runtime error in checked builds: overwriting owned value
+own mut node* h = null;
+h = new(node);            // ok: 'h' was null
+h = new(node);            // runtime error in checked builds: overwriting owned value
 h = k;                    // error: copying own lvalue 'k' needs move(k)
 del(h);
 h = move(k);              // ok: 'h' was emptied by del
@@ -886,7 +886,7 @@ variables declared in the body are not visible in the condition.
 compute(x);               // ok: result discarded
 str.dup(s);               // error: owning result discarded; bind it or del it
 a * b;                    // error: expression statement must be a call
-Point{1, 2};              // error: expression statement must be a call
+point{1, 2};              // error: expression statement must be a call
 ;                         // error: empty statement
 if (n) { }                // error: condition must be bool; write n != 0
 if (ok) return;           // error: expected '{'
@@ -934,13 +934,13 @@ for (char c : "hi") { print(c); }      // hi
 for (i64 v : a) { }                    // error: element type is i32, not i64
 for (mut i32 v : a) { v = 0; }         // ok: modifies the copy only
 for (i32 v : p) { }                    // error: cannot iterate a pointer; slice it first
-// own mut Node* own[] kids; Vec[4] vecs (struct Vec has an own field)
-for (mut Node* c : kids) { c->value = 0; }     // ok: lends each node
-for (own mut Node* c : kids) { }               // error: a range variable cannot be own
+// own mut node* own[] kids; vec[4] vecs (struct vec has an own field)
+for (mut node* c : kids) { c->value = 0; }     // ok: lends each node
+for (own mut node* c : kids) { }               // error: a range variable cannot be own
 for (mut u64 i = 0; i < kids.len; i++) {
     take(move(kids[i]));                       // ok: moving out is explicit
 }
-for (Vec v : vecs) { }                         // error: elements are owning; iterate by index
+for (vec v : vecs) { }                         // error: elements are owning; iterate by index
 ```
 
 ### 6.5 `switch`, `break` and `continue` (D7.6, D7.7, D15, D16)
@@ -963,11 +963,11 @@ enclosing loop, running `step` in a `for`. Outside a loop or `switch` they are e
 no labeled `break`; use a flag or a helper function.
 
 ```fort
-enum Color { Red, Green, Blue }
+enum color { red, green, blue }
 switch (c) {
-    case Color.Red:
+    case color.red:
         handle_red();
-}                                   // error: switch over Color does not handle Green, Blue
+}                                   // error: switch over color does not handle green, blue
 switch (n) {
     case 1:
         i32 k = 2;                  // scoped to this case
@@ -1067,12 +1067,12 @@ return type is not `own` is refused as a leaking temporary (D17.8).
 ```fort
 fn void f() { return 1; }     // error: 'return' with a value in a void function
 fn i32 g() { return; }        // error: 'return' without a value in a function returning i32
-fn own mut Node* pop(mut List* l) {
+fn own mut node* pop(mut list* l) {
     return l->head;           // error: 'l->head' is not a local; write move(l->head)
 }
-fn Node* leak() {
-    own mut Node* n = new(Node);
-    return n;                 // error: owning temporary would leak; return own mut Node*
+fn node* leak() {
+    own mut node* n = new(node);
+    return n;                 // error: owning temporary would leak; return own mut node*
 }
 ```
 
@@ -1101,7 +1101,7 @@ object. A parameter is a local of the callee: `mut` at level 0 makes the copy as
 An `own` parameter takes ownership of its argument (D6.11, D17.5): the callee frees it or stores
 it in an `own` place, and since a parameter is a local, `del(p)` is allowed on an immutable `p`
 and `return p` is an implicit move (3.9). A parameter of owning aggregate type receives its
-argument only through `move`, which is why functions take `Vec*` or `mut Vec*` (D17.7). A
+argument only through `move`, which is why functions take `vec*` or `mut vec*` (D17.7). A
 return type may be `own` (`fn own mut u8[] read_all(i32 fd)`), and its value must land in the
 caller (D17.8).
 
@@ -1113,9 +1113,9 @@ fn void g() {
 fn void bump(i32 n) { n += 1; }         // error: cannot assign to immutable parameter 'n'
 fn void bump2(mut i32 n) { n += 1; }    // ok: modifies the local copy
 fn i32[4] copy(i32[4] a) { return a; }  // the array is copied in and copied out
-fn void take(own mut Node* n) { del(n); }         // ok: 'n' need not be mut
-fn void eat(Vec v) { del(v.data); }               // callers must write eat(move(x))
-fn void reset(mut Vec* v) { del(v->data); v->len = 0; }   // the usual shape
+fn void take(own mut node* n) { del(n); }         // ok: 'n' need not be mut
+fn void eat(vec v) { del(v.data); }               // callers must write eat(move(x))
+fn void reset(mut vec* v) { del(v->data); v->len = 0; }   // the usual shape
 ```
 
 ### 7.2 Function types and values (D3.10, D3.6, D17.1)
@@ -1123,8 +1123,8 @@ fn void reset(mut Vec* v) { del(v->data); v->len = 0; }   // the usual shape
 A function type is written `fn R(P1, P2)` with parameter types only. Identity is structural over
 the parameter types (including pointee mutability), the return type and `noreturn`; level-0
 `mut` on parameters is ignored. `own` at any reference of a parameter or return type is part of
-the identity (D17.1): `fn void(own Node*)` and `fn void(Node*)` are different types, and so are
-`fn own mut Node*()` and `fn mut Node*()`. `own` on a function-pointer type itself is an error.
+the identity (D17.1): `fn void(own node*)` and `fn void(node*)` are different types, and so are
+`fn own mut node*()` and `fn mut node*()`. `own` on a function-pointer type itself is an error.
 A function name, or a qualified name `m.f`, used as a value has its function type; `&f` and `*f`
 are errors. `null` is a valid value, and calling it is undefined behavior. `==` and `!=` compare
 identity. Suffixes after a function type apply to the function type: `fn i32(i32)[4]` is an
@@ -1142,7 +1142,7 @@ fn i32(i32)[2] table = {inc, dec};
 i32 r = table[1](5);              // 4
 fn i32(i32) w = &inc;             // error: '&' on a function; write 'inc'
 fn i64(i32) v = inc;              // error: mismatched function types
-fn void(Node*) t = take;          // error: fn void(own mut Node*) is not fn void(Node*)
+fn void(node*) t = take;          // error: fn void(own mut node*) is not fn void(node*)
 own fn i32(i32) o = inc;          // error: 'own' on a function-pointer type
 ```
 
@@ -1171,11 +1171,11 @@ fn i32 sign(i32 x) {
         return 1;
     }
 }                                 // error: missing return (add an else branch)
-fn i32 code(Color c) {
+fn i32 code(color c) {
     switch (c) {
-        case Color.Red:
+        case color.red:
             return 1;
-        case Color.Green, Color.Blue:
+        case color.green, color.blue:
             return 2;
     }
 }                                 // ok: exhaustive enum switch, every case returns
@@ -1233,7 +1233,7 @@ binding need not be `mut` but a level reached through `*p`, `p->f` or `s[i]` mus
 rvalue it only frees. `del(null)` (the literal adopts `own void*`) and `del` of a zero slice or
 string are no-ops, so `del(buf); del(buf);` frees once and a use after `del` dereferences
 `null`. `del` is shallow:
-`del(kids)` on an `own mut Node* own[]` frees the slots, not the nodes, and `del` of a struct or
+`del(kids)` on an `own mut node* own[]` frees the slots, not the nodes, and `del` of a struct or
 array is an error. A view, a sub-slice, a `.ptr`, a stack address, a literal and a `string` that
 is not `own` are compile errors, because none of them has an `own` type. Allocations have no
 header, so `new`/`del` and C `malloc`/`free` are interchangeable, and C memory is adopted with
@@ -1256,23 +1256,23 @@ token, or of the builtin's name for `new`, `assert` and `panic`; the `assert` te
 source text of the expression, verbatim. Deferred code does not run.
 
 ```fort
-// own mut u8[] buf; own mut Node* n; Node* v = n; Node* own[] view; Vec vec; string s; i32 k
+// own mut u8[] buf; own mut node* n; node* v = n; node* own[] view; vec w; string s; i32 k
 del(s);                       // error: 's' is a string, not an own string
 del(buf[1..]);                // error: a sub-slice is a view, not an own slice
 del(buf.ptr);                 // error: '.ptr' is a view
 del(&k);                      // error: a stack address is not owned
 del("abc");                   // error: a literal is not owned
-del(v);                       // error: 'v' is a borrowed Node*, not own
-del(vec);                     // error: 'del' takes a reference, not an aggregate
+del(v);                       // error: 'v' is a borrowed node*, not own
+del(w);                       // error: 'del' takes a reference, not an aggregate
 del(view[0]);                 // error: cannot empty immutable slot 'view[0]'
-del(new(Node));               // ok: frees the temporary
+del(new(node));               // ok: frees the temporary
 del(n); del(n);               // ok: the second call is del(null)
 i32 r = del(n);               // error: 'del' has no value
-fn void(own mut Node*) f = del;   // error: 'del' cannot be used as a value
+fn void(own mut node*) f = del;   // error: 'del' cannot be used as a value
 move(n);                      // error: owning temporary would leak
-own mut Node* m = move(k);    // error: 'move' needs an owning operand; 'k' is an i32
-own mut Node* o = move(v);    // error: 'move' needs an owning operand; 'v' is a borrowed Node*
-own mut Node* q = move(view[0]);  // error: cannot move out of immutable slot 'view[0]'
+own mut node* m = move(k);    // error: 'move' needs an owning operand; 'k' is an i32
+own mut node* o = move(v);    // error: 'move' needs an owning operand; 'v' is a borrowed node*
+own mut node* q = move(view[0]);  // error: cannot move out of immutable slot 'view[0]'
 assert(k);                    // error: 'assert' requires a bool
 panic(1);                     // error: 'panic' requires a string
 assert(s.len > 0);            // runtime error when s is empty
@@ -1314,10 +1314,10 @@ print('a');                                 // a
 print(cast('a', u8));                       // 97
 println(1.0, " ", 0.5, " ", 1e20);          // 1.0 0.5 1e+20
 println(cast(0.1, f32), " ", 0.00001);      // 0.1 1e-05
-println(Color.Green, " ", cast(7, Color));  // Green 7
+println(color.green, " ", cast(7, color));  // green 7
 void* v = null;
 println(v);                                 // 0x0
-println(pt);                                // error: cannot print a value of struct type Point
+println(pt);                                // error: cannot print a value of struct type point
 println(str.dup("x"));                      // error: owning temporary would leak
 ```
 

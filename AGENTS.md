@@ -104,8 +104,11 @@ A safe(r) C-like systems programming language.
   result is used or discarded with `(void)` (`TEST_UNUSED` in tests); no magic numbers; uppercase
   literal suffixes. `.clang-format` and `.clang-tidy` are the reference. This applies to test
   helpers under `test/` too.
-- **fort sources**: identifier conventions per decision D1.4 (lower_case everything except
-  module constants).
+- **fort sources**: identifier conventions per decision D1.4: everything is lower_case with
+  underscores, struct and enum type names and enum members included; only module constants are
+  UPPER_CASE. A variable never takes its type's name (`point p`, `box bx`, `mut list* l`); a
+  field may (`own mut node* node`), since fields are not variables and are outside the module
+  namespace (D7.9).
 - **Shell scripts**: bash with `set -eu`, clean under shellcheck at its default severity; the
   host has no shellcheck, run it in the guest: `tools/vm run 'shellcheck tools/vm
   tools/provision.sh'`.

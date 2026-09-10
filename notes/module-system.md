@@ -97,9 +97,9 @@ Bindings:
   name already declared or already bound in the file is a duplicate-binding error.
 - Importable declarations are functions, `extern` functions, structs, enums, constants and
   globals. The import bindings of another module are not importable; there is no re-export.
-- Enum members are not declarations. `import m::Color::Red;` fails with "module 'm::Color::Red'
-  not found" because neither `m/Color/Red.ft` nor `m/Color.ft` is a file. Write
-  `import m::Color;` and use `Color.Red`.
+- Enum members are not declarations. `import m::color::red;` fails with "module 'm::color::red'
+  not found" because neither `m/color/red.ft` nor `m/color.ft` is a file. Write
+  `import m::color;` and use `color.red`.
 - One module may be imported under several names, and together with some of its declarations;
   the bindings name the same entities.
 - There is no wildcard import. An unused import is not diagnosed (no warnings, D14.2).
@@ -114,10 +114,10 @@ finding a module, looks the name up in that module's namespace.
 |----------------|--------------------------------------------|-----------------------------------|
 | call           | `m.f(args)`                                | `io.close(fd)`                    |
 | value          | `m.C`, `m.g`                               | `math.PI`, `inp.frame += 1;`      |
-| type           | `m.T`                                      | `math.Vector v = {1.0, 2.0};`     |
+| type           | `m.T`                                      | `math.vector v = {1.0, 2.0};`     |
 | type operand   | `sizeof(m.T)`, `cast(p, m.T*)`, `new(m.T)` |                                   |
-| struct literal | `m.T{...}`                                 | `math.Vector{1.0, 2.0}`           |
-| enum member    | `m.E.Member`                               | `inp.Key.Left`, or a `case` label |
+| struct literal | `m.T{...}`                                 | `math.vector{1.0, 2.0}`           |
+| enum member    | `m.E.Member`                               | `inp.key.left`, or a `case` label |
 | function value | `m.f`                                      | `fn i32(i32, i32) op = math.add;` |
 
 - A type position admits exactly one dot (`qualified_name`, `grammar.md` section 4). `m` alone
@@ -130,7 +130,7 @@ finding a module, looks the name up in that module's namespace.
 
 Each module has one namespace holding its functions, `extern` functions, structs, enums,
 constants, globals and import bindings (D7.9). Any two of these with the same name collide,
-whatever their kinds: a struct `Node` and a function `Node` cannot coexist.
+whatever their kinds: a struct `node` and a function `node` cannot coexist.
 
 Lookup of an unqualified name proceeds (D7.9):
 
@@ -146,7 +146,7 @@ Lookup of an unqualified name proceeds (D7.9):
   named `io` is legal, and `io` in its scope names the parameter, not the module.
 - A module-level declaration or import binding may shadow a universe name: a module declaring
   `fn void print(string s)` loses the builtin `print` throughout its body.
-- Enum members are not in the namespace (D3.9): `Red` is not a name, `Color.Red` is.
+- Enum members are not in the namespace (D3.9): `red` is not a name, `color.red` is.
 - Universe functions other than `move` yield no value (D12.2); none can be used as a value,
   imported or qualified.
 
@@ -216,7 +216,7 @@ as a function-pointer value, and may be `noreturn` (D8.5).
 | return type `void` or `noreturn`                |                                      |
 
 Structs cross the boundary through pointers only. Because struct layout is C layout (D3.8, D9.9),
-a `mut Stat* buf` parameter is exactly a C `struct stat *`.
+a `mut stat* buf` parameter is exactly a C `struct stat *`.
 
 `own` may qualify a pointer or `void*` in an extern signature (D17.13). It is erased, so the
 declaration names the same C function with or without it, and it records the C side's
@@ -446,12 +446,12 @@ fn i32 multiply(i32 a, i32 b) {
     return a * b;
 }
 
-struct Vector {
+struct vector {
     f64 x;
     f64 y;
 }
 
-fn f64 dot(Vector a, Vector b) {
+fn f64 dot(vector a, vector b) {
     return a.x * b.x + a.y * b.y;
 }
 ```
@@ -466,14 +466,14 @@ import math::{add, multiply as mul};
 fn i32 main() {
     i32 sum = add(5, 3);
     i32 product = mul(4, 7);
-    math.Vector v = math.Vector{1.0, 2.0};
-    math.Vector w = {3.0, 4.0};
+    math.vector v = math.vector{1.0, 2.0};
+    math.vector w = {3.0, 4.0};
     println(sum, " ", product, " ", math.dot(v, w));
     return 0;
 }
 ```
 
-Output: `8 28 11.0` (D11.7). `math.Vector w = {3.0, 4.0};` is a declaration because `math.Vector`
+Output: `8 28 11.0` (D11.7). `math.vector w = {3.0, 4.0};` is a declaration because `math.vector`
 parses as a type followed by an identifier (`grammar.md` section 7). Both files sit in one
 directory; `fort main.ft -o main` builds the program.
 
@@ -481,58 +481,58 @@ directory; `fort main.ft -o main` builds the program.
 
 ```fort
 // list.ft
-struct Node {
+struct node {
     i32 value;
-    own mut Node* next;
+    own mut node* next;
 }
 
-struct List {
-    own mut Node* head;
+struct list {
+    own mut node* head;
     u64 size;
 }
 
-fn List list_create() {
-    return List{};
+fn list list_create() {
+    return list{};
 }
 
-fn void list_push(mut List* list, i32 value) {
-    own mut Node* n = new(Node);
+fn void list_push(mut list* l, i32 value) {
+    own mut node* n = new(node);
     n->value = value;
-    n->next = move(list->head);
-    list->head = move(n);
-    list->size += 1;
+    n->next = move(l->head);
+    l->head = move(n);
+    l->size += 1;
 }
 
-fn bool list_pop(mut List* list, mut i32* out) {
-    if (list->head == null) {
+fn bool list_pop(mut list* l, mut i32* out) {
+    if (l->head == null) {
         return false;
     }
-    own mut Node* n = move(list->head);
+    own mut node* n = move(l->head);
     *out = n->value;
-    list->head = move(n->next);
-    list->size -= 1;
+    l->head = move(n->next);
+    l->size -= 1;
     del(n);
     return true;
 }
 
-fn void list_free(mut List* list) {
+fn void list_free(mut list* l) {
     mut i32 unused = 0;
-    while (list_pop(list, &unused)) {
+    while (list_pop(l, &unused)) {
     }
 }
 ```
 
-`Node` and `List` refer to each other through pointers and live in one module (section 6).
-`own mut Node* next` as a field type marks the pointee mutable (D5.5) and the node as owned by
-its predecessor (D17.2); `List` is therefore an owning aggregate and is passed as
-`mut List* list`, which makes the pointee writable in the callee (D5.3, D17.7). `new(Node)`
+`node` and `list` refer to each other through pointers and live in one module (section 6).
+`own mut node* next` as a field type marks the pointee mutable (D5.5) and the node as owned by
+its predecessor (D17.2); `list` is therefore an owning aggregate and is passed as
+`mut list* l`, which makes the pointee writable in the callee (D5.3, D17.7). `new(node)`
 yields zeroed, owned memory (D10.2, D17.3); `move` transfers the head into the new node's
 `next` and the node into `head`, each store landing in a field the preceding `move` emptied, so
 the checked build's overwrite check passes (D17.5, D17.11); `del(n)` frees the popped node and
-leaves `n` null (D17.9). A user writes `import list;`, `mut List l = list.list_create();`,
-`list.list_push(&l, 7);` and `defer list.list_free(&l);`; `&l` on a `mut List` is a
-`mut List*` (D5.8); a local named `list` would shadow the binding (section 5), hence `l`.
-`list.List copy = l;` is an error, because copying an owning value requires `move` (D17.7).
+leaves `n` null (D17.9). A user writes `import list;`, `mut list.list l = list.list_create();`,
+`list.list_push(&l, 7);` and `defer list.list_free(&l);`; `&l` on a `mut list.list` is a
+`mut list.list*` (D5.8); a local named `list` would shadow the binding (section 5), hence `l`.
+`list.list copy = l;` is an error, because copying an owning value requires `move` (D17.7).
 
 ### 12.4 A multi-module application
 
@@ -547,28 +547,28 @@ game/
 
 ```fort
 // geom/vec.ft
-struct Vec2 {
+struct vec2 {
     f64 x;
     f64 y;
 }
 
-fn Vec2 vec_add(Vec2 a, Vec2 b) {
-    return Vec2{a.x + b.x, a.y + b.y};
+fn vec2 vec_add(vec2 a, vec2 b) {
+    return vec2{a.x + b.x, a.y + b.y};
 }
 ```
 
 ```fort
 // input.ft
-enum Key { None, Left, Right, Quit }
+enum key { none, left, right, quit }
 
 mut i32 frame = 0;
 
-fn Key poll() {
+fn key poll() {
     frame += 1;
     switch (frame) {
-    case 1: return Key.Left;
-    case 2: return Key.Right;
-    default: return Key.Quit;
+    case 1: return key.left;
+    case 2: return key.right;
+    default: return key.quit;
     }
 }
 ```
@@ -576,40 +576,40 @@ fn Key poll() {
 ```fort
 // render.ft
 import geom::vec;
-import geom::vec::Vec2;
+import geom::vec::vec2;
 
-struct Window {
+struct window {
     i32 width;
     i32 height;
-    Vec2 origin;
+    vec2 origin;
 }
 
-fn void draw(Window* win, Vec2 pos) {
-    Vec2 p = vec.vec_add(win->origin, pos);
+fn void draw(window* win, vec2 pos) {
+    vec2 p = vec.vec_add(win->origin, pos);
     println("draw at ", p.x, ",", p.y, " in ", win->width, "x", win->height);
 }
 ```
 
 ```fort
 // main.ft
-import geom::vec::Vec2;
+import geom::vec::vec2;
 import render;
-import render::Window;
+import render::window;
 import input as inp;
 
 fn i32 main() {
-    Window w = {800, 600, {0.0, 0.0}};
-    mut Vec2 pos = {0.0, 0.0};
+    window w = {800, 600, {0.0, 0.0}};
+    mut vec2 pos = {0.0, 0.0};
     mut bool running = true;
     while (running) {
         switch (inp.poll()) {
-        case inp.Key.Left:
+        case inp.key.left:
             pos.x -= 1.0;
-        case inp.Key.Right:
+        case inp.key.right:
             pos.x += 1.0;
-        case inp.Key.Quit:
+        case inp.key.quit:
             running = false;
-        case inp.Key.None:
+        case inp.key.none:
         }
         render.draw(&w, pos);
     }

@@ -130,7 +130,7 @@ qualified_name = identifier [ "." identifier ] ;                    (* D9.4 *)
 
 Reading rules (D3.6, D5.2, D5.3):
 
-- `*` suffixes directly after the base type make pointers to the base; `Node*[16]` is an array
+- `*` suffixes directly after the base type make pointers to the base; `node*[16]` is an array
   of 16 pointers.
 - Array suffixes read outside-in: `i32[3][4]` is three arrays of four; `i32[][4]` is a slice of
   `i32[4]`.
@@ -268,7 +268,7 @@ speculative parse over the token array (rewind on failure); none require symbol-
    - otherwise, speculatively parse a `type`; if the next token is then an identifier, the
      statement is a `var_decl`; else rewind and parse `assign_stmt | incdec_stmt | call_stmt`.
    Because expression statements are calls only (D7.3), `a * b;` never has to be parsed, and
-   `foo[3] = x;` (assignment) versus `Foo[3] arr = {};` (declaration) is settled by the token
+   `foo[3] = x;` (assignment) versus `foo[3] arr = {};` (declaration) is settled by the token
    after the type.
 2. **Struct and array literals versus expressions** (D6.5). In `primary_expr` position, an
    `identifier` (optionally `. identifier`) directly followed by `{` is a `struct_literal`; a

@@ -308,7 +308,7 @@ This section is normative for the compiler. The assembly it emits must satisfy e
    emitted with `.globl`, `.type name, @function` or `@object`, and `.size`. `fort_entry` is
    `.globl`. Every compiler-generated label starts with `.L`: `.Lstr<N>` (literals),
    `.Lfile<N>` (one NUL-terminated file path per module, as printed by section 4), `.Lfail<N>`
-   (failure stubs), `.Lenum.<module.path.Name>` (enum tables), and ordinary control-flow labels.
+   (failure stubs), `.Lenum.<module.path.name>` (enum tables), and ordinary control-flow labels.
    `extern` symbols are used unmangled (D9.8).
 4. **Position independence** (D14.3, D16). Data is addressed RIP-relative (`lea sym(%rip)`,
    `mov sym(%rip), %reg`). Calls to `extern` and runtime functions are `call name@PLT`; their
@@ -376,14 +376,14 @@ This section is normative for the compiler. The assembly it emits must satisfy e
     evaluate `fd` (1, 2, or the first argument, once) and then each argument left to right,
     calling one entry point per argument: `i8 i16 i32 i64` sign-extended to `fort_rt_print_i64`;
     `u8 u16 u32 u64` zero-extended to `fort_rt_print_u64`; `f32`/`f64` to `_f32`/`_f64`; `bool`,
-    `char` to `_bool`, `_char`; enums with the address and length of `.Lenum.<path.Name>` to
+    `char` to `_bool`, `_char`; enums with the address and length of `.Lenum.<path.name>` to
     `_enum`; pointers, `void*` and function pointers to `_ptr`; `string` as `ptr`, `len` to
     `_str`. `println` and friends end with `fort_rt_print_char(fd, 10)`. `assert(cond)` branches
     on `cond` to a `fort_rt_assert_fail` stub whose text is a `.Lstr<N>`; it is emitted in both
     modes. `panic(msg)` calls `fort_rt_panic` and is followed by `ud2`.
 16. **`noreturn`** (D8.5). `ud2` follows the body of a `noreturn` function and every call to one;
     reaching it raises SIGILL with no message.
-17. **Enum tables.** `.Lenum.<path.Name>` is an array of `fort_rt_enum_member` (16 bytes each:
+17. **Enum tables.** `.Lenum.<path.name>` is an array of `fort_rt_enum_member` (16 bytes each:
     `.long value`, `.zero 4`, `.quad .Lstr<N>`), one entry per member in declaration order.
 18. **`fort_entry`.** Emitted in the entry module: copies the 16-byte slice it receives into its
     frame, calls `<entry>.main` with the copy's address in `rdi` when `main` takes `args`, or
@@ -552,13 +552,13 @@ D17.8, D17.9):
 
 ```fort
 //! fail
-struct Node { i32 v; }
+struct node { i32 v; }
 
 fn i32 main() {
-    own mut Node* a = new(Node);
-    own mut Node* b = a;         //! error: move
-    mut Node* c = new(Node);     //! error: would leak
-    Node* view = a;
+    own mut node* a = new(node);
+    own mut node* b = a;         //! error: move
+    mut node* c = new(node);     //! error: would leak
+    node* view = a;
     del(view);                   //! error: own
     del(a);
     return 0;

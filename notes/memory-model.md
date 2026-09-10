@@ -64,25 +64,25 @@ constant count may take any integer type, and a negative constant count is a com
 (D4.1). A negative count at run time, a total size that overflows, and allocation failure are
 runtime errors (section 6); `n == 0` is allowed and yields a slice of length 0 with a non-null
 `.ptr`, because the runtime allocates at least one byte (D10.2). `mut` does not parse inside
-`new(...)`, and `own` only after a `*` of the element type (grammar section 6): `new(Node*[n])`
-yields an `own mut Node*[]`, a slice of borrowed pointers, and `new(Node* own[n])` yields an
-`own mut Node* own[]`, a slice of owned slots that are all `null` (D17.3).
+`new(...)`, and `own` only after a `*` of the element type (grammar section 6): `new(node*[n])`
+yields an `own mut node*[]`, a slice of borrowed pointers, and `new(node* own[n])` yields an
+`own mut node* own[]`, a slice of owned slots that are all `null` (D17.3).
 
 The result is an rvalue that must land in an `own` place (D17.8): the initializer of an `own`
 declaration, an `own` parameter, an `own` field or element, or `del` itself. Binding it to a
 plain `mut T*` would leave nothing able to free it and is a compile error.
 
 ```fort
-own mut Point* p = new(Point);       // p->x == 0, p->y == 0
+own mut point* p = new(point);       // p->x == 0, p->y == 0
 own mut i32[] xs = new(i32[8]);      // eight zeroes
 own mut u8[][16] rows = new(u8[n][16]);  // n rows of sixteen bytes
 own mut i32[] none = new(i32[0]);    // none.len == 0, none.ptr != null; del it like any other
 own i32[] ro = new(i32[4]);          // owned, read-only through this binding (D5.4, D17.4)
-own mut Node* own[] kids = new(Node* own[4]);   // four null owned slots (D17.3)
-own mut Node* own[] k2 = new(own Node*[4]);     // error: prefix own inside new does not parse
-del(new(Point));                     // allocated and freed in one statement
-mut Point* q = new(Point);           // error: owning temporary would leak (D17.8)
-own mut Point* q2 = new(Point{1, 2});  // error: new takes a type, not a literal
+own mut node* own[] kids = new(node* own[4]);   // four null owned slots (D17.3)
+own mut node* own[] k2 = new(own node*[4]);     // error: prefix own inside new does not parse
+del(new(point));                     // allocated and freed in one statement
+mut point* q = new(point);           // error: owning temporary would leak (D17.8)
+own mut point* q2 = new(point{1, 2});  // error: new takes a type, not a literal
 own mut i32[] bad = new(i32[]);      // error: new needs an element count
 own mut void* v = new(void);         // error: cannot allocate void
 own mut i32[] neg = new(i32[-1]);    // error: negative constant count (D4.1)
@@ -118,7 +118,7 @@ memory (D17.9). On an rvalue operand `del` only frees.
 | an integer, struct or fixed array                  | error: `del` is shallow (D17.7)           |
 
 ```fort
-own mut Node* n = new(Node);
+own mut node* n = new(node);
 del(n);                              // n == null afterwards
 del(n);                              // no-op
 n->value = 1;                        // dereferences null: a segfault, never a write to freed memory
@@ -137,14 +137,14 @@ del(d);                              // frees the copy (D17.12)
 i32 local = 1;
 del(&local);                         // error: a stack address is not an own value (D17.9)
 del(cast(s, u8[]));                  // error: not an own type; the cast lends a view (D17.12)
-del(new(Node));                      // frees the temporary: an own rvalue
+del(new(node));                      // frees the temporary: an own rvalue
 ```
 
 Through an indirection, `del` needs the level it empties to be mutable, exactly like `move`
 (D17.6, D17.9):
 
 ```fort
-fn void drop(Node* own[] view, Node* own mut[] slots, mut Node* n) {
+fn void drop(node* own[] view, node* own mut[] slots, mut node* n) {
     del(view[0]);                    // error: element level of 'view' is immutable (D17.6)
     del(slots[0]);                   // fine: the slots are mutable; slots[0] == null afterwards
     del(n->next);                    // fine: level 1 of n is mutable; n->next == null afterwards
@@ -164,7 +164,7 @@ extern fn void free(own void* p);
 own mut i32* p = cast(malloc(sizeof(i32)), own mut i32*);   // not zeroed: C did not clear it
 *p = 1;
 del(p);                              // same allocator as free; p == null afterwards
-own mut Node* q = new(Node);
+own mut node* q = new(node);
 free(cast(move(q), own void*));      // also fine: the move empties q
 ```
 
@@ -192,43 +192,43 @@ shape every idiom in this document:
   exactly like dropping `mut` (D5.4), and the two drops combine (D17.4). The conversion is
   monotone: `own` at an inner level may be dropped only together with every outer level and only
   where the target keeps every level outside that reference immutable, so
-  `own mut Node* own[]` lends as `Node* own[]` or `Node*[]` but never as `own mut Node*[]`,
-  which would leave the nodes owned by nobody, nor as `mut Node*[]`, through which a borrowed
+  `own mut node* own[]` lends as `node* own[]` or `node*[]` but never as `own mut node*[]`,
+  which would leave the nodes owned by nobody, nor as `mut node*[]`, through which a borrowed
   pointer could be stored into a slot the source still owns (D17.4). Operands of `==`, `!=` and
   `?:` lend; `?:` yields `own` only when both operands are `own` rvalues or `null` (D6.2). An
   `own` rvalue may not be lent: converting it to a non-`own` type is the compile error "owning
   temporary would leak" (D17.8), because nothing could ever `del` it.
 
 ```fort
-struct Node {
+struct node {
     i32 value;
-    own mut Node* next;              // an owning field: Node is an owning aggregate (D17.7)
+    own mut node* next;              // an owning field: node is an owning aggregate (D17.7)
 }
 
-fn i32 value_of(Node* n) { return n->value; }   // borrows: any Node* or own Node* fits
-fn void adopt(own mut Node* n) { del(n); }      // takes ownership: the caller must not del
+fn i32 value_of(node* n) { return n->value; }   // borrows: any node* or own node* fits
+fn void adopt(own mut node* n) { del(n); }      // takes ownership: the caller must not del
 
-own mut Node* a = new(Node);         // an own rvalue lands in an own place
-Node* v = a;                         // lends: v is a view of the same node (D17.4)
-own mut Node* b = a;                 // error: copying an own lvalue requires move(a) (D17.5)
-own mut Node* c = move(a);           // a == null afterwards; c owns the node
+own mut node* a = new(node);         // an own rvalue lands in an own place
+node* v = a;                         // lends: v is a view of the same node (D17.4)
+own mut node* b = a;                 // error: copying an own lvalue requires move(a) (D17.5)
+own mut node* c = move(a);           // a == null afterwards; c owns the node
 i32 x = value_of(c);                 // lends for the call
 adopt(c);                            // error: passing an own lvalue requires move(c) (D17.5)
 adopt(move(c));                      // c == null; adopt is now responsible for the node
-adopt(new(Node));                    // an rvalue passes as it is
-mut Node* leak = new(Node);          // error: owning temporary would leak (D17.8)
-value_of(new(Node));                 // error: owning temporary would leak (D17.8)
-own mut Node* z = move(a);           // a was already null: z == null (D17.6)
+adopt(new(node));                    // an rvalue passes as it is
+mut node* leak = new(node);          // error: owning temporary would leak (D17.8)
+value_of(new(node));                 // error: owning temporary would leak (D17.8)
+own mut node* z = move(a);           // a was already null: z == null (D17.6)
 ```
 
 Through an indirection the emptied level must be mutable, so nothing can be taken out of what
 was merely lent (D17.6):
 
 ```fort
-fn void take(Node* own[] view, Node* own mut[] slots, mut Node* own[] all) {
-    own Node* p = move(view[0]);     // error: element level of 'view' is immutable (D17.6)
-    own Node* q = move(slots[0]);    // fine: the slot is mutable, the node is not
-    own mut Node* r = move(all[0]);  // fine: the prefix mut marks every level
+fn void take(node* own[] view, node* own mut[] slots, mut node* own[] all) {
+    own node* p = move(view[0]);     // error: element level of 'view' is immutable (D17.6)
+    own node* q = move(slots[0]);    // fine: the slot is mutable, the node is not
+    own mut node* r = move(all[0]);  // fine: the prefix mut marks every level
     del(q);
     del(r);
 }
@@ -237,32 +237,32 @@ fn void take(Node* own[] view, Node* own mut[] slots, mut Node* own[] all) {
 Structs and fixed arrays that contain an `own` reference by value are owning aggregates: they
 are moved like `own` references, returned from a local by an implicit move, and never `del`ed,
 because `del` is shallow and a struct frees its own fields (D17.7). Functions therefore take
-`List*` or `mut List*`, and a range `for` over owning elements lends its loop variable, which
+`list*` or `mut list*`, and a range `for` over owning elements lends its loop variable, which
 is declared without `own` (D17.10):
 
 ```fort
-struct List {
-    own mut Node* head;
+struct list {
+    own mut node* head;
     u64 size;
 }
 
-fn List make() { List l = {}; return l; }     // returning a local: implicit move (D17.7)
-fn void consume(List l) { del(l.head); }      // by value: the caller writes move
+fn list make() { list l = {}; return l; }     // returning a local: implicit move (D17.7)
+fn void consume(list l) { del(l.head); }      // by value: the caller writes move
 
-mut List l = make();
-List l2 = l;                         // error: copying an owning value requires move(l) (D17.7)
-consume(move(l));                    // l is List{} afterwards
+mut list l = make();
+list l2 = l;                         // error: copying an owning value requires move(l) (D17.7)
+consume(move(l));                    // l is list{} afterwards
 del(l);                              // error: del of an aggregate; del its fields instead (D17.7)
-own mut Node* own[] kids = new(Node* own[4]);   // four null owned slots (D17.3)
-for (mut Node* k : kids) { }         // each k lends one element; kids is iterated in place (D17.10)
-for (own mut Node* k : kids) { }     // error: a loop variable cannot be own (D17.10)
-own mut Node* first = move(kids[0]); // taking an element out is explicit
+own mut node* own[] kids = new(node* own[4]);   // four null owned slots (D17.3)
+for (mut node* k : kids) { }         // each k lends one element; kids is iterated in place (D17.10)
+for (own mut node* k : kids) { }     // error: a loop variable cannot be own (D17.10)
+own mut node* first = move(kids[0]); // taking an element out is explicit
 del(first);
 del(kids);                           // frees the slots; the remaining nodes must be freed first
 ```
 
-`new(Node*[4])` yields `own mut Node*[]`, slots that borrow; `new(Node* own[4])` yields
-`own mut Node* own[]`, slots that own what is later moved into them (D17.3). The `cast` that
+`new(node*[4])` yields `own mut node*[]`, slots that borrow; `new(node* own[4])` yields
+`own mut node* own[]`, slots that own what is later moved into them (D17.3). The `cast` that
 adds `own` is reserved for memory from C (section 4.5).
 
 ### 2.4 Cleanup idioms
@@ -305,14 +305,14 @@ new element in and popping moves it out, and every field it overwrites was empti
 the overwrite check of section 2.5 passes (D17.11):
 
 ```fort
-fn void push(mut List* l, own mut Node* n) {
+fn void push(mut list* l, own mut node* n) {
     n->next = move(l->head);             // l->head is empty afterwards
     l->head = move(n);                   // stores into an emptied field
     l->size += 1;
 }
 
-fn own mut Node* pop(mut List* l) {      // null when the list is empty
-    own mut Node* n = move(l->head);
+fn own mut node* pop(mut list* l) {      // null when the list is empty
+    own mut node* n = move(l->head);
     if (n != null) {
         l->head = move(n->next);
         l->size -= 1;
@@ -320,31 +320,31 @@ fn own mut Node* pop(mut List* l) {      // null when the list is empty
     return n;
 }
 
-fn void free_list(mut List* l) {
+fn void free_list(mut list* l) {
     while (l->head != null) {
         del(pop(l));                     // an own rvalue: freed on the spot
     }
 }
 
-mut List l = {};
-push(&l, new(Node));                     // an rvalue moves in
-own mut Node* n = new(Node);
+mut list l = {};
+push(&l, new(node));                     // an rvalue moves in
+own mut node* n = new(node);
 push(&l, move(n));                       // an lvalue needs move
 push(&l, n);                             // error: passing an own lvalue requires move(n) (D17.5)
 free_list(&l);
 ```
 
-**Freeing a tree.** A node whose children are `own mut Node* own[]` frees each child, then the
+**Freeing a tree.** A node whose children are `own mut node* own[]` frees each child, then the
 slots, then itself; the element level is reached through a mutable path, so `move` out of the
 slice is allowed (D17.6):
 
 ```fort
-struct Tree {
+struct tree {
     i32 value;
-    own mut Tree* own[] kids;            // owned slots holding owned subtrees (D17.2)
+    own mut tree* own[] kids;            // owned slots holding owned subtrees (D17.2)
 }
 
-fn void free_tree(own mut Tree* t) {
+fn void free_tree(own mut tree* t) {
     if (t == null) { return; }
     for (mut u64 i = 0; i < t->kids.len; i++) {
         free_tree(move(t->kids[i]));     // the slot is null afterwards
@@ -359,24 +359,24 @@ use the memory but not free it, because slicing yields views (D17.3), and `del` 
 not compile (D17.9):
 
 ```fort
-struct Arena {
+struct arena {
     own mut u8[] block;
     u64 used;
 }
 
-fn mut u8[] arena_alloc(mut Arena* a, u64 n) {
+fn mut u8[] arena_alloc(mut arena* a, u64 n) {
     if (n > a->block.len - a->used) { panic("arena exhausted"); }
     mut u8[] chunk = a->block[a->used .. a->used + n];   // a view into the block
     a->used += n;
     return chunk;
 }
 
-fn void arena_free(mut Arena* a) {
+fn void arena_free(mut arena* a) {
     del(a->block);                       // frees every chunk at once; block is {null, 0}
     a->used = 0;
 }
 
-mut Arena ar = {new(u8[4096]), 0};
+mut arena ar = {new(u8[4096]), 0};
 mut u8[] tmp = arena_alloc(&ar, 64);
 del(tmp);                                // error: cannot del 'tmp': not an own type (D17.9)
 arena_free(&ar);
@@ -417,9 +417,9 @@ del(buf);
 buf = new(u8[8]);                    // fine: buf was {null, 0}
 own mut u8[] other = move(buf);      // buf is {null, 0} again
 buf = move(other);                   // fine
-mut List l = {};
-l.head = new(Node);                  // fine: zero-initialized field
-l = List{};                          // not checked: an aggregate assignment (D17.11); leaks
+mut list l = {};
+l.head = new(node);                  // fine: zero-initialized field
+l = list{};                          // not checked: an aggregate assignment (D17.11); leaks
 ```
 
 What is not tracked, exactly as in C (D10.7, D17.14): a view, or a copy of an `own` value made
@@ -461,20 +461,20 @@ itself in every operand position (D17.4); only `del` and `move` distinguish them
 mut i32 x = 10;
 mut i32* p = &x;
 *p = 11;                             // x == 11
-mut Point pt = {1, 2};
-mut Point* pp = &pt;
+mut point pt = {1, 2};
+mut point* pp = &pt;
 pp->x = 5;
 i32 y = pp.x;                        // error: use -> on a pointer
 i32 z = p[0];                        // error: pointers cannot be indexed
 mut i32* q = p + 1;                  // error: no pointer arithmetic
 p++;                                 // error: no pointer arithmetic
-Node* n = null;
+node* n = null;
 bool none = n == null;
 i32[] s = {};
 bool empty = s == null;              // error: compare s.len or s.ptr
 bool nn = null == null;              // error: null has no type here
-own mut Node* o = new(Node);
-Node* w = o;                         // lends: the same operations, no responsibility
+own mut node* o = new(node);
+node* w = o;                         // lends: the same operations, no responsibility
 i32 val = o->value;                  // as on w
 bool same = o == w;                  // operands of == lend (D17.4)
 del(w);                              // error: cannot del 'w': not an own type (D17.9)
@@ -518,7 +518,7 @@ del(raw);                            // frees the byte; one now dangles
 cannot be indexed or sliced; every conversion to and from it is a `cast` (D3.11). It exists for
 `extern` signatures and for storing an address whose type is recovered later with `cast`.
 `own void*` is its owning form (D17.1): what `malloc` returns and `free` takes (D17.13), a
-legal operand of `del`, and the type a container such as `PtrVec` would use if it owned what it
+legal operand of `del`, and the type a container such as `ptr_vec` would use if it owned what it
 stores. A `cast` between `own void*` and a typed `own` pointer yields `own` because its target
 says so, and an `own` lvalue operand must therefore be moved (D3.14, D17.5). It is never
 `own mut void*`: `void*` has no target level for the `mut` to describe (D17.13).
@@ -526,8 +526,8 @@ says so, and an `own` lvalue operand must therefore be moved (D3.14, D17.5). It 
 ```fort
 extern fn own void* malloc(u64 n);
 own void* blob = malloc(16);
-own mut Point* pt = cast(move(blob), own mut Point*);   // blob == null afterwards
-own mut Point* pt2 = cast(blob, own mut Point*);        // error: copying own lvalue needs move
+own mut point* pt = cast(move(blob), own mut point*);   // blob == null afterwards
+own mut point* pt2 = cast(blob, own mut point*);        // error: copying own lvalue needs move
 del(pt);
 del(blob);                           // no-op: blob is null
 ```
@@ -872,7 +872,7 @@ a diagnosed error (D10.7). None of these is detected.
 |------------------------------------------------|--------------------------------------------|
 | a view or stale copy used after the free       | `i32[] v = a; del(a); i32 x = v[0];`       |
 | `del` of adopted memory not starting an allocation | `i32 x = 1; del(cast(&x, own i32*));`  |
-| dereferencing `null`                           | `Node* q = null; i32 v = q->value;`        |
+| dereferencing `null`                           | `node* q = null; i32 v = q->value;`        |
 | dereferencing a dangling pointer               | `fn i32* f() { i32 x = 1; return &x; }`    |
 | writing read-only memory through a cast that added `mut` | `cast("abc", mut u8[])[0] = 'x';` |
 | `p[lo..hi]` beyond the object                  | `i32 one = 0; i32[] s = (&one)[0..4];`     |
@@ -908,29 +908,29 @@ declares an `own` parameter, and its callers write `move` for lvalues (D17.5). F
 are declared `own` too, so that a struct's `free` function can `del` them (D13.5).
 
 ```fort
-struct Node {
+struct node {
     i32 value;
-    own mut Node* next;
+    own mut node* next;
 }
 
-fn own mut Node* make_node(i32 v) {
-    own mut Node* n = new(Node);     // zeroed: next == null
+fn own mut node* make_node(i32 v) {
+    own mut node* n = new(node);     // zeroed: next == null
     n->value = v;
     return n;                        // implicit move: responsibility passes to the caller
 }
 
-fn void free_chain(own mut Node* head) {
+fn void free_chain(own mut node* head) {
     while (head != null) {
-        own mut Node* next = move(head->next);   // level 1 of head is mutable (D17.6)
+        own mut node* next = move(head->next);   // level 1 of head is mutable (D17.6)
         del(head);                   // head == null afterwards
         head = move(next);           // stores into an emptied binding: no trap (D17.11)
     }
 }
 
 fn void demo() {
-    own mut Node* a = make_node(1);
+    own mut node* a = make_node(1);
     a->next = make_node(2);          // an rvalue into a zeroed field
-    Node* second = a->next;          // lends
+    node* second = a->next;          // lends
     free_chain(move(a));             // a == null afterwards; second dangles
     free_chain(a);                   // a null chain: nothing happens
     free_chain(second);              // error: passing a view to an own parameter (D17.3)
@@ -946,19 +946,19 @@ D13.5, D17.2): the callee moves the header through `*out`, and the caller, who i
 slot to `{}` so that the store passes the overwrite check (D17.11), owns the elements.
 
 ```fort
-enum ParseError { None, Empty, BadDigit, Overflow }
+enum parse_error { none, empty, bad_digit, overflow }
 
-fn ParseError parse_u32(string s, mut u32* out) {
-    if (s.len == 0) { return ParseError.Empty; }
+fn parse_error parse_u32(string s, mut u32* out) {
+    if (s.len == 0) { return parse_error.empty; }
     mut u32 acc = 0;
     for (char c : s) {
-        if (c < '0' || c > '9') { return ParseError.BadDigit; }
+        if (c < '0' || c > '9') { return parse_error.bad_digit; }
         u32 d = cast(c, u32) - '0';
-        if (acc > (4294967295 - d) / 10) { return ParseError.Overflow; }
+        if (acc > (4294967295 - d) / 10) { return parse_error.overflow; }
         acc = acc * 10 + d;
     }
     *out = acc;
-    return ParseError.None;
+    return parse_error.none;
 }
 
 fn bool find(i32[] xs, i32 key, mut u64* index) {
@@ -985,8 +985,8 @@ fn bool read_wrong(i32 fd, mut u8[] own* out) {
 fn void use_both() {
     mut u32 v = 0;
     switch (parse_u32("42", &v)) {
-    case ParseError.None: println(v);
-    case ParseError.Empty, ParseError.BadDigit, ParseError.Overflow: println("bad input");
+    case parse_error.none: println(v);
+    case parse_error.empty, parse_error.bad_digit, parse_error.overflow: println("bad input");
     }
     own mut u8[] data = {};
     if (read_all(0, &data)) {        // &data is mut u8[] own*: a pointer to an own slot
@@ -1001,16 +1001,16 @@ fn void use_both() {
 One struct per element type: an `own` backing slice plus a count of the elements in use
 (D13.5). The backing slice is replaced by a larger one when full, and because `del` empties the
 field first, the replacement passes the overwrite check (D17.11). The struct is an owning
-aggregate and is passed by pointer (D17.7); `std::vec` provides `IntVec` and `PtrVec` on this
+aggregate and is passed by pointer (D17.7); `std::vec` provides `int_vec` and `ptr_vec` on this
 pattern (D13.2).
 
 ```fort
-struct IntBuf {
+struct int_buf {
     own mut i32[] items;             // backing storage; items.len is what is allocated
     u64 count;                       // elements in use
 }
 
-fn void push(mut IntBuf* b, i32 x) {
+fn void push(mut int_buf* b, i32 x) {
     if (b->count == b->items.len) {
         own mut i32[] bigger = new(i32[b->items.len * 2 + 8]);
         for (mut u64 i = 0; i < b->count; i++) { bigger[i] = b->items[i]; }
@@ -1021,17 +1021,17 @@ fn void push(mut IntBuf* b, i32 x) {
     b->count++;
 }
 
-fn i32[] contents(IntBuf* b) {
+fn i32[] contents(int_buf* b) {
     return b->items[..b->count];     // a view; del of it does not compile (D17.9)
 }
 
-fn void free_buf(mut IntBuf* b) {
+fn void free_buf(mut int_buf* b) {
     del(b->items);                   // b->items is {null, 0} afterwards
     b->count = 0;
 }
 
-fn void misuse(mut IntBuf* b) {
-    IntBuf copy = *b;                // error: copying an owning value requires move (D17.7)
+fn void misuse(mut int_buf* b) {
+    int_buf copy = *b;               // error: copying an owning value requires move (D17.7)
     del(*b);                         // error: del of an aggregate; del its fields instead (D17.7)
 }
 ```

@@ -49,12 +49,12 @@ library follows:
   the result to an `own` variable, passes it to an `own` parameter or `del`s it; using it where
   a plain `string` is expected is the "owning temporary would leak" error (D17.8). `del` of an
   `own string` frees it (D17.12); the earlier `del(cast(s, u8[]))` is gone.
-- **Containers own their storage, not their contents.** `StrBuf`, `PtrVec`, `IntVec` and
-  `StrMap` keep their storage in an `own` field, which makes each an owning aggregate (D17.7):
-  it is passed by pointer (`mut StrBuf*`), copying one from a variable into another needs
+- **Containers own their storage, not their contents.** `str_buf`, `ptr_vec`, `int_vec` and
+  `str_map` keep their storage in an `own` field, which makes each an owning aggregate (D17.7):
+  it is passed by pointer (`mut str_buf*`), copying one from a variable into another needs
   `move`, and `del` of a whole container is an error. Each has a `free` that `del`s the storage
   and leaves the zero value; `free` of the zero value is a no-op (D17.9), so
-  `defer free(&c);` right after the declaration is always safe. `PtrVec` items and `StrMap`
+  `defer free(&c);` right after the declaration is always safe. `ptr_vec` items and `str_map`
   keys are borrowed; freeing the container never touches them.
 - **Out-parameters that receive ownership are pointers to `own` slots**, `mut u8[] own* out`
   (D13.5, D17.2). The caller initializes the slot to `{}` or `null` and passes its address; the
@@ -104,7 +104,7 @@ library follows:
   is `str.to_cstr`, which always copies; `io.open_read`, `io.open_write` and `sys.env` use it
   internally (D13.4). In the other direction, `str.from_cstr` wraps a C string without copying.
 - Out-parameters. Scalar results use `mut i64* out` and similar. A function that produces a
-  whole file or stream fills a `strbuf.StrBuf` through `mut strbuf.StrBuf* out`, so that the
+  whole file or stream fills a `strbuf.str_buf` through `mut strbuf.str_buf* out`, so that the
   caller can keep reading into the same storage and release it once; `io.read_file_bytes`
   delivers a plain heap slice through `mut u8[] own* out` (level 0 is `out`, level 1 the `own`
   slot the callee fills, level 2 the bytes, D5.2, D17.2) for callers that want one allocation
@@ -115,10 +115,12 @@ library follows:
 ### 1.5 Naming
 
 Module short names are the last path segment: `sys libc mem io str strbuf vec strmap math`.
-Functions are `snake_case`; structs are `CamelCase`; module constants are `UPPER_CASE`. When a
-module has several struct types, the functions carry the type as a prefix (`vec.ptr_push`,
-`vec.int_push`). A `char` parameter is called `ch`, and library sources do not reuse an import
-binding's name for a local even though D7.9 permits it.
+Functions, struct and enum types, enum members, fields and variables are `lower_case` with
+underscores (`str_buf`, `ptr_vec`, `str_map_entry`); module constants are `UPPER_CASE` (D1.4).
+When a module has several struct types, the functions carry the type as a prefix
+(`vec.ptr_push`, `vec.int_push`). A variable never takes its type's name (`str_buf b`, never
+`str_buf str_buf`; D1.4). A `char` parameter is called `ch`, and library sources do not reuse an
+import binding's name for a local even though D7.9 permits it.
 
 ### 1.6 Module list
 
@@ -130,7 +132,7 @@ binding's name for a local even though D7.9 permits it.
 | `std::sys`    | `libc`, `str`                         | exit, args, errno, env                 |
 | `std::strbuf` | `mem`                                 | growable text and byte buffer          |
 | `std::io`     | `libc`, `mem`, `sys`, `str`, `strbuf` | descriptors, whole files and streams   |
-| `std::vec`    | none                                  | `PtrVec`, `IntVec`, template pattern   |
+| `std::vec`    | none                                  | `ptr_vec`, `int_vec`, template pattern |
 | `std::strmap` | `str`                                 | string-keyed open-addressing table     |
 | `std::math`   | none                                  | float bit casts, abs, min, max, limits |
 
@@ -308,8 +310,8 @@ fn bool close(i32 fd)
 fn void flush(i32 fd)
 fn i64 read(i32 fd, mut u8[] buf)
 fn bool write_all(i32 fd, u8[] buf)
-fn bool read_all(i32 fd, mut strbuf.StrBuf* out)
-fn bool read_file(string path, mut strbuf.StrBuf* out)
+fn bool read_all(i32 fd, mut strbuf.str_buf* out)
+fn bool read_file(string path, mut strbuf.str_buf* out)
 fn bool read_file_bytes(string path, mut u8[] own* out)
 fn bool write_file(string path, u8[] data)
 ```
@@ -364,7 +366,7 @@ fn i32 main(string[] args) {
     if (args.len != 2) {
         return 2;
     }
-    mut strbuf.StrBuf buf = strbuf.create();
+    mut strbuf.str_buf buf = strbuf.create();
     defer strbuf.free(&buf);
     if (!io.read_file(args[1], &buf)) {
         eprintln("cat: ", args[1], ": errno ", sys.errno());
@@ -477,35 +479,35 @@ fn own string keep(string name) {
 A growable buffer for building text and byte sequences.
 
 ```fort
-struct StrBuf {
+struct str_buf {
     own mut u8[] data;   // storage the buffer owns; data.len is the cap
     u64 len;             // bytes in use; len <= data.len
 }
 ```
 
-`StrBuf` is 24 bytes: `data` at offset 0, `len` at offset 16 (`own` is erased, D17.1). The
-`own` field makes `StrBuf` an owning aggregate (D17.7): functions take `mut StrBuf*` or
-`StrBuf*`, copying a buffer from one variable into another is written `move(b)`, `del` of a
-whole `StrBuf` is an error, and `free` releases it. The zero value `StrBuf{}` is a valid empty
-buffer with no storage, so a struct containing a `StrBuf` may be initialized with `{}`. The
+`str_buf` is 24 bytes: `data` at offset 0, `len` at offset 16 (`own` is erased, D17.1). The
+`own` field makes `str_buf` an owning aggregate (D17.7): functions take `mut str_buf*` or
+`str_buf*`, copying a buffer from one variable into another is written `move(b)`, `del` of a
+whole `str_buf` is an error, and `free` releases it. The zero value `str_buf{}` is a valid empty
+buffer with no storage, so a struct containing a `str_buf` may be initialized with `{}`. The
 bytes `data[len..]` are spare room whose contents are unspecified.
 
 ```fort
-fn StrBuf create()
-fn StrBuf with_cap(u64 cap)
-fn void free(mut StrBuf* b)
-fn void reserve(mut StrBuf* b, u64 extra)
-fn void push(mut StrBuf* b, char ch)
-fn void push_byte(mut StrBuf* b, u8 v)
-fn void append(mut StrBuf* b, string s)
-fn void append_bytes(mut StrBuf* b, u8[] src)
-fn void append_i64(mut StrBuf* b, i64 v)
-fn void append_u64(mut StrBuf* b, u64 v)
-fn void clear(mut StrBuf* b)
-fn void truncate(mut StrBuf* b, u64 len)
-fn string view(StrBuf* b)
-fn u8[] bytes(StrBuf* b)
-fn own string take(mut StrBuf* b)
+fn str_buf create()
+fn str_buf with_cap(u64 cap)
+fn void free(mut str_buf* b)
+fn void reserve(mut str_buf* b, u64 extra)
+fn void push(mut str_buf* b, char ch)
+fn void push_byte(mut str_buf* b, u8 v)
+fn void append(mut str_buf* b, string s)
+fn void append_bytes(mut str_buf* b, u8[] src)
+fn void append_i64(mut str_buf* b, i64 v)
+fn void append_u64(mut str_buf* b, u64 v)
+fn void clear(mut str_buf* b)
+fn void truncate(mut str_buf* b, u64 len)
+fn string view(str_buf* b)
+fn u8[] bytes(str_buf* b)
+fn own string take(mut str_buf* b)
 ```
 
 Growth policy: when an operation needs `len + extra > data.len`, the new cap is the largest of
@@ -520,13 +522,13 @@ del(b->data);                           // frees and empties the field (D17.9)
 b->data = move(bigger);                 // the slot is zero, so the store passes (D17.11)
 ```
 
-- `create`: `StrBuf{}`; allocates nothing. `with_cap`: allocates `cap` bytes of storage up
-  front as `StrBuf{new(u8[cap]), 0}` (an `own` rvalue lands in the `own` field, D17.5); `0`
+- `create`: `str_buf{}`; allocates nothing. `with_cap`: allocates `cap` bytes of storage up
+  front as `str_buf{new(u8[cap]), 0}` (an `own` rvalue lands in the `own` field, D17.5); `0`
   is the same as `create`. Ownership: the result is an owning value that the caller keeps in
-  a variable (`mut strbuf.StrBuf b = strbuf.create();`, a call result needs no `move`, D17.5)
+  a variable (`mut strbuf.str_buf b = strbuf.create();`, a call result needs no `move`, D17.5)
   and releases with `free`.
 - `free`: `del(b->data)`, which frees the storage and empties the field (D17.9), then sets
-  `b->len` to 0, leaving `StrBuf{}`; calling it twice, or on `StrBuf{}`, is harmless because
+  `b->len` to 0, leaving `str_buf{}`; calling it twice, or on `str_buf{}`, is harmless because
   `del` of a zero slice is a no-op.
 - `reserve`: ensures `data.len >= len + extra`, growing per the policy. Ownership: none.
 - `push`, `push_byte`: append one `char` or one `u8`.
@@ -553,7 +555,7 @@ import std::strbuf;
 
 // Formats "    mov <reg>, <imm>\n". Ownership: the caller dels the result.
 fn own string mov_imm(string reg, i64 imm) {
-    mut strbuf.StrBuf b = strbuf.with_cap(32);
+    mut strbuf.str_buf b = strbuf.with_cap(32);
     defer strbuf.free(&b);
     strbuf.append(&b, "    mov ");
     strbuf.append(&b, reg);
@@ -575,12 +577,12 @@ fn bool emit_mov(i32 fd) {
 Growable sequences of pointers and of `i64`, and the pattern for every other element type.
 
 ```fort
-struct PtrVec {
+struct ptr_vec {
     own mut void*[] items;   // slots the vector owns; items.len is the cap
     u64 len;                 // slots in use; len <= items.len
 }
 
-struct IntVec {
+struct int_vec {
     own mut i64[] items;
     u64 len;
 }
@@ -588,26 +590,26 @@ struct IntVec {
 
 Both structs are 24 bytes with `items` at offset 0 and `len` at offset 16 (`own` is erased,
 D17.1); `{}` is a valid empty vector. Both are owning aggregates (D17.7): functions take them by
-pointer and `*_free` releases them. Prefix `own` marks one level (D17.2), so a `PtrVec` owns its
+pointer and `*_free` releases them. Prefix `own` marks one level (D17.2), so a `ptr_vec` owns its
 slots and borrows every pointer in them: `ptr_push` lends its argument (D17.4), `ptr_pop`
 returns a view, and `ptr_free` never touches a pointee. The live elements are
 `v.items[..v.len]`. Indexing `v.items[i]` with `v.len <= i < v.items.len` is not a runtime
 error; it reads a zero or stale slot, so code that wants a bounds check indexes the live slice.
 
 ```fort
-fn PtrVec ptr_create()
-fn PtrVec ptr_with_cap(u64 cap)
-fn void ptr_free(mut PtrVec* v)
-fn void ptr_reserve(mut PtrVec* v, u64 extra)
-fn void ptr_push(mut PtrVec* v, void* p)
-fn void* ptr_pop(mut PtrVec* v)
+fn ptr_vec ptr_create()
+fn ptr_vec ptr_with_cap(u64 cap)
+fn void ptr_free(mut ptr_vec* v)
+fn void ptr_reserve(mut ptr_vec* v, u64 extra)
+fn void ptr_push(mut ptr_vec* v, void* p)
+fn void* ptr_pop(mut ptr_vec* v)
 
-fn IntVec int_create()
-fn IntVec int_with_cap(u64 cap)
-fn void int_free(mut IntVec* v)
-fn void int_reserve(mut IntVec* v, u64 extra)
-fn void int_push(mut IntVec* v, i64 x)
-fn i64 int_pop(mut IntVec* v)
+fn int_vec int_create()
+fn int_vec int_with_cap(u64 cap)
+fn void int_free(mut int_vec* v)
+fn void int_reserve(mut int_vec* v, u64 extra)
+fn void int_push(mut int_vec* v, i64 x)
+fn i64 int_pop(mut int_vec* v)
 ```
 
 - `*_create`, `*_with_cap`, `*_free`, `*_reserve`: exactly as their `strbuf` counterparts,
@@ -615,37 +617,37 @@ fn i64 int_pop(mut IntVec* v)
   Growth copies the elements to fresh storage with an element loop, then `del`s the old slice
   and stores the new one (`del(v->items); v->items = move(bigger);`, D17.11), which is what
   makes the file usable as a template. Ownership: `*_free` `del`s the slots and leaves `{}`; it
-  never frees the pointees of a `PtrVec`.
+  never frees the pointees of a `ptr_vec`.
 - `*_push`: appends one element, growing as needed. `*_pop`: removes and returns the last
   element; panics with `"vec.ptr_pop: empty"` or `"vec.int_pop: empty"` on an empty vector.
 
-This module is the non-generic container pattern (D15). To hold `Token` values, copy `IntVec`
-and its six functions, replace `i64` with `Token` and the prefix `int_` with `token_`: about
-forty lines, type-checked like any other code. `PtrVec` is for elements that must not be
+This module is the non-generic container pattern (D15). To hold `token` values, copy `int_vec`
+and its six functions, replace `i64` with `token` and the prefix `int_` with `token_`: about
+forty lines, type-checked like any other code. `ptr_vec` is for elements that must not be
 copied and belong to someone else (an arena, a fixed array, an owner that outlives the vector):
 store `cast(p, void*)` and cast back on retrieval; a pointer cast may add mutability (D3.14),
-so a `mut Node*` survives the round trip. When the vector is to own its elements, copy the file
-with the slot type `own mut Node* own[] items;` instead, an owned slice of owned nodes (D17.2):
-`node_push(mut NodeVec* v, own mut Node* n)` stores `v->items[v->len] = move(n);` (a parameter
+so a `mut node*` survives the round trip. When the vector is to own its elements, copy the file
+with the slot type `own mut node* own[] items;` instead, an owned slice of owned nodes (D17.2):
+`node_push(mut node_vec* v, own mut node* n)` stores `v->items[v->len] = move(n);` (a parameter
 is an `own` lvalue, D17.5, and a fresh slot is zero, D10.2, so the store passes D17.11);
-`node_pop` returns `own mut Node*` with `return move(v->items[v->len]);` (the slot is reached
+`node_pop` returns `own mut node*` with `return move(v->items[v->len]);` (the slot is reached
 through `mut` storage, D17.6, and is left `null`); the growth loop moves each element,
 `bigger[i] = move(v->items[i]);`; `node_free` `del`s every live element before the slice; and
-a range loop over the live slice lends, `for (mut Node* n : v->items[..v->len])` (D17.10).
+a range loop over the live slice lends, `for (mut node* n : v->items[..v->len])` (D17.10).
 
 ```fort
 import std::vec;
 
-struct Node { i64 value; }
+struct node { i64 value; }
 
 fn i64 demo() {
-    mut vec.PtrVec stack = vec.ptr_create();
+    mut vec.ptr_vec stack = vec.ptr_create();
     defer vec.ptr_free(&stack);
-    own mut Node* n = new(Node);              // new lands in an own place (D17.3, D17.8)
+    own mut node* n = new(node);              // new lands in an own place (D17.3, D17.8)
     defer del(n);
     n->value = 7;
     vec.ptr_push(&stack, cast(n, void*));     // lends n; the vector never frees it
-    Node* top = cast(vec.ptr_pop(&stack), Node*);
+    node* top = cast(vec.ptr_pop(&stack), node*);
     return top->value;
 }
 ```
@@ -660,23 +662,23 @@ u8 SLOT_EMPTY = 0;
 u8 SLOT_FULL = 1;
 u8 SLOT_DEAD = 2;
 
-struct StrMapEntry {
+struct str_map_entry {
     string key;   // a borrowed view; the map never owns a key
     i64 val;
     u64 hash;
     u8 state;     // SLOT_EMPTY, SLOT_FULL or SLOT_DEAD
 }
 
-struct StrMap {
-    own mut StrMapEntry[] entries;   // entries.len is the cap: 0 or a power of two
+struct str_map {
+    own mut str_map_entry[] entries;   // entries.len is the cap: 0 or a power of two
     u64 live;                        // entries in state SLOT_FULL
     u64 used;                        // live plus tombstones
 }
 ```
 
-`StrMapEntry` is 40 bytes (`key` 0, `val` 16, `hash` 24, `state` 32, then padding); `StrMap` is
-32 bytes (`own` is erased, D17.1). `StrMap{}` is a valid empty map. `StrMap` is an owning
-aggregate (D17.7) and is passed by pointer; `StrMapEntry` has no `own` field, so entries are
+`str_map_entry` is 40 bytes (`key` 0, `val` 16, `hash` 24, `state` 32, then padding); `str_map` is
+32 bytes (`own` is erased, D17.1). `str_map{}` is a valid empty map. `str_map` is an owning
+aggregate (D17.7) and is passed by pointer; `str_map_entry` has no `own` field, so entries are
 copied freely during a rebuild.
 
 Algorithm: a key probes from `hash & (cap - 1)` upward, wrapping, comparing the stored `hash`
@@ -684,23 +686,23 @@ and then the key with `==`; a lookup stops at the first `SLOT_EMPTY`. An insert 
 key reuses the first `SLOT_DEAD` slot met on its probe, else the `SLOT_EMPTY` that ended it.
 Before an insert, if `cap == 0` or `(used + 1) * 4 > cap * 3`, the table is rebuilt: the new
 cap starts at 16 and doubles until `(live + 1) * 2 <= cap`, a fresh
-`own mut StrMapEntry[] table = new(StrMapEntry[cap]);` receives the live entries, tombstones
+`own mut str_map_entry[] table = new(str_map_entry[cap]);` receives the live entries, tombstones
 disappear, and `del(m->entries); m->entries = move(table);` installs it (D17.11). `remove`
 marks the slot `SLOT_DEAD` and decrements `live`; `used` is unchanged until the next rebuild.
 Iteration is a walk over `entries` taking the slots whose `state == SLOT_FULL`, in table order.
 
 ```fort
-fn StrMap create()
-fn void free(mut StrMap* m)
-fn bool put(mut StrMap* m, string key, i64 val)
-fn bool get(StrMap* m, string key, mut i64* out)
-fn bool has(StrMap* m, string key)
-fn bool remove(mut StrMap* m, string key)
-fn u64 count(StrMap* m)
+fn str_map create()
+fn void free(mut str_map* m)
+fn bool put(mut str_map* m, string key, i64 val)
+fn bool get(str_map* m, string key, mut i64* out)
+fn bool has(str_map* m, string key)
+fn bool remove(mut str_map* m, string key)
+fn u64 count(str_map* m)
 ```
 
-- `create`: `StrMap{}`; allocates nothing. `free`: `del(m->entries)`, which frees the table and
-  empties the field (D17.9), then zeroes `live` and `used`, leaving `StrMap{}`; keys are
+- `create`: `str_map{}`; allocates nothing. `free`: `del(m->entries)`, which frees the table and
+  empties the field (D17.9), then zeroes `live` and `used`, leaving `str_map{}`; keys are
   untouched, and a second call is harmless. Ownership: the caller calls `free`.
 - `put`: inserts `key` with `val`, or replaces the value of an existing key. Returns `true` when
   the key was new. Keys are borrowed views (D13.5): the caller keeps the key's bytes alive and
@@ -712,7 +714,7 @@ fn u64 count(StrMap* m)
 - `get`: `true` and `*out = val` when present; `false` with `*out` unchanged otherwise. `has`:
   the presence test alone. `remove`: `true` when the key was present. `count`: `live`.
 
-To map names to pointers, keep a `vec.PtrVec` beside the map and store the index. A struct that
+To map names to pointers, keep a `vec.ptr_vec` beside the map and store the index. A struct that
 holds two containers is itself an owning aggregate (D17.7), so it is passed by pointer and gets
 a `free` of its own:
 
@@ -720,14 +722,14 @@ a `free` of its own:
 import std::strmap;
 import std::vec;
 
-struct Sym { string name; i64 offset; }
+struct sym { string name; i64 offset; }
 
-struct SymTab {
-    strmap.StrMap index;   // name to position in syms
-    vec.PtrVec syms;       // Sym* in declaration order, owned by whoever declared them
+struct sym_tab {
+    strmap.str_map index;   // name to position in syms
+    vec.ptr_vec syms;       // sym* in declaration order, owned by whoever declared them
 }
 
-fn bool declare(mut SymTab* t, mut Sym* s) {
+fn bool declare(mut sym_tab* t, mut sym* s) {
     if (strmap.has(&t->index, s->name)) {
         return false;
     }
@@ -736,17 +738,17 @@ fn bool declare(mut SymTab* t, mut Sym* s) {
     return true;
 }
 
-fn Sym* lookup(SymTab* t, string name) {
+fn sym* lookup(sym_tab* t, string name) {
     mut i64 i = 0;
     if (!strmap.get(&t->index, name, &i)) {
         return null;
     }
-    return cast(t->syms.items[cast(i, u64)], Sym*);
+    return cast(t->syms.items[cast(i, u64)], sym*);
 }
 
-fn void symtab_free(mut SymTab* t) {
+fn void symtab_free(mut sym_tab* t) {
     strmap.free(&t->index);
-    vec.ptr_free(&t->syms);   // the Sym values are borrowed and stay alive
+    vec.ptr_free(&t->syms);   // the sym values are borrowed and stay alive
 }
 ```
 
@@ -835,7 +837,7 @@ extern fn noreturn fort_rt_exit(i32 status);
 Three properties of the runtime the library also depends on: `del` frees by the pointer alone,
 with no header and no length check (D10.3, D17.9, used by 1.3); `own` changes no bits, so a
 value produced by `new` and one adopted from `malloc` are released the same way (D17.1, D17.3);
-and `new(T[n])` returns zeroed storage (D10.2), which is why fresh `StrBuf`, `vec` and `strmap`
+and `new(T[n])` returns zeroed storage (D10.2), which is why fresh `str_buf`, `vec` and `strmap`
 slots read as zero and why a fresh `own` slot passes the overwrite check (D17.11).
 
 ## 4. Worked example
@@ -894,11 +896,11 @@ guard keeps `text.len - 1` from trapping on an empty file (D11.1).
 
 Deliberately absent, with the idiom to use instead; the language-level list is D15.
 
-- Formatted output beyond the print family: build text in a `StrBuf` with `append`,
+- Formatted output beyond the print family: build text in a `str_buf` with `append`,
   `append_i64` and `append_u64`, then `io.write_all` or `print` the result.
-- Generic containers: copy `std::vec` for each element type (2.7); use `StrMap` with indices
+- Generic containers: copy `std::vec` for each element type (2.7); use `str_map` with indices
   for pointer values (2.8).
-- Containers that own their elements: copy `std::vec` with an `own mut Node* own[]` slot type
+- Containers that own their elements: copy `std::vec` with an `own mut node* own[]` slot type
   and a `free` that `del`s every element (2.7).
 - Compile-time leak and use-after-`move` detection (D15, D17.14): the idiom is `defer del`
   right after the declaration, and the zero value that `move` and `del` leave behind (1.3).

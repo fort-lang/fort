@@ -76,7 +76,7 @@ Seed tests that exercise every feature live under `test/lang/` in the format def
 | Modules       | headers and `#include`             | `import a::b;`, one module per file (D9)   |
 | Functions     | `int f(int)`                       | `fn i32 f(i32)`; function-pointer types    |
 |               |                                    | read the same (D8.1)                       |
-| Enums         | integer constants                  | typed, scoped `Color.Red` (D3.9)           |
+| Enums         | integer constants                  | typed, scoped `color.red` (D3.9)           |
 | Bool          | `int`                              | `bool`, `true`, `false` (D3.3)             |
 
 ## Deliberately not in v1

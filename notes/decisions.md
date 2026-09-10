@@ -99,13 +99,13 @@ Owner: `type-system.md`.
   `{T* ptr; u64 len}`; whether it owns its elements is part of its type (`own`, D17); all slices
   of the same element type, element mutability (D5) and ownership are one type; the zero value
   is `{null, 0}`. `.len` (type `u64`) and `.ptr`
-  (a pointer to the element type, carrying the element level's mutability: `Node* mut[]` gives
-  `Node* mut*`) are read-only pseudo-fields. Slices are produced by `new(T[n])` (D10.2, as
+  (a pointer to the element type, carrying the element level's mutability: `node* mut[]` gives
+  `node* mut*`) are read-only pseudo-fields. Slices are produced by `new(T[n])` (D10.2, as
   `own mut T[]`), by slicing (D6.9, always a view) and by the zero initializer `{}`. A slice
   literal `{1, 2, 3}` does not exist.
 - **D3.6** Type suffixes come in three groups, left to right. `*` suffixes directly after the
-  base type make pointers to the base (`Node*`, `Node**`). Array and slice suffixes then apply
-  outside-in like C declarators: `Node*[16]` is an array of 16 pointers, `i32[3][4]` is indexed
+  base type make pointers to the base (`node*`, `node**`). Array and slice suffixes then apply
+  outside-in like C declarators: `node*[16]` is an array of 16 pointers, `i32[3][4]` is indexed
   `a[i][j]` with `i < 3`, `j < 4`, `i32[][4]` is a slice of `i32[4]`, and `new(i32[n][4])`
   returns `mut i32[][4]`. `*` suffixes after the array group make pointers to the whole array or
   slice type: `i32[4]*` points to an `i32[4]`, `u8[]*` points to a slice, which is the usual
@@ -120,13 +120,13 @@ Owner: `type-system.md`.
   `string`; `.len` and `.ptr` (`char*`) exist; `==`/`!=` compare `len` then bytes, so the zero
   string equals `""`. Bytes are UTF-8 by convention and never validated. There is no `+`; the
   standard library concatenates and returns `own string`, the owned form (D17.12).
-- **D3.8** Structs: `struct Name { T1 f1; T2 f2; }` with no trailing semicolon, nominal typing,
+- **D3.8** Structs: `struct name { T1 f1; T2 f2; }` with no trailing semicolon, nominal typing,
   C/System V layout (fields in order, natural alignment, size rounded to alignment). No methods,
   no inheritance, no per-field `mut` at the field's own level (D5.5). An empty struct is an
   error. A struct may contain itself only through a pointer or slice; value-containment cycles
   are "infinite size" errors.
-- **D3.9** Enums: `enum Color { Red, Green = 5, Blue }`. Underlying type `i32`, size 4. Members
-  are scoped: `Color.Red` everywhere, including `case` labels; `m.Color.Red` across modules.
+- **D3.9** Enums: `enum color { red, green = 5, blue }`. Underlying type `i32`, size 4. Members
+  are scoped: `color.red` everywhere, including `case` labels; `m.color.red` across modules.
   Values start at 0 and increment; an explicit value is a constant expression that may not refer
   to the enum itself; duplicate values are errors. Enums support `== !=`, `switch` (D7.7) and
   `cast` to and from any integer type (int-to-enum is unchecked). No ordering operators. A zeroed
@@ -209,7 +209,7 @@ Owner: `type-system.md` (Constants), `core-language.md` (Literals).
   any expression of fixed-array type (the operand is not evaluated, so `m[i].len` is constant
   for `i32[3][4] m`), unary `- ! ~`, the binary arithmetic, wrapping, bitwise, shift,
   comparison and logical operators, `?:`, `cast` among numeric types, `char` and enums (so
-  `cast(Color.Blue, i32) + 1` may size an array), parentheses, and struct or array literals whose
+  `cast(color.blue, i32) + 1` may size an array), parentheses, and struct or array literals whose
   leaves are constant expressions. Not constant: calls, `&` (except `&global` in module-level
   initializers, D7.10), field access, indexing, slicing, `.len` of slices or strings, reads of
   `mut` globals, `null` in a `cast`. Typed constant folding respects the declared type:
@@ -227,8 +227,8 @@ Owner: `core-language.md` (Declarations and mutability), `type-system.md` (Mutab
   binding inward: level 0 is the binding's own storage; level 1 is the storage reached through
   the outermost indirection (the `*` or `[]` whose value the binding holds); level 2 the storage
   reached through the next indirection, and so on. With the suffix-reading rules of D3.6, the
-  outermost indirection of `Node**` is the last `*` (level 1 holds a `Node*`, level 2 a `Node`),
-  of `Node*[]` it is the `[]` (level 1 holds `Node*` elements, level 2 the nodes), of
+  outermost indirection of `node**` is the last `*` (level 1 holds a `node*`, level 2 a `node`),
+  of `node*[]` it is the `[]` (level 1 holds `node*` elements, level 2 the nodes), of
   `i32[][]` it is the first `[]`, and of `u8[]*` it is the trailing `*` (level 1 holds the slice
   header, level 2 the bytes). Fixed arrays and structs do not add a level: their elements
   and fields share the storage of the value that contains them. `string` has a single level (its
@@ -239,30 +239,30 @@ Owner: `core-language.md` (Declarations and mutability), `type-system.md` (Mutab
   as "fully mutable" and any other `mut` as "this level only". A `mut` that marks a level twice
   (`mut i32* mut p`) is an error ("redundant mut"), so every type has one spelling. Inside a
   fixed-array type, a `mut` after `*` marks the array's slots, which are level 0 of the array
-  value (`Node* mut[4] t` has assignable slots and immutable nodes; `t[..]` is `Node* mut[]`).
+  value (`node* mut[4] t` has assignable slots and immutable nodes; `t[..]` is `node* mut[]`).
 
   | Declaration              | rebind `p = ...` | write through `*p`, `p->f`, `p[i]` |
   |--------------------------|------------------|------------------------------------|
-  | `Node* p`                | no               | no                                 |
-  | `Node* mut p`            | yes              | no                                 |
-  | `mut Node* p`            | yes              | yes                                |
+  | `node* p`                | no               | no                                 |
+  | `node* mut p`            | yes              | no                                 |
+  | `mut node* p`            | yes              | yes                                |
   | `i32[] s`                | no               | elements: no                       |
   | `i32[] mut s`            | yes              | elements: no                       |
   | `mut i32[] s`            | yes              | elements: yes                      |
-  | `Node* mut[] t`          | no               | slots: yes, pointees: no           |
-  | `Node* mut* pp`          | no               | `*pp`: yes, `**pp`: no             |
+  | `node* mut[] t`          | no               | slots: yes, pointees: no           |
+  | `node* mut* pp`          | no               | `*pp`: yes, `**pp`: no             |
   | `mut u8[]* out`          | yes              | `*out`: yes, bytes: yes            |
   | `u8[] mut* out`          | no               | `*out`: yes, bytes: no             |
   | `mut string s`           | yes              | never                              |
-  | `mut Point q`            | yes (and fields) | not applicable                     |
+  | `mut point q`            | yes (and fields) | not applicable                     |
 
   Rationale: C-style `const` placement, with the default inverted, made the most common local
-  (`mut Node* cur = head; cur = cur->next;`) need `mut` twice. What is lost is "mutable target,
+  (`mut node* cur = head; cur = cur->next;`) need `mut` twice. What is lost is "mutable target,
   non-rebindable variable", which is a lint-level property.
 - **D5.4** Dropping mutability is the one implicit conversion. Level 0 (the receiving binding) is
   unconstrained. For a level `k >= 1`, mutability may be dropped only if every level between 1
-  and `k - 1` is immutable in the target type. So `mut Node*[]` converts to `Node*[]` and to
-  `Node* mut[] ` is refused (a mutable slot could then hold a pointer to what the source still
+  and `k - 1` is immutable in the target type. So `mut node*[]` converts to `node*[]` and to
+  `node* mut[] ` is refused (a mutable slot could then hold a pointer to what the source still
   sees as a mutable node). This closes the C `T** -> const T**` hole with a short recursive check.
   Adding mutability requires `cast` (D3.14). Dropping `own` (D17.4) is the other implicit
   conversion and follows the same monotone shape.
@@ -280,8 +280,8 @@ Owner: `core-language.md` (Declarations and mutability), `type-system.md` (Mutab
 - **D5.8** `&e` has type `T*` where the level-1 bit is the mutability of `e` and deeper levels come
   from `e`'s type. `new(T)` returns `own mut T*`; `new(T[n])` returns `own mut T[]` (D17.3).
 - **D5.9** Shallow model. Immutability of a variable never propagates through a pointer or slice
-  it contains; the levels behind an indirection are fixed by the type. `Node n` with a field
-  `mut Node* next`: `n.value = 1` is an error, `n.next->value = 1` is allowed.
+  it contains; the levels behind an indirection are fixed by the type. `node n` with a field
+  `mut node* next`: `n.value = 1` is an error, `n.next->value = 1` is allowed.
 
 ## D6 Expressions and evaluation
 
@@ -315,9 +315,9 @@ Owner: `core-language.md` (Expressions).
   statement.
 - **D6.4** Casts are `cast(expr, Type)`, a keyword form so the parser never has to guess whether a
   parenthesized name is a type. Semantics in D3.14. Rationale: user decision.
-- **D6.5** Struct literals `Point{1, 2}` (positional, every field, in order) and
-  `Point{.x = 1, .y = 2}` (designated, any order, omitted fields zeroed, no mixing with positional,
-  no duplicates; designated form for structs only) are expressions. `Point{}` is all-zero.
+- **D6.5** Struct literals `point{1, 2}` (positional, every field, in order) and
+  `point{.x = 1, .y = 2}` (designated, any order, omitted fields zeroed, no mixing with positional,
+  no duplicates; designated form for structs only) are expressions. `point{}` is all-zero.
   Typed array literals `i32[3]{1, 2, 3}`
   must have exactly `N` elements or be `{}`. A bare `{...}` is allowed only as the initializer of
   a declaration (local, global, `for` init) whose type is a struct or array, and nested inside
@@ -371,7 +371,7 @@ Owner: `core-language.md` (Statements).
 - **D7.2** Assignment `lv = e;`, compound assignment `lv op= e;` for `+ - * / % +% -% *% & | ^ <<
   >>`, and postfix `lv++;` `lv--;` (integer types only) are statements. They are not
   expressions: `a = b = c;` and `if (x = 5)` do not parse.
-- **D7.3** Expression statements are calls only. `a * b;`, `x;` and `Point{1, 2};` are errors. A
+- **D7.3** Expression statements are calls only. `a * b;`, `x;` and `point{1, 2};` are errors. A
   call's result may be discarded. The empty statement `;` is an error. A bare block `{ ... }` is
   a statement and a scope.
 - **D7.4** `if (cond) { } else if (cond) { } else { }`: parenthesized `bool` condition, mandatory
@@ -485,7 +485,7 @@ Owner: `module-system.md`.
   binding is an error;
   importing the same module under two names is allowed; import bindings are not re-exported.
 - **D9.4** Qualified access uses a dot in expressions and in type positions: `io.read_file(p)`,
-  `math.Vector v = ...;`, `m.Color.Red`. Rationale: consistent with field access, and the
+  `math.vector v = ...;`, `m.color.red`. Rationale: consistent with field access, and the
   resolver knows which identifiers are modules.
 - **D9.5** Circular imports are a compile error even though whole-program compilation would
   permit them. Consequence, documented: mutually referential types must live in one module.
@@ -650,7 +650,7 @@ Owner: `stdlib.md`.
   (copy, fill, equal), `std::io` (descriptors, read/write whole files and streams, close),
   `std::str` (compare, search, classify, parse integers, duplicate, NUL-terminated copies for
   C), `std::strbuf`
-  (growable byte buffer), `std::vec` (`PtrVec`, `IntVec`, the non-generic pattern), `std::strmap`
+  (growable byte buffer), `std::vec` (`ptr_vec`, `int_vec`, the non-generic pattern), `std::strmap`
   (string-keyed open-addressing table), `std::math` (float bit casts, abs/min/max per type).
 - **D13.3** Error handling idiom (the earlier TBD): functions return `bool` or an error enum, with
   results delivered through `mut T*` out-parameters; `-1`/`null` sentinels where conventional;
@@ -661,8 +661,8 @@ Owner: `stdlib.md`.
   value (`str.dup`, `str.concat` and `strbuf.take` return `own string`, exact length, no NUL;
   `str.to_cstr` returns `own mut char[]` with a trailing NUL) or delivers it through an `own`
   slot (`io.read_file_bytes`); containers hold their
-  storage as `own` fields (`StrBuf { own mut u8[] data; u64 len; }`, `PtrVec`, `IntVec`,
-  `StrMap`) and expose a `free` function that `del`s them; out-parameters that receive
+  storage as `own` fields (`str_buf { own mut u8[] data; u64 len; }`, `ptr_vec`, `int_vec`,
+  `str_map`) and expose a `free` function that `del`s them; out-parameters that receive
   ownership are pointers to `own` slots (`mut u8[] own* out`), which the caller initializes to
   `{}` or `null`; `sys.args()` and every `view`-style accessor return borrowed values.
 
@@ -760,7 +760,7 @@ Findings from the design reviews that look like bugs but are deliberate.
   chosen for the failure mode, not by oversight.
 - `move` and `del` empty an immutable binding; that is ownership ending, not an assignment
   (D17.6).
-- `mut Node* n = new(Node);` is an error: an owning temporary must land in an `own` place
+- `mut node* n = new(node);` is an error: an owning temporary must land in an `own` place
   (D17.8).
 
 
@@ -774,28 +774,28 @@ decision or document says ownership is "by convention", this section supersedes 
 - **D17.1** `own` is a qualifier on reference types: `own T*`, `own void*`, `own T[]`,
   `own string`. It states that the reference designates the start of a live allocation obtained
   from `new` (or adopted with `cast`, D17.3) and that `del` on it is meaningful. It is erased at
-  run time (same bits, layout and ABI) and is part of type identity: `own Node*` and `Node*` are
-  different types, as are `fn void(own Node*)` and `fn void(Node*)`. `own` on a non-reference
-  type (`own i32`, `own Point`, `own i32[4]`) or on a function-pointer type is an error; an
+  run time (same bits, layout and ABI) and is part of type identity: `own node*` and `node*` are
+  different types, as are `fn void(own node*)` and `fn void(node*)`. `own` on a non-reference
+  type (`own i32`, `own point`, `own i32[4]`) or on a function-pointer type is an error; an
   array or struct that *contains* an `own` reference is an owning aggregate (D17.7).
 - **D17.2** Placement. A `own` before the base type (and before any `mut`) marks the outermost
   reference of the type, the one the binding holds. A `own` immediately after a `*` or `[]`
   suffix (before any `mut` in that position) marks the reference that suffix introduces. Marking
   one level twice is a "redundant own" error, and a postfix `own` on the outermost suffix
-  (`Node* own p`) is an error too, so every type has one spelling. Unlike prefix `mut`, prefix
-  `own` marks one level only: the safe failure mode for `own mut Node*[] kids` is that
+  (`node* own p`) is an error too, so every type has one spelling. Unlike prefix `mut`, prefix
+  `own` marks one level only: the safe failure mode for `own mut node*[] kids` is that
   `del(kids[i])` does not compile when the nodes belong to someone else (an arena, say).
 
-  | Declaration                 | Meaning                                                    |
-  |-----------------------------|------------------------------------------------------------|
-  | `own mut u8[] buf`          | owned slice of writable bytes                              |
-  | `own u8[] data`             | owned slice, read-only through this binding                |
-  | `own mut Node* n`           | owned node                                                 |
-  | `own mut Node*[] items`     | owned slice of borrowed pointers (a `PtrVec`, arena nodes) |
-  | `own mut Node* own[] kids`  | owned slice of owned nodes                                 |
-  | `Node* own[] view`          | borrowed slice of owned nodes                              |
-  | `mut u8[] own* out`         | borrowed pointer to an owned slot (an out-parameter)       |
-  | `own string name`           | owned immutable characters (`str.dup`, `strbuf.take`)      |
+  | Declaration                 | Meaning                                                     |
+  |-----------------------------|-------------------------------------------------------------|
+  | `own mut u8[] buf`          | owned slice of writable bytes                               |
+  | `own u8[] data`             | owned slice, read-only through this binding                 |
+  | `own mut node* n`           | owned node                                                  |
+  | `own mut node*[] items`     | owned slice of borrowed pointers (a `ptr_vec`, arena nodes) |
+  | `own mut node* own[] kids`  | owned slice of owned nodes                                  |
+  | `node* own[] view`          | borrowed slice of owned nodes                               |
+  | `mut u8[] own* out`         | borrowed pointer to an owned slot (an out-parameter)        |
+  | `own string name`           | owned immutable characters (`str.dup`, `strbuf.take`)       |
 
 - **D17.3** Producers. `new(T)` yields `own mut T*`; `new(T[n])` yields `own mut T[]` and
   `new(T[n][K])` yields `own mut T[][K]`; standard-library functions that allocate return `own`
@@ -809,9 +809,9 @@ decision or document says ownership is "by convention", this section supersedes 
 - **D17.4** Lending. `own X` converts implicitly to `X` wherever a value meets an expected type,
   like dropping `mut` (D5.4); the two drops combine (`own mut u8[]` to `u8[]`). Dropping `own`
   at a level `k` is allowed only if every level between 1 and `k - 1` is immutable in the target
-  (the D5.4 shape: otherwise `mut Node*[] w = kids; w[0] = &local;` would let `del(kids[0])`
-  free a stack address) and only if no outer level keeps `own` (`own mut Node* own[]` to
-  `own mut Node*[]` is an error, since the inner objects would then be owned by nobody); lend the
+  (the D5.4 shape: otherwise `mut node*[] w = kids; w[0] = &local;` would let `del(kids[0])`
+  free a stack address) and only if no outer level keeps `own` (`own mut node* own[]` to
+  `own mut node*[]` is an error, since the inner objects would then be owned by nobody); lend the
   whole thing instead. Operands of `==`, `!=` and `?:` lend, so `own` never blocks a comparison;
   `?:` yields `own` only when both operands are `own` rvalues or `null` (D6.2).
 - **D17.5** Transfer. Copying an `own` **lvalue** into an `own` place (a declaration's
@@ -824,20 +824,20 @@ decision or document says ownership is "by convention", this section supersedes 
   operand to its zero value (`null`, `{null, 0}`). Emptying is not an assignment: the binding
   need not be `mut`, and after the move it still cannot be assigned to unless it is. When the
   operand is reached through an indirection (`*p`, `p->f`, `s[i]`), that level must be mutable,
-  because the move changes storage that others can see: `move(v[0])` on a `Node* own[] v` is an
+  because the move changes storage that others can see: `move(v[0])` on a `node* own[] v` is an
   error, since nothing may be taken out of what was only lent. Fields and elements of a local
   value count as the local. Moving a zero value yields a zero value. `move` and `del` of a
   module-level constant (D7.10) are errors: it lives in read-only memory.
 - **D17.7** Owning aggregates. A struct or fixed array that contains an `own` reference by value
   (directly or through nested aggregates) is owning. Copying an owning lvalue into an owning
   place (initialization, assignment, a by-value parameter, a literal element) requires `move`;
-  returning a local owning value is an implicit move. Functions therefore take `Vec*` or
-  `mut Vec*`. `del` of an aggregate is an error: `del` is shallow, and a struct frees its own
+  returning a local owning value is an implicit move. Functions therefore take `vec*` or
+  `mut vec*`. `del` of an aggregate is an error: `del` is shallow, and a struct frees its own
   fields.
 - **D17.8** Temporaries must land. An `own` rvalue may only be bound to an `own` place, passed
   to an `own` parameter, or `del`ed. Anything else is a compile error ("owning temporary would
   leak"), because nothing could ever `del` it: converting or casting it to a non-`own` type
-  (`mut Node* n = new(Node);`, `use(str.dup(x))`, `cast(new(node), node*)`), slicing, indexing or
+  (`mut node* n = new(node);`, `use(str.dup(x))`, `cast(new(node), node*)`), slicing, indexing or
   taking `.ptr` of it (`new(u8[8])[..4]`, `new(i32[2])[0]`), accessing a field of an owning
   aggregate rvalue, and discarding it as an expression statement (`move(x);`, `str.dup(s);`).
 - **D17.9** `del(x)` requires an `own` operand of any mutability: an `own` pointer, `own void*`,
