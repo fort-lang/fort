@@ -1,40 +1,47 @@
 # Language tests
 
-End-to-end tests for the `fort` compiler. Each `.ft` file is a complete program whose expected
-behavior is encoded in `//!` directives at the top of the file. The full convention is specified
-in `notes/toolchain.md` (decisions D14.4 and D14.5 in `notes/decisions.md`); this file is the
-short version.
+End-to-end tests for the `fort` compiler. The convention is fixed by decisions D14.4 and D14.5
+in `notes/decisions.md` and described in `notes/toolchain.md` section 7; this file is the short
+version. Each test is a `.ft` file whose expected behavior is encoded in `//!` directives at the
+top of the file.
 
-## Layout
+## Layout (D14.4)
 
 - `run/<area>/NNN_name.ft`: compile, run, then compare stdout, exit status and stderr.
 - `fail/<area>/NNN_name.ft`: must not compile; every annotated line must produce a diagnostic.
-- `run/modules/<name>/main.ft`: multi-file tests. The harness compiles `main.ft` with its
-  directory as the search root, so sibling files and subdirectories are importable modules.
-  `fail/modules/<name>/main.ft` is the same layout for tests that must not compile.
+- `run/modules/<name>/main.ft` and `fail/modules/<name>/main.ft`: multi-file tests. The harness
+  compiles `main.ft` with its directory as the search root, reads the directives from `main.ft`
+  and collects `error` annotations from every `.ft` file in the directory. Sibling modules carry
+  no `//!` directives.
 - `ffi/*.c`: C helpers that tests link in with `//! link:`.
-- `programs/*.ft`: larger programs that exercise many features at once.
+- `programs/*.ft`: larger programs that exercise many features at once, treated as run tests.
 
-`NNN` starts at `001` within each area. Tests use only the core language and the builtins;
-standard-library tests live elsewhere.
+`NNN` starts at `001` within each area, with no gaps. Tests use only the core language and the
+builtins; standard-library tests live elsewhere.
 
-## Directives
+## Directives (D14.5)
 
-All directives are at the top of the file before any code, except `error`.
+All directives are `//!` lines at the top of the file before any code, except `error`, which
+annotates a line.
 
-| Directive                     | Meaning                                                        |
-|-------------------------------|----------------------------------------------------------------|
-| `//! run` / `//! fail`        | Required on line 1.                                            |
-| `//! flags: --release`        | Extra compiler flags.                                          |
-| `//! args: a b c`             | Command-line arguments, visible as `args[1..]`.                |
+| Directive                     | Meaning                                                         |
+|-------------------------------|-----------------------------------------------------------------|
+| `//! run` / `//! fail`        | Required on line 1.                                             |
+| `//! flags: --release`        | Extra compiler flags.                                           |
+| `//! args: a b c`             | Command-line arguments, visible as `args[1..]`.                 |
 | `//! link: ffi/helpers.c`     | C file to compile and link, relative to `test/lang`; repeatable.|
-| `//! stdin:` + `//< ` lines   | Standard input fed to the program.                             |
-| `//! stdout:` + `//| ` lines  | Expected stdout, compared exactly (trailing spaces included).  |
-| `//! exit: N`                 | Expected exit status; default 0.                               |
-| `//! abort`                   | Expect SIGABRT (runtime error, `panic`, failed `assert`).      |
-| `//! stderr: <substring>`     | Substring that must appear in stderr.                          |
-| `//! error: <substring>`      | `fail` only, at the end of the offending line.                 |
-| `//! error-any: <substring>`  | `fail` only, at the top: an error with no useful line.         |
+| `//! stdin:` + `//< ` lines   | Standard input, one line per `//< ` line.                       |
+| `//! stdout:` + `//| ` lines  | Expected stdout, compared exactly (see below).                  |
+| `//! exit: N`                 | Expected exit status; default 0.                                |
+| `//! abort`                   | Expect SIGABRT (runtime error, `panic`, failed `assert`).       |
+| `//! stderr: <substring>`     | Substring that must appear in stderr; repeatable.               |
+| `//! error: <substring>`      | `fail` only, at the end of the offending line.                  |
+| `//! error-any: <substring>`  | `fail` only, at the top: an error with no useful line.          |
+
+The expected stdout is each `//| ` line's text after `//| ` followed by a newline; a bare `//|`
+is an empty line. The comparison is exact, trailing spaces included, so output without a final
+newline cannot be expressed: use `println`. Each `//< ` line is fed to the program with a
+newline. Every `stderr` substring given must appear in stderr.
 
 Example:
 
@@ -53,8 +60,9 @@ fn i32 main(string[] args) {
 
 - `run`: the compiler must exit 0. The program is run with the given `args` and `stdin`. Its
   stdout must equal the `//| ` lines byte for byte, its exit status must equal `exit` (or the
-  process must die with SIGABRT when `abort` is given), and stderr must contain the `stderr`
-  substring when one is given.
-- `fail`: the compiler must exit 1. Every line carrying `//! error:` must produce a diagnostic on
-  that line whose text contains the substring, and no diagnostic may appear on an unannotated
-  line. `error-any` accepts a diagnostic on any line.
+  process must die with SIGABRT when `abort` is given), and its stderr must contain every
+  `stderr` substring.
+- `fail`: the compiler must exit 1. Every line carrying `//! error:` must produce a diagnostic
+  on that line whose text contains the substring, and no diagnostic may appear on an unannotated
+  line. `error-any` accepts a diagnostic on any line. `stderr` substrings apply to the compiler's
+  stderr.
