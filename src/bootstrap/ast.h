@@ -5,7 +5,11 @@
 // One node type carries every construct, so the file mirrors what the
 // self-hosted compiler will do: no unions, no function pointers, no macros
 // beyond constants, every field laid out in the open. `kind` names the
-// production; `loc` is the position of the construct's first token; `op` is
+// production; `loc` is the position of the construct's first token, except on
+// the nodes named after an operator or a punctuation mark (unary, binary,
+// assignment, increment, call, index, slice, field, arrow, type suffix),
+// which carry that token's own position, since that is where a diagnostic
+// about the operation points; `op` is
 // the small kind code the construct needs (a token kind for an operator, a
 // suffix kind for a type suffix, a primitive kind for a primitive type); `a`
 // to `d` are the fixed children, absent ones NULL; `list` holds the children
