@@ -1,0 +1,142 @@
+//! run
+//! stdout:
+//| keyword fn
+//| keyword i32
+//| ident add
+//| punct (
+//| keyword i32
+//| ident a
+//| punct ,
+//| keyword i32
+//| ident b
+//| punct )
+//| punct {
+//| keyword return
+//| ident a
+//| op +%
+//| ident b
+//| op *
+//| number 2
+//| punct ;
+//| punct }
+//| ident x
+//| op <=
+//| number 10
+//| op ->
+//| ident y
+//| op ::
+//| ident z
+//| op ..
+//| number 0x1F
+//| op !=
+//| op -
+//| number 3
+//| tokens: 31
+// Tokenizes a fort-like snippet held in a string literal into keywords, identifiers, numbers,
+// multi-character operators (longest match) and punctuation, printing one token per line.
+string SRC = "fn i32 add(i32 a, i32 b) { return a +% b * 2; }\nx <= 10 -> y :: z .. 0x1F != -3";
+
+string[21] OPS = {"+%=", "-%=", "*%=", "<<=", ">>=", "+%", "-%", "*%", "==", "!=", "<=", ">=",
+                  "&&", "||", "<<", ">>", "++", "--", "::", "->", ".."};
+
+string[8] KEYWORDS = {"fn", "return", "if", "else", "while", "for", "i32", "u8"};
+
+fn bool is_letter(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+
+fn bool is_digit(char c) {
+    return c >= '0' && c <= '9';
+}
+
+fn bool is_space(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+fn bool is_punct(char c) {
+    switch (c) {
+    case '(', ')', '{', '}', '[', ']', ',', ';':
+        return true;
+    default:
+        return false;
+    }
+}
+
+fn bool is_op_char(char c) {
+    switch (c) {
+    case '+', '-', '*', '/', '%', '=', '<', '>', '!', '&', '|', '^', '~', '?', ':', '.':
+        return true;
+    default:
+        return false;
+    }
+}
+
+fn bool is_keyword(string word) {
+    for (string k : KEYWORDS) {
+        if (k == word) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn bool has_prefix(string s, u64 at, string pat) {
+    if (at + pat.len > s.len) {
+        return false;
+    }
+    return s[at..at + pat.len] == pat;
+}
+
+// Length of the longest multi-character operator starting at `at`, or 0 when none matches.
+fn u64 match_op(string s, u64 at) {
+    for (string op : OPS) {
+        if (has_prefix(s, at, op)) {
+            return op.len;
+        }
+    }
+    return 0;
+}
+
+// Identifiers and numbers both extend over letters, digits and underscores; the first
+// character decides which kind the token is.
+fn u64 scan_word(string s, u64 start) {
+    mut u64 i = start;
+    while (i < s.len && (is_letter(s[i]) || is_digit(s[i]))) {
+        i++;
+    }
+    return i;
+}
+
+fn i32 main() {
+    mut u64 i = 0;
+    mut i32 count = 0;
+    while (i < SRC.len) {
+        char c = SRC[i];
+        if (is_space(c)) {
+            i++;
+            continue;
+        }
+        u64 start = i;
+        mut string kind = "op";
+        if (is_letter(c)) {
+            i = scan_word(SRC, i);
+            kind = is_keyword(SRC[start..i]) ? "keyword" : "ident";
+        } else if (is_digit(c)) {
+            kind = "number";
+            i = scan_word(SRC, i);
+        } else if (is_punct(c)) {
+            kind = "punct";
+            i++;
+        } else if (is_op_char(c)) {
+            u64 n = match_op(SRC, i);
+            i += n > 0 ? n : 1;
+        } else {
+            kind = "unknown";
+            i++;
+        }
+        println(kind, " ", SRC[start..i]);
+        count++;
+    }
+    println("tokens: ", count);
+    return 0;
+}

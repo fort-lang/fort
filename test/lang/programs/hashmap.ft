@@ -1,0 +1,169 @@
+//! run
+//! stdout:
+//| 14695981039346656037 12638187200555641996
+//| count=11 cap=16
+//| alpha=0 delta=30 kilo=100 found=11 missing=0
+//| true true true false
+//| count=8 tombstones=3
+//| false false true 90
+//| count=9 tombstones=2 delta=300
+//| sum=685
+// An open-addressing string-to-i64 hash map with linear probing, tombstone deletes and
+// doubling growth, written with core features only. Nothing hash-order dependent is printed.
+struct Entry {
+    string key;
+    i64 value;
+    u8 state;
+}
+
+struct Map {
+    mut Entry[] slots;
+    u64 count;
+    u64 tombstones;
+}
+
+u8 EMPTY = 0;
+u8 USED = 1;
+u8 DELETED = 2;
+
+string[11] WORDS = {"alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
+                    "india", "juliet", "kilo"};
+
+// FNV-1a; `*%` keeps the multiplication wrapping in both build modes (D11.2).
+fn u64 fnv1a(string key) {
+    mut u64 h = 14695981039346656037;
+    for (char c : key) {
+        h ^= cast(c, u64);
+        h *%= 1099511628211;
+    }
+    return h;
+}
+
+fn void map_init(mut Map* m, u64 cap) {
+    m->slots = new(Entry[cap]);
+    m->count = 0;
+    m->tombstones = 0;
+}
+
+// Index of `key` when present (*found = true), otherwise the first reusable slot on its probe
+// chain (*found = false). The table always has an empty slot, so the walk terminates.
+fn u64 map_find(Map* m, string key, mut bool* found) {
+    u64 cap = m->slots.len;
+    mut u64 idx = fnv1a(key) % cap;
+    mut u64 free_slot = cap;
+    while (true) {
+        Entry e = m->slots[idx];
+        if (e.state == EMPTY) {
+            *found = false;
+            return free_slot < cap ? free_slot : idx;
+        }
+        if (e.state == DELETED) {
+            if (free_slot == cap) {
+                free_slot = idx;
+            }
+        } else if (e.key == key) {
+            *found = true;
+            return idx;
+        }
+        idx = (idx + 1) % cap;
+    }
+}
+
+fn void map_grow(mut Map* m) {
+    mut Entry[] old = m->slots;
+    map_init(m, old.len * 2);
+    for (Entry e : old) {
+        if (e.state == USED) {
+            map_put(m, e.key, e.value);
+        }
+    }
+    del(old);
+}
+
+fn void map_put(mut Map* m, string key, i64 value) {
+    if ((m->count + m->tombstones + 1) * 4 > m->slots.len * 3) {
+        map_grow(m);
+    }
+    mut bool found = false;
+    u64 idx = map_find(m, key, &found);
+    if (found) {
+        m->slots[idx].value = value;
+        return;
+    }
+    if (m->slots[idx].state == DELETED) {
+        m->tombstones--;
+    }
+    m->slots[idx] = Entry{key, value, USED};
+    m->count++;
+}
+
+fn bool map_get(Map* m, string key, mut i64* out) {
+    mut bool found = false;
+    u64 idx = map_find(m, key, &found);
+    if (found) {
+        *out = m->slots[idx].value;
+    }
+    return found;
+}
+
+fn bool map_del(mut Map* m, string key) {
+    mut bool found = false;
+    u64 idx = map_find(m, key, &found);
+    if (!found) {
+        return false;
+    }
+    m->slots[idx].state = DELETED;
+    m->count--;
+    m->tombstones++;
+    return true;
+}
+
+fn i64 sum_values(Map* m) {
+    mut i64 total = 0;
+    for (Entry e : m->slots) {
+        if (e.state == USED) {
+            total += e.value;
+        }
+    }
+    return total;
+}
+
+fn i32 main() {
+    println(fnv1a(""), " ", fnv1a("a"));
+    mut Map m = {};
+    map_init(&m, 4);
+    defer del(m.slots);
+    for (mut u64 i = 0; i < WORDS.len; i++) {
+        map_put(&m, WORDS[i], cast(i, i64) * 10);
+    }
+    println("count=", m.count, " cap=", m.slots.len);
+    mut i64 v = 0;
+    mut i32 found = 0;
+    mut i32 missing = 0;
+    for (string w : WORDS) {
+        if (map_get(&m, w, &v)) {
+            found++;
+        } else {
+            missing++;
+        }
+    }
+    map_get(&m, "alpha", &v);
+    i64 a = v;
+    map_get(&m, "delta", &v);
+    i64 d = v;
+    map_get(&m, "kilo", &v);
+    println("alpha=", a, " delta=", d, " kilo=", v, " found=", found, " missing=", missing);
+    println(map_del(&m, "delta"), " ", map_del(&m, "echo"), " ", map_del(&m, "kilo"), " ",
+            map_del(&m, "zulu"));
+    println("count=", m.count, " tombstones=", m.tombstones);
+    bool d1 = map_get(&m, "delta", &v);
+    bool d2 = map_get(&m, "zulu", &v);
+    bool d3 = map_get(&m, "juliet", &v);
+    println(d1, " ", d2, " ", d3, " ", v);
+    map_put(&m, "delta", 300);
+    map_put(&m, "alpha", 5);
+    map_get(&m, "delta", &v);
+    println("count=", m.count, " tombstones=", m.tombstones, " delta=", v);
+    println("sum=", sum_values(&m));
+    return 0;
+}
