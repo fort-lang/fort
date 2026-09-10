@@ -154,12 +154,44 @@ if(FORT_UNIT_TEST_TARGETS)
     add_dependencies(check ${FORT_UNIT_TEST_TARGETS})
 endif()
 
-# The language-test harness arrives with ticket T-005; until then check-lang
-# only builds what the harness will need.
+# The language tests (toolchain.md 7, D14.4, D14.5): test/lang/run_tests.py
+# drives the compiler over test/lang. The ctest `lang` (label lang) and the
+# check-lang target run the same command; `lang_lint` validates the directives
+# and `lang_selftest` runs the harness's own unit tests (both label unit).
+find_program(FORT_PYTHON3 NAMES python3 REQUIRED)
+set(FORT_LANG_DIR "${FORT_TEST_DIR}/lang")
+set(FORT_LANG_HARNESS "${FORT_LANG_DIR}/run_tests.py")
+include(ProcessorCount)
+ProcessorCount(FORT_LANG_JOBS)
+if(FORT_LANG_JOBS EQUAL 0)
+    set(FORT_LANG_JOBS 1)
+endif()
+set(FORT_LANG_COMMAND
+    "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}"
+    --fort "$<TARGET_FILE:fort>"
+    --std-dir "${FORT_STD_DIR}"
+    --cc "${FORT_TARGET_CC_PATH}"
+    -j "${FORT_LANG_JOBS}"
+)
+add_test(NAME lang COMMAND ${FORT_LANG_COMMAND})
+set_tests_properties(lang PROPERTIES
+    LABELS lang
+    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
+add_test(NAME lang_lint COMMAND "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}" --lint)
+set_tests_properties(lang_lint PROPERTIES LABELS unit)
+add_test(NAME lang_selftest
+    COMMAND "${FORT_PYTHON3}" -m unittest run_tests_test
+    WORKING_DIRECTORY "${FORT_LANG_DIR}")
+set_tests_properties(lang_selftest PROPERTIES
+    LABELS unit
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 add_custom_target(check-lang
-    COMMAND "${CMAKE_COMMAND}" -E echo "check-lang: no harness yet"
+    COMMAND ${FORT_LANG_COMMAND}
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Running the language tests"
     USES_TERMINAL
+    VERBATIM
 )
 add_dependencies(check-lang fort fort_rt)
 
@@ -205,7 +237,6 @@ else()
     add_custom_target(tidy COMMAND false COMMENT "tidy: run-clang-tidy not found")
 endif()
 
-find_program(FORT_PYTHON3 NAMES python3 REQUIRED)
 add_custom_target(lines
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/lines.py"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"

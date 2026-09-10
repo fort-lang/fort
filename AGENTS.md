@@ -51,7 +51,7 @@ A safe(r) C-like systems programming language.
   is aarch64). Provisioning sets `QEMU_LD_PREFIX`; the test harness sets it itself. When a
   cross program dies by a signal, qemu-user appends `qemu: uncaught target signal 6 (Abort) -
   core dumped` to the program's stderr; native execution prints nothing, so a harness comparing
-  stderr drops that line (`test/pipeline_test.sh` does).
+  stderr drops that line (`test/pipeline_test.sh` and `test/lang/run_tests.py` do).
 - Provisioning disables apport and sets `kernel.core_pattern=core`: Ubuntu's piped core pattern
   ignores `ulimit -c 0` and made every SIGABRT cost about a second. A VM provisioned before that
   change needs `tools/vm provision` once (or the same two commands by hand).
@@ -70,19 +70,27 @@ A safe(r) C-like systems programming language.
   default `x86_64-linux-gnu-gcc`, into `build/<preset>/std/fort_rt.o` next to a copy of
   `std/*.ft`), `fort_rt_native` (the runtime compiled natively with `-DFORT_RT_NO_MAIN` for the
   unit tests and tidy), `lang_ffi_helpers` (`test/lang/ffi/*.c` built natively so `-Werror` and
-  tidy cover them), `check` (ctest label `unit`), `check-lang` (language tests; prints
-  `no harness yet` until T-005), `check-all` (both), `format` and `format-check` (clang-format
+  tidy cover them), `check` (ctest label `unit`, including `lang_lint` and `lang_selftest`),
+  `check-lang` (`test/lang/run_tests.py` with the built compiler; the same command is the ctest
+  `lang`, label `lang`), `check-all` (both), `format` and `format-check` (clang-format
   over `src`, `runtime`, `test`), `tidy` (`run-clang-tidy` over the same), `lines`
   (`tools/lines.py`: test lines per compiler line, target 3:1, `--min RATIO` fails below it).
   `tools/vm <target> [preset]` runs one.
 - `tools/vm gate` is the merge gate: `format-check`, `tidy`, and `check-all` under `debug`,
   `asan` and `ubsan` (it configures `debug` first, then configures and builds each preset before
   its `check-all`).
-- Language tests: `test/lang/run_tests.py [filter]` (decisions D14.4, D14.5). `test/lang/xfail.txt`
-  lists tests the compiler cannot pass yet; a listed test that passes fails the run, so shrink
-  the list in the same commit that makes tests pass. `test/lang/bootstrap-unsupported.txt` lists
-  tests that use features the C bootstrap deliberately lacks. `run_tests.py --lint` validates
-  directives without a compiler.
+- Language tests: `test/lang/run_tests.py [filter]` (decisions D14.4, D14.5; toolchain.md 7.3
+  describes every option and verdict). `test/lang/xfail.txt` lists tests the compiler cannot
+  pass yet; a listed test that passes fails the run, so shrink the list in the same commit that
+  makes tests pass. `test/lang/bootstrap-unsupported.txt` lists tests that use features the C
+  bootstrap deliberately lacks (floats, multi-dimensional arrays, do-while, `?:`, function
+  pointers); keep such features out of core tests, or split them into their own test, so the
+  core tests exercise stage1. `run_tests.py --lint` validates directives without a compiler and
+  runs before every test run. A compiler exit status other than 0 or 1 is an `ERROR`, which
+  `xfail.txt` still covers. The harness and its unit tests are Python 3.12, standard library
+  only, wrapped at 100 columns (the host's `ruff format --line-length 100` is the reference);
+  `run_tests_test.py` scripts a fake `fort` with `//@` lines, extend it rather than calling the
+  real compiler.
 - Unit tests: `test/<component>_test.c` with `test/test.h`; every `test/*_test.c` is globbed
   into an executable `build/<preset>/test/<component>_test` linked against `fort_core` and
   `fort_rt_native`, and a ctest `unit-<component>`. A `TEST` body is one macro argument: a comma

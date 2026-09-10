@@ -435,7 +435,10 @@ test/
   common.h                     TEST_UNUSED and shared helpers, provided by the implementation
   <component>_test.c           one C suite per compiler component (lexer_test.c, ...)
   lang/
-    harness.sh                 runs every language test below
+    run_tests.py               runs every language test below
+    run_tests_test.py          the harness's own unit tests
+    xfail.txt                  tests the compiler cannot pass yet
+    bootstrap-unsupported.txt  tests the C bootstrap must reject
     run/<area>/NNN_name.ft     compile, run, compare
     fail/<area>/NNN_name.ft    must not compile, with annotated errors
     run/modules/<name>/main.ft multi-file run test; the directory is the root
@@ -481,14 +484,20 @@ contain the substring and is for errors without a useful line, such as circular 
 
 ### 7.3 What the harness does
 
-`test/lang/harness.sh [filter]` runs with the compiler named by `$FORT` (default `build/fort`)
-and passes `--std-dir` through from `$FORT_STD_DIR` when set. For each test, in a fresh
-temporary directory:
+`test/lang/run_tests.py [options] [filter...]` (Python 3, standard library only) runs the
+compiler named by `--fort` (default `$FORT`, else `build/debug/fort`) with `--std-dir` from
+`--std-dir` (default `$FORT_STD_DIR`, else `std` beside the compiler) and `--cc` from `--cc`
+(default `x86_64-linux-gnu-gcc`); `--runner` names a command that runs the programs when
+binfmt does not, `-j` the number of parallel tests, `--timeout` the seconds per step, `-v`
+prints the commands and outputs of failures and `--keep` keeps the temporary directories. The
+compiler runs with `test/lang` as its working directory (D14.4). For each test, in a fresh
+temporary directory that is also `TMPDIR`, with `LC_ALL=C`, `QEMU_LD_PREFIX` set unless
+inherited and core dumps disabled:
 
 | Directive    | Harness action                                                              |
 |--------------|-----------------------------------------------------------------------------|
 | `run`        | `fort <flags> -o prog <test>` must exit 0; run `prog`; compare its output    |
-| `fail`       | `fort <flags> <test>` must exit 1 with only annotated errors                |
+| `fail`       | `fort <flags> -o prog <test>` must exit 1 with only annotated errors        |
 | `flags:`     | appended to the `fort` command line                                         |
 | `args:`      | appended to the program's command line                                      |
 | `link:`      | `fort -c`, then `cc -o prog prog.o <helpers> <std-dir>/fort_rt.o`           |
@@ -500,12 +509,43 @@ temporary directory:
 | `error:`     | an `error:` line with that file and line must contain the substring         |
 | `error-any:` | some `error:` line must contain the substring                               |
 
-`<test>` is the test file, or `main.ft` in a multi-file test. For `error:` the harness also
-fails the test when the compiler reports an `error:` for a line that carries no annotation. In
-multi-file tests, directives are read from `main.ft`, `//! error:` annotations from every `.ft`
-file in the directory (D14.4), and no `-I` is passed because the directory is the root (D9.2).
-The harness prints one `PASS`/`FAIL` line per test with the reason for a failure, then a
-summary, and exits with 1 if any test failed; `filter` selects tests by path.
+`<test>` is the test file, or `main.ft` in a multi-file test; `-o` names a file in the temporary
+directory even for a `fail` test, so a compiler that wrongly succeeds never writes `a.out` into
+`test/lang`. Before the `stderr:` substrings of a `run` test are looked for, the lines qemu-user
+adds when a signal kills the program (`qemu: uncaught target signal 6 (Abort) - core dumped`)
+are dropped, since native execution prints nothing there. For `error:` the harness also fails
+the test when the compiler reports an `error:` for a line that carries no annotation; a
+diagnostic matched by an `error-any:` counts as annotated, and further diagnostics on an
+annotated line are accepted. In multi-file tests, directives are read from `main.ft`,
+`//! error:` annotations from every `.ft` file in the directory (D14.4), and no `-I` is passed
+because the directory is the root (D9.2). A compiler exit status other than 0 or 1 (2 is a
+usage, toolchain or internal error, D14.1), a compiler crash, a compiler timeout, a failure of
+the harness's own `link:` step and a program that cannot be started are `ERROR`, not a verdict
+about the test; a program that times out is a `FAIL`.
+
+Two expectation files beside the harness list path prefixes of tests (relative to `test/lang`,
+`#` comments allowed). `xfail.txt` names the tests the compiler cannot pass yet: a listed test
+that fails or errors is `XFAIL`, a listed test that passes is `XPASS` and fails the run, so the
+list shrinks in the commit that makes tests pass. `bootstrap-unsupported.txt` names the tests
+that use features the C bootstrap deliberately lacks (floats, multi-dimensional arrays,
+`do`-`while`, `?:`, function-pointer types and values); each is judged as a `fail` test whose
+only expectation is a diagnostic containing `not supported by the bootstrap compiler`, whatever
+its own kind, and `--no-unsupported` (for the self-hosted compiler) judges them normally.
+`--xfail` and `--unsupported` name other lists; `--no-xfail` ignores the first.
+
+The harness prints one `PASS`, `FAIL`, `XFAIL`, `XPASS` or `ERROR` line per test with the
+reason where there is one, then a summary, and exits with 1 if any test is `FAIL`, `XPASS` or
+`ERROR`; each `filter` selects the tests whose path contains it. `--list` prints the selected
+tests and their count. `--lint` validates the corpus without a compiler and fails on: a first
+line other than `//! run` or `//! fail` or one that does not match the directory; an unknown,
+malformed, duplicated or empty directive; `exit` together with `abort`; a run-only directive in
+a `fail` test or `error`/`error-any` in a `run` test; a `link:` file that does not exist; a
+`//<` or `//|` not followed by a space or outside its block; a directive after the header or in
+a sibling module; a `fail` test with neither `error:` nor `error-any:`; an unknown area, a
+badly named test, a stray file, a directory test outside `modules`, and a gap or duplicate in
+the `NNN` numbering of an area; and an expectation-list entry that matches no test. A run
+performs the same checks first and stops when they fail, and fails when the filters select no
+test.
 
 ### 7.4 Examples
 

@@ -1,4 +1,4 @@
-/* C11 helpers linked into test/lang/run/ffi/002_helpers.ft via `//! link: ffi/helpers.c`.
+/* C11 helpers linked into the test/lang/run/ffi tests via `//! link: ffi/helpers.c`.
  * Every signature uses only scalar types so it is extern-legal in fort (D9.8). */
 #include <stdbool.h>
 #include <stdint.h>

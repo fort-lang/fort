@@ -56,6 +56,18 @@ fn i32 main(string[] args) {
 }
 ```
 
+## Running
+
+`test/lang/run_tests.py [options] [filter...]` compiles and runs every test (or those whose
+path contains a filter) and prints one `PASS`, `FAIL`, `XFAIL`, `XPASS` or `ERROR` line per
+test plus a summary; `--lint` validates the directives without a compiler, `--list` lists the
+tests, `-v` shows the commands and outputs of failures and `--keep` keeps the temporary
+directories. From the VM, `tools/vm check-lang` runs it with the debug build. `xfail.txt` lists
+the tests the compiler cannot pass yet (a listed test that passes fails the run) and
+`bootstrap-unsupported.txt` the tests the C bootstrap must reject with `not supported by the
+bootstrap compiler`; see `notes/toolchain.md` 7.3. `python3 -m unittest run_tests_test` runs
+the harness's own tests.
+
 ## How a test is judged
 
 - `run`: the compiler must exit 0. The program is run with the given `args` and `stdin`. Its
