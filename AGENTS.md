@@ -43,6 +43,9 @@ A safe(r) C-like systems programming language.
   `tools/vm status` shows `paused`; guest commands then fail after the 10 s ssh timeout and
   `tools/vm up` cannot resume it. Recover with `VBoxManage controlvm fort-dev-<name> savestate`
   followed by `tools/vm up`.
+- The shared folder can serve stale pages to tools that `mmap` a file the host rewrote (seen
+  with `clang-format` reporting a line past the end of a shrunk file while `md5sum` read the
+  right bytes). Recover with `tools/vm run 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"'`.
 - The target is x86-64 Linux. The compiler runs natively on arm64; generated programs run under
   `qemu-x86_64` transparently. Always pass `--cc x86_64-linux-gnu-gcc` to `fort` (the guest `cc`
   is aarch64). Provisioning sets `QEMU_LD_PREFIX`; the test harness sets it itself. When a
@@ -99,6 +102,14 @@ A safe(r) C-like systems programming language.
   `x86_64-linux-gnu-gcc` and `<build-dir>/std/fort_rt.o`, runs them under qemu and checks
   stdout, stderr and the status byte-exactly; ctest `pipeline` (label `unit`). `*.s` is
   gitignored except `test/asm/*.s`.
+- clang-tidy's `readability-function-size` caps `main` at about 90 `TEST_RUN`s (statement
+  threshold 800): split a larger suite into two files. `test/fork.h` runs a function in a forked
+  child and captures its stderr and exit status, for paths that end the process (`fatal_oom`);
+  under asan the child runs LeakSanitizer at exit, so the forked function must not drop a
+  block it allocated (blocks its still-live frames point to are reachable and fine).
+- Running `run-clang-tidy` by hand: its positional arguments are regexes matched against the
+  absolute paths in `compile_commands.json`, so a relative path such as `../../test` silently
+  selects nothing and reports success. Use `tools/vm tidy` or absolute guest paths.
 - Binaries: `build/<preset>/fort` is stage1 (the C compiler); `build/<preset>/stage2/fort` and
   `stage3/fort` are the self-hosted compiler built by stage1 and by stage2.
 

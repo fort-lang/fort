@@ -10,11 +10,12 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <unistd.h>
+
 #include <sys/wait.h>
 
-#include "test.h"
-
 #include "fort_rt.h"
+
+#include "test.h"
 
 /* The literals below are the sample values and the expected texts of the
    formatting rules; naming each one would only hide what is being checked. */

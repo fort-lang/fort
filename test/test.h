@@ -159,6 +159,11 @@ static inline const char* test_result_name(test_result_t result) {
 #define TEST_ASSERT_EQ_INT32(val, exp) TEST_ASSERT_EQ_(val, exp, "%" PRId32)
 #define TEST_ASSERT_EQ_INT64(val, exp) TEST_ASSERT_EQ_(val, exp, "%" PRId64)
 #define TEST_ASSERT_EQ_SIZE(val, exp) TEST_ASSERT_EQ_(val, exp, "%zu")
+#define TEST_ASSERT_EQ_UINT64(val, exp) TEST_ASSERT_EQ_(val, exp, "%" PRIu64)
+
+/* Equality of two NUL-terminated strings, neither NULL. */
+#define TEST_ASSERT_EQ_STR(val, exp)                                                               \
+    TEST_ASSERT_OP_(val, exp, strcmp((val), (exp)) == 0, "==", "\"%s\"")
 
 #define TEST_ASSERT_NE_(val, exp, fmt) TEST_ASSERT_OP_(val, exp, (val) != (exp), "!=", fmt)
 #define TEST_ASSERT_NE_CHAR(val, exp) TEST_ASSERT_NE_(val, exp, "%c")
