@@ -268,12 +268,14 @@ speculative parse over the token array (rewind on failure); none require symbol-
 1. **Declaration versus statement** (D7.1). At the start of a statement:
    - a keyword among `if while do for switch defer return break continue` or `{` starts that
      statement;
-   - `own`, `mut`, a `prim_type`, `string`, or `fn` starts a declaration;
+   - a `prim_type`, `string`, or `fn` starts a declaration;
    - otherwise, speculatively parse a `type`; if the next token is then an identifier, the
      statement is a `var_decl`; else rewind and parse `assign_stmt | incdec_stmt | call_stmt`.
    Because expression statements are calls only (D7.3), `a * b;` never has to be parsed, and
    `foo[3] = x;` (assignment) versus `foo[3] arr = {};` (declaration) is settled by the token
-   after the type.
+   after the type. Since D5.3 puts every `mut` and `own` after what it qualifies, a statement
+   never begins with one; `foo@ mut x;` and `foo* own p;` are settled by the same speculative
+   parse.
 2. **Struct and array literals versus expressions** (D6.5). In `primary_expr` position, an
    `identifier` (optionally `. identifier`) directly followed by `{` is a `struct_literal`; a
    successful speculative parse of `array_type` directly followed by `{` is an `array_literal`.
