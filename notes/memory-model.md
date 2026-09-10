@@ -50,11 +50,12 @@ type says that this value is the one responsible for freeing the allocation (D17
 | `new(T[n])`       | `own mut T[]`        | `n` zeroed elements; `n` is any integer type     |
 | `new(T[n][K])`    | `own mut T[][K]`     | `n` zeroed rows of `T[K]`; `K` is a constant     |
 | `new(T[n][K][M])` | `own mut T[][K][M]`  | `n` zeroed rows of `T[K][M]`                     |
+| `new(T* own[n])`  | `own mut T* own[]`   | `n` owned slots, all `null` (D17.3)              |
 | `new(T{...})`     | error                | allocate, then assign the fields                 |
 | `new(T[])`        | error                | the count is mandatory                           |
 | `new(void)`       | error                | `void` has no size                               |
 | `new(mut T)`      | error                | the result is always fully mutable (D5.8)        |
-| `new(own T)`      | error                | the result is always owning (D17.3)              |
+| `new(own T)`      | error                | a prefix `own` does not parse; the result is owning |
 
 The first bracket after the element type always holds a run-time count and always produces a
 slice; later brackets are fixed-array dimensions of the element type (grammar section 6).
@@ -62,9 +63,10 @@ slice; later brackets are fixed-array dimensions of the element type (grammar se
 constant count may take any integer type, and a negative constant count is a compile error
 (D4.1). A negative count at run time, a total size that overflows, and allocation failure are
 runtime errors (section 6); `n == 0` is allowed and yields a slice of length 0 with a non-null
-`.ptr`, because the runtime allocates at least one byte (D10.2). Neither `mut` nor `own` parses
-inside `new(...)` (grammar section 4): the element type is written bare, and `new(Node*[n])`
-yields an `own mut Node*[]`, a slice of borrowed pointers.
+`.ptr`, because the runtime allocates at least one byte (D10.2). `mut` does not parse inside
+`new(...)`, and `own` only after a `*` of the element type (grammar section 6): `new(Node*[n])`
+yields an `own mut Node*[]`, a slice of borrowed pointers, and `new(Node* own[n])` yields an
+`own mut Node* own[]`, a slice of owned slots that are all `null` (D17.3).
 
 The result is an rvalue that must land in an `own` place (D17.8): the initializer of an `own`
 declaration, an `own` parameter, an `own` field or element, or `del` itself. Binding it to a
@@ -76,6 +78,8 @@ own mut i32[] xs = new(i32[8]);      // eight zeroes
 own mut u8[][16] rows = new(u8[n][16]);  // n rows of sixteen bytes
 own mut i32[] none = new(i32[0]);    // none.len == 0, none.ptr != null; del it like any other
 own i32[] ro = new(i32[4]);          // owned, read-only through this binding (D5.4, D17.4)
+own mut Node* own[] kids = new(Node* own[4]);   // four null owned slots (D17.3)
+own mut Node* own[] k2 = new(own Node*[4]);     // error: prefix own inside new does not parse
 del(new(Point));                     // allocated and freed in one statement
 mut Point* q = new(Point);           // error: owning temporary would leak (D17.8)
 own mut Point* q2 = new(Point{1, 2});  // error: new takes a type, not a literal
@@ -105,7 +109,8 @@ memory (D17.9). On an rvalue operand `del` only frees.
 | `own T[][K]` from `new(T[n][K])`                   | frees the rows; operand `{null, 0}`       |
 | `own string` (D17.12)                              | frees the characters; operand `{null, 0}` |
 | an `own` rvalue: a call result, `move(x)`, a cast  | frees; there is nothing to empty          |
-| `null`, a zero slice or string                     | no-op                                     |
+| `null` (the literal adopts `own void*`)            | no-op (D17.9)                             |
+| a zero slice or string                             | no-op                                     |
 | `T*`, `T[]`, `string`, `void*` without `own`       | error: a view, not an `own` type          |
 | a sub-slice `s[lo..hi]` or `s[..]`, a `.ptr`       | error: slicing and `.ptr` yield views     |
 | `&local`, a literal                                | error: not an `own` type                  |
@@ -131,7 +136,7 @@ own string d = str.dup(s);           // an owned copy (D13.5)
 del(d);                              // frees the copy (D17.12)
 i32 local = 1;
 del(&local);                         // error: a stack address is not an own value (D17.9)
-del(cast(s, u8[]));                  // error: not an own type; the cast kept the view (D17.12)
+del(cast(s, u8[]));                  // error: not an own type; the cast lends a view (D17.12)
 del(new(Node));                      // frees the temporary: an own rvalue
 ```
 
@@ -153,7 +158,7 @@ may be released with `del` once it is adopted, and memory from `new` may be rele
 `mut` (D17.3):
 
 ```fort
-extern fn own mut void* malloc(u64 n);
+extern fn own void* malloc(u64 n);   // void* has no target level, so no mut (D17.13)
 extern fn void free(own void* p);
 
 own mut i32* p = cast(malloc(sizeof(i32)), own mut i32*);   // not zeroed: C did not clear it
@@ -185,11 +190,14 @@ shape every idiom in this document:
   `s[i]` needs that level to be mutable (D17.6). Moving a zero value yields a zero value.
 - **Lending is implicit.** `own X` converts to `X` wherever a value meets an expected type,
   exactly like dropping `mut` (D5.4), and the two drops combine (D17.4). The conversion is
-  monotone: `own` at an inner level may be dropped only together with every outer level, so
+  monotone: `own` at an inner level may be dropped only together with every outer level and only
+  where the target keeps every level outside that reference immutable, so
   `own mut Node* own[]` lends as `Node* own[]` or `Node*[]` but never as `own mut Node*[]`,
-  which would leave the nodes owned by nobody (D17.4). Operands of `==`, `!=` and `?:` lend.
-  An `own` rvalue may not be lent: converting it to a non-`own` type is the compile error
-  "owning temporary would leak" (D17.8), because nothing could ever `del` it.
+  which would leave the nodes owned by nobody, nor as `mut Node*[]`, through which a borrowed
+  pointer could be stored into a slot the source still owns (D17.4). Operands of `==`, `!=` and
+  `?:` lend; `?:` yields `own` only when both operands are `own` rvalues or `null` (D6.2). An
+  `own` rvalue may not be lent: converting it to a non-`own` type is the compile error "owning
+  temporary would leak" (D17.8), because nothing could ever `del` it.
 
 ```fort
 struct Node {
@@ -245,17 +253,17 @@ mut List l = make();
 List l2 = l;                         // error: copying an owning value requires move(l) (D17.7)
 consume(move(l));                    // l is List{} afterwards
 del(l);                              // error: del of an aggregate; del its fields instead (D17.7)
-own mut Node* own[] kids = cast(new(Node*[4]), own mut Node* own[]);
-for (mut Node* k : kids) { }         // each k lends one element (D17.10)
+own mut Node* own[] kids = new(Node* own[4]);   // four null owned slots (D17.3)
+for (mut Node* k : kids) { }         // each k lends one element; kids is iterated in place (D17.10)
 for (own mut Node* k : kids) { }     // error: a loop variable cannot be own (D17.10)
 own mut Node* first = move(kids[0]); // taking an element out is explicit
 del(first);
 del(kids);                           // frees the slots; the remaining nodes must be freed first
 ```
 
-`new(Node*[4])` yields `own mut Node*[]`, slots that borrow; the `cast` that adds `own` to the
-element level is the adoption escape of D17.3 applied to zeroed slots, and it is the only way
-to obtain an owned slice of owned pointers, because `own` does not parse inside `new`.
+`new(Node*[4])` yields `own mut Node*[]`, slots that borrow; `new(Node* own[4])` yields
+`own mut Node* own[]`, slots that own what is later moved into them (D17.3). The `cast` that
+adds `own` is reserved for memory from C (section 4.5).
 
 ### 2.4 Cleanup idioms
 
@@ -375,8 +383,9 @@ arena_free(&ar);
 ```
 
 `defer` captures nothing: the statement runs with the values its variables hold at exit (D7.8,
-D16), so `defer del(p); p = move(q);` frees `q`; and when `p` still holds a live allocation at
-that assignment, a checked build traps there before any deferred code runs (section 2.5).
+D16), so after `defer del(p);` a later `del(p); p = move(q);` makes the exit free `q`; had the
+`del(p)` been left out, the assignment would trap on the overwrite check in a checked build
+before any deferred code runs (section 2.5).
 Prefer `defer` immediately after the `new` it undoes, before the variable is rebound.
 
 ### 2.5 Ownership at run time
@@ -392,7 +401,8 @@ exactly three things for ownership:
 - **`del(lv)`** passes the pointer (or the slice's `ptr`) to the runtime's `free` and then
   stores the zero value into the operand; `del(rv)` only frees (D17.9; `toolchain.md` 6).
 - **The overwrite check.** In a checked build (D11.1), every assignment to an lvalue of `own`
-  reference type first loads the current pointer word and traps when it is non-null:
+  reference type loads the current pointer word after the right-hand side has been evaluated,
+  immediately before the store, and traps when it is non-null:
   `<file>:<line>:<col>: runtime error: overwriting owned value`, positioned at the assignment's
   `=` (D17.11, D11.4; section 7). The previous allocation would otherwise leak silently. `del`
   and `move` leave zero behind, so `del(v.data); v.data = new(...)`, `a = move(b)` after
@@ -509,12 +519,15 @@ cannot be indexed or sliced; every conversion to and from it is a `cast` (D3.11)
 `extern` signatures and for storing an address whose type is recovered later with `cast`.
 `own void*` is its owning form (D17.1): what `malloc` returns and `free` takes (D17.13), a
 legal operand of `del`, and the type a container such as `PtrVec` would use if it owned what it
-stores. `cast` moves between `own void*` and typed `own` pointers as it does for views.
+stores. A `cast` between `own void*` and a typed `own` pointer yields `own` because its target
+says so, and an `own` lvalue operand must therefore be moved (D3.14, D17.5). It is never
+`own mut void*`: `void*` has no target level for the `mut` to describe (D17.13).
 
 ```fort
-extern fn own mut void* malloc(u64 n);
-own mut void* blob = malloc(16);
+extern fn own void* malloc(u64 n);
+own void* blob = malloc(16);
 own mut Point* pt = cast(move(blob), own mut Point*);   // blob == null afterwards
+own mut Point* pt2 = cast(blob, own mut Point*);        // error: copying own lvalue needs move
 del(pt);
 del(blob);                           // no-op: blob is null
 ```
@@ -627,10 +640,11 @@ i32 fd2 = open(sub.ptr, 0);          // opens "path": C reads past sub.len to th
 `own string` is the owned form (D17.12): `str.dup`, `str.concat` and `strbuf.take` return it,
 while literals, sub-strings and `sys.args()` are `string` views (D13.5). It lends as `string`
 in every operand position, its sub-strings are `string` views, `del(own string)` frees the
-characters and `del(string)` does not compile. Casts among `string`, `char[]`, `u8[]` and their
-`mut` forms preserve `own` (D3.14, D17.12), so a string built in an `own mut u8[]` becomes an
-`own string` with `cast(move(buf), own string)` (section 9.5); the `move` leaves `buf` empty so
-that the bytes keep exactly one owner (D17.14).
+characters and `del(string)` does not compile. A cast among `string`, `char[]`, `u8[]` and
+their `mut` forms yields `own` exactly when its target spells it (D3.14, D17.12), so a string
+built in an `own mut u8[]` becomes an `own string` with `cast(move(buf), own string)`
+(section 9.5): the target says `own`, so the `own` lvalue must be moved (D17.5), which leaves
+`buf` empty and the bytes with exactly one owner; `cast(buf, string)` lends a view instead.
 
 ```fort
 own string d = str.dup("path");      // a heap copy with a trailing NUL (D13.5)
@@ -661,7 +675,8 @@ extern fn void sum(i32[] xs);        // error: slices cannot cross an extern bou
 ```
 
 `own` in an `extern` signature is erased and records who frees (D17.13): a result type
-`own mut void*` says the caller frees, a parameter type `own void*` says the callee does.
+`own void*` says the caller frees, a parameter type `own void*` says the callee does; `void*`
+takes no `mut`, having no target level (D17.13, D5.5).
 Memory received from C is used through `p[lo..hi]` (section 3.1) and released with `del` or the
 C library's own function, whichever the C side documents; `new`/`del` and `malloc`/`free` are
 interchangeable (D10.3). Adoption, a `cast` that adds `own` to a pointer or slice, is how
@@ -672,11 +687,11 @@ one `own` value exists per allocation (D17.14). `del` of adopted memory that doe
 allocation is undefined (D10.7).
 
 ```fort
-extern fn own mut void* malloc(u64 n);
+extern fn own void* malloc(u64 n);
 extern fn void free(own void* p);
 extern fn mut char* read_line(mut u64* len);   // C documents: the caller frees with free()
 
-own mut u8* raw = cast(malloc(64), own mut u8*);   // adopted; the bytes are not zeroed
+own mut u8* raw = cast(malloc(64), own mut u8*);   // own rvalue to own type; not zeroed
 mut u8[] bytes = raw[0..64];                   // a view for filling
 free(cast(move(raw), own void*));              // or del(raw); raw == null either way
 mut u64 n = 0;
@@ -1046,8 +1061,9 @@ fn bool copy_file(string src, string dst) {
 ### 9.5 Building a string in an `own mut u8[]`
 
 Allocate the bytes, fill them, and `cast` the moved slice to `own string` (D3.14, D17.12). The
-cast preserves `own`, and the `move` empties the buffer so that the characters have exactly one
-owner (D17.14); the caller frees the result with `del`. Allocate the exact length: a prefix such
+cast's result is `own` because its target says so, and an `own` lvalue cast to an `own` target
+must be moved (D17.5), which empties the buffer so that the characters have exactly one owner
+(D17.14); the caller frees the result with `del`. Allocate the exact length: a prefix such
 as `buf[..n]` is a view, and a view becomes an `own string` only through the adoption `cast`,
 which is meant for memory from C (D17.3).
 
@@ -1064,7 +1080,7 @@ fn void demo() {
     println(s);
     string head = s[..5];            // a sub-string: a view
     del(head);                       // error: cannot del a string: not an own type (D17.12)
-    del(cast(s, u8[]));              // error: not an own type; the cast dropped own (D17.12)
+    del(cast(s, u8[]));              // error: not an own type; the cast lends a view (D17.12)
 }
 ```
 

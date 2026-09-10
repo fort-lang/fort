@@ -213,7 +213,7 @@ i32 EINTR = 4;
 i32 EACCES = 13;
 
 // <stdlib.h>, <string.h>
-extern fn own mut void* malloc(u64 size);
+extern fn own void* malloc(u64 size);
 extern fn void free(own void* p);
 extern fn void* memcpy(void* dst, void* src, u64 n);
 extern fn void* memmove(void* dst, void* src, u64 n);
@@ -242,11 +242,13 @@ extern fn void fort_rt_flush_all();
 extern fn noreturn fort_rt_exit(i32 status);
 ```
 
-Semantics are those of the C functions. `malloc` returns `own mut void*` and `free` takes
-`own void*` (D17.13): the qualifiers are erased at the boundary and state C's convention, so
-the pair is interchangeable with `new` and `del` (D10.3) and exists for code that sizes an
-allocation in bytes. `own mut u8* p = cast(libc.malloc(n), own mut u8*);` adopts the block
-(D17.3; `p` is `null` when C is out of memory, where `new` would trap, D10.2), `p[0..n]` is a
+Semantics are those of the C functions. `malloc` returns `own void*` (no `mut`: `void*` has no
+target level, D17.13) and `free` takes `own void*` (D17.13): the qualifiers are erased at the
+boundary and state C's convention, so the pair is interchangeable with `new` and `del` (D10.3)
+and exists for code that sizes an allocation in bytes.
+`own mut u8* p = cast(libc.malloc(n), own mut u8*);` types the block, the cast's result being
+`own` because its target says so (D3.14; `p` is `null` when C is out of memory, where `new`
+would trap, D10.2), `p[0..n]` is a
 `mut u8[]` view of it (D6.9), and `del(p)` releases it; so does
 `libc.free(cast(move(p), own void*))`, where the `own` lvalue must be moved into the `own`
 parameter (D6.11) and is left `null` (D17.6). `memcpy`, `memmove` and `memset` return their
