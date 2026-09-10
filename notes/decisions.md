@@ -162,26 +162,26 @@ Owner: `type-system.md`.
 - **D3.13** Equality `==`/`!=` is defined on integers, floats, `bool`, `char`, enums, pointers
   (identity), function pointers (identity) and `string` (contents). It is a compile error on
   structs, fixed arrays and slices. This narrows type-system.md's earlier "all types support ==".
-- **D3.14** Conversions. The only implicit conversion is dropping mutability (D5.4). Everything
-  else is `cast(expr, Type)` (D6.4). Allowed casts: integer to integer (widening sign- or
-  zero-extends by the source's signedness, narrowing truncates, same-width sign change
-  reinterprets); integer to float (round to nearest); float to integer (truncate toward zero,
-  saturate at the target's range, NaN becomes 0); float to float; `bool` to integer; `char` to
-  and from integer; enum to and from integer; any pointer to any pointer or `void*` (mutability
-  may be added, this is the cast-away-const escape); pointer to and from `u64`; function pointer
-  to and from `void*`; among `string`, `char[]`, `u8[]`, `mut char[]` and `mut u8[]` (a
-  binding-level `mut` in a cast target is an error); `T[]` to `mut T[]` and `mut T[]` to `T[]`;
-  any cast that only drops mutability or ownership, at any level (a no-op, since the implicit
-  conversions of D5.4 and D17.4 cover it); adding `own` to a pointer or slice (adoption, D17.3);
-  identity. The result of a cast is `own` exactly when its target type says `own`: an `own`
-  source cast to a non-`own` target lends (the result is a view), a non-`own` source cast to an
-  `own` target adopts, and an `own` lvalue cast to an `own` target is a copy that must be written
-  `cast(move(x), ...)` (D17.5). Forbidden:
-  integer to `bool`, any other slice-to-slice cast (the element
-  type of a slice never changes, because `len` counts elements), pointer to slice, struct or
-  array casts. Casts never trap: float to integer is emitted as `llvm.fptosi.sat` or
-  `llvm.fptoui.sat`, whose saturating result is this rule (plain `fptosi` would be poison out of
-  range, D19.2).
+- **D3.14** Conversions. The only implicit conversion is dropping mutability (D5.4). Everything else
+  is `cast(expr, Type)` (D6.4). Allowed casts: integer to integer (widening sign- or zero-extends by
+  the source's signedness, narrowing truncates, same-width sign change reinterprets); integer to
+  float (round to nearest); float to integer (truncate toward zero, saturate at the target's range,
+  NaN becomes 0); float to float; `bool` to integer; `char` to and from integer; enum to and from
+  integer; any pointer to any pointer or `void*` (mutability may be added, this is the cast-away-
+  const escape); pointer to and from `u64`; function pointer to and from `void*`; among `string`,
+  `char[]`, `u8[]`, `mut char[]` and `mut u8[]` (a binding-level `mut` in a cast target is an
+  error); a slice to a slice of the same element type whose marks differ only in mutability, added
+  or dropped at any level (the cast-away-const escape, as for pointers; amended 2026-09-10 from the
+  T-011 review, which found the earlier `T[]` to `mut T[]` wording narrower than the rule); any cast
+  that only drops mutability or ownership, at any level (a no-op, since the implicit conversions of
+  D5.4 and D17.4 cover it); adding `own` to a pointer or slice (adoption, D17.3); identity. The
+  result of a cast is `own` exactly when its target type says `own`: an `own` source cast to a
+  non-`own` target lends (the result is a view), a non-`own` source cast to an `own` target adopts,
+  and an `own` lvalue cast to an `own` target is a copy that must be written `cast(move(x), ...)`
+  (D17.5). Forbidden: integer to `bool`, any other slice-to-slice cast (the element type of a slice
+  never changes, because `len` counts elements), pointer to slice, struct or array casts. Casts
+  never trap: float to integer is emitted as `llvm.fptosi.sat` or `llvm.fptoui.sat`, whose
+  saturating result is this rule (plain `fptosi` would be poison out of range, D19.2).
 - **D3.15** `sizeof(Type)` takes a type only, yields an untyped integer constant (D4). `sizeof` of
   `void` is an error. `sizeof(T[])` and `sizeof(string)` are 16; function pointers are 8; `bool`
   and `char` are 1; enums are 4. There is no `alignof` in v1.
