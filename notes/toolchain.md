@@ -36,7 +36,7 @@ file (D14.1). Options and the entry file may appear in any order.
 - The default output is `a.out`; with `-c` it is `<entry>.o` and with `-S` `<entry>.s`, where
   `<entry>` is the entry file's base name without `.ft`, placed in the current directory as `cc`
   does.
-- The default standard library directory is `$FORT_STD_DIR` when set, else `../std` relative to
+- The default standard library directory is `$FORT_STD_DIR` when set, else `std` relative to
   the directory containing the `fort` binary.
 - `-S` and `-c` together stop at assembly. With `-S`, `-l` and `--cc` are unused.
 - `--release` and `--no-bounds-check` are independent and may be combined.
@@ -95,7 +95,7 @@ Where things live: `<std-dir>/*.ft` holds the standard library modules of D13.2 
 `std::libc`, `std::mem`, `std::io`, `std::str`, `std::strbuf`, `std::vec`, `std::strmap`,
 `std::math`) as source, compiled with every program that imports them; `<std-dir>/fort_rt.o` is
 the C runtime object, built from `runtime/fort_rt.c` by the compiler's own build; `<bindir>/fort` is
-the compiler, and `<bindir>/../std` its fallback `--std-dir`. Only modules in the import closure
+the compiler, and `<bindir>/std` its fallback `--std-dir`. Only modules in the import closure
 are read (module-system.md 10).
 
 ## 3. Build modes
@@ -665,9 +665,10 @@ the token stream, the parser's speculative rewinds, constant folding at the edge
 ### 7.6 Coverage target (D14.6)
 
 The corpus aims at about three lines of test for each line of compiler source: `wc -l` over
-`test/*.c`, `test/lang/**/*.ft` and `test/lang/ffi/*.c` against `wc -l` over `src/*.c` and
-`src/*.h`, the runtime and standard library excluded from both sides. The seed tests of the
-design phase establish the format with one example per area; the full corpus is sized as follows,
+`test/*.c`, `test/lang/**/*.ft` and `test/lang/ffi/*.c` against `wc -l` over `src/bootstrap/*.c`,
+`src/bootstrap/*.h` and `src/fort/*.ft`, the runtime and standard library excluded from both
+sides. The seed tests of the design phase establish the format with one example per area; the
+full corpus is sized as follows,
 in files:
 
 | Area                    | run | fail |

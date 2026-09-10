@@ -672,7 +672,7 @@ Owner: `toolchain.md`.
 
 - **D14.1** `fort [options] entry.ft`. Options: `-o <file>` (default `a.out`), `-S` (stop after
   emitting `<entry>.s`), `-c` (stop after the object file), `-I <dir>` (repeatable),
-  `--std-dir <dir>` (default `$FORT_STD_DIR`, else `../std` relative to the binary),
+  `--std-dir <dir>` (default `$FORT_STD_DIR`, else `std` beside the binary),
   `--release` (D11.1), `--no-bounds-check` (D10.6), `-l<lib>` (passed to the linker),
   `--cc <path>` (default `cc`), `--help`, `--version`. Exit status: 0 success, 1 compile error,
   2 usage, toolchain (`cc` failed) or internal error; usage and toolchain errors are printed as
