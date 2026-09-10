@@ -152,8 +152,8 @@ commit messages. Agents that cannot run an interactive rebase use the equivalent
 `git reset --soft $(git merge-base main HEAD) && git commit` (not `git reset --soft main`:
 if `main` moved since the branch was cut, that commits the branch's old tree on top of the
 new `main` and silently reverts its newer commits). A feature branch made of several
-self-contained units of work (for example the language design, or a compiler pass plus its tests plus its documentation)
-keeps its individual commits and is merged into `main` with a merge commit
+self-contained units of work (for example the language design, or a compiler pass plus its tests
+plus its documentation) keeps its individual commits and is merged into `main` with a merge commit
 (`git merge --no-ff`) whose message describes the whole feature. Until a remote exists, `main`
 plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitignored.
 
