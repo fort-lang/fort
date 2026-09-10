@@ -58,5 +58,3 @@ fn i32 main(string[] args) {
 - `fail`: the compiler must exit 1. Every line carrying `//! error:` must produce a diagnostic on
   that line whose text contains the substring, and no diagnostic may appear on an unannotated
   line. `error-any` accepts a diagnostic on any line.
-- Expected outputs were computed by hand from `notes/decisions.md` before any compiler existed;
-  a disagreement between a test and the compiler is a bug in one of the two, decided by the notes.
