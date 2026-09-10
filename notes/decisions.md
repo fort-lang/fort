@@ -143,7 +143,9 @@ Owner: `type-system.md`.
   and from integer; enum to and from integer; any pointer to any pointer or `void*` (mutability
   may be added, this is the cast-away-const escape); pointer to and from `u64`; function pointer
   to and from `void*`; among `string`, `char[]`, `u8[]`, `mut char[]` and `mut u8[]` (a
-  binding-level `mut` is not part of a cast target); `T[]` to `mut T[]`; identity. Forbidden:
+  binding-level `mut` in a cast target is an error); `T[]` to `mut T[]` and `mut T[]` to `T[]`;
+  any cast that only drops mutability, at any level (a no-op, since the implicit conversion of
+  D5.4 covers it); identity. Forbidden:
   integer to `bool`, any other slice-to-slice cast (the element
   type of a slice never changes, because `len` counts elements), pointer to slice, struct or
   array casts. Casts never trap.
@@ -276,7 +278,9 @@ Owner: `core-language.md` (Expressions).
   integer type, or the same float type (`%` and the wrapping forms are integer-only). Unary `-`:
   signed integers and floats only. Bitwise `& | ^ ~`: integers only, same type. Shifts `<< >>`:
   left operand any integer type, right operand any integer type or untyped constant; the result
-  has the left operand's type; `>>` is arithmetic for signed and logical for unsigned types;
+  has the left operand's type; a constant count that is negative or at least the width of the
+  left operand's type is a compile error; `>>` is arithmetic for signed and logical for unsigned
+  types;
   `<<` discards the bits shifted out and never checks for overflow (`1 << 31` on `i32` is
   `-2147483648` in both build modes).
   Comparisons: same type, ordering only on integers, floats and `char`. `! && ||`: `bool` only.
@@ -546,7 +550,7 @@ Owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime)
 
   | Check                              | Message                                            |
   |------------------------------------|----------------------------------------------------|
-  | index                              | `index 5 out of range for length 3`                |
+  | index                              | `index 5 out of range for length 3` (`-1` prints signed) |
   | slice bounds                       | `slice bounds 2..7 out of range for length 3`      |
   | overflow of `+ - *`, `++`, `--`, unary `-` | `integer overflow`                         |
   | shift count                        | `shift count 64 out of range for i64`              |
@@ -589,7 +593,7 @@ Owner: `core-language.md` (Builtins).
 
 - **D12.1** Keywords with type operands: `new(T)`, `new(T[n])`, `sizeof(T)`, `cast(e, T)`.
 - **D12.2** Universe-scope functions with ordinary call syntax and special typing. They may be
-  shadowed only by a module-level declaration (D7.9) and cannot be used as values:
+  shadowed by a module-level or local declaration (D7.9) and cannot be used as values:
   - `del(x)` (D10.3);
   - `assert(cond)`: `bool` argument; failure is a runtime error with the expression text;
   - `panic(msg)`: `string` argument; `noreturn`;
