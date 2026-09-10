@@ -24,6 +24,7 @@ Sections:
 - D15 Not in v1
 - D16 Hazards not to re-litigate
 - D17 Ownership
+- D19 Target: LLVM IR
 - Ready-to-implement checklist
 
 ## D1 Naming and files
@@ -685,12 +686,16 @@ Owner: `stdlib.md`.
 Owner: `toolchain.md`.
 
 - **D14.1** `fort [options] entry.ft`. Options: `-o <file>` (default `a.out`), `-S` (stop after
-  emitting `<entry>.s`), `-c` (stop after the object file), `-I <dir>` (repeatable),
+  emitting `<entry>.ll`, D19.1), `-c` (stop after the object file), `-I <dir>` (repeatable),
   `--std-dir <dir>` (default `$FORT_STD_DIR`, else `std` beside the binary),
   `--release` (D11.1), `--no-bounds-check` (D10.6), `-l<lib>` (passed to the linker),
-  `--cc <path>` (default `cc`), `--help`, `--version`. Exit status: 0 success, 1 compile error,
-  2 usage, toolchain (`cc` failed) or internal error; usage and toolchain errors are printed as
-  `fort: error: <message>`.
+  `--cc <path>` (default `clang`; it must be a clang, since it compiles LLVM IR),
+  `--target <triple>` (default `x86_64-linux-gnu`, passed to `--cc` as `--target=<triple>`),
+  `-Xcc <arg>` (repeatable, passed to `--cc` verbatim after the compiler's own arguments),
+  `--help`, `--version`. Exit status: 0 success, 1 compile error, 2 usage, toolchain (`--cc`
+  failed) or internal error; usage and toolchain errors are printed as `fort: error: <message>`.
+  Amended 2026-09-10 with D19: `-S` emitted `<entry>.s`, `--cc` defaulted to `cc`, and
+  `--target` and `-Xcc` did not exist.
 - **D14.2** Diagnostics: `<file>:<line>:<col>: error: <message>` on stderr, one per line,
   optionally followed by `note:` lines. Errors without a position in the file (a missing
   `main`, an invalid module name) use `1:1`. A syntax error stops the compilation of that file
@@ -700,9 +705,13 @@ Owner: `toolchain.md`.
   are reported at the closing brace of the body or `switch`; an infinite-size struct at its
   `struct` keyword; a shadowing error at the inner declaration ("'n' shadows a parameter",
   "'n' shadows an enclosing local"). The compiler never emits warnings in v1.
-- **D14.3** Generated assembly is GNU syntax, position-independent (RIP-relative data, `@PLT`
-  calls for externs), and is assembled and linked by the system C compiler together with the
-  runtime object.
+- **D14.3** Generated code is LLVM IR (D19.1), compiled and linked by `--cc` in one invocation,
+  `<cc> --target=<triple> -O1 -fPIE -pie -Wno-override-module -o <out> <entry>.ll
+  <std-dir>/fort_rt.o [-l<lib>...] [<-Xcc args>...]`, `-O2` in place of `-O1` under `--release`
+  and `-c` before `-o` when the compiler stops at the object; the executable is
+  position-independent and the runtime object is compiled for the same triple. Amended
+  2026-09-10 with D19: generated code was GNU assembly, assembled and linked by the system C
+  compiler.
 - **D14.4** Language tests live under `test/lang/`: `run/<area>/NNN_name.ft` (compile, run,
   compare), `fail/<area>/NNN_name.ft` (must not compile), where `<area>` is one of `lexical
   constants operators casts mutability ownership declarations control switch defer functions
@@ -892,6 +901,21 @@ decision or document says ownership is "by convention", this section supersedes 
   used after the allocation was freed; an `own` value that is never freed; two `own` copies made
   through `cast`. The linear check that would make leaks and use after `move` compile errors is
   deferred (D15); this design is its intended base and adds no syntax it would not need.
+
+## D19 Target: LLVM IR
+
+Decided 2026-09-10, before any code-generation ticket had started; the earlier target, x86-64 GNU
+assembly, survives only in the history of this file and of `toolchain.md`.
+
+- **D19.1** The compiler emits one textual LLVM IR module (`.ll`, LLVM 18 syntax, opaque
+  pointers) for the whole program (D9.10), built by string appending in one forward pass, and
+  hands it to clang (D14.3). The compiler never links libLLVM or calls its C or C++ API: the
+  bootstrap stays a dependency-free C11 program and the self-hosted compiler needs no foreign
+  bindings. The module carries `target triple = "x86_64-unknown-linux-gnu"` and no datalayout,
+  module flags, comments or `source_filename`. Every emitted module must pass `opt
+  -passes=verify`; the language-test harness checks that (`run_tests.py --verify-ir`) and the
+  pipeline test checks its hand-written samples under `test/ir/`, which are the reference for
+  the form of a module until the contract below says otherwise.
 
 ## Ready-to-implement checklist
 
