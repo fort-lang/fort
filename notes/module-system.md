@@ -1,23 +1,393 @@
-# Module System Specification
+# fort module system
 
-## Module Organization
+This document specifies modules, imports, name resolution, symbol naming, the C foreign function
+interface and the compilation model of fort v1. It implements D9 together with the parts of D3,
+D7, D8, D11, D13 and D14 that touch modules. Where it disagrees with `decisions.md` or
+`grammar.md`, those files win (D1.2).
 
-### File-Based Modules
-- One module per file
-- Module name matches filename (without extension)
-- File `math.lang` defines module `math`
-- No explicit module declaration needed
+Sections: 1 Modules and files; 2 Search roots and the entry file; 3 Import forms and
+resolution; 4 Qualified access; 5 Namespaces, lookup and shadowing; 6 Import graph and export
+rules; 7 Symbol names; 8 C foreign function interface; 9 Calling convention; 10 Compilation
+model; 11 Entry point and program start; 12 Worked examples; 13 Module diagnostics; 14 Not in v1.
 
-### Module Structure
-```c
-// math.lang
+## 1. Modules and files
 
-// Imports at top
-import std::io;
+One source file is one module (D9.1). A file contains no module declaration; its module path is
+the file path relative to a search root (section 2) with `/` replaced by `::` and `.ft` dropped.
+The last segment is the short name, which an import binds by default.
 
-// Declarations
-fn add(i32 a, i32 b) -> i32 {
+| Module path     | File                     |
+|-----------------|--------------------------|
+| `main`          | `<root>/main.ft`         |
+| `std::io`       | `<std>/io.ft`            |
+| `std::str`      | `<std>/str.ft`           |
+| `util::strings` | `<root>/util/strings.ft` |
+| `geom::vec`     | `<root>/geom/vec.ft`     |
+
+- The extension is `.ft` (D1.1). A file with any other extension is never a module.
+- Every segment is an identifier (D2.3) that is neither a keyword nor a reserved word (D2.4); a
+  file or directory named otherwise is unreachable by any import. This is why the standard
+  library's string module is `std::str`, not `std::string` (D9.1).
+- A directory is not a module: `util::strings` says nothing about `<root>/util.ft`, which would
+  be the unrelated module `util`. Paths are case-sensitive like the file names they map to.
+
+## 2. Search roots and the entry file
+
+The entry file is the one `.ft` file named on the `fort` command line (D14.1). Its module path is
+its base name without `.ft`: `main.ft` is the module `main`, `src/app.ft` is the module `app`.
+The base name must satisfy the segment rule of section 1.
+
+Search roots, in order (D9.2):
+
+1. the directory containing the entry file;
+2. each `-I <dir>` directory, in command-line order;
+3. the standard library directory (`--std-dir`, else `$FORT_STD_DIR`, else `../std` relative to
+   the compiler binary; see `toolchain.md`).
+
+The first segment `std` is reserved for the standard library. A path beginning with `std` is
+looked up only in the standard library directory, `std` mapping to that directory itself
+(`std::io` is `<std>/io.ft`); a path that does not begin with `std` is never looked up there. A
+file `std/x.ft` under any other root is unreachable.
+
+- The current working directory is never a root. `fort src/main.ft` run from the project
+  directory makes `src/` a root, not `.`; a module in `./lib/` needs `-I .` and is then
+  `lib::name`.
+- Import paths are root-relative, never file-relative: `util/a.ft` imports its sibling as
+  `util::b`.
+- For one reading of a path (section 3), the first root in order that contains the file wins.
+- A module's identity is the real path of its file, after resolving symbolic links and `..`.
+  Reaching one file through two module paths, for example through `-I .` combined with the entry
+  directory, is an error (section 13).
+
+## 3. Import forms and resolution
+
+Imports appear at the top of a file, before any declaration (D9.3; `grammar.md` section 2). An
+`import` after a declaration is a parse error. The order of imports is irrelevant.
+
+| Form                                       | Binds                           | Use              |
+|--------------------------------------------|---------------------------------|------------------|
+| `import std::io;`                          | `io` to the module `std::io`    | `io.close(fd)`   |
+| `import std::io as sysio;`                 | `sysio` to the module `std::io` | `sysio.close(fd)`|
+| `import std::str::compare;`                | `compare` to that declaration   | `compare(a, b)`  |
+| `import std::str::compare as cmp;`         | `cmp` to that declaration       | `cmp(a, b)`      |
+| `import std::str::{find, compare as cmp};` | `find` and `cmp`, independently | `find(s, c)`     |
+
+Resolution of `import a::b::c;` (D9.3). The grammar does not know whether `c` is a module or a
+declaration; the loader decides with at most two readings:
+
+| Reading | Condition                                | Result                                 |
+|---------|------------------------------------------|----------------------------------------|
+| module  | a file `a/b/c.ft` exists under some root | `c` bound to the module `a::b::c`      |
+| symbol  | a file `a/b.ft` exists under some root   | `c` bound to declaration `c` of `a::b` |
+
+- If both readings find a file the import is ambiguous and an error, whichever roots the two files
+  live under.
+- If neither reading finds a file, the module is not found.
+- Under the symbol reading `a::b` must declare `c`; otherwise it is an error.
+- At most one trailing segment names a declaration, so a one-segment path (`import math;`) has
+  only the module reading.
+
+The braced form `import a::b::{s1, s2 as t};` is sugar for `import a::b::s1; import a::b::s2 as
+t;` with the symbol reading forced: `a::b` must be a module file and every item one of its
+declarations. `import std::{io, str};` is an error because `std` is not a module file.
+
+Bindings:
+
+- The bound name, the last segment or the `as` name, enters the module namespace (section 5). A
+  name already declared or already bound in the file is a duplicate-binding error.
+- Importable declarations are functions, `extern` functions, structs, enums, constants and
+  globals. The import bindings of another module are not importable; there is no re-export.
+- Enum members are not declarations. `import m::Color::Red;` fails with "module `m::Color` not
+  found" because `Color` is not a file. Write `import m::Color;` and use `Color.Red`.
+- One module may be imported under several names, and together with some of its declarations;
+  the bindings name the same entities.
+- There is no wildcard import. An unused import is not diagnosed (no warnings, D14.2).
+
+## 4. Qualified access
+
+A module binding `m` is used only as the left operand of `.` (D9.4). The parser produces the same
+postfix `.` as for field access (`grammar.md` section 6); the checker resolves `m` first and,
+finding a module, looks the name up in that module's namespace.
+
+| Position       | Form                                       | Example                           |
+|----------------|--------------------------------------------|-----------------------------------|
+| call           | `m.f(args)`                                | `io.close(fd)`                    |
+| value          | `m.C`, `m.g`                               | `math.PI`, `inp.frame += 1;`      |
+| type           | `m.T`                                      | `math.Vector v = {1.0, 2.0};`     |
+| type operand   | `sizeof(m.T)`, `cast(p, m.T*)`, `new(m.T)` |                                   |
+| struct literal | `m.T{...}`                                 | `math.Vector{1.0, 2.0}`           |
+| enum member    | `m.E.Member`                               | `inp.Key.Left`, or a `case` label |
+| function value | `m.f`                                      | `fn i32(i32, i32) op = math.add;` |
+
+- A type position admits exactly one dot (`qualified_name`, `grammar.md` section 4). `m` alone
+  is an error in both value and type positions.
+- Qualified access sees the declarations of `m`, not the imports of `m`.
+- `m.g = e;` and `m.g++;` are allowed when `g` is a `mut` global (D7.10); assigning to `m.C` is
+  an error like any assignment to an immutable lvalue (D5.7).
+
+## 5. Namespaces, lookup and shadowing
+
+Each module has one namespace holding its functions, `extern` functions, structs, enums,
+constants, globals and import bindings (D7.9). Any two of these with the same name collide,
+whatever their kinds: a struct `Node` and a function `Node` cannot coexist.
+
+Lookup of an unqualified name proceeds (D7.9):
+
+1. block scopes, innermost outward: locals and parameters, a local being visible only after its
+   own declaration;
+2. the module namespace of the current file;
+3. the universe: `del`, `assert`, `panic`, `print`, `println`, `eprint`, `eprintln`, `fprint`,
+   `fprintln` (D12.2).
+
+- A local or parameter may not reuse the name of an enclosing local or parameter.
+- A local or parameter may shadow a module-level name, import bindings included, or a universe
+  name; the shadowed name is inaccessible in that scope. After `import std::io;` a parameter
+  named `io` is legal, and `io` in its scope names the parameter, not the module.
+- A module-level declaration or import binding may shadow a universe name: a module declaring
+  `fn void print(string s)` loses the builtin `print` throughout its body.
+- Enum members are not in the namespace (D3.9): `Red` is not a name, `Color.Red` is.
+- Universe functions yield no value, cannot be used as values, and cannot be imported or
+  qualified.
+
+## 6. Import graph and export rules
+
+The import relation must be acyclic (D9.5). The loader detects a cycle while walking the closure
+from the entry module and reports it at the import that closes it. A module importing itself is a
+cycle of length one. Whole-program compilation could tolerate cycles; the rule stays because it
+keeps dependencies one-directional and module order a topological order.
+
+- Two struct types that refer to each other, through pointers or slices (D3.8), must be declared
+  in the same module.
+- Two functions in different modules cannot call each other, and a module cannot both provide
+  types to another module and call into it. Move one side, or pass a function pointer down from
+  the importing module.
+
+Everything at module level is exported (D9.6); `pub` and `priv` are reserved words (D2.4) and
+naming conventions for helpers are not enforced. `extern` declarations are per-module: every
+module that calls a C function declares it, and the same C symbol may be declared in several
+modules provided the signatures are identical (D9.8); differing signatures are an error
+(section 13). `std::libc` (D13.2) collects the common libc prototypes so most modules import
+them instead.
+
+## 7. Symbol names
+
+| Entity                          | Assembly symbol              | Example             |
+|---------------------------------|------------------------------|---------------------|
+| function in module `a::b`       | `a.b.name`                   | `std.io.close`      |
+| constant or global in `a::b`    | `a.b.NAME`                   | `main.TABLE`        |
+| `main` of the entry module      | `<entry>.main`               | `main.main`         |
+| program entry, compiler-emitted | `fort_entry`                 | `fort_entry`        |
+| runtime                         | `fort_rt_<name>`             | `fort_rt_print_i64` |
+| `extern fn`                     | the declared name, unmangled | `write`             |
+| struct, enum, import binding    | none                         |                     |
+
+The module path joined with `.`, then `.` and the declaration name, is injective: `.` is legal in
+ELF symbols and cannot occur in an identifier, and every segment is an identifier (D9.7). A
+double-underscore scheme is not injective (`a__b` is also one identifier). Fort symbols never
+collide with C symbols because C identifiers cannot contain `.`; the only undotted symbols the
+compiler emits are `fort_entry` (D11.6), runtime references and `extern` names. The standard
+library reaches the runtime through ordinary `extern fn fort_rt_...` declarations (D13.1).
+
+## 8. C foreign function interface
+
+### 8.1 Declaration and allowed types
+
+```fort
+extern fn i64 write(i32 fd, void* buf, u64 n);
+extern fn u64 strlen(char* s);
+extern fn noreturn exit(i32 status);
+```
+
+`extern fn` declares a C function with the System V x86-64 ABI (D9.8; `grammar.md` section 3). It
+is top-level only, has no body, and its symbol is the declared name. Parameter names are required
+by the grammar and otherwise unused. An `extern` function is called like any function, is usable
+as a function-pointer value, and may be `noreturn` (D8.5).
+
+| Allowed in an extern signature                  | Not allowed                          |
+|-------------------------------------------------|--------------------------------------|
+| `i8 i16 i32 i64 u8 u16 u32 u64`, `f32 f64`      | `T[]` slices, `string`, fixed arrays |
+| `bool`, `char`                                  | structs by value                     |
+| `T*`, `mut T*` for any `T`, `void*`             | enums (pass `cast(e, i32)`)          |
+| `fn R(P...)` whose signature is extern-legal    | variadic parameters                  |
+| return type `void` or `noreturn`                |                                      |
+
+Structs cross the boundary through pointers only. Because struct layout is C layout (D3.8, D9.9),
+a `mut Stat* buf` parameter is exactly a C `struct stat *`.
+
+### 8.2 C type mapping
+
+| C type                         | fort type                                 |
+|--------------------------------|-------------------------------------------|
+| `char`, `signed char`          | `char` for text, `i8` for numbers         |
+| `unsigned char`, `uint8_t`     | `u8`                                      |
+| `short`, `unsigned short`      | `i16`, `u16`                              |
+| `int`, `unsigned int`          | `i32`, `u32`                              |
+| `long`, `long long`, `ssize_t`, `off_t` | `i64`                            |
+| `unsigned long`, `size_t`      | `u64`                                     |
+| `mode_t`                       | `u32`                                     |
+| `_Bool`                        | `bool`                                    |
+| `float`, `double`              | `f32`, `f64`                              |
+| `char*`, `const char*`         | `char*` (or `u8*` for binary data)        |
+| `T*` written to by C           | `mut T*`                                  |
+| `const T*`                     | `T*`                                      |
+| `void*`, `const void*`         | `void*`                                   |
+| `R (*)(A, B)`                  | `fn R(A, B)`                              |
+| C `enum`                       | `i32`                                     |
+
+A C `const` on the pointee becomes the absence of `mut`. Nothing finer is expressible, and nothing
+finer is needed at the boundary.
+
+### 8.3 Narrow values and `bool`
+
+Values narrower than 32 bits are normalized on both sides of the boundary (D9.8): before an extern
+call the compiler zero-extends `u8`, `u16`, `bool` and `char` arguments and sign-extends `i8` and
+`i16` arguments to 32 bits; after the call it re-extends a narrow return value from `al` or `ax`,
+so upper bits left by C are never observed. A fort function that C calls back into re-extends its
+own narrow parameters on entry. `bool` crosses as a single 0 or 1.
+
+### 8.4 Variadic C functions
+
+Fort has no variadics (D8.3) and an extern signature cannot declare one. A variadic C function is
+declared with a fixed prototype for the arguments actually passed, such as
+`extern fn i32 printf(char* fmt, i64 n, f64 x);`. This is safe because System V passes fixed and
+variadic arguments identically and tells a variadic callee through `al` how many vector registers
+were used; the compiler sets `al` to that count before every extern call, zero when no float
+argument is passed (D9.8). Each argument shape needs its own prototype under its own fort name,
+since one module cannot declare `printf` twice (D7.9). Integer promotions are the caller's
+business: a `char` bound for an `int` slot is widened with `cast(c, i32)`.
+
+### 8.5 Fort functions as C callbacks
+
+A fort function is a valid C callback exactly when its signature is extern-legal (D9.9). Its
+symbol is dotted (`main.by_value`), which C cannot spell, but a callback is passed by value:
+
+```fort
+extern fn void qsort(void* base, u64 n, u64 size, fn i32(void*, void*) cmp);
+
+fn i32 by_value(void* a, void* b) {
+    i32 x = *cast(a, i32*);
+    i32 y = *cast(b, i32*);
+    return x < y ? -1 : (x > y ? 1 : 0);
+}
+```
+
+A `mut i32[] xs` is sorted with `qsort(cast(xs.ptr, void*), xs.len, sizeof(i32), by_value);`. A
+function taking a slice, string, struct or enum is not extern-legal and cannot be passed to C.
+
+### 8.6 Slices and strings
+
+Slices and strings never cross the boundary whole (D9.8, D13.4). Pass `.ptr` and `.len`: `s.ptr`
+of a `string` is `char*`; `xs.ptr` of a `T[]` is `T*`, or `mut T*` for `mut T[]`. A string
+literal is NUL-terminated (D3.7) and so is every element of `args` (D8.6); a string obtained by
+slicing or read from a file is not. A C function expecting a terminator gets a copy: allocate
+`new(char[s.len + 1])`, copy the characters, and pass `.ptr`; the last element is already `'\0'`
+(D10.2). Memory received from C as `T*` becomes a slice with `p[0..n]` (D6.9), unchecked; a
+`char*` becomes a `string` with `cast(p[0..n], string)` (D3.14). Memory from `new` may be freed
+by C `free` and memory from `malloc` by `del` (D10.3). There is no strict-aliasing rule (D10.7):
+memory may be read through any pointer type reached by `cast`. A C function that fills a buffer
+and reports its length takes the usual out-parameter shape `mut u8[]* out` (D3.6), with the
+callee writing `out->ptr` and `out->len` through a pointer to the whole slice.
+
+### 8.7 Complete example
+
+```fort
+// hello.ft
+extern fn i64 write(i32 fd, void* buf, u64 n);
+extern fn u64 strlen(char* s);
+
+fn void put(string s) {
+    write(1, cast(s.ptr, void*), s.len);
+}
+
+fn i32 main(string[] args) {
+    string greeting = "hello from fort\n";
+    put(greeting);
+    put("program: ");
+    put(args[0]);
+    put("\n");
+    u64 n = strlen(greeting.ptr);
+    println("strlen: ", n, " len: ", greeting.len);
+    return 0;
+}
+```
+
+`write` returns `i64` (`ssize_t`), discarded by the call statement (D7.3). `s.ptr` is `char*` and
+needs `cast` to `void*` (D3.14). `strlen` sees the literal's terminator and returns 16, equal to
+`.len`. Direct `write` calls bypass the stdout buffer (D11.5), so mixing them with `print`
+reorders output unless the buffer is flushed first.
+
+## 9. Calling convention
+
+The internal convention (D9.9) is System V x86-64 for scalars and one rule for aggregates:
+
+- Integers, `bool`, `char`, enums, pointers and function pointers: `rdi rsi rdx rcx r8 r9`, then
+  the stack; returned in `rax`.
+- `f32` and `f64`: `xmm0` to `xmm7`, then the stack; returned in `xmm0`.
+- Structs, fixed arrays, slices and `string`: passed as a hidden pointer to a caller-made copy,
+  occupying the next integer slot; returned into a caller-provided buffer whose address is passed
+  in `rdi` ahead of every other argument and echoed in `rax`.
+
+Differences from System V for aggregates:
+
+| Case                         | System V                            | fort v1                  |
+|------------------------------|-------------------------------------|--------------------------|
+| struct of at most 16 bytes   | split into up to two registers      | pointer to a copy        |
+| struct larger than 16 bytes  | copied onto the stack by the caller | pointer to a copy        |
+| slice or `string`            | two integer registers               | pointer to a copy        |
+| aggregate return             | registers or `rdi` result pointer   | always the `rdi` pointer |
+
+Because of these differences an aggregate never appears in an extern signature (D9.8), and the
+compiler never needs System V aggregate classification (D16). Layout is unaffected: structs,
+fixed arrays and slice headers (`ptr` at offset 0, `len` at offset 8) have C layout, so any
+aggregate can be shared with C through a pointer. Callee-saved registers, stack alignment and the
+rest of the convention are System V; `toolchain.md` states the code generation contract.
+
+## 10. Compilation model
+
+Fort v1 compiles a whole program at once (D9.10):
+
+1. The entry file is parsed and its imports are resolved (sections 2 and 3).
+2. Every imported module is parsed in turn until the import closure is complete; cycles and
+   duplicate identities are errors here.
+3. Modules are type-checked in dependency order, an imported module before its importers.
+4. One assembly file is emitted for the entire closure.
+5. The system C compiler assembles it and links it with the runtime object (D14.3).
+
+A module outside the closure is never read, so an error in an unimported standard library module
+is never reported. There is no separate compilation: no interface files, no per-module objects, no
+module cache, no incremental rebuild, no parallel compilation of modules and no `--module-path`
+(D15). A change to any file recompiles the program.
+
+## 11. Entry point and program start
+
+The entry module must define `fn i32 main()` or `fn i32 main(string[] args)` (D8.6). A `main`
+returning `void` or taking other parameters is an error. `main` in any other module is an ordinary
+function.
+
+Start-up (D11.6): the C runtime owns `main(argc, argv)`. It builds a `string[]` of `argc` strings
+whose bytes are the `argv` entries, each NUL-terminated, calls the compiler-emitted `fort_entry`
+with that slice, flushes every output buffer (D11.5) and exits with `status & 0xFF`. `fort_entry`
+is generated in the entry module: it receives the slice by hidden pointer (section 9) and calls
+`<entry>.main`, passing the slice when `main` declares the parameter. `args[0]` is the program
+name. The runtime keeps the slice for the life of the process and exposes it through
+`fort_rt_args_ptr()` and `fort_rt_args_len()`, which `std::sys` declares as externs to implement
+`sys.args()` for modules whose `main` takes no parameter. `sys.exit` (D13.2) is the other normal
+exit; a runtime error exits through `abort()` (D11.4).
+
+## 12. Worked examples
+
+### 12.1 A math module
+
+```fort
+// math.ft
+f64 PI = 3.141592653589793;
+
+fn i32 add(i32 a, i32 b) {
     return a + b;
+}
+
+fn i32 multiply(i32 a, i32 b) {
+    return a * b;
 }
 
 struct Vector {
@@ -25,357 +395,207 @@ struct Vector {
     f64 y;
 }
 
-// Everything is exported by default (v1)
-// Visibility modifiers in future versions
+fn f64 dot(Vector a, Vector b) {
+    return a.x * b.x + a.y * b.y;
+}
 ```
 
-## Import System
+### 12.2 Using it
 
-### Import Syntax
-
-#### Import Entire Module
-```c
+```fort
+// main.ft
 import math;
-// Usage: math.add(1, 2)
+import math::{add, multiply as mul};
+
+fn i32 main() {
+    i32 sum = add(5, 3);
+    i32 product = mul(4, 7);
+    math.Vector v = math.Vector{1.0, 2.0};
+    math.Vector w = {3.0, 4.0};
+    println(sum, " ", product, " ", math.dot(v, w));
+    return 0;
+}
 ```
 
-#### Import Specific Symbols
-```c
-import math::add;
-// Usage: add(1, 2)
+Output: `8 28 11.0` (D11.7). `math.Vector w = {3.0, 4.0};` is a declaration because `math.Vector`
+parses as a type followed by an identifier (`grammar.md` section 7). Both files sit in one
+directory; `fort main.ft -o main` builds the program.
 
-import math::{add, subtract, Vector};
-// Multiple symbols
+### 12.3 A list module
+
+```fort
+// list.ft
+struct Node {
+    i32 value;
+    mut Node* next;
+}
+
+struct List {
+    mut Node* head;
+    u64 size;
+}
+
+fn List list_create() {
+    return List{};
+}
+
+fn void list_push(mut List* list, i32 value) {
+    mut Node* n = new(Node);
+    n->value = value;
+    n->next = list->head;
+    list->head = n;
+    list->size += 1;
+}
+
+fn bool list_pop(mut List* list, mut i32* out) {
+    if (list->head == null) {
+        return false;
+    }
+    mut Node* n = list->head;
+    *out = n->value;
+    list->head = n->next;
+    list->size -= 1;
+    del(n);
+    return true;
+}
 ```
 
-#### Import with Rename
-```c
-import math::add as math_add;
-import vector::add as vec_add;
-// Avoid naming conflicts
+`Node` and `List` refer to each other through pointers and live in one module (section 6).
+`mut Node* next` as a field type marks the pointee mutable (D5.5); `mut List* list` makes the
+pointee writable in the callee (D5.3); `new(Node)` yields zeroed memory (D10.2). A user writes
+`import list;`, `mut List l = list.list_create();`, `list.list_push(&l, 7);`; `&l` on a `mut List`
+is a `mut List*` (D5.8); a local named `list` would shadow the binding (section 5), hence `l`.
+
+### 12.4 A multi-module application
+
+```
+game/
+  main.ft
+  input.ft
+  render.ft
+  geom/
+    vec.ft
 ```
 
-### No Wildcard Imports
-```c
-// NOT SUPPORTED:
-// import math::*;
-```
-Rationale: Explicit imports make dependencies clear
-
-### Import Resolution
-```c
-// Given multiple imports:
-import math;
-import math::add;
-
-// Both are valid:
-add(1, 2);        // Direct import
-math.add(1, 2);   // Qualified access
-```
-
-## Module Dependencies
-
-### No Circular Dependencies
-- Modules form a directed acyclic graph (DAG)
-- Circular imports are a compile error
-- Enforces clean architecture
-
-### Dependency Example
-```c
-// vec2.lang
+```fort
+// geom/vec.ft
 struct Vec2 {
     f64 x;
     f64 y;
 }
 
-// vec3.lang
-import vec2::Vec2;
-
-struct Vec3 {
-    Vec2 xy;
-    f64 z;
-}
-
-// math.lang
-import vec2::Vec2;
-import vec3::Vec3;
-
-fn dot2(Vec2 a, Vec2 b) -> f64 {
-    return a.x * b.x + a.y * b.y;
-}
-
-fn dot3(Vec3 a, Vec3 b) -> f64 {
-    return dot2(a.xy, b.xy) + a.z * b.z;
-}
-
-## Symbol Resolution
-
-### Name Conflicts
-```c
-// Error case:
-import math::add;
-import vector::add;  // ERROR: 'add' already imported
-
-// Solutions:
-import math::add as math_add;
-import vector::add as vec_add;
-
-// Or use qualified access:
-import math;
-import vector;
-math.add(1, 2);
-vector.add(v1, v2);
-```
-
-### Symbol Tables
-1. Module maintains export table
-2. Importing module builds local symbol mapping
-3. Direct imports (`::add`) go into unqualified namespace
-4. Module imports (`math`) go into qualified namespace
-
-### Type Dependencies
-```c
-// types.lang
-struct Point {
-    i32 x;
-    i32 y;
-}
-
-// graphics.lang
-import types::Point;
-
-fn draw(Point p) {  // Can use Point directly
-    // ...
+fn Vec2 vec_add(Vec2 a, Vec2 b) {
+    return Vec2{a.x + b.x, a.y + b.y};
 }
 ```
 
-## Compilation Model
+```fort
+// input.ft
+enum Key { None, Left, Right, Quit }
 
-### Separate Compilation
-- Each module compiles independently
-- Generates interface file with:
-  - Exported function signatures
-  - Exported type definitions
-  - Exported constants
-- Interface files enable parallel compilation
+mut i32 frame = 0;
 
-### Compilation Process
-1. Parse import statements
-2. Load required module interfaces
-3. Build dependency graph
-4. Compile in topological order
-5. Link modules together
-
-### Module Interface Files
-```
-// math.interface (auto-generated)
-module math {
-    fn add(i32, i32) -> i32;
-    fn subtract(i32, i32) -> i32;
-    struct Vector {
-        f64 x;
-        f64 y;
+fn Key poll() {
+    frame += 1;
+    switch (frame) {
+    case 1: return Key.Left;
+    case 2: return Key.Right;
+    default: return Key.Quit;
     }
 }
 ```
 
-## Module Search Path
+```fort
+// render.ft
+import geom::vec;
+import geom::vec::Vec2;
 
-### Search Order
-1. Current directory
-2. Project source directory
-3. Standard library path
-4. User-specified paths (via compiler flags)
-
-### Path Configuration
-```bash
-# Compiler flags
-langc --module-path=/usr/local/lib/lang
-langc --module-path=./vendor
-```
-
-## Standard Library Modules
-
-### Core Modules (Planned)
-```c
-std::io       // Input/output
-std::mem      // Memory utilities
-std::math     // Mathematical functions
-std::string   // String operations
-std::array    // Array utilities
-std::sys      // System interface
-```
-
-### Import Examples
-```c
-import std::io::{print, println};
-import std::math;
-import std::string::format;
-```
-
-## Module System Rules
-
-### Export Rules (v1)
-- All top-level declarations are exported
-- No private symbols in first version
-- Future: visibility modifiers
-
-### Import Rules
-- Imports must appear at top of file
-- Cannot import inside functions
-- Cannot conditionally import
-- Import order doesn't matter (within constraints)
-
-### Naming Conventions
-- Module names: lowercase, underscores
-- No nested modules initially
-- Future: hierarchical modules with `::`
-
-## Future Extensions
-
-### Visibility Modifiers
-```c
-// Future syntax
-pub fn add(i32 a, i32 b) -> i32 { }
-priv fn helper() { }
-```
-
-### Nested Modules
-```c
-// Future: math::linear::Vector
-// Future: math::trig::sin
-```
-
-### Module-Level Constants
-```c
-// Future
-const PI = 3.14159;
-export const MAX_SIZE = 1000;
-```
-
-### Conditional Compilation
-```c
-// Future
-#[cfg(target_os = "linux")]
-import linux::syscall;
-```
-
-## Examples
-
-### Example 1: Simple Math Module
-```c
-// math.lang
-fn add(i32 a, i32 b) -> i32 {
-    return a + b;
+struct Window {
+    i32 width;
+    i32 height;
+    Vec2 origin;
 }
 
-fn multiply(i32 a, i32 b) -> i32 {
-    return a * b;
+fn void draw(Window* win, Vec2 pos) {
+    Vec2 p = vec.vec_add(win->origin, pos);
+    println("draw at ", p.x, ",", p.y, " in ", win->width, "x", win->height);
 }
 ```
 
-### Example 2: Using Math Module
-```c
-// main.lang
-import math::{add, multiply};
+```fort
+// main.ft
+import geom::vec::Vec2;
+import render;
+import render::Window;
+import input as inp;
 
-fn main() {
-    i32 sum = add(5, 3);
-    i32 product = multiply(4, 7);
-}
-```
-
-### Example 3: Data Structure Module
-```c
-// list.lang
-struct Node {
-    i32 value;
-    Node* next;
-}
-
-struct List {
-    Node* head;
-    u64 size;
-}
-
-fn list_create() -> List {
-    List list;
-    list.head = 0;  // null
-    list.size = 0;
-    return list;
-}
-
-fn list_append(List* list, i32 value) {
-    // Implementation
-}
-```
-
-### Example 4: Complex Dependencies
-```c
-// app.lang
-import graphics::Window;
-import input::{Keyboard, Mouse};
-import math::{Vector, Matrix};
-import renderer;
-
-fn main() {
-    Window w = Window.create(800, 600);
-    renderer.init(&w);
-    
-    // Game loop
-    while (w.is_open()) {
-        input::update();
-        renderer.draw(&w);
+fn i32 main() {
+    Window w = {800, 600, {0.0, 0.0}};
+    mut Vec2 pos = {0.0, 0.0};
+    mut bool running = true;
+    while (running) {
+        switch (inp.poll()) {
+        case inp.Key.Left:
+            pos.x -= 1.0;
+        case inp.Key.Right:
+            pos.x += 1.0;
+        case inp.Key.Quit:
+            running = false;
+        case inp.Key.None:
+        }
+        render.draw(&w, pos);
     }
+    return 0;
 }
 ```
 
-## Design Rationale
+`fort main.ft -o game` from any directory builds it; `game/` is the root because it contains the
+entry file, so `geom::vec` is `game/geom/vec.ft`. Output:
 
-### Why File-Based Modules?
-- Simple mental model
-- Easy to navigate projects
-- Natural mapping to filesystem
-- Familiar to C programmers
-
-### Why No Textual Include?
-- Avoids header duplication
-- No include guards needed
-- Faster compilation
-- Clear dependencies
-
-### Why No Circular Dependencies?
-- Forces clean architecture
-- Simplifies compilation
-- Prevents initialization order issues
-- Makes code easier to understand
-
-### Why No Wildcard Imports?
-- Explicit dependencies
-- Easier to track symbol origin
-- Prevents namespace pollution
-- Better for tooling
-
-## Implementation Notes
-
-### Module Cache
-- Parsed modules cached in memory
-- Interface files cached on disk
-- Rebuild only changed modules
-
-### Error Messages
 ```
-Error: Circular dependency detected:
-  math.lang imports vector.lang
-  vector.lang imports physics.lang  
-  physics.lang imports math.lang
-
-Error: Symbol 'add' already imported from module 'math'
-  at vector.lang:3:import vector::add;
+draw at -1.0,0.0 in 800x600
+draw at 0.0,0.0 in 800x600
+draw at 0.0,0.0 in 800x600
 ```
 
-### Tooling Support
-- Module dependency visualization
-- Automatic import organization
-- Unused import detection
-- Module documentation generation
+Shown: a nested module path; one module imported both as a binding and by symbol; a type from
+another module as a field, a parameter and a nested brace initializer (D6.5); an exhaustive enum
+`switch` through a module binding (D7.7); a `mut` global; a terminating `switch` (D8.4).
+
+## 13. Module diagnostics
+
+All diagnostics follow D14.2: `<file>:<line>:<col>: error: <message>`, optionally followed by
+`note:` lines. The position is the `import` keyword unless stated; file-level errors use `1:1`.
+
+| Situation                          | Message                                                  |
+|------------------------------------|----------------------------------------------------------|
+| no file for either reading         | `module 'util::strings' not found`                       |
+| symbol reading, name absent        | `module 'util' has no declaration named 'strngs'`        |
+| both readings find a file          | `ambiguous import 'a::b::c': a/b/c.ft and a/b.ft exist`  |
+| importing an import binding        | `cannot import 'x': it is an import of module 'a::b'`    |
+| cycle (at the closing import)      | `circular import: 'main' imports 'util' imports 'main'`  |
+| one file, two paths                | `module 'util::x' is the same file as module 'x'`        |
+| module-level name reused           | `redeclaration of 'add'`                                 |
+| local reusing an enclosing local   | `redeclaration of 'i'`                                   |
+| same extern, different signatures  | `conflicting declarations of extern 'write'`             |
+| import after a declaration         | `imports must precede declarations`                      |
+| module binding as a value or type  | `'io' is a module, not a value` (or `not a type`)        |
+| `m.x` with no such declaration     | `module 'std::io' has no declaration named 'x'`          |
+| entry module without a valid `main`| `entry module 'main' must define 'fn i32 main()'`        |
+| entry base name not an identifier  | `'my-app' is not a valid module name`                    |
+| aggregate or enum in an extern     | `extern signature cannot use type 'i32[]'`               |
+
+Notes accompany some of these: "not found" lists `note: looked for <path>` once per root and
+reading; the ambiguous and same-file cases give the full paths; a redeclaration points at the
+earlier one with `note: previous declaration of 'add' here`; the missing-`main` message continues
+`or 'fn i32 main(string[] args)'`. Tests pin these with `//! error: <substring>` on the offending
+line, or `//! error-any:` for the cycle case, where the closing import depends on walk order
+(D14.5).
+
+## 14. Not in v1
+
+Deferred by D15, with the v1 idiom: visibility modifiers (idiom: naming conventions, since
+everything is exported); separate compilation, interface files and a module cache (idiom:
+whole-program builds); conditional compilation (idiom: a C shim behind `extern`). Also absent:
+wildcard imports, re-exports, nested module declarations inside a file, importing enum members,
+a module-dependency tool and generated module documentation.
