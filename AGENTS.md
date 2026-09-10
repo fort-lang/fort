@@ -11,11 +11,41 @@ A safe(r) C-like systems programming language.
 - `test/`: `test/test.h` is the C macro framework for the compiler's unit tests (it expects a
   `common.h` providing `TALLY_UNUSED`); `test/lang/` holds language tests in the directive format
   defined in `notes/toolchain.md`.
-- `src/`, `std/`, `runtime/`: compiler (C), standard library (fort) and C runtime; created in the
-  implementation phase.
+- `src/bootstrap/`: the C bootstrap compiler (stage1), frozen once the compiler is self-hosted.
+  `src/fort/`: the compiler written in fort (stage2 and stage3). `runtime/`: the C runtime
+  linked into every program. `std/`: the standard library in fort. `tools/`: `vm`,
+  `provision.sh`, `lines.py`, `bootstrap.sh`.
 - `CMakeLists.txt`, `.clang-format` and `.clang-tidy` were copied from another project (`axle`,
-  C++) as templates. They do not describe this repository yet and must be replaced when the
-  compiler is scaffolded; do not try to build with them.
+  C++) as templates until ticket T-003 replaces them; do not try to build with them before then.
+- `.tickets/` (gitignored, main checkout only) is the ticket board; `.claude/agents/` holds the
+  `implementor` and `reviewer` agent definitions.
+
+## Environment
+- Everything builds and runs inside the Ubuntu 24.04 arm64 Vagrant VM defined by `Vagrantfile`;
+  nothing is built on the host. `tools/vm up` creates and provisions it; run vagrant only through
+  `tools/vm` (it always uses the main checkout; a worktree also contains the Vagrantfile).
+- The repo root is `/vagrant` in the guest and worktrees are `/vagrant/.worktrees/<name>`;
+  `tools/vm run <cmd>` executes in the guest directory matching your host cwd.
+- The target is x86-64 Linux. The compiler runs natively on arm64; generated programs run under
+  `qemu-x86_64` transparently. Always pass `--cc x86_64-linux-gnu-gcc` to `fort` (the guest `cc`
+  is aarch64). Provisioning sets `QEMU_LD_PREFIX`; the test harness sets it itself.
+- git runs on the host; it also works in the guest (provisioning symlinks the host repo path).
+
+## Build and test
+- Presets: `debug release gcc asan msan tsan ubsan`. `tools/vm workflow <preset>` configures,
+  builds and runs ctest; build directories are `build/<preset>` inside the worktree.
+- Targets: `check` (unit tests), `check-lang` (language tests), `check-all`, `format`,
+  `format-check`, `tidy`, `lines` (test-to-code ratio, target 3:1). `tools/vm <target>` runs one.
+- `tools/vm gate` is the merge gate: `format-check`, `tidy`, and `check-all` under `debug`,
+  `asan` and `ubsan`.
+- Language tests: `test/lang/run_tests.py [filter]` (decisions D14.4, D14.5). `test/lang/xfail.txt`
+  lists tests the compiler cannot pass yet; a listed test that passes fails the run, so shrink
+  the list in the same commit that makes tests pass. `test/lang/bootstrap-unsupported.txt` lists
+  tests that use features the C bootstrap deliberately lacks. `run_tests.py --lint` validates
+  directives without a compiler.
+- Unit tests: `test/<component>_test.c` with `test/test.h`; every `test/*_test.c` is a ctest.
+- Binaries: `build/<preset>/fort` is stage1 (the C compiler); `build/<preset>/stage2/fort` and
+  `stage3/fort` are the self-hosted compiler built by stage1 and by stage2.
 
 ## Technical Standards
 - **Markdown**: Line-wrap at 100 characters, including tables and code blocks. Check with
@@ -30,9 +60,15 @@ A safe(r) C-like systems programming language.
   and reports it to the lead for ratification; it never invents syntax or semantics. Every
   amendment to `notes/decisions.md` is relayed to agents still writing against the old text, and
   a separate audit pass reconciles the documents afterwards.
-- **C sources**: every `.c`/`.h` file in the repository, including test helpers under `test/`,
-  must pass `cc -std=c11 -Wall -Wextra -Wpedantic -Werror` and the repository's `.clang-tidy`
-  with warnings as errors (no magic numbers, uppercase literal suffixes such as `0xFFU`).
+- **C sources**: C11 (`-std=c11`, `_POSIX_C_SOURCE=200809L`), no third-party code, warnings are
+  errors under both clang (default) and gcc (`gcc` preset). Names: functions, variables, fields
+  and struct/enum tags lower_case; typedefs lower_case with a `_t` suffix; enum constants,
+  global constants and macros UPPER_CASE (`enum { BYTE_MASK = 0xFFU }`). Every non-void call
+  result is used or discarded with `(void)` (`TEST_UNUSED` in tests); no magic numbers; uppercase
+  literal suffixes. `.clang-format` and `.clang-tidy` are the reference. This applies to test
+  helpers under `test/` too.
+- **fort sources**: identifier conventions per decision D1.4 (lower_case everything except
+  module constants).
 - **Commit messages**: a title of about 50 characters (72 at most), a blank line, then a body
   wrapped at 72 columns that says what changed and why, then the attribution trailers.
 
@@ -67,6 +103,37 @@ work (for example the language design, or a compiler pass plus its tests plus it
 keeps its individual commits and is merged into `main` with a merge commit
 (`git merge --no-ff`) whose message describes the whole feature. Until a remote exists, `main`
 plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitignored.
+
+### Tickets
+- One markdown ticket per deliverable in `.tickets/` in the main checkout, never in a worktree;
+  state is the directory: `todo/`, `inprogress/`, `done/`. Template and numbering rule in
+  `.tickets/README.md`; fields: id, title, size, depends-on, deliverable, spec, branch, worktree,
+  assignee, acceptance criteria (checkboxes), notes, log.
+- A ticket is assigned only when every ticket in its `depends-on` is in `done/`. Independent
+  tickets are assigned concurrently, one implementor each.
+- Acceptance criteria are verifiable inside the VM; the log records every hand-off with its
+  evidence (commands run, results, review rounds, merge sha).
+
+### Agents
+- `.claude/agents/implementor.md` (effort high, full tools) implements one ticket;
+  `.claude/agents/reviewer.md` (effort xhigh, read-only tools, the `code-review` skill) reviews
+  one branch. The coordinator is the main session. Reasoning effort is fixed per definition.
+
+### Review Workflow
+- Coordinator: picks a ticket whose dependencies are done, creates the worktree and branch
+  (`.worktrees/fort-<id>`, `feat/<id>-<slug>`), fills branch/worktree/assignee, moves the ticket
+  to `inprogress/`, spawns an `implementor` with the ticket path and worktree.
+- Implementor: reads the ticket and the cited spec; codes and tests in the worktree with small
+  green commits; runs `tools/vm gate`; spawns a `reviewer` with the branch, worktree and ticket;
+  fixes or explicitly declines each finding in the ticket log; re-runs the gate; squashes if the
+  ticket is a single unit of work; ticks every criterion with evidence; moves the ticket to
+  `done/`; reports the branch to the coordinator.
+- Reviewer: read-only; runs the `code-review` skill on the branch against `main`; also checks
+  spec citations, tests added, `xfail.txt` updates, AGENTS.md updates and commit hygiene;
+  returns findings with file:line and severity.
+- Coordinator: re-runs the gate on the branch, merges per the Change Implementation Loop
+  (squash for a single unit, `--no-ff` for a multi-unit feature), deletes the worktree and
+  branch, appends the merge sha to the ticket log, and assigns the tickets it unblocked.
 
 ### Self-Updating Context (AGENTS.md Auto-Amendment)
 AGENTS.md MUST be amended whenever a learning or course correction occurs. This applies in two
