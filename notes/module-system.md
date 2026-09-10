@@ -197,7 +197,7 @@ library reaches the runtime through ordinary `extern fn fort_rt_...` declaration
 extern fn i64 write(i32 fd, void* buf, u64 n);
 extern fn u64 strlen(char* s);
 extern fn noreturn exit(i32 status);
-extern fn own mut void* malloc(u64 n);
+extern fn own void* malloc(u64 n);
 extern fn void free(own void* p);
 ```
 
@@ -220,16 +220,17 @@ a `mut Stat* buf` parameter is exactly a C `struct stat *`.
 
 `own` may qualify a pointer or `void*` in an extern signature (D17.13). It is erased, so the
 declaration names the same C function with or without it, and it records the C side's
-convention on the fort side: `own mut void* malloc(u64 n)` says the caller must free the
-result, so `own mut u8* p = cast(malloc(n), own mut u8*);` adopts it (D17.3) and a plain
-`mut u8* p = malloc(n);` is refused as a leaking temporary (D17.8); `free(own void* p)` says
-the callee frees, so an `own` lvalue is passed as `free(cast(move(p), own void*))` and is
-`null` afterwards (D17.5). A C function that stores or frees nothing takes plain `T*`. Because
-`own` is part of type identity (D17.1), two modules that declare one C symbol with and without
-it have conflicting declarations (D9.8, section 13):
+convention on the fort side: `own void* malloc(u64 n)` says the caller must free the result
+(`void*` has no target level, so it takes no `mut`, D5.5), so the cast in
+`own mut u8* p = cast(malloc(n), own mut u8*);` types the owned block, its target saying `own`
+(D3.14), and a plain `mut u8* p = malloc(n);` is refused as a leaking temporary (D17.8);
+`free(own void* p)` says the callee frees, so an `own` lvalue is passed as
+`free(cast(move(p), own void*))` and is `null` afterwards (D17.5). A C function that stores or
+frees nothing takes plain `T*`. Because `own` is part of type identity (D17.1), two modules that
+declare one C symbol with and without it have conflicting declarations (D9.8, section 13):
 
 ```fort
-extern fn own mut void* malloc(u64 n);
+extern fn own void* malloc(u64 n);
 extern fn void free(own void* p);
 extern fn own mut char* strdup(char* s);        // C documents: the caller frees
 
@@ -258,7 +259,7 @@ free(cast(alias, void*));                       // error: a view cannot pass to 
 | `const T*`                     | `T*`                                      |
 | `void*`, `const void*`         | `void*`                                   |
 | `T*` result the caller must free | `own mut T*` (D17.13)                   |
-| `void*` from an allocator      | `own mut void*` (D17.13)                  |
+| `void*` from an allocator      | `own void*`, never `mut` (D17.13)         |
 | `T*` parameter that C frees    | `own T*` or `own void*` (D17.13)          |
 | `R (*)(A, B)`                  | `fn R(A, B)`                              |
 | C `enum`                       | `i32`, or a fort enum (passed as `i32`)   |
