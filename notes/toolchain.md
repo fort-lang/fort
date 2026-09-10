@@ -2,8 +2,8 @@
 
 This document specifies the `fort` compiler's command line, build pipeline, build modes,
 diagnostics, C runtime, code generation contract and test conventions for v1. It implements D14
-together with D9.10, D10, D11 and D12. Where it disagrees with `decisions.md` or `grammar.md`,
-those files win (D1.2).
+together with D9.10, D10, D11, D12 and the run-time side of D17. Where it disagrees with
+`decisions.md` or `grammar.md`, those files win (D1.2).
 
 Sections: 1 Command line; 2 Build pipeline; 3 Build modes; 4 Diagnostics; 5 The C runtime;
 6 Code generation contract; 7 Testing; 8 Compiler architecture sketch; 9 Not in v1.
@@ -113,13 +113,15 @@ identical in every mode: no optimizer exists in v1, and the C compiler only asse
 | index out of range (D6.8)                          | trap    | trap        | removed             |
 | slice bounds `0 <= lo <= hi <= len` (D6.9)         | trap    | trap        | removed             |
 | `new`: negative count, size overflow, no memory    | trap    | trap        | unchanged           |
+| store over a live `own` value (D17.11)             | trap    | no check    | unchanged           |
 | `assert(cond)` (D12.2)                             | trap    | trap        | unchanged           |
 | `panic(msg)`                                       | trap    | trap        | unchanged           |
 | constant index or fold out of range (D4.4, D6.8)   | compile error in every mode                 |
 | `cast` (D3.14)                                     | never traps in any mode                     |
 
 "Trap" is the runtime error contract of D11.4: flush, one line on stderr, `abort()`. "Wrap" is
-two's complement; "masked" means `count & (width - 1)`. Programs must not rely on wrapping or
+two's complement; "masked" means `count & (width - 1)`; "no check" means the store happens and
+the allocation the old value designated leaks (D17.11). Programs must not rely on wrapping or
 trapping for correctness (D11.1); the wrapping operators exist for code that needs wrap-around in
 both modes. `p[lo..hi]` on a raw pointer is never checked (D6.9), and the undefined behaviors of
 D10.7 are undefined in every mode.
@@ -157,22 +159,25 @@ reports status 134:
 
 ```sh
 main.ft:12:14: runtime error: index 5 out of range for length 3
+main.ft:16:9: runtime error: overwriting owned value
 main.ft:20:5: panic: queue empty
 main.ft:31:5: assertion failed: n > 0
 ```
 
 The position of a runtime error is the operator token of the failing operation (`[`, `+`, `-`,
-`*`, `/`, `%`, `<<`, `>>`, `++`, `--`, a compound-assignment operator, unary `-`) or the builtin
-name for `new`, `assert` and `panic`. The assertion text is the verbatim source text of the
-argument. Runtime messages are listed in section 5.
+`*`, `/`, `%`, `<<`, `>>`, `++`, `--`, a compound-assignment operator, unary `-`, the `=` of an
+assignment for the overwrite check of D17.11) or the builtin name for `new`, `assert` and
+`panic`. The assertion text is the verbatim source text of the argument. Runtime messages are
+listed in section 5.
 
 ## 5. The C runtime
 
 The runtime is `runtime/fort_rt.c`, compiled to `<std-dir>/fort_rt.o`; it is C and permanent
 (D13.1). It owns process start and exit (D11.6), heap allocation (D10.2, D10.3), the
-runtime-error and panic paths (D11.4), formatting and buffering for the print family (D11.5,
-D11.7, D12.2), and the program arguments for `std::sys`. The compiler emits calls to the entry
-points below; the standard library declares the ones it needs with `extern fn`
+runtime-error and panic paths (D11.4, including the ownership overwrite check of D17.11),
+formatting and buffering for the print family (D11.5, D11.7, D12.2), and the program arguments
+for `std::sys`. The compiler emits calls to the entry points below; the standard library
+declares the ones it needs with `extern fn`
 (module-system.md 7).
 
 ### 5.1 Entry points
@@ -189,7 +194,9 @@ struct fort_rt_enum_member { int32_t value; const char* name; };
 /* Allocation (D10.2, D10.3). fort_rt_new returns zeroed storage for count elements
    of elem_size bytes, at least one byte so the result is never null (new(T[0]) is
    non-null); an overflowing product or a failed calloc is a runtime error at loc.
-   fort_rt_del is free(p); a null p is a no-op. */
+   fort_rt_del is free(p); a null p is a no-op. Ownership (D17) is erased: the
+   runtime sees plain pointers, and the compiler zeroes a del or move operand
+   itself (section 6, item 14). */
 void* fort_rt_new(uint64_t elem_size, uint64_t count, loc);
 void  fort_rt_del(void* p);
 
@@ -197,7 +204,9 @@ void  fort_rt_del(void* p);
    Values arrive sign-extended to 64 bits; hi is len for e[lo..]; type is the
    NUL-terminated name of the shifted operand's type; text is the NUL-terminated
    source text of the assert argument. fail_div_overflow is MIN / -1 and MIN % -1;
-   fail_alloc_count is new(T[n]) with a negative signed n. */
+   fail_alloc_count is new(T[n]) with a negative signed n; fail_overwrite is an
+   assignment to an own reference-typed lvalue whose current value is not zero
+   (D17.11), emitted in checked builds only. */
 void fort_rt_fail_bounds(int64_t index, uint64_t len, loc);
 void fort_rt_fail_slice(int64_t lo, int64_t hi, uint64_t len, loc);
 void fort_rt_fail_overflow(loc);
@@ -205,6 +214,7 @@ void fort_rt_fail_shift(int64_t count, const char* type, loc);
 void fort_rt_fail_div_zero(loc);
 void fort_rt_fail_div_overflow(loc);
 void fort_rt_fail_alloc_count(int64_t n, loc);
+void fort_rt_fail_overwrite(loc);
 void fort_rt_panic(const char* ptr, uint64_t len, loc);
 void fort_rt_assert_fail(const char* text, loc);
 
@@ -257,6 +267,7 @@ Each failure writes exactly one line, after `fort_rt_flush_all`, then calls `abo
 | `fort_rt_fail_alloc_count`  | `runtime error: negative allocation count -1`              |
 | `fort_rt_new` (overflow)    | `runtime error: allocation size overflow`                  |
 | `fort_rt_new` (no memory)   | `runtime error: out of memory`                             |
+| `fort_rt_fail_overwrite`    | `runtime error: overwriting owned value`                   |
 | `fort_rt_panic`             | `panic: <message bytes>`                                   |
 | `fort_rt_assert_fail`       | `assertion failed: <expression text>`                      |
 
@@ -343,11 +354,25 @@ This section is normative for the compiler. The assembly it emits must satisfy e
     (unsigned types) to 64 bits, then one unsigned compare against the length branches to the
     stub when not below it. Slicing checks `hi <= len` and `lo <= hi` with unsigned compares.
     Fixed-array lengths are immediates. `--no-bounds-check` omits exactly these compares.
-13. **`new` and `del`** (D10.2, D10.3). `new(T)` calls `fort_rt_new(sizeof(T), 1, loc)` and
-    yields `rax`; `new(T[n])` first tests a signed `n` with `test`/`js` into a
+13. **`new` and `del`** (D10.2, D10.3, D17.9). `new(T)` calls `fort_rt_new(sizeof(T), 1, loc)`
+    and yields `rax`; `new(T[n])` first tests a signed `n` with `test`/`js` into a
     `fort_rt_fail_alloc_count` stub, then calls `fort_rt_new(sizeof(T), n, loc)` and builds the
-    header `{rax, n}`. `del(x)` calls `fort_rt_del` with the pointer, or the slice's `ptr`.
-14. **Builtins** (D12.2). `print`, `println`, `eprint`, `eprintln`, `fprint`, `fprintln`
+    header `{rax, n}`. `del(x)` calls `fort_rt_del` with the pointer, or the slice's `ptr`, and
+    then, when `x` is an lvalue, stores the zero value into `x`: eight zero bytes for a pointer
+    or `void*`, sixteen for a slice or `string`. On an rvalue operand nothing is stored.
+14. **Ownership** (D17). `own` is erased: an `own` type has the representation, alignment,
+    argument class (item 5, item 6) and normalization of the same type without `own`, and
+    neither the emitted code nor the runtime carries any ownership information. `move(lv)`
+    loads the operand's value as the expression result and stores the zero value into `lv`
+    (the whole zeroed value for an owning aggregate, D17.6), whatever the build mode.
+    In checked mode only, an assignment whose target is an lvalue of `own` reference type
+    (pointer, `void*`, slice or `string`, not an owning aggregate) loads the target's pointer
+    word (offset 0 for a slice or `string`) after the right-hand side has been evaluated and
+    immediately before the store, tests it, and branches to a `fort_rt_fail_overwrite` stub when
+    it is non-zero (D17.11); the stub's position is the `=` token. Release mode emits the plain
+    store, and `--no-bounds-check` does not affect the check. Declarations, `move`, `del` and
+    assignments of owning aggregates never emit it.
+15. **Builtins** (D12.2). `print`, `println`, `eprint`, `eprintln`, `fprint`, `fprintln`
     evaluate `fd` (1, 2, or the first argument, once) and then each argument left to right,
     calling one entry point per argument: `i8 i16 i32 i64` sign-extended to `fort_rt_print_i64`;
     `u8 u16 u32 u64` zero-extended to `fort_rt_print_u64`; `f32`/`f64` to `_f32`/`_f64`; `bool`,
@@ -356,11 +381,11 @@ This section is normative for the compiler. The assembly it emits must satisfy e
     `_str`. `println` and friends end with `fort_rt_print_char(fd, 10)`. `assert(cond)` branches
     on `cond` to a `fort_rt_assert_fail` stub whose text is a `.Lstr<N>`; it is emitted in both
     modes. `panic(msg)` calls `fort_rt_panic` and is followed by `ud2`.
-15. **`noreturn`** (D8.5). `ud2` follows the body of a `noreturn` function and every call to one;
+16. **`noreturn`** (D8.5). `ud2` follows the body of a `noreturn` function and every call to one;
     reaching it raises SIGILL with no message.
-16. **Enum tables.** `.Lenum.<path.Name>` is an array of `fort_rt_enum_member` (16 bytes each:
+17. **Enum tables.** `.Lenum.<path.Name>` is an array of `fort_rt_enum_member` (16 bytes each:
     `.long value`, `.zero 4`, `.quad .Lstr<N>`), one entry per member in declaration order.
-17. **`fort_entry`.** Emitted in the entry module: copies the 16-byte slice it receives into its
+18. **`fort_entry`.** Emitted in the entry module: copies the 16-byte slice it receives into its
     frame, calls `<entry>.main` with the copy's address in `rdi` when `main` takes `args`, or
     with no arguments otherwise, and returns `main`'s `eax`.
 
@@ -416,8 +441,10 @@ test/
 
 `<area>` is one of `lexical constants operators casts mutability declarations control switch
 defer functions structs enums arrays slices strings pointers globals builtins errors modes modules
-ffi stdlib`: `errors` holds the `abort` tests of the runtime checks, `modes` the `--release`
-tests, and `stdlib` the tests of the standard library once it exists. `NNN` is a three-digit
+ffi stdlib ownership`: `errors` holds the `abort` tests of the runtime checks (the overwrite
+check of D17.11 included, with its `--release` twin under `modes`), `modes` the `--release`
+tests, `stdlib` the tests of the standard library once it exists, and `ownership` the run tests
+of `own`, `move`, lending and `del` and the fail tests of every rule of D17. `NNN` is a three-digit
 sequence number and `name` a short snake-case description. Paths in `link:` are relative to
 `test/lang/`.
 
@@ -512,10 +539,28 @@ path (D11.4):
 //! stdout:
 //| before
 fn i32 main() {
-    mut i32[] xs = new(i32[3]);
+    own mut i32[] xs = new(i32[3]);
     defer del(xs);
     println("before");
     xs[5] = 1;
+    return 0;
+}
+```
+
+An ownership fail test under `test/lang/fail/ownership/`, one annotated line per rule (D17.5,
+D17.8, D17.9):
+
+```fort
+//! fail
+struct Node { i32 v; }
+
+fn i32 main() {
+    own mut Node* a = new(Node);
+    own mut Node* b = a;         //! error: move
+    mut Node* c = new(Node);     //! error: would leak
+    Node* view = a;
+    del(view);                   //! error: own
+    del(a);
     return 0;
 }
 ```
@@ -645,8 +690,9 @@ in files:
 | globals                 | 15  | 10   |
 | builtins                | 30  | 10   |
 | stdlib                  | 45  | 5    |
+| ownership               | 15  | 20   |
 | programs                | 20  | 0    |
-| total                   | 550 | 350  |
+| total                   | 565 | 370  |
 
 Every operator, keyword and builtin appears in at least one run test and, where it can be
 misused, one fail test (decisions.md checklist). Every runtime check has an `abort` test in
@@ -671,7 +717,8 @@ implementable; the design is to be planned in the implementation phase.
 - **Checker.** Two-phase top-level resolution per D7.10: phase one enters every module-level
   name; phase two resolves types, signatures, constant values and struct sizes lazily with cycle
   detection, so declaration order never matters; then each body is checked against D3 to D8 and
-  the AST is annotated with types, constant values, lvalue mutability and resolved symbols.
+  D17 and the AST is annotated with types, constant values, lvalue mutability, resolved symbols
+  and, on each assignment, whether the target is an `own` lvalue that needs the overwrite check.
 - **Codegen.** One pass over the annotated AST writing text assembly (section 6) with no
   intermediate representation and no register allocation: expressions evaluate into `rax` or
   `xmm0`, intermediates spill to the frame, locals live in frame slots, deferred statements are
