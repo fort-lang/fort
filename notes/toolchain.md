@@ -36,7 +36,7 @@ file (D14.1). Options and the entry file may appear in any order.
 - `-o`, `-I`, `--std-dir`, `--cc`, `--target` and `-Xcc` take the following argument; `-l<lib>`
   is one argument. `-I` roots are searched in command-line order (D9.2) and `-Xcc` arguments are
   passed in command-line order. The last `-o`, `--cc` and `--target` win.
-- `--cc` must name a clang: the compiler emits LLVM IR, not assembly or C (D14.1, D19.1). The
+- `--cc` must name a clang, since nothing else reads LLVM IR (D14.1, D19.1). The
   default target triple is `x86_64-linux-gnu` (D14.1).
 - The default output is `a.out`; with `-c` it is `<entry>.o` and with `-S` `<entry>.ll` (D14.1),
   where `<entry>` is the entry file's base name without `.ft`, placed in the current directory as
@@ -200,10 +200,11 @@ listed in section 5.
 The runtime is `runtime/fort_rt.c`, compiled to `<std-dir>/fort_rt.o`; it is C and permanent
 (D13.1). It owns process start and exit (D11.6), heap allocation (D10.2, D10.3), the
 runtime-error and panic paths (D11.4, including the ownership overwrite check of D17.11),
-formatting and buffering for the print family (D11.5, D11.7, D12.2, D18), and the program arguments
-for `std::sys`. The compiler emits calls to the entry points below; the standard library
-declares the ones it needs with `extern fn`
-(module-system.md 7).
+formatting and buffering for the print family (D11.5, D11.7, D12.2, D18), and the program
+arguments for `std::sys`. The compiler emits calls to the entry points below and declares each
+one it uses in the module with the prototype shown, mapped to IR types by section 6 item 8 and
+with `cold noreturn nounwind` on the `_Noreturn` ones; the standard library declares the ones it
+needs with `extern fn` (module-system.md 7).
 
 ### 5.1 Entry points
 
@@ -221,7 +222,7 @@ struct fort_rt_enum_member { int32_t value; const char* name; };
 // non-null); an overflowing product or a failed calloc is a runtime error at loc.
 // fort_rt_del is free(p); a null p is a no-op. Ownership (D17) is erased: the
 // runtime sees plain pointers, and the compiler zeroes a del or move operand
-// itself (section 6, item 14).
+// itself (section 6, items 17 and 18).
 void* fort_rt_new(uint64_t elem_size, uint64_t count, loc);
 void  fort_rt_del(void* p);
 
@@ -319,8 +320,8 @@ Each failure writes exactly one line, after `fort_rt_flush_all`, then calls `abo
 | `fort_rt_assert_fail`       | `assertion failed: <expression text>`                      |
 
 `<file>` is as in section 4. Numbers in messages are decimal; the index, the slice bounds and
-the allocation count are printed as signed values. Falling off the end of a
-`noreturn` function executes a bare trap instruction (D8.5): the process dies with SIGILL and no
+the allocation count are printed as signed values. Falling off the end of a `noreturn` function
+executes the trap of section 6 item 20 (D8.5, D19.7): the process dies with SIGILL and no
 message.
 
 ### 5.3 Buffering
@@ -339,134 +340,543 @@ buffer size is the runtime's choice.
 
 ## 6. Code generation contract
 
-This section is normative for the compiler. The assembly it emits must satisfy every item.
+This section is normative for the compiler. The LLVM IR module it emits must satisfy every item
+and must pass `opt -passes=verify` (D19.1). The two examples at the end are `test/ir/hello.ll`
+and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (section 2).
 
-1. **Syntax.** GNU assembler, AT&T syntax, one `.s` file per program (D14.3). The file begins
-   with `.text` and ends with `.section .note.GNU-stack,"",@progbits` so the stack is
-   non-executable.
-2. **Sections.** Functions in `.text`, aligned with `.p2align 4`. String literals (`.asciz`, one
-   NUL beyond `len`, D3.7), enum name tables and constants (`Type NAME = init;`, D7.10) in
-   `.rodata`; a constant whose initializer contains an address (`&global`, a function name) goes in
-   `.data.rel.ro` instead so the loader can relocate it. `mut` globals with a nonzero
-   initializer in `.data`, all-zero ones in `.bss`. Data is aligned with `.balign` to its type's
-   alignment (D3.1, D3.8): scalars to their size; pointers, function pointers, slices and strings
-   to 8; arrays to their element; structs to their most-aligned field.
-3. **Symbols.** Fort functions, constants and globals use the dotted names of D9.7 and are
-   emitted with `.globl`, `.type name, @function` or `@object`, and `.size`. `fort_entry` is
-   `.globl`. Every compiler-generated label starts with `.L`: `.Lstr<N>` (literals),
-   `.Lfile<N>` (one NUL-terminated file path per module, as printed by section 4), `.Lfail<N>`
-   (failure stubs), `.Lenum.<module.path.name>` (enum tables), and ordinary control-flow labels.
-   `extern` symbols are used unmangled (D9.8).
-4. **Position independence** (D14.3, D16). Data is addressed RIP-relative (`lea sym(%rip)`,
-   `mov sym(%rip), %reg`). Calls to `extern` and runtime functions are `call name@PLT`; their
-   addresses, when used as values, come from `mov name@GOTPCREL(%rip), %reg`. Fort-to-fort calls
-   are direct (`call a.b.f`) and a fort function's address is `lea a.b.f(%rip), %reg`. Absolute
-   addresses appear only in data (`.quad a.b.f`) in `.data` or `.data.rel.ro`.
-5. **Registers and stack** (D9.9). Scalar arguments and results follow System V: integer class in
-   `rdi rsi rdx rcx r8 r9` and `rax`, floats in `xmm0` to `xmm7` and `xmm0`, further arguments on
-   the stack right to left in 8-byte slots. `rbx`, `rbp`, `r12` to `r15` are preserved. `rsp` is a
-   multiple of 16 immediately before every `call`. Every function establishes a frame with
-   `push %rbp; mov %rsp, %rbp`. The red zone is not used.
-6. **Aggregates** (D9.9). A struct, fixed array, slice or `string` argument is copied by the
-   caller into its own frame and its address is passed in the integer slot the argument occupies.
-   An aggregate result is written into caller-provided storage whose address is passed in `rdi`
-   before all other arguments and returned in `rax`. Slice and string headers are 16 bytes,
-   `ptr` at offset 0 and `len` at offset 8; enums are 4 bytes; `bool` and `char` are 1 byte.
-7. **Extern calls** (D9.8). Before every `call` to a non-fort symbol, `al` holds the number of
-   vector registers used by the call (zero when no float argument is passed), which is what a
-   variadic callee reads. Narrow arguments are extended before the call (item 8) and a narrow
-   return value is re-extended from `al` or `ax` after it.
-8. **Normalization.** A `bool`, `char`, `u8`, `u16`, `i8` or `i16` value held in a register is
-   always extended to 32 bits: `movzbl`/`movzwl` for the unsigned ones, `bool` and `char`,
-   `movsbl`/`movswl` for `i8`/`i16`. Extension happens on every load from memory, on function
-   entry for each narrow parameter (so C callbacks are covered), and after an extern call.
-   Stores use the narrow width. `bool` is stored as 0 or 1; comparisons produce it with `setcc`
-   followed by `movzbl`.
-9. **Stack probing** (D10.8). A frame larger than 4096 bytes is established by touching one byte
-   in every page of the frame, from the highest address down, before any other store into it.
-10. **Checks and failure stubs.** Every runtime check is a compare-and-branch to an out-of-line
-    stub placed after the function body. A stub loads the arguments of section 5.1, loads
-    `.Lfile<N>` into `rdi` and the line and column into `esi` and `edx` (or the following
-    registers when the entry point takes values first), calls the entry point through `@PLT`,
-    and is followed by `ud2`. One stub per check site; the line and column are the position rule
-    of section 4.
-11. **Integer checks** (D11.1, D11.3). In checked mode: signed `add`/`sub`/`imul`/`neg` are
-    followed by `jo`; unsigned `add`/`sub` by `jc`; unsigned `mul` by `jo` or `jc`; overflow is
-    detected at the operand's width. A shift count is compared unsigned against the width and
-    branches to the stub when not below it; in release mode it is masked with `and` by
-    `width - 1`. Division tests the divisor for zero (`fort_rt_fail_div_zero`) and, for signed
-    types, `-1` against a dividend equal to the minimum (`fort_rt_fail_div_overflow`), in both
-    modes, then uses `cqo`/`cdq` and `idiv`, or `xor %edx, %edx` and `div`.
-12. **Bounds checks** (D6.8, D6.9). The index is sign-extended (signed types) or zero-extended
-    (unsigned types) to 64 bits, then one unsigned compare against the length branches to the
-    stub when not below it. Slicing checks `hi <= len` and `lo <= hi` with unsigned compares.
-    Fixed-array lengths are immediates. `--no-bounds-check` omits exactly these compares.
-13. **`new` and `del`** (D10.2, D10.3, D17.9). `new(T)` calls `fort_rt_new(sizeof(T), 1, loc)`
-    and yields `rax`; `new(T[n])` first tests a signed `n` with `test`/`js` into a
-    `fort_rt_fail_alloc_count` stub, then calls `fort_rt_new(sizeof(T), n, loc)` and builds the
-    header `{rax, n}`. `del(x)` calls `fort_rt_del` with the pointer, or the slice's `ptr`, and
-    then, when `x` is an lvalue, stores the zero value into `x`: eight zero bytes for a pointer
-    or `void*`, sixteen for a slice or `string`. On an rvalue operand nothing is stored.
-14. **Ownership** (D17). `own` is erased: an `own` type has the representation, alignment,
-    argument class (item 5, item 6) and normalization of the same type without `own`, and
-    neither the emitted code nor the runtime carries any ownership information. `move(lv)`
-    loads the operand's value as the expression result and stores the zero value into `lv`
-    (the whole zeroed value for an owning aggregate, D17.6), whatever the build mode.
-    In checked mode only, an assignment whose target is an lvalue of `own` reference type
-    (pointer, `void*`, slice or `string`, not an owning aggregate) loads the target's pointer
-    word (offset 0 for a slice or `string`) after the right-hand side has been evaluated and
-    immediately before the store, tests it, and branches to a `fort_rt_fail_overwrite` stub when
-    it is non-zero (D17.11); the stub's position is the `=` token. Release mode emits the plain
-    store, and `--no-bounds-check` does not affect the check. Declarations, `move`, `del` and
-    assignments of owning aggregates never emit it.
-15. **Builtins** (D12.2). `print`, `println`, `eprint`, `eprintln`, `fprint`, `fprintln`
-    evaluate `fd` (1, 2, or the first argument, once) and then each argument left to right,
-    calling one entry point per argument: `i8 i16 i32 i64` sign-extended to `fort_rt_print_i64`;
-    `u8 u16 u32 u64` zero-extended to `fort_rt_print_u64`; `f32`/`f64` to `_f32`/`_f64`; `bool`,
-    `char` to `_bool`, `_char`; enums with the address and length of `.Lenum.<path.name>` to
-    `_enum`; pointers, `void*` and function pointers to `_ptr`; `string` as `ptr`, `len` to
-    `_str`. `println` and friends end with `fort_rt_print_char(fd, 10)`. `assert(cond)` branches
-    on `cond` to a `fort_rt_assert_fail` stub whose text is a `.Lstr<N>`; it is emitted in both
-    modes. `panic(msg)` calls `fort_rt_panic` and is followed by `ud2`.
-16. **`noreturn`** (D8.5). `ud2` follows the body of a `noreturn` function and every call to one;
-    reaching it raises SIGILL with no message.
-17. **Enum tables.** `.Lenum.<path.name>` is an array of `fort_rt_enum_member` (16 bytes each:
-    `.long value`, `.zero 4`, `.quad .Lstr<N>`), one entry per member in declaration order.
-18. **`fort_entry`.** Emitted in the entry module: copies the 16-byte slice it receives into its
-    frame, calls `<entry>.main` with the copy's address in `rdi` when `main` takes `args`, or
-    with no arguments otherwise, and returns `main`'s `eax`.
+1. **Form and module header.** One textual module (`.ll`, LLVM 18 syntax, opaque pointers) holds
+   the whole program (D9.10, D19.1) and is built by appending text in one forward pass. It
+   begins with
 
-A checked-mode `fn i32 add(i32 a, i32 b) { return a + b; }` in `main.ft` (the `+` at line 2,
-column 14) is emitted as:
+   ```llvm
+   target triple = "x86_64-unknown-linux-gnu"
+   ```
 
-```asm
-        .text
-        .globl  main.add
-        .type   main.add, @function
-        .p2align 4
-main.add:
-        push    %rbp
-        mov     %rsp, %rbp
-        mov     %edi, %eax
-        add     %esi, %eax
-        jo      .Lfail0
-        pop     %rbp
-        ret
-.Lfail0:
-        lea     .Lfile0(%rip), %rdi
-        mov     $2, %esi
-        mov     $14, %edx
-        xor     %eax, %eax
-        call    fort_rt_fail_overflow@PLT
-        ud2
-        .size   main.add, .-main.add
+   in clang's normalized spelling, and carries no `target datalayout`, no `!llvm.module.flags`,
+   no `!llvm.ident`, no `source_filename` and no comments (D19.1): clang derives the layout from
+   the triple, and position independence comes from the `--cc` line (section 2), not from module
+   flags. Sections appear in this order and nowhere else: the triple, the named types, the
+   module-level globals and constants (D7.10), the function definitions, the private data, the
+   declarations, the attribute groups. Forward references to globals are legal in `.ll`, which
+   is what lets one pass emit a function before the data it names. Naming and ordering inside
+   each section follow D19.5, so the text is a function of the program alone.
 
-        .section .rodata
-.Lfile0:
-        .asciz  "main.ft"
+2. **Type mapping** (D19.2). The value type is what a temporary holds; the memory type is what
+   an `alloca`, a global or a field holds.
 
-        .section .note.GNU-stack,"",@progbits
+   | fort                     | value type        | memory type     | notes                        |
+   |--------------------------|-------------------|-----------------|------------------------------|
+   | `i8 i16 i32 i64`         | `i8 i16 i32 i64`  | same            | `sdiv`, `sext`, `icmp slt`   |
+   | `u8 u16 u32 u64`         | `i8 i16 i32 i64`  | same            | `udiv`, `zext`, `icmp ult`   |
+   | `bool`                   | `i1`              | `i8`            | 0 or 1 in memory (D3.3)      |
+   | `char`                   | `i8`              | `i8`            | unsigned byte (D3.2)         |
+   | `f32`, `f64`             | `float`, `double` | same            | D3.1                         |
+   | `T*`, `void*`, `fn R(P)` | `ptr`             | `ptr`           | opaque (D3.10, D3.11)        |
+   | `T[N]`                   | none              | `[N x T]`       | outside in (D3.6)            |
+   | `T[]`, `string`          | none              | `%fort.slice`   | `type { ptr, i64 }`          |
+   | `struct a::b::s`         | none              | `%struct.a.b.s` | fields in order, no `packed` |
+   | `enum`                   | `i32`             | `i32`           | D3.9                         |
+   | `void`                   | `void`            | none            | result type only             |
+
+   Signedness is in the instruction, never in the type (D3.1), and an array type nests outside
+   in, so `i32[3][4]` is `[4 x [3 x i32]]` (D3.6). Every load of a `bool` place is a
+   `load i8` and a `trunc`, every store a `zext` and a `store i8`, so a `bool` field has C's
+   `_Bool` layout and `fort_rt_print_bool(int32_t, uint8_t)` needs no special case; the
+   `trunc`/`zext` pairs disappear in the optimizer. One `%fort.slice` serves every slice and
+   `string`, because with opaque pointers `i32[]`, `u8[]` and `string` have identical IR (D3.5,
+   D3.7). `%fort.slice` and `%fort.enum_member = type { i32, ptr }` are emitted in every module,
+   used or not, so the emitter tracks nothing; unused named types are legal.
+
+3. **Aggregates live in memory** (D19.3). Only scalars are SSA values: a struct, fixed array,
+   slice or `string` always occupies a place, is copied with `llvm.memcpy.p0.p0.i64`, zeroed
+   (`{}`, `del`, `move`) with `llvm.memset.p0.i64`, and reached field by field or element by
+   element with `getelementptr`. The emitter never loads or stores an aggregate as one value and
+   never writes `insertvalue` or `extractvalue` on one; its only `extractvalue` takes apart the
+   `{iN, i1}` of an overflow intrinsic (item 15). Exactly three `getelementptr` shapes exist,
+   and all three always carry `inbounds`: `inbounds <arrty>, ptr %a, i64 0, i64 %i` for an
+   element of a fixed array, `inbounds <elemty>, ptr %p, i64 %i` for an element reached through
+   a pointer or a slice's `.ptr`, and `inbounds %struct.x, ptr %s, i32 0, i32 <k>` for a field.
+   `inbounds` is always true: an element access is preceded by its bounds check (item 16) and a
+   field or header access is in bounds by construction, and `--no-bounds-check` removes the
+   check's branch, never the `inbounds` (D10.6). This is D9.9's model spelled in IR.
+
+4. **Symbols, linkage, visibility** (D9.7). The dotted names of D9.7 are quoted:
+   `@"main.add"`, `@"std.io.read_file"`, `@"main.LIMIT"`; quoting is uniform and does not change
+   the ELF symbol, which is `main.add`. C names (`extern` declarations, `fort_rt_*`,
+   `fort_entry`) are unquoted. Fort functions, constants and globals are `dso_local` with the
+   default external linkage (D9.6), so fort-to-fort calls are direct and fort data is addressed
+   PC-relative; `extern` and `fort_rt_*` symbols carry no `dso_local` and go through the
+   procedure linkage and global offset tables. Private data (`@.str.N`, `@.file.N`,
+   `@.enum.<path.name>`) is `private unnamed_addr`.
+
+5. **Data emission.** Private data follows the function definitions, `@.file.N` constants before
+   `@.str.N` before `@.enum.*` (D19.5):
+
+   ```llvm
+   @.file.0 = private unnamed_addr constant [9 x i8] c"abort.ft\00", align 1
+   @.str.0  = private unnamed_addr constant [7 x i8] c"before\00", align 1
+   @"main.LIMIT"   = dso_local constant i32 100, align 4
+   @"main.TABLE"   = dso_local constant [2 x ptr] [ptr @"main.f", ptr @"main.g"], align 8
+   @"main.counter" = dso_local global i64 0, align 8
+   @"main.origin"  = dso_local global %struct.main.point zeroinitializer, align 4
+   ```
+
+   - A string literal is `[len + 1 x i8]` with the trailing NUL that `len` excludes (D3.7);
+     non-printable bytes are written as `\XX` hex pairs.
+   - `constant` for module constants (D7.10) and for private data, `global` for `mut` globals;
+     an all-zero `global` lands in `.bss` and a nonzero one in `.data` by itself, and a
+     `constant` whose initializer holds a relocation lands in `.data.rel.ro` because the module
+     is compiled as position-independent code (item 6).
+   - `unnamed_addr` marks private data only: a named fort constant keeps its address significant
+     because `&CONST` is expressible (D6.7).
+   - Every global, `alloca`, `load` and `store` carries an explicit `align N` from D3.1 and
+     D3.8.
+   - Only referenced private data is emitted: a program with no check has no `@.file.N`
+     (`test/ir/hello.ll`), and an enum table exists only if some `print` of that enum type is
+     compiled (item 21).
+
+6. **Position independence** (D14.3, D16). Nothing in the IR expresses it: `dso_local` (item 4)
+   and the `-fPIE -pie` of section 2 give RIP-relative data, direct fort-to-fort calls and
+   linkage-table calls to `extern` and runtime symbols. The one requirement the module carries
+   is that an address is never an integer constant derived from a symbol; addresses appear only
+   as `ptr` values and as `ptr` constants in initializers.
+
+7. **Calling convention, fort to fort** (D9.9). Scalars (integers, `bool`, `char`, enums,
+   pointers, function pointers, floats) are ordinary parameters and results and LLVM applies
+   System V. A struct, fixed array, slice or `string` argument is a plain `ptr` parameter: the
+   caller allocates a copy in its entry block, `llvm.memcpy`s into it and passes its address,
+   and `byval` is never used, since it would mean a callee-visible copy on the stack rather than
+   the pointer in the integer slot D9.9 requires. An aggregate result is a leading
+   `ptr sret(%T) %ret.sret` parameter on a function whose result type is `void`; the pointer
+   arrives in `rdi` and is echoed in `rax`, which is D9.9's ABI. A slice or `string` is one
+   hidden pointer and is never split into two scalars, so `fort_entry`'s C prototype stays
+   literally true (D11.6). `bool`, `char`, `u8` and `u16` parameters and results carry `zeroext`
+   and `i8` and `i16` carry `signext`, in fort and extern signatures alike, so an extern-legal
+   signature is a valid C callback by construction (D9.9). Every fort definition is
+   `define dso_local <ret> @"m.f"(...) #0`, where `#0` is
+   `{ nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }`: `nounwind` because fort has
+   no exceptions, the frame pointer because it is what a debugger gets without DWARF (section
+   9), and `probe-stack` for item 13.
+
+8. **Extern and runtime declarations** (D9.8). An `extern` function is declared with its C types,
+   unmangled, and with a variadic tail, and is called through the matching variadic call type:
+
+   ```llvm
+   declare i32 @printf(ptr, ...)
+   declare signext i8 @c_narrow(i8 signext, i16 zeroext, ...)
+   ```
+
+   ```llvm
+     %t10 = call i32 (ptr, ...) @printf(ptr @.str.0) #3
+     %t11 = call signext i8 (i8, i16, ...) @c_narrow(i8 signext %t8, i16 zeroext %t9) #3
+   ```
+
+   LLVM passes the vector-register count a variadic callee reads exactly when the call-site type
+   is variadic, so declaring every extern variadic is what makes a fixed-prototype declaration
+   of a variadic C function safe (D9.8); a non-variadic callee ignores that count, so the
+   declaration is ABI-identical for it. `#3 = { nobuiltin }` on every extern call site keeps
+   LLVM from rewriting a declared symbol into another library call, and is preferred to a
+   driver-wide `-fno-builtin`, which would also change how our `llvm.memcpy` and `llvm.memset`
+   are lowered. A call through a function pointer is not variadic (D3.10 has no variadic
+   function type) and needs no such declaration.
+
+   The runtime entry points are declared with the C prototypes of section 5.1 and are never
+   variadic; a `fort_rt_*` function the standard library declares with `extern fn` is an
+   ordinary extern declaration instead (D13.1):
+
+   ```llvm
+   declare ptr  @fort_rt_new(i64, i64, ptr, i32, i32)
+   declare void @fort_rt_del(ptr)
+   declare void @fort_rt_fail_bounds(i64, i64, ptr, i32, i32) #2
+   declare void @fort_rt_fail_slice(i64, i64, i64, ptr, i32, i32) #2
+   declare void @fort_rt_fail_overflow(ptr, i32, i32) #2
+   declare void @fort_rt_fail_shift(i64, ptr, ptr, i32, i32) #2
+   declare void @fort_rt_fail_div_zero(ptr, i32, i32) #2
+   declare void @fort_rt_fail_div_overflow(ptr, i32, i32) #2
+   declare void @fort_rt_fail_alloc_count(i64, ptr, i32, i32) #2
+   declare void @fort_rt_fail_overwrite(ptr, i32, i32) #2
+   declare void @fort_rt_panic(ptr, i64, ptr, i32, i32) #2
+   declare void @fort_rt_assert_fail(ptr, ptr, i32, i32) #2
+   declare void @fort_rt_print_i64(i32, i64)
+   declare void @fort_rt_print_u64(i32, i64)
+   declare void @fort_rt_print_f32(i32, float)
+   declare void @fort_rt_print_f64(i32, double)
+   declare void @fort_rt_print_bool(i32, i8 zeroext)
+   declare void @fort_rt_print_char(i32, i8 zeroext)
+   declare void @fort_rt_print_ptr(i32, ptr)
+   declare void @fort_rt_print_str(i32, ptr, i64)
+   declare void @fort_rt_print_enum(i32, i32, ptr, i64)
+   declare void @fort_rt_flush(i32)
+   declare void @fort_rt_flush_all()
+   ```
+
+   The intrinsics are declared with the spellings LLVM 18 prints, in this fixed order, one per
+   type actually used and none otherwise:
+
+   ```llvm
+   declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly,
+       ptr noalias nocapture readonly, i64, i1 immarg) #5
+   declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg) #6
+   declare { i8, i1 } @llvm.sadd.with.overflow.i8(i8, i8) #4
+   declare i32 @llvm.fptosi.sat.i32.f64(double) #4
+   declare void @llvm.trap() #7
+   ```
+
+   The `llvm.memcpy` declaration is one line in the module and is wrapped here only to fit the
+   page. The order is: `llvm.memcpy.p0.p0.i64`, then `llvm.memset.p0.i64`, then the overflow
+   family in the order `sadd ssub smul uadd usub umul` and, within each, the widths
+   `i8 i16 i32 i64` (item 15), then `llvm.fptosi.sat.i<N>.f32`, `llvm.fptosi.sat.i<N>.f64`,
+   `llvm.fptoui.sat.i<N>.f32` and `llvm.fptoui.sat.i<N>.f64` by ascending target width (item
+   12), then `llvm.trap` (item 20). The parameter attributes shown are part of the spelling.
+
+   Only referenced declarations are emitted, in a fixed order (D19.5): `extern` C functions in
+   first-use order, then the runtime entry points in the order of section 5.1 above, then the
+   intrinsics in the order of the table above, each group separated from the next by a blank
+   line. A symbol is declared exactly once, so an `extern fn` naming a runtime entry point
+   (`fort_rt_flush`, `fort_rt_exit`, the rest of section 5.1 that `std::libc` declares, D13.1)
+   is emitted in the runtime group with that group's prototype and attributes and is left out of
+   the extern group, variadic tail included. A plain runtime declaration carries no attribute
+   group; the failure entry points carry `#2` (item 14).
+
+9. **Normalization** (D9.8, D19.2). A narrow value is not widened to 32 bits: an `i8` value has
+   type `i8` and its width is in the type. The only extensions the emitter produces are the
+   `zeroext` and `signext` attributes of item 7, which make LLVM normalize on both sides of a
+   call, the `trunc` and `zext` of `bool`'s value and memory types, and the explicit conversions
+   of item 12.
+
+10. **Locals, control flow, evaluation order** (D19.4). Every local, scalar parameter copy and
+    compiler temporary is an `alloca` in the entry block, before any other instruction, in
+    declaration order; nothing is variable-length. Names are fixed by D19.5, per function and
+    reset at each definition: `%t<N>` for an instruction result in emission order, `%L<N>` for a
+    block in creation order with the entry block always literally `entry`, `%<ident>.<slot>` for
+    a local or parameter slot, `%<ident>.in` for an incoming parameter, `%ret.sret` for an
+    aggregate result pointer, and `%tmp<K>` from a third counter for a place the compiler
+    invents (an aggregate argument copy, a short-circuit slot). A name that embeds a fort
+    identifier always contains a dot and an invented one never does, so a local named `tmp` is
+    `%tmp.0` and cannot collide with `%tmp0` (D19.5).
+
+    A scalar parameter arrives as `%<name>.in` and is stored into its slot immediately. An
+    aggregate parameter is not copied again: its place is the caller-made copy the incoming
+    `ptr` designates (item 7), which the callee may write to, since D8.2's by-value rule is
+    satisfied by the caller's copy. `fort_entry` is the exception, because its caller is the C
+    runtime rather than fort code, which is why item 22 copies the argument slice. Control flow
+    is explicit blocks: `if`, `while`,
+    `for`, `break` and `continue` become `br`; a fort `switch` on an integer, `char` or enum
+    becomes an LLVM `switch` with one case per label and a default block (D7.7); `&&`, `||` and
+    `?:` short-circuit through a stack slot rather than a `phi`, so the tree walk never has to
+    know its predecessors; after a terminating statement the emitter opens a fresh `%L<N>` block
+    for the unreachable statements D14.2 allows. Evaluation order needs nothing: LLVM keeps the
+    order of side effects and the walk emits calls, loads and stores in source order, `fd` once
+    (D6.3, D12.2). Deferred statements are already expanded at each exit by the front end
+    (D7.8).
+
+11. **SSA discipline** (D19.4). Because every user-visible value lives in an `alloca`, a
+    temporary `%tN` is used only in the block that defines it or in a block that block dominates
+    (its own check's continuation and failure blocks). The emitter never carries a value across
+    a merge point and never builds a `phi`; the optimizer does. This is what satisfies the
+    verifier's dominance rule without any analysis in the compiler.
+
+12. **Casts** (D3.14). `trunc`, `zext` and `sext` for integer to integer, widening by the
+    source's signedness; `zext i1` for `bool` to integer; `ptrtoint` and `inttoptr` for pointer
+    to and from `u64`; nothing at all for pointer to pointer and for casts that only drop
+    mutability or ownership (D5.4, D17.4); `sitofp` and `uitofp` for integer to float; `fptrunc`
+    and `fpext` for float to float; and the saturating intrinsics for float to integer, because
+    plain `fptosi` is poison out of range while D3.14 requires truncation toward zero,
+    saturation at the target's range, 0 for NaN, and no trap:
+
+    ```llvm
+      %t3 = call i32 @llvm.fptosi.sat.i32.f64(double %t2)
+    ```
+
+13. **Stack probing** (D10.8). The `"probe-stack"="inline-asm"` attribute on every fort
+    definition (item 7) makes the backend establish a frame larger than a page one page at a
+    time. It is in the IR rather than on the `--cc` line so that a module written by `-S`
+    carries the guarantee by itself.
+
+14. **Checks and failure blocks** (D19.6). Every runtime check computes one `i1` that is true on
+    failure and branches with the failure label first:
+
+    ```llvm
+      br i1 %t4, label %L1, label %L0
+    ```
+
+    `assert` is the one exception: its operand is already the success condition, so it branches
+    to the continuation first (D12.2). The continuation label is allocated before the failure
+    label, and failure blocks are emitted after every normal block of the function, in ascending
+    label order (D19.5). Each failure block holds exactly one call to the section 5.1 entry
+    point, with the check's values, `ptr @.file.N` and the `i32` line and column of section 4's
+    position rule, followed by `unreachable`; nothing else, because the callee aborts (D11.4).
+    The failure entry points are declared `#2 = { cold noreturn nounwind }`: `noreturn` is
+    truthful, since each is `_Noreturn` in `runtime/fort_rt.h`, and `cold` lays the block out of
+    line. No attribute is put on a failure call site.
+
+15. **Integer checks** (D11.1, D11.3). In checked mode one intrinsic per operation, at the
+    operand's width:
+
+    ```llvm
+      %t2 = call { i32, i1 } @llvm.sadd.with.overflow.i32(i32 %t0, i32 %t1)
+      %t3 = extractvalue { i32, i1 } %t2, 0
+      %t4 = extractvalue { i32, i1 } %t2, 1
+      br i1 %t4, label %L1, label %L0
+    ```
+
+    `llvm.sadd`, `llvm.ssub` and `llvm.smul` `.with.overflow.iN` for signed `+ - *`, the
+    `llvm.uadd`, `llvm.usub` and `llvm.umul` family for unsigned; unary `-`, `++`, `--` and the
+    compound assignments use the same intrinsics (negation is `llvm.ssub.with.overflow.iN(0,
+    x)`). Release mode and the wrapping operators `+% -% *%` emit plain `add`, `sub` and `mul`.
+    `nsw`, `nuw` and `exact` are never emitted (D16): release mode's wrapping is defined
+    behavior, and in checked mode the check has already proved the absence of overflow. No
+    float instruction carries a fast-math flag, since floats are IEEE 754 (D6.12, D16).
+
+    A shift count is materialized at 64 bits (`sext` for a signed count type, `zext` for an
+    unsigned one) so that a negative count is reported with its signed value, then
+    `icmp uge i64 %cnt, <width>` branches to a `fort_rt_fail_shift(i64 %cnt, ptr @.str.T, ...)`
+    block, where `@.str.T` is the shifted operand's type name; release mode replaces the check
+    with `and i64 %cnt, <width - 1>` (D11.1). The count is then truncated to the operand's type
+    and the shift is `shl`, `ashr` for a signed operand or `lshr` for an unsigned one (D6.2), so
+    a shift never produces poison. Division and remainder, in both modes (D6.13): `icmp eq %d,
+    0` branches to `fort_rt_fail_div_zero`; for a signed type the conjunction of
+    `icmp eq %d, -1` and `icmp eq %n, <MIN>` branches to `fort_rt_fail_div_overflow`; then
+    `sdiv`, `srem`, `udiv` or `urem`.
+
+16. **Bounds checks** (D6.8, D6.9). The index is sign-extended (signed) or zero-extended
+    (unsigned) to `i64`, then one `icmp uge i64 %idx, %len` branches to
+    `fort_rt_fail_bounds(i64 %idx, i64 %len, ...)`, so a negative index fails the same compare.
+    Element addressing is `getelementptr inbounds` (item 3):
+
+    ```llvm
+      %t2 = getelementptr inbounds [3 x i32], ptr %a.0, i64 0, i64 %t0
+      %t5 = getelementptr inbounds i32, ptr %t4, i64 %t3
+    ```
+
+    Slicing checks both bounds with one branch (`icmp ugt i64 %hi, %len`, `icmp ugt i64 %lo,
+    %hi`, `or i1`) into `fort_rt_fail_slice(i64 %lo, i64 %hi, i64 %len, ...)`. A fixed array's
+    length is an `i64` literal. `--no-bounds-check` removes exactly these branches and keeps the
+    `inbounds`, which is what makes it unsafe (D10.6).
+
+17. **`new` and `del`** (D10.2, D10.3, D17.9).
+
+    ```llvm
+      %t0 = call ptr @fort_rt_new(i64 4, i64 1, ptr @.file.0, i32 7, i32 13)
+    ```
+
+    `new(T[n])` materializes `n` as `i64` first and, when its fort type is signed, branches on
+    `icmp slt i64 %n, 0` to `fort_rt_fail_alloc_count(i64 %n, ...)`; it then calls
+    `fort_rt_new(sizeof(T), %n, loc)` and writes the header field by field into the destination
+    place (`getelementptr inbounds %fort.slice, ptr %d, i32 0, i32 0` for `ptr`, `i32 0, i32 1`
+    for `len`). `del(x)` loads the pointer (field 0 for a slice or `string`), calls `fort_rt_del`
+    and, on an lvalue operand, zeroes the place: `store ptr null` for a pointer, a 16-byte
+    `llvm.memset` for a slice or `string`. On an rvalue nothing is stored.
+
+18. **Ownership** (D17). `own` is erased: same types, same ABI, same normalization, and neither
+    the module nor the runtime carries ownership information. `move(lv)` copies the operand's
+    value to the destination (`load` and `store` for a reference, `llvm.memcpy` for an owning
+    aggregate) and then zeroes the operand (`store ptr null` or `llvm.memset`), in both build
+    modes (D17.6). The overwrite check (D17.11), in checked mode only, runs after the
+    right-hand side is evaluated and immediately before the store:
+
+    ```llvm
+      %t7 = getelementptr inbounds %fort.slice, ptr %v.2, i32 0, i32 0
+      %t8 = load ptr, ptr %t7, align 8
+      %t9 = icmp ne ptr %t8, null
+      br i1 %t9, label %L5, label %L4
+    ```
+
+    with `fort_rt_fail_overwrite(ptr @.file.N, i32 line, i32 col)` at the `=` token. Release
+    mode emits the plain store; `--no-bounds-check` does not affect the check; declarations,
+    `move`, `del` and assignments of owning aggregates never emit it. The check's own load
+    cannot be optimized away, since it reads the location a later store writes.
+
+19. **Builtins** (D12.2). The print family evaluates `fd` once (`1`, `2`, or the first argument)
+    and then each argument left to right, one call per argument (D11.5): `i8 i16 i32 i64`
+    sign-extended to `i64` to `fort_rt_print_i64`; `u8 u16 u32 u64` zero-extended to `i64` to
+    `fort_rt_print_u64`; `f32` and `f64` to `_f32` and `_f64`; `bool` `zext`ed from `i1` to `i8`
+    to `_bool`; `char` to `_char`; an enum as `(i32 %v, ptr @.enum.<path.name>, i64 <count>)` to
+    `_enum`; a pointer, `void*` or function pointer to `_ptr`; a `string` as its `ptr` and `len`
+    fields, or as `(ptr @.str.N, i64 <len>)` for a literal, to `_str`. `println` and its
+    relatives end with `fort_rt_print_char(i32 %fd, i8 zeroext 10)`. `assert(cond)` branches to
+    a block that calls `fort_rt_assert_fail(ptr @.str.N, ptr @.file.N, i32 line, i32 col)` and
+    is followed by `unreachable`, in both build modes, where `@.str.N` is the verbatim source
+    text of the argument; `panic(msg)` calls `fort_rt_panic(ptr, i64, ptr, i32, i32)` and is
+    followed by `unreachable` (D11.4).
+
+20. **`noreturn`** (D8.5, D19.7). A `noreturn` fort function is
+    `define dso_local void @"m.f"(...) #1` with `#1 = { noreturn nounwind "frame-pointer"="all"
+    "probe-stack"="inline-asm" }`, and the block that would fall off the end of its body ends
+    with
+
+    ```llvm
+      call void @llvm.trap()
+      unreachable
+    ```
+
+    as does every call site of such a function (D8.5 requires the trap in both places).
+    `llvm.trap` is the trap instruction D8.5 asks for, and `unreachable` alone would not be one,
+    since LLVM may let control fall through it. Reaching either raises SIGILL with no message
+    (D11.4).
+
+    `noreturn` is emitted on a fort definition, as `#1` above, and never on a declaration of a
+    C function the program wrote with `extern fn`, whatever its fort return type; the runtime
+    entry points are the exception, since their `_Noreturn` is the runtime's own guarantee
+    (section 5.1, item 14). The reason is that the optimizer deletes the trap after a call to a
+    function it is told never returns: for a fort definition that is harmless, because the trap
+    at the end of the body survives, but an `extern` that returns anyway must still hit a trap
+    at the call site (`memory-model.md` 6), which only an unadorned declaration preserves.
+
+21. **Enum tables** (D3.9, D12.2).
+
+    ```llvm
+    @.enum.main.color = private unnamed_addr constant [3 x %fort.enum_member]
+        [%fort.enum_member { i32 0, ptr @.str.3 },
+         %fort.enum_member { i32 5, ptr @.str.4 },
+         %fort.enum_member { i32 6, ptr @.str.5 }], align 8
+    ```
+
+    One entry per member in declaration order; `%fort.enum_member = type { i32, ptr }` has C's
+    16-byte layout with its 4 bytes of padding, so it matches `struct fort_rt_enum_member`
+    (section 5.1). A table is emitted only for an enum some `print` of that type reaches.
+
+22. **`fort_entry`** (D11.6, D8.6). Emitted in the entry module, it receives the argument slice
+    by hidden pointer, copies it into its own frame when `main` declares the parameter, and
+    returns what `main` returns:
+
+    ```llvm
+    define dso_local i32 @fort_entry(ptr %args.in) #0 {
+    entry:
+      %args.0 = alloca %fort.slice, align 8
+      call void @llvm.memcpy.p0.p0.i64(ptr align 8 %args.0, ptr align 8 %args.in, i64 16, i1 false)
+      %t0 = call i32 @"main.main"(ptr %args.0)
+      ret i32 %t0
+    }
+    ```
+
+    When `main` takes no parameter there is no `alloca` and no copy, only the call and the
+    `ret` (the second example below).
+
+23. **`-S` and `-c`** (D14.1). `-S` writes the module and stops, so the text above is exactly
+    what a user reads; `-c` writes it into the temporary directory and runs `--cc -c` over it
+    (section 2). The compiler never writes a `.s` file; `llc` over the `-S` output is how a
+    human reads the machine code.
+
+The attribute groups have fixed indices, and only the used ones are emitted, so gaps in the
+numbering are normal (D19.5):
+
+- `#0 = { nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }` on every fort definition
+  (item 7), and `#1`, the same set plus `noreturn`, on a `noreturn` definition (item 20).
+- `#2 = { cold noreturn nounwind }` on the failure entry points (item 14).
+- `#3 = { nobuiltin }` on every extern call site (item 8).
+- `#4 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }` on the
+  overflow intrinsics (item 15) and on `llvm.fptosi.sat` and `llvm.fptoui.sat` (item 12).
+- `#5 = { nocallback nofree nounwind willreturn memory(argmem: readwrite) }` on `llvm.memcpy`
+  and `#6 = { nocallback nofree nounwind willreturn memory(argmem: write) }` on `llvm.memset`.
+- `#7 = { cold noreturn nounwind memory(inaccessiblemem: write) }` on `llvm.trap` (item 20).
+
+`mustprogress` is deliberately absent everywhere, from `#4`, `#5` and `#6`, where clang would
+print it, and from fort definitions: it licenses the optimizer to delete a loop with no side
+effects, and a fort `while (true) { }` must keep running (D8.4 counts it as terminating, and
+D14.2 emits no warning about what follows it).
+
+### 6.1 A program without checks
+
+```fort
+fn i32 main() { println("hello, world!"); return 0; }
 ```
+
+in `main.ft` compiles to `test/ir/hello.ll`:
+
+```llvm
+target triple = "x86_64-unknown-linux-gnu"
+
+%fort.slice = type { ptr, i64 }
+%fort.enum_member = type { i32, ptr }
+
+define dso_local i32 @"main.main"() #0 {
+entry:
+  call void @fort_rt_print_str(i32 1, ptr @.str.0, i64 13)
+  call void @fort_rt_print_char(i32 1, i8 zeroext 10)
+  ret i32 0
+}
+
+define dso_local i32 @fort_entry(ptr %args.in) #0 {
+entry:
+  %t0 = call i32 @"main.main"()
+  ret i32 %t0
+}
+
+@.str.0 = private unnamed_addr constant [14 x i8] c"hello, world!\00", align 1
+
+declare void @fort_rt_print_char(i32, i8 zeroext)
+declare void @fort_rt_print_str(i32, ptr, i64)
+
+attributes #0 = { nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }
+```
+
+### 6.2 A program with a check
+
+```fort
+fn i32 main() {
+    println("before");
+    i32[3] a = {};
+    mut i64 i = 5;
+    return a[i];
+}
+```
+
+in `abort.ft`, with the `[` of `a[i]` at line 12, column 14, compiles to `test/ir/abort.ll`:
+
+```llvm
+target triple = "x86_64-unknown-linux-gnu"
+
+%fort.slice = type { ptr, i64 }
+%fort.enum_member = type { i32, ptr }
+
+define dso_local i32 @"main.main"() #0 {
+entry:
+  %a.0 = alloca [3 x i32], align 4
+  %i.1 = alloca i64, align 8
+  call void @fort_rt_print_str(i32 1, ptr @.str.0, i64 6)
+  call void @fort_rt_print_char(i32 1, i8 zeroext 10)
+  call void @llvm.memset.p0.i64(ptr align 4 %a.0, i8 0, i64 12, i1 false)
+  store i64 5, ptr %i.1, align 8
+  %t0 = load i64, ptr %i.1, align 8
+  %t1 = icmp uge i64 %t0, 3
+  br i1 %t1, label %L1, label %L0
+
+L0:
+  %t2 = getelementptr inbounds [3 x i32], ptr %a.0, i64 0, i64 %t0
+  %t3 = load i32, ptr %t2, align 4
+  ret i32 %t3
+
+L1:
+  call void @fort_rt_fail_bounds(i64 %t0, i64 3, ptr @.file.0, i32 12, i32 14)
+  unreachable
+}
+
+define dso_local i32 @fort_entry(ptr %args.in) #0 {
+entry:
+  %t0 = call i32 @"main.main"()
+  ret i32 %t0
+}
+
+@.file.0 = private unnamed_addr constant [9 x i8] c"abort.ft\00", align 1
+@.str.0 = private unnamed_addr constant [7 x i8] c"before\00", align 1
+
+declare void @fort_rt_fail_bounds(i64, i64, ptr, i32, i32) #2
+declare void @fort_rt_print_char(i32, i8 zeroext)
+declare void @fort_rt_print_str(i32, ptr, i64)
+
+declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg) #6
+
+attributes #0 = { nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }
+attributes #2 = { cold noreturn nounwind }
+attributes #6 = { nocallback nofree nounwind willreturn memory(argmem: write) }
+```
+
+The locals are entry-block allocas, the array is zeroed with `llvm.memset`, the bounds check of
+item 16 branches to a failure block at the end of the function, and `%fort.slice` and
+`%fort.enum_member` are emitted although nothing uses them (item 2). The program prints
+`before`, then `abort.ft:12:14: runtime error: index 5 out of range for length 3`, and dies with
+SIGABRT (D11.4).
 
 ## 7. Testing
 
@@ -577,9 +987,10 @@ Two expectation files beside the harness list path prefixes of tests (relative t
 that fails or errors is `XFAIL`, a listed test that passes is `XPASS` and fails the run, so the
 list shrinks in the commit that makes tests pass. `bootstrap-unsupported.txt` names the tests
 that use features the C bootstrap deliberately lacks (floats, multi-dimensional arrays,
-`do`-`while`, `?:`, function-pointer types and values); each is judged as a `fail` test whose
-only expectation is a diagnostic containing `not supported by the bootstrap compiler`, whatever
-its own kind, and `--no-unsupported` (for the self-hosted compiler) judges them normally.
+`do`-`while` and `?:`; function pointers are in its subset, D3.10); each is judged as a `fail`
+test whose only expectation is a diagnostic containing `not supported by the bootstrap
+compiler`, whatever its own kind, and `--no-unsupported` (for the self-hosted compiler) judges
+them normally.
 `--xfail` and `--unsupported` name other lists; `--no-xfail` ignores the first.
 
 The harness prints one `PASS`, `FAIL`, `XFAIL`, `XPASS` or `ERROR` line per test with the
@@ -823,9 +1234,11 @@ implementable; the design is to be planned in the implementation phase.
 
 ## 9. Not in v1
 
-Deferred by D15 and the design reviews: debugger support (no DWARF, no `.loc`; the frame pointer
-and the symbol names in section 6 are what a debugger gets), an optimizer and `-O` levels,
-warnings, separate compilation and incremental builds, a package manager, documentation
+Deferred by D15 and the design reviews: debugger support (no DWARF, no `!dbg` metadata; the
+frame pointer of section 6 item 7 and the symbol names are what a debugger gets), an optimizer
+of the compiler's own and `-O` options on `fort`'s command line (`--cc` optimizes the module at
+`-O1`, or `-O2` under `--release`, D14.3), building the module through the LLVM C API in process
+(D15), warnings, separate compilation and incremental builds, a package manager, documentation
 generation, cross-compilation and any target other than x86-64 Linux, `--help` text beyond the
 usage line, and conditional compilation. The idioms that replace the deferred language features
 are listed with each item in D15.

@@ -151,7 +151,9 @@ Owner: `type-system.md`.
   binding-level `mut` on parameters is ignored. A function name used as a value, including a
   qualified `m.f`, has its function type; `&f` and `*f` are errors. `null` is a valid
   function-pointer value; calling it is
-  undefined behavior. `==`/`!=` compare identity.
+  undefined behavior. `==`/`!=` compare identity. Function pointers are in the C bootstrap's
+  subset (`toolchain.md` 7.3): a function pointer is an ordinary `ptr` value and a call through
+  one an ordinary `call` in LLVM IR (D19.2), so the bootstrap implements them.
 - **D3.11** `void*` is an opaque pointer with no pointee level: no `*`, `->`, indexing or slicing.
   Conversion to and from any pointer, function pointer or `u64` requires `cast`.
 - **D3.12** Type identity: primitives by name; structs and enums nominally; arrays by element type
@@ -177,7 +179,9 @@ Owner: `type-system.md`.
   `cast(move(x), ...)` (D17.5). Forbidden:
   integer to `bool`, any other slice-to-slice cast (the element
   type of a slice never changes, because `len` counts elements), pointer to slice, struct or
-  array casts. Casts never trap.
+  array casts. Casts never trap: float to integer is emitted as `llvm.fptosi.sat` or
+  `llvm.fptoui.sat`, whose saturating result is this rule (plain `fptosi` would be poison out of
+  range, D19.2).
 - **D3.15** `sizeof(Type)` takes a type only, yields an untyped integer constant (D4). `sizeof` of
   `void` is an error. `sizeof(T[])` and `sizeof(string)` are 16; function pointers are 8; `bool`
   and `char` are 1; enums are 4. There is no `alignof` in v1.
@@ -510,31 +514,53 @@ Owner: `module-system.md`.
 - **D9.5** Circular imports are a compile error even though whole-program compilation would
   permit them. Consequence, documented: mutually referential types must live in one module.
 - **D9.6** Everything at module level is exported in v1. Visibility modifiers are deferred.
-- **D9.7** Symbol names in the generated assembly are the module path joined with dots plus the
+- **D9.7** Symbol names in the generated code are the module path joined with dots plus the
   declaration name: `std.io.read_file`, `main.main`. Dots are legal in ELF symbols and cannot
   appear in identifiers, so the scheme is injective. Runtime symbols are prefixed `fort_rt_`;
   the compiler emits `fort_entry` in the entry module (D11.6). `extern` names are unmangled.
+  A dotted name is quoted in LLVM IR (`@"std.io.read_file"`), which is spelling only: the ELF
+  symbol is unchanged, and quoting every dotted name keeps the emitter free of per-name
+  analysis. Fort functions, constants and globals are `dso_local` with the default external
+  linkage (D9.6), so fort-to-fort calls are direct and fort data is addressed PC-relative;
+  `extern` and `fort_rt_*` symbols are not `dso_local` and are reached through the procedure
+  linkage and global offset tables. Amended 2026-09-10 with D19: the assembler directives that
+  spelled this became IR linkage words.
 - **D9.8** `extern fn i64 write(i32 fd, void* buf, u64 n);` declares a C function with the
   System V x86-64 ABI. Extern signatures may use only integers, floats, `bool`, `char`, enums
   (passed as `i32`), pointers and function pointers: no slices, strings, structs or arrays, and
-  no variadics. Before every extern call the compiler sets `al` to the number of vector
-  registers the call uses (zero when no float is passed), as the ABI requires of callers of
-  variadic functions, so a fixed-prototype declaration of a variadic C function is safe.
-  Narrow integers and `bool` are normalized with zero- or sign-extension on both sides
-  of the boundary. C `char*` maps to `char*` (or `u8*`); `size_t` to `u64`; `ssize_t` and
+  no variadics. Every extern function is declared and called through a variadic LLVM function
+  type (`declare i32 @printf(ptr, ...)`, called as `call i32 (ptr, ...) @printf(...)`), which
+  makes the caller pass the vector-register count the ABI requires of callers of variadic
+  functions, so a fixed-prototype declaration of a variadic C function is safe; a non-variadic
+  callee ignores that count, so the same declaration is ABI-identical for it (D19.2). Extern
+  call sites are `nobuiltin`, so no library-call rewriting replaces a symbol the program
+  declared. Narrow integers and `bool` are normalized with zero- or sign-extension on both sides
+  of the boundary, expressed as the `zeroext` and `signext` parameter and result attributes of
+  D9.9, which normalize on both sides of the call by construction. C `char*` maps to `char*`
+  (or `u8*`); `size_t` to `u64`; `ssize_t` and
   `off_t` to `i64`; `mode_t` to `u32`; `int` to `i32`; `long` to `i64`; `double` to `f64`. The
   same C symbol may be declared `extern` in several modules provided the signatures are
-  identical, `own` qualifiers included (D17.13).
+  identical, `own` qualifiers included (D17.13). Fort `char` is C's `unsigned char` at the
+  boundary (`i8 zeroext`, D3.2). Amended 2026-09-10 with D19: the compiler itself set `al` to
+  the vector-register count before every extern call, and extended narrow values by hand.
 - **D9.9** Internal calling convention (v1 simplification): integers, pointers, `bool`, `char`,
   enums, function pointers and floats are passed and returned in registers per System V; every
   aggregate (struct, fixed array, slice, `string`) is passed by a hidden pointer to a caller-made
   copy and returned through a hidden result pointer. Struct layout stays C-compatible, so
   pointer-based interop works. A fort function is usable as a C callback exactly when its
-  signature is extern-legal.
+  signature is extern-legal, function-pointer parameters included (D3.10). In LLVM IR an
+  aggregate argument is a plain `ptr` parameter, never `byval`, and an aggregate result is a
+  leading `ptr sret(%T)` parameter on a function returning `void`; a slice or `string` stays one
+  hidden pointer and is never split into two scalars, so `fort_entry`'s C prototype
+  (`const struct fort_slice*`, D11.6) is literally true. `bool`, `char`, `u8` and `u16`
+  parameters and results carry `zeroext`, `i8` and `i16` carry `signext`, and nothing wider
+  carries an extension attribute, in fort and extern signatures alike (D9.8). Amended
+  2026-09-10 with D19: the register-level spelling of the same convention is now LLVM's job.
 - **D9.10** Whole-program compilation: the compiler walks the import closure from the entry file,
-  type-checks every module, emits one assembly file, and runs the system C compiler to assemble
-  and link it with the runtime. Interface files, separate compilation, a module cache and
-  incremental rebuilds are deferred.
+  type-checks every module, emits one LLVM IR module (D19.1), and runs `--cc` over it once to
+  compile and link it with the runtime (D14.3). Interface files, separate compilation, a module
+  cache and incremental rebuilds are deferred. Amended 2026-09-10 with D19: the compiler emitted
+  one assembly file that the system C compiler assembled and linked.
 
 ## D10 Memory and runtime checks
 
@@ -574,7 +600,10 @@ Owner: `memory-model.md`.
   is no strict-aliasing rule: reading an object through a pointer to another type of the same
   size (`*cast(&x, u64*)` for an `f64 x`) is defined and yields the bit pattern.
 - **D10.8** Frames larger than one page are probed so that a large local array plus recursion
-  faults instead of skipping the guard page.
+  faults instead of skipping the guard page. The probing is requested with the
+  `"probe-stack"="inline-asm"` attribute on every fort definition, so a module produced by `-S`
+  carries the guarantee whatever the driver line is (D19.1). Amended 2026-09-10 with D19: the
+  compiler emitted the page touches itself.
 
 ## D11 Build modes and the runtime contract
 
@@ -610,8 +639,8 @@ Owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime)
   | allocation failure                 | `out of memory`                                    |
   | overwriting a live `own` value (D17.11) | `overwriting owned value`                     |
 
-  The end of a `noreturn` function is guarded by a bare trap instruction (SIGILL, no message),
-  since a conforming body never reaches it. `<file>` is the path the compiler opened (search
+  The end of a `noreturn` function is guarded by a trap (SIGILL, no message, D19.7), since a
+  conforming body never reaches it. `<file>` is the path the compiler opened (search
   root as given plus the relative module path); the column of a check is that of its operator
   token, or of the builtin's name for `new`, `assert` and `panic`; the `assert` text is the
   source text of the expression, verbatim.
@@ -769,6 +798,13 @@ string `switch`; linear ownership, that is compile-time detection of leaks and o
 `move` (idiom: `defer del`, and the zeroing that `move` and `del` leave behind, D17); `goto`
 (never).
 
+Deferred on the toolchain side (user decision, 2026-09-10): building the module in process
+through the LLVM C API, and everything that would come with it (a JIT, per-function control of
+the pass pipeline, layout and target queries answered by LLVM rather than by the compiler's own
+tables). The compiler appends IR text instead (D19.1) with one helper per instruction shape, so
+that a later move to the API is a mechanical substitution rather than a rewrite; the idiom
+meanwhile is `opt` and `llc` on the `-S` output.
+
 ## D16 Hazards not to re-litigate
 
 Findings from the design reviews that look like bugs but are deliberate.
@@ -788,7 +824,18 @@ Findings from the design reviews that look like bugs but are deliberate.
 - Symbol mangling uses dots, not double underscores, because `a__b` is not injective.
 - `extern` signatures exclude aggregates so the compiler does not need System V aggregate
   classification in v1.
-- Generated code must be position-independent; do not rely on `-no-pie`.
+- Generated code must be position-independent: `--cc` is invoked with `-fPIE -pie` (D14.3) and
+  the module names no absolute address; do not rely on `-no-pie`.
+- The emitter appends LLVM IR text and never links or calls libLLVM (D19.1); the C API is
+  deferred (D15), so no build of the compiler ever needs LLVM's headers or libraries.
+- Never emit `nsw`, `nuw` or `exact`. Release mode's wrapping is defined (D11.1), so a
+  poison-producing flag would be a miscompile waiting to happen, and in checked mode the check
+  has already proved the absence of overflow, so the flag would buy nothing.
+- Never emit a fast-math flag (`fast`, `nnan`, `ninf`, `reassoc` and the rest) on a float
+  instruction: floats are IEEE 754 with `NaN != NaN` and no reassociation (D6.12).
+- Never emit `!tbaa`. There is no strict-aliasing rule (D10.7), and emitting no type-based alias
+  metadata is what makes that true by construction, without `-fno-strict-aliasing` on the `--cc`
+  line.
 - Prefix `own` marks one level while prefix `mut` marks every level (D17.2); the asymmetry is
   chosen for the failure mode, not by oversight.
 - `move` and `del` empty an immutable binding; that is ownership ending, not an assignment
@@ -945,6 +992,81 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   -passes=verify`; the language-test harness checks that (`run_tests.py --verify-ir`) and the
   pipeline test checks its hand-written samples under `test/ir/`, which are the reference for
   the form of a module until the contract below says otherwise.
+- **D19.2** Type mapping. `i8 i16 i32 i64` and `u8 u16 u32 u64` are the LLVM types `i8 i16 i32
+  i64`: signedness lives in the instruction (`sdiv` against `udiv`, `sext` against `zext`,
+  `icmp slt` against `icmp ult`) and never in the type (D3.1). `char` is `i8` compared and
+  extended as unsigned (D3.2). `bool` is `i1` as a value and `i8` in memory (D3.3), so a `bool`
+  field or global has the layout and the two values of C's `_Bool`: every load of a `bool` place
+  is a `load i8` and a `trunc`, every store a `zext` and a `store i8`. `f32` and `f64` are
+  `float` and `double`. Every pointer, `void*` and function pointer is the opaque `ptr` (D3.11,
+  D3.10); the pointee type is the compiler's business and appears only on the instructions that
+  need it, so a function pointer is a `ptr` and a call through one an ordinary `call`. `T[N]` is
+  `[N x T]` (D3.4); a slice and `string` are the one type `%fort.slice = type { ptr, i64 }`
+  (D3.5, D3.7); a struct is `%struct.<dotted name>` with its fields in declaration order and
+  never `packed`, because LLVM lays that type out exactly as C does (D3.8); an enum is `i32`
+  (D3.9); `void` is `void` and only a result type. Float to integer uses the saturating
+  intrinsics of D3.14 and every other conversion the obvious cast instruction.
+- **D19.3** Aggregates live in memory. Only scalars are SSA values: a struct, fixed array, slice
+  or `string` always occupies a place (an `alloca`, a global, or memory reached through a `ptr`)
+  and is never loaded or stored as one value, so the emitter never writes `insertvalue` or
+  `extractvalue` on a fort aggregate (its only `extractvalue` takes apart the `{iN, i1}` that an
+  overflow intrinsic returns, D19.6). Copying an aggregate is `llvm.memcpy`, zeroing one is
+  `llvm.memset` and reaching a field or element is `getelementptr`. This is D9.9's model spelled
+  in IR, and it is what keeps code generation one tree walk with a destination place per
+  expression (D19.1).
+- **D19.4** Entry-block allocas and SSA discipline. Every local, parameter copy and compiler
+  temporary is an `alloca` in the entry block, before any other instruction and in declaration
+  order, because LLVM's promotion passes look only there; no `alloca` is variable-length (array
+  lengths are constants, D3.4, and `new` is the heap, D10.2). The emitter builds no `phi` and
+  carries no value across a merge point: a temporary is used only in the block that defines it
+  or in a block that block dominates, and `&&`, `||` and `?:` short-circuit through a stack slot
+  (D6.3) that the optimizer promotes. Control flow is explicit blocks: `br` for `if`, `while`,
+  `for`, `break` and `continue`; an LLVM `switch` with one case per label and a default block
+  for a fort `switch` (D7.7); a fresh block for the statements D14.2 allows after a terminating
+  one. Together with D19.3 this is what keeps the module verifier-clean without any analysis in
+  the emitter.
+- **D19.5** The emitted text is a function of the program alone, so that a self-hosted compiler
+  reaches a fixpoint: stage2 and stage3 must emit byte-identical modules for the same sources in
+  both build modes, and the bootstrap script compares them with `cmp` over `-S` output, with
+  `diff` as the debugging output. Hence: every value, parameter and block is named, so LLVM
+  never numbers anything implicitly; per function and reset at each definition, instruction
+  results are `%t<N>` in emission order, blocks are `%L<N>` in creation order with the entry
+  block always literally `entry`, locals are `%<ident>.<slot>` by the local's index in the
+  function, parameters arrive as `%<ident>.in`, an aggregate result pointer is `%ret.sret` and
+  compiler-made places are `%tmp<K>` from a third per-function counter. A name that embeds a
+  fort identifier always contains a dot and a name the compiler invents never does, which is
+  what makes collisions impossible: an identifier cannot contain a dot (D2.3), so a local named
+  `tmp` is `%tmp.0` and never `%tmp0`, and `%ret.sret` cannot be a local named `ret`, whose
+  names are `%ret.<slot>` and `%ret.in`.
+  Module-level counters (`@.str.<N>`, `@.file.<N>`) are assigned on first use and never
+  deduplicated by content; enum tables are keyed by the mangled name. Order is by construction
+  and never by iteration over a hash table: modules in dependency order, declarations in source
+  order, runtime declarations in the fixed order of `toolchain.md` 5.1, intrinsics in a fixed
+  table order, `extern` declarations in first-use order, attribute groups at fixed indices with
+  unused indices simply absent. Nothing in the text depends on the environment: no timestamps,
+  no compiler version, no comments, no `!llvm.ident`, and no path other than the ones D11.4
+  prints, which `@.file.<N>` holds exactly as the compiler opened them, so comparing two stages
+  means invoking them identically (same working directory, same arguments) rather than expecting
+  path-free text. An integer constant is printed in decimal without padding and with the
+  signedness of its fort type (`store i8 -1` for an `i8`, `store i8 255` for a `u8`, and `i64`
+  MIN as `-9223372036854775808`); a float constant is printed as the LLVM hex literal of its
+  `double` bit pattern, an `f32` constant converted to `double` first, so no decimal rounding
+  can differ between two stages.
+- **D19.6** Checks and failure blocks. Every runtime check (D10.6, D11.1, D11.3, D17.11)
+  computes one `i1` that is true on failure and branches with the failure block as the first
+  label; `assert` is the exception, since its operand is already the success condition (D12.2).
+  Failure blocks are emitted after every normal block of the function, in ascending label order;
+  each holds exactly one call to the `toolchain.md` 5.1 entry point, with the offending values,
+  the file constant and the line and column of D11.4's position rule, followed by `unreachable`.
+  The failure entry points are declared `cold noreturn nounwind`: `noreturn` is truthful, since
+  every one of them is `_Noreturn` and aborts, and `cold` lays the block out of line, which is
+  what the out-of-line failure stubs used to do. `--no-bounds-check` removes exactly the index
+  and slice branches (D10.6).
+- **D19.7** The trap D8.5 requires after the body of a `noreturn` function and after every call
+  to one is `call void @llvm.trap()` followed by `unreachable`. `llvm.trap` is `ud2` on x86-64,
+  so D11.4's SIGILL with no message is unchanged; `unreachable` alone is not a trap, since LLVM
+  is free to let control fall through it, which is why the call is emitted and not just the
+  terminator.
 
 ## Ready-to-implement checklist
 

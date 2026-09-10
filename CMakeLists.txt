@@ -132,7 +132,7 @@ foreach(test_source IN LISTS FORT_UNIT_TEST_SOURCES)
 endforeach()
 
 # The cross pipeline: the hand-written LLVM IR modules under test/ir, which
-# are the reference for the form of a module (D19.1, test/ir/README.md), are
+# are in the form of toolchain.md 6 and are its worked examples (D19.1), are
 # verified with opt, compiled and linked with the cross-compiled fort_rt.o and
 # run under qemu (toolchain.md 2). It is a unit test so that check covers it;
 # it needs the runtime object, not the compiler.

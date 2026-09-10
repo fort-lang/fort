@@ -192,8 +192,9 @@ Thin `extern` declarations for the libc calls the other modules need, plus the r
 points of section 3, with the C types mapped per D9.8: `int` is `i32`, `size_t` is `u64`,
 `ssize_t` and `off_t` are `i64`, `mode_t` is `u32`, `char*` is `char*`, and every `void*`
 buffer is `void*`. Names are unmangled (D9.7). `open` is variadic in C; the fixed prototype is
-safe because the compiler sets `al` to the number of vector registers the call uses before every
-extern call, zero here since no float is passed (D9.8).
+safe because every extern function is declared and called through a variadic LLVM function type,
+so a variadic callee always learns how many vector registers the call used (D9.8,
+`toolchain.md` 6 item 8).
 
 ```fort
 // open(2) flags, Linux x86-64 values.

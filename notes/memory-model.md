@@ -714,7 +714,8 @@ struct occupies its fields in declaration order with natural alignment and paddi
 to its largest field alignment, exactly like the same C struct (D3.4, D3.8). Both are values:
 assignment, argument passing and `return` copy the whole object (D8.2). In the internal calling
 convention they are passed by a hidden pointer to a caller-made copy and returned through a
-hidden result pointer, so a callee never sees the caller's storage (D9.9).
+hidden result pointer, so a callee never sees the caller's storage (D9.9); in LLVM IR that is a
+plain `ptr` parameter and a leading `ptr sret(%T)` parameter (`toolchain.md` 6 item 7).
 
 ```fort
 i32[4] a = {1, 2, 3, 4};
@@ -763,7 +764,7 @@ except where the table says otherwise. Casts never trap (D3.14) and float arithm
 | `lv = e`, `own` | `lv` is not zero (checked)    | `overwriting owned value`                     |
 | `assert(c)`     | `c` is `false`                | `assertion failed: <text>`                    |
 | `panic(m)`      | always                        | `panic: <m>`                                  |
-| `noreturn` guard | a `noreturn` function returns | none: bare trap instruction                  |
+| `noreturn` guard | a `noreturn` function returns | none: `llvm.trap` (D19.7)                    |
 
 The message texts are fixed (D11.4); the numbers shown (the index and the length, the two
 bounds and the length, the shift count and the shifted operand's type, the negative count) are
@@ -798,9 +799,10 @@ Notes:
 - The overwrite check guards every assignment to an lvalue of `own` reference type and nothing
   else: declarations, `move`, `del` and aggregate assignments are never checked (D17.11,
   section 2.5). A release build stores without looking, and the old allocation leaks.
-- The `noreturn` guard is a trap instruction emitted after the body of a `noreturn` function and
-  after every call to one (D8.5). It is reachable only when an `extern` declared `noreturn`
-  returns anyway; the process dies with SIGILL and nothing is flushed.
+- The `noreturn` guard is `call void @llvm.trap()` followed by `unreachable`, emitted after the
+  body of a `noreturn` function and after every call to one (D8.5, D19.7). It is reachable only
+  when an `extern` declared `noreturn` returns anyway; the process dies with SIGILL and nothing
+  is flushed.
 - `--no-bounds-check` exists for benchmarking and is unsafe (D10.6).
 
 ```fort
