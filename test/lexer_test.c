@@ -94,7 +94,7 @@ TEST(non_ascii_outside_strings_and_comments_is_an_error, {
 })
 
 TEST(unexpected_printable_character_is_an_error, {
-    ASSERT_LEX_ERROR("a @ b", "t.ft:1:3: error: unexpected character '@'\n");
+    ASSERT_LEX_ERROR("a # b", "t.ft:1:3: error: unexpected character '#'\n");
     ASSERT_LEX_ERROR("#", "t.ft:1:1: error: unexpected character '#'\n");
     ASSERT_LEX_ERROR("`", "t.ft:1:1: error: unexpected character '`'\n");
     ASSERT_LEX_ERROR("$", "t.ft:1:1: error: unexpected character '$'\n");
@@ -111,12 +111,12 @@ TEST(unexpected_control_byte_is_an_error, {
 })
 
 TEST(error_position_counts_lines_columns_and_tabs, {
-    ASSERT_LEX_ERROR("a\n\n\t\tb @", "t.ft:3:5: error: unexpected character '@'\n");
+    ASSERT_LEX_ERROR("a\n\n\t\tb #", "t.ft:3:5: error: unexpected character '#'\n");
     TEST_ASSERT_EQ_UINT64(toks.len, (uint64_t)2);
 })
 
 TEST(error_keeps_the_tokens_before_it_and_stops, {
-    ASSERT_LEX_ERROR("a b @ c @", "t.ft:1:5: error: unexpected character '@'\n");
+    ASSERT_LEX_ERROR("a b # c #", "t.ft:1:5: error: unexpected character '#'\n");
     TEST_ASSERT_EQ_UINT64(toks.len, (uint64_t)2);
     ASSERT_TOK_TEXT(0, "a");
     ASSERT_TOK_TEXT(1, "b");
@@ -314,13 +314,13 @@ TEST(every_operator_lexes_alone_as_its_kind, {
         ASSERT_TOK_SPAN(0, 0, strlen(op));
         ASSERT_TOK_POS(1, 1, strlen(op) + 1);
     }
-    TEST_ASSERT_EQ_INT64((int64_t)(TOK_OP_LAST - TOK_OP_FIRST + 1), (int64_t)53);
+    TEST_ASSERT_EQ_INT64((int64_t)(TOK_OP_LAST - TOK_OP_FIRST + 1), (int64_t)54);
 })
 
 TEST(the_operator_list_of_d2_10, {
     ASSERT_LEX_OK("+ - * / % +% -% *% = += -= *= /= %= +%= -%= *%= &= |= ^= <<= >>= == != < <= "
-                  "> >= && || ! & | ^ ~ << >> ++ -- ? : :: . -> .. ( ) [ ] { } , ;",
-                  53);
+                  "> >= && || ! & | ^ ~ << >> ++ -- ? : :: . -> .. ( ) [ ] { } , ; @",
+                  54);
     for (int k = TOK_OP_FIRST; k <= TOK_OP_LAST; k++) {
         ASSERT_TOK_KIND((uint64_t)(k - TOK_OP_FIRST), (tok_kind_t)k);
     }
@@ -416,22 +416,91 @@ TEST(slash_operators_beside_comments, {
     ASSERT_TOK_KIND(1, TOK_SLASH);
 })
 
-TEST(a_statement_lexes_into_the_expected_sequence, {
-    ASSERT_LEX_OK("own mut i32* p = new i32(x +% 1);", 14);
-    ASSERT_TOK_KIND(0, TOK_KW_OWN);
+TEST(at_lexes_as_the_slice_suffix_token, {
+    // `@` is a one-byte operator token, the slice suffix (D2.10, D3.5).
+    ASSERT_LEX_OK("@", 1);
+    ASSERT_TOK_KIND(0, TOK_AT);
+    ASSERT_TOK_TEXT(0, "@");
+    ASSERT_TOK_POS(0, 1, 1);
+    ASSERT_TOK_SPAN(0, 0, 1);
+    ASSERT_LEX_OK("a\n  @ b", 3);
+    ASSERT_TOK_KIND(1, TOK_AT);
+    ASSERT_TOK_POS(1, 2, 3);
+    ASSERT_TOK_SPAN(1, 4, 1);
+})
+
+TEST(at_in_a_type_lexes_beside_its_neighbours, {
+    // A slice of writable bytes, `u8 mut@ mut s` (D3.5, D5.3).
+    ASSERT_LEX_OK("u8 mut@ mut s", 5);
+    ASSERT_TOK_KIND(0, TOK_KW_U8);
     ASSERT_TOK_KIND(1, TOK_KW_MUT);
-    ASSERT_TOK_KIND(2, TOK_KW_I32);
-    ASSERT_TOK_KIND(3, TOK_STAR);
+    ASSERT_TOK_KIND(2, TOK_AT);
+    ASSERT_TOK_KIND(3, TOK_KW_MUT);
     ASSERT_TOK_KIND(4, TOK_IDENT);
-    ASSERT_TOK_KIND(5, TOK_ASSIGN);
-    ASSERT_TOK_KIND(6, TOK_KW_NEW);
-    ASSERT_TOK_KIND(7, TOK_KW_I32);
+    ASSERT_TOK_SPAN(2, 6, 1);
+    // Reference suffixes may be adjacent and repeat: `node*@`, `u8@*`, `u8@@`.
+    ASSERT_LEX_OK("node*@ u8@* u8@@", 9);
+    ASSERT_TOK_KIND(1, TOK_STAR);
+    ASSERT_TOK_KIND(2, TOK_AT);
+    ASSERT_TOK_KIND(4, TOK_AT);
+    ASSERT_TOK_KIND(5, TOK_STAR);
+    ASSERT_TOK_KIND(7, TOK_AT);
+    ASSERT_TOK_KIND(8, TOK_AT);
+})
+
+TEST(at_starts_no_longer_operator, {
+    // No two-byte operator begins with `@`, so a run splits after each one.
+    ASSERT_LEX_OK("@=", 2);
+    ASSERT_TOK_KIND(0, TOK_AT);
+    ASSERT_TOK_KIND(1, TOK_ASSIGN);
+    ASSERT_LEX_OK("@@", 2);
+    ASSERT_TOK_KIND(0, TOK_AT);
+    ASSERT_TOK_KIND(1, TOK_AT);
+    ASSERT_LEX_OK("a@b", 3);
+    ASSERT_TOK_KIND(1, TOK_AT);
+    ASSERT_TOK_KIND(2, TOK_IDENT);
+    ASSERT_LEX_OK("x[..]@", 5);
+    ASSERT_TOK_KIND(4, TOK_AT);
+})
+
+TEST(at_inside_a_literal_or_a_comment_is_an_ordinary_byte, {
+    // A string keeps `@` as a byte of its text (D2.9).
+    ASSERT_LEX_OK("\"a@b\"", 1);
+    ASSERT_TOK_KIND(0, TOK_STRING);
+    ASSERT_TOK_TEXT(0, "a@b");
+    ASSERT_LEX_OK("\"@\"", 1);
+    ASSERT_TOK_TEXT(0, "@");
+    // A char literal holds its byte value, 0x40 (D2.7).
+    ASSERT_LEX_OK("'@'", 1);
+    ASSERT_TOK_KIND(0, TOK_CHAR);
+    TEST_ASSERT_EQ_UINT64(tok(0)->ival, (uint64_t)0x40);
+    ASSERT_TOK_SPAN(0, 0, 3);
+    // A comment swallows it (D2.2).
+    ASSERT_LEX_OK("a // @ @\n@", 2);
+    ASSERT_TOK_KIND(0, TOK_IDENT);
+    ASSERT_TOK_KIND(1, TOK_AT);
+    ASSERT_TOK_POS(1, 2, 1);
+})
+
+TEST(a_statement_lexes_into_the_expected_sequence, {
+    // An owned slice of writable bytes from new(T, n) (D5.3, D17.2, D10.2).
+    ASSERT_LEX_OK("u8 mut@ own mut s = new(u8, n +% 1);", 16);
+    ASSERT_TOK_KIND(0, TOK_KW_U8);
+    ASSERT_TOK_KIND(1, TOK_KW_MUT);
+    ASSERT_TOK_KIND(2, TOK_AT);
+    ASSERT_TOK_KIND(3, TOK_KW_OWN);
+    ASSERT_TOK_KIND(4, TOK_KW_MUT);
+    ASSERT_TOK_KIND(5, TOK_IDENT);
+    ASSERT_TOK_KIND(6, TOK_ASSIGN);
+    ASSERT_TOK_KIND(7, TOK_KW_NEW);
     ASSERT_TOK_KIND(8, TOK_LPAREN);
-    ASSERT_TOK_KIND(9, TOK_IDENT);
-    ASSERT_TOK_KIND(10, TOK_PLUS_WRAP);
-    ASSERT_TOK_KIND(11, TOK_INT);
-    ASSERT_TOK_KIND(12, TOK_RPAREN);
-    ASSERT_TOK_KIND(13, TOK_SEMI);
+    ASSERT_TOK_KIND(9, TOK_KW_U8);
+    ASSERT_TOK_KIND(10, TOK_COMMA);
+    ASSERT_TOK_KIND(11, TOK_IDENT);
+    ASSERT_TOK_KIND(12, TOK_PLUS_WRAP);
+    ASSERT_TOK_KIND(13, TOK_INT);
+    ASSERT_TOK_KIND(14, TOK_RPAREN);
+    ASSERT_TOK_KIND(15, TOK_SEMI);
 })
 
 TEST(every_kind_of_token_in_one_file, {
@@ -458,7 +527,7 @@ TEST(kind_names_of_the_literal_classes, {
     TEST_ASSERT_EQ_STR(tok_kind_name(TOK_STRING), "string literal");
     TEST_ASSERT_EQ_STR(tok_kind_name(TOK_KW_OWN), "own");
     TEST_ASSERT_EQ_STR(tok_kind_name(TOK_PLUS_WRAP_ASSIGN), "+%=");
-    TEST_ASSERT_EQ_INT64((int64_t)TOK_COUNT, (int64_t)(6 + 41 + 53));
+    TEST_ASSERT_EQ_INT64((int64_t)TOK_COUNT, (int64_t)(6 + 41 + 54));
 })
 
 TEST(kind_names_are_distinct, {
@@ -567,6 +636,10 @@ int main(int argc, char** argv) {
     TEST_RUN(longest_match_without_spaces);
     TEST_RUN(runs_of_operator_characters_split_greedily);
     TEST_RUN(slash_operators_beside_comments);
+    TEST_RUN(at_lexes_as_the_slice_suffix_token);
+    TEST_RUN(at_in_a_type_lexes_beside_its_neighbours);
+    TEST_RUN(at_starts_no_longer_operator);
+    TEST_RUN(at_inside_a_literal_or_a_comment_is_an_ordinary_byte);
     TEST_RUN(a_statement_lexes_into_the_expected_sequence);
     TEST_RUN(every_kind_of_token_in_one_file);
     TEST_RUN(kind_names_of_the_literal_classes);

@@ -125,6 +125,7 @@ typedef enum {
     TOK_RBRACE,            // }
     TOK_COMMA,             // ,
     TOK_SEMI,              // ;
+    TOK_AT,                // @, the slice suffix (D2.10, D3.5)
 
     TOK_COUNT
 } tok_kind_t;
@@ -134,7 +135,7 @@ enum {
     TOK_KW_FIRST = TOK_KW_AS,
     TOK_KW_LAST = TOK_KW_WHILE,
     TOK_OP_FIRST = TOK_PLUS,
-    TOK_OP_LAST = TOK_SEMI
+    TOK_OP_LAST = TOK_AT
 };
 
 // The spelling of a keyword or operator kind, or a description of the other
