@@ -21,15 +21,33 @@ A safe(r) C-like systems programming language.
   `implementor` and `reviewer` agent definitions.
 
 ## Environment
-- Everything builds and runs inside the Ubuntu 24.04 arm64 Vagrant VM defined by `Vagrantfile`;
-  nothing is built on the host. `tools/vm up` creates and provisions it; run vagrant only through
-  `tools/vm` (it always uses the main checkout; a worktree also contains the Vagrantfile).
-- The repo root is `/vagrant` in the guest and worktrees are `/vagrant/.worktrees/<name>`;
-  `tools/vm run <cmd>` executes in the guest directory matching your host cwd.
+- Everything builds and runs inside the Ubuntu 24.04 arm64 Vagrant VM defined by `Vagrantfile`
+  (VirtualBox, `bento/ubuntu-24.04`); nothing is built on the host. Run vagrant only through
+  `tools/vm`: `up` creates, provisions and starts the VM and caches its ssh config; `halt` stops
+  it; `destroy [-f]` removes it (the box stays installed); `provision` re-runs
+  `tools/provision.sh`; `status` and `ssh` do what they say.
+- The VM directory (whose `Vagrantfile` and `.vagrant/` are used) is `$FORT_VM_DIR` if set,
+  otherwise the main checkout of the current repository, so every worktree shares one VM. It is
+  `/vagrant` in the guest and worktrees are `/vagrant/.worktrees/<name>`. The VirtualBox machine
+  is named `fort-dev-<directory name>` (`fort-dev-fort` for the main checkout), so a VM brought
+  up from another directory does not collide with it; destroy one before bringing up the other
+  if memory is tight. `FORT_VM_CPUS` (default 6) and `FORT_VM_MEMORY` (MiB, default 8192) size
+  the VM at `up`.
+- `tools/vm run <cmd>` executes in the guest directory matching the host cwd, which must lie
+  inside the VM directory (`ssh` and the cmake subcommands too; the lifecycle subcommands work
+  from anywhere inside the repository, or anywhere with `FORT_VM_DIR` set). The cmake
+  subcommands (`configure`, `build`, `test`, `workflow`, the targets below and `gate`) run at
+  the top of the host git worktree containing the cwd and default to the `debug` preset. Every
+  guest command sources `/etc/profile.d/fort.sh` and disables core dumps.
+- When the Mac sleeps, VirtualBox pauses the VM ("paused due to host power management") and
+  `tools/vm status` shows `paused`; guest commands then fail after the 10 s ssh timeout and
+  `tools/vm up` cannot resume it. Recover with `VBoxManage controlvm fort-dev-<name> savestate`
+  followed by `tools/vm up`.
 - The target is x86-64 Linux. The compiler runs natively on arm64; generated programs run under
   `qemu-x86_64` transparently. Always pass `--cc x86_64-linux-gnu-gcc` to `fort` (the guest `cc`
   is aarch64). Provisioning sets `QEMU_LD_PREFIX`; the test harness sets it itself.
-- git runs on the host; it also works in the guest (provisioning symlinks the host repo path).
+- git runs on the host; it also works in the guest: provisioning symlinks the host path of the
+  VM directory to `/vagrant`, so worktree `.git` files (absolute host paths) resolve there.
 
 ## Build and test
 - Presets: `debug release gcc asan msan tsan ubsan`. `tools/vm workflow <preset>` configures,
@@ -37,7 +55,8 @@ A safe(r) C-like systems programming language.
 - Targets: `check` (unit tests), `check-lang` (language tests), `check-all`, `format`,
   `format-check`, `tidy`, `lines` (test-to-code ratio, target 3:1). `tools/vm <target>` runs one.
 - `tools/vm gate` is the merge gate: `format-check`, `tidy`, and `check-all` under `debug`,
-  `asan` and `ubsan`.
+  `asan` and `ubsan` (it configures `debug` first, then configures and builds each preset before
+  its `check-all`).
 - Language tests: `test/lang/run_tests.py [filter]` (decisions D14.4, D14.5). `test/lang/xfail.txt`
   lists tests the compiler cannot pass yet; a listed test that passes fails the run, so shrink
   the list in the same commit that makes tests pass. `test/lang/bootstrap-unsupported.txt` lists
@@ -69,6 +88,9 @@ A safe(r) C-like systems programming language.
   helpers under `test/` too.
 - **fort sources**: identifier conventions per decision D1.4 (lower_case everything except
   module constants).
+- **Shell scripts**: bash with `set -eu`, clean under shellcheck at its default severity; the
+  host has no shellcheck, run it in the guest: `tools/vm run 'shellcheck tools/vm
+  tools/provision.sh'`.
 - **Commit messages**: a title of about 50 characters (72 at most), a blank line, then a body
   wrapped at 72 columns that says what changed and why, then the attribution trailers.
 
@@ -118,6 +140,8 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
 - `.claude/agents/implementor.md` (effort high, full tools) implements one ticket;
   `.claude/agents/reviewer.md` (effort xhigh, read-only tools, the `code-review` skill) reviews
   one branch. The coordinator is the main session. Reasoning effort is fixed per definition.
+- Agent definitions in `.claude/agents/` are loaded when a session starts; restart the session
+  after adding or changing one.
 
 ### Review Workflow
 - Coordinator: picks a ticket whose dependencies are done, creates the worktree and branch
