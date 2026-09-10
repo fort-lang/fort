@@ -40,6 +40,18 @@ export QEMU_LD_PREFIX=/usr/x86_64-linux-gnu
 export ASAN_SYMBOLIZER_PATH=$symbolizer
 EOF
 
+# ---- core dumps -----------------------------------------------------------------
+# Ubuntu pipes every core dump to apport, and a piped core_pattern ignores
+# `ulimit -c 0`, so each SIGABRT cost about a second; the runtime's tests
+# abort dozens of times. Disable apport and dump to a plain file, which the
+# limit then suppresses.
+systemctl disable --now apport.service || true
+cat > /etc/sysctl.d/60-fort-core.conf <<'EOF'
+# Written by tools/provision.sh (fort): no apport, so ulimit -c 0 is honored.
+kernel.core_pattern = core
+EOF
+sysctl -q -p /etc/sysctl.d/60-fort-core.conf
+
 # ---- host repository path -----------------------------------------------------
 if [ -L "$FORT_HOST_REPO" ]; then
     test "$(readlink "$FORT_HOST_REPO")" = /vagrant
@@ -74,6 +86,9 @@ done
 # The lint configuration targets clang 18.
 clang-tidy --version | grep -q 'version 18\.'
 clang-format --version | grep -q 'version 18\.'
+
+# Core dumps go nowhere near apport.
+test "$(cat /proc/sys/kernel/core_pattern)" = core
 
 # git resolves the host repository path.
 test "$(readlink -f "$FORT_HOST_REPO")" = /vagrant

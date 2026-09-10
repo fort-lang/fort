@@ -45,7 +45,13 @@ A safe(r) C-like systems programming language.
   followed by `tools/vm up`.
 - The target is x86-64 Linux. The compiler runs natively on arm64; generated programs run under
   `qemu-x86_64` transparently. Always pass `--cc x86_64-linux-gnu-gcc` to `fort` (the guest `cc`
-  is aarch64). Provisioning sets `QEMU_LD_PREFIX`; the test harness sets it itself.
+  is aarch64). Provisioning sets `QEMU_LD_PREFIX`; the test harness sets it itself. When a
+  cross program dies by a signal, qemu-user appends `qemu: uncaught target signal 6 (Abort) -
+  core dumped` to the program's stderr; native execution prints nothing, so a harness comparing
+  stderr drops that line (`test/pipeline_test.sh` does).
+- Provisioning disables apport and sets `kernel.core_pattern=core`: Ubuntu's piped core pattern
+  ignores `ulimit -c 0` and made every SIGABRT cost about a second. A VM provisioned before that
+  change needs `tools/vm provision` once (or the same two commands by hand).
 - git runs on the host; it also works in the guest: provisioning symlinks the host path of the
   VM directory to `/vagrant`, so worktree `.git` files (absolute host paths) resolve there.
 
@@ -80,7 +86,19 @@ A safe(r) C-like systems programming language.
   outside parentheses (a brace initializer, for example) splits it. `#val` in an assertion
   message is the argument after macro expansion, so compare through a variable when the
   expected text matters. Suites are ordinary C11: no `__VA_OPT__`, and `-Wtype-limits` (gcc)
-  rejects assertions that are always true, such as `TEST_ASSERT_GE_SIZE(n, 0)`.
+  rejects assertions that are always true, such as `TEST_ASSERT_GE_SIZE(n, 0)`. The
+  `TEST_ASSERT_*_INT64`/`_SIZE` operands are printed with `PRId64`/`%zu`, so cast plain
+  literals and `long` values (`(int64_t)0`) or `-Wformat` fails the build. A suite whose
+  literals are the test data (sample values, expected texts) wraps them in
+  `// NOLINTBEGIN(readability-magic-numbers)` with a comment saying so rather than naming each.
+  The sanitizer presets run the unit tests with `allocator_may_return_null=1` (ctest sets the
+  environment, `cmake/sanitizers.cmake`) because the runtime's out-of-memory path is tested with
+  an impossible allocation; run a suite by hand under those presets with the same variable.
+- The cross pipeline: `test/asm/*.s` are hand-written x86-64 programs that follow the codegen
+  contract (`notes/toolchain.md` 6); `test/pipeline_test.sh <build-dir>` assembles them with
+  `x86_64-linux-gnu-gcc` and `<build-dir>/std/fort_rt.o`, runs them under qemu and checks
+  stdout, stderr and the status byte-exactly; ctest `pipeline` (label `unit`). `*.s` is
+  gitignored except `test/asm/*.s`.
 - Binaries: `build/<preset>/fort` is stage1 (the C compiler); `build/<preset>/stage2/fort` and
   `stage3/fort` are the self-hosted compiler built by stage1 and by stage2.
 
