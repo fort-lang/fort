@@ -55,9 +55,10 @@ so no value ever starts undefined.
 The first bracket after the element type always holds a run-time count and always produces a
 slice; later brackets are fixed-array dimensions of the element type (grammar section 6).
 `new(i32[4])` is therefore a `mut i32[]` of four elements, not an `i32[4]`. An untyped constant
-count takes its default type (D4.5). A negative count, a total size that overflows, and
-allocation failure are runtime errors (section 6); `n == 0` is allowed and yields a slice of
-length 0 with a non-null `.ptr`, because the runtime allocates at least one byte (D10.2).
+count may take any integer type, and a negative constant count is a compile error (D4.1). A
+negative count at run time, a total size that overflows, and allocation failure are runtime
+errors (section 6); `n == 0` is allowed and yields a slice of length 0 with a non-null `.ptr`,
+because the runtime allocates at least one byte (D10.2).
 
 ```fort
 mut Point* p = new(Point);           // p->x == 0, p->y == 0
@@ -67,7 +68,8 @@ mut i32[] none = new(i32[0]);        // none.len == 0, none.ptr != null; del it 
 Point* q = new(Point{1, 2});         // error: new takes a type, not a literal
 i32[] bad = new(i32[]);              // error: new needs an element count
 void* v = new(void);                 // error: cannot allocate void
-mut i32[] neg = new(i32[-1]);        // runtime error: negative allocation count
+mut i32[] neg = new(i32[-1]);        // error: negative constant count (D4.1)
+mut i32[] neg2 = new(i32[k]);        // runtime error when k == -1: negative allocation count -1
 ```
 
 ### 2.2 `del`
@@ -154,8 +156,7 @@ undoes, before the variable is rebound.
 
 A pointer `T*` holds the address of one `T` or is `null`. It is obtained with `&` on an lvalue,
 from `new`, from `.ptr` of a slice or string, from a `cast`, from a function name (for function
-pointers), from `null`, or from an `extern` call (D10.4, D10.5, D7.10). The operations are (D6.7,
-D6.10):
+pointers), from `null`, or from a call (D10.4, D10.5). The operations are (D6.7, D6.10):
 
 | Expression  | Meaning                                | Requires                                 |
 |-------------|----------------------------------------|------------------------------------------|
@@ -224,14 +225,10 @@ A slice `T[]` is sixteen bytes: a pointer to the first element followed by a `u6
 own nothing: the elements live on the stack (a sliced local array), on the heap (`new`), in
 read-only data (a literal, a sliced module constant) or in foreign memory (`p[lo..hi]`).
 
-```
-T[] s            +----------------+----------------+
-                 | ptr: T*        | len: u64       |
-                 +-------+--------+----------------+
-                         |
-                         v
-elements         | s[0] | s[1] | ... | s[len - 1] |
-```
+| Offset | Word  | Type  | Holds                                                    |
+|--------|-------|-------|----------------------------------------------------------|
+| 0      | `ptr` | `T*`  | the address of `s[0]`, or `null` in the zero value       |
+| 8      | `len` | `u64` | the element count; `s[len - 1]` is the last element      |
 
 `.ptr` and `.len` read the two words; neither is an lvalue (D6.7). The zero value `{null, 0}` is
 what `= {}` produces and what a zeroed struct field holds. There is no expression form for a
@@ -251,8 +248,8 @@ mut i32[] a = new(i32[6]);           // {p, 6}
 mut i32[] b = a[2..5];               // {p + 2 * 4 bytes, 3}
 i32[] c = b[1..];                    // {p + 3 * 4 bytes, 2}
 i32[] d = a[..];                     // same header as a, elements immutable
-i32[] e = b[0..4];                   // runtime error: hi 4 exceeds b.len 3
-i32[] f = a[4..2];                   // runtime error: lo exceeds hi
+i32[] e = b[0..4];                   // runtime error: slice bounds 0..4 out of range for length 3
+i32[] f = a[4..2];                   // runtime error: slice bounds 4..2 out of range for length 6
 mut i32[4] arr = {1, 2, 3, 4};
 mut i32[] g = arr[1..3];             // points into arr's stack storage
 i32[] h = make_array()[..];          // error: a fixed array rvalue cannot be sliced
@@ -356,7 +353,7 @@ i32[4] row = m[2];                   // copies 16 bytes
 mut i32[][4] rows = new(i32[n][4]);  // n rows, zeroed
 rows[0][1] = 7;
 rows[1] = row;                       // copies a whole row into the slice's storage
-u64 k = m[3].len;                    // error: constant index 3 out of range for i32[3][4]
+u64 k = m[i].len;                    // 4: a constant; m[i] is not evaluated (D4.6)
 ```
 
 ## 6. Runtime checks
@@ -365,22 +362,26 @@ Every check below is compiled into the program. A failing check is a runtime err
 except where the table says otherwise. Casts never trap (D3.14) and float arithmetic never traps
 (D6.12).
 
-| Check              | Fires when                                | Message text                   |
-|--------------------|-------------------------------------------|--------------------------------|
-| index `e[i]`       | `i` outside `0 .. len - 1`, unsigned      | `index out of range`           |
-| slice `e[lo..hi]`  | not `0 <= lo <= hi <= len`                | `slice bounds out of range`    |
-| `+ - *`, unary `-` | signed or unsigned result does not fit    | `integer overflow`             |
-| `++ --`            | result does not fit                       | `integer overflow`             |
-| `+= -= *=`         | result does not fit                       | `integer overflow`             |
-| `<< >> <<= >>=`    | count negative or at least the width      | `shift count out of range`     |
-| `/ % /= %=`        | divisor is zero                           | `division by zero`             |
-| `/ % /= %=`        | `MIN / -1` or `MIN % -1`                  | `integer overflow`             |
-| `new(T[n])`        | `n < 0`                                   | `negative allocation count`    |
-| `new`              | `n * sizeof(T)` overflows `u64`           | `allocation size overflow`     |
-| `new`              | the allocator returns `null`              | `out of memory`                |
-| `assert(c)`        | `c` is `false`                            | `assertion failed: <text>`     |
-| `panic(m)`         | always                                    | `panic: <m>`                   |
-| `noreturn` guard   | a `noreturn` function returns             | none: trap instruction         |
+| Check           | Fires when                    | Message (values in decimal)                   |
+|-----------------|-------------------------------|-----------------------------------------------|
+| index `e[i]`    | `i >= len`, compared unsigned | `index 5 out of range for length 3`           |
+| slice `e[a..b]` | not `0 <= a <= b <= len`      | `slice bounds 2..7 out of range for length 3` |
+| `+ - *`, `-e`   | result does not fit           | `integer overflow`                            |
+| `++ --`         | result does not fit           | `integer overflow`                            |
+| `+= -= *=`      | result does not fit           | `integer overflow`                            |
+| `<< >> <<= >>=` | count `< 0` or `>= width`     | `shift count 64 out of range for i64`         |
+| `/ % /= %=`     | divisor is zero               | `division by zero`                            |
+| `/ % /= %=`     | `MIN / -1` or `MIN % -1`      | `division overflow`                           |
+| `new(T[n])`     | `n < 0` at run time           | `negative allocation count -1`                |
+| `new`           | `n * sizeof(T)` exceeds `u64` | `allocation size overflow`                    |
+| `new`           | the allocator returns `null`  | `out of memory`                               |
+| `assert(c)`     | `c` is `false`                | `assertion failed: <text>`                    |
+| `panic(m)`      | always                        | `panic: <m>`                                  |
+| `noreturn` guard | a `noreturn` function returns | none: bare trap instruction                  |
+
+The message texts are fixed (D11.4); the numbers shown (the index and the length, the two
+bounds and the length, the shift count and the shifted operand's type, the negative count) are
+the offending values of the failing check, written as signed decimals.
 
 | Check                       | Checked (default) | Release (`--release`)    | `--no-bounds-check` |
 |-----------------------------|-------------------|--------------------------|---------------------|
@@ -403,7 +404,8 @@ Notes:
 - Overflow checks cover signed and unsigned integers alike, so `len - 1` on an empty slice traps
   in checked mode (D11.1, D16). The wrapping operators exist so hashes and counters behave
   identically in both modes (D11.2). Programs must not rely on either overflow behavior (D11.1).
-- `<<` discards bits shifted out without a check; only the count is checked (D11.1).
+- `<<` discards bits shifted out without a check, so `1 << 31` on `i32` is `-2147483648` in
+  both modes; only the count is checked (D6.2, D11.1).
 - Division checks apply at every width and in both modes (D6.13, D11.3).
 - `assert` is active in both modes; its message carries the source text of the argument (D12.2).
 - The `noreturn` guard is a trap instruction emitted after the body of a `noreturn` function and
@@ -413,19 +415,20 @@ Notes:
 
 ```fort
 i32[] s = new(i32[3]);
-i32 a = s[3];                        // runtime error: index out of range
+i32 a = s[3];                        // runtime error: index 3 out of range for length 3
 i64 k = -1;
-i32 b = s[k];                        // runtime error: index out of range (unsigned compare)
+i32 b = s[k];                        // runtime error: index -1 out of range for length 3
 mut u8 c = 255;
-c++;                                 // checked: runtime error; release: c == 0
-u64 n = s.len - 4;                   // checked: runtime error; release: wraps
+c++;                                 // checked: integer overflow; release: c == 0
+u64 n = s.len - 4;                   // checked: integer overflow; release: wraps
 mut u32 h = 0;
 h = h *% 31 +% 7;                    // wraps in both modes
-i32 d = 1 << 32;                     // compile error: 1 is i32 and the constant count is its width
+i32 sc = 32;
+i32 d = a << sc;                     // checked: shift count 32 out of range for i32; release: a
 i32 zero = 0;
 i32 e = a / zero;                    // runtime error: division by zero
 assert(s.len == 3);                  // passes
-assert(s.len == 4);                  // main.ft:14:1: assertion failed: s.len == 4
+assert(s.len == 4);                  // main.ft:15:1: assertion failed: s.len == 4
 ```
 
 ## 7. The runtime-error contract
@@ -439,24 +442,27 @@ When a check fails, or `panic` or a failed `assert` executes, the runtime (D11.4
 Deferred statements do not run (D7.8) and no destructor-like cleanup exists. The line has one of
 three forms:
 
-```
-<file>:<line>:<col>: runtime error: <message>
-<file>:<line>:<col>: panic: <message>
-<file>:<line>:<col>: assertion failed: <expression text>
-```
+- `<file>:<line>:<col>: runtime error: <message>` for the checks of section 6;
+- `<file>:<line>:<col>: panic: <message>` for `panic`;
+- `<file>:<line>:<col>: assertion failed: <expression text>` for `assert`.
 
-`<file>:<line>:<col>` locates the failing operation, `new`, `assert` or `panic` call in the
-source. Test files match these lines with `//! stderr: <substring>` and `//! abort` (D14.5).
+`<file>` is the path the compiler opened (the search root as given plus the relative module
+path); `<line>:<col>` is the position of the check's operator token, or of the builtin's name
+for `new`, `assert` and `panic`; the `assert` text is the source text of the expression,
+verbatim (D11.4). Test files match these lines with `//! stderr: <substring>` and `//! abort`
+(D14.5).
 
 ```sh
 $ fort main.ft && ./a.out
-main.ft:7:13: runtime error: index out of range
+main.ft:7:13: runtime error: index 5 out of range for length 3
 $ echo $?
 134
 ```
 
 Output buffering (D11.5): `print` and `println` write to a runtime buffer for standard output;
-`eprint` and `eprintln` are unbuffered; `fprint` and `fprintln` use one buffer per descriptor.
+`eprint` and `eprintln` are unbuffered; `fprint` and `fprintln` use one buffer per descriptor,
+and `fprint(1, ...)` shares the stdout buffer with `print`. An `extern` write to a descriptor
+bypasses the buffers, so it can overtake buffered output unless the program flushes first.
 Buffers flush when full, on `io.close` and `io.flush`, at exit, and before any runtime error, so
 output printed before a failure is never lost. The runtime exports `fort_rt_flush(i32 fd)` and
 `fort_rt_flush_all()`; `io.close` and `io.flush` call the former. Program start and exit are

@@ -36,8 +36,8 @@ The three kinds differ in what a copy means:
   value, but the copy designates the same target storage as the original. Two slices obtained from
   one `new` alias the same elements; two pointers to one variable alias that variable.
 
-The zero value is what `= {}` produces for aggregates, slices and strings (D6.5), what `new`
-fills allocations with (D10.2), and what a zeroed enum or scalar field holds.
+The zero value is what `= {}` produces for aggregates, slices, strings and enums (D6.5), what
+`new` fills allocations with (D10.2), and what a zeroed scalar field holds.
 
 `noreturn` is a return type, not a type (D8.5): `noreturn x = ...;` does not parse.
 
@@ -63,8 +63,8 @@ type (D3.12): `i32 x` and `mut i32 x` hold values of the same type `i32`.
 | `char` | 1    | 1         | one byte, 0 .. 255                          |
 | `void` | none | none      | none; only a return type or the base of `void*` |
 
-Alignment equals size for every primitive (D3.1). Raw bytes are `u8`; there is no other
-one-byte integer type. Integers are two's complement; `>>` is arithmetic on signed and logical
+Alignment equals size for every primitive (D3.1). Raw bytes are `u8`; there is no distinct type
+for them (D3.1). Integers are two's complement; `>>` is arithmetic on signed and logical
 on unsigned types (D6.2). Floats follow IEEE 754 (D6.12). Every arithmetic, bitwise and
 comparison operator requires both operands to have the same type; there is no promotion, not
 even between `u8` and `i32` (D6.2).
@@ -79,7 +79,7 @@ i32 d = a + c;              // error: operands of + must have the same type
 ### 2.1 `char`
 
 `char` is a distinct one-byte character type (D3.2). It supports `== != < <= > >=`, `switch`,
-`cast` to and from every integer type, and nothing else. Ordering compares byte values.
+`cast` to and from every integer type, and nothing else. Ordering compares unsigned byte values.
 Character literals are untyped constants whose default type is `char` (D4.3). Strings are
 sequences of `char` (D3.7).
 
@@ -130,7 +130,7 @@ u64 n = sizeof(void);                // error: sizeof(void) (D3.15)
 value: assignment, argument passing and `return` copy all `N` elements (D8.2). `a.len` is an
 untyped integer constant equal to `N` (D3.4, D4.6). A fixed array has no `.ptr`; obtain a
 pointer to an element with `&a[i]` or a slice with `a[lo..hi]` (D6.9). A constant index that is
-out of range is a compile error; any other index is checked at run time (D6.8).
+out of range or negative is a compile error (D6.8, D4.1); any other index is checked at run time.
 
 ```fort
 i32[4] a = {1, 2, 3, 4};
@@ -388,8 +388,9 @@ P2 b = a;                            // error: P1 is not P2, even with the same 
 `==` and `!=` are defined on integers, floats, `bool`, `char`, enums, pointers (address
 identity), `void*`, function pointers (identity) and `string` (contents). They are compile errors
 on structs, fixed arrays and slices (D3.13). Both operands must have identical types, including
-mutability levels; an untyped constant takes the other operand's type (D4.1), and `null` takes
-the type of a pointer operand (D10.5).
+mutability levels, because the implicit drop of section 7.4 does not apply to comparison operands
+(D6.2); an untyped constant takes the other operand's type (D4.1), and `null` takes the type of
+a pointer operand (D10.5).
 
 ```fort
 mut i32* p = &x;
@@ -448,11 +449,12 @@ immediately after a `*` or `[]` suffix marks mutable exactly the storage that ho
 or slice header introduced by that suffix, that is, the level just outside the level the suffix
 reaches (D5.3). Read the front `mut` as "fully mutable" and any other `mut` as "this level only".
 `mut` never follows a fixed-array suffix, and a `mut` that does not precede the base type or
-follow a `*` or `[]` does not parse.
+follow a `*` or `[]` does not parse. A `mut` that marks a level twice (`mut i32* mut p`) is an
+error ("redundant mut"), so every type has exactly one spelling (D5.3).
 
 In the table, "rebind" is `x = ...` on the binding itself; "level 1" covers writes such as
 `*p = v`, `p->f = v`, `s[i] = v`, `t[i] = q`; "level 2" covers `**pp = v`, `(*pp)->f = v`,
-`s[i][j] = v`, `t[i]->f = v`. The first ten rows are the D5.3 table.
+`s[i][j] = v`, `t[i]->f = v`. Every row of the D5.3 table appears below, with further shapes.
 
 | Declaration          | rebind               | level 1              | level 2            |
 |----------------------|----------------------|----------------------|--------------------|
@@ -504,7 +506,8 @@ Rationale (D5.3): with C-style placement and the default inverted, the most comm
 
 Dropping mutability is the only implicit conversion (D3.14, D5.4). It applies when a value is
 used to initialize a declaration, on the right of an assignment, as an argument, and as a
-`return` operand. Level 0 of the receiving binding is unconstrained. For a level `k >= 1`,
+`return` operand; it does not apply to the operands of a comparison or of `?:`, which must have
+identical types (D6.2). Level 0 of the receiving binding is unconstrained. For a level `k >= 1`,
 mutability may be dropped only if every level from 1 to `k - 1` is immutable in the target type.
 Adding mutability at any level requires `cast` (D3.14).
 
@@ -591,6 +594,7 @@ An lvalue (D6.7) is mutable according to the table below (D5.7). Assignment, com
 | Lvalue                        | Mutable when                                              |
 |-------------------------------|-----------------------------------------------------------|
 | variable, parameter `x`       | `x` was declared with level 0 mutable                     |
+| module constant `K`, global `g` | `g` was declared `mut`; `K` never (addressable, D7.10)  |
 | `*p`, `p->f`                  | level 1 of `p`'s type is mutable                          |
 | `e.f`, `e[i]` on a fixed array| `e` is a mutable lvalue                                   |
 | `s[i]` on a slice             | level 1 of `s`'s type is mutable                          |
@@ -712,9 +716,11 @@ first takes its default type (D4.5) and is then converted with the runtime seman
 | function pointer    | `u64`, other fn type     | error (go through `void*`)                    |
 | `string`            | `char[]`, `u8[]`         | reinterpret the header                        |
 | `string`            | `mut char[]`, `mut u8[]` | reinterpret; adds `mut` (cast-away-const)     |
-| `char[]`, `u8[]`    | `string`, each other     | reinterpret the header; `mut` forms likewise  |
+| `char[]`, `u8[]`    | `string`, each other     | reinterpret the header                        |
+| `mut char[]`, `mut u8[]` | `string`, `char[]`, `u8[]`, each other | reinterpret; drops `mut` |
+| `char[]`, `u8[]`    | `mut char[]`, `mut u8[]` | reinterpret; adds `mut` (cast-away-const)     |
 | `T[]`               | `mut T[]`                | add mutability at every level                 |
-| `mut T*`, `mut T[]` | `T*`, `T[]`              | drop mutability, as the implicit conversion   |
+| `mut T*`            | `T*`                     | drop mutability, as the implicit conversion   |
 | slice               | other element type       | error: `len` counts elements of one type      |
 | pointer             | slice                    | error (use `p[lo..hi]`)                       |
 | slice               | pointer                  | error (use `.ptr`)                            |
@@ -722,6 +728,10 @@ first takes its default type (D4.5) and is then converted with the runtime seman
 | struct              | anything                 | error                                         |
 | anything            | fixed array, struct      | error                                         |
 | any `T`             | `T`                      | identity                                      |
+
+A `mut` in a cast target names the levels behind the indirection; a binding-level `mut` is not
+part of a cast target, so `cast(s, u8[] mut)` is an error (D3.14). `null` is not a valid cast
+operand, because it has no type of its own (D10.5).
 
 ```fort
 i64 w = cast(cast(-1, i8), i64);     // -1: sign-extended because i8 is signed
@@ -733,7 +743,7 @@ f32 f = cast(16777217, f32);         // 16777216.0: rounded to nearest even
 i32 s1 = cast(1e10, i32);            // 2147483647: saturated
 i32 s2 = cast(-3.99, i32);           // -3: truncated toward zero
 u8 s3 = cast(-1.0, u8);              // 0: saturated
-i32 s4 = cast(0.0 / 0.0, i32);       // 0: NaN
+i32 s4 = cast(math.f64_nan(), i32);  // 0: NaN (std::math provides NaN, D6.12)
 i32 b = cast(true, i32);             // 1
 bool x = cast(1, bool);              // error: no cast from integer to bool
 i32 c = cast('A', i32);              // 65
@@ -761,7 +771,8 @@ type of its own; it takes one from context:
 - the type of the other operand of a binary operator, except that the count operand of a shift
   is never a context for the shifted operand (section 9.4);
 - the parameter type in a call, the return type in `return`, the operand type in a `case` label;
-- an index or slice-bound position, where any integer type is accepted (D6.8, D6.9).
+- an index, slice-bound or `new` count position, where any integer type is accepted and a
+  negative constant is a compile error (D4.1, D6.8, D6.9, D10.2).
 
 `cast(c, T)` is not a context: an untyped `c` takes its default type first (D4.1, D4.5).
 
@@ -803,10 +814,12 @@ char e = 65;                         // error: use cast(65, char)
 
 Operators applied to untyped constants fold at compile time. Integer with integer stays an
 untyped integer, so `1 / 2` is `0`; integer with float becomes an untyped float; `~c` on an
-untyped integer is `-c - 1`. Untyped integers are evaluated exactly in `[-2^63, 2^64 - 1]`; an
-intermediate outside that range, and division by zero, are compile errors. Untyped floats are
-evaluated as `f64`; an `f32` constant is the rounding of that `f64` value. The shifted operand of
-a shift takes its type from the context of the whole shift expression, never from the count.
+untyped integer is `-c - 1`; constant `/` and `%` truncate toward zero exactly as at run time
+(D6.13), so `-7 / 2` is `-3` and `-7 % 2` is `-1`. Untyped integers are evaluated exactly in
+`[-2^63, 2^64 - 1]`; an intermediate outside that range, and division by zero, are compile
+errors. Untyped floats are evaluated as `f64`; an `f32` constant is the rounding of that `f64`
+value. The shifted operand of a shift takes its type from the context of the whole shift
+expression, never from the count.
 
 ```fort
 f64 h = 1 / 2;                       // 0.0: integer division folded first
@@ -824,10 +837,10 @@ f64 mixed2 = 1 + 0.5;                // 1.5
 ### 9.5 Default types (D4.5)
 
 With no context at all (an argument to `print`, an operand of `cast`, the operand of a `switch`,
-the count in `new(T[n])`), an untyped integer becomes `i32` if it fits, otherwise `i64`,
-otherwise it is an error; an untyped float becomes `f64`; a character literal becomes `char`.
-`null` has no default type: it takes the type of a pointer it is initialized into, assigned to,
-passed as, returned as, or compared with.
+the shifted operand of a shift in no other context), an untyped integer becomes `i32` if it
+fits, otherwise `i64`, otherwise it is an error; an untyped float becomes `f64`; a character
+literal becomes `char`. `null` has no default type: it takes the type of a pointer it is
+initialized into, assigned to, passed as, returned as, or compared with.
 
 ```fort
 print(7);                            // i32
@@ -851,14 +864,15 @@ expressions. A constant expression is one of:
 - `.len` of an expression of fixed-array type (only the type is used; the expression is not
   evaluated, so `s[i].len` is constant when `s` is an `i32[][4]`);
 - unary `- ! ~`; binary `+ - * / % +% -% *% & | ^ << >> < <= > >= == != && ||`; `?:`;
-- `cast` whose source and target are both integer or float types;
+- `cast` whose source and target are each an integer or float type, `char` or an enum, so
+  `cast(Color.Blue, i32) + 1` may size an array;
 - a parenthesized constant expression;
 - a struct or array literal whose leaves are constant expressions.
 
 Not constant: calls, `&` (except `&` of a module-level declaration inside a module-level
 initializer, D7.10), indexing, slicing, field access, `.len` of a slice or string, reads of
-`mut` globals, `cast` involving `char`, `bool`, enums, pointers or slices, and a `?:` whose
-condition is not constant.
+`mut` globals, `cast` involving `bool`, pointers or slices (`cast` of `null` is an error
+outright, D10.5), and a `?:` whose condition is not constant.
 
 ```fort
 i32 N = 4;                           // module level: a constant, addressable, read-only
@@ -867,7 +881,8 @@ i32[buf.len + 1] more = {};          // ok: 9
 mut i32 g = 4;
 i32[g] bad = {};                     // error: reads a mut global
 i32[buf[0]] bad2 = {};               // error: indexing is not constant
-i32[cast(Color.Blue, i32)] bad3 = {};// error: cast of an enum is not constant
+i32[cast(Color.Blue, i32) + 1] ok3 = {};   // ok: 7, with Blue == 6 from section 4.2
+i32[cast(true, i32)] bad3 = {};      // error: cast of a bool is not constant
 string S = "abc";
 i32[S.len] bad4 = {};                // error: .len of a string is not constant
 ```
@@ -940,10 +955,10 @@ calling convention realizes this as follows (D9.9):
 
 Struct layout is identical to the C layout of the same declaration, so passing `&s` to C works.
 A fort function is usable as a C callback, and an `extern` function may be declared, exactly when
-every parameter and the result are integers, floats, `bool`, `char`, pointers or function
-pointers; slices, strings, structs and arrays never cross an `extern` boundary (D9.8). Narrow
-integers and `bool` are zero- or sign-extended on both sides of the boundary; C `char*` maps to
-`char*` or `u8*`, C `size_t` to `u64` (D9.8).
+every parameter and the result are integers, floats, `bool`, `char`, enums (passed as `i32`),
+pointers or function pointers; slices, strings, structs and arrays never cross an `extern`
+boundary (D9.8). Narrow integers and `bool` are zero- or sign-extended on both sides of the
+boundary; C `char*` maps to `char*` or `u8*`, C `size_t` to `u64` (D9.8).
 
 ```fort
 extern fn i64 write(i32 fd, void* buf, u64 n);
