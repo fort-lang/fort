@@ -237,6 +237,110 @@ TEST(the_conditional_operator_is_not_supported, {
                        "t.ft:1:16: error: not supported by the bootstrap compiler: ?:\n");
 })
 
+// ---- every operator token -------------------------------------------------
+
+// Each binary operator of D6.1 builds its own node with its own spelling.
+TEST(every_binary_operator_parses, {
+    TEST_ASSERT_EQ_STR(dump_expr("a + b"), "(binary + (ident a) (ident b))");
+    TEST_ASSERT_EQ_STR(dump_expr("a - b"), "(binary - (ident a) (ident b))");
+    TEST_ASSERT_EQ_STR(dump_expr("a * b"), "(binary * (ident a) (ident b))");
+    TEST_ASSERT_EQ_STR(dump_expr("a / b"), "(binary / (ident a) (ident b))");
+    TEST_ASSERT_EQ_STR(dump_expr("a % b"), "(binary % (ident a) (ident b))");
+    TEST_ASSERT_EQ_STR(dump_expr("a +% b"), "(binary +% (ident a) (ident b))");
+    TEST_ASSERT_EQ_STR(dump_expr("a -% b"), "(binary -% (ident a) (ident b))");
+    TEST_ASSERT_EQ_STR(dump_expr("a *% b"), "(binary *% (ident a) (ident b))");
+    TEST_ASSERT_EQ_STR(dump_expr("a << b"), "(binary << (ident a) (ident b))");
+    TEST_ASSERT_EQ_STR(dump_expr("a >> b"), "(binary >> (ident a) (ident b))");
+    TEST_ASSERT_EQ_STR(dump_expr("a < b"), "(binary < (ident a) (ident b))");
+    TEST_ASSERT_EQ_STR(dump_expr("a <= b"), "(binary <= (ident a) (ident b))");
+    TEST_ASSERT_EQ_STR(dump_expr("a > b"), "(binary > (ident a) (ident b))");
+    TEST_ASSERT_EQ_STR(dump_expr("a >= b"), "(binary >= (ident a) (ident b))");
+    TEST_ASSERT_EQ_STR(dump_expr("a == b"), "(binary == (ident a) (ident b))");
+    TEST_ASSERT_EQ_STR(dump_expr("a != b"), "(binary != (ident a) (ident b))");
+    TEST_ASSERT_EQ_STR(dump_expr("a & b"), "(binary & (ident a) (ident b))");
+    TEST_ASSERT_EQ_STR(dump_expr("a ^ b"), "(binary ^ (ident a) (ident b))");
+    TEST_ASSERT_EQ_STR(dump_expr("a | b"), "(binary | (ident a) (ident b))");
+    TEST_ASSERT_EQ_STR(dump_expr("a && b"), "(binary && (ident a) (ident b))");
+    TEST_ASSERT_EQ_STR(dump_expr("a || b"), "(binary || (ident a) (ident b))");
+})
+
+// Comparisons do not chain into one node: `a < b < c` parses and is a type
+// error later (grammar.md 6).
+TEST(comparisons_parse_but_do_not_chain, {
+    TEST_ASSERT_EQ_STR(dump_expr("a < b < c"),
+                       "(binary < (binary < (ident a) (ident b)) (ident c))");
+    TEST_ASSERT_EQ_STR(dump_expr("a == b == c"),
+                       "(binary == (binary == (ident a) (ident b)) (ident c))");
+})
+
+// Unary operators stack and bind looser than every postfix form.
+TEST(unary_operators_stack, {
+    TEST_ASSERT_EQ_STR(dump_expr("!!b"), "(unary ! (unary ! (ident b)))");
+    TEST_ASSERT_EQ_STR(dump_expr("- -x"), "(unary - (unary - (ident x)))");
+    TEST_ASSERT_EQ_STR(dump_expr("~-x"), "(unary ~ (unary - (ident x)))");
+    TEST_ASSERT_EQ_STR(dump_expr("*&x"), "(unary * (unary & (ident x)))");
+    TEST_ASSERT_EQ_STR(dump_expr("&*p"), "(unary & (unary * (ident p)))");
+    TEST_ASSERT_EQ_STR(dump_expr("!p->ok"), "(unary ! (arrow (ident p) ok))");
+    TEST_ASSERT_EQ_STR(dump_expr("-f(x)"), "(unary - (call (ident f) (ident x)))");
+})
+
+// A postfix chain is a left-leaning spine, whatever the forms in it.
+TEST(postfix_chains_lean_left, {
+    TEST_ASSERT_EQ_STR(dump_expr("a.b.c"), "(field (field (ident a) b) c)");
+    TEST_ASSERT_EQ_STR(dump_expr("f()()"), "(call (call (ident f)))");
+    TEST_ASSERT_EQ_STR(dump_expr("a[0][1]"), "(index (index (ident a) (int 0)) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_expr("p->a->b"), "(arrow (arrow (ident p) a) b)");
+    TEST_ASSERT_EQ_STR(dump_expr("f(1).x[0]"),
+                       "(index (field (call (ident f) (int 1)) x) (int 0))");
+    TEST_ASSERT_EQ_STR(dump_expr("xs[0..2][1]"),
+                       "(index (slice (ident xs) (int 0) (int 2)) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_expr("(*p).f"), "(field (unary * (ident p)) f)");
+    TEST_ASSERT_EQ_STR(dump_expr("(*p)[0]"), "(index (unary * (ident p)) (int 0))");
+})
+
+// A whole expression of mixed precedence, as a program writes it.
+TEST(a_mixed_expression_keeps_the_ladder, {
+    TEST_ASSERT_EQ_STR(dump_expr("a + b * c - d / e"),
+                       "(binary - (binary + (ident a) (binary * (ident b) (ident c)))"
+                       " (binary / (ident d) (ident e)))");
+    TEST_ASSERT_EQ_STR(dump_expr("i < n && xs[i] != 0"),
+                       "(binary && (binary < (ident i) (ident n))"
+                       " (binary != (index (ident xs) (ident i)) (int 0)))");
+    TEST_ASSERT_EQ_STR(dump_expr("(a | b) & ~c"),
+                       "(binary & (binary | (ident a) (ident b)) (unary ~ (ident c)))");
+    TEST_ASSERT_EQ_STR(dump_expr("p != null && p->n > 0"),
+                       "(binary && (binary != (ident p) (null))"
+                       " (binary > (arrow (ident p) n) (int 0)))");
+})
+
+// The arguments and the members of a literal are expressions of their own.
+TEST(arguments_and_members_are_full_expressions, {
+    TEST_ASSERT_EQ_STR(dump_expr("f(a + 1, g(b), c[0])"),
+                       "(call (ident f) (binary + (ident a) (int 1))"
+                       " (call (ident g) (ident b)) (index (ident c) (int 0)))");
+    TEST_ASSERT_EQ_STR(dump_expr("point{a + 1, -b}"),
+                       "(struct-lit (name point) (init (binary + (ident a) (int 1))"
+                       " (unary - (ident b))))");
+    TEST_ASSERT_EQ_STR(dump_expr("i32[2]{f(1), x.y}"),
+                       "(array-lit (type (prim i32) (array (int 2)))"
+                       " (init (call (ident f) (int 1)) (field (ident x) y)))");
+    TEST_ASSERT_EQ_STR(dump_expr("s[a + 1 .. b - 1]"),
+                       "(slice (ident s) (binary + (ident a) (int 1))"
+                       " (binary - (ident b) (int 1)))");
+})
+
+// Casts and sizeof take full types, including function and marked ones.
+TEST(cast_and_sizeof_take_any_type, {
+    TEST_ASSERT_EQ_STR(dump_expr("cast(p, void*)"), "(cast (ident p) (type (void) (ptr)))");
+    TEST_ASSERT_EQ_STR(dump_expr("cast(s, u8@)"), "(cast (ident s) (type (prim u8) (slice)))");
+    TEST_ASSERT_EQ_STR(dump_expr("cast(f, fn i32(i32))"),
+                       "(cast (ident f) (type (fn-type (type (prim i32)) (type (prim i32)))))");
+    TEST_ASSERT_EQ_STR(dump_expr("cast(x + 1, i64)"),
+                       "(cast (binary + (ident x) (int 1)) (type (prim i64)))");
+    TEST_ASSERT_EQ_STR(dump_expr("sizeof(string)"), "(sizeof (type (string)))");
+    TEST_ASSERT_EQ_STR(dump_expr("sizeof(node mut* own)"),
+                       "(sizeof (type (name node) mut (ptr own)))");
+})
 // NOLINTEND(readability-magic-numbers)
 
 int main(int argc, char** argv) {
@@ -266,6 +370,13 @@ int main(int argc, char** argv) {
     TEST_RUN(positional_and_designated_initializers_do_not_mix);
     TEST_RUN(float_literals_are_not_supported);
     TEST_RUN(the_conditional_operator_is_not_supported);
+    TEST_RUN(every_binary_operator_parses);
+    TEST_RUN(comparisons_parse_but_do_not_chain);
+    TEST_RUN(unary_operators_stack);
+    TEST_RUN(postfix_chains_lean_left);
+    TEST_RUN(a_mixed_expression_keeps_the_ladder);
+    TEST_RUN(arguments_and_members_are_full_expressions);
+    TEST_RUN(cast_and_sizeof_take_any_type);
     parse_done();
     TEST_EXIT();
 }

@@ -90,6 +90,19 @@ static inline const char* dumped(const ast_node_t* n) {
     return sb_cstr(&pt_out);
 }
 
+// The position of `n` as `line:col`, valid until the next dump.
+static inline const char* loc_of(const ast_node_t* n) {
+    sb_clear(&pt_out);
+    if (n == NULL) {
+        sb_append(&pt_out, "nil");
+        return sb_cstr(&pt_out);
+    }
+    msg_uint(&pt_out, n->loc.line);
+    sb_push(&pt_out, ':');
+    msg_uint(&pt_out, n->loc.col);
+    return sb_cstr(&pt_out);
+}
+
 // The S-expression of the whole module, or the diagnostics when the parse
 // failed, so that a failing assertion shows why.
 static inline const char* parse_dump(const char* src) {

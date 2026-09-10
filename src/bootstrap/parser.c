@@ -1121,16 +1121,14 @@ static ast_node_t* parse_binary(parser_t* p, int min_prec) {
 }
 
 // ternary_expr = or_expr [ "?" expr ":" ternary_expr ], right-associative
-// (D6.1); `?:` is outside the C bootstrap's subset.
+// (D6.1). As for `do`-`while`, the whole form is parsed before `?:` is
+// reported as outside the C bootstrap's subset.
 static ast_node_t* parse_ternary(parser_t* p) {
     ast_node_t* cond = parse_binary(p, PREC_OR);
     if (cond == NULL || !at(p, TOK_QUESTION)) {
         return cond;
     }
     const loc_t loc = here(p);
-    if (unsupported(p, loc, "?:")) {
-        return NULL;
-    }
     bump(p);
     if (!enter(p)) {
         return NULL;
@@ -1143,6 +1141,9 @@ static ast_node_t* parse_ternary(parser_t* p) {
     }
     leave(p);
     if (n->b == NULL || n->c == NULL) {
+        return NULL;
+    }
+    if (unsupported(p, loc, "?:")) {
         return NULL;
     }
     return n;
@@ -1235,7 +1236,10 @@ static ast_node_t* parse_var_decl(parser_t* p, bool want_semi) {
 }
 
 // assign_head, incdec_head or call_expr (D7.2, D7.3): the target is a
-// postfix expression or a unary `*` (grammar.md 5).
+// postfix expression or a unary `*` (grammar.md 5). An assignment and an
+// increment carry their operator's position, which is where the runtime
+// reports the overwrite check of D17.11 and an overflow (toolchain.md 4);
+// the target's own position is on the target node.
 static ast_node_t* parse_simple_head(parser_t* p) {
     const loc_t loc = here(p);
     ast_node_t* e = at(p, TOK_STAR) ? parse_unary(p) : parse_postfix(p);
@@ -1243,7 +1247,7 @@ static ast_node_t* parse_simple_head(parser_t* p) {
         return NULL;
     }
     if (is_assign_op(kind(p))) {
-        ast_node_t* n = node_at(p, AST_ASSIGN, loc);
+        ast_node_t* n = node_at(p, AST_ASSIGN, here(p));
         n->op = (int32_t)kind(p);
         n->a = e;
         bump(p);
@@ -1254,7 +1258,7 @@ static ast_node_t* parse_simple_head(parser_t* p) {
         return n;
     }
     if (at(p, TOK_PLUS_PLUS) || at(p, TOK_MINUS_MINUS)) {
-        ast_node_t* n = node_at(p, AST_INCDEC, loc);
+        ast_node_t* n = node_at(p, AST_INCDEC, here(p));
         n->op = (int32_t)kind(p);
         n->a = e;
         bump(p);
@@ -1336,13 +1340,11 @@ static ast_node_t* parse_while(parser_t* p) {
     return n;
 }
 
-// do_stmt = "do" block "while" "(" expr ")" ";" (D7.5); `do`-`while` is
-// outside the C bootstrap's subset.
+// do_stmt = "do" block "while" "(" expr ")" ";" (D7.5). The whole form is
+// parsed before `do`-`while` is reported as outside the C bootstrap's subset,
+// so this is the parser the self-hosted compiler keeps, minus the one check.
 static ast_node_t* parse_do(parser_t* p) {
     const loc_t loc = here(p);
-    if (unsupported(p, loc, "do-while")) {
-        return NULL;
-    }
     ast_node_t* n = node_at(p, AST_DO_WHILE, loc);
     bump(p);
     n->a = parse_block(p);
@@ -1351,6 +1353,9 @@ static ast_node_t* parse_do(parser_t* p) {
     }
     n->b = parse_condition(p);
     if (n->b == NULL || !expect(p, TOK_SEMI, "';'")) {
+        return NULL;
+    }
+    if (unsupported(p, loc, "do-while")) {
         return NULL;
     }
     return n;

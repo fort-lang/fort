@@ -349,6 +349,44 @@ TEST(nesting_deeper_than_256_is_an_error, {
         strstr(parse_fails(many_suffixes(257)), "error: nesting deeper than 256\n"));
 })
 
+// The end of the file closes nothing: every unterminated construct is
+// reported where it runs out of tokens, and no loop spins there.
+TEST(unterminated_constructs_end_at_the_end_of_the_file, {
+    TEST_ASSERT_EQ_STR(parse_fails("fn i32 f() {"),
+                       "t.ft:1:13: error: expected '}', found end of file\n");
+    TEST_ASSERT_EQ_STR(parse_fails("struct s {"),
+                       "t.ft:1:11: error: expected '}', found end of file\n");
+    TEST_ASSERT_EQ_STR(parse_fails("enum e {"),
+                       "t.ft:1:9: error: expected an identifier, found end of file\n");
+    TEST_ASSERT_EQ_STR(parse_fails("point x = {"),
+                       "t.ft:1:12: error: expected an expression, found end of file\n");
+    TEST_ASSERT_EQ_STR(parse_fails("import a::"),
+                       "t.ft:1:11: error: expected an identifier, found end of file\n");
+    TEST_ASSERT_EQ_STR(parse_fails("i32"),
+                       "t.ft:1:4: error: expected an identifier, found end of file\n");
+})
+
+// An `else if` chain is a chain, not nesting: it costs no depth and no
+// recursion, so a long one parses (D7.4).
+TEST(a_long_else_if_chain_is_not_nesting, {
+    sb_clear(&deep);
+    sb_append(&deep, "fn void f() {\n    if (c) { }");
+    for (uint64_t i = 0; i < 300; i++) {
+        sb_append(&deep, " else if (c) { }");
+    }
+    sb_append(&deep, " else { }\n}\n");
+    const ast_node_t* mod = parse_text(sb_cstr(&deep));
+    TEST_ASSERT_NONNULL(mod);
+    TEST_ASSERT_EQ_STR(parse_diags(), "");
+    const ast_node_t* chain = ast_child(ast_child(mod, 0)->b, 0);
+    uint64_t links = 0;
+    while (chain != NULL && chain->kind == AST_IF) {
+        links++;
+        chain = chain->c;
+    }
+    TEST_ASSERT_EQ_UINT64(links, (uint64_t)301);
+})
+
 // One diagnostic per file, then the file is abandoned (D14.2).
 TEST(only_the_first_syntax_error_is_reported, {
     TEST_ASSERT_EQ_STR(parse_fails("fn void f() {\n    x;\n    y;\n}\ni32 = 1;\n"),
@@ -356,6 +394,188 @@ TEST(only_the_first_syntax_error_is_reported, {
                        "found ';'\n");
 })
 
+// ---- statements in every context ------------------------------------------
+
+// Every compound assignment of D7.2 is a statement of its own.
+TEST(every_assignment_operator_is_a_statement, {
+    TEST_ASSERT_EQ_STR(dump_stmt("x -= 1;"), "(assign -= (ident x) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_stmt("x *= 1;"), "(assign *= (ident x) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_stmt("x /= 1;"), "(assign /= (ident x) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_stmt("x %= 1;"), "(assign %= (ident x) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_stmt("x +%= 1;"), "(assign +%= (ident x) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_stmt("x -%= 1;"), "(assign -%= (ident x) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_stmt("x &= 1;"), "(assign &= (ident x) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_stmt("x |= 1;"), "(assign |= (ident x) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_stmt("x ^= 1;"), "(assign ^= (ident x) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_stmt("x >>= 1;"), "(assign >>= (ident x) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_stmt("i--;"), "(incdec -- (ident i))");
+})
+
+// An assignment target is any postfix form or a unary `*` (grammar.md 5).
+TEST(every_assignment_target_shape, {
+    TEST_ASSERT_EQ_STR(dump_stmt("**pp = 1;"), "(assign = (unary * (unary * (ident pp))) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_stmt("(*p).f = 1;"),
+                       "(assign = (field (unary * (ident p)) f) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_stmt("a[i][j] = 1;"),
+                       "(assign = (index (index (ident a) (ident i)) (ident j)) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_stmt("p->next->value = 1;"),
+                       "(assign = (arrow (arrow (ident p) next) value) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_stmt("m.g.h = 1;"), "(assign = (field (field (ident m) g) h) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_stmt("f(1).x = 1;"),
+                       "(assign = (field (call (ident f) (int 1)) x) (int 1))");
+})
+
+// A declaration is a statement wherever a statement is, and its initializer
+// is an expression or a brace list (D6.5, D7.1).
+TEST(declarations_in_every_body, {
+    TEST_ASSERT_EQ_STR(dump_stmt("if (c) { i32 x = 1; }"),
+                       "(if (ident c) (block (var x (type (prim i32)) (int 1))) nil)");
+    TEST_ASSERT_EQ_STR(dump_stmt("while (c) { point p = {}; }"),
+                       "(while (ident c) (block (var p (type (name point)) (init))))");
+    TEST_ASSERT_EQ_STR(dump_stmt("{ i32[2] a = {1, 2}; }"),
+                       "(block (var a (type (prim i32) (array (int 2)))"
+                       " (init (int 1) (int 2))))");
+    TEST_ASSERT_EQ_STR(dump_stmt("for (;;) { string s = \"x\"; }"),
+                       "(for nil nil nil (block (var s (type (string)) (str \"x\"))))");
+})
+
+// Loops and conditionals nest, and `break` and `continue` sit in them
+// (D7.5, D7.6).
+TEST(nested_control_flow, {
+    TEST_ASSERT_EQ_STR(dump_stmt("while (a) { while (b) { break; } continue; }"),
+                       "(while (ident a) (block (while (ident b) (block (break))) (continue)))");
+    TEST_ASSERT_EQ_STR(dump_stmt("for (;;) { if (c) { break; } else { continue; } }"),
+                       "(for nil nil nil (block (if (ident c) (block (break))"
+                       " (block (continue)))))");
+    TEST_ASSERT_EQ_STR(dump_stmt("switch (c) { case 1: while (b) { break; } }"),
+                       "(switch (ident c) (case (labels (int 1))"
+                       " (block (while (ident b) (block (break))))))");
+    TEST_ASSERT_EQ_STR(dump_stmt("switch (a) { case 1: switch (b) { default: } }"),
+                       "(switch (ident a) (case (labels (int 1))"
+                       " (block (switch (ident b) (case default (block))))))");
+})
+
+// A case body is an implicit block that holds any statement (D7.6).
+TEST(case_bodies_hold_statements, {
+    TEST_ASSERT_EQ_STR(dump_stmt("switch (c) { case 1: i32 x = 1; f(x); }"),
+                       "(switch (ident c) (case (labels (int 1))"
+                       " (block (var x (type (prim i32)) (int 1))"
+                       " (call-stmt (call (ident f) (ident x))))))");
+    TEST_ASSERT_EQ_STR(dump_stmt("switch (c) { case 1: case 2: f(); }"),
+                       "(switch (ident c) (case (labels (int 1)) (block))"
+                       " (case (labels (int 2)) (block (call-stmt (call (ident f))))))");
+    TEST_ASSERT_EQ_STR(dump_stmt("switch (c) { default: return; }"),
+                       "(switch (ident c) (case default (block (return nil))))");
+})
+
+// `defer` takes an assignment, an increment, a call or a block (D7.8).
+TEST(every_defer_form, {
+    TEST_ASSERT_EQ_STR(dump_stmt("defer i++;"), "(defer (incdec ++ (ident i)))");
+    TEST_ASSERT_EQ_STR(dump_stmt("defer *p = 0;"),
+                       "(defer (assign = (unary * (ident p)) (int 0)))");
+    TEST_ASSERT_EQ_STR(dump_stmt("defer { del(a); del(b); }"),
+                       "(defer (block (call-stmt (call (ident del) (ident a)))"
+                       " (call-stmt (call (ident del) (ident b)))))");
+    TEST_ASSERT_EQ_STR(dump_stmt("defer io.flush();"),
+                       "(defer (call-stmt (call (field (ident io) flush))))");
+    TEST_ASSERT_EQ_STR(stmt_fails("defer return;"),
+                       "t.ft:2:7: error: expected an expression, found 'return'\n");
+    TEST_ASSERT_EQ_STR(stmt_fails("defer i32 x = 1;"),
+                       "t.ft:2:7: error: expected an expression, found 'i32'\n");
+})
+
+// The `for` parts are a declaration, an assignment, an increment or a call,
+// and any of them may be missing (D7.5).
+TEST(every_for_part_shape, {
+    TEST_ASSERT_EQ_STR(dump_stmt("for (f(); ; g()) { }"),
+                       "(for (call-stmt (call (ident f))) nil"
+                       " (call-stmt (call (ident g))) (block))");
+    TEST_ASSERT_EQ_STR(dump_stmt("for (i = 0; i < n; i += 2) { }"),
+                       "(for (assign = (ident i) (int 0))"
+                       " (binary < (ident i) (ident n))"
+                       " (assign += (ident i) (int 2)) (block))");
+    TEST_ASSERT_EQ_STR(dump_stmt("for (node* mut p = head; p != null; p = p->next) { }"),
+                       "(for (var p (type (name node) (ptr mut)) (ident head))"
+                       " (binary != (ident p) (null))"
+                       " (assign = (ident p) (arrow (ident p) next)) (block))");
+    TEST_ASSERT_EQ_STR(dump_stmt("for (; ; i--) { }"),
+                       "(for nil nil (incdec -- (ident i)) (block))");
+})
+
+// A range loop takes any expression as its collection (D7.5).
+TEST(range_for_collections, {
+    TEST_ASSERT_EQ_STR(dump_stmt("for (u8 b : buf[..]) { }"),
+                       "(range-for (type (prim u8)) b (slice (ident buf) nil nil) (block))");
+    TEST_ASSERT_EQ_STR(dump_stmt("for (i32 v : f(1)) { }"),
+                       "(range-for (type (prim i32)) v (call (ident f) (int 1)) (block))");
+    TEST_ASSERT_EQ_STR(dump_stmt("for (node* n : m.nodes) { }"),
+                       "(range-for (type (name node) (ptr)) n (field (ident m) nodes) (block))");
+    TEST_ASSERT_EQ_STR(dump_stmt("for (i32[4] row : rows) { }"),
+                       "(range-for (type (prim i32) (array (int 4))) row (ident rows) (block))");
+})
+
+// ---- the disambiguation matrix (grammar.md 7.1) ---------------------------
+
+// A statement that starts with a type-looking prefix is a declaration
+// exactly when an identifier follows the type.
+TEST(a_type_prefix_followed_by_an_identifier_is_a_declaration, {
+    TEST_ASSERT_EQ_STR(dump_stmt("foo x = 1;"), "(var x (type (name foo)) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_stmt("foo* x = null;"), "(var x (type (name foo) (ptr)) (null))");
+    TEST_ASSERT_EQ_STR(dump_stmt("foo@ x = s;"), "(var x (type (name foo) (slice)) (ident s))");
+    TEST_ASSERT_EQ_STR(dump_stmt("foo[2] x = {};"),
+                       "(var x (type (name foo) (array (int 2))) (init))");
+    TEST_ASSERT_EQ_STR(dump_stmt("foo*[2] x = {};"),
+                       "(var x (type (name foo) (ptr) (array (int 2))) (init))");
+    TEST_ASSERT_EQ_STR(dump_stmt("foo[2]* x = null;"),
+                       "(var x (type (name foo) (array (int 2)) (ptr)) (null))");
+    TEST_ASSERT_EQ_STR(dump_stmt("m.foo* mut x = null;"),
+                       "(var x (type (name m foo) (ptr mut)) (null))");
+    TEST_ASSERT_EQ_STR(dump_stmt("foo mut* own mut x = null;"),
+                       "(var x (type (name foo) mut (ptr own mut)) (null))");
+})
+
+// The same prefixes followed by anything else are expression statements.
+TEST(a_type_prefix_followed_by_anything_else_is_a_statement, {
+    TEST_ASSERT_EQ_STR(dump_stmt("foo();"), "(call-stmt (call (ident foo)))");
+    TEST_ASSERT_EQ_STR(dump_stmt("foo = 1;"), "(assign = (ident foo) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_stmt("foo++;"), "(incdec ++ (ident foo))");
+    TEST_ASSERT_EQ_STR(dump_stmt("foo[2] = 1;"), "(assign = (index (ident foo) (int 2)) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_stmt("foo[2][3] = 1;"),
+                       "(assign = (index (index (ident foo) (int 2)) (int 3)) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_stmt("m.foo = 1;"), "(assign = (field (ident m) foo) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_stmt("m.foo(1);"), "(call-stmt (call (field (ident m) foo) (int 1)))");
+    TEST_ASSERT_EQ_STR(dump_stmt("foo.bar[2].baz = 1;"),
+                       "(assign = (field (index (field (ident foo) bar) (int 2)) baz) (int 1))");
+})
+
+// A primitive, `string`, `void` or `fn` starts a declaration with no
+// speculation at all (grammar.md 7.1).
+TEST(a_keyword_type_starts_a_declaration_at_once, {
+    TEST_ASSERT_EQ_STR(dump_stmt("u8 b = 0;"), "(var b (type (prim u8)) (int 0))");
+    TEST_ASSERT_EQ_STR(dump_stmt("bool ok = true;"), "(var ok (type (prim bool)) (bool true))");
+    TEST_ASSERT_EQ_STR(dump_stmt("char c = 'x';"), "(var c (type (prim char)) (char 120))");
+    TEST_ASSERT_EQ_STR(dump_stmt("string s = t;"), "(var s (type (string)) (ident t))");
+    TEST_ASSERT_EQ_STR(dump_stmt("void* p = null;"), "(var p (type (void) (ptr)) (null))");
+    TEST_ASSERT_EQ_STR(dump_stmt("fn void() f = g;"),
+                       "(var f (type (fn-type (type (void)))) (ident g))");
+    TEST_ASSERT_EQ_STR(dump_stmt("i32[2] mut a = {};"),
+                       "(var a (type (prim i32) (array (int 2) mut)) (init))");
+})
+
+// The speculative parse looks past a whole type, however long it is, and
+// still rewinds cleanly when no identifier follows.
+TEST(a_long_type_prefix_rewinds_cleanly, {
+    TEST_ASSERT_EQ_STR(dump_stmt("a[b + c * d] = e;"),
+                       "(assign = (index (ident a)"
+                       " (binary + (ident b) (binary * (ident c) (ident d)))) (ident e))");
+    TEST_ASSERT_EQ_STR(dump_stmt("a[f(1)] = e;"),
+                       "(assign = (index (ident a) (call (ident f) (int 1))) (ident e))");
+    TEST_ASSERT_EQ_STR(dump_stmt("a[sizeof(i32)] = e;"),
+                       "(assign = (index (ident a) (sizeof (type (prim i32)))) (ident e))");
+    TEST_ASSERT_EQ_STR(dump_stmt("a[m.N] = e;"),
+                       "(assign = (index (ident a) (field (ident m) N)) (ident e))");
+    TEST_ASSERT_EQ_STR(parse_diags(), "");
+})
 // NOLINTEND(readability-magic-numbers)
 
 int main(int argc, char** argv) {
@@ -390,7 +610,21 @@ int main(int argc, char** argv) {
     TEST_RUN(parameter_lists_take_no_trailing_comma);
     TEST_RUN(nesting_of_256_is_accepted);
     TEST_RUN(nesting_deeper_than_256_is_an_error);
+    TEST_RUN(unterminated_constructs_end_at_the_end_of_the_file);
+    TEST_RUN(a_long_else_if_chain_is_not_nesting);
     TEST_RUN(only_the_first_syntax_error_is_reported);
+    TEST_RUN(every_assignment_operator_is_a_statement);
+    TEST_RUN(every_assignment_target_shape);
+    TEST_RUN(declarations_in_every_body);
+    TEST_RUN(nested_control_flow);
+    TEST_RUN(case_bodies_hold_statements);
+    TEST_RUN(every_defer_form);
+    TEST_RUN(every_for_part_shape);
+    TEST_RUN(range_for_collections);
+    TEST_RUN(a_type_prefix_followed_by_an_identifier_is_a_declaration);
+    TEST_RUN(a_type_prefix_followed_by_anything_else_is_a_statement);
+    TEST_RUN(a_keyword_type_starts_a_declaration_at_once);
+    TEST_RUN(a_long_type_prefix_rewinds_cleanly);
     parse_done();
     sb_free(&deep);
     TEST_EXIT();

@@ -269,6 +269,236 @@ TEST(new_refuses_a_mut_a_slice_and_a_misplaced_own, {
                        "new allocates writable storage\n");
 })
 
+// ---- the marker matrix ----------------------------------------------------
+
+// Every marker set a reference suffix can carry, in the order D17.2 fixes
+// (`own` then `mut`).
+TEST(every_marker_set_on_a_reference_suffix, {
+    TEST_ASSERT_EQ_STR(dump_type("i32*"), "(type (prim i32) (ptr))");
+    TEST_ASSERT_EQ_STR(dump_type("i32* own"), "(type (prim i32) (ptr own))");
+    TEST_ASSERT_EQ_STR(dump_type("i32* mut"), "(type (prim i32) (ptr mut))");
+    TEST_ASSERT_EQ_STR(dump_type("i32* own mut"), "(type (prim i32) (ptr own mut))");
+    TEST_ASSERT_EQ_STR(dump_type("i32@"), "(type (prim i32) (slice))");
+    TEST_ASSERT_EQ_STR(dump_type("i32@ own"), "(type (prim i32) (slice own))");
+    TEST_ASSERT_EQ_STR(dump_type("i32@ mut"), "(type (prim i32) (slice mut))");
+    TEST_ASSERT_EQ_STR(dump_type("i32@ own mut"), "(type (prim i32) (slice own mut))");
+})
+
+// The base position takes a `mut` for every base type and an `own` only for
+// `string` (D5.3, D17.2).
+TEST(every_marker_set_on_a_base_type, {
+    TEST_ASSERT_EQ_STR(dump_type("u8 mut*"), "(type (prim u8) mut (ptr))");
+    TEST_ASSERT_EQ_STR(dump_type("char mut@"), "(type (prim char) mut (slice))");
+    TEST_ASSERT_EQ_STR(dump_type("bool[4] mut"), "(type (prim bool) (array (int 4) mut))");
+    TEST_ASSERT_EQ_STR(dump_type("node mut*"), "(type (name node) mut (ptr))");
+    TEST_ASSERT_EQ_STR(dump_type("m.t mut*"), "(type (name m t) mut (ptr))");
+    TEST_ASSERT_EQ_STR(dump_type("string"), "(type (string))");
+    TEST_ASSERT_EQ_STR(dump_type("string own"), "(type (string) own)");
+    TEST_ASSERT_EQ_STR(dump_type("string mut"), "(type (string) mut)");
+})
+
+// A reference chain reads inside-out, so a marker sticks to the suffix it
+// follows however long the chain is (D3.6, D5.3).
+TEST(long_reference_chains_keep_their_markers, {
+    TEST_ASSERT_EQ_STR(dump_type("i32****"), "(type (prim i32) (ptr) (ptr) (ptr) (ptr))");
+    TEST_ASSERT_EQ_STR(dump_type("i32 mut* mut* mut* mut"),
+                       "(type (prim i32) mut (ptr mut) (ptr mut) (ptr mut))");
+    TEST_ASSERT_EQ_STR(dump_type("node* own* own* own"),
+                       "(type (name node) (ptr own) (ptr own) (ptr own))");
+    TEST_ASSERT_EQ_STR(dump_type("m.t* mut@ own"), "(type (name m t) (ptr mut) (slice own))");
+})
+
+// A fixed-array group may sit between the two reference groups, and the
+// group after it refers to the whole array (D3.6).
+TEST(the_array_group_between_the_reference_groups, {
+    TEST_ASSERT_EQ_STR(dump_type("i32*[2]"), "(type (prim i32) (ptr) (array (int 2)))");
+    TEST_ASSERT_EQ_STR(dump_type("i32* own[2]"), "(type (prim i32) (ptr own) (array (int 2)))");
+    TEST_ASSERT_EQ_STR(dump_type("i32*[2] mut"), "(type (prim i32) (ptr) (array (int 2) mut))");
+    TEST_ASSERT_EQ_STR(dump_type("i32[2]*"), "(type (prim i32) (array (int 2)) (ptr))");
+    TEST_ASSERT_EQ_STR(dump_type("i32[2]* own mut"),
+                       "(type (prim i32) (array (int 2)) (ptr own mut))");
+    TEST_ASSERT_EQ_STR(dump_type("i32 mut*[2] mut"),
+                       "(type (prim i32) mut (ptr) (array (int 2) mut))");
+})
+
+// An array length is a constant expression, which the parser only parses
+// (D4.6: the checker requires it to be constant).
+TEST(an_array_length_is_any_expression_here, {
+    TEST_ASSERT_EQ_STR(dump_type("i32[N]"), "(type (prim i32) (array (ident N)))");
+    TEST_ASSERT_EQ_STR(dump_type("i32[2 + 2]"),
+                       "(type (prim i32) (array (binary + (int 2) (int 2))))");
+    TEST_ASSERT_EQ_STR(dump_type("i32[sizeof(u64)]"),
+                       "(type (prim i32) (array (sizeof (type (prim u64)))))");
+    TEST_ASSERT_EQ_STR(dump_type("i32[m.LIMIT]"),
+                       "(type (prim i32) (array (field (ident m) LIMIT)))");
+    TEST_ASSERT_EQ_STR(dump_type("i32[0]"), "(type (prim i32) (array (int 0)))");
+})
+
+// A function type nests: as a parameter, as a return type and as the base of
+// another function type (D3.10).
+TEST(function_types_nest, {
+    TEST_ASSERT_EQ_STR(dump_type("fn void(fn i32(i32))"),
+                       "(type (fn-type (type (void))"
+                       " (type (fn-type (type (prim i32)) (type (prim i32))))))");
+    TEST_ASSERT_EQ_STR(dump_type("fn fn void()()"),
+                       "(type (fn-type (type (fn-type (type (void))))))");
+    TEST_ASSERT_EQ_STR(dump_type("fn u8@(string, i32 mut*)"),
+                       "(type (fn-type (type (prim u8) (slice)) (type (string))"
+                       " (type (prim i32) mut (ptr))))");
+    TEST_ASSERT_EQ_STR(dump_type("fn noreturn()"), "(type (fn-type (type (noreturn))))");
+})
+
+// A `noreturn` is a return type only (D8.5).
+TEST(noreturn_is_only_a_return_type, {
+    TEST_ASSERT_EQ_STR(type_fails("noreturn*"),
+                       "t.ft:1:1: error: expected a type, found 'noreturn'\n");
+    TEST_ASSERT_EQ_STR(type_fails("fn void(noreturn)"),
+                       "t.ft:1:9: error: expected a type, found 'noreturn'\n");
+    TEST_ASSERT_EQ_STR(parse_fails("fn void f(noreturn n) { }"),
+                       "t.ft:1:11: error: expected a type, found 'noreturn'\n");
+    TEST_ASSERT_EQ_STR(expr_fails("sizeof(noreturn)"),
+                       "t.ft:1:16: error: expected a type, found 'noreturn'\n");
+})
+
+// The type of an array literal has no base marker and no marker on a
+// dimension (grammar.md 6), so a marked type followed by `{` is not one.
+TEST(an_array_literal_type_carries_no_marker, {
+    TEST_ASSERT_EQ_STR(dump_expr("i32[2]{1, 2}"),
+                       "(array-lit (type (prim i32) (array (int 2))) (init (int 1) (int 2)))");
+    TEST_ASSERT_EQ_STR(dump_expr("node* own[2]{a, b}"),
+                       "(array-lit (type (name node) (ptr own) (array (int 2)))"
+                       " (init (ident a) (ident b)))");
+    TEST_ASSERT_EQ_STR(expr_fails("i32 mut[2]{1, 2}"),
+                       "t.ft:1:9: error: expected an expression, found 'i32'\n");
+    TEST_ASSERT_EQ_STR(expr_fails("i32[2] mut{1, 2}"),
+                       "t.ft:1:9: error: expected an expression, found 'i32'\n");
+})
+
+// The allocated type of `new` has no `@`, no `mut` and an `own` only after a
+// `*` (D10.2, D17.3), and its dimensions carry no marker either.
+TEST(an_allocated_type_takes_pointers_and_dimensions, {
+    TEST_ASSERT_EQ_STR(dump_expr("new(node**)"), "(new (type (name node) (ptr) (ptr)) nil)");
+    TEST_ASSERT_EQ_STR(dump_expr("new(node* own* own)"),
+                       "(new (type (name node) (ptr own) (ptr own)) nil)");
+    TEST_ASSERT_EQ_STR(dump_expr("new(u8[16], n)"),
+                       "(new (type (prim u8) (array (int 16))) (ident n))");
+    TEST_ASSERT_EQ_STR(dump_expr("new(string)"), "(new (type (string)) nil)");
+    TEST_ASSERT_EQ_STR(expr_fails("new(node* mut)"),
+                       "t.ft:1:19: error: a mut does not parse inside new: "
+                       "new allocates writable storage\n");
+    TEST_ASSERT_EQ_STR(expr_fails("new(node own*)"),
+                       "t.ft:1:18: error: inside new an own follows a '*' of the element type\n");
+})
+
+// ---- a marker in a place no position exists -------------------------------
+
+// The placement rules hold in every position a type can be written: a
+// parameter, a field, a return type, a cast target and an array length's
+// type (D5.3, D17.2).
+TEST(the_placement_rules_hold_in_every_type_position, {
+    TEST_ASSERT_EQ_STR(parse_fails("fn void f(mut i32 a) { }"),
+                       "t.ft:1:11: error: a mut never precedes the base type: "
+                       "write 'node mut* p' or 'node* mut p'\n");
+    TEST_ASSERT_EQ_STR(parse_fails("struct s { own node* p; }"),
+                       "t.ft:1:12: error: an own never precedes the base type: "
+                       "write 'node* own p' or 'string own s'\n");
+    TEST_ASSERT_EQ_STR(parse_fails("fn mut i32 f() { }"),
+                       "t.ft:1:4: error: a mut never precedes the base type: "
+                       "write 'node mut* p' or 'node* mut p'\n");
+    TEST_ASSERT_EQ_STR(expr_fails("cast(p, mut i32*)"),
+                       "t.ft:1:17: error: a mut never precedes the base type: "
+                       "write 'node mut* p' or 'node* mut p'\n");
+    TEST_ASSERT_EQ_STR(expr_fails("sizeof(own u8@)"),
+                       "t.ft:1:16: error: an own never precedes the base type: "
+                       "write 'node* own p' or 'string own s'\n");
+    TEST_ASSERT_EQ_STR(type_fails("i32[mut N]"),
+                       "t.ft:1:5: error: expected an expression, found 'mut'\n");
+})
+
+// A doubled marker is refused in every position, on a base type, on a
+// pointer, on a slice and on an array (D5.3).
+TEST(a_doubled_marker_in_every_position, {
+    TEST_ASSERT_EQ_STR(type_fails("i32 own own"),
+                       "t.ft:1:5: error: an own marks a reference: "
+                       "write it after a '*' or an '@', or on a string\n");
+    TEST_ASSERT_EQ_STR(type_fails("string own own"),
+                       "t.ft:1:12: error: an own appears once in a type position\n");
+    TEST_ASSERT_EQ_STR(type_fails("i32@ mut mut"),
+                       "t.ft:1:10: error: a mut appears once in a type position\n");
+    TEST_ASSERT_EQ_STR(type_fails("i32@ own own"),
+                       "t.ft:1:10: error: an own appears once in a type position\n");
+    TEST_ASSERT_EQ_STR(type_fails("i32[4] mut mut"),
+                       "t.ft:1:12: error: a mut appears once in a type position\n");
+    TEST_ASSERT_EQ_STR(type_fails("string mut mut"),
+                       "t.ft:1:12: error: a mut appears once in a type position\n");
+})
+
+// An `own` never follows the `mut` of its position, wherever that position
+// is (D17.2).
+TEST(an_own_after_a_mut_in_every_position, {
+    TEST_ASSERT_EQ_STR(type_fails("i32@ mut own"),
+                       "t.ft:1:10: error: an own precedes the mut of its position: "
+                       "write 'node* own mut p'\n");
+    TEST_ASSERT_EQ_STR(type_fails("i32* mut own*"),
+                       "t.ft:1:10: error: an own precedes the mut of its position: "
+                       "write 'node* own mut p'\n");
+    TEST_ASSERT_EQ_STR(type_fails("i32 mut own*"),
+                       "t.ft:1:9: error: an own precedes the mut of its position: "
+                       "write 'node* own mut p'\n");
+})
+
+// An `own` marks a reference, so no base type but `string` and no array
+// suffix takes one (D17.1, D17.2).
+TEST(an_own_where_no_reference_is, {
+    TEST_ASSERT_EQ_STR(type_fails("point own"),
+                       "t.ft:1:7: error: an own marks a reference: "
+                       "write it after a '*' or an '@', or on a string\n");
+    TEST_ASSERT_EQ_STR(type_fails("bool own*"),
+                       "t.ft:1:6: error: an own marks a reference: "
+                       "write it after a '*' or an '@', or on a string\n");
+    TEST_ASSERT_EQ_STR(type_fails("void own*"),
+                       "t.ft:1:6: error: an own marks a reference: "
+                       "write it after a '*' or an '@', or on a string\n");
+    TEST_ASSERT_EQ_STR(type_fails("i32[4] own"),
+                       "t.ft:1:8: error: an own never follows a fixed-array suffix: "
+                       "write it after the '*' or '@' it marks\n");
+    TEST_ASSERT_EQ_STR(type_fails("i32@[4] own"),
+                       "t.ft:1:9: error: an own never follows a fixed-array suffix: "
+                       "write it after the '*' or '@' it marks\n");
+})
+
+// The `mut` of a position that a `[N]` follows belongs after the length, in
+// every group (D5.3).
+TEST(a_mut_before_a_length_in_every_group, {
+    TEST_ASSERT_EQ_STR(type_fails("string mut[4]"),
+                       "t.ft:1:8: error: the elements share the array's storage: "
+                       "write the mut after the length, as 'i32[4] mut'\n");
+    TEST_ASSERT_EQ_STR(type_fails("i32@ mut[4]"),
+                       "t.ft:1:6: error: the elements share the array's storage: "
+                       "write the mut after the length, as 'i32[4] mut'\n");
+    TEST_ASSERT_EQ_STR(type_fails("i32* own mut[4]"),
+                       "t.ft:1:10: error: the elements share the array's storage: "
+                       "write the mut after the length, as 'i32[4] mut'\n");
+    TEST_ASSERT_EQ_STR(parse_fails("fn void f(i32 mut[4] a) { }"),
+                       "t.ft:1:15: error: the elements share the array's storage: "
+                       "write the mut after the length, as 'i32[4] mut'\n");
+})
+
+// No array suffix follows a trailing reference suffix, whichever suffix it
+// is (D3.6).
+TEST(an_array_after_any_trailing_reference_suffix, {
+    TEST_ASSERT_EQ_STR(type_fails("i32[2]*[2]"),
+                       "t.ft:1:8: error: no array suffix follows a reference suffix: "
+                       "wrap the array in a struct\n");
+    TEST_ASSERT_EQ_STR(type_fails("i32[2]* mut[2]"),
+                       "t.ft:1:12: error: no array suffix follows a reference suffix: "
+                       "wrap the array in a struct\n");
+    // The shape is settled before the bootstrap's own limits are: an array
+    // after a trailing reference suffix does not parse at all.
+    TEST_ASSERT_EQ_STR(type_fails("string@[2]@[2]"),
+                       "t.ft:1:12: error: no array suffix follows a reference suffix: "
+                       "wrap the array in a struct\n");
+})
 // NOLINTEND(readability-magic-numbers)
 
 int main(int argc, char** argv) {
@@ -296,6 +526,21 @@ int main(int argc, char** argv) {
     TEST_RUN(one_array_or_slice_level_with_pointers_is_supported);
     TEST_RUN(the_level_count_is_per_written_type);
     TEST_RUN(new_refuses_a_mut_a_slice_and_a_misplaced_own);
+    TEST_RUN(every_marker_set_on_a_reference_suffix);
+    TEST_RUN(every_marker_set_on_a_base_type);
+    TEST_RUN(long_reference_chains_keep_their_markers);
+    TEST_RUN(the_array_group_between_the_reference_groups);
+    TEST_RUN(an_array_length_is_any_expression_here);
+    TEST_RUN(function_types_nest);
+    TEST_RUN(noreturn_is_only_a_return_type);
+    TEST_RUN(an_array_literal_type_carries_no_marker);
+    TEST_RUN(an_allocated_type_takes_pointers_and_dimensions);
+    TEST_RUN(the_placement_rules_hold_in_every_type_position);
+    TEST_RUN(a_doubled_marker_in_every_position);
+    TEST_RUN(an_own_after_a_mut_in_every_position);
+    TEST_RUN(an_own_where_no_reference_is);
+    TEST_RUN(a_mut_before_a_length_in_every_group);
+    TEST_RUN(an_array_after_any_trailing_reference_suffix);
     parse_done();
     TEST_EXIT();
 }
