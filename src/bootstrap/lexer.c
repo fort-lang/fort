@@ -210,6 +210,8 @@ const char* tok_kind_name(tok_kind_t kind) {
         return ",";
     case TOK_SEMI:
         return ";";
+    case TOK_AT:
+        return "@";
     case TOK_COUNT:
         break;
     }
@@ -909,6 +911,10 @@ static tok_kind_t operator_kind(const lexer_t* lx, uint64_t* len) {
         break;
     case ';':
         one = TOK_SEMI;
+        break;
+    // `@` is the slice suffix, one byte, no longer match (D2.10, D3.5).
+    case '@':
+        one = TOK_AT;
         break;
     default:
         break;

@@ -191,8 +191,8 @@ A safe(r) C-like systems programming language.
   for that reason: `mag > (UINT64_MAX >> n)` says the same thing.
 - **fort sources**: identifier conventions per decision D1.4: everything is lower_case with
   underscores, struct and enum type names and enum members included; only module constants are
-  UPPER_CASE. A variable never takes its type's name (`point p`, `box bx`, `mut list* l`); a
-  field may (`own mut node* node`), since fields are not variables and are outside the module
+  UPPER_CASE. A variable never takes its type's name (`point p`, `box bx`, `list mut* mut l`); a
+  field may (`node mut* own node`), since fields are not variables and are outside the module
   namespace (D7.9).
 - **Shell scripts**: bash with `set -eu`, clean under shellcheck at its default severity; the
   host has no shellcheck, run it in the guest: `tools/vm run 'shellcheck tools/vm

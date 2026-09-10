@@ -200,8 +200,8 @@ item 4).
 extern fn i64 write(i32 fd, void* buf, u64 n);
 extern fn u64 strlen(char* s);
 extern fn noreturn exit(i32 status);
-extern fn own void* malloc(u64 n);
-extern fn void free(own void* p);
+extern fn void* own malloc(u64 n);
+extern fn void free(void* own p);
 ```
 
 `extern fn` declares a C function with the System V x86-64 ABI (D9.8; `grammar.md` section 3). It
@@ -211,36 +211,36 @@ as a function-pointer value, and may be `noreturn` (D8.5).
 
 | Allowed in an extern signature                  | Not allowed                          |
 |-------------------------------------------------|--------------------------------------|
-| `i8 i16 i32 i64 u8 u16 u32 u64`, `f32 f64`      | `T[]` slices, `string`, fixed arrays |
+| `i8 i16 i32 i64 u8 u16 u32 u64`, `f32 f64`      | `T@` slices, `string`, fixed arrays  |
 | `bool`, `char`, enums (passed as `i32`)         | structs by value                     |
-| `T*`, `mut T*` for any `T`, `void*`             | variadic parameters                  |
+| `T*`, `T mut*` for any `T`, `void*`             | variadic parameters                  |
 | `own` on any of those pointers (D17.13)         | `own` slices and strings (D9.8)      |
 | `fn R(P...)` whose signature is extern-legal    |                                      |
 | return type `void` or `noreturn`                |                                      |
 
 Structs cross the boundary through pointers only. Because struct layout is C layout (D3.8, D9.9),
-a `mut stat* buf` parameter is exactly a C `struct stat *`.
+a `stat mut* buf` parameter is exactly a C `struct stat *`.
 
 `own` may qualify a pointer or `void*` in an extern signature (D17.13). It is erased, so the
 declaration names the same C function with or without it, and it records the C side's
-convention on the fort side: `own void* malloc(u64 n)` says the caller must free the result
-(`void*` has no target level, so it takes no `mut`, D5.5), so the cast in
-`own mut u8* p = cast(malloc(n), own mut u8*);` types the owned block, its target saying `own`
-(D3.14), and a plain `mut u8* p = malloc(n);` is refused as a leaking temporary (D17.8);
-`free(own void* p)` says the callee frees, so an `own` lvalue is passed as
-`free(cast(move(p), own void*))` and is `null` afterwards (D17.5). A C function that stores or
+convention on the fort side: `void* own malloc(u64 n)` says the caller must free the result
+(`void*` has no target level, so no `mut` after `void`, D3.11), so the cast in
+`u8 mut* own p = cast(malloc(n), u8 mut* own);` types the owned block, its target saying `own`
+(D3.14), and a plain `u8 mut* p = malloc(n);` is refused as a leaking temporary (D17.8);
+`free(void* own p)` says the callee frees, so an `own` lvalue is passed as
+`free(cast(move(p), void* own))` and is `null` afterwards (D17.5). A C function that stores or
 frees nothing takes plain `T*`. Because `own` is part of type identity (D17.1), two modules that
 declare one C symbol with and without it have conflicting declarations (D9.8, section 13):
 
 ```fort
-extern fn own void* malloc(u64 n);
-extern fn void free(own void* p);
-extern fn own mut char* strdup(char* s);        // C documents: the caller frees
+extern fn void* own malloc(u64 n);
+extern fn void free(void* own p);
+extern fn char mut* own strdup(char* s);        // C documents: the caller frees
 
-own mut char* copy = strdup("abc".ptr);       // adopted through the declared own result
-mut char* alias = copy;                         // lends (D17.4)
-free(cast(move(copy), own void*));              // copy == null afterwards; alias dangles
-mut char* leak = strdup("abc".ptr);             // error: owning temporary would leak (D17.8)
+char mut* own copy = strdup("abc".ptr);         // adopted through the declared own result
+char mut* alias = copy;                         // lends (D17.4)
+free(cast(move(copy), void* own));              // copy == null afterwards; alias dangles
+char mut* leak = strdup("abc".ptr);             // error: owning temporary would leak (D17.8)
 free(cast(alias, void*));                       // error: a view cannot pass to an own parameter
 ```
 
@@ -258,12 +258,12 @@ free(cast(alias, void*));                       // error: a view cannot pass to 
 | `_Bool`                        | `bool`                                    |
 | `float`, `double`              | `f32`, `f64`                              |
 | `char*`, `const char*`         | `char*` (or `u8*` for binary data)        |
-| `T*` written to by C           | `mut T*`                                  |
+| `T*` written to by C           | `T mut*`                                  |
 | `const T*`                     | `T*`                                      |
 | `void*`, `const void*`         | `void*`                                   |
-| `T*` result the caller must free | `own mut T*` (D17.13)                   |
-| `void*` from an allocator      | `own void*`, never `mut` (D17.13)         |
-| `T*` parameter that C frees    | `own T*` or `own void*` (D17.13)          |
+| `T*` result the caller must free | `T mut* own` (D17.13)                   |
+| `void*` from an allocator      | `void* own`, never `mut` (D17.13)         |
+| `T*` parameter that C frees    | `T* own` or `void* own` (D17.13)          |
 | `R (*)(A, B)`                  | `fn R(A, B)`                              |
 | C `enum`                       | `i32`, or a fort enum (passed as `i32`)   |
 
@@ -308,43 +308,43 @@ fn i32 by_value(void* a, void* b) {
 }
 ```
 
-A `mut i32[] xs` is sorted with `qsort(cast(xs.ptr, void*), xs.len, sizeof(i32), by_value);`. A
+An `i32 mut@ xs` is sorted with `qsort(cast(xs.ptr, void*), xs.len, sizeof(i32), by_value);`. A
 function taking a slice, string, struct or fixed array is not extern-legal and cannot be passed
 to C.
 
 ### 8.6 Slices and strings
 
 Slices and strings never cross the boundary whole (D9.8, D13.4). Pass `.ptr` and `.len`: `s.ptr`
-of a `string` is `char*`; `xs.ptr` of a `T[]` is `T*`, or `mut T*` for `mut T[]`. A string
+of a `string` is `char*`; `xs.ptr` of a `T@` is `T*`, or `T mut*` for `T mut@`. A string
 literal is NUL-terminated (D3.7) and so is every element of `args` (D8.6); a string obtained by
 slicing or read from a file is not. A C function expecting a terminator gets a copy: allocate
-`own mut char[] tmp = new(char[s.len + 1]);` under a `defer del(tmp);`, copy the characters, and
+`char mut@ own tmp = new(char, s.len + 1);` under a `defer del(tmp);`, copy the characters, and
 pass `tmp.ptr`; the last element is already `'\0'` (D10.2). Memory received from C as `T*`
 becomes a slice with `p[0..n]` (D6.9), unchecked and borrowed; a `char*` becomes a `string`
 with `cast(p[0..n], string)` (D3.14). When C hands the memory over for good, the slice is
-adopted with a `cast` that adds `own`, `cast(p[0..n], own mut u8[])`, and is then freed with
+adopted with a `cast` that adds `own`, `cast(p[0..n], u8 mut@ own)`, and is then freed with
 `del` (D17.3); memory from `new` may likewise be freed by C `free` and memory from `malloc` by
 `del` (D10.3). There is no strict-aliasing rule (D10.7): memory may be read through any
 pointer type reached by `cast`. A fort wrapper around a C function that fills a buffer and
-reports its length takes the out-parameter shape `mut u8[] own* out`, a borrowed pointer to an
-`own` slot (D3.6, D13.5, D17.2), and stores the adopted slice through it, since `.ptr` and
+reports its length takes the out-parameter shape `u8 mut@ own mut* out`, a borrowed pointer to
+an `own` slot (D3.6, D13.5, D17.2), and stores the adopted slice through it, since `.ptr` and
 `.len` are never assignable (D6.7); the caller initializes the slot to `{}` so that the store
 passes the overwrite check (D17.11).
 
 ```fort
-extern fn mut u8* c_read_all(mut u64* n);       // C documents: the caller frees
+extern fn u8 mut* c_read_all(u64 mut* n);       // C documents: the caller frees
 
-fn bool read_all(mut u8[] own* out) {
-    mut u64 n = 0;
-    mut u8* p = c_read_all(&n);
+fn bool read_all(u8 mut@ own mut* out) {
+    u64 mut n = 0;
+    u8 mut* p = c_read_all(&n);
     if (p == null) { return false; }
-    *out = cast(p[0..n], own mut u8[]);         // adopt; the caller dels *out
+    *out = cast(p[0..n], u8 mut@ own);          // adopt; the caller dels *out
     return true;
 }
 
-fn void wrong(mut u8[] own* out) {
-    mut u64 n = 0;
-    mut u8* p = c_read_all(&n);
+fn void wrong(u8 mut@ own mut* out) {
+    u64 mut n = 0;
+    u8 mut* p = c_read_all(&n);
     *out = p[0..n];                             // error: a view cannot be stored in an own slot
 }
 ```
@@ -360,7 +360,7 @@ fn void put(string s) {
     write(1, cast(s.ptr, void*), s.len);
 }
 
-fn i32 main(string[] args) {
+fn i32 main(string@ args) {
     string greeting = "hello from fort\n";
     put(greeting);
     put("program: ");
@@ -426,11 +426,11 @@ module cache, no incremental rebuild, no parallel compilation of modules and no 
 
 ## 11. Entry point and program start
 
-The entry module must define `fn i32 main()` or `fn i32 main(string[] args)` (D8.6). A `main`
+The entry module must define `fn i32 main()` or `fn i32 main(string@ args)` (D8.6). A `main`
 returning `void` or taking other parameters is an error. `main` in any other module is an ordinary
 function.
 
-Start-up (D11.6): the C runtime owns `main(argc, argv)`. It builds a `string[]` of `argc` strings
+Start-up (D11.6): the C runtime owns `main(argc, argv)`. It builds a `string@` of `argc` strings
 whose bytes are the `argv` entries, each NUL-terminated, calls the compiler-emitted `fort_entry`
 with that slice, flushes every output buffer (D11.5) and exits with `status & 0xFF`. `fort_entry`
 is generated in the entry module: it receives the slice by hidden pointer (section 9) and calls
@@ -495,11 +495,11 @@ directory; `fort main.ft -o main` builds the program.
 // list.ft
 struct node {
     i32 value;
-    own mut node* next;
+    node mut* own next;
 }
 
 struct list {
-    own mut node* head;
+    node mut* own head;
     u64 size;
 }
 
@@ -507,19 +507,19 @@ fn list list_create() {
     return list{};
 }
 
-fn void list_push(mut list* l, i32 value) {
-    own mut node* n = new(node);
+fn void list_push(list mut* l, i32 value) {
+    node mut* own n = new(node);
     n->value = value;
     n->next = move(l->head);
     l->head = move(n);
     l->size += 1;
 }
 
-fn bool list_pop(mut list* l, mut i32* out) {
+fn bool list_pop(list mut* l, i32 mut* out) {
     if (l->head == null) {
         return false;
     }
-    own mut node* n = move(l->head);
+    node mut* own n = move(l->head);
     *out = n->value;
     l->head = move(n->next);
     l->size -= 1;
@@ -527,23 +527,23 @@ fn bool list_pop(mut list* l, mut i32* out) {
     return true;
 }
 
-fn void list_free(mut list* l) {
-    mut i32 unused = 0;
+fn void list_free(list mut* l) {
+    i32 mut unused = 0;
     while (list_pop(l, &unused)) {
     }
 }
 ```
 
 `node` and `list` refer to each other through pointers and live in one module (section 6).
-`own mut node* next` as a field type marks the pointee mutable (D5.5) and the node as owned by
+`node mut* own next` as a field type marks the pointee mutable (D5.5) and the node as owned by
 its predecessor (D17.2); `list` is therefore an owning aggregate and is passed as
-`mut list* l`, which makes the pointee writable in the callee (D5.3, D17.7). `new(node)`
+`list mut* l`, which makes the pointee writable in the callee (D5.3, D17.7). `new(node)`
 yields zeroed, owned memory (D10.2, D17.3); `move` transfers the head into the new node's
 `next` and the node into `head`, each store landing in a field the preceding `move` emptied, so
 the checked build's overwrite check passes (D17.5, D17.11); `del(n)` frees the popped node and
-leaves `n` null (D17.9). A user writes `import list;`, `mut list.list l = list.list_create();`,
-`list.list_push(&l, 7);` and `defer list.list_free(&l);`; `&l` on a `mut list.list` is a
-`mut list.list*` (D5.8); a local named `list` would shadow the binding (section 5), hence `l`.
+leaves `n` null (D17.9). A user writes `import list;`, `list.list mut l = list.list_create();`,
+`list.list_push(&l, 7);` and `defer list.list_free(&l);`; `&l` on a `list.list mut` is a
+`list.list mut*` (D5.8); a local named `list` would shadow the binding (section 5), hence `l`.
 `list.list copy = l;` is an error, because copying an owning value requires `move` (D17.7).
 
 ### 12.4 A multi-module application
@@ -573,7 +573,7 @@ fn vec2 vec_add(vec2 a, vec2 b) {
 // input.ft
 enum key { none, left, right, quit }
 
-mut i32 frame = 0;
+i32 mut frame = 0;
 
 fn key poll() {
     frame += 1;
@@ -611,8 +611,8 @@ import input as inp;
 
 fn i32 main() {
     window w = {800, 600, {0.0, 0.0}};
-    mut vec2 pos = {0.0, 0.0};
-    mut bool running = true;
+    vec2 mut pos = {0.0, 0.0};
+    bool mut running = true;
     while (running) {
         switch (inp.poll()) {
         case inp.key.left:
@@ -664,12 +664,12 @@ All diagnostics follow D14.2: `<file>:<line>:<col>: error: <message>`, optionall
 | `m.x` with no such declaration     | `module 'std::io' has no declaration named 'x'`          |
 | entry module without a valid `main`| `entry module 'main' must define 'fn i32 main()'`        |
 | entry base name not an identifier  | `'my-app' is not a valid module name`                    |
-| aggregate in an extern signature   | `extern signature cannot use type 'i32[]'`               |
+| aggregate in an extern signature   | `extern signature cannot use type 'i32@'`                |
 
 Notes accompany some of these: "not found" lists `note: looked for <path>` once per root and
 reading; the ambiguous and same-file cases give the full paths; a redeclaration points at the
 earlier one with `note: previous declaration of 'add' here`; the missing-`main` message continues
-`or 'fn i32 main(string[] args)'`. Tests pin these with `//! error: <substring>` on the offending
+`or 'fn i32 main(string@ args)'`. Tests pin these with `//! error: <substring>` on the offending
 line, or `//! error-any:` for the cycle case, where the closing import depends on walk order
 (D14.5).
 
