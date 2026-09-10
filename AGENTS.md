@@ -116,6 +116,12 @@ A safe(r) C-like systems programming language.
   The sanitizer presets run the unit tests with `allocator_may_return_null=1` (ctest sets the
   environment, `cmake/sanitizers.cmake`) because the runtime's out-of-memory path is tested with
   an impossible allocation; run a suite by hand under those presets with the same variable.
+- A test that must observe a program the compiler spawns uses a fake one: `test/fake_cc.sh` is
+  the `--cc` of `driver_test`, it writes its own path and every argument, one per line, into
+  `$FORT_FAKE_CC_LOG` and exits with `$FORT_FAKE_CC_STATUS`, so the whole clang command line is
+  one string comparison and the failure path is a variable away. CMake passes its path as
+  `FORT_FAKE_CC` to that one target (a `target_compile_definitions` after the glob loop), since
+  a unit test has no working directory it can rely on.
 - The cross pipeline: `test/ir/*.ll` are hand-written LLVM 18 modules in the form
   `notes/toolchain.md` 6 specifies (D19.1); its two worked examples are these files byte for
   byte, so a change to one changes the other. `test/pipeline_test.sh <build-dir>`
@@ -156,15 +162,18 @@ A safe(r) C-like systems programming language.
   amendment to `notes/decisions.md` is relayed to agents still writing against the old text, and
   a separate audit pass reconciles the documents afterwards.
 - **C sources**: C11 (`-std=c11`, `_POSIX_C_SOURCE=200809L`), no third-party code, warnings are
-  errors under both clang (default) and gcc (`gcc` preset). Names: functions, variables,
-  parameters, fields and struct/union/enum tags lower_case; typedefs lower_case with a `_t`
-  suffix; enum constants, file-scope constants (static or not), function-scope static constants
-  and macros UPPER_CASE (`enum { BYTE_MASK = 0xFFU }`); local constants lower_case; macros
-  private to a header end with an underscore (`TEST_LOG_`). Every non-void call result is used
-  or discarded with `(void)` (`TEST_UNUSED` in tests); no magic numbers (0 to 4, powers of two,
-  `1.0` and `100.0` are allowed); uppercase literal suffixes; comments are `//` only, never
-  `/* */`, as in fort (D2.2), so a region is commented out line by line; includes grouped as the
-  file's own header, `<x.h>`, `<sys/x.h>`, project `"x.h"`, then `"test.h"`/`"common.h"`.
+  errors under both clang (default) and gcc (`gcc` preset). `_POSIX_C_SOURCE` alone does not
+  make glibc declare `environ`: `<unistd.h>` guards it with `#ifdef __USE_GNU`, so a file that
+  passes an environment to `posix_spawn` declares `extern char** environ;` itself, as POSIX
+  allows. Names: functions, variables, parameters, fields and struct/union/enum tags lower_case;
+  typedefs lower_case with a `_t` suffix; enum constants, file-scope constants (static or not),
+  function-scope static constants and macros UPPER_CASE (`enum { BYTE_MASK = 0xFFU }`); local
+  constants lower_case; macros private to a header end with an underscore (`TEST_LOG_`). Every
+  non-void call result is used or discarded with `(void)` (`TEST_UNUSED` in tests); no magic
+  numbers (0 to 4, powers of two, `1.0` and `100.0` are allowed); uppercase literal suffixes;
+  comments are `//` only, never `/* */`, as in fort (D2.2), so a region is commented out line by
+  line; includes grouped as the file's own header, `<x.h>`, `<sys/x.h>`, project `"x.h"`, then
+  `"test.h"`/`"common.h"`.
   `.clang-format` and `.clang-tidy` (clang 18) are the reference; `tools/vm format` reformats,
   and `tools/check_comments.py` rejects a block comment (`tools/vm format-check` runs it; it
   skips a `/*` inside a string literal, a character literal or a `//` comment). This applies to

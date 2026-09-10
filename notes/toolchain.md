@@ -35,7 +35,7 @@ file (D14.1). Options and the entry file may appear in any order.
 
 - `-o`, `-I`, `--std-dir`, `--cc`, `--target` and `-Xcc` take the following argument; `-l<lib>`
   is one argument. `-I` roots are searched in command-line order (D9.2) and `-Xcc` arguments are
-  passed in command-line order. The last `-o`, `--cc` and `--target` win.
+  passed in command-line order. The last `-o`, `--std-dir`, `--cc` and `--target` win.
 - `--cc` must name a clang, since nothing else reads LLVM IR (D14.1, D19.1). The
   default target triple is `x86_64-linux-gnu` (D14.1).
 - The default output is `a.out`; with `-c` it is `<entry>.o` and with `-S` `<entry>.ll` (D14.1),
@@ -59,7 +59,17 @@ Exit status (D14.1):
 Usage errors, internal errors and failures of `--cc` are reported as `fort: error: <message>`
 on stderr, for example `fort: error: cannot read 'x.ft': No such file or directory` or
 `fort: error: cc failed with status 1`. `fort` with no arguments prints one usage line and exits
-with 2; `--help` prints the same line and exits 0.
+with 2; `--help` prints that line and then the table above, and exits 0.
+
+These are all the `fort: error: <message>` texts, each of them exit status 2 (D14.1). Four report
+a command line the compiler cannot use and are followed by the usage line: `missing argument for
+option '<opt>'`, `unexpected argument '<arg>'` (a second entry file), `unknown option '<opt>'`
+and `no entry file`. Four report an operation of section 2 that failed, with the system's error
+text as `<reason>`: `cannot read '<file>': <reason>` (the entry file), `cannot write '<file>':
+<reason>` (the LLVM IR module), `cannot create a temporary directory in '<dir>': <reason>`
+(`mkdtemp` under `$TMPDIR`) and `cannot run '<cc>': <reason>` (`--cc` could not be started). Two
+report the outcome of `--cc`: `cc failed with status <n>` and `cc failed with signal <n>`. The
+last two are the compiler's own failures: `internal error: <what>` and `out of memory`.
 
 ```sh
 fort main.ft -o main                          # build ./main in checked mode
