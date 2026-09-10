@@ -124,6 +124,17 @@ foreach(test_source IN LISTS FORT_UNIT_TEST_SOURCES)
     list(APPEND FORT_UNIT_TEST_TARGETS "${test_target}")
 endforeach()
 
+# The cross pipeline: hand-written x86-64 programs under test/asm that follow
+# the codegen contract (toolchain.md 6) are assembled and linked with the
+# cross-compiled fort_rt.o and run under qemu (toolchain.md 2). It is a unit
+# test so that check covers it; it needs the runtime object, not the compiler.
+add_test(NAME pipeline
+    COMMAND bash "${FORT_TEST_DIR}/pipeline_test.sh" "${CMAKE_BINARY_DIR}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(pipeline PROPERTIES
+    LABELS unit
+    ENVIRONMENT "FORT_TARGET_CC=${FORT_TARGET_CC_PATH}")
+
 # The C helpers of the language tests are cross-compiled by the harness; they
 # are also built natively here so that -Werror and clang-tidy cover them. They
 # are FFI entry points declared by the tests, hence no prototypes.
@@ -138,6 +149,7 @@ add_custom_target(check
     COMMENT "Running the unit tests"
     USES_TERMINAL
 )
+add_dependencies(check fort_rt)
 if(FORT_UNIT_TEST_TARGETS)
     add_dependencies(check ${FORT_UNIT_TEST_TARGETS})
 endif()
