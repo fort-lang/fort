@@ -1,10 +1,10 @@
-/* Self-check of the unit-test framework in test.h (toolchain.md 7.5).
- *
- * The positive tests run every TEST_ASSERT_* macro on values that satisfy it.
- * The negative tests (neg_*) each violate one macro; they are registered only
- * when a prefix is given, so the plain run stays green, and the spawn_* tests
- * re-run this executable with a neg_* prefix to check the exit status, the
- * logged message and the filter. */
+// Self-check of the unit-test framework in test.h (toolchain.md 7.5).
+//
+// The positive tests run every TEST_ASSERT_* macro on values that satisfy it.
+// The negative tests (neg_*) each violate one macro; they are registered only
+// when a prefix is given, so the plain run stays green, and the spawn_* tests
+// re-run this executable with a neg_* prefix to check the exit status, the
+// logged message and the filter.
 #include <stdlib.h>
 
 #include <sys/wait.h>
@@ -13,12 +13,12 @@
 
 enum { COMMAND_MAX = 4096, OUTPUT_MAX = 8192 };
 
-/* argv[0] of this run, set by main before any test runs. */
+// argv[0] of this run, set by main before any test runs.
 static const char* self_path = NULL;
 
-/* Runs this executable with the given name prefix, capturing stdout and
- * stderr into out; returns the exit status, or -1 when the run could not be
- * started or ended abnormally. */
+// Runs this executable with the given name prefix, capturing stdout and
+// stderr into out; returns the exit status, or -1 when the run could not be
+// started or ended abnormally.
 static int run_self(const char* prefix, char* out, size_t out_size) {
     char command[COMMAND_MAX];
     const int n = snprintf(command, sizeof command, "'%s' %s 2>&1", self_path, prefix);
@@ -45,7 +45,7 @@ static int run_self(const char* prefix, char* out, size_t out_size) {
     return WEXITSTATUS(status);
 }
 
-/* ---- positive tests: every macro on satisfying values ------------------------ */
+// ---- positive tests: every macro on satisfying values ---------------------------
 
 TEST(assert_true_and_false, {
     TEST_ASSERT_TRUE(1 == 1);
@@ -147,17 +147,17 @@ TEST(error_nonzero_passes_on_zero, {
 
 TEST(explicit_ok_returns_early, {
     TEST_OK();
-    TEST_FAIL(); /* unreachable */
+    TEST_FAIL(); // unreachable
 })
 
 TEST(body_with_commas_inside_parentheses, {
-    /* A body is one macro argument: commas must sit inside parentheses. */
+    // A body is one macro argument: commas must sit inside parentheses.
     char buf[8];
     TEST_ASSERT_EQ_INT32(snprintf(buf, sizeof buf, "%d-%d", 1, 2), 3);
     TEST_ASSERT_EQ_INT32(strcmp(buf, "1-2"), 0);
 })
 
-/* ---- negative tests: one macro each, run only under a prefix ------------------ */
+// ---- negative tests: one macro each, run only under a prefix ---------------------
 
 TEST(neg_true, { TEST_ASSERT_TRUE(1 == 2); })
 TEST(neg_false, { TEST_ASSERT_FALSE(1 == 1); })
@@ -207,10 +207,10 @@ TEST(neg_after_ok, {
     TEST_FAIL();
 })
 
-/* ---- spawn tests: exit statuses, messages and the prefix filter -------------- */
+// ---- spawn tests: exit statuses, messages and the prefix filter -----------------
 
-/* Runs the neg_* test called prefix and checks that the suite exits with the
- * expected status and logs each of the expected substrings. */
+// Runs the neg_* test called prefix and checks that the suite exits with the
+// expected status and logs each of the expected substrings.
 static test_result_t check_negative(const char* prefix,
                                     int expected_status,
                                     const char* expect1,
@@ -330,15 +330,15 @@ TEST(spawn_test_error_exits_2, {
 TEST(spawn_log_names_file_and_line, {
     char out[OUTPUT_MAX];
     TEST_ASSERT_EQ_INT32(run_self("neg_fail", out, sizeof out), 1);
-    /* TEST_FAIL logs nothing; an assertion logs "<file>:<line>". */
+    // TEST_FAIL logs nothing; an assertion logs "<file>:<line>".
     TEST_ASSERT_NULL(strstr(out, "selfcheck_test.c:"));
     TEST_ASSERT_EQ_INT32(run_self("neg_true", out, sizeof out), 1);
     TEST_ASSERT_NONNULL(strstr(out, "selfcheck_test.c:"));
 })
 
 TEST(spawn_error_outranks_failure, {
-    /* Every neg_e* test: neg_eq_* fail and neg_error* error, so the suite
-     * exits with 2. */
+    // Every neg_e* test: neg_eq_* fail and neg_error* error, so the suite
+    // exits with 2.
     char out[OUTPUT_MAX];
     TEST_ASSERT_EQ_INT32(run_self("neg_e", out, sizeof out), 2);
     TEST_ASSERT_NONNULL(strstr(out, "END: selfcheck.neg_eq_char FAIL"));
@@ -346,8 +346,8 @@ TEST(spawn_error_outranks_failure, {
 })
 
 TEST(spawn_error_outranks_a_later_failure, {
-    /* Every neg_* test: the last one registered, neg_after_ok, fails after
-     * the neg_error* tests errored; the suite still exits with 2. */
+    // Every neg_* test: the last one registered, neg_after_ok, fails after
+    // the neg_error* tests errored; the suite still exits with 2.
     char out[OUTPUT_MAX];
     TEST_ASSERT_EQ_INT32(run_self("neg_", out, sizeof out), 2);
     TEST_ASSERT_NONNULL(strstr(out, "END: selfcheck.neg_error_nonzero ERROR"));
@@ -389,7 +389,7 @@ int main(int argc, char** argv) {
     TEST_RUN(spawn_error_outranks_failure);
     TEST_RUN(spawn_error_outranks_a_later_failure);
 
-    /* The negative tests are selected by prefix only. */
+    // The negative tests are selected by prefix only.
     if (argc > 1) {
         TEST_RUN(neg_true);
         TEST_RUN(neg_false);

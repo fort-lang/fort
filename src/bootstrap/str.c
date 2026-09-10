@@ -1,10 +1,10 @@
-/* Byte strings, the string pool and the byte buffer; see str.h. */
+// Byte strings, the string pool and the byte buffer; see str.h.
 #include "str.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 
-/* ---- fatal errors and allocation ------------------------------------------ */
+// ---- fatal errors and allocation ---------------------------------------------
 
 _Noreturn void fatal_oom(void) {
     (void)fputs("fort: error: out of memory\n", stderr);
@@ -19,8 +19,8 @@ _Noreturn void fatal_internal(const char* what) {
 }
 
 void* mem_alloc(uint64_t size) {
-    /* calloc(0) may legitimately return NULL; a one-byte block keeps every
-     * allocation distinct and non-null, as fort's `new` does (D10.2). */
+    // calloc(0) may legitimately return NULL; a one-byte block keeps every
+    // allocation distinct and non-null, as fort's `new` does (D10.2).
     void* p = calloc(1, size == 0U ? 1U : (size_t)size);
     if (p == NULL) {
         fatal_oom();
@@ -57,7 +57,7 @@ uint64_t mem_grown_cap(uint64_t cap, uint64_t need) {
     return grown;
 }
 
-/* ---- views ------------------------------------------------------------------------ */
+// ---- views ---------------------------------------------------------------------------
 
 static const uint64_t FNV_OFFSET_BASIS = 0xcbf29ce484222325ULL;
 static const uint64_t FNV_PRIME = 0x100000001b3ULL;
@@ -112,7 +112,7 @@ uint64_t str_hash(str_t s) {
     uint64_t h = FNV_OFFSET_BASIS;
     for (uint64_t i = 0; i < s.len; i++) {
         h ^= (uint64_t)(unsigned char)s.ptr[i];
-        h *= FNV_PRIME; /* unsigned: wraps, as `*%` does (D11.2) */
+        h *= FNV_PRIME; // unsigned: wraps, as `*%` does (D11.2)
     }
     return h;
 }
@@ -133,7 +133,7 @@ int64_t str_index_of(str_t s, char ch) {
     return -1;
 }
 
-/* Copies `len` bytes from `src` to `dst`; the ranges must not overlap. */
+// Copies `len` bytes from `src` to `dst`; the ranges must not overlap.
 static void copy_bytes(char* dst, const char* src, uint64_t len) {
     for (uint64_t i = 0; i < len; i++) {
         dst[i] = src[i];
@@ -148,12 +148,12 @@ str_t str_dup(str_t s) {
 }
 
 void str_del(str_t s) {
-    /* The copy was made by mem_alloc, so dropping const is giving back what
-     * str_dup handed out. */
+    // The copy was made by mem_alloc, so dropping const is giving back what
+    // str_dup handed out.
     mem_free((char*)s.ptr);
 }
 
-/* ---- string pool -------------------------------------------------------------- */
+// ---- string pool -----------------------------------------------------------------
 
 enum { STR_POOL_MIN_BLOCKS = 16 };
 
@@ -174,7 +174,7 @@ void str_pool_free(str_pool_t* p) {
     str_pool_init(p);
 }
 
-/* Appends a fresh block of `size` bytes to the pool's block list. */
+// Appends a fresh block of `size` bytes to the pool's block list.
 static char* str_pool_add_block(str_pool_t* p, uint64_t size) {
     if (p->block_len == p->block_cap) {
         const uint64_t cap = p->block_cap == 0 ? STR_POOL_MIN_BLOCKS : p->block_cap * 2U;
@@ -196,8 +196,8 @@ str_t str_pool_intern(str_pool_t* p, str_t s) {
     const uint64_t need = mem_add(s.len, 1U);
     char* dst = NULL;
     if (need > STR_POOL_BLOCK_SIZE) {
-        /* A string that does not fit a block gets a block of its own; the
-         * current block stays current. */
+        // A string that does not fit a block gets a block of its own; the
+        // current block stays current.
         dst = str_pool_add_block(p, need);
     } else {
         if (p->cur == NULL || p->used + need > p->cap) {
@@ -213,7 +213,7 @@ str_t str_pool_intern(str_pool_t* p, str_t s) {
     return str_from_span(dst, s.len);
 }
 
-/* ---- growable byte buffer ------------------------------------------------------ */
+// ---- growable byte buffer ---------------------------------------------------------
 
 void sb_init(sb_t* b) {
     b->data = NULL;
@@ -251,14 +251,14 @@ void sb_append(sb_t* b, const char* cstr) {
 
 void sb_append_str(sb_t* b, str_t s) {
     if (s.len == 0) {
-        return; /* also keeps the empty buffer's NULL storage untouched */
+        return; // also keeps the empty buffer's NULL storage untouched
     }
     sb_reserve(b, s.len);
     copy_bytes(b->data + b->len, s.ptr, s.len);
     b->len += s.len;
 }
 
-/* The most digits a 64-bit number has in decimal. */
+// The most digits a 64-bit number has in decimal.
 enum { DECIMAL_DIGITS_MAX = 20, DECIMAL_BASE = 10 };
 
 void sb_append_u64(sb_t* b, uint64_t v) {
@@ -280,7 +280,7 @@ void sb_append_u64(sb_t* b, uint64_t v) {
 void sb_append_i64(sb_t* b, int64_t v) {
     if (v < 0) {
         sb_push(b, '-');
-        /* The magnitude in unsigned arithmetic, so that INT64_MIN works. */
+        // The magnitude in unsigned arithmetic, so that INT64_MIN works.
         sb_append_u64(b, (uint64_t)0 - (uint64_t)v);
     } else {
         sb_append_u64(b, (uint64_t)v);

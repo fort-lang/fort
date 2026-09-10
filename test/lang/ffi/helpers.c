@@ -1,5 +1,5 @@
-/* C11 helpers linked into the test/lang/run/ffi tests via `//! link: ffi/helpers.c`.
- * Every signature uses only scalar types so it is extern-legal in fort (D9.8). */
+// C11 helpers linked into the test/lang/run/ffi tests via `//! link: ffi/helpers.c`.
+// Every signature uses only scalar types so it is extern-legal in fort (D9.8).
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -21,7 +21,7 @@ bool helper_is_even(int64_t n) {
     return n % 2 == 0;
 }
 
-/* Calls back into a fort function whose signature is extern-legal (D9.9). */
+// Calls back into a fort function whose signature is extern-legal (D9.9).
 int32_t helper_apply(int32_t (*cb)(int32_t), int32_t x) {
     return cb(x);
 }

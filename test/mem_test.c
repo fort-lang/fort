@@ -1,8 +1,8 @@
-/* Unit tests of the fatal exits of toolchain.md 1 (D14.1) and the
- * allocation helpers of str.h: mem_alloc, mem_free, and the checked size
- * arithmetic mem_add, mem_mul and mem_grown_cap that every container's
- * growth goes through. Views, the pool and the byte buffer have their own
- * suites, str_test.c and sb_test.c. */
+// Unit tests of the fatal exits of toolchain.md 1 (D14.1) and the
+// allocation helpers of str.h: mem_alloc, mem_free, and the checked size
+// arithmetic mem_add, mem_mul and mem_grown_cap that every container's
+// growth goes through. Views, the pool and the byte buffer have their own
+// suites, str_test.c and sb_test.c.
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -14,7 +14,7 @@
 
 enum { ERR_MAX = 256 };
 
-/* ---- fatal errors and allocation ------------------------------------------ */
+// ---- fatal errors and allocation ---------------------------------------------
 
 static void call_fatal_oom(void) {
     fatal_oom();
@@ -102,7 +102,7 @@ TEST(mem_grown_cap_is_the_largest_of_minimum_double_and_need, {
     TEST_ASSERT_EQ_UINT64(mem_grown_cap(100, 101), (uint64_t)200);
     TEST_ASSERT_EQ_UINT64(mem_grown_cap(100, 1000), (uint64_t)1000);
     TEST_ASSERT_EQ_UINT64(mem_grown_cap(1024, 1025), (uint64_t)2048);
-    /* The largest capacity whose double still fits. */
+    // The largest capacity whose double still fits.
     TEST_ASSERT_EQ_UINT64(mem_grown_cap(UINT64_MAX / 2, 1), UINT64_MAX - 1);
 })
 

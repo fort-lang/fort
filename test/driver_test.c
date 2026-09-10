@@ -1,5 +1,5 @@
-/* Unit tests of the driver scaffold: the command line of toolchain.md 1 and the
- * exit statuses of D14.1 as far as ticket T-003 implements them. */
+// Unit tests of the driver scaffold: the command line of toolchain.md 1 and the
+// exit statuses of D14.1 as far as ticket T-003 implements them.
 #include "driver.h"
 
 #include <stdlib.h>
@@ -8,21 +8,21 @@
 
 enum { CAPTURE_MAX = 1024 };
 
-/* One driver run with its captured stdout and stderr. */
+// One driver run with its captured stdout and stderr.
 typedef struct {
     int status;
     char out[CAPTURE_MAX];
     char err[CAPTURE_MAX];
 } run_t;
 
-/* Reads the whole of a temporary stream into buf as a NUL-terminated string. */
+// Reads the whole of a temporary stream into buf as a NUL-terminated string.
 static void slurp(FILE* stream, char* buf, size_t size) {
     TEST_UNUSED(fseek(stream, 0, SEEK_SET));
     const size_t got = fread(buf, 1, size - 1, stream);
     buf[got] = '\0';
 }
 
-/* Runs driver_main on the NULL-terminated argument list, argv[0] included. */
+// Runs driver_main on the NULL-terminated argument list, argv[0] included.
 static run_t run_driver(char** argv) {
     run_t run;
     run.status = -1;
@@ -106,7 +106,7 @@ TEST(bare_l_is_not_an_option, {
     TEST_ASSERT_NONNULL(strstr(run.err, "fort: error: unknown option '-l'\n"));
 })
 
-/* The options of toolchain.md 1 that take the following argument. */
+// The options of toolchain.md 1 that take the following argument.
 static const char* const OPTIONS_WITH_ARGUMENT[] = {"-o", "-I", "--std-dir", "--cc"};
 
 TEST(option_missing_its_argument_is_a_usage_error, {

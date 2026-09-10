@@ -1,4 +1,4 @@
-/* The compiler driver scaffold (toolchain.md 1, D14.1); see driver.h. */
+// The compiler driver scaffold (toolchain.md 1, D14.1); see driver.h.
 #include "driver.h"
 
 #include <stdbool.h>
@@ -6,10 +6,10 @@
 
 static const char USAGE_LINE[] = "usage: fort [options] entry.ft";
 
-/* Options that take the following argument (toolchain.md 1). */
+// Options that take the following argument (toolchain.md 1).
 static const char* const OPTIONS_WITH_ARGUMENT[] = {"-o", "-I", "--std-dir", "--cc"};
 
-/* Options that stand alone. -l<lib> is one argument and is checked apart. */
+// Options that stand alone. -l<lib> is one argument and is checked apart.
 static const char* const OPTIONS_ALONE[] = {"-S", "-c", "--release", "--no-bounds-check"};
 
 static bool in_list(const char* arg, const char* const* list, size_t count) {
@@ -49,8 +49,8 @@ int driver_main(int argc, char** argv, FILE* out, FILE* err) {
     for (int i = 1; i < argc; i++) {
         const char* arg = argv[i];
         if (arg[0] != '-') {
-            /* The first argument that does not start with '-' is the entry
-             * file (D14.1); a second one is a usage error. */
+            // The first argument that does not start with '-' is the entry
+            // file (D14.1); a second one is a usage error.
             if (entry != NULL) {
                 return usage_error(err, "unexpected argument", arg);
             }

@@ -1,9 +1,9 @@
-/* Vectors and the string map; see containers.h. */
+// Vectors and the string map; see containers.h.
 #include "containers.h"
 
 #include <stddef.h>
 
-/* ---- vectors ------------------------------------------------------------------ */
+// ---- vectors ---------------------------------------------------------------------
 
 void ptrvec_init(ptrvec_t* v) {
     v->items = NULL;
@@ -85,7 +85,7 @@ int64_t intvec_pop(intvec_t* v) {
     return v->items[v->len];
 }
 
-/* ---- string map --------------------------------------------------------------- */
+// ---- string map ------------------------------------------------------------------
 
 void strmap_init(strmap_t* m) {
     m->entries = NULL;
@@ -99,9 +99,9 @@ void strmap_free(strmap_t* m) {
     strmap_init(m);
 }
 
-/* The slot holding `key`, or `cap` when absent: the probe starts at
- * hash & (cap - 1), steps by one, wraps, and stops at the first empty slot
- * (stdlib.md 2.8). */
+// The slot holding `key`, or `cap` when absent: the probe starts at
+// hash & (cap - 1), steps by one, wraps, and stops at the first empty slot
+// (stdlib.md 2.8).
 static uint64_t strmap_find(const strmap_t* m, str_t key, uint64_t hash) {
     if (m->cap == 0) {
         return m->cap;
@@ -120,8 +120,8 @@ static uint64_t strmap_find(const strmap_t* m, str_t key, uint64_t hash) {
     }
 }
 
-/* Stores an entry known to be absent into a table with an empty slot, at
- * the first tombstone of its probe or else at the empty slot ending it. */
+// Stores an entry known to be absent into a table with an empty slot, at
+// the first tombstone of its probe or else at the empty slot ending it.
 static void strmap_place(strmap_t* m, str_t key, int64_t val, uint64_t hash) {
     const uint64_t mask = m->cap - 1U;
     uint64_t i = hash & mask;
@@ -133,7 +133,7 @@ static void strmap_place(strmap_t* m, str_t key, int64_t val, uint64_t hash) {
         i = (i + 1U) & mask;
     }
     if (dead != m->cap) {
-        i = dead; /* a tombstone becomes live: used is unchanged */
+        i = dead; // a tombstone becomes live: used is unchanged
     } else {
         m->used++;
     }
@@ -145,9 +145,9 @@ static void strmap_place(strmap_t* m, str_t key, int64_t val, uint64_t hash) {
     m->live++;
 }
 
-/* Moves the live entries into a fresh table whose capacity starts at
- * STRMAP_MIN_CAP and doubles until (live + 1) * 2 <= cap; tombstones
- * disappear (stdlib.md 2.8). */
+// Moves the live entries into a fresh table whose capacity starts at
+// STRMAP_MIN_CAP and doubles until (live + 1) * 2 <= cap; tombstones
+// disappear (stdlib.md 2.8).
 static void strmap_rebuild(strmap_t* m) {
     uint64_t cap = STRMAP_MIN_CAP;
     while (mem_mul(mem_add(m->live, 1U), 2U) > cap) {

@@ -1,6 +1,6 @@
-/* Unit tests of containers.h: the vectors of stdlib.md 2.7 and the string
- * map of stdlib.md 2.8, including the scenario of
- * test/lang/programs/hashmap.ft. */
+// Unit tests of containers.h: the vectors of stdlib.md 2.7 and the string
+// map of stdlib.md 2.8, including the scenario of
+// test/lang/programs/hashmap.ft.
 #include "containers.h"
 
 #include <stddef.h>
@@ -13,14 +13,14 @@
 
 enum { ERR_MAX = 256 };
 
-/* The vector growth steps up to 4096 elements: 16, 32, ..., 4096. */
+// The vector growth steps up to 4096 elements: 16, 32, ..., 4096.
 enum { GROWTH_STEPS = 9, GROWTH_ELEMENTS = 4096 };
 
-/* Sizes of the bulk tests. */
+// Sizes of the bulk tests.
 enum { MANY_KEYS = 5000, KEY_MAX = 32, COLLISION_KEYS = 12 };
 
-/* The words of test/lang/programs/hashmap.ft; a brace initializer with
- * commas cannot sit inside a TEST body. */
+// The words of test/lang/programs/hashmap.ft; a brace initializer with
+// commas cannot sit inside a TEST body.
 static const char* const WORDS[] = {"alpha",
                                     "bravo",
                                     "charlie",
@@ -38,13 +38,13 @@ static str_t s(const char* text) {
     return str_from_cstr(text);
 }
 
-/* Formats "k<n>" into buf and returns its view. */
+// Formats "k<n>" into buf and returns its view.
 static str_t key_of(char* buf, size_t size, int n) {
     TEST_UNUSED(snprintf(buf, size, "k%d", n));
     return str_from_cstr(buf);
 }
 
-/* A pool of generated keys whose bytes outlive the map that borrows them. */
+// A pool of generated keys whose bytes outlive the map that borrows them.
 typedef struct {
     char* storage;
     str_t keys[MANY_KEYS];
@@ -62,7 +62,7 @@ static void key_set_free(key_set_t* ks) {
     ks->storage = NULL;
 }
 
-/* The number of SLOT_FULL slots, walked in table order. */
+// The number of SLOT_FULL slots, walked in table order.
 static uint64_t count_full(const strmap_t* m) {
     uint64_t n = 0;
     for (uint64_t i = 0; i < m->cap; i++) {
@@ -73,7 +73,7 @@ static uint64_t count_full(const strmap_t* m) {
     return n;
 }
 
-/* The number of SLOT_DEAD slots. */
+// The number of SLOT_DEAD slots.
 static uint64_t count_dead(const strmap_t* m) {
     uint64_t n = 0;
     for (uint64_t i = 0; i < m->cap; i++) {
@@ -84,7 +84,7 @@ static uint64_t count_dead(const strmap_t* m) {
     return n;
 }
 
-/* The sum of the values of the live entries. */
+// The sum of the values of the live entries.
 static int64_t sum_values(const strmap_t* m) {
     int64_t total = 0;
     for (uint64_t i = 0; i < m->cap; i++) {
@@ -95,7 +95,7 @@ static int64_t sum_values(const strmap_t* m) {
     return total;
 }
 
-/* The slot index of a present key, or cap. */
+// The slot index of a present key, or cap.
 static uint64_t slot_of(const strmap_t* m, str_t key) {
     for (uint64_t i = 0; i < m->cap; i++) {
         if (m->entries[i].state == SLOT_FULL && str_eq(m->entries[i].key, key)) {
@@ -105,7 +105,7 @@ static uint64_t slot_of(const strmap_t* m, str_t key) {
     return m->cap;
 }
 
-/* ---- ptrvec ------------------------------------------------------------------- */
+// ---- ptrvec ----------------------------------------------------------------------
 
 TEST(ptrvec_init_is_the_empty_vector, {
     ptrvec_t v;
@@ -281,13 +281,13 @@ static void ptrvec_reserve_overflowing_count(void) {
     ptrvec_t v;
     ptrvec_init(&v);
     ptrvec_push(&v, NULL);
-    ptrvec_reserve(&v, UINT64_MAX); /* len + extra overflows */
+    ptrvec_reserve(&v, UINT64_MAX); // len + extra overflows
 }
 
 static void ptrvec_reserve_overflowing_bytes(void) {
     ptrvec_t v;
     ptrvec_init(&v);
-    ptrvec_reserve(&v, UINT64_MAX / sizeof(void*) + 1); /* count * 8 overflows */
+    ptrvec_reserve(&v, UINT64_MAX / sizeof(void*) + 1); // count * 8 overflows
 }
 
 TEST(ptrvec_reserve_overflow_is_out_of_memory, {
@@ -298,7 +298,7 @@ TEST(ptrvec_reserve_overflow_is_out_of_memory, {
     TEST_ASSERT_EQ_STR(err, "fort: error: out of memory\n");
 })
 
-/* ---- intvec ------------------------------------------------------------------- */
+// ---- intvec ----------------------------------------------------------------------
 
 TEST(intvec_init_is_the_empty_vector, {
     intvec_t v;
@@ -457,7 +457,7 @@ TEST(intvec_reserve_overflow_is_out_of_memory, {
     TEST_ASSERT_EQ_STR(err, "fort: error: out of memory\n");
 })
 
-/* ---- strmap: basics ----------------------------------------------------------- */
+// ---- strmap: basics --------------------------------------------------------------
 
 TEST(strmap_init_is_the_empty_map, {
     strmap_t m;
@@ -634,8 +634,8 @@ TEST(zero_initialized_strmap_is_valid, {
 })
 
 TEST(strmap_entry_layout_matches_stdlib, {
-    /* StrMapEntry: key 0, val 16, hash 24, state 32, 40 bytes (stdlib.md
-     * 2.8); StrMap is 32 bytes. */
+    // StrMapEntry: key 0, val 16, hash 24, state 32, 40 bytes (stdlib.md
+    // 2.8); StrMap is 32 bytes.
     TEST_ASSERT_EQ_SIZE(sizeof(strmap_entry_t), (size_t)40);
     TEST_ASSERT_EQ_SIZE(offsetof(strmap_entry_t, val), (size_t)16);
     TEST_ASSERT_EQ_SIZE(offsetof(strmap_entry_t, hash), (size_t)24);
@@ -645,7 +645,7 @@ TEST(strmap_entry_layout_matches_stdlib, {
     TEST_ASSERT_EQ_SIZE(sizeof(intvec_t), (size_t)24);
 })
 
-/* ---- strmap: removal and tombstones ---------------------------------------- */
+// ---- strmap: removal and tombstones -------------------------------------------
 
 TEST(strmap_remove_returns_true_once_and_forgets_the_key, {
     strmap_t m;
@@ -716,9 +716,9 @@ TEST(strmap_remove_every_key_leaves_only_tombstones, {
 })
 
 TEST(strmap_rebuild_drops_tombstones, {
-    /* Ten keys inserted and removed leave used = 10 in a table of 16. The
-     * third further insert sees (12 + 1) * 4 > 16 * 3 and rebuilds: the
-     * capacity stays 16 because (2 + 1) * 2 <= 16, and used drops to live. */
+    // Ten keys inserted and removed leave used = 10 in a table of 16. The
+    // third further insert sees (12 + 1) * 4 > 16 * 3 and rebuilds: the
+    // capacity stays 16 because (2 + 1) * 2 <= 16, and used drops to live.
     strmap_t m;
     strmap_init(&m);
     char bufs[13][KEY_MAX];
@@ -746,7 +746,7 @@ TEST(strmap_rebuild_drops_tombstones, {
 })
 
 TEST(strmap_grows_at_three_quarters_load, {
-    /* The 13th insert sees (12 + 1) * 4 = 52 > 48 and rebuilds to 32. */
+    // The 13th insert sees (12 + 1) * 4 = 52 > 48 and rebuilds to 32.
     strmap_t m;
     strmap_init(&m);
     char bufs[13][KEY_MAX];
@@ -774,8 +774,8 @@ TEST(strmap_replace_runs_the_load_check_first, {
         TEST_ASSERT_TRUE(strmap_put(&m, key_of(bufs[i], KEY_MAX, i), i));
     }
     TEST_ASSERT_EQ_UINT64(m.used, (uint64_t)12);
-    /* A replace at used = 12 still runs the load check first, which
-     * rebuilds at the same capacity (stdlib.md 2.8: before an insert). */
+    // A replace at used = 12 still runs the load check first, which
+    // rebuilds at the same capacity (stdlib.md 2.8: before an insert).
     TEST_ASSERT_FALSE(strmap_put(&m, key_of(bufs[0], KEY_MAX, 0), 100));
     TEST_ASSERT_EQ_UINT64(m.cap, (uint64_t)32);
     TEST_ASSERT_EQ_UINT64(m.live, (uint64_t)12);
@@ -785,10 +785,10 @@ TEST(strmap_replace_runs_the_load_check_first, {
     strmap_free(&m);
 })
 
-/* ---- strmap: collisions --------------------------------------------------------- */
+// ---- strmap: collisions ------------------------------------------------------------
 
-/* Fills keys with COLLISION_KEYS generated names whose hashes all land on
- * slot 0 of a table of 16, deterministically; returns the number found. */
+// Fills keys with COLLISION_KEYS generated names whose hashes all land on
+// slot 0 of a table of 16, deterministically; returns the number found.
 static int collision_keys(char bufs[][KEY_MAX], str_t* keys) {
     int found = 0;
     for (int i = 0; found < COLLISION_KEYS; i++) {
@@ -870,13 +870,13 @@ TEST(insert_reuses_the_first_tombstone_of_the_chain, {
     }
     TEST_ASSERT_TRUE(strmap_remove(&m, keys[2]));
     TEST_ASSERT_TRUE(strmap_remove(&m, keys[5]));
-    /* A new colliding key lands on the first tombstone, slot 2, not slot 5
-     * and not the empty slot 8. */
+    // A new colliding key lands on the first tombstone, slot 2, not slot 5
+    // and not the empty slot 8.
     TEST_ASSERT_TRUE(strmap_put(&m, keys[8], 8));
     TEST_ASSERT_EQ_UINT64(slot_of(&m, keys[8]), (uint64_t)2);
     TEST_ASSERT_EQ_UINT64(m.used, (uint64_t)8);
     TEST_ASSERT_EQ_UINT64(m.live, (uint64_t)7);
-    /* The next one takes slot 5; the one after that the empty slot 8. */
+    // The next one takes slot 5; the one after that the empty slot 8.
     TEST_ASSERT_TRUE(strmap_put(&m, keys[9], 9));
     TEST_ASSERT_EQ_UINT64(slot_of(&m, keys[9]), (uint64_t)5);
     TEST_ASSERT_EQ_UINT64(m.used, (uint64_t)8);
@@ -932,7 +932,7 @@ TEST(colliding_keys_survive_a_rebuild, {
     strmap_free(&m);
 })
 
-/* ---- strmap: bulk ------------------------------------------------------------- */
+// ---- strmap: bulk ----------------------------------------------------------------
 
 TEST(thousands_of_keys_insert_and_read_back, {
     key_set_t ks;
@@ -950,7 +950,7 @@ TEST(thousands_of_keys_insert_and_read_back, {
     }
     TEST_ASSERT_EQ_UINT64(count_full(&m), (uint64_t)MANY_KEYS);
     TEST_ASSERT_EQ_UINT64(m.used, (uint64_t)MANY_KEYS);
-    /* 5000 live entries need (5000 + 1) * 4 <= cap * 3: cap = 8192. */
+    // 5000 live entries need (5000 + 1) * 4 <= cap * 3: cap = 8192.
     TEST_ASSERT_EQ_UINT64(m.cap, (uint64_t)8192);
     char absent[KEY_MAX];
     TEST_ASSERT_FALSE(strmap_has(&m, key_of(absent, sizeof absent, MANY_KEYS)));
@@ -1018,8 +1018,8 @@ TEST(thousands_of_keys_remove_half_then_reinsert, {
 })
 
 TEST(churn_of_inserts_and_removes_keeps_the_table_bounded, {
-    /* Repeatedly filling and emptying a small working set must not let
-     * tombstones grow the table: rebuilds keep cap at 16 for 4 live keys. */
+    // Repeatedly filling and emptying a small working set must not let
+    // tombstones grow the table: rebuilds keep cap at 16 for 4 live keys.
     strmap_t m;
     strmap_init(&m);
     char bufs[8][KEY_MAX];
@@ -1059,8 +1059,8 @@ TEST(iteration_in_table_order_visits_each_live_entry_once, {
 })
 
 TEST(the_hashmap_ft_scenario, {
-    /* The observable sequence of test/lang/programs/hashmap.ft, with the
-     * counts that do not depend on that program's table policy. */
+    // The observable sequence of test/lang/programs/hashmap.ft, with the
+    // counts that do not depend on that program's table policy.
     strmap_t m;
     strmap_init(&m);
     for (int i = 0; i < WORD_COUNT; i++) {

@@ -1,5 +1,5 @@
-/* Unit tests of the byte buffer sb_t of str.h, which mirrors std::strbuf
- * (stdlib.md 2.6): growth, appends, decimal formatting, views and copies. */
+// Unit tests of the byte buffer sb_t of str.h, which mirrors std::strbuf
+// (stdlib.md 2.6): growth, appends, decimal formatting, views and copies.
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -14,7 +14,7 @@ static str_t s(const char* text) {
     return str_from_cstr(text);
 }
 
-/* Whether the view holds exactly the given text. */
+// Whether the view holds exactly the given text.
 static bool view_is(str_t v, const char* text) {
     return str_eq(v, str_from_cstr(text));
 }
@@ -133,7 +133,7 @@ static void reserve_past_the_end_of_memory(void) {
     sb_t b;
     sb_init(&b);
     sb_push(&b, 'a');
-    sb_reserve(&b, UINT64_MAX); /* len + extra overflows before any allocation */
+    sb_reserve(&b, UINT64_MAX); // len + extra overflows before any allocation
 }
 
 TEST(sb_reserve_overflow_is_out_of_memory, {
