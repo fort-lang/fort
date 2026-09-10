@@ -33,6 +33,8 @@ A safe(r) C-like systems programming language.
 - **C sources**: every `.c`/`.h` file in the repository, including test helpers under `test/`,
   must pass `cc -std=c11 -Wall -Wextra -Wpedantic -Werror` and the repository's `.clang-tidy`
   with warnings as errors (no magic numbers, uppercase literal suffixes such as `0xFFU`).
+- **Commit messages**: a title of about 50 characters (72 at most), a blank line, then a body
+  wrapped at 72 columns that says what changed and why, then the attribution trailers.
 
 ## Mandatory Process Rules
 The following rules MUST be followed by each process/agent for each change being made. There are no
