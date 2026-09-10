@@ -39,7 +39,8 @@ Sections:
   fields, struct and enum type names, and enum members are lower_case with underscores
   (`struct str_buf`, `enum color { red, green }`, `color.red`, `fn i32 parse_i64(...)`);
   module-level constants are UPPER_CASE (`i32 MAX = 64;`); a variable never takes its type's
-  name (`point p`, never `point point`), because a local may shadow a module-level name (D7.9).
+  name (`point p`, never `point point`), because a local may shadow a module-level name (D7.9);
+  a struct field may (`node* node;`), since fields live in no namespace a type could occupy.
   Rationale: user decision, matching C's `struct point` and the function and variable style.
 
 ## D2 Lexical structure
