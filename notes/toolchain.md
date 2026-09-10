@@ -234,14 +234,18 @@ void fort_rt_print_enum(int32_t fd, int32_t v, const struct fort_rt_enum_member*
 void fort_rt_flush(int32_t fd);
 void fort_rt_flush_all(void);
 
-/* Process (D11.6, D8.6). main builds the args slice from argv, calls fort_entry,
-   calls fort_rt_flush_all and returns status & 0xFF. fort_entry is emitted by the
-   compiler (module-system.md 11). The args slice lives for the whole process and
-   std::libc declares fort_rt_args_ptr and fort_rt_args_len for sys.args().
-   fort_rt_exit flushes every buffer, then exit(status & 0xFF); std::libc declares
-   it for sys.exit. */
+/* Process (D11.6, D8.6). main calls fort_rt_args_init, which builds the args
+   slice from argv (one string per argument, NUL-terminated since it is the argv
+   byte sequence itself), then fort_entry, then fort_rt_flush_all, and returns
+   status & 0xFF. fort_entry is emitted by the compiler (module-system.md 11).
+   The args slice lives for the whole process and std::libc declares
+   fort_rt_args_ptr and fort_rt_args_len for sys.args(); fort_rt_args_init is
+   called by main only and exists so the native runtime object, built without
+   main, can be tested. fort_rt_exit flushes every buffer, then
+   exit(status & 0xFF); std::libc declares it for sys.exit. */
 int main(int argc, char** argv);
 int32_t fort_entry(const struct fort_slice* args);
+void fort_rt_args_init(int argc, char** argv);
 const struct fort_string* fort_rt_args_ptr(void);
 uint64_t fort_rt_args_len(void);
 void fort_rt_exit(int32_t status);

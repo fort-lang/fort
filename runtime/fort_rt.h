@@ -59,11 +59,14 @@ void fort_rt_print_enum(int32_t fd, int32_t v, const struct fort_rt_enum_member*
 void fort_rt_flush(int32_t fd);
 void fort_rt_flush_all(void);
 
-/* Process (D11.6, D8.6). fort_entry is emitted by the compiler. */
+/* Process (D11.6, D8.6). fort_entry is emitted by the compiler. main calls
+ * fort_rt_args_init, which builds the args slice that fort_rt_args_ptr and
+ * fort_rt_args_len return, then fort_entry, then fort_rt_flush_all. */
 #ifndef FORT_RT_NO_MAIN
 int main(int argc, char** argv);
 #endif
 int32_t fort_entry(const struct fort_slice* args);
+void fort_rt_args_init(int argc, char** argv);
 const struct fort_string* fort_rt_args_ptr(void);
 uint64_t fort_rt_args_len(void);
 _Noreturn void fort_rt_exit(int32_t status);

@@ -5,7 +5,9 @@
 # compiler, fort_rt_native and the unit tests) is instrumented; the
 # cross-compiled fort_rt.o is built outside CMake's compiler settings and is
 # never affected. FORT_SANITIZER_TEST_ENV is the environment the unit tests
-# run with under ctest.
+# run with under ctest: every sanitizer allocator returns null on an impossible
+# request instead of reporting, because the runtime's out-of-memory path is
+# tested that way (test/runtime_test.c).
 
 set(FORT_SANITIZER "" CACHE STRING
     "Sanitizer for the native build: address, memory, thread, undefined or empty")
@@ -24,7 +26,8 @@ elseif(FORT_SANITIZER STREQUAL "address")
         -g
     )
     add_link_options(-fsanitize=address)
-    set(FORT_SANITIZER_TEST_ENV "ASAN_OPTIONS=detect_leaks=1:detect_stack_use_after_return=1")
+    set(FORT_SANITIZER_TEST_ENV
+        "ASAN_OPTIONS=detect_leaks=1:detect_stack_use_after_return=1:allocator_may_return_null=1")
 elseif(FORT_SANITIZER STREQUAL "memory")
     if(NOT CMAKE_C_COMPILER_ID STREQUAL "Clang")
         message(FATAL_ERROR
@@ -38,9 +41,11 @@ elseif(FORT_SANITIZER STREQUAL "memory")
         -g
     )
     add_link_options(-fsanitize=memory)
+    set(FORT_SANITIZER_TEST_ENV "MSAN_OPTIONS=allocator_may_return_null=1")
 elseif(FORT_SANITIZER STREQUAL "thread")
     add_compile_options(-fsanitize=thread -O1 -g)
     add_link_options(-fsanitize=thread)
+    set(FORT_SANITIZER_TEST_ENV "TSAN_OPTIONS=allocator_may_return_null=1")
 elseif(FORT_SANITIZER STREQUAL "undefined")
     add_compile_options(-fsanitize=undefined -fno-sanitize-recover=all -g)
     add_link_options(-fsanitize=undefined)
