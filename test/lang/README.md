@@ -15,8 +15,9 @@ short version.
 - `ffi/*.c`: C helpers that tests link in with `//! link:`.
 - `programs/*.ft`: larger programs that exercise many features at once.
 
-`NNN` starts at `001` within each area. Tests use only the core language and the builtins;
-standard-library tests live elsewhere.
+`NNN` starts at `001` within each area. The seed tests use only the core language and the
+builtins; standard-library tests go under the `stdlib` area once the library exists
+(`notes/toolchain.md` 7.1).
 
 ## Directives
 
@@ -32,13 +33,16 @@ All directives are at the top of the file before any code, except `error`.
 | `//! stdout:` + `//| ` lines  | Expected stdout, compared exactly (trailing spaces included).  |
 | `//! exit: N`                 | Expected exit status; default 0.                               |
 | `//! abort`                   | Expect SIGABRT (runtime error, `panic`, failed `assert`).      |
-| `//! stderr: <substring>`     | Substring that must appear in stderr.                          |
+| `//! stderr: <substring>`     | Substring that must appear in stderr; repeatable.              |
 | `//! error: <substring>`      | `fail` only, at the end of the offending line.                 |
 | `//! error-any: <substring>`  | `fail` only, at the top: an error with no useful line.         |
 
+Each `//| ` line contributes its text after the marker plus a newline, and a bare `//|` is an
+empty line; output without a final newline cannot be expressed, so end with `println`.
+
 Example:
 
-```
+```fort
 //! run
 //! args: x
 //! stdout:
@@ -53,8 +57,9 @@ fn i32 main(string[] args) {
 
 - `run`: the compiler must exit 0. The program is run with the given `args` and `stdin`. Its
   stdout must equal the `//| ` lines byte for byte, its exit status must equal `exit` (or the
-  process must die with SIGABRT when `abort` is given), and stderr must contain the `stderr`
-  substring when one is given.
+  process must die with SIGABRT when `abort` is given), and stderr must contain every `stderr`
+  substring given.
 - `fail`: the compiler must exit 1. Every line carrying `//! error:` must produce a diagnostic on
   that line whose text contains the substring, and no diagnostic may appear on an unannotated
-  line. `error-any` accepts a diagnostic on any line.
+  line. `error-any` accepts a diagnostic on any line. In a multi-file test the annotations of
+  every `.ft` file in the directory count.

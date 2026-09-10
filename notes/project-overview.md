@@ -17,9 +17,9 @@ next phase is the implementation strategy and the compiler itself.
 |---------------------------|----------|
 | 1. Language design (v1)   | complete |
 | 2. Implementation plan    | next     |
-| 3. Compiler in C          | pending  |
-| 4. Standard library       | pending  |
-| 5. Self-hosting           | pending  |
+| 3. Compiler in C          | later    |
+| 4. Standard library       | later    |
+| 5. Self-hosting           | later    |
 
 ## Documents
 
