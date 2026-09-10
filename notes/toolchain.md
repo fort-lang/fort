@@ -414,9 +414,9 @@ test/
     programs/*.ft              larger programs, treated as run tests
 ```
 
-`<area>` is one of `lexical constants operators mutability declarations control switch
-functions structs enums arrays slices strings pointers defer modules ffi globals builtins errors
-modes stdlib`: `errors` holds the `abort` tests of the runtime checks, `modes` the `--release`
+`<area>` is one of `lexical constants operators casts mutability declarations control switch
+defer functions structs enums arrays slices strings pointers globals builtins errors modes modules
+ffi stdlib`: `errors` holds the `abort` tests of the runtime checks, `modes` the `--release`
 tests, and `stdlib` the tests of the standard library once it exists. `NNN` is a three-digit
 sequence number and `name` a short snake-case description. Paths in `link:` are relative to
 `test/lang/`.

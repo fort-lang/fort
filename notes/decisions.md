@@ -177,8 +177,11 @@ Owner: `type-system.md` (Constants), `core-language.md` (Literals).
 - **D4.4** Arithmetic among untyped constants folds at compile time: integer with integer stays an
   untyped integer (`1 / 2` is `0`, so `f64 d = 1 / 2;` is `0.0`); integer with float becomes an
   untyped float; `~c` on an untyped integer is `-c - 1`, so `u32 m = ~0;` is an error (write
-  `0xFFFFFFFF`); constant `/` and `%` truncate toward zero exactly as at runtime (D6.13).
-  Untyped integers are evaluated exactly in the range `[-2^63, 2^64 - 1]`; any
+  `0xFFFFFFFF`); constant `/` and `%` truncate toward zero exactly as at runtime (D6.13); shifts
+  among untyped constants fold exactly too, so `i32 x = 1 << 31;` is an error (2147483648 does
+  not fit `i32`) while `cast(1 << 31, i32)` is `-2147483648` and `one << 31` on an `i32` variable
+  `one` is `-2147483648` (D6.2). Untyped integers are evaluated exactly in the range
+  `[-2^63, 2^64 - 1]`; any
   intermediate outside it, and constant division by zero, are compile errors. Untyped floats are
   evaluated as `f64`. `cast` on a constant has runtime semantics (`cast(0x80000000, i32)` is
   `-2147483648`, `cast(-1, u32)` is `4294967295`). A float constant that is not finite in the
@@ -639,20 +642,27 @@ Owner: `toolchain.md`.
   optionally followed by `note:` lines. Errors without a position in the file (a missing
   `main`, an invalid module name) use `1:1`. A syntax error stops the compilation of that file
   after one diagnostic (no recovery in v1). Modules are checked in dependency order; all semantic
-  errors of the first module that has any are reported, then compilation stops. The compiler
-  never emits warnings in v1.
+  errors of the first module that has any are reported, then compilation stops. Positions of
+  errors that concern a whole construct: "missing return" and a non-exhaustive enum `switch`
+  are reported at the closing brace of the body or `switch`; an infinite-size struct at its
+  `struct` keyword; a shadowing error at the inner declaration ("'n' shadows a parameter",
+  "'n' shadows an enclosing local"). The compiler never emits warnings in v1.
 - **D14.3** Generated assembly is GNU syntax, position-independent (RIP-relative data, `@PLT`
   calls for externs), and is assembled and linked by the system C compiler together with the
   runtime object.
 - **D14.4** Language tests live under `test/lang/`: `run/<area>/NNN_name.ft` (compile, run,
-  compare), `fail/<area>/NNN_name.ft` (must not compile), `run/modules/<name>/main.ft` and
+  compare), `fail/<area>/NNN_name.ft` (must not compile), where `<area>` is one of `lexical
+  constants operators casts mutability declarations control switch defer functions structs enums
+  arrays slices strings pointers globals builtins errors modes modules ffi stdlib`, plus
+  `run/modules/<name>/main.ft` and
   `fail/modules/<name>/main.ft` for multi-file tests (the harness compiles `main.ft` with the
   directory as root and collects `error` annotations from every `.ft` file in it), `ffi/*.c`
   helpers, `programs/*.ft` for larger programs. The harness invokes `fort` on the test file
   itself (`main.ft` for multi-file tests) with `test/lang` as the working directory, so `<file>`
   in diagnostics and runtime errors is the path relative to `test/lang`. Compiler unit tests in
   C live in `test/` using `test.h`.
-- **D14.5** Test file directives, all at the top of the file (`//!`) except `error`:
+- **D14.5** Test file directives, all at the top of the file (`//!`) except `error`; in a
+  multi-file test only `main.ft` carries directives and sibling modules carry none:
   - `//! run` or `//! fail` (required, first line);
   - `//! flags: --release` (extra compiler flags);
   - `//! args: a b c`; `//! link: ffi/helpers.c` (repeatable, relative to `test/lang`);
