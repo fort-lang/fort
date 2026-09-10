@@ -154,7 +154,7 @@ p = &m;                   // error: cannot assign to immutable 'p'
 q = &m;                   // ok
 q->value = 1;             // error: cannot write through immutable pointer 'q'
 r->value = 1;             // ok; the common cursor 'mut Node* cur' can do both
-fn bool read_file(string path, mut u8[]* out) { ... }   // *out and its bytes writable
+fn bool read_file(string path, mut u8[] own* out) { ... }  // the own slot *out and its bytes
 fn bool peek(string path, u8[] mut* out) { ... }        // *out rebindable, bytes immutable
 ```
 
@@ -335,9 +335,13 @@ because the move changes storage that others can see; the fields and elements of
 count as the local. Moving a zero value yields a zero value. `del` empties its operand the same
 way (8.2), and storing over a live `own` value is a runtime error in checked builds (6.1).
 
-**Temporaries must land (D17.8).** An `own` rvalue converted to a non-`own` type, or discarded,
-is an error ("owning temporary would leak"): bind it to an `own` declaration, pass it to an
-`own` parameter, store it in an `own` place, or `del` it.
+**Temporaries must land (D17.8).** An `own` rvalue may only be bound to an `own` place, passed
+to an `own` parameter, or `del`ed. Anything else is an error ("owning temporary would leak"),
+because nothing could ever `del` it: converting or casting it to a non-`own` type
+(`mut Node* n = new(Node);`, `println(str.dup(x))`, `cast(new(Node), Node*)`), slicing it or
+taking its `.ptr` (`new(u8[8])[..4]`, 5.6, 5.7), accessing a field of an owning aggregate rvalue
+(`make_vec().data`), and discarding it as an expression statement (`move(x);`, `str.dup(s);`,
+6.2).
 
 **Returning and `defer` (D17.5, D7.8).** `return x` where `x` is a local variable or parameter
 of `own` type is an implicit `move(x)`, performed before deferred code runs (6.6, 6.7). A
@@ -603,6 +607,7 @@ i32* q = arr.ptr;         // error: fixed arrays have no '.ptr'
 i32[s.len] b = {};        // error: '.len' of a slice is not a constant expression
 i32[arr.len] c = {};      // ok: '.len' of a fixed array is a constant
 own mut u8* d = buf.ptr;  // error: '.ptr' is a view; cannot add own
+mut u8* e = new(u8[8]).ptr;  // error: owning temporary would leak (D17.8)
 ```
 
 ### 5.7 Indexing and slicing (D6.8, D6.9, D10.6, D10.7)
@@ -637,6 +642,7 @@ mut i32[] s = a[1..3];    // error: cannot add mutability; 'a' is immutable
 i32[] t = a[1..3];        // {2, 3}
 i32[] u = t[1..2];        // {3}: bounds are relative to t
 own i32[] o = t[..];      // error: slicing yields a view; cannot add own
+mut u8[] k = new(u8[8])[..4];  // error: owning temporary would leak (D17.8)
 i32[] v = t[2..1];        // runtime error: slice bounds 2..1 out of range for length 2
 i32 z = p[0];             // error: pointers cannot be indexed
 i32[] f = p[0..n];        // ok: unchecked view of n elements at p
@@ -682,15 +688,16 @@ to guess whether a parenthesized name is a type, and it never traps. Allowed:
 - any pointer to any pointer or `void*`; mutability may be added, which is the cast-away-const
   escape, and writing through it into read-only memory is undefined behavior; pointer to and
   from `u64`; function pointer to and from `void*`;
-- among `string`, `char[]`, `u8[]`, `mut char[]` and `mut u8[]`, and their `own` forms, which
-  keep `own` when the target spells it: `cast(buf, own string)` for an `own mut u8[] buf`
-  (D17.12); `T[]` to `mut T[]`; identity. A binding-level `mut` is never part of a cast target:
+- among `string`, `char[]`, `u8[]`, `mut char[]` and `mut u8[]`, and their `own` forms, where
+  the result is `own` exactly when the target spells it: `cast(move(buf), own string)` for an
+  `own mut u8[] buf`, and `cast(buf, string)` lends a view (D17.12); `T[]` to `mut T[]`;
+  identity. A binding-level `mut` is never part of a cast target:
   the `mut` in a target names the levels behind the indirection, and `cast(s, u8[] mut)` is an
   error;
 - adding `own` to any reference of a pointer or slice type: adoption of memory that came from C
-  or from a `new` of another shape (`cast(libc.malloc(n), own mut u8*)`,
-  `cast(new(Node*[n]), own mut Node* own[])`), the same unsafe escape as adding `mut`; a later
-  `del` of adopted memory that is not the start of an allocation is undefined behavior (D10.7);
+  (`cast(p, own mut u8*)` for a `mut u8* p` returned by an extern that does not say `own`,
+  `cast(line[0..n], own mut char[])`), the same unsafe escape as adding `mut`; a later `del` of
+  adopted memory that is not the start of an allocation is undefined behavior (D10.7);
 - dropping `own` at any level: a no-op wherever 3.9 already converts, and the escape where the
   monotone rule of 3.9 refuses the implicit form (`own mut Node* own[]` to `mut Node*[]`).
 
@@ -700,8 +707,10 @@ constant operand first takes its default type (D4.5) and then converts with the 
 so `cast(0x80000000, i32)` is `-2147483648` and `cast(-1, u32)` is `4294967295`. `null` is not
 a valid operand, because it has no type of its own (D10.5). There is no strict aliasing:
 reading an object through a pointer of another type, as in `*cast(&x, u64*)` for an `f64 x`,
-is defined. A cast never moves: its operand is lent, so casting an `own` lvalue to an `own`
-type leaves two owners that nothing tracks (D17.14); write `cast(move(x), ...)` to transfer. A
+is defined. The result of a cast is `own` exactly when its target type says `own` (D3.14): an
+`own` source cast to a non-`own` target lends, so the result is a view; a non-`own` source cast
+to an `own` target adopts; and an `own` lvalue cast to an `own` target is a copy into an `own`
+place, which must be written `cast(move(x), ...)` (D17.5), so that the bytes keep one owner. A
 `cast` to an `own` type yields an `own` rvalue, which must land (3.9), and a cast that drops
 `own` from an `own` rvalue is refused (D17.8).
 
@@ -713,9 +722,11 @@ Point q = cast(r, Point);          // error: cannot cast to struct type Point
 mut i32* w = cast(cp, mut i32*);   // ok: adds mutability explicitly
 i32 c = cast('a', i32) - '0';      // 49
 u8 t = cast(300, u8);              // 44: 300 is i32, then truncated
-own mut u8* m = cast(libc.malloc(64), own mut u8*);   // ok: adopts C memory; del(m) frees it
-own string s1 = cast(move(buf), own string);          // ok: keeps own; 'buf' is emptied
-own string s2 = cast(buf, own string);                // compiles: 'buf' and 's2' both own it
+own mut u8* m = cast(libc.malloc(64), own mut u8*);   // ok: own rvalue to own type; del(m) frees
+own mut u8* a2 = cast(c_alloc(64), own mut u8*);      // ok: adopts; mut u8* c_alloc(u64) is C
+own string s1 = cast(move(buf), own string);          // ok: the target says own; 'buf' is emptied
+own string s2 = cast(buf, own string);                // error: copying own lvalue 'buf' needs move
+string s5 = cast(buf, string);                        // ok: lends a view; 'buf' still owns it
 string s3 = cast(new(u8[4]), string);                 // error: owning temporary would leak
 own string s4 = cast("abc", own string);              // compiles; del(s4) is undefined behavior
 ```
@@ -732,9 +743,11 @@ for structs. `sizeof(void)` and `sizeof(expr)` are errors, and there is no `alig
 constant; later brackets are fixed-array dimensions of the element (`new(i32[n][4])` is
 `own mut i32[][4]`) (D17.3). A negative constant `n` is a compile error (D4.1); a negative `n`
 at run time, a size that overflows, or allocation failure is a runtime error; `n == 0` is
-allowed and yields a slice with a non-null pointer. Neither `mut` nor `own` is written inside
-`new(...)`: the result is fully mutable and owned at its outermost reference only, so an owned
-slice of owned pointers is made with `cast(new(Node*[n]), own mut Node* own[])` (5.9).
+allowed and yields a slice with a non-null pointer. `mut` is never written inside `new(...)`,
+and `own` only in postfix positions of the element type, after a `*`: the result is fully
+mutable and owned at its outermost reference, and `new(Node* own[n])` yields
+`own mut Node* own[]`, an owned slice of owned pointers whose slots are all `null` (D17.3); a
+prefix `own` inside `new(...)` does not parse (`grammar.md` section 6).
 `new(T{...})`, `new(T[])` and `new(void)` are errors. The result is an `own` rvalue and must
 land in an `own` place (3.9): `Point* q = new(Point);` is an error, not a conversion. Heap
 storage is freed only by `del` (8.2).
@@ -747,7 +760,8 @@ own mut i32[] s = new(i32[]);          // error: 'new' of a slice needs a count
 own mut i32[] t = new(i32[n]);         // ok; runtime error if n < 0
 own mut i32[] u = new(i32[-1]);        // error: negative constant count
 own mut Node** pp = new(Node* mut);    // error: 'mut' inside 'new'
-own mut Node* own[] k = new(Node* own[4]);   // error: 'own' inside 'new'
+own mut Node* own[] k = new(Node* own[4]);   // ok: four null slots, each an owned Node*
+own mut Node* own[] k2 = new(own Node*[4]);  // error: prefix 'own' inside 'new' does not parse
 own mut Point* q = new(Point);         // ok
 Point* r = new(Point);                 // error: owning temporary would leak; write own mut Point*
 own Point* w = new(Point);             // ok: drops mut, keeps own
@@ -799,9 +813,10 @@ own string e = "";                // error: a literal is not owned; write {}
 `c ? a : b` requires a `bool` condition and two operands of one type, identical down to the
 mutability levels (the implicit drop of 3.4 does not apply, D6.2); an untyped constant operand
 adopts the other operand's type. The operands are lent (D17.4): an `own` lvalue operand
-contributes its type without `own`, the result is never `own`, and an `own` rvalue operand
-would leak and is an error (D17.8). It is right-associative and evaluates only the chosen
-operand. `+% -% *%` and `+%= -%= *%=` are integer-only and wrap in two's complement in both
+contributes its type without `own`, and the result is `own` only when both operands are `own`
+rvalues or `null` (D6.2), so that the chosen temporary lands; an `own` rvalue paired with a lent
+operand would leak and is an error (D17.8). It is right-associative and evaluates only the
+chosen operand. `+% -% *%` and `+%= -%= *%=` are integer-only and wrap in two's complement in both
 build modes, so hashes, checksums and counters can be written once and behave identically in
 checked and release builds; `/`, `%` and the shifts have no wrapping form. Unsigned subtraction
 traps in checked mode (`s.len - 1` on an empty slice): test first, or use `-%` when wrapping is
@@ -812,7 +827,8 @@ i32 y = n ? 1 : 2;                // error: condition must be bool
 f64 z = flag ? x : 2.5;           // error: 2.5 cannot take the type i32 of 'x'
 Node* w = flag ? p : q;           // error: mut Node* and Node* differ (cast or copy first)
 Node* v = flag ? a : b;           // ok: own Node* a and own Node* b are lent
-own mut Node* n = flag ? new(Node) : null;   // error: owning temporary would leak; use if
+own mut Node* n = flag ? new(Node) : null;   // ok: both operands are own rvalues or null
+own mut Node* m = flag ? new(Node) : a;      // error: owning temporary would leak; 'a' is lent
 mut u32 h = 2166136261;
 h = h *% 16777619;                // ok in both modes
 u32 t = h *% 1.5;                 // error: wrapping operators are integer-only
@@ -835,7 +851,8 @@ needed for the value of an assignment.
 
 When `lv` has an `own` reference type, `e` must be an `own` rvalue or `move(x)` (3.9), and in
 checked builds the store traps with `overwriting owned value` when `lv` currently holds a
-non-zero value, because the old allocation would leak (D17.11, D11.4). `del` and `move` leave
+non-zero value, because the old allocation would leak (D17.11, D11.4); the check runs after `e`
+is evaluated, immediately before the store, and is reported at the `=` token. `del` and `move` leave
 zero behind, so `del(v.data); v.data = new(...)` and `a = move(b)` after `move(a)` pass; release
 builds store without checking; assignments of owning aggregates are not checked field by field.
 
@@ -899,11 +916,13 @@ for (;;) { break; }                        // ok
 ### 6.4 Range `for` (D7.5, D17.10)
 
 `for (T x : coll) { }` and `for (mut T x : coll) { }`: `coll` is a fixed array, slice or string
-expression, evaluated once before the first iteration; a fixed array is evaluated as a value, so
-the loop iterates over a copy. `x` is a fresh copy of each element in order, taken at the start
-of its iteration. `T` is the element type (`char` for a string); `mut` makes the copy assignable
-without affecting the collection. The variable lends (D17.10): `T` is the element type without
-its outermost `own`, and an `own` range variable is an error. Moving an element out is explicit,
+expression, evaluated once before the first iteration; a fixed array that owns nothing is
+evaluated as a value, so the loop iterates over a copy. `x` is a fresh copy of each element in
+order, taken at the start of its iteration. `T` is the element type (`char` for a string); `mut`
+makes the copy assignable without affecting the collection. The loop lends its collection
+(D17.10): an owning collection, an `own` slice or an owning fixed array, is iterated in place
+and is never moved or copied; `T` is the element type without its outermost `own`, and an `own`
+range variable is an error. Moving an element out is explicit,
 `move(kids[i])` in an index loop. A range over elements that are owning aggregates (3.9) is an
 error, since the copy could not be made without `move`; iterate by index and take `&a[i]`.
 `break` and `continue` work as in other loops.
@@ -977,7 +996,7 @@ fn void f() {
 - The set of deferred statements that run at an exit is static: those textually before the exit
   in each exited block, innermost block first, in reverse textual order within a block.
 - Nothing is captured at `defer` time; the statement is ordinary code executed at exit, so after
-  `defer del(p);` a later `p = move(q);` makes the exit free `q`.
+  `defer del(p);` a later `del(p); p = move(q);` makes the exit free `q`.
 - `return e` evaluates `e` before deferred code runs, so deferred code cannot change the returned
   value. `return x` of an `own` local or parameter is an implicit move that empties `x` first
   (6.7), so `defer del(x);` frees `x` on every path except the one that hands it to the caller
@@ -1211,8 +1230,9 @@ and appear only as call statements, `defer` operands and `for` init or step.
 mutability: an `own` pointer, `own void*`, `own` slice or `own string`, as an lvalue or an
 rvalue (D17.9, D10.3). On an lvalue, `del` empties the operand as `move` does (3.9), so the
 binding need not be `mut` but a level reached through `*p`, `p->f` or `s[i]` must be; on an
-rvalue it only frees. `del(null)` and `del` of a zero slice or string are no-ops, so
-`del(buf); del(buf);` frees once and a use after `del` dereferences `null`. `del` is shallow:
+rvalue it only frees. `del(null)` (the literal adopts `own void*`) and `del` of a zero slice or
+string are no-ops, so `del(buf); del(buf);` frees once and a use after `del` dereferences
+`null`. `del` is shallow:
 `del(kids)` on an `own mut Node* own[]` frees the slots, not the nodes, and `del` of a struct or
 array is an error. A view, a sub-slice, a `.ptr`, a stack address, a literal and a `string` that
 is not `own` are compile errors, because none of them has an `own` type. Allocations have no
