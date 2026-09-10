@@ -69,8 +69,9 @@ Owner: `core-language.md` (Lexical structure), `grammar.md` (Lexical grammar).
   appear between two digits (`1_000_000`, `0xFF_FF`), nowhere else. A decimal literal other than
   `0` may not start with `0` (no C-style octal). No suffixes.
 - **D2.6** Float literals: digits `.` digits with optional exponent (`1.0`, `2.5e-3`), or digits
-  with an exponent (`1e10`). `1.` and `.5` are not literals. No suffixes; `f32` values come from
-  context (D4).
+  with an exponent (`1e10`). `1.` and `.5` are not literals, and the integer part follows D2.5's
+  leading-zero rule (`0.5` and `0e1` are fine, `09.5` is an error). No suffixes; `f32` values
+  come from context (D4).
 - **D2.7** Char literals: `'x'` where `x` is one printable ASCII character other than `'` or `\`,
   or one escape. A non-ASCII byte in a char literal is an error ("use a string").
 - **D2.8** Escapes, in char and string literals: `\n \t \r \0 \\ \' \" \xHH` (exactly two hex
@@ -199,12 +200,15 @@ Owner: `type-system.md` (Constants), `core-language.md` (Literals).
 - **D4.4** Arithmetic among untyped constants folds at compile time: integer with integer stays an
   untyped integer (`1 / 2` is `0`, so `f64 d = 1 / 2;` is `0.0`); integer with float becomes an
   untyped float; `~c` on an untyped integer is `-c - 1`, so `u32 m = ~0;` is an error (write
-  `0xFFFFFFFF`); constant `/` and `%` truncate toward zero exactly as at runtime (D6.13); shifts
-  among untyped constants fold exactly too, so `i32 x = 1 << 31;` is an error (2147483648 does
-  not fit `i32`) while `cast(1 << 31, i32)` is `-2147483648` and `one << 31` on an `i32` variable
-  `one` is `-2147483648` (D6.2). Untyped integers are evaluated exactly in the range
-  `[-2^63, 2^64 - 1]`; any
-  intermediate outside it, and constant division by zero, are compile errors. Untyped floats are
+  `0xFFFFFFFF`); constant `/` and `%` truncate toward zero exactly as at runtime (D6.13); `& | ^`
+  on untyped integers operate on the infinite two's-complement extension of the values (Go's
+  rule; `-1 & 0xFFFFFFFFFFFFFFFF` is `18446744073709551615`), and only `^` can leave the range;
+  shifts among untyped constants fold exactly too, with a count in `0..63`, `<<` an exact
+  multiplication and `>>` a floor division (`-3 >> 1` is `-2`), so `i32 x = 1 << 31;` is an
+  error (2147483648 does not fit `i32`) while `cast(1 << 31, i32)` is `-2147483648` and
+  `one << 31` on an `i32` variable `one` is `-2147483648` (D6.2). Untyped integers are evaluated
+  exactly in the range `[-2^63, 2^64 - 1]`; any intermediate outside it, a shift count outside
+  `0..63`, and constant division by zero, are compile errors. Untyped floats are
   evaluated as `f64`. `cast` on a constant has runtime semantics (`cast(0x80000000, i32)` is
   `-2147483648`, `cast(-1, u32)` is `4294967295`). A float constant that is not finite in the
   target type is an error.
@@ -220,8 +224,10 @@ Owner: `type-system.md` (Constants), `core-language.md` (Literals).
   `cast(color.blue, i32) + 1` may size an array), parentheses, and struct or array literals whose
   leaves are constant expressions. Not constant: calls, `&` (except `&global` in module-level
   initializers, D7.10), field access, indexing, slicing, `.len` of slices or strings, reads of
-  `mut` globals, `null` in a `cast`. Typed constant folding respects the declared type:
-  `i32 A = 2147483647;` then
+  `mut` globals, `null` in a `cast`. Typed constant folding respects the declared type and
+  applies every checked-mode rule at compile time (overflow, shift count, division by zero,
+  `MIN / -1` and `MIN % -1` are all compile errors in a typed constant): `i32 A = 2147483647;`
+  then
   `A + 1` is a compile error, not a runtime trap. Constant references are evaluated lazily with
   cycle detection; `i32 A = B; i32 B = A;` is an error.
 

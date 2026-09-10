@@ -131,6 +131,10 @@ A safe(r) C-like systems programming language.
   (new decision number or amended decision with a note), then in the specification document that
   owns the topic, then in the tests under `test/lang/`. Specification text never contains "TBD",
   "pending" or "not finalized"; deferred features live only in decision D15.
+- **Citing decisions in code**: a citation goes on the line or function that implements the
+  rule, with a phrase stating the rule (`// pointers print as 0x + lowercase hex, 0x0 for null
+  (D11.7)`), so a reader learns the rule without opening the log. A bare tag list at file or
+  section level (`// Printing (D11.5, D11.7, D12.2).`) is not a citation.
 - **Writing specification text**: cite the decision each rule implements as `(Dn.m)`. An agent
   that needs a rule the decision log does not settle uses the most conservative reading, marks it,
   and reports it to the lead for ratification; it never invents syntax or semantics. Every

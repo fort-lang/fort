@@ -37,8 +37,8 @@ hex_literal = "0x" hex_digit { [ "_" ] hex_digit } ;
 oct_literal = "0o" oct_digit { [ "_" ] oct_digit } ;
 bin_literal = "0b" bin_digit { [ "_" ] bin_digit } ;
 
-float_literal = dec_digits "." dec_digits [ exponent ]
-              | dec_digits exponent ;                    (* D2.6 *)
+float_literal = dec_literal "." dec_digits [ exponent ]
+              | dec_literal exponent ;                   (* D2.6: no leading zero *)
 dec_digits    = dec_digit { [ "_" ] dec_digit } ;
 exponent      = ( "e" | "E" ) [ "+" | "-" ] dec_digits ;
 
