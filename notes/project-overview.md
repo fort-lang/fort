@@ -32,8 +32,9 @@ Read them in this order. Two are normative and win over the rest.
 | `core-language.md`   | Lexical structure, declarations, expressions, statements, functions,  |
 |                      | builtins.                                                             |
 | `type-system.md`     | Every type, mutability levels, conversions, untyped constants, layout.|
-| `memory-model.md`    | Stack and heap, `new`/`del`, slices and strings, runtime checks, the  |
-|                      | runtime-error contract, undefined behavior.                           |
+| `memory-model.md`    | Stack and heap, `new`/`del`, ownership (`own`, `move`), slices and    |
+|                      | strings, runtime checks, the runtime-error contract, undefined        |
+|                      | behavior.                                                             |
 | `module-system.md`   | Files and imports, name resolution, mangling, C FFI, calling          |
 |                      | convention, entry point.                                              |
 | `stdlib.md`          | The v1 standard library, module by module, with signatures.           |
@@ -50,8 +51,9 @@ Seed tests that exercise every feature live under `test/lang/` in the format def
    allocation, no fallthrough. `cast`, `mut` and `new` are written out.
 3. **Safety without complexity.** Bounds-checked arrays and slices, checked arithmetic, mandatory
    initialization, no pointer arithmetic, exhaustive enum switches.
-4. **Manual control.** Explicit `new`/`del`, C-compatible struct layout, a raw-pointer escape
-   hatch (`p[lo..hi]`) for foreign memory.
+4. **Manual control.** Explicit `new`/`del`, with `own` in the type saying who frees and `move`
+   passing that job on (D17), C-compatible struct layout, a raw-pointer escape hatch
+   (`p[lo..hi]`) for foreign memory.
 5. **Minimal runtime.** A few hundred lines of C: allocation, checks, printing, process start.
 
 ## What fort changes relative to C
@@ -68,6 +70,8 @@ Seed tests that exercise every feature live under `test/lang/` in the format def
 | Null          | `0`/`NULL`                         | `null` keyword, pointers only (D10.5)      |
 | Switch        | fallthrough                        | none; `case a, b:`; exhaustive enums (D7.6)|
 | Cleanup       | manual on every path               | `defer` (D7.8)                             |
+| Ownership     | `malloc`/`free` by convention      | `own` types, `move`, `del` that empties    |
+|               |                                    | its operand (D17)                          |
 | Control flow  | `goto`, optional braces            | no `goto`; braces required (D7.4)          |
 | Modules       | headers and `#include`             | `import a::b;`, one module per file (D9)   |
 | Functions     | `int f(int)`                       | `fn i32 f(i32)`; function-pointer types    |

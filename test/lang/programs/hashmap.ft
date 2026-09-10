@@ -8,8 +8,11 @@
 //| false false true 90
 //| count=9 tombstones=2 delta=300
 //| sum=685
+//| freed cap=0 count=0
 // An open-addressing string-to-i64 hash map with linear probing, tombstone deletes and
 // doubling growth, written with core features only. Nothing hash-order dependent is printed.
+// The map owns its slot storage (D17): growth builds a fresh table, frees the old slots and
+// moves the new ones in, and map_free empties the map so a second free is a no-op.
 struct Entry {
     string key;
     i64 value;
@@ -17,7 +20,7 @@ struct Entry {
 }
 
 struct Map {
-    mut Entry[] slots;
+    own mut Entry[] slots;
     u64 count;
     u64 tombstones;
 }
@@ -39,6 +42,7 @@ fn u64 fnv1a(string key) {
     return h;
 }
 
+// The caller's slots must be empty ({} or freed), or the checked build traps (D17.11).
 fn void map_init(mut Map* m, u64 cap) {
     m->slots = new(Entry[cap]);
     m->count = 0;
@@ -69,15 +73,26 @@ fn u64 map_find(Map* m, string key, mut bool* found) {
     }
 }
 
+// Rehash into a fresh table, then del the old slots so the move into the emptied slot passes
+// the overwrite check. The fresh table never grows: it holds at most 3/4 of half its capacity.
 fn void map_grow(mut Map* m) {
-    mut Entry[] old = m->slots;
-    map_init(m, old.len * 2);
-    for (Entry e : old) {
+    mut Map fresh = {};
+    map_init(&fresh, m->slots.len * 2);
+    for (Entry e : m->slots) {
         if (e.state == USED) {
-            map_put(m, e.key, e.value);
+            map_put(&fresh, e.key, e.value);
         }
     }
-    del(old);
+    del(m->slots);
+    m->slots = move(fresh.slots);
+    m->count = fresh.count;
+    m->tombstones = fresh.tombstones;
+}
+
+fn void map_free(mut Map* m) {
+    del(m->slots);
+    m->count = 0;
+    m->tombstones = 0;
 }
 
 fn void map_put(mut Map* m, string key, i64 value) {
@@ -132,7 +147,7 @@ fn i32 main() {
     println(fnv1a(""), " ", fnv1a("a"));
     mut Map m = {};
     map_init(&m, 4);
-    defer del(m.slots);
+    defer map_free(&m);
     for (mut u64 i = 0; i < WORDS.len; i++) {
         map_put(&m, WORDS[i], cast(i, i64) * 10);
     }
@@ -165,5 +180,7 @@ fn i32 main() {
     map_get(&m, "delta", &v);
     println("count=", m.count, " tombstones=", m.tombstones, " delta=", v);
     println("sum=", sum_values(&m));
+    map_free(&m);
+    println("freed cap=", m.slots.len, " count=", m.count);
     return 0;
 }

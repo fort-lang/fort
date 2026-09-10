@@ -2,7 +2,7 @@
 
 This document specifies modules, imports, name resolution, symbol naming, the C foreign function
 interface and the compilation model of fort v1. It implements D9 together with the parts of D3,
-D7, D8, D11, D13 and D14 that touch modules. Where it disagrees with `decisions.md` or
+D7, D8, D11, D13, D14 and D17 that touch modules. Where it disagrees with `decisions.md` or
 `grammar.md`, those files win (D1.2).
 
 Sections: 1 Modules and files; 2 Search roots and the entry file; 3 Import forms and
@@ -137,8 +137,8 @@ Lookup of an unqualified name proceeds (D7.9):
 1. block scopes, innermost outward: locals and parameters, a local being visible only after its
    own declaration;
 2. the module namespace of the current file;
-3. the universe: `del`, `assert`, `panic`, `print`, `println`, `eprint`, `eprintln`, `fprint`,
-   `fprintln` (D12.2).
+3. the universe: `del`, `move`, `assert`, `panic`, `print`, `println`, `eprint`, `eprintln`,
+   `fprint`, `fprintln` (D12.2).
 
 - A local or parameter may not reuse the name of an enclosing local or parameter.
 - A local or parameter may shadow a module-level name, import bindings included, or a universe
@@ -147,8 +147,8 @@ Lookup of an unqualified name proceeds (D7.9):
 - A module-level declaration or import binding may shadow a universe name: a module declaring
   `fn void print(string s)` loses the builtin `print` throughout its body.
 - Enum members are not in the namespace (D3.9): `Red` is not a name, `Color.Red` is.
-- Universe functions yield no value, cannot be used as values, and cannot be imported or
-  qualified.
+- Universe functions other than `move` yield no value (D12.2); none can be used as a value,
+  imported or qualified.
 
 ## 6. Import graph and export rules
 
@@ -197,6 +197,8 @@ library reaches the runtime through ordinary `extern fn fort_rt_...` declaration
 extern fn i64 write(i32 fd, void* buf, u64 n);
 extern fn u64 strlen(char* s);
 extern fn noreturn exit(i32 status);
+extern fn own void* malloc(u64 n);
+extern fn void free(own void* p);
 ```
 
 `extern fn` declares a C function with the System V x86-64 ABI (D9.8; `grammar.md` section 3). It
@@ -209,11 +211,35 @@ as a function-pointer value, and may be `noreturn` (D8.5).
 | `i8 i16 i32 i64 u8 u16 u32 u64`, `f32 f64`      | `T[]` slices, `string`, fixed arrays |
 | `bool`, `char`, enums (passed as `i32`)         | structs by value                     |
 | `T*`, `mut T*` for any `T`, `void*`             | variadic parameters                  |
+| `own` on any of those pointers (D17.13)         | `own` slices and strings (D9.8)      |
 | `fn R(P...)` whose signature is extern-legal    |                                      |
 | return type `void` or `noreturn`                |                                      |
 
 Structs cross the boundary through pointers only. Because struct layout is C layout (D3.8, D9.9),
 a `mut Stat* buf` parameter is exactly a C `struct stat *`.
+
+`own` may qualify a pointer or `void*` in an extern signature (D17.13). It is erased, so the
+declaration names the same C function with or without it, and it records the C side's
+convention on the fort side: `own void* malloc(u64 n)` says the caller must free the result
+(`void*` has no target level, so it takes no `mut`, D5.5), so the cast in
+`own mut u8* p = cast(malloc(n), own mut u8*);` types the owned block, its target saying `own`
+(D3.14), and a plain `mut u8* p = malloc(n);` is refused as a leaking temporary (D17.8);
+`free(own void* p)` says the callee frees, so an `own` lvalue is passed as
+`free(cast(move(p), own void*))` and is `null` afterwards (D17.5). A C function that stores or
+frees nothing takes plain `T*`. Because `own` is part of type identity (D17.1), two modules that
+declare one C symbol with and without it have conflicting declarations (D9.8, section 13):
+
+```fort
+extern fn own void* malloc(u64 n);
+extern fn void free(own void* p);
+extern fn own mut char* strdup(char* s);        // C documents: the caller frees
+
+own mut char* copy = strdup("abc".ptr);       // adopted through the declared own result
+mut char* alias = copy;                         // lends (D17.4)
+free(cast(move(copy), own void*));              // copy == null afterwards; alias dangles
+mut char* leak = strdup("abc".ptr);             // error: owning temporary would leak (D17.8)
+free(cast(alias, void*));                       // error: a view cannot pass to an own parameter
+```
 
 ### 8.2 C type mapping
 
@@ -232,11 +258,16 @@ a `mut Stat* buf` parameter is exactly a C `struct stat *`.
 | `T*` written to by C           | `mut T*`                                  |
 | `const T*`                     | `T*`                                      |
 | `void*`, `const void*`         | `void*`                                   |
+| `T*` result the caller must free | `own mut T*` (D17.13)                   |
+| `void*` from an allocator      | `own void*`, never `mut` (D17.13)         |
+| `T*` parameter that C frees    | `own T*` or `own void*` (D17.13)          |
 | `R (*)(A, B)`                  | `fn R(A, B)`                              |
 | C `enum`                       | `i32`, or a fort enum (passed as `i32`)   |
 
-A C `const` on the pointee becomes the absence of `mut`. Nothing finer is expressible, and nothing
-finer is needed at the boundary.
+A C `const` on the pointee becomes the absence of `mut`, and a documented "caller frees" or
+"callee frees" becomes `own` on the result or the parameter (D17.13); a pointer that C merely
+reads through, keeps without freeing, or that points into something larger stays borrowed.
+Nothing finer is expressible, and nothing finer is needed at the boundary.
 
 ### 8.3 Narrow values and `bool`
 
@@ -282,14 +313,36 @@ Slices and strings never cross the boundary whole (D9.8, D13.4). Pass `.ptr` and
 of a `string` is `char*`; `xs.ptr` of a `T[]` is `T*`, or `mut T*` for `mut T[]`. A string
 literal is NUL-terminated (D3.7) and so is every element of `args` (D8.6); a string obtained by
 slicing or read from a file is not. A C function expecting a terminator gets a copy: allocate
-`new(char[s.len + 1])`, copy the characters, and pass `.ptr`; the last element is already `'\0'`
-(D10.2). Memory received from C as `T*` becomes a slice with `p[0..n]` (D6.9), unchecked; a
-`char*` becomes a `string` with `cast(p[0..n], string)` (D3.14). Memory from `new` may be freed
-by C `free` and memory from `malloc` by `del` (D10.3). There is no strict-aliasing rule (D10.7):
-memory may be read through any pointer type reached by `cast`. A fort wrapper around a C function
-that fills a buffer and reports its length takes the usual out-parameter shape `mut u8[]* out`
-(D3.6) and rebinds the whole slice, `*out = p[0..n];`, since `.ptr` and `.len` are never
-assignable (D6.7).
+`own mut char[] tmp = new(char[s.len + 1]);` under a `defer del(tmp);`, copy the characters, and
+pass `tmp.ptr`; the last element is already `'\0'` (D10.2). Memory received from C as `T*`
+becomes a slice with `p[0..n]` (D6.9), unchecked and borrowed; a `char*` becomes a `string`
+with `cast(p[0..n], string)` (D3.14). When C hands the memory over for good, the slice is
+adopted with a `cast` that adds `own`, `cast(p[0..n], own mut u8[])`, and is then freed with
+`del` (D17.3); memory from `new` may likewise be freed by C `free` and memory from `malloc` by
+`del` (D10.3). There is no strict-aliasing rule (D10.7): memory may be read through any
+pointer type reached by `cast`. A fort wrapper around a C function that fills a buffer and
+reports its length takes the out-parameter shape `mut u8[] own* out`, a borrowed pointer to an
+`own` slot (D3.6, D13.5, D17.2), and stores the adopted slice through it, since `.ptr` and
+`.len` are never assignable (D6.7); the caller initializes the slot to `{}` so that the store
+passes the overwrite check (D17.11).
+
+```fort
+extern fn mut u8* c_read_all(mut u64* n);       // C documents: the caller frees
+
+fn bool read_all(mut u8[] own* out) {
+    mut u64 n = 0;
+    mut u8* p = c_read_all(&n);
+    if (p == null) { return false; }
+    *out = cast(p[0..n], own mut u8[]);         // adopt; the caller dels *out
+    return true;
+}
+
+fn void wrong(mut u8[] own* out) {
+    mut u64 n = 0;
+    mut u8* p = c_read_all(&n);
+    *out = p[0..n];                             // error: a view cannot be stored in an own slot
+}
+```
 
 ### 8.7 Complete example
 
@@ -430,11 +483,11 @@ directory; `fort main.ft -o main` builds the program.
 // list.ft
 struct Node {
     i32 value;
-    mut Node* next;
+    own mut Node* next;
 }
 
 struct List {
-    mut Node* head;
+    own mut Node* head;
     u64 size;
 }
 
@@ -443,10 +496,10 @@ fn List list_create() {
 }
 
 fn void list_push(mut List* list, i32 value) {
-    mut Node* n = new(Node);
+    own mut Node* n = new(Node);
     n->value = value;
-    n->next = list->head;
-    list->head = n;
+    n->next = move(list->head);
+    list->head = move(n);
     list->size += 1;
 }
 
@@ -454,20 +507,32 @@ fn bool list_pop(mut List* list, mut i32* out) {
     if (list->head == null) {
         return false;
     }
-    mut Node* n = list->head;
+    own mut Node* n = move(list->head);
     *out = n->value;
-    list->head = n->next;
+    list->head = move(n->next);
     list->size -= 1;
     del(n);
     return true;
 }
+
+fn void list_free(mut List* list) {
+    mut i32 unused = 0;
+    while (list_pop(list, &unused)) {
+    }
+}
 ```
 
 `Node` and `List` refer to each other through pointers and live in one module (section 6).
-`mut Node* next` as a field type marks the pointee mutable (D5.5); `mut List* list` makes the
-pointee writable in the callee (D5.3); `new(Node)` yields zeroed memory (D10.2). A user writes
-`import list;`, `mut List l = list.list_create();`, `list.list_push(&l, 7);`; `&l` on a `mut List`
-is a `mut List*` (D5.8); a local named `list` would shadow the binding (section 5), hence `l`.
+`own mut Node* next` as a field type marks the pointee mutable (D5.5) and the node as owned by
+its predecessor (D17.2); `List` is therefore an owning aggregate and is passed as
+`mut List* list`, which makes the pointee writable in the callee (D5.3, D17.7). `new(Node)`
+yields zeroed, owned memory (D10.2, D17.3); `move` transfers the head into the new node's
+`next` and the node into `head`, each store landing in a field the preceding `move` emptied, so
+the checked build's overwrite check passes (D17.5, D17.11); `del(n)` frees the popped node and
+leaves `n` null (D17.9). A user writes `import list;`, `mut List l = list.list_create();`,
+`list.list_push(&l, 7);` and `defer list.list_free(&l);`; `&l` on a `mut List` is a
+`mut List*` (D5.8); a local named `list` would shadow the binding (section 5), hence `l`.
+`list.List copy = l;` is an error, because copying an owning value requires `move` (D17.7).
 
 ### 12.4 A multi-module application
 
@@ -581,6 +646,7 @@ All diagnostics follow D14.2: `<file>:<line>:<col>: error: <message>`, optionall
 | module-level name reused           | `redeclaration of 'add'`                                 |
 | local reusing an enclosing local   | `'i' shadows an enclosing local` (or `a parameter`)      |
 | same extern, different signatures  | `conflicting declarations of extern 'write'`             |
+| same extern, `own` differs (D17.1) | `conflicting declarations of extern 'free'`              |
 | import after a declaration         | `imports must precede declarations`                      |
 | module binding as a value or type  | `'io' is a module, not a value` (or `not a type`)        |
 | `m.x` with no such declaration     | `module 'std::io' has no declaration named 'x'`          |
