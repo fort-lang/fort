@@ -15,8 +15,9 @@ writable with nothing but this library and the builtins (D12).
   about it beyond resolving the `std` search root.
 - Everything at module level is exported (D9.6). Names not documented here (helpers such as
   `strmap.find_slot`) are implementation details and may change; programs must not use them.
-- Foreign calls happen only through the `extern` declarations collected in `std::c` (D9.8) and
-  the C runtime's `fort_rt_*` entry points (section 3). The runtime is permanent; it is not a
+- Foreign calls go through the `extern` declarations collected in `std::libc` (D9.8) and the C
+  runtime's `fort_rt_*` entry points (section 3); a program may redeclare any of those C
+  symbols with an identical signature (D9.8). The runtime is permanent; it is not a
   self-hosting goal (D13.1).
 - Struct field lists and their order are part of the contract (layout per D3.8); the sizes and
   offsets stated below may be relied on.
@@ -51,40 +52,41 @@ Every function entry below carries an "Ownership" line. The rules behind those l
 ### 1.4 Talking to C
 
 - Slices, strings and structs never cross an `extern` boundary (D13.4). A call unpacks `.ptr`
-  and `.len`: `c.write(fd, cast(buf.ptr, void*), buf.len)`. A fixed array has no `.ptr` (D3.4);
-  slice it first: `arr[..].ptr`.
+  and `.len`: `libc.write(fd, cast(buf.ptr, void*), buf.len)`. A fixed array has no `.ptr`
+  (D3.4); slice it first: `arr[..].ptr`.
 - NUL termination. These strings carry a `0` after their last character: literals (D3.7), the
   elements of `sys.args()` (D8.6), the result of `sys.env`, and the results of `str.dup`,
   `str.concat` and `strbuf.take`. Sub-strings, `strbuf.view` results and file contents do not.
   The one way to hand a string to C is `str.to_cstr`, which always copies; `io.open_read`,
   `io.open_write` and `sys.env` use it internally (D13.4). In the other direction,
   `str.from_cstr` wraps a C string without copying.
-- Out-parameters that deliver a slice. Pointer-to-slice is not a v1 type (D3.6, D15), so a
-  function that produces a growable `u8[]` fills a `strbuf.StrBuf` through
-  `mut strbuf.StrBuf* out`, the struct wrapper D3.6 prescribes. Scalar results use
-  `mut i64* out` and similar.
+- Out-parameters. Scalar results use `mut i64* out` and similar. A function that produces a
+  whole file or stream fills a `strbuf.StrBuf` through `mut strbuf.StrBuf* out`, so that the
+  caller can keep reading into the same storage and release it once; `io.read_file_bytes`
+  delivers a plain heap slice through `mut u8[]* out` (level 0 is `out`, level 1 the slice
+  header the callee rebinds, level 2 the bytes, D5.2) for callers that want one allocation and
+  one `del`.
 - Buffer parameters of externs are `void*`; reaching it takes a `cast` (D3.11), so the caller
   decides what C may write into. Handing C a pointer into read-only memory is undefined (D10.7).
 
 ### 1.5 Naming
 
-Module short names are the last path segment: `sys c mem io str strbuf vec strmap math`.
+Module short names are the last path segment: `sys libc mem io str strbuf vec strmap math`.
 Functions are `snake_case`; structs are `CamelCase`; module constants are `UPPER_CASE`. When a
 module has several struct types, the functions carry the type as a prefix (`vec.ptr_push`,
-`vec.int_push`). Import bindings share the module namespace with locals (D7.9), so library
-sources never name a parameter `c`, `str`, `mem`, `io`, `sys`, `vec`, `strbuf` or `math`; a
-`char` parameter is called `ch`.
+`vec.int_push`). A `char` parameter is called `ch`, and library sources do not reuse an import
+binding's name for a local even though D7.9 permits it.
 
 ### 1.6 Module list
 
 | Module        | Imports                        | Purpose                                      |
 |---------------|--------------------------------|----------------------------------------------|
-| `std::c`      | none                           | libc and runtime `extern`s, flag constants   |
-| `std::mem`    | `c`                            | copy, fill and compare bytes                 |
-| `std::str`    | `c`, `mem`                     | compare, search, classify, parse, duplicate  |
-| `std::sys`    | `c`, `str`                     | exit, args, errno, env                       |
+| `std::libc`   | none                           | libc and runtime `extern`s, flag constants   |
+| `std::mem`    | `libc`                         | copy, fill and compare bytes                 |
+| `std::str`    | `libc`, `mem`                  | compare, search, classify, parse, duplicate  |
+| `std::sys`    | `libc`, `str`                  | exit, args, errno, env                       |
 | `std::strbuf` | `mem`                          | growable text and byte buffer                |
-| `std::io`     | `c`, `sys`, `str`, `strbuf`    | descriptors, whole files and streams         |
+| `std::io`     | `libc`, `sys`, `str`, `strbuf` | descriptors, whole files and streams         |
 | `std::vec`    | none                           | `PtrVec`, `IntVec`, the non-generic pattern  |
 | `std::strmap` | `str`                          | string-keyed open-addressing table           |
 | `std::math`   | none                           | float bit casts, abs, min, max, limits       |
@@ -111,13 +113,13 @@ fn bool env(string name, mut string* out)
 
 - `exit`: flushes every runtime output buffer (D11.5) and terminates the process with status
   `code & 0xFF` (D11.6). Deferred statements of the calling function do not run. Implemented as
-  `c.fort_rt_flush_all(); c.exit(code);`. Ownership: none.
+  `libc.fort_rt_flush_all(); libc.exit(code);`. Ownership: none.
 - `args`: returns the same `string[]` that `main` received (D8.6, D11.6): `args()[0]` is the
   program name and every element is NUL-terminated. Implemented as
-  `cast(c.fort_rt_args_ptr(), string*)[0..c.fort_rt_args_len()]` (unchecked pointer slicing,
-  D6.9). Ownership: the runtime owns the storage; never `del` it.
+  `cast(libc.fort_rt_args_ptr(), string*)[0..libc.fort_rt_args_len()]` (unchecked pointer
+  slicing, D6.9). Ownership: the runtime owns the storage; never `del` it.
 - `errno`: the value of C `errno` for the calling thread, read through
-  `c.__errno_location()`. It is meaningful only after a library call has reported failure.
+  `libc.__errno_location()`. It is meaningful only after a library call has reported failure.
   Ownership: none.
 - `env`: looks up `name` in the process environment. On success `*out` aliases the environment
   string (NUL-terminated, valid for the life of the process) and the result is `true`; when the
@@ -136,7 +138,7 @@ fn string std_dir() {
 }
 ```
 
-### 2.2 `std::c`
+### 2.2 `std::libc`
 
 Thin `extern` declarations for the libc calls the other modules need, plus the runtime entry
 points of section 3, with the C types mapped per D9.8: `int` is `i32`, `size_t` is `u64`,
@@ -194,11 +196,11 @@ extern fn void fort_rt_flush_all();
 
 Semantics are those of the C functions. `malloc` and `free` are interchangeable with `new` and
 `del` (D10.3) and exist for code that sizes an allocation in bytes; a `void*` from `malloc`
-becomes usable through `cast(p, mut u8*)[0..n]`. `c.exit` does not flush the runtime's output
-buffers; programs call `sys.exit`. `c.abort` is what the runtime calls after a runtime error
-(D11.4). Ownership: as in C; the library wraps every ownership-bearing call below. Direct use
-looks like `c.write(fd, cast(s.ptr, void*), s.len) == cast(s.len, i64)`, which writes a string
-to a descriptor, bypassing the runtime's buffers.
+becomes usable through `cast(p, mut u8*)[0..n]`. `libc.exit` does not flush the runtime's
+output buffers; programs call `sys.exit`. `libc.abort` is what the runtime calls after a
+runtime error (D11.4). Ownership: as in C; the library wraps every ownership-bearing call
+below. Direct use looks like `libc.write(fd, cast(s.ptr, void*), s.len) == cast(s.len, i64)`,
+which writes a string to a descriptor, bypassing the runtime's buffers.
 
 ### 2.3 `std::mem`
 
@@ -218,8 +220,8 @@ fn bool equal(u8[] a, u8[] b)
   whatever their pointers. Ownership: none.
 
 Only `u8` slices are covered: a slice cast never changes the element size (D3.14), so other
-element types are copied with a loop, or through `c.memmove` on `.ptr` with a byte count of
-`n * sizeof(T)` (the pattern `std::vec` uses).
+element types are copied with a loop, as `std::vec` does, or through `libc.memmove` on `.ptr`
+with a byte count of `n * sizeof(T)`.
 
 ```fort
 import std::mem;
@@ -251,6 +253,7 @@ fn i64 read(i32 fd, mut u8[] buf)
 fn bool write_all(i32 fd, u8[] buf)
 fn bool read_all(i32 fd, mut strbuf.StrBuf* out)
 fn bool read_file(string path, mut strbuf.StrBuf* out)
+fn bool read_file_bytes(string path, mut u8[]* out)
 fn bool write_file(string path, u8[] data)
 ```
 
@@ -277,6 +280,10 @@ fn bool write_file(string path, u8[] data)
   `out->len` restored and `sys.errno()` describing the failing call (`close(2)` leaves `errno`
   alone when it succeeds). On success the contents are `strbuf.bytes(out)` and, as text,
   `strbuf.view(out)`. Ownership: as `read_all`.
+- `read_file_bytes`: the same as `read_file`, delivering a plain heap slice. On success `*out`
+  is rebound to a fresh allocation holding the file's bytes, with `(*out).len` the file's
+  length (an empty file yields a zero-length, non-null allocation, D10.2); on failure `*out` is
+  unchanged. Ownership: the caller releases `*out` with `del(*out)`.
 - `write_file`: `open_write`, `write_all`, `close`. Returns `true` only when all three succeed.
   Ownership: none.
 
@@ -329,8 +336,8 @@ fn bool is_hex(char ch)
 
 - `equal`: the same as `a == b` (D3.7); it exists so that equality can be a function value,
   `fn bool(string, string) eq = str.equal;`.
-- `cmp`: lexicographic order over the bytes taken as `u8` values, a proper prefix sorting
-  first; returns `-1`, `0` or `1`. This is independent of how `char` itself orders.
+- `cmp`: lexicographic order by unsigned byte value, the order `<` gives `char` (D3.2), with a
+  proper prefix sorting first; returns `-1`, `0` or `1`.
 - `hash`: 64-bit FNV-1a over the bytes: start from `0xcbf29ce484222325`, and for each byte
   `h ^= cast(ch, u64); h *%= 0x100000001b3;`. The wrapping multiply (D11.2) makes the value
   identical in both build modes; the empty string hashes to the offset basis. The function is
@@ -347,8 +354,8 @@ fn bool is_hex(char ch)
 - `to_cstr`: the one sanctioned way to hand a string to C: a NUL-terminated heap copy, returned
   as `char*` (it is `dup(s).ptr`). If `s` contains `\0`, C sees the prefix. Ownership: the
   caller releases it with `del(p)`.
-- `from_cstr`: wraps the C string at `p` as `p[0..c.strlen(p)]` cast to `string`; no copy, so
-  the result aliases `p` and stays valid as long as `p` does. `from_cstr(null)` is the zero
+- `from_cstr`: wraps the C string at `p` as `p[0..libc.strlen(p)]` cast to `string`; no copy,
+  so the result aliases `p` and stays valid as long as `p` does. `from_cstr(null)` is the zero
   string. Ownership: whatever owns `p`.
 - `parse_i64`: decimal with an optional leading `-`, at least one digit and nothing else: no
   `+`, no whitespace, no `_`. Returns `false` on a syntax error or when the value does not fit
@@ -643,8 +650,8 @@ fn f64 max_f64(f64 a, f64 b)
 - The `*_MIN`/`*_MAX` constants are module-level constants (D7.10), usable in `case` labels and
   array lengths.
 - `f64_bits` and friends reinterpret the bytes through the pointer-cast idiom,
-  `*cast(&x, u64*)`, which is defined behavior: a type-punning load is not in the D10.7 list of
-  undefined behavior. `f64_inf()` is `f64_from_bits(0x7FF0000000000000)` and `f64_nan()` is
+  `*cast(&x, u64*)`, which is defined because fort has no strict-aliasing rule (D10.7).
+  `f64_inf()` is `f64_from_bits(0x7FF0000000000000)` and `f64_nan()` is
   `f64_from_bits(0x7FF8000000000000)`; they are functions because a call is not a constant
   expression (D4.6) and no float literal denotes infinity (D4.4). `is_nan` is `x != x` (D6.12).
 - `abs_i32`, `abs_i64`: `x < 0 ? -x : x`. For `I32_MIN` and `I64_MIN` the negation traps in
@@ -667,7 +674,7 @@ fn bool is_negative_zero(f64 x) {
 buffers and process start. This section names only what the library calls. The library uses
 the builtins `new`, `del`, `panic`, `assert` and the print family as any program does (D12);
 the runtime calls behind them are emitted by the compiler and never named in library source.
-Beyond that, `std::c` declares four runtime entry points:
+Beyond that, `std::libc` declares four runtime entry points:
 
 ```fort
 extern fn void* fort_rt_args_ptr();
@@ -680,9 +687,8 @@ extern fn void fort_rt_flush_all();
   runtime built from `argv` at process start (D11.6). They describe the same storage `main`
   receives, so `sys.args()` and `main`'s parameter are equal slice for slice.
 - `fort_rt_flush`: writes out the runtime's buffer for one descriptor, if it has one, and is a
-  no-op otherwise. `io.close` and `io.flush` call it, which is how "buffers flush on `io.close`"
-  in D11.5 happens.
-- `fort_rt_flush_all`: writes out every runtime buffer; `sys.exit` calls it before `c.exit`.
+  no-op otherwise. `io.close` and `io.flush` call it, as D11.5 specifies.
+- `fort_rt_flush_all`: writes out every runtime buffer; `sys.exit` calls it before `libc.exit`.
 
 Two properties of the runtime the library also depends on: `del` frees by the pointer alone,
 with no header and no length check (D10.3, used by 1.3), and `new(T[n])` returns zeroed
@@ -747,6 +753,6 @@ Deliberately absent, with the idiom to use instead; the language-level list is D
   for pointer values (2.8).
 - Unicode: strings are bytes (D3.7); the classification functions are ASCII-only.
 - Floating-point formatting and parsing beyond what the print family emits (D11.7): a program
-  that needs a float from text writes its own conversion or calls C through `std::c`.
+  that needs a float from text writes its own conversion or calls C through `std::libc`.
 - Threads, signals, networking, directories, time, line-at-a-time input: call libc through your
-  own `extern` declarations following the `std::c` conventions, or `read_all` and scan.
+  own `extern` declarations following the `std::libc` conventions, or `read_all` and scan.
