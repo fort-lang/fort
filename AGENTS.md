@@ -8,15 +8,15 @@ A safe(r) C-like systems programming language.
 - `notes/`: the language specification. `notes/decisions.md` (numbered decision log) and
   `notes/grammar.md` are normative and win over every other document. Start at
   `notes/project-overview.md`.
-- `test/`: `test/test.h` is the C macro framework for the compiler's unit tests (it expects a
-  `common.h` providing `TALLY_UNUSED`); `test/lang/` holds language tests in the directive format
-  defined in `notes/toolchain.md`.
+- `test/`: `test/test.h` is the C macro framework for the compiler's unit tests
+  (`test/common.h` provides `TEST_UNUSED`); `test/lang/` holds language tests in the directive
+  format defined in `notes/toolchain.md`.
 - `src/bootstrap/`: the C bootstrap compiler (stage1), frozen once the compiler is self-hosted.
   `src/fort/`: the compiler written in fort (stage2 and stage3). `runtime/`: the C runtime
   linked into every program. `std/`: the standard library in fort. `tools/`: `vm`,
   `provision.sh`, `lines.py`, `bootstrap.sh`.
-- `CMakeLists.txt`, `.clang-format` and `.clang-tidy` were copied from another project (`axle`,
-  C++) as templates until ticket T-003 replaces them; do not try to build with them before then.
+- `CMakeLists.txt`, `CMakePresets.json` and `cmake/sanitizers.cmake` are the build;
+  `.clang-format` and `.clang-tidy` (clang 18) are the C11 lint configuration.
 - `.tickets/` (gitignored, main checkout only) is the ticket board; `.claude/agents/` holds the
   `implementor` and `reviewer` agent definitions.
 
@@ -50,10 +50,22 @@ A safe(r) C-like systems programming language.
   VM directory to `/vagrant`, so worktree `.git` files (absolute host paths) resolve there.
 
 ## Build and test
-- Presets: `debug release gcc asan msan tsan ubsan`. `tools/vm workflow <preset>` configures,
-  builds and runs ctest; build directories are `build/<preset>` inside the worktree.
-- Targets: `check` (unit tests), `check-lang` (language tests), `check-all`, `format`,
-  `format-check`, `tidy`, `lines` (test-to-code ratio, target 3:1). `tools/vm <target>` runs one.
+- Presets (`CMakePresets.json`, Ninja, clang unless noted): `debug`, `release` (RelWithDebInfo),
+  `gcc`, `asan`, `msan`, `tsan`, `ubsan` (the last four set `FORT_SANITIZER` for
+  `cmake/sanitizers.cmake`, which instruments every native target but never the cross-compiled
+  runtime object). `tools/vm workflow <preset>` configures, builds and runs ctest; build
+  directories are `build/<preset>` inside the worktree. `-Wall -Wextra -Wpedantic -Werror
+  -Wshadow -Wvla -Wstrict-prototypes -Wmissing-prototypes -Wundef` apply to every C target.
+- Targets: `fort_core` (static library, `src/bootstrap/*.c` except `main.c`, globbed), `fort`
+  (`build/<preset>/fort`), `fort_rt` (`runtime/fort_rt.c` cross-compiled by `FORT_TARGET_CC`,
+  default `x86_64-linux-gnu-gcc`, into `build/<preset>/std/fort_rt.o` next to a copy of
+  `std/*.ft`), `fort_rt_native` (the runtime compiled natively with `-DFORT_RT_NO_MAIN` for the
+  unit tests and tidy), `lang_ffi_helpers` (`test/lang/ffi/*.c` built natively so `-Werror` and
+  tidy cover them), `check` (ctest label `unit`), `check-lang` (language tests; prints
+  `no harness yet` until T-005), `check-all` (both), `format` and `format-check` (clang-format
+  over `src`, `runtime`, `test`), `tidy` (`run-clang-tidy` over the same), `lines`
+  (`tools/lines.py`: test lines per compiler line, target 3:1, `--min RATIO` fails below it).
+  `tools/vm <target> [preset]` runs one.
 - `tools/vm gate` is the merge gate: `format-check`, `tidy`, and `check-all` under `debug`,
   `asan` and `ubsan` (it configures `debug` first, then configures and builds each preset before
   its `check-all`).
@@ -62,7 +74,13 @@ A safe(r) C-like systems programming language.
   the list in the same commit that makes tests pass. `test/lang/bootstrap-unsupported.txt` lists
   tests that use features the C bootstrap deliberately lacks. `run_tests.py --lint` validates
   directives without a compiler.
-- Unit tests: `test/<component>_test.c` with `test/test.h`; every `test/*_test.c` is a ctest.
+- Unit tests: `test/<component>_test.c` with `test/test.h`; every `test/*_test.c` is globbed
+  into an executable `build/<preset>/test/<component>_test` linked against `fort_core` and
+  `fort_rt_native`, and a ctest `unit-<component>`. A `TEST` body is one macro argument: a comma
+  outside parentheses (a brace initializer, for example) splits it. `#val` in an assertion
+  message is the argument after macro expansion, so compare through a variable when the
+  expected text matters. Suites are ordinary C11: no `__VA_OPT__`, and `-Wtype-limits` (gcc)
+  rejects assertions that are always true, such as `TEST_ASSERT_GE_SIZE(n, 0)`.
 - Binaries: `build/<preset>/fort` is stage1 (the C compiler); `build/<preset>/stage2/fort` and
   `stage3/fort` are the self-hosted compiler built by stage1 and by stage2.
 

@@ -1,188 +1,202 @@
-cmake_minimum_required(VERSION 3.20)
-project(axle LANGUAGES CXX ASM)
+cmake_minimum_required(VERSION 3.25)
+project(fort LANGUAGES C)
 
-set(CMAKE_CXX_STANDARD 20)
+# ---- toolchain --------------------------------------------------------------
+# C11 without extensions and with POSIX.1-2008 visible (AGENTS.md, C sources).
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-enable_testing()
+find_program(FORT_CCACHE ccache)
+if(FORT_CCACHE)
+    set(CMAKE_C_COMPILER_LAUNCHER "${FORT_CCACHE}")
+endif()
 
-
-# Directories
-set(AXLE_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
-set(AXLE_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
-set(AXLE_TEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/test)
-set(AXLE_BENCH_DIR ${CMAKE_CURRENT_SOURCE_DIR}/bench)
-set(AXLE_EXAMPLES_DIR ${CMAKE_CURRENT_SOURCE_DIR}/examples)
-
-set(AXLE_THIRD_PARTY_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
-set(AXLE_GOOGLETEST_DIR ${AXLE_THIRD_PARTY_DIR}/googletest)
-set(AXLE_GOOGLEBENCHMARK_DIR ${AXLE_THIRD_PARTY_DIR}/benchmark)
-
-add_compile_options(
+# The warnings every C compilation gets, native and cross.
+set(FORT_C_WARNINGS
     -Wall
     -Wextra
     -Wpedantic
     -Werror
+    -Wshadow
+    -Wvla
+    -Wstrict-prototypes
+    -Wmissing-prototypes
+    -Wundef
 )
 
-option(AXLE_ENABLE_ASAN "Enable Address Sanitizer" OFF)
-option(AXLE_ENABLE_UBSAN "Enable Undefined Behavior Sanitizer" OFF)
-option(AXLE_ENABLE_TSAN "Enable Thread Sanitizer" OFF)
+add_compile_definitions(_POSIX_C_SOURCE=200809L)
+add_compile_options(${FORT_C_WARNINGS})
 
-if(AXLE_ENABLE_ASAN)
-    add_compile_options(
-        -fsanitize=address
-        -fno-omit-frame-pointer
-        -g
+# FORT_SANITIZER instruments every native target (the compiler, the native
+# runtime object and the unit tests) but never the cross-compiled fort_rt.o.
+include(cmake/sanitizers.cmake)
+
+enable_testing()
+
+set(FORT_SRC_DIR "${CMAKE_SOURCE_DIR}/src/bootstrap")
+set(FORT_RUNTIME_DIR "${CMAKE_SOURCE_DIR}/runtime")
+set(FORT_TEST_DIR "${CMAKE_SOURCE_DIR}/test")
+set(FORT_STD_SRC_DIR "${CMAKE_SOURCE_DIR}/std")
+set(FORT_STD_DIR "${CMAKE_BINARY_DIR}/std")
+
+# ---- the bootstrap compiler ---------------------------------------------------
+file(GLOB FORT_CORE_SOURCES CONFIGURE_DEPENDS "${FORT_SRC_DIR}/*.c")
+list(REMOVE_ITEM FORT_CORE_SOURCES "${FORT_SRC_DIR}/main.c")
+
+add_library(fort_core STATIC ${FORT_CORE_SOURCES})
+target_include_directories(fort_core PUBLIC "${FORT_SRC_DIR}")
+
+# The compiler binary sits at the root of the build directory and the
+# standard library directory is <build>/std. The fallback --std-dir of
+# toolchain.md 1 (../std relative to the binary) does not resolve to it; the
+# test harness passes --std-dir explicitly.
+add_executable(fort "${FORT_SRC_DIR}/main.c")
+target_link_libraries(fort PRIVATE fort_core)
+set_target_properties(fort PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+
+# ---- the C runtime -------------------------------------------------------------
+# fort_rt.o is the runtime object linked into every generated program
+# (toolchain.md 2, 5). It is built for the x86-64 target by FORT_TARGET_CC,
+# outside CMake's compiler settings, so it is never sanitized.
+set(FORT_TARGET_CC "x86_64-linux-gnu-gcc" CACHE STRING
+    "C compiler that builds the target (x86-64) runtime object fort_rt.o")
+find_program(FORT_TARGET_CC_PATH NAMES "${FORT_TARGET_CC}")
+if(NOT FORT_TARGET_CC_PATH)
+    message(FATAL_ERROR "FORT_TARGET_CC: compiler not found: ${FORT_TARGET_CC}")
+endif()
+
+set(FORT_RT_OBJECT "${FORT_STD_DIR}/fort_rt.o")
+add_custom_command(
+    OUTPUT "${FORT_RT_OBJECT}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${FORT_STD_DIR}"
+    COMMAND "${FORT_TARGET_CC_PATH}"
+            -std=c11 -D_POSIX_C_SOURCE=200809L -O2 -g -fPIE ${FORT_C_WARNINGS}
+            -c -o "${FORT_RT_OBJECT}" "${FORT_RUNTIME_DIR}/fort_rt.c"
+    DEPENDS "${FORT_RUNTIME_DIR}/fort_rt.c" "${FORT_RUNTIME_DIR}/fort_rt.h"
+    COMMENT "Cross-compiling runtime/fort_rt.c with ${FORT_TARGET_CC}"
+    VERBATIM
+)
+
+# The standard library sources are copied next to fort_rt.o; the compiler
+# reads them from <std-dir> (toolchain.md 2).
+file(GLOB FORT_STD_SOURCES CONFIGURE_DEPENDS "${FORT_STD_SRC_DIR}/*.ft")
+set(FORT_STD_OUTPUTS "")
+foreach(std_source IN LISTS FORT_STD_SOURCES)
+    get_filename_component(std_name "${std_source}" NAME)
+    set(std_output "${FORT_STD_DIR}/${std_name}")
+    add_custom_command(
+        OUTPUT "${std_output}"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${std_source}" "${std_output}"
+        DEPENDS "${std_source}"
+        COMMENT "Copying std/${std_name}"
+        VERBATIM
     )
-    add_link_options(-fsanitize=address)
-    message("ASan enabled")
-elseif(AXLE_ENABLE_UBSAN)
-    add_compile_options(
-        -fsanitize=undefined
-        -g
+    list(APPEND FORT_STD_OUTPUTS "${std_output}")
+endforeach()
+
+add_custom_target(fort_rt ALL DEPENDS "${FORT_RT_OBJECT}" ${FORT_STD_OUTPUTS})
+
+# The same runtime compiled natively, without main, for the unit tests and
+# for clang-tidy.
+add_library(fort_rt_native OBJECT "${FORT_RUNTIME_DIR}/fort_rt.c")
+target_compile_definitions(fort_rt_native PRIVATE FORT_RT_NO_MAIN)
+target_include_directories(fort_rt_native PUBLIC "${FORT_RUNTIME_DIR}")
+
+# ---- unit tests ----------------------------------------------------------------
+# One executable and one ctest, labelled unit, per test/<component>_test.c
+# (toolchain.md 7.5). The ctest is named unit-<component>.
+file(GLOB FORT_UNIT_TEST_SOURCES CONFIGURE_DEPENDS "${FORT_TEST_DIR}/*_test.c")
+set(FORT_UNIT_TEST_TARGETS "")
+foreach(test_source IN LISTS FORT_UNIT_TEST_SOURCES)
+    get_filename_component(test_target "${test_source}" NAME_WE)
+    string(REGEX REPLACE "_test$" "" test_component "${test_target}")
+    add_executable("${test_target}" "${test_source}")
+    target_include_directories("${test_target}" PRIVATE "${FORT_TEST_DIR}")
+    target_link_libraries("${test_target}" PRIVATE fort_core fort_rt_native)
+    set_target_properties("${test_target}" PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test")
+    add_test(NAME "unit-${test_component}" COMMAND "${test_target}")
+    set_tests_properties("unit-${test_component}" PROPERTIES
+        LABELS unit
+        ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
+    list(APPEND FORT_UNIT_TEST_TARGETS "${test_target}")
+endforeach()
+
+# The C helpers of the language tests are cross-compiled by the harness; they
+# are also built natively here so that -Werror and clang-tidy cover them. They
+# are FFI entry points declared by the tests, hence no prototypes.
+file(GLOB FORT_LANG_FFI_SOURCES CONFIGURE_DEPENDS "${FORT_TEST_DIR}/lang/ffi/*.c")
+add_library(lang_ffi_helpers OBJECT ${FORT_LANG_FFI_SOURCES})
+target_compile_options(lang_ffi_helpers PRIVATE -Wno-missing-prototypes)
+
+# ---- check targets ---------------------------------------------------------------
+add_custom_target(check
+    COMMAND "${CMAKE_CTEST_COMMAND}" -L unit --output-on-failure
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+    COMMENT "Running the unit tests"
+    USES_TERMINAL
+)
+if(FORT_UNIT_TEST_TARGETS)
+    add_dependencies(check ${FORT_UNIT_TEST_TARGETS})
+endif()
+
+# The language-test harness arrives with ticket T-005; until then check-lang
+# only builds what the harness will need.
+add_custom_target(check-lang
+    COMMAND "${CMAKE_COMMAND}" -E echo "check-lang: no harness yet"
+    COMMENT "Running the language tests"
+    USES_TERMINAL
+)
+add_dependencies(check-lang fort fort_rt)
+
+add_custom_target(check-all COMMENT "Running every test")
+add_dependencies(check-all check check-lang)
+
+# ---- format, tidy, lines -----------------------------------------------------------
+file(GLOB_RECURSE FORT_LINT_SOURCES CONFIGURE_DEPENDS
+    "${FORT_SRC_DIR}/*.c" "${FORT_SRC_DIR}/*.h"
+    "${FORT_RUNTIME_DIR}/*.c" "${FORT_RUNTIME_DIR}/*.h"
+    "${FORT_TEST_DIR}/*.c" "${FORT_TEST_DIR}/*.h"
+)
+
+find_program(FORT_CLANG_FORMAT NAMES clang-format clang-format-18)
+if(FORT_CLANG_FORMAT)
+    add_custom_target(format
+        COMMAND "${FORT_CLANG_FORMAT}" -i ${FORT_LINT_SOURCES}
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Formatting the C sources"
+        VERBATIM
     )
-    add_link_options(-fsanitize=undefined)
-    message("UBSan enabled")
-elseif(AXLE_ENABLE_TSAN)
-    add_compile_options(
-        -fsanitize=thread
-        -g
+    add_custom_target(format-check
+        COMMAND "${FORT_CLANG_FORMAT}" --dry-run --Werror ${FORT_LINT_SOURCES}
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Checking the formatting of the C sources"
+        VERBATIM
     )
-    add_link_options(-fsanitize=thread)
-    message("TSan enabled")
 else()
-    message("No sanitizers enabled")
+    add_custom_target(format COMMAND false COMMENT "format: clang-format not found")
+    add_custom_target(format-check COMMAND false COMMENT "format-check: clang-format not found")
 endif()
 
-if(AXLE_ENABLE_DEBUG)
-    add_compile_definitions(AXLE_DEBUG_ENABLED)
-endif()
-
-# Dependencies
-add_subdirectory(${AXLE_GOOGLETEST_DIR} EXCLUDE_FROM_ALL)
-set(BENCHMARK_ENABLE_TESTING OFF)
-add_subdirectory(${AXLE_GOOGLEBENCHMARK_DIR} EXCLUDE_FROM_ALL)
-
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
-# Project version
-file(READ VERSION AXLE_PROJECT_VERSION)
-string(STRIP ${AXLE_PROJECT_VERSION} AXLE_PROJECT_VERSION)
-
-# and commit
-execute_process(COMMAND git describe --always --dirty
-    OUTPUT_VARIABLE AXLE_GIT_COMMIT_HASH
-    ERROR_VARIABLE AXLE_GIT_COMMIT_ERROR
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    RESULT_VARIABLE AXLE_GIT_COMMIT_RESULT
-)
-if (NOT ${AXLE_GIT_COMMIT_RESULT} STREQUAL 0)
-    message(WARNING "Could not retrieve git commit: " ${AXLE_GIT_COMMIT_ERROR})
-    set(AXLE_GIT_COMMIT_HASH unknown)
-endif()
-
-message("axle version information: " ${AXLE_PROJECT_VERSION} " - " ${AXLE_GIT_COMMIT_HASH})
-configure_file(${AXLE_SRC_DIR}/version.cpp.in ${CMAKE_CURRENT_BINARY_DIR}/gen/version.cpp @ONLY)
-
-# Source files
-set(AXLE_SRC_LIST
-    ${AXLE_SRC_DIR}/async_socket.cpp
-    ${AXLE_SRC_DIR}/axle.cpp
-    ${AXLE_SRC_DIR}/event.cpp
-    ${AXLE_SRC_DIR}/fiber.cpp
-    ${AXLE_SRC_DIR}/gate.cpp
-    ${AXLE_SRC_DIR}/scheduler.cpp
-    ${AXLE_SRC_DIR}/socket.cpp
-    ${CMAKE_CURRENT_BINARY_DIR}/gen/version.cpp
-)
-
-if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "amd64")
-    message("axle: target processor is x64")
-    list(APPEND AXLE_SRC_LIST ${AXLE_SRC_DIR}/asm/fiber_x64.S)
-    list(APPEND AXLE_SRC_LIST ${AXLE_SRC_DIR}/fiber_x64.cpp)
-elseif(CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
-    message("axle: target processor is arm64")
-    list(APPEND AXLE_SRC_LIST ${AXLE_SRC_DIR}/asm/fiber_arm64.S)
-    list(APPEND AXLE_SRC_LIST ${AXLE_SRC_DIR}/fiber_arm64.cpp)
+find_program(FORT_RUN_CLANG_TIDY NAMES run-clang-tidy run-clang-tidy-18)
+if(FORT_RUN_CLANG_TIDY)
+    add_custom_target(tidy
+        COMMAND "${FORT_RUN_CLANG_TIDY}" -p "${CMAKE_BINARY_DIR}" -quiet
+                "${FORT_SRC_DIR}" "${FORT_RUNTIME_DIR}" "${FORT_TEST_DIR}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Running clang-tidy over src, runtime and test"
+        VERBATIM
+    )
 else()
-    message(FATAL_ERROR "Unknown target: " ${CMAKE_SYSTEM_PROCESSOR})
+    add_custom_target(tidy COMMAND false COMMENT "tidy: run-clang-tidy not found")
 endif()
 
-if (CMAKE_SYSTEM_NAME MATCHES "FreeBSD|Darwin")
-    list(APPEND AXLE_SRC_LIST ${AXLE_SRC_DIR}/poller_bsd.cpp)
-endif ()
-
-if (CMAKE_SYSTEM_NAME MATCHES "Linux")
-    list(APPEND AXLE_SRC_LIST ${AXLE_SRC_DIR}/poller_linux.cpp)
-    list(APPEND AXLE_SRC_LIST ${AXLE_SRC_DIR}/poller_iouring.cpp)
-    list(APPEND AXLE_SRC_LIST ${AXLE_SRC_DIR}/iouring_socket.cpp)
-endif ()
-
-# Test files
-set(AXLE_TEST_LIST
-    ${AXLE_TEST_DIR}/async_socket_test.cpp
-    ${AXLE_TEST_DIR}/axle_test.cpp
-    ${AXLE_TEST_DIR}/event_test.cpp
-    ${AXLE_TEST_DIR}/fiber_test.cpp
-    ${AXLE_TEST_DIR}/gate_test.cpp
-    ${AXLE_TEST_DIR}/poller_iouring_test.cpp
-    ${AXLE_TEST_DIR}/scheduler_test.cpp
-    ${AXLE_TEST_DIR}/status_test.cpp
-)
-
-# Benchmark files
-set(AXLE_BENCH_LIST
-    ${AXLE_BENCH_DIR}/async_echo_server.cpp
-)
-
-# Main library
-add_library(axle ${AXLE_SRC_LIST})
-target_include_directories(axle PUBLIC ${AXLE_INCLUDE_DIR} PRIVATE ${AXLE_SRC_DIR})
-if (CMAKE_SYSTEM_NAME MATCHES "Linux")
-    target_link_libraries(axle PUBLIC "uring")
-endif()
-if (AXLE_ENABLE_ASAN)
-    target_compile_definitions(axle PUBLIC "AXLE_ASAN_ENABLED=1")
-endif()
-
-if (AXLE_ENABLE_TSAN)
-    target_compile_definitions(axle PUBLIC "AXLE_TSAN_ENABLED=1")
-endif()
-
-# Unit tests
-add_executable(axle_test ${AXLE_TEST_LIST})
-target_include_directories(axle_test PRIVATE ${AXLE_SRC_DIR} ${AXLE_TEST_DIR})
-target_link_libraries(axle_test axle gtest_main)
-
-add_test(unit-tests axle_test)
-if(AXLE_ENABLE_ASAN)
-    if(APPLE)
-        set(AXLE_ASAN_OPTIONS detect_leaks=1)
-    endif()
-    set(AXLE_LSAN_SUPP_FILE
-        ${CMAKE_CURRENT_SOURCE_DIR}/sanitizers/asan/asan_leak_supp_darwin_arm64.txt
-    )
-    set(AXLE_LSAN_OPTIONS suppressions=${AXLE_LSAN_SUPP_FILE})
-    set_tests_properties(unit-tests PROPERTIES
-        ENVIRONMENT "ASAN_OPTIONS=${AXLE_ASAN_OPTIONS};LSAN_OPTIONS=${AXLE_LSAN_OPTIONS}"
-    )
-endif()
-
-# Benchmarks
-add_executable(axle_bench ${AXLE_BENCH_LIST})
-target_link_libraries(axle_bench axle benchmark_main)
-
-
-# Examples
-add_executable(echo_server ${AXLE_EXAMPLES_DIR}/echo_server/main.cpp)
-target_link_libraries(echo_server axle)
-
-add_executable(async_echo_server ${AXLE_EXAMPLES_DIR}/async_echo_server/main.cpp)
-target_link_libraries(async_echo_server axle)
-
-file(GLOB_RECURSE HDR_FILES "${AXLE_SRC_DIR}/*.h" "${AXLE_INCLUDE_DIR}/*.h")
-add_custom_target(lint
-  # COMMAND /usr/local/bin/clang-tidy -p "${CMAKE_BINARY_DIR}" --checks="-*,misc-include-cleaner" ${HDR_FILES}
-  COMMAND /usr/local/bin/run-clang-tidy -q -allow-no-checks -p=${CMAKE_BINARY_DIR}
-  COMMENT "Running clang-tidy..."
+find_program(FORT_PYTHON3 NAMES python3 REQUIRED)
+add_custom_target(lines
+    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/lines.py"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    COMMENT "Counting test lines per compiler line"
+    VERBATIM
 )

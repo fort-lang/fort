@@ -427,7 +427,7 @@ main.add:
 ```sh
 test/
   test.h                       C unit-test macros
-  common.h                     TALLY_UNUSED and shared helpers, provided by the implementation
+  common.h                     TEST_UNUSED and shared helpers, provided by the implementation
   <component>_test.c           one C suite per compiler component (lexer_test.c, ...)
   lang/
     harness.sh                 runs every language test below
