@@ -306,7 +306,9 @@ Owner: `core-language.md` (Expressions).
   `T*` or `mut T*` produces a `T[]` or `mut T[]` with no check; this is the explicit unsafe
   escape for foreign memory. `void*` cannot be sliced.
 - **D6.10** `->` is `(*p).f` and is required for pointers; `.` on a pointer is an error with a
-  hint. Rationale: C familiarity and an explicit dereference.
+  hint. Through a pointer to a slice or string, `->` also reaches the `.len` and `.ptr`
+  pseudo-fields (`out->len`). Indexing through a pointer to an array or slice is written
+  `(*p)[i]`, never `p[i]` (D10.4). Rationale: C familiarity and an explicit dereference.
 - **D6.11** Calls: arguments are matched by position; no defaults, no named arguments, no
   overloading, no variadics. A function name, a function-pointer-typed expression and a
   qualified name `mod.f` are callable. A `noreturn` call is a terminating statement (D8.4).
