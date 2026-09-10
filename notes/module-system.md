@@ -172,7 +172,7 @@ them instead.
 
 ## 7. Symbol names
 
-| Entity                          | Assembly symbol              | Example             |
+| Entity                          | ELF symbol                   | Example             |
 |---------------------------------|------------------------------|---------------------|
 | function in module `a::b`       | `a.b.name`                   | `std.io.close`      |
 | constant or global in `a::b`    | `a.b.NAME`                   | `main.TABLE`        |
@@ -188,6 +188,9 @@ double-underscore scheme is not injective (`a__b` is also one identifier). Fort 
 collide with C symbols because C identifiers cannot contain `.`; the only undotted symbols the
 compiler emits are `fort_entry` (D11.6), runtime references and `extern` names. The standard
 library reaches the runtime through ordinary `extern fn fort_rt_...` declarations (D13.1).
+In the generated LLVM IR a dotted name is quoted (`@"std.io.close"`) and an undotted one is not,
+which changes the spelling only: the ELF symbol is the one in the table (D9.7, `toolchain.md` 6
+item 4).
 
 ## 8. C foreign function interface
 
@@ -271,22 +274,24 @@ Nothing finer is expressible, and nothing finer is needed at the boundary.
 
 ### 8.3 Narrow values and `bool`
 
-Values narrower than 32 bits are normalized on both sides of the boundary (D9.8): before an extern
-call the compiler zero-extends `u8`, `u16`, `bool` and `char` arguments and sign-extends `i8` and
-`i16` arguments to 32 bits; after the call it re-extends a narrow return value from `al` or `ax`,
-so upper bits left by C are never observed. A fort function that C calls back into re-extends its
-own narrow parameters on entry. `bool` crosses as a single 0 or 1.
+Values narrower than 32 bits are normalized on both sides of the boundary (D9.8): `u8`, `u16`,
+`bool` and `char` parameters and results carry `zeroext` and `i8` and `i16` carry `signext` in
+the declaration and at the call site (`toolchain.md` 6 item 7), so the caller extends the
+argument, the callee extends the result, and upper bits left by C are never observed. A fort
+function that C calls back into carries the same attributes on its own parameters. `bool`
+crosses as a single 0 or 1.
 
 ### 8.4 Variadic C functions
 
 Fort has no variadics (D8.3) and an extern signature cannot declare one. A variadic C function is
 declared with a fixed prototype for the arguments actually passed, such as
 `extern fn i32 printf(char* fmt, i64 n, f64 x);`. This is safe because System V passes fixed and
-variadic arguments identically and tells a variadic callee through `al` how many vector registers
-were used; the compiler sets `al` to that count before every extern call, zero when no float
-argument is passed (D9.8). Each argument shape needs its own prototype under its own fort name,
-since one module cannot declare `printf` twice (D7.9). Integer promotions are the caller's
-business: a `char` bound for an `int` slot is widened with `cast(c, i32)`.
+variadic arguments identically and tells a variadic callee how many vector registers were used;
+the compiler declares and calls every extern function through a variadic LLVM function type, so
+that count is always passed (D9.8, `toolchain.md` 6 item 8). Each argument shape needs its own
+prototype under its own fort name, since one module cannot declare `printf` twice (D7.9).
+Integer promotions are the caller's business: a `char` bound for an `int` slot is widened with
+`cast(c, i32)`.
 
 ### 8.5 Fort functions as C callbacks
 
@@ -392,6 +397,11 @@ Differences from System V for aggregates:
 | slice or `string`            | two integer registers               | pointer to a copy        |
 | aggregate return             | registers or `rdi` result pointer   | always the `rdi` pointer |
 
+In LLVM IR (`toolchain.md` 6 item 7) an aggregate argument is a plain `ptr` parameter, never
+`byval`, and an aggregate result is a leading `ptr sret(%T)` parameter on a function returning
+`void`; a slice or `string` is one pointer and is never split into two scalars. Scalar
+parameters and results carry `zeroext` or `signext` when they are narrower than 32 bits (D9.9).
+
 Because of these differences an aggregate never appears in an extern signature (D9.8), and the
 compiler never needs System V aggregate classification (D16). Layout is unaffected: structs,
 fixed arrays and slice headers (`ptr` at offset 0, `len` at offset 8) have C layout, so any
@@ -406,8 +416,8 @@ Fort v1 compiles a whole program at once (D9.10):
 2. Every imported module is parsed in turn until the import closure is complete; cycles and
    duplicate identities are errors here.
 3. Modules are type-checked in dependency order, an imported module before its importers.
-4. One assembly file is emitted for the entire closure.
-5. The system C compiler assembles it and links it with the runtime object (D14.3).
+4. One LLVM IR module is emitted for the entire closure (D19.1).
+5. `--cc` compiles that module and links it with the runtime object in one invocation (D14.3).
 
 A module outside the closure is never read, so an error in an unimported standard library module
 is never reported. There is no separate compilation: no interface files, no per-module objects, no
@@ -424,7 +434,9 @@ Start-up (D11.6): the C runtime owns `main(argc, argv)`. It builds a `string[]` 
 whose bytes are the `argv` entries, each NUL-terminated, calls the compiler-emitted `fort_entry`
 with that slice, flushes every output buffer (D11.5) and exits with `status & 0xFF`. `fort_entry`
 is generated in the entry module: it receives the slice by hidden pointer (section 9) and calls
-`<entry>.main`, passing the slice when `main` declares the parameter. `args[0]` is the program
+`<entry>.main`, copying the slice into its own frame and passing that copy when `main` declares
+the parameter, and taking neither the copy nor an argument when it does not (`toolchain.md` 6
+item 22). `args[0]` is the program
 name. The runtime keeps the slice for the life of the process and exposes it through
 `fort_rt_args_ptr()` and `fort_rt_args_len()`, declared in `std::libc` (`stdlib.md` 3) so that
 `sys.args()` works in modules whose `main` takes no parameter. `sys.exit` (D13.2) is the other

@@ -94,14 +94,14 @@ A safe(r) C-like systems programming language.
   describes every option and verdict). `test/lang/xfail.txt` lists tests the compiler cannot
   pass yet; a listed test that passes fails the run, so shrink the list in the same commit that
   makes tests pass. `test/lang/bootstrap-unsupported.txt` lists tests that use features the C
-  bootstrap deliberately lacks (floats, multi-dimensional arrays, do-while, `?:`, function
-  pointers); keep such features out of core tests, or split them into their own test, so the
-  core tests exercise stage1. `run_tests.py --lint` validates directives without a compiler and
-  runs before every test run. A compiler exit status other than 0 or 1 is an `ERROR`, which
-  `xfail.txt` still covers. The harness and its unit tests are Python 3.12, standard library
-  only, wrapped at 100 columns (the host's `ruff format --line-length 100` is the reference);
-  `run_tests_test.py` scripts a fake `fort` with `//@` lines, extend it rather than calling the
-  real compiler.
+  bootstrap deliberately lacks (floats, multi-dimensional arrays, do-while, `?:`; function
+  pointers are in its subset, D3.10); keep such features out of core tests, or split them into
+  their own test, so the core tests exercise stage1. `run_tests.py --lint` validates directives
+  without a compiler and runs before every test run. A compiler exit status other than 0 or 1 is
+  an `ERROR`, which `xfail.txt` still covers. The harness and its unit tests are Python 3.12,
+  standard library only, wrapped at 100 columns (the host's `ruff format --line-length 100` is
+  the reference); `run_tests_test.py` scripts a fake `fort` with `//@` lines, extend it rather
+  than calling the real compiler.
 - Unit tests: `test/<component>_test.c` with `test/test.h`; every `test/*_test.c` is globbed
   into an executable `build/<preset>/test/<component>_test` linked against `fort_core` and
   `fort_rt_native`, and a ctest `unit-<component>`. A `TEST` body is one macro argument: a comma
@@ -116,9 +116,9 @@ A safe(r) C-like systems programming language.
   The sanitizer presets run the unit tests with `allocator_may_return_null=1` (ctest sets the
   environment, `cmake/sanitizers.cmake`) because the runtime's out-of-memory path is tested with
   an impossible allocation; run a suite by hand under those presets with the same variable.
-- The cross pipeline: `test/ir/*.ll` are hand-written LLVM 18 modules that are the reference for
-  the form of a module until `notes/toolchain.md` 6 is rewritten against them (D19.1,
-  `test/ir/README.md`); `test/pipeline_test.sh <build-dir>`
+- The cross pipeline: `test/ir/*.ll` are hand-written LLVM 18 modules in the form
+  `notes/toolchain.md` 6 specifies (D19.1); its two worked examples are these files byte for
+  byte, so a change to one changes the other. `test/pipeline_test.sh <build-dir>`
   verifies each with `opt-18 -passes=verify`, compiles and links it with `clang
   --target=x86_64-linux-gnu` and `<build-dir>/std/fort_rt.o`, runs it under qemu and checks
   stdout, stderr and the status byte-exactly; ctest `pipeline` (label `unit`). `*.ll` is
@@ -141,7 +141,7 @@ A safe(r) C-like systems programming language.
 ## Technical Standards
 - **Markdown**: Line-wrap at 100 characters, including tables and code blocks. Check with
   `awk 'length > 100 {print FILENAME": "FNR}' <files>`. Code fences use `fort`, `c`, `sh`,
-  `asm` or `ebnf` as the language tag.
+  `llvm` or `ebnf` as the language tag.
 - **Language changes**: any change to the language is recorded in `notes/decisions.md` first
   (new decision number or amended decision with a note), then in the specification document that
   owns the topic, then in the tests under `test/lang/`. Specification text never contains "TBD",
@@ -247,7 +247,7 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
 - Reviewers (read-only, the `code-review` skill): `rev-quick` (medium, skill at low) screens a
   low-risk diff for conventions, tests and scope; `rev-std` (high, skill at high) reviews an
   ordinary change; `rev-deep` (xhigh, skill at max) re-derives the invariants independently for
-  ABI, memory, ownership, exact arithmetic, unsafe casts and generated assembly.
+  ABI, memory, ownership, exact arithmetic, unsafe casts and generated code.
 - Each ticket names its tiers in its `impl:` and `review:` fields. Review depth follows the risk
   of the change, not the effort it took to write: a ticket can be `impl-std` and `rev-deep`.
 - A tier is a default, not a verdict. If a ticket run at `impl-mech` or `impl-port` fails the

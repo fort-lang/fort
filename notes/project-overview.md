@@ -92,7 +92,8 @@ the idioms that replace each is decision D15.
    fallthrough, sign and width confusion) are compile errors or runtime errors, not silent.
 3. Performance within 10% of equivalent C for typical systems code, bounds checks included.
 4. Real systems software, including the fort compiler itself, can be written in it.
-5. The compiler fits in one head: whole-program, no IR beyond the AST, text assembly out.
+5. The compiler fits in one head: whole-program, no intermediate representation of its own
+   beyond the AST, LLVM IR text out (D19.1).
 
 ## Influences
 

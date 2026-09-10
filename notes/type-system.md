@@ -1281,6 +1281,11 @@ calling convention realizes this as follows (D9.9):
 | `f32`, `f64`                                  | SSE registers (System V)      | `xmm0`          |
 | struct, fixed array, slice, `string`          | pointer to a caller-made copy | hidden pointer  |
 
+The registers are what System V assigns; the compiler expresses the convention in LLVM IR as
+ordinary scalar parameters, a plain `ptr` parameter for an aggregate argument and a leading
+`ptr sret(%T)` parameter for an aggregate result, and LLVM assigns the registers
+(`toolchain.md` 6 item 7).
+
 Struct layout is identical to the C layout of the same declaration, so passing `&s` to C works.
 A fort function is usable as a C callback, and an `extern` function may be declared, exactly when
 every parameter and the result are integers, floats, `bool`, `char`, enums (passed as `i32`),

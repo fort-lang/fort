@@ -2,15 +2,11 @@
 
 Hand-written LLVM IR modules (LLVM 18, opaque pointers) in the form the compiler emits, one per
 program. `test/pipeline_test.sh` verifies each module with `opt -passes=verify`, compiles and
-links it with `<build-dir>/std/fort_rt.o` and runs it under qemu (toolchain.md 2). D19.1 names
-them the reference for the form of a module until the code generation contract (toolchain.md 6)
-is rewritten against them: no comments, no `source_filename`, no datalayout and no module flags,
-the `target triple` first, then the named types (`%fort.slice` and `%fort.enum_member`, always
-emitted), the globals, the function definitions, the private data, the declarations and the
-attribute groups. Only referenced declarations appear, in a fixed order: `extern` C functions in
-first-use order, then the runtime entry points in the order of toolchain.md 5.1, then the
-intrinsics. Attribute group `#0` is a fort definition, `#2` a failure entry point and `#6` an
-intrinsic.
+links it with `<build-dir>/std/fort_rt.o` and runs it under qemu (toolchain.md 2). The code
+generation contract (toolchain.md 6, D19.1) quotes both files as its worked examples, byte for
+byte, so a change here is a change there, and every rule about the module's form (the section
+order, the always-emitted named types, the fixed order of the declarations, the attribute-group
+indices) is stated there, not here.
 
 `hello.ll` is
 
