@@ -88,6 +88,22 @@ TEST(assert_eq_size, {
     TEST_ASSERT_EQ_SIZE(sizeof(int64_t), (size_t)8);
 })
 
+TEST(assert_eq_uint64, {
+    const uint64_t v = UINT64_MAX;
+    TEST_ASSERT_EQ_UINT64(v, UINT64_MAX);
+    TEST_ASSERT_EQ_UINT64((uint64_t)0, (uint64_t)0);
+    TEST_ASSERT_EQ_UINT64(v - 1, UINT64_MAX - 1);
+})
+
+TEST(assert_eq_str, {
+    const char* text = "text";
+    char buf[8];
+    TEST_UNUSED(snprintf(buf, sizeof buf, "%s", "text"));
+    TEST_ASSERT_EQ_STR(text, "text");
+    TEST_ASSERT_EQ_STR(buf, text);
+    TEST_ASSERT_EQ_STR("", "");
+})
+
 TEST(assert_ne_char, {
     const char c = 'x';
     TEST_ASSERT_NE_CHAR(c, 'y');
@@ -158,6 +174,15 @@ TEST(neg_eq_int64, {
     TEST_ASSERT_EQ_INT64(lo, hi);
 })
 TEST(neg_eq_size, { TEST_ASSERT_EQ_SIZE((size_t)1, (size_t)2); })
+TEST(neg_eq_uint64, {
+    const uint64_t zero = 0;
+    const uint64_t big = UINT64_MAX;
+    TEST_ASSERT_EQ_UINT64(zero, big);
+})
+TEST(neg_eq_str, {
+    const char* got = "got";
+    TEST_ASSERT_EQ_STR(got, "want");
+})
 TEST(neg_ne_char, { TEST_ASSERT_NE_CHAR('a', 'a'); })
 TEST(neg_ge_int32, { TEST_ASSERT_GE_INT32((int32_t)1, (int32_t)2); })
 TEST(neg_ge_int64, {
@@ -263,6 +288,14 @@ TEST(spawn_eq_failures_exit_1, {
                    "assertion failed: lo == hi",
                    "actual:   -9223372036854775808\n\texpected: 9223372036854775807");
     CHECK_NEGATIVE("neg_eq_size", 1, "(size_t)1 == (size_t)2", "actual:   1\n\texpected: 2");
+    CHECK_NEGATIVE("neg_eq_uint64",
+                   1,
+                   "assertion failed: zero == big",
+                   "actual:   0\n\texpected: 18446744073709551615");
+    CHECK_NEGATIVE("neg_eq_str",
+                   1,
+                   "assertion failed: got == \"want\"",
+                   "actual:   \"got\"\n\texpected: \"want\"");
 })
 
 TEST(spawn_ne_failure_exits_1,
@@ -329,6 +362,8 @@ int main(int argc, char** argv) {
     TEST_RUN(assert_null_and_nonnull);
     TEST_RUN(assert_eq_char);
     TEST_RUN(assert_eq_int32);
+    TEST_RUN(assert_eq_uint64);
+    TEST_RUN(assert_eq_str);
     TEST_RUN(assert_eq_int64);
     TEST_RUN(assert_eq_size);
     TEST_RUN(assert_ne_char);
@@ -364,6 +399,8 @@ int main(int argc, char** argv) {
         TEST_RUN(neg_eq_int32);
         TEST_RUN(neg_eq_int64);
         TEST_RUN(neg_eq_size);
+        TEST_RUN(neg_eq_uint64);
+        TEST_RUN(neg_eq_str);
         TEST_RUN(neg_ne_char);
         TEST_RUN(neg_ge_int32);
         TEST_RUN(neg_ge_int64);

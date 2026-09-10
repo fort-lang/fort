@@ -9,14 +9,17 @@
 
 #include <stdio.h>
 
+#include "str.h"
+
 /* The version printed by --version. */
 #define FORT_VERSION_STRING "0.1.0"
 
-/* Exit statuses of D14.1. */
+/* Exit statuses of D14.1; usage, internal and C compiler failures share
+ * FATAL_EXIT_STATUS of str.h. */
 enum {
     FORT_EXIT_OK = 0,
     FORT_EXIT_COMPILE_ERROR = 1,
-    FORT_EXIT_USAGE = 2,
+    FORT_EXIT_USAGE = FATAL_EXIT_STATUS,
 };
 
 /* The usage line that `fort` with no arguments and --help print. */
