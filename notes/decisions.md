@@ -750,7 +750,7 @@ Findings from the design reviews that look like bugs but are deliberate.
 - `for (i32 i = 0; ...)` is an error; the induction variable needs `mut`.
 - Unsigned subtraction traps in checked mode (`len - 1` on an empty slice); test before
   subtracting or use `-%` when wrapping is intended.
-- `defer` captures nothing; `defer del(p); p = q;` frees `q`.
+- `defer` captures nothing; after `defer del(p);`, a later `del(p); p = move(q);` frees `q`.
 - `break` inside a `switch` inside a loop exits the switch, not the loop.
 - Symbol mangling uses dots, not double underscores, because `a__b` is not injective.
 - `extern` signatures exclude aggregates so the compiler does not need System V aggregate

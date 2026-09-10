@@ -143,7 +143,8 @@ Reading rules (D3.6, D5.2, D5.3):
   `mut` marks every level. `mut` never follows a fixed-array suffix.
 - A leading `own` marks the outermost reference of the type, the one the binding holds; an `own`
   after `*` or `[]` marks the reference that suffix introduces (D17.2). `own` precedes `mut` in
-  both positions, never follows a fixed-array suffix, and does not parse inside `new(...)`.
+  both positions, never follows a fixed-array suffix, and inside `new(...)` parses only after a
+  `*` of the element type (D17.3).
 - In a `fn_type`, a `mut` that would apply only to a parameter's own storage is ignored for type
   identity (D5.6).
 
