@@ -1,13 +1,16 @@
 // The fort C runtime (toolchain.md 5).
 //
-// Every entry point of toolchain.md 5.1 except the float printers, which
-// arrive with a later ticket. All formatting is done by hand, without stdio,
-// so that the bytes written are exactly those of D11.4 and D11.7 and the code
-// carries over to a fort rewrite unchanged.
+// Every entry point of toolchain.md 5.1. All layout is done by hand, without
+// stdio, so that the bytes written are exactly those of D11.4 and D11.7 and
+// the code carries over to a fort rewrite unchanged; the two float printers
+// are the exception, and use snprintf and strtod only to obtain the shortest
+// digit string that round-trips (D18).
 #include "fort_rt.h"
 
 #include <errno.h>
+#include <float.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -32,6 +35,24 @@ enum {
     DECIMAL_MAX = 20,
     // Longest pointer rendering: 0x followed by 16 hex digits.
     HEX_MAX = 18,
+    // Significant digits that always round-trip: 17 for f64, 9 for f32.
+    FLOAT_DIGITS_F64 = 17,
+    FLOAT_DIGITS_F32 = 9,
+    // Longest text printf produces below, a magnitude only: 1.<16 digits>e+308
+    // and a NUL.
+    FLOAT_SCRATCH_MAX = 32,
+    // Longest float rendering: a sign, 0.000 and 17 digits in fixed form, a
+    // sign, 17 digits, a point and e+308 in exponent form.
+    FLOAT_TEXT_MAX = 40,
+    // Exponent form below 1e-4 and at 1e17 and above, fixed form between them
+    // (D11.7), each decided on the exponent of the leading digit (D18.3).
+    FLOAT_EXP_LOW = -4,
+    FLOAT_EXP_HIGH = 17,
+    // The exponent is written with a sign and at least two digits (D11.7).
+    FLOAT_EXP_MIN_DIGITS = 2,
+    // The sign bit of an IEEE 754 binary64 and binary32 (D6.12).
+    F64_SIGN_SHIFT = 63,
+    F32_SIGN_SHIFT = 31,
 };
 
 // One descriptor's pending bytes. fd is -1 while the slot is free.
@@ -221,6 +242,279 @@ void fort_rt_print_i64(int32_t fd, int64_t v) {
 
 void fort_rt_print_u64(int32_t fd, uint64_t v) {
     emit_u64(fd, v);
+}
+
+// ---- floats: the shortest digits that read back, then D11.7's layout ----------
+
+// One float as a decimal: the significant digits of the shortest text that
+// reads back as the value, most significant first, and the power of ten the
+// first of them stands for, so that the value is digits[0].digits[1..] times
+// ten to the exponent. The sign is kept apart, since -0.0 has no digit to
+// carry it.
+struct float_decimal {
+    uint64_t digit_count;
+    int32_t exponent;
+    uint8_t digits[FLOAT_DIGITS_F64];
+};
+
+// Reads printf's %e text back into digits and an exponent. The text is
+// d.ddde+xx, without the point at precision 0, and never carries a sign here:
+// only the magnitude is printed. A text with no digit at all, which is what a
+// failed printf leaves behind, scans as the decimal zero, so every caller gets
+// a decimal it can lay out.
+static void float_scan(const char* s, struct float_decimal* d) {
+    d->digit_count = 0;
+    d->exponent = 0;
+    uint64_t i = 0;
+    while (s[i] != 'e' && s[i] != '\0') {
+        if (s[i] >= '0' && s[i] <= '9' && d->digit_count < FLOAT_DIGITS_F64) {
+            d->digits[d->digit_count] = (uint8_t)(s[i] - '0');
+            d->digit_count++;
+        }
+        i++;
+    }
+    if (d->digit_count == 0) {
+        d->digits[0] = 0;
+        d->digit_count = 1;
+    }
+    if (s[i] != 'e') {
+        return;
+    }
+    i++;
+    const bool negative = s[i] == '-';
+    if (s[i] == '+' || s[i] == '-') {
+        i++;
+    }
+    int32_t exponent = 0;
+    while (s[i] >= '0' && s[i] <= '9') {
+        exponent = (exponent * DECIMAL_BASE) + (s[i] - '0');
+        i++;
+    }
+    d->exponent = negative ? -exponent : exponent;
+}
+
+// Appends the exponent as e, a sign and at least two digits (D11.7).
+static uint64_t float_put_exponent(uint8_t* out, uint64_t n, int32_t exponent) {
+    out[n++] = 'e';
+    out[n++] = exponent < 0 ? '-' : '+';
+    const uint64_t magnitude = exponent < 0 ? (uint64_t)0 - (uint64_t)exponent : (uint64_t)exponent;
+    uint8_t text[DECIMAL_MAX];
+    uint64_t start = format_u64(text, magnitude);
+    while (DECIMAL_MAX - start < FLOAT_EXP_MIN_DIGITS) {
+        start--;
+        text[start] = '0';
+    }
+    while (start < DECIMAL_MAX) {
+        out[n++] = text[start];
+        start++;
+    }
+    return n;
+}
+
+// Lays the digits out per D11.7: exponent form below 1e-4 and at 1e17 and
+// above, fixed form in between, with .0 appended when the fixed text has
+// neither a point nor an exponent. out holds FLOAT_TEXT_MAX bytes; the
+// returned length is how many were written.
+static uint64_t float_layout(bool negative, const struct float_decimal* d, uint8_t* out) {
+    uint64_t n = 0;
+    if (negative) {
+        out[n++] = '-';
+    }
+    if (d->exponent < FLOAT_EXP_LOW || d->exponent >= FLOAT_EXP_HIGH) {
+        out[n++] = (uint8_t)('0' + d->digits[0]);
+        if (d->digit_count > 1) {
+            out[n++] = '.';
+            for (uint64_t i = 1; i < d->digit_count; i++) {
+                out[n++] = (uint8_t)('0' + d->digits[i]);
+            }
+        }
+        return float_put_exponent(out, n, d->exponent);
+    }
+    if (d->exponent < 0) {
+        out[n++] = '0';
+        out[n++] = '.';
+        for (int32_t i = -1; i > d->exponent; i--) {
+            out[n++] = '0';
+        }
+        for (uint64_t i = 0; i < d->digit_count; i++) {
+            out[n++] = (uint8_t)('0' + d->digits[i]);
+        }
+        return n;
+    }
+    const uint64_t integer_digits = (uint64_t)d->exponent + 1;
+    for (uint64_t i = 0; i < integer_digits; i++) {
+        out[n++] = i < d->digit_count ? (uint8_t)('0' + d->digits[i]) : (uint8_t)'0';
+    }
+    out[n++] = '.';
+    if (d->digit_count <= integer_digits) {
+        out[n++] = '0';
+        return n;
+    }
+    for (uint64_t i = integer_digits; i < d->digit_count; i++) {
+        out[n++] = (uint8_t)('0' + d->digits[i]);
+    }
+    return n;
+}
+
+// The next decimal of the same length upward: 1.24 after 1.23, and a power of
+// ten after all nines, where the digits collapse to a single one. That last
+// case is here for totality and no value can be printed by it: digits that are
+// all nines mean the value is within a hundredth of the power of ten above, so
+// that power of ten was the nearest one-digit decimal and was tried, and
+// rejected, at the very first length.
+static void float_decimal_step_up(struct float_decimal* d) {
+    uint64_t i = d->digit_count;
+    while (i > 0) {
+        i--;
+        if (d->digits[i] < DECIMAL_BASE - 1) {
+            d->digits[i]++;
+            return;
+        }
+        d->digits[i] = 0;
+    }
+    d->digits[0] = 1;
+    d->digit_count = 1;
+    d->exponent++;
+}
+
+// The decimal as a NUL-terminated text, laid out as it would print; buf holds
+// FLOAT_TEXT_MAX + 1 bytes.
+static void float_decimal_text(const struct float_decimal* d, char* buf) {
+    const uint64_t n = float_layout(false, d, (uint8_t*)buf);
+    buf[n] = '\0';
+}
+
+// Whether the decimal reads back as v. strtod must be correctly rounded, down
+// to the subnormals, where it also reports ERANGE (D18.2); only the value it
+// returns matters here, so errno is left alone.
+static bool float_reads_back_f64(const struct float_decimal* d, double v) {
+    char text[FLOAT_TEXT_MAX + 1];
+    float_decimal_text(d, text);
+    return strtod(text, NULL) == v;
+}
+
+static bool float_reads_back_f32(const struct float_decimal* d, float v) {
+    char text[FLOAT_TEXT_MAX + 1];
+    float_decimal_text(d, text);
+    return strtof(text, NULL) == v;
+}
+
+// The shortest decimal that reads back as v in f64 and, of the strings of that
+// length that read back as it, the one nearest v (D11.7, D18.2; toolchain.md
+// 5.1 describes this search): printf is asked for one significant digit, then
+// two, and so on, and the first length that reads back wins; 17 digits always
+// do, so the search ends. printf rounds correctly, so what it returns is the
+// nearest decimal of that length; when that one misses, the neighbour above it
+// is tried, because the values that read back as a normal power of two above
+// the minimum normal reach half an ulp above it and only a quarter below (the
+// binade below it is coarser), so the nearest string can fall short of the
+// interval while the next one up lands inside it. Everywhere else the interval
+// is symmetric. It never leans the other way, the gap below a float never
+// being wider than the gap above, so the neighbour below can never be the only
+// string of its length that reads back.
+//
+// The search starts at one digit rather than at the 15 a %g-style probe would
+// use: the shortest answer is what D11.7 asks for at every length, and the
+// values programs print are usually short. A program that changes LC_NUMERIC
+// through the FFI degrades this and nothing else: printf then writes another
+// decimal point, no candidate reads back, and the value prints with all 17
+// digits, in D11.7's layout as always. v is a finite magnitude, never negative
+// and never NaN.
+static void float_decimal_f64(double v, struct float_decimal* d) {
+    char scratch[FLOAT_SCRATCH_MAX];
+    scratch[0] = '\0';
+    for (int32_t precision = 0; precision < FLOAT_DIGITS_F64; precision++) {
+        // a printf that fails leaves the text empty, which scans as zero
+        if (snprintf(scratch, sizeof scratch, "%.*e", (int)precision, v) < 0) {
+            scratch[0] = '\0';
+        }
+        float_scan(scratch, d);
+        if (precision == FLOAT_DIGITS_F64 - 1 || float_reads_back_f64(d, v)) {
+            return;
+        }
+        struct float_decimal up = *d;
+        float_decimal_step_up(&up);
+        if (float_reads_back_f64(&up, v)) {
+            *d = up;
+            return;
+        }
+    }
+}
+
+// The same search in f32, where 9 digits always read back and strtof decides
+// (D11.7: the shortest decimal that round-trips in the argument's own type).
+// The magnitude widens to double for printf without changing value.
+static void float_decimal_f32(float v, struct float_decimal* d) {
+    char scratch[FLOAT_SCRATCH_MAX];
+    scratch[0] = '\0';
+    for (int32_t precision = 0; precision < FLOAT_DIGITS_F32; precision++) {
+        if (snprintf(scratch, sizeof scratch, "%.*e", (int)precision, (double)v) < 0) {
+            scratch[0] = '\0';
+        }
+        float_scan(scratch, d);
+        if (precision == FLOAT_DIGITS_F32 - 1 || float_reads_back_f32(d, v)) {
+            return;
+        }
+        struct float_decimal up = *d;
+        float_decimal_step_up(&up);
+        if (float_reads_back_f32(&up, v)) {
+            *d = up;
+            return;
+        }
+    }
+}
+
+// The sign bit of v: -0.0 == 0.0 (D6.12), so a comparison cannot tell the two
+// apart and the bits decide. Both targets are IEEE 754 (D6.12).
+static bool f64_negative(double v) {
+    uint64_t bits = 0;
+    (void)memcpy(&bits, &v, sizeof v);
+    return (bits >> F64_SIGN_SHIFT) != 0;
+}
+
+static bool f32_negative(float v) {
+    uint32_t bits = 0;
+    (void)memcpy(&bits, &v, sizeof v);
+    return (bits >> F32_SIGN_SHIFT) != 0;
+}
+
+static void emit_float(int32_t fd, bool negative, const struct float_decimal* d) {
+    uint8_t out[FLOAT_TEXT_MAX];
+    const uint64_t n = float_layout(negative, d, out);
+    emit(fd, out, n);
+}
+
+// NaN prints as nan whatever its sign bit, since D11.7 lists inf, -inf and nan
+// and no -nan; every finite double is at most DBL_MAX in magnitude, so a
+// larger one is an infinity.
+void fort_rt_print_f64(int32_t fd, double v) {
+    if (v != v) {
+        emit_cstr(fd, "nan");
+        return;
+    }
+    const bool negative = f64_negative(v);
+    if (v > DBL_MAX || v < -DBL_MAX) {
+        emit_cstr(fd, negative ? "-inf" : "inf");
+        return;
+    }
+    struct float_decimal d;
+    float_decimal_f64(negative ? -v : v, &d);
+    emit_float(fd, negative, &d);
+}
+
+void fort_rt_print_f32(int32_t fd, float v) {
+    if (v != v) {
+        emit_cstr(fd, "nan");
+        return;
+    }
+    const bool negative = f32_negative(v);
+    if (v > FLT_MAX || v < -FLT_MAX) {
+        emit_cstr(fd, negative ? "-inf" : "inf");
+        return;
+    }
+    struct float_decimal d;
+    float_decimal_f32(negative ? -v : v, &d);
+    emit_float(fd, negative, &d);
 }
 
 void fort_rt_print_bool(int32_t fd, uint8_t v) {

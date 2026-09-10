@@ -1,7 +1,8 @@
-// Unit tests of the C runtime (toolchain.md 5): the formatting of every
-// print entry point (D11.7), buffering and flush order (D11.5), the message
-// of every failure entry point (D11.4), allocation (D10.2, D10.3), the
-// argument vector (D8.6) and exit (D11.6).
+// Unit tests of the C runtime (toolchain.md 5): the formatting of every print
+// entry point but the float ones (D11.7), which are in runtime_float_test.c,
+// buffering and flush order (D11.5), the message of every failure entry point
+// (D11.4), allocation (D10.2, D10.3), the argument vector (D8.6) and exit
+// (D11.6).
 //
 // Output is captured by pointing a descriptor at a temporary file. A failure
 // entry point aborts the process, so each one runs in a forked child whose
@@ -14,6 +15,7 @@
 #include <sys/wait.h>
 
 #include "fort_rt.h"
+#include "runtime_helpers.h"
 
 #include "test.h"
 
@@ -22,7 +24,6 @@
 // NOLINTBEGIN(readability-magic-numbers)
 
 enum {
-    CAPTURE_MAX = 4096,
     // The runtime's buffer is at most this large: a program that has printed
     // this many bytes has seen at least one flush.
     BUFFER_BOUND = 65536,
@@ -37,93 +38,6 @@ enum {
 
 static const char FILE_NAME[] = "dir/main.ft";
 enum { LINE = 12, COL = 14 };
-
-// ---- capturing a descriptor ---------------------------------------------------
-
-// A descriptor redirected to a temporary file: `fd` is the number the runtime
-// writes to and `saved` its previous target, or -1 when `fd` is the temporary
-// file's own descriptor.
-typedef struct {
-    int fd;
-    int saved;
-    FILE* file;
-} capture_t;
-
-// Captures fd, or a fresh descriptor of its own when fd is negative.
-static capture_t capture_begin(int fd) {
-    capture_t c;
-    c.fd = fd;
-    c.saved = -1;
-    c.file = tmpfile();
-    if (c.file == NULL) {
-        return c;
-    }
-    if (fd < 0) {
-        c.fd = fileno(c.file);
-        return c;
-    }
-    c.saved = dup(fd);
-    TEST_UNUSED(dup2(fileno(c.file), fd));
-    return c;
-}
-
-// Reads everything written so far into buf, NUL-terminated, and returns its
-// length.
-static size_t capture_read(const capture_t* c, char* buf, size_t size) {
-    TEST_UNUSED(fseek(c->file, 0, SEEK_SET));
-    const size_t got = fread(buf, 1, size - 1, c->file);
-    buf[got] = '\0';
-    return got;
-}
-
-// The number of bytes written so far.
-static long capture_size(const capture_t* c) {
-    return lseek(c->fd, 0, SEEK_END);
-}
-
-static void capture_end(capture_t* c) {
-    if (c->saved >= 0) {
-        TEST_UNUSED(dup2(c->saved, c->fd));
-        TEST_UNUSED(close(c->saved));
-    }
-    if (c->file != NULL) {
-        TEST_UNUSED(fclose(c->file));
-    }
-}
-
-#define ASSERT_SIZE(capture, n) TEST_ASSERT_EQ_INT64(capture_size(&(capture)), (int64_t)(n))
-
-// Fails the test with both texts when they differ.
-#define ASSERT_SAME_TEXT(actual, expected)                                                         \
-    do {                                                                                           \
-        const char* want = (expected);                                                             \
-        if (strcmp((actual), want) != 0) {                                                         \
-            TEST_UNUSED(fprintf(stderr,                                                            \
-                                "%s:%d\n\ttext differs\n\tactual:   \"%s\"\n\texpected: \"%s\"\n", \
-                                __FILE__,                                                          \
-                                __LINE__,                                                          \
-                                (actual),                                                          \
-                                want));                                                            \
-            TEST_FAIL();                                                                           \
-        }                                                                                          \
-    } while (0)
-
-// Runs body with fd 1 captured, flushes, and returns the bytes it produced.
-static size_t stdout_of(void (*body)(void), char* buf, size_t size) {
-    capture_t c = capture_begin(1);
-    body();
-    fort_rt_flush_all();
-    const size_t got = capture_read(&c, buf, size);
-    capture_end(&c);
-    return got;
-}
-
-#define ASSERT_STDOUT(body, expected)                                                              \
-    do {                                                                                           \
-        char actual[CAPTURE_MAX];                                                                  \
-        TEST_UNUSED(stdout_of(body, actual, sizeof actual));                                       \
-        ASSERT_SAME_TEXT(actual, expected);                                                        \
-    } while (0)
 
 // ---- running a failure in a child --------------------------------------------
 

@@ -2,7 +2,7 @@
 
 This document specifies the `fort` compiler's command line, build pipeline, build modes,
 diagnostics, C runtime, code generation contract and test conventions for v1. It implements D14
-together with D9.10, D10, D11, D12 and the run-time side of D17. Where it disagrees with
+together with D9.10, D10, D11, D12, D18 and the run-time side of D17. Where it disagrees with
 `decisions.md` or `grammar.md`, those files win (D1.2).
 
 Sections: 1 Command line; 2 Build pipeline; 3 Build modes; 4 Diagnostics; 5 The C runtime;
@@ -200,7 +200,7 @@ listed in section 5.
 The runtime is `runtime/fort_rt.c`, compiled to `<std-dir>/fort_rt.o`; it is C and permanent
 (D13.1). It owns process start and exit (D11.6), heap allocation (D10.2, D10.3), the
 runtime-error and panic paths (D11.4, including the ownership overwrite check of D17.11),
-formatting and buffering for the print family (D11.5, D11.7, D12.2), and the program arguments
+formatting and buffering for the print family (D11.5, D11.7, D12.2, D18), and the program arguments
 for `std::sys`. The compiler emits calls to the entry points below; the standard library
 declares the ones it needs with `extern fn`
 (module-system.md 7).
@@ -244,7 +244,10 @@ void fort_rt_panic(const char* ptr, uint64_t len, loc);
 void fort_rt_assert_fail(const char* text, loc);
 
 // Printing (D11.5, D11.7, D12.2): format one value per D11.7 and append it to the
-// buffer of fd. fort_rt_flush writes out one buffer (io.close and io.flush call it);
+// buffer of fd. A float arrives in its own type and prints with the shortest digits
+// that round-trip in that type, which the runtime obtains from the C library and
+// lays out itself (D18); the two entry points are the only float ones (D18.4).
+// fort_rt_flush writes out one buffer (io.close and io.flush call it);
 // fort_rt_flush_all writes out every buffer, at exit and before every failure.
 void fort_rt_print_i64(int32_t fd, int64_t v);
 void fort_rt_print_u64(int32_t fd, uint64_t v);
@@ -275,6 +278,21 @@ const struct fort_string* fort_rt_args_ptr(void);
 uint64_t fort_rt_args_len(void);
 void fort_rt_exit(int32_t status);
 ```
+
+The float printers are the one place where the runtime uses the C library to format a value.
+`fort_rt_print_f64` asks `snprintf("%.*e", ...)` for one significant digit, then two, and so on,
+and keeps the first length whose text `strtod` reads back as the value; 17 digits for `f64` and
+9 for `f32` (`strtof`) always read back, so the search ends. `printf` returns the nearest decimal
+of the length asked for, which is not always the one to keep: for a normal power of two above the
+minimum normal the values that read back as it reach half an ulp above and only a quarter below,
+the binade below being coarser, so the nearest decimal can fall short of that interval while the
+next one up falls inside it, and the runtime tries that neighbour before lengthening. The
+neighbour below never needs trying, the gap below a float never being wider than the gap above.
+This asks two things of the C library that the standard permits but does not require and glibc
+provides: a correctly rounded `printf` (ties to even) and a correctly rounded `strtod`, down to
+the subnormals, where it also reports `ERANGE`, which the runtime ignores because only the value
+matters. The runtime lays the digits out itself. A rewrite of the runtime in fort must reproduce
+the text D18.2 fixes; it need not reproduce this search.
 
 This list is complete (D11.6): the standard library declares no other `fort_rt_*` symbol. It
 declares `fort_rt_args_ptr`, `fort_rt_args_len`, `fort_rt_flush`, `fort_rt_flush_all` and

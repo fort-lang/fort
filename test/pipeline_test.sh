@@ -7,8 +7,9 @@
 # exactly as the compiler does it (D14.3), and run under qemu through
 # binfmt_misc. hello must print its line and exit 0; abort must
 # print its line, then the runtime error of D11.4 on stderr, and die with
-# SIGABRT (status 134). Both binaries must be position independent (D14.3).
-# ctest runs it as the unit test `pipeline`.
+# SIGABRT (status 134); floats must print the D11.7 text of each of its
+# values. Every binary must be position independent (D14.3). ctest runs it as
+# the unit test `pipeline`.
 set -eu
 
 if [ $# -ne 1 ]; then
@@ -56,7 +57,7 @@ done
 
 # The module must satisfy the IR verifier before anything compiles it, so a
 # malformed module is reported as such and not as a compiler crash.
-for prog in hello abort; do
+for prog in hello abort floats; do
     "$opt" -passes=verify -disable-output "$ir/$prog.ll" ||
         fail "$prog: the IR verifier rejected the module"
     "$cc" --target="$target" -O1 -fPIE -pie -Wno-override-module \
@@ -102,6 +103,22 @@ drop_qemu_notice "$work/abort.both"
 expect_file abort.order "$work/abort.both" 'before
 abort.ft:12:14: runtime error: index 5 out of range for length 3
 '
+
+# floats: the D11.7 rendering of each value on stdout, nothing on stderr and
+# status 0. The digits come from the target's own C library (D18.2), so this is
+# where the printers are checked on the target.
+status=0
+"$work/floats" >"$work/floats.out" 2>"$work/floats.err" || status=$?
+[ "$status" -eq 0 ] || fail "floats: exit status $status, expected 0"
+expect_file floats.stdout "$work/floats.out" '0.1
+1e+17
+-0.0
+inf
+nan
+0.1
+16777216.0
+'
+expect_file floats.stderr "$work/floats.err" ''
 
 if [ "$failures" -ne 0 ]; then
     echo "pipeline: $failures failure(s)" >&2

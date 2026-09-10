@@ -38,3 +38,25 @@ block at the end of the function, which calls
 `fort_rt_fail_bounds` (index, length, file, line, column) and is followed by `unreachable`. The
 program prints `before`, then the D11.4 line
 `abort.ft:12:14: runtime error: index 5 out of range for length 3`, and dies with SIGABRT.
+
+`floats.ll` is
+
+```fort
+fn i32 main() {
+    println(0.1);
+    println(1e17);
+    println(-0.0);
+    println(f64.from_bits(0x7FF0000000000000));   // inf
+    println(f64.from_bits(0x7FF8000000000000));   // nan
+    println(cast(0.1, f32));
+    println(cast(16777217.0, f32));
+    return 0;
+}
+```
+
+in `floats.ft`: an `f64` argument is a `double` and an `f32` argument a `float`, each in its own
+type, because the digits printed depend on it (D18.1). Float constants are LLVM hex literals,
+exact by construction; a `float` one carries the value widened to `double`, so `0.1f` is
+`0x3FB99999A0000000` and the unrepresentable `16777217.0` is the `f32` it rounds to,
+`0x4170000000000000`. The program prints `0.1`, `1e+17`, `-0.0`, `inf`, `nan`, `0.1` and
+`16777216.0`, one per line, and exits 0 (D11.7, D18.3).

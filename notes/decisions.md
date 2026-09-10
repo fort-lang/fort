@@ -24,6 +24,7 @@ Sections:
 - D15 Not in v1
 - D16 Hazards not to re-litigate
 - D17 Ownership
+- D18 Float printing in the runtime
 - D19 Target: LLVM IR
 - Ready-to-implement checklist
 
@@ -901,6 +902,30 @@ decision or document says ownership is "by convention", this section supersedes 
   used after the allocation was freed; an `own` value that is never freed; two `own` copies made
   through `cast`. The linear check that would make leaks and use after `move` compile errors is
   deferred (D15); this design is its intended base and adds no syntax it would not need.
+
+## D18 Float printing in the runtime
+
+Owner: `toolchain.md` (5.1 entry points). Names the entry points that produce D11.7's float text
+and settles what D11.7 leaves to the runtime.
+
+- **D18.1** The runtime exports exactly two float entry points, `fort_rt_print_f32(i32 fd, f32 v)`
+  and `fort_rt_print_f64(i32 fd, f64 v)`. The print family (D12.2) calls one of them per float
+  argument and passes the value in the argument's own type: an `f32` is never widened to `f64`
+  first, because the digits printed depend on the type (D11.7).
+- **D18.2** Shortest round-trip. The digits are the shortest decimal that reads back as the value
+  in that type and, among the strings of that length that read back as it, the one nearest the
+  value, ties going to the even last digit. That text is what this decision fixes; how a runtime
+  arrives at it is an implementation matter, described for the C runtime in `toolchain.md` 5.1.
+  The layout around the digits is the runtime's own work, so the bytes are D11.7's and not a C
+  library's `%g`.
+- **D18.3** Layout. D11.7's choice of form is decided on the decimal exponent `e` of the leading
+  digit: exponent form when `e < -4` or `e >= 17`, fixed form otherwise, so `1e-4` prints
+  `0.0001` and `1e16` prints `10000000000000000.0`. `-0.0` prints `-0.0`, its sign taken from the
+  sign bit (D6.12: `-0.0 == 0.0`, so no comparison can). A NaN prints `nan` whatever its sign bit
+  and payload, since D11.7 lists `inf`, `-inf` and `nan` and no `-nan`.
+- **D18.4** No other float entry point. The conversions of D3.14 (float to integer, saturating
+  with NaN to zero, and integer to float) are emitted in the module the compiler generates
+  (D19.1), not called for, so the list in `toolchain.md` 5.1 stays complete (D11.6).
 
 ## D19 Target: LLVM IR
 
