@@ -112,6 +112,16 @@ target_compile_definitions(fort_rt_native PRIVATE FORT_RT_NO_MAIN)
 target_include_directories(fort_rt_native PUBLIC "${FORT_RUNTIME_DIR}")
 
 # ---- unit tests ----------------------------------------------------------------
+# The test-only helpers that are compiled rather than included: every
+# test/*.c that is not a suite, such as the syntax tree's S-expression
+# printer. They are linked into every suite so that -Werror and clang-tidy
+# cover them once.
+file(GLOB FORT_TEST_SUPPORT_SOURCES CONFIGURE_DEPENDS "${FORT_TEST_DIR}/*.c")
+list(FILTER FORT_TEST_SUPPORT_SOURCES EXCLUDE REGEX "_test\\.c$")
+add_library(fort_test_support OBJECT ${FORT_TEST_SUPPORT_SOURCES})
+target_include_directories(fort_test_support PUBLIC "${FORT_TEST_DIR}")
+target_link_libraries(fort_test_support PUBLIC fort_core)
+
 # One executable and one ctest, labelled unit, per test/<component>_test.c
 # (toolchain.md 7.5). The ctest is named unit-<component>.
 file(GLOB FORT_UNIT_TEST_SOURCES CONFIGURE_DEPENDS "${FORT_TEST_DIR}/*_test.c")
@@ -121,7 +131,7 @@ foreach(test_source IN LISTS FORT_UNIT_TEST_SOURCES)
     string(REGEX REPLACE "_test$" "" test_component "${test_target}")
     add_executable("${test_target}" "${test_source}")
     target_include_directories("${test_target}" PRIVATE "${FORT_TEST_DIR}")
-    target_link_libraries("${test_target}" PRIVATE fort_core fort_rt_native)
+    target_link_libraries("${test_target}" PRIVATE fort_core fort_rt_native fort_test_support)
     set_target_properties("${test_target}" PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test")
     add_test(NAME "unit-${test_component}" COMMAND "${test_target}")
