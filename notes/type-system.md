@@ -379,8 +379,9 @@ own fn i32(i32, i32) u = add;        // error: own on a function-pointer type
 `void*` is an opaque pointer with a single storage level: it cannot be dereferenced, cannot reach
 fields, and cannot be indexed or sliced (D3.11, D5.2). Every conversion to or from `void*`
 requires `cast` (D3.14); `== null` is allowed (D10.5). `own void*` is its owned form (D17.1):
-`del` accepts it, `cast` to and from `own` pointers keeps the `own` mark, and it is the type C's
-`malloc` and `free` are declared with (section 11.2).
+`del` accepts it, a `cast` between it and a typed pointer yields `own` exactly when the target
+says `own` (D3.14, section 9.2), and it is the type C's `malloc` and `free` are declared with
+(section 11.2).
 
 ```fort
 mut i32 x = 1;
@@ -393,9 +394,10 @@ i32[] h = vp[0..1];                  // error: void* cannot be sliced
 mut i32* back = cast(vp, mut i32*);
 u64 addr = cast(vp, u64);
 bool isnull = vp == null;
-own mut void* raw = cast(libc.malloc(16), own mut void*);   // adopted; del(raw) frees it
+own void* raw = libc.malloc(16);    // an own rvalue lands (D17.13); del(raw) frees it
 void* peek = raw;                    // ok: lends
-own mut u8* bytes = cast(move(raw), own mut u8*);           // ok: transfers, keeps own
+own mut u8* bytes = cast(move(raw), own mut u8*);   // ok: the target says own, so raw is moved
+own mut u8* twice = cast(raw, own mut u8*);         // error: copying own lvalue 'raw' needs move
 ```
 
 ## 6. Type identity and equality
@@ -778,7 +780,8 @@ Unlike a leading `mut`, which marks every level, a leading `own` marks one refer
 when the nodes belong to an arena. Marking a reference twice is an error ("redundant own"). The
 outermost reference is named by the leading position, so an `own` after the outermost suffix
 (`Node* own p`) is an error too, and every type has exactly one spelling. `own` never follows a
-fixed-array suffix and does not parse inside `new(...)`. The mutability of each level is spelled
+fixed-array suffix, and inside `new(...)` it parses only after a `*` of the element type
+(section 8.3). The mutability of each level is spelled
 independently by section 7.3; `own` and `mut` combine freely, `own` first.
 
 | Declaration                 | Level 0 holds             | Level 1 holds            | Level 2 |
@@ -818,8 +821,10 @@ i32[4] own w = {};                   // error: own never follows a fixed-array s
 view: slicing, `.ptr`, `&`, literals and the runtime's `args` never produce an `own` reference,
 although the `own` marks inside the element or pointee type survive. An `own` rvalue must land
 in an `own` place (a declaration, an assignment target, an `own` parameter, an `own` field or
-element of a literal, a `return`) or be freed with `del`; converting it to a non-`own` type or
-discarding it is an error, because nothing could free it afterwards (D17.8).
+element of a literal, a `return`) or be freed with `del`; anything else is the error "owning
+temporary would leak", because nothing could free it afterwards (D17.8): converting or casting it
+to a non-`own` type, slicing it or taking its `.ptr`, accessing a field of an owning aggregate
+rvalue (section 8.5), and discarding it as an expression statement.
 
 | Expression                                    | Type                                  |
 |-----------------------------------------------|---------------------------------------|
@@ -827,7 +832,7 @@ discarding it is an error, because nothing could free it afterwards (D17.8).
 | `new(u8[n])`                                  | `own mut u8[]`                        |
 | `new(i32[n][4])`                              | `own mut i32[][4]`                    |
 | `new(Node*[n])`                               | `own mut Node*[]`                     |
-| `cast(new(Node*[n]), own mut Node* own[])`    | `own mut Node* own[]`                 |
+| `new(Node* own[n])`                           | `own mut Node* own[]`, slots `null`   |
 | `buf[..]`, `buf[lo..hi]` for `own mut u8[] buf` | `mut u8[]`                          |
 | `buf.ptr`                                     | `mut u8*`                             |
 | `&buf`                                        | `mut u8[] own*`                       |
@@ -837,8 +842,9 @@ discarding it is an error, because nothing could free it afterwards (D17.8).
 | `"abc"`, `s[1..]`, `sys.args()`               | `string`, `string`, `string[]`        |
 | `str.dup(s)`, `strbuf.take(&b)`               | `own string`                          |
 
-Because `new` marks only the outermost reference, an owned slice of owned pointers is built by
-adopting the slots of a fresh allocation: `cast(new(Node*[n]), own mut Node* own[])`.
+`new` always marks the outermost reference; an `own` after a `*` of the element type marks the
+slots, so `new(Node* own[n])` is an owned slice of `n` owned slots, all `null` (D17.3). A prefix
+`own` inside `new(...)` does not parse, and `mut` never does (grammar section 6).
 
 ```fort
 own mut u8[] buf = new(u8[16]);
@@ -848,6 +854,10 @@ mut u8[] own* slot = &buf;           // ok: a borrowed pointer to the owned slot
 own mut u8[] own* bad = &buf;        // error: & yields a borrowed pointer
 mut u8[] leak = new(u8[8]);          // error: owning temporary would leak
 u8[] tmp = str.dup("x");             // error: owning temporary would leak
+mut u8[] head = new(u8[8])[..4];     // error: owning temporary would leak
+mut u8* first = new(u8[8]).ptr;      // error: owning temporary would leak
+own mut Node* own[] kids = new(Node* own[2]);   // ok: two null owned slots
+own mut Node* own[] bad2 = new(own Node*[2]);   // error: prefix own inside new does not parse
 del(new(u8[8]));                     // ok: the temporary is freed
 ```
 
@@ -855,8 +865,9 @@ del(new(u8[8]));                     // ok: the temporary is freed
 
 `own X` converts implicitly to `X` wherever a value meets an expected type, in the same places
 as the mutability drop of section 7.4, and the two drops combine (D17.4). The operands of `==`,
-`!=` and `?:` are lent as well, so `own` never blocks a comparison; an `own` rvalue operand is
-refused by D17.8. Lending never empties the source. The drop is monotone with the shape of
+`!=` and `?:` are lent as well, so `own` never blocks a comparison; an `own` rvalue operand of
+`==` or `!=` is refused by D17.8, and `?:` yields `own` only when both operands are `own` rvalues
+or `null` (D6.2). Lending never empties the source. The drop is monotone with the shape of
 section 7.4: `own` may be dropped from a reference only if, in the target type, no reference
 outside it is `own` and every level between the binding and the storage holding that reference
 is immutable. The first condition keeps a container from being freed while its elements are
@@ -880,7 +891,7 @@ value could be stored, through the copy, into a slot the source still sees as ow
 | `own string` to `string`                   | ok     | drops the outer own                       |
 
 ```fort
-own mut Node* own[] kids = cast(new(Node*[2]), own mut Node* own[]);
+own mut Node* own[] kids = new(Node* own[2]);
 mut Node*[] w = kids;                // error: cannot drop own at level 1 behind a mutable slot
 // If the line above were accepted, the next two lines would both type-check and
 // together put a stack address where del(kids[0]) expects an allocation:
@@ -889,6 +900,9 @@ w[0] = &local;
 Node*[] ro = kids;                   // ok: no slot is writable through ro
 mut Node* own[] view = kids;         // ok: the slots are still owned, and kids still owns them
 own mut Node*[] half = move(kids);   // error: the nodes would be owned by nobody
+bool same = kids[0] == view[0];      // ok: both operands lend, as mut Node*
+own mut Node* pick = flag ? new(Node) : null;   // ok: own rvalues or null on both sides
+mut Node* mixed = flag ? new(Node) : view[0];   // error: owning temporary would leak
 ```
 
 ### 8.5 Owning aggregates
@@ -928,9 +942,9 @@ vec_free(&z);                        // ok: z.data is {null, 0} afterwards
 `own string` is an owned, immutable character sequence (D17.12): `str.dup`, `str.concat` and
 `strbuf.take` return it; literals, sub-strings and `sys.args()` are `string`. `del(own string)`
 is legal and `del(string)` is not. The casts among `string`, `char[]`, `u8[]` and their `mut`
-forms (section 9.2) keep `own` when the target spells it, so a string built in an
-`own mut u8[]` becomes an `own string` with `cast(move(buf), own string)`; the cast lends its
-operand, so without `move` both `buf` and the result would own the bytes (D17.14).
+forms (section 9.2) yield `own` exactly when the target spells it (D3.14), so a string built in
+an `own mut u8[]` becomes an `own string` with `cast(move(buf), own string)`: the target says
+`own`, so the `own` lvalue must be moved (D17.5), and `cast(buf, string)` lends a view instead.
 
 ```fort
 own string d = str.dup("abc");       // ok
@@ -941,7 +955,9 @@ own string z = {};                   // ok: the zero string, owned and empty
 del(v);                              // error: 'v' is a string, not an own string
 del(d);                              // ok: d is now {null, 0}
 own mut u8[] buf = new(u8[3]);
-own string t = cast(move(buf), own string);   // ok: keeps own, empties buf
+string peek = cast(buf, string);     // ok: lends; buf still owns the bytes
+own string t3 = cast(buf, own string);        // error: copying own lvalue 'buf' needs move(buf)
+own string t = cast(move(buf), own string);   // ok: the target says own; buf is emptied
 own string t2 = cast(d, string);     // error: cannot add own; cast(d, string) only lends
 ```
 
@@ -1007,9 +1023,10 @@ first takes its default type (D4.5) and is then converted with the runtime seman
 | `mut char[]`, `mut u8[]` | `string`, `char[]`, `u8[]`, each other | reinterpret; drops `mut` |
 | `char[]`, `u8[]`    | `mut char[]`, `mut u8[]` | reinterpret; adds `mut` (cast-away-const)     |
 | `T[]`               | `mut T[]`                | add mutability at every level                 |
-| `T[]`, `T*`         | the same with `own` added at any reference | adoption; no check          |
+| `T[]`, `T*`, string family | the same with `own` added at any reference | adoption; no check   |
 | `own` reference     | same, `own` dropped at any level | lends; refused on an `own` rvalue     |
-| `own` string family | `own` string family      | reinterpret the header, keep `own` (D17.12)   |
+| `own` rvalue        | any `own` target above   | transfer: the result is `own`                 |
+| `own` lvalue        | any `own` target above   | error unless `cast(move(x), T)` (D17.5)       |
 | `mut T*`            | `T*`                     | drop mutability, as the implicit conversion   |
 | slice               | other element type       | error: `len` counts elements of one type      |
 | pointer             | slice                    | error (use `p[lo..hi]`)                       |
@@ -1023,15 +1040,16 @@ A `mut` in a cast target names the levels behind the indirection; a binding-leve
 part of a cast target, so `cast(s, u8[] mut)` is an error (D3.14). `null` is not a valid cast
 operand, because it has no type of its own (D10.5).
 
-Ownership in casts (D3.14, D17.3, D17.12): a cast may add `own` to any reference of a pointer
-or slice type, adopting memory that came from C or from a `new` of another shape, the same
-unsafe escape as adding `mut` (a later `del` of adopted memory that is not the start of an
-allocation is undefined behavior, D10.7); it may drop `own` at any level, including where the
-implicit drop of section 8.4 refuses; and among `string`, `char[]`, `u8[]` and their `mut`
-forms it keeps `own` exactly when the target spells it. A cast never moves: its operand is lent,
-so casting an `own` lvalue to an `own` type leaves two owners (D17.14); write `cast(move(x), T)`
-to transfer. A `cast` to an `own` type yields an `own` rvalue, which must land (section 8.3),
-and a cast that drops `own` from an `own` rvalue is refused (D17.8).
+Ownership in casts (D3.14, D17.3, D17.12): the result of a cast is `own` exactly when its target
+type says `own`. A cast may add `own` to any reference of a pointer or slice type, adopting
+memory that came from C, the same unsafe escape as adding `mut` (a later `del` of adopted memory
+that is not the start of an allocation is undefined behavior, D10.7); it may drop `own` at any
+level, including where the implicit drop of section 8.4 refuses, and then lends: the result is a
+view and the source keeps ownership. An `own` rvalue cast to an `own` target transfers. An `own`
+lvalue cast to an `own` target is a copy into an `own` place and must be written
+`cast(move(x), T)` (D17.5), which empties `x`. A `cast` to an `own` type yields an `own` rvalue,
+which must land (section 8.3), and a cast that drops `own` from an `own` rvalue is refused
+(D17.8).
 
 ```fort
 i64 w = cast(cast(-1, i8), i64);     // -1: sign-extended because i8 is signed
@@ -1058,11 +1076,13 @@ u8[] ro = cast("abc", u8[]);              // ok
 i8[] sb = cast(ro, i8[]);            // error: element type of a slice never changes
 i32[] q = cast(p, i32[]);            // error: no cast from pointer to slice
 Point pt = cast(rec, Point);         // error: no struct casts
-own mut u8* m = cast(libc.malloc(64), own mut u8*);    // adopts C memory; del(m) frees it
-own mut Node* own[] kids = cast(new(Node*[8]), own mut Node* own[]);   // slots now owned
+own mut u8* m = cast(libc.malloc(64), own mut u8*);    // own rvalue to own type; del(m) frees it
+own mut u8[] got = cast(p2[0..n], own mut u8[]);       // adopts C memory at a mut u8* p2
+own mut Node* own[] kids = new(Node* own[8]);          // owned slots (section 8.3)
 mut Node*[] esc = cast(kids, mut Node*[]);             // ok: cast drops own where 8.4 refuses
-own string t = cast(move(buf), own string);            // keeps own; buf is emptied
-own string t2 = cast(buf, own string);                 // compiles: two owners (D17.14)
+own string t = cast(move(buf), own string);            // the target says own; buf is emptied
+own string t2 = cast(buf, own string);                 // error: copying own lvalue 'buf' needs move
+string t5 = cast(buf, string);                         // ok: lends; buf still owns the bytes
 string t3 = cast(new(u8[4]), string);                  // error: owning temporary would leak
 own string t4 = cast("abc", own string);               // compiles; del(t4) is undefined
 ```
@@ -1269,13 +1289,17 @@ boundary (D9.8). Narrow integers and `bool` are zero- or sign-extended on both s
 boundary; C `char*` maps to `char*` or `u8*`, C `size_t` to `u64` (D9.8). `own` may appear in
 an `extern` signature (D17.13): it is erased like everywhere else and documents the C side's
 convention, so a fort caller must `move` into an `own` parameter and must land an `own` result.
+A `void*` result is `own void*`, never `own mut void*`, because `void*` has no target level for
+the `mut` to describe (D5.5). Signature identity includes `own` (D9.8): two modules declaring one
+C symbol with and without it conflict.
 
 ```fort
 extern fn i64 write(i32 fd, void* buf, u64 n);
 extern fn void sort(i32[] xs);       // error: slices cannot cross an extern boundary
-extern fn own mut void* malloc(u64 n);
+extern fn own void* malloc(u64 n);
+extern fn own mut void* calloc(u64 n, u64 size);   // error: 'mut' on void*: no target level
 extern fn void free(own void* p);
-own mut void* raw = malloc(16);      // ok: the owned result lands
+own void* raw = malloc(16);          // ok: the owned result lands
 free(raw);                           // error: 'raw' is an own lvalue; write move(raw)
 free(move(raw));                     // ok; del(raw) would have done the same (D10.3)
 void* lost = malloc(16);             // error: owning temporary would leak
