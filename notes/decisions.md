@@ -450,7 +450,9 @@ Owner: `module-system.md`.
   module `a::b` (the prefix must be a module; the braces never name modules). Resolution of a
   path `p::last`: the module reading (`p/last.ft` exists) and the symbol reading (`p.ft` exists
   and declares `last`) are both tried; exactly one must succeed, otherwise the import is an
-  error ("not found" or "ambiguous"). No wildcard imports. A duplicate binding is an error;
+  error: "not found" when neither reading succeeds, "has no declaration named" when only `p.ft`
+  exists but lacks `last`, "ambiguous" when both succeed. No wildcard imports. A duplicate
+  binding is an error;
   importing the same module under two names is allowed; import bindings are not re-exported.
 - **D9.4** Qualified access uses a dot in expressions and in type positions: `io.read_file(p)`,
   `math.Vector v = ...;`, `m.Color.Red`. Rationale: consistent with field access, and the
@@ -632,8 +634,9 @@ Owner: `toolchain.md`.
 - **D14.2** Diagnostics: `<file>:<line>:<col>: error: <message>` on stderr, one per line,
   optionally followed by `note:` lines. Errors without a position in the file (a missing
   `main`, an invalid module name) use `1:1`. A syntax error stops the compilation of that file
-  after one diagnostic (no recovery in v1); semantic errors are all reported. The compiler never
-  emits warnings in v1.
+  after one diagnostic (no recovery in v1). Modules are checked in dependency order; all semantic
+  errors of the first module that has any are reported, then compilation stops. The compiler
+  never emits warnings in v1.
 - **D14.3** Generated assembly is GNU syntax, position-independent (RIP-relative data, `@PLT`
   calls for externs), and is assembled and linked by the system C compiler together with the
   runtime object.
@@ -641,8 +644,10 @@ Owner: `toolchain.md`.
   compare), `fail/<area>/NNN_name.ft` (must not compile), `run/modules/<name>/main.ft` and
   `fail/modules/<name>/main.ft` for multi-file tests (the harness compiles `main.ft` with the
   directory as root and collects `error` annotations from every `.ft` file in it), `ffi/*.c`
-  helpers, `programs/*.ft` for larger programs. Compiler unit tests in C live in `test/` using
-  `test.h`.
+  helpers, `programs/*.ft` for larger programs. The harness invokes `fort` on the test file
+  itself (`main.ft` for multi-file tests) with `test/lang` as the working directory, so `<file>`
+  in diagnostics and runtime errors is the path relative to `test/lang`. Compiler unit tests in
+  C live in `test/` using `test.h`.
 - **D14.5** Test file directives, all at the top of the file (`//!`) except `error`:
   - `//! run` or `//! fail` (required, first line);
   - `//! flags: --release` (extra compiler flags);
