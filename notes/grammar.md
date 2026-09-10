@@ -116,7 +116,7 @@ nested inside another `brace_init` or typed literal (D6.5).
 ## 4. Types
 
 ```
-type         = [ "mut" ] elem_type { array_suffix } ;          (* D5.3 *)
+type         = [ "mut" ] elem_type { array_suffix } { "*" [ "mut" ] } ;   (* D3.6, D5.3 *)
 elem_type    = base_type { "*" [ "mut" ] } ;
 array_suffix = "[" const_expr "]"                               (* fixed array, D3.4 *)
              | "[" "]" [ "mut" ] ;                              (* slice, D3.5 *)
@@ -129,12 +129,15 @@ qualified_name = identifier [ "." identifier ] ;                    (* D9.4 *)
 
 Reading rules (D3.6, D5.2, D5.3):
 
-- `*` suffixes bind tighter than array suffixes; `Node*[16]` is an array of 16 pointers.
+- `*` suffixes directly after the base type make pointers to the base; `Node*[16]` is an array
+  of 16 pointers.
 - Array suffixes read outside-in: `i32[3][4]` is three arrays of four; `i32[][4]` is a slice of
   `i32[4]`.
+- `*` suffixes after the array group make pointers to the whole array or slice type: `u8[]*` is
+  a pointer to a slice, `i32[4]*` a pointer to an `i32[4]`. No array suffix may follow them
+  (`i32[4]*[2]` does not parse; wrap it in a struct).
 - `void` is legal as a `base_type` only when followed by at least one `*` (D3.11).
 - A `fn_type` used as `base_type` may take suffixes: `fn i32(i32)[4]` is four function pointers.
-- Pointer-to-array and pointer-to-slice cannot be written: `*` never follows an `array_suffix`.
 - A `mut` after `*` or `[]` marks the storage holding that pointer or slice header; a leading
   `mut` marks every level. `mut` never follows a fixed-array suffix.
 - In a `fn_type`, a `mut` that would apply only to a parameter's own storage is ignored for type

@@ -76,9 +76,10 @@ Owner: `type-system.md`.
 - **D3.1** Primitive types: `i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 bool char void`. Sizes: 1, 2,
   4, 8 bytes for the integers, 4 and 8 for the floats, 1 for `bool` and `char`; alignment equals
   size. `void` is only a return type or the base of `void*`. There is no `byte` type.
-- **D3.2** `char` is a distinct one-byte character type. It supports `== != < <= > >=`, `switch`,
-  `cast` to and from integer types, and nothing else (no arithmetic, no bitwise operators). Char
-  literals default to `char` (D4.3). Rationale: the user chose a distinct text type over `u8`.
+- **D3.2** `char` is a distinct one-byte character type. It supports `== != < <= > >=` (ordered
+  by unsigned byte value), `switch`, `cast` to and from integer types, and nothing else (no
+  arithmetic, no bitwise operators). Char literals default to `char` (D4.3). Rationale: the user
+  chose a distinct text type over `u8`.
 - **D3.3** `bool` has exactly the values `true` and `false`. Conditions must be `bool`; there is no
   truthiness for integers or pointers (`p != null`, `x != 0`). `bool` supports `== != ! && ||`
   and `cast` to integer types (0 or 1). `cast` from an integer to `bool` is an error.
@@ -90,12 +91,16 @@ Owner: `type-system.md`.
   mutability, D5) are one type; the zero value is `{null, 0}`. `.len` (type `u64`) and `.ptr`
   (type `T*` or `mut T*`) are read-only pseudo-fields. Slices are produced by `new(T[n])` (D10.2),
   by slicing (D6.9) and by the zero initializer `{}`. A slice literal `{1, 2, 3}` does not exist.
-- **D3.6** Type suffixes: `*` binds tighter than `[...]`, and array/slice suffixes read outside-in
-  like C declarators. `Node*[16]` is an array of 16 pointers; `i32[3][4]` is indexed `a[i][j]`
-  with `i < 3`, `j < 4`; `i32[][4]` is a slice of `i32[4]`; `new(i32[n][4])` returns
-  `mut i32[][4]`. Suffixes after a function type apply to the function type: `fn i32(i32)[4]` is
-  an array of four function pointers, `fn i32[4](i32)` returns an `i32[4]`. Pointer-to-array and
-  pointer-to-slice are not expressible in v1 (wrap them in a struct).
+- **D3.6** Type suffixes come in three groups, left to right. `*` suffixes directly after the
+  base type make pointers to the base (`Node*`, `Node**`). Array and slice suffixes then apply
+  outside-in like C declarators: `Node*[16]` is an array of 16 pointers, `i32[3][4]` is indexed
+  `a[i][j]` with `i < 3`, `j < 4`, `i32[][4]` is a slice of `i32[4]`, and `new(i32[n][4])`
+  returns `mut i32[][4]`. `*` suffixes after the array group make pointers to the whole array or
+  slice type: `i32[4]*` points to an `i32[4]`, `u8[]*` points to a slice, which is the usual
+  shape of an out-parameter (`fn bool read_file(string path, mut u8[]* out)`). No array suffix
+  may follow a trailing `*` (wrap such a type in a struct). Suffixes after a function type apply
+  to the function type: `fn i32(i32)[4]` is an array of four function pointers, `fn i32[4](i32)`
+  returns an `i32[4]`.
 - **D3.7** `string` is a distinct type: an immutable slice of `char` (`{char* ptr; u64 len}`).
   Literals have type `string` and are stored in read-only memory with a trailing NUL that is not
   counted in `len`. Sub-strings are not NUL-terminated. Indexing yields `char`; slicing yields
@@ -115,8 +120,9 @@ Owner: `type-system.md`.
   enum holds 0 even if 0 is not a member.
 - **D3.10** Function types are written `fn R(P1, P2)` with parameter types only. Identity is
   structural over parameter types (including pointee mutability), return type and `noreturn`;
-  binding-level `mut` on parameters is ignored. A function name used as a value has its function
-  type; `&f` and `*f` are errors. `null` is a valid function-pointer value; calling it is
+  binding-level `mut` on parameters is ignored. A function name used as a value, including a
+  qualified `m.f`, has its function type; `&f` and `*f` are errors. `null` is a valid
+  function-pointer value; calling it is
   undefined behavior. `==`/`!=` compare identity.
 - **D3.11** `void*` is an opaque pointer with no pointee level: no `*`, `->`, indexing or slicing.
   Conversion to and from any pointer, function pointer or `u64` requires `cast`.
@@ -194,8 +200,9 @@ Owner: `core-language.md` (Declarations and mutability), `type-system.md` (Mutab
   the outermost indirection (the `*` or `[]` whose value the binding holds); level 2 the storage
   reached through the next indirection, and so on. With the suffix-reading rules of D3.6, the
   outermost indirection of `Node**` is the last `*` (level 1 holds a `Node*`, level 2 a `Node`),
-  of `Node*[]` it is the `[]` (level 1 holds `Node*` elements, level 2 the nodes), and of
-  `i32[][]` it is the first `[]`. Fixed arrays and structs do not add a level: their elements
+  of `Node*[]` it is the `[]` (level 1 holds `Node*` elements, level 2 the nodes), of
+  `i32[][]` it is the first `[]`, and of `u8[]*` it is the trailing `*` (level 1 holds the slice
+  header, level 2 the bytes). Fixed arrays and structs do not add a level: their elements
   and fields share the storage of the value that contains them. `string` has a single level (its
   characters are never mutable). `void*` has a single level (D3.11).
 - **D5.3** Placement rule. A `mut` **before the base type** marks every level mutable, including
@@ -213,6 +220,8 @@ Owner: `core-language.md` (Declarations and mutability), `type-system.md` (Mutab
   | `mut i32[] s`            | yes              | elements: yes                      |
   | `Node* mut[] t`          | no               | slots: yes, pointees: no           |
   | `Node* mut* pp`          | no               | `*pp`: yes, `**pp`: no             |
+  | `mut u8[]* out`          | yes              | `*out`: yes, bytes: yes            |
+  | `u8[] mut* out`          | no               | `*out`: yes, bytes: no             |
   | `mut string s`           | yes              | never                              |
   | `mut Point q`            | yes (and fields) | not applicable                     |
 
@@ -357,10 +366,12 @@ Owner: `core-language.md` (Statements).
 - **D7.9** Scoping and shadowing. One namespace per module holds functions, structs, enums,
   constants, globals, externs and import bindings; any collision is an error. Lookup goes from the
   innermost block outward, then the module namespace, then the universe (D12). A local or
-  parameter may not reuse the name of any enclosing local or parameter, nor of any module-level
-  name. Only universe names may be shadowed, and only by module-level declarations. Enum members
-  are not in the module namespace (D3.9). Sibling scopes may reuse names. A local's scope starts
-  after its own declaration (`i32 x = x;` is an error).
+  parameter may not reuse the name of any enclosing local or parameter. It may shadow a
+  module-level name (including an import binding) or a universe name, which is then
+  inaccessible within its scope; a module-level declaration may likewise shadow a universe name.
+  Rationale: otherwise `import std::io;` would forbid a parameter named `io` anywhere in the
+  module. Enum members are not in the module namespace (D3.9). Sibling scopes may reuse names.
+  A local's scope starts after its own declaration (`i32 x = x;` is an error).
 - **D7.10** Module-level declarations. `Type NAME = init;` is a compile-time constant: it lives in
   read-only memory, is addressable, and is usable in array lengths and `case` labels.
   `mut Type g = init;` is a global in writable memory. Initializers must be constant expressions
@@ -435,7 +446,10 @@ Owner: `module-system.md`.
   and function pointers: no slices, strings, structs or arrays, and no variadics. The compiler
   zeroes `al` before every extern call so a fixed-prototype declaration of a variadic C function
   is safe. Narrow integers and `bool` are normalized with zero- or sign-extension on both sides
-  of the boundary. C `char*` maps to `char*` (or `u8*`); C `size_t` to `u64`.
+  of the boundary. C `char*` maps to `char*` (or `u8*`); `size_t` to `u64`; `ssize_t` and
+  `off_t` to `i64`; `mode_t` to `u32`; `int` to `i32`; `long` to `i64`; `double` to `f64`. The
+  same C symbol may be declared `extern` in several modules provided the signatures are
+  identical.
 - **D9.9** Internal calling convention (v1 simplification): integers, pointers, `bool`, `char`,
   enums, function pointers and floats are passed and returned in registers per System V; every
   aggregate (struct, fixed array, slice, `string`) is passed by a hidden pointer to a caller-made
@@ -455,7 +469,8 @@ Owner: `memory-model.md`.
   only through `new`; freed only through `del`.
 - **D10.2** `new(T)` returns `mut T*` to zero-initialized storage; `new(T[n])` returns `mut T[]`
   of `n` zero-initialized elements, where `n` is any integer type; a negative `n`, a size that
-  overflows, or allocation failure is a runtime error; `n == 0` is allowed. `new(T{...})`,
+  overflows, or allocation failure is a runtime error; `n == 0` is allowed and yields a
+  non-null pointer (the runtime allocates at least one byte). `new(T{...})`,
   `new(T[])` and `new(void)` are errors. Rationale for zero-initialization: keeps "no undefined
   values" true at the cost of one `calloc`; the earlier "uninitialized" text is withdrawn.
 - **D10.3** `del(x)` accepts any pointer, `void*` or slice regardless of mutability and frees it.
@@ -477,7 +492,9 @@ Owner: `memory-model.md`.
 - **D10.7** Undefined behavior in v1 is limited to: use after `del`, double `del`, `del` of a
   non-allocation, dereferencing `null` or a dangling pointer, writing through a cast that added
   mutability into read-only memory, `p[lo..hi]` beyond the object, calling a null function
-  pointer, and data races. Everything else is defined or a diagnosed error.
+  pointer, and data races. Everything else is defined or a diagnosed error. In particular there
+  is no strict-aliasing rule: reading an object through a pointer to another type of the same
+  size (`*cast(&x, u64*)` for an `f64 x`) is defined and yields the bit pattern.
 - **D10.8** Frames larger than one page are probed so that a large local array plus recursion
   faults instead of skipping the guard page.
 
@@ -502,7 +519,9 @@ Owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime)
   run.
 - **D11.5** Output buffering: `print`/`println` write to a runtime buffer for stdout;
   `eprint`/`eprintln` are unbuffered; `fprint`/`fprintln` use one runtime buffer per descriptor.
-  Buffers flush when full, on `io.close`, at exit, and before any runtime error.
+  Buffers flush when full, at exit, and before any runtime error. The runtime exports
+  `fort_rt_flush(i32 fd)` and `fort_rt_flush_all()`; `io.close` and `io.flush` call the former,
+  which is how a library call flushes a buffer the runtime owns.
 - **D11.6** Process start: the C runtime owns `main(argc, argv)`, builds `string[] args`, calls
   the compiler-emitted `fort_entry(args)`, flushes, and exits with `status & 0xFF`.
 - **D11.7** Value formatting by the print family: integers in decimal; `bool` as `true`/`false`;
@@ -538,7 +557,8 @@ Owner: `stdlib.md`.
 
 - **D13.1** The standard library is written in fort on top of `extern` declarations, plus the C
   runtime (`fort_rt_*`), which is permanent and is not a self-hosting goal.
-- **D13.2** v1 modules: `std::sys` (exit, args, errno), `std::c` (thin libc externs), `std::mem`
+- **D13.2** v1 modules: `std::sys` (exit, args, errno), `std::libc` (thin libc externs, named
+  so that its short name does not collide with the common parameter name `c`), `std::mem`
   (copy, fill, equal), `std::io` (descriptors, read/write whole files and streams, close),
   `std::str` (compare, search, classify, parse integers, duplicate with a NUL), `std::strbuf`
   (growable byte buffer), `std::vec` (`PtrVec`, `IntVec`, the non-generic pattern), `std::strmap`
@@ -596,7 +616,8 @@ slice equality; definite-assignment analysis (idiom: initialize with `{}` or a s
 alignment and packed attributes (idiom: an opaque `u8[N]` field and a C shim); separate
 compilation and interface files; conditional compilation; labeled `break` (idiom: a flag or a
 helper function); raw strings; a blank identifier; compile-time function evaluation; `alignof`;
-`sizeof(expr)`; pointer-to-array and pointer-to-slice types; string `switch`; `goto` (never).
+`sizeof(expr)`; array suffixes after a trailing pointer suffix (`i32[4]*[2]`, idiom: a struct);
+string `switch`; `goto` (never).
 
 ## D16 Hazards not to re-litigate
 
