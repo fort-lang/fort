@@ -198,7 +198,9 @@ A safe(r) C-like systems programming language.
   host has no shellcheck, run it in the guest: `tools/vm run 'shellcheck tools/vm
   tools/provision.sh'`.
 - **Commit messages**: a title of about 50 characters (72 at most), a blank line, then a body
-  wrapped at 72 columns that says what changed and why, then the attribution trailers.
+  wrapped at 72 columns that says what changed and why, then a single `Co-Authored-By:` trailer.
+  No `Claude-Session:` trailer: the session URL is useless to anyone reading the history later
+  and it is the only line in a commit that no reader can act on.
 
 ## Mandatory Process Rules
 The following rules MUST be followed by each process/agent for each change being made. There are no
