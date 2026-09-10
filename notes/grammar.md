@@ -239,7 +239,7 @@ array_type     = elem_type "[" const_expr "]" { "[" const_expr "]" } ;
 cast_expr      = "cast" "(" expr "," type ")" ;                       (* D6.4 *)
 sizeof_expr    = "sizeof" "(" type ")" ;                              (* D3.15 *)
 new_expr       = "new" "(" alloc_type ")" ;                           (* D10.2 *)
-alloc_type     = base_type { "*" } [ "[" expr "]" { "[" const_expr "]" } ] ;
+alloc_type     = base_type { "*" [ "own" ] } [ "[" expr "]" { "[" const_expr "]" } ] ;
 ```
 
 Notes:
@@ -250,7 +250,8 @@ Notes:
 - `-x` on an unsigned type, and `!`/`~` on the wrong types, are type errors, not parse errors.
 - `new(T[n])` always produces a slice; the first bracket after the element type holds a runtime
   count, later brackets are fixed-array dimensions of the element (`new(i32[n][4])`). `mut` does
-  not parse inside `new(...)`; the result is always fully mutable (D5.8).
+  not parse inside `new(...)`, and `own` only after a `*` of the element type
+  (`new(node* own[n])`, D17.3); the result is always fully mutable and owned (D5.8, D17.3).
 - An `array_literal` type has only fixed dimensions and no trailing `*`: `i32[3][]{...}` and
   `i32[3]*{...}` do not parse.
 
@@ -262,7 +263,7 @@ speculative parse over the token array (rewind on failure); none require symbol-
 1. **Declaration versus statement** (D7.1). At the start of a statement:
    - a keyword among `if while do for switch defer return break continue` or `{` starts that
      statement;
-   - `mut`, a `prim_type`, `string`, or `fn` starts a declaration;
+   - `own`, `mut`, a `prim_type`, `string`, or `fn` starts a declaration;
    - otherwise, speculatively parse a `type`; if the next token is then an identifier, the
      statement is a `var_decl`; else rewind and parse `assign_stmt | incdec_stmt | call_stmt`.
    Because expression statements are calls only (D7.3), `a * b;` never has to be parsed, and
