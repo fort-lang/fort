@@ -140,7 +140,7 @@ i32[0] z = {};                       // error: array length must be greater than
 u64 n = a.len;                       // 4, an untyped constant
 i32* p = a.ptr;                      // error: fixed arrays have no .ptr
 i32 x = a[4];                        // error: constant index 4 out of range for i32[4]
-i32[4]* q = &a;                      // error: pointer to array is not expressible (D3.6)
+i32[4]* q = &a;                      // pointer to the whole array (D3.6)
 bool same = a == b;                  // error: no == on fixed arrays (D3.13)
 ```
 
@@ -155,16 +155,17 @@ mutability are one type. The zero value is `{null, 0}`. Slices come from `new(T[
 from slicing an array, slice, string or pointer (D6.9), from the runtime (`string[] args`, D8.6)
 and from the zero initializer `{}`. There is no slice literal.
 
-`.len` (type `u64`) and `.ptr` are read-only pseudo-fields (D3.5). The type of `s.ptr` is the
-slice type with its last `[]` suffix, and any `mut` written after it, replaced by `*`; the pointer's
-target has the mutability of the slice's elements:
+`.len` (type `u64`) and `.ptr` are read-only pseudo-fields (D3.5). `s.ptr` is a pointer to the
+element type whose target has the mutability of the slice's elements: textually, delete the
+slice's own `[]` (the first array suffix) together with any `mut` right after it, and append `*`.
 
 | Slice type      | `.ptr` type   | Slice type      | `.ptr` type                            |
 |-----------------|---------------|-----------------|----------------------------------------|
 | `i32[]`         | `i32*`        | `Node* mut[]`   | `Node* mut*`                           |
 | `mut i32[]`     | `mut i32*`    | `mut Node*[]`   | `mut Node**`                           |
 | `i32[] mut`     | `i32*`        | `string[]`      | `string*`                              |
-| `fn i32(i32)[]` | `fn i32(i32)*`| `i32[][4]`      | error: pointer to `i32[4]` (D3.6)      |
+| `fn i32(i32)[]` | `fn i32(i32)*`| `i32[][4]`      | `i32[4]*`                              |
+| `i32[][]`       | `i32[]*`      | `i32[][] mut`   | `i32[] mut*`                           |
 
 ```fort
 mut i32[] s = new(i32[8]);           // eight zeroed elements, all levels mutable
@@ -179,11 +180,12 @@ bool same = s == t;                  // error: no == on slices (D3.13)
 
 ### 3.3 Reading type suffixes
 
-Suffixes follow the base type (grammar section 4). `*` binds tighter than `[...]`: a `*` chain is
-read inside-out (`Node**` is a pointer to a `Node*`), and array or slice suffixes are read
-outside-in like C declarators (`i32[3][4]` is three arrays of four) (D3.6). Suffixes after a
-function type apply to the function type. Pointer-to-array and pointer-to-slice cannot be written;
-wrap such a value in a struct (D3.6).
+A type is `[mut] elem_type { array_suffix } { "*" [mut] }` (grammar section 4). Within the
+element type, `*` binds tighter than `[...]` and a `*` chain is read inside-out (`Node**` is a
+pointer to a `Node*`); array and slice suffixes are read outside-in like C declarators
+(`i32[3][4]` is three arrays of four); a `*` after the array group points to the whole array or
+slice (`u8[]*` is a pointer to a slice, `i32[4]*` a pointer to an `i32[4]`); no array suffix may
+follow such a trailing `*` (D3.6). Suffixes after a function type apply to the function type.
 
 | Type              | Reads as                                              | `sizeof` |
 |-------------------|-------------------------------------------------------|----------|
@@ -194,12 +196,14 @@ wrap such a value in a struct (D3.6).
 | `i32[4][]`        | array of 4 slices of `i32`                            | 64       |
 | `i32[][]`         | slice whose elements are slices of `i32`              | 16       |
 | `Node* mut[]`     | slice of mutable slots, each holding a `Node*`        | 16       |
+| `u8[]*`           | pointer to a slice header of `u8`                     | 8        |
+| `i32[4]*`         | pointer to a whole `i32[4]`                           | 8        |
+| `Node*[]*`        | pointer to a slice of `Node*`                         | 8        |
 | `fn i32(i32)[4]`  | array of 4 pointers to functions `fn i32(i32)`        | 32       |
 | `fn i32[4](i32)`  | pointer to a function taking `i32`, returning `i32[4]`| 8        |
 | `fn i32(i32)*`    | pointer to a slot holding a function pointer          | 8        |
 | `void*[2]`        | array of 2 opaque pointers                            | 16       |
-| `i32[4]*`         | error: pointer to array is not expressible            |          |
-| `i32[]*`          | error: pointer to slice is not expressible            |          |
+| `i32[4]*[2]`      | error: no array suffix after a trailing `*`; wrap in a struct |  |
 | `i32[4] mut`      | error: `mut` never follows a fixed-array suffix       |          |
 | `i32 mut*`        | error: `mut` precedes the base type or follows a suffix|         |
 
@@ -312,7 +316,8 @@ case Color.Red, Color.Green:
 ### 5.1 Function types
 
 A function type is written `fn R(P1, P2)` with parameter types only (D3.10, D8.1). A function
-name used as a value has its function type. Identity is structural over the parameter types
+name, or a qualified name `m.f` naming a function in module `m`, used as a value has its function
+type. Identity is structural over the parameter types
 including the mutability levels behind their indirections, the return type, and whether the
 function is `noreturn`; `mut` at level 0 of a parameter is ignored (D3.10, D5.6). `null` is a
 valid value; calling it is undefined behavior (D10.7). `==` and `!=` compare identity.
@@ -415,11 +420,12 @@ y = 2;
 
 A declared type is a chain of storage levels (D5.2). Level 0 is the binding's own storage. Each
 `*` and each `[]` suffix introduces one further level: the storage reached through that
-indirection. Levels are numbered from the binding inward: level 1 is reached through the
-outermost indirection, which is the last `*` of a pointer chain or the first `[]` of a slice
-chain, following the reading rules of section 3.3. Fixed arrays and structs add no level: their
-elements and fields live in the storage of the containing value. `string` has exactly one level
-(its characters are never mutable) and so does `void*` and every function type.
+indirection. Levels are numbered from the binding inward, following the reading rules of
+section 3.3: the trailing `*` group is read right to left first (its last `*` is level 1), then
+the array suffixes left to right, then the `*` chain of the element type right to left. Fixed
+arrays and structs add no level: their elements and fields live in the storage of the containing
+value. `string` has exactly one level (its characters are never mutable) and so does `void*` and
+every function type.
 
 | Declared type   | Level 0    | Level 1                     | Level 2                |
 |-----------------|------------|-----------------------------|------------------------|
@@ -429,6 +435,8 @@ elements and fields live in the storage of the containing value. `string` has ex
 | `i32[] s`       | `s`        | `s[i]`                      |                        |
 | `i32[][] s`     | `s`        | `s[i]` (an `i32[]` header)  | `s[i][j]`              |
 | `Node*[] t`     | `t`        | `t[i]` (a `Node*` slot)     | `*t[i]`, `t[i]->f`     |
+| `u8[]* out`     | `out`      | `*out` (a slice header)     | `(*out)[i]`            |
+| `i32[4]* pa`    | `pa`       | `*pa`, `(*pa)[i]`           |                        |
 | `i32[3][4] m`   | `m`, `m[i][j]` |                         |                        |
 | `Point q`       | `q`, `q.x` |                             |                        |
 | `string s`      | `s`        |                             |                        |
@@ -474,12 +482,19 @@ In the table, "rebind" is `x = ...` on the binding itself; "level 1" covers writ
 | `mut Point* p`       | yes                  | `p->x = 1`: yes      |                    |
 | `string[] mut v`     | yes                  | `v[i] = "a"`: no     | `v[i][0]`: never   |
 | `mut string[] v`     | yes                  | `v[i] = "a"`: yes    | `v[i][0]`: never   |
+| `u8[]* out`          | no                   | `*out = s`: no       | `(*out)[i]`: no    |
+| `u8[]* mut out`      | yes                  | `*out = s`: no       | `(*out)[i]`: no    |
+| `u8[] mut* out`      | no                   | `*out = s`: yes      | `(*out)[i]`: no    |
+| `mut u8[]* out`      | yes                  | `*out = s`: yes      | `(*out)[i]`: yes   |
+| `i32[4]* pa`         | no                   | `(*pa)[i] = 1`: no   |                    |
+| `mut i32[4]* pa`     | yes                  | `(*pa)[i] = 1`: yes  |                    |
 | `void* mut vp`       | yes                  | not applicable       |                    |
 | `mut fn i32(i32) f`  | yes                  | not applicable       |                    |
 
 In `i32[][4] s` the `[4]` adds no level, so a row `s[i]` and a cell `s[i][j]` are both at
 level 1. In `Node* mut[4] a` the `[4]` adds no level either, so the slots are level 0 and the
-`mut` after `*` makes the binding, and with it every slot, assignable.
+`mut` after `*` makes the binding, and with it every slot, assignable. In `u8[] mut* out` the
+`mut` after `[]` marks the storage that holds the slice header, which is `*out`.
 
 Rationale (D5.3): with C-style placement and the default inverted, the most common local,
 `mut Node* cur = head; cur = cur->next;`, would need `mut` twice. What cannot be expressed is
@@ -601,8 +616,7 @@ make_point().x = 1;                  // error: not an lvalue
 
 `&e` requires an lvalue and has the pointer type whose level 1 is the mutability of `e` and whose
 deeper levels come from `e`'s type (D5.8, D6.7). `new(T)` returns `mut T*` and `new(T[n])`
-returns `mut T[]` (D5.8, D10.2). `&e` is an error when `e` is a fixed array or a slice, because
-the pointer type cannot be written (D3.6).
+returns `mut T[]` (D5.8, D10.2).
 
 | Declaration           | Expression | Type                                              |
 |-----------------------|------------|---------------------------------------------------|
@@ -611,9 +625,12 @@ the pointer type cannot be written (D3.6).
 | `Node* p`             | `&p`       | `Node**`                                          |
 | `Node* mut p`         | `&p`       | `Node* mut*`                                      |
 | `mut Node* p`         | `&p`       | `mut Node**`                                      |
-| `mut i32[4] a`        | `&a[2]`    | `mut i32*`; `&a` is an error (pointer to array)   |
-| `mut i32[] s`         | `&s[0]`    | `mut i32*`; `&s` is an error (pointer to slice)   |
-| `string str`          | `&str[0]`  | `char*`; `&str` is `string*`                      |
+| `i32[4] a`            | `&a`       | `i32[4]*`                                         |
+| `mut i32[4] a`        | `&a`       | `mut i32[4]*`; `&a[2]` is `mut i32*`              |
+| `i32[] s`             | `&s`       | `i32[]*`                                          |
+| `i32[] mut s`         | `&s`       | `i32[] mut*`                                      |
+| `mut i32[] s`         | `&s`       | `mut i32[]*`; `&s[0]` is `mut i32*`               |
+| `string str`          | `&str`     | `string*`; `&str[0]` is `char*`                   |
 | `mut Point q`         | `&q.x`     | `mut i32*`                                        |
 | module `i32 K = 3;`   | `&K`       | `i32*` (D7.10)                                    |
 
@@ -937,7 +954,7 @@ extern fn void sort(i32[] xs);       // error: slices cannot cross an extern bou
 
 Generics, unions (tagged or untagged), `Result`, methods, closures, overloading, default and
 named arguments, type aliases, struct, array and slice equality, alignment and packed attributes,
-`alignof`, `sizeof(expr)`, pointer-to-array and pointer-to-slice types, and string `switch` are
-deferred; D15 lists each with the idiom to use instead (a fat struct with a kind field for
-unions, `bool` plus out-parameters for results, an opaque `u8[N]` field with a C shim for
-alignment, a struct wrapper for a pointer to an array or slice).
+`alignof`, `sizeof(expr)` and string `switch` are deferred; D15 lists each with the idiom to use
+instead (a fat struct with a kind field for unions, `bool` plus out-parameters for results, an
+opaque `u8[N]` field with a C shim for alignment). An array suffix after a trailing `*` does not
+parse in v1; wrap the pointer in a struct (D3.6).
