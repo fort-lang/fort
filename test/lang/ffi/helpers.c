@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+enum { BYTE_MASK = 0xFFU };
+
 int32_t helper_add(int32_t a, int32_t b) {
     return a + b;
 }
@@ -12,7 +14,7 @@ double helper_scale(double x, int32_t k) {
 }
 
 uint8_t helper_low_byte(uint32_t x) {
-    return (uint8_t)(x & 0xFFu);
+    return (uint8_t)(x & BYTE_MASK);
 }
 
 bool helper_is_even(int64_t n) {
