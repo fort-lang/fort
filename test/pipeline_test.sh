@@ -1,11 +1,14 @@
 #!/bin/bash
 # test/pipeline_test.sh <build-dir>: the cross pipeline of toolchain.md 2 on
-# the hand-written programs under test/asm. Each program is assembled and
-# linked by the target C compiler with <build-dir>/std/fort_rt.o, exactly as
-# the compiler will do it, and run under qemu through binfmt_misc. hello must
-# print its line and exit 0; abort must print its line, then the runtime error
-# of D11.4 on stderr, and die with SIGABRT (status 134). Both binaries must be
-# position independent (D14.3). ctest runs it as the unit test `pipeline`.
+# the hand-written LLVM IR modules under test/ir, which are the reference for
+# the form of a module (D19.1). Every emitted module must pass the verifier
+# (D19.1), so each one is verified with `opt -passes=verify` first, then
+# compiled and linked by the target clang with <build-dir>/std/fort_rt.o,
+# exactly as the compiler does it (D14.3), and run under qemu through
+# binfmt_misc. hello must print its line and exit 0; abort must
+# print its line, then the runtime error of D11.4 on stderr, and die with
+# SIGABRT (status 134). Both binaries must be position independent (D14.3).
+# ctest runs it as the unit test `pipeline`.
 set -eu
 
 if [ $# -ne 1 ]; then
@@ -13,9 +16,11 @@ if [ $# -ne 1 ]; then
     exit 2
 fi
 build=$1
-asm=$(cd "$(dirname "$0")/asm" && pwd)
+ir=$(cd "$(dirname "$0")/ir" && pwd)
 runtime=$build/std/fort_rt.o
-cc=${FORT_TARGET_CC:-x86_64-linux-gnu-gcc}
+cc=${FORT_TARGET_CC:-clang}
+opt=${FORT_OPT:-opt-18}
+target=${FORT_TARGET_TRIPLE:-x86_64-linux-gnu}
 export QEMU_LD_PREFIX=${QEMU_LD_PREFIX:-/usr/x86_64-linux-gnu}
 
 work=$(mktemp -d)
@@ -40,9 +45,23 @@ test -f "$runtime" || {
     exit 2
 }
 
+# A missing tool is a broken environment, not a failing module: report it as
+# such (exit 2) instead of letting the verification or the link fail below.
+for tool in "$opt" "$cc"; do
+    command -v "$tool" >/dev/null || {
+        echo "pipeline: $tool not found (llvm-18 and clang, see tools/provision.sh)" >&2
+        exit 2
+    }
+done
+
+# The module must satisfy the IR verifier before anything compiles it, so a
+# malformed module is reported as such and not as a compiler crash.
 for prog in hello abort; do
-    "$cc" -o "$work/$prog" "$asm/$prog.s" "$runtime" ||
-        fail "$prog: assembling and linking failed"
+    "$opt" -passes=verify -disable-output "$ir/$prog.ll" ||
+        fail "$prog: the IR verifier rejected the module"
+    "$cc" --target="$target" -O1 -fPIE -pie -Wno-override-module \
+        -o "$work/$prog" "$ir/$prog.ll" "$runtime" ||
+        fail "$prog: compiling and linking failed"
     if ! readelf -h "$work/$prog" | grep -q 'Type: *DYN'; then
         fail "$prog: not a position-independent executable"
     fi
@@ -57,7 +76,7 @@ expect_file hello.stdout "$work/hello.out" 'hello, world!
 expect_file hello.stderr "$work/hello.err" ''
 
 # drop_qemu_notice <file>: qemu-user reports a fatal signal on the program's
-# stderr ("qemu: uncaught target signal 6 (Abort) - core dumped"); native
+# stderr ("qemu: uncaught target signal 6 (Aborted) - core dumped"); native
 # execution prints nothing, so the line is not part of the expected output.
 drop_qemu_notice() {
     grep -v '^qemu: uncaught target signal' "$1" >"$1.clean" || true

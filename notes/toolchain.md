@@ -20,25 +20,31 @@ file (D14.1). Options and the entry file may appear in any order.
 | Option              | Meaning                                                    | Default    |
 |---------------------|------------------------------------------------------------|------------|
 | `-o <file>`         | output path                                                | see below  |
-| `-S`                | stop after emitting assembly                               | off        |
-| `-c`                | stop after assembling to an object file                    | off        |
+| `-S`                | stop after emitting the LLVM IR module (D19.1)             | off        |
+| `-c`                | stop after compiling it to an object file                  | off        |
 | `-I <dir>`          | add a search root after the entry directory; repeatable    | none       |
 | `--std-dir <dir>`   | standard library directory                                 | see below  |
 | `--release`         | release mode (section 3, D11.1)                            | checked    |
 | `--no-bounds-check` | remove index and slice checks (D10.6); unsafe              | checks on  |
 | `-l<lib>`           | passed to the linker as given; repeatable, in order        | none       |
-| `--cc <path>`       | C compiler used to assemble and link                       | `cc`       |
+| `--cc <path>`       | the clang that compiles and links the IR (D14.3)           | `clang`    |
+| `--target <triple>` | passed to `--cc` as `--target=<triple>` (D14.1)            | see below  |
+| `-Xcc <arg>`        | passed to `--cc` verbatim, after the arguments below       | none       |
 | `--help`            | print the usage line and exit 0                            |            |
 | `--version`         | print the compiler version and exit 0                      |            |
 
-- `-o`, `-I`, `--std-dir` and `--cc` take the following argument; `-l<lib>` is one argument.
-  `-I` roots are searched in command-line order (D9.2). The last `-o` wins.
-- The default output is `a.out`; with `-c` it is `<entry>.o` and with `-S` `<entry>.s`, where
-  `<entry>` is the entry file's base name without `.ft`, placed in the current directory as `cc`
-  does.
+- `-o`, `-I`, `--std-dir`, `--cc`, `--target` and `-Xcc` take the following argument; `-l<lib>`
+  is one argument. `-I` roots are searched in command-line order (D9.2) and `-Xcc` arguments are
+  passed in command-line order. The last `-o`, `--cc` and `--target` win.
+- `--cc` must name a clang: the compiler emits LLVM IR, not assembly or C (D14.1, D19.1). The
+  default target triple is `x86_64-linux-gnu` (D14.1).
+- The default output is `a.out`; with `-c` it is `<entry>.o` and with `-S` `<entry>.ll` (D14.1),
+  where `<entry>` is the entry file's base name without `.ft`, placed in the current directory as
+  `cc` does.
 - The default standard library directory is `$FORT_STD_DIR` when set, else `std` relative to
   the directory containing the `fort` binary.
-- `-S` and `-c` together stop at assembly. With `-S`, `-l` and `--cc` are unused.
+- `-S` and `-c` together stop at the IR. With `-S`, `-l`, `--cc`, `--target` and `-Xcc` are
+  unused.
 - `--release` and `--no-bounds-check` are independent and may be combined.
 - The entry file's directory is always a root and the current directory never is (D9.2).
 
@@ -48,26 +54,27 @@ Exit status (D14.1):
 |--------|----------------------------------------------------------------------------------|
 | 0      | success                                                                          |
 | 1      | at least one compile error was reported (section 4)                              |
-| 2      | usage error, unreadable entry file, internal error, or failure of the C compiler |
+| 2      | usage error, unreadable entry file, internal error, or failure of `--cc`         |
 
-Usage errors, internal errors and C compiler failures are reported as `fort: error: <message>`
+Usage errors, internal errors and failures of `--cc` are reported as `fort: error: <message>`
 on stderr, for example `fort: error: cannot read 'x.ft': No such file or directory` or
 `fort: error: cc failed with status 1`. `fort` with no arguments prints one usage line and exits
 with 2; `--help` prints the same line and exits 0.
 
 ```sh
 fort main.ft -o main                          # build ./main in checked mode
-fort -S main.ft                               # write main.s and stop
+fort -S main.ft                               # write main.ll and stop
 fort -c main.ft                               # write main.o and stop
-cc -o main main.o "$FORT_STD_DIR/fort_rt.o"   # link a -c object by hand
+clang --target=x86_64-linux-gnu -o main main.o "$FORT_STD_DIR/fort_rt.o"   # link -c by hand
 fort --release -o main main.ft                # release mode
 fort --release --no-bounds-check -o bench main.ft
 fort -I lib -I vendor -lm main.ft             # extra roots, link libm
-FORT_STD_DIR=/opt/fort/std fort --cc clang main.ft
+fort --cc clang-18 --target x86_64-linux-gnu -Xcc -fuse-ld=lld main.ft
+FORT_STD_DIR=/opt/fort/std fort main.ft
 ```
 
 The only environment variables read are `FORT_STD_DIR` (D14.1) and `TMPDIR`, which locates the
-temporary directory for the intermediate assembly file.
+temporary directory for the intermediate IR file (D19.1).
 
 ## 2. Build pipeline
 
@@ -78,16 +85,33 @@ Compilation is whole-program (D9.10):
 2. Parse it; resolve each import (module-system.md 2 and 3); parse each newly reached module
    until the closure is complete; reject cycles and duplicate identities (exit 1).
 3. Check every module in dependency order, imported modules first (exit 1).
-4. Emit one assembly file for the closure to `<tmp>/<entry>.s`, or to the `-S` output and stop.
-5. Run `<cc> -c -o <out> <tmp>/<entry>.s` for `-c`, otherwise
-   `<cc> -o <out> <tmp>/<entry>.s <std-dir>/fort_rt.o <-l options>` (exit 2 on failure).
+4. Emit one LLVM IR module for the closure to `<tmp>/<entry>.ll` (D19.1), or to the `-S` output
+   and stop.
+5. Run `<cc>` over that module once: it compiles and links in one invocation (D14.3), exit 2 on
+   failure. The line is
+
+   ```sh
+   clang --target=x86_64-linux-gnu -O1 -fPIE -pie -Wno-override-module \
+       -o <out> <tmp>/<entry>.ll <std-dir>/fort_rt.o <-l options> <-Xcc args>
+   ```
+
+   with `-O2` in place of `-O1` under `--release` (D14.3), and `-c` before `-o`, no `-pie`, no
+   runtime object and no `-l` for `-c`. That clang finds the cross sysroot, its `Scrt1.o`,
+   `crti.o` and `crtn.o` and `x86_64-linux-gnu-ld` by itself, so no `--sysroot`,
+   `--gcc-toolchain` or `-fuse-ld` is needed; `-Wno-override-module` silences the warning about
+   the module's own target triple, and `-x ir` must not be passed because `-x` is sticky and
+   would also treat `fort_rt.o` as IR.
 6. Remove the temporary directory.
 
 - The temporary directory comes from `mkdtemp` under `$TMPDIR` (default `/tmp`) and is removed
-  whether or not the C compiler succeeded.
-- The C compiler is invoked with exactly the arguments shown, so its default of position-
-  independent executables applies; the generated assembly is position-independent (section 6)
-  and links either way (D14.3, D16).
+  whether or not `--cc` succeeded.
+- `--cc` is invoked with exactly the arguments shown, in that order; `-fPIE -pie` and the
+  position-independent code the IR compiles to make the output a position-independent executable
+  (D14.3, D16).
+- Every emitted module passes `opt -passes=verify` (D19.1). `test/ir/*.ll` are hand-written
+  modules in the form the compiler emits and `test/pipeline_test.sh` runs this pipeline over
+  them; the language-test harness verifies the module of every test that compiles
+  (`run_tests.py --verify-ir`, section 7.3).
 - An object from `-c` contains the whole program except the runtime; linking it needs
   `<std-dir>/fort_rt.o` and nothing else (D9.10).
 
@@ -100,8 +124,9 @@ are read (module-system.md 10).
 
 ## 3. Build modes
 
-Two modes (D11.1); `--no-bounds-check` is an orthogonal switch (D10.6). Everything not listed is
-identical in every mode: no optimizer exists in v1, and the C compiler only assembles.
+Two modes (D11.1); `--no-bounds-check` is an orthogonal switch (D10.6). The compiler itself
+optimizes nothing in v1 and emits the same shape of IR in both modes; the only difference besides
+the checks below is that `--cc` compiles the module with `-O2` instead of `-O1` (D14.3).
 
 | Check                                              | checked | `--release` | `--no-bounds-check` |
 |----------------------------------------------------|---------|-------------|---------------------|
@@ -487,9 +512,15 @@ contain the substring and is for errors without a useful line, such as circular 
 `test/lang/run_tests.py [options] [filter...]` (Python 3, standard library only) runs the
 compiler named by `--fort` (default `$FORT`, else `build/debug/fort`) with `--std-dir` from
 `--std-dir` (default `$FORT_STD_DIR`, else `std` beside the compiler) and `--cc` from `--cc`
-(default `x86_64-linux-gnu-gcc`); `--runner` names a command that runs the programs when
-binfmt does not, `-j` the number of parallel tests, `--timeout` the seconds per step, `-v`
-prints the commands and outputs of failures and `--keep` keeps the temporary directories. The
+(default `clang`, which must be a clang as `--cc` is, D14.1). `--target` (default
+`x86_64-linux-gnu`) is the triple the harness passes to `--cc` as `--target=<triple>` when it
+links a test's C helpers itself. `--verify-ir` runs `fort -S -o prog.ll <test>` for every test
+whose compilation succeeds and verifies the module with `<opt> -passes=verify -disable-output`
+(D19.1); `--opt` names that program (default `opt-18`). A module the verifier rejects is a FAIL;
+an `opt` that cannot be launched, times out or dies by a signal is an ERROR, like a compiler exit
+2 (D14.1). `--runner` names a command that runs the programs when binfmt does not, `-j` the
+number of parallel tests, `--timeout` the seconds per step, `-v` prints the commands and outputs
+of failures and `--keep` keeps the temporary directories. The
 compiler runs with `test/lang` as its working directory (D14.4). For each test, in a fresh
 temporary directory that is also `TMPDIR`, with `LC_ALL=C`, `QEMU_LD_PREFIX` set unless
 inherited and core dumps disabled:
@@ -754,7 +785,8 @@ implementable; the design is to be planned in the implementation phase.
   `test/` (section 7) and a build script producing `build/fort` and `build/std/` with the library
   sources and `fort_rt.o`.
 - **Driver.** Parses options (section 1), owns the module table keyed by real path, runs the
-  passes below, invokes the C compiler and maps failures to exit statuses.
+  passes below, invokes `--cc` over the emitted module (D14.3) and maps failures to exit
+  statuses.
 - **Lexer.** A complete token array per file (kind, position, literal value) applying D2; the
   array makes each speculative parse of `grammar.md` section 7 a saved and restored index.
 - **Parser.** Recursive descent over the token array, one AST per module, with the nesting
@@ -765,10 +797,10 @@ implementable; the design is to be planned in the implementation phase.
   detection, so declaration order never matters; then each body is checked against D3 to D8 and
   D17 and the AST is annotated with types, constant values, lvalue mutability, resolved symbols
   and, on each assignment, whether the target is an `own` lvalue that needs the overwrite check.
-- **Codegen.** One pass over the annotated AST writing text assembly (section 6) with no
-  intermediate representation and no register allocation: expressions evaluate into `rax` or
-  `xmm0`, intermediates spill to the frame, locals live in frame slots, deferred statements are
-  expanded statically at each exit (D7.8).
+- **Codegen.** One forward pass over the annotated AST appending text to a single LLVM IR
+  module (D19.1, section 6), with no intermediate representation of its own, no libLLVM and no
+  register allocation: locals are `alloca`s in the entry block, intermediates are SSA
+  temporaries, and deferred statements are expanded statically at each exit (D7.8).
 - **Memory.** Arenas per compilation; nothing is freed before exit.
 
 ## 9. Not in v1

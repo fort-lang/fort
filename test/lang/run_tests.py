@@ -8,7 +8,9 @@ fresh temporary directory, and judged against its directives. `xfail.txt`
 lists the tests the compiler cannot pass yet (a listed test that passes is an
 XPASS and fails the run); `bootstrap-unsupported.txt` lists the tests that use
 features the C bootstrap deliberately lacks, which must be rejected with the
-bootstrap diagnostic. `--lint` validates the directives without a compiler.
+bootstrap diagnostic. `--lint` validates the directives without a compiler and
+`--verify-ir` runs the LLVM verifier over the module of every test that
+compiles.
 
 Standard library only; Python 3.12.
 """
@@ -48,7 +50,10 @@ HEADER_MARKERS = ("//!", "//<", "//|")
 XFAIL_NAME = "xfail.txt"
 UNSUPPORTED_NAME = "bootstrap-unsupported.txt"
 UNSUPPORTED_MESSAGE = "not supported by the bootstrap compiler"
-DEFAULT_CC = "x86_64-linux-gnu-gcc"
+# `--cc` must be a clang and its target is named on the command line (D14.1).
+DEFAULT_CC = "clang"
+DEFAULT_TARGET = "x86_64-linux-gnu"
+DEFAULT_OPT = "opt-18"
 DEFAULT_QEMU_LD_PREFIX = "/usr/x86_64-linux-gnu"
 DEFAULT_TIMEOUT = 60.0
 # qemu-user reports a fatal signal on the program's stderr ("qemu: uncaught
@@ -614,6 +619,9 @@ class Config:
     fort: str
     std_dir: str
     cc: str = DEFAULT_CC
+    target: str = DEFAULT_TARGET
+    opt: str = DEFAULT_OPT
+    verify_ir: bool = False
     runner: list = dataclasses.field(default_factory=list)
     timeout: float = DEFAULT_TIMEOUT
     keep: bool = False
@@ -658,14 +666,66 @@ def run_process(argv, cwd, env, timeout, stdin=b""):
     return Proc(argv, child.returncode, stdout, stderr)
 
 
-def compile_command(config, test, output, compile_only=False):
-    """`fort --cc CC --std-dir D <flags> [-c] -o <output> <entry>` (toolchain.md 7.3)."""
+def compile_command(config, test, output, compile_only=False, emit_ir=False):
+    """`fort --cc CC --std-dir D <flags> [-c|-S] -o <output> <entry>` (toolchain.md 7.3).
+
+    `-S` stops after the LLVM IR module (D14.1, D19.1).
+    """
     argv = [config.fort, "--cc", config.cc, "--std-dir", config.std_dir]
     argv.extend(test.flags)
     if compile_only:
         argv.append("-c")
+    if emit_ir:
+        argv.append("-S")
     argv.extend(["-o", output, test.entry])
     return argv
+
+
+def link_command(config, test, prog, obj):
+    """`<cc> --target=<triple> -o prog prog.o <link: files> fort_rt.o` for a test with helpers.
+
+    `--cc` is a clang and names its target on the command line (D14.1, D14.3),
+    so the harness spells the triple here exactly as the compiler does.
+    """
+    argv = [config.cc, "--target=" + config.target, "-o", prog, obj]
+    argv.extend(str(config.root / link) for link in test.links)
+    argv.append(os.path.join(config.std_dir, "fort_rt.o"))
+    return argv
+
+
+def verify_command(config, module):
+    """`<opt> -passes=verify -disable-output <module>`: the module must verify (D19.1)."""
+    return [config.opt, "-passes=verify", "-disable-output", module]
+
+
+def verify_module(config, test, workdir, env, procs):
+    """Emit the test's LLVM IR with `-S` and verify it (`--verify-ir`).
+
+    Every emitted module must pass `opt -passes=verify`, and this harness is
+    where that is checked (D19.1). Returns (verdict, reason), or (None, "")
+    when the module verifies. A module the verifier rejects is the compiler's
+    fault, hence a FAIL; a verifier that cannot be launched, times out or dies
+    by a signal is the toolchain's, hence an ERROR, like a compiler exit 2
+    (D14.1).
+    """
+    module = os.path.join(workdir, "prog.ll")
+    argv = compile_command(config, test, module, emit_ir=True)
+    emit = run_process(argv, config.root, env, config.timeout)
+    procs.append(emit)
+    verdict, reason = judge_compile(emit, True)
+    if verdict:
+        return verdict, "-S: " + reason
+    proc = run_process(verify_command(config, module), workdir, env, config.timeout)
+    procs.append(proc)
+    if not proc.started:
+        return "ERROR", "the IR verifier failed to start: " + _first_line(proc.stderr)
+    if proc.timed_out:
+        return "ERROR", "the IR verifier timed out"
+    if proc.returncode < 0:
+        return "ERROR", "the IR verifier was killed by signal %d" % -proc.returncode
+    if proc.returncode != 0:
+        return "FAIL", "the IR verifier rejected the module: " + _first_line(proc.stderr)
+    return None, ""
 
 
 def execute(config, test, unsupported):
@@ -698,17 +758,21 @@ def execute(config, test, unsupported):
             compile_proc = run_process(argv, config.root, env, config.timeout)
             procs.append(compile_proc)
             if compile_proc.returncode == 0:
-                argv = [config.cc, "-o", prog, obj]
-                argv.extend(str(config.root / link) for link in test.links)
-                argv.append(os.path.join(config.std_dir, "fort_rt.o"))
-                link_proc = run_process(argv, workdir, env, config.timeout)
+                link_proc = run_process(
+                    link_command(config, test, prog, obj), workdir, env, config.timeout
+                )
                 procs.append(link_proc)
         else:
             argv = compile_command(config, test, prog)
             compile_proc = run_process(argv, config.root, env, config.timeout)
             procs.append(compile_proc)
+        linked = link_proc is None or link_proc.returncode == 0
+        if config.verify_ir and compile_proc.returncode == 0 and linked:
+            verdict, reason = verify_module(config, test, workdir, env, procs)
+            if verdict:
+                return Result(test, verdict, reason, procs, workdir)
         run_proc = None
-        if compile_proc.returncode == 0 and (link_proc is None or link_proc.returncode == 0):
+        if compile_proc.returncode == 0 and linked:
             argv = config.runner + [prog] + test.args
             run_proc = run_process(argv, workdir, env, config.timeout, test.stdin)
             procs.append(run_proc)
@@ -754,8 +818,17 @@ def parse_args(argv):
         help="passed as --std-dir (default: $FORT_STD_DIR or std beside the compiler)",
     )
     parser.add_argument(
-        "--cc", default=DEFAULT_CC, help="C compiler for --cc and link: (default: %(default)s)"
+        "--cc", default=DEFAULT_CC, help="clang for --cc and link: (default: %(default)s)"
     )
+    parser.add_argument(
+        "--target", default=DEFAULT_TARGET, help="--target= of the link step (default: %(default)s)"
+    )
+    parser.add_argument(
+        "--verify-ir",
+        action="store_true",
+        help="also emit each compiling test's IR with -S and verify it with opt",
+    )
+    parser.add_argument("--opt", default=DEFAULT_OPT, help="LLVM opt (default: %(default)s)")
     parser.add_argument(
         "--runner", default="", help="command that runs the programs, e.g. qemu-x86_64"
     )
@@ -848,6 +921,9 @@ def main(argv=None):
         fort=fort,
         std_dir=os.path.abspath(std_dir),
         cc=args.cc,
+        target=args.target,
+        opt=args.opt,
+        verify_ir=args.verify_ir,
         runner=args.runner.split(),
         timeout=args.timeout,
         keep=args.keep,

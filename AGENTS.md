@@ -46,12 +46,14 @@ A safe(r) C-like systems programming language.
 - The shared folder can serve stale pages to tools that `mmap` a file the host rewrote (seen
   with `clang-format` reporting a line past the end of a shrunk file while `md5sum` read the
   right bytes). Recover with `tools/vm run 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"'`.
-- The target is x86-64 Linux. The compiler runs natively on arm64; generated programs run under
-  `qemu-x86_64` transparently. Always pass `--cc x86_64-linux-gnu-gcc` to `fort` (the guest `cc`
-  is aarch64). Provisioning sets `QEMU_LD_PREFIX`; the test harness sets it itself. When a
-  cross program dies by a signal, qemu-user appends `qemu: uncaught target signal 6 (Abort) -
-  core dumped` to the program's stderr; native execution prints nothing, so a harness comparing
-  stderr drops that line (`test/pipeline_test.sh` and `test/lang/run_tests.py` do).
+- The target is x86-64 Linux. The compiler runs natively on arm64, emits LLVM IR and runs `clang
+  --target=x86_64-linux-gnu` over it, so `--cc` names a clang (the guest `cc` is a native gcc and
+  would build for aarch64); generated programs run under `qemu-x86_64` transparently. The verified
+  line is in `notes/toolchain.md` 2 (D14.3), and `--target` names the triple (D14.1). Provisioning
+  sets `QEMU_LD_PREFIX`; the test harness sets it itself. When a cross program dies by a signal,
+  qemu-user appends `qemu: uncaught target signal 6 (Aborted) - core dumped` to the program's
+  stderr; native execution prints nothing, so a harness comparing stderr drops that line
+  (`test/pipeline_test.sh` and `test/lang/run_tests.py` do).
 - Provisioning disables apport and sets `kernel.core_pattern=core`: Ubuntu's piped core pattern
   ignores `ulimit -c 0` and made every SIGABRT cost about a second. A VM provisioned before that
   change needs `tools/vm provision` once (or the same two commands by hand).
@@ -67,7 +69,8 @@ A safe(r) C-like systems programming language.
   -Wshadow -Wvla -Wstrict-prototypes -Wmissing-prototypes -Wundef` apply to every C target.
 - Targets: `fort_core` (static library, `src/bootstrap/*.c` except `main.c`, globbed), `fort`
   (`build/<preset>/fort`), `fort_rt` (`runtime/fort_rt.c` cross-compiled by `FORT_TARGET_CC`,
-  default `x86_64-linux-gnu-gcc`, into `build/<preset>/std/fort_rt.o` next to a copy of
+  a clang (default `clang`) with `--target=${FORT_TARGET_TRIPLE}` (default
+  `x86_64-linux-gnu`), into `build/<preset>/std/fort_rt.o` next to a copy of
   `std/*.ft`), `fort_rt_native` (the runtime compiled natively with `-DFORT_RT_NO_MAIN` for the
   unit tests and tidy), `lang_ffi_helpers` (`test/lang/ffi/*.c` built natively so `-Werror` and
   tidy cover them), `check` (ctest label `unit`, including `lang_lint` and `lang_selftest`),
@@ -78,6 +81,12 @@ A safe(r) C-like systems programming language.
   tests are the ctest `check_comments_selftest`), `tidy` (`run-clang-tidy` over the same),
   `lines` (`tools/lines.py`: test lines per compiler line, target 3:1, `--min RATIO` fails
   below it). `tools/vm <target> [preset]` runs one.
+- A CMake variable derived from a cache variable must not be cached itself: `find_program`
+  caches by default, so `FORT_TARGET_CC_PATH` kept resolving to the old program after
+  `FORT_TARGET_CC` changed in an existing build directory, and the build then ran gcc with
+  clang's arguments. It uses `NO_CACHE`; check for the same trap before adding a `find_program`
+  or `find_file` whose `NAMES` come from a cache variable, or delete `build/<preset>` after such
+  a change.
 - `tools/vm gate` is the merge gate: `format-check`, `tidy`, and `check-all` under `debug`,
   `asan` and `ubsan` (it configures `debug` first, then configures and builds each preset before
   its `check-all`).
@@ -107,11 +116,14 @@ A safe(r) C-like systems programming language.
   The sanitizer presets run the unit tests with `allocator_may_return_null=1` (ctest sets the
   environment, `cmake/sanitizers.cmake`) because the runtime's out-of-memory path is tested with
   an impossible allocation; run a suite by hand under those presets with the same variable.
-- The cross pipeline: `test/asm/*.s` are hand-written x86-64 programs that follow the codegen
-  contract (`notes/toolchain.md` 6); `test/pipeline_test.sh <build-dir>` assembles them with
-  `x86_64-linux-gnu-gcc` and `<build-dir>/std/fort_rt.o`, runs them under qemu and checks
-  stdout, stderr and the status byte-exactly; ctest `pipeline` (label `unit`). `*.s` is
-  gitignored except `test/asm/*.s`.
+- The cross pipeline: `test/ir/*.ll` are hand-written LLVM 18 modules that are the reference for
+  the form of a module until `notes/toolchain.md` 6 is rewritten against them (D19.1,
+  `test/ir/README.md`); `test/pipeline_test.sh <build-dir>`
+  verifies each with `opt-18 -passes=verify`, compiles and links it with `clang
+  --target=x86_64-linux-gnu` and `<build-dir>/std/fort_rt.o`, runs it under qemu and checks
+  stdout, stderr and the status byte-exactly; ctest `pipeline` (label `unit`). `*.ll` is
+  gitignored except `test/ir/*.ll`. `run_tests.py --verify-ir` runs the same verifier over the
+  `-S` output of every language test that compiles.
 - clang-tidy's `readability-function-size` caps `main` at about 60 `TEST_RUN`s (statement
   threshold 800; each `TEST_RUN` expands to about 13 statements, so 89 measured 1162): split a
   larger suite into two files with a shared `test/<component>_helpers.h` whose helpers are

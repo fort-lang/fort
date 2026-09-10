@@ -59,23 +59,30 @@ set_target_properties(fort PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_D
 # ---- the C runtime -------------------------------------------------------------
 # fort_rt.o is the runtime object linked into every generated program
 # (toolchain.md 2, 5). It is built for the x86-64 target by FORT_TARGET_CC,
-# outside CMake's compiler settings, so it is never sanitized.
-set(FORT_TARGET_CC "x86_64-linux-gnu-gcc" CACHE STRING
-    "C compiler that builds the target (x86-64) runtime object fort_rt.o")
-find_program(FORT_TARGET_CC_PATH NAMES "${FORT_TARGET_CC}")
+# outside CMake's compiler settings, so it is never sanitized. FORT_TARGET_CC
+# must name a clang, since the compiler drives the same program over the LLVM
+# IR it emits, with --target=${FORT_TARGET_TRIPLE} (D14.1, D14.3).
+set(FORT_TARGET_CC "clang" CACHE STRING
+    "clang that builds the target (x86-64) runtime object fort_rt.o")
+set(FORT_TARGET_TRIPLE "x86_64-linux-gnu" CACHE STRING
+    "target of FORT_TARGET_CC, passed as --target=")
+# NO_CACHE: the path must follow FORT_TARGET_CC. A cached result would survive
+# a change of FORT_TARGET_CC in an existing build directory and keep running
+# the previous program, which then receives arguments meant for the new one.
+find_program(FORT_TARGET_CC_PATH NAMES "${FORT_TARGET_CC}" NO_CACHE)
 if(NOT FORT_TARGET_CC_PATH)
-    message(FATAL_ERROR "FORT_TARGET_CC: compiler not found: ${FORT_TARGET_CC}")
+    message(FATAL_ERROR "FORT_TARGET_CC: clang not found: ${FORT_TARGET_CC}")
 endif()
 
 set(FORT_RT_OBJECT "${FORT_STD_DIR}/fort_rt.o")
 add_custom_command(
     OUTPUT "${FORT_RT_OBJECT}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${FORT_STD_DIR}"
-    COMMAND "${FORT_TARGET_CC_PATH}"
+    COMMAND "${FORT_TARGET_CC_PATH}" "--target=${FORT_TARGET_TRIPLE}"
             -std=c11 -D_POSIX_C_SOURCE=200809L -O2 -g -fPIE ${FORT_C_WARNINGS}
             -c -o "${FORT_RT_OBJECT}" "${FORT_RUNTIME_DIR}/fort_rt.c"
     DEPENDS "${FORT_RUNTIME_DIR}/fort_rt.c" "${FORT_RUNTIME_DIR}/fort_rt.h"
-    COMMENT "Cross-compiling runtime/fort_rt.c with ${FORT_TARGET_CC}"
+    COMMENT "Cross-compiling runtime/fort_rt.c with ${FORT_TARGET_CC} for ${FORT_TARGET_TRIPLE}"
     VERBATIM
 )
 
@@ -124,16 +131,17 @@ foreach(test_source IN LISTS FORT_UNIT_TEST_SOURCES)
     list(APPEND FORT_UNIT_TEST_TARGETS "${test_target}")
 endforeach()
 
-# The cross pipeline: hand-written x86-64 programs under test/asm that follow
-# the codegen contract (toolchain.md 6) are assembled and linked with the
-# cross-compiled fort_rt.o and run under qemu (toolchain.md 2). It is a unit
-# test so that check covers it; it needs the runtime object, not the compiler.
+# The cross pipeline: the hand-written LLVM IR modules under test/ir, which
+# are the reference for the form of a module (D19.1, test/ir/README.md), are
+# verified with opt, compiled and linked with the cross-compiled fort_rt.o and
+# run under qemu (toolchain.md 2). It is a unit test so that check covers it;
+# it needs the runtime object, not the compiler.
 add_test(NAME pipeline
     COMMAND bash "${FORT_TEST_DIR}/pipeline_test.sh" "${CMAKE_BINARY_DIR}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(pipeline PROPERTIES
     LABELS unit
-    ENVIRONMENT "FORT_TARGET_CC=${FORT_TARGET_CC_PATH}")
+    ENVIRONMENT "FORT_TARGET_CC=${FORT_TARGET_CC_PATH};FORT_TARGET_TRIPLE=${FORT_TARGET_TRIPLE}")
 
 # The C helpers of the language tests are cross-compiled by the harness; they
 # are also built natively here so that -Werror and clang-tidy cover them. They
