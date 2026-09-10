@@ -1,6 +1,6 @@
-/* Unit tests of str.h: views, the FNV-1a hash of stdlib.md 2.5, owned
- * copies and the string pool. The fatal exits and the allocation helpers
- * have their own suite, mem_test.c, and the byte buffer sb_test.c. */
+// Unit tests of str.h: views, the FNV-1a hash of stdlib.md 2.5, owned
+// copies and the string pool. The fatal exits and the allocation helpers
+// have their own suite, mem_test.c, and the byte buffer sb_test.c.
 #include "str.h"
 
 #include <stdint.h>
@@ -12,7 +12,7 @@
 
 enum { ERR_MAX = 256 };
 
-/* The FNV-1a vectors of stdlib.md 2.5 and test/lang/programs/hashmap.ft. */
+// The FNV-1a vectors of stdlib.md 2.5 and test/lang/programs/hashmap.ft.
 static const uint64_t FNV_EMPTY = 14695981039346656037ULL;
 static const uint64_t FNV_A = 12638187200555641996ULL;
 static const uint64_t FNV_AB = 620445648566982762ULL;
@@ -21,8 +21,8 @@ static const uint64_t FNV_BYTE_FF = 12638352127299873646ULL;
 static const uint64_t FNV_BYTE_00 = 12638153115695167455ULL;
 static const uint64_t FNV_HELLO_WORLD = 8618312879776256743ULL;
 
-/* Single high bytes, as C strings; brace initializers with commas cannot sit
- * inside a TEST body. */
+// Single high bytes, as C strings; brace initializers with commas cannot sit
+// inside a TEST body.
 static const char BYTE_FF[] = {(char)0xFFU, '\0'};
 static const char BYTE_80[] = {(char)0x80U, '\0'};
 
@@ -30,12 +30,12 @@ static str_t s(const char* text) {
     return str_from_cstr(text);
 }
 
-/* Whether the view holds exactly the given text. */
+// Whether the view holds exactly the given text.
 static bool view_is(str_t v, const char* text) {
     return str_eq(v, str_from_cstr(text));
 }
 
-/* ---- constructors ------------------------------------------------------------ */
+// ---- constructors ---------------------------------------------------------------
 
 TEST(from_cstr_measures_up_to_the_terminator, {
     const char* text = "hello";
@@ -79,7 +79,7 @@ TEST(from_span_of_a_substring_is_a_view_into_the_source, {
     TEST_ASSERT_TRUE(world.ptr == text + 6);
 })
 
-/* ---- equality ------------------------------------------------------------------ */
+// ---- equality ---------------------------------------------------------------------
 
 TEST(eq_compares_bytes_and_length, {
     TEST_ASSERT_TRUE(str_eq(s("abc"), s("abc")));
@@ -114,7 +114,7 @@ TEST(eq_is_symmetric_for_differing_lengths, {
     TEST_ASSERT_FALSE(str_eq(s("aa"), s("a")));
 })
 
-/* ---- order ---------------------------------------------------------------------- */
+// ---- order -------------------------------------------------------------------------
 
 TEST(cmp_of_equal_strings_is_zero, {
     TEST_ASSERT_EQ_INT32(str_cmp(s("abc"), s("abc")), 0);
@@ -137,8 +137,8 @@ TEST(cmp_puts_a_proper_prefix_first, {
 })
 
 TEST(cmp_uses_unsigned_byte_order, {
-    /* 0xFF sorts after 'a' as an unsigned byte; as a signed char it would
-     * sort before. */
+    // 0xFF sorts after 'a' as an unsigned byte; as a signed char it would
+    // sort before.
     TEST_ASSERT_EQ_INT32(str_cmp(str_from_cstr(BYTE_FF), s("a")), 1);
     TEST_ASSERT_EQ_INT32(str_cmp(s("a"), str_from_cstr(BYTE_FF)), -1);
     TEST_ASSERT_EQ_INT32(str_cmp(str_from_cstr(BYTE_80), str_from_cstr(BYTE_FF)), -1);
@@ -157,7 +157,7 @@ TEST(cmp_sees_embedded_nul_bytes, {
     TEST_ASSERT_EQ_INT32(str_cmp(str_from_span(a, 3), str_from_span(a, 3)), 0);
 })
 
-/* ---- hash ------------------------------------------------------------------------ */
+// ---- hash ---------------------------------------------------------------------------
 
 TEST(hash_of_the_empty_string_is_the_offset_basis, {
     TEST_ASSERT_EQ_UINT64(str_hash(s("")), FNV_EMPTY);
@@ -185,7 +185,7 @@ TEST(hash_covers_nul_bytes_inside_the_view, {
 })
 
 TEST(hash_is_a_step_by_step_fnv1a, {
-    /* One step from the hash of "a" gives the hash of "ab". */
+    // One step from the hash of "a" gives the hash of "ab".
     uint64_t h = str_hash(s("a"));
     h ^= (uint64_t)'b';
     h *= 0x100000001b3ULL;
@@ -196,7 +196,7 @@ TEST(hash_depends_only_on_the_bytes, {
     char a[] = "same text";
     char b[] = "same text";
     TEST_ASSERT_EQ_UINT64(str_hash(str_from_cstr(a)), str_hash(str_from_cstr(b)));
-    /* A span in the middle of a longer text hashes like the text alone. */
+    // A span in the middle of a longer text hashes like the text alone.
     TEST_ASSERT_EQ_UINT64(str_hash(str_from_span(&"xxsame textxx"[2], 9)),
                           str_hash(str_from_cstr("same text")));
 })
@@ -207,7 +207,7 @@ TEST(hash_differs_for_differing_inputs, {
     TEST_ASSERT_TRUE(str_hash(s("a")) != str_hash(s("aa")));
 })
 
-/* ---- starts_with and index_of -------------------------------------------------- */
+// ---- starts_with and index_of -----------------------------------------------------
 
 TEST(starts_with_accepts_an_empty_prefix, {
     TEST_ASSERT_TRUE(str_starts_with(s("abc"), s("")));
@@ -252,7 +252,7 @@ TEST(index_of_stays_inside_the_view, {
     TEST_ASSERT_EQ_INT64(str_index_of(str_from_span(text, 4), 'd'), (int64_t)3);
 })
 
-/* ---- dup and del -------------------------------------------------------------- */
+// ---- dup and del -----------------------------------------------------------------
 
 TEST(dup_makes_an_independent_nul_terminated_copy, {
     char text[] = "copy me";
@@ -294,7 +294,7 @@ TEST(dup_copies_embedded_nul_bytes, {
 TEST(del_of_the_zero_view_is_a_no_op, { str_del(str_from_cstr(NULL)); })
 
 static void dup_of_the_largest_view(void) {
-    /* len + 1 for the terminator overflows before anything is allocated. */
+    // len + 1 for the terminator overflows before anything is allocated.
     TEST_UNUSED(str_dup(str_from_span("", UINT64_MAX)));
 }
 
@@ -304,7 +304,7 @@ TEST(dup_of_a_view_whose_length_plus_one_overflows_is_out_of_memory, {
     TEST_ASSERT_EQ_STR(err, "fort: error: out of memory\n");
 })
 
-/* ---- string pool -------------------------------------------------------------- */
+// ---- string pool -----------------------------------------------------------------
 
 TEST(pool_init_is_the_empty_pool, {
     str_pool_t p;
@@ -402,8 +402,8 @@ TEST(pool_views_stay_stable_across_many_interns, {
 TEST(pool_opens_a_new_block_when_the_current_one_is_full, {
     str_pool_t p;
     str_pool_init(&p);
-    /* A string of STR_POOL_BLOCK_SIZE - 1 bytes fills a block exactly with
-     * its terminator. */
+    // A string of STR_POOL_BLOCK_SIZE - 1 bytes fills a block exactly with
+    // its terminator.
     char* big = mem_alloc(STR_POOL_BLOCK_SIZE);
     for (int i = 0; i < STR_POOL_BLOCK_SIZE - 1; i++) {
         big[i] = 'x';
@@ -434,8 +434,8 @@ TEST(pool_gives_an_oversized_string_its_own_block, {
     TEST_ASSERT_TRUE(str_eq(v, str_from_span(big, big_len)));
     TEST_ASSERT_EQ_CHAR(v.ptr[big_len], '\0');
     TEST_ASSERT_EQ_UINT64(p.block_len, (uint64_t)2);
-    /* The small block stays current: the next small string lands after
-     * "small". */
+    // The small block stays current: the next small string lands after
+    // "small".
     TEST_ASSERT_TRUE(p.cur == p.blocks[0]);
     TEST_ASSERT_EQ_UINT64(p.used, (uint64_t)6);
     const str_t next = str_pool_intern(&p, s("next"));

@@ -1,9 +1,9 @@
-/* The fort C runtime (toolchain.md 5).
- *
- * Every entry point of toolchain.md 5.1 except the float printers, which
- * arrive with a later ticket. All formatting is done by hand, without stdio,
- * so that the bytes written are exactly those of D11.4 and D11.7 and the code
- * carries over to a fort rewrite unchanged. */
+// The fort C runtime (toolchain.md 5).
+//
+// Every entry point of toolchain.md 5.1 except the float printers, which
+// arrive with a later ticket. All formatting is done by hand, without stdio,
+// so that the bytes written are exactly those of D11.4 and D11.7 and the code
+// carries over to a fort rewrite unchanged.
 #include "fort_rt.h"
 
 #include <errno.h>
@@ -12,43 +12,43 @@
 #include <string.h>
 #include <unistd.h>
 
-/* ---- descriptors and buffers (D11.5, toolchain.md 5.3) -------------------- */
+// ---- descriptors and buffers (D11.5, toolchain.md 5.3) -----------------------
 
 enum {
     STDOUT_FD = 1,
     STDERR_FD = 2,
-    /* Bytes held back per descriptor before a write. */
+    // Bytes held back per descriptor before a write.
     BUFFER_SIZE = 8192,
-    /* Descriptors buffered at once: stdout plus this many others. A program
-       that spreads output over more descriptors than this evicts the oldest
-       buffer, which is flushed and reassigned (toolchain.md 5.3 leaves the
-       buffer size and count to the runtime). */
+    // Descriptors buffered at once: stdout plus this many others. A program
+    // that spreads output over more descriptors than this evicts the oldest
+    // buffer, which is flushed and reassigned (toolchain.md 5.3 leaves the
+    // buffer size and count to the runtime).
     BUFFER_POOL_SIZE = 8,
-    /* Exit statuses are truncated to a byte (D11.6). */
+    // Exit statuses are truncated to a byte (D11.6).
     EXIT_STATUS_MASK = 0xFF,
     DECIMAL_BASE = 10,
     HEX_BASE = 16,
-    /* Longest decimal rendering: -9223372036854775808 or 18446744073709551615. */
+    // Longest decimal rendering: -9223372036854775808 or 18446744073709551615.
     DECIMAL_MAX = 20,
-    /* Longest pointer rendering: 0x followed by 16 hex digits. */
+    // Longest pointer rendering: 0x followed by 16 hex digits.
     HEX_MAX = 18,
 };
 
-/* One descriptor's pending bytes. fd is -1 while the slot is free. */
+// One descriptor's pending bytes. fd is -1 while the slot is free.
 struct fort_rt_buffer {
     int32_t fd;
     uint64_t len;
     uint8_t data[BUFFER_SIZE];
 };
 
-/* Slot 0 is stdout, always. The others are handed out in order and evicted
-   round-robin once every slot is taken. */
+// Slot 0 is stdout, always. The others are handed out in order and evicted
+// round-robin once every slot is taken.
 static struct fort_rt_buffer buffers[1 + BUFFER_POOL_SIZE];
 static bool buffers_ready = false;
 static uint64_t next_eviction = 1;
 
-/* The line of a failure is assembled here so that it reaches stderr in one
-   write when it fits. */
+// The line of a failure is assembled here so that it reaches stderr in one
+// write when it fits.
 static struct fort_rt_buffer message;
 
 static void buffers_init(void) {
@@ -63,8 +63,8 @@ static void buffers_init(void) {
     buffers_ready = true;
 }
 
-/* Writes n bytes to fd, retrying after partial writes and EINTR. A write error
-   drops the rest (toolchain.md 5.3). */
+// Writes n bytes to fd, retrying after partial writes and EINTR. A write error
+// drops the rest (toolchain.md 5.3).
 static void write_all(int32_t fd, const uint8_t* p, uint64_t n) {
     while (n > 0) {
         const ssize_t got = write(fd, p, (size_t)n);
@@ -87,8 +87,8 @@ static void buffer_flush(struct fort_rt_buffer* b) {
     }
 }
 
-/* Appends n bytes, flushing first when they do not fit and bypassing the
-   buffer entirely when they never would. */
+// Appends n bytes, flushing first when they do not fit and bypassing the
+// buffer entirely when they never would.
 static void buffer_append(struct fort_rt_buffer* b, const uint8_t* p, uint64_t n) {
     if (n > BUFFER_SIZE - b->len) {
         buffer_flush(b);
@@ -101,9 +101,9 @@ static void buffer_append(struct fort_rt_buffer* b, const uint8_t* p, uint64_t n
     b->len += n;
 }
 
-/* The buffer of a buffered descriptor, assigning a slot when it has none;
-   NULL for stderr, which is unbuffered, and for an invalid (negative) fd,
-   whose writes fail and are dropped. */
+// The buffer of a buffered descriptor, assigning a slot when it has none;
+// NULL for stderr, which is unbuffered, and for an invalid (negative) fd,
+// whose writes fail and are dropped.
 static struct fort_rt_buffer* buffer_for(int32_t fd) {
     if (fd == STDERR_FD || fd < 0) {
         return NULL;
@@ -128,7 +128,7 @@ static struct fort_rt_buffer* buffer_for(int32_t fd) {
     return &buffers[free_slot];
 }
 
-/* Sends n bytes to fd through its buffer, or straight out for stderr. */
+// Sends n bytes to fd through its buffer, or straight out for stderr.
 static void emit(int32_t fd, const uint8_t* p, uint64_t n) {
     struct fort_rt_buffer* b = buffer_for(fd);
     if (b == NULL) {
@@ -161,12 +161,12 @@ void fort_rt_flush_all(void) {
     }
 }
 
-/* ---- formatting (D11.7) ----------------------------------------------------- */
+// ---- formatting (D11.7) --------------------------------------------------------
 
 static const char HEX_DIGITS[] = "0123456789abcdef";
 
-/* Writes the decimal digits of v at the end of out and returns where they
-   start; out holds DECIMAL_MAX bytes. */
+// Writes the decimal digits of v at the end of out and returns where they
+// start; out holds DECIMAL_MAX bytes.
 static uint64_t format_u64(uint8_t out[DECIMAL_MAX], uint64_t v) {
     uint64_t start = DECIMAL_MAX;
     do {
@@ -177,8 +177,8 @@ static uint64_t format_u64(uint8_t out[DECIMAL_MAX], uint64_t v) {
     return start;
 }
 
-/* As format_u64, with a leading minus for a negative v. The magnitude of the
-   minimum is taken in unsigned arithmetic, where it is representable. */
+// As format_u64, with a leading minus for a negative v. The magnitude of the
+// minimum is taken in unsigned arithmetic, where it is representable.
 static uint64_t format_i64(uint8_t out[DECIMAL_MAX], int64_t v) {
     if (v >= 0) {
         return format_u64(out, (uint64_t)v);
@@ -189,8 +189,8 @@ static uint64_t format_i64(uint8_t out[DECIMAL_MAX], int64_t v) {
     return start;
 }
 
-/* 0x followed by the lowercase hex digits of v, no leading zeros, 0x0 for
-   zero; out holds HEX_MAX bytes. Returns where the text starts. */
+// 0x followed by the lowercase hex digits of v, no leading zeros, 0x0 for
+// zero; out holds HEX_MAX bytes. Returns where the text starts.
 static uint64_t format_hex(uint8_t out[HEX_MAX], uint64_t v) {
     uint64_t start = HEX_MAX;
     do {
@@ -253,7 +253,7 @@ void fort_rt_print_enum(int32_t fd, int32_t v, const struct fort_rt_enum_member*
     emit_i64(fd, v);
 }
 
-/* ---- failures (D11.4, toolchain.md 5.2) ------------------------------------ */
+// ---- failures (D11.4, toolchain.md 5.2) ---------------------------------------
 
 static void message_str(const char* s) {
     buffer_append(&message, (const uint8_t*)s, (uint64_t)strlen(s));
@@ -271,8 +271,8 @@ static void message_i64(int64_t v) {
     buffer_append(&message, out + start, DECIMAL_MAX - start);
 }
 
-/* Flushes every buffer, then starts the failure line with the position and
-   the kind ("runtime error", "panic" or "assertion failed"). */
+// Flushes every buffer, then starts the failure line with the position and
+// the kind ("runtime error", "panic" or "assertion failed").
 static void fail_begin(const char* file, uint32_t line, uint32_t col, const char* kind) {
     fort_rt_flush_all();
     message.len = 0;
@@ -374,7 +374,7 @@ _Noreturn void fort_rt_assert_fail(const char* text,
     fail_end();
 }
 
-/* ---- allocation (D10.2, D10.3) ---------------------------------------------- */
+// ---- allocation (D10.2, D10.3) -------------------------------------------------
 
 void* fort_rt_new(
     uint64_t elem_size, uint64_t count, const char* file, uint32_t line, uint32_t col) {
@@ -396,7 +396,7 @@ void fort_rt_del(void* p) {
     free(p);
 }
 
-/* ---- process (D11.6, D8.6) --------------------------------------------------- */
+// ---- process (D11.6, D8.6) ------------------------------------------------------
 
 static const struct fort_string* args_ptr = NULL;
 static uint64_t args_len = 0;

@@ -73,9 +73,11 @@ A safe(r) C-like systems programming language.
   tidy cover them), `check` (ctest label `unit`, including `lang_lint` and `lang_selftest`),
   `check-lang` (`test/lang/run_tests.py` with the built compiler; the same command is the ctest
   `lang`, label `lang`), `check-all` (both), `format` and `format-check` (clang-format
-  over `src`, `runtime`, `test`), `tidy` (`run-clang-tidy` over the same), `lines`
-  (`tools/lines.py`: test lines per compiler line, target 3:1, `--min RATIO` fails below it).
-  `tools/vm <target> [preset]` runs one.
+  over `src`, `runtime`, `test`), `check-comments` (`tools/check_comments.py`, which
+  `format-check` depends on: it rejects a `/* */` in the same sources, D2.2, and its own unit
+  tests are the ctest `check_comments_selftest`), `tidy` (`run-clang-tidy` over the same),
+  `lines` (`tools/lines.py`: test lines per compiler line, target 3:1, `--min RATIO` fails
+  below it). `tools/vm <target> [preset]` runs one.
 - `tools/vm gate` is the merge gate: `format-check`, `tidy`, and `check-all` under `debug`,
   `asan` and `ubsan` (it configures `debug` first, then configures and builds each preset before
   its `check-all`).
@@ -145,7 +147,8 @@ A safe(r) C-like systems programming language.
   `/* */`, as in fort (D2.2), so a region is commented out line by line; includes grouped as the
   file's own header, `<x.h>`, `<sys/x.h>`, project `"x.h"`, then `"test.h"`/`"common.h"`.
   `.clang-format` and `.clang-tidy` (clang 18) are the reference; `tools/vm format` reformats,
-  and `tools/check_comments.py` rejects a block comment. This applies to
+  and `tools/check_comments.py` rejects a block comment (`tools/vm format-check` runs it; it
+  skips a `/*` inside a string literal, a character literal or a `//` comment). This applies to
   test helpers under `test/` too. Two gaps of clang-tidy 18 are covered by review:
   `bugprone-unused-return-value` takes function names, not patterns (patterns arrive in
   clang-tidy 19), so `.clang-tidy` lists the C library and POSIX functions and the project's own

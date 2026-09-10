@@ -1,9 +1,9 @@
-/* The unit-test framework of the bootstrap compiler (toolchain.md 7.5).
- *
- * A suite defines tests with TEST(name, body), registers them with TEST_RUN in
- * main after TEST_INIT, and exits through TEST_EXIT with 0 (every test ok),
- * 1 (an assertion failed) or 2 (a test error). The first command-line argument,
- * when present, is a name prefix selecting the tests to run. */
+// The unit-test framework of the bootstrap compiler (toolchain.md 7.5).
+//
+// A suite defines tests with TEST(name, body), registers them with TEST_RUN in
+// main after TEST_INIT, and exits through TEST_EXIT with 0 (every test ok),
+// 1 (an assertion failed) or 2 (a test error). The first command-line argument,
+// when present, is a name prefix selecting the tests to run.
 #ifndef FORT_TEST_H
 #define FORT_TEST_H
 
@@ -31,8 +31,8 @@ typedef enum {
     TEST_RESULT_ TEST_FINAL_RESULT_ = TEST_RESULT_OK;                                              \
     const char* TEST_FILTER_TEST_PREFIX_ = (filter_test_prefix)
 
-/* The suite result is the worst test result: an error outranks a failure,
- * whatever the order the tests ran in. */
+// The suite result is the worst test result: an error outranks a failure,
+// whatever the order the tests ran in.
 #define TEST_FINAL_RESULT_UPDATE_(test_result)                                                     \
     do {                                                                                           \
         if ((test_result) > TEST_FINAL_RESULT_) {                                                  \
@@ -40,7 +40,7 @@ typedef enum {
         }                                                                                          \
     } while (0)
 
-/* The process exit status of a suite result: 0 ok, 1 fail, 2 error. */
+// The process exit status of a suite result: 0 ok, 1 fail, 2 error.
 static inline int test_exit_status(test_result_t final_result) {
     switch (final_result) {
     case TEST_RESULT_OK:
@@ -59,7 +59,7 @@ static inline int test_exit_status(test_result_t final_result) {
 
 #define TEST_EXIT() TEST_EXIT_(TEST_FINAL_RESULT_)
 
-/* The name of a test result as printed by TEST_RUN. */
+// The name of a test result as printed by TEST_RUN.
 static inline const char* test_result_name(test_result_t result) {
     switch (result) {
     case TEST_RESULT_OK:
@@ -96,9 +96,9 @@ static inline const char* test_result_name(test_result_t result) {
         TEST_OK();                                                                                 \
     }
 
-/* TEST_LOG_(fmt, args...) writes "<file>:<line>" and the message on the next
- * line. The whole printf argument list is the variadic part, so a call with a
- * bare format string is well-formed C11. */
+// TEST_LOG_(fmt, args...) writes "<file>:<line>" and the message on the next
+// line. The whole printf argument list is the variadic part, so a call with a
+// bare format string is well-formed C11.
 #define TEST_LOG_(...)                                                                             \
     do {                                                                                           \
         TEST_UNUSED(fprintf(stderr, "%s:%d\n\t", __FILE__, __LINE__));                             \
@@ -161,7 +161,7 @@ static inline const char* test_result_name(test_result_t result) {
 #define TEST_ASSERT_EQ_SIZE(val, exp) TEST_ASSERT_EQ_(val, exp, "%zu")
 #define TEST_ASSERT_EQ_UINT64(val, exp) TEST_ASSERT_EQ_(val, exp, "%" PRIu64)
 
-/* Equality of two NUL-terminated strings, neither NULL. */
+// Equality of two NUL-terminated strings, neither NULL.
 #define TEST_ASSERT_EQ_STR(val, exp)                                                               \
     TEST_ASSERT_OP_(val, exp, strcmp((val), (exp)) == 0, "==", "\"%s\"")
 
@@ -182,8 +182,8 @@ static inline const char* test_result_name(test_result_t result) {
 
 #define TEST_FAIL() return TEST_RESULT_FAIL
 
-/* TEST_ERROR(fmt, args...) logs "test error: " and the message, then returns
- * TEST_RESULT_ERR. */
+// TEST_ERROR(fmt, args...) logs "test error: " and the message, then returns
+// TEST_RESULT_ERR.
 #define TEST_ERROR(...)                                                                            \
     do {                                                                                           \
         TEST_UNUSED(fprintf(stderr, "%s:%d\n\ttest error: ", __FILE__, __LINE__));                 \

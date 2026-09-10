@@ -1,5 +1,5 @@
-/* Unit tests of diag.h: the diagnostic lines of toolchain.md 4 (D14.2), the
- * error count, capture, and the message builder. */
+// Unit tests of diag.h: the diagnostic lines of toolchain.md 4 (D14.2), the
+// error count, capture, and the message builder.
 #include "diag.h"
 
 #include <stdint.h>
@@ -11,12 +11,12 @@
 
 enum { ERR_MAX = 1024 };
 
-/* The positions of the toolchain.md section 4 example, for the helpers that
- * run outside a TEST body. */
+// The positions of the toolchain.md section 4 example, for the helpers that
+// run outside a TEST body.
 enum { USE_LINE = 7, USE_COL = 5, DECL_LINE = 3, DECL_COL = 9 };
 
-/* Every test that captures starts from a clean count and an empty sink and
- * restores stderr at the end. */
+// Every test that captures starts from a clean count and an empty sink and
+// restores stderr at the end.
 static sb_t sink;
 
 static void begin_capture(void) {
@@ -35,7 +35,7 @@ static const char* captured(void) {
     return sb_cstr(&sink);
 }
 
-/* ---- loc ------------------------------------------------------------------------ */
+// ---- loc ---------------------------------------------------------------------------
 
 TEST(loc_make_fills_every_field, {
     const loc_t loc = loc_make("main.ft", 7, 5);
@@ -50,7 +50,7 @@ TEST(loc_holds_the_largest_line_and_column, {
     TEST_ASSERT_EQ_UINT64((uint64_t)loc.col, (uint64_t)UINT32_MAX);
 })
 
-/* ---- errors and notes --------------------------------------------------------- */
+// ---- errors and notes ------------------------------------------------------------
 
 TEST(error_prints_the_toolchain_format, {
     begin_capture();
@@ -166,7 +166,7 @@ TEST(many_diagnostics_accumulate_in_the_sink, {
     }
     TEST_ASSERT_EQ_UINT64(diag_count(), (uint64_t)500);
     TEST_ASSERT_TRUE(str_starts_with(sb_view(&sink), str_from_cstr("a.ft:1:1: error: e\n")));
-    /* "a.ft:<n>:1: error: e\n": 18 bytes plus the digits of n. */
+    // "a.ft:<n>:1: error: e\n": 18 bytes plus the digits of n.
     const uint64_t fixed = strlen("a.ft:") + strlen(":1: error: e\n");
     uint64_t expected = 0;
     for (int i = 1; i <= 500; i++) {
@@ -176,7 +176,7 @@ TEST(many_diagnostics_accumulate_in_the_sink, {
     end_capture();
 })
 
-/* ---- capture ---------------------------------------------------------------------- */
+// ---- capture -------------------------------------------------------------------------
 
 static void write_to_stderr_uncaptured(void) {
     diag_capture(NULL);
@@ -238,7 +238,7 @@ TEST(switching_sinks_routes_later_lines_to_the_new_one, {
     diag_reset();
 })
 
-/* ---- message builder ------------------------------------------------------------ */
+// ---- message builder ---------------------------------------------------------------
 
 TEST(msg_begin_empties_the_buffer, {
     sb_t m;
@@ -353,7 +353,7 @@ TEST(msg_end_returns_the_buffer_and_keeps_its_length, {
     TEST_ASSERT_TRUE(text == m.data);
     TEST_ASSERT_EQ_UINT64(m.len, (uint64_t)3);
     TEST_ASSERT_EQ_STR(text, "abc");
-    /* Ending twice is harmless. */
+    // Ending twice is harmless.
     TEST_ASSERT_EQ_STR(msg_end(&m), "abc");
     TEST_ASSERT_EQ_UINT64(m.len, (uint64_t)3);
     sb_free(&m);

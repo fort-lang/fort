@@ -186,27 +186,27 @@ declares the ones it needs with `extern fn`
 function, `fort_rt_panic`, `fort_rt_assert_fail` and `fort_rt_exit` is `_Noreturn`.
 
 ```c
-/* Types shared with generated code. */
-struct fort_string { const char* ptr; uint64_t len; };    /* fort string, D3.7 */
-struct fort_slice  { void* ptr; uint64_t len; };          /* fort T[], D3.5 */
+// Types shared with generated code.
+struct fort_string { const char* ptr; uint64_t len; };    // fort string, D3.7
+struct fort_slice  { void* ptr; uint64_t len; };          // fort T[], D3.5
 struct fort_rt_enum_member { int32_t value; const char* name; };
 
-/* Allocation (D10.2, D10.3). fort_rt_new returns zeroed storage for count elements
-   of elem_size bytes, at least one byte so the result is never null (new(T[0]) is
-   non-null); an overflowing product or a failed calloc is a runtime error at loc.
-   fort_rt_del is free(p); a null p is a no-op. Ownership (D17) is erased: the
-   runtime sees plain pointers, and the compiler zeroes a del or move operand
-   itself (section 6, item 14). */
+// Allocation (D10.2, D10.3). fort_rt_new returns zeroed storage for count elements
+// of elem_size bytes, at least one byte so the result is never null (new(T[0]) is
+// non-null); an overflowing product or a failed calloc is a runtime error at loc.
+// fort_rt_del is free(p); a null p is a no-op. Ownership (D17) is erased: the
+// runtime sees plain pointers, and the compiler zeroes a del or move operand
+// itself (section 6, item 14).
 void* fort_rt_new(uint64_t elem_size, uint64_t count, loc);
 void  fort_rt_del(void* p);
 
-/* Failures (D11.4): flush every buffer, write one line to stderr, abort().
-   Values arrive sign-extended to 64 bits; hi is len for e[lo..]; type is the
-   NUL-terminated name of the shifted operand's type; text is the NUL-terminated
-   source text of the assert argument. fail_div_overflow is MIN / -1 and MIN % -1;
-   fail_alloc_count is new(T[n]) with a negative signed n; fail_overwrite is an
-   assignment to an own reference-typed lvalue whose current value is not zero
-   (D17.11), emitted in checked builds only. */
+// Failures (D11.4): flush every buffer, write one line to stderr, abort().
+// Values arrive sign-extended to 64 bits; hi is len for e[lo..]; type is the
+// NUL-terminated name of the shifted operand's type; text is the NUL-terminated
+// source text of the assert argument. fail_div_overflow is MIN / -1 and MIN % -1;
+// fail_alloc_count is new(T[n]) with a negative signed n; fail_overwrite is an
+// assignment to an own reference-typed lvalue whose current value is not zero
+// (D17.11), emitted in checked builds only.
 void fort_rt_fail_bounds(int64_t index, uint64_t len, loc);
 void fort_rt_fail_slice(int64_t lo, int64_t hi, uint64_t len, loc);
 void fort_rt_fail_overflow(loc);
@@ -218,9 +218,9 @@ void fort_rt_fail_overwrite(loc);
 void fort_rt_panic(const char* ptr, uint64_t len, loc);
 void fort_rt_assert_fail(const char* text, loc);
 
-/* Printing (D11.5, D11.7, D12.2): format one value per D11.7 and append it to the
-   buffer of fd. fort_rt_flush writes out one buffer (io.close and io.flush call it);
-   fort_rt_flush_all writes out every buffer, at exit and before every failure. */
+// Printing (D11.5, D11.7, D12.2): format one value per D11.7 and append it to the
+// buffer of fd. fort_rt_flush writes out one buffer (io.close and io.flush call it);
+// fort_rt_flush_all writes out every buffer, at exit and before every failure.
 void fort_rt_print_i64(int32_t fd, int64_t v);
 void fort_rt_print_u64(int32_t fd, uint64_t v);
 void fort_rt_print_f32(int32_t fd, float v);
@@ -234,15 +234,15 @@ void fort_rt_print_enum(int32_t fd, int32_t v, const struct fort_rt_enum_member*
 void fort_rt_flush(int32_t fd);
 void fort_rt_flush_all(void);
 
-/* Process (D11.6, D8.6). main calls fort_rt_args_init, which builds the args
-   slice from argv (one string per argument, NUL-terminated since it is the argv
-   byte sequence itself), then fort_entry, then fort_rt_flush_all, and returns
-   status & 0xFF. fort_entry is emitted by the compiler (module-system.md 11).
-   The args slice lives for the whole process and std::libc declares
-   fort_rt_args_ptr and fort_rt_args_len for sys.args(); fort_rt_args_init is
-   called by main only and exists so the native runtime object, built without
-   main, can be tested. fort_rt_exit flushes every buffer, then
-   exit(status & 0xFF); std::libc declares it for sys.exit. */
+// Process (D11.6, D8.6). main calls fort_rt_args_init, which builds the args
+// slice from argv (one string per argument, NUL-terminated since it is the argv
+// byte sequence itself), then fort_entry, then fort_rt_flush_all, and returns
+// status & 0xFF. fort_entry is emitted by the compiler (module-system.md 11).
+// The args slice lives for the whole process and std::libc declares
+// fort_rt_args_ptr and fort_rt_args_len for sys.args(); fort_rt_args_init is
+// called by main only and exists so the native runtime object, built without
+// main, can be tested. fort_rt_exit flushes every buffer, then
+// exit(status & 0xFF); std::libc declares it for sys.exit.
 int main(int argc, char** argv);
 int32_t fort_entry(const struct fort_slice* args);
 void fort_rt_args_init(int argc, char** argv);

@@ -1,12 +1,12 @@
-/* Diagnostics and the message builder; see diag.h. */
+// Diagnostics and the message builder; see diag.h.
 #include "diag.h"
 
 #include <stdio.h>
 
-/* Errors reported since the last diag_reset. */
+// Errors reported since the last diag_reset.
 static uint64_t error_count = 0;
 
-/* Where the lines go: the capture buffer, or stderr when NULL. */
+// Where the lines go: the capture buffer, or stderr when NULL.
 static sb_t* capture_sink = NULL;
 
 loc_t loc_make(const char* file, uint32_t line, uint32_t col) {
@@ -17,7 +17,7 @@ loc_t loc_make(const char* file, uint32_t line, uint32_t col) {
     return loc;
 }
 
-/* Writes one `<file>:<line>:<col>: <kind>: <msg>` line (toolchain.md 4). */
+// Writes one `<file>:<line>:<col>: <kind>: <msg>` line (toolchain.md 4).
 static void diag_write(loc_t loc, const char* kind, const char* msg) {
     sb_t line;
     sb_init(&line);
@@ -60,7 +60,7 @@ void diag_capture(sb_t* sink) {
     capture_sink = sink;
 }
 
-/* ---- message builder ------------------------------------------------------------ */
+// ---- message builder ---------------------------------------------------------------
 
 void msg_begin(sb_t* m) {
     sb_clear(m);

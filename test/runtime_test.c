@@ -1,12 +1,12 @@
-/* Unit tests of the C runtime (toolchain.md 5): the formatting of every
- * print entry point (D11.7), buffering and flush order (D11.5), the message
- * of every failure entry point (D11.4), allocation (D10.2, D10.3), the
- * argument vector (D8.6) and exit (D11.6).
- *
- * Output is captured by pointing a descriptor at a temporary file. A failure
- * entry point aborts the process, so each one runs in a forked child whose
- * stdout and stderr are both tied to one pipe; the parent checks the bytes
- * and the SIGABRT. */
+// Unit tests of the C runtime (toolchain.md 5): the formatting of every
+// print entry point (D11.7), buffering and flush order (D11.5), the message
+// of every failure entry point (D11.4), allocation (D10.2, D10.3), the
+// argument vector (D8.6) and exit (D11.6).
+//
+// Output is captured by pointing a descriptor at a temporary file. A failure
+// entry point aborts the process, so each one runs in a forked child whose
+// stdout and stderr are both tied to one pipe; the parent checks the bytes
+// and the SIGABRT.
 #include <signal.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -17,19 +17,19 @@
 
 #include "test.h"
 
-/* The literals below are the sample values and the expected texts of the
-   formatting rules; naming each one would only hide what is being checked. */
+// The literals below are the sample values and the expected texts of the
+// formatting rules; naming each one would only hide what is being checked.
 // NOLINTBEGIN(readability-magic-numbers)
 
 enum {
     CAPTURE_MAX = 4096,
-    /* The runtime's buffer is at most this large: a program that has printed
-       this many bytes has seen at least one flush. */
+    // The runtime's buffer is at most this large: a program that has printed
+    // this many bytes has seen at least one flush.
     BUFFER_BOUND = 65536,
-    /* Enough to overrun any reasonable buffer several times. */
+    // Enough to overrun any reasonable buffer several times.
     LARGE_OUTPUT = 4 * BUFFER_BOUND,
     CHUNK = 1024,
-    /* More descriptors than the runtime keeps buffers for. */
+    // More descriptors than the runtime keeps buffers for.
     MANY_FDS = 24,
     STATUS_OVER_A_BYTE = 300,
     STATUS_OVER_A_BYTE_TRUNCATED = 44,
@@ -38,18 +38,18 @@ enum {
 static const char FILE_NAME[] = "dir/main.ft";
 enum { LINE = 12, COL = 14 };
 
-/* ---- capturing a descriptor ------------------------------------------------ */
+// ---- capturing a descriptor ---------------------------------------------------
 
-/* A descriptor redirected to a temporary file: `fd` is the number the runtime
-   writes to and `saved` its previous target, or -1 when `fd` is the temporary
-   file's own descriptor. */
+// A descriptor redirected to a temporary file: `fd` is the number the runtime
+// writes to and `saved` its previous target, or -1 when `fd` is the temporary
+// file's own descriptor.
 typedef struct {
     int fd;
     int saved;
     FILE* file;
 } capture_t;
 
-/* Captures fd, or a fresh descriptor of its own when fd is negative. */
+// Captures fd, or a fresh descriptor of its own when fd is negative.
 static capture_t capture_begin(int fd) {
     capture_t c;
     c.fd = fd;
@@ -67,8 +67,8 @@ static capture_t capture_begin(int fd) {
     return c;
 }
 
-/* Reads everything written so far into buf, NUL-terminated, and returns its
-   length. */
+// Reads everything written so far into buf, NUL-terminated, and returns its
+// length.
 static size_t capture_read(const capture_t* c, char* buf, size_t size) {
     TEST_UNUSED(fseek(c->file, 0, SEEK_SET));
     const size_t got = fread(buf, 1, size - 1, c->file);
@@ -76,7 +76,7 @@ static size_t capture_read(const capture_t* c, char* buf, size_t size) {
     return got;
 }
 
-/* The number of bytes written so far. */
+// The number of bytes written so far.
 static long capture_size(const capture_t* c) {
     return lseek(c->fd, 0, SEEK_END);
 }
@@ -93,7 +93,7 @@ static void capture_end(capture_t* c) {
 
 #define ASSERT_SIZE(capture, n) TEST_ASSERT_EQ_INT64(capture_size(&(capture)), (int64_t)(n))
 
-/* Fails the test with both texts when they differ. */
+// Fails the test with both texts when they differ.
 #define ASSERT_SAME_TEXT(actual, expected)                                                         \
     do {                                                                                           \
         const char* want = (expected);                                                             \
@@ -108,7 +108,7 @@ static void capture_end(capture_t* c) {
         }                                                                                          \
     } while (0)
 
-/* Runs body with fd 1 captured, flushes, and returns the bytes it produced. */
+// Runs body with fd 1 captured, flushes, and returns the bytes it produced.
 static size_t stdout_of(void (*body)(void), char* buf, size_t size) {
     capture_t c = capture_begin(1);
     body();
@@ -125,15 +125,15 @@ static size_t stdout_of(void (*body)(void), char* buf, size_t size) {
         ASSERT_SAME_TEXT(actual, expected);                                                        \
     } while (0)
 
-/* ---- running a failure in a child ----------------------------------------- */
+// ---- running a failure in a child --------------------------------------------
 
 typedef struct {
     int status;
     char out[CAPTURE_MAX];
 } child_t;
 
-/* Forks, ties the child's fd 1 and fd 2 to one pipe, runs body there, and
-   returns the wait status and everything the child wrote, in order. */
+// Forks, ties the child's fd 1 and fd 2 to one pipe, runs body there, and
+// returns the wait status and everything the child wrote, in order.
 static child_t run_child(void (*body)(void)) {
     child_t r;
     r.status = -1;
@@ -180,7 +180,7 @@ static bool aborted(const child_t* r) {
         TEST_ASSERT_TRUE(aborted(&r));                                                             \
     } while (0)
 
-/* ---- integers (D11.7) ------------------------------------------------------- */
+// ---- integers (D11.7) ----------------------------------------------------------
 
 static void print_i64_samples(void) {
     fort_rt_print_i64(1, 0);
@@ -231,7 +231,7 @@ TEST(every_decimal_length_is_rendered_without_padding, {
                   "1000000000000000000,10000000000000000000,");
 })
 
-/* ---- bool, char, string ------------------------------------------------------ */
+// ---- bool, char, string ---------------------------------------------------------
 
 static void print_bools(void) {
     fort_rt_print_bool(1, 1);
@@ -273,9 +273,9 @@ TEST(str_prints_len_bytes_and_ignores_the_pointer_when_empty, {
     TEST_ASSERT_EQ_INT32(memcmp(actual, "hellowora\0b", 11), 0);
 })
 
-/* ---- pointers ------------------------------------------------------------------ */
+// ---- pointers ---------------------------------------------------------------------
 
-/* Fixed bit patterns, not real addresses: the text they render to is fixed. */
+// Fixed bit patterns, not real addresses: the text they render to is fixed.
 // NOLINTBEGIN(performance-no-int-to-ptr)
 static void print_pointers(void) {
     fort_rt_print_ptr(1, NULL);
@@ -294,7 +294,7 @@ TEST(ptr_prints_0x_and_lowercase_hex_without_leading_zeros, {
     ASSERT_STDOUT(print_pointers, "0x0 0x7fffabcd1234 0x10 0xffffffffffffffff 0x123456789abcdef");
 })
 
-/* ---- enums ---------------------------------------------------------------------- */
+// ---- enums -------------------------------------------------------------------------
 
 static const struct fort_rt_enum_member COLOR[] = {
     {0, "red"},
@@ -331,7 +331,7 @@ static void print_enum_fallbacks(void) {
 TEST(enum_prints_the_number_when_no_member_matches,
      { ASSERT_STDOUT(print_enum_fallbacks, "2 -1 -2147483648 5 7"); })
 
-/* ---- buffering (D11.5) ------------------------------------------------------- */
+// ---- buffering (D11.5) ----------------------------------------------------------
 
 TEST(stdout_is_held_until_flushed, {
     capture_t c = capture_begin(1);
@@ -486,7 +486,7 @@ TEST(a_write_error_is_ignored, {
     TEST_UNUSED(fclose(file));
 })
 
-/* ---- failures (D11.4, toolchain.md 5.2) -------------------------------------- */
+// ---- failures (D11.4, toolchain.md 5.2) -----------------------------------------
 
 static void fail_bounds(void) {
     fort_rt_fail_bounds(5, 3, FILE_NAME, LINE, COL);
@@ -687,7 +687,7 @@ TEST(a_message_longer_than_the_runtime_buffer_is_complete, {
     TEST_ASSERT_EQ_INT32(last, '\n');
 })
 
-/* ---- allocation (D10.2, D10.3) ------------------------------------------------ */
+// ---- allocation (D10.2, D10.3) ---------------------------------------------------
 
 TEST(new_returns_zeroed_storage, {
     uint8_t* p = fort_rt_new(4, 8, FILE_NAME, LINE, COL);
@@ -737,8 +737,8 @@ static void new_too_large(void) {
     TEST_UNUSED(fort_rt_new(1ULL << 62, 1, FILE_NAME, LINE, COL));
 }
 
-/* A sanitizer allocator that returns null first prints a "==<pid>==WARNING"
-   line of its own; the runtime's line must be the exact tail of the output. */
+// A sanitizer allocator that returns null first prints a "==<pid>==WARNING"
+// line of its own; the runtime's line must be the exact tail of the output.
 TEST(new_reports_out_of_memory, {
     const child_t r = run_child(new_too_large);
     const char* line = "dir/main.ft:12:14: runtime error: out of memory\n";
@@ -760,7 +760,7 @@ TEST(new_failure_flushes_first, {
                        "pendingdir/main.ft:12:14: runtime error: allocation size overflow\n");
 })
 
-/* ---- process (D11.6, D8.6) ------------------------------------------------------ */
+// ---- process (D11.6, D8.6) ---------------------------------------------------------
 
 TEST(args_are_empty_before_init, {
     TEST_ASSERT_NULL(fort_rt_args_ptr());
