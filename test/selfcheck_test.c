@@ -6,6 +6,7 @@
  * re-run this executable with a neg_* prefix to check the exit status, the
  * logged message and the filter. */
 #include <stdlib.h>
+
 #include <sys/wait.h>
 
 #include "test.h"

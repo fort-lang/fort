@@ -1,39 +1,122 @@
 # clang-tidy 18 configuration for the C11 sources (AGENTS.md, C sources).
-# Ticket T-004 tunes the check set; this is the minimal C configuration.
+# Only checks and options that clang-tidy 18 knows; check with
+# `clang-tidy --verify-config`.
+#
+# Every bugprone, clang-analyzer, misc, performance and readability check is
+# on, except:
+# - the analyzer groups that do not apply to this project: C++ (cplusplus,
+#   optin.cplusplus), macOS (osx, optin.osx), WebKit, Fuchsia handles and MPI;
+#   the C++-only checks of the other groups match nothing in C and stay
+#   listed;
+# - clang-analyzer-optin.performance.Padding: a struct layout heuristic, not a
+#   project rule;
+# - bugprone-easily-swappable-parameters: (file, line, col) parameter runs
+#   are the runtime ABI;
+# - clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling:
+#   memcpy and friends have no annex K replacement in glibc;
+# - misc-include-cleaner: include-what-you-use is not a project rule;
+# - misc-no-recursion: the compiler is a recursive descent parser;
+# - readability-function-cognitive-complexity, readability-identifier-length,
+#   readability-implicit-bool-conversion: style rules the project does not
+#   have.
 Checks: >
   -*,
   bugprone-*,
+  clang-analyzer-*,
   misc-*,
   performance-*,
   readability-*,
+  -clang-analyzer-cplusplus*,
+  -clang-analyzer-optin.cplusplus*,
+  -clang-analyzer-osx*,
+  -clang-analyzer-optin.osx*,
+  -clang-analyzer-webkit*,
+  -clang-analyzer-fuchsia*,
+  -clang-analyzer-optin.mpi*,
+  -clang-analyzer-optin.performance.Padding,
   -bugprone-easily-swappable-parameters,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -misc-include-cleaner,
+  -misc-no-recursion,
   -readability-function-cognitive-complexity,
-  -readability-implicit-bool-conversion,
   -readability-identifier-length,
-  -misc-include-cleaner
+  -readability-implicit-bool-conversion
 
+WarningsAsErrors: '*'
 HeaderFilterRegex: '.*'
-WarningsAsErrors: "*"
 
 CheckOptions:
-  - { key: readability-identifier-naming.StructCase,              value: lower_case }
-  - { key: readability-identifier-naming.UnionCase,               value: lower_case }
-  - { key: readability-identifier-naming.EnumCase,                value: lower_case }
-  - { key: readability-identifier-naming.TypedefCase,             value: lower_case }
-  - { key: readability-identifier-naming.TypedefSuffix,           value: _t }
-  - { key: readability-identifier-naming.FunctionCase,            value: lower_case }
-  - { key: readability-identifier-naming.VariableCase,            value: lower_case }
-  - { key: readability-identifier-naming.ParameterCase,           value: lower_case }
-  - { key: readability-identifier-naming.MemberCase,              value: lower_case }
-  - { key: readability-identifier-naming.MacroDefinitionCase,     value: UPPER_CASE }
-  - { key: readability-identifier-naming.MacroDefinitionIgnoredRegexp, value: '^TEST_.*_$' }
-  - { key: readability-identifier-naming.EnumConstantCase,        value: UPPER_CASE }
-  - { key: readability-identifier-naming.GlobalConstantCase,      value: UPPER_CASE }
-  - { key: readability-identifier-naming.StaticConstantCase,      value: UPPER_CASE }
-  - { key: readability-identifier-naming.LocalConstantCase,       value: lower_case }
-  - { key: readability-identifier-naming.ConstantParameterCase,   value: lower_case }
-  - { key: readability-identifier-naming.ConstantMemberCase,      value: lower_case }
+  # Names (AGENTS.md, C sources): lower_case for functions, variables,
+  # parameters, members and struct/union/enum tags; lower_case with the
+  # suffix _t for typedefs; UPPER_CASE for enum constants, file-scope
+  # constants (static or not), function-scope static constants and macros.
+  # Macros private to a header end with an underscore (TEST_LOG_); clang-tidy
+  # rejects a trailing underscore in every style, so they are matched apart.
+  - { key: readability-identifier-naming.FunctionCase,          value: lower_case }
+  - { key: readability-identifier-naming.VariableCase,          value: lower_case }
+  - { key: readability-identifier-naming.ParameterCase,         value: lower_case }
+  - { key: readability-identifier-naming.MemberCase,            value: lower_case }
+  - { key: readability-identifier-naming.StructCase,            value: lower_case }
+  - { key: readability-identifier-naming.UnionCase,             value: lower_case }
+  - { key: readability-identifier-naming.EnumCase,              value: lower_case }
+  - { key: readability-identifier-naming.TypedefCase,           value: lower_case }
+  - { key: readability-identifier-naming.TypedefSuffix,         value: _t }
+  - { key: readability-identifier-naming.LocalConstantCase,     value: lower_case }
+  - { key: readability-identifier-naming.ConstantParameterCase, value: lower_case }
+  - { key: readability-identifier-naming.ConstantMemberCase,    value: lower_case }
+  - { key: readability-identifier-naming.EnumConstantCase,      value: UPPER_CASE }
+  - { key: readability-identifier-naming.GlobalConstantCase,    value: UPPER_CASE }
+  - { key: readability-identifier-naming.StaticConstantCase,    value: UPPER_CASE }
+  - { key: readability-identifier-naming.MacroDefinitionCase,   value: UPPER_CASE }
+  - { key: readability-identifier-naming.MacroDefinitionIgnoredRegexp, value: '^[A-Z][A-Z0-9_]*_$' }
+
+  # No magic numbers, powers of two allowed (AGENTS.md, C sources). The
+  # defaults also allow 0 to 4. clang-tidy 18 does not look inside macro
+  # arguments, so the bodies of TEST(name, { ... }) are not covered.
   - { key: readability-magic-numbers.IgnorePowersOf2IntegerValues, value: true }
-  - { key: bugprone-unused-return-value.CheckedFunctions,         value: '^.*$' }
-  - { key: bugprone-unused-return-value.CheckedReturnTypes,       value: '^.*$' }
-  - { key: bugprone-unused-return-value.AllowCastToVoid,          value: true }
+
+  # Every non-void call result is used or discarded with (void) (AGENTS.md, C
+  # sources). clang-tidy 18 takes CheckedFunctions and CheckedReturnTypes as
+  # name lists, not patterns (regular expressions arrive in clang-tidy 19), so
+  # the rule is enforced for the C standard library functions of CERT ERR33-C
+  # (the default list of cert-err33-c in clang-tidy 18), the printf family
+  # ERR33-C leaves out, the string and memory functions, and the POSIX
+  # process and file calls the driver uses; the project's own functions are
+  # checked in review.
+  - { key: bugprone-unused-return-value.AllowCastToVoid, value: true }
+  - key: bugprone-unused-return-value.CheckedFunctions
+    value: >-
+      ::aligned_alloc;::asctime_s;::at_quick_exit;::atexit;::bsearch;::bsearch_s;::btowc;
+      ::c16rtomb;::c32rtomb;::calloc;::clock;::cnd_broadcast;::cnd_init;::cnd_signal;
+      ::cnd_timedwait;::cnd_wait;::ctime_s;::fclose;::fflush;::fgetc;::fgetpos;::fgets;
+      ::fgetwc;::fopen;::fopen_s;::fprintf;::fprintf_s;::fputc;::fputs;::fputwc;::fputws;
+      ::fread;::freopen;::freopen_s;::fscanf;::fscanf_s;::fseek;::fsetpos;::ftell;
+      ::fwprintf;::fwprintf_s;::fwrite;::fwscanf;::fwscanf_s;::getc;::getchar;::getenv;
+      ::getenv_s;::gets_s;::getwc;::getwchar;::gmtime;::gmtime_s;::localtime;::localtime_s;
+      ::malloc;::mbrtoc16;::mbrtoc32;::mbsrtowcs;::mbsrtowcs_s;::mbstowcs;::mbstowcs_s;
+      ::memchr;::mktime;::mtx_init;::mtx_lock;::mtx_timedlock;::mtx_trylock;::mtx_unlock;
+      ::printf_s;::putc;::putwc;::raise;::realloc;::remove;::rename;::scanf;::scanf_s;
+      ::setlocale;::setvbuf;::signal;::snprintf;::snprintf_s;::sprintf;::sprintf_s;::sscanf;
+      ::sscanf_s;::strchr;::strerror_s;::strftime;::strpbrk;::strrchr;::strstr;::strtod;
+      ::strtof;::strtoimax;::strtok;::strtok_s;::strtol;::strtold;::strtoll;::strtoul;
+      ::strtoull;::strtoumax;::strxfrm;::swprintf;::swprintf_s;::swscanf;::swscanf_s;
+      ::thrd_create;::thrd_detach;::thrd_join;::thrd_sleep;::time;::timespec_get;::tmpfile;
+      ::tmpfile_s;::tmpnam;::tmpnam_s;::tss_create;::tss_get;::tss_set;::ungetc;::ungetwc;
+      ::vfprintf;::vfprintf_s;::vfscanf;::vfscanf_s;::vfwprintf;::vfwprintf_s;::vfwscanf;
+      ::vfwscanf_s;::vprintf_s;::vscanf;::vscanf_s;::vsnprintf;::vsnprintf_s;::vsprintf;
+      ::vsprintf_s;::vsscanf;::vsscanf_s;::vswprintf;::vswprintf_s;::vswscanf;::vswscanf_s;
+      ::vwprintf_s;::vwscanf;::vwscanf_s;::wcrtomb;::wcschr;::wcsftime;::wcspbrk;::wcsrchr;
+      ::wcsrtombs;::wcsrtombs_s;::wcsstr;::wcstod;::wcstof;::wcstoimax;::wcstok;::wcstok_s;
+      ::wcstol;::wcstold;::wcstoll;::wcstombs;::wcstombs_s;::wcstoul;::wcstoull;::wcstoumax;
+      ::wcsxfrm;::wctob;::wctrans;::wctype;::wmemchr;::wprintf_s;::wscanf;::wscanf_s;
+      ::printf;::puts;::putchar;::vprintf;::wprintf;::vwprintf;::putwchar;
+      ::strcmp;::strncmp;::strlen;::strnlen;::strcpy;::strncpy;::strcat;::strncat;::strspn;
+      ::strcspn;::strcoll;::strerror;::strdup;::strndup;::memcmp;::memcpy;::memmove;::memset;
+      ::atoi;::atol;::atoll;::atof;::abs;::labs;::llabs;
+      ::open;::close;::read;::write;::pipe;::dup;::dup2;::lseek;::fsync;::ftruncate;::fcntl;
+      ::fileno;::fdopen;::isatty;::dprintf;::vdprintf;::getline;::getdelim;::mmap;::munmap;
+      ::access;::stat;::fstat;::lstat;::unlink;::rmdir;::mkdir;::symlink;::chmod;::mkstemp;
+      ::mkdtemp;::chdir;::getcwd;::realpath;::readlink;::opendir;::readdir;::closedir;
+      ::popen;::pclose;::system;::fork;::execv;::execvp;::execve;::execl;::execlp;
+      ::posix_spawn;::posix_spawnp;::wait;::waitpid;::kill;::sigaction;::sigemptyset;
+      ::sigaddset;::sigprocmask;::nanosleep;::clock_gettime;::setenv;::unsetenv;::putenv

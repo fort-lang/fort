@@ -98,12 +98,20 @@ A safe(r) C-like systems programming language.
   amendment to `notes/decisions.md` is relayed to agents still writing against the old text, and
   a separate audit pass reconciles the documents afterwards.
 - **C sources**: C11 (`-std=c11`, `_POSIX_C_SOURCE=200809L`), no third-party code, warnings are
-  errors under both clang (default) and gcc (`gcc` preset). Names: functions, variables, fields
-  and struct/enum tags lower_case; typedefs lower_case with a `_t` suffix; enum constants,
-  global constants and macros UPPER_CASE (`enum { BYTE_MASK = 0xFFU }`). Every non-void call
-  result is used or discarded with `(void)` (`TEST_UNUSED` in tests); no magic numbers; uppercase
-  literal suffixes. `.clang-format` and `.clang-tidy` are the reference. This applies to test
-  helpers under `test/` too.
+  errors under both clang (default) and gcc (`gcc` preset). Names: functions, variables,
+  parameters, fields and struct/union/enum tags lower_case; typedefs lower_case with a `_t`
+  suffix; enum constants, file-scope constants (static or not), function-scope static constants
+  and macros UPPER_CASE (`enum { BYTE_MASK = 0xFFU }`); local constants lower_case; macros
+  private to a header end with an underscore (`TEST_LOG_`). Every non-void call result is used
+  or discarded with `(void)` (`TEST_UNUSED` in tests); no magic numbers (0 to 4, powers of two,
+  `1.0` and `100.0` are allowed); uppercase literal suffixes; includes grouped as the file's own
+  header, `<x.h>`, `<sys/x.h>`, project `"x.h"`, then `"test.h"`/`"common.h"`. `.clang-format`
+  and `.clang-tidy` (clang 18) are the reference; `tools/vm format` reformats. This applies to
+  test helpers under `test/` too. Two gaps of clang-tidy 18 are covered by review:
+  `bugprone-unused-return-value` takes function names, not patterns (patterns arrive in
+  clang-tidy 19), so `.clang-tidy` lists the C library and POSIX functions and the project's own
+  functions are unchecked; and `readability-magic-numbers` skips macro arguments, so
+  `TEST(name, { ... })` bodies are unchecked.
 - **fort sources**: identifier conventions per decision D1.4 (lower_case everything except
   module constants).
 - **Shell scripts**: bash with `set -eu`, clean under shellcheck at its default severity; the
@@ -138,8 +146,10 @@ Once done with a change that is a single unit of work, squash all commits on the
 via interactive rebase (`git rebase -i origin/main`, mark all but the first as `squash`). Write a
 meaningful commit message that describes _what_ and _why_ -- do not just collate the individual
 commit messages. Agents that cannot run an interactive rebase use the equivalent
-`git reset --soft main && git commit`. A feature branch made of several self-contained units of
-work (for example the language design, or a compiler pass plus its tests plus its documentation)
+`git reset --soft $(git merge-base main HEAD) && git commit` (not `git reset --soft main`:
+if `main` moved since the branch was cut, that commits the branch's old tree on top of the
+new `main` and silently reverts its newer commits). A feature branch made of several
+self-contained units of work (for example the language design, or a compiler pass plus its tests plus its documentation)
 keeps its individual commits and is merged into `main` with a merge commit
 (`git merge --no-ff`) whose message describes the whole feature. Until a remote exists, `main`
 plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitignored.
