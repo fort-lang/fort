@@ -3,7 +3,8 @@
 
 The end-to-end tests use a fake `fort` whose behavior is scripted by `//@`
 lines in the test files it is given (they are ordinary comments to the
-harness), and a fake `cc` that turns `prog.o` into `prog`. Run with
+harness), a fake `cc` that turns `prog.o` into `prog` and a fake `opt` that
+rejects a module containing the word `invalid`. Run with
 `python3 -m unittest run_tests_test` from this directory.
 """
 
@@ -28,6 +29,8 @@ FAKE_FORT = r'''#!/usr/bin/env python3
 //@ exit N          exit with status N (default 0; the program is written only on 0)
 //@ stderr TEXT     print TEXT on stderr (a diagnostic, for example)
 //@ program LINE    a line of the /bin/sh program written to -o
+//@ module LINE     a line of the LLVM module written to -o under -S
+//@ ir-exit N       exit with status N under -S (default 0)
 //@ flag FLAG       exit 2 unless FLAG is on the command line
 //@ hang            sleep, to exercise the timeout
 """
@@ -48,6 +51,7 @@ while i < len(args):
         entry = a
     i += 1
 status, program = 0, ["#!/bin/sh"]
+ir_status, module = 0, ['target triple = "x86_64-unknown-linux-gnu"']
 with open(entry) as f:
     for line in f:
         line = line.rstrip("\n")
@@ -57,11 +61,20 @@ with open(entry) as f:
             sys.stderr.write(line[11:] + "\n")
         elif line.startswith("//@ program "):
             program.append(line[12:])
+        elif line.startswith("//@ module "):
+            module.append(line[11:])
+        elif line.startswith("//@ ir-exit "):
+            ir_status = int(line[12:])
         elif line.startswith("//@ flag ") and line[9:] not in args:
             sys.stderr.write("fort: error: missing flag %s\n" % line[9:])
             sys.exit(2)
         elif line.startswith("//@ hang"):
             time.sleep(30)
+if "-S" in args:
+    if ir_status == 0:
+        with open(out, "w") as f:
+            f.write("\n".join(module) + "\n")
+    sys.exit(ir_status)
 if status == 0:
     with open(out, "w") as f:
         f.write("\n".join(program) + "\n")
@@ -70,7 +83,10 @@ sys.exit(status)
 '''
 
 FAKE_CC = r'''#!/usr/bin/env python3
-"""A stand-in linker: copies the object (a shell script) to -o and logs the other inputs."""
+"""A stand-in linker: copies the object (a shell script) to -o and logs the other inputs.
+
+An input named `broken.c` makes it fail, as a real linker would on a bad helper.
+"""
 import os
 import shutil
 import sys
@@ -78,11 +94,40 @@ import sys
 args = sys.argv[1:]
 out = args[args.index("-o") + 1]
 inputs = [a for i, a in enumerate(args) if not a.startswith("-") and args[i - 1] != "-o"]
+if any(os.path.basename(p) == "broken.c" for p in inputs):
+    sys.stderr.write("cc: error: broken.c: undefined reference\n")
+    sys.exit(1)
 shutil.copy(inputs[0], out)
 with open(out, "a") as f:
     f.write("echo linked %s\n" % " ".join(os.path.basename(p) for p in inputs[1:]))
 os.chmod(out, 0o755)
 '''
+
+FAKE_OPT = r'''#!/usr/bin/env python3
+"""A stand-in LLVM opt: rejects a module that contains the word `invalid`."""
+import sys
+
+path = sys.argv[-1]
+with open(path) as f:
+    text = f.read()
+if "invalid" in text:
+    sys.stderr.write("opt: %s:1:1: error: invalid module\n" % path)
+    sys.exit(1)
+'''
+
+
+FAKE_OPT_HANG = """#!/usr/bin/env python3
+import time
+
+time.sleep(30)
+"""
+
+FAKE_OPT_SIGNAL = """#!/usr/bin/env python3
+import os
+import signal
+
+os.kill(os.getpid(), signal.SIGKILL)
+"""
 
 
 def write(root, rel, text):
@@ -819,6 +864,7 @@ class EndToEnd(TempRoot):
         super().setUp()
         self.fort = executable(self.root, "bin/fort", FAKE_FORT)
         self.cc = executable(self.root, "bin/cc", FAKE_CC)
+        self.opt = executable(self.root, "bin/opt", FAKE_OPT)
         self.corpus = self.root / "lang"
         write(self.corpus, "ffi/helpers.c", "int helper(void) { return 1; }\n")
         (self.corpus / "std").mkdir()
@@ -1204,6 +1250,164 @@ class EndToEnd(TempRoot):
         self.assertTrue(os.path.isdir(workdir))
         self.assertTrue(os.path.isfile(os.path.join(workdir, "prog")))
         shutil.rmtree(workdir)
+
+    def verify_options(self):
+        return ["--verify-ir", "--opt", str(self.opt)]
+
+    def write_ir_test(self, name, *scripted):
+        write(
+            self.corpus,
+            name,
+            "//! run\n//! stdout:\n//| hi\n//@ program echo hi\n" + "".join(scripted),
+        )
+
+    def test_verify_ir_accepts_a_valid_module(self):
+        self.write_ir_test(
+            "run/control/001_ok.ft", '//@ module define i32 @"main.main"() { ret i32 0 }\n'
+        )
+        status, lines = self.run_main(*self.verify_options())
+        self.assertEqual(lines[0], "PASS run/control/001_ok.ft")
+        self.assertEqual(status, 0)
+
+    def test_verify_ir_rejects_a_bad_module(self):
+        self.write_ir_test("run/control/001_bad.ft", "//@ module invalid\n")
+        status, lines = self.run_main(*self.verify_options())
+        self.assertEqual(status, 1)
+        self.assertTrue(
+            lines[0].startswith(
+                "FAIL run/control/001_bad.ft: the IR verifier rejected the module: opt: "
+            ),
+            lines[0],
+        )
+        self.assertTrue(lines[0].endswith("error: invalid module"), lines[0])
+
+    def test_a_bad_module_is_verified_only_on_request(self):
+        self.write_ir_test("run/control/001_bad.ft", "//@ module invalid\n")
+        status, lines = self.run_main()
+        self.assertEqual(lines[0], "PASS run/control/001_bad.ft")
+        self.assertEqual(status, 0)
+
+    def test_verify_ir_reports_a_failing_emission(self):
+        self.write_ir_test(
+            "run/control/001_no_ir.ft",
+            "//@ ir-exit 2\n",
+            "//@ stderr fort: error: not implemented\n",
+        )
+        status, lines = self.run_main(*self.verify_options())
+        self.assertEqual(
+            lines[0],
+            "ERROR run/control/001_no_ir.ft: -S: compiler exited 2: fort: error: not implemented",
+        )
+        self.assertEqual(status, 1)
+
+    def test_verify_ir_reports_a_rejected_emission(self):
+        self.write_ir_test("run/control/001_error.ft", "//@ ir-exit 1\n")
+        status, lines = self.run_main(*self.verify_options())
+        self.assertEqual(lines[0], "FAIL run/control/001_error.ft: -S: compiler exited 1")
+        self.assertEqual(status, 1)
+
+    def test_verify_ir_needs_an_opt(self):
+        self.write_ir_test("run/control/001_ok.ft")
+        status, lines = self.run_main("--verify-ir", "--opt", str(self.root / "no-opt"))
+        self.assertEqual(status, 1)
+        self.assertTrue(
+            lines[0].startswith("ERROR run/control/001_ok.ft: the IR verifier failed to start: "),
+            lines[0],
+        )
+
+    def test_verify_ir_leaves_a_fail_test_alone(self):
+        write(
+            self.corpus,
+            "fail/mutability/001_x.ft",
+            """\
+            //! fail
+            fn i32 main() {
+                x = 2; //! error: immutable
+            }
+            //@ module invalid
+            //@ exit 1
+            //@ stderr fail/mutability/001_x.ft:3:5: error: assignment to immutable 'x'
+            """,
+        )
+        status, lines = self.run_main(*self.verify_options())
+        self.assertEqual(lines[0], "PASS fail/mutability/001_x.ft")
+        self.assertEqual(status, 0)
+
+    def test_verify_ir_timeout_and_signal_are_toolchain_errors(self):
+        self.write_ir_test("run/control/001_ok.ft")
+        hang = executable(self.root, "bin/opt_hang", FAKE_OPT_HANG)
+        status, lines = self.run_main("--verify-ir", "--opt", str(hang), "--timeout", "1")
+        self.assertEqual(lines[0], "ERROR run/control/001_ok.ft: the IR verifier timed out")
+        self.assertEqual(status, 1)
+        killed = executable(self.root, "bin/opt_signal", FAKE_OPT_SIGNAL)
+        status, lines = self.run_main("--verify-ir", "--opt", str(killed))
+        self.assertEqual(
+            lines[0], "ERROR run/control/001_ok.ft: the IR verifier was killed by signal 9"
+        )
+        self.assertEqual(status, 1)
+
+    def test_a_failed_link_is_not_masked_by_the_verifier(self):
+        write(self.corpus, "ffi/broken.c", "int broken(void);\n")
+        write(
+            self.corpus,
+            "run/ffi/001_link.ft",
+            "//! run\n//! link: ffi/broken.c\n//@ module invalid\n",
+        )
+        status, lines = self.run_main(*self.verify_options())
+        self.assertEqual(
+            lines[0],
+            "ERROR run/ffi/001_link.ft: link failed: cc: error: broken.c: undefined reference",
+        )
+        self.assertEqual(status, 1)
+
+    def test_link_command(self):
+        test = run_tests.Test("run/ffi/001_link.ft", "run/ffi/001_link.ft", "run")
+        test.links = ["ffi/helpers.c"]
+        config = run_tests.Config(root=self.corpus, fort="/bin/fort", std_dir="/std", cc="clang")
+        self.assertEqual(
+            run_tests.link_command(config, test, "/tmp/w/prog", "/tmp/w/prog.o"),
+            [
+                "clang",
+                "--target=x86_64-linux-gnu",
+                "-o",
+                "/tmp/w/prog",
+                "/tmp/w/prog.o",
+                str(self.corpus / "ffi/helpers.c"),
+                "/std/fort_rt.o",
+            ],
+        )
+
+    def test_verify_command(self):
+        config = run_tests.Config(root=self.corpus, fort="/bin/fort", std_dir="/std", opt="opt-18")
+        self.assertEqual(
+            run_tests.verify_command(config, "/tmp/w/prog.ll"),
+            ["opt-18", "-passes=verify", "-disable-output", "/tmp/w/prog.ll"],
+        )
+
+    def test_verify_ir_command(self):
+        test = run_tests.Test("run/control/001_ok.ft", "run/control/001_ok.ft", "run")
+        test.flags = ["--release"]
+        config = run_tests.Config(root=self.corpus, fort="/bin/fort", std_dir="/std")
+        self.assertEqual(
+            run_tests.compile_command(config, test, "/tmp/w/prog.ll", emit_ir=True),
+            [
+                "/bin/fort",
+                "--cc",
+                run_tests.DEFAULT_CC,
+                "--std-dir",
+                "/std",
+                "--release",
+                "-S",
+                "-o",
+                "/tmp/w/prog.ll",
+                "run/control/001_ok.ft",
+            ],
+        )
+
+    def test_defaults_name_clang_and_opt(self):
+        args = run_tests.parse_args([])
+        self.assertEqual((args.cc, args.target, args.opt), ("clang", "x86_64-linux-gnu", "opt-18"))
+        self.assertFalse(args.verify_ir)
 
     def test_runner(self):
         self.write_corpus()
