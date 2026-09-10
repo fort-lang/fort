@@ -119,7 +119,7 @@ enum, and nested inside another `brace_init` or typed literal (D6.5).
 ```ebnf
 type         = base_type [ "own" ] [ "mut" ] { ref_suffix } { array_suffix } { ref_suffix } ;
                                                             (* D3.6, D5.3, D17.2 *)
-ref_suffix   = ( "*" | "@" ) [ "own" ] [ "mut" ] ;             (* pointer D3.3, slice D3.5 *)
+ref_suffix   = ( "*" | "@" ) [ "own" ] [ "mut" ] ;             (* pointer, slice D3.5 *)
 array_suffix = "[" const_expr "]" [ "mut" ] ;                   (* fixed array, D3.4 *)
 base_type    = prim_type | "string" | "void" | fn_type | qualified_name ;
 prim_type    = "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"

@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 COMPILER_GLOBS = ("src/bootstrap/*.c", "src/bootstrap/*.h", "src/fort/*.ft")
-TEST_GLOBS = ("test/*.c", "test/lang/**/*.ft", "test/lang/ffi/*.c")
+TEST_GLOBS = ("test/*.c", "test/*.h", "test/lang/**/*.ft", "test/lang/ffi/*.c")
 TARGET_RATIO = 3.0
 
 

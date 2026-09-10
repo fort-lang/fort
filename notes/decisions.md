@@ -118,7 +118,7 @@ Owner: `type-system.md`.
   mut*`) are read-only pseudo-fields. Slices are produced by `new(T, n)` (D10.2, as `T mut@ own`),
   by slicing (D6.9, always a view) and by the zero initializer `{}`. A slice literal `{1, 2, 3}`
   does not exist.
-- **D3.6** Type suffixes read as follows. A reference suffix, `*` (pointer, D3.3) or `@` (slice,
+- **D3.6** Type suffixes read as follows. A reference suffix, `*` (pointer) or `@` (slice,
   D3.5), applies to everything to its left, so a sequence of them reads inside-out: `node**` is a
   pointer to a pointer, `node*@` a slice of pointers, `u8@*` a pointer to a slice, `u8@@` a slice of
   slices. Fixed-array suffixes form one group that reads outside-in like C declarators: `i32[3][4]`
