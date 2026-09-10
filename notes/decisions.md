@@ -674,8 +674,9 @@ Owner: `toolchain.md`.
   runtime object.
 - **D14.4** Language tests live under `test/lang/`: `run/<area>/NNN_name.ft` (compile, run,
   compare), `fail/<area>/NNN_name.ft` (must not compile), where `<area>` is one of `lexical
-  constants operators casts mutability declarations control switch defer functions structs enums
-  arrays slices strings pointers globals builtins errors modes modules ffi stdlib`, plus
+  constants operators casts mutability ownership declarations control switch defer functions
+  structs enums arrays slices strings pointers globals builtins errors modes modules ffi stdlib`,
+  plus
   `run/modules/<name>/main.ft` and
   `fail/modules/<name>/main.ft` for multi-file tests (the harness compiles `main.ft` with the
   directory as root and collects `error` annotations from every `.ft` file in it), `ffi/*.c`
