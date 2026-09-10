@@ -75,7 +75,9 @@ Owner: `type-system.md`.
 
 - **D3.1** Primitive types: `i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 bool char void`. Sizes: 1, 2,
   4, 8 bytes for the integers, 4 and 8 for the floats, 1 for `bool` and `char`; alignment equals
-  size. `void` is only a return type or the base of `void*`. There is no `byte` type.
+  size. Pointers, function pointers, slices and strings align to 8; arrays to their element;
+  structs to their most-aligned field. `void` is only a return type or the base of `void*`.
+  There is no `byte` type.
 - **D3.2** `char` is a distinct one-byte character type. It supports `== != < <= > >=` (ordered
   by unsigned byte value), `switch`, `cast` to and from integer types, and nothing else (no
   arithmetic, no bitwise operators). Char literals default to `char` (D4.3). Rationale: the user
@@ -89,7 +91,8 @@ Owner: `type-system.md`.
 - **D3.5** Slices `T[]` replace the earlier "dynamic array". A slice is a fat pointer
   `{T* ptr; u64 len}` with no ownership; all slices of the same element type (and element
   mutability, D5) are one type; the zero value is `{null, 0}`. `.len` (type `u64`) and `.ptr`
-  (type `T*` or `mut T*`) are read-only pseudo-fields. Slices are produced by `new(T[n])` (D10.2),
+  (a pointer to the element type, carrying the element level's mutability: `Node* mut[]` gives
+  `Node* mut*`) are read-only pseudo-fields. Slices are produced by `new(T[n])` (D10.2),
   by slicing (D6.9) and by the zero initializer `{}`. A slice literal `{1, 2, 3}` does not exist.
 - **D3.6** Type suffixes come in three groups, left to right. `*` suffixes directly after the
   base type make pointers to the base (`Node*`, `Node**`). Array and slice suffixes then apply
@@ -155,7 +158,8 @@ Owner: `type-system.md` (Constants), `core-language.md` (Literals).
 - **D4.1** Integer, float and char literals are untyped constants. An untyped constant takes its
   type from context: the declared type of the variable being initialized or assigned, the other
   operand of a binary operator, the parameter type, the return type, the `case` operand type, or
-  an index position (any integer type is fine there). This is the Go model. A `cast` is not a
+  an index, slice-bound or `new` count position (any integer type is fine there; a negative
+  constant in such a position is a compile error). This is the Go model. A `cast` is not a
   context: in `cast(c, T)` an untyped `c` first takes its default type (D4.5) and is then
   converted to `T` with runtime semantics (D4.4). The count operand of a shift is not a context
   either: in `u64 m = 1 << n;` the untyped `1` takes `u64` from the declaration, whatever the
@@ -182,10 +186,12 @@ Owner: `type-system.md` (Constants), `core-language.md` (Literals).
   module-level initializers): literals, `true`, `false`, `null`, module-level immutable
   declarations with constant initializers (from any module), enum members, `sizeof`, `.len` of a
   fixed-array-typed expression, unary `- ! ~`, the binary arithmetic, wrapping, bitwise, shift,
-  comparison and logical operators, `?:`, `cast` between numeric types, parentheses, and struct or
-  array literals whose leaves are constant expressions. Not constant: calls, `&` (except `&global`
-  in module-level initializers, D7.10), indexing, slicing, `.len` of slices or strings, reads of
-  `mut` globals. Typed constant folding respects the declared type: `i32 A = 2147483647;` then
+  comparison and logical operators, `?:`, `cast` among numeric types, `char` and enums (so
+  `cast(Color.Blue, i32) + 1` may size an array), parentheses, and struct or array literals whose
+  leaves are constant expressions. Not constant: calls, `&` (except `&global` in module-level
+  initializers, D7.10), field access, indexing, slicing, `.len` of slices or strings, reads of
+  `mut` globals, `null` in a `cast`. Typed constant folding respects the declared type:
+  `i32 A = 2147483647;` then
   `A + 1` is a compile error, not a runtime trap. Constant references are evaluated lazily with
   cycle detection; `i32 A = B; i32 B = A;` is an error.
 
@@ -207,8 +213,9 @@ Owner: `core-language.md` (Declarations and mutability), `type-system.md` (Mutab
   characters are never mutable). `void*` has a single level (D3.11).
 - **D5.3** Placement rule. A `mut` **before the base type** marks every level mutable, including
   the binding. A `mut` **immediately after a `*` or `[]` suffix** marks mutable exactly the
-  storage that holds the pointer or slice header built so far. Read the front `mut` as "fully
-  mutable" and any other `mut` as "this level only".
+  storage that holds the pointer or slice header introduced by that suffix. Read the front `mut`
+  as "fully mutable" and any other `mut` as "this level only". A `mut` that marks a level twice
+  (`mut i32* mut p`) is an error ("redundant mut"), so every type has one spelling.
 
   | Declaration              | rebind `p = ...` | write through `*p`, `p->f`, `p[i]` |
   |--------------------------|------------------|------------------------------------|
@@ -482,8 +489,9 @@ Owner: `memory-model.md`.
   detected. `del` does not null its argument. Allocation has no header, so `new`/`del` and C
   `malloc`/`free` are interchangeable.
 - **D10.4** No pointer arithmetic: `p + 1`, `p++` and `p[i]` are errors. The only ways to get a
-  pointer are `&`, `new`, `.ptr`, `cast` and extern calls; the only way to get a slice from a raw
-  pointer is `p[lo..hi]` (D6.9).
+  pointer are `null`, `&`, `new`, `.ptr`, `cast`, a function name, and calls; the only way to
+  get a slice from a raw pointer is the two-bound form `p[lo..hi]` (D6.9); `p[lo..]`, `p[..hi]`
+  and `p[..]` are errors because a pointer has no length.
 - **D10.5** `null` is the zero pointer and function-pointer value. `== null` and `!= null` are
   allowed only on pointers, `void*` and function pointers; slices and strings compare `.len`
   or `.ptr`. `null` has no type of its own: it is usable only where a pointer, `void*` or
@@ -518,7 +526,22 @@ Owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime)
   Formats: `<file>:<line>:<col>: runtime error: <message>` for checks (bounds, overflow, shift,
   division, allocation), `<file>:<line>:<col>: panic: <message>` for `panic`, and
   `<file>:<line>:<col>: assertion failed: <expression text>` for `assert`. Deferred code does not
-  run.
+  run. The check messages are fixed, with the offending values in decimal:
+
+  | Check                              | Message                                            |
+  |------------------------------------|----------------------------------------------------|
+  | index                              | `index 5 out of range for length 3`                |
+  | slice bounds                       | `slice bounds 2..7 out of range for length 3`      |
+  | overflow of `+ - *`, `++`, `--`, unary `-` | `integer overflow`                         |
+  | shift count                        | `shift count 64 out of range for i64`              |
+  | division or remainder by zero      | `division by zero`                                 |
+  | `MIN / -1`, `MIN % -1`             | `division overflow`                                |
+  | negative `new` count               | `negative allocation count -1`                     |
+  | `new` size overflow                | `allocation size overflow`                         |
+  | allocation failure                 | `out of memory`                                    |
+
+  The end of a `noreturn` function is guarded by a bare trap instruction (SIGILL, no message),
+  since a conforming body never reaches it.
 - **D11.5** Output buffering: `print`/`println` write to a runtime buffer for stdout;
   `eprint`/`eprintln` are unbuffered; `fprint`/`fprintln` use one runtime buffer per descriptor.
   Buffers flush when full, at exit, and before any runtime error. The runtime exports

@@ -231,11 +231,11 @@ primary_expr = int_literal | float_literal | char_literal | string_literal
 
 struct_literal = qualified_name brace_init ;                          (* D6.5 *)
 array_literal  = array_type brace_init ;                              (* D6.5 *)
-array_type     = elem_type "[" const_expr "]" { array_suffix } ;
+array_type     = elem_type "[" const_expr "]" { "[" const_expr "]" } ;
 cast_expr      = "cast" "(" expr "," type ")" ;                       (* D6.4 *)
 sizeof_expr    = "sizeof" "(" type ")" ;                              (* D3.15 *)
 new_expr       = "new" "(" alloc_type ")" ;                           (* D10.2 *)
-alloc_type     = elem_type [ "[" expr "]" { "[" const_expr "]" } ] ;
+alloc_type     = base_type { "*" } [ "[" expr "]" { "[" const_expr "]" } ] ;
 ```
 
 Notes:
@@ -245,8 +245,10 @@ Notes:
 - Comparison operators do not chain: `a < b < c` parses but is a type error (`bool < T`).
 - `-x` on an unsigned type, and `!`/`~` on the wrong types, are type errors, not parse errors.
 - `new(T[n])` always produces a slice; the first bracket after the element type holds a runtime
-  count, later brackets are fixed-array dimensions of the element (`new(i32[n][4])`). `mut` is not
-  written inside `new(...)`; the result is always fully mutable (D5.8).
+  count, later brackets are fixed-array dimensions of the element (`new(i32[n][4])`). `mut` does
+  not parse inside `new(...)`; the result is always fully mutable (D5.8).
+- An `array_literal` type has only fixed dimensions and no trailing `*`: `i32[3][]{...}` and
+  `i32[3]*{...}` do not parse.
 
 ## 7. Disambiguation
 
