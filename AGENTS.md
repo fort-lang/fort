@@ -197,35 +197,56 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
 ### Tickets
 - One markdown ticket per deliverable in `.tickets/` in the main checkout, never in a worktree;
   state is the directory: `todo/`, `inprogress/`, `done/`. Template and numbering rule in
-  `.tickets/README.md`; fields: id, title, size, depends-on, deliverable, spec, branch, worktree,
-  assignee, acceptance criteria (checkboxes), notes, log.
+  `.tickets/README.md`; fields: id, title, size, critical-path, depends-on, impl, review,
+  deliverable, spec, branch, worktree, assignee, acceptance criteria (checkboxes), notes, log.
 - A ticket is assigned only when every ticket in its `depends-on` is in `done/`. Independent
   tickets are assigned concurrently, one implementor each.
 - Acceptance criteria are verifiable inside the VM; the log records every hand-off with its
   evidence (commands run, results, review rounds, merge sha).
 
 ### Agents
-- `.claude/agents/implementor.md` (effort high, full tools) implements one ticket;
-  `.claude/agents/reviewer.md` (effort xhigh, read-only tools, the `code-review` skill) reviews
-  one branch. The coordinator is the main session. Reasoning effort is fixed per definition.
+- The coordinator is the main session. Every other role is an agent definition in
+  `.claude/agents/`, all on Opus and differing only in reasoning effort, because effort is fixed
+  per definition and cannot be overridden per call.
+- Implementors (full tools, no `Agent` tool): `impl-mech` (medium) for work the specification
+  pins completely, transcription and coverage; `impl-std` (high) for ordinary tickets that need
+  data-structure design; `impl-hard` (xhigh) for cross-cutting invariants, the calling
+  convention, memory layout, ownership and codegen; `impl-port` (medium) for transliterating a
+  tested C module into fort against an oracle.
+- Reviewers (read-only, the `code-review` skill): `rev-quick` (medium, skill at low) screens a
+  low-risk diff for conventions, tests and scope; `rev-std` (high, skill at high) reviews an
+  ordinary change; `rev-deep` (xhigh, skill at max) re-derives the invariants independently for
+  ABI, memory, ownership, exact arithmetic, unsafe casts and generated assembly.
+- Each ticket names its tiers in its `impl:` and `review:` fields. Review depth follows the risk
+  of the change, not the effort it took to write: a ticket can be `impl-std` and `rev-deep`.
+- A tier is a default, not a verdict. If a ticket run at `impl-mech` or `impl-port` fails the
+  gate twice or comes back with a must-fix finding, the coordinator re-runs it one tier up and
+  records the promotion in the ticket log; two promotions out of one tier means the mapping is
+  wrong, so change the tickets' `impl:` field rather than promoting case by case.
 - Agent definitions in `.claude/agents/` are loaded when a session starts; restart the session
   after adding or changing one.
 
 ### Review Workflow
 - Coordinator: picks a ticket whose dependencies are done, creates the worktree and branch
   (`.worktrees/fort-<id>`, `feat/<id>-<slug>`), fills branch/worktree/assignee, moves the ticket
-  to `inprogress/`, spawns an `implementor` with the ticket path and worktree.
-- Implementor: reads the ticket and the cited spec; codes and tests in the worktree with small
-  green commits; runs `tools/vm gate`; spawns a `reviewer` with the branch, worktree and ticket;
-  fixes or explicitly declines each finding in the ticket log; re-runs the gate; squashes if the
-  ticket is a single unit of work; ticks every criterion with evidence; moves the ticket to
-  `done/`; reports the branch to the coordinator.
-- Reviewer: read-only; runs the `code-review` skill on the branch against `main`; also checks
-  spec citations, tests added, `xfail.txt` updates, AGENTS.md updates and commit hygiene;
-  returns findings with file:line and severity.
+  to `inprogress/`, spawns the implementor tier the ticket's `impl:` field names, with the ticket
+  path and the worktree.
+- Implementor: reads the ticket and only the specification sections it cites; codes and tests in
+  the worktree with small commits, each green under `tools/vm check`; runs the full `tools/vm
+  gate` once, at the end; squashes if the ticket is a single unit of work; ticks every criterion
+  with its evidence; moves the ticket to `done/`; reports in at most 40 lines. It does not spawn
+  a reviewer.
+- Coordinator: spawns the reviewer tier the ticket's `review:` field names (raising it when the
+  diff turned out riskier than the ticket looked), and relays the findings to the implementor,
+  which fixes or explicitly declines each one in the ticket log. A second review round happens
+  only when the fixes changed behaviour.
+- Reviewer: read-only; runs the `code-review` skill on the branch against `main` at its tier's
+  effort; also checks spec citations, tests added, `xfail.txt` updates, AGENTS.md updates and
+  commit hygiene; returns findings with file:line and severity; never edits, commits or merges.
 - Coordinator: re-runs the gate on the branch, merges per the Change Implementation Loop
   (squash for a single unit, `--no-ff` for a multi-unit feature), deletes the worktree and
-  branch, appends the merge sha to the ticket log, and assigns the tickets it unblocked.
+  branch, appends the merge sha and the agents' token counts to the ticket log, and assigns the
+  tickets it unblocked.
 
 ### Self-Updating Context (AGENTS.md Auto-Amendment)
 AGENTS.md MUST be amended whenever a learning or course correction occurs. This applies in two
