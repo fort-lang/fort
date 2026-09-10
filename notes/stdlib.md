@@ -113,7 +113,8 @@ fn bool env(string name, mut string* out)
 
 - `exit`: flushes every runtime output buffer (D11.5) and terminates the process with status
   `code & 0xFF` (D11.6). Deferred statements of the calling function do not run. Implemented as
-  `libc.fort_rt_flush_all(); libc.exit(code);`. Ownership: none.
+  `libc.fort_rt_exit(code);`, the runtime entry point that flushes and calls C `exit`
+  (`toolchain.md` 5.1). Ownership: none.
 - `args`: returns the same `string[]` that `main` received (D8.6, D11.6): `args()[0]` is the
   program name and every element is NUL-terminated. Implemented as
   `cast(libc.fort_rt_args_ptr(), string*)[0..libc.fort_rt_args_len()]` (unchecked pointer
@@ -144,7 +145,8 @@ Thin `extern` declarations for the libc calls the other modules need, plus the r
 points of section 3, with the C types mapped per D9.8: `int` is `i32`, `size_t` is `u64`,
 `ssize_t` and `off_t` are `i64`, `mode_t` is `u32`, `char*` is `char*`, and every `void*`
 buffer is `void*`. Names are unmangled (D9.7). `open` is variadic in C; the fixed prototype is
-safe because the compiler zeroes `al` before every extern call (D9.8).
+safe because the compiler sets `al` to the number of vector registers the call uses before every
+extern call, zero here since no float is passed (D9.8).
 
 ```fort
 // open(2) flags, Linux x86-64 values.
@@ -192,6 +194,7 @@ extern fn void* fort_rt_args_ptr();
 extern fn u64 fort_rt_args_len();
 extern fn void fort_rt_flush(i32 fd);
 extern fn void fort_rt_flush_all();
+extern fn noreturn fort_rt_exit(i32 status);
 ```
 
 Semantics are those of the C functions. `malloc` and `free` are interchangeable with `new` and
@@ -653,7 +656,7 @@ fn f64 max_f64(f64 a, f64 b)
   `*cast(&x, u64*)`, which is defined because fort has no strict-aliasing rule (D10.7).
   `f64_inf()` is `f64_from_bits(0x7FF0000000000000)` and `f64_nan()` is
   `f64_from_bits(0x7FF8000000000000)`; they are functions because a call is not a constant
-  expression (D4.6) and no float literal denotes infinity (D4.4). `is_nan` is `x != x` (D6.12).
+  expression (D4.6) and no float literal denotes infinity (D6.12). `is_nan` is `x != x` (D6.12).
 - `abs_i32`, `abs_i64`: `x < 0 ? -x : x`. For `I32_MIN` and `I64_MIN` the negation traps in
   checked mode and yields the minimum again in release mode (D11.1); callers that need a total
   function test for the minimum first.
@@ -674,21 +677,28 @@ fn bool is_negative_zero(f64 x) {
 buffers and process start. This section names only what the library calls. The library uses
 the builtins `new`, `del`, `panic`, `assert` and the print family as any program does (D12);
 the runtime calls behind them are emitted by the compiler and never named in library source.
-Beyond that, `std::libc` declares four runtime entry points:
+Beyond that, `std::libc` declares five runtime entry points, whose C prototypes are fixed in
+`toolchain.md` 5.1:
 
 ```fort
 extern fn void* fort_rt_args_ptr();
 extern fn u64 fort_rt_args_len();
 extern fn void fort_rt_flush(i32 fd);
 extern fn void fort_rt_flush_all();
+extern fn noreturn fort_rt_exit(i32 status);
 ```
 
 - `fort_rt_args_ptr`, `fort_rt_args_len`: the element pointer and length of the `string[]` the
   runtime built from `argv` at process start (D11.6). They describe the same storage `main`
-  receives, so `sys.args()` and `main`'s parameter are equal slice for slice.
+  receives, so `sys.args()` and `main`'s parameter are equal slice for slice. The C prototype
+  returns a pointer to the runtime's string struct; the declaration says `void*` and `sys.args`
+  casts it to `string*` (2.1).
 - `fort_rt_flush`: writes out the runtime's buffer for one descriptor, if it has one, and is a
   no-op otherwise. `io.close` and `io.flush` call it, as D11.5 specifies.
-- `fort_rt_flush_all`: writes out every runtime buffer; `sys.exit` calls it before `libc.exit`.
+- `fort_rt_flush_all`: writes out every runtime buffer. The library does not call it; it is
+  declared for programs that write through `libc.write` after printing (2.2).
+- `fort_rt_exit`: flushes every runtime buffer and exits with `status & 0xFF`; `sys.exit` is a
+  call to it.
 
 Two properties of the runtime the library also depends on: `del` frees by the pointer alone,
 with no header and no length check (D10.3, used by 1.3), and `new(T[n])` returns zeroed

@@ -68,22 +68,22 @@ Imports appear at the top of a file, before any declaration (D9.3; `grammar.md` 
 |--------------------------------------------|---------------------------------|------------------|
 | `import std::io;`                          | `io` to the module `std::io`    | `io.close(fd)`   |
 | `import std::io as sysio;`                 | `sysio` to the module `std::io` | `sysio.close(fd)`|
-| `import std::str::compare;`                | `compare` to that declaration   | `compare(a, b)`  |
-| `import std::str::compare as cmp;`         | `cmp` to that declaration       | `cmp(a, b)`      |
-| `import std::str::{find, compare as cmp};` | `find` and `cmp`, independently | `find(s, c)`     |
+| `import std::str::cmp;`                    | `cmp` to that declaration       | `cmp(a, b)`      |
+| `import std::str::cmp as compare;`         | `compare` to that declaration   | `compare(a, b)`  |
+| `import std::str::{find, cmp as compare};` | `find` and `compare` separately | `find(s, c)`     |
 
 Resolution of `import a::b::c;` (D9.3). The grammar does not know whether `c` is a module or a
-declaration; the loader decides with at most two readings:
+declaration; the loader tries two readings, of which exactly one must succeed:
 
-| Reading | Condition                                | Result                                 |
-|---------|------------------------------------------|----------------------------------------|
-| module  | a file `a/b/c.ft` exists under some root | `c` bound to the module `a::b::c`      |
-| symbol  | a file `a/b.ft` exists under some root   | `c` bound to declaration `c` of `a::b` |
+| Reading | Condition                                        | Result                            |
+|---------|--------------------------------------------------|-----------------------------------|
+| module  | a file `a/b/c.ft` exists under some root         | `c` bound to the module `a::b::c` |
+| symbol  | `a/b.ft` exists under some root and declares `c` | `c` bound to that declaration     |
 
-- If both readings find a file the import is ambiguous and an error, whichever roots the two files
+- If both readings succeed the import is ambiguous and an error, whichever roots the two files
   live under.
-- If neither reading finds a file, the module is not found.
-- Under the symbol reading `a::b` must declare `c`; otherwise it is an error.
+- If neither succeeds the import is an error: "not found" when no file exists for either
+  reading, "has no declaration" when `a/b.ft` exists but lacks `c` (section 13).
 - At most one trailing segment names a declaration, so a one-segment path (`import math;`) has
   only the module reading.
 
@@ -97,8 +97,9 @@ Bindings:
   name already declared or already bound in the file is a duplicate-binding error.
 - Importable declarations are functions, `extern` functions, structs, enums, constants and
   globals. The import bindings of another module are not importable; there is no re-export.
-- Enum members are not declarations. `import m::Color::Red;` fails with "module `m::Color` not
-  found" because `Color` is not a file. Write `import m::Color;` and use `Color.Red`.
+- Enum members are not declarations. `import m::Color::Red;` fails with "module 'm::Color::Red'
+  not found" because neither `m/Color/Red.ft` nor `m/Color.ft` is a file. Write
+  `import m::Color;` and use `Color.Red`.
 - One module may be imported under several names, and together with some of its declarations;
   the bindings name the same entities.
 - There is no wildcard import. An unused import is not diagnosed (no warnings, D14.2).
@@ -206,9 +207,9 @@ as a function-pointer value, and may be `noreturn` (D8.5).
 | Allowed in an extern signature                  | Not allowed                          |
 |-------------------------------------------------|--------------------------------------|
 | `i8 i16 i32 i64 u8 u16 u32 u64`, `f32 f64`      | `T[]` slices, `string`, fixed arrays |
-| `bool`, `char`                                  | structs by value                     |
-| `T*`, `mut T*` for any `T`, `void*`             | enums (pass `cast(e, i32)`)          |
-| `fn R(P...)` whose signature is extern-legal    | variadic parameters                  |
+| `bool`, `char`, enums (passed as `i32`)         | structs by value                     |
+| `T*`, `mut T*` for any `T`, `void*`             | variadic parameters                  |
+| `fn R(P...)` whose signature is extern-legal    |                                      |
 | return type `void` or `noreturn`                |                                      |
 
 Structs cross the boundary through pointers only. Because struct layout is C layout (D3.8, D9.9),
@@ -232,7 +233,7 @@ a `mut Stat* buf` parameter is exactly a C `struct stat *`.
 | `const T*`                     | `T*`                                      |
 | `void*`, `const void*`         | `void*`                                   |
 | `R (*)(A, B)`                  | `fn R(A, B)`                              |
-| C `enum`                       | `i32`                                     |
+| C `enum`                       | `i32`, or a fort enum (passed as `i32`)   |
 
 A C `const` on the pointee becomes the absence of `mut`. Nothing finer is expressible, and nothing
 finer is needed at the boundary.
@@ -272,7 +273,8 @@ fn i32 by_value(void* a, void* b) {
 ```
 
 A `mut i32[] xs` is sorted with `qsort(cast(xs.ptr, void*), xs.len, sizeof(i32), by_value);`. A
-function taking a slice, string, struct or enum is not extern-legal and cannot be passed to C.
+function taking a slice, string, struct or fixed array is not extern-legal and cannot be passed
+to C.
 
 ### 8.6 Slices and strings
 
@@ -284,9 +286,10 @@ slicing or read from a file is not. A C function expecting a terminator gets a c
 (D10.2). Memory received from C as `T*` becomes a slice with `p[0..n]` (D6.9), unchecked; a
 `char*` becomes a `string` with `cast(p[0..n], string)` (D3.14). Memory from `new` may be freed
 by C `free` and memory from `malloc` by `del` (D10.3). There is no strict-aliasing rule (D10.7):
-memory may be read through any pointer type reached by `cast`. A C function that fills a buffer
-and reports its length takes the usual out-parameter shape `mut u8[]* out` (D3.6), with the
-callee writing `out->ptr` and `out->len` through a pointer to the whole slice.
+memory may be read through any pointer type reached by `cast`. A fort wrapper around a C function
+that fills a buffer and reports its length takes the usual out-parameter shape `mut u8[]* out`
+(D3.6) and rebinds the whole slice, `*out = p[0..n];`, since `.ptr` and `.len` are never
+assignable (D6.7).
 
 ### 8.7 Complete example
 
@@ -370,9 +373,9 @@ with that slice, flushes every output buffer (D11.5) and exits with `status & 0x
 is generated in the entry module: it receives the slice by hidden pointer (section 9) and calls
 `<entry>.main`, passing the slice when `main` declares the parameter. `args[0]` is the program
 name. The runtime keeps the slice for the life of the process and exposes it through
-`fort_rt_args_ptr()` and `fort_rt_args_len()`, which `std::sys` declares as externs to implement
-`sys.args()` for modules whose `main` takes no parameter. `sys.exit` (D13.2) is the other normal
-exit; a runtime error exits through `abort()` (D11.4).
+`fort_rt_args_ptr()` and `fort_rt_args_len()`, declared in `std::libc` (`stdlib.md` 3) so that
+`sys.args()` works in modules whose `main` takes no parameter. `sys.exit` (D13.2) is the other
+normal exit; a runtime error exits through `abort()` (D11.4).
 
 ## 12. Worked examples
 
@@ -468,7 +471,7 @@ is a `mut List*` (D5.8); a local named `list` would shadow the binding (section 
 
 ### 12.4 A multi-module application
 
-```
+```sh
 game/
   main.ft
   input.ft
@@ -552,7 +555,7 @@ fn i32 main() {
 `fort main.ft -o game` from any directory builds it; `game/` is the root because it contains the
 entry file, so `geom::vec` is `game/geom/vec.ft`. Output:
 
-```
+```sh
 draw at -1.0,0.0 in 800x600
 draw at 0.0,0.0 in 800x600
 draw at 0.0,0.0 in 800x600
@@ -576,14 +579,14 @@ All diagnostics follow D14.2: `<file>:<line>:<col>: error: <message>`, optionall
 | cycle (at the closing import)      | `circular import: 'main' imports 'util' imports 'main'`  |
 | one file, two paths                | `module 'util::x' is the same file as module 'x'`        |
 | module-level name reused           | `redeclaration of 'add'`                                 |
-| local reusing an enclosing local   | `redeclaration of 'i'`                                   |
+| local reusing an enclosing local   | `'i' shadows an enclosing local` (or `a parameter`)      |
 | same extern, different signatures  | `conflicting declarations of extern 'write'`             |
 | import after a declaration         | `imports must precede declarations`                      |
 | module binding as a value or type  | `'io' is a module, not a value` (or `not a type`)        |
 | `m.x` with no such declaration     | `module 'std::io' has no declaration named 'x'`          |
 | entry module without a valid `main`| `entry module 'main' must define 'fn i32 main()'`        |
 | entry base name not an identifier  | `'my-app' is not a valid module name`                    |
-| aggregate or enum in an extern     | `extern signature cannot use type 'i32[]'`               |
+| aggregate in an extern signature   | `extern signature cannot use type 'i32[]'`               |
 
 Notes accompany some of these: "not found" lists `note: looked for <path>` once per root and
 reading; the ambiguous and same-file cases give the full paths; a redeclaration points at the
