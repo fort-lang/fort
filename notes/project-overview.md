@@ -62,7 +62,7 @@ Seed tests that exercise every feature live under `test/lang/` in the format def
 |---------------|------------------------------------|--------------------------------------------|
 | Mutability    | mutable by default, `const`        | immutable by default, `mut` (D5)           |
 | Conversions   | implicit promotions and narrowing  | none; `cast(x, T)` (D3.14)                 |
-| Arrays        | decay to pointers, no length       | `T[N]` values and `T[]` slices with `.len` |
+| Arrays        | decay to pointers, no length       | `T[N]` values and `T@` slices with `.len`  |
 | Strings       | `char*` with NUL                   | `string`: immutable `{ptr, len}` (D3.7)    |
 | Overflow      | undefined for signed               | trap in checked builds, wrap in release    |
 | Bounds        | unchecked                          | always checked (D10.6)                     |

@@ -224,11 +224,11 @@ function, `fort_rt_panic`, `fort_rt_assert_fail` and `fort_rt_exit` is `_Noretur
 ```c
 // Types shared with generated code.
 struct fort_string { const char* ptr; uint64_t len; };    // fort string, D3.7
-struct fort_slice  { void* ptr; uint64_t len; };          // fort T[], D3.5
+struct fort_slice  { void* ptr; uint64_t len; };          // fort T@, D3.5
 struct fort_rt_enum_member { int32_t value; const char* name; };
 
 // Allocation (D10.2, D10.3). fort_rt_new returns zeroed storage for count elements
-// of elem_size bytes, at least one byte so the result is never null (new(T[0]) is
+// of elem_size bytes, at least one byte so the result is never null (new(T, 0) is
 // non-null); an overflowing product or a failed calloc is a runtime error at loc.
 // fort_rt_del is free(p); a null p is a no-op. Ownership (D17) is erased: the
 // runtime sees plain pointers, and the compiler zeroes a del or move operand
@@ -240,7 +240,7 @@ void  fort_rt_del(void* p);
 // Values arrive sign-extended to 64 bits; hi is len for e[lo..]; type is the
 // NUL-terminated name of the shifted operand's type; text is the NUL-terminated
 // source text of the assert argument. fail_div_overflow is MIN / -1 and MIN % -1;
-// fail_alloc_count is new(T[n]) with a negative signed n; fail_overwrite is an
+// fail_alloc_count is new(T, n) with a negative signed n; fail_overwrite is an
 // assignment to an own reference-typed lvalue whose current value is not zero
 // (D17.11), emitted in checked builds only.
 void fort_rt_fail_bounds(int64_t index, uint64_t len, loc);
@@ -383,17 +383,17 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    | `f32`, `f64`             | `float`, `double` | same            | D3.1                         |
    | `T*`, `void*`, `fn R(P)` | `ptr`             | `ptr`           | opaque (D3.10, D3.11)        |
    | `T[N]`                   | none              | `[N x T]`       | outside in (D3.6)            |
-   | `T[]`, `string`          | none              | `%fort.slice`   | `type { ptr, i64 }`          |
+   | `T@`, `string`           | none              | `%fort.slice`   | `type { ptr, i64 }`          |
    | `struct a::b::s`         | none              | `%struct.a.b.s` | fields in order, no `packed` |
    | `enum`                   | `i32`             | `i32`           | D3.9                         |
    | `void`                   | `void`            | none            | result type only             |
 
    Signedness is in the instruction, never in the type (D3.1), and an array type nests outside
-   in, so `i32[3][4]` is `[4 x [3 x i32]]` (D3.6). Every load of a `bool` place is a
+   in, so `i32[3][4]` is `[3 x [4 x i32]]` (D3.6). Every load of a `bool` place is a
    `load i8` and a `trunc`, every store a `zext` and a `store i8`, so a `bool` field has C's
    `_Bool` layout and `fort_rt_print_bool(int32_t, uint8_t)` needs no special case; the
    `trunc`/`zext` pairs disappear in the optimizer. One `%fort.slice` serves every slice and
-   `string`, because with opaque pointers `i32[]`, `u8[]` and `string` have identical IR (D3.5,
+   `string`, because with opaque pointers `i32@`, `u8@` and `string` have identical IR (D3.5,
    D3.7). `%fort.slice` and `%fort.enum_member = type { i32, ptr }` are emitted in every module,
    used or not, so the emitter tracks nothing; unused named types are legal.
 
@@ -670,7 +670,7 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
       %t0 = call ptr @fort_rt_new(i64 4, i64 1, ptr @.file.0, i32 7, i32 13)
     ```
 
-    `new(T[n])` materializes `n` as `i64` first and, when its fort type is signed, branches on
+    `new(T, n)` materializes `n` as `i64` first and, when its fort type is signed, branches on
     `icmp slt i64 %n, 0` to `fort_rt_fail_alloc_count(i64 %n, ...)`; it then calls
     `fort_rt_new(sizeof(T), %n, loc)` and writes the header field by field into the destination
     place (`getelementptr inbounds %fort.slice, ptr %d, i32 0, i32 0` for `ptr`, `i32 0, i32 1`
@@ -827,7 +827,7 @@ attributes #0 = { nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }
 fn i32 main() {
     println("before");
     i32[3] a = {};
-    mut i64 i = 5;
+    i64 mut i = 5;
     return a[i];
 }
 ```
@@ -1054,7 +1054,7 @@ path (D11.4):
 //! stdout:
 //| before
 fn i32 main() {
-    own mut i32[] xs = new(i32[3]);
+    i32 mut@ own xs = new(i32, 3);
     defer del(xs);
     println("before");
     xs[5] = 1;
@@ -1070,9 +1070,9 @@ D17.8, D17.9):
 struct node { i32 v; }
 
 fn i32 main() {
-    own mut node* a = new(node);
-    own mut node* b = a;         //! error: move
-    mut node* c = new(node);     //! error: would leak
+    node mut* own a = new(node);
+    node mut* own b = a;         //! error: move
+    node mut* c = new(node);     //! error: would leak
     node* view = a;
     del(view);                   //! error: own
     del(a);
@@ -1115,7 +1115,7 @@ A release-mode test under `test/lang/run/modes/`, whose checked-mode twin uses `
 //! stdout:
 //| -2147483648
 fn i32 main() {
-    mut i32 x = 2147483647;
+    i32 mut x = 2147483647;
     x += 1;
     println(x);
     return 0;
@@ -1141,7 +1141,7 @@ fn i32 main() {
 int32_t helper_add(int32_t a, int32_t b) { return a + b; }
 ```
 
-`args:` and `exit:` are exercised by a `main(string[] args)` that returns `cast(args.len, i32)`
+`args:` and `exit:` are exercised by a `main(string@ args)` that returns `cast(args.len, i32)`
 under `//! args: one two` and `//! exit: 3`.
 
 ### 7.5 Compiler unit tests in C
