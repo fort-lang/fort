@@ -1,156 +1,97 @@
-# C-Like Language Design Project
+# fort: project overview
 
-## Project Intent
+fort is a systems programming language that takes C as its foundation and makes a small number of
+targeted changes to remove whole classes of bugs while keeping C's directness: constants by
+default, arrays and slices that know their length, checked arithmetic, no implicit conversions,
+no fallthrough, no `goto`, a real module system. It is explicitly not trying to be Rust or C++.
+A C programmer should be productive in an afternoon, and the compiler should stay small enough for
+one person to understand.
 
-This project aims to design a new systems programming language that takes C as its foundation and makes targeted improvements to eliminate common sources of bugs while maintaining C's simplicity and directness. The language is explicitly not trying to be as safe as Rust or as feature-rich as C++, but rather a "slightly better C" that a C programmer could learn in an afternoon.
+## Status
 
-## Design Philosophy
+The v1 language design is complete. Every open question from the original notes has a recorded
+decision, and the specification documents in this directory agree with the decision log. The
+next phase is the implementation strategy and the compiler itself.
 
-### Core Principles
-1. **Familiarity First**: Maintain C-like syntax and semantics where possible
-2. **Explicit Over Implicit**: No hidden behaviors, automatic conversions, or magic
-3. **Safety Without Complexity**: Simple improvements that eliminate entire bug classes
-4. **Manual Control**: Programmer retains full control over memory and performance
-5. **Minimal Runtime**: No garbage collection, no hidden allocations
+| Phase                     | State    |
+|---------------------------|----------|
+| 1. Language design (v1)   | complete |
+| 2. Implementation plan    | next     |
+| 3. Compiler in C          | later    |
+| 4. Standard library       | later    |
+| 5. Self-hosting           | later    |
 
-### Non-Goals
-- Not trying to prevent all memory safety issues
-- Not adding advanced type system features (generics, traits, etc.) initially
-- Not targeting beginners - assumes C programming knowledge
-- Not prioritizing compile-time guarantees over simplicity
+## Documents
 
-## Language Components
+Read them in this order. Two are normative and win over the rest.
 
-### 1. Core Language (`core-language.md`)
-- Type system and primitives
-- Variables and mutability
-- Operators and expressions
-- Control flow constructs
-- Functions and calling conventions
+| Document             | Role                                                                  |
+|----------------------|-----------------------------------------------------------------------|
+| `decisions.md`       | **Normative.** Numbered decision log (`D5.3`); the source of truth.   |
+| `grammar.md`         | **Normative.** Complete EBNF and the parser's disambiguation rules.   |
+| `core-language.md`   | Lexical structure, declarations, expressions, statements, functions,  |
+|                      | builtins.                                                             |
+| `type-system.md`     | Every type, mutability levels, conversions, untyped constants, layout.|
+| `memory-model.md`    | Stack and heap, `new`/`del`, slices and strings, runtime checks, the  |
+|                      | runtime-error contract, undefined behavior.                           |
+| `module-system.md`   | Files and imports, name resolution, mangling, C FFI, calling          |
+|                      | convention, entry point.                                              |
+| `stdlib.md`          | The v1 standard library, module by module, with signatures.           |
+| `toolchain.md`       | The `fort` command, build modes, diagnostics, the C runtime, code     |
+|                      | generation contract, test conventions.                                |
 
-### 2. Memory Model (`memory-model.md`)
-- Allocation and deallocation
-- Pointer semantics
-- Array implementation
-- Stack vs heap
-- Memory safety boundaries
+Seed tests that exercise every feature live under `test/lang/` in the format defined in
+`toolchain.md`; they are the first tests the compiler has to pass.
 
-### 3. Type System (`type-system.md`)
-- Primitive types
-- Composite types (structs, arrays)
-- Type conversion rules
-- Const/mutability system
-- Future: enums, unions, aliases
+## Design principles
 
-### 4. Module System (`module-system.md`)
-- File organization
-- Import/export mechanism
-- Symbol resolution
-- Compilation model
-- Visibility (future)
+1. **Familiarity first.** C syntax and semantics wherever the change buys nothing.
+2. **Explicit over implicit.** No conversions, no promotions, no truthiness, no hidden
+   allocation, no fallthrough. `cast`, `mut` and `new` are written out.
+3. **Safety without complexity.** Bounds-checked arrays and slices, checked arithmetic, mandatory
+   initialization, no pointer arithmetic, exhaustive enum switches.
+4. **Manual control.** Explicit `new`/`del`, C-compatible struct layout, a raw-pointer escape
+   hatch (`p[lo..hi]`) for foreign memory.
+5. **Minimal runtime.** A few hundred lines of C: allocation, checks, printing, process start.
 
-### 5. Standard Library (`stdlib.md`)
-- Built-in functions
-- Core data structures
-- I/O operations
-- String handling
-- C interop layer
+## What fort changes relative to C
 
-### 6. Toolchain (`toolchain.md`)
-- Compiler architecture
-- Build system
-- Debugger support
-- Package management (future)
-- Documentation tools
+| Area          | C                                  | fort                                       |
+|---------------|------------------------------------|--------------------------------------------|
+| Mutability    | mutable by default, `const`        | immutable by default, `mut` (D5)           |
+| Conversions   | implicit promotions and narrowing  | none; `cast(x, T)` (D3.14)                 |
+| Arrays        | decay to pointers, no length       | `T[N]` values and `T[]` slices with `.len` |
+| Strings       | `char*` with NUL                   | `string`: immutable `{ptr, len}` (D3.7)    |
+| Overflow      | undefined for signed               | trap in checked builds, wrap in release    |
+| Bounds        | unchecked                          | always checked (D10.6)                     |
+| Initialization| optional                           | mandatory; `new` zeroes (D7.1, D10.2)      |
+| Null          | `0`/`NULL`                         | `null` keyword, pointers only (D10.5)      |
+| Switch        | fallthrough                        | none; `case a, b:`; exhaustive enums (D7.6)|
+| Cleanup       | manual on every path               | `defer` (D7.8)                             |
+| Control flow  | `goto`, optional braces            | no `goto`; braces required (D7.4)          |
+| Modules       | headers and `#include`             | `import a::b;`, one module per file (D9)   |
+| Functions     | `int f(int)`                       | `fn i32 f(i32)`; function-pointer types    |
+|               |                                    | read the same (D8.1)                       |
+| Enums         | integer constants                  | typed, scoped `Color.Red` (D3.9)           |
+| Bool          | `int`                              | `bool`, `true`, `false` (D3.3)             |
 
-## Development Approach
+## Deliberately not in v1
 
-### Phase 1: Core Design (Current)
-- Define syntax and semantics
-- Establish type system
-- Design memory model
-- Create module system
+Generics, unions, tagged unions, methods, closures, variadics, overloading, visibility modifiers,
+type aliases, separate compilation, conditional compilation, labeled `break`. The full list with
+the idioms that replace each is decision D15.
 
-### Phase 2: Implementation Planning
-- Choose implementation language
-- Design compiler architecture
-- Plan standard library
-- Define C FFI mechanism
+## Success criteria
 
-### Phase 3: Prototype
-- Implement minimal compiler
-- Basic standard library
-- Simple test programs
-- Performance benchmarks
+1. A C programmer can read the whole specification in a day and write real code the same day.
+2. The common C bug classes (buffer overflows, uninitialized reads, silent overflow, switch
+   fallthrough, sign and width confusion) are compile errors or runtime errors, not silent.
+3. Performance within 10% of equivalent C for typical systems code, bounds checks included.
+4. Real systems software, including the fort compiler itself, can be written in it.
+5. The compiler fits in one head: whole-program, no IR beyond the AST, text assembly out.
 
-### Phase 4: Refinement
-- Syntax adjustments based on usage
-- Optimize common patterns
-- Expand standard library
-- Tooling improvements
+## Influences
 
-## Key Innovations
-
-### Safety Improvements Over C
-1. **Const by default** - Prevents accidental mutation
-2. **No implicit conversions** - Eliminates surprising behavior
-3. **Bounds-checked arrays** - Prevents buffer overflows
-4. **No pointer arithmetic** - Reduces memory corruption
-5. **Required initialization** - No undefined values
-6. **No goto** - Cleaner control flow
-7. **Switch without fallthrough** - Eliminates common bug
-
-### Quality of Life Improvements
-1. **Module system** - Better code organization than headers
-2. **Built-in bool type** - With `true`/`false` keywords
-3. **Simplified struct syntax** - No redundant keywords
-4. **Range-based for loops** - Cleaner iteration
-5. **Type-safe memory allocation** - `new(Type)` instead of malloc
-
-## Design Status
-
-### Completed Decisions
-- ✅ Basic type system
-- ✅ Mutability model (const by default, `mut` keyword)
-- ✅ Array semantics (embedded length, bounds checking)
-- ✅ Control flow (C-like with improvements)
-- ✅ Module system basics
-- ✅ Memory allocation approach
-
-### Pending Decisions
-- ⏳ Explicit cast syntax
-- ⏳ Overflow behavior
-- ⏳ Error handling mechanism
-- ⏳ Const transitivity rules
-- ⏳ String encoding (UTF-8 support)
-- ⏳ Generic programming approach
-
-### Future Considerations
-- 🔮 Compile-time computation
-- 🔮 Macro system or metaprogramming
-- 🔮 Concurrency primitives
-- 🔮 Package management
-- 🔮 Standard library scope
-
-## Success Criteria
-
-The language will be considered successful if:
-1. C programmers can learn it in a day
-2. Common C bugs are structurally prevented
-3. Performance is within 10% of equivalent C code
-4. Real systems software can be written in it
-5. The compiler is simple enough for one person to understand
-
-## References and Inspiration
-
-### Direct Influences
-- **C**: Base syntax and system programming model
-- **Rust**: Mutability model, no implicit conversions
-- **Go**: Simple module system, explicit error handling
-- **Zig**: Compile-time computation, no hidden allocations
-
-### Anti-Patterns to Avoid
-- C++ complexity creep
-- Java's verbose boilerplate
-- JavaScript's implicit conversions
-- Python's runtime overhead
+C for the base; Rust for immutability by default and the absence of implicit conversions; Go for
+the module model, untyped constants and `defer`; Zig for checked arithmetic with explicit wrapping
+operators and no hidden allocation.
