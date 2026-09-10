@@ -112,11 +112,14 @@ A safe(r) C-like systems programming language.
   `x86_64-linux-gnu-gcc` and `<build-dir>/std/fort_rt.o`, runs them under qemu and checks
   stdout, stderr and the status byte-exactly; ctest `pipeline` (label `unit`). `*.s` is
   gitignored except `test/asm/*.s`.
-- clang-tidy's `readability-function-size` caps `main` at about 90 `TEST_RUN`s (statement
-  threshold 800): split a larger suite into two files. `test/fork.h` runs a function in a forked
-  child and captures its stderr and exit status, for paths that end the process (`fatal_oom`);
-  under asan the child runs LeakSanitizer at exit, so the forked function must not drop a
-  block it allocated (blocks its still-live frames point to are reachable and fine).
+- clang-tidy's `readability-function-size` caps `main` at about 60 `TEST_RUN`s (statement
+  threshold 800; each `TEST_RUN` expands to about 13 statements, so 89 measured 1162): split a
+  larger suite into two files with a shared `test/<component>_helpers.h` whose helpers are
+  `static inline` so that a suite using only some of them still builds under `-Werror`.
+  `test/fork.h` runs a function in a forked child and captures its stderr and exit status, for
+  paths that end the process (`fatal_oom`); under asan the child runs LeakSanitizer at exit, so
+  the forked function must not drop a block it allocated (blocks its still-live frames point to
+  are reachable and fine).
 - Running `run-clang-tidy` by hand: its positional arguments are regexes matched against the
   absolute paths in `compile_commands.json`, so a relative path such as `../../test` silently
   selects nothing and reports success. Use `tools/vm tidy` or absolute guest paths.

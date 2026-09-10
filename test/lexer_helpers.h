@@ -1,0 +1,102 @@
+// Helpers shared by the lexer suites (lexer_test.c, lexer_literals_test.c):
+// lexing a text with diagnostics captured, and assertions on the tokens
+// and the diagnostic produced.
+#ifndef FORT_TEST_LEXER_HELPERS_H
+#define FORT_TEST_LEXER_HELPERS_H
+
+#include <stdint.h>
+#include <string.h>
+
+#include "diag.h"
+#include "lexer.h"
+
+#include "test.h"
+
+// The results of the last lex() call: tokens, the pool the strings were
+// decoded into, and the captured diagnostics.
+static tokvec_t toks;
+static str_pool_t pool;
+static sb_t sink;
+static bool capturing = false;
+
+// Lexes `len` bytes of `src` as file t.ft with diagnostics captured; the
+// previous results are released first.
+static inline bool lex_bytes(const char* src, uint64_t len) {
+    if (!capturing) {
+        sb_init(&sink);
+        str_pool_init(&pool);
+        tokvec_init(&toks);
+        diag_capture(&sink);
+        capturing = true;
+    }
+    sb_clear(&sink);
+    str_pool_free(&pool);
+    tokvec_free(&toks);
+    diag_reset();
+    return lex_file("t.ft", str_from_span(src, len), &pool, &toks);
+}
+
+static inline bool lex(const char* src) {
+    return lex_bytes(src, strlen(src));
+}
+
+// Releases the results of the last lex() call and restores stderr.
+static inline void lex_done(void) {
+    if (capturing) {
+        diag_capture(NULL);
+        sb_free(&sink);
+        str_pool_free(&pool);
+        tokvec_free(&toks);
+        capturing = false;
+    }
+}
+
+static inline const token_t* tok(uint64_t i) {
+    if (i >= toks.len) {
+        fatal_internal("lexer_test: token index out of range");
+    }
+    return &toks.items[i];
+}
+
+static inline const char* captured(void) {
+    return sb_cstr(&sink);
+}
+
+static inline bool text_is(uint64_t i, const char* expected) {
+    return str_eq(tok(i)->text, str_from_cstr(expected));
+}
+
+// The kind, the text, the position and the span of token i.
+#define ASSERT_TOK_KIND(i, k) TEST_ASSERT_EQ_STR(tok_kind_name(tok(i)->kind), tok_kind_name(k))
+#define ASSERT_TOK_TEXT(i, s) TEST_ASSERT_TRUE(text_is(i, s))
+#define ASSERT_TOK_POS(i, l, c)                                                                    \
+    do {                                                                                           \
+        TEST_ASSERT_EQ_INT64((int64_t)tok(i)->line, (int64_t)(l));                                 \
+        TEST_ASSERT_EQ_INT64((int64_t)tok(i)->col, (int64_t)(c));                                  \
+    } while (0)
+#define ASSERT_TOK_SPAN(i, o, n)                                                                   \
+    do {                                                                                           \
+        TEST_ASSERT_EQ_UINT64(tok(i)->off, (uint64_t)(o));                                         \
+        TEST_ASSERT_EQ_UINT64(tok(i)->len, (uint64_t)(n));                                         \
+    } while (0)
+
+// lex() failed with exactly the diagnostic `line` (with its newline) and
+// no TOK_EOF.
+#define ASSERT_LEX_ERROR(src, line)                                                                \
+    do {                                                                                           \
+        TEST_ASSERT_FALSE(lex(src));                                                               \
+        TEST_ASSERT_EQ_STR(captured(), line);                                                      \
+        TEST_ASSERT_EQ_UINT64(diag_count(), (uint64_t)1);                                          \
+        TEST_ASSERT_TRUE(toks.len == 0 || tok(toks.len - 1)->kind != TOK_EOF);                     \
+    } while (0)
+
+// lex() succeeded with `n` tokens before the TOK_EOF and no diagnostic.
+#define ASSERT_LEX_OK(src, n)                                                                      \
+    do {                                                                                           \
+        TEST_ASSERT_TRUE(lex(src));                                                                \
+        TEST_ASSERT_EQ_STR(captured(), "");                                                        \
+        TEST_ASSERT_EQ_UINT64(toks.len, (uint64_t)(n) + 1);                                        \
+        ASSERT_TOK_KIND((n), TOK_EOF);                                                             \
+    } while (0)
+
+#endif
