@@ -837,9 +837,9 @@ decision or document says ownership is "by convention", this section supersedes 
 - **D17.8** Temporaries must land. An `own` rvalue may only be bound to an `own` place, passed
   to an `own` parameter, or `del`ed. Anything else is a compile error ("owning temporary would
   leak"), because nothing could ever `del` it: converting or casting it to a non-`own` type
-  (`mut Node* n = new(Node);`, `use(str.dup(x))`, `cast(new(node), node*)`), slicing it or taking
-  its `.ptr` (`new(u8[8])[..4]`), accessing a field of an owning aggregate rvalue, and discarding
-  it as an expression statement (`move(x);`, `str.dup(s);`).
+  (`mut Node* n = new(Node);`, `use(str.dup(x))`, `cast(new(node), node*)`), slicing, indexing or
+  taking `.ptr` of it (`new(u8[8])[..4]`, `new(i32[2])[0]`), accessing a field of an owning
+  aggregate rvalue, and discarding it as an expression statement (`move(x);`, `str.dup(s);`).
 - **D17.9** `del(x)` requires an `own` operand of any mutability: an `own` pointer, `own void*`,
   `own` slice or `own string`, as an lvalue or an rvalue. On an lvalue, `del` empties the operand
   under the rules of D17.6, with the same mutability requirement through indirections; on an
