@@ -11,7 +11,7 @@ by the speculative parse described under "Disambiguation" at the end.
 ## 1. Lexical grammar
 
 Tokens are produced greedily (longest match). Whitespace and comments separate tokens and are
-otherwise ignored. A token never spans a newline except inside a block comment.
+otherwise ignored. No token spans a newline.
 
 ```ebnf
 letter      = "A" ... "Z" | "a" ... "z" | "_" ;
@@ -49,8 +49,7 @@ string_plain   = any byte except '"', "\", and newline ;
 escape         = "\n" | "\t" | "\r" | "\0" | "\\" | "\'" | '\"'
                | "\x" hex_digit hex_digit ;               (* D2.8 *)
 
-line_comment  = "//" { any byte except newline } ;
-block_comment = "/*" { any byte } "*/" ;                 (* does not nest, D2.2 *)
+line_comment  = "//" { any byte except newline } ;       (* the only comment form, D2.2 *)
 
 operator = "+%=" | "-%=" | "*%=" | "<<=" | ">>="
          | "+%" | "-%" | "*%" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^="
@@ -63,6 +62,8 @@ operator = "+%=" | "-%=" | "*%=" | "<<=" | ">>="
 Notes:
 
 - Non-ASCII bytes may appear only inside string literals and comments (D2.1).
+- `/*` is not a comment introducer: the adjacent pair is a lexical error (D2.2). Separated, `/`
+  and unary `*` are the ordinary operators.
 - `1.` and `.5` are not float literals; `1.0` and `0.5` are. `1..5` lexes as `1`, `..`, `5`.
 - Nesting depth of `( [ {` and of type suffixes is limited to 256 (D2.11).
 

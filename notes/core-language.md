@@ -18,9 +18,15 @@ trailing `// error: ...` comment marks a compile error; runtime errors say so ex
 Source files are UTF-8 with the extension `.ft`; an optional leading byte-order mark is skipped.
 Whitespace is space, tab, `\n` and `\r`; it separates tokens and is otherwise ignored. Non-ASCII
 bytes are permitted only inside string literals and comments. `//` starts a comment that ends at
-the end of the line; `/*` starts a comment that ends at the first `*/`. Block comments do not
-nest (`/* a /* b */ c` leaves `c` outside the comment), and an unterminated block comment is an
-error.
+the end of the line, and it is the only comment form: fort has no block comments, so a region is
+commented out one line at a time. The adjacent pair `/*` is a lexical error rather than a
+division by a dereference, which catches the habit brought from C; separate the operators to
+write the division.
+
+```fort
+i32 a = x /* stale */ + 1;    // error: block comments are not supported, use '//'
+i32 b = x / *p;               // ok: divide by the pointee
+```
 
 ### 2.2 Identifiers, keywords and reserved words (D2.3, D2.4)
 

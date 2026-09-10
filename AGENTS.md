@@ -141,9 +141,11 @@ A safe(r) C-like systems programming language.
   and macros UPPER_CASE (`enum { BYTE_MASK = 0xFFU }`); local constants lower_case; macros
   private to a header end with an underscore (`TEST_LOG_`). Every non-void call result is used
   or discarded with `(void)` (`TEST_UNUSED` in tests); no magic numbers (0 to 4, powers of two,
-  `1.0` and `100.0` are allowed); uppercase literal suffixes; includes grouped as the file's own
-  header, `<x.h>`, `<sys/x.h>`, project `"x.h"`, then `"test.h"`/`"common.h"`. `.clang-format`
-  and `.clang-tidy` (clang 18) are the reference; `tools/vm format` reformats. This applies to
+  `1.0` and `100.0` are allowed); uppercase literal suffixes; comments are `//` only, never
+  `/* */`, as in fort (D2.2), so a region is commented out line by line; includes grouped as the
+  file's own header, `<x.h>`, `<sys/x.h>`, project `"x.h"`, then `"test.h"`/`"common.h"`.
+  `.clang-format` and `.clang-tidy` (clang 18) are the reference; `tools/vm format` reformats,
+  and `tools/check_comments.py` rejects a block comment. This applies to
   test helpers under `test/` too. Two gaps of clang-tidy 18 are covered by review:
   `bugprone-unused-return-value` takes function names, not patterns (patterns arrive in
   clang-tidy 19), so `.clang-tidy` lists the C library and POSIX functions and the project's own

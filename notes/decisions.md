@@ -49,7 +49,14 @@ Owner: `core-language.md` (Lexical structure), `grammar.md` (Lexical grammar).
 
 - **D2.1** Source is UTF-8. Whitespace is space, tab, `\n`, `\r`. An optional leading BOM is
   skipped. Non-ASCII bytes are allowed only inside string literals and comments.
-- **D2.2** Comments: `//` to end of line, and `/* ... */` which does not nest.
+- **D2.2** Comments: `//` to the end of the line, and nothing else. There are no block comments,
+  so there is no nesting question, no unterminated-comment failure mode, and no `a /*p`
+  ambiguity; commenting out a region is a line-oriented operation every editor does. The
+  adjacent two-byte sequence `/*` is a lexical error ("block comments are not supported, use
+  `//`") rather than a division followed by a dereference, so the C habit fails loudly instead
+  of parsing as something else; `a / *p`, with the operators separated, is that division and is
+  legal. Rationale: user decision, and the same rule holds for the project's C sources
+  (AGENTS.md).
 - **D2.3** Identifiers: `[A-Za-z_][A-Za-z0-9_]*`, case-sensitive, no length limit. `_` is an
   ordinary identifier. Keywords cannot be identifiers.
 - **D2.4** Keywords:
