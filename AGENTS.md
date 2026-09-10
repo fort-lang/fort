@@ -25,6 +25,14 @@ A safe(r) C-like systems programming language.
   (new decision number or amended decision with a note), then in the specification document that
   owns the topic, then in the tests under `test/lang/`. Specification text never contains "TBD",
   "pending" or "not finalized"; deferred features live only in decision D15.
+- **Writing specification text**: cite the decision each rule implements as `(Dn.m)`. An agent
+  that needs a rule the decision log does not settle uses the most conservative reading, marks it,
+  and reports it to the lead for ratification; it never invents syntax or semantics. Every
+  amendment to `notes/decisions.md` is relayed to agents still writing against the old text, and
+  a separate audit pass reconciles the documents afterwards.
+- **C sources**: every `.c`/`.h` file in the repository, including test helpers under `test/`,
+  must pass `cc -std=c11 -Wall -Wextra -Wpedantic -Werror` and the repository's `.clang-tidy`
+  with warnings as errors (no magic numbers, uppercase literal suffixes such as `0xFFU`).
 
 ## Mandatory Process Rules
 The following rules MUST be followed by each process/agent for each change being made. There are no
