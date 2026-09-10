@@ -105,7 +105,11 @@ Owner: `type-system.md`.
   and `cast` to integer types (0 or 1). `cast` from an integer to `bool` is an error.
 - **D3.4** Fixed arrays `T[N]`: `N` is a constant expression (D4.6) greater than 0. Value type:
   assignment, parameter passing and return copy all elements. Different `N` are different types.
-  `a.len` is an untyped integer constant. Fixed arrays have no `.ptr`.
+  `a.len` is an untyped integer constant. Fixed arrays have no `.ptr`. Sizes are computed
+  exactly: a type whose size would exceed `2^63 - 1` bytes (the range of an `i64` index) is a
+  compile error, "type is too large", at the declaration that introduces it, reported like the
+  infinite-size error of D3.8 rather than as an out-of-memory failure of the compiler. Amended
+  2026-09-10 (T-011 review): the limit was unstated.
 - **D3.5** Slices `T[]` replace the earlier "dynamic array". A slice is a fat pointer
   `{T* ptr; u64 len}`; whether it owns its elements is part of its type (`own`, D17); all slices
   of the same element type, element mutability (D5) and ownership are one type; the zero value
