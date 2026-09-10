@@ -134,8 +134,9 @@ Owner: `type-system.md`.
   and from integer; enum to and from integer; any pointer to any pointer or `void*` (mutability
   may be added, this is the cast-away-const escape); pointer to and from `u64`; function pointer
   to and from `void*`; among `string`, `char[]`, `u8[]` and their `mut` forms; `T[]` to
-  `mut T[]`; identity. Forbidden: integer to `bool`, slice to slice with a different element
-  size, pointer to slice, struct or array casts. Casts never trap.
+  `mut T[]`; identity. Forbidden: integer to `bool`, any other slice-to-slice cast (the element
+  type of a slice never changes, because `len` counts elements), pointer to slice, struct or
+  array casts. Casts never trap.
 - **D3.15** `sizeof(Type)` takes a type only, yields an untyped integer constant (D4). `sizeof` of
   `void` is an error. `sizeof(T[])` and `sizeof(string)` are 16; function pointers are 8; `bool`
   and `char` are 1; enums are 4. There is no `alignof` in v1.
@@ -147,8 +148,12 @@ Owner: `type-system.md` (Constants), `core-language.md` (Literals).
 
 - **D4.1** Integer, float and char literals are untyped constants. An untyped constant takes its
   type from context: the declared type of the variable being initialized or assigned, the other
-  operand of a binary operator, the parameter type, the return type, the `case` operand type, the
-  `cast` target, or an index position (any integer type is fine there). This is the Go model.
+  operand of a binary operator, the parameter type, the return type, the `case` operand type, or
+  an index position (any integer type is fine there). This is the Go model. A `cast` is not a
+  context: in `cast(c, T)` an untyped `c` first takes its default type (D4.5) and is then
+  converted to `T` with runtime semantics (D4.4). The count operand of a shift is not a context
+  either: in `u64 m = 1 << n;` the untyped `1` takes `u64` from the declaration, whatever the
+  type of `n`; with no enclosing context it takes its default type.
 - **D4.2** Contextual conversion is checked at compile time. An untyped integer may become any
   integer type it fits in, or any float type. An untyped float may become only a float type,
   never an integer type even when integral (`i32 x = 2.0;` is an error). `u32 x = -1;` and
@@ -184,9 +189,13 @@ Owner: `core-language.md` (Declarations and mutability), `type-system.md` (Mutab
 
 - **D5.1** Everything is immutable unless marked `mut`. This applies to variables, parameters,
   the targets of pointers and the elements of slices.
-- **D5.2** Storage levels. A declared type is a chain of storage levels: level 0 is the binding's
-  own storage; each `*` or `[]` suffix, read left to right, introduces one more level (the storage
-  reached through that indirection). Fixed arrays and structs do not add a level: their elements
+- **D5.2** Storage levels. A declared type is a chain of storage levels numbered from the
+  binding inward: level 0 is the binding's own storage; level 1 is the storage reached through
+  the outermost indirection (the `*` or `[]` whose value the binding holds); level 2 the storage
+  reached through the next indirection, and so on. With the suffix-reading rules of D3.6, the
+  outermost indirection of `Node**` is the last `*` (level 1 holds a `Node*`, level 2 a `Node`),
+  of `Node*[]` it is the `[]` (level 1 holds `Node*` elements, level 2 the nodes), and of
+  `i32[][]` it is the first `[]`. Fixed arrays and structs do not add a level: their elements
   and fields share the storage of the value that contains them. `string` has a single level (its
   characters are never mutable). `void*` has a single level (D3.11).
 - **D5.3** Placement rule. A `mut` **before the base type** marks every level mutable, including
@@ -249,6 +258,9 @@ Owner: `core-language.md` (Expressions).
   has the left operand's type; `>>` is arithmetic for signed and logical for unsigned types.
   Comparisons: same type, ordering only on integers, floats and `char`. `! && ||`: `bool` only.
   Every mixed-type operation is an error; there is no promotion, not even for `u8`/`i8`.
+  "Same type" for comparison and `?:` operands means identical, mutability levels included;
+  the implicit drop of D5.4 applies only to initialization, assignment, argument passing and
+  `return`.
 - **D6.3** Evaluation order is left to right for operands, arguments, and struct and array literal
   fields. `&&`, `||` and `?:` evaluate only what they need. For an assignment the target's
   address, including any index and its bounds check, is computed before the right-hand side;
@@ -258,7 +270,8 @@ Owner: `core-language.md` (Expressions).
   parenthesized name is a type. Semantics in D3.14. Rationale: user decision.
 - **D6.5** Struct literals `Point{1, 2}` (positional, every field, in order) and
   `Point{.x = 1, .y = 2}` (designated, any order, omitted fields zeroed, no mixing with positional,
-  no duplicates) are expressions. `Point{}` is all-zero. Typed array literals `i32[3]{1, 2, 3}`
+  no duplicates; designated form for structs only) are expressions. `Point{}` is all-zero.
+  Typed array literals `i32[3]{1, 2, 3}`
   must have exactly `N` elements or be `{}`. A bare `{...}` is allowed only as the initializer of
   a declaration (local, global, `for` init) whose type is a struct or array, and nested inside
   another literal; `= {}` zero-initializes any aggregate, slice or string; `i32 x = {};` is an
@@ -317,11 +330,13 @@ Owner: `core-language.md` (Statements).
   assignment, `++`, `--`, a call, or empty; `for (;;)` is legal. The induction variable must be
   declared `mut` like any other (`for (mut i32 i = 0; i < n; i++)`); there is no exception.
   Range loop `for (T x : coll) { }` and `for (mut T x : coll) { }` where `coll` is a fixed array,
-  slice or string expression evaluated once; `x` is a copy of each element in order. `break` and
+  slice or string expression evaluated once before the loop (a fixed array is copied as a
+  value); `x` is a fresh copy of each element, taken at the start of its iteration. `break` and
   `continue` target the innermost enclosing loop (`continue` in a `for` runs `step`). There is no
   labeled `break`.
 - **D7.6** `switch (e) { case a, b: ... default: ... }`: `e` is an integer, `char` or enum type
-  (not `bool`, not `string`, not a pointer); an untyped constant operand becomes `i32`. Labels
+  (not `bool`, not `string`, not a pointer); an untyped constant operand takes its default type
+  (D4.5). Labels
   are constant expressions convertible to `e`'s type, no duplicates after evaluation; at most one
   `default`, in any position. Each case body is an implicit block scope with an implicit `break`
   at its end; there is no fallthrough; an empty case body does nothing (use `case a, b:` to share
@@ -329,7 +344,8 @@ Owner: `core-language.md` (Statements).
   loop" trap is documented); `continue` targets the enclosing loop.
 - **D7.7** A `switch` over an enum with no `default` must list every member; otherwise it is a
   compile error. Rationale: adding a member then finds every switch that needs updating.
-- **D7.8** `defer stmt;` and `defer { ... }`. The deferred code runs when the enclosing block is
+- **D7.8** `defer` followed by an assignment, a `++`/`--` statement, a call statement, or a
+  block (`grammar.md`, `defer_stmt`). The deferred code runs when the enclosing block is
   exited by any path: falling off the end, `return`, `break`, `continue`. The set of deferred
   statements that run at an exit is static: those textually before the exit in each exited block,
   innermost block first, in reverse order within a block. Nothing is captured at `defer` time; the
@@ -343,7 +359,8 @@ Owner: `core-language.md` (Statements).
   innermost block outward, then the module namespace, then the universe (D12). A local or
   parameter may not reuse the name of any enclosing local or parameter, nor of any module-level
   name. Only universe names may be shadowed, and only by module-level declarations. Enum members
-  are not in the module namespace (D3.9). Sibling scopes may reuse names.
+  are not in the module namespace (D3.9). Sibling scopes may reuse names. A local's scope starts
+  after its own declaration (`i32 x = x;` is an error).
 - **D7.10** Module-level declarations. `Type NAME = init;` is a compile-time constant: it lives in
   read-only memory, is addressable, and is usable in array lengths and `case` labels.
   `mut Type g = init;` is a global in writable memory. Initializers must be constant expressions
@@ -368,11 +385,12 @@ Owner: `core-language.md` (Functions).
 - **D8.3** No nested functions, closures, overloading, default arguments, variadics or methods.
   Recursion is allowed; depth is bounded only by the OS stack.
 - **D8.4** Terminating statements: `return`; a call to a `noreturn` function or to `panic`; an
-  `if` with an `else` whose branches both terminate; `while (true)` with no `break` targeting it;
-  a `switch` with a `default` all of whose cases terminate; a block whose last statement
-  terminates. A non-`void` function body must end in a terminating statement or it is a compile
-  error ("missing return"). Rationale: catching this at compile time is a core "better than C"
-  promise, and the structural rule is a few dozen lines to implement.
+  `if` with an `else` whose branches both terminate; `while (true)`, `for (;;)` or a `for` with an
+  empty condition, with no `break` targeting it; a `switch` all of whose cases terminate and
+  that either has a `default` or is an exhaustive enum switch (D7.7); a block whose last
+  statement terminates. A non-`void` function body must end in a terminating statement or it is
+  a compile error ("missing return"). Rationale: catching this at compile time is a core "better
+  than C" promise, and the structural rule is a few dozen lines to implement.
 - **D8.5** `noreturn` is a return type: `fn noreturn fatal(string msg) { ... }`. Such a function
   may not contain `return` and must end in a terminating statement; the compiler emits a trap
   after its body and after every call to it. `panic` and `sys.exit` are `noreturn`. Rationale:
@@ -451,7 +469,9 @@ Owner: `memory-model.md`.
   pointer is `p[lo..hi]` (D6.9).
 - **D10.5** `null` is the zero pointer and function-pointer value. `== null` and `!= null` are
   allowed only on pointers, `void*` and function pointers; slices and strings compare `.len`
-  or `.ptr`. Dereferencing `null` is undefined behavior (a segfault in practice).
+  or `.ptr`. `null` has no type of its own: it is usable only where a pointer, `void*` or
+  function-pointer type is expected, so `print(null)` and `null == null` are errors.
+  Dereferencing `null` is undefined behavior (a segfault in practice).
 - **D10.6** Bounds checks are performed on every index and slice operation, in every build mode;
   `--no-bounds-check` disables them for benchmarking and is documented as unsafe.
 - **D10.7** Undefined behavior in v1 is limited to: use after `del`, double `del`, `del` of a
@@ -487,7 +507,8 @@ Owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime)
   the compiler-emitted `fort_entry(args)`, flushes, and exits with `status & 0xFF`.
 - **D11.7** Value formatting by the print family: integers in decimal; `bool` as `true`/`false`;
   `char` as its byte; `u8` as a number; enums as the member name, or the number if no member
-  matches; pointers as `0x` plus lowercase hex; `string` as its bytes; floats as the shortest
+  matches; pointers, `void*` and function pointers as `0x` plus lowercase hex (`0x0` for
+  `null`); `string` as its bytes; floats as the shortest
   decimal that round-trips, `%g`-style (exponent form below 1e-4 or at 1e17 and above), with `.0`
   appended when the text has neither `.` nor `e`; `inf`, `-inf`, `nan`. No separators are
   inserted between arguments.
@@ -507,7 +528,9 @@ Owner: `core-language.md` (Builtins).
   - `eprint(...)`, `eprintln(...)`: the same to stderr;
   - `fprint(fd, ...)`, `fprintln(fd, ...)`: the same to the descriptor `fd` (`i32`).
   Each argument compiles to one per-type runtime call. An untyped constant argument takes its
-  default type (D4.5).
+  default type (D4.5). Universe functions yield no value: they are usable only as call
+  statements (including as `defer` operands and in `for` init and step positions). `assert` is
+  active in both build modes.
 
 ## D13 Standard library scope
 
