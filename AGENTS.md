@@ -46,7 +46,8 @@ hand.
 #### Worktree Isolation
 Each Claude process/agent MUST work in a separate git worktree and associated branch. Create the
 worktree as a directory (`fort-<name>`) in `.worktrees`, and prefix the branch name with `bug/`,
-`feat/`, etc. as you see appropriate.
+`feat/`, etc. as you see appropriate. The coordinator deletes the worktree once the change is merged
+into the target branch.
 
 #### Change Implementation Loop
 Always implement a change in small incremental commits. A commit MUST be composed of a
