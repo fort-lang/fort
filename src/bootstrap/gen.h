@@ -181,9 +181,11 @@ struct gen {
     bool terminated; // the block being written already ended in a terminator
 
     // ---- what the module refers to, in first-use order (D19.5) ----
-    ptrvec_t files;   // str_t*, owned: @.file.N, one per file
-    ptrvec_t strs;    // str_t*, owned: @.str.N, never deduplicated by content
-    ptrvec_t enums;   // const sym_t*: @.enum.<path.name>, one per enum printed
+    // The three private-data lists hold records the emitter owns and
+    // gen_free releases; the extern list borrows the symbols the checker owns.
+    ptrvec_t files;   // @.file.N, one per file
+    ptrvec_t strs;    // @.str.N, never deduplicated by content
+    ptrvec_t enums;   // @.enum.<path.name>, one per enum some print reaches
     ptrvec_t externs; // const sym_t*: the extern C functions, in first-use order
     bool rt[RT_COUNT];
     bool intrinsics[IN_COUNT];

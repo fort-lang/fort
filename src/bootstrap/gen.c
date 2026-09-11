@@ -114,7 +114,7 @@ void gen_free(gen_t* g) {
     free_records(&g->slots);
     free_records(&g->files);
     free_records(&g->strs);
-    ptrvec_free(&g->enums);
+    free_records(&g->enums);
     ptrvec_free(&g->externs);
     str_pool_free(&g->pool);
     sb_free(&g->scratch);
