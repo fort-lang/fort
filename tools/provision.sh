@@ -18,7 +18,7 @@ fi
 apt-get update
 apt-get install -y --no-install-recommends \
     build-essential clang clang-tidy clang-format llvm llvm-18 libclang-rt-18-dev \
-    cmake ninja-build ccache gdb gdb-multiarch python3 git file shellcheck \
+    cmake ninja-build ccache gdb gdb-multiarch python3 nodejs git file shellcheck \
     gcc-x86-64-linux-gnu binutils-x86-64-linux-gnu libc6-dev-amd64-cross \
     qemu-user-static binfmt-support
 
@@ -102,6 +102,14 @@ for s in address memory thread undefined; do
     echo 'int main(void){return 0;}' | clang -fsanitize=$s -x c - -o "$tmp/s_$s"
     "$tmp/s_$s"
 done
+
+# Node runs the unit tests of the VS Code extension with its built-in test
+# runner, which needs Node 18 or later.
+node --version | grep -qE '^v(1[89]|[2-9][0-9])\.'
+node --test --help > /dev/null 2>&1 || {
+    echo "provision.sh: node has no built-in test runner" >&2
+    exit 1
+}
 
 # The lint configuration targets clang 18.
 clang-tidy --version | grep -q 'version 18\.'

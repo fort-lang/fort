@@ -16,8 +16,9 @@ A safe(r) C-like systems programming language.
   linked into every program. `std/`: the standard library in fort. `tools/`: `vm`,
   `provision.sh`, `lines.py`, `bootstrap.sh`.
 - `editors/`: `editors/vscode/` is the VS Code extension (`package.json`,
-  `language-configuration.json`, `syntaxes/fort.tmLanguage.json`) and `editors/README.md` is its
-  install guide and its list of limitations.
+  `language-configuration.json`, `syntaxes/fort.tmLanguage.json`, and `extension.js` with the pure
+  modules it is tested through in `lib/`) and `editors/README.md` is its install guide, its manual
+  smoke test and its list of limitations.
 - `CMakeLists.txt`, `CMakePresets.json` and `cmake/sanitizers.cmake` are the build;
   `.clang-format` and `.clang-tidy` (clang 18) are the C11 lint configuration.
 - `.tickets/` (gitignored, main checkout only) is the ticket board; `.claude/agents/` holds the
@@ -62,6 +63,14 @@ A safe(r) C-like systems programming language.
   qemu-user appends `qemu: uncaught target signal 6 (Aborted) - core dumped` to the program's
   stderr; native execution prints nothing, so a harness comparing stderr drops that line
   (`test/pipeline_test.sh` and `test/lang/run_tests.py` do).
+- Provisioning installs `nodejs` (Node 18) for the extension's unit tests and fails loudly when it
+  is older or has no built-in test runner.
+- An ssh `ControlPath` under `os.tmpdir()` does not work on macOS: the host's temporary directory
+  is `/var/folders/<...>/T`, ssh binds the socket under a temporary name of its own, and the total
+  passes the 104-byte Unix domain socket limit, so ssh exits 255 with `unix_listener: path ... too
+  long` -- indistinguishable, to a caller, from a VM that is down. Anything multiplexing ssh from
+  the host measures the path and falls back to `/tmp/<something short>`
+  (`editors/vscode/lib/command.js`).
 - Provisioning disables apport and sets `kernel.core_pattern=core`: Ubuntu's piped core pattern
   ignores `ulimit -c 0` and made every SIGABRT cost about a second. A VM provisioned before that
   change needs `tools/vm provision` once (or the same two commands by hand).
@@ -158,6 +167,27 @@ A safe(r) C-like systems programming language.
   line above must produce), of the D5.3 and D17.2 marker tables, and of every `test/lang/run`
   test, which must tokenize with no `invalid.` scope and no unscoped character, so a new language
   test that the grammar mishandles fails here.
+- The VS Code extension's sources are plain JavaScript wrapped at 100 columns, and no gate target
+  lints them, so the conventions are here: `'use strict'` at the top of every file, CommonJS
+  (`require`/`module.exports`, no ESM and no bundler), `//` comments only as in C and fort (D2.2),
+  two-space indentation, single quotes, semicolons, `const` unless a binding is reassigned, no npm
+  dependency and no devDependency, and no API beyond Node's standard library and `vscode` (which
+  only `extension.js` may require). A file is tested by `node --test` or it is `extension.js`.
+- The VS Code extension is plain JavaScript on the VS Code API, with no npm dependency and no
+  build step. Its logic lives in `editors/vscode/lib/*.js`, which never `require('vscode')`, so
+  Node's built-in runner tests it: `tools/vm run 'cd editors/vscode && node --test'` (ctest
+  `extension_selftest`, label `unit`, run from `editors/vscode`; `node --test` with no argument
+  discovers `test/*.test.js` itself, and naming the directory fails on newer Node). `extension.js`
+  is the only file that may touch the API, so keep it thin and move anything with a case analysis
+  into `lib/`; it is driven through `test/fake_vscode.js`, which answers its `require('vscode')`
+  and its `require('child_process')` by patching `Module._load` before loading a fresh copy of it,
+  so a save, a crash, a hover and a definition are all tested with no editor and no ssh. What that
+  cannot check is that VS Code calls the extension the way its API is documented to, which is what
+  the manual smoke test in `editors/README.md` is for, and a change to `extension.js` is run
+  through it by hand. Its fixtures are real compiler output: regenerate them with
+  `fort --check --json --index` over `editors/vscode/test/fixtures/` rather than by hand, and a
+  helper that is not a suite, such as `test/fake_vscode.js`, defines no test of its own, since
+  Node 18 loads every file under `test/`.
 - The cross pipeline: `test/ir/*.ll` are hand-written LLVM 18 modules in the form
   `notes/toolchain.md` 6 specifies (D19.1); its two worked examples are these files byte for
   byte, so a change to one changes the other. `test/pipeline_test.sh <build-dir>`

@@ -39,6 +39,7 @@ set(FORT_SRC_DIR "${CMAKE_SOURCE_DIR}/src/bootstrap")
 set(FORT_RUNTIME_DIR "${CMAKE_SOURCE_DIR}/runtime")
 set(FORT_TEST_DIR "${CMAKE_SOURCE_DIR}/test")
 set(FORT_STD_SRC_DIR "${CMAKE_SOURCE_DIR}/std")
+set(FORT_EDITORS_DIR "${CMAKE_SOURCE_DIR}/editors")
 set(FORT_STD_DIR "${CMAKE_BINARY_DIR}/std")
 
 # ---- the bootstrap compiler ---------------------------------------------------
@@ -279,6 +280,18 @@ add_test(NAME highlight_selftest
 set_tests_properties(highlight_selftest PROPERTIES
     LABELS unit
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
+# The unit tests of the VS Code extension in editors/vscode (label unit), under
+# Node's built-in runner: the check document of D20.2 turned into editor shapes,
+# the conversion of its 1-based byte columns to character offsets, the lookup in
+# the index of D20.3, and the activation script itself driven against a fake
+# editor (editors/vscode/test/fake_vscode.js), which leaves only what needs a
+# real one to the manual smoke test in editors/README.md.
+find_program(FORT_NODE NAMES node nodejs REQUIRED)
+add_test(NAME extension_selftest
+    COMMAND "${FORT_NODE}" --test
+    WORKING_DIRECTORY "${FORT_EDITORS_DIR}/vscode")
+set_tests_properties(extension_selftest PROPERTIES LABELS unit)
 
 add_custom_target(check-lang
     COMMAND ${FORT_LANG_COMMAND}
