@@ -359,6 +359,13 @@ A safe(r) C-like systems programming language.
   period, while a leak moves both. A probe over a whole driver run belongs in a file of its own
   (`test/fort/driver_lifetime_test.ft`), since forty other tests in the same program fragment the
   heap for reasons that are not leaks.
+  **A probe also sizes its round**: a release of one small block per round is seen by neither view,
+  because the allocator serves the next round's block out of the chunk the round just freed while
+  the break stands still -- deleting `del(t->params)` in `types.ft` left `types_table_test.ft`
+  green while every other release of that function turned it red (T-084). The round therefore
+  repeats the allocation the release covers (two hundred parameter lists, a thousand child lists)
+  until the leak is a round's worth rather than a block's, and the deletion test is what says it is
+  enough.
   **A `//! stderr:` directive cannot see a line that should not be there**: it is a substring
   check over the whole run, so "this call wrote nothing" is asserted by capturing the descriptor
   into a file and comparing the bytes: `test/fort/support/capture.ft` does the `dup`/`dup2` and

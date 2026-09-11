@@ -150,35 +150,64 @@ fn void arena_init_zeroes_a_fresh_arena() {
 
 // The arena owns every node, every node's list and the vector of nodes
 // itself, and nothing else in this directory can see a release that is
-// missing: the gate's sanitizers instrument the compiler and not the x86-64
-// program the harness runs, so a leak here is invisible to every other test
-// and to ctest.
+// missing: the gate's sanitizers instrument the C compiler and not the
+// x86-64 program the harness runs, so a leak here is invisible to every
+// other test and to ctest.
 //
-// What can see one is the allocator. Two hundred identical rounds ask for the
-// same blocks in the same order; a round that gives its blocks back is handed
-// the same addresses again, so the address a late round is handed stands
-// still, while a round that keeps them is handed fresh ones and the address
-// climbs by the leaked bytes per round.
+// What can see one is the allocator, in two views, because each is blind to
+// what the other sees (modules_closure_test.ft says which and why). Two
+// hundred identical rounds build the same tree and free it: the program break
+// sees a leak the allocator had to ask the kernel for, and the address a
+// round is handed sees one it served out of its own free chunks. The early
+// round is held against the last two and the smaller distance taken, since
+// the allocator alternates between two positions from one round to the next
+// once the program's path is long enough to change a bin.
 //
-// ast_arena_free makes three releases and each is held by something. The
-// list and the node vector are held by the two probes below, each verified by
-// deleting the `del` it covers: with `list_free` deleted the list address
-// moved by 812592 bytes over the last hundred rounds, with `del(ar->nodes)`
-// deleted the vector address moved by 1623600, and with both in place each
-// delta is 0. The third, `del(n)` on the node itself, is held by the language
-// rather than by a probe: an owning local dropped without it makes the
-// checked build abort at the next write into that slot with `overwriting
-// owned value` (D17.11), which is what deleting it produces here.
+// ast_arena_free makes three releases. `list_free(&n->list)` and
+// `del(ar->nodes)` are each watched here by an address and by the break, and
+// each was verified by deleting that one release and watching this test fail.
+// The third, `del(n)` on the node itself, is held by the language rather than
+// by a probe: an owning local dropped without it makes the checked build
+// abort at the next write into that slot with `overwriting owned value`
+// (D17.11), which is what deleting it produces here.
 u64 LEAK_ROUNDS = 200;
 u64 LEAK_EARLY = 100;
 u64 LEAK_CHILDREN = 1024;
 u64 LEAK_BOUND = 8192;
 
+// The current program break, which is where the heap ends: sbrk(0) moves
+// nothing and reports it. There is no std binding for it and this is its one
+// caller (D9.8).
+extern fn void* sbrk(i64 increment);
+
+fn u64 heap_end() {
+    return cast(sbrk(0), u64);
+}
+
+// How far apart two positions are, whichever way the heap moved: a
+// subtraction the wrong way round would trap before the assertion (D11.1).
+fn u64 distance(u64 a, u64 b) {
+    if (a > b) {
+        return a - b;
+    }
+    return b - a;
+}
+
+// The smaller of the distances from the early round to the last two.
+fn u64 moved(u64 early, u64 late, u64 last) {
+    assert(early != 0 && late != 0 && last != 0);
+    u64 one = distance(late, early);
+    u64 other = distance(last, early);
+    if (one < other) {
+        return one;
+    }
+    return other;
+}
+
 fn void the_nodes_and_their_lists_are_released_with_the_arena() {
-    u64 mut list_early = 0;
-    u64 mut list_late = 0;
-    u64 mut nodes_early = 0;
-    u64 mut nodes_late = 0;
+    u64[3] mut break_at = {};
+    u64[3] mut list_at = {};
+    u64[3] mut nodes_at = {};
     u64 mut round = 0;
     while (round < LEAK_ROUNDS) {
         env mut e = open();
@@ -188,27 +217,35 @@ fn void the_nodes_and_their_lists_are_released_with_the_arena() {
             ast.ast_push(parent, int_lit(&e, i));
             i += 1;
         }
+        u64 mut slot = 3;
         if (round == LEAK_EARLY) {
-            list_early = cast(parent->list.items.ptr, u64);
-            nodes_early = cast(e.arena.nodes.ptr, u64);
+            slot = 0;
+        }
+        if (round == LEAK_ROUNDS - 2) {
+            slot = 1;
         }
         if (round == LEAK_ROUNDS - 1) {
-            list_late = cast(parent->list.items.ptr, u64);
-            nodes_late = cast(e.arena.nodes.ptr, u64);
+            slot = 2;
+        }
+        // The addresses are read while the arena still holds them, the break
+        // after it is freed, which is where a round's keeping shows.
+        if (slot < 3) {
+            list_at[slot] = cast(parent->list.items.ptr, u64);
+            nodes_at[slot] = cast(e.arena.nodes.ptr, u64);
         }
         close(&e);
+        if (slot < 3) {
+            break_at[slot] = heap_end();
+        }
         round += 1;
     }
-    assert(list_early != 0 && list_late != 0);
-    assert(nodes_early != 0 && nodes_late != 0);
+    assert(moved(break_at[0], break_at[1], break_at[2]) < LEAK_BOUND);
     // A node owns its list and `del` is shallow (D17.7), so the list goes
     // before the node does; if it did not, this is where it would show.
-    assert(list_late >= list_early);
-    assert(list_late - list_early < LEAK_BOUND);
+    assert(moved(list_at[0], list_at[1], list_at[2]) < LEAK_BOUND);
     // The vector of owned node pointers is the arena's own block and is
     // released last.
-    assert(nodes_late >= nodes_early);
-    assert(nodes_late - nodes_early < LEAK_BOUND);
+    assert(moved(nodes_at[0], nodes_at[1], nodes_at[2]) < LEAK_BOUND);
 }
 
 // ---- children ------------------------------------------------------------------

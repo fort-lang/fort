@@ -108,54 +108,113 @@ fn void a_grown_table_frees_everything_it_made() {
     }
 }
 
-// The two blocks a node owns beside itself -- its parameter list and its
-// layout -- are released with it (`del` is shallow, D17.7), and nothing else
-// in this directory can see it if they are not: the gate's sanitizers
-// instrument the compiler and not the x86-64 program the harness runs, so a
-// leak here is invisible to every other test and to ctest.
+// The three blocks a node owns beside itself -- its parameter list, its
+// layout and the vector the table keeps them in -- are released with it
+// (`del` is shallow, D17.7), and nothing else in this directory can see it if
+// they are not: the gate's sanitizers instrument the C compiler and not the
+// x86-64 program the harness runs, so a leak here is invisible to every other
+// test and to ctest.
 //
-// What can see one is the allocator. Eight identical rounds ask for the same
-// blocks in the same order; a round that gives its blocks back is handed the
-// same addresses again, and a round that keeps them is handed fresh ones
-// every time, so an address that repeats is the release and an address that
-// never repeats is the leak. The assertion is the weaker "some address
-// repeats" rather than "they are all equal", so that an allocator that serves
-// one round from elsewhere does not make the test flaky.
-fn bool some_address_repeats(u64@ addrs) {
-    u64 mut i = 0;
-    while (i < addrs.len) {
-        u64 mut j = i + 1;
-        while (j < addrs.len) {
-            if (addrs[i] == addrs[j]) {
-                return true;
-            }
-            j += 1;
-        }
-        i += 1;
+// What can see one is the allocator, in two views, because each is blind to
+// what the other sees (modules_closure_test.ft says which and why). Two
+// hundred identical rounds build the same table and free it: the program
+// break sees a leak the allocator had to ask the kernel for, and the address
+// a round is handed sees one it served out of its own free chunks. The early
+// round is held against the last two and the smaller distance taken, since
+// the allocator alternates between two positions from one round to the next
+// once the program's path is long enough to change a bin.
+//
+// type_table_free makes four releases. `del(t->params)`, `del(t->layout)`
+// and `del(tt->nodes)` are each watched here by an address and by the break,
+// and each was verified by deleting that one release and watching this test
+// fail. The fourth, `del(t)` on the node itself, is held by the language
+// rather than by a probe: an owning local dropped without it makes the
+// checked build abort at the next write into that slot with `overwriting
+// owned value` (D17.11), which is what deleting it produces here.
+u64 LEAK_ROUNDS = 200;
+u64 LEAK_EARLY = 100;
+u64 LEAK_TYPES = 200;
+u64 LEAK_BOUND = 8192;
+
+// The current program break, which is where the heap ends: sbrk(0) moves
+// nothing and reports it. There is no std binding for it and this is its one
+// caller (D9.8).
+extern fn void* sbrk(i64 increment);
+
+fn u64 heap_end() {
+    return cast(sbrk(0), u64);
+}
+
+// How far apart two positions are, whichever way the heap moved: a
+// subtraction the wrong way round would trap before the assertion (D11.1).
+fn u64 distance(u64 a, u64 b) {
+    if (a > b) {
+        return a - b;
     }
-    return false;
+    return b - a;
+}
+
+// The smaller of the distances from the early round to the last two.
+fn u64 moved(u64 early, u64 late, u64 last) {
+    assert(early != 0 && late != 0 && last != 0);
+    u64 one = distance(late, early);
+    u64 other = distance(last, early);
+    if (one < other) {
+        return one;
+    }
+    return other;
 }
 
 fn void the_blocks_a_node_owns_are_released_with_it() {
-    u64[8] mut param_at = {};
-    u64[8] mut layout_at = {};
-    u64 mut n = 0;
-    while (n < 8) {
+    u64[3] mut break_at = {};
+    u64[3] mut param_at = {};
+    u64[3] mut layout_at = {};
+    u64[3] mut nodes_at = {};
+    u64 mut round = 0;
+    while (round < LEAK_ROUNDS) {
         types.table mut tt = types.table{};
         types.node* i32t = types.type_prim(&tt, prim.prim_kind.prim_i32);
-        types.node*[3] mut params = {i32t, i32t, i32t};
+        types.node*[8] mut params = {i32t, i32t, i32t, i32t, i32t, i32t, i32t, i32t};
         types.node* f = types.type_fn(&tt, types.type_void(&tt), params[..], false);
         types.node* s = types.type_struct(&tt, "probe", decl_at(2));
-        param_at[n] = cast(f->params.ptr, u64);
-        layout_at[n] = cast(s->layout, u64);
-        assert(param_at[n] != 0 && layout_at[n] != 0);
+        // Past the first capacity of the node vector, so the block
+        // `del(tt->nodes)` gives back is one the allocator had to grow for,
+        // and one parameter list per function type, since a single
+        // sixty-four-byte list a round keeps moves neither view.
+        u64 mut n = 0;
+        while (n < LEAK_TYPES) {
+            types.node* elem = types.type_array(&tt, i32t, n + 1);
+            assert(elem != null);
+            assert(types.type_fn(&tt, elem, params[..], false) != null);
+            n += 1;
+        }
+        u64 mut slot = 3;
+        if (round == LEAK_EARLY) {
+            slot = 0;
+        }
+        if (round == LEAK_ROUNDS - 2) {
+            slot = 1;
+        }
+        if (round == LEAK_ROUNDS - 1) {
+            slot = 2;
+        }
+        // The addresses are read while the table still holds them, the break
+        // after it is freed, which is where a round's keeping shows.
+        if (slot < 3) {
+            param_at[slot] = cast(f->params.ptr, u64);
+            layout_at[slot] = cast(s->layout, u64);
+            nodes_at[slot] = cast(tt.nodes.ptr, u64);
+        }
         types.type_table_free(&tt);
-        n += 1;
+        if (slot < 3) {
+            break_at[slot] = heap_end();
+        }
+        round += 1;
     }
-    // The parameter list of the eight rounds, and the layout block of the
-    // eight structs: each was given back, so each address came round again.
-    assert(some_address_repeats(param_at[..]));
-    assert(some_address_repeats(layout_at[..]));
+    assert(moved(break_at[0], break_at[1], break_at[2]) < LEAK_BOUND);
+    assert(moved(param_at[0], param_at[1], param_at[2]) < LEAK_BOUND);
+    assert(moved(layout_at[0], layout_at[1], layout_at[2]) < LEAK_BOUND);
+    assert(moved(nodes_at[0], nodes_at[1], nodes_at[2]) < LEAK_BOUND);
 }
 
 // ---- the parameter list ---------------------------------------------------------
