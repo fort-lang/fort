@@ -366,6 +366,23 @@ add_test(NAME diff-check
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_check.sh" "${CMAKE_BINARY_DIR}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(diff-check PROPERTIES LABELS lang)
+
+# The interactive half of D11.5 (toolchain.md 5.3): a program whose stdout is
+# a terminal flushes each line as it writes it. No language test can see that,
+# because run_tests.py captures stdout through a pipe and every test therefore
+# takes the non-interactive path, so test/tty_test.py compiles one program and
+# drives it on a real pty and on a pipe. It is a unit test like `pipeline`, and
+# it needs the compiler and the runtime object this build made.
+add_test(NAME tty
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/tty_test.py"
+            --fort "$<TARGET_FILE:fort>"
+            --std-dir "${FORT_STD_DIR}"
+            --cc "${FORT_TARGET_CC_PATH}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(tty PROPERTIES
+    LABELS unit
+    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
+
 add_test(NAME lang_lint COMMAND "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}" --lint)
 set_tests_properties(lang_lint PROPERTIES LABELS unit)
 add_test(NAME lang_selftest

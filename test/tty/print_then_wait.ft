@@ -1,0 +1,22 @@
+// The program test/tty_test.py drives, once with its output on a pseudo
+// terminal and once on a pipe (D11.5). It writes one line to stdout and one
+// to stderr, then blocks reading stdin, so the parent sees exactly what the
+// runtime has flushed while the program is still running: on a terminal both
+// lines, in the order they were printed, and on a pipe the stderr line alone,
+// the stdout line waiting for the flush at exit.
+import std.io;
+
+fn i32 main() {
+    println("out");
+    eprintln("err");
+    // Blocks until the parent sends a byte. Nothing below runs, and no exit
+    // flush happens, while the parent is looking at what arrived.
+    u8[1] mut gate = {};
+    io.read(io.STDIN, gate[..]);
+    println("bye");
+    // Blocks a second time so that the parent reads the line above while the
+    // process is still alive: closing the last slave of a pty discards what is
+    // still in its buffer, so a line read after the exit would be a race.
+    io.read(io.STDIN, gate[..]);
+    return 0;
+}

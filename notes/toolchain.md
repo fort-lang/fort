@@ -467,6 +467,8 @@ void fort_rt_assert_fail(const char* text, loc);
 // lays out itself (D18); the two entry points are the only float ones (D18.4).
 // fort_rt_flush writes out one buffer (io.close and io.flush call it);
 // fort_rt_flush_all writes out every buffer, at exit and before every failure.
+// A buffer whose descriptor is a terminal is written out at every newline too
+// (D11.5, section 5.3).
 void fort_rt_print_i64(int32_t fd, int64_t v);
 void fort_rt_print_u64(int32_t fd, uint64_t v);
 void fort_rt_print_f32(int32_t fd, float v);
@@ -546,15 +548,35 @@ message.
 
 | fd    | Used by                              | Policy (D11.5)                                   |
 |-------|--------------------------------------|--------------------------------------------------|
-| 1     | `print`, `println`, `fprint(1, ...)` | buffered; flushed when full, at exit, on failure |
+| 1     | `print`, `println`, `fprint(1, ...)` | buffered, and line-buffered when interactive     |
 | 2     | `eprint`, `eprintln`                 | unbuffered; every call writes immediately        |
 | other | `fprint(fd, ...)`, `fprintln`        | one buffer per descriptor, same policy as 1      |
+
+A buffered descriptor is flushed when its buffer is full, at exit, and before any runtime error.
+It is *interactive* when `isatty` says so, which the runtime asks once, when it creates that
+descriptor's buffer, and never again, so that no `print` carries a system call of its own; a
+descriptor that is interactive is flushed at a newline as well, the whole buffer and not only the
+bytes up to the newline. That is C's rule (C11 7.21.3p7) and the reason a reader cares is the
+order it fixes: on a terminal each `println` appears as the program runs, and `print` and
+`eprint` output interleave in the order the program wrote them, where before this rule a program
+printing one line to each showed the `eprint` line alone until it exited. On a pipe or a file
+nothing changes: `print` output waits for a flush, so redirecting a program still yields the same
+bytes in the same few writes. Line buffering is decided per descriptor and not for stdout alone,
+`fprint(fd, ...)` on a terminal being as interactive as `print` is.
+
+Asking costs the program nothing it can observe: `isatty` fails with `ENOTTY` on a descriptor
+that is not a terminal, and `sys.errno()` hands a program the errno of its own last call
+(`stdlib.md` 2.4), so the runtime restores errno around the question.
 
 `fprint(1, ...)` shares the stdout buffer with `print` (D11.5). The runtime tells descriptors
 apart by number alone, so `fprint(2, ...)` behaves as `eprint`. An `extern` write to a
 descriptor bypasses the buffers; a program that mixes the two on one descriptor flushes first
 (`io.flush`, D11.5). A write error on any descriptor is ignored; the bytes are dropped. The
 buffer size is the runtime's choice.
+
+`test/tty_test.py` (the ctest `tty`) is the witness for the interactive half: the language
+harness captures a program's stdout through a pipe, so no test under `test/lang` can take the
+interactive path, and the script drives a compiled program on a real pseudo terminal instead.
 
 ## 6. Code generation contract
 

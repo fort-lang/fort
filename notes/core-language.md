@@ -1342,7 +1342,9 @@ and at least two digits (`1e+21`, `1.5e-07`); `.0` is appended when the text has
 nor `e`; `inf`, `-inf` and `nan` print as such. Output buffering (D11.5): `print` and `println`
 write to a runtime buffer for stdout, which `fprint(1, ...)` shares; `eprint` and `eprintln` are
 unbuffered; `fprint` and `fprintln` use one buffer per descriptor. An `extern` write to a
-descriptor bypasses the buffers. Buffers flush when full, at exit and before any runtime error;
+descriptor bypasses the buffers. Buffers flush when full, at exit and before any runtime error,
+and a buffer whose descriptor is a terminal flushes at every newline as well, so a program run
+interactively shows each `println` as it happens and one redirected to a file or a pipe does not;
 the runtime exports `fort_rt_flush(i32 fd)` and `fort_rt_flush_all()`, and `io.close` and
 `io.flush` call the former (`memory-model.md` section 7).
 

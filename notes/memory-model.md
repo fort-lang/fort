@@ -876,10 +876,13 @@ Output buffering (D11.5): `print` and `println` write to a runtime buffer for st
 and `fprint(1, ...)` shares the stdout buffer with `print`. An `extern` write to a descriptor
 bypasses the buffers, so it can overtake buffered output unless the program flushes first.
 Buffers flush when full, on `io.close` and `io.flush`, at exit, and before any runtime error, so
-output printed before a failure is never lost. The runtime exports `fort_rt_flush(i32 fd)` and
-`fort_rt_flush_all()`; `io.close` and `io.flush` call the former. Program start and exit are
-owned by the C runtime, which builds `args`, calls the compiled `fort_entry`, flushes, and exits
-with `main`'s result masked to eight bits (D11.6).
+output printed before a failure is never lost. A buffer whose descriptor is interactive -- one
+`isatty` accepts, asked once when the runtime creates that buffer -- flushes at every newline as
+well, which is C's rule: the same program shows each `println` as it runs on a terminal and holds
+its output until it exits when it is redirected to a file or a pipe. The runtime exports
+`fort_rt_flush(i32 fd)` and `fort_rt_flush_all()`; `io.close` and `io.flush` call the former.
+Program start and exit are owned by the C runtime, which builds `args`, calls the compiled
+`fort_entry`, flushes, and exits with `main`'s result masked to eight bits (D11.6).
 
 ## 8. Undefined behavior
 

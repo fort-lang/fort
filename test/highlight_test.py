@@ -14,7 +14,8 @@ include, match, begin/end, captures) tokenizes the fixtures in test/highlight,
 every marker declaration of the D5.3 and D17.2 tables, and every fort source
 the project itself writes -- the language tests under test/lang/run, the whole
 programs beside them, the standard library, the self-hosted compiler under
-src/fort, its own tests under test/fort and the fixtures of tools/fort_lint.py
+src/fort, its own tests under test/fort, the fixtures of tools/fort_lint.py and
+the program test/tty_test.py drives on a pseudo terminal
 -- and the tests assert the
 scopes the grammar hands out. CORPUS_DIRS is that list and CORPUS_FILES its
 size, and a partition test holds every other `.ft` in the repository against
@@ -42,6 +43,7 @@ STD_DIR = ROOT / "std"
 FORT_SRC_DIR = ROOT / "src" / "fort"
 FORT_TESTS_DIR = ROOT / "test" / "fort"
 FORT_LINT_DIR = ROOT / "test" / "fort_lint"
+TTY_DIR = ROOT / "test" / "tty"
 EDITOR_FIXTURE_DIR = ROOT / "editors" / "vscode" / "test" / "fixtures"
 
 # Every directory of fort the grammar is held over. `src/fort` is the only one
@@ -53,13 +55,14 @@ CORPUS_DIRS = (
     FORT_SRC_DIR,
     FORT_TESTS_DIR,
     FORT_LINT_DIR,
+    TTY_DIR,
 )
 # The number of files those directories hold. It is an equality and not a floor
 # because a floor cannot see a directory that stopped being walked: a ticket
 # that adds or removes a `.ft` under CORPUS_DIRS reads the new number off the
 # failure and writes it here, as it does for CORPUS_FILES in
 # test/parser_recovery_test.c and FT_FILES in tools/diff_tokens.sh.
-CORPUS_FILES = 448
+CORPUS_FILES = 449
 # The `.ft` of the repository that are deliberately outside the corpus, each
 # because it is meant to hold a lexical error: test/lang/fail is the corpus of
 # programs the compiler must reject, test/highlight/scopes.ft carries the

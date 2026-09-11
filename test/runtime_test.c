@@ -8,6 +8,7 @@
 // entry point aborts the process, so each one runs in a forked child whose
 // stdout and stderr are both tied to one pipe; the parent checks the bytes
 // and the SIGABRT.
+#include <errno.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -261,6 +262,42 @@ TEST(stdout_is_held_until_flushed, {
     TEST_UNUSED(capture_read(&c, actual, sizeof actual));
     capture_end(&c);
     ASSERT_SAME_TEXT(actual, "heldmore");
+})
+
+// A descriptor that is not a terminal is fully buffered, newline or not: the
+// line flush of D11.5 is decided by isatty when the buffer is created, and a
+// temporary file is not interactive. Its other half, a descriptor that is a
+// terminal, needs a pty and is test/tty_test.py.
+TEST(a_newline_does_not_flush_a_descriptor_that_is_not_a_terminal, {
+    capture_t c = capture_begin(-1);
+    fort_rt_print_str(c.fd, "one\ntwo\n", 8);
+    ASSERT_SIZE(c, 0);
+    // The newline of println is a print_char of its own, so it is held too.
+    fort_rt_print_str(c.fd, "three", 5);
+    fort_rt_print_char(c.fd, '\n');
+    ASSERT_SIZE(c, 0);
+    fort_rt_flush(c.fd);
+    ASSERT_SIZE(c, 14);
+    char actual[CAPTURE_MAX];
+    TEST_UNUSED(capture_read(&c, actual, sizeof actual));
+    capture_end(&c);
+    ASSERT_SAME_TEXT(actual, "one\ntwo\nthree\n");
+})
+
+// Creating a buffer asks isatty, which fails with ENOTTY on anything that is
+// not a terminal; the library hands the program errno through sys.errno()
+// after a call of its own, so the runtime must give it back unchanged
+// (D11.5, stdlib.md 2.4). test/lang/run/stdlib/053_io_open_errors.ft is the
+// program that sees it: it prints a failed open's descriptor and then asks
+// for the errno that open left.
+TEST(printing_does_not_disturb_errno, {
+    capture_t c = capture_begin(-1);
+    errno = ENOENT;
+    fort_rt_print_str(c.fd, "first", 5);
+    TEST_ASSERT_EQ_INT64((int64_t)errno, (int64_t)ENOENT);
+    fort_rt_flush(c.fd);
+    TEST_ASSERT_EQ_INT64((int64_t)errno, (int64_t)ENOENT);
+    capture_end(&c);
 })
 
 TEST(stderr_is_written_immediately, {
@@ -799,6 +836,8 @@ int main(int argc, char** argv) {
     TEST_RUN(enum_prints_the_member_name);
     TEST_RUN(enum_prints_the_number_when_no_member_matches);
     TEST_RUN(stdout_is_held_until_flushed);
+    TEST_RUN(printing_does_not_disturb_errno);
+    TEST_RUN(a_newline_does_not_flush_a_descriptor_that_is_not_a_terminal);
     TEST_RUN(stderr_is_written_immediately);
     TEST_RUN(flush_of_one_descriptor_leaves_the_others_alone);
     TEST_RUN(flush_of_an_unknown_descriptor_is_a_no_op);

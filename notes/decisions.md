@@ -804,10 +804,18 @@ Owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime)
 - **D11.5** Output buffering: `print`/`println` write to a runtime buffer for stdout;
   `eprint`/`eprintln` are unbuffered; `fprint`/`fprintln` use one runtime buffer per descriptor,
   and `fprint(1, ...)` shares the stdout buffer with `print`. An `extern` write to a descriptor
-  bypasses the buffers. Buffers flush when full, at exit, and before any runtime error. The
-  runtime exports
-  `fort_rt_flush(i32 fd)` and `fort_rt_flush_all()`; `io.close` and `io.flush` call the former,
-  which is how a library call flushes a buffer the runtime owns.
+  bypasses the buffers. Buffers flush when full, at exit, and before any runtime error. A
+  buffered descriptor that is **interactive** is line-buffered as well: a newline written through
+  it flushes the whole buffer, not only the bytes up to that newline, which is C's rule (C11
+  7.21.3p7) and makes a terminal show each `println` as the program runs. Interactive means
+  `isatty` of the descriptor, and the runtime asks once, when it creates that descriptor's
+  buffer, so that no `print` carries a system call of its own; every buffered descriptor is
+  decided that way and not stdout alone, since `fprint(fd, ...)` on any descriptor has the same
+  policy. The runtime exports `fort_rt_flush(i32 fd)` and `fort_rt_flush_all()`; `io.close` and
+  `io.flush` call the former, which is how a library call flushes a buffer the runtime owns.
+  Amended 2026-09-11 (T-083): buffering was unconditional, so a program on a terminal showed
+  nothing until it exited and its `print` output arrived after its `eprint` output whatever the
+  order in the source.
 - **D11.6** Process start: the C runtime owns `main(argc, argv)`, builds `string@ args`, calls
   the compiler-emitted `fort_entry(args)`, flushes, and exits with `status & 0xFF`.
   `fort_entry` takes the argument span by pointer and is the one compiler-emitted exception to

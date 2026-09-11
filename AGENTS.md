@@ -269,6 +269,25 @@ A safe(r) C-like systems programming language.
   the others; the list is not globbed, since each module's output is its own. `*.ll` is
   gitignored except `test/ir/*.ll`. `run_tests.py --verify-ir` runs the same verifier over the
   `-S` output of every language test that compiles.
+- **A terminal is a test environment no pipe can stand in for.** `test/lang/run_tests.py` captures
+  a program's stdout through a pipe, so a rule that only holds on an interactive descriptor --
+  D11.5's line buffering -- is invisible to the whole language corpus, which stays green with the
+  feature deleted. `test/tty_test.py` (ctest `tty`, label `unit`) is the shape that sees it: it
+  compiles one program with the built compiler and runs it twice, under `pty.fork()` and under
+  pipes, asking what has arrived while the program is still blocked in a read of stdin. Two
+  traps cost T-083 an hour between them. A pty master loses whatever is still in the line
+  discipline once the last slave closes, so the program blocks a second time and the parent reads
+  the line **while the child lives** rather than after it exits. And a `done` predicate that stops
+  at a substring (`"bye" in text`) returns before the newline that follows it arrives in the next
+  chunk, which is a flake of about one run in five: wait for the whole line (`"bye\n"`), and
+  prove a pty harness is not flaky with `ctest --repeat until-fail:20` rather than one green run.
+- **A system call added to a print path must give errno back.** `sys.errno()` hands a program the
+  errno of its own last library call (`stdlib.md` 2.4), and the print family runs between the two:
+  the `isatty` of D11.5 fails with `ENOTTY` on every pipe, so the first `print` after a failed
+  `open` replaced the program's `ENOENT` with it and `run/stdlib/053_io_open_errors.ft` printed
+  `-1 false`. That test found it because the arguments of one `println` are evaluated left to
+  right (D11.7), which puts the buffer's creation before the `sys.errno()` beside it. The runtime
+  saves and restores errno around the call; anything else it grows on that path does the same.
 - Test code that is compiled rather than included lives in a `test/*.c` that is not a suite:
   CMake globs every such file into the `fort_test_support` object library and links it into every
   suite, so `-Werror` and clang-tidy cover it once. The list is empty today -- its one member,

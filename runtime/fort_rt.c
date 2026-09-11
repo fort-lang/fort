@@ -55,9 +55,11 @@ enum {
     F32_SIGN_SHIFT = 31,
 };
 
-// One descriptor's pending bytes. fd is -1 while the slot is free.
+// One descriptor's pending bytes. fd is -1 while the slot is free;
+// line_buffered is the answer isatty gave when the slot was assigned.
 struct fort_rt_buffer {
     int32_t fd;
+    bool line_buffered;
     uint64_t len;
     uint8_t data[BUFFER_SIZE];
 };
@@ -72,15 +74,33 @@ static uint64_t next_eviction = 1;
 // write when it fits.
 static struct fort_rt_buffer message;
 
+// Whether fd refers to a terminal, which is what makes a buffer
+// line-buffered. The question is asked once per buffer, when the buffer is
+// created, and never per write, so that no print carries a system call of its
+// own (D11.5). isatty fails with ENOTTY on everything that is not a terminal,
+// and a program reads errno through sys.errno() after a call of its own, so
+// the question restores it (toolchain.md 5.3).
+static bool is_interactive(int32_t fd) {
+    const int saved = errno;
+    const bool interactive = isatty((int)fd) == 1;
+    errno = saved;
+    return interactive;
+}
+
 static void buffers_init(void) {
     if (buffers_ready) {
         return;
     }
     buffers[0].fd = STDOUT_FD;
+    buffers[0].line_buffered = is_interactive(STDOUT_FD);
     for (uint64_t i = 1; i < 1 + BUFFER_POOL_SIZE; i++) {
         buffers[i].fd = -1;
+        buffers[i].line_buffered = false;
     }
+    // The failure line is assembled whole and written by its own flush, so it
+    // is never cut at a newline (D11.4).
     message.fd = STDERR_FD;
+    message.line_buffered = false;
     buffers_ready = true;
 }
 
@@ -108,8 +128,21 @@ static void buffer_flush(struct fort_rt_buffer* b) {
     }
 }
 
+// Whether the bytes hold a newline, which is what ends a line for a
+// line-buffered descriptor (D11.5).
+static bool has_newline(const uint8_t* p, uint64_t n) {
+    for (uint64_t i = 0; i < n; i++) {
+        if (p[i] == '\n') {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Appends n bytes, flushing first when they do not fit and bypassing the
-// buffer entirely when they never would.
+// buffer entirely when they never would. A newline written to a line-buffered
+// descriptor flushes the whole buffer afterwards, as C does (D11.5); bytes
+// that bypassed the buffer are already out.
 static void buffer_append(struct fort_rt_buffer* b, const uint8_t* p, uint64_t n) {
     if (n > BUFFER_SIZE - b->len) {
         buffer_flush(b);
@@ -120,6 +153,9 @@ static void buffer_append(struct fort_rt_buffer* b, const uint8_t* p, uint64_t n
     }
     (void)memcpy(b->data + b->len, p, (size_t)n);
     b->len += n;
+    if (b->line_buffered && has_newline(p, n)) {
+        buffer_flush(b);
+    }
 }
 
 // The buffer of a buffered descriptor, assigning a slot when it has none;
@@ -145,6 +181,7 @@ static struct fort_rt_buffer* buffer_for(int32_t fd) {
         buffer_flush(&buffers[free_slot]);
     }
     buffers[free_slot].fd = fd;
+    buffers[free_slot].line_buffered = is_interactive(fd);
     buffers[free_slot].len = 0;
     return &buffers[free_slot];
 }
