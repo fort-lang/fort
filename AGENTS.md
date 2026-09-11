@@ -412,8 +412,13 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
   `tools/vm run 'python3 tools/lines.py --since main --min 3.0'` is an acceptance criterion of every
   ticket that adds compiler lines, and the implementor runs it before the gate. The repository ratio
   drifted from 3.34 to 2.50 over six tickets while every one of them passed, because a large corpus
-  hides a thin diff; a ticket that cannot reach 3:1 says so in its log with the reason rather than
-  lowering the number.
+  hides a thin diff, and it measured 1.86 on 2026-09-10 (18352 compiler lines against 34051 test
+  lines). The two numbers answer different questions and both are working: the per-ticket rule is
+  not retroactive, so the corpus figure is a lagging indicator of everything that landed before it
+  and climbs only asymptotically even if every future ticket hits 3:1 exactly. Measure it with
+  `tools/vm run 'python3 tools/lines.py'` before quoting it; never repeat the figure from this
+  line. A ticket that cannot reach 3:1 says so in its log with the reason rather than lowering the
+  number.
 - The ratio is a prompt, not a verdict: what a review asks is which rules of the decisions a ticket
   cites have no test at all, unit or language, and the answer decides the ticket. T-014 measured
   0.76 and merged, because the number could not see that it took 57 entries out of xfail.txt -- a
