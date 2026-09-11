@@ -704,6 +704,15 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
   and nobody can ever re-check it -- T-069's audit of all 86 amended decisions is gone for exactly
   that reason, leaving only the findings that reached a commit message. An agent whose deliverable
   is an analysis rather than code writes it into the ticket or into `notes/`, and cites that.
+- **A criterion that claims "every" must be backed by a count, not by a representative case.** Three
+  tickets have ticked a universal they had not measured: T-020 and T-023 each claimed every emitter
+  test called `verified()` when 23 of 50 and 9 of 25 did not, and T-073 claimed three guards were
+  mutation-proved when two of the sites were held only by a compiler warning outside the gate. In
+  every case the implementor had checked one instance and generalised, and in every case a reviewer
+  found it by counting. So: write the count and the command that produced it into the log
+  (`grep -c 'verified()' test/gen_*_test.c` against the number of tests, and so on), and phrase the
+  criterion as the number rather than as "every". A criterion that overstates is worse than one that
+  admits a gap, because it stops the next reader looking.
 - Every ticket meets the 3:1 test-to-code ratio on its own diff, not on the repository average:
   `tools/vm run 'python3 tools/lines.py --since main --min 3.0'` is an acceptance criterion of every
   ticket that adds compiler lines, and the implementor runs it before the gate. The repository ratio
