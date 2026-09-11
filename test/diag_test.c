@@ -432,6 +432,54 @@ TEST(zero_initialized_message_buffer_is_valid, {
     sb_free(&m);
 })
 
+TEST(a_muted_diagnostic_is_counted_and_not_written, {
+    begin_capture();
+    diag_mute();
+    diag_error(loc_make("t.ft", 1, 1), "silent");
+    diag_note(loc_make("t.ft", 1, 1), "also silent");
+    // A muted error still counts, so a caller can ask diag_count whether the
+    // file it was probing parsed (module-system.md 3).
+    TEST_ASSERT_EQ_UINT64(diag_count(), (uint64_t)1);
+    TEST_ASSERT_EQ_UINT64(diag_unmute(), (uint64_t)1);
+    TEST_ASSERT_EQ_STR(captured(), "");
+    end_capture();
+})
+
+TEST(unmute_restores_the_count_the_mute_saw, {
+    begin_capture();
+    diag_error(loc_make("t.ft", 1, 1), "real");
+    diag_mute();
+    diag_error(loc_make("t.ft", 2, 1), "probe");
+    diag_error(loc_make("t.ft", 3, 1), "probe");
+    TEST_ASSERT_EQ_UINT64(diag_unmute(), (uint64_t)2);
+    TEST_ASSERT_EQ_UINT64(diag_count(), (uint64_t)1);
+    end_capture();
+})
+
+TEST(a_diagnostic_after_the_mute_is_written_again, {
+    begin_capture();
+    diag_mute();
+    diag_error(loc_make("t.ft", 1, 1), "silent");
+    TEST_UNUSED(diag_unmute());
+    diag_error(loc_make("t.ft", 2, 3), "loud");
+    TEST_ASSERT_EQ_STR(captured(), "t.ft:2:3: error: loud\n");
+    end_capture();
+})
+
+TEST(only_the_outermost_mute_restores_the_count, {
+    begin_capture();
+    diag_mute();
+    diag_mute();
+    diag_error(loc_make("t.ft", 1, 1), "silent");
+    TEST_ASSERT_EQ_UINT64(diag_unmute(), (uint64_t)0);
+    TEST_ASSERT_EQ_UINT64(diag_count(), (uint64_t)1);
+    diag_error(loc_make("t.ft", 2, 1), "still silent");
+    TEST_ASSERT_EQ_UINT64(diag_unmute(), (uint64_t)2);
+    TEST_ASSERT_EQ_UINT64(diag_count(), (uint64_t)0);
+    TEST_ASSERT_EQ_STR(captured(), "");
+    end_capture();
+})
+
 int main(int argc, char** argv) {
     TEST_INIT("diag", argc, argv);
 
@@ -472,6 +520,10 @@ int main(int argc, char** argv) {
     TEST_RUN(builder_composes_the_examples_of_toolchain_section_4);
     TEST_RUN(builder_composes_a_runtime_style_message_with_numbers);
     TEST_RUN(zero_initialized_message_buffer_is_valid);
+    TEST_RUN(a_muted_diagnostic_is_counted_and_not_written);
+    TEST_RUN(unmute_restores_the_count_the_mute_saw);
+    TEST_RUN(a_diagnostic_after_the_mute_is_written_again);
+    TEST_RUN(only_the_outermost_mute_restores_the_count);
 
     TEST_EXIT();
 }

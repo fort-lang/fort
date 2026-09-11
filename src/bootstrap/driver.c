@@ -12,6 +12,8 @@
 #include <sys/wait.h>
 
 #include "containers.h"
+#include "diag.h"
+#include "modules.h"
 #include "str.h"
 
 // The environment handed to the spawned `--cc`. POSIX declares it in
@@ -530,7 +532,30 @@ static int run_cc(const driver_options_t* opts,
 
 // ---- the front end (the seam of T-013 and T-015) ----------------------------------
 
-int driver_front_end(const driver_options_t* opts, const char* ir_path, FILE* err) {
+// Steps 1 and 2 of toolchain.md 2: the entry file's module path and root,
+// then the import closure, with the search roots of D9.2 in order. Returns
+// false after the diagnostics of D14.2 were reported.
+static bool load_closure(const driver_options_t* opts, const char* argv0, module_set_t* set) {
+    str_pool_t pool;
+    str_pool_init(&pool);
+    for (uint64_t i = 0; i < opts->includes.len; i++) {
+        // The `-I` roots come after the entry file's directory, in
+        // command-line order (D9.2).
+        module_set_add_root(set, arg_at(&opts->includes, i));
+    }
+    // A path beginning with `std` is looked up in the standard library
+    // directory alone (D9.2), which --std-dir, $FORT_STD_DIR or the binary's
+    // own directory names (D14.1).
+    const str_t std_dir = driver_std_dir(opts, argv0, &pool);
+    module_set_std_dir(set, std_dir.ptr);
+    str_pool_free(&pool);
+    return module_set_load(set, opts->entry);
+}
+
+int driver_front_end(const driver_options_t* opts,
+                     const char* argv0,
+                     const char* ir_path,
+                     FILE* err) {
     // Step 1 of toolchain.md 2: an unreadable entry file is exit 2 (D14.1).
     FILE* entry = fopen(opts->entry, "rb");
     if (entry == NULL) {
@@ -538,9 +563,18 @@ int driver_front_end(const driver_options_t* opts, const char* ir_path, FILE* er
         return FORT_EXIT_USAGE;
     }
     (void)fclose(entry);
-    // Steps 2 to 4 belong to T-013 (parse and check the import closure) and
-    // T-015 (emit the module). Until they land the module is empty: the
-    // driver is complete, the compiler behind it is not.
+    diag_reset();
+    module_set_t set;
+    module_set_init(&set);
+    const bool loaded = load_closure(opts, argv0, &set);
+    module_set_free(&set);
+    if (!loaded) {
+        // At least one compile error was reported, which is exit 1 (D14.1).
+        return FORT_EXIT_COMPILE_ERROR;
+    }
+    // Steps 3 and 4, checking the modules in dependency order and emitting
+    // the closure's module, belong to T-015. Until it lands the module is
+    // empty: the driver is complete, the compiler behind it is not.
     FILE* module = fopen(ir_path, "wb");
     if (module == NULL) {
         error_path(err, "cannot write", ir_path, strerror(errno));
@@ -564,7 +598,7 @@ static int compile_entry(const driver_options_t* opts, const char* argv0, FILE* 
     if (opts->emit_ir) {
         // -S writes the module to the output and stops, so it needs no
         // temporary (toolchain.md 2).
-        const int status = driver_front_end(opts, out_path, err);
+        const int status = driver_front_end(opts, argv0, out_path, err);
         str_pool_free(&pool);
         return status;
     }
@@ -577,7 +611,7 @@ static int compile_entry(const driver_options_t* opts, const char* argv0, FILE* 
         return FORT_EXIT_USAGE;
     }
     const str_t ir_path = join_path(&pool, dir.ptr, driver_entry_base(opts->entry), ".ll");
-    int status = driver_front_end(opts, ir_path.ptr, err);
+    int status = driver_front_end(opts, argv0, ir_path.ptr, err);
     if (status == FORT_EXIT_OK) {
         status = run_cc(opts, argv0, ir_path.ptr, out_path, err);
     }

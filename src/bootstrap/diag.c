@@ -9,6 +9,10 @@ static uint64_t error_count = 0;
 // Where the lines go: the capture buffer, or stderr when NULL.
 static sb_t* capture_sink = NULL;
 
+// The nesting depth of diag_mute and the error count the outermost mute saw.
+static uint64_t mute_depth = 0;
+static uint64_t mute_saved_count = 0;
+
 loc_t loc_make(const char* file, uint32_t line, uint32_t col) {
     loc_t loc;
     loc.file = file;
@@ -19,6 +23,12 @@ loc_t loc_make(const char* file, uint32_t line, uint32_t col) {
 
 // Writes one `<file>:<line>:<col>: <kind>: <msg>` line (toolchain.md 4).
 static void diag_write(loc_t loc, const char* kind, const char* msg) {
+    if (mute_depth > 0) {
+        // A muted diagnostic is counted by the caller of diag_write and never
+        // built, so a probing parse costs nothing and diag_count still says
+        // whether the file it read parsed.
+        return;
+    }
     sb_t line;
     sb_init(&line);
     sb_append(&line, loc.file);
@@ -58,6 +68,26 @@ void diag_reset(void) {
 
 void diag_capture(sb_t* sink) {
     capture_sink = sink;
+}
+
+void diag_mute(void) {
+    if (mute_depth == 0) {
+        mute_saved_count = error_count;
+    }
+    mute_depth++;
+}
+
+uint64_t diag_unmute(void) {
+    if (mute_depth == 0) {
+        fatal_internal("diag_unmute: no diag_mute is open");
+    }
+    mute_depth--;
+    if (mute_depth > 0) {
+        return 0;
+    }
+    const uint64_t suppressed = error_count - mute_saved_count;
+    error_count = mute_saved_count;
+    return suppressed;
 }
 
 // ---- message builder ---------------------------------------------------------------
