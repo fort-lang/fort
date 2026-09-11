@@ -298,6 +298,23 @@ bool gen_builtin_call(gen_t* g, ast_node_t* n) {
 
 // ---- calls (item 7) ---------------------------------------------------------------
 
+// A function name used as a value is its address: a function pointer is an
+// ordinary `ptr` value, and `&f` and `*f` are errors, so the name alone
+// denotes it (D3.10). A qualified name `m.f` is the same value, since the
+// symbol a field node resolved to is the function itself (D9.4).
+static bool function_ref(gen_t* g, ast_node_t* n, gen_val_t* out) {
+    const sym_t* s = n->sym;
+    // Only a fort function: an `extern fn` in value position is a checker
+    // error, since an indirect call site cannot take the variadic form its
+    // declaration supplies (D3.10, D9.8).
+    if (s == NULL || s->kind != SYM_FN) {
+        return false;
+    }
+    out->ty = str_from_cstr("ptr");
+    out->val = gen_symbol_ref(g, s);
+    return true;
+}
+
 // One argument of a fort or `extern` call: a scalar is an ordinary parameter,
 // and an aggregate is a plain `ptr` to a copy the caller allocates in its
 // entry block and memcpys into (item 7).
@@ -312,21 +329,62 @@ static void gen_call_arg(gen_t* g, gen_args_t* args, ast_node_t* arg) {
     gen_args_add_ext(args, gen_expr_value(g, arg), gen_ext_attr(t));
 }
 
-// The call of a fort or `extern` function; `dst` is the place an aggregate
-// result is written into and is NULL for a scalar or void result.
+// The parameter types of a call-site function type, `(i32, ptr)`: an
+// aggregate parameter is a plain `ptr` and an aggregate result adds the
+// leading pointer of item 7. An extern call ends the list with the variadic
+// tail of item 8; a call through a function pointer never does, since D3.10
+// has no variadic function type.
+static void gen_call_type(gen_t* g, const type_t* sig, bool variadic) {
+    gen_text_append(g, "(");
+    uint64_t written = 0;
+    if (gen_is_aggregate(sig->elem)) {
+        // An aggregate result is a leading `ptr` parameter (item 7).
+        gen_text_append(g, "ptr");
+        written++;
+    }
+    for (uint32_t i = 0; i < sig->nparams; i++) {
+        if (written > 0) {
+            gen_text_append(g, ", ");
+        }
+        written++;
+        const type_t* pt = sig->params[i];
+        // A struct, fixed array, span or `string` parameter is a plain `ptr`
+        // (item 7).
+        gen_text_append_str(g, gen_is_aggregate(pt) ? str_from_cstr("ptr") : gen_value_type(g, pt));
+    }
+    if (variadic) {
+        if (written > 0) {
+            gen_text_append(g, ", ");
+        }
+        gen_text_append(g, "...");
+    }
+    gen_text_append(g, ") ");
+}
+
+// The call of a fort function, an `extern` function or a function pointer;
+// `dst` is the place an aggregate result is written into and is NULL for a
+// scalar or void result.
 static gen_val_t gen_call(gen_t* g, ast_node_t* n, const gen_place_t* dst) {
     gen_val_t none = gen_literal(g, str_from_cstr("void"), "");
     const sym_t* s = n->a != NULL ? n->a->sym : NULL;
-    if (s == NULL || (s->kind != SYM_FN && s->kind != SYM_EXTERN_FN)) {
-        // A call through a function pointer is T-017's.
-        gen_todo(g, n->loc, "a call through a function pointer");
+    // A function name, a qualified name and a function-pointer-typed
+    // expression are all callable (D6.11); only the first two name a symbol,
+    // and the third is an ordinary `ptr` value (D3.10).
+    const bool direct = s != NULL && (s->kind == SYM_FN || s->kind == SYM_EXTERN_FN);
+    const type_t* sig = NULL;
+    if (direct) {
+        sig = s->type;
+    } else if (n->a != NULL) {
+        sig = n->a->type;
+    }
+    if (sig == NULL || sig->kind != TYPE_FN) {
+        // Only the checker can produce a callee that is not a function, and
+        // it reports one, so this is unreachable; an unfinished path is a
+        // diagnostic and never wrong code.
+        gen_todo(g, n->loc, "this callee");
         return none;
     }
-    const type_t* sig = s->type;
-    if (bad_type(sig) || sig->kind != TYPE_FN) {
-        return none;
-    }
-    const bool is_extern = s->kind == SYM_EXTERN_FN;
+    const bool is_extern = direct && s->kind == SYM_EXTERN_FN;
     // An `extern fn` naming a runtime entry point takes that group's
     // prototype, variadic tail included, so it is called through it and not
     // through the variadic type of D9.8 (item 8).
@@ -339,6 +397,18 @@ static gen_val_t gen_call(gen_t* g, ast_node_t* n, const gen_place_t* dst) {
         // reaching this without one would drop the `sret` argument.
         gen_todo(g, n->loc, "an aggregate result read without a destination");
         return none;
+    }
+    gen_val_t callee = none;
+    if (direct) {
+        callee.ty = str_from_cstr("ptr");
+        callee.val = gen_symbol_ref(g, s);
+    } else {
+        // The callee is evaluated before the arguments, which is the source
+        // order the walk keeps (D6.3).
+        callee = gen_expr_value(g, n->a);
+        if (g->failed) {
+            return none;
+        }
     }
     gen_args_t args;
     gen_args_init(&args);
@@ -370,22 +440,14 @@ static gen_val_t gen_call(gen_t* g, ast_node_t* n, const gen_place_t* dst) {
     }
     gen_text_append_str(g, ret);
     gen_text_append(g, " ");
-    if (variadic) {
+    if (variadic || !direct) {
         // An extern call goes through the matching variadic call type, which
-        // is what makes the vector-register count right (item 8, D9.8).
-        gen_text_append(g, "(");
-        for (uint32_t i = 0; i < sig->nparams; i++) {
-            if (i > 0) {
-                gen_text_append(g, ", ");
-            }
-            gen_text_append_str(g, gen_value_type(g, sig->params[i]));
-        }
-        if (sig->nparams > 0) {
-            gen_text_append(g, ", ");
-        }
-        gen_text_append(g, "...) ");
+        // is what makes the vector-register count right (item 8, D9.8), and a
+        // call through a function pointer carries the function type because
+        // an opaque pointer carries none (D3.10, D19.2).
+        gen_call_type(g, sig, variadic);
     }
-    gen_text_append_str(g, gen_symbol_ref(g, s));
+    gen_text_append_str(g, callee.val);
     gen_text_append(g, "(");
     gen_text_append_str(g, sb_view(&args.text));
     gen_text_append(g, ")");
@@ -975,12 +1037,25 @@ gen_val_t gen_expr_value(gen_t* g, ast_node_t* n) {
         return gen_const_value(g, n->type, check_node_value(g->ck, n));
     }
     switch (n->kind) {
-    case AST_IDENT:
+    case AST_IDENT: {
+        gen_val_t fn;
+        // A function name is a value of its function type and has no storage
+        // to load from (D3.10).
+        if (function_ref(g, n, &fn)) {
+            return fn;
+        }
+        return gen_load_place(g, gen_expr_place(g, n));
+    }
     case AST_INDEX:
     case AST_ARROW:
         return gen_load_place(g, gen_expr_place(g, n));
     case AST_FIELD: {
         gen_val_t v;
+        // A qualified name `m.f` of a function is that function's address,
+        // not a field of a value (D3.10, D9.4).
+        if (function_ref(g, n, &v)) {
+            return v;
+        }
         if (pseudo_field_value(g, n, &v)) {
             return v;
         }

@@ -154,11 +154,19 @@ Owner: `type-system.md`.
 - **D3.10** Function types are written `fn R(P1, P2)` with parameter types only. Identity is
   structural over parameter types (including pointee mutability), return type and `noreturn`;
   binding-level `mut` on parameters is ignored. A function name used as a value, including a
-  qualified `m.f`, has its function type; `&f` and `*f` are errors. `null` is a valid
+  qualified `m.f`, has its function type; `&f` and `*f` are errors. The name must be a fort
+  function: an `extern fn` in value position is an error, because every extern is declared and
+  called through a variadic LLVM function type so that a fixed prototype of a variadic C function
+  is safe (D9.8), and an indirect call site has no callee to take that form from, so the
+  vector-register count the ABI requires of a variadic caller would go unset. Wrap it in a fort
+  function to take an address; that call is direct and keeps the variadic form. `null` is a valid
   function-pointer value; calling it is
   undefined behavior. `==`/`!=` compare identity. Function pointers are in the C bootstrap's
   subset (`toolchain.md` 7.3): a function pointer is an ordinary `ptr` value and a call through
-  one an ordinary `call` in LLVM IR (D19.2), so the bootstrap implements them.
+  one an ordinary `call` in LLVM IR (D19.2), so the bootstrap implements them. Amended 2026-09-10:
+  an `extern` name was a value like any other, which emitted a non-variadic indirect call site
+  against a symbol declared variadic -- no `al` set, no diagnostic, and no test that could see it
+  (T-017's review).
 - **D3.11** `void*` is an opaque pointer with no pointee level: no `*`, `->`, indexing or span
   expression. Conversion to and from any pointer, function pointer or `u64` requires `cast`.
 - **D3.12** Type identity: primitives by name; structs and enums nominally; arrays by element type
@@ -578,7 +586,9 @@ Owner: `module-system.md`.
   type (`declare i32 @printf(ptr, ...)`, called as `call i32 (ptr, ...) @printf(...)`), which
   makes the caller pass the vector-register count the ABI requires of callers of variadic
   functions, so a fixed-prototype declaration of a variadic C function is safe; a non-variadic
-  callee ignores that count, so the same declaration is ABI-identical for it (D19.2). Extern
+  callee ignores that count, so the same declaration is ABI-identical for it (D19.2). That
+  argument covers direct calls only, since the variadic form comes from the callee's
+  declaration, which is why an `extern` name is not a value (D3.10). Extern
   call sites are `nobuiltin`, so no library-call rewriting replaces a symbol the program
   declared. Narrow integers and `bool` are normalized with zero- or sign-extension on both sides
   of the boundary, expressed as the `zeroext` and `signext` parameter and result attributes of
@@ -600,7 +610,15 @@ Owner: `module-system.md`.
   hidden pointer and is never split into two scalars, so `fort_entry`'s C prototype
   (`const struct fort_span*`, D11.6) is literally true. `bool`, `char`, `u8` and `u16`
   parameters and results carry `zeroext`, `i8` and `i16` carry `signext`, and nothing wider
-  carries an extension attribute, in fort and extern signatures alike (D9.8). Amended
+  carries an extension attribute, in fort and extern signatures alike (D9.8). `sret(%T)` is
+  written on the definition's parameter and not at the call site, which passes the destination as
+  a plain `ptr`: on x86-64 the two are identical, since the pointer takes the first integer
+  register either way and the `rax` echo is driven by the callee's attribute, so the only consumer
+  of a call-site `sret` is tail-call eligibility, which can suppress an optimization but never
+  change meaning. That holds while every aggregate-returning callee is one the compiler also
+  defines; an aggregate-returning `declare` would make the call site the only description and the
+  question would have to be asked again, which D9.8 forbids by keeping aggregates out of extern
+  signatures. Amended
   2026-09-10 with D19: the register-level spelling of the same convention is now LLVM's job, and
   the prototype read `const struct fort_slice*` while spans were called slices (D3.5).
 - **D9.10** Whole-program compilation: the compiler walks the import closure from the entry file,
@@ -1089,7 +1107,10 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   is a `load i8` and a `trunc`, every store a `zext` and a `store i8`. `f32` and `f64` are
   `float` and `double`. Every pointer, `void*` and function pointer is the opaque `ptr` (D3.11,
   D3.10); the pointee type is the compiler's business and appears only on the instructions that
-  need it, so a function pointer is a `ptr` and a call through one an ordinary `call`. `T[N]` is
+  need it, so a function pointer is a `ptr` and a call through one an ordinary `call` whose
+  function type is written out, `call i32 (i32, i32) %t0(...)`, as item 8's variadic form is: an
+  opaque `ptr` carries no signature, so the spelled type is the only description of the callee at
+  that site. `T[N]` is
   `[N x T]` (D3.4); a span and `string` are the one type `%fort.span = type { ptr, i64 }`
   (D3.5, D3.7); a struct is `%struct.<dotted name>` with its fields in declaration order and
   never `packed`, because LLVM lays that type out exactly as C does (D3.8); an enum is `i32`

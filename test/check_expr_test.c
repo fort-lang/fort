@@ -307,6 +307,35 @@ TEST(a_function_name_is_a_value_of_its_type, {
     TEST_ASSERT_EQ_STR(init_type("f"), "fn i32(i32)");
 })
 
+TEST(an_extern_function_is_callable_and_not_a_value, {
+    // An `extern fn` in value position is an error: an extern is called
+    // through the variadic LLVM type its declaration supplies, which an
+    // indirect call site has no callee to take (D3.10, D9.8).
+    TEST_ASSERT_TRUE(check_src("extern fn i32 abs(i32 n);\n"
+                               "fn i32 main() {\n    return abs(-1);\n}\n"));
+    TEST_ASSERT_FALSE(check_src("extern fn i32 abs(i32 n);\n"
+                                "fn i32 main() {\n    fn i32(i32) f = abs;\n"
+                                "    return f(-1);\n}\n"));
+    TEST_ASSERT_TRUE(said("'abs' is an extern function, which is not a value"));
+    TEST_ASSERT_FALSE(check_src("extern fn i32 abs(i32 n);\n"
+                                "fn i32 main() {\n    println(cast(abs, void*));\n"
+                                "    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("wrap it in a fort function to take a function pointer"));
+})
+
+TEST(an_extern_of_another_module_is_callable_and_not_a_value, {
+    begin();
+    add("libc.ft", "extern fn i32 abs(i32 n);\n");
+    add("main.ft", "import libc;\nfn i32 main() {\n    return libc.abs(-1);\n}\n");
+    TEST_ASSERT_TRUE(check_entry("main.ft"));
+    begin();
+    add("libc.ft", "extern fn i32 abs(i32 n);\n");
+    add("main.ft",
+        "import libc;\nfn i32 main() {\n    fn i32(i32) f = libc.abs;\n    return f(-1);\n}\n");
+    TEST_ASSERT_FALSE(check_entry("main.ft"));
+    TEST_ASSERT_TRUE(said("'abs' is an extern function, which is not a value"));
+})
+
 TEST(a_value_that_is_not_callable_is_refused, {
     TEST_ASSERT_FALSE(check_body("    i32 x = 1;\n    println(x(1));"));
     TEST_ASSERT_TRUE(said("cannot call a value of type i32"));
@@ -457,6 +486,8 @@ int main(int argc, char** argv) {
     TEST_RUN(a_call_checks_its_arity);
     TEST_RUN(a_call_converts_its_arguments);
     TEST_RUN(a_function_name_is_a_value_of_its_type);
+    TEST_RUN(an_extern_function_is_callable_and_not_a_value);
+    TEST_RUN(an_extern_of_another_module_is_callable_and_not_a_value);
     TEST_RUN(a_value_that_is_not_callable_is_refused);
     TEST_RUN(a_builtin_cannot_be_used_as_a_value);
     TEST_RUN(a_builtin_that_yields_nothing_has_no_value);

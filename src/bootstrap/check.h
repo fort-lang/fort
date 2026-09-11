@@ -120,6 +120,9 @@ typedef struct {
     const module_t* module;
     const sym_t* module_sym;
     const sym_t* fn_sym; // the function whose body is being checked
+    // The callee of the call being resolved: an `extern fn` name is a callee
+    // and nowhere a value, so the value path tells the two apart (D3.10).
+    const ast_node_t* callee;
     scope_t* scope;      // the innermost block scope, NULL at module level
     const type_t* ret;   // the return type of the function being checked
     bool ret_void;       // its return type is `void` (D7.11)

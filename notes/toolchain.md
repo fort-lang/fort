@@ -573,15 +573,27 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    and `byval` is never used, since it would mean a callee-visible copy on the stack rather than
    the pointer in the integer slot D9.9 requires. An aggregate result is a leading
    `ptr sret(%T) %ret.sret` parameter on a function whose result type is `void`; the pointer
-   arrives in `rdi` and is echoed in `rax`, which is D9.9's ABI. A span or `string` is one
-   hidden pointer and is never split into two scalars, so `fort_entry`'s C prototype stays
-   literally true (D11.6). `bool`, `char`, `u8` and `u16` parameters and results carry `zeroext`
-   and `i8` and `i16` carry `signext`, in fort and extern signatures alike, so an extern-legal
-   signature is a valid C callback by construction (D9.9). Every fort definition is
-   `define dso_local <ret> @"m.f"(...) #0`, where `#0` is
+   arrives in `rdi` and is echoed in `rax`, which is D9.9's ABI. The attribute is written on the
+   definition and not at the call site, which passes the destination as a plain `ptr`: on
+   x86-64 the two are identical and only tail-call eligibility can tell them apart (D9.9).
+   A span or `string` is one hidden pointer and is never split into two scalars, so
+   `fort_entry`'s C prototype stays literally true (D11.6). `bool`, `char`, `u8` and `u16`
+   parameters and results carry `zeroext` and `i8` and `i16` carry `signext`, in fort and extern
+   signatures alike, so an extern-legal signature is a valid C callback by construction (D9.9).
+   Every fort definition is `define dso_local <ret> @"m.f"(...) #0`, where `#0` is
    `{ nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }`: `nounwind` because fort has
    no exceptions, the frame pointer because it is what a debugger gets without DWARF (section
    9), and `probe-stack` for item 13.
+
+   A call through a function pointer is an ordinary `call` whose callee is the `ptr` value and
+   whose function type is written out, because an opaque pointer carries none (D19.2):
+   `call i32 (i32, i32) %t0(i32 %t1, i32 %t2)`, and `call void (ptr, i32) %t0(ptr %r.0, i32 3)`
+   for an aggregate result. The callee is evaluated before the arguments (D6.3) and every rule
+   above holds at that call site unchanged, aggregate arguments and the extension attributes
+   included, so it differs from the call of a name only in the callee and that type (D3.10). The
+   callee is always a fort function, since an `extern fn` in value position is an error (D3.10):
+   an extern is called through the variadic type of item 8, which only its declaration can
+   supply.
 
 8. **Extern and runtime declarations** (D9.8). An `extern` function is declared with its C types,
    unmangled, and with a variadic tail, and is called through the matching variadic call type:
@@ -603,7 +615,8 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    LLVM from rewriting a declared symbol into another library call, and is preferred to a
    driver-wide `-fno-builtin`, which would also change how our `llvm.memcpy` and `llvm.memset`
    are lowered. A call through a function pointer is not variadic (D3.10 has no variadic
-   function type) and needs no such declaration.
+   function type) and needs no such declaration; it is also never a call of an extern, whose name
+   is not a value, so every extern call in the module carries the variadic type above (D3.10).
 
    The runtime entry points are declared with the C prototypes of section 5.1 and are never
    variadic, whether the compiler emits the call itself or the standard library reached the

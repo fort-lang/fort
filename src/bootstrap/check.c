@@ -49,6 +49,7 @@ void check_init(check_t* ck) {
     ck->module = NULL;
     ck->module_sym = NULL;
     ck->fn_sym = NULL;
+    ck->callee = NULL;
     ck->scope = NULL;
     ck->ret = NULL;
     ck->ret_void = true;
@@ -1297,8 +1298,24 @@ static void value_of_sym(check_t* ck, ast_node_t* n, const sym_t* s, expr_t* out
         out->lvalue = true;
         out->mut = s->mut0;
         break;
-    case SYM_FN:
     case SYM_EXTERN_FN:
+        if (n != ck->callee) {
+            // An `extern fn` in value position is an error: an extern is
+            // called through the variadic LLVM type its declaration supplies,
+            // and an indirect call site has no callee to take that form from,
+            // so the vector-register count would go unset (D3.10, D9.8).
+            check_msg_begin(ck);
+            msg_quote(&ck->msg, s->name);
+            msg_str(&ck->msg,
+                    " is an extern function, which is not a value: wrap it in a fort function "
+                    "to take a function pointer");
+            check_msg_end(ck, n->name_loc);
+            out->type = type_error(&ck->types);
+            break;
+        }
+        out->init_const = true;
+        break;
+    case SYM_FN:
         // A function name used as a value has its function type; `&f` is an
         // error (D3.10), and a function name is a module-level initializer
         // (D7.10).
@@ -2007,7 +2024,11 @@ static void check_call(check_t* ck, ast_node_t* n, expr_t* out) {
         }
     }
     expr_t f;
+    // The callee is the one position an `extern fn` name may stand in (D3.10).
+    const ast_node_t* outer_callee = ck->callee;
+    ck->callee = callee;
     check_expr(ck, callee, &f);
+    ck->callee = outer_callee;
     out->sym = f.sym;
     if (!check_poisoned(f.type) && f.type->kind != TYPE_FN) {
         check_msg_begin(ck);

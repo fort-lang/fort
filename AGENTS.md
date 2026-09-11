@@ -300,7 +300,10 @@ A safe(r) C-like systems programming language.
   header is complete before it. `test/lang/fail` is the cascade test (`parser_recovery_test.c`
   walks it): a diagnostic on a line with no `//! error:` annotation fails the suite, and the
   diagnostic counts of the files with two syntax errors are asserted beside it, since a walk that
-  only forbids unannotated lines also passes with recovery switched off.
+  only forbids unannotated lines also passes with recovery switched off. It also asserts the
+  number of files it walked (`CORPUS_FILES`), so a ticket that adds a test under `test/lang/fail`
+  raises that constant in the same commit, and one that adds a suite of its own to `test/` runs
+  `tools/vm configure` before `build`, since the executables are globbed at configure time.
 - **Diagnostic records**: a `diag_record_t` owns its file name as well as its message. `loc.file`
   is borrowed from whoever reported the diagnostic -- the module set, whose pool holds every file
   name it read -- and that set is freed before `fort --check --json` writes its document (D20.2),
@@ -350,6 +353,18 @@ A safe(r) C-like systems programming language.
   contract item 10 and a new suite inherits it. Treat `opt` as a floor that catches type and
   dominance errors, never as the proof of a structural contract item -- and when a contract item
   names a tool as its check, confirm the tool actually rejects a violation before believing it.
+  **No internal-ABI mutation is catchable by a language run test.** Flipping a `zeroext` to
+  `signext`, dropping either extension attribute, passing an aggregate `byval` and dropping the
+  `sret` of a definition each leave the whole of `test/lang` green (measured on all 280 tests,
+  T-017's review): a fort program is one LLVM module, caller and callee are compiled together, the
+  `-O1` of the `--cc` line inlines the mismatch away, and a convention both sides get wrong agrees
+  with itself. The corpus can only see what the *program* can observe -- evaluation order, a callee
+  writing to its parameter, a trap that must fire. Everything else is pinned by the text: the
+  assertions in `test/gen*_test.c` and the goldens in `test/ir/*.ll`. A ticket that touches the
+  calling convention therefore asserts the emitted text and proves the assertion by mutation --
+  change the emitter, watch that one test fail, change it back -- rather than trusting that a run
+  test would have caught it. The same held for the `llvm.trap` of D19.7: the review broke it and
+  all 55 suites and 280 language tests stayed green.
 - **A whole directory in `xfail.txt` hides a class of programs from every pass behind it.** Both
   bugs the deep review of T-015 found were at a module boundary, because `run/modules/` is
   entirely expected to fail, so no program with two modules had ever reached the emitter: an

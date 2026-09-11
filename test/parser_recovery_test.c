@@ -742,7 +742,7 @@ TEST(an_unclosed_bracket_costs_its_construct_and_no_more, {
 
 // ---- the fail corpus (D14.4) ----------------------------------------------
 
-enum { CORPUS_PATH_CAP = 512, CORPUS_CHUNK = 4096, CORPUS_FILES = 127 };
+enum { CORPUS_PATH_CAP = 512, CORPUS_CHUNK = 4096, CORPUS_FILES = 129 };
 
 // The files walked, the source of the one being read, and the lines that were
 // reported on without an annotation, one per line.
@@ -884,8 +884,12 @@ TEST(the_fail_corpus_reports_only_on_annotated_lines, {
     sb_clear(&corpus_report);
     walk_corpus(FORT_LANG_DIR "/fail");
     TEST_ASSERT_EQ_STR(sb_cstr(&corpus_report), "");
-    // The exact count, so that a file that stops being walked is noticed.
-    TEST_ASSERT_EQ_UINT64(corpus_files, (uint64_t)CORPUS_FILES);
+    // The exact count, so that a file that stops being walked is noticed. It
+    // is a literal on purpose: deriving it with this walker would be
+    // circular, so the name of the operand carries what to do about it, since
+    // `#val` is what the failing assertion prints.
+    const uint64_t raise_corpus_files_when_you_add_a_fail_test = corpus_files;
+    TEST_ASSERT_EQ_UINT64(raise_corpus_files_when_you_add_a_fail_test, (uint64_t)CORPUS_FILES);
 })
 
 // The corpus files whose syntax errors are all reported, with the number of

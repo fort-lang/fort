@@ -26,6 +26,12 @@ int32_t helper_apply(int32_t (*cb)(int32_t), int32_t x) {
     return cb(x);
 }
 
+// Calls back with narrow arguments and a narrow result, which the extension
+// attributes of D9.9 normalize on both sides of the boundary.
+uint8_t helper_apply_narrow(uint8_t (*cb)(int8_t, uint16_t), int8_t a, uint16_t b) {
+    return cb(a, b);
+}
+
 int64_t helper_sum_to(int64_t n) {
     int64_t sum = 0;
     for (int64_t i = 1; i <= n; i++) {
