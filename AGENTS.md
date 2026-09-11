@@ -305,6 +305,17 @@ A safe(r) C-like systems programming language.
   report a missing one as a broken environment (`gen_no_verifier`, exit `TEST_RESULT_ERR`) the
   way `test/pipeline_test.sh` exits 2: a spawn that succeeds and a child that exits 127 otherwise
   reads as "the verifier rejected this IR", which blames the wrong thing.
+  **`opt -passes=verify` does not reject an instruction after a terminator.** It splits the block,
+  invents an unnamed successor which it prints as `0: ; No predecessors!`, and exits 0 -- so it
+  quietly manufactures the implicit numbering D19.5 forbids rather than reporting the module that
+  caused it. An emitter whose block structure is wrong therefore passes the whole gate: `gen_for`
+  emitted its back edge after a `noreturn` call in a `for` header for a whole ticket while the unit
+  tests, the language corpus, `--verify-ir` and `test/pipeline_test.sh` all stayed green. Block
+  structure is asserted by the suites themselves: `verified()` in `test/gen_helpers.h` runs
+  `gen_block_terminators` before it calls `opt`, so every call site in every emitter suite checks
+  contract item 10 and a new suite inherits it. Treat `opt` as a floor that catches type and
+  dominance errors, never as the proof of a structural contract item -- and when a contract item
+  names a tool as its check, confirm the tool actually rejects a violation before believing it.
 - **A whole directory in `xfail.txt` hides a class of programs from every pass behind it.** Both
   bugs the deep review of T-015 found were at a module boundary, because `run/modules/` is
   entirely expected to fail, so no program with two modules had ever reached the emitter: an

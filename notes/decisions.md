@@ -1137,7 +1137,12 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   signedness of its fort type (`store i8 -1` for an `i8`, `store i8 255` for a `u8`, and `i64`
   MIN as `-9223372036854775808`); a float constant is printed as the LLVM hex literal of its
   `double` bit pattern, an `f32` constant converted to `double` first, so no decimal rounding
-  can differ between two stages.
+  can differ between two stages. Amended 2026-09-10 with how the naming half is checked: `opt
+  -passes=verify` cannot enforce it, because an instruction after a terminator makes the verifier
+  *create* an implicit number rather than reject the module. `opt-18` exits 0 on a block whose
+  `unreachable` is followed by a `br`, splits it and prints the remainder as `0: ; No
+  predecessors!` -- an implicitly numbered block, which is the one thing this decision forbids. The
+  verifier is a floor; the emitter's own tests assert block structure.
 - **D19.6** Checks and failure blocks. Every runtime check (D10.6, D11.1, D11.3, D17.11)
   computes one `i1` that is true on failure and branches with the failure block as the first
   label; `assert` is the exception, since its operand is already the success condition (D12.2).
