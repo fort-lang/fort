@@ -1,6 +1,6 @@
 target triple = "x86_64-unknown-linux-gnu"
 
-%fort.slice = type { ptr, i64 }
+%fort.span = type { ptr, i64 }
 %fort.enum_member = type { i32, ptr }
 
 define dso_local i32 @"main.main"() #0 {

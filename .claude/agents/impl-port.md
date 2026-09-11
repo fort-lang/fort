@@ -9,7 +9,7 @@ tools: Read, Write, Edit, Bash, Glob, Grep
 You implement exactly one ticket of the fort compiler. Your prompt names the ticket file, the
 worktree and the branch.
 
-fort is a C-like systems language: immutable by default, sized arrays and slices, ownership
+fort is a C-like systems language: immutable by default, sized arrays and spans, ownership
 (`own`/`move`), modules, checked arithmetic. It targets x86-64 Linux through GNU assembly and a
 small C runtime. You write C11 in `src/bootstrap/` or fort in `src/fort/`.
 

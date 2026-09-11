@@ -157,7 +157,7 @@ from the entry module and reports it at the import that closes it. A module impo
 cycle of length one. Whole-program compilation could tolerate cycles; the rule stays because it
 keeps dependencies one-directional and module order a topological order.
 
-- Two struct types that refer to each other, through pointers or slices (D3.8), must be declared
+- Two struct types that refer to each other, through pointers or spans (D3.8), must be declared
   in the same module.
 - Two functions in different modules cannot call each other, and a module cannot both provide
   types to another module and call into it. Move one side, or pass a function pointer down from
@@ -211,10 +211,10 @@ as a function-pointer value, and may be `noreturn` (D8.5).
 
 | Allowed in an extern signature                  | Not allowed                          |
 |-------------------------------------------------|--------------------------------------|
-| `i8 i16 i32 i64 u8 u16 u32 u64`, `f32 f64`      | `T@` slices, `string`, fixed arrays  |
+| `i8 i16 i32 i64 u8 u16 u32 u64`, `f32 f64`      | `T@` spans, `string`, fixed arrays   |
 | `bool`, `char`, enums (passed as `i32`)         | structs by value                     |
 | `T*`, `T mut*` for any `T`, `void*`             | variadic parameters                  |
-| `own` on any of those pointers (D17.13)         | `own` slices and strings (D9.8)      |
+| `own` on any of those pointers (D17.13)         | `own` spans and strings (D9.8)       |
 | `fn R(P...)` whose signature is extern-legal    |                                      |
 | return type `void` or `noreturn`                |                                      |
 
@@ -309,25 +309,25 @@ fn i32 by_value(void* a, void* b) {
 ```
 
 An `i32 mut@ xs` is sorted with `qsort(cast(xs.ptr, void*), xs.len, sizeof(i32), by_value);`. A
-function taking a slice, string, struct or fixed array is not extern-legal and cannot be passed
+function taking a span, string, struct or fixed array is not extern-legal and cannot be passed
 to C.
 
-### 8.6 Slices and strings
+### 8.6 Spans and strings
 
-Slices and strings never cross the boundary whole (D9.8, D13.4). Pass `.ptr` and `.len`: `s.ptr`
+Spans and strings never cross the boundary whole (D9.8, D13.4). Pass `.ptr` and `.len`: `s.ptr`
 of a `string` is `char*`; `xs.ptr` of a `T@` is `T*`, or `T mut*` for `T mut@`. A string
-literal is NUL-terminated (D3.7) and so is every element of `args` (D8.6); a string obtained by
-slicing or read from a file is not. A C function expecting a terminator gets a copy: allocate
+literal is NUL-terminated (D3.7) and so is every element of `args` (D8.6); a string obtained as a
+span or read from a file is not. A C function expecting a terminator gets a copy: allocate
 `char mut@ own tmp = new(char, s.len + 1);` under a `defer del(tmp);`, copy the characters, and
 pass `tmp.ptr`; the last element is already `'\0'` (D10.2). Memory received from C as `T*`
-becomes a slice with `p[0..n]` (D6.9), unchecked and borrowed; a `char*` becomes a `string`
-with `cast(p[0..n], string)` (D3.14). When C hands the memory over for good, the slice is
+becomes a span with `p[0..n]` (D6.9), unchecked and borrowed; a `char*` becomes a `string`
+with `cast(p[0..n], string)` (D3.14). When C hands the memory over for good, the span is
 adopted with a `cast` that adds `own`, `cast(p[0..n], u8 mut@ own)`, and is then freed with
 `del` (D17.3); memory from `new` may likewise be freed by C `free` and memory from `malloc` by
 `del` (D10.3). There is no strict-aliasing rule (D10.7): memory may be read through any
 pointer type reached by `cast`. A fort wrapper around a C function that fills a buffer and
 reports its length takes the out-parameter shape `u8 mut@ own mut* out`, a borrowed pointer to
-an `own` slot (D3.6, D13.5, D17.2), and stores the adopted slice through it, since `.ptr` and
+an `own` slot (D3.6, D13.5, D17.2), and stores the adopted span through it, since `.ptr` and
 `.len` are never assignable (D6.7); the caller initializes the slot to `{}` so that the store
 passes the overwrite check (D17.11).
 
@@ -384,7 +384,7 @@ The internal convention (D9.9) is System V x86-64 for scalars and one rule for a
 - Integers, `bool`, `char`, enums, pointers and function pointers: `rdi rsi rdx rcx r8 r9`, then
   the stack; returned in `rax`.
 - `f32` and `f64`: `xmm0` to `xmm7`, then the stack; returned in `xmm0`.
-- Structs, fixed arrays, slices and `string`: passed as a hidden pointer to a caller-made copy,
+- Structs, fixed arrays, spans and `string`: passed as a hidden pointer to a caller-made copy,
   occupying the next integer slot; returned into a caller-provided buffer whose address is passed
   in `rdi` ahead of every other argument and echoed in `rax`.
 
@@ -394,17 +394,17 @@ Differences from System V for aggregates:
 |------------------------------|-------------------------------------|--------------------------|
 | struct of at most 16 bytes   | split into up to two registers      | pointer to a copy        |
 | struct larger than 16 bytes  | copied onto the stack by the caller | pointer to a copy        |
-| slice or `string`            | two integer registers               | pointer to a copy        |
+| span or `string`             | two integer registers               | pointer to a copy        |
 | aggregate return             | registers or `rdi` result pointer   | always the `rdi` pointer |
 
 In LLVM IR (`toolchain.md` 6 item 7) an aggregate argument is a plain `ptr` parameter, never
 `byval`, and an aggregate result is a leading `ptr sret(%T)` parameter on a function returning
-`void`; a slice or `string` is one pointer and is never split into two scalars. Scalar
+`void`; a span or `string` is one pointer and is never split into two scalars. Scalar
 parameters and results carry `zeroext` or `signext` when they are narrower than 32 bits (D9.9).
 
 Because of these differences an aggregate never appears in an extern signature (D9.8), and the
 compiler never needs System V aggregate classification (D16). Layout is unaffected: structs,
-fixed arrays and slice headers (`ptr` at offset 0, `len` at offset 8) have C layout, so any
+fixed arrays and span headers (`ptr` at offset 0, `len` at offset 8) have C layout, so any
 aggregate can be shared with C through a pointer. Callee-saved registers, stack alignment and the
 rest of the convention are System V; `toolchain.md` states the code generation contract.
 
@@ -432,12 +432,12 @@ function.
 
 Start-up (D11.6): the C runtime owns `main(argc, argv)`. It builds a `string@` of `argc` strings
 whose bytes are the `argv` entries, each NUL-terminated, calls the compiler-emitted `fort_entry`
-with that slice, flushes every output buffer (D11.5) and exits with `status & 0xFF`. `fort_entry`
-is generated in the entry module: it receives the slice by hidden pointer (section 9) and calls
-`<entry>.main`, copying the slice into its own frame and passing that copy when `main` declares
+with that span, flushes every output buffer (D11.5) and exits with `status & 0xFF`. `fort_entry`
+is generated in the entry module: it receives the span by hidden pointer (section 9) and calls
+`<entry>.main`, copying the span into its own frame and passing that copy when `main` declares
 the parameter, and taking neither the copy nor an argument when it does not (`toolchain.md` 6
 item 22). `args[0]` is the program
-name. The runtime keeps the slice for the life of the process and exposes it through
+name. The runtime keeps the span for the life of the process and exposes it through
 `fort_rt_args_ptr()` and `fort_rt_args_len()`, declared in `std::libc` (`stdlib.md` 3) so that
 `sys.args()` works in modules whose `main` takes no parameter. `sys.exit` (D13.2) is the other
 normal exit; a runtime error exits through `abort()` (D11.4).

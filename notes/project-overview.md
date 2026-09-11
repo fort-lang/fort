@@ -2,7 +2,7 @@
 
 fort is a systems programming language that takes C as its foundation and makes a small number of
 targeted changes to remove whole classes of bugs while keeping C's directness: constants by
-default, arrays and slices that know their length, checked arithmetic, no implicit conversions,
+default, arrays and spans that know their length, checked arithmetic, no implicit conversions,
 no fallthrough, no `goto`, a real module system. It is explicitly not trying to be Rust or C++.
 A C programmer should be productive in an afternoon, and the compiler should stay small enough for
 one person to understand.
@@ -32,7 +32,7 @@ Read them in this order. Two are normative and win over the rest.
 | `core-language.md`   | Lexical structure, declarations, expressions, statements, functions,  |
 |                      | builtins.                                                             |
 | `type-system.md`     | Every type, mutability levels, conversions, untyped constants, layout.|
-| `memory-model.md`    | Stack and heap, `new`/`del`, ownership (`own`, `move`), slices and    |
+| `memory-model.md`    | Stack and heap, `new`/`del`, ownership (`own`, `move`), spans and     |
 |                      | strings, runtime checks, the runtime-error contract, undefined        |
 |                      | behavior.                                                             |
 | `module-system.md`   | Files and imports, name resolution, mangling, C FFI, calling          |
@@ -49,7 +49,7 @@ Seed tests that exercise every feature live under `test/lang/` in the format def
 1. **Familiarity first.** C syntax and semantics wherever the change buys nothing.
 2. **Explicit over implicit.** No conversions, no promotions, no truthiness, no hidden
    allocation, no fallthrough. `cast`, `mut` and `new` are written out.
-3. **Safety without complexity.** Bounds-checked arrays and slices, checked arithmetic, mandatory
+3. **Safety without complexity.** Bounds-checked arrays and spans, checked arithmetic, mandatory
    initialization, no pointer arithmetic, exhaustive enum switches.
 4. **Manual control.** Explicit `new`/`del`, with `own` in the type saying who frees and `move`
    passing that job on (D17), C-compatible struct layout, a raw-pointer escape hatch
@@ -62,7 +62,7 @@ Seed tests that exercise every feature live under `test/lang/` in the format def
 |---------------|------------------------------------|--------------------------------------------|
 | Mutability    | mutable by default, `const`        | immutable by default, `mut` (D5)           |
 | Conversions   | implicit promotions and narrowing  | none; `cast(x, T)` (D3.14)                 |
-| Arrays        | decay to pointers, no length       | `T[N]` values and `T@` slices with `.len`  |
+| Arrays        | decay to pointers, no length       | `T[N]` values and `T@` spans with `.len`   |
 | Strings       | `char*` with NUL                   | `string`: immutable `{ptr, len}` (D3.7)    |
 | Overflow      | undefined for signed               | trap in checked builds, wrap in release    |
 | Bounds        | unchecked                          | always checked (D10.6)                     |
