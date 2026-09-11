@@ -142,10 +142,14 @@ foreach(test_source IN LISTS FORT_UNIT_TEST_SOURCES)
 endforeach()
 
 # The driver tests spawn test/fake_cc.sh as their --cc: it records the command
-# line the driver built (D14.3) instead of compiling it, so they need its path.
-if(TARGET driver_test)
-    target_compile_definitions(driver_test PRIVATE FORT_FAKE_CC="${FORT_TEST_DIR}/fake_cc.sh")
-endif()
+# line the driver built (D14.3) instead of compiling it, so they need its path;
+# the check suite needs it to assert that `--check` spawns nothing (D20.1).
+foreach(driver_suite driver_test driver_check_test)
+    if(TARGET "${driver_suite}")
+        target_compile_definitions("${driver_suite}"
+            PRIVATE FORT_FAKE_CC="${FORT_TEST_DIR}/fake_cc.sh")
+    endif()
+endforeach()
 
 # The cross pipeline: the hand-written LLVM IR modules under test/ir, which
 # are in the form of toolchain.md 6 and are its worked examples (D19.1), are

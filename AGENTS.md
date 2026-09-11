@@ -232,6 +232,13 @@ A safe(r) C-like systems programming language.
   walks it): a diagnostic on a line with no `//! error:` annotation fails the suite, and the
   diagnostic counts of the files with two syntax errors are asserted beside it, since a walk that
   only forbids unannotated lines also passes with recovery switched off.
+- **Diagnostic records**: a `diag_record_t` owns its file name as well as its message. `loc.file`
+  is borrowed from whoever reported the diagnostic -- the module set, whose pool holds every file
+  name it read -- and that set is freed before `fort --check --json` writes its document (D20.2),
+  so a record that kept the borrowed pointer hands out freed bytes. The symptom is not a crash:
+  the freed block still held a NUL, so the document printed `"file":""` while the text form,
+  written at report time, was right. `record_append` interns the name in the sink's own pool, and
+  anything else a record must outlive its reporter for is copied the same way.
 - **Citing decisions in code**: a citation goes on the line or function that implements the
   rule, with a phrase stating the rule (`// pointers print as 0x + lowercase hex, 0x0 for null
   (D11.7)`), so a reader learns the rule without opening the log. A bare tag list at file or

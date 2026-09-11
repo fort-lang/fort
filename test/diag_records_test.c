@@ -112,6 +112,48 @@ TEST(the_message_is_copied_into_the_sink, {
     end();
 })
 
+// The record owns its file name as it owns its message: the front end
+// releases the names it read before the check mode writes the document
+// (D20.2), so a name the caller lent out would dangle.
+TEST(the_file_name_is_copied_into_the_sink, {
+    sb_t name;
+    sb_init(&name);
+    begin();
+    sb_append(&name, "lib/util.ft");
+    diag_error(loc_range(sb_cstr(&name), 2, 3, 2, 8), "expected ';'");
+    sb_free(&name);
+    const diag_record_t rec = diag_record_at(0);
+    TEST_ASSERT_EQ_STR(rec.loc.file, "lib/util.ft");
+    TEST_ASSERT_NONNULL(strstr(written_json(), "\"file\":\"lib/util.ft\""));
+    end();
+})
+
+// A note's file name is copied too, and two diagnostics about one file keep
+// their own copies.
+TEST(every_record_keeps_its_own_file_name, {
+    sb_t name;
+    sb_init(&name);
+    begin();
+    sb_append(&name, "a.ft");
+    diag_error(loc_range(sb_cstr(&name), 1, 1, 1, 2), "first");
+    sb_clear(&name);
+    sb_append(&name, "b.ft");
+    diag_note(loc_range(sb_cstr(&name), 4, 1, 4, 2), "second");
+    sb_free(&name);
+    TEST_ASSERT_EQ_STR(diag_record_at(0).loc.file, "a.ft");
+    TEST_ASSERT_EQ_STR(diag_record_at(1).loc.file, "b.ft");
+    end();
+})
+
+// An error without a position in the file has no file name either; the copy
+// must not turn that into a name (D14.2).
+TEST(a_record_without_a_file_keeps_none, {
+    begin();
+    diag_error(loc_make(NULL, 1, 1), "no file at all");
+    TEST_ASSERT_NULL(diag_record_at(0).loc.file);
+    end();
+})
+
 // The records are the diagnostics in the order they were reported, past the
 // first growth of the array.
 TEST(records_keep_the_order_they_were_reported_in, {
@@ -557,6 +599,9 @@ int main(int argc, char** argv) {
     TEST_RUN(an_error_is_recorded_with_its_range);
     TEST_RUN(an_error_is_recorded_as_an_error_and_a_note_as_a_note);
     TEST_RUN(the_message_is_copied_into_the_sink);
+    TEST_RUN(the_file_name_is_copied_into_the_sink);
+    TEST_RUN(every_record_keeps_its_own_file_name);
+    TEST_RUN(a_record_without_a_file_keeps_none);
     TEST_RUN(records_keep_the_order_they_were_reported_in);
     TEST_RUN(diag_reset_clears_the_records);
     TEST_RUN(a_muted_diagnostic_is_not_recorded);

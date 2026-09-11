@@ -124,6 +124,10 @@ static void records_reserve(void) {
 // Keeps the diagnostic, with its whole range (D20.4) and a copy of its
 // message, for the structured form; a muted diagnostic is not reported and so
 // is not recorded.
+//
+// The file name is copied too: the caller's own name dies with the module set
+// that read the file, while a record is read after the front end returned
+// (D20.2), so a record owns every byte it hands out.
 static void record_append(loc_t loc, diag_severity_t severity, const char* msg) {
     if (diag_muted()) {
         return;
@@ -131,6 +135,9 @@ static void record_append(loc_t loc, diag_severity_t severity, const char* msg) 
     records_reserve();
     diag_record_t rec;
     rec.loc = loc;
+    if (loc.file != NULL) {
+        rec.loc.file = str_pool_intern(&sink.pool, str_from_cstr(loc.file)).ptr;
+    }
     rec.severity = severity;
     rec.msg = str_pool_intern(&sink.pool, str_from_cstr(msg));
     sink.records[sink.len] = rec;
