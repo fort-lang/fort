@@ -386,9 +386,11 @@ static gen_val_t gen_call(gen_t* g, ast_node_t* n, const gen_place_t* dst) {
     }
     gen_ins_end(g);
     gen_args_free(&args);
-    if (sig->noreturn && !is_extern) {
-        // Every call site of a `noreturn` fort function ends with the trap
-        // D8.5 requires (item 20, D19.7).
+    if (sig->noreturn) {
+        // Every call site of a `noreturn` function ends with the trap D8.5
+        // requires, an `extern` one included: its declaration is unadorned so
+        // that the optimizer cannot delete this trap, which is what catches an
+        // extern that returns anyway (item 20, D19.7).
         gen_use_intrinsic(g, IN_TRAP);
         gen_use_attr(g, ATTR_TRAP);
         gen_ins(g);

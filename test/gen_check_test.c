@@ -465,6 +465,39 @@ TEST(an_or_short_circuit_branches_the_other_way, {
     TEST_ASSERT_EQ_STR(found("br i1 %t1, label %L1, label %L0"), "br i1 %t1, label %L1, label %L0");
 })
 
+// ---- traps and constants (items 20 and 5) ------------------------------------------
+
+TEST(a_call_to_a_noreturn_extern_still_traps, {
+    TEST_ASSERT_TRUE(emit("extern fn noreturn exit(i32 code);\n"
+                          "fn i32 main() { println(\"bye\"); exit(0); }\n"));
+    // The declaration carries no noreturn, so the optimizer cannot delete the
+    // trap; an extern that returns anyway must still hit it (item 20).
+    TEST_ASSERT_EQ_STR(found("declare void @exit(i32, ...)\n"), "declare void @exit(i32, ...)\n");
+    TEST_ASSERT_EQ_STR(absent("noreturn void @exit"), "absent");
+    TEST_ASSERT_EQ_STR(found("  call void (i32, ...) @exit(i32 0) #3\n"
+                             "  call void @llvm.trap()\n  unreachable\n"),
+                       "  call void (i32, ...) @exit(i32 0) #3\n"
+                       "  call void @llvm.trap()\n  unreachable\n");
+})
+
+TEST(an_integer_constant_is_printed_with_the_signedness_of_its_type, {
+    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i8 a = -1;\n    u8 b = 255;\n"
+                          "    i64 c = -9223372036854775808;\n"
+                          "    u64 d = 18446744073709551615;\n    u16 e = 65535;\n"
+                          "    i16 f = -32768;\n    println(a, b, c, d, e, f);\n"
+                          "    return 0;\n}\n"));
+    // The decimal is printed without padding and with the signedness of the
+    // fort type (D19.5).
+    TEST_ASSERT_EQ_STR(found("store i8 -1, ptr %a.0"), "store i8 -1, ptr %a.0");
+    TEST_ASSERT_EQ_STR(found("store i8 255, ptr %b.1"), "store i8 255, ptr %b.1");
+    TEST_ASSERT_EQ_STR(found("store i64 -9223372036854775808, ptr %c.2"),
+                       "store i64 -9223372036854775808, ptr %c.2");
+    TEST_ASSERT_EQ_STR(found("store i64 18446744073709551615, ptr %d.3"),
+                       "store i64 18446744073709551615, ptr %d.3");
+    TEST_ASSERT_EQ_STR(found("store i16 65535, ptr %e.4"), "store i16 65535, ptr %e.4");
+    TEST_ASSERT_EQ_STR(found("store i16 -32768, ptr %f.5"), "store i16 -32768, ptr %f.5");
+})
+
 int main(int argc, char** argv) {
     TEST_INIT("gen_check", argc, argv);
     TEST_RUN(a_checked_signed_addition_is_the_intrinsic_and_its_two_extractvalues);
@@ -514,6 +547,8 @@ int main(int argc, char** argv) {
     TEST_RUN(an_enum_compares_as_i32);
     TEST_RUN(a_short_circuit_goes_through_a_compiler_made_slot);
     TEST_RUN(an_or_short_circuit_branches_the_other_way);
+    TEST_RUN(a_call_to_a_noreturn_extern_still_traps);
+    TEST_RUN(an_integer_constant_is_printed_with_the_signedness_of_its_type);
     gen_done();
     TEST_EXIT();
 }
