@@ -331,6 +331,26 @@ const char* gen_ext_attr(const type_t* t) {
 
 // ---- names (item 4, D9.7) ---------------------------------------------------------
 
+bool gen_field_index(const sym_t* field, uint64_t* out) {
+    const sym_t* owner = field != NULL ? field->owner : NULL;
+    if (owner == NULL || owner->node == NULL) {
+        return false;
+    }
+    uint64_t at = 0;
+    for (uint64_t i = 0; i < ast_len(owner->node); i++) {
+        const ast_node_t* f = ast_child(owner->node, i);
+        if (f->kind != AST_FIELD_DECL) {
+            continue;
+        }
+        if (f->sym == field) {
+            *out = at;
+            return true;
+        }
+        at++;
+    }
+    return false;
+}
+
 str_t gen_symbol(gen_t* g, const sym_t* s) {
     if (s == NULL) {
         return str_from_cstr("");
@@ -492,6 +512,20 @@ gen_val_t gen_const_value(gen_t* g, const type_t* t, cval_t v) {
     // A char in an integer context is its code point, so the folder is asked
     // for the integer of an integer-like value (D4.3).
     return const_bits(g, ty, cv_bits(cv_as_int(v)), gen_int_bits(t), gen_is_signed(t));
+}
+
+gen_val_t gen_const_mem_value(gen_t* g, const type_t* t, cval_t v) {
+    // The memory type is asked for first, since gen_const_value builds its own
+    // text in the same scratch buffer.
+    const str_t ty = gen_mem_type(g, t);
+    if (v.kind == CV_BOOL) {
+        // A `bool` in memory is 0 or 1 in an `i8`, never the `i1 true` of a
+        // value (D19.2, D3.3).
+        return gen_const_unsigned(g, ty, v.mag != 0 ? 1U : 0U);
+    }
+    gen_val_t out = gen_const_value(g, t, v);
+    out.ty = ty;
+    return out;
 }
 
 gen_val_t gen_binary(gen_t* g, const char* op, gen_val_t a, gen_val_t b) {
@@ -1145,12 +1179,14 @@ static void gen_fort_entry(gen_t* g, const sym_t* main_sym) {
 // The named type of every struct the module declares, in source order, so
 // that a field access names a type the module defines (item 2).
 //
-// This loop, the field index of gen_expr.c and the positional literal there
-// must count the same declarations, or a field index names the wrong field
-// and every GEP after it reads the wrong bytes. All three take the
-// AST_FIELD_DECL children in order and skip on the kind alone; a field with
-// no type would leave the three disagreeing, so it ends the compilation here
-// rather than shifting an index silently.
+// Four walks count the AST_FIELD_DECL children of a declaration and must
+// count the same ones, or a field index names the wrong field and every GEP
+// or constant initializer after it reads or writes the wrong bytes: this one,
+// gen_field_index above, the positional struct literal of gen_expr.c and the
+// constant struct initializer of gen_data.c. All four take those children in
+// order and skip on the kind alone; a field with no type would leave them
+// disagreeing, so it ends the compilation here rather than shifting an index
+// silently.
 static void gen_struct_type(gen_t* g, const ast_node_t* decl) {
     const sym_t* s = decl->sym;
     if (s == NULL || s->error || s->type == NULL || s->type->kind != TYPE_STRUCT) {
@@ -1188,13 +1224,18 @@ static void gen_module(gen_t* g, const module_t* m) {
         }
     }
     for (uint64_t i = 0; i < ast_len(m->ast); i++) {
-        ast_node_t* decl = ast_child(m->ast, i);
+        const ast_node_t* decl = ast_child(m->ast, i);
         if (decl->kind == AST_VAR_DECL) {
-            // Module-level data is T-024's; a program that declares one is
-            // refused rather than miscompiled.
-            gen_todo(g, decl->loc, "a module-level variable");
-            continue;
+            // The module-level data of D7.10, in source order, and before
+            // the functions of the same module: forward references to a
+            // global are legal in `.ll`, so either order would do, and this
+            // one numbers a global's string constants before its bodies'
+            // (item 1, D19.5).
+            gen_global(g, decl);
         }
+    }
+    for (uint64_t i = 0; i < ast_len(m->ast); i++) {
+        ast_node_t* decl = ast_child(m->ast, i);
         if (decl->kind != AST_FN_DECL || decl->b == NULL) {
             continue;
         }

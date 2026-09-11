@@ -148,6 +148,14 @@ typedef struct {
     // The callee of the call being resolved: an `extern fn` name is a callee
     // and nowhere a value, so the value path tells the two apart (D3.10).
     const ast_node_t* callee;
+    // Whether the operand of a `&` is being checked, which asks for an
+    // address and not for a value: `node N = node{&N};` is a legal
+    // self-pointing sentinel, since D7.10 admits `&` of a module-level
+    // declaration from any module, this one included, and the value of `N`
+    // does not depend on the value of `N`. The lazy resolution of D4.6 would
+    // otherwise read the reference as a cycle, its guard being unable to tell
+    // "I need your value" from "I need your address".
+    bool addr_only;
     scope_t* scope;      // the innermost block scope, NULL at module level
     const type_t* ret;   // the return type of the function being checked
     bool ret_void;       // its return type is `void` (D7.11)

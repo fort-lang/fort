@@ -1,8 +1,9 @@
 // Unit tests of the LLVM IR emitter: the module skeleton, the type mapping,
-// symbols, private data, locals, calls, casts and the print family
-// (toolchain.md 6 items 1 to 13 and 19; D19.1 to D19.5). The runtime checks
-// are the other half, in gen_check_test.c, and the whole-module goldens are
-// in gen_module_test.c.
+// symbols, private data, locals, calls and the print family (toolchain.md 6
+// items 1 to 13 and 19; D19.1 to D19.5). The runtime checks are the other
+// half, in gen_check_test.c, the cast matrix of D3.14 is in gen_cast_test.c,
+// the module-level data of D7.10 in gen_global_test.c, and the whole-module
+// goldens are in gen_module_test.c.
 #include "gen.h"
 
 #include <stdbool.h>
@@ -390,59 +391,13 @@ TEST(a_noreturn_definition_carries_its_own_group_and_ends_in_a_trap, {
         "attributes #7 = { cold noreturn nounwind memory(inaccessiblemem: write) }");
 })
 
-// ---- normalization and casts (items 9 and 12) --------------------------------------
+// ---- normalization (item 9) ---------------------------------------------------------
 
 TEST(a_narrow_value_keeps_its_own_width, {
     TEST_ASSERT_TRUE(emit(in_main("    i8 a = 1;\n    i8 b = 2;\n    println(a +% b);\n")));
     // A narrow value is not widened to 32 bits: its width is in its type
     // (item 9).
     TEST_ASSERT_EQ_STR(found("add i8 %t0, %t1"), "add i8 %t0, %t1");
-})
-
-TEST(a_signed_widening_cast_is_a_sext, {
-    TEST_ASSERT_TRUE(emit(in_main("    i32 a = 1;\n    i64 b = cast(a, i64);\n")));
-    TEST_ASSERT_EQ_STR(found("sext i32 %t0 to i64"), "sext i32 %t0 to i64");
-})
-
-TEST(an_unsigned_widening_cast_is_a_zext, {
-    TEST_ASSERT_TRUE(emit(in_main("    u32 a = 1;\n    u64 b = cast(a, u64);\n")));
-    TEST_ASSERT_EQ_STR(found("zext i32 %t0 to i64"), "zext i32 %t0 to i64");
-})
-
-TEST(a_narrowing_cast_is_a_trunc, {
-    TEST_ASSERT_TRUE(emit(in_main("    i64 a = 1;\n    i8 b = cast(a, i8);\n")));
-    TEST_ASSERT_EQ_STR(found("trunc i64 %t0 to i8"), "trunc i64 %t0 to i8");
-})
-
-TEST(a_cast_between_types_of_one_width_emits_nothing, {
-    TEST_ASSERT_TRUE(emit(in_main("    i32 a = 1;\n    u32 b = cast(a, u32);\n")));
-    TEST_ASSERT_EQ_STR(absent(" to i32"), "absent");
-})
-
-TEST(a_bool_to_integer_cast_is_a_zext_of_i1, {
-    TEST_ASSERT_TRUE(emit(in_main("    bool b = true;\n    i32 n = cast(b, i32);\n")));
-    TEST_ASSERT_EQ_STR(found("zext i1 %t2 to i32"), "zext i1 %t2 to i32");
-})
-
-TEST(a_pointer_and_u64_round_trip_uses_ptrtoint_and_inttoptr, {
-    TEST_ASSERT_TRUE(emit(in_main("    i32 v = 1;\n    i32* p = &v;\n"
-                                  "    u64 n = cast(p, u64);\n    void* q = cast(n, void*);\n")));
-    TEST_ASSERT_EQ_STR(found("ptrtoint ptr %t0 to i64"), "ptrtoint ptr %t0 to i64");
-    TEST_ASSERT_EQ_STR(found("inttoptr i64 %t2 to ptr"), "inttoptr i64 %t2 to ptr");
-})
-
-TEST(a_pointer_to_pointer_cast_emits_nothing, {
-    TEST_ASSERT_TRUE(
-        emit(in_main("    i32 v = 1;\n    i32* p = &v;\n    void* q = cast(p, void*);\n")));
-    TEST_ASSERT_EQ_STR(absent("bitcast"), "absent");
-    TEST_ASSERT_EQ_STR(absent("addrspacecast"), "absent");
-})
-
-TEST(an_enum_cast_reads_the_i32_representation, {
-    TEST_ASSERT_TRUE(emit("enum color { red, green }\n"
-                          "fn i32 main() {\n    color g = cast(7, color);\n"
-                          "    return cast(g, i32);\n}\n"));
-    TEST_ASSERT_EQ_STR(found("store i32 7, ptr %g.0, align 4"), "store i32 7, ptr %g.0, align 4");
 })
 
 // ---- one terminator per block (item 10) --------------------------------------------
@@ -507,14 +462,6 @@ int main(int argc, char** argv) {
     TEST_RUN(every_fort_definition_carries_the_attribute_group_of_item_7);
     TEST_RUN(a_noreturn_definition_carries_its_own_group_and_ends_in_a_trap);
     TEST_RUN(a_narrow_value_keeps_its_own_width);
-    TEST_RUN(a_signed_widening_cast_is_a_sext);
-    TEST_RUN(an_unsigned_widening_cast_is_a_zext);
-    TEST_RUN(a_narrowing_cast_is_a_trunc);
-    TEST_RUN(a_cast_between_types_of_one_width_emits_nothing);
-    TEST_RUN(a_bool_to_integer_cast_is_a_zext_of_i1);
-    TEST_RUN(a_pointer_and_u64_round_trip_uses_ptrtoint_and_inttoptr);
-    TEST_RUN(a_pointer_to_pointer_cast_emits_nothing);
-    TEST_RUN(an_enum_cast_reads_the_i32_representation);
     TEST_RUN(the_blocks_of_a_short_circuit_and_a_check_each_end_in_one_terminator);
     gen_done();
     TEST_EXIT();

@@ -592,11 +592,18 @@ TEST(the_argument_entry_points_are_declared_from_section_5_1, {
 
 // ---- unfinished constructs are refused, never miscompiled --------------------------
 
-TEST(a_construct_the_emitter_cannot_lower_yet_is_a_diagnostic, {
-    // The tickets after T-015 remove these one by one; until then a program
-    // that uses one is refused rather than emitted wrongly.
-    TEST_ASSERT_FALSE(emit("i32 mut counter = 0;\nfn i32 main() {\n    return 0;\n}\n"));
-    TEST_ASSERT_NONNULL(strstr(gen_said(), "cannot generate code yet for a module-level variable"));
+TEST(no_construct_the_front_end_admits_reaches_the_emitters_refusal, {
+    // The tickets after T-015 removed the emitter's `gen_todo` paths one by
+    // one, and T-024, which lowered the module-level variable this test used
+    // to be refused for, removed the last one a program could reach: every
+    // feature the bootstrap subset lacks is refused by the parser or the
+    // checker first (floats, `?:`, do-while, multi-dimensional arrays), so a
+    // program that checks is a program that is lowered. What the remaining
+    // paths stand for is unchanged -- an unfinished path is a diagnostic and
+    // never wrong code -- so a ticket that adds one puts its case here.
+    TEST_ASSERT_TRUE(emit("i32 mut counter = 0;\nfn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_NULL(strstr(gen_said(), "cannot generate code yet"));
+    TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
 int main(int argc, char** argv) {
@@ -635,7 +642,7 @@ int main(int argc, char** argv) {
     TEST_RUN(two_declarations_of_one_c_name_never_reach_the_emitter_disagreeing);
     TEST_RUN(an_extern_naming_a_runtime_entry_point_takes_that_groups_prototype);
     TEST_RUN(the_argument_entry_points_are_declared_from_section_5_1);
-    TEST_RUN(a_construct_the_emitter_cannot_lower_yet_is_a_diagnostic);
+    TEST_RUN(no_construct_the_front_end_admits_reaches_the_emitters_refusal);
     sb_free(&golden_text);
     gen_done();
     TEST_EXIT();

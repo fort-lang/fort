@@ -8,6 +8,7 @@
 //| true 8
 //| true 5 h
 //| true 6
+//| true 3 h
 // fort computes struct layout itself (D3.8) and C computes it again; D9.9 says
 // the two agree, so that pointer-based interop works. A fort-only program
 // cannot see a disagreement, because a wrong layout used consistently agrees
@@ -52,6 +53,13 @@ extern fn u64 layout_named_len(named* s);
 extern fn char layout_named_first(named* s);
 extern fn u64 layout_sizeof_table();
 extern fn i64 layout_sum_rows(table* t);
+extern fn i64 layout_table_digest(table* t);
+
+// Module-level constants (D7.10): a constant aggregate is laid out by the
+// emitter's initializer and by LLVM, not field by field at run time, so C
+// reading these is the only check that that layout is the C ABI's too.
+table CONST_TABLE = {{{1, 2}, {3, 4}, {5, 6}}, 7};
+named CONST_NAMED = {3, "hey"};
 
 // The distance between two addresses, which is fort's own offset of a field
 // (D3.11: a pointer reaches `u64` through `cast`).
@@ -95,5 +103,9 @@ fn i32 main() {
     // An array field strides by the element's padded size (D3.4).
     table t = {{{1, 0}, {2, 0}, {3, 0}}, 0};
     println(sizeof(table) == layout_sizeof_table(), " ", layout_sum_rows(&t));
+    // And the same structs as module-level constants, read out of read-only
+    // memory through C's own offsets.
+    println(layout_table_digest(&CONST_TABLE) == 1234567, " ",
+            layout_named_len(&CONST_NAMED), " ", layout_named_first(&CONST_NAMED));
     return 0;
 }

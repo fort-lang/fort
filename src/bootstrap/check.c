@@ -50,6 +50,7 @@ void check_init(check_t* ck) {
     ck->module_sym = NULL;
     ck->fn_sym = NULL;
     ck->callee = NULL;
+    ck->addr_only = false;
     ck->scope = NULL;
     ck->ret = NULL;
     ck->ret_void = true;
@@ -1698,8 +1699,14 @@ static void check_unary(check_t* ck, ast_node_t* n, expr_t* out) {
     expr_t a;
     if (n->op == TOK_AMP) {
         // `&e` requires an lvalue and yields a borrowed pointer whose level 1
-        // is the mutability of `e` (D5.8, D17.3).
+        // is the mutability of `e` (D5.8, D17.3). Its operand is asked for an
+        // address and not for a value, which is what lets a module-level
+        // declaration hold its own address (D7.10); the flag is saved and
+        // restored, since a `&` may stand anywhere.
+        const bool outer_addr_only = ck->addr_only;
+        ck->addr_only = true;
         check_expr(ck, n->a, &a);
+        ck->addr_only = outer_addr_only;
         if (check_poisoned(a.type)) {
             return;
         }
@@ -2598,6 +2605,15 @@ static void resolve_sym(check_t* ck, sym_t* s) {
         // ordinary recursion; only value containment is a cycle, and the
         // layout catches that (D3.8).
         if (s->kind == SYM_STRUCT) {
+            return;
+        }
+        if (ck->addr_only && (s->kind == SYM_CONST || s->kind == SYM_GLOBAL) && s->type != NULL) {
+            // `&N` inside N's own initializer closes no cycle: it asks for an
+            // address, and D7.10 admits `&` of a module-level declaration
+            // from any module, this one included. Everything that answer
+            // needs is already known, because resolve_var writes the type
+            // before it checks the initializer; the value stays CV_NONE,
+            // which is what an address is (D4.6).
             return;
         }
         // A declaration reached while it is being resolved closes a cycle

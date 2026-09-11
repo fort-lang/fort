@@ -464,6 +464,35 @@ TEST(a_constant_initializer_cycle_is_an_error, {
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
 })
 
+TEST(a_declaration_may_hold_its_own_address, {
+    // `&` of a module-level declaration from any module is an initializer,
+    // this one included (D7.10): the value of `N` does not depend on the
+    // value of `N`, only its address does, so the lazy resolution of D4.6
+    // closes no cycle. A self-pointing sentinel is the shape that needs it.
+    TEST_ASSERT_TRUE(check_src("struct node {\n    i32 v;\n    node* next;\n}\n"
+                               "node N = node{7, &N};\n"
+                               "fn i32 main() {\n    return N.next->v;\n}\n"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)0);
+    TEST_ASSERT_FALSE(sym_main("N")->error);
+})
+
+TEST(two_declarations_may_hold_each_others_addresses, {
+    TEST_ASSERT_TRUE(check_src("struct node {\n    i32 v;\n    node* next;\n}\n"
+                               "node A = node{1, &B};\nnode B = node{2, &A};\n"
+                               "fn i32 main() {\n    return A.next->v;\n}\n"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)0);
+})
+
+TEST(a_declaration_that_needs_its_own_value_is_still_a_cycle, {
+    // The address is the carve-out and nothing else is: naming the
+    // declaration itself, or reading through the pointer that names it, still
+    // asks for the value (D4.6).
+    TEST_ASSERT_FALSE(check_src("struct node {\n    i32 v;\n    node* next;\n}\n"
+                                "node C = C;\n"
+                                "fn i32 main() {\n    return C.v;\n}\n"));
+    TEST_ASSERT_TRUE(said("'C' is defined in terms of itself"));
+})
+
 TEST(an_enum_value_may_not_refer_to_its_own_enum, {
     TEST_ASSERT_FALSE(check_src("enum color {\n    red = 1,\n    green = cast(color.red, i32),\n}\n"
                                 "fn i32 main() {\n    return 0;\n}\n"));
@@ -700,6 +729,9 @@ int main(int argc, char** argv) {
     TEST_RUN(a_value_containment_cycle_is_an_infinite_size_error);
     TEST_RUN(a_cycle_of_two_structs_is_reported_once);
     TEST_RUN(a_constant_initializer_cycle_is_an_error);
+    TEST_RUN(a_declaration_may_hold_its_own_address);
+    TEST_RUN(two_declarations_may_hold_each_others_addresses);
+    TEST_RUN(a_declaration_that_needs_its_own_value_is_still_a_cycle);
     TEST_RUN(an_enum_value_may_not_refer_to_its_own_enum);
     TEST_RUN(a_failed_declaration_gets_the_error_type);
     TEST_RUN(a_failed_declaration_silences_its_uses);

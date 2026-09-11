@@ -297,6 +297,13 @@ str_t gen_result_type(gen_t* g, const type_t* t);
 // `u8` and `u16`, `signext` for `i8` and `i16`.
 const char* gen_ext_attr(const type_t* t);
 
+// The index of a field in its struct: the position among the AST_FIELD_DECL
+// children of the declaration, which is the order the named type of item 2
+// writes them in, so the field shape of item 3 and a constant initializer
+// name the same field. The one map from a field symbol to its index: a second
+// one would let the initializer's order drift from the named type's.
+bool gen_field_index(const sym_t* field, uint64_t* out);
+
 // ---- names (item 4, D9.7) ---------------------------------------------------------
 
 // The ELF symbol of a declaration: the module path joined with dots plus the
@@ -355,6 +362,11 @@ gen_val_t gen_const_min(gen_t* g, str_t ty, uint32_t bits);
 // `bool`, `char`, `null` or an enum member. A string constant is not a scalar
 // and has no value form.
 gen_val_t gen_const_value(gen_t* g, const type_t* t, cval_t v);
+
+// The same constant in its memory form, what a global initializer or a field
+// of one holds: a `bool` is `i8 0` or `i8 1` there rather than the `i1 true`
+// of a value (D19.2).
+gen_val_t gen_const_mem_value(gen_t* g, const type_t* t, cval_t v);
 
 // `  %tN = <op> <ty> <a>, <b>`, the shape every arithmetic and bitwise
 // instruction has.
@@ -498,6 +510,14 @@ void gen_fail_block(gen_t* g, uint64_t label, gen_rt_t rt, gen_args_t* args, loc
 // declarations are emitted (item 8, D19.5).
 void gen_use_intrinsic(gen_t* g, gen_intrinsic_t which);
 void gen_use_attr(gen_t* g, gen_attr_t which);
+
+// ---- module-level data (item 5, D7.10) --------------------------------------------
+
+// Appends the module-level declaration `decl` to the globals section: a
+// `dso_local constant` for an immutable declaration, which lives in read-only
+// memory, and a `dso_local global` for a `mut` one (D7.10). A declaration
+// that failed to check is skipped.
+void gen_global(gen_t* g, const ast_node_t* decl);
 
 // ---- private data (item 5) --------------------------------------------------------
 

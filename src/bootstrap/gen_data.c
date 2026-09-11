@@ -11,6 +11,7 @@
 #include "containers.h"
 #include "diag.h"
 #include "gen.h"
+#include "lexer.h"
 #include "str.h"
 #include "sym.h"
 #include "types.h"
@@ -377,6 +378,264 @@ static void emit_data(gen_t* g, sb_t* out) {
         // struct fort_rt_enum_member (item 21).
         sb_append(out, "], align 8\n");
     }
+}
+
+// ---- module-level data (item 5, D7.10) --------------------------------------------
+
+// The value of a module-level initializer, appended to `out`, and whether
+// every byte of it is zero, which is what `zeroinitializer` spells (item 5).
+static bool const_value(gen_t* g, sb_t* out, const type_t* t, const ast_node_t* n);
+
+// The zero constant of `t` as an initializer spells it: `zeroinitializer` for
+// an aggregate, `null` for a pointer and `0` for every other scalar (item 5).
+static void const_zero(sb_t* out, const type_t* t) {
+    if (gen_is_aggregate(t)) {
+        sb_append(out, "zeroinitializer");
+        return;
+    }
+    if (t != NULL && (t->kind == TYPE_PTR || t->kind == TYPE_VOIDPTR || t->kind == TYPE_FN)) {
+        sb_append(out, "null");
+        return;
+    }
+    sb_push(out, '0');
+}
+
+// `<memtype> <value>`: one element or field of a constant aggregate, whose
+// type is written before every member (item 5). A NULL node is a field the
+// designated form omitted, which is zeroed (D6.5).
+static void const_member(gen_t* g, sb_t* out, const type_t* t, const ast_node_t* n, bool* zero) {
+    // The member's type is appended before its value is built, since both
+    // texts come out of the emitter's one scratch buffer.
+    const str_t ty = gen_mem_type(g, t);
+    sb_append_str(out, ty);
+    sb_push(out, ' ');
+    if (n == NULL) {
+        const_zero(out, t);
+        return;
+    }
+    if (!const_value(g, out, t, n)) {
+        *zero = false;
+    }
+}
+
+// The member of a designated struct literal that initializes the field at
+// index `at`, or NULL when it omits it (D6.5). It places every designator
+// through gen_field_index, the one map from a field symbol to its index, so a
+// designator the emitter cannot place ends the compilation instead of leaving
+// a zeroed field in read-only memory: an unfinished path is a diagnostic,
+// never wrong data.
+static const ast_node_t* designated_value(gen_t* g, const ast_node_t* lit, uint64_t at) {
+    for (uint64_t i = 0; i < ast_len(lit); i++) {
+        const ast_node_t* d = ast_child(lit, i);
+        uint64_t k = 0;
+        if (d->kind != AST_DESIGNATOR || !gen_field_index(d->sym, &k)) {
+            gen_todo(g, d->loc, "this initializer");
+            return NULL;
+        }
+        if (k == at) {
+            return d->a;
+        }
+    }
+    return NULL;
+}
+
+// A constant struct: its fields in declaration order, the order the named
+// type of gen.c writes them in, with an omitted field zeroed (D6.5, item 5).
+// This is the fourth walk over the AST_FIELD_DECL children of a declaration;
+// gen.c's gen_struct_type names the other three and why all four must agree.
+static bool const_struct(gen_t* g, sb_t* out, const type_t* t, const ast_node_t* n) {
+    const sym_t* s = (const sym_t*)t->decl;
+    if (s == NULL || s->node == NULL) {
+        gen_todo(g, n->loc, "this initializer");
+        return true;
+    }
+    const bool designated = (n->flags & AST_FLAG_DESIGNATED) != 0;
+    sb_t buf;
+    sb_init(&buf);
+    bool zero = true;
+    uint64_t at = 0;
+    sb_append(&buf, "{ ");
+    for (uint64_t i = 0; i < ast_len(s->node); i++) {
+        const ast_node_t* f = ast_child(s->node, i);
+        if (f->kind != AST_FIELD_DECL) {
+            continue;
+        }
+        if (at > 0) {
+            sb_append(&buf, ", ");
+        }
+        const ast_node_t* v = NULL;
+        if (designated) {
+            v = designated_value(g, n, at);
+        } else if (at < ast_len(n)) {
+            v = ast_child(n, at);
+        }
+        const_member(g, &buf, f->type, v, &zero);
+        if (g->failed) {
+            // One report per initializer: the walk stops at the first member
+            // the emitter cannot lower.
+            break;
+        }
+        at++;
+    }
+    sb_append(&buf, " }");
+    // An all-zero aggregate is `zeroinitializer` whatever its shape (item 5).
+    sb_append_str(out, zero ? str_from_cstr("zeroinitializer") : sb_view(&buf));
+    sb_free(&buf);
+    return zero;
+}
+
+// A constant fixed array: exactly `N` elements or `{}` (D6.5, item 5).
+static bool const_array(gen_t* g, sb_t* out, const type_t* t, const ast_node_t* n) {
+    sb_t buf;
+    sb_init(&buf);
+    bool zero = true;
+    sb_push(&buf, '[');
+    for (uint64_t i = 0; i < ast_len(n); i++) {
+        if (i > 0) {
+            sb_append(&buf, ", ");
+        }
+        const_member(g, &buf, t->elem, ast_child(n, i), &zero);
+    }
+    sb_push(&buf, ']');
+    sb_append_str(out, zero ? str_from_cstr("zeroinitializer") : sb_view(&buf));
+    sb_free(&buf);
+    return zero;
+}
+
+// A constant `string` or span: its two header fields, the bytes and the
+// length the trailing NUL excludes (D3.7, item 5). The pointer is a
+// relocation, so the value is never all-zero.
+static bool const_string(gen_t* g, sb_t* out, str_t bytes) {
+    const str_t ref = gen_str_ref(g, bytes);
+    sb_append(out, "{ ptr ");
+    sb_append_str(out, ref);
+    sb_append(out, ", i64 ");
+    sb_append_u64(out, bytes.len);
+    sb_append(out, " }");
+    return false;
+}
+
+// The address of a module-level declaration, of a function, or the value of
+// another module-level declaration: the three forms D7.10 adds to the
+// constant expressions of D4.6. Returns false when `n` is none of them.
+static bool const_symbol(gen_t* g, sb_t* out, const type_t* t, const ast_node_t* n, bool* zero) {
+    const sym_t* s = n->sym;
+    if (s == NULL) {
+        return false;
+    }
+    if (s->kind == SYM_FN) {
+        // A function name is a module-level initializer and its address is a
+        // relocation (D3.10, D7.10).
+        sb_append_str(out, gen_symbol_ref(g, s));
+        *zero = false;
+        return true;
+    }
+    if (s->kind == SYM_CONST && s->node != NULL && s->node->b != NULL) {
+        // A constant that names another one holds that one's value; the
+        // checker resolved the chain lazily and refused a cycle (D4.6, D7.10).
+        // Only an immutable declaration: a read of a `mut` global is not a
+        // constant expression, so one reaching here is refused rather than
+        // frozen into another constant (D4.6).
+        *zero = const_value(g, out, t, s->node->b);
+        return true;
+    }
+    return false;
+}
+
+static bool const_value(gen_t* g, sb_t* out, const type_t* t, const ast_node_t* n) {
+    if (g->failed || t == NULL || n == NULL) {
+        const_zero(out, t);
+        return true;
+    }
+    if ((n->ann & CHECK_ANN_CONST) != 0) {
+        const cval_t v = check_node_value(g->ck, n);
+        if (v.kind == CV_STR) {
+            return const_string(g, out, v.str);
+        }
+        if (v.kind != CV_NONE) {
+            // Every folded constant is emitted as its literal, whatever node
+            // it stands on (D4.6).
+            const gen_val_t c = gen_const_mem_value(g, t, v);
+            sb_append_str(out, c.val);
+            return v.kind == CV_NULL || v.mag == 0;
+        }
+    }
+    switch (n->kind) {
+    case AST_BRACE_INIT:
+        if (ast_len(n) == 0) {
+            // `{}` zeroes any aggregate, span or string (D6.5).
+            const_zero(out, t);
+            return true;
+        }
+        if (t->kind == TYPE_ARRAY) {
+            return const_array(g, out, t, n);
+        }
+        if (t->kind == TYPE_STRUCT) {
+            return const_struct(g, out, t, n);
+        }
+        break;
+    case AST_STRUCT_LIT:
+    case AST_ARRAY_LIT:
+        // A typed literal carries its brace list in `b` (D6.5).
+        return const_value(g, out, t, n->b);
+    case AST_IDENT:
+    case AST_FIELD: {
+        bool zero = true;
+        if (const_symbol(g, out, t, n, &zero)) {
+            return zero;
+        }
+        break;
+    }
+    case AST_UNARY:
+        if (n->op == TOK_AMP && n->a != NULL && n->a->sym != NULL &&
+            (n->a->sym->kind == SYM_CONST || n->a->sym->kind == SYM_GLOBAL)) {
+            // `&` of a module-level declaration from any module, and of
+            // nothing else, is an initializer (D7.10).
+            sb_append_str(out, gen_symbol_ref(g, n->a->sym));
+            return false;
+        }
+        break;
+    default:
+        break;
+    }
+    gen_todo(g, n->loc, "this initializer");
+    const_zero(out, t);
+    return true;
+}
+
+void gen_global(gen_t* g, const ast_node_t* decl) {
+    const sym_t* s = decl->sym;
+    if (s == NULL || s->error || s->type == NULL) {
+        // A declaration that failed to check is silent here: the checker
+        // reported it (D14.2).
+        return;
+    }
+    if (s->kind != SYM_CONST && s->kind != SYM_GLOBAL) {
+        return;
+    }
+    // Name, type and value each pass through the one scratch buffer, so each
+    // is finished before the next begins.
+    const str_t name = gen_symbol_ref(g, s);
+    const str_t ty = gen_mem_type(g, s->type);
+    sb_t init;
+    sb_init(&init);
+    (void)const_value(g, &init, s->type, decl->b);
+    sb_append_str(&g->globals, name);
+    // An immutable declaration lives in read-only memory and a `mut` one in
+    // writable memory (D7.10); no section is named, since LLVM picks it from
+    // the initializer (item 5). A named fort constant is not `unnamed_addr`:
+    // its address is significant, because `&CONST` is expressible (D6.7).
+    sb_append(&g->globals,
+              s->kind == SYM_GLOBAL ? " = dso_local global " : " = dso_local constant ");
+    sb_append_str(&g->globals, ty);
+    sb_push(&g->globals, ' ');
+    sb_append_str(&g->globals, sb_view(&init));
+    // Every global carries an explicit `align N` from the compiler's own
+    // layout (D3.1, D3.8, item 5).
+    sb_append(&g->globals, ", align ");
+    sb_append_u64(&g->globals, type_alignof(s->type));
+    sb_push(&g->globals, '\n');
+    sb_free(&init);
 }
 
 // ---- declarations (item 8) --------------------------------------------------------

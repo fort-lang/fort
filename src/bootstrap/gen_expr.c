@@ -991,13 +991,14 @@ static gen_val_t gen_cast(gen_t* g, ast_node_t* n) {
         return v;
     }
     if (is_bool(from)) {
-        // `zext i1` for `bool` to integer (item 12).
-        return gen_cast_op(g, "zext", v, gen_value_type(g, to));
+        // `zext i1` for `bool` to an integer, and nothing at all for
+        // `cast(b, bool)`, which is the identity of D3.14 and would otherwise
+        // be a `zext i1` to `i1` (item 12).
+        return gen_resize(g, v, from_bits, gen_value_type(g, to), to_bits, false);
     }
-    if (is_bool(to)) {
-        gen_todo(g, n->loc, "a cast to bool");
-        return v;
-    }
+    // No row of D3.14 converts anything but a `bool` to `bool`: an integer to
+    // `bool` is a checker error (D3.3) and so is every other source type, so
+    // a `bool` target is the identity above and nothing else.
     // Integer to integer widens by the source's signedness (item 12).
     return gen_resize(g, v, from_bits, gen_value_type(g, to), to_bits, gen_is_signed(from));
 }
@@ -1171,29 +1172,6 @@ static void gen_span_expr(gen_t* g, ast_node_t* n, gen_place_t dst) {
     gen_span_init(g, dst.addr, base, length);
 }
 
-// The index of a field in its struct, which is what the field shape of item 3
-// names: the position among the AST_FIELD_DECL children, which is the order
-// the named type of gen.c writes them in.
-static bool field_index(const sym_t* field, uint64_t* out) {
-    const sym_t* owner = field != NULL ? field->owner : NULL;
-    if (owner == NULL || owner->node == NULL) {
-        return false;
-    }
-    uint64_t at = 0;
-    for (uint64_t i = 0; i < ast_len(owner->node); i++) {
-        const ast_node_t* f = ast_child(owner->node, i);
-        if (f->kind != AST_FIELD_DECL) {
-            continue;
-        }
-        if (f->sym == field) {
-            *out = at;
-            return true;
-        }
-        at++;
-    }
-    return false;
-}
-
 static gen_place_t gen_field_place(gen_t* g, ast_node_t* n, bool arrow) {
     gen_place_t out;
     out.addr = gen_literal(g, str_from_cstr("ptr"), "null");
@@ -1210,12 +1188,31 @@ static gen_place_t gen_field_place(gen_t* g, ast_node_t* n, bool arrow) {
     }
     const type_t* st = arrow ? n->a->type->elem : n->a->type;
     uint64_t k = 0;
-    if (st == NULL || st->kind != TYPE_STRUCT || !field_index(n->sym, &k)) {
+    if (st == NULL || st->kind != TYPE_STRUCT || !gen_field_index(n->sym, &k)) {
         gen_todo(g, n->loc, "this field access");
         return out;
     }
     out.addr = gen_gep_field(g, gen_mem_type(g, st), base, k);
     return out;
+}
+
+// The storage of a module-level constant or global, which is its symbol
+// itself: a constant is an immutable lvalue in read-only memory and a `mut`
+// global an assignable one (D6.7, D7.10). Returns false when `n` denotes
+// something else.
+static bool global_place(gen_t* g, const ast_node_t* n, gen_place_t* out) {
+    const sym_t* s = n->sym;
+    if (s == NULL || (s->kind != SYM_CONST && s->kind != SYM_GLOBAL) || bad_type(s->type)) {
+        return false;
+    }
+    gen_val_t addr;
+    addr.ty = str_from_cstr("ptr");
+    addr.val = gen_symbol_ref(g, s);
+    out->addr = addr;
+    // The declaration's own type, as a local's slot takes it from its symbol:
+    // a place is storage, not the expression that reached it.
+    out->type = s->type;
+    return true;
 }
 
 // The place of an rvalue: a field access or an index on an rvalue struct or
@@ -1240,12 +1237,20 @@ gen_place_t gen_expr_place(gen_t* g, ast_node_t* n) {
         if (s != NULL && (s->kind == SYM_LOCAL || s->kind == SYM_PARAM)) {
             return gen_slot_place(g, s);
         }
+        if (global_place(g, n, &out)) {
+            return out;
+        }
         gen_todo(g, n->loc, "a module-level name");
         return out;
     }
     case AST_INDEX:
         return gen_index_place(g, n);
     case AST_FIELD:
+        // `m.NAME` across modules designates that module's storage, not a
+        // field of a value (D7.10, D9.4).
+        if (global_place(g, n, &out)) {
+            return out;
+        }
         return gen_field_place(g, n, false);
     case AST_ARROW:
         return gen_field_place(g, n, true);
@@ -1476,7 +1481,7 @@ static void gen_brace_init(gen_t* g, ast_node_t* n, gen_place_t dst) {
         for (uint64_t i = 0; i < ast_len(n); i++) {
             ast_node_t* d = ast_child(n, i);
             uint64_t k = 0;
-            if (d->kind != AST_DESIGNATOR || !field_index(d->sym, &k)) {
+            if (d->kind != AST_DESIGNATOR || !gen_field_index(d->sym, &k)) {
                 gen_todo(g, d->loc, "this initializer");
                 return;
             }

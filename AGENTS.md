@@ -64,7 +64,18 @@ A safe(r) C-like systems programming language.
   and the suite keeps failing on text the file no longer holds; `md5sum` in the guest reads the
   new bytes and dropping the caches does not help, because it is the timestamp and not the
   content that is stale. Delete that target's object
-  (`build/<preset>/CMakeFiles/<target>.dir/<path>.o`) and build again.
+  (`build/<preset>/CMakeFiles/<target>.dir/<path>.o`) and build again. A mutation experiment --
+  break a rule in the compiler, watch the test go red, restore it, watch it go green -- runs into
+  this more than anything else, because every step rewrites a file the last step just built from,
+  and a stale mtime makes the next step report the previous binary's colours. Edit and restore
+  from the host, `touch` the sources there, and prove the restore by comparing the rebuilt
+  binary's `md5sum` with the baseline's: a green suite after the restore does not prove the
+  restore was compiled, and an md5 that differs from the baseline says some earlier step built
+  nothing. That check is also how a build that silently skipped a source is caught, which is
+  worth one `md5sum` before any measurement that will be quoted as evidence. Undo the mutation
+  from a saved copy of the file, never with `git checkout <file>`: the file usually also holds the
+  ticket's own uncommitted work, which that command throws away silently, and the suite stays
+  green afterwards because the deleted work was the part with no test of its own yet.
 - The target is x86-64 Linux. The compiler runs natively on arm64, emits LLVM IR and runs `clang
   --target=x86_64-linux-gnu` over it, so `--cc` names a clang (the guest `cc` is a native gcc and
   would build for aarch64); generated programs run under `qemu-x86_64` transparently. The verified

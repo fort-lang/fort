@@ -24,6 +24,9 @@ enum {
     FILL_BIG = 44444,
 };
 
+// The base layout_table_digest mixes one field per digit in.
+enum { DIGIT = 10 };
+
 // struct interop { u8 tag; i32 n; u16 k; i64 big; }
 struct interop {
     uint8_t tag;
@@ -126,6 +129,21 @@ unsigned char layout_named_first(const struct named* s) {
 
 uint64_t layout_sizeof_table(void) {
     return sizeof(struct table);
+}
+
+// Every field of a `table` mixed into one decimal digit each, so that a wrong
+// offset, a wrong element stride or a lost `tag` cannot cancel out. Fort
+// passes a module-level constant here (D7.10): that table is laid out by the
+// emitter's own initializer and by LLVM rather than field by field at run
+// time, so this is the boundary that can see a constant aggregate disagree
+// with the C ABI.
+int64_t layout_table_digest(const struct table* t) {
+    int64_t digest = 0;
+    for (size_t i = 0; i < sizeof t->rows / sizeof t->rows[0]; i++) {
+        digest = digest * DIGIT + t->rows[i].n;
+        digest = digest * DIGIT + t->rows[i].tag;
+    }
+    return digest * DIGIT + t->tag;
 }
 
 // The sum of the rows' `n` fields: a wrong element stride reads the padding.
