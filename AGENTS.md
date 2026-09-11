@@ -330,6 +330,10 @@ A safe(r) C-like systems programming language.
   since a diagnostic on an unannotated line fails the run (D14.5) and `parser_recovery_test.c`
   walks the same corpus. The cap of twenty diagnostics is the file's, not the parser's: `lex_file`
   opens it with `diag_begin_file()` and both report while `diag_file_count() < DIAG_MAX_PER_FILE`.
+- **A `fail` test may not mix a lexical with a semantic diagnostic.** `lex_file` reports, and the
+  driver then stops before the checker runs (D14.2), so a file whose lexical error is annotated
+  alongside an expected type error never produces the second one and the run fails on the missing
+  annotation. Split them into two files. Found by T-029 while filling the `fail/lexer` gaps.
 - **Parser recovery**: `p->failed` means "unwinding the construct a syntax error hit" (D14.2),
   not "the file is dead". Everything between the report and the next recovery point is silent, so
   a new parse function needs no error handling of its own: return NULL and the recovery point
