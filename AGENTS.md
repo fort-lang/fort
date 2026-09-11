@@ -159,6 +159,9 @@ A safe(r) C-like systems programming language.
   paths that end the process (`fatal_oom`); under asan the child runs LeakSanitizer at exit, so
   the forked function must not drop a block it allocated (blocks its still-live frames point to
   are reachable and fine).
+- clang-tidy's `readability-inconsistent-declaration-parameter-name` fires only under
+  `tools/vm tidy`, late in the loop: when a definition renames a parameter, for instance to stop
+  it shadowing a new file-scope static, rename it in the header too, in the same edit.
 - Running `run-clang-tidy` by hand: its positional arguments are regexes matched against the
   absolute paths in `compile_commands.json`, so a relative path such as `../../test` silently
   selects nothing and reports success. Use `tools/vm tidy` or absolute guest paths.
