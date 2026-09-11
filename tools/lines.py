@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Count test lines per compiler line (notes/toolchain.md 7.6, D14.6).
+"""Count test lines per source line (notes/toolchain.md 7.6, D14.6).
 
-Compiler lines are src/bootstrap/*.c and *.h plus src/fort/*.ft; test lines
-are test/*.c, test/*.h, test/lang/**/*.ft and test/lang/ffi/*.c. The runtime
-and the standard library count on neither side. The target ratio is 3:1;
---min fails the run when the ratio is below the given value.
+Source lines are src/bootstrap/*.c and *.h, src/fort/*.ft, std/*.ft and
+runtime/*.c and *.h; test lines are test/*.c, test/*.h, test/**/*.ft and
+test/lang/ffi/*.c. The standard library and the runtime are on the source side
+because they are hand-written code the project ships and must test, and
+crediting them to the tests would raise the ratio for writing library code
+while test/runtime_test.c already counted as tests (D14.6, amended by T-076).
+The editor extension is still on neither side. The target ratio is 3:1; --min
+fails the run when the ratio is below the given value.
 
 --since REF measures a branch instead of the repository: it counts the lines
 a diff against REF adds and removes on each side, so a ticket answers for the
 code it introduces rather than hiding behind the corpus already there. A
-branch that adds no compiler line has no ratio and passes.
+branch that adds no source line has no ratio and passes.
 """
 
 import argparse
@@ -18,8 +22,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-COMPILER_GLOBS = ("src/bootstrap/*.c", "src/bootstrap/*.h", "src/fort/*.ft")
-TEST_GLOBS = ("test/*.c", "test/*.h", "test/lang/**/*.ft", "test/lang/ffi/*.c")
+SOURCE_GLOBS = (
+    "src/bootstrap/*.c",
+    "src/bootstrap/*.h",
+    "src/fort/*.ft",
+    "std/*.ft",
+    "runtime/*.c",
+    "runtime/*.h",
+)
+TEST_GLOBS = ("test/*.c", "test/*.h", "test/**/*.ft", "test/lang/ffi/*.c")
 TARGET_RATIO = 3.0
 
 
@@ -98,11 +109,11 @@ def diff_lines(root, ref, globs):
     return added, removed
 
 
-def ratio_of(test_lines, compiler_lines):
-    """The ratio, or None when there is no compiler source to measure against."""
-    if compiler_lines == 0:
+def ratio_of(test_lines, source_lines):
+    """The ratio, or None when there is no source to measure against."""
+    if source_lines == 0:
         return None
-    return test_lines / compiler_lines
+    return test_lines / source_lines
 
 
 def format_ratio(ratio):
@@ -138,17 +149,17 @@ def main(argv=None):
     if args.since is not None:
         return main_since(args)
 
-    compiler_files = collect(args.root, COMPILER_GLOBS)
+    source_files = collect(args.root, SOURCE_GLOBS)
     test_files = collect(args.root, TEST_GLOBS)
-    compiler_lines = total_lines(compiler_files)
+    source_lines = total_lines(source_files)
     test_lines = total_lines(test_files)
-    ratio = ratio_of(test_lines, compiler_lines)
+    ratio = ratio_of(test_lines, source_lines)
 
     if args.verbose:
-        for label, files in (("compiler", compiler_files), ("test", test_files)):
+        for label, files in (("source", source_files), ("test", test_files)):
             for p in files:
                 print("%-8s %6d %s" % (label, count_lines(p), p.relative_to(args.root)))
-    print("compiler: %d lines in %d files" % (compiler_lines, len(compiler_files)))
+    print("source:   %d lines in %d files" % (source_lines, len(source_files)))
     print("tests:    %d lines in %d files" % (test_lines, len(test_files)))
     print("ratio:    %s (target %.1f:1)" % (format_ratio(ratio), TARGET_RATIO))
 
@@ -162,19 +173,19 @@ def main(argv=None):
 
 def main_since(args):
     """Measure the branch's own diff against args.since."""
-    compiler_added, compiler_removed = diff_lines(args.root, args.since, COMPILER_GLOBS)
+    source_added, source_removed = diff_lines(args.root, args.since, SOURCE_GLOBS)
     test_added, test_removed = diff_lines(args.root, args.since, TEST_GLOBS)
-    compiler_net = compiler_added - compiler_removed
+    source_net = source_added - source_removed
     test_net = test_added - test_removed
-    ratio = ratio_of(test_net, compiler_net) if compiler_net > 0 else None
+    ratio = ratio_of(test_net, source_net) if source_net > 0 else None
 
-    print("compiler: %+d lines (%d added, %d removed)" % (compiler_net, compiler_added,
-                                                          compiler_removed))
+    print("source:   %+d lines (%d added, %d removed)" % (source_net, source_added,
+                                                          source_removed))
     print("tests:    %+d lines (%d added, %d removed)" % (test_net, test_added, test_removed))
     print("ratio:    %s (target %.1f:1, against %s)" % (format_ratio(ratio), TARGET_RATIO,
                                                         args.since))
     if ratio is None:
-        print("lines.py: no compiler lines added, so there is no ratio to meet")
+        print("lines.py: no source lines added, so there is no ratio to meet")
         return 0
     if args.min is not None and ratio < args.min:
         sys.stdout.flush()

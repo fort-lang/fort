@@ -919,9 +919,18 @@ Owner: `toolchain.md`.
     must produce a diagnostic on that line containing the substring, and no unannotated
     diagnostic may occur; `//! error-any: <substring>` at the top for errors without a useful
     line (for example circular imports).
-- **D14.6** Coverage target from the prompt: about three lines of test for each line of compiler.
-  The implementation plan will size the corpus; the seed tests written in this phase establish
-  the format and one example per feature area.
+- **D14.6** Coverage target from the prompt: about three lines of test for each line of source the
+  project writes and ships -- the compiler (`src/bootstrap/*.c`, `*.h`, `src/fort/*.ft`), the
+  standard library (`std/*.ft`) and the runtime (`runtime/*.c`, `*.h`) -- measured against
+  `test/*.c`, `test/*.h`, `test/**/*.ft` and `test/lang/ffi/*.c` by `tools/lines.py`. The
+  implementation plan will size the corpus; the seed tests written in this phase establish the
+  format and one example per feature area. Amended 2026-09-11 (T-076): until then the target was
+  "three lines of test for each line of compiler", with the runtime and the standard library
+  excluded from both sides, which credited library and runtime code with tests it did not have --
+  `test/runtime_test.c` counted 850 lines into the numerator while the 851 lines it tests counted
+  nowhere, and a ticket writing `std/*.ft` met the ratio without the ratio seeing its code. The
+  editor extension (`editors/`) still counts on neither side, that being a separate question about
+  non-compiler code.
 
 ## D15 Not in v1
 

@@ -117,7 +117,10 @@ A safe(r) C-like systems programming language.
   over `src`, `runtime`, `test`), `check-comments` (`tools/check_comments.py`, which
   `format-check` depends on: it rejects a `/* */` in the same sources, D2.2, and its own unit
   tests are the ctest `check_comments_selftest`), `tidy` (`run-clang-tidy` over the same),
-  `lines` (`tools/lines.py`: test lines per compiler line, target 3:1, `--min RATIO` fails
+  `fort-lint` (`tools/fort_lint.py`: the identifier conventions of D1.4 over `std/*.ft` and
+  `src/fort/*.ft`, read off `fort --index`; the ctests are `fort_lint` and `fort_lint_selftest`),
+  `lines` (`tools/lines.py`: test lines per source line, source being the compiler, `std/*.ft`
+  and the runtime (D14.6, amended by T-076), target 3:1, `--min RATIO` fails
   below it; `--since REF` measures a branch's own diff instead of the whole repository, which
   is how a ticket answers for the code it introduces rather than hiding behind the corpus
   already there; its own tests are the ctest `lines_selftest`).
@@ -598,8 +601,10 @@ A safe(r) C-like systems programming language.
   underscores, struct and enum type names and enum members included; only module constants are
   UPPER_CASE. A variable never takes its type's name (`point p`, `box bx`, `list mut* mut l`); a
   field may (`node mut* own node`), since fields are not variables and are outside the module
-  namespace (D7.9). Nothing formats or lints `.ft`, so wrap at 100 columns by hand and check with
-  the same `awk 'length > 100'` the markdown rule uses.
+  namespace (D7.9). `tools/fort_lint.py` enforces exactly that, and the 100-column wrap, over
+  `std/` and `src/fort/`; nothing formats `.ft`, so indentation and spacing are still written by
+  hand and read by review. Run it with `tools/vm fort-lint`, or by hand as
+  `tools/vm run 'python3 tools/fort_lint.py --fort build/debug/fort <file.ft>'`.
 - **Transliterating the bootstrap into fort.** Phase B rewrites `src/bootstrap/*.c` as
   `src/fort/*.ft`, and stage2 is compiled by stage1, so a compiler source may use only what the
   bootstrap itself accepts. `test/lang/bootstrap-unsupported.txt` is that list: no floats (`f32`,
@@ -667,15 +672,30 @@ A safe(r) C-like systems programming language.
   A ported module is judged against the C one it replaces: the same unit suite runs over both, so
   the oracle is the existing test, not a reading of the new code. `tools/lines.py` counts
   `src/fort`, so the ported lines carry the 3:1 ratio like any others.
-- **The standard library is invisible to the tooling that watches the compiler.** `tools/lines.py`
-  counts `src/bootstrap`, `src/fort` and `test/`, so a ticket that writes `std/*.ft` passes the 3:1
-  ratio without the ratio having seen its code; state the real figure (library lines against the
-  test lines that exercise them) in the ticket log rather than quoting the tool. `test/lang` is
-  where a library module is tested, under `run/stdlib`; `test/highlight_test.py` tokenizes
-  `test/lang/run` but not `std/`, so a construct only the library uses is not held against the
-  TextMate grammar. A new `std/*.ft` reaches the harness only after `tools/vm build <preset>`
-  copies it into `build/<preset>/std`, next to `fort_rt.o`: running `run_tests.py` by hand against
-  a source that has not been copied reports `module 'std::x' not found`.
+- **What checks `.ft` source, and what does not** (T-076). Three things do. `tools/fort_lint.py`
+  (ctest `fort_lint`, target `fort-lint`) holds `std/*.ft` and `src/fort/*.ft` to the identifier
+  conventions of D1.4 and to 100 columns; it reads `fort --index` (D20.3) rather than tokenizing
+  fort a second time, so the kinds and types it reasons about are the checker's own answers, and a
+  second tokenizer cannot drift from the language. `test/highlight_test.py` tokenizes `std/`,
+  `src/fort/` and `test/lang/run` against the TextMate grammar, which is the only check that grammar
+  has. `tools/lines.py` counts `std/*.ft` on the source side of the 3:1 ratio, with the compiler and
+  the runtime (D14.6, amended). What still does not: **there is no formatter** -- indentation,
+  spacing, brace placement and blank lines in `.ft` are review's alone, since `.clang-format` has no
+  fort equivalent; the lint sees only what the checker resolved, so an unresolved name is judged by
+  nothing (D20.3 gives it no record), though the names around it in a file that fails to compile are
+  judged as usual and the error is reported beside them; `test/lang/**` is deliberately outside the
+  lint, because a test exercises the language rather than exemplifying the conventions; and nothing
+  checks import order, doc comments or dead code. Block comments need no check: `/*` is a lexical
+  error in the compiler itself (D2.2). A new fort source outside `std/` and `src/fort/` is checked
+  by nothing until a glob in `fort_lint.py` names it. One `fort --index` per file re-checks that
+  file's whole import closure, so linting *n* modules costs O(n^2) checker work under each of the
+  gate's three presets: 0.1 s for the eight `std/` modules, and worth rewriting as one run per
+  root entry (`--index` indexes the closure and `same_file` already attributes each record) before
+  `src/fort/` holds forty of them.
+- A new `std/*.ft` reaches the language harness only after `tools/vm build <preset>` copies it
+  into `build/<preset>/std`, next to `fort_rt.o`: running `run_tests.py` by hand against a source
+  that has not been copied reports `module 'std::x' not found`. `test/lang/run/stdlib` is where a
+  library module is tested.
 - **Writing a library module against C** (`stdlib.md` 1.4, D13.4): a span is not a pointer, so
   `cast(u8 mut@ own, void* own)` is rejected (D3.14 lists pointer-to-pointer, not span-to-pointer).
   The `libc.free(cast(move(p), void* own))` idiom of `stdlib.md` 2.2 therefore applies to a
@@ -748,12 +768,15 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
   admits a gap, because it stops the next reader looking.
 - Every ticket meets the 3:1 test-to-code ratio on its own diff, not on the repository average:
   `tools/vm run 'python3 tools/lines.py --since main --min 3.0'` is an acceptance criterion of every
-  ticket that adds compiler lines, and the implementor runs it before the gate. The repository ratio
+  ticket that adds **source** lines -- the compiler, `std/*.ft` and the runtime, which are what
+  D14.6 counts since T-076, so a ticket writing only library or runtime code answers for its
+  tests like any other -- and the implementor runs it before the gate. The repository ratio
   drifted from 3.34 to 2.50 over six tickets while every one of them passed, because a large corpus
-  hides a thin diff, and it measured 1.86 on 2026-09-10 (18352 compiler lines against 34051 test
-  lines). The two numbers answer different questions and both are working: the per-ticket rule is
-  not retroactive, so the corpus figure is a lagging indicator of everything that landed before it
-  and climbs only asymptotically even if every future ticket hits 3:1 exactly. Measure it with
+  hides a thin diff, and it measured 2.41 on 2026-09-11 (22776 source lines against 54891 test
+  lines, the first figure to count `std/` and the runtime). The two numbers answer different
+  questions and both are working: the per-ticket rule is not retroactive, so the corpus figure is
+  a lagging indicator of everything that landed before it and climbs only asymptotically even if
+  every future ticket hits 3:1 exactly. Measure it with
   `tools/vm run 'python3 tools/lines.py'` before quoting it; never repeat the figure from this
   line. A ticket that cannot reach 3:1 says so in its log with the reason rather than lowering the
   number.

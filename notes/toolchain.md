@@ -1373,11 +1373,12 @@ the token stream, the parser's speculative rewinds, constant folding at the edge
 
 ### 7.6 Coverage target (D14.6)
 
-The corpus aims at about three lines of test for each line of compiler source: `wc -l` over
-`test/*.c`, `test/lang/**/*.ft` and `test/lang/ffi/*.c` against `wc -l` over `src/bootstrap/*.c`,
-`src/bootstrap/*.h` and `src/fort/*.ft`, the runtime and standard library excluded from both
-sides. The seed tests of the design phase establish the format with one example per area; the
-full corpus is sized as follows,
+The corpus aims at about three lines of test for each line of source: `wc -l` over `test/*.c`,
+`test/*.h`, `test/**/*.ft` and `test/lang/ffi/*.c` against `wc -l` over `src/bootstrap/*.c`,
+`src/bootstrap/*.h`, `src/fort/*.ft`, `std/*.ft` and `runtime/*.c` and `*.h`. The standard library
+and the runtime are source and not test (D14.6): they are code the project ships, and the tests
+that exercise them are `test/lang/run/stdlib` and `test/runtime_test.c`. The seed tests of the
+design phase establish the format with one example per area; the full corpus is sized as follows,
 in files:
 
 | Area                    | run | fail |

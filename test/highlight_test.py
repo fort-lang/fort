@@ -11,8 +11,9 @@ matches neither shape is an error, so a rule cannot hide from the comparison.
 
 Second, scopes: a small line-oriented TextMate engine (patterns, repository,
 include, match, begin/end, captures) tokenizes the fixtures in test/highlight,
-every marker declaration of the D5.3 and D17.2 tables and every language test
-under test/lang/run, and the tests assert the scopes the grammar hands out.
+every marker declaration of the D5.3 and D17.2 tables, every language test
+under test/lang/run and every module of the standard library, and the tests
+assert the scopes the grammar hands out.
 
 Run with `python3 -m unittest highlight_test` from this directory. Standard
 library only; Python 3.12.
@@ -30,6 +31,8 @@ GRAMMAR_PATH = ROOT / "editors" / "vscode" / "syntaxes" / "fort.tmLanguage.json"
 DECISIONS_PATH = ROOT / "notes" / "decisions.md"
 FIXTURE_DIR = TEST_DIR / "highlight"
 LANG_RUN_DIR = ROOT / "test" / "lang" / "run"
+STD_DIR = ROOT / "std"
+FORT_SRC_DIR = ROOT / "src" / "fort"
 
 # A keyword rule writes `\b(?:a|b)\b` or `\b(a|b)`; an operator or punctuation
 # rule writes one alternation of literals, `(?:\+|-)`.
@@ -443,6 +446,26 @@ class CorpusTest(unittest.TestCase):
 
     def test_every_language_test_spells_correctly(self):
         self.check(self.sources(LANG_RUN_DIR))
+
+    def test_every_standard_library_module_spells_correctly(self):
+        """std/*.ft is real fort the grammar must cover too (T-076)."""
+        paths = self.sources(STD_DIR)
+        self.assertGreaterEqual(len(paths), 8)
+        self.check(paths)
+
+    def test_every_compiler_source_in_fort_spells_correctly(self):
+        """src/fort/*.ft, which Phase B fills.
+
+        The directory does not exist before the first ported module lands, and
+        rglob over a missing directory yields nothing without error, so the
+        test would pass over zero files and say so to nobody. It skips out
+        loud until the directory exists and asserts a file once it does.
+        """
+        if not FORT_SRC_DIR.is_dir():
+            self.skipTest("src/fort does not exist yet (Phase B creates it)")
+        paths = self.sources(FORT_SRC_DIR)
+        self.assertGreaterEqual(len(paths), 1, "src/fort exists but holds no .ft")
+        self.check(paths)
 
     def check(self, paths):
         for path in paths:

@@ -38,25 +38,58 @@ class GlobMatching(unittest.TestCase):
         self.assertFalse(self.matches("test/*.c", "test/diagXc"))
 
     def test_the_real_globs_sort_the_files_they_are_meant_to(self):
-        compiler = [lines.glob_to_regex(g) for g in lines.COMPILER_GLOBS]
+        source = [lines.glob_to_regex(g) for g in lines.SOURCE_GLOBS]
         tests = [lines.glob_to_regex(g) for g in lines.TEST_GLOBS]
         for path in ("src/bootstrap/diag.c", "src/bootstrap/diag.h", "src/fort/lexer.ft"):
-            self.assertTrue(lines.path_matches(path, compiler), path)
+            self.assertTrue(lines.path_matches(path, source), path)
             self.assertFalse(lines.path_matches(path, tests), path)
         for path in ("test/diag_test.c", "test/types_helpers.h",
                      "test/lang/run/arrays/001_x.ft", "test/lang/ffi/helpers.c"):
             self.assertTrue(lines.path_matches(path, tests), path)
-            self.assertFalse(lines.path_matches(path, compiler), path)
-        for path in ("runtime/fort_rt.c", "std/io.ft", "tools/lines.py", "notes/decisions.md"):
-            self.assertFalse(lines.path_matches(path, compiler), path)
+            self.assertFalse(lines.path_matches(path, source), path)
+        for path in ("tools/lines.py", "notes/decisions.md", "editors/vscode/extension.js"):
+            self.assertFalse(lines.path_matches(path, source), path)
             self.assertFalse(lines.path_matches(path, tests), path)
+
+    def test_the_runtime_is_source_and_its_suite_is_test(self):
+        """851 runtime lines counted nowhere while their 850 test lines counted (D14.6)."""
+        source = [lines.glob_to_regex(g) for g in lines.SOURCE_GLOBS]
+        tests = [lines.glob_to_regex(g) for g in lines.TEST_GLOBS]
+        for path in ("runtime/fort_rt.c", "runtime/fort_rt.h"):
+            self.assertTrue(lines.path_matches(path, source), path)
+            self.assertFalse(lines.path_matches(path, tests), path)
+        self.assertTrue(lines.path_matches("test/runtime_test.c", tests))
+
+    def test_the_standard_library_is_source_and_not_test(self):
+        """std/*.ft is code the project ships, so it is the denominator (D14.6)."""
+        source = [lines.glob_to_regex(g) for g in lines.SOURCE_GLOBS]
+        tests = [lines.glob_to_regex(g) for g in lines.TEST_GLOBS]
+        for path in ("std/io.ft", "std/strbuf.ft"):
+            self.assertTrue(lines.path_matches(path, source), path)
+            self.assertFalse(lines.path_matches(path, tests), path)
+        self.assertFalse(lines.path_matches("std/README.md", source))
+        self.assertFalse(lines.path_matches("std/sub/deep.ft", source))
+
+    def test_every_ft_file_under_test_counts_as_a_test(self):
+        """Fixtures outside test/lang are test data too, test/highlight/scopes.ft above all."""
+        tests = [lines.glob_to_regex(g) for g in lines.TEST_GLOBS]
+        for path in ("test/highlight/scopes.ft", "test/fort_lint/good.ft", "test/bare.ft"):
+            self.assertTrue(lines.path_matches(path, tests), path)
+
+    def test_the_real_standard_library_is_counted(self):
+        """End to end over the repository itself: the std files are in the file list."""
+        counted = lines.collect(ROOT, lines.SOURCE_GLOBS)
+        names = {p.name for p in counted if p.parent.name == "std"}
+        self.assertIn("io.ft", names)
+        self.assertGreaterEqual(len(names), 8)
+        self.assertIn("fort_rt.c", {p.name for p in counted if p.parent.name == "runtime"})
 
 
 class Ratio(unittest.TestCase):
-    def test_no_compiler_line_has_no_ratio(self):
+    def test_no_source_line_has_no_ratio(self):
         self.assertIsNone(lines.ratio_of(10, 0))
 
-    def test_the_ratio_is_tests_over_compiler(self):
+    def test_the_ratio_is_tests_over_source(self):
         self.assertAlmostEqual(lines.ratio_of(30, 10), 3.0)
 
 
@@ -74,7 +107,7 @@ class Since(unittest.TestCase):
     def git(self, repo, *args):
         subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
 
-    def make_repo(self, tmp, compiler_lines, test_lines):
+    def make_repo(self, tmp, source_lines, test_lines):
         repo = Path(tmp)
         self.git(repo, "init", "-q")
         self.git(repo, "config", "user.email", "t@example.com")
@@ -84,7 +117,7 @@ class Since(unittest.TestCase):
         (repo / "README").write_text("base\n")
         self.git(repo, "add", "-A")
         self.git(repo, "commit", "-qm", "base")
-        (repo / "src" / "bootstrap" / "x.c").write_text("x\n" * compiler_lines)
+        (repo / "src" / "bootstrap" / "x.c").write_text("x\n" * source_lines)
         (repo / "test" / "x_test.c").write_text("t\n" * test_lines)
         self.git(repo, "add", "-A")
         self.git(repo, "commit", "-qm", "work")
@@ -108,14 +141,14 @@ class Since(unittest.TestCase):
             self.assertEqual(got.returncode, 1)
             self.assertIn("below the minimum", got.stderr)
 
-    def test_a_branch_with_no_compiler_line_passes(self):
+    def test_a_branch_with_no_source_line_passes(self):
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
             repo = self.make_repo(tmp, 0, 20)
             got = self.run_lines(repo, "--since", "HEAD~1", "--min", "3.0")
             self.assertEqual(got.returncode, 0, got.stderr)
-            self.assertIn("no compiler lines added", got.stdout)
+            self.assertIn("no source lines added", got.stdout)
 
 
 if __name__ == "__main__":

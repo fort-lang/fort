@@ -196,7 +196,7 @@ add_custom_target(check
     COMMENT "Running the unit tests"
     USES_TERMINAL
 )
-add_dependencies(check fort_rt)
+add_dependencies(check fort fort_rt)
 if(FORT_UNIT_TEST_TARGETS)
     add_dependencies(check ${FORT_UNIT_TEST_TARGETS})
 endif()
@@ -270,6 +270,27 @@ add_test(NAME lines_selftest
 set_tests_properties(lines_selftest PROPERTIES
     LABELS unit
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
+# The D1.4 identifier check over the project's own fort sources (label unit):
+# tools/fort_lint.py reads `fort --index` (D20.3) rather than tokenizing fort a
+# second time, so it needs the compiler this build made.
+add_test(NAME fort_lint
+    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
+            --fort "$<TARGET_FILE:fort>"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(fort_lint PROPERTIES
+    LABELS unit
+    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
+
+# Its own unit tests (label unit): the rules over synthetic index records, the
+# plumbing against a fake compiler, and the fixtures in test/fort_lint through
+# the real one, which FORT_BINARY names.
+add_test(NAME fort_lint_selftest
+    COMMAND "${FORT_PYTHON3}" -m unittest fort_lint_test
+    WORKING_DIRECTORY "${FORT_TEST_DIR}")
+set_tests_properties(fort_lint_selftest PROPERTIES
+    LABELS unit
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1;FORT_BINARY=$<TARGET_FILE:fort>")
 
 # The unit tests of the TextMate grammar in editors/vscode (label unit): they
 # compare its keyword and operator lists with D2.4 and D2.10 and assert the
@@ -354,6 +375,16 @@ if(FORT_RUN_CLANG_TIDY)
 else()
     add_custom_target(tidy COMMAND false COMMENT "tidy: run-clang-tidy not found")
 endif()
+
+# The same check as the ctest fort_lint, for running by hand over a file.
+add_custom_target(fort-lint
+    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
+            --fort "$<TARGET_FILE:fort>"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    COMMENT "Checking the identifier conventions of D1.4 in std and src/fort"
+    VERBATIM
+)
+add_dependencies(fort-lint fort fort_rt)
 
 add_custom_target(lines
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/lines.py"
