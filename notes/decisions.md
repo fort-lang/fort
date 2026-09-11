@@ -333,7 +333,7 @@ Owner: `core-language.md` (Declarations and mutability), `type-system.md` (Mutab
 
 Owner: `core-language.md` (Expressions).
 
-- **D6.1** Precedence, highest first: primary (`()` `@` `.` `->` calls, slicing, `cast`,
+- **D6.1** Precedence, highest first: primary (`()` `[]` `.` `->` calls, slicing, `cast`,
   `sizeof`, `new`, struct and array literals); unary (`! ~ - * &`); `* / % *%`; `+ - +% -%`;
   `<< >>`; `< <= > >=`; `== !=`; `&`; `^`; `|`; `&&`; `||`; `?:` (right-associative).
   Assignment is a statement, not an expression (D7.2). There is no comma operator and no unary
