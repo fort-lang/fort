@@ -14,6 +14,7 @@
 #include "check.h"
 #include "containers.h"
 #include "diag.h"
+#include "gen.h"
 #include "index.h"
 #include "json.h"
 #include "modules.h"
@@ -623,6 +624,42 @@ void driver_analysis_free(driver_analysis_t* an) {
     module_set_free(&an->set);
 }
 
+// Step 4 of toolchain.md 2: the emitter writes one module for the whole
+// closure (D19.1, toolchain.md 6). An unwritable path is a toolchain error
+// (exit 2) and a construct the emitter cannot lower yet is a compile error
+// (exit 1), so a half-emitted module never reaches `--cc`.
+static int emit_module(const driver_options_t* opts,
+                       const check_t* ck,
+                       const module_set_t* set,
+                       const char* ir_path,
+                       FILE* err) {
+    gen_options_t gopts;
+    gopts.release = opts->release;
+    gopts.no_bounds_check = opts->no_bounds_check;
+    gen_t g;
+    gen_init(&g, gopts);
+    const bool ok = gen_program(&g, ck, set);
+    int status = FORT_EXIT_OK;
+    if (!ok) {
+        status = FORT_EXIT_COMPILE_ERROR;
+    } else {
+        FILE* module = fopen(ir_path, "wb");
+        if (module == NULL) {
+            error_path(err, "cannot write", ir_path, strerror(errno));
+            status = FORT_EXIT_USAGE;
+        } else {
+            const str_t text = gen_text(&g);
+            (void)fwrite(text.ptr, 1, (size_t)text.len, module);
+            if (fclose(module) != 0) {
+                error_path(err, "cannot write", ir_path, strerror(errno));
+                status = FORT_EXIT_USAGE;
+            }
+        }
+    }
+    gen_free(&g);
+    return status;
+}
+
 int driver_front_end(const driver_options_t* opts,
                      const char* argv0,
                      const char* ir_path,
@@ -666,16 +703,10 @@ int driver_front_end(const driver_options_t* opts,
         // file was a module under inspection rather than a program (D20.1).
         return FORT_EXIT_OK;
     }
-    // Step 4, emitting the closure's module, belongs to T-015. Until it lands
-    // the module is empty: the front end is complete, the emitter behind it is
-    // not.
-    FILE* module = fopen(ir_path, "wb");
-    if (module == NULL) {
-        error_path(err, "cannot write", ir_path, strerror(errno));
-        return FORT_EXIT_USAGE;
-    }
-    (void)fclose(module);
-    return FORT_EXIT_OK;
+    // Step 4: the program's LLVM IR module (D19.1). It is emitted while the
+    // analysis is alive, since every annotation the emitter reads points into
+    // it (check.h), which is the lifetime the caller now owns.
+    return emit_module(opts, &an->ck, &an->set, ir_path, err);
 }
 
 // ---- the document of the check mode (D20.2, toolchain.md 4.1) ---------------------
