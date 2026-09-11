@@ -857,12 +857,16 @@ Owner: `toolchain.md`.
   `--target <triple>` (default `x86_64-linux-gnu`, passed to `--cc` as `--target=<triple>`),
   `-Xcc <arg>` (repeatable, passed to `--cc` verbatim after the compiler's own arguments),
   `--check` (D20.1), `--json` (D20.2, only with `--check`), `--index` (D20.3, which implies
-  `--check --json`), `--help`, `--version`. Exit status: 0
+  `--check --json`), `--tokens` (lex the entry file alone and write its tokens to stdout; it
+  resolves no import and parses nothing, and combining it with `--check`, `--json` or `--index`
+  is a usage error), `--help`, `--version`. Exit status: 0
   success, 1 compile error, 2 usage, toolchain (`--cc` failed) or internal error; usage and
   toolchain errors are printed as `fort: error: <message>`.
   Amended 2026-09-10 with D19: `-S` emitted `<entry>.s`, `--cc` defaulted to `cc`, and
   `--target` and `-Xcc` did not exist. Amended 2026-09-10 with D20: `--check`, `--json` and
-  `--index` did not exist.
+  `--index` did not exist. Amended 2026-09-11: `--tokens` did not exist. It is the observation
+  point the self-hosted lexer is verified at, the two compilers' dumps being compared file by
+  file over the whole repository, and the only thing stage2 can do before it has a parser.
 - **D14.2** Diagnostics: `<file>:<line>:<col>: error: <message>` on stderr, one per line,
   optionally followed by `note:` lines. Errors without a position in the file (a missing
   `main`) use `1:1`. A lexical error is reported and lexing resumes at the start of the next

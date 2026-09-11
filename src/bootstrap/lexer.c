@@ -1062,3 +1062,57 @@ bool lex_file(const char* file, str_t source, str_pool_t* pool, tokvec_t* out) {
     sb_free(&lx.msg);
     return ok;
 }
+
+// ---- the token dump (--tokens, toolchain.md 1) ----------------------------------
+
+// One byte of a spelling, escaped so that a token keeps to one line of the
+// dump and cannot close the quoted field itself (D14.1).
+static void dump_byte(sb_t* out, int c) {
+    static const char* const HEX_DIGITS = "0123456789ABCDEF";
+    if (c == '"' || c == '\\') {
+        sb_push(out, '\\');
+        sb_push(out, (char)c);
+    } else if (c == BYTE_LF) {
+        sb_append(out, "\\n");
+    } else if (c == BYTE_TAB) {
+        sb_append(out, "\\t");
+    } else if (c == BYTE_CR) {
+        sb_append(out, "\\r");
+    } else if (is_printable(c)) {
+        sb_push(out, (char)c);
+    } else {
+        sb_append(out, "\\x");
+        sb_push(out, HEX_DIGITS[c / RADIX_HEX]);
+        sb_push(out, HEX_DIGITS[c % RADIX_HEX]);
+    }
+}
+
+void tok_dump(const tokvec_t* v, sb_t* out) {
+    for (uint64_t i = 0; i < v->len; i++) {
+        const token_t t = v->items[i];
+        // The token's range (D20.4) in the <line>:<col> form of D14.2, its
+        // end exclusive. No token holds a line break (D2.9), so the end is
+        // on the token's own line, `len` columns further on.
+        sb_append_u64(out, t.line);
+        sb_push(out, ':');
+        sb_append_u64(out, t.col);
+        sb_push(out, '-');
+        sb_append_u64(out, t.line);
+        sb_push(out, ':');
+        sb_append_u64(out, (uint64_t)t.col + t.len);
+        sb_push(out, ' ');
+        // The value of an integer or a char literal, 0 for every other kind:
+        // the spelling alone does not say what the lexer made of `0x10` or of
+        // '\n' (D2.5, D2.7).
+        sb_append_u64(out, t.ival);
+        sb_append(out, " \"");
+        for (uint64_t b = 0; b < t.text.len; b++) {
+            dump_byte(out, (unsigned char)t.text.ptr[b]);
+        }
+        sb_append(out, "\" ");
+        // The kind last: tok_kind_name returns phrases with spaces ("end of
+        // file"), which nothing after them could be told apart from.
+        sb_append(out, tok_kind_name(t.kind));
+        sb_push(out, '\n');
+    }
+}

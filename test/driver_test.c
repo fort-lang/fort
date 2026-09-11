@@ -186,6 +186,7 @@ static const char* const EVERY_OPTION[] = {"-o <file>",
                                            "--check",
                                            "--json",
                                            "--index",
+                                           "--tokens",
                                            "--help",
                                            "--version"};
 

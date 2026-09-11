@@ -174,7 +174,7 @@ endforeach()
 # line the driver built (D14.3) instead of compiling it, so they need its path;
 # the check suite needs it to assert that `--check` spawns nothing (D20.1) and
 # the conformance suite to assert the same of the runs that stop before it.
-foreach(driver_suite driver_test driver_check_test driver_conformance_test)
+foreach(driver_suite driver_test driver_check_test driver_conformance_test driver_tokens_test)
     if(TARGET "${driver_suite}")
         target_compile_definitions("${driver_suite}"
             PRIVATE FORT_FAKE_CC="${FORT_TEST_DIR}/fake_cc.sh")
@@ -322,6 +322,17 @@ set_tests_properties(lang-stage2 PROPERTIES LABELS lang)
 add_test(NAME stage-usage
     COMMAND bash "${FORT_TEST_DIR}/stage_usage_test.sh" "${CMAKE_BINARY_DIR}")
 set_tests_properties(stage-usage PROPERTIES LABELS unit)
+
+# The two lexers over the whole repository: `fort --tokens` writes one line per
+# token (D14.1, toolchain.md 1) and tools/diff_tokens.sh compares stage1's dump
+# with stage2's, together with their diagnostics and their exit statuses, over
+# every .ft file there is. It is the oracle the transliteration of src/fort is
+# judged against; it is label lang rather than unit because it runs stage2 --
+# an x86-64 binary under qemu -- once per file.
+add_test(NAME diff-tokens
+    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_tokens.sh" "${CMAKE_BINARY_DIR}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(diff-tokens PROPERTIES LABELS lang)
 add_test(NAME lang_lint COMMAND "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}" --lint)
 set_tests_properties(lang_lint PROPERTIES LABELS unit)
 add_test(NAME lang_selftest
@@ -398,6 +409,7 @@ add_custom_target(check-lang
     COMMAND ${FORT_LANG_COMMAND} --check-json
     COMMAND ${FORT_MODULE_TEST_COMMAND}
     COMMAND ${FORT_LANG_STAGE2_COMMAND}
+    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_tokens.sh" "${CMAKE_BINARY_DIR}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Running the language tests"
     USES_TERMINAL

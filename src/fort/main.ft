@@ -1,22 +1,30 @@
 // The entry point of the self-hosted compiler (toolchain.md 1).
 //
-// This is the skeleton of the driver: it answers the two options that need no
-// compiler, `--help` and `--version`, prints the usage line when there is
-// nothing to do, and reports every other invocation as an internal error
-// rather than pretending to build something. An invocation it cannot serve
-// exits 2, like every other usage, toolchain or internal error (D14.1).
+// This is the driver of src/bootstrap/driver.c as far as the compiler behind
+// it can go: it parses the command line of D14.1, answers `--help` and
+// `--version`, reports the usage errors of toolchain.md 1 in the same words,
+// and serves `--tokens`, which lexes the entry file and writes its tokens to
+// stdout. An invocation that would need a parser -- a build, `--check` -- is
+// reported as an internal error rather than pretending to build something,
+// and exits 2 like every other usage, toolchain or internal error (D14.1).
 //
 // The passes take a session (session.ft): it owns the pool they intern into,
 // the sink they report to and the source texts they read, and freeing it frees
-// the analysis. The driver creates one per build, which is also what makes a
-// second build in one process -- a language server re-analysing a document
+// the analysis. The driver creates one per run, which is also what makes a
+// second run in one process -- a language server re-analysing a document
 // (D20.5) -- independent of the first.
 //
 // Dispatch: none. Option parsing is a chain of comparisons over the argument
-// list, as src/bootstrap/driver.c writes it, though not yet in that order: see
-// main below. The tables of function pointers belong to the parser and the
-// emitter (D3.10).
+// list, in the order src/bootstrap/driver.c walks it, so the two compilers
+// answer one command line alike. The tables of function pointers belong to
+// the parser and the emitter (D3.10).
+import containers;
+import diag;
+import lexer;
 import session;
+import std::str;
+import std::strbuf;
+import std::sys;
 
 // The usage line of toolchain.md 1, printed by --help and after every usage
 // error. A module constant is UPPER_CASE (D1.4).
@@ -25,6 +33,64 @@ string USAGE = "usage: fort [options] entry.ft";
 // The version printed by --version, as src/bootstrap/driver.h spells it; the
 // `stage-usage` ctest holds the two against each other.
 string VERSION = "0.1.0";
+
+// The exit statuses of D14.1: usage, toolchain and internal errors share 2.
+i32 EXIT_OK = 0;
+i32 EXIT_COMPILE_ERROR = 1;
+i32 EXIT_USAGE = 2;
+
+// The outcome of parse: the command line is in *opts, --help or --version was
+// printed, or a usage error was reported.
+i32 PARSE_OK = 0;
+i32 PARSE_DONE = 1;
+i32 PARSE_ERROR = 2;
+
+// The system's text for the failing call, which is what a `cannot read` line
+// carries as its reason (toolchain.md 1). strerror is the C library's; the
+// standard library has no binding for it and this is its one caller (D9.8).
+extern fn char* strerror(i32 code);
+
+// The command line after parsing (toolchain.md 1). Every string borrows an
+// argument; the three vectors hold them in command-line order and own only
+// their slots.
+struct options {
+    bool have_entry; // whether an entry file was seen; C compares against NULL
+    string entry;
+    string output;   // -o, empty for the default
+    string std_dir;  // --std-dir, empty for $FORT_STD_DIR or std beside the binary
+    string cc;       // --cc
+    string target;   // --target
+    bool emit_ir;         // -S
+    bool compile_only;    // -c
+    bool release;         // --release
+    bool no_bounds_check; // --no-bounds-check
+    bool check;           // --check: the front end alone (D20.1)
+    bool json;            // --json: the document of D20.2 on stdout
+    bool index;           // --index: the identifier index of D20.3 in it
+    bool tokens;          // --tokens: the entry file's tokens on stdout (D14.1)
+    containers.str_vec includes; // -I roots, searched in command-line order (D9.2)
+    containers.str_vec libs;     // -l<lib> as given, passed to the linker in order
+    containers.str_vec cc_args;  // -Xcc arguments, passed verbatim after the rest
+}
+
+// The defaults of toolchain.md 1: `--cc` is a clang because nothing else
+// reads LLVM IR (D14.1, D19.1) and the target triple is x86_64-linux-gnu.
+string DEFAULT_CC = "clang";
+string DEFAULT_TARGET = "x86_64-linux-gnu";
+
+fn options options_create() {
+    options mut opts = options{};
+    opts.cc = DEFAULT_CC;
+    opts.target = DEFAULT_TARGET;
+    return opts;
+}
+
+// Releases the vectors' slots. The strings are borrowed and are untouched.
+fn void options_free(options mut* opts) {
+    containers.str_free(&opts->includes);
+    containers.str_free(&opts->libs);
+    containers.str_free(&opts->cc_args);
+}
 
 // What --help prints after the usage line: the option table of toolchain.md 1.
 // It is the table src/bootstrap/driver.c prints, line for line, and the ctest
@@ -47,6 +113,7 @@ fn void help() {
     println("  --check            run the front end only and stop; emit nothing");
     println("  --json             write the check document to stdout; needs --check");
     println("  --index            fill the document's identifier index; implies --check --json");
+    println("  --tokens           write the entry file's tokens to stdout and stop");
     println("  --help             print this help and exit");
     println("  --version          print the compiler version and exit");
 }
@@ -57,39 +124,227 @@ fn void error(string message) {
     eprintln("fort: error: ", message);
 }
 
+// `fort: error: <what> '<path>': <reason>`, the form of
+// `cannot read 'x.ft': No such file or directory` (toolchain.md 1).
+fn void error_path(string what, string path, string reason) {
+    eprintln("fort: error: ", what, " '", path, "': ", reason);
+}
+
+// A usage error, followed by the usage line (toolchain.md 1).
+fn void usage_error(string message) {
+    error(message);
+    eprintln(USAGE);
+}
+
+// The same with the offending argument quoted after the message.
+fn void usage_error_arg(string message, string detail) {
+    eprintln("fort: error: ", message, " '", detail, "'");
+    eprintln(USAGE);
+}
+
+// Whether `arg` is an option rather than the entry file: the first argument
+// that does not start with '-' is the entry file (D14.1).
+fn bool is_option(string arg) {
+    return arg.len > 0 && arg[0] == '-';
+}
+
+// Whether `arg` is `-l<lib>`: the library is part of the option, so it is one
+// argument, unlike every other option that carries a value (D14.1).
+fn bool is_link_option(string arg) {
+    return arg.len > 2 && arg[0] == '-' && arg[1] == 'l';
+}
+
+// The argument of an option that takes the following one; false after
+// reporting the usage error. *i is left on the argument. -o, -I, --std-dir,
+// --cc, --target and -Xcc take the following argument, whatever it looks like
+// (D14.1).
+fn bool take_argument(string@ args, u64 mut* i, string mut* out) {
+    if (*i + 1 >= args.len) {
+        usage_error_arg("missing argument for option", args[*i]);
+        return false;
+    }
+    *i += 1;
+    *out = args[*i];
+    return true;
+}
+
+// The options that carry no value: -S, -c, --release, --no-bounds-check,
+// --check, --json, --index and --tokens, each of which sets one flag (D14.1,
+// D20.1, D20.2, D20.3).
+fn bool parse_flag(options mut* opts, string arg) {
+    if (arg == "-S") {
+        opts->emit_ir = true;
+    } else if (arg == "-c") {
+        opts->compile_only = true;
+    } else if (arg == "--release") {
+        opts->release = true;
+    } else if (arg == "--no-bounds-check") {
+        opts->no_bounds_check = true;
+    } else if (arg == "--check") {
+        opts->check = true;
+    } else if (arg == "--json") {
+        opts->json = true;
+    } else if (arg == "--index") {
+        // --index implies --check and --json, so it is the whole command line
+        // an editor gives the compiler (D20.3).
+        opts->index = true;
+        opts->check = true;
+        opts->json = true;
+    } else if (arg == "--tokens") {
+        // --tokens lexes the entry file and stops there, so it implies
+        // nothing and combines with nothing (D14.1).
+        opts->tokens = true;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+// The options that take the following argument. Returns false when `arg` is
+// not one of them; *ok is false when the argument was missing. The last -o,
+// --std-dir, --cc and --target win, while -I, -l and -Xcc accumulate in
+// command-line order (D14.1, toolchain.md 1).
+fn bool parse_valued(options mut* opts, string@ args, u64 mut* i, bool mut* ok) {
+    string arg = args[*i];
+    bool is_output = arg == "-o";
+    bool is_include = arg == "-I";
+    bool is_std_dir = arg == "--std-dir";
+    bool is_cc = arg == "--cc";
+    bool is_target = arg == "--target";
+    bool is_cc_arg = arg == "-Xcc";
+    if (!is_output && !is_include && !is_std_dir && !is_cc && !is_target && !is_cc_arg) {
+        return false;
+    }
+    string mut value = "";
+    if (!take_argument(args, i, &value)) {
+        *ok = false;
+        return true;
+    }
+    if (is_output) {
+        opts->output = value;
+    } else if (is_include) {
+        containers.str_push(&opts->includes, value);
+    } else if (is_std_dir) {
+        opts->std_dir = value;
+    } else if (is_cc) {
+        opts->cc = value;
+    } else if (is_target) {
+        opts->target = value;
+    } else {
+        containers.str_push(&opts->cc_args, value);
+    }
+    return true;
+}
+
+// Parses args[1..] into *opts, which options_create has prepared. --help and
+// --version print to stdout; a usage error prints `fort: error: <message>`
+// and the usage line to stderr (toolchain.md 1).
+fn i32 parse(options mut* opts, string@ args) {
+    u64 mut i = 1;
+    while (i < args.len) {
+        string arg = args[i];
+        if (!is_option(arg)) {
+            // The first argument that does not start with '-' is the entry
+            // file (D14.1); a second one is a usage error.
+            if (opts->have_entry) {
+                usage_error_arg("unexpected argument", arg);
+                return PARSE_ERROR;
+            }
+            opts->have_entry = true;
+            opts->entry = arg;
+        } else if (arg == "--help") {
+            help();
+            return PARSE_DONE;
+        } else if (arg == "--version") {
+            println("fort ", VERSION);
+            return PARSE_DONE;
+        } else if (is_link_option(arg)) {
+            containers.str_push(&opts->libs, arg);
+        } else if (!parse_flag(opts, arg)) {
+            bool mut ok = true;
+            if (!parse_valued(opts, args, &i, &ok)) {
+                usage_error_arg("unknown option", arg);
+                return PARSE_ERROR;
+            }
+            if (!ok) {
+                return PARSE_ERROR;
+            }
+        }
+        i += 1;
+    }
+    if (!opts->have_entry) {
+        usage_error("no entry file");
+        return PARSE_ERROR;
+    }
+    if (opts->tokens && (opts->check || opts->json || opts->index)) {
+        // --tokens stops before the parser, so there is no front end for
+        // --check to run and no document for --json to write (D14.1).
+        usage_error("--tokens does not combine with --check, --json or --index");
+        return PARSE_ERROR;
+    }
+    if (opts->json && !opts->check) {
+        // A build spawns a `--cc` that inherits stdout, so only the check mode
+        // can promise a complete document or nothing (D20.2).
+        usage_error("--json requires --check");
+        return PARSE_ERROR;
+    }
+    return PARSE_OK;
+}
+
+// --tokens lexes the entry file alone -- no import is resolved and nothing is
+// parsed -- and writes one line per token to stdout in the form of
+// toolchain.md 1. A lexical error is reported on stderr as usual and lexing
+// goes on (D14.2), so the dump covers the whole file either way; the status is
+// then the compile error of D14.1.
+fn i32 tokens_entry(options* opts) {
+    // The session the lexer takes: it owns the sink the diagnostics go to and
+    // the pool the decoded strings are interned in, and freeing it frees them
+    // (D20.5).
+    session.session mut s = session.create();
+    defer session.free(&s);
+    string mut source = "";
+    if (!session.read_source(&s, opts->entry, &source)) {
+        error_path("cannot read", opts->entry, str.from_cstr(strerror(sys.errno())));
+        return EXIT_USAGE;
+    }
+    // A batch driver writes the text form of every diagnostic as it arrives,
+    // which the library leaves off (D14.2, D20.2).
+    diag.set_text(session.diags(&s), true);
+    lexer.tok_vec mut toks = lexer.tokvec_create();
+    defer lexer.tokvec_free(&toks);
+    bool clean = lexer.lex_file(&s, opts->entry, source, &toks);
+    strbuf.str_buf mut dump = strbuf.create();
+    defer strbuf.free(&dump);
+    lexer.tok_dump(&toks, &dump);
+    print(strbuf.view(&dump));
+    if (clean) {
+        return EXIT_OK;
+    }
+    return EXIT_COMPILE_ERROR;
+}
+
 fn i32 main(string@ args) {
     // fort with no arguments prints one usage line and exits with 2
     // (toolchain.md 1).
     if (args.len < 2) {
         eprintln(USAGE);
-        return 2;
+        return EXIT_USAGE;
     }
-    // The two options that need no compiler are answered wherever they stand,
-    // which src/bootstrap/driver.c does not do: it walks the arguments in
-    // order and reaches a usage error first, so `fort a.ft b.ft --help` is
-    // `unexpected argument 'b.ft'` there and help here. Matching that order
-    // needs the rest of the command line parsed -- an option that takes the
-    // following argument decides whether a `--help` after it is an option at
-    // all -- so the divergence stands until the driver is written, and this
-    // comment is what says it is deliberate rather than an oversight.
-    for (string arg : args[1..]) {
-        if (arg == "--help") {
-            help();
-            return 0;
-        }
-        if (arg == "--version") {
-            println("fort ", VERSION);
-            return 0;
-        }
+    options mut opts = options_create();
+    defer options_free(&opts);
+    i32 parsed = parse(&opts, args);
+    if (parsed == PARSE_ERROR) {
+        return EXIT_USAGE;
     }
-    // The session the passes will take. It is created and freed here so that
-    // the shape of a build is the shape a re-analysis has: one value, whose
-    // storage is gone when the build returns (D20.5).
-    session.session mut s = session.create();
-    defer session.free(&s);
+    if (parsed == PARSE_DONE) {
+        return EXIT_OK;
+    }
+    if (opts.tokens) {
+        return tokens_entry(&opts);
+    }
     // An internal error is not a usage error, so no usage line follows it:
-    // toolchain.md 1 puts that line after the five errors that report a
+    // toolchain.md 1 puts that line after the six errors that report a
     // command line the compiler cannot use, and this command line is fine.
     error("internal error: this compiler cannot build a program yet");
-    return 2;
+    return EXIT_USAGE;
 }

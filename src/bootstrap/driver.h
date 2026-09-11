@@ -12,6 +12,11 @@
 // `--index` implies both and fills that document's identifier index, which
 // index.h builds from the trees the run leaves behind (D20.3).
 //
+// `--tokens` stops one pass earlier still: it lexes the entry file alone,
+// opening no import and parsing nothing, and writes the token dump of
+// lexer.h to stdout (D14.1, toolchain.md 1). It is what holds the two
+// compilers' lexers against each other while src/fort is written.
+//
 // The file mirrors what the self-hosted compiler will do: no unions, no
 // function pointers, messages assembled with sb_t instead of printf formats.
 #ifndef FORT_DRIVER_H
@@ -65,6 +70,7 @@ typedef struct {
     bool check;           // --check: the front end alone (D20.1)
     bool json;            // --json: the document of D20.2 on stdout
     bool index;           // --index: the identifier index of D20.3 in it
+    bool tokens;          // --tokens: the entry file's tokens on stdout (D14.1)
     ptrvec_t includes;    // -I roots, searched in command-line order (D9.2)
     ptrvec_t libs;        // -l<lib> as given, passed to the linker in order
     ptrvec_t cc_args;     // -Xcc arguments, passed verbatim after the rest

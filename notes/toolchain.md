@@ -33,6 +33,7 @@ file (D14.1). Options and the entry file may appear in any order.
 | `--check`           | run the front end only and stop (D20.1)                    | off        |
 | `--json`            | write the check document to stdout (D20.2), needs `--check`| off        |
 | `--index`           | fill the document's identifier index (D20.3)               | off        |
+| `--tokens`          | write the entry file's tokens to stdout and stop (D14.1)   | off        |
 | `--help`            | print the usage line and exit 0                            |            |
 | `--version`         | print the compiler version and exit 0                      |            |
 
@@ -57,6 +58,41 @@ file (D14.1). Options and the entry file may appear in any order.
   stdout and could not promise a complete document or nothing (D20.2). `--index` fills the
   document's `"symbols"` array with the identifier index of section 9.1 and implies `--check` and
   `--json`, so `fort --index main.ft` is the whole of what an editor runs (D20.3).
+- `--tokens` runs the lexer over the entry file and stops there: it resolves no import, parses
+  nothing and needs no standard library, so it is the one thing a compiler with a lexer and no
+  parser can do (D14.1). It writes one line per token to stdout, ending with the `end of file`
+  token, and is a usage error together with `--check`, `--json` or `--index`, which all need a
+  front end; every other option is unused, as under `--check`. A lexical error is reported on
+  stderr in the form of section 4 and lexing resumes at the next line (D14.2), so the dump covers
+  the whole file either way and the status is then 1. A line is
+
+  ```sh
+  <line>:<col>-<end_line>:<end_col> <value> "<spelling>" <kind>
+  ```
+
+  where the range is the token's (D20.4), 1-based with a tab counting as one column and its end
+  exclusive; `<value>` is the magnitude of an integer literal (D2.5) or the byte of a char literal
+  (D2.7) and 0 for every other kind; `<spelling>` is the token's source bytes, and for a string
+  literal its decoded bytes (D2.9), with `"`, `\`, a newline, a tab, a carriage return and every
+  byte outside printable ASCII written as `\"`, `\\`, `\n`, `\t`, `\r` and `\xHH` with
+  uppercase hex digits, so that one token is one line; and `<kind>` is the token kind as a
+  diagnostic names it -- the word for a keyword, the glyph for an operator, and one of
+  `identifier`, `integer literal`, `float literal`, `char literal`, `string literal` and
+  `end of file` -- which stands last because it is the only field that may hold a space. So
+  `fort --tokens` on a file holding `x = 0x10;` writes
+
+  ```sh
+  1:1-1:2 0 "x" identifier
+  1:3-1:4 0 "=" =
+  1:5-1:9 16 "0x10" integer literal
+  1:9-1:10 0 ";" ;
+  2:1-2:1 0 "" end of file
+  ```
+
+  Both compilers write those bytes: `tools/diff_tokens.sh` compares stage1's dump with stage2's,
+  together with their diagnostics and their exit statuses, over every `.ft` file in the
+  repository, and that is how the self-hosted lexer is held against the bootstrap's (the ctest
+  `diff-tokens`).
 - The entry file's directory is always a root and the current directory never is (D9.2).
 
 Exit status (D14.1):
@@ -72,10 +108,11 @@ on stderr, for example `fort: error: cannot read 'x.ft': No such file or directo
 `fort: error: cc failed with status 1`. `fort` with no arguments prints one usage line and exits
 with 2; `--help` prints that line and then the table above, and exits 0.
 
-These are all the `fort: error: <message>` texts, each of them exit status 2 (D14.1). Five report a
+These are all the `fort: error: <message>` texts, each of them exit status 2 (D14.1). Six report a
 command line the compiler cannot use and are followed by the usage line: `missing argument for
 option '<opt>'`, `unexpected argument '<arg>'` (a second entry file), `unknown option '<opt>'`, `no
-entry file` and `--json requires --check` (D20.2). Four report an operation of section 2 that
+entry file`, `--json requires --check` (D20.2) and `--tokens does not combine with --check, --json
+or --index`. Four report an operation of section 2 that
 failed, with the system's error text as `<reason>`: `cannot read '<file>': <reason>` (the entry
 file), `cannot write '<file>': <reason>` (the LLVM IR module), `cannot create a temporary directory
 in '<dir>': <reason>` (`mkdtemp` under `$TMPDIR`) and `cannot run '<cc>': <reason>` (`--cc` could
@@ -95,6 +132,7 @@ fort --cc clang-18 --target x86_64-linux-gnu -Xcc -fuse-ld=lld main.ft
 fort --check lib/util.ft                      # check that module and its imports, print nothing
 fort --check --json main.ft                   # one JSON document on stdout, for an editor
 fort --index main.ft                          # the same document with the identifier index
+fort --tokens main.ft                         # one line per token of that file, nothing else
 FORT_STD_DIR=/opt/fort/std fort main.ft
 ```
 

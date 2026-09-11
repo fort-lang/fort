@@ -191,4 +191,18 @@ void tokvec_truncate(tokvec_t* v, uint64_t len);
 // is left of.
 bool lex_file(const char* file, str_t source, str_pool_t* pool, tokvec_t* out);
 
+// The token dump of `--tokens` (D14.1), appended to `out`: one line per
+// token of `v`, in the form toolchain.md 1 documents,
+//
+//     <line>:<col>-<end_line>:<end_col> <ival> "<spelling>" <kind>
+//
+// with the spelling escaped so that a token holding a newline, a tab, a
+// quote or a byte outside printable ASCII still occupies one line. The
+// end of the range is the position after the token's last byte: no token
+// holds a line break (D2.9), so it is `<col> + <len>` on the token's own
+// line. src/fort/lexer.ft writes the same bytes, and tools/diff_tokens.sh
+// holds the two dumps against each other over every .ft file in the
+// repository.
+void tok_dump(const tokvec_t* v, sb_t* out);
+
 #endif

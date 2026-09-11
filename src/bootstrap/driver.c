@@ -17,6 +17,7 @@
 #include "gen.h"
 #include "index.h"
 #include "json.h"
+#include "lexer.h"
 #include "modules.h"
 #include "str.h"
 
@@ -44,6 +45,7 @@ static const char* const HELP_LINES[] = {
     "  --check            run the front end only and stop; emit nothing",
     "  --json             write the check document to stdout; needs --check",
     "  --index            fill the document's identifier index; implies --check --json",
+    "  --tokens           write the entry file's tokens to stdout and stop",
     "  --help             print this help and exit",
     "  --version          print the compiler version and exit",
 };
@@ -52,6 +54,10 @@ static const char* const HELP_LINES[] = {
 // not set, and the template mkdtemp fills in.
 static const char TMP_DIR_DEFAULT[] = "/tmp";
 static const char TMP_DIR_TEMPLATE[] = "/fort-XXXXXX";
+
+// The bytes the entry file is read in under --tokens, as modules.c reads a
+// module.
+enum { ENTRY_READ_CHUNK = 4096 };
 
 // The symbolic link naming the running binary, and the buffer sizes the
 // driver reads it with.
@@ -118,6 +124,7 @@ void driver_options_init(driver_options_t* opts) {
     opts->check = false;
     opts->json = false;
     opts->index = false;
+    opts->tokens = false;
     ptrvec_init(&opts->includes);
     ptrvec_init(&opts->libs);
     ptrvec_init(&opts->cc_args);
@@ -161,8 +168,8 @@ static bool is_link_option(const char* arg) {
 }
 
 // The options that carry no value: -S, -c, --release, --no-bounds-check,
-// --check, --json and --index, each of which sets one flag (D14.1, D20.1,
-// D20.2, D20.3).
+// --check, --json, --index and --tokens, each of which sets one flag (D14.1,
+// D20.1, D20.2, D20.3).
 static bool parse_flag(driver_options_t* opts, const char* arg) {
     if (strcmp(arg, "-S") == 0) {
         opts->emit_ir = true;
@@ -182,6 +189,10 @@ static bool parse_flag(driver_options_t* opts, const char* arg) {
         opts->index = true;
         opts->check = true;
         opts->json = true;
+    } else if (strcmp(arg, "--tokens") == 0) {
+        // --tokens lexes the entry file and stops there, so it implies
+        // nothing and combines with nothing (D14.1).
+        opts->tokens = true;
     } else {
         return false;
     }
@@ -260,6 +271,12 @@ int driver_parse(driver_options_t* opts, int argc, char** argv, FILE* out, FILE*
     }
     if (opts->entry == NULL) {
         usage_error(err, "no entry file", NULL);
+        return DRIVER_PARSE_ERROR;
+    }
+    if (opts->tokens && (opts->check || opts->json || opts->index)) {
+        // --tokens stops before the parser, so there is no front end for
+        // --check to run and no document for --json to write (D14.1).
+        usage_error(err, "--tokens does not combine with --check, --json or --index", NULL);
         return DRIVER_PARSE_ERROR;
     }
     if (opts->json && !opts->check) {
@@ -752,6 +769,67 @@ static void write_document(FILE* out, const driver_files_t* files, const index_t
     sb_free(&doc);
 }
 
+// ---- the token dump (--tokens, D14.1) --------------------------------------------
+
+// The whole of `path` into `b`; false when it could not be opened or read,
+// with the failure reported as `cannot read '<path>': <reason>`, the same
+// line an unreadable entry file gets from the pipeline (toolchain.md 1).
+static bool read_entry(const char* path, sb_t* b, FILE* err) {
+    FILE* file = fopen(path, "rb");
+    if (file == NULL) {
+        error_path(err, "cannot read", path, strerror(errno));
+        return false;
+    }
+    for (;;) {
+        sb_reserve(b, ENTRY_READ_CHUNK);
+        const size_t got = fread(b->data + b->len, 1, ENTRY_READ_CHUNK, file);
+        b->len += (uint64_t)got;
+        if (got < ENTRY_READ_CHUNK) {
+            break;
+        }
+    }
+    const bool ok = ferror(file) == 0;
+    if (!ok) {
+        error_path(err, "cannot read", path, strerror(errno));
+    }
+    (void)fclose(file);
+    return ok;
+}
+
+// --tokens lexes the entry file alone -- no import is resolved and nothing is
+// parsed -- and writes one line per token to `out` in the form of
+// toolchain.md 1. A lexical error is reported as usual and lexing goes on
+// (D14.2), so the dump covers the whole file either way; the status is then
+// the compile error of D14.1.
+static int tokens_entry(const driver_options_t* opts, FILE* out, FILE* err) {
+    sb_t source;
+    sb_init(&source);
+    if (!read_entry(opts->entry, &source, err)) {
+        sb_free(&source);
+        return FORT_EXIT_USAGE;
+    }
+    // Each run starts from an empty sink, as the front end does.
+    diag_reset();
+    str_pool_t pool;
+    str_pool_init(&pool);
+    tokvec_t toks;
+    tokvec_init(&toks);
+    const bool clean = lex_file(opts->entry, sb_view(&source), &pool, &toks);
+    sb_t dump;
+    sb_init(&dump);
+    tok_dump(&toks, &dump);
+    const str_t text = sb_view(&dump);
+    if (text.len > 0) {
+        (void)fwrite(text.ptr, 1, (size_t)text.len, out);
+    }
+    (void)fflush(out);
+    sb_free(&dump);
+    tokvec_free(&toks);
+    str_pool_free(&pool);
+    sb_free(&source);
+    return clean ? FORT_EXIT_OK : FORT_EXIT_COMPILE_ERROR;
+}
+
 // ---- the pipeline (toolchain.md 2) ------------------------------------------------
 
 // Emits the module and, unless -S stops there, compiles and links it,
@@ -846,9 +924,12 @@ int driver_main(int argc, char** argv, FILE* out, FILE* err) {
     if (parsed == DRIVER_PARSE_ERROR) {
         status = FORT_EXIT_USAGE;
     } else if (parsed == DRIVER_PARSE_OK) {
-        // --check stops after the front end; every other run goes through the
-        // whole pipeline of toolchain.md 2 (D20.1).
-        if (opts.check) {
+        // --tokens stops after the lexer and --check after the front end;
+        // every other run goes through the whole pipeline of toolchain.md 2
+        // (D14.1, D20.1).
+        if (opts.tokens) {
+            status = tokens_entry(&opts, out, err);
+        } else if (opts.check) {
             status = check_entry(&opts, argv[0], out, err);
         } else {
             status = compile_entry(&opts, argv[0], err);

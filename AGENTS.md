@@ -755,10 +755,41 @@ A safe(r) C-like systems programming language.
     and a C non-`const` gains `mut` in the position D5.3 gives it. A field never carries the
     outermost `mut` (D5.5), so `int count;` in a struct the code writes through is just
     `i32 count;` and the mutability comes from the access path.
+  - **Adjacent string literals do not concatenate** (D2.9), which C uses to wrap a long text
+    across lines, and a `.ft` line is 100 columns: build the text with a `std::strbuf` or split
+    the statement into several. T-031 found it in a test that lexed the forty-one keywords of
+    D2.4 as one line.
+  - **A `case` label is a constant expression**, so a C `switch` over byte values held in an
+    `int` -- the lexer's `switch (c0)` over operator characters, where -1 means the end of the
+    file -- becomes a chain of `if`/`else if` comparisons against `cast('+', i64)`. The chain is
+    the transliteration; do not reorder it, since the first match wins in both.
+  - **An enum member may not take a keyword's name.** `char` and `string` are keywords (D2.4),
+    so C's `TOK_CHAR` and `TOK_STRING` become `char_lit` and `string_lit`, and the whole family
+    takes the suffix rather than two of its six members.
+  - A C `T*` parameter that may be null to mean "do not compute this" (`lex_digits`'s `value`)
+    is better replaced by always computing it and letting the caller ignore the result, when the
+    caller that passed NULL ignores the result anyway: same behaviour, no null to reason about.
   - Nesting deeper than 256 is a compile error (D2.11), parentheses, blocks, brackets and type
     suffixes together.
   A ported module is judged against the C one it replaces: the same unit suite runs over both, so
-  the oracle is the existing test, not a reading of the new code. `tools/lines.py` counts
+  the oracle is the existing test, not a reading of the new code. A module that the two compilers
+  can both be made to *show* -- the lexer, through `fort --tokens` (D14.1) -- gets a differential
+  oracle as well, and that one is worth building before the port: `tools/diff_tokens.sh` compares
+  the two token dumps, their diagnostics and their exit statuses over every `.ft` file in the
+  repository (the ctest `diff-tokens`, a command of `check-lang` so that the gate runs it), and it
+  caught every mutation the port was probed with. Two guards make it an oracle rather than a
+  ritual, and both were added after a review broke it: `FT_FILES` is the exact number of `.ft`
+  files, so a ticket that adds or removes one changes that line in the same commit and no file
+  can slip out of the comparison; and stage1's own answer is held against what a lexer must
+  produce -- exit 0 or 1 and a dump ending in the end-of-file token -- before the two are
+  compared, because two compilers that both refuse `--tokens` agree about everything, and the
+  script passed over the whole corpus with both binaries replaced by a stub. The same check is
+  what a path with a space needs, since word-splitting the file list makes both compilers fail
+  alike. **The root of `test/fort` has no shared helper file** -- a `.ft` directly there whose
+  stem does not end in `_test` is a lint failure, since `run_tests.py` registers every root
+  `.ft` as a test -- so a fixture common to several suites is either repeated in each or put in
+  a subdirectory (`test/fort/support/`), which discovery ignores but which `fort_lint.py` and
+  `test/highlight_test.py` do not see either. `tools/lines.py` counts
   `src/fort`, so the ported lines carry the 3:1 ratio like any others.
 - **What checks `.ft` source, and what does not** (T-076). Three things do. `tools/fort_lint.py`
   (ctest `fort_lint`, target `fort-lint`) holds `std/*.ft` and `src/fort/*.ft` to the identifier
