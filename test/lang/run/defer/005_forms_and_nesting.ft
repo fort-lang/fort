@@ -1,0 +1,64 @@
+//! run
+//! stdout:
+//| x at exit 6
+//| returned 5
+//| 2 99
+//| n at exit 11
+//| returned 9
+//| inner mid outer
+//| 3
+//| c a b
+// The forms `defer` admits (D7.8, grammar.md defer_stmt) and the blocks a `return` unwinds: an
+// assignment, a compound assignment, a `++` and a call, plus a deferred block that defers again.
+// The returned value is read before any deferred code runs.
+fn i32 read_then_bump() {
+    i32 mut x = 5;
+    defer println("x at exit ", x);       // runs last, so it sees the 6 the `++` below left
+    defer x++;                            // a `++` is a deferred form
+    return x;                             // 5: the value is read before the deferred code
+}
+
+fn i32 bump_through_a_pointer(i32 mut* p) {
+    defer *p = 99;                        // an assignment is a deferred form
+    return *p + 1;                        // 2, not 100: the operand is read before the store
+}
+
+fn i32 compound() {
+    i32 mut n = 9;
+    defer println("n at exit ", n);       // 11: the two below ran, in reverse order
+    defer n += 3;
+    defer n--;                            // `--` is a deferred form like `++`
+    return n;                             // 9
+}
+
+fn i32 nested_blocks() {
+    defer println(" outer");
+    {
+        defer print(" mid");
+        {
+            defer print("inner");
+            return 3;                     // unwinds three blocks, innermost first
+        }
+    }
+}
+
+fn void defer_inside_defer() {
+    defer {
+        defer println(" b");              // registered while the deferred block runs
+        print(" a");
+    }
+    print("c");
+}
+
+fn i32 main() {
+    i32 a = read_then_bump();
+    println("returned ", a);
+    i32 mut v = 1;
+    i32 got = bump_through_a_pointer(&v);
+    println(got, " ", v);
+    i32 c = compound();
+    println("returned ", c);
+    println(nested_blocks());
+    defer_inside_defer();
+    return 0;
+}

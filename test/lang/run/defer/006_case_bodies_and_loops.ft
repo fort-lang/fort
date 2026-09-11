@@ -1,0 +1,136 @@
+//! run
+//! stdout:
+//| zero zero-d end 0
+//| one one-d end 1
+//| work i=0
+//| body end i=0
+//| body end i=1
+//| work i=2
+//| body end i=2
+//| case0
+//| after switch 0
+//| iter 0
+//| other 1
+//| after switch 1
+//| iter 1
+//| case 0
+//| loop 0
+//| tail 1
+//| loop 1
+//| deep 3
+//| loop 3
+//| fn 3
+//| 7
+//| seen 1
+//| seen 2
+//| seen 3
+//| left at 4
+//| seen 4
+//| case 5
+//| loop 5
+//| fn 5
+//| 6
+// A case body is a block, so `break` leaves it and runs its deferred statements alone (D7.6,
+// D7.8); a loop body is a block too, so its deferred statements run at the end of every
+// iteration, before `step`, which is what the loop variable printed at each exit shows.
+fn void classify(i32 n) {
+    defer println(" end ", n);
+    switch (n) {
+    case 0:
+        defer print(" zero-d");
+        print("zero");
+        break;                            // leaves the case body, not the function
+    default:
+        defer print(" one-d");
+        print("one");                     // falls off the end of the case body
+    }
+}
+
+fn void loop_steps() {
+    for (i32 mut i = 0; i < 3; i++) {
+        defer println("body end i=", i);   // before `step`, so it sees this iteration's `i`
+        if (i == 1) {
+            continue;
+        }
+        println("work i=", i);
+    }
+}
+
+fn void switch_in_loop() {
+    for (i32 mut i = 0; i < 2; i++) {
+        defer println("iter ", i);
+        switch (i) {
+        case 0:
+            defer println("case0");
+            break;                        // leaves the case body alone
+        default:
+            println("other ", i);
+        }
+        println("after switch ", i);
+    }
+}
+
+fn void continue_from_a_case() {
+    for (i32 mut i = 0; i < 2; i++) {
+        defer println("loop ", i);
+        switch (i) {
+        case 0:
+            defer println("case ", i);
+            continue;                     // leaves the case body and the loop body
+        default:
+            break;
+        }
+        println("tail ", i);
+    }
+}
+
+fn i32 return_from_a_loop(i32 n) {
+    defer println("fn ", n);
+    while (true) {
+        defer println("loop ", n);
+        {
+            defer println("deep ", n);
+            return n + 4;                 // unwinds the inner block, the body and the function
+        }
+    }
+}
+
+fn void over_an_array(i32[4] xs) {
+    for (i32 x : xs) {
+        defer println("seen ", x);
+        if (x == 3) {
+            continue;                     // a range `for` body is a block like any other
+        }
+        if (x == 4) {
+            println("left at ", x);
+            break;
+        }
+    }
+}
+
+fn i32 return_from_a_case(i32 n) {
+    defer println("fn ", n);
+    while (true) {
+        defer println("loop ", n);
+        switch (n) {
+        case 5:
+            defer println("case ", n);
+            return n + 1;                 // unwinds the case body, the loop body and the function
+        default:
+            return 0;
+        }
+    }
+}
+
+fn i32 main() {
+    classify(0);
+    classify(1);
+    loop_steps();
+    switch_in_loop();
+    continue_from_a_case();
+    println(return_from_a_loop(3));
+    i32[4] xs = {1, 2, 3, 4};
+    over_an_array(xs);
+    println(return_from_a_case(5));
+    return 0;
+}

@@ -374,6 +374,16 @@ A safe(r) C-like systems programming language.
   an exit (`defer`) reads both. Each target is a label and a flag saying whether it is set, and
   the flag is deliberately not a depth: nothing asks how many constructs an exit crosses, and a
   counter whose balance no test can see is a bug waiting for the pass that starts reading it.
+  **Deferred statements are expanded off a scope stack, not off a counter** (`gen_stmt.c`, D7.8):
+  `gen_block_scoped` pushes one entry per block being emitted, with its kind (`GEN_SCOPE_FN`,
+  `GEN_SCOPE_LOOP`, `GEN_SCOPE_CASE`, `GEN_SCOPE_BLOCK`) and the index where its own `defer`
+  nodes begin, and every exit walks that stack outward, copying each scope's statements into
+  itself in reverse order and stopping at the scope it leaves. How many scopes an exit leaves is
+  therefore read off the tree being walked. A new construct whose body is a block must open it
+  with `gen_block_scoped` and the kind its exits stop at, or the deferred statements of that body
+  run at the wrong place; and because the expansion duplicates code at every exit, an emitter
+  test that adds one asserts `verified()`, since a missed `g->terminated` check there writes an
+  instruction after a terminator that `opt -passes=verify` alone accepts.
   **A runtime entry point is described in four places that nothing holds together**: the C
   prototype in `runtime/fort_rt.h` and `.c`, the table in `toolchain.md` 5.1, the declaration
   list of item 8, and the three positional arrays of `gen_data.c` (`RT_DECL`, `RT_NAME`,

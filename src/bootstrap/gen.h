@@ -164,6 +164,18 @@ typedef struct {
     str_t name;
 } gen_slot_t;
 
+// The kind of a block scope: which exits leave it, and therefore run the
+// deferred statements it holds (D7.8). `break` leaves the innermost loop body
+// or case body, `continue` the innermost loop body, `return` every scope out
+// to the function body, and falling off the end of a block leaves that block
+// alone.
+typedef enum {
+    GEN_SCOPE_BLOCK, // an ordinary block, left by falling off its end
+    GEN_SCOPE_LOOP,  // a loop body, left by `break` and by `continue` too
+    GEN_SCOPE_CASE,  // a case body, left by `break` (D7.6)
+    GEN_SCOPE_FN,    // the function body, left by `return`
+} gen_scope_kind_t;
+
 typedef struct gen gen_t;
 struct gen {
     gen_options_t opts;
@@ -195,6 +207,24 @@ struct gen {
     bool has_continue;
     ptrvec_t slots;  // gen_slot_t*, owned; the locals and parameters in order
     bool terminated; // the block being written already ended in a terminator
+    // The block scopes open at the statement being emitted, innermost last,
+    // and the deferred statements registered in them: the set of deferred
+    // statements an exit runs is static, so the emitter reads it off this
+    // stack and copies the code into every exit rather than keeping a runtime
+    // list (D7.8). How many scopes an exit leaves is a property of the tree
+    // being walked, which is what this stack is, and never a counter the
+    // emitter maintains beside it.
+    ptrvec_t defers;      // ast_node_t*, borrowed; the AST_DEFER nodes of every
+                          // open scope, in textual order
+    intvec_t scope_kinds; // GEN_SCOPE_*, one per open scope
+    intvec_t scope_first; // the index into `defers` where each scope's own
+                          // deferred statements begin
+    // The scope an exit inside deferred code may not unwind past: the scopes
+    // below it are the ones the exit being expanded is already leaving, and
+    // `return`, `break` and `continue` inside deferred code are errors the
+    // checker refused (D7.8), so reaching it is an internal error rather than
+    // an unbounded re-entry into the same deferred statement.
+    uint64_t defer_floor;
 
     // ---- what the module refers to, in first-use order (D19.5) ----
     // The three private-data lists hold records the emitter owns and
@@ -506,7 +536,16 @@ gen_place_t gen_slot_place(gen_t* g, const sym_t* s);
 // ---- statements and expressions ---------------------------------------------------
 
 void gen_stmt(gen_t* g, ast_node_t* n);
+
+// A block as an ordinary block scope, which only falling off its end exits
+// (D7.8).
 void gen_block(gen_t* g, ast_node_t* n);
+
+// A block as a scope of kind `kind`, which is what says which exits leave it
+// and therefore run its deferred statements (D7.8): gen_function opens the
+// body as GEN_SCOPE_FN, a loop body as GEN_SCOPE_LOOP and a case body as
+// GEN_SCOPE_CASE.
+void gen_block_scoped(gen_t* g, ast_node_t* n, gen_scope_kind_t kind);
 
 // A scalar expression's value.
 gen_val_t gen_expr_value(gen_t* g, ast_node_t* n);

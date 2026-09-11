@@ -102,6 +102,10 @@ void gen_init(gen_t* g, gen_options_t opts) {
     g->has_continue = false;
     ptrvec_init(&g->slots);
     g->terminated = false;
+    ptrvec_init(&g->defers);
+    intvec_init(&g->scope_kinds);
+    intvec_init(&g->scope_first);
+    g->defer_floor = 0;
     ptrvec_init(&g->files);
     ptrvec_init(&g->strs);
     ptrvec_init(&g->enums);
@@ -139,6 +143,9 @@ void gen_free(gen_t* g) {
     sb_free(&g->body);
     sb_free(&g->fail);
     free_records(&g->slots);
+    ptrvec_free(&g->defers);
+    intvec_free(&g->scope_kinds);
+    intvec_free(&g->scope_first);
     free_records(&g->files);
     free_records(&g->strs);
     free_records(&g->enums);
@@ -984,6 +991,12 @@ static void function_begin(gen_t* g) {
     g->has_continue = false;
     free_records(&g->slots);
     ptrvec_init(&g->slots);
+    // No scope of the previous definition stays open: a deferred statement is
+    // expanded inside the function that wrote it (D7.8).
+    g->defers.len = 0;
+    g->scope_kinds.len = 0;
+    g->scope_first.len = 0;
+    g->defer_floor = 0;
     sb_clear(&g->allocas);
     sb_clear(&g->body);
     sb_clear(&g->fail);
@@ -1061,7 +1074,9 @@ static void gen_function(gen_t* g, ast_node_t* fn) {
         }
     }
     ptrvec_free(&locals);
-    gen_block(g, fn->b);
+    // The body is the scope a `return` unwinds out to, and falling off its
+    // end runs its deferred statements before the terminator below (D7.8).
+    gen_block_scoped(g, fn->b, GEN_SCOPE_FN);
     if (!g->terminated) {
         if (sig->noreturn) {
             // The block that would fall off the end of a `noreturn` body ends

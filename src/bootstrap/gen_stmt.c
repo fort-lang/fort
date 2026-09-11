@@ -162,6 +162,97 @@ static void gen_incdec(gen_t* g, ast_node_t* n) {
     gen_store_place(g, target, gen_arith(g, n->loc, op, n->a->type, before, n->a->type, one));
 }
 
+// ---- deferred statements (D7.8) ----------------------------------------------------
+
+// What leaves a block, for deciding which scopes an exit unwinds through:
+// falling off the end of a block is the block's own business and needs no
+// kind of its own.
+enum {
+    EXIT_RETURN = 0,
+    EXIT_BREAK = 1,
+    EXIT_CONTINUE = 2,
+};
+
+static void scope_push(gen_t* g, gen_scope_kind_t kind) {
+    intvec_push(&g->scope_kinds, kind);
+    intvec_push(&g->scope_first, (int64_t)g->defers.len);
+}
+
+// Closes the innermost scope: its deferred statements go out of scope with
+// it, so nothing an exit below it crosses can run them (D7.8).
+static void scope_pop(gen_t* g) {
+    g->defers.len = (uint64_t)intvec_pop(&g->scope_first);
+    (void)intvec_pop(&g->scope_kinds);
+}
+
+// The deferred statements of the scope at `depth`, in reverse textual order:
+// those registered after that scope opened and before the next one did, so an
+// unwind through an outer scope runs that scope's own statements alone
+// (D7.8). A deferred statement that ends the block -- a call to a `noreturn`
+// function -- stops the expansion, the rest of the exit not being reached.
+static void run_scope_defers(gen_t* g, uint64_t depth) {
+    const uint64_t first = (uint64_t)g->scope_first.items[depth];
+    uint64_t end = g->defers.len;
+    if (depth + 1 < g->scope_first.len) {
+        end = (uint64_t)g->scope_first.items[depth + 1];
+    }
+    // The scopes open now are the ones the exit is leaving, so an exit met
+    // inside the code below may not unwind past them (D7.8).
+    const uint64_t saved_floor = g->defer_floor;
+    g->defer_floor = g->scope_kinds.len;
+    for (uint64_t i = end; i > first; i--) {
+        if (g->failed || g->terminated) {
+            break;
+        }
+        ast_node_t* deferred = (ast_node_t*)g->defers.items[i - 1];
+        // Nothing was captured at `defer` time: the deferred statement is
+        // ordinary code emitted here, reading whatever its variables hold at
+        // the exit (D7.8).
+        gen_stmt(g, deferred->a);
+    }
+    g->defer_floor = saved_floor;
+}
+
+// Whether an exit of kind `exit_kind` stops at a scope of kind `kind`:
+// `break` leaves the innermost loop body or case body, `continue` the
+// innermost loop body, and `return` unwinds out to the function body (D7.6,
+// D7.8).
+static bool exit_stops_at(int32_t exit_kind, gen_scope_kind_t kind) {
+    if (exit_kind == EXIT_RETURN) {
+        return kind == GEN_SCOPE_FN;
+    }
+    if (exit_kind == EXIT_CONTINUE) {
+        return kind == GEN_SCOPE_LOOP;
+    }
+    return kind == GEN_SCOPE_LOOP || kind == GEN_SCOPE_CASE;
+}
+
+// The deferred code an exit runs, copied into the exit itself: the set is
+// static, so every exited scope is expanded here, innermost first and in
+// reverse order within each (D7.8). How many scopes the exit leaves is read
+// off the scope stack, which is the shape of the tree being walked, so no
+// counter is kept beside it.
+static void gen_unwind(gen_t* g, int32_t exit_kind) {
+    uint64_t depth = g->scope_kinds.len;
+    while (depth > g->defer_floor) {
+        depth--;
+        run_scope_defers(g, depth);
+        if (g->failed || g->terminated) {
+            return;
+        }
+        if (exit_stops_at(exit_kind, (gen_scope_kind_t)g->scope_kinds.items[depth])) {
+            return;
+        }
+    }
+    // The scope an exit stops at always exists: the checker refused `return`,
+    // `break` and `continue` inside deferred code and `break` and `continue`
+    // with no construct around them (D7.8, check_stmt.c), so an exit that
+    // walks past the floor is a checker that let one through, not a program.
+    // Without the floor the walk would re-enter the deferred statement that
+    // holds the exit, without end.
+    fatal_internal("gen: return, break or continue inside deferred code");
+}
+
 // `return x` of a bare `own` local or parameter is an implicit `move`, which
 // the checker marked (D17.5, D17.7): the operand is emptied once its value has
 // been read, so that a `defer del(x)` written above sees the zero value and
@@ -178,6 +269,10 @@ static void gen_return_move(gen_t* g, ast_node_t* n) {
 
 static void gen_return(gen_t* g, ast_node_t* n) {
     if (n->a == NULL) {
+        gen_unwind(g, EXIT_RETURN);
+        if (g->failed || g->terminated) {
+            return;
+        }
         gen_ins(g);
         gen_text_append(g, "ret void");
         gen_ins_end(g);
@@ -191,8 +286,28 @@ static void gen_return(gen_t* g, ast_node_t* n) {
         sret.addr.ty = str_from_cstr("ptr");
         sret.addr.val = str_from_cstr("%ret.sret");
         sret.type = n->a->type;
-        gen_expr_into(g, n->a, sret);
+        // The `sret` block belongs to the caller, which may have passed a
+        // pointer to it as an argument as well (`s = f(&s)` hands one block
+        // to both), so deferred code can reach it. The result therefore lands
+        // in a temporary of the callee's own, which nothing outside names,
+        // and is copied out after the deferred code has run: `return e`
+        // evaluates `e` before deferred code runs, which cannot then change
+        // the value returned (D7.8, D8.2). A function with nothing deferred
+        // writes the block directly and pays for no temporary.
+        const bool through_temp = g->defers.len > 0;
+        const gen_place_t target = through_temp ? gen_temp_place(g, n->a->type) : sret;
+        gen_expr_into(g, n->a, target);
+        // The operand of an implicit move is emptied before the deferred code
+        // too (D17.5).
         gen_return_move(g, n);
+        gen_unwind(g, EXIT_RETURN);
+        if (g->failed || g->terminated) {
+            return;
+        }
+        if (through_temp) {
+            const uint64_t align = type_alignof(n->a->type);
+            gen_memcpy(g, sret.addr, align, target.addr, align, type_sizeof(n->a->type));
+        }
         gen_ins(g);
         gen_text_append(g, "ret void");
         gen_ins_end(g);
@@ -201,6 +316,13 @@ static void gen_return(gen_t* g, ast_node_t* n) {
     }
     const gen_val_t v = gen_expr_value(g, n->a);
     gen_return_move(g, n);
+    // The value is in a register before the deferred code runs, so a deferred
+    // statement that writes the variable it was read from does not change it
+    // (D7.8).
+    gen_unwind(g, EXIT_RETURN);
+    if (g->failed || g->terminated) {
+        return;
+    }
     gen_ins(g);
     gen_text_append(g, "ret ");
     gen_text_append_str(g, v.ty);
@@ -257,7 +379,10 @@ static void gen_loop_body(gen_t* g, ast_node_t* body, uint64_t brk, uint64_t con
     g->continue_label = cont;
     g->has_break = true;
     g->has_continue = true;
-    gen_block(g, body);
+    // The body is a block that `break` and `continue` both leave, so its
+    // deferred statements run at either exit and at the end of every
+    // iteration (D7.8).
+    gen_block_scoped(g, body, GEN_SCOPE_LOOP);
     g->break_label = saved_break;
     g->continue_label = saved_continue;
     g->has_break = had_break;
@@ -416,6 +541,12 @@ static void gen_break(gen_t* g, bool cont) {
     if (cont ? !g->has_continue : !g->has_break) {
         fatal_internal("gen: break or continue outside a loop or switch");
     }
+    // The deferred statements of every block the jump leaves run before it
+    // (D7.8); in a `for`, `continue` therefore runs them before `step`.
+    gen_unwind(g, cont ? EXIT_CONTINUE : EXIT_BREAK);
+    if (g->failed || g->terminated) {
+        return;
+    }
     gen_br(g, cont ? g->continue_label : g->break_label);
 }
 
@@ -429,7 +560,8 @@ static void gen_case_body(gen_t* g, ast_node_t* body, uint64_t brk) {
     const bool had_break = g->has_break;
     g->break_label = brk;
     g->has_break = true;
-    gen_block(g, body);
+    // A case body is a block too, which `break` leaves (D7.6, D7.8).
+    gen_block_scoped(g, body, GEN_SCOPE_CASE);
     g->break_label = saved_break;
     g->has_break = had_break;
 }
@@ -593,7 +725,10 @@ void gen_stmt(gen_t* g, ast_node_t* n) {
         gen_break(g, true);
         return;
     case AST_DEFER:
-        gen_todo(g, n->loc, "a deferred statement");
+        // A `defer` emits nothing where it stands: it registers its statement
+        // in the innermost open scope, and every exit below it copies the
+        // statement out (D7.8).
+        ptrvec_push(&g->defers, n);
         return;
     default:
         break;
@@ -602,12 +737,17 @@ void gen_stmt(gen_t* g, ast_node_t* n) {
 }
 
 void gen_block(gen_t* g, ast_node_t* n) {
+    gen_block_scoped(g, n, GEN_SCOPE_BLOCK);
+}
+
+void gen_block_scoped(gen_t* g, ast_node_t* n, gen_scope_kind_t kind) {
     if (n == NULL) {
         return;
     }
+    scope_push(g, kind);
     for (uint64_t i = 0; i < ast_len(n); i++) {
         if (g->failed) {
-            return;
+            break;
         }
         if (g->terminated) {
             // After a terminating statement the emitter opens a fresh block
@@ -616,4 +756,10 @@ void gen_block(gen_t* g, ast_node_t* n) {
         }
         gen_stmt(g, ast_child(n, i));
     }
+    if (!g->failed && !g->terminated) {
+        // Falling off the end of the block exits it, and runs the deferred
+        // statements it holds in reverse order (D7.8).
+        run_scope_defers(g, g->scope_kinds.len - 1);
+    }
+    scope_pop(g);
 }

@@ -1,0 +1,32 @@
+//! run
+//! stdout:
+//| 1 2
+//| 3 4
+//| 7 9
+// Deferred code cannot change the value returned (D7.8), and a result is returned by value
+// (D8.2), so a caller that passes a pointer to the very block the result is written into --
+// `s = copy_of(&s)` hands one block to both -- still sees the value the `return` evaluated.
+struct pair { i32 x; i32 y; }
+
+fn pair copy_of(pair mut* p) {
+    defer p->x = 9;                       // reaches the caller's block, never the result
+    return *p;
+}
+
+fn pair plain(pair mut* p) {
+    p->x = 3;                             // the same write without `defer`, for the contrast
+    return *p;
+}
+
+fn i32 main() {
+    pair mut s = {1, 2};
+    s = copy_of(&s);
+    println(s.x, " ", s.y);               // 1 2: the deferred store did not reach the result
+    pair mut t = {3, 4};
+    t = plain(&t);
+    println(t.x, " ", t.y);
+    pair mut u = {7, 2};
+    pair v = copy_of(&u);                 // a distinct destination: u.x is 9 afterwards
+    println(v.x, " ", u.x);       // 7 9: the result is the old value, the store did land
+    return 0;
+}

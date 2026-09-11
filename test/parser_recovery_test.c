@@ -742,7 +742,7 @@ TEST(an_unclosed_bracket_costs_its_construct_and_no_more, {
 
 // ---- the fail corpus (D14.4) ----------------------------------------------
 
-enum { CORPUS_PATH_CAP = 512, CORPUS_CHUNK = 4096, CORPUS_FILES = 153 };
+enum { CORPUS_PATH_CAP = 512, CORPUS_CHUNK = 4096, CORPUS_FILES = 156 };
 
 // The files walked, the source of the one being read, and the lines that were
 // reported on without an annotation, one per line.
@@ -903,8 +903,9 @@ static const char* const MULTI_ERROR_FILES[] = {
     "/fail/ownership/010_own_non_reference.ft",
     "/fail/ownership/022_own_before_base_type.ft",
     "/fail/declarations/007_two_missing_initializers.ft",
-    "/fail/structs/004_two_bad_fields.ft"};
-static const uint64_t MULTI_ERROR_COUNTS[] = {2, 2, 2, 3, 2, 2, 2};
+    "/fail/structs/004_two_bad_fields.ft",
+    "/fail/defer/004_defer_of_a_declaration.ft"};
+static const uint64_t MULTI_ERROR_COUNTS[] = {2, 2, 2, 3, 2, 2, 2, 2};
 
 // Records the files of the table above whose diagnostic count is not the one
 // expected, as `<path>: <got> diagnostics, expected <want>`.
