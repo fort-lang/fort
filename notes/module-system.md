@@ -195,11 +195,15 @@ entry module is the one whose path need not be (section 2, D9.1), and `.` and `:
 its base name for exactly this reason: they are the two characters the mangling reads. A
 double-underscore scheme is not injective (`a__b` is also one identifier). Fort symbols never
 collide with C symbols because C identifiers cannot contain `.`; the only undotted symbols the
-compiler emits are `fort_entry` (D11.6), runtime references and `extern` names. The standard
+compiler emits are `fort_entry` (D11.6), runtime references and `extern` names. `fort_entry` is
+reserved for that definition: an `extern` declaring the name is an error (section 13), because
+nothing can check a declared signature against a definition the compiler writes itself, and a
+mismatch would otherwise be a silent call through the wrong type (D9.7). The standard
 library reaches the runtime through ordinary `extern fn fort_rt_...` declarations (D13.1).
-In the generated LLVM IR a dotted name is quoted (`@"std.io.close"`) and an undotted one is not,
-which changes the spelling only: the ELF symbol is the one in the table (D9.7, `toolchain.md` 6
-item 4).
+In the generated LLVM IR a name is quoted when LLVM's unquoted identifier syntax does not admit
+it (`@"std.io.close"`), with a `"`, a `\` or a non-printable byte inside it written `\XX`, which
+changes the spelling only: LLVM reads the escape back to the byte, so the ELF symbol is the one in
+the table (D9.7, `toolchain.md` 6 item 4).
 
 ## 8. C foreign function interface
 
@@ -675,6 +679,7 @@ All diagnostics follow D14.2: `<file>:<line>:<col>: error: <message>`, optionall
 | module-level name reused           | `redeclaration of 'add'`                                 |
 | local reusing an enclosing local   | `'i' shadows an enclosing local` (or `a parameter`)      |
 | same extern, different signatures  | `conflicting declarations of extern 'write'`             |
+| `extern` declaring `fort_entry`    | `'fort_entry' is reserved: the compiler emits it`        |
 | same extern, `own` differs (D17.1) | `conflicting declarations of extern 'free'`              |
 | import after a declaration         | `imports must precede declarations`                      |
 | module binding as a value or type  | `'io' is a module, not a value` (or `not a type`)        |

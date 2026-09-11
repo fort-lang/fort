@@ -47,9 +47,19 @@ A safe(r) C-like systems programming language.
   `tools/vm status` shows `paused`; guest commands then fail after the 10 s ssh timeout and
   `tools/vm up` cannot resume it. Recover with `VBoxManage controlvm fort-dev-<name> savestate`
   followed by `tools/vm up`.
+- Only the VM directory is shared: `/tmp` in the guest is not the host's `/tmp`. A scratch file
+  a host command writes there is invisible to `tools/vm run`, which is worse than an error,
+  because the guest may hold an unrelated file of that name from an earlier run and the command
+  then answers about it -- an experiment on a hand-written `.ll` verified a module that was not
+  the one being tested. Put scratch files under the worktree (`build/` is gitignored) so both
+  sides see the same bytes.
 - The shared folder can serve stale pages to tools that `mmap` a file the host rewrote (seen
   with `clang-format` reporting a line past the end of a shrunk file while `md5sum` read the
-  right bytes). Recover with `tools/vm run 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"'`.
+  right bytes). The other face of it is the compiler reading the tail of a file the host has just
+  rewritten as NUL bytes, `error: null character ignored [-Werror,-Wnull-character]` at a line
+  past the end, while `git diff` on the host shows a clean edit. Recover with
+  `tools/vm run 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"'`, and delete that target's
+  object as well, since ninja has already recorded the failed compile.
 - The same folder can hand ninja a stale mtime, so a rebuild after an edit prints "no work to do"
   and the suite keeps failing on text the file no longer holds; `md5sum` in the guest reads the
   new bytes and dropping the caches does not help, because it is the timestamp and not the
@@ -342,6 +352,12 @@ A safe(r) C-like systems programming language.
   report a missing one as a broken environment (`gen_no_verifier`, exit `TEST_RESULT_ERR`) the
   way `test/pipeline_test.sh` exits 2: a spawn that succeeds and a child that exits 127 otherwise
   reads as "the verifier rejected this IR", which blames the wrong thing.
+  A duplicate the emitter stops writing is only a fix if something else refuses the program: `opt`
+  rejected a `declare` beside a `define` of `fort_entry`, and dropping the declaration to satisfy
+  it turned a hard compile error into a call through the declared type -- a SIGSEGV in the test
+  that declared a wrong signature (T-018's review). When a tool's rejection is the only thing
+  standing between a legal-looking program and wrong code, the front end takes the rejection over
+  before the emitter stops producing it.
   **`opt -passes=verify` does not reject an instruction after a terminator.** It splits the block,
   invents an unnamed successor which it prints as `0: ; No predecessors!`, and exits 0 -- so it
   quietly manufactures the implicit numbering D19.5 forbids rather than reporting the module that

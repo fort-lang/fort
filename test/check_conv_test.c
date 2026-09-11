@@ -223,6 +223,52 @@ TEST(a_module_without_the_declaration_is_reported, {
     TEST_ASSERT_TRUE(said("module 'util' has no declaration named 'two'"));
 })
 
+TEST(the_import_bindings_of_a_module_are_not_reachable_through_a_dot, {
+    begin();
+    add("deep.ft", "enum tone {\n    low,\n    high,\n}\nfn i32 base() {\n    return 1;\n}\n");
+    add("mid.ft", "import deep;\nfn i32 step() {\n    return deep.base();\n}\n");
+    add("main.ft", "import mid;\nfn i32 main() {\n    return mid.deep.base();\n}\n");
+    // Qualified access sees the declarations of `mid`, not its imports: an
+    // import binding is not re-exported (D9.3, module-system.md 4).
+    TEST_ASSERT_FALSE(check_entry("main.ft"));
+    TEST_ASSERT_TRUE(said("module 'mid' has no declaration named 'deep'"));
+})
+
+TEST(a_re_exported_enum_member_is_refused_at_the_module_binding, {
+    begin();
+    add("deep.ft", "enum tone {\n    low,\n    high,\n}\n");
+    add("mid.ft", "import deep;\nfn i32 step() {\n    return 1;\n}\n");
+    add("main.ft",
+        "import mid;\nfn i32 main() {\n"
+        "    return cast(mid.deep.tone.high, i32);\n}\n");
+    // The leftmost dot fails first, so the member spelling of D3.9 never
+    // reaches an enum of a module the file did not import.
+    TEST_ASSERT_FALSE(check_entry("main.ft"));
+    TEST_ASSERT_TRUE(said("module 'mid' has no declaration named 'deep'"));
+})
+
+TEST(a_symbol_a_module_imported_is_not_one_of_its_declarations, {
+    begin();
+    add("deep.ft", "fn i32 base() {\n    return 1;\n}\n");
+    add("mid.ft", "import deep::base;\nfn i32 step() {\n    return base();\n}\n");
+    add("main.ft", "import mid;\nfn i32 main() {\n    return mid.base();\n}\n");
+    // The other import binding of D9.3, with the same answer.
+    TEST_ASSERT_FALSE(check_entry("main.ft"));
+    TEST_ASSERT_TRUE(said("module 'mid' has no declaration named 'base'"));
+})
+
+TEST(a_module_reaches_the_declarations_of_the_modules_it_imports_itself, {
+    begin();
+    add("deep.ft", "fn i32 base() {\n    return 1;\n}\n");
+    add("mid.ft", "import deep;\nfn i32 step() {\n    return deep.base();\n}\n");
+    add("main.ft",
+        "import mid;\nimport deep;\n"
+        "fn i32 main() {\n    return mid.step() + deep.base();\n}\n");
+    // The rule bars the re-export, not the module: a file that imports `deep`
+    // itself reaches it (D9.3).
+    TEST_ASSERT_TRUE(check_entry("main.ft"));
+})
+
 TEST(an_imported_declaration_is_used_through_its_short_name, {
     begin();
     add("util.ft", "i32 SIZE = 3;\nstruct pair {\n    i32 a;\n    i32 b;\n}\n");
@@ -292,6 +338,20 @@ TEST(an_extern_signature_takes_scalars_and_pointers, {
     TEST_ASSERT_FALSE(check_src("extern fn void take(i32[2] a);\n"
                                 "fn i32 main() {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("extern signature cannot use type 'i32[2]'"));
+})
+
+TEST(an_extern_may_not_declare_the_program_entry_point, {
+    TEST_ASSERT_FALSE(check_src("extern fn i64 fort_entry(i32 a, i32 b);\n"
+                                "fn i32 main() {\n    return cast(fort_entry(1, 2), i32);\n}\n"));
+    // The compiler emits the definition of `fort_entry` (D11.6), so an
+    // `extern` declaring it is not a second declaration of one C function:
+    // nothing can check the signature against that definition, and the call
+    // would go through the declared type (D9.7, module-system.md 13).
+    TEST_ASSERT_TRUE(said("'fort_entry' is reserved: the compiler emits it"));
+    // The name is reserved for `extern` alone: a fort function's symbol
+    // carries its module path, so it never collides (D9.7).
+    TEST_ASSERT_TRUE(check_src("fn i32 fort_entry() {\n    return 1;\n}\n"
+                               "fn i32 main() {\n    return fort_entry();\n}\n"));
 })
 
 TEST(a_noreturn_function_pointer_keeps_its_type, {
@@ -494,6 +554,10 @@ int main(int argc, char** argv) {
     TEST_RUN(a_cast_target_that_is_too_large_is_refused);
     TEST_RUN(a_module_is_not_a_value_and_not_a_type);
     TEST_RUN(a_module_without_the_declaration_is_reported);
+    TEST_RUN(the_import_bindings_of_a_module_are_not_reachable_through_a_dot);
+    TEST_RUN(a_re_exported_enum_member_is_refused_at_the_module_binding);
+    TEST_RUN(a_symbol_a_module_imported_is_not_one_of_its_declarations);
+    TEST_RUN(a_module_reaches_the_declarations_of_the_modules_it_imports_itself);
     TEST_RUN(an_imported_declaration_is_used_through_its_short_name);
     TEST_RUN(a_qualified_enum_member_crosses_modules);
     TEST_RUN(an_imported_type_keeps_its_identity);
@@ -502,6 +566,7 @@ int main(int argc, char** argv) {
     TEST_RUN(a_function_type_ignores_the_binding_mut_of_its_parameters);
     TEST_RUN(a_void_parameter_is_refused);
     TEST_RUN(an_extern_signature_takes_scalars_and_pointers);
+    TEST_RUN(an_extern_may_not_declare_the_program_entry_point);
     TEST_RUN(a_noreturn_function_pointer_keeps_its_type);
     TEST_RUN(an_importer_is_checked_although_its_import_did_not_parse);
     TEST_RUN(a_failed_import_silences_every_use_of_its_name);

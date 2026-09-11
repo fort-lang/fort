@@ -572,13 +572,22 @@ Owner: `module-system.md`.
   declaration name: `std.io.read_file`, `main.main`. Dots are legal in ELF symbols and cannot
   appear in identifiers, so the scheme is injective. Runtime symbols are prefixed `fort_rt_`;
   the compiler emits `fort_entry` in the entry module (D11.6). `extern` names are unmangled.
-  A dotted name is quoted in LLVM IR (`@"std.io.read_file"`), which is spelling only: the ELF
-  symbol is unchanged, and quoting every dotted name keeps the emitter free of per-name
-  analysis. Fort functions, constants and globals are `dso_local` with the default external
+  A name is quoted in LLVM IR when LLVM's unquoted identifier syntax does not admit it
+  (`@"std.io.read_file"`), and a `"`, a `\` or any byte outside the printable range within it is
+  written `\XX`; that is spelling only, since LLVM reads `\XX` back to the byte, so the ELF symbol
+  is the name of the first sentence unchanged. `fort_entry` is reserved: the compiler emits its
+  definition (D11.6), so an `extern` declaring that name is an error and not a second declaration
+  of it -- nothing can check a declared signature against a definition the compiler writes itself,
+  and a mismatch is otherwise a silent call through the wrong type.
+  Fort functions, constants and globals are `dso_local` with the default external
   linkage (D9.6), so fort-to-fort calls are direct and fort data is addressed PC-relative;
   `extern` and `fort_rt_*` symbols are not `dso_local` and are reached through the procedure
   linkage and global offset tables. Amended 2026-09-10 with D19: the assembler directives that
-  spelled this became IR linkage words.
+  spelled this became IR linkage words. Amended 2026-09-11: quoting was said to cover dotted names
+  and to keep the emitter free of per-name analysis, which left a legal entry base name holding a
+  `"` emitting invalid IR that clang rejected, and made `extern fn fort_entry` a `declare` beside a
+  `define` -- caught by `opt` until T-018 dropped the declaration, and a silent SIGSEGV after
+  (T-018's review).
 - **D9.8** `extern fn i64 write(i32 fd, void* buf, u64 n);` declares a C function with the
   System V x86-64 ABI. Extern signatures may use only integers, floats, `bool`, `char`, enums
   (passed as `i32`), pointers and function pointers: no spans, strings, structs or arrays, and

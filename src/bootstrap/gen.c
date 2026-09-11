@@ -99,6 +99,7 @@ void gen_init(gen_t* g, gen_options_t opts) {
     str_pool_init(&g->pool);
     sb_init(&g->scratch);
     g->module = NULL;
+    g->entry_defined = false;
     g->failed = false;
 }
 
@@ -186,8 +187,8 @@ static str_t nominal_type_name(gen_t* g, const type_t* t) {
     // same scratch buffer.
     const str_t dotted = s != NULL ? gen_symbol(g, s) : str_from_cstr("");
     sb_clear(&g->scratch);
-    sb_append(&g->scratch, "%struct.");
-    sb_append_str(&g->scratch, dotted);
+    sb_push(&g->scratch, '%');
+    gen_append_name(&g->scratch, "struct.", dotted, false);
     return gen_take(g);
 }
 
@@ -330,14 +331,13 @@ str_t gen_symbol_ref(gen_t* g, const sym_t* s) {
     sb_clear(&g->scratch);
     sb_push(&g->scratch, '@');
     if (s != NULL && s->kind == SYM_EXTERN_FN) {
-        sb_append_str(&g->scratch, name);
+        // A C name is an identifier and stands unquoted (D9.7).
+        gen_append_name(&g->scratch, "", name, false);
         return gen_take(g);
     }
     // A dotted name is quoted, which is spelling only: the ELF symbol is
     // unchanged (D9.7).
-    sb_push(&g->scratch, '"');
-    sb_append_str(&g->scratch, name);
-    sb_push(&g->scratch, '"');
+    gen_append_name(&g->scratch, "", name, true);
     return gen_take(g);
 }
 
@@ -983,6 +983,10 @@ static void gen_fort_entry(gen_t* g, const sym_t* main_sym) {
     // `fort_entry` is a C name, so it is unquoted (D9.7), and it receives the
     // argument span by hidden pointer (D11.6).
     sb_append(&g->funcs, "define dso_local i32 @fort_entry(ptr %args.in) #0 {\n");
+    // The module defines the name from here on, so an `extern fn fort_entry`
+    // is not declared beside it: two C declarations of one name are one ELF
+    // symbol, and a `declare` beside a `define` is a redefinition (item 8).
+    g->entry_defined = true;
     gen_args_t args;
     gen_args_init(&args);
     if (main_sym->type->nparams == 1) {

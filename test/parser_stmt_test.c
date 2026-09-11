@@ -159,6 +159,12 @@ TEST(a_qualified_type_and_a_function_type_at_statement_level, {
                        "(var op (type (fn-type (type (prim i32)) (type (prim i32))))"
                        " (ident add))");
     TEST_ASSERT_EQ_STR(dump_stmt("string s = \"x\";"), "(var s (type (string)) (str \"x\"))");
+    // A type admits exactly one dot (D9.4, grammar.md 4: `qualified_name`), so
+    // a second one is no longer a type and the statement is read as an
+    // expression.
+    TEST_ASSERT_EQ_STR(stmt_fails("math.vec.pair w = {};"),
+                       "t.ft:2:15: error: expected an assignment, an increment or a call, "
+                       "found identifier 'w'\n");
 })
 
 // A statement never begins with a marker (grammar.md 7.1).

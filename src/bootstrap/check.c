@@ -337,6 +337,16 @@ bool check_layout(check_t* ck, const type_t* t) {
     return nominal == NULL || type_layout_state(nominal) != LAYOUT_ERROR;
 }
 
+// The declaration `name` denotes in the module `m`, or NULL. A module's own
+// import bindings are not among its declarations, since there is no
+// re-export (D9.3): qualified access and an import both see the declarations
+// of `m` and not its imports (module-system.md 3, 4), and every lookup into
+// another module's namespace asks this one question.
+static const binding_t* module_declaration(const module_t* m, str_t name) {
+    const binding_t* b = m != NULL ? scope_find(&m->names, name) : NULL;
+    return b != NULL && bind_is_declaration(b) ? b : NULL;
+}
+
 // The type a name in type position denotes: a struct or an enum, of this
 // module or, qualified, of an imported one (D9.4).
 static const type_t* named_type(check_t* ck, ast_node_t* n) {
@@ -364,8 +374,8 @@ static const type_t* named_type(check_t* ck, ast_node_t* n) {
             return type_error(&ck->types);
         }
         const module_t* m = (const module_t*)b->module;
-        const binding_t* inner = m != NULL ? scope_find(&m->names, tail->name) : NULL;
-        if (inner == NULL || !bind_is_declaration(inner)) {
+        const binding_t* inner = module_declaration(m, tail->name);
+        if (inner == NULL) {
             check_msg_begin(ck);
             msg_str(&ck->msg, "module ");
             msg_quote(&ck->msg, m != NULL ? m->path : n->name);
@@ -1376,8 +1386,12 @@ static const binding_t* names_module_or_type(check_t* ck, ast_node_t* n) {
     if (n->kind == AST_IDENT) {
         b = lookup(ck, n->name);
     } else if (n->kind == AST_FIELD && n->a != NULL) {
-        const module_t* m = module_of(names_module_or_type(ck, n->a));
-        b = m != NULL ? scope_find(&m->names, n->name) : NULL;
+        // Qualified access sees the declarations of a module, not its
+        // imports, which are not re-exported (D9.3, module-system.md 4):
+        // `m.other.f()` is an error even when `m` imports `other`. The caller
+        // then checks the operand as an expression, which reports that `m`
+        // has no declaration of that name.
+        b = module_declaration(module_of(names_module_or_type(ck, n->a)), n->name);
     }
     const sym_t* s = sym_of_binding(b);
     if (s == NULL || (s->kind != SYM_MODULE && s->kind != SYM_STRUCT && s->kind != SYM_ENUM)) {
@@ -1428,8 +1442,8 @@ static void check_field(check_t* ck, ast_node_t* n, expr_t* out, bool arrow) {
         const sym_t* q = sym_of_binding(qb);
         const module_t* qm = module_of(qb);
         if (qm != NULL) {
-            const binding_t* b = scope_find(&qm->names, n->name);
-            if (b == NULL || !bind_is_declaration(b)) {
+            const binding_t* b = module_declaration(qm, n->name);
+            if (b == NULL) {
                 check_msg_begin(ck);
                 msg_str(&ck->msg, "module ");
                 msg_quote(&ck->msg, qm->path);
@@ -2554,9 +2568,24 @@ static bool extern_legal(const type_t* t) {
     }
 }
 
+// The program entry point the compiler emits in the entry module (D11.6),
+// whose name an `extern` may not declare (D9.7).
+static const char ENTRY_SYMBOL[] = "fort_entry";
+
 static void resolve_fn(check_t* ck, sym_t* s) {
     ast_node_t* decl = (ast_node_t*)s->node;
     const bool is_extern = s->kind == SYM_EXTERN_FN;
+    if (is_extern && str_eq(s->name, str_from_cstr(ENTRY_SYMBOL))) {
+        // `fort_entry` is reserved: the compiler emits its definition, so an
+        // `extern` declaring it is not a second declaration of one C function
+        // but a signature nothing can check against that definition (D9.7).
+        check_msg_begin(ck);
+        msg_quote(&ck->msg, s->name);
+        msg_str(&ck->msg, " is reserved: the compiler emits it");
+        check_msg_end(ck, decl->name_loc);
+        sym_fail(ck, s);
+        return;
+    }
     // A return type has no binding, so its outermost position carries no
     // `mut` (D5.5); `noreturn` is a return type of its own (D8.5).
     const check_type_t ret = check_type(ck, decl->a, TYPE_POS_RETURN);

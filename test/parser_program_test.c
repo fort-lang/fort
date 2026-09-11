@@ -185,6 +185,13 @@ TEST(an_ffi_module_parses, {
     TEST_ASSERT_EQ_STR(dumped(body_stmt(mod, 4, 3)), "(return (span (ident p) (int 0) (ident n)))");
 })
 
+// The two import forms the grammar has no production for (D9.3, grammar.md
+// section 2): a wildcard, and a path segment that is not an identifier.
+TEST(a_wildcard_import_does_not_parse, {
+    TEST_ASSERT_EQ_STR(parse_fails("import util::*;\nfn i32 main() { return 0; }\n"),
+                       "t.ft:1:14: error: expected an identifier, found '*'\n");
+})
+
 // A module that imports in every form and qualifies names across modules
 // (D9.3, D9.4).
 TEST(an_importing_module_parses, {
@@ -335,6 +342,7 @@ int main(int argc, char** argv) {
     TEST_RUN(a_tokenizer_module_parses);
     TEST_RUN(a_tokenizer_module_in_the_east_marker_spelling_parses);
     TEST_RUN(an_ffi_module_parses);
+    TEST_RUN(a_wildcard_import_does_not_parse);
     TEST_RUN(an_importing_module_parses);
     TEST_RUN(a_module_of_constants_parses);
     TEST_RUN(a_function_with_every_statement_form_parses);

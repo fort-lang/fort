@@ -204,6 +204,7 @@ struct gen {
     str_pool_t pool;        // owns every operand and type text the emitter builds
     sb_t scratch;           // the buffer those texts are built in
     const module_t* module; // the module being emitted
+    bool entry_defined;     // `fort_entry` was emitted, so nothing declares it (D9.7, D11.6)
     bool failed;            // a construct the emitter cannot lower yet was reported
 };
 
@@ -266,6 +267,16 @@ str_t gen_symbol(gen_t* g, const sym_t* s);
 // for a C one, since a dotted name is quoted and quoting is spelling only
 // (D9.7).
 str_t gen_symbol_ref(gen_t* g, const sym_t* s);
+
+// Appends `<prefix><name>` after the `@` or `%` of an IR name: quoted when
+// `always` asks, as every fort symbol is (D9.7), and otherwise only when
+// LLVM's unquoted identifier rules do not admit it, which a module path never
+// needs and an entry base name of D9.1 may. Inside the quotes the two bytes a
+// quoted name cannot hold, `"` and `\`, and every byte outside the printable
+// range are written as the `\XX` hex pair of item 5, which LLVM reads back to
+// the byte, so the ELF symbol is the name itself and quoting stays spelling
+// only (D9.7).
+void gen_append_name(sb_t* out, const char* prefix, str_t name, bool always);
 
 // ---- emission primitives ----------------------------------------------------------
 

@@ -534,6 +534,18 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    procedure linkage and global offset tables. Private data (`@.str.N`, `@.file.N`,
    `@.enum.<path.name>`) is `private unnamed_addr`.
 
+   A name LLVM's unquoted identifiers (`[-a-zA-Z$._][-a-zA-Z$._0-9]*`) do not admit is quoted
+   too, which only an entry module's can be, since every other module path is identifiers
+   joined with dots (D9.1): `%"struct.a\22b.point"` and `@".enum.a\22b.color"` for an entry
+   file `a"b.ft`. Inside the quotes, the two bytes a quoted name cannot hold, `"` and `\`, and
+   every byte outside the printable range are written as the `\XX` hex pair of item 5, which
+   LLVM reads back to the byte: the ELF symbol is the name itself, so this stays spelling only
+   like the quoting of every dotted name (D9.7). One ELF symbol is one IR entity: an `extern fn`
+   naming a runtime entry point is replaced by that group's canonical declaration (item 8), and
+   `fort_entry` is reserved, so the checker refuses an `extern` that declares it (D9.7,
+   module-system.md 13) and the emitter declares no name it defines, which leaves the definition
+   of item 22 alone.
+
 5. **Data emission.** Private data follows the function definitions, `@.file.N` constants before
    `@.str.N` before `@.enum.*` (D19.5):
 

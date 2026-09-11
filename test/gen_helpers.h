@@ -119,9 +119,16 @@ static inline void gen_begin(void) {
     gen_ok = false;
 }
 
-// Writes `text` at `name` in the sandbox.
+// Writes `text` at `name` in the sandbox, making the one directory a nested
+// module path needs (`util/chars.ft` is the module `util::chars`, D9.1).
 static inline void gen_write(const char* name, const char* text) {
     char path[GEN_PATH_CAP];
+    const char* slash = strchr(name, '/');
+    if (slash != NULL) {
+        char dir[GEN_PATH_CAP];
+        TEST_UNUSED(snprintf(dir, sizeof dir, "%s/%.*s", gen_sandbox, (int)(slash - name), name));
+        TEST_UNUSED(mkdir(dir, S_IRWXU));
+    }
     TEST_UNUSED(snprintf(path, sizeof path, "%s/%s", gen_sandbox, name));
     FILE* file = fopen(path, "wb");
     if (file == NULL) {
@@ -213,6 +220,21 @@ static inline bool emit_two(const char* entry_name,
     return gen_ok;
 }
 
+// The module of a program of `count` files: `names[i]` holds `texts[i]` and
+// `names[0]` is the entry file, so a closure of any size is emitted from one
+// call (D9.10). A name holding a `/` is a nested module path (D9.1).
+static inline bool emit_files(const char* const* names, const char* const* texts, uint64_t count) {
+    gen_begin();
+    for (uint64_t i = count; i > 0; i--) {
+        gen_write(names[i - 1], texts[i - 1]);
+    }
+    gen_options_t opts;
+    opts.release = false;
+    opts.no_bounds_check = false;
+    gen_ok = count > 0 && gen_emit_file(names[0], opts);
+    return gen_ok;
+}
+
 // The module of `text` under the file name `name`, which the `@.file.N`
 // constants of its checks hold (D19.5).
 static inline bool emit_as(const char* name, const char* text) {
@@ -251,6 +273,18 @@ static inline const char* absent(const char* fragment) {
         return "absent";
     }
     return ir();
+}
+
+// How many times `fragment` occurs in the module: what a test asking that one
+// definition, declaration or table was emitted once counts (item 8).
+static inline uint64_t occurrences(const char* fragment) {
+    uint64_t n = 0;
+    const char* p = strstr(ir(), fragment);
+    while (p != NULL) {
+        n++;
+        p = strstr(p + 1, fragment);
+    }
+    return n;
 }
 
 // The offset of `fragment` in the module, or -1: two of them in order say

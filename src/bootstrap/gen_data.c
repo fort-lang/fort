@@ -19,6 +19,10 @@
 // no datalayout, module flags, comments or source_filename (D19.1).
 static const char MODULE_HEADER[] = "target triple = \"x86_64-unknown-linux-gnu\"\n";
 
+// The program entry point the compiler emits in the entry module (D11.6): the
+// one C name a fort program's own definitions occupy.
+static const char ENTRY_NAME[] = "fort_entry";
+
 // The declarations of the runtime entry points, with the C prototypes of
 // toolchain.md 5.1 mapped to IR types by item 8, in that section's order
 // (D19.5).
@@ -208,8 +212,8 @@ static str_t enum_name(gen_t* g, const sym_t* e) {
     // same scratch buffer.
     const str_t dotted = gen_symbol(g, e);
     sb_clear(&g->scratch);
-    sb_append(&g->scratch, "@.enum.");
-    sb_append_str(&g->scratch, dotted);
+    sb_push(&g->scratch, '@');
+    gen_append_name(&g->scratch, ".enum.", dotted, false);
     return gen_take(g);
 }
 
@@ -237,17 +241,79 @@ str_t gen_enum_ref(gen_t* g, const sym_t* e) {
     return enum_name(g, e);
 }
 
+// The hex digits of a `\XX` escape, which a string constant and a quoted name
+// both write (item 5).
+static const char HEX[] = "0123456789ABCDEF";
+
+// Appends `\XX` for `byte`.
+static void append_hex(sb_t* out, unsigned char byte) {
+    sb_push(out, '\\');
+    sb_push(out, HEX[byte / HEX_DIGITS]);
+    sb_push(out, HEX[byte % HEX_DIGITS]);
+}
+
+// Whether `byte` may stand in an IR name with no quotes around it: LLVM's
+// unquoted identifiers are `[-a-zA-Z$._][-a-zA-Z$._0-9]*`, which every module
+// path satisfies, since its segments are identifiers joined with dots (D9.1).
+static bool name_byte_is_plain(unsigned char byte, bool first) {
+    if (byte == '-' || byte == '$' || byte == '.' || byte == '_') {
+        return true;
+    }
+    if ((byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z')) {
+        return true;
+    }
+    return !first && byte >= '0' && byte <= '9';
+}
+
+// Whether `prefix` followed by `name` needs quotes around it.
+static bool name_needs_quotes(const char* prefix, str_t name) {
+    uint64_t at = 0;
+    for (const char* p = prefix; *p != '\0'; p++) {
+        if (!name_byte_is_plain((unsigned char)*p, at == 0)) {
+            return true;
+        }
+        at++;
+    }
+    for (uint64_t i = 0; i < name.len; i++) {
+        if (!name_byte_is_plain((unsigned char)name.ptr[i], at == 0)) {
+            return true;
+        }
+        at++;
+    }
+    return at == 0;
+}
+
+void gen_append_name(sb_t* out, const char* prefix, str_t name, bool always) {
+    if (!always && !name_needs_quotes(prefix, name)) {
+        sb_append(out, prefix);
+        sb_append_str(out, name);
+        return;
+    }
+    sb_push(out, '"');
+    sb_append(out, prefix);
+    for (uint64_t i = 0; i < name.len; i++) {
+        const unsigned char byte = (unsigned char)name.ptr[i];
+        // The two bytes a quoted name cannot hold, and every byte outside the
+        // printable range, are written as the `\XX` hex pair of item 5, which
+        // LLVM reads back to the byte: the ELF symbol is the name itself
+        // (D9.7).
+        if (byte < PRINTABLE_FIRST || byte > PRINTABLE_LAST || byte == '"' || byte == '\\') {
+            append_hex(out, byte);
+            continue;
+        }
+        sb_push(out, (char)byte);
+    }
+    sb_push(out, '"');
+}
+
 // Appends `c"..."` with the trailing NUL that `len` excludes (D3.7) and every
 // byte outside the printable range written as a `\XX` hex pair (item 5).
 static void append_bytes(sb_t* out, str_t s) {
-    static const char HEX[] = "0123456789ABCDEF";
     sb_append(out, "c\"");
     for (uint64_t i = 0; i < s.len; i++) {
         const unsigned char byte = (unsigned char)s.ptr[i];
         if (byte < PRINTABLE_FIRST || byte > PRINTABLE_LAST || byte == '"' || byte == '\\') {
-            sb_push(out, '\\');
-            sb_push(out, HEX[byte / HEX_DIGITS]);
-            sb_push(out, HEX[byte % HEX_DIGITS]);
+            append_hex(out, byte);
             continue;
         }
         sb_push(out, (char)byte);
@@ -345,7 +411,10 @@ static void emit_extern(gen_t* g, sb_t* out, const sym_t* s) {
     }
     sb_append_str(out, gen_value_type(g, sig->elem));
     sb_append(out, " @");
-    sb_append_str(out, s->name);
+    // Through the one spelling of item 4, like every other `@` name: an
+    // `extern` name is a fort identifier and comes out bare, and no site of
+    // the emitter has a rule of its own (D9.7).
+    gen_append_name(out, "", s->name, false);
     sb_push(out, '(');
     for (uint32_t i = 0; i < sig->nparams; i++) {
         if (i > 0) {
@@ -454,9 +523,18 @@ void gen_finish(gen_t* g) {
     emit_data(g, &data);
     sb_t externs;
     sb_init(&externs);
-    // `extern` C functions in first-use order (D19.5).
+    // `extern` C functions in first-use order (D19.5), except one naming a
+    // symbol the module defines: one ELF symbol is one IR entity, so a
+    // `declare` beside a `define` of `fort_entry` would be a redefinition
+    // (item 8). The checker refuses such a declaration first, since the name
+    // is reserved (D9.7), so this only keeps the invariant local to the
+    // emitter.
     for (uint64_t i = 0; i < g->externs.len; i++) {
-        emit_extern(g, &externs, (const sym_t*)g->externs.items[i]);
+        const sym_t* s = (const sym_t*)g->externs.items[i];
+        if (g->entry_defined && str_eq(s->name, str_from_cstr(ENTRY_NAME))) {
+            continue;
+        }
+        emit_extern(g, &externs, s);
     }
     sb_t runtime;
     sb_init(&runtime);
