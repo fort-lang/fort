@@ -351,6 +351,13 @@ struct fort_rt_enum_member { int32_t value; const char* name; };
 void* fort_rt_new(uint64_t elem_size, uint64_t count, loc);
 void  fort_rt_del(void* p);
 
+// Strings (D3.7). fort_rt_str_eq is 1 when the two strings have the same length
+// and the same bytes and 0 otherwise, which is what == and != on strings compare,
+// so the zero string equals "". The compiler emits no call to a C library symbol
+// of its own accord (D9.8), so the memcmp this needs lives in the runtime, where
+// it is an implementation detail and not a fort ABI surface.
+uint8_t fort_rt_str_eq(const char* a, uint64_t a_len, const char* b, uint64_t b_len);
+
 // Failures (D11.4): flush every buffer, write one line to stderr, abort().
 // Values arrive sign-extended to 64 bits; hi is len for e[lo..]; type is the
 // NUL-terminated name of the shifted operand's type; text is the NUL-terminated
@@ -642,6 +649,7 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    ```llvm
    declare ptr @fort_rt_new(i64, i64, ptr, i32, i32)
    declare void @fort_rt_del(ptr)
+   declare zeroext i8 @fort_rt_str_eq(ptr, i64, ptr, i64)
    declare void @fort_rt_fail_bounds(i64, i64, ptr, i32, i32) #2
    declare void @fort_rt_fail_span(i64, i64, i64, ptr, i32, i32) #2
    declare void @fort_rt_fail_overflow(ptr, i32, i32) #2
@@ -650,6 +658,7 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    declare void @fort_rt_fail_div_overflow(ptr, i32, i32) #2
    declare void @fort_rt_fail_alloc_count(i64, ptr, i32, i32) #2
    declare void @fort_rt_fail_overwrite(ptr, i32, i32) #2
+   declare void @fort_rt_fail_enum(i64, ptr, ptr, i32, i32) #2
    declare void @fort_rt_panic(ptr, i64, ptr, i32, i32) #2
    declare void @fort_rt_assert_fail(ptr, ptr, i32, i32) #2
    declare void @fort_rt_print_i64(i32, i64)

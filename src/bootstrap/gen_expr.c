@@ -20,9 +20,6 @@
 #include "sym.h"
 #include "types.h"
 
-// The header fields of a span or `string` (item 17).
-enum { SPAN_FIELD_PTR = 0, SPAN_FIELD_LEN = 1 };
-
 // The descriptors the print family writes to (D11.5).
 enum { FD_STDOUT = 1, FD_STDERR = 2 };
 
@@ -77,10 +74,8 @@ static void string_operand(gen_t* g, ast_node_t* n, gen_val_t* ptr, gen_val_t* l
         *len = gen_const_unsigned(g, str_from_cstr("i64"), 0);
         return;
     }
-    const gen_val_t pf = gen_gep_field(g, str_from_cstr("%fort.span"), p.addr, SPAN_FIELD_PTR);
-    *ptr = gen_load(g, str_from_cstr("ptr"), pf, (uint64_t)sizeof(void*));
-    const gen_val_t lf = gen_gep_field(g, str_from_cstr("%fort.span"), p.addr, SPAN_FIELD_LEN);
-    *len = gen_load(g, str_from_cstr("i64"), lf, (uint64_t)sizeof(uint64_t));
+    *ptr = gen_span_ptr(g, p.addr);
+    *len = gen_span_len(g, p.addr);
 }
 
 // One argument of the print family: one call per argument, per type (item
@@ -241,6 +236,150 @@ static void gen_panic(gen_t* g, ast_node_t* n) {
     g->terminated = true;
 }
 
+// ---- new and del (item 17, D10.2, D10.3) -------------------------------------------
+
+// Whether `n` designates storage, which is what decides whether `del` empties
+// its operand (D6.7, D17.9): an `own` rvalue -- `new(...)`, a call result, a
+// `cast` that adopts -- is freed and nothing is stored.
+static bool is_place_expr(const ast_node_t* n) {
+    switch (n->kind) {
+    case AST_IDENT:
+    case AST_INDEX:
+    case AST_FIELD:
+    case AST_ARROW:
+        return true;
+    case AST_UNARY:
+        // `*p` designates the storage the pointer reaches (D6.7).
+        return n->op == TOK_STAR;
+    default:
+        break;
+    }
+    return false;
+}
+
+// `del(x)` (item 17): the pointer is loaded (field 0 for a span or `string`),
+// `fort_rt_del` frees it, and an lvalue operand is emptied -- `store ptr null`
+// for a pointer, a 16-byte `llvm.memset` for a span or `string` (D17.9). A
+// null operand is a no-op in the runtime, so `del(null)` and `del` of a zero
+// span need no test of their own (D17.9). The emptying is not an assignment
+// and never carries the overwrite check of D17.11, which is what makes
+// `del(v); v = new(...)` pass it (item 18).
+static void gen_del(gen_t* g, ast_node_t* n) {
+    if (ast_len(n) != 1) {
+        // The checker reported the arity and the module is not emitted.
+        return;
+    }
+    ast_node_t* arg = ast_child(n, 0);
+    const type_t* t = arg->type;
+    if (bad_type(t)) {
+        return;
+    }
+    const bool lvalue = is_place_expr(arg);
+    // A span or `string` operand is an aggregate, so it always has a place:
+    // an rvalue one lands in a temporary the copy is made in (D19.3).
+    const bool header = gen_is_aggregate(t);
+    gen_place_t place;
+    place.addr = gen_literal(g, str_from_cstr("ptr"), "null");
+    place.type = t;
+    gen_val_t p;
+    if (header || lvalue) {
+        place = gen_expr_place(g, arg);
+        if (g->failed) {
+            return;
+        }
+        p = header ? gen_span_ptr(g, place.addr) : gen_load_place(g, place);
+    } else {
+        p = gen_expr_value(g, arg);
+        if (g->failed) {
+            return;
+        }
+    }
+    gen_args_t args;
+    gen_args_init(&args);
+    gen_args_add(&args, p);
+    gen_call_rt(g, RT_DEL, &args);
+    gen_args_free(&args);
+    if (!lvalue) {
+        // On an rvalue nothing is stored (item 17).
+        return;
+    }
+    if (header) {
+        gen_memset_zero(g, place.addr, type_alignof(t), type_sizeof(t));
+        return;
+    }
+    gen_store_place(g, place, gen_literal(g, str_from_cstr("ptr"), "null"));
+}
+
+// The count of `new(T, n)` as an `i64`, with the check of D10.2: a negative
+// count is a runtime error reported with its signed value at the builtin's
+// name (D11.4). It is not a bounds check, so neither `--release` nor
+// `--no-bounds-check` removes it (D10.6).
+static gen_val_t alloc_count(gen_t* g, ast_node_t* n, ast_node_t* count) {
+    const str_t i64ty = str_from_cstr("i64");
+    const gen_val_t raw = gen_expr_value(g, count);
+    if (g->failed) {
+        return raw;
+    }
+    const bool sign = gen_is_signed(count->type);
+    const gen_val_t v =
+        gen_resize(g, raw, gen_int_bits(count->type), i64ty, (uint32_t)BITS_64, sign);
+    if (!sign) {
+        // An unsigned count is never negative, so it takes no branch.
+        return v;
+    }
+    const gen_val_t bad = gen_icmp(g, "slt", v, gen_const_unsigned(g, i64ty, 0));
+    gen_args_t args;
+    gen_args_init(&args);
+    gen_args_add(&args, v);
+    gen_check(g, bad, true, RT_FAIL_ALLOC_COUNT, &args, n->loc);
+    gen_args_free(&args);
+    return v;
+}
+
+// `fort_rt_new(sizeof(T), count, loc)` (item 17): the runtime zeroes the
+// storage and never returns null, `n == 0` included (D10.2), and an
+// overflowing size or a failed allocation is its runtime error, so the module
+// emits no test of the result.
+static gen_val_t alloc_call(gen_t* g, ast_node_t* n, const type_t* elem, gen_val_t count) {
+    const str_t i64ty = str_from_cstr("i64");
+    gen_args_t args;
+    gen_args_init(&args);
+    gen_args_add(&args, gen_const_unsigned(g, i64ty, type_sizeof(elem)));
+    gen_args_add(&args, count);
+    gen_args_add_loc(g, &args, n->loc);
+    const gen_val_t p = gen_call_rt_value(g, RT_NEW, str_from_cstr("ptr"), &args);
+    gen_args_free(&args);
+    return p;
+}
+
+// `new(T)`: one zero-initialized `T`, whose address is an ordinary scalar
+// (D10.2, D17.3).
+static gen_val_t gen_new_object(gen_t* g, ast_node_t* n) {
+    const gen_val_t null = gen_literal(g, str_from_cstr("ptr"), "null");
+    if (n->b != NULL || n->type == NULL || n->type->kind != TYPE_PTR) {
+        // `new(T, n)` is a span and is written into a place; only the checker
+        // could produce another shape, and it reports one.
+        gen_todo(g, n->loc, "this allocation");
+        return null;
+    }
+    return alloc_call(g, n, n->type->elem, gen_const_unsigned(g, str_from_cstr("i64"), 1));
+}
+
+// `new(T, n)`: `n` zero-initialized elements, whose header is written into the
+// destination place field by field (item 17, D10.2, D17.3).
+static void gen_new_span(gen_t* g, ast_node_t* n, gen_place_t dst) {
+    if (n->b == NULL || n->type == NULL || n->type->kind != TYPE_SPAN) {
+        gen_todo(g, n->loc, "this allocation");
+        return;
+    }
+    const gen_val_t count = alloc_count(g, n, n->b);
+    if (g->failed) {
+        return;
+    }
+    const gen_val_t p = alloc_call(g, n, n->type->elem, count);
+    gen_span_init(g, dst.addr, p, count);
+}
+
 bool gen_builtin_call(gen_t* g, ast_node_t* n) {
     const sym_t* s = n->a != NULL ? n->a->sym : NULL;
     if (s == NULL || s->kind != SYM_BUILTIN) {
@@ -277,9 +416,13 @@ bool gen_builtin_call(gen_t* g, ast_node_t* n) {
         gen_panic(g, n);
         return true;
     }
-    // `del` and `move` are the ownership half of D12.2, which T-021 and T-022
-    // own.
-    gen_todo(g, n->loc, "del and move");
+    if (str_eq(name, str_from_cstr("del"))) {
+        gen_del(g, n);
+        return true;
+    }
+    // `move` is the other half of the ownership pair of D12.2, which T-022
+    // owns.
+    gen_todo(g, n->loc, "move");
     return true;
 }
 
@@ -695,12 +838,48 @@ static const char* compare_pred(int32_t op, bool sign) {
     return sign ? "sge" : "uge";
 }
 
+// `==` and `!=` on strings (D3.7): the runtime compares the lengths and then
+// the bytes, so the zero string equals `""`. The comparison is a runtime entry
+// point because the compiler emits no call to a C library symbol of its own
+// accord, memcmp included (D9.8).
+static gen_val_t gen_string_compare(gen_t* g, ast_node_t* n) {
+    gen_val_t aptr;
+    gen_val_t alen;
+    string_operand(g, n->a, &aptr, &alen);
+    gen_val_t bptr;
+    gen_val_t blen;
+    string_operand(g, n->b, &bptr, &blen);
+    if (g->failed) {
+        return gen_literal(g, str_from_cstr("i1"), "false");
+    }
+    gen_args_t args;
+    gen_args_init(&args);
+    gen_args_add(&args, aptr);
+    gen_args_add(&args, alen);
+    gen_args_add(&args, bptr);
+    gen_args_add(&args, blen);
+    // The entry point answers in a `u8`, which is `i8 zeroext` at the
+    // boundary and `i1` as a value (D9.9, D19.2).
+    const gen_val_t r = gen_call_rt_value(g, RT_STR_EQ, str_from_cstr("i8"), &args);
+    gen_args_free(&args);
+    const gen_val_t eq = gen_cast_op(g, "trunc", r, str_from_cstr("i1"));
+    if (n->op == TOK_EQ) {
+        return eq;
+    }
+    if (n->op != TOK_NE) {
+        // Only `==` and `!=` compare strings; the checker rejects an ordering
+        // operator on them (D3.7), so this is unreachable and an unfinished
+        // path is a diagnostic rather than a wrong default.
+        gen_todo(g, n->loc, "this comparison of strings");
+        return eq;
+    }
+    return gen_binary(g, "xor", eq, gen_literal(g, str_from_cstr("i1"), "true"));
+}
+
 static gen_val_t gen_compare(gen_t* g, ast_node_t* n) {
     const type_t* t = n->a->type;
     if (t != NULL && t->kind == TYPE_STRING) {
-        // `string ==` compares lengths and then bytes, which T-021 owns.
-        gen_todo(g, n->loc, "comparing strings");
-        return gen_literal(g, str_from_cstr("i1"), "false");
+        return gen_string_compare(g, n);
     }
     const gen_val_t a = gen_expr_value(g, n->a);
     const gen_val_t b = gen_expr_value(g, n->b);
@@ -785,20 +964,28 @@ gen_val_t gen_length_of(gen_t* g, const type_t* t, gen_val_t base) {
         // A fixed array's length is an `i64` literal (item 16).
         return gen_const_unsigned(g, str_from_cstr("i64"), t->len);
     }
-    const gen_val_t field = gen_gep_field(g, str_from_cstr("%fort.span"), base, SPAN_FIELD_LEN);
-    return gen_load(g, str_from_cstr("i64"), field, (uint64_t)sizeof(uint64_t));
+    return gen_span_len(g, base);
 }
 
-gen_val_t gen_element_addr(
-    gen_t* g, const type_t* t, const type_t* elem, gen_val_t base, gen_val_t index) {
+const type_t* gen_element_type(gen_t* g, const type_t* t) {
+    if (t == NULL) {
+        return NULL;
+    }
+    if (t->kind == TYPE_STRING) {
+        // A `string` is an immutable span of `char` whose type carries no
+        // element, so the emitter's own node stands for it (D3.7).
+        return &g->char_type;
+    }
+    return t->elem;
+}
+
+gen_val_t gen_element_addr(gen_t* g, const type_t* t, gen_val_t base, gen_val_t index) {
     if (t->kind == TYPE_ARRAY) {
         return gen_gep_array(g, t, base, index);
     }
     // A span's elements are reached through its `.ptr` (item 3).
-    const gen_val_t field = gen_gep_field(g, str_from_cstr("%fort.span"), base, SPAN_FIELD_PTR);
-    const gen_val_t ptr = gen_load(g, str_from_cstr("ptr"), field, (uint64_t)sizeof(void*));
-    // A `string` has `char` elements and a span its own (D3.5, D3.7).
-    return gen_gep_element(g, t->kind == TYPE_STRING ? elem : t->elem, ptr, index);
+    const gen_val_t ptr = gen_span_ptr(g, base);
+    return gen_gep_element(g, gen_element_type(g, t), ptr, index);
 }
 
 // `e[i]` (D6.8): the index is extended to `i64`, one `icmp uge` branches to
@@ -838,8 +1025,105 @@ static gen_place_t gen_index_place(gen_t* g, ast_node_t* n) {
         gen_check(g, bad, true, RT_FAIL_BOUNDS, &args, n->loc);
         gen_args_free(&args);
     }
-    out.addr = gen_element_addr(g, ot, n->type, operand.addr, index);
+    out.addr = gen_element_addr(g, ot, operand.addr, index);
     return out;
+}
+
+// ---- span expressions (item 16, D6.9) -----------------------------------------------
+
+// One bound of a span expression as an `i64`, extended by its own signedness
+// so that a negative bound fails the unsigned compares below (item 16).
+static gen_val_t span_bound(gen_t* g, ast_node_t* e) {
+    const gen_val_t raw = gen_expr_value(g, e);
+    return gen_resize(g,
+                      raw,
+                      gen_int_bits(e->type),
+                      str_from_cstr("i64"),
+                      (uint32_t)BITS_64,
+                      gen_is_signed(e->type));
+}
+
+// `e[lo..hi]`, `e[lo..]`, `e[..hi]` and `e[..]` (D6.9): the result is a view
+// of the operand, whose two bounds are checked against the operand's own
+// length in one branch, and `p[lo..hi]` on a raw pointer is the explicit
+// unsafe escape that checks nothing (D6.9, D10.4).
+static void gen_span_expr(gen_t* g, ast_node_t* n, gen_place_t dst) {
+    const type_t* ot = n->a != NULL ? n->a->type : NULL;
+    if (ot == NULL || bad_type(ot)) {
+        return;
+    }
+    const str_t i64ty = str_from_cstr("i64");
+    if (ot->kind == TYPE_PTR) {
+        // A pointer has no length, so only the two-bound form exists and
+        // nothing is checked (D6.9, D10.4).
+        const gen_val_t base = gen_expr_value(g, n->a);
+        if (g->failed) {
+            return;
+        }
+        if (n->b == NULL || n->c == NULL) {
+            // `p[lo..]`, `p[..hi]` and `p[..]` are checker errors, a pointer
+            // having no length (D10.4), so this is unreachable; an
+            // unfinished path is a diagnostic and never wrong code.
+            gen_todo(g, n->loc, "this span expression");
+            return;
+        }
+        const gen_val_t lo = span_bound(g, n->b);
+        const gen_val_t hi = span_bound(g, n->c);
+        if (g->failed) {
+            return;
+        }
+        // Two instructions, so two statements (D19.5), as below.
+        const gen_val_t at = gen_gep_element(g, ot->elem, base, lo);
+        const gen_val_t length = gen_binary(g, "sub", hi, lo);
+        gen_span_init(g, dst.addr, at, length);
+        return;
+    }
+    const gen_place_t operand = gen_expr_place(g, n->a);
+    if (g->failed) {
+        return;
+    }
+    // The operand and then the bounds, left to right (D6.3); an absent low
+    // bound is zero (D6.9).
+    const gen_val_t lo = n->b != NULL ? span_bound(g, n->b) : gen_const_unsigned(g, i64ty, 0);
+    if (g->failed) {
+        return;
+    }
+    gen_val_t hi;
+    if (n->c != NULL) {
+        hi = span_bound(g, n->c);
+    } else {
+        // `e[lo..]` is `e[lo..len]` (D6.9).
+        hi = gen_length_of(g, ot, operand.addr);
+    }
+    if (g->failed) {
+        return;
+    }
+    if (!g->opts.no_bounds_check) {
+        // The length is read after the bounds the source writes, so the check
+        // holds against the length the operation sees (D6.3); an absent high
+        // bound is that length and was read above. With both bounds written
+        // and `--no-bounds-check` nothing reads it, so nothing loads it
+        // (D10.6).
+        const gen_val_t len = n->c != NULL ? gen_length_of(g, ot, operand.addr) : hi;
+        // `0 <= lo <= hi <= len` in one branch: the two compares are
+        // unsigned, so a negative bound fails them too (item 16, D6.9).
+        const gen_val_t over = gen_icmp(g, "ugt", hi, len);
+        const gen_val_t inverted = gen_icmp(g, "ugt", lo, hi);
+        const gen_val_t bad = gen_binary(g, "or", over, inverted);
+        gen_args_t args;
+        gen_args_init(&args);
+        gen_args_add(&args, lo);
+        gen_args_add(&args, hi);
+        gen_args_add(&args, len);
+        gen_check(g, bad, true, RT_FAIL_SPAN, &args, n->loc);
+        gen_args_free(&args);
+    }
+    // Two instructions, so two statements: C leaves the order of two
+    // arguments unspecified and the text is a function of the program alone
+    // (D19.5).
+    const gen_val_t base = gen_element_addr(g, ot, operand.addr, lo);
+    const gen_val_t length = gen_binary(g, "sub", hi, lo);
+    gen_span_init(g, dst.addr, base, length);
 }
 
 // The index of a field in its struct, which is what the field shape of item 3
@@ -927,21 +1211,25 @@ gen_place_t gen_expr_place(gen_t* g, ast_node_t* n) {
             return out;
         }
         break;
+    case AST_SPAN:
     case AST_STRING:
     case AST_STRUCT_LIT:
     case AST_ARRAY_LIT:
     case AST_BRACE_INIT:
-        // A `string` literal is a place only as the source of a copy, whose
-        // header is built in a temporary (D3.7), and `point{1, 2}.x` and
-        // `i32[3]{7, 8, 9}[1]` read a member out of the literal's own
-        // temporary (D6.5, D6.7).
+        // A span expression yields a view, which is a value and not storage
+        // (D6.9), so its header is built in a temporary, as a `string`
+        // literal's is (D3.7); `point{1, 2}.x` and `i32[3]{7, 8, 9}[1]` read
+        // a member out of the literal's own temporary (D6.5, D6.7).
         return rvalue_place(g, n);
     case AST_CAST:
     case AST_CALL:
+    case AST_NEW:
         if (gen_is_aggregate(n->type)) {
-            // A call result, and a cast between aggregates, which only drops
-            // marks and emits nothing of its own, are rvalues as well, so a
-            // member of either is read out of a copy (D3.14, D5.4, D6.7).
+            // A call result, a cast between aggregates, which only drops
+            // marks and emits nothing of its own, and the span `new(T, n)`
+            // returns are rvalues as well, so a member of either is read out
+            // of a copy and `del(new(T, n))`, which D17.8 admits, frees the
+            // copy's pointer (D3.14, D5.4, D6.7, D17.9).
             return rvalue_place(g, n);
         }
         break;
@@ -979,12 +1267,7 @@ static bool pseudo_field_value(gen_t* g, ast_node_t* n, gen_val_t* out) {
         *out = gen_literal(g, str_from_cstr("i64"), "0");
         return true;
     }
-    const gen_val_t field =
-        gen_gep_field(g, str_from_cstr("%fort.span"), base, len ? SPAN_FIELD_LEN : SPAN_FIELD_PTR);
-    *out = gen_load(g,
-                    len ? str_from_cstr("i64") : str_from_cstr("ptr"),
-                    field,
-                    len ? (uint64_t)sizeof(uint64_t) : (uint64_t)sizeof(void*));
+    *out = len ? gen_span_len(g, base) : gen_span_ptr(g, base);
     return true;
 }
 
@@ -1100,11 +1383,9 @@ gen_val_t gen_expr_value(gen_t* g, ast_node_t* n) {
         }
         break;
     case AST_NEW:
-        gen_todo(g, n->loc, "new");
-        return gen_literal(g, str_from_cstr("ptr"), "null");
-    case AST_SPAN:
-        gen_todo(g, n->loc, "a span expression");
-        return gen_literal(g, str_from_cstr("ptr"), "null");
+        // `new(T)` yields the address of one object, which is a scalar;
+        // `new(T, n)` yields a span and is written into a place (D10.2).
+        return gen_new_object(g, n);
     default:
         break;
     }
@@ -1204,12 +1485,7 @@ void gen_expr_into(gen_t* g, ast_node_t* n, gen_place_t dst) {
         gen_val_t ptr;
         gen_val_t len;
         string_operand(g, n, &ptr, &len);
-        const gen_val_t pf =
-            gen_gep_field(g, str_from_cstr("%fort.span"), dst.addr, SPAN_FIELD_PTR);
-        gen_store(g, ptr, pf, (uint64_t)sizeof(void*));
-        const gen_val_t lf =
-            gen_gep_field(g, str_from_cstr("%fort.span"), dst.addr, SPAN_FIELD_LEN);
-        gen_store(g, len, lf, (uint64_t)sizeof(uint64_t));
+        gen_span_init(g, dst.addr, ptr, len);
         return;
     }
     case AST_CALL:
@@ -1222,6 +1498,12 @@ void gen_expr_into(gen_t* g, ast_node_t* n, gen_place_t dst) {
         // for it (item 12, D5.4, D17.4).
         gen_expr_into(g, n->a, dst);
         return;
+    case AST_NEW:
+        gen_new_span(g, n, dst);
+        return;
+    case AST_SPAN:
+        gen_span_expr(g, n, dst);
+        return;
     default:
         break;
     }
@@ -1229,12 +1511,7 @@ void gen_expr_into(gen_t* g, ast_node_t* n, gen_place_t dst) {
         gen_val_t ptr;
         gen_val_t len;
         string_operand(g, n, &ptr, &len);
-        const gen_val_t pf =
-            gen_gep_field(g, str_from_cstr("%fort.span"), dst.addr, SPAN_FIELD_PTR);
-        gen_store(g, ptr, pf, (uint64_t)sizeof(void*));
-        const gen_val_t lf =
-            gen_gep_field(g, str_from_cstr("%fort.span"), dst.addr, SPAN_FIELD_LEN);
-        gen_store(g, len, lf, (uint64_t)sizeof(uint64_t));
+        gen_span_init(g, dst.addr, ptr, len);
         return;
     }
     // Every other aggregate is an lvalue, so the value is a copy of its

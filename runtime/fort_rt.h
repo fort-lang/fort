@@ -30,6 +30,9 @@ void* fort_rt_new(
     uint64_t elem_size, uint64_t count, const char* file, uint32_t line, uint32_t col);
 void fort_rt_del(void* p);
 
+// Strings (D3.7).
+uint8_t fort_rt_str_eq(const char* a, uint64_t a_len, const char* b, uint64_t b_len);
+
 // Failures (D11.4): flush every buffer, write one line to stderr, abort().
 _Noreturn void fort_rt_fail_bounds(
     int64_t index, uint64_t len, const char* file, uint32_t line, uint32_t col);

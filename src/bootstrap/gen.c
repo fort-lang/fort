@@ -64,6 +64,24 @@ void gen_args_add(gen_args_t* a, gen_val_t v) {
 
 // ---- the emitter ------------------------------------------------------------------
 
+// The one type node the emitter builds itself: the `char` a `string`'s
+// elements are, which `string` does not carry (D3.7). Every field is written,
+// since a type node is compared and lowered by all of them (types.h).
+static void char_type_init(type_t* t) {
+    t->kind = TYPE_PRIM;
+    t->prim = PRIM_CHAR;
+    t->mut = false;
+    t->own = false;
+    t->noreturn = false;
+    t->elem = NULL;
+    t->len = 0;
+    t->params = NULL;
+    t->nparams = 0;
+    t->name = str_from_range(NULL, 0);
+    t->decl = NULL;
+    t->layout = NULL;
+}
+
 void gen_init(gen_t* g, gen_options_t opts) {
     g->opts = opts;
     g->ck = NULL;
@@ -97,6 +115,7 @@ void gen_init(gen_t* g, gen_options_t opts) {
     for (uint64_t i = 0; i < (uint64_t)ATTR_COUNT; i++) {
         g->attrs[i] = false;
     }
+    char_type_init(&g->char_type);
     str_pool_init(&g->pool);
     sb_init(&g->scratch);
     g->module = NULL;
@@ -602,6 +621,28 @@ gen_val_t gen_gep_field(gen_t* g, str_t ty, gen_val_t base, uint64_t k) {
     sb_append_u64(&g->body, k);
     sb_push(&g->body, '\n');
     return r;
+}
+
+// ---- the span header (item 17) -----------------------------------------------------
+
+gen_val_t gen_span_ptr(gen_t* g, gen_val_t base) {
+    // Field 0 of `%fort.span` is the pointer (D3.5, D19.2).
+    const gen_val_t field = gen_gep_field(g, str_from_cstr(SPAN_TYPE), base, SPAN_FIELD_PTR);
+    return gen_load(g, str_from_cstr("ptr"), field, (uint64_t)sizeof(void*));
+}
+
+gen_val_t gen_span_len(gen_t* g, gen_val_t base) {
+    // Field 1 is the length, a `u64` (D3.5, D19.2).
+    const gen_val_t field = gen_gep_field(g, str_from_cstr(SPAN_TYPE), base, SPAN_FIELD_LEN);
+    return gen_load(g, str_from_cstr("i64"), field, (uint64_t)sizeof(uint64_t));
+}
+
+void gen_span_init(gen_t* g, gen_val_t base, gen_val_t ptr, gen_val_t len) {
+    // The header is written field by field, pointer first (item 17).
+    const gen_val_t pf = gen_gep_field(g, str_from_cstr(SPAN_TYPE), base, SPAN_FIELD_PTR);
+    gen_store(g, ptr, pf, (uint64_t)sizeof(void*));
+    const gen_val_t lf = gen_gep_field(g, str_from_cstr(SPAN_TYPE), base, SPAN_FIELD_LEN);
+    gen_store(g, len, lf, (uint64_t)sizeof(uint64_t));
 }
 
 // ---- aggregates (item 3) ----------------------------------------------------------

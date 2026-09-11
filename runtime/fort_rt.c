@@ -705,6 +705,24 @@ void fort_rt_del(void* p) {
     free(p);
 }
 
+// ---- strings (D3.7) -------------------------------------------------------------
+
+// `==` and `!=` on strings compare the length and then the bytes, so the zero
+// string equals "" (D3.7). The compiler emits no call to a C library symbol of
+// its own accord, so the comparison is an entry point here, where memcmp is an
+// implementation detail of the runtime and not a fort ABI surface (D9.8).
+uint8_t fort_rt_str_eq(const char* a, uint64_t a_len, const char* b, uint64_t b_len) {
+    if (a_len != b_len) {
+        return 0;
+    }
+    if (a_len == 0) {
+        // Two empty strings are equal whatever their pointers are, and memcmp
+        // may not be given a null pointer even for zero bytes.
+        return 1;
+    }
+    return memcmp(a, b, (size_t)a_len) == 0 ? 1 : 0;
+}
+
 // ---- process (D11.6, D8.6) ------------------------------------------------------
 
 static const struct fort_string* args_ptr = NULL;

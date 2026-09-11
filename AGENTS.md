@@ -350,6 +350,31 @@ A safe(r) C-like systems programming language.
   an exit (`defer`) reads both. Each target is a label and a flag saying whether it is set, and
   the flag is deliberately not a depth: nothing asks how many constructs an exit crosses, and a
   counter whose balance no test can see is a bug waiting for the pass that starts reading it.
+  **A runtime entry point is described in four places that nothing holds together**: the C
+  prototype in `runtime/fort_rt.h` and `.c`, the table in `toolchain.md` 5.1, the declaration
+  list of item 8, and the three positional arrays of `gen_data.c` (`RT_DECL`, `RT_NAME`,
+  `RT_RESULT`) indexed by the `gen_rt_t` of `gen.h`, and `rt_is_noreturn` beside them, which
+  spells the `_Noreturn` entry points as a *range* over that enum (`RT_FAIL_BOUNDS` to
+  `RT_ASSERT_FAIL`, plus `RT_EXIT`): an entry point added inside that run is `cold noreturn
+  nounwind` whether or not it returns, and one added just outside it silently is not. Adding one
+  in the middle of 5.1's order shifts every later index of all three arrays at once, and only
+  `RT_RESULT`, whose entries are short, can absorb a miscount without the compiler noticing, so
+  write the five together and count that array by hand (T-072 exists because nothing checks the
+  agreement). A narrow result
+  carries its extension attribute in the declaration *and* at the call site (`declare zeroext i8
+  @fort_rt_str_eq(...)`, `%t = call zeroext i8 @...`), which is why `RT_RESULT` holds a type text
+  and not a type. `opt` accepts a call site whose attributes differ from the callee's and LLVM
+  falls back to the callee's, so *dropping* one at a call site cannot change the assumption while
+  *adding* one the declaration lacks can: T-021's review dropped the `zeroext` from the
+  `fort_rt_str_eq` call site and the entire language corpus stayed green, only the emitted-text
+  assertion failing. The attribute is not decorative -- on a return it licenses eliding the
+  `movzbl` -- and it stops being invisible the moment a lowering compares or widens the narrow
+  result instead of truncating it straight to `i1`.
+  **The emitter decides lvalue-ness syntactically.** The checker computes `expr_t.lvalue` (D6.7)
+  and writes no bit for it on the node, so `is_place_expr` in `gen_expr.c` re-derives it from the
+  node kind for the one question that needs it, whether `del` empties its operand (D17.9). A new
+  expression form that designates storage is added there as well as to `gen_expr_place`, or `del`
+  of it silently frees without emptying.
   Two C declarations of one name are one ELF symbol, so anything the module emits once -- an
   `extern` declaration above all -- deduplicates by the C name and never by `sym_t*`: two modules
   declaring the same function are two symbols, and a second `declare` is a redefinition `opt`
@@ -456,10 +481,16 @@ A safe(r) C-like systems programming language.
   test helpers under `test/` too. Two gaps of clang-tidy 18 are covered by review:
   `bugprone-unused-return-value` takes function names, not patterns (patterns arrive in
   clang-tidy 19), so `.clang-tidy` lists the C library and POSIX functions and the project's own
-  functions are unchecked; and `readability-magic-numbers` skips macro arguments, so
-  `TEST(name, { ... })` bodies are unchecked. The bootstrap must also stay transliterable into
-  fort: no unions, no macro tricks, and no compiler builtin fort lacks (function-pointer tables
-  are fine, the bootstrap subset has function pointers). `__builtin_add_overflow` and
+  functions are unchecked; and **clang-tidy 18's macro-argument blind spot covers
+  `readability-identifier-naming` as well as `readability-magic-numbers`**, so nothing inside a
+  `TEST(name, { ... })` body is checked for either -- a `static const char program[]` there draws
+  no `invalid case style for static constant` while the same declaration at ordinary source
+  location does. An experiment that renames an identifier *inside* a `TEST` body and sees no
+  complaint has measured nothing; move the declaration out, or read the convention off a
+  comparable one in a `main` (`SOURCE` in `test/gen_control_test.c`).
+  The bootstrap must also stay transliterable into fort: no unions, no macro tricks, and no
+  compiler builtin fort lacks (function-pointer tables are fine, the bootstrap subset has
+  function pointers). `__builtin_add_overflow` and
   `__builtin_mul_overflow` are the exception the exact constant folder needs; the port replaces
   their three sites in `src/bootstrap/consts.c` by pre-checks, `am > UINT64_MAX - bm` in
   `add_raw`, `a.mag != 0 && b.mag > UINT64_MAX / a.mag` in `cv_mul` and `a.mag == UINT64_MAX` in

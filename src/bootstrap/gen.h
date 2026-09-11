@@ -49,6 +49,7 @@
 typedef enum {
     RT_NEW,
     RT_DEL,
+    RT_STR_EQ,
     RT_FAIL_BOUNDS,
     RT_FAIL_SPAN,
     RT_FAIL_OVERFLOW,
@@ -205,6 +206,11 @@ struct gen {
     bool rt[RT_COUNT];
     bool intrinsics[IN_COUNT];
     bool attrs[ATTR_COUNT];
+
+    // The `char` a `string`'s elements are, which its type does not carry
+    // (D3.7): gen_element_type hands it out so that the emitter has no second
+    // spelling of `char`'s IR type (item 2).
+    type_t char_type;
 
     str_pool_t pool;        // owns every operand and type text the emitter builds
     sb_t scratch;           // the buffer those texts are built in
@@ -372,15 +378,26 @@ gen_val_t gen_gep_element(gen_t* g, const type_t* elem, gen_val_t base, gen_val_
 // struct or a header field of a span.
 gen_val_t gen_gep_field(gen_t* g, str_t ty, gen_val_t base, uint64_t k);
 
+// The two header fields of a span or `string` place (item 17): field 0 is the
+// pointer and field 1 the length (D3.5, D3.7), so every site that reads or
+// writes one spells the layout once.
+gen_val_t gen_span_ptr(gen_t* g, gen_val_t base);
+gen_val_t gen_span_len(gen_t* g, gen_val_t base);
+void gen_span_init(gen_t* g, gen_val_t base, gen_val_t ptr, gen_val_t len);
+
 // The length of a fixed array, span or `string` place as an `i64`: a fixed
 // array's is a literal and a span's is its header field (item 16).
 gen_val_t gen_length_of(gen_t* g, const type_t* t, gen_val_t base);
 
+// The element type of a fixed array, span or `string`: a `string`'s is
+// `char`, which its own type does not carry (D3.7), so the emitter holds one
+// and every element still reaches its IR type through gen_mem_type, leaving
+// exactly one map from a fort type to an IR type (item 2).
+const type_t* gen_element_type(gen_t* g, const type_t* t);
+
 // The address of element `index` of such a place, by the array shape or the
-// element shape of item 3; `elem` is the element type, which a `string` does
-// not carry (D3.7).
-gen_val_t gen_element_addr(
-    gen_t* g, const type_t* t, const type_t* elem, gen_val_t base, gen_val_t index);
+// element shape of item 3.
+gen_val_t gen_element_addr(gen_t* g, const type_t* t, gen_val_t base, gen_val_t index);
 
 // ---- aggregates (item 3) ----------------------------------------------------------
 

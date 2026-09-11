@@ -318,7 +318,7 @@ static void gen_range_for(gen_t* g, ast_node_t* n) {
     gen_br_cond(g, gen_icmp(g, "ult", at, len), body, done);
     gen_block_begin(g, body);
     gen_place_t element;
-    element.addr = gen_element_addr(g, n->b->type, n->sym->type, coll.addr, at);
+    element.addr = gen_element_addr(g, n->b->type, coll.addr, at);
     element.type = n->sym->type;
     copy_into(g, gen_slot_place(g, n->sym), element);
     gen_loop_body(g, n->c, done, step);

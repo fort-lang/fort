@@ -1,0 +1,31 @@
+//! run
+//! stdout:
+//| 7 true
+//| 5
+//| 0 true true
+// Allocation has no header, so `new`/`del` and C `malloc`/`free` are
+// interchangeable and memory from C is adopted with a `cast` (D10.3, D17.3).
+// `del` of an already emptied operand frees once, since `del` leaves the zero
+// value behind and a null pointer or a zero span is a no-op (D17.9).
+extern fn void* calloc(u64 count, u64 size);
+extern fn void free(void* own p);
+
+fn i32 main() {
+    i32 mut* own adopted = cast(calloc(1, sizeof(i32)), i32 mut* own);
+    *adopted = 7;
+    i32 seen = *adopted;
+    del(adopted);                             // the same allocator as free
+    println(seen, " ", adopted == null);
+
+    free(cast(new(i32), void* own));          // C frees what new allocated
+    del(new(u8, 4));                          // an own rvalue may be del'ed (D17.8)
+    u8 mut@ own bytes = new(u8, 5);
+    println(bytes.len);
+
+    del(bytes);
+    del(bytes);                               // a zero span: a second del frees nothing
+    i32 mut* own gone = null;
+    del(gone);
+    println(bytes.len, " ", bytes.ptr == null, " ", gone == null);
+    return 0;
+}

@@ -29,6 +29,7 @@ static const char ENTRY_NAME[] = "fort_entry";
 static const char* const RT_DECL[RT_COUNT] = {
     "declare ptr @fort_rt_new(i64, i64, ptr, i32, i32)",
     "declare void @fort_rt_del(ptr)",
+    "declare zeroext i8 @fort_rt_str_eq(ptr, i64, ptr, i64)",
     "declare void @fort_rt_fail_bounds(i64, i64, ptr, i32, i32) #2",
     "declare void @fort_rt_fail_span(i64, i64, i64, ptr, i32, i32) #2",
     "declare void @fort_rt_fail_overflow(ptr, i32, i32) #2",
@@ -62,6 +63,7 @@ static const char* const RT_DECL[RT_COUNT] = {
 static const char* const RT_NAME[RT_COUNT] = {
     "@fort_rt_new",
     "@fort_rt_del",
+    "@fort_rt_str_eq",
     "@fort_rt_fail_bounds",
     "@fort_rt_fail_span",
     "@fort_rt_fail_overflow",
@@ -90,12 +92,14 @@ static const char* const RT_NAME[RT_COUNT] = {
     "@fort_rt_exit",
 };
 
-// The result type of each entry point: fort_rt_new, fort_rt_args_ptr and
-// fort_rt_args_len are the three that return a value.
+// The result type of each entry point: fort_rt_new, fort_rt_str_eq,
+// fort_rt_args_ptr and fort_rt_args_len are the four that return a value. A
+// narrow result carries the extension attribute of item 7 here and at the call
+// site, so the two sides of the boundary normalize alike (D9.9).
 static const char* const RT_RESULT[RT_COUNT] = {
-    "ptr",  "void", "void", "void", "void", "void", "void", "void", "void", "void",
-    "void", "void", "void", "void", "void", "void", "void", "void", "void", "void",
-    "void", "void", "void", "void", "void", "ptr",  "i64",  "void",
+    "ptr",  "void", "zeroext i8", "void", "void", "void", "void", "void", "void", "void",
+    "void", "void", "void",       "void", "void", "void", "void", "void", "void", "void",
+    "void", "void", "void",       "void", "void", "void", "ptr",  "i64",  "void",
 };
 
 // Whether toolchain.md 5.1 declares the entry point `_Noreturn`, which is

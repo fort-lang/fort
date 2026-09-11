@@ -696,6 +696,37 @@ TEST(new_failure_flushes_first, {
                        "pendingdir/main.ft:12:14: runtime error: allocation size overflow\n");
 })
 
+// ---- strings (D3.7) ----------------------------------------------------------------
+
+TEST(str_eq_compares_the_length_and_then_the_bytes, {
+    // `==` on strings compares `len` then bytes (D3.7).
+    TEST_ASSERT_EQ_INT32(fort_rt_str_eq("hello", 5, "hello", 5), 1);
+    TEST_ASSERT_EQ_INT32(fort_rt_str_eq("hello", 5, "hellO", 5), 0);
+    TEST_ASSERT_EQ_INT32(fort_rt_str_eq("hello", 5, "hell", 4), 0);
+    TEST_ASSERT_EQ_INT32(fort_rt_str_eq("hell", 4, "hello", 5), 0);
+})
+
+TEST(str_eq_reads_only_the_counted_bytes, {
+    // A sub-string is not NUL-terminated (D3.7), so the length and not a NUL
+    // ends the comparison.
+    TEST_ASSERT_EQ_INT32(fort_rt_str_eq("hello", 2, "help", 2), 1);
+    TEST_ASSERT_EQ_INT32(fort_rt_str_eq("hello", 4, "help", 4), 0);
+})
+
+TEST(str_eq_holds_embedded_nul_bytes_apart, {
+    TEST_ASSERT_EQ_INT32(fort_rt_str_eq("a\0b", 3, "a\0b", 3), 1);
+    TEST_ASSERT_EQ_INT32(fort_rt_str_eq("a\0b", 3, "a\0c", 3), 0);
+})
+
+TEST(the_zero_string_equals_the_empty_literal, {
+    // The zero value of a `string` is `{null, 0}` and equals "" (D3.5, D3.7),
+    // so a null pointer of length zero never reaches memcmp.
+    TEST_ASSERT_EQ_INT32(fort_rt_str_eq(NULL, 0, "", 0), 1);
+    TEST_ASSERT_EQ_INT32(fort_rt_str_eq("", 0, NULL, 0), 1);
+    TEST_ASSERT_EQ_INT32(fort_rt_str_eq(NULL, 0, NULL, 0), 1);
+    TEST_ASSERT_EQ_INT32(fort_rt_str_eq(NULL, 0, "x", 1), 0);
+})
+
 // ---- process (D11.6, D8.6) ---------------------------------------------------------
 
 TEST(args_are_empty_before_init, {
@@ -804,6 +835,10 @@ int main(int argc, char** argv) {
     TEST_RUN(new_reports_a_size_overflow_by_one_bit);
     TEST_RUN(new_reports_out_of_memory);
     TEST_RUN(new_failure_flushes_first);
+    TEST_RUN(str_eq_compares_the_length_and_then_the_bytes);
+    TEST_RUN(str_eq_reads_only_the_counted_bytes);
+    TEST_RUN(str_eq_holds_embedded_nul_bytes_apart);
+    TEST_RUN(the_zero_string_equals_the_empty_literal);
     TEST_RUN(args_are_empty_before_init);
     TEST_RUN(args_init_builds_one_string_per_argument);
     TEST_RUN(args_init_with_no_arguments_is_empty);
