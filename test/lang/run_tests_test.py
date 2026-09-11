@@ -645,6 +645,41 @@ class Discovery(TempRoot):
         self.assertEqual(tests, [])
         self.assertEqual(problems, ["containers_tets.ft: bad test name", "helper.ft: bad test name"])
 
+    def test_a_test_below_the_root_is_reported(self):
+        """A `*_test.ft` in a directory discovery does not walk (T-079).
+
+        `test/fort/support` holds the code several module tests share and is
+        invisible to `discover`, so a test misfiled there would otherwise run
+        nowhere and say nothing at all.
+        """
+        write(self.root, "containers_test.ft", "//! run\n")
+        write(self.root, "support/stray_test.ft", "garbage garbage\n")
+        tests, problems = run_tests.discover(self.root)
+        self.assertEqual([t.path for t in tests], ["containers_test.ft"])
+        self.assertEqual(problems, ["support/stray_test.ft: test outside the root of the corpus"])
+
+    def test_shared_code_below_the_root_is_not_a_test(self):
+        """The directory is there to hold exactly this, so it is no problem."""
+        write(self.root, "containers_test.ft", "//! run\n")
+        write(self.root, "support/types_env.ft", "fn f() {}\n")
+        write(self.root, "support/capture.ft", "fn g() {}\n")
+        _, problems = run_tests.discover(self.root)
+        self.assertEqual(problems, [])
+
+    def test_a_test_nested_deeper_below_the_root_is_reported(self):
+        write(self.root, "helpers/inner/lexer_test.ft", "//! run\n")
+        _, problems = run_tests.discover(self.root)
+        self.assertEqual(
+            problems, ["helpers/inner/lexer_test.ft: test outside the root of the corpus"]
+        )
+
+    def test_a_module_of_a_directory_test_is_not_reported(self):
+        """`run`, `fail` and `programs` are walked by name and judged there."""
+        write(self.root, "run/modules/two/main.ft", "//! run\n")
+        write(self.root, "run/modules/two/util_test.ft", "fn f() {}\n")
+        _, problems = run_tests.discover(self.root)
+        self.assertEqual(problems, [])
+
     def test_layout_problems(self):
         write(self.root, "run/arrays/001_a.ft", "//! run\n")
         write(self.root, "run/arrays/003_c.ft", "//! run\n")

@@ -224,9 +224,18 @@ A safe(r) C-like systems programming language.
   for operators; a rule whose scope is in a keyword or operator family but whose pattern matches
   neither shape fails the test. Its other half is a small TextMate engine that asserts the scopes
   of `test/highlight/scopes.ft` (`//^` lines: alternating text and scope fields naming what the
-  line above must produce), of the D5.3 and D17.2 marker tables, and of every `test/lang/run`
-  test, which must tokenize with no `invalid.` scope and no unscoped character, so a new language
-  test that the grammar mishandles fails here.
+  line above must produce), of the D5.3 and D17.2 marker tables, and of **every fort source the
+  project writes**, which must tokenize with no `invalid.` scope and no unscoped character, so a
+  new file the grammar mishandles fails here. `CORPUS_DIRS` is that list -- `test/lang/run`,
+  `test/lang/programs`, `std`, `src/fort`, `test/fort` (its `support/` included) and
+  `test/fort_lint` -- and `CORPUS_FILES` is the exact number of files in it, so a ticket that adds
+  or removes a `.ft` under any of them reads the new number off the failure and writes it there,
+  as it does for `CORPUS_FILES` in `test/parser_recovery_test.c` and `FT_FILES` in
+  `tools/diff_tokens.sh`. The other `.ft` of the repository are listed in `EXCLUDED_DIRS`, each
+  because it is meant to hold a lexical error (`test/lang/fail`, `test/highlight/scopes.ft`,
+  `editors/vscode/test/fixtures/lexical.ft`), and a test asserts that partition, so a new
+  directory of fort is a red test rather than a corpus nobody tokenizes -- which is what
+  `test/fort` and `test/lang/programs` both were until T-079 measured it.
 - The VS Code extension's sources are plain JavaScript wrapped at 100 columns, and no gate target
   lints them, so the conventions are here: `'use strict'` at the top of every file, CommonJS
   (`require`/`module.exports`, no ESM and no bundler), `//` comments only as in C and fort (D2.2),
@@ -311,16 +320,18 @@ A safe(r) C-like systems programming language.
   second include root (`//! flags: -I ../../src/fort -I support`): a `test/fort` test is a program
   rather than a translation unit, so the `#include`d helper a C suite would use
   (`test/types_helpers.h`) has to be an imported module (`support/types_env.ft`, T-032). The
-  directory is invisible to the harness, and that cuts both ways: `discover` walks `run`, `fail`,
-  `programs` and the `*_test.ft` of the root and nothing else, so **a test misfiled under
-  `support/` runs nowhere and says nothing** -- `support/stray_test.ft` leaves
-  `run_tests.py --lint` reporting `no problems` while the same file at the root is
-  `lint: bad test name`. `fort_lint.py` globs `std/*.ft` and `src/fort/*.ft` only, so D1.4 is
-  unchecked there as well (T-079 owns both holes). Put a test at the root and only shared code
-  under `support/`.
+  directory is invisible to the harness: `discover` walks `run`, `fail`, `programs` and the
+  `*_test.ft` of the root and nothing else, so a test misfiled there would run nowhere and say
+  nothing. `_report_misplaced_tests` closes that (T-079): a `*_test.ft` anywhere below the root
+  outside those three directories is `test outside the root of the corpus`, which is a lint
+  problem and not a test, since what belongs under `support/` is shared code and nothing else.
   `tools/lines.py` counts `test/fort/**/*.ft` as test lines and `src/fort/*.ft` as compiler lines,
-  and `test/highlight_test.py` does **not** tokenize them, so the TextMate grammar has no witness
-  over `test/fort` (T-079). **`test/fort` is not a leak oracle**: the gate's `asan` and `ubsan`
+  `test/highlight_test.py` tokenizes them, and `tools/fort_lint.py` lints them with the search
+  roots its `SOURCE_SETS` table pairs with the glob (`-I src/fort -I test/fort/support`, the
+  `-I ../../src/fort -I support` of the directives spelled from the repository root); a file named
+  on its command line takes the roots of its own `-I` options. Without them `fort --index` reports
+  `module 'containers' not found` and every name in the file goes unjudged, which it did until
+  T-079. **`test/fort` is not a leak oracle**: the gate's `asan` and `ubsan`
   presets instrument the native compiler, not the x86-64 program the harness builds and runs under
   qemu, so a `del` a module forgets leaks silently through all three presets. A module that
   promises its allocations die with the value that owns them (D20.5) needs a witness of its own --

@@ -478,6 +478,20 @@ class FakeCompiler(unittest.TestCase):
         self.assertIn("over the 100 of the house style", got.stdout)
         self.assertIn("fort exited with status 3", got.stdout)
 
+    def test_the_search_roots_are_passed_to_the_compiler(self):
+        """One `-I` per root, before the file (D9.2)."""
+        fort = self.fake_fort(
+            'print(\'{"diagnostics":[],"symbols":[]}\' if sys.argv[1:] == '
+            "['--index', '-I', 'x', '-I', 'y', 'a.ft'] else "
+            '\'{"diagnostics":[],"symbols":[{"file":"a.ft",'
+            '"line":1,"col":1,"name":"Wrong","kind":"fn","type":"",'
+            '"is_decl":true}]}\')\n'
+        )
+        got = self.run_lint(fort, "-I", "x", "-I", "y", "a.ft")
+        # The empty index trips the guard, which proves the arguments matched.
+        self.assertIn("no identifier", got.stdout)
+        self.assertNotIn("Wrong", got.stdout)
+
     def test_the_file_is_passed_to_the_compiler(self):
         fort = self.fake_fort(
             'print(\'{"diagnostics":[],"symbols":[]}\' if sys.argv[1:] == '
@@ -531,6 +545,61 @@ class DefaultFileSet(unittest.TestCase):
         self.assertEqual(fort_lint.empty_set_problems(ROOT, paths), [])
 
 
+class IncludeRoots(unittest.TestCase):
+    """The module search roots the default file set carries (D9.2, T-079)."""
+
+    def roots(self, name):
+        for path, includes in fort_lint.default_file_set(ROOT):
+            if path.relative_to(ROOT).as_posix() == name:
+                return includes
+        self.fail("%s is not in the default file set" % name)
+        return None
+
+    def test_a_standard_library_module_needs_no_search_root(self):
+        """An import of std resolves beside the compiler, not through -I."""
+        self.assertEqual(self.roots("std/vec.ft"), ())
+
+    def test_a_compiler_source_needs_no_search_root(self):
+        self.assertEqual(self.roots("src/fort/containers.ft"), ())
+
+    def test_a_module_test_gets_the_compiler_and_the_fixtures(self):
+        """`-I ../../src/fort -I support` from the root of test/fort."""
+        self.assertEqual(
+            self.roots("test/fort/containers_test.ft"), ("src/fort", "test/fort/support")
+        )
+
+    def test_a_shared_fixture_gets_them_too(self):
+        self.assertEqual(
+            self.roots("test/fort/support/types_env.ft"), ("src/fort", "test/fort/support")
+        )
+
+    def test_the_set_holds_every_file_of_every_glob_once(self):
+        files = fort_lint.default_file_set(ROOT)
+        paths = [path for path, _ in files]
+        self.assertEqual(len(paths), len(set(paths)))
+        self.assertEqual(paths, sorted(paths))
+        for glob in fort_lint.SOURCE_GLOBS:
+            self.assertTrue(set(fort_lint.collect(ROOT, (glob,))) <= set(paths), glob)
+
+    def test_the_set_is_the_four_corpora(self):
+        """The count the ctest reports, so a glob that stops matching is seen."""
+        files = fort_lint.default_file_set(ROOT)
+        counts = {}
+        for path, _ in files:
+            counts[path.parent.relative_to(ROOT).as_posix()] = (
+                counts.get(path.parent.relative_to(ROOT).as_posix(), 0) + 1
+            )
+        self.assertEqual(sorted(counts), ["src/fort", "std", "test/fort", "test/fort/support"])
+        self.assertGreaterEqual(counts["test/fort"], 80)
+        self.assertGreaterEqual(counts["test/fort/support"], 4)
+
+    def test_an_overlapping_glob_takes_the_roots_of_the_first(self):
+        """The table's order decides, not the filesystem's."""
+        sets = (("std/*.ft", ("first",)), ("std/vec.ft", ("second",)))
+        files = fort_lint.default_file_set(ROOT, sets)
+        self.assertTrue(all(includes == ("first",) for _, includes in files))
+
+
 @unittest.skipUnless(os.environ.get("FORT_BINARY"), "FORT_BINARY is not set")
 class RealCompiler(unittest.TestCase):
     """The whole tool over the fixtures, with the compiler the build made."""
@@ -570,6 +639,25 @@ class RealCompiler(unittest.TestCase):
         got = self.run_lint("test/fort_lint/broken.ft")
         self.assertEqual(got.returncode, 1)
         self.assertEqual(got.stdout.strip().split("\n"), BROKEN_PROBLEMS)
+
+    def test_a_module_test_without_its_roots_cannot_resolve_its_imports(self):
+        """The hole T-079 closed: no -I meant no index and no D1.4 at all."""
+        got = self.run_lint("test/fort/containers_test.ft")
+        self.assertEqual(got.returncode, 1)
+        self.assertIn("module 'containers' not found", got.stdout)
+
+    def test_a_module_test_with_its_roots_is_judged(self):
+        got = self.run_lint(
+            "-I", "src/fort", "-I", "test/fort/support", "test/fort/containers_test.ft"
+        )
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertEqual(got.stdout.strip(), "fort_lint: 1 file(s), no violation of D1.4")
+
+    def test_a_shared_fixture_with_its_roots_is_judged(self):
+        got = self.run_lint(
+            "-I", "src/fort", "-I", "test/fort/support", "test/fort/support/types_env.ft"
+        )
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
 
     def test_a_file_outside_the_repository_is_linted_too(self):
         """The scratch file goes under build/, which is gitignored (AGENTS.md, T-022)."""

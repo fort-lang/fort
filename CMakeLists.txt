@@ -496,7 +496,7 @@ add_custom_target(fort-lint
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
             --fort "$<TARGET_FILE:fort>"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    COMMENT "Checking the identifier conventions of D1.4 in std and src/fort"
+    COMMENT "Checking the identifier conventions of D1.4 in the project's fort"
     VERBATIM
 )
 add_dependencies(fort-lint fort fort_rt)

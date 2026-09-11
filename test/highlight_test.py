@@ -11,9 +11,14 @@ matches neither shape is an error, so a rule cannot hide from the comparison.
 
 Second, scopes: a small line-oriented TextMate engine (patterns, repository,
 include, match, begin/end, captures) tokenizes the fixtures in test/highlight,
-every marker declaration of the D5.3 and D17.2 tables, every language test
-under test/lang/run and every module of the standard library, and the tests
-assert the scopes the grammar hands out.
+every marker declaration of the D5.3 and D17.2 tables, and every fort source
+the project itself writes -- the language tests under test/lang/run, the whole
+programs beside them, the standard library, the self-hosted compiler under
+src/fort, its own tests under test/fort and the fixtures of tools/fort_lint.py
+-- and the tests assert the
+scopes the grammar hands out. CORPUS_DIRS is that list and CORPUS_FILES its
+size, and a partition test holds every other `.ft` in the repository against
+EXCLUDED_DIRS, so a new directory of fort cannot be missed in silence.
 
 Run with `python3 -m unittest highlight_test` from this directory. Standard
 library only; Python 3.12.
@@ -31,8 +36,40 @@ GRAMMAR_PATH = ROOT / "editors" / "vscode" / "syntaxes" / "fort.tmLanguage.json"
 DECISIONS_PATH = ROOT / "notes" / "decisions.md"
 FIXTURE_DIR = TEST_DIR / "highlight"
 LANG_RUN_DIR = ROOT / "test" / "lang" / "run"
+LANG_PROGRAMS_DIR = ROOT / "test" / "lang" / "programs"
+LANG_FAIL_DIR = ROOT / "test" / "lang" / "fail"
 STD_DIR = ROOT / "std"
 FORT_SRC_DIR = ROOT / "src" / "fort"
+FORT_TESTS_DIR = ROOT / "test" / "fort"
+FORT_LINT_DIR = ROOT / "test" / "fort_lint"
+EDITOR_FIXTURE_DIR = ROOT / "editors" / "vscode" / "test" / "fixtures"
+
+# Every directory of fort the grammar is held over. `src/fort` is the only one
+# that may not exist yet, which the test that walks it says out loud.
+CORPUS_DIRS = (
+    LANG_RUN_DIR,
+    LANG_PROGRAMS_DIR,
+    STD_DIR,
+    FORT_SRC_DIR,
+    FORT_TESTS_DIR,
+    FORT_LINT_DIR,
+)
+# The number of files those directories hold. It is an equality and not a floor
+# because a floor cannot see a directory that stopped being walked: a ticket
+# that adds or removes a `.ft` under CORPUS_DIRS reads the new number off the
+# failure and writes it here, as it does for CORPUS_FILES in
+# test/parser_recovery_test.c and FT_FILES in tools/diff_tokens.sh.
+CORPUS_FILES = 435
+# The `.ft` of the repository that are deliberately outside the corpus, each
+# because it is meant to hold a lexical error: test/lang/fail is the corpus of
+# programs the compiler must reject, test/highlight/scopes.ft carries the
+# errors the fixture test enumerates, and editors/vscode/test/fixtures holds
+# lexical.ft, whose bad literal is the diagnostic the extension displays.
+EXCLUDED_DIRS = (LANG_FAIL_DIR, FIXTURE_DIR, EDITOR_FIXTURE_DIR)
+# Directories of the worktree that hold no source of the project: the build
+# tree copies std/*.ft next to the runtime, and a dot directory is git's or a
+# cache.
+IGNORED_DIRS = ("build",)
 
 # A keyword rule writes `\b(?:a|b)\b` or `\b(a|b)`; an operator or punctuation
 # rule writes one alternation of literals, `(?:\+|-)`.
@@ -447,6 +484,12 @@ class CorpusTest(unittest.TestCase):
     def test_every_language_test_spells_correctly(self):
         self.check(self.sources(LANG_RUN_DIR))
 
+    def test_every_whole_program_spells_correctly(self):
+        """test/lang/programs/*.ft, the corpus of whole programs (T-079)."""
+        paths = self.sources(LANG_PROGRAMS_DIR)
+        self.assertGreaterEqual(len(paths), 20)
+        self.check(paths)
+
     def test_every_standard_library_module_spells_correctly(self):
         """std/*.ft is real fort the grammar must cover too (T-076)."""
         paths = self.sources(STD_DIR)
@@ -466,6 +509,46 @@ class CorpusTest(unittest.TestCase):
         paths = self.sources(FORT_SRC_DIR)
         self.assertGreaterEqual(len(paths), 1, "src/fort exists but holds no .ft")
         self.check(paths)
+
+    def test_every_module_test_of_the_compiler_spells_correctly(self):
+        """test/fort/**/*.ft: the tests of the self-hosted modules and their
+        shared fixtures under support/, which rglob reaches (T-079)."""
+        paths = self.sources(FORT_TESTS_DIR)
+        self.assertGreaterEqual(len(paths), 80)
+        self.assertTrue(any(p.parent.name == "support" for p in paths), "support/ not walked")
+        self.check(paths)
+
+    def test_every_fort_lint_fixture_spells_correctly(self):
+        """test/fort_lint/*.ft is wrong semantically and clean lexically, which
+        is the stress this test wants: bad_names.ft violates every rule of D1.4
+        and broken.ft fails the checker, yet both must tokenize (T-079)."""
+        paths = self.sources(FORT_LINT_DIR)
+        self.assertGreaterEqual(len(paths), 3)
+        self.check(paths)
+
+    def test_the_corpus_is_the_size_it_says_it_is(self):
+        """The count of files walked, so a glob that stopped matching is seen."""
+        walked = [path for directory in CORPUS_DIRS for path in self.sources(directory)]
+        self.assertEqual(len(walked), len(set(walked)))
+        self.assertEqual(len(walked), CORPUS_FILES)
+        self.check(walked)
+
+    def test_every_fort_source_in_the_repository_is_walked_or_excluded(self):
+        """No directory of fort can be missed in silence.
+
+        A new `.ft` outside CORPUS_DIRS and EXCLUDED_DIRS fails here, so a
+        corpus this test does not know about is a red test rather than a hole
+        nobody sees -- which is what test/fort was for two tickets.
+        """
+        stray = []
+        for path in sorted(ROOT.rglob("*.ft")):
+            parts = path.relative_to(ROOT).parts
+            if any(part.startswith(".") or part in IGNORED_DIRS for part in parts):
+                continue
+            if any(path.is_relative_to(d) for d in CORPUS_DIRS + EXCLUDED_DIRS):
+                continue
+            stray.append(path.relative_to(ROOT).as_posix())
+        self.assertEqual(stray, [], "fort in no corpus of highlight_test.py")
 
     def check(self, paths):
         for path in paths:

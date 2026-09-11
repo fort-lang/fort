@@ -26,9 +26,18 @@ language in the repository (D1.3 for markdown, ColumnLimit in .clang-format,
 ruff for Python) rather than a decision about fort; MAX_COLUMNS is the one
 place to change if that reading is wrong.
 
-Usage: fort_lint.py --fort build/<preset>/fort [file.ft ...]. With no file it
-checks std/*.ft and src/fort/*.ft. Problems print as <file>:<line>:<col>:
-<message> and the exit status is 1 when it reported anything.
+A file that imports a module of the compiler's own tree needs the search
+roots that module lives under, which `fort` takes as `-I` (D9.2): a
+`test/fort/<x>_test.ft` imports `containers` from `src/fort` and its fixtures
+from `test/fort/support`, so without them every such file reports `module
+'containers' not found` and its names go unchecked. SOURCE_SETS pairs each
+default glob with the roots its files need, and `-I` on the command line adds
+roots for the files named there.
+
+Usage: fort_lint.py --fort build/<preset>/fort [-I dir ...] [file.ft ...].
+With no file it checks the globs of SOURCE_SETS. Problems print as
+<file>:<line>:<col>: <message> and the exit status is 1 when it reported
+anything.
 """
 
 import argparse
@@ -39,7 +48,21 @@ import subprocess
 import sys
 from pathlib import Path
 
-SOURCE_GLOBS = ("std/*.ft", "src/fort/*.ft")
+# The default file set: one glob per group of sources, with the module search
+# roots (`-I`, D9.2) a file of that group needs to resolve its imports. The
+# standard library resolves through the copy beside the compiler and needs
+# none; a `test/fort` test imports the compiler's modules from `src/fort` and
+# its shared fixtures from `test/fort/support` (the `-I ../../src/fort -I
+# support` its own directives carry, spelled from the repository root, which is
+# this tool's working directory). `test/fort/support/*.ft` is in the set too:
+# it is fort the project wrote and D1.4 reaches it like any other.
+SOURCE_SETS = (
+    ("std/*.ft", ()),
+    ("src/fort/*.ft", ()),
+    ("test/fort/*.ft", ("src/fort", "test/fort/support")),
+    ("test/fort/support/*.ft", ("src/fort", "test/fort/support")),
+)
+SOURCE_GLOBS = tuple(glob for glob, _ in SOURCE_SETS)
 MAX_COLUMNS = 100
 
 LOWER_CASE = re.compile(r"\A[a-z_][a-z0-9_]*\Z")
@@ -80,6 +103,21 @@ def collect(root, globs):
     for pattern in globs:
         files.update(p for p in root.glob(pattern) if p.is_file())
     return sorted(files)
+
+
+def default_file_set(root, sets=SOURCE_SETS):
+    """Return the default (path, include roots) pairs, sorted by path.
+
+    A file matched by two globs -- `test/fort/*.ft` and the support glob do not
+    overlap today, but a future pair could -- takes the roots of the first glob
+    that matched it, so the set is a function of the table's order and not of
+    the filesystem's.
+    """
+    chosen = {}
+    for pattern, includes in sets:
+        for path in collect(root, (pattern,)):
+            chosen.setdefault(path, tuple(includes))
+    return [(path, chosen[path]) for path in sorted(chosen)]
 
 
 def name_problem(kind, name):
@@ -243,15 +281,21 @@ def document_problems(document, root, relative, has_source_text=True):
     return problems
 
 
-def index_document(fort, root, relative):
+def index_document(fort, root, relative, includes=()):
     """Run `fort --index` over one file and return (document, error).
 
     The compiler exits 0 with an empty diagnostics array on a clean file and 1
     when it reported one (D20.2); any other status, or output that is not a
     document, is a broken environment rather than a lint verdict.
     """
+    command = [str(fort), "--index"]
+    for include in includes:
+        # The compiler takes one search root per `-I` (D9.2); they are spelled
+        # relative to the working directory, which is the repository root.
+        command.extend(["-I", str(include)])
+    command.append(str(relative))
     proc = subprocess.run(
-        [str(fort), "--index", str(relative)],
+        command,
         cwd=str(root),
         capture_output=True,
         text=True,
@@ -274,7 +318,7 @@ def index_document(fort, root, relative):
     return document, None
 
 
-def lint_file(fort, root, path):
+def lint_file(fort, root, path, includes=()):
     """Return the formatted problems of one file, in source order.
 
     A broken environment costs the file its index, not the checks that read
@@ -290,7 +334,7 @@ def lint_file(fort, root, path):
         problems.append((1, 1, name))
     text = Path(path).read_text(encoding="utf-8")
     problems.extend(width_problems(text))
-    document, error = index_document(fort, root, relative)
+    document, error = index_document(fort, root, relative, includes)
     if error is not None:
         problems.append((1, 1, error))
     else:
@@ -330,15 +374,25 @@ def main(argv=None):
         default=Path(__file__).resolve().parent.parent,
         help="repository root (default: the parent of tools/)",
     )
+    parser.add_argument(
+        "-I",
+        "--include",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="a module search root to pass to fort (D9.2); repeatable",
+    )
     parser.add_argument("paths", nargs="*", type=Path, help="the files to check")
     args = parser.parse_args(argv)
 
     if args.paths:
-        paths = args.paths
+        files = [(path, tuple(args.include)) for path in args.paths]
         empty = []
     else:
-        paths = collect(args.root, SOURCE_GLOBS)
-        empty = empty_set_problems(args.root, paths)
+        files = default_file_set(args.root)
+        for index, (path, includes) in enumerate(files):
+            files[index] = (path, tuple(args.include) + includes)
+        empty = empty_set_problems(args.root, [path for path, _ in files])
     if empty:
         for problem in empty:
             print(problem, file=sys.stderr)
@@ -346,8 +400,8 @@ def main(argv=None):
 
     problems = []
     files_with_problems = 0
-    for path in paths:
-        found = lint_file(args.fort, args.root, path)
+    for path, includes in files:
+        found = lint_file(args.fort, args.root, path, includes)
         if found:
             files_with_problems += 1
         problems.extend(found)
@@ -357,11 +411,11 @@ def main(argv=None):
         sys.stdout.flush()
         print(
             "fort_lint: %d problem(s) in %d of %d file(s)"
-            % (len(problems), files_with_problems, len(paths)),
+            % (len(problems), files_with_problems, len(files)),
             file=sys.stderr,
         )
         return 1
-    print("fort_lint: %d file(s), no violation of D1.4" % len(paths))
+    print("fort_lint: %d file(s), no violation of D1.4" % len(files))
     return 0
 
 

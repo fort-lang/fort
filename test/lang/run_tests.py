@@ -497,8 +497,30 @@ def discover(root):
     if programs.is_dir():
         _discover_dir(root, programs, "run", False, tests, problems)
     _discover_module_tests(root, tests, problems)
+    _report_misplaced_tests(root, problems)
     tests.sort(key=lambda t: t.path)
     return tests, problems
+
+
+# The directories of a corpus whose contents `discover` walks by name.
+WALKED_TOPS = ("run", "fail", "programs")
+
+
+def _report_misplaced_tests(root, problems):
+    """Report a `<x>_test.ft` in a directory discovery does not walk.
+
+    Everything below `root` other than `run`, `fail` and `programs` is invisible
+    to discovery -- `test/fort/support`, which holds the code several module
+    tests share, is the only such directory today -- so a test dropped there
+    would run nowhere and say nothing, which is the hole the root's `bad test
+    name` rule closes one directory up (T-079).
+    """
+    for entry in sorted(root.rglob("*.ft")):
+        rel = entry.relative_to(root)
+        if len(rel.parts) == 1 or rel.parts[0] in WALKED_TOPS:
+            continue
+        if entry.stem.endswith("_test"):
+            problems.append("%s: test outside the root of the corpus" % rel.as_posix())
 
 
 def _discover_module_tests(root, tests, problems):
