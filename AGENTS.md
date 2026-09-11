@@ -177,6 +177,19 @@ A safe(r) C-like systems programming language.
 - **"span" names the fort type `T@`** (D3.5), so a byte or source extent is a **range** everywhere
   in the compiler: `str_from_range`, token byte ranges, `ASSERT_TOK_RANGE`, and `loc_t` ranges in
   the editor-support work. Never call an extent a span.
+- **Node ranges**: a node's `loc` is a range (D20.4). A parser function ends a node's range with
+  `finish(p, n)` at every successful return in which it consumed the node's trailing tokens: the
+  nodes it built itself, and also a node a callee built whose `;` it consumed, as
+  `parse_simple_statement` and `parse_var_decl` do. It leaves a node alone when the tokens it
+  consumed are not part of it, as `parse_paren_expr` does with the `)` of a parenthesized
+  expression, whose start cannot move over the `(` (D20.4). A name is recorded with
+  `expect_name(p, n)`, and a node's start never moves: the nodes named after an operator still
+  start at it (`toolchain.md` 4). `test/parser_range_test.c` catches a missed `finish` only when
+  the node has a child that ends after the node's anchor token, since what it checks is that a
+  child's range lies inside its parent's: dropping the `finish` of a childless node (`break`,
+  `continue`), of a marker-only type suffix (`* mut`) or of a trailing `;` leaves it green. Those
+  need an explicit `parser_loc_test` assertion on the source text the range covers. Add a new node
+  kind to the corpus of the first suite and an assertion to the second.
 - **Citing decisions in code**: a citation goes on the line or function that implements the
   rule, with a phrase stating the rule (`// pointers print as 0x + lowercase hex, 0x0 for null
   (D11.7)`), so a reader learns the rule without opening the log. A bare tag list at file or

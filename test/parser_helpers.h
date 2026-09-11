@@ -31,6 +31,7 @@ static ast_arena_t pt_arena;
 static sb_t pt_diags;
 static sb_t pt_out;
 static sb_t pt_src;
+static sb_t pt_text; // the source of the last parse, for the range helpers
 static bool pt_ready = false;
 
 static inline void pt_init(void) {
@@ -43,6 +44,7 @@ static inline void pt_init(void) {
     sb_init(&pt_diags);
     sb_init(&pt_out);
     sb_init(&pt_src);
+    sb_init(&pt_text);
     diag_capture(&pt_diags);
     pt_ready = true;
 }
@@ -59,6 +61,7 @@ static inline void parse_done(void) {
     sb_free(&pt_diags);
     sb_free(&pt_out);
     sb_free(&pt_src);
+    sb_free(&pt_text);
     pt_ready = false;
 }
 
@@ -72,6 +75,8 @@ static inline ast_node_t* parse_text(const char* src) {
     str_pool_free(&pt_pool);
     ast_arena_free(&pt_arena);
     diag_reset();
+    sb_clear(&pt_text);
+    sb_append(&pt_text, src);
     if (!lex_file("t.ft", str_from_cstr(src), &pt_pool, &pt_toks)) {
         return NULL;
     }
@@ -101,6 +106,78 @@ static inline const char* loc_of(const ast_node_t* n) {
     sb_push(&pt_out, ':');
     msg_uint(&pt_out, n->loc.col);
     return sb_cstr(&pt_out);
+}
+
+// The range of `n` as `line:col-end_line:end_col`, valid until the next dump
+// (D20.4: the start inclusive, the end exclusive).
+static inline const char* range_of(const ast_node_t* n) {
+    sb_clear(&pt_out);
+    if (n == NULL) {
+        sb_append(&pt_out, "nil");
+        return sb_cstr(&pt_out);
+    }
+    msg_uint(&pt_out, n->loc.line);
+    sb_push(&pt_out, ':');
+    msg_uint(&pt_out, n->loc.col);
+    sb_push(&pt_out, '-');
+    msg_uint(&pt_out, n->loc.end_line);
+    sb_push(&pt_out, ':');
+    msg_uint(&pt_out, n->loc.end_col);
+    return sb_cstr(&pt_out);
+}
+
+// The byte offset of `line`:`col` in the last parsed source, its length when
+// the position is past the end; a tab counts as one column (D14.2).
+static inline uint64_t pt_offset_of(uint32_t line, uint32_t col) {
+    const char* s = sb_cstr(&pt_text);
+    uint32_t at_line = 1;
+    uint32_t at_col = 1;
+    uint64_t i = 0;
+    while (s[i] != '\0') {
+        if (at_line == line && at_col == col) {
+            return i;
+        }
+        if (s[i] == '\n') {
+            at_line++;
+            at_col = 1;
+        } else {
+            at_col++;
+        }
+        i++;
+    }
+    return i;
+}
+
+// The source text `loc` covers in the last parsed source, valid until the
+// next dump: what an editor would underline (D20.4).
+static inline const char* pt_text_of(loc_t loc) {
+    const uint64_t start = pt_offset_of(loc.line, loc.col);
+    const uint64_t end = pt_offset_of(loc.end_line, loc.end_col);
+    sb_clear(&pt_out);
+    if (end > start) {
+        sb_append_str(&pt_out, str_from_range(sb_cstr(&pt_text) + start, end - start));
+    }
+    return sb_cstr(&pt_out);
+}
+
+// The source text of `n`'s own range, and of the name token it carries; the
+// empty string for a node without a name (D20.4).
+static inline const char* text_of(const ast_node_t* n) {
+    if (n == NULL) {
+        sb_clear(&pt_out);
+        sb_append(&pt_out, "nil");
+        return sb_cstr(&pt_out);
+    }
+    return pt_text_of(n->loc);
+}
+
+static inline const char* name_text_of(const ast_node_t* n) {
+    if (n == NULL) {
+        sb_clear(&pt_out);
+        sb_append(&pt_out, "nil");
+        return sb_cstr(&pt_out);
+    }
+    return pt_text_of(n->name_loc);
 }
 
 // The S-expression of the whole module, or the diagnostics when the parse

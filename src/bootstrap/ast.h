@@ -5,12 +5,14 @@
 // One node type carries every construct, so the file mirrors what the
 // self-hosted compiler will do: no unions, no function pointers, no macros
 // beyond constants, every field laid out in the open. `kind` names the
-// production; `loc` is the position of the construct's first token, except on
-// the nodes named after an operator or a punctuation mark (unary, binary,
-// assignment, increment, call, index, span, field, arrow, type suffix),
-// which carry that token's own position, since a runtime error is reported at
-// the operator of the failing operation and the overwrite check at the `=` of
-// an assignment (toolchain.md 4, D17.11); `op` is
+// production; `loc` is the range of the construct (D20.4): it starts at the
+// construct's first token, except on the nodes named after an operator or a
+// punctuation mark (unary, binary, assignment, increment, call, index, span,
+// field, arrow, type suffix), which start at that token, since a runtime
+// error is reported at the operator of the failing operation and the
+// overwrite check at the `=` of an assignment (toolchain.md 4, D17.11), and
+// ends one past the last byte of the construct's last token; `name_loc` is
+// the range of the name token on a node a name declares or mentions; `op` is
 // the small kind code the construct needs (a token kind for an operator, a
 // suffix kind for a type suffix, a primitive kind for a primitive type); `a`
 // to `d` are the fixed children, absent ones NULL; `list` holds the children
@@ -124,6 +126,13 @@ typedef struct ast_node ast_node_t;
 struct ast_node {
     ast_kind_t kind;
     loc_t loc;
+    // The range of the name token of a node a name declares or mentions, the
+    // empty range on every other node (D20.4), so an editor jumps to the name
+    // and not to the construct's first token. It is a whole loc_t, repeating
+    // `loc`'s file on a node that has a name and costing a pointer on one that
+    // has none, so that a name range is passed to diag_error and printed like
+    // any other range with no conversion.
+    loc_t name_loc;
     int32_t op;    // a tok_kind_t, a suffix_kind_t or a prim_kind_t; 0 otherwise
     ast_node_t* a; // the fixed children, in the order the comments above give
     ast_node_t* b;

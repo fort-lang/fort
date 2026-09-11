@@ -148,6 +148,294 @@ TEST(a_statement_starts_at_its_keyword_or_target, {
     TEST_ASSERT_EQ_STR(loc_of(body_stmt(mod, 0, 7)), "9:5");
 })
 
+// ---- ranges: the end of a node's range ------------------------------------
+
+// A node's range runs to one past the last byte of the construct's last
+// token (D20.4), which the helpers show as the source text it covers.
+TEST(a_declaration_covers_its_terminator, {
+    const ast_node_t* mod = parse_text("i32 n = 4 + 1;\n"
+                                       "fn i32 f(i32 a) {\n"
+                                       "    return a;\n"
+                                       "}\n");
+    TEST_ASSERT_NONNULL(mod);
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 0)), "i32 n = 4 + 1;");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 0)->a), "i32");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 1)), "fn i32 f(i32 a) {\n    return a;\n}");
+    TEST_ASSERT_EQ_STR(text_of(ast_child(pt_decl(mod, 1), 0)), "i32 a");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 1)->b), "{\n    return a;\n}");
+    TEST_ASSERT_EQ_STR(text_of(body_stmt(mod, 1, 0)), "return a;");
+})
+
+// The whole module runs from 1:1 to one past the last byte of its last token.
+TEST(the_module_covers_the_whole_file, {
+    const ast_node_t* mod = parse_text("i32 n = 4;\ni32 m = 5;\n");
+    TEST_ASSERT_NONNULL(mod);
+    TEST_ASSERT_EQ_STR(range_of(mod), "1:1-2:11");
+    TEST_ASSERT_EQ_STR(text_of(mod), "i32 n = 4;\ni32 m = 5;");
+})
+
+TEST(an_empty_file_is_the_empty_range_at_one_one, {
+    const ast_node_t* mod = parse_text("");
+    TEST_ASSERT_NONNULL(mod);
+    TEST_ASSERT_EQ_STR(range_of(mod), "1:1-1:1");
+})
+
+// A node named after an operator starts at that operator (toolchain.md 4) and
+// ends with its last operand, so its range is not the whole operation.
+TEST(an_operator_node_runs_from_its_operator_to_its_last_operand, {
+    const ast_node_t* mod = parse_text("i32 x = a + b * c;\n"
+                                       "fn void f(i32 mut y) {\n"
+                                       "    y += g(1, 2);\n"
+                                       "    y++;\n"
+                                       "}\n");
+    TEST_ASSERT_NONNULL(mod);
+    const ast_node_t* sum = pt_decl(mod, 0)->b;
+    TEST_ASSERT_EQ_STR(text_of(sum), "+ b * c");
+    TEST_ASSERT_EQ_STR(text_of(sum->a), "a");
+    TEST_ASSERT_EQ_STR(text_of(sum->b), "* c");
+    TEST_ASSERT_EQ_STR(text_of(body_stmt(mod, 1, 0)), "+= g(1, 2);");
+    TEST_ASSERT_EQ_STR(text_of(body_stmt(mod, 1, 0)->b), "(1, 2)");
+    TEST_ASSERT_EQ_STR(text_of(body_stmt(mod, 1, 1)), "++;");
+})
+
+TEST(postfix_and_unary_nodes_cover_their_own_tokens, {
+    const ast_node_t* mod = parse_text("i32 a = -x;\n"
+                                       "i32 b = f(1);\n"
+                                       "i32 c = v[0];\n"
+                                       "i32 d = p.f;\n"
+                                       "i32 e = p->f;\n"
+                                       "i32 g = s[1..2];\n");
+    TEST_ASSERT_NONNULL(mod);
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 0)->b), "-x");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 1)->b), "(1)");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 2)->b), "[0]");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 3)->b), ".f");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 4)->b), "->f");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 5)->b), "[1..2]");
+})
+
+TEST(literal_and_keyword_expressions_cover_their_whole_form, {
+    const ast_node_t* mod = parse_text("i32 a = cast(x, i32);\n"
+                                       "i32 b = sizeof(u8);\n"
+                                       "i32 c = new(node);\n"
+                                       "point d = point{1};\n"
+                                       "i32 e = i32[1]{0};\n"
+                                       "string f = \"hi\";\n"
+                                       "bool g = true;\n"
+                                       "node* h = null;\n");
+    TEST_ASSERT_NONNULL(mod);
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 0)->b), "cast(x, i32)");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 1)->b), "sizeof(u8)");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 2)->b), "new(node)");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 3)->b), "point{1}");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 3)->b->b), "{1}");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 4)->b), "i32[1]{0}");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 5)->b), "\"hi\"");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 6)->b), "true");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 7)->b), "null");
+})
+
+// A type covers its base and every marker and suffix written after it, and
+// each suffix covers its own marker (D5.3, D17.2).
+TEST(a_type_covers_its_suffixes_and_markers, {
+    const ast_node_t* mod = parse_text("node* mut@ own x = 0;\n"
+                                       "i32[4] mut y = 0;\n"
+                                       "string own s = \"\";\n");
+    TEST_ASSERT_NONNULL(mod);
+    const ast_node_t* first = pt_decl(mod, 0)->a;
+    TEST_ASSERT_EQ_STR(text_of(first), "node* mut@ own");
+    TEST_ASSERT_EQ_STR(text_of(first->a), "node");
+    TEST_ASSERT_EQ_STR(text_of(ast_child(first, 0)), "* mut");
+    TEST_ASSERT_EQ_STR(text_of(ast_child(first, 1)), "@ own");
+    const ast_node_t* second = pt_decl(mod, 1)->a;
+    TEST_ASSERT_EQ_STR(text_of(second), "i32[4] mut");
+    TEST_ASSERT_EQ_STR(text_of(ast_child(second, 0)), "[4] mut");
+    TEST_ASSERT_EQ_STR(text_of(ast_child(second, 0)->a), "4");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 2)->a), "string own");
+})
+
+TEST(a_statement_covers_its_block_or_semicolon, {
+    const ast_node_t* mod = parse_text("fn void f() {\n"
+                                       "    if (c) { g(); } else { h(); }\n"
+                                       "    while (c) { }\n"
+                                       "    for (i32 mut i = 0; i < 4; i++) { }\n"
+                                       "    for (i32 v : xs) { }\n"
+                                       "    switch (c) { case 1: g(); default: }\n"
+                                       "    defer g();\n"
+                                       "    x = 1;\n"
+                                       "    g();\n"
+                                       "    return;\n"
+                                       "}\n");
+    TEST_ASSERT_NONNULL(mod);
+    TEST_ASSERT_EQ_STR(text_of(body_stmt(mod, 0, 0)), "if (c) { g(); } else { h(); }");
+    TEST_ASSERT_EQ_STR(text_of(body_stmt(mod, 0, 1)), "while (c) { }");
+    TEST_ASSERT_EQ_STR(text_of(body_stmt(mod, 0, 2)), "for (i32 mut i = 0; i < 4; i++) { }");
+    TEST_ASSERT_EQ_STR(text_of(body_stmt(mod, 0, 2)->a), "i32 mut i = 0");
+    TEST_ASSERT_EQ_STR(text_of(body_stmt(mod, 0, 3)), "for (i32 v : xs) { }");
+    TEST_ASSERT_EQ_STR(text_of(body_stmt(mod, 0, 4)), "switch (c) { case 1: g(); default: }");
+    TEST_ASSERT_EQ_STR(text_of(ast_child(body_stmt(mod, 0, 4), 0)), "case 1: g();");
+    TEST_ASSERT_EQ_STR(text_of(ast_child(body_stmt(mod, 0, 4), 0)->a), "g();");
+    TEST_ASSERT_EQ_STR(text_of(body_stmt(mod, 0, 5)), "defer g();");
+    TEST_ASSERT_EQ_STR(text_of(body_stmt(mod, 0, 6)), "= 1;");
+    TEST_ASSERT_EQ_STR(text_of(body_stmt(mod, 0, 7)), "g();");
+    TEST_ASSERT_EQ_STR(text_of(body_stmt(mod, 0, 8)), "return;");
+})
+
+// An if-else-if chain nests at its tail, so every `if` of the chain ends at
+// the end of the chain.
+TEST(every_if_of_a_chain_ends_at_the_end_of_the_chain, {
+    const ast_node_t* mod = parse_text("fn void f() {\n"
+                                       "    if (a) { } else if (b) { } else { }\n"
+                                       "}\n");
+    TEST_ASSERT_NONNULL(mod);
+    const ast_node_t* outer = body_stmt(mod, 0, 0);
+    TEST_ASSERT_EQ_STR(text_of(outer), "if (a) { } else if (b) { } else { }");
+    TEST_ASSERT_EQ_STR(text_of(outer->c), "if (b) { } else { }");
+    TEST_ASSERT_EQ_STR(text_of(outer->c->c), "{ }");
+})
+
+// An empty case body has no token of its own, so it is the empty range just
+// after the ':' and stays inside its clause (D20.4).
+TEST(an_empty_case_body_is_an_empty_range_after_the_colon, {
+    const ast_node_t* mod = parse_text("fn void f() {\n"
+                                       "    switch (c) { case 1: }\n"
+                                       "}\n");
+    TEST_ASSERT_NONNULL(mod);
+    const ast_node_t* clause = ast_child(body_stmt(mod, 0, 0), 0);
+    TEST_ASSERT_EQ_STR(range_of(clause), "2:18-2:25");
+    TEST_ASSERT_EQ_STR(range_of(clause->a), "2:25-2:25");
+    TEST_ASSERT_EQ_STR(text_of(clause->a), "");
+})
+
+TEST(an_import_covers_its_semicolon_and_its_items, {
+    const ast_node_t* mod = parse_text("import std::io;\n"
+                                       "import util::strings as s;\n"
+                                       "import a::b::{c, d as e};\n");
+    TEST_ASSERT_NONNULL(mod);
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 0)), "import std::io;");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 0)->a), "std::io");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 1)), "import util::strings as s;");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 1)->b), "as s");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 2)), "import a::b::{c, d as e};");
+    // The path ends at its last segment; the item list is not part of it.
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 2)->a), "a::b");
+    TEST_ASSERT_EQ_STR(text_of(ast_child(pt_decl(mod, 2), 0)), "c");
+    TEST_ASSERT_EQ_STR(text_of(ast_child(pt_decl(mod, 2), 1)), "d as e");
+})
+
+TEST(a_struct_an_enum_and_an_extern_cover_their_whole_declaration, {
+    const ast_node_t* mod = parse_text("struct point {\n"
+                                       "    i32 x;\n"
+                                       "}\n"
+                                       "enum color {\n"
+                                       "    red,\n"
+                                       "    green = 5,\n"
+                                       "}\n"
+                                       "extern fn void abort();\n");
+    TEST_ASSERT_NONNULL(mod);
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 0)), "struct point {\n    i32 x;\n}");
+    TEST_ASSERT_EQ_STR(text_of(ast_child(pt_decl(mod, 0), 0)), "i32 x;");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 1)), "enum color {\n    red,\n    green = 5,\n}");
+    TEST_ASSERT_EQ_STR(text_of(ast_child(pt_decl(mod, 1), 0)), "red");
+    TEST_ASSERT_EQ_STR(text_of(ast_child(pt_decl(mod, 1), 1)), "green = 5");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 2)), "extern fn void abort();");
+})
+
+TEST(break_and_continue_cover_their_semicolon, {
+    const ast_node_t* mod = parse_text("fn void f() {\n"
+                                       "    while (c) {\n"
+                                       "        break;\n"
+                                       "        continue;\n"
+                                       "    }\n"
+                                       "}\n");
+    TEST_ASSERT_NONNULL(mod);
+    const ast_node_t* body = body_stmt(mod, 0, 0)->b;
+    TEST_ASSERT_EQ_STR(text_of(ast_child(body, 0)), "break;");
+    TEST_ASSERT_EQ_STR(text_of(ast_child(body, 1)), "continue;");
+})
+
+// ---- name ranges ----------------------------------------------------------
+
+// A declaration carries the range of the name it introduces, so an editor
+// jumps to the name and not to the first token (D20.4).
+TEST(declarations_carry_the_range_of_their_name, {
+    const ast_node_t* mod = parse_text("struct point {\n"
+                                       "    i32 x;\n"
+                                       "}\n"
+                                       "enum color { red, green }\n"
+                                       "i32 total = 0;\n"
+                                       "fn i32 sum(i32 a) {\n"
+                                       "    i32 local = a;\n"
+                                       "    return local;\n"
+                                       "}\n");
+    TEST_ASSERT_NONNULL(mod);
+    TEST_ASSERT_EQ_STR(name_text_of(pt_decl(mod, 0)), "point");
+    TEST_ASSERT_EQ_STR(name_text_of(ast_child(pt_decl(mod, 0), 0)), "x");
+    TEST_ASSERT_EQ_STR(name_text_of(pt_decl(mod, 1)), "color");
+    TEST_ASSERT_EQ_STR(name_text_of(ast_child(pt_decl(mod, 1), 0)), "red");
+    TEST_ASSERT_EQ_STR(name_text_of(ast_child(pt_decl(mod, 1), 1)), "green");
+    TEST_ASSERT_EQ_STR(name_text_of(pt_decl(mod, 2)), "total");
+    TEST_ASSERT_EQ_STR(name_text_of(pt_decl(mod, 3)), "sum");
+    TEST_ASSERT_EQ_STR(name_text_of(ast_child(pt_decl(mod, 3), 0)), "a");
+    TEST_ASSERT_EQ_STR(name_text_of(body_stmt(mod, 3, 0)), "local");
+})
+
+// The name range is the name token alone, not the declaration.
+TEST(a_name_range_is_the_name_token, {
+    const ast_node_t* mod = parse_text("i32 total = 0;\n");
+    TEST_ASSERT_NONNULL(mod);
+    TEST_ASSERT_EQ_STR(range_of(pt_decl(mod, 0)), "1:1-1:15");
+    const ast_node_t* decl = pt_decl(mod, 0);
+    sb_clear(&pt_out);
+    msg_uint(&pt_out, decl->name_loc.line);
+    sb_push(&pt_out, ':');
+    msg_uint(&pt_out, decl->name_loc.col);
+    sb_push(&pt_out, '-');
+    msg_uint(&pt_out, decl->name_loc.end_line);
+    sb_push(&pt_out, ':');
+    msg_uint(&pt_out, decl->name_loc.end_col);
+    TEST_ASSERT_EQ_STR(sb_cstr(&pt_out), "1:5-1:10");
+})
+
+TEST(mentions_of_a_name_carry_its_range, {
+    const ast_node_t* mod = parse_text("import std::io;\n"
+                                       "import a::{b as c};\n"
+                                       "point d = point{.x = 1};\n"
+                                       "i32 e = f.g;\n"
+                                       "i32 h = p->q;\n"
+                                       "io.writer w = 0;\n"
+                                       "fn void k(i32@ xs) {\n"
+                                       "    for (i32 v : xs) { }\n"
+                                       "}\n");
+    TEST_ASSERT_NONNULL(mod);
+    TEST_ASSERT_EQ_STR(name_text_of(ast_child(pt_decl(mod, 0)->a, 0)), "std");
+    TEST_ASSERT_EQ_STR(name_text_of(ast_child(pt_decl(mod, 0)->a, 1)), "io");
+    TEST_ASSERT_EQ_STR(name_text_of(ast_child(pt_decl(mod, 1), 0)), "b");
+    TEST_ASSERT_EQ_STR(name_text_of(ast_child(pt_decl(mod, 1), 0)->a), "c");
+    TEST_ASSERT_EQ_STR(name_text_of(pt_decl(mod, 2)->b->a), "point");
+    TEST_ASSERT_EQ_STR(name_text_of(ast_child(pt_decl(mod, 2)->b->b, 0)), "x");
+    TEST_ASSERT_EQ_STR(name_text_of(pt_decl(mod, 3)->b), "g");
+    TEST_ASSERT_EQ_STR(name_text_of(pt_decl(mod, 3)->b->a), "f");
+    TEST_ASSERT_EQ_STR(name_text_of(pt_decl(mod, 4)->b), "q");
+    TEST_ASSERT_EQ_STR(name_text_of(pt_decl(mod, 5)->a->a), "io");
+    TEST_ASSERT_EQ_STR(name_text_of(pt_decl(mod, 5)->a->a->a), "writer");
+    TEST_ASSERT_EQ_STR(name_text_of(body_stmt(mod, 6, 0)), "v");
+})
+
+// A node no name declares or mentions carries the empty range (D20.4).
+TEST(nodes_without_a_name_carry_an_empty_name_range, {
+    const ast_node_t* mod = parse_text("i32 a = 1 + 2;\n"
+                                       "string b = \"hi\";\n");
+    TEST_ASSERT_NONNULL(mod);
+    const ast_node_t* sum = pt_decl(mod, 0)->b;
+    TEST_ASSERT_EQ_UINT64((uint64_t)sum->name_loc.line, (uint64_t)0);
+    TEST_ASSERT_EQ_UINT64((uint64_t)sum->name_loc.col, (uint64_t)0);
+    TEST_ASSERT_EQ_STR(name_text_of(sum), "");
+    TEST_ASSERT_EQ_STR(name_text_of(sum->a), "");
+    TEST_ASSERT_EQ_STR(name_text_of(pt_decl(mod, 0)->a), "");
+    TEST_ASSERT_EQ_STR(name_text_of(pt_decl(mod, 1)->b), "");
+})
+
 // ---- whole modules --------------------------------------------------------
 
 // The out-parameter signature of D3.6 and D17.2, with every marker position
@@ -304,6 +592,23 @@ int main(int argc, char** argv) {
     TEST_RUN(literal_and_keyword_expressions_are_at_their_first_token);
     TEST_RUN(a_type_and_its_suffixes_carry_their_own_positions);
     TEST_RUN(a_statement_starts_at_its_keyword_or_target);
+    TEST_RUN(a_declaration_covers_its_terminator);
+    TEST_RUN(the_module_covers_the_whole_file);
+    TEST_RUN(an_empty_file_is_the_empty_range_at_one_one);
+    TEST_RUN(an_operator_node_runs_from_its_operator_to_its_last_operand);
+    TEST_RUN(postfix_and_unary_nodes_cover_their_own_tokens);
+    TEST_RUN(literal_and_keyword_expressions_cover_their_whole_form);
+    TEST_RUN(a_type_covers_its_suffixes_and_markers);
+    TEST_RUN(a_statement_covers_its_block_or_semicolon);
+    TEST_RUN(every_if_of_a_chain_ends_at_the_end_of_the_chain);
+    TEST_RUN(an_empty_case_body_is_an_empty_range_after_the_colon);
+    TEST_RUN(an_import_covers_its_semicolon_and_its_items);
+    TEST_RUN(a_struct_an_enum_and_an_extern_cover_their_whole_declaration);
+    TEST_RUN(break_and_continue_cover_their_semicolon);
+    TEST_RUN(declarations_carry_the_range_of_their_name);
+    TEST_RUN(a_name_range_is_the_name_token);
+    TEST_RUN(mentions_of_a_name_carry_its_range);
+    TEST_RUN(nodes_without_a_name_carry_an_empty_name_range);
     TEST_RUN(the_out_parameter_signature_of_d17_2);
     TEST_RUN(a_whole_module_parses_end_to_end);
     TEST_RUN(a_whole_module_in_the_east_marker_spelling);

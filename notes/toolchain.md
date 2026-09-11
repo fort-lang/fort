@@ -175,6 +175,10 @@ Compile-time diagnostics (D14.2) are written to stderr, one per line:
   `lib/util.ft`; the entry directory is the entry path's directory part, or nothing).
 - `<line>` is 1-based; `<col>` is the 1-based column of the offending token's first byte, a tab
   counting as one column. A `note:` follows the `error:` it belongs to, with its own position.
+- A position is the start of a range (D20.4): the diagnostic is about the bytes from `<line>`
+  and `<col>` to one past the last byte of the construct's last token, and every syntax-tree
+  node carries that range and the range of its name. The text form above prints the start only,
+  so an end never appears in a diagnostic line.
 - An error without a position in the file (a missing `main`, an entry base name that is not a
   valid module name) uses `1:1` (D14.2).
 - Parsing stops at a module's first syntax error; checking reports every error in a module.

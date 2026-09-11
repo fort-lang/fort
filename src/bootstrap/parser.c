@@ -91,9 +91,14 @@ static tok_kind_t peek_kind(const parser_t* p, uint64_t n) {
     return p->toks[i].kind;
 }
 
+// The range one token covers: no token spans lines (D2.9), so it ends on its
+// own line, one past its last byte (D20.4).
+static loc_t tok_loc(const parser_t* p, const token_t* t) {
+    return loc_range(p->file, t->line, t->col, t->line, (uint32_t)(t->col + t->len));
+}
+
 static loc_t here(const parser_t* p) {
-    const token_t* t = cur(p);
-    return loc_make(p->file, t->line, t->col);
+    return tok_loc(p, cur(p));
 }
 
 // Consumes the current token; the end of the file is never consumed.
@@ -105,6 +110,29 @@ static void bump(parser_t* p) {
 
 static bool at(const parser_t* p, tok_kind_t k) {
     return kind(p) == k;
+}
+
+// The empty range just after the last consumed token, where a node with no
+// token of its own begins (D20.4): the implicit block of a case body.
+static loc_t here_implicit(const parser_t* p) {
+    if (p->pos == 0) {
+        return loc_make(p->file, cur(p)->line, cur(p)->col);
+    }
+    const token_t* t = &p->toks[p->pos - 1];
+    return loc_make(p->file, t->line, (uint32_t)(t->col + t->len));
+}
+
+// Ends `n`'s range at the last consumed token (`toks[pos - 1]`; bump never
+// consumes the end of the file), which is the construct's last token wherever
+// a node is returned successfully (D20.4). Every function ends the ranges of
+// the nodes it creates, so one that returns a node a callee made leaves it
+// alone; joining never shrinks, so a node that grows as its construct grows
+// keeps the widest end. A NULL node is a failed parse and passes through.
+static ast_node_t* finish(parser_t* p, ast_node_t* n) {
+    if (n != NULL && p->pos > 0) {
+        n->loc = loc_extend(n->loc, tok_loc(p, &p->toks[p->pos - 1]));
+    }
+    return n;
 }
 
 // ---- diagnostics ----------------------------------------------------------
@@ -170,15 +198,22 @@ static bool expect(parser_t* p, tok_kind_t k, const char* what) {
     return true;
 }
 
-// Consumes an identifier and yields its text, or reports and yields the zero
-// view.
-static bool expect_ident(parser_t* p, str_t* out) {
+// Records the current identifier as `n`'s name, with the range an editor
+// jumps to for it (D20.4), and consumes it.
+static void take_name(parser_t* p, ast_node_t* n) {
+    n->name = cur(p)->text;
+    n->name_loc = here(p);
+    bump(p);
+}
+
+// Consumes the identifier that names `n`, or reports `expected an
+// identifier`.
+static bool expect_name(parser_t* p, ast_node_t* n) {
     if (!at(p, TOK_IDENT)) {
         error_expected(p, "an identifier");
         return false;
     }
-    *out = cur(p)->text;
-    bump(p);
+    take_name(p, n);
     return true;
 }
 
@@ -397,7 +432,7 @@ static ast_node_t* parse_fn_type_params(parser_t* p, loc_t loc, ast_node_t* ret)
     if (!expect(p, TOK_RPAREN, "')'")) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 // return_type = type | "void" | "noreturn" (D8.5); `void` and `noreturn` are
@@ -413,22 +448,22 @@ static ast_node_t* parse_base_type(parser_t* p, bool allow_noreturn) {
         ast_node_t* n = node_at(p, AST_TYPE_PRIM, loc);
         n->op = (int32_t)prim;
         bump(p);
-        return n;
+        return finish(p, n);
     }
     switch (kind(p)) {
     case TOK_KW_STRING:
         bump(p);
-        return node_at(p, AST_TYPE_STRING, loc);
+        return finish(p, node_at(p, AST_TYPE_STRING, loc));
     case TOK_KW_VOID:
         bump(p);
-        return node_at(p, AST_TYPE_VOID, loc);
+        return finish(p, node_at(p, AST_TYPE_VOID, loc));
     case TOK_KW_NORETURN:
         if (!allow_noreturn) {
             error_expected(p, "a type");
             return NULL;
         }
         bump(p);
-        return node_at(p, AST_TYPE_NORETURN, loc);
+        return finish(p, node_at(p, AST_TYPE_NORETURN, loc));
     case TOK_KW_FN: {
         bump(p);
         ast_node_t* ret = parse_return_type(p);
@@ -441,17 +476,15 @@ static ast_node_t* parse_base_type(parser_t* p, bool allow_noreturn) {
         // qualified_name = identifier [ "." identifier ] (D9.4); resolution
         // decides whether the first part is a module.
         ast_node_t* n = node_at(p, AST_TYPE_NAME, loc);
-        n->name = cur(p)->text;
-        bump(p);
+        take_name(p, n);
         if (at(p, TOK_DOT) && peek_kind(p, 1) == TOK_IDENT) {
             const loc_t second = here(p);
             bump(p);
             ast_node_t* tail = node_at(p, AST_IDENT, second);
-            tail->name = cur(p)->text;
-            bump(p);
-            n->a = tail;
+            take_name(p, tail);
+            n->a = finish(p, tail);
         }
-        return n;
+        return finish(p, n);
     }
     default:
         error_expected(p, "a type");
@@ -497,6 +530,7 @@ static bool parse_ref_suffixes(parser_t* p, ast_node_t* t, bool array_may_follow
             return false;
         }
         s->flags = m.flags;
+        (void)finish(p, s);
         if (array_may_follow && !check_mut_before_array(p, &m)) {
             return false;
         }
@@ -539,6 +573,7 @@ static bool parse_array_suffixes(parser_t* p, ast_node_t* t, bool marked) {
                 return false;
             }
         }
+        (void)finish(p, s);
         if (!push_suffix(p, t, s)) {
             return false;
         }
@@ -610,7 +645,7 @@ static ast_node_t* parse_type_after_base(parser_t* p, loc_t loc, ast_node_t* bas
     if (!check_one_aggregate_level(p, t)) {
         return NULL;
     }
-    return t;
+    return finish(p, t);
 }
 
 static ast_node_t* parse_type_inner(parser_t* p, bool allow_noreturn) {
@@ -657,7 +692,7 @@ static ast_node_t* parse_array_type(parser_t* p) {
         }
     }
     leave(p);
-    return t;
+    return finish(p, t);
 }
 
 // Inside `new(...)` a `mut` never parses, an `own` follows only a `*` of the
@@ -702,6 +737,7 @@ static ast_node_t* parse_alloc_type(parser_t* p) {
                 s->flags = AST_FLAG_OWN;
                 bump(p);
             }
+            (void)finish(p, s);
             if (!push_suffix(p, t, s)) {
                 t = NULL;
             }
@@ -715,7 +751,7 @@ static ast_node_t* parse_alloc_type(parser_t* p) {
         }
     }
     leave(p);
-    return t;
+    return finish(p, t);
 }
 
 // ---- expressions (grammar.md 6) -------------------------------------------
@@ -816,7 +852,7 @@ static ast_node_t* parse_cast(parser_t* p) {
     if (n->a == NULL || n->b == NULL || !expect(p, TOK_RPAREN, "')'")) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 // sizeof_expr = "sizeof" "(" type ")" (D3.15).
@@ -832,7 +868,7 @@ static ast_node_t* parse_sizeof(parser_t* p) {
     if (n->a == NULL || !expect(p, TOK_RPAREN, "')'")) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 // new_expr = "new" "(" alloc_type [ "," expr ] ")": one `T` without a count,
@@ -855,7 +891,7 @@ static ast_node_t* parse_new(parser_t* p) {
     if (!ok || !expect(p, TOK_RPAREN, "')'")) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 // struct_literal = qualified_name brace_init (D6.5); grammar.md 7.2: an
@@ -880,7 +916,7 @@ static ast_node_t* parse_struct_literal(parser_t* p) {
     if (n->b == NULL) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 // grammar.md 7.2: a successful speculative parse of an `array_type` directly
@@ -905,7 +941,7 @@ static ast_node_t* parse_array_literal(parser_t* p) {
     if (n->b == NULL) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 static ast_node_t* parse_primary(parser_t* p) {
@@ -916,7 +952,7 @@ static ast_node_t* parse_primary(parser_t* p) {
         n = node_at(p, AST_INT, loc);
         n->ival = cur(p)->ival;
         bump(p);
-        return n;
+        return finish(p, n);
     case TOK_FLOAT:
         // Float literals are outside the C bootstrap's subset (D2.6).
         if (unsupported(p, loc, "float literals")) {
@@ -925,26 +961,26 @@ static ast_node_t* parse_primary(parser_t* p) {
         n = node_at(p, AST_FLOAT, loc);
         n->name = cur(p)->text;
         bump(p);
-        return n;
+        return finish(p, n);
     case TOK_CHAR:
         n = node_at(p, AST_CHAR, loc);
         n->ival = cur(p)->ival;
         bump(p);
-        return n;
+        return finish(p, n);
     case TOK_STRING:
         n = node_at(p, AST_STRING, loc);
         n->name = cur(p)->text;
         bump(p);
-        return n;
+        return finish(p, n);
     case TOK_KW_TRUE:
     case TOK_KW_FALSE:
         n = node_at(p, AST_BOOL, loc);
         n->ival = at(p, TOK_KW_TRUE) ? 1 : 0;
         bump(p);
-        return n;
+        return finish(p, n);
     case TOK_KW_NULL:
         bump(p);
-        return node_at(p, AST_NULL, loc);
+        return finish(p, node_at(p, AST_NULL, loc));
     case TOK_LPAREN:
         return parse_paren_expr(p);
     case TOK_KW_CAST:
@@ -961,9 +997,8 @@ static ast_node_t* parse_primary(parser_t* p) {
             return parse_array_literal(p);
         }
         n = node_at(p, AST_IDENT, loc);
-        n->name = cur(p)->text;
-        bump(p);
-        return n;
+        take_name(p, n);
+        return finish(p, n);
     default:
         break;
     }
@@ -1001,7 +1036,7 @@ static ast_node_t* parse_call(parser_t* p, ast_node_t* callee) {
     if (!ok || !expect(p, TOK_RPAREN, "')'")) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 // index (D6.8) and the four span forms (D6.9), told apart by the `..`.
@@ -1036,7 +1071,7 @@ static ast_node_t* parse_index_or_span(parser_t* p, ast_node_t* operand) {
     if (!ok || !expect(p, TOK_RBRACKET, "']'")) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 // `.f` and `->f`, the second required through a pointer (D6.10).
@@ -1046,10 +1081,10 @@ static ast_node_t* parse_member(parser_t* p, ast_node_t* operand) {
     bump(p);
     ast_node_t* n = node_at(p, arrow ? AST_ARROW : AST_FIELD, loc);
     n->a = operand;
-    if (!expect_ident(p, &n->name)) {
+    if (!expect_name(p, n)) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 static ast_node_t* parse_postfix(parser_t* p) {
@@ -1092,7 +1127,7 @@ static ast_node_t* parse_unary(parser_t* p) {
     ast_node_t* n = node_at(p, AST_UNARY, loc);
     n->op = (int32_t)k;
     n->a = operand;
-    return n;
+    return finish(p, n);
 }
 
 // The binary levels of D6.1, climbed by precedence; every level is
@@ -1115,7 +1150,7 @@ static ast_node_t* parse_binary(parser_t* p, int min_prec) {
         n->op = (int32_t)k;
         n->a = left;
         n->b = right;
-        left = n;
+        left = finish(p, n);
     }
     return NULL;
 }
@@ -1146,7 +1181,7 @@ static ast_node_t* parse_ternary(parser_t* p) {
     if (unsupported(p, loc, "?:")) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 static ast_node_t* parse_expr(parser_t* p) {
@@ -1177,10 +1212,13 @@ static ast_node_t* parse_brace_init(parser_t* p) {
             if (designated) {
                 member = node_at(p, AST_DESIGNATOR, here(p));
                 bump(p);
-                ok = expect_ident(p, &member->name) && expect(p, TOK_ASSIGN, "'='");
+                ok = expect_name(p, member) && expect(p, TOK_ASSIGN, "'='");
                 if (ok) {
                     member->a = parse_initializer(p);
                     ok = member->a != NULL;
+                }
+                if (ok) {
+                    (void)finish(p, member);
                 }
             } else {
                 member = parse_initializer(p);
@@ -1203,7 +1241,7 @@ static ast_node_t* parse_brace_init(parser_t* p) {
     if (!ok || !expect(p, TOK_RBRACE, "'}'")) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 // initializer = expr | brace_init (grammar.md 3).
@@ -1222,7 +1260,7 @@ static ast_node_t* parse_var_decl(parser_t* p, bool want_semi) {
     const loc_t loc = here(p);
     ast_node_t* n = node_at(p, AST_VAR_DECL, loc);
     n->a = parse_type(p, false);
-    if (n->a == NULL || !expect_ident(p, &n->name) || !expect(p, TOK_ASSIGN, "'='")) {
+    if (n->a == NULL || !expect_name(p, n) || !expect(p, TOK_ASSIGN, "'='")) {
         return NULL;
     }
     n->b = parse_initializer(p);
@@ -1232,7 +1270,7 @@ static ast_node_t* parse_var_decl(parser_t* p, bool want_semi) {
     if (want_semi && !expect(p, TOK_SEMI, "';'")) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 // assign_head, incdec_head or call_expr (D7.2, D7.3): the target is a
@@ -1255,20 +1293,20 @@ static ast_node_t* parse_simple_head(parser_t* p) {
         if (n->b == NULL) {
             return NULL;
         }
-        return n;
+        return finish(p, n);
     }
     if (at(p, TOK_PLUS_PLUS) || at(p, TOK_MINUS_MINUS)) {
         ast_node_t* n = node_at(p, AST_INCDEC, here(p));
         n->op = (int32_t)kind(p);
         n->a = e;
         bump(p);
-        return n;
+        return finish(p, n);
     }
     // Expression statements are calls only (D7.3).
     if (e->kind == AST_CALL) {
         ast_node_t* n = node_at(p, AST_CALL_STMT, loc);
         n->a = e;
-        return n;
+        return finish(p, n);
     }
     error_expected(p, "an assignment, an increment or a call");
     return NULL;
@@ -1279,12 +1317,22 @@ static ast_node_t* parse_simple_statement(parser_t* p) {
     if (n == NULL || !expect(p, TOK_SEMI, "';'")) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 // The condition of `if` and `while`, always parenthesized (D7.4).
 static ast_node_t* parse_condition(parser_t* p) {
     return parse_paren_expr(p);
+}
+
+// Ends the range of every `if` of an else-if chain: the chain nests at its
+// tail, so each one runs to the end of the whole chain (D20.4).
+static ast_node_t* finish_if_chain(parser_t* p, ast_node_t* first) {
+    ast_node_t* n = first;
+    while (n != NULL && n->kind == AST_IF) {
+        n = finish(p, n)->c;
+    }
+    return first;
 }
 
 // if_stmt = "if" "(" expr ")" block { "else" "if" "(" expr ")" block }
@@ -1312,7 +1360,7 @@ static ast_node_t* parse_if(parser_t* p) {
         }
         prev = n;
         if (!at(p, TOK_KW_ELSE)) {
-            return first;
+            return finish_if_chain(p, first);
         }
         bump(p);
         if (at(p, TOK_KW_IF)) {
@@ -1322,7 +1370,7 @@ static ast_node_t* parse_if(parser_t* p) {
         if (prev->c == NULL) {
             return NULL;
         }
-        return first;
+        return finish_if_chain(p, first);
     }
 }
 
@@ -1337,7 +1385,7 @@ static ast_node_t* parse_while(parser_t* p) {
     if (n->b == NULL) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 // do_stmt = "do" block "while" "(" expr ")" ";" (D7.5). The whole form is
@@ -1358,7 +1406,7 @@ static ast_node_t* parse_do(parser_t* p) {
     if (unsupported(p, loc, "do-while")) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 // grammar.md 7.3: after `for (`, a speculative parse of `type identifier`
@@ -1386,7 +1434,7 @@ static int speculate_for_form(parser_t* p) {
 static ast_node_t* parse_range_for(parser_t* p, loc_t loc) {
     ast_node_t* n = node_at(p, AST_RANGE_FOR, loc);
     n->a = parse_type(p, false);
-    if (n->a == NULL || !expect_ident(p, &n->name) || !expect(p, TOK_COLON, "':'")) {
+    if (n->a == NULL || !expect_name(p, n) || !expect(p, TOK_COLON, "':'")) {
         return NULL;
     }
     n->b = parse_expr(p);
@@ -1397,7 +1445,7 @@ static ast_node_t* parse_range_for(parser_t* p, loc_t loc) {
     if (n->c == NULL) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 // for_stmt = "for" "(" [ for_init ] ";" [ expr ] ";" [ for_step ] ")" block
@@ -1435,7 +1483,7 @@ static ast_node_t* parse_for_tail(parser_t* p, loc_t loc, int form) {
     if (n->d == NULL) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 static ast_node_t* parse_for(parser_t* p) {
@@ -1451,6 +1499,12 @@ static ast_node_t* parse_for(parser_t* p) {
     }
     leave(p);
     return n;
+}
+
+// Where the statements of a case body stop: the next clause or the end of the
+// switch (D7.6).
+static bool at_case_end(const parser_t* p) {
+    return at(p, TOK_KW_CASE) || at(p, TOK_KW_DEFAULT) || at(p, TOK_RBRACE) || at(p, TOK_EOF);
 }
 
 // switch_stmt = "switch" "(" expr ")" "{" { case_clause } "}" (D7.6); each
@@ -1477,16 +1531,19 @@ static ast_node_t* parse_case(parser_t* p) {
     if (!expect(p, TOK_COLON, "':'")) {
         return NULL;
     }
-    ast_node_t* body = node_at(p, AST_BLOCK, here(p));
-    while (!at(p, TOK_KW_CASE) && !at(p, TOK_KW_DEFAULT) && !at(p, TOK_RBRACE) && !at(p, TOK_EOF)) {
+    // The implicit block starts at its first statement, or, when the clause has
+    // none, at the empty range just after the ':', so that it stays inside the
+    // clause (D20.4).
+    ast_node_t* body = node_at(p, AST_BLOCK, at_case_end(p) ? here_implicit(p) : here(p));
+    while (!at_case_end(p)) {
         ast_node_t* s = parse_statement(p);
         if (s == NULL) {
             return NULL;
         }
         ast_push(body, s);
     }
-    n->a = body;
-    return n;
+    n->a = finish(p, body);
+    return finish(p, n);
 }
 
 static ast_node_t* parse_switch(parser_t* p) {
@@ -1508,7 +1565,7 @@ static ast_node_t* parse_switch(parser_t* p) {
     if (!ok || !expect(p, TOK_RBRACE, "'}'")) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 // defer_stmt = "defer" ( assign_stmt | incdec_stmt | call_stmt | block )
@@ -1520,7 +1577,7 @@ static ast_node_t* parse_defer(parser_t* p) {
     if (n->a == NULL) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 // return_stmt = "return" [ expr ] ";" (D7.11).
@@ -1536,7 +1593,7 @@ static ast_node_t* parse_return(parser_t* p) {
     if (!expect(p, TOK_SEMI, "';'")) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 static ast_node_t* parse_break_or_continue(parser_t* p) {
@@ -1545,7 +1602,7 @@ static ast_node_t* parse_break_or_continue(parser_t* p) {
     if (!expect(p, TOK_SEMI, "';'")) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 // grammar.md 7.1: a `prim_type`, `string` or `fn` starts a declaration, and
@@ -1621,7 +1678,7 @@ static ast_node_t* parse_block(parser_t* p) {
     if (!ok || !expect(p, TOK_RBRACE, "'}'")) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 // ---- declarations (grammar.md 2, 3) ---------------------------------------
@@ -1636,10 +1693,10 @@ static bool parse_params(parser_t* p, ast_node_t* fn) {
         for (;;) {
             ast_node_t* param = node_at(p, AST_PARAM, here(p));
             param->a = parse_type(p, false);
-            if (param->a == NULL || !expect_ident(p, &param->name)) {
+            if (param->a == NULL || !expect_name(p, param)) {
                 return false;
             }
-            ast_push(fn, param);
+            ast_push(fn, finish(p, param));
             if (!at(p, TOK_COMMA)) {
                 break;
             }
@@ -1654,14 +1711,14 @@ static bool parse_params(parser_t* p, ast_node_t* fn) {
 static ast_node_t* parse_fn_decl(parser_t* p, loc_t loc, ast_node_t* ret) {
     ast_node_t* n = node_at(p, AST_FN_DECL, loc);
     n->a = ret;
-    if (!expect_ident(p, &n->name) || !parse_params(p, n)) {
+    if (!expect_name(p, n) || !parse_params(p, n)) {
         return NULL;
     }
     n->b = parse_block(p);
     if (n->b == NULL) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 // At the top level a `fn` opens a function definition (grammar.md 7). When
@@ -1684,14 +1741,14 @@ static ast_node_t* parse_fn_top_decl(parser_t* p) {
     }
     ast_node_t* n = node_at(p, AST_VAR_DECL, loc);
     n->a = parse_type_after_base(p, loc, base);
-    if (n->a == NULL || !expect_ident(p, &n->name) || !expect(p, TOK_ASSIGN, "'='")) {
+    if (n->a == NULL || !expect_name(p, n) || !expect(p, TOK_ASSIGN, "'='")) {
         return NULL;
     }
     n->b = parse_initializer(p);
     if (n->b == NULL || !expect(p, TOK_SEMI, "';'")) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 // extern_decl = "extern" "fn" return_type identifier "(" [ param_list ] ")"
@@ -1705,13 +1762,13 @@ static ast_node_t* parse_extern_decl(parser_t* p) {
     ast_node_t* n = node_at(p, AST_FN_DECL, loc);
     n->flags = AST_FLAG_EXTERN;
     n->a = parse_return_type(p);
-    if (n->a == NULL || !expect_ident(p, &n->name) || !parse_params(p, n)) {
+    if (n->a == NULL || !expect_name(p, n) || !parse_params(p, n)) {
         return NULL;
     }
     if (!expect(p, TOK_SEMI, "';'")) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 // struct_decl = "struct" identifier "{" field { field } "}" (D3.8): no
@@ -1719,7 +1776,7 @@ static ast_node_t* parse_extern_decl(parser_t* p) {
 static ast_node_t* parse_struct_decl(parser_t* p) {
     ast_node_t* n = node_at(p, AST_STRUCT_DECL, here(p));
     bump(p);
-    if (!expect_ident(p, &n->name) || !expect(p, TOK_LBRACE, "'{'") || !enter(p)) {
+    if (!expect_name(p, n) || !expect(p, TOK_LBRACE, "'{'") || !enter(p)) {
         return NULL;
     }
     bool ok = true;
@@ -1730,16 +1787,16 @@ static ast_node_t* parse_struct_decl(parser_t* p) {
     while (ok && !at(p, TOK_RBRACE) && !at(p, TOK_EOF)) {
         ast_node_t* field = node_at(p, AST_FIELD_DECL, here(p));
         field->a = parse_type(p, false);
-        ok = field->a != NULL && expect_ident(p, &field->name) && expect(p, TOK_SEMI, "';'");
+        ok = field->a != NULL && expect_name(p, field) && expect(p, TOK_SEMI, "';'");
         if (ok) {
-            ast_push(n, field);
+            ast_push(n, finish(p, field));
         }
     }
     leave(p);
     if (!ok || !expect(p, TOK_RBRACE, "'}'")) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 // enum_decl = "enum" identifier "{" enum_member { "," enum_member } [ "," ]
@@ -1747,7 +1804,7 @@ static ast_node_t* parse_struct_decl(parser_t* p) {
 static ast_node_t* parse_enum_decl(parser_t* p) {
     ast_node_t* n = node_at(p, AST_ENUM_DECL, here(p));
     bump(p);
-    if (!expect_ident(p, &n->name) || !expect(p, TOK_LBRACE, "'{'") || !enter(p)) {
+    if (!expect_name(p, n) || !expect(p, TOK_LBRACE, "'{'") || !enter(p)) {
         return NULL;
     }
     bool ok = true;
@@ -1757,7 +1814,7 @@ static ast_node_t* parse_enum_decl(parser_t* p) {
     }
     while (ok) {
         ast_node_t* member = node_at(p, AST_ENUM_MEMBER, here(p));
-        ok = expect_ident(p, &member->name);
+        ok = expect_name(p, member);
         if (ok && at(p, TOK_ASSIGN)) {
             bump(p);
             member->a = parse_expr(p);
@@ -1766,7 +1823,7 @@ static ast_node_t* parse_enum_decl(parser_t* p) {
         if (!ok) {
             break;
         }
-        ast_push(n, member);
+        ast_push(n, finish(p, member));
         if (!at(p, TOK_COMMA)) {
             break;
         }
@@ -1779,7 +1836,7 @@ static ast_node_t* parse_enum_decl(parser_t* p) {
     if (!ok || !expect(p, TOK_RBRACE, "'}'")) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 // import_decl = "import" import_path [ "as" identifier ] ";" or "import"
@@ -1790,18 +1847,19 @@ static bool parse_import_items(parser_t* p, ast_node_t* n) {
     bump(p);
     for (;;) {
         ast_node_t* item = node_at(p, AST_IMPORT_ITEM, here(p));
-        if (!expect_ident(p, &item->name)) {
+        if (!expect_name(p, item)) {
             return false;
         }
         if (at(p, TOK_KW_AS)) {
             const loc_t loc = here(p);
             bump(p);
             item->a = node_at(p, AST_IDENT, loc);
-            if (!expect_ident(p, &item->a->name)) {
+            if (!expect_name(p, item->a)) {
                 return false;
             }
+            (void)finish(p, item->a);
         }
-        ast_push(n, item);
+        ast_push(n, finish(p, item));
         if (!at(p, TOK_COMMA)) {
             break;
         }
@@ -1820,10 +1878,13 @@ static ast_node_t* parse_import(parser_t* p) {
     n->a = path;
     for (;;) {
         ast_node_t* segment = node_at(p, AST_IDENT, here(p));
-        if (!expect_ident(p, &segment->name)) {
+        if (!expect_name(p, segment)) {
             return NULL;
         }
-        ast_push(path, segment);
+        ast_push(path, finish(p, segment));
+        // The path ends at its last segment, so it is extended here and not
+        // after the loop: the `::{ ... }` of an item list is not part of it.
+        (void)finish(p, path);
         if (!at(p, TOK_COLON_COLON)) {
             break;
         }
@@ -1839,14 +1900,15 @@ static ast_node_t* parse_import(parser_t* p) {
         const loc_t loc = here(p);
         bump(p);
         n->b = node_at(p, AST_IDENT, loc);
-        if (!expect_ident(p, &n->b->name)) {
+        if (!expect_name(p, n->b)) {
             return NULL;
         }
+        (void)finish(p, n->b);
     }
     if (!expect(p, TOK_SEMI, "';'")) {
         return NULL;
     }
-    return n;
+    return finish(p, n);
 }
 
 // top_decl = fn_decl | extern_decl | struct_decl | enum_decl | global_decl
@@ -1912,5 +1974,5 @@ ast_node_t* parse_module(const char* file,
     }
     const bool failed = p.failed;
     sb_free(&p.msg);
-    return failed ? NULL : mod;
+    return failed ? NULL : finish(&p, mod);
 }

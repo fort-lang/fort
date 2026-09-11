@@ -44,10 +44,129 @@ TEST(loc_make_fills_every_field, {
     TEST_ASSERT_EQ_INT32((int32_t)loc.col, 5);
 })
 
+// A position with no extent yet is the empty range at that position (D20.4).
+TEST(loc_make_is_the_empty_range_at_its_position, {
+    const loc_t loc = loc_make("main.ft", 7, 5);
+    TEST_ASSERT_EQ_INT32((int32_t)loc.end_line, 7);
+    TEST_ASSERT_EQ_INT32((int32_t)loc.end_col, 5);
+})
+
 TEST(loc_holds_the_largest_line_and_column, {
     const loc_t loc = loc_make("f", UINT32_MAX, UINT32_MAX);
     TEST_ASSERT_EQ_UINT64((uint64_t)loc.line, (uint64_t)UINT32_MAX);
     TEST_ASSERT_EQ_UINT64((uint64_t)loc.col, (uint64_t)UINT32_MAX);
+    TEST_ASSERT_EQ_UINT64((uint64_t)loc.end_line, (uint64_t)UINT32_MAX);
+    TEST_ASSERT_EQ_UINT64((uint64_t)loc.end_col, (uint64_t)UINT32_MAX);
+})
+
+TEST(loc_range_fills_every_field, {
+    const loc_t loc = loc_range("main.ft", 7, 5, 9, 12);
+    TEST_ASSERT_EQ_STR(loc.file, "main.ft");
+    TEST_ASSERT_EQ_INT32((int32_t)loc.line, 7);
+    TEST_ASSERT_EQ_INT32((int32_t)loc.col, 5);
+    TEST_ASSERT_EQ_INT32((int32_t)loc.end_line, 9);
+    TEST_ASSERT_EQ_INT32((int32_t)loc.end_col, 12);
+})
+
+// The end is exclusive, so a token of n bytes ends n columns further on
+// (D20.4).
+TEST(a_token_range_ends_one_past_its_last_byte, {
+    const loc_t loc = loc_range("t.ft", 1, 5, 1, 5 + 3);
+    TEST_ASSERT_EQ_INT32((int32_t)(loc.end_col - loc.col), 3);
+})
+
+// ---- comparing and extending ranges ----------------------------------------------
+
+TEST(starts_compare_the_line_first, {
+    TEST_ASSERT_TRUE(loc_starts_at_or_before(loc_make("a.ft", 1, 100), loc_make("a.ft", 2, 1)));
+    TEST_ASSERT_FALSE(loc_starts_at_or_before(loc_make("a.ft", 2, 1), loc_make("a.ft", 1, 100)));
+})
+
+TEST(starts_compare_the_column_within_a_line, {
+    TEST_ASSERT_TRUE(loc_starts_at_or_before(loc_make("a.ft", 3, 4), loc_make("a.ft", 3, 5)));
+    TEST_ASSERT_FALSE(loc_starts_at_or_before(loc_make("a.ft", 3, 5), loc_make("a.ft", 3, 4)));
+})
+
+TEST(a_start_is_at_or_before_itself,
+     { TEST_ASSERT_TRUE(loc_starts_at_or_before(loc_make("a.ft", 3, 4), loc_make("a.ft", 3, 4))); })
+
+// Ends compare the same way, and the start plays no part in it.
+TEST(ends_compare_independently_of_the_starts, {
+    const loc_t early = loc_range("a.ft", 1, 1, 1, 9);
+    const loc_t late = loc_range("a.ft", 5, 1, 5, 2);
+    TEST_ASSERT_TRUE(loc_ends_at_or_before(early, late));
+    TEST_ASSERT_FALSE(loc_ends_at_or_before(late, early));
+    TEST_ASSERT_TRUE(loc_ends_at_or_before(early, early));
+})
+
+TEST(a_range_is_ordered_when_its_end_is_not_before_its_start, {
+    TEST_ASSERT_TRUE(loc_is_ordered(loc_range("a.ft", 1, 1, 3, 2)));
+    TEST_ASSERT_TRUE(loc_is_ordered(loc_make("a.ft", 4, 7)));
+    TEST_ASSERT_FALSE(loc_is_ordered(loc_range("a.ft", 3, 2, 1, 1)));
+})
+
+TEST(loc_extend_moves_the_end_and_keeps_the_start, {
+    const loc_t joined = loc_extend(loc_range("a.ft", 1, 5, 1, 6), loc_range("a.ft", 1, 9, 1, 12));
+    TEST_ASSERT_EQ_INT32((int32_t)joined.line, 1);
+    TEST_ASSERT_EQ_INT32((int32_t)joined.col, 5);
+    TEST_ASSERT_EQ_INT32((int32_t)joined.end_line, 1);
+    TEST_ASSERT_EQ_INT32((int32_t)joined.end_col, 12);
+})
+
+TEST(loc_extend_spans_lines, {
+    const loc_t joined = loc_extend(loc_range("a.ft", 2, 1, 2, 3), loc_range("a.ft", 8, 1, 8, 2));
+    TEST_ASSERT_EQ_INT32((int32_t)joined.line, 2);
+    TEST_ASSERT_EQ_INT32((int32_t)joined.col, 1);
+    TEST_ASSERT_EQ_INT32((int32_t)joined.end_line, 8);
+    TEST_ASSERT_EQ_INT32((int32_t)joined.end_col, 2);
+})
+
+// Joining never shrinks a range (D20.4), so a range already covering the
+// second one comes back unchanged.
+// Extending never moves the start, so a range that already covers the other
+// one comes back unchanged: a start further left is not adopted (D20.4).
+TEST(loc_extend_keeps_the_later_end_and_never_widens_leftwards, {
+    const loc_t right = loc_range("a.ft", 1, 9, 1, 12);
+    const loc_t extended = loc_extend(right, loc_range("a.ft", 1, 1, 1, 4));
+    TEST_ASSERT_EQ_INT32((int32_t)extended.col, 9);
+    TEST_ASSERT_EQ_INT32((int32_t)extended.end_col, 12);
+})
+
+TEST(loc_extend_keeps_the_later_end, {
+    const loc_t wide = loc_range("a.ft", 1, 1, 5, 2);
+    const loc_t joined = loc_extend(wide, loc_range("a.ft", 2, 1, 2, 4));
+    TEST_ASSERT_EQ_INT32((int32_t)joined.end_line, 5);
+    TEST_ASSERT_EQ_INT32((int32_t)joined.end_col, 2);
+})
+
+// Extending again with a token the range already covers changes nothing, so a
+// node finished at several levels keeps one range (D20.4).
+TEST(loc_extend_is_idempotent, {
+    const loc_t a = loc_range("a.ft", 1, 1, 1, 8);
+    const loc_t once = loc_extend(a, loc_range("a.ft", 1, 5, 1, 8));
+    const loc_t twice = loc_extend(once, loc_range("a.ft", 1, 5, 1, 8));
+    TEST_ASSERT_EQ_INT32((int32_t)twice.line, (int32_t)once.line);
+    TEST_ASSERT_EQ_INT32((int32_t)twice.col, (int32_t)once.col);
+    TEST_ASSERT_EQ_INT32((int32_t)twice.end_line, (int32_t)once.end_line);
+    TEST_ASSERT_EQ_INT32((int32_t)twice.end_col, (int32_t)once.end_col);
+})
+
+TEST(loc_extend_with_an_empty_range_at_the_same_end_changes_nothing, {
+    const loc_t a = loc_range("a.ft", 1, 1, 1, 4);
+    const loc_t joined = loc_extend(a, loc_make("a.ft", 1, 4));
+    TEST_ASSERT_EQ_INT32((int32_t)joined.col, 1);
+    TEST_ASSERT_EQ_INT32((int32_t)joined.end_col, 4);
+})
+
+TEST(loc_extend_keeps_the_file_of_the_first, {
+    const loc_t joined = loc_extend(loc_make("a.ft", 1, 1), loc_range("b.ft", 1, 2, 1, 3));
+    TEST_ASSERT_EQ_STR(joined.file, "a.ft");
+})
+
+TEST(extending_an_empty_range_with_a_token_gives_the_token, {
+    const loc_t joined = loc_extend(loc_make("a.ft", 4, 7), loc_range("a.ft", 4, 7, 4, 10));
+    TEST_ASSERT_EQ_INT32((int32_t)joined.col, 7);
+    TEST_ASSERT_EQ_INT32((int32_t)joined.end_col, 10);
 })
 
 // ---- errors and notes ------------------------------------------------------------
@@ -115,6 +234,30 @@ TEST(positionless_errors_use_line_one_column_one, {
     begin_capture();
     diag_error(loc_make("main.ft", 1, 1), "missing 'main'");
     TEST_ASSERT_EQ_STR(captured(), "main.ft:1:1: error: missing 'main'\n");
+    end_capture();
+})
+
+// The text form of D14.2 prints the start only, so a range prints exactly
+// what a bare position printed before ranges existed (D20.4).
+TEST(a_range_prints_only_its_start, {
+    begin_capture();
+    diag_error(loc_range("main.ft", 7, 5, 7, 6), "cannot assign to immutable 'x'");
+    diag_note(loc_range("main.ft", 3, 9, 5, 2), "'x' declared here");
+    diag_error(loc_range("util.ft", 12, 23, 12, 24), "expected ';'");
+    TEST_ASSERT_EQ_STR(captured(),
+                       "main.ft:7:5: error: cannot assign to immutable 'x'\n"
+                       "main.ft:3:9: note: 'x' declared here\n"
+                       "util.ft:12:23: error: expected ';'\n");
+    end_capture();
+})
+
+TEST(a_range_and_a_bare_position_print_the_same_line, {
+    begin_capture();
+    diag_error(loc_make("main.ft", 7, 5), "same");
+    diag_error(loc_range("main.ft", 7, 5, 9, 40), "same");
+    TEST_ASSERT_EQ_STR(captured(),
+                       "main.ft:7:5: error: same\n"
+                       "main.ft:7:5: error: same\n");
     end_capture();
 })
 
@@ -484,7 +627,23 @@ int main(int argc, char** argv) {
     TEST_INIT("diag", argc, argv);
 
     TEST_RUN(loc_make_fills_every_field);
+    TEST_RUN(loc_make_is_the_empty_range_at_its_position);
     TEST_RUN(loc_holds_the_largest_line_and_column);
+    TEST_RUN(loc_range_fills_every_field);
+    TEST_RUN(a_token_range_ends_one_past_its_last_byte);
+    TEST_RUN(starts_compare_the_line_first);
+    TEST_RUN(starts_compare_the_column_within_a_line);
+    TEST_RUN(a_start_is_at_or_before_itself);
+    TEST_RUN(ends_compare_independently_of_the_starts);
+    TEST_RUN(a_range_is_ordered_when_its_end_is_not_before_its_start);
+    TEST_RUN(loc_extend_moves_the_end_and_keeps_the_start);
+    TEST_RUN(loc_extend_spans_lines);
+    TEST_RUN(loc_extend_keeps_the_later_end_and_never_widens_leftwards);
+    TEST_RUN(loc_extend_keeps_the_later_end);
+    TEST_RUN(loc_extend_is_idempotent);
+    TEST_RUN(loc_extend_with_an_empty_range_at_the_same_end_changes_nothing);
+    TEST_RUN(loc_extend_keeps_the_file_of_the_first);
+    TEST_RUN(extending_an_empty_range_with_a_token_gives_the_token);
 
     TEST_RUN(error_prints_the_toolchain_format);
     TEST_RUN(note_prints_the_toolchain_format);
@@ -493,6 +652,8 @@ int main(int argc, char** argv) {
     TEST_RUN(reset_clears_the_count);
     TEST_RUN(reset_does_not_touch_captured_text);
     TEST_RUN(positionless_errors_use_line_one_column_one);
+    TEST_RUN(a_range_prints_only_its_start);
+    TEST_RUN(a_range_and_a_bare_position_print_the_same_line);
     TEST_RUN(large_line_and_column_numbers_print_in_full);
     TEST_RUN(file_paths_with_directories_print_as_given);
     TEST_RUN(an_empty_message_still_prints_the_prefix);

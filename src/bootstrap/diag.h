@@ -14,19 +14,43 @@
 #ifndef FORT_DIAG_H
 #define FORT_DIAG_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "str.h"
 
-// A position in a source file: 1-based line and column (toolchain.md 4). An
-// error without a position in the file uses 1:1 (D14.2).
+// A range in a source file: 1-based lines and byte columns, a tab counting as
+// one column, the start inclusive and the end exclusive (D20.4, toolchain.md
+// 4). An error without a position in the file uses the empty range at 1:1
+// (D14.2). Only the start is printed; the end is what an editor underlines.
 typedef struct {
     const char* file;
     uint32_t line;
     uint32_t col;
+    uint32_t end_line;
+    uint32_t end_col;
 } loc_t;
 
+// The empty range at `line`:`col`: a position with no extent yet (D20.4).
 loc_t loc_make(const char* file, uint32_t line, uint32_t col);
+
+// The range from `line`:`col` to `end_line`:`end_col`, the end exclusive
+// (D20.4).
+loc_t loc_range(const char* file, uint32_t line, uint32_t col, uint32_t end_line, uint32_t end_col);
+
+// `a` with its end moved to the later of the two ends: it never moves the
+// start and never shrinks the range, so extending a range over a token it
+// already covers changes nothing (D20.4). To widen leftwards, build the range
+// from the leftmost start with loc_range.
+loc_t loc_extend(loc_t a, loc_t b);
+
+// Whether `a` starts at or before `b` starts, and whether `a` ends at or
+// before `b` ends; both compare line then column.
+bool loc_starts_at_or_before(loc_t a, loc_t b);
+bool loc_ends_at_or_before(loc_t a, loc_t b);
+
+// Whether `loc` ends at or after it starts, which every range does (D20.4).
+bool loc_is_ordered(loc_t loc);
 
 // Writes `<file>:<line>:<col>: error: <msg>` and counts one error.
 void diag_error(loc_t loc, const char* msg);
