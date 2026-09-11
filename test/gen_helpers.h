@@ -35,10 +35,16 @@
 
 enum { GEN_PATH_CAP = 512 };
 
-// The verifier every emitted module must pass (D19.1); CMake passes its path.
+// The verifier every emitted module must pass (D19.1); CMake passes its path,
+// and falls back to this name when it found none at configure time, so a
+// missing verifier surfaces here rather than at configure time.
 #ifndef FORT_OPT
 #define FORT_OPT "opt-18"
 #endif
+
+// The status a shell and posix_spawn's child both use when exec fails: the
+// one exit status that means the tool is missing rather than unhappy.
+enum { EXEC_FAILED_STATUS = 127 };
 
 // The environment of the spawned verifier. POSIX declares `environ` in
 // <unistd.h>, but glibc's is behind `#ifdef __USE_GNU`, which -std=c11 with
@@ -83,6 +89,18 @@ static inline void gen_done(void) {
     gen_remove_tree(gen_sandbox);
     gen_sandbox[0] = '\0';
     gen_open = false;
+}
+
+// A broken environment, not a failing module: the suite says which tool is
+// missing and ends with the test framework's error status, the way gen_begin
+// does when it cannot make its sandbox.
+static inline void gen_no_verifier(const char* what) {
+    TEST_UNUSED(fputs("gen: ", stderr));
+    TEST_UNUSED(fputs(what, stderr));
+    TEST_UNUSED(fputs(": ", stderr));
+    TEST_UNUSED(fputs(FORT_OPT, stderr));
+    TEST_UNUSED(fputs(" (llvm-18, see tools/provision.sh)\n", stderr));
+    exit(TEST_RESULT_ERR);
 }
 
 static inline void gen_begin(void) {
@@ -270,14 +288,20 @@ static inline const char* verified(void) {
     char quiet[] = "-disable-output";
     char* argv[] = {program, passes, quiet, path, NULL};
     pid_t child = 0;
-    if (posix_spawnp(&child, argv[0], NULL, NULL, argv, environ) != 0) {
-        return "the IR verifier failed to start";
-    }
+    const int spawned = posix_spawnp(&child, argv[0], NULL, NULL, argv, environ);
     int status = 0;
-    if (waitpid(child, &status, 0) != child) {
-        return "the IR verifier could not be waited for";
+    if (spawned == 0 && waitpid(child, &status, 0) != child) {
+        gen_no_verifier("the IR verifier could not be waited for");
     }
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+    // posix_spawnp reports only the failures it can see before the fork; a
+    // failed exec is the child exiting 127, and either way the environment is
+    // broken and not the module, so it ends the suite with a message naming
+    // the tool instead of an assertion reading "the verifier rejected this
+    // IR" (test/pipeline_test.sh does the same with exit 2).
+    if (spawned != 0 || !WIFEXITED(status) || WEXITSTATUS(status) == EXEC_FAILED_STATUS) {
+        gen_no_verifier("the IR verifier could not be run");
+    }
+    if (WEXITSTATUS(status) != 0) {
         return ir();
     }
     return "verified";

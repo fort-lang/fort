@@ -600,11 +600,12 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    function type) and needs no such declaration.
 
    The runtime entry points are declared with the C prototypes of section 5.1 and are never
-   variadic; a `fort_rt_*` function the standard library declares with `extern fn` is an
-   ordinary extern declaration instead (D13.1):
+   variadic, whether the compiler emits the call itself or the standard library reached the
+   entry point with an `extern fn` (D13.1), which is the rule the paragraph below the intrinsics
+   states in full:
 
    ```llvm
-   declare ptr  @fort_rt_new(i64, i64, ptr, i32, i32)
+   declare ptr @fort_rt_new(i64, i64, ptr, i32, i32)
    declare void @fort_rt_del(ptr)
    declare void @fort_rt_fail_bounds(i64, i64, ptr, i32, i32) #2
    declare void @fort_rt_fail_span(i64, i64, i64, ptr, i32, i32) #2
@@ -627,6 +628,10 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    declare void @fort_rt_print_enum(i32, i32, ptr, i64)
    declare void @fort_rt_flush(i32)
    declare void @fort_rt_flush_all()
+   declare void @fort_rt_args_init(i32, ptr)
+   declare ptr @fort_rt_args_ptr()
+   declare i64 @fort_rt_args_len()
+   declare void @fort_rt_exit(i32) #2
    ```
 
    The intrinsics are declared with the spellings LLVM 18 prints, in this fixed order, one per
@@ -655,7 +660,8 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    (`fort_rt_flush`, `fort_rt_exit`, the rest of section 5.1 that `std::libc` declares, D13.1)
    is emitted in the runtime group with that group's prototype and attributes and is left out of
    the extern group, variadic tail included. A plain runtime declaration carries no attribute
-   group; the failure entry points carry `#2` (item 14).
+   group; the `_Noreturn` entry points of section 5.1 carry `#2` (item 14), `fort_rt_exit`
+   included, whether the compiler or an `extern fn` brought them in.
 
 9. **Normalization** (D9.8, D19.2). A narrow value is not widened to 32 bits: an `i8` value has
    type `i8` and its width is in the type. The only extensions the emitter produces are the
@@ -725,9 +731,12 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
     label order (D19.5). Each failure block holds exactly one call to the section 5.1 entry
     point, with the check's values, `ptr @.file.N` and the `i32` line and column of section 4's
     position rule, followed by `unreachable`; nothing else, because the callee aborts (D11.4).
-    The failure entry points are declared `#2 = { cold noreturn nounwind }`: `noreturn` is
-    truthful, since each is `_Noreturn` in `runtime/fort_rt.h`, and `cold` lays the block out of
-    line. No attribute is put on a failure call site.
+    Every `_Noreturn` entry point of section 5.1 is declared `#2 = { cold noreturn nounwind }`:
+    the `fort_rt_fail_*` family, `fort_rt_panic` and `fort_rt_assert_fail`, which the failure
+    blocks call, and `fort_rt_exit`, which only `std::libc` reaches. `noreturn` is truthful,
+    since each is `_Noreturn` in `runtime/fort_rt.h`, and `cold` lays the block out of line,
+    which on an exit path is a layout hint and nothing more. No attribute is put on a failure
+    call site.
 
 15. **Integer checks** (D11.1, D11.3). In checked mode one intrinsic per operation, at the
     operand's width:
@@ -884,7 +893,7 @@ numbering are normal (D19.5):
 
 - `#0 = { nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }` on every fort definition
   (item 7), and `#1`, the same set plus `noreturn`, on a `noreturn` definition (item 20).
-- `#2 = { cold noreturn nounwind }` on the failure entry points (item 14).
+- `#2 = { cold noreturn nounwind }` on the `_Noreturn` entry points of section 5.1 (item 14).
 - `#3 = { nobuiltin }` on every extern call site (item 8).
 - `#4 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }` on the
   overflow intrinsics (item 15) and on `llvm.fptosi.sat` and `llvm.fptoui.sat` (item 12).

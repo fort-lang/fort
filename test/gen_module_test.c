@@ -536,6 +536,20 @@ TEST(a_c_function_two_modules_declare_is_declared_once, {
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
+TEST(two_declarations_of_one_c_name_never_reach_the_emitter_disagreeing, {
+    // The dedup above keeps the first symbol of a C name, which is only safe
+    // because the loader refuses two declarations of one extern that disagree
+    // (module-system.md 13); the emitter never chooses between them.
+    TEST_ASSERT_FALSE(emit_two("app.ft",
+                               "import util;\n"
+                               "extern fn i64 puts(i32 n);\n"
+                               "fn i32 main() { return cast(puts(7), i32); }\n",
+                               "util.ft",
+                               "extern fn i32 puts(char* s);\n"
+                               "fn i32 shout(char* s) { return puts(s); }\n"));
+    TEST_ASSERT_NONNULL(strstr(gen_said(), "conflicting declarations of extern 'puts'"));
+})
+
 // ---- the runtime group reached through an extern fn (item 8, D13.1) ----------------
 
 TEST(an_extern_naming_a_runtime_entry_point_takes_that_groups_prototype, {
@@ -618,6 +632,7 @@ int main(int argc, char** argv) {
     TEST_RUN(every_module_of_the_corpus_is_reproduced_byte_for_byte);
     TEST_RUN(the_modules_of_a_closure_are_emitted_in_dependency_order);
     TEST_RUN(a_c_function_two_modules_declare_is_declared_once);
+    TEST_RUN(two_declarations_of_one_c_name_never_reach_the_emitter_disagreeing);
     TEST_RUN(an_extern_naming_a_runtime_entry_point_takes_that_groups_prototype);
     TEST_RUN(the_argument_entry_points_are_declared_from_section_5_1);
     TEST_RUN(a_construct_the_emitter_cannot_lower_yet_is_a_diagnostic);
