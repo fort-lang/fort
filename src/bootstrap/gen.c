@@ -78,9 +78,10 @@ void gen_init(gen_t* g, gen_options_t opts) {
     g->temps = 0;
     g->labels = 0;
     g->tmps = 0;
-    g->loop_break = 0;
-    g->loop_continue = 0;
-    g->loop_depth = 0;
+    g->break_label = 0;
+    g->continue_label = 0;
+    g->has_break = false;
+    g->has_continue = false;
     ptrvec_init(&g->slots);
     g->terminated = false;
     ptrvec_init(&g->files);
@@ -173,10 +174,17 @@ uint32_t gen_int_bits(const type_t* t) {
     return prim_size(t->prim) * PRIM_BITS_PER_BYTE;
 }
 
-// Whether a value of `t` is compared and extended as signed (D3.1, D3.2):
-// `char`, `bool` and the unsigned integers are not.
-static bool type_is_signed(const type_t* t) {
-    return t != NULL && t->kind == TYPE_PRIM && prim_is_signed(t->prim);
+bool gen_is_signed(const type_t* t) {
+    if (t == NULL) {
+        return false;
+    }
+    if (t->kind == TYPE_ENUM) {
+        // An enum's `i32` is the signed type of D3.1: a member may be
+        // negative, so its constants print signed and a widening cast of one
+        // sign-extends (D3.9).
+        return true;
+    }
+    return t->kind == TYPE_PRIM && prim_is_signed(t->prim);
 }
 
 // The dotted name of a nominal type's declaration, `%struct.main.point`
@@ -457,7 +465,7 @@ gen_val_t gen_const_value(gen_t* g, const type_t* t, cval_t v) {
     }
     // A char in an integer context is its code point, so the folder is asked
     // for the integer of an integer-like value (D4.3).
-    return const_bits(g, ty, cv_bits(cv_as_int(v)), gen_int_bits(t), type_is_signed(t));
+    return const_bits(g, ty, cv_bits(cv_as_int(v)), gen_int_bits(t), gen_is_signed(t));
 }
 
 gen_val_t gen_binary(gen_t* g, const char* op, gen_val_t a, gen_val_t b) {
@@ -662,6 +670,35 @@ void gen_br_cond(gen_t* g, gen_val_t cond, uint64_t t, uint64_t f) {
     g->terminated = true;
 }
 
+// A fort `switch` is one LLVM `switch` on the operand, with one case per
+// label and a default block (item 10). The case list is indented one level
+// further than an instruction, and the `]` that closes it stands where an
+// instruction does, which is how LLVM prints it.
+void gen_switch_begin(gen_t* g, gen_val_t operand, uint64_t default_label) {
+    sb_append(&g->body, "  switch ");
+    sb_append_str(&g->body, operand.ty);
+    sb_push(&g->body, ' ');
+    sb_append_str(&g->body, operand.val);
+    sb_append(&g->body, ", label %L");
+    sb_append_u64(&g->body, default_label);
+    sb_append(&g->body, " [\n");
+}
+
+void gen_switch_case(gen_t* g, gen_val_t value, uint64_t label) {
+    sb_append(&g->body, "    ");
+    sb_append_str(&g->body, value.ty);
+    sb_push(&g->body, ' ');
+    sb_append_str(&g->body, value.val);
+    sb_append(&g->body, ", label %L");
+    sb_append_u64(&g->body, label);
+    sb_push(&g->body, '\n');
+}
+
+void gen_switch_end(gen_t* g) {
+    sb_append(&g->body, "  ]\n");
+    g->terminated = true;
+}
+
 // ---- checks and failure blocks (item 14, D19.6) -----------------------------------
 
 void gen_args_add_loc(gen_t* g, gen_args_t* args, loc_t loc) {
@@ -702,6 +739,11 @@ void gen_check(gen_t* g, gen_val_t cond, bool fail_when, gen_rt_t rt, gen_args_t
     gen_args_add_loc(g, args, loc);
     fail_block(g, bad, rt, args);
     gen_block_begin(g, cont);
+}
+
+void gen_fail_block(gen_t* g, uint64_t label, gen_rt_t rt, gen_args_t* args, loc_t loc) {
+    gen_args_add_loc(g, args, loc);
+    fail_block(g, label, rt, args);
 }
 
 void gen_use_intrinsic(gen_t* g, gen_intrinsic_t which) {
@@ -885,9 +927,10 @@ static void function_begin(gen_t* g) {
     g->temps = 0;
     g->labels = 0;
     g->tmps = 0;
-    g->loop_break = 0;
-    g->loop_continue = 0;
-    g->loop_depth = 0;
+    g->break_label = 0;
+    g->continue_label = 0;
+    g->has_break = false;
+    g->has_continue = false;
     free_records(&g->slots);
     ptrvec_init(&g->slots);
     sb_clear(&g->allocas);

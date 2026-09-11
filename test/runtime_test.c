@@ -518,6 +518,28 @@ TEST(overwrite_message, {
                        "dir/main.ft:12:14: runtime error: overwriting owned value\n");
 })
 
+static void fail_enum(void) {
+    fort_rt_fail_enum(0, "level", FILE_NAME, LINE, COL);
+}
+
+// The default a `switch` over an enum with no `default` clause is given
+// (D7.7): the zero value reaches it whenever 0 is not a member (D3.9).
+TEST(enum_message, {
+    ASSERT_ABORTS_WITH(fail_enum,
+                       "dir/main.ft:12:14: runtime error: enum value 0 is not a member of level\n");
+})
+
+static void fail_enum_negative(void) {
+    fort_rt_fail_enum(-7, "sign", FILE_NAME, LINE, COL);
+}
+
+// The value arrives sign-extended to 64 bits and prints signed, since an
+// enum's `i32` is the signed type of D3.1 (D3.9, toolchain.md 5.1).
+TEST(enum_message_prints_the_value_signed, {
+    ASSERT_ABORTS_WITH(fail_enum_negative,
+                       "dir/main.ft:12:14: runtime error: enum value -7 is not a member of sign\n");
+})
+
 static void panic_message_body(void) {
     fort_rt_panic("queue empty", 11, FILE_NAME, LINE, COL);
 }
@@ -767,6 +789,8 @@ int main(int argc, char** argv) {
     TEST_RUN(alloc_count_message);
     TEST_RUN(alloc_count_message_at_the_minimum);
     TEST_RUN(overwrite_message);
+    TEST_RUN(enum_message);
+    TEST_RUN(enum_message_prints_the_value_signed);
     TEST_RUN(panic_message);
     TEST_RUN(panic_with_an_empty_message);
     TEST_RUN(panic_prints_len_bytes_not_a_c_string);

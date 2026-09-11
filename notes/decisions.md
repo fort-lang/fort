@@ -145,7 +145,9 @@ Owner: `type-system.md`.
   no inheritance, no per-field `mut` at the field's own level (D5.5). An empty struct is an
   error. A struct may contain itself only through a pointer or span; value-containment cycles
   are "infinite size" errors.
-- **D3.9** Enums: `enum color { red, green = 5, blue }`. Underlying type `i32`, size 4. Members
+- **D3.9** Enums: `enum color { red, green = 5, blue }`. Underlying type `i32`, size 4, and `i32`
+  is the signed type of D3.1: a member may be negative, a widening `cast` sign-extends, and the
+  enum table of `toolchain.md` 6 prints the member signed. Members
   are scoped: `color.red` everywhere, including `case` labels; `m.color.red` across modules.
   Values start at 0 and increment; an explicit value is a constant expression that may not refer
   to the enum itself; duplicate values are errors. Enums support `== !=`, `switch` (D7.7) and
@@ -457,7 +459,17 @@ Owner: `core-language.md` (Statements).
   a body). `break` inside a case exits the switch (C semantics; the "break inside switch inside
   loop" trap is documented); `continue` targets the enclosing loop.
 - **D7.7** A `switch` over an enum with no `default` must list every member; otherwise it is a
-  compile error. Rationale: adding a member then finds every switch that needs updating.
+  compile error. Rationale: adding a member then finds every switch that needs updating. Listing
+  every member is not covering every value: D3.9 zeroes an enum to 0 whether or not 0 is a member
+  and leaves int-to-enum unchecked, so a value outside the member set is reachable in a program
+  with no error in it. The compiler therefore gives such a switch a `default` of its own that
+  reports a runtime error naming the enum and the value, and does not return. D10.7 leaves no
+  third option: the case is not in its list of undefined behaviour, so it is defined or
+  diagnosed, and it cannot be diagnosed at compile time. It is not a bounds check, so
+  `--no-bounds-check` does not remove it (D10.6). Amended 2026-09-11: the rule said which switches
+  compile and not what the ones it admits do with a value no clause names; T-020's review found
+  the emitter naming the continuation as the LLVM default, where the epilogue had written
+  `unreachable`, so a legal program became UB that `-O1` then folded on.
 - **D7.8** `defer` followed by an assignment, a `++`/`--` statement, a call statement, or a
   block (`grammar.md`, `defer_stmt`). The deferred code runs when the enclosing block is
   exited by any path: falling off the end, `return`, `break`, `continue`. The set of deferred
@@ -507,7 +519,8 @@ Owner: `core-language.md` (Functions).
 - **D8.4** Terminating statements: `return`; a call to a `noreturn` function or to `panic`; an
   `if` with an `else` whose branches both terminate; `while (true)`, `for (;;)` or a `for` with an
   empty condition, with no `break` targeting it; a `switch` all of whose cases terminate and
-  that either has a `default` or is an exhaustive enum switch (D7.7); a block whose last
+  that either has a `default` or is an exhaustive enum switch (D7.7), which terminates through the
+  default the compiler gives it; a block whose last
   statement terminates. A non-`void` function body must end in a terminating statement or it is
   a compile error ("missing return", reported at the body's closing brace). Rationale: catching
   this at compile time is a core "better than C" promise, and the structural rule is a few dozen
@@ -700,7 +713,8 @@ Owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime)
 - **D11.4** Runtime error contract: the runtime flushes buffered output, writes one line to
   stderr, and calls `abort()`, so the process dies with SIGABRT (status 134 under a shell).
   Formats: `<file>:<line>:<col>: runtime error: <message>` for checks (bounds, overflow, shift,
-  division, allocation, ownership), `<file>:<line>:<col>: panic: <message>` for `panic`, and
+  division, allocation, ownership, enum `switch`), `<file>:<line>:<col>: panic: <message>` for
+  `panic`, and
   `<file>:<line>:<col>: assertion failed: <expression text>` for `assert`. Deferred code does not
   run. The check messages are fixed, with the offending values in decimal:
 
@@ -716,13 +730,15 @@ Owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime)
   | `new` size overflow                | `allocation size overflow`                         |
   | allocation failure                 | `out of memory`                                    |
   | overwriting a live `own` value (D17.11) | `overwriting owned value`                     |
+  | an enum value no clause names (D7.7) | `enum value 0 is not a member of level`          |
 
   The end of a `noreturn` function is guarded by a trap (SIGILL, no message, D19.7), since a
   conforming body never reaches it. `<file>` is the path the compiler opened (search
   root as given plus the relative module path); the column of a check is that of its operator
-  token, or of the builtin's name for `new`, `assert` and `panic`; the `assert` text is the
-  source text of the expression, verbatim. Amended 2026-09-10: the bounds message read `slice
-  bounds ...` while spans were called slices (D3.5).
+  token, or of the builtin's name for `new`, `assert` and `panic`, or of the `switch` keyword for
+  the default of D7.7; the `assert` text is the source text of the expression, verbatim. Amended
+  2026-09-10: the bounds message read `slice bounds ...` while spans were called slices (D3.5).
+  Amended 2026-09-11 (T-020): the enum `switch` default of D7.7 was added.
 - **D11.5** Output buffering: `print`/`println` write to a runtime buffer for stdout;
   `eprint`/`eprintln` are unbuffered; `fprint`/`fprintln` use one runtime buffer per descriptor,
   and `fprint(1, ...)` shares the stdout buffer with `print`. An `extern` write to a descriptor
@@ -1179,7 +1195,10 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   verifier is a floor; the emitter's own tests assert block structure.
 - **D19.6** Checks and failure blocks. Every runtime check (D10.6, D11.1, D11.3, D17.11)
   computes one `i1` that is true on failure and branches with the failure block as the first
-  label; `assert` is the exception, since its operand is already the success condition (D12.2).
+  label; `assert` is the exception, since its operand is already the success condition (D12.2),
+  and so is the `default` D7.7 gives an enum `switch`, which the switch's own default edge
+  reaches. Amended 2026-09-11 (T-020): the `switch` default was added, with
+  `fort_rt_fail_enum` in `toolchain.md` 5.1.
   Failure blocks are emitted after every normal block of the function, in ascending label order;
   each holds exactly one call to the `toolchain.md` 5.1 entry point, with the offending values,
   the file constant and the line and column of D11.4's position rule, followed by `unreachable`.

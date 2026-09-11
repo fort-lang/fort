@@ -357,7 +357,9 @@ void  fort_rt_del(void* p);
 // source text of the assert argument. fail_div_overflow is MIN / -1 and MIN % -1;
 // fail_alloc_count is new(T, n) with a negative signed n; fail_overwrite is an
 // assignment to an own reference-typed lvalue whose current value is not zero
-// (D17.11), emitted in checked builds only.
+// (D17.11), emitted in checked builds only; fail_enum is the default a switch
+// over an enum with no `default` clause is given (D7.7), where type is the
+// enum's name, and it is emitted in both build modes.
 void fort_rt_fail_bounds(int64_t index, uint64_t len, loc);
 void fort_rt_fail_span(int64_t lo, int64_t hi, uint64_t len, loc);
 void fort_rt_fail_overflow(loc);
@@ -366,6 +368,7 @@ void fort_rt_fail_div_zero(loc);
 void fort_rt_fail_div_overflow(loc);
 void fort_rt_fail_alloc_count(int64_t n, loc);
 void fort_rt_fail_overwrite(loc);
+void fort_rt_fail_enum(int64_t v, const char* type, loc);
 void fort_rt_panic(const char* ptr, uint64_t len, loc);
 void fort_rt_assert_fail(const char* text, loc);
 
@@ -441,6 +444,7 @@ Each failure writes exactly one line, after `fort_rt_flush_all`, then calls `abo
 | `fort_rt_new` (overflow)    | `runtime error: allocation size overflow`                  |
 | `fort_rt_new` (no memory)   | `runtime error: out of memory`                             |
 | `fort_rt_fail_overwrite`    | `runtime error: overwriting owned value`                   |
+| `fort_rt_fail_enum`         | `runtime error: enum value 0 is not a member of level`     |
 | `fort_rt_panic`             | `panic: <message bytes>`                                   |
 | `fort_rt_assert_fail`       | `assertion failed: <expression text>`                      |
 
@@ -718,7 +722,11 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
     runtime rather than fort code, which is why item 22 copies the argument span. Control flow
     is explicit blocks: `if`, `while`,
     `for`, `break` and `continue` become `br`; a fort `switch` on an integer, `char` or enum
-    becomes an LLVM `switch` with one case per label and a default block (D7.7); `&&`, `||` and
+    becomes an LLVM `switch` with one case per label and a default block: the `default` clause
+    wherever it stands, the continuation when there is none, and, for an enum switch with no
+    `default` clause, a failure block calling `fort_rt_fail_enum` with the operand
+    sign-extended to 64 bits and the enum's name, which is the default D7.7 gives it and which
+    neither build mode removes; `&&`, `||` and
     `?:` short-circuit through a stack slot rather than a `phi`, so the tree walk never has to
     know its predecessors; after a terminating statement the emitter opens a fresh `%L<N>` block
     for the unreachable statements D14.2 allows. Evaluation order needs nothing: LLVM keeps the
@@ -757,11 +765,14 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
     ```
 
     `assert` is the one exception: its operand is already the success condition, so it branches
-    to the continuation first (D12.2). The continuation label is allocated before the failure
-    label, and failure blocks are emitted after every normal block of the function, in ascending
-    label order (D19.5). Each failure block holds exactly one call to the section 5.1 entry
-    point, with the check's values, `ptr @.file.N` and the `i32` line and column of section 4's
-    position rule, followed by `unreachable`; nothing else, because the callee aborts (D11.4).
+    to the continuation first (D12.2), and the `default` D7.7 gives an enum `switch` is reached
+    by that switch's default edge rather than by a branch of its own. The continuation label is
+    allocated before the failure label, and failure blocks are emitted after every normal block
+    of the function, in ascending label order (D19.5), so the one a `switch` makes is written
+    before the bodies of its clauses, whose own checks take larger labels. Each failure block
+    holds exactly one call to the section 5.1 entry point, with the check's values,
+    `ptr @.file.N` and the `i32` line and column of section 4's position rule, followed by
+    `unreachable`; nothing else, because the callee aborts (D11.4).
     Every `_Noreturn` entry point of section 5.1 is declared `#2 = { cold noreturn nounwind }`:
     the `fort_rt_fail_*` family, `fort_rt_panic` and `fort_rt_assert_fail`, which the failure
     blocks call, and `fort_rt_exit`, which only `std::libc` reaches. `noreturn` is truthful,

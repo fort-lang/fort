@@ -650,6 +650,21 @@ _Noreturn void fort_rt_fail_overwrite(const char* file, uint32_t line, uint32_t 
     fail_runtime(file, line, col, "overwriting owned value");
 }
 
+// The default a `switch` over an enum with no `default` clause is given: a
+// value outside the member set is reachable, since a zeroed enum holds 0
+// whether or not 0 is a member and int-to-enum is unchecked (D3.9), and the
+// case is not undefined behavior (D10.7), so it is a runtime error naming the
+// enum and the value (D7.7).
+_Noreturn void fort_rt_fail_enum(
+    int64_t v, const char* type, const char* file, uint32_t line, uint32_t col) {
+    fail_begin(file, line, col, "runtime error");
+    message_str("enum value ");
+    message_i64(v);
+    message_str(" is not a member of ");
+    message_str(type);
+    fail_end();
+}
+
 _Noreturn void fort_rt_panic(
     const char* ptr, uint64_t len, const char* file, uint32_t line, uint32_t col) {
     fail_begin(file, line, col, "panic");

@@ -42,6 +42,8 @@ _Noreturn void fort_rt_fail_div_zero(const char* file, uint32_t line, uint32_t c
 _Noreturn void fort_rt_fail_div_overflow(const char* file, uint32_t line, uint32_t col);
 _Noreturn void fort_rt_fail_alloc_count(int64_t n, const char* file, uint32_t line, uint32_t col);
 _Noreturn void fort_rt_fail_overwrite(const char* file, uint32_t line, uint32_t col);
+_Noreturn void fort_rt_fail_enum(
+    int64_t v, const char* type, const char* file, uint32_t line, uint32_t col);
 _Noreturn void fort_rt_panic(
     const char* ptr, uint64_t len, const char* file, uint32_t line, uint32_t col);
 _Noreturn void fort_rt_assert_fail(const char* text, const char* file, uint32_t line, uint32_t col);

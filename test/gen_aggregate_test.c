@@ -516,6 +516,102 @@ TEST(the_alignment_of_every_place_comes_from_its_type, {
     TEST_ASSERT_EQ_STR(found("load i8, ptr %t0, align 1"), "load i8, ptr %t0, align 1");
 })
 
+// ---- the element classes of a fixed array (D3.4, item 2) ---------------------------
+
+TEST(an_array_of_a_padded_struct_strides_by_the_padded_size, {
+    // `pixel` is five bytes of fields and eight of storage, so the array type
+    // carries the stride and the zero of the whole array moves 24 bytes: an
+    // element type whose size is rounded up to its alignment is the class a
+    // stride computed from the fields alone would get wrong (D3.4, D3.8).
+    TEST_ASSERT_TRUE(emit("struct pixel { i32 code; char tag; }\n"
+                          "fn i32 main() {\n    pixel[3] mut ps = {};\n"
+                          "    ps[2] = pixel{3, 'c'};\n    return ps[2].code;\n}\n"));
+    TEST_ASSERT_EQ_STR(found("  %ps.0 = alloca [3 x %struct.main.pixel], align 4\n"),
+                       "  %ps.0 = alloca [3 x %struct.main.pixel], align 4\n");
+    TEST_ASSERT_EQ_STR(
+        found("  call void @llvm.memset.p0.i64(ptr align 4 %ps.0, i8 0, i64 24, i1 false)\n"),
+        "  call void @llvm.memset.p0.i64(ptr align 4 %ps.0, i8 0, i64 24, i1 false)\n");
+    TEST_ASSERT_EQ_STR(
+        found("getelementptr inbounds [3 x %struct.main.pixel], ptr %ps.0, i64 0, i64 %t0\n"),
+        "getelementptr inbounds [3 x %struct.main.pixel], ptr %ps.0, i64 0, i64 %t0\n");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+TEST(a_single_element_array_is_still_an_array_type, {
+    // `N` is greater than 0 (D3.4) and 1 is the smallest it may be: the
+    // element is reached by the array shape and not as a bare scalar.
+    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32[1] one = {7};\n"
+                          "    i64 i = 0;\n    return one[i] +% cast(one.len, i32);\n}\n"));
+    TEST_ASSERT_EQ_STR(found("  %one.0 = alloca [1 x i32], align 4\n"),
+                       "  %one.0 = alloca [1 x i32], align 4\n");
+    TEST_ASSERT_EQ_STR(found("getelementptr inbounds [1 x i32], ptr %one.0, i64 0, i64 0\n"),
+                       "getelementptr inbounds [1 x i32], ptr %one.0, i64 0, i64 0\n");
+    // `.len` is a constant, so the bounds check of the read compares against
+    // the literal 1 (D3.4, item 16).
+    TEST_ASSERT_EQ_STR(found("  %t2 = icmp uge i64 %t1, 1\n"), "  %t2 = icmp uge i64 %t1, 1\n");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+TEST(an_array_of_function_pointers_is_an_array_of_ptr, {
+    // A function type's suffix applies to the function type, so
+    // `fn i32(i32)[2]` is two function pointers, and every pointer is the
+    // opaque `ptr` (D3.6, D3.10, D19.2).
+    TEST_ASSERT_TRUE(emit("fn i32 twice(i32 n) { return n *% 2; }\n"
+                          "fn i32 main() {\n    fn i32(i32)[2] table = {twice, twice};\n"
+                          "    i64 i = 1;\n    return table[i](5);\n}\n"));
+    TEST_ASSERT_EQ_STR(found("  %table.0 = alloca [2 x ptr], align 8\n"),
+                       "  %table.0 = alloca [2 x ptr], align 8\n");
+    const char* want = "  %t0 = getelementptr inbounds [2 x ptr], ptr %table.0, i64 0, i64 0\n"
+                       "  store ptr @\"main.twice\", ptr %t0, align 8\n";
+    TEST_ASSERT_EQ_STR(found(want), want);
+    // The element is loaded as a `ptr` and called with the function type
+    // written out, since an opaque pointer carries none (item 7, D19.2).
+    TEST_ASSERT_EQ_STR(found("  %t6 = call i32 (i32) %t5(i32 5)\n"),
+                       "  %t6 = call i32 (i32) %t5(i32 5)\n");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+TEST(an_array_of_strings_strides_by_the_span_header, {
+    // A `string` is the sixteen-byte `%fort.span`, so an array of them is an
+    // array of that named type and each element's header is reached through
+    // the array shape and then the field shape (D3.7, item 3).
+    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    string[2] names = {\"a\", \"bc\"};\n"
+                          "    i64 i = 1;\n    return cast(names[i].len, i32);\n}\n"));
+    TEST_ASSERT_EQ_STR(found("  %names.0 = alloca [2 x %fort.span], align 8\n"),
+                       "  %names.0 = alloca [2 x %fort.span], align 8\n");
+    const char* want = "getelementptr inbounds [2 x %fort.span], ptr %names.0, i64 0, i64 1\n";
+    TEST_ASSERT_EQ_STR(found(want), want);
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+TEST(a_one_byte_element_and_an_eight_byte_one_keep_their_own_alignments, {
+    // The array's alignment is its element's, so a `char[4]` is one-byte
+    // aligned and an `i64[2]` eight (D3.4, D3.8).
+    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    char[4] mut cs = {};\n    i64[2] longs = {2, 1};\n"
+                          "    cs[0] = 'a';\n    return cast(longs[0], i32);\n}\n"));
+    TEST_ASSERT_EQ_STR(found("  %cs.0 = alloca [4 x i8], align 1\n"),
+                       "  %cs.0 = alloca [4 x i8], align 1\n");
+    TEST_ASSERT_EQ_STR(found("  %longs.1 = alloca [2 x i64], align 8\n"),
+                       "  %longs.1 = alloca [2 x i64], align 8\n");
+    TEST_ASSERT_EQ_STR(
+        found("  call void @llvm.memset.p0.i64(ptr align 1 %cs.0, i8 0, i64 4, i1 false)\n"),
+        "  call void @llvm.memset.p0.i64(ptr align 1 %cs.0, i8 0, i64 4, i1 false)\n");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+TEST(an_array_copy_moves_every_element_at_once, {
+    // A fixed array is a value type: assignment copies every element, which
+    // is one `llvm.memcpy` of the whole array (D3.4, D19.3).
+    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i64[3] a = {1, 2, 3};\n    i64[3] b = a;\n"
+                          "    return cast(b[0], i32);\n}\n"));
+    TEST_ASSERT_EQ_STR(
+        found("  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %b.1, ptr align 8 %a.0, i64 24, "
+              "i1 false)\n"),
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %b.1, ptr align 8 %a.0, i64 24, "
+        "i1 false)\n");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
 int main(int argc, char** argv) {
     TEST_INIT("gen_aggregate", argc, argv);
     TEST_RUN(a_local_place_is_its_entry_block_alloca);
@@ -557,6 +653,12 @@ int main(int argc, char** argv) {
     TEST_RUN(a_struct_wider_than_two_words_is_returned_and_copied_whole);
     TEST_RUN(a_copy_and_a_zero_move_the_padded_size_of_the_struct);
     TEST_RUN(the_alignment_of_every_place_comes_from_its_type);
+    TEST_RUN(an_array_of_a_padded_struct_strides_by_the_padded_size);
+    TEST_RUN(a_single_element_array_is_still_an_array_type);
+    TEST_RUN(an_array_of_function_pointers_is_an_array_of_ptr);
+    TEST_RUN(an_array_of_strings_strides_by_the_span_header);
+    TEST_RUN(a_one_byte_element_and_an_eight_byte_one_keep_their_own_alignments);
+    TEST_RUN(an_array_copy_moves_every_element_at_once);
     gen_done();
     TEST_EXIT();
 }

@@ -341,6 +341,15 @@ A safe(r) C-like systems programming language.
   name was built first. A construct the emitter does not lower yet reports
   `cannot generate code yet for <what>` through `gen_todo` and fails the compilation: an unfinished
   path is a diagnostic, never wrong code, and the ticket that implements it deletes its `gen_todo`.
+  One unit test asserts that an unlowered construct is refused
+  (`gen_module_test.c`, `a_construct_the_emitter_cannot_lower_yet_is_a_diagnostic`), so the
+  ticket that lowers the construct that test names re-points it at one still unlowered rather
+  than deleting it. `break` and `continue` are two targets and not one: a loop sets both, a
+  `switch` only the break target, because a `break` inside a switch inside a loop exits the
+  switch while a `continue` there still runs the loop's step (D7.6), so a construct that catches
+  an exit (`defer`) reads both. Each target is a label and a flag saying whether it is set, and
+  the flag is deliberately not a depth: nothing asks how many constructs an exit crosses, and a
+  counter whose balance no test can see is a bug waiting for the pass that starts reading it.
   Two C declarations of one name are one ELF symbol, so anything the module emits once -- an
   `extern` declaration above all -- deduplicates by the C name and never by `sym_t*`: two modules
   declaring the same function are two symbols, and a second `declare` is a redefinition `opt`

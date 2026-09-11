@@ -41,19 +41,6 @@ static bool is_bool(const type_t* t) {
     return t != NULL && t->kind == TYPE_PRIM && t->prim == PRIM_BOOL;
 }
 
-// Whether values of `t` are compared and extended as signed: the four signed
-// integers alone, since `char` is an unsigned byte and `bool` is 0 or 1
-// (D3.1, D3.2, D3.3). An enum is `i32` and reads as signed (D3.9).
-static bool is_signed(const type_t* t) {
-    if (t == NULL) {
-        return false;
-    }
-    if (t->kind == TYPE_ENUM) {
-        return true;
-    }
-    return t->kind == TYPE_PRIM && prim_is_signed(t->prim);
-}
-
 // A zero value of the type, the operand a negation and a division check need.
 static gen_val_t zero_of(gen_t* g, const type_t* t) {
     return gen_const_unsigned(g, gen_value_type(g, t), 0);
@@ -154,7 +141,7 @@ static void gen_print_arg(gen_t* g, ast_node_t* n, gen_val_t fd) {
     }
     // `i8 i16 i32 i64` are sign-extended to `i64` and `u8 u16 u32 u64`
     // zero-extended to it (item 19).
-    const bool sign = is_signed(t);
+    const bool sign = gen_is_signed(t);
     gen_args_add(&args,
                  gen_resize(g, v, gen_int_bits(t), str_from_cstr("i64"), (uint32_t)BITS_64, sign));
     gen_call_rt(g, sign ? RT_PRINT_I64 : RT_PRINT_U64, &args);
@@ -567,7 +554,8 @@ static gen_val_t gen_checked(gen_t* g, gen_overflow_t which, gen_val_t a, gen_va
 static gen_val_t gen_shift_count(
     gen_t* g, loc_t loc, const type_t* at, const type_t* bt, gen_val_t b, uint32_t bits) {
     const str_t i64ty = str_from_cstr("i64");
-    gen_val_t wide = gen_resize(g, b, gen_int_bits(bt), i64ty, (uint32_t)BITS_64, is_signed(bt));
+    gen_val_t wide =
+        gen_resize(g, b, gen_int_bits(bt), i64ty, (uint32_t)BITS_64, gen_is_signed(bt));
     if (g->opts.release) {
         // Release mode takes the count modulo the width (D11.1).
         const gen_val_t mask = gen_const_unsigned(g, i64ty, (uint64_t)bits - 1U);
@@ -592,7 +580,7 @@ static gen_val_t gen_shift_count(
 // Division and remainder, checked in both build modes (D6.13, D11.3).
 static gen_val_t gen_divide(
     gen_t* g, loc_t loc, int32_t op, const type_t* t, gen_val_t a, gen_val_t b) {
-    const bool sign = is_signed(t);
+    const bool sign = gen_is_signed(t);
     const uint32_t bits = gen_int_bits(t);
     const gen_val_t zero = zero_of(g, t);
     gen_val_t bad = gen_icmp(g, "eq", b, zero);
@@ -620,7 +608,7 @@ static gen_val_t gen_divide(
 
 gen_val_t gen_arith(
     gen_t* g, loc_t loc, int32_t op, const type_t* at, gen_val_t a, const type_t* bt, gen_val_t b) {
-    const bool sign = is_signed(at);
+    const bool sign = gen_is_signed(at);
     const uint32_t bits = gen_int_bits(at);
     switch (op) {
     case TOK_PLUS:
@@ -719,7 +707,7 @@ static gen_val_t gen_compare(gen_t* g, ast_node_t* n) {
     if (g->failed) {
         return gen_literal(g, str_from_cstr("i1"), "false");
     }
-    return gen_icmp(g, compare_pred(n->op, is_signed(t)), a, b);
+    return gen_icmp(g, compare_pred(n->op, gen_is_signed(t)), a, b);
 }
 
 // `&&` and `||` short-circuit through a stack slot rather than a `phi`, so
@@ -787,7 +775,7 @@ static gen_val_t gen_cast(gen_t* g, ast_node_t* n) {
         return v;
     }
     // Integer to integer widens by the source's signedness (item 12).
-    return gen_resize(g, v, from_bits, gen_value_type(g, to), to_bits, is_signed(from));
+    return gen_resize(g, v, from_bits, gen_value_type(g, to), to_bits, gen_is_signed(from));
 }
 
 // ---- places (item 3) --------------------------------------------------------------
@@ -839,7 +827,7 @@ static gen_place_t gen_index_place(gen_t* g, ast_node_t* n) {
                                        gen_int_bits(n->b->type),
                                        str_from_cstr("i64"),
                                        (uint32_t)BITS_64,
-                                       is_signed(n->b->type));
+                                       gen_is_signed(n->b->type));
     if (!g->opts.no_bounds_check) {
         const gen_val_t len = gen_length_of(g, ot, operand.addr);
         const gen_val_t bad = gen_icmp(g, "uge", index, len);
@@ -1103,6 +1091,14 @@ gen_val_t gen_expr_value(gen_t* g, ast_node_t* n) {
         }
         return gen_call(g, n, NULL);
     }
+    case AST_BRACE_INIT:
+        // `{}` on a scalar is the zero value, which the checker allows for an
+        // enum alone: a zeroed enum holds 0 even when 0 is not a member
+        // (D3.9, D6.5).
+        if (ast_len(n) == 0) {
+            return zero_of(g, n->type);
+        }
+        break;
     case AST_NEW:
         gen_todo(g, n->loc, "new");
         return gen_literal(g, str_from_cstr("ptr"), "null");

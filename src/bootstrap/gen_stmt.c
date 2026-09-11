@@ -17,6 +17,10 @@
 #include "sym.h"
 #include "types.h"
 
+// The width a failure entry point takes a value at: every value the runtime
+// reports arrives sign-extended to 64 bits (toolchain.md 5.1).
+enum { FAIL_VALUE_BITS = 64 };
+
 // The operator a compound assignment applies, or TOK_ASSIGN for a plain one:
 // `lv op= e` has the operand rules and the overflow behavior of `lv op e`
 // (D7.2).
@@ -172,15 +176,19 @@ static void gen_if(gen_t* g, ast_node_t* n) {
 // the innermost enclosing loop, so the enclosing targets are saved and
 // restored around it (D7.5).
 static void gen_loop_body(gen_t* g, ast_node_t* body, uint64_t brk, uint64_t cont) {
-    const uint64_t saved_break = g->loop_break;
-    const uint64_t saved_continue = g->loop_continue;
-    g->loop_break = brk;
-    g->loop_continue = cont;
-    g->loop_depth++;
+    const uint64_t saved_break = g->break_label;
+    const uint64_t saved_continue = g->continue_label;
+    const bool had_break = g->has_break;
+    const bool had_continue = g->has_continue;
+    g->break_label = brk;
+    g->continue_label = cont;
+    g->has_break = true;
+    g->has_continue = true;
     gen_block(g, body);
-    g->loop_depth--;
-    g->loop_break = saved_break;
-    g->loop_continue = saved_continue;
+    g->break_label = saved_break;
+    g->continue_label = saved_continue;
+    g->has_break = had_break;
+    g->has_continue = had_continue;
 }
 
 // `while (cond) { }` (D7.5): a head block that re-evaluates the condition, a
@@ -327,16 +335,134 @@ static void gen_range_for(gen_t* g, ast_node_t* n) {
     gen_block_begin(g, done);
 }
 
-// `break` and `continue` target the innermost enclosing loop (D7.5). A
-// `break` with no enclosing loop is not a checker error, since D7.6 lets one
-// stand in a `switch` alone, so this is unreachable only while `switch` is a
-// gen_todo: T-020 sets a target of its own, because a `break` inside a
-// `switch` inside a loop exits the switch (D7.6) and not the loop.
+// `break` targets the innermost enclosing loop or `switch` (D7.5, D7.6) and
+// `continue` the innermost enclosing loop alone. The checker refused a
+// `break` with neither construct around it and a `continue` outside every
+// loop, so a target is always set here (check_stmt.c).
 static void gen_break(gen_t* g, bool cont) {
-    if (g->loop_depth == 0) {
-        fatal_internal("gen: break or continue outside a loop");
+    if (cont ? !g->has_continue : !g->has_break) {
+        fatal_internal("gen: break or continue outside a loop or switch");
     }
-    gen_br(g, cont ? g->loop_continue : g->loop_break);
+    gen_br(g, cont ? g->continue_label : g->break_label);
+}
+
+// ---- switch (D7.6, D7.7) -----------------------------------------------------------
+
+// The body of one case clause, with `break` targeting the switch: a `break`
+// inside a `switch` inside a loop exits the switch and not the loop, and
+// `continue` still targets the loop the switch stands in (D7.6).
+static void gen_case_body(gen_t* g, ast_node_t* body, uint64_t brk) {
+    const uint64_t saved_break = g->break_label;
+    const bool had_break = g->has_break;
+    g->break_label = brk;
+    g->has_break = true;
+    gen_block(g, body);
+    g->break_label = saved_break;
+    g->has_break = had_break;
+}
+
+// The clause that is the `default`, or `clauses` when the switch has none: at
+// most one, in any position (D7.6).
+static uint64_t default_clause(const ast_node_t* n, uint64_t clauses) {
+    for (uint64_t i = 0; i < clauses; i++) {
+        const ast_node_t* clause = ast_child(n, i);
+        if (clause->kind == AST_CASE && (clause->flags & AST_FLAG_DEFAULT) != 0) {
+            return i;
+        }
+    }
+    return clauses;
+}
+
+// `switch (e) { case a, b: ... default: ... }` (D7.6): one LLVM `switch` on
+// the operand with one case per label, a block per clause and a default
+// block, which is the `default` clause wherever it stands, the failure block
+// of D7.7 for an enum switch that has no `default`, and the continuation
+// itself otherwise (item 10). Each case body is an implicit block scope with
+// an implicit `break` at its end, so a body that has not terminated branches
+// to the continuation and no clause ever falls into the next.
+static void gen_switch(gen_t* g, ast_node_t* n) {
+    const gen_val_t operand = gen_expr_value(g, n->a);
+    if (g->failed) {
+        return;
+    }
+    const uint64_t clauses = ast_len(n);
+    const type_t* ot = n->a->type;
+    const uint64_t fallback_clause = default_clause(n, clauses);
+    // A `switch` over an enum with no `default` lists every member (D7.7) and
+    // still meets values outside the member set, since a zeroed enum holds 0
+    // whether or not 0 is a member and int-to-enum is unchecked (D3.9). That
+    // is not in D10.7's list of undefined behavior and cannot be diagnosed,
+    // so the compiler gives the switch a `default` of its own that reports a
+    // runtime error naming the enum and the value (D7.7).
+    const bool generated_default =
+        fallback_clause == clauses && ot != NULL && ot->kind == TYPE_ENUM;
+    gen_val_t reported = operand;
+    if (generated_default) {
+        // The value the failure names, widened in the block the switch stands
+        // in, which dominates the failure block (D19.4, D19.6).
+        reported = gen_resize(
+            g, operand, gen_int_bits(ot), str_from_cstr("i64"), (uint32_t)FAIL_VALUE_BITS, true);
+    }
+    // Labels are `%L<N>` in creation order, so one block per clause is
+    // allocated in clause order and the continuation last (D19.5); the
+    // counter hands out consecutive numbers, so clause `i` owns `first + i`.
+    const uint64_t first = g->labels;
+    for (uint64_t i = 0; i < clauses; i++) {
+        (void)gen_label(g);
+    }
+    const uint64_t done = gen_label(g);
+    // The default target: the `default` clause wherever it stands, the
+    // failure block of D7.7 whose label follows the continuation's (D19.6),
+    // or the continuation itself.
+    uint64_t fallback = done;
+    if (generated_default) {
+        fallback = gen_label(g);
+    } else if (fallback_clause != clauses) {
+        fallback = first + fallback_clause;
+    }
+    gen_switch_begin(g, operand, fallback);
+    for (uint64_t i = 0; i < clauses; i++) {
+        const ast_node_t* clause = ast_child(n, i);
+        if (clause->kind != AST_CASE) {
+            continue;
+        }
+        for (uint64_t k = 0; k < ast_len(clause); k++) {
+            // Every label is a constant the checker folded and converted to
+            // the operand's type, so it prints with that type's signedness
+            // (D7.6, D19.5).
+            const ast_node_t* label = ast_child(clause, k);
+            gen_switch_case(
+                g, gen_const_value(g, n->a->type, check_node_value(g->ck, label)), i + first);
+        }
+    }
+    gen_switch_end(g);
+    if (generated_default) {
+        // Emitted here, while its label is the smallest one outstanding, so
+        // that the failure blocks of the case bodies follow it in ascending
+        // order (D19.6). It is not a bounds check, so neither `--release` nor
+        // `--no-bounds-check` removes it (D7.7, D10.6).
+        gen_args_t args;
+        gen_args_init(&args);
+        gen_args_add(&args, reported);
+        gen_args_add(&args, gen_literal(g, str_from_cstr("ptr"), gen_str_ref(g, ot->name).ptr));
+        gen_fail_block(g, fallback, RT_FAIL_ENUM, &args, n->loc);
+        gen_args_free(&args);
+    }
+    for (uint64_t i = 0; i < clauses; i++) {
+        ast_node_t* clause = ast_child(n, i);
+        gen_block_begin(g, first + i);
+        if (clause->kind == AST_CASE) {
+            gen_case_body(g, clause->a, done);
+        }
+        if (g->failed) {
+            return;
+        }
+        if (!g->terminated) {
+            // The implicit `break` at the end of a case body (D7.6).
+            gen_br(g, done);
+        }
+    }
+    gen_block_begin(g, done);
 }
 
 void gen_stmt(gen_t* g, ast_node_t* n) {
@@ -385,7 +511,7 @@ void gen_stmt(gen_t* g, ast_node_t* n) {
         gen_range_for(g, n);
         return;
     case AST_SWITCH:
-        gen_todo(g, n->loc, "a switch statement");
+        gen_switch(g, n);
         return;
     case AST_BREAK:
         gen_break(g, false);

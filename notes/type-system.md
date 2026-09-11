@@ -350,6 +350,11 @@ case color.red, color.green:
 }                                    // error: switch over color does not handle blue
 ```
 
+Listing every member is not covering every value: a zeroed enum holds 0 whether or not 0 is a
+member, and an integer casts to an enum unchecked, so the compiler gives such a `switch` a
+`default` of its own that reports the runtime error `enum value 0 is not a member of color` and
+aborts (D7.7, D11.4).
+
 ## 5. Function types and `void*`
 
 ### 5.1 Function types

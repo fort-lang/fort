@@ -57,6 +57,7 @@ typedef enum {
     RT_FAIL_DIV_OVERFLOW,
     RT_FAIL_ALLOC_COUNT,
     RT_FAIL_OVERWRITE,
+    RT_FAIL_ENUM,
     RT_PANIC,
     RT_ASSERT_FAIL,
     RT_PRINT_I64,
@@ -181,12 +182,16 @@ struct gen {
     uint64_t temps;
     uint64_t labels;
     uint64_t tmps;
-    // `break` and `continue` target the innermost enclosing loop (D7.5), so
-    // the loop being emitted saves these three, sets them and restores them;
-    // `loop_depth` is 0 outside every loop.
-    uint64_t loop_break;
-    uint64_t loop_continue;
-    uint64_t loop_depth;
+    // `break` targets the innermost enclosing loop or `switch` and `continue`
+    // the innermost enclosing loop, which a `switch` between them does not
+    // interrupt (D7.5, D7.6), so the two targets are saved and set apart: a
+    // loop sets both, a `switch` the break target alone. The flags say
+    // whether a target is set at all, which is the only question asked of
+    // them, and each is saved and restored with its label.
+    uint64_t break_label;
+    uint64_t continue_label;
+    bool has_break;
+    bool has_continue;
     ptrvec_t slots;  // gen_slot_t*, owned; the locals and parameters in order
     bool terminated; // the block being written already ended in a terminator
 
@@ -330,6 +335,14 @@ gen_val_t gen_cast_op(gen_t* g, const char* op, gen_val_t a, str_t to);
 // or an extension compares (item 9).
 uint32_t gen_int_bits(const type_t* t);
 
+// Whether a value of `t` is compared, extended and printed as signed: the
+// four signed integers and every enum, since `char` is an unsigned byte,
+// `bool` is 0 or 1 (D3.1, D3.2, D3.3) and an enum's `i32` is D3.1's signed
+// type (D3.9). One predicate, because two would let the constant a member
+// folds to disagree with the cast that widens it, which is two spellings of
+// one program (D19.5).
+bool gen_is_signed(const type_t* t);
+
 // Narrows or widens `v` from `from` bits to the `to`-bit type `ty`, by
 // `sign`, and emits nothing when the widths already agree (item 9).
 gen_val_t gen_resize(gen_t* g, gen_val_t v, uint32_t from, str_t ty, uint32_t to, bool sign);
@@ -393,6 +406,14 @@ void gen_block_begin(gen_t* g, uint64_t n);
 void gen_br(gen_t* g, uint64_t n);
 void gen_br_cond(gen_t* g, gen_val_t cond, uint64_t t, uint64_t f);
 
+// The LLVM `switch` of a fort `switch` (item 10): `  switch <ty> <v>, label
+// %L<d> [`, then one `    <ty> <value>, label %L<n>` line per case label, then
+// the `  ]` that closes it. The three calls write one terminator, which is the
+// only one the emitter spells over several lines.
+void gen_switch_begin(gen_t* g, gen_val_t operand, uint64_t default_label);
+void gen_switch_case(gen_t* g, gen_val_t value, uint64_t label);
+void gen_switch_end(gen_t* g);
+
 // A call to a runtime entry point, which is declared on first use (item 8).
 // The result form names the value; the void form emits none.
 void gen_call_rt(gen_t* g, gen_rt_t rt, const gen_args_t* args);
@@ -410,6 +431,14 @@ void gen_args_add_loc(gen_t* g, gen_args_t* args, loc_t loc);
 // condition (D12.2). The caller adds the check's own values to `args`; the
 // location of D11.4 is appended here.
 void gen_check(gen_t* g, gen_val_t cond, bool fail_when, gen_rt_t rt, gen_args_t* args, loc_t loc);
+
+// One failure block of D19.6 that no check's branch reaches: the default of a
+// `switch` over an enum with no `default` clause arrives by the switch's own
+// default edge (D7.7). The caller allocated `label`; the block holds one call
+// to `rt` and `unreachable` like every other, the location of D11.4 is
+// appended to `args` here, and it is written to the failure buffer, so the
+// caller emits it while its label is still the smallest one outstanding.
+void gen_fail_block(gen_t* g, uint64_t label, gen_rt_t rt, gen_args_t* args, loc_t loc);
 
 // Marks an intrinsic or an attribute group used, so that only referenced
 // declarations are emitted (item 8, D19.5).

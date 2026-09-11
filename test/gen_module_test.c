@@ -595,10 +595,8 @@ TEST(the_argument_entry_points_are_declared_from_section_5_1, {
 TEST(a_construct_the_emitter_cannot_lower_yet_is_a_diagnostic, {
     // The tickets after T-015 remove these one by one; until then a program
     // that uses one is refused rather than emitted wrongly.
-    TEST_ASSERT_FALSE(emit("fn i32 main() {\n    i32 n = 0;\n"
-                           "    switch (n) {\n    default:\n        return 1;\n    }\n"
-                           "    return 0;\n}\n"));
-    TEST_ASSERT_NONNULL(strstr(gen_said(), "cannot generate code yet for a switch statement"));
+    TEST_ASSERT_FALSE(emit("fn i32 main() {\n    defer println(\"bye\");\n    return 0;\n}\n"));
+    TEST_ASSERT_NONNULL(strstr(gen_said(), "cannot generate code yet for a deferred statement"));
 })
 
 int main(int argc, char** argv) {

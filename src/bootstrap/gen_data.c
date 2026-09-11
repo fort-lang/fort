@@ -37,6 +37,7 @@ static const char* const RT_DECL[RT_COUNT] = {
     "declare void @fort_rt_fail_div_overflow(ptr, i32, i32) #2",
     "declare void @fort_rt_fail_alloc_count(i64, ptr, i32, i32) #2",
     "declare void @fort_rt_fail_overwrite(ptr, i32, i32) #2",
+    "declare void @fort_rt_fail_enum(i64, ptr, ptr, i32, i32) #2",
     "declare void @fort_rt_panic(ptr, i64, ptr, i32, i32) #2",
     "declare void @fort_rt_assert_fail(ptr, ptr, i32, i32) #2",
     "declare void @fort_rt_print_i64(i32, i64)",
@@ -69,6 +70,7 @@ static const char* const RT_NAME[RT_COUNT] = {
     "@fort_rt_fail_div_overflow",
     "@fort_rt_fail_alloc_count",
     "@fort_rt_fail_overwrite",
+    "@fort_rt_fail_enum",
     "@fort_rt_panic",
     "@fort_rt_assert_fail",
     "@fort_rt_print_i64",
@@ -91,9 +93,9 @@ static const char* const RT_NAME[RT_COUNT] = {
 // The result type of each entry point: fort_rt_new, fort_rt_args_ptr and
 // fort_rt_args_len are the three that return a value.
 static const char* const RT_RESULT[RT_COUNT] = {
-    "ptr",  "void", "void", "void", "void", "void", "void", "void", "void",
-    "void", "void", "void", "void", "void", "void", "void", "void", "void",
-    "void", "void", "void", "void", "void", "void", "ptr",  "i64",  "void",
+    "ptr",  "void", "void", "void", "void", "void", "void", "void", "void", "void",
+    "void", "void", "void", "void", "void", "void", "void", "void", "void", "void",
+    "void", "void", "void", "void", "void", "ptr",  "i64",  "void",
 };
 
 // Whether toolchain.md 5.1 declares the entry point `_Noreturn`, which is

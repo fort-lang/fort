@@ -987,7 +987,11 @@ for (vec v : vecs) { }                         // error: elements are owning; it
 - `break` inside a case exits the `switch`. Inside a loop, `break` in a `switch` therefore exits
   the `switch`, not the loop (C semantics). `continue` targets the enclosing loop.
 - A `switch` over an enum with no `default` must list every member (D7.7), so that adding a
-  member finds every `switch` that needs updating.
+  member finds every `switch` that needs updating. Listing every member is not covering every
+  value: a zeroed enum holds 0 whether or not 0 is a member and an integer casts to an enum
+  unchecked (D3.9), so the compiler gives such a `switch` a `default` of its own that reports a
+  runtime error, `enum value 0 is not a member of level`, and aborts (D7.7, D11.4). It is not a
+  bounds check, so `--no-bounds-check` keeps it (D10.6).
 
 `break;` exits the innermost enclosing loop or `switch`; `continue;` continues the innermost
 enclosing loop, running `step` in a `for`. Outside a loop or `switch` they are errors. There is
@@ -1188,7 +1192,8 @@ error-reporting helper would force a dead `return` after each call.
 A terminating statement is one of: `return`; a call statement to a `noreturn` function,
 including `panic`; an `if` with an `else` whose branches all terminate; `while (true)`,
 `for (;;)`, or any `for` with an empty condition, with no `break` targeting it; a `switch` all
-of whose cases terminate, when it has a `default` or is an exhaustive enum `switch` (D7.7); a
+of whose cases terminate, when it has a `default` or is an exhaustive enum `switch` (D7.7),
+which terminates through the default the compiler gives it; a
 block whose last statement terminates. A non-`void` function body must end in a terminating
 statement, or it is a compile error ("missing return", reported at the body's closing brace).
 The rule is structural, not a data-flow analysis: a loop that may run zero times does not
