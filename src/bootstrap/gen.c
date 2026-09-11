@@ -578,6 +578,7 @@ gen_val_t gen_gep_field(gen_t* g, str_t ty, gen_val_t base, uint64_t k) {
 void gen_memcpy(
     gen_t* g, gen_val_t dst, uint64_t dst_align, gen_val_t src, uint64_t src_align, uint64_t size) {
     gen_use_intrinsic(g, IN_MEMCPY);
+    gen_use_attr(g, ATTR_MEMCPY);
     sb_append(&g->body, "  call void @llvm.memcpy.p0.p0.i64(ptr align ");
     sb_append_u64(&g->body, dst_align);
     sb_push(&g->body, ' ');
@@ -593,6 +594,7 @@ void gen_memcpy(
 
 void gen_memset_zero(gen_t* g, gen_val_t dst, uint64_t align, uint64_t size) {
     gen_use_intrinsic(g, IN_MEMSET);
+    gen_use_attr(g, ATTR_MEMSET);
     sb_append(&g->body, "  call void @llvm.memset.p0.i64(ptr align ");
     sb_append_u64(&g->body, align);
     sb_push(&g->body, ' ');
@@ -792,6 +794,13 @@ static void definition_begin(gen_t* g) {
 static void emit_signature(gen_t* g, const ast_node_t* fn, const sym_t* s, const type_t* sig) {
     definition_begin(g);
     sb_append(&g->funcs, "define dso_local ");
+    const char* ret_attr = gen_ext_attr(sig->elem);
+    if (ret_attr != NULL) {
+        // A narrow result carries the same attribute as a narrow parameter,
+        // so that LLVM normalizes on both sides of a call (item 7).
+        sb_append(&g->funcs, ret_attr);
+        sb_push(&g->funcs, ' ');
+    }
     sb_append_str(&g->funcs, gen_result_type(g, sig->elem));
     sb_push(&g->funcs, ' ');
     sb_append_str(&g->funcs, gen_symbol_ref(g, s));

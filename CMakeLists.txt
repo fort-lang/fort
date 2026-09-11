@@ -151,6 +151,17 @@ foreach(driver_suite driver_test driver_check_test)
     endif()
 endforeach()
 
+# The emitter suites run the LLVM verifier over every module they emit (D19.1)
+# and compare two of them with the worked examples of toolchain.md 6, which
+# live in test/ir, so they need the verifier's path and that directory.
+find_program(FORT_OPT_PATH NAMES opt-18 opt REQUIRED)
+foreach(gen_suite gen_test gen_check_test gen_module_test)
+    if(TARGET "${gen_suite}")
+        target_compile_definitions("${gen_suite}"
+            PRIVATE FORT_OPT="${FORT_OPT_PATH}" FORT_IR_DIR="${FORT_TEST_DIR}/ir")
+    endif()
+endforeach()
+
 # The cross pipeline: the hand-written LLVM IR modules under test/ir, which
 # are in the form of toolchain.md 6 and are its worked examples (D19.1), are
 # verified with opt, compiled and linked with the cross-compiled fort_rt.o and
@@ -201,11 +212,16 @@ ProcessorCount(FORT_LANG_JOBS)
 if(FORT_LANG_JOBS EQUAL 0)
     set(FORT_LANG_JOBS 1)
 endif()
+# --verify-ir runs opt -passes=verify over the `-S` output of every test that
+# compiles, so every module the emitter writes is verified from here on
+# (D19.1, toolchain.md 6).
 set(FORT_LANG_COMMAND
     "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}"
     --fort "$<TARGET_FILE:fort>"
     --std-dir "${FORT_STD_DIR}"
     --cc "${FORT_TARGET_CC_PATH}"
+    --opt "${FORT_OPT_PATH}"
+    --verify-ir
     -j "${FORT_LANG_JOBS}"
 )
 add_test(NAME lang COMMAND ${FORT_LANG_COMMAND})
