@@ -44,6 +44,14 @@ void diag_reset(void);
 // restores stderr. The sink is borrowed until then.
 void diag_capture(sb_t* sink);
 
+// Drops the line of every diagnostic reported until diag_unmute, which
+// restores the error count diag_mute saw and returns how many errors were
+// suppressed: a parse that only answers a question about a file, such as
+// whether it declares a name, reports nothing (module-system.md 3). Mutes
+// nest, and only the outermost one restores the count.
+void diag_mute(void);
+uint64_t diag_unmute(void);
+
 // ---- message builder ---------------------------------------------------------------
 
 // Empties the message buffer.

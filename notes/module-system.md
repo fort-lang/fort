@@ -658,6 +658,7 @@ All diagnostics follow D14.2: `<file>:<line>:<col>: error: <message>`, optionall
 | importing an import binding        | `cannot import 'x': it is an import of module 'a::b'`    |
 | cycle (at the closing import)      | `circular import: 'main' imports 'util' imports 'main'`  |
 | one file, two paths                | `module 'util::x' is the same file as module 'x'`        |
+| module file that cannot be read    | `cannot read 'lib/util.ft'`                              |
 | module-level name reused           | `redeclaration of 'add'`                                 |
 | local reusing an enclosing local   | `'i' shadows an enclosing local` (or `a parameter`)      |
 | same extern, different signatures  | `conflicting declarations of extern 'write'`             |
@@ -669,7 +670,8 @@ All diagnostics follow D14.2: `<file>:<line>:<col>: error: <message>`, optionall
 | aggregate in an extern signature   | `extern signature cannot use type 'i32@'`                |
 
 Notes accompany some of these: "not found" lists `note: looked for <path>` once per root and
-reading; the ambiguous and same-file cases give the full paths; a redeclaration points at the
+reading; the ambiguous case gives the full paths in the message and the same-file case adds
+`note: both name <real path>`; a redeclaration points at the
 earlier one with `note: previous declaration of 'add' here`; the missing-`main` message continues
 `or 'fn i32 main(string@ args)'`. Tests pin these with `//! error: <substring>` on the offending
 line, or `//! error-any:` for the cycle case, where the closing import depends on walk order
