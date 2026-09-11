@@ -619,8 +619,16 @@ Owner: `module-system.md`.
   `off_t` to `i64`; `mode_t` to `u32`; `int` to `i32`; `long` to `i64`; `double` to `f64`. The
   same C symbol may be declared `extern` in several modules provided the signatures are
   identical, `own` qualifiers included (D17.13). Fort `char` is C's `unsigned char` at the
-  boundary (`i8 zeroext`, D3.2). Amended 2026-09-10 with D19: the compiler itself set `al` to
-  the vector-register count before every extern call, and extended narrow values by hand.
+  boundary (`i8 zeroext`, D3.2). The compiler never emits a call to a C library symbol of its own
+  accord: anything it needs at run time is a runtime entry point of `toolchain.md` 5.1, in the
+  `fort_rt_` space no C library occupies. A compiler-emitted `@memcmp` would be a second
+  declaration of an ELF symbol a program may also declare `extern`, against D9.7's one entity per
+  symbol, and it is the library-call rewriting `nobuiltin` exists two sentences above to prevent.
+  The runtime may use the C library internally, where it is an implementation detail and not a
+  fort ABI surface. Amended 2026-09-10 with D19: the compiler itself set `al` to
+  the vector-register count before every extern call, and extended narrow values by hand. Amended
+  2026-09-11: T-015 found that `string ==` needed `memcmp` and stopped rather than invent a fourth
+  declaration group for `toolchain.md` 6 item 8; there is no fourth group.
 - **D9.9** Internal calling convention (v1 simplification): integers, pointers, `bool`, `char`,
   enums, function pointers and floats are passed and returned in registers per System V; every
   aggregate (struct, fixed array, span, `string`) is passed by a hidden pointer to a caller-made
