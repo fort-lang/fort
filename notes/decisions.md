@@ -1271,8 +1271,9 @@ assembly, survives only in the history of this file and of `toolchain.md`.
 Decided 2026-09-10. Owner: `toolchain.md` (1, 4). An editor underlines the construct a diagnostic
 is about and jumps to the name a declaration introduces, so both are recorded from the parser on.
 The check mode is the compiler's whole editor interface: it never grows a server. The identifier
-index is D20.3, decided once the checker could resolve a name; the language server (D20.5) is not
-decided here and lands after the self-hosted compiler.
+index is D20.3, decided once the checker could resolve a name; D20.5 fixes what the self-hosted
+compiler's modules must be for a language server to use them, while the server itself lands after
+the bootstrap fixpoint.
 
 - **D20.1** `fort --check entry.ft` runs the front end only (lex, parse, resolve the import
   closure, check every module of it) and stops: no IR, no `--cc`, no temporary directory, so
@@ -1356,6 +1357,22 @@ decided here and lands after the self-hosted compiler.
   again with a token it already covers changes nothing and a node anchored at its operator never
   ends up with an end before its start. An error without a position in the file is the empty range
   at 1:1 (D14.2). The text form of D14.2 prints the start only, so no diagnostic text changes.
+- **D20.5** The self-hosted compiler is re-entrant. A language server analyses one document many
+  times in one process, so `src/fort` is written for that from its first module rather than
+  retrofitted: no module-level mutable state outlives one analysis -- the diagnostic sink, every
+  counter and every cache is a field of a session value passed down, never a global; every
+  allocation an analysis makes comes from that session's pool and dies with it, so a thousand
+  re-analyses of one document do not grow the heap; no library module ends the process, an
+  impossible input being a `panic` at the API boundary that broke its precondition (D13.3) rather
+  than an exit in a leaf; and every read of a source file goes through one function, so a server
+  can hand it a buffer it holds in memory instead of a path. The C bootstrap satisfies none of
+  these and is not required to: it is a batch process that exits when it is done, and D14.6's
+  freeze (T-046) leaves it that way. What a `panic` buys over an exit is a documented boundary and
+  a stated precondition, not in-process recovery -- `fort_rt_panic` aborts like any other failure
+  (D11.4), and a server that must survive a malformed document runs the analysis where it can
+  observe that abort. The protocol, the wire format and the server's own structure are not decided
+  here and land after the bootstrap fixpoint (D19.5); this decision fixes only what the compiler's
+  modules must be for such a server to be possible at all.
 
 ## Ready-to-implement checklist
 
