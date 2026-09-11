@@ -338,6 +338,10 @@ void ast_dump(const ast_node_t* n, sb_t* out) {
         return;
     }
     switch (n->kind) {
+    case AST_ERROR:
+        // The skipped region of a syntax error has no children (D14.2).
+        sb_append(out, "(error)");
+        return;
     case AST_TYPE:
     case AST_TYPE_PRIM:
     case AST_TYPE_STRING:

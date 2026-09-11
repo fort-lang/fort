@@ -101,7 +101,9 @@ TEST(a_tokenizer_module_parses, {
                                        "    }\n"
                                        "    return token{kind.ident, src[*pos..i]};\n"
                                        "}\n");
-    TEST_ASSERT_NULL(mod);
+    // The parser recovers and returns the tree of what parsed (D14.2); the
+    // marker is what the module reports, once.
+    TEST_ASSERT_NONNULL(mod);
     TEST_ASSERT_EQ_STR(parse_diags(),
                        "t.ft:13:5: error: a mut never precedes the base type: "
                        "write 'node mut* p' or 'node* mut p'\n");

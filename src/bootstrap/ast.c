@@ -126,6 +126,9 @@ const char* ast_kind_name(ast_kind_t kind) {
         return "struct-lit";
     case AST_ARRAY_LIT:
         return "array-lit";
+    // The region a syntax error made the parser skip (D14.2).
+    case AST_ERROR:
+        return "error";
     case AST_KIND_COUNT:
         break;
     }

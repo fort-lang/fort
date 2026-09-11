@@ -196,6 +196,30 @@ A safe(r) C-like systems programming language.
   `continue`), of a marker-only type suffix (`* mut`) or of a trailing `;` leaves it green. Those
   need an explicit `parser_loc_test` assertion on the source text the range covers. Add a new node
   kind to the corpus of the first suite and an assertion to the second.
+- **Parser recovery**: `p->failed` means "unwinding the construct a syntax error hit" (D14.2),
+  not "the file is dead". Everything between the report and the next recovery point is silent, so
+  a new parse function needs no error handling of its own: return NULL and the recovery point
+  above it skips, records an `AST_ERROR` and clears `failed`. Two rules constrain a change there.
+  A construct may return non-NULL with `failed` set -- `parse_block_tail`, `parse_switch`,
+  `parse_struct_decl` and `parse_enum_decl` do when their `}` is missing -- and every caller must
+  then propagate quietly, so a caller that tests `!= NULL` keeps working; the recovery point
+  pushes that node and clears `failed` without skipping, since the construct already stands at
+  the boundary. `spec_begin` clears `failed` and `spec_rewind` restores it, because a speculation
+  answers about the tokens ahead and every speculation reads `failed` afterwards to tell a type
+  that parsed from one that did not: a speculation made during an unwind, which is what a
+  recovery point and the first statement of a body with no `{` do, would otherwise read the
+  unwind and answer no. And every recovery must consume a token unless it is
+  at the end of the file, or `parse_module` loops forever: `skip_to_boundary` bumps once when the
+  construct consumed nothing. A skip counts the `(` and `[` the failed construct left open, from
+  its first token, so the `;` of a `for` header or of an argument list is not mistaken for a
+  statement boundary; it deliberately does not count a `{` it left open, since which brace that
+  was is not decidable from the tokens and assuming the construct owns the next `}` eats the
+  enclosing block's. Both braces of a body have a rule of their own: a body ends at a top-level
+  keyword, and the `{` of a function, struct or enum body may be missing, because a declaration
+  header is complete before it. `test/lang/fail` is the cascade test (`parser_recovery_test.c`
+  walks it): a diagnostic on a line with no `//! error:` annotation fails the suite, and the
+  diagnostic counts of the files with two syntax errors are asserted beside it, since a walk that
+  only forbids unannotated lines also passes with recovery switched off.
 - **Citing decisions in code**: a citation goes on the line or function that implements the
   rule, with a phrase stating the rule (`// pointers print as 0x + lowercase hex, 0x0 for null
   (D11.7)`), so a reader learns the rule without opening the log. A bare tag list at file or

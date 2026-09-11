@@ -6,9 +6,25 @@
 // function pointers, no macros beyond constants, plain switches on the
 // current token.
 //
-// Diagnostics. A syntax error stops the file after one diagnostic (D14.2):
-// every parse function returns NULL from there on and parse_module returns
-// NULL with the tokens it had consumed left behind in the arena.
+// Diagnostics. A syntax error is reported and recovered from, so a file
+// reports one diagnostic for each construct that failed (D14.2). The first
+// report starts an unwind: every parse function returns NULL from there on,
+// reporting nothing, until one of the recovery points of toolchain.md 4 -- the
+// statements of a block or of a case clause, the clauses of a switch, the
+// fields of a struct, the declarations of the module -- skips what is left of
+// the failed construct, keeps it as an AST_ERROR node and parses on. The
+// parser reports at most twenty errors per file and never two in a row that
+// start at the same place, and it parses on after either, so the tree always
+// covers the whole file.
+//
+// Two rules are not skips, for the braces an edit in progress is missing. A
+// block, a case clause, a struct body and an enum body also end where a
+// top-level declaration starts, which is `struct`, `enum`, `extern`, `import`
+// or a `fn` whose return type is followed by an identifier; without it every
+// following function would cost one cascaded diagnostic. And the `{` of a
+// function, struct or enum body may be missing: the header before it is
+// complete, so the brace is reported once and the body is read as though it
+// were there, rather than one statement at a time as declarations.
 //
 // Speculation. The grammar is LL(1) but for the three points of grammar.md 7:
 // the declaration-versus-statement choice, the array literal in an expression
@@ -53,8 +69,10 @@
 // declarations in source order (D9.3). `file` names the source in
 // diagnostics. The nodes come from `arena` and the names in them are views
 // into the source and into the pool the tokens were lexed with, so both must
-// outlive the tree. On a syntax error one diagnostic is reported and NULL is
-// returned.
+// outlive the tree. The result is never NULL: a file with syntax errors
+// yields the tree of everything that parsed, with an AST_ERROR node over each
+// skipped region, so a caller asks whether the file parsed by comparing
+// diag_count() before and after (D14.2).
 ast_node_t* parse_module(const char* file, const token_t* toks, uint64_t ntoks, ast_arena_t* arena);
 
 #endif

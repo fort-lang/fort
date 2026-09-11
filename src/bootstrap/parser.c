@@ -17,6 +17,10 @@
 // branches and types nest at most this deep (D2.11).
 enum { PARSE_MAX_DEPTH = 256 };
 
+// Syntax errors reported per file; the parse goes on silently after the cap,
+// so the tree still covers the whole file (D14.2).
+enum { PARSE_MAX_ERRORS = 20 };
+
 // The `for` forms grammar.md 7.3 distinguishes after `for (`.
 enum { FOR_PLAIN = 0, FOR_RANGE = 1, FOR_DECL = 2 };
 
@@ -43,11 +47,12 @@ typedef struct {
     uint64_t ntoks;
     uint64_t pos;
     ast_arena_t* arena;
-    uint32_t depth; // open nested constructs (D2.11)
-    uint32_t spec;  // running speculative parses; no diagnostic while > 0
-    bool failed;    // a syntax error was hit; the file is abandoned (D14.2)
-    bool reported;  // the one diagnostic of D14.2 was written
-    sb_t msg;       // the message under construction
+    uint32_t depth;  // open nested constructs (D2.11)
+    uint32_t spec;   // running speculative parses; no diagnostic while > 0
+    bool failed;     // unwinding the construct a syntax error hit (D14.2)
+    uint32_t errors; // syntax errors reported, capped at PARSE_MAX_ERRORS
+    loc_t last;      // where the last reported error started, for the dedupe
+    sb_t msg;        // the message under construction
 } parser_t;
 
 // The state a speculative parse restores when it rewinds.
@@ -137,13 +142,25 @@ static ast_node_t* finish(parser_t* p, ast_node_t* n) {
 
 // ---- diagnostics ----------------------------------------------------------
 
-// Reports `text` at `loc` and abandons the file: a syntax error stops the
-// compilation of that file after one diagnostic (D14.2). A speculative parse
-// reports nothing, so a rewind leaves the diagnostics untouched.
+// Whether two ranges begin at the same place; one parse reports one file, so
+// the file of every range it builds is the same.
+static bool same_start(loc_t a, loc_t b) {
+    return a.line == b.line && a.col == b.col;
+}
+
+// Reports `text` at `loc` and begins unwinding the failed construct: every
+// later report is silent until a recovery point clears `failed`, so one
+// mistake costs one diagnostic (D14.2). Two more rules keep a broken file
+// readable (D14.2): an error that starts where the one before it started is
+// dropped, and nothing is reported after the twentieth, though the parse goes
+// on. A speculative parse reports nothing, so a rewind leaves the diagnostics
+// untouched.
 static void report(parser_t* p, loc_t loc, const char* text) {
-    if (p->spec == 0 && !p->reported) {
+    if (p->spec == 0 && !p->failed && p->errors < PARSE_MAX_ERRORS &&
+        !(p->errors > 0 && same_start(loc, p->last))) {
         diag_error(loc, text);
-        p->reported = true;
+        p->last = loc;
+        p->errors++;
     }
     p->failed = true;
 }
@@ -254,17 +271,45 @@ static void leave(parser_t* p) {
 }
 
 // Begins a speculative parse (grammar.md 7): nothing is reported until it
-// rewinds.
+// rewinds. A speculation asks what the tokens ahead are, which does not depend
+// on whether a construct is unwinding, so it starts with `failed` clear and
+// spec_rewind puts the caller's back; every speculation reads `failed`
+// afterwards to tell a type that parsed from one that did not, and would read
+// the unwind instead (D14.2). A recovery point speculates while `failed` is
+// set, and so does the first statement of a body whose `{` was missing.
 static spec_state_t spec_begin(parser_t* p) {
-    if (p->failed) {
-        fatal_internal("parser: a speculative parse after a syntax error");
-    }
     spec_state_t s;
     s.pos = p->pos;
     s.depth = p->depth;
     s.failed = p->failed;
+    p->failed = false;
     p->spec++;
     return s;
+}
+
+// Whether a failed speculative type parse read or stopped at a `mut` or an
+// `own` that stands outside every bracket. A marker follows the type element
+// it qualifies and no expression begins with one (D5.3, D17.2), so a statement
+// that begins with a type-shaped prefix carrying a marker at that level cannot
+// be read as an expression statement, and parsing it as a declaration reports
+// the marker rather than the statement's own complaint (grammar.md 7.1). It is
+// a heuristic and not a proof: an expression does embed a type, in `cast`,
+// `sizeof`, `new` and an array literal's length (grammar.md 6), so a marker
+// inside a bracket may well belong to an expression and is not counted.
+static bool read_marker(const parser_t* p, uint64_t start) {
+    uint32_t depth = 0;
+    for (uint64_t i = start; i <= p->pos && i < p->ntoks; i++) {
+        const tok_kind_t k = p->toks[i].kind;
+        if (depth == 0 && (k == TOK_KW_MUT || k == TOK_KW_OWN)) {
+            return true;
+        }
+        if (k == TOK_LPAREN || k == TOK_LBRACKET || k == TOK_LBRACE) {
+            depth++;
+        } else if ((k == TOK_RPAREN || k == TOK_RBRACKET || k == TOK_RBRACE) && depth > 0) {
+            depth--;
+        }
+    }
+    return false;
 }
 
 // Restores the cursor, the depth and the failure state the speculation
@@ -1252,6 +1297,211 @@ static ast_node_t* parse_initializer(parser_t* p) {
     return parse_expr(p);
 }
 
+// ---- recovery (toolchain.md 4, D14.2) -------------------------------------
+
+// The recovery points, which differ in what ends a skip: the statements of a
+// block or of a case clause, the clauses of a switch, the fields of a struct
+// body, the declarations of the module (toolchain.md 4).
+enum { RECOVER_STMT = 0, RECOVER_CASE = 1, RECOVER_FIELD = 2, RECOVER_DECL = 3 };
+
+// The keywords that begin a statement (grammar.md 5). A skip stops before one
+// rather than swallowing it, since it is where the next statement starts
+// (toolchain.md 4).
+static bool starts_statement(tok_kind_t k) {
+    return k == TOK_KW_IF || k == TOK_KW_WHILE || k == TOK_KW_FOR || k == TOK_KW_SWITCH ||
+           k == TOK_KW_DEFER || k == TOK_KW_RETURN || k == TOK_KW_BREAK || k == TOK_KW_CONTINUE ||
+           k == TOK_KW_DO;
+}
+
+// The keywords that begin a case clause (D7.6). Neither appears in a statement
+// or an expression, so a skip inside a switch stops before one rather than
+// swallowing the clause that follows the broken one (toolchain.md 4).
+static bool starts_case(tok_kind_t k) {
+    return k == TOK_KW_CASE || k == TOK_KW_DEFAULT;
+}
+
+// Whether the current token starts a top-level declaration (grammar.md 7).
+// `struct`, `enum`, `extern` and `import` always do; a `fn` does when a return
+// type and an identifier follow it, since the `fn` of a statement or of a
+// field is the base of a function type, whose return type is followed by `(`
+// (D3.10). A block, a case clause, a struct body and an enum body end here as
+// well as at their `}`, so a file with a missing `}` costs one diagnostic
+// rather than one per following declaration (D14.2).
+static bool at_decl_start(parser_t* p) {
+    switch (kind(p)) {
+    case TOK_KW_STRUCT:
+    case TOK_KW_ENUM:
+    case TOK_KW_EXTERN:
+    case TOK_KW_IMPORT:
+        return true;
+    case TOK_KW_FN:
+        break;
+    default:
+        return false;
+    }
+    const spec_state_t st = spec_begin(p);
+    bump(p);
+    const ast_node_t* ret = parse_return_type(p);
+    const bool decl = ret != NULL && !p->failed && at(p, TOK_IDENT);
+    spec_rewind(p, st);
+    return decl;
+}
+
+// The `(` and `[` the failed construct left open, counted over the tokens it
+// consumed: a skip that begins inside them looks for the construct's end at
+// the construct's own level, so the `;` of a `for` header and the `,` of an
+// argument list never pass for a statement boundary (toolchain.md 4). Braces
+// are not counted here: which `{` an unclosed one was meant to be is not
+// decidable from the tokens, and assuming the construct owns the next `}` ends
+// with the enclosing block's brace being eaten, so a skip counts only the
+// braces it opens itself and leaves any other `}` to the body it belongs to.
+static uint32_t count_open_groups(const parser_t* p, uint64_t start) {
+    uint32_t groups = 0;
+    for (uint64_t i = start; i < p->pos; i++) {
+        const tok_kind_t k = p->toks[i].kind;
+        if (k == TOK_LPAREN || k == TOK_LBRACKET) {
+            groups++;
+        } else if ((k == TOK_RPAREN || k == TOK_RBRACKET) && groups > 0) {
+            groups--;
+        }
+    }
+    return groups;
+}
+
+// Skips what is left of the construct that began at `start` and failed, to the
+// boundary of toolchain.md 4. Outside the `(` and `[` the construct left open,
+// a `;` and the `}` that closes a brace the skip saw opened are consumed, and
+// a `}` it did not see opened, a case keyword, a statement keyword and a token
+// that starts a top-level declaration are left where the next construct reads
+// them; the end of the file ends every skip. `level` is the recovery point: a
+// struct field and a declaration run over the statement keywords, which start
+// no field and no declaration, a declaration also drops a `}`, which closes
+// nothing at the top level, and a case clause runs over the statement keywords
+// of the body it is skipping. The first token is consumed when the construct
+// consumed none, so a recovery always makes progress and the parse terminates
+// (D14.2).
+static void skip_to_boundary(parser_t* p, uint64_t start, int level) {
+    if (p->pos == start) {
+        bump(p);
+    }
+    // A construct that begins with `{` is a block statement, which consumed
+    // its brace before it failed, so the first `}` ahead closes it; only the
+    // nesting limit makes a block fail to open (D2.11), and the `}` it leaves
+    // unmatched belongs to the skipped region.
+    uint32_t braces = p->toks[start].kind == TOK_LBRACE ? 1U : 0U;
+    uint32_t groups = count_open_groups(p, start);
+    while (!at(p, TOK_EOF)) {
+        const tok_kind_t k = kind(p);
+        if (k == TOK_RBRACE) {
+            if (braces > 0) {
+                braces--;
+                bump(p);
+                if (braces == 0) {
+                    return;
+                }
+                continue;
+            }
+            // A `}` the skip did not see opened and that a `;` follows closes
+            // a brace initializer or a struct literal the construct opened, as
+            // no block is followed by a `;` (D7.3: the empty statement is an
+            // error).
+            if (peek_kind(p, 1) == TOK_SEMI) {
+                bump(p);
+                bump(p);
+                return;
+            }
+            // One that a `)` or a `]` follows stands inside a bracket the
+            // construct left open, where it closes nothing, so it goes with
+            // the skipped region. The premise is that a `}` before a closing
+            // bracket is a typo of the construct and not the brace of the body
+            // around it, which holds for the half-typed `g(});` and fails only
+            // where a stray `)` follows a body's genuine `}`.
+            if (groups > 0 && (peek_kind(p, 1) == TOK_RPAREN || peek_kind(p, 1) == TOK_RBRACKET)) {
+                bump(p);
+                continue;
+            }
+            // Any other one closes the body the construct sits in and is left
+            // to it, except at the top level, where it closes nothing.
+            if (level != RECOVER_DECL) {
+                return;
+            }
+            bump(p);
+            continue;
+        }
+        // A declaration keyword outranks a `(` the construct left open, which
+        // is a typo of the construct; a `;` inside one is part of it.
+        if (braces == 0) {
+            const bool in_body = level == RECOVER_STMT || level == RECOVER_CASE;
+            if (at_decl_start(p) || (in_body && starts_case(k)) ||
+                (level == RECOVER_STMT && starts_statement(k))) {
+                return;
+            }
+            if (groups == 0 && k == TOK_SEMI) {
+                // A run of `;` is one boundary, so the empty statement that
+                // follows a skipped region is part of it and not an error of
+                // its own (D7.3).
+                while (at(p, TOK_SEMI)) {
+                    bump(p);
+                }
+                return;
+            }
+        }
+        if (k == TOK_LBRACE) {
+            braces++;
+        } else if (k == TOK_LPAREN || k == TOK_LBRACKET) {
+            groups++;
+        } else if ((k == TOK_RPAREN || k == TOK_RBRACKET) && groups > 0) {
+            groups--;
+        }
+        bump(p);
+    }
+}
+
+// Drops the tokens the skip stopped in front of that begin no construct: a `)`
+// or a `]` that closes nothing, the `;` that follows one, and, at the top
+// level, a `}`, which closes nothing there either. Directly after a skip they
+// are the tail of the construct that failed, so reading them as the next
+// construct would cost a second diagnostic for one mistake (D14.2). A token of
+// the same kind that reaches a parse any other way is a stray one and is
+// reported like any other.
+static void drop_leftovers(parser_t* p, int level) {
+    while (at(p, TOK_RPAREN) || at(p, TOK_RBRACKET) || at(p, TOK_SEMI) ||
+           (level == RECOVER_DECL && at(p, TOK_RBRACE))) {
+        bump(p);
+    }
+}
+
+// Ends the unwind of the construct that began at `start` (D14.2). A construct
+// that produced no node leaves the tokens it failed on to a skip, which the
+// tree keeps as an error node so that a later pass sees the region was
+// skipped; one that produced a node in spite of the error, the block of a
+// missing `}`, has read them already and stands at the boundary itself.
+static void recover(parser_t* p, ast_node_t* parent, uint64_t start, bool skipping, int level) {
+    if (skipping) {
+        skip_to_boundary(p, start, level);
+        drop_leftovers(p, level);
+        if (p->pos > start) {
+            ast_node_t* err = node_at(p, AST_ERROR, tok_loc(p, &p->toks[start]));
+            ast_push(parent, finish(p, err));
+        }
+    }
+    p->failed = false;
+}
+
+// Parses one statement into `parent` and recovers from a syntax error where
+// the statement began: the statement's node when it parsed, an error node over
+// the skipped tokens when it did not (D14.2).
+static void parse_statement_into(parser_t* p, ast_node_t* parent) {
+    const uint64_t start = p->pos;
+    ast_node_t* s = parse_statement(p);
+    if (s != NULL) {
+        ast_push(parent, s);
+    }
+    if (p->failed) {
+        recover(p, parent, start, s == NULL, RECOVER_STMT);
+    }
+}
+
 // ---- statements (grammar.md 5) --------------------------------------------
 
 // var_decl = type identifier "=" initializer ";" (D7.1: one declarator, the
@@ -1415,9 +1665,9 @@ static int speculate_for_form(parser_t* p) {
     if (at(p, TOK_SEMI)) {
         return FOR_PLAIN;
     }
-    spec_state_t s = spec_begin(p);
+    const spec_state_t s = spec_begin(p);
     int form = FOR_PLAIN;
-    ast_node_t* t = parse_type(p, false);
+    const ast_node_t* t = parse_type(p, false);
     if (t != NULL && !p->failed && at(p, TOK_IDENT)) {
         bump(p);
         if (at(p, TOK_COLON)) {
@@ -1425,6 +1675,10 @@ static int speculate_for_form(parser_t* p) {
         } else if (at(p, TOK_ASSIGN)) {
             form = FOR_DECL;
         }
+    } else if (p->failed && read_marker(p, s.pos)) {
+        // A misplaced marker makes the init a declaration, as at statement
+        // level, so that the marker is what the init reports (grammar.md 7.1).
+        form = FOR_DECL;
     }
     spec_rewind(p, s);
     return form;
@@ -1502,9 +1756,11 @@ static ast_node_t* parse_for(parser_t* p) {
 }
 
 // Where the statements of a case body stop: the next clause or the end of the
-// switch (D7.6).
-static bool at_case_end(const parser_t* p) {
-    return at(p, TOK_KW_CASE) || at(p, TOK_KW_DEFAULT) || at(p, TOK_RBRACE) || at(p, TOK_EOF);
+// switch (D7.6), and, since a missing `}` ends every body, a top-level
+// declaration (D14.2).
+static bool at_case_end(parser_t* p) {
+    return at(p, TOK_KW_CASE) || at(p, TOK_KW_DEFAULT) || at(p, TOK_RBRACE) || at(p, TOK_EOF) ||
+           at_decl_start(p);
 }
 
 // switch_stmt = "switch" "(" expr ")" "{" { case_clause } "}" (D7.6); each
@@ -1535,12 +1791,9 @@ static ast_node_t* parse_case(parser_t* p) {
     // none, at the empty range just after the ':', so that it stays inside the
     // clause (D20.4).
     ast_node_t* body = node_at(p, AST_BLOCK, at_case_end(p) ? here_implicit(p) : here(p));
+    // The statements of the clause are a recovery point like a block's (D14.2).
     while (!at_case_end(p)) {
-        ast_node_t* s = parse_statement(p);
-        if (s == NULL) {
-            return NULL;
-        }
-        ast_push(body, s);
+        parse_statement_into(p, body);
     }
     n->a = finish(p, body);
     return finish(p, n);
@@ -1553,18 +1806,30 @@ static ast_node_t* parse_switch(parser_t* p) {
     if (n->a == NULL || !expect(p, TOK_LBRACE, "'{'") || !enter(p)) {
         return NULL;
     }
-    bool ok = true;
-    while (ok && (at(p, TOK_KW_CASE) || at(p, TOK_KW_DEFAULT))) {
-        ast_node_t* clause = parse_case(p);
-        ok = clause != NULL;
-        if (ok) {
-            ast_push(n, clause);
+    // The clauses are a recovery point of their own, so a broken label list, a
+    // missing `:` or a token that is no clause at all costs one diagnostic and
+    // the clauses after it are read (D14.2); the switch is returned whether or
+    // not its `}` was found, as a block is. A switch body holds clauses and
+    // nothing else (D7.6), so anything else in it is skipped here rather than
+    // handed back to the enclosing block, which would read the clauses after
+    // it as statements.
+    while (!at(p, TOK_RBRACE) && !at(p, TOK_EOF) && !at_decl_start(p)) {
+        const uint64_t start = p->pos;
+        ast_node_t* clause = NULL;
+        if (at(p, TOK_KW_CASE) || at(p, TOK_KW_DEFAULT)) {
+            clause = parse_case(p);
+            if (clause != NULL) {
+                ast_push(n, clause);
+            }
+        } else {
+            error_expected(p, "'case' or 'default'");
+        }
+        if (p->failed) {
+            recover(p, n, start, clause == NULL, RECOVER_CASE);
         }
     }
     leave(p);
-    if (!ok || !expect(p, TOK_RBRACE, "'}'")) {
-        return NULL;
-    }
+    (void)expect(p, TOK_RBRACE, "'}'");
     return finish(p, n);
 }
 
@@ -1616,9 +1881,12 @@ static bool starts_declaration(const parser_t* p) {
 // grammar.md 7.1: otherwise a speculative type parse decides, and the
 // statement is a declaration when an identifier follows the type.
 static bool speculate_declaration(parser_t* p) {
-    spec_state_t s = spec_begin(p);
-    ast_node_t* t = parse_type(p, false);
-    const bool decl = t != NULL && !p->failed && at(p, TOK_IDENT);
+    const spec_state_t s = spec_begin(p);
+    const ast_node_t* t = parse_type(p, false);
+    // A type parse that died on a marker leaves no expression reading of the
+    // statement, so the declaration branch wins and reports the marker.
+    const bool decl =
+        (t != NULL && !p->failed && at(p, TOK_IDENT)) || (p->failed && read_marker(p, s.pos));
     spec_rewind(p, s);
     return decl;
 }
@@ -1660,25 +1928,54 @@ static ast_node_t* parse_statement(parser_t* p) {
     return parse_simple_statement(p);
 }
 
-static ast_node_t* parse_block(parser_t* p) {
-    const loc_t loc = here(p);
-    if (!expect(p, TOK_LBRACE, "'{'") || !enter(p)) {
+// The statements of a block and its closing `}`, with the `{` already read or
+// reported missing. The statements are a recovery point, and the block ends at
+// a top-level declaration as well as at its `}`, so a missing `}` is reported
+// once, here (D14.2). The node is returned whether or not the `}` was found,
+// so that the enclosing constructs unwind quietly to the next recovery point
+// and the tree still covers the file.
+static ast_node_t* parse_block_tail(parser_t* p, loc_t loc) {
+    if (!enter(p)) {
         return NULL;
     }
     ast_node_t* n = node_at(p, AST_BLOCK, loc);
-    bool ok = true;
-    while (ok && !at(p, TOK_RBRACE) && !at(p, TOK_EOF)) {
-        ast_node_t* s = parse_statement(p);
-        ok = s != NULL;
-        if (ok) {
-            ast_push(n, s);
-        }
+    while (!at(p, TOK_RBRACE) && !at(p, TOK_EOF) && !at_decl_start(p)) {
+        parse_statement_into(p, n);
     }
     leave(p);
-    if (!ok || !expect(p, TOK_RBRACE, "'}'")) {
+    (void)expect(p, TOK_RBRACE, "'}'");
+    return finish(p, n);
+}
+
+// block = "{" { statement } "}" (grammar.md 5). A block that stands where a
+// statement is expected needs its `{`: the statement forms of D7.4 are braced,
+// so a missing one is a different mistake and the construct fails.
+static ast_node_t* parse_block(parser_t* p) {
+    const loc_t loc = here(p);
+    if (!expect(p, TOK_LBRACE, "'{'")) {
         return NULL;
     }
-    return finish(p, n);
+    return parse_block_tail(p, loc);
+}
+
+// Reads the `{` that opens the body of a declaration, or reports it missing
+// and reads the body all the same, which is the mirror of the missing `}`
+// (D14.2): a declaration header is complete before its `{` and the `}` that
+// closes the body is usually still in the file, so one missing brace costs one
+// diagnostic instead of one per statement or field in the body.
+static void open_body(parser_t* p) {
+    if (at(p, TOK_LBRACE)) {
+        bump(p);
+    } else {
+        error_expected(p, "'{'");
+    }
+}
+
+// The body of a function (D8.1), whose `{` may be missing.
+static ast_node_t* parse_body(parser_t* p) {
+    const loc_t loc = here(p);
+    open_body(p);
+    return parse_block_tail(p, loc);
 }
 
 // ---- declarations (grammar.md 2, 3) ---------------------------------------
@@ -1714,7 +2011,7 @@ static ast_node_t* parse_fn_decl(parser_t* p, loc_t loc, ast_node_t* ret) {
     if (!expect_name(p, n) || !parse_params(p, n)) {
         return NULL;
     }
-    n->b = parse_block(p);
+    n->b = parse_body(p);
     if (n->b == NULL) {
         return NULL;
     }
@@ -1776,26 +2073,33 @@ static ast_node_t* parse_extern_decl(parser_t* p) {
 static ast_node_t* parse_struct_decl(parser_t* p) {
     ast_node_t* n = node_at(p, AST_STRUCT_DECL, here(p));
     bump(p);
-    if (!expect_name(p, n) || !expect(p, TOK_LBRACE, "'{'") || !enter(p)) {
+    if (!expect_name(p, n)) {
         return NULL;
     }
-    bool ok = true;
+    open_body(p);
+    if (!enter(p)) {
+        return NULL;
+    }
     if (at(p, TOK_RBRACE)) {
         error_here(p, "a struct has at least one field");
-        ok = false;
     }
-    while (ok && !at(p, TOK_RBRACE) && !at(p, TOK_EOF)) {
+    // The fields are a recovery point of their own: a broken one is skipped to
+    // its `;` or to the `}` of the body, and the body ends at a top-level
+    // declaration as well as at its `}` (D14.2).
+    while (!at(p, TOK_RBRACE) && !at(p, TOK_EOF) && !at_decl_start(p)) {
+        const uint64_t start = p->pos;
         ast_node_t* field = node_at(p, AST_FIELD_DECL, here(p));
         field->a = parse_type(p, false);
-        ok = field->a != NULL && expect_name(p, field) && expect(p, TOK_SEMI, "';'");
+        const bool ok = field->a != NULL && expect_name(p, field) && expect(p, TOK_SEMI, "';'");
         if (ok) {
             ast_push(n, finish(p, field));
         }
+        if (p->failed) {
+            recover(p, n, start, !ok, RECOVER_FIELD);
+        }
     }
     leave(p);
-    if (!ok || !expect(p, TOK_RBRACE, "'}'")) {
-        return NULL;
-    }
+    (void)expect(p, TOK_RBRACE, "'}'");
     return finish(p, n);
 }
 
@@ -1804,7 +2108,11 @@ static ast_node_t* parse_struct_decl(parser_t* p) {
 static ast_node_t* parse_enum_decl(parser_t* p) {
     ast_node_t* n = node_at(p, AST_ENUM_DECL, here(p));
     bump(p);
-    if (!expect_name(p, n) || !expect(p, TOK_LBRACE, "'{'") || !enter(p)) {
+    if (!expect_name(p, n)) {
+        return NULL;
+    }
+    open_body(p);
+    if (!enter(p)) {
         return NULL;
     }
     bool ok = true;
@@ -1812,7 +2120,10 @@ static ast_node_t* parse_enum_decl(parser_t* p) {
         error_here(p, "an enum has at least one member");
         ok = false;
     }
-    while (ok) {
+    // A member recovers through the declaration (D14.2), but the body still
+    // ends where a top-level declaration starts, so a missing `}` reports the
+    // `}` and not the member it read next.
+    while (ok && !at_decl_start(p)) {
         ast_node_t* member = node_at(p, AST_ENUM_MEMBER, here(p));
         ok = expect_name(p, member);
         if (ok && at(p, TOK_ASSIGN)) {
@@ -1833,9 +2144,14 @@ static ast_node_t* parse_enum_decl(parser_t* p) {
         }
     }
     leave(p);
-    if (!ok || !expect(p, TOK_RBRACE, "'}'")) {
+    // A member that did not parse leaves the body to the declaration skip; a
+    // body that ran to a top-level declaration keeps its node, as a block and
+    // a struct body do, so the enum and the declarations after it stay in the
+    // tree (D14.2).
+    if (!ok) {
         return NULL;
     }
+    (void)expect(p, TOK_RBRACE, "'}'");
     return finish(p, n);
 }
 
@@ -1937,6 +2253,21 @@ static ast_node_t* parse_top_decl(parser_t* p) {
     return parse_var_decl(p, true);
 }
 
+// Parses one declaration into `mod` and recovers from a syntax error where the
+// declaration began, as a block does with a statement (D14.2). `import` parses
+// the import form, which comes first in a file (D9.3); every declaration of a
+// file is read, whatever the ones before it did.
+static void parse_decl_into(parser_t* p, ast_node_t* mod, bool import) {
+    const uint64_t start = p->pos;
+    ast_node_t* decl = import ? parse_import(p) : parse_top_decl(p);
+    if (decl != NULL) {
+        ast_push(mod, decl);
+    }
+    if (p->failed) {
+        recover(p, mod, start, decl == NULL, RECOVER_DECL);
+    }
+}
+
 ast_node_t* parse_module(const char* file,
                          const token_t* toks,
                          uint64_t ntoks,
@@ -1953,26 +2284,20 @@ ast_node_t* parse_module(const char* file,
     p.depth = 0;
     p.spec = 0;
     p.failed = false;
-    p.reported = false;
+    p.errors = 0;
+    p.last = loc_make(file, 0, 0);
     sb_init(&p.msg);
 
     ast_node_t* mod = ast_new(arena, AST_MODULE, loc_make(file, 1, 1));
     // module = { import_decl } { top_decl }: the imports come first (D9.3).
-    while (!p.failed && at(&p, TOK_KW_IMPORT)) {
-        ast_node_t* imp = parse_import(&p);
-        if (imp == NULL) {
-            break;
-        }
-        ast_push(mod, imp);
+    // Both loops are recovery points, so a broken declaration costs one
+    // diagnostic and the ones that follow it are still parsed (D14.2).
+    while (at(&p, TOK_KW_IMPORT)) {
+        parse_decl_into(&p, mod, true);
     }
-    while (!p.failed && !at(&p, TOK_EOF)) {
-        ast_node_t* decl = parse_top_decl(&p);
-        if (decl == NULL) {
-            break;
-        }
-        ast_push(mod, decl);
+    while (!at(&p, TOK_EOF)) {
+        parse_decl_into(&p, mod, false);
     }
-    const bool failed = p.failed;
     sb_free(&p.msg);
-    return failed ? NULL : finish(&p, mod);
+    return finish(&p, mod);
 }
