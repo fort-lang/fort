@@ -83,7 +83,16 @@ A safe(r) C-like systems programming language.
   sets `QEMU_LD_PREFIX`; the test harness sets it itself. When a cross program dies by a signal,
   qemu-user appends `qemu: uncaught target signal 6 (Aborted) - core dumped` to the program's
   stderr; native execution prints nothing, so a harness comparing stderr drops that line
-  (`test/pipeline_test.sh` and `test/lang/run_tests.py` do).
+  (`test/pipeline_test.sh` and `test/lang/run_tests.py` do). The number and the name vary with
+  the signal, so the filter matches the shape (`qemu: uncaught target signal`) and not one line.
+  **No language test can go red from a leaked notice**, and the same holds for anything else a
+  harness claims to strip from stderr: `//! stderr:` is a containment check, so an extra line
+  only enlarges the text the substrings are sought in and every expectation still matches.
+  Deleting the `drop_qemu_notice` call leaves the whole corpus green. The witness for a
+  stripping rule is therefore a unit test that asserts the negative -- that a substring taken
+  from the stripped line is *not* found -- which is `run_tests_test.py`'s
+  `test_judge_run_qemu_notice_is_not_stderr` and `test_judge_run_signal_ignores_the_qemu_notice`;
+  a `run` test that merely passes witnesses nothing here (T-071's review).
 - Provisioning installs `nodejs` (Node 18) for the extension's unit tests and fails loudly when it
   is older or has no built-in test runner.
 - An ssh `ControlPath` under `os.tmpdir()` does not work on macOS: the host's temporary directory

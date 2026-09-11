@@ -43,12 +43,12 @@ AREAS = (
 ).split()
 
 KINDS = ("run", "fail")
-RUN_ONLY = ("args", "link", "stdin", "stdout", "exit", "abort")
+RUN_ONLY = ("args", "link", "stdin", "stdout", "exit", "abort", "signal")
 FAIL_ONLY = ("error", "error-any")
 # Directives that take no text, the ones that take text, and the ones that
 # may be repeated (D14.5).
 BLOCKS = ("stdin", "stdout")
-WITH_TEXT = ("flags", "args", "link", "exit", "stderr", "error", "error-any")
+WITH_TEXT = ("flags", "args", "link", "exit", "signal", "stderr", "error", "error-any")
 REPEATABLE = ("link", "stderr", "error-any")
 HEADER_MARKERS = ("//!", "//<", "//|")
 
@@ -65,6 +65,17 @@ DEFAULT_TIMEOUT = 60.0
 # target signal 6 (Abort) - core dumped"); native execution prints nothing.
 QEMU_NOTICE_PREFIX = b"qemu: uncaught target signal"
 MAX_EXIT = 255
+# The signals `//! signal:` may name, by their POSIX name without the `SIG`
+# prefix; `//! abort` is the older spelling of `signal: ABRT`. A number is not
+# accepted, since the set is normative (toolchain.md 7.3).
+SIGNALS = {
+    "ABRT": signal.SIGABRT,
+    "BUS": signal.SIGBUS,
+    "FPE": signal.SIGFPE,
+    "ILL": signal.SIGILL,
+    "SEGV": signal.SIGSEGV,
+    "TRAP": signal.SIGTRAP,
+}
 VERDICTS = ("PASS", "FAIL", "XFAIL", "XPASS", "ERROR")
 
 # The document of `fort --check --json` (D20.2): its keys, the keys of a
@@ -167,6 +178,7 @@ class Test:
     stdout: bytes = b""
     exit: int = 0
     abort: bool = False
+    signal_name: str = ""  # a key of SIGNALS, or "" when the program must not die
     stderr: list = dataclasses.field(default_factory=list)
     errors: list = dataclasses.field(default_factory=list)  # (file, line, substring)
     error_any: list = dataclasses.field(default_factory=list)
@@ -311,8 +323,11 @@ def parse_main(root, test, text):
                 _apply_text_directive(root, test, name, value, problem, lineno)
         else:
             problem(lineno, "unknown directive '%s'" % name)
-    if "exit" in seen and test.abort:
-        problem(1, "'exit' and 'abort' are mutually exclusive")
+    # A run test states one outcome: a status, SIGABRT, or a named signal.
+    chosen = [name for name in ("exit", "abort", "signal") if name in seen]
+    for index, first in enumerate(chosen):
+        for second in chosen[index + 1 :]:
+            problem(1, "'%s' and '%s' are mutually exclusive" % (first, second))
     test.stdin = b"".join(s.encode() + b"\n" for s in stdin_lines)
     test.stdout = b"".join(s.encode() + b"\n" for s in stdout_lines)
     parse_body(test, test.entry, lines[header_end:], header_end + 1)
@@ -332,6 +347,13 @@ def _apply_text_directive(root, test, name, value, problem, lineno):
             problem(lineno, "exit: expected a status between 0 and %d" % MAX_EXIT)
         else:
             test.exit = int(value)
+    elif name == "signal":
+        # The set of toolchain.md 7.3, and nothing else: a number is not portable
+        # across the harness's native and qemu paths.
+        if value not in SIGNALS:
+            problem(lineno, "signal: expected one of %s" % ", ".join(sorted(SIGNALS)))
+        else:
+            test.signal_name = value
     elif name == "stderr":
         test.stderr.append(value)
     elif name == "error-any":
@@ -588,6 +610,11 @@ def _first_line(data, limit=200):
 
 def _describe_status(returncode):
     if returncode < 0:
+        # Name the signal the way a `signal:` directive spells it, so the two
+        # sides of a failure message can be compared by eye.
+        for name, number in SIGNALS.items():
+            if number == -returncode:
+                return "SIG" + name
         return "signal %d" % -returncode
     return "exit %d" % returncode
 
@@ -690,8 +717,8 @@ def judge_run(test, compile_proc, link_proc, run_proc):
     (D14.1); a program that times out is a FAIL.
 
     The `stderr:` substrings are looked for after dropping the notice qemu-user
-    appends when a signal kills the program, so an `abort` test sees the same
-    stderr under qemu as natively.
+    appends when a signal kills the program, so an `abort` or `signal:` test
+    sees the same stderr under qemu as natively.
     """
     verdict, reason = judge_compile(compile_proc, True)
     if verdict:
@@ -705,9 +732,13 @@ def judge_run(test, compile_proc, link_proc, run_proc):
     if run_proc.timed_out:
         return "FAIL", "program timed out"
     problems = _stdout_problems(test.stdout, run_proc.stdout)
-    if test.abort:
-        if run_proc.returncode != -signal.SIGABRT:
-            problems.append("expected SIGABRT, got %s" % _describe_status(run_proc.returncode))
+    # `abort` is the spelling of `signal: ABRT` (toolchain.md 7.3).
+    wanted = "ABRT" if test.abort else test.signal_name
+    if wanted:
+        if run_proc.returncode != -SIGNALS[wanted]:
+            problems.append(
+                "expected SIG%s, got %s" % (wanted, _describe_status(run_proc.returncode))
+            )
     elif run_proc.returncode != test.exit:
         problems.append(
             "expected exit %d, got %s" % (test.exit, _describe_status(run_proc.returncode))

@@ -286,6 +286,27 @@ class ParseDirectives(TempRoot):
         self.assertTrue(test.abort)
         self.assertEqual(test.stdout, b"before\n")
 
+    def test_signal(self):
+        test = parse(
+            self.root,
+            "run/ffi/002_trap.ft",
+            """\
+            //! run
+            //! signal: ILL
+            //! stdout:
+            //| before
+            fn i32 main() { return 0; }
+            """,
+        )
+        self.assertEqual(test.problems, [])
+        self.assertEqual(test.signal_name, "ILL")
+        self.assertFalse(test.abort)
+        self.assertEqual(test.stdout, b"before\n")
+        for name in ("ABRT", "BUS", "FPE", "ILL", "SEGV", "TRAP"):
+            other = parse(self.root, "run/control/001_x.ft", "//! run\n//! signal: %s\n" % name)
+            self.assertEqual(other.problems, [])
+            self.assertEqual(other.signal_name, name)
+
     def test_fail_annotations(self):
         test = parse(
             self.root,
@@ -384,6 +405,42 @@ class ParseDirectives(TempRoot):
         self.assertEqual(
             self.problems_of("//! run\n//! abort: yes\n"),
             ["run/control/001_x.ft:2: 'abort' takes no text"],
+        )
+
+    def test_signal_problems(self):
+        expected = "signal: expected one of ABRT, BUS, FPE, ILL, SEGV, TRAP"
+        for value in ("SIGILL", "ill", "4", "KILL", "ILL ABRT"):
+            self.assertEqual(
+                self.problems_of("//! run\n//! signal: %s\n" % value),
+                ["run/control/001_x.ft:2: " + expected],
+            )
+        self.assertEqual(
+            self.problems_of("//! run\n//! signal\n"),
+            ["run/control/001_x.ft:2: 'signal:' needs text"],
+        )
+        self.assertEqual(
+            self.problems_of("//! run\n//! signal: ILL\n//! signal: SEGV\n"),
+            ["run/control/001_x.ft:3: duplicate 'signal:' directive"],
+        )
+        self.assertEqual(
+            self.problems_of("//! run\n//! signal: ILL\n//! abort\n"),
+            ["run/control/001_x.ft:1: 'abort' and 'signal' are mutually exclusive"],
+        )
+        self.assertEqual(
+            self.problems_of("//! run\n//! exit: 1\n//! signal: ILL\n"),
+            ["run/control/001_x.ft:1: 'exit' and 'signal' are mutually exclusive"],
+        )
+        self.assertEqual(
+            self.problems_of("//! run\n//! exit: 1\n//! abort\n//! signal: ILL\n"),
+            [
+                "run/control/001_x.ft:1: 'exit' and 'abort' are mutually exclusive",
+                "run/control/001_x.ft:1: 'exit' and 'signal' are mutually exclusive",
+                "run/control/001_x.ft:1: 'abort' and 'signal' are mutually exclusive",
+            ],
+        )
+        self.assertEqual(
+            self.problems_of("//! fail\n//! signal: ILL\n", "fail/control/001_x.ft", "fail"),
+            ["fail/control/001_x.ft:2: 'signal' is only allowed in run tests"],
         )
 
     def test_kind_restrictions(self):
@@ -828,7 +885,7 @@ class Judging(unittest.TestCase):
         )
         self.assertEqual(
             run_tests.judge_run(self.run_test, proc(0), None, proc(-signal.SIGABRT)),
-            ("FAIL", "expected exit 0, got signal 6"),
+            ("FAIL", "expected exit 0, got SIGABRT"),
         )
         self.run_test.abort = True
         self.assertEqual(
@@ -848,6 +905,58 @@ class Judging(unittest.TestCase):
                 "stdout line 1: expected 'x', got 'y'; expected exit 0, got exit 2; "
                 "stderr lacks 'boom'",
             ),
+        )
+
+    def test_judge_run_signal(self):
+        self.run_test.signal_name = "ILL"
+        self.assertEqual(
+            run_tests.judge_run(self.run_test, proc(0), None, proc(-signal.SIGILL)), ("PASS", "")
+        )
+        self.assertEqual(
+            run_tests.judge_run(self.run_test, proc(0), None, proc(-signal.SIGABRT)),
+            ("FAIL", "expected SIGILL, got SIGABRT"),
+        )
+        self.assertEqual(
+            run_tests.judge_run(self.run_test, proc(0), None, proc(0)),
+            ("FAIL", "expected SIGILL, got exit 0"),
+        )
+        self.assertEqual(
+            run_tests.judge_run(self.run_test, proc(0), None, proc(132)),
+            ("FAIL", "expected SIGILL, got exit 132"),
+        )
+        self.run_test.signal_name = "SEGV"
+        self.assertEqual(
+            run_tests.judge_run(self.run_test, proc(0), None, proc(-signal.SIGSEGV)), ("PASS", "")
+        )
+        # A signal outside the normative set keeps its number, and a status is
+        # never confused with a signal of the same value.
+        self.assertEqual(
+            run_tests.judge_run(self.run_test, proc(0), None, proc(-signal.SIGKILL)),
+            ("FAIL", "expected SIGSEGV, got signal 9"),
+        )
+        self.assertEqual(
+            run_tests.judge_run(self.run_test, proc(0), None, proc(int(signal.SIGSEGV))),
+            ("FAIL", "expected SIGSEGV, got exit 11"),
+        )
+        self.assertEqual(
+            run_tests.judge_run(self.run_test, proc(0), None, proc(-signal.SIGILL)),
+            ("FAIL", "expected SIGSEGV, got SIGILL"),
+        )
+
+    def test_judge_run_signal_ignores_the_qemu_notice(self):
+        notice = b"qemu: uncaught target signal 4 (Illegal instruction) - core dumped\n"
+        self.run_test.signal_name = "ILL"
+        self.run_test.stderr = ["Illegal instruction"]
+        self.assertEqual(
+            run_tests.judge_run(self.run_test, proc(0), None, proc(-signal.SIGILL, b"", notice)),
+            ("FAIL", "stderr lacks 'Illegal instruction'"),
+        )
+        self.run_test.stderr = ["about to trap"]
+        self.assertEqual(
+            run_tests.judge_run(
+                self.run_test, proc(0), None, proc(-signal.SIGILL, b"", b"about to trap\n" + notice)
+            ),
+            ("PASS", ""),
         )
 
     def test_drop_qemu_notice(self):

@@ -1127,6 +1127,7 @@ All directives are `//!` lines at the top of the file, except `error`, which ann
 | `//! stdout:` then `//| ` lines | expected stdout, compared exactly, trailing spaces included |
 | `//! exit: N`                   | expected exit status, default 0                          |
 | `//! abort`                     | expect termination by SIGABRT                            |
+| `//! signal: NAME`              | expect termination by that signal                        |
 | `//! stderr: <substring>`       | `<substring>` must appear in stderr; repeatable          |
 | `//! error: <substring>`        | `fail` tests only, at the end of the offending line      |
 | `//! error-any: <substring>`    | `fail` tests only, at the top                            |
@@ -1168,23 +1169,29 @@ inherited and core dumps disabled:
 | `stdout:`    | the program's stdout must equal the `//| ` lines; with no directive, empty   |
 | `exit:`      | the program's exit status must equal `N`                                    |
 | `abort`      | the program must die with SIGABRT (status 134 from the shell)               |
+| `signal:`    | the program must die with `SIG<NAME>`, one of the six names below           |
 | `stderr:`    | each substring must occur in the program's (`run`) or compiler's (`fail`) stderr |
 | `error:`     | an `error:` line with that file and line must contain the substring         |
 | `error-any:` | some `error:` line must contain the substring                               |
 
 `<test>` is the test file, or `main.ft` in a multi-file test; `-o` names a file in the temporary
 directory even for a `fail` test, so a compiler that wrongly succeeds never writes `a.out` into
-`test/lang`. Before the `stderr:` substrings of a `run` test are looked for, the lines qemu-user
-adds when a signal kills the program (`qemu: uncaught target signal 6 (Abort) - core dumped`)
-are dropped, since native execution prints nothing there. For `error:` the harness also fails
-the test when the compiler reports an `error:` for a line that carries no annotation; a
-diagnostic matched by an `error-any:` counts as annotated, and further diagnostics on an
-annotated line are accepted. In multi-file tests, directives are read from `main.ft`,
-`//! error:` annotations from every `.ft` file in the directory (D14.4), and no `-I` is passed
-because the directory is the root (D9.2). A compiler exit status other than 0 or 1 (2 is a
-usage, toolchain or internal error, D14.1), a compiler crash, a compiler timeout, a failure of
-the harness's own `link:` step and a program that cannot be started are `ERROR`, not a verdict
-about the test; a program that times out is a `FAIL`.
+`test/lang`. `//! abort` is the spelling for SIGABRT and `//! signal:` covers the rest: its text is
+a signal's POSIX name without the `SIG` prefix, one of `ABRT`, `BUS`, `FPE`, `ILL`, `SEGV` and
+`TRAP` (`signal: ABRT` says what `abort` says). Any other name, and a number, is a lint error, since
+the set is normative here rather than whatever the machine running the harness happens to define.
+`exit:`, `abort` and `signal:` state one outcome between them and are mutually exclusive. Before the
+`stderr:` substrings of a `run` test are looked for, the lines qemu-user adds when a signal kills
+the program (`qemu: uncaught target signal 6 (Abort) - core dumped`) are dropped, since native
+execution prints nothing there; that holds for every signal, so a `signal:` test compares the
+program's own stderr and not qemu's note. For `error:` the harness also fails the test when the
+compiler reports an `error:` for a line that carries no annotation; a diagnostic matched by an
+`error-any:` counts as annotated, and further diagnostics on an annotated line are accepted. In
+multi-file tests, directives are read from `main.ft`, `//! error:` annotations from every `.ft` file
+in the directory (D14.4), and no `-I` is passed because the directory is the root (D9.2). A compiler
+exit status other than 0 or 1 (2 is a usage, toolchain or internal error, D14.1), a compiler crash,
+a compiler timeout, a failure of the harness's own `link:` step and a program that cannot be started
+are `ERROR`, not a verdict about the test; a program that times out is a `FAIL`.
 
 Two expectation files beside the harness list path prefixes of tests (relative to `test/lang`,
 `#` comments allowed). `xfail.txt` names the tests the compiler cannot pass yet: a listed test
@@ -1202,7 +1209,8 @@ reason where there is one, then a summary, and exits with 1 if any test is `FAIL
 `ERROR`; each `filter` selects the tests whose path contains it. `--list` prints the selected
 tests and their count. `--lint` validates the corpus without a compiler and fails on: a first
 line other than `//! run` or `//! fail` or one that does not match the directory; an unknown,
-malformed, duplicated or empty directive; `exit` together with `abort`; a run-only directive in
+malformed, duplicated or empty directive; a `signal:` naming none of the six signals above;
+two of `exit`, `abort` and `signal` together; a run-only directive in
 a `fail` test or `error`/`error-any` in a `run` test; a `link:` file that does not exist; a
 `//<` or `//|` not followed by a space or outside its block; a directive after the header or in
 a sibling module; a `fail` test with neither `error:` nor `error-any:`; an unknown area, a

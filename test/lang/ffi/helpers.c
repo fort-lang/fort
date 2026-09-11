@@ -81,3 +81,9 @@ int32_t helper_enum_next(int32_t c) {
 int32_t helper_paint(int32_t color) {
     return color * PAINT_SCALE;
 }
+
+// Returns to its caller although the fort side declares it `noreturn`, which
+// is the one way a program can reach the trap the compiler emits after a call
+// to a `noreturn` function (D19.7). `llvm.trap` is `ud2` on x86-64, so control
+// arriving here dies by SIGILL with no message (D11.4).
+void helper_returns_anyway(void) {}
