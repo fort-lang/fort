@@ -345,6 +345,15 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
   drifted from 3.34 to 2.50 over six tickets while every one of them passed, because a large corpus
   hides a thin diff; a ticket that cannot reach 3:1 says so in its log with the reason rather than
   lowering the number.
+- The ratio is a prompt, not a verdict: what a review asks is which rules of the decisions a ticket
+  cites have no test at all, unit or language, and the answer decides the ticket. T-014 measured
+  0.76 and merged, because the number could not see that it took 57 entries out of xfail.txt -- a
+  body of language tests that already existed and only then began to exercise the code, adding not a
+  line to the diff -- while the coverage question found three rules that were untested and also
+  broken (a noreturn function type that never matched, an unchecked shift count that made the two
+  build modes disagree, and an index expression that handed out a pointer into a dead temporary).
+  Ask a reviewer for the list of untested rules whenever a ticket misses the ratio, and merge or
+  refuse on that list.
 
 ### Agents
 - The coordinator is the main session. Every other role is an agent definition in
