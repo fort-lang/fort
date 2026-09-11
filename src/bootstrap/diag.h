@@ -63,9 +63,11 @@ bool loc_is_ordered(loc_t loc);
 typedef enum { DIAG_ERROR, DIAG_NOTE } diag_severity_t;
 
 // One reported diagnostic, handed out by value: the sink's own array moves
-// when it grows, while `msg` is a copy owned by the sink's pool, stable until
-// diag_reset, and NUL-terminated like every pooled string, so `msg.ptr` is
-// also a C string.
+// when it grows, while `msg` and the file name of `loc` are copies owned by
+// the sink's pool, stable until diag_reset, and NUL-terminated like every
+// pooled string, so `msg.ptr` is also a C string. The file name is copied
+// because a record is read after the compilation that reported it has
+// released the names it read (D20.2).
 typedef struct {
     loc_t loc;
     diag_severity_t severity;

@@ -103,7 +103,10 @@ A safe(r) C-like systems programming language.
   bootstrap deliberately lacks (floats, multi-dimensional arrays, do-while, `?:`; function
   pointers are in its subset, D3.10); keep such features out of core tests, or split them into
   their own test, so the core tests exercise stage1. `run_tests.py --lint` validates directives
-  without a compiler and runs before every test run. A compiler exit status other than 0 or 1 is
+  without a compiler and runs before every test run; `run_tests.py --check-json` is a mode of its
+  own (ctest `lang_check_json`, also run by check-lang) that holds the document of `fort --check
+  --json` against the text form on every fail test and ignores `xfail.txt`, since it judges the
+  two forms of one run rather than the test. A compiler exit status other than 0 or 1 is
   an `ERROR`, which `xfail.txt` still covers. The harness and its unit tests are Python 3.12,
   standard library only, wrapped at 100 columns (the host's `ruff format --line-length 100` is
   the reference); `run_tests_test.py` scripts a fake `fort` with `//@` lines, extend it rather
@@ -171,7 +174,7 @@ A safe(r) C-like systems programming language.
 ## Technical Standards
 - **Markdown**: Line-wrap at 100 characters, including tables and code blocks. Check with
   `awk 'length > 100 {print FILENAME": "FNR}' <files>`. Code fences use `fort`, `c`, `sh`,
-  `llvm` or `ebnf` as the language tag.
+  `llvm`, `json` or `ebnf` as the language tag.
 - **Language changes**: any change to the language is recorded in `notes/decisions.md` first
   (new decision number or amended decision with a note), then in the specification document that
   owns the topic, then in the tests under `test/lang/`. Specification text never contains "TBD",
@@ -232,6 +235,13 @@ A safe(r) C-like systems programming language.
   walks it): a diagnostic on a line with no `//! error:` annotation fails the suite, and the
   diagnostic counts of the files with two syntax errors are asserted beside it, since a walk that
   only forbids unannotated lines also passes with recovery switched off.
+- **Diagnostic records**: a `diag_record_t` owns its file name as well as its message. `loc.file`
+  is borrowed from whoever reported the diagnostic -- the module set, whose pool holds every file
+  name it read -- and that set is freed before `fort --check --json` writes its document (D20.2),
+  so a record that kept the borrowed pointer hands out freed bytes. The symptom is not a crash:
+  the freed block still held a NUL, so the document printed `"file":""` while the text form,
+  written at report time, was right. `record_append` interns the name in the sink's own pool, and
+  anything else a record must outlive its reporter for is copied the same way.
 - **Citing decisions in code**: a citation goes on the line or function that implements the
   rule, with a phrase stating the rule (`// pointers print as 0x + lowercase hex, 0x0 for null
   (D11.7)`), so a reader learns the rule without opening the log. A bare tag list at file or

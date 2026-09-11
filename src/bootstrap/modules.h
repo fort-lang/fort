@@ -97,6 +97,14 @@ bool module_set_load(module_set_t* set, const char* entry);
 uint64_t module_set_count(const module_set_t* set);
 const module_t* module_set_at(const module_set_t* set, uint64_t i);
 
+// The files of every module the loader read, in the order it read them,
+// whether or not the module parsed and whether or not the closure is
+// complete: the "files" array of the check mode's document, which tells a
+// client which files it may clear stale diagnostics for (D20.2). A file that
+// could not be read is not among them.
+uint64_t module_set_file_count(const module_set_t* set);
+str_t module_set_file_at(const module_set_t* set, uint64_t i);
+
 // The module of the given path, or NULL when the closure holds none.
 const module_t* module_set_find(const module_set_t* set, str_t path);
 

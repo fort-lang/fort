@@ -142,10 +142,14 @@ foreach(test_source IN LISTS FORT_UNIT_TEST_SOURCES)
 endforeach()
 
 # The driver tests spawn test/fake_cc.sh as their --cc: it records the command
-# line the driver built (D14.3) instead of compiling it, so they need its path.
-if(TARGET driver_test)
-    target_compile_definitions(driver_test PRIVATE FORT_FAKE_CC="${FORT_TEST_DIR}/fake_cc.sh")
-endif()
+# line the driver built (D14.3) instead of compiling it, so they need its path;
+# the check suite needs it to assert that `--check` spawns nothing (D20.1).
+foreach(driver_suite driver_test driver_check_test)
+    if(TARGET "${driver_suite}")
+        target_compile_definitions("${driver_suite}"
+            PRIVATE FORT_FAKE_CC="${FORT_TEST_DIR}/fake_cc.sh")
+    endif()
+endforeach()
 
 # The cross pipeline: the hand-written LLVM IR modules under test/ir, which
 # are in the form of toolchain.md 6 and are its worked examples (D19.1), are
@@ -180,8 +184,9 @@ endif()
 
 # The language tests (toolchain.md 7, D14.4, D14.5): test/lang/run_tests.py
 # drives the compiler over test/lang. The ctest `lang` (label lang) and the
-# check-lang target run the same command; `lang_lint` validates the directives
-# and `lang_selftest` runs the harness's own unit tests (both label unit).
+# check-lang target run the same command, and `lang_check_json` the cross-check
+# of the check mode (D20.2); `lang_lint` validates the directives and
+# `lang_selftest` runs the harness's own unit tests (both label unit).
 find_program(FORT_PYTHON3 NAMES python3 REQUIRED)
 set(FORT_LANG_DIR "${FORT_TEST_DIR}/lang")
 
@@ -205,6 +210,13 @@ set(FORT_LANG_COMMAND
 )
 add_test(NAME lang COMMAND ${FORT_LANG_COMMAND})
 set_tests_properties(lang PROPERTIES
+    LABELS lang
+    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
+
+# The check mode over the same corpus: `fort --check --json` on every fail
+# test, held against the text form of D14.2 (D20.1, D20.2).
+add_test(NAME lang_check_json COMMAND ${FORT_LANG_COMMAND} --check-json)
+set_tests_properties(lang_check_json PROPERTIES
     LABELS lang
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
 add_test(NAME lang_lint COMMAND "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}" --lint)
@@ -247,6 +259,7 @@ set_tests_properties(highlight_selftest PROPERTIES
 
 add_custom_target(check-lang
     COMMAND ${FORT_LANG_COMMAND}
+    COMMAND ${FORT_LANG_COMMAND} --check-json
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Running the language tests"
     USES_TERMINAL

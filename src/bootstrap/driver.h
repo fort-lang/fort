@@ -6,6 +6,10 @@
 // once to compile and link it with the runtime object. The front end is the
 // seam driver_front_end below: tickets T-013 and T-015 implement it.
 //
+// `--check` stops after the front end, with no module, no temporary and no
+// `--cc` (D20.1), and `--json` reports what it found as one JSON document on
+// stdout instead of the text diagnostics of D14.2 (D20.2, toolchain.md 4.1).
+//
 // The file mirrors what the self-hosted compiler will do: no unions, no
 // function pointers, messages assembled with sb_t instead of printf formats.
 #ifndef FORT_DRIVER_H
@@ -54,6 +58,8 @@ typedef struct {
     bool compile_only;    // -c
     bool release;         // --release
     bool no_bounds_check; // --no-bounds-check
+    bool check;           // --check: the front end alone (D20.1)
+    bool json;            // --json: the document of D20.2 on stdout
     ptrvec_t includes;    // -I roots, searched in command-line order (D9.2)
     ptrvec_t libs;        // -l<lib> as given, passed to the linker in order
     ptrvec_t cc_args;     // -Xcc arguments, passed verbatim after the rest
@@ -110,6 +116,27 @@ void driver_cc_argv(const driver_options_t* opts,
                     str_pool_t* pool,
                     ptrvec_t* argv);
 
+// The `"version"` of the check mode's document: 1 for the form of D20.2.
+enum { FORT_JSON_VERSION = 1 };
+
+// The files of the import closure, in the order the compiler read them: the
+// `"files"` array of the document (D20.2). The names are copies, since the
+// module set that read them is released before the document is written.
+// Zero-initialized storage is not one: driver_files_init prepares it.
+typedef struct {
+    str_pool_t pool; // owns every name
+    ptrvec_t names;  // const char*, NUL-terminated, in read order
+} driver_files_t;
+
+void driver_files_init(driver_files_t* files);
+
+// Releases the names and the pool; the list is empty and usable afterwards.
+void driver_files_free(driver_files_t* files);
+
+// The files, in read order. `i` past the end is an internal error.
+uint64_t driver_files_count(const driver_files_t* files);
+const char* driver_files_at(const driver_files_t* files, uint64_t i);
+
 // The front end of toolchain.md 2, steps 1 to 4: read the entry file, parse
 // the import closure (module-system.md 10), check every module in dependency
 // order and write the program's LLVM IR module to `ir_path` (D19.1). The
@@ -123,14 +150,20 @@ void driver_cc_argv(const driver_options_t* opts,
 // toolchain error goes to `err`: the compile-time diagnostics of D14.2 go to
 // stderr through diag.h, which main.c relies on and a test redirects with
 // diag_capture.
+//
+// `ir_path` is NULL under `--check`, which emits no module (D20.1); `files`
+// collects the closure's file names for the document of D20.2 and is NULL
+// when the caller wants none. The diagnostics the run reported stay in the
+// sink of diag.h, where diag_write_json reads them.
 int driver_front_end(const driver_options_t* opts,
                      const char* argv0,
                      const char* ir_path,
+                     driver_files_t* files,
                      FILE* err);
 
 // Runs the compiler with argv[1..argc-1]; out and err are where --help,
-// --version and the diagnostics go (stdout and stderr in main). Returns the
-// process exit status.
+// --version, the document of `--json` and the `fort: error:` lines go
+// (stdout and stderr in main). Returns the process exit status.
 int driver_main(int argc, char** argv, FILE* out, FILE* err);
 
 #endif

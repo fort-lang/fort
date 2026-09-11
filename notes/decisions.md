@@ -509,7 +509,9 @@ Owner: `core-language.md` (Functions).
 - **D8.6** Entry point: the module given to `fort` must define `fn i32 main()` or
   `fn i32 main(string@ args)`. `args[0]` is the program name; each element is NUL-terminated
   because it comes from `argv`. The return value is the exit status. A `main` returning `void`
-  is an error. A `main` in any other module is an ordinary function.
+  is an error. A `main` in any other module is an ordinary function. Amended 2026-09-10 with D20:
+  `fort --check` inspects a module rather than building a program, so it does not apply this rule
+  (D20.1).
 
 ## D9 Modules, namespaces and FFI
 
@@ -766,10 +768,12 @@ Owner: `toolchain.md`.
   `--cc <path>` (default `clang`; it must be a clang, since it compiles LLVM IR),
   `--target <triple>` (default `x86_64-linux-gnu`, passed to `--cc` as `--target=<triple>`),
   `-Xcc <arg>` (repeatable, passed to `--cc` verbatim after the compiler's own arguments),
-  `--help`, `--version`. Exit status: 0 success, 1 compile error, 2 usage, toolchain (`--cc`
-  failed) or internal error; usage and toolchain errors are printed as `fort: error: <message>`.
+  `--check` (D20.1), `--json` (D20.2, only with `--check`), `--help`, `--version`. Exit status: 0
+  success, 1 compile error, 2 usage, toolchain (`--cc` failed) or internal error; usage and
+  toolchain errors are printed as `fort: error: <message>`.
   Amended 2026-09-10 with D19: `-S` emitted `<entry>.s`, `--cc` defaulted to `cc`, and
-  `--target` and `-Xcc` did not exist.
+  `--target` and `-Xcc` did not exist. Amended 2026-09-10 with D20: `--check` and `--json`
+  did not exist.
 - **D14.2** Diagnostics: `<file>:<line>:<col>: error: <message>` on stderr, one per line,
   optionally followed by `note:` lines. Errors without a position in the file (a missing
   `main`) use `1:1`. A lexical error is reported and lexing resumes at the start of the next
@@ -1134,11 +1138,33 @@ assembly, survives only in the history of this file and of `toolchain.md`.
 
 ## D20 Editor support
 
-Decided 2026-09-10. Owner: `toolchain.md` (4). An editor underlines the construct a diagnostic is
-about and jumps to the name a declaration introduces, so both are recorded from the parser on.
-Only this preamble and D20.4 are decided here; the check mode, the JSON form, the identifier index
-and the language server (D20.1 to D20.3, D20.5) land with the check mode, after the checker.
+Decided 2026-09-10. Owner: `toolchain.md` (1, 4). An editor underlines the construct a diagnostic
+is about and jumps to the name a declaration introduces, so both are recorded from the parser on.
+The check mode is the compiler's whole editor interface: it never grows a server. The identifier
+index and the language server (D20.3, D20.5) are not decided here; they land after the checker.
 
+- **D20.1** `fort --check entry.ft` runs the front end only (lex, parse, resolve the import
+  closure, check every module of it) and stops: no IR, no `--cc`, no temporary directory, so
+  `-o`, `-S`, `-c`, `-l`, `--cc`, `--target` and `-Xcc` are unused as they already are under
+  `-S`. Exit 0 when nothing was reported, 1 when anything was, 2 for a usage, toolchain or
+  internal error (D14.1). The entry module need not define `main`: under `--check` it is a module
+  under inspection and not a program, so D8.6 is not applied. Every other rule holds, the
+  diagnostics of D14.2 included.
+- **D20.2** `fort --check --json entry.ft` writes one JSON document to stdout and no text
+  diagnostic; `fort: error:` lines stay on stderr, so a client tells a crash (exit 2, stdout
+  empty) from a verdict (exit 0 or 1, one document). The document is built whole and written with
+  one `fwrite`, so stdout is a complete document or empty and never a truncated one. `--json`
+  without `--check` is a usage error: a build spawns `--cc`, which inherits stdout, so no build
+  can promise that; `-S`, which spawns nothing, could be given the document by a later
+  amendment. The document is
+  `{"version": 1, "files": [...], "diagnostics": [...], "symbols": [...]}`, one line, `"version"`
+  1 for this form. `"files"` lists every file the compiler read, in that order, as the `<file>`
+  of D14.2, so a client can clear the stale diagnostics of a file that no longer has any. A
+  diagnostic is `{"file", "line", "col", "end_line", "end_col", "severity": "error", "message",
+  "notes": [{"file", "line", "col", "end_line", "end_col", "message"}]}`, the notes of D14.2
+  nested under the error they follow; positions are the 1-based byte columns of D14.2 and D20.4
+  with the end exclusive, and converting them to UTF-16 is the client's job. `"symbols"` is the
+  index of D20.3 and is empty until it is decided.
 - **D20.4** Ranges. A position is a range: from the first byte of its first token to one past the
   last byte of its last token, the start inclusive and the end exclusive, both 1-based byte
   columns with a tab counting as one column (D14.2). No token spans lines (D2.9), so the range of

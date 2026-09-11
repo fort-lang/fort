@@ -844,6 +844,19 @@ const module_t* module_set_at(const module_set_t* set, uint64_t i) {
     return (const module_t*)set->order.items[i];
 }
 
+// Every file read, whether or not its module parsed: a module is recorded
+// before it is lexed, so a file with errors is listed too (D20.2).
+uint64_t module_set_file_count(const module_set_t* set) {
+    return set->modules.len;
+}
+
+str_t module_set_file_at(const module_set_t* set, uint64_t i) {
+    if (i >= set->modules.len) {
+        fatal_internal("module_set_file_at: index out of range");
+    }
+    return ((const module_t*)set->modules.items[i])->file;
+}
+
 const module_t* module_set_find(const module_set_t* set, str_t path) {
     int64_t at = 0;
     if (!strmap_get(&set->by_path, path, &at)) {
