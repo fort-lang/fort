@@ -1,0 +1,441 @@
+// The environment the checker suites share: the module sandbox of
+// modules_env.ft, a checker over the closure it loads, and small queries over
+// the symbols, the types and the annotations the checker wrote.
+//
+// This is the port of the part of test/check_helpers.h the ported half of the
+// checker needs. A `test/fort` test is a program rather than a translation
+// unit, so the shared part is a module the tests import with `-I support`.
+//
+// What the suites over this module are for. The differential oracle of Phase
+// B -- the language corpus run against stage2, which holds every diagnostic,
+// its position and the exit status against stage1's -- cannot see what the
+// checker actually produces: its output is annotations on the tree, `ty`,
+// `sym`, `ann` and `aux`, and neither `--tokens` nor `--ast` prints them. Two
+// compilers can therefore agree about every diagnostic of every file in the
+// corpus and disagree about the type of an expression, and the first thing to
+// notice would be the emitter. So the annotations are asserted here by name:
+// the type of an expression, the symbol a name denotes, the folded value of a
+// constant, the byte offset of a field, the bits of `ann` and the fact that a
+// second check clears them.
+//
+// Two probes of the checker are reachable only from here. src/fort/check.ft
+// resolves the declarations of a module and stops before the function bodies,
+// which are check_stmt.ft's (T-036), so an expression inside a body is
+// reached by calling check_expr on its node directly, after
+// check_module_decls has left the module in place; and `empty` and `is_mut`
+// are two fields of one checked expression, which no diagnostic prints apart.
+import ast;
+import check;
+import consts;
+import modules;
+import modules_env;
+import scope;
+import session;
+import std.str;
+import std.strbuf;
+import types;
+
+// The sandbox, the checker over it, and the buffer the text queries build
+// their answer in.
+struct env {
+    modules_env.env m;
+    check.checker ck;
+    strbuf.str_buf buf;
+    // The options of the next check, which check_entry applies and resets, so
+    // that a test states the ones it needs and leaves the next one the
+    // defaults. The C suite's `want_main` and `want_mute`.
+    bool want_main;
+    bool want_mute;
+}
+
+// Prepares a fresh sandbox with an empty session, an empty set and a checker
+// over them. The entry rule of D8.6 is on by default, as the driver has it
+// for a build.
+//
+// It fills a caller's value rather than returning one, which modules_env.open
+// may do because nothing in a module set points into the session beside it: a
+// checker holds the session it reports through (check.ft), so it must be
+// initialised at the address it will be used at. An `open` that returned by
+// value left every diagnostic going to the session of the dead local, and the
+// suite saw a check that reported nothing at all.
+fn void open(env mut* e) {
+    e->m = modules_env.open();
+    check.check_init(&e->ck, &e->m.s);
+    e->want_main = true;
+}
+
+// Releases the checker, then the modules, then the session: every annotation
+// points into the checker, every name of a tree into the session, and the
+// trees belong to the modules (D20.5).
+fn void close(env mut* e) {
+    check.check_free(&e->ck);
+    strbuf.free(&e->buf);
+    modules_env.close(&e->m);
+}
+
+// Writes a module at `rel` under the sandbox.
+fn void add(env mut* e, string rel, string text) {
+    modules_env.add(&e->m, rel, text);
+}
+
+fn void add2(env mut* e, string rel, string first, string second) {
+    modules_env.add2(&e->m, rel, first, second);
+}
+
+fn void add3(env mut* e, string rel, string first, string second, string third) {
+    modules_env.add3(&e->m, rel, first, second, third);
+}
+
+// Loads the closure of the sandbox module `rel` and checks it; false when the
+// load or the check reported a diagnostic. Checking runs even when the load
+// failed, as the front end does, so that a module whose import did not parse
+// is still checked (D14.2, D20.1).
+fn bool check_entry(env mut* e, string rel) {
+    bool loaded = modules_env.load(&e->m, rel);
+    e->ck.require_main = e->want_main;
+    e->ck.mute = e->want_mute;
+    e->want_main = true;
+    e->want_mute = false;
+    bool checked = check.check_program(&e->ck, &e->m.set);
+    return checked && loaded;
+}
+
+// Writes `text` as the entry module `main.ft` and checks it.
+fn bool check_src(env mut* e, string text) {
+    add(e, "main.ft", text);
+    return check_entry(e, "main.ft");
+}
+
+// The same for a source that is a list of module-level declarations, with the
+// `main` D8.6 asks of an entry module appended: a declaration on line n of
+// `decls` is on line n of the module, so a position assertion reads off the
+// text the test wrote.
+fn bool check_decls(env mut* e, string decls) {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, decls);
+    strbuf.append(&b, "fn i32 main() {\n    return 0;\n}\n");
+    return check_src(e, strbuf.view(&b));
+}
+
+// `T N = <expr>;` as the whole of a module: the one context in which an
+// expression is checked by the ported half of the checker, since a
+// module-level initializer is (D7.10). Returns whether the module checked
+// clean.
+fn bool check_init_of(env mut* e, string type_text, string expr_text) {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, type_text);
+    strbuf.append(&b, " probe = ");
+    strbuf.append(&b, expr_text);
+    strbuf.append(&b, ";\n");
+    return check_decls(e, strbuf.view(&b));
+}
+
+// ---- the tree and the symbols ------------------------------------------------------
+
+// The module of the closure at `path`, or null.
+fn modules.module* module_at(env* e, string path) {
+    return modules.find(&e->m.set, path);
+}
+
+// The syntax tree of the module at `path`, or null.
+fn ast.node mut* module_ast(env* e, string path) {
+    modules.module* m = module_at(e, path);
+    if (m == null) {
+        return null;
+    }
+    return cast(m->ast, ast.node mut*);
+}
+
+// The symbol of a top-level declaration of the module at `path`.
+fn ast.sym* sym_of(env* e, string path, string name) {
+    scope.binding* b = modules_env.bound(&e->m, path, name);
+    if (b == null || b->node == null) {
+        return null;
+    }
+    return b->node->sym;
+}
+
+// The symbol of a top-level declaration of the entry module `main`.
+fn ast.sym* sym_main(env* e, string name) {
+    return sym_of(e, "main", name);
+}
+
+// The first node of `kind` in the tree below `n`, in source order; `name`
+// selects by the node's own name when it is not the empty string.
+fn ast.node mut* node_find(ast.node mut* n, ast.ast_kind kind, string name) {
+    if (n == null) {
+        return null;
+    }
+    if (n->kind == kind && (name.len == 0 || n->name == name)) {
+        return n;
+    }
+    ast.node mut* mut hit = node_find(n->a, kind, name);
+    if (hit != null) {
+        return hit;
+    }
+    hit = node_find(n->b, kind, name);
+    if (hit != null) {
+        return hit;
+    }
+    hit = node_find(n->c, kind, name);
+    if (hit != null) {
+        return hit;
+    }
+    hit = node_find(n->d, kind, name);
+    if (hit != null) {
+        return hit;
+    }
+    u64 mut i = 0;
+    while (i < ast.ast_len(n)) {
+        hit = node_find(cast(ast.ast_child(n, i), ast.node mut*), kind, name);
+        if (hit != null) {
+            return hit;
+        }
+        i += 1;
+    }
+    return null;
+}
+
+// The first node of `kind` named `name` in the entry module.
+fn ast.node mut* node_in_main(env* e, ast.ast_kind kind, string name) {
+    return node_find(module_ast(e, "main"), kind, name);
+}
+
+// ---- the annotations ---------------------------------------------------------------
+
+// The canonical spelling of a type, valid until the next text query.
+fn string type_text(env mut* e, types.node* t) {
+    strbuf.clear(&e->buf);
+    if (t == null) {
+        strbuf.append(&e->buf, "<null>");
+    } else {
+        types.type_to_str(t, &e->buf);
+    }
+    return strbuf.view(&e->buf);
+}
+
+// The spelling of a declaration's type, level 0 included (D5.3).
+fn string sym_type_text(env mut* e, ast.sym* s) {
+    strbuf.clear(&e->buf);
+    if (s == null || s->ty == null) {
+        strbuf.append(&e->buf, "<null>");
+    } else {
+        types.type_to_str_decl(s->ty, s->mut0, &e->buf);
+    }
+    return strbuf.view(&e->buf);
+}
+
+// The declared type of the module declaration `name`, level 0 included.
+fn string decl_type(env mut* e, string name) {
+    ast.node mut* d = node_in_main(e, ast.ast_kind.k_var_decl, name);
+    if (d == null) {
+        return sym_type_text(e, null);
+    }
+    return sym_type_text(e, d->sym);
+}
+
+// The type the checker gave the initializer of the declaration `name`.
+fn string init_type(env mut* e, string name) {
+    ast.node mut* d = node_in_main(e, ast.ast_kind.k_var_decl, name);
+    if (d == null || d->b == null) {
+        return type_text(e, null);
+    }
+    return type_text(e, d->b->ty);
+}
+
+// The type the checker gave the initializer of `probe`, which is what
+// check_init_of writes.
+fn string probe_type(env mut* e) {
+    return init_type(e, "probe");
+}
+
+// The folded value of the initializer of the declaration `name`, as an i64;
+// false when it is not an integer constant.
+fn bool init_int(env mut* e, string name, i64 mut* out) {
+    ast.node mut* d = node_in_main(e, ast.ast_kind.k_var_decl, name);
+    if (d == null || d->b == null) {
+        return false;
+    }
+    return consts.cv_to_i64(check.check_node_value(&e->ck, d->b), out);
+}
+
+// The byte offset the checker recorded on the field `field` of the struct
+// `name` (D3.8). `aux` carries a constant's value index on one node kind and
+// a field's byte offset on another, so it is never read without the bit that
+// says which: on a field declaration that is ANN_RESOLVED, which check_sym_new
+// sets when it makes the field's symbol, and a field that did not resolve
+// carries no offset to read.
+fn u64 field_offset(env* e, string name, string field) {
+    ast.node mut* decl = node_in_main(e, ast.ast_kind.k_struct_decl, name);
+    ast.node mut* f = node_find(decl, ast.ast_kind.k_field_decl, field);
+    if (f == null) {
+        panic("check_env.field_offset: no such field");
+    }
+    if (!has_ann(f, check.ANN_RESOLVED)) {
+        panic("check_env.field_offset: the field did not resolve, so aux is not an offset");
+    }
+    return f->aux;
+}
+
+// Whether every bit of `mask` is set on the node.
+fn bool has_ann(ast.node* n, u32 mask) {
+    return n != null && (n->ann & mask) == mask;
+}
+
+// ---- diagnostics -------------------------------------------------------------------
+
+// Whether any diagnostic reported so far holds `text`.
+fn bool said(env mut* e, string text) {
+    return modules_env.said(&e->m, text);
+}
+
+// The errors reported so far, notes excluded (D14.2).
+fn u64 errors(env* e) {
+    return modules_env.errors(&e->m);
+}
+
+// The number of diagnostics reported, notes included.
+fn u64 reports(env mut* e) {
+    return modules_env.reports(&e->m);
+}
+
+// The `i`-th diagnostic as `<line>:<col>: <message>`, valid until the next
+// text query: the position is what a test about D14.2 asserts.
+fn string report_text(env mut* e, u64 i) {
+    diag_record_text(e, i);
+    return strbuf.view(&e->buf);
+}
+
+fn void diag_record_text(env mut* e, u64 i) {
+    strbuf.clear(&e->buf);
+    if (i >= modules_env.reports(&e->m)) {
+        strbuf.append(&e->buf, "<none>");
+        return;
+    }
+    strbuf.append_u64(&e->buf, cast(modules_env.report_at(&e->m, i).loc.line, u64));
+    strbuf.push(&e->buf, ':');
+    strbuf.append_u64(&e->buf, cast(modules_env.report_at(&e->m, i).loc.col, u64));
+    strbuf.append(&e->buf, ": ");
+    strbuf.append(&e->buf, modules_env.report_at(&e->m, i).msg);
+}
+
+// ---- checking one expression by hand -----------------------------------------------
+
+// Loads the entry module `main.ft` written from `text` and resolves its
+// declarations, leaving the module in place so that probe_expr may check an
+// expression against it. check_module_decls stops before the function bodies,
+// which check_module_finish would end the module pass after (check.ft).
+fn bool open_module(env mut* e, string text) {
+    add(e, "main.ft", text);
+    bool loaded = modules_env.load(&e->m, "main.ft");
+    modules.module* m = module_at(e, "main");
+    if (m == null) {
+        return false;
+    }
+    check.check_module_decls(&e->ck, m);
+    return loaded;
+}
+
+// Checks the expression node `n` as the checker would, with the module
+// open_module left in place and no block scope, and returns what it found.
+// This is how an expression form that cannot stand in a module-level
+// initializer -- a call, `new`, `move`, `del`, `&` -- is reached before the
+// statements are ported (T-036).
+fn check.expr probe_expr(env mut* e, ast.node mut* n) {
+    check.expr mut out = check.expr{};
+    check.check_expr(&e->ck, n, &out);
+    return out;
+}
+
+// The first expression of `kind` in the body of the function `name` of the
+// entry module, checked; the test asserts on the fields of the result.
+fn check.expr probe_in(env mut* e, string fn_name, ast.ast_kind kind) {
+    ast.node mut* f = node_in_main(e, ast.ast_kind.k_fn_decl, fn_name);
+    if (f == null) {
+        panic("check_env.probe_in: no such function");
+    }
+    ast.node mut* n = node_find(f->b, kind, "");
+    if (n == null) {
+        panic("check_env.probe_in: no such expression");
+    }
+    return probe_expr(e, n);
+}
+
+// The sources the suites reuse.
+fn string src_main() {
+    return "fn i32 main() {\n    return 0;\n}\n";
+}
+
+// The `i`-th statement of the body of the function `name`, with the call
+// statement of D7.3 unwrapped to the call it holds: the shape probe_stmt
+// checks, since a statement is not an expression.
+fn ast.node mut* body_expr(env* e, string fn_name, u64 i) {
+    ast.node mut* f = node_in_main(e, ast.ast_kind.k_fn_decl, fn_name);
+    if (f == null || f->b == null || i >= ast.ast_len(f->b)) {
+        panic("check_env.body_expr: no such statement");
+    }
+    ast.node mut* s = cast(ast.ast_child(f->b, i), ast.node mut*);
+    if (s->kind == ast.ast_kind.k_call_stmt) {
+        return s->a;
+    }
+    return s;
+}
+
+// Checks the expression of the `i`-th statement of the body of `fn_name`.
+fn check.expr probe_stmt(env mut* e, string fn_name, u64 i) {
+    return probe_expr(e, body_expr(e, fn_name, i));
+}
+
+// ---- the parameter scope of a body -------------------------------------------------
+
+// Opens the scope check_function_body puts around a body: one block scope with
+// no parent holding the function's parameters, so that a name in the body
+// resolves to one (D7.9). This half of the checker resolves the signature and
+// leaves the scope to the statement checker (T-036), so a probe of a statement
+// expression builds it here. close_params closes it.
+fn void open_params(env mut* e, scope.scope mut* params, string fn_name) {
+    ast.node mut* f = node_in_main(e, ast.ast_kind.k_fn_decl, fn_name);
+    if (f == null) {
+        panic("check_env.open_params: no such function");
+    }
+    scope.init(params, scope.scope_kind.s_block, null);
+    u64 mut i = 0;
+    while (i < ast.ast_len(f)) {
+        ast.node mut* p = cast(ast.ast_child(f, i), ast.node mut*);
+        if (p->kind == ast.ast_kind.k_param && p->sym != null) {
+            scope.declare(params, p->name, scope.bind_kind.b_param, p->name_loc, p);
+        }
+        i += 1;
+    }
+    e->ck.scope = params;
+}
+
+fn void close_params(env mut* e, scope.scope mut* params) {
+    e->ck.scope = null;
+    scope.free(params);
+}
+
+// The first `return` of the body of the function `name`.
+fn ast.node mut* return_in(env* e, string fn_name) {
+    ast.node mut* f = node_in_main(e, ast.ast_kind.k_fn_decl, fn_name);
+    if (f == null) {
+        panic("check_env.return_in: no such function");
+    }
+    ast.node mut* r = node_find(f->b, ast.ast_kind.k_return, "");
+    if (r == null) {
+        panic("check_env.return_in: no return statement");
+    }
+    return r;
+}
+
+// The result type of the function `name`, which is what a `return` of it is
+// checked against.
+fn types.node* result_type(env* e, string fn_name) {
+    ast.sym* s = sym_main(e, fn_name);
+    if (s == null || s->ty == null || s->ty->kind != types.type_kind.k_fn) {
+        panic("check_env.result_type: not a resolved function");
+    }
+    return s->ty->elem;
+}

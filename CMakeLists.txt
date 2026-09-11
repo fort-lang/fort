@@ -354,6 +354,18 @@ add_test(NAME diff-ast
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ast.sh" "${CMAKE_BINARY_DIR}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(diff-ast PROPERTIES LABELS lang)
+
+# The two checkers over the whole repository, one pass later again: `fort
+# --check` runs the front end and stops (D20.1), and tools/diff_check.sh
+# compares the diagnostics and the exit statuses of every .ft file stage1
+# checks clean. It is the half of the checker's oracle the language corpus
+# cannot see: a corpus of failing tests holds the diagnostics stage2 reports,
+# while this holds the ones it must not, over the compiler's own sources and
+# the standard library among the rest.
+add_test(NAME diff-check
+    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_check.sh" "${CMAKE_BINARY_DIR}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(diff-check PROPERTIES LABELS lang)
 add_test(NAME lang_lint COMMAND "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}" --lint)
 set_tests_properties(lang_lint PROPERTIES LABELS unit)
 add_test(NAME lang_selftest
@@ -432,6 +444,7 @@ add_custom_target(check-lang
     COMMAND ${FORT_LANG_STAGE2_COMMAND}
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_tokens.sh" "${CMAKE_BINARY_DIR}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ast.sh" "${CMAKE_BINARY_DIR}"
+    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_check.sh" "${CMAKE_BINARY_DIR}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Running the language tests"
     USES_TERMINAL

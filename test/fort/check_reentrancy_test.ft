@@ -1,0 +1,74 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| ok
+import check;
+import check_env;
+
+// A language server analyses one document over and over in one process
+// (D20.5), so nothing the checker owns may outlive the checker that owns it
+// and nothing may accumulate across analyses. Two checkers over two sessions
+// are independent, and a thousand of them cost what one costs.
+//
+// What this suite can see is the independence; the heap itself is watched by
+// test/fort/driver_lifetime_test.ft, which measures two hundred runs of the
+// driver -- the checker of every one of them included -- against both views
+// of the allocator.
+
+// Two analyses in one process share nothing: the second sees none of the
+// first's symbols, diagnostics or types.
+fn void two_checkers_are_independent() {
+    check_env.env mut first = check_env.env{};
+    check_env.open(&first);
+    defer check_env.close(&first);
+    assert(!check_env.check_decls(&first, "i32 k = nosuch;\n"));
+    assert(check_env.errors(&first) == 1);
+    u64 made = check.check_sym_count(&first.ck);
+    check_env.env mut second = check_env.env{};
+    check_env.open(&second);
+    defer check_env.close(&second);
+    assert(check_env.check_decls(&second, "i32 k = 1;\n"));
+    // The second analysis reported nothing and made its own records: even
+    // the universe of D12.2 is one set per checker, so no symbol of the first
+    // is a symbol of the second.
+    assert(check_env.errors(&second) == 0);
+    assert(check.check_sym_at(&second.ck, 0) != check.check_sym_at(&first.ck, 0));
+    // The first is untouched by the second.
+    assert(check_env.errors(&first) == 1);
+    assert(check.check_sym_count(&first.ck) == made);
+}
+
+// The universe functions of D12.2 are one record each per checker, which is
+// what makes every use of a builtin denote the same symbol.
+fn void every_checker_makes_its_own_universe() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(check.check_sym_count(&e.ck) == 10);
+    assert(check.check_sym_at(&e.ck, 0)->name == "del");
+    assert(check.check_sym_at(&e.ck, 9)->name == "fprintln");
+}
+
+// A hundred analyses of one document answer alike, which is the question a
+// server asks: the run after the ninety-ninth edit is the run after the
+// first.
+fn void a_hundred_analyses_of_one_document_answer_alike() {
+    u64 mut i = 0;
+    while (i < 100) {
+        check_env.env mut e = check_env.env{};
+        check_env.open(&e);
+        assert(!check_env.check_decls(&e, "i32 k = nosuch;\n"));
+        assert(check_env.errors(&e) == 1);
+        assert(check_env.said(&e, "unknown name 'nosuch'"));
+        check_env.close(&e);
+        i += 1;
+    }
+}
+
+fn i32 main() {
+    two_checkers_are_independent();
+    every_checker_makes_its_own_universe();
+    a_hundred_analyses_of_one_document_answer_alike();
+    println("ok");
+    return 0;
+}

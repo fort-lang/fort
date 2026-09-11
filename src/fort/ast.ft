@@ -27,11 +27,23 @@
 // are views into the source or into the session's pool, so the session must
 // outlive the tree.
 //
-// The annotation slots src/bootstrap/ast.h ends with -- `type`, `sym`, `aux`,
-// `ann` -- are not here: they belong to the checker, which is not ported yet,
-// and three of the four name things this compiler has no representation for.
-// The ticket that ports check.c adds them; nothing the parser writes reads
-// them.
+// The annotation slots src/bootstrap/ast.h ends with are here: `ty` is the
+// checked type of an expression or of a written type, `sym` the declaration
+// the node's own name token denotes, `ann` the checker's bits and `aux` the
+// index or the byte offset one of those bits gives a meaning to (check.ft).
+// The parser writes none of them and the checker clears them before it writes
+// them, so a tree checked twice starts from what the parser left (D20.2).
+// They are spelled `ty` and not `type` because `type` is reserved (D2.4), as
+// types.ft's `build_result.built` is.
+//
+// The symbol record of src/bootstrap/sym.h stands in this module rather than
+// in one of its own, which is the one structural difference from the C: a
+// node points at the symbol its name denotes and a symbol points back at the
+// node that declares it, and fort has no forward declaration across modules,
+// so two modules holding those two types would import each other (D9.5). The
+// C header spells the same cycle `struct ast_node` and gets away with it
+// because a C header may name an incomplete type. Everything else about the
+// record is what sym.h says it is.
 //
 // Names: the kind enum members carry a `k_` prefix, as types.ft's do, because
 // two thirds of the C constants' bare names are keywords (`if`, `while`,
@@ -172,6 +184,22 @@ struct node {
     string name;   // an identifier or the bytes of a literal
     u64 ival;      // an integer or char literal, 0 or 1 for a bool
     u32 flags;
+
+    // ---- the checker's annotations (check.ft) ----
+    // The type of an expression or of a written type, null until the checker
+    // writes it; `type` is reserved, so the slot the C calls `type` is `ty`
+    // (D2.4).
+    types.node* ty;
+    // The declaration the node's own name token denotes, null on every other
+    // node (D20.3).
+    sym* sym;
+    // The checker's bits, one mask it owns entirely (check.ft), and the slot
+    // whose meaning one of those bits gives: the index of a folded constant's
+    // value on an expression, the byte offset of a field on a field
+    // declaration (D3.8), so it is never read without the bit that says
+    // which.
+    u32 ann;
+    u64 aux;
 }
 
 // The children of variable arity of one node. src/bootstrap/ast.h uses the
@@ -219,6 +247,85 @@ fn void list_reserve(node_vec mut* v) {
     }
     del(v->items);
     v->items = move(bigger);
+}
+
+// ---- symbols (src/bootstrap/sym.h, D7.9, D20.3) ---------------------------------
+
+// What a name denotes. The module-level kinds are the importable declarations
+// of module-system.md 3; s_field and s_enum_member are reached through a type
+// rather than through a scope (D3.9); s_builtin is a universe function of
+// D12.2. The C's SYM_KIND_COUNT, one past the last kind for a table, is gone:
+// a fort switch over an enum names every member and needs no sentinel (D7.6).
+enum sym_kind {
+    s_module,
+    s_fn,
+    s_extern_fn,
+    s_struct,
+    s_enum,
+    s_enum_member,
+    s_field,
+    s_const,  // a module-level immutable declaration (D7.10)
+    s_global, // a module-level `mut` declaration (D7.10)
+    s_local,
+    s_param,
+    s_builtin,
+}
+
+// One declaration, enum member, field or builtin. The checker writes these;
+// the index walk, the symbol list of the structured output and a language
+// server read them, so a record holds what a reader needs and nothing about
+// checking (sym.h).
+//
+// `node` is the declaring node, so `s->node->sym == s` for every record but a
+// builtin's, which no source declares. `ty` is null for the two kinds that
+// have no fort type, s_module and s_builtin, and is the error type of the
+// table whenever `error` is set, so that every later diagnostic about the
+// declaration is silenced by the poison the type table already carries
+// (D14.2).
+//
+// A record lives as long as the checker that made it: every `sym` and `ty`
+// slot of a tree dangles once check.free has run, so a pass that reads the
+// annotations runs before it.
+struct sym {
+    sym_kind kind;
+    string name;
+    diag.loc decl;  // the declaring node's name_loc (D20.4)
+    types.node* ty; // the error type when `error` is set
+    bool mut0;      // level-0 mutability, as types.type_to_str_decl spells it (D5.2)
+    node* node;     // the declaring node; null for a builtin
+    sym* owner;     // the struct of a field, the enum of a member, the module
+    bool error;     // the declaration failed to check (D14.2)
+}
+
+// The kind as a reader spells it: "module", "extern fn", "enum member",
+// "constant", "global", "local", "parameter", "builtin".
+fn string sym_kind_name(sym_kind kind) {
+    switch (kind) {
+    case sym_kind.s_module:
+        return "module";
+    case sym_kind.s_fn:
+        return "fn";
+    case sym_kind.s_extern_fn:
+        return "extern fn";
+    case sym_kind.s_struct:
+        return "struct";
+    case sym_kind.s_enum:
+        return "enum";
+    case sym_kind.s_enum_member:
+        return "enum member";
+    case sym_kind.s_field:
+        return "field";
+    case sym_kind.s_const:
+        return "constant";
+    case sym_kind.s_global:
+        return "global";
+    case sym_kind.s_local:
+        return "local";
+    case sym_kind.s_param:
+        return "parameter";
+    case sym_kind.s_builtin:
+        return "builtin";
+    }
 }
 
 // ---- the arena -----------------------------------------------------------------

@@ -1,0 +1,158 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| ok
+import check;
+import check_env;
+import std.strbuf;
+
+// The ceilings a declaration meets: the size of D3.4 and the three limits
+// src/bootstrap/check.c sets rather than sizing a declaration dynamically, as
+// D2.11 caps nesting -- 32 type suffixes, 128 parameters and 128 fields. No
+// program of this project comes near any of them, which is why nothing else
+// reaches these paths: a suite that does not build the declaration by hand
+// cannot.
+
+// A struct with `n` fields, and the entry module's `main` after it.
+fn string many_fields(strbuf.str_buf mut* b, u64 n) {
+    strbuf.clear(b);
+    strbuf.append(b, "struct wide {\n");
+    u64 mut i = 0;
+    while (i < n) {
+        strbuf.append(b, "    i32 fld");
+        strbuf.append_u64(b, i);
+        strbuf.append(b, ";\n");
+        i += 1;
+    }
+    strbuf.append(b, "}\n");
+    return strbuf.view(b);
+}
+
+// A function of `n` parameters.
+fn string many_params(strbuf.str_buf mut* b, u64 n) {
+    strbuf.clear(b);
+    strbuf.append(b, "fn void wide(");
+    u64 mut i = 0;
+    while (i < n) {
+        if (i > 0) {
+            strbuf.append(b, ", ");
+        }
+        strbuf.append(b, "i32 p");
+        strbuf.append_u64(b, i);
+        i += 1;
+    }
+    strbuf.append(b, ") {\n    return;\n}\n");
+    return strbuf.view(b);
+}
+
+// A function type of `n` parameters, written as the type of a declaration:
+// base_type caps a function type's own parameter list, which is a second
+// site of the same limit and a second diagnostic to reach.
+fn string many_fn_params(strbuf.str_buf mut* b, u64 n) {
+    strbuf.clear(b);
+    strbuf.append(b, "fn void(");
+    u64 mut i = 0;
+    while (i < n) {
+        if (i > 0) {
+            strbuf.append(b, ", ");
+        }
+        strbuf.append(b, "i32");
+        i += 1;
+    }
+    strbuf.append(b, ") wide = null;\n");
+    return strbuf.view(b);
+}
+
+// A declaration whose written type carries `n` pointer suffixes.
+fn string many_suffixes(strbuf.str_buf mut* b, u64 n) {
+    strbuf.clear(b);
+    strbuf.append(b, "i32");
+    u64 mut i = 0;
+    while (i < n) {
+        strbuf.append(b, "*");
+        i += 1;
+    }
+    strbuf.append(b, " deep = null;\n");
+    return strbuf.view(b);
+}
+
+fn void a_struct_of_a_hundred_and_twenty_eight_fields_is_the_last_that_fits() {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(check_env.check_decls(&e, many_fields(&b, 128)));
+    assert(check_env.errors(&e) == 0);
+    check_env.env mut f = check_env.env{};
+    check_env.open(&f);
+    defer check_env.close(&f);
+    assert(!check_env.check_decls(&f, many_fields(&b, 129)));
+    assert(check_env.said(&f, "too many fields"));
+}
+
+fn void a_function_of_a_hundred_and_twenty_nine_parameters_is_refused() {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(check_env.check_decls(&e, many_params(&b, 128)));
+    assert(check_env.errors(&e) == 0);
+    check_env.env mut f = check_env.env{};
+    check_env.open(&f);
+    defer check_env.close(&f);
+    assert(!check_env.check_decls(&f, many_params(&b, 129)));
+    assert(check_env.said(&f, "too many parameters"));
+}
+
+fn void a_function_type_of_a_hundred_and_twenty_nine_parameters_is_refused() {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(check_env.check_decls(&e, many_fn_params(&b, 128)));
+    assert(check_env.errors(&e) == 0);
+    check_env.env mut f = check_env.env{};
+    check_env.open(&f);
+    defer check_env.close(&f);
+    assert(!check_env.check_decls(&f, many_fn_params(&b, 129)));
+    assert(check_env.said(&f, "too many parameters"));
+}
+
+fn void a_type_of_thirty_three_suffixes_is_refused() {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(check_env.check_decls(&e, many_suffixes(&b, 32)));
+    assert(check_env.errors(&e) == 0);
+    check_env.env mut f = check_env.env{};
+    check_env.open(&f);
+    defer check_env.close(&f);
+    assert(!check_env.check_decls(&f, many_suffixes(&b, 33)));
+    assert(check_env.said(&f, "too many type suffixes"));
+}
+
+fn void a_type_whose_size_would_pass_the_ceiling_of_d3_4_is_refused() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // Two billion billion i64 is more than 2^63 - 1 bytes, which is the
+    // largest size a type may have (D3.4); the declaration that introduces it
+    // is where it is reported.
+    assert(!check_env.check_decls(&e, "i64[2000000000000000000] big = {};\n"));
+    assert(check_env.said(&e, "type is too large: i64[2000000000000000000]"));
+}
+
+fn i32 main() {
+    a_struct_of_a_hundred_and_twenty_eight_fields_is_the_last_that_fits();
+    a_function_of_a_hundred_and_twenty_nine_parameters_is_refused();
+    a_function_type_of_a_hundred_and_twenty_nine_parameters_is_refused();
+    a_type_of_thirty_three_suffixes_is_refused();
+    a_type_whose_size_would_pass_the_ceiling_of_d3_4_is_refused();
+    println("ok");
+    return 0;
+}

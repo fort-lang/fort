@@ -327,19 +327,25 @@ fn void an_entry_file_that_is_a_directory_is_the_loader_s_error() {
     assert(err == "adir:1:1: error: cannot read 'adir'\n");
 }
 
-// A file whose closure loaded is the checker's and the emitter's turn, which
-// this compiler does not carry: an internal error, exit 2, and no usage line
-// after it, since the command line was fine.
-fn void a_clean_program_stops_at_the_missing_checker() {
+// A file whose closure loaded and checked is the emitter's turn, which this
+// compiler does not carry: an internal error, exit 2, and no usage line after
+// it, since the command line was fine. `--check` alone stops here and is exit
+// 0 instead, since a check-only run emits nothing (D20.1).
+fn void a_clean_program_stops_at_the_missing_emitter() {
     write_file("clean.ft", "fn i32 main() {\n    return 0;\n}\n");
     string[2] mut argv = {"fort", "clean.ft"};
     assert(run(argv[0..2]) == EXIT_USAGE);
     string own err = captured_err();
     defer del(err);
     // One line and no usage line after it.
-    assert(str.starts_with(err, "fort: error: internal error: this compiler cannot check"));
-    assert(str.ends_with(err, " or build a program yet\n"));
+    assert(str.starts_with(err, "fort: error: internal error: this compiler cannot"));
+    assert(str.ends_with(err, " build a program yet\n"));
     assert(capture.line_count(err) == 1);
+    string[3] mut checked = {"fort", "--check", "clean.ft"};
+    assert(run(checked[0..3]) == EXIT_OK);
+    string own quiet = captured_err();
+    defer del(quiet);
+    assert(quiet == "");
 }
 
 // A file with a syntax error is exit 1, with the diagnostic of D14.2 on
@@ -672,7 +678,7 @@ fn i32 main() {
     println("help ok");
     an_unreadable_entry_file_is_exit_two();
     an_entry_file_that_is_a_directory_is_the_loader_s_error();
-    a_clean_program_stops_at_the_missing_checker();
+    a_clean_program_stops_at_the_missing_emitter();
     a_syntax_error_is_exit_one();
     a_lexical_error_is_exit_one();
     a_missing_import_is_exit_one();

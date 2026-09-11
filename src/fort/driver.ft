@@ -26,6 +26,7 @@
 // answer one command line alike. The tables of function pointers belong to
 // the parser and the emitter (D3.10).
 import ast;
+import check;
 import consts;
 import containers;
 import diag;
@@ -41,10 +42,10 @@ import std.strbuf;
 import std.sys;
 import types;
 
-// prim, consts and types are the checker's (T-035) and nothing here calls
-// them yet; they are imported so that they are inside the import closure of
-// main.ft, which is what makes stage1 compile them into stage2 with every
-// build rather than only under the fort-modules ctest.
+// prim, consts and types are the checker's and are reached through it; they
+// are imported so that they are inside the import closure of main.ft, which is
+// what makes stage1 compile them into stage2 with every build rather than only
+// under the fort-modules ctest.
 
 // The usage line of toolchain.md 1, printed by --help and after every usage
 // error. A module constant is UPPER_CASE (D1.4).
@@ -492,13 +493,21 @@ fn string std_dir(containers.pool mut* p, options* opts, string program) {
 // point into the session's storage.
 struct analysis {
     modules.module_set set;
+    check.checker ck;
 }
 
-fn analysis analysis_create() {
-    return analysis{};
+// The analysis of one run: the modules it will read and the checker that will
+// annotate their trees. src/bootstrap/driver.c's driver_analysis_init does the
+// same two calls; the checker takes the session here because it reports
+// through it, where the C reports through a file-scope sink (D20.5).
+fn analysis analysis_create(session.session mut* s) {
+    analysis mut an = analysis{};
+    check.check_init(&an.ck, s);
+    return an;
 }
 
 fn void analysis_free(analysis mut* an) {
+    check.check_free(&an->ck);
     modules.free(&an->set);
 }
 
@@ -557,7 +566,19 @@ fn i32 front_end(session.session mut* s, options* opts, string program, analysis
     // which the library leaves off (D14.2, D20.2).
     diag.set_text(session.diags(s), true);
     bool loaded = load_closure(s, opts, program, an);
-    if (!loaded || session.error_count(s) > 0) {
+    // Step 3: every module that parsed is checked, the dependency order
+    // first, so one file that did not parse never hides the errors of the
+    // others (D9.10, D14.2 as amended).
+    //
+    // Neither the modules nor the checker is released here: the annotations
+    // they own live until the caller frees the analysis, which is what will
+    // let the emitter and an index walk read the trees afterwards (D20.3,
+    // ast.sym). A compilation builds a program, so the entry module defines
+    // main (D8.6); --check inspects one module instead, and the entry rule
+    // does not apply to it (D20.1).
+    an->ck.require_main = !opts->check;
+    bool checked = check.check_program(&an->ck, &an->set);
+    if (!loaded || !checked || session.error_count(s) > 0) {
         // At least one compile error was reported, which is exit 1 (D14.1).
         return EXIT_COMPILE_ERROR;
     }
@@ -571,16 +592,23 @@ fn i32 front_end(session.session mut* s, options* opts, string program, analysis
 fn i32 compile_entry(options* opts, string program) {
     session.session mut s = session.create();
     defer session.free(&s);
-    analysis mut an = analysis_create();
+    analysis mut an = analysis_create(&s);
     defer analysis_free(&an);
     i32 status = front_end(&s, opts, program, &an);
     if (status != EXIT_OK) {
         return status;
     }
+    if (opts->check && !opts->json) {
+        // --check stops after the front end: no module is emitted, and the
+        // file was a module under inspection rather than a program (D20.1).
+        return EXIT_OK;
+    }
     // An internal error is not a usage error, so no usage line follows it:
     // toolchain.md 1 puts that line after the six errors that report a
     // command line the compiler cannot use, and this command line is fine.
-    error("internal error: this compiler cannot check or build a program yet");
+    // What is missing is the document of D20.2, which needs the JSON writer
+    // and the index walk, and the emitter of toolchain.md 2 step 4.
+    error("internal error: this compiler cannot build a program yet");
     return EXIT_USAGE;
 }
 

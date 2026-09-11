@@ -1,0 +1,4203 @@
+// check: the checker of the self-hosted compiler (core-language.md 3, 5, 6;
+// D3 to D8, D12), the transliteration of src/bootstrap/check.c: it resolves
+// every name to a symbol (ast.sym), gives every expression a type (types.ft),
+// folds every constant expression (consts.ft) and reports the program errors
+// of D14.2.
+//
+// Order of work. Every module of the closure is checked, in the dependency
+// order the loader left (D9.10, D14.2 as amended): an imported module is
+// complete before its importer looks at it. Within a module the pass is two
+// phases. First it collects one symbol per top-level declaration, so that
+// declarations are order-independent (D7.10). Then it resolves each symbol
+// lazily: the symbol of a declaration reached from another one is resolved on
+// the spot, a declaration reached while it is being resolved closes a cycle
+// and is reported once (D7.10: struct sizes and constant values are resolved
+// lazily with cycle detection), and the function bodies are checked last,
+// when every declaration of the module has a type.
+//
+// Failure is local. A declaration whose type or initializer fails to check
+// gets the error type and `error` on its symbol; the type table poisons
+// through the error type, so every later diagnostic that involves the
+// declaration is silent and an importer is still checked in full (D14.2).
+//
+// Annotations. The checker writes `ty` on every expression and type node,
+// `sym` on every node whose own name token denotes something, `ann` bits from
+// the list below and `aux`, which indexes the folded value of a constant node
+// (check_node_value) and holds the byte offset of a field declaration (D3.8).
+// The tree, the arena and the symbols stay alive until the caller frees the
+// checker, so an index walk can run after the compilation.
+//
+// What this module does not carry, and why. src/bootstrap/check.c and
+// src/bootstrap/check_stmt.c call each other: the statements use the
+// expressions, and check_module's last loop checks the function bodies. Two
+// fort modules cannot do that, since circular imports are a compile error
+// (D9.5), so the one edge that closes the cycle is cut here: check_module
+// resolves every declaration of a module and stops before the bodies, and
+// check_module_bodies, check_stmt, check_block, check_function_body and
+// check_program stand in check_stmt.ft, which imports this module. Everything
+// else is where the C put it.
+//
+// Re-entrancy (D20.5): the checker is a value the caller creates, passes down
+// and frees; nothing here is module-level mutable state, and every symbol,
+// value and type an analysis makes dies with the checker that made it, so a
+// thousand re-analyses of one document do not grow the heap. The session the
+// diagnostics go to is a field of the checker rather than a parameter of every
+// function, which is what "one fat context passed down instead of globals"
+// means here; src/bootstrap/diag.c reports through a file-scope sink instead.
+// Nothing ends the process: where the C calls fatal_internal on a tree its own
+// passes cannot produce, this panics at the precondition that was broken
+// (D13.3).
+//
+// Dispatch: none. check_expr is one switch over the node kind, as the C wrote
+// it, and no table of function pointers (D3.10).
+import ast;
+import consts;
+import containers;
+import diag;
+import lexer;
+import modules;
+import prim;
+import runtime_sig;
+import scope;
+import session;
+import types;
+import std.strbuf;
+import std.strmap;
+
+// ---- the annotation bits the checker sets (D1.4: a module constant is
+// UPPER_CASE) -----------------------------------------------------------------------
+
+// The node is a constant expression (D4.6) and `aux` indexes its value:
+// check_node_value reads it.
+u32 ANN_CONST = 1;
+// An untyped constant that has not met its context yet (D4.1): its `ty` is
+// the default type of D4.5 until a context finalizes it.
+u32 ANN_UNTYPED = 2;
+// k_call: the callee never returns, so the call statement terminates (D8.4).
+u32 ANN_NORETURN = 4;
+// A top-level declaration on the resolution path, and one whose symbol is
+// complete (D7.10): the two states of the lazy resolution.
+u32 ANN_RESOLVING = 8;
+u32 ANN_RESOLVED = 16;
+// k_switch: the switch has a `default` clause or lists every member of its
+// enum, which is what a terminating switch needs (D7.7, D8.4).
+u32 ANN_EXHAUSTIVE = 32;
+// k_return: `return x` of an `own` local or parameter is an implicit `move`,
+// so the emitter empties the operand after reading it (D17.5, D17.7).
+u32 ANN_MOVE = 64;
+// One past the highest bit above. A new bit is declared as the new highest
+// and this sentinel doubles with it, so that ANN_ALL, which is the only mask
+// check_module clears, never leaves one out; nothing else clears `ann`, and a
+// bit left behind would survive into the next check of the same tree.
+// test/fort/check_own_test.ft holds the assertion that ties the sentinel to
+// the highest declared bit, and the one that watches a second check wipe
+// them.
+u32 ANN_END = 128;
+u32 ANN_ALL = ANN_END - 1;
+
+// ---- the limits of one declaration -------------------------------------------------
+
+// A type with more suffixes, or a function, function type or struct with more
+// parameters or fields, is refused rather than sized dynamically, as D2.11
+// caps nesting. No program of this project comes near either.
+u64 MAX_SUFFIXES = 32;
+u64 MAX_MEMBERS = 128;
+
+// The width of the `struct` keyword, which is where an infinite-size struct
+// is reported (D14.2).
+u32 STRUCT_KEYWORD_LEN = 6;
+
+// The first non-zero capacity of the symbol and value vectors; growth doubles
+// from there.
+u64 VEC_MIN_CAP = 16;
+
+// The program entry point the compiler emits in the entry module (D11.6),
+// whose name an `extern` may not declare (D9.7).
+string ENTRY_SYMBOL = "fort_entry";
+
+// The underlying type of an enum is i32 (D3.9).
+fn prim.prim_kind enum_underlying() {
+    return prim.prim_kind.prim_i32;
+}
+
+// ---- the values a checked construct carries ----------------------------------------
+
+// Where a written type stands, which decides the markers its outermost
+// position may carry. The type table builds the type and leaves these
+// refusals to the checker, which alone knows the position (types.ft).
+enum type_pos {
+    pos_binding, // a variable, parameter or field of a literal: any marker (D5.3)
+    pos_field,   // a struct field: no outermost `mut` (D5.5)
+    pos_return,  // a return type: no outermost `mut` (D5.5)
+    pos_cast,    // a cast target: a result has no binding (D3.14)
+    pos_alloc,   // inside `new`: every level is allocated writable (D5.8)
+}
+
+// Whether `move` and `del` may empty an lvalue, and why not when they may
+// not (D17.6, D17.9). Emptying is not an assignment, so a binding's own `mut`
+// does not decide it: `del` on an immutable `own` binding is legal, while
+// `move` out of a slot reached through an immutable level is not.
+enum empty_kind {
+    empty_ok,        // a binding's own storage, or a mutable indirection
+    empty_readonly,  // a module-level constant, or a member of one (D7.10)
+    empty_immutable, // an indirection whose level is immutable
+}
+
+// A written type after resolution: the type and the mutability of level 0,
+// which lives outside the type (D5.2). The error type marks a failure. The C
+// calls it check_type_t, which would collide with the function check_type
+// (D7.9), so it is named for what it holds.
+struct written_type {
+    types.node* ty;
+    bool mut0;
+}
+
+// A checked expression. `ty` is never null and is the error type after a
+// failure; `value` is cv_none unless the expression is a constant expression
+// (D4.6); `untyped` marks a constant that still takes its type from context
+// (D4.1); `lvalue` and `is_mut` are D6.7 and D5.7; `sym` is the declaration an
+// identifier or a field access denotes, null otherwise, so that a diagnostic
+// can name it.
+struct expr {
+    types.node* ty;
+    consts.cval value;
+    bool untyped;
+    bool lvalue;
+    // Level-0 mutability, which answers "may this be assigned to" (D5.7).
+    // `mut` is a keyword (D2.4), so the field is `is_mut`, as types.node's is.
+    bool is_mut;
+    // Whether `move` and `del` may empty this lvalue, and why not when they
+    // may not (D17.6, D17.9). Meaningless unless `lvalue`.
+    empty_kind empty;
+    // Usable as a module-level initializer (D7.10): every constant
+    // expression, and also `null`, a function name, `&` of a module-level
+    // declaration and a literal whose members are all of those.
+    bool init_const;
+    ast.sym* sym;
+}
+
+// ---- the context -------------------------------------------------------------------
+
+// Everything one analysis of a closure owns and knows. The C's check_t, with
+// the session it reports through added and its three `ptrvec_t`s spelled as
+// typed vectors: `syms` owns one record per declaration and hands out pointers
+// into it, so it is a vector of owned pointers as scope.ft's bindings are,
+// while `values` holds the folded values by value, since a cval is a plain
+// value the C only boxed to put it in a ptrvec.
+struct checker {
+    session.session mut* sess; // borrowed: the diagnostics and the pool of the analysis
+    types.table types;         // owned: every type the annotations point to
+    ast.sym mut* own mut@ own syms; // owned; alive until check_free
+    u64 syms_len;
+    consts.cval mut@ own values; // owned: the folded values `aux` indexes
+    u64 values_len;
+    strbuf.str_buf msg; // the message builder, as modules.ft has one
+    // The names an import of the module being checked failed to bind: the
+    // loader reported each one, so a use of one is silent, as a use of a
+    // declaration that failed to check is (D14.2).
+    strmap.str_map bad_imports;
+    // The first `extern fn` declaration of each C symbol, over the whole
+    // closure: `extern_first` maps the C name to a position in `externs`,
+    // which holds that declaration's symbol. A later declaration of the same
+    // symbol is held against it, since the declarations of one C symbol must
+    // have identical signatures (D9.8). The symbols are owned by `syms`.
+    strmap.str_map extern_first;
+    ast.sym mut* mut@ own externs;
+    u64 externs_len;
+    ast.sym*[scope.UNIVERSE_COUNT] builtins; // the universe functions of D12.2
+    bool mute;         // annotate without reporting, for an editor mode (D20.2)
+    bool require_main; // the entry module defines main (D8.6); off for a check-only run
+    u64 errors;        // checker diagnostics, muted ones included
+
+    // ---- the module and the function being checked ----
+    modules.module* module;
+    ast.sym* module_sym;
+    ast.sym* fn_sym; // the function whose body is being checked
+    // The callee of the call being resolved: an `extern fn` name is a callee
+    // and nowhere a value, so the value path tells the two apart (D3.10).
+    ast.node* callee;
+    // Whether the operand of a `&` is being checked, which asks for an
+    // address and not for a value: `node N = node{&N};` is a legal
+    // self-pointing sentinel, since D7.10 admits `&` of a module-level
+    // declaration from any module, this one included, and the value of `N`
+    // does not depend on the value of `N`. The lazy resolution of D4.6 would
+    // otherwise read the reference as a cycle, its guard being unable to tell
+    // "I need your value" from "I need your address".
+    bool addr_only;
+    scope.scope mut* scope; // the innermost block scope, null at module level
+    types.node* ret;        // the return type of the function being checked
+    bool ret_void;          // its return type is `void` (D7.11)
+    bool ret_noreturn;      // it is `fn noreturn` (D8.5)
+    bool in_function;       // a body is being checked
+    u64 loops;              // enclosing loops: `continue` needs one (D7.5)
+    u64 switches;           // enclosing switches: `break` takes either (D7.6)
+    u64 defers;             // enclosing deferred statements (D7.8)
+    u64 block_errs;         // k_error nodes seen in the body (D14.2)
+}
+
+// Prepares a checker that reports through `s`. Every field a zeroed checker
+// already has the right value for is left alone, as types.type_table_init
+// leaves a zeroed table; what is set is what the C's check_init sets to
+// something other than zero, and the universe symbols of D12.2, one per name,
+// so that every use of a builtin denotes the same record.
+//
+// The session is borrowed, so it must outlive the checker, and it is the one
+// precondition a caller can break silently: `s` is stored, so a checker
+// initialised against a session that later moves -- a session held by value
+// inside a struct the caller then returns -- reports into freed storage.
+// Initialise a checker at the address it will be used at, and give it a
+// session that does not move. modules.ft takes the session as a parameter of
+// every call instead; the checker is the C's "one fat context passed down",
+// which is what keeps its eighty functions reading like check.c's.
+fn void check_init(checker mut* ck, session.session mut* s) {
+    ck->sess = s;
+    types.type_table_init(&ck->types);
+    ck->require_main = true;
+    ck->ret_void = true;
+    u64 mut i = 0;
+    while (i < scope.UNIVERSE_COUNT) {
+        ck->builtins[i] = check_sym_new(ck, ast.sym_kind.s_builtin, scope.universe_at(i), null,
+                                        null);
+        i += 1;
+    }
+}
+
+// Releases the symbols, the values and the type table. Every annotation the
+// checker wrote points into them, so a tree must not be read afterwards.
+fn void check_free(checker mut* ck) {
+    u64 mut i = 0;
+    while (i < ck->syms_len) {
+        ast.sym mut* own s = move(ck->syms[i]);
+        del(s);
+        i += 1;
+    }
+    del(ck->syms);
+    ck->syms_len = 0;
+    del(ck->values);
+    ck->values_len = 0;
+    strmap.free(&ck->bad_imports);
+    strmap.free(&ck->extern_first);
+    del(ck->externs);
+    ck->externs_len = 0;
+    strbuf.free(&ck->msg);
+    types.type_table_free(&ck->types);
+}
+
+// ---- the three vectors -------------------------------------------------------------
+
+// Ensures room for one more symbol, growing to the largest of VEC_MIN_CAP and
+// twice the capacity. A record must not move once its address is on a node,
+// so the vector holds one owned pointer per symbol (scope.ft has the same
+// shape for the same reason).
+fn void syms_reserve(checker mut* ck) {
+    if (ck->syms_len < ck->syms.len) {
+        return;
+    }
+    u64 mut cap = VEC_MIN_CAP;
+    if (ck->syms.len >= cap) {
+        if (ck->syms.len > containers.U64_MAX / 2) {
+            panic("check.syms_reserve: capacity overflow");
+        }
+        cap = ck->syms.len * 2;
+    }
+    ast.sym mut* own mut@ own bigger = new(ast.sym* own, cap);
+    u64 mut i = 0;
+    while (i < ck->syms_len) {
+        bigger[i] = move(ck->syms[i]);
+        i += 1;
+    }
+    del(ck->syms);
+    ck->syms = move(bigger);
+}
+
+// The same for the folded values, which are plain values and need no boxing:
+// `aux` indexes this vector and nothing holds a pointer into it.
+fn void values_reserve(checker mut* ck) {
+    if (ck->values_len < ck->values.len) {
+        return;
+    }
+    u64 mut cap = VEC_MIN_CAP;
+    if (ck->values.len >= cap) {
+        if (ck->values.len > containers.U64_MAX / 2) {
+            panic("check.values_reserve: capacity overflow");
+        }
+        cap = ck->values.len * 2;
+    }
+    consts.cval mut@ own bigger = new(consts.cval, cap);
+    u64 mut i = 0;
+    while (i < ck->values_len) {
+        bigger[i] = ck->values[i];
+        i += 1;
+    }
+    del(ck->values);
+    ck->values = move(bigger);
+}
+
+// The same for the extern declarations, which borrow symbols `syms` owns.
+fn void externs_reserve(checker mut* ck) {
+    if (ck->externs_len < ck->externs.len) {
+        return;
+    }
+    u64 mut cap = VEC_MIN_CAP;
+    if (ck->externs.len >= cap) {
+        if (ck->externs.len > containers.U64_MAX / 2) {
+            panic("check.externs_reserve: capacity overflow");
+        }
+        cap = ck->externs.len * 2;
+    }
+    ast.sym mut* mut@ own bigger = new(ast.sym*, cap);
+    u64 mut i = 0;
+    while (i < ck->externs_len) {
+        bigger[i] = ck->externs[i];
+        i += 1;
+    }
+    del(ck->externs);
+    ck->externs = move(bigger);
+}
+
+// The symbols in the order they were made, for the index walk.
+fn u64 check_sym_count(checker* ck) {
+    return ck->syms_len;
+}
+
+// The symbol at `i`; an index at or past check_sym_count is a violated
+// precondition and panics (D13.3), since the slots beyond it hold nothing.
+fn ast.sym* check_sym_at(checker* ck, u64 i) {
+    if (i >= ck->syms_len) {
+        panic("check.check_sym_at: index out of range");
+    }
+    return ck->syms[i];
+}
+
+// The folded value of a node the checker marked ANN_CONST, and cv_none for
+// every other node.
+fn consts.cval check_node_value(checker* ck, ast.node* n) {
+    if ((n->ann & ANN_CONST) == 0) {
+        return consts.cv_none();
+    }
+    if (n->aux >= ck->values_len) {
+        panic("check.check_node_value: value index out of range");
+    }
+    return ck->values[n->aux];
+}
+
+// Records the folded value of a node: `aux` indexes it and ANN_CONST says so
+// (D4.6).
+fn void set_value(checker mut* ck, ast.node mut* n, consts.cval v) {
+    if (v.kind == consts.cval_kind.cv_none) {
+        n->ann &= ~ANN_CONST;
+        return;
+    }
+    values_reserve(ck);
+    ck->values[ck->values_len] = v;
+    n->aux = ck->values_len;
+    ck->values_len += 1;
+    n->ann |= ANN_CONST;
+}
+
+// ---- diagnostics -------------------------------------------------------------------
+
+// The one funnel every checker diagnostic goes through (D14.2): it counts the
+// error and reports it unless the checker is muted.
+fn void check_error(checker mut* ck, diag.loc at, string msg) {
+    ck->errors += 1;
+    // A muted checker annotates the tree without reporting, so that an editor
+    // mode can index a file it is not compiling (D20.2).
+    if (!ck->mute) {
+        diag.error(session.diags(ck->sess), at, msg);
+    }
+}
+
+// Begins a message in `ck->msg`; check_msg_end finishes it and reports it at
+// `at`. Between them the caller appends with the msg_* functions below and
+// with check_msg_type, which writes a type as D5.3 spells it.
+fn void check_msg_begin(checker mut* ck) {
+    strbuf.clear(&ck->msg);
+}
+
+fn void msg_str(checker mut* ck, string text) {
+    strbuf.append(&ck->msg, text);
+}
+
+// Appends a name between single quotes: 'name'.
+fn void msg_quote(checker mut* ck, string name) {
+    strbuf.push(&ck->msg, '\'');
+    strbuf.append(&ck->msg, name);
+    strbuf.push(&ck->msg, '\'');
+}
+
+fn void msg_uint(checker mut* ck, u64 v) {
+    strbuf.append_u64(&ck->msg, v);
+}
+
+fn void check_msg_type(checker mut* ck, types.node* t) {
+    types.type_to_str(t, &ck->msg);
+}
+
+fn void msg_value(checker mut* ck, consts.cval v) {
+    consts.cv_to_str(v, &ck->msg);
+}
+
+fn void check_msg_end(checker mut* ck, diag.loc at) {
+    check_error(ck, at, strbuf.view(&ck->msg));
+}
+
+// A note at `at`, which belongs to the error before it and is dropped with it
+// when the checker is muted (D14.2, D20.2).
+fn void check_note_end(checker mut* ck, diag.loc at) {
+    diag.note(session.diags(ck->sess), at, strbuf.view(&ck->msg));
+}
+
+// Whether `t` already failed: no diagnostic mentions a poisoned type, which
+// is how one error stays one error (D14.2).
+fn bool check_poisoned(types.node* t) {
+    return t == null || t->kind == types.type_kind.k_error;
+}
+
+// The range of the closing brace of a construct whose range ends at it, where
+// "missing return" and a non-exhaustive `switch` are reported (D14.2).
+fn diag.loc check_close_brace(diag.loc at) {
+    // The range of a construct ends one past its last byte (D20.4), and its
+    // last byte is the `}`, so the brace is the one column before the end.
+    if (at.end_col <= 1) {
+        return at;
+    }
+    return diag.loc_range(at.file, at.end_line, at.end_col - 1, at.end_line, at.end_col);
+}
+
+// The range of the keyword a declaration starts at, where an infinite-size
+// struct is reported (D14.2).
+fn diag.loc keyword_range(diag.loc at, u32 len) {
+    return diag.loc_range(at.file, at.line, at.col, at.line, at.col + len);
+}
+
+// The position an error with no position in the file takes, which is 1:1
+// (D14.2).
+fn diag.loc file_start(string file) {
+    return diag.loc_make(file, 1, 1);
+}
+
+// ---- symbols -----------------------------------------------------------------------
+
+// A new symbol, owned by the checker and recorded for the index walk.
+fn ast.sym mut* check_sym_new(checker mut* ck, ast.sym_kind kind, string name, ast.node mut* n,
+                              ast.sym* owner) {
+    ast.sym mut* own s = new(ast.sym);
+    s->kind = kind;
+    s->name = name;
+    // A symbol is found at the name it declares, never at the construct's
+    // first token (D20.4).
+    if (n != null) {
+        s->decl = n->name_loc;
+    } else {
+        s->decl = diag.loc_make("", 1, 1);
+    }
+    s->node = n;
+    s->owner = owner;
+    syms_reserve(ck);
+    ck->syms[ck->syms_len] = move(s);
+    ck->syms_len += 1;
+    ast.sym mut* kept = ck->syms[ck->syms_len - 1];
+    // Only the top-level declarations are resolved lazily; a field, an enum
+    // member, a local and a parameter are complete when their container makes
+    // them (D7.10).
+    if (n != null
+        && (kind == ast.sym_kind.s_field || kind == ast.sym_kind.s_enum_member
+            || kind == ast.sym_kind.s_local || kind == ast.sym_kind.s_param)) {
+        n->ann |= ANN_RESOLVED;
+    }
+    return kept;
+}
+
+// Marks a symbol as failed: the error type silences every later diagnostic
+// that involves the declaration (D14.2).
+fn void sym_fail(checker mut* ck, ast.sym mut* s) {
+    s->error = true;
+    s->ty = types.type_error(&ck->types);
+}
+
+// The declaration a binding denotes: an import binding stands for the module
+// or for the declaration it names, which is what its own name denotes (D9.3).
+fn ast.sym* sym_of_binding(scope.binding* b) {
+    if (b == null) {
+        return null;
+    }
+    if (b->kind == scope.bind_kind.b_module) {
+        modules.module* m = cast(b->module, modules.module*);
+        if (m != null && m->ast != null) {
+            return m->ast->sym;
+        }
+        return null;
+    }
+    if (b->kind == scope.bind_kind.b_symbol) {
+        if (b->to != null && b->to->node != null) {
+            return b->to->node->sym;
+        }
+        return null;
+    }
+    if (b->node != null) {
+        return b->node->sym;
+    }
+    return null;
+}
+
+// The same, where the caller goes on to write through the record: `sym` is an
+// immutable view on the node, and the resolution writes the symbol it reads
+// there, exactly as the C casts its `const sym_t*` away.
+fn ast.sym mut* sym_mut(ast.sym* s) {
+    return cast(s, ast.sym mut*);
+}
+
+// ---- names (D7.9) ------------------------------------------------------------------
+
+// Steps 1 and 2 of D7.9: the innermost block outward, then the module
+// namespace. The universe of step 3 is a builtin, which check_builtin reads.
+fn scope.binding* lookup(checker* ck, string name) {
+    if (ck->scope != null) {
+        scope.binding* b = scope.lookup(ck->scope, name);
+        if (b != null) {
+            return b;
+        }
+    }
+    if (ck->module != null) {
+        return scope.find(&ck->module->names, name);
+    }
+    return null;
+}
+
+// The builtin of `name`, or null: the universe is searched after every scope,
+// so a declaration of the same name shadows it (D7.9, D12.2).
+fn ast.sym* check_builtin(checker* ck, string name) {
+    u64 mut i = 0;
+    while (i < scope.UNIVERSE_COUNT) {
+        if (ck->builtins[i]->name == name) {
+            return ck->builtins[i];
+        }
+        i += 1;
+    }
+    return null;
+}
+
+// Whether the name is one an import of this module failed to bind: the
+// loader reported that import, so nothing more is said about the name
+// (D14.2).
+fn bool from_a_failed_import(checker* ck, string name) {
+    return strmap.has(&ck->bad_imports, name);
+}
+
+// "unknown name 'x'", with the hint D3.9 asks for when the name is an enum
+// member, which is written `color.red` and lives in no namespace.
+fn void error_unknown_name(checker mut* ck, string name, diag.loc at) {
+    if (from_a_failed_import(ck, name)) {
+        return;
+    }
+    check_msg_begin(ck);
+    msg_str(ck, "unknown name ");
+    msg_quote(ck, name);
+    modules.module* m = ck->module;
+    u64 mut i = 0;
+    while (m != null && m->ast != null && i < ast.ast_len(m->ast)) {
+        ast.node* decl = ast.ast_child(m->ast, i);
+        if (decl->kind == ast.ast_kind.k_enum_decl) {
+            u64 mut k = 0;
+            while (k < ast.ast_len(decl)) {
+                if (ast.ast_child(decl, k)->name == name) {
+                    // An enum member is scoped to its enum (D3.9).
+                    msg_str(ck, ": an enum member is written ");
+                    msg_str(ck, decl->name);
+                    msg_str(ck, ".");
+                    msg_str(ck, name);
+                    check_msg_end(ck, at);
+                    return;
+                }
+                k += 1;
+            }
+        }
+        i += 1;
+    }
+    check_msg_end(ck, at);
+}
+
+// ---- types (D3, D5.3) --------------------------------------------------------------
+
+// The declaring symbol of a struct or enum type, which the checker stored in
+// the node when it made it (types.ft keeps it opaque).
+fn ast.sym mut* nominal_sym(types.node* t) {
+    return cast(t->decl, ast.sym mut*);
+}
+
+// Reports "type is too large" at `at` when the size of `t` passes the ceiling
+// of D3.4, and returns whether the type may be used.
+fn bool check_size_fits(checker mut* ck, diag.loc at, types.node* t) {
+    // `void` is a return type and has no size to check (D3.1).
+    if (check_poisoned(t) || t->kind == types.type_kind.k_void || types.type_size_fits(t)) {
+        return true;
+    }
+    // A type whose size would pass 2^63 - 1 bytes is an error at the
+    // declaration that introduces it (D3.4).
+    check_msg_begin(ck);
+    msg_str(ck, "type is too large: ");
+    check_msg_type(ck, t);
+    check_msg_end(ck, at);
+    return false;
+}
+
+// The struct whose layout a type needs, behind any fixed arrays.
+fn types.node* struct_of(types.node* t) {
+    if (t->kind == types.type_kind.k_struct) {
+        return t;
+    }
+    if (t->kind == types.type_kind.k_array) {
+        return struct_of(t->elem);
+    }
+    return null;
+}
+
+// Lays out the struct behind `t` when it needs it, so that sizeof and a
+// declaration of that type are exact (D3.8); false when the layout failed.
+fn bool check_layout(checker mut* ck, types.node* t) {
+    if (check_poisoned(t)) {
+        return false;
+    }
+    if (t->kind == types.type_kind.k_void) {
+        return true;
+    }
+    types.node* mut pending = types.type_layout_pending(t);
+    if (pending != null) {
+        // A struct is laid out when a declaration or a sizeof first needs its
+        // size, which is what makes the sizes of D7.10 lazy.
+        resolve_sym(ck, nominal_sym(pending));
+        pending = types.type_layout_pending(t);
+    }
+    if (pending != null) {
+        // The struct is still on the resolution path, so it contains itself
+        // by value: an infinite size, reported at its `struct` keyword (D3.8,
+        // D14.2).
+        ast.sym mut* s = nominal_sym(pending);
+        check_msg_begin(ck);
+        msg_str(ck, "struct ");
+        msg_str(ck, pending->name);
+        msg_str(ck, " has infinite size");
+        if (s != null && s->node != null) {
+            check_msg_end(ck, keyword_range(s->node->loc, STRUCT_KEYWORD_LEN));
+        } else {
+            check_msg_end(ck, file_start(""));
+        }
+        types.type_layout_fail(pending);
+        if (s != null) {
+            sym_fail(ck, s);
+        }
+        return false;
+    }
+    types.node* nominal = struct_of(t);
+    return nominal == null || types.type_layout_state(nominal) != types.layout_state.l_error;
+}
+
+// The declaration `name` denotes in the module `m`, or null. A module's own
+// import bindings are not among its declarations, since there is no
+// re-export (D9.3): qualified access and an import both see the declarations
+// of `m` and not its imports (module-system.md 3, 4), and every lookup into
+// another module's namespace asks this one question.
+fn scope.binding* module_declaration(modules.module* m, string name) {
+    if (m == null) {
+        return null;
+    }
+    scope.binding* b = scope.find(&m->names, name);
+    if (b != null && scope.is_declaration(b)) {
+        return b;
+    }
+    return null;
+}
+
+// The type a name in type position denotes: a struct or an enum, of this
+// module or, qualified, of an imported one (D9.4). `stores_base` says whether
+// the written type puts a value of that name in its own storage, which is
+// what decides whether the name is a layout dependency.
+fn types.node* named_type(checker mut* ck, ast.node mut* n, bool stores_base) {
+    scope.binding* b = lookup(ck, n->name);
+    if (b == null) {
+        if (!from_a_failed_import(ck, n->name)) {
+            check_msg_begin(ck);
+            msg_str(ck, "unknown type ");
+            msg_quote(ck, n->name);
+            check_msg_end(ck, n->name_loc);
+        }
+        return types.type_error(&ck->types);
+    }
+    ast.sym* mut s = sym_of_binding(b);
+    n->sym = s;
+    ast.node mut* tail = n->a;
+    if (tail != null) {
+        // A qualified name: the first identifier is the module, the second
+        // the declaration in it (D9.4).
+        if (b->kind != scope.bind_kind.b_module) {
+            check_msg_begin(ck);
+            msg_quote(ck, n->name);
+            msg_str(ck, " is not a module");
+            check_msg_end(ck, n->name_loc);
+            return types.type_error(&ck->types);
+        }
+        modules.module* m = cast(b->module, modules.module*);
+        scope.binding* inner = module_declaration(m, tail->name);
+        if (inner == null) {
+            check_msg_begin(ck);
+            msg_str(ck, "module ");
+            if (m != null) {
+                msg_quote(ck, m->path);
+            } else {
+                msg_quote(ck, n->name);
+            }
+            msg_str(ck, " has no declaration named ");
+            msg_quote(ck, tail->name);
+            check_msg_end(ck, tail->name_loc);
+            return types.type_error(&ck->types);
+        }
+        s = sym_of_binding(inner);
+        tail->sym = s;
+    }
+    if (s == null || (s->kind != ast.sym_kind.s_struct && s->kind != ast.sym_kind.s_enum)) {
+        check_msg_begin(ck);
+        if (tail != null) {
+            msg_quote(ck, tail->name);
+        } else {
+            msg_quote(ck, n->name);
+        }
+        msg_str(ck, " is a ");
+        if (s != null) {
+            msg_str(ck, ast.sym_kind_name(s->kind));
+        } else {
+            msg_str(ck, "value");
+        }
+        msg_str(ck, ", not a type");
+        if (tail != null) {
+            check_msg_end(ck, tail->name_loc);
+        } else {
+            check_msg_end(ck, n->name_loc);
+        }
+        return types.type_error(&ck->types);
+    }
+    // The declaration may still be unresolved: a type name is one of the
+    // places the lazy resolution of D7.10 reaches another declaration. A
+    // struct the written type does not store by value is not one of them:
+    // its size is no part of this type's size, so forcing it would put it on
+    // the resolution path of a struct that does not contain it, and
+    // check_layout would read that unfinished layout as an infinite size
+    // (D3.8). The resolution edges are exactly the value-containment edges,
+    // which is what makes the two declaration orders of a pair one program
+    // (D7.10). collect_module gave every struct its type before any field
+    // was read, so the name already denotes the right type (D3.8).
+    bool identity_only = s->kind == ast.sym_kind.s_struct && !stores_base && s->ty != null;
+    if (!identity_only) {
+        resolve_sym(ck, sym_mut(s));
+    }
+    return s->ty;
+}
+
+fn written_type type_result(types.node* t, bool mut0) {
+    return written_type{t, mut0};
+}
+
+// The constant length of a fixed-array suffix (D3.4).
+fn bool array_length(checker mut* ck, ast.node mut* e, u64 mut* out) {
+    expr mut v = expr{};
+    check_expr_default(ck, e, &v);
+    if (check_poisoned(v.ty)) {
+        return false;
+    }
+    if (!consts.cv_is_int_like(v.value)) {
+        check_error(ck, e->loc, "an array length must be a constant expression");
+        return false;
+    }
+    consts.cval n = consts.cv_as_int(v.value);
+    if (consts.cv_is_neg(n) || consts.cv_is_zero(n) || !consts.cv_to_u64(n, out)) {
+        // D3.4: N is a constant expression greater than 0.
+        check_error(ck, e->loc, "an array length must be greater than 0");
+        return false;
+    }
+    return true;
+}
+
+// Whether a written return type is `noreturn` (D8.5). Every return type is
+// parsed through `type`, so the keyword sits under the k_type wrapper; a base
+// type node is accepted too, since a speculative parse hands one over.
+fn bool is_noreturn(ast.node* t) {
+    if (t == null) {
+        return false;
+    }
+    if (t->kind == ast.ast_kind.k_type) {
+        return t->a != null && t->a->kind == ast.ast_kind.k_type_noreturn;
+    }
+    return t->kind == ast.ast_kind.k_type_noreturn;
+}
+
+// The base type of a written type (grammar.md 4): a primitive, `string`,
+// `void`, `noreturn`, a qualified name or a function type.
+fn types.node* base_type(checker mut* ck, ast.node mut* n, bool allow_noreturn, bool stores_base) {
+    types.node* mut t = types.type_error(&ck->types);
+    switch (n->kind) {
+    case ast.ast_kind.k_type_prim:
+        prim.prim_kind k = cast(n->op, prim.prim_kind);
+        if (prim.prim_is_float(k)) {
+            // Floats are outside the C bootstrap's subset (toolchain.md 7.3).
+            check_error(ck, n->loc, "not supported by the bootstrap compiler: floats");
+        } else if (k == prim.prim_kind.prim_void) {
+            t = types.type_void(&ck->types);
+        } else {
+            t = types.type_prim(&ck->types, k);
+        }
+    case ast.ast_kind.k_type_string:
+        t = types.type_string(&ck->types, false);
+    case ast.ast_kind.k_type_void:
+        t = types.type_void(&ck->types);
+    case ast.ast_kind.k_type_noreturn:
+        // `noreturn` is a return type only (D8.5); a function with it returns
+        // void and carries the mark on its type.
+        if (!allow_noreturn) {
+            check_error(ck, n->loc, "'noreturn' is a return type");
+        } else {
+            t = types.type_void(&ck->types);
+        }
+    case ast.ast_kind.k_type_name:
+        t = named_type(ck, n, stores_base);
+    case ast.ast_kind.k_type_fn:
+        types.node*[MAX_MEMBERS] mut params = {};
+        u64 count = ast.ast_len(n);
+        if (count > MAX_MEMBERS) {
+            check_error(ck, n->loc, "too many parameters");
+        } else {
+            // A function pointer is one word and its signature is stored
+            // nowhere (D3.10), so neither the result nor a parameter is a
+            // layout dependency of whatever holds the pointer.
+            written_type ret = check_type_at(ck, n->a, type_pos.pos_return, false);
+            bool mut ok = !check_poisoned(ret.ty);
+            u64 mut i = 0;
+            while (i < count) {
+                // A binding-level `mut` on a parameter is not part of the
+                // function's type (D3.10), so mut0 is dropped here.
+                written_type p = check_type_at(ck, ast_child_mut(n, i), type_pos.pos_binding,
+                                               false);
+                params[i] = p.ty;
+                ok = ok && !check_poisoned(p.ty);
+                i += 1;
+            }
+            if (ok) {
+                t = types.type_fn(&ck->types, ret.ty, params[0..count], is_noreturn(n->a));
+            }
+        }
+    default:
+        panic("check.base_type: not a base type");
+    }
+    n->ty = t;
+    return t;
+}
+
+// The `i`-th child of a node's list, mutable: the checker writes annotations
+// on every child it reaches, where ast.ast_child hands out an immutable view.
+fn ast.node mut* ast_child_mut(ast.node* n, u64 i) {
+    return cast(ast.ast_child(n, i), ast.node mut*);
+}
+
+// Whether the base of a written type ends up in the storage the type
+// describes. A reference suffix anywhere breaks the chain: `node*` is one
+// word and `node* @` two, whatever a `node` is (D3.11, D3.5, D5.8), while a
+// fixed array is N of its element and carries the base through (D3.4). It is
+// the written form of the rule `type_layout_pending` applies to the built
+// type, which looks behind fixed arrays and stops at every reference.
+fn bool suffixes_store_base(ast.node* n) {
+    if (n->kind != ast.ast_kind.k_type) {
+        // A bare base type n, which a speculative parse hands over: it
+        // carries no suffix at all.
+        return true;
+    }
+    u64 mut i = 0;
+    while (i < ast.ast_len(n)) {
+        if (cast(ast.ast_child(n, i)->op, types.suffix_kind) != types.suffix_kind.s_array) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// `check_type` with the answer to "does anything store a value of the base
+// type here": a function type's own result and parameters are written types
+// that store nothing, and pass false whatever their suffixes say.
+fn written_type check_type_at(checker mut* ck, ast.node mut* n, type_pos pos, bool in_storage) {
+    bool wrapped = n->kind == ast.ast_kind.k_type;
+    ast.node mut* mut base = n;
+    if (wrapped) {
+        base = n->a;
+    }
+    bool allow_noreturn = pos == type_pos.pos_return;
+    bool stores_base = in_storage && suffixes_store_base(n);
+    types.node* mut b = base_type(ck, base, allow_noreturn, stores_base);
+    if (base->kind == ast.ast_kind.k_type_noreturn && wrapped && ast.ast_len(n) > 0) {
+        // `noreturn` is a return type and nothing else (D8.5).
+        check_error(ck, n->loc, "'noreturn' is a return type");
+        b = types.type_error(&ck->types);
+    }
+    types.suffix[MAX_SUFFIXES] mut suffixes = {};
+    u64 mut count = 0;
+    if (wrapped) {
+        count = ast.ast_len(n);
+    }
+    bool mut ok = !check_poisoned(b);
+    if (count > MAX_SUFFIXES) {
+        check_error(ck, n->loc, "too many type suffixes");
+        ok = false;
+    }
+    u64 mut i = 0;
+    while (ok && i < count) {
+        ast.node mut* s = ast_child_mut(n, i);
+        suffixes[i].kind = cast(s->op, types.suffix_kind);
+        suffixes[i].len = 0;
+        suffixes[i].is_own = ast.ast_is_own(s);
+        suffixes[i].is_mut = ast.ast_is_mut(s);
+        if (suffixes[i].kind == types.suffix_kind.s_array
+            && !array_length(ck, s->a, &suffixes[i].len)) {
+            ok = false;
+        }
+        i += 1;
+    }
+    if (!ok) {
+        n->ty = types.type_error(&ck->types);
+        return type_result(n->ty, false);
+    }
+    bool mut base_own = wrapped && ast.ast_is_own(n);
+    bool mut base_mut = wrapped && ast.ast_is_mut(n);
+    if (pos == type_pos.pos_alloc) {
+        // `new` allocates storage that is writable at every level (D5.8), so
+        // every position but the one a fixed-array suffix follows is marked.
+        // `void` is the exception: it has no target level to carry a marker
+        // (D3.11), and `new(void*)` is legal (D17.3), so marking the base
+        // would reject the one pointer slot the standard library's ptr_vec
+        // allocates.
+        base_mut = (count == 0 || suffixes[0].kind != types.suffix_kind.s_array)
+            && b->kind != types.type_kind.k_void;
+        u64 mut k = 0;
+        while (k < count) {
+            suffixes[k].is_mut =
+                k + 1 == count || suffixes[k + 1].kind != types.suffix_kind.s_array;
+            k += 1;
+        }
+    }
+    types.build_result built =
+        types.type_build(&ck->types, base_own, base_mut, b, suffixes[0..count]);
+    if (built.built == null) {
+        check_error(ck, n->loc, built.error);
+        n->ty = types.type_error(&ck->types);
+        return type_result(n->ty, false);
+    }
+    if (built.mut0 && pos != type_pos.pos_binding && pos != type_pos.pos_alloc) {
+        // The outermost position of a field or of a return type never carries
+        // `mut` (D5.5), and neither does a cast target, a result having no
+        // binding (D3.14).
+        string mut what = "a field's own storage follows its struct";
+        if (pos == type_pos.pos_return) {
+            what = "a return type has no binding";
+        } else if (pos == type_pos.pos_cast) {
+            what = "a cast result has no binding";
+        }
+        check_msg_begin(ck);
+        msg_str(ck, what);
+        msg_str(ck, ": remove the outermost 'mut'");
+        check_msg_end(ck, n->loc);
+        n->ty = types.type_error(&ck->types);
+        return type_result(n->ty, false);
+    }
+    n->ty = built.built;
+    return type_result(built.built, built.mut0);
+}
+
+// The type a written type n denotes at `pos`, with the marker refusals the
+// type table delegates (D5.5, D3.14); the error type after a diagnostic.
+fn written_type check_type(checker mut* ck, ast.node mut* n, type_pos pos) {
+    // Every written type outside a function type's own signature describes
+    // storage: a field, a binding, a parameter, a result or a cast target.
+    return check_type_at(ck, n, pos, true);
+}
+
+// ---- ownership (D17) -------------------------------------------------------------
+
+// Whether a value of `t` owns an allocation: an `own` reference or an owning
+// aggregate, which are the two things `move` transfers and `del` refuses
+// (D17.1, D17.7). A struct still without a layout answers false, the
+// declaration that needs it having reported its own error (D3.8).
+fn bool check_owning(types.node* t) {
+    if (types.type_is_reference(t)) {
+        // An `own` reference owns the allocation it designates (D17.1).
+        return t->is_own;
+    }
+    // A struct or fixed array that holds an `own` reference by value is an
+    // owning aggregate (D17.7); one whose layout is still unresolved has no
+    // answer yet, and the declaration that needed it reported that (D3.8).
+    return types.type_layout_pending(t) == null && types.type_is_owning_aggregate(t);
+}
+
+// An `own` rvalue: `new(...)`, a call result, `move(...)` or a `cast` to an
+// `own` type, none of which any binding could later `del` (D17.5, D17.8).
+// `null` is not one of them: it owns nothing, whatever `own` type it adopts
+// from its context, and `del(null)` is a no-op (D10.5, D17.9).
+fn bool is_owning_rvalue(expr* e) {
+    return !e->lvalue && e->value.kind != consts.cval_kind.cv_null && check_owning(e->ty);
+}
+
+// Reports "owning temporary would leak" at `at` when `e` is an owning rvalue,
+// which nothing could ever `del` (D17.8); `what` says what the expression
+// would do with it. Returns whether it reported.
+fn bool check_owning_temporary(checker mut* ck, diag.loc at, expr* e, string what) {
+    if (check_poisoned(e->ty) || !is_owning_rvalue(e)) {
+        return false;
+    }
+    // An `own` rvalue may only land in an `own` place, reach an `own`
+    // parameter or be `del`ed; anything else leaks it (D17.8).
+    check_msg_begin(ck);
+    msg_str(ck, "owning temporary would leak: ");
+    msg_str(ck, what);
+    check_msg_end(ck, at);
+    return true;
+}
+
+// `t` lent: the same type without the `own` of the reference it holds, which
+// is what `==`, a range loop and a borrowed use of an owning value see
+// (D6.2, D17.4, D17.10).
+fn types.node* check_lend(checker mut* ck, types.node* t) {
+    switch (t->kind) {
+    case types.type_kind.k_ptr:
+        return types.type_ptr(&ck->types, t->elem, false, t->is_mut);
+    case types.type_kind.k_span:
+        return types.type_span(&ck->types, t->elem, false, t->is_mut);
+    case types.type_kind.k_string:
+        return types.type_string(&ck->types, false);
+    case types.type_kind.k_voidptr:
+        return types.type_voidptr(&ck->types, false);
+    default:
+        return t;
+    }
+}
+
+// ---- untyped constants in context (D4.1 to D4.5) -----------------------------------
+
+fn bool type_is_integer_prim(types.node* t) {
+    return t->kind == types.type_kind.k_prim && prim.prim_is_integer(t->prim);
+}
+
+// Whether the untyped constant `v` may take the type `t` (D4.2, D4.3, D10.5),
+// with the diagnostic that names the reason. `what` names the context and is
+// the empty string where the C passes NULL, which no context ever does when
+// the branch that reads it is taken with a real name.
+fn bool constant_fits(checker mut* ck, diag.loc at, consts.cval v, types.node* t, string what) {
+    if (v.kind == consts.cval_kind.cv_null) {
+        // `null` has no type of its own: it takes a pointer, `void*` or
+        // function-pointer type from its context (D10.5).
+        if (types.type_assignable(t, types.type_null(&ck->types))) {
+            return true;
+        }
+        check_msg_begin(ck);
+        msg_str(ck, "'null' needs a pointer type, not ");
+        check_msg_type(ck, t);
+        check_msg_end(ck, at);
+        return false;
+    }
+    if (t->kind == types.type_kind.k_prim && consts.cv_fits(v, t->prim)) {
+        return true;
+    }
+    check_msg_begin(ck);
+    if (t->kind == types.type_kind.k_enum) {
+        // An integer never becomes an enum implicitly (D3.9).
+        msg_str(ck, "an integer constant does not become an enum: use cast");
+    } else if (t->kind == types.type_kind.k_prim && t->prim == prim.prim_kind.prim_char) {
+        // An integer literal never becomes `char` implicitly (D4.3).
+        msg_str(ck, "an integer constant does not become char: use cast");
+    } else if (t->kind == types.type_kind.k_prim && t->prim == prim.prim_kind.prim_bool) {
+        // There is no truthiness: a condition is a `bool` (D3.3).
+        msg_str(ck, "an integer constant does not become bool: write '!= 0'");
+    } else if (t->kind == types.type_kind.k_prim) {
+        msg_str(ck, "constant ");
+        msg_value(ck, v);
+        msg_str(ck, " does not fit ");
+        check_msg_type(ck, t);
+    } else {
+        // No constant has that type at all, so the context names itself.
+        if (what.len > 0) {
+            msg_str(ck, what);
+        } else {
+            msg_str(ck, "the expression");
+        }
+        msg_str(ck, " expects ");
+        check_msg_type(ck, t);
+        msg_str(ck, ", not a constant");
+    }
+    check_msg_end(ck, at);
+    return false;
+}
+
+// A `void` expression in a value position: the call of a function or of a
+// universe builtin that yields nothing (D12.2).
+fn bool check_no_value(checker mut* ck, ast.node* n, expr mut* e) {
+    if (e->ty->kind != types.type_kind.k_void) {
+        return false;
+    }
+    check_msg_begin(ck);
+    if (e->sym != null) {
+        msg_quote(ck, e->sym->name);
+        msg_str(ck, " has no value");
+    } else {
+        msg_str(ck, "the expression has no value");
+    }
+    check_msg_end(ck, n->loc);
+    e->ty = types.type_error(&ck->types);
+    return true;
+}
+
+// Gives every node of an untyped constant expression the type its context
+// fixed (D4.1). A node that folded stands for its whole subtree, so only its
+// value meets the context (D4.4: the intermediates are exact); a node that
+// did not fold, `1 << n` with a variable count, passes the context on to the
+// operands that do carry a value.
+fn bool retype_untyped(checker mut* ck, ast.node mut* n, types.node* t, bool fit, string what) {
+    if ((n->ann & ANN_UNTYPED) == 0) {
+        return true;
+    }
+    n->ann &= ~ANN_UNTYPED;
+    n->ty = t;
+    consts.cval v = check_node_value(ck, n);
+    bool mut ok = true;
+    bool mut deeper = fit;
+    if (v.kind != consts.cval_kind.cv_none) {
+        ok = !fit || constant_fits(ck, n->loc, v, t, what);
+        if (ok && v.kind == consts.cval_kind.cv_char && type_is_integer_prim(t)) {
+            // A char constant in an integer context is its code point (D4.3).
+            set_value(ck, n, consts.cv_as_int(v));
+        }
+        deeper = false;
+    }
+    if (n->a != null && !retype_untyped(ck, n->a, t, deeper, what)) {
+        ok = false;
+    }
+    if (n->b != null && !retype_untyped(ck, n->b, t, deeper, what)) {
+        ok = false;
+    }
+    if (n->c != null && !retype_untyped(ck, n->c, t, deeper, what)) {
+        ok = false;
+    }
+    if (n->d != null && !retype_untyped(ck, n->d, t, deeper, what)) {
+        ok = false;
+    }
+    u64 mut i = 0;
+    while (i < ast.ast_len(n)) {
+        if (!retype_untyped(ck, ast_child_mut(n, i), t, deeper, what)) {
+            ok = false;
+        }
+        i += 1;
+    }
+    return ok;
+}
+
+// The default type of an untyped constant with no context (D4.5).
+fn void default_type(checker mut* ck, ast.node mut* n, expr mut* e) {
+    if (!e->untyped) {
+        return;
+    }
+    e->untyped = false;
+    prim.prim_kind mut k = prim.prim_kind.prim_i32;
+    if (e->value.kind == consts.cval_kind.cv_null) {
+        // `null` is an error where no pointer type is expected (D10.5).
+        check_error(ck, n->loc, "'null' needs a pointer-typed context");
+        e->ty = types.type_error(&ck->types);
+    } else if (e->value.kind != consts.cval_kind.cv_none
+               && !consts.cv_default_kind(e->value, &k)) {
+        // An untyped integer that fits neither i32 nor i64 has no default
+        // type (D4.5).
+        check_error(ck, n->loc, "constant expression out of range");
+        e->ty = types.type_error(&ck->types);
+    } else if (e->value.kind == consts.cval_kind.cv_none) {
+        // `1 << n` with no context: the left operand takes its default type.
+        k = prim.prim_kind.prim_i32;
+        e->ty = types.type_prim(&ck->types, k);
+    } else {
+        e->ty = types.type_prim(&ck->types, k);
+    }
+    if (!retype_untyped(ck, n, e->ty, true, "")) {
+        e->ty = types.type_error(&ck->types);
+    }
+    n->ty = e->ty;
+    e->value = check_node_value(ck, n);
+}
+
+// An expression used for its value with no context of its own (D4.5), which
+// also refuses a call that yields nothing (D12.2).
+fn void value_of(checker mut* ck, ast.node mut* n, expr mut* e) {
+    default_type(ck, n, e);
+    if (!check_poisoned(e->ty)) {
+        check_no_value(ck, n, e);
+    }
+}
+
+// The ownership rules a value meets when it reaches an expected type. An
+// owning target is an `own` place, which an owning lvalue enters only as
+// `move(lv)` and an owning rvalue enters as it is (D17.5, D17.7); a target
+// that does not own takes the lend of an owning lvalue (D17.4) but would
+// leak an owning rvalue (D17.8). `implicit_move` is the one exception, the
+// `return` of a bare `own` local or parameter (D17.5).
+fn void convert_ownership(checker mut* ck, ast.node* n, expr mut* e, types.node* target,
+                          string what, bool implicit_move) {
+    if (check_owning(target)) {
+        if (!e->lvalue || implicit_move || !check_owning(e->ty)) {
+            return;
+        }
+        // Transfer is written: copying an `own` lvalue into an `own` place
+        // requires `move`, which empties the source (D17.5, D17.7).
+        check_msg_begin(ck);
+        msg_str(ck, "copying an owning value requires 'move'");
+        if (e->sym != null && n->kind == ast.ast_kind.k_ident) {
+            // The hint spells a whole expression, so it is offered only for a
+            // name: `move(data)` for `b->data` would name nothing in scope.
+            msg_str(ck, ": write move(");
+            msg_str(ck, e->sym->name);
+            msg_str(ck, ")");
+        }
+        check_msg_end(ck, n->loc);
+        e->ty = types.type_error(&ck->types);
+        return;
+    }
+    if (!is_owning_rvalue(e)) {
+        return;
+    }
+    // Nothing could ever `del` the temporary once it has been lent (D17.8).
+    check_msg_begin(ck);
+    msg_str(ck, "owning temporary would leak: ");
+    msg_str(ck, what);
+    msg_str(ck, " expects ");
+    check_msg_type(ck, target);
+    check_msg_end(ck, n->loc);
+    e->ty = types.type_error(&ck->types);
+}
+
+// Converts a checked expression to the type its context expects: an untyped
+// constant takes that type (D4.1), a typed one may drop mutability and
+// ownership (D5.4, D17.4) and nothing else, and the ownership rules of D17.5
+// and D17.8 decide whether the value may be copied there at all.
+fn void convert_at(checker mut* ck, ast.node mut* n, expr mut* e, types.node* target, string what,
+                   bool implicit_move) {
+    if (e->untyped) {
+        e->untyped = false;
+        if (check_poisoned(target)) {
+            e->ty = target;
+        } else if (retype_untyped(ck, n, target, true, what)) {
+            e->ty = target;
+            e->value = check_node_value(ck, n);
+        } else {
+            e->ty = types.type_error(&ck->types);
+        }
+        n->ty = e->ty;
+        return;
+    }
+    if (check_poisoned(e->ty) || check_poisoned(target)) {
+        return;
+    }
+    if (check_no_value(ck, n, e)) {
+        return;
+    }
+    if (!types.type_assignable(target, e->ty)) {
+        check_msg_begin(ck);
+        msg_str(ck, what);
+        msg_str(ck, " expects ");
+        check_msg_type(ck, target);
+        msg_str(ck, ", not ");
+        check_msg_type(ck, e->ty);
+        check_msg_end(ck, n->loc);
+        e->ty = types.type_error(&ck->types);
+        return;
+    }
+    convert_ownership(ck, n, e, target, what, implicit_move);
+}
+
+fn void convert(checker mut* ck, ast.node mut* n, expr mut* e, types.node* target, string what) {
+    convert_at(ck, n, e, target, what, false);
+}
+
+// Checks an expression that must produce a value of `target`: it finalizes an
+// untyped constant against it (D4.1) and reports a type that does not convert
+// (D5.4). `what` names the context in the diagnostic. An owning target is an
+// own place, so an owning lvalue reaches it only through `move` (D17.5).
+fn void check_expr_as(checker mut* ck, ast.node mut* n, types.node* target, string what,
+                      expr mut* out) {
+    check_expr(ck, n, out);
+    convert(ck, n, out, target, what);
+}
+
+// Whether the operand of a `return` is a local or a parameter named outright,
+// which is the implicit move of D17.5 and D17.7; a field, an element or any
+// other lvalue is written `move`.
+fn bool names_a_local(ast.node* n) {
+    return n->kind == ast.ast_kind.k_ident && n->sym != null
+        && (n->sym->kind == ast.sym_kind.s_local || n->sym->kind == ast.sym_kind.s_param);
+}
+
+// Checks the operand of `ret`, a k_return with a value, against `target`. It
+// is the one own place an owning lvalue reaches without `move`, and only when
+// it names a local or a parameter outright, which is an implicit move the
+// checker records on `ret` for the emitter (D17.5, D17.7).
+fn void check_return_value(checker mut* ck, ast.node mut* ret, types.node* target, expr mut* out) {
+    ast.node mut* n = ret->a;
+    check_expr(ck, n, out);
+    bool implicit = check_owning(target) && out->lvalue && names_a_local(n);
+    convert_at(ck, n, out, target, "the return value", implicit);
+    if (implicit && !check_poisoned(out->ty)) {
+        // The emitter empties the operand after reading it, which is what
+        // lets a `defer del(x)` written above see the zero value (D7.8,
+        // D17.5).
+        ret->ann |= ANN_MOVE;
+    }
+}
+
+// Checks an expression used as a value with no context, so an untyped
+// constant takes its default type (D4.5).
+fn void check_expr_default(checker mut* ck, ast.node mut* n, expr mut* out) {
+    check_expr(ck, n, out);
+    value_of(ck, n, out);
+    // No context means no `own` place, so an owning rvalue used here --
+    // `println(str.dup(s))` above all -- would leak (D4.5, D17.8).
+    if (check_owning_temporary(ck, n->loc, out, "nothing here could free it")) {
+        out->ty = types.type_error(&ck->types);
+    }
+}
+
+// Checks a `bool` condition (D3.3, D7.4).
+fn void check_condition(checker mut* ck, ast.node mut* n, string what) {
+    expr mut e = expr{};
+    check_expr(ck, n, &e);
+    value_of(ck, n, &e);
+    if (check_poisoned(e.ty)) {
+        return;
+    }
+    // Conditions must be `bool`: there is no truthiness (D3.3).
+    if (e.ty->kind != types.type_kind.k_prim || e.ty->prim != prim.prim_kind.prim_bool) {
+        check_msg_begin(ck);
+        msg_str(ck, what);
+        msg_str(ck, " must be bool, not ");
+        check_msg_type(ck, e.ty);
+        check_msg_end(ck, n->loc);
+    }
+}
+
+// ---- operators (D6.2) --------------------------------------------------------------
+
+// The token kind a n's `op` holds, which the parser stored as an i32
+// (ast.ft): the C compares the plain int against the TOK_ constants.
+fn lexer.tok_kind op_of(i32 op) {
+    return cast(op, lexer.tok_kind);
+}
+
+// The name of an operator in a diagnostic, which is the token's spelling.
+fn void msg_op(checker mut* ck, i32 op) {
+    msg_str(ck, lexer.tok_kind_name(op_of(op)));
+}
+
+fn bool op_is_shift(i32 op) {
+    return op_of(op) == lexer.tok_kind.shl || op_of(op) == lexer.tok_kind.shr;
+}
+
+fn bool op_is_logical(i32 op) {
+    return op_of(op) == lexer.tok_kind.and_and || op_of(op) == lexer.tok_kind.pipe_pipe;
+}
+
+fn bool op_is_equality(i32 op) {
+    return op_of(op) == lexer.tok_kind.eq || op_of(op) == lexer.tok_kind.ne;
+}
+
+fn bool op_is_ordering(i32 op) {
+    return op_of(op) == lexer.tok_kind.lt || op_of(op) == lexer.tok_kind.le
+        || op_of(op) == lexer.tok_kind.gt || op_of(op) == lexer.tok_kind.ge;
+}
+
+fn bool op_is_comparison(i32 op) {
+    return op_is_equality(op) || op_is_ordering(op);
+}
+
+// `+ - * /` take integers or floats; every other arithmetic, wrapping and
+// bitwise operator is integer-only (D6.2).
+fn bool op_takes_floats(i32 op) {
+    return op_of(op) == lexer.tok_kind.plus || op_of(op) == lexer.tok_kind.minus
+        || op_of(op) == lexer.tok_kind.star || op_of(op) == lexer.tok_kind.slash;
+}
+
+// Equality is defined on integers, floats, bool, char, enums, pointers,
+// function pointers and string, and is an error on structs, fixed arrays and
+// spans (D3.13).
+fn bool type_has_equality(types.node* t) {
+    switch (t->kind) {
+    case types.type_kind.k_prim, types.type_kind.k_enum, types.type_kind.k_ptr,
+         types.type_kind.k_voidptr, types.type_kind.k_fn, types.type_kind.k_string:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Ordering exists on integers, floats and `char` only (D6.2, D3.2).
+fn bool type_has_ordering(types.node* t) {
+    return t->kind == types.type_kind.k_prim && t->prim != prim.prim_kind.prim_bool;
+}
+
+// "there is no pointer arithmetic": `p + 1`, `p++` and `p[i]` are errors, and
+// the only ways to obtain a pointer are null, &, new, .ptr, cast, a function
+// name and calls (D10.4).
+fn bool check_pointer_arithmetic(checker mut* ck, diag.loc at, i32 op, types.node* t) {
+    if (t->kind != types.type_kind.k_ptr && t->kind != types.type_kind.k_voidptr) {
+        return false;
+    }
+    check_msg_begin(ck);
+    msg_str(ck, "there is no pointer arithmetic: '");
+    msg_op(ck, op);
+    msg_str(ck, "' does not apply to ");
+    check_msg_type(ck, t);
+    check_msg_end(ck, at);
+    return true;
+}
+
+// "'+' takes integer operands, not char": one shape for every operand rule,
+// naming the operator and the type that broke it.
+fn void error_operand(checker mut* ck, diag.loc at, i32 op, string takes, types.node* t) {
+    check_msg_begin(ck);
+    msg_str(ck, "'");
+    msg_op(ck, op);
+    msg_str(ck, "' takes ");
+    msg_str(ck, takes);
+    msg_str(ck, ", not ");
+    check_msg_type(ck, t);
+    check_msg_end(ck, at);
+}
+
+// The exact folding of D4.4 on two untyped constants.
+fn bool fold_untyped(checker mut* ck, diag.loc at, i32 op, consts.cval a, consts.cval b,
+                     consts.cval mut* out) {
+    if ((op_of(op) == lexer.tok_kind.slash || op_of(op) == lexer.tok_kind.percent)
+        && consts.cv_is_zero(b)) {
+        check_error(ck, at, "constant division by zero");
+        return false;
+    }
+    bool mut ok = true;
+    switch (op_of(op)) {
+    case lexer.tok_kind.plus:
+        ok = consts.cv_add(a, b, out);
+    case lexer.tok_kind.minus:
+        ok = consts.cv_sub(a, b, out);
+    case lexer.tok_kind.star:
+        ok = consts.cv_mul(a, b, out);
+    case lexer.tok_kind.slash:
+        ok = consts.cv_div(a, b, out);
+    case lexer.tok_kind.percent:
+        ok = consts.cv_rem(a, b, out);
+    case lexer.tok_kind.amp:
+        ok = consts.cv_and(a, b, out);
+    case lexer.tok_kind.pipe:
+        ok = consts.cv_or(a, b, out);
+    case lexer.tok_kind.caret:
+        ok = consts.cv_xor(a, b, out);
+    case lexer.tok_kind.plus_wrap:
+        ok = consts.cv_add(a, b, out);
+    case lexer.tok_kind.minus_wrap:
+        ok = consts.cv_sub(a, b, out);
+    case lexer.tok_kind.star_wrap:
+        // A wrapping operator among untyped constants has no width to wrap
+        // at, so it folds exactly like its checked form and a result outside
+        // the constant range is an error (D4.4, D4.6, D11.2).
+        ok = consts.cv_mul(a, b, out);
+    default:
+        panic("check.fold_untyped: folding an operator that is not arithmetic");
+    }
+    if (!ok) {
+        // Untyped integers are evaluated exactly in [-2^63, 2^64 - 1] (D4.4).
+        check_error(ck, at, "constant expression out of range");
+    }
+    return ok;
+}
+
+// The typed folding of D4.6: every checked-mode rule applies at compile time,
+// so an overflow or a division by zero is a compile error and not a trap.
+fn bool fold_typed(checker mut* ck, diag.loc at, i32 op, consts.cval a, consts.cval b,
+                   prim.prim_kind t, consts.cval mut* out) {
+    if ((op_of(op) == lexer.tok_kind.slash || op_of(op) == lexer.tok_kind.percent)
+        && consts.cv_is_zero(b)) {
+        check_error(ck, at, "constant division by zero");
+        return false;
+    }
+    bool mut ok = true;
+    switch (op_of(op)) {
+    case lexer.tok_kind.plus:
+        ok = consts.cv_typed_add(a, b, t, out);
+    case lexer.tok_kind.minus:
+        ok = consts.cv_typed_sub(a, b, t, out);
+    case lexer.tok_kind.star:
+        ok = consts.cv_typed_mul(a, b, t, out);
+    case lexer.tok_kind.slash:
+        ok = consts.cv_typed_div(a, b, t, out);
+    case lexer.tok_kind.percent:
+        ok = consts.cv_typed_rem(a, b, t, out);
+    case lexer.tok_kind.amp:
+        ok = consts.cv_typed_and(a, b, t, out);
+    case lexer.tok_kind.pipe:
+        ok = consts.cv_typed_or(a, b, t, out);
+    case lexer.tok_kind.caret:
+        ok = consts.cv_typed_xor(a, b, t, out);
+    case lexer.tok_kind.plus_wrap:
+        *out = consts.cv_wrap_add(a, b, t);
+    case lexer.tok_kind.minus_wrap:
+        *out = consts.cv_wrap_sub(a, b, t);
+    case lexer.tok_kind.star_wrap:
+        *out = consts.cv_wrap_mul(a, b, t);
+    default:
+        panic("check.fold_typed: folding an operator that is not arithmetic");
+    }
+    if (!ok) {
+        check_msg_begin(ck);
+        msg_str(ck, "constant expression overflows ");
+        msg_str(ck, prim.prim_name(t));
+        check_msg_end(ck, at);
+    }
+    return ok;
+}
+
+fn consts.cv_rel relation_of(i32 op) {
+    switch (op_of(op)) {
+    case lexer.tok_kind.eq:
+        return consts.cv_rel.cv_rel_eq;
+    case lexer.tok_kind.ne:
+        return consts.cv_rel.cv_rel_ne;
+    case lexer.tok_kind.lt:
+        return consts.cv_rel.cv_rel_lt;
+    case lexer.tok_kind.le:
+        return consts.cv_rel.cv_rel_le;
+    case lexer.tok_kind.gt:
+        return consts.cv_rel.cv_rel_gt;
+    default:
+        return consts.cv_rel.cv_rel_ge;
+    }
+}
+
+// The shift rules of D6.2 and D4.4: the left operand keeps its own type, the
+// count is not a context for it, and a constant count outside the width is a
+// compile error.
+fn void check_shift(checker mut* ck, diag.loc at, i32 op, expr mut* a, ast.node mut* rhs,
+                    expr mut* b, expr mut* out) {
+    default_type(ck, rhs, b);
+    if (check_poisoned(a->ty) || check_poisoned(b->ty)) {
+        return;
+    }
+    if (!type_is_integer_prim(b->ty)) {
+        error_operand(ck, at, op, "an integer count", b->ty);
+        return;
+    }
+    if (!a->untyped && !type_is_integer_prim(a->ty)) {
+        error_operand(ck, at, op, "an integer left operand", a->ty);
+        return;
+    }
+    out->ty = a->ty;
+    out->untyped = a->untyped;
+    bool counted = consts.cv_is_int(b->value);
+    if (a->untyped) {
+        // The left operand has no width until its context fixes one, so the
+        // count is checked against the range of an untyped constant, 0..63
+        // (D4.4), whether or not the operand folded.
+        i64 mut count = 0;
+        if (counted
+            && (!consts.cv_to_i64(b->value, &count) || count < 0
+                || count > cast(consts.CV_SHIFT_MAX, i64))) {
+            check_error(ck, at, "constant shift count must be in 0..63");
+            out->ty = types.type_error(&ck->types);
+            out->untyped = false;
+            return;
+        }
+        if (counted && consts.cv_is_int_like(a->value)) {
+            consts.cval mut v = consts.cv_none();
+            consts.cval left = consts.cv_as_int(a->value);
+            bool mut ok = false;
+            if (op_of(op) == lexer.tok_kind.shl) {
+                ok = consts.cv_shl(left, b->value, &v);
+            } else {
+                ok = consts.cv_shr(left, b->value, &v);
+            }
+            if (!ok) {
+                // The count is in range, so an exact result that leaves the
+                // constant range is what failed (D4.4).
+                check_error(ck, at, "constant expression out of range");
+                out->ty = types.type_error(&ck->types);
+                out->untyped = false;
+                return;
+            }
+            out->value = v;
+        }
+        return;
+    }
+    u64 width = cast(prim.prim_size(a->ty->prim), u64) * prim.PRIM_BITS_PER_BYTE;
+    if (counted) {
+        i64 mut n = 0;
+        if (!consts.cv_to_i64(b->value, &n) || n < 0 || cast(n, u64) >= width) {
+            // A constant count that is negative or at least the width of the
+            // left operand is a compile error (D6.2).
+            check_msg_begin(ck);
+            msg_str(ck, "shift count must be in 0..");
+            msg_uint(ck, width - 1);
+            msg_str(ck, " for ");
+            check_msg_type(ck, a->ty);
+            check_msg_end(ck, at);
+            out->ty = types.type_error(&ck->types);
+            return;
+        }
+        if (consts.cv_is_int(a->value)) {
+            consts.cval mut v = consts.cv_none();
+            bool mut ok = false;
+            if (op_of(op) == lexer.tok_kind.shl) {
+                ok = consts.cv_typed_shl(a->value, b->value, a->ty->prim, &v);
+            } else {
+                ok = consts.cv_typed_shr(a->value, b->value, a->ty->prim, &v);
+            }
+            if (ok) {
+                out->value = v;
+            }
+        }
+    }
+}
+
+// Two untyped constants: the arithmetic folds exactly and a comparison yields
+// a bool (D4.4).
+fn void check_untyped_pair(checker mut* ck, diag.loc at, i32 op, expr mut* a, expr mut* b,
+                           expr mut* out) {
+    bool chars = a->value.kind == consts.cval_kind.cv_char
+        && b->value.kind == consts.cval_kind.cv_char;
+    if (a->value.kind == consts.cval_kind.cv_null
+        || b->value.kind == consts.cval_kind.cv_null) {
+        // `null` has no type of its own, so two of them do not compare (D10.5).
+        check_error(ck, at, "'null' has no type of its own");
+        return;
+    }
+    if (op_is_logical(op)) {
+        error_operand(ck, at, op, "bool operands", a->ty);
+        return;
+    }
+    if (a->value.kind == consts.cval_kind.cv_none
+        || b->value.kind == consts.cval_kind.cv_none) {
+        // A shift by a variable count leaves an untyped expression with no
+        // value; it still takes its type from context (D4.1).
+        out->ty = a->ty;
+        out->untyped = !op_is_comparison(op);
+        if (op_is_comparison(op)) {
+            out->ty = types.type_prim(&ck->types, prim.prim_kind.prim_bool);
+        }
+        return;
+    }
+    if (op_is_comparison(op)) {
+        out->ty = types.type_prim(&ck->types, prim.prim_kind.prim_bool);
+        consts.cval mut lhs = a->value;
+        consts.cval mut rhs = b->value;
+        if (!chars) {
+            lhs = consts.cv_as_int(a->value);
+            rhs = consts.cv_as_int(b->value);
+        }
+        out->value = consts.cv_compare(relation_of(op), lhs, rhs);
+        return;
+    }
+    consts.cval mut v = consts.cv_none();
+    if (!fold_untyped(ck, at, op, consts.cv_as_int(a->value), consts.cv_as_int(b->value), &v)) {
+        return;
+    }
+    out->value = v;
+    out->untyped = true;
+    prim.prim_kind mut k = prim.prim_kind.prim_i32;
+    // The provisional type is the default one; a context replaces it (D4.5).
+    if (consts.cv_default_kind(v, &k)) {
+        out->ty = types.type_prim(&ck->types, k);
+    } else {
+        out->ty = types.type_error(&ck->types);
+    }
+}
+
+// The operand rules of D6.2 on the type the operator is applied to.
+fn bool operand_kind_ok(checker mut* ck, diag.loc at, i32 op, types.node* t) {
+    if (check_poisoned(t)) {
+        return true;
+    }
+    if (op_is_logical(op)) {
+        // `! && ||` take bool only (D3.3).
+        if (t->kind != types.type_kind.k_prim || t->prim != prim.prim_kind.prim_bool) {
+            error_operand(ck, at, op, "bool operands", t);
+            return false;
+        }
+        return true;
+    }
+    if (op_is_comparison(op)) {
+        bool mut ok = true;
+        if (op_is_ordering(op)) {
+            ok = type_has_ordering(t);
+        } else {
+            ok = type_has_equality(t);
+        }
+        if (!ok) {
+            string mut takes = "comparable operands";
+            if (op_is_ordering(op)) {
+                takes = "ordered operands";
+            }
+            error_operand(ck, at, op, takes, t);
+            return false;
+        }
+        return true;
+    }
+    // Arithmetic, wrapping and bitwise operators take integers, and `+ - * /`
+    // floats as well (D6.2).
+    if (!type_is_integer_prim(t) && !(op_takes_floats(op) && types.type_is_float(t))) {
+        if (check_pointer_arithmetic(ck, at, op, t)) {
+            return false;
+        }
+        string mut takes = "integer operands";
+        if (op_takes_floats(op)) {
+            takes = "numeric operands";
+        }
+        error_operand(ck, at, op, takes, t);
+        return false;
+    }
+    return true;
+}
+
+// `a op b` on two checked operands (D6.2): it finalizes an untyped operand
+// against the other (D4.1), applies the operand rules of the operator, folds
+// two constants (D4.6) and reports every violation at `at`. The compound
+// assignments of D7.2 have the operand rules of their operator, so they use
+// it too.
+fn void check_operands(checker mut* ck, diag.loc at, i32 op, ast.node mut* lhs, expr mut* a,
+                       ast.node mut* rhs, expr mut* b, expr mut* out) {
+    out->ty = types.type_error(&ck->types);
+    out->value = consts.cv_none();
+    out->untyped = false;
+    out->lvalue = false;
+    out->is_mut = false;
+    out->empty = empty_kind.empty_immutable;
+    out->sym = null;
+    if (op_is_shift(op)) {
+        check_shift(ck, at, op, a, rhs, b, out);
+        return;
+    }
+    if (a->untyped && b->untyped) {
+        check_untyped_pair(ck, at, op, a, b, out);
+        return;
+    }
+    // The typed operand decides whether the operator applies at all, before
+    // the untyped one adopts its type, so that `c + 1` on a char reports the
+    // arithmetic rule of D3.2 and not a constant that does not fit.
+    types.node* mut decides = a->ty;
+    if (a->untyped) {
+        decides = b->ty;
+    }
+    if (!operand_kind_ok(ck, at, op, decides)) {
+        return;
+    }
+    // An untyped operand takes the type of the other one (D4.1).
+    if (a->untyped) {
+        convert(ck, lhs, a, b->ty, "the operand");
+    } else if (b->untyped) {
+        convert(ck, rhs, b, a->ty, "the operand");
+    }
+    if (check_poisoned(a->ty) || check_poisoned(b->ty)) {
+        return;
+    }
+    if (op_is_equality(op)) {
+        // The operands of `==` and `!=` lend, so `own` never blocks a
+        // comparison (D6.2, D17.4); an owning rvalue is lent too and nothing
+        // would be left to free it (D17.8).
+        if (check_owning_temporary(ck, lhs->loc, a, "comparing it leaves no owner")
+            || check_owning_temporary(ck, rhs->loc, b, "comparing it leaves no owner")) {
+            return;
+        }
+    }
+    types.node* mut lt = a->ty;
+    types.node* mut rt = b->ty;
+    if (op_is_equality(op)) {
+        lt = check_lend(ck, a->ty);
+        rt = check_lend(ck, b->ty);
+    }
+    if (!types.type_equal(lt, rt)) {
+        // There is no promotion: every mixed-type operation is an error
+        // (D6.2), mutability levels included.
+        check_msg_begin(ck);
+        msg_str(ck, "'");
+        msg_op(ck, op);
+        msg_str(ck, "' takes two operands of the same type, not ");
+        check_msg_type(ck, a->ty);
+        msg_str(ck, " and ");
+        check_msg_type(ck, b->ty);
+        check_msg_end(ck, at);
+        return;
+    }
+    types.node* t = lt;
+    if (op_is_logical(op)) {
+        out->ty = t;
+        // `&& ||` fold only when both operands are constants (D4.6).
+        if (a->value.kind == consts.cval_kind.cv_bool
+            && b->value.kind == consts.cval_kind.cv_bool) {
+            if (op_of(op) == lexer.tok_kind.and_and) {
+                out->value = consts.cv_land(a->value, b->value);
+            } else {
+                out->value = consts.cv_lor(a->value, b->value);
+            }
+        }
+        return;
+    }
+    if (op_is_comparison(op)) {
+        out->ty = types.type_prim(&ck->types, prim.prim_kind.prim_bool);
+        if (a->value.kind != consts.cval_kind.cv_none
+            && b->value.kind != consts.cval_kind.cv_none) {
+            out->value = consts.cv_compare(relation_of(op), a->value, b->value);
+        }
+        return;
+    }
+    out->ty = t;
+    if (consts.cv_is_int(a->value) && consts.cv_is_int(b->value)) {
+        consts.cval mut v = consts.cv_none();
+        if (!fold_typed(ck, at, op, a->value, b->value, t->prim, &v)) {
+            out->ty = types.type_error(&ck->types);
+            return;
+        }
+        out->value = v;
+    }
+}
+
+// ---- expressions (core-language.md 5) ----------------------------------------------
+
+fn void expr_clear(checker mut* ck, expr mut* out) {
+    out->ty = types.type_error(&ck->types);
+    out->value = consts.cv_none();
+    out->untyped = false;
+    out->lvalue = false;
+    out->is_mut = false;
+    out->empty = empty_kind.empty_immutable;
+    out->init_const = false;
+    out->sym = null;
+}
+
+// An untyped constant: its type is provisional until a context fixes it
+// (D4.1), so the node is marked and the value recorded.
+fn void untyped(checker mut* ck, ast.node mut* n, expr mut* out, consts.cval v) {
+    out->value = v;
+    out->untyped = true;
+    out->init_const = true;
+    prim.prim_kind mut k = prim.prim_kind.prim_i32;
+    if (consts.cv_default_kind(v, &k)) {
+        out->ty = types.type_prim(&ck->types, k);
+    } else {
+        out->ty = types.type_error(&ck->types);
+    }
+    if (v.kind == consts.cval_kind.cv_null) {
+        out->ty = types.type_null(&ck->types);
+    }
+    n->ann |= ANN_UNTYPED;
+    set_value(ck, n, v);
+}
+
+// The member of an enum, or null: members are scoped to their enum and live
+// in no namespace (D3.9).
+fn ast.node* enum_member(ast.sym* e, string name) {
+    ast.node* decl = e->node;
+    u64 mut i = 0;
+    while (decl != null && i < ast.ast_len(decl)) {
+        ast.node* m = ast.ast_child(decl, i);
+        if (m->kind == ast.ast_kind.k_enum_member && m->name == name) {
+            return m;
+        }
+        i += 1;
+    }
+    return null;
+}
+
+// The field of a struct, or null.
+fn ast.node* struct_field(ast.sym* s, string name) {
+    ast.node* decl = s->node;
+    u64 mut i = 0;
+    while (decl != null && i < ast.ast_len(decl)) {
+        ast.node* f = ast.ast_child(decl, i);
+        if (f->kind == ast.ast_kind.k_field_decl && f->name == name) {
+            return f;
+        }
+        i += 1;
+    }
+    return null;
+}
+
+// The value an identifier or a qualified name denotes, once its symbol is
+// known: a constant carries its folded value (D4.6), a variable is an lvalue
+// with its level-0 mutability (D5.7).
+fn void value_of_sym(checker mut* ck, ast.node* n, ast.sym* s, expr mut* out) {
+    resolve_sym(ck, sym_mut(s));
+    out->sym = s;
+    if (s->ty != null) {
+        out->ty = s->ty;
+    } else {
+        out->ty = types.type_error(&ck->types);
+    }
+    switch (s->kind) {
+    case ast.sym_kind.s_const:
+        // A module-level immutable declaration is a constant expression and
+        // an immutable lvalue in read-only memory, which `move` and `del`
+        // may not empty (D4.6, D6.7, D17.6).
+        out->lvalue = true;
+        out->empty = empty_kind.empty_readonly;
+        if (s->node != null && s->node->b != null) {
+            out->value = check_node_value(ck, s->node->b);
+        } else {
+            out->value = consts.cv_none();
+        }
+        out->init_const = true;
+    case ast.sym_kind.s_global, ast.sym_kind.s_local, ast.sym_kind.s_param:
+        // A variable is an lvalue with its level-0 mutability; a read of a
+        // `mut` global is not a constant expression (D4.6, D6.7). Its own
+        // storage is emptiable whether or not the binding is `mut`, since
+        // emptying is not an assignment (D17.6); a constant's is not, being
+        // read-only memory.
+        out->lvalue = true;
+        out->is_mut = s->mut0;
+        out->empty = empty_kind.empty_ok;
+    case ast.sym_kind.s_extern_fn:
+        if (n != ck->callee) {
+            // An `extern fn` in value position is an error: an extern is
+            // called through the variadic LLVM type its declaration supplies,
+            // and an indirect call site has no callee to take that form from,
+            // so the vector-register count would go unset (D3.10, D9.8).
+            check_msg_begin(ck);
+            msg_quote(ck, s->name);
+            msg_str(ck, " is an extern function, which is not a value: wrap it in a fort ");
+            msg_str(ck, "function to take a function pointer");
+            check_msg_end(ck, n->name_loc);
+            out->ty = types.type_error(&ck->types);
+        } else {
+            out->init_const = true;
+        }
+    case ast.sym_kind.s_fn:
+        // A function name used as a value has its function type; `&f` is an
+        // error (D3.10), and a function name is a module-level initializer
+        // (D7.10).
+        out->init_const = true;
+    case ast.sym_kind.s_enum_member:
+        if (s->node != null) {
+            out->value = check_node_value(ck, s->node);
+        } else {
+            out->value = consts.cv_none();
+        }
+        out->init_const = true;
+    default:
+        check_msg_begin(ck);
+        msg_quote(ck, s->name);
+        msg_str(ck, " is a ");
+        msg_str(ck, ast.sym_kind_name(s->kind));
+        msg_str(ck, ", not a value");
+        check_msg_end(ck, n->name_loc);
+        out->ty = types.type_error(&ck->types);
+    }
+}
+
+fn void check_ident(checker mut* ck, ast.node mut* n, expr mut* out) {
+    scope.binding* b = lookup(ck, n->name);
+    if (b == null) {
+        ast.sym* builtin = check_builtin(ck, n->name);
+        if (builtin != null) {
+            // A universe function is callable and nothing else (D12.2).
+            n->sym = builtin;
+            check_msg_begin(ck);
+            msg_quote(ck, n->name);
+            msg_str(ck, " cannot be used as a value");
+            check_msg_end(ck, n->name_loc);
+            return;
+        }
+        error_unknown_name(ck, n->name, n->name_loc);
+        return;
+    }
+    ast.sym* s = sym_of_binding(b);
+    n->sym = s;
+    if (s == null) {
+        return;
+    }
+    value_of_sym(ck, n, s, out);
+}
+
+// The module a binding denotes, or null: only the module reading of an
+// import binds one (D9.3).
+fn modules.module* module_of(scope.binding* b) {
+    if (b != null && b->kind == scope.bind_kind.b_module) {
+        return cast(b->module, modules.module*);
+    }
+    return null;
+}
+
+// What an expression names when it is not a value: a module or a type, which
+// only a `.` may follow (D9.4, D3.9). Null for every ordinary expression. The
+// binding is returned rather than the symbol because a module is reached
+// through it.
+fn scope.binding* names_module_or_type(checker mut* ck, ast.node mut* n) {
+    scope.binding* mut b = null;
+    if (n->kind == ast.ast_kind.k_ident) {
+        b = lookup(ck, n->name);
+    } else if (n->kind == ast.ast_kind.k_field && n->a != null) {
+        // Qualified access sees the declarations of a module, not its
+        // imports, which are not re-exported (D9.3, module-system.md 4):
+        // `m.other.f()` is an error even when `m` imports `other`. The caller
+        // then checks the operand as an expression, which reports that `m`
+        // has no declaration of that name.
+        b = module_declaration(module_of(names_module_or_type(ck, n->a)), n->name);
+    }
+    ast.sym* s = sym_of_binding(b);
+    if (s == null
+        || (s->kind != ast.sym_kind.s_module && s->kind != ast.sym_kind.s_struct
+            && s->kind != ast.sym_kind.s_enum)) {
+        return null;
+    }
+    n->sym = s;
+    return b;
+}
+
+// `.len` and `.ptr`, the read-only pseudo-fields of arrays, spans and strings
+// (D3.4, D3.5, D3.7).
+fn bool pseudo_field(checker mut* ck, ast.node mut* n, types.node* t, expr mut* out) {
+    bool len = n->name == "len";
+    bool ptr = n->name == "ptr";
+    if (!len && !ptr) {
+        return false;
+    }
+    if (t->kind == types.type_kind.k_array && len) {
+        // `.len` of a fixed array is an untyped integer constant and its
+        // operand is not evaluated (D3.4, D4.6).
+        untyped(ck, n, out, consts.cv_from_u64(t->len));
+        return true;
+    }
+    if (t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string) {
+        if (len) {
+            out->ty = types.type_prim(&ck->types, prim.prim_kind.prim_u64);
+            return true;
+        }
+        // `.ptr` carries the element level's mutability and is never `own`
+        // (D3.5, D3.7, D17.3).
+        types.node* mut elem = t->elem;
+        if (t->kind == types.type_kind.k_string) {
+            elem = types.type_prim(&ck->types, prim.prim_kind.prim_char);
+        }
+        out->ty = types.type_ptr(&ck->types, elem, false,
+                                 t->kind == types.type_kind.k_span && t->is_mut);
+        return true;
+    }
+    if (t->kind == types.type_kind.k_array && ptr) {
+        // Fixed arrays have no `.ptr` (D3.4).
+        check_error(ck, n->name_loc, "a fixed array has no '.ptr'");
+        return true;
+    }
+    return false;
+}
+
+// `e.f`, `p->f` and the qualified forms of D9.4.
+fn void check_field(checker mut* ck, ast.node mut* n, expr mut* out, bool arrow) {
+    if (!arrow) {
+        scope.binding* qb = names_module_or_type(ck, n->a);
+        ast.sym* q = sym_of_binding(qb);
+        modules.module* qm = module_of(qb);
+        if (qm != null) {
+            scope.binding* b = module_declaration(qm, n->name);
+            if (b == null) {
+                check_msg_begin(ck);
+                msg_str(ck, "module ");
+                msg_quote(ck, qm->path);
+                msg_str(ck, " has no declaration named ");
+                msg_quote(ck, n->name);
+                check_msg_end(ck, n->name_loc);
+                return;
+            }
+            ast.sym* s = sym_of_binding(b);
+            n->sym = s;
+            if (s != null) {
+                value_of_sym(ck, n, s, out);
+            }
+            return;
+        }
+        if (q != null && q->kind == ast.sym_kind.s_enum) {
+            // `color.red` is the only spelling of a member (D3.9).
+            resolve_sym(ck, sym_mut(q));
+            ast.node* m = enum_member(q, n->name);
+            if (m == null) {
+                check_msg_begin(ck);
+                msg_str(ck, "enum ");
+                msg_str(ck, q->name);
+                msg_str(ck, " has no member ");
+                msg_quote(ck, n->name);
+                check_msg_end(ck, n->name_loc);
+                return;
+            }
+            n->sym = m->sym;
+            out->sym = m->sym;
+            out->ty = q->ty;
+            out->value = check_node_value(ck, m);
+            out->init_const = true;
+            return;
+        }
+        if (q != null) {
+            check_msg_begin(ck);
+            msg_quote(ck, q->name);
+            msg_str(ck, " is a type, not a value");
+            check_msg_end(ck, n->a->loc);
+            return;
+        }
+    }
+    expr mut op = expr{};
+    check_expr(ck, n->a, &op);
+    if (check_poisoned(op.ty)) {
+        return;
+    }
+    // A field of an owning aggregate rvalue, and `.len` or `.ptr` of an
+    // owning span rvalue, would leave the allocation with no owner (D17.8).
+    if (check_owning_temporary(ck, n->loc, &op, "a field of it leaves no owner")) {
+        return;
+    }
+    types.node* mut t = op.ty;
+    bool mut is_mut = op.is_mut;
+    bool mut lvalue = op.lvalue;
+    // A field of a local counts as the local, and one reached through `->`
+    // needs level 1 of the pointer mutable (D17.6).
+    empty_kind mut empty = op.empty;
+    if (arrow) {
+        // `p->f` is `(*p).f` and is required for pointers (D6.10).
+        if (t->kind != types.type_kind.k_ptr) {
+            check_msg_begin(ck);
+            msg_str(ck, "'->' needs a pointer, not ");
+            check_msg_type(ck, t);
+            msg_str(ck, ": use '.'");
+            check_msg_end(ck, n->loc);
+            return;
+        }
+        is_mut = types.type_level_mut(t, 1);
+        // The read-only memory of a constant stops at the first indirection.
+        if (is_mut) {
+            empty = empty_kind.empty_ok;
+        } else {
+            empty = empty_kind.empty_immutable;
+        }
+        lvalue = true;
+        t = t->elem;
+    } else if (t->kind == types.type_kind.k_ptr || t->kind == types.type_kind.k_voidptr) {
+        check_msg_begin(ck);
+        msg_str(ck, "'.' on a pointer of type ");
+        check_msg_type(ck, t);
+        msg_str(ck, ": use '->'");
+        check_msg_end(ck, n->loc);
+        return;
+    }
+    if (pseudo_field(ck, n, t, out)) {
+        // `.len` and `.ptr` are never lvalues (D6.7).
+        return;
+    }
+    if (t->kind != types.type_kind.k_struct) {
+        check_msg_begin(ck);
+        check_msg_type(ck, t);
+        msg_str(ck, " has no field ");
+        msg_quote(ck, n->name);
+        check_msg_end(ck, n->name_loc);
+        return;
+    }
+    ast.sym* s = nominal_sym(t);
+    ast.node* mut f = null;
+    if (s != null) {
+        f = struct_field(s, n->name);
+    }
+    if (f == null) {
+        check_msg_begin(ck);
+        msg_str(ck, "struct ");
+        msg_str(ck, t->name);
+        msg_str(ck, " has no field ");
+        msg_quote(ck, n->name);
+        check_msg_end(ck, n->name_loc);
+        return;
+    }
+    n->sym = f->sym;
+    out->sym = f->sym;
+    if (f->sym != null) {
+        out->ty = f->sym->ty;
+    } else {
+        out->ty = types.type_error(&ck->types);
+    }
+    // A field's own storage is as mutable as the value that contains it
+    // (D5.5, D5.7).
+    out->lvalue = lvalue;
+    out->is_mut = is_mut;
+    out->empty = empty;
+}
+
+// ---- unary, indexing and span expressions ------------------------------------------
+
+fn void check_unary(checker mut* ck, ast.node mut* n, expr mut* out) {
+    expr mut a = expr{};
+    if (op_of(n->op) == lexer.tok_kind.amp) {
+        // `&e` requires an lvalue and yields a borrowed pointer whose level 1
+        // is the mutability of `e` (D5.8, D17.3). Its operand is asked for an
+        // address and not for a value, which is what lets a module-level
+        // declaration hold its own address (D7.10); the flag is saved and
+        // restored, since a `&` may stand anywhere.
+        bool outer_addr_only = ck->addr_only;
+        ck->addr_only = true;
+        check_expr(ck, n->a, &a);
+        ck->addr_only = outer_addr_only;
+        if (check_poisoned(a.ty)) {
+            return;
+        }
+        if (a.sym != null
+            && (a.sym->kind == ast.sym_kind.s_fn || a.sym->kind == ast.sym_kind.s_extern_fn)) {
+            check_error(ck, n->loc, "'&' on a function: a function name is already a value");
+            return;
+        }
+        if (!a.lvalue) {
+            check_error(ck, n->loc, "'&' requires an lvalue");
+            return;
+        }
+        out->ty = types.type_ptr(&ck->types, a.ty, false, a.is_mut);
+        // `&` of a module-level declaration is a module-level initializer
+        // (D7.10).
+        out->init_const = a.sym != null
+            && (a.sym->kind == ast.sym_kind.s_const || a.sym->kind == ast.sym_kind.s_global);
+        return;
+    }
+    if (op_of(n->op) == lexer.tok_kind.star) {
+        check_expr(ck, n->a, &a);
+        if (check_poisoned(a.ty)) {
+            return;
+        }
+        if (a.ty->kind != types.type_kind.k_ptr) {
+            // `void*` has no pointee level and a function pointer is called,
+            // not dereferenced (D3.11, D3.10).
+            check_msg_begin(ck);
+            msg_str(ck, "cannot dereference ");
+            check_msg_type(ck, a.ty);
+            check_msg_end(ck, n->loc);
+            return;
+        }
+        if (check_owning_temporary(ck, n->loc, &a, "dereferencing it leaves no owner")) {
+            return;
+        }
+        out->ty = a.ty->elem;
+        out->lvalue = true;
+        out->is_mut = types.type_level_mut(a.ty, 1);
+        // What `*p` designates is emptiable when level 1 of `p` is mutable
+        // (D17.6); a constant's read-only memory stops at the indirection.
+        if (out->is_mut) {
+            out->empty = empty_kind.empty_ok;
+        } else {
+            out->empty = empty_kind.empty_immutable;
+        }
+        return;
+    }
+    check_expr(ck, n->a, &a);
+    if (op_of(n->op) == lexer.tok_kind.bang) {
+        convert(ck, n->a, &a, types.type_prim(&ck->types, prim.prim_kind.prim_bool), "'!'");
+        if (check_poisoned(a.ty)) {
+            return;
+        }
+        out->ty = a.ty;
+        if (a.value.kind == consts.cval_kind.cv_bool) {
+            out->value = consts.cv_lnot(a.value);
+            out->init_const = true;
+        }
+        return;
+    }
+    if (a.untyped) {
+        // `-c` and `~c` fold exactly on an untyped constant, `~c` being
+        // `-c - 1` (D4.4).
+        if (consts.cv_is_int_like(a.value)) {
+            consts.cval mut v = consts.cv_none();
+            consts.cval x = consts.cv_as_int(a.value);
+            bool mut ok = false;
+            if (op_of(n->op) == lexer.tok_kind.minus) {
+                ok = consts.cv_neg(x, &v);
+            } else {
+                ok = consts.cv_not(x, &v);
+            }
+            if (!ok) {
+                check_error(ck, n->loc, "constant expression out of range");
+                return;
+            }
+            untyped(ck, n, out, v);
+            return;
+        }
+        value_of(ck, n->a, &a);
+    }
+    if (check_poisoned(a.ty)) {
+        return;
+    }
+    if (!type_is_integer_prim(a.ty)
+        && !(op_of(n->op) == lexer.tok_kind.minus && types.type_is_float(a.ty))) {
+        error_operand(ck, n->loc, n->op, "an integer operand", a.ty);
+        return;
+    }
+    if (op_of(n->op) == lexer.tok_kind.minus && !prim.prim_is_signed(a.ty->prim)
+        && !types.type_is_float(a.ty)) {
+        // Unary `-` takes signed integers and floats only (D6.2).
+        error_operand(ck, n->loc, n->op, "a signed operand", a.ty);
+        return;
+    }
+    out->ty = a.ty;
+    if (consts.cv_is_int(a.value)) {
+        consts.cval mut v = consts.cv_none();
+        bool mut ok = false;
+        if (op_of(n->op) == lexer.tok_kind.minus) {
+            ok = consts.cv_typed_neg(a.value, a.ty->prim, &v);
+        } else {
+            ok = consts.cv_typed_not(a.value, a.ty->prim, &v);
+        }
+        if (!ok) {
+            check_msg_begin(ck);
+            msg_str(ck, "constant expression overflows ");
+            msg_str(ck, prim.prim_name(a.ty->prim));
+            check_msg_end(ck, n->loc);
+            out->ty = types.type_error(&ck->types);
+            return;
+        }
+        out->value = v;
+        out->init_const = true;
+    }
+}
+
+// An index, a span bound or a `new` count: any integer type is fine there and
+// a negative constant is a compile error (D4.1, D6.8, D6.9, D10.2).
+fn bool check_count(checker mut* ck, ast.node mut* n, string what, consts.cval mut* value) {
+    expr mut e = expr{};
+    check_expr(ck, n, &e);
+    *value = e.value;
+    if (consts.cv_is_int(e.value) && consts.cv_is_neg(e.value)) {
+        check_msg_begin(ck);
+        msg_str(ck, "a negative ");
+        msg_str(ck, what);
+        msg_str(ck, ": ");
+        msg_value(ck, e.value);
+        check_msg_end(ck, n->loc);
+        return false;
+    }
+    value_of(ck, n, &e);
+    if (check_poisoned(e.ty)) {
+        return false;
+    }
+    if (!type_is_integer_prim(e.ty)) {
+        check_msg_begin(ck);
+        msg_str(ck, "a ");
+        msg_str(ck, what);
+        msg_str(ck, " must be an integer, not ");
+        check_msg_type(ck, e.ty);
+        check_msg_end(ck, n->loc);
+        return false;
+    }
+    return true;
+}
+
+// The element type of an operand that may be indexed or spanned (D6.8).
+fn types.node* element_of(checker mut* ck, types.node* t) {
+    if (t->kind == types.type_kind.k_array || t->kind == types.type_kind.k_span) {
+        return t->elem;
+    }
+    if (t->kind == types.type_kind.k_string) {
+        return types.type_prim(&ck->types, prim.prim_kind.prim_char);
+    }
+    return null;
+}
+
+fn void check_index(checker mut* ck, ast.node mut* n, expr mut* out) {
+    expr mut a = expr{};
+    check_expr(ck, n->a, &a);
+    consts.cval mut index = consts.cv_none();
+    bool ok = check_count(ck, n->b, "index", &index);
+    if (check_poisoned(a.ty)) {
+        return;
+    }
+    // Indexing an owning rvalue reads through an allocation nothing owns
+    // (D17.8).
+    if (check_owning_temporary(ck, n->loc, &a, "indexing it leaves no owner")) {
+        return;
+    }
+    types.node* elem = element_of(ck, a.ty);
+    if (elem == null) {
+        // Pointers cannot be indexed, not even pointers to arrays (D6.8,
+        // D10.4).
+        check_msg_begin(ck);
+        check_msg_type(ck, a.ty);
+        if (a.ty->kind == types.type_kind.k_ptr) {
+            msg_str(ck, " cannot be indexed: write '(*p)[i]'");
+        } else {
+            msg_str(ck, " cannot be indexed");
+        }
+        check_msg_end(ck, n->loc);
+        return;
+    }
+    if (!ok) {
+        return;
+    }
+    if (a.ty->kind == types.type_kind.k_array && consts.cv_is_int(index)) {
+        u64 mut i = 0;
+        if (!consts.cv_to_u64(index, &i) || i >= a.ty->len) {
+            // A constant index out of range for a fixed array is a compile
+            // error (D6.8).
+            check_msg_begin(ck);
+            msg_str(ck, "index ");
+            msg_value(ck, index);
+            msg_str(ck, " out of range for ");
+            check_msg_type(ck, a.ty);
+            check_msg_end(ck, n->loc);
+            return;
+        }
+    }
+    out->ty = elem;
+    // `e[i]` is an lvalue where `e` is an lvalue fixed array, or any span or
+    // string expression (D6.7): indexing an rvalue array yields a copy.
+    out->lvalue = a.ty->kind != types.type_kind.k_array || a.lvalue;
+    // The mutability of an element: of the array's own storage, of level 1 of
+    // a span, never of a string (D5.7).
+    if (a.ty->kind == types.type_kind.k_array) {
+        out->is_mut = a.is_mut;
+    } else {
+        out->is_mut = a.ty->kind == types.type_kind.k_span && a.ty->is_mut;
+    }
+    // An element of a local array counts as the local, a constant array's
+    // read-only memory included; one behind a span is emptiable only where
+    // level 1 of the span is mutable (D17.6).
+    if (a.ty->kind == types.type_kind.k_array) {
+        out->empty = a.empty;
+    } else if (out->is_mut) {
+        out->empty = empty_kind.empty_ok;
+    } else {
+        out->empty = empty_kind.empty_immutable;
+    }
+}
+
+fn void check_span_expr(checker mut* ck, ast.node mut* n, expr mut* out) {
+    expr mut a = expr{};
+    check_expr(ck, n->a, &a);
+    bool mut ok = true;
+    consts.cval mut bound = consts.cv_none();
+    if (n->b != null && !check_count(ck, n->b, "span bound", &bound)) {
+        ok = false;
+    }
+    if (n->c != null && !check_count(ck, n->c, "span bound", &bound)) {
+        ok = false;
+    }
+    if (check_poisoned(a.ty) || !ok) {
+        return;
+    }
+    // A span of an owning rvalue is a view of an allocation nothing owns
+    // (D17.8).
+    if (check_owning_temporary(ck, n->loc, &a, "a span of it leaves no owner")) {
+        return;
+    }
+    if (a.ty->kind == types.type_kind.k_ptr) {
+        // `p[lo..hi]` is the unchecked escape for foreign memory and has only
+        // the two-bound form, a pointer having no length (D6.9, D10.4).
+        if (n->b == null || n->c == null) {
+            check_error(ck, n->loc, "a pointer has no length: write 'p[lo..hi]'");
+            return;
+        }
+        out->ty = types.type_span(&ck->types, a.ty->elem, false, a.ty->is_mut);
+        return;
+    }
+    if (a.ty->kind == types.type_kind.k_string) {
+        // A span of a string is a string (D3.7).
+        out->ty = types.type_string(&ck->types, false);
+        return;
+    }
+    types.node* elem = element_of(ck, a.ty);
+    if (elem == null) {
+        check_msg_begin(ck);
+        msg_str(ck, "cannot take a span of ");
+        check_msg_type(ck, a.ty);
+        check_msg_end(ck, n->loc);
+        return;
+    }
+    if (a.ty->kind == types.type_kind.k_array && !a.lvalue) {
+        // A span of a fixed array needs an lvalue (D6.9).
+        check_error(ck, n->loc, "a span of a fixed array needs an lvalue");
+        return;
+    }
+    // The result is a view whose element mutability is that of the operand's
+    // elements, and never `own` (D6.9, D17.3).
+    bool mut is_mut = a.ty->is_mut;
+    if (a.ty->kind == types.type_kind.k_array) {
+        is_mut = a.is_mut;
+    }
+    out->ty = types.type_span(&ck->types, elem, false, is_mut);
+}
+
+// ---- cast, sizeof and new ----------------------------------------------------------
+
+fn void check_cast(checker mut* ck, ast.node mut* n, expr mut* out) {
+    expr mut a = expr{};
+    check_expr(ck, n->a, &a);
+    if (a.value.kind == consts.cval_kind.cv_null) {
+        // `null` is not a valid operand, having no type of its own (D3.14,
+        // D10.5).
+        check_error(ck, n->a->loc, "'null' is not a cast operand");
+        check_type(ck, n->b, type_pos.pos_cast);
+        return;
+    }
+    // A `cast` is not a context: an untyped operand takes its default type
+    // first and is then converted with run-time semantics (D4.1, D3.14).
+    value_of(ck, n->a, &a);
+    written_type target = check_type(ck, n->b, type_pos.pos_cast);
+    if (check_poisoned(a.ty) || check_poisoned(target.ty)) {
+        return;
+    }
+    if (!check_layout(ck, target.ty) || !check_size_fits(ck, n->loc, target.ty)) {
+        return;
+    }
+    if (!types.type_cast_allowed(target.ty, a.ty)) {
+        check_msg_begin(ck);
+        msg_str(ck, "cannot cast ");
+        check_msg_type(ck, a.ty);
+        msg_str(ck, " to ");
+        check_msg_type(ck, target.ty);
+        check_msg_end(ck, n->loc);
+        return;
+    }
+    // A cast is `own` exactly when its target says so (D3.14): an owning
+    // lvalue reaches an owning target only through `move` (D17.5, D17.12) and
+    // an owning rvalue cast to a target that does not own would leak (D17.8).
+    if (check_owning(target.ty)) {
+        if (a.lvalue && check_owning(a.ty)) {
+            check_msg_begin(ck);
+            msg_str(ck, "casting an owning value to an owning type requires 'move'");
+            if (a.sym != null && n->a->kind == ast.ast_kind.k_ident) {
+                // As above: a hint that spells an expression is offered only
+                // for a name.
+                msg_str(ck, ": write move(");
+                msg_str(ck, a.sym->name);
+                msg_str(ck, ")");
+            }
+            check_msg_end(ck, n->loc);
+            return;
+        }
+    } else if (check_owning_temporary(ck, n->loc, &a, "the cast target does not own it")) {
+        return;
+    }
+    out->ty = target.ty;
+    // `cast` among numeric types, char and enums folds (D4.6); the value is
+    // the one the run time would produce (D3.14).
+    bool numeric = target.ty->kind == types.type_kind.k_prim
+        || target.ty->kind == types.type_kind.k_enum;
+    if (numeric && consts.cv_is_int_like(a.value)
+        && (a.ty->kind == types.type_kind.k_prim || a.ty->kind == types.type_kind.k_enum)) {
+        prim.prim_kind mut k = target.ty->prim;
+        if (target.ty->kind == types.type_kind.k_enum) {
+            k = enum_underlying();
+        }
+        consts.cval mut v = consts.cv_none();
+        if (consts.cv_cast(a.value, k, &v)) {
+            out->value = v;
+            out->init_const = true;
+        }
+    }
+}
+
+fn void check_sizeof(checker mut* ck, ast.node mut* n, expr mut* out) {
+    written_type t = check_type(ck, n->a, type_pos.pos_binding);
+    if (check_poisoned(t.ty)) {
+        return;
+    }
+    if (t.ty->kind == types.type_kind.k_void) {
+        // `sizeof(void)` is an error (D3.15).
+        check_error(ck, n->loc, "'sizeof' needs a sized type, not void");
+        return;
+    }
+    if (!check_layout(ck, t.ty) || !check_size_fits(ck, n->loc, t.ty)) {
+        return;
+    }
+    // `sizeof(Type)` yields an untyped integer constant (D3.15, D4.6).
+    untyped(ck, n, out, consts.cv_from_u64(types.type_sizeof(t.ty)));
+}
+
+fn void check_new(checker mut* ck, ast.node mut* n, expr mut* out) {
+    written_type t = check_type(ck, n->a, type_pos.pos_alloc);
+    consts.cval mut count = consts.cv_none();
+    bool counted = n->b != null;
+    bool ok = !counted || check_count(ck, n->b, "count", &count);
+    if (check_poisoned(t.ty) || !ok) {
+        return;
+    }
+    if (t.ty->kind == types.type_kind.k_void) {
+        // `new(void)` is an error because `void` has no size; `new(void*)`,
+        // one pointer slot, is not (D10.2, D17.3).
+        check_error(ck, n->loc, "'new' needs a sized type, not void");
+        return;
+    }
+    if (!check_layout(ck, t.ty) || !check_size_fits(ck, n->loc, t.ty)) {
+        return;
+    }
+    // `new(T)` is `T mut* own` and `new(T, n)` is `T mut@ own` (D10.2,
+    // D17.3).
+    if (counted) {
+        out->ty = types.type_span(&ck->types, t.ty, true, t.mut0);
+    } else {
+        out->ty = types.type_ptr(&ck->types, t.ty, true, t.mut0);
+    }
+}
+
+// ---- calls (D6.11, D12.2) ----------------------------------------------------------
+
+fn bool is_builtin(ast.sym* s, string name) {
+    return s != null && s->kind == ast.sym_kind.s_builtin && s->name == name;
+}
+
+// The printable types of D12.2 and 8.3: structs, arrays and spans are not
+// printable.
+fn bool type_is_printable(types.node* t) {
+    switch (t->kind) {
+    case types.type_kind.k_prim, types.type_kind.k_enum, types.type_kind.k_ptr,
+         types.type_kind.k_voidptr, types.type_kind.k_fn, types.type_kind.k_string:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// "'assert' takes 1 argument, 2 given" and "'add' takes 2 arguments, 1 given".
+fn bool check_arity(checker mut* ck, ast.node* n, string name, u64 want) {
+    u64 got = ast.ast_len(n);
+    if (got == want) {
+        return true;
+    }
+    check_msg_begin(ck);
+    msg_quote(ck, name);
+    msg_str(ck, " takes ");
+    msg_uint(ck, want);
+    if (want == 1) {
+        msg_str(ck, " argument, ");
+    } else {
+        msg_str(ck, " arguments, ");
+    }
+    msg_uint(ck, got);
+    msg_str(ck, " given");
+    check_msg_end(ck, n->loc);
+    return false;
+}
+
+// The print family (D12.2, 8.3): zero or more printable arguments, each
+// taking its default type, after the descriptor of the `fprint` forms.
+fn void check_print(checker mut* ck, ast.node mut* n, u64 first) {
+    u64 mut i = first;
+    while (i < ast.ast_len(n)) {
+        ast.node mut* arg = ast_child_mut(n, i);
+        expr mut e = expr{};
+        check_expr_default(ck, arg, &e);
+        if (!check_poisoned(e.ty) && !type_is_printable(e.ty)) {
+            check_msg_begin(ck);
+            msg_str(ck, "cannot print a value of type ");
+            check_msg_type(ck, e.ty);
+            check_msg_end(ck, arg->loc);
+        }
+        i += 1;
+    }
+}
+
+// Whether the lvalue `e` may be emptied by `move` or `del` (D17.6, D17.9):
+// a module-level constant lives in read-only memory, and an operand reached
+// through an indirection needs that level mutable, because the store is
+// visible to everyone else who holds the pointer or span. `verb` is the
+// builtin's name, which the diagnostic quotes.
+fn bool check_emptiable(checker mut* ck, ast.node* arg, expr* e, string verb) {
+    if (e->empty == empty_kind.empty_ok) {
+        return true;
+    }
+    check_msg_begin(ck);
+    msg_quote(ck, verb);
+    // The reason is the lvalue's own, not its outermost symbol's: `C.data` of
+    // a module-level constant is read-only memory although `data` is a field.
+    if (e->empty == empty_kind.empty_readonly) {
+        msg_str(ck, " cannot empty a module-level constant: it lives in read-only memory");
+    } else {
+        msg_str(ck, " cannot empty an immutable indirection: nothing may be taken out of what ");
+        msg_str(ck, "was only lent");
+    }
+    check_msg_end(ck, arg->loc);
+    return false;
+}
+
+fn void check_builtin_call(checker mut* ck, ast.node mut* n, ast.sym* s, expr mut* out) {
+    out->sym = s;
+    // Every universe function but `move` yields no value (D12.2).
+    out->ty = types.type_void(&ck->types);
+    if (is_builtin(s, "print") || is_builtin(s, "println") || is_builtin(s, "eprint")
+        || is_builtin(s, "eprintln")) {
+        check_print(ck, n, 0);
+        return;
+    }
+    if (is_builtin(s, "fprint") || is_builtin(s, "fprintln")) {
+        if (ast.ast_len(n) == 0) {
+            check_msg_begin(ck);
+            msg_quote(ck, s->name);
+            msg_str(ck, " takes a descriptor and then its arguments");
+            check_msg_end(ck, n->loc);
+            return;
+        }
+        expr mut fd = expr{};
+        // `fprint(fd, ...)` writes to the i32 descriptor `fd` (D12.2).
+        check_expr_as(ck, ast_child_mut(n, 0), types.type_prim(&ck->types,
+                      prim.prim_kind.prim_i32), "a descriptor", &fd);
+        check_print(ck, n, 1);
+        return;
+    }
+    if (is_builtin(s, "assert")) {
+        if (check_arity(ck, n, s->name, 1)) {
+            // `assert(cond)` takes a bool and is active in both build modes
+            // (D12.2).
+            check_condition(ck, ast_child_mut(n, 0), "'assert'");
+        }
+        return;
+    }
+    if (is_builtin(s, "panic")) {
+        if (check_arity(ck, n, s->name, 1)) {
+            expr mut m = expr{};
+            check_expr_as(ck, ast_child_mut(n, 0), types.type_string(&ck->types, false),
+                          "'panic'", &m);
+        }
+        // `panic` is noreturn, so a `panic(...)` statement terminates (D8.4).
+        n->ann |= ANN_NORETURN;
+        return;
+    }
+    if (is_builtin(s, "del")) {
+        if (!check_arity(ck, n, s->name, 1)) {
+            return;
+        }
+        ast.node mut* arg = ast_child_mut(n, 0);
+        expr mut e = expr{};
+        check_expr(ck, arg, &e);
+        if (e.untyped && e.value.kind == consts.cval_kind.cv_null) {
+            // `del(null)`: the literal adopts `void* own` and the call is a
+            // no-op (D12.2).
+            convert(ck, arg, &e, types.type_voidptr(&ck->types, true), "'del'");
+            return;
+        }
+        if (check_poisoned(e.ty)) {
+            return;
+        }
+        if (!types.type_is_reference(e.ty) || !e.ty->is_own) {
+            // `del` frees an operand of an `own` type; a view, a stack
+            // address or an aggregate is a compile error (D12.2, D17.9).
+            check_msg_begin(ck);
+            msg_quote(ck, s->name);
+            if (types.type_is_reference(e.ty)) {
+                msg_str(ck, " needs an owning operand, not ");
+            } else {
+                msg_str(ck, " takes a reference, not ");
+            }
+            check_msg_type(ck, e.ty);
+            check_msg_end(ck, arg->loc);
+            return;
+        }
+        if (e.lvalue) {
+            // On an lvalue `del` empties the operand under the rules of
+            // D17.6; on an rvalue it only frees (D17.9).
+            check_emptiable(ck, arg, &e, s->name);
+        }
+        return;
+    }
+    if (is_builtin(s, "move")) {
+        if (!check_arity(ck, n, s->name, 1)) {
+            return;
+        }
+        ast.node mut* arg = ast_child_mut(n, 0);
+        expr mut e = expr{};
+        check_expr(ck, arg, &e);
+        if (check_poisoned(e.ty)) {
+            return;
+        }
+        // Every failure below poisons the result: a `void` one would add
+        // "'move' has no value" to the real diagnostic (D12.2, D14.2).
+        out->ty = types.type_error(&ck->types);
+        if (!e.lvalue) {
+            check_error(ck, arg->loc, "'move' takes an lvalue");
+            return;
+        }
+        if (!check_owning(e.ty)) {
+            // `move` takes an owning lvalue and leaves the zero value behind
+            // (D12.2, D17.6).
+            check_msg_begin(ck);
+            msg_str(ck, "'move' needs an owning operand, not ");
+            check_msg_type(ck, e.ty);
+            check_msg_end(ck, arg->loc);
+            return;
+        }
+        if (!check_emptiable(ck, arg, &e, s->name)) {
+            return;
+        }
+        // The one universe function with a value, an `own` rvalue (D17.6).
+        out->ty = e.ty;
+        return;
+    }
+    panic("check.check_builtin_call: unknown builtin");
+}
+
+fn void check_call(checker mut* ck, ast.node mut* n, expr mut* out) {
+    ast.node mut* callee = n->a;
+    if (callee->kind == ast.ast_kind.k_ident && lookup(ck, callee->name) == null) {
+        ast.sym* b = check_builtin(ck, callee->name);
+        if (b != null) {
+            // A universe function is reached only after every scope, so a
+            // declaration of the same name shadows it (D7.9, D12.2).
+            callee->sym = b;
+            callee->ty = types.type_void(&ck->types);
+            check_builtin_call(ck, n, b, out);
+            return;
+        }
+    }
+    expr mut f = expr{};
+    // The callee is the one position an `extern fn` name may stand in (D3.10).
+    ast.node* outer_callee = ck->callee;
+    ck->callee = callee;
+    check_expr(ck, callee, &f);
+    ck->callee = outer_callee;
+    out->sym = f.sym;
+    if (!check_poisoned(f.ty) && f.ty->kind != types.type_kind.k_fn) {
+        check_msg_begin(ck);
+        msg_str(ck, "cannot call a value of type ");
+        check_msg_type(ck, f.ty);
+        check_msg_end(ck, n->loc);
+        f.ty = types.type_error(&ck->types);
+    }
+    bool known = !check_poisoned(f.ty);
+    if (known) {
+        string mut name = "the callee";
+        if (f.sym != null) {
+            name = f.sym->name;
+        }
+        if (!check_arity(ck, n, name, f.ty->params.len)) {
+            return;
+        }
+    }
+    u64 mut i = 0;
+    while (i < ast.ast_len(n)) {
+        expr mut arg = expr{};
+        if (known && i < f.ty->params.len) {
+            // Arguments are matched by position and must convert to the
+            // parameter types (D6.11).
+            check_expr_as(ck, ast_child_mut(n, i), f.ty->params[i], "the argument", &arg);
+        } else {
+            check_expr_default(ck, ast_child_mut(n, i), &arg);
+        }
+        i += 1;
+    }
+    if (!known) {
+        return;
+    }
+    out->ty = f.ty->elem;
+    if (f.ty->is_noreturn) {
+        // A call to a `noreturn` function is a terminating statement (D8.4).
+        n->ann |= ANN_NORETURN;
+    }
+}
+
+// ---- struct and array literals (D6.5) ----------------------------------------------
+
+// The designated form: any order, omitted fields zeroed, no duplicates, and
+// designators only on structs (D6.5).
+fn void check_designated(checker mut* ck, ast.node mut* n, types.node* t, expr mut* out) {
+    ast.sym* s = nominal_sym(t);
+    u64 mut i = 0;
+    while (i < ast.ast_len(n)) {
+        ast.node mut* d = ast_child_mut(n, i);
+        if (d->kind != ast.ast_kind.k_designator) {
+            i += 1;
+            continue;
+        }
+        ast.node* mut f = null;
+        if (s != null) {
+            f = struct_field(s, d->name);
+        }
+        if (f == null) {
+            check_msg_begin(ck);
+            msg_str(ck, "struct ");
+            msg_str(ck, t->name);
+            msg_str(ck, " has no field ");
+            msg_quote(ck, d->name);
+            check_msg_end(ck, d->name_loc);
+            out->ty = types.type_error(&ck->types);
+            i += 1;
+            continue;
+        }
+        u64 mut k = 0;
+        while (k < i) {
+            if (ast.ast_child(n, k)->name == d->name) {
+                check_msg_begin(ck);
+                msg_str(ck, "duplicate field ");
+                msg_quote(ck, d->name);
+                check_msg_end(ck, d->name_loc);
+                out->ty = types.type_error(&ck->types);
+            }
+            k += 1;
+        }
+        d->sym = f->sym;
+        if (f->sym != null) {
+            d->ty = f->sym->ty;
+        } else {
+            d->ty = types.type_error(&ck->types);
+        }
+        expr mut v = expr{};
+        check_initializer(ck, d->a, d->ty, "the field", &v);
+        out->init_const = out->init_const && v.init_const;
+        i += 1;
+    }
+}
+
+// A bare `{ ... }` against the type it initializes (D6.5).
+fn void check_brace(checker mut* ck, ast.node mut* n, types.node* t, expr mut* out) {
+    n->ty = t;
+    out->ty = t;
+    out->init_const = true;
+    if (check_poisoned(t)) {
+        out->ty = types.type_error(&ck->types);
+        return;
+    }
+    u64 count = ast.ast_len(n);
+    if ((n->flags & ast.FLAG_DESIGNATED) != 0) {
+        if (t->kind != types.type_kind.k_struct) {
+            check_msg_begin(ck);
+            msg_str(ck, "designated initializers need a struct, not ");
+            check_msg_type(ck, t);
+            check_msg_end(ck, n->loc);
+            out->ty = types.type_error(&ck->types);
+            return;
+        }
+        check_designated(ck, n, t, out);
+        return;
+    }
+    if (count == 0) {
+        // `= {}` zero-initializes any aggregate, span, string or enum (D6.5).
+        if (t->kind == types.type_kind.k_struct || t->kind == types.type_kind.k_array
+            || t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string
+            || t->kind == types.type_kind.k_enum) {
+            return;
+        }
+        check_msg_begin(ck);
+        msg_str(ck, "'{}' initializes an aggregate, span, string or enum, not ");
+        check_msg_type(ck, t);
+        check_msg_end(ck, n->loc);
+        out->ty = types.type_error(&ck->types);
+        return;
+    }
+    if (t->kind == types.type_kind.k_struct) {
+        ast.sym* s = nominal_sym(t);
+        u64 mut fields = 0;
+        u64 mut i = 0;
+        while (s != null && s->node != null && i < ast.ast_len(s->node)) {
+            if (ast.ast_child(s->node, i)->kind == ast.ast_kind.k_field_decl) {
+                fields += 1;
+            }
+            i += 1;
+        }
+        if (count != fields) {
+            // A positional literal has every field, in order (D6.5).
+            check_msg_begin(ck);
+            msg_str(ck, "a positional literal of struct ");
+            msg_str(ck, t->name);
+            msg_str(ck, " needs its ");
+            msg_uint(ck, fields);
+            if (fields == 1) {
+                msg_str(ck, " field, ");
+            } else {
+                msg_str(ck, " fields, ");
+            }
+            msg_uint(ck, count);
+            msg_str(ck, " given");
+            check_msg_end(ck, n->loc);
+            out->ty = types.type_error(&ck->types);
+            return;
+        }
+        u64 mut at = 0;
+        u64 mut k = 0;
+        while (k < ast.ast_len(s->node)) {
+            ast.node* f = ast.ast_child(s->node, k);
+            if (f->kind == ast.ast_kind.k_field_decl) {
+                expr mut v = expr{};
+                types.node* mut ft = types.type_error(&ck->types);
+                if (f->sym != null) {
+                    ft = f->sym->ty;
+                }
+                check_initializer(ck, ast_child_mut(n, at), ft, "the field", &v);
+                out->init_const = out->init_const && v.init_const;
+                at += 1;
+            }
+            k += 1;
+        }
+        return;
+    }
+    if (t->kind == types.type_kind.k_array) {
+        if (count != t->len) {
+            // A typed array literal has exactly N elements or is `{}` (D6.5).
+            check_msg_begin(ck);
+            msg_str(ck, "an array literal for ");
+            check_msg_type(ck, t);
+            msg_str(ck, " needs ");
+            msg_uint(ck, t->len);
+            if (t->len == 1) {
+                msg_str(ck, " element, ");
+            } else {
+                msg_str(ck, " elements, ");
+            }
+            msg_uint(ck, count);
+            msg_str(ck, " given");
+            check_msg_end(ck, n->loc);
+            out->ty = types.type_error(&ck->types);
+            return;
+        }
+        u64 mut i = 0;
+        while (i < count) {
+            expr mut v = expr{};
+            check_initializer(ck, ast_child_mut(n, i), t->elem, "the element", &v);
+            out->init_const = out->init_const && v.init_const;
+            i += 1;
+        }
+        return;
+    }
+    check_msg_begin(ck);
+    if (t->kind == types.type_kind.k_span) {
+        // A span literal does not exist; the zero span is `{}` (D3.5).
+        msg_str(ck, "a span literal does not exist: write '{}' for the zero span");
+    } else {
+        msg_str(ck, "a brace initializer needs a struct or array type, not ");
+        check_msg_type(ck, t);
+    }
+    check_msg_end(ck, n->loc);
+    out->ty = types.type_error(&ck->types);
+}
+
+// Checks the initializer of a declaration of type `target`, which may be the
+// bare `{ ... }` of D6.5.
+fn void check_initializer(checker mut* ck, ast.node mut* n, types.node* target, string what,
+                          expr mut* out) {
+    expr_clear(ck, out);
+    if (n->kind == ast.ast_kind.k_brace_init) {
+        check_brace(ck, n, target, out);
+        return;
+    }
+    check_expr_as(ck, n, target, what, out);
+}
+
+// `point{1, 2}` and `i32[3]{1, 2, 3}`: a literal is an rvalue whose type its
+// own name gives (D6.5).
+fn void check_literal(checker mut* ck, ast.node mut* n, expr mut* out, bool array) {
+    written_type mut t = written_type{};
+    if (array) {
+        t = check_type(ck, n->a, type_pos.pos_binding);
+    } else {
+        t = type_result(base_type(ck, n->a, false, true), false);
+    }
+    if (check_poisoned(t.ty)) {
+        expr mut ignored = expr{};
+        check_brace(ck, n->b, t.ty, &ignored);
+        return;
+    }
+    bool mut wrong = t.ty->kind != types.type_kind.k_struct;
+    if (array) {
+        wrong = t.ty->kind != types.type_kind.k_array;
+    }
+    if (wrong) {
+        check_msg_begin(ck);
+        check_msg_type(ck, t.ty);
+        if (array) {
+            msg_str(ck, " is not an array type");
+        } else {
+            msg_str(ck, " is not a struct type");
+        }
+        check_msg_end(ck, n->a->loc);
+        return;
+    }
+    if (!check_layout(ck, t.ty) || !check_size_fits(ck, n->loc, t.ty)) {
+        return;
+    }
+    check_brace(ck, n->b, t.ty, out);
+}
+
+// ---- the dispatch ------------------------------------------------------------------
+
+// Checks one expression and annotates its node.
+fn void check_expr(checker mut* ck, ast.node mut* n, expr mut* out) {
+    expr_clear(ck, out);
+    switch (n->kind) {
+    case ast.ast_kind.k_int:
+        // An integer literal is an untyped constant (D4.1); the parser holds
+        // its magnitude (D2.5).
+        untyped(ck, n, out, consts.cv_from_u64(n->ival));
+    case ast.ast_kind.k_char:
+        untyped(ck, n, out, consts.cv_from_char(n->ival));
+    case ast.ast_kind.k_null:
+        // `null` has no type of its own and takes one from context (D10.5).
+        untyped(ck, n, out, consts.cv_null());
+    case ast.ast_kind.k_bool:
+        out->ty = types.type_prim(&ck->types, prim.prim_kind.prim_bool);
+        out->value = consts.cv_from_bool(n->ival != 0);
+        out->init_const = true;
+    case ast.ast_kind.k_string:
+        // A string literal has type `string` and is borrowed (D3.7, D2.9).
+        out->ty = types.type_string(&ck->types, false);
+        out->value = consts.cv_from_str(n->name);
+        out->init_const = true;
+    case ast.ast_kind.k_ident:
+        check_ident(ck, n, out);
+    case ast.ast_kind.k_unary:
+        check_unary(ck, n, out);
+    case ast.ast_kind.k_binary:
+        expr mut a = expr{};
+        expr mut b = expr{};
+        check_expr(ck, n->a, &a);
+        check_expr(ck, n->b, &b);
+        check_operands(ck, n->loc, n->op, n->a, &a, n->b, &b, out);
+        out->init_const = out->value.kind != consts.cval_kind.cv_none;
+    case ast.ast_kind.k_call:
+        check_call(ck, n, out);
+    case ast.ast_kind.k_index:
+        check_index(ck, n, out);
+    case ast.ast_kind.k_span:
+        check_span_expr(ck, n, out);
+    case ast.ast_kind.k_field:
+        check_field(ck, n, out, false);
+    case ast.ast_kind.k_arrow:
+        check_field(ck, n, out, true);
+    case ast.ast_kind.k_cast:
+        check_cast(ck, n, out);
+    case ast.ast_kind.k_sizeof:
+        check_sizeof(ck, n, out);
+    case ast.ast_kind.k_new:
+        check_new(ck, n, out);
+    case ast.ast_kind.k_struct_lit:
+        check_literal(ck, n, out, false);
+    case ast.ast_kind.k_array_lit:
+        check_literal(ck, n, out, true);
+    case ast.ast_kind.k_brace_init:
+        // Bare braces initialize a declaration; they are not an expression
+        // (D6.5).
+        check_error(ck, n->loc, "a brace initializer is not an expression");
+    case ast.ast_kind.k_ternary:
+        check_error(ck, n->loc, "not supported by the bootstrap compiler: ?:");
+    case ast.ast_kind.k_error:
+        // The tokens a syntax error made the parser skip: already reported
+        // (D14.2).
+    default:
+        panic("check.check_expr: not an expression");
+    }
+    n->ty = out->ty;
+    if (out->untyped) {
+        n->ann |= ANN_UNTYPED;
+    }
+    if (out->value.kind != consts.cval_kind.cv_none && (n->ann & ANN_CONST) == 0) {
+        set_value(ck, n, out->value);
+    }
+}
+
+// ---- declarations (D7.10, D8.1, D3.8, D3.9) ----------------------------------------
+
+// The two states of the lazy resolution of D7.10, kept on the declaring node.
+fn bool resolving(ast.node* n) {
+    return n != null && (n->ann & ANN_RESOLVING) != 0;
+}
+
+fn bool resolved(ast.node* n) {
+    return n != null && (n->ann & ANN_RESOLVED) != 0;
+}
+
+fn void resolve_sym(checker mut* ck, ast.sym mut* s) {
+    if (s == null || s->node == null || resolved(s->node)) {
+        return;
+    }
+    if (resolving(s->node)) {
+        // A struct reached through a pointer while it is being resolved is
+        // ordinary recursion; only value containment is a cycle, and the
+        // layout catches that (D3.8).
+        if (s->kind == ast.sym_kind.s_struct) {
+            return;
+        }
+        if (ck->addr_only
+            && (s->kind == ast.sym_kind.s_const || s->kind == ast.sym_kind.s_global)
+            && s->ty != null) {
+            // `&N` inside N's own initializer closes no cycle: it asks for an
+            // address, and D7.10 admits `&` of a module-level declaration
+            // from any module, this one included. Everything that answer
+            // needs is already known, because resolve_var writes the type
+            // before it checks the initializer; the value stays cv_none,
+            // which is what an address is (D4.6).
+            return;
+        }
+        // A declaration reached while it is being resolved closes a cycle
+        // (D7.10, D4.6); D3.9 forbids the same for an enum member value.
+        check_msg_begin(ck);
+        msg_quote(ck, s->name);
+        msg_str(ck, " is defined in terms of itself");
+        check_msg_end(ck, s->decl);
+        ast.node mut* cyclic = cast(s->node, ast.node mut*);
+        cyclic->ann |= ANN_RESOLVED;
+        sym_fail(ck, s);
+        return;
+    }
+    ast.node mut* n = cast(s->node, ast.node mut*);
+    n->ann |= ANN_RESOLVING;
+    switch (s->kind) {
+    case ast.sym_kind.s_struct:
+        resolve_struct(ck, s);
+    case ast.sym_kind.s_enum:
+        resolve_enum(ck, s);
+    case ast.sym_kind.s_fn, ast.sym_kind.s_extern_fn:
+        resolve_fn(ck, s);
+    case ast.sym_kind.s_const, ast.sym_kind.s_global:
+        // Which of the two it is follows from the type it declares (D7.10).
+        resolve_var(ck, s);
+    default:
+        // A field, an enum member, a local, a parameter, a module and a
+        // builtin are complete when they are made (D7.10).
+    }
+    n->ann &= ~ANN_RESOLVING;
+    n->ann |= ANN_RESOLVED;
+    n->ty = s->ty;
+    n->sym = s;
+}
+
+fn void resolve_struct(checker mut* ck, ast.sym mut* s) {
+    ast.node mut* decl = cast(s->node, ast.node mut*);
+    // The record the layout is driven through: a field that fails poisons the
+    // symbol's type, and the layout still has to be closed on the struct node
+    // itself (D3.8).
+    types.node* record = s->ty;
+    if (!types.type_layout_begin(record)) {
+        panic("check.resolve_struct: a struct laid out twice");
+    }
+    types.node*[MAX_MEMBERS] mut fields = {};
+    u64[MAX_MEMBERS] mut offsets = {};
+    u64 mut n = 0;
+    bool mut ok = true;
+    u64 mut i = 0;
+    while (i < ast.ast_len(decl)) {
+        ast.node mut* f = ast_child_mut(decl, i);
+        i += 1;
+        // An error node stands where a field was expected (D14.2).
+        if (f->kind != ast.ast_kind.k_field_decl) {
+            continue;
+        }
+        if (n >= MAX_MEMBERS) {
+            check_error(ck, f->loc, "too many fields");
+            ok = false;
+            break;
+        }
+        // A field's own storage follows its struct, so its outermost position
+        // carries no `mut` (D5.5).
+        written_type ft = check_type(ck, f->a, type_pos.pos_field);
+        ast.sym mut* fs = check_sym_new(ck, ast.sym_kind.s_field, f->name, f, s);
+        fs->ty = ft.ty;
+        f->sym = fs;
+        f->ty = ft.ty;
+        if (check_poisoned(ft.ty) || !check_layout(ck, ft.ty)
+            || !check_size_fits(ck, f->loc, ft.ty)) {
+            sym_fail(ck, fs);
+            ok = false;
+            continue;
+        }
+        fields[n] = ft.ty;
+        n += 1;
+    }
+    if (!ok || n == 0) {
+        // An empty struct is an error (D3.8); the parser reports a body with
+        // no field, so a body with none here is one whose fields all failed.
+        if (types.type_layout_state(record) != types.layout_state.l_error) {
+            types.type_layout_fail(record);
+        }
+        sym_fail(ck, s);
+        return;
+    }
+    if (!types.type_layout_struct(record, fields[0..n], offsets[0..n])) {
+        // The struct passes the ceiling of D3.4, reported like the
+        // infinite-size error of D3.8, at the `struct` keyword (D14.2).
+        check_msg_begin(ck);
+        msg_str(ck, "type is too large: struct ");
+        msg_str(ck, s->name);
+        check_msg_end(ck, keyword_range(decl->loc, STRUCT_KEYWORD_LEN));
+        sym_fail(ck, s);
+        return;
+    }
+    u64 mut at = 0;
+    u64 mut k = 0;
+    while (k < ast.ast_len(decl)) {
+        ast.node mut* f = ast_child_mut(decl, k);
+        if (f->kind == ast.ast_kind.k_field_decl) {
+            // The byte offset D3.8 gives the field, recorded on its
+            // declaration. The IR emitter names a field by its index and lets
+            // LLVM compute the address from the same layout (toolchain.md 6
+            // item 3), so the only consumers are the checker's own suites,
+            // where these offsets are the one place the compiler states its
+            // own answer for a whole declaration; the loop walks exactly the
+            // fields of the struct's IR type, since every field that failed
+            // left `ok` false above.
+            f->aux = offsets[at];
+            at += 1;
+        }
+        k += 1;
+    }
+}
+
+fn void resolve_enum(checker mut* ck, ast.sym mut* s) {
+    ast.node mut* decl = cast(s->node, ast.node mut*);
+    prim.prim_kind underlying = enum_underlying();
+    consts.cval mut next = consts.cv_from_i64(0);
+    bool mut ok = true;
+    u64 mut i = 0;
+    while (i < ast.ast_len(decl)) {
+        ast.node mut* m = ast_child_mut(decl, i);
+        u64 index = i;
+        i += 1;
+        if (m->kind != ast.ast_kind.k_enum_member) {
+            continue;
+        }
+        ast.sym mut* ms = check_sym_new(ck, ast.sym_kind.s_enum_member, m->name, m, s);
+        ms->ty = s->ty;
+        m->sym = ms;
+        m->ty = s->ty;
+        consts.cval mut v = next;
+        if (m->a != null) {
+            // An explicit value is a constant expression that may not refer
+            // to the enum itself (D3.9).
+            expr mut e = expr{};
+            check_expr_default(ck, m->a, &e);
+            if (!consts.cv_is_int(e.value)) {
+                if (!check_poisoned(e.ty)) {
+                    check_error(ck, m->a->loc, "an enum value must be a constant expression");
+                }
+                sym_fail(ck, ms);
+                ok = false;
+                continue;
+            }
+            v = e.value;
+        }
+        if (!consts.cv_fits(v, underlying)) {
+            // The underlying type of an enum is i32 (D3.9).
+            check_msg_begin(ck);
+            msg_str(ck, "enum value ");
+            msg_value(ck, v);
+            msg_str(ck, " does not fit i32");
+            check_msg_end(ck, m->loc);
+            sym_fail(ck, ms);
+            ok = false;
+            continue;
+        }
+        u64 mut k = 0;
+        while (k < index) {
+            ast.node* other = ast.ast_child(decl, k);
+            if (other->kind == ast.ast_kind.k_enum_member
+                && consts.cv_eq(check_node_value(ck, other), v)) {
+                // Duplicate values are errors (D3.9).
+                check_msg_begin(ck);
+                msg_str(ck, "duplicate enum value ");
+                msg_value(ck, v);
+                msg_str(ck, " for ");
+                msg_quote(ck, m->name);
+                check_msg_end(ck, m->name_loc);
+                ok = false;
+                break;
+            }
+            k += 1;
+        }
+        set_value(ck, m, v);
+        // Values start at 0 and increment (D3.9).
+        if (!consts.cv_add(v, consts.cv_from_i64(1), &next)) {
+            next = consts.cv_from_i64(0);
+        }
+    }
+    if (!ok) {
+        sym_fail(ck, s);
+    }
+}
+
+// The types an extern signature may use (D9.8): no spans, strings, structs or
+// arrays. A function-pointer parameter is legal exactly when its own
+// signature is extern-legal, result type included, since the C side calls
+// through it with the same convention (module-system.md 8.1, D9.9); the
+// recursion terminates because a function type is built from types written
+// before it and cannot reach itself.
+fn bool extern_legal(types.node* t) {
+    switch (t->kind) {
+    case types.type_kind.k_prim, types.type_kind.k_enum, types.type_kind.k_ptr,
+         types.type_kind.k_voidptr, types.type_kind.k_void, types.type_kind.k_error:
+        return true;
+    case types.type_kind.k_fn:
+        if (!extern_legal(t->elem)) {
+            return false;
+        }
+        u64 mut i = 0;
+        while (i < t->params.len) {
+            if (!extern_legal(t->params[i])) {
+                return false;
+            }
+            i += 1;
+        }
+        return true;
+    default:
+        return false;
+    }
+}
+
+// The `i`-th parameter declaration of a function, for the position a
+// signature difference is reported at.
+fn ast.node* param_at(ast.node* decl, u64 k) {
+    u64 mut n = 0;
+    u64 mut i = 0;
+    while (i < ast.ast_len(decl)) {
+        ast.node* p = ast.ast_child(decl, i);
+        i += 1;
+        if (p->kind != ast.ast_kind.k_param) {
+            continue;
+        }
+        if (n == k) {
+            return p;
+        }
+        n += 1;
+    }
+    return decl;
+}
+
+// `note: the compiler declares it as 'declare void @fort_rt_del(ptr)'`: the
+// declaration the program conflicts with is the compiler's own, so the note
+// shows it rather than pointing at an earlier one, as the note of a conflict
+// between two modules does (module-system.md 13). A muted checker annotates
+// the tree without reporting (D20.2), so the note follows the error.
+fn void note_runtime_declaration(checker mut* ck, diag.loc at, runtime_sig.rt_entry rt) {
+    if (ck->mute) {
+        return;
+    }
+    strbuf.str_buf mut decl = strbuf.create();
+    defer strbuf.free(&decl);
+    runtime_sig.rt_declaration(&decl, rt);
+    string mut text = strbuf.view(&decl);
+    if (text.len > 0 && text[text.len - 1] == '\n') {
+        // The rendering ends the line; a note is one line already.
+        text = text[0..text.len - 1];
+    }
+    check_msg_begin(ck);
+    msg_str(ck, "the compiler declares it as '");
+    msg_str(ck, text);
+    msg_str(ck, "'");
+    check_note_end(ck, at);
+}
+
+// `conflicting declarations of extern 'fort_rt_del': parameter 1 differs from
+// the runtime's`, in the wording module-system.md 13 gives the same conflict
+// between two modules. `param` is the 1-based parameter for the difference
+// that names one and 0 otherwise.
+fn void error_runtime_conflict(checker mut* ck, diag.loc at, string name,
+                               runtime_sig.rt_entry rt, string what, u64 param) {
+    check_msg_begin(ck);
+    msg_str(ck, "conflicting declarations of extern ");
+    msg_quote(ck, name);
+    msg_str(ck, what);
+    if (param > 0) {
+        msg_uint(ck, param);
+        msg_str(ck, " differs");
+    }
+    msg_str(ck, " from the runtime's");
+    check_msg_end(ck, at);
+    note_runtime_declaration(ck, at, rt);
+}
+
+// An `extern fn` naming a runtime entry point must agree with the signature
+// toolchain.md 5.1 fixes for it. D9.8 requires the extern declarations of one
+// symbol to agree with each other, and the compiler's own declaration is one
+// of them: it replaces the user's with the canonical prototype (item 8), so a
+// mismatch reaches no tool below -- opaque pointers make a call site's type
+// independent of its callee's -- and is silently ABI-wrong. The standard
+// library declares these legitimately (D13.1), so what is refused is a
+// disagreement and never the declaration itself. Two signatures agree when
+// each type takes the same IR form, attribute included (D9.9), since that is
+// what the call the emitter writes is made of. Reports the first difference
+// only, at the piece of the declaration that carries it.
+fn bool check_runtime_signature(checker mut* ck, ast.node* decl, string name, types.node* ret,
+                                types.node*@ params) {
+    runtime_sig.rt_entry rt = runtime_sig.rt_entry_of(name);
+    if (rt == runtime_sig.rt_entry.rt_none) {
+        return true;
+    }
+    // A `noreturn` declaration of an entry point that returns claims more
+    // than is true and suppresses the missing-`return` analysis of D8.5, so
+    // the mark is part of the result; an entry point section 5.1 declares
+    // `_Noreturn` may be written `void`, which claims less and is safe by
+    // construction, since `gen_use_extern` stamps the `cold noreturn nounwind`
+    // group from the table and never from the user's spelling (item 14).
+    bool noreturn_written = is_noreturn(decl->a);
+    if (runtime_sig.ir_form_of_type(ret) != runtime_sig.rt_entry_result(rt)
+        || (noreturn_written && !runtime_sig.rt_entry_noreturn(rt))) {
+        error_runtime_conflict(ck, decl->a->loc, name, rt, ": the result type differs", 0);
+        return false;
+    }
+    if (params.len != runtime_sig.rt_entry_param_count(rt)) {
+        error_runtime_conflict(ck, decl->name_loc, name, rt,
+                               ": the number of parameters differs", 0);
+        return false;
+    }
+    u64 mut i = 0;
+    while (i < params.len) {
+        if (runtime_sig.ir_form_of_type(params[i]) != runtime_sig.rt_entry_param(rt, i)) {
+            error_runtime_conflict(ck, param_at(decl, i)->loc, name, rt, ": parameter ", i + 1);
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// ---- two extern declarations of one C symbol (D9.8) --------------------------------
+
+// Whether a primitive is the byte C spells `unsigned char`: fort `char` is
+// that type at the boundary (D3.2), so `char` and `u8` name one C type and
+// `char*` may equally be written `u8*` (D9.8).
+fn bool is_c_byte(prim.prim_kind k) {
+    return k == prim.prim_kind.prim_u8 || k == prim.prim_kind.prim_char;
+}
+
+// Whether two types in an extern signature name one C type. D9.8 requires the
+// declarations of one C symbol to be identical, so this is type identity --
+// interning makes it pointer equality below the nominal types, whose identity
+// is their declaration (D3.8, D3.9) -- with the one relaxation D9.8 states
+// itself, `char` for `u8`. Level marks below the binding are part of a type
+// (D3.12) and `own` is too (D17.1), so both are compared; a binding-level
+// `mut` is not part of a function type (D3.10) and never reaches here.
+fn bool extern_type_agrees(types.node* a, types.node* b) {
+    if (a == null || b == null) {
+        return a == b;
+    }
+    if (a == b) {
+        return true;
+    }
+    if (a->kind != b->kind) {
+        return false;
+    }
+    switch (a->kind) {
+    case types.type_kind.k_void:
+        return true;
+    case types.type_kind.k_prim:
+        return a->prim == b->prim || (is_c_byte(a->prim) && is_c_byte(b->prim));
+    case types.type_kind.k_ptr:
+        return a->is_mut == b->is_mut && a->is_own == b->is_own
+            && extern_type_agrees(a->elem, b->elem);
+    case types.type_kind.k_voidptr:
+        return a->is_own == b->is_own;
+    case types.type_kind.k_fn:
+        if (a->is_noreturn != b->is_noreturn || a->params.len != b->params.len
+            || !extern_type_agrees(a->elem, b->elem)) {
+            return false;
+        }
+        u64 mut i = 0;
+        while (i < a->params.len) {
+            if (!extern_type_agrees(a->params[i], b->params[i])) {
+                return false;
+            }
+            i += 1;
+        }
+        return true;
+    default:
+        // A struct or enum reached through a pointer, and every kind an
+        // extern signature may not use: two nodes the interning above did not
+        // equate are two types.
+        return false;
+    }
+}
+
+// Whether a struct or an enum, whose identity is the declaration it comes
+// from and not its spelling (D3.8, D3.9).
+fn bool is_nominal(types.node* t) {
+    return t->kind == types.type_kind.k_struct || t->kind == types.type_kind.k_enum;
+}
+
+// Whether either side of the first difference between two disagreeing extern
+// types names a struct or an enum, whose identity is its declaration and not
+// its spelling (D3.8, D3.9): that is the case where writing the same words in
+// both modules cannot make the declarations agree, so the note must offer the
+// type or the wrapper. It says "either side" and not "each": one module
+// spelling the parameter `i32` where the other names an enum is the same
+// class of fix, the enum being importable. Two spellings of one type never
+// reach here, since `color` and `shade.color` denote one declaration (D9.4)
+// and the comparison above already agreed.
+//
+// It runs only after extern_type_agrees returned false, so it is a second
+// walk over a pair known to differ and never a verdict on its own. Two
+// deliberate differences from that walk: it stops at a `void*`, which erases
+// its pointee and so can hide no nominal type, and it tolerates two function
+// types of unequal arity by walking the shorter list, since it is asked which
+// kind of difference was found and not whether one exists.
+fn bool differs_by_nominal(types.node* a, types.node* b) {
+    if (a == null || b == null || a == b) {
+        return false;
+    }
+    if (is_nominal(a) || is_nominal(b)) {
+        return true;
+    }
+    if (a->kind != b->kind) {
+        return false;
+    }
+    if (a->kind == types.type_kind.k_ptr) {
+        return differs_by_nominal(a->elem, b->elem);
+    }
+    if (a->kind == types.type_kind.k_fn) {
+        if (differs_by_nominal(a->elem, b->elem)) {
+            return true;
+        }
+        u64 mut i = 0;
+        while (i < a->params.len && i < b->params.len) {
+            if (differs_by_nominal(a->params[i], b->params[i])) {
+                return true;
+            }
+            i += 1;
+        }
+    }
+    return false;
+}
+
+// `conflicting declarations of extern 'write': parameter 1 differs`, in the
+// wording module-system.md 13 gives every row of this conflict: the error at
+// the piece of the later declaration that carries the difference, then a note
+// at the earlier declaration. `param` is the 1-based parameter for the
+// difference that names one and 0 otherwise; `wrapper` asks for the note that
+// says what to do when no shared spelling exists.
+fn void error_extern_conflict(checker mut* ck, diag.loc at, diag.loc first, string name,
+                              string what, u64 param, bool wrapper) {
+    check_msg_begin(ck);
+    msg_str(ck, "conflicting declarations of extern ");
+    msg_quote(ck, name);
+    msg_str(ck, what);
+    if (param > 0) {
+        msg_uint(ck, param);
+        msg_str(ck, " differs");
+    }
+    check_msg_end(ck, at);
+    // A muted checker annotates the tree without reporting, so the notes
+    // follow the error rather than standing alone (D20.2).
+    if (ck->mute) {
+        return;
+    }
+    check_msg_begin(ck);
+    msg_str(ck, "previous declaration of ");
+    msg_quote(ck, name);
+    msg_str(ck, " here");
+    check_note_end(ck, first);
+    if (!wrapper) {
+        return;
+    }
+    check_msg_begin(ck);
+    // A struct or an enum is identified by its declaration (D3.8, D3.9), so a
+    // module that names one where the other names another type, or another
+    // module's, cannot reach agreement by rewording: it imports the type, or
+    // one module declares the symbol and exports a fort function the others
+    // call (module-system.md 8.1).
+    msg_str(ck, "a struct or an enum stands here, and its identity is its declaration and not ");
+    msg_str(ck, "its spelling: give both declarations that one type, importing it where it is ");
+    msg_str(ck, "missing, or declare the symbol in one module and call it through a fort ");
+    msg_str(ck, "function the others import");
+    check_note_end(ck, at);
+}
+
+// The same C symbol may be declared `extern` in several modules provided the
+// signatures are identical, `own` included (D9.8, D17.13): every module of
+// the closure is checked in the dependency order the loader left, so the
+// first declaration of a name is the one every later declaration is held
+// against, and the difference is reported at the later one. The comparison is
+// of types and not of what the two modules wrote, which is why it stands here
+// and not in the loader: two spellings of one imported type are one type
+// (D9.4), and two local types of one spelling are two.
+fn bool check_extern_agreement(checker mut* ck, ast.node* decl, ast.sym mut* s) {
+    i64 mut at = 0;
+    if (!strmap.get(&ck->extern_first, s->name, &at)) {
+        strmap.put(&ck->extern_first, s->name, cast(ck->externs_len, i64));
+        externs_reserve(ck);
+        ck->externs[ck->externs_len] = s;
+        ck->externs_len += 1;
+        return true;
+    }
+    u64 slot = cast(at, u64);
+    ast.sym* first = ck->externs[slot];
+    if (first->node == decl) {
+        // The same declaration, checked a second time through one checker
+        // (the editor mode of D20.2): its symbol and the nominal types it
+        // names are new records of the old tree, so the entry is replaced
+        // rather than compared against itself. Replacing assumes this second
+        // pass reaches here at all, which it does only when the declaration
+        // still checks: a pass that fails it leaves the map pointing at the
+        // first pass's symbol, whose nominal types belong to a resolution
+        // that has been superseded, so a later module would be held against
+        // types no module can name any more. Every failure path above this
+        // one reports first, so such a run is already diagnosed and the stale
+        // comparison can only add to a file that is not compiling; nothing
+        // reaches it otherwise.
+        ck->externs[slot] = s;
+        return true;
+    }
+    types.node* a = first->ty;
+    types.node* b = s->ty;
+    if (a == null || b == null || a->kind != types.type_kind.k_fn
+        || b->kind != types.type_kind.k_fn) {
+        return true;
+    }
+    diag.loc note = first->node->name_loc;
+    if (a->is_noreturn != b->is_noreturn || !extern_type_agrees(a->elem, b->elem)) {
+        error_extern_conflict(ck, decl->a->loc, note, s->name, ": the result type differs", 0,
+                              differs_by_nominal(a->elem, b->elem));
+        return false;
+    }
+    if (a->params.len != b->params.len) {
+        error_extern_conflict(ck, decl->name_loc, note, s->name,
+                              ": the number of parameters differs", 0, false);
+        return false;
+    }
+    u64 mut i = 0;
+    while (i < a->params.len) {
+        if (!extern_type_agrees(a->params[i], b->params[i])) {
+            error_extern_conflict(ck, param_at(decl, i)->loc, note, s->name, ": parameter ",
+                                  i + 1, differs_by_nominal(a->params[i], b->params[i]));
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+fn void resolve_fn(checker mut* ck, ast.sym mut* s) {
+    ast.node mut* decl = cast(s->node, ast.node mut*);
+    bool is_extern = s->kind == ast.sym_kind.s_extern_fn;
+    if (is_extern && s->name == ENTRY_SYMBOL) {
+        // `fort_entry` is reserved: the compiler emits its definition, so an
+        // `extern` declaring it is not a second declaration of one C function
+        // but a signature nothing can check against that definition (D9.7).
+        check_msg_begin(ck);
+        msg_quote(ck, s->name);
+        msg_str(ck, " is reserved: the compiler emits it");
+        check_msg_end(ck, decl->name_loc);
+        sym_fail(ck, s);
+        return;
+    }
+    // A return type has no binding, so its outermost position carries no
+    // `mut` (D5.5); `noreturn` is a return type of its own (D8.5).
+    written_type ret = check_type(ck, decl->a, type_pos.pos_return);
+    bool mut ok = !check_poisoned(ret.ty) && check_layout(ck, ret.ty)
+        && check_size_fits(ck, decl->a->loc, ret.ty);
+    types.node*[MAX_MEMBERS] mut params = {};
+    u64 mut n = 0;
+    u64 mut i = 0;
+    while (i < ast.ast_len(decl)) {
+        ast.node mut* p = ast_child_mut(decl, i);
+        i += 1;
+        if (p->kind != ast.ast_kind.k_param) {
+            continue;
+        }
+        if (n >= MAX_MEMBERS) {
+            check_error(ck, p->loc, "too many parameters");
+            ok = false;
+            break;
+        }
+        written_type pt = check_type(ck, p->a, type_pos.pos_binding);
+        ast.sym mut* ps = check_sym_new(ck, ast.sym_kind.s_param, p->name, p, s);
+        ps->ty = pt.ty;
+        // A `mut` in the outermost position makes the callee's copy
+        // assignable and is not part of the function's type (D5.6, D3.10).
+        ps->mut0 = pt.mut0;
+        p->sym = ps;
+        p->ty = pt.ty;
+        if (check_poisoned(pt.ty) || !check_layout(ck, pt.ty)
+            || !check_size_fits(ck, p->loc, pt.ty)) {
+            sym_fail(ck, ps);
+            ok = false;
+            continue;
+        }
+        if (pt.ty->kind == types.type_kind.k_void) {
+            check_error(ck, p->loc, "'void' is only a return type or the base of 'void*'");
+            sym_fail(ck, ps);
+            ok = false;
+            continue;
+        }
+        if (is_extern && !extern_legal(pt.ty)) {
+            // An extern signature may use only scalars, pointers and function
+            // pointers (D9.8).
+            check_msg_begin(ck);
+            msg_str(ck, "extern signature cannot use type '");
+            check_msg_type(ck, pt.ty);
+            msg_str(ck, "'");
+            check_msg_end(ck, p->loc);
+            sym_fail(ck, ps);
+            ok = false;
+            continue;
+        }
+        params[n] = pt.ty;
+        n += 1;
+    }
+    if (ok && is_extern && !extern_legal(ret.ty)) {
+        check_msg_begin(ck);
+        msg_str(ck, "extern signature cannot use type '");
+        check_msg_type(ck, ret.ty);
+        msg_str(ck, "'");
+        check_msg_end(ck, decl->a->loc);
+        ok = false;
+    }
+    if (ok && is_extern
+        && !check_runtime_signature(ck, decl, s->name, ret.ty, params[0..n])) {
+        ok = false;
+    }
+    if (!ok) {
+        sym_fail(ck, s);
+        return;
+    }
+    s->ty = types.type_fn(&ck->types, ret.ty, params[0..n], is_noreturn(decl->a));
+    if (is_extern && !check_extern_agreement(ck, decl, s)) {
+        // The declaration is well formed and what failed is its agreement
+        // with another module's declaration of the same C symbol, but the
+        // program has no one signature for it, so the symbol is poisoned and
+        // every call to it in this module stays silent (D9.8, D14.2).
+        sym_fail(ck, s);
+    }
+}
+
+fn void resolve_var(checker mut* ck, ast.sym mut* s) {
+    ast.node mut* decl = cast(s->node, ast.node mut*);
+    written_type t = check_type(ck, decl->a, type_pos.pos_binding);
+    s->ty = t.ty;
+    s->mut0 = t.mut0;
+    // `Type NAME = init;` is a compile-time constant and `mut Type g = init;`
+    // a global (D7.10).
+    if (t.mut0) {
+        s->kind = ast.sym_kind.s_global;
+    } else {
+        s->kind = ast.sym_kind.s_const;
+    }
+    if (check_poisoned(t.ty) || !check_layout(ck, t.ty)
+        || !check_size_fits(ck, decl->loc, t.ty)) {
+        sym_fail(ck, s);
+        return;
+    }
+    if (t.ty->kind == types.type_kind.k_void) {
+        check_error(ck, decl->loc, "'void' is only a return type or the base of 'void*'");
+        sym_fail(ck, s);
+        return;
+    }
+    if (decl->b == null) {
+        // The initializer is mandatory and the parser enforces it (D7.1).
+        sym_fail(ck, s);
+        return;
+    }
+    expr mut e = expr{};
+    check_initializer(ck, decl->b, t.ty, "the initializer", &e);
+    if (check_poisoned(e.ty)) {
+        sym_fail(ck, s);
+        return;
+    }
+    if (!e.init_const) {
+        // Module-level initializers are constant expressions extended with
+        // `null`, function names and `&` of a module-level declaration
+        // (D7.10): no calls and no reads of `mut` globals.
+        check_error(ck, decl->b->loc, "a module-level initializer must be a constant expression");
+        sym_fail(ck, s);
+    }
+}
+
+// ---- modules (D9.10, D14.2) --------------------------------------------------------
+
+// The symbol kind a top-level declaration introduces; a module-level variable
+// is a constant or a global once its type is resolved (D7.10).
+fn bool decl_sym_kind(ast.node* decl, ast.sym_kind mut* out) {
+    switch (decl->kind) {
+    case ast.ast_kind.k_fn_decl:
+        if ((decl->flags & ast.FLAG_EXTERN) != 0) {
+            *out = ast.sym_kind.s_extern_fn;
+        } else {
+            *out = ast.sym_kind.s_fn;
+        }
+        return true;
+    case ast.ast_kind.k_struct_decl:
+        *out = ast.sym_kind.s_struct;
+        return true;
+    case ast.ast_kind.k_enum_decl:
+        *out = ast.sym_kind.s_enum;
+        return true;
+    case ast.ast_kind.k_var_decl:
+        *out = ast.sym_kind.s_const;
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Every node of an import whose own name token denotes the imported module or
+// declaration carries its symbol: the item, its `as` alias, and the last
+// segment of the path, which names the module of an item list and the
+// declaration of a symbol import (D9.3). The segments before it name search
+// directories rather than modules, so they carry nothing.
+fn void annotate_path(ast.node* imp, ast.sym* last, ast.sym* module) {
+    ast.node mut* path = cast(imp->a, ast.node mut*);
+    if (path == null || ast.ast_len(path) == 0) {
+        return;
+    }
+    u64 n = ast.ast_len(path);
+    ast_child_mut(path, n - 1)->sym = last;
+    if (n >= 2 && module != null && module != last) {
+        // `import a.b.c;` reads `c` in the module `a.b` (D9.3).
+        ast_child_mut(path, n - 2)->sym = module;
+    }
+}
+
+// The module a symbol was declared in, which is its owner (ast.sym).
+fn ast.sym* owning_module(ast.sym* s) {
+    if (s != null && s->owner != null && s->owner->kind == ast.sym_kind.s_module) {
+        return s->owner;
+    }
+    return null;
+}
+
+fn void annotate_import(scope.binding* b) {
+    ast.node mut* n = cast(b->node, ast.node mut*);
+    ast.sym* s = sym_of_binding(b);
+    if (n == null) {
+        return;
+    }
+    n->sym = s;
+    if (n->kind == ast.ast_kind.k_import_item) {
+        // An item names a declaration of the module the path names (D9.3).
+        if (n->a != null) {
+            n->a->sym = s;
+        }
+        return;
+    }
+    if (n->b != null) {
+        n->b->sym = s;
+    }
+    if (b->kind == scope.bind_kind.b_symbol) {
+        annotate_path(n, s, owning_module(s));
+    } else {
+        annotate_path(n, s, s);
+    }
+}
+
+// The path of an item list names the module every item comes from, which is
+// the owner of the first item that resolved (D9.3).
+fn void annotate_item_path(ast.node* imp) {
+    u64 mut i = 0;
+    while (i < ast.ast_len(imp)) {
+        ast.node* item = ast.ast_child(imp, i);
+        ast.sym* module = owning_module(item->sym);
+        if (module != null) {
+            annotate_path(imp, module, module);
+            return;
+        }
+        i += 1;
+    }
+}
+
+// The annotation slots this pass owns, cleared before it writes them: the
+// symbols of an earlier check belong to a checker that may be gone, so a
+// module checked twice starts from the tree the parser left, which an editor
+// that re-checks a file after an edit needs (D20.2).
+fn void clear_annotations(ast.node mut* n) {
+    if (n == null) {
+        return;
+    }
+    n->ty = null;
+    n->sym = null;
+    n->aux = 0;
+    // Every bit the checker owns, named once (ANN_ALL): a bit cleared here by
+    // hand would be forgotten the day a new one is added.
+    n->ann &= ~ANN_ALL;
+    clear_annotations(n->a);
+    clear_annotations(n->b);
+    clear_annotations(n->c);
+    clear_annotations(n->d);
+    u64 mut i = 0;
+    while (i < ast.ast_len(n)) {
+        clear_annotations(ast_child_mut(n, i));
+        i += 1;
+    }
+}
+
+// The name an import binds: the `as` alias, the item's own name, or the last
+// segment of the path (D9.3).
+fn string bound_name(ast.node* imp, ast.node* item) {
+    if (item != null) {
+        if (item->a != null) {
+            return item->a->name;
+        }
+        return item->name;
+    }
+    if (imp->b != null) {
+        return imp->b->name;
+    }
+    ast.node* path = imp->a;
+    if (path != null && ast.ast_len(path) > 0) {
+        return ast.ast_child(path, ast.ast_len(path) - 1)->name;
+    }
+    return "";
+}
+
+// The names the module's imports did not bind, which is what an import the
+// loader reported leaves behind: a use of one says nothing further (D14.2).
+fn void collect_failed_imports(checker mut* ck, modules.module* m) {
+    u64 mut i = 0;
+    while (i < ast.ast_len(m->ast)) {
+        ast.node* imp = ast.ast_child(m->ast, i);
+        i += 1;
+        if (imp->kind != ast.ast_kind.k_import) {
+            continue;
+        }
+        u64 items = ast.ast_len(imp);
+        u64 mut k = 0;
+        while (k == 0 || k < items) {
+            ast.node* mut item = null;
+            if (items > 0) {
+                item = ast.ast_child(imp, k);
+            }
+            string name = bound_name(imp, item);
+            if (name.len > 0 && scope.find(&m->names, name) == null) {
+                strmap.put(&ck->bad_imports, name, 1);
+            }
+            k += 1;
+        }
+    }
+}
+
+// Phase one: one symbol per top-level declaration, so that the declarations
+// of a module are order-independent (D7.10).
+fn void collect_module(checker mut* ck, modules.module* m) {
+    ast.sym mut* ms = check_sym_new(ck, ast.sym_kind.s_module, m->path, m->ast, null);
+    // A module's own record hangs on its k_module node, which is how a
+    // binding reaches it (ast.sym).
+    m->ast->sym = ms;
+    ck->module_sym = ms;
+    u64 mut i = 0;
+    while (i < ast.ast_len(m->ast)) {
+        ast.node mut* decl = ast_child_mut(m->ast, i);
+        i += 1;
+        ast.sym_kind mut kind = ast.sym_kind.s_const;
+        // An error node stands where a declaration was expected (D14.2).
+        if (!decl_sym_kind(decl, &kind)) {
+            continue;
+        }
+        ast.sym mut* s = check_sym_new(ck, kind, decl->name, decl, ms);
+        decl->sym = s;
+        if (kind == ast.sym_kind.s_struct) {
+            // The type exists before the fields are read, so that a struct
+            // may contain itself through a pointer (D3.8).
+            s->ty = types.type_struct(&ck->types, decl->name, cast(s, void*));
+        } else if (kind == ast.sym_kind.s_enum) {
+            s->ty = types.type_enum(&ck->types, decl->name, cast(s, void*));
+        }
+    }
+    u64 mut k = 0;
+    while (k < scope.count(&m->names)) {
+        scope.binding* b = scope.at(&m->names, k);
+        if (b->kind == scope.bind_kind.b_module || b->kind == scope.bind_kind.b_symbol) {
+            annotate_import(b);
+        }
+        k += 1;
+    }
+    u64 mut j = 0;
+    while (j < ast.ast_len(m->ast)) {
+        ast.node* imp = ast.ast_child(m->ast, j);
+        if (imp->kind == ast.ast_kind.k_import && ast.ast_len(imp) > 0) {
+            annotate_item_path(imp);
+        }
+        j += 1;
+    }
+}
+
+// The entry module defines `fn i32 main()` or `fn i32 main(string@ args)`
+// (D8.6).
+fn void check_main(checker mut* ck, modules.module* m) {
+    scope.binding* b = scope.find(&m->names, "main");
+    ast.sym* s = sym_of_binding(b);
+    bool mut ok = s != null && s->kind == ast.sym_kind.s_fn && !check_poisoned(s->ty)
+        && s->ty->kind == types.type_kind.k_fn && !s->ty->is_noreturn
+        && types.type_equal(s->ty->elem, types.type_prim(&ck->types, prim.prim_kind.prim_i32));
+    if (ok && s->ty->params.len > 1) {
+        ok = false;
+    }
+    if (ok && s->ty->params.len == 1) {
+        types.node* args = types.type_span(&ck->types, types.type_string(&ck->types, false),
+                                           false, false);
+        ok = types.type_equal(s->ty->params[0], args);
+    }
+    if (ok || (s != null && s->error)) {
+        return;
+    }
+    check_msg_begin(ck);
+    msg_str(ck, "entry module ");
+    msg_quote(ck, m->path);
+    msg_str(ck, " must define 'fn i32 main()' or 'fn i32 main(string@ args)'");
+    // An error without a position in the file uses 1:1 (D14.2).
+    if (s != null) {
+        check_msg_end(ck, s->decl);
+    } else {
+        check_msg_end(ck, file_start(m->file));
+    }
+}
+
+// Phases one and two of one module: the symbols of its top-level
+// declarations, then each of them resolved on demand, so that a type or a
+// constant reached from another one is complete when it is read (D7.10).
+// The bodies come after this, when every declaration of the module has a
+// type, and they are check_stmt.ft's (T-036).
+fn void check_module_decls(checker mut* ck, modules.module* m) {
+    ck->module = m;
+    ck->scope = null;
+    ck->in_function = false;
+    clear_annotations(m->ast);
+    strmap.free(&ck->bad_imports);
+    collect_failed_imports(ck, m);
+    collect_module(ck, m);
+    u64 mut i = 0;
+    while (i < ast.ast_len(m->ast)) {
+        ast.node* decl = ast.ast_child(m->ast, i);
+        i += 1;
+        ast.sym_kind mut kind = ast.sym_kind.s_const;
+        if (decl_sym_kind(decl, &kind)) {
+            resolve_sym(ck, sym_mut(decl->sym));
+        }
+    }
+}
+
+// The rule the whole module has to be checked for, and the end of the pass
+// over it.
+fn void check_module_finish(checker mut* ck, modules.module* m) {
+    if (m->entry && ck->require_main) {
+        // The entry module defines main (D8.6). A module checked on its own
+        // is a file under inspection and not a program, so the rule does not
+        // apply to it at all (D20.1).
+        check_main(ck, m);
+    }
+    ck->module = null;
+    ck->module_sym = null;
+}
+
+// Checks one module. Every module it imports must have been checked already,
+// which check_program's order guarantees.
+//
+// The function bodies are not checked here: the loop that checks them stands
+// between check_module_decls and check_module_finish in
+// src/bootstrap/check.c, and it calls check_function_body, which is
+// check_stmt.ft's (T-036). Until that module lands, this pass reports the
+// diagnostics of the declarations of a module and says nothing about the
+// statements inside them.
+fn bool check_module(checker mut* ck, modules.module* m) {
+    if (m->ast == null) {
+        return true;
+    }
+    u64 before = ck->errors;
+    check_module_decls(ck, m);
+    check_module_finish(ck, m);
+    return ck->errors == before;
+}
+
+// Checks the closure: every module the loader put in the dependency order
+// first (D9.10, D14.2), then every other module that parsed, deepest first,
+// so that a file whose import failed is still checked and an editor sees its
+// own errors (D20.1). A module that did not parse is not checked (D14.2).
+// Returns whether none reported an error. The index walk reads the same
+// order, which is why neither builds one of its own.
+fn bool check_program(checker mut* ck, modules.module_set* set) {
+    bool mut ok = true;
+    u64 mut i = 0;
+    while (i < modules.pass_count(set)) {
+        if (!check_module(ck, modules.pass_at(set, i))) {
+            ok = false;
+        }
+        i += 1;
+    }
+    return ok;
+}

@@ -693,6 +693,31 @@ A safe(r) C-like systems programming language.
   struct of 8 or 16 bytes until T-019, so a mutation that dropped `sret(%T)` or shortened a
   `memcpy` only for a struct wider than two words passed the entire gate. An assertion about an
   aggregate convention covers one size unless a second size is written down.
+- **Phase B has three differential oracles, and the third is the only one that can see a false
+  positive.** `tools/diff_tokens.sh` and `tools/diff_ast.sh` compare stage1's and stage2's
+  `--tokens` and `--ast` over every `.ft` file of the repository; `tools/diff_check.sh` compares
+  `fort --check` over the files stage1 checks clean, which is where the compiler's own thirteen
+  thousand lines of fort and the standard library are. The language corpus under stage2 holds the
+  diagnostics a ported pass must *report*; only diff_check holds the ones it must not, and T-035
+  measured the difference: reverting T-082's `identity_only` in `named_type` left the whole
+  495-test stage2 corpus green and was caught by diff_check, on
+  `run/structs/008_recursive_span_first.ft`. The unit suite the same ticket added
+  (`check_resolve_test.ft`) catches it too, and that is the shape to aim for -- the differential
+  finds the class, a named assertion pins it -- so do not read the story as "the differential is
+  enough". All three carry the same `FT_FILES` equality, so a ticket that adds or removes a `.ft`
+  file changes **three** lines in the same commit, and `diff_check.sh` carries a second equality,
+  `CLEAN_FILES`, because a comparison that shrank would otherwise pass while seeing less.
+- **A ported pass is judged on its diagnostics one by one, with a script and not a reading.**
+  For every message the ported file builds -- each `check_error` text and each run of `msg_str`
+  pieces between `check_msg_begin` and `check_msg_end` -- ask whether any suite under `test/fort`
+  holds a piece of it. T-035's review ran that over five suites and found **22 diagnostics with no
+  fort test, 11 of them asserted by the very C suites the ticket was porting**, because only 6 of
+  its 85 test-function names matched a C `TEST` name: the suite was a re-derivation and nothing
+  mechanically caught what fell out. `tools/diag_coverage.py` is that script; it reports
+  candidates, and a composed message whose only distinctive piece is a shared hint is a false
+  positive, so the few it leaves are verified by hand and the count is written into the ticket.
+  Run it before claiming any coverage universal, and name the *measured* list rather than "every
+  rule is tested".
 - **A whole directory in `xfail.txt` hides a class of programs from every pass behind it.** Both
   bugs the deep review of T-015 found were at a module boundary, because `run/modules/` is
   entirely expected to fail, so no program with two modules had ever reached the emitter: an
@@ -837,7 +862,27 @@ A safe(r) C-like systems programming language.
   - No function-scope `static`: a module-level `mut` global replaces it, and it is visible to the
     whole module rather than to one function.
   - No forward declaration: top-level declarations are order-independent within a module (D7.10),
-    so every C prototype the file carried for ordering disappears.
+    so every C prototype the file carried for ordering disappears. **Two types that point at each
+    other must therefore live in one module**, since circular imports are a compile error (D9.5)
+    and no fort module can name a type of a module that names one of its own. C gets away with it
+    through the incomplete type a header may declare (`struct ast_node` in `sym.h`), so the C
+    file boundary is not a guide: `ast.h`'s node and `sym.h`'s record are one module in fort
+    (`src/fort/ast.ft`), and `scope.ft`'s `void* module` is the other way out where one of the
+    two may be opaque. **The same cut applies to two C files that call each other**: `check.c`
+    and `check_stmt.c` do, so `src/fort/check.ft` stops where the single reverse edge is --
+    `check_module` resolves the declarations and the body loop moves to the module that imports
+    it -- and the split is a ticket boundary rather than a copy of the C's.
+  - **A value must not store a pointer into storage that returning it copies**: itself, or a
+    field beside the pointer. A `return` of a local aggregate copies the whole value to the
+    caller, so a pointer inside it that named the local -- or a sibling field of the local --
+    dangles the moment it lands. Storing the *caller's* address is fine, which is why
+    `driver.ft`'s `analysis_create(&s)` is correct: `s` is the caller's session and does not
+    move. What is not fine is the shape T-035's test environment had, `fn env open()` building an
+    `env` in a local and calling `check.check_init(&e.ck, &e.m.s)` on a field of that local before
+    returning it: every diagnostic then went to the dead local's session and the suite saw a check
+    that reported *nothing at all*, which reads as a pass. The fix is to fill the caller's value
+    (`fn void open(env mut* e)`). `modules.ft` sidesteps the question entirely by taking the
+    session as a parameter of every call instead of holding it.
   - `_Static_assert` has no fort spelling. The invariant becomes a unit test, or a runtime
     `assert` at the one place that depends on it; `prim.h`'s assertion on the order of
     `prim_kind_t` is the site.

@@ -6,6 +6,7 @@ import capture;
 import containers;
 import driver;
 import std.io;
+import std.strbuf;
 
 // A run of the driver owns its session and its analysis and releases both on
 // every path out (D20.5), and no other test can see a release that is
@@ -27,13 +28,45 @@ import std.io;
 // moves the address for a reason that is not a leak. Its first act is the
 // loop.
 //
-// Each of the three modes is measured, since each releases a different set:
-// --tokens holds a session and a token vector, --ast a syntax tree as well,
-// and a build the module set of the whole closure. Verified by deleting
-// compile_entry's `defer session.free(&s)`, which moved the build address by
-// 490336 bytes over the rounds measured, and its `defer analysis_free(&an)`,
-// which moved it by 28480; with both in place every distance is 0.
-u64 ROUNDS = 200;
+// Each of the four modes is measured, since each releases a different set:
+// --tokens holds a session and a token vector, --ast a syntax tree as well, a
+// build the module set of the whole closure and the checker over it, and the
+// fourth a program written so that the checker allocates everything it has --
+// a folded constant for its value vector, an `extern fn` for its extern
+// vector and its map, an import that binds nothing for the map of names it
+// failed to bind, and two diagnostics for its message buffer -- since a
+// release is witnessed only by a round that made the allocation.
+//
+// Both views are watched, since neither sees the whole heap: the program
+// break is blind to a leak the allocator serves out of a free chunk it
+// already holds, and the address of a fresh block is blind to a large one,
+// which was measured at 0 while the break had climbed by megabytes. The
+// answer is the larger of the two distances, so a round that moved either
+// view fails the bound.
+//
+// **Two views are necessary and not sufficient: a round must also be large
+// enough for the release it claims to witness.** Deleting `del(ck->syms)`
+// leaks about 144 bytes per analysis, and two hundred rounds of that stay
+// inside the 132 KB glibc gives a process at startup, so neither view moves
+// and the probe reads 0 -- which is how T-035 first cited this test for a
+// release it does not witness at that size. ROUNDS is therefore set past the
+// point where the smallest release here becomes visible, and a release added
+// later is held to the same standard: delete it, watch this test go red, and
+// raise ROUNDS until it does.
+//
+// Verified by deletion, one at a time, each moving a view past BOUND:
+// compile_entry's `defer session.free(&s)` and `defer analysis_free(&an)`;
+// and in check.check_free the loop that frees the symbol records,
+// `del(ck->syms)`, `del(ck->values)`, `del(ck->externs)`,
+// `strmap.free(&ck->extern_first)`, `strmap.free(&ck->bad_imports)`,
+// `strbuf.free(&ck->msg)` and `types.type_table_free`. That is every release
+// check.check_free performs, and the fourth program is what makes the last
+// five of them reachable at all.
+// Past the point where the smallest release measured here is visible: a leak
+// of about 144 bytes a round needs roughly nine hundred rounds to push the
+// break out of the heap the process starts with, and the early sample is
+// taken at half the rounds, so the count is set well above twice that.
+u64 ROUNDS = 4000;
 u64 BOUND = 4096;
 
 // The current program break, which is where the heap ends: sbrk(0) moves
@@ -43,6 +76,18 @@ extern fn void* sbrk(i64 increment);
 
 fn u64 probe_address() {
     return cast(sbrk(0), u64);
+}
+
+// The other view: the address a small fresh block is served at, which moves
+// when a round kept a block the next round would have been given. The block is
+// released at once, so the probe itself leaks nothing.
+u64 PROBE_BLOCK = 32;
+
+fn u64 probe_block() {
+    u8 mut@ own block = new(u8, PROBE_BLOCK);
+    u64 at = cast(block.ptr, u64);
+    del(block);
+    return at;
 }
 
 // How far the allocator moved between the round at half the rounds and the
@@ -57,6 +102,9 @@ fn u64 measure(string@ args) {
     u64 mut early = 0;
     u64 mut late = 0;
     u64 mut last = 0;
+    u64 mut early_block = 0;
+    u64 mut late_block = 0;
+    u64 mut last_block = 0;
     u64 mut i = 0;
     while (i < ROUNDS) {
         // The driver writes to both descriptors; they are captured so that
@@ -68,18 +116,33 @@ fn u64 measure(string@ args) {
         capture.end(io.STDOUT, saved_out);
         if (i == ROUNDS / 2) {
             early = probe_address();
+            early_block = probe_block();
         }
         if (i == ROUNDS - 2) {
             late = probe_address();
+            late_block = probe_block();
         }
         if (i == ROUNDS - 1) {
             last = probe_address();
+            last_block = probe_block();
         }
         i += 1;
     }
     assert(early != 0 && late != 0 && last != 0);
-    u64 one = distance(late, early);
-    u64 other = distance(last, early);
+    assert(early_block != 0 && late_block != 0 && last_block != 0);
+    u64 broke = nearer(distance(late, early), distance(last, early));
+    u64 block = nearer(distance(late_block, early_block), distance(last_block, early_block));
+    // Either view moving is a leak, so the answer is the larger distance.
+    if (broke > block) {
+        return broke;
+    }
+    return block;
+}
+
+// The smaller of two distances, which is what holding the early round against
+// the last two costs nothing when the heap is steady and absorbs an allocator
+// that grows it on one round in two.
+fn u64 nearer(u64 one, u64 other) {
     if (one < other) {
         return one;
     }
@@ -102,6 +165,20 @@ fn i32 main() {
     write_file("clean.ft", "fn i32 main() {\n    return 0;\n}\n");
     write_file("closure.ft", "import helper;\nfn i32 main() {\n    return helper.one();\n}\n");
     write_file("helper.ft", "fn i32 one() {\n    return 1;\n}\n");
+    // The fourth program makes the checker allocate everything it owns: a
+    // constant that folds, an extern declaration, and a name that is not
+    // declared, which is a diagnostic and so a message.
+    strbuf.str_buf mut program = strbuf.create();
+    defer strbuf.free(&program);
+    // An import that resolves to nothing leaves the checker the names it
+    // failed to bind, which is the one allocation a clean program never
+    // makes (D14.2).
+    strbuf.append(&program, "import nosuchmodule;\n");
+    strbuf.append(&program, "extern fn i32 puts(char* s);\n");
+    strbuf.append(&program, "i32 FOLDED = 41 + 1;\n");
+    strbuf.append(&program, "i32 bad = nosuch;\n");
+    strbuf.append(&program, "fn i32 main() {\n    return 0;\n}\n");
+    write_file("checked.ft", strbuf.view(&program));
     string[3] mut tokens = {"fort", "--tokens", "clean.ft"};
     string[3] mut ast = {"fort", "--ast", "clean.ft"};
     // A build of a closure of two modules, which stops at the missing checker
@@ -110,6 +187,8 @@ fn i32 main() {
     assert(measure(tokens[0..3]) < BOUND);
     assert(measure(ast[0..3]) < BOUND);
     assert(measure(build[0..2]) < BOUND);
+    string[2] mut checked = {"fort", "checked.ft"};
+    assert(measure(checked[0..2]) < BOUND);
     println("ok");
     return 0;
 }
