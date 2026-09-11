@@ -239,12 +239,14 @@ static inline const char* dump_stmt(const char* stmt_src) {
     return dumped(ast_child(fn->b, 0));
 }
 
-// The one diagnostic a source that must not parse produces (D14.2), or the
+// The diagnostics a source that must not parse produces, one per line, or the
 // tree when it parsed after all, so that a failing assertion shows what the
-// parser accepted.
+// parser accepted. The parser recovers and returns a tree whatever it
+// reported (D14.2), so whether the source parsed is the number of diagnostics,
+// which parse_text resets before every parse, and never a NULL tree.
 static inline const char* parse_fails(const char* src) {
     const ast_node_t* mod = parse_text(src);
-    if (mod != NULL) {
+    if (diag_count() == 0) {
         return dumped(mod);
     }
     return parse_diags();

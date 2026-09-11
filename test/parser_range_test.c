@@ -18,7 +18,8 @@
 #include "test.h"
 
 // The types, expressions, statements and whole modules the parser suites
-// parse, one of each shape they cover.
+// parse, one of each shape they cover, and the broken modules the parser
+// recovers in, one of each recovery point.
 static const char* const TYPES[] = {"i32",
                                     "u8",
                                     "bool",
@@ -183,6 +184,20 @@ static const char* const MODULES[] = {"",
                                       "bool ready = true;\n"
                                       "node* root = null;\n"};
 
+// Modules the parser recovers in: every one reports at least one syntax error
+// and still yields a tree, whose error nodes cover the skipped regions
+// (D14.2), so the invariants below are checked on a recovered tree too.
+static const char* const RECOVERED[] = {"i32 a = ;\ni32 b = 1;\n",
+                                        "fn i32 f() {\n    x = ;\n    return 0;\n}\n",
+                                        "fn i32 f() {\n    if (c) {\n        x = ;\n    }\n"
+                                        "    return 0;\n}\n",
+                                        "fn void f() {\n    switch (c) {\n    case 1:\n"
+                                        "        x = ;\n    }\n}\n",
+                                        "struct s {\n    i32 ;\n    i32 y;\n}\n",
+                                        "fn void f() {\n    x = 1;\n"
+                                        "fn void g() {\n    y = 2;\n}\n",
+                                        "fn void f() {\n    if (c) {\n"};
+
 // The violations found in the tree under test, one per line, and the kinds
 // the corpus has reached.
 static sb_t report;
@@ -266,8 +281,9 @@ static void check_node(const ast_node_t* n, const ast_node_t* parent) {
 }
 
 // Parses `src` and reports every invariant it breaks, the empty string when
-// it breaks none; a source that does not parse is reported as such, since
-// every source of the corpus is meant to parse.
+// it breaks none; a source that yields no tree is reported as such, since the
+// parser returns one whatever it reported (D14.2) and only a lexical error
+// stops it, which no source here has.
 static const char* violations(const char* src) {
     const ast_node_t* mod = parse_text(src);
     sb_clear(&report);
@@ -308,6 +324,14 @@ TEST(every_module_of_the_corpus_holds_the_invariants, {
     }
 })
 
+// A recovered tree holds them too: an error node lies inside the block or the
+// module that holds it and ends at the last token the skip dropped (D14.2).
+TEST(every_recovered_module_holds_the_invariants, {
+    for (uint64_t i = 0; i < sizeof(RECOVERED) / sizeof(RECOVERED[0]); i++) {
+        TEST_ASSERT_EQ_STR(violations(RECOVERED[i]), "");
+    }
+})
+
 // A statement nested in a switch in a loop in a function still lies inside
 // every one of them.
 TEST(a_deeply_nested_statement_lies_inside_every_ancestor, {
@@ -340,6 +364,9 @@ static void walk_corpus(void) {
     for (uint64_t i = 0; i < sizeof(MODULES) / sizeof(MODULES[0]); i++) {
         TEST_UNUSED(violations(MODULES[i]));
     }
+    for (uint64_t i = 0; i < sizeof(RECOVERED) / sizeof(RECOVERED[0]); i++) {
+        TEST_UNUSED(violations(RECOVERED[i]));
+    }
 }
 
 // The kinds the C bootstrap rejects (toolchain.md 7.3) never reach a tree:
@@ -371,6 +398,7 @@ int main(int argc, char** argv) {
     TEST_RUN(every_expression_of_the_corpus_holds_the_invariants);
     TEST_RUN(every_statement_of_the_corpus_holds_the_invariants);
     TEST_RUN(every_module_of_the_corpus_holds_the_invariants);
+    TEST_RUN(every_recovered_module_holds_the_invariants);
     TEST_RUN(a_deeply_nested_statement_lies_inside_every_ancestor);
     TEST_RUN(the_corpus_covers_every_node_kind_the_bootstrap_builds);
     sb_free(&report);

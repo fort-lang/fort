@@ -1,7 +1,8 @@
-// Every diagnostic the parser can write, at the position it writes it
-// (D14.2: a syntax error stops the file after one diagnostic). The parser's
-// messages are the compiler's first contact with a mistyped program, so each
-// one is pinned here by its full line.
+// Every diagnostic the parser can write, at the position it writes it. The
+// parser's messages are the compiler's first contact with a mistyped program,
+// so each one is pinned here by its full line, and a source that reports more
+// than one after recovering (D14.2) pins them all, so that a cascade shows up
+// as a line no one expected.
 #include <stdint.h>
 
 #include "ast.h"
@@ -66,8 +67,12 @@ TEST(a_missing_bracket_or_brace, {
                        "t.ft:1:10: error: expected '{', found 'i32'\n");
     TEST_ASSERT_EQ_STR(parse_fails("enum e red }"),
                        "t.ft:1:8: error: expected '{', found identifier 'red'\n");
+    // The `{` the switch never opened leaves its `}` to the function's block,
+    // which therefore closes on line 2, so the `}` of line 3 is read where a
+    // declaration was due (D14.2).
     TEST_ASSERT_EQ_STR(stmt_fails("switch (c) case 1: }"),
-                       "t.ft:2:12: error: expected '{', found 'case'\n");
+                       "t.ft:2:12: error: expected '{', found 'case'\n"
+                       "t.ft:3:1: error: expected a type, found '}'\n");
     TEST_ASSERT_EQ_STR(expr_fails("point{1"), "t.ft:1:16: error: expected '}', found ';'\n");
 })
 
@@ -179,15 +184,21 @@ TEST(a_reserved_word_is_not_an_identifier, {
                        "t.ft:1:8: error: 'type' is a reserved word\n");
 })
 
-// ---- one diagnostic, then the file is abandoned (D14.2) -------------------
+// ---- one diagnostic per mistake, recovery in between (D14.2) -------------
 
-TEST(later_errors_are_not_reported, {
+TEST(later_errors_are_reported_too, {
     TEST_ASSERT_EQ_STR(parse_fails("i32 a = ;\ni32 b = ;\ni32 c = ;\n"),
-                       "t.ft:1:9: error: expected an expression, found ';'\n");
-    TEST_ASSERT_EQ_STR(parse_fails("fn void f() {\n    if (c) {\n    x = ;\n}\n"),
+                       "t.ft:1:9: error: expected an expression, found ';'\n"
+                       "t.ft:2:9: error: expected an expression, found ';'\n"
                        "t.ft:3:9: error: expected an expression, found ';'\n");
+    // The `}` of line 4 closes the `if`, so the function's block runs out of
+    // tokens and says so at the end of the file.
+    TEST_ASSERT_EQ_STR(parse_fails("fn void f() {\n    if (c) {\n    x = ;\n}\n"),
+                       "t.ft:3:9: error: expected an expression, found ';'\n"
+                       "t.ft:5:1: error: expected '}', found end of file\n");
     TEST_ASSERT_EQ_STR(parse_fails("struct s { i32 x }\nfn void f( { }\n"),
-                       "t.ft:1:18: error: expected ';', found '}'\n");
+                       "t.ft:1:18: error: expected ';', found '}'\n"
+                       "t.ft:2:12: error: expected a type, found '{'\n");
 })
 
 // A declaration that fails after the speculative parse chose it reports the
@@ -214,7 +225,7 @@ int main(int argc, char** argv) {
     TEST_RUN(a_token_that_starts_no_type);
     TEST_RUN(a_token_that_starts_no_expression);
     TEST_RUN(a_reserved_word_is_not_an_identifier);
-    TEST_RUN(later_errors_are_not_reported);
+    TEST_RUN(later_errors_are_reported_too);
     TEST_RUN(the_committed_branch_reports_its_own_error);
     parse_done();
     TEST_EXIT();

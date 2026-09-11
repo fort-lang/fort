@@ -40,7 +40,8 @@
 #include "types.h"
 
 // The productions of grammar.md, in its order: module and declarations,
-// types, statements, expressions.
+// types, statements, expressions, and last the error node that stands for a
+// region no production accepted (D14.2).
 typedef enum {
     AST_NONE = 0, // never produced by the parser; the zero of a fresh node
 
@@ -109,6 +110,14 @@ typedef enum {
     AST_NEW,        // a: the allocated type; b: the count or NULL (D10.2)
     AST_STRUCT_LIT, // a: the qualified name; b: the brace initializer (D6.5)
     AST_ARRAY_LIT,  // a: the array type; b: the brace initializer (D6.5)
+
+    // ---- recovery (D14.2) ----
+    // The tokens a syntax error made the parser skip; never has children. It
+    // stands wherever a list holds children of that level -- the statements of
+    // a block, the clauses of a switch, the fields of a struct, the
+    // declarations of a module -- so every pass that walks one of those lists
+    // skips a node of this kind (D14.2).
+    AST_ERROR,
 
     AST_KIND_COUNT
 } ast_kind_t;

@@ -387,11 +387,15 @@ TEST(a_long_else_if_chain_is_not_nesting, {
     TEST_ASSERT_EQ_UINT64(links, (uint64_t)301);
 })
 
-// One diagnostic per file, then the file is abandoned (D14.2).
-TEST(only_the_first_syntax_error_is_reported, {
+// One diagnostic per broken statement, and the statements and declarations
+// after it are parsed and reported too (D14.2).
+TEST(every_broken_statement_is_reported, {
     TEST_ASSERT_EQ_STR(parse_fails("fn void f() {\n    x;\n    y;\n}\ni32 = 1;\n"),
                        "t.ft:2:6: error: expected an assignment, an increment or a call, "
-                       "found ';'\n");
+                       "found ';'\n"
+                       "t.ft:3:6: error: expected an assignment, an increment or a call, "
+                       "found ';'\n"
+                       "t.ft:5:5: error: expected an identifier, found '='\n");
 })
 
 // ---- statements in every context ------------------------------------------
@@ -548,6 +552,25 @@ TEST(a_type_prefix_followed_by_anything_else_is_a_statement, {
                        "(assign = (field (index (field (ident foo) bar) (int 2)) baz) (int 1))");
 })
 
+// A type embeds in an expression, in `cast`, `sizeof`, `new` and the length of
+// an array literal (grammar.md 6), so a `mut` or an `own` inside a bracket
+// belongs to that type and says nothing about the statement: only a marker
+// outside every bracket makes the statement a declaration (grammar.md 7.1).
+TEST(a_marker_inside_a_bracket_leaves_the_statement_alone, {
+    TEST_ASSERT_EQ_STR(dump_stmt("a[sizeof(i32 mut*)..2] = b;"),
+                       "(assign = (span (ident a) "
+                       "(sizeof (type (prim i32) mut (ptr))) (int 2)) (ident b))");
+    TEST_ASSERT_EQ_STR(dump_stmt("a[sizeof(node* own)] = 1;"),
+                       "(assign = (index (ident a) "
+                       "(sizeof (type (name node) (ptr own)))) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_stmt("p = cast(q, node* mut);"),
+                       "(assign = (ident p) "
+                       "(cast (ident q) (type (name node) (ptr mut))))");
+    TEST_ASSERT_EQ_STR(dump_stmt("f(new(node* own, 4));"),
+                       "(call-stmt (call (ident f) "
+                       "(new (type (name node) (ptr own)) (int 4))))");
+})
+
 // A primitive, `string`, `void` or `fn` starts a declaration with no
 // speculation at all (grammar.md 7.1).
 TEST(a_keyword_type_starts_a_declaration_at_once, {
@@ -612,7 +635,7 @@ int main(int argc, char** argv) {
     TEST_RUN(nesting_deeper_than_256_is_an_error);
     TEST_RUN(unterminated_constructs_end_at_the_end_of_the_file);
     TEST_RUN(a_long_else_if_chain_is_not_nesting);
-    TEST_RUN(only_the_first_syntax_error_is_reported);
+    TEST_RUN(every_broken_statement_is_reported);
     TEST_RUN(every_assignment_operator_is_a_statement);
     TEST_RUN(every_assignment_target_shape);
     TEST_RUN(declarations_in_every_body);
@@ -623,6 +646,7 @@ int main(int argc, char** argv) {
     TEST_RUN(range_for_collections);
     TEST_RUN(a_type_prefix_followed_by_an_identifier_is_a_declaration);
     TEST_RUN(a_type_prefix_followed_by_anything_else_is_a_statement);
+    TEST_RUN(a_marker_inside_a_bracket_leaves_the_statement_alone);
     TEST_RUN(a_keyword_type_starts_a_declaration_at_once);
     TEST_RUN(a_long_type_prefix_rewinds_cleanly);
     parse_done();
