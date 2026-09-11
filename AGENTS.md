@@ -434,7 +434,14 @@ A safe(r) C-like systems programming language.
   comments are `//` only, never `/* */`, as in fort (D2.2), so a region is commented out line by
   line; includes grouped as the file's own header, `<x.h>`, `<sys/x.h>`, project `"x.h"`, then
   `"test.h"`/`"common.h"`.
-  `.clang-format` and `.clang-tidy` (clang 18) are the reference; `tools/vm format` reformats,
+  `.clang-format` and `.clang-tidy` (clang 18) are the reference, and clang 18 in the guest is the
+  only authority: the host's clang is newer and its editor diagnostics report checks the gate does
+  not, so a warning that appears in an IDE and nowhere in `tools/vm tidy` is a version difference
+  and not a finding. Seen with `bugprone-narrowing-conversions` on an `int`-to-`char` ternary in
+  `test/lang/ffi/layout.c`, flagged on the host and silent under `clang-tidy-18` in the guest, where
+  `WarningsAsErrors: '*'` means a real one would have failed the gate. Check in the guest before
+  acting on an editor's warning, and never edit code to satisfy a check the project does not run.
+  `tools/vm format` reformats,
   and `tools/check_comments.py` rejects a block comment (`tools/vm format-check` runs it; it
   skips a `/*` inside a string literal, a character literal or a `//` comment). This applies to
   test helpers under `test/` too. Two gaps of clang-tidy 18 are covered by review:
