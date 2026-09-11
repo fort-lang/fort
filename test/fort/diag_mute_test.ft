@@ -1,0 +1,189 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| mute ok
+//| counts ok
+//| nesting ok
+//| budget ok
+//| text ok
+//| ok
+import capture;
+import diag;
+import std.io;
+
+// The mute of src/bootstrap/diag.h 108-114, which the module loader needs:
+// it speculatively lexes and parses a candidate file to ask whether that file
+// declares a name, and a file that turns out to be irrelevant must report
+// nothing (module-system.md 3). The contract is two separate numbers -- the
+// error count unmute restores, and the number of errors it says were
+// swallowed -- so both are held here, and so is the record vector, which a
+// muted stretch may not grow.
+
+// ---- what a mute drops ----------------------------------------------------------
+
+// A muted error is written nowhere and recorded nowhere: the sink holds the
+// records it held before the mute.
+fn void a_muted_error_is_not_recorded() {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    diag.error(&s, diag.loc_make("a.ft", 1, 1), "kept");
+    u64 before = diag.record_count(&s);
+    diag.mute(&s);
+    diag.error(&s, diag.loc_make("probe.ft", 9, 9), "dropped");
+    diag.note(&s, diag.loc_make("probe.ft", 9, 9), "dropped too");
+    assert(diag.unmute(&s) == 1);
+    assert(diag.record_count(&s) == before);
+    // The record that was there is untouched, and it is still the first one.
+    assert(diag.record_at(&s, 0).msg == "kept");
+}
+
+// A mute drops what a probe reports however many records it would have been:
+// thirty errors under one mute leave the vector at the length it had, which
+// is one growth's worth of records the sink never allocated.
+fn void a_long_probe_grows_nothing() {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    diag.mute(&s);
+    u64 mut i = 0;
+    while (i < 30) {
+        diag.error(&s, diag.loc_make("probe.ft", 1, 1), "dropped");
+        i += 1;
+    }
+    assert(diag.unmute(&s) == 30);
+    assert(diag.record_count(&s) == 0);
+    assert(diag.count(&s) == 0);
+}
+
+// muted answers whether a mute is open, which is what a reporter under a
+// probe asks before it builds a message it would throw away.
+fn void muted_says_whether_one_is_open() {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    assert(!diag.muted(&s));
+    diag.mute(&s);
+    assert(diag.muted(&s));
+    assert(diag.unmute(&s) == 0);
+    assert(!diag.muted(&s));
+}
+
+// ---- the two numbers ------------------------------------------------------------
+
+// The count it restores and the count it returns are two numbers: the sink is
+// back at the two errors it had, and the call says three were swallowed.
+fn void the_restored_count_and_the_returned_count_are_two_numbers() {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    diag.error(&s, diag.loc_make("a.ft", 1, 1), "one");
+    diag.error(&s, diag.loc_make("a.ft", 2, 1), "two");
+    assert(diag.count(&s) == 2);
+    diag.mute(&s);
+    diag.error(&s, diag.loc_make("probe.ft", 1, 1), "a");
+    diag.error(&s, diag.loc_make("probe.ft", 2, 1), "b");
+    diag.error(&s, diag.loc_make("probe.ft", 3, 1), "c");
+    assert(diag.unmute(&s) == 3);
+    assert(diag.count(&s) == 2);
+}
+
+// A probe that reported nothing is answered by the count alone: the loader
+// reads "it declares nothing" off `count(&s) == before`, which a mute that
+// restored the count wrongly would break whatever it returned.
+fn void a_clean_probe_swallows_nothing() {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    u64 before = diag.count(&s);
+    diag.mute(&s);
+    assert(diag.unmute(&s) == 0);
+    assert(diag.count(&s) == before);
+}
+
+// ---- nesting --------------------------------------------------------------------
+
+// Mutes nest and only the outermost one restores the count: the inner unmute
+// returns 0 and takes nothing back, and the outer one then answers for every
+// error reported under either.
+fn void only_the_outermost_mute_restores() {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    diag.error(&s, diag.loc_make("a.ft", 1, 1), "kept");
+    diag.mute(&s);
+    diag.error(&s, diag.loc_make("probe.ft", 1, 1), "outer");
+    diag.mute(&s);
+    diag.error(&s, diag.loc_make("probe.ft", 2, 1), "inner");
+    assert(diag.unmute(&s) == 0);
+    // Still muted: the inner unmute closed one of two mutes.
+    assert(diag.muted(&s));
+    assert(diag.count(&s) == 3);
+    diag.error(&s, diag.loc_make("probe.ft", 3, 1), "after the inner unmute");
+    assert(diag.unmute(&s) == 3);
+    assert(diag.count(&s) == 1);
+    assert(diag.record_count(&s) == 1);
+}
+
+// ---- the file budget ------------------------------------------------------------
+
+// The probe's own file spends nothing of the budget of the file that asked
+// for it (D14.2): a probe that reports past the cap leaves the asking file
+// with the budget it had.
+fn void the_file_budget_is_restored_too() {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    diag.begin_file(&s);
+    diag.error(&s, diag.loc_make("a.ft", 1, 1), "one");
+    assert(diag.file_count(&s) == 1);
+    diag.mute(&s);
+    u64 mut i = 0;
+    while (i < 25) {
+        diag.error(&s, diag.loc_make("probe.ft", 1, 1), "dropped");
+        i += 1;
+    }
+    assert(!diag.budget_left(&s));
+    assert(diag.unmute(&s) == 25);
+    assert(diag.file_count(&s) == 1);
+    assert(diag.budget_left(&s));
+}
+
+// ---- the text form --------------------------------------------------------------
+
+// A muted diagnostic writes no line even with the text form on. The whole of
+// stderr is captured into a file of the test's own directory and held against
+// the two lines that belong there, byte for byte: a stderr directive of the
+// harness is a substring check and cannot see a line that should not be
+// there, which is exactly the failure this test is written for. stderr is unbuffered
+// (toolchain.md 5.3), so the lines are in the file before the descriptor goes
+// back.
+fn void text_is_silent_while_muted() {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    diag.set_text(&s, true);
+    i32 saved = capture.begin(io.STDERR, "stderr.txt");
+
+    diag.error(&s, diag.loc_make("a.ft", 1, 1), "written");
+    diag.mute(&s);
+    diag.error(&s, diag.loc_make("probe.ft", 2, 1), "not written");
+    diag.note(&s, diag.loc_make("probe.ft", 2, 1), "not written either");
+    assert(diag.unmute(&s) == 1);
+    diag.error(&s, diag.loc_make("a.ft", 3, 1), "written again");
+
+    capture.end(io.STDERR, saved);
+    string own got = capture.text("stderr.txt");
+    defer del(got);
+    assert(got == "a.ft:1:1: error: written\na.ft:3:1: error: written again\n");
+}
+
+fn i32 main() {
+    a_muted_error_is_not_recorded();
+    a_long_probe_grows_nothing();
+    muted_says_whether_one_is_open();
+    println("mute ok");
+    the_restored_count_and_the_returned_count_are_two_numbers();
+    a_clean_probe_swallows_nothing();
+    println("counts ok");
+    only_the_outermost_mute_restores();
+    println("nesting ok");
+    the_file_budget_is_restored_too();
+    println("budget ok");
+    text_is_silent_while_muted();
+    println("text ok");
+    println("ok");
+    return 0;
+}

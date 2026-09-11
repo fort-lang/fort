@@ -1,0 +1,703 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| flags ok
+//| valued ok
+//| usage ok
+//| help ok
+//| statuses ok
+//| dumps ok
+//| front end ok
+//| std dir ok
+//| reentrancy ok
+//| ok
+import capture;
+import containers;
+import driver;
+import std.io;
+import std.str;
+import std.strbuf;
+import std.sys;
+
+// The driver of src/fort/driver.ft against D14.1 and toolchain.md 1: the
+// options each spelling sets, the usage errors, the exit statuses of every
+// mode this compiler carries, and the standard library directory.
+//
+// This is the half of test/driver_test.c that applies to a compiler with no
+// checker, no emitter and no `--cc` to spawn: the command line, the two
+// dumps, the front end and the exit statuses. The clang invocation of D14.3,
+// the temporary directory and the default output path are that suite's
+// other half and belong to the tickets that port the emitter and the
+// pipeline.
+//
+// Every run of the driver writes to stdout or to stderr, so each one is
+// captured into a file of this test's own directory and read back
+// (support/capture.ft); what reaches the harness is this file's own
+// `println`s alone.
+
+// The exit statuses of D14.1, as this suite spells them.
+i32 EXIT_OK = 0;
+i32 EXIT_COMPILE_ERROR = 1;
+i32 EXIT_USAGE = 2;
+
+// ---- running the driver with its output captured --------------------------------
+
+// The status of `fort <args>`, with stdout in `out.txt` and stderr in
+// `err.txt` of the working directory.
+fn i32 run(string@ args) {
+    i32 saved_out = capture.begin(io.STDOUT, "out.txt");
+    i32 saved_err = capture.begin(io.STDERR, "err.txt");
+    i32 status = driver.run(args);
+    capture.end(io.STDERR, saved_err);
+    capture.end(io.STDOUT, saved_out);
+    return status;
+}
+
+fn string own captured_out() {
+    return capture.text("out.txt");
+}
+
+fn string own captured_err() {
+    return capture.text("err.txt");
+}
+
+// Whether the last run's stderr holds `text`.
+fn bool err_has(string text) {
+    string own got = captured_err();
+    defer del(got);
+    return str.find(got, text) >= 0;
+}
+
+// Whether the last run's stdout holds `text`.
+fn bool out_has(string text) {
+    string own got = captured_out();
+    defer del(got);
+    return str.find(got, text) >= 0;
+}
+
+// Writes a source file of the working directory, which a run then compiles.
+fn void write_file(string path, string text) {
+    assert(io.write_file(path, cast(text, u8@)));
+}
+
+// ---- the flags that carry no value (D14.1) --------------------------------------
+
+// Each spelling sets its own flag and nothing else; the parse stops at
+// PARSE_OK with the entry file in place.
+fn void every_flag_sets_its_own_option() {
+    string[8] mut argv = {"fort", "-S", "-c", "--release", "--no-bounds-check", "--check",
+                          "entry.ft", ""};
+    driver.options mut opts = driver.options_create();
+    defer driver.options_free(&opts);
+    assert(driver.parse(&opts, argv[0..7]) == driver.PARSE_OK);
+    assert(opts.emit_ir);
+    assert(opts.compile_only);
+    assert(opts.release);
+    assert(opts.no_bounds_check);
+    assert(opts.check);
+    assert(opts.have_entry);
+    assert(opts.entry == "entry.ft");
+    // Nothing the command line did not name is set.
+    assert(!opts.json);
+    assert(!opts.index);
+    assert(!opts.tokens);
+    assert(!opts.ast);
+}
+
+// --index implies --check and --json, so it is the whole command line an
+// editor gives the compiler (D20.3).
+fn void index_implies_check_and_json() {
+    string[3] mut argv = {"fort", "--index", "entry.ft"};
+    driver.options mut opts = driver.options_create();
+    defer driver.options_free(&opts);
+    assert(driver.parse(&opts, argv[0..3]) == driver.PARSE_OK);
+    assert(opts.index);
+    assert(opts.check);
+    assert(opts.json);
+}
+
+// --tokens and --ast imply nothing: each stops the run at one pass (D14.1).
+fn void the_two_dumps_imply_nothing() {
+    string[3] mut tokens = {"fort", "--tokens", "entry.ft"};
+    driver.options mut a = driver.options_create();
+    defer driver.options_free(&a);
+    assert(driver.parse(&a, tokens[0..3]) == driver.PARSE_OK);
+    assert(a.tokens);
+    assert(!a.check && !a.json && !a.ast);
+    string[3] mut ast = {"fort", "--ast", "entry.ft"};
+    driver.options mut b = driver.options_create();
+    defer driver.options_free(&b);
+    assert(driver.parse(&b, ast[0..3]) == driver.PARSE_OK);
+    assert(b.ast);
+    assert(!b.check && !b.json && !b.tokens);
+}
+
+// ---- the options that take a value (D14.1, toolchain.md 1) ----------------------
+
+// The last -o, --std-dir, --cc and --target win.
+fn void the_last_value_of_a_single_option_wins() {
+    string[11] mut argv = {"fort", "-o", "first", "-o", "second", "--cc", "gcc", "--target",
+                           "aarch64-linux-gnu", "--std-dir", "lib"};
+    driver.options mut opts = driver.options_create();
+    defer driver.options_free(&opts);
+    string[12] mut full = {"fort", "-o", "first", "-o", "second", "--cc", "gcc", "--target",
+                           "aarch64-linux-gnu", "--std-dir", "lib", "entry.ft"};
+    assert(driver.parse(&opts, full[0..12]) == driver.PARSE_OK);
+    assert(opts.output == "second");
+    assert(opts.cc == "gcc");
+    assert(opts.target == "aarch64-linux-gnu");
+    assert(opts.std_dir == "lib");
+    assert(argv.len == 11);
+}
+
+// -I, -l and -Xcc accumulate in command-line order (D9.2, D14.1).
+fn void the_repeatable_options_keep_their_order() {
+    string[10] mut argv = {"fort", "-I", "first", "-I", "second", "-lm", "-lc", "-Xcc", "-g",
+                           "entry.ft"};
+    driver.options mut opts = driver.options_create();
+    defer driver.options_free(&opts);
+    assert(driver.parse(&opts, argv[0..10]) == driver.PARSE_OK);
+    assert(opts.includes.len == 2);
+    assert(containers.str_at(&opts.includes, 0) == "first");
+    assert(containers.str_at(&opts.includes, 1) == "second");
+    // A `-l<lib>` is one argument: the library is part of the option.
+    assert(opts.libs.len == 2);
+    assert(containers.str_at(&opts.libs, 0) == "-lm");
+    assert(containers.str_at(&opts.libs, 1) == "-lc");
+    assert(opts.cc_args.len == 1);
+    assert(containers.str_at(&opts.cc_args, 0) == "-g");
+}
+
+// The defaults of toolchain.md 1: clang, because nothing else reads LLVM IR
+// (D14.1, D19.1), and the x86-64 Linux triple.
+fn void the_defaults_are_clang_and_the_linux_triple() {
+    driver.options mut opts = driver.options_create();
+    defer driver.options_free(&opts);
+    assert(opts.cc == "clang");
+    assert(opts.target == "x86_64-linux-gnu");
+    assert(!opts.have_entry);
+    assert(opts.output.len == 0);
+    assert(opts.std_dir.len == 0);
+}
+
+// An option that takes the following argument takes it whatever it looks
+// like, an option spelling included (D14.1).
+fn void a_valued_option_takes_the_next_argument_whatever_it_is() {
+    string[4] mut argv = {"fort", "-o", "--release", "entry.ft"};
+    driver.options mut opts = driver.options_create();
+    defer driver.options_free(&opts);
+    assert(driver.parse(&opts, argv[0..4]) == driver.PARSE_OK);
+    assert(opts.output == "--release");
+    assert(!opts.release);
+}
+
+// ---- the usage errors (toolchain.md 1) ------------------------------------------
+
+fn void an_unknown_option_is_a_usage_error() {
+    string[3] mut argv = {"fort", "-Q", "entry.ft"};
+    assert(run(argv[0..3]) == EXIT_USAGE);
+    assert(err_has("fort: error: unknown option '-Q'"));
+    assert(err_has("usage: fort [options] entry.ft"));
+}
+
+fn void a_missing_option_argument_is_a_usage_error() {
+    string[3] mut argv = {"fort", "entry.ft", "-o"};
+    assert(run(argv[0..3]) == EXIT_USAGE);
+    assert(err_has("fort: error: missing argument for option '-o'"));
+}
+
+fn void a_second_entry_file_is_a_usage_error() {
+    string[3] mut argv = {"fort", "one.ft", "two.ft"};
+    assert(run(argv[0..3]) == EXIT_USAGE);
+    assert(err_has("fort: error: unexpected argument 'two.ft'"));
+}
+
+fn void no_entry_file_is_a_usage_error() {
+    string[2] mut argv = {"fort", "--release"};
+    assert(run(argv[0..2]) == EXIT_USAGE);
+    assert(err_has("fort: error: no entry file"));
+}
+
+// --tokens stops before the parser, so there is no front end for --check to
+// run and no document for --json to write (D14.1).
+fn void tokens_combines_with_neither_check_nor_json() {
+    string[4] mut argv = {"fort", "--tokens", "--check", "entry.ft"};
+    assert(run(argv[0..4]) == EXIT_USAGE);
+    assert(err_has("--tokens does not combine with --check, --json or --index"));
+}
+
+// --ast stops before the checker and after the lexer, so there is no front
+// end for --check and no dump for --tokens to write (D14.1).
+fn void ast_combines_with_neither_dump_nor_check() {
+    string[4] mut argv = {"fort", "--ast", "--tokens", "entry.ft"};
+    assert(run(argv[0..4]) == EXIT_USAGE);
+    assert(err_has("--ast does not combine with --tokens, --check, --json or --index"));
+}
+
+// A build spawns a `--cc` that inherits stdout, so only the check mode can
+// promise a complete document or nothing (D20.2).
+fn void json_without_check_is_a_usage_error() {
+    string[3] mut argv = {"fort", "--json", "entry.ft"};
+    assert(run(argv[0..3]) == EXIT_USAGE);
+    assert(err_has("--json requires --check"));
+}
+
+// fort with no arguments prints one usage line and exits with 2, with no
+// `fort: error:` line before it (toolchain.md 1).
+fn void no_arguments_prints_the_usage_line_alone() {
+    string[1] mut argv = {"fort"};
+    assert(run(argv[0..1]) == EXIT_USAGE);
+    string own err = captured_err();
+    defer del(err);
+    assert(err == "usage: fort [options] entry.ft\n");
+}
+
+// A usage error prints its message and then the usage line, in that order and
+// nothing else (toolchain.md 1).
+fn void a_usage_error_is_two_lines() {
+    string[2] mut argv = {"fort", "-Q"};
+    assert(run(argv[0..2]) == EXIT_USAGE);
+    string own err = captured_err();
+    defer del(err);
+    assert(err == "fort: error: unknown option '-Q'\nusage: fort [options] entry.ft\n");
+}
+
+// ---- --help and --version (toolchain.md 1) --------------------------------------
+
+fn void help_prints_the_usage_line_and_the_option_table() {
+    string[2] mut argv = {"fort", "--help"};
+    assert(run(argv[0..2]) == EXIT_OK);
+    string own out = captured_out();
+    defer del(out);
+    assert(str.starts_with(out, "usage: fort [options] entry.ft\noptions:\n"));
+    // One line per option of toolchain.md 1, after the usage line and the
+    // `options:` header; the ctest `stage-usage` holds the table itself
+    // against stage1's, line for line.
+    assert(capture.line_count(out) == 20);
+    assert(str.find(out, "  --help             print this help and exit\n") >= 0);
+    // --help answers whatever follows it, and nothing else runs.
+    assert(captured_err_is_empty());
+}
+
+fn bool captured_err_is_empty() {
+    string own err = captured_err();
+    defer del(err);
+    return err.len == 0;
+}
+
+fn void version_prints_the_version_alone() {
+    string[2] mut argv = {"fort", "--version"};
+    assert(run(argv[0..2]) == EXIT_OK);
+    string own out = captured_out();
+    defer del(out);
+    assert(out == "fort 0.1.0\n");
+}
+
+// --help wins over the entry file and over a later usage error: the parse
+// stops at it (toolchain.md 1).
+fn void help_stops_the_parse_where_it_stands() {
+    string[3] mut argv = {"fort", "--help", "-Q"};
+    assert(run(argv[0..3]) == EXIT_OK);
+    assert(out_has("usage: fort [options] entry.ft"));
+    assert(captured_err_is_empty());
+}
+
+// ---- the exit statuses of a run (D14.1) -----------------------------------------
+
+// An entry file that cannot be read is a usage error, reported with the
+// reason the system gave (toolchain.md 1).
+fn void an_unreadable_entry_file_is_exit_two() {
+    string[2] mut argv = {"fort", "nothere.ft"};
+    assert(run(argv[0..2]) == EXIT_USAGE);
+    assert(err_has("fort: error: cannot read 'nothere.ft': No such file or directory"));
+}
+
+// An entry file that opens and does not read -- a directory, whose read(2) is
+// EISDIR -- is not a usage error: src/bootstrap/driver.c opens the entry with
+// fopen and asks no more, so the loader reports it as the compile error of
+// D14.2 at 1:1 and the run exits 1. stage2 answers as stage1 answers, which
+// is what Phase B is for; a `fort: error: cannot read '<dir>': Is a
+// directory` and exit 2 would be the two compilers disagreeing.
+fn void an_entry_file_that_is_a_directory_is_the_loader_s_error() {
+    assert(make_directory("adir"));
+    string[2] mut argv = {"fort", "adir"};
+    assert(run(argv[0..2]) == EXIT_COMPILE_ERROR);
+    string own err = captured_err();
+    defer del(err);
+    assert(err == "adir:1:1: error: cannot read 'adir'\n");
+}
+
+// A file whose closure loaded is the checker's and the emitter's turn, which
+// this compiler does not carry: an internal error, exit 2, and no usage line
+// after it, since the command line was fine.
+fn void a_clean_program_stops_at_the_missing_checker() {
+    write_file("clean.ft", "fn i32 main() {\n    return 0;\n}\n");
+    string[2] mut argv = {"fort", "clean.ft"};
+    assert(run(argv[0..2]) == EXIT_USAGE);
+    string own err = captured_err();
+    defer del(err);
+    // One line and no usage line after it.
+    assert(str.starts_with(err, "fort: error: internal error: this compiler cannot check"));
+    assert(str.ends_with(err, " or build a program yet\n"));
+    assert(capture.line_count(err) == 1);
+}
+
+// A file with a syntax error is exit 1, with the diagnostic of D14.2 on
+// stderr and nothing on stdout.
+fn void a_syntax_error_is_exit_one() {
+    write_file("broken.ft", "fn i32 main() {\n    return 0\n}\n");
+    string[2] mut argv = {"fort", "broken.ft"};
+    assert(run(argv[0..2]) == EXIT_COMPILE_ERROR);
+    // The missing `;` is reported where the parser found the token that
+    // cannot follow the expression, which is the `}` of the next line.
+    assert(err_has("broken.ft:3:1: error: expected ';', found '}'"));
+    string own out = captured_out();
+    defer del(out);
+    assert(out.len == 0);
+}
+
+// A lexical error is the same, and the file is reported once: the lexer
+// resynchronises at the next line and the parser runs on what it left
+// (D14.2).
+fn void a_lexical_error_is_exit_one() {
+    write_file("lexical.ft", "fn i32 main() {\n    i32 x = 08;\n    return x;\n}\n");
+    string[2] mut argv = {"fort", "lexical.ft"};
+    assert(run(argv[0..2]) == EXIT_COMPILE_ERROR);
+    assert(err_has("lexical.ft:2:"));
+}
+
+// An import the closure cannot resolve is exit 1, reported at the `import`
+// with the notes of module-system.md 13.
+fn void a_missing_import_is_exit_one() {
+    write_file("importer.ft", "import nothere;\nfn i32 main() {\n    return 0;\n}\n");
+    string[2] mut argv = {"fort", "importer.ft"};
+    assert(run(argv[0..2]) == EXIT_COMPILE_ERROR);
+    assert(err_has("importer.ft:1:1: error: module 'nothere' not found"));
+    assert(err_has("note: looked for"));
+}
+
+// ---- the two dumps (D14.1) ------------------------------------------------------
+
+// --tokens lexes the entry file alone and writes one line per token; a clean
+// file is exit 0.
+fn void tokens_writes_the_dump_and_exits_zero() {
+    write_file("tokens.ft", "fn i32 main() {\n    return 0;\n}\n");
+    string[3] mut argv = {"fort", "--tokens", "tokens.ft"};
+    assert(run(argv[0..3]) == EXIT_OK);
+    string own out = captured_out();
+    defer del(out);
+    // The form of toolchain.md 1: the range, the nesting depth, the text and
+    // the kind, one token per line.
+    assert(str.starts_with(out, "1:1-1:3 0 \"fn\" fn\n"));
+    assert(str.ends_with(out, "end of file\n"));
+}
+
+// A lexical error is reported and lexing goes on, so the dump covers the
+// whole file and the status is the compile error of D14.1.
+fn void tokens_of_a_file_with_a_lexical_error_is_exit_one() {
+    write_file("tokens_bad.ft", "fn i32 main() {\n    i32 x = 08;\n    return x;\n}\n");
+    string[3] mut argv = {"fort", "--tokens", "tokens_bad.ft"};
+    assert(run(argv[0..3]) == EXIT_COMPILE_ERROR);
+    assert(err_has("tokens_bad.ft:2:"));
+    // The dump is written either way, and it reaches the end of the file.
+    assert(out_has("end of file"));
+}
+
+// --ast parses the entry file alone and writes its syntax tree as one
+// S-expression followed by one newline.
+fn void ast_writes_the_tree_and_exits_zero() {
+    write_file("tree.ft", "fn i32 main() {\n    return 0;\n}\n");
+    string[3] mut argv = {"fort", "--ast", "tree.ft"};
+    assert(run(argv[0..3]) == EXIT_OK);
+    string own out = captured_out();
+    defer del(out);
+    assert(str.starts_with(out, "(module"));
+    assert(str.ends_with(out, ")\n"));
+    assert(capture.line_count(out) == 1);
+}
+
+// The parser recovers and hands back the tree of what parsed (D14.2), so a
+// tree is written and the status is the compile error.
+fn void ast_of_a_file_with_a_syntax_error_is_exit_one() {
+    write_file("tree_bad.ft", "fn i32 main() {\n    return 0\n}\n");
+    string[3] mut argv = {"fort", "--ast", "tree_bad.ft"};
+    assert(run(argv[0..3]) == EXIT_COMPILE_ERROR);
+    assert(out_has("(module"));
+    assert(err_has("tree_bad.ft:3:"));
+}
+
+// Neither dump opens an import: the file is lexed or parsed alone, so a
+// module it imports being missing changes neither the dump nor the status
+// (D14.1).
+fn void neither_dump_opens_an_import() {
+    write_file("lonely.ft", "import nothere;\nfn i32 main() {\n    return 0;\n}\n");
+    string[3] mut tokens = {"fort", "--tokens", "lonely.ft"};
+    assert(run(tokens[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    string[3] mut ast = {"fort", "--ast", "lonely.ft"};
+    assert(run(ast[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
+}
+
+// A dump of a file that cannot be read is a usage error, like a build's
+// (toolchain.md 1).
+fn void a_dump_of_an_unreadable_file_is_exit_two() {
+    string[3] mut argv = {"fort", "--tokens", "gone.ft"};
+    assert(run(argv[0..3]) == EXIT_USAGE);
+    assert(err_has("fort: error: cannot read 'gone.ft'"));
+}
+
+// ---- the front end (toolchain.md 2) ---------------------------------------------
+
+// The search roots of D9.2 in order: the entry file's directory first, then
+// the `-I` roots. The imported module is read through the front end, so an
+// error inside it is reported with its own file name.
+fn void the_front_end_walks_the_closure() {
+    write_file("app.ft", "import helper;\nfn i32 main() {\n    return helper.one();\n}\n");
+    write_file("helper.ft", "fn i32 one() {\n    return 1\n}\n");
+    string[2] mut argv = {"fort", "app.ft"};
+    assert(run(argv[0..2]) == EXIT_COMPILE_ERROR);
+    assert(err_has("helper.ft:3:"));
+}
+
+// An `-I` root is searched after the entry file's directory (D9.2): the
+// module is found under it and its own syntax error is what the run reports.
+fn void an_include_root_is_searched() {
+    assert(make_directory("root"));
+    write_file("root/lib.ft", "fn i32 two() {\n    return 2\n}\n");
+    write_file("uses_lib.ft", "import lib;\nfn i32 main() {\n    return lib.two();\n}\n");
+    string[4] mut argv = {"fort", "-I", "root", "uses_lib.ft"};
+    assert(run(argv[0..4]) == EXIT_COMPILE_ERROR);
+    assert(err_has("root/lib.ft:3:"));
+}
+
+// Without that root the same file does not resolve, which is what says the
+// root and not the current directory was what found it (D9.2).
+fn void the_current_directory_is_not_a_search_root() {
+    assert(make_directory("root2"));
+    write_file("root2/lib2.ft", "fn i32 two() {\n    return 2;\n}\n");
+    write_file("uses_lib2.ft", "import lib2;\nfn i32 main() {\n    return lib2.two();\n}\n");
+    string[2] mut argv = {"fort", "uses_lib2.ft"};
+    assert(run(argv[0..2]) == EXIT_COMPILE_ERROR);
+    assert(err_has("module 'lib2' not found"));
+}
+
+extern fn i32 mkdir(char* path, u32 mode);
+
+fn bool make_directory(string path) {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    return mkdir(c_path.ptr, 0o700) == 0;
+}
+
+// ---- the standard library directory (D14.1) -------------------------------------
+
+// `std` in the directory containing the binary, or `std` alone when the
+// program name has no directory part.
+fn void std_beside_the_binary_is_the_last_resort() {
+    containers.pool mut p = containers.pool_create();
+    defer containers.pool_free(&p);
+    assert(driver.std_dir_beside(&p, "/usr/local/bin/fort") == "/usr/local/bin/std");
+    assert(driver.std_dir_beside(&p, "fort") == "std");
+    assert(driver.std_dir_beside(&p, "./fort") == "./std");
+    assert(driver.std_dir_beside(&p, "/fort") == "/std");
+}
+
+// --std-dir wins over the environment, which wins over the binary's own
+// directory (toolchain.md 1).
+fn void the_std_dir_option_wins_over_the_environment() {
+    containers.pool mut p = containers.pool_create();
+    defer containers.pool_free(&p);
+    string[4] mut argv = {"fort", "--std-dir", "chosen", "entry.ft"};
+    driver.options mut opts = driver.options_create();
+    defer driver.options_free(&opts);
+    assert(driver.parse(&opts, argv[0..4]) == driver.PARSE_OK);
+    assert(driver.std_dir(&p, &opts, "/usr/bin/fort") == "chosen");
+}
+
+// Without --std-dir the directory is $FORT_STD_DIR when it names one, and
+// `std` beside the binary otherwise (toolchain.md 1). Both arms are forced
+// here rather than read off the environment the run happens to have: a test
+// that branches on the ambient variable asserts whichever half the
+// environment presents and covers neither on any one run.
+fn void the_environment_is_read_when_the_option_is_absent() {
+    containers.pool mut p = containers.pool_create();
+    defer containers.pool_free(&p);
+    driver.options mut opts = driver.options_create();
+    defer driver.options_free(&opts);
+    set_env("FORT_STD_DIR", "/from/the/environment");
+    assert(driver.std_dir(&p, &opts, "/usr/bin/fort") == "/from/the/environment");
+}
+
+// An empty value names no directory, so it counts as unset and the search
+// falls through to `std` beside the binary, which /proc/self/exe names for
+// this program (toolchain.md 1).
+fn void an_empty_std_dir_variable_counts_as_unset() {
+    containers.pool mut p = containers.pool_create();
+    defer containers.pool_free(&p);
+    driver.options mut opts = driver.options_create();
+    defer driver.options_free(&opts);
+    set_env("FORT_STD_DIR", "");
+    assert(str.ends_with(driver.std_dir(&p, &opts, "/usr/bin/fort"), "/std"));
+    // And so does a variable that is not there at all.
+    unset_env("FORT_STD_DIR");
+    assert(str.ends_with(driver.std_dir(&p, &opts, "/usr/bin/fort"), "/std"));
+}
+
+// An empty --std-dir is a directory that was named, not an option left out:
+// src/bootstrap/driver.c compares the option against NULL, so `--std-dir ""`
+// is the empty root and nothing below it is consulted. Reading its length
+// instead made stage2 fall back to the environment and resolve, under that
+// command line, imports stage1 refuses.
+fn void an_empty_std_dir_option_counts_as_named() {
+    containers.pool mut p = containers.pool_create();
+    defer containers.pool_free(&p);
+    set_env("FORT_STD_DIR", "/from/the/environment");
+    string[4] mut argv = {"fort", "--std-dir", "", "entry.ft"};
+    driver.options mut opts = driver.options_create();
+    defer driver.options_free(&opts);
+    assert(driver.parse(&opts, argv[0..4]) == driver.PARSE_OK);
+    assert(opts.have_std_dir);
+    assert(opts.std_dir.len == 0);
+    assert(driver.std_dir(&p, &opts, "/usr/bin/fort").len == 0);
+    unset_env("FORT_STD_DIR");
+}
+
+// The same at the level a user sees: with the environment naming a directory
+// that holds the module, `--std-dir ""` still refuses the import, because the
+// empty root is the one root a `std` path is looked up in (D9.2).
+fn void an_empty_std_dir_option_resolves_no_std_import() {
+    assert(make_directory("stdlib"));
+    write_file("stdlib/thing.ft", "fn i32 one() {\n    return 1;\n}\n");
+    write_file("uses_std.ft", "import std.thing;\nfn i32 main() { return thing.one(); }\n");
+    set_env("FORT_STD_DIR", "stdlib");
+    // With the environment alone the import resolves and the run reaches the
+    // missing checker, which is exit 2 and no diagnostic.
+    string[2] mut plain = {"fort", "uses_std.ft"};
+    assert(run(plain[0..2]) == EXIT_USAGE);
+    assert(err_has("internal error"));
+    // With an empty --std-dir it does not resolve at all.
+    string[4] mut empty = {"fort", "--std-dir", "", "uses_std.ft"};
+    assert(run(empty[0..4]) == EXIT_COMPILE_ERROR);
+    assert(err_has("module 'std.thing' not found"));
+    unset_env("FORT_STD_DIR");
+}
+
+// The environment of this process, which the two tests above set and clear so
+// that each arm of the search is forced rather than observed. Neither has a
+// std binding and this is their one caller (D9.8).
+extern fn i32 setenv(char* name, char* value, i32 overwrite);
+extern fn i32 unsetenv(char* name);
+
+fn void set_env(string name, string value) {
+    char mut@ own c_name = str.to_cstr(name);
+    defer del(c_name);
+    char mut@ own c_value = str.to_cstr(value);
+    defer del(c_value);
+    assert(setenv(c_name.ptr, c_value.ptr, 1) == 0);
+}
+
+fn void unset_env(string name) {
+    char mut@ own c_name = str.to_cstr(name);
+    defer del(c_name);
+    assert(unsetenv(c_name.ptr) == 0);
+}
+
+// ---- re-entrancy (D20.5) --------------------------------------------------------
+
+// Two runs in one process are independent: the second answers for its own
+// command line, whatever the first reported, because every allocation and
+// every counter belongs to the session the run created (D20.5).
+fn void two_runs_in_one_process_share_nothing() {
+    write_file("first.ft", "fn i32 main() {\n    return 0\n}\n");
+    write_file("second.ft", "fn i32 main() {\n    return 0;\n}\n");
+    string[3] mut bad = {"fort", "--ast", "first.ft"};
+    string[3] mut good = {"fort", "--ast", "second.ft"};
+    assert(run(bad[0..3]) == EXIT_COMPILE_ERROR);
+    // The diagnostics of the first run are not the second's: it reports
+    // nothing and exits 0.
+    assert(run(good[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    // And the third run of the broken file reports again, rather than
+    // answering from a counter the second left behind.
+    assert(run(bad[0..3]) == EXIT_COMPILE_ERROR);
+    assert(err_has("first.ft:3:"));
+}
+
+// A hundred runs of one file neither grow nor change: the status of the
+// hundredth is the status of the first, which is what a language server
+// re-analysing a document depends on (D20.5).
+u64 RERUNS = 100;
+
+fn void a_hundred_runs_answer_alike() {
+    write_file("again.ft", "import nothere;\nfn i32 main() {\n    return 0;\n}\n");
+    string[2] mut argv = {"fort", "again.ft"};
+    u64 mut i = 0;
+    while (i < RERUNS) {
+        assert(run(argv[0..2]) == EXIT_COMPILE_ERROR);
+        i += 1;
+    }
+    string own err = captured_err();
+    defer del(err);
+    // The last run reported exactly what one run reports: the error and the
+    // one note a one-segment path carries -- the entry file's directory is
+    // the only root and there is no prefix reading -- and not a hundred
+    // runs' worth (D14.2, module-system.md 13).
+    assert(capture.line_count(err) == 2);
+}
+
+fn i32 main() {
+    every_flag_sets_its_own_option();
+    index_implies_check_and_json();
+    the_two_dumps_imply_nothing();
+    println("flags ok");
+    the_last_value_of_a_single_option_wins();
+    the_repeatable_options_keep_their_order();
+    the_defaults_are_clang_and_the_linux_triple();
+    a_valued_option_takes_the_next_argument_whatever_it_is();
+    println("valued ok");
+    an_unknown_option_is_a_usage_error();
+    a_missing_option_argument_is_a_usage_error();
+    a_second_entry_file_is_a_usage_error();
+    no_entry_file_is_a_usage_error();
+    tokens_combines_with_neither_check_nor_json();
+    ast_combines_with_neither_dump_nor_check();
+    json_without_check_is_a_usage_error();
+    no_arguments_prints_the_usage_line_alone();
+    a_usage_error_is_two_lines();
+    println("usage ok");
+    help_prints_the_usage_line_and_the_option_table();
+    version_prints_the_version_alone();
+    help_stops_the_parse_where_it_stands();
+    println("help ok");
+    an_unreadable_entry_file_is_exit_two();
+    an_entry_file_that_is_a_directory_is_the_loader_s_error();
+    a_clean_program_stops_at_the_missing_checker();
+    a_syntax_error_is_exit_one();
+    a_lexical_error_is_exit_one();
+    a_missing_import_is_exit_one();
+    println("statuses ok");
+    tokens_writes_the_dump_and_exits_zero();
+    tokens_of_a_file_with_a_lexical_error_is_exit_one();
+    ast_writes_the_tree_and_exits_zero();
+    ast_of_a_file_with_a_syntax_error_is_exit_one();
+    neither_dump_opens_an_import();
+    a_dump_of_an_unreadable_file_is_exit_two();
+    println("dumps ok");
+    the_front_end_walks_the_closure();
+    an_include_root_is_searched();
+    the_current_directory_is_not_a_search_root();
+    println("front end ok");
+    std_beside_the_binary_is_the_last_resort();
+    the_std_dir_option_wins_over_the_environment();
+    the_environment_is_read_when_the_option_is_absent();
+    an_empty_std_dir_variable_counts_as_unset();
+    an_empty_std_dir_option_counts_as_named();
+    an_empty_std_dir_option_resolves_no_std_import();
+    println("std dir ok");
+    two_runs_in_one_process_share_nothing();
+    a_hundred_runs_answer_alike();
+    println("reentrancy ok");
+    println("ok");
+    return 0;
+}

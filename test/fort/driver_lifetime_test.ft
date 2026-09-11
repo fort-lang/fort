@@ -1,0 +1,115 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| ok
+import capture;
+import containers;
+import driver;
+import std.io;
+
+// A run of the driver owns its session and its analysis and releases both on
+// every path out (D20.5), and no other test can see a release that is
+// missing: the gate's sanitizers instrument the C compiler and not the
+// x86-64 program the harness runs.
+//
+// What can see one is the heap itself. Two hundred runs of one command line
+// ask for the same blocks in the same order, so a run that gives them back
+// leaves the program break where it was, while a run that keeps something
+// pushes it up by the leaked bytes per run. The break and not the address of
+// a fresh block is what is watched: a leaked module set is large enough that
+// the allocator still serves a small block from a free chunk at the same
+// address, so an address probe read 0 with `analysis_free` deleted while the
+// break had climbed by megabytes.
+//
+// This is a program of its own rather than a test of driver_test.ft: the
+// measurement is of the allocator, so anything the same program did before it
+// -- forty other driver runs over forty other files -- fragments the heap and
+// moves the address for a reason that is not a leak. Its first act is the
+// loop.
+//
+// Each of the three modes is measured, since each releases a different set:
+// --tokens holds a session and a token vector, --ast a syntax tree as well,
+// and a build the module set of the whole closure. Verified by deleting
+// compile_entry's `defer session.free(&s)`, which moved the build address by
+// 490336 bytes over the rounds measured, and its `defer analysis_free(&an)`,
+// which moved it by 28480; with both in place every distance is 0.
+u64 ROUNDS = 200;
+u64 BOUND = 4096;
+
+// The current program break, which is where the heap ends: sbrk(0) moves
+// nothing and reports it. There is no std binding for it and this is its one
+// caller (D9.8).
+extern fn void* sbrk(i64 increment);
+
+fn u64 probe_address() {
+    return cast(sbrk(0), u64);
+}
+
+// How far the allocator moved between the round at half the rounds and the
+// end of them, whichever way it went: a leak that hands a later round a lower
+// address is a leak too, and a subtraction the wrong way round would trap
+// before the assertion (D11.1).
+//
+// The early round is held against the last two rounds and the smaller of the
+// two distances is the answer, which costs nothing when the break is steady
+// and absorbs an allocator that grows the heap on one round in two.
+fn u64 measure(string@ args) {
+    u64 mut early = 0;
+    u64 mut late = 0;
+    u64 mut last = 0;
+    u64 mut i = 0;
+    while (i < ROUNDS) {
+        // The driver writes to both descriptors; they are captured so that
+        // this test's own stdout is its one line.
+        i32 saved_out = capture.begin(io.STDOUT, "out.txt");
+        i32 saved_err = capture.begin(io.STDERR, "err.txt");
+        driver.run(args);
+        capture.end(io.STDERR, saved_err);
+        capture.end(io.STDOUT, saved_out);
+        if (i == ROUNDS / 2) {
+            early = probe_address();
+        }
+        if (i == ROUNDS - 2) {
+            late = probe_address();
+        }
+        if (i == ROUNDS - 1) {
+            last = probe_address();
+        }
+        i += 1;
+    }
+    assert(early != 0 && late != 0 && last != 0);
+    u64 one = distance(late, early);
+    u64 other = distance(last, early);
+    if (one < other) {
+        return one;
+    }
+    return other;
+}
+
+// How far apart two addresses are, whichever way the allocator moved.
+fn u64 distance(u64 a, u64 b) {
+    if (a > b) {
+        return a - b;
+    }
+    return b - a;
+}
+
+fn void write_file(string path, string text) {
+    assert(io.write_file(path, cast(text, u8@)));
+}
+
+fn i32 main() {
+    write_file("clean.ft", "fn i32 main() {\n    return 0;\n}\n");
+    write_file("closure.ft", "import helper;\nfn i32 main() {\n    return helper.one();\n}\n");
+    write_file("helper.ft", "fn i32 one() {\n    return 1;\n}\n");
+    string[3] mut tokens = {"fort", "--tokens", "clean.ft"};
+    string[3] mut ast = {"fort", "--ast", "clean.ft"};
+    // A build of a closure of two modules, which stops at the missing checker
+    // after the loader has read both (D14.1).
+    string[2] mut build = {"fort", "closure.ft"};
+    assert(measure(tokens[0..3]) < BOUND);
+    assert(measure(ast[0..3]) < BOUND);
+    assert(measure(build[0..2]) < BOUND);
+    println("ok");
+    return 0;
+}

@@ -330,6 +330,30 @@ A safe(r) C-like systems programming language.
   (`the_blocks_a_node_owns_are_released_with_it` in `test/fort/types_table_test.ft`, T-032).
   Verify such a witness by deleting the `del` it covers and watching it go red; two of them in
   `types.ft` had no witness at all until that was measured.
+  **An allocator probe needs two views, because each is blind to what the other sees** (T-034).
+  The address a round is handed catches a leak the allocator serves out of its own free chunks --
+  a 64-byte vector -- and misses a large one, because a small probe block still comes back at the
+  same address while the heap has grown: with `defer analysis_free` deleted in the driver the
+  address probe read 0 while the program break had climbed by megabytes, so the release it
+  claimed to witness was unwitnessed. The program break (`extern fn void* sbrk(i64)`, `sbrk(0)`)
+  catches exactly the other half: it did not move at all when `del(set->modules.items)` was
+  deleted. So watch both, and more than one address when a round allocates several blocks -- a
+  dropped `del(set->order.items)` left the address of the module vector exactly where it was, so
+  `modules_closure_test.ft` watches three addresses and the break, and every one of the six
+  releases was verified against the view that moves. Sample the early round against the **last
+  two** rounds and take the smaller distance: the allocator alternates between two positions from
+  one round to the next once the program's own path is long enough to change a bin -- which the
+  harness's `mkdtemp` directory is, while a hand run from `/tmp/prog` is not, so a probe reads 0
+  by hand and 12208 under `check-lang` -- and one of the two late rounds is in step whatever the
+  period, while a leak moves both. A probe over a whole driver run belongs in a file of its own
+  (`test/fort/driver_lifetime_test.ft`), since forty other tests in the same program fragment the
+  heap for reasons that are not leaks.
+  **A `//! stderr:` directive cannot see a line that should not be there**: it is a substring
+  check over the whole run, so "this call wrote nothing" is asserted by capturing the descriptor
+  into a file and comparing the bytes: `test/fort/support/capture.ft` does the `dup`/`dup2` and
+  the flush around it, and `diag_mute_test.ft` and `driver_test.ft` call it rather than repeating
+  the redirect. A mute that kept printing passed the directive form of that test and failed the
+  captured form.
   `lang-stage2` passes `--no-unsupported`: `bootstrap-unsupported.txt`
   demands that the compiler *reject* the features the C bootstrap lacks, which stage2 is under no
   such obligation to do, and inheriting it would keep twenty entries in `xfail-stage2.txt` for

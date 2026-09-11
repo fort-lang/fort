@@ -1,0 +1,283 @@
+// scope: namespaces and scopes (module-system.md 5, D7.9): the module
+// namespace holding a file's declarations and import bindings, the block
+// scopes nested inside it, and the universe of D12.2.
+//
+// One namespace per module holds functions, extern functions, structs, enums,
+// constants, globals and import bindings, and any two of them with the same
+// name collide, whatever their kinds (D7.9). Lookup of an unqualified name
+// goes from the innermost block outward, then the module namespace, then the
+// universe; a local may shadow a module-level or universe name but never an
+// enclosing local or parameter, which is why the block scopes are searched
+// apart from the module namespace (find_in_blocks).
+//
+// Enum members are not in a namespace (D3.9): `color.red` is the only
+// spelling, so a scope never holds one.
+//
+// This is src/bootstrap/scope.c transliterated. Two things differ from the C
+// and neither is behaviour: the scope owns its bindings as a vector of owned
+// pointers rather than through a vector of `void*`, since a binding must not
+// move when the vector grows; and the C's BIND_KIND_COUNT, which is one past
+// the last kind for a table, is gone, because a fort switch over an enum names
+// every member and needs no such sentinel (D7.6).
+//
+// Re-entrancy (D20.5): nothing here is module-level mutable state, every
+// function takes the scope it works on, and every binding dies with the scope
+// that declared it. A violated precondition panics at the call that broke it
+// (D13.3) rather than ending the process in a leaf.
+//
+// Dispatch: none. The kind of a binding is read by one switch, not by a table
+// of function pointers (D3.10).
+import ast;
+import containers;
+import diag;
+import std.strmap;
+
+// What a bound name denotes. The module-level kinds are the importable
+// declarations of module-system.md 3; b_module and b_symbol are the two
+// import bindings, which are not importable in turn since there is no
+// re-export (D9.3).
+enum bind_kind {
+    b_none,      // never stored; the kind of a binding that was not found
+    b_fn,        // `fn` (D8.1)
+    b_extern_fn, // `extern fn` (D9.8)
+    b_struct,    // `struct` (D3.8)
+    b_enum,      // `enum` (D3.9)
+    b_var,       // a module-level constant or `mut` global (D7.10)
+    b_module,    // `import a.b;`: the name denotes a module (D9.3)
+    b_symbol,    // `import a.b.c;`: the name denotes a declaration of a.b
+    b_local,     // a local of a block (D7.1)
+    b_param,     // a parameter (D8.1)
+}
+
+// A namespace or a block: the module namespace has no parent, every block
+// scope has one (D7.9).
+enum scope_kind {
+    s_module,
+    s_block,
+}
+
+// The first non-zero capacity of the binding vector; growth doubles from
+// there.
+u64 ITEMS_MIN_CAP = 8;
+
+// One bound name. `module` is the module a b_module binding denotes, held as
+// `void*` because a module holds a scope by value and the two modules would
+// otherwise import each other (D9.5); the loader casts it back. `to` is the
+// declaration a b_symbol binding names in the other module.
+struct binding {
+    string name;
+    bind_kind kind;
+    diag.loc loc;   // where the name is declared or bound
+    ast.node* node; // the declaring or importing node
+    void* module;
+    binding* to;
+}
+
+// A scope owns its bindings and borrows its parent. `scope{}` is a module
+// namespace with no bindings, which is what a zeroed module gets; init sets
+// the kind and the parent, and a scope whose parent is null is a module
+// namespace whatever its kind field says it is not.
+struct scope {
+    scope_kind kind;
+    scope mut* parent; // null for a module namespace
+    strmap.str_map index; // name -> position in `items`
+    binding mut* own mut@ own items;
+    u64 len;
+}
+
+// Sets the kind and the parent of a scope that holds no binding yet, as
+// src/bootstrap/scope.c's scope_init does over raw storage; the index and the
+// vector of a zeroed scope are already the empty ones, so nothing else is to
+// be done and `scope{}` is a valid module namespace.
+fn void init(scope mut* s, scope_kind kind, scope mut* parent) {
+    s->kind = kind;
+    s->parent = parent;
+}
+
+// Releases every binding and the index; the scope is empty and usable
+// afterwards. The nodes and the names the bindings point at belong to the
+// arena and to the pool that interned them (D13.5).
+fn void free(scope mut* s) {
+    u64 mut i = 0;
+    while (i < s->len) {
+        binding mut* own b = move(s->items[i]);
+        del(b);
+        i += 1;
+    }
+    del(s->items);
+    s->len = 0;
+    strmap.free(&s->index);
+}
+
+// Ensures room for one more binding, growing to the largest of ITEMS_MIN_CAP
+// and twice the capacity.
+fn void reserve(scope mut* s) {
+    if (s->len < s->items.len) {
+        return;
+    }
+    u64 mut cap = ITEMS_MIN_CAP;
+    if (s->items.len >= cap) {
+        // A pointer is more than one byte, so a capacity can never reach half
+        // the address space; the doubling is guarded all the same, since
+        // nothing here may detect an overflow by performing one (D11.1).
+        if (s->items.len > containers.U64_MAX / 2) {
+            panic("scope.reserve: capacity overflow");
+        }
+        cap = s->items.len * 2;
+    }
+    binding mut* own mut@ own bigger = new(binding* own, cap);
+    u64 mut i = 0;
+    while (i < s->len) {
+        bigger[i] = move(s->items[i]);
+        i += 1;
+    }
+    del(s->items);
+    s->items = move(bigger);
+}
+
+// Binds `name` in `s` and returns the new binding, or null when `s` already
+// binds the name: any two entries of one namespace collide whatever their
+// kinds (D7.9), and the caller reports the collision against find.
+// The declaring or importing node is `decl` and not `node`, which is what
+// src/bootstrap/scope.c calls it: a variable never takes its type's name
+// (D1.4), while the field it is stored in may.
+fn binding mut* declare(scope mut* s, string name, bind_kind kind, diag.loc at, ast.node* decl) {
+    // Any two entries of one namespace collide, whatever their kinds: a
+    // struct `node` and a function `node` cannot coexist (D7.9).
+    if (strmap.has(&s->index, name)) {
+        return null;
+    }
+    binding mut* own fresh = new(binding);
+    fresh->name = name;
+    fresh->kind = kind;
+    fresh->loc = at;
+    fresh->node = decl;
+    reserve(s);
+    s->items[s->len] = move(fresh);
+    s->len += 1;
+    strmap.put(&s->index, s->items[s->len - 1]->name, cast(s->len - 1, i64));
+    return s->items[s->len - 1];
+}
+
+// The binding of `name` in `s` alone, or null. The result is an immutable
+// view, as src/bootstrap/scope.h's `const binding_t*` is: only the declare
+// that created a binding hands out one the caller may write through.
+fn binding* find(scope* s, string name) {
+    i64 mut at = 0;
+    if (!strmap.get(&s->index, name, &at)) {
+        return null;
+    }
+    return s->items[cast(at, u64)];
+}
+
+// The binding of `name` in `s`, then in every enclosing scope (D7.9 steps 1
+// and 2), or null. The universe of step 3 is is_universe.
+fn binding* lookup(scope* s, string name) {
+    scope* mut cur = s;
+    while (cur != null) {
+        binding* found = find(cur, name);
+        if (found != null) {
+            return found;
+        }
+        cur = cur->parent;
+    }
+    return null;
+}
+
+// The binding of `name` in `s` and its enclosing block scopes, stopping
+// before the module namespace: the locals and parameters a new local may not
+// reuse the name of (D7.9), as opposed to the module-level names it may
+// shadow.
+//
+// A scope holds every binding declared in it so far, so D7.9's other rule,
+// that a local is visible only after its own declaration (`i32 x = x;` is an
+// error), is the caller's: declare the local after checking its initializer.
+fn binding* find_in_blocks(scope* s, string name) {
+    scope* mut cur = s;
+    while (cur != null && cur->kind == scope_kind.s_block) {
+        binding* found = find(cur, name);
+        if (found != null) {
+            return found;
+        }
+        cur = cur->parent;
+    }
+    return null;
+}
+
+// The number of bindings of `s`, in declaration order.
+fn u64 count(scope* s) {
+    return s->len;
+}
+
+// The binding at `i`; an index at or past count is a violated precondition
+// and panics (D13.3), since the slots beyond it hold stale pointers.
+fn binding* at(scope* s, u64 i) {
+    if (i >= s->len) {
+        panic("scope.at: index out of range");
+    }
+    return s->items[i];
+}
+
+// Whether the binding denotes a declaration, as opposed to one of the two
+// import bindings: what `import a.b.c;` needs of `c` for its symbol reading,
+// since import bindings are not re-exported (D9.3).
+fn bool is_declaration(binding* b) {
+    switch (b->kind) {
+    case bind_kind.b_fn, bind_kind.b_extern_fn, bind_kind.b_struct, bind_kind.b_enum,
+         bind_kind.b_var:
+        return true;
+    case bind_kind.b_none, bind_kind.b_module, bind_kind.b_symbol, bind_kind.b_local,
+         bind_kind.b_param:
+        return false;
+    }
+}
+
+// ---- the universe (D12.2) --------------------------------------------------------
+
+// The builtins of D12.2, looked up after every scope: `del`, `move`,
+// `assert`, `panic`, `print`, `println`, `eprint`, `eprintln`, `fprint` and
+// `fprintln`.
+u64 UNIVERSE_COUNT = 10;
+
+// The `i`-th universe name, in the order module-system.md 5 lists them; `i`
+// at or past UNIVERSE_COUNT is a violated precondition and panics (D13.3).
+// src/bootstrap/scope.c reads them out of a static array of C strings; a
+// switch says the same thing without module-level state (D20.5).
+fn string universe_at(u64 i) {
+    if (i == 0) {
+        return "del";
+    } else if (i == 1) {
+        return "move";
+    } else if (i == 2) {
+        return "assert";
+    } else if (i == 3) {
+        return "panic";
+    } else if (i == 4) {
+        return "print";
+    } else if (i == 5) {
+        return "println";
+    } else if (i == 6) {
+        return "eprint";
+    } else if (i == 7) {
+        return "eprintln";
+    } else if (i == 8) {
+        return "fprint";
+    } else if (i == 9) {
+        return "fprintln";
+    }
+    panic("scope.universe_at: index out of range");
+}
+
+// Whether `name` is a universe name. A module-level declaration or a local
+// may shadow one, which is then inaccessible in that scope (D7.9), so this is
+// a question and never an error on its own.
+fn bool is_universe(string name) {
+    u64 mut i = 0;
+    while (i < UNIVERSE_COUNT) {
+        if (name == universe_at(i)) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}

@@ -1,0 +1,208 @@
+// The environment the module suites share: a directory tree the running test
+// writes its modules into, the session and the module set that load them, and
+// the diagnostics the load reported, so that resolution is exercised against
+// real files (module-system.md 2).
+//
+// This is the port of test/modules_helpers.h, which the C suites include. A
+// `test/fort` test is a program rather than a translation unit, so the shared
+// part is a module the tests import with `-I support`; the directory is not a
+// test area, so the harness discovers nothing in it (run_tests.py walks `run`,
+// `fail`, `programs` and the `*_test.ft` of the root).
+//
+// A run test's program runs in a temporary directory of its own holding only
+// the program (toolchain.md 7), so the sandbox is a subdirectory of the
+// working directory rather than a mkdtemp of /tmp, and nothing removes it: the
+// harness removes the whole directory when the test ends. Each open makes a
+// directory of its own, so two tests of one program never see each other's
+// files.
+//
+// The diagnostics are read off the sink's records rather than captured from
+// stderr: the session's text form is off until a driver turns it on (D20.2),
+// so a suite reads what was reported without anything being printed.
+import diag;
+import modules;
+import scope;
+import session;
+import std.io;
+import std.str;
+import std.strbuf;
+
+// Creates one directory, which may already exist; the tests never care which.
+extern fn i32 mkdir(char* path, u32 mode);
+
+// The permissions a sandbox directory is created with: the owner's.
+u32 DIR_MODE = 0o700;
+
+// One per open, so that the sandboxes of one program do not collide.
+u64 mut SANDBOXES = 0;
+
+// The tree of the running test, its session and its module set.
+struct env {
+    session.session s;
+    modules.module_set set;
+    string own dir;
+}
+
+// A fresh sandbox with an empty session and an empty set.
+fn env open() {
+    env mut e = env{};
+    e.s = session.create();
+    e.set = modules.create();
+    SANDBOXES += 1;
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "sandbox");
+    strbuf.append_u64(&b, SANDBOXES);
+    e.dir = strbuf.take(&b);
+    make_dir(e.dir);
+    return e;
+}
+
+// Releases the set and then the session: every name of a tree points into the
+// session's storage, so the modules go first (D20.5).
+fn void close(env mut* e) {
+    modules.free(&e->set);
+    session.free(&e->s);
+    del(e->dir);
+}
+
+// Creates one directory of the sandbox, ignoring a directory that is there.
+fn void make_dir(string path) {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    mkdir(c_path.ptr, DIR_MODE);
+}
+
+// `<sandbox>/<rel>`, a fresh string the caller owns.
+fn string own in_sandbox(env* e, string rel) {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, e->dir);
+    strbuf.push(&b, '/');
+    strbuf.append(&b, rel);
+    return strbuf.take(&b);
+}
+
+// Writes a module at `rel` under the sandbox, creating the directories its
+// path names.
+fn void add(env mut* e, string rel, string text) {
+    string own path = in_sandbox(e, rel);
+    defer del(path);
+    u64 mut i = e->dir.len + 1;
+    while (i < path.len) {
+        if (path[i] == '/') {
+            make_dir(path[0..i]);
+        }
+        i += 1;
+    }
+    assert(io.write_file(path, cast(text, u8@)));
+}
+
+// Two and three lines of a module, joined: the C suites rely on C's adjacent
+// string literals, which fort has no spelling for (D2.9), so a source built
+// from pieces is written with these rather than with a concatenation the
+// caller would have to release.
+fn void add2(env mut* e, string rel, string first, string second) {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, first);
+    strbuf.append(&b, second);
+    add(e, rel, strbuf.view(&b));
+}
+
+fn void add3(env mut* e, string rel, string first, string second, string third) {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, first);
+    strbuf.append(&b, second);
+    strbuf.append(&b, third);
+    add(e, rel, strbuf.view(&b));
+}
+
+// Adds a search root of the sandbox, as `-I <dir>` does (D9.2).
+fn void root(env mut* e, string rel) {
+    string own path = in_sandbox(e, rel);
+    defer del(path);
+    modules.add_root(&e->set, path);
+}
+
+// Names the standard library directory, as `--std-dir` does (D14.1).
+fn void std_dir(env mut* e, string rel) {
+    string own path = in_sandbox(e, rel);
+    defer del(path);
+    modules.set_std_dir(&e->set, path);
+}
+
+// Loads the closure of the entry module `rel` of the sandbox.
+fn bool load(env mut* e, string rel) {
+    string own path = in_sandbox(e, rel);
+    defer del(path);
+    return modules.load(&e->s, &e->set, path);
+}
+
+// The errors reported so far, notes excluded (D14.2).
+fn u64 errors(env* e) {
+    return session.error_count(&e->s);
+}
+
+// Whether any diagnostic reported so far holds `text`. The C suites look for
+// a substring of the captured lines; a record holds the message alone, so a
+// test that means the file or the position asserts on those fields instead.
+fn bool said(env mut* e, string text) {
+    diag.sink mut* sink = session.diags(&e->s);
+    u64 mut i = 0;
+    while (i < diag.record_count(sink)) {
+        if (str.find(diag.record_at(sink, i).msg, text) >= 0) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// The number of diagnostics reported, notes included.
+fn u64 reports(env mut* e) {
+    return diag.record_count(session.diags(&e->s));
+}
+
+// The `i`-th diagnostic as it was reported, in order.
+fn diag.record report_at(env mut* e, u64 i) {
+    return diag.record_at(session.diags(&e->s), i);
+}
+
+// The module path of the `i`-th module of the dependency order, or the empty
+// string when there is no such module, so that a failing assertion is about
+// the path rather than a panic.
+fn string ordered(env* e, u64 i) {
+    if (i >= modules.count(&e->set)) {
+        return "";
+    }
+    return modules.at(&e->set, i)->path;
+}
+
+// The module path of the `i`-th module of the pass order, or the empty string
+// when there is no such module (D9.10, D14.2).
+fn string passed(env* e, u64 i) {
+    if (i >= modules.pass_count(&e->set)) {
+        return "";
+    }
+    return modules.pass_at(&e->set, i)->path;
+}
+
+// The binding of `name` in the namespace of the module `path`, or null.
+fn scope.binding* bound(env* e, string path, string name) {
+    modules.module* m = modules.find(&e->set, path);
+    if (m == null) {
+        return null;
+    }
+    return scope.find(&m->names, name);
+}
+
+// The sources the tests reuse.
+fn string src_main() {
+    return "fn i32 main() {\n    return 0;\n}\n";
+}
+
+fn string src_add() {
+    return "fn i32 add(i32 a, i32 b) {\n    return a + b;\n}\n";
+}

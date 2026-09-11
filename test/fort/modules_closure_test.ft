@@ -1,0 +1,561 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| cycles ok
+//| identity ok
+//| namespace ok
+//| closure ok
+//| order ok
+//| files ok
+//| lifetime ok
+//| ok
+import diag;
+import modules;
+import modules_env;
+import scope;
+import std.str;
+
+// The import closure of src/fort/modules.ft (module-system.md 6, 10, 13;
+// D9.5, D9.6, D7.9): cycles, the identity of a module by the real path of its
+// file, the module namespaces the bindings land in, and the dependency order.
+// The roots and the import readings are the other half, in modules_test.ft;
+// two declarations of one C symbol are compared where types exist, so they
+// belong to the checker (D9.8).
+//
+// This is the port of test/modules_closure_test.c, case for case, with the
+// file list of D20.2 and the release of what a set owns added at the end:
+// neither is in the C suite, the first because the C driver asks the set for
+// it and the second because the sanitizers watch the C compiler and not this
+// program.
+
+// The link a module's identity is tested through; there is no std binding for
+// it and this is its one caller (D9.8).
+extern fn i32 symlink(char* target, char* link_path);
+
+// ---- cycles (D9.5) --------------------------------------------------------------
+
+fn void a_cycle_is_reported_at_the_import_that_closes_it() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import other;\nfn i32 main() { return other.value(); }\n");
+    modules_env.add(&e, "other.ft", "import main;\nfn i32 value() { return 1; }\n");
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules_env.said(&e, "circular import: 'main' imports 'other' imports 'main'"));
+    // At the import that closes the cycle, which is the one in other.ft.
+    diag.record rec = modules_env.report_at(&e, 0);
+    assert(str.find(rec.loc.file, "other.ft") >= 0);
+    assert(rec.loc.line == 1);
+    assert(rec.loc.col == 1);
+}
+
+fn void a_module_importing_itself_is_a_cycle_of_length_one() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import main;\nfn i32 main() { return 0; }\n");
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules_env.said(&e, "circular import: 'main' imports 'main'"));
+}
+
+fn void a_longer_cycle_names_every_module_on_the_path() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import a;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "a.ft", "import b;\nfn i32 f() { return 0; }\n");
+    modules_env.add(&e, "b.ft", "import a;\nfn i32 g() { return 0; }\n");
+    assert(!modules_env.load(&e, "main.ft"));
+    // The walk is named from the module reached again, not from the entry.
+    assert(modules_env.said(&e, "circular import: 'a' imports 'b' imports 'a'"));
+}
+
+fn void a_diamond_is_not_a_cycle() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add2(&e, "main.ft", "import a;\nimport b;\n", "fn i32 main() { return 0; }\n");
+    modules_env.add(&e, "a.ft", "import c;\nfn i32 f() { return 0; }\n");
+    modules_env.add(&e, "b.ft", "import c;\nfn i32 g() { return 0; }\n");
+    modules_env.add(&e, "c.ft", "fn i32 h() { return 0; }\n");
+    assert(modules_env.load(&e, "main.ft"));
+    assert(modules.count(&e.set) == 4);
+    assert(modules_env.ordered(&e, 0) == "c");
+    assert(modules_env.ordered(&e, 1) == "a");
+    assert(modules_env.ordered(&e, 2) == "b");
+    assert(modules_env.ordered(&e, 3) == "main");
+}
+
+// ---- identity by the real path (D9.2) -------------------------------------------
+
+fn void one_file_reached_through_two_paths_is_an_error() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add2(&e, "main.ft", "import sub.x;\nimport x;\n", "fn i32 main() { return 0; }\n");
+    modules_env.add(&e, "sub/x.ft", "fn i32 f() { return 0; }\n");
+    modules_env.root(&e, "sub");
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules_env.said(&e, "module 'x' is the same file as module 'sub.x'"));
+    assert(modules_env.said(&e, "both name "));
+}
+
+fn void a_symbolic_link_reaches_the_same_module() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add2(&e, "main.ft", "import util;\nimport link;\n",
+                     "fn i32 main() { return 0; }\n");
+    modules_env.add(&e, "util.ft", modules_env.src_add());
+    // The target is relative to the directory the link is made in, which is
+    // the sandbox itself, so it is the bare file name.
+    string own link_path = modules_env.in_sandbox(&e, "link.ft");
+    defer del(link_path);
+    char mut@ own c_target = str.to_cstr("util.ft");
+    defer del(c_target);
+    char mut@ own c_link = str.to_cstr(link_path);
+    defer del(c_link);
+    assert(symlink(c_target.ptr, c_link.ptr) == 0);
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules_env.said(&e, "is the same file as module 'util'"));
+}
+
+fn void one_module_may_be_imported_under_several_names() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add2(&e, "main.ft", "import util;\nimport util as u;\n",
+                     "fn i32 main() { return u.add(1, 2); }\n");
+    modules_env.add(&e, "util.ft", modules_env.src_add());
+    assert(modules_env.load(&e, "main.ft"));
+    assert(modules.count(&e.set) == 2);
+    assert(modules_env.bound(&e, "main", "util")->module ==
+           modules_env.bound(&e, "main", "u")->module);
+}
+
+fn void a_module_and_one_of_its_declarations_may_be_imported_together() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add2(&e, "main.ft", "import util;\nimport util.add;\n",
+                     "fn i32 main() { return add(1, 2); }\n");
+    modules_env.add(&e, "util.ft", modules_env.src_add());
+    assert(modules_env.load(&e, "main.ft"));
+    assert(modules.count(&e.set) == 2);
+    assert(modules_env.bound(&e, "main", "add")->to == modules_env.bound(&e, "util", "add"));
+}
+
+// ---- the module namespace (D7.9) ------------------------------------------------
+
+fn void every_kind_of_declaration_enters_the_namespace() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add3(&e, "main.ft",
+                     "extern fn i64 write(i32 fd, void* buf, u64 n);\n"
+                     ,
+                     "struct point { i32 x; i32 y; }\nenum color { red, green }\n",
+                     "i32 LIMIT = 4;\ni32 mut counter = 0;\nfn i32 main() { return 0; }\n");
+    assert(modules_env.load(&e, "main.ft"));
+    assert(modules_env.bound(&e, "main", "write")->kind == scope.bind_kind.b_extern_fn);
+    assert(modules_env.bound(&e, "main", "point")->kind == scope.bind_kind.b_struct);
+    assert(modules_env.bound(&e, "main", "color")->kind == scope.bind_kind.b_enum);
+    assert(modules_env.bound(&e, "main", "LIMIT")->kind == scope.bind_kind.b_var);
+    assert(modules_env.bound(&e, "main", "counter")->kind == scope.bind_kind.b_var);
+    assert(modules_env.bound(&e, "main", "main")->kind == scope.bind_kind.b_fn);
+}
+
+fn void enum_members_are_not_in_the_namespace() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "enum color { red, green }\nfn i32 main() { return 0; }\n");
+    assert(modules_env.load(&e, "main.ft"));
+    // `color.red` is the only spelling, so a scope never holds a member
+    // (D3.9).
+    assert(modules_env.bound(&e, "main", "red") == null);
+}
+
+fn void two_declarations_of_one_name_collide() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add2(&e, "main.ft", "fn i32 add(i32 a) { return a; }\nstruct add { i32 x; }\n",
+                     "fn i32 main() { return 0; }\n");
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules_env.said(&e, "redeclaration of 'add'"));
+    assert(modules_env.said(&e, "previous declaration of 'add' here"));
+    // The note belongs to the error before it and is not counted (D14.2).
+    assert(modules_env.errors(&e) == 1);
+    assert(modules_env.reports(&e) == 2);
+    assert(modules_env.report_at(&e, 1).severity == diag.severity.note);
+}
+
+fn void a_declaration_colliding_with_an_import_is_reported_at_the_declaration() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add2(&e, "main.ft", "import util;\nfn i32 util(i32 a) { return a; }\n",
+                     "fn i32 main() { return 0; }\n");
+    modules_env.add(&e, "util.ft", modules_env.src_add());
+    assert(!modules_env.load(&e, "main.ft"));
+    // The later of the two positions carries the error and the earlier the
+    // note, whichever was bound first (D7.9, D14.2).
+    assert(modules_env.said(&e, "redeclaration of 'util'"));
+    assert(modules_env.report_at(&e, 0).loc.line == 2);
+    assert(modules_env.report_at(&e, 1).loc.line == 1);
+}
+
+fn void two_imports_binding_one_name_collide() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add2(&e, "main.ft", "import util;\nimport other as util;\n",
+                     "fn i32 main() { return 0; }\n");
+    modules_env.add(&e, "util.ft", modules_env.src_add());
+    modules_env.add(&e, "other.ft", "fn i32 one() { return 1; }\n");
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules_env.said(&e, "redeclaration of 'util'"));
+    assert(modules_env.report_at(&e, 0).loc.line == 2);
+}
+
+fn void a_namespace_holds_the_files_imports_and_its_declarations() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add2(&e, "main.ft", "import util;\nimport util.add as plus;\n",
+                     "fn i32 main() { return plus(1, 2); }\n");
+    modules_env.add(&e, "util.ft", modules_env.src_add());
+    assert(modules_env.load(&e, "main.ft"));
+    modules.module* m = modules.find(&e.set, "main");
+    assert(m != null);
+    assert(scope.count(&m->names) == 3);
+}
+
+// ---- the closure (module-system.md 10) ------------------------------------------
+
+fn void a_module_with_nothing_in_it_loads_with_an_empty_namespace() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import empty;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "empty.ft", "");
+    assert(modules_env.load(&e, "main.ft"));
+    modules.module* empty = modules.find(&e.set, "empty");
+    assert(empty != null);
+    assert(scope.count(&empty->names) == 0);
+}
+
+fn void a_module_is_read_once_however_many_modules_import_it() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add2(&e, "main.ft", "import a;\nimport util;\n", "fn i32 main() { return 0; }\n");
+    modules_env.add(&e, "a.ft", "import util;\nfn i32 f() { return util.add(1, 2); }\n");
+    modules_env.add(&e, "util.ft", modules_env.src_add());
+    assert(modules_env.load(&e, "main.ft"));
+    assert(modules.count(&e.set) == 3);
+    assert(modules.file_count(&e.set) == 3);
+    assert(modules_env.ordered(&e, 0) == "util");
+}
+
+fn void the_symbol_reading_works_at_any_depth() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import a.b.c.d;\nfn i32 main() { return d(1); }\n");
+    modules_env.add(&e, "a/b/c.ft", "fn i32 d(i32 x) { return x; }\n");
+    assert(modules_env.load(&e, "main.ft"));
+    assert(modules_env.ordered(&e, 0) == "a.b.c");
+    assert(modules_env.bound(&e, "main", "d")->kind == scope.bind_kind.b_symbol);
+}
+
+fn void the_file_of_a_module_is_its_root_joined_path() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "src/main.ft", "import geom.vec;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "src/geom/vec.ft", "struct vec2 { i64 x; i64 y; }\n");
+    assert(modules_env.load(&e, "src/main.ft"));
+    modules.module* vec = modules.find(&e.set, "geom.vec");
+    assert(vec != null);
+    // The file is the root as given followed by the path (toolchain.md 4).
+    assert(str.find(vec->file, "/src/geom/vec.ft") >= 0);
+}
+
+// <sandbox>/sub/../sub/x.ft and <sandbox>/sub/x.ft are one file, since a
+// module's identity is the real path of its file, `..` resolved (D9.2).
+fn void a_root_spelled_with_dot_dot_reaches_the_same_module() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add2(&e, "main.ft", "import sub.x;\nimport x;\n", "fn i32 main() { return 0; }\n");
+    modules_env.add(&e, "sub/x.ft", "fn i32 f() { return 0; }\n");
+    modules_env.root(&e, "sub/../sub");
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules_env.said(&e, "module 'x' is the same file as module 'sub.x'"));
+}
+
+fn void the_notes_of_a_missing_module_name_every_root_and_reading() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import util.strings;\nfn i32 main() { return 0; }\n");
+    modules_env.root(&e, "lib");
+    assert(!modules_env.load(&e, "main.ft"));
+    // One note per root and reading: two roots, two readings (D9.2,
+    // module-system.md 13).
+    u64 mut notes = 0;
+    u64 mut i = 0;
+    while (i < modules_env.reports(&e)) {
+        if (modules_env.report_at(&e, i).severity == diag.severity.note) {
+            notes += 1;
+        }
+        i += 1;
+    }
+    assert(notes == 4);
+}
+
+// ---- the pass order (D9.10, D14.2) ----------------------------------------------
+
+fn void a_chain_is_ordered_from_the_deepest_module_up() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import a;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "a.ft", "import b;\nfn i32 f() { return 0; }\n");
+    modules_env.add(&e, "b.ft", "import c;\nfn i32 g() { return 0; }\n");
+    modules_env.add(&e, "c.ft", "fn i32 h() { return 0; }\n");
+    assert(modules_env.load(&e, "main.ft"));
+    assert(modules_env.ordered(&e, 0) == "c");
+    assert(modules_env.ordered(&e, 1) == "b");
+    assert(modules_env.ordered(&e, 2) == "a");
+    assert(modules_env.ordered(&e, 3) == "main");
+}
+
+fn void the_pass_order_is_the_dependency_order_when_every_module_loaded() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import a;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "a.ft", "fn i32 f() { return 0; }\n");
+    assert(modules_env.load(&e, "main.ft"));
+    // A closure that resolved is ordered end to end, so the pass order of
+    // D9.10 is the dependency order and nothing more.
+    assert(modules.pass_count(&e.set) == modules.count(&e.set));
+    assert(modules_env.passed(&e, 0) == "a");
+    assert(modules_env.passed(&e, 1) == "main");
+    assert(modules.is_ordered(&e.set, modules.find(&e.set, "main")));
+}
+
+fn void the_pass_order_ends_with_the_modules_the_loader_never_ordered() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import a;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "a.ft", "import nothere;\nfn i32 f() { return 0; }\n");
+    assert(!modules_env.load(&e, "main.ft"));
+    // `a` never resolved and `main` was never reached, so neither is in the
+    // dependency order; both parsed, so a pass still visits them, the
+    // imported module first (D14.2, D20.1).
+    assert(modules.count(&e.set) == 0);
+    assert(modules.pass_count(&e.set) == 2);
+    assert(modules_env.passed(&e, 0) == "a");
+    assert(modules_env.passed(&e, 1) == "main");
+    assert(!modules.is_ordered(&e.set, modules.find(&e.set, "main")));
+}
+
+fn void a_module_that_did_not_parse_is_not_in_the_pass_order() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import a;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "a.ft", "fn i32 f() { return 0\n");
+    assert(!modules_env.load(&e, "main.ft"));
+    // A file with a syntax error is not checked, so no pass visits it
+    // (D14.2); the importer that parsed is visited.
+    assert(modules.pass_count(&e.set) == 1);
+    assert(modules_env.passed(&e, 0) == "main");
+}
+
+// ---- the files the loader read (D20.2) ------------------------------------------
+
+// Every file read, whether or not its module parsed and whether or not the
+// closure is complete: the "files" array of the check mode's document tells a
+// client which files it may clear stale diagnostics for.
+fn void the_file_list_is_every_file_read_in_read_order() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import a;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "a.ft", "fn i32 f() { return 0\n");
+    assert(!modules_env.load(&e, "main.ft"));
+    // The entry was read first and the module it imports second, and the one
+    // that did not parse is listed too.
+    assert(modules.file_count(&e.set) == 2);
+    assert(str.ends_with(modules.file_at(&e.set, 0), "main.ft"));
+    assert(str.ends_with(modules.file_at(&e.set, 1), "a.ft"));
+}
+
+// A file that could not be read is not among them: a module is recorded only
+// once its bytes are in hand.
+fn void a_file_that_could_not_be_read_is_not_listed() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import nothere;\nfn i32 main() { return 0; }\n");
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules.file_count(&e.set) == 1);
+    assert(str.ends_with(modules.file_at(&e.set, 0), "main.ft"));
+}
+
+// ---- lifetime -------------------------------------------------------------------
+
+// free empties the set and leaves it usable, which is what a second analysis
+// through one value needs (D20.5).
+fn void free_empties_the_set_and_leaves_it_usable() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import util;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "util.ft", modules_env.src_add());
+    assert(modules_env.load(&e, "main.ft"));
+    assert(modules.count(&e.set) == 2);
+    modules.free(&e.set);
+    modules.free(&e.set);
+    assert(modules.count(&e.set) == 0);
+    assert(modules.file_count(&e.set) == 0);
+    assert(modules.pass_count(&e.set) == 0);
+    assert(modules.find(&e.set, "util") == null);
+    assert(modules.entry(&e.set) == null);
+    // The same set loads the same closure again, and the roots it was given
+    // are gone with the rest.
+    assert(modules_env.load(&e, "main.ft"));
+    assert(modules.count(&e.set) == 2);
+}
+
+// The set owns every module, every namespace, the two vectors of module
+// pointers, the two maps, the arena of every tree and the pool of every path,
+// and no other test here can see a release that is missing: the gate's
+// sanitizers instrument the C compiler and not the x86-64 program the harness
+// runs.
+//
+// What can see one is the allocator, and it takes two views of it, because
+// each is blind to what the other sees. Two hundred identical rounds load the
+// same two modules and ask for the same blocks in the same order.
+//
+// The first view is the program break: a round that gives its blocks back
+// leaves it where it was, while a round that keeps something pushes it up.
+// That view sees a large leak and misses a small one, since the allocator
+// serves a sixty-four-byte vector out of its free chunks without ever asking
+// the kernel for more: with `del(set->modules.items)` deleted the break does
+// not move at all.
+//
+// The second view is the address of a block a round is handed: a round that
+// frees what it took is handed the same address again. That view sees a small
+// leak and misses a large one -- with `defer analysis_free` deleted in the
+// driver it read 0 while the break had climbed by megabytes -- so three of
+// them are watched here, the vector of owned modules, the vector of the
+// dependency order and the pool's first block, because one address alone does
+// not see every release either: a leak of the order vector alone left the
+// address of the modules vector where it was.
+//
+// Every release of modules.free was verified by deleting it and watching this
+// test fail: `del(set->modules.items)` and `del(set->order.items)` move an
+// address, `ast.ast_arena_free(&set->arena)`,
+// `containers.pool_free(&set->pool)`, `strmap.free(&set->by_path)` and
+// `scope.free(&m->names)` move both views. Dropping the `del(m)` of a module
+// makes the checked build abort with `overwriting owned value` (D17.11) in
+// the first test of this file instead.
+u64 LEAK_ROUNDS = 200;
+u64 LEAK_EARLY = 100;
+u64 LEAK_BOUND = 1024;
+
+// The current program break, which is where the heap ends: sbrk(0) moves
+// nothing and reports it. There is no std binding for it and this is its one
+// caller (D9.8).
+extern fn void* sbrk(i64 increment);
+
+fn u64 heap_end() {
+    return cast(sbrk(0), u64);
+}
+
+// How far apart two positions are, whichever way the heap moved: a
+// subtraction the wrong way round would trap before the assertion (D11.1).
+fn u64 distance(u64 a, u64 b) {
+    if (a > b) {
+        return a - b;
+    }
+    return b - a;
+}
+
+// How far the break moved between the early round and the end of the rounds:
+// the smaller of its distances to the last two, which costs nothing when the
+// break is steady and absorbs an allocator that grows the heap on one round
+// in two.
+fn u64 moved(u64 early, u64 late, u64 last) {
+    assert(early != 0 && late != 0 && last != 0);
+    u64 one = distance(late, early);
+    u64 other = distance(last, early);
+    if (one < other) {
+        return one;
+    }
+    return other;
+}
+
+fn void everything_a_set_holds_is_released_with_it() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import util;\nfn i32 main() { return util.add(1, 2); }\n");
+    modules_env.add(&e, "util.ft", modules_env.src_add());
+    u64[3] mut break_at = {};
+    u64[3] mut modules_at = {};
+    u64[3] mut order_at = {};
+    u64[3] mut pool_at = {};
+    u64 mut round = 0;
+    while (round < LEAK_ROUNDS) {
+        modules.module_set mut set = modules.create();
+        string own entry = modules_env.in_sandbox(&e, "main.ft");
+        assert(modules.load(&e.s, &set, entry));
+        del(entry);
+        // The addresses are read while the set still holds them, the break
+        // after it is freed, which is where a round's keeping shows.
+        u64 mut slot = 3;
+        if (round == LEAK_EARLY) {
+            slot = 0;
+        }
+        if (round == LEAK_ROUNDS - 2) {
+            slot = 1;
+        }
+        if (round == LEAK_ROUNDS - 1) {
+            slot = 2;
+        }
+        if (slot < 3) {
+            modules_at[slot] = cast(set.modules.items.ptr, u64);
+            order_at[slot] = cast(set.order.items.ptr, u64);
+            pool_at[slot] = cast(set.pool.head, u64);
+        }
+        modules.free(&set);
+        if (slot < 3) {
+            break_at[slot] = heap_end();
+        }
+        round += 1;
+    }
+    assert(moved(break_at[0], break_at[1], break_at[2]) < LEAK_BOUND);
+    assert(moved(modules_at[0], modules_at[1], modules_at[2]) < LEAK_BOUND);
+    assert(moved(order_at[0], order_at[1], order_at[2]) < LEAK_BOUND);
+    assert(moved(pool_at[0], pool_at[1], pool_at[2]) < LEAK_BOUND);
+}
+
+fn i32 main() {
+    a_cycle_is_reported_at_the_import_that_closes_it();
+    a_module_importing_itself_is_a_cycle_of_length_one();
+    a_longer_cycle_names_every_module_on_the_path();
+    a_diamond_is_not_a_cycle();
+    println("cycles ok");
+    one_file_reached_through_two_paths_is_an_error();
+    a_symbolic_link_reaches_the_same_module();
+    one_module_may_be_imported_under_several_names();
+    a_module_and_one_of_its_declarations_may_be_imported_together();
+    println("identity ok");
+    every_kind_of_declaration_enters_the_namespace();
+    enum_members_are_not_in_the_namespace();
+    two_declarations_of_one_name_collide();
+    a_declaration_colliding_with_an_import_is_reported_at_the_declaration();
+    two_imports_binding_one_name_collide();
+    a_namespace_holds_the_files_imports_and_its_declarations();
+    println("namespace ok");
+    a_module_with_nothing_in_it_loads_with_an_empty_namespace();
+    a_module_is_read_once_however_many_modules_import_it();
+    the_symbol_reading_works_at_any_depth();
+    the_file_of_a_module_is_its_root_joined_path();
+    a_root_spelled_with_dot_dot_reaches_the_same_module();
+    the_notes_of_a_missing_module_name_every_root_and_reading();
+    println("closure ok");
+    a_chain_is_ordered_from_the_deepest_module_up();
+    the_pass_order_is_the_dependency_order_when_every_module_loaded();
+    the_pass_order_ends_with_the_modules_the_loader_never_ordered();
+    a_module_that_did_not_parse_is_not_in_the_pass_order();
+    println("order ok");
+    the_file_list_is_every_file_read_in_read_order();
+    a_file_that_could_not_be_read_is_not_listed();
+    println("files ok");
+    free_empties_the_set_and_leaves_it_usable();
+    everything_a_set_holds_is_released_with_it();
+    println("lifetime ok");
+    println("ok");
+    return 0;
+}

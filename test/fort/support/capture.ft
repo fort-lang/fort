@@ -1,0 +1,62 @@
+// Capturing a descriptor into a file, which is how a suite holds what a
+// function wrote rather than what it returned.
+//
+// A `test/fort` test is a program, so the only way to assert on the bytes the
+// driver writes to stdout or stderr is to read them back: the harness's
+// `stderr:` directive is a substring check over the whole run and cannot see
+// a line that should not be there, nor tell which call wrote it. begin
+// redirects one descriptor into a file of the test's own directory and end
+// puts the original back, so one call is captured and the next is not.
+//
+// The runtime buffers stdout per descriptor and writes stderr straight out
+// (toolchain.md 5.3), so both ends flush before they move the descriptor.
+import std.io;
+import std.str;
+import std.strbuf;
+
+// Neither has a std binding and this is their one caller (D9.8).
+extern fn i32 dup(i32 fd);
+extern fn i32 dup2(i32 old_fd, i32 new_fd);
+
+// Sends `fd` to `path` and returns the descriptor it was, which end takes
+// back. The file is created or truncated.
+fn i32 begin(i32 fd, string path) {
+    io.flush(fd);
+    i32 saved = dup(fd);
+    assert(saved >= 0);
+    i32 target = io.open_write(path);
+    assert(target >= 0);
+    assert(dup2(target, fd) >= 0);
+    assert(io.close(target));
+    return saved;
+}
+
+// Puts the descriptor `saved` back as `fd`; what was written in between is in
+// the file begin named.
+fn void end(i32 fd, i32 saved) {
+    io.flush(fd);
+    assert(dup2(saved, fd) >= 0);
+    assert(io.close(saved));
+}
+
+// The whole of `path`, which is what the captured descriptor wrote.
+fn string own text(string path) {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(io.read_file(path, &b));
+    return strbuf.take(&b);
+}
+
+// The number of lines of `s`, counting a trailing newline as ending the last
+// one rather than starting another.
+fn u64 line_count(string s) {
+    u64 mut lines = 0;
+    u64 mut i = 0;
+    while (i < s.len) {
+        if (s[i] == '\n') {
+            lines += 1;
+        }
+        i += 1;
+    }
+    return lines;
+}

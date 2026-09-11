@@ -99,6 +99,13 @@ struct sink {
     u64 errors;
     u64 file_errors;
     bool text;
+    // The open mutes and the two counts the outermost one saw: a muted
+    // stretch reports nothing and costs nothing (module-system.md 3). Like
+    // `text`, they are a mode and not state, so reset leaves them alone; a
+    // mute may not span a reset.
+    u64 mute_depth;
+    u64 mute_errors;
+    u64 mute_file_errors;
 }
 
 // The empty sink; allocates nothing and writes nothing until set_text.
@@ -122,6 +129,48 @@ fn void free(sink mut* s) {
 // grow the heap (D20.5).
 fn void reset(sink mut* s) {
     free(s);
+}
+
+// Whether a diagnostic reported now is dropped: a muted one is counted by
+// error and never written or recorded, so a probing parse costs nothing and
+// count still says whether the file it read parsed.
+fn bool muted(sink* s) {
+    return s->mute_depth > 0;
+}
+
+// Drops the line and the record of every diagnostic until unmute, which
+// restores the error count this call saw: a parse that only answers a
+// question about a file, such as whether it declares a name, reports nothing
+// (module-system.md 3, src/bootstrap/diag.h). Mutes nest, and only the
+// outermost one restores the count. A note of a muted error is dropped with
+// it, so a caller that annotates under a mute must put the note under the
+// same guard as its error or the note stands alone.
+fn void mute(sink mut* s) {
+    if (s->mute_depth == 0) {
+        s->mute_errors = s->errors;
+        s->mute_file_errors = s->file_errors;
+    }
+    s->mute_depth += 1;
+}
+
+// Closes the mute this call's matching mute opened and returns how many
+// errors were swallowed, which is 0 for every mute but the outermost one; the
+// outermost also restores the error count and the file budget the mute saw,
+// since the file the probe read spent no budget of the file that asked for
+// it. An unmute with no mute open is a violated precondition and panics
+// (D13.3).
+fn u64 unmute(sink mut* s) {
+    if (s->mute_depth == 0) {
+        panic("diag.unmute: no diag.mute is open");
+    }
+    s->mute_depth -= 1;
+    if (s->mute_depth > 0) {
+        return 0;
+    }
+    u64 suppressed = s->errors - s->mute_errors;
+    s->errors = s->mute_errors;
+    s->file_errors = s->mute_file_errors;
+    return suppressed;
 }
 
 // Whether each diagnostic also writes its text line to stderr as it arrives.
@@ -205,19 +254,25 @@ fn void reserve(sink mut* s) {
 // parser.c, so a sink that refused one here would make stage2 report fewer
 // diagnostics than stage1 over the same file.
 fn void report(sink mut* s, loc l, severity sev, string msg) {
-    loc copy = loc{containers.pool_intern(&s->pool, l.file), l.line, l.col, l.end_line, l.end_col};
-    string text = containers.pool_intern(&s->pool, msg);
-    reserve(s);
-    s->records[s->count] = record{copy, sev, text};
-    s->count += 1;
+    // A muted diagnostic is counted and nothing else: no record is kept and
+    // no byte is interned, so a probe costs the sink nothing but the count
+    // unmute takes back.
+    if (!muted(s)) {
+        loc copy =
+            loc{containers.pool_intern(&s->pool, l.file), l.line, l.col, l.end_line, l.end_col};
+        string text = containers.pool_intern(&s->pool, msg);
+        reserve(s);
+        s->records[s->count] = record{copy, sev, text};
+        s->count += 1;
+    }
     // A note belongs to the error before it and is counted by neither counter
     // (D14.2), so it spends nothing of the file's budget either.
     if (sev == severity.error) {
         s->errors += 1;
         s->file_errors += 1;
     }
-    if (s->text) {
-        write_line(copy, sev, text);
+    if (s->text && !muted(s)) {
+        write_line(l, sev, msg);
     }
 }
 

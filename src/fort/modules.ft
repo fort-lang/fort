@@ -1,0 +1,1105 @@
+// modules: module resolution (module-system.md 1, 2, 3, 6 and 10; D9.1 to
+// D9.6, D9.10): the search roots, the two readings of an import path, the
+// import closure of the entry file, the cycle rule and the dependency order
+// the later passes walk.
+//
+// One source file is one module (D9.1); its module path is its file path
+// relative to a search root with `/` replaced by `.` and `.ft` dropped. The
+// roots are the directory containing the entry file, then each `-I`
+// directory, then the standard library directory, which is the only place a
+// path beginning with `std` is looked up and is never used for any other path
+// (D9.2). A module's identity is the real path of its file, so one file
+// reached through two module paths is an error (D9.2).
+//
+// load walks the closure depth first: it parses a module, collects its
+// declarations into its namespace, then resolves its imports, so the modules
+// land in `at` in dependency order, every imported module before its importers
+// (D9.10). A module reached while it is still being walked closes a cycle,
+// which is an error at the import that closes it (D9.5).
+//
+// Diagnostics follow D14.2 and the table of module-system.md 13; they are
+// reported at the `import` keyword, or at 1:1 for the entry file's own name.
+// The loader stops at the first module with errors, so the diagnostics of one
+// module come together as D14.2 requires; the caller asks the session's error
+// count whether anything was reported.
+//
+// This is src/bootstrap/modules.c transliterated. What differs is not
+// behaviour: every file is read through the session (D20.5), so a language
+// server's unsaved buffer is what the closure sees and a file read twice is
+// read once; the "not found" of a candidate search is a bool rather than a
+// `str_t` whose `ptr` is NULL, since a fort `string` has no such reading; and
+// an index past the end panics at the call that broke the precondition (D13.3)
+// instead of ending the process.
+//
+// Dispatch: none. The kind of a top-level declaration is read by one switch,
+// not by a table of function pointers (D3.10).
+import ast;
+import containers;
+import diag;
+import lexer;
+import parser;
+import scope;
+import session;
+import std.libc;
+import std.str;
+import std.strbuf;
+import std.strmap;
+
+// The real path of a file, which is a module's identity (D9.2), and whether a
+// readable file of a name exists, which is the condition both readings of
+// module-system.md 3 are stated with. Neither has a std binding and this is
+// their one caller (D9.8); realpath allocates its result with malloc, so it
+// is declared `own` and released with libc.free (stdlib.md 2.2).
+extern fn char* own realpath(char* name, char* resolved);
+extern fn i32 access(char* path, i32 mode);
+
+// The mode bit access is asked about: readable.
+i32 R_OK = 4;
+
+// The extension of a fort source file (D1.1); a file with any other extension
+// is never a module (module-system.md 1).
+string MODULE_SUFFIX = ".ft";
+
+// The separator of module paths (D9.1) and the one of file paths.
+char PATH_SEPARATOR = '.';
+char DIRECTORY_SEPARATOR = '/';
+
+// The first segment reserved for the standard library: a path beginning with
+// it is looked up only in the standard library directory, and no other path
+// is ever looked up there (D9.2).
+string STD_SEGMENT = "std";
+
+// The first non-zero capacity of the module vectors; growth doubles from
+// there.
+u64 VEC_MIN_CAP = 8;
+
+// Where a module stands in the walk of the import closure (D9.5).
+enum module_state {
+    m_loading, // on the current import path: reaching it again is a cycle
+    m_ready,   // its imports are resolved and it is in the dependency order
+}
+
+// One module of the closure.
+struct module {
+    string path;       // the module path, `std.io` (D9.1)
+    string file;       // the file as the compiler opened it, the `<file>` of D14.2
+    string real;       // the real path: the module's identity (D9.2)
+    string source;     // the file's bytes, which the tree's names point into
+    ast.node mut* ast; // the module node, complete only when `parsed`
+    scope.scope names; // the module namespace (D7.9)
+    bool parsed;       // no diagnostic was reported while lexing and parsing it
+    bool entry;        // the module named on the command line (D14.1)
+    module_state state;
+}
+
+// The modules of the closure, owned: one allocation per module, so a module
+// does not move when the vector grows and the pointers the order and the
+// stack hold stay good.
+struct owned_modules {
+    module mut* own mut@ own items;
+    u64 len;
+}
+
+// A vector of modules the set does not own: the dependency order and the
+// import path being walked. It stands after `module` because stage1 lays a
+// struct out in declaration order and a struct whose field points at one
+// declared later reports "infinite size" (T-082).
+struct module_vec {
+    module mut* mut@ own items;
+    u64 len;
+}
+
+// The import closure and everything reading it allocated. `module_set{}` is a
+// valid empty set, so a struct holding one is initialized with {}.
+struct module_set {
+    owned_modules modules;     // in the order they were read, owned
+    module_vec order;          // an imported module before its importers (D9.10)
+    module_vec stack;          // the import path being walked, for cycles (D9.5)
+    containers.str_vec roots;  // the `-I` roots, interned, in command-line order (D9.2)
+    strmap.str_map by_path;    // module path -> position in `modules`
+    strmap.str_map by_real;    // real path -> position in `modules`, the identity map (D9.2)
+    string entry_dir;          // the first root: the directory containing the entry file
+    string std_dir;            // the standard library directory, the last root
+    containers.pool pool;      // owns every path above and every file name a loc holds
+    ast.arena arena;           // owns every module's nodes until free
+    strbuf.str_buf msg;        // the message under construction
+    bool stopped;              // a module has errors: read no further file (D14.2)
+}
+
+// ---- the module vectors ------------------------------------------------------------
+
+// Ensures room for one more module, growing to the largest of VEC_MIN_CAP and
+// twice the capacity.
+fn void owned_reserve(owned_modules mut* v) {
+    if (v->len < v->items.len) {
+        return;
+    }
+    u64 mut cap = VEC_MIN_CAP;
+    if (v->items.len >= cap) {
+        // A pointer is more than one byte, so a capacity can never reach half
+        // the address space; the doubling is guarded all the same, since
+        // nothing here may detect an overflow by performing one (D11.1).
+        if (v->items.len > containers.U64_MAX / 2) {
+            panic("modules.owned_reserve: capacity overflow");
+        }
+        cap = v->items.len * 2;
+    }
+    module mut* own mut@ own bigger = new(module* own, cap);
+    u64 mut i = 0;
+    while (i < v->len) {
+        bigger[i] = move(v->items[i]);
+        i += 1;
+    }
+    del(v->items);
+    v->items = move(bigger);
+}
+
+// Ensures room for one more element of a borrowed vector, growing the same
+// way.
+fn void vec_reserve(module_vec mut* v) {
+    if (v->len < v->items.len) {
+        return;
+    }
+    u64 mut cap = VEC_MIN_CAP;
+    if (v->items.len >= cap) {
+        if (v->items.len > containers.U64_MAX / 2) {
+            panic("modules.vec_reserve: capacity overflow");
+        }
+        cap = v->items.len * 2;
+    }
+    module mut* mut@ own bigger = new(module*, cap);
+    u64 mut i = 0;
+    while (i < v->len) {
+        bigger[i] = v->items[i];
+        i += 1;
+    }
+    del(v->items);
+    v->items = move(bigger);
+}
+
+fn void vec_push(module_vec mut* v, module mut* m) {
+    vec_reserve(v);
+    v->items[v->len] = m;
+    v->len += 1;
+}
+
+// Drops the last element; an empty vector is a violated precondition (D13.3),
+// since a pop with no push is a walk that lost its balance.
+fn void vec_pop(module_vec mut* v) {
+    if (v->len == 0) {
+        panic("modules.vec_pop: the vector is empty");
+    }
+    v->len -= 1;
+}
+
+// ---- messages ---------------------------------------------------------------------
+
+// Empties the message buffer; the three below append to it, as the msg_*
+// family of src/bootstrap/diag.h does over an sb_t.
+fn void msg_begin(module_set mut* set) {
+    strbuf.clear(&set->msg);
+}
+
+fn void msg_str(module_set mut* set, string text) {
+    strbuf.append(&set->msg, text);
+}
+
+// Appends a name between single quotes: 'name'.
+fn void msg_quote(module_set mut* set, string name) {
+    strbuf.push(&set->msg, '\'');
+    strbuf.append(&set->msg, name);
+    strbuf.push(&set->msg, '\'');
+}
+
+fn string msg_end(module_set* set) {
+    return strbuf.view(&set->msg);
+}
+
+// The message buffer's contents, interned in the set's pool, so that a loc may
+// borrow them; the buffer is empty afterwards. Every string a message quotes is
+// interned this way before the message is built, since the message uses the
+// same buffer.
+fn string take(module_set mut* set) {
+    string kept = containers.pool_intern(&set->pool, strbuf.view(&set->msg));
+    strbuf.clear(&set->msg);
+    return kept;
+}
+
+// ---- paths ------------------------------------------------------------------------
+
+// The directory part of a path, without the trailing separator: the entry
+// file's directory is the first search root, and is the empty string when the
+// path has no directory part (D9.2, toolchain.md 4).
+fn string directory_of(string path) {
+    u64 mut len = 0;
+    bool mut separated = false;
+    u64 mut i = 0;
+    while (i < path.len) {
+        if (path[i] == DIRECTORY_SEPARATOR) {
+            len = i;
+            separated = true;
+        }
+        i += 1;
+    }
+    if (separated && len == 0) {
+        // An entry at the file system root keeps the separator: an empty root
+        // would make every candidate relative to the current directory, which
+        // is never a search root (D9.2).
+        return path[0..1];
+    }
+    return path[0..len];
+}
+
+// The last component of a path without its `.ft` suffix: the entry file's
+// module path is its base name, `src/app.ft` giving `app` (module-system.md
+// 2).
+fn string base_name(string path) {
+    u64 mut start = 0;
+    u64 mut i = 0;
+    while (i < path.len) {
+        if (path[i] == DIRECTORY_SEPARATOR) {
+            start = i + 1;
+        }
+        i += 1;
+    }
+    string base = path[start..path.len];
+    if (base.len > MODULE_SUFFIX.len && str.ends_with(base, MODULE_SUFFIX)) {
+        return base[0..base.len - MODULE_SUFFIX.len];
+    }
+    return base;
+}
+
+// Whether `base` holds the one character a module path is spelled with, the
+// `.` that the symbol splitting of D9.7 reads; every other character reaches
+// the symbol verbatim and cannot spell a path (D9.1).
+fn bool holds_path_separator(string base) {
+    return str.index_of(base, PATH_SEPARATOR) >= 0;
+}
+
+// The `i`-th segment of an import path: the path node holds one identifier
+// per segment, in source order (D9.1).
+fn string segment_at(ast.node* path, u64 i) {
+    return ast.ast_child(path, i)->name;
+}
+
+// The first `n` segments joined with `.`, the spelling of a module path in a
+// diagnostic (D9.1).
+fn string path_text(module_set mut* set, ast.node* path, u64 n) {
+    msg_begin(set);
+    u64 mut i = 0;
+    while (i < n) {
+        if (i > 0) {
+            strbuf.push(&set->msg, PATH_SEPARATOR);
+        }
+        msg_str(set, segment_at(path, i));
+        i += 1;
+    }
+    return take(set);
+}
+
+// `<dir>/<segments from..n joined with '/'>.ft` in `out`: the file the
+// segments name under one root, `/` standing for the `.` of the module path
+// (D9.1). A root of zero length, which the entry file's directory is when the
+// entry names no directory, contributes no separator (toolchain.md 4). The
+// result is a view of `out`, valid until the next call on it, so a path the
+// loader only probes is never interned.
+fn string file_of(strbuf.str_buf mut* out, string dir, ast.node* path, u64 from, u64 n) {
+    strbuf.clear(out);
+    if (dir.len > 0) {
+        strbuf.append(out, dir);
+        if (dir[dir.len - 1] != DIRECTORY_SEPARATOR) {
+            strbuf.push(out, DIRECTORY_SEPARATOR);
+        }
+    }
+    u64 mut i = from;
+    while (i < n) {
+        if (i > from) {
+            strbuf.push(out, DIRECTORY_SEPARATOR);
+        }
+        strbuf.append(out, segment_at(path, i));
+        i += 1;
+    }
+    strbuf.append(out, MODULE_SUFFIX);
+    return strbuf.view(out);
+}
+
+// Whether the path begins with the reserved segment `std` (D9.2).
+fn bool is_std_path(ast.node* path, u64 n) {
+    return n > 0 && segment_at(path, 0) == STD_SEGMENT;
+}
+
+// The number of files the first `n` segments may name, one per search root
+// (D9.2). A path beginning with `std` has the one candidate in the standard
+// library directory, `std` naming that directory itself, so `import std;`
+// names no file at all; every other path is looked up in the entry file's
+// directory and the `-I` roots and never in the standard library.
+fn u64 candidate_count(module_set* set, ast.node* path, u64 n) {
+    if (n == 0) {
+        return 0;
+    }
+    if (is_std_path(path, n)) {
+        if (n >= 2 && set->std_dir.len > 0) {
+            return 1;
+        }
+        return 0;
+    }
+    return 1 + set->roots.len;
+}
+
+// The `i`-th candidate file of the first `n` segments, the roots in order
+// (D9.2), built into `out`.
+fn string candidate_at(module_set* set, strbuf.str_buf mut* out, ast.node* path, u64 n, u64 i) {
+    if (is_std_path(path, n)) {
+        // `std` maps to the standard library directory itself, so `std.io`
+        // is `<std>/io.ft` (D9.2).
+        return file_of(out, set->std_dir, path, 1, n);
+    }
+    if (i == 0) {
+        return file_of(out, set->entry_dir, path, 0, n);
+    }
+    return file_of(out, containers.str_at(&set->roots, i - 1), path, 0, n);
+}
+
+// ---- the file system ----------------------------------------------------------------
+
+// Whether a readable file of that name exists: the condition both readings of
+// module-system.md 3 are stated with.
+fn bool file_exists(string path) {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    return access(c_path.ptr, R_OK) == 0;
+}
+
+// The first root that holds the file of the first `n` segments: for one
+// reading of a path, the first root in order that contains the file wins
+// (module-system.md 2). False when no root holds it, with *out unchanged;
+// only the file that is there is interned, so the loader keeps no copy of a
+// path it merely looked at.
+fn bool find_file(module_set mut* set, ast.node* path, u64 n, string mut* out) {
+    u64 count = candidate_count(set, path, n);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut i = 0;
+    while (i < count) {
+        string file = candidate_at(set, &b, path, n, i);
+        if (file_exists(file)) {
+            *out = containers.pool_intern(&set->pool, file);
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// The real path of a file, symbolic links and `..` resolved: a module's
+// identity (D9.2). A path realpath cannot resolve stands for itself, so a
+// file that vanished between the probe and here is still one module.
+fn string real_path(module_set mut* set, string path) {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    char* own mut resolved = realpath(c_path.ptr, null);
+    if (resolved == null) {
+        return containers.pool_intern(&set->pool, path);
+    }
+    string real = containers.pool_intern(&set->pool, str.from_cstr(resolved));
+    libc.free(cast(move(resolved), void* own));
+    return real;
+}
+
+// ---- diagnostics (module-system.md 13) ------------------------------------------------
+
+// The position of an error without one in the file: 1:1 (D14.2).
+fn diag.loc file_start(string file) {
+    return diag.loc_make(file, 1, 1);
+}
+
+// `note: looked for <path>` once per root and reading, the notes a module
+// that was not found carries (module-system.md 13).
+fn void note_candidates(session.session mut* s, module_set mut* set, diag.loc at, ast.node* path,
+                        u64 n) {
+    u64 count = candidate_count(set, path, n);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut i = 0;
+    while (i < count) {
+        // The candidate is quoted from the buffer it was built in: the
+        // message copies the bytes and the sink copies them again, so a path
+        // the loader only looked at is never interned (module-system.md 13).
+        msg_begin(set);
+        msg_str(set, "looked for ");
+        msg_str(set, candidate_at(set, &b, path, n, i));
+        diag.note(session.diags(s), at, msg_end(set));
+        i += 1;
+    }
+}
+
+// `module 'util.strings' not found`: no file exists for either reading
+// (module-system.md 13).
+fn void error_not_found(session.session mut* s, module_set mut* set, diag.loc at, ast.node* path,
+                        u64 n) {
+    string name = path_text(set, path, n);
+    msg_begin(set);
+    msg_str(set, "module ");
+    msg_quote(set, name);
+    msg_str(set, " not found");
+    diag.error(session.diags(s), at, msg_end(set));
+    note_candidates(s, set, at, path, n);
+    if (n >= 2) {
+        note_candidates(s, set, at, path, n - 1);
+    }
+}
+
+// `module 'util' has no declaration named 'strngs'`: the symbol reading found
+// the file of the prefix, which declares no such name (module-system.md 13).
+fn void error_no_declaration(session.session mut* s, module_set mut* set, diag.loc at,
+                             string from_path, string name) {
+    msg_begin(set);
+    msg_str(set, "module ");
+    msg_quote(set, from_path);
+    msg_str(set, " has no declaration named ");
+    msg_quote(set, name);
+    diag.error(session.diags(s), at, msg_end(set));
+}
+
+// `cannot import 'x': it is an import of module 'a.b'`: the import bindings
+// of another module are not importable, there is no re-export (D9.3).
+fn void error_not_exported(session.session mut* s, module_set mut* set, diag.loc at,
+                           string from_path, string name) {
+    msg_begin(set);
+    msg_str(set, "cannot import ");
+    msg_quote(set, name);
+    msg_str(set, ": it is an import of module ");
+    msg_quote(set, from_path);
+    diag.error(session.diags(s), at, msg_end(set));
+}
+
+// `ambiguous import 'a.b.c': a/b/c.ft and a/b.ft exist`: both readings
+// succeed, whichever roots the two files live under (module-system.md 3).
+fn void error_ambiguous(session.session mut* s, module_set mut* set, diag.loc at, ast.node* path,
+                        u64 n, string module_file, string prefix_file) {
+    string name = path_text(set, path, n);
+    msg_begin(set);
+    msg_str(set, "ambiguous import ");
+    msg_quote(set, name);
+    msg_str(set, ": ");
+    msg_str(set, module_file);
+    msg_str(set, " and ");
+    msg_str(set, prefix_file);
+    msg_str(set, " exist");
+    diag.error(session.diags(s), at, msg_end(set));
+}
+
+// `entry file name 'my.app' cannot contain '.'`: the entry base name is the
+// entry module's path, and a `.` in it spells another module's symbol prefix,
+// which the injectivity of D9.7 rests on (D9.1, module-system.md 2 and 13).
+fn void error_entry_name_separator(session.session mut* s, module_set mut* set, diag.loc at,
+                                   string base) {
+    msg_begin(set);
+    msg_str(set, "entry file name ");
+    msg_quote(set, base);
+    msg_str(set, " cannot contain '");
+    strbuf.push(&set->msg, PATH_SEPARATOR);
+    msg_str(set, "'");
+    diag.error(session.diags(s), at, msg_end(set));
+}
+
+// `module 'util.x' is the same file as module 'x'`: one file reached through
+// two module paths, a module's identity being the real path of its file
+// (D9.2).
+fn void error_same_file(session.session mut* s, module_set mut* set, diag.loc at, string path,
+                        string other, string real) {
+    msg_begin(set);
+    msg_str(set, "module ");
+    msg_quote(set, path);
+    msg_str(set, " is the same file as module ");
+    msg_quote(set, other);
+    diag.error(session.diags(s), at, msg_end(set));
+    msg_begin(set);
+    msg_str(set, "both name ");
+    msg_str(set, real);
+    diag.note(session.diags(s), at, msg_end(set));
+}
+
+// `circular import: 'main' imports 'util' imports 'main'`, reported at the
+// import that closes the cycle (D9.5): the modules of the walk from the one
+// reached again, then that module once more.
+fn void error_cycle(session.session mut* s, module_set mut* set, diag.loc at, module* reached) {
+    u64 mut from = 0;
+    u64 mut i = 0;
+    while (i < set->stack.len) {
+        if (cast(set->stack.items[i], module*) == reached) {
+            from = i;
+            i = set->stack.len;
+        } else {
+            i += 1;
+        }
+    }
+    msg_begin(set);
+    msg_str(set, "circular import: ");
+    i = from;
+    while (i < set->stack.len) {
+        msg_quote(set, set->stack.items[i]->path);
+        msg_str(set, " imports ");
+        i += 1;
+    }
+    msg_quote(set, reached->path);
+    diag.error(session.diags(s), at, msg_end(set));
+}
+
+// `redeclaration of 'add'`, pointing at the later of the two positions with a
+// note on the earlier one (D7.9, D14.2), which is what lets the declarations
+// of a file be collected before its import bindings are bound.
+fn void error_redeclaration(session.session mut* s, module_set mut* set, diag.loc first,
+                            diag.loc second, string name) {
+    diag.loc mut earlier = first;
+    diag.loc mut later = second;
+    if (first.line > second.line || (first.line == second.line && first.col > second.col)) {
+        earlier = second;
+        later = first;
+    }
+    msg_begin(set);
+    msg_str(set, "redeclaration of ");
+    msg_quote(set, name);
+    diag.error(session.diags(s), later, msg_end(set));
+    msg_begin(set);
+    msg_str(set, "previous declaration of ");
+    msg_quote(set, name);
+    msg_str(set, " here");
+    diag.note(session.diags(s), earlier, msg_end(set));
+}
+
+// ---- the module namespace (D7.9) --------------------------------------------------
+
+// The binding kind of a top-level declaration; b_none for a node that is
+// none, which is what an AST error node of a file with syntax errors is.
+fn scope.bind_kind decl_kind(ast.node* decl) {
+    if (decl->kind == ast.ast_kind.k_fn_decl) {
+        // `extern fn` declares a C function and is importable like any other
+        // declaration (D9.8).
+        if ((decl->flags & ast.FLAG_EXTERN) != 0) {
+            return scope.bind_kind.b_extern_fn;
+        }
+        return scope.bind_kind.b_fn;
+    }
+    if (decl->kind == ast.ast_kind.k_struct_decl) {
+        return scope.bind_kind.b_struct;
+    }
+    if (decl->kind == ast.ast_kind.k_enum_decl) {
+        return scope.bind_kind.b_enum;
+    }
+    if (decl->kind == ast.ast_kind.k_var_decl) {
+        // A module-level `Type NAME = init;` is a constant and `mut Type g` a
+        // global; both occupy one name (D7.10).
+        return scope.bind_kind.b_var;
+    }
+    return scope.bind_kind.b_none;
+}
+
+// Binds a name in the module namespace, reporting the collision of D7.9 when
+// it is taken: any two entries collide whatever their kinds, import bindings
+// included.
+fn scope.binding mut* bind_name(session.session mut* s, module_set mut* set, module mut* m,
+                                string name, scope.bind_kind kind, diag.loc at, ast.node* decl) {
+    scope.binding mut* bound = scope.declare(&m->names, name, kind, at, decl);
+    if (bound == null) {
+        error_redeclaration(s, set, scope.find(&m->names, name)->loc, at, name);
+    }
+    return bound;
+}
+
+// Collects the module's declarations into its namespace before its imports
+// are resolved, so that another module's symbol reading can ask whether this
+// one declares a name (module-system.md 3). Enum members are not names
+// (D3.9), so only the top-level declarations enter. Returns false when a
+// collision was reported; every collision of the module is reported first, as
+// they are that module's own errors (D14.2).
+fn bool collect_declarations(session.session mut* s, module_set mut* set, module mut* m) {
+    if (m->ast == null) {
+        return true;
+    }
+    bool mut ok = true;
+    u64 mut i = 0;
+    while (i < ast.ast_len(m->ast)) {
+        ast.node* decl = ast.ast_child(m->ast, i);
+        scope.bind_kind kind = decl_kind(decl);
+        if (kind != scope.bind_kind.b_none) {
+            if (bind_name(s, set, m, decl->name, kind, decl->loc, decl) == null) {
+                ok = false;
+            }
+        }
+        i += 1;
+    }
+    return ok;
+}
+
+// ---- loading a module (module-system.md 10) ------------------------------------------
+
+// The module at `file` under the module path `path`, read, parsed and walked
+// if it is new; null after a diagnostic was reported at `at`. A module
+// already on the walk closes a cycle (D9.5) and a file already read under
+// another path is one file with two identities (D9.2).
+fn module mut* load_module(session.session mut* s, module_set mut* set, string path, string file,
+                           diag.loc at, bool entry) {
+    i64 mut known = 0;
+    if (strmap.get(&set->by_path, path, &known)) {
+        module mut* found = set->modules.items[cast(known, u64)];
+        if (found->state == module_state.m_loading) {
+            error_cycle(s, set, at, found);
+            return null;
+        }
+        return found;
+    }
+    if (set->stopped) {
+        // A module of the closure already has errors, so no further file is
+        // read and this import is left without a diagnostic of its own
+        // (D14.2).
+        return null;
+    }
+    string mut source = "";
+    if (!session.read_source(s, file, &source)) {
+        msg_begin(set);
+        msg_str(set, "cannot read ");
+        msg_quote(set, file);
+        diag.error(session.diags(s), at, msg_end(set));
+        return null;
+    }
+    string real = real_path(set, file);
+    i64 mut twin = 0;
+    if (strmap.get(&set->by_real, real, &twin)) {
+        error_same_file(s, set, at, path, set->modules.items[cast(twin, u64)]->path, real);
+        return null;
+    }
+    module mut* own fresh = new(module);
+    fresh->path = path;
+    fresh->file = file;
+    fresh->real = real;
+    fresh->source = source;
+    fresh->entry = entry;
+    fresh->state = module_state.m_loading;
+    scope.init(&fresh->names, scope.scope_kind.s_module, null);
+    owned_reserve(&set->modules);
+    set->modules.items[set->modules.len] = move(fresh);
+    set->modules.len += 1;
+    module mut* m = set->modules.items[set->modules.len - 1];
+    strmap.put(&set->by_path, m->path, cast(set->modules.len - 1, i64));
+    strmap.put(&set->by_real, m->real, cast(set->modules.len - 1, i64));
+
+    // The parser recovers from a syntax error and hands back the tree of what
+    // parsed (D14.2), so whether the file parsed is the number of diagnostics
+    // the lexer and the parser reported, never the tree being null.
+    u64 before = session.error_count(s);
+    lexer.tok_vec mut toks = lexer.tokvec_create();
+    // A lexical error costs its line and lexing resumes at the next one, so
+    // the tokens cover the whole file and the parser runs either way (D14.2).
+    lexer.lex_file(s, m->file, m->source, &toks);
+    m->ast = parser.parse_module(s, m->file, &toks, &set->arena);
+    lexer.tokvec_free(&toks);
+    m->parsed = session.error_count(s) == before;
+    if (!m->parsed) {
+        return null;
+    }
+    if (!collect_declarations(s, set, m)) {
+        return null;
+    }
+    vec_push(&set->stack, m);
+    bool resolved = resolve_imports(s, set, m);
+    vec_pop(&set->stack);
+    if (!resolved) {
+        return null;
+    }
+    // Post-order: the module joins the dependency order once every module it
+    // imports is in it (D9.10).
+    m->state = module_state.m_ready;
+    vec_push(&set->order, m);
+    return m;
+}
+
+// ---- resolving one import (module-system.md 3) ---------------------------------------
+
+// Binds one declaration of another module under `as` name or its own, the
+// symbol reading of D9.3. The import bindings of that module are not
+// importable, there is no re-export.
+fn bool bind_symbol(session.session mut* s, module_set mut* set, module mut* m, module* from,
+                    string name, string bound, diag.loc at, ast.node* decl) {
+    scope.binding* target = scope.find(&from->names, name);
+    if (target == null) {
+        error_no_declaration(s, set, at, from->path, name);
+        return false;
+    }
+    if (!scope.is_declaration(target)) {
+        error_not_exported(s, set, at, from->path, name);
+        return false;
+    }
+    scope.binding mut* b = bind_name(s, set, m, bound, scope.bind_kind.b_symbol, at, decl);
+    if (b == null) {
+        return false;
+    }
+    b->to = target;
+    return true;
+}
+
+// Whether the file of the prefix module declares `name`, which is what the
+// symbol reading of D9.3 asks. A module the closure already holds answers from
+// its namespace, whose declarations are collected before its imports are
+// walked; any other file is read and parsed here alone, reporting nothing and
+// joining nothing, since the module reading may still win and a module outside
+// the closure is never read (module-system.md 3 and 10). A file that does not
+// parse declares nothing: the error belongs to whoever imports it for real.
+fn bool prefix_declares(session.session mut* s, module_set mut* set, string path, string file,
+                        string name) {
+    if (set->stopped) {
+        return false;
+    }
+    module* known = find(set, path);
+    if (known != null) {
+        scope.binding* found = scope.find(&known->names, name);
+        return found != null && scope.is_declaration(found);
+    }
+    string mut source = "";
+    if (!session.read_source(s, file, &source)) {
+        return false;
+    }
+    bool mut declares = false;
+    ast.arena mut ar = ast.arena{};
+    defer ast.ast_arena_free(&ar);
+    lexer.tok_vec mut toks = lexer.tokvec_create();
+    defer lexer.tokvec_free(&toks);
+    diag.mute(session.diags(s));
+    u64 before = session.error_count(s);
+    // The lexer resynchronises at the next line (D14.2), so the probe parses
+    // the tokens either way; a file that reported anything declares nothing.
+    lexer.lex_file(s, file, source, &toks);
+    ast.node* probed = parser.parse_module(s, file, &toks, &ar);
+    if (probed != null && session.error_count(s) == before) {
+        u64 mut i = 0;
+        while (i < ast.ast_len(probed) && !declares) {
+            ast.node* decl = ast.ast_child(probed, i);
+            declares = decl_kind(decl) != scope.bind_kind.b_none && decl->name == name;
+            i += 1;
+        }
+    }
+    diag.unmute(session.diags(s));
+    return declares;
+}
+
+// `import a.b.{s1, s2 as t};` is sugar for independent symbol imports from
+// `a.b`, with the symbol reading forced: the prefix must be a module file
+// and every item one of its declarations (D9.3).
+fn bool resolve_items(session.session mut* s, module_set mut* set, module mut* m, ast.node* imp) {
+    ast.node* path = imp->a;
+    u64 n = ast.ast_len(path);
+    string mut file = "";
+    if (!find_file(set, path, n, &file)) {
+        error_not_found(s, set, imp->loc, path, n);
+        return false;
+    }
+    module mut* from = load_module(s, set, path_text(set, path, n), file, imp->loc, false);
+    if (from == null) {
+        return false;
+    }
+    u64 mut i = 0;
+    while (i < ast.ast_len(imp)) {
+        ast.node* item = ast.ast_child(imp, i);
+        string mut bound = item->name;
+        if (item->a != null) {
+            bound = item->a->name;
+        }
+        if (!bind_symbol(s, set, m, from, item->name, bound, imp->loc, item)) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// The two readings of `import a.b.c;` (D9.3): the module reading when
+// `a/b/c.ft` exists under some root, the symbol reading when `a/b.ft` exists
+// and declares `c`. Exactly one must succeed; a one-segment path has only the
+// module reading, since at most one trailing segment names a declaration.
+//
+// Only the module the import resolves to is loaded. When both files exist the
+// prefix is probed for the name alone, without being read into the closure,
+// so that an import that resolves to `a/b/c.ft` never inherits the errors, the
+// imports or the extern declarations of the unrelated module `a/b.ft`
+// (module-system.md 10).
+fn bool resolve_path(session.session mut* s, module_set mut* set, module mut* m, ast.node* imp) {
+    ast.node* path = imp->a;
+    u64 n = ast.ast_len(path);
+    string last = segment_at(path, n - 1);
+    string mut bound = last;
+    if (imp->b != null) {
+        bound = imp->b->name;
+    }
+    string mut module_file = "";
+    bool have_module = find_file(set, path, n, &module_file);
+    string mut prefix_file = "";
+    bool mut have_prefix = false;
+    if (n >= 2) {
+        have_prefix = find_file(set, path, n - 1, &prefix_file);
+    }
+    if (have_module) {
+        string mut prefix_path = "";
+        if (n >= 2) {
+            prefix_path = path_text(set, path, n - 1);
+        }
+        if (have_prefix && prefix_declares(s, set, prefix_path, prefix_file, last)) {
+            error_ambiguous(s, set, imp->loc, path, n, module_file, prefix_file);
+            return false;
+        }
+        module mut* target = load_module(s, set, path_text(set, path, n), module_file, imp->loc,
+                                         false);
+        if (target == null) {
+            return false;
+        }
+        scope.binding mut* b = bind_name(s, set, m, bound, scope.bind_kind.b_module, imp->loc,
+                                         imp);
+        if (b == null) {
+            return false;
+        }
+        b->module = cast(target, void*);
+        return true;
+    }
+    if (have_prefix) {
+        // The symbol reading is the only one left, so the prefix module is
+        // this import's module and is read into the closure.
+        module mut* prefix = load_module(s, set, path_text(set, path, n - 1), prefix_file,
+                                         imp->loc, false);
+        if (prefix == null) {
+            return false;
+        }
+        return bind_symbol(s, set, m, prefix, last, bound, imp->loc, imp);
+    }
+    error_not_found(s, set, imp->loc, path, n);
+    return false;
+}
+
+// Resolves every import of the module, in source order; imports appear before
+// every declaration, which the parser has already enforced (D9.3).
+//
+// Every failing import of the module is reported, so that its errors appear
+// together, and `stopped` then keeps the remaining imports from reading any
+// further file: processing stops at the module boundary, which is what D14.2
+// asks of a module that has errors.
+fn bool resolve_imports(session.session mut* s, module_set mut* set, module mut* m) {
+    if (m->ast == null) {
+        return true;
+    }
+    bool mut ok = true;
+    u64 mut i = 0;
+    while (i < ast.ast_len(m->ast)) {
+        ast.node* imp = ast.ast_child(m->ast, i);
+        if (imp->kind == ast.ast_kind.k_import) {
+            bool mut resolved = false;
+            if (ast.ast_len(imp) > 0) {
+                resolved = resolve_items(s, set, m, imp);
+            } else {
+                resolved = resolve_path(s, set, m, imp);
+            }
+            if (!resolved) {
+                ok = false;
+                set->stopped = true;
+            }
+        }
+        i += 1;
+    }
+    return ok;
+}
+
+// ---- the set --------------------------------------------------------------------------
+
+// The empty set; allocates nothing. A call result needs no move (D17.5).
+fn module_set create() {
+    return module_set{};
+}
+
+// Releases every module, its namespace and the shared arena; the set is empty
+// and usable afterwards. Every string it handed out dies here, the sources
+// excepted: those belong to the session that read them.
+fn void free(module_set mut* set) {
+    u64 mut i = 0;
+    while (i < set->modules.len) {
+        module mut* own m = move(set->modules.items[i]);
+        scope.free(&m->names);
+        del(m);
+        i += 1;
+    }
+    del(set->modules.items);
+    set->modules.len = 0;
+    del(set->order.items);
+    set->order.len = 0;
+    del(set->stack.items);
+    set->stack.len = 0;
+    containers.str_free(&set->roots);
+    strmap.free(&set->by_path);
+    strmap.free(&set->by_real);
+    ast.ast_arena_free(&set->arena);
+    strbuf.free(&set->msg);
+    set->entry_dir = "";
+    set->std_dir = "";
+    set->stopped = false;
+    // The pool holds every path above and every file name a loc borrows, so
+    // it goes last.
+    containers.pool_free(&set->pool);
+}
+
+// Appends a `-I` search root; the roots are searched in the order they were
+// added, after the entry file's directory (D9.2). The string is copied.
+fn void add_root(module_set mut* set, string dir) {
+    containers.str_push(&set->roots, containers.pool_intern(&set->pool, dir));
+}
+
+// Sets the standard library directory, the only root a path beginning with
+// `std` is looked up in (D9.2). The string is copied; without it no such path
+// resolves.
+fn void set_std_dir(module_set mut* set, string dir) {
+    set->std_dir = containers.pool_intern(&set->pool, dir);
+}
+
+// The modules of the closure in dependency order, every module after the ones
+// it imports (D9.10).
+fn u64 count(module_set* set) {
+    return set->order.len;
+}
+
+fn module* at(module_set* set, u64 i) {
+    if (i >= set->order.len) {
+        panic("modules.at: index out of range");
+    }
+    return set->order.items[i];
+}
+
+// Whether the loader put `m` in the dependency order, as opposed to the
+// modules the pass order visits after it (D9.5, D14.2).
+fn bool is_ordered(module_set* set, module* m) {
+    u64 mut i = 0;
+    while (i < set->order.len) {
+        if (cast(set->order.items[i], module*) == m) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// Whether the module belongs to the second group of the pass order: it parsed
+// and the loader never ordered it (D14.2).
+fn bool is_unordered_pass_module(module_set* set, module* m) {
+    return m->parsed && m->ast != null && !is_ordered(set, m);
+}
+
+// The modules a whole-closure pass visits, in the order it must visit them
+// (D9.10, D14.2): the dependency order first, then every other module the
+// loader read that parsed -- one whose own import failed, or an importer of a
+// file that did not parse -- in the reverse of the read order, which is depth
+// first, so an imported module comes before its importer in that group too.
+// The checker walks this order and so does the index walk, which is what makes
+// the file order of the index the order D20.3 documents; the two may not
+// drift, so neither builds an order of its own.
+fn u64 pass_count(module_set* set) {
+    u64 mut n = set->order.len;
+    u64 mut i = 0;
+    while (i < set->modules.len) {
+        if (is_unordered_pass_module(set, set->modules.items[i])) {
+            n += 1;
+        }
+        i += 1;
+    }
+    return n;
+}
+
+fn module* pass_at(module_set* set, u64 i) {
+    if (i < set->order.len) {
+        return set->order.items[i];
+    }
+    // The second group is read depth first, so it is visited in the reverse of
+    // the read order (D9.10).
+    u64 mut seen = set->order.len;
+    u64 mut k = set->modules.len;
+    while (k > 0) {
+        module* m = set->modules.items[k - 1];
+        if (is_unordered_pass_module(set, m)) {
+            if (seen == i) {
+                return m;
+            }
+            seen += 1;
+        }
+        k -= 1;
+    }
+    panic("modules.pass_at: index out of range");
+}
+
+// The files of every module the loader read, in the order it read them,
+// whether or not the module parsed and whether or not the closure is
+// complete: the "files" array of the check mode's document, which tells a
+// client which files it may clear stale diagnostics for (D20.2). A file that
+// could not be read is not among them, since a module is recorded only once
+// its bytes are in hand.
+fn u64 file_count(module_set* set) {
+    return set->modules.len;
+}
+
+fn string file_at(module_set* set, u64 i) {
+    if (i >= set->modules.len) {
+        panic("modules.file_at: index out of range");
+    }
+    return set->modules.items[i]->file;
+}
+
+// The module of the given path, or null when the closure holds none. The
+// result is an immutable view, as src/bootstrap/modules.h's `const module_t*`
+// is: nothing outside the loader writes through a module, and an immutable set
+// may not hand out a mutable one.
+fn module* find(module_set* set, string path) {
+    i64 mut at_index = 0;
+    if (!strmap.get(&set->by_path, path, &at_index)) {
+        return null;
+    }
+    return set->modules.items[cast(at_index, u64)];
+}
+
+// The entry module, or null before load has read it.
+fn module* entry(module_set* set) {
+    u64 mut i = 0;
+    while (i < set->modules.len) {
+        module* m = set->modules.items[i];
+        if (m->entry) {
+            return m;
+        }
+        i += 1;
+    }
+    return null;
+}
+
+// Reads `entry_file`, derives its module path from its base name and walks the
+// import closure (module-system.md 2, 10). Returns false after reporting a
+// diagnostic: an unreadable file, a lexical or syntax error, or an import
+// error of module-system.md 13 that a namespace answers -- not every row of
+// that table is the loader's, since two `extern` declarations of one C symbol
+// are compared as types and so in the checker (D9.8).
+fn bool load(session.session mut* s, module_set mut* set, string entry_file) {
+    u64 before = session.error_count(s);
+    string file = containers.pool_intern(&set->pool, entry_file);
+    // The entry file's directory is always a search root and the current
+    // directory never is (D9.2).
+    set->entry_dir = containers.pool_intern(&set->pool, directory_of(file));
+    // The entry file's module path is its base name: `src/app.ft` is the
+    // module `app`. The base name need not be a path segment, since the entry
+    // file is named on the command line rather than reached by an import
+    // (D9.1, module-system.md 2), so `007_case.ft` is the module `007_case`,
+    // which no import path can spell.
+    string base = containers.pool_intern(&set->pool, base_name(file));
+    // The base name may not contain a `.`, the one character a module path is
+    // spelled with: `my.app.ft` is the module `my.app`, whose `main` is the
+    // `my.app.main` that the module `my/app.ft` already emits (D9.1, D9.7).
+    // Every other character reaches the symbol verbatim, `my:app.ft` emitting
+    // `my:app.main`, which no module path can spell. The error has no position
+    // in the file, so it is reported at 1:1 (D14.2).
+    if (holds_path_separator(base)) {
+        error_entry_name_separator(s, set, file_start(file), base);
+        return false;
+    }
+    if (load_module(s, set, base, file, file_start(file), true) == null) {
+        return false;
+    }
+    return session.error_count(s) == before;
+}

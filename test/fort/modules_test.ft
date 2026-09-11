@@ -1,0 +1,724 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| entry ok
+//| errors ok
+//| module reading ok
+//| roots ok
+//| std ok
+//| symbol reading ok
+//| ambiguity ok
+//| prefix ok
+//| ok
+import diag;
+import modules;
+import modules_env;
+import scope;
+import std.str;
+import std.strbuf;
+
+// Module resolution of src/fort/modules.ft (module-system.md 1, 2, 3, 13;
+// D9.1 to D9.4): the search roots, the two readings of an import path, the
+// standard library root, and the ambiguity and not-found rules. The closure,
+// its order, the namespaces and the pass order are the other half, in
+// modules_closure_test.ft.
+//
+// This is the port of test/modules_test.c, case for case, so that the two
+// loaders answer the same questions; what it does not carry over is that
+// suite's last test, which holds a fixed path buffer against a path too long
+// for it. The fort loader joins paths into a growing buffer (std.strbuf) and
+// has no such bound.
+
+// ---- the entry file (module-system.md 2) ----------------------------------------
+
+fn void the_entry_module_path_is_its_base_name() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", modules_env.src_main());
+    assert(modules_env.load(&e, "main.ft"));
+    assert(modules.count(&e.set) == 1);
+    assert(modules_env.ordered(&e, 0) == "main");
+    assert(modules.entry(&e.set) == modules.at(&e.set, 0));
+}
+
+fn void an_entry_file_in_a_directory_keeps_only_its_base_name() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "src/app.ft", modules_env.src_main());
+    assert(modules_env.load(&e, "src/app.ft"));
+    assert(modules_env.ordered(&e, 0) == "app");
+}
+
+fn void the_entry_directory_is_the_first_search_root() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "src/app.ft",
+                    "import util;\nfn i32 main() { return util.add(1, 2); }\n");
+    modules_env.add(&e, "src/util.ft", modules_env.src_add());
+    assert(modules_env.load(&e, "src/app.ft"));
+    assert(modules_env.ordered(&e, 0) == "util");
+    assert(modules_env.ordered(&e, 1) == "app");
+}
+
+// module-system.md 2 asks the entry base name to be a module path segment,
+// which the test corpus D14.4 fixes (`NNN_name.ft`, compiled as the entry
+// file) cannot satisfy; decisions.md wins (D1.2). Such a name only makes the
+// module unreachable by an import, which cannot spell it.
+fn void an_entry_base_name_that_is_no_identifier_is_taken_as_it_is() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "001_leading_zero.ft", modules_env.src_main());
+    assert(modules_env.load(&e, "001_leading_zero.ft"));
+    assert(modules_env.ordered(&e, 0) == "001_leading_zero");
+}
+
+// The entry base name may not contain a `.`, which would spell a module path
+// and break the injectivity of the symbol names (D9.1, D9.7).
+fn void a_dotted_entry_base_name_is_rejected() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "my.app.ft", modules_env.src_main());
+    assert(!modules_env.load(&e, "my.app.ft"));
+    assert(modules_env.said(&e, "entry file name 'my.app' cannot contain '.'"));
+}
+
+fn void a_dotted_entry_is_reported_at_the_start_of_the_file() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "my.app.ft", modules_env.src_main());
+    assert(!modules_env.load(&e, "my.app.ft"));
+    assert(modules_env.reports(&e) == 1);
+    diag.record rec = modules_env.report_at(&e, 0);
+    // An error with no position in the file is reported at 1:1 (D14.2): it is
+    // the file's name that is wrong, not anything written inside it.
+    assert(rec.loc.line == 1);
+    assert(rec.loc.col == 1);
+    assert(rec.severity == diag.severity.error);
+    assert(str.find(rec.loc.file, "my.app.ft") >= 0);
+}
+
+fn void a_dotted_entry_file_is_never_read() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "my.app.ft", modules_env.src_main());
+    assert(!modules_env.load(&e, "my.app.ft"));
+    // The name is rejected before the file is read, so no module exists and
+    // nothing can be emitted for one (module-system.md 2).
+    assert(modules.count(&e.set) == 0);
+    assert(modules.file_count(&e.set) == 0);
+    assert(modules.entry(&e.set) == null);
+}
+
+// `my.app.ft` is the module `my.app`, whose `main` is the `my.app.main` the
+// module `my/app.ft` already emits (D9.1, module-system.md 7).
+fn void a_dotted_entry_is_rejected_beside_the_module_it_would_collide_with() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "my.app.ft", "import my.app;\nfn i32 main() { return app.main(); }\n");
+    modules_env.add(&e, "my/app.ft", modules_env.src_main());
+    assert(!modules_env.load(&e, "my.app.ft"));
+    assert(modules_env.said(&e, "cannot contain '.'"));
+}
+
+// Only `.` is barred, since only `.` separates a module path (D9.1): the
+// mangler copies the path across, so `my:app.ft` emits `my:app.main`, which
+// no module path can spell because a segment is an identifier.
+fn void a_colon_in_the_entry_base_name_is_accepted() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "my:app.ft", modules_env.src_main());
+    assert(modules_env.load(&e, "my:app.ft"));
+    assert(modules_env.ordered(&e, 0) == "my:app");
+}
+
+// The mangler used to drop a `:` it could not pair, so `my:app.main` was
+// `myapp.main`; it translates nothing now, so the two modules coexist (D9.1
+// amended 2026-09-11, D9.7).
+fn void a_colon_entry_stands_beside_the_module_it_once_collided_with() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "my:app.ft", "import myapp;\nfn i32 main() { return myapp.main(); }\n");
+    modules_env.add(&e, "myapp.ft", modules_env.src_main());
+    assert(modules_env.load(&e, "my:app.ft"));
+    assert(modules.count(&e.set) == 2);
+    assert(modules_env.ordered(&e, 0) == "myapp");
+    assert(modules_env.ordered(&e, 1) == "my:app");
+}
+
+// A doubled colon spelled a module path until T-080 made the separator a `.`;
+// it is not a token at all now (D2.10), so the base name is just a name and
+// the loader's path map holds it beside no other (D9.1).
+fn void a_doubled_colon_entry_base_name_is_accepted_as_a_name() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "my::app.ft", modules_env.src_main());
+    assert(modules_env.load(&e, "my::app.ft"));
+    assert(modules_env.ordered(&e, 0) == "my::app");
+    assert(!modules_env.said(&e, "circular import"));
+}
+
+// The rule is about any position, not an interior one (D9.1).
+fn void a_dot_first_or_last_in_the_entry_base_name_is_rejected() {
+    modules_env.env mut first = modules_env.open();
+    defer modules_env.close(&first);
+    modules_env.add(&first, ".hidden.ft", modules_env.src_main());
+    assert(!modules_env.load(&first, ".hidden.ft"));
+    assert(modules_env.said(&first, "entry file name '.hidden' cannot contain '.'"));
+    modules_env.env mut last = modules_env.open();
+    defer modules_env.close(&last);
+    modules_env.add(&last, "app..ft", modules_env.src_main());
+    assert(!modules_env.load(&last, "app..ft"));
+    assert(modules_env.said(&last, "entry file name 'app.' cannot contain '.'"));
+}
+
+// `.ft` is shorter than the suffix plus a name, so nothing is stripped and
+// the base name is `.ft` itself, which the dot rule then rejects
+// (module-system.md 2, D9.1).
+fn void an_entry_named_exactly_ft_keeps_its_whole_base_name() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, ".ft", modules_env.src_main());
+    assert(!modules_env.load(&e, ".ft"));
+    assert(modules_env.said(&e, "entry file name '.ft' cannot contain '.'"));
+}
+
+// Only `.` is barred; every other base name is a legal entry, whatever it
+// holds (D9.1).
+fn void a_hyphenated_entry_base_name_is_accepted() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "my-app.ft", modules_env.src_main());
+    assert(modules_env.load(&e, "my-app.ft"));
+    assert(modules_env.ordered(&e, 0) == "my-app");
+}
+
+// The rule is about the base name, which is what becomes the module path
+// (module-system.md 2). This is the only test that catches a check made over
+// the whole path: every guest path here is under `/vagrant`, so such a check
+// would reject every entry the build compiles.
+fn void a_dot_in_a_directory_of_the_entry_path_is_not_the_base_name() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "my.dir/app.ft", modules_env.src_main());
+    assert(modules_env.load(&e, "my.dir/app.ft"));
+    assert(modules_env.ordered(&e, 0) == "app");
+}
+
+// ---- the errors of a file (D14.2) -----------------------------------------------
+
+fn void an_unreadable_entry_file_is_reported() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    assert(!modules_env.load(&e, "missing.ft"));
+    assert(modules_env.said(&e, "cannot read"));
+}
+
+fn void a_lexical_error_stops_the_file() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "fn i32 main() {\n    i32 x = 08;\n    return x;\n}\n");
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules_env.errors(&e) == 1);
+}
+
+fn void a_syntax_error_stops_the_file() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "fn i32 main() {\n    i32 x = 1\n    return x;\n}\n");
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules_env.errors(&e) > 0);
+}
+
+// `n` declarations of distinct names, each missing the comma between its two
+// parameters, which the parser reports once per declaration.
+fn void append_broken_declarations(strbuf.str_buf mut* out, u64 n) {
+    u64 mut i = 0;
+    while (i < n) {
+        strbuf.append(out, "fn i32 f");
+        strbuf.append_u64(out, i);
+        strbuf.append(out, "(i32 a i32 b) { return a; }\n");
+        i += 1;
+    }
+}
+
+// A file's budget is twenty errors, counted across its lexical and its syntax
+// errors together (D14.2): the loader opens the file with begin_file through
+// the lexer, and the parser goes on with what the lexer left of it, so a file
+// mistyped from end to end costs a reader twenty lines and no more.
+fn void a_file_reports_at_most_twenty_errors() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    // Thirty declarations whose parameter list is missing a comma, which is
+    // one syntax error each.
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    append_broken_declarations(&src, 30);
+    strbuf.append(&src, "fn i32 main() { return 0; }\n");
+    modules_env.add(&e, "main.ft", strbuf.view(&src));
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules_env.errors(&e) == 20);
+}
+
+// The budget is the file's and not the run's, so a second file begins with
+// its own twenty (D14.2). The entry file here is clean and the module it
+// imports is the mistyped one, which makes the imported file the one that
+// spends a budget of its own.
+fn void each_file_has_a_budget_of_its_own() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import util;\nfn i32 main() { return util.add(1, 2); }\n");
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    append_broken_declarations(&src, 30);
+    strbuf.append(&src, "fn i32 add(i32 a, i32 b) { return a + b; }\n");
+    modules_env.add(&e, "util.ft", strbuf.view(&src));
+    assert(!modules_env.load(&e, "main.ft"));
+    // The entry file reported nothing, so the twenty are the imported file's,
+    // counted from its own begin_file rather than from the run's start.
+    assert(modules_env.errors(&e) == 20);
+    assert(str.find(modules_env.report_at(&e, 0).loc.file, "util.ft") >= 0);
+}
+
+fn void a_syntax_error_in_an_imported_module_stops_the_compilation() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import util;\nfn i32 main() { return util.add(1, 2); }\n");
+    modules_env.add(&e, "util.ft", "fn i32 add(i32 a i32 b) { return a; }\n");
+    assert(!modules_env.load(&e, "main.ft"));
+    // The diagnostic is the imported file's, at its first line.
+    assert(str.find(modules_env.report_at(&e, 0).loc.file, "util.ft") >= 0);
+    assert(modules_env.report_at(&e, 0).loc.line == 1);
+}
+
+// ---- the module reading (module-system.md 3) ------------------------------------
+
+fn void an_import_binds_the_short_name_to_the_module() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import util;\nfn i32 main() { return util.add(1, 2); }\n");
+    modules_env.add(&e, "util.ft", modules_env.src_add());
+    assert(modules_env.load(&e, "main.ft"));
+    scope.binding* b = modules_env.bound(&e, "main", "util");
+    assert(b != null);
+    assert(b->kind == scope.bind_kind.b_module);
+    // The binding denotes the module itself, held as an opaque pointer the
+    // loader casts back (D9.3).
+    assert(b->module == cast(modules.find(&e.set, "util"), void*));
+}
+
+fn void a_nested_path_names_a_file_in_a_directory() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import geom.vec;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "geom/vec.ft", "struct vec2 {\n    i64 x;\n    i64 y;\n}\n");
+    assert(modules_env.load(&e, "main.ft"));
+    assert(modules_env.ordered(&e, 0) == "geom.vec");
+    assert(modules_env.bound(&e, "main", "vec") != null);
+}
+
+fn void as_renames_a_module_binding() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import util as u;\nfn i32 main() { return u.add(1, 2); }\n");
+    modules_env.add(&e, "util.ft", modules_env.src_add());
+    assert(modules_env.load(&e, "main.ft"));
+    assert(modules_env.bound(&e, "main", "u") != null);
+    assert(modules_env.bound(&e, "main", "util") == null);
+}
+
+fn void import_paths_are_root_relative_and_not_file_relative() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import util.a;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "util/a.ft", "import util.b;\nfn i32 one() { return b.two(); }\n");
+    modules_env.add(&e, "util/b.ft", "fn i32 two() { return 2; }\n");
+    assert(modules_env.load(&e, "main.ft"));
+    assert(modules_env.ordered(&e, 0) == "util.b");
+    assert(modules_env.ordered(&e, 1) == "util.a");
+}
+
+fn void a_sibling_is_not_reachable_by_its_short_name() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import util.a;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "util/a.ft", "import b;\nfn i32 one() { return b.two(); }\n");
+    modules_env.add(&e, "util/b.ft", "fn i32 two() { return 2; }\n");
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules_env.said(&e, "module 'b' not found"));
+}
+
+// ---- the search roots (D9.2) ----------------------------------------------------
+
+fn void an_include_root_is_searched_after_the_entry_directory() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "src/main.ft", "import util;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "lib/util.ft", modules_env.src_add());
+    modules_env.root(&e, "lib");
+    assert(modules_env.load(&e, "src/main.ft"));
+    assert(modules_env.ordered(&e, 0) == "util");
+}
+
+fn void the_entry_directory_wins_over_an_include_root() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "src/main.ft", "import util;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "src/util.ft", modules_env.src_add());
+    modules_env.add(&e, "lib/util.ft", "fn i32 add(i32 a, i32 b) { return 0; }\n");
+    modules_env.root(&e, "lib");
+    assert(modules_env.load(&e, "src/main.ft"));
+    modules.module* util = modules.find(&e.set, "util");
+    assert(util != null);
+    assert(str.find(util->file, "src/util.ft") >= 0);
+}
+
+fn void include_roots_are_searched_in_command_line_order() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import util;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "first/util.ft", modules_env.src_add());
+    modules_env.add(&e, "second/util.ft", modules_env.src_add());
+    modules_env.root(&e, "first");
+    modules_env.root(&e, "second");
+    assert(modules_env.load(&e, "main.ft"));
+    modules.module* util = modules.find(&e.set, "util");
+    assert(util != null);
+    assert(str.find(util->file, "first/util.ft") >= 0);
+}
+
+// ---- the standard library root (D9.2) -------------------------------------------
+
+fn void a_std_path_is_looked_up_in_the_standard_library_directory() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import std.io;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "lib/io.ft", "fn i32 close(i32 fd) { return fd; }\n");
+    modules_env.std_dir(&e, "lib");
+    assert(modules_env.load(&e, "main.ft"));
+    assert(modules_env.ordered(&e, 0) == "std.io");
+    assert(modules_env.bound(&e, "main", "io") != null);
+}
+
+fn void a_std_path_is_not_looked_up_under_any_other_root() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import std.io;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "std/io.ft", "fn i32 close(i32 fd) { return fd; }\n");
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules_env.said(&e, "module 'std.io' not found"));
+}
+
+fn void a_path_that_does_not_begin_with_std_never_reaches_the_library() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import io;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "lib/io.ft", "fn i32 close(i32 fd) { return fd; }\n");
+    modules_env.std_dir(&e, "lib");
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules_env.said(&e, "module 'io' not found"));
+}
+
+fn void std_alone_is_a_directory_and_not_a_module() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import std;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "lib/io.ft", "fn i32 close(i32 fd) { return fd; }\n");
+    modules_env.std_dir(&e, "lib");
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules_env.said(&e, "module 'std' not found"));
+}
+
+// ---- the symbol reading (module-system.md 3) ------------------------------------
+
+fn void a_trailing_declaration_is_bound_to_that_declaration() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import util.add;\nfn i32 main() { return add(1, 2); }\n");
+    modules_env.add(&e, "util.ft", modules_env.src_add());
+    assert(modules_env.load(&e, "main.ft"));
+    scope.binding* b = modules_env.bound(&e, "main", "add");
+    assert(b != null);
+    assert(b->kind == scope.bind_kind.b_symbol);
+    assert(b->to == modules_env.bound(&e, "util", "add"));
+}
+
+fn void as_renames_an_imported_declaration() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft",
+                    "import util.add as plus;\nfn i32 main() { return plus(1, 2); }\n");
+    modules_env.add(&e, "util.ft", modules_env.src_add());
+    assert(modules_env.load(&e, "main.ft"));
+    assert(modules_env.bound(&e, "main", "plus") != null);
+    assert(modules_env.bound(&e, "main", "add") == null);
+}
+
+fn void braces_are_sugar_for_independent_symbol_imports() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add2(&e, "main.ft", "import util.{add, mul as times};\n",
+                     "fn i32 main() { return add(1, times(2, 3)); }\n");
+    modules_env.add2(&e, "util.ft", "fn i32 add(i32 a, i32 b) { return a + b; }\n",
+                     "fn i32 mul(i32 a, i32 b) { return a * b; }\n");
+    assert(modules_env.load(&e, "main.ft"));
+    assert(modules_env.bound(&e, "main", "add") != null);
+    assert(modules_env.bound(&e, "main", "times") != null);
+    assert(modules_env.bound(&e, "main", "mul") == null);
+}
+
+fn void a_braced_import_whose_prefix_is_no_module_file_is_an_error() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import std.{io, str};\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "lib/io.ft", "fn i32 close(i32 fd) { return fd; }\n");
+    modules_env.std_dir(&e, "lib");
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules_env.said(&e, "module 'std' not found"));
+}
+
+fn void a_declaration_the_module_lacks_is_an_error() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import util.strngs;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "util.ft", modules_env.src_add());
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules_env.said(&e, "module 'util' has no declaration named 'strngs'"));
+}
+
+fn void an_import_binding_of_another_module_is_not_importable() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import util.other;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "util.ft", "import other;\nfn i32 add(i32 a) { return other.one(); }\n");
+    modules_env.add(&e, "other.ft", "fn i32 one() { return 1; }\n");
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules_env.said(&e, "cannot import 'other': it is an import of module 'util'"));
+}
+
+fn void a_one_segment_path_has_only_the_module_reading() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import add;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "util.ft", modules_env.src_add());
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules_env.said(&e, "module 'add' not found"));
+}
+
+fn void a_missing_module_lists_the_paths_it_looked_for() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import util.strings;\nfn i32 main() { return 0; }\n");
+    modules_env.root(&e, "lib");
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules_env.said(&e, "module 'util.strings' not found"));
+    assert(modules_env.said(&e, "looked for"));
+    assert(modules_env.said(&e, "util/strings.ft"));
+    assert(modules_env.said(&e, "util.ft"));
+    // One note per root and reading: two roots for `util.strings` and two for
+    // the prefix `util` (module-system.md 13).
+    assert(modules_env.reports(&e) == 5);
+    assert(modules_env.report_at(&e, 1).severity == diag.severity.note);
+}
+
+// ---- ambiguity (module-system.md 3) ---------------------------------------------
+
+fn void both_readings_succeeding_is_ambiguous() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import a.b.c;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "a/b.ft", "fn i32 c(i32 x) { return x; }\n");
+    modules_env.add(&e, "a/b/c.ft", "fn i32 f() { return 0; }\n");
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules_env.said(&e, "ambiguous import 'a.b.c'"));
+    assert(modules_env.said(&e, "a/b/c.ft"));
+    assert(modules_env.said(&e, "a/b.ft"));
+}
+
+fn void ambiguity_holds_whichever_roots_the_two_files_live_under() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "src/main.ft", "import a.b.c;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "src/a/b.ft", "fn i32 c(i32 x) { return x; }\n");
+    modules_env.add(&e, "lib/a/b/c.ft", "fn i32 f() { return 0; }\n");
+    modules_env.root(&e, "lib");
+    assert(!modules_env.load(&e, "src/main.ft"));
+    assert(modules_env.said(&e, "ambiguous import 'a.b.c'"));
+}
+
+fn void a_prefix_that_lacks_the_name_leaves_the_module_reading() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import a.b.c;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "a/b.ft", "fn i32 other() { return 0; }\n");
+    modules_env.add(&e, "a/b/c.ft", "fn i32 f() { return 0; }\n");
+    assert(modules_env.load(&e, "main.ft"));
+    scope.binding* b = modules_env.bound(&e, "main", "c");
+    assert(b != null);
+    assert(b->kind == scope.bind_kind.b_module);
+}
+
+fn void a_missing_module_file_leaves_the_symbol_reading() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import a.b.c;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "a/b.ft", "fn i32 c(i32 x) { return x; }\n");
+    assert(modules_env.load(&e, "main.ft"));
+    scope.binding* b = modules_env.bound(&e, "main", "c");
+    assert(b != null);
+    assert(b->kind == scope.bind_kind.b_symbol);
+}
+
+// ---- the prefix of an import is read only when it is the module (10) ------------
+
+fn void a_prefix_that_lacks_the_name_is_not_read_into_the_closure() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import util.helper;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "util/helper.ft", "fn i32 help() { return 0; }\n");
+    modules_env.add(&e, "util.ft", "fn i32 unrelated() { return 0; }\n");
+    assert(modules_env.load(&e, "main.ft"));
+    // The module reading won, so `util.ft` is a module no import reaches and
+    // is never read into the closure (module-system.md 10).
+    assert(modules.count(&e.set) == 2);
+    assert(modules.find(&e.set, "util") == null);
+    assert(modules_env.ordered(&e, 0) == "util.helper");
+}
+
+fn void a_syntax_error_in_a_prefix_the_module_reading_beats_is_not_reported() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import util.helper;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "util/helper.ft", "fn i32 help() { return 0; }\n");
+    modules_env.add(&e, "util.ft", "fn i32 broken(i32 a i32 b) { return a; }\n");
+    assert(modules_env.load(&e, "main.ft"));
+    // The probe is muted, so the prefix's own errors reach nothing: neither
+    // the count nor the records (module-system.md 3).
+    assert(modules_env.reports(&e) == 0);
+    assert(modules_env.errors(&e) == 0);
+}
+
+fn void an_import_of_the_entry_from_such_a_prefix_is_not_a_cycle() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import util.helper;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "util/helper.ft", "fn i32 help() { return 0; }\n");
+    modules_env.add(&e, "util.ft", "import main;\nfn i32 unrelated() { return 0; }\n");
+    assert(modules_env.load(&e, "main.ft"));
+    assert(!modules_env.said(&e, "circular"));
+}
+
+fn void an_extern_of_such_a_prefix_conflicts_with_nothing() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add3(&e, "main.ft", "import util.helper;\n",
+                     "extern fn i64 write(i32 fd, void* buf, u64 n);\n",
+                     "fn i32 main() { return 0; }\n");
+    modules_env.add(&e, "util/helper.ft", "fn i32 help() { return 0; }\n");
+    modules_env.add(&e, "util.ft", "extern fn i32 write(i32 fd, void* buf, u64 n);\n");
+    assert(modules_env.load(&e, "main.ft"));
+    assert(modules_env.reports(&e) == 0);
+}
+
+// `util` is in the closure, so the symbol reading is answered from its
+// namespace, and both readings succeeding is ambiguous (D9.3).
+fn void a_prefix_the_closure_already_holds_answers_from_its_namespace() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft",
+                    "import util;\nimport util.add;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "util.ft", modules_env.src_add());
+    modules_env.add(&e, "util/add.ft", "fn i32 f() { return 0; }\n");
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules_env.said(&e, "ambiguous import 'util.add'"));
+}
+
+// All the errors of the module that has them are reported, then processing
+// stops at the module boundary (D14.2).
+fn void every_failing_import_of_one_module_is_reported() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft",
+                    "import nothere;\nimport alsomissing;\nfn i32 main() { return 0; }\n");
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules_env.said(&e, "module 'nothere' not found"));
+    assert(modules_env.said(&e, "module 'alsomissing' not found"));
+    assert(modules_env.errors(&e) == 2);
+}
+
+fn void no_further_module_is_read_after_an_import_failed() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft",
+                    "import nothere;\nimport util;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "util.ft", "fn i32 broken(i32 a i32 b) { return a; }\n");
+    assert(!modules_env.load(&e, "main.ft"));
+    // The second import would have read a module with its own syntax error;
+    // one module's errors appear together (D14.2), so it is left alone.
+    assert(modules_env.errors(&e) == 1);
+    assert(modules_env.said(&e, "module 'nothere' not found"));
+}
+
+fn i32 main() {
+    the_entry_module_path_is_its_base_name();
+    an_entry_file_in_a_directory_keeps_only_its_base_name();
+    the_entry_directory_is_the_first_search_root();
+    an_entry_base_name_that_is_no_identifier_is_taken_as_it_is();
+    a_dotted_entry_base_name_is_rejected();
+    a_dotted_entry_is_reported_at_the_start_of_the_file();
+    a_dotted_entry_file_is_never_read();
+    a_dotted_entry_is_rejected_beside_the_module_it_would_collide_with();
+    a_colon_in_the_entry_base_name_is_accepted();
+    a_colon_entry_stands_beside_the_module_it_once_collided_with();
+    a_doubled_colon_entry_base_name_is_accepted_as_a_name();
+    a_dot_first_or_last_in_the_entry_base_name_is_rejected();
+    an_entry_named_exactly_ft_keeps_its_whole_base_name();
+    a_hyphenated_entry_base_name_is_accepted();
+    a_dot_in_a_directory_of_the_entry_path_is_not_the_base_name();
+    println("entry ok");
+    an_unreadable_entry_file_is_reported();
+    a_lexical_error_stops_the_file();
+    a_syntax_error_stops_the_file();
+    a_syntax_error_in_an_imported_module_stops_the_compilation();
+    a_file_reports_at_most_twenty_errors();
+    each_file_has_a_budget_of_its_own();
+    println("errors ok");
+    an_import_binds_the_short_name_to_the_module();
+    a_nested_path_names_a_file_in_a_directory();
+    as_renames_a_module_binding();
+    import_paths_are_root_relative_and_not_file_relative();
+    a_sibling_is_not_reachable_by_its_short_name();
+    println("module reading ok");
+    an_include_root_is_searched_after_the_entry_directory();
+    the_entry_directory_wins_over_an_include_root();
+    include_roots_are_searched_in_command_line_order();
+    println("roots ok");
+    a_std_path_is_looked_up_in_the_standard_library_directory();
+    a_std_path_is_not_looked_up_under_any_other_root();
+    a_path_that_does_not_begin_with_std_never_reaches_the_library();
+    std_alone_is_a_directory_and_not_a_module();
+    println("std ok");
+    a_trailing_declaration_is_bound_to_that_declaration();
+    as_renames_an_imported_declaration();
+    braces_are_sugar_for_independent_symbol_imports();
+    a_braced_import_whose_prefix_is_no_module_file_is_an_error();
+    a_declaration_the_module_lacks_is_an_error();
+    an_import_binding_of_another_module_is_not_importable();
+    a_one_segment_path_has_only_the_module_reading();
+    a_missing_module_lists_the_paths_it_looked_for();
+    println("symbol reading ok");
+    both_readings_succeeding_is_ambiguous();
+    ambiguity_holds_whichever_roots_the_two_files_live_under();
+    a_prefix_that_lacks_the_name_leaves_the_module_reading();
+    a_missing_module_file_leaves_the_symbol_reading();
+    println("ambiguity ok");
+    a_prefix_that_lacks_the_name_is_not_read_into_the_closure();
+    a_syntax_error_in_a_prefix_the_module_reading_beats_is_not_reported();
+    an_import_of_the_entry_from_such_a_prefix_is_not_a_cycle();
+    an_extern_of_such_a_prefix_conflicts_with_nothing();
+    a_prefix_the_closure_already_holds_answers_from_its_namespace();
+    every_failing_import_of_one_module_is_reported();
+    no_further_module_is_read_after_an_import_failed();
+    println("prefix ok");
+    println("ok");
+    return 0;
+}
