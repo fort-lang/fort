@@ -300,9 +300,30 @@ A safe(r) C-like systems programming language.
   `<module>_test.ft` or `<module>_<case>_panic_test.ft` for a test whose program must end in a
   panic, since a panic kills the program and each one needs a file; any other `.ft` at that root is
   `bad test name`, because a typo there would otherwise run nowhere and say nothing.
+  **Code several of those tests share lives in `test/fort/support/*.ft`**, which they reach with a
+  second include root (`//! flags: -I ../../src/fort -I support`): a `test/fort` test is a program
+  rather than a translation unit, so the `#include`d helper a C suite would use
+  (`test/types_helpers.h`) has to be an imported module (`support/types_env.ft`, T-032). The
+  directory is invisible to the harness, and that cuts both ways: `discover` walks `run`, `fail`,
+  `programs` and the `*_test.ft` of the root and nothing else, so **a test misfiled under
+  `support/` runs nowhere and says nothing** -- `support/stray_test.ft` leaves
+  `run_tests.py --lint` reporting `no problems` while the same file at the root is
+  `lint: bad test name`. `fort_lint.py` globs `std/*.ft` and `src/fort/*.ft` only, so D1.4 is
+  unchecked there as well (T-079 owns both holes). Put a test at the root and only shared code
+  under `support/`.
   `tools/lines.py` counts `test/fort/**/*.ft` as test lines and `src/fort/*.ft` as compiler lines,
   and `test/highlight_test.py` does **not** tokenize them, so the TextMate grammar has no witness
-  over `test/fort` (T-079). `lang-stage2` passes `--no-unsupported`: `bootstrap-unsupported.txt`
+  over `test/fort` (T-079). **`test/fort` is not a leak oracle**: the gate's `asan` and `ubsan`
+  presets instrument the native compiler, not the x86-64 program the harness builds and runs under
+  qemu, so a `del` a module forgets leaks silently through all three presets. A module that
+  promises its allocations die with the value that owns them (D20.5) needs a witness of its own --
+  in-band accounting the module already keeps (`containers.pool_used`), or the allocator itself:
+  identical rounds are handed the same addresses again when a round frees what it took and fresh
+  ones when it does not, so an address that repeats over eight rounds is the release
+  (`the_blocks_a_node_owns_are_released_with_it` in `test/fort/types_table_test.ft`, T-032).
+  Verify such a witness by deleting the `del` it covers and watching it go red; two of them in
+  `types.ft` had no witness at all until that was measured.
+  `lang-stage2` passes `--no-unsupported`: `bootstrap-unsupported.txt`
   demands that the compiler *reject* the features the C bootstrap lacks, which stage2 is under no
   such obligation to do, and inheriting it would keep twenty entries in `xfail-stage2.txt` for
   ever. ctest `stage-usage` (label `unit`) diffs stage1's and stage2's `--help`, `--version` and
@@ -785,12 +806,35 @@ A safe(r) C-like systems programming language.
   compared, because two compilers that both refuse `--tokens` agree about everything, and the
   script passed over the whole corpus with both binaries replaced by a stub. The same check is
   what a path with a space needs, since word-splitting the file list makes both compilers fail
-  alike. **The root of `test/fort` has no shared helper file** -- a `.ft` directly there whose
-  stem does not end in `_test` is a lint failure, since `run_tests.py` registers every root
-  `.ft` as a test -- so a fixture common to several suites is either repeated in each or put in
-  a subdirectory (`test/fort/support/`), which discovery ignores but which `fort_lint.py` and
-  `test/highlight_test.py` do not see either. `tools/lines.py` counts
+  alike. **The root of `test/fort` holds tests and nothing else** -- a `.ft` directly there whose
+  stem does not end in `_test` is a lint failure, since `run_tests.py` registers every root `.ft`
+  as a test -- so a fixture common to several suites is either repeated in each or put in
+  `test/fort/support/`; what that directory is and what it costs is under **Build and test**
+  above, in one place rather than two. `tools/lines.py` counts
   `src/fort`, so the ported lines carry the 3:1 ratio like any others.
+  Five more facts the first ports paid for (T-032, `prim.ft`, `consts.ft`, `types.ft`).
+  - **Keywords take the names first.** `type`, `const`, `match` and the rest of D2.4's reserved
+    list, and every type keyword, are not identifiers, so `type_t` cannot be `type`, a field
+    cannot be `mut`, `own` or `noreturn`, and an enum member cannot be `i8`, `bool` or `null`.
+    The port keeps the C function names verbatim (`types.type_ptr`, `consts.cv_add`,
+    `prim.prim_is_integer`), stutter and all, because the module answers to its C original name
+    by name; it renames a field to `is_mut`/`is_own`/`is_noreturn` and gives an enum member the
+    C constant's prefix (`cv_int` for `CV_INT`), or a short one where the C name is already a
+    function's (`k_ptr` for `TYPE_PTR`, beside the constructor `type_ptr`).
+  - **`new(T, n)` gives its result `mut` at every level** (D5.8), so `new(node*, n)` is
+    `node mut* mut@ own` and storing it in a `node* mut@ own` field is refused: dropping the
+    pointee's `mut` behind a mutable span is D5.4's `T** -> const T**` hole. A `cast` is the
+    sanctioned escape and the only one; write it once, at the allocation, with the reason.
+  - **`==` does not drop `mut`.** Operands lend `own` (D17.4) and nothing else, so comparing a
+    `node mut*` with a `node*` is a type error: give the test a `node*` binding rather than
+    casting.
+  - **An enum has no ordering operators** (D3.9), so a C range test over a kind enum
+    (`k <= PRIM_U64`) becomes a comparison of `cast(k, i32)`, and the `_Static_assert` that
+    pinned the order becomes a test (`test/fort/prim_test.ft`).
+  - **The C's forked internal-error tests become one file each.** `fatal_internal` is a `panic`
+    in `src/fort` (D13.3), a panic ends the program (D11.4), and a `test/fort` test cannot fork,
+    so each broken precondition is a `<module>_<case>_panic_test.ft` that prints one line, calls
+    the site and carries the message in a `//! stderr:` directive.
 - **What checks `.ft` source, and what does not** (T-076). Three things do. `tools/fort_lint.py`
   (ctest `fort_lint`, target `fort-lint`) holds `std/*.ft` and `src/fort/*.ft` to the identifier
   conventions of D1.4 and to 100 columns; it reads `fort --index` (D20.3) rather than tokenizing

@@ -1,0 +1,563 @@
+//! run
+//! flags: -I ../../src/fort
+//! stdout:
+//| cast ok
+//| arithmetic ok
+//| bitwise ok
+//| shifts ok
+//| wrapping ok
+//| ok
+import consts;
+import prim;
+
+// cv_cast (D3.14, D4.4), the typed folding of D4.6 with the operand rules of
+// D6.2 and D6.13, and the wrapping operators of D11.2: the port of
+// test/consts_typed_test.c. Its four forked internal-error tests are five
+// files of their own here (consts_typed_*_panic_test.ft), since a panic ends
+// the program (D11.4).
+//
+// The sample values are the edges of every integer type and the examples of
+// type-system.md 10 and core-language.md 5.9.
+
+u64 TWO63 = 9223372036854775808;
+u64 U64_MAX = 18446744073709551615;
+i64 I64_MIN = -9223372036854775808;
+i64 I64_MAX = 9223372036854775807;
+i64 I32_MIN = -2147483648;
+i64 I32_MAX = 2147483647;
+i64 U32_MAX = 4294967295;
+
+fn consts.cval i(i64 v) {
+    return consts.cv_from_i64(v);
+}
+
+fn consts.cval u(u64 v) {
+    return consts.cv_from_u64(v);
+}
+
+fn consts.cval neg_two63() {
+    return consts.cv_from_i64(I64_MIN);
+}
+
+fn consts.cval ch(u64 code) {
+    return consts.cv_from_char(code);
+}
+
+fn bool is_int(consts.cval v, i64 expect) {
+    return v.kind == consts.cval_kind.cv_int && consts.cv_eq(v, consts.cv_from_i64(expect));
+}
+
+fn bool is_uint(consts.cval v, u64 expect) {
+    return v.kind == consts.cval_kind.cv_int && consts.cv_eq(v, consts.cv_from_u64(expect));
+}
+
+fn bool is_char(consts.cval v, u64 code) {
+    return v.kind == consts.cval_kind.cv_char && v.mag == code;
+}
+
+fn bool is_none(consts.cval v) {
+    return v.kind == consts.cval_kind.cv_none;
+}
+
+// ---- cv_cast (D3.14, D4.4, core-language.md 5.9) -------------------------------
+
+fn void cast_two31_to_i32_is_i32_min() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_cast(u(2147483648), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, I32_MIN));
+    assert(consts.cv_shl(i(1), i(31), &r));
+    assert(consts.cv_cast(r, prim.prim_kind.prim_i32, &r)); // cast(1 << 31, i32)
+    assert(is_int(r, I32_MIN));
+}
+
+fn void cast_minus_one_to_unsigned_is_all_ones() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_cast(i(-1), prim.prim_kind.prim_u32, &r));
+    assert(is_int(r, U32_MAX));
+    assert(consts.cv_cast(i(-1), prim.prim_kind.prim_u8, &r));
+    assert(is_int(r, 255));
+    assert(consts.cv_cast(i(-1), prim.prim_kind.prim_u16, &r));
+    assert(is_int(r, 65535));
+    assert(consts.cv_cast(i(-1), prim.prim_kind.prim_u64, &r));
+    assert(is_uint(r, U64_MAX));
+}
+
+fn void cast_300_to_u8_is_44() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_cast(i(300), prim.prim_kind.prim_u8, &r));
+    assert(is_int(r, 44));
+    assert(consts.cv_cast(i(300), prim.prim_kind.prim_i8, &r));
+    assert(is_int(r, 44));
+    assert(consts.cv_cast(i(200), prim.prim_kind.prim_i8, &r));
+    assert(is_int(r, -56));
+    assert(consts.cv_cast(i(-56), prim.prim_kind.prim_u8, &r));
+    assert(is_int(r, 200));
+}
+
+fn void cast_of_a_char_to_an_integer_is_its_code_point() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_cast(ch(cast('a', u64)), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, 97));
+    // cast('a', i32) - '0'
+    assert(consts.cv_sub(r, consts.cv_as_int(ch(cast('0', u64))), &r));
+    assert(is_int(r, 49));
+    assert(consts.cv_cast(ch(255), prim.prim_kind.prim_i8, &r));
+    assert(is_int(r, -1));
+    assert(consts.cv_cast(ch(255), prim.prim_kind.prim_u64, &r));
+    assert(is_int(r, 255));
+}
+
+fn void cast_to_char_keeps_the_low_byte() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_cast(i(65), prim.prim_kind.prim_char, &r)); // cast(65, char)
+    assert(is_char(r, cast('A', u64)));
+    assert(consts.cv_cast(i(321), prim.prim_kind.prim_char, &r));
+    assert(is_char(r, cast('A', u64)));
+    assert(consts.cv_cast(i(-1), prim.prim_kind.prim_char, &r));
+    assert(is_char(r, 255));
+    assert(consts.cv_cast(ch(cast('z', u64)), prim.prim_kind.prim_char, &r));
+    assert(is_char(r, cast('z', u64)));
+    // cast(0x1F600, char) is '\x00'
+    assert(consts.cv_cast(i(128512), prim.prim_kind.prim_char, &r));
+    assert(is_char(r, 0));
+}
+
+fn void cast_at_the_64_bit_edges() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_cast(u(U64_MAX), prim.prim_kind.prim_i64, &r));
+    assert(is_int(r, -1));
+    assert(consts.cv_cast(u(TWO63), prim.prim_kind.prim_i64, &r));
+    assert(consts.cv_eq(r, neg_two63()));
+    assert(consts.cv_cast(neg_two63(), prim.prim_kind.prim_u64, &r));
+    assert(is_uint(r, TWO63));
+    assert(consts.cv_cast(i(I64_MAX), prim.prim_kind.prim_i64, &r));
+    assert(is_int(r, I64_MAX));
+    assert(consts.cv_cast(u(U64_MAX), prim.prim_kind.prim_u64, &r));
+    assert(is_uint(r, U64_MAX));
+    assert(consts.cv_cast(neg_two63(), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, 0));
+}
+
+fn void cast_of_a_value_in_range_is_the_identity() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_cast(i(-128), prim.prim_kind.prim_i8, &r));
+    assert(is_int(r, -128));
+    assert(consts.cv_cast(i(127), prim.prim_kind.prim_i8, &r));
+    assert(is_int(r, 127));
+    assert(consts.cv_cast(i(I32_MIN), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, I32_MIN));
+    assert(consts.cv_cast(i(U32_MAX), prim.prim_kind.prim_u32, &r));
+    assert(is_int(r, U32_MAX));
+    assert(consts.cv_cast(i(0), prim.prim_kind.prim_u16, &r));
+    assert(is_int(r, 0));
+}
+
+// The source sign is in the value: a negative constant sign-extends, a
+// non-negative one zero-extends.
+fn void cast_widens_by_the_source_signedness() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_cast(i(-1), prim.prim_kind.prim_i64, &r));
+    assert(is_int(r, -1));
+    assert(consts.cv_cast(i(255), prim.prim_kind.prim_i64, &r));
+    assert(is_int(r, 255));
+    assert(consts.cv_cast(i(-32768), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, -32768));
+    // cast(cast(-1, i8), i64) is -1 and cast(cast(-1, i8), u64) is 2^64 - 1
+    // (type-system.md 9.2): the i8 value -1 sign-extends both times.
+    assert(consts.cv_cast(i(-1), prim.prim_kind.prim_i8, &r));
+    assert(is_int(r, -1));
+    consts.cval mut w = consts.cv_none();
+    assert(consts.cv_cast(r, prim.prim_kind.prim_i64, &w));
+    assert(is_int(w, -1));
+    assert(consts.cv_cast(r, prim.prim_kind.prim_u64, &w));
+    assert(is_uint(w, U64_MAX));
+}
+
+fn void cast_of_a_bool_to_an_integer_is_zero_or_one() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_cast(consts.cv_from_bool(true), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, 1));
+    assert(consts.cv_cast(consts.cv_from_bool(false), prim.prim_kind.prim_u8, &r));
+    assert(is_int(r, 0));
+    assert(consts.cv_cast(consts.cv_from_bool(true), prim.prim_kind.prim_u64, &r));
+    assert(is_int(r, 1));
+}
+
+fn void cast_to_bool_is_forbidden() {
+    consts.cval mut r = i(1);
+    assert(!consts.cv_cast(i(1), prim.prim_kind.prim_bool, &r)); // cast(1, bool)
+    assert(is_none(r));
+    assert(!consts.cv_cast(ch(cast('a', u64)), prim.prim_kind.prim_bool, &r));
+    assert(!consts.cv_cast(consts.cv_from_bool(true), prim.prim_kind.prim_bool, &r));
+}
+
+fn void cast_to_floats_void_and_from_a_bool_to_char_are_unsupported() {
+    consts.cval mut r = i(1);
+    assert(!consts.cv_cast(i(1), prim.prim_kind.prim_f32, &r));
+    assert(is_none(r));
+    assert(!consts.cv_cast(i(1), prim.prim_kind.prim_f64, &r));
+    assert(!consts.cv_cast(i(1), prim.prim_kind.prim_void, &r));
+    assert(!consts.cv_cast(consts.cv_from_bool(true), prim.prim_kind.prim_char, &r));
+    // `char` to `bool`, a float or an enum is an error too (D3.14).
+    assert(!consts.cv_cast(ch(cast('a', u64)), prim.prim_kind.prim_f32, &r));
+    assert(!consts.cv_cast(ch(cast('a', u64)), prim.prim_kind.prim_f64, &r));
+    assert(!consts.cv_cast(ch(cast('a', u64)), prim.prim_kind.prim_void, &r));
+    assert(!consts.cv_cast(consts.cv_from_bool(true), prim.prim_kind.prim_f64, &r));
+}
+
+fn void cast_of_null_strings_and_none_is_an_error() {
+    consts.cval mut r = i(1);
+    assert(!consts.cv_cast(consts.cv_null(), prim.prim_kind.prim_u64, &r)); // cast(null, ...)
+    assert(is_none(r));
+    assert(!consts.cv_cast(consts.cv_from_str("a"), prim.prim_kind.prim_i32, &r));
+    assert(!consts.cv_cast(consts.cv_none(), prim.prim_kind.prim_i32, &r));
+}
+
+// `cast(c, T)` is not a context (D4.1): the checker gives the untyped `c` its
+// default type (D4.5) and only then converts. The step rejects a value above
+// i64, so cv_cast is never reached with one, and it cannot change a value that
+// does fit i64, so cv_cast needs only the value.
+fn void the_default_type_step_of_d4_1_precedes_cv_cast() {
+    consts.cval mut r = consts.cv_none();
+    prim.prim_kind mut k = prim.prim_kind.prim_void;
+    assert(consts.cv_shl(i(1), i(63), &r)); // cast(1 << 63, i32)
+    assert(is_uint(r, TWO63));
+    assert(!consts.cv_default_kind(r, &k)); // rejected at the default-type step
+    assert(consts.cv_default_kind(u(TWO63 - 1), &k));
+    assert(k == prim.prim_kind.prim_i64);
+    // its default type: unchanged
+    assert(consts.cv_cast(u(TWO63 - 1), prim.prim_kind.prim_i64, &r));
+    assert(is_int(r, I64_MAX));
+    assert(consts.cv_default_kind(u(2147483648), &k)); // cast(0x80000000, i32)
+    assert(k == prim.prim_kind.prim_i64);
+    assert(consts.cv_cast(u(2147483648), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, I32_MIN));
+    assert(consts.cv_default_kind(ch(cast('a', u64)), &k)); // cast('a', i32) is 97
+    assert(k == prim.prim_kind.prim_char);
+    assert(consts.cv_cast(ch(cast('a', u64)), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, 97));
+}
+
+// ---- typed folding: the examples of type-system.md 10.6 (D4.6) -----------------
+
+fn void typed_i32_max_plus_one_is_an_error() {
+    consts.cval mut r = i(1);
+    // i32 B = A + 1
+    assert(!consts.cv_typed_add(i(I32_MAX), i(1), prim.prim_kind.prim_i32, &r));
+    assert(is_none(r));
+    assert(consts.cv_typed_add(i(I32_MAX), i(1), prim.prim_kind.prim_i64, &r));
+    assert(is_int(r, I32_MAX + 1));
+}
+
+fn void typed_i32_max_wrap_plus_one_is_i32_min() {
+    // i32 C = A +% 1
+    consts.cval r = consts.cv_wrap_add(i(I32_MAX), i(1), prim.prim_kind.prim_i32);
+    assert(is_int(r, I32_MIN));
+}
+
+fn void typed_u8_200_times_2_is_an_error() {
+    consts.cval mut r = i(1);
+    assert(!consts.cv_typed_mul(i(200), i(2), prim.prim_kind.prim_u8, &r)); // u8 E = D * 2
+    assert(is_none(r));
+    assert(is_int(consts.cv_wrap_mul(i(200), i(2), prim.prim_kind.prim_u8), 144));
+}
+
+fn void typed_constant_expression_examples() {
+    consts.cval mut r = consts.cv_none();
+    // i32[N * 2] with N = 4
+    assert(consts.cv_typed_mul(i(4), i(2), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, 8));
+    assert(consts.cv_add(i(8), i(1), &r)); // buf.len + 1: untyped
+    assert(is_int(r, 9));
+    assert(consts.cv_cast(i(6), prim.prim_kind.prim_i32, &r)); // cast(color.blue, i32) + 1
+    assert(consts.cv_typed_add(r, i(1), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, 7));
+}
+
+// ---- typed add, sub, mul, neg --------------------------------------------------
+
+fn void typed_add_and_sub_stay_in_range() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_typed_add(i(100), i(27), prim.prim_kind.prim_i8, &r));
+    assert(is_int(r, 127));
+    assert(!consts.cv_typed_add(i(100), i(28), prim.prim_kind.prim_i8, &r));
+    assert(consts.cv_typed_sub(i(-100), i(28), prim.prim_kind.prim_i8, &r));
+    assert(is_int(r, -128));
+    assert(!consts.cv_typed_sub(i(-100), i(29), prim.prim_kind.prim_i8, &r));
+    assert(consts.cv_typed_add(u(U64_MAX - 1), i(1), prim.prim_kind.prim_u64, &r));
+    assert(is_uint(r, U64_MAX));
+    assert(!consts.cv_typed_add(u(U64_MAX), i(1), prim.prim_kind.prim_u64, &r));
+}
+
+fn void typed_unsigned_subtraction_below_zero_is_an_error() {
+    consts.cval mut r = i(1);
+    // len - 1 on an empty span
+    assert(!consts.cv_typed_sub(i(0), i(1), prim.prim_kind.prim_u8, &r));
+    assert(is_none(r));
+    assert(!consts.cv_typed_sub(i(0), i(1), prim.prim_kind.prim_u64, &r));
+    assert(consts.cv_typed_sub(i(1), i(1), prim.prim_kind.prim_u64, &r));
+    assert(is_int(r, 0));
+}
+
+fn void typed_mul_at_the_edges() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_typed_mul(i(-64), i(2), prim.prim_kind.prim_i8, &r));
+    assert(is_int(r, -128));
+    assert(!consts.cv_typed_mul(i(64), i(2), prim.prim_kind.prim_i8, &r));
+    assert(consts.cv_typed_mul(i(I32_MIN), i(1), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, I32_MIN));
+    assert(!consts.cv_typed_mul(i(I32_MIN), i(-1), prim.prim_kind.prim_i32, &r));
+    assert(!consts.cv_typed_mul(neg_two63(), i(-1), prim.prim_kind.prim_i64, &r));
+    assert(!consts.cv_typed_mul(u(TWO63), i(2), prim.prim_kind.prim_u64, &r));
+}
+
+fn void typed_neg_of_min_is_an_error() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_typed_neg(i(5), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, -5));
+    assert(consts.cv_typed_neg(i(I32_MIN + 1), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, I32_MAX));
+    assert(!consts.cv_typed_neg(i(I32_MIN), prim.prim_kind.prim_i32, &r));
+    assert(is_none(r));
+    assert(!consts.cv_typed_neg(i(-128), prim.prim_kind.prim_i8, &r));
+    assert(!consts.cv_typed_neg(neg_two63(), prim.prim_kind.prim_i64, &r));
+}
+
+// ---- typed div and rem (D6.13, D11.3) ------------------------------------------
+
+fn void typed_div_truncates_and_rejects_min_over_minus_one() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_typed_div(i(-7), i(2), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, -3));
+    assert(consts.cv_typed_div(i(I32_MIN), i(2), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, -1073741824));
+    assert(!consts.cv_typed_div(i(I32_MIN), i(-1), prim.prim_kind.prim_i32, &r));
+    assert(is_none(r));
+    assert(!consts.cv_typed_div(i(-128), i(-1), prim.prim_kind.prim_i8, &r));
+    assert(!consts.cv_typed_div(i(-32768), i(-1), prim.prim_kind.prim_i16, &r));
+    assert(!consts.cv_typed_div(neg_two63(), i(-1), prim.prim_kind.prim_i64, &r));
+    assert(consts.cv_typed_div(i(I32_MIN + 1), i(-1), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, I32_MAX));
+}
+
+fn void typed_div_by_zero_is_an_error() {
+    consts.cval mut r = i(1);
+    assert(!consts.cv_typed_div(i(1), i(0), prim.prim_kind.prim_i32, &r));
+    assert(is_none(r));
+    assert(!consts.cv_typed_div(i(0), i(0), prim.prim_kind.prim_u64, &r));
+}
+
+fn void typed_rem_keeps_the_dividend_sign_and_rejects_min_rem_minus_one() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_typed_rem(i(-7), i(2), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, -1));
+    assert(consts.cv_typed_rem(i(7), i(-2), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, 1));
+    assert(consts.cv_typed_rem(i(255), i(16), prim.prim_kind.prim_u8, &r));
+    assert(is_int(r, 15));
+    assert(!consts.cv_typed_rem(i(I32_MIN), i(-1), prim.prim_kind.prim_i32, &r));
+    assert(is_none(r));
+    assert(!consts.cv_typed_rem(i(-128), i(-1), prim.prim_kind.prim_i8, &r));
+    assert(!consts.cv_typed_rem(neg_two63(), i(-1), prim.prim_kind.prim_i64, &r));
+    assert(consts.cv_typed_rem(i(I32_MIN), i(-2), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, 0));
+    assert(consts.cv_typed_rem(i(I32_MIN + 1), i(-1), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, 0));
+}
+
+fn void typed_rem_by_zero_is_an_error() {
+    consts.cval mut r = i(1);
+    assert(!consts.cv_typed_rem(i(1), i(0), prim.prim_kind.prim_i32, &r));
+    assert(is_none(r));
+    assert(!consts.cv_typed_rem(i(-1), i(0), prim.prim_kind.prim_i8, &r));
+}
+
+// ---- typed bitwise -------------------------------------------------------------
+
+fn void typed_not_complements_within_the_width() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_typed_not(i(0), prim.prim_kind.prim_u32, &r));
+    assert(is_int(r, U32_MAX)); // ~0 on a u32 variable
+    assert(consts.cv_typed_not(i(0), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, -1));
+    assert(consts.cv_typed_not(i(240), prim.prim_kind.prim_u8, &r));
+    assert(is_int(r, 15));
+    assert(consts.cv_typed_not(i(-1), prim.prim_kind.prim_i8, &r));
+    assert(is_int(r, 0));
+    assert(consts.cv_typed_not(i(127), prim.prim_kind.prim_i8, &r));
+    assert(is_int(r, -128));
+    assert(consts.cv_typed_not(u(U64_MAX), prim.prim_kind.prim_u64, &r));
+    assert(is_int(r, 0));
+    assert(consts.cv_typed_not(i(0), prim.prim_kind.prim_u64, &r));
+    assert(is_uint(r, U64_MAX));
+    assert(consts.cv_typed_not(neg_two63(), prim.prim_kind.prim_i64, &r));
+    assert(is_int(r, I64_MAX));
+}
+
+fn void typed_and_or_xor_never_leave_the_type() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_typed_and(i(-1), i(5), prim.prim_kind.prim_i8, &r));
+    assert(is_int(r, 5));
+    assert(consts.cv_typed_or(i(-128), i(127), prim.prim_kind.prim_i8, &r));
+    assert(is_int(r, -1));
+    assert(consts.cv_typed_xor(i(-1), i(127), prim.prim_kind.prim_i8, &r));
+    assert(is_int(r, -128));
+    assert(consts.cv_typed_xor(i(-128), i(-1), prim.prim_kind.prim_i8, &r));
+    assert(is_int(r, 127));
+    assert(consts.cv_typed_and(u(U64_MAX), u(TWO63), prim.prim_kind.prim_u64, &r));
+    assert(is_uint(r, TWO63));
+    assert(consts.cv_typed_or(u(TWO63), u(TWO63 - 1), prim.prim_kind.prim_u64, &r));
+    assert(is_uint(r, U64_MAX));
+    assert(consts.cv_typed_xor(u(U64_MAX), u(TWO63), prim.prim_kind.prim_u64, &r));
+    assert(is_uint(r, TWO63 - 1));
+    assert(consts.cv_typed_xor(neg_two63(), i(-1), prim.prim_kind.prim_i64, &r));
+    assert(is_int(r, I64_MAX));
+    assert(consts.cv_typed_and(i(61680), i(4080), prim.prim_kind.prim_u16, &r));
+    assert(is_int(r, 240));
+}
+
+// ---- typed shifts (D6.2) -------------------------------------------------------
+
+fn void typed_shl_discards_the_bits_shifted_out() {
+    consts.cval mut r = consts.cv_none();
+    // one << 31 on an i32
+    assert(consts.cv_typed_shl(i(1), i(31), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, I32_MIN));
+    assert(consts.cv_typed_shl(i(1), i(7), prim.prim_kind.prim_u8, &r));
+    assert(is_int(r, 128));
+    assert(consts.cv_typed_shl(i(3), i(7), prim.prim_kind.prim_u8, &r));
+    assert(is_int(r, 128));
+    assert(consts.cv_typed_shl(i(1), i(7), prim.prim_kind.prim_i8, &r));
+    assert(is_int(r, -128));
+    assert(consts.cv_typed_shl(i(-1), i(1), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, -2));
+    assert(consts.cv_typed_shl(i(1), i(63), prim.prim_kind.prim_u64, &r));
+    assert(is_uint(r, TWO63));
+    assert(consts.cv_typed_shl(i(1), i(63), prim.prim_kind.prim_i64, &r));
+    assert(consts.cv_eq(r, neg_two63()));
+    assert(consts.cv_typed_shl(u(U64_MAX), i(1), prim.prim_kind.prim_u64, &r));
+    assert(is_uint(r, U64_MAX - 1));
+    assert(consts.cv_typed_shl(i(5), i(0), prim.prim_kind.prim_i16, &r));
+    assert(is_int(r, 5));
+}
+
+fn void typed_shift_count_at_or_past_the_width_is_an_error() {
+    consts.cval mut r = i(1);
+    assert(!consts.cv_typed_shl(i(1), i(32), prim.prim_kind.prim_i32, &r));
+    assert(is_none(r));
+    assert(!consts.cv_typed_shl(i(1), i(8), prim.prim_kind.prim_u8, &r));
+    assert(!consts.cv_typed_shl(i(1), i(64), prim.prim_kind.prim_u64, &r));
+    assert(!consts.cv_typed_shr(i(1), i(32), prim.prim_kind.prim_u32, &r));
+    assert(!consts.cv_typed_shr(i(1), i(16), prim.prim_kind.prim_i16, &r));
+    assert(!consts.cv_typed_shr(i(0), i(64), prim.prim_kind.prim_i64, &r));
+    assert(!consts.cv_typed_shl(i(1), u(U64_MAX), prim.prim_kind.prim_i64, &r));
+}
+
+fn void typed_negative_shift_count_is_an_error() {
+    consts.cval mut r = i(1);
+    assert(!consts.cv_typed_shl(i(1), i(-1), prim.prim_kind.prim_i32, &r));
+    assert(is_none(r));
+    assert(!consts.cv_typed_shr(i(1), i(-1), prim.prim_kind.prim_u64, &r));
+}
+
+fn void typed_shr_is_arithmetic_for_signed_and_logical_for_unsigned() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_typed_shr(i(-8), i(1), prim.prim_kind.prim_i32, &r));
+    assert(is_int(r, -4));
+    assert(consts.cv_typed_shr(i(-1), i(7), prim.prim_kind.prim_i8, &r));
+    assert(is_int(r, -1));
+    assert(consts.cv_typed_shr(i(-7), i(1), prim.prim_kind.prim_i16, &r));
+    assert(is_int(r, -4));
+    assert(consts.cv_typed_shr(neg_two63(), i(63), prim.prim_kind.prim_i64, &r));
+    assert(is_int(r, -1));
+    assert(consts.cv_typed_shr(i(U32_MAX), i(31), prim.prim_kind.prim_u32, &r));
+    assert(is_int(r, 1));
+    assert(consts.cv_typed_shr(u(U64_MAX), i(63), prim.prim_kind.prim_u64, &r));
+    assert(is_int(r, 1));
+    assert(consts.cv_typed_shr(i(255), i(7), prim.prim_kind.prim_u8, &r));
+    assert(is_int(r, 1));
+    assert(consts.cv_typed_shr(i(64), i(3), prim.prim_kind.prim_i8, &r));
+    assert(is_int(r, 8));
+}
+
+// ---- wrapping operators (D11.2) ------------------------------------------------
+
+fn void wrap_add_wraps_at_every_width() {
+    assert(is_int(consts.cv_wrap_add(i(127), i(1), prim.prim_kind.prim_i8), -128));
+    assert(is_int(consts.cv_wrap_add(i(255), i(1), prim.prim_kind.prim_u8), 0));
+    assert(is_int(consts.cv_wrap_add(i(32767), i(1), prim.prim_kind.prim_i16), -32768));
+    assert(is_int(consts.cv_wrap_add(i(65535), i(2), prim.prim_kind.prim_u16), 1));
+    assert(is_int(consts.cv_wrap_add(i(U32_MAX), i(1), prim.prim_kind.prim_u32), 0));
+    assert(is_int(consts.cv_wrap_add(i(I64_MAX), i(1), prim.prim_kind.prim_i64), I64_MIN));
+    assert(is_int(consts.cv_wrap_add(u(U64_MAX), i(1), prim.prim_kind.prim_u64), 0));
+    assert(is_int(consts.cv_wrap_add(i(1), i(2), prim.prim_kind.prim_i32), 3));
+    assert(is_int(consts.cv_wrap_add(i(-1), i(-1), prim.prim_kind.prim_i32), -2));
+}
+
+fn void wrap_sub_wraps_at_every_width() {
+    assert(is_int(consts.cv_wrap_sub(i(0), i(1), prim.prim_kind.prim_u8), 255));
+    assert(is_int(consts.cv_wrap_sub(i(0), i(1), prim.prim_kind.prim_u32), U32_MAX));
+    assert(is_uint(consts.cv_wrap_sub(i(0), i(1), prim.prim_kind.prim_u64), U64_MAX));
+    assert(is_int(consts.cv_wrap_sub(i(-128), i(1), prim.prim_kind.prim_i8), 127));
+    assert(is_int(consts.cv_wrap_sub(i(I32_MIN), i(1), prim.prim_kind.prim_i32), I32_MAX));
+    assert(is_int(consts.cv_wrap_sub(neg_two63(), i(1), prim.prim_kind.prim_i64), I64_MAX));
+    assert(is_int(consts.cv_wrap_sub(i(5), i(7), prim.prim_kind.prim_i32), -2));
+}
+
+fn void wrap_mul_wraps_at_every_width() {
+    // The FNV step of core-language.md 5.12: h *% 16777619 with h = 2166136261.
+    assert(is_int(consts.cv_wrap_mul(i(2166136261), i(16777619), prim.prim_kind.prim_u32),
+                  84696351));
+    assert(is_int(consts.cv_wrap_mul(i(255), i(2), prim.prim_kind.prim_u8), 254));
+    assert(is_int(consts.cv_wrap_mul(i(200), i(2), prim.prim_kind.prim_u8), 144));
+    assert(is_int(consts.cv_wrap_mul(i(-128), i(-1), prim.prim_kind.prim_i8), -128));
+    assert(is_int(consts.cv_wrap_mul(i(I32_MIN), i(-1), prim.prim_kind.prim_i32), I32_MIN));
+    assert(is_int(consts.cv_wrap_mul(neg_two63(), i(-1), prim.prim_kind.prim_i64), I64_MIN));
+    assert(is_int(consts.cv_wrap_mul(u(U64_MAX), u(U64_MAX), prim.prim_kind.prim_u64), 1));
+    assert(is_int(consts.cv_wrap_mul(u(TWO63), u(TWO63), prim.prim_kind.prim_u64), 0));
+    assert(is_int(consts.cv_wrap_mul(i(6), i(7), prim.prim_kind.prim_i32), 42));
+}
+
+fn i32 main() {
+    cast_two31_to_i32_is_i32_min();
+    cast_minus_one_to_unsigned_is_all_ones();
+    cast_300_to_u8_is_44();
+    cast_of_a_char_to_an_integer_is_its_code_point();
+    cast_to_char_keeps_the_low_byte();
+    cast_at_the_64_bit_edges();
+    cast_of_a_value_in_range_is_the_identity();
+    cast_widens_by_the_source_signedness();
+    cast_of_a_bool_to_an_integer_is_zero_or_one();
+    cast_to_bool_is_forbidden();
+    cast_to_floats_void_and_from_a_bool_to_char_are_unsupported();
+    cast_of_null_strings_and_none_is_an_error();
+    the_default_type_step_of_d4_1_precedes_cv_cast();
+    println("cast ok");
+    typed_i32_max_plus_one_is_an_error();
+    typed_i32_max_wrap_plus_one_is_i32_min();
+    typed_u8_200_times_2_is_an_error();
+    typed_constant_expression_examples();
+    typed_add_and_sub_stay_in_range();
+    typed_unsigned_subtraction_below_zero_is_an_error();
+    typed_mul_at_the_edges();
+    typed_neg_of_min_is_an_error();
+    typed_div_truncates_and_rejects_min_over_minus_one();
+    typed_div_by_zero_is_an_error();
+    typed_rem_keeps_the_dividend_sign_and_rejects_min_rem_minus_one();
+    typed_rem_by_zero_is_an_error();
+    println("arithmetic ok");
+    typed_not_complements_within_the_width();
+    typed_and_or_xor_never_leave_the_type();
+    println("bitwise ok");
+    typed_shl_discards_the_bits_shifted_out();
+    typed_shift_count_at_or_past_the_width_is_an_error();
+    typed_negative_shift_count_is_an_error();
+    typed_shr_is_arithmetic_for_signed_and_logical_for_unsigned();
+    println("shifts ok");
+    wrap_add_wraps_at_every_width();
+    wrap_sub_wraps_at_every_width();
+    wrap_mul_wraps_at_every_width();
+    println("wrapping ok");
+    println("ok");
+    return 0;
+}

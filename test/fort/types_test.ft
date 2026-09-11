@@ -1,0 +1,381 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| interning ok
+//| classes ok
+//| identity ok
+//| levels ok
+//| ok
+import prim;
+import types;
+import types_env;
+
+// The representation of a type: the table and its interning, identity (D3.12,
+// D17.1) and the level model (D5.2). The port of test/types_test.c.
+//
+// The conversions are in types_convert_test.ft, the sizes and the layout in
+// types_layout_test.ft, the builder and the canonical spelling in
+// types_build_test.ft, and each broken precondition in a panic test of its
+// own.
+
+// A distinct declaration pointer for the nominal types built by hand here. The
+// C passes a string literal; `void*` needs an address, so each call gives the
+// address of the next slot of a module-level array, which is as distinct.
+i64[8] mut decls = {};
+
+fn void* decl_at(u64 i) {
+    return cast(&decls[i], void*);
+}
+
+// ---- interning -----------------------------------------------------------------
+
+fn void intern_gives_one_node_per_type() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    assert(types_env.type_of(&e, "node*") == types_env.type_of(&e, "node*"));
+    assert(types_env.type_of(&e, "i32@") == types_env.type_of(&e, "i32@"));
+    assert(types_env.type_of(&e, "i32[4]") == types_env.type_of(&e, "i32[4]"));
+    assert(types_env.type_of(&e, "string") == types_env.type_of(&e, "string"));
+    assert(types_env.type_of(&e, "void*") == types_env.type_of(&e, "void*"));
+    assert(types_env.type_of(&e, "node mut* own mut@ own") ==
+           types_env.type_of(&e, "node mut* own mut@ own"));
+}
+
+fn void intern_separates_marks_and_shapes() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    assert(types_env.type_of(&e, "node*") != types_env.type_of(&e, "node mut*"));
+    assert(types_env.type_of(&e, "node*") != types_env.type_of(&e, "node* own"));
+    assert(types_env.type_of(&e, "i32@") != types_env.type_of(&e, "i32 mut@"));
+    assert(types_env.type_of(&e, "i32@") != types_env.type_of(&e, "i32@ own"));
+    assert(types_env.type_of(&e, "i32[4]") != types_env.type_of(&e, "i32[8]"));
+    assert(types_env.type_of(&e, "i32*") != types_env.type_of(&e, "u32*"));
+    assert(types_env.type_of(&e, "string") != types_env.type_of(&e, "string own"));
+    assert(types_env.type_of(&e, "void*") != types_env.type_of(&e, "void* own"));
+    assert(types_env.type_of(&e, "node**") != types_env.type_of(&e, "node* mut*"));
+}
+
+fn void intern_covers_function_types() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node* i32t = types.type_prim(&e.tt, prim.prim_kind.prim_i32);
+    types.node* i64t = types.type_prim(&e.tt, prim.prim_kind.prim_i64);
+    assert(types_env.fn1(&e, i32t, i32t) == types_env.fn1(&e, i32t, i32t));
+    assert(types_env.fn2(&e, i32t, i32t, i32t) == types_env.fn2(&e, i32t, i32t, i32t));
+    assert(types_env.fn1(&e, i32t, i32t) != types_env.fn1(&e, i64t, i32t));
+    assert(types_env.fn1(&e, i32t, i32t) != types_env.fn1(&e, i32t, i64t));
+    assert(types_env.fn1(&e, i32t, i32t) != types_env.fn2(&e, i32t, i32t, i32t));
+}
+
+fn void singletons_are_one_node_each() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    assert(types.type_void(&e.tt) == types.type_void(&e.tt));
+    assert(types.type_null(&e.tt) == types.type_null(&e.tt));
+    assert(types.type_error(&e.tt) == types.type_error(&e.tt));
+    assert(types.type_prim(&e.tt, prim.prim_kind.prim_i32) ==
+           types.type_prim(&e.tt, prim.prim_kind.prim_i32));
+    assert(types.type_prim(&e.tt, prim.prim_kind.prim_i32) !=
+           types.type_prim(&e.tt, prim.prim_kind.prim_u32));
+    assert(types.type_void(&e.tt) != types.type_null(&e.tt));
+}
+
+// Two structs with the same name and different declarations are two types; one
+// declaration is one node, however often it is asked for, so no two nodes of a
+// struct can split the types built from it (D3.12).
+fn void a_nominal_type_is_one_node_per_declaration() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node* a = types.type_struct(&e.tt, "p1", decl_at(0));
+    types.node* b = types.type_struct(&e.tt, "p1", decl_at(1));
+    assert(a != b);
+    assert(!types.type_equal(a, b));
+    assert(types.type_equal(a, a));
+    assert(types.type_struct(&e.tt, "p1", decl_at(0)) == a);
+    assert(types.type_struct(&e.tt, "other name", decl_at(0)) == a);
+    assert(types.type_enum(&e.tt, "c1", decl_at(2)) == types.type_enum(&e.tt, "c1", decl_at(2)));
+    // Every type built from one declaration is therefore one node.
+    assert(types.type_ptr(&e.tt, a, false, false) ==
+           types.type_ptr(&e.tt, types.type_struct(&e.tt, "p1", decl_at(0)), false, false));
+    // An anonymous node (no declaration) is its own type.
+    types.node* anon1 = types.type_struct(&e.tt, "p1", null);
+    types.node* anon2 = types.type_struct(&e.tt, "p1", null);
+    assert(anon1 != anon2);
+    assert(!types.type_equal(anon1, anon2));
+    assert(types.type_equal(anon1, anon1));
+}
+
+fn void error_type_poisons_every_constructor() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node* err = types.type_error(&e.tt);
+    types.node* i32t = types.type_prim(&e.tt, prim.prim_kind.prim_i32);
+    assert(types.type_ptr(&e.tt, err, false, false) == err);
+    assert(types.type_span(&e.tt, err, true, true) == err);
+    assert(types.type_array(&e.tt, err, 4) == err);
+    assert(types_env.fn1(&e, err, i32t) == err);
+    assert(types_env.fn1(&e, i32t, err) == err);
+}
+
+fn void table_free_leaves_an_empty_usable_table() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    assert(types_env.type_of(&e, "node mut* own mut@ own") != null);
+    assert(types_env.fn2(&e, types.type_prim(&e.tt, prim.prim_kind.prim_i32), e.node,
+                         e.point) != null);
+    types_env.free(&e);
+    types_env.init(&e);
+    assert(types_env.type_of(&e, "u8 mut@ own mut*") != null);
+    types_env.free(&e);
+}
+
+// ---- type classes ---------------------------------------------------------------
+
+fn void type_classes_answer_for_whole_types() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    assert(types.type_is_int(types_env.type_of(&e, "i32")));
+    assert(!types.type_is_int(types_env.type_of(&e, "f64")));
+    assert(types.type_is_float(types_env.type_of(&e, "f32")));
+    assert(types.type_is_scalar(types_env.type_of(&e, "bool")));
+    assert(types.type_is_scalar(types_env.type_of(&e, "char")));
+    assert(types.type_is_scalar(e.color));
+    assert(!types.type_is_scalar(e.point));
+    assert(!types.type_is_scalar(types_env.type_of(&e, "node*")));
+    assert(types.type_is_reference(types_env.type_of(&e, "node*")));
+    assert(types.type_is_reference(types_env.type_of(&e, "void*")));
+    assert(types.type_is_reference(types_env.type_of(&e, "i32@")));
+    assert(types.type_is_reference(types_env.type_of(&e, "string")));
+    assert(!types.type_is_reference(types_env.type_of(&e, "i32[4]")));
+    assert(!types.type_is_reference(e.point));
+}
+
+// ---- identity (D3.12, D17.1) ----------------------------------------------------
+
+fn void identity_of_primitives_is_the_name() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    assert(types.type_equal(types_env.type_of(&e, "i32"), types_env.type_of(&e, "i32")));
+    assert(!types.type_equal(types_env.type_of(&e, "i32"), types_env.type_of(&e, "u32")));
+    assert(!types.type_equal(types_env.type_of(&e, "i32"), types_env.type_of(&e, "i64")));
+    assert(!types.type_equal(types_env.type_of(&e, "char"), types_env.type_of(&e, "u8")));
+    assert(!types.type_equal(types_env.type_of(&e, "bool"), types_env.type_of(&e, "u8")));
+}
+
+fn void identity_of_struct_and_enum_is_the_declaration() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node* p1 = types.type_struct(&e.tt, "p1", decl_at(3));
+    types.node* p1_again = types.type_struct(&e.tt, "p1", decl_at(3));
+    assert(types.type_equal(p1, p1_again));
+    assert(p1 == p1_again);
+    assert(!types.type_equal(e.node, e.point));
+    assert(!types.type_equal(e.color, e.shape));
+    assert(!types.type_equal(e.color, e.node));
+    assert(types.type_equal(types_env.type_of(&e, "node*"), types_env.type_of(&e, "node*")));
+    assert(!types.type_equal(types_env.type_of(&e, "node*"), types_env.type_of(&e, "point*")));
+}
+
+fn void identity_of_arrays_is_element_and_length() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    assert(types.type_equal(types_env.type_of(&e, "i32[4]"), types_env.type_of(&e, "i32[4]")));
+    assert(!types.type_equal(types_env.type_of(&e, "i32[4]"), types_env.type_of(&e, "i32[5]")));
+    assert(!types.type_equal(types_env.type_of(&e, "i32[4]"), types_env.type_of(&e, "u32[4]")));
+    assert(types.type_equal(types_env.type_of(&e, "i32[3][4]"),
+                            types_env.type_of(&e, "i32[3][4]")));
+    assert(!types.type_equal(types_env.type_of(&e, "i32[3][4]"),
+                             types_env.type_of(&e, "i32[4][3]")));
+}
+
+fn void identity_of_pointers_and_spans_includes_every_mark() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    assert(!types.type_equal(types_env.type_of(&e, "node*"), types_env.type_of(&e, "node mut*")));
+    assert(!types.type_equal(types_env.type_of(&e, "node*"), types_env.type_of(&e, "node* own")));
+    assert(!types.type_equal(types_env.type_of(&e, "node**"),
+                             types_env.type_of(&e, "node* mut*")));
+    assert(!types.type_equal(types_env.type_of(&e, "i32@"), types_env.type_of(&e, "i32 mut@")));
+    assert(!types.type_equal(types_env.type_of(&e, "node*@"),
+                             types_env.type_of(&e, "node* own@")));
+    assert(!types.type_equal(types_env.type_of(&e, "node*@"),
+                             types_env.type_of(&e, "node* mut@ own")));
+    // Level 0 is not part of the type: `node* mut p` and `node* q` agree.
+    assert(types.type_equal(types_env.type_of(&e, "node* mut"), types_env.type_of(&e, "node*")));
+    assert(types.type_equal(types_env.type_of(&e, "i32@ mut"), types_env.type_of(&e, "i32@")));
+}
+
+fn void identity_of_voidptr_and_string_is_the_own_mark() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    assert(types.type_equal(types_env.type_of(&e, "void*"), types_env.type_of(&e, "void*")));
+    assert(!types.type_equal(types_env.type_of(&e, "void*"), types_env.type_of(&e, "void* own")));
+    assert(!types.type_equal(types_env.type_of(&e, "string"), types_env.type_of(&e, "string own")));
+    // `string` is distinct from `char@` and `u8@` (D3.7).
+    assert(!types.type_equal(types_env.type_of(&e, "string"), types_env.type_of(&e, "char@")));
+    assert(!types.type_equal(types_env.type_of(&e, "string"), types_env.type_of(&e, "u8@")));
+    assert(!types.type_equal(types_env.type_of(&e, "void*"), types_env.type_of(&e, "i32*")));
+}
+
+fn void identity_of_function_types_is_structural() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node* i32t = types.type_prim(&e.tt, prim.prim_kind.prim_i32);
+    types.node* i64t = types.type_prim(&e.tt, prim.prim_kind.prim_i64);
+    types.node* v = types.type_void(&e.tt);
+    assert(types.type_equal(types_env.fn2(&e, i32t, i32t, i32t),
+                            types_env.fn2(&e, i32t, i32t, i32t)));
+    assert(types.type_equal(types_env.fn0(&e, v), types_env.fn0(&e, v)));
+    // Return type, parameter types and arity.
+    assert(!types.type_equal(types_env.fn1(&e, i32t, i32t), types_env.fn1(&e, i64t, i32t)));
+    assert(!types.type_equal(types_env.fn1(&e, i32t, i32t), types_env.fn1(&e, i32t, i64t)));
+    assert(!types.type_equal(types_env.fn1(&e, i32t, i32t),
+                             types_env.fn2(&e, i32t, i32t, i32t)));
+    assert(!types.type_equal(types_env.fn0(&e, v), types_env.fn0(&e, i32t)));
+    // Pointee mutability and `own` of a parameter (D3.10, D17.1).
+    assert(!types.type_equal(types_env.fn1(&e, v, types_env.type_of(&e, "node*")),
+                             types_env.fn1(&e, v, types_env.type_of(&e, "node mut*"))));
+    assert(!types.type_equal(types_env.fn1(&e, v, types_env.type_of(&e, "node*")),
+                             types_env.fn1(&e, v, types_env.type_of(&e, "node* own"))));
+    // `noreturn` is part of identity.
+    types.node*[1] mut none = {};
+    types.node* nore = types.type_fn(&e.tt, v, none[..0], true);
+    assert(!types.type_equal(nore, types_env.fn0(&e, v)));
+    assert(types.type_equal(nore, types.type_fn(&e.tt, v, none[..0], true)));
+}
+
+fn void same_shape_ignores_mut_and_own() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    assert(types.type_same_shape(types_env.type_of(&e, "node*"),
+                                 types_env.type_of(&e, "node mut* own")));
+    assert(types.type_same_shape(types_env.type_of(&e, "node*@"),
+                                 types_env.type_of(&e, "node mut* own mut@ own")));
+    assert(types.type_same_shape(types_env.type_of(&e, "string"),
+                                 types_env.type_of(&e, "string own")));
+    assert(types.type_same_shape(types_env.type_of(&e, "void*"),
+                                 types_env.type_of(&e, "void* own")));
+    assert(!types.type_same_shape(types_env.type_of(&e, "node*"),
+                                  types_env.type_of(&e, "point*")));
+    assert(!types.type_same_shape(types_env.type_of(&e, "i32[4]"),
+                                  types_env.type_of(&e, "i32@")));
+    assert(!types.type_same_shape(types_env.type_of(&e, "string"),
+                                  types_env.type_of(&e, "char@")));
+    // A function type is compared whole: the marks of its parameters and
+    // result are part of its identity, not of the chain that reaches it
+    // (D3.10), so they survive type_same_shape.
+    types.node* v = types.type_void(&e.tt);
+    types.node* takes_node = types_env.fn1(&e, v, types_env.type_of(&e, "node*"));
+    types.node* takes_mut = types_env.fn1(&e, v, types_env.type_of(&e, "node mut*"));
+    types.node* takes_own = types_env.fn1(&e, v, types_env.type_of(&e, "node* own"));
+    assert(!types.type_same_shape(takes_node, takes_mut));
+    assert(!types.type_same_shape(takes_node, takes_own));
+    assert(types.type_same_shape(takes_node, takes_node));
+    assert(!types.type_same_shape(types.type_span(&e.tt, takes_node, false, false),
+                                  types.type_span(&e.tt, takes_mut, false, false)));
+    assert(types.type_same_shape(types.type_span(&e.tt, takes_node, true, true),
+                                 types.type_span(&e.tt, takes_node, false, false)));
+    assert(!types.type_same_shape(types_env.fn0(&e, types_env.type_of(&e, "node*")),
+                                  types_env.fn0(&e, types_env.type_of(&e, "node mut*"))));
+}
+
+// ---- the level model (D5.2) -----------------------------------------------------
+
+fn void the_levels_of_a_chain_of_suffixes() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    assert(types.type_levels(types_env.type_of(&e, "i32")) == 0);
+    assert(types.type_levels(types_env.type_of(&e, "node*")) == 1);
+    assert(types.type_levels(types_env.type_of(&e, "node**")) == 2);
+    assert(types.type_levels(types_env.type_of(&e, "i32@")) == 1);
+    assert(types.type_levels(types_env.type_of(&e, "i32@@")) == 2);
+    assert(types.type_levels(types_env.type_of(&e, "node*@")) == 2);
+    assert(types.type_levels(types_env.type_of(&e, "u8@*")) == 2);
+    assert(types.type_levels(types_env.type_of(&e, "i32[4]*")) == 1);
+    assert(types.type_levels(types_env.type_of(&e, "i32[3][4]")) == 0);
+    assert(types.type_levels(types_env.type_of(&e, "point")) == 0);
+    // `string` and `void*` have no level behind the binding (D5.2, D3.11).
+    assert(types.type_levels(types_env.type_of(&e, "string")) == 0);
+    assert(types.type_levels(types_env.type_of(&e, "void*")) == 0);
+    assert(types.type_levels(types_env.type_of(&e, "i32[4]@")) == 1);
+    assert(types.type_levels(types_env.type_of(&e, "i32@[4]")) == 1);
+}
+
+fn void ref_at_walks_the_chain_outermost_first() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node* t = types_env.type_of(&e, "node mut* own mut@ own");
+    assert(types.type_ref_at(t, 1) == t);
+    assert(types.type_ref_at(t, 2) == t->elem);
+    assert(types.type_ref_at(t, 3) == null);
+    // A fixed array is transparent: the reference behind it is level 1.
+    types.node* arr = types_env.type_of(&e, "node* own[4]");
+    assert(types.type_ref_at(arr, 1) == arr->elem);
+    assert(types.type_ref_at(arr, 1)->is_own);
+    assert(types.type_ref_at(arr, 2) == null);
+    // `string` and `void*` carry an `own` mark but add no level.
+    assert(types.type_ref_at(types_env.type_of(&e, "string own"), 1)->is_own);
+    assert(types.type_ref_at(types_env.type_of(&e, "void* own"), 1)->is_own);
+    assert(types.type_ref_at(types_env.type_of(&e, "string own"), 2) == null);
+    assert(types.type_ref_at(types_env.type_of(&e, "i32"), 1) == null);
+    assert(types.type_ref_at(types_env.type_of(&e, "i32[3][4]"), 1) == null);
+}
+
+fn void level_mut_reports_the_level_of_each_reference() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    assert(!types.type_level_mut(types_env.type_of(&e, "node*"), 1));
+    assert(types.type_level_mut(types_env.type_of(&e, "node mut*"), 1));
+    assert(types.type_level_mut(types_env.type_of(&e, "node* mut*"), 1));
+    assert(!types.type_level_mut(types_env.type_of(&e, "node* mut*"), 2));
+    assert(types.type_level_mut(types_env.type_of(&e, "node mut* mut*"), 2));
+    // Beyond the chain, and for the characters of a string, always false.
+    assert(!types.type_level_mut(types_env.type_of(&e, "node*"), 2));
+    assert(!types.type_level_mut(types_env.type_of(&e, "string"), 1));
+    assert(!types.type_level_mut(types_env.type_of(&e, "string own"), 1));
+    assert(!types.type_level_mut(types_env.type_of(&e, "void* mut"), 1));
+}
+
+fn i32 main() {
+    intern_gives_one_node_per_type();
+    intern_separates_marks_and_shapes();
+    intern_covers_function_types();
+    singletons_are_one_node_each();
+    a_nominal_type_is_one_node_per_declaration();
+    error_type_poisons_every_constructor();
+    table_free_leaves_an_empty_usable_table();
+    println("interning ok");
+    type_classes_answer_for_whole_types();
+    println("classes ok");
+    identity_of_primitives_is_the_name();
+    identity_of_struct_and_enum_is_the_declaration();
+    identity_of_arrays_is_element_and_length();
+    identity_of_pointers_and_spans_includes_every_mark();
+    identity_of_voidptr_and_string_is_the_own_mark();
+    identity_of_function_types_is_structural();
+    same_shape_ignores_mut_and_own();
+    println("identity ok");
+    the_levels_of_a_chain_of_suffixes();
+    ref_at_walks_the_chain_outermost_first();
+    level_mut_reports_the_level_of_each_reference();
+    println("levels ok");
+    println("ok");
+    return 0;
+}

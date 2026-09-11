@@ -1,0 +1,477 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| offsets ok
+//| fields ok
+//| nesting ok
+//| ok
+import prim;
+import types;
+import types_env;
+
+// The one silent failure mode of D3.8: the compiler computes struct layout
+// itself and a disagreement neither fails to compile nor fails a language test
+// -- it reads the wrong bytes at the only boundary that can see it, which is
+// pointer-based C interop (D9.9).
+//
+// test/types_abi_test.c writes every struct twice, once as the field list
+// `type_layout_struct` lays out and once as the C struct it must equal, and
+// asserts against `offsetof` and `sizeof` of that mirror rather than against
+// numbers written by hand: a number written by hand states what the author
+// believed. This port keeps that shape with the mirror written in fort, so the
+// oracle is the layout stage1 computed for a declared struct -- the C
+// bootstrap's own layout engine, which is the module under test's original --
+// read through `sizeof` (D3.15) and through the address of each field. Two
+// independent implementations of D3.8 therefore have to agree, and no offset
+// below is written by hand.
+//
+// Two gaps this shape cannot close, both covered elsewhere. Floats have no
+// spelling in the bootstrap subset (test/lang/bootstrap-unsupported.txt), so
+// the `f64` field of `rec` is mirrored by an `i64`, which D3.1 gives the same
+// size and alignment, and the sizes of `f32` and `f64` themselves are held in
+// types_layout_test.ft. And fort has no `alignof` (D3.15), so an alignment is
+// read as the offset a leading `u8` pushes the value to, which is what the
+// alignment does.
+
+// struct rec { u8 tag; i32 n; u16 k; f64 x; } (type-system.md 4.1), with the
+// float mirrored by an i64.
+struct rec_mirror {
+    u8 tag;
+    i32 n;
+    u16 k;
+    i64 x;
+}
+
+// The largest member first, so the struct ends in padding C still counts.
+struct tail_mirror {
+    i64 big;
+    u8 tag;
+}
+
+// Three bytes of trailing padding, so an array of it strides by more than the
+// bytes its fields occupy.
+struct small_mirror {
+    i32 n;
+    u8 tag;
+}
+
+struct nest_mirror {
+    u8 tag;
+    rec_mirror inner;
+}
+
+struct grid_mirror {
+    small_mirror[3] cells;
+    u8 tag;
+}
+
+// `bool` is `i1` in a value and `i8` in memory (D19.2), so in a struct it is a
+// byte.
+struct flags_mirror {
+    bool on;
+    i32 n;
+    bool off;
+}
+
+struct spanful_mirror {
+    u8 tag;
+    string name;
+    i32@ vals;
+}
+
+struct plain_mirror {
+    u8 tag;
+    string s;
+}
+
+struct refs_mirror {
+    rec_mirror* node;
+    fn i32(i32) call;
+    void* opaque;
+}
+
+// An enum's underlying type is `i32` and its size 4 (D3.9).
+enum colour_mirror {
+    red,
+    green,
+    blue,
+}
+
+struct tagged_mirror {
+    u8 tag;
+    colour_mirror colour;
+    i64 big;
+}
+
+// `char` is an unsigned byte (D3.2); the `f32` of the C mirror is an `i32`
+// here, which D3.1 gives the same size and alignment.
+struct narrow_mirror {
+    char first;
+    i32 weight;
+    char last;
+}
+
+// A struct of one field: the size is the field's, rounded up to its own
+// alignment, so it adds nothing.
+struct one_mirror {
+    i64 only;
+}
+
+// The classic C divergence: `inner` is five bytes of fields and eight of
+// storage, so the field after it stands at 8 and not at 5.
+struct inner_mirror {
+    i32 n;
+    u8 tag;
+}
+
+struct after_mirror {
+    inner_mirror inner;
+    u8 tag;
+}
+
+// The alignment probes: a leading byte pushes the value to the first offset
+// its alignment admits, which is the alignment itself.
+struct align_rec {
+    u8 pad;
+    rec_mirror value;
+}
+
+struct align_small {
+    u8 pad;
+    small_mirror value;
+}
+
+struct align_flags {
+    u8 pad;
+    flags_mirror value;
+}
+
+struct align_spanful {
+    u8 pad;
+    spanful_mirror value;
+}
+
+struct align_narrow {
+    u8 pad;
+    narrow_mirror value;
+}
+
+// The byte offset of a field, from the two addresses: a pointer casts to `u64`
+// and to no other integer type (D3.14).
+fn u64 offset_of(void* base, void* field) {
+    return cast(field, u64) - cast(base, u64);
+}
+
+// Lays out a fresh nominal struct of the given fields and writes their
+// offsets, then answers whether the layout ran to the end: the state
+// type_layout_struct leaves on a true return, and never the error of a
+// refusal.
+fn bool lay_out(types_env.env mut* e, string name, types.node*@ fields, u64 mut@ offsets,
+                types.node* mut* out) {
+    types.node* s = types_env.make_struct(e, name);
+    *out = s;
+    if (!types.type_layout_begin(s)) {
+        return false;
+    }
+    if (!types.type_layout_struct(s, fields, offsets)) {
+        return false;
+    }
+    return types.type_layout_state(s) == types.layout_state.l_resolved;
+}
+
+// Whether the struct `s` has the size and alignment the mirror has.
+fn bool matches(types.node* s, u64 size, u64 align) {
+    return types.type_sizeof(s) == size && types.type_alignof(s) == align;
+}
+
+fn void rec_has_the_offsets_and_sizeof_of_its_mirror() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node*[4] mut fields = {types_env.type_of(&e, "u8"), types_env.type_of(&e, "i32"),
+                                 types_env.type_of(&e, "u16"), types_env.type_of(&e, "i64")};
+    u64[4] mut offsets = {};
+    types.node* mut s = null;
+    assert(lay_out(&e, "rec_abi", fields[..], offsets[..], &s));
+    rec_mirror mut m = rec_mirror{};
+    align_rec mut probe = align_rec{};
+    void* base = cast(&m, void*);
+    assert(offsets[0] == offset_of(base, cast(&m.tag, void*)));
+    assert(offsets[1] == offset_of(base, cast(&m.n, void*)));
+    assert(offsets[2] == offset_of(base, cast(&m.k, void*)));
+    assert(offsets[3] == offset_of(base, cast(&m.x, void*)));
+    assert(matches(s, sizeof(rec_mirror),
+                   offset_of(cast(&probe, void*), cast(&probe.value, void*))));
+}
+
+// The size passes the last field, because C rounds it up to the alignment
+// (D3.8): a copy that stopped at the last byte written would lose it.
+fn void a_struct_whose_largest_member_is_first_keeps_its_trailing_padding() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node*[2] mut fields = {types_env.type_of(&e, "i64"), types_env.type_of(&e, "u8")};
+    u64[2] mut offsets = {};
+    types.node* mut s = null;
+    assert(lay_out(&e, "tail_abi", fields[..], offsets[..], &s));
+    tail_mirror mut m = tail_mirror{};
+    void* base = cast(&m, void*);
+    assert(offsets[0] == offset_of(base, cast(&m.big, void*)));
+    assert(offsets[1] == offset_of(base, cast(&m.tag, void*)));
+    assert(types.type_sizeof(s) == sizeof(tail_mirror));
+    assert(types.type_sizeof(s) > offsets[1] + 1);
+}
+
+// The fields occupy five bytes and the element strides by eight, which is what
+// an array of the mirror does (D3.4, D3.8).
+fn void an_array_strides_by_the_padded_size_of_its_element_struct() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node*[2] mut fields = {types_env.type_of(&e, "i32"), types_env.type_of(&e, "u8")};
+    u64[2] mut offsets = {};
+    types.node* mut small = null;
+    assert(lay_out(&e, "small_abi", fields[..], offsets[..], &small));
+    align_small mut probe = align_small{};
+    assert(matches(small, sizeof(small_mirror),
+                   offset_of(cast(&probe, void*), cast(&probe.value, void*))));
+    types.node* array = types.type_array(&e.tt, small, 3);
+    assert(types.type_sizeof(array) == sizeof(small_mirror[3]));
+    // The stride is the padded size, which the two elements of a real array
+    // stand apart by.
+    small_mirror[2] mut pair = {};
+    assert(offset_of(cast(&pair[0], void*), cast(&pair[1], void*)) == sizeof(small_mirror));
+}
+
+// The inner struct's alignment is the outer one's, so the field is pushed past
+// seven bytes of padding (D3.8).
+fn void a_nested_struct_field_lands_where_the_mirror_puts_it() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node*[4] mut inner_fields = {types_env.type_of(&e, "u8"),
+                                       types_env.type_of(&e, "i32"),
+                                       types_env.type_of(&e, "u16"),
+                                       types_env.type_of(&e, "i64")};
+    u64[4] mut inner_offsets = {};
+    types.node* mut inner = null;
+    assert(lay_out(&e, "rec_abi", inner_fields[..], inner_offsets[..], &inner));
+    types.node*[2] mut fields = {types_env.type_of(&e, "u8"), inner};
+    u64[2] mut offsets = {};
+    types.node* mut s = null;
+    assert(lay_out(&e, "nest_abi", fields[..], offsets[..], &s));
+    nest_mirror mut m = nest_mirror{};
+    void* base = cast(&m, void*);
+    assert(offsets[0] == offset_of(base, cast(&m.tag, void*)));
+    assert(offsets[1] == offset_of(base, cast(&m.inner, void*)));
+    assert(types.type_sizeof(s) == sizeof(nest_mirror));
+}
+
+fn void a_struct_holding_an_array_of_structs_matches_the_mirror() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node*[2] mut small_fields = {types_env.type_of(&e, "i32"),
+                                       types_env.type_of(&e, "u8")};
+    u64[2] mut small_offsets = {};
+    types.node* mut small = null;
+    assert(lay_out(&e, "small_abi", small_fields[..], small_offsets[..], &small));
+    types.node*[2] mut fields = {types.type_array(&e.tt, small, 3),
+                                 types_env.type_of(&e, "u8")};
+    u64[2] mut offsets = {};
+    types.node* mut s = null;
+    assert(lay_out(&e, "grid_abi", fields[..], offsets[..], &s));
+    grid_mirror mut m = grid_mirror{};
+    void* base = cast(&m, void*);
+    assert(offsets[0] == offset_of(base, cast(&m.cells, void*)));
+    assert(offsets[1] == offset_of(base, cast(&m.tag, void*)));
+    assert(types.type_sizeof(s) == sizeof(grid_mirror));
+}
+
+// `bool` is `i1` in a value and one byte in memory (D19.2), so it pads like a
+// `u8` and never like an `i32`.
+fn void a_bool_field_occupies_the_byte_the_mirror_gives_it() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node*[3] mut fields = {types_env.type_of(&e, "bool"), types_env.type_of(&e, "i32"),
+                                 types_env.type_of(&e, "bool")};
+    u64[3] mut offsets = {};
+    types.node* mut s = null;
+    assert(lay_out(&e, "flags_abi", fields[..], offsets[..], &s));
+    flags_mirror mut m = flags_mirror{};
+    align_flags mut probe = align_flags{};
+    void* base = cast(&m, void*);
+    assert(offsets[0] == offset_of(base, cast(&m.on, void*)));
+    assert(offsets[1] == offset_of(base, cast(&m.n, void*)));
+    assert(offsets[2] == offset_of(base, cast(&m.off, void*)));
+    assert(matches(s, sizeof(flags_mirror),
+                   offset_of(cast(&probe, void*), cast(&probe.value, void*))));
+}
+
+// A span or `string` is one hidden pointer and is never split into two scalars
+// (D9.9), so each field is one two-word header.
+fn void a_span_and_a_string_field_are_one_two_word_header_each() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node*[3] mut fields = {types_env.type_of(&e, "u8"),
+                                 types_env.type_of(&e, "string"),
+                                 types_env.type_of(&e, "i32@")};
+    u64[3] mut offsets = {};
+    types.node* mut s = null;
+    assert(lay_out(&e, "spanful_abi", fields[..], offsets[..], &s));
+    spanful_mirror mut m = spanful_mirror{};
+    align_spanful mut probe = align_spanful{};
+    void* base = cast(&m, void*);
+    assert(offsets[0] == offset_of(base, cast(&m.tag, void*)));
+    assert(offsets[1] == offset_of(base, cast(&m.name, void*)));
+    assert(offsets[2] == offset_of(base, cast(&m.vals, void*)));
+    assert(matches(s, sizeof(spanful_mirror),
+                   offset_of(cast(&probe, void*), cast(&probe.value, void*))));
+    assert(offsets[2] - offsets[1] == 16);
+}
+
+fn void pointer_and_function_pointer_fields_match_the_mirror() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node* i32t = types.type_prim(&e.tt, prim.prim_kind.prim_i32);
+    types.node*[3] mut fields = {types_env.type_of(&e, "node*"), types_env.fn1(&e, i32t, i32t),
+                                 types_env.type_of(&e, "void*")};
+    u64[3] mut offsets = {};
+    types.node* mut s = null;
+    assert(lay_out(&e, "refs_abi", fields[..], offsets[..], &s));
+    refs_mirror mut m = refs_mirror{};
+    void* base = cast(&m, void*);
+    assert(offsets[0] == offset_of(base, cast(&m.node, void*)));
+    assert(offsets[1] == offset_of(base, cast(&m.call, void*)));
+    assert(offsets[2] == offset_of(base, cast(&m.opaque, void*)));
+    assert(types.type_sizeof(s) == sizeof(refs_mirror));
+}
+
+// An enum is `i32` and 4 bytes (D3.9), so a field of one pads like an `i32`:
+// laid out as anything wider it would move the field after it and the struct's
+// size with it.
+fn void an_enum_field_is_four_bytes_wide() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node*[3] mut fields = {types_env.type_of(&e, "u8"), e.color,
+                                 types_env.type_of(&e, "i64")};
+    u64[3] mut offsets = {};
+    types.node* mut s = null;
+    assert(lay_out(&e, "tagged_abi", fields[..], offsets[..], &s));
+    tagged_mirror mut m = tagged_mirror{};
+    void* base = cast(&m, void*);
+    assert(offsets[0] == offset_of(base, cast(&m.tag, void*)));
+    assert(offsets[1] == offset_of(base, cast(&m.colour, void*)));
+    assert(offsets[2] == offset_of(base, cast(&m.big, void*)));
+    assert(types.type_sizeof(s) == sizeof(tagged_mirror));
+    assert(sizeof(colour_mirror) == 4);
+}
+
+// `char` is an unsigned byte (D3.2), so the 4-byte field after it is aligned
+// and the byte after that one is not.
+fn void char_fields_match_their_mirror() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node*[3] mut fields = {types_env.type_of(&e, "char"), types_env.type_of(&e, "i32"),
+                                 types_env.type_of(&e, "char")};
+    u64[3] mut offsets = {};
+    types.node* mut s = null;
+    assert(lay_out(&e, "narrow_abi", fields[..], offsets[..], &s));
+    narrow_mirror mut m = narrow_mirror{};
+    align_narrow mut probe = align_narrow{};
+    void* base = cast(&m, void*);
+    assert(offsets[0] == offset_of(base, cast(&m.first, void*)));
+    assert(offsets[1] == offset_of(base, cast(&m.weight, void*)));
+    assert(offsets[2] == offset_of(base, cast(&m.last, void*)));
+    assert(matches(s, sizeof(narrow_mirror),
+                   offset_of(cast(&probe, void*), cast(&probe.value, void*))));
+}
+
+fn void a_struct_of_one_field_is_that_field() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node*[1] mut fields = {types_env.type_of(&e, "i64")};
+    u64[1] mut offsets = {};
+    types.node* mut s = null;
+    assert(lay_out(&e, "one_abi", fields[..], offsets[..], &s));
+    one_mirror mut m = one_mirror{};
+    assert(offsets[0] == offset_of(cast(&m, void*), cast(&m.only, void*)));
+    assert(types.type_sizeof(s) == sizeof(one_mirror));
+    assert(types.type_sizeof(s) == sizeof(i64));
+}
+
+// The C divergence a layout written by hand falls into: the inner struct
+// occupies five bytes of fields and eight of storage, and the field after it
+// stands at 8, because a struct's size carries its padding with it (D3.8).
+fn void a_field_after_a_nested_struct_stands_past_its_trailing_padding() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node*[2] mut inner_fields = {types_env.type_of(&e, "i32"),
+                                       types_env.type_of(&e, "u8")};
+    u64[2] mut inner_offsets = {};
+    types.node* mut inner = null;
+    assert(lay_out(&e, "inner_abi", inner_fields[..], inner_offsets[..], &inner));
+    types.node*[2] mut fields = {inner, types_env.type_of(&e, "u8")};
+    u64[2] mut offsets = {};
+    types.node* mut s = null;
+    assert(lay_out(&e, "after_abi", fields[..], offsets[..], &s));
+    after_mirror mut m = after_mirror{};
+    void* base = cast(&m, void*);
+    assert(offsets[0] == offset_of(base, cast(&m.inner, void*)));
+    assert(offsets[1] == offset_of(base, cast(&m.tag, void*)));
+    assert(offsets[1] == 8);
+    assert(types.type_sizeof(s) == sizeof(after_mirror));
+}
+
+// `own` is a compile-time mark and no part of the representation (D17.1), so
+// the owning form of a struct has the layout of the plain one.
+fn void an_owning_field_changes_no_offset() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node*[2] mut plain_fields = {types_env.type_of(&e, "u8"),
+                                       types_env.type_of(&e, "string")};
+    u64[2] mut plain_offsets = {};
+    types.node* mut plain = null;
+    assert(lay_out(&e, "plain_abi", plain_fields[..], plain_offsets[..], &plain));
+    types.node*[2] mut owning_fields = {types_env.type_of(&e, "u8"),
+                                        types_env.type_of(&e, "string own")};
+    u64[2] mut owning_offsets = {};
+    types.node* mut owning = null;
+    assert(lay_out(&e, "owning_abi", owning_fields[..], owning_offsets[..], &owning));
+    plain_mirror mut m = plain_mirror{};
+    assert(plain_offsets[1] == offset_of(cast(&m, void*), cast(&m.s, void*)));
+    assert(owning_offsets[1] == plain_offsets[1]);
+    assert(types.type_sizeof(plain) == sizeof(plain_mirror));
+    assert(types.type_sizeof(owning) == sizeof(plain_mirror));
+    assert(types.type_is_owning_aggregate(owning));
+    assert(!types.type_is_owning_aggregate(plain));
+}
+
+fn i32 main() {
+    rec_has_the_offsets_and_sizeof_of_its_mirror();
+    a_struct_whose_largest_member_is_first_keeps_its_trailing_padding();
+    an_array_strides_by_the_padded_size_of_its_element_struct();
+    println("offsets ok");
+    a_bool_field_occupies_the_byte_the_mirror_gives_it();
+    a_span_and_a_string_field_are_one_two_word_header_each();
+    pointer_and_function_pointer_fields_match_the_mirror();
+    an_enum_field_is_four_bytes_wide();
+    char_fields_match_their_mirror();
+    a_struct_of_one_field_is_that_field();
+    println("fields ok");
+    a_nested_struct_field_lands_where_the_mirror_puts_it();
+    a_struct_holding_an_array_of_structs_matches_the_mirror();
+    a_field_after_a_nested_struct_stands_past_its_trailing_padding();
+    an_owning_field_changes_no_offset();
+    println("nesting ok");
+    println("ok");
+    return 0;
+}

@@ -1,0 +1,415 @@
+//! run
+//! flags: -I ../../src/fort
+//! stdout:
+//| conversions ok
+//| fits ok
+//| text ok
+//| ok
+import consts;
+import prim;
+import std::str;
+import std::strbuf;
+
+// The second oracle for the query half of consts.ft, as consts_model_test.ft
+// is for the folding half: the conversions out of a constant, the type queries
+// of D4.2 and D4.5 and the diagnostic text of D2.8 are held against models
+// computed here, over a grid rather than over a list of cases.
+//
+// The text half matters more than it looks: cv_to_str is what a diagnostic
+// carries, and a wrong escape there is not a wrong number but a diagnostic
+// line that a reader (or a test harness) cannot parse. Every one of the 256
+// code points is checked, and every byte of a string constant.
+
+u64 U64_MAX = 18446744073709551615;
+u64 TWO63 = 9223372036854775808;
+i64 I64_MIN = -9223372036854775808;
+i64 I64_MAX = 9223372036854775807;
+
+// The magnitudes the grid walks, boundaries included.
+u64[11] MAGS = {0, 1, 2, 127, 128, 255, 32768, 2147483648, 4294967296,
+                9223372036854775807, 9223372036854775808};
+
+fn consts.cval i(i64 v) {
+    return consts.cv_from_i64(v);
+}
+
+fn consts.cval u(u64 v) {
+    return consts.cv_from_u64(v);
+}
+
+// The grid: every magnitude as a non-negative constant, then as a negative one
+// where [-2^63, 2^64 - 1] holds it (D4.4).
+fn u64 grid_len() {
+    return MAGS.len * 2;
+}
+
+fn consts.cval grid_at(u64 k) {
+    u64 mag = MAGS[k % MAGS.len];
+    if (k < MAGS.len) {
+        return u(mag);
+    }
+    if (mag > TWO63) {
+        return u(mag);
+    }
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_neg(u(mag), &r));
+    return r;
+}
+
+fn u64 width_of(prim.prim_kind t) {
+    return cast(prim.prim_size(t), u64) * prim.PRIM_BITS_PER_BYTE;
+}
+
+// Whether `v` lies in the range of the integer type `t`, from the width.
+fn bool in_range(consts.cval v, prim.prim_kind t) {
+    u64 width = width_of(t);
+    u64 one = 1;
+    if (prim.prim_is_signed(t)) {
+        u64 half = one << (width - 1);
+        if (v.neg) {
+            return v.mag <= half;
+        }
+        return v.mag < half;
+    }
+    if (v.neg) {
+        return false;
+    }
+    if (width == 64) {
+        return true;
+    }
+    return v.mag < (one << width);
+}
+
+// ---- the conversions out of a constant ------------------------------------------
+
+// `cv_to_i64` answers for exactly the values an `i64` holds, and the value it
+// writes converts back to the constant it came from.
+fn void to_i64_round_trips_exactly_the_i64_range() {
+    u64 mut k = 0;
+    while (k < grid_len()) {
+        consts.cval v = grid_at(k);
+        i64 mut out = 7;
+        bool model = in_range(v, prim.prim_kind.prim_i64);
+        assert(consts.cv_to_i64(v, &out) == model);
+        if (model) {
+            assert(consts.cv_eq(i(out), v));
+        } else {
+            assert(out == 7); // untouched on a refusal
+        }
+        k += 1;
+    }
+}
+
+// `cv_to_u64` answers for exactly the non-negative values, which is the same
+// as the range of `u64` (D4.4).
+fn void to_u64_answers_for_the_non_negative_values() {
+    u64 mut k = 0;
+    while (k < grid_len()) {
+        consts.cval v = grid_at(k);
+        u64 mut out = 7;
+        bool model = !v.neg;
+        assert(consts.cv_to_u64(v, &out) == model);
+        assert(model == in_range(v, prim.prim_kind.prim_u64));
+        if (model) {
+            assert(out == v.mag);
+            assert(consts.cv_eq(u(out), v));
+        } else {
+            assert(out == 7);
+        }
+        k += 1;
+    }
+}
+
+// `cv_bits` is the value modulo 2^64: for a non-negative value the magnitude,
+// and for a negative one the magnitude subtracted from zero, which the wrapping
+// subtract of D11.2 computes here as well.
+fn void bits_is_the_value_modulo_two_to_the_64() {
+    u64 mut k = 0;
+    while (k < grid_len()) {
+        consts.cval v = grid_at(k);
+        u64 mut want = v.mag;
+        if (v.neg) {
+            want = 0 -% v.mag;
+        }
+        assert(consts.cv_bits(v) == want);
+        // The pattern reconstructs the value: a non-negative one directly, a
+        // negative one as the complement plus one.
+        if (!v.neg) {
+            assert(consts.cv_eq(u(consts.cv_bits(v)), v));
+        } else {
+            assert(consts.cv_bits(v) +% v.mag == 0);
+        }
+        k += 1;
+    }
+}
+
+// A char is an integer-like constant whose value is its code point (D4.3), and
+// every one of the 256 of them converts.
+fn void every_code_point_is_an_integer_like_constant() {
+    u64 mut code = 0;
+    while (code <= 255) {
+        consts.cval c = consts.cv_from_char(code);
+        assert(consts.cv_is_int_like(c));
+        assert(!consts.cv_is_int(c));
+        consts.cval as_int = consts.cv_as_int(c);
+        assert(consts.cv_is_int(as_int));
+        assert(consts.cv_eq(as_int, u(code)));
+        assert(consts.cv_bits(as_int) == code);
+        i64 mut out = 0;
+        assert(consts.cv_to_i64(as_int, &out));
+        assert(out == cast(code, i64));
+        code += 1;
+    }
+}
+
+// ---- cv_fits and cv_default_kind ------------------------------------------------
+
+// An integer fits an integer type exactly when its range holds it, and either
+// float type always (D4.2).
+fn void fits_agrees_with_the_range_of_every_kind() {
+    u64 mut k = 0;
+    while (k < grid_len()) {
+        consts.cval v = grid_at(k);
+        u64 mut t = 0;
+        while (t < prim.PRIM_COUNT) {
+            prim.prim_kind kind = cast(t, prim.prim_kind);
+            bool mut model = false;
+            if (prim.prim_is_integer(kind)) {
+                model = in_range(v, kind);
+            } else if (prim.prim_is_float(kind)) {
+                model = true;
+            }
+            assert(consts.cv_fits(v, kind) == model);
+            t += 1;
+        }
+        k += 1;
+    }
+}
+
+// A char fits `char` and every integer type that holds its code point, and
+// never `bool`, a float or `void` (D4.3).
+fn void fits_of_a_char_follows_its_code_point() {
+    u64 mut code = 0;
+    while (code <= 255) {
+        consts.cval c = consts.cv_from_char(code);
+        consts.cval as_int = consts.cv_as_int(c);
+        assert(consts.cv_fits(c, prim.prim_kind.prim_char));
+        assert(!consts.cv_fits(c, prim.prim_kind.prim_bool));
+        assert(!consts.cv_fits(c, prim.prim_kind.prim_f32));
+        assert(!consts.cv_fits(c, prim.prim_kind.prim_f64));
+        assert(!consts.cv_fits(c, prim.prim_kind.prim_void));
+        u64 mut t = 0;
+        while (t <= 7) {
+            prim.prim_kind kind = cast(t, prim.prim_kind);
+            assert(consts.cv_fits(c, kind) == in_range(as_int, kind));
+            t += 1;
+        }
+        // An integer never fits `char`, whatever its value (D4.3).
+        assert(!consts.cv_fits(as_int, prim.prim_kind.prim_char));
+        code += 1;
+    }
+}
+
+// The default type is `i32` when the integer fits it, else `i64`, and no type
+// at all above that (D4.5).
+fn void default_kind_is_i32_then_i64() {
+    u64 mut k = 0;
+    while (k < grid_len()) {
+        consts.cval v = grid_at(k);
+        prim.prim_kind mut kind = prim.prim_kind.prim_void;
+        bool model = in_range(v, prim.prim_kind.prim_i64);
+        assert(consts.cv_default_kind(v, &kind) == model);
+        if (model) {
+            if (in_range(v, prim.prim_kind.prim_i32)) {
+                assert(kind == prim.prim_kind.prim_i32);
+            } else {
+                assert(kind == prim.prim_kind.prim_i64);
+            }
+            // The default type is one the value fits, which is what makes it
+            // usable with no context.
+            assert(consts.cv_fits(v, kind));
+        } else {
+            assert(kind == prim.prim_kind.prim_void);
+        }
+        k += 1;
+    }
+}
+
+// ---- the diagnostic text (D2.8) -------------------------------------------------
+
+// The text cv_to_str writes for `v`.
+fn string text_of(consts.cval v, strbuf.str_buf mut* b) {
+    strbuf.clear(b);
+    consts.cv_to_str(v, b);
+    return strbuf.view(b);
+}
+
+// An integer reads back as the decimal of its magnitude behind its sign, which
+// std::str parses back to the magnitude it came from.
+fn void an_integer_reads_back_as_its_decimal() {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut k = 0;
+    while (k < grid_len()) {
+        consts.cval v = grid_at(k);
+        string text = text_of(v, &b);
+        assert(text.len > 0);
+        string mut digits = text;
+        if (v.neg) {
+            assert(text[0] == '-');
+            digits = text[1..text.len];
+        } else {
+            assert(text[0] != '-');
+        }
+        u64 mut parsed = 0;
+        assert(str.parse_u64(digits, 10, &parsed));
+        assert(parsed == v.mag);
+        // No leading zero, and the digits are digits.
+        assert(digits.len == 1 || digits[0] != '0');
+        u64 mut j = 0;
+        while (j < digits.len) {
+            assert(str.is_digit(digits[j]));
+            j += 1;
+        }
+        k += 1;
+    }
+}
+
+// The escape a byte takes inside a literal delimited by `quote`, from the rules
+// of D2.8 rather than from the module.
+fn string escape_model(u64 code, char quote, strbuf.str_buf mut* b) {
+    strbuf.clear(b);
+    if (code == cast(quote, u64)) {
+        strbuf.push(b, '\\');
+        strbuf.push(b, quote);
+        return strbuf.view(b);
+    }
+    if (code == 10) {
+        strbuf.append(b, "\\n");
+        return strbuf.view(b);
+    }
+    if (code == 9) {
+        strbuf.append(b, "\\t");
+        return strbuf.view(b);
+    }
+    if (code == 13) {
+        strbuf.append(b, "\\r");
+        return strbuf.view(b);
+    }
+    if (code == 0) {
+        strbuf.append(b, "\\0");
+        return strbuf.view(b);
+    }
+    if (code == 92) {
+        strbuf.append(b, "\\\\");
+        return strbuf.view(b);
+    }
+    if (code >= 32 && code <= 126) {
+        strbuf.push(b, cast(code, char));
+        return strbuf.view(b);
+    }
+    strbuf.append(b, "\\x");
+    string digits = "0123456789ABCDEF";
+    strbuf.push(b, digits[(code >> 4) & 15]);
+    strbuf.push(b, digits[code & 15]);
+    return strbuf.view(b);
+}
+
+// Every one of the 256 code points reads back as a char literal whose body is
+// the escape D2.8 gives it.
+fn void every_char_literal_is_escaped_by_d2_8() {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.str_buf mut model = strbuf.create();
+    defer strbuf.free(&model);
+    u64 mut code = 0;
+    while (code <= 255) {
+        string text = text_of(consts.cv_from_char(code), &b);
+        assert(text.len >= 3);
+        assert(text[0] == '\'');
+        assert(text[text.len - 1] == '\'');
+        string body = text[1..text.len - 1];
+        assert(body == escape_model(code, '\'', &model));
+        // A literal never carries a bare quote, a newline or a NUL, so a
+        // diagnostic holding one stays on its line.
+        u64 mut j = 0;
+        while (j < body.len) {
+            assert(body[j] != '\n');
+            assert(body[j] != '\r');
+            assert(cast(body[j], u64) != 0);
+            j += 1;
+        }
+        code += 1;
+    }
+}
+
+// A string constant is written between double quotes with the same escapes, so
+// its own quote is escaped and its single quote is not.
+fn void every_byte_of_a_string_is_escaped_by_d2_8() {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.str_buf mut model = strbuf.create();
+    defer strbuf.free(&model);
+    strbuf.str_buf mut bytes = strbuf.create();
+    defer strbuf.free(&bytes);
+    // One string of all 256 bytes, which is also the widest input the escape
+    // has to carry.
+    u64 mut code = 0;
+    while (code <= 255) {
+        strbuf.push_byte(&bytes, cast(code, u8));
+        code += 1;
+    }
+    string all = strbuf.view(&bytes);
+    assert(all.len == 256);
+    string text = text_of(consts.cv_from_str(all), &b);
+    assert(text[0] == '"');
+    assert(text[text.len - 1] == '"');
+    // The body is the concatenation of the escapes, byte by byte.
+    u64 mut at = 1;
+    code = 0;
+    while (code <= 255) {
+        string want = escape_model(code, '"', &model);
+        assert(at + want.len <= text.len);
+        assert(text[at..at + want.len] == want);
+        at += want.len;
+        code += 1;
+    }
+    assert(at == text.len - 1);
+}
+
+// The empty string, and the kinds that have a fixed text.
+fn void the_remaining_kinds_have_the_text_they_promise() {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(text_of(consts.cv_from_str(""), &b) == "\"\"");
+    assert(text_of(consts.cv_from_bool(true), &b) == "true");
+    assert(text_of(consts.cv_from_bool(false), &b) == "false");
+    assert(text_of(consts.cv_null(), &b) == "null");
+    assert(text_of(consts.cv_none(), &b) == "<none>");
+    // The text is appended, never written over: a diagnostic composes.
+    strbuf.clear(&b);
+    strbuf.append(&b, "a");
+    consts.cv_to_str(i(-1), &b);
+    consts.cv_to_str(consts.cv_from_char(10), &b);
+    consts.cv_to_str(consts.cv_null(), &b);
+    assert(strbuf.view(&b) == "a-1'\\n'null");
+}
+
+fn i32 main() {
+    to_i64_round_trips_exactly_the_i64_range();
+    to_u64_answers_for_the_non_negative_values();
+    bits_is_the_value_modulo_two_to_the_64();
+    every_code_point_is_an_integer_like_constant();
+    println("conversions ok");
+    fits_agrees_with_the_range_of_every_kind();
+    fits_of_a_char_follows_its_code_point();
+    default_kind_is_i32_then_i64();
+    println("fits ok");
+    an_integer_reads_back_as_its_decimal();
+    every_char_literal_is_escaped_by_d2_8();
+    every_byte_of_a_string_is_escaped_by_d2_8();
+    the_remaining_kinds_have_the_text_they_promise();
+    println("text ok");
+    println("ok");
+    return 0;
+}

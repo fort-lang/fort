@@ -1,0 +1,446 @@
+//! run
+//! flags: -I ../../src/fort
+//! stdout:
+//| constructors ok
+//| queries ok
+//| order ok
+//| folding ok
+//| text ok
+//| ok
+import consts;
+import std::strbuf;
+
+// The constant values of src/fort/consts.ft, part one: values, queries,
+// ordering and equality, the comparison and logical operators, and cv_to_str.
+// The exact untyped arithmetic (D4.4) is in consts_fold_test.ft and the typed
+// side (cv_fits, cv_default_kind, cv_cast, cv_typed_*, cv_wrap_*) in
+// consts_typed_test.ft; each broken precondition of the module has a panic
+// test of its own, since a panic ends the program (D11.4).
+//
+// This file is the port of test/consts_test.c and asserts what it asserts, so
+// that the two compilers answer the same questions about the same values. The
+// sample values are the boundaries of the constant range and the examples of
+// type-system.md 10.
+
+// 2^63, the magnitude of the most negative constant.
+u64 TWO63 = 9223372036854775808;
+
+// 2^64 - 1, the largest constant there is.
+u64 U64_MAX = 18446744073709551615;
+
+// The i64 boundaries, which fort spells as constants rather than as macros.
+i64 I64_MIN = -9223372036854775808;
+i64 I64_MAX = 9223372036854775807;
+
+fn consts.cval i(i64 v) {
+    return consts.cv_from_i64(v);
+}
+
+fn consts.cval u(u64 v) {
+    return consts.cv_from_u64(v);
+}
+
+// -2^63, the most negative constant.
+fn consts.cval neg_two63() {
+    return consts.cv_from_i64(I64_MIN);
+}
+
+fn bool is_int(consts.cval v, i64 expect) {
+    return v.kind == consts.cval_kind.cv_int && consts.cv_eq(v, consts.cv_from_i64(expect));
+}
+
+fn bool is_uint(consts.cval v, u64 expect) {
+    return v.kind == consts.cval_kind.cv_int && consts.cv_eq(v, consts.cv_from_u64(expect));
+}
+
+fn bool is_bool(consts.cval v, bool expect) {
+    if (v.kind != consts.cval_kind.cv_bool) {
+        return false;
+    }
+    if (expect) {
+        return v.mag == 1;
+    }
+    return v.mag == 0;
+}
+
+// Whether cv_to_str writes exactly `want` for `v`. The C keeps a static
+// buffer; a buffer of its own per call is the re-entrant spelling of the same
+// thing (D20.5).
+fn bool text_is(consts.cval v, string want) {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    consts.cv_to_str(v, &b);
+    return strbuf.view(&b) == want;
+}
+
+// ---- constructors --------------------------------------------------------------
+
+fn void none_has_kind_none_and_no_payload() {
+    consts.cval v = consts.cv_none();
+    assert(v.kind == consts.cval_kind.cv_none);
+    assert(!v.neg);
+    assert(v.mag == 0);
+    assert(v.str.len == 0);
+}
+
+fn void from_i64_of_a_positive_is_its_magnitude() {
+    consts.cval v = consts.cv_from_i64(42);
+    assert(v.kind == consts.cval_kind.cv_int);
+    assert(!v.neg);
+    assert(v.mag == 42);
+}
+
+fn void from_i64_of_a_negative_sets_neg_and_the_magnitude() {
+    consts.cval v = consts.cv_from_i64(-42);
+    assert(v.neg);
+    assert(v.mag == 42);
+}
+
+fn void from_i64_of_zero_is_never_negative() {
+    consts.cval v = consts.cv_from_i64(0);
+    assert(!v.neg);
+    assert(v.mag == 0);
+}
+
+fn void from_i64_of_i64_min_is_neg_two63() {
+    consts.cval v = consts.cv_from_i64(I64_MIN);
+    assert(v.neg);
+    assert(v.mag == TWO63);
+}
+
+fn void from_i64_of_i64_max_is_two63_minus_one() {
+    consts.cval v = consts.cv_from_i64(I64_MAX);
+    assert(!v.neg);
+    assert(v.mag == TWO63 - 1);
+}
+
+fn void from_u64_holds_the_lexer_magnitude_up_to_u64_max() {
+    consts.cval v = consts.cv_from_u64(U64_MAX);
+    assert(v.kind == consts.cval_kind.cv_int);
+    assert(!v.neg);
+    assert(v.mag == U64_MAX);
+}
+
+fn void from_u64_of_two63_is_the_first_value_above_i64() {
+    consts.cval v = consts.cv_from_u64(TWO63);
+    assert(!v.neg);
+    assert(v.mag == TWO63);
+    i64 mut out = 0;
+    assert(!consts.cv_to_i64(v, &out));
+}
+
+fn void from_char_holds_the_code_point() {
+    consts.cval v = consts.cv_from_char(cast('a', u64));
+    assert(v.kind == consts.cval_kind.cv_char);
+    assert(v.mag == 97);
+    assert(consts.cv_from_char(255).mag == 255);
+    assert(consts.cv_from_char(0).mag == 0);
+}
+
+fn void from_bool_holds_zero_or_one() {
+    assert(consts.cv_from_bool(true).kind == consts.cval_kind.cv_bool);
+    assert(consts.cv_from_bool(true).mag == 1);
+    assert(consts.cv_from_bool(false).mag == 0);
+}
+
+fn void null_has_kind_null() {
+    consts.cval v = consts.cv_null();
+    assert(v.kind == consts.cval_kind.cv_null);
+    assert(v.mag == 0);
+}
+
+fn void from_str_keeps_the_view() {
+    consts.cval v = consts.cv_from_str("abc");
+    assert(v.kind == consts.cval_kind.cv_str);
+    assert(v.str == "abc");
+    assert(v.str.len == 3);
+}
+
+// ---- queries -------------------------------------------------------------------
+
+fn void is_int_holds_for_integers_only() {
+    assert(consts.cv_is_int(i(0)));
+    assert(consts.cv_is_int(u(U64_MAX)));
+    assert(!consts.cv_is_int(consts.cv_from_char(cast('a', u64))));
+    assert(!consts.cv_is_int(consts.cv_from_bool(true)));
+    assert(!consts.cv_is_int(consts.cv_null()));
+    assert(!consts.cv_is_int(consts.cv_none()));
+}
+
+fn void is_int_like_admits_chars_too() {
+    assert(consts.cv_is_int_like(i(-1)));
+    assert(consts.cv_is_int_like(consts.cv_from_char(cast('a', u64))));
+    assert(!consts.cv_is_int_like(consts.cv_from_bool(false)));
+    assert(!consts.cv_is_int_like(consts.cv_from_str("a")));
+}
+
+// A char in an integer context is its code point (D4.3).
+fn void as_int_of_a_char_is_its_code_point() {
+    consts.cval v = consts.cv_as_int(consts.cv_from_char(cast('a', u64)));
+    assert(is_int(v, 97));
+    assert(is_int(consts.cv_as_int(consts.cv_from_char(0)), 0));
+    assert(is_int(consts.cv_as_int(consts.cv_from_char(255)), 255));
+}
+
+fn void as_int_of_an_int_is_itself() {
+    assert(is_int(consts.cv_as_int(i(-5)), -5));
+    assert(is_uint(consts.cv_as_int(u(U64_MAX)), U64_MAX));
+}
+
+fn void is_zero_and_is_neg() {
+    assert(consts.cv_is_zero(i(0)));
+    assert(!consts.cv_is_zero(i(1)));
+    assert(!consts.cv_is_zero(i(-1)));
+    assert(consts.cv_is_neg(i(-1)));
+    assert(!consts.cv_is_neg(i(0)));
+    assert(!consts.cv_is_neg(u(U64_MAX)));
+    assert(consts.cv_is_neg(neg_two63()));
+}
+
+fn void to_i64_round_trips_the_i64_range() {
+    i64 mut out = 0;
+    assert(consts.cv_to_i64(i(I64_MIN), &out));
+    assert(out == I64_MIN);
+    assert(consts.cv_to_i64(i(I64_MAX), &out));
+    assert(out == I64_MAX);
+    assert(consts.cv_to_i64(i(-1), &out));
+    assert(out == -1);
+    assert(consts.cv_to_i64(i(0), &out));
+    assert(out == 0);
+}
+
+fn void to_i64_rejects_values_above_i64_max() {
+    i64 mut out = 7;
+    assert(!consts.cv_to_i64(u(TWO63), &out));
+    assert(!consts.cv_to_i64(u(U64_MAX), &out));
+    assert(out == 7);
+}
+
+fn void to_u64_accepts_non_negatives_and_rejects_negatives() {
+    u64 mut out = 0;
+    assert(consts.cv_to_u64(u(U64_MAX), &out));
+    assert(out == U64_MAX);
+    assert(consts.cv_to_u64(i(0), &out));
+    assert(out == 0);
+    assert(!consts.cv_to_u64(i(-1), &out));
+    assert(!consts.cv_to_u64(neg_two63(), &out));
+}
+
+fn void bits_is_the_two_s_complement_pattern() {
+    assert(consts.cv_bits(i(0)) == 0);
+    assert(consts.cv_bits(i(1)) == 1);
+    assert(consts.cv_bits(i(-1)) == U64_MAX);
+    assert(consts.cv_bits(i(-2)) == U64_MAX - 1);
+    assert(consts.cv_bits(neg_two63()) == TWO63);
+    assert(consts.cv_bits(u(TWO63)) == TWO63);
+    assert(consts.cv_bits(u(U64_MAX)) == U64_MAX);
+}
+
+// ---- ordering and equality -----------------------------------------------------
+
+fn void cmp_orders_integers_across_the_whole_range() {
+    assert(consts.cv_cmp(i(1), i(2)) == -1);
+    assert(consts.cv_cmp(i(2), i(1)) == 1);
+    assert(consts.cv_cmp(i(2), i(2)) == 0);
+    assert(consts.cv_cmp(i(-1), i(0)) == -1);
+    assert(consts.cv_cmp(i(0), i(-1)) == 1);
+    assert(consts.cv_cmp(i(-2), i(-1)) == -1);
+    assert(consts.cv_cmp(i(-1), i(-2)) == 1);
+    assert(consts.cv_cmp(i(-1), i(-1)) == 0);
+    assert(consts.cv_cmp(neg_two63(), u(U64_MAX)) == -1);
+    assert(consts.cv_cmp(u(U64_MAX), u(TWO63)) == 1);
+    assert(consts.cv_cmp(u(TWO63), i(I64_MAX)) == 1);
+    assert(consts.cv_cmp(neg_two63(), i(I64_MIN + 1)) == -1);
+}
+
+// Chars order by code point (D3.2).
+fn void cmp_orders_chars_by_code_point() {
+    consts.cval a = consts.cv_from_char(cast('a', u64));
+    consts.cval b = consts.cv_from_char(cast('b', u64));
+    assert(consts.cv_cmp(a, b) == -1);
+    assert(consts.cv_cmp(b, a) == 1);
+    assert(consts.cv_cmp(a, a) == 0);
+    assert(consts.cv_cmp(consts.cv_from_char(0), consts.cv_from_char(255)) == -1);
+}
+
+fn void eq_compares_integers_by_value() {
+    assert(consts.cv_eq(i(5), u(5)));
+    assert(consts.cv_eq(i(-5), i(-5)));
+    assert(!consts.cv_eq(i(-5), i(5)));
+    assert(!consts.cv_eq(i(0), i(1)));
+    assert(consts.cv_eq(neg_two63(), consts.cv_from_i64(I64_MIN)));
+    assert(!consts.cv_eq(u(TWO63), neg_two63()));
+}
+
+fn void eq_compares_bools_chars_nulls_and_strings() {
+    assert(consts.cv_eq(consts.cv_from_bool(true), consts.cv_from_bool(true)));
+    assert(!consts.cv_eq(consts.cv_from_bool(true), consts.cv_from_bool(false)));
+    consts.cval x = consts.cv_from_char(cast('x', u64));
+    consts.cval y = consts.cv_from_char(cast('y', u64));
+    assert(consts.cv_eq(x, x));
+    assert(!consts.cv_eq(x, y));
+    assert(consts.cv_eq(consts.cv_null(), consts.cv_null()));
+    assert(consts.cv_eq(consts.cv_from_str("ab"), consts.cv_from_str("ab")));
+    assert(!consts.cv_eq(consts.cv_from_str("ab"), consts.cv_from_str("ac")));
+}
+
+fn void eq_is_false_across_kinds_and_for_none() {
+    assert(!consts.cv_eq(i(97), consts.cv_from_char(cast('a', u64))));
+    assert(!consts.cv_eq(i(1), consts.cv_from_bool(true)));
+    assert(!consts.cv_eq(i(0), consts.cv_null()));
+    assert(!consts.cv_eq(consts.cv_none(), consts.cv_none()));
+}
+
+// ---- comparison and logical folding --------------------------------------------
+
+fn void compare_orders_integers() {
+    assert(is_bool(consts.cv_compare(consts.cv_rel.cv_rel_lt, i(1), i(2)), true));
+    assert(is_bool(consts.cv_compare(consts.cv_rel.cv_rel_lt, i(2), i(2)), false));
+    assert(is_bool(consts.cv_compare(consts.cv_rel.cv_rel_le, i(2), i(2)), true));
+    assert(is_bool(consts.cv_compare(consts.cv_rel.cv_rel_le, i(3), i(2)), false));
+    assert(is_bool(consts.cv_compare(consts.cv_rel.cv_rel_gt, i(3), i(2)), true));
+    assert(is_bool(consts.cv_compare(consts.cv_rel.cv_rel_gt, i(2), i(2)), false));
+    assert(is_bool(consts.cv_compare(consts.cv_rel.cv_rel_ge, i(2), i(2)), true));
+    assert(is_bool(consts.cv_compare(consts.cv_rel.cv_rel_ge, i(1), i(2)), false));
+    assert(is_bool(consts.cv_compare(consts.cv_rel.cv_rel_lt, neg_two63(), u(U64_MAX)), true));
+    assert(is_bool(consts.cv_compare(consts.cv_rel.cv_rel_ge, i(-1), u(TWO63)), false));
+}
+
+fn void compare_tests_equality_of_every_kind() {
+    assert(is_bool(consts.cv_compare(consts.cv_rel.cv_rel_eq, i(1), i(1)), true));
+    assert(is_bool(consts.cv_compare(consts.cv_rel.cv_rel_ne, i(1), i(1)), false));
+    assert(is_bool(consts.cv_compare(consts.cv_rel.cv_rel_eq, i(1), i(-1)), false));
+    assert(is_bool(consts.cv_compare(consts.cv_rel.cv_rel_ne, i(1), i(-1)), true));
+    consts.cval t = consts.cv_from_bool(true);
+    assert(is_bool(consts.cv_compare(consts.cv_rel.cv_rel_eq, t, t), true));
+    consts.cval a = consts.cv_from_char(cast('a', u64));
+    consts.cval b = consts.cv_from_char(cast('b', u64));
+    assert(is_bool(consts.cv_compare(consts.cv_rel.cv_rel_ne, a, b), true));
+    assert(is_bool(consts.cv_compare(consts.cv_rel.cv_rel_eq, consts.cv_null(),
+                                     consts.cv_null()), true));
+    assert(is_bool(consts.cv_compare(consts.cv_rel.cv_rel_eq, consts.cv_from_str("x"),
+                                     consts.cv_from_str("x")), true));
+}
+
+fn void compare_orders_chars() {
+    consts.cval a = consts.cv_from_char(cast('a', u64));
+    consts.cval b = consts.cv_from_char(cast('b', u64));
+    assert(is_bool(consts.cv_compare(consts.cv_rel.cv_rel_lt, a, b), true));
+    assert(is_bool(consts.cv_compare(consts.cv_rel.cv_rel_ge, a, b), false));
+}
+
+fn void logical_operators_fold_bools() {
+    consts.cval t = consts.cv_from_bool(true);
+    consts.cval f = consts.cv_from_bool(false);
+    assert(is_bool(consts.cv_lnot(t), false));
+    assert(is_bool(consts.cv_lnot(f), true));
+    assert(is_bool(consts.cv_land(t, t), true));
+    assert(is_bool(consts.cv_land(t, f), false));
+    assert(is_bool(consts.cv_land(f, t), false));
+    assert(is_bool(consts.cv_land(f, f), false));
+    assert(is_bool(consts.cv_lor(t, t), true));
+    assert(is_bool(consts.cv_lor(t, f), true));
+    assert(is_bool(consts.cv_lor(f, t), true));
+    assert(is_bool(consts.cv_lor(f, f), false));
+}
+
+// ---- cv_to_str -----------------------------------------------------------------
+
+fn void to_str_writes_integers_in_decimal() {
+    assert(text_is(i(0), "0"));
+    assert(text_is(i(42), "42"));
+    assert(text_is(i(-42), "-42"));
+    assert(text_is(i(I64_MAX), "9223372036854775807"));
+    assert(text_is(u(TWO63), "9223372036854775808"));
+    assert(text_is(u(U64_MAX), "18446744073709551615"));
+    assert(text_is(neg_two63(), "-9223372036854775808"));
+}
+
+fn void to_str_writes_chars_as_literals() {
+    assert(text_is(consts.cv_from_char(cast('a', u64)), "'a'"));
+    assert(text_is(consts.cv_from_char(cast(' ', u64)), "' '"));
+    assert(text_is(consts.cv_from_char(cast('~', u64)), "'~'"));
+    assert(text_is(consts.cv_from_char(cast('\n', u64)), "'\\n'"));
+    assert(text_is(consts.cv_from_char(cast('\t', u64)), "'\\t'"));
+    assert(text_is(consts.cv_from_char(cast('\r', u64)), "'\\r'"));
+    assert(text_is(consts.cv_from_char(0), "'\\0'"));
+    assert(text_is(consts.cv_from_char(cast('\\', u64)), "'\\\\'"));
+    assert(text_is(consts.cv_from_char(cast('\'', u64)), "'\\''"));
+    assert(text_is(consts.cv_from_char(cast('"', u64)), "'\"'"));
+    assert(text_is(consts.cv_from_char(127), "'\\x7F'"));
+    assert(text_is(consts.cv_from_char(255), "'\\xFF'"));
+    assert(text_is(consts.cv_from_char(1), "'\\x01'"));
+}
+
+fn void to_str_writes_the_other_kinds() {
+    assert(text_is(consts.cv_from_bool(true), "true"));
+    assert(text_is(consts.cv_from_bool(false), "false"));
+    assert(text_is(consts.cv_null(), "null"));
+    assert(text_is(consts.cv_from_str("abc"), "\"abc\""));
+    assert(text_is(consts.cv_none(), "<none>"));
+}
+
+// A quote, a newline or a NUL byte in a string constant must not break the
+// diagnostic line, so the bytes are written with the escapes of D2.8. The nine
+// bytes are a " \n NUL \\ \t \r ' 0xFF; a fort string holds the NUL and counts
+// it in its length (D3.7).
+fn void to_str_escapes_a_string_as_a_literal() {
+    string s = "a\"\n\0\\\t\r'\xFF";
+    assert(s.len == 9);
+    assert(text_is(consts.cv_from_str(s), "\"a\\\"\\n\\0\\\\\\t\\r'\\xFF\""));
+    assert(text_is(consts.cv_from_str(""), "\"\""));
+}
+
+fn void to_str_appends_to_the_buffer() {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "constant ");
+    consts.cv_to_str(i(-7), &b);
+    strbuf.append(&b, " does not fit");
+    assert(strbuf.view(&b) == "constant -7 does not fit");
+}
+
+fn i32 main() {
+    none_has_kind_none_and_no_payload();
+    from_i64_of_a_positive_is_its_magnitude();
+    from_i64_of_a_negative_sets_neg_and_the_magnitude();
+    from_i64_of_zero_is_never_negative();
+    from_i64_of_i64_min_is_neg_two63();
+    from_i64_of_i64_max_is_two63_minus_one();
+    from_u64_holds_the_lexer_magnitude_up_to_u64_max();
+    from_u64_of_two63_is_the_first_value_above_i64();
+    from_char_holds_the_code_point();
+    from_bool_holds_zero_or_one();
+    null_has_kind_null();
+    from_str_keeps_the_view();
+    println("constructors ok");
+    is_int_holds_for_integers_only();
+    is_int_like_admits_chars_too();
+    as_int_of_a_char_is_its_code_point();
+    as_int_of_an_int_is_itself();
+    is_zero_and_is_neg();
+    to_i64_round_trips_the_i64_range();
+    to_i64_rejects_values_above_i64_max();
+    to_u64_accepts_non_negatives_and_rejects_negatives();
+    bits_is_the_two_s_complement_pattern();
+    println("queries ok");
+    cmp_orders_integers_across_the_whole_range();
+    cmp_orders_chars_by_code_point();
+    eq_compares_integers_by_value();
+    eq_compares_bools_chars_nulls_and_strings();
+    eq_is_false_across_kinds_and_for_none();
+    println("order ok");
+    compare_orders_integers();
+    compare_tests_equality_of_every_kind();
+    compare_orders_chars();
+    logical_operators_fold_bools();
+    println("folding ok");
+    to_str_writes_integers_in_decimal();
+    to_str_writes_chars_as_literals();
+    to_str_writes_the_other_kinds();
+    to_str_escapes_a_string_as_a_literal();
+    to_str_appends_to_the_buffer();
+    println("text ok");
+    println("ok");
+    return 0;
+}

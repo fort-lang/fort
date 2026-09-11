@@ -1,0 +1,633 @@
+//! run
+//! flags: -I ../../src/fort
+//! stdout:
+//| add ok
+//| mul ok
+//| div ok
+//| unary ok
+//| bitwise ok
+//| shifts ok
+//| ok
+import consts;
+import prim;
+
+// The exact untyped folding of D4.4 and type-system.md 10.4
+// (`+ - * / % - ~ & | ^ << >>`) over the whole constant range
+// [-2^63, 2^64 - 1], with its boundaries and one past each: the port of
+// test/consts_fold_test.c, assertion for assertion.
+//
+// The three overflow pre-checks of src/fort/consts.ft are what the boundary
+// cases hold: add_raw's `am > U64_MAX - bm`, cv_mul's
+// `b.mag > U64_MAX / a.mag` and cv_not's `a.mag == U64_MAX` replace the C's
+// overflow builtins, and a wrong comparison in any of them shows up as a value
+// accepted one past the range or refused one short of it.
+
+// 2^63, the magnitude of the most negative constant.
+u64 TWO63 = 9223372036854775808;
+
+// 2^64 - 1, the largest constant there is.
+u64 U64_MAX = 18446744073709551615;
+
+i64 I64_MIN = -9223372036854775808;
+i64 I64_MAX = 9223372036854775807;
+
+// The i64 minimum halved, which two additions and a multiplication reach the
+// bottom of the range from.
+i64 I64_MIN_HALF = -4611686018427387904;
+
+fn consts.cval i(i64 v) {
+    return consts.cv_from_i64(v);
+}
+
+fn consts.cval u(u64 v) {
+    return consts.cv_from_u64(v);
+}
+
+fn consts.cval neg_two63() {
+    return consts.cv_from_i64(I64_MIN);
+}
+
+fn bool is_int(consts.cval v, i64 expect) {
+    return v.kind == consts.cval_kind.cv_int && consts.cv_eq(v, consts.cv_from_i64(expect));
+}
+
+fn bool is_uint(consts.cval v, u64 expect) {
+    return v.kind == consts.cval_kind.cv_int && consts.cv_eq(v, consts.cv_from_u64(expect));
+}
+
+fn bool is_none(consts.cval v) {
+    return v.kind == consts.cval_kind.cv_none;
+}
+
+// ---- addition and subtraction --------------------------------------------------
+
+fn void add_folds_small_values() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_add(i(1), i(2), &r));
+    assert(is_int(r, 3));
+    assert(consts.cv_add(i(-1), i(-2), &r));
+    assert(is_int(r, -3));
+    assert(consts.cv_add(i(5), i(-7), &r));
+    assert(is_int(r, -2));
+    assert(consts.cv_add(i(-5), i(7), &r));
+    assert(is_int(r, 2));
+    assert(consts.cv_add(i(-5), i(5), &r));
+    assert(is_int(r, 0));
+    assert(!r.neg);
+}
+
+fn void add_reaches_u64_max_exactly() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_add(u(U64_MAX - 1), i(1), &r));
+    assert(is_uint(r, U64_MAX));
+    assert(consts.cv_add(i(I64_MAX), i(I64_MAX), &r));
+    assert(is_uint(r, U64_MAX - 1));
+    assert(consts.cv_add(u(TWO63), u(TWO63 - 1), &r));
+    assert(is_uint(r, U64_MAX));
+}
+
+fn void add_one_past_u64_max_is_an_error() {
+    consts.cval mut r = i(1);
+    assert(!consts.cv_add(u(U64_MAX), i(1), &r));
+    assert(is_none(r));
+    assert(!consts.cv_add(u(TWO63), u(TWO63), &r));
+    assert(!consts.cv_add(u(U64_MAX), u(U64_MAX), &r));
+}
+
+fn void add_reaches_neg_two63_exactly() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_add(i(I64_MIN + 1), i(-1), &r));
+    assert(consts.cv_eq(r, neg_two63()));
+    assert(consts.cv_add(i(I64_MIN_HALF), i(I64_MIN_HALF), &r));
+    assert(consts.cv_eq(r, neg_two63()));
+}
+
+fn void add_one_below_neg_two63_is_an_error() {
+    consts.cval mut r = i(1);
+    assert(!consts.cv_add(neg_two63(), i(-1), &r));
+    assert(is_none(r));
+    assert(!consts.cv_add(neg_two63(), neg_two63(), &r));
+}
+
+fn void add_of_u64_max_and_a_negative_comes_back_into_range() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_add(u(U64_MAX), i(-1), &r));
+    assert(is_uint(r, U64_MAX - 1));
+    assert(consts.cv_add(u(U64_MAX), neg_two63(), &r));
+    assert(is_uint(r, TWO63 - 1));
+}
+
+fn void sub_folds_small_values() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_sub(i(5), i(7), &r));
+    assert(is_int(r, -2));
+    assert(consts.cv_sub(i(7), i(5), &r));
+    assert(is_int(r, 2));
+    assert(consts.cv_sub(i(-5), i(-7), &r));
+    assert(is_int(r, 2));
+    assert(consts.cv_sub(i(3), i(3), &r));
+    assert(is_int(r, 0));
+    assert(!r.neg);
+}
+
+fn void sub_at_the_boundaries() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_sub(i(0), u(TWO63), &r));
+    assert(consts.cv_eq(r, neg_two63()));
+    assert(consts.cv_sub(u(U64_MAX), u(U64_MAX), &r));
+    assert(is_int(r, 0));
+    assert(consts.cv_sub(i(I64_MAX), i(I64_MIN), &r));
+    assert(is_uint(r, U64_MAX));
+    assert(consts.cv_sub(u(TWO63 - 1), i(-1), &r));
+    assert(is_uint(r, TWO63));
+}
+
+fn void sub_outside_the_range_is_an_error() {
+    consts.cval mut r = i(1);
+    assert(!consts.cv_sub(i(0), u(TWO63 + 1), &r));
+    assert(is_none(r));
+    assert(!consts.cv_sub(neg_two63(), i(1), &r));
+    assert(!consts.cv_sub(u(U64_MAX), i(-1), &r));
+    assert(!consts.cv_sub(i(0), u(U64_MAX), &r));
+    assert(!consts.cv_sub(i(-1), u(U64_MAX), &r));
+}
+
+// ---- multiplication ------------------------------------------------------------
+
+fn void mul_folds_with_the_sign_of_the_product() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_mul(i(6), i(7), &r));
+    assert(is_int(r, 42));
+    assert(consts.cv_mul(i(-6), i(7), &r));
+    assert(is_int(r, -42));
+    assert(consts.cv_mul(i(-6), i(-7), &r));
+    assert(is_int(r, 42));
+    assert(consts.cv_mul(i(-6), i(0), &r));
+    assert(is_int(r, 0));
+    assert(!r.neg);
+}
+
+fn void mul_reaches_the_boundaries() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_mul(u(TWO63), i(1), &r));
+    assert(is_uint(r, TWO63));
+    assert(consts.cv_mul(u(TWO63), i(-1), &r));
+    assert(consts.cv_eq(r, neg_two63()));
+    // 0xFFFFFFFF * 0x100000001 is 2^64 - 1 exactly, the product that must not
+    // be one bit wider.
+    assert(consts.cv_mul(u(4294967295), u(4294967297), &r));
+    assert(is_uint(r, U64_MAX));
+    assert(consts.cv_mul(i(I64_MIN_HALF), i(2), &r));
+    assert(consts.cv_eq(r, neg_two63()));
+    assert(consts.cv_mul(neg_two63(), i(-1), &r));
+    assert(is_uint(r, TWO63));
+}
+
+fn void mul_outside_the_range_is_an_error() {
+    consts.cval mut r = i(1);
+    assert(!consts.cv_mul(u(TWO63), i(2), &r));
+    assert(is_none(r));
+    assert(!consts.cv_mul(u(TWO63 + 1), i(-1), &r));
+    assert(!consts.cv_mul(u(U64_MAX), i(-1), &r));
+    assert(!consts.cv_mul(neg_two63(), neg_two63(), &r));
+    assert(!consts.cv_mul(neg_two63(), i(2), &r));
+    // 2^32 * 2^32 is 2^64, one past the range.
+    assert(!consts.cv_mul(u(4294967296), u(4294967296), &r));
+}
+
+// ---- division and remainder (D6.13) --------------------------------------------
+
+fn void div_truncates_toward_zero() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_div(i(7), i(2), &r));
+    assert(is_int(r, 3));
+    assert(consts.cv_div(i(7), i(-2), &r));
+    assert(is_int(r, -3));
+    assert(consts.cv_div(i(-7), i(2), &r));
+    assert(is_int(r, -3));
+    assert(consts.cv_div(i(-7), i(-2), &r));
+    assert(is_int(r, 3));
+}
+
+// 1 / 2 is 0 (D4.4).
+fn void div_of_one_by_two_is_zero() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_div(i(1), i(2), &r));
+    assert(is_int(r, 0));
+    assert(consts.cv_div(i(-1), i(2), &r));
+    assert(is_int(r, 0));
+    assert(!r.neg);
+}
+
+fn void div_by_zero_is_an_error() {
+    consts.cval mut r = i(1);
+    assert(!consts.cv_div(i(1), i(0), &r));
+    assert(is_none(r));
+    assert(!consts.cv_div(i(0), i(0), &r));
+    assert(!consts.cv_div(i(-1), i(0), &r));
+}
+
+fn void div_at_the_boundaries() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_div(neg_two63(), i(-1), &r));
+    assert(is_uint(r, TWO63));
+    assert(consts.cv_div(u(U64_MAX), i(1), &r));
+    assert(is_uint(r, U64_MAX));
+    assert(consts.cv_div(u(U64_MAX), i(-2), &r));
+    assert(is_int(r, -I64_MAX));
+    assert(consts.cv_div(u(TWO63), i(-1), &r));
+    assert(consts.cv_eq(r, neg_two63()));
+}
+
+fn void div_of_u64_max_by_minus_one_is_an_error() {
+    consts.cval mut r = i(1);
+    assert(!consts.cv_div(u(U64_MAX), i(-1), &r));
+    assert(is_none(r));
+    assert(!consts.cv_div(u(TWO63 + 1), i(-1), &r));
+}
+
+fn void rem_takes_the_sign_of_the_dividend() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_rem(i(7), i(2), &r));
+    assert(is_int(r, 1));
+    assert(consts.cv_rem(i(7), i(-2), &r));
+    assert(is_int(r, 1));
+    assert(consts.cv_rem(i(-7), i(2), &r));
+    assert(is_int(r, -1));
+    assert(consts.cv_rem(i(-7), i(-2), &r));
+    assert(is_int(r, -1));
+}
+
+fn void rem_of_an_exact_multiple_is_a_non_negative_zero() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_rem(i(-6), i(3), &r));
+    assert(is_int(r, 0));
+    assert(!r.neg);
+    assert(consts.cv_rem(neg_two63(), i(-1), &r));
+    assert(is_int(r, 0));
+}
+
+fn void rem_by_zero_is_an_error() {
+    consts.cval mut r = i(1);
+    assert(!consts.cv_rem(i(1), i(0), &r));
+    assert(is_none(r));
+    assert(!consts.cv_rem(i(-1), i(0), &r));
+}
+
+fn void rem_at_the_boundaries() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_rem(u(U64_MAX), u(TWO63), &r));
+    assert(is_uint(r, TWO63 - 1));
+    assert(consts.cv_rem(neg_two63(), u(U64_MAX), &r));
+    assert(consts.cv_eq(r, neg_two63()));
+    assert(consts.cv_rem(neg_two63(), i(10), &r));
+    assert(is_int(r, -8));
+}
+
+// ---- negation and complement ---------------------------------------------------
+
+fn void neg_flips_the_sign_and_keeps_zero_positive() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_neg(i(5), &r));
+    assert(is_int(r, -5));
+    assert(consts.cv_neg(i(-5), &r));
+    assert(is_int(r, 5));
+    assert(consts.cv_neg(i(0), &r));
+    assert(is_int(r, 0));
+    assert(!r.neg);
+}
+
+fn void neg_at_the_boundaries() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_neg(u(TWO63), &r));
+    assert(consts.cv_eq(r, neg_two63()));
+    assert(consts.cv_neg(neg_two63(), &r));
+    assert(is_uint(r, TWO63));
+    assert(consts.cv_neg(i(I64_MAX), &r));
+    assert(is_int(r, I64_MIN + 1));
+}
+
+fn void neg_of_a_value_above_two63_is_an_error() {
+    consts.cval mut r = i(1);
+    assert(!consts.cv_neg(u(TWO63 + 1), &r));
+    assert(is_none(r));
+    assert(!consts.cv_neg(u(U64_MAX), &r));
+}
+
+// `~c` is `-c - 1` (D4.4).
+fn void not_is_minus_c_minus_one() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_not(i(0), &r));
+    assert(is_int(r, -1));
+    assert(consts.cv_not(i(-1), &r));
+    assert(is_int(r, 0));
+    assert(!r.neg);
+    assert(consts.cv_not(i(5), &r));
+    assert(is_int(r, -6));
+    assert(consts.cv_not(i(-6), &r));
+    assert(is_int(r, 5));
+}
+
+fn void not_at_the_boundaries() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_not(i(I64_MAX), &r));
+    assert(consts.cv_eq(r, neg_two63()));
+    assert(consts.cv_not(neg_two63(), &r));
+    assert(is_int(r, I64_MAX));
+    assert(consts.cv_not(u(4294967295), &r));
+    assert(is_int(r, -4294967296));
+}
+
+// The one magnitude cv_not's pre-check refuses is the largest u64, whose
+// complement would be -2^64 - 1.
+fn void not_of_two63_or_more_is_an_error() {
+    consts.cval mut r = i(1);
+    assert(!consts.cv_not(u(TWO63), &r));
+    assert(is_none(r));
+    assert(!consts.cv_not(u(U64_MAX), &r));
+}
+
+// ---- bitwise operators: infinite two's complement -------------------------------
+
+fn void and_of_non_negatives_is_the_plain_bit_and() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_and(i(240), i(60), &r));
+    assert(is_int(r, 48));
+    assert(consts.cv_and(u(U64_MAX), u(TWO63), &r));
+    assert(is_uint(r, TWO63));
+    assert(consts.cv_and(i(0), u(U64_MAX), &r));
+    assert(is_int(r, 0));
+}
+
+fn void and_with_minus_one_is_the_identity_even_above_i64() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_and(i(-1), u(U64_MAX), &r));
+    assert(is_uint(r, U64_MAX));
+    assert(consts.cv_and(u(TWO63), i(-1), &r));
+    assert(is_uint(r, TWO63));
+    assert(consts.cv_and(i(-1), i(-1), &r));
+    assert(is_int(r, -1));
+}
+
+fn void and_of_two_negatives_is_negative() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_and(i(-2), i(-3), &r));
+    assert(is_int(r, -4));
+    assert(consts.cv_and(neg_two63(), i(-1), &r));
+    assert(consts.cv_eq(r, neg_two63()));
+    assert(consts.cv_and(i(-8), i(7), &r));
+    assert(is_int(r, 0));
+    assert(!r.neg);
+}
+
+// A negative in-range operand has bit 63 set in its pattern, so the result of
+// `&` with a negative operand is at least -2^63.
+fn void and_never_leaves_the_range() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_and(neg_two63(), i(-2), &r));
+    assert(consts.cv_eq(r, neg_two63()));
+    assert(consts.cv_and(neg_two63(), neg_two63(), &r));
+    assert(consts.cv_eq(r, neg_two63()));
+    assert(consts.cv_and(neg_two63(), i(0), &r));
+    assert(is_int(r, 0));
+    assert(consts.cv_and(neg_two63(), u(U64_MAX), &r));
+    assert(is_uint(r, TWO63));
+}
+
+fn void or_of_non_negatives_is_the_plain_bit_or() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_or(i(240), i(15), &r));
+    assert(is_int(r, 255));
+    assert(consts.cv_or(u(TWO63), u(TWO63 - 1), &r));
+    assert(is_uint(r, U64_MAX));
+}
+
+fn void or_with_a_negative_is_negative() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_or(i(-1), u(U64_MAX), &r));
+    assert(is_int(r, -1));
+    assert(consts.cv_or(i(-4), i(1), &r));
+    assert(is_int(r, -3));
+    assert(consts.cv_or(neg_two63(), u(TWO63), &r));
+    assert(consts.cv_eq(r, neg_two63()));
+    assert(consts.cv_or(neg_two63(), i(I64_MAX), &r));
+    assert(is_int(r, -1));
+}
+
+// As for `&`: a negative operand keeps bit 63 set in the result.
+fn void or_never_leaves_the_range() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_or(neg_two63(), u(U64_MAX), &r));
+    assert(is_int(r, -1));
+    assert(consts.cv_or(neg_two63(), neg_two63(), &r));
+    assert(consts.cv_eq(r, neg_two63()));
+    assert(consts.cv_or(neg_two63(), i(0), &r));
+    assert(consts.cv_eq(r, neg_two63()));
+    assert(consts.cv_or(i(-1), neg_two63(), &r));
+    assert(is_int(r, -1));
+}
+
+fn void xor_of_non_negatives_is_the_plain_bit_xor() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_xor(i(255), i(15), &r));
+    assert(is_int(r, 240));
+    assert(consts.cv_xor(u(U64_MAX), u(TWO63), &r));
+    assert(is_uint(r, TWO63 - 1));
+    assert(consts.cv_xor(u(U64_MAX), u(U64_MAX), &r));
+    assert(is_int(r, 0));
+}
+
+fn void xor_with_minus_one_is_the_complement() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_xor(i(-1), i(5), &r));
+    assert(is_int(r, -6));
+    assert(consts.cv_xor(i(-1), i(-1), &r));
+    assert(is_int(r, 0));
+    assert(consts.cv_xor(i(-2), i(1), &r));
+    assert(is_int(r, -1));
+    assert(consts.cv_xor(i(-1), i(I64_MAX), &r));
+    assert(consts.cv_eq(r, neg_two63()));
+}
+
+// Only `^` can leave the range (D4.4).
+fn void xor_below_neg_two63_is_an_error() {
+    consts.cval mut r = i(1);
+    // -1 ^ (2^64 - 1) is -2^64.
+    assert(!consts.cv_xor(i(-1), u(U64_MAX), &r));
+    assert(is_none(r));
+    // -2^63 ^ (2^64 - 1) is -2^63 - 1.
+    assert(!consts.cv_xor(neg_two63(), u(U64_MAX), &r));
+    // -1 ^ 2^63 is -2^63 - 1.
+    assert(!consts.cv_xor(i(-1), u(TWO63), &r));
+}
+
+// ---- shifts --------------------------------------------------------------------
+
+fn void shl_multiplies_by_a_power_of_two() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_shl(i(1), i(0), &r));
+    assert(is_int(r, 1));
+    assert(consts.cv_shl(i(1), i(4), &r));
+    assert(is_int(r, 16));
+    assert(consts.cv_shl(i(3), i(2), &r));
+    assert(is_int(r, 12));
+    assert(consts.cv_shl(i(-1), i(1), &r));
+    assert(is_int(r, -2));
+    assert(consts.cv_shl(i(0), i(63), &r));
+    assert(is_int(r, 0));
+}
+
+fn void shl_one_by_63_is_two63() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_shl(i(1), i(63), &r));
+    assert(is_uint(r, TWO63));
+    assert(consts.cv_shl(i(-1), i(63), &r));
+    assert(consts.cv_eq(r, neg_two63()));
+    assert(consts.cv_shl(u(U64_MAX), i(0), &r));
+    assert(is_uint(r, U64_MAX));
+}
+
+fn void shl_one_by_64_is_an_error() {
+    consts.cval mut r = i(1);
+    assert(!consts.cv_shl(i(1), i(64), &r));
+    assert(is_none(r));
+    assert(!consts.cv_shl(i(0), i(64), &r));
+    assert(!consts.cv_shl(i(1), i(100), &r));
+    assert(!consts.cv_shl(i(1), u(U64_MAX), &r));
+}
+
+fn void shl_by_a_negative_count_is_an_error() {
+    consts.cval mut r = i(1);
+    assert(!consts.cv_shl(i(1), i(-1), &r));
+    assert(is_none(r));
+    assert(!consts.cv_shr(i(1), i(-1), &r));
+}
+
+fn void shl_losing_a_bit_is_an_error() {
+    consts.cval mut r = i(1);
+    assert(!consts.cv_shl(i(2), i(63), &r));
+    assert(is_none(r));
+    assert(!consts.cv_shl(u(TWO63), i(1), &r));
+    assert(!consts.cv_shl(u(U64_MAX), i(1), &r));
+    assert(!consts.cv_shl(i(-2), i(63), &r));
+    assert(!consts.cv_shl(neg_two63(), i(1), &r));
+    assert(!consts.cv_shl(i(3), i(63), &r));
+}
+
+fn void shr_is_a_floor_division_by_a_power_of_two() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_shr(i(16), i(4), &r));
+    assert(is_int(r, 1));
+    assert(consts.cv_shr(i(17), i(4), &r));
+    assert(is_int(r, 1));
+    assert(consts.cv_shr(i(7), i(0), &r));
+    assert(is_int(r, 7));
+    assert(consts.cv_shr(u(U64_MAX), i(63), &r));
+    assert(is_int(r, 1));
+    assert(consts.cv_shr(u(TWO63), i(63), &r));
+    assert(is_int(r, 1));
+    assert(consts.cv_shr(u(TWO63 - 1), i(63), &r));
+    assert(is_int(r, 0));
+}
+
+fn void shr_of_a_negative_is_arithmetic() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_shr(i(-1), i(1), &r));
+    assert(is_int(r, -1));
+    assert(consts.cv_shr(i(-1), i(63), &r));
+    assert(is_int(r, -1));
+    assert(consts.cv_shr(i(-2), i(1), &r));
+    assert(is_int(r, -1));
+    assert(consts.cv_shr(i(-3), i(1), &r));
+    assert(is_int(r, -2));
+    assert(consts.cv_shr(i(-16), i(4), &r));
+    assert(is_int(r, -1));
+    assert(consts.cv_shr(i(-17), i(4), &r));
+    assert(is_int(r, -2));
+    assert(consts.cv_shr(neg_two63(), i(63), &r));
+    assert(is_int(r, -1));
+    assert(consts.cv_shr(neg_two63(), i(1), &r));
+    assert(is_int(r, I64_MIN_HALF));
+    // A count of 0 rounds nothing up: `x >> 0` is `x` for a negative x too.
+    assert(consts.cv_shr(i(-1), i(0), &r));
+    assert(is_int(r, -1));
+    assert(consts.cv_shr(i(-7), i(0), &r));
+    assert(is_int(r, -7));
+    assert(consts.cv_shr(neg_two63(), i(0), &r));
+    assert(consts.cv_eq(r, neg_two63()));
+}
+
+fn void shr_by_64_or_more_is_an_error() {
+    consts.cval mut r = i(1);
+    assert(!consts.cv_shr(i(1), i(64), &r));
+    assert(is_none(r));
+    assert(!consts.cv_shr(i(0), i(64), &r));
+    assert(!consts.cv_shr(i(-1), i(64), &r));
+}
+
+// The worked example of type-system.md 10.4.
+fn void one_shl_40_shr_38_is_four() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_shl(i(1), i(40), &r));
+    assert(is_int(r, 1099511627776));
+    assert(consts.cv_shr(r, i(38), &r));
+    assert(is_int(r, 4));
+    assert(consts.cv_fits(r, prim.prim_kind.prim_i32));
+}
+
+fn i32 main() {
+    add_folds_small_values();
+    add_reaches_u64_max_exactly();
+    add_one_past_u64_max_is_an_error();
+    add_reaches_neg_two63_exactly();
+    add_one_below_neg_two63_is_an_error();
+    add_of_u64_max_and_a_negative_comes_back_into_range();
+    sub_folds_small_values();
+    sub_at_the_boundaries();
+    sub_outside_the_range_is_an_error();
+    println("add ok");
+    mul_folds_with_the_sign_of_the_product();
+    mul_reaches_the_boundaries();
+    mul_outside_the_range_is_an_error();
+    println("mul ok");
+    div_truncates_toward_zero();
+    div_of_one_by_two_is_zero();
+    div_by_zero_is_an_error();
+    div_at_the_boundaries();
+    div_of_u64_max_by_minus_one_is_an_error();
+    rem_takes_the_sign_of_the_dividend();
+    rem_of_an_exact_multiple_is_a_non_negative_zero();
+    rem_by_zero_is_an_error();
+    rem_at_the_boundaries();
+    println("div ok");
+    neg_flips_the_sign_and_keeps_zero_positive();
+    neg_at_the_boundaries();
+    neg_of_a_value_above_two63_is_an_error();
+    not_is_minus_c_minus_one();
+    not_at_the_boundaries();
+    not_of_two63_or_more_is_an_error();
+    println("unary ok");
+    and_of_non_negatives_is_the_plain_bit_and();
+    and_with_minus_one_is_the_identity_even_above_i64();
+    and_of_two_negatives_is_negative();
+    and_never_leaves_the_range();
+    or_of_non_negatives_is_the_plain_bit_or();
+    or_with_a_negative_is_negative();
+    or_never_leaves_the_range();
+    xor_of_non_negatives_is_the_plain_bit_xor();
+    xor_with_minus_one_is_the_complement();
+    xor_below_neg_two63_is_an_error();
+    println("bitwise ok");
+    shl_multiplies_by_a_power_of_two();
+    shl_one_by_63_is_two63();
+    shl_one_by_64_is_an_error();
+    shl_by_a_negative_count_is_an_error();
+    shl_losing_a_bit_is_an_error();
+    shr_is_a_floor_division_by_a_power_of_two();
+    shr_of_a_negative_is_arithmetic();
+    shr_by_64_or_more_is_an_error();
+    one_shl_40_shr_38_is_four();
+    println("shifts ok");
+    println("ok");
+    return 0;
+}
