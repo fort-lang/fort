@@ -190,7 +190,11 @@ A safe(r) C-like systems programming language.
   errors under both clang (default) and gcc (`gcc` preset). `_POSIX_C_SOURCE` alone does not
   make glibc declare `environ`: `<unistd.h>` guards it with `#ifdef __USE_GNU`, so a file that
   passes an environment to `posix_spawn` declares `extern char** environ;` itself, as POSIX
-  allows. Names: functions, variables, parameters, fields and struct/union/enum tags lower_case;
+  allows. `realpath` is the same case (`<stdlib.h>` guards it with `__USE_XOPEN_EXTENDED`, which
+  `_POSIX_C_SOURCE` does not set), and `src/bootstrap/modules.c` declares it the same way;
+  check for that guard before calling any POSIX function the headers seem to be missing, rather
+  than widening the feature macros. Names: functions, variables, parameters, fields and
+  struct/union/enum tags lower_case;
   typedefs lower_case with a `_t` suffix; enum constants, file-scope constants (static or not),
   function-scope static constants and macros UPPER_CASE (`enum { BYTE_MASK = 0xFFU }`); local
   constants lower_case; macros private to a header end with an underscore (`TEST_LOG_`). Every
