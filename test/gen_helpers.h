@@ -270,10 +270,113 @@ static inline bool before(const char* first, const char* second) {
     return a >= 0 && b >= 0 && a < b;
 }
 
-// Runs the LLVM verifier over the emitted module: every module the compiler
-// emits must pass `opt -passes=verify` (D19.1). Returns "verified", or the
-// module when it does not, so a failing assertion shows the text.
+// Whether `text` begins with the literal `prefix`, whose length the literal
+// itself gives, so that no length is written twice.
+static inline bool gen_starts_with(const char* text, const char* prefix) {
+    return strncmp(text, prefix, strlen(prefix)) == 0;
+}
+
+// Whether the line at `p` begins one of the four terminators the emitter
+// writes: `br`, `ret`, `unreachable` and the `switch` of a fort switch (item
+// 10).
+static inline bool gen_is_terminator(const char* p) {
+    return gen_starts_with(p, "  br ") || gen_starts_with(p, "  ret ") ||
+           gen_starts_with(p, "  unreachable") || gen_starts_with(p, "  switch ");
+}
+
+// Whether the line at `p` begins an instruction rather than continuing the
+// one above. Every instruction is indented by exactly two spaces, so a line
+// indented further, or one holding the `]` that closes a `switch`, is a
+// continuation of the `switch` above it, which is the one terminator LLVM
+// prints over several lines (item 10).
+static inline bool gen_is_instruction(const char* p) {
+    return gen_starts_with(p, "  ") && p[2] != ' ' && p[2] != ']';
+}
+
+// "one terminator per block" when every block of every definition in `text`
+// ends in exactly one terminator and holds no instruction after it, and the
+// offending block's label otherwise: the structural half of what
+// `opt -passes=verify` confirms (item 10), stated over the text so that a
+// failing assertion names the block.
+//
+// A block begins at a label line, which is the only unindented line inside a
+// definition, and ends at the next label or at the closing brace.
+static inline const char* gen_block_terminators_of(const char* text) {
+    static char report[GEN_PATH_CAP];
+    const char* p = text;
+    bool in_function = false;
+    bool open = false;
+    bool seen = false;
+    int64_t count = 0;
+    char label[GEN_PATH_CAP];
+    label[0] = '\0';
+    while (*p != '\0') {
+        const char* eol = strchr(p, '\n');
+        if (eol == NULL) {
+            break;
+        }
+        const size_t len = (size_t)(eol - p);
+        if (!in_function) {
+            in_function = gen_starts_with(p, "define ");
+            seen = seen || in_function;
+            open = false;
+        } else if (len == 1 && *p == '}') {
+            if (open && count != 1) {
+                TEST_UNUSED(snprintf(
+                    report, sizeof report, "%s has %lld terminators", label, (long long)count));
+                return report;
+            }
+            in_function = false;
+        } else if (len > 1 && *p != ' ' && p[len - 1] == ':') {
+            if (open && count != 1) {
+                TEST_UNUSED(snprintf(
+                    report, sizeof report, "%s has %lld terminators", label, (long long)count));
+                return report;
+            }
+            const size_t keep = len < sizeof label ? len : sizeof label - 1;
+            TEST_UNUSED(memcpy(label, p, keep));
+            label[keep] = '\0';
+            open = true;
+            count = 0;
+        } else if (open && gen_is_instruction(p)) {
+            if (gen_is_terminator(p)) {
+                count++;
+            } else if (count > 0) {
+                TEST_UNUSED(snprintf(
+                    report, sizeof report, "%s has an instruction after its terminator", label));
+                return report;
+            }
+        }
+        p = eol + 1;
+    }
+    if (!seen || in_function) {
+        // A module with no definition, or one whose last definition never
+        // closed, would otherwise pass without a block being looked at.
+        return "the module holds no closed definition";
+    }
+    return "one terminator per block";
+}
+
+// The same over the module the last emission produced.
+static inline const char* gen_block_terminators(void) {
+    return gen_block_terminators_of(ir());
+}
+
+// Runs the block scan and then the LLVM verifier over the emitted module:
+// every module the compiler emits must pass `opt -passes=verify` (D19.1).
+// Returns "verified", the scan's report, or the module when the verifier
+// rejects it, so a failing assertion shows what went wrong.
+//
+// The scan runs first and is not redundant: `opt` exits 0 on a block holding
+// two terminators, silently splitting it in two and printing
+// `; No predecessors!` on the second, so the verifier alone does not prove
+// item 10's "every block ends in exactly one terminator". Every caller of
+// `verified` therefore asserts both halves at once.
 static inline const char* verified(void) {
+    const char* blocks = gen_block_terminators();
+    if (strcmp(blocks, "one terminator per block") != 0) {
+        return blocks;
+    }
     char path[GEN_PATH_CAP];
     TEST_UNUSED(snprintf(path, sizeof path, "%s/module.ll", gen_sandbox));
     FILE* file = fopen(path, "wb");

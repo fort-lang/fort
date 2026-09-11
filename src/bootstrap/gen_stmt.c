@@ -133,6 +133,212 @@ static void gen_return(gen_t* g, ast_node_t* n) {
     g->terminated = true;
 }
 
+// ---- control flow (item 10, D19.4) ------------------------------------------------
+
+// `if (cond) { } else if (cond) { } else { }` (D7.4): the condition branches
+// to the then block and to the else block, or to the continuation when there
+// is no `else`, and each branch that has not terminated branches to the
+// continuation. Every block the emitter opens therefore ends in exactly one
+// terminator (item 10).
+static void gen_if(gen_t* g, ast_node_t* n) {
+    const gen_val_t cond = gen_expr_value(g, n->a);
+    if (g->failed) {
+        return;
+    }
+    const bool has_else = n->c != NULL;
+    // Labels are `%L<N>` in creation order, so the order they are allocated
+    // in is part of the emitted text (D19.5).
+    const uint64_t then_label = gen_label(g);
+    const uint64_t else_label = has_else ? gen_label(g) : 0;
+    const uint64_t done = gen_label(g);
+    gen_br_cond(g, cond, then_label, has_else ? else_label : done);
+    gen_block_begin(g, then_label);
+    gen_block(g, n->b);
+    if (!g->terminated) {
+        gen_br(g, done);
+    }
+    if (has_else) {
+        gen_block_begin(g, else_label);
+        // The `else` is a block, or the `if` of an `else if` chain (D7.4).
+        gen_stmt(g, n->c);
+        if (!g->terminated) {
+            gen_br(g, done);
+        }
+    }
+    gen_block_begin(g, done);
+}
+
+// The body of a loop, with `break` and `continue` targeting it: they target
+// the innermost enclosing loop, so the enclosing targets are saved and
+// restored around it (D7.5).
+static void gen_loop_body(gen_t* g, ast_node_t* body, uint64_t brk, uint64_t cont) {
+    const uint64_t saved_break = g->loop_break;
+    const uint64_t saved_continue = g->loop_continue;
+    g->loop_break = brk;
+    g->loop_continue = cont;
+    g->loop_depth++;
+    gen_block(g, body);
+    g->loop_depth--;
+    g->loop_break = saved_break;
+    g->loop_continue = saved_continue;
+}
+
+// `while (cond) { }` (D7.5): a head block that re-evaluates the condition, a
+// body that branches back to it, and a continuation. `continue` targets the
+// head, `break` the continuation.
+static void gen_while(gen_t* g, ast_node_t* n) {
+    const uint64_t head = gen_label(g);
+    const uint64_t body = gen_label(g);
+    const uint64_t done = gen_label(g);
+    gen_br(g, head);
+    gen_block_begin(g, head);
+    const gen_val_t cond = gen_expr_value(g, n->a);
+    if (g->failed) {
+        return;
+    }
+    gen_br_cond(g, cond, body, done);
+    gen_block_begin(g, body);
+    gen_loop_body(g, n->b, done, head);
+    if (!g->terminated) {
+        gen_br(g, head);
+    }
+    gen_block_begin(g, done);
+}
+
+// `for (init; cond; step) { }` (D7.5): `init` runs in the block the loop
+// stands in, the head tests the condition, the body branches to the step
+// block and the step branches back to the head. `continue` targets the step
+// block, because `continue` in a `for` runs `step`; an empty `cond` means
+// `true`, which is what `for (;;)` is.
+static void gen_for(gen_t* g, ast_node_t* n) {
+    if (n->a != NULL) {
+        gen_stmt(g, n->a);
+    }
+    if (g->failed) {
+        return;
+    }
+    const uint64_t head = gen_label(g);
+    const uint64_t body = gen_label(g);
+    const uint64_t step = gen_label(g);
+    const uint64_t done = gen_label(g);
+    if (!g->terminated) {
+        // `init` may be a call (D7.5) and a call to a `noreturn` function
+        // already ended the block (D8.4), so the entry edge is conditional on
+        // the block still being open: every block ends in exactly one
+        // terminator (item 10).
+        gen_br(g, head);
+    }
+    gen_block_begin(g, head);
+    if (n->b == NULL) {
+        // An empty condition is `true`, so the head branches straight in
+        // (D7.5).
+        gen_br(g, body);
+    } else {
+        const gen_val_t cond = gen_expr_value(g, n->b);
+        if (g->failed) {
+            return;
+        }
+        gen_br_cond(g, cond, body, done);
+    }
+    gen_block_begin(g, body);
+    gen_loop_body(g, n->d, done, step);
+    if (!g->terminated) {
+        gen_br(g, step);
+    }
+    gen_block_begin(g, step);
+    if (n->c != NULL) {
+        gen_stmt(g, n->c);
+    }
+    if (g->failed) {
+        return;
+    }
+    if (!g->terminated) {
+        // `step` may be a call too, with the same consequence as `init`.
+        gen_br(g, head);
+    }
+    gen_block_begin(g, done);
+}
+
+// The copy of one element into the loop variable's slot: a scalar is loaded
+// and stored, an aggregate is copied with `llvm.memcpy` (D19.3).
+static void copy_into(gen_t* g, gen_place_t dst, gen_place_t src) {
+    if (gen_is_aggregate(dst.type)) {
+        const uint64_t align = type_alignof(dst.type);
+        gen_memcpy(g, dst.addr, align, src.addr, align, type_sizeof(dst.type));
+        return;
+    }
+    gen_store_place(g, dst, gen_load_place(g, src));
+}
+
+// The place the collection of a range `for` is iterated over (D7.5, D17.10).
+// The loop lends an owning collection, which is iterated in place and never
+// moved or copied; a collection that owns nothing is evaluated as a value
+// into a temporary, so that it is evaluated once before the first iteration
+// and the loop iterates over the copy.
+static gen_place_t range_collection(gen_t* g, ast_node_t* coll) {
+    if (coll->type != NULL && (type_is_owning_aggregate(coll->type) ||
+                               (type_is_reference(coll->type) && coll->type->own))) {
+        return gen_expr_place(g, coll);
+    }
+    const gen_place_t tmp = gen_temp_place(g, coll->type);
+    gen_expr_into(g, coll, tmp);
+    return tmp;
+}
+
+// `for (T x : coll) { }` (D7.5): an `i64` counter the compiler invents walks
+// the collection, and the loop variable is a fresh copy of each element taken
+// at the start of its iteration. The counter is bounded by the collection's
+// length, so its increment is a plain `add` and not a checked one (item 15).
+static void gen_range_for(gen_t* g, ast_node_t* n) {
+    const gen_place_t coll = range_collection(g, n->b);
+    if (g->failed || n->sym == NULL || n->b->type == NULL) {
+        return;
+    }
+    const str_t i64 = str_from_cstr("i64");
+    const gen_place_t index = gen_temp_place_raw(g, i64, (uint64_t)sizeof(uint64_t));
+    gen_store(g, gen_const_unsigned(g, i64, 0), index.addr, (uint64_t)sizeof(uint64_t));
+    const uint64_t head = gen_label(g);
+    const uint64_t body = gen_label(g);
+    const uint64_t step = gen_label(g);
+    const uint64_t done = gen_label(g);
+    gen_br(g, head);
+    gen_block_begin(g, head);
+    const gen_val_t at = gen_load(g, i64, index.addr, (uint64_t)sizeof(uint64_t));
+    const gen_val_t len = gen_length_of(g, n->b->type, coll.addr);
+    // The counter never passes the length, so the compare is unsigned and no
+    // bounds check is needed on the element address (item 16).
+    gen_br_cond(g, gen_icmp(g, "ult", at, len), body, done);
+    gen_block_begin(g, body);
+    gen_place_t element;
+    element.addr = gen_element_addr(g, n->b->type, n->sym->type, coll.addr, at);
+    element.type = n->sym->type;
+    copy_into(g, gen_slot_place(g, n->sym), element);
+    gen_loop_body(g, n->c, done, step);
+    if (!g->terminated) {
+        gen_br(g, step);
+    }
+    gen_block_begin(g, step);
+    const gen_val_t before = gen_load(g, i64, index.addr, (uint64_t)sizeof(uint64_t));
+    gen_store(g,
+              gen_binary(g, "add", before, gen_const_unsigned(g, i64, 1)),
+              index.addr,
+              (uint64_t)sizeof(uint64_t));
+    gen_br(g, head);
+    gen_block_begin(g, done);
+}
+
+// `break` and `continue` target the innermost enclosing loop (D7.5). A
+// `break` with no enclosing loop is not a checker error, since D7.6 lets one
+// stand in a `switch` alone, so this is unreachable only while `switch` is a
+// gen_todo: T-020 sets a target of its own, because a `break` inside a
+// `switch` inside a loop exits the switch (D7.6) and not the loop.
+static void gen_break(gen_t* g, bool cont) {
+    if (g->loop_depth == 0) {
+        fatal_internal("gen: break or continue outside a loop");
+    }
+    gen_br(g, cont ? g->loop_continue : g->loop_break);
+}
+
 void gen_stmt(gen_t* g, ast_node_t* n) {
     if (n == NULL || g->failed) {
         return;
@@ -162,18 +368,30 @@ void gen_stmt(gen_t* g, ast_node_t* n) {
         // emitted at all when one was reported (D14.2).
         return;
     case AST_IF:
+        gen_if(g, n);
+        return;
     case AST_WHILE:
+        gen_while(g, n);
+        return;
     case AST_DO_WHILE:
+        // The parser rejects `do`-`while` in the bootstrap subset, so this
+        // arm is defensive and no later ticket owns it (D15).
+        gen_todo(g, n->loc, "a do-while loop");
+        return;
     case AST_FOR:
+        gen_for(g, n);
+        return;
     case AST_RANGE_FOR:
-        gen_todo(g, n->loc, "control flow");
+        gen_range_for(g, n);
         return;
     case AST_SWITCH:
         gen_todo(g, n->loc, "a switch statement");
         return;
     case AST_BREAK:
+        gen_break(g, false);
+        return;
     case AST_CONTINUE:
-        gen_todo(g, n->loc, "break and continue");
+        gen_break(g, true);
         return;
     case AST_DEFER:
         gen_todo(g, n->loc, "a deferred statement");

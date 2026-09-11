@@ -78,6 +78,9 @@ void gen_init(gen_t* g, gen_options_t opts) {
     g->temps = 0;
     g->labels = 0;
     g->tmps = 0;
+    g->loop_break = 0;
+    g->loop_continue = 0;
+    g->loop_depth = 0;
     ptrvec_init(&g->slots);
     g->terminated = false;
     ptrvec_init(&g->files);
@@ -748,7 +751,7 @@ gen_place_t gen_slot_place(gen_t* g, const sym_t* s) {
     fatal_internal("gen: a local with no slot");
 }
 
-gen_place_t gen_temp_place(gen_t* g, const type_t* t) {
+gen_place_t gen_temp_place_raw(gen_t* g, str_t mem_type, uint64_t align) {
     // A place the compiler invents is `%tmp<K>` from a third counter, and
     // never contains a dot, so it cannot collide with a local (D19.5).
     sb_clear(&g->scratch);
@@ -758,15 +761,21 @@ gen_place_t gen_temp_place(gen_t* g, const type_t* t) {
     gen_place_t p;
     p.addr.ty = str_from_cstr("ptr");
     p.addr.val = gen_take(g);
-    p.type = t;
+    p.type = NULL;
     // Every compiler temporary is an alloca in the entry block (D19.4).
     sb_append(&g->allocas, "  ");
     sb_append_str(&g->allocas, p.addr.val);
     sb_append(&g->allocas, " = alloca ");
-    sb_append_str(&g->allocas, gen_mem_type(g, t));
+    sb_append_str(&g->allocas, mem_type);
     sb_append(&g->allocas, ", align ");
-    sb_append_u64(&g->allocas, type_alignof(t));
+    sb_append_u64(&g->allocas, align);
     sb_push(&g->allocas, '\n');
+    return p;
+}
+
+gen_place_t gen_temp_place(gen_t* g, const type_t* t) {
+    gen_place_t p = gen_temp_place_raw(g, gen_mem_type(g, t), type_alignof(t));
+    p.type = t;
     return p;
 }
 
@@ -778,7 +787,9 @@ static void collect_locals(gen_t* g, ast_node_t* n, ptrvec_t* out) {
     if (n == NULL) {
         return;
     }
-    if (n->kind == AST_VAR_DECL && n->sym != NULL) {
+    if ((n->kind == AST_VAR_DECL || n->kind == AST_RANGE_FOR) && n->sym != NULL) {
+        // A range `for` declares its loop variable on the loop node itself,
+        // and that variable is a local like any other (D7.5).
         ptrvec_push(out, (void*)n);
     }
     collect_locals(g, n->a, out);
@@ -874,6 +885,9 @@ static void function_begin(gen_t* g) {
     g->temps = 0;
     g->labels = 0;
     g->tmps = 0;
+    g->loop_break = 0;
+    g->loop_continue = 0;
+    g->loop_depth = 0;
     free_records(&g->slots);
     ptrvec_init(&g->slots);
     sb_clear(&g->allocas);

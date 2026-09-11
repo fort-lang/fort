@@ -515,6 +515,22 @@ TEST(an_enum_cast_reads_the_i32_representation, {
     TEST_ASSERT_EQ_STR(found("store i32 7, ptr %g.0, align 4"), "store i32 7, ptr %g.0, align 4");
 })
 
+// ---- one terminator per block (item 10) --------------------------------------------
+
+TEST(the_blocks_of_a_short_circuit_and_a_check_each_end_in_one_terminator, {
+    TEST_ASSERT_TRUE(emit("enum color { red, green }\n"
+                          "struct point { i32 x; i32 y; }\n"
+                          "fn i32 main() {\n    i32 mut a = 7;\n    i32 b = 3;\n"
+                          "    bool t = a > 0 && b > 0;\n    i32[2] arr = {a, b};\n"
+                          "    point p = {a, b};\n    a /= b;\n    assert(a != 0);\n"
+                          "    println(t, \" \", arr[1], \" \", p.x, \" \", color.green);\n"
+                          "    return 0;\n}\n"));
+    // Every block of every definition ends in exactly one terminator (item
+    // 10), which `verified` checks before it runs `opt`, because `opt` exits
+    // 0 on a block that holds two.
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
 int main(int argc, char** argv) {
     TEST_INIT("gen", argc, argv);
     TEST_RUN(the_module_begins_with_the_normalized_triple);
@@ -577,6 +593,7 @@ int main(int argc, char** argv) {
     TEST_RUN(a_pointer_and_u64_round_trip_uses_ptrtoint_and_inttoptr);
     TEST_RUN(a_pointer_to_pointer_cast_emits_nothing);
     TEST_RUN(an_enum_cast_reads_the_i32_representation);
+    TEST_RUN(the_blocks_of_a_short_circuit_and_a_check_each_end_in_one_terminator);
     gen_done();
     TEST_EXIT();
 }

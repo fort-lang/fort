@@ -520,6 +520,19 @@ TEST(release_mode_emits_the_plain_store_over_an_owning_reference, {
     TEST_ASSERT_EQ_STR(absent("fort_rt_fail_overwrite"), "absent");
 })
 
+TEST(every_failure_block_and_continuation_ends_in_one_terminator, {
+    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32[3] a = {1, 2, 3};\n    i32 mut s = 0;\n"
+                          "    i32 n = 3;\n"
+                          "    for (i32 mut i = 0; i < n; i++) {\n"
+                          "        s += a[i] / n;\n        s <<= 1;\n"
+                          "        assert(s >= 0);\n    }\n    return s;\n}\n"));
+    // A check's continuation and its failure block are each one block ending
+    // in one terminator (item 10, D19.6), the failure blocks standing after
+    // every normal block of the function; `verified` checks that before it
+    // runs `opt`, which exits 0 on a block that holds two.
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
 int main(int argc, char** argv) {
     TEST_INIT("gen_check", argc, argv);
     TEST_RUN(a_checked_signed_addition_is_the_intrinsic_and_its_two_extractvalues);
@@ -569,6 +582,7 @@ int main(int argc, char** argv) {
     TEST_RUN(an_enum_compares_as_i32);
     TEST_RUN(a_short_circuit_goes_through_a_compiler_made_slot);
     TEST_RUN(an_or_short_circuit_branches_the_other_way);
+    TEST_RUN(every_failure_block_and_continuation_ends_in_one_terminator);
     TEST_RUN(a_call_to_a_noreturn_extern_still_traps);
     TEST_RUN(an_integer_constant_is_printed_with_the_signedness_of_its_type);
     TEST_RUN(an_assignment_to_an_owning_reference_is_refused_in_the_checked_mode);

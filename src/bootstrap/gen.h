@@ -181,6 +181,12 @@ struct gen {
     uint64_t temps;
     uint64_t labels;
     uint64_t tmps;
+    // `break` and `continue` target the innermost enclosing loop (D7.5), so
+    // the loop being emitted saves these three, sets them and restores them;
+    // `loop_depth` is 0 outside every loop.
+    uint64_t loop_break;
+    uint64_t loop_continue;
+    uint64_t loop_depth;
     ptrvec_t slots;  // gen_slot_t*, owned; the locals and parameters in order
     bool terminated; // the block being written already ended in a terminator
 
@@ -342,6 +348,16 @@ gen_val_t gen_gep_element(gen_t* g, const type_t* elem, gen_val_t base, gen_val_
 // struct or a header field of a span.
 gen_val_t gen_gep_field(gen_t* g, str_t ty, gen_val_t base, uint64_t k);
 
+// The length of a fixed array, span or `string` place as an `i64`: a fixed
+// array's is a literal and a span's is its header field (item 16).
+gen_val_t gen_length_of(gen_t* g, const type_t* t, gen_val_t base);
+
+// The address of element `index` of such a place, by the array shape or the
+// element shape of item 3; `elem` is the element type, which a `string` does
+// not carry (D3.7).
+gen_val_t gen_element_addr(
+    gen_t* g, const type_t* t, const type_t* elem, gen_val_t base, gen_val_t index);
+
 // ---- aggregates (item 3) ----------------------------------------------------------
 
 // `llvm.memcpy` of `size` bytes from `src` to `dst`, the copy of every
@@ -444,6 +460,10 @@ void gen_expr_discard(gen_t* g, ast_node_t* n);
 // A place the compiler invents, `%tmp<K>` from its own counter (D19.5), for
 // an aggregate argument copy or a short-circuit slot.
 gen_place_t gen_temp_place(gen_t* g, const type_t* t);
+
+// The same, for a place with no fort type: the `i64` counter of a range
+// `for`, whose memory type and alignment are given directly (D19.5).
+gen_place_t gen_temp_place_raw(gen_t* g, str_t mem_type, uint64_t align);
 
 // `a op b` on two scalars, with the checks of item 15: the overflow
 // intrinsics for `+ - *`, unary `-`, `++` and `--` in checked mode, plain

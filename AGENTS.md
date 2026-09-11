@@ -49,6 +49,11 @@ A safe(r) C-like systems programming language.
 - The shared folder can serve stale pages to tools that `mmap` a file the host rewrote (seen
   with `clang-format` reporting a line past the end of a shrunk file while `md5sum` read the
   right bytes). Recover with `tools/vm run 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"'`.
+- The same folder can hand ninja a stale mtime, so a rebuild after an edit prints "no work to do"
+  and the suite keeps failing on text the file no longer holds; `md5sum` in the guest reads the
+  new bytes and dropping the caches does not help, because it is the timestamp and not the
+  content that is stale. Delete that target's object
+  (`build/<preset>/CMakeFiles/<target>.dir/<path>.o`) and build again.
 - The target is x86-64 Linux. The compiler runs natively on arm64, emits LLVM IR and runs `clang
   --target=x86_64-linux-gnu` over it, so `--cc` names a clang (the guest `cc` is a native gcc and
   would build for aarch64); generated programs run under `qemu-x86_64` transparently. The verified

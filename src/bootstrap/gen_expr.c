@@ -730,14 +730,25 @@ static gen_val_t gen_cast(gen_t* g, ast_node_t* n) {
 
 // ---- places (item 3) --------------------------------------------------------------
 
-// The length of the operand of an index or span expression: a fixed array's
-// is an `i64` literal and a span's is its header field (item 16).
-static gen_val_t operand_length(gen_t* g, const type_t* t, gen_val_t base) {
+gen_val_t gen_length_of(gen_t* g, const type_t* t, gen_val_t base) {
     if (t->kind == TYPE_ARRAY) {
+        // A fixed array's length is an `i64` literal (item 16).
         return gen_const_unsigned(g, str_from_cstr("i64"), t->len);
     }
     const gen_val_t field = gen_gep_field(g, str_from_cstr("%fort.span"), base, SPAN_FIELD_LEN);
     return gen_load(g, str_from_cstr("i64"), field, (uint64_t)sizeof(uint64_t));
+}
+
+gen_val_t gen_element_addr(
+    gen_t* g, const type_t* t, const type_t* elem, gen_val_t base, gen_val_t index) {
+    if (t->kind == TYPE_ARRAY) {
+        return gen_gep_array(g, t, base, index);
+    }
+    // A span's elements are reached through its `.ptr` (item 3).
+    const gen_val_t field = gen_gep_field(g, str_from_cstr("%fort.span"), base, SPAN_FIELD_PTR);
+    const gen_val_t ptr = gen_load(g, str_from_cstr("ptr"), field, (uint64_t)sizeof(void*));
+    // A `string` has `char` elements and a span its own (D3.5, D3.7).
+    return gen_gep_element(g, t->kind == TYPE_STRING ? elem : t->elem, ptr, index);
 }
 
 // `e[i]` (D6.8): the index is extended to `i64`, one `icmp uge` branches to
@@ -768,7 +779,7 @@ static gen_place_t gen_index_place(gen_t* g, ast_node_t* n) {
                                        (uint32_t)BITS_64,
                                        is_signed(n->b->type));
     if (!g->opts.no_bounds_check) {
-        const gen_val_t len = operand_length(g, ot, operand.addr);
+        const gen_val_t len = gen_length_of(g, ot, operand.addr);
         const gen_val_t bad = gen_icmp(g, "uge", index, len);
         gen_args_t args;
         gen_args_init(&args);
@@ -777,16 +788,7 @@ static gen_place_t gen_index_place(gen_t* g, ast_node_t* n) {
         gen_check(g, bad, true, RT_FAIL_BOUNDS, &args, n->loc);
         gen_args_free(&args);
     }
-    if (ot->kind == TYPE_ARRAY) {
-        out.addr = gen_gep_array(g, ot, operand.addr, index);
-        return out;
-    }
-    // A span's elements are reached through its `.ptr` (item 3).
-    const gen_val_t field =
-        gen_gep_field(g, str_from_cstr("%fort.span"), operand.addr, SPAN_FIELD_PTR);
-    const gen_val_t base = gen_load(g, str_from_cstr("ptr"), field, (uint64_t)sizeof(void*));
-    // A `string` has `char` elements and a span its own (D3.5, D3.7).
-    out.addr = gen_gep_element(g, ot->kind == TYPE_STRING ? n->type : ot->elem, base, index);
+    out.addr = gen_element_addr(g, ot, n->type, operand.addr, index);
     return out;
 }
 
