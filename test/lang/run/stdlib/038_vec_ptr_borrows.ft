@@ -1,0 +1,42 @@
+//! run
+//! stdout:
+//| 2 5 6
+//| 0 0 true
+//| 5 6
+//| 5 6
+import std::vec;
+
+// A ptr_vec owns its slots and borrows every pointer in them (D13.5, D17.2):
+// ptr_push lends its argument, ptr_free releases the slots alone, and the
+// nodes outlive the vector and are released by the owner that made them.
+struct node { i64 value; }
+
+fn i32 main() {
+    node mut* own first = new(node);
+    defer del(first);
+    node mut* own second = new(node);
+    defer del(second);
+    first->value = 5;
+    second->value = 6;
+
+    vec.ptr_vec mut v = vec.ptr_create();
+    defer vec.ptr_free(&v);
+    // The cast lends: what is stored is a borrowed pointer, so the vector's
+    // slot type carries no own of its own.
+    vec.ptr_push(&v, cast(first, void*));
+    vec.ptr_push(&v, cast(second, void*));
+    println(v.len, " ", cast(v.items[0], node*)->value, " ",
+            cast(v.items[1], node*)->value);
+
+    // Freeing the vector frees the slots and nothing else.
+    vec.ptr_free(&v);
+    println(v.len, " ", v.items.len, " ", v.items.ptr == null);
+    println(first->value, " ", second->value);
+
+    // The pointers are as good as they were, and their owners still free them
+    // at the end of this function.
+    node* a = first;
+    node* b = second;
+    println(a->value, " ", b->value);
+    return 0;
+}

@@ -1,0 +1,177 @@
+// std::strmap: a hash table from string to i64 with open addressing, linear
+// probing, tombstones and str.hash (stdlib.md 2.8, D13.2). The map owns its
+// table and borrows every key in it.
+import std::str;
+
+// The state of one slot. A lookup stops at the first SLOT_EMPTY, which is why
+// a removal leaves SLOT_DEAD behind rather than emptying the slot: emptying it
+// would cut every probe that ran through it.
+u8 SLOT_EMPTY = 0;
+u8 SLOT_FULL = 1;
+u8 SLOT_DEAD = 2;
+
+// The hash is stored beside the key so that a probe rejects a mismatch without
+// comparing bytes, and a rebuild places the entry again without hashing it.
+struct str_map_entry {
+    string key;
+    i64 val;
+    u64 hash;
+    u8 state;
+}
+
+// entries.len is the capacity: 0 or a power of two, so that the probe's
+// wrap-around is an and with cap - 1. live counts the SLOT_FULL slots and used
+// counts those plus the tombstones, which is what the load factor is measured
+// on. The own field makes this an owning aggregate (D17.7): it is passed by
+// pointer and released by free rather than del. str_map{} is a valid empty
+// map, so a struct holding one may be initialized with {}.
+struct str_map {
+    str_map_entry mut@ own entries;
+    u64 live;
+    u64 used;
+}
+
+// The empty map; allocates nothing. A call result needs no move (D17.5).
+fn str_map create() {
+    return str_map{};
+}
+
+// Releases the table and leaves str_map{}; the keys are borrowed views and
+// are left alone (D13.5). del empties the field (D17.9), so a second call, or
+// a call on str_map{}, is a no-op.
+fn void free(str_map mut* m) {
+    del(m->entries);
+    m->live = 0;
+    m->used = 0;
+}
+
+// The index of key's slot, or -1 when it is absent. The probe starts at
+// hash & (cap - 1), walks upward wrapping, compares the stored hash before the
+// key itself, and stops at the first SLOT_EMPTY: a tombstone does not end it,
+// because the key may have been placed beyond one (stdlib.md 2.8). The walk
+// always terminates, since put keeps at least one slot empty.
+fn i64 find_slot(str_map* m, string key, u64 h) {
+    if (m->entries.len == 0) {
+        return -1;
+    }
+    u64 mask = m->entries.len - 1;
+    u64 mut i = h & mask;
+    while (true) {
+        u8 state = m->entries[i].state;
+        if (state == SLOT_EMPTY) {
+            return -1;
+        }
+        if (state == SLOT_FULL && m->entries[i].hash == h && m->entries[i].key == key) {
+            return cast(i, i64);
+        }
+        i = (i + 1) & mask;
+    }
+}
+
+// Installs a table large enough for one more live entry: the capacity starts
+// at 16 and doubles until (live + 1) * 2 <= cap, the live entries are placed
+// again, the tombstones disappear and used falls back to live (stdlib.md 2.8).
+// Every earlier view of an entry dies here.
+fn void rebuild(str_map mut* m) {
+    u64 mut cap = 16;
+    // A capacity is at most one entry per byte of address space, so neither
+    // the doubling nor the comparison can overflow; nothing here detects an
+    // overflow by performing one (D11.1).
+    while ((m->live + 1) * 2 > cap) {
+        cap *= 2;
+    }
+    str_map_entry mut@ own table = new(str_map_entry, cap);
+    u64 mask = cap - 1;
+    u64 mut k = 0;
+    while (k < m->entries.len) {
+        if (m->entries[k].state == SLOT_FULL) {
+            // The new table has no tombstone and room to spare, so the first
+            // slot that is not full is this entry's.
+            u64 mut i = m->entries[k].hash & mask;
+            while (table[i].state == SLOT_FULL) {
+                i = (i + 1) & mask;
+            }
+            table[i] = m->entries[k];
+        }
+        k += 1;
+    }
+    del(m->entries);
+    m->entries = move(table);
+    m->used = m->live;
+}
+
+// Inserts key with val, or replaces the value of an existing key; the result
+// says whether the key was new. The key is borrowed (D13.5): the caller keeps
+// its bytes alive and unchanged for as long as the entry exists. A replacement
+// stores the value alone, so the entry keeps the key view of the insert that
+// created it and it is that key's bytes the caller must keep alive
+// (stdlib.md 2.8). Allocates on a rebuild. Ownership: the map never owns a key.
+fn bool put(str_map mut* m, string key, i64 val) {
+    u64 h = str.hash(key);
+    i64 found = find_slot(m, key, h);
+    if (found >= 0) {
+        // Only the value moves: the stored key stays the one that created the
+        // entry, whose bytes the caller is keeping alive (stdlib.md 2.8).
+        m->entries[cast(found, u64)].val = val;
+        return false;
+    }
+    // The table is rebuilt before the insert, never after it, so a probe never
+    // runs over a table with no empty slot left.
+    if (m->entries.len == 0 || (m->used + 1) * 4 > m->entries.len * 3) {
+        rebuild(m);
+    }
+    u64 mask = m->entries.len - 1;
+    u64 mut i = h & mask;
+    // An absent key takes the first tombstone its probe met, and the empty
+    // slot that ended the probe when it met none.
+    i64 mut dead = -1;
+    while (m->entries[i].state != SLOT_EMPTY) {
+        if (m->entries[i].state == SLOT_DEAD && dead < 0) {
+            dead = cast(i, i64);
+        }
+        i = (i + 1) & mask;
+    }
+    if (dead >= 0) {
+        // A tombstone already counts in used, so only live grows.
+        i = cast(dead, u64);
+    } else {
+        m->used += 1;
+    }
+    m->entries[i] = str_map_entry{key, val, h, SLOT_FULL};
+    m->live += 1;
+    return true;
+}
+
+// true with *out set to the value when key is present, false with *out
+// unchanged otherwise (D13.3).
+fn bool get(str_map* m, string key, i64 mut* out) {
+    i64 found = find_slot(m, key, str.hash(key));
+    if (found < 0) {
+        return false;
+    }
+    *out = m->entries[cast(found, u64)].val;
+    return true;
+}
+
+// The presence test alone.
+fn bool has(str_map* m, string key) {
+    return find_slot(m, key, str.hash(key)) >= 0;
+}
+
+// Removes key and says whether it was there. The slot becomes a tombstone so
+// that the probes running through it still reach what lies beyond; used keeps
+// counting it until the next rebuild (stdlib.md 2.8).
+fn bool remove(str_map mut* m, string key) {
+    i64 found = find_slot(m, key, str.hash(key));
+    if (found < 0) {
+        return false;
+    }
+    m->entries[cast(found, u64)].state = SLOT_DEAD;
+    m->live -= 1;
+    return true;
+}
+
+// The number of entries, tombstones excluded.
+fn u64 count(str_map* m) {
+    return m->live;
+}

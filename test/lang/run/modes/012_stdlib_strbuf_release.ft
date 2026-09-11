@@ -1,0 +1,43 @@
+//! run
+//! flags: --release
+//! abort
+//! stderr: strbuf.reserve: capacity overflow
+//! stdout:
+//| 3 16
+//| 34 34 hello world!?!hello world!?!hello!
+//| 9223372036854775807-9223372036854775808
+import std::strbuf;
+
+// str_buf in release mode, where arithmetic wraps instead of trapping and the
+// overwrite check of D17.11 is not emitted (D11.1). Growth must therefore
+// reach its decisions by arithmetic alone: a guard that detected the overflow
+// by performing it would abort here in a checked build and hand out a
+// capacity of two in this one. The same program with the checks on is
+// run/stdlib/033, 025 and 028, and the answers below are theirs.
+fn i32 main() {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "abc");
+    println(b.len, " ", b.data.len);
+
+    // The growth policy picks the same capacities without the checks.
+    strbuf.clear(&b);
+    strbuf.append(&b, "hello world!?!");
+    strbuf.append(&b, "hello world!?!hello!");
+    println(b.len, " ", b.data.len, " ", strbuf.view(&b));
+
+    // The i64 minimum's magnitude is taken in u64 with a wrapping subtract, so
+    // both modes print the same digits (D11.2).
+    u64 i64_min_magnitude = 9223372036854775808;
+    strbuf.clear(&b);
+    strbuf.append_i64(&b, 9223372036854775807);
+    strbuf.append_i64(&b, cast(i64_min_magnitude, i64));
+    println(strbuf.view(&b));
+
+    // And the capacity guard still reports rather than wrapping.
+    strbuf.truncate(&b, 3);
+    u64 u64_max = 18446744073709551615;
+    strbuf.reserve(&b, u64_max - 2);
+    println("not reached");
+    return 0;
+}

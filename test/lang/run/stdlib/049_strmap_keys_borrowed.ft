@@ -1,0 +1,53 @@
+//! run
+//! stdout:
+//| true true 2
+//| 10 20
+//| true true
+//| 10 20 2
+//| 0 0 true
+//| owned sub
+import std::strmap;
+import std::str;
+import std::strbuf;
+
+// The map borrows its keys and never owns one (D13.5, stdlib.md 2.8): an owned
+// string and a sub-string of a buffer serve as keys while their owners keep
+// them alive, free(&m) leaves both alone, and the owners release them
+// afterwards.
+fn i32 main() {
+    string own owned = str.dup("owned");
+    defer del(owned);
+
+    strbuf.str_buf mut source = strbuf.with_cap(32);
+    defer strbuf.free(&source);
+    strbuf.append(&source, "a sub-string of a buffer");
+    // A sub-string of storage that outlives the map is a legitimate key; the
+    // buffer must not grow while the entry lives, since growth would free
+    // these bytes (stdlib.md 1.3).
+    string borrowed = strbuf.view(&source)[2..5];
+
+    strmap.str_map mut m = strmap.create();
+    defer strmap.free(&m);
+    println(strmap.put(&m, owned, 10), " ", strmap.put(&m, borrowed, 20), " ",
+            strmap.count(&m));
+
+    i64 mut a = 0;
+    i64 mut b = 0;
+    strmap.get(&m, owned, &a);
+    strmap.get(&m, borrowed, &b);
+    println(a, " ", b);
+
+    // The entries answer to any string with the same bytes, whoever owns it.
+    println(strmap.has(&m, "owned"), " ", strmap.has(&m, "sub"));
+    i64 mut c = 0;
+    i64 mut d = 0;
+    strmap.get(&m, "owned", &c);
+    strmap.get(&m, "sub", &d);
+    println(c, " ", d, " ", strmap.count(&m));
+
+    // Freeing the map releases the table alone: both keys are as they were.
+    strmap.free(&m);
+    println(m.live, " ", m.used, " ", m.entries.ptr == null);
+    println(owned, " ", borrowed);
+    return 0;
+}

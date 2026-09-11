@@ -1,0 +1,52 @@
+//! run
+//! stdout:
+//| 4 4 4 16
+//| aa aq bh bx
+//| 1 2 3 4
+//| true 3 4
+//| 2 1 2
+//| true true 1 3 4
+//| true 4 4 16 5
+//| aa aq bh bx
+//| 0 1 1 1
+import std::strmap;
+
+// Four keys that hash into the same bucket, so that the probe itself is under
+// test rather than the hash (stdlib.md 2.8): with a capacity of 16, str.hash
+// puts "aa", "aq", "bh" and "bx" all at slot 7, so they occupy 7, 8, 9 and 10
+// in insertion order. A tombstone in the middle of that chain must not cut it.
+fn i32 main() {
+    strmap.str_map mut m = strmap.create();
+    defer strmap.free(&m);
+    strmap.put(&m, "aa", 1);
+    strmap.put(&m, "aq", 2);
+    strmap.put(&m, "bh", 3);
+    strmap.put(&m, "bx", 4);
+    println(strmap.count(&m), " ", m.live, " ", m.used, " ", m.entries.len);
+    println(m.entries[7].key, " ", m.entries[8].key, " ", m.entries[9].key, " ",
+            m.entries[10].key);
+    println(m.entries[7].val, " ", m.entries[8].val, " ", m.entries[9].val, " ",
+            m.entries[10].val);
+
+    // Removing the second link leaves a tombstone: live falls, used does not.
+    println(strmap.remove(&m, "aq"), " ", m.live, " ", m.used);
+    println(m.entries[8].state, " ", m.entries[7].state, " ", m.entries[8].state);
+
+    // The keys beyond the tombstone are still reachable, which is the whole
+    // reason a removal does not empty the slot.
+    i64 mut third = 0;
+    i64 mut fourth = 0;
+    println(strmap.get(&m, "bh", &third), " ", strmap.get(&m, "bx", &fourth), " ",
+            third - 2, " ", third, " ", fourth);
+
+    // Putting the key back reuses the tombstone rather than the empty slot at
+    // the end of the chain, so used does not grow.
+    println(strmap.put(&m, "aq", 5), " ", m.live, " ", m.used, " ", m.entries.len, " ",
+            m.entries[8].val);
+    println(m.entries[7].key, " ", m.entries[8].key, " ", m.entries[9].key, " ",
+            m.entries[10].key);
+    // The slot after the chain was never touched by any of it.
+    println(m.entries[11].state, " ", m.entries[7].state, " ", m.entries[8].state, " ",
+            m.entries[10].state);
+    return 0;
+}

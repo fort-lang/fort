@@ -541,7 +541,11 @@ check_type_t check_type(check_t* ck, ast_node_t* node, type_pos_t pos) {
     if (pos == TYPE_POS_ALLOC) {
         // `new` allocates storage that is writable at every level (D5.8), so
         // every position but the one a fixed-array suffix follows is marked.
-        base_mut = count == 0 || suffixes[0].kind != SUFFIX_ARRAY;
+        // `void` is the exception: it has no target level to carry a marker
+        // (D3.11), and `new(void*)` is legal (D17.3), so marking the base
+        // would reject the one pointer slot the standard library's ptr_vec
+        // allocates.
+        base_mut = (count == 0 || suffixes[0].kind != SUFFIX_ARRAY) && b->kind != TYPE_VOID;
         for (uint64_t i = 0; i < count; i++) {
             suffixes[i].mut = i + 1 == count || suffixes[i + 1].kind != SUFFIX_ARRAY;
         }
@@ -2051,6 +2055,12 @@ static void check_new(check_t* ck, ast_node_t* n, expr_t* out) {
     const bool counted = n->b != NULL;
     const bool ok = !counted || check_count(ck, n->b, "count", &count);
     if (check_poisoned(t.type) || !ok) {
+        return;
+    }
+    if (t.type->kind == TYPE_VOID) {
+        // `new(void)` is an error because `void` has no size; `new(void*)`,
+        // one pointer slot, is not (D10.2, D17.3).
+        check_error(ck, n->loc, "'new' needs a sized type, not void");
         return;
     }
     if (!check_layout(ck, t.type) || !check_size_fits(ck, n->loc, t.type)) {

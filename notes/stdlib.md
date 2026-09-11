@@ -710,8 +710,12 @@ fn u64 count(str_map* m)
   unchanged for as long as the entry exists (a literal, a sub-string of a source buffer that
   outlives the map, or a `string own` from `str.dup` held in a variable that outlives the
   entry and is `del`ed afterwards). `put(&m, str.dup(s), v)` does not compile: the copy would
-  be an owning temporary that leaks (D17.8). Allocates on rebuild. Ownership: the map never
-  owns a key.
+  be an owning temporary that leaks (D17.8). Replacing the value of a key that is there stores
+  the value alone: the entry keeps the key view of the insert that created it, and the `key` of
+  the later `put`, equal in bytes but possibly other storage, is not stored. It is therefore the
+  first key's bytes that must stay alive for as long as the entry does, and a caller replacing a
+  value from a buffer it is about to release `remove`s the entry and `put`s it again. Allocates
+  on rebuild. Ownership: the map never owns a key.
 - `get`: `true` and `*out = val` when present; `false` with `*out` unchanged otherwise. `has`:
   the presence test alone. `remove`: `true` when the key was present. `count`: `live`.
 

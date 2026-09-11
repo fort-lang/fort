@@ -15,6 +15,9 @@ top of the file.
   no `//!` directives.
 - `ffi/*.c`: C helpers that tests link in with `//! link:`.
 - `programs/*.ft`: larger programs that exercise many features at once, treated as run tests.
+  `programs/wc.ft` is the worked example of `notes/stdlib.md` section 4 byte for byte below
+  its directives, so a change to one is a change to the other; `programs/cat.ft` is the
+  example of section 2.4 with its `?:` written as an `if`, which stage1 admits.
 
 `NNN` starts at `001` within each area, with no gaps. Tests use only the core language and the
 builtins; standard-library tests go under the `stdlib` area once the library exists.

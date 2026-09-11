@@ -53,6 +53,8 @@ type says that this value is the one responsible for freeing the allocation (D17
 | `new(T*)`         | `T mut* mut* own`     | one zeroed pointer slot (D10.2)                 |
 | `new(T*, n)`      | `T mut* mut@ own`     | `n` zeroed slots, each a borrowed pointer       |
 | `new(T* own, n)`  | `T mut* own mut@ own` | `n` owned slots, all `null` (D17.3)             |
+| `new(void*)`      | `void* mut* own`      | one zeroed `void*` slot (D17.3)                 |
+| `new(void*, n)`   | `void* mut@ own`      | `n` zeroed `void*` slots (`std::vec`)           |
 | `new(T{...})`     | error                 | allocate, then assign the fields                |
 | `new(T@)`         | error                 | a span header is not an object to allocate      |
 | `new(void)`       | error                 | `void` has no size                              |
@@ -71,7 +73,10 @@ allocates at least one byte (D10.2). `mut` does not parse inside `new(...)`, and
 a `*` of the element type (grammar section 6): `new(node*)` allocates one pointer slot and yields
 a `node mut* mut* own`, `new(node*, n)` yields a `node mut* mut@ own`, a span of borrowed
 pointers, and `new(node* own, n)` yields a `node mut* own mut@ own`, a span of owned slots that
-are all `null` (D17.3).
+are all `null` (D17.3). `void*` is an element type like any other, since a pointer to `void` has a
+size: `new(void*)` is one slot and `new(void*, n)` is the span `std::vec`'s `ptr_vec` allocates.
+`void` itself has no target level to mark writable, so no `mut` appears after it (D3.11) and
+`new(void)` stays the error above (D10.2, D17.3).
 
 The result is an rvalue that must land in an `own` place (D17.8): the initializer of an `own`
 declaration, an `own` parameter, an `own` field or element, or `del` itself. Binding it to a

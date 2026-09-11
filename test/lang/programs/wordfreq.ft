@@ -1,0 +1,139 @@
+//! run
+//! args: /dev/stdin
+//! stdin:
+//< the cat sat on the mat
+//< the cat sat again
+//! stdout:
+//| 41 bytes, 10 words, 6 distinct
+//| again 1
+//| cat 2
+//| mat 1
+//| on 1
+//| sat 2
+//| the 3
+//| missing 0
+import std::io;
+import std::str;
+import std::strbuf;
+import std::strmap;
+import std::sys;
+import std::vec;
+
+// The whole library working together: io reads the file into an owned span,
+// str classifies and orders its bytes, strmap counts the words with keys that
+// are sub-strings of that span rather than copies (stdlib.md 2.8), vec holds
+// the running totals the map indexes, and strbuf builds each output line.
+// The one allocation the program makes for the text is the file itself.
+struct counter {
+    strmap.str_map index;   // word to its position in totals
+    vec.int_vec totals;     // how often each distinct word was seen
+}
+
+fn void counter_free(counter mut* c) {
+    strmap.free(&c->index);
+    vec.int_free(&c->totals);
+}
+
+// Counts one word; the key is borrowed and outlives the map (D13.5).
+fn void count(counter mut* c, string word) {
+    i64 mut at = 0;
+    if (strmap.get(&c->index, word, &at)) {
+        c->totals.items[cast(at, u64)] += 1;
+        return;
+    }
+    strmap.put(&c->index, word, cast(c->totals.len, i64));
+    vec.int_push(&c->totals, 1);
+}
+
+// How often word was seen, 0 when it was never seen.
+fn i64 total(counter* c, string word) {
+    i64 mut at = 0;
+    if (!strmap.get(&c->index, word, &at)) {
+        return 0;
+    }
+    return c->totals.items[cast(at, u64)];
+}
+
+// The end of the word starting at from, which is the first space at or after
+// it; from is past the last word when it equals text.len.
+fn u64 word_end(string text, u64 from) {
+    u64 mut i = from;
+    while (i < text.len && !str.is_space(text[i])) {
+        i += 1;
+    }
+    return i;
+}
+
+// The start of the next word at or after from, which is text.len when there
+// is none.
+fn u64 word_start(string text, u64 from) {
+    u64 mut i = from;
+    while (i < text.len && str.is_space(text[i])) {
+        i += 1;
+    }
+    return i;
+}
+
+fn i32 main(string@ args) {
+    if (args.len != 2) {
+        eprintln("usage: ", args[0], " <file>");
+        return 2;
+    }
+    u8 mut@ own mut data = {};
+    defer del(data);
+    if (!io.read_file_bytes(args[1], &data)) {
+        eprintln("wordfreq: cannot read ", args[1], " (errno ", sys.errno(), ")");
+        return 1;
+    }
+    string text = cast(data[..], string);
+
+    counter mut c = {};
+    defer counter_free(&c);
+    // The distinct words in alphabetical order; v1 has no sort, so each new
+    // word is inserted in place (D15). Eight is this program's limit, and a
+    // file with more words is counted but not listed.
+    string[8] mut listed = {"", "", "", "", "", "", "", ""};
+    u64 mut listed_len = 0;
+    u64 mut words = 0;
+
+    u64 mut i = word_start(text, 0);
+    while (i < text.len) {
+        u64 end = word_end(text, i);
+        string word = text[i..end];
+        words += 1;
+        if (total(&c, word) == 0 && listed_len < listed.len) {
+            u64 mut at = 0;
+            while (at < listed_len && str.cmp(listed[at], word) < 0) {
+                at += 1;
+            }
+            u64 mut m = listed_len;
+            while (m > at) {
+                listed[m] = listed[m - 1];
+                m -= 1;
+            }
+            listed[at] = word;
+            listed_len += 1;
+        }
+        count(&c, word);
+        i = word_start(text, end);
+    }
+    println(text.len, " bytes, ", words, " words, ", strmap.count(&c.index), " distinct");
+
+    strbuf.str_buf mut b = strbuf.with_cap(32);
+    defer strbuf.free(&b);
+    u64 mut k = 0;
+    while (k <= listed_len) {
+        // The last line is a word that never appeared, whose total is 0.
+        string mut word = "missing";
+        if (k < listed_len) {
+            word = listed[k];
+        }
+        strbuf.clear(&b);
+        strbuf.append(&b, word);
+        strbuf.push(&b, ' ');
+        strbuf.append_i64(&b, total(&c, word));
+        println(strbuf.view(&b));
+        k += 1;
+    }
+    return 0;
+}

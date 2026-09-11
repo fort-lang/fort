@@ -1,0 +1,42 @@
+//! run
+//! stdout:
+//| -1 true
+//| 0 true
+//| false 5 hello
+//| false true
+//| true true
+import std::io;
+import std::libc;
+import std::strbuf;
+import std::sys;
+
+// What the library reports when the operating system refuses (D13.3,
+// stdlib.md 2.4): open_read answers -1 with the reason in sys.errno(), and
+// every whole-file call above it answers false without disturbing what the
+// caller gave it.
+fn i32 main() {
+    i32 fd = io.open_read("t028-absent.txt");
+    println(fd, " ", sys.errno() == libc.ENOENT);
+
+    // A descriptor that did open is a non-negative number, and closing it
+    // succeeds.
+    i32 out = io.open_write("t028-open.txt");
+    println(out - 3, " ", io.close(out));
+
+    // read_file leaves the buffer's contents and length where they were.
+    strbuf.str_buf mut buf = strbuf.create();
+    defer strbuf.free(&buf);
+    strbuf.append(&buf, "hello");
+    println(io.read_file("t028-absent.txt", &buf), " ", buf.len, " ", strbuf.view(&buf));
+
+    // read_file_bytes leaves the slot alone, so it is still the zero span.
+    u8 mut@ own mut data = {};
+    defer del(data);
+    println(io.read_file_bytes("t028-absent.txt", &data), " ", data.ptr == null);
+
+    // write_file reports the open failure the same way; a path inside a
+    // directory that does not exist cannot be created.
+    println(io.write_file("t028-no-dir/file.txt", cast("x", u8@)) == false, " ",
+            sys.errno() == libc.ENOENT);
+    return 0;
+}

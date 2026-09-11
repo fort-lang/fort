@@ -1,0 +1,34 @@
+//! run
+//! link: ffi/std_io_fds.c
+//! stdout:
+//| true 5 hello
+//| false 5 hello
+//| false 5 hello
+import std::io;
+import std::strbuf;
+
+// read_all restores out->len when a read fails (stdlib.md 2.4), and the case
+// that says anything is a read that fails after another has succeeded: the
+// first read adds bytes to the buffer, and the restore has to undo those and
+// not merely leave a length it never moved. The helper's descriptor holds a
+// hundred bytes and then fails rather than reporting end of file.
+extern fn i32 std_io_pipe_with_bytes(i64 n);
+
+fn i32 main() {
+    strbuf.str_buf mut buf = strbuf.create();
+    defer strbuf.free(&buf);
+    strbuf.append(&buf, "hello");
+
+    i32 fd = std_io_pipe_with_bytes(100);
+    println(fd >= 0, " ", buf.len, " ", strbuf.view(&buf));
+
+    // A hundred bytes arrive, then the read fails: what the caller gave is
+    // what the caller gets back, storage grown but contents unchanged.
+    println(io.read_all(fd, &buf), " ", buf.len, " ", strbuf.view(&buf));
+    io.close(fd);
+
+    // The same through read_file's descriptor-owning path: a directory opens
+    // and fails on the first read, so nothing was added to undo.
+    println(io.read_file(".", &buf), " ", buf.len, " ", strbuf.view(&buf));
+    return 0;
+}

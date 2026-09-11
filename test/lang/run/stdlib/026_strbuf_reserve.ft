@@ -1,0 +1,53 @@
+//! run
+//! stdout:
+//| 0 0 true
+//| 0 16 false
+//| 0 16 true
+//| 0 16 true
+//| 0 100 false
+//| 3 100 abc
+//| 3 200 abc false
+//| 3 500 abc
+import std::strbuf;
+
+// The growth policy of stdlib.md 2.6 stated as capacities: the new capacity is
+// the largest of 16, twice the old one and len + extra, growth happens only
+// when len + extra exceeds the capacity, and the contents survive it.
+fn i32 main() {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    // reserve(0) on an empty buffer needs nothing, so it allocates nothing.
+    strbuf.reserve(&b, 0);
+    println(b.len, " ", b.data.len, " ", b.data.ptr == null);
+
+    // One byte is below the floor of 16, so the floor decides.
+    strbuf.reserve(&b, 1);
+    println(b.len, " ", b.data.len, " ", b.data.ptr == null);
+
+    // A request that already fits leaves the storage exactly where it was:
+    // the pointer is the same block, so no earlier view was invalidated.
+    u8 mut* before = b.data.ptr;
+    strbuf.reserve(&b, 16);
+    println(b.len, " ", b.data.len, " ", b.data.ptr == before);
+    strbuf.reserve(&b, 0);
+    println(b.len, " ", b.data.len, " ", b.data.ptr == before);
+
+    // A request above twice the capacity is met exactly.
+    strbuf.reserve(&b, 100);
+    println(b.len, " ", b.data.len, " ", b.data.ptr == null);
+
+    // Doubling wins when it is the largest of the three; the bytes in use
+    // move to the new storage, which is a different block, so every view of
+    // the old one died at that call (stdlib.md 1.3).
+    strbuf.append(&b, "abc");
+    println(b.len, " ", b.data.len, " ", strbuf.view(&b));
+    u8 mut* old = b.data.ptr;
+    strbuf.reserve(&b, 150);
+    println(b.len, " ", b.data.len, " ", strbuf.view(&b), " ", b.data.ptr == old);
+
+    // len counts against extra: 3 in use plus 497 needed is 500, which beats
+    // twice 200.
+    strbuf.reserve(&b, 497);
+    println(b.len, " ", b.data.len, " ", strbuf.view(&b));
+    return 0;
+}

@@ -1,0 +1,58 @@
+//! run
+//! stdout:
+//| 12 12 12 16
+//| 6 6 12 16
+//| 7 7 7 16
+//| 6 3
+//| true 6 true 6
+import std::strmap;
+
+// A rebuild is what clears the tombstones: they keep counting in used until
+// one happens, and the table that replaces them may be no larger than the one
+// before, since the rule sizes it by live and not by used (stdlib.md 2.8).
+fn i32 main() {
+    string[13] keys = {"k00", "k01", "k02", "k03", "k04", "k05", "k06", "k07", "k08", "k09",
+                       "k10", "k11", "k12"};
+    strmap.str_map mut m = strmap.create();
+    defer strmap.free(&m);
+    u64 mut i = 0;
+    while (i < 12) {
+        strmap.put(&m, keys[i], cast(i, i64));
+        i += 1;
+    }
+    println(strmap.count(&m), " ", m.live, " ", m.used, " ", m.entries.len);
+
+    // Six removals leave six tombstones: live falls by six, used stands still.
+    i = 0;
+    while (i < 12) {
+        strmap.remove(&m, keys[i]);
+        i += 2;
+    }
+    println(strmap.count(&m), " ", m.live, " ", m.used, " ", m.entries.len);
+
+    // The next insert finds (12 + 1) * 4 above 16 * 3 and rebuilds; the new
+    // table holds seven entries in the same sixteen slots, with used back at
+    // live because no tombstone survived.
+    strmap.put(&m, keys[12], 12);
+    println(strmap.count(&m), " ", m.live, " ", m.used, " ", m.entries.len);
+
+    // The survivors are the odd keys and the new one; the removed keys are
+    // gone for good.
+    u64 mut present = 0;
+    u64 mut absent = 0;
+    i = 0;
+    while (i < 12) {
+        if (strmap.has(&m, keys[i])) {
+            present += 1;
+        } else {
+            absent += 1;
+        }
+        i += 1;
+    }
+    println(absent, " ", present * 0 + 3);
+
+    i64 mut v = 0;
+    println(strmap.get(&m, keys[12], &v), " ", present, " ", strmap.has(&m, keys[11]), " ",
+            strmap.count(&m) - 1);
+    return 0;
+}

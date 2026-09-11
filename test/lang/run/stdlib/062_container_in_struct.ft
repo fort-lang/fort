@@ -1,0 +1,49 @@
+//! run
+//! stdout:
+//| 0 0 0 0
+//| 5 hello 2 20
+//| 8 helloXYZ 3 30
+//| 0 0 0 0 true true
+import std::strbuf;
+import std::vec;
+
+// The zero value of every container is a valid empty one, so a struct holding
+// them is initialized with {} and is itself an owning aggregate (D17.7,
+// stdlib.md 1.3): it is passed by pointer and gets a free of its own that
+// releases each field in turn.
+struct record {
+    strbuf.str_buf text;
+    vec.int_vec numbers;
+}
+
+fn void record_free(record mut* r) {
+    strbuf.free(&r->text);
+    vec.int_free(&r->numbers);
+}
+
+fn void add(record mut* r, string s, i64 n) {
+    strbuf.append(&r->text, s);
+    vec.int_push(&r->numbers, n);
+}
+
+fn i32 main() {
+    record mut r = {};
+    defer record_free(&r);
+    println(r.text.len, " ", r.text.data.len, " ", r.numbers.len, " ", r.numbers.items.len);
+
+    add(&r, "hello", 10);
+    add(&r, "", 20);
+    println(r.text.len, " ", strbuf.view(&r.text), " ", r.numbers.len, " ",
+            r.numbers.items[1]);
+
+    add(&r, "XYZ", 30);
+    println(r.text.len, " ", strbuf.view(&r.text), " ", r.numbers.len, " ",
+            r.numbers.items[2]);
+
+    // Freeing the record leaves both fields at their zero value, so the
+    // deferred call above frees nothing a second time (D17.9).
+    record_free(&r);
+    println(r.text.len, " ", r.text.data.len, " ", r.numbers.len, " ", r.numbers.items.len,
+            " ", r.text.data.ptr == null, " ", r.numbers.items.ptr == null);
+    return 0;
+}

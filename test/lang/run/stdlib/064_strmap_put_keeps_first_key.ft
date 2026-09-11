@@ -1,0 +1,46 @@
+//! run
+//! stdout:
+//| true 1 true false
+//| false 2 1 true false
+//| true 2 true
+//| false 7 0
+//| true 9 true
+import std::strmap;
+import std::str;
+
+// A put that replaces a value stores the value alone: the entry keeps the key
+// view of the insert that created it (stdlib.md 2.8). It is therefore the
+// first key's bytes the caller must keep alive, which the .ptr comparisons
+// below pin down, and a caller that wants the later key's storage removes the
+// entry and puts it again.
+fn i32 main() {
+    string own first = str.dup("key");
+    defer del(first);
+    string own second = str.dup("key");
+    defer del(second);
+    // Equal bytes in two allocations: the same key, different storage.
+    strmap.str_map mut m = strmap.create();
+    defer strmap.free(&m);
+    println(strmap.put(&m, first, 1), " ", strmap.count(&m), " ",
+            cast(m.entries[cast(str.hash(first) & 15, u64)].key.ptr, void*) ==
+                cast(first.ptr, void*), " ",
+            cast(m.entries[cast(str.hash(first) & 15, u64)].key.ptr, void*) ==
+                cast(second.ptr, void*));
+
+    // The replacement moves the value and leaves the key where it was.
+    i64 mut got = 0;
+    println(strmap.put(&m, second, 7), " ", strmap.count(&m) + 1, " ", strmap.count(&m), " ",
+            cast(m.entries[cast(str.hash(first) & 15, u64)].key.ptr, void*) ==
+                cast(first.ptr, void*), " ",
+            cast(m.entries[cast(str.hash(first) & 15, u64)].key.ptr, void*) ==
+                cast(second.ptr, void*));
+    println(strmap.get(&m, "key", &got), " ", got - 5, " ", strmap.has(&m, second));
+
+    // Removing and putting again is how the later key's storage takes over.
+    println(strmap.remove(&m, first) == false, " ", got, " ", strmap.count(&m));
+    strmap.put(&m, second, 9);
+    println(strmap.get(&m, second, &got), " ", got, " ",
+            cast(m.entries[cast(str.hash(second) & 15, u64)].key.ptr, void*) ==
+                cast(second.ptr, void*));
+    return 0;
+}

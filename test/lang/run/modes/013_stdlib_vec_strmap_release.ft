@@ -1,0 +1,82 @@
+//! run
+//! flags: --release
+//! abort
+//! stderr: vec.ptr_reserve: capacity overflow
+//! stdout:
+//| 17 32 136
+//| 13 13 13 32
+//| 13 78
+//| 6 6 13 32
+//| 7 7 13 32
+import std::strmap;
+import std::vec;
+
+// vec and strmap in release mode, where arithmetic wraps instead of trapping
+// and the overwrite check of D17.11 is not emitted (D11.1). Growth and rebuild
+// must reach the same capacities as run/stdlib/036, 047 and 048, because every
+// decision they take is arithmetic: a guard that overflowed to detect an
+// overflow would abort in one mode and hand out a short block in the other,
+// and a rebuild that stored over a live own field would leak here and trap
+// there. The vec capacities are run/stdlib/036's and 040's.
+fn i32 main() {
+    vec.int_vec mut v = vec.int_create();
+    defer vec.int_free(&v);
+    i64 mut i = 0;
+    while (i < 17) {
+        vec.int_push(&v, i);
+        i += 1;
+    }
+    i64 mut sum = 0;
+    u64 mut k = 0;
+    while (k < v.len) {
+        sum += v.items[k];
+        k += 1;
+    }
+    println(v.len, " ", v.items.len, " ", sum);
+
+    string[13] keys = {"k00", "k01", "k02", "k03", "k04", "k05", "k06", "k07", "k08", "k09",
+                       "k10", "k11", "k12"};
+    strmap.str_map mut m = strmap.create();
+    defer strmap.free(&m);
+    k = 0;
+    while (k < 13) {
+        strmap.put(&m, keys[k], cast(k, i64));
+        k += 1;
+    }
+    println(strmap.count(&m), " ", m.live, " ", m.used, " ", m.entries.len);
+    u64 mut found = 0;
+    i64 mut total = 0;
+    k = 0;
+    while (k < 13) {
+        i64 mut got = 0;
+        if (strmap.get(&m, keys[k], &got)) {
+            found += 1;
+            total += got;
+        }
+        k += 1;
+    }
+    println(found, " ", total);
+
+    // Tombstones keep counting in used until a rebuild, and with thirteen of
+    // thirty-two slots taken the load factor never calls for one, so the
+    // insert below reuses a tombstone and used stands still (stdlib.md 2.8).
+    k = 0;
+    while (k < 12) {
+        strmap.remove(&m, keys[k]);
+        k += 2;
+    }
+    strmap.remove(&m, keys[12]);
+    println(strmap.count(&m), " ", m.live, " ", m.used, " ", m.entries.len);
+    strmap.put(&m, keys[12], 12);
+    println(strmap.count(&m), " ", m.live, " ", m.used, " ", m.entries.len);
+
+    // And the capacity guard still reports rather than wrapping to a short
+    // block, which is what a release build would do with the check omitted.
+    vec.ptr_vec mut p = vec.ptr_create();
+    defer vec.ptr_free(&p);
+    vec.ptr_push(&p, null);
+    u64 u64_max = 18446744073709551615;
+    vec.ptr_reserve(&p, u64_max);
+    println("not reached");
+    return 0;
+}

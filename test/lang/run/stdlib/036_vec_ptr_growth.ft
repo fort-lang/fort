@@ -1,0 +1,64 @@
+//! run
+//! stdout:
+//| 0 0
+//| 1 16
+//| 16 16
+//| 17 32
+//| 32 32 496
+//| 32 64 496
+//| 32 200 496
+import std::vec;
+
+// The growth policy of stdlib.md 2.7, which is strbuf's counted in elements:
+// the floor of 16 on the first push, doubling when the last slot is taken, and
+// len + extra when a reservation asks for more than doubling gives. Every
+// element must survive each move to new storage, which is what the running sum
+// checks.
+fn i32 main() {
+    vec.ptr_vec mut v = vec.ptr_create();
+    defer vec.ptr_free(&v);
+    println(v.len, " ", v.items.len);
+
+    i64[32] mut values = {};
+    u64 mut i = 0;
+    while (i < 32) {
+        values[i] = cast(i, i64);
+        i += 1;
+    }
+
+    vec.ptr_push(&v, cast(&values[0], void*));
+    println(v.len, " ", v.items.len);
+
+    // Filling the sixteenth slot does not grow; the seventeenth does.
+    i = 1;
+    while (i < 16) {
+        vec.ptr_push(&v, cast(&values[i], void*));
+        i += 1;
+    }
+    println(v.len, " ", v.items.len);
+    vec.ptr_push(&v, cast(&values[16], void*));
+    println(v.len, " ", v.items.len);
+
+    i = 17;
+    while (i < 32) {
+        vec.ptr_push(&v, cast(&values[i], void*));
+        i += 1;
+    }
+    // 0 + 1 + ... + 31 is 496: every pointer still points at its own value
+    // after two moves to fresh storage.
+    i64 mut sum = 0;
+    i = 0;
+    while (i < v.len) {
+        sum += *cast(v.items[i], i64*);
+        i += 1;
+    }
+    println(v.len, " ", v.items.len, " ", sum);
+
+    // A reservation that fits within doubling takes the doubling.
+    vec.ptr_reserve(&v, 3);
+    println(v.len, " ", v.items.len, " ", sum);
+    // One that does not is met exactly.
+    vec.ptr_reserve(&v, 168);
+    println(v.len, " ", v.items.len, " ", sum);
+    return 0;
+}

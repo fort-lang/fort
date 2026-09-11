@@ -1,0 +1,155 @@
+// std::vec: growable sequences of pointers and of i64, and the pattern every
+// other element type is copied from (stdlib.md 2.7, D13.2, D15). The two
+// halves of this file are the same twelve lines with the element type and the
+// function prefix changed, which is what makes it a template rather than a
+// generic: there is nothing here a copy of the file cannot repeat.
+
+// The largest u64 there is, named once so that the twenty digits both capacity
+// guards hold their arithmetic against are written in one place (D1.4: a
+// module constant is UPPER_CASE).
+u64 U64_MAX = 18446744073709551615;
+
+// items.len is the capacity and len the slots in use, so the live elements are
+// items[..len]. Each own marks one reference (D17.2), so the vector owns its
+// slots and borrows every pointer in them: ptr_push lends its argument
+// (D17.4), ptr_pop returns a view and ptr_free never touches a pointee.
+// Indexing items[i] between len and the capacity is not a runtime error; it
+// reads a zero or stale slot, so code that wants a bounds check indexes
+// items[..len].
+struct ptr_vec {
+    void* mut@ own items;
+    u64 len;
+}
+
+// The i64 vector holds its elements by value, so nothing outside it is
+// borrowed and int_free releases everything the vector holds.
+struct int_vec {
+    i64 mut@ own items;
+    u64 len;
+}
+
+// The empty vector; allocates nothing. A call result needs no move (D17.5).
+fn ptr_vec ptr_create() {
+    return ptr_vec{};
+}
+
+// cap slots up front; ptr_with_cap(0) is ptr_create(). The new rvalue lands
+// directly in the own field of the literal (D17.5, D17.8).
+fn ptr_vec ptr_with_cap(u64 cap) {
+    return ptr_vec{new(void*, cap), 0};
+}
+
+// Releases the slots and leaves ptr_vec{}; the pointers they held belong to
+// someone else and are left alone (D13.5). del empties the field (D17.9), so
+// a second call, or a call on ptr_vec{}, is a no-op.
+fn void ptr_free(ptr_vec mut* v) {
+    del(v->items);
+    v->len = 0;
+}
+
+// Ensures items.len >= len + extra, growing to the largest of 16, twice the
+// capacity and len + extra (stdlib.md 2.7). The elements move to fresh storage
+// and the old span is deleted, so every earlier alias of items dies here.
+fn void ptr_reserve(ptr_vec mut* v, u64 extra) {
+    // The sum is tested before it is computed: detecting the overflow by
+    // performing it would trap in a checked build and wrap to a capacity
+    // below the length in a release build (D3.1, D11.1).
+    if (extra > U64_MAX - v->len) {
+        panic("vec.ptr_reserve: capacity overflow");
+    }
+    u64 need = v->len + extra;
+    if (need <= v->items.len) {
+        return;
+    }
+    u64 mut cap = 16;
+    if (need > cap) {
+        cap = need;
+    }
+    // Doubling is skipped when it cannot be represented; the allocation below
+    // is then already past what any machine can give.
+    if (v->items.len <= U64_MAX / 2 && v->items.len * 2 > cap) {
+        cap = v->items.len * 2;
+    }
+    void* mut@ own bigger = new(void*, cap);
+    u64 mut i = 0;
+    while (i < v->len) {
+        bigger[i] = v->items[i];
+        i += 1;
+    }
+    del(v->items);
+    v->items = move(bigger);
+}
+
+// Appends one pointer, growing as needed. The argument is borrowed: the
+// vector never frees what it points at (D17.4).
+fn void ptr_push(ptr_vec mut* v, void* p) {
+    ptr_reserve(v, 1);
+    v->items[v->len] = p;
+    v->len += 1;
+}
+
+// Removes and returns the last pointer; an empty vector is a violated
+// precondition and panics (D13.3). Ownership: a view of whatever the caller
+// stored (D17.3).
+fn void* ptr_pop(ptr_vec mut* v) {
+    if (v->len == 0) {
+        panic("vec.ptr_pop: empty");
+    }
+    v->len -= 1;
+    return v->items[v->len];
+}
+
+// The i64 half is the same six functions with the element type changed; to
+// hold token values, copy them once more and replace i64 by token and the
+// prefix int_ by token_ (stdlib.md 2.7).
+fn int_vec int_create() {
+    return int_vec{};
+}
+
+fn int_vec int_with_cap(u64 cap) {
+    return int_vec{new(i64, cap), 0};
+}
+
+fn void int_free(int_vec mut* v) {
+    del(v->items);
+    v->len = 0;
+}
+
+fn void int_reserve(int_vec mut* v, u64 extra) {
+    if (extra > U64_MAX - v->len) {
+        panic("vec.int_reserve: capacity overflow");
+    }
+    u64 need = v->len + extra;
+    if (need <= v->items.len) {
+        return;
+    }
+    u64 mut cap = 16;
+    if (need > cap) {
+        cap = need;
+    }
+    if (v->items.len <= U64_MAX / 2 && v->items.len * 2 > cap) {
+        cap = v->items.len * 2;
+    }
+    i64 mut@ own bigger = new(i64, cap);
+    u64 mut i = 0;
+    while (i < v->len) {
+        bigger[i] = v->items[i];
+        i += 1;
+    }
+    del(v->items);
+    v->items = move(bigger);
+}
+
+fn void int_push(int_vec mut* v, i64 x) {
+    int_reserve(v, 1);
+    v->items[v->len] = x;
+    v->len += 1;
+}
+
+fn i64 int_pop(int_vec mut* v) {
+    if (v->len == 0) {
+        panic("vec.int_pop: empty");
+    }
+    v->len -= 1;
+    return v->items[v->len];
+}

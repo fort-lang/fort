@@ -1,0 +1,34 @@
+//! run
+//! stdout:
+//| true 0 true
+//| false 5 hello
+//| false 5 hello
+//| false true
+import std::io;
+import std::strbuf;
+
+// A read that fails after the file opened, which is the one path where
+// read_all and read_file have something to undo: out->len goes back to what it
+// was on entry, though the storage it grew stays (stdlib.md 2.4). A directory
+// is the portable way to reach it: it opens for reading and every read(2) on
+// it fails.
+fn i32 main() {
+    i32 dir = io.open_read(".");
+    println(dir >= 0, " ", dir - dir, " ", io.close(dir));
+
+    strbuf.str_buf mut buf = strbuf.create();
+    defer strbuf.free(&buf);
+    strbuf.append(&buf, "hello");
+    println(io.read_file(".", &buf), " ", buf.len, " ", strbuf.view(&buf));
+
+    // read_all through a descriptor of the caller's own says the same thing.
+    i32 again = io.open_read(".");
+    println(io.read_all(again, &buf), " ", buf.len, " ", strbuf.view(&buf));
+    io.close(again);
+
+    // And read_file_bytes reports it without touching the slot.
+    u8 mut@ own mut data = {};
+    defer del(data);
+    println(io.read_file_bytes(".", &data), " ", data.ptr == null);
+    return 0;
+}

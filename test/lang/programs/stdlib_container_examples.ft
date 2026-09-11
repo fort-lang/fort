@@ -1,0 +1,108 @@
+//! run
+//! stdout:
+//|     mov rax, 42
+//| true
+//| 7
+//| true true false
+//| 0 1 x y
+//| true false
+//| 2 0 0 true
+import std::io;
+import std::strbuf;
+import std::strmap;
+import std::vec;
+
+// The worked examples of stdlib.md 2.6, 2.7 and 2.8, run so that the
+// specification's own sample code is held against the library it describes.
+// Every declaration below the imports is the example as the document spells
+// it; the main at the end is this test's own, and it drives them.
+
+// stdlib.md 2.6.
+// Formats "    mov <reg>, <imm>\n". Ownership: the caller dels the result.
+fn string own mov_imm(string reg, i64 imm) {
+    strbuf.str_buf mut b = strbuf.with_cap(32);
+    defer strbuf.free(&b);
+    strbuf.append(&b, "    mov ");
+    strbuf.append(&b, reg);
+    strbuf.append(&b, ", ");
+    strbuf.append_i64(&b, imm);
+    strbuf.push(&b, '\n');
+    return strbuf.take(&b);   // an own rvalue flows into the own return type (D17.5)
+}
+
+fn bool emit_mov(i32 fd) {
+    string own line = mov_imm("rax", 42);
+    defer del(line);
+    return io.write_all(fd, cast(line[..], u8@));   // a view of line is written (1.3)
+}
+
+// stdlib.md 2.7.
+struct node { i64 value; }
+
+fn i64 demo() {
+    vec.ptr_vec mut stack = vec.ptr_create();
+    defer vec.ptr_free(&stack);
+    node mut* own n = new(node);              // new lands in an own place (D17.3, D17.8)
+    defer del(n);
+    n->value = 7;
+    vec.ptr_push(&stack, cast(n, void*));     // lends n; the vector never frees it
+    node* top = cast(vec.ptr_pop(&stack), node*);
+    return top->value;
+}
+
+// stdlib.md 2.8.
+struct sym { string name; i64 offset; }
+
+struct sym_tab {
+    strmap.str_map index;   // name to position in syms
+    vec.ptr_vec syms;       // sym* in declaration order, owned by whoever declared them
+}
+
+fn bool declare(sym_tab mut* t, sym mut* s) {
+    if (strmap.has(&t->index, s->name)) {
+        return false;
+    }
+    strmap.put(&t->index, s->name, cast(t->syms.len, i64));
+    vec.ptr_push(&t->syms, cast(s, void*));
+    return true;
+}
+
+fn sym* lookup(sym_tab* t, string name) {
+    i64 mut i = 0;
+    if (!strmap.get(&t->index, name, &i)) {
+        return null;
+    }
+    return cast(t->syms.items[cast(i, u64)], sym*);
+}
+
+fn void symtab_free(sym_tab mut* t) {
+    strmap.free(&t->index);
+    vec.ptr_free(&t->syms);   // the sym values are borrowed and stay alive
+}
+
+fn i32 main() {
+    // The buffer the example builds is written straight to the descriptor,
+    // so the runtime's buffer for it is flushed first (D11.5).
+    io.flush(io.STDOUT);
+    println(emit_mov(io.STDOUT));
+
+    // stdlib.md 2.7: the pointer comes back out of the vector unharmed.
+    println(demo());
+
+    // stdlib.md 2.8: two symbols declared, one of them twice.
+    sym mut x = {"x", 0};
+    sym mut y = {"y", 8};
+    sym_tab mut t = {};
+    defer symtab_free(&t);
+    println(declare(&t, &x), " ", declare(&t, &y), " ", declare(&t, &x));
+    println(lookup(&t, "x")->offset, " ", lookup(&t, "y")->offset - 7, " ",
+            lookup(&t, "x")->name, " ", lookup(&t, "y")->name);
+    println(lookup(&t, "zzz") == null, " ", lookup(&t, "x") == null);
+
+    // symtab_free releases the map and the vector and leaves the symbols,
+    // which belong to this function.
+    symtab_free(&t);
+    println(x.offset + y.offset - 6, " ", t.index.live, " ", t.syms.len, " ",
+            t.syms.items.ptr == null);
+    return 0;
+}

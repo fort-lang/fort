@@ -423,6 +423,23 @@ TEST(new_of_an_own_element_owns_each_slot, {
     TEST_ASSERT_EQ_STR(init_type("k"), "node mut* own mut@ own");
 })
 
+TEST(new_of_a_void_pointer_allocates_a_slot, {
+    TEST_ASSERT_TRUE(check_body("    void* mut* own p = new(void*);\n"
+                                "    void* mut@ own s = new(void*, 4);\n"
+                                "    println(s.len);\n    del(p);\n    del(s);"));
+    // `new(void*)` is legal, one pointer slot; `void` carries no marker of its
+    // own, so the allocated levels are the ones the suffixes introduce (D3.11,
+    // D17.3).
+    TEST_ASSERT_EQ_STR(init_type("p"), "void* mut* own");
+    TEST_ASSERT_EQ_STR(init_type("s"), "void* mut@ own");
+})
+
+TEST(new_of_void_is_refused, {
+    // It is `new(void)` that D10.2 rejects, `void` having no size.
+    TEST_ASSERT_FALSE(check_body("    void* own p = new(void);\n    del(p);"));
+    TEST_ASSERT_TRUE(said("'new' needs a sized type, not void"));
+})
+
 TEST(del_needs_an_owning_operand, {
     TEST_ASSERT_FALSE(check_body("    string s = \"a\";\n    del(s);"));
     TEST_ASSERT_TRUE(said("'del' needs an owning operand, not string"));
@@ -500,6 +517,8 @@ int main(int argc, char** argv) {
     TEST_RUN(new_yields_an_owning_pointer_or_span);
     TEST_RUN(new_allocates_writable_storage_at_every_level);
     TEST_RUN(new_of_an_own_element_owns_each_slot);
+    TEST_RUN(new_of_a_void_pointer_allocates_a_slot);
+    TEST_RUN(new_of_void_is_refused);
     TEST_RUN(del_needs_an_owning_operand);
     TEST_RUN(del_of_null_is_allowed);
     TEST_RUN(move_needs_an_owning_lvalue);

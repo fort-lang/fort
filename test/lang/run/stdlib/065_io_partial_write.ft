@@ -1,0 +1,46 @@
+//! run
+//! link: ffi/std_io_fds.c
+//! stdout:
+//| 4096 true
+//| false
+//| true 4096
+import std::io;
+import std::str;
+import std::strbuf;
+
+// write_all loops over partial writes (stdlib.md 2.4), so it must count the
+// bytes each write(2) reports rather than assume the whole buffer went. The
+// helper caps the file's size, which makes the first write transfer what is
+// left and the next one fail: a write_all that trusted the request would stop
+// after the short write and report success, while this one reports the failure
+// and leaves exactly the bytes the descriptor took.
+extern fn i64 std_io_write_cap();
+extern fn i32 std_io_capped_file(char* path);
+
+fn i32 main() {
+    strbuf.str_buf mut text = strbuf.with_cap(6000);
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < 6000) {
+        strbuf.push_byte(&text, cast(cast('0', u64) + i % 10, u8));
+        i += 1;
+    }
+
+    char mut@ own path = str.to_cstr("t028-capped.txt");
+    defer del(path);
+    i32 fd = std_io_capped_file(path.ptr);
+    println(std_io_write_cap(), " ", fd >= 0);
+
+    // Six thousand bytes into a file that may hold four thousand and ninety
+    // six: the first write takes the room that is left, the second fails.
+    println(io.write_all(fd, strbuf.bytes(&text)));
+    io.close(fd);
+
+    // What reached the file is exactly the prefix the short write reported,
+    // in order, and not one byte more.
+    strbuf.str_buf mut back = strbuf.create();
+    defer strbuf.free(&back);
+    bool read_ok = io.read_file("t028-capped.txt", &back);
+    println(read_ok && strbuf.view(&back) == strbuf.view(&text)[..4096], " ", back.len);
+    return 0;
+}

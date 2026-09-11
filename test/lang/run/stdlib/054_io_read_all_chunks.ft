@@ -1,0 +1,44 @@
+//! run
+//! stdout:
+//| true 10000
+//| true 10000 10000 true
+//| true 20000 10000 true
+//| 0 9999 4096 8192
+import std::io;
+import std::strbuf;
+
+// read_all asks the buffer for spare room and reads into it in place, so a
+// file larger than one chunk takes several reads and several growths
+// (stdlib.md 2.4). Every byte must survive those growths, in order, and a
+// second read must add its bytes after the first lot.
+fn i32 main() {
+    // A pattern that says where in the file each byte came from: position
+    // modulo ten as a digit.
+    strbuf.str_buf mut source = strbuf.with_cap(10000);
+    defer strbuf.free(&source);
+    u64 mut i = 0;
+    while (i < 10000) {
+        strbuf.push_byte(&source, cast(cast('0', u64) + i % 10, u8));
+        i += 1;
+    }
+    println(io.write_file("t028-big.txt", strbuf.bytes(&source)), " ", source.len);
+
+    strbuf.str_buf mut buf = strbuf.create();
+    defer strbuf.free(&buf);
+    bool first = io.read_file("t028-big.txt", &buf);
+    println(first, " ", buf.len, " ", buf.len, " ",
+            strbuf.view(&buf) == strbuf.view(&source));
+
+    // Reading the same file again appends: the buffer holds the file twice.
+    bool second = io.read_file("t028-big.txt", &buf);
+    println(second, " ", buf.len, " ", buf.len - 10000, " ",
+            strbuf.view(&buf)[10000..] == strbuf.view(&source));
+
+    // Spot checks at the chunk boundaries the reads crossed, where a wrong
+    // spare-room span would have left a hole.
+    string text = strbuf.view(&buf);
+    println(cast(text[0], u64) - cast('0', u64), " ", cast(text[9999], u64) - cast('0', u64) + 9990,
+            " ", cast(text[4096], u64) - cast('0', u64) + 4090, " ",
+            cast(text[8192], u64) - cast('0', u64) + 8190);
+    return 0;
+}

@@ -1,0 +1,45 @@
+//! run
+//! stdout:
+//| 5 16 hello
+//| 0 16 
+//| 5 hello
+//| 5 hello
+//| 3 16 new
+//| 0 0 true
+//| 5 hello
+import std::strbuf;
+
+// take hands out an exact-size heap copy and leaves the buffer empty with its
+// storage (stdlib.md 2.6). The copy is independent of the buffer, which is
+// what lets the buffer be refilled at once, and an empty buffer still yields
+// an allocation rather than nothing (D10.2).
+fn i32 main() {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "hello");
+    println(b.len, " ", b.data.len, " ", strbuf.view(&b));
+
+    string own taken = strbuf.take(&b);
+    defer del(taken);
+    // The buffer is empty afterwards and keeps the capacity it had.
+    println(b.len, " ", b.data.len, " ", strbuf.view(&b));
+    // The copy has exactly the length of the text, not the capacity.
+    println(taken.len, " ", taken);
+
+    // Refilling the buffer does not touch the copy: the two hold different
+    // storage, which is the whole point of the copy.
+    strbuf.append(&b, "new");
+    println(taken.len, " ", taken);
+    println(b.len, " ", b.data.len, " ", strbuf.view(&b));
+
+    // take of an empty buffer yields a zero-length, non-null allocation.
+    strbuf.str_buf mut empty = strbuf.create();
+    defer strbuf.free(&empty);
+    string own nothing = strbuf.take(&empty);
+    defer del(nothing);
+    println(nothing.len, " ", empty.len, " ", nothing.ptr != null);
+
+    // And the first copy is still what it was after all of that.
+    println(taken.len, " ", taken);
+    return 0;
+}
