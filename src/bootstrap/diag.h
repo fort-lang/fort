@@ -5,6 +5,11 @@
 // `<file>:<line>:<col>: note: <message>`; errors are counted and notes are
 // not. For tests, diag_capture redirects the lines into a buffer.
 //
+// Every diagnostic is also kept as a record, with its whole range and a copy
+// of its message, so that a structured form can be written after the
+// compilation as well as the text form during it (diag_write_json); a mode
+// that wants only the structured form turns the text off with diag_set_text.
+//
 // Messages are assembled with the msg_* functions into a caller-owned sb_t
 // (str.h) so that the compiler never formats with printf: begin, append
 // pieces, end, and pass the result to diag_error or diag_note.
@@ -17,6 +22,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "json.h"
 #include "str.h"
 
 // A range in a source file: 1-based lines and byte columns, a tab counting as
@@ -52,6 +58,20 @@ bool loc_ends_at_or_before(loc_t a, loc_t b);
 // Whether `loc` ends at or after it starts, which every range does (D20.4).
 bool loc_is_ordered(loc_t loc);
 
+// What a diagnostic says about itself: an error, or a note that belongs to
+// the error before it (D14.2).
+typedef enum { DIAG_ERROR, DIAG_NOTE } diag_severity_t;
+
+// One reported diagnostic, handed out by value: the sink's own array moves
+// when it grows, while `msg` is a copy owned by the sink's pool, stable until
+// diag_reset, and NUL-terminated like every pooled string, so `msg.ptr` is
+// also a C string.
+typedef struct {
+    loc_t loc;
+    diag_severity_t severity;
+    str_t msg;
+} diag_record_t;
+
 // Writes `<file>:<line>:<col>: error: <msg>` and counts one error.
 void diag_error(loc_t loc, const char* msg);
 
@@ -61,12 +81,13 @@ void diag_note(loc_t loc, const char* msg);
 // The number of errors reported since the start or the last diag_reset.
 uint64_t diag_count(void);
 
-// Sets the error count to 0.
+// Sets the error count to 0 and drops every record: the records and the
+// messages read before it are gone.
 void diag_reset(void);
 
-// Sends every following diagnostic line to `sink` instead of stderr; NULL
-// restores stderr. The sink is borrowed until then.
-void diag_capture(sb_t* sink);
+// Sends every following diagnostic line to `buffer` instead of stderr; NULL
+// restores stderr. The buffer is borrowed until then.
+void diag_capture(sb_t* buffer);
 
 // Drops the line of every diagnostic reported until diag_unmute, which
 // restores the error count diag_mute saw and returns how many errors were
@@ -75,6 +96,21 @@ void diag_capture(sb_t* sink);
 // nest, and only the outermost one restores the count.
 void diag_mute(void);
 uint64_t diag_unmute(void);
+
+// Whether each diagnostic writes its text line as it arrives; on until turned
+// off, so a mode that wants only the structured form (diag_write_json) writes
+// no text. Records are kept either way. A mode, not state: diag_reset leaves
+// it alone.
+void diag_set_text(bool on);
+
+// The diagnostics recorded since the start or the last diag_reset, in the
+// order they were reported. `i` past the end is an internal error.
+uint64_t diag_record_count(void);
+diag_record_t diag_record_at(uint64_t i);
+
+// Writes the records as a JSON array of diagnostics, each note nested under
+// the error it follows (D14.2), through `j`.
+void diag_write_json(json_t* j);
 
 // ---- message builder ---------------------------------------------------------------
 

@@ -563,6 +563,10 @@ int driver_front_end(const driver_options_t* opts,
         return FORT_EXIT_USAGE;
     }
     (void)fclose(entry);
+    // Each run starts from an empty sink; the records of this one outlive it
+    // on purpose, so that a caller can write them after the front end returns
+    // (D14.2's diagnostics are the run's result, not only its output), and
+    // the next diag_reset releases them.
     diag_reset();
     module_set_t set;
     module_set_init(&set);
