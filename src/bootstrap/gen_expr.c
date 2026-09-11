@@ -530,8 +530,7 @@ static gen_val_t gen_divide(
     if (sign) {
         // `MIN / -1` and `MIN % -1` are runtime errors at every width (D6.13).
         const gen_val_t minus_one = gen_const_signed(g, a.ty, -1);
-        const uint64_t min = (uint64_t)1 << (bits - 1);
-        const gen_val_t smallest = gen_const_signed(g, a.ty, -(int64_t)min);
+        const gen_val_t smallest = gen_const_min(g, a.ty, bits);
         const gen_val_t is_minus_one = gen_icmp(g, "eq", b, minus_one);
         const gen_val_t is_min = gen_icmp(g, "eq", a, smallest);
         bad = gen_binary(g, "and", is_minus_one, is_min);

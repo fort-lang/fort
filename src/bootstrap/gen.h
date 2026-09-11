@@ -283,6 +283,12 @@ gen_val_t gen_literal(gen_t* g, str_t ty, const char* text);
 gen_val_t gen_const_signed(gen_t* g, str_t ty, int64_t v);
 gen_val_t gen_const_unsigned(gen_t* g, str_t ty, uint64_t v);
 
+// The smallest value of a signed type of `bits` bits, printed as a signed
+// decimal: the operand the division check of item 15 compares against. It is
+// built from the bit pattern, since negating the magnitude of `i64` MIN
+// overflows the type that would hold it.
+gen_val_t gen_const_min(gen_t* g, str_t ty, uint32_t bits);
+
 // The value of a folded constant of type `t` (CHECK_ANN_CONST): an integer,
 // `bool`, `char`, `null` or an enum member. A string constant is not a scalar
 // and has no value form.

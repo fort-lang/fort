@@ -28,6 +28,9 @@ static const char ENUM_MEMBER_TYPE[] = "%fort.enum_member";
 // length (D3.5).
 enum { SPAN_SIZE = 16, SPAN_ALIGN = 8 };
 
+// The width of the widest integer the emitter prints a constant of.
+enum { BITS_PER_U64 = 64 };
+
 // The header fields of a span, in the order item 17 gives them.
 enum { SPAN_FIELD_PTR = 0, SPAN_FIELD_LEN = 1 };
 
@@ -404,20 +407,37 @@ gen_val_t gen_const_unsigned(gen_t* g, str_t ty, uint64_t v) {
     return out;
 }
 
+// A negative constant from its magnitude, so that a value whose magnitude is
+// 2^63 (`i64` MIN) never has to be negated in a signed type (D19.5).
+static gen_val_t const_negative(gen_t* g, str_t ty, uint64_t magnitude) {
+    sb_clear(&g->scratch);
+    sb_push(&g->scratch, '-');
+    sb_append_u64(&g->scratch, magnitude);
+    gen_val_t out;
+    out.ty = ty;
+    out.val = gen_take(g);
+    return out;
+}
+
 // The low `bits` of `x` as the fort type reads them: sign-extended for a
-// signed type, zero-extended otherwise (D19.5).
+// signed type, zero-extended otherwise (D19.5). The magnitude of a negative
+// value is the two's complement of the pattern, computed in unsigned
+// arithmetic so that every width behaves alike.
 static gen_val_t const_bits(gen_t* g, str_t ty, uint64_t x, uint32_t bits, bool sign) {
-    if (bits >= 64) {
-        return sign ? gen_const_signed(g, ty, (int64_t)x) : gen_const_unsigned(g, ty, x);
-    }
-    const uint64_t mask = ((uint64_t)1 << bits) - 1U;
+    const uint32_t width = bits == 0 || bits > BITS_PER_U64 ? BITS_PER_U64 : bits;
+    const uint64_t mask = width == BITS_PER_U64 ? UINT64_MAX : ((uint64_t)1 << width) - 1U;
     const uint64_t low = x & mask;
-    if (sign && (low & ((uint64_t)1 << (bits - 1))) != 0) {
+    if (sign && (low & ((uint64_t)1 << (width - 1))) != 0) {
         // A negative value of a signed type prints as `i8 -1` (D19.5).
-        const uint64_t magnitude = (~low & mask) + 1U;
-        return gen_const_signed(g, ty, -(int64_t)magnitude);
+        return const_negative(g, ty, (~low & mask) + 1U);
     }
     return gen_const_unsigned(g, ty, low);
+}
+
+gen_val_t gen_const_min(gen_t* g, str_t ty, uint32_t bits) {
+    // The pattern with the sign bit alone set, read as the signed type says
+    // (D19.5): `i8` MIN is -128 and `i64` MIN -9223372036854775808.
+    return const_bits(g, ty, (uint64_t)1 << (bits - 1), bits, true);
 }
 
 gen_val_t gen_const_value(gen_t* g, const type_t* t, cval_t v) {
