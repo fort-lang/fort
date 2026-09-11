@@ -10,7 +10,9 @@ XPASS and fails the run); `bootstrap-unsupported.txt` lists the tests that use
 features the C bootstrap deliberately lacks, which must be rejected with the
 bootstrap diagnostic. `--lint` validates the directives without a compiler and
 `--verify-ir` runs the LLVM verifier over the module of every test that
-compiles.
+compiles. `--check-json` is a mode of its own: it runs `fort --check --json`
+over every fail test and holds the document of D20.2 against the text form of
+D14.2 instead of judging the test.
 
 Standard library only; Python 3.12.
 """
@@ -18,6 +20,7 @@ Standard library only; Python 3.12.
 import argparse
 import concurrent.futures
 import dataclasses
+import json
 import os
 import re
 import resource
@@ -62,9 +65,47 @@ QEMU_NOTICE_PREFIX = b"qemu: uncaught target signal"
 MAX_EXIT = 255
 VERDICTS = ("PASS", "FAIL", "XFAIL", "XPASS", "ERROR")
 
+# The document of `fort --check --json` (D20.2): its keys, the keys of a
+# diagnostic and of a note, and the version this harness reads.
+DOCUMENT_KEYS = ("version", "files", "diagnostics", "symbols")
+DIAGNOSTIC_KEYS = ("file", "line", "col", "end_line", "end_col", "severity", "message", "notes")
+NOTE_KEYS = ("file", "line", "col", "end_line", "end_col", "message")
+DOCUMENT_VERSION = 1
+
 DIRECTIVE_RE = re.compile(r"^//! ([a-z][a-z-]*)(:(.*))?$")
 ANNOTATION_RE = re.compile(r"^(.*?\S)\s*//! error:(.*)$")
 DIAGNOSTIC_RE = re.compile(r"^(.+):(\d+):(\d+): error: (.*)$")
+REPORT_RE = re.compile(r"^(.+):(\d+):(\d+): (error|note): (.*)$")
+
+# The lexer reports a position rather than a range, since the bytes it
+# rejected are not a token (D14.2, D20.4), so its diagnostics are the ones
+# whose range may be empty. These are the messages of `fail` and `fail_text`
+# in src/bootstrap/lexer.c, by the part of each that never varies; a lexer
+# message that is not here fails the range check of a fail test, which is the
+# reminder to add it or to give the diagnostic a range.
+LEXICAL_MESSAGES = (
+    "block comments are not supported",
+    "'_' must stand between two digits",
+    "is a reserved word",
+    "decimal literal may not start with '0'",
+    "float literals have no suffix",
+    "is not a float literal",
+    "integer literal too large",
+    "integer literals have no suffix",
+    "invalid digit ",
+    "literal needs at least one digit",
+    "unknown escape ",
+    "'\\' followed by byte ",
+    "'\\x' needs exactly two hex digits",
+    "unterminated char literal",
+    "char literal holds exactly one character",
+    "non-ASCII byte in char literal",
+    "control character in char literal",
+    "unterminated string literal",
+    "non-ASCII byte outside a string literal or comment",
+    "unexpected character ",
+    "unexpected byte ",
+)
 NUMBERED_RE = re.compile(r"^(\d{3})_([a-z0-9_]+)$")
 NAME_RE = re.compile(r"^[a-z0-9_]+$")
 
@@ -116,10 +157,17 @@ class Proc:
 
 @dataclasses.dataclass
 class Diagnostic:
+    """One `error:` or `note:` line of D14.2, or one record of a document."""
+
     file: str
     line: int
     column: int
     message: str
+    severity: str = "error"
+
+    def text(self):
+        """The line D14.2 prints for it."""
+        return "%s:%d:%d: %s: %s" % (self.file, self.line, self.column, self.severity, self.message)
 
 
 @dataclasses.dataclass
@@ -436,6 +484,28 @@ def parse_diagnostics(stderr, root):
     return diagnostics
 
 
+def parse_reports(stderr, root):
+    """Every `error:` and `note:` line of a compiler's stderr, in order (D14.2).
+
+    A note belongs to the error before it, which is what the document nests
+    (D20.2), so the two forms are compared as one sequence.
+    """
+    reports = []
+    for raw in stderr.decode("utf-8", errors="replace").split("\n"):
+        match = REPORT_RE.match(raw)
+        if match:
+            reports.append(
+                Diagnostic(
+                    _normalize_file(match.group(1), root),
+                    int(match.group(2)),
+                    int(match.group(3)),
+                    match.group(5),
+                    match.group(4),
+                )
+            )
+    return reports
+
+
 def _normalize_file(file, root):
     """Diagnostic paths are relative to the corpus root (D14.4); absolute ones are mapped back."""
     path = Path(file)
@@ -597,6 +667,240 @@ def judge_unsupported(compile_proc, root=ROOT):
     return "PASS", ""
 
 
+# ---- the check document (D20.2) -------------------------------------------------------
+
+
+def source_lines(root, file, cache):
+    """The lines of a file of the closure as byte strings, or None.
+
+    Columns are byte columns (D14.2), so the file is read as bytes; a file
+    ending in a newline yields a last, empty line, which is where the end of
+    the file is.
+    """
+    if file not in cache:
+        try:
+            cache[file] = (root / file).read_bytes().split(b"\n")
+        except OSError:
+            cache[file] = None
+    return cache[file]
+
+
+def empty_range_is_allowed(record, lines):
+    """Whether an empty range is a position the compiler has no extent for.
+
+    Three are: the 1:1 of an error without a position in the file (D14.2), the
+    end of the file, where the token has no bytes, and a lexical error, whose
+    message says so, since the lexer reports the position of bytes that are
+    not a token (D14.2, D20.4). Every other diagnostic covers the tokens it is
+    about, so its range is non-empty.
+    """
+    if (record["line"], record["col"]) == (1, 1):
+        return True
+    if record["line"] == len(lines) and record["col"] == len(lines[-1]) + 1:
+        return True
+    return any(text in record["message"] for text in LEXICAL_MESSAGES)
+
+
+def range_problems(where, record, lines):
+    """The problems of one range of D20.4: ordered, inside its file, non-empty.
+
+    The start is inclusive and the end exclusive, so a column one past the last
+    byte of its line is in range.
+    """
+    problems = []
+    start = (record["line"], record["col"])
+    end = (record["end_line"], record["end_col"])
+    if end < start:
+        problems.append("%s: range %d:%d-%d:%d ends before it starts" % ((where,) + start + end))
+    for what, (line, col) in (("start", start), ("end", end)):
+        if line < 1 or line > len(lines):
+            problems.append("%s: %s line %d is outside the file" % (where, what, line))
+        elif col < 1 or col > len(lines[line - 1]) + 1:
+            problems.append("%s: %s column %d is outside line %d" % (where, what, col, line))
+    if not problems and start == end and not empty_range_is_allowed(record, lines):
+        problems.append("%s: empty range at %d:%d" % ((where,) + start))
+    return problems
+
+
+def _keys_problem(where, record, keys):
+    if sorted(record) != sorted(keys):
+        return ["%s: keys are %s, expected %s" % (where, sorted(record), sorted(keys))]
+    return []
+
+
+def _record_problems(where, record, keys, root, files, cache):
+    """The shape and the range of one diagnostic or note (D20.2, D20.4)."""
+    problems = _keys_problem(where, record, keys)
+    if problems:
+        return problems
+    file = _normalize_file(record["file"], root)
+    if file not in files:
+        problems.append("%s: '%s' is not in \"files\"" % (where, file))
+    lines = source_lines(root, file, cache)
+    if lines is None:
+        problems.append("%s: '%s' cannot be read" % (where, file))
+    else:
+        problems.extend(range_problems(where, record, lines))
+    return problems
+
+
+def document_problems(doc, root, cache):
+    """The problems of one document of D20.2: its shape, its files and its ranges."""
+    if not isinstance(doc, dict):
+        return ["the document is not an object"]
+    problems = _keys_problem("document", doc, DOCUMENT_KEYS)
+    if problems:
+        return problems
+    if doc["version"] != DOCUMENT_VERSION:
+        problems.append("version is %r, expected %d" % (doc["version"], DOCUMENT_VERSION))
+    if doc["symbols"] != []:
+        problems.append("symbols is not empty: %r" % (doc["symbols"],))
+    files = [_normalize_file(f, root) for f in doc["files"]]
+    for file in files:
+        if source_lines(root, file, cache) is None:
+            problems.append("files: '%s' cannot be read" % file)
+    after_error = False
+    for i, diagnostic in enumerate(doc["diagnostics"]):
+        where = "diagnostics[%d]" % i
+        found = _record_problems(where, diagnostic, DIAGNOSTIC_KEYS, root, files, cache)
+        problems.extend(found)
+        if found:
+            continue
+        if diagnostic["severity"] not in ("error", "note"):
+            problems.append("%s: severity is %r" % (where, diagnostic["severity"]))
+        if diagnostic["severity"] == "note" and after_error:
+            # A note belongs to the error before it and is nested in its
+            # "notes", never listed beside it (D20.2, D14.2).
+            problems.append('%s: a note after an error must be nested in its "notes"' % where)
+        after_error = after_error or diagnostic["severity"] == "error"
+        for j, note in enumerate(diagnostic["notes"]):
+            problems.extend(
+                _record_problems("%s.notes[%d]" % (where, j), note, NOTE_KEYS, root, files, cache)
+            )
+    return problems
+
+
+def _report_of(record, root, severity):
+    return Diagnostic(
+        _normalize_file(record["file"], root),
+        record["line"],
+        record["col"],
+        record["message"],
+        severity,
+    )
+
+
+def document_reports(doc, root):
+    """The document's records in the order the text form prints them (D20.2).
+
+    Each diagnostic comes first and the notes nested in it follow, which is
+    where the text form of D14.2 puts them.
+    """
+    reports = []
+    for diagnostic in doc["diagnostics"]:
+        reports.append(_report_of(diagnostic, root, diagnostic["severity"]))
+        for note in diagnostic["notes"]:
+            reports.append(_report_of(note, root, "note"))
+    return reports
+
+
+def sequence_problems(from_text, from_json):
+    """Where the document and the text form differ, as sequences (D20.2).
+
+    The document lists its diagnostics in the order they were reported, which
+    is the order of the text form, so a reordered or a duplicated record is a
+    difference and not just a missing one.
+    """
+    problems = []
+    for i, (text, document) in enumerate(zip(from_text, from_json)):
+        if text != document:
+            problems.append(
+                "report %d is '%s' in the text form and '%s' in the document"
+                % (i + 1, text.text(), document.text())
+            )
+            return problems
+    for text in from_text[len(from_json) :]:
+        problems.append("only in the text form: %s" % text.text())
+    for document in from_json[len(from_text) :]:
+        problems.append("only in the document: %s" % document.text())
+    return problems
+
+
+def _answer_problem(proc, label):
+    """(verdict, reason) when `proc` is not an answer of D14.1: exit 0 or 1."""
+    if proc.timed_out:
+        return "ERROR", "%s: compiler timed out" % label
+    if not proc.started:
+        return "ERROR", "%s: compiler failed to start: %s" % (label, _first_line(proc.stderr))
+    if proc.returncode < 0:
+        return "ERROR", "%s: compiler killed by signal %d" % (label, -proc.returncode)
+    if proc.returncode > 1:
+        detail = _first_line(proc.stderr)
+        return "ERROR", "%s: compiler exited %d%s" % (
+            label,
+            proc.returncode,
+            ": " + detail if detail else "",
+        )
+    return None, ""
+
+
+def files_problems(test, files):
+    """What `"files"` must hold whatever the run reported (D20.2).
+
+    It lists every file the compiler read, so the entry file is always among
+    them; every other file a diagnostic is about is checked with that
+    diagnostic. A module of the test that the walk never reached is
+    legitimately absent: an import rejected before its file is opened, as in
+    `fail/modules/003_late_import`, leaves the sibling unread.
+    """
+    if test.entry in files:
+        return []
+    return ["files: the entry '%s' is missing" % test.entry]
+
+
+def judge_check_json(test, text_proc, json_proc, root=ROOT):
+    """Judge one test's `--check --json` run against its own text form.
+
+    The document must be the only thing on stdout and have the shape of D20.2,
+    every range of D20.4 must lie inside its file, `"files"` must name the
+    entry and every file a diagnostic is about, and the two
+    runs must agree on the exit status and, record for record and in order, on
+    the errors and notes the text form of D14.2 prints. A run that exits 2 is
+    not an answer (D14.1) and must leave stdout empty, which is how a client
+    tells a crash from a verdict (D20.2).
+    """
+    document_verdict, document_reason = _answer_problem(json_proc, "--json")
+    if document_verdict and json_proc.stdout:
+        # Exit 2 with a document on stdout is the one contract a client cannot
+        # work around, so it is a failure and not an error (D20.2).
+        return "FAIL", "stdout is not empty after %s" % _describe_status(json_proc.returncode)
+    for proc, label in ((text_proc, "text"), (json_proc, "--json")):
+        verdict, reason = _answer_problem(proc, label)
+        if verdict:
+            return verdict, reason
+    problems = []
+    if json_proc.returncode != text_proc.returncode:
+        problems.append(
+            "--json exited %d, the text form %d" % (json_proc.returncode, text_proc.returncode)
+        )
+    if json_proc.stderr.strip():
+        problems.append("--json wrote to stderr: " + _first_line(json_proc.stderr))
+    try:
+        doc = json.loads(json_proc.stdout.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as e:
+        return "FAIL", "; ".join(problems + ["stdout is not one JSON document: %s" % e])
+    problems.extend(document_problems(doc, root, {}))
+    if problems:
+        return "FAIL", "; ".join(problems)
+    problems.extend(files_problems(test, [_normalize_file(f, root) for f in doc["files"]]))
+    problems.extend(
+        sequence_problems(parse_reports(text_proc.stderr, root), document_reports(doc, root))
+    )
+    if problems:
+        return "FAIL", "; ".join(problems)
+    return "PASS", ""
+
+
 def apply_expectations(verdict, reason, xfail):
     """Map a verdict through xfail.txt: a listed failure is expected, a listed pass is not.
 
@@ -622,6 +926,7 @@ class Config:
     target: str = DEFAULT_TARGET
     opt: str = DEFAULT_OPT
     verify_ir: bool = False
+    check_json: bool = False
     runner: list = dataclasses.field(default_factory=list)
     timeout: float = DEFAULT_TIMEOUT
     keep: bool = False
@@ -681,6 +986,21 @@ def compile_command(config, test, output, compile_only=False, emit_ir=False):
     return argv
 
 
+def check_command(config, test, as_json):
+    """`fort --check [--json] <flags> <entry>`: the front end alone (D20.1).
+
+    `-o`, `-c`, `-S` and `--cc` are unused under `--check`, so the command
+    carries neither an output nor a compiler; `--json` turns the text
+    diagnostics into the one document of D20.2 on stdout.
+    """
+    argv = [config.fort, "--check", "--std-dir", config.std_dir]
+    if as_json:
+        argv.append("--json")
+    argv.extend(test.flags)
+    argv.append(test.entry)
+    return argv
+
+
 def link_command(config, test, prog, obj):
     """`<cc> --target=<triple> -o prog prog.o <link: files> fort_rt.o` for a test with helpers.
 
@@ -728,12 +1048,37 @@ def verify_module(config, test, workdir, env, procs):
     return None, ""
 
 
+def execute_check_json(config, test):
+    """Run one test twice under `--check`, once with `--json`, and compare.
+
+    The two runs are the same mode with one option between them, so what they
+    report must be the same; `judge_check_json` says how (D20.1, D20.2).
+    """
+    if test.problems:
+        return Result(test, "ERROR", "invalid directives: " + test.problems[0])
+    workdir = tempfile.mkdtemp(prefix="fort-check-json-")
+    env = child_env(workdir)
+    procs = []
+    try:
+        text = run_process(check_command(config, test, False), config.root, env, config.timeout)
+        procs.append(text)
+        document = run_process(check_command(config, test, True), config.root, env, config.timeout)
+        procs.append(document)
+        verdict, reason = judge_check_json(test, text, document, config.root)
+        return Result(test, verdict, reason, procs, workdir)
+    finally:
+        if not config.keep:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+
 def execute(config, test, unsupported):
     """Compile, link and run one test in a fresh temporary directory; return its Result.
 
     The compiler runs with the corpus root as working directory (D14.4) and
     `TMPDIR` pointed at the temporary directory; the program runs inside it.
     """
+    if config.check_json:
+        return execute_check_json(config, test)
     if test.problems:
         return Result(test, "ERROR", "invalid directives: " + test.problems[0])
     workdir = tempfile.mkdtemp(prefix="fort-lang-")
@@ -828,6 +1173,11 @@ def parse_args(argv):
         action="store_true",
         help="also emit each compiling test's IR with -S and verify it with opt",
     )
+    parser.add_argument(
+        "--check-json",
+        action="store_true",
+        help="instead of running the tests, hold `fort --check --json` against the text form",
+    )
     parser.add_argument("--opt", default=DEFAULT_OPT, help="LLVM opt (default: %(default)s)")
     parser.add_argument(
         "--runner", default="", help="command that runs the programs, e.g. qemu-x86_64"
@@ -896,6 +1246,10 @@ def main(argv=None):
     root = Path(args.root).resolve()
     tests, problems, xfail, unsupported = load_corpus(root, args)
     selected = select(tests, args.filters)
+    if args.check_json:
+        # The document is compared on the tests that have diagnostics to
+        # compare: every fail test of the corpus (D20.2).
+        selected = [t for t in selected if t.kind == "fail"]
     if args.list:
         for test in selected:
             print(test.path)
@@ -910,7 +1264,10 @@ def main(argv=None):
         print("run_tests.py: %d tests, no problems" % len(tests))
         return 0
     if not selected:
-        print("run_tests.py: error: no test matches %s" % " ".join(args.filters))
+        if args.check_json:
+            print("run_tests.py: error: no fail test matches %s" % " ".join(args.filters))
+        else:
+            print("run_tests.py: error: no test matches %s" % " ".join(args.filters))
         return 1
     if not (os.path.isfile(args.fort) and os.access(args.fort, os.X_OK)):
         sys.exit("run_tests.py: error: compiler not found: %s" % args.fort)
@@ -924,6 +1281,7 @@ def main(argv=None):
         target=args.target,
         opt=args.opt,
         verify_ir=args.verify_ir,
+        check_json=args.check_json,
         runner=args.runner.split(),
         timeout=args.timeout,
         keep=args.keep,
@@ -937,9 +1295,13 @@ def main(argv=None):
         ]
         for test, future in zip(selected, futures):
             result = future.result()
-            result.verdict, result.reason = apply_expectations(
-                result.verdict, result.reason, listed(test, xfail)
-            )
+            if not args.check_json:
+                # The cross-check is about the two forms of one run, not about
+                # whether the compiler can pass the test yet, so xfail.txt does
+                # not apply to it.
+                result.verdict, result.reason = apply_expectations(
+                    result.verdict, result.reason, listed(test, xfail)
+                )
             counts[result.verdict] += 1
             print(result.line())
             if (config.verbose and result.verdict != "PASS") or (config.keep and result.workdir):

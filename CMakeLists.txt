@@ -184,8 +184,9 @@ endif()
 
 # The language tests (toolchain.md 7, D14.4, D14.5): test/lang/run_tests.py
 # drives the compiler over test/lang. The ctest `lang` (label lang) and the
-# check-lang target run the same command; `lang_lint` validates the directives
-# and `lang_selftest` runs the harness's own unit tests (both label unit).
+# check-lang target run the same command, and `lang_check_json` the cross-check
+# of the check mode (D20.2); `lang_lint` validates the directives and
+# `lang_selftest` runs the harness's own unit tests (both label unit).
 find_program(FORT_PYTHON3 NAMES python3 REQUIRED)
 set(FORT_LANG_DIR "${FORT_TEST_DIR}/lang")
 
@@ -209,6 +210,13 @@ set(FORT_LANG_COMMAND
 )
 add_test(NAME lang COMMAND ${FORT_LANG_COMMAND})
 set_tests_properties(lang PROPERTIES
+    LABELS lang
+    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
+
+# The check mode over the same corpus: `fort --check --json` on every fail
+# test, held against the text form of D14.2 (D20.1, D20.2).
+add_test(NAME lang_check_json COMMAND ${FORT_LANG_COMMAND} --check-json)
+set_tests_properties(lang_check_json PROPERTIES
     LABELS lang
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
 add_test(NAME lang_lint COMMAND "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}" --lint)
@@ -251,6 +259,7 @@ set_tests_properties(highlight_selftest PROPERTIES
 
 add_custom_target(check-lang
     COMMAND ${FORT_LANG_COMMAND}
+    COMMAND ${FORT_LANG_COMMAND} --check-json
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Running the language tests"
     USES_TERMINAL

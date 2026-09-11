@@ -103,7 +103,10 @@ A safe(r) C-like systems programming language.
   bootstrap deliberately lacks (floats, multi-dimensional arrays, do-while, `?:`; function
   pointers are in its subset, D3.10); keep such features out of core tests, or split them into
   their own test, so the core tests exercise stage1. `run_tests.py --lint` validates directives
-  without a compiler and runs before every test run. A compiler exit status other than 0 or 1 is
+  without a compiler and runs before every test run; `run_tests.py --check-json` is a mode of its
+  own (ctest `lang_check_json`, also run by check-lang) that holds the document of `fort --check
+  --json` against the text form on every fail test and ignores `xfail.txt`, since it judges the
+  two forms of one run rather than the test. A compiler exit status other than 0 or 1 is
   an `ERROR`, which `xfail.txt` still covers. The harness and its unit tests are Python 3.12,
   standard library only, wrapped at 100 columns (the host's `ruff format --line-length 100` is
   the reference); `run_tests_test.py` scripts a fake `fort` with `//@` lines, extend it rather

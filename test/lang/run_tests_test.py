@@ -10,6 +10,7 @@ rejects a module containing the word `invalid`. Run with
 
 import contextlib
 import io
+import json
 import os
 import shutil
 import signal
@@ -33,8 +34,21 @@ FAKE_FORT = r'''#!/usr/bin/env python3
 //@ ir-exit N       exit with status N under -S (default 0)
 //@ flag FLAG       exit 2 unless FLAG is on the command line
 //@ hang            sleep, to exercise the timeout
+
+Under --check it writes no program; under --check --json it writes one document
+to stdout and no text diagnostic (D20.1, D20.2). The document is derived from
+the //@ stderr lines that look like diagnostics unless one of these overrides it:
+
+//@ check-exit N    exit with status N under --check (default: the `exit` status)
+//@ json-exit N     exit with status N under --check --json (default: the --check status)
+//@ json-file PATH  add PATH to the document's "files" (the entry is always there)
+//@ json TEXT       write TEXT as the document instead of the derived one
+//@ json-none       write nothing at all to stdout
+//@ json-stderr T   print T on stderr under --check --json, which must write none
 """
+import json
 import os
+import re
 import sys
 import time
 
@@ -52,13 +66,32 @@ while i < len(args):
     i += 1
 status, program = 0, ["#!/bin/sh"]
 ir_status, module = 0, ['target triple = "x86_64-unknown-linux-gnu"']
+check = "--check" in args
+as_json = check and "--json" in args
+check_status, json_status = None, None
+diagnostics, doc_lines, doc_files = [], [], []
+no_document = False
 with open(entry) as f:
     for line in f:
         line = line.rstrip("\n")
         if line.startswith("//@ exit "):
             status = int(line[9:])
+        elif line.startswith("//@ check-exit "):
+            check_status = int(line[15:])
+        elif line.startswith("//@ json-exit "):
+            json_status = int(line[14:])
+        elif line.startswith("//@ json-file "):
+            doc_files.append(line[14:])
+        elif line.startswith("//@ json-none"):
+            no_document = True
+        elif line.startswith("//@ json-stderr ") and as_json:
+            sys.stderr.write(line[16:] + "\n")
+        elif line.startswith("//@ json "):
+            doc_lines.append(line[9:])
         elif line.startswith("//@ stderr "):
-            sys.stderr.write(line[11:] + "\n")
+            diagnostics.append(line[11:])
+            if not as_json:
+                sys.stderr.write(line[11:] + "\n")
         elif line.startswith("//@ program "):
             program.append(line[12:])
         elif line.startswith("//@ module "):
@@ -70,6 +103,38 @@ with open(entry) as f:
             sys.exit(2)
         elif line.startswith("//@ hang"):
             time.sleep(30)
+if check:
+    if as_json and not no_document:
+        if doc_lines:
+            sys.stdout.write("\n".join(doc_lines) + "\n")
+        else:
+            records = []
+            for text in diagnostics:
+                m = re.match(r"^(.+):(\d+):(\d+): error: (.*)$", text)
+                if m:
+                    records.append(
+                        {
+                            "file": m.group(1),
+                            "line": int(m.group(2)),
+                            "col": int(m.group(3)),
+                            "end_line": int(m.group(2)),
+                            "end_col": int(m.group(3)) + 1,
+                            "severity": "error",
+                            "message": m.group(4),
+                            "notes": [],
+                        }
+                    )
+            document = {
+                "version": 1,
+                "files": [entry] + doc_files,
+                "diagnostics": records,
+                "symbols": [],
+            }
+            sys.stdout.write(json.dumps(document, separators=(",", ":")) + "\n")
+    code = status if check_status is None else check_status
+    if as_json and json_status is not None:
+        code = json_status
+    sys.exit(code)
 if "-S" in args:
     if ir_status == 0:
         with open(out, "w") as f:
@@ -1051,6 +1116,7 @@ class EndToEnd(TempRoot):
             //! error-any: circular
             import other;
             //@ exit 1
+            //@ json-file fail/modules/001_multi/other.ft
             //@ stderr fail/modules/001_multi/main.ft:1:1: error: circular import main -> other
             //@ stderr fail/modules/001_multi/other.ft:3:12: error: undeclared 'x'
             """,
@@ -1424,6 +1490,352 @@ class EndToEnd(TempRoot):
         )
         status, lines = self.run_main("--runner", str(runner), "008_runner")
         self.assertEqual((status, lines[0]), (0, "PASS run/control/008_runner.ft"))
+
+
+# ---- the check document (D20.1, D20.2) -------------------------------------------------
+
+
+class CheckJson(EndToEnd):
+    """`--check-json`: the document of `fort --check --json` against the text form."""
+
+    def document(self, files, diagnostics, **rest):
+        """A document of D20.2, before the `//@ json` override writes it out."""
+        doc = {
+            "version": 1,
+            "files": list(files),
+            "diagnostics": list(diagnostics),
+            "symbols": [],
+        }
+        doc.update(rest)
+        return doc
+
+    def diagnostic(self, file, line, col, end_col, message, notes=()):
+        """One error of a document, a range on one line (D20.2, D20.4)."""
+        return {
+            "file": file,
+            "line": line,
+            "col": col,
+            "end_line": line,
+            "end_col": end_col,
+            "severity": "error",
+            "message": message,
+            "notes": list(notes),
+        }
+
+    def note(self, file, line, col, end_col, message):
+        return {
+            "file": file,
+            "line": line,
+            "col": col,
+            "end_line": line,
+            "end_col": end_col,
+            "message": message,
+        }
+
+    def script(self, name, directives, expected="scripted"):
+        """One fail test of the corpus whose //@ lines script both runs.
+
+        Its code line is line 3, which every scripted range points into; the
+        corpus is fresh in every test, so every test is the first of its area.
+        """
+        path = "fail/mutability/%s" % name
+        header = "//! fail\n//! error-any: %s\nfn i32 main() { return 0; }\n" % expected
+        write(self.corpus, path, header + "\n".join(directives) + "\n")
+        return path
+
+    def json_line(self, doc):
+        """The `//@ json` directive that makes the fake write `doc` verbatim."""
+        return "//@ json " + json.dumps(doc, separators=(",", ":"))
+
+    def only(self, name):
+        """Run --check-json over the one fail test `name`."""
+        return self.run_main("--check-json", name)
+
+    def test_the_corpus_documents_match_the_text_form(self):
+        self.write_corpus()
+        status, lines = self.run_main("--check-json")
+        self.assertEqual(
+            lines,
+            [
+                "PASS fail/modules/001_multi",
+                "PASS fail/mutability/001_annotated.ft",
+                "PASS fail/mutability/002_unannotated.ft",
+                "run_tests.py: 3 tests: 3 passed, 0 failed, 0 xfail, 0 xpass, 0 errors",
+            ],
+        )
+        self.assertEqual(status, 0)
+
+    def test_only_fail_tests_are_selected(self):
+        self.write_corpus()
+        status, lines = self.run_main("--check-json", "run/control")
+        self.assertEqual(status, 1)
+        self.assertEqual(lines, ["run_tests.py: error: no fail test matches run/control"])
+
+    def test_a_listed_test_is_not_expected_to_fail(self):
+        self.write_corpus()
+        xfail = write(self.root, "xpass.txt", "fail/mutability/001_annotated.ft\n")
+        # xfail.txt says the compiler cannot pass the test yet; the two forms
+        # of one run must agree anyway (D20.2).
+        status, lines = self.run_main("--check-json", "--xfail", str(xfail), "001_annotated")
+        self.assertEqual((status, lines[0]), (0, "PASS fail/mutability/001_annotated.ft"))
+
+    def test_a_diagnostic_only_in_the_text_form_fails(self):
+        path = self.script("001_missing.ft", ["//@ exit 1"], "gone")
+        directives = [
+            "//@ exit 1",
+            "//@ stderr %s:3:1: error: gone from the document" % path,
+            self.json_line(self.document([path], [])),
+        ]
+        self.script("001_missing.ft", directives, "gone")
+        status, lines = self.only("001_missing")
+        self.assertEqual(status, 1)
+        self.assertEqual(
+            lines[0],
+            "FAIL %s: only in the text form: %s:3:1: error: gone from the document" % (path, path),
+        )
+
+    def test_a_diagnostic_only_in_the_document_fails(self):
+        path = "fail/mutability/001_extra.ft"
+        doc = self.document([path], [self.diagnostic(path, 3, 1, 2, "invented")])
+        self.script("001_extra.ft", ["//@ exit 1", self.json_line(doc)], "invented")
+        status, lines = self.only("001_extra")
+        self.assertEqual(status, 1)
+        self.assertIn("only in the document: %s:3:1: error: invented" % path, lines[0])
+
+    def test_an_empty_stdout_is_not_a_document(self):
+        path = "fail/mutability/001_silent.ft"
+        directives = ["//@ exit 1", "//@ stderr %s:3:1: error: quiet" % path, "//@ json-none"]
+        self.script("001_silent.ft", directives, "quiet")
+        status, lines = self.only("001_silent")
+        self.assertEqual(status, 1)
+        self.assertIn("stdout is not one JSON document", lines[0])
+
+    def test_a_truncated_document_is_not_a_document(self):
+        self.script("001_cut.ft", ["//@ exit 1", '//@ json {"version":1,"files":["a.ft"'], "cut")
+        status, lines = self.only("001_cut")
+        self.assertEqual(status, 1)
+        self.assertIn("stdout is not one JSON document", lines[0])
+
+    def test_a_missing_key_is_reported(self):
+        path = "fail/mutability/001_shape.ft"
+        doc = self.document([path], [])
+        del doc["symbols"]
+        self.script("001_shape.ft", ["//@ exit 1", self.json_line(doc)], "shape")
+        status, lines = self.only("001_shape")
+        self.assertEqual(status, 1)
+        self.assertIn("document: keys are", lines[0])
+
+    def test_another_version_and_a_filled_index_are_reported(self):
+        path = "fail/mutability/001_version.ft"
+        doc = self.document([path], [], version=2, symbols=["x"])
+        self.script("001_version.ft", ["//@ exit 1", self.json_line(doc)], "version")
+        status, lines = self.only("001_version")
+        self.assertEqual(status, 1)
+        self.assertIn("version is 2, expected 1", lines[0])
+        self.assertIn("symbols is not empty", lines[0])
+
+    def test_a_file_missing_from_files_is_reported(self):
+        path = "fail/mutability/001_unlisted.ft"
+        doc = self.document([], [self.diagnostic(path, 3, 1, 2, "unlisted")])
+        self.script("001_unlisted.ft", ["//@ exit 1", self.json_line(doc)], "unlisted")
+        status, lines = self.only("001_unlisted")
+        self.assertEqual(status, 1)
+        self.assertIn('is not in "files"', lines[0])
+
+    def test_a_range_outside_its_line_is_reported(self):
+        path = "fail/mutability/001_outside.ft"
+        doc = self.document([path], [self.diagnostic(path, 3, 1, 400, "outside")])
+        self.script("001_outside.ft", ["//@ exit 1", self.json_line(doc)], "outside")
+        status, lines = self.only("001_outside")
+        self.assertEqual(status, 1)
+        self.assertIn("end column 400 is outside line 3", lines[0])
+
+    def test_a_range_that_ends_before_it_starts_is_reported(self):
+        path = "fail/mutability/001_reversed.ft"
+        doc = self.document([path], [self.diagnostic(path, 3, 8, 2, "reversed")])
+        self.script("001_reversed.ft", ["//@ exit 1", self.json_line(doc)], "reversed")
+        status, lines = self.only("001_reversed")
+        self.assertEqual(status, 1)
+        self.assertIn("ends before it starts", lines[0])
+
+    def test_an_empty_range_is_reported(self):
+        path = "fail/mutability/001_empty.ft"
+        # A diagnostic that is not the lexer's covers the tokens it is about,
+        # so its range is never empty (D20.4).
+        doc = self.document([path], [self.diagnostic(path, 3, 4, 4, "expected ';'")])
+        directives = [
+            "//@ exit 1",
+            "//@ stderr %s:3:4: error: expected ';'" % path,
+            self.json_line(doc),
+        ]
+        self.script("001_empty.ft", directives, "expected")
+        status, lines = self.only("001_empty")
+        self.assertEqual(status, 1)
+        self.assertIn("empty range at 3:4", lines[0])
+
+    def test_an_empty_range_of_a_lexical_error_is_allowed(self):
+        path = "fail/mutability/001_lexical.ft"
+        # The lexer reports the position of bytes that are not a token, so its
+        # range is empty (D14.2, D20.4); the message is what says so.
+        message = "unterminated string literal"
+        doc = self.document([path], [self.diagnostic(path, 3, 4, 4, message)])
+        directives = [
+            "//@ exit 1",
+            "//@ stderr %s:3:4: error: %s" % (path, message),
+            self.json_line(doc),
+        ]
+        self.script("001_lexical.ft", directives, message)
+        status, lines = self.only("001_lexical")
+        self.assertEqual((status, lines[0]), (0, "PASS %s" % path))
+
+    def test_a_note_missing_from_the_document_is_reported(self):
+        path = "fail/mutability/001_dropped_note.ft"
+        doc = self.document([path], [self.diagnostic(path, 3, 1, 2, "noted")])
+        directives = [
+            "//@ exit 1",
+            "//@ stderr %s:3:1: error: noted" % path,
+            "//@ stderr %s:2:1: note: declared here" % path,
+            self.json_line(doc),
+        ]
+        self.script("001_dropped_note.ft", directives, "noted")
+        status, lines = self.only("001_dropped_note")
+        self.assertEqual(status, 1)
+        self.assertIn("only in the text form: %s:2:1: note: declared here" % path, lines[0])
+
+    def test_a_note_beside_its_error_is_not_nested(self):
+        path = "fail/mutability/001_hoisted.ft"
+        # D20.2 nests a note in the "notes" of the error it follows; a note
+        # listed beside it is the same text with the structure lost.
+        hoisted = self.diagnostic(path, 2, 1, 2, "declared here")
+        hoisted["severity"] = "note"
+        doc = self.document([path], [self.diagnostic(path, 3, 1, 2, "noted"), hoisted])
+        directives = [
+            "//@ exit 1",
+            "//@ stderr %s:3:1: error: noted" % path,
+            "//@ stderr %s:2:1: note: declared here" % path,
+            self.json_line(doc),
+        ]
+        self.script("001_hoisted.ft", directives, "noted")
+        status, lines = self.only("001_hoisted")
+        self.assertEqual(status, 1)
+        self.assertIn("diagnostics[1]: a note after an error must be nested", lines[0])
+
+    def test_a_note_at_another_position_is_reported(self):
+        path = "fail/mutability/001_moved_note.ft"
+        notes = [self.note(path, 1, 1, 1, "declared here")]
+        doc = self.document([path], [self.diagnostic(path, 3, 1, 2, "noted", notes)])
+        directives = [
+            "//@ exit 1",
+            "//@ stderr %s:3:1: error: noted" % path,
+            "//@ stderr %s:2:1: note: declared here" % path,
+            self.json_line(doc),
+        ]
+        self.script("001_moved_note.ft", directives, "noted")
+        status, lines = self.only("001_moved_note")
+        self.assertEqual(status, 1)
+        self.assertIn("report 2 is '%s:2:1: note: declared here'" % path, lines[0])
+
+    def test_the_order_of_the_diagnostics_is_compared(self):
+        path = "fail/mutability/001_order.ft"
+        first = self.diagnostic(path, 3, 1, 2, "first")
+        second = self.diagnostic(path, 3, 5, 6, "second")
+        doc = self.document([path], [second, first])
+        directives = [
+            "//@ exit 1",
+            "//@ stderr %s:3:1: error: first" % path,
+            "//@ stderr %s:3:5: error: second" % path,
+            self.json_line(doc),
+        ]
+        self.script("001_order.ft", directives, "first")
+        status, lines = self.only("001_order")
+        self.assertEqual(status, 1)
+        self.assertIn("report 1 is '%s:3:1: error: first'" % path, lines[0])
+
+    def test_a_duplicated_diagnostic_is_reported(self):
+        path = "fail/mutability/001_twice.ft"
+        once = self.diagnostic(path, 3, 1, 2, "twice")
+        doc = self.document([path], [once, once])
+        directives = [
+            "//@ exit 1",
+            "//@ stderr %s:3:1: error: twice" % path,
+            self.json_line(doc),
+        ]
+        self.script("001_twice.ft", directives, "twice")
+        status, lines = self.only("001_twice")
+        self.assertEqual(status, 1)
+        self.assertIn("only in the document: %s:3:1: error: twice" % path, lines[0])
+
+    def test_the_entry_must_be_in_the_files(self):
+        path = "fail/mutability/001_no_entry.ft"
+        doc = self.document([], [])
+        self.script("001_no_entry.ft", ["//@ exit 1", self.json_line(doc)], "none")
+        status, lines = self.only("001_no_entry")
+        self.assertEqual(status, 1)
+        self.assertIn("files: the entry '%s' is missing" % path, lines[0])
+
+    def test_a_note_is_checked_like_a_diagnostic(self):
+        path = "fail/mutability/001_note.ft"
+        notes = [self.note("other.ft", 1, 1, 2, "over there")]
+        doc = self.document([path], [self.diagnostic(path, 3, 1, 2, "noted", notes)])
+        directives = [
+            "//@ exit 1",
+            "//@ stderr %s:3:1: error: noted" % path,
+            self.json_line(doc),
+        ]
+        self.script("001_note.ft", directives, "noted")
+        status, lines = self.only("001_note")
+        self.assertEqual(status, 1)
+        self.assertIn("diagnostics[0].notes[0]: 'other.ft' is not in \"files\"", lines[0])
+
+    def test_a_crash_must_leave_stdout_empty(self):
+        path = "fail/mutability/001_crash.ft"
+        doc = self.document([path], [])
+        directives = ["//@ exit 1", "//@ check-exit 2", self.json_line(doc)]
+        self.script("001_crash.ft", directives, "crash")
+        status, lines = self.only("001_crash")
+        self.assertEqual(status, 1)
+        self.assertEqual(lines[0], "FAIL %s: stdout is not empty after exit 2" % path)
+
+    def test_an_internal_error_with_an_empty_stdout_is_an_error(self):
+        path = "fail/mutability/001_silent_crash.ft"
+        directives = [
+            "//@ exit 1",
+            "//@ check-exit 2",
+            "//@ stderr fort: error: internal error: simulated",
+            "//@ json-none",
+        ]
+        self.script("001_silent_crash.ft", directives, "crash")
+        status, lines = self.only("001_silent_crash")
+        self.assertEqual(status, 1)
+        self.assertEqual(
+            lines[0],
+            "ERROR %s: text: compiler exited 2: fort: error: internal error: simulated" % path,
+        )
+
+    def test_the_two_runs_must_agree_on_the_status(self):
+        path = "fail/mutability/001_status.ft"
+        doc = self.document([path], [])
+        directives = ["//@ exit 1", "//@ check-exit 0", "//@ json-exit 1", self.json_line(doc)]
+        self.script("001_status.ft", directives, "status")
+        status, lines = self.only("001_status")
+        self.assertEqual(status, 1)
+        self.assertIn("--json exited 1, the text form 0", lines[0])
+
+    def test_a_text_diagnostic_under_json_is_reported(self):
+        path = "fail/mutability/001_chatty.ft"
+        doc = self.document([path], [self.diagnostic(path, 3, 1, 2, "chatty")])
+        # --json writes no text diagnostic (D20.2); the fake's `//@ stderr`
+        # lines reach stderr only because this document is scripted.
+        directives = [
+            "//@ exit 1",
+            "//@ stderr %s:3:1: error: chatty" % path,
+            "//@ json-stderr noise",
+            self.json_line(doc),
+        ]
+        self.script("001_chatty.ft", directives, "chatty")
+        status, lines = self.only("001_chatty")
+        self.assertEqual(status, 1)
+        self.assertIn("--json wrote to stderr: noise", lines[0])
 
 
 if __name__ == "__main__":
