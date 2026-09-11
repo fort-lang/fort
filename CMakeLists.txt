@@ -184,6 +184,12 @@ endif()
 # and `lang_selftest` runs the harness's own unit tests (both label unit).
 find_program(FORT_PYTHON3 NAMES python3 REQUIRED)
 set(FORT_LANG_DIR "${FORT_TEST_DIR}/lang")
+
+# The parser's recovery suite walks the fail corpus (D14.4) and asserts that
+# every diagnostic lands on an annotated line, so it needs the corpus's path.
+if(TARGET parser_recovery_test)
+    target_compile_definitions(parser_recovery_test PRIVATE FORT_LANG_DIR="${FORT_LANG_DIR}")
+endif()
 set(FORT_LANG_HARNESS "${FORT_LANG_DIR}/run_tests.py")
 include(ProcessorCount)
 ProcessorCount(FORT_LANG_JOBS)
