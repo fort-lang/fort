@@ -1,0 +1,243 @@
+// diag: compile-time diagnostics (toolchain.md 4, D14.2) collected in a sink.
+//
+// A diagnostic is `<file>:<line>:<col>: error: <message>` and
+// `<file>:<line>:<col>: note: <message>`; errors are counted and notes are
+// not. src/bootstrap/diag.c keeps that state in two file-scope globals, which
+// a language server could not run twice over one process (D20.5), so here the
+// sink is a value the caller owns and passes down: two analyses in one process
+// are two sinks and share nothing.
+//
+// A sink keeps every diagnostic as a record with its whole range and a copy of
+// its message, so a structured form can be written after the compilation as
+// well as a text form during it. The copy matters: the file name of a
+// diagnostic belongs to whoever reported it, and that module set is released
+// before a check document is written (D20.2), so the sink interns both the
+// message and the file name in a pool of its own and a record outlives its
+// reporter.
+//
+// Text output is off until a caller turns it on, because a library that writes
+// to stderr on its own is one a server cannot embed; the batch driver turns it
+// on and gets src/bootstrap/diag.c's behaviour.
+//
+// Dispatch: none. Severity is an enum of two members read by one `if`, not a
+// table of function pointers (D3.10).
+import containers;
+
+// The errors one file may report (D14.2): at most twenty, counted across its
+// lexical and its syntax errors together, so a file that is mistyped from end
+// to end costs a reader twenty lines and no more. The cap is not enforced
+// here: the lexer and the parser check budget_left before they report, as
+// src/bootstrap/lexer.c and parser.c do, and the passes after them report
+// without a cap, so stage2 prints the diagnostics stage1 prints.
+u64 MAX_PER_FILE = 20;
+
+// The first non-zero capacity of the record vector; growth doubles from there.
+u64 RECORD_MIN_CAP = 16;
+
+// What a diagnostic says about itself: an error, or a note that belongs to the
+// error before it (D14.2).
+enum severity {
+    error,
+    note,
+}
+
+// A range in a source file: 1-based lines and byte columns, a tab counting as
+// one column, the start inclusive and the end exclusive (D20.4). An error with
+// no position in the file uses the empty range at 1:1 (D14.2). Only the start
+// is printed; the end is what an editor underlines.
+struct loc {
+    string file;
+    u32 line;
+    u32 col;
+    u32 end_line;
+    u32 end_col;
+}
+
+// The empty range at `line`:`col`: a position with no extent yet (D20.4).
+fn loc loc_make(string file, u32 line, u32 col) {
+    return loc{file, line, col, line, col};
+}
+
+// The range from `line`:`col` to `end_line`:`end_col`, the end exclusive
+// (D20.4).
+fn loc loc_range(string file, u32 line, u32 col, u32 end_line, u32 end_col) {
+    return loc{file, line, col, end_line, end_col};
+}
+
+// `a` with its end moved to the later of the two ends: it never moves the
+// start and never shrinks the range, so extending a range over one it already
+// covers changes nothing (D20.4). To widen leftwards, build the range from the
+// leftmost start with loc_range.
+fn loc loc_extend(loc a, loc b) {
+    if (b.end_line > a.end_line || (b.end_line == a.end_line && b.end_col > a.end_col)) {
+        return loc{a.file, a.line, a.col, b.end_line, b.end_col};
+    }
+    return a;
+}
+
+// Whether `loc` ends at or after it starts, which every range does (D20.4).
+fn bool loc_is_ordered(loc l) {
+    return l.end_line > l.line || (l.end_line == l.line && l.end_col >= l.col);
+}
+
+// One reported diagnostic, handed out by value. Its message and the file name
+// of its range are copies the sink's pool owns, stable until diag.reset or
+// diag.free.
+struct record {
+    loc loc;
+    severity severity;
+    string msg;
+}
+
+// Everything one analysis reports. sink{} is a valid empty sink, so a struct
+// holding one is initialized with {}; `text` off is a library that writes
+// nothing of its own.
+struct sink {
+    containers.pool pool;
+    record mut@ own records;
+    u64 count;
+    u64 errors;
+    u64 file_errors;
+    bool text;
+}
+
+// The empty sink; allocates nothing and writes nothing until set_text.
+fn sink create() {
+    return sink{};
+}
+
+// Releases the records and every message and file name the sink copied; the
+// sink is empty and usable afterwards.
+fn void free(sink mut* s) {
+    del(s->records);
+    containers.pool_free(&s->pool);
+    s->count = 0;
+    s->errors = 0;
+    s->file_errors = 0;
+}
+
+// Sets the error count to 0 and drops every record, releasing the copies they
+// point at: the records and the messages read before it are gone. The storage
+// is released rather than kept, so a thousand analyses through one sink do not
+// grow the heap (D20.5).
+fn void reset(sink mut* s) {
+    free(s);
+}
+
+// Whether each diagnostic also writes its text line to stderr as it arrives.
+// Records are kept either way, and a mode that wants only the structured form
+// leaves it off (D20.2).
+fn void set_text(sink mut* s, bool on) {
+    s->text = on;
+}
+
+// Starts the budget of the file about to be read: the lexer opens it and the
+// parser goes on with what the lexer left of it, so the two share one counter
+// (D14.2).
+fn void begin_file(sink mut* s) {
+    s->file_errors = 0;
+}
+
+// The errors reported since begin_file, which is what the budget above is
+// spent from; 0 when no file was begun. A note is not counted, here or in
+// count, since it belongs to the error before it (D14.2).
+fn u64 file_count(sink* s) {
+    return s->file_errors;
+}
+
+// Whether the file being read may report one more error: its twentieth is its
+// last (D14.2). The lexer and the parser ask before they report; nothing here
+// refuses a diagnostic on its own.
+fn bool budget_left(sink* s) {
+    return s->file_errors < MAX_PER_FILE;
+}
+
+// The number of errors reported since the sink was created or last reset.
+fn u64 count(sink* s) {
+    return s->errors;
+}
+
+// The diagnostics recorded since then, in the order they were reported.
+fn u64 record_count(sink* s) {
+    return s->count;
+}
+
+// The record at `i`; an index at or past record_count is a violated
+// precondition and panics (D13.3).
+fn record record_at(sink* s, u64 i) {
+    if (i >= s->count) {
+        panic("diag.record_at: index out of range");
+    }
+    return s->records[i];
+}
+
+// Ensures room for one more record, growing to the largest of RECORD_MIN_CAP
+// and twice the capacity.
+fn void reserve(sink mut* s) {
+    if (s->count < s->records.len) {
+        return;
+    }
+    u64 mut cap = RECORD_MIN_CAP;
+    if (s->records.len >= cap) {
+        // A record is more than one byte, so a capacity can never reach half
+        // the address space; the doubling is guarded all the same, since
+        // nothing here may detect an overflow by performing one (D11.1).
+        if (s->records.len > containers.U64_MAX / 2) {
+            panic("diag.reserve: capacity overflow");
+        }
+        cap = s->records.len * 2;
+    }
+    record mut@ own bigger = new(record, cap);
+    u64 mut i = 0;
+    while (i < s->count) {
+        bigger[i] = s->records[i];
+        i += 1;
+    }
+    del(s->records);
+    s->records = move(bigger);
+}
+
+// Records one diagnostic and, when text is on, writes its line. The message
+// and the file name are copied into the sink's pool, so the record outlives
+// the module set that reported it (D20.2). Every diagnostic handed to it is
+// recorded: the cap of D14.2 is the lexer's and the parser's to check with
+// budget_left, exactly as src/bootstrap/diag.c leaves it to lexer.c and
+// parser.c, so a sink that refused one here would make stage2 report fewer
+// diagnostics than stage1 over the same file.
+fn void report(sink mut* s, loc l, severity sev, string msg) {
+    loc copy = loc{containers.pool_intern(&s->pool, l.file), l.line, l.col, l.end_line, l.end_col};
+    string text = containers.pool_intern(&s->pool, msg);
+    reserve(s);
+    s->records[s->count] = record{copy, sev, text};
+    s->count += 1;
+    // A note belongs to the error before it and is counted by neither counter
+    // (D14.2), so it spends nothing of the file's budget either.
+    if (sev == severity.error) {
+        s->errors += 1;
+        s->file_errors += 1;
+    }
+    if (s->text) {
+        write_line(copy, sev, text);
+    }
+}
+
+// `<file>:<line>:<col>: error: <msg>`, counted as an error (D14.2).
+fn void error(sink mut* s, loc l, string msg) {
+    report(s, l, severity.error, msg);
+}
+
+// `<file>:<line>:<col>: note: <msg>`, which belongs to the error before it and
+// is not counted (D14.2).
+fn void note(sink mut* s, loc l, string msg) {
+    report(s, l, severity.note, msg);
+}
+
+// The text form of one diagnostic on stderr; only the start of the range is
+// printed (toolchain.md 4).
+fn void write_line(loc l, severity sev, string msg) {
+    if (sev == severity.error) {
+        eprintln(l.file, ":", l.line, ":", l.col, ": error: ", msg);
+    } else {
+        eprintln(l.file, ":", l.line, ":", l.col, ": note: ", msg);
+    }
+}

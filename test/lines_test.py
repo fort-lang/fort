@@ -44,7 +44,8 @@ class GlobMatching(unittest.TestCase):
             self.assertTrue(lines.path_matches(path, source), path)
             self.assertFalse(lines.path_matches(path, tests), path)
         for path in ("test/diag_test.c", "test/types_helpers.h",
-                     "test/lang/run/arrays/001_x.ft", "test/lang/ffi/helpers.c"):
+                     "test/lang/run/arrays/001_x.ft", "test/lang/ffi/helpers.c",
+                     "test/fort/containers_test.ft"):
             self.assertTrue(lines.path_matches(path, tests), path)
             self.assertFalse(lines.path_matches(path, source), path)
         for path in ("tools/lines.py", "notes/decisions.md", "editors/vscode/extension.js"):

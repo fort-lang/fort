@@ -1,0 +1,223 @@
+// containers: the storage the self-hosted compiler needs beyond std (D13.2).
+//
+// src/bootstrap/containers.h is a vector of pointers, a vector of integers and
+// a string map; all three are std::vec and std::strmap already, so a module of
+// the self-hosted compiler imports those and this file adds only what they do
+// not give: a pool, which is the block allocator of src/bootstrap/str.h with
+// its blocks released together, and a vector of `string`, the element type
+// std::vec does not instantiate.
+//
+// Re-entrancy (D20.5): nothing here is module-level mutable state, every
+// function takes the container it works on, and every allocation belongs to
+// that container and dies with it, so a session that frees its pool frees
+// every name a whole analysis interned. Nothing here ends the process on its
+// own: a violated precondition panics at the call that broke it (D13.3). What
+// that buys over an exit is a documented boundary and a stated precondition
+// and not in-process recovery, since a panic aborts like any other failure
+// (D11.4, D20.5); a caller that must survive a malformed document runs the
+// analysis where it can observe the abort.
+//
+// Dispatch: none. The module is data structures with no case analysis, so it
+// has no switch to turn into a function-pointer table (D3.10).
+import std::mem;
+
+// The largest u64 there is, named once so that the capacity guards below hold
+// their arithmetic against one spelling of it (D1.4: a module constant is
+// UPPER_CASE).
+u64 U64_MAX = 18446744073709551615;
+
+// Bytes per pool block, as src/bootstrap/str.h spells it; a string longer than
+// that gets a block of its own.
+u64 POOL_BLOCK_BYTES = 4096;
+
+// The first non-zero capacity of a vector; growth doubles from there.
+u64 VEC_MIN_CAP = 16;
+
+// ---- pool ----------------------------------------------------------------------
+
+// One block of a pool: the storage, and how much of it has been handed out.
+// The blocks form a list through `next` so that freeing the pool is a walk,
+// with no vector of blocks to grow beside them.
+struct pool_block {
+    u8 mut@ own bytes;
+    u64 used;
+    pool_block mut* own next;
+}
+
+// A pool owns copies of strings and raw byte ranges in blocks released all at
+// once. pool{} is a valid empty pool, so a struct holding one is initialized
+// with {}. Unlike src/bootstrap/str.h, a copy carries no trailing NUL: the one
+// sanctioned way to hand a string to C is str.to_cstr (D13.4), and unlike an
+// interner it does not deduplicate, so two calls with equal input give two
+// views.
+struct pool {
+    pool_block mut* own head;
+    u64 blocks;
+    u64 used;
+}
+
+// The empty pool; allocates nothing. A call result needs no move (D17.5).
+fn pool pool_create() {
+    return pool{};
+}
+
+// Releases every block; the pool is empty and usable afterwards, and every
+// view a pool_bytes or pool_intern handed out dies here. del empties an
+// operand (D17.9), so a second call, or a call on pool{}, is a no-op.
+fn void pool_free(pool mut* p) {
+    pool_block mut* own mut block = move(p->head);
+    while (block != null) {
+        // The tail is taken out before the block is released, since del of the
+        // block is shallow and would otherwise drop the list (D17.7).
+        pool_block mut* own next = move(block->next);
+        del(block->bytes);
+        del(block);
+        block = move(next);
+    }
+    p->blocks = 0;
+    p->used = 0;
+}
+
+// Adds a block of at least `least` bytes at the head of the list and makes it
+// the one allocations are packed into.
+fn void pool_add_block(pool mut* p, u64 least) {
+    u64 mut size = POOL_BLOCK_BYTES;
+    if (least > size) {
+        size = least;
+    }
+    pool_block mut* own block = new(pool_block);
+    block->bytes = new(u8, size);
+    // The old head was moved out, so the store into `next` overwrites a zero
+    // value and the overwrite check of D17.11 passes.
+    block->next = move(p->head);
+    p->head = move(block);
+    p->blocks += 1;
+}
+
+// `n` bytes of storage the pool owns, zeroed, stable until pool_free. The
+// result is a view of the pool's block (D17.3), so del on it does not compile
+// (D17.9). A request of 0 bytes is a zero-length view.
+fn u8 mut@ pool_bytes(pool mut* p, u64 n) {
+    // A request that no block could hold is a violated precondition rather
+    // than an allocation that would trap: the sum below must not be the thing
+    // that detects it (D3.1, D11.1).
+    if (n > U64_MAX - POOL_BLOCK_BYTES) {
+        panic("containers.pool_bytes: request too large");
+    }
+    if (n == 0) {
+        // A zero-length request never starts a block, so interning the empty
+        // string costs nothing.
+        u8 mut@ none = {};
+        return none;
+    }
+    if (p->head == null || n > p->head->bytes.len - p->head->used) {
+        pool_add_block(p, n);
+    }
+    pool_block mut* block = p->head;
+    u64 start = block->used;
+    block->used = start + n;
+    p->used += n;
+    return block->bytes[start..start + n];
+}
+
+// A copy of `s` the pool owns, stable until pool_free; interning the empty
+// string yields an empty view. Ownership: a view (D17.3), as pool_bytes.
+fn string pool_intern(pool mut* p, string s) {
+    u8 mut@ copy = pool_bytes(p, s.len);
+    mem.copy(copy, cast(s, u8@));
+    return cast(copy, string);
+}
+
+// The blocks the pool holds, which is what a test measures reuse by.
+fn u64 pool_block_count(pool* p) {
+    return p->blocks;
+}
+
+// The bytes handed out since the pool was created, tail padding of a block
+// excluded.
+fn u64 pool_used(pool* p) {
+    return p->used;
+}
+
+// ---- vector of string ------------------------------------------------------------
+
+// items.len is the capacity and len the slots in use, so the live elements are
+// items[..len]. The vector owns its slots and borrows every string in them:
+// str_push lends its argument (D17.4) and str_free never touches the bytes of
+// an element, which is why a vector of names is filled from a pool.
+struct str_vec {
+    string mut@ own items;
+    u64 len;
+}
+
+// The empty vector; allocates nothing.
+fn str_vec str_create() {
+    return str_vec{};
+}
+
+// Releases the slots and leaves str_vec{}; the strings they held belong to
+// someone else and are left alone (D13.5).
+fn void str_free(str_vec mut* v) {
+    del(v->items);
+    v->len = 0;
+}
+
+// Ensures items.len >= len + extra, growing to the largest of VEC_MIN_CAP,
+// twice the capacity and len + extra, as std::vec grows (stdlib.md 2.7).
+fn void str_reserve(str_vec mut* v, u64 extra) {
+    // The sum is tested before it is computed: detecting the overflow by
+    // performing it would trap in a checked build and wrap in a release one
+    // (D3.1, D11.1).
+    if (extra > U64_MAX - v->len) {
+        panic("containers.str_reserve: capacity overflow");
+    }
+    u64 need = v->len + extra;
+    if (need <= v->items.len) {
+        return;
+    }
+    u64 mut cap = VEC_MIN_CAP;
+    if (need > cap) {
+        cap = need;
+    }
+    if (v->items.len <= U64_MAX / 2 && v->items.len * 2 > cap) {
+        cap = v->items.len * 2;
+    }
+    string mut@ own bigger = new(string, cap);
+    u64 mut i = 0;
+    while (i < v->len) {
+        bigger[i] = v->items[i];
+        i += 1;
+    }
+    del(v->items);
+    v->items = move(bigger);
+}
+
+// Appends one string, growing as needed. The argument is borrowed: the vector
+// never frees an element's bytes (D17.4).
+fn void str_push(str_vec mut* v, string s) {
+    str_reserve(v, 1);
+    v->items[v->len] = s;
+    v->len += 1;
+}
+
+// The element at `i`; an index at or past len is a violated precondition and
+// panics (D13.3), since the slots beyond len hold zero or stale strings.
+fn string str_at(str_vec* v, u64 i) {
+    if (i >= v->len) {
+        panic("containers.str_at: index out of range");
+    }
+    return v->items[i];
+}
+
+// Replaces the element at `i`, with the same precondition as str_at.
+fn void str_set(str_vec mut* v, u64 i, string s) {
+    if (i >= v->len) {
+        panic("containers.str_set: index out of range");
+    }
+    v->items[i] = s;
+}
+
+// The live elements as a span, a view valid until the next growth.
+fn string@ str_items(str_vec* v) {
+    return v->items[..v->len];
+}

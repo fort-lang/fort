@@ -1,0 +1,221 @@
+//! run
+//! flags: -I ../../src/fort
+//! stdout:
+//| interleaved ok
+//| repeated ok
+//| ok
+import containers;
+import diag;
+import session;
+import std::io;
+import std::strbuf;
+
+// Re-entrancy (D20.5): a language server analyses a document again at every
+// keystroke, and analyses several documents at once, so nothing a module of
+// the compiler holds may be shared between two analyses. src/fort keeps no
+// module-level mutable state, so the witness is this: sessions that live at
+// the same time answer for themselves alone, and a session that is created
+// and freed a thousand times leaves nothing behind.
+//
+// The C bootstrap could not pass this file: its diagnostics live in two
+// file-scope globals, so the second analysis would read the first one's
+// counters.
+
+// ---- sessions that live at the same time ---------------------------------------
+
+// Three sessions hold three versions of one document, at one time, and each
+// reads back its own.
+fn void three_sessions_hold_three_versions() {
+    session.session mut a = session.create();
+    defer session.free(&a);
+    session.session mut b = session.create();
+    defer session.free(&b);
+    session.session mut c = session.create();
+    defer session.free(&c);
+    session.set_source(&a, "doc.ft", "version a");
+    session.set_source(&b, "doc.ft", "version b");
+    session.set_source(&c, "doc.ft", "version c");
+    string mut text = "";
+    assert(session.read_source(&a, "doc.ft", &text));
+    assert(text == "version a");
+    assert(session.read_source(&c, "doc.ft", &text));
+    assert(text == "version c");
+    assert(session.read_source(&b, "doc.ft", &text));
+    assert(text == "version b");
+    // Changing one leaves the others where they were.
+    session.set_source(&b, "doc.ft", "version b again");
+    assert(session.read_source(&a, "doc.ft", &text));
+    assert(text == "version a");
+    assert(session.read_source(&b, "doc.ft", &text));
+    assert(text == "version b again");
+    assert(session.source_count(&a) == 1);
+    assert(session.source_count(&b) == 1);
+    assert(session.source_count(&c) == 1);
+}
+
+// Diagnostics reported to one session are not counted by another, however
+// they are interleaved.
+fn void interleaved_diagnostics_stay_apart() {
+    session.session mut a = session.create();
+    defer session.free(&a);
+    session.session mut b = session.create();
+    defer session.free(&b);
+    diag.error(session.diags(&a), diag.loc_make("a.ft", 1, 1), "a one");
+    diag.error(session.diags(&b), diag.loc_make("b.ft", 1, 1), "b one");
+    diag.error(session.diags(&a), diag.loc_make("a.ft", 2, 1), "a two");
+    diag.note(session.diags(&b), diag.loc_make("b.ft", 1, 1), "b note");
+    diag.error(session.diags(&a), diag.loc_make("a.ft", 3, 1), "a three");
+    assert(session.error_count(&a) == 3);
+    assert(session.error_count(&b) == 1);
+    assert(diag.record_count(session.diags(&a)) == 3);
+    assert(diag.record_count(session.diags(&b)) == 2);
+    assert(diag.record_at(session.diags(&a), 2).msg == "a three");
+    assert(diag.record_at(session.diags(&b), 1).msg == "b note");
+    assert(diag.record_at(session.diags(&b), 1).loc.file == "b.ft");
+}
+
+// The budget of D14.2 is per sink, so one session spending its file's twenty
+// leaves another session's file free to report.
+fn void one_spent_budget_does_not_spend_another() {
+    session.session mut a = session.create();
+    defer session.free(&a);
+    session.session mut b = session.create();
+    defer session.free(&b);
+    diag.begin_file(session.diags(&a));
+    diag.begin_file(session.diags(&b));
+    u64 mut i = 0;
+    while (i < 20) {
+        diag.error(session.diags(&a), diag.loc_make("a.ft", cast(i + 1, u32), 1), "spent");
+        i += 1;
+    }
+    assert(!diag.budget_left(session.diags(&a)));
+    assert(diag.budget_left(session.diags(&b)));
+    diag.error(session.diags(&b), diag.loc_make("b.ft", 1, 1), "reported");
+    assert(session.error_count(&a) == 20);
+    assert(session.error_count(&b) == 1);
+    assert(diag.record_at(session.diags(&b), 0).msg == "reported");
+}
+
+// A session created inside another session's analysis, and freed inside it,
+// disturbs nothing of the outer one: no allocation of the inner session is
+// reachable from the outer, and none of the outer's views moves.
+fn void an_inner_session_disturbs_nothing() {
+    session.session mut outer = session.create();
+    defer session.free(&outer);
+    session.set_source(&outer, "outer.ft", "the outer document");
+    string outer_name = containers.pool_intern(session.pool(&outer), "outer_symbol");
+    diag.error(session.diags(&outer), diag.loc_make("outer.ft", 1, 1), "outer error");
+    u64 mut i = 0;
+    while (i < 100) {
+        session.session mut inner = session.create();
+        session.set_source(&inner, "inner.ft", "the inner document");
+        string mut text = "";
+        assert(session.read_source(&inner, "inner.ft", &text));
+        assert(text == "the inner document");
+        diag.error(session.diags(&inner), diag.loc_make("inner.ft", 1, 1), "inner error");
+        assert(session.error_count(&inner) == 1);
+        assert(session.source_count(&inner) == 1);
+        session.free(&inner);
+        i += 1;
+    }
+    string mut text = "";
+    assert(session.read_source(&outer, "outer.ft", &text));
+    assert(text == "the outer document");
+    assert(outer_name == "outer_symbol");
+    assert(session.error_count(&outer) == 1);
+    assert(session.source_count(&outer) == 1);
+    assert(diag.record_at(session.diags(&outer), 0).msg == "outer error");
+}
+
+// ---- the same document, again and again ----------------------------------------
+
+// A document re-analysed a thousand times: a fresh session each time, each
+// reading the same overlay text and reporting the same diagnostics, each
+// freeing everything it allocated. What the heap holds afterwards is what it
+// held before, which is the property the modules are written for.
+fn void a_document_analysed_a_thousand_times() {
+    u64 mut round = 0;
+    while (round < 1000) {
+        session.session mut s = session.create();
+        session.set_source(&s, "doc.ft", "fn i32 main() { return 0; }");
+        string mut text = "";
+        assert(session.read_source(&s, "doc.ft", &text));
+        assert(text.len == 27);
+        assert(text[0] == 'f');
+        diag.begin_file(session.diags(&s));
+        diag.error(session.diags(&s), diag.loc_range("doc.ft", 1, 16, 1, 22), "an error");
+        diag.note(session.diags(&s), diag.loc_make("doc.ft", 1, 1), "a note");
+        assert(session.error_count(&s) == 1);
+        assert(diag.record_count(session.diags(&s)) == 2);
+        assert(containers.pool_used(session.pool(&s)) > 0);
+        session.free(&s);
+        assert(session.source_count(&s) == 0);
+        assert(session.error_count(&s) == 0);
+        round += 1;
+    }
+}
+
+// One session re-used for a thousand documents: it is the storage that must
+// not grow without bound, so a server that keeps a session frees it between
+// analyses rather than trusting the counters to fall.
+fn void one_session_reused_for_a_thousand_documents() {
+    session.session mut s = session.create();
+    defer session.free(&s);
+    strbuf.str_buf mut path = strbuf.create();
+    defer strbuf.free(&path);
+    u64 mut i = 0;
+    while (i < 1000) {
+        strbuf.clear(&path);
+        strbuf.append(&path, "doc_");
+        strbuf.append_u64(&path, i);
+        strbuf.append(&path, ".ft");
+        session.set_source(&s, strbuf.view(&path), "fn void f() {}");
+        i += 1;
+    }
+    assert(session.source_count(&s) == 1000);
+    // Every one of them is still readable and none was confused with another.
+    i = 0;
+    while (i < 1000) {
+        strbuf.clear(&path);
+        strbuf.append(&path, "doc_");
+        strbuf.append_u64(&path, i);
+        strbuf.append(&path, ".ft");
+        assert(session.has_source(&s, strbuf.view(&path)));
+        string mut text = "";
+        assert(session.read_source(&s, strbuf.view(&path), &text));
+        assert(text == "fn void f() {}");
+        i += 1;
+    }
+    session.free(&s);
+    assert(session.source_count(&s) == 0);
+}
+
+// The same file on disk read by a thousand sessions: each opens it once and
+// each frees its copy, so the reader has no state of its own either.
+fn void a_file_read_by_a_thousand_sessions() {
+    assert(io.write_file("shared.ft", cast("fn void shared() {}", u8@)));
+    u64 mut round = 0;
+    while (round < 1000) {
+        session.session mut s = session.create();
+        string mut text = "";
+        assert(session.read_source(&s, "shared.ft", &text));
+        assert(text == "fn void shared() {}");
+        assert(session.source_count(&s) == 1);
+        session.free(&s);
+        round += 1;
+    }
+}
+
+fn i32 main() {
+    three_sessions_hold_three_versions();
+    interleaved_diagnostics_stay_apart();
+    one_spent_budget_does_not_spend_another();
+    an_inner_session_disturbs_nothing();
+    println("interleaved ok");
+    a_document_analysed_a_thousand_times();
+    one_session_reused_for_a_thousand_documents();
+    a_file_read_by_a_thousand_sessions();
+    println("repeated ok");
+    println("ok");
+    return 0;
+}

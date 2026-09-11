@@ -1,0 +1,81 @@
+//! run
+//! flags: -I ../../src/fort
+//! stderr: main.ft:1:1: error: first error
+//! stderr: main.ft:12:34: error: undefined name 'x'
+//! stderr: main.ft:12:34: note: declared here
+//! stderr: lib/util.ft:4294967295:4294967295: error: at the last position a u32 can hold
+//! stderr: :1:1: error: an error with no file
+//! stderr: main.ft:7:1: error:
+//! stdout:
+//| ok
+import diag;
+
+// The text form of toolchain.md 4, held line by line: a diagnostic writes
+// `<file>:<line>:<col>: error: <message>` and a note the same with `note:`,
+// only the start of the range is printed, and the text is the message
+// verbatim. The stderr directives in this test's header are those lines, so
+// any change to the format fails here.
+//
+// The lines are written as each diagnostic arrives, which is what a batch
+// driver wants; the records are kept whatever the text setting is, which is
+// what a server reads instead.
+
+fn i32 main() {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    diag.set_text(&s, true);
+    diag.begin_file(&s);
+
+    // A position with no extent prints its start like any other.
+    diag.error(&s, diag.loc_make("main.ft", 1, 1), "first error");
+
+    // A range prints its start alone: the end is what an editor underlines
+    // (D20.4), and nothing of it reaches the line.
+    diag.error(&s, diag.loc_range("main.ft", 12, 34, 14, 2), "undefined name 'x'");
+
+    // A note belongs to the error before it and is not counted (D14.2).
+    diag.note(&s, diag.loc_make("main.ft", 12, 34), "declared here");
+
+    // The line and the column are u32 (D20.4), and the largest one prints
+    // whole rather than wrapping or being truncated.
+    diag.error(&s, diag.loc_make("lib/util.ft", 4294967295, 4294967295),
+               "at the last position a u32 can hold");
+
+    // An error with no position in the file uses the empty range at 1:1
+    // (D14.2); its file name is empty and the line still has its two colons.
+    diag.error(&s, diag.loc_make("", 1, 1), "an error with no file");
+
+    // An empty message keeps the `error: ` prefix, so a line is never
+    // mistaken for something else.
+    diag.error(&s, diag.loc_make("main.ft", 7, 1), "");
+
+    // Six records, five of them errors: the text form changes none of that,
+    // and the note spends nothing of the file's budget (D14.2).
+    assert(diag.record_count(&s) == 6);
+    assert(diag.count(&s) == 5);
+    assert(diag.file_count(&s) == 5);
+
+    // Every record still carries what was reported, in order.
+    assert(diag.record_at(&s, 0).msg == "first error");
+    assert(diag.record_at(&s, 0).loc.line == 1);
+    assert(diag.record_at(&s, 1).loc.end_line == 14);
+    assert(diag.record_at(&s, 1).loc.end_col == 2);
+    assert(diag.record_at(&s, 2).severity == diag.severity.note);
+    assert(diag.record_at(&s, 3).loc.file == "lib/util.ft");
+    assert(diag.record_at(&s, 3).loc.col == 4294967295);
+    assert(diag.record_at(&s, 4).loc.file == "");
+    assert(diag.record_at(&s, 5).msg == "");
+    assert(diag.record_at(&s, 5).msg.len == 0);
+
+    // With the text off again, the next diagnostic is recorded and no line is
+    // written; being an error, it spends one more of the file's budget.
+    diag.set_text(&s, false);
+    diag.error(&s, diag.loc_make("main.ft", 99, 1), "this one is not on stderr");
+    assert(diag.record_count(&s) == 7);
+    assert(diag.count(&s) == 6);
+    assert(diag.file_count(&s) == 6);
+    assert(diag.record_at(&s, 6).msg == "this one is not on stderr");
+
+    println("ok");
+    return 0;
+}

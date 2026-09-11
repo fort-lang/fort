@@ -474,8 +474,29 @@ def discover(root):
     programs = root / "programs"
     if programs.is_dir():
         _discover_dir(root, programs, "run", False, tests, problems)
+    _discover_module_tests(root, tests, problems)
     tests.sort(key=lambda t: t.path)
     return tests, problems
+
+
+def _discover_module_tests(root, tests, problems):
+    """Register the `<x>_test.ft` files directly under `root` as run tests.
+
+    That is the shape of `test/fort`, where a test is a program importing a
+    module of the self-hosted compiler with `-I` rather than an area of the
+    language corpus (D14.4 areas do not describe the compiler's own modules),
+    so a test is named after the module it exercises instead of numbered.
+    `test/lang` holds no such file, so nothing there changes.
+    """
+    for entry in sorted(root.glob("*.ft")):
+        rel = entry.relative_to(root).as_posix()
+        # A `.ft` at the root that is not a test is a typo nothing would ever
+        # run, as `containers_tets.ft` would be, so it is a problem rather
+        # than a file to skip.
+        if not NAME_RE.match(entry.stem) or not entry.stem.endswith("_test"):
+            problems.append("%s: bad test name" % rel)
+            continue
+        tests.append(Test(rel, rel, "run"))
 
 
 def load_expectations(path):
@@ -1069,16 +1090,18 @@ def judge_check_json(test, text_proc, json_proc, root=ROOT):
     return "PASS", ""
 
 
-def apply_expectations(verdict, reason, xfail):
-    """Map a verdict through xfail.txt: a listed failure is expected, a listed pass is not.
+def apply_expectations(verdict, reason, xfail, label=XFAIL_NAME):
+    """Map a verdict through the expectation list: a listed failure is expected, a pass is not.
 
     ERROR is covered too: a listed test is one the compiler cannot handle yet,
-    however it fails (the stage1 scaffold exits 2 on every input).
+    however it fails (the stage1 scaffold exits 2 on every input). `label` is
+    the list in use, since a run may be given another one with --xfail (stage2
+    has its own, xfail-stage2.txt) and an XPASS must name the file to edit.
     """
     if not xfail:
         return verdict, reason
     if verdict == "PASS":
-        return "XPASS", "listed in %s but passed" % XFAIL_NAME
+        return "XPASS", "listed in %s but passed" % label
     return "XFAIL", reason
 
 
@@ -1424,6 +1447,8 @@ def main(argv=None):
     args = parse_args(argv)
     root = Path(args.root).resolve()
     tests, problems, xfail, unsupported = load_corpus(root, args)
+    # The name an XPASS tells the reader to edit: the list actually in use.
+    xfail_label = os.path.basename(args.xfail) if args.xfail else XFAIL_NAME
     selected = select(tests, args.filters)
     if args.check_json:
         # The document is compared on the tests that have something to compare:
@@ -1480,7 +1505,7 @@ def main(argv=None):
                 # whether the compiler can pass the test yet, so xfail.txt does
                 # not apply to it.
                 result.verdict, result.reason = apply_expectations(
-                    result.verdict, result.reason, listed(test, xfail)
+                    result.verdict, result.reason, listed(test, xfail), xfail_label
                 )
             counts[result.verdict] += 1
             print(result.line())

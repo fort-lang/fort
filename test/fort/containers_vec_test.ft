@@ -1,0 +1,133 @@
+//! run
+//! flags: -I ../../src/fort
+//! stdout:
+//| growth ok
+//| reuse ok
+//| ok
+import containers;
+import std::strbuf;
+
+// The vector of `string` under the growth it will actually see: a symbol table
+// pushing thousands of names, a reserve that anticipates them, and a vector
+// emptied and filled again between two analyses. containers_test.ft holds its
+// contract; this file holds it at size.
+
+// A thousand pushes keep every element at its index, across the growths the
+// doubling implies.
+fn void a_thousand_pushes_keep_their_order() {
+    containers.pool mut p = containers.pool_create();
+    defer containers.pool_free(&p);
+    containers.str_vec mut v = containers.str_create();
+    defer containers.str_free(&v);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut i = 0;
+    while (i < 1000) {
+        strbuf.clear(&b);
+        strbuf.append_u64(&b, i);
+        containers.str_push(&v, containers.pool_intern(&p, strbuf.view(&b)));
+        i += 1;
+    }
+    assert(v.len == 1000);
+    // 16 doubled six times is 1024, the first capacity that holds a thousand.
+    assert(v.items.len == 1024);
+    i = 0;
+    while (i < 1000) {
+        strbuf.clear(&b);
+        strbuf.append_u64(&b, i);
+        assert(containers.str_at(&v, i) == strbuf.view(&b));
+        i += 1;
+    }
+    assert(containers.str_items(&v).len == 1000);
+}
+
+// A reserve for the whole run means the capacity is taken once and no push
+// grows it afterwards.
+fn void a_reserve_up_front_grows_nothing_later() {
+    containers.str_vec mut v = containers.str_create();
+    defer containers.str_free(&v);
+    containers.str_reserve(&v, 500);
+    assert(v.items.len == 500);
+    u64 mut i = 0;
+    while (i < 500) {
+        containers.str_push(&v, "name");
+        assert(v.items.len == 500);
+        i += 1;
+    }
+    assert(v.len == 500);
+    // The five hundred and first push is the one that doubles it.
+    containers.str_push(&v, "one more");
+    assert(v.items.len == 1000);
+    assert(containers.str_at(&v, 500) == "one more");
+}
+
+// A reserve on a vector that has elements counts from its length, not from
+// zero, so the room asked for is room for new elements.
+fn void a_reserve_counts_from_the_length() {
+    containers.str_vec mut v = containers.str_create();
+    defer containers.str_free(&v);
+    u64 mut i = 0;
+    while (i < 20) {
+        containers.str_push(&v, "x");
+        i += 1;
+    }
+    assert(v.len == 20);
+    assert(v.items.len == 32);
+    containers.str_reserve(&v, 100);
+    assert(v.items.len == 120);
+    assert(v.len == 20);
+    assert(containers.str_at(&v, 19) == "x");
+}
+
+// A vector emptied and filled again is the storage two analyses share: it
+// holds nothing of the first one afterwards.
+fn void a_refilled_vector_holds_nothing_of_the_last_round() {
+    containers.str_vec mut v = containers.str_create();
+    defer containers.str_free(&v);
+    u64 mut round = 0;
+    while (round < 100) {
+        u64 mut i = 0;
+        while (i < 50) {
+            containers.str_push(&v, "element");
+            i += 1;
+        }
+        assert(v.len == 50);
+        assert(v.items.len == 64);
+        assert(containers.str_at(&v, 49) == "element");
+        containers.str_free(&v);
+        assert(v.len == 0);
+        assert(v.items.len == 0);
+        assert(containers.str_items(&v).len == 0);
+        round += 1;
+    }
+}
+
+// Two vectors are two vectors: pushing into one leaves the other alone, and
+// freeing one does not touch the elements of the other.
+fn void two_vectors_share_nothing() {
+    containers.str_vec mut a = containers.str_create();
+    defer containers.str_free(&a);
+    containers.str_vec mut b = containers.str_create();
+    defer containers.str_free(&b);
+    containers.str_push(&a, "in a");
+    containers.str_push(&b, "in b");
+    containers.str_push(&b, "in b too");
+    assert(a.len == 1);
+    assert(b.len == 2);
+    containers.str_free(&b);
+    assert(a.len == 1);
+    assert(containers.str_at(&a, 0) == "in a");
+    assert(b.len == 0);
+}
+
+fn i32 main() {
+    a_thousand_pushes_keep_their_order();
+    a_reserve_up_front_grows_nothing_later();
+    a_reserve_counts_from_the_length();
+    println("growth ok");
+    a_refilled_vector_holds_nothing_of_the_last_round();
+    two_vectors_share_nothing();
+    println("reuse ok");
+    println("ok");
+    return 0;
+}

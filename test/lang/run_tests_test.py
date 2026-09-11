@@ -560,6 +560,34 @@ class Discovery(TempRoot):
             ],
         )
 
+    def test_module_tests_at_the_root(self):
+        """test/fort: a `<x>_test.ft` beside the root is a run test of a compiler module."""
+        write(self.root, "containers_test.ft", "//! run\n")
+        write(self.root, "diag_test.ft", "//! run\n")
+        tests, problems = run_tests.discover(self.root)
+        self.assertEqual(problems, [])
+        self.assertEqual(
+            [(t.path, t.entry, t.expected_kind, t.multi) for t in tests],
+            [
+                ("containers_test.ft", "containers_test.ft", "run", False),
+                ("diag_test.ft", "diag_test.ft", "run", False),
+            ],
+        )
+
+    def test_module_test_name_is_checked(self):
+        write(self.root, "Bad_Name_test.ft", "//! run\n")
+        _, problems = run_tests.discover(self.root)
+        self.assertEqual(problems, ["Bad_Name_test.ft: bad test name"])
+
+    def test_a_plain_ft_at_the_root_is_a_problem(self):
+        """A `.ft` there that is not a test is a typo nothing would run, so it is reported."""
+        write(self.root, "helper.ft", "fn f() {}\n")
+        write(self.root, "containers_tets.ft", "//! run\n")
+        write(self.root, "README.md", "ignored\n")
+        tests, problems = run_tests.discover(self.root)
+        self.assertEqual(tests, [])
+        self.assertEqual(problems, ["containers_tets.ft: bad test name", "helper.ft: bad test name"])
+
     def test_layout_problems(self):
         write(self.root, "run/arrays/001_a.ft", "//! run\n")
         write(self.root, "run/arrays/003_c.ft", "//! run\n")
@@ -923,6 +951,11 @@ class Judging(unittest.TestCase):
             run_tests.apply_expectations("PASS", "", True),
             ("XPASS", "listed in xfail.txt but passed"),
         )
+        # An XPASS names the list actually in use, which --xfail may change.
+        self.assertEqual(
+            run_tests.apply_expectations("PASS", "", True, "xfail-stage2.txt"),
+            ("XPASS", "listed in xfail-stage2.txt but passed"),
+        )
 
 
 # ---- end to end with a fake compiler ---------------------------------------------------
@@ -1201,13 +1234,14 @@ class EndToEnd(TempRoot):
         )
 
     def test_xpass_fails_the_run(self):
+        """The XPASS names the list in use, which --xfail may have changed."""
         self.write_corpus()
         xfail = write(self.root, "xpass.txt", "run/control/001_echo.ft\n")
         status, lines = self.run_main("--xfail", str(xfail), "001_echo")
         self.assertEqual(
             lines,
             [
-                "XPASS run/control/001_echo.ft: listed in xfail.txt but passed",
+                "XPASS run/control/001_echo.ft: listed in xpass.txt but passed",
                 "run_tests.py: 1 tests: 0 passed, 0 failed, 0 xfail, 1 xpass, 0 errors",
             ],
         )

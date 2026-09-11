@@ -272,7 +272,37 @@ A safe(r) C-like systems programming language.
   absolute paths in `compile_commands.json`, so a relative path such as `../../test` silently
   selects nothing and reports success. Use `tools/vm tidy` or absolute guest paths.
 - Binaries: `build/<preset>/fort` is stage1 (the C compiler); `build/<preset>/stage2/fort` and
-  `stage3/fort` are the self-hosted compiler built by stage1 and by stage2.
+  `stage3/fort` are the self-hosted compiler built by stage1 and by stage2. The `fort_stage2`
+  target builds stage2 at every build (stage1 over `src/fort/main.ft`, whose imports pull the rest
+  of `src/fort` in), so a module stage1 rejects fails the build rather than the test run; stage2 is
+  an x86-64 binary and runs under qemu like every program the compiler builds.
+  `tools/bootstrap.sh [--preset <preset>] [--stage3]` drives the same steps by hand in the guest
+  and, with `--stage3`, compiles `src/fort` with stage2 and compares the two binaries byte for
+  byte -- the fixed point self-hosting means. It is not in the gate, and `--stage3` fails until
+  stage2 can compile `src/fort`.
+- Two corpora beside `test/lang` run through the same `run_tests.py`, which takes the corpus root
+  as `--root`: ctest `lang-stage2` (label `lang`) holds the language corpus against stage2 with
+  `--xfail test/lang/xfail-stage2.txt`, which starts as the whole corpus (`run/`, `fail/`,
+  `programs/`) and shrinks as Phase B lands passes; ctest `fort-modules` (label `lang`) runs
+  `test/fort/<x>_test.ft`, the tests of the compiler's own modules. Both are commands of
+  `check-lang`, so the gate runs them. A `test/fort` test is an ordinary run test in the D14.5
+  directives whose header carries `//! flags: -I ../../src/fort` (the compiler's working
+  directory is the corpus root, so the path has two `..`, not three); its file name is
+  `<module>_test.ft` or `<module>_<case>_panic_test.ft` for a test whose program must end in a
+  panic, since a panic kills the program and each one needs a file; any other `.ft` at that root is
+  `bad test name`, because a typo there would otherwise run nowhere and say nothing.
+  `tools/lines.py` counts `test/fort/**/*.ft` as test lines and `src/fort/*.ft` as compiler lines,
+  and `test/highlight_test.py` does **not** tokenize them, so the TextMate grammar has no witness
+  over `test/fort` (T-079). `lang-stage2` passes `--no-unsupported`: `bootstrap-unsupported.txt`
+  demands that the compiler *reject* the features the C bootstrap lacks, which stage2 is under no
+  such obligation to do, and inheriting it would keep twenty entries in `xfail-stage2.txt` for
+  ever. ctest `stage-usage` (label `unit`) diffs stage1's and stage2's `--help`, `--version` and
+  usage line, which is what holds the option table `src/fort/main.ft` copies from
+  `src/bootstrap/driver.c` to it.
+- A directive lint gotcha: `run_tests.py --lint` rejects any line of a test whose text holds `//!`
+  after code, so a comment inside a test that quotes a directive (`the //! stderr: lines`) fails
+  the lint with `only '//! error:' may follow code on a line`. Say "the stderr directives in this
+  test's header" instead.
 
 ## Technical Standards
 - **Markdown**: Line-wrap at 100 characters, including tables and code blocks. Check with
@@ -624,6 +654,36 @@ A safe(r) C-like systems programming language.
   `std/` and `src/fort/`; nothing formats `.ft`, so indentation and spacing are still written by
   hand and read by review. Run it with `tools/vm fort-lint`, or by hand as
   `tools/vm run 'python3 tools/fort_lint.py --fort build/debug/fort <file.ft>'`.
+- **`src/fort` is written re-entrant** (D20.5), because a language server is a planned consumer of
+  the compiler's modules and retrofitting that later would touch every pass. Four rules, set by the
+  skeleton (`src/fort/containers.ft`, `diag.ft`, `session.ft`) and followed by every module ported
+  after it. No module-level mutable state that outlives one analysis: the diagnostic sink, the
+  counters and the caches are fields of `session.session`, which the driver creates, passes down
+  and frees, so two analyses in one process share nothing (`src/bootstrap/diag.c` keeps one
+  file-scope `sink` holding every counter, which is the habit not to transliterate). Every
+  allocation of an analysis comes from that session's pool or from a container the session frees,
+  so a document analysed a thousand times leaves the heap where it found it. Nothing in a library
+  module ends the process: an impossible input is a
+  `panic` at the boundary that broke the precondition (D13.3), never an exit deep in a leaf (the C
+  bootstrap ends the process at 73 sites across 17 modules:
+  `grep -rn 'fatal_internal(\|fatal_oom(\|\bexit(' src/bootstrap/*.c | grep -v fail.c | wc -l`;
+  and its arenas are never freed). A panic buys a documented boundary and a stated precondition,
+  not in-process recovery: `fort_rt_panic` aborts like every other failure (D11.4), so a server that
+  must survive a malformed document runs the analysis where it can observe that abort (D20.5).
+  And every read of a source file goes through `session.read_source`, which answers from the
+  overlay a `session.set_source` installed before it opens anything, so a server points the
+  compiler at an editor buffer without touching a pass. Each module's header comment also records
+  whether it uses a function-pointer dispatch table (D3.10) or the switches the C used, so a port
+  stays comparable with its oracle.
+- **A port answers to its C oracle, not to a reading of the rule.** `diag.ft` first enforced the
+  twenty-diagnostics-per-file cap of D14.2 inside `report` and charged a note to the budget, which
+  reads like the decision and is not what the compiler does: `src/bootstrap/diag.c` counts a file's
+  errors only (`diag_note` touches no counter) and the cap is checked by `lexer.c` and `parser.c`
+  before they report, so `check.c` and `modules.c` are uncapped. The divergence is stage-visible --
+  25 type errors would have printed 20 under stage2 and 25 under stage1 -- and a stage2 that
+  reports differently from stage1 is what the fixpoint work has to not fight. So when a ported
+  module can enforce a rule in a place the C does not, read the C: the oracle is where the rule
+  lives, and a difference is a bug even when the new place looks tidier.
 - **Transliterating the bootstrap into fort.** Phase B rewrites `src/bootstrap/*.c` as
   `src/fort/*.ft`, and stage2 is compiled by stage1, so a compiler source may use only what the
   bootstrap itself accepts. `test/lang/bootstrap-unsupported.txt` is that list: no floats (`f32`,

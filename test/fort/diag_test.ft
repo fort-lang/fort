@@ -1,0 +1,418 @@
+//! run
+//! flags: -I ../../src/fort
+//! stderr: one.ft:3:7: error: bad thing
+//! stderr: one.ft:3:7: note: it came from here
+//! stdout:
+//| loc ok
+//| records ok
+//| budget ok
+//| ok
+import containers;
+import diag;
+import std::strbuf;
+
+// The diagnostic sink of src/fort/diag.ft, held against what toolchain.md 4
+// and D14.2 say a diagnostic is: a range with a 1-based line and byte column,
+// an error that counts and a note that does not, a budget of twenty per file,
+// and a record whose message and file name are copies of their own.
+//
+// The sink is a value this test owns, which is the whole point of the module:
+// two sinks in one program share nothing, so the counts below are never a
+// global's leftovers.
+
+// ---- ranges (D20.4) ------------------------------------------------------------
+
+// loc_make is the empty range at a position: the end is the start, which is
+// what a diagnostic with no extent carries.
+fn void loc_make_is_the_empty_range() {
+    diag.loc l = diag.loc_make("a.ft", 4, 9);
+    assert(l.file == "a.ft");
+    assert(l.line == 4);
+    assert(l.col == 9);
+    assert(l.end_line == 4);
+    assert(l.end_col == 9);
+    assert(diag.loc_is_ordered(l));
+}
+
+// loc_range carries the end as given, exclusive.
+fn void loc_range_carries_both_ends() {
+    diag.loc l = diag.loc_range("b.ft", 1, 1, 2, 5);
+    assert(l.file == "b.ft");
+    assert(l.line == 1);
+    assert(l.col == 1);
+    assert(l.end_line == 2);
+    assert(l.end_col == 5);
+    assert(diag.loc_is_ordered(l));
+}
+
+// The range with no position in the file is the empty range at 1:1 (D14.2).
+fn void the_positionless_range_is_one_one() {
+    diag.loc l = diag.loc_make("", 1, 1);
+    assert(l.file == "");
+    assert(l.line == 1);
+    assert(l.col == 1);
+    assert(diag.loc_is_ordered(l));
+}
+
+// loc_extend moves the end forward and never the start.
+fn void extend_moves_the_end_forward() {
+    diag.loc a = diag.loc_range("a.ft", 2, 3, 2, 6);
+    diag.loc b = diag.loc_range("a.ft", 2, 10, 2, 14);
+    diag.loc joined = diag.loc_extend(a, b);
+    assert(joined.line == 2);
+    assert(joined.col == 3);
+    assert(joined.end_line == 2);
+    assert(joined.end_col == 14);
+    assert(joined.file == "a.ft");
+}
+
+// A later line wins over a later column: the comparison is line then column.
+fn void extend_compares_line_before_column() {
+    diag.loc a = diag.loc_range("a.ft", 1, 1, 3, 2);
+    diag.loc b = diag.loc_range("a.ft", 1, 1, 2, 40);
+    diag.loc joined = diag.loc_extend(a, b);
+    assert(joined.end_line == 3);
+    assert(joined.end_col == 2);
+}
+
+// Extending over a range already covered changes nothing, so extending twice
+// is extending once.
+fn void extend_over_a_covered_range_changes_nothing() {
+    diag.loc a = diag.loc_range("a.ft", 1, 1, 5, 5);
+    diag.loc inside = diag.loc_range("a.ft", 2, 2, 3, 3);
+    diag.loc once = diag.loc_extend(a, inside);
+    assert(once.end_line == 5);
+    assert(once.end_col == 5);
+    diag.loc twice = diag.loc_extend(once, inside);
+    assert(twice.end_line == 5);
+    assert(twice.end_col == 5);
+    assert(twice.line == 1);
+    assert(twice.col == 1);
+}
+
+// An end at the start is ordered (an empty range) and an end before it is not.
+fn void ordered_ranges_end_at_or_after_their_start() {
+    assert(diag.loc_is_ordered(diag.loc_range("a.ft", 2, 2, 2, 2)));
+    assert(diag.loc_is_ordered(diag.loc_range("a.ft", 2, 2, 2, 3)));
+    assert(diag.loc_is_ordered(diag.loc_range("a.ft", 2, 2, 3, 1)));
+    assert(!diag.loc_is_ordered(diag.loc_range("a.ft", 2, 2, 2, 1)));
+    assert(!diag.loc_is_ordered(diag.loc_range("a.ft", 2, 2, 1, 9)));
+}
+
+// ---- the sink ------------------------------------------------------------------
+
+// A fresh sink has reported nothing and has a full budget.
+fn void a_fresh_sink_is_empty() {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    assert(diag.count(&s) == 0);
+    assert(diag.record_count(&s) == 0);
+    assert(diag.file_count(&s) == 0);
+    assert(diag.budget_left(&s));
+}
+
+// An error is counted and recorded; a note is recorded and not counted
+// (D14.2).
+fn void errors_are_counted_and_notes_are_not() {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    diag.error(&s, diag.loc_make("a.ft", 1, 1), "first");
+    assert(diag.count(&s) == 1);
+    assert(diag.record_count(&s) == 1);
+    diag.note(&s, diag.loc_make("a.ft", 1, 1), "about the first");
+    assert(diag.count(&s) == 1);
+    assert(diag.record_count(&s) == 2);
+    diag.error(&s, diag.loc_make("a.ft", 2, 1), "second");
+    assert(diag.count(&s) == 2);
+    assert(diag.record_count(&s) == 3);
+}
+
+// A record carries the range, the severity and the message it was reported
+// with, in the order they were reported.
+fn void a_record_carries_what_was_reported() {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    diag.error(&s, diag.loc_range("one.ft", 3, 7, 3, 12), "bad thing");
+    diag.note(&s, diag.loc_make("two.ft", 9, 2), "it came from here");
+    diag.record first = diag.record_at(&s, 0);
+    assert(first.severity == diag.severity.error);
+    assert(first.msg == "bad thing");
+    assert(first.loc.file == "one.ft");
+    assert(first.loc.line == 3);
+    assert(first.loc.col == 7);
+    assert(first.loc.end_line == 3);
+    assert(first.loc.end_col == 12);
+    diag.record second = diag.record_at(&s, 1);
+    assert(second.severity == diag.severity.note);
+    assert(second.msg == "it came from here");
+    assert(second.loc.file == "two.ft");
+    assert(second.loc.line == 9);
+    assert(second.loc.col == 2);
+}
+
+// The message and the file name are copies the sink owns: the buffers they
+// came from may die, which is what lets a record outlive the module set that
+// reported it (D20.2).
+fn void a_record_outlives_the_buffers_it_was_built_from() {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    {
+        strbuf.str_buf mut file = strbuf.create();
+        defer strbuf.free(&file);
+        strbuf.append(&file, "gone.ft");
+        strbuf.str_buf mut msg = strbuf.create();
+        defer strbuf.free(&msg);
+        strbuf.append(&msg, "undefined name ");
+        strbuf.append(&msg, "'x'");
+        diag.error(&s, diag.loc_make(strbuf.view(&file), 2, 4), strbuf.view(&msg));
+    }
+    diag.record r = diag.record_at(&s, 0);
+    assert(r.loc.file == "gone.ft");
+    assert(r.msg == "undefined name 'x'");
+    assert(r.loc.line == 2);
+    assert(r.loc.col == 4);
+}
+
+// The records grow past their first capacity and keep their order: a file of
+// twenty diagnostics is the budget, so more than that takes several files.
+fn void the_records_grow_and_keep_their_order() {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    strbuf.str_buf mut msg = strbuf.create();
+    defer strbuf.free(&msg);
+    u64 mut i = 0;
+    while (i < 50) {
+        if (i % 10 == 0) {
+            diag.begin_file(&s);
+        }
+        strbuf.clear(&msg);
+        strbuf.append(&msg, "error ");
+        strbuf.append_u64(&msg, i);
+        diag.error(&s, diag.loc_make("a.ft", cast(i + 1, u32), 1), strbuf.view(&msg));
+        i += 1;
+    }
+    assert(diag.record_count(&s) == 50);
+    assert(diag.count(&s) == 50);
+    assert(diag.record_at(&s, 0).msg == "error 0");
+    assert(diag.record_at(&s, 0).loc.line == 1);
+    assert(diag.record_at(&s, 17).msg == "error 17");
+    assert(diag.record_at(&s, 17).loc.line == 18);
+    assert(diag.record_at(&s, 49).msg == "error 49");
+    assert(diag.record_at(&s, 49).loc.line == 50);
+}
+
+// Two sinks in one program share nothing: the counters of one are not the
+// counters of the other, which is what src/bootstrap/diag.c's globals cannot
+// do (D20.5).
+fn void two_sinks_share_nothing() {
+    diag.sink mut a = diag.create();
+    defer diag.free(&a);
+    diag.sink mut b = diag.create();
+    defer diag.free(&b);
+    diag.error(&a, diag.loc_make("a.ft", 1, 1), "in a");
+    diag.error(&a, diag.loc_make("a.ft", 2, 1), "in a again");
+    diag.error(&b, diag.loc_make("b.ft", 1, 1), "in b");
+    assert(diag.count(&a) == 2);
+    assert(diag.count(&b) == 1);
+    assert(diag.record_at(&a, 0).msg == "in a");
+    assert(diag.record_at(&b, 0).msg == "in b");
+    assert(diag.record_at(&b, 0).loc.file == "b.ft");
+}
+
+// ---- the budget of D14.2 -------------------------------------------------------
+
+// begin_file starts the count of the file about to be read.
+fn void begin_file_restarts_the_count() {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    diag.begin_file(&s);
+    diag.error(&s, diag.loc_make("a.ft", 1, 1), "one");
+    diag.error(&s, diag.loc_make("a.ft", 2, 1), "two");
+    assert(diag.file_count(&s) == 2);
+    diag.begin_file(&s);
+    assert(diag.file_count(&s) == 0);
+    assert(diag.count(&s) == 2);
+    diag.error(&s, diag.loc_make("b.ft", 1, 1), "three");
+    diag.note(&s, diag.loc_make("b.ft", 1, 1), "a note of three");
+    // The note is recorded and spends nothing of the file's budget.
+    assert(diag.file_count(&s) == 1);
+    assert(diag.count(&s) == 3);
+    assert(diag.record_count(&s) == 4);
+}
+
+// The twentieth error of a file is its last, and budget_left says so. The
+// budget is a question the lexer and the parser ask before they report, as
+// src/bootstrap/lexer.c and parser.c do; the sink itself refuses nothing, so
+// a pass with no cap -- the checker and the module loader have none -- reports
+// what it has to report and stage2 prints what stage1 prints (D14.2).
+fn void the_twentieth_error_is_the_last_one_the_budget_allows() {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    diag.begin_file(&s);
+    u64 mut i = 0;
+    while (i < 20) {
+        assert(diag.budget_left(&s));
+        diag.error(&s, diag.loc_make("a.ft", cast(i + 1, u32), 1), "spent");
+        i += 1;
+    }
+    assert(diag.file_count(&s) == 20);
+    assert(!diag.budget_left(&s));
+    // A caller that reports anyway is recorded: the sink is not the cap.
+    diag.error(&s, diag.loc_make("a.ft", 21, 1), "uncapped pass");
+    assert(diag.count(&s) == 21);
+    assert(diag.record_count(&s) == 21);
+    assert(diag.file_count(&s) == 21);
+    assert(diag.record_at(&s, 20).msg == "uncapped pass");
+    // The next file starts with a full budget.
+    diag.begin_file(&s);
+    assert(diag.budget_left(&s));
+    assert(diag.file_count(&s) == 0);
+    diag.error(&s, diag.loc_make("b.ft", 1, 1), "kept");
+    assert(diag.record_at(&s, 21).msg == "kept");
+    assert(diag.count(&s) == 22);
+}
+
+// A note spends nothing of the budget: the twenty are counted across a file's
+// lexical and syntax errors, and a note belongs to the error before it and is
+// counted by neither counter (D14.2), which is what src/bootstrap/diag.c does
+// -- diag_note touches neither errors nor file_errors.
+fn void a_note_spends_nothing_of_the_budget() {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    diag.begin_file(&s);
+    u64 mut i = 0;
+    while (i < 10) {
+        diag.error(&s, diag.loc_make("a.ft", cast(i + 1, u32), 1), "e");
+        diag.note(&s, diag.loc_make("a.ft", cast(i + 1, u32), 3), "n");
+        i += 1;
+    }
+    assert(diag.file_count(&s) == 10);
+    assert(diag.count(&s) == 10);
+    assert(diag.record_count(&s) == 20);
+    assert(diag.budget_left(&s));
+    // Ten more errors spend the rest of it; the ten notes beside them do not.
+    while (i < 20) {
+        diag.error(&s, diag.loc_make("a.ft", cast(i + 1, u32), 1), "e");
+        diag.note(&s, diag.loc_make("a.ft", cast(i + 1, u32), 3), "n");
+        i += 1;
+    }
+    assert(diag.file_count(&s) == 20);
+    assert(!diag.budget_left(&s));
+    assert(diag.record_count(&s) == 40);
+}
+
+// ---- reset and free ------------------------------------------------------------
+
+// reset drops every record and every copy, and the sink works afterwards.
+fn void reset_empties_the_sink() {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    diag.begin_file(&s);
+    diag.error(&s, diag.loc_make("a.ft", 1, 1), "gone after reset");
+    assert(diag.record_count(&s) == 1);
+    diag.reset(&s);
+    assert(diag.count(&s) == 0);
+    assert(diag.record_count(&s) == 0);
+    assert(diag.file_count(&s) == 0);
+    assert(diag.budget_left(&s));
+    diag.error(&s, diag.loc_make("b.ft", 5, 6), "after");
+    assert(diag.record_count(&s) == 1);
+    diag.record r = diag.record_at(&s, 0);
+    assert(r.msg == "after");
+    assert(r.loc.file == "b.ft");
+    assert(r.loc.line == 5);
+}
+
+// A thousand analyses through one sink allocate no more than one does: reset
+// releases the records and the copies rather than keeping them (D20.5).
+fn void a_thousand_resets_do_not_grow_the_sink() {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    u64 mut i = 0;
+    while (i < 1000) {
+        diag.begin_file(&s);
+        diag.error(&s, diag.loc_make("a.ft", 1, 1), "the same error every time");
+        diag.note(&s, diag.loc_make("a.ft", 1, 1), "with the same note");
+        assert(diag.record_count(&s) == 2);
+        diag.reset(&s);
+        i += 1;
+    }
+    assert(diag.record_count(&s) == 0);
+    assert(diag.count(&s) == 0);
+}
+
+// Freeing an empty sink is a no-op, and so is freeing one twice.
+fn void freeing_twice_is_a_no_op() {
+    diag.sink mut s = diag.create();
+    diag.free(&s);
+    diag.free(&s);
+    assert(diag.record_count(&s) == 0);
+    diag.error(&s, diag.loc_make("a.ft", 1, 1), "still works");
+    assert(diag.record_count(&s) == 1);
+    diag.free(&s);
+    assert(diag.record_count(&s) == 0);
+}
+
+// ---- the text form -------------------------------------------------------------
+
+// With text on, each diagnostic writes `<file>:<line>:<col>: error: <msg>`
+// and `... note: ...` to stderr as it arrives, and the records are kept all
+// the same (toolchain.md 4). The two lines are the stderr directives in this
+// test's header, so the format is held byte for byte.
+fn void text_writes_the_line_of_toolchain_4() {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    diag.set_text(&s, true);
+    diag.error(&s, diag.loc_range("one.ft", 3, 7, 3, 16), "bad thing");
+    diag.note(&s, diag.loc_make("one.ft", 3, 7), "it came from here");
+    assert(diag.record_count(&s) == 2);
+    assert(diag.count(&s) == 1);
+    // Turning it off again leaves the records alone and writes nothing more.
+    diag.set_text(&s, false);
+    diag.error(&s, diag.loc_make("one.ft", 9, 9), "silent");
+    assert(diag.record_count(&s) == 3);
+    assert(diag.record_at(&s, 2).msg == "silent");
+}
+
+// A sink that was never told to write text writes none: the default is a
+// library a server can embed.
+fn void text_is_off_until_it_is_asked_for() {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    assert(!s.text);
+    diag.error(&s, diag.loc_make("quiet.ft", 1, 1), "not on stderr");
+    assert(diag.record_count(&s) == 1);
+    diag.set_text(&s, true);
+    assert(s.text);
+    diag.set_text(&s, false);
+    assert(!s.text);
+}
+
+fn i32 main() {
+    loc_make_is_the_empty_range();
+    loc_range_carries_both_ends();
+    the_positionless_range_is_one_one();
+    extend_moves_the_end_forward();
+    extend_compares_line_before_column();
+    extend_over_a_covered_range_changes_nothing();
+    ordered_ranges_end_at_or_after_their_start();
+    println("loc ok");
+    a_fresh_sink_is_empty();
+    errors_are_counted_and_notes_are_not();
+    a_record_carries_what_was_reported();
+    a_record_outlives_the_buffers_it_was_built_from();
+    the_records_grow_and_keep_their_order();
+    two_sinks_share_nothing();
+    println("records ok");
+    begin_file_restarts_the_count();
+    the_twentieth_error_is_the_last_one_the_budget_allows();
+    a_note_spends_nothing_of_the_budget();
+    println("budget ok");
+    reset_empties_the_sink();
+    a_thousand_resets_do_not_grow_the_sink();
+    freeing_twice_is_a_no_op();
+    text_writes_the_line_of_toolchain_4();
+    text_is_off_until_it_is_asked_for();
+    println("ok");
+    return 0;
+}

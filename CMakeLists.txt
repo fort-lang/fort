@@ -41,6 +41,8 @@ set(FORT_TEST_DIR "${CMAKE_SOURCE_DIR}/test")
 set(FORT_STD_SRC_DIR "${CMAKE_SOURCE_DIR}/std")
 set(FORT_EDITORS_DIR "${CMAKE_SOURCE_DIR}/editors")
 set(FORT_STD_DIR "${CMAKE_BINARY_DIR}/std")
+set(FORT_FORT_SRC_DIR "${CMAKE_SOURCE_DIR}/src/fort")
+set(FORT_STAGE2_DIR "${CMAKE_BINARY_DIR}/stage2")
 
 # ---- the bootstrap compiler ---------------------------------------------------
 file(GLOB FORT_CORE_SOURCES CONFIGURE_DEPENDS "${FORT_SRC_DIR}/*.c")
@@ -111,6 +113,32 @@ add_custom_target(fort_rt ALL DEPENDS "${FORT_RT_OBJECT}" ${FORT_STD_OUTPUTS})
 add_library(fort_rt_native OBJECT "${FORT_RUNTIME_DIR}/fort_rt.c")
 target_compile_definitions(fort_rt_native PRIVATE FORT_RT_NO_MAIN)
 target_include_directories(fort_rt_native PUBLIC "${FORT_RUNTIME_DIR}")
+
+# ---- the self-hosted compiler --------------------------------------------------
+# stage2 is src/fort compiled by stage1 (toolchain.md 8): the binary is
+# x86-64 like every program the compiler builds, so it runs under qemu. It is
+# built by every build so that a module of src/fort that stage1 rejects fails
+# here rather than in the language run below; tools/bootstrap.sh drives the
+# same command by hand and goes on to stage3.
+file(GLOB FORT_FORT_SOURCES CONFIGURE_DEPENDS "${FORT_FORT_SRC_DIR}/*.ft")
+set(FORT_STAGE2_BINARY "${FORT_STAGE2_DIR}/fort")
+add_custom_command(
+    OUTPUT "${FORT_STAGE2_BINARY}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${FORT_STAGE2_DIR}"
+    COMMAND "$<TARGET_FILE:fort>" --std-dir "${FORT_STD_DIR}" --cc "${FORT_TARGET_CC_PATH}"
+            --target "${FORT_TARGET_TRIPLE}" -o "${FORT_STAGE2_BINARY}"
+            "${FORT_FORT_SRC_DIR}/main.ft"
+    # The file inputs, not just the targets: a DEPENDS on the custom target
+    # fort_rt is an order-only edge, so with fort_rt alone an edit to
+    # std/strmap.ft -- which session.ft imports -- left stage2/fort untouched
+    # and lang-stage2 and stage-usage then judged the previous build's binary.
+    # The copies in <build>/std are what stage1 actually reads, and fort_rt.o
+    # is what it links.
+    DEPENDS fort fort_rt ${FORT_FORT_SOURCES} ${FORT_STD_OUTPUTS} "${FORT_RT_OBJECT}"
+    COMMENT "Compiling src/fort with stage1 into stage2/fort"
+    VERBATIM
+)
+add_custom_target(fort_stage2 ALL DEPENDS "${FORT_STAGE2_BINARY}")
 
 # ---- unit tests ----------------------------------------------------------------
 # The test-only helpers that are compiled rather than included: every
@@ -196,7 +224,7 @@ add_custom_target(check
     COMMENT "Running the unit tests"
     USES_TERMINAL
 )
-add_dependencies(check fort fort_rt)
+add_dependencies(check fort fort_rt fort_stage2)
 if(FORT_UNIT_TEST_TARGETS)
     add_dependencies(check ${FORT_UNIT_TEST_TARGETS})
 endif()
@@ -243,6 +271,57 @@ add_test(NAME lang_check_json COMMAND ${FORT_LANG_COMMAND} --check-json)
 set_tests_properties(lang_check_json PROPERTIES
     LABELS lang
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
+
+# The compiler's own modules: test/fort/<x>_test.ft is a run test in the
+# directives of D14.5 that imports a module of src/fort with `-I` and asserts
+# what its comments promise, compiled by stage1 like any other program. The
+# harness takes the corpus root, so the same run_tests.py judges both.
+set(FORT_MODULE_TEST_DIR "${FORT_TEST_DIR}/fort")
+set(FORT_MODULE_TEST_COMMAND
+    "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}"
+    --root "${FORT_MODULE_TEST_DIR}"
+    --fort "$<TARGET_FILE:fort>"
+    --std-dir "${FORT_STD_DIR}"
+    --cc "${FORT_TARGET_CC_PATH}"
+    --opt "${FORT_OPT_PATH}"
+    --verify-ir
+    -j "${FORT_LANG_JOBS}"
+)
+add_test(NAME fort-modules COMMAND ${FORT_MODULE_TEST_COMMAND})
+set_tests_properties(fort-modules PROPERTIES
+    LABELS lang
+    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
+
+# The language corpus against stage2, with the expected failures of
+# xfail-stage2.txt: the compiler being written in fort is held against the
+# same tests as the one it replaces, and an entry leaves that list in the
+# commit that makes its tests pass (D14.4). stage2 is an x86-64 binary, so
+# every run of it here goes through qemu. --no-unsupported:
+# bootstrap-unsupported.txt lists what the C bootstrap deliberately lacks and
+# demands that the compiler reject those tests with the bootstrap diagnostic,
+# which stage2 is under no such obligation to do -- inheriting it would make
+# those twenty tests fail the day stage2 implements floats or `?:`, and their
+# xfail entries could then never honestly leave the list.
+set(FORT_LANG_STAGE2_COMMAND
+    "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}"
+    --fort "${FORT_STAGE2_BINARY}"
+    --std-dir "${FORT_STD_DIR}"
+    --cc "${FORT_TARGET_CC_PATH}"
+    --opt "${FORT_OPT_PATH}"
+    --xfail "${FORT_LANG_DIR}/xfail-stage2.txt"
+    --no-unsupported
+    -j "${FORT_LANG_JOBS}"
+)
+add_test(NAME lang-stage2 COMMAND ${FORT_LANG_STAGE2_COMMAND})
+set_tests_properties(lang-stage2 PROPERTIES LABELS lang)
+
+# src/fort/main.ft carries the option table of toolchain.md 1 and the version
+# string of src/bootstrap/driver.h as a second copy of what driver.c prints.
+# Both binaries exist here, so the two copies are held against each other by
+# running them: --help, --version and the usage line, byte for byte.
+add_test(NAME stage-usage
+    COMMAND bash "${FORT_TEST_DIR}/stage_usage_test.sh" "${CMAKE_BINARY_DIR}")
+set_tests_properties(stage-usage PROPERTIES LABELS unit)
 add_test(NAME lang_lint COMMAND "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}" --lint)
 set_tests_properties(lang_lint PROPERTIES LABELS unit)
 add_test(NAME lang_selftest
@@ -317,12 +396,14 @@ set_tests_properties(extension_selftest PROPERTIES LABELS unit)
 add_custom_target(check-lang
     COMMAND ${FORT_LANG_COMMAND}
     COMMAND ${FORT_LANG_COMMAND} --check-json
+    COMMAND ${FORT_MODULE_TEST_COMMAND}
+    COMMAND ${FORT_LANG_STAGE2_COMMAND}
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Running the language tests"
     USES_TERMINAL
     VERBATIM
 )
-add_dependencies(check-lang fort fort_rt)
+add_dependencies(check-lang fort fort_rt fort_stage2)
 
 add_custom_target(check-all COMMENT "Running every test")
 add_dependencies(check-all check check-lang)

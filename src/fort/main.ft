@@ -1,0 +1,95 @@
+// The entry point of the self-hosted compiler (toolchain.md 1).
+//
+// This is the skeleton of the driver: it answers the two options that need no
+// compiler, `--help` and `--version`, prints the usage line when there is
+// nothing to do, and reports every other invocation as an internal error
+// rather than pretending to build something. An invocation it cannot serve
+// exits 2, like every other usage, toolchain or internal error (D14.1).
+//
+// The passes take a session (session.ft): it owns the pool they intern into,
+// the sink they report to and the source texts they read, and freeing it frees
+// the analysis. The driver creates one per build, which is also what makes a
+// second build in one process -- a language server re-analysing a document
+// (D20.5) -- independent of the first.
+//
+// Dispatch: none. Option parsing is a chain of comparisons over the argument
+// list, as src/bootstrap/driver.c writes it, though not yet in that order: see
+// main below. The tables of function pointers belong to the parser and the
+// emitter (D3.10).
+import session;
+
+// The usage line of toolchain.md 1, printed by --help and after every usage
+// error. A module constant is UPPER_CASE (D1.4).
+string USAGE = "usage: fort [options] entry.ft";
+
+// The version printed by --version, as src/bootstrap/driver.h spells it; the
+// `stage-usage` ctest holds the two against each other.
+string VERSION = "0.1.0";
+
+// What --help prints after the usage line: the option table of toolchain.md 1.
+// It is the table src/bootstrap/driver.c prints, line for line, and the ctest
+// `stage-usage` diffs the two binaries' --help and --version so that the two
+// copies cannot drift while both compilers exist.
+fn void help() {
+    println(USAGE);
+    println("options:");
+    println("  -o <file>          write the output to <file> (default a.out)");
+    println("  -S                 stop after emitting the LLVM IR module <entry>.ll");
+    println("  -c                 stop after compiling that module to <entry>.o");
+    println("  -I <dir>           add a module search root; repeatable, in order");
+    println("  --std-dir <dir>    the standard library directory");
+    println("  --release          release mode");
+    println("  --no-bounds-check  remove the index and span checks; unsafe");
+    println("  -l<lib>            pass -l<lib> to the linker; repeatable, in order");
+    println("  --cc <path>        the clang that compiles and links the IR (default clang)");
+    println("  --target <triple>  pass --target=<triple> to --cc (default x86_64-linux-gnu)");
+    println("  -Xcc <arg>         pass <arg> to --cc verbatim; repeatable, in order");
+    println("  --check            run the front end only and stop; emit nothing");
+    println("  --json             write the check document to stdout; needs --check");
+    println("  --index            fill the document's identifier index; implies --check --json");
+    println("  --help             print this help and exit");
+    println("  --version          print the compiler version and exit");
+}
+
+// `fort: error: <message>` on stderr, the form every usage, toolchain and
+// internal error takes (toolchain.md 1, D14.1).
+fn void error(string message) {
+    eprintln("fort: error: ", message);
+}
+
+fn i32 main(string@ args) {
+    // fort with no arguments prints one usage line and exits with 2
+    // (toolchain.md 1).
+    if (args.len < 2) {
+        eprintln(USAGE);
+        return 2;
+    }
+    // The two options that need no compiler are answered wherever they stand,
+    // which src/bootstrap/driver.c does not do: it walks the arguments in
+    // order and reaches a usage error first, so `fort a.ft b.ft --help` is
+    // `unexpected argument 'b.ft'` there and help here. Matching that order
+    // needs the rest of the command line parsed -- an option that takes the
+    // following argument decides whether a `--help` after it is an option at
+    // all -- so the divergence stands until the driver is written, and this
+    // comment is what says it is deliberate rather than an oversight.
+    for (string arg : args[1..]) {
+        if (arg == "--help") {
+            help();
+            return 0;
+        }
+        if (arg == "--version") {
+            println("fort ", VERSION);
+            return 0;
+        }
+    }
+    // The session the passes will take. It is created and freed here so that
+    // the shape of a build is the shape a re-analysis has: one value, whose
+    // storage is gone when the build returns (D20.5).
+    session.session mut s = session.create();
+    defer session.free(&s);
+    // An internal error is not a usage error, so no usage line follows it:
+    // toolchain.md 1 puts that line after the five errors that report a
+    // command line the compiler cannot use, and this command line is fine.
+    error("internal error: this compiler cannot build a program yet");
+    return 2;
+}
