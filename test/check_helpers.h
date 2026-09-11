@@ -41,19 +41,19 @@ static inline void check_reset(void) {
 }
 
 // Loads the closure of the sandbox module `rel` and checks it; false when the
-// load or the check reported a diagnostic.
+// load or the check reported a diagnostic. Checking runs even when the load
+// failed, as the front end does, so that a module whose import did not parse
+// is still checked (D14.2, D20.1).
 static inline bool check_entry(const char* rel) {
     check_reset();
-    if (!load(rel)) {
-        return false;
-    }
+    const bool loaded = load(rel);
     check_init(&checker);
     checker_live = true;
     checker.require_main = want_main;
     checker.mute = want_mute;
     want_main = true;
     want_mute = false;
-    return check_program(&checker, &set);
+    return check_program(&checker, &set) && loaded;
 }
 
 // Writes `text` as the entry module `main.ft` and checks it.
@@ -230,6 +230,12 @@ static inline ast_node_t* untyped_expr(ast_node_t* n) {
 static inline ast_node_t* unresolved_name(ast_node_t* n) {
     if (n == NULL) {
         return NULL;
+    }
+    if (n->kind == AST_PATH) {
+        // Every segment of an import path but the last names a search
+        // directory rather than a module, so only the last one denotes
+        // something (D9.2, D9.3).
+        return unresolved_name(ast_child(n, ast_len(n) - 1));
     }
     const bool literal = n->kind == AST_STRING || n->kind == AST_FLOAT;
     const bool pseudo =

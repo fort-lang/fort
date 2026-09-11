@@ -161,6 +161,12 @@ static void check_assign(check_t* ck, ast_node_t* n) {
         return;
     }
     expr_t rhs;
+    if (!ok) {
+        // The target already failed: the value is checked for its own errors
+        // and the operator says nothing more (D14.2).
+        check_expr_default(ck, n->b, &rhs);
+        return;
+    }
     check_expr(ck, n->b, &rhs);
     expr_t result;
     check_operands(ck, n->loc, compound_operator(n->op), n->a, &lv, n->b, &rhs, &result);
@@ -195,7 +201,9 @@ static void check_call_stmt(check_t* ck, ast_node_t* n) {
     if (check_poisoned(e.type)) {
         return;
     }
-    if (type_is_reference(e.type) && e.type->own) {
+    // An owning result is an `own` reference or an owning aggregate (D17.7),
+    // and nothing could free either once it is dropped (D17.8).
+    if ((type_is_reference(e.type) && e.type->own) || type_is_owning_aggregate(e.type)) {
         check_msg_begin(ck);
         msg_str(&ck->msg, "owning result discarded: bind it or del it");
         check_msg_end(ck, n->loc);

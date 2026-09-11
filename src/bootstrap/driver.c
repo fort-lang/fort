@@ -624,19 +624,17 @@ int driver_front_end(const driver_options_t* opts,
     if (files != NULL) {
         collect_files(&set, files);
     }
-    // Step 3: every module of the closure is checked, in the dependency order
-    // the loader left (D9.10, D14.2 as amended).
-    bool checked = true;
-    if (loaded) {
-        check_t ck;
-        check_init(&ck);
-        // A compilation builds a program, so the entry module defines main
-        // (D8.6); --check inspects one module instead and stands down for a
-        // missing one (D20.1).
-        ck.require_main = ir_path != NULL;
-        checked = check_program(&ck, &set);
-        check_free(&ck);
-    }
+    // Step 3: every module that parsed is checked, the dependency order
+    // first, so one file that did not parse never hides the errors of the
+    // others (D9.10, D14.2 as amended).
+    check_t ck;
+    check_init(&ck);
+    // A compilation builds a program, so the entry module defines main
+    // (D8.6); --check inspects one module instead, and the entry rule does
+    // not apply to it (D20.1).
+    ck.require_main = ir_path != NULL;
+    const bool checked = check_program(&ck, &set);
+    check_free(&ck);
     module_set_free(&set);
     if (!loaded || !checked) {
         // At least one compile error was reported, which is exit 1 (D14.1).

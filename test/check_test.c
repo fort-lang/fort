@@ -615,18 +615,28 @@ TEST(a_main_returning_void_is_refused, {
     TEST_ASSERT_TRUE(said("main.ft:1:9:"));
 })
 
-TEST(a_main_with_a_wrong_signature_is_refused_in_both_modes, {
-    // The entry rule stands down for a missing `main` under a check of one
-    // module, never for one that is there and wrong (D8.6, D20.1).
+TEST(the_entry_rule_does_not_apply_to_a_module_checked_on_its_own, {
+    // A file checked on its own is a module under inspection and not a
+    // program, so D8.6 is not applied to it at all (D20.1): neither the
+    // missing `main` nor the `fn void main()` a library may legally declare
+    // is an error there, and a compilation reports both.
+    begin();
+    add("main.ft", "i32 A = 1;\n");
+    want_main = false;
+    TEST_ASSERT_TRUE(check_entry("main.ft"));
+    begin();
+    add("main.ft", "fn void main() {\n}\n");
+    want_main = false;
+    TEST_ASSERT_TRUE(check_entry("main.ft"));
     begin();
     add("main.ft", "fn i32 main(i32 n) {\n    return n;\n}\n");
     want_main = false;
-    TEST_ASSERT_FALSE(check_entry("main.ft"));
-    TEST_ASSERT_TRUE(said("must define"));
+    TEST_ASSERT_TRUE(check_entry("main.ft"));
     begin();
     add("main.ft", "fn i32 main(i32 n) {\n    return n;\n}\n");
-    TEST_ASSERT_FALSE(check_entry("main.ft"));
-    TEST_ASSERT_TRUE(said("must define"));
+    const bool compiled = check_entry("main.ft");
+    TEST_ASSERT_FALSE(compiled);
+    TEST_ASSERT_TRUE(said("entry module 'main' must define"));
 })
 
 TEST(main_may_take_the_argument_span, {
@@ -639,13 +649,6 @@ TEST(a_main_in_another_module_is_ordinary, {
     begin();
     add("util.ft", "fn void main() {\n}\n");
     add("main.ft", "import util;\nfn i32 main() {\n    util.main();\n    return 0;\n}\n");
-    TEST_ASSERT_TRUE(check_entry("main.ft"));
-})
-
-TEST(a_check_without_the_main_rule_accepts_a_module_without_one, {
-    begin();
-    add("main.ft", "i32 A = 1;\n");
-    want_main = false;
     TEST_ASSERT_TRUE(check_entry("main.ft"));
 })
 
@@ -716,10 +719,9 @@ int main(int argc, char** argv) {
     TEST_RUN(an_extern_signature_cannot_use_a_string);
     TEST_RUN(an_entry_module_without_main_is_reported_at_one_one);
     TEST_RUN(a_main_returning_void_is_refused);
-    TEST_RUN(a_main_with_a_wrong_signature_is_refused_in_both_modes);
+    TEST_RUN(the_entry_rule_does_not_apply_to_a_module_checked_on_its_own);
     TEST_RUN(main_may_take_the_argument_span);
     TEST_RUN(a_main_in_another_module_is_ordinary);
-    TEST_RUN(a_check_without_the_main_rule_accepts_a_module_without_one);
     TEST_RUN(the_mute_flag_counts_without_reporting);
     check_reset();
     done();

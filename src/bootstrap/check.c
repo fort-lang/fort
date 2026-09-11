@@ -37,6 +37,7 @@ void check_init(check_t* ck) {
     ptrvec_init(&ck->syms);
     ptrvec_init(&ck->values);
     sb_init(&ck->msg);
+    strmap_init(&ck->bad_imports);
     // One symbol per universe name of D12.2, so that every use of a builtin
     // denotes the same record.
     for (uint64_t i = 0; i < UNIVERSE_COUNT; i++) {
@@ -68,6 +69,7 @@ void check_free(check_t* ck) {
         mem_free(ck->values.items[i]);
     }
     ptrvec_free(&ck->values);
+    strmap_free(&ck->bad_imports);
     sb_free(&ck->msg);
     type_table_free(&ck->types);
 }
@@ -226,9 +228,19 @@ static const sym_t* check_builtin(const check_t* ck, str_t name) {
     return NULL;
 }
 
+// Whether the name is one an import of this module failed to bind: the
+// loader reported that import, so nothing more is said about the name
+// (D14.2).
+static bool from_a_failed_import(const check_t* ck, str_t name) {
+    return strmap_has(&ck->bad_imports, name);
+}
+
 // "unknown name 'x'", with the hint D3.9 asks for when the name is an enum
 // member, which is written `color.red` and lives in no namespace.
 static void error_unknown_name(check_t* ck, str_t name, loc_t loc) {
+    if (from_a_failed_import(ck, name)) {
+        return;
+    }
     check_msg_begin(ck);
     msg_str(&ck->msg, "unknown name ");
     msg_quote(&ck->msg, name);
@@ -329,10 +341,12 @@ bool check_layout(check_t* ck, const type_t* t) {
 static const type_t* named_type(check_t* ck, ast_node_t* n) {
     const binding_t* b = lookup(ck, n->name);
     if (b == NULL) {
-        check_msg_begin(ck);
-        msg_str(&ck->msg, "unknown type ");
-        msg_quote(&ck->msg, n->name);
-        check_msg_end(ck, n->name_loc);
+        if (!from_a_failed_import(ck, n->name)) {
+            check_msg_begin(ck);
+            msg_str(&ck->msg, "unknown type ");
+            msg_quote(&ck->msg, n->name);
+            check_msg_end(ck, n->name_loc);
+        }
         return type_error(&ck->types);
     }
     const sym_t* s = sym_of_binding(b);
@@ -404,6 +418,19 @@ static bool array_length(check_t* ck, ast_node_t* e, uint64_t* out) {
     return true;
 }
 
+// Whether a written return type is `noreturn` (D8.5). Every return type is
+// parsed through `type`, so the keyword sits under the AST_TYPE wrapper; a
+// base type node is accepted too, since a speculative parse hands one over.
+static bool is_noreturn(const ast_node_t* t) {
+    if (t == NULL) {
+        return false;
+    }
+    if (t->kind == AST_TYPE) {
+        return t->a != NULL && t->a->kind == AST_TYPE_NORETURN;
+    }
+    return t->kind == AST_TYPE_NORETURN;
+}
+
 // The base type of a written type (grammar.md 4): a primitive, `string`,
 // `void`, `noreturn`, a qualified name or a function type.
 static const type_t* base_type(check_t* ck, ast_node_t* n, bool allow_noreturn) {
@@ -456,8 +483,7 @@ static const type_t* base_type(check_t* ck, ast_node_t* n, bool allow_noreturn) 
             ok = ok && !check_poisoned(p.type);
         }
         if (ok) {
-            t = type_fn(
-                &ck->types, ret.type, params, (uint32_t)count, n->a->kind == AST_TYPE_NORETURN);
+            t = type_fn(&ck->types, ret.type, params, (uint32_t)count, is_noreturn(n->a));
         }
         break;
     }
@@ -987,13 +1013,24 @@ static void check_shift(
     out->untyped = a->untyped;
     const bool counted = cv_is_int(b->value);
     if (a->untyped) {
-        // Among untyped constants the count is in 0..63 (D4.4).
+        // The left operand has no width until its context fixes one, so the
+        // count is checked against the range of an untyped constant, 0..63
+        // (D4.4), whether or not the operand folded.
+        int64_t count = 0;
+        if (counted && (!cv_to_i64(b->value, &count) || count < 0 || count > CV_SHIFT_MAX)) {
+            check_error(ck, loc, "constant shift count must be in 0..63");
+            out->type = type_error(&ck->types);
+            out->untyped = false;
+            return;
+        }
         if (counted && cv_is_int_like(a->value)) {
             cval_t v = cv_none();
             const cval_t left = cv_as_int(a->value);
             const bool ok = op == TOK_SHL ? cv_shl(left, b->value, &v) : cv_shr(left, b->value, &v);
             if (!ok) {
-                check_error(ck, loc, "constant shift count must be in 0..63 and the result exact");
+                // The count is in range, so an exact result that leaves the
+                // constant range is what failed (D4.4).
+                check_error(ck, loc, "constant expression out of range");
                 out->type = type_error(&ck->types);
                 out->untyped = false;
                 return;
@@ -1662,7 +1699,9 @@ static void check_index(check_t* ck, ast_node_t* n, expr_t* out) {
         }
     }
     out->type = elem;
-    out->lvalue = true;
+    // `e[i]` is an lvalue where `e` is an lvalue fixed array, or any span or
+    // string expression (D6.7): indexing an rvalue array yields a copy.
+    out->lvalue = a.type->kind != TYPE_ARRAY || a.lvalue;
     // The mutability of an element: of the array's own storage, of level 1 of
     // a span, never of a string (D5.7).
     out->mut = a.type->kind == TYPE_ARRAY ? a.mut : (a.type->kind == TYPE_SPAN && a.type->mut);
@@ -1786,12 +1825,6 @@ static void check_new(check_t* ck, ast_node_t* n, expr_t* out) {
     const bool counted = n->b != NULL;
     const bool ok = !counted || check_count(ck, n->b, "count", &count);
     if (check_poisoned(t.type) || !ok) {
-        return;
-    }
-    if (t.type->kind == TYPE_SPAN) {
-        // A span header is not an element type: `new(T, n)` asks for a span
-        // (D10.2).
-        check_error(ck, n->loc, "'new' takes an element type: write 'new(T, n)' for a span");
         return;
     }
     if (!check_layout(ck, t.type) || !check_size_fits(ck, n->loc, t.type)) {
@@ -2512,8 +2545,13 @@ static void resolve_fn(check_t* ck, sym_t* s) {
     uint64_t n = 0;
     for (uint64_t i = 0; i < ast_len(decl); i++) {
         ast_node_t* p = ast_child(decl, i);
-        if (p->kind != AST_PARAM || n >= CHECK_MAX_MEMBERS) {
+        if (p->kind != AST_PARAM) {
             continue;
+        }
+        if (n >= CHECK_MAX_MEMBERS) {
+            check_error(ck, p->loc, "too many parameters");
+            ok = false;
+            break;
         }
         const check_type_t pt = check_type(ck, p->a, TYPE_POS_BINDING);
         sym_t* ps = check_sym_new(ck, SYM_PARAM, p->name, p, s);
@@ -2562,11 +2600,7 @@ static void resolve_fn(check_t* ck, sym_t* s) {
         sym_fail(ck, s);
         return;
     }
-    s->type = type_fn(&ck->types,
-                      ret.type,
-                      params,
-                      (uint32_t)n,
-                      decl->a->kind == AST_TYPE && decl->a->a->kind == AST_TYPE_NORETURN);
+    s->type = type_fn(&ck->types, ret.type, params, (uint32_t)n, is_noreturn(decl->a));
 }
 
 static void resolve_var(check_t* ck, sym_t* s) {
@@ -2709,6 +2743,38 @@ static void clear_annotations(ast_node_t* n) {
     }
 }
 
+// The name an import binds: the `as` alias, the item's own name, or the last
+// segment of the path (D9.3).
+static str_t bound_name(const ast_node_t* imp, const ast_node_t* item) {
+    if (item != NULL) {
+        return item->a != NULL ? item->a->name : item->name;
+    }
+    if (imp->b != NULL) {
+        return imp->b->name;
+    }
+    const ast_node_t* path = imp->a;
+    return path != NULL && ast_len(path) > 0 ? ast_child(path, ast_len(path) - 1)->name
+                                             : str_from_range(NULL, 0);
+}
+
+// The names the module's imports did not bind, which is what an import the
+// loader reported leaves behind: a use of one says nothing further (D14.2).
+static void collect_failed_imports(check_t* ck, const module_t* m) {
+    for (uint64_t i = 0; i < ast_len(m->ast); i++) {
+        const ast_node_t* imp = ast_child(m->ast, i);
+        if (imp->kind != AST_IMPORT) {
+            continue;
+        }
+        const uint64_t items = ast_len(imp);
+        for (uint64_t k = 0; k == 0 || k < items; k++) {
+            const str_t name = bound_name(imp, items > 0 ? ast_child(imp, k) : NULL);
+            if (name.len > 0 && scope_find(&m->names, name) == NULL) {
+                (void)strmap_put(&ck->bad_imports, name, 1);
+            }
+        }
+    }
+}
+
 // Phase one: one symbol per top-level declaration, so that the declarations
 // of a module are order-independent (D7.10).
 static void collect_module(check_t* ck, const module_t* m) {
@@ -2766,12 +2832,6 @@ static void check_main(check_t* ck, const module_t* m) {
     if (ok || (s != NULL && s->error)) {
         return;
     }
-    if (s == NULL && !ck->require_main) {
-        // A module checked on its own is under inspection, not a program, so
-        // the entry rule does not apply to it (D20.1); a `main` that is there
-        // and wrong is still wrong.
-        return;
-    }
     check_msg_begin(ck);
     msg_str(&ck->msg, "entry module ");
     msg_quote(&ck->msg, m->path);
@@ -2789,6 +2849,9 @@ bool check_module(check_t* ck, const module_t* m) {
     ck->scope = NULL;
     ck->in_function = false;
     clear_annotations(m->ast);
+    strmap_free(&ck->bad_imports);
+    strmap_init(&ck->bad_imports);
+    collect_failed_imports(ck, m);
     collect_module(ck, m);
     // Phase two: every declaration is resolved, each on demand, so that a
     // type or a constant reached from another one is complete when it is read
@@ -2807,14 +2870,26 @@ bool check_module(check_t* ck, const module_t* m) {
             check_function_body(ck, decl, decl->sym);
         }
     }
-    if (m->entry) {
-        // The entry module defines main (D8.6); under a check of one module
-        // the rule stands down for a missing one (D20.1).
+    if (m->entry && ck->require_main) {
+        // The entry module defines main (D8.6). A module checked on its own
+        // is a file under inspection and not a program, so the rule does not
+        // apply to it at all (D20.1).
         check_main(ck, m);
     }
     ck->module = NULL;
     ck->module_sym = NULL;
     return ck->errors == before;
+}
+
+// Whether the module is one the loader put in the dependency order, which is
+// where check_program starts.
+static bool in_dependency_order(const module_set_t* set, const module_t* m) {
+    for (uint64_t i = 0; i < module_set_count(set); i++) {
+        if (module_set_at(set, i) == m) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool check_program(check_t* ck, const module_set_t* set) {
@@ -2823,6 +2898,17 @@ bool check_program(check_t* ck, const module_set_t* set) {
     // D14.2): an imported module is complete before its importer reads it.
     for (uint64_t i = 0; i < module_set_count(set); i++) {
         if (!check_module(ck, module_set_at(set, i))) {
+            ok = false;
+        }
+    }
+    // A module the walk did not finish -- one whose own import failed, or an
+    // importer of a file that did not parse -- is still checked when it
+    // parsed itself, so that its own errors are reported and not only its
+    // import's (D14.2, D20.1). They are read depth first, so the reverse of
+    // the read order puts an imported module before its importer.
+    for (uint64_t i = set->modules.len; i > 0; i--) {
+        const module_t* m = (const module_t*)set->modules.items[i - 1];
+        if (m->parsed && m->ast != NULL && !in_dependency_order(set, m) && !check_module(ck, m)) {
             ok = false;
         }
     }

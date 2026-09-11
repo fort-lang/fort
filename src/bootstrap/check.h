@@ -103,10 +103,14 @@ typedef struct {
 } expr_t;
 
 typedef struct {
-    type_table_t types;                    // owned: every type the annotations point to
-    ptrvec_t syms;                         // sym_t*, owned; alive until check_free
-    ptrvec_t values;                       // cval_t*, owned: the folded values `aux` indexes
-    sb_t msg;                              // the message builder of diag.h
+    type_table_t types; // owned: every type the annotations point to
+    ptrvec_t syms;      // sym_t*, owned; alive until check_free
+    ptrvec_t values;    // cval_t*, owned: the folded values `aux` indexes
+    sb_t msg;           // the message builder of diag.h
+    // The names an import of the module being checked failed to bind: the
+    // loader reported each one, so a use of one is silent, as a use of a
+    // declaration that failed to check is (D14.2).
+    strmap_t bad_imports;
     const sym_t* builtins[UNIVERSE_COUNT]; // the universe functions of D12.2
     bool mute;                             // annotate without reporting, for an editor mode (D20.2)
     bool require_main; // the entry module defines main (D8.6); off for a check-only run
@@ -133,8 +137,11 @@ void check_init(check_t* ck);
 // checker wrote points into them, so the tree must not be read afterwards.
 void check_free(check_t* ck);
 
-// Checks every module of the closure in dependency order (D9.10, D14.2) and
-// returns whether none reported an error.
+// Checks the closure: every module the loader put in the dependency order
+// first (D9.10, D14.2), then every other module that parsed, deepest first,
+// so that a file whose import failed is still checked and an editor sees its
+// own errors (D20.1). A module that did not parse is not checked (D14.2).
+// Returns whether none reported an error.
 bool check_program(check_t* ck, const module_set_t* set);
 
 // Checks one module. Every module it imports must have been checked already,

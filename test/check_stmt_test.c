@@ -139,6 +139,11 @@ TEST(a_compound_assignment_has_the_rules_of_its_operator, {
     TEST_ASSERT_TRUE(said("'+' takes two operands of the same type, not i32 and i64"));
     TEST_ASSERT_FALSE(check_body("    string mut s = \"a\";\n    s += \"b\";\n    println(s);"));
     TEST_ASSERT_TRUE(said("'+' takes numeric operands, not string"));
+    // A target that failed says nothing about the operator as well: one
+    // construct, one diagnostic (D14.2).
+    TEST_ASSERT_FALSE(check_body("    i32 x = 1;\n    x += \"s\";\n    println(x);"));
+    TEST_ASSERT_TRUE(said("cannot assign to immutable 'x'"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
 })
 
 TEST(incdec_needs_an_integer_lvalue, {
@@ -379,6 +384,50 @@ TEST(a_while_true_with_no_break_terminates, {
     TEST_ASSERT_TRUE(said("missing return"));
 })
 
+TEST(a_constant_true_condition_does_not_terminate, {
+    // D8.4 names `while (true)`, the literal: a condition that folds to true
+    // is not one, and the conservative reading reports the missing return
+    // rather than accepting a body that may fall through.
+    TEST_ASSERT_FALSE(check_src("bool ALWAYS = true;\n"
+                                "fn i32 spin() {\n    while (ALWAYS) {\n        println(1);\n"
+                                "    }\n}\n"
+                                "fn i32 main() {\n    return spin();\n}\n"));
+    TEST_ASSERT_TRUE(said("missing return"));
+})
+
+TEST(a_call_through_a_noreturn_pointer_terminates, {
+    // A call statement to a `noreturn` function is terminating, through a
+    // function pointer as through a name (D8.4, D6.11).
+    TEST_ASSERT_TRUE(check_src("fn i32 pick(bool b, fn noreturn(string) quit) {\n"
+                               "    if (b) {\n        return 1;\n    }\n"
+                               "    quit(\"no\");\n}\n"
+                               "fn noreturn die(string msg) {\n    panic(msg);\n}\n"
+                               "fn i32 main() {\n    return pick(true, die);\n}\n"));
+    TEST_ASSERT_FALSE(check_src("fn i32 pick(bool b, fn void(string) quit) {\n"
+                                "    if (b) {\n        return 1;\n    }\n"
+                                "    quit(\"no\");\n}\n"
+                                "fn void say(string msg) {\n    println(msg);\n}\n"
+                                "fn i32 main() {\n    return pick(true, say);\n}\n"));
+    TEST_ASSERT_TRUE(said("missing return"));
+})
+
+TEST(a_discarded_owning_aggregate_is_refused, {
+    // An owning result is an `own` reference or an owning aggregate (D17.7),
+    // and neither may be dropped (D17.8).
+    TEST_ASSERT_FALSE(check_src("struct vec {\n    i32 mut@ own data;\n}\n"
+                                "fn vec make() {\n    return vec{.data = new(i32, 2)};\n}\n"
+                                "fn i32 main() {\n    make();\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("owning result discarded"));
+    TEST_ASSERT_FALSE(check_src("struct vec {\n    i32 mut@ own data;\n}\n"
+                                "fn i32 main() {\n    vec mut b = {};\n    move(b);\n"
+                                "    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("owning result discarded"));
+    // A result that owns nothing is discarded freely (D7.3).
+    TEST_ASSERT_TRUE(check_src("struct point {\n    i32 x;\n}\n"
+                               "fn point make() {\n    return point{1};\n}\n"
+                               "fn i32 main() {\n    make();\n    return 0;\n}\n"));
+})
+
 TEST(a_break_in_an_inner_switch_does_not_target_the_loop, {
     TEST_ASSERT_TRUE(check_src("fn i32 spin(i32 n) {\n    while (true) {\n        switch (n) {\n"
                                "        default:\n            break;\n        }\n    }\n}\n"
@@ -485,6 +534,9 @@ int main(int argc, char** argv) {
     TEST_RUN(a_missing_return_is_reported_at_the_closing_brace);
     TEST_RUN(an_if_with_an_else_terminates);
     TEST_RUN(a_while_true_with_no_break_terminates);
+    TEST_RUN(a_constant_true_condition_does_not_terminate);
+    TEST_RUN(a_call_through_a_noreturn_pointer_terminates);
+    TEST_RUN(a_discarded_owning_aggregate_is_refused);
     TEST_RUN(a_break_in_an_inner_switch_does_not_target_the_loop);
     TEST_RUN(a_for_with_no_condition_terminates);
     TEST_RUN(an_exhaustive_enum_switch_terminates);

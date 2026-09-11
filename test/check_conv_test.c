@@ -294,6 +294,67 @@ TEST(an_extern_signature_takes_scalars_and_pointers, {
     TEST_ASSERT_TRUE(said("extern signature cannot use type 'i32[2]'"));
 })
 
+TEST(a_noreturn_function_pointer_keeps_its_type, {
+    TEST_ASSERT_TRUE(check_src("fn noreturn die(string msg) {\n    panic(msg);\n}\n"
+                               "fn i32 main() {\n    fn noreturn(string) f = die;\n"
+                               "    println(f);\n    return 0;\n}\n"));
+    // `noreturn` is part of a function type's identity (D3.10, D8.5), so the
+    // written type of the binding is the function's own.
+    TEST_ASSERT_EQ_STR(type_text(sym_main("die")->type), "fn noreturn(string)");
+    TEST_ASSERT_EQ_STR(decl_type("f"), "fn noreturn(string)");
+    TEST_ASSERT_FALSE(check_src("fn void die(string msg) {\n    println(msg);\n}\n"
+                                "fn i32 main() {\n    fn noreturn(string) f = die;\n"
+                                "    println(f);\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("expects fn noreturn(string), not fn void(string)"));
+})
+
+// ---- imports that failed (D14.2, D20.1) ----------------------------------------------
+
+TEST(an_importer_is_checked_although_its_import_did_not_parse, {
+    begin();
+    add("util.ft", "fn i32 one( {\n    return 1;\n}\n");
+    add("main.ft", "import util;\nfn i32 main() {\n    bool z = 1;\n    return util.one();\n}\n");
+    TEST_ASSERT_FALSE(check_entry("main.ft"));
+    // A file with a syntax error is not checked; every other module is, so
+    // the importer reports its own error (D14.2).
+    TEST_ASSERT_TRUE(said("an integer constant does not become bool"));
+    // The loader reported the import, so the name it did not bind says
+    // nothing further.
+    TEST_ASSERT_FALSE(said("unknown name 'util'"));
+})
+
+TEST(a_failed_import_silences_every_use_of_its_name, {
+    begin();
+    add("main.ft",
+        "import nothere;\nfn i32 main() {\n    nothere.point p = {1};\n"
+        "    return nothere.one() + p.x;\n}\n");
+    TEST_ASSERT_FALSE(check_entry("main.ft"));
+    TEST_ASSERT_TRUE(said("not found"));
+    TEST_ASSERT_FALSE(said("unknown name 'nothere'"));
+    TEST_ASSERT_FALSE(said("unknown type 'nothere'"));
+})
+
+TEST(a_multi_segment_import_path_names_its_module, {
+    begin();
+    add("util/strings.ft", "i32 LEN = 3;\nfn i32 helper() {\n    return LEN;\n}\n");
+    add("main.ft",
+        "import util::strings;\nimport util::strings::helper;\n"
+        "fn i32 main() {\n    return strings.LEN + helper();\n}\n");
+    TEST_ASSERT_TRUE(check_entry("main.ft"));
+    const sym_t* module = module_at("util::strings")->ast->sym;
+    ast_node_t* mod = module_at("main")->ast;
+    const ast_node_t* first = ast_child(mod, 0);
+    const ast_node_t* second = ast_child(mod, 1);
+    // The last segment of a module reading names the module; of a symbol
+    // reading, the declaration, with the module on the segment before it
+    // (D9.3). The segments before those name directories and carry nothing.
+    TEST_ASSERT_TRUE(ast_child(first->a, 1)->sym == module);
+    TEST_ASSERT_NULL(ast_child(first->a, 0)->sym);
+    TEST_ASSERT_TRUE(ast_child(second->a, 2)->sym == sym_of("util::strings", "helper"));
+    TEST_ASSERT_TRUE(ast_child(second->a, 1)->sym == module);
+    TEST_ASSERT_NULL(unresolved_name(mod));
+})
+
 // ---- sizes and layout (D3.1, D3.8, D3.15) -------------------------------------------
 
 TEST(sizeof_gives_the_size_of_every_kind, {
@@ -441,6 +502,10 @@ int main(int argc, char** argv) {
     TEST_RUN(a_function_type_ignores_the_binding_mut_of_its_parameters);
     TEST_RUN(a_void_parameter_is_refused);
     TEST_RUN(an_extern_signature_takes_scalars_and_pointers);
+    TEST_RUN(a_noreturn_function_pointer_keeps_its_type);
+    TEST_RUN(an_importer_is_checked_although_its_import_did_not_parse);
+    TEST_RUN(a_failed_import_silences_every_use_of_its_name);
+    TEST_RUN(a_multi_segment_import_path_names_its_module);
     TEST_RUN(sizeof_gives_the_size_of_every_kind);
     TEST_RUN(a_field_offset_follows_the_c_layout);
     TEST_RUN(a_struct_of_a_struct_is_laid_out_once);

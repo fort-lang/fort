@@ -16,8 +16,12 @@
 // the declaration is silenced by the poison the type table already carries
 // (D14.2).
 //
-// A record lives as long as the checker that made it, which the driver keeps
-// alive until the compilation ends, and is never freed on its own.
+// A record lives as long as the checker that made it: every `sym` and `type`
+// slot of the tree dangles once check_free has run, so a pass that reads the
+// annotations runs before it. The one carve-out in the rule above is an
+// import path: only its last segment denotes the module or the declaration
+// the import binds, the segments before it naming search directories rather
+// than modules (D9.2, D9.3), so they carry no symbol.
 //
 // The file mirrors what the self-hosted compiler will do: no unions, no
 // function pointers, a plain struct laid out in the open. The declaring node

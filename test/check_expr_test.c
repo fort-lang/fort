@@ -195,6 +195,20 @@ TEST(a_constant_index_out_of_range_is_refused, {
     TEST_ASSERT_TRUE(said("index 4 out of range for i32[4]"));
 })
 
+TEST(an_index_of_an_rvalue_array_is_not_an_lvalue, {
+    // `e[i]` is an lvalue where `e` is an lvalue fixed array (D6.7): the
+    // elements of a returned array live in a temporary.
+    TEST_ASSERT_FALSE(check_src("fn i32[3] make() {\n    return i32[3]{1, 2, 3};\n}\n"
+                                "fn i32 main() {\n    i32* p = &make()[0];\n"
+                                "    return *p;\n}\n"));
+    TEST_ASSERT_TRUE(said("'&' requires an lvalue"));
+    // Reading one is fine, and a span or string expression is an lvalue
+    // whatever its operand.
+    TEST_ASSERT_TRUE(check_src("fn i32[3] make() {\n    return i32[3]{1, 2, 3};\n}\n"
+                               "fn i32 main() {\n    return make()[0];\n}\n"));
+    TEST_ASSERT_TRUE(check_body("    string s = \"ab\";\n    println(&s[0]);"));
+})
+
 TEST(a_negative_constant_index_is_refused, {
     TEST_ASSERT_FALSE(check_body("    i32[4] a = {};\n    i32 x = a[-1];\n    println(x);"));
     TEST_ASSERT_TRUE(said("a negative index: -1"));
@@ -428,6 +442,7 @@ int main(int argc, char** argv) {
     TEST_RUN(a_span_ptr_carries_the_element_mutability);
     TEST_RUN(a_fixed_array_has_no_ptr);
     TEST_RUN(a_constant_index_out_of_range_is_refused);
+    TEST_RUN(an_index_of_an_rvalue_array_is_not_an_lvalue);
     TEST_RUN(a_negative_constant_index_is_refused);
     TEST_RUN(a_negative_span_bound_or_count_is_refused);
     TEST_RUN(a_pointer_cannot_be_indexed);

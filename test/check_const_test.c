@@ -243,6 +243,35 @@ TEST(comparisons_of_constants_fold_to_a_bool, {
     TEST_ASSERT_TRUE(cv_eq(check_node_value(&checker, d->b), cv_from_bool(true)));
 })
 
+TEST(a_shift_count_is_checked_without_a_folded_left_operand, {
+    // The left operand of `1 << n` has no value and no type until its context
+    // fixes one, and the count is still in 0..63 (D4.4, D6.2).
+    TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n    i32 x = (1 << n) << 64;\n    println(x);"));
+    TEST_ASSERT_TRUE(said("constant shift count must be in 0..63"));
+    TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n    u64 y = (1 << n) << 99;\n    println(y);"));
+    TEST_ASSERT_TRUE(said("constant shift count must be in 0..63"));
+    TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n    i32 z = (1 << n) << -1;\n    println(z);"));
+    TEST_ASSERT_TRUE(said("constant shift count must be in 0..63"));
+    TEST_ASSERT_TRUE(check_body("    i32 n = 1;\n    u64 m = (1 << n) << 63;\n    println(m);"));
+})
+
+TEST(untyped_wrapping_operators_fold_exactly, {
+    // A wrapping operator among untyped constants has no width to wrap at, so
+    // it folds exactly like its checked form and a result outside the
+    // constant range is an error (D4.4, D4.6, D11.2).
+    TEST_ASSERT_TRUE(check_body("    i32 a = 1 +% 2;\n    i32 b = 2 -% 5;\n"
+                                "    i32 c = 3 *% 4;\n    println(a, b, c);"));
+    int64_t v = 0;
+    TEST_ASSERT_TRUE(init_int("a", &v));
+    TEST_ASSERT_EQ_INT64(v, (int64_t)3);
+    TEST_ASSERT_TRUE(init_int("b", &v));
+    TEST_ASSERT_EQ_INT64(v, (int64_t)-3);
+    TEST_ASSERT_TRUE(init_int("c", &v));
+    TEST_ASSERT_EQ_INT64(v, (int64_t)12);
+    TEST_ASSERT_FALSE(check_body("    u64 m = 18446744073709551615 +% 1;\n    println(m);"));
+    TEST_ASSERT_TRUE(said("constant expression out of range"));
+})
+
 // ---- typed folding (D4.6) -----------------------------------------------------------
 
 TEST(a_typed_constant_expression_is_checked_at_compile_time, {
@@ -267,6 +296,24 @@ TEST(the_wrapping_operators_fold_at_the_width, {
     int64_t v = 0;
     TEST_ASSERT_TRUE(init_int("B", &v));
     TEST_ASSERT_EQ_INT64(v, (int64_t)44);
+})
+
+TEST(the_typed_division_traps_of_d6_13_are_compile_errors, {
+    // Division by zero, `MIN / -1` and `MIN % -1` are runtime errors in every
+    // build mode, so a typed constant that would trap is a compile error
+    // (D4.6, D6.13, D11.3).
+    TEST_ASSERT_FALSE(check_src("i32 A = -2147483648;\ni32 B = A / -1;\n"
+                                "fn i32 main() {\n    return B;\n}\n"));
+    TEST_ASSERT_TRUE(said("constant expression overflows i32"));
+    TEST_ASSERT_FALSE(check_src("i32 A = -2147483648;\ni32 B = A % -1;\n"
+                                "fn i32 main() {\n    return B;\n}\n"));
+    TEST_ASSERT_TRUE(said("constant expression overflows i32"));
+    TEST_ASSERT_FALSE(check_src("i32 A = 1;\ni32 ZERO = 0;\ni32 B = A / ZERO;\n"
+                                "fn i32 main() {\n    return B;\n}\n"));
+    TEST_ASSERT_TRUE(said("constant division by zero"));
+    // The same operands one width up are ordinary arithmetic.
+    TEST_ASSERT_TRUE(check_src("i64 A = -2147483648;\ni64 B = A / -1;\n"
+                               "fn i32 main() {\n    return cast(B, i32);\n}\n"));
 })
 
 TEST(a_typed_shift_count_is_below_the_width, {
@@ -422,6 +469,9 @@ int main(int argc, char** argv) {
     TEST_RUN(untyped_shifts_fold_exactly);
     TEST_RUN(an_untyped_shift_count_is_at_most_63);
     TEST_RUN(comparisons_of_constants_fold_to_a_bool);
+    TEST_RUN(a_shift_count_is_checked_without_a_folded_left_operand);
+    TEST_RUN(untyped_wrapping_operators_fold_exactly);
+    TEST_RUN(the_typed_division_traps_of_d6_13_are_compile_errors);
     TEST_RUN(a_typed_constant_expression_is_checked_at_compile_time);
     TEST_RUN(a_typed_constant_folds_with_the_declared_type);
     TEST_RUN(the_wrapping_operators_fold_at_the_width);
