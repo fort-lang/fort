@@ -605,10 +605,10 @@ _Noreturn void fort_rt_fail_bounds(
     fail_end();
 }
 
-_Noreturn void fort_rt_fail_slice(
+_Noreturn void fort_rt_fail_span(
     int64_t lo, int64_t hi, uint64_t len, const char* file, uint32_t line, uint32_t col) {
     fail_begin(file, line, col, "runtime error");
-    message_str("slice bounds ");
+    message_str("span bounds ");
     message_i64(lo);
     message_str("..");
     message_i64(hi);
@@ -729,7 +729,7 @@ _Noreturn void fort_rt_exit(int32_t status) {
 #ifndef FORT_RT_NO_MAIN
 int main(int argc, char** argv) {
     fort_rt_args_init(argc, argv);
-    struct fort_slice args;
+    struct fort_span args;
     args.ptr = (void*)args_ptr;
     args.len = args_len;
     const int32_t status = fort_entry(&args);

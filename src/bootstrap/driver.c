@@ -30,7 +30,7 @@ static const char* const HELP_LINES[] = {
     "  -I <dir>           add a module search root; repeatable, in order",
     "  --std-dir <dir>    the standard library directory",
     "  --release          release mode",
-    "  --no-bounds-check  remove the index and slice checks; unsafe",
+    "  --no-bounds-check  remove the index and span checks; unsafe",
     "  -l<lib>            pass -l<lib> to the linker; repeatable, in order",
     "  --cc <path>        the clang that compiles and links the IR (default clang)",
     "  --target <triple>  pass --target=<triple> to --cc (default x86_64-linux-gnu)",
@@ -259,12 +259,12 @@ static uint64_t last_component(str_t path) {
 str_t driver_entry_base(const char* entry) {
     str_t path = str_from_cstr(entry);
     const uint64_t start = last_component(path);
-    str_t base = str_from_span(path.ptr + start, path.len - start);
+    str_t base = str_from_range(path.ptr + start, path.len - start);
     const str_t suffix = str_from_cstr(".ft");
     if (base.len > suffix.len) {
-        const str_t tail = str_from_span(base.ptr + base.len - suffix.len, suffix.len);
+        const str_t tail = str_from_range(base.ptr + base.len - suffix.len, suffix.len);
         if (str_eq(tail, suffix)) {
-            base = str_from_span(base.ptr, base.len - suffix.len);
+            base = str_from_range(base.ptr, base.len - suffix.len);
         }
     }
     return base;
@@ -323,7 +323,7 @@ str_t driver_std_dir_beside(const char* program, str_pool_t* pool) {
     const uint64_t dir_len = last_component(path);
     sb_t b;
     sb_init(&b);
-    sb_append_str(&b, str_from_span(path.ptr, dir_len));
+    sb_append_str(&b, str_from_range(path.ptr, dir_len));
     sb_append(&b, FORT_STD_DIR_NAME);
     const str_t dir = pool_take(pool, &b);
     sb_free(&b);
@@ -343,17 +343,17 @@ static str_t exe_path(str_pool_t* pool) {
         const ssize_t len = readlink(PROC_SELF_EXE, b.data, (size_t)cap);
         if (len < 0) {
             sb_free(&b);
-            return str_from_span(NULL, 0);
+            return str_from_range(NULL, 0);
         }
         if ((uint64_t)len < cap) {
-            const str_t path = str_pool_intern(pool, str_from_span(b.data, (uint64_t)len));
+            const str_t path = str_pool_intern(pool, str_from_range(b.data, (uint64_t)len));
             sb_free(&b);
             return path;
         }
         sb_free(&b);
         cap = mem_mul(cap, 2U);
     }
-    return str_from_span(NULL, 0);
+    return str_from_range(NULL, 0);
 }
 
 str_t driver_std_dir(const driver_options_t* opts, const char* argv0, str_pool_t* pool) {
@@ -395,7 +395,7 @@ static str_t make_temp_dir(str_pool_t* pool, const char** parent_out, int* error
     // sb_cstr terminates the template in the buffer's own storage, which is
     // where mkdtemp replaces the six X in place.
     (void)sb_cstr(&b);
-    str_t dir = str_from_span(NULL, 0);
+    str_t dir = str_from_range(NULL, 0);
     *error_out = 0;
     if (mkdtemp(b.data) != NULL) {
         dir = str_pool_intern(pool, str_from_cstr(b.data));

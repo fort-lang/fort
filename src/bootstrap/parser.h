@@ -36,7 +36,7 @@
 //
 // Features the C bootstrap deliberately lacks are reported here as `not
 // supported by the bootstrap compiler: <feature>` (toolchain.md 7.3): float
-// literals, a second array or slice level in one type (`i32[3][4]`,
+// literals, a second array or span level in one type (`i32[3][4]`,
 // `i32[4]@`, `u8@@`, `node@[4]`), `do`-`while` and `?:`. A speculative parse
 // skips the check, so the construct still decides the shape and the
 // committed parse reports it.

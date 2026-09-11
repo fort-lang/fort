@@ -6,7 +6,7 @@
 //
 // Level model (D5.2). A type is a chain of storage levels: level 0 is the
 // binding's own storage and lives outside the type (the `mut0` of the
-// declaration, which the caller holds); every pointer or slice node carries
+// declaration, which the caller holds); every pointer or span node carries
 // the mutability of the storage it reaches (`mut`, the next level) and
 // whether the reference it represents is owned (`own`, D17.2). Fixed arrays
 // add no level. `string` and `void*` have no target level, so their `mut` is
@@ -47,7 +47,7 @@ typedef enum {
     TYPE_VOIDPTR, // `void*`, `void* own` (D3.11)
     TYPE_FN,      // `fn R(P1, P2)` (D3.10)
     TYPE_ARRAY,   // `T[N]` (D3.4)
-    TYPE_SLICE,   // `T@`, `T@ own`, `T mut@` (D3.5)
+    TYPE_SPAN,    // `T@`, `T@ own`, `T mut@` (D3.5)
     TYPE_STRING,  // `string`, `string own` (D3.7)
     TYPE_STRUCT,  // nominal (D3.8)
     TYPE_ENUM,    // nominal, underlying i32 (D3.9)
@@ -74,8 +74,8 @@ typedef struct type type_t;
 struct type {
     type_kind_t kind;
     prim_kind_t prim;            // TYPE_PRIM
-    bool mut;                    // TYPE_PTR, TYPE_SLICE: the storage reached is mutable
-    bool own;                    // TYPE_PTR, TYPE_VOIDPTR, TYPE_SLICE, TYPE_STRING
+    bool mut;                    // TYPE_PTR, TYPE_SPAN: the storage reached is mutable
+    bool own;                    // TYPE_PTR, TYPE_VOIDPTR, TYPE_SPAN, TYPE_STRING
     bool noreturn;               // TYPE_FN: `fn noreturn(...)`, with elem void
     const type_t* elem;          // pointee, element or return type
     uint64_t len;                // TYPE_ARRAY
@@ -115,7 +115,7 @@ const type_t* type_voidptr(type_table_t* tt, bool own);
 
 // `elem` must not be void (use type_voidptr) or the null type.
 const type_t* type_ptr(type_table_t* tt, const type_t* elem, bool own, bool mut);
-const type_t* type_slice(type_table_t* tt, const type_t* elem, bool own, bool mut);
+const type_t* type_span(type_table_t* tt, const type_t* elem, bool own, bool mut);
 
 // `len` must be greater than 0 (D3.4); `elem` must not be void or null.
 const type_t* type_array(type_table_t* tt, const type_t* elem, uint64_t len);
@@ -136,7 +136,7 @@ const type_t* type_enum(type_table_t* tt, str_t name, const void* decl);
 
 // ---- queries ---------------------------------------------------------------------
 
-// A pointer, `void*`, slice or string: the kinds that may be `own` (D17.1).
+// A pointer, `void*`, span or string: the kinds that may be `own` (D17.1).
 bool type_is_reference(const type_t* t);
 
 // A primitive of the class prim.h names, on a whole type.
@@ -144,12 +144,12 @@ bool type_is_int(const type_t* t);
 bool type_is_float(const type_t* t);
 bool type_is_scalar(const type_t* t); // integer, float, bool, char, enum
 
-// The storage levels behind level 0 (D5.2): one per pointer or slice node on
+// The storage levels behind level 0 (D5.2): one per pointer or span node on
 // the chain, fixed arrays adding none; `string` and `void*` add none.
 uint32_t type_levels(const type_t* t);
 
 // The reference stored at level k - 1 and reaching level k, for k >= 1: the
-// outermost pointer, `void*`, slice or string of `t` (behind any fixed
+// outermost pointer, `void*`, span or string of `t` (behind any fixed
 // arrays) for k == 1, then inward; NULL beyond the chain. Its `mut` is the
 // mutability of level k and its `own` the ownership mark of that reference
 // (D17.2). A `string` or `void*` node is reported,
@@ -269,7 +269,7 @@ void type_to_str_decl(const type_t* t, bool mut0, sb_t* out);
 typedef enum {
     SUFFIX_PTR,   // `*`, a reference suffix (D3.6)
     SUFFIX_ARRAY, // `[N]` (D3.4)
-    SUFFIX_SLICE, // `@`, a reference suffix (D3.5)
+    SUFFIX_SPAN,  // `@`, a reference suffix (D3.5)
 } suffix_kind_t;
 
 // One suffix of `base [own] [mut] { suffix [own] [mut] }` in source order,

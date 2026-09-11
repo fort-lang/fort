@@ -109,7 +109,7 @@ TEST(range_for_forms, {
     TEST_ASSERT_EQ_STR(dump_stmt("for (node* p : ps) { }"),
                        "(range-for (type (name node) (ptr)) p (ident ps) (block))");
     TEST_ASSERT_EQ_STR(dump_stmt("for (char c : s[1..]) { }"),
-                       "(range-for (type (prim char)) c (slice (ident s) (int 1) nil) (block))");
+                       "(range-for (type (prim char)) c (span (ident s) (int 1) nil) (block))");
 })
 
 TEST(switch_clauses_and_bodies, {
@@ -145,7 +145,7 @@ TEST(the_token_after_the_type_settles_a_declaration, {
 // declarations, settled by the same speculative parse (grammar.md 7.1).
 TEST(a_marked_type_at_statement_level_is_a_declaration, {
     TEST_ASSERT_EQ_STR(dump_stmt("foo@ mut x = s;"),
-                       "(var x (type (name foo) (slice mut)) (ident s))");
+                       "(var x (type (name foo) (span mut)) (ident s))");
     TEST_ASSERT_EQ_STR(dump_stmt("foo* own p = q;"),
                        "(var p (type (name foo) (ptr own)) (ident q))");
     TEST_ASSERT_EQ_STR(stmt_fails("foo@ mut x;"), "t.ft:2:11: error: expected '=', found ';'\n");
@@ -236,7 +236,7 @@ TEST(an_unsupported_feature_survives_a_rewind, {
         "t.ft:2:7: error: not supported by the bootstrap compiler: multi-dimensional arrays\n");
     TEST_ASSERT_EQ_STR(
         stmt_fails("foo@@ s = t;"),
-        "t.ft:2:5: error: not supported by the bootstrap compiler: slices of slices\n");
+        "t.ft:2:5: error: not supported by the bootstrap compiler: spans of spans\n");
     TEST_ASSERT_EQ_STR(
         stmt_fails("x = i32[2][3]{1};"),
         "t.ft:2:11: error: not supported by the bootstrap compiler: multi-dimensional arrays\n");
@@ -505,7 +505,7 @@ TEST(every_for_part_shape, {
 // A range loop takes any expression as its collection (D7.5).
 TEST(range_for_collections, {
     TEST_ASSERT_EQ_STR(dump_stmt("for (u8 b : buf[..]) { }"),
-                       "(range-for (type (prim u8)) b (slice (ident buf) nil nil) (block))");
+                       "(range-for (type (prim u8)) b (span (ident buf) nil nil) (block))");
     TEST_ASSERT_EQ_STR(dump_stmt("for (i32 v : f(1)) { }"),
                        "(range-for (type (prim i32)) v (call (ident f) (int 1)) (block))");
     TEST_ASSERT_EQ_STR(dump_stmt("for (node* n : m.nodes) { }"),
@@ -521,7 +521,7 @@ TEST(range_for_collections, {
 TEST(a_type_prefix_followed_by_an_identifier_is_a_declaration, {
     TEST_ASSERT_EQ_STR(dump_stmt("foo x = 1;"), "(var x (type (name foo)) (int 1))");
     TEST_ASSERT_EQ_STR(dump_stmt("foo* x = null;"), "(var x (type (name foo) (ptr)) (null))");
-    TEST_ASSERT_EQ_STR(dump_stmt("foo@ x = s;"), "(var x (type (name foo) (slice)) (ident s))");
+    TEST_ASSERT_EQ_STR(dump_stmt("foo@ x = s;"), "(var x (type (name foo) (span)) (ident s))");
     TEST_ASSERT_EQ_STR(dump_stmt("foo[2] x = {};"),
                        "(var x (type (name foo) (array (int 2))) (init))");
     TEST_ASSERT_EQ_STR(dump_stmt("foo*[2] x = {};"),

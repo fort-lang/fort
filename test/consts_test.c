@@ -450,9 +450,9 @@ TEST(to_str_escapes_a_string_as_a_literal_d2_8, {
     // diagnostic line, so the bytes are written with the escapes of D2.8.
     // The nine bytes a " \n NUL \\ \t \r ' 0xFF (a brace initializer would
     // split the TEST body at its commas, so they come from a literal).
-    const str_t s = str_from_span("a\"\n\0\\\t\r'\xFF", 9);
+    const str_t s = str_from_range("a\"\n\0\\\t\r'\xFF", 9);
     TEST_ASSERT_EQ_STR(text_of(cv_from_str(s)), "\"a\\\"\\n\\0\\\\\\t\\r'\\xFF\"");
-    TEST_ASSERT_EQ_STR(text_of(cv_from_str(str_from_span(NULL, 0))), "\"\"");
+    TEST_ASSERT_EQ_STR(text_of(cv_from_str(str_from_range(NULL, 0))), "\"\"");
 })
 
 TEST(to_str_appends_to_the_buffer, {

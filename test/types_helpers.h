@@ -105,7 +105,7 @@ static inline void tenv_init(tenv_t* e) {
     TEST_UNUSED(type_layout_begin(e->node));
     TEST_UNUSED(type_layout_struct(e->node, node_fields, 2, offsets));
 
-    const type_t* vec_fields[2] = {type_slice(&e->tt, i32, true, true), u64};
+    const type_t* vec_fields[2] = {type_span(&e->tt, i32, true, true), u64};
     TEST_UNUSED(type_layout_begin(e->vec));
     TEST_UNUSED(type_layout_struct(e->vec, vec_fields, 2, offsets));
 }
@@ -155,7 +155,7 @@ static inline str_t tenv_take_word(const char* text, uint32_t* i) {
     if (*i == start) {
         return str_from_cstr(NULL);
     }
-    return str_from_span(text + start, *i - start);
+    return str_from_range(text + start, *i - start);
 }
 
 // Takes the word `want` when it is next; `*i` is untouched otherwise.
@@ -187,7 +187,7 @@ static inline const char* tenv_take_suffix(const char* text, uint32_t* i, type_s
         s->kind = SUFFIX_PTR;
     } else if (text[*i] == '@') {
         (*i)++;
-        s->kind = SUFFIX_SLICE;
+        s->kind = SUFFIX_SPAN;
     } else if (text[*i] == '[') {
         (*i)++;
         const uint64_t base = 10;

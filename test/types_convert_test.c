@@ -132,8 +132,8 @@ static uint32_t sample_types(tenv_t* e, const type_t** types) {
     types[n++] = takes_node;
     types[n++] = takes_mut;
     types[n++] = tenv_fn(e, tenv_type(e, "i32"), tenv_type(e, "i32"), NULL);
-    types[n++] = type_slice(&e->tt, takes_node, false, false);
-    types[n++] = type_slice(&e->tt, takes_mut, false, false);
+    types[n++] = type_span(&e->tt, takes_node, false, false);
+    types[n++] = type_span(&e->tt, takes_mut, false, false);
     types[n++] = type_ptr(&e->tt, takes_node, false, false);
     return n;
 }
@@ -228,7 +228,7 @@ TEST(assignability_of_null_void_and_the_error_type, {
     TEST_ASSERT_TRUE(type_assignable(tenv_type(&e, "node mut* own"), null));
     TEST_ASSERT_TRUE(type_assignable(tenv_type(&e, "void*"), null));
     TEST_ASSERT_TRUE(type_assignable(tenv_fn(&e, i32, i32, NULL), null));
-    // Not a slice, a string or a value type: the zero value is `{}` (D3.5).
+    // Not a span, a string or a value type: the zero value is `{}` (D3.5).
     TEST_ASSERT_FALSE(type_assignable(tenv_type(&e, "i32@"), null));
     TEST_ASSERT_FALSE(type_assignable(tenv_type(&e, "string"), null));
     TEST_ASSERT_FALSE(type_assignable(tenv_type(&e, "i32"), null));
@@ -316,7 +316,7 @@ TEST(casts_among_pointers_and_u64, {
     TEST_ASSERT_TRUE(castable(&e, "u64", "void*"));
     TEST_ASSERT_TRUE(castable(&e, "void*", "u64"));
     TEST_ASSERT_TRUE(castable(&e, "node**", "node* mut*"));
-    // Pointers cast to no other integer type, and never to a slice.
+    // Pointers cast to no other integer type, and never to a span.
     TEST_ASSERT_FALSE(castable(&e, "i64", "node*"));
     TEST_ASSERT_FALSE(castable(&e, "i32", "node*"));
     TEST_ASSERT_FALSE(castable(&e, "u32", "void*"));
@@ -364,23 +364,23 @@ TEST(casts_within_the_string_family, {
     TEST_ASSERT_TRUE(castable(&e, "string", "u8 mut@ own"));
     TEST_ASSERT_TRUE(castable(&e, "string own", "string"));
     TEST_ASSERT_TRUE(castable(&e, "string", "string own"));
-    // The element type of any other slice never changes.
+    // The element type of any other span never changes.
     TEST_ASSERT_FALSE(castable(&e, "i8@", "u8@"));
     TEST_ASSERT_FALSE(castable(&e, "string", "i8@"));
     TEST_ASSERT_FALSE(castable(&e, "i32@", "u32@"));
     tenv_free(&e);
 })
 
-TEST(a_slice_cast_never_launders_a_signature_or_an_owner, {
+TEST(a_span_cast_never_launders_a_signature_or_an_owner, {
     tenv_t e;
     tenv_init(&e);
     const type_t* v = type_void(&e.tt);
     const type_t* takes_node = tenv_fn(&e, v, tenv_type(&e, "node*"), NULL);
     const type_t* takes_mut = tenv_fn(&e, v, tenv_type(&e, "node mut*"), NULL);
-    const type_t* of_node = type_slice(&e.tt, takes_node, false, false);
-    const type_t* of_mut = type_slice(&e.tt, takes_mut, false, false);
+    const type_t* of_node = type_span(&e.tt, takes_node, false, false);
+    const type_t* of_mut = type_span(&e.tt, takes_mut, false, false);
     // The marks of a parameter are part of the function type's identity
-    // (D3.10), so those slices have different element types and the row for
+    // (D3.10), so those spans have different element types and the row for
     // marks does not reach them, exactly as the cast on one element does
     // not (D3.14).
     TEST_ASSERT_FALSE(type_cast_allowed(of_node, of_mut));
@@ -388,8 +388,8 @@ TEST(a_slice_cast_never_launders_a_signature_or_an_owner, {
     TEST_ASSERT_FALSE(type_cast_allowed(takes_node, takes_mut));
     TEST_ASSERT_FALSE(type_same_shape(of_node, of_mut));
     TEST_ASSERT_TRUE(type_cast_allowed(of_node, of_node));
-    // A slice of function pointers still casts where its own marks differ.
-    TEST_ASSERT_TRUE(type_cast_allowed(type_slice(&e.tt, takes_node, true, true), of_node));
+    // A span of function pointers still casts where its own marks differ.
+    TEST_ASSERT_TRUE(type_cast_allowed(type_span(&e.tt, takes_node, true, true), of_node));
     // Dropping an `own` under a reference the target still owns would leave
     // its objects owned by nobody, which no cast licenses (D17.4).
     TEST_ASSERT_FALSE(castable(&e, "node mut* mut@ own", "node mut* own mut@ own"));
@@ -403,7 +403,7 @@ TEST(a_slice_cast_never_launders_a_signature_or_an_owner, {
     tenv_free(&e);
 })
 
-TEST(casts_of_slices_change_only_the_marks, {
+TEST(casts_of_spans_change_only_the_marks, {
     tenv_t e;
     tenv_init(&e);
     // The element type never changes; mutability is added or dropped at any
@@ -443,8 +443,8 @@ TEST(casts_refused_for_structs_and_fixed_arrays, {
 TEST(casts_between_a_reference_and_a_fat_pointer_are_refused, {
     tenv_t e;
     tenv_init(&e);
-    // A slice is `{ptr, len}` and a pointer is an address: neither reaches
-    // the other, and slicing or `.ptr` is the way across (D3.5, D3.14).
+    // A span is `{ptr, len}` and a pointer is an address: neither reaches
+    // the other, and a span expression or `.ptr` is the way across (D3.5, D3.14).
     TEST_ASSERT_FALSE(castable(&e, "u8@", "u8*"));
     TEST_ASSERT_FALSE(castable(&e, "u8*", "u8@"));
     TEST_ASSERT_FALSE(castable(&e, "u8 mut@", "u8 mut*"));
@@ -458,7 +458,7 @@ TEST(casts_between_a_reference_and_a_fat_pointer_are_refused, {
     TEST_ASSERT_FALSE(castable(&e, "u64", "string"));
     TEST_ASSERT_FALSE(castable(&e, "u64", "u8@"));
     TEST_ASSERT_FALSE(castable(&e, "u8@", "u64"));
-    // A pointer to a slice is a pointer, and casts like one.
+    // A pointer to a span is a pointer, and casts like one.
     TEST_ASSERT_TRUE(castable(&e, "u64", "u8@*"));
     TEST_ASSERT_TRUE(castable(&e, "void*", "u8@*"));
     tenv_free(&e);
@@ -516,7 +516,7 @@ TEST(mutability_drops_along_a_three_level_chain, {
     TEST_ASSERT_FALSE(assignable(&e, "node** mut*", "node mut* mut* mut*"));
     // Dropping nothing is always fine.
     TEST_ASSERT_TRUE(assignable(&e, "node mut* mut* mut*", "node mut* mut* mut*"));
-    // A slice of slices behaves like a chain of pointers.
+    // A span of spans behaves like a chain of pointers.
     TEST_ASSERT_TRUE(assignable(&e, "i32@@", "i32 mut@ mut@"));
     TEST_ASSERT_FALSE(assignable(&e, "i32 mut@ mut@", "i32@@"));
     TEST_ASSERT_TRUE(assignable(&e, "u8@*", "u8 mut@ mut*"));
@@ -555,7 +555,7 @@ TEST(lending_combines_with_dropping_mutability, {
     TEST_ASSERT_TRUE(assignable(&e, "node* own", "node mut* own"));
     TEST_ASSERT_TRUE(assignable(&e, "void*", "void* own"));
     TEST_ASSERT_TRUE(assignable(&e, "string", "string own"));
-    // A slice of owned strings lends its own mark under the same rule.
+    // A span of owned strings lends its own mark under the same rule.
     TEST_ASSERT_TRUE(assignable(&e, "string@", "string@ own"));
     TEST_ASSERT_FALSE(assignable(&e, "string@ own", "string@"));
     tenv_free(&e);
@@ -689,8 +689,8 @@ int main(int argc, char** argv) {
     TEST_RUN(casts_among_pointers_and_u64);
     TEST_RUN(casts_of_function_pointers_go_through_voidptr);
     TEST_RUN(casts_within_the_string_family);
-    TEST_RUN(a_slice_cast_never_launders_a_signature_or_an_owner);
-    TEST_RUN(casts_of_slices_change_only_the_marks);
+    TEST_RUN(a_span_cast_never_launders_a_signature_or_an_owner);
+    TEST_RUN(casts_of_spans_change_only_the_marks);
     TEST_RUN(casts_refused_for_structs_and_fixed_arrays);
     TEST_RUN(casts_between_a_reference_and_a_fat_pointer_are_refused);
     TEST_RUN(casts_of_null_void_and_the_error_type);

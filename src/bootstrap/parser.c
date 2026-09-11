@@ -490,7 +490,7 @@ static bool parse_ref_suffixes(parser_t* p, ast_node_t* t, bool array_may_follow
     while (at(p, TOK_STAR) || at(p, TOK_AT)) {
         const loc_t loc = here(p);
         ast_node_t* s = node_at(p, AST_TYPE_SUFFIX, loc);
-        s->op = at(p, TOK_STAR) ? (int32_t)SUFFIX_PTR : (int32_t)SUFFIX_SLICE;
+        s->op = at(p, TOK_STAR) ? (int32_t)SUFFIX_PTR : (int32_t)SUFFIX_SPAN;
         bump(p);
         markers_t m;
         if (!parse_markers(p, &m, NULL)) {
@@ -546,36 +546,36 @@ static bool parse_array_suffixes(parser_t* p, ast_node_t* t, bool marked) {
     return true;
 }
 
-// The C bootstrap has at most one array or slice level in one written type
+// The C bootstrap has at most one array or span level in one written type
 // (toolchain.md 7.3): a second one is a nested aggregate its layout and
 // codegen do not do.
 static bool check_one_aggregate_level(parser_t* p, const ast_node_t* t) {
     uint64_t arrays = 0;
-    uint64_t slices = 0;
+    uint64_t spans = 0;
     uint64_t first_extra = 0;
     for (uint64_t i = 0; i < ast_len(t); i++) {
         const ast_node_t* s = ast_child(t, i);
         if ((suffix_kind_t)s->op == SUFFIX_ARRAY) {
             arrays++;
-        } else if ((suffix_kind_t)s->op == SUFFIX_SLICE) {
-            slices++;
+        } else if ((suffix_kind_t)s->op == SUFFIX_SPAN) {
+            spans++;
         } else {
             continue;
         }
-        if (arrays + slices == 2) {
+        if (arrays + spans == 2) {
             first_extra = i;
         }
     }
-    if (arrays + slices < 2) {
+    if (arrays + spans < 2) {
         return true;
     }
-    const char* feature = "slices of slices";
+    const char* feature = "spans of spans";
     if (arrays >= 2) {
         feature = "multi-dimensional arrays";
-    } else if (slices == 1 && (suffix_kind_t)ast_child(t, first_extra)->op == SUFFIX_SLICE) {
-        feature = "slices of arrays";
-    } else if (slices == 1) {
-        feature = "arrays of slices";
+    } else if (spans == 1 && (suffix_kind_t)ast_child(t, first_extra)->op == SUFFIX_SPAN) {
+        feature = "spans of arrays";
+    } else if (spans == 1) {
+        feature = "arrays of spans";
     }
     return !unsupported(p, ast_child(t, first_extra)->loc, feature);
 }
@@ -661,7 +661,7 @@ static ast_node_t* parse_array_type(parser_t* p) {
 }
 
 // Inside `new(...)` a `mut` never parses, an `own` follows only a `*` of the
-// element type and a slice is asked for with a count, not with an `@`
+// element type and a span is asked for with a count, not with an `@`
 // (D10.2, D17.3).
 static bool check_alloc_marker(parser_t* p) {
     if (at(p, TOK_KW_MUT)) {
@@ -673,7 +673,7 @@ static bool check_alloc_marker(parser_t* p) {
         return false;
     }
     if (at(p, TOK_AT)) {
-        error_here(p, "a slice suffix does not parse inside new: write new(T, n)");
+        error_here(p, "a span suffix does not parse inside new: write new(T, n)");
         return false;
     }
     return true;
@@ -836,7 +836,7 @@ static ast_node_t* parse_sizeof(parser_t* p) {
 }
 
 // new_expr = "new" "(" alloc_type [ "," expr ] ")": one `T` without a count,
-// a slice of `n` elements with one (D10.2).
+// a span of `n` elements with one (D10.2).
 static ast_node_t* parse_new(parser_t* p) {
     const loc_t loc = here(p);
     bump(p);
@@ -974,7 +974,7 @@ static ast_node_t* parse_primary(parser_t* p) {
     return NULL;
 }
 
-// postfix = call | index | slice | "." identifier | "->" identifier.
+// postfix = call | index | span | "." identifier | "->" identifier.
 static ast_node_t* parse_call(parser_t* p, ast_node_t* callee) {
     ast_node_t* n = node_at(p, AST_CALL, here(p));
     n->a = callee;
@@ -1004,8 +1004,8 @@ static ast_node_t* parse_call(parser_t* p, ast_node_t* callee) {
     return n;
 }
 
-// index (D6.8) and the four slicing forms (D6.9), told apart by the `..`.
-static ast_node_t* parse_index_or_slice(parser_t* p, ast_node_t* operand) {
+// index (D6.8) and the four span forms (D6.9), told apart by the `..`.
+static ast_node_t* parse_index_or_span(parser_t* p, ast_node_t* operand) {
     const loc_t loc = here(p);
     bump(p);
     if (!enter(p)) {
@@ -1020,7 +1020,7 @@ static ast_node_t* parse_index_or_slice(parser_t* p, ast_node_t* operand) {
     }
     if (ok && at(p, TOK_DOT_DOT)) {
         bump(p);
-        n = node_at(p, AST_SLICE, loc);
+        n = node_at(p, AST_SPAN, loc);
         n->a = operand;
         n->b = low;
         if (!at(p, TOK_RBRACKET)) {
@@ -1060,7 +1060,7 @@ static ast_node_t* parse_postfix(parser_t* p) {
             e = parse_call(p, e);
             break;
         case TOK_LBRACKET:
-            e = parse_index_or_slice(p, e);
+            e = parse_index_or_span(p, e);
             break;
         case TOK_DOT:
         case TOK_ARROW:

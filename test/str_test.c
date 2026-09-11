@@ -63,18 +63,18 @@ TEST(from_cstr_stops_at_the_first_nul, {
     TEST_ASSERT_EQ_UINT64(v.len, (uint64_t)2);
 })
 
-TEST(from_span_keeps_pointer_and_length_as_given, {
+TEST(from_range_keeps_pointer_and_length_as_given, {
     const char text[] = "ab\0cd";
-    const str_t v = str_from_span(text, sizeof text - 1);
+    const str_t v = str_from_range(text, sizeof text - 1);
     TEST_ASSERT_TRUE(v.ptr == text);
     TEST_ASSERT_EQ_UINT64(v.len, (uint64_t)5);
     TEST_ASSERT_EQ_CHAR(v.ptr[2], '\0');
     TEST_ASSERT_EQ_CHAR(v.ptr[4], 'd');
 })
 
-TEST(from_span_of_a_substring_is_a_view_into_the_source, {
+TEST(from_range_of_a_substring_is_a_view_into_the_source, {
     const char* text = "hello world";
-    const str_t world = str_from_span(text + 6, 5);
+    const str_t world = str_from_range(text + 6, 5);
     TEST_ASSERT_TRUE(view_is(world, "world"));
     TEST_ASSERT_TRUE(world.ptr == text + 6);
 })
@@ -105,8 +105,8 @@ TEST(eq_does_not_depend_on_the_pointer, {
 TEST(eq_sees_embedded_nul_bytes, {
     const char a[] = "a\0b";
     const char b[] = "a\0c";
-    TEST_ASSERT_FALSE(str_eq(str_from_span(a, 3), str_from_span(b, 3)));
-    TEST_ASSERT_TRUE(str_eq(str_from_span(a, 2), str_from_span(b, 2)));
+    TEST_ASSERT_FALSE(str_eq(str_from_range(a, 3), str_from_range(b, 3)));
+    TEST_ASSERT_TRUE(str_eq(str_from_range(a, 2), str_from_range(b, 2)));
 })
 
 TEST(eq_is_symmetric_for_differing_lengths, {
@@ -153,8 +153,8 @@ TEST(cmp_only_returns_minus_one_zero_or_one, {
 TEST(cmp_sees_embedded_nul_bytes, {
     const char a[] = "a\0b";
     const char b[] = "a\0c";
-    TEST_ASSERT_EQ_INT32(str_cmp(str_from_span(a, 3), str_from_span(b, 3)), -1);
-    TEST_ASSERT_EQ_INT32(str_cmp(str_from_span(a, 3), str_from_span(a, 3)), 0);
+    TEST_ASSERT_EQ_INT32(str_cmp(str_from_range(a, 3), str_from_range(b, 3)), -1);
+    TEST_ASSERT_EQ_INT32(str_cmp(str_from_range(a, 3), str_from_range(a, 3)), 0);
 })
 
 // ---- hash ---------------------------------------------------------------------------
@@ -180,8 +180,8 @@ TEST(hash_treats_bytes_as_unsigned,
      { TEST_ASSERT_EQ_UINT64(str_hash(str_from_cstr(BYTE_FF)), FNV_BYTE_FF); })
 
 TEST(hash_covers_nul_bytes_inside_the_view, {
-    TEST_ASSERT_EQ_UINT64(str_hash(str_from_span("", 1)), FNV_BYTE_00);
-    TEST_ASSERT_TRUE(str_hash(str_from_span("", 1)) != FNV_EMPTY);
+    TEST_ASSERT_EQ_UINT64(str_hash(str_from_range("", 1)), FNV_BYTE_00);
+    TEST_ASSERT_TRUE(str_hash(str_from_range("", 1)) != FNV_EMPTY);
 })
 
 TEST(hash_is_a_step_by_step_fnv1a, {
@@ -196,8 +196,8 @@ TEST(hash_depends_only_on_the_bytes, {
     char a[] = "same text";
     char b[] = "same text";
     TEST_ASSERT_EQ_UINT64(str_hash(str_from_cstr(a)), str_hash(str_from_cstr(b)));
-    // A span in the middle of a longer text hashes like the text alone.
-    TEST_ASSERT_EQ_UINT64(str_hash(str_from_span(&"xxsame textxx"[2], 9)),
+    // A range in the middle of a longer text hashes like the text alone.
+    TEST_ASSERT_EQ_UINT64(str_hash(str_from_range(&"xxsame textxx"[2], 9)),
                           str_hash(str_from_cstr("same text")));
 })
 
@@ -242,14 +242,14 @@ TEST(index_of_returns_minus_one_when_absent, {
 
 TEST(index_of_can_find_a_nul_byte_inside_the_view, {
     const char text[] = "ab\0cd";
-    TEST_ASSERT_EQ_INT64(str_index_of(str_from_span(text, 5), '\0'), (int64_t)2);
-    TEST_ASSERT_EQ_INT64(str_index_of(str_from_span(text, 2), '\0'), (int64_t)-1);
+    TEST_ASSERT_EQ_INT64(str_index_of(str_from_range(text, 5), '\0'), (int64_t)2);
+    TEST_ASSERT_EQ_INT64(str_index_of(str_from_range(text, 2), '\0'), (int64_t)-1);
 })
 
 TEST(index_of_stays_inside_the_view, {
     const char* text = "abcdef";
-    TEST_ASSERT_EQ_INT64(str_index_of(str_from_span(text, 3), 'd'), (int64_t)-1);
-    TEST_ASSERT_EQ_INT64(str_index_of(str_from_span(text, 4), 'd'), (int64_t)3);
+    TEST_ASSERT_EQ_INT64(str_index_of(str_from_range(text, 3), 'd'), (int64_t)-1);
+    TEST_ASSERT_EQ_INT64(str_index_of(str_from_range(text, 4), 'd'), (int64_t)3);
 })
 
 // ---- dup and del -----------------------------------------------------------------
@@ -283,7 +283,7 @@ TEST(dup_of_the_zero_view_is_a_non_null_empty_copy, {
 
 TEST(dup_copies_embedded_nul_bytes, {
     const char text[] = "a\0b";
-    const str_t copy = str_dup(str_from_span(text, 3));
+    const str_t copy = str_dup(str_from_range(text, 3));
     TEST_ASSERT_EQ_UINT64(copy.len, (uint64_t)3);
     TEST_ASSERT_EQ_CHAR(copy.ptr[1], '\0');
     TEST_ASSERT_EQ_CHAR(copy.ptr[2], 'b');
@@ -295,7 +295,7 @@ TEST(del_of_the_zero_view_is_a_no_op, { str_del(str_from_cstr(NULL)); })
 
 static void dup_of_the_largest_view(void) {
     // len + 1 for the terminator overflows before anything is allocated.
-    TEST_UNUSED(str_dup(str_from_span("", UINT64_MAX)));
+    TEST_UNUSED(str_dup(str_from_range("", UINT64_MAX)));
 }
 
 TEST(dup_of_a_view_whose_length_plus_one_overflows_is_out_of_memory, {
@@ -429,9 +429,9 @@ TEST(pool_gives_an_oversized_string_its_own_block, {
     for (uint64_t i = 0; i < big_len; i++) {
         big[i] = (char)('a' + (int)(i % 26));
     }
-    const str_t v = str_pool_intern(&p, str_from_span(big, big_len));
+    const str_t v = str_pool_intern(&p, str_from_range(big, big_len));
     TEST_ASSERT_EQ_UINT64(v.len, big_len);
-    TEST_ASSERT_TRUE(str_eq(v, str_from_span(big, big_len)));
+    TEST_ASSERT_TRUE(str_eq(v, str_from_range(big, big_len)));
     TEST_ASSERT_EQ_CHAR(v.ptr[big_len], '\0');
     TEST_ASSERT_EQ_UINT64(p.block_len, (uint64_t)2);
     // The small block stays current: the next small string lands after
@@ -453,14 +453,14 @@ TEST(pool_oversized_string_as_the_first_intern_does_not_become_current, {
     for (uint64_t i = 0; i < big_len; i++) {
         big[i] = 'z';
     }
-    const str_t v = str_pool_intern(&p, str_from_span(big, big_len));
+    const str_t v = str_pool_intern(&p, str_from_range(big, big_len));
     TEST_ASSERT_EQ_UINT64(p.block_len, (uint64_t)1);
     TEST_ASSERT_EQ_UINT64(p.cap, (uint64_t)0);
     TEST_ASSERT_NULL(p.cur);
     const str_t small = str_pool_intern(&p, s("s"));
     TEST_ASSERT_EQ_UINT64(p.block_len, (uint64_t)2);
     TEST_ASSERT_EQ_UINT64(p.used, (uint64_t)2);
-    TEST_ASSERT_TRUE(str_eq(v, str_from_span(big, big_len)));
+    TEST_ASSERT_TRUE(str_eq(v, str_from_range(big, big_len)));
     TEST_ASSERT_TRUE(view_is(small, "s"));
     mem_free(big);
     str_pool_free(&p);
@@ -477,12 +477,12 @@ TEST(pool_block_list_grows_past_sixteen_blocks, {
     const int blocks = 40;
     str_t views[40];
     for (int i = 0; i < blocks; i++) {
-        views[i] = str_pool_intern(&p, str_from_span(big, big_len));
+        views[i] = str_pool_intern(&p, str_from_range(big, big_len));
     }
     TEST_ASSERT_EQ_UINT64(p.block_len, (uint64_t)blocks);
     TEST_ASSERT_EQ_UINT64(p.block_cap, (uint64_t)64);
     for (int i = 0; i < blocks; i++) {
-        TEST_ASSERT_TRUE(str_eq(views[i], str_from_span(big, big_len)));
+        TEST_ASSERT_TRUE(str_eq(views[i], str_from_range(big, big_len)));
     }
     mem_free(big);
     str_pool_free(&p);
@@ -517,8 +517,8 @@ int main(int argc, char** argv) {
     TEST_RUN(from_cstr_of_empty_string_has_length_zero_and_a_pointer);
     TEST_RUN(from_cstr_of_null_is_the_zero_view);
     TEST_RUN(from_cstr_stops_at_the_first_nul);
-    TEST_RUN(from_span_keeps_pointer_and_length_as_given);
-    TEST_RUN(from_span_of_a_substring_is_a_view_into_the_source);
+    TEST_RUN(from_range_keeps_pointer_and_length_as_given);
+    TEST_RUN(from_range_of_a_substring_is_a_view_into_the_source);
 
     TEST_RUN(eq_compares_bytes_and_length);
     TEST_RUN(eq_of_two_empty_views_holds_whatever_their_pointers);

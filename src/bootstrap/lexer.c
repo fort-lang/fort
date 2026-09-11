@@ -1,4 +1,4 @@
-// The lexer; see lexer.h. Positions and spans follow D14.2, the token
+// The lexer; see lexer.h. Positions and byte ranges follow D14.2, the token
 // classes D2.1 to D2.10, the messages core-language.md 2.
 #include "lexer.h"
 
@@ -427,10 +427,10 @@ static token_t make_token(const lexer_t* lx, tok_kind_t kind, uint64_t start, lo
     t.off = start;
     t.len = lx->pos - start;
     t.ival = 0;
-    // An empty source has no bytes to point at: str_from_span keeps the null
+    // An empty source has no bytes to point at: str_from_range keeps the null
     // view rather than forming lx->src.ptr + start on a NULL pointer.
     t.text =
-        lx->src.ptr == NULL ? str_from_span(NULL, 0) : str_from_span(lx->src.ptr + start, t.len);
+        lx->src.ptr == NULL ? str_from_range(NULL, 0) : str_from_range(lx->src.ptr + start, t.len);
     return t;
 }
 
@@ -607,7 +607,7 @@ static bool lex_number(lexer_t* lx) {
         if (c == '.' && peek_at(lx, 1) != '.') {
             advance(lx);
             msg_begin(&lx->msg);
-            msg_quote(&lx->msg, str_from_span(lx->src.ptr + start, lx->pos - start));
+            msg_quote(&lx->msg, str_from_range(lx->src.ptr + start, lx->pos - start));
             msg_str(&lx->msg, " is not a float literal");
             return fail(lx, at);
         }
@@ -618,7 +618,7 @@ static bool lex_number(lexer_t* lx) {
     if (is_dec_digit(c) || (radix < RADIX_DEC && is_hex_letter(c))) {
         msg_begin(&lx->msg);
         msg_str(&lx->msg, "invalid digit ");
-        msg_quote(&lx->msg, str_from_span(lx->src.ptr + lx->pos, 1));
+        msg_quote(&lx->msg, str_from_range(lx->src.ptr + lx->pos, 1));
         msg_str(&lx->msg, " in ");
         msg_str(&lx->msg, radix_name(radix));
         msg_str(&lx->msg, " literal");
@@ -912,7 +912,7 @@ static tok_kind_t operator_kind(const lexer_t* lx, uint64_t* len) {
     case ';':
         one = TOK_SEMI;
         break;
-    // `@` is the slice suffix, one byte, no longer match (D2.10, D3.5).
+    // `@` is the span suffix, one byte, no longer match (D2.10, D3.5).
     case '@':
         one = TOK_AT;
         break;
@@ -943,7 +943,7 @@ static bool lex_operator(lexer_t* lx) {
             msg_str(&lx->msg, "non-ASCII byte outside a string literal or comment");
         } else if (is_printable(c)) {
             msg_str(&lx->msg, "unexpected character ");
-            msg_quote(&lx->msg, str_from_span(lx->src.ptr + start, 1));
+            msg_quote(&lx->msg, str_from_range(lx->src.ptr + start, 1));
         } else {
             msg_str(&lx->msg, "unexpected byte ");
             msg_hex_byte(&lx->msg, c);
@@ -987,7 +987,7 @@ static bool lex_all(lexer_t* lx) {
         }
         if (at_end(lx)) {
             token_t eof = make_token(lx, TOK_EOF, lx->pos, here(lx));
-            eof.text = str_from_span(NULL, 0);
+            eof.text = str_from_range(NULL, 0);
             tokvec_push(lx->out, eof);
             return true;
         }

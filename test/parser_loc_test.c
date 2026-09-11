@@ -161,9 +161,9 @@ TEST(the_out_parameter_signature_of_d17_2, {
     TEST_ASSERT_NONNULL(mod);
     TEST_ASSERT_EQ_STR(parse_diags(), "");
     TEST_ASSERT_EQ_STR(dumped(ast_child(pt_decl(mod, 0), 1)),
-                       "(param (type (prim u8) mut (slice own mut) (ptr)) out)");
+                       "(param (type (prim u8) mut (span own mut) (ptr)) out)");
     TEST_ASSERT_EQ_STR(dumped(body_stmt(mod, 0, 0)),
-                       "(var buf (type (prim u8) mut (slice own)) "
+                       "(var buf (type (prim u8) mut (span own)) "
                        "(new (type (prim u8)) (int 16)))");
     TEST_ASSERT_EQ_STR(dumped(body_stmt(mod, 0, 1)),
                        "(assign = (unary * (ident out)) (call (ident move) (ident buf)))");

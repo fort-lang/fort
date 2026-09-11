@@ -7,7 +7,7 @@
 // beyond constants, every field laid out in the open. `kind` names the
 // production; `loc` is the position of the construct's first token, except on
 // the nodes named after an operator or a punctuation mark (unary, binary,
-// assignment, increment, call, index, slice, field, arrow, type suffix),
+// assignment, increment, call, index, span, field, arrow, type suffix),
 // which carry that token's own position, since a runtime error is reported at
 // the operator of the failing operation and the overwrite check at the `=` of
 // an assignment (toolchain.md 4, D17.11); `op` is
@@ -99,7 +99,7 @@ typedef enum {
     AST_TERNARY,    // a: condition; b: then; c: else (D6.6)
     AST_CALL,       // a: the callee; list: the arguments
     AST_INDEX,      // a: the operand; b: the index (D6.8)
-    AST_SLICE,      // a: the operand; b: low or NULL; c: high or NULL (D6.9)
+    AST_SPAN,       // a: the operand; b: low or NULL; c: high or NULL (D6.9)
     AST_FIELD,      // a: the operand; name: the field (`.`)
     AST_ARROW,      // a: the operand; name: the field (`->`, D6.10)
     AST_CAST,       // a: the expression; b: the target type (D6.4)

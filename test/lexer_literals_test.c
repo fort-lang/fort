@@ -23,7 +23,7 @@ TEST(decimal_literals, {
     TEST_ASSERT_EQ_UINT64(tok(2)->ival, (uint64_t)123);
     TEST_ASSERT_EQ_UINT64(tok(3)->ival, (uint64_t)4294967296ULL);
     ASSERT_TOK_TEXT(3, "4294967296");
-    ASSERT_TOK_SPAN(3, 8, 10);
+    ASSERT_TOK_RANGE(3, 8, 10);
 })
 
 TEST(hex_literals_in_both_cases, {
@@ -59,7 +59,7 @@ TEST(underscores_between_digits, {
     TEST_ASSERT_EQ_UINT64(tok(3)->ival, (uint64_t)2);
     TEST_ASSERT_EQ_UINT64(tok(4)->ival, (uint64_t)123);
     ASSERT_TOK_TEXT(0, "1_000_000");
-    ASSERT_TOK_SPAN(0, 0, 9);
+    ASSERT_TOK_RANGE(0, 0, 9);
 })
 
 TEST(largest_integer_literals, {
@@ -175,7 +175,7 @@ TEST(float_literal_with_a_fraction, {
     ASSERT_LEX_OK("1.0 0.5 123.456", 3);
     ASSERT_TOK_KIND(0, TOK_FLOAT);
     ASSERT_TOK_TEXT(0, "1.0");
-    ASSERT_TOK_SPAN(0, 0, 3);
+    ASSERT_TOK_RANGE(0, 0, 3);
     ASSERT_TOK_KIND(1, TOK_FLOAT);
     ASSERT_TOK_TEXT(1, "0.5");
     ASSERT_TOK_KIND(2, TOK_FLOAT);
@@ -256,7 +256,7 @@ TEST(plain_char_literals, {
     TEST_ASSERT_EQ_UINT64(tok(2)->ival, (uint64_t)'~');
     TEST_ASSERT_EQ_UINT64(tok(3)->ival, (uint64_t)'"');
     ASSERT_TOK_TEXT(0, "'x'");
-    ASSERT_TOK_SPAN(0, 0, 3);
+    ASSERT_TOK_RANGE(0, 0, 3);
     ASSERT_TOK_POS(3, 1, 13);
 })
 
@@ -273,7 +273,7 @@ TEST(every_escape_in_a_char_literal, {
     for (uint64_t i = 0; i < 8; i++) {
         ASSERT_TOK_KIND(i, TOK_CHAR);
     }
-    ASSERT_TOK_SPAN(7, 35, 6);
+    ASSERT_TOK_RANGE(7, 35, 6);
 })
 
 TEST(hex_escape_takes_both_cases_and_the_whole_byte, {
@@ -349,7 +349,7 @@ TEST(string_literal_is_decoded_into_the_pool, {
     TEST_ASSERT_EQ_UINT64(tok(0)->text.len, (uint64_t)5);
     TEST_ASSERT_EQ_STR(tok(0)->text.ptr, "hello");
     TEST_ASSERT_TRUE(tok(0)->text.ptr != src);
-    ASSERT_TOK_SPAN(0, 0, 7);
+    ASSERT_TOK_RANGE(0, 0, 7);
     ASSERT_TOK_POS(0, 1, 1);
     ASSERT_TOK_POS(1, 1, 8);
 })
@@ -359,13 +359,13 @@ TEST(empty_string_literal, {
     ASSERT_TOK_KIND(0, TOK_STRING);
     TEST_ASSERT_EQ_UINT64(tok(0)->text.len, (uint64_t)0);
     TEST_ASSERT_EQ_STR(tok(0)->text.ptr, "");
-    ASSERT_TOK_SPAN(0, 0, 2);
+    ASSERT_TOK_RANGE(0, 0, 2);
 })
 
 TEST(every_escape_in_a_string_literal, {
     ASSERT_LEX_OK("\"a\\nb\\tc\\rd\\\\e\\'f\\\"g\\x41h\"", 1);
     ASSERT_TOK_TEXT(0, "a\nb\tc\rd\\e'f\"gAh");
-    ASSERT_TOK_SPAN(0, 0, 26);
+    ASSERT_TOK_RANGE(0, 0, 26);
 })
 
 TEST(string_literal_keeps_an_escaped_nul, {

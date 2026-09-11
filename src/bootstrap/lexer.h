@@ -4,7 +4,7 @@
 // The file mirrors what the self-hosted compiler will do: no unions, no
 // function pointers, no macros beyond constants, a plain switch on the
 // current byte. Every token records its kind, its 1-based line and column
-// (a tab is one column, D14.2) and its byte span in the source; integer and
+// (a tab is one column, D14.2) and its byte range in the source; integer and
 // char literals carry their value, identifiers a view into the source and
 // string literals their decoded bytes interned in the caller's pool. The
 // first lexical error stops the file with one diagnostic (D14.2).
@@ -125,7 +125,7 @@ typedef enum {
     TOK_RBRACE,            // }
     TOK_COMMA,             // ,
     TOK_SEMI,              // ;
-    TOK_AT,                // @, the slice suffix (D2.10, D3.5)
+    TOK_AT,                // @, the span suffix (D2.10, D3.5)
 
     TOK_COUNT
 } tok_kind_t;

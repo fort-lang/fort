@@ -60,15 +60,15 @@ TEST(d5_3_table_pointers, {
     TEST_ASSERT_EQ_STR(dump_type("void* mut"), "(type (void) (ptr mut))");
 })
 
-TEST(d5_3_table_slices, {
-    TEST_ASSERT_EQ_STR(dump_type("i32@"), "(type (prim i32) (slice))");
-    TEST_ASSERT_EQ_STR(dump_type("i32@ mut"), "(type (prim i32) (slice mut))");
-    TEST_ASSERT_EQ_STR(dump_type("i32 mut@"), "(type (prim i32) mut (slice))");
-    TEST_ASSERT_EQ_STR(dump_type("node* mut@"), "(type (name node) (ptr mut) (slice))");
-    TEST_ASSERT_EQ_STR(dump_type("node mut*@"), "(type (name node) mut (ptr) (slice))");
-    TEST_ASSERT_EQ_STR(dump_type("u8 mut@ mut*"), "(type (prim u8) mut (slice mut) (ptr))");
-    TEST_ASSERT_EQ_STR(dump_type("u8@ mut*"), "(type (prim u8) (slice mut) (ptr))");
-    TEST_ASSERT_EQ_STR(dump_type("string@"), "(type (string) (slice))");
+TEST(d5_3_table_spans, {
+    TEST_ASSERT_EQ_STR(dump_type("i32@"), "(type (prim i32) (span))");
+    TEST_ASSERT_EQ_STR(dump_type("i32@ mut"), "(type (prim i32) (span mut))");
+    TEST_ASSERT_EQ_STR(dump_type("i32 mut@"), "(type (prim i32) mut (span))");
+    TEST_ASSERT_EQ_STR(dump_type("node* mut@"), "(type (name node) (ptr mut) (span))");
+    TEST_ASSERT_EQ_STR(dump_type("node mut*@"), "(type (name node) mut (ptr) (span))");
+    TEST_ASSERT_EQ_STR(dump_type("u8 mut@ mut*"), "(type (prim u8) mut (span mut) (ptr))");
+    TEST_ASSERT_EQ_STR(dump_type("u8@ mut*"), "(type (prim u8) (span mut) (ptr))");
+    TEST_ASSERT_EQ_STR(dump_type("string@"), "(type (string) (span))");
 })
 
 TEST(d5_3_table_arrays_of_references, {
@@ -80,14 +80,14 @@ TEST(d5_3_table_arrays_of_references, {
 // ---- the placement table of D17.2 -----------------------------------------
 
 TEST(d17_2_table_owning_references, {
-    TEST_ASSERT_EQ_STR(dump_type("u8 mut@ own"), "(type (prim u8) mut (slice own))");
-    TEST_ASSERT_EQ_STR(dump_type("u8@ own"), "(type (prim u8) (slice own))");
+    TEST_ASSERT_EQ_STR(dump_type("u8 mut@ own"), "(type (prim u8) mut (span own))");
+    TEST_ASSERT_EQ_STR(dump_type("u8@ own"), "(type (prim u8) (span own))");
     TEST_ASSERT_EQ_STR(dump_type("node mut* own"), "(type (name node) mut (ptr own))");
-    TEST_ASSERT_EQ_STR(dump_type("node* mut@ own"), "(type (name node) (ptr mut) (slice own))");
+    TEST_ASSERT_EQ_STR(dump_type("node* mut@ own"), "(type (name node) (ptr mut) (span own))");
     TEST_ASSERT_EQ_STR(dump_type("node mut* own mut@ own"),
-                       "(type (name node) mut (ptr own mut) (slice own))");
-    TEST_ASSERT_EQ_STR(dump_type("node* own@"), "(type (name node) (ptr own) (slice))");
-    TEST_ASSERT_EQ_STR(dump_type("u8 mut@ own mut*"), "(type (prim u8) mut (slice own mut) (ptr))");
+                       "(type (name node) mut (ptr own mut) (span own))");
+    TEST_ASSERT_EQ_STR(dump_type("node* own@"), "(type (name node) (ptr own) (span))");
+    TEST_ASSERT_EQ_STR(dump_type("u8 mut@ own mut*"), "(type (prim u8) mut (span own mut) (ptr))");
 })
 
 // `string` is the reference with no suffix, so it takes an `own` directly,
@@ -130,8 +130,8 @@ TEST(function_types_take_suffixes_and_markers, {
 // ---- the out-parameter shape of D3.6 --------------------------------------
 
 TEST(the_out_parameter_shape_of_d3_6, {
-    TEST_ASSERT_EQ_STR(dump_type("u8 mut@ own mut*"), "(type (prim u8) mut (slice own mut) (ptr))");
-    TEST_ASSERT_EQ_STR(dump_type("u8@* mut"), "(type (prim u8) (slice) (ptr mut))");
+    TEST_ASSERT_EQ_STR(dump_type("u8 mut@ own mut*"), "(type (prim u8) mut (span own mut) (ptr))");
+    TEST_ASSERT_EQ_STR(dump_type("u8@* mut"), "(type (prim u8) (span) (ptr mut))");
 })
 
 // ---- what the placement rules forbid --------------------------------------
@@ -214,29 +214,29 @@ TEST(a_type_that_is_not_a_type, {
                        "t.ft:1:6: error: expected an expression, found ']'\n");
 })
 
-// ---- one array or slice level (toolchain.md 7.3) --------------------------
+// ---- one array or span level (toolchain.md 7.3) --------------------------
 
-TEST(a_second_array_or_slice_level_is_not_supported, {
+TEST(a_second_array_or_span_level_is_not_supported, {
     TEST_ASSERT_EQ_STR(
         type_fails("i32[3][4]"),
         "t.ft:1:7: error: not supported by the bootstrap compiler: multi-dimensional arrays\n");
     TEST_ASSERT_EQ_STR(
         type_fails("i32[4]@"),
-        "t.ft:1:7: error: not supported by the bootstrap compiler: slices of arrays\n");
+        "t.ft:1:7: error: not supported by the bootstrap compiler: spans of arrays\n");
     TEST_ASSERT_EQ_STR(
         type_fails("u8@@"),
-        "t.ft:1:4: error: not supported by the bootstrap compiler: slices of slices\n");
+        "t.ft:1:4: error: not supported by the bootstrap compiler: spans of spans\n");
     TEST_ASSERT_EQ_STR(
         type_fails("node@[4]"),
-        "t.ft:1:6: error: not supported by the bootstrap compiler: arrays of slices\n");
+        "t.ft:1:6: error: not supported by the bootstrap compiler: arrays of spans\n");
 })
 
 // One level is supported, and a pointer is not a level of its own.
-TEST(one_array_or_slice_level_with_pointers_is_supported, {
+TEST(one_array_or_span_level_with_pointers_is_supported, {
     TEST_ASSERT_EQ_STR(dump_type("node*[16]"), "(type (name node) (ptr) (array (int 16)))");
-    TEST_ASSERT_EQ_STR(dump_type("u8@*"), "(type (prim u8) (slice) (ptr))");
+    TEST_ASSERT_EQ_STR(dump_type("u8@*"), "(type (prim u8) (span) (ptr))");
     TEST_ASSERT_EQ_STR(dump_type("node***"), "(type (name node) (ptr) (ptr) (ptr))");
-    TEST_ASSERT_EQ_STR(dump_type("string@"), "(type (string) (slice))");
+    TEST_ASSERT_EQ_STR(dump_type("string@"), "(type (string) (span))");
 })
 
 // The bootstrap's limit is per written type: a function type's parameters
@@ -244,20 +244,20 @@ TEST(one_array_or_slice_level_with_pointers_is_supported, {
 TEST(the_level_count_is_per_written_type, {
     TEST_ASSERT_EQ_STR(dump_type("fn void(i32[4], u8@)"),
                        "(type (fn-type (type (void)) (type (prim i32) (array (int 4)))"
-                       " (type (prim u8) (slice))))");
+                       " (type (prim u8) (span))))");
     TEST_ASSERT_EQ_STR(
         type_fails("fn void(u8@@)"),
-        "t.ft:1:12: error: not supported by the bootstrap compiler: slices of slices\n");
+        "t.ft:1:12: error: not supported by the bootstrap compiler: spans of spans\n");
 })
 
 // ---- inside new (D10.2, D17.3) --------------------------------------------
 
-TEST(new_refuses_a_mut_a_slice_and_a_misplaced_own, {
+TEST(new_refuses_a_mut_a_span_and_a_misplaced_own, {
     TEST_ASSERT_EQ_STR(expr_fails("new(i32 mut)"),
                        "t.ft:1:17: error: a mut does not parse inside new: "
                        "new allocates writable storage\n");
     TEST_ASSERT_EQ_STR(expr_fails("new(i32@)"),
-                       "t.ft:1:16: error: a slice suffix does not parse inside new: "
+                       "t.ft:1:16: error: a span suffix does not parse inside new: "
                        "write new(T, n)\n");
     TEST_ASSERT_EQ_STR(expr_fails("new(string own)"),
                        "t.ft:1:20: error: inside new an own follows a '*' of the element type\n");
@@ -278,17 +278,17 @@ TEST(every_marker_set_on_a_reference_suffix, {
     TEST_ASSERT_EQ_STR(dump_type("i32* own"), "(type (prim i32) (ptr own))");
     TEST_ASSERT_EQ_STR(dump_type("i32* mut"), "(type (prim i32) (ptr mut))");
     TEST_ASSERT_EQ_STR(dump_type("i32* own mut"), "(type (prim i32) (ptr own mut))");
-    TEST_ASSERT_EQ_STR(dump_type("i32@"), "(type (prim i32) (slice))");
-    TEST_ASSERT_EQ_STR(dump_type("i32@ own"), "(type (prim i32) (slice own))");
-    TEST_ASSERT_EQ_STR(dump_type("i32@ mut"), "(type (prim i32) (slice mut))");
-    TEST_ASSERT_EQ_STR(dump_type("i32@ own mut"), "(type (prim i32) (slice own mut))");
+    TEST_ASSERT_EQ_STR(dump_type("i32@"), "(type (prim i32) (span))");
+    TEST_ASSERT_EQ_STR(dump_type("i32@ own"), "(type (prim i32) (span own))");
+    TEST_ASSERT_EQ_STR(dump_type("i32@ mut"), "(type (prim i32) (span mut))");
+    TEST_ASSERT_EQ_STR(dump_type("i32@ own mut"), "(type (prim i32) (span own mut))");
 })
 
 // The base position takes a `mut` for every base type and an `own` only for
 // `string` (D5.3, D17.2).
 TEST(every_marker_set_on_a_base_type, {
     TEST_ASSERT_EQ_STR(dump_type("u8 mut*"), "(type (prim u8) mut (ptr))");
-    TEST_ASSERT_EQ_STR(dump_type("char mut@"), "(type (prim char) mut (slice))");
+    TEST_ASSERT_EQ_STR(dump_type("char mut@"), "(type (prim char) mut (span))");
     TEST_ASSERT_EQ_STR(dump_type("bool[4] mut"), "(type (prim bool) (array (int 4) mut))");
     TEST_ASSERT_EQ_STR(dump_type("node mut*"), "(type (name node) mut (ptr))");
     TEST_ASSERT_EQ_STR(dump_type("m.t mut*"), "(type (name m t) mut (ptr))");
@@ -305,7 +305,7 @@ TEST(long_reference_chains_keep_their_markers, {
                        "(type (prim i32) mut (ptr mut) (ptr mut) (ptr mut))");
     TEST_ASSERT_EQ_STR(dump_type("node* own* own* own"),
                        "(type (name node) (ptr own) (ptr own) (ptr own))");
-    TEST_ASSERT_EQ_STR(dump_type("m.t* mut@ own"), "(type (name m t) (ptr mut) (slice own))");
+    TEST_ASSERT_EQ_STR(dump_type("m.t* mut@ own"), "(type (name m t) (ptr mut) (span own))");
 })
 
 // A fixed-array group may sit between the two reference groups, and the
@@ -343,7 +343,7 @@ TEST(function_types_nest, {
     TEST_ASSERT_EQ_STR(dump_type("fn fn void()()"),
                        "(type (fn-type (type (fn-type (type (void))))))");
     TEST_ASSERT_EQ_STR(dump_type("fn u8@(string, i32 mut*)"),
-                       "(type (fn-type (type (prim u8) (slice)) (type (string))"
+                       "(type (fn-type (type (prim u8) (span)) (type (string))"
                        " (type (prim i32) mut (ptr))))");
     TEST_ASSERT_EQ_STR(dump_type("fn noreturn()"), "(type (fn-type (type (noreturn))))");
 })
@@ -416,7 +416,7 @@ TEST(the_placement_rules_hold_in_every_type_position, {
 })
 
 // A doubled marker is refused in every position, on a base type, on a
-// pointer, on a slice and on an array (D5.3).
+// pointer, on a span and on an array (D5.3).
 TEST(a_doubled_marker_in_every_position, {
     TEST_ASSERT_EQ_STR(type_fails("i32 own own"),
                        "t.ft:1:5: error: an own marks a reference: "
@@ -508,7 +508,7 @@ int main(int argc, char** argv) {
     TEST_RUN(void_parses_as_a_base_type_on_its_own);
     TEST_RUN(d5_3_table_scalars_and_arrays);
     TEST_RUN(d5_3_table_pointers);
-    TEST_RUN(d5_3_table_slices);
+    TEST_RUN(d5_3_table_spans);
     TEST_RUN(d5_3_table_arrays_of_references);
     TEST_RUN(d17_2_table_owning_references);
     TEST_RUN(d17_2_own_on_string_and_before_an_array);
@@ -522,10 +522,10 @@ int main(int argc, char** argv) {
     TEST_RUN(a_mut_between_an_element_type_and_its_length_is_an_error);
     TEST_RUN(an_array_after_a_reference_suffix_is_an_error);
     TEST_RUN(a_type_that_is_not_a_type);
-    TEST_RUN(a_second_array_or_slice_level_is_not_supported);
-    TEST_RUN(one_array_or_slice_level_with_pointers_is_supported);
+    TEST_RUN(a_second_array_or_span_level_is_not_supported);
+    TEST_RUN(one_array_or_span_level_with_pointers_is_supported);
     TEST_RUN(the_level_count_is_per_written_type);
-    TEST_RUN(new_refuses_a_mut_a_slice_and_a_misplaced_own);
+    TEST_RUN(new_refuses_a_mut_a_span_and_a_misplaced_own);
     TEST_RUN(every_marker_set_on_a_reference_suffix);
     TEST_RUN(every_marker_set_on_a_base_type);
     TEST_RUN(long_reference_chains_keep_their_markers);

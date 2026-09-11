@@ -562,7 +562,7 @@ class Discovery(TempRoot):
     def test_select(self):
         tests = [
             run_tests.Test(p, p, "run")
-            for p in ("run/arrays/001_a.ft", "run/slices/001_a.ft", "programs/p.ft")
+            for p in ("run/arrays/001_a.ft", "run/spans/001_a.ft", "programs/p.ft")
         ]
         self.assertEqual(run_tests.select(tests, []), tests)
         self.assertEqual(
@@ -570,7 +570,7 @@ class Discovery(TempRoot):
         )
         self.assertEqual(
             [t.path for t in run_tests.select(tests, ["001_a", "programs/"])],
-            ["run/arrays/001_a.ft", "run/slices/001_a.ft", "programs/p.ft"],
+            ["run/arrays/001_a.ft", "run/spans/001_a.ft", "programs/p.ft"],
         )
 
 

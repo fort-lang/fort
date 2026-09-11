@@ -180,7 +180,7 @@ TEST(sb_append_str_adds_the_bytes_of_a_view, {
     sb_t b;
     sb_init(&b);
     const char text[] = "a\0b";
-    sb_append_str(&b, str_from_span(text, 3));
+    sb_append_str(&b, str_from_range(text, 3));
     sb_append_str(&b, s("c"));
     TEST_ASSERT_EQ_UINT64(b.len, (uint64_t)4);
     TEST_ASSERT_EQ_CHAR(b.data[0], 'a');
@@ -206,10 +206,10 @@ TEST(sb_append_str_of_a_long_view_grows_in_one_step, {
     for (int i = 0; i < 5000; i++) {
         text[i] = 'k';
     }
-    sb_append_str(&b, str_from_span(text, 5000));
+    sb_append_str(&b, str_from_range(text, 5000));
     TEST_ASSERT_EQ_UINT64(b.len, (uint64_t)5000);
     TEST_ASSERT_EQ_UINT64(b.cap, (uint64_t)5000);
-    TEST_ASSERT_TRUE(str_eq(sb_view(&b), str_from_span(text, 5000)));
+    TEST_ASSERT_TRUE(str_eq(sb_view(&b), str_from_range(text, 5000)));
     mem_free(text);
     sb_free(&b);
 })
