@@ -772,13 +772,21 @@ Owner: `toolchain.md`.
   `--target` and `-Xcc` did not exist.
 - **D14.2** Diagnostics: `<file>:<line>:<col>: error: <message>` on stderr, one per line,
   optionally followed by `note:` lines. Errors without a position in the file (a missing
-  `main`) use `1:1`. A syntax error stops the compilation of that file
-  after one diagnostic (no recovery in v1). Modules are checked in dependency order; all semantic
-  errors of the first module that has any are reported, then compilation stops. Positions of
-  errors that concern a whole construct: "missing return" and a non-exhaustive enum `switch`
-  are reported at the closing brace of the body or `switch`; an infinite-size struct at its
-  `struct` keyword; a shadowing error at the inner declaration ("'n' shadows a parameter",
-  "'n' shadows an enclosing local"). The compiler never emits warnings in v1.
+  `main`) use `1:1`. A lexical error stops the compilation of that file after one diagnostic.
+  After a syntax error the parser reports it, skips to the next statement, clause, field or
+  declaration boundary and parses on, so a file reports one diagnostic for each construct that
+  failed and not only for the first: at most 20 per file, never two in a row at one position,
+  and none for a construct whose tokens an earlier skip had already dropped. The skipped tokens
+  are held in the tree as an error node that every later pass skips. A file with a syntax error
+  is parsed whole and not checked. Every module of the closure is checked in dependency order; a
+  declaration whose check failed has the error type, which silences every later diagnostic
+  involving it, so an importer sees only its own errors. Positions of errors that concern a
+  whole construct: "missing return" and a non-exhaustive enum `switch` are reported at the
+  closing brace of the body or `switch`; an infinite-size struct at its `struct` keyword; a
+  shadowing error at the inner declaration ("'n' shadows a parameter", "'n' shadows an
+  enclosing local"). The compiler never emits warnings in v1. Amended
+  2026-09-10 with D20: a syntax error stopped the file after one diagnostic with no recovery,
+  and only the semantic errors of the first module that had any were reported.
 - **D14.3** Generated code is LLVM IR (D19.1), compiled and linked by `--cc` in one invocation,
   `<cc> --target=<triple> -O1 -fPIE -pie -Wno-override-module -o <out> <entry>.ll
   <std-dir>/fort_rt.o [-l<lib>...] [<-Xcc args>...]`, `-O2` in place of `-O1` under `--release`

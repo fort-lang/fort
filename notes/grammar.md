@@ -288,6 +288,18 @@ At the top level the first token decides: `import`, `fn`, `extern`, `struct`, `e
 (a `global_decl`). A `fn` at statement level always begins a declaration whose type is a
 `fn_type` (`fn i32(i32) op = add;`); function definitions are top-level only (D8.3).
 
+A parse that fails does not stop the file: the parser reports the error, skips to the next
+statement, clause, field or declaration boundary and parses on, so a file reports one diagnostic
+for each construct that failed (D14.2). The recovery points and what a skip consumes are in
+`toolchain.md` 4. Recovery adds one rule to the grammar above: a `block`, a `case_clause`, a
+`struct_decl` body and an `enum_decl` body also end where a top-level declaration starts, so
+that a missing `}` is reported once rather than once per following declaration, and the `{` of a
+`fn_decl` body, a `struct_decl` body or an `enum_decl` body may be missing without the body
+ceasing to be one. Which of the two a `fn` starts is the same speculative parse as case 1: a
+return type followed by an identifier is a `fn_decl`, a return type followed by `(` is a
+`fn_type` (D3.10). The skipped tokens are no production of this grammar; the tree holds them as
+an error node (D14.2).
+
 ## 8. Grammar-to-decision index
 
 | Construct              | Decisions                         |

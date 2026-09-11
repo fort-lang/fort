@@ -181,9 +181,48 @@ Compile-time diagnostics (D14.2) are written to stderr, one per line:
   so an end never appears in a diagnostic line.
 - An error without a position in the file (a missing `main`, an entry base name that is not a
   valid module name) uses `1:1` (D14.2).
-- Parsing stops at a module's first syntax error; checking reports every error in a module.
-  Modules are processed in dependency order and processing stops after the first module with
-  errors, so one module's errors appear together (D14.2).
+- A lexical error stops the module after one diagnostic. After a syntax error the parser reports
+  it and unwinds the construct it was parsing, reporting nothing more until it reaches a recovery
+  point: the statement loop of a block or of a `case` clause, the clause loop of a `switch`, the
+  field loop of a struct body, or the declaration loop of the module. There it skips what is left
+  of the failed construct, keeps the skipped tokens as an error node that every later pass skips,
+  and parses on, so a file reports one diagnostic for each construct that failed (D14.2). A
+  parameter list, an argument list, an import item list and an enum body have no recovery point
+  of their own and recover through the construct that encloses them.
+- A skip runs to the end of the failed construct. It consumes at least one token, so it always
+  makes progress, and then, outside the `(` and `[` the construct left open, consumes a `;`, and
+  consumes the `}` that closes a brace it saw opened; it stops before a `}` it did not see opened
+  and before a token that starts a top-level declaration, the end of the file ending every skip.
+  Which other tokens stop it depends on the recovery point: a skip that stands where a statement
+  or a clause would stops before `case` and `default`, since a switch body holds nothing else,
+  and one that stands where a statement would also stops before a statement keyword (`if while
+  for switch defer return break continue do`); a struct field is skipped to its `;` or to the `}`
+  of the body, and a skip at the top level, where a `}` closes nothing, consumes one. Two
+  lookaheads settle the braces a skip did not see opened: a `}` that a `;` follows closes a brace
+  initializer or a struct literal the construct opened, since no block is followed by a `;`
+  (D7.3), and a `}` that a `)` or a `]` follows stands inside a bracket the construct left open,
+  where it closes nothing; both go with the skipped region. A `{` a construct left open is not
+  counted: which brace it was meant to be is not decidable from the tokens, so the skip leaves
+  the next `}` to the body it belongs to and drops the unclosed construct instead.
+- A block, a `case` clause, a struct body and an enum body also end where a top-level declaration
+  starts: at `struct`, `enum`, `extern`, `import`, or a `fn` whose return type is followed by an
+  identifier (a `fn` at statement level is a function type, whose return type is followed by `(`,
+  D3.10). A file with a missing `}` therefore reports `expected '}', found 'fn'` once, at the
+  declaration that follows it, instead of one diagnostic per following declaration (D14.2). The
+  mirror holds for the `{` of a function body, a struct body or an enum body, which a complete
+  declaration header precedes: a missing one is reported once and the body is read as though it
+  were there, instead of the body being read as declarations.
+- The parser reports at most 20 syntax errors per file, and drops an error that starts where the
+  one reported before it started; it parses on silently after either, so the tree covers the
+  whole file whatever was reported (D14.2). Diagnostics come out in the order they are reported,
+  which is source order except where a construct is judged after its parts are parsed: the
+  features the bootstrap lacks (toolchain.md 7.3) are reported that way, so a `do`-`while` whose
+  body has a mistake reports the body's line first. Nothing reads a diagnostic's position
+  relative to another's: the test harness matches each `error:` line to the annotation on its own
+  line (D14.5).
+- Every module of the closure is checked in dependency order (D14.2); a file with a syntax error
+  is parsed whole and not checked. A declaration whose check failed has the error type, which
+  silences every later diagnostic involving it, so an importer sees only its own errors.
 - The compiler emits no warnings (D14.2): unused imports, unused variables and statements after
   a terminating statement are not diagnosed.
 
