@@ -9,6 +9,8 @@
 // `--check` stops after the front end, with no module, no temporary and no
 // `--cc` (D20.1), and `--json` reports what it found as one JSON document on
 // stdout instead of the text diagnostics of D14.2 (D20.2, toolchain.md 4.1).
+// `--index` implies both and fills that document's identifier index, which
+// index.h builds from the trees the run leaves behind (D20.3).
 //
 // The file mirrors what the self-hosted compiler will do: no unions, no
 // function pointers, messages assembled with sb_t instead of printf formats.
@@ -62,6 +64,7 @@ typedef struct {
     bool no_bounds_check; // --no-bounds-check
     bool check;           // --check: the front end alone (D20.1)
     bool json;            // --json: the document of D20.2 on stdout
+    bool index;           // --index: the identifier index of D20.3 in it
     ptrvec_t includes;    // -I roots, searched in command-line order (D9.2)
     ptrvec_t libs;        // -l<lib> as given, passed to the linker in order
     ptrvec_t cc_args;     // -Xcc arguments, passed verbatim after the rest

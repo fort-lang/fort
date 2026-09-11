@@ -106,11 +106,16 @@ A safe(r) C-like systems programming language.
   without a compiler and runs before every test run; `run_tests.py --check-json` is a mode of its
   own (ctest `lang_check_json`, also run by check-lang) that holds the document of `fort --check
   --json` against the text form on every fail test and ignores `xfail.txt`, since it judges the
-  two forms of one run rather than the test. A compiler exit status other than 0 or 1 is
-  an `ERROR`, which `xfail.txt` still covers. The harness and its unit tests are Python 3.12,
-  standard library only, wrapped at 100 columns (the host's `ruff format --line-length 100` is
-  the reference); `run_tests_test.py` scripts a fake `fort` with `//@` lines, extend it rather
-  than calling the real compiler.
+  two forms of one run rather than the test. It also selects a test with an `index.json` beside
+  it, runs that one with `--index` and holds its `"symbols"` against the file byte for byte
+  (D20.3): the golden is one record per line as `render_index` spells it, it is the one non-`.ft`
+  file a directory test may hold, and `--lint` checks its shape without a compiler, so a golden
+  edited by hand into another spelling of the same records fails the lint rather than the run.
+  Regenerate one with `fort --index` and `render_index`, never by hand. A compiler exit status
+  other than 0 or 1 is an `ERROR`, which `xfail.txt` still covers. The harness and its unit tests
+  are Python 3.12, standard library only, wrapped at 100 columns (the host's
+  `ruff format --line-length 100` is the reference); `run_tests_test.py` scripts a fake `fort`
+  with `//@` lines, extend it rather than calling the real compiler.
 - Unit tests: `test/<component>_test.c` with `test/test.h`; every `test/*_test.c` is globbed
   into an executable `build/<preset>/test/<component>_test` linked against `fort_core` and
   `fort_rt_native`, and a ctest `unit-<component>`. A `TEST` body is one macro argument: a comma
@@ -253,6 +258,13 @@ A safe(r) C-like systems programming language.
   the freed block still held a NUL, so the document printed `"file":""` while the text form,
   written at report time, was right. `record_append` interns the name in the sink's own pool, and
   anything else a record must outlive its reporter for is copied the same way.
+- **Reading a tree after the front end**: `driver_front_end` does not own the analysis. The
+  module set (which owns every tree) and the checker (which owns every symbol and type the
+  annotations point to) are a `driver_analysis_t` the caller prepares and frees, because a `sym`
+  or `type` slot dangles the moment `check_free` runs (sym.h). A build frees it as soon as the
+  front end returns; `--check --json` frees it after the document has been written, since the
+  index walk of D20.3 reads the trees then. A new pass over an annotated tree goes in that
+  window, not after it.
 - **Citing decisions in code**: a citation goes on the line or function that implements the
   rule, with a phrase stating the rule (`// pointers print as 0x + lowercase hex, 0x0 for null
   (D11.7)`), so a reader learns the rule without opening the log. A bare tag list at file or

@@ -14,6 +14,7 @@
 #include "check.h"
 #include "containers.h"
 #include "diag.h"
+#include "index.h"
 #include "json.h"
 #include "modules.h"
 #include "str.h"
@@ -41,6 +42,7 @@ static const char* const HELP_LINES[] = {
     "  -Xcc <arg>         pass <arg> to --cc verbatim; repeatable, in order",
     "  --check            run the front end only and stop; emit nothing",
     "  --json             write the check document to stdout; needs --check",
+    "  --index            fill the document's identifier index; implies --check --json",
     "  --help             print this help and exit",
     "  --version          print the compiler version and exit",
 };
@@ -114,6 +116,7 @@ void driver_options_init(driver_options_t* opts) {
     opts->no_bounds_check = false;
     opts->check = false;
     opts->json = false;
+    opts->index = false;
     ptrvec_init(&opts->includes);
     ptrvec_init(&opts->libs);
     ptrvec_init(&opts->cc_args);
@@ -157,7 +160,8 @@ static bool is_link_option(const char* arg) {
 }
 
 // The options that carry no value: -S, -c, --release, --no-bounds-check,
-// --check and --json, each of which sets one flag (D14.1, D20.1, D20.2).
+// --check, --json and --index, each of which sets one flag (D14.1, D20.1,
+// D20.2, D20.3).
 static bool parse_flag(driver_options_t* opts, const char* arg) {
     if (strcmp(arg, "-S") == 0) {
         opts->emit_ir = true;
@@ -170,6 +174,12 @@ static bool parse_flag(driver_options_t* opts, const char* arg) {
     } else if (strcmp(arg, "--check") == 0) {
         opts->check = true;
     } else if (strcmp(arg, "--json") == 0) {
+        opts->json = true;
+    } else if (strcmp(arg, "--index") == 0) {
+        // --index implies --check and --json, so it is the whole command line
+        // an editor gives the compiler (D20.3).
+        opts->index = true;
+        opts->check = true;
         opts->json = true;
     } else {
         return false;
@@ -672,7 +682,7 @@ int driver_front_end(const driver_options_t* opts,
 
 // Builds the whole document into `doc`: the version, the files of the
 // closure, the diagnostics of the run and the identifier index (D20.2).
-static void build_document(sb_t* doc, const driver_files_t* files) {
+static void build_document(sb_t* doc, const driver_files_t* files, const index_t* ix) {
     json_t j;
     json_init(&j, doc);
     json_object_begin(&j);
@@ -689,21 +699,21 @@ static void build_document(sb_t* doc, const driver_files_t* files) {
     json_array_end(&j);
     json_key(&j, "diagnostics");
     diag_write_json(&j);
-    // The identifier index of D20.3, which nothing fills yet: an empty array
-    // rather than a missing key, so the document has one shape (D20.2).
+    // The identifier index of D20.3, which is the empty array without
+    // --index: a member of every document rather than one of two shapes
+    // (D20.2).
     json_key(&j, "symbols");
-    json_array_begin(&j);
-    json_array_end(&j);
+    index_write_json(ix, &j);
     json_object_end(&j);
 }
 
 // Writes the document with one fwrite, so stdout holds a complete document or
 // nothing and a client tells a crash from a verdict (D20.2). The document is
 // one line ended by a newline (toolchain.md 4.1).
-static void write_document(FILE* out, const driver_files_t* files) {
+static void write_document(FILE* out, const driver_files_t* files, const index_t* ix) {
     sb_t doc;
     sb_init(&doc);
-    build_document(&doc, files);
+    build_document(&doc, files, ix);
     sb_push(&doc, '\n');
     const str_t text = sb_view(&doc);
     (void)fwrite(text.ptr, 1, (size_t)text.len, out);
@@ -774,7 +784,15 @@ static int check_entry(const driver_options_t* opts, const char* argv0, FILE* ou
         // The document is written only for a verdict: a usage, toolchain or
         // internal error is exit 2 with stdout empty (D20.2, D14.1).
         if (status == FORT_EXIT_OK || status == FORT_EXIT_COMPILE_ERROR) {
-            write_document(out, &files);
+            index_t ix;
+            index_init(&ix);
+            if (opts->index) {
+                // The trees the run annotated are still alive: the analysis
+                // is freed below, after the document (D20.3, sym.h).
+                index_build(&ix, &an.set);
+            }
+            write_document(out, &files, &ix);
+            index_free(&ix);
         }
         // The text form is a process-wide mode, so it is restored: one run
         // must not change the next in a process that makes several.

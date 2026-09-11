@@ -196,6 +196,116 @@ TEST(the_document_of_a_failing_module_is_exact, {
     sandbox_close(&box);
 })
 
+// The whole document of the sandbox entry under --index: one record for the
+// one name the module declares (D20.3, toolchain.md 9.1).
+static const char INDEXED_DOCUMENT[] =
+    "{\"version\":1,\"files\":[\"%s\"],\"diagnostics\":[],\"symbols\":[{\"file\":\"%s\","
+    "\"line\":1,\"col\":8,\"end_line\":1,\"end_col\":12,\"name\":\"main\",\"kind\":\"fn\","
+    "\"type\":\"fn i32()\",\"is_decl\":true,\"decl\":{\"file\":\"%s\",\"line\":1,\"col\":8,"
+    "\"end_line\":1,\"end_col\":12}}]}\n";
+
+TEST(index_implies_check_and_json_and_fills_the_symbols, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    // --index is the whole command line an editor gives the compiler: it
+    // turns on --check and --json by itself (D20.3).
+    const run_t run = RUN_CAPTURED("--index", box.entry);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
+    char want[CAPTURE_MAX];
+    TEST_UNUSED(snprintf(want, sizeof want, INDEXED_DOCUMENT, box.entry, box.entry, box.entry));
+    TEST_ASSERT_EQ_STR(run.out, want);
+    sandbox_close(&box);
+})
+
+TEST(index_runs_the_front_end_alone, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    // The check mode emits nothing and spawns no `--cc` (D20.1), which
+    // --index does not change.
+    const run_t run = RUN_CAPTURED("--index", "--cc", FORT_FAKE_CC, "-o", box.out, box.entry);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
+    TEST_ASSERT_EQ_INT32(access(box.log, F_OK), -1);
+    TEST_ASSERT_EQ_INT32(access(box.out, F_OK), -1);
+    sandbox_close(&box);
+})
+
+TEST(an_indexed_use_points_at_the_declaration_in_the_other_file, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    TEST_ASSERT_TRUE(
+        write_source(box.entry, "import util;\nfn i32 main() { return util.add(1, 2); }\n"));
+    char util[PATH_CAP];
+    join(util, sizeof util, box.dir, "util.ft");
+    TEST_ASSERT_TRUE(write_source(util, "fn i32 add(i32 a, i32 b) { return a + b; }\n"));
+    const run_t run = RUN_CAPTURED("--index", box.entry);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
+    // The use of `add` in the entry carries the declaration's name range in
+    // the imported file, which is what go-to-definition follows (D20.3).
+    char want[CAPTURE_MAX];
+    TEST_UNUSED(snprintf(want,
+                         sizeof want,
+                         "{\"file\":\"%s\",\"line\":2,\"col\":29,\"end_line\":2,"
+                         "\"end_col\":32,\"name\":\"add\",\"kind\":\"fn\","
+                         "\"type\":\"fn i32(i32, i32)\",\"is_decl\":false,"
+                         "\"decl\":{\"file\":\"%s\",\"line\":1,\"col\":8,\"end_line\":1,"
+                         "\"end_col\":11}}",
+                         box.entry,
+                         util));
+    TEST_ASSERT_NONNULL(strstr(run.out, want));
+    sandbox_close(&box);
+})
+
+TEST(an_indexed_run_with_an_error_still_indexes_what_resolved, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    TEST_ASSERT_TRUE(write_source(box.entry, BAD_IMPORT_SOURCE));
+    const run_t run = RUN_CAPTURED("--index", box.entry);
+    // A verdict is exit 0 or 1 with a document (D20.2), and a file with
+    // errors still indexes everything the checker resolved (D20.3).
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
+    TEST_ASSERT_NONNULL(strstr(run.out, "\"message\":\"module 'nothere' not found\""));
+    TEST_ASSERT_NONNULL(strstr(run.out, "\"name\":\"main\",\"kind\":\"fn\""));
+    sandbox_close(&box);
+})
+
+TEST(an_indexed_run_that_cannot_read_the_entry_leaves_stdout_empty, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    char missing[PATH_CAP];
+    join(missing, sizeof missing, box.dir, "gone.ft");
+    // An unreadable entry is a usage error: exit 2 with stdout empty, which
+    // is how a client tells a crash from a verdict (D14.1, D20.2).
+    const run_t run = RUN_CAPTURED("--index", missing);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_USAGE);
+    TEST_ASSERT_EQ_SIZE(strlen(run.out), (size_t)0);
+    sandbox_close(&box);
+})
+
+TEST(index_after_check_and_json_is_the_same_run, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    // --index implies the two options, so spelling them as well changes
+    // nothing (D20.3).
+    const run_t implied = RUN_CAPTURED("--index", box.entry);
+    char want[CAPTURE_MAX];
+    TEST_UNUSED(snprintf(want, sizeof want, "%s", implied.out));
+    const run_t spelled = RUN_CAPTURED("--check", "--json", "--index", box.entry);
+    TEST_ASSERT_EQ_INT32(spelled.status, FORT_EXIT_OK);
+    TEST_ASSERT_EQ_STR(spelled.out, want);
+    sandbox_close(&box);
+})
+
+TEST(a_document_without_index_has_an_empty_symbols_array, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    // The index is a member of every document and is filled by --index alone
+    // (D20.2, D20.3).
+    const run_t run = RUN_CAPTURED("--check", "--json", box.entry);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
+    TEST_ASSERT_NONNULL(strstr(run.out, "\"symbols\":[]}"));
+    sandbox_close(&box);
+})
+
 TEST(json_writes_no_text_diagnostic, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
@@ -559,6 +669,13 @@ int main(int argc, char** argv) {
     TEST_RUN(an_include_root_is_searched_under_check);
     TEST_RUN(a_quote_in_a_file_name_is_escaped_in_the_document);
     TEST_RUN(a_non_ascii_file_name_passes_through_the_document);
+    TEST_RUN(index_implies_check_and_json_and_fills_the_symbols);
+    TEST_RUN(index_runs_the_front_end_alone);
+    TEST_RUN(an_indexed_use_points_at_the_declaration_in_the_other_file);
+    TEST_RUN(an_indexed_run_with_an_error_still_indexes_what_resolved);
+    TEST_RUN(an_indexed_run_that_cannot_read_the_entry_leaves_stdout_empty);
+    TEST_RUN(index_after_check_and_json_is_the_same_run);
+    TEST_RUN(a_document_without_index_has_an_empty_symbols_array);
     TEST_RUN(the_front_end_hands_out_the_files_it_read);
     TEST_RUN(the_analysis_outlives_the_front_end);
     TEST_RUN(a_front_end_that_wants_no_files_gets_none);
