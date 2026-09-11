@@ -234,6 +234,85 @@ TEST(an_extern_signature_takes_scalars_and_pointers, {
     TEST_ASSERT_TRUE(said("extern signature cannot use type 'i32[2]'"));
 })
 
+// ---- sizes and layout (D3.1, D3.8, D3.15) -------------------------------------------
+
+TEST(sizeof_gives_the_size_of_every_kind, {
+    TEST_ASSERT_TRUE(check_src("struct pad {\n    i8 a;\n    i64 b;\n    i8 c;\n}\n"
+                               "enum color {\n    red,\n}\n"
+                               "u64 BOOL_SIZE = sizeof(bool);\n"
+                               "u64 CHAR_SIZE = sizeof(char);\n"
+                               "u64 PTR_SIZE = sizeof(i32*);\n"
+                               "u64 FN_SIZE = sizeof(fn i32(i32));\n"
+                               "u64 SPAN_SIZE = sizeof(i32@);\n"
+                               "u64 STRING_SIZE = sizeof(string);\n"
+                               "u64 ENUM_SIZE = sizeof(color);\n"
+                               "u64 ARRAY_SIZE = sizeof(i32[4]);\n"
+                               "u64 STRUCT_SIZE = sizeof(pad);\n"
+                               "fn i32 main() {\n    return 0;\n}\n"));
+    int64_t v = 0;
+    TEST_ASSERT_TRUE(init_int("BOOL_SIZE", &v));
+    TEST_ASSERT_EQ_INT64(v, (int64_t)1);
+    TEST_ASSERT_TRUE(init_int("CHAR_SIZE", &v));
+    TEST_ASSERT_EQ_INT64(v, (int64_t)1);
+    TEST_ASSERT_TRUE(init_int("PTR_SIZE", &v));
+    TEST_ASSERT_EQ_INT64(v, (int64_t)8);
+    // A function pointer is 8, a span and a string 16, an enum 4 (D3.15).
+    TEST_ASSERT_TRUE(init_int("FN_SIZE", &v));
+    TEST_ASSERT_EQ_INT64(v, (int64_t)8);
+    TEST_ASSERT_TRUE(init_int("SPAN_SIZE", &v));
+    TEST_ASSERT_EQ_INT64(v, (int64_t)16);
+    TEST_ASSERT_TRUE(init_int("STRING_SIZE", &v));
+    TEST_ASSERT_EQ_INT64(v, (int64_t)16);
+    TEST_ASSERT_TRUE(init_int("ENUM_SIZE", &v));
+    TEST_ASSERT_EQ_INT64(v, (int64_t)4);
+    TEST_ASSERT_TRUE(init_int("ARRAY_SIZE", &v));
+    TEST_ASSERT_EQ_INT64(v, (int64_t)16);
+    // C/System V layout: 1 byte, 7 of padding, 8, 1 and 7 more to the
+    // alignment (D3.8).
+    TEST_ASSERT_TRUE(init_int("STRUCT_SIZE", &v));
+    TEST_ASSERT_EQ_INT64(v, (int64_t)24);
+})
+
+TEST(a_field_offset_follows_the_c_layout, {
+    TEST_ASSERT_TRUE(check_src("struct pad {\n    i8 a;\n    i64 b;\n    i8 c;\n}\n"
+                               "fn i32 main() {\n    pad p = {1, 2, 3};\n"
+                               "    return cast(p.a, i32);\n}\n"));
+    // Fields in order, each at the next multiple of its alignment (D3.8).
+    TEST_ASSERT_EQ_UINT64(node_in_main(AST_FIELD_DECL, "a")->aux, (uint64_t)0);
+    TEST_ASSERT_EQ_UINT64(node_in_main(AST_FIELD_DECL, "b")->aux, (uint64_t)8);
+    TEST_ASSERT_EQ_UINT64(node_in_main(AST_FIELD_DECL, "c")->aux, (uint64_t)16);
+})
+
+TEST(a_struct_of_a_struct_is_laid_out_once, {
+    TEST_ASSERT_TRUE(check_src("struct point {\n    i32 x;\n    i32 y;\n}\n"
+                               "struct line {\n    point a;\n    point b;\n}\n"
+                               "u64 SIZE = sizeof(line);\n"
+                               "fn i32 main() {\n    line l = {{1, 2}, {3, 4}};\n"
+                               "    return l.b.y;\n}\n"));
+    int64_t v = 0;
+    TEST_ASSERT_TRUE(init_int("SIZE", &v));
+    TEST_ASSERT_EQ_INT64(v, (int64_t)16);
+    TEST_ASSERT_EQ_UINT64(node_in_main(AST_FIELD_DECL, "b")->aux, (uint64_t)8);
+})
+
+// ---- the print family (D12.2, 8.3) --------------------------------------------------
+
+TEST(every_printable_type_prints, {
+    TEST_ASSERT_TRUE(
+        check_src("enum color {\n    red,\n}\n"
+                  "fn i32 id(i32 n) {\n    return n;\n}\n"
+                  "fn i32 main() {\n    i32 mut v = 1;\n"
+                  "    println(1, 'a', true, \"s\", color.red, &v, id, cast(0, u64));\n"
+                  "    void* o = null;\n    println(o);\n    return 0;\n}\n"));
+})
+
+TEST(an_array_and_a_span_are_not_printable, {
+    TEST_ASSERT_FALSE(check_body("    i32[2] a = {1, 2};\n    println(a);"));
+    TEST_ASSERT_TRUE(said("cannot print a value of type i32[2]"));
+    TEST_ASSERT_FALSE(check_body("    i32@ s = {};\n    println(s);"));
+    TEST_ASSERT_TRUE(said("cannot print a value of type i32@"));
+})
+
 // ---- poisoning (D14.2) --------------------------------------------------------------
 
 TEST(a_failed_type_silences_the_declarations_that_use_it, {
@@ -300,6 +379,11 @@ int main(int argc, char** argv) {
     TEST_RUN(a_function_type_ignores_the_binding_mut_of_its_parameters);
     TEST_RUN(a_void_parameter_is_refused);
     TEST_RUN(an_extern_signature_takes_scalars_and_pointers);
+    TEST_RUN(sizeof_gives_the_size_of_every_kind);
+    TEST_RUN(a_field_offset_follows_the_c_layout);
+    TEST_RUN(a_struct_of_a_struct_is_laid_out_once);
+    TEST_RUN(every_printable_type_prints);
+    TEST_RUN(an_array_and_a_span_are_not_printable);
     TEST_RUN(a_failed_type_silences_the_declarations_that_use_it);
     TEST_RUN(a_failed_function_silences_its_calls);
     TEST_RUN(a_failed_local_silences_its_uses);
