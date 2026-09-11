@@ -380,6 +380,51 @@ static void gen_new_span(gen_t* g, ast_node_t* n, gen_place_t dst) {
     gen_span_init(g, dst.addr, p, count);
 }
 
+bool gen_is_move(const ast_node_t* n) {
+    const sym_t* s = n->kind == AST_CALL && n->a != NULL ? n->a->sym : NULL;
+    return s != NULL && s->kind == SYM_BUILTIN && str_eq(s->name, str_from_cstr("move"));
+}
+
+// `move(lv)` (item 18, D17.6): the operand's value is read into a place of the
+// emitter's own, the operand is then left at its zero value, and only then is
+// the value handed on. `dst` is the place an aggregate result is written into
+// and is NULL for a scalar one and on the discard path.
+//
+// The intermediate is not an optimization to drop: `dst` may be the operand
+// itself, and nothing here can tell. `s = move(s)`, `*p = move(*q)` and
+// `v[i] = move(v[j])` all reach this with two places that may be one address,
+// and copying into `dst` first would let the zeroing that follows destroy the
+// value D17.6 says the move yields. A scalar's intermediate is the register
+// the `load` names; an aggregate's is a `%tmpK` slot (D19.5). The emptying is
+// not an assignment, so it carries no overwrite check (item 18, D17.11).
+static gen_val_t gen_move(gen_t* g, ast_node_t* n, const gen_place_t* dst) {
+    const gen_val_t none = gen_literal(g, str_from_cstr("void"), "");
+    if (ast_len(n) != 1 || bad_type(ast_child(n, 0)->type)) {
+        // The checker reported the arity or the operand, so the module is not
+        // emitted.
+        return none;
+    }
+    ast_node_t* arg = ast_child(n, 0);
+    const gen_place_t src = gen_expr_place(g, arg);
+    if (g->failed) {
+        return none;
+    }
+    if (gen_is_aggregate(arg->type)) {
+        const uint64_t align = type_alignof(arg->type);
+        const uint64_t size = type_sizeof(arg->type);
+        const gen_place_t held = gen_temp_place(g, arg->type);
+        gen_memcpy(g, held.addr, align, src.addr, align, size);
+        gen_zero_owner(g, src);
+        if (dst != NULL) {
+            gen_memcpy(g, dst->addr, align, held.addr, align, size);
+        }
+        return none;
+    }
+    const gen_val_t v = gen_load_place(g, src);
+    gen_zero_owner(g, src);
+    return v;
+}
+
 bool gen_builtin_call(gen_t* g, ast_node_t* n) {
     const sym_t* s = n->a != NULL ? n->a->sym : NULL;
     if (s == NULL || s->kind != SYM_BUILTIN) {
@@ -420,9 +465,9 @@ bool gen_builtin_call(gen_t* g, ast_node_t* n) {
         gen_del(g, n);
         return true;
     }
-    // `move` is the other half of the ownership pair of D12.2, which T-022
-    // owns.
-    gen_todo(g, n->loc, "move");
+    // The value of a discarded `move` has nowhere to go, which the checker
+    // refuses (D17.8), so the effect alone is emitted here.
+    (void)gen_move(g, n, NULL);
     return true;
 }
 
@@ -1368,8 +1413,11 @@ gen_val_t gen_expr_value(gen_t* g, ast_node_t* n) {
     case AST_CAST:
         return gen_cast(g, n);
     case AST_CALL: {
+        // `move` is the one universe function with a value (D12.2, item 18).
+        if (gen_is_move(n)) {
+            return gen_move(g, n, NULL);
+        }
         if (gen_builtin_call(g, n)) {
-            // A builtin call yields no value but `move`, which T-022 owns.
             return gen_literal(g, str_from_cstr("void"), "");
         }
         return gen_call(g, n, NULL);
@@ -1489,6 +1537,12 @@ void gen_expr_into(gen_t* g, ast_node_t* n, gen_place_t dst) {
         return;
     }
     case AST_CALL:
+        if (gen_is_move(n)) {
+            // A span, a `string` or an owning aggregate is copied into the
+            // destination and the operand is then zeroed (item 18).
+            (void)gen_move(g, n, &dst);
+            return;
+        }
         if (!gen_builtin_call(g, n)) {
             (void)gen_call(g, n, &dst);
         }

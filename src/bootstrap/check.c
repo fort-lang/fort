@@ -573,6 +573,40 @@ check_type_t check_type(check_t* ck, ast_node_t* node, type_pos_t pos) {
     return type_result(built.type, built.mut0);
 }
 
+// ---- ownership (D17) -------------------------------------------------------------
+
+bool check_owning(const type_t* t) {
+    if (type_is_reference(t)) {
+        // An `own` reference owns the allocation it designates (D17.1).
+        return t->own;
+    }
+    // A struct or fixed array that holds an `own` reference by value is an
+    // owning aggregate (D17.7); one whose layout is still unresolved has no
+    // answer yet, and the declaration that needed it reported that (D3.8).
+    return type_layout_pending(t) == NULL && type_is_owning_aggregate(t);
+}
+
+// An `own` rvalue: `new(...)`, a call result, `move(...)` or a `cast` to an
+// `own` type, none of which any binding could later `del` (D17.5, D17.8).
+// `null` is not one of them: it owns nothing, whatever `own` type it adopts
+// from its context, and `del(null)` is a no-op (D10.5, D17.9).
+static bool is_owning_rvalue(const expr_t* e) {
+    return !e->lvalue && e->value.kind != CV_NULL && check_owning(e->type);
+}
+
+bool check_owning_temporary(check_t* ck, loc_t loc, const expr_t* e, const char* what) {
+    if (check_poisoned(e->type) || !is_owning_rvalue(e)) {
+        return false;
+    }
+    // An `own` rvalue may only land in an `own` place, reach an `own`
+    // parameter or be `del`ed; anything else leaks it (D17.8).
+    check_msg_begin(ck);
+    msg_str(&ck->msg, "owning temporary would leak: ");
+    msg_str(&ck->msg, what);
+    check_msg_end(ck, loc);
+    return true;
+}
+
 // ---- untyped constants in context (D4.1 to D4.5) -----------------------------------
 
 static bool type_is_integer_prim(const type_t* t) {
@@ -717,10 +751,60 @@ static void value_of(check_t* ck, ast_node_t* n, expr_t* e) {
     }
 }
 
+// The ownership rules a value meets when it reaches an expected type. An
+// owning target is an `own` place, which an owning lvalue enters only as
+// `move(lv)` and an owning rvalue enters as it is (D17.5, D17.7); a target
+// that does not own takes the lend of an owning lvalue (D17.4) but would
+// leak an owning rvalue (D17.8). `implicit_move` is the one exception, the
+// `return` of a bare `own` local or parameter (D17.5).
+static void convert_ownership(check_t* ck,
+                              ast_node_t* n,
+                              expr_t* e,
+                              const type_t* target,
+                              const char* what,
+                              bool implicit_move) {
+    if (check_owning(target)) {
+        if (!e->lvalue || implicit_move || !check_owning(e->type)) {
+            return;
+        }
+        // Transfer is written: copying an `own` lvalue into an `own` place
+        // requires `move`, which empties the source (D17.5, D17.7).
+        check_msg_begin(ck);
+        msg_str(&ck->msg, "copying an owning value requires 'move'");
+        if (e->sym != NULL && n->kind == AST_IDENT) {
+            // The hint spells a whole expression, so it is offered only for a
+            // name: `move(data)` for `b->data` would name nothing in scope.
+            msg_str(&ck->msg, ": write move(");
+            msg_view(&ck->msg, e->sym->name);
+            msg_str(&ck->msg, ")");
+        }
+        check_msg_end(ck, n->loc);
+        e->type = type_error(&ck->types);
+        return;
+    }
+    if (!is_owning_rvalue(e)) {
+        return;
+    }
+    // Nothing could ever `del` the temporary once it has been lent (D17.8).
+    check_msg_begin(ck);
+    msg_str(&ck->msg, "owning temporary would leak: ");
+    msg_str(&ck->msg, what);
+    msg_str(&ck->msg, " expects ");
+    check_msg_type(ck, target);
+    check_msg_end(ck, n->loc);
+    e->type = type_error(&ck->types);
+}
+
 // Converts a checked expression to the type its context expects: an untyped
 // constant takes that type (D4.1), a typed one may drop mutability and
-// ownership (D5.4, D17.4) and nothing else.
-static void convert(check_t* ck, ast_node_t* n, expr_t* e, const type_t* target, const char* what) {
+// ownership (D5.4, D17.4) and nothing else, and the ownership rules of D17.5
+// and D17.8 decide whether the value may be copied there at all.
+static void convert_at(check_t* ck,
+                       ast_node_t* n,
+                       expr_t* e,
+                       const type_t* target,
+                       const char* what,
+                       bool implicit_move) {
     if (e->untyped) {
         e->untyped = false;
         if (check_poisoned(target)) {
@@ -749,7 +833,13 @@ static void convert(check_t* ck, ast_node_t* n, expr_t* e, const type_t* target,
         check_msg_type(ck, e->type);
         check_msg_end(ck, n->loc);
         e->type = type_error(&ck->types);
+        return;
     }
+    convert_ownership(ck, n, e, target, what, implicit_move);
+}
+
+static void convert(check_t* ck, ast_node_t* n, expr_t* e, const type_t* target, const char* what) {
+    convert_at(ck, n, e, target, what, false);
 }
 
 void check_expr_as(
@@ -758,9 +848,35 @@ void check_expr_as(
     convert(ck, node, out, target, what);
 }
 
+// Whether the operand of a `return` is a local or a parameter named outright,
+// which is the implicit move of D17.5 and D17.7; a field, an element or any
+// other lvalue is written `move`.
+static bool names_a_local(const ast_node_t* n) {
+    return n->kind == AST_IDENT && n->sym != NULL &&
+           (n->sym->kind == SYM_LOCAL || n->sym->kind == SYM_PARAM);
+}
+
+void check_return_value(check_t* ck, ast_node_t* ret, const type_t* target, expr_t* out) {
+    ast_node_t* node = ret->a;
+    check_expr(ck, node, out);
+    const bool implicit = check_owning(target) && out->lvalue && names_a_local(node);
+    convert_at(ck, node, out, target, "the return value", implicit);
+    if (implicit && !check_poisoned(out->type)) {
+        // The emitter empties the operand after reading it, which is what
+        // lets a `defer del(x)` written above see the zero value (D7.8,
+        // D17.5).
+        ret->ann |= CHECK_ANN_MOVE;
+    }
+}
+
 void check_expr_default(check_t* ck, ast_node_t* node, expr_t* out) {
     check_expr(ck, node, out);
     value_of(ck, node, out);
+    // No context means no `own` place, so an owning rvalue used here --
+    // `println(str.dup(s))` above all -- would leak (D4.5, D17.8).
+    if (check_owning_temporary(ck, node->loc, out, "nothing here could free it")) {
+        out->type = type_error(&ck->types);
+    }
 }
 
 void check_condition(check_t* ck, ast_node_t* node, const char* what) {
@@ -1165,6 +1281,7 @@ void check_operands(check_t* ck,
     out->untyped = false;
     out->lvalue = false;
     out->mut = false;
+    out->empty = EMPTY_IMMUTABLE;
     out->sym = NULL;
     if (op_is_shift(op)) {
         check_shift(ck, loc, op, a, rhs, b, out);
@@ -1188,6 +1305,15 @@ void check_operands(check_t* ck,
     }
     if (check_poisoned(a->type) || check_poisoned(b->type)) {
         return;
+    }
+    if (op_is_equality(op)) {
+        // The operands of `==` and `!=` lend, so `own` never blocks a
+        // comparison (D6.2, D17.4); an owning rvalue is lent too and nothing
+        // would be left to free it (D17.8).
+        if (check_owning_temporary(ck, lhs->loc, a, "comparing it leaves no owner") ||
+            check_owning_temporary(ck, rhs->loc, b, "comparing it leaves no owner")) {
+            return;
+        }
     }
     const type_t* lt = op_is_equality(op) ? check_lend(ck, a->type) : a->type;
     const type_t* rt = op_is_equality(op) ? check_lend(ck, b->type) : b->type;
@@ -1240,6 +1366,7 @@ static void expr_clear(check_t* ck, expr_t* out) {
     out->untyped = false;
     out->lvalue = false;
     out->mut = false;
+    out->empty = EMPTY_IMMUTABLE;
     out->init_const = false;
     out->sym = NULL;
 }
@@ -1294,8 +1421,10 @@ static void value_of_sym(check_t* ck, ast_node_t* n, const sym_t* s, expr_t* out
     switch (s->kind) {
     case SYM_CONST:
         // A module-level immutable declaration is a constant expression and
-        // an immutable lvalue (D4.6, D6.7).
+        // an immutable lvalue in read-only memory, which `move` and `del`
+        // may not empty (D4.6, D6.7, D17.6).
         out->lvalue = true;
+        out->empty = EMPTY_READONLY;
         out->value =
             s->node != NULL && s->node->b != NULL ? check_node_value(ck, s->node->b) : cv_none();
         out->init_const = true;
@@ -1304,9 +1433,13 @@ static void value_of_sym(check_t* ck, ast_node_t* n, const sym_t* s, expr_t* out
     case SYM_LOCAL:
     case SYM_PARAM:
         // A variable is an lvalue with its level-0 mutability; a read of a
-        // `mut` global is not a constant expression (D4.6, D6.7).
+        // `mut` global is not a constant expression (D4.6, D6.7). Its own
+        // storage is emptiable whether or not the binding is `mut`, since
+        // emptying is not an assignment (D17.6); a constant's is not, being
+        // read-only memory.
         out->lvalue = true;
         out->mut = s->mut0;
+        out->empty = EMPTY_OK;
         break;
     case SYM_EXTERN_FN:
         if (n != ck->callee) {
@@ -1492,9 +1625,17 @@ static void check_field(check_t* ck, ast_node_t* n, expr_t* out, bool arrow) {
     if (check_poisoned(op.type)) {
         return;
     }
+    // A field of an owning aggregate rvalue, and `.len` or `.ptr` of an
+    // owning span rvalue, would leave the allocation with no owner (D17.8).
+    if (check_owning_temporary(ck, n->loc, &op, "a field of it leaves no owner")) {
+        return;
+    }
     const type_t* t = op.type;
     bool mut = op.mut;
     bool lvalue = op.lvalue;
+    // A field of a local counts as the local, and one reached through `->`
+    // needs level 1 of the pointer mutable (D17.6).
+    empty_kind_t empty = op.empty;
     if (arrow) {
         // `p->f` is `(*p).f` and is required for pointers (D6.10).
         if (t->kind != TYPE_PTR) {
@@ -1506,6 +1647,8 @@ static void check_field(check_t* ck, ast_node_t* n, expr_t* out, bool arrow) {
             return;
         }
         mut = type_level_mut(t, 1);
+        // The read-only memory of a constant stops at the first indirection.
+        empty = mut ? EMPTY_OK : EMPTY_IMMUTABLE;
         lvalue = true;
         t = t->elem;
     } else if (t->kind == TYPE_PTR || t->kind == TYPE_VOIDPTR) {
@@ -1546,6 +1689,7 @@ static void check_field(check_t* ck, ast_node_t* n, expr_t* out, bool arrow) {
     // (D5.5, D5.7).
     out->lvalue = lvalue;
     out->mut = mut;
+    out->empty = empty;
 }
 
 // ---- unary, indexing and span expressions ------------------------------------------
@@ -1587,9 +1731,15 @@ static void check_unary(check_t* ck, ast_node_t* n, expr_t* out) {
             check_msg_end(ck, n->loc);
             return;
         }
+        if (check_owning_temporary(ck, n->loc, &a, "dereferencing it leaves no owner")) {
+            return;
+        }
         out->type = a.type->elem;
         out->lvalue = true;
         out->mut = type_level_mut(a.type, 1);
+        // What `*p` designates is emptiable when level 1 of `p` is mutable
+        // (D17.6); a constant's read-only memory stops at the indirection.
+        out->empty = out->mut ? EMPTY_OK : EMPTY_IMMUTABLE;
         return;
     }
     check_expr(ck, n->a, &a);
@@ -1700,6 +1850,11 @@ static void check_index(check_t* ck, ast_node_t* n, expr_t* out) {
     if (check_poisoned(a.type)) {
         return;
     }
+    // Indexing an owning rvalue reads through an allocation nothing owns
+    // (D17.8).
+    if (check_owning_temporary(ck, n->loc, &a, "indexing it leaves no owner")) {
+        return;
+    }
     const type_t* elem = element_of(ck, a.type);
     if (elem == NULL) {
         // Pointers cannot be indexed, not even pointers to arrays (D6.8,
@@ -1736,6 +1891,14 @@ static void check_index(check_t* ck, ast_node_t* n, expr_t* out) {
     // The mutability of an element: of the array's own storage, of level 1 of
     // a span, never of a string (D5.7).
     out->mut = a.type->kind == TYPE_ARRAY ? a.mut : (a.type->kind == TYPE_SPAN && a.type->mut);
+    // An element of a local array counts as the local, a constant array's
+    // read-only memory included; one behind a span is emptiable only where
+    // level 1 of the span is mutable (D17.6).
+    if (a.type->kind == TYPE_ARRAY) {
+        out->empty = a.empty;
+    } else {
+        out->empty = out->mut ? EMPTY_OK : EMPTY_IMMUTABLE;
+    }
 }
 
 static void check_span_expr(check_t* ck, ast_node_t* n, expr_t* out) {
@@ -1750,6 +1913,11 @@ static void check_span_expr(check_t* ck, ast_node_t* n, expr_t* out) {
         ok = false;
     }
     if (check_poisoned(a.type) || !ok) {
+        return;
+    }
+    // A span of an owning rvalue is a view of an allocation nothing owns
+    // (D17.8).
+    if (check_owning_temporary(ck, n->loc, &a, "a span of it leaves no owner")) {
         return;
     }
     if (a.type->kind == TYPE_PTR) {
@@ -1815,6 +1983,26 @@ static void check_cast(check_t* ck, ast_node_t* n, expr_t* out) {
         msg_str(&ck->msg, " to ");
         check_msg_type(ck, target.type);
         check_msg_end(ck, n->loc);
+        return;
+    }
+    // A cast is `own` exactly when its target says so (D3.14): an owning
+    // lvalue reaches an owning target only through `move` (D17.5, D17.12) and
+    // an owning rvalue cast to a target that does not own would leak (D17.8).
+    if (check_owning(target.type)) {
+        if (a.lvalue && check_owning(a.type)) {
+            check_msg_begin(ck);
+            msg_str(&ck->msg, "casting an owning value to an owning type requires 'move'");
+            if (a.sym != NULL && n->a->kind == AST_IDENT) {
+                // As above: a hint that spells an expression is offered only
+                // for a name.
+                msg_str(&ck->msg, ": write move(");
+                msg_view(&ck->msg, a.sym->name);
+                msg_str(&ck->msg, ")");
+            }
+            check_msg_end(ck, n->loc);
+            return;
+        }
+    } else if (check_owning_temporary(ck, n->loc, &a, "the cast target does not own it")) {
         return;
     }
     out->type = target.type;
@@ -1925,6 +2113,28 @@ static void check_print(check_t* ck, ast_node_t* n, uint64_t first) {
     }
 }
 
+// Whether the lvalue `e` may be emptied by `move` or `del` (D17.6, D17.9):
+// a module-level constant lives in read-only memory, and an operand reached
+// through an indirection needs that level mutable, because the store is
+// visible to everyone else who holds the pointer or span. `verb` is the
+// builtin's name, which the diagnostic quotes.
+static bool check_emptiable(check_t* ck, ast_node_t* arg, const expr_t* e, str_t verb) {
+    if (e->empty == EMPTY_OK) {
+        return true;
+    }
+    check_msg_begin(ck);
+    msg_quote(&ck->msg, verb);
+    // The reason is the lvalue's own, not its outermost symbol's: `C.data` of
+    // a module-level constant is read-only memory although `data` is a field.
+    msg_str(&ck->msg,
+            e->empty == EMPTY_READONLY
+                ? " cannot empty a module-level constant: it lives in read-only memory"
+                : " cannot empty an immutable indirection: nothing may be taken out of what was "
+                  "only lent");
+    check_msg_end(ck, arg->loc);
+    return false;
+}
+
 static void check_builtin_call(check_t* ck, ast_node_t* n, const sym_t* s, expr_t* out) {
     out->sym = s;
     // Every universe function but `move` yields no value (D12.2).
@@ -1991,6 +2201,12 @@ static void check_builtin_call(check_t* ck, ast_node_t* n, const sym_t* s, expr_
                                               : " takes a reference, not ");
             check_msg_type(ck, e.type);
             check_msg_end(ck, arg->loc);
+            return;
+        }
+        if (e.lvalue) {
+            // On an lvalue `del` empties the operand under the rules of
+            // D17.6; on an rvalue it only frees (D17.9).
+            (void)check_emptiable(ck, arg, &e, s->name);
         }
         return;
     }
@@ -2004,17 +2220,23 @@ static void check_builtin_call(check_t* ck, ast_node_t* n, const sym_t* s, expr_
         if (check_poisoned(e.type)) {
             return;
         }
+        // Every failure below poisons the result: a `void` one would add
+        // "'move' has no value" to the real diagnostic (D12.2, D14.2).
+        out->type = type_error(&ck->types);
         if (!e.lvalue) {
             check_error(ck, arg->loc, "'move' takes an lvalue");
             return;
         }
-        if (!(type_is_reference(e.type) && e.type->own) && !type_is_owning_aggregate(e.type)) {
+        if (!check_owning(e.type)) {
             // `move` takes an owning lvalue and leaves the zero value behind
             // (D12.2, D17.6).
             check_msg_begin(ck);
             msg_str(&ck->msg, "'move' needs an owning operand, not ");
             check_msg_type(ck, e.type);
             check_msg_end(ck, arg->loc);
+            return;
+        }
+        if (!check_emptiable(ck, arg, &e, s->name)) {
             return;
         }
         // The one universe function with a value, an `own` rvalue (D17.6).
@@ -2789,8 +3011,9 @@ static void clear_annotations(ast_node_t* n) {
     n->type = NULL;
     n->sym = NULL;
     n->aux = 0;
-    n->ann &= ~(uint32_t)(CHECK_ANN_CONST | CHECK_ANN_UNTYPED | CHECK_ANN_NORETURN |
-                          CHECK_ANN_RESOLVING | CHECK_ANN_RESOLVED | CHECK_ANN_EXHAUSTIVE);
+    // Every bit the checker owns, named once (check.h): a bit cleared here by
+    // hand would be forgotten the day a new one is added.
+    n->ann &= ~(uint32_t)CHECK_ANN_ALL;
     clear_annotations(n->a);
     clear_annotations(n->b);
     clear_annotations(n->c);

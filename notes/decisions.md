@@ -1032,8 +1032,16 @@ decision or document says ownership is "by convention", this section supersedes 
   (the D5.4 shape: otherwise `node* mut@ w = kids; w[0] = &local;` would let `del(kids[0])`
   free a stack address) and only if no outer level keeps `own` (`node mut* own mut@ own` to
   `node mut* mut@ own` is an error, since the inner objects would then be owned by nobody); lend the
-  whole thing instead. Operands of `==`, `!=` and `?:` lend, so `own` never blocks a comparison;
-  `?:` yields `own` only when both operands are `own` rvalues or `null` (D6.2).
+  whole thing instead. Operands of `==`, `!=` and `?:` lend, so an `own` **lvalue** never blocks a
+  comparison; an `own` **rvalue** operand is the error of D17.8 instead, `make() == null` above
+  all, since lending it would leave nothing able to free it. `?:` is the exception: it yields
+  `own` when both operands are `own` rvalues or `null`
+  (D6.2), so the temporary lands wherever the conditional's value lands. Stage1 does not implement
+  `?:` at all (D3.10, `bootstrap-unsupported.txt`), so that clause is carried by the ticket that
+  adds it, together with a `fail` test for `use(flag ? new(node) : new(node))`. Amended
+  2026-09-11: the comparison clause read "so `own` never blocks a comparison" without
+  distinguishing an lvalue from an rvalue, which D17.8's "anything else is a compile error"
+  contradicts for the rvalue (T-022).
 - **D17.5** Transfer. Copying an `own` **lvalue** into an `own` place (a declaration's
   initializer, an assignment, an `own` parameter, an `own` element or field of a literal, a
   `return` operand that is not a local) requires `move(lv)`. An `own` **rvalue** (`new(...)`, a
@@ -1080,7 +1088,17 @@ decision or document says ownership is "by convention", this section supersedes 
   behind, so `del(v.data); v.data = new(...)`, `a = move(b)` after `move(a)`, and initialization
   from `{}` or `null` all pass. The check runs after the right-hand side is evaluated,
   immediately before the store, and is reported at the `=` token. Release builds store without
-  checking. Assignments of owning aggregates are not checked field by field.
+  checking. Assignments of owning aggregates are not checked field by field. A declaration is a
+  store like any other and is checked too: the slot of an owning local is zeroed once in the entry
+  block (D19.4), so the first execution of the declaration passes and a second one -- in a loop
+  whose body did not `del` -- traps. Without that zeroing the check would read an uninitialized
+  `alloca`, which is why declarations were skipped and why skipping them was wrong. A declaration's
+  check is reported at the declared name rather than at its `=`: the parser records no location for
+  that token and `ast_node_t` has no room for one, and the name is the better anchor in any case,
+  being what a reader looks at to see whose allocation is about to be dropped (D11.4). Amended
+  2026-09-11: `for (i32 mut i = 0; i < 3; i++) { i32 mut* own p = new(i32); }` leaked one
+  allocation per iteration with no diagnostic, while the same program written as an assignment
+  trapped (T-022's review).
 - **D17.12** Strings. `string own` is an owned, immutable character sequence: `str.dup`,
   `str.concat` and `strbuf.take` return it; literals, sub-strings and `sys.args()` are `string`.
   `del(string own)` is legal and `del(string)` is not. A string built in a `u8 mut@ own`

@@ -414,8 +414,11 @@ exactly three things for ownership:
   `=` (D17.11, D11.4; section 7). The previous allocation would otherwise leak silently. `del`
   and `move` leave zero behind, so `del(v.data); v.data = new(...)`, `a = move(b)` after
   `move(a)`, and a store into a slot initialized from `{}` or `null` all pass. A release build
-  stores without checking. Assignments of owning aggregates are not checked field by field,
-  and a declaration's initializer is never checked, because fresh storage holds nothing.
+  stores without checking. Assignments of owning aggregates are not checked field by field. A
+  declaration is a store like any other and is checked too: the slot of an owning local is zeroed
+  once on entry, so the first execution passes and a second one -- a declaration in a loop whose
+  body did not `del` -- traps rather than leaking one allocation per iteration (D17.11). Its check
+  is reported at the declared name, a declaration having no operator token of its own.
 
 ```fort
 u8 mut@ own mut buf = new(u8, 4);
@@ -804,8 +807,8 @@ Notes:
   both modes; only the count is checked (D6.2, D11.1).
 - Division checks apply at every width and in both modes (D6.13, D11.3).
 - `assert` is active in both modes; its message carries the source text of the argument (D12.2).
-- The overwrite check guards every assignment to an lvalue of `own` reference type and nothing
-  else: declarations, `move`, `del` and aggregate assignments are never checked (D17.11,
+- The overwrite check guards every store into an lvalue of `own` reference type, a declaration
+  included, and nothing else: `move`, `del` and aggregate assignments are never checked (D17.11,
   section 2.5). A release build stores without looking, and the old allocation leaks.
 - The `noreturn` guard is `call void @llvm.trap()` followed by `unreachable`, emitted after the
   body of a `noreturn` function and after every call to one (D8.5, D19.7). It is reachable only

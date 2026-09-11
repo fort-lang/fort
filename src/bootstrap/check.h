@@ -63,6 +63,18 @@ enum {
     // AST_SWITCH: the switch has a `default` clause or lists every member of
     // its enum, which is what a terminating switch needs (D7.7, D8.4).
     CHECK_ANN_EXHAUSTIVE = 32U,
+    // AST_RETURN: `return x` of an `own` local or parameter is an implicit
+    // `move`, so the emitter empties the operand after reading it (D17.5,
+    // D17.7).
+    CHECK_ANN_MOVE = 64U,
+    // One past the highest bit above. A new bit is declared as the new
+    // highest and this sentinel doubles with it, so that CHECK_ANN_ALL, which
+    // is the only mask check_module clears, never leaves one out; nothing
+    // else clears `ann`, and a bit left behind would survive into the next
+    // check of the same tree. check_own_test.c holds the assertion that ties
+    // the sentinel to the highest declared bit.
+    CHECK_ANN_END = 128U,
+    CHECK_ANN_ALL = CHECK_ANN_END - 1U,
 };
 
 // Where a written type stands, which decides the markers its outermost
@@ -75,6 +87,16 @@ typedef enum {
     TYPE_POS_CAST,    // a cast target: a result has no binding (D3.14)
     TYPE_POS_ALLOC,   // inside `new`: every level is allocated writable (D5.8)
 } type_pos_t;
+
+// Whether `move` and `del` may empty an lvalue, and why not when they may
+// not (D17.6, D17.9). Emptying is not an assignment, so a binding's own `mut`
+// does not decide it: `del` on an immutable `own` binding is legal, while
+// `move` out of a slot reached through an immutable level is not.
+typedef enum {
+    EMPTY_OK,        // a binding's own storage, or a mutable indirection
+    EMPTY_READONLY,  // a module-level constant, or a member of one (D7.10)
+    EMPTY_IMMUTABLE, // an indirection whose level is immutable
+} empty_kind_t;
 
 // A written type after resolution: the type and the mutability of level 0,
 // which lives outside the type (D5.2). The error type marks a failure.
@@ -95,6 +117,9 @@ typedef struct {
     bool untyped;
     bool lvalue;
     bool mut;
+    // Whether `move` and `del` may empty this lvalue, and why not when they
+    // may not (D17.6, D17.9). Meaningless unless `lvalue`.
+    empty_kind_t empty;
     // Usable as a module-level initializer (D7.10): every constant
     // expression, and also `null`, a function name, `&` of a module-level
     // declaration and a literal whose members are all of those.
@@ -177,6 +202,17 @@ void check_msg_end(check_t* ck, loc_t loc);
 // (D6.2, D17.4, D17.10).
 const type_t* check_lend(check_t* ck, const type_t* t);
 
+// Whether a value of `t` owns an allocation: an `own` reference or an owning
+// aggregate, which are the two things `move` transfers and `del` refuses
+// (D17.1, D17.7). A struct still without a layout answers false, the
+// declaration that needs it having reported its own error (D3.8).
+bool check_owning(const type_t* t);
+
+// Reports "owning temporary would leak" at `loc` when `e` is an owning
+// rvalue, which nothing could ever `del` (D17.8); `what` says what the
+// expression would do with it. Returns whether it reported.
+bool check_owning_temporary(check_t* ck, loc_t loc, const expr_t* e, const char* what);
+
 // Reports "there is no pointer arithmetic" when `t` is a pointer, and
 // returns whether it did: `p + 1`, `p++` and `p[i]` are errors (D10.4).
 bool check_pointer_arithmetic(check_t* ck, loc_t loc, int32_t op, const type_t* t);
@@ -210,9 +246,16 @@ void check_expr(check_t* ck, ast_node_t* node, expr_t* out);
 
 // Checks an expression that must produce a value of `target`: it finalizes an
 // untyped constant against it (D4.1) and reports a type that does not convert
-// (D5.4). `what` names the context in the diagnostic.
+// (D5.4). `what` names the context in the diagnostic. An owning target is an
+// own place, so an owning lvalue reaches it only through `move` (D17.5).
 void check_expr_as(
     check_t* ck, ast_node_t* node, const type_t* target, const char* what, expr_t* out);
+
+// Checks the operand of `ret`, an AST_RETURN with a value, against `target`.
+// It is the one own place an owning lvalue reaches without `move`, and only
+// when it names a local or a parameter outright, which is an implicit move
+// the checker records on `ret` for the emitter (D17.5, D17.7).
+void check_return_value(check_t* ck, ast_node_t* ret, const type_t* target, expr_t* out);
 
 // Checks the initializer of a declaration of type `target`, which may be the
 // bare `{ ... }` of D6.5.

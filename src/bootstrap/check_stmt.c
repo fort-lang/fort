@@ -203,11 +203,8 @@ static void check_call_stmt(check_t* ck, ast_node_t* n) {
     }
     // An owning result is an `own` reference or an owning aggregate (D17.7),
     // and nothing could free either once it is dropped (D17.8).
-    if ((type_is_reference(e.type) && e.type->own) || type_is_owning_aggregate(e.type)) {
-        check_msg_begin(ck);
-        msg_str(&ck->msg, "owning result discarded: bind it or del it");
-        check_msg_end(ck, n->loc);
-    }
+    (void)check_owning_temporary(
+        ck, n->loc, &e, "bind it to an 'own' place, pass it on or 'del' it");
 }
 
 // ---- control flow (D7.4, D7.5) -----------------------------------------------------
@@ -266,6 +263,11 @@ static void check_range_for(check_t* ck, ast_node_t* n) {
     ck->scope = &header;
     expr_t coll;
     check_expr(ck, n->b, &coll);
+    // The collection lends, so an owning rvalue would be iterated and then
+    // leak (D17.8, D17.10).
+    if (check_owning_temporary(ck, n->b->loc, &coll, "the loop only lends its collection")) {
+        coll.type = type_error(&ck->types);
+    }
     const check_type_t decl = check_type(ck, n->a, TYPE_POS_BINDING);
     const type_t* elem = NULL;
     if (!check_poisoned(coll.type)) {
@@ -295,7 +297,7 @@ static void check_range_for(check_t* ck, ast_node_t* n) {
         msg_str(&ck->msg, ", not ");
         check_msg_type(ck, decl.type);
         check_msg_end(ck, n->a->loc);
-    } else if (elem != NULL && type_is_owning_aggregate(elem)) {
+    } else if (elem != NULL && check_owning(elem) && !type_is_reference(elem)) {
         // A copy of an owning aggregate would need a `move`, so an index loop
         // is the way (D17.10).
         check_error(ck, n->b->loc, "the elements are owning: iterate by index");
@@ -482,7 +484,9 @@ static void check_return(check_t* ck, ast_node_t* n) {
         return;
     }
     expr_t e;
-    check_expr_as(ck, n->a, ck->ret, "the return value", &e);
+    // The result type is the one `own` place a bare `own` local reaches
+    // without `move`, which is the implicit move of D17.5 and D17.7.
+    check_return_value(ck, n, ck->ret, &e);
 }
 
 static void check_break(check_t* ck, ast_node_t* n, bool cont) {

@@ -915,7 +915,7 @@ variables declared in the body are not visible in the condition.
 
 ```fort
 compute(x);               // ok: result discarded
-str.dup(s);               // error: owning result discarded; bind it or del it
+str.dup(s);               // error: owning temporary would leak; bind it or del it
 a * b;                    // error: expression statement must be a call
 point{1, 2};              // error: expression statement must be a call
 ;                         // error: empty statement

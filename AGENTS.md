@@ -261,7 +261,31 @@ A safe(r) C-like systems programming language.
   module twice starts from the tree the parser left rather than reading symbols of a checker
   that is gone. `aux` indexes the checker's own value vector on a constant node and holds a
   field's byte offset on a field declaration, so it is never read without the bit that says
-  which it is.
+  which it is. A new bit is declared above the last one and doubles `CHECK_ANN_END`, so that
+  `CHECK_ANN_ALL`, the one mask `clear_annotations` clears, cannot leave it out;
+  `check_own_test.c` sets every bit of `CHECK_ANN_ALL` on a node the checker marks with none and
+  asserts a re-check wipes them, and ties `CHECK_ANN_END` to the highest declared bit. Write that
+  test shape for any "cleared before it is written" invariant: asserting that a bit *is* set
+  after a second pass passes whether or not the clearing happens, so it proves nothing.
+- **Ownership in the checker** (D17): `check_owning(t)` is the one answer to "does a value of
+  this type own an allocation" -- an `own` reference or an owning aggregate -- and it guards the
+  layout, since `type_is_owning_aggregate` fatals on a struct that has none. Every own place is
+  reached through `convert`, so the transfer rule of D17.5 lives there and nowhere else; the
+  `return` of a bare `own` local is the one exception and goes through `check_return_value`.
+  `expr_t.mut` is level-0 mutability and answers "may this be assigned to" (D5.7), which is
+  **not** what `move` and `del` ask: they empty storage, which a binding's own `mut` does not
+  govern, so `expr_t.empty` carries the separate question of D17.6 -- a local's own storage and a
+  mutable indirection are `EMPTY_OK`, a module-level constant and its members are
+  `EMPTY_READONLY`, an immutable indirection is `EMPTY_IMMUTABLE`, and the read-only memory stops
+  at the first indirection. Reading `mut` where `empty` is meant silently lets `move(view[0])`
+  through or refuses `del(buf)` on an immutable binding.
+- **An emitter that copies a value and then clears its source needs an intermediate.** `move(lv)`
+  writes into a destination the emitter cannot prove distinct from the operand (`s = move(s)`,
+  `*p = move(*q)`, `v[i] = move(v[j])`), so it reads into a register or a `%tmpK` slot first and
+  zeroes the operand only after. The first version copied straight to the destination and zeroed
+  after, which destroyed the value in three of six build-mode/shape cells and was invisible to
+  every language test, because the two aliasing forms it did not cover are not statically
+  comparable. Fix the general case rather than banning the syntax that exposes it.
 - **Node ranges**: a node's `loc` is a range (D20.4). A parser function ends a node's range with
   `finish(p, n)` at every successful return in which it consumed the node's trailing tokens: the
   nodes it built itself, and also a node a callee built whose `;` it consumed, as

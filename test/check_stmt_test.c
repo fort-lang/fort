@@ -163,7 +163,7 @@ TEST(a_call_statement_may_discard_its_result, {
 TEST(an_owning_result_may_not_be_discarded, {
     TEST_ASSERT_FALSE(check_body("    i32 mut* own p = new(i32);\n    move(p);\n    del(p);"));
     // The value of `move` must land somewhere (D12.2, D17.8).
-    TEST_ASSERT_TRUE(said("owning result discarded"));
+    TEST_ASSERT_TRUE(said("owning temporary would leak"));
 })
 
 // ---- control flow (D7.4, D7.5) ------------------------------------------------------
@@ -417,11 +417,11 @@ TEST(a_discarded_owning_aggregate_is_refused, {
     TEST_ASSERT_FALSE(check_src("struct vec {\n    i32 mut@ own data;\n}\n"
                                 "fn vec make() {\n    return vec{.data = new(i32, 2)};\n}\n"
                                 "fn i32 main() {\n    make();\n    return 0;\n}\n"));
-    TEST_ASSERT_TRUE(said("owning result discarded"));
+    TEST_ASSERT_TRUE(said("owning temporary would leak"));
     TEST_ASSERT_FALSE(check_src("struct vec {\n    i32 mut@ own data;\n}\n"
                                 "fn i32 main() {\n    vec mut b = {};\n    move(b);\n"
                                 "    return 0;\n}\n"));
-    TEST_ASSERT_TRUE(said("owning result discarded"));
+    TEST_ASSERT_TRUE(said("owning temporary would leak"));
     // A result that owns nothing is discarded freely (D7.3).
     TEST_ASSERT_TRUE(check_src("struct point {\n    i32 x;\n}\n"
                                "fn point make() {\n    return point{1};\n}\n"

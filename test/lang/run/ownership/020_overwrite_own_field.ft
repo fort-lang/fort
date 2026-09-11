@@ -1,0 +1,34 @@
+//! run
+//! abort
+//! stderr: run/ownership/020_overwrite_own_field.ft:17:13: runtime error: overwriting owned value
+//! stdout:
+//| 2 4
+//| 3 8
+// The overwrite check guards every assignment to an lvalue of `own` reference
+// type, an owning span reached through a field included, and it reads the
+// pointer word of the header (D17.11). Emptying the field first is what makes
+// the replacement pass, so the second store is fine and the third traps.
+struct vec {
+    i32 mut@ own data;
+    u64 len;
+}
+
+fn void fill(vec mut* v, u64 n) {
+    v->data = new(i32, n);
+    v->len = n;
+    for (u64 mut i = 0; i < n; i++) {
+        v->data[i] = cast(i * 2, i32);
+    }
+}
+
+fn i32 main() {
+    vec mut v = {};
+    fill(&v, 2);                              // the field is {null, 0}: the store passes
+    println(v.len, " ", v.data[1] * 2);
+    del(v.data);                              // emptied, so the next fill passes too
+    fill(&v, 3);
+    println(v.len, " ", v.data[2] * 2);
+    fill(&v, 4);                              // v.data is live: the allocation would leak
+    println("never");
+    return 0;
+}

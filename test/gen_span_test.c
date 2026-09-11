@@ -81,16 +81,16 @@ TEST(indexing_a_span_checks_against_its_header_length, {
                           "    println(s[i]);\n    del(s);\n    return 0;\n}\n"));
     // One `icmp uge i64 %idx, %len` branches to fort_rt_fail_bounds, and the
     // element is reached through the header's pointer (item 16, item 3).
-    TEST_ASSERT_EQ_STR(found("  %t5 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 1\n"
-                             "  %t6 = load i64, ptr %t5, align 8\n"
-                             "  %t7 = icmp uge i64 %t4, %t6\n"
-                             "  br i1 %t7, label %L1, label %L0\n"),
-                       "  %t5 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 1\n"
-                       "  %t6 = load i64, ptr %t5, align 8\n"
-                       "  %t7 = icmp uge i64 %t4, %t6\n"
-                       "  br i1 %t7, label %L1, label %L0\n");
-    TEST_ASSERT_EQ_STR(found("@fort_rt_fail_bounds(i64 %t4, i64 %t6, ptr @.file.0, i32 5, i32 14)"),
-                       "@fort_rt_fail_bounds(i64 %t4, i64 %t6, ptr @.file.0, i32 5, i32 14)");
+    TEST_ASSERT_EQ_STR(found("  %t8 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 1\n"
+                             "  %t9 = load i64, ptr %t8, align 8\n"
+                             "  %t10 = icmp uge i64 %t7, %t9\n"
+                             "  br i1 %t10, label %L3, label %L2\n"),
+                       "  %t8 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 1\n"
+                       "  %t9 = load i64, ptr %t8, align 8\n"
+                       "  %t10 = icmp uge i64 %t7, %t9\n"
+                       "  br i1 %t10, label %L3, label %L2\n");
+    TEST_ASSERT_EQ_STR(found("@fort_rt_fail_bounds(i64 %t7, i64 %t9, ptr @.file.0, i32 5, i32 14)"),
+                       "@fort_rt_fail_bounds(i64 %t7, i64 %t9, ptr @.file.0, i32 5, i32 14)");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -103,8 +103,8 @@ TEST(an_element_of_a_span_of_pointers_is_a_pointer_slot, {
     // stride is a pointer (D17.3).
     TEST_ASSERT_EQ_STR(found("call ptr @fort_rt_new(i64 8, i64 %t0, "),
                        "call ptr @fort_rt_new(i64 8, i64 %t0, ");
-    TEST_ASSERT_EQ_STR(found("getelementptr inbounds ptr, ptr %t9, i64 %t4"),
-                       "getelementptr inbounds ptr, ptr %t9, i64 %t4");
+    TEST_ASSERT_EQ_STR(found("getelementptr inbounds ptr, ptr %t12, i64 %t7"),
+                       "getelementptr inbounds ptr, ptr %t12, i64 %t7");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -173,15 +173,15 @@ TEST(an_absent_high_bound_is_the_operands_length, {
                           "    return 0;\n}\n"));
     // `e[lo..]` is `e[lo..len]`, and the length is read once and used by both
     // the check and the result (D6.9).
-    TEST_ASSERT_EQ_STR(found("  %t5 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 1\n"
-                             "  %t6 = load i64, ptr %t5, align 8\n"
-                             "  %t7 = icmp ugt i64 %t6, %t6\n"
-                             "  %t8 = icmp ugt i64 %t4, %t6\n"),
-                       "  %t5 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 1\n"
-                       "  %t6 = load i64, ptr %t5, align 8\n"
-                       "  %t7 = icmp ugt i64 %t6, %t6\n"
-                       "  %t8 = icmp ugt i64 %t4, %t6\n");
-    TEST_ASSERT_EQ_STR(found("sub i64 %t6, %t4"), "sub i64 %t6, %t4");
+    TEST_ASSERT_EQ_STR(found("  %t8 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 1\n"
+                             "  %t9 = load i64, ptr %t8, align 8\n"
+                             "  %t10 = icmp ugt i64 %t9, %t9\n"
+                             "  %t11 = icmp ugt i64 %t7, %t9\n"),
+                       "  %t8 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 1\n"
+                       "  %t9 = load i64, ptr %t8, align 8\n"
+                       "  %t10 = icmp ugt i64 %t9, %t9\n"
+                       "  %t11 = icmp ugt i64 %t7, %t9\n");
+    TEST_ASSERT_EQ_STR(found("sub i64 %t9, %t7"), "sub i64 %t9, %t7");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -393,10 +393,18 @@ TEST(a_range_for_over_a_span_walks_it_by_index_with_no_check, {
                           "    println(total);\n    del(s);\n    return 0;\n}\n"));
     // The counter never passes the length, so the element address needs no
     // bounds check (item 16), and an owning collection is iterated in place
-    // (D17.10).
+    // (D17.10): the loop reads the length and the pointer out of the
+    // collection's own slot, and the one memcpy of the module is the
+    // declaration's checked store (D17.11).
     TEST_ASSERT_EQ_STR(absent("fort_rt_fail_bounds"), "absent");
     TEST_ASSERT_EQ_STR(found("icmp ult i64 "), "icmp ult i64 ");
-    TEST_ASSERT_EQ_STR(absent("llvm.memcpy"), "absent");
+    TEST_ASSERT_EQ_SIZE(occurrences("call void @llvm.memcpy"), (size_t)1);
+    TEST_ASSERT_EQ_STR(found("  %t7 = load i64, ptr %tmp1, align 8\n"
+                             "  %t8 = getelementptr inbounds %fort.span, ptr %s.1, "
+                             "i32 0, i32 1\n"),
+                       "  %t7 = load i64, ptr %tmp1, align 8\n"
+                       "  %t8 = getelementptr inbounds %fort.span, ptr %s.1, "
+                       "i32 0, i32 1\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 

@@ -765,6 +765,16 @@ static void fail_block(gen_t* g, uint64_t label, gen_rt_t rt, const gen_args_t* 
     g->body.len = mark;
 }
 
+void gen_zero_owner(gen_t* g, gen_place_t p) {
+    if (gen_is_aggregate(p.type)) {
+        // A span, a `string` or an owning aggregate is zeroed whole (D17.6).
+        gen_memset_zero(g, p.addr, type_alignof(p.type), type_sizeof(p.type));
+        return;
+    }
+    // The zero value of a pointer or a `void*` is `null` (D17.6).
+    gen_store_place(g, p, gen_literal(g, str_from_cstr("ptr"), "null"));
+}
+
 void gen_check(gen_t* g, gen_val_t cond, bool fail_when, gen_rt_t rt, gen_args_t* args, loc_t loc) {
     // The continuation label is allocated before the failure label (D19.6).
     const uint64_t cont = gen_label(g);
@@ -1027,7 +1037,6 @@ static void gen_function(gen_t* g, ast_node_t* fn) {
         emit_alloca(g, name, d->sym->type);
         slot++;
     }
-    ptrvec_free(&locals);
     // A scalar parameter is stored into its slot immediately (item 10).
     for (uint64_t i = 0; i < ast_len(fn); i++) {
         const ast_node_t* p = ast_child(fn, i);
@@ -1039,6 +1048,19 @@ static void gen_function(gen_t* g, ast_node_t* fn) {
         in.val = slot_name(g, p->sym, 0, true);
         gen_store_place(g, gen_slot_place(g, p->sym), in);
     }
+    // The slot of an owning local is zeroed once here, so that the overwrite
+    // check its declaration carries reads the zero value the first time and
+    // whatever the slot still holds on a second execution -- a declaration in
+    // a loop whose body did not `del` (D17.11 as amended, D19.4). Without it
+    // the check would read an uninitialized `alloca`.
+    for (uint64_t i = 0; i < locals.len; i++) {
+        const ast_node_t* d = (const ast_node_t*)locals.items[i];
+        const type_t* t = d->sym->type;
+        if (type_is_reference(t) && t->own) {
+            gen_zero_owner(g, gen_slot_place(g, d->sym));
+        }
+    }
+    ptrvec_free(&locals);
     gen_block(g, fn->b);
     if (!g->terminated) {
         if (sig->noreturn) {

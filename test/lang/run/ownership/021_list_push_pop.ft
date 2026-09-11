@@ -1,0 +1,67 @@
+//! run
+//! stdout:
+//| 3 30
+//| true true
+//| 30 2
+//| 20 1
+//| 10 0
+//| 0 true
+//| 3
+// The container idiom of memory-model.md 2.3: pushing moves the new element
+// in and popping moves it out, and every field a store overwrites was emptied
+// by a `move` first, so the checked build's overwrite check passes (D17.5,
+// D17.6, D17.11). `del(pop(&l))` frees an owning rvalue on the spot (D17.8).
+struct node {
+    i32 value;
+    node mut* own next;
+}
+
+struct list {
+    node mut* own head;
+    u64 size;
+}
+
+fn void push(list mut* l, node mut* own n) {
+    n->next = move(l->head);                  // the head slot is empty afterwards
+    l->head = move(n);                        // and takes the new node
+    l->size += 1;
+}
+
+fn node mut* own pop(list mut* l) {
+    node mut* own n = move(l->head);
+    if (n != null) {
+        l->head = move(n->next);              // the emptied head takes the tail
+        l->size -= 1;
+    }
+    return n;
+}
+
+fn i32 main() {
+    list mut l = {};
+    push(&l, new(node));
+    l.head->value = 10;
+    node mut* own second = new(node);
+    second->value = 20;
+    push(&l, move(second));                   // an own lvalue needs move
+    node mut* own third = new(node);
+    third->value = 30;
+    push(&l, move(third));
+    println(l.size, " ", l.head->value);
+    println(second == null, " ", third == null);
+    while (l.head != null) {
+        node mut* own n = pop(&l);
+        println(n->value, " ", l.size);
+        del(n);
+    }
+    println(l.size, " ", l.head == null);
+    i32 mut freed = 0;
+    push(&l, new(node));
+    push(&l, new(node));
+    push(&l, new(node));
+    while (l.head != null) {
+        del(pop(&l));                         // an own rvalue: freed on the spot
+        freed += 1;
+    }
+    println(freed);
+    return 0;
+}

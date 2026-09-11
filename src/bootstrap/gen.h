@@ -409,6 +409,13 @@ void gen_memcpy(
 // `llvm.memset` of `size` zero bytes: `{}`, `del` and `move` zero a place.
 void gen_memset_zero(gen_t* g, gen_val_t dst, uint64_t align, uint64_t size);
 
+// The zero value of an owning place: `store ptr null` for a pointer or
+// `void*`, a `llvm.memset` of the whole value for a span, a `string` or an
+// owning aggregate. It is what `move`, the implicit move of a `return` and
+// `del` leave behind, and it is not an assignment, so it never carries the
+// overwrite check of D17.11 (item 18, D17.6, D17.9).
+void gen_zero_owner(gen_t* g, gen_place_t p);
+
 // ---- blocks and calls -------------------------------------------------------------
 
 // A fresh block label, `%L<N>` in creation order (D19.5). The number is
@@ -513,6 +520,10 @@ void gen_expr_into(gen_t* g, ast_node_t* n, gen_place_t dst);
 
 // An expression evaluated for its effects alone: a call statement.
 void gen_expr_discard(gen_t* g, ast_node_t* n);
+
+// Whether `n` is a call of the `move` builtin, the one universe function with
+// a value, which every expression path lowers itself (D12.2, item 18).
+bool gen_is_move(const ast_node_t* n);
 
 // A place the compiler invents, `%tmp<K>` from its own counter (D19.5), for
 // an aggregate argument copy or a short-circuit slot.

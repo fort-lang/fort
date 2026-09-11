@@ -848,11 +848,15 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
     `llvm.memset` for a span or `string`. On an rvalue nothing is stored.
 
 18. **Ownership** (D17). `own` is erased: same types, same ABI, same normalization, and neither
-    the module nor the runtime carries ownership information. `move(lv)` copies the operand's
-    value to the destination (`load` and `store` for a reference, `llvm.memcpy` for an owning
-    aggregate) and then zeroes the operand (`store ptr null` or `llvm.memset`), in both build
-    modes (D17.6). The overwrite check (D17.11), in checked mode only, runs after the
-    right-hand side is evaluated and immediately before the store:
+    the module nor the runtime carries ownership information. `move(lv)` reads the operand's
+    value into an intermediate of the emitter's own -- the register a `load` names for a pointer
+    or a `void*`, a `%tmpK` slot an `llvm.memcpy` fills for a span, a `string` or an owning
+    aggregate -- zeroes the operand (`store ptr null` or `llvm.memset`) and only then copies the
+    value on to the destination, in both build modes (D17.6). The intermediate is not optional:
+    the destination may be the operand itself (`s = move(s)`, `*p = move(*q)`,
+    `v[i] = move(v[j])`), and copying to the destination first would let the zeroing destroy the
+    value the move is meant to yield. The overwrite check (D17.11), in checked mode only, runs
+    after the right-hand side is evaluated and immediately before the store:
 
     ```llvm
       %t7 = getelementptr inbounds %fort.span, ptr %v.2, i32 0, i32 0
@@ -861,10 +865,18 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
       br i1 %t9, label %L5, label %L4
     ```
 
-    with `fort_rt_fail_overwrite(ptr @.file.N, i32 line, i32 col)` at the `=` token. Release
-    mode emits the plain store; `--no-bounds-check` does not affect the check; declarations,
-    `move`, `del` and assignments of owning aggregates never emit it. The check's own load
-    cannot be optimized away, since it reads the location a later store writes.
+    with `fort_rt_fail_overwrite(ptr @.file.N, i32 line, i32 col)` at the `=` token. A span or
+    `string` target is produced into a compiler temporary first, an aggregate being written into
+    a place rather than held in a register (D19.3), and the header is copied over after the
+    check; a pointer target's value is already in a register, so the store follows the check
+    directly. Release mode emits the plain store with no temporary; `--no-bounds-check` does not
+    affect the check; `move`, `del` and assignments of owning aggregates never emit it. A
+    declaration of an owning local does emit it, at the declared name, and gen_function stores
+    the zero value into that local's slot once in the entry block so that the first execution
+    reads zero (D17.11 as amended, D19.4). The check's own load cannot be optimized away, since
+    it reads the location a later store writes. `return x` of an `own` local or parameter is the
+    implicit move of D17.5: the value is read, the operand is then zeroed the same way, and only
+    then does the function return, so a `defer del(x)` above it sees the zero value (D7.8).
 
 19. **Builtins** (D12.2). The print family evaluates `fd` once (`1`, `2`, or the first argument)
     and then each argument left to right, one call per argument (D11.5): `i8 i16 i32 i64`

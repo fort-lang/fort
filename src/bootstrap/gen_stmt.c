@@ -58,13 +58,72 @@ static int32_t compound_operator(int32_t op) {
     return TOK_ASSIGN;
 }
 
+// Whether an assignment to a place of type `t` carries the overwrite check of
+// D17.11: only an `own` reference, only in the checked mode of D11.1. An
+// owning aggregate is not checked field by field, a declaration's initializer
+// is never checked, and `--no-bounds-check` removes the index and span
+// branches alone, so it leaves this one standing (D10.6, item 18).
+static bool overwrite_checked(const gen_t* g, const type_t* t) {
+    return !g->opts.release && type_is_reference(t) && t->own;
+}
+
+// The check itself (item 18): the current pointer word is loaded -- field 0
+// of a span or `string` header, the value itself for a pointer or `void*` --
+// and a non-null one branches to `fort_rt_fail_overwrite`, because the
+// previous allocation would leak. `loc` is the `=` token (D11.4, D17.11).
+static void gen_overwrite_check(gen_t* g, gen_place_t target, loc_t loc) {
+    const gen_val_t held =
+        gen_is_aggregate(target.type) ? gen_span_ptr(g, target.addr) : gen_load_place(g, target);
+    const gen_val_t live = gen_icmp(g, "ne", held, gen_literal(g, str_from_cstr("ptr"), "null"));
+    gen_args_t args;
+    gen_args_init(&args);
+    gen_check(g, live, true, RT_FAIL_OVERWRITE, &args, loc);
+    gen_args_free(&args);
+}
+
+// A plain assignment into an `own` reference: the right-hand side is fully
+// evaluated, the check runs, and only then does the store happen (item 18).
+static void gen_checked_store(gen_t* g, gen_place_t target, ast_node_t* value, loc_t loc) {
+    if (!gen_is_aggregate(target.type)) {
+        // A pointer's value is in a register, so the check stands between its
+        // evaluation and the store.
+        const gen_val_t v = gen_expr_value(g, value);
+        if (g->failed) {
+            return;
+        }
+        gen_overwrite_check(g, target, loc);
+        gen_store_place(g, target, v);
+        return;
+    }
+    // A span or a `string` is produced into a place, so the value lands in a
+    // temporary first and the header is copied over after the check (D19.3).
+    const gen_place_t tmp = gen_temp_place(g, target.type);
+    gen_expr_into(g, value, tmp);
+    if (g->failed) {
+        return;
+    }
+    gen_overwrite_check(g, target, loc);
+    const uint64_t align = type_alignof(target.type);
+    gen_memcpy(g, target.addr, align, tmp.addr, align, type_sizeof(target.type));
+}
+
 // `Type name = init;` (D7.1): the local's storage is the entry-block alloca
-// gen_function made, so the statement is the initializer alone.
+// gen_function made, so the statement is the initializer alone -- and, for an
+// owning local, the overwrite check of D17.11, since a declaration is a store
+// like any other. gen_function zeroed the slot once in the entry block, so the
+// first execution passes and a second one, in a loop whose body did not `del`,
+// traps instead of leaking. The check is reported at the declared name, the
+// declaration having no operator token of its own (D11.4).
 static void gen_var_decl(gen_t* g, ast_node_t* n) {
     if (n->b == NULL || n->sym == NULL) {
         return;
     }
-    gen_expr_into(g, n->b, gen_slot_place(g, n->sym));
+    const gen_place_t slot = gen_slot_place(g, n->sym);
+    if (overwrite_checked(g, slot.type)) {
+        gen_checked_store(g, slot, n->b, n->name_loc);
+        return;
+    }
+    gen_expr_into(g, n->b, slot);
 }
 
 static void gen_assign(gen_t* g, ast_node_t* n) {
@@ -76,12 +135,10 @@ static void gen_assign(gen_t* g, ast_node_t* n) {
     }
     const int32_t op = compound_operator(n->op);
     if (op == TOK_ASSIGN) {
-        if (!g->opts.release && type_is_reference(target.type) && target.type->own) {
-            // Storing over a live `own` value traps in the checked mode
-            // (D11.1, D17.11), and that check is T-022's: the bare store below
-            // is the release-mode lowering and would silently be a checked
-            // build without its check (item 18).
-            gen_todo(g, n->loc, "an assignment to an owning reference");
+        if (overwrite_checked(g, target.type)) {
+            // Storing over a live `own` value is a runtime error in a checked
+            // build, the previous allocation being lost (D11.1, D17.11).
+            gen_checked_store(g, target, n->b, n->loc);
             return;
         }
         gen_expr_into(g, n->b, target);
@@ -105,6 +162,20 @@ static void gen_incdec(gen_t* g, ast_node_t* n) {
     gen_store_place(g, target, gen_arith(g, n->loc, op, n->a->type, before, n->a->type, one));
 }
 
+// `return x` of a bare `own` local or parameter is an implicit `move`, which
+// the checker marked (D17.5, D17.7): the operand is emptied once its value has
+// been read, so that a `defer del(x)` written above sees the zero value and
+// frees nothing (D7.8, item 18).
+static void gen_return_move(gen_t* g, ast_node_t* n) {
+    if ((n->ann & CHECK_ANN_MOVE) == 0 || g->failed) {
+        return;
+    }
+    const gen_place_t src = gen_expr_place(g, n->a);
+    if (!g->failed) {
+        gen_zero_owner(g, src);
+    }
+}
+
 static void gen_return(gen_t* g, ast_node_t* n) {
     if (n->a == NULL) {
         gen_ins(g);
@@ -121,6 +192,7 @@ static void gen_return(gen_t* g, ast_node_t* n) {
         sret.addr.val = str_from_cstr("%ret.sret");
         sret.type = n->a->type;
         gen_expr_into(g, n->a, sret);
+        gen_return_move(g, n);
         gen_ins(g);
         gen_text_append(g, "ret void");
         gen_ins_end(g);
@@ -128,6 +200,7 @@ static void gen_return(gen_t* g, ast_node_t* n) {
         return;
     }
     const gen_val_t v = gen_expr_value(g, n->a);
+    gen_return_move(g, n);
     gen_ins(g);
     gen_text_append(g, "ret ");
     gen_text_append_str(g, v.ty);

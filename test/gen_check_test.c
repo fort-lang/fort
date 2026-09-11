@@ -4,7 +4,6 @@
 // and the failure blocks they branch to.
 #include <stdbool.h>
 #include <stdint.h>
-#include <string.h>
 
 #include "gen.h"
 #include "gen_helpers.h"
@@ -498,28 +497,6 @@ TEST(an_integer_constant_is_printed_with_the_signedness_of_its_type, {
     TEST_ASSERT_EQ_STR(found("store i16 -32768, ptr %f.5"), "store i16 -32768, ptr %f.5");
 })
 
-TEST(an_assignment_to_an_owning_reference_is_refused_in_the_checked_mode, {
-    // Storing over a live `own` value traps (D11.1, D17.11), and that check
-    // is T-022's; a bare store would be a checked build silently missing one
-    // of its checks, so the emitter refuses instead (item 18).
-    TEST_ASSERT_FALSE(emit("extern fn i32 mut* own grab();\n"
-                           "fn i32 main() {\n    i32 mut* own mut p = grab();\n"
-                           "    p = null;\n    return 0;\n}\n"));
-    TEST_ASSERT_NONNULL(
-        strstr(gen_said(), "cannot generate code yet for an assignment to an owning reference"));
-})
-
-TEST(release_mode_emits_the_plain_store_over_an_owning_reference, {
-    // Release mode overwrites an owned value without a check, so the store
-    // alone is the whole lowering there (D11.1, item 18).
-    TEST_ASSERT_TRUE(emit_release("extern fn i32 mut* own grab();\n"
-                                  "fn i32 main() {\n    i32 mut* own mut p = grab();\n"
-                                  "    p = null;\n    return 0;\n}\n"));
-    TEST_ASSERT_EQ_STR(found("store ptr null, ptr %p.0, align 8"),
-                       "store ptr null, ptr %p.0, align 8");
-    TEST_ASSERT_EQ_STR(absent("fort_rt_fail_overwrite"), "absent");
-})
-
 TEST(every_failure_block_and_continuation_ends_in_one_terminator, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32[3] a = {1, 2, 3};\n    i32 mut s = 0;\n"
                           "    i32 n = 3;\n"
@@ -585,8 +562,6 @@ int main(int argc, char** argv) {
     TEST_RUN(every_failure_block_and_continuation_ends_in_one_terminator);
     TEST_RUN(a_call_to_a_noreturn_extern_still_traps);
     TEST_RUN(an_integer_constant_is_printed_with_the_signedness_of_its_type);
-    TEST_RUN(an_assignment_to_an_owning_reference_is_refused_in_the_checked_mode);
-    TEST_RUN(release_mode_emits_the_plain_store_over_an_owning_reference);
     gen_done();
     TEST_EXIT();
 }

@@ -27,14 +27,29 @@
 TEST(new_of_one_object_is_the_element_size_and_a_count_of_one, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut* own p = new(i32);\n"
                           "    println(*p);\n    del(p);\n    return 0;\n}\n"));
-    // The column of the check is the builtin's name (D11.4).
+    // The column of the check is the builtin's name (D11.4). The declaration
+    // carries the overwrite check of D17.11, so the store stands in its
+    // continuation block (item 18).
     TEST_ASSERT_EQ_STR(found("  %t0 = call ptr @fort_rt_new(i64 4, i64 1, ptr @.file.0, "
-                             "i32 2, i32 22)\n  store ptr %t0, ptr %p.0, align 8\n"),
+                             "i32 2, i32 22)\n"
+                             "  %t1 = load ptr, ptr %p.0, align 8\n"
+                             "  %t2 = icmp ne ptr %t1, null\n"
+                             "  br i1 %t2, label %L1, label %L0\n"
+                             "\nL0:\n  store ptr %t0, ptr %p.0, align 8\n"),
                        "  %t0 = call ptr @fort_rt_new(i64 4, i64 1, ptr @.file.0, "
-                       "i32 2, i32 22)\n  store ptr %t0, ptr %p.0, align 8\n");
+                       "i32 2, i32 22)\n"
+                       "  %t1 = load ptr, ptr %p.0, align 8\n"
+                       "  %t2 = icmp ne ptr %t1, null\n"
+                       "  br i1 %t2, label %L1, label %L0\n"
+                       "\nL0:\n  store ptr %t0, ptr %p.0, align 8\n");
     // The runtime zeroes the storage, so the module writes nothing into it
-    // (D10.2).
+    // (D10.2); the slot of the owning local is a pointer, so its entry-block
+    // zeroing is a `store ptr null` and not a memset (D17.11).
     TEST_ASSERT_EQ_STR(absent("llvm.memset"), "absent");
+    TEST_ASSERT_EQ_STR(found("entry:\n  %p.0 = alloca ptr, align 8\n"
+                             "  store ptr null, ptr %p.0, align 8\n"),
+                       "entry:\n  %p.0 = alloca ptr, align 8\n"
+                       "  store ptr null, ptr %p.0, align 8\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -82,18 +97,20 @@ TEST(a_counted_new_writes_the_header_field_by_field, {
                           "    println(s.len);\n    del(s);\n    return 0;\n}\n"));
     // An unsigned count takes no branch, and the header is the pointer then
     // the length (item 17).
+    // The declaration is checked, so the header is built in the temporary of
+    // item 18 and copied into the slot after the check.
     TEST_ASSERT_EQ_STR(
         found("  %t0 = load i64, ptr %n.0, align 8\n"
               "  %t1 = call ptr @fort_rt_new(i64 4, i64 %t0, ptr @.file.0, i32 3, i32 22)\n"
-              "  %t2 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 0\n"
+              "  %t2 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0\n"
               "  store ptr %t1, ptr %t2, align 8\n"
-              "  %t3 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 1\n"
+              "  %t3 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 1\n"
               "  store i64 %t0, ptr %t3, align 8\n"),
         "  %t0 = load i64, ptr %n.0, align 8\n"
         "  %t1 = call ptr @fort_rt_new(i64 4, i64 %t0, ptr @.file.0, i32 3, i32 22)\n"
-        "  %t2 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 0\n"
+        "  %t2 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0\n"
         "  store ptr %t1, ptr %t2, align 8\n"
-        "  %t3 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 1\n"
+        "  %t3 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 1\n"
         "  store i64 %t0, ptr %t3, align 8\n");
     TEST_ASSERT_EQ_STR(absent("fort_rt_fail_alloc_count"), "absent");
     TEST_ASSERT_EQ_STR(verified(), "verified");
@@ -169,11 +186,11 @@ TEST(the_allocation_count_check_survives_both_switches, {
 TEST(del_of_a_pointer_lvalue_frees_it_and_stores_null, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut* own p = new(i32);\n"
                           "    del(p);\n    println(p == null);\n    return 0;\n}\n"));
-    TEST_ASSERT_EQ_STR(found("  %t1 = load ptr, ptr %p.0, align 8\n"
-                             "  call void @fort_rt_del(ptr %t1)\n"
+    TEST_ASSERT_EQ_STR(found("  %t3 = load ptr, ptr %p.0, align 8\n"
+                             "  call void @fort_rt_del(ptr %t3)\n"
                              "  store ptr null, ptr %p.0, align 8\n"),
-                       "  %t1 = load ptr, ptr %p.0, align 8\n"
-                       "  call void @fort_rt_del(ptr %t1)\n"
+                       "  %t3 = load ptr, ptr %p.0, align 8\n"
+                       "  call void @fort_rt_del(ptr %t3)\n"
                        "  store ptr null, ptr %p.0, align 8\n");
     TEST_ASSERT_EQ_STR(found("declare void @fort_rt_del(ptr)"), "declare void @fort_rt_del(ptr)");
     TEST_ASSERT_EQ_STR(verified(), "verified");
@@ -186,13 +203,13 @@ TEST(del_of_a_span_lvalue_frees_the_pointer_field_and_zeroes_the_header, {
     // The pointer is field 0, and the whole 16-byte header is zeroed (item
     // 17, D17.9).
     TEST_ASSERT_EQ_STR(
-        found("  %t4 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 0\n"
-              "  %t5 = load ptr, ptr %t4, align 8\n"
-              "  call void @fort_rt_del(ptr %t5)\n"
+        found("  %t7 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 0\n"
+              "  %t8 = load ptr, ptr %t7, align 8\n"
+              "  call void @fort_rt_del(ptr %t8)\n"
               "  call void @llvm.memset.p0.i64(ptr align 8 %s.1, i8 0, i64 16, i1 false)\n"),
-        "  %t4 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 0\n"
-        "  %t5 = load ptr, ptr %t4, align 8\n"
-        "  call void @fort_rt_del(ptr %t5)\n"
+        "  %t7 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 0\n"
+        "  %t8 = load ptr, ptr %t7, align 8\n"
+        "  call void @fort_rt_del(ptr %t8)\n"
         "  call void @llvm.memset.p0.i64(ptr align 8 %s.1, i8 0, i64 16, i1 false)\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
