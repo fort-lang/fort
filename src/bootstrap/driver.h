@@ -142,9 +142,9 @@ const char* driver_files_at(const driver_files_t* files, uint64_t i);
 // order and write the program's LLVM IR module to `ir_path` (D19.1). The
 // search roots are the entry file's directory, the `-I` options in order and
 // the standard library directory driver_std_dir names (D9.2), which is why
-// `argv0` is needed. Checking and emission are the seam ticket T-015 fills
-// in; until then a closure that resolves writes an empty module, which is
-// enough to exercise the options, the temporary and the clang invocation.
+// `argv0` is needed. Emission is the seam ticket T-015 fills in; until then a
+// closure that resolves and checks writes an empty module, which is enough to
+// exercise the options, the temporary and the clang invocation.
 // Returns FORT_EXIT_OK, FORT_EXIT_COMPILE_ERROR, or FORT_EXIT_USAGE for an
 // unreadable entry file (D14.1). Only the `fort: error:` line of a usage or
 // toolchain error goes to `err`: the compile-time diagnostics of D14.2 go to

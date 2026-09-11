@@ -11,6 +11,7 @@
 
 #include <sys/wait.h>
 
+#include "check.h"
 #include "containers.h"
 #include "diag.h"
 #include "json.h"
@@ -623,22 +624,30 @@ int driver_front_end(const driver_options_t* opts,
     if (files != NULL) {
         collect_files(&set, files);
     }
+    // Step 3: every module that parsed is checked, the dependency order
+    // first, so one file that did not parse never hides the errors of the
+    // others (D9.10, D14.2 as amended).
+    check_t ck;
+    check_init(&ck);
+    // A compilation builds a program, so the entry module defines main
+    // (D8.6); --check inspects one module instead, and the entry rule does
+    // not apply to it (D20.1).
+    ck.require_main = ir_path != NULL;
+    const bool checked = check_program(&ck, &set);
+    check_free(&ck);
     module_set_free(&set);
-    if (!loaded) {
+    if (!loaded || !checked) {
         // At least one compile error was reported, which is exit 1 (D14.1).
         return FORT_EXIT_COMPILE_ERROR;
     }
     if (ir_path == NULL) {
         // --check stops after the front end: no module is emitted, and the
-        // entry-point rule of D8.6 is not applied, since the file is a module
-        // under inspection and not a program (D20.1). Step 3, checking every
-        // module of the closure in dependency order, runs in both modes and
-        // belongs to T-014.
+        // file was a module under inspection rather than a program (D20.1).
         return FORT_EXIT_OK;
     }
-    // Steps 3 and 4, checking the modules in dependency order and emitting
-    // the closure's module, belong to T-015. Until it lands the module is
-    // empty: the driver is complete, the compiler behind it is not.
+    // Step 4, emitting the closure's module, belongs to T-015. Until it lands
+    // the module is empty: the front end is complete, the emitter behind it is
+    // not.
     FILE* module = fopen(ir_path, "wb");
     if (module == NULL) {
         error_path(err, "cannot write", ir_path, strerror(errno));
