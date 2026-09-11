@@ -155,7 +155,7 @@ endforeach()
 # and compare two of them with the worked examples of toolchain.md 6, which
 # live in test/ir, so they need the verifier's path and that directory.
 find_program(FORT_OPT_PATH NAMES opt-18 opt REQUIRED)
-foreach(gen_suite gen_test gen_check_test gen_module_test)
+foreach(gen_suite gen_test gen_check_test gen_module_test gen_aggregate_test)
     if(TARGET "${gen_suite}")
         target_compile_definitions("${gen_suite}"
             PRIVATE FORT_OPT="${FORT_OPT_PATH}" FORT_IR_DIR="${FORT_TEST_DIR}/ir")
