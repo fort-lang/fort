@@ -798,16 +798,18 @@ TEST(an_entry_without_the_ft_suffix_keeps_its_whole_name, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
     char entry[PATH_CAP];
-    join(entry, sizeof entry, box.dir, "prog.src");
+    join(entry, sizeof entry, box.dir, "prog");
     FILE* source = fopen(entry, "wb");
     TEST_ASSERT_NONNULL(source);
     TEST_UNUSED(fputs("fn i32 main() { return 0; }\n", source));
     TEST_UNUSED(fclose(source));
-    // Only a `.ft` suffix is dropped from the base name (toolchain.md 1).
+    // A base name with no suffix at all keeps its whole self (toolchain.md
+    // 2); that only a `.ft` suffix is dropped is the test above, since every
+    // other suffix carries a `.`, which an entry may not (D9.1).
     const run_t run = RUN("--cc", FORT_FAKE_CC, "--std-dir", "/std", "-o", box.out, entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     cc_log_t log;
-    TEST_ASSERT_TRUE(cc_log_load_named(box.log, &log, "/prog.src.ll"));
+    TEST_ASSERT_TRUE(cc_log_load_named(box.log, &log, "/prog.ll"));
     char expected[CAPTURE_MAX];
     expect2(expected,
             sizeof expected,
@@ -819,7 +821,7 @@ TEST(an_entry_without_the_ft_suffix_keeps_its_whole_name, {
             "-Wno-override-module\n"
             "-o\n"
             "%s\n"
-            "<tmp>/prog.src.ll\n"
+            "<tmp>/prog.ll\n"
             "/std/fort_rt.o\n",
             FORT_FAKE_CC,
             box.out);
@@ -828,11 +830,28 @@ TEST(an_entry_without_the_ft_suffix_keeps_its_whole_name, {
     sandbox_close(&box);
 })
 
-TEST(the_default_module_of_an_entry_without_a_suffix_keeps_its_whole_name, {
+TEST(only_the_ft_suffix_is_dropped_from_the_base_name, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
     char entry[PATH_CAP];
     join(entry, sizeof entry, box.dir, "prog.src");
+    TEST_ASSERT_TRUE(write_source(entry, "fn i32 main() { return 0; }\n"));
+    // A suffix other than `.ft` stays in the base name (toolchain.md 2), so
+    // the name still holds the `.` an entry may not (D9.1) and the message
+    // quotes the whole of it: a compiler that stripped `.src` would report
+    // `'prog'` and read the file instead.
+    const run_t run = RUN_CAPTURED("--cc", FORT_FAKE_CC, "-o", box.out, entry);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
+    TEST_ASSERT_NONNULL(strstr(last_diags, "entry file name 'prog.src' cannot contain '.'"));
+    TEST_ASSERT_EQ_INT32(access(box.log, F_OK), -1);
+    sandbox_close(&box);
+})
+
+TEST(the_default_module_of_an_entry_without_a_suffix_keeps_its_whole_name, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    char entry[PATH_CAP];
+    join(entry, sizeof entry, box.dir, "prog");
     FILE* source = fopen(entry, "wb");
     TEST_ASSERT_NONNULL(source);
     TEST_UNUSED(fputs("fn i32 main() { return 0; }\n", source));
@@ -840,12 +859,12 @@ TEST(the_default_module_of_an_entry_without_a_suffix_keeps_its_whole_name, {
     char cwd[PATH_CAP];
     TEST_ASSERT_NONNULL(getcwd(cwd, sizeof cwd));
     TEST_ASSERT_EQ_INT32(chdir(box.dir), 0);
-    const run_t run = RUN("-S", "prog.src");
+    const run_t run = RUN("-S", "prog");
     const int back = chdir(cwd);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     TEST_ASSERT_EQ_INT32(back, 0);
     char module[PATH_CAP];
-    join(module, sizeof module, box.dir, "prog.src.ll");
+    join(module, sizeof module, box.dir, "prog.ll");
     TEST_ASSERT_EQ_INT32(access(module, F_OK), 0);
     sandbox_close(&box);
 })
@@ -1009,6 +1028,23 @@ TEST(an_import_no_root_reaches_is_a_compile_error, {
     sandbox_close(&box);
 })
 
+TEST(a_dotted_entry_base_name_is_a_compile_error_with_no_output, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    char entry[PATH_CAP];
+    join(entry, sizeof entry, box.dir, "my.app.ft");
+    TEST_ASSERT_TRUE(write_source(entry, "fn i32 main() { return 0; }\n"));
+    // The entry base name may not contain a `.` (D9.1): the compilation stops
+    // at step 1 of toolchain.md 2, before any file is written.
+    const run_t run = RUN_CAPTURED("--cc", FORT_FAKE_CC, "-o", box.out, entry);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
+    TEST_ASSERT_NONNULL(strstr(last_diags, "entry file name 'my.app' cannot contain '.'"));
+    TEST_ASSERT_EQ_INT32(access(box.log, F_OK), -1);
+    TEST_ASSERT_EQ_INT32(access(box.out, F_OK), -1);
+    TEST_ASSERT_EQ_INT32(count_entries(box.tmp), 0);
+    sandbox_close(&box);
+})
+
 TEST(a_module_beside_the_entry_file_is_reached_without_any_option, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
@@ -1084,6 +1120,7 @@ int main(int argc, char** argv) {
     TEST_RUN(a_compiler_killed_by_a_signal_is_exit_2_and_says_so);
     TEST_RUN(an_empty_tmpdir_variable_counts_as_unset);
     TEST_RUN(an_entry_without_the_ft_suffix_keeps_its_whole_name);
+    TEST_RUN(only_the_ft_suffix_is_dropped_from_the_base_name);
     TEST_RUN(the_default_module_of_an_entry_without_a_suffix_keeps_its_whole_name);
     TEST_RUN(a_compiler_that_cannot_be_run_is_exit_2);
     TEST_RUN(an_unreadable_entry_file_is_exit_2_and_removes_the_temporary);
@@ -1096,6 +1133,7 @@ int main(int argc, char** argv) {
     TEST_RUN(a_usage_error_creates_no_temporary_at_all);
     TEST_RUN(exit_status_constants_match_d14_1);
     TEST_RUN(an_import_no_root_reaches_is_a_compile_error);
+    TEST_RUN(a_dotted_entry_base_name_is_a_compile_error_with_no_output);
     TEST_RUN(a_module_beside_the_entry_file_is_reached_without_any_option);
     TEST_RUN(an_include_root_reaches_a_module_the_entry_directory_lacks);
     TEST_EXIT();

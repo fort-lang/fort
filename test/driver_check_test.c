@@ -204,6 +204,45 @@ static const char INDEXED_DOCUMENT[] =
     "\"type\":\"fn i32()\",\"is_decl\":true,\"decl\":{\"file\":\"%s\",\"line\":1,\"col\":8,"
     "\"end_line\":1,\"end_col\":12}}]}\n";
 
+// The whole document of a dotted entry name: the file is never read, so
+// `"files"` is empty and the one diagnostic stands at 1:1 (D9.1, D14.2).
+// A diagnostic naming a file `"files"` does not list is published all the
+// same: `"files"` is what a client may clear, not what it publishes
+// (toolchain.md 9.2).
+static const char DOTTED_ENTRY_DOCUMENT[] =
+    "{\"version\":1,\"files\":[],\"diagnostics\":[{\"file\":\"%s\",\"line\":1,"
+    "\"col\":1,\"end_line\":1,\"end_col\":1,\"severity\":\"error\",\"message\":"
+    "\"entry file name 'my.app' cannot contain '.'\",\"notes\":[]}],\"symbols\":[]}\n";
+
+TEST(a_dotted_entry_under_check_is_rejected_too, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    char entry[PATH_CAP];
+    join(entry, sizeof entry, box.dir, "my.app.ft");
+    TEST_ASSERT_TRUE(write_source(entry, "fn i32 main() { return 0; }\n"));
+    // The rule is not D8.6's `main`, which --check skips: the name of the
+    // file is wrong whatever the file holds (D9.1, D20.1).
+    const run_t run = RUN_CAPTURED("--check", entry);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
+    TEST_ASSERT_NONNULL(strstr(last_diags, "entry file name 'my.app' cannot contain '.'"));
+    sandbox_close(&box);
+})
+
+TEST(the_document_of_a_dotted_entry_is_exact, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    char entry[PATH_CAP];
+    join(entry, sizeof entry, box.dir, "my.app.ft");
+    TEST_ASSERT_TRUE(write_source(entry, "fn i32 main() { return 0; }\n"));
+    // Exit 1 with a complete document is a verdict a client reads (D20.2).
+    const run_t run = RUN_CAPTURED("--check", "--json", entry);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
+    char want[CAPTURE_MAX];
+    TEST_UNUSED(snprintf(want, sizeof want, DOTTED_ENTRY_DOCUMENT, entry));
+    TEST_ASSERT_EQ_STR(run.out, want);
+    sandbox_close(&box);
+})
+
 TEST(index_implies_check_and_json_and_fills_the_symbols, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
@@ -692,6 +731,8 @@ int main(int argc, char** argv) {
     TEST_RUN(an_include_root_is_searched_under_check);
     TEST_RUN(a_quote_in_a_file_name_is_escaped_in_the_document);
     TEST_RUN(a_non_ascii_file_name_passes_through_the_document);
+    TEST_RUN(a_dotted_entry_under_check_is_rejected_too);
+    TEST_RUN(the_document_of_a_dotted_entry_is_exact);
     TEST_RUN(index_implies_check_and_json_and_fills_the_symbols);
     TEST_RUN(index_runs_the_front_end_alone);
     TEST_RUN(an_indexed_use_points_at_the_declaration_in_the_other_file);

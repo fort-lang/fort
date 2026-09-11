@@ -53,6 +53,121 @@ TEST(an_entry_base_name_that_is_no_identifier_is_taken_as_it_is, {
     TEST_ASSERT_EQ_STR(ordered(0), "001_leading_zero");
 })
 
+TEST(a_dotted_entry_base_name_is_rejected, {
+    begin();
+    add("my.app.ft", src_main());
+    // The entry base name may not contain a `.`, which would spell a module
+    // path and break the injectivity of the symbol names (D9.1, D9.7).
+    TEST_ASSERT_FALSE(load("my.app.ft"));
+    TEST_ASSERT_TRUE(said("entry file name 'my.app' cannot contain '.'"));
+})
+
+TEST(a_dotted_entry_is_reported_at_the_start_of_the_file, {
+    begin();
+    add("my.app.ft", src_main());
+    TEST_ASSERT_FALSE(load("my.app.ft"));
+    TEST_ASSERT_EQ_UINT64(diag_record_count(), (uint64_t)1);
+    const diag_record_t rec = diag_record_at(0);
+    // An error with no position in the file is reported at 1:1 (D14.2): it is
+    // the file's name that is wrong, not anything written inside it.
+    TEST_ASSERT_EQ_UINT64((uint64_t)rec.loc.line, (uint64_t)1);
+    TEST_ASSERT_EQ_UINT64((uint64_t)rec.loc.col, (uint64_t)1);
+    TEST_ASSERT_EQ_INT32((int32_t)rec.severity, (int32_t)DIAG_ERROR);
+    TEST_ASSERT_TRUE(strstr(rec.loc.file, "my.app.ft") != NULL);
+})
+
+TEST(a_dotted_entry_file_is_never_read, {
+    begin();
+    add("my.app.ft", src_main());
+    TEST_ASSERT_FALSE(load("my.app.ft"));
+    // The name is rejected before the file is read, so no module exists and
+    // nothing can be emitted for one (module-system.md 2).
+    TEST_ASSERT_EQ_UINT64(module_set_count(&set), (uint64_t)0);
+    TEST_ASSERT_TRUE(module_set_entry(&set) == NULL);
+})
+
+TEST(a_dotted_entry_is_rejected_beside_the_module_it_would_collide_with, {
+    begin();
+    add("my.app.ft", "import my::app;\nfn i32 main() { return app.main(); }\n");
+    add("my/app.ft", src_main());
+    // `my.app.ft` is the module `my.app`, whose `main` is the `my.app.main`
+    // the module `my::app` already emits (D9.1, module-system.md 7).
+    TEST_ASSERT_FALSE(load("my.app.ft"));
+    TEST_ASSERT_TRUE(said("cannot contain '.'"));
+})
+
+TEST(a_colon_in_the_entry_base_name_is_rejected, {
+    begin();
+    add("my:app.ft", src_main());
+    // The mangler writes a `::` as `.` and drops a `:` it cannot pair, so
+    // `my:app` would emit `myapp.main`, the symbol of a module `myapp`
+    // (D9.1, D9.7). The message names the character it found.
+    TEST_ASSERT_FALSE(load("my:app.ft"));
+    TEST_ASSERT_TRUE(said("entry file name 'my:app' cannot contain ':'"));
+})
+
+TEST(a_colon_entry_is_rejected_beside_the_module_it_would_collide_with, {
+    begin();
+    add("my:app.ft", "import myapp;\nfn i32 main() { return myapp.main(); }\n");
+    add("myapp.ft", src_main());
+    TEST_ASSERT_FALSE(load("my:app.ft"));
+    TEST_ASSERT_TRUE(said("cannot contain ':'"));
+    TEST_ASSERT_EQ_UINT64(module_set_count(&set), (uint64_t)0);
+})
+
+TEST(a_doubled_colon_entry_base_name_is_rejected_as_a_name, {
+    begin();
+    add("my::app.ft", src_main());
+    // `my::app` spells a module path outright. The loader's own path map
+    // would collide first and blame a cycle, so the name is judged before
+    // anything is read (D9.1).
+    TEST_ASSERT_FALSE(load("my::app.ft"));
+    TEST_ASSERT_TRUE(said("entry file name 'my::app' cannot contain ':'"));
+    TEST_ASSERT_FALSE(said("circular import"));
+})
+
+TEST(a_dot_first_or_last_in_the_entry_base_name_is_rejected, {
+    begin();
+    add(".hidden.ft", src_main());
+    // The rule is about any position, not an interior one (D9.1).
+    TEST_ASSERT_FALSE(load(".hidden.ft"));
+    TEST_ASSERT_TRUE(said("entry file name '.hidden' cannot contain '.'"));
+    begin();
+    add("app..ft", src_main());
+    TEST_ASSERT_FALSE(load("app..ft"));
+    TEST_ASSERT_TRUE(said("entry file name 'app.' cannot contain '.'"));
+})
+
+TEST(an_entry_named_exactly_ft_keeps_its_whole_base_name, {
+    begin();
+    add(".ft", src_main());
+    // `.ft` is shorter than the suffix plus a name, so nothing is stripped
+    // and the base name is `.ft` itself, which the dot rule then rejects
+    // (module-system.md 2, D9.1).
+    TEST_ASSERT_FALSE(load(".ft"));
+    TEST_ASSERT_TRUE(said("entry file name '.ft' cannot contain '.'"));
+})
+
+TEST(a_hyphenated_entry_base_name_is_accepted, {
+    begin();
+    add("my-app.ft", src_main());
+    // Only `.` and `:` are barred; every other base name is a legal entry,
+    // whatever it holds (D9.1).
+    TEST_ASSERT_TRUE(load("my-app.ft"));
+    TEST_ASSERT_EQ_STR(ordered(0), "my-app");
+})
+
+TEST(a_dot_in_a_directory_of_the_entry_path_is_not_the_base_name, {
+    begin();
+    add("my.dir/app.ft", src_main());
+    // The rule is about the base name, which is what becomes the module path
+    // (module-system.md 2). This is the only test that catches a check made
+    // over the whole path: every guest path here is under `/vagrant`, so such
+    // a check would reject every entry the build compiles.
+    TEST_ASSERT_TRUE(load("my.dir/app.ft"));
+    TEST_ASSERT_EQ_STR(ordered(0), "app");
+})
+
 TEST(an_unreadable_entry_file_is_reported, {
     begin();
     TEST_ASSERT_FALSE(load("missing.ft"));
@@ -423,6 +538,17 @@ int main(int argc, char** argv) {
     TEST_RUN(an_entry_file_in_a_directory_keeps_only_its_base_name);
     TEST_RUN(the_entry_directory_is_the_first_search_root);
     TEST_RUN(an_entry_base_name_that_is_no_identifier_is_taken_as_it_is);
+    TEST_RUN(a_dotted_entry_base_name_is_rejected);
+    TEST_RUN(a_dotted_entry_is_reported_at_the_start_of_the_file);
+    TEST_RUN(a_dotted_entry_file_is_never_read);
+    TEST_RUN(a_dotted_entry_is_rejected_beside_the_module_it_would_collide_with);
+    TEST_RUN(a_colon_in_the_entry_base_name_is_rejected);
+    TEST_RUN(a_colon_entry_is_rejected_beside_the_module_it_would_collide_with);
+    TEST_RUN(a_doubled_colon_entry_base_name_is_rejected_as_a_name);
+    TEST_RUN(a_dot_first_or_last_in_the_entry_base_name_is_rejected);
+    TEST_RUN(an_entry_named_exactly_ft_keeps_its_whole_base_name);
+    TEST_RUN(a_hyphenated_entry_base_name_is_accepted);
+    TEST_RUN(a_dot_in_a_directory_of_the_entry_path_is_not_the_base_name);
     TEST_RUN(an_unreadable_entry_file_is_reported);
     TEST_RUN(a_lexical_error_stops_the_file);
     TEST_RUN(a_syntax_error_stops_the_file);

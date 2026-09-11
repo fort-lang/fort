@@ -37,10 +37,12 @@ The entry file is the one `.ft` file named on the `fort` command line (D14.1). I
 its base name without `.ft`: `main.ft` is the module `main`, `src/app.ft` is the module `app`.
 The base name need not satisfy the segment rule of section 1 (D9.1): the entry file is named on the
 command line, not reached by an import path, so `007_case.ft` and `my-app.ft` are legal entries
-whose modules are `007_case` and `my-app`. The one character it may not contain is `.`, which
-would let the entry's symbols collide with another module's (section 7): `my.app.ft` would be the
-module `my.app`, whose `main` is the `my.app.main` a module `my::app` already emits. A module whose
-name is not an identifier cannot be imported, since no import path spells it.
+whose modules are `007_case` and `my-app`. The two characters it may not contain are `.` and `:`,
+which would let the entry's symbols collide with another module's (section 7): `my.app.ft` would be
+the module `my.app`, whose `main` is the `my.app.main` a module `my::app` already emits, and
+`my:app.ft` would emit `myapp.main`, which is module `myapp`'s. Every other character reaches the
+symbol unchanged and so cannot spell a path. A module whose name is not an identifier cannot be
+imported, since no import path spells it.
 
 Search roots, in order (D9.2):
 
@@ -189,9 +191,9 @@ them instead.
 
 The module path joined with `.`, then `.` and the declaration name, is injective: `.` is legal in
 ELF symbols and cannot occur in an identifier, and every segment is an identifier (D9.7). The
-entry module is the one whose path need not be (section 2, D9.1), and a `.` is barred from its base
-name for exactly this reason. A double-underscore scheme is not injective (`a__b` is also one
-identifier). Fort symbols never
+entry module is the one whose path need not be (section 2, D9.1), and `.` and `:` are barred from
+its base name for exactly this reason: they are the two characters the mangling reads. A
+double-underscore scheme is not injective (`a__b` is also one identifier). Fort symbols never
 collide with C symbols because C identifiers cannot contain `.`; the only undotted symbols the
 compiler emits are `fort_entry` (D11.6), runtime references and `extern` names. The standard
 library reaches the runtime through ordinary `extern fn fort_rt_...` declarations (D13.1).
@@ -678,7 +680,7 @@ All diagnostics follow D14.2: `<file>:<line>:<col>: error: <message>`, optionall
 | module binding as a value or type  | `'io' is a module, not a value` (or `not a type`)        |
 | `m.x` with no such declaration     | `module 'std::io' has no declaration named 'x'`          |
 | entry module without a valid `main`| `entry module 'main' must define 'fn i32 main()'`        |
-| dotted entry file base name        | `entry file name 'my.app' cannot contain '.'`            |
+| entry base name with `.` or `:`    | `entry file name 'my.app' cannot contain '.'`            |
 | aggregate in an extern signature   | `extern signature cannot use type 'i32@'`                |
 
 The missing-`main` row is the one diagnostic a build reports and `fort --check` does not: under

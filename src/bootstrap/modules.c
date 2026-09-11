@@ -93,6 +93,18 @@ static str_t base_name(str_t path) {
     return base;
 }
 
+// The first character of `base` that a module path is spelled with, `.` or
+// `:`, or NUL when it holds neither: those two are what the mangler of D9.7
+// reads, and every other character reaches the symbol verbatim (D9.1).
+static char path_character_in(str_t base) {
+    for (uint64_t i = 0; i < base.len; i++) {
+        if (base.ptr[i] == '.' || base.ptr[i] == ':') {
+            return base.ptr[i];
+        }
+    }
+    return '\0';
+}
+
 // The `i`-th segment of an import path: the path node holds one identifier
 // per segment, in source order (D9.1).
 static str_t segment_at(const ast_node_t* path, uint64_t i) {
@@ -317,6 +329,23 @@ static void error_ambiguous(module_set_t* set,
     msg_str(&set->msg, " and ");
     msg_view(&set->msg, prefix_file);
     msg_str(&set->msg, " exist");
+    diag_error(at, msg_end(&set->msg));
+}
+
+// `entry file name 'my.app' cannot contain '.'`, naming the character found:
+// the entry base name is the entry module's path, and a `.` or a `:` in it
+// spells another module's symbol prefix, which the injectivity of D9.7 rests
+// on (D9.1, module-system.md 2 and 13).
+static void error_entry_name_char(module_set_t* set, loc_t at, str_t base, char found) {
+    char text[2];
+    text[0] = found;
+    text[1] = '\0';
+    msg_begin(&set->msg);
+    msg_str(&set->msg, "entry file name ");
+    msg_quote(&set->msg, base);
+    msg_str(&set->msg, " cannot contain '");
+    msg_str(&set->msg, text);
+    msg_str(&set->msg, "'");
     diag_error(at, msg_end(&set->msg));
 }
 
@@ -933,6 +962,17 @@ bool module_set_load(module_set_t* set, const char* entry) {
     // (D9.1, module-system.md 2), so `007_case.ft` is the module `007_case`,
     // which no import path can spell.
     const str_t base = str_pool_intern(&set->pool, base_name(file));
+    // The base name may contain neither a `.` nor a `:`, the two characters a
+    // module path is spelled with: `my.app.ft` is the module `my.app`, whose
+    // `main` is the `my.app.main` a module `my::app` already emits, and
+    // `my:app.ft` emits `myapp.main`, since the mangler writes a `::` as `.`
+    // and drops a `:` it cannot pair (D9.1, D9.7). The error has no position
+    // in the file, so it is reported at 1:1 (D14.2).
+    const char found = path_character_in(base);
+    if (found != '\0') {
+        error_entry_name_char(set, file_start(file), base, found);
+        return false;
+    }
     if (load_module(set, base, file, file_start(file), true) == NULL) {
         return false;
     }

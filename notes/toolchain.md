@@ -105,10 +105,12 @@ temporary directory for the intermediate IR file (D19.1).
 
 Compilation is whole-program (D9.10):
 
-1. Read the entry file and derive its module path and root (exit 2 if unreadable). The base name
-   need not be an identifier: the entry file is named on the command line rather than reached by
-   an import path, so `007_case.ft` is the module `007_case` and nothing can import it (D9.1 as
-   amended).
+1. Read the entry file and derive its module path and root (exit 2 if unreadable, 1 if the base
+   name contains a `.` or a `:`, the two characters a module path is spelled with, which would
+   let it collide with that module's symbols). The base name need not otherwise be an identifier:
+   the entry file is named on the command line rather than reached by an import path, so
+   `007_case.ft` is the module `007_case` and nothing can import it, and `my-app.ft` is legal too
+   (D9.1 as amended).
 2. Parse it; resolve each import (module-system.md 2 and 3); parse each newly reached module
    until the closure is complete; reject cycles and duplicate identities (exit 1).
 3. Check every module in dependency order, imported modules first (exit 1).
@@ -1430,8 +1432,11 @@ editor needs; without it `"symbols"` is the empty array.
 The index is a batch answer about the file as it was saved, which is what an editor built on
 `--index` can promise: it publishes the diagnostics of `"files"`, clearing the files that no longer
 have any, and serves hover and definition from the records of the last run whose closure contained
-the file. Between two saves the answers are stale, and a client says so rather than guessing. The
-VS Code extension in `editors/vscode` is the client this repository ships; `editors/README.md` is
+the file. `"files"` is the set a client may clear, not the set it publishes: every entry of
+`"diagnostics"` is published whether or not its file is listed, since an error about a file
+the compiler never read names a file that `"files"` cannot hold (section 4.1, D20.2). Between
+two saves the answers are stale, and a client says so rather than guessing. The VS Code
+extension in `editors/vscode` is the client this repository ships; `editors/README.md` is
 its install guide and its list of limitations.
 
 ## 10. Not in v1

@@ -117,10 +117,14 @@ A safe(r) C-like systems programming language.
   file a directory test may hold, and `--lint` checks its shape without a compiler, so a golden
   edited by hand into another spelling of the same records fails the lint rather than the run.
   Regenerate one with `fort --index` and `render_index`, never by hand. A compiler exit status
-  other than 0 or 1 is an `ERROR`, which `xfail.txt` still covers. The harness and its unit tests
-  are Python 3.12, standard library only, wrapped at 100 columns (the host's
-  `ruff format --line-length 100` is the reference); `run_tests_test.py` scripts a fake `fort`
-  with `//@` lines, extend it rather than calling the real compiler.
+  other than 0 or 1 is an `ERROR`, which `xfail.txt` still covers. Discovery matches a test file's
+  stem (the name without `.ft`) against `^(\d{3})_([a-z0-9_]+)$` or `^[a-z0-9_]+$`, so the corpus
+  cannot host a test whose *file name* is the thing under test: `fail/structs/my.app.ft` is
+  `lint: fail/structs/my.app.ft: bad test name`, and a rule about a file name (a dotted entry
+  name, D9.1) is pinned by a unit test instead. The harness and its unit tests are Python 3.12,
+  standard library only, wrapped at 100 columns (the host's `ruff format --line-length 100` is
+  the reference); `run_tests_test.py` scripts a fake `fort` with `//@` lines, extend it rather
+  than calling the real compiler.
 - Unit tests: `test/<component>_test.c` with `test/test.h`; every `test/*_test.c` is globbed
   into an executable `build/<preset>/test/<component>_test` linked against `fort_core` and
   `fort_rt_native`, and a ctest `unit-<component>`. A `TEST` body is one macro argument: a comma

@@ -525,15 +525,19 @@ Owner: `module-system.md`.
   earlier `std::string` is `std::str`. The entry file is the exception: it is named on the command
   line rather than reached by an import path, so its base name need not be an identifier, and a name
   that is not one simply cannot be imported by anything (`007_case.ft` is the module `007_case`,
-  whose name reaches the generated module only inside a quoted symbol, D9.7). It may not contain a
-  `.`, the one character that would break the injectivity D9.7 rests on: an entry `my.app.ft` is
-  the module `my.app` and emits `my.app.main`, which is already the symbol of a `main` in a module
-  `my::app`. Nothing else is barred, since a module path is identifiers joined with `.` and a base
-  name without a dot cannot spell one whatever else it contains. Amended 2026-09-10:
+  whose name reaches the generated module only inside a quoted symbol, D9.7). It may contain
+  neither a `.` nor a `:`, the two characters that break the injectivity D9.7 rests on, because
+  they are the two a module path is spelled with: an entry `my.app.ft` is the module `my.app` and
+  emits `my.app.main`, already the symbol of a `main` in a module `my::app`; and `my:app.ft` emits
+  `myapp.main`, because the mangler writes a `::` as `.` and drops a `:` it cannot pair (D9.7), so
+  it collides with a module `myapp`. Nothing else is barred: every other character reaches the
+  symbol verbatim, and a name made of those cannot spell a path. Amended 2026-09-10:
   module-system.md required the entry base name to be a segment, which would have rejected every
   test file D14.4 names `NNN_name.ft`. Amended 2026-09-10, separately: that exception admitted a
   dotted base name, which the compiler accepted and then emitted two definitions of one symbol for
-  -- invalid IR, exit 0, caught only by `opt`.
+  -- invalid IR, exit 0, caught only by `opt`. Amended 2026-09-10, a third time: barring `.` alone
+  was incomplete, since the mangler also transforms `:`; T-070's review found `my:app.ft` still
+  colliding with a module `myapp`, by the same silent route.
 - **D9.2** Search roots, in order: the directory containing the entry file; each `-I` directory;
   the standard library directory. The first segment `std` is reserved for the standard library
   directory. The current working directory is never searched. Import paths are root-relative
