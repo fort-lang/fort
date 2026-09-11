@@ -768,12 +768,13 @@ Owner: `toolchain.md`.
   `--cc <path>` (default `clang`; it must be a clang, since it compiles LLVM IR),
   `--target <triple>` (default `x86_64-linux-gnu`, passed to `--cc` as `--target=<triple>`),
   `-Xcc <arg>` (repeatable, passed to `--cc` verbatim after the compiler's own arguments),
-  `--check` (D20.1), `--json` (D20.2, only with `--check`), `--help`, `--version`. Exit status: 0
+  `--check` (D20.1), `--json` (D20.2, only with `--check`), `--index` (D20.3, which implies
+  `--check --json`), `--help`, `--version`. Exit status: 0
   success, 1 compile error, 2 usage, toolchain (`--cc` failed) or internal error; usage and
   toolchain errors are printed as `fort: error: <message>`.
   Amended 2026-09-10 with D19: `-S` emitted `<entry>.s`, `--cc` defaulted to `cc`, and
-  `--target` and `-Xcc` did not exist. Amended 2026-09-10 with D20: `--check` and `--json`
-  did not exist.
+  `--target` and `-Xcc` did not exist. Amended 2026-09-10 with D20: `--check`, `--json` and
+  `--index` did not exist.
 - **D14.2** Diagnostics: `<file>:<line>:<col>: error: <message>` on stderr, one per line,
   optionally followed by `note:` lines. Errors without a position in the file (a missing
   `main`) use `1:1`. A lexical error is reported and lexing resumes at the start of the next
@@ -1141,7 +1142,8 @@ assembly, survives only in the history of this file and of `toolchain.md`.
 Decided 2026-09-10. Owner: `toolchain.md` (1, 4). An editor underlines the construct a diagnostic
 is about and jumps to the name a declaration introduces, so both are recorded from the parser on.
 The check mode is the compiler's whole editor interface: it never grows a server. The identifier
-index and the language server (D20.3, D20.5) are not decided here; they land after the checker.
+index is D20.3, decided once the checker could resolve a name; the language server (D20.5) is not
+decided here and lands after the self-hosted compiler.
 
 - **D20.1** `fort --check entry.ft` runs the front end only (lex, parse, resolve the import
   closure, check every module of it) and stops: no IR, no `--cc`, no temporary directory, so
@@ -1164,7 +1166,30 @@ index and the language server (D20.3, D20.5) are not decided here; they land aft
   "notes": [{"file", "line", "col", "end_line", "end_col", "message"}]}`, the notes of D14.2
   nested under the error they follow; positions are the 1-based byte columns of D14.2 and D20.4
   with the end exclusive, and converting them to UTF-16 is the client's job. `"symbols"` is the
-  index of D20.3 and is empty until it is decided.
+  identifier index of D20.3, which is empty unless `--index` was given.
+- **D20.3** `fort --index entry.ft` fills `"symbols"` with the identifier index. `--index` implies
+  `--check` and `--json`, so the index is always a member of the document of D20.2 and is the empty
+  array without it. The index holds one record per identifier occurrence the checker resolved, in
+  every module of the closure that was checked:
+  `{"file", "line", "col", "end_line", "end_col", "name", "kind", "type", "is_decl", "decl":
+  {"file", "line", "col", "end_line", "end_col"} | null}`. The record's own range is the range of
+  that one name token and never the construct's first token (D20.4), so an editor underlines the
+  name the reader pointed at and nothing else. `"kind"` is the kind of what the name denotes,
+  spelled as a diagnostic spells it: `module`, `fn`, `extern fn`, `struct`, `enum`, `enum member`,
+  `field`, `constant`, `global`, `local`, `parameter` or `builtin` (D7.9, D7.10, D3.9, D12.2).
+  `"type"` is the declaration's type as a declaration spells it (D5.2, D5.3), and is empty for a
+  name that denotes no value: a module, a struct name, an enum name and a builtin. `"is_decl"` is
+  true on the occurrence that declares the name and false on every use of it. `"decl"` is the range
+  of the declaring name token, which is the range of that record; it is `null` for a builtin, which
+  no source declares, and the empty range at 1:1 of the module's own file for a module, which is
+  declared by a file and has no name token (D9.1, and D14.2's position for what has none). Records
+  are ordered by file, an imported module before its importers (D9.10), and within a file by the
+  start of the occurrence. A name the checker did not resolve carries no record, so a file with
+  errors still indexes everything that resolved; neither does a construct that has no name token of
+  its own, nor a segment of an import path before its last, which names a search directory and not
+  a module (D9.2, D9.3). An occurrence and its declaration each carry the type and the declaration
+  range in full: the document is read once and thrown away, so a client never resolves a reference
+  into a second table.
 - **D20.4** Ranges. A position is a range: from the first byte of its first token to one past the
   last byte of its last token, the start inclusive and the end exclusive, both 1-based byte
   columns with a tab counting as one column (D14.2). No token spans lines (D2.9), so the range of

@@ -32,6 +32,7 @@ file (D14.1). Options and the entry file may appear in any order.
 | `-Xcc <arg>`        | passed to `--cc` verbatim, after the arguments below       | none       |
 | `--check`           | run the front end only and stop (D20.1)                    | off        |
 | `--json`            | write the check document to stdout (D20.2), needs `--check`| off        |
+| `--index`           | fill the document's identifier index (D20.3)                | off        |
 | `--help`            | print the usage line and exit 0                            |            |
 | `--version`         | print the compiler version and exit 0                      |            |
 
@@ -53,7 +54,9 @@ file (D14.1). Options and the entry file may appear in any order.
   program (D20.1, D8.6). With it, `-o`, `-S`, `-c`, `-l`, `--cc`, `--target` and `-Xcc` are
   unused. `--json` replaces the text diagnostics of section 4 with the document of section 4.1 on
   stdout and is a usage error without `--check`, since a build spawns a `--cc` that inherits
-  stdout and could not promise a complete document or nothing (D20.2).
+  stdout and could not promise a complete document or nothing (D20.2). `--index` fills the
+  document's `"symbols"` array with the identifier index of section 9.1 and implies `--check` and
+  `--json`, so `fort --index main.ft` is the whole of what an editor runs (D20.3).
 - The entry file's directory is always a root and the current directory never is (D9.2).
 
 Exit status (D14.1):
@@ -91,6 +94,7 @@ fort -I lib -I vendor -lm main.ft             # extra roots, link libm
 fort --cc clang-18 --target x86_64-linux-gnu -Xcc -fuse-ld=lld main.ft
 fort --check lib/util.ft                      # check that module and its imports, print nothing
 fort --check --json main.ft                   # one JSON document on stdout, for an editor
+fort --index main.ft                          # the same document with the identifier index
 FORT_STD_DIR=/opt/fort/std fort main.ft
 ```
 
@@ -302,7 +306,8 @@ several:
 - The `note:` lines of an error are nested in its `"notes"`, in order, each with its own range; a
   note carries no severity. A note that follows no error stands as a diagnostic of severity
   `"note"`.
-- `"symbols"` is the identifier index, which is empty until D20.3 decides it.
+- `"symbols"` is the identifier index of section 9.1, which `--index` fills and which is the
+  empty array without it (D20.3).
 - Diagnostics appear in the order they were reported, which is the order of the text form.
 - `--json` is a usage error without `--check`: the `--cc` a build spawns inherits stdout, so the
   guarantee above is the check mode's alone (D20.2). The document is written only when the
@@ -1346,7 +1351,62 @@ implementable; the design is to be planned in the implementation phase.
   temporaries, and deferred statements are expanded statically at each exit (D7.8).
 - **Memory.** Arenas per compilation; nothing is freed before exit.
 
-## 9. Not in v1
+## 9. Editor support
+
+An editor asks the compiler two questions about a saved file: what is wrong with it, and what
+does this name mean. Section 4.1 answers the first; the identifier index below answers the second.
+Both are one batch run of `fort`, and the check mode is the compiler's whole editor interface: it
+never grows a server (D20).
+
+### 9.1 The identifier index (D20.3)
+
+`fort --index entry.ft` runs the check mode and fills the document's `"symbols"` array with one
+record per identifier occurrence the checker resolved, in every module of the closure that was
+checked. `--index` implies `--check` and `--json`, so the option is the whole command line an
+editor needs; without it `"symbols"` is the empty array.
+
+```json
+{"file": "main.ft", "line": 7, "col": 16, "end_line": 7, "end_col": 19,
+ "name": "add", "kind": "fn", "type": "fn i32(i32, i32)", "is_decl": false,
+ "decl": {"file": "mathx.ft", "line": 12, "col": 8, "end_line": 12, "end_col": 11}}
+```
+
+- The record's own range is the range of that one name token, never the construct's first token
+  (D20.4): the range of `add` in `mathx.add(1, 2)` covers `add` alone, so an editor underlines the
+  name the reader pointed at. Positions are the 1-based byte columns of section 4, the end
+  exclusive; converting them to UTF-16 code units is the client's job, as it is for a diagnostic.
+- `"name"` is the identifier as it is spelled at that occurrence, so an `as` alias reads as the
+  alias and the declaration it binds reads as its own name (D9.3).
+- `"kind"` is what the name denotes, spelled as a diagnostic spells it: `module`, `fn`,
+  `extern fn`, `struct`, `enum`, `enum member`, `field`, `constant`, `global`, `local`, `parameter`
+  or `builtin` (D7.9, D7.10, D3.9, D12.2).
+- `"type"` is the declaration's type as a declaration spells it, the `mut` of level 0 included
+  (D5.2, D5.3): `i32`, `i32 mut* own`, `fn i32(i32, i32)`. It is empty for a name that denotes no
+  value, which is a module, a struct name, an enum name and a builtin.
+- `"is_decl"` is true on the occurrence that declares the name and false on every use of it, and
+  `"decl"` is the range of that declaring name token: for the declaration itself, its own range.
+  `"decl"` is `null` for a builtin, which no source declares (D12.2), and the empty range at 1:1 of
+  the module's file for a module, which a file declares and which has no name token (D9.1), so
+  jumping to the definition of `mathx` in `mathx.add(1, 2)` opens `mathx.ft`.
+- Records are ordered by file, an imported module before its importers (D9.10), and within a file
+  by the start of the occurrence, so a client may bisect the records of a file by position.
+- A name the checker could not resolve carries no record, and a file that did not parse
+  contributes none, so a file with errors still indexes everything that resolved. A construct with
+  no name token of its own carries none either, and neither does a segment of an import path
+  before its last: those name search directories, not modules (D9.2, D9.3).
+- Every record repeats the type and the declaration range of the name it resolves, so a client
+  answers hover and go-to-definition from the record under the cursor alone.
+
+### 9.2 What an editor does with it
+
+The index is a batch answer about the file as it was saved, which is what an editor built on
+`--index` can promise: it publishes the diagnostics of `"files"`, clearing the files that no longer
+have any, and serves hover and definition from the records of the last run whose closure contained
+the file. Between two saves the answers are stale, and a client says so rather than guessing. The
+VS Code extension in `editors/vscode` is the client this repository ships; `editors/README.md` is
+its install guide and its list of limitations.
+
+## 10. Not in v1
 
 Deferred by D15 and the design reviews: debugger support (no DWARF, no `!dbg` metadata; the
 frame pointer of section 6 item 7 and the symbol names are what a debugger gets), an optimizer
