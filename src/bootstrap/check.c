@@ -1002,7 +1002,7 @@ static void check_shift(
         }
         return;
     }
-    const uint32_t width = (uint32_t)prim_size(a->type->prim) * PRIM_BITS_PER_BYTE;
+    const uint32_t width = prim_size(a->type->prim) * PRIM_BITS_PER_BYTE;
     if (counted) {
         int64_t n = 0;
         if (!cv_to_i64(b->value, &n) || n < 0 || (uint64_t)n >= width) {
@@ -1253,12 +1253,10 @@ static void value_of_sym(check_t* ck, ast_node_t* n, const sym_t* s, expr_t* out
         out->init_const = true;
         break;
     case SYM_GLOBAL:
-        // Reads of `mut` globals are not constant expressions (D4.6).
-        out->lvalue = true;
-        out->mut = s->mut0;
-        break;
     case SYM_LOCAL:
     case SYM_PARAM:
+        // A variable is an lvalue with its level-0 mutability; a read of a
+        // `mut` global is not a constant expression (D4.6, D6.7).
         out->lvalue = true;
         out->mut = s->mut0;
         break;
