@@ -321,6 +321,44 @@ TEST(a_type_name_carries_the_declaration, {
     TEST_ASSERT_TRUE(t->sym == sym_main("point"));
 })
 
+TEST(the_declarations_after_a_failed_one_are_still_checked, {
+    TEST_ASSERT_FALSE(check_src("i32 A = nope;\ni32 B = also_nope;\n"
+                                "fn i32 main() {\n    return third_nope;\n}\n"));
+    // Checking does not stop at the first error: a module reports every one
+    // of its own (D14.2).
+    TEST_ASSERT_TRUE(said("unknown name 'nope'"));
+    TEST_ASSERT_TRUE(said("unknown name 'also_nope'"));
+    TEST_ASSERT_TRUE(said("unknown name 'third_nope'"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)3);
+})
+
+TEST(a_module_may_be_checked_twice, {
+    begin();
+    add("main.ft", "i32 MAX = 2;\nfn i32 main() {\n    i32[MAX] a = {};\n    return a[1];\n}\n");
+    TEST_ASSERT_TRUE(check_entry("main.ft"));
+    const module_t* m = module_at("main");
+    // The pass clears the slots it owns, so a second check of one tree starts
+    // from the tree the parser left (D20.2).
+    TEST_ASSERT_TRUE(check_module(&checker, m));
+    TEST_ASSERT_EQ_STR(decl_type("a"), "i32[2]");
+    TEST_ASSERT_NULL(untyped_expr(m->ast));
+    TEST_ASSERT_NULL(unresolved_name(m->ast));
+})
+
+TEST(a_function_may_call_itself_and_a_function_pointer, {
+    TEST_ASSERT_TRUE(check_src("fn i32 fact(i32 n) {\n    if (n < 2) {\n        return 1;\n"
+                               "    }\n    return n * fact(n - 1);\n}\n"
+                               "fn i32 main() {\n    fn i32(i32) f = fact;\n"
+                               "    return f(3) + fact(2);\n}\n"));
+})
+
+TEST(a_chain_of_pointers_keeps_every_level, {
+    TEST_ASSERT_TRUE(check_body("    i32 mut v = 1;\n    i32 mut* mut a = &v;\n"
+                                "    i32 mut* mut* mut b = &a;\n"
+                                "    i32 mut* mut* mut* c = &b;\n    ***c = 2;\n    println(v);"));
+    TEST_ASSERT_EQ_STR(decl_type("c"), "i32 mut* mut* mut*");
+})
+
 // ---- imports (D9.3, D9.4) -----------------------------------------------------------
 
 TEST(an_import_carries_the_module_it_binds, {
@@ -645,6 +683,10 @@ int main(int argc, char** argv) {
     TEST_RUN(an_enum_member_access_carries_the_member);
     TEST_RUN(a_designator_carries_the_field);
     TEST_RUN(a_type_name_carries_the_declaration);
+    TEST_RUN(the_declarations_after_a_failed_one_are_still_checked);
+    TEST_RUN(a_module_may_be_checked_twice);
+    TEST_RUN(a_function_may_call_itself_and_a_function_pointer);
+    TEST_RUN(a_chain_of_pointers_keeps_every_level);
     TEST_RUN(an_import_carries_the_module_it_binds);
     TEST_RUN(an_import_item_carries_the_declaration);
     TEST_RUN(a_qualified_type_name_carries_the_module_and_the_type);
