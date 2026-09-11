@@ -210,6 +210,48 @@ TEST(errors_are_counted_and_notes_are_not, {
     end_capture();
 })
 
+// The per-file count is the budget the lexer and the parser share (D14.2):
+// it starts at each diag_begin_file and the global count keeps running.
+TEST(the_file_count_starts_at_each_file, {
+    begin_capture();
+    TEST_ASSERT_EQ_UINT64(diag_file_count(), (uint64_t)0);
+    diag_begin_file();
+    diag_error(loc_make("a.ft", 1, 1), "one");
+    diag_error(loc_make("a.ft", 2, 1), "two");
+    diag_note(loc_make("a.ft", 2, 1), "a note");
+    TEST_ASSERT_EQ_UINT64(diag_file_count(), (uint64_t)2);
+    diag_begin_file();
+    TEST_ASSERT_EQ_UINT64(diag_file_count(), (uint64_t)0);
+    diag_error(loc_make("b.ft", 1, 1), "three");
+    TEST_ASSERT_EQ_UINT64(diag_file_count(), (uint64_t)1);
+    TEST_ASSERT_EQ_UINT64(diag_count(), (uint64_t)3);
+    end_capture();
+})
+
+// A muted probe reads another file, so what it reports leaves the budget of
+// the file that asked for it where it was (module-system.md 3).
+TEST(a_muted_probe_spends_no_budget, {
+    begin_capture();
+    diag_begin_file();
+    diag_error(loc_make("a.ft", 1, 1), "one");
+    diag_mute();
+    diag_begin_file();
+    diag_error(loc_make("b.ft", 1, 1), "probed");
+    TEST_UNUSED(diag_unmute());
+    TEST_ASSERT_EQ_UINT64(diag_file_count(), (uint64_t)1);
+    end_capture();
+})
+
+// diag_reset clears the file count with the global one.
+TEST(reset_clears_the_file_count, {
+    begin_capture();
+    diag_begin_file();
+    diag_error(loc_make("a.ft", 1, 1), "one");
+    diag_reset();
+    TEST_ASSERT_EQ_UINT64(diag_file_count(), (uint64_t)0);
+    end_capture();
+})
+
 TEST(reset_clears_the_count, {
     begin_capture();
     diag_error(loc_make("a.ft", 1, 1), "one");
@@ -649,6 +691,9 @@ int main(int argc, char** argv) {
     TEST_RUN(note_prints_the_toolchain_format);
     TEST_RUN(error_then_note_are_consecutive_lines);
     TEST_RUN(errors_are_counted_and_notes_are_not);
+    TEST_RUN(the_file_count_starts_at_each_file);
+    TEST_RUN(a_muted_probe_spends_no_budget);
+    TEST_RUN(reset_clears_the_file_count);
     TEST_RUN(reset_clears_the_count);
     TEST_RUN(reset_does_not_touch_captured_text);
     TEST_RUN(positionless_errors_use_line_one_column_one);

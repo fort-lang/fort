@@ -72,6 +72,20 @@ typedef struct {
     str_t msg;
 } diag_record_t;
 
+// The diagnostics one file may report (D14.2): at most twenty, counted
+// across its lexical and its syntax errors together, so a file that is
+// mistyped from end to end costs a reader twenty lines and no more.
+enum { DIAG_MAX_PER_FILE = 20 };
+
+// Starts the budget of the file about to be read: lex_file opens it and
+// parse_module goes on with what the lexer left of it, so the two share one
+// counter (D14.2).
+void diag_begin_file(void);
+
+// The errors reported since diag_begin_file, which is what the budget above
+// is spent from; 0 when no file was begun.
+uint64_t diag_file_count(void);
+
 // Writes `<file>:<line>:<col>: error: <msg>` and counts one error.
 void diag_error(loc_t loc, const char* msg);
 

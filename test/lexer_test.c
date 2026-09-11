@@ -88,7 +88,7 @@ TEST(positions_advance_across_lines, {
 TEST(non_ascii_outside_strings_and_comments_is_an_error, {
     ASSERT_LEX_ERROR("x = \xC3\xA9;",
                      "t.ft:1:5: error: non-ASCII byte outside a string literal or comment\n");
-    TEST_ASSERT_EQ_UINT64(toks.len, (uint64_t)2);
+    ASSERT_TOK_COUNT(0);
     ASSERT_LEX_ERROR("\xEF\xBBx",
                      "t.ft:1:1: error: non-ASCII byte outside a string literal or comment\n");
 })
@@ -112,14 +112,145 @@ TEST(unexpected_control_byte_is_an_error, {
 
 TEST(error_position_counts_lines_columns_and_tabs, {
     ASSERT_LEX_ERROR("a\n\n\t\tb #", "t.ft:3:5: error: unexpected character '#'\n");
-    TEST_ASSERT_EQ_UINT64(toks.len, (uint64_t)2);
+    // The lines before the error keep their tokens, the line of the error
+    // loses them (D14.2).
+    ASSERT_TOK_COUNT(1);
+    ASSERT_TOK_TEXT(0, "a");
 })
 
-TEST(error_keeps_the_tokens_before_it_and_stops, {
+// An error drops the whole line it stands on, the tokens lexed before it
+// included, and the second error of that line is never reached, so one line
+// costs one diagnostic (D14.2).
+TEST(an_error_drops_its_line_and_reports_once, {
     ASSERT_LEX_ERROR("a b # c #", "t.ft:1:5: error: unexpected character '#'\n");
-    TEST_ASSERT_EQ_UINT64(toks.len, (uint64_t)2);
+    ASSERT_TOK_COUNT(0);
+})
+
+// ---- resynchronisation after a lexical error (D14.2) ----------------------
+
+// The four tokens of `x = 1;` on line `l` are all the file lexed: the line
+// every resync test below resumes on.
+#define ASSERT_RESUMED_LINE(l)                                                                     \
+    do {                                                                                           \
+        ASSERT_TOK_COUNT(4);                                                                       \
+        ASSERT_TOK_TEXT(0, "x");                                                                   \
+        ASSERT_TOK_KIND(1, TOK_ASSIGN);                                                            \
+        ASSERT_TOK_KIND(2, TOK_INT);                                                               \
+        ASSERT_TOK_KIND(3, TOK_SEMI);                                                              \
+        ASSERT_TOK_POS(0, (l), 1);                                                                 \
+    } while (0)
+
+// Every kind of lexical error costs its line alone: the line after it is
+// lexed as though nothing had happened (D14.2).
+TEST(every_error_kind_resumes_at_the_next_line, {
+    ASSERT_LEX_ERROR("#\nx = 1;\n", "t.ft:1:1: error: unexpected character '#'\n");
+    ASSERT_RESUMED_LINE(2);
+    ASSERT_LEX_ERROR("\x01\nx = 1;\n", "t.ft:1:1: error: unexpected byte 0x01\n");
+    ASSERT_RESUMED_LINE(2);
+    ASSERT_LEX_ERROR("a \xC3\xA9\nx = 1;\n",
+                     "t.ft:1:3: error: non-ASCII byte outside a string literal or comment\n");
+    ASSERT_RESUMED_LINE(2);
+    ASSERT_LEX_ERROR("/* c */\nx = 1;\n",
+                     "t.ft:1:1: error: block comments are not supported, use '//'\n");
+    ASSERT_RESUMED_LINE(2);
+    ASSERT_LEX_ERROR("i32 const = 1;\nx = 1;\n", "t.ft:1:5: error: 'const' is a reserved word\n");
+    ASSERT_RESUMED_LINE(2);
+})
+
+// The same for the literal forms: a bad number, a bad escape and a literal
+// left open at the end of its line (D2.5, D2.8, D2.9).
+TEST(a_broken_literal_resumes_at_the_next_line, {
+    ASSERT_LEX_ERROR("i32 y = 08;\nx = 1;\n",
+                     "t.ft:1:9: error: decimal literal may not start with '0'\n");
+    ASSERT_RESUMED_LINE(2);
+    ASSERT_LEX_ERROR("i32 y = 0xZ;\nx = 1;\n",
+                     "t.ft:1:9: error: hex literal needs at least one digit\n");
+    ASSERT_RESUMED_LINE(2);
+    ASSERT_LEX_ERROR("char c = '\\q';\nx = 1;\n", "t.ft:1:11: error: unknown escape '\\q'\n");
+    ASSERT_RESUMED_LINE(2);
+    ASSERT_LEX_ERROR("string s = \"abc;\nx = 1;\n",
+                     "t.ft:1:12: error: unterminated string literal\n");
+    ASSERT_RESUMED_LINE(2);
+    ASSERT_LEX_ERROR("char c = 'a\nx = 1;\n", "t.ft:1:10: error: unterminated char literal\n");
+    ASSERT_RESUMED_LINE(2);
+})
+
+// The lines before and after a broken line keep their tokens, so the array
+// covers the file with one line missing (D14.2).
+TEST(an_error_line_stands_between_two_good_lines, {
+    ASSERT_LEX_ERROR("a;\n#\nx = 1;\n", "t.ft:2:1: error: unexpected character '#'\n");
+    ASSERT_TOK_COUNT(6);
     ASSERT_TOK_TEXT(0, "a");
-    ASSERT_TOK_TEXT(1, "b");
+    ASSERT_TOK_KIND(1, TOK_SEMI);
+    ASSERT_TOK_TEXT(2, "x");
+    ASSERT_TOK_POS(2, 3, 1);
+})
+
+// Two errors on two lines are both reported, and the lines between and after
+// them are lexed (D14.2).
+TEST(two_errors_on_two_lines_are_both_reported, {
+    ASSERT_LEX_ERRORS("a #\nb;\nc `\nx = 1;\n",
+                      2,
+                      "t.ft:1:3: error: unexpected character '#'\n"
+                      "t.ft:3:3: error: unexpected character '`'\n");
+    ASSERT_TOK_COUNT(6);
+    ASSERT_TOK_TEXT(0, "b");
+    ASSERT_TOK_TEXT(2, "x");
+    ASSERT_TOK_POS(0, 2, 1);
+    ASSERT_TOK_POS(2, 4, 1);
+})
+
+// An error on the last line, with no newline to resume after, still ends the
+// array in a TOK_EOF at the end of the file (D14.2).
+TEST(an_error_on_the_last_line_still_ends_in_eof, {
+    ASSERT_LEX_ERROR("a;\nb #", "t.ft:2:3: error: unexpected character '#'\n");
+    ASSERT_TOK_COUNT(2);
+    ASSERT_TOK_KIND(2, TOK_EOF);
+    ASSERT_TOK_POS(2, 2, 4);
+    ASSERT_TOK_RANGE(2, 6, 0);
+})
+
+// A file that is one broken line is the TOK_EOF alone, which is what lets the
+// parser run on it (D14.2).
+TEST(a_file_of_one_broken_line_is_only_eof, {
+    ASSERT_LEX_ERROR("#\n", "t.ft:1:1: error: unexpected character '#'\n");
+    ASSERT_TOK_COUNT(0);
+    ASSERT_TOK_POS(0, 2, 1);
+})
+
+// A string literal lexed after a resync is decoded like any other, so the
+// pool is unaffected by the dropped line (D2.9).
+TEST(a_literal_after_a_resync_is_decoded, {
+    ASSERT_LEX_ERROR("s = \"ab;\nt = \"cd\";\n", "t.ft:1:5: error: unterminated string literal\n");
+    ASSERT_TOK_COUNT(4);
+    ASSERT_TOK_TEXT(0, "t");
+    ASSERT_TOK_KIND(2, TOK_STRING);
+    ASSERT_TOK_TEXT(2, "cd");
+})
+
+// A file reports at most twenty diagnostics (D14.2), and lexing goes on
+// silently past the cap, so the tokens of the lines after it are still there.
+TEST(a_file_reports_at_most_twenty_diagnostics, {
+    sb_t src;
+    sb_init(&src);
+    for (uint64_t i = 0; i < 25; i++) {
+        sb_append(&src, "#\n");
+    }
+    sb_append(&src, "x = 1;\n");
+    TEST_ASSERT_FALSE(lex_bytes(sb_cstr(&src), sb_view(&src).len));
+    TEST_ASSERT_EQ_UINT64(diag_count(), (uint64_t)20);
+    ASSERT_RESUMED_LINE(26);
+    sb_free(&src);
+})
+
+// A lone carriage return is whitespace (D2.1), so it ends a line for a resync
+// too: a file written with `\r` alone keeps the tokens after the bad line.
+TEST(a_carriage_return_ends_a_resync, {
+    ASSERT_LEX_ERROR("a #\rx = 1;\r", "t.ft:1:3: error: unexpected character '#'\n");
+    ASSERT_TOK_COUNT(4);
+    ASSERT_TOK_TEXT(0, "x");
+    ASSERT_LEX_ERROR("a #\r\nx = 1;\n", "t.ft:1:3: error: unexpected character '#'\n");
+    ASSERT_RESUMED_LINE(2);
 })
 
 // ---- comments (D2.2) -----------------------------------------------------------
@@ -141,8 +272,7 @@ TEST(line_comment_at_the_end_of_the_file, {
 TEST(block_comment_start_is_an_error, {
     ASSERT_LEX_ERROR("a /* stale */ + 1",
                      "t.ft:1:3: error: block comments are not supported, use '//'\n");
-    TEST_ASSERT_EQ_UINT64(toks.len, (uint64_t)1);
-    ASSERT_TOK_TEXT(0, "a");
+    ASSERT_TOK_COUNT(0);
     ASSERT_LEX_ERROR("/*", "t.ft:1:1: error: block comments are not supported, use '//'\n");
     ASSERT_LEX_ERROR("/**/", "t.ft:1:1: error: block comments are not supported, use '//'\n");
     ASSERT_LEX_ERROR("x/*", "t.ft:1:2: error: block comments are not supported, use '//'\n");
@@ -152,7 +282,7 @@ TEST(block_comment_start_is_an_error, {
 TEST(block_comment_start_is_an_error_wherever_it_stands, {
     ASSERT_LEX_ERROR("// fine\nx = /* y */ 1;\n",
                      "t.ft:2:5: error: block comments are not supported, use '//'\n");
-    TEST_ASSERT_EQ_UINT64(toks.len, (uint64_t)2);
+    ASSERT_TOK_COUNT(0);
     ASSERT_LEX_ERROR("f(/*x*/)", "t.ft:1:3: error: block comments are not supported, use '//'\n");
     ASSERT_LEX_ERROR("a\n\t/*", "t.ft:2:2: error: block comments are not supported, use '//'\n");
 })
@@ -284,7 +414,7 @@ TEST(universe_functions_are_not_keywords, {
 
 TEST(reserved_words_are_errors, {
     ASSERT_LEX_ERROR("i32 const = 1;", "t.ft:1:5: error: 'const' is a reserved word\n");
-    TEST_ASSERT_EQ_UINT64(toks.len, (uint64_t)1);
+    ASSERT_TOK_COUNT(0);
     ASSERT_LEX_ERROR("async", "t.ft:1:1: error: 'async' is a reserved word\n");
     ASSERT_LEX_ERROR("await", "t.ft:1:1: error: 'await' is a reserved word\n");
     ASSERT_LEX_ERROR("match", "t.ft:1:1: error: 'match' is a reserved word\n");
@@ -611,7 +741,16 @@ int main(int argc, char** argv) {
     TEST_RUN(unexpected_printable_character_is_an_error);
     TEST_RUN(unexpected_control_byte_is_an_error);
     TEST_RUN(error_position_counts_lines_columns_and_tabs);
-    TEST_RUN(error_keeps_the_tokens_before_it_and_stops);
+    TEST_RUN(an_error_drops_its_line_and_reports_once);
+    TEST_RUN(every_error_kind_resumes_at_the_next_line);
+    TEST_RUN(a_broken_literal_resumes_at_the_next_line);
+    TEST_RUN(an_error_line_stands_between_two_good_lines);
+    TEST_RUN(two_errors_on_two_lines_are_both_reported);
+    TEST_RUN(an_error_on_the_last_line_still_ends_in_eof);
+    TEST_RUN(a_file_of_one_broken_line_is_only_eof);
+    TEST_RUN(a_literal_after_a_resync_is_decoded);
+    TEST_RUN(a_file_reports_at_most_twenty_diagnostics);
+    TEST_RUN(a_carriage_return_ends_a_resync);
     TEST_RUN(line_comment_runs_to_the_end_of_the_line);
     TEST_RUN(line_comment_at_the_end_of_the_file);
     TEST_RUN(block_comment_start_is_an_error);

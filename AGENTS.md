@@ -196,6 +196,18 @@ A safe(r) C-like systems programming language.
   `continue`), of a marker-only type suffix (`* mut`) or of a trailing `;` leaves it green. Those
   need an explicit `parser_loc_test` assertion on the source text the range covers. Add a new node
   kind to the corpus of the first suite and an assertion to the second.
+- **Lexer recovery**: a lexical error costs the lexer its line, and the parser then recovers from
+  whatever that missing line broke (D14.2) -- nothing when the line was a statement of its own,
+  the enclosing construct when it carried a `{`, a `(` or a declaration header. `lex_file` reports
+  the error, drops every token already lexed on that line, resumes at the start of the next one
+  and keeps returning whether the file was clean, but the array it leaves always covers the rest
+  of the file and ends in TOK_EOF, so `parse_module` runs on it whatever was reported and a caller
+  asks whether the file is usable by comparing `diag_count()`. Dropping the line's earlier tokens
+  is what keeps the parser from reporting a syntax error over the half construct that stood before
+  the error, which the user never typed and cannot annotate: `test/lang/fail/lexical` is the test,
+  since a diagnostic on an unannotated line fails the run (D14.5) and `parser_recovery_test.c`
+  walks the same corpus. The cap of twenty diagnostics is the file's, not the parser's: `lex_file`
+  opens it with `diag_begin_file()` and both report while `diag_file_count() < DIAG_MAX_PER_FILE`.
 - **Parser recovery**: `p->failed` means "unwinding the construct a syntax error hit" (D14.2),
   not "the file is dead". Everything between the report and the next recovery point is silent, so
   a new parse function needs no error handling of its own: return NULL and the recovery point

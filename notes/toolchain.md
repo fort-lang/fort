@@ -181,10 +181,18 @@ Compile-time diagnostics (D14.2) are written to stderr, one per line:
   so an end never appears in a diagnostic line.
 - An error without a position in the file (a missing `main`, an entry base name that is not a
   valid module name) uses `1:1` (D14.2).
-- A lexical error stops the module after one diagnostic. After a syntax error the parser reports
-  it and unwinds the construct it was parsing, reporting nothing more until it reaches a recovery
-  point: the statement loop of a block or of a `case` clause, the clause loop of a `switch`, the
-  field loop of a struct body, or the declaration loop of the module. There it skips what is left
+- A lexical error is reported and lexing resumes at the start of the next line (D14.2): the line
+  the error stands on is dropped whole, the tokens already lexed on it included, so a file reports
+  at most one lexical diagnostic per line and the token stream covers the rest of the file and
+  ends at the end of it. The parser reads those tokens and recovers from what the missing line
+  broke, which costs it nothing when the line was a statement of its own and costs it the
+  enclosing construct when the line carried a `{`, a `(` or a declaration header. The
+  declarations after a half-typed literal therefore still reach the syntax tree and an editor
+  keeps its index of them; a file that reported anything is not checked.
+- After a syntax error the parser reports it and unwinds the construct it was parsing, reporting
+  nothing more until it reaches a recovery point: the statement loop of a block or of a `case`
+  clause, the clause loop of a `switch`, the field loop of a struct body, or the declaration loop
+  of the module. There it skips what is left
   of the failed construct, keeps the skipped tokens as an error node that every later pass skips,
   and parses on, so a file reports one diagnostic for each construct that failed (D14.2). A
   parameter list, an argument list, an import item list and an enum body have no recovery point
@@ -212,9 +220,10 @@ Compile-time diagnostics (D14.2) are written to stderr, one per line:
   mirror holds for the `{` of a function body, a struct body or an enum body, which a complete
   declaration header precedes: a missing one is reported once and the body is read as though it
   were there, instead of the body being read as declarations.
-- The parser reports at most 20 syntax errors per file, and drops an error that starts where the
-  one reported before it started; it parses on silently after either, so the tree covers the
-  whole file whatever was reported (D14.2). Diagnostics come out in the order they are reported,
+- A file reports at most 20 diagnostics, its lexical and its syntax errors counted against one
+  budget, and the parser drops an error that starts where the one reported before it started; the
+  lexer and the parser go on silently after either, so the tokens and the tree cover the whole
+  file whatever was reported (D14.2). Diagnostics come out in the order they are reported,
   which is source order except where a construct is judged after its parts are parsed: the
   features the bootstrap lacks (toolchain.md 7.3) are reported that way, so a `do`-`while` whose
   body has a mistake reports the body's line first. Nothing reads a diagnostic's position

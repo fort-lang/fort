@@ -17,10 +17,6 @@
 // branches and types nest at most this deep (D2.11).
 enum { PARSE_MAX_DEPTH = 256 };
 
-// Syntax errors reported per file; the parse goes on silently after the cap,
-// so the tree still covers the whole file (D14.2).
-enum { PARSE_MAX_ERRORS = 20 };
-
 // The `for` forms grammar.md 7.3 distinguishes after `for (`.
 enum { FOR_PLAIN = 0, FOR_RANGE = 1, FOR_DECL = 2 };
 
@@ -47,12 +43,11 @@ typedef struct {
     uint64_t ntoks;
     uint64_t pos;
     ast_arena_t* arena;
-    uint32_t depth;  // open nested constructs (D2.11)
-    uint32_t spec;   // running speculative parses; no diagnostic while > 0
-    bool failed;     // unwinding the construct a syntax error hit (D14.2)
-    uint32_t errors; // syntax errors reported, capped at PARSE_MAX_ERRORS
-    loc_t last;      // where the last reported error started, for the dedupe
-    sb_t msg;        // the message under construction
+    uint32_t depth; // open nested constructs (D2.11)
+    uint32_t spec;  // running speculative parses; no diagnostic while > 0
+    bool failed;    // unwinding the construct a syntax error hit (D14.2)
+    loc_t last;     // where the last reported error started, for the dedupe
+    sb_t msg;       // the message under construction
 } parser_t;
 
 // The state a speculative parse restores when it rewinds.
@@ -152,15 +147,16 @@ static bool same_start(loc_t a, loc_t b) {
 // later report is silent until a recovery point clears `failed`, so one
 // mistake costs one diagnostic (D14.2). Two more rules keep a broken file
 // readable (D14.2): an error that starts where the one before it started is
-// dropped, and nothing is reported after the twentieth, though the parse goes
-// on. A speculative parse reports nothing, so a rewind leaves the diagnostics
-// untouched.
+// dropped, and nothing is reported after the twentieth diagnostic of the
+// file, the lexer's included since the budget is one (DIAG_MAX_PER_FILE),
+// though the parse goes on. A speculative parse reports nothing, so a rewind
+// leaves the diagnostics untouched.
 static void report(parser_t* p, loc_t loc, const char* text) {
-    if (p->spec == 0 && !p->failed && p->errors < PARSE_MAX_ERRORS &&
-        !(p->errors > 0 && same_start(loc, p->last))) {
+    const uint64_t reported = diag_file_count();
+    if (p->spec == 0 && !p->failed && reported < DIAG_MAX_PER_FILE &&
+        !(reported > 0 && same_start(loc, p->last))) {
         diag_error(loc, text);
         p->last = loc;
-        p->errors++;
     }
     p->failed = true;
 }
@@ -2284,7 +2280,6 @@ ast_node_t* parse_module(const char* file,
     p.depth = 0;
     p.spec = 0;
     p.failed = false;
-    p.errors = 0;
     p.last = loc_make(file, 0, 0);
     sb_init(&p.msg);
 

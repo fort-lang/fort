@@ -591,9 +591,10 @@ static module_t* load_module(module_set_t* set, str_t path, str_t file, loc_t at
     const uint64_t before = diag_count();
     tokvec_t toks;
     tokvec_init(&toks);
-    if (lex_file(m->file.ptr, m->source, &set->pool, &toks)) {
-        m->ast = parse_module(m->file.ptr, toks.items, toks.len, &set->arena);
-    }
+    // A lexical error costs its line and lexing resumes at the next one, so
+    // the tokens cover the whole file and the parser runs either way (D14.2).
+    (void)lex_file(m->file.ptr, m->source, &set->pool, &toks);
+    m->ast = parse_module(m->file.ptr, toks.items, toks.len, &set->arena);
     tokvec_free(&toks);
     m->parsed = diag_count() == before;
     if (!m->parsed) {
@@ -672,13 +673,14 @@ static bool prefix_declares(module_set_t* set, str_t path, str_t file, str_t nam
     tokvec_init(&toks);
     diag_mute();
     const uint64_t before = diag_count();
-    if (lex_file(file.ptr, source, &set->pool, &toks)) {
-        const ast_node_t* probed = parse_module(file.ptr, toks.items, toks.len, &arena);
-        if (probed != NULL && diag_count() == before) {
-            for (uint64_t i = 0; i < ast_len(probed) && !declares; i++) {
-                const ast_node_t* decl = ast_child(probed, i);
-                declares = decl_kind(decl) != BIND_NONE && str_eq(decl->name, name);
-            }
+    // The lexer resynchronises at the next line (D14.2), so the probe parses
+    // the tokens either way; a file that reported anything declares nothing.
+    (void)lex_file(file.ptr, source, &set->pool, &toks);
+    const ast_node_t* probed = parse_module(file.ptr, toks.items, toks.len, &arena);
+    if (probed != NULL && diag_count() == before) {
+        for (uint64_t i = 0; i < ast_len(probed) && !declares; i++) {
+            const ast_node_t* decl = ast_child(probed, i);
+            declares = decl_kind(decl) != BIND_NONE && str_eq(decl->name, name);
         }
     }
     (void)diag_unmute();

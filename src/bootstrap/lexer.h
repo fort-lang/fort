@@ -6,8 +6,10 @@
 // current byte. Every token records its kind, its 1-based line and column
 // (a tab is one column, D14.2) and its byte range in the source; integer and
 // char literals carry their value, identifiers a view into the source and
-// string literals their decoded bytes interned in the caller's pool. The
-// first lexical error stops the file with one diagnostic (D14.2).
+// string literals their decoded bytes interned in the caller's pool. A
+// lexical error is reported and lexing resumes at the start of the next
+// line, so the file is lexed whole and reports at most one lexical
+// diagnostic per line (D14.2).
 #ifndef FORT_LEXER_H
 #define FORT_LEXER_H
 
@@ -173,12 +175,20 @@ void tokvec_reserve(tokvec_t* v, uint64_t extra);
 
 void tokvec_push(tokvec_t* v, token_t t);
 
+// Drops every token after the first `len`; a `len` at or past the end leaves
+// the vector alone.
+void tokvec_truncate(tokvec_t* v, uint64_t len);
+
 // Lexes the whole of `source`, which the caller keeps alive and unchanged
 // for as long as the tokens are used, appending the tokens to `out` ending
 // in TOK_EOF; string literals are decoded into `pool`. `file` names the
-// source in diagnostics. On the first lexical error one diagnostic is
-// reported (D14.2), the file is abandoned, and false is returned with `out`
-// holding the tokens before the error and no TOK_EOF.
+// source in diagnostics. Returns whether the file was clean. A lexical
+// error is reported and lexing resumes at the start of the next line
+// (D14.2), dropping the whole of that line and reporting at most one
+// diagnostic per line, so `out` covers the rest of the file and ends in
+// TOK_EOF either way and the tokens can be parsed. It opens the file's
+// budget of DIAG_MAX_PER_FILE diagnostics, which the parser then spends what
+// is left of.
 bool lex_file(const char* file, str_t source, str_pool_t* pool, tokvec_t* out);
 
 #endif

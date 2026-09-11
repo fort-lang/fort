@@ -65,8 +65,9 @@ static inline void parse_done(void) {
     pt_ready = false;
 }
 
-// Lexes and parses `src` as t.ft with the diagnostics captured; NULL when the
-// lexer or the parser reported one. The previous parse's tokens, strings and
+// Lexes and parses `src` as t.ft with the diagnostics captured; never NULL,
+// since a lexical error resynchronises at the next line and still leaves a
+// complete token array (D14.2). The previous parse's tokens, strings and
 // nodes are released first, so every tree lives until the next call.
 static inline ast_node_t* parse_text(const char* src) {
     pt_init();
@@ -77,9 +78,9 @@ static inline ast_node_t* parse_text(const char* src) {
     diag_reset();
     sb_clear(&pt_text);
     sb_append(&pt_text, src);
-    if (!lex_file("t.ft", str_from_cstr(src), &pt_pool, &pt_toks)) {
-        return NULL;
-    }
+    // A lexical error is reported and lexing resumes at the next line, so the
+    // tokens cover the whole file and the parser runs on them (D14.2).
+    (void)lex_file("t.ft", str_from_cstr(src), &pt_pool, &pt_toks);
     return parse_module("t.ft", pt_toks.items, pt_toks.len, &pt_arena);
 }
 

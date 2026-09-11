@@ -64,15 +64,17 @@
 #include "ast.h"
 #include "lexer.h"
 
-// Parses the tokens of one file, which must end in TOK_EOF as lex_file
-// leaves them, into an AST_MODULE whose list holds the imports then the
-// declarations in source order (D9.3). `file` names the source in
-// diagnostics. The nodes come from `arena` and the names in them are views
-// into the source and into the pool the tokens were lexed with, so both must
-// outlive the tree. The result is never NULL: a file with syntax errors
-// yields the tree of everything that parsed, with an AST_ERROR node over each
-// skipped region, so a caller asks whether the file parsed by comparing
-// diag_count() before and after (D14.2).
+// Parses the tokens of one file into an AST_MODULE whose list holds the
+// imports then the declarations in source order (D9.3). The tokens are the
+// ones lex_file produced: they end in TOK_EOF, and the file's budget of
+// diagnostics (DIAG_MAX_PER_FILE) is the one lex_file opened, so the syntax
+// errors reported here are capped together with the lexical ones (D14.2).
+// `file` names the source in diagnostics. The nodes come from `arena` and
+// the names in them are views into the source and into the pool the tokens
+// were lexed with, so both must outlive the tree. The result is never NULL:
+// a file with syntax errors yields the tree of everything that parsed, with
+// an AST_ERROR node over each skipped region, so a caller asks whether the
+// file parsed by comparing diag_count() before and after (D14.2).
 ast_node_t* parse_module(const char* file, const token_t* toks, uint64_t ntoks, ast_arena_t* arena);
 
 #endif

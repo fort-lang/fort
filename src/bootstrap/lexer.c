@@ -286,6 +286,12 @@ void tokvec_push(tokvec_t* v, token_t t) {
     v->len++;
 }
 
+void tokvec_truncate(tokvec_t* v, uint64_t len) {
+    if (len < v->len) {
+        v->len = len;
+    }
+}
+
 // ---- byte classes -----------------------------------------------------------
 
 // Byte values the classification needs by name.
@@ -358,8 +364,9 @@ typedef struct {
     uint32_t col;  // column of the next byte
     str_pool_t* pool;
     tokvec_t* out;
-    sb_t buf; // the decoded bytes of the string literal being lexed
-    sb_t msg; // the diagnostic being built
+    sb_t buf;           // the decoded bytes of the string literal being lexed
+    sb_t msg;           // the diagnostic being built
+    uint64_t line_base; // tokens `out` held when the current line began
 } lexer_t;
 
 // The byte `ahead` bytes after the next one, or -1 past the end.
@@ -382,11 +389,18 @@ static bool at_end(const lexer_t* lx) {
 // Consumes the next byte, which exists, and tracks the position: a newline
 // starts the next line, every other byte (a tab too) is one column.
 static void advance(lexer_t* lx) {
-    if (peek(lx) == BYTE_LF) {
+    const int c = peek(lx);
+    if (c == BYTE_LF) {
         lx->line++;
         lx->col = 1;
     } else {
         lx->col++;
+    }
+    // Either line break ends the tokens a resync may drop: what stands before
+    // it was lexed on a line already past (D14.2). A lone `\r` is whitespace
+    // like any other (D2.1), so it ends a line here without numbering one.
+    if (c == BYTE_LF || c == BYTE_CR) {
+        lx->line_base = lx->out->len;
     }
     lx->pos++;
 }
@@ -396,9 +410,15 @@ static loc_t here(const lexer_t* lx) {
 }
 
 // Reports the message built in lx->msg at `at`; always false so that a
-// lexing function can `return fail(lx, at)`.
+// lexing function can `return fail(lx, at)`. A file reports at most
+// DIAG_MAX_PER_FILE diagnostics, the parser's share of the budget included,
+// and lexing goes on silently past the cap so that the tokens still cover the
+// file (D14.2).
 static bool fail(lexer_t* lx, loc_t at) {
-    diag_error(at, msg_end(&lx->msg));
+    const char* text = msg_end(&lx->msg);
+    if (diag_file_count() < DIAG_MAX_PER_FILE) {
+        diag_error(at, text);
+    }
     return false;
 }
 
@@ -977,22 +997,47 @@ static bool lex_token(lexer_t* lx) {
     return lex_operator(lx);
 }
 
+// Resumes at the start of the next line after a lexical error: the whole of
+// the line the error was reported on is dropped, the tokens already lexed on
+// it included, and lexing goes on at the next line, so a file reports at most
+// one lexical diagnostic per line and the parser is left to recover from a
+// missing line rather than from the half of a construct that stood before the
+// error (D14.2). No token spans lines (D2.9), so the tokens to drop are the
+// ones pushed since the line began.
+static void resync(lexer_t* lx) {
+    tokvec_truncate(lx->out, lx->line_base);
+    while (!at_end(lx) && peek(lx) != BYTE_LF && peek(lx) != BYTE_CR) {
+        advance(lx);
+    }
+    if (!at_end(lx)) {
+        advance(lx);
+    }
+}
+
+// Lexes every line of the file, returning whether it was clean: a lexical
+// error is reported and lexing resumes at the start of the next line
+// (D14.2), so the token array covers the whole file and ends in TOK_EOF
+// whether or not an error was reported.
 static bool lex_all(lexer_t* lx) {
     if (peek_at(lx, 0) == BOM_0 && peek_at(lx, 1) == BOM_1 && peek_at(lx, 2) == BOM_2) {
         lx->pos = BOM_LEN;
     }
+    bool ok = true;
     for (;;) {
         if (!skip_blanks(lx)) {
-            return false;
+            ok = false;
+            resync(lx);
+            continue;
         }
         if (at_end(lx)) {
             token_t eof = make_token(lx, TOK_EOF, lx->pos, here(lx));
             eof.text = str_from_range(NULL, 0);
             tokvec_push(lx->out, eof);
-            return true;
+            return ok;
         }
         if (!lex_token(lx)) {
-            return false;
+            ok = false;
+            resync(lx);
         }
     }
 }
@@ -1006,6 +1051,10 @@ bool lex_file(const char* file, str_t source, str_pool_t* pool, tokvec_t* out) {
     lx.col = 1;
     lx.pool = pool;
     lx.out = out;
+    lx.line_base = out->len;
+    // The file's budget of diagnostics opens here and the parser spends what
+    // the lexer leaves of it (D14.2).
+    diag_begin_file();
     sb_init(&lx.buf);
     sb_init(&lx.msg);
     const bool ok = lex_all(&lx);

@@ -324,15 +324,28 @@ TEST(non_ascii_byte_in_a_char_literal, {
 
 TEST(control_character_in_a_char_literal, {
     ASSERT_LEX_ERROR("'\t'", "t.ft:1:2: error: control character in char literal; use an escape\n");
-    ASSERT_LEX_ERROR("'\r'", "t.ft:1:2: error: control character in char literal; use an escape\n");
+    // A lone `\r` is whitespace (D2.1), so a resync ends the line there and
+    // the `'` left after it opens a literal of its own.
+    ASSERT_LEX_ERRORS("'\r'",
+                      2,
+                      "t.ft:1:2: error: control character in char literal; use an escape\n"
+                      "t.ft:1:3: error: unterminated char literal\n");
     ASSERT_LEX_ERROR("'\x7F'",
                      "t.ft:1:2: error: control character in char literal; use an escape\n");
 })
 
 TEST(unterminated_char_literal, {
     ASSERT_LEX_ERROR("'a", "t.ft:1:1: error: unterminated char literal\n");
-    ASSERT_LEX_ERROR("x = 'a\n'", "t.ft:1:5: error: unterminated char literal\n");
-    ASSERT_LEX_ERROR("'\n'", "t.ft:1:1: error: unterminated char literal\n");
+    // The `'` left on the next line is a second unterminated literal, on its
+    // own line, so it is reported as well (D14.2).
+    ASSERT_LEX_ERRORS("x = 'a\n'",
+                      2,
+                      "t.ft:1:5: error: unterminated char literal\n"
+                      "t.ft:2:1: error: unterminated char literal\n");
+    ASSERT_LEX_ERRORS("'\n'",
+                      2,
+                      "t.ft:1:1: error: unterminated char literal\n"
+                      "t.ft:2:1: error: unterminated char literal\n");
     ASSERT_LEX_ERROR("'", "t.ft:1:1: error: unterminated char literal\n");
     ASSERT_LEX_ERROR("'\\", "t.ft:1:1: error: unterminated char literal\n");
     ASSERT_LEX_ERROR("'\\'", "t.ft:1:1: error: unterminated char literal\n");
@@ -400,8 +413,16 @@ TEST(string_literal_may_hold_comment_markers_and_quotes, {
 })
 
 TEST(raw_newline_in_a_string_is_an_error, {
-    ASSERT_LEX_ERROR("s = \"ab\ncd\"", "t.ft:1:5: error: unterminated string literal\n");
-    ASSERT_LEX_ERROR("\"\n\"", "t.ft:1:1: error: unterminated string literal\n");
+    // The rest of the literal stands on the next line, where its closing
+    // quote opens an unterminated literal of its own (D14.2).
+    ASSERT_LEX_ERRORS("s = \"ab\ncd\"",
+                      2,
+                      "t.ft:1:5: error: unterminated string literal\n"
+                      "t.ft:2:3: error: unterminated string literal\n");
+    ASSERT_LEX_ERRORS("\"\n\"",
+                      2,
+                      "t.ft:1:1: error: unterminated string literal\n"
+                      "t.ft:2:1: error: unterminated string literal\n");
 })
 
 TEST(unterminated_string_literal, {
@@ -409,7 +430,10 @@ TEST(unterminated_string_literal, {
     ASSERT_LEX_ERROR("\"", "t.ft:1:1: error: unterminated string literal\n");
     ASSERT_LEX_ERROR("\"abc\\\"", "t.ft:1:1: error: unterminated string literal\n");
     ASSERT_LEX_ERROR("\"abc\\", "t.ft:1:1: error: unterminated string literal\n");
-    ASSERT_LEX_ERROR("\"abc\\\nx\"", "t.ft:1:1: error: unterminated string literal\n");
+    ASSERT_LEX_ERRORS("\"abc\\\nx\"",
+                      2,
+                      "t.ft:1:1: error: unterminated string literal\n"
+                      "t.ft:2:2: error: unterminated string literal\n");
 })
 
 TEST(escape_errors_inside_a_string, {

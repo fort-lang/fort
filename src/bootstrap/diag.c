@@ -17,10 +17,12 @@ typedef struct {
     uint64_t cap;              // records allocated
     str_pool_t pool;           // owns the copy of every recorded message
     uint64_t errors;           // errors reported since the last diag_reset
+    uint64_t file_errors;      // errors reported since the last diag_begin_file
     bool text_off;             // whether the text line is suppressed
     sb_t* capture;             // where the lines go, or stderr when NULL
     uint64_t mute_depth;       // open diag_mute calls
     uint64_t mute_saved_count; // the error count the outermost mute saw
+    uint64_t mute_saved_file;  // the file error count the outermost mute saw
 } diag_sink_t;
 
 static diag_sink_t sink;
@@ -135,10 +137,21 @@ static void record_append(loc_t loc, diag_severity_t severity, const char* msg) 
     sink.len++;
 }
 
+// A file's budget is spent by its lexer and by its parser alike (D14.2), so
+// the count they cap on is this one.
+void diag_begin_file(void) {
+    sink.file_errors = 0;
+}
+
+uint64_t diag_file_count(void) {
+    return sink.file_errors;
+}
+
 void diag_error(loc_t loc, const char* msg) {
     diag_write(loc, "error", msg);
     record_append(loc, DIAG_ERROR, msg);
     sink.errors++;
+    sink.file_errors++;
 }
 
 // A note belongs to the error before it and is not counted (D14.2).
@@ -153,6 +166,7 @@ uint64_t diag_count(void) {
 
 void diag_reset(void) {
     sink.errors = 0;
+    sink.file_errors = 0;
     mem_free(sink.records);
     sink.records = NULL;
     sink.len = 0;
@@ -171,6 +185,7 @@ void diag_set_text(bool on) {
 void diag_mute(void) {
     if (sink.mute_depth == 0) {
         sink.mute_saved_count = sink.errors;
+        sink.mute_saved_file = sink.file_errors;
     }
     sink.mute_depth++;
 }
@@ -185,6 +200,8 @@ uint64_t diag_unmute(void) {
     }
     const uint64_t suppressed = sink.errors - sink.mute_saved_count;
     sink.errors = sink.mute_saved_count;
+    // The probe's own file spent no budget of the file that asked for it.
+    sink.file_errors = sink.mute_saved_file;
     return suppressed;
 }
 

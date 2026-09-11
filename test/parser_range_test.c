@@ -282,8 +282,8 @@ static void check_node(const ast_node_t* n, const ast_node_t* parent) {
 
 // Parses `src` and reports every invariant it breaks, the empty string when
 // it breaks none; a source that yields no tree is reported as such, since the
-// parser returns one whatever it reported (D14.2) and only a lexical error
-// stops it, which no source here has.
+// parser returns one whatever it reported and a lexical error resynchronises
+// at the next line rather than stopping the file (D14.2).
 static const char* violations(const char* src) {
     const ast_node_t* mod = parse_text(src);
     sb_clear(&report);

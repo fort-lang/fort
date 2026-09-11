@@ -81,13 +81,38 @@ static inline bool text_is(uint64_t i, const char* expected) {
     } while (0)
 
 // lex() failed with exactly the diagnostic `line` (with its newline) and
-// no TOK_EOF.
+// still lexed the file whole, so the tokens end in TOK_EOF (D14.2).
 #define ASSERT_LEX_ERROR(src, line)                                                                \
     do {                                                                                           \
         TEST_ASSERT_FALSE(lex(src));                                                               \
         TEST_ASSERT_EQ_STR(captured(), line);                                                      \
         TEST_ASSERT_EQ_UINT64(diag_count(), (uint64_t)1);                                          \
-        TEST_ASSERT_TRUE(toks.len == 0 || tok(toks.len - 1)->kind != TOK_EOF);                     \
+        ASSERT_ENDS_IN_EOF();                                                                      \
+    } while (0)
+
+// lex() failed with exactly the diagnostics `lines` (each with its newline),
+// `n` of them, one per line of the source at most (D14.2).
+#define ASSERT_LEX_ERRORS(src, n, lines)                                                           \
+    do {                                                                                           \
+        TEST_ASSERT_FALSE(lex(src));                                                               \
+        TEST_ASSERT_EQ_STR(captured(), lines);                                                     \
+        TEST_ASSERT_EQ_UINT64(diag_count(), (uint64_t)(n));                                        \
+        ASSERT_ENDS_IN_EOF();                                                                      \
+    } while (0)
+
+// The tokens of the last lex() end in TOK_EOF.
+#define ASSERT_ENDS_IN_EOF()                                                                       \
+    do {                                                                                           \
+        TEST_ASSERT_TRUE(toks.len > 0);                                                            \
+        ASSERT_TOK_KIND(toks.len - 1, TOK_EOF);                                                    \
+    } while (0)
+
+// The last lex() left `n` tokens before its TOK_EOF: what a resync kept
+// (D14.2).
+#define ASSERT_TOK_COUNT(n)                                                                        \
+    do {                                                                                           \
+        ASSERT_ENDS_IN_EOF();                                                                      \
+        TEST_ASSERT_EQ_UINT64(toks.len, (uint64_t)(n) + 1);                                        \
     } while (0)
 
 // lex() succeeded with `n` tokens before the TOK_EOF and no diagnostic.

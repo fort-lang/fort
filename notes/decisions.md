@@ -772,10 +772,16 @@ Owner: `toolchain.md`.
   `--target` and `-Xcc` did not exist.
 - **D14.2** Diagnostics: `<file>:<line>:<col>: error: <message>` on stderr, one per line,
   optionally followed by `note:` lines. Errors without a position in the file (a missing
-  `main`) use `1:1`. A lexical error stops the compilation of that file after one diagnostic.
+  `main`) use `1:1`. A lexical error is reported and lexing resumes at the start of the next
+  line, dropping the line it stands on with the tokens already lexed on it, so a file reports at
+  most one lexical diagnostic per line and its token stream still covers the rest of the file and
+  ends at the end of it; the file is parsed from those tokens, so an editor keeps the declarations
+  after a half-typed literal, and the parser recovers from whatever construct the missing line
+  broke. A file with a lexical error is not checked.
   After a syntax error the parser reports it, skips to the next statement, clause, field or
   declaration boundary and parses on, so a file reports one diagnostic for each construct that
-  failed and not only for the first: at most 20 per file, never two in a row at one position,
+  failed and not only for the first: at most 20 per file counted across its lexical and its
+  syntax errors together, never two in a row at one position,
   and none for a construct whose tokens an earlier skip had already dropped. The skipped tokens
   are held in the tree as an error node that every later pass skips. A file with a syntax error
   is parsed whole and not checked. Every module of the closure is checked in dependency order; a
@@ -786,7 +792,9 @@ Owner: `toolchain.md`.
   shadowing error at the inner declaration ("'n' shadows a parameter", "'n' shadows an
   enclosing local"). The compiler never emits warnings in v1. Amended
   2026-09-10 with D20: a syntax error stopped the file after one diagnostic with no recovery,
-  and only the semantic errors of the first module that had any were reported.
+  and only the semantic errors of the first module that had any were reported. Amended
+  2026-09-10 with T-062: a lexical error stopped the compilation of the file after one
+  diagnostic, the file was never parsed, and the cap of 20 counted syntax errors alone.
 - **D14.3** Generated code is LLVM IR (D19.1), compiled and linked by `--cc` in one invocation,
   `<cc> --target=<triple> -O1 -fPIE -pie -Wno-override-module -o <out> <entry>.ll
   <std-dir>/fort_rt.o [-l<lib>...] [<-Xcc args>...]`, `-O2` in place of `-O1` under `--release`

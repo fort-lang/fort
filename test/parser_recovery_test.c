@@ -515,15 +515,34 @@ TEST(an_error_node_covers_the_skipped_region_and_has_no_children, {
 
 // ---- the boundaries ------------------------------------------------------
 
-// A lexical error still stops the file after one diagnostic: recovery is the
-// parser's, the lexer is unchanged (D14.2), so the parser never runs and the
-// mistakes after the bad literal are not reported.
-TEST(a_lexical_error_still_stops_the_file, {
-    TEST_ASSERT_NULL(parse_text("fn i32 main() {\n"
-                                "    i32 a = 0xZ;\n"
-                                "    i32 b = ;\n"
-                                "}\n"));
-    TEST_ASSERT_EQ_STR(parse_diags(), "t.ft:2:13: error: hex literal needs at least one digit\n");
+// A lexical error costs its line and lexing resumes at the next one (D14.2),
+// so the parser runs on the rest of the file and reports the mistake after
+// the bad literal; the line the lexer dropped yields no syntax error, since
+// none of its tokens reached the parser.
+TEST(a_lexical_error_costs_its_line_and_the_parser_sees_the_rest, {
+    TEST_ASSERT_EQ_STR(parse_fails("fn i32 main() {\n"
+                                   "    i32 a = 0xZ;\n"
+                                   "    i32 b = ;\n"
+                                   "}\n"),
+                       "t.ft:2:13: error: hex literal needs at least one digit\n"
+                       "t.ft:3:13: error: expected an expression, found ';'\n");
+})
+
+// An unclosed string literal on line 3 leaves the declarations after it
+// parsed: what an editor needs while a literal is half typed (D14.2).
+TEST(a_file_with_an_unclosed_string_still_parses_the_lines_after_it, {
+    const ast_node_t* mod = parse_text("fn i32 one() {\n"
+                                       "    string s = \"abc;\n"
+                                       "    return 1;\n"
+                                       "}\n"
+                                       "fn i32 two() {\n"
+                                       "    return 2;\n"
+                                       "}\n");
+    TEST_ASSERT_EQ_UINT64(diag_count(), (uint64_t)1);
+    TEST_ASSERT_EQ_STR(parse_diags(), "t.ft:2:16: error: unterminated string literal\n");
+    TEST_ASSERT_EQ_STR(dumped(mod),
+                       "(module (fn (type (prim i32)) one (params) (block (return (int 1)))) "
+                       "(fn (type (prim i32)) two (params) (block (return (int 2)))))");
 })
 
 // The empty file and the file that is one stray token: the first reports
@@ -566,6 +585,45 @@ TEST(the_cap_is_twenty_errors, {
     TEST_ASSERT_EQ_UINT64(diag_lines(sb_cstr(&src)), (uint64_t)20);
     sb_append(&src, "i32 a = ;\n");
     TEST_ASSERT_EQ_UINT64(diag_lines(sb_cstr(&src)), (uint64_t)20);
+    sb_free(&src);
+})
+
+// The budget of twenty is the file's, not the parser's: what the lexer
+// reported is already spent when the parse begins (D14.2).
+TEST(the_cap_is_shared_with_the_lexer, {
+    sb_t src;
+    sb_init(&src);
+    for (uint64_t i = 0; i < 15; i++) {
+        sb_append(&src, "#\n");         // a lexical error, one per line
+        sb_append(&src, "i32 a = ;\n"); // a syntax error
+    }
+    TEST_ASSERT_EQ_UINT64(diag_lines(sb_cstr(&src)), (uint64_t)20);
+    // The lexer runs first and spends fifteen of the twenty, so the parser
+    // reports five of its fifteen.
+    const char* text = parse_fails(sb_cstr(&src));
+    uint64_t lexical = 0;
+    for (uint64_t i = 0; text[i] != '\0'; i++) {
+        if (text[i] == '#') {
+            lexical++;
+        }
+    }
+    TEST_ASSERT_EQ_UINT64(lexical, (uint64_t)15);
+    sb_free(&src);
+})
+
+// Past the cap the file is still lexed and parsed whole, so the tree covers
+// the declarations after the twentieth diagnostic (D14.2).
+TEST(a_declaration_after_the_cap_is_still_in_the_tree, {
+    sb_t src;
+    sb_init(&src);
+    for (uint64_t i = 0; i < 25; i++) {
+        sb_append(&src, "#\n");
+    }
+    sb_append(&src, "i32 last = 1;\n");
+    TEST_ASSERT_EQ_UINT64(diag_lines(sb_cstr(&src)), (uint64_t)20);
+    const ast_node_t* mod = parse_text(sb_cstr(&src));
+    TEST_ASSERT_EQ_UINT64(ast_len(mod), (uint64_t)1);
+    TEST_ASSERT_EQ_STR(dumped(ast_child(mod, 0)), "(var last (type (prim i32)) (int 1))");
     sb_free(&src);
 })
 
@@ -684,7 +742,7 @@ TEST(an_unclosed_bracket_costs_its_construct_and_no_more, {
 
 // ---- the fail corpus (D14.4) ----------------------------------------------
 
-enum { CORPUS_PATH_CAP = 512, CORPUS_CHUNK = 4096, CORPUS_FILES = 112 };
+enum { CORPUS_PATH_CAP = 512, CORPUS_CHUNK = 4096, CORPUS_FILES = 116 };
 
 // The files walked, the source of the one being read, and the lines that were
 // reported on without an annotation, one per line.
@@ -900,10 +958,13 @@ int main(int argc, char** argv) {
     TEST_RUN(an_error_under_a_speculation_is_reported_once);
     TEST_RUN(a_speculation_during_an_unwind_leaves_no_trace);
     TEST_RUN(the_twenty_first_error_is_not_reported);
+    TEST_RUN(the_cap_is_shared_with_the_lexer);
+    TEST_RUN(a_declaration_after_the_cap_is_still_in_the_tree);
     TEST_RUN(two_errors_at_one_position_are_reported_once);
     TEST_RUN(a_file_with_errors_still_yields_a_tree);
     TEST_RUN(an_error_node_covers_the_skipped_region_and_has_no_children);
-    TEST_RUN(a_lexical_error_still_stops_the_file);
+    TEST_RUN(a_lexical_error_costs_its_line_and_the_parser_sees_the_rest);
+    TEST_RUN(a_file_with_an_unclosed_string_still_parses_the_lines_after_it);
     TEST_RUN(an_empty_file_and_a_one_token_file);
     TEST_RUN(nesting_past_the_limit_is_reported_once);
     TEST_RUN(the_cap_is_twenty_errors);
