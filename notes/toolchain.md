@@ -105,8 +105,10 @@ temporary directory for the intermediate IR file (D19.1).
 
 Compilation is whole-program (D9.10):
 
-1. Read the entry file and derive its module path and root (exit 2 if unreadable, 1 if the base
-   name is not a valid module name).
+1. Read the entry file and derive its module path and root (exit 2 if unreadable). The base name
+   need not be an identifier: the entry file is named on the command line rather than reached by
+   an import path, so `007_case.ft` is the module `007_case` and nothing can import it (D9.1 as
+   amended).
 2. Parse it; resolve each import (module-system.md 2 and 3); parse each newly reached module
    until the closure is complete; reject cycles and duplicate identities (exit 1).
 3. Check every module in dependency order, imported modules first (exit 1).

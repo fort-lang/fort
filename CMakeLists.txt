@@ -143,8 +143,9 @@ endforeach()
 
 # The driver tests spawn test/fake_cc.sh as their --cc: it records the command
 # line the driver built (D14.3) instead of compiling it, so they need its path;
-# the check suite needs it to assert that `--check` spawns nothing (D20.1).
-foreach(driver_suite driver_test driver_check_test)
+# the check suite needs it to assert that `--check` spawns nothing (D20.1) and
+# the conformance suite to assert the same of the runs that stop before it.
+foreach(driver_suite driver_test driver_check_test driver_conformance_test)
     if(TARGET "${driver_suite}")
         target_compile_definitions("${driver_suite}"
             PRIVATE FORT_FAKE_CC="${FORT_TEST_DIR}/fake_cc.sh")

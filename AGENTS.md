@@ -131,11 +131,14 @@ A safe(r) C-like systems programming language.
   environment, `cmake/sanitizers.cmake`) because the runtime's out-of-memory path is tested with
   an impossible allocation; run a suite by hand under those presets with the same variable.
 - A test that must observe a program the compiler spawns uses a fake one: `test/fake_cc.sh` is
-  the `--cc` of `driver_test`, it writes its own path and every argument, one per line, into
+  the `--cc` of the driver suites, it writes its own path and every argument, one per line, into
   `$FORT_FAKE_CC_LOG` and exits with `$FORT_FAKE_CC_STATUS`, so the whole clang command line is
   one string comparison and the failure path is a variable away. CMake passes its path as
-  `FORT_FAKE_CC` to that one target (a `target_compile_definitions` after the glob loop), since
-  a unit test has no working directory it can rely on.
+  `FORT_FAKE_CC` to the suites that name it, and to no others (a `target_compile_definitions`
+  over a list after the glob loop: `driver_test` asserts the command line, `driver_check_test`
+  that `--check` spawns nothing and `driver_conformance_test` that the runs which stop before
+  `--cc` spawn nothing), since a unit test has no working directory it can rely on. A new suite
+  that needs it is added to that list, not left to inherit it.
 - The TextMate grammar is checked by `test/highlight_test.py` (ctest `highlight_selftest`, label
   `unit`, run from `test/`): it reads the D2.4 keyword lists and the D2.10 operator list out of
   `notes/decisions.md` and the same sets out of the grammar, so the two cannot drift. That only
