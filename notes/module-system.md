@@ -35,7 +35,10 @@ The last segment is the short name, which an import binds by default.
 
 The entry file is the one `.ft` file named on the `fort` command line (D14.1). Its module path is
 its base name without `.ft`: `main.ft` is the module `main`, `src/app.ft` is the module `app`.
-The base name must satisfy the segment rule of section 1.
+The base name need not satisfy the segment rule of section 1 (D9.1): the entry file is named on the
+command line, not reached by an import path, so `007_case.ft` and `my-app.ft` are legal entries
+whose modules are `007_case` and `my-app`. A module whose name is not an identifier cannot be
+imported, since no import path spells it.
 
 Search roots, in order (D9.2):
 
@@ -663,7 +666,6 @@ All diagnostics follow D14.2: `<file>:<line>:<col>: error: <message>`, optionall
 | module binding as a value or type  | `'io' is a module, not a value` (or `not a type`)        |
 | `m.x` with no such declaration     | `module 'std::io' has no declaration named 'x'`          |
 | entry module without a valid `main`| `entry module 'main' must define 'fn i32 main()'`        |
-| entry base name not an identifier  | `'my-app' is not a valid module name`                    |
 | aggregate in an extern signature   | `extern signature cannot use type 'i32@'`                |
 
 Notes accompany some of these: "not found" lists `note: looked for <path>` once per root and

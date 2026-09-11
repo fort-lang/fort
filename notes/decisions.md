@@ -518,7 +518,12 @@ Owner: `module-system.md`.
 - **D9.1** One module per file; the module path is the file path relative to a search root, with
   `::` separating segments and `.ft` dropped: `std::io` is `<std>/io.ft`, `util::strings` is
   `<root>/util/strings.ft`. Every segment must be an identifier that is not a keyword, so the
-  earlier `std::string` is `std::str`.
+  earlier `std::string` is `std::str`. The entry file is the exception: it is named on the command
+  line rather than reached by an import path, so its base name need not be an identifier, and a name
+  that is not one simply cannot be imported by anything (`007_case.ft` is the module `007_case`,
+  whose name reaches the generated module only inside a quoted symbol, D9.7). Amended 2026-09-10:
+  module-system.md required the entry base name to be a segment, which would have rejected every
+  test file D14.4 names `NNN_name.ft`.
 - **D9.2** Search roots, in order: the directory containing the entry file; each `-I` directory;
   the standard library directory. The first segment `std` is reserved for the standard library
   directory. The current working directory is never searched. Import paths are root-relative
