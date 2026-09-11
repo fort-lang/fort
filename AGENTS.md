@@ -15,6 +15,9 @@ A safe(r) C-like systems programming language.
   `src/fort/`: the compiler written in fort (stage2 and stage3). `runtime/`: the C runtime
   linked into every program. `std/`: the standard library in fort. `tools/`: `vm`,
   `provision.sh`, `lines.py`, `bootstrap.sh`.
+- `editors/`: `editors/vscode/` is the VS Code extension (`package.json`,
+  `language-configuration.json`, `syntaxes/fort.tmLanguage.json`) and `editors/README.md` is its
+  install guide and its list of limitations.
 - `CMakeLists.txt`, `CMakePresets.json` and `cmake/sanitizers.cmake` are the build;
   `.clang-format` and `.clang-tidy` (clang 18) are the C11 lint configuration.
 - `.tickets/` (gitignored, main checkout only) is the ticket board; `.claude/agents/` holds the
@@ -122,6 +125,16 @@ A safe(r) C-like systems programming language.
   one string comparison and the failure path is a variable away. CMake passes its path as
   `FORT_FAKE_CC` to that one target (a `target_compile_definitions` after the glob loop), since
   a unit test has no working directory it can rely on.
+- The TextMate grammar is checked by `test/highlight_test.py` (ctest `highlight_selftest`, label
+  `unit`, run from `test/`): it reads the D2.4 keyword lists and the D2.10 operator list out of
+  `notes/decisions.md` and the same sets out of the grammar, so the two cannot drift. That only
+  works while the rules keep their canonical shapes, `\b(?:a|b)\b` for keywords and `(?:\+|-)`
+  for operators; a rule whose scope is in a keyword or operator family but whose pattern matches
+  neither shape fails the test. Its other half is a small TextMate engine that asserts the scopes
+  of `test/highlight/scopes.ft` (`//^` lines: alternating text and scope fields naming what the
+  line above must produce), of the D5.3 and D17.2 marker tables, and of every `test/lang/run`
+  test, which must tokenize with no `invalid.` scope and no unscoped character, so a new language
+  test that the grammar mishandles fails here.
 - The cross pipeline: `test/ir/*.ll` are hand-written LLVM 18 modules in the form
   `notes/toolchain.md` 6 specifies (D19.1); its two worked examples are these files byte for
   byte, so a change to one changes the other. `test/pipeline_test.sh <build-dir>`
