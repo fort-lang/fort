@@ -37,6 +37,7 @@
 #include "containers.h"
 #include "diag.h"
 #include "str.h"
+#include "sym.h"
 #include "types.h"
 
 // The productions of grammar.md, in its order: module and declarations,
@@ -154,7 +155,7 @@ struct ast_node {
 
     // ---- annotation slots, zero after parsing ----
     const type_t* type; // the checked type of an expression or type node
-    const void* sym;    // the declaration a name resolves to, opaque here
+    const sym_t* sym;   // what this node's own name token denotes (sym.h)
     uint64_t aux;       // a constant value, an offset or a slot index
     uint32_t ann;       // the annotation bits of the pass that set them
 };
