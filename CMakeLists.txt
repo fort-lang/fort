@@ -219,6 +219,16 @@ set_tests_properties(check_comments_selftest PROPERTIES
     LABELS unit
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+# The unit tests of tools/lines.py (label unit): the glob matcher, which the
+# guest's Python 3.12 cannot delegate to pathlib, and the --since mode that
+# measures a branch's own diff (AGENTS.md, Build and test).
+add_test(NAME lines_selftest
+    COMMAND "${FORT_PYTHON3}" -m unittest lines_test
+    WORKING_DIRECTORY "${FORT_TEST_DIR}")
+set_tests_properties(lines_selftest PROPERTIES
+    LABELS unit
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 # The unit tests of the TextMate grammar in editors/vscode (label unit): they
 # compare its keyword and operator lists with D2.4 and D2.10 and assert the
 # scopes it gives the fixtures in test/highlight.

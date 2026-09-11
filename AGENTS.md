@@ -83,7 +83,10 @@ A safe(r) C-like systems programming language.
   `format-check` depends on: it rejects a `/* */` in the same sources, D2.2, and its own unit
   tests are the ctest `check_comments_selftest`), `tidy` (`run-clang-tidy` over the same),
   `lines` (`tools/lines.py`: test lines per compiler line, target 3:1, `--min RATIO` fails
-  below it). `tools/vm <target> [preset]` runs one.
+  below it; `--since REF` measures a branch's own diff instead of the whole repository, which
+  is how a ticket answers for the code it introduces rather than hiding behind the corpus
+  already there; its own tests are the ctest `lines_selftest`).
+  `tools/vm <target> [preset]` runs one.
 - A CMake variable derived from a cache variable must not be cached itself: `find_program`
   caches by default, so `FORT_TARGET_CC_PATH` kept resolving to the old program after
   `FORT_TARGET_CC` changed in an existing build directory, and the build then ran gcc with
@@ -287,6 +290,12 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
   tickets are assigned concurrently, one implementor each.
 - Acceptance criteria are verifiable inside the VM; the log records every hand-off with its
   evidence (commands run, results, review rounds, merge sha).
+- Every ticket meets the 3:1 test-to-code ratio on its own diff, not on the repository average:
+  `tools/vm run 'python3 tools/lines.py --since main --min 3.0'` is an acceptance criterion of every
+  ticket that adds compiler lines, and the implementor runs it before the gate. The repository ratio
+  drifted from 3.34 to 2.50 over six tickets while every one of them passed, because a large corpus
+  hides a thin diff; a ticket that cannot reach 3:1 says so in its log with the reason rather than
+  lowering the number.
 
 ### Agents
 - The coordinator is the main session. Every other role is an agent definition in

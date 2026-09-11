@@ -2,13 +2,19 @@
 """Count test lines per compiler line (notes/toolchain.md 7.6, D14.6).
 
 Compiler lines are src/bootstrap/*.c and *.h plus src/fort/*.ft; test lines
-are test/*.c, test/lang/**/*.ft and test/lang/ffi/*.c (test/*.h, the
-framework, counts on neither side). The runtime and the standard library
-count on neither side. The target ratio is 3:1; --min fails the run when the
-ratio is below the given value.
+are test/*.c, test/*.h, test/lang/**/*.ft and test/lang/ffi/*.c. The runtime
+and the standard library count on neither side. The target ratio is 3:1;
+--min fails the run when the ratio is below the given value.
+
+--since REF measures a branch instead of the repository: it counts the lines
+a diff against REF adds and removes on each side, so a ticket answers for the
+code it introduces rather than hiding behind the corpus already there. A
+branch that adds no compiler line has no ratio and passes.
 """
 
 import argparse
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -33,6 +39,63 @@ def collect(root, globs):
 
 def total_lines(files):
     return sum(count_lines(p) for p in files)
+
+
+def glob_to_regex(pattern):
+    """Compile one of the globs above into a regex over a slash-separated path.
+
+    pathlib.Path.full_match would do this, but it arrived in Python 3.13 and
+    the guest runs 3.12. `**/` matches any number of directories, `*` and `?`
+    match within one name.
+    """
+    out = []
+    i = 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out.append("(?:[^/]+/)*")
+            i += 3
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return re.compile("".join(out) + r"\Z")
+
+
+def path_matches(path, patterns):
+    """Whether the path matches any of the patterns."""
+    return any(p.match(path) for p in patterns)
+
+
+def diff_lines(root, ref, globs):
+    """Return (added, removed) line counts of a diff against ref for the globs.
+
+    git numstat reports added and removed per file; a file whose path matches
+    none of the globs is skipped, so the two sides use the same rules as a
+    whole-repository count.
+    """
+    out = subprocess.run(
+        ["git", "diff", "--numstat", "--no-renames", ref + "...HEAD"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    patterns = [glob_to_regex(g) for g in globs]
+    added = removed = 0
+    for line in out.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 3 or fields[0] == "-":
+            continue
+        if not path_matches(fields[2], patterns):
+            continue
+        added += int(fields[0])
+        removed += int(fields[1])
+    return added, removed
 
 
 def ratio_of(test_lines, compiler_lines):
@@ -62,9 +125,18 @@ def main(argv=None):
         help="exit with status 1 when the ratio is below RATIO",
     )
     parser.add_argument(
+        "--since",
+        metavar="REF",
+        default=None,
+        help="measure the diff against REF instead of the whole repository",
+    )
+    parser.add_argument(
         "--verbose", "-v", action="store_true", help="list every counted file"
     )
     args = parser.parse_args(argv)
+
+    if args.since is not None:
+        return main_since(args)
 
     compiler_files = collect(args.root, COMPILER_GLOBS)
     test_files = collect(args.root, TEST_GLOBS)
@@ -81,6 +153,30 @@ def main(argv=None):
     print("ratio:    %s (target %.1f:1)" % (format_ratio(ratio), TARGET_RATIO))
 
     if args.min is not None and ratio is not None and ratio < args.min:
+        sys.stdout.flush()
+        print("lines.py: ratio %s is below the minimum %.2f" % (format_ratio(ratio), args.min),
+              file=sys.stderr)
+        return 1
+    return 0
+
+
+def main_since(args):
+    """Measure the branch's own diff against args.since."""
+    compiler_added, compiler_removed = diff_lines(args.root, args.since, COMPILER_GLOBS)
+    test_added, test_removed = diff_lines(args.root, args.since, TEST_GLOBS)
+    compiler_net = compiler_added - compiler_removed
+    test_net = test_added - test_removed
+    ratio = ratio_of(test_net, compiler_net) if compiler_net > 0 else None
+
+    print("compiler: %+d lines (%d added, %d removed)" % (compiler_net, compiler_added,
+                                                          compiler_removed))
+    print("tests:    %+d lines (%d added, %d removed)" % (test_net, test_added, test_removed))
+    print("ratio:    %s (target %.1f:1, against %s)" % (format_ratio(ratio), TARGET_RATIO,
+                                                        args.since))
+    if ratio is None:
+        print("lines.py: no compiler lines added, so there is no ratio to meet")
+        return 0
+    if args.min is not None and ratio < args.min:
         sys.stdout.flush()
         print("lines.py: ratio %s is below the minimum %.2f" % (format_ratio(ratio), args.min),
               file=sys.stderr)
