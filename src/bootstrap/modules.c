@@ -585,9 +585,9 @@ static module_t* load_module(module_set_t* set, str_t path, str_t file, loc_t at
     (void)strmap_put(&set->by_real, m->real, (int64_t)set->modules.len);
     ptrvec_push(&set->modules, m);
 
-    // A syntax error stops the compilation of that file after one diagnostic
-    // (D14.2), so whether the file parsed is the number of diagnostics the
-    // lexer and the parser reported, never the tree being NULL.
+    // The parser recovers from a syntax error and hands back the tree of what
+    // parsed (D14.2), so whether the file parsed is the number of diagnostics
+    // the lexer and the parser reported, never the tree being NULL.
     const uint64_t before = diag_count();
     tokvec_t toks;
     tokvec_init(&toks);
