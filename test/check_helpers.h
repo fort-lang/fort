@@ -173,6 +173,42 @@ static inline const char* sym_type_text(const sym_t* s) {
     return sb_cstr(&out);
 }
 
+// The first expression node below `n` that the checker left without a type,
+// or NULL: every expression of a module that checks clean carries one, which
+// is what the emitter reads. The expression kinds are the range of ast.h
+// between the literals and the array literal.
+static inline ast_node_t* untyped_expr(ast_node_t* n) {
+    if (n == NULL || n->kind == AST_IMPORT) {
+        // The identifiers of an import path name modules, which have no type
+        // of their own; they carry a symbol and nothing else (D9.3).
+        return NULL;
+    }
+    if (n->sym != NULL &&
+        (n->sym->kind == SYM_MODULE || n->sym->kind == SYM_STRUCT || n->sym->kind == SYM_ENUM)) {
+        // A name that denotes a module or a type is not a value: `color` in
+        // `color.red` and `util` in `util.one()` carry a symbol only (D9.4,
+        // D3.9).
+        return NULL;
+    }
+    if (n->kind >= AST_INT && n->kind <= AST_ARRAY_LIT && n->type == NULL) {
+        return n;
+    }
+    ast_node_t* const kids[] = {n->a, n->b, n->c, n->d};
+    for (uint64_t i = 0; i < sizeof kids / sizeof kids[0]; i++) {
+        ast_node_t* hit = untyped_expr(kids[i]);
+        if (hit != NULL) {
+            return hit;
+        }
+    }
+    for (uint64_t i = 0; i < ast_len(n); i++) {
+        ast_node_t* hit = untyped_expr(ast_child(n, i));
+        if (hit != NULL) {
+            return hit;
+        }
+    }
+    return NULL;
+}
+
 // The folded value of the initializer of the local or module declaration
 // `name`, as an int64_t; false when it is not an integer constant.
 static inline bool init_int(const char* name, int64_t* out) {

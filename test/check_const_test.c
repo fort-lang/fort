@@ -138,6 +138,40 @@ TEST(a_returned_constant_takes_the_return_type, {
     TEST_ASSERT_TRUE(said("constant 300 does not fit u8"));
 })
 
+TEST(every_integer_width_accepts_exactly_its_range, {
+    // The boundary of each type of D3.1: the extreme value fits and the next
+    // one does not (D4.2).
+    TEST_ASSERT_TRUE(check_body("    i8 a = 127;\n    i8 b = -128;\n    println(a, b);"));
+    TEST_ASSERT_FALSE(check_body("    i8 a = 128;"));
+    TEST_ASSERT_FALSE(check_body("    i8 a = -129;"));
+    TEST_ASSERT_TRUE(check_body("    u8 a = 255;\n    u8 b = 0;\n    println(a, b);"));
+    TEST_ASSERT_FALSE(check_body("    u8 a = 256;"));
+    TEST_ASSERT_FALSE(check_body("    u8 a = -1;"));
+    TEST_ASSERT_TRUE(check_body("    i16 a = 32767;\n    i16 b = -32768;\n    println(a, b);"));
+    TEST_ASSERT_FALSE(check_body("    i16 a = 32768;"));
+    TEST_ASSERT_TRUE(check_body("    u16 a = 65535;\n    println(a);"));
+    TEST_ASSERT_FALSE(check_body("    u16 a = 65536;"));
+    TEST_ASSERT_TRUE(check_body("    i32 a = 2147483647;\n    i32 b = -2147483648;\n"
+                                "    println(a, b);"));
+    TEST_ASSERT_FALSE(check_body("    i32 a = 2147483648;"));
+    TEST_ASSERT_FALSE(check_body("    i32 a = -2147483649;"));
+    TEST_ASSERT_TRUE(check_body("    u32 a = 4294967295;\n    println(a);"));
+    TEST_ASSERT_FALSE(check_body("    u32 a = 4294967296;"));
+    TEST_ASSERT_TRUE(check_body("    i64 a = 9223372036854775807;\n"
+                                "    i64 b = -9223372036854775808;\n    println(a, b);"));
+    TEST_ASSERT_FALSE(check_body("    i64 a = 9223372036854775808;"));
+    TEST_ASSERT_TRUE(check_body("    u64 a = 18446744073709551615;\n    u64 b = 0;\n"
+                                "    println(a, b);"));
+    // 2^64 leaves the constant range itself, before any target is met (D4.4).
+    TEST_ASSERT_FALSE(check_body("    u64 a = 18446744073709551616;"));
+})
+
+TEST(a_char_constant_fits_every_width_that_holds_its_code_point, {
+    TEST_ASSERT_TRUE(check_body("    u8 a = '\\xFF';\n    i32 b = 'a';\n    println(a, b);"));
+    // A char whose code point does not fit the target is refused (D4.3).
+    TEST_ASSERT_FALSE(check_body("    i8 a = '\\xFF';"));
+})
+
 // ---- exact folding among untyped constants (D4.4) -----------------------------------
 
 TEST(untyped_arithmetic_folds_exactly, {
@@ -299,7 +333,7 @@ TEST(sizeof_is_an_untyped_constant, {
 TEST(sizeof_needs_a_type, {
     TEST_ASSERT_FALSE(check_body("    i32 x = 1;\n    println(sizeof(x));"));
     // `sizeof(expr)` is an error (D3.15).
-    TEST_ASSERT_TRUE(said("'x' is not a type"));
+    TEST_ASSERT_TRUE(said("'x' is a local, not a type"));
     TEST_ASSERT_FALSE(check_body("    println(sizeof(void));"));
     TEST_ASSERT_TRUE(said("'sizeof' needs a sized type, not void"));
 })
@@ -378,6 +412,8 @@ int main(int argc, char** argv) {
     TEST_RUN(a_shift_count_is_not_a_context_for_the_left_operand);
     TEST_RUN(a_constant_argument_takes_the_parameter_type);
     TEST_RUN(a_returned_constant_takes_the_return_type);
+    TEST_RUN(every_integer_width_accepts_exactly_its_range);
+    TEST_RUN(a_char_constant_fits_every_width_that_holds_its_code_point);
     TEST_RUN(untyped_arithmetic_folds_exactly);
     TEST_RUN(an_intermediate_may_leave_the_target_range);
     TEST_RUN(an_intermediate_outside_the_constant_range_is_refused);

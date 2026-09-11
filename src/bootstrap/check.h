@@ -167,6 +167,10 @@ void check_msg_end(check_t* ck, loc_t loc);
 // (D6.2, D17.4, D17.10).
 const type_t* check_lend(check_t* ck, const type_t* t);
 
+// Reports "there is no pointer arithmetic" when `t` is a pointer, and
+// returns whether it did: `p + 1`, `p++` and `p[i]` are errors (D10.4).
+bool check_pointer_arithmetic(check_t* ck, loc_t loc, int32_t op, const type_t* t);
+
 // Whether `t` already failed: no diagnostic mentions a poisoned type, which
 // is how one error stays one error (D14.2).
 bool check_poisoned(const type_t* t);

@@ -1,0 +1,310 @@
+// Unit tests of the conversions the checker applies (core-language.md 3.4,
+// 3.9, 5.8, 5.9; D5.4, D3.14, D17.4): where the implicit drops of mutability
+// and ownership apply, what the cast matrix allows there, and the qualified
+// names and poisoning that go with them. The operand rules are in
+// check_expr_test.c.
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "ast.h"
+#include "check.h"
+#include "check_helpers.h"
+
+#include "test.h"
+
+// NOLINTBEGIN(readability-magic-numbers) the sources below are the test data.
+
+// ---- dropping mutability (D5.4) -----------------------------------------------------
+
+TEST(mutability_drops_at_level_one, {
+    TEST_ASSERT_TRUE(check_body("    i32 mut v = 1;\n    i32 mut* p = &v;\n    i32* q = p;\n"
+                                "    println(q);"));
+})
+
+TEST(mutability_is_never_added_implicitly, {
+    TEST_ASSERT_FALSE(check_body("    i32 mut v = 1;\n    i32* p = &v;\n    i32 mut* q = p;\n"
+                                 "    println(q);"));
+    // Adding mutability requires a cast (D5.4, D3.14).
+    TEST_ASSERT_TRUE(said("the initializer expects i32 mut*, not i32*"));
+})
+
+TEST(a_drop_behind_a_mutable_level_is_refused, {
+    TEST_ASSERT_TRUE(check_src("struct node {\n    i32 v;\n}\n"
+                               "fn i32 main() {\n"
+                               "    node mut* mut@ own a = new(node*, 1);\n"
+                               "    node*@ b = a;\n    println(b.len);\n    del(a);\n"
+                               "    return 0;\n}\n"));
+    TEST_ASSERT_FALSE(check_src("struct node {\n    i32 v;\n}\n"
+                                "fn i32 main() {\n"
+                                "    node mut* mut@ own a = new(node*, 1);\n"
+                                "    node* mut@ c = a;\n    println(c.len);\n    del(a);\n"
+                                "    return 0;\n}\n"));
+    // A mutable slot could then hold a pointer to what the source still sees
+    // as mutable: the C `T** -> const T**` hole (D5.4).
+    TEST_ASSERT_TRUE(said("expects node* mut@, not node mut* mut@ own"));
+})
+
+TEST(the_drop_rule_applies_to_arguments_and_returns, {
+    TEST_ASSERT_TRUE(check_src("fn void look(i32* p) {\n    println(p);\n}\n"
+                               "fn i32* view(i32 mut* p) {\n    return p;\n}\n"
+                               "fn i32 main() {\n    i32 mut v = 1;\n    look(&v);\n"
+                               "    println(view(&v));\n    return 0;\n}\n"));
+    TEST_ASSERT_FALSE(check_src("fn void write(i32 mut* p) {\n    println(p);\n}\n"
+                                "fn i32 main() {\n    i32 v = 1;\n    write(&v);\n"
+                                "    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("the argument expects i32 mut*, not i32*"));
+})
+
+TEST(level_zero_is_unconstrained, {
+    // Level 0 of the receiving binding is unconstrained (D5.4).
+    TEST_ASSERT_TRUE(check_body("    i32 mut v = 1;\n    i32* mut p = &v;\n    i32* q = p;\n"
+                                "    p = q;\n    println(q);"));
+})
+
+// ---- dropping ownership (D17.4) -----------------------------------------------------
+
+TEST(ownership_drops_where_mutability_does, {
+    TEST_ASSERT_TRUE(check_body("    i32 mut* own p = new(i32);\n    i32 mut* v = p;\n"
+                                "    i32* w = p;\n    println(v, w);\n    del(p);"));
+})
+
+TEST(ownership_is_never_added_implicitly, {
+    TEST_ASSERT_FALSE(check_body("    i32 mut v = 1;\n    i32 mut* own p = &v;\n    del(p);"));
+    // `&` yields a borrowed pointer; adding `own` needs a cast (D17.3, D3.14).
+    TEST_ASSERT_TRUE(said("the initializer expects i32 mut* own, not i32 mut*"));
+})
+
+TEST(an_owning_span_lends_its_elements, {
+    TEST_ASSERT_TRUE(check_body("    i32 mut@ own s = new(i32, 2);\n    i32 mut@ v = s;\n"
+                                "    i32@ w = s;\n    println(v.len, w.len);\n    del(s);"));
+})
+
+// ---- the cast matrix (D3.14) --------------------------------------------------------
+
+TEST(a_cast_converts_between_pointers_and_integers, {
+    TEST_ASSERT_TRUE(check_body("    i32 mut v = 1;\n    i32 mut* p = &v;\n"
+                                "    u8 mut* b = cast(p, u8 mut*);\n    u64 n = cast(p, u64);\n"
+                                "    void* o = cast(p, void*);\n    println(b, n, o);"));
+})
+
+TEST(a_cast_adds_mutability_and_ownership, {
+    TEST_ASSERT_TRUE(check_body("    i32 v = 1;\n    i32* p = &v;\n"
+                                "    i32 mut* w = cast(p, i32 mut*);\n    println(w);"));
+    TEST_ASSERT_TRUE(check_body("    u8 mut* p = null;\n"
+                                "    u8 mut* own a = cast(p, u8 mut* own);\n    println(a);"));
+})
+
+TEST(a_cast_converts_among_string_and_byte_spans, {
+    TEST_ASSERT_TRUE(check_body("    string s = \"ab\";\n    u8@ b = cast(s, u8@);\n"
+                                "    string t = cast(b, string);\n    println(b.len, t);"));
+})
+
+TEST(a_cast_never_changes_a_span_element_type, {
+    TEST_ASSERT_FALSE(check_body("    i32@ s = {};\n    u32@ u = cast(s, u32@);\n"
+                                 "    println(u.len);"));
+    // The element type of a span never changes, because `len` counts elements
+    // (D3.14).
+    TEST_ASSERT_TRUE(said("cannot cast i32@ to u32@"));
+})
+
+TEST(a_cast_from_a_pointer_to_a_span_is_refused, {
+    TEST_ASSERT_FALSE(check_body("    i32 mut v = 1;\n    i32* p = &v;\n"
+                                 "    i32@ s = cast(p, i32@);\n    println(s.len);"));
+    TEST_ASSERT_TRUE(said("cannot cast i32* to i32@"));
+})
+
+TEST(a_cast_to_a_struct_or_an_array_is_refused, {
+    TEST_ASSERT_FALSE(check_src("struct point {\n    i32 x;\n}\n"
+                                "fn i32 main() {\n    i32 n = 1;\n    point p = cast(n, point);\n"
+                                "    return p.x;\n}\n"));
+    TEST_ASSERT_TRUE(said("cannot cast i32 to point"));
+})
+
+TEST(a_cast_between_an_enum_and_an_integer_is_allowed, {
+    TEST_ASSERT_TRUE(check_src("enum color {\n    red,\n    green,\n}\n"
+                               "fn i32 main() {\n    color c = cast(1, color);\n"
+                               "    return cast(c, i32);\n}\n"));
+})
+
+TEST(a_cast_between_char_and_an_integer_is_allowed, {
+    TEST_ASSERT_TRUE(check_body("    char c = cast(65, char);\n    i32 n = cast(c, i32);\n"
+                                "    println(c, n);"));
+})
+
+TEST(a_cast_target_that_is_too_large_is_refused, {
+    TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n"
+                                 "    i32[4611686018427387904] a = "
+                                 "cast(n, i32[4611686018427387904]);\n"
+                                 "    println(a[0]);"));
+    TEST_ASSERT_TRUE(said("type is too large"));
+})
+
+// ---- qualified names (D9.4) ---------------------------------------------------------
+
+TEST(a_module_is_not_a_value_and_not_a_type, {
+    begin();
+    add("util.ft", "fn i32 one() {\n    return 1;\n}\n");
+    add("main.ft", "import util;\nfn i32 main() {\n    i32 n = util;\n    return n;\n}\n");
+    TEST_ASSERT_FALSE(check_entry("main.ft"));
+    // The diagnostics of module-system.md 13.
+    TEST_ASSERT_TRUE(said("'util' is a module, not a value"));
+    begin();
+    add("util.ft", "fn i32 one() {\n    return 1;\n}\n");
+    add("main.ft", "import util;\nfn i32 main() {\n    util u = 1;\n    return 0;\n}\n");
+    TEST_ASSERT_FALSE(check_entry("main.ft"));
+    TEST_ASSERT_TRUE(said("'util' is a module, not a type"));
+})
+
+TEST(a_module_without_the_declaration_is_reported, {
+    begin();
+    add("util.ft", "fn i32 one() {\n    return 1;\n}\n");
+    add("main.ft", "import util;\nfn i32 main() {\n    return util.two();\n}\n");
+    TEST_ASSERT_FALSE(check_entry("main.ft"));
+    TEST_ASSERT_TRUE(said("module 'util' has no declaration named 'two'"));
+})
+
+TEST(an_imported_declaration_is_used_through_its_short_name, {
+    begin();
+    add("util.ft", "i32 SIZE = 3;\nstruct pair {\n    i32 a;\n    i32 b;\n}\n");
+    add("main.ft",
+        "import util::{SIZE, pair};\n"
+        "fn i32 main() {\n    pair p = {1, 2};\n    i32[SIZE] t = {};\n"
+        "    return p.a + t[2];\n}\n");
+    TEST_ASSERT_TRUE(check_entry("main.ft"));
+    TEST_ASSERT_EQ_STR(decl_type("t"), "i32[3]");
+})
+
+TEST(a_qualified_enum_member_crosses_modules, {
+    begin();
+    add("palette.ft", "enum color {\n    red,\n    green,\n}\n");
+    add("main.ft",
+        "import palette;\n"
+        "fn i32 main() {\n    palette.color c = palette.color.green;\n"
+        "    return cast(c, i32);\n}\n");
+    TEST_ASSERT_TRUE(check_entry("main.ft"));
+})
+
+TEST(an_imported_type_keeps_its_identity, {
+    begin();
+    add("geom.ft", "struct point {\n    i32 x;\n}\n");
+    add("main.ft",
+        "import geom;\nstruct point {\n    i32 x;\n}\n"
+        "fn i32 main() {\n    geom.point a = {1};\n    point b = a;\n    return b.x;\n}\n");
+    // Structs are nominal: two declarations are two types (D3.8, D3.12).
+    TEST_ASSERT_FALSE(check_entry("main.ft"));
+    TEST_ASSERT_TRUE(said("the initializer expects point, not point"));
+})
+
+// ---- functions and aggregates (D8.2, D9.9) ------------------------------------------
+
+TEST(an_aggregate_is_passed_and_returned_by_value, {
+    TEST_ASSERT_TRUE(check_src("struct point {\n    i32 x;\n    i32 y;\n}\n"
+                               "fn point flip(point p) {\n    return point{p.y, p.x};\n}\n"
+                               "fn i32 main() {\n    point a = {1, 2};\n    point b = flip(a);\n"
+                               "    return b.x;\n}\n"));
+})
+
+TEST(a_fixed_array_parameter_keeps_its_length, {
+    TEST_ASSERT_FALSE(
+        check_src("fn i32 first(i32[3] a) {\n    return a[0];\n}\n"
+                  "fn i32 main() {\n    i32[2] t = {1, 2};\n    return first(t);\n}\n"));
+    // Different `N` are different types (D3.4).
+    TEST_ASSERT_TRUE(said("the argument expects i32[3], not i32[2]"));
+})
+
+TEST(a_function_type_ignores_the_binding_mut_of_its_parameters, {
+    TEST_ASSERT_TRUE(
+        check_src("fn i32 take(i32 mut n) {\n    n = n + 1;\n    return n;\n}\n"
+                  "fn i32 main() {\n    fn i32(i32) f = take;\n    return f(1);\n}\n"));
+    // Binding-level `mut` on parameters is not part of the type (D3.10).
+    TEST_ASSERT_EQ_STR(type_text(sym_main("take")->type), "fn i32(i32)");
+})
+
+TEST(a_void_parameter_is_refused, {
+    TEST_ASSERT_FALSE(check_src("fn i32 f(void v) {\n    return 1;\n}\n"
+                                "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("'void' is only a return type or the base of 'void*'"));
+})
+
+TEST(an_extern_signature_takes_scalars_and_pointers, {
+    TEST_ASSERT_TRUE(check_src("extern fn i64 write(i32 fd, void* buf, u64 n);\n"
+                               "fn i32 main() {\n    return cast(write(1, null, 0), i32);\n}\n"));
+    TEST_ASSERT_FALSE(check_src("extern fn void take(i32[2] a);\n"
+                                "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("extern signature cannot use type 'i32[2]'"));
+})
+
+// ---- poisoning (D14.2) --------------------------------------------------------------
+
+TEST(a_failed_type_silences_the_declarations_that_use_it, {
+    TEST_ASSERT_FALSE(check_src("struct bad {\n    nope x;\n}\n"
+                                "fn i32 main() {\n    bad b = {1};\n    return b.x;\n}\n"));
+    // The field failed, so the struct and every use of it are poisoned: one
+    // diagnostic (D14.2).
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_TRUE(said("unknown type 'nope'"));
+})
+
+TEST(a_failed_function_silences_its_calls, {
+    TEST_ASSERT_FALSE(check_src("fn nope f() {\n    return 1;\n}\n"
+                                "fn i32 main() {\n    return f() + 1;\n}\n"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+})
+
+TEST(a_failed_local_silences_its_uses, {
+    TEST_ASSERT_FALSE(check_body("    i32 x = nope;\n    i32 y = x + 1;\n    println(y);"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+})
+
+TEST(each_module_reports_its_own_errors, {
+    begin();
+    add("a.ft", "i32 A = nope;\n");
+    add("b.ft", "import a;\ni32 B = bad;\n");
+    add("main.ft", "import b;\nfn i32 main() {\n    return b.B;\n}\n");
+    TEST_ASSERT_FALSE(check_entry("main.ft"));
+    // Every module of the closure is checked, in dependency order (D9.10,
+    // D14.2 as amended).
+    TEST_ASSERT_TRUE(said("a.ft:1:9: error: unknown name 'nope'"));
+    TEST_ASSERT_TRUE(said("b.ft:2:9: error: unknown name 'bad'"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)2);
+})
+
+// NOLINTEND(readability-magic-numbers)
+
+int main(int argc, char** argv) {
+    TEST_INIT("check_conv", argc, argv);
+    TEST_RUN(mutability_drops_at_level_one);
+    TEST_RUN(mutability_is_never_added_implicitly);
+    TEST_RUN(a_drop_behind_a_mutable_level_is_refused);
+    TEST_RUN(the_drop_rule_applies_to_arguments_and_returns);
+    TEST_RUN(level_zero_is_unconstrained);
+    TEST_RUN(ownership_drops_where_mutability_does);
+    TEST_RUN(ownership_is_never_added_implicitly);
+    TEST_RUN(an_owning_span_lends_its_elements);
+    TEST_RUN(a_cast_converts_between_pointers_and_integers);
+    TEST_RUN(a_cast_adds_mutability_and_ownership);
+    TEST_RUN(a_cast_converts_among_string_and_byte_spans);
+    TEST_RUN(a_cast_never_changes_a_span_element_type);
+    TEST_RUN(a_cast_from_a_pointer_to_a_span_is_refused);
+    TEST_RUN(a_cast_to_a_struct_or_an_array_is_refused);
+    TEST_RUN(a_cast_between_an_enum_and_an_integer_is_allowed);
+    TEST_RUN(a_cast_between_char_and_an_integer_is_allowed);
+    TEST_RUN(a_cast_target_that_is_too_large_is_refused);
+    TEST_RUN(a_module_is_not_a_value_and_not_a_type);
+    TEST_RUN(a_module_without_the_declaration_is_reported);
+    TEST_RUN(an_imported_declaration_is_used_through_its_short_name);
+    TEST_RUN(a_qualified_enum_member_crosses_modules);
+    TEST_RUN(an_imported_type_keeps_its_identity);
+    TEST_RUN(an_aggregate_is_passed_and_returned_by_value);
+    TEST_RUN(a_fixed_array_parameter_keeps_its_length);
+    TEST_RUN(a_function_type_ignores_the_binding_mut_of_its_parameters);
+    TEST_RUN(a_void_parameter_is_refused);
+    TEST_RUN(an_extern_signature_takes_scalars_and_pointers);
+    TEST_RUN(a_failed_type_silences_the_declarations_that_use_it);
+    TEST_RUN(a_failed_function_silences_its_calls);
+    TEST_RUN(a_failed_local_silences_its_uses);
+    TEST_RUN(each_module_reports_its_own_errors);
+    check_reset();
+    done();
+    TEST_EXIT();
+}

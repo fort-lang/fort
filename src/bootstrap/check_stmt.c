@@ -175,6 +175,9 @@ static void check_incdec(check_t* ck, ast_node_t* n) {
     // `++` and `--` add or subtract 1 with the checks of `+` and `-` and are
     // allowed on integer types only (D7.2).
     if (lv.type->kind != TYPE_PRIM || !prim_is_integer(lv.type->prim)) {
+        if (check_pointer_arithmetic(ck, n->loc, n->op, lv.type)) {
+            return;
+        }
         check_msg_begin(ck);
         msg_str(&ck->msg, "'");
         msg_str(&ck->msg, tok_kind_name((tok_kind_t)n->op));
@@ -439,6 +442,15 @@ static void check_return(check_t* ck, ast_node_t* n) {
     if (!check_outside_defer(ck, n, "return")) {
         return;
     }
+    if (check_poisoned(ck->ret)) {
+        // The signature failed to check, so nothing is known about what this
+        // returns: the error type silences it (D14.2).
+        if (n->a != NULL) {
+            expr_t e;
+            check_expr_default(ck, n->a, &e);
+        }
+        return;
+    }
     if (ck->ret_noreturn) {
         // A `noreturn` function may not contain `return` (D8.5).
         check_error(ck, n->loc, "'return' in a noreturn function");
@@ -653,9 +665,10 @@ void check_block(check_t* ck, ast_node_t* n) {
 
 void check_function_body(check_t* ck, ast_node_t* fn, const sym_t* sym) {
     const type_t* signature = sym->type;
-    ck->ret = check_poisoned(signature) ? signature : signature->elem;
-    ck->ret_void = check_poisoned(signature) || ck->ret->kind == TYPE_VOID;
-    ck->ret_noreturn = !check_poisoned(signature) && signature->noreturn;
+    const bool poisoned = check_poisoned(signature) || signature->kind != TYPE_FN;
+    ck->ret = poisoned ? type_error(&ck->types) : signature->elem;
+    ck->ret_void = !poisoned && ck->ret->kind == TYPE_VOID;
+    ck->ret_noreturn = !poisoned && signature->noreturn;
     ck->in_function = true;
     ck->fn_sym = sym;
     ck->loops = 0;
@@ -680,7 +693,7 @@ void check_function_body(check_t* ck, ast_node_t* fn, const sym_t* sym) {
         }
     }
     check_block(ck, fn->b);
-    if (ck->block_errs == 0 && !check_terminates(fn->b)) {
+    if (ck->block_errs == 0 && !check_poisoned(ck->ret) && !check_terminates(fn->b)) {
         if (ck->ret_noreturn) {
             // A `noreturn` function must end in a terminating statement
             // (D8.5).

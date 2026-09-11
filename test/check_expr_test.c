@@ -81,7 +81,7 @@ TEST(there_is_no_pointer_arithmetic, {
                                  "    println(q);"));
     // The only ways to obtain a pointer are null, &, new, .ptr, cast, a
     // function name and calls (D10.4).
-    TEST_ASSERT_TRUE(said("'+' takes numeric operands, not i32*"));
+    TEST_ASSERT_TRUE(said("there is no pointer arithmetic: '+' does not apply to i32*"));
 })
 
 TEST(an_enum_compares_but_does_not_order, {

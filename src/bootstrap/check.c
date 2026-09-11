@@ -352,7 +352,8 @@ static const type_t* named_type(check_t* ck, ast_node_t* n) {
         const binding_t* inner = m != NULL ? scope_find(&m->names, tail->name) : NULL;
         if (inner == NULL || !bind_is_declaration(inner)) {
             check_msg_begin(ck);
-            msg_view(&ck->msg, m != NULL ? m->path : n->name);
+            msg_str(&ck->msg, "module ");
+            msg_quote(&ck->msg, m != NULL ? m->path : n->name);
             msg_str(&ck->msg, " has no declaration named ");
             msg_quote(&ck->msg, tail->name);
             check_msg_end(ck, tail->name_loc);
@@ -364,7 +365,9 @@ static const type_t* named_type(check_t* ck, ast_node_t* n) {
     if (s == NULL || (s->kind != SYM_STRUCT && s->kind != SYM_ENUM)) {
         check_msg_begin(ck);
         msg_quote(&ck->msg, tail != NULL ? tail->name : n->name);
-        msg_str(&ck->msg, " is not a type");
+        msg_str(&ck->msg, " is a ");
+        msg_str(&ck->msg, s != NULL ? sym_kind_name(s->kind) : "value");
+        msg_str(&ck->msg, ", not a type");
         check_msg_end(ck, tail != NULL ? tail->name_loc : n->name_loc);
         return type_error(&ck->types);
     }
@@ -807,6 +810,22 @@ static bool type_has_ordering(const type_t* t) {
     return t->kind == TYPE_PRIM && t->prim != PRIM_BOOL;
 }
 
+// "there is no pointer arithmetic": `p + 1`, `p++` and `p[i]` are errors, and
+// the only ways to obtain a pointer are null, &, new, .ptr, cast, a function
+// name and calls (D10.4).
+bool check_pointer_arithmetic(check_t* ck, loc_t loc, int32_t op, const type_t* t) {
+    if (t->kind != TYPE_PTR && t->kind != TYPE_VOIDPTR) {
+        return false;
+    }
+    check_msg_begin(ck);
+    msg_str(&ck->msg, "there is no pointer arithmetic: '");
+    msg_str(&ck->msg, tok_kind_name((tok_kind_t)op));
+    msg_str(&ck->msg, "' does not apply to ");
+    check_msg_type(ck, t);
+    check_msg_end(ck, loc);
+    return true;
+}
+
 // "'+' takes integer operands, not char": one shape for every operand rule,
 // naming the operator and the type that broke it.
 static void error_operand(check_t* ck, loc_t loc, int32_t op, const char* takes, const type_t* t) {
@@ -1075,6 +1094,9 @@ static bool operand_kind_ok(check_t* ck, loc_t loc, int32_t op, const type_t* t)
     // Arithmetic, wrapping and bitwise operators take integers, and `+ - * /`
     // floats as well (D6.2).
     if (!type_is_integer_prim(t) && !(op_takes_floats(op) && type_is_float(t))) {
+        if (check_pointer_arithmetic(ck, loc, op, t)) {
+            return false;
+        }
         error_operand(
             ck, loc, op, op_takes_floats(op) ? "numeric operands" : "integer operands", t);
         return false;
@@ -1136,29 +1158,19 @@ void check_operands(check_t* ck,
     }
     const type_t* t = lt;
     if (op_is_logical(op)) {
-        if (t->kind != TYPE_PRIM || t->prim != PRIM_BOOL) {
-            error_operand(ck, loc, op, "bool operands", t);
-            return;
-        }
         out->type = t;
-        out->value = op == TOK_AND_AND ? cv_land(a->value, b->value) : cv_lor(a->value, b->value);
+        // `&& ||` fold only when both operands are constants (D4.6).
+        if (a->value.kind == CV_BOOL && b->value.kind == CV_BOOL) {
+            out->value =
+                op == TOK_AND_AND ? cv_land(a->value, b->value) : cv_lor(a->value, b->value);
+        }
         return;
     }
     if (op_is_comparison(op)) {
-        if (op_is_ordering(op) ? !type_has_ordering(t) : !type_has_equality(t)) {
-            error_operand(
-                ck, loc, op, op_is_ordering(op) ? "ordered operands" : "comparable operands", t);
-            return;
-        }
         out->type = type_prim(&ck->types, PRIM_BOOL);
         if (a->value.kind != CV_NONE && b->value.kind != CV_NONE) {
             out->value = cv_compare(relation_of(op), a->value, b->value);
         }
-        return;
-    }
-    if (!type_is_integer_prim(t) && !(op_takes_floats(op) && type_is_float(t))) {
-        error_operand(
-            ck, loc, op, op_takes_floats(op) ? "numeric operands" : "integer operands", t);
         return;
     }
     out->type = t;
@@ -1367,7 +1379,8 @@ static void check_field(check_t* ck, ast_node_t* n, expr_t* out, bool arrow) {
             const binding_t* b = scope_find(&qm->names, n->name);
             if (b == NULL || !bind_is_declaration(b)) {
                 check_msg_begin(ck);
-                msg_view(&ck->msg, qm->path);
+                msg_str(&ck->msg, "module ");
+                msg_quote(&ck->msg, qm->path);
                 msg_str(&ck->msg, " has no declaration named ");
                 msg_quote(&ck->msg, n->name);
                 check_msg_end(ck, n->name_loc);
@@ -1520,8 +1533,10 @@ static void check_unary(check_t* ck, ast_node_t* n, expr_t* out) {
             return;
         }
         out->type = a.type;
-        out->value = cv_lnot(a.value);
-        out->init_const = out->value.kind != CV_NONE;
+        if (a.value.kind == CV_BOOL) {
+            out->value = cv_lnot(a.value);
+            out->init_const = true;
+        }
         return;
     }
     if (a.untyped) {
@@ -2129,8 +2144,13 @@ static void check_brace(check_t* ck, ast_node_t* n, const type_t* t, expr_t* out
         return;
     }
     check_msg_begin(ck);
-    msg_str(&ck->msg, "a brace initializer needs a struct or array type, not ");
-    check_msg_type(ck, t);
+    if (t->kind == TYPE_SPAN) {
+        // A span literal does not exist; the zero span is `{}` (D3.5).
+        msg_str(&ck->msg, "a span literal does not exist: write '{}' for the zero span");
+    } else {
+        msg_str(&ck->msg, "a brace initializer needs a struct or array type, not ");
+        check_msg_type(ck, t);
+    }
     check_msg_end(ck, n->loc);
     out->type = type_error(&ck->types);
 }
@@ -2315,8 +2335,12 @@ static void resolve_sym(check_t* ck, sym_t* s) {
     case SYM_EXTERN_FN:
         resolve_fn(ck, s);
         break;
-    default:
+    case SYM_CONST:
+    case SYM_GLOBAL:
+        // Which of the two it is follows from the type it declares (D7.10).
         resolve_var(ck, s);
+        break;
+    default:
         break;
     }
     node->ann &= ~(uint32_t)CHECK_ANN_RESOLVING;
@@ -2517,8 +2541,9 @@ static void resolve_fn(check_t* ck, sym_t* s) {
             // An extern signature may use only scalars, pointers and function
             // pointers (D9.8).
             check_msg_begin(ck);
-            msg_str(&ck->msg, "an extern signature cannot use ");
+            msg_str(&ck->msg, "extern signature cannot use type '");
             check_msg_type(ck, pt.type);
+            msg_str(&ck->msg, "'");
             check_msg_end(ck, p->loc);
             sym_fail(ck, ps);
             ok = false;
@@ -2529,8 +2554,9 @@ static void resolve_fn(check_t* ck, sym_t* s) {
     }
     if (ok && is_extern && !extern_legal(ret.type)) {
         check_msg_begin(ck);
-        msg_str(&ck->msg, "an extern signature cannot use ");
+        msg_str(&ck->msg, "extern signature cannot use type '");
         check_msg_type(ck, ret.type);
+        msg_str(&ck->msg, "'");
         check_msg_end(ck, decl->a->loc);
         ok = false;
     }
@@ -2681,10 +2707,18 @@ static void check_main(check_t* ck, const module_t* m) {
     if (ok || (s != NULL && s->error)) {
         return;
     }
+    if (s == NULL && !ck->require_main) {
+        // A module checked on its own is under inspection, not a program, so
+        // the entry rule does not apply to it (D20.1); a `main` that is there
+        // and wrong is still wrong.
+        return;
+    }
+    check_msg_begin(ck);
+    msg_str(&ck->msg, "entry module ");
+    msg_quote(&ck->msg, m->path);
+    msg_str(&ck->msg, " must define 'fn i32 main()' or 'fn i32 main(string@ args)'");
     // An error without a position in the file uses 1:1 (D14.2).
-    check_error(ck,
-                s != NULL ? s->decl : loc_make(m->file.ptr, 1, 1),
-                "the entry module must define 'fn i32 main()' or 'fn i32 main(string@ args)'");
+    check_msg_end(ck, s != NULL ? s->decl : loc_make(m->file.ptr, 1, 1));
 }
 
 bool check_module(check_t* ck, const module_t* m) {
@@ -2713,7 +2747,9 @@ bool check_module(check_t* ck, const module_t* m) {
             check_function_body(ck, decl, decl->sym);
         }
     }
-    if (m->entry && ck->require_main) {
+    if (m->entry) {
+        // The entry module defines main (D8.6); under a check of one module
+        // the rule stands down for a missing one (D20.1).
         check_main(ck, m);
     }
     ck->module = NULL;

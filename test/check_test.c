@@ -164,6 +164,70 @@ TEST(every_symbol_kind_is_recorded, {
     }
 })
 
+TEST(every_expression_of_a_clean_module_carries_a_type, {
+    begin();
+    add("util.ft", "fn i32 one() {\n    return 1;\n}\n");
+    add("main.ft",
+        "import util;\n"
+        "struct point {\n    i32 x;\n    i32 y;\n}\n"
+        "enum color {\n    red,\n    green = 4,\n}\n"
+        "i32 MAX = 2 + 3;\n"
+        "i32[MAX] mut table = {};\n"
+        "fn i32 sum(point p, color c, string s) {\n"
+        "    i32 mut total = p.x + p.y;\n"
+        "    u8 mut@ own bytes = new(u8, 4);\n"
+        "    for (u64 mut i = 0; i < bytes.len; i++) {\n"
+        "        bytes[i] = cast(s.len, u8);\n"
+        "    }\n"
+        "    for (char ch : s) {\n        total = total + cast(ch, i32);\n    }\n"
+        "    switch (c) {\n    case color.red:\n        total = total + 1;\n"
+        "    default:\n    }\n"
+        "    defer del(bytes);\n"
+        "    if (total > 0 && !(total < 0)) {\n        println(total, ' ', s, true, null);\n"
+        "    }\n"
+        "    table[0] = sizeof(point) > 0 ? 1 : 1;\n"
+        "    return total + util.one() + MAX;\n}\n"
+        "fn i32 main() {\n    point p = point{.x = 1, .y = 2};\n"
+        "    return sum(p, color.green, \"ab\");\n}\n");
+    // The ternary is outside the bootstrap's subset, so the source above uses
+    // it nowhere else; drop it before checking.
+    TEST_ASSERT_FALSE(check_entry("main.ft"));
+    begin();
+    add("util.ft", "fn i32 one() {\n    return 1;\n}\n");
+    add("main.ft",
+        "import util;\n"
+        "struct point {\n    i32 x;\n    i32 y;\n}\n"
+        "enum color {\n    red,\n    green = 4,\n}\n"
+        "i32 MAX = 2 + 3;\n"
+        "i32[MAX] mut table = {};\n"
+        "fn i32 sum(point p, color c, string s) {\n"
+        "    i32 mut total = p.x + p.y;\n"
+        "    u8 mut@ own bytes = new(u8, 4);\n"
+        "    defer del(bytes);\n"
+        "    for (u64 mut i = 0; i < bytes.len; i++) {\n"
+        "        bytes[i] = cast(s.len, u8);\n"
+        "    }\n"
+        "    for (char ch : s) {\n        total = total + cast(ch, i32);\n    }\n"
+        "    switch (c) {\n    case color.red:\n        total = total + 1;\n"
+        "    default:\n    }\n"
+        "    if (total > 0 && !(total < 0)) {\n        println(total, ' ', s, true);\n"
+        "    }\n"
+        "    table[0] = cast(sizeof(point), i32);\n"
+        "    return total + util.one() + MAX;\n}\n"
+        "fn i32 main() {\n    point p = point{.x = 1, .y = 2};\n"
+        "    return sum(p, color.green, \"ab\");\n}\n");
+    TEST_ASSERT_TRUE(check_entry("main.ft"));
+    const ast_node_t* missing = untyped_expr(module_at("main")->ast);
+    if (missing != NULL) {
+        TEST_LOG_("untyped %s at %u:%u",
+                  ast_kind_name(missing->kind),
+                  missing->loc.line,
+                  missing->loc.col);
+    }
+    TEST_ASSERT_NULL(missing);
+    TEST_ASSERT_NULL(untyped_expr(module_at("util")->ast));
+})
+
 // ---- what a name token denotes (the symbol contract) --------------------------------
 
 TEST(an_identifier_carries_the_declaration_it_denotes, {
@@ -457,14 +521,18 @@ TEST(an_extern_signature_cannot_use_a_string, {
                                 "fn i32 main() {\n    return 0;\n}\n"));
     // An extern signature may use only scalars, pointers and function
     // pointers (D9.8).
-    TEST_ASSERT_TRUE(said("an extern signature cannot use string"));
+    // The diagnostic of module-system.md 13.
+    TEST_ASSERT_TRUE(said("extern signature cannot use type 'string'"));
 })
 
 // ---- the entry point (D8.6) ---------------------------------------------------------
 
 TEST(an_entry_module_without_main_is_reported_at_one_one, {
     TEST_ASSERT_FALSE(check_src("i32 A = 1;\n"));
-    TEST_ASSERT_TRUE(said("main.ft:1:1: error: the entry module must define"));
+    // The diagnostic of module-system.md 13, at 1:1 since it has no position
+    // in the file (D8.6, D14.2).
+    TEST_ASSERT_TRUE(said("main.ft:1:1: error: entry module 'main' must define 'fn i32 main()' "
+                          "or 'fn i32 main(string@ args)'"));
 })
 
 TEST(a_main_returning_void_is_refused, {
@@ -472,6 +540,20 @@ TEST(a_main_returning_void_is_refused, {
     TEST_ASSERT_TRUE(said("must define"));
     // The diagnostic stands at the declaration when one is there (D14.2).
     TEST_ASSERT_TRUE(said("main.ft:1:9:"));
+})
+
+TEST(a_main_with_a_wrong_signature_is_refused_in_both_modes, {
+    // The entry rule stands down for a missing `main` under a check of one
+    // module, never for one that is there and wrong (D8.6, D20.1).
+    begin();
+    add("main.ft", "fn i32 main(i32 n) {\n    return n;\n}\n");
+    want_main = false;
+    TEST_ASSERT_FALSE(check_entry("main.ft"));
+    TEST_ASSERT_TRUE(said("must define"));
+    begin();
+    add("main.ft", "fn i32 main(i32 n) {\n    return n;\n}\n");
+    TEST_ASSERT_FALSE(check_entry("main.ft"));
+    TEST_ASSERT_TRUE(said("must define"));
 })
 
 TEST(main_may_take_the_argument_span, {
@@ -519,6 +601,7 @@ int main(int argc, char** argv) {
     TEST_RUN(a_local_is_a_symbol_owned_by_its_function);
     TEST_RUN(a_builtin_is_a_symbol_with_no_node);
     TEST_RUN(every_symbol_kind_is_recorded);
+    TEST_RUN(every_expression_of_a_clean_module_carries_a_type);
     TEST_RUN(an_identifier_carries_the_declaration_it_denotes);
     TEST_RUN(an_unresolved_name_has_no_symbol_and_one_diagnostic);
     TEST_RUN(an_unqualified_enum_member_says_how_it_is_written);
@@ -555,6 +638,7 @@ int main(int argc, char** argv) {
     TEST_RUN(an_extern_signature_cannot_use_a_string);
     TEST_RUN(an_entry_module_without_main_is_reported_at_one_one);
     TEST_RUN(a_main_returning_void_is_refused);
+    TEST_RUN(a_main_with_a_wrong_signature_is_refused_in_both_modes);
     TEST_RUN(main_may_take_the_argument_span);
     TEST_RUN(a_main_in_another_module_is_ordinary);
     TEST_RUN(a_check_without_the_main_rule_accepts_a_module_without_one);
