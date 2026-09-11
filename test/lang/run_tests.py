@@ -842,9 +842,11 @@ def _range_problems(where, record, root, files, cache):
 def symbol_problems(where, record, root, files, cache):
     """The problems of one record of the identifier index (D20.3).
 
-    Its shape, its kind, its own range, and its declaration: `"decl"` is a
-    range in the closure, it is null only for a builtin, and on the occurrence
-    that declares the name it is that occurrence's own range.
+    Its shape, its kind, its type, its own range, and its declaration:
+    `"type"` is a string or null, `"decl"` is a range in the closure, it is
+    null only for a builtin, and on an occurrence that declares the name it is
+    that occurrence's own range -- except on an `as` alias, which declares a
+    name here for a declaration that stands in another file (D9.3).
     """
     problems = _keys_problem(where, record, SYMBOL_KEYS)
     if problems:
@@ -853,6 +855,9 @@ def symbol_problems(where, record, root, files, cache):
         problems.append("%s: kind is %r" % (where, record["kind"]))
     if not isinstance(record["is_decl"], bool):
         problems.append("%s: is_decl is %r" % (where, record["is_decl"]))
+    if record["type"] is not None and not isinstance(record["type"], str):
+        # The type is absent only when the declaration failed to check (D20.3).
+        problems.append("%s: type is %r" % (where, record["type"]))
     problems.extend(_range_problems(where, record, root, files, cache))
     decl = record["decl"]
     if decl is None:
@@ -865,7 +870,11 @@ def symbol_problems(where, record, root, files, cache):
     if found:
         return problems + found
     problems.extend(_range_problems("%s.decl" % where, decl, root, files, cache))
-    if record["is_decl"] and [decl[k] for k in RANGE_KEYS] != [record[k] for k in RANGE_KEYS]:
+    same_range = [decl[k] for k in RANGE_KEYS] == [record[k] for k in RANGE_KEYS]
+    elsewhere = _normalize_file(decl["file"], root) != _normalize_file(record["file"], root)
+    if record["is_decl"] and not same_range and not elsewhere:
+        # A declaration is its own "decl"; only an alias declares a name here
+        # for something declared in another file (D9.3, D20.3).
         problems.append('%s: the declaration\'s "decl" is not its own range' % where)
     return problems
 

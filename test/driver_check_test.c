@@ -295,6 +295,29 @@ TEST(index_after_check_and_json_is_the_same_run, {
     sandbox_close(&box);
 })
 
+TEST(an_indexed_alias_declares_its_name_and_points_elsewhere, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    TEST_ASSERT_TRUE(write_source(
+        box.entry, "import util::add as plus;\nfn i32 main() { return plus(1, 2); }\n"));
+    char util[PATH_CAP];
+    join(util, sizeof util, box.dir, "util.ft");
+    TEST_ASSERT_TRUE(write_source(util, "fn i32 add(i32 a, i32 b) { return a + b; }\n"));
+    const run_t run = RUN_CAPTURED("--index", box.entry);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
+    // The alias declares `plus` in the entry and its declaration is the
+    // function in the imported file (D9.3, D20.3).
+    char want[CAPTURE_MAX];
+    TEST_UNUSED(snprintf(want,
+                         sizeof want,
+                         "\"name\":\"plus\",\"kind\":\"fn\",\"type\":\"fn i32(i32, i32)\","
+                         "\"is_decl\":true,\"decl\":{\"file\":\"%s\",\"line\":1,\"col\":8,"
+                         "\"end_line\":1,\"end_col\":11}}",
+                         util));
+    TEST_ASSERT_NONNULL(strstr(run.out, want));
+    sandbox_close(&box);
+})
+
 TEST(a_document_without_index_has_an_empty_symbols_array, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
@@ -675,6 +698,7 @@ int main(int argc, char** argv) {
     TEST_RUN(an_indexed_run_with_an_error_still_indexes_what_resolved);
     TEST_RUN(an_indexed_run_that_cannot_read_the_entry_leaves_stdout_empty);
     TEST_RUN(index_after_check_and_json_is_the_same_run);
+    TEST_RUN(an_indexed_alias_declares_its_name_and_points_elsewhere);
     TEST_RUN(a_document_without_index_has_an_empty_symbols_array);
     TEST_RUN(the_front_end_hands_out_the_files_it_read);
     TEST_RUN(the_analysis_outlives_the_front_end);

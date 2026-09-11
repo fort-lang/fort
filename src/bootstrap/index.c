@@ -42,14 +42,20 @@ const index_entry_t* index_at(const index_t* ix, uint64_t i) {
 
 // ---- one record (D20.3) -----------------------------------------------------------
 
+// Whether the name denotes something with a type to show. A module, a struct
+// name, an enum name and a builtin denote no value type, so their records
+// carry the empty spelling (D20.3).
+static bool has_value_type(const sym_t* s) {
+    return s->type != NULL && s->kind != SYM_MODULE && s->kind != SYM_STRUCT && s->kind != SYM_ENUM;
+}
+
 // The type of the name as a declaration of it would spell it, level-0
-// mutability included (D5.2, D5.3). It is empty for a name that denotes no
-// value -- a module, a struct name, an enum name, a builtin -- and for a
-// declaration that failed to check, whose type is the poison of D14.2 and
-// says nothing a reader wants (D20.3).
+// mutability included (D5.2, D5.3). A declaration that failed to check has
+// the poison of D14.2, which says nothing a reader wants, so its record
+// carries no type at all rather than the empty spelling of a name that has
+// none: the two cases are told apart by the client (D20.3).
 static str_t type_spelling(index_t* ix, const sym_t* s) {
-    if (s->type == NULL || s->error || s->kind == SYM_MODULE || s->kind == SYM_STRUCT ||
-        s->kind == SYM_ENUM) {
+    if (!has_value_type(s)) {
         return str_from_cstr("");
     }
     sb_clear(&ix->msg);
@@ -76,7 +82,25 @@ static bool starts_before(loc_t a, loc_t b) {
     return a.col < b.col;
 }
 
-static void record(index_t* ix, const ast_node_t* n) {
+// Whether the occurrence is the `as` alias of an import, which declares that
+// name in this module while the declaration it binds stands elsewhere (D9.3,
+// D20.3): the alias of a whole-module import hangs on the import node and the
+// alias of an item on the item. An import without an alias introduces the
+// name its declaration already has, so it is a use.
+static bool is_import_alias(const ast_node_t* parent, const ast_node_t* n) {
+    if (parent == NULL) {
+        return false;
+    }
+    if (parent->kind == AST_IMPORT) {
+        return n == parent->b;
+    }
+    if (parent->kind == AST_IMPORT_ITEM) {
+        return n == parent->a;
+    }
+    return false;
+}
+
+static void record(index_t* ix, const ast_node_t* n, const ast_node_t* parent) {
     const sym_t* s = n->sym;
     index_entry_t* e = mem_alloc((uint64_t)sizeof(index_entry_t));
     // The occurrence's own name token, never the construct's first one
@@ -85,9 +109,11 @@ static void record(index_t* ix, const ast_node_t* n) {
     e->name = n->name;
     e->kind = s->kind;
     e->type = type_spelling(ix, s);
-    // `sym->node` is the declaring node, so the declaration is the one
-    // occurrence that stands on it (sym.h).
-    e->is_decl = s->node == n;
+    // A declaration that failed to check has no type to show (D20.3).
+    e->has_type = !s->error;
+    // `sym->node` is the declaring node, so the declaration is the occurrence
+    // that stands on it (sym.h), and an alias declares its own name here.
+    e->is_decl = s->node == n || is_import_alias(parent, n);
     // A builtin is declared by no source, so it has no declaration range
     // (D12.2, D20.3).
     e->has_decl = s->node != NULL;
@@ -97,7 +123,9 @@ static void record(index_t* ix, const ast_node_t* n) {
 
 // ---- the walk ---------------------------------------------------------------------
 
-static void walk(index_t* ix, const ast_node_t* n) {
+// `parent` is the node this one hangs on, which is what tells an `as` alias
+// from an ordinary occurrence (D9.3); it is NULL at the module node.
+static void walk(index_t* ix, const ast_node_t* n, const ast_node_t* parent) {
     if (n == NULL) {
         return;
     }
@@ -106,14 +134,14 @@ static void walk(index_t* ix, const ast_node_t* n) {
     // import node the binding's, while the name a reader sees is on the path
     // segment or on the alias beside them (D20.3, sym.h).
     if (n->sym != NULL && n->name_loc.file != NULL) {
-        record(ix, n);
+        record(ix, n, parent);
     }
-    walk(ix, n->a);
-    walk(ix, n->b);
-    walk(ix, n->c);
-    walk(ix, n->d);
+    walk(ix, n->a, n);
+    walk(ix, n->b, n);
+    walk(ix, n->c, n);
+    walk(ix, n->d, n);
     for (uint64_t i = 0; i < ast_len(n); i++) {
-        walk(ix, ast_child(n, i));
+        walk(ix, ast_child(n, i), n);
     }
 }
 
@@ -142,38 +170,18 @@ static void index_module(index_t* ix, const module_t* m) {
         return;
     }
     const uint64_t start = ix->entries.len;
-    walk(ix, m->ast);
+    walk(ix, m->ast, NULL);
     sort_from(ix, start);
 }
 
-// Whether the loader put the module in the dependency order, which is where
-// the walk starts; check_program asks the same question the same way before
-// it checks the modules the walk never ordered.
-static bool in_dependency_order(const module_set_t* set, const module_t* m) {
-    for (uint64_t i = 0; i < module_set_count(set); i++) {
-        if (module_set_at(set, i) == m) {
-            return true;
-        }
-    }
-    return false;
-}
-
 void index_build(index_t* ix, const module_set_t* set) {
-    // The dependency order first, an imported module before its importers
-    // (D9.10, D20.3).
-    for (uint64_t i = 0; i < module_set_count(set); i++) {
-        index_module(ix, module_set_at(set, i));
-    }
-    // Then the modules the loader read but never ordered -- one whose own
-    // import failed, or an importer of a file that did not parse -- which the
-    // checker checked all the same, so that a file being edited is indexed
-    // whatever its imports do (D14.2, D20.1). They were read depth first, so
-    // the reverse of the read order puts an imported module first here too.
-    for (uint64_t i = set->modules.len; i > 0; i--) {
-        const module_t* m = (const module_t*)set->modules.items[i - 1];
-        if (!in_dependency_order(set, m)) {
-            index_module(ix, m);
-        }
+    // The pass order of modules.h, which is the order the checker used: an
+    // imported module before its importers (D9.10), then the modules the
+    // loader read but never ordered, so a file being edited is indexed
+    // whatever its imports do (D14.2, D20.1). The index's file order is that
+    // order (D20.3), so it is read from one place and not rebuilt here.
+    for (uint64_t i = 0; i < module_set_pass_count(set); i++) {
+        index_module(ix, module_set_pass_at(set, i));
     }
 }
 
@@ -207,7 +215,13 @@ void index_write_json(const index_t* ix, json_t* j) {
         json_key(j, "kind");
         json_cstr(j, sym_kind_name(e->kind));
         json_key(j, "type");
-        json_str(j, e->type);
+        if (e->has_type) {
+            json_str(j, e->type);
+        } else {
+            // The declaration failed to check, so there is no type to show
+            // and the client renders it as unknown (D14.2, D20.3).
+            json_null(j);
+        }
         json_key(j, "is_decl");
         json_bool(j, e->is_decl);
         json_key(j, "decl");

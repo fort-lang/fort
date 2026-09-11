@@ -32,15 +32,18 @@
 // One occurrence of one name (D20.3). `loc` is that name token's own range
 // and never the construct's first token (D20.4); `name` is the identifier as
 // it is spelled here, so an `as` alias reads as the alias (D9.3); `type` is
-// what a declaration of it would spell (D5.2) and is empty for a name that
-// denotes no value; `is_decl` marks the occurrence that declares the name;
-// `decl` is the declaring name's range, which `has_decl` denies to a builtin
-// alone, since no source declares one (D12.2).
+// what a declaration of it would spell (D5.2), empty for a name that denotes
+// no value type and absent, which `has_type` says, when the declaration
+// failed to check; `is_decl` marks an occurrence that declares the name in
+// this module, the `as` alias of an import included; `decl` is the declaring
+// name's range, which `has_decl` denies to a builtin alone, since no source
+// declares one (D12.2).
 typedef struct {
     loc_t loc;
     str_t name;
     sym_kind_t kind;
     str_t type;
+    bool has_type;
     bool is_decl;
     bool has_decl;
     loc_t decl;

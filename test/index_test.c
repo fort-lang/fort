@@ -206,6 +206,16 @@ TEST(a_directory_segment_of_an_import_path_carries_no_record, {
                        "main.ft:1:13-1:17 module util '' use sub/util.ft:1:1");
 })
 
+TEST(an_alias_of_an_import_that_failed_carries_no_record, {
+    begin();
+    add("main.ft", "import nothere as n;\nfn i32 main() { return 0; }\n");
+    TEST_ASSERT_FALSE(check_entry("main.ft"));
+    index_closure();
+    // The import bound nothing, so neither the path segment nor the alias
+    // denotes anything and the file indexes only what resolved (D20.3).
+    TEST_ASSERT_EQ_STR(file_text("main.ft"), "main@2:8");
+})
+
 TEST(the_module_node_itself_is_not_an_occurrence, {
     TEST_ASSERT_TRUE(index_src("fn i32 main() { return 0; }\n"));
     // The module's own record hangs on the module node, which has no name
@@ -226,8 +236,11 @@ TEST(a_name_that_did_not_resolve_carries_no_record, {
 TEST(a_declaration_that_failed_to_check_has_no_type_to_show, {
     TEST_ASSERT_FALSE(index_src("fn i32 main() {\n    nope n = 1;\n    return 0;\n}\n"));
     // Its type is the poison of D14.2, which says nothing a reader wants, so
-    // the record carries the empty spelling (D20.3).
-    TEST_ASSERT_EQ_STR(text_at(2, 10), "main.ft:2:10-2:11 local n '' decl main.ft:2:10");
+    // the record carries no type at all and a client renders it as unknown,
+    // which the empty spelling of a name that has no value type would not say
+    // (D20.3).
+    TEST_ASSERT_EQ_STR(text_at(2, 10), "main.ft:2:10-2:11 local n null decl main.ft:2:10");
+    TEST_ASSERT_FALSE(entry_at(2, 10)->has_type);
 })
 
 TEST(a_module_that_did_not_parse_contributes_nothing, {
@@ -262,12 +275,40 @@ TEST(an_alias_import_records_the_declaration_and_the_alias, {
     // denotes the same declaration under its own name (D9.3).
     TEST_ASSERT_EQ_STR(text_in("main.ft", 1, 14),
                        "main.ft:1:14-1:19 fn twice 'fn i32(i32)' use util.ft:1:8");
-    // A record names the identifier as it is spelled there, so the alias
-    // reads as the alias and points at the declaration it binds (D9.3, D20.3).
+    // A record names the identifier as it is spelled there, and the alias
+    // declares that name in this module while pointing at the declaration it
+    // binds, so a rename starts here and a jump lands there (D9.3, D20.3).
     TEST_ASSERT_EQ_STR(text_in("main.ft", 1, 23),
-                       "main.ft:1:23-1:29 fn double 'fn i32(i32)' use util.ft:1:8");
+                       "main.ft:1:23-1:29 fn double 'fn i32(i32)' decl util.ft:1:8");
     TEST_ASSERT_EQ_STR(text_in("main.ft", 2, 24),
                        "main.ft:2:24-2:30 fn double 'fn i32(i32)' use util.ft:1:8");
+})
+
+TEST(a_whole_module_alias_declares_its_name_here, {
+    begin();
+    add("util.ft", "fn i32 twice(i32 n) { return n + n; }\n");
+    add("main.ft", "import util as u;\nfn i32 main() { return u.twice(1); }\n");
+    TEST_ASSERT_TRUE(check_entry("main.ft"));
+    index_closure();
+    // `import util as u;` names the module `u` in this file (D9.3), so the
+    // alias declares that name while the path segment stays a use of the
+    // module and both point at the module's file (D20.3).
+    TEST_ASSERT_EQ_STR(text_in("main.ft", 1, 8), "main.ft:1:8-1:12 module util '' use util.ft:1:1");
+    TEST_ASSERT_EQ_STR(text_in("main.ft", 1, 16), "main.ft:1:16-1:17 module u '' decl util.ft:1:1");
+    TEST_ASSERT_EQ_STR(text_in("main.ft", 2, 24), "main.ft:2:24-2:25 module u '' use util.ft:1:1");
+})
+
+TEST(one_module_imported_under_two_names_declares_both, {
+    begin();
+    add("util.ft", "fn i32 twice(i32 n) { return n + n; }\n");
+    add("main.ft", "import util;\nimport util as u;\nfn i32 main() { return u.twice(1); }\n");
+    TEST_ASSERT_TRUE(check_entry("main.ft"));
+    index_closure();
+    // A module may be imported under several names (module-system.md 3); the
+    // alias is a declaration here and the plain import is not, since it
+    // introduces the name the module already has (D20.3).
+    TEST_ASSERT_EQ_STR(text_in("main.ft", 1, 8), "main.ft:1:8-1:12 module util '' use util.ft:1:1");
+    TEST_ASSERT_EQ_STR(text_in("main.ft", 2, 16), "main.ft:2:16-2:17 module u '' decl util.ft:1:1");
 })
 
 TEST(an_item_list_records_the_module_and_every_item, {
@@ -282,8 +323,10 @@ TEST(an_item_list_records_the_module_and_every_item, {
                        "main.ft:1:15-1:20 fn twice 'fn i32(i32)' use util.ft:1:8");
     TEST_ASSERT_EQ_STR(text_in("main.ft", 1, 22),
                        "main.ft:1:22-1:27 constant LIMIT 'i32' use util.ft:2:5");
+    // The alias of an item declares its name here too (D9.3); the item
+    // without one introduces the name its declaration already has.
     TEST_ASSERT_EQ_STR(text_in("main.ft", 1, 31),
-                       "main.ft:1:31-1:34 constant CAP 'i32' use util.ft:2:5");
+                       "main.ft:1:31-1:34 constant CAP 'i32' decl util.ft:2:5");
 })
 
 TEST(a_designator_records_the_field_it_names, {
@@ -468,6 +511,23 @@ TEST(an_entry_that_did_not_parse_yields_an_empty_index, {
     TEST_ASSERT_EQ_UINT64(index_count(&ix), (uint64_t)0);
 })
 
+static void pass_past_the_end(void) {
+    module_set_t empty;
+    module_set_init(&empty);
+    TEST_UNUSED(module_set_pass_at(&empty, 0));
+    module_set_free(&empty);
+}
+
+TEST(a_module_past_the_end_of_the_pass_order_is_an_internal_error, {
+    char err[ERR_CAP];
+    // The order the checker and the index walk share is asked for by index,
+    // so asking past its end is a bug like any other bounds failure.
+    const int status = run_forked(pass_past_the_end, err, sizeof err);
+    TEST_ASSERT_EQ_INT32(status, FATAL_EXIT_STATUS);
+    TEST_ASSERT_EQ_STR(err,
+                       "fort: error: internal error: module_set_pass_at: index out of range\n");
+})
+
 static void index_past_the_end(void) {
     index_t empty;
     index_init(&empty);
@@ -529,12 +589,15 @@ int main(int argc, char** argv) {
     TEST_RUN(an_operand_comes_before_the_field_it_is_read_through);
     TEST_RUN(the_records_of_one_line_are_in_column_order);
     TEST_RUN(a_directory_segment_of_an_import_path_carries_no_record);
+    TEST_RUN(an_alias_of_an_import_that_failed_carries_no_record);
     TEST_RUN(the_module_node_itself_is_not_an_occurrence);
     TEST_RUN(a_name_that_did_not_resolve_carries_no_record);
     TEST_RUN(a_declaration_that_failed_to_check_has_no_type_to_show);
     TEST_RUN(a_module_that_did_not_parse_contributes_nothing);
     TEST_RUN(a_module_whose_import_failed_is_indexed_all_the_same);
     TEST_RUN(an_alias_import_records_the_declaration_and_the_alias);
+    TEST_RUN(a_whole_module_alias_declares_its_name_here);
+    TEST_RUN(one_module_imported_under_two_names_declares_both);
     TEST_RUN(an_item_list_records_the_module_and_every_item);
     TEST_RUN(a_designator_records_the_field_it_names);
     TEST_RUN(a_shadowing_local_hides_the_module_level_name);
@@ -554,6 +617,7 @@ int main(int argc, char** argv) {
     TEST_RUN(an_importer_of_a_broken_module_is_indexed_all_the_same);
     TEST_RUN(a_struct_literal_and_an_array_literal_record_their_type_names);
     TEST_RUN(an_entry_that_did_not_parse_yields_an_empty_index);
+    TEST_RUN(a_module_past_the_end_of_the_pass_order_is_an_internal_error);
     TEST_RUN(a_record_past_the_end_is_an_internal_error);
     TEST_RUN(an_empty_index_holds_nothing);
     TEST_RUN(freeing_an_index_leaves_it_usable);

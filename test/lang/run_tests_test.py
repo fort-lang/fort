@@ -1961,6 +1961,37 @@ class GoldenIndex(EndToEnd):
         self.assertEqual(status, 1)
         self.assertIn('symbols[0]: the declaration\'s "decl" is not its own range', lines[0])
 
+    def test_an_alias_declares_a_name_for_a_declaration_elsewhere(self):
+        _, entry = self.write_test([])
+        symbols = [self.record(entry, name="double", is_decl=True)]
+        symbols[0]["decl"] = {
+            "file": "run/modules/indexed/other.ft",
+            "line": 1,
+            "col": 1,
+            "end_line": 1,
+            "end_col": 1,
+        }
+        write(self.corpus, "run/modules/indexed/other.ft", "fn i32 f() { return 0; }\n")
+        # An `as` alias is the one declaration whose "decl" is in another file
+        # (D9.3, D20.3), so the harness accepts it and nothing else.
+        status, lines, _ = self.run_indexed(
+            symbols, extra=["//@ json-file run/modules/indexed/other.ft"]
+        )
+        self.assertEqual((status, lines[0]), (0, "PASS run/modules/indexed"))
+
+    def test_a_null_type_is_a_declaration_that_failed_to_check(self):
+        _, entry = self.write_test([])
+        symbols = [self.record(entry, kind="local", type_=None, is_decl=True)]
+        status, lines, _ = self.run_indexed(symbols)
+        self.assertEqual((status, lines[0]), (0, "PASS run/modules/indexed"))
+
+    def test_a_type_that_is_neither_a_string_nor_null_fails(self):
+        _, entry = self.write_test([])
+        symbols = [self.record(entry, type_=7)]
+        status, lines, _ = self.run_indexed(symbols, [self.record(entry)])
+        self.assertEqual(status, 1)
+        self.assertIn("symbols[0]: type is 7", lines[0])
+
     def test_a_range_outside_its_file_fails(self):
         _, entry = self.write_test([])
         symbols = [self.record(entry, line=99)]

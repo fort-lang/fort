@@ -1177,19 +1177,30 @@ decided here and lands after the self-hosted compiler.
   name the reader pointed at and nothing else. `"kind"` is the kind of what the name denotes,
   spelled as a diagnostic spells it: `module`, `fn`, `extern fn`, `struct`, `enum`, `enum member`,
   `field`, `constant`, `global`, `local`, `parameter` or `builtin` (D7.9, D7.10, D3.9, D12.2).
-  `"type"` is the declaration's type as a declaration spells it (D5.2, D5.3), and is empty for a
-  name that denotes no value: a module, a struct name, an enum name and a builtin. `"is_decl"` is
-  true on the occurrence that declares the name and false on every use of it. `"decl"` is the range
-  of the declaring name token, which is the range of that record; it is `null` for a builtin, which
-  no source declares, and the empty range at 1:1 of the module's own file for a module, which is
-  declared by a file and has no name token (D9.1, and D14.2's position for what has none). Records
-  are ordered by file, an imported module before its importers (D9.10), and within a file by the
-  start of the occurrence. A name the checker did not resolve carries no record, so a file with
-  errors still indexes everything that resolved; neither does a construct that has no name token of
-  its own, nor a segment of an import path before its last, which names a search directory and not
-  a module (D9.2, D9.3). An occurrence and its declaration each carry the type and the declaration
-  range in full: the document is read once and thrown away, so a client never resolves a reference
-  into a second table.
+  `"type"` is the declaration's type as a declaration spells it (D5.2, D5.3). It is the empty string
+  for a name that denotes no value type -- a module, a struct name, an enum name, a builtin -- and
+  `null` when the declaration failed to check, whose type is the poison of D14.2 and says nothing a
+  reader wants; a client renders `null` as unknown and the empty string as nothing at all, so the
+  two cases stay apart. `"is_decl"` is true on the occurrence that declares the name here and false
+  on every use of it. The `as` alias of an import is a declaration by that rule: it introduces the
+  name in the importing module (D9.3), so its occurrence is `true` while its `"decl"` still points
+  at the declaration it binds, since going to the definition of an alias must land on the thing and
+  not on the import line; an import without an alias introduces the name the declaration already
+  has, so its occurrence is a use like any other. `"decl"` is the range of the declaring name token,
+  which for a record with `"is_decl"` is its own range except on an alias; it is `null` for a
+  builtin, which no source declares, and the empty range at 1:1 of the module's own file for a
+  module, which is declared by a file and has no name token (D9.1, and D14.2's position for what has
+  none): going to the definition of a module qualifier then opens that file at the top, where
+  `null` would be indistinguishable from a builtin's nothing to jump to. The consequence is that no
+  record has `"is_decl"` true for kind `module`, so a module has no rename anchor. Records are
+  ordered by file, an imported module before its importers (D9.10), and within a file by the start
+  of the occurrence. A name the checker did not resolve carries no record, so a file with errors
+  still indexes everything that resolved; neither does a construct that has no name token of its
+  own, nor a segment of an import path before its last, which names a search directory and not a
+  module (D9.2, D9.3), nor the pseudo-fields `.len` and `.ptr`, which are a property of the type
+  rather than a declaration of any module (D3.4, D3.5, D3.7). An occurrence and its declaration each
+  carry the type and the declaration range in full: the document is read once and thrown away, so a
+  client never resolves a reference into a second table.
 - **D20.4** Ranges. A position is a range: from the first byte of its first token to one past the
   last byte of its last token, the start inclusive and the end exclusive, both 1-based byte
   columns with a tab counting as one column (D14.2). No token spans lines (D2.9), so the range of

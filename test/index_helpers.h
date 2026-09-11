@@ -69,8 +69,9 @@ static inline void append_pos(sb_t* out, loc_t loc) {
 }
 
 // One record as a line: the range of the occurrence, the kind, the name, the
-// type in quotes, `decl` or `use`, and the declaration's position or `null`
-// (D20.3). Valid until the next call.
+// type in quotes or a bare `null` when the declaration failed to check,
+// `decl` or `use`, and the declaration's position or `null` (D20.3). Valid
+// until the next call.
 static inline const char* entry_text(const index_entry_t* e) {
     static sb_t out;
     static bool ready = false;
@@ -92,9 +93,15 @@ static inline const char* entry_text(const index_entry_t* e) {
     sb_append(&out, sym_kind_name(e->kind));
     sb_push(&out, ' ');
     sb_append_str(&out, e->name);
-    sb_append(&out, " '");
-    sb_append_str(&out, e->type);
-    sb_append(&out, "' ");
+    sb_push(&out, ' ');
+    if (e->has_type) {
+        sb_push(&out, '\'');
+        sb_append_str(&out, e->type);
+        sb_push(&out, '\'');
+    } else {
+        sb_append(&out, "null");
+    }
+    sb_push(&out, ' ');
     sb_append(&out, e->is_decl ? "decl " : "use ");
     if (e->has_decl) {
         append_pos(&out, e->decl);

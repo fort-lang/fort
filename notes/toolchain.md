@@ -32,7 +32,7 @@ file (D14.1). Options and the entry file may appear in any order.
 | `-Xcc <arg>`        | passed to `--cc` verbatim, after the arguments below       | none       |
 | `--check`           | run the front end only and stop (D20.1)                    | off        |
 | `--json`            | write the check document to stdout (D20.2), needs `--check`| off        |
-| `--index`           | fill the document's identifier index (D20.3)                | off        |
+| `--index`           | fill the document's identifier index (D20.3)               | off        |
 | `--help`            | print the usage line and exit 0                            |            |
 | `--version`         | print the compiler version and exit 0                      |            |
 
@@ -1381,19 +1381,30 @@ editor needs; without it `"symbols"` is the empty array.
   `extern fn`, `struct`, `enum`, `enum member`, `field`, `constant`, `global`, `local`, `parameter`
   or `builtin` (D7.9, D7.10, D3.9, D12.2).
 - `"type"` is the declaration's type as a declaration spells it, the `mut` of level 0 included
-  (D5.2, D5.3): `i32`, `i32 mut* own`, `fn i32(i32, i32)`. It is empty for a name that denotes no
-  value, which is a module, a struct name, an enum name and a builtin.
-- `"is_decl"` is true on the occurrence that declares the name and false on every use of it, and
-  `"decl"` is the range of that declaring name token: for the declaration itself, its own range.
-  `"decl"` is `null` for a builtin, which no source declares (D12.2), and the empty range at 1:1 of
+  (D5.2, D5.3): `i32`, `i32 mut* own`, `fn i32(i32, i32)`. It is the empty string for a name that
+  denotes no value type, which is a module, a struct name, an enum name and a builtin, and `null`
+  when the declaration failed to check, which a client renders as unknown: the type it has is the
+  poison of section 4 and says nothing a reader wants (D20.3).
+- `"is_decl"` is true on the occurrence that declares the name in this file and false on every use
+  of it, and `"decl"` is the range of the declaring name token: for a declaration, its own range.
+  An `as` alias declares its name in the importing module (D9.3), so it is the one record with
+  `"is_decl"` true whose `"decl"` lies elsewhere: going to the definition of `double` in
+  `import util::twice as double;` lands on `twice`, while the alias is still the anchor a rename of
+  `double` in this file starts from. An import without an alias introduces the name its declaration
+  already has, so its occurrence is a use.
+- `"decl"` is `null` for a builtin, which no source declares (D12.2), and the empty range at 1:1 of
   the module's file for a module, which a file declares and which has no name token (D9.1), so
-  jumping to the definition of `mathx` in `mathx.add(1, 2)` opens `mathx.ft`.
+  jumping to the definition of `mathx` in `mathx.add(1, 2)` opens `mathx.ft` at the top rather than
+  reading as a builtin's nothing to jump to. No record is therefore a module's declaration, and a
+  module has no rename anchor.
 - Records are ordered by file, an imported module before its importers (D9.10), and within a file
   by the start of the occurrence, so a client may bisect the records of a file by position.
 - A name the checker could not resolve carries no record, and a file that did not parse
   contributes none, so a file with errors still indexes everything that resolved. A construct with
   no name token of its own carries none either, and neither does a segment of an import path
-  before its last: those name search directories, not modules (D9.2, D9.3).
+  before its last: those name search directories, not modules (D9.2, D9.3). The pseudo-fields
+  `.len` and `.ptr` carry none: they are a property of the type and not a declaration of any
+  module (D3.4, D3.5, D3.7).
 - Every record repeats the type and the declaration range of the name it resolves, so a client
   answers hover and go-to-definition from the record under the cursor alone.
 

@@ -183,6 +183,33 @@ TEST(one_record_per_occurrence_and_no_more, {
     TEST_ASSERT_EQ_UINT64(index_count(&ix), (uint64_t)4);
 })
 
+TEST(an_alias_declares_a_name_here_for_a_declaration_elsewhere, {
+    begin();
+    add("util.ft", "fn i32 twice(i32 n) { return n + n; }\n");
+    add("main.ft", "import util::twice as double;\nfn i32 main() { return double(2); }\n");
+    TEST_ASSERT_TRUE(check_entry("main.ft"));
+    index_closure();
+    char want[TEXT_CAP];
+    TEST_UNUSED(snprintf(want,
+                         sizeof want,
+                         "\"name\":\"double\",\"kind\":\"fn\",\"type\":\"fn i32(i32)\","
+                         "\"is_decl\":true,\"decl\":{\"file\":\"%s\",\"line\":1,\"col\":8,"
+                         "\"end_line\":1,\"end_col\":13}}",
+                         file_of("util.ft")));
+    // The alias declares `double` in this module while the declaration it
+    // binds stands in the other file, so a rename anchors here and a jump
+    // lands there (D9.3, D20.3).
+    TEST_ASSERT_NONNULL(strstr(symbols_text(), want));
+})
+
+TEST(a_declaration_that_failed_to_check_writes_a_null_type, {
+    TEST_ASSERT_FALSE(index_src("fn i32 main() {\n    nope n = 1;\n    return 0;\n}\n"));
+    // `null` is the type of a declaration that failed and `""` the type of a
+    // name that denotes no value type, so a client tells them apart (D20.3).
+    TEST_ASSERT_NONNULL(strstr(symbols_text(), "\"name\":\"n\",\"kind\":\"local\",\"type\":null,"));
+    TEST_ASSERT_NULL(strstr(symbols_text(), "<error>"));
+})
+
 TEST(the_array_carries_the_records_of_every_file_of_the_closure, {
     begin();
     add("util.ft", "i32 LIMIT = 4;\n");
@@ -219,6 +246,8 @@ int main(int argc, char** argv) {
     TEST_RUN(the_array_nests_under_the_symbols_key_of_a_document);
     TEST_RUN(a_document_of_a_module_with_an_error_still_carries_what_resolved);
     TEST_RUN(one_record_per_occurrence_and_no_more);
+    TEST_RUN(an_alias_declares_a_name_here_for_a_declaration_elsewhere);
+    TEST_RUN(a_declaration_that_failed_to_check_writes_a_null_type);
     TEST_RUN(the_array_carries_the_records_of_every_file_of_the_closure);
     TEST_RUN(a_record_of_the_entry_names_the_file_the_compiler_opened);
     index_reset();

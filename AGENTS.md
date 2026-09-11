@@ -264,7 +264,10 @@ A safe(r) C-like systems programming language.
   or `type` slot dangles the moment `check_free` runs (sym.h). A build frees it as soon as the
   front end returns; `--check --json` frees it after the document has been written, since the
   index walk of D20.3 reads the trees then. A new pass over an annotated tree goes in that
-  window, not after it.
+  window, not after it. A whole-closure pass also takes its order from `module_set_pass_at`
+  (modules.h): the dependency order, then the modules the loader read but never ordered. The
+  checker and the index walk share it because the index's file order is documented as the
+  checker's order (D20.3), and two copies of that loop would drift with no test able to see it.
 - **Citing decisions in code**: a citation goes on the line or function that implements the
   rule, with a phrase stating the rule (`// pointers print as 0x + lowercase hex, 0x0 for null
   (D11.7)`), so a reader learns the rule without opening the log. A bare tag list at file or

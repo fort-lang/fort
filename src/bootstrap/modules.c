@@ -844,6 +844,52 @@ const module_t* module_set_at(const module_set_t* set, uint64_t i) {
     return (const module_t*)set->order.items[i];
 }
 
+bool module_set_is_ordered(const module_set_t* set, const module_t* m) {
+    for (uint64_t i = 0; i < set->order.len; i++) {
+        if (set->order.items[i] == m) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Whether the module belongs to the second group of the pass order: it parsed
+// and the loader never ordered it (D14.2).
+static bool is_unordered_pass_module(const module_set_t* set, const module_t* m) {
+    return m->parsed && m->ast != NULL && !module_set_is_ordered(set, m);
+}
+
+uint64_t module_set_pass_count(const module_set_t* set) {
+    uint64_t n = set->order.len;
+    for (uint64_t i = 0; i < set->modules.len; i++) {
+        if (is_unordered_pass_module(set, (const module_t*)set->modules.items[i])) {
+            n++;
+        }
+    }
+    return n;
+}
+
+const module_t* module_set_pass_at(const module_set_t* set, uint64_t i) {
+    if (i < set->order.len) {
+        return (const module_t*)set->order.items[i];
+    }
+    // The second group is read depth first, so it is visited in the reverse of
+    // the read order (D9.10).
+    uint64_t seen = set->order.len;
+    for (uint64_t k = set->modules.len; k > 0; k--) {
+        const module_t* m = (const module_t*)set->modules.items[k - 1];
+        if (!is_unordered_pass_module(set, m)) {
+            continue;
+        }
+        if (seen == i) {
+            return m;
+        }
+        seen++;
+    }
+    fatal_internal("module_set_pass_at: index out of range");
+    return NULL;
+}
+
 // Every file read, whether or not its module parsed: a module is recorded
 // before it is lexed, so a file with errors is listed too (D20.2).
 uint64_t module_set_file_count(const module_set_t* set) {

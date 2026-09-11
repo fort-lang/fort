@@ -2881,34 +2881,17 @@ bool check_module(check_t* ck, const module_t* m) {
     return ck->errors == before;
 }
 
-// Whether the module is one the loader put in the dependency order, which is
-// where check_program starts.
-static bool in_dependency_order(const module_set_t* set, const module_t* m) {
-    for (uint64_t i = 0; i < module_set_count(set); i++) {
-        if (module_set_at(set, i) == m) {
-            return true;
-        }
-    }
-    return false;
-}
-
 bool check_program(check_t* ck, const module_set_t* set) {
     bool ok = true;
-    // Every module of the closure is checked, in dependency order (D9.10,
-    // D14.2): an imported module is complete before its importer reads it.
-    for (uint64_t i = 0; i < module_set_count(set); i++) {
-        if (!check_module(ck, module_set_at(set, i))) {
-            ok = false;
-        }
-    }
-    // A module the walk did not finish -- one whose own import failed, or an
-    // importer of a file that did not parse -- is still checked when it
-    // parsed itself, so that its own errors are reported and not only its
-    // import's (D14.2, D20.1). They are read depth first, so the reverse of
-    // the read order puts an imported module before its importer.
-    for (uint64_t i = set->modules.len; i > 0; i--) {
-        const module_t* m = (const module_t*)set->modules.items[i - 1];
-        if (m->parsed && m->ast != NULL && !in_dependency_order(set, m) && !check_module(ck, m)) {
+    // Every module of the closure in the pass order of modules.h: the
+    // dependency order first, so an imported module is complete before its
+    // importer reads it (D9.10), then a module the walk did not finish -- one
+    // whose own import failed, or an importer of a file that did not parse --
+    // which is still checked when it parsed itself, so that its own errors
+    // are reported and not only its import's (D14.2, D20.1). The index walk
+    // reads the same order, which is why neither builds one of its own.
+    for (uint64_t i = 0; i < module_set_pass_count(set); i++) {
+        if (!check_module(ck, module_set_pass_at(set, i))) {
             ok = false;
         }
     }
