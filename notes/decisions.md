@@ -772,7 +772,7 @@ Owner: `toolchain.md`.
   `--target` and `-Xcc` did not exist.
 - **D14.2** Diagnostics: `<file>:<line>:<col>: error: <message>` on stderr, one per line,
   optionally followed by `note:` lines. Errors without a position in the file (a missing
-  `main`, an invalid module name) use `1:1`. A syntax error stops the compilation of that file
+  `main`) use `1:1`. A syntax error stops the compilation of that file
   after one diagnostic (no recovery in v1). Modules are checked in dependency order; all semantic
   errors of the first module that has any are reported, then compilation stops. Positions of
   errors that concern a whole construct: "missing return" and a non-exhaustive enum `switch`
