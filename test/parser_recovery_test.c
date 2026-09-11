@@ -513,6 +513,175 @@ TEST(an_error_node_covers_the_skipped_region_and_has_no_children, {
     TEST_ASSERT_EQ_STR(dumped(err), "(error)");
 })
 
+// ---- the boundaries ------------------------------------------------------
+
+// A lexical error still stops the file after one diagnostic: recovery is the
+// parser's, the lexer is unchanged (D14.2), so the parser never runs and the
+// mistakes after the bad literal are not reported.
+TEST(a_lexical_error_still_stops_the_file, {
+    TEST_ASSERT_NULL(parse_text("fn i32 main() {\n"
+                                "    i32 a = 0xZ;\n"
+                                "    i32 b = ;\n"
+                                "}\n"));
+    TEST_ASSERT_EQ_STR(parse_diags(), "t.ft:2:13: error: hex literal needs at least one digit\n");
+})
+
+// The empty file and the file that is one stray token: the first reports
+// nothing and the second reports once, since a recovery that consumed nothing
+// would spin at the end of the file (D14.2).
+TEST(an_empty_file_and_a_one_token_file, {
+    TEST_ASSERT_EQ_STR(parse_dump(""), "(module)");
+    TEST_ASSERT_EQ_STR(parse_fails("}"), "t.ft:1:1: error: expected a type, found '}'\n");
+    TEST_ASSERT_EQ_STR(parse_fails(";"), "t.ft:1:1: error: expected a type, found ';'\n");
+    TEST_ASSERT_EQ_STR(parse_fails("i32"),
+                       "t.ft:1:4: error: expected an identifier, found end of file\n");
+})
+
+// The nesting limit of D2.11 is reported once: the construct that broke it
+// unwinds to the nearest recovery point, which skips over the whole nest
+// instead of walking back into it.
+TEST(nesting_past_the_limit_is_reported_once, {
+    sb_t src;
+    sb_init(&src);
+    sb_append(&src, "fn void f() ");
+    for (uint64_t i = 0; i < 257; i++) {
+        sb_push(&src, '{');
+    }
+    for (uint64_t i = 0; i < 257; i++) {
+        sb_push(&src, '}');
+    }
+    sb_push(&src, '\n');
+    TEST_ASSERT_EQ_UINT64(diag_lines(sb_cstr(&src)), (uint64_t)1);
+    TEST_ASSERT_EQ_STR(parse_fails(sb_cstr(&src)), "t.ft:1:270: error: nesting deeper than 256\n");
+    sb_free(&src);
+})
+
+// Exactly twenty errors are all reported; the twenty-first is not.
+TEST(the_cap_is_twenty_errors, {
+    sb_t src;
+    sb_init(&src);
+    for (uint64_t i = 0; i < 20; i++) {
+        sb_append(&src, "i32 a = ;\n");
+    }
+    TEST_ASSERT_EQ_UINT64(diag_lines(sb_cstr(&src)), (uint64_t)20);
+    sb_append(&src, "i32 a = ;\n");
+    TEST_ASSERT_EQ_UINT64(diag_lines(sb_cstr(&src)), (uint64_t)20);
+    sb_free(&src);
+})
+
+// ---- where a skip stops ---------------------------------------------------
+
+// The `}` of a block the failed construct opened is consumed with it, so the
+// statement after that block is read as a statement and not as a leftover.
+TEST(a_skip_consumes_the_block_of_the_failed_statement, {
+    TEST_ASSERT_EQ_STR(parse_fails("fn i32 f() {\n"
+                                   "    if c) { g(); }\n"
+                                   "    h();\n"
+                                   "    return 0;\n"
+                                   "}\n"),
+                       "t.ft:2:8: error: expected '(', found identifier 'c'\n");
+    TEST_ASSERT_EQ_STR(parse_dump("fn i32 f() {\n"
+                                  "    if c) { g(); }\n"
+                                  "    h();\n"
+                                  "    return 0;\n"
+                                  "}\n"),
+                       "(module (fn (type (prim i32)) f (params) (block (error) "
+                       "(call-stmt (call (ident h))) (return (int 0)))))");
+})
+
+// An import that does not parse is skipped like any declaration, and the
+// imports and declarations after it are read (D9.3).
+TEST(a_broken_import_does_not_stop_the_imports, {
+    TEST_ASSERT_EQ_STR(parse_fails("import ;\n"
+                                   "import std::io;\n"
+                                   "fn i32 main() { return 0; }\n"),
+                       "t.ft:1:8: error: expected an identifier, found ';'\n");
+    TEST_ASSERT_EQ_STR(parse_dump("import ;\n"
+                                  "import std::io;\n"
+                                  "fn i32 main() { return 0; }\n"),
+                       "(module (error) (import (path std io) nil) "
+                       "(fn (type (prim i32)) main (params) (block (return (int 0)))))");
+})
+
+// An import after a declaration is reported before a token is consumed, so the
+// recovery consumes one itself and the declaration after it is read: the rule
+// that keeps parse_module from spinning (D14.2).
+TEST(a_late_import_is_reported_once_and_skipped, {
+    TEST_ASSERT_EQ_STR(parse_fails("fn i32 main() { return 0; }\n"
+                                   "import std::io;\n"
+                                   "fn i32 g() { return 1; }\n"),
+                       "t.ft:2:1: error: an import comes before every declaration\n");
+    TEST_ASSERT_EQ_STR(parse_dump("fn i32 main() { return 0; }\n"
+                                  "import std::io;\n"
+                                  "fn i32 g() { return 1; }\n"),
+                       "(module (fn (type (prim i32)) main (params) (block (return (int 0)))) "
+                       "(error) (fn (type (prim i32)) g (params) (block (return (int 1)))))");
+})
+
+// The `{` of a brace initializer that is never closed is dropped with the
+// statement it belongs to: a skip counts only the braces it sees opened, so
+// the `}` of the enclosing block stays that block's and the statements after
+// the broken one are read (D14.2).
+TEST(an_unclosed_brace_initializer_costs_one_statement, {
+    TEST_ASSERT_EQ_STR(parse_fails("fn i32 main() {\n"
+                                   "    point p = {1, ;\n"
+                                   "    return 0;\n"
+                                   "}\n"),
+                       "t.ft:2:19: error: expected an expression, found ';'\n");
+    TEST_ASSERT_EQ_STR(parse_dump("fn i32 main() {\n"
+                                  "    point p = {1, ;\n"
+                                  "    return 0;\n"
+                                  "}\n"),
+                       "(module (fn (type (prim i32)) main (params) (block "
+                       "(error) (return (int 0)))))");
+})
+
+// The error node of each recovery point covers the region its skip dropped.
+TEST(every_recovery_point_records_what_it_skipped, {
+    const ast_node_t* mod = parse_text("i32 a = ;\n");
+    TEST_ASSERT_NONNULL(mod);
+    TEST_ASSERT_EQ_STR(text_of(ast_child(mod, 0)), "i32 a = ;");
+    mod = parse_text("struct s {\n    i32 ;\n    i32 y;\n}\n");
+    TEST_ASSERT_NONNULL(mod);
+    TEST_ASSERT_EQ_STR(text_of(ast_child(ast_child(mod, 0), 0)), "i32 ;");
+    mod = parse_text("fn void f() {\n    switch (c) {\n    case 1:\n        x = ;\n    }\n}\n");
+    TEST_ASSERT_NONNULL(mod);
+    const ast_node_t* clause = ast_child(ast_child(ast_child(mod, 0)->b, 0), 0);
+    TEST_ASSERT_EQ_STR(text_of(ast_child(clause->a, 0)), "x = ;");
+})
+
+// A bracket a construct leaves open costs that construct and the statements
+// up to the next boundary, and nothing else: an unclosed `(` ends at the next
+// statement keyword, an unclosed `{` at the `;` of the declaration it is in,
+// and a `}` that closes nothing at the top level is one diagnostic, not a
+// second file (D14.2).
+TEST(an_unclosed_bracket_costs_its_construct_and_no_more, {
+    TEST_ASSERT_EQ_STR(parse_fails("fn i32 main() {\n"
+                                   "    g(1, 2;\n"
+                                   "    h();\n"
+                                   "    return 0;\n"
+                                   "}\n"),
+                       "t.ft:2:11: error: expected ')', found ';'\n");
+    TEST_ASSERT_EQ_STR(parse_dump("fn i32 main() {\n"
+                                  "    g(1, 2;\n"
+                                  "    h();\n"
+                                  "    return 0;\n"
+                                  "}\n"),
+                       "(module (fn (type (prim i32)) main (params) (block "
+                       "(error) (return (int 0)))))");
+    TEST_ASSERT_EQ_STR(parse_fails("i32 a = {1, 2;\n"
+                                   "fn i32 main() {\n"
+                                   "    return 0;\n"
+                                   "}\n"),
+                       "t.ft:1:14: error: expected '}', found ';'\n");
+    TEST_ASSERT_EQ_STR(parse_fails("fn void f() {\n"
+                                   "    x = 1;\n"
+                                   "}\n"
+                                   "}\n"
+                                   "fn void g() { }\n"),
+                       "t.ft:4:1: error: expected a type, found '}'\n");
+})
+
 // ---- the fail corpus (D14.4) ----------------------------------------------
 
 enum { CORPUS_PATH_CAP = 512, CORPUS_CHUNK = 4096, CORPUS_MIN_FILES = 90 };
@@ -691,6 +860,16 @@ int main(int argc, char** argv) {
     TEST_RUN(two_errors_at_one_position_are_reported_once);
     TEST_RUN(a_file_with_errors_still_yields_a_tree);
     TEST_RUN(an_error_node_covers_the_skipped_region_and_has_no_children);
+    TEST_RUN(a_lexical_error_still_stops_the_file);
+    TEST_RUN(an_empty_file_and_a_one_token_file);
+    TEST_RUN(nesting_past_the_limit_is_reported_once);
+    TEST_RUN(the_cap_is_twenty_errors);
+    TEST_RUN(a_skip_consumes_the_block_of_the_failed_statement);
+    TEST_RUN(a_broken_import_does_not_stop_the_imports);
+    TEST_RUN(a_late_import_is_reported_once_and_skipped);
+    TEST_RUN(an_unclosed_brace_initializer_costs_one_statement);
+    TEST_RUN(every_recovery_point_records_what_it_skipped);
+    TEST_RUN(an_unclosed_bracket_costs_its_construct_and_no_more);
     TEST_RUN(the_fail_corpus_reports_only_on_annotated_lines);
     sb_free(&corpus_report);
     sb_free(&corpus_src);
