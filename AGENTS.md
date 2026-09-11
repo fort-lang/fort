@@ -399,7 +399,12 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
 - A ticket is assigned only when every ticket in its `depends-on` is in `done/`. Independent
   tickets are assigned concurrently, one implementor each.
 - Acceptance criteria are verifiable inside the VM; the log records every hand-off with its
-  evidence (commands run, results, review rounds, merge sha).
+  evidence (commands run, results, review rounds, merge sha). Evidence must outlive the agent that
+  produced it: a command anyone can re-run, a commit sha, a file in the repository. A criterion
+  ticked against "the report" is ticked against prose that exists nowhere once the agent returns,
+  and nobody can ever re-check it -- T-069's audit of all 86 amended decisions is gone for exactly
+  that reason, leaving only the findings that reached a commit message. An agent whose deliverable
+  is an analysis rather than code writes it into the ticket or into `notes/`, and cites that.
 - Every ticket meets the 3:1 test-to-code ratio on its own diff, not on the repository average:
   `tools/vm run 'python3 tools/lines.py --since main --min 3.0'` is an acceptance criterion of every
   ticket that adds compiler lines, and the implementor runs it before the gate. The repository ratio
