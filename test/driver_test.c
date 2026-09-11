@@ -18,6 +18,7 @@
 
 #include <sys/stat.h>
 
+#include "diag.h"
 #include "str.h"
 
 #include "test.h"
@@ -1139,6 +1140,81 @@ TEST(exit_status_constants_match_d14_1, {
     TEST_ASSERT_EQ_INT32(FORT_EXIT_USAGE, 2);
 })
 
+// ---- the front end (toolchain.md 2, steps 1 and 2) -------------------------------
+
+// The compile-time diagnostics of D14.2 go to stderr, not to the stream
+// driver_main writes its `fort: error:` lines to, so a test that wants them
+// captures them with diag_capture; the run is otherwise an ordinary one.
+static char last_diags[CAPTURE_MAX];
+
+static run_t run_and_capture(char** argv) {
+    sb_t sink;
+    sb_init(&sink);
+    diag_capture(&sink);
+    const run_t run = run_driver(argv);
+    diag_capture(NULL);
+    TEST_UNUSED(snprintf(last_diags, sizeof last_diags, "%s", sb_cstr(&sink)));
+    sb_free(&sink);
+    return run;
+}
+
+#define RUN_CAPTURED(...) run_and_capture((char*[]){"fort", __VA_ARGS__, NULL})
+
+// Writes a source file, replacing what the sandbox put there.
+static bool write_source(const char* path, const char* text) {
+    FILE* file = fopen(path, "wb");
+    if (file == NULL) {
+        return false;
+    }
+    TEST_UNUSED(fputs(text, file));
+    TEST_UNUSED(fclose(file));
+    return true;
+}
+
+TEST(an_import_no_root_reaches_is_a_compile_error, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    TEST_ASSERT_TRUE(write_source(box.entry, "import nothere;\nfn i32 main() { return 0; }\n"));
+    const run_t run = RUN_CAPTURED("--cc", FORT_FAKE_CC, "-o", box.out, box.entry);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
+    TEST_ASSERT_NONNULL(strstr(last_diags, "module 'nothere' not found"));
+    TEST_ASSERT_EQ_INT32(access(box.log, F_OK), -1);
+    TEST_ASSERT_EQ_INT32(count_entries(box.tmp), 0);
+    sandbox_close(&box);
+})
+
+TEST(a_module_beside_the_entry_file_is_reached_without_any_option, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    TEST_ASSERT_TRUE(write_source(box.entry, "import util;\nfn i32 main() { return 0; }\n"));
+    char util[PATH_CAP];
+    join(util, sizeof util, box.dir, "util.ft");
+    TEST_ASSERT_TRUE(write_source(util, "fn i32 add(i32 a, i32 b) { return a + b; }\n"));
+    // The entry file's directory is always a search root (D9.2).
+    const run_t run = RUN_CAPTURED("--cc", FORT_FAKE_CC, "-o", box.out, box.entry);
+    TEST_ASSERT_EQ_STR(last_diags, "");
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
+    TEST_ASSERT_EQ_INT32(access(box.log, F_OK), 0);
+    sandbox_close(&box);
+})
+
+TEST(an_include_root_reaches_a_module_the_entry_directory_lacks, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    TEST_ASSERT_TRUE(write_source(box.entry, "import util;\nfn i32 main() { return 0; }\n"));
+    char lib[PATH_CAP];
+    join(lib, sizeof lib, box.dir, "lib");
+    TEST_ASSERT_EQ_INT32(mkdir(lib, S_IRWXU), 0);
+    char util[PATH_CAP];
+    join(util, sizeof util, lib, "util.ft");
+    TEST_ASSERT_TRUE(write_source(util, "fn i32 add(i32 a, i32 b) { return a + b; }\n"));
+    // A `-I` root is searched after the entry file's directory (D9.2).
+    const run_t run = RUN_CAPTURED("--cc", FORT_FAKE_CC, "-I", lib, "-o", box.out, box.entry);
+    TEST_ASSERT_EQ_STR(last_diags, "");
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
+    sandbox_close(&box);
+})
+
 int main(int argc, char** argv) {
     TEST_INIT("driver", argc, argv);
     TEST_RUN(usage_line_is_the_one_of_toolchain_section_1);
@@ -1193,5 +1269,8 @@ int main(int argc, char** argv) {
     TEST_RUN(an_option_swallowing_the_entry_file_leaves_none);
     TEST_RUN(a_usage_error_creates_no_temporary_at_all);
     TEST_RUN(exit_status_constants_match_d14_1);
+    TEST_RUN(an_import_no_root_reaches_is_a_compile_error);
+    TEST_RUN(a_module_beside_the_entry_file_is_reached_without_any_option);
+    TEST_RUN(an_include_root_reaches_a_module_the_entry_directory_lacks);
     TEST_EXIT();
 }

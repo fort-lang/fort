@@ -111,15 +111,22 @@ void driver_cc_argv(const driver_options_t* opts,
                     ptrvec_t* argv);
 
 // The front end of toolchain.md 2, steps 1 to 4: read the entry file, parse
-// the import closure, check every module in dependency order and write the
-// program's LLVM IR module to `ir_path` (D19.1). This is the seam tickets
-// T-013 (parser and semantic front end) and T-015 (emitter) fill in; until
-// then it only refuses an unreadable entry file with the message of
-// toolchain.md 1 and writes an empty module, which is enough to exercise the
-// options, the temporary and the clang invocation. Returns FORT_EXIT_OK,
-// FORT_EXIT_COMPILE_ERROR after reporting diagnostics on `err`, or
-// FORT_EXIT_USAGE for an unreadable file (D14.1).
-int driver_front_end(const driver_options_t* opts, const char* ir_path, FILE* err);
+// the import closure (module-system.md 10), check every module in dependency
+// order and write the program's LLVM IR module to `ir_path` (D19.1). The
+// search roots are the entry file's directory, the `-I` options in order and
+// the standard library directory driver_std_dir names (D9.2), which is why
+// `argv0` is needed. Checking and emission are the seam ticket T-015 fills
+// in; until then a closure that resolves writes an empty module, which is
+// enough to exercise the options, the temporary and the clang invocation.
+// Returns FORT_EXIT_OK, FORT_EXIT_COMPILE_ERROR, or FORT_EXIT_USAGE for an
+// unreadable entry file (D14.1). Only the `fort: error:` line of a usage or
+// toolchain error goes to `err`: the compile-time diagnostics of D14.2 go to
+// stderr through diag.h, which main.c relies on and a test redirects with
+// diag_capture.
+int driver_front_end(const driver_options_t* opts,
+                     const char* argv0,
+                     const char* ir_path,
+                     FILE* err);
 
 // Runs the compiler with argv[1..argc-1]; out and err are where --help,
 // --version and the diagnostics go (stdout and stderr in main). Returns the
