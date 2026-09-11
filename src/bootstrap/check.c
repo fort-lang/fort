@@ -2633,8 +2633,28 @@ static bool decl_sym_kind(const ast_node_t* decl, sym_kind_t* out) {
 }
 
 // Every node of an import whose own name token denotes the imported module or
-// declaration carries its symbol: the last path segment, the `as` alias and
-// each item (D9.3).
+// declaration carries its symbol: the item, its `as` alias, and the last
+// segment of the path, which names the module of an item list and the
+// declaration of a symbol import (D9.3). The segments before it name search
+// directories rather than modules, so they carry nothing.
+static void annotate_path(const ast_node_t* imp, const sym_t* last, const sym_t* module) {
+    ast_node_t* path = imp->a;
+    if (path == NULL || ast_len(path) == 0) {
+        return;
+    }
+    const uint64_t n = ast_len(path);
+    ast_child(path, n - 1)->sym = last;
+    if (n >= 2 && module != NULL && module != last) {
+        // `import a::b::c;` reads `c` in the module `a::b` (D9.3).
+        ast_child(path, n - 2)->sym = module;
+    }
+}
+
+// The module a symbol was declared in, which is its owner (sym.h).
+static const sym_t* owning_module(const sym_t* s) {
+    return s != NULL && s->owner != NULL && s->owner->kind == SYM_MODULE ? s->owner : NULL;
+}
+
 static void annotate_import(const binding_t* b) {
     ast_node_t* n = (ast_node_t*)b->node;
     const sym_t* s = sym_of_binding(b);
@@ -2643,6 +2663,7 @@ static void annotate_import(const binding_t* b) {
     }
     n->sym = s;
     if (n->kind == AST_IMPORT_ITEM) {
+        // An item names a declaration of the module the path names (D9.3).
         if (n->a != NULL) {
             n->a->sym = s;
         }
@@ -2651,8 +2672,42 @@ static void annotate_import(const binding_t* b) {
     if (n->b != NULL) {
         n->b->sym = s;
     }
-    if (n->a != NULL && ast_len(n->a) > 0) {
-        ast_child(n->a, ast_len(n->a) - 1)->sym = s;
+    annotate_path(n, s, b->kind == BIND_SYMBOL ? owning_module(s) : s);
+}
+
+// The path of an item list names the module every item comes from, which is
+// the owner of the first item that resolved (D9.3).
+static void annotate_item_path(const module_t* m, ast_node_t* imp) {
+    for (uint64_t i = 0; i < ast_len(imp); i++) {
+        const ast_node_t* item = ast_child(imp, i);
+        const sym_t* module = owning_module(item->sym);
+        if (module != NULL) {
+            annotate_path(imp, module, module);
+            return;
+        }
+    }
+    (void)m;
+}
+
+// The annotation slots this pass owns, cleared before it writes them: the
+// symbols of an earlier check belong to a checker that may be gone, so a
+// module checked twice starts from the tree the parser left, which an editor
+// that re-checks a file after an edit needs (D20.2).
+static void clear_annotations(ast_node_t* n) {
+    if (n == NULL) {
+        return;
+    }
+    n->type = NULL;
+    n->sym = NULL;
+    n->aux = 0;
+    n->ann &= ~(uint32_t)(CHECK_ANN_CONST | CHECK_ANN_UNTYPED | CHECK_ANN_NORETURN |
+                          CHECK_ANN_RESOLVING | CHECK_ANN_RESOLVED | CHECK_ANN_EXHAUSTIVE);
+    clear_annotations(n->a);
+    clear_annotations(n->b);
+    clear_annotations(n->c);
+    clear_annotations(n->d);
+    for (uint64_t i = 0; i < ast_len(n); i++) {
+        clear_annotations(ast_child(n, i));
     }
 }
 
@@ -2685,6 +2740,12 @@ static void collect_module(check_t* ck, const module_t* m) {
         const binding_t* b = scope_at(&m->names, i);
         if (b->kind == BIND_MODULE || b->kind == BIND_SYMBOL) {
             annotate_import(b);
+        }
+    }
+    for (uint64_t i = 0; i < ast_len(m->ast); i++) {
+        ast_node_t* imp = ast_child(m->ast, i);
+        if (imp->kind == AST_IMPORT && ast_len(imp) > 0) {
+            annotate_item_path(m, imp);
         }
     }
 }
@@ -2729,6 +2790,7 @@ bool check_module(check_t* ck, const module_t* m) {
     ck->module = m;
     ck->scope = NULL;
     ck->in_function = false;
+    clear_annotations(m->ast);
     collect_module(ck, m);
     // Phase two: every declaration is resolved, each on demand, so that a
     // type or a constant reached from another one is complete when it is read

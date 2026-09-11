@@ -88,6 +88,20 @@ static inline bool check_broken(const char* text) {
     return m != NULL && check_module(&checker, m);
 }
 
+// `body` inside a main that already has a struct `node`, a mutable `m`, an
+// immutable `k` and a mutable `i32 w`: the shape the tables of D5.3 and D17.2
+// are written against.
+static inline bool check_node_body(const char* body) {
+    char source[4096];
+    TEST_UNUSED(snprintf(source,
+                         sizeof source,
+                         "struct node {\n    i32 value;\n}\n"
+                         "fn i32 main() {\n    node mut m = {};\n    node k = {};\n"
+                         "    i32 mut w = 1;\n%s\n    return 0;\n}\n",
+                         body));
+    return check_src(source);
+}
+
 // The module of the closure at `path`, or NULL.
 static inline const module_t* module_at(const char* path) {
     return module_set_find(&set, str_from_cstr(path));
@@ -202,6 +216,37 @@ static inline ast_node_t* untyped_expr(ast_node_t* n) {
     }
     for (uint64_t i = 0; i < ast_len(n); i++) {
         ast_node_t* hit = untyped_expr(ast_child(n, i));
+        if (hit != NULL) {
+            return hit;
+        }
+    }
+    return NULL;
+}
+
+// The first node below `n` whose own name token denotes something and that
+// the checker left without a symbol, or NULL. Literals carry their bytes in
+// `name` and denote nothing, and so do the pseudo-fields `.len` and `.ptr`,
+// which no declaration introduces.
+static inline ast_node_t* unresolved_name(ast_node_t* n) {
+    if (n == NULL) {
+        return NULL;
+    }
+    const bool literal = n->kind == AST_STRING || n->kind == AST_FLOAT;
+    const bool pseudo =
+        (n->kind == AST_FIELD || n->kind == AST_ARROW) &&
+        (str_eq(n->name, str_from_cstr("len")) || str_eq(n->name, str_from_cstr("ptr")));
+    if (n->name.len > 0 && n->sym == NULL && !literal && !pseudo) {
+        return n;
+    }
+    ast_node_t* const kids[] = {n->a, n->b, n->c, n->d};
+    for (uint64_t i = 0; i < sizeof kids / sizeof kids[0]; i++) {
+        ast_node_t* hit = unresolved_name(kids[i]);
+        if (hit != NULL) {
+            return hit;
+        }
+    }
+    for (uint64_t i = 0; i < ast_len(n); i++) {
+        ast_node_t* hit = unresolved_name(ast_child(n, i));
         if (hit != NULL) {
             return hit;
         }

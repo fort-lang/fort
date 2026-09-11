@@ -228,6 +228,41 @@ TEST(every_expression_of_a_clean_module_carries_a_type, {
     TEST_ASSERT_NULL(untyped_expr(module_at("util")->ast));
 })
 
+TEST(every_named_node_of_a_clean_module_carries_a_symbol, {
+    begin();
+    add("util.ft", "i32 ONE = 1;\nfn i32 one() {\n    return ONE;\n}\n");
+    add("main.ft",
+        "import util as u;\n"
+        "import util::{one as first};\n"
+        "struct point {\n    i32 x;\n    i32 y;\n}\n"
+        "enum color {\n    red,\n    green,\n}\n"
+        "i32 MAX = 3;\n"
+        "fn i32 pick(point mut p, color c) {\n"
+        "    i32 mut total = p.x;\n"
+        "    point mut* q = &p;\n"
+        "    total = total + q->y;\n"
+        "    switch (c) {\n    case color.red:\n        total = total + MAX;\n"
+        "    default:\n    }\n"
+        "    i32[2] table = {1, 2};\n"
+        "    for (i32 v : table) {\n        total = total + v;\n    }\n"
+        "    return total + u.one() + first();\n}\n"
+        "fn i32 main() {\n    point p = point{.x = 1, .y = 2};\n"
+        "    return pick(p, color.green);\n}\n");
+    TEST_ASSERT_TRUE(check_entry("main.ft"));
+    const ast_node_t* missing = unresolved_name(module_at("main")->ast);
+    if (missing != NULL) {
+        TEST_LOG_("no symbol on %s '%s' at %u:%u",
+                  ast_kind_name(missing->kind),
+                  missing->name.ptr,
+                  missing->name_loc.line,
+                  missing->name_loc.col);
+    }
+    // Every node whose name token denotes something carries the symbol it
+    // denotes (the symbol contract).
+    TEST_ASSERT_NULL(missing);
+    TEST_ASSERT_NULL(unresolved_name(module_at("util")->ast));
+})
+
 // ---- what a name token denotes (the symbol contract) --------------------------------
 
 TEST(an_identifier_carries_the_declaration_it_denotes, {
@@ -602,6 +637,7 @@ int main(int argc, char** argv) {
     TEST_RUN(a_builtin_is_a_symbol_with_no_node);
     TEST_RUN(every_symbol_kind_is_recorded);
     TEST_RUN(every_expression_of_a_clean_module_carries_a_type);
+    TEST_RUN(every_named_node_of_a_clean_module_carries_a_symbol);
     TEST_RUN(an_identifier_carries_the_declaration_it_denotes);
     TEST_RUN(an_unresolved_name_has_no_symbol_and_one_diagnostic);
     TEST_RUN(an_unqualified_enum_member_says_how_it_is_written);

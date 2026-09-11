@@ -162,6 +162,11 @@ A safe(r) C-like systems programming language.
   paths that end the process (`fatal_oom`); under asan the child runs LeakSanitizer at exit, so
   the forked function must not drop a block it allocated (blocks its still-live frames point to
   are reachable and fine).
+- `TEST_ASSERT_TRUE(f())` and `TEST_ASSERT_FALSE(f())` evaluate their argument twice when it
+  fails, once for the test and once for the `#val` of the message, so a call with side effects
+  runs a second time on the failing path only. Keep it: it caught a checker that could not run
+  twice over one tree. A helper whose second run must not differ either stores the result in a
+  variable first or is made idempotent.
 - clang-tidy's `readability-inconsistent-declaration-parameter-name` fires only under
   `tools/vm tidy`, late in the loop: when a definition renames a parameter, for instance to stop
   it shadowing a new file-scope static, rename it in the header too, in the same edit.
@@ -186,6 +191,12 @@ A safe(r) C-like systems programming language.
 - **"span" names the fort type `T@`** (D3.5), so a byte or source extent is a **range** everywhere
   in the compiler: `str_from_range`, token byte ranges, `ASSERT_TOK_RANGE`, and `loc_t` ranges in
   the editor-support work. Never call an extent a span.
+- **Checker annotations**: `type`, `sym`, `aux` and the `CHECK_ANN_*` bits of `ann` belong to
+  the checker (`check.h`); `check_module` clears them before it writes them, so checking one
+  module twice starts from the tree the parser left rather than reading symbols of a checker
+  that is gone. `aux` indexes the checker's own value vector on a constant node and holds a
+  field's byte offset on a field declaration, so it is never read without the bit that says
+  which it is.
 - **Node ranges**: a node's `loc` is a range (D20.4). A parser function ends a node's range with
   `finish(p, n)` at every successful return in which it consumed the node's trailing tokens: the
   nodes it built itself, and also a node a callee built whose `;` it consumed, as

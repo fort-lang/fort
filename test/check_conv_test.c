@@ -79,6 +79,66 @@ TEST(an_owning_span_lends_its_elements, {
                                 "    i32@ w = s;\n    println(v.len, w.len);\n    del(s);"));
 })
 
+// ---- the marker table of D5.3 -------------------------------------------------------
+
+TEST(the_binding_marker_says_what_may_be_rebound, {
+    // Every row of the table of D5.3, left column: the marker before the name
+    // is the binding's own storage.
+    TEST_ASSERT_TRUE(check_node_body("    i32 mut x = 1;\n    x = 2;"));
+    TEST_ASSERT_FALSE(check_node_body("    i32 x = 1;\n    x = 2;"));
+    TEST_ASSERT_TRUE(check_node_body("    node mut q = {};\n    q = m;"));
+    TEST_ASSERT_FALSE(check_node_body("    node q = {};\n    q = m;"));
+    TEST_ASSERT_TRUE(check_node_body("    i32[4] mut a = {};\n    i32[4] b = {};\n    a = b;"));
+    TEST_ASSERT_FALSE(check_node_body("    i32[4] a = {};\n    i32[4] b = {};\n    a = b;"));
+    TEST_ASSERT_FALSE(check_node_body("    node* p = &k;\n    p = &m;"));
+    TEST_ASSERT_TRUE(check_node_body("    node* mut p = &k;\n    p = &m;"));
+    TEST_ASSERT_FALSE(check_node_body("    node mut* p = &m;\n    p = &m;"));
+    TEST_ASSERT_TRUE(check_node_body("    node mut* mut p = &m;\n    p = &m;"));
+    TEST_ASSERT_FALSE(check_node_body("    i32@ s = {};\n    i32@ t = {};\n    s = t;"));
+    TEST_ASSERT_TRUE(check_node_body("    i32@ mut s = {};\n    i32@ t = {};\n    s = t;"));
+    TEST_ASSERT_FALSE(check_node_body("    i32 mut@ s = {};\n    i32 mut@ t = {};\n    s = t;"));
+    TEST_ASSERT_TRUE(check_node_body("    string mut s = \"a\";\n    s = \"b\";"));
+    TEST_ASSERT_FALSE(check_node_body("    string s = \"a\";\n    s = \"b\";"));
+})
+
+TEST(a_marker_behind_an_indirection_says_what_may_be_written, {
+    // Every row of the table of D5.3, right column: a `mut` after a `*` or an
+    // `@` marks the reference, one after the base type marks what it reaches.
+    TEST_ASSERT_FALSE(check_node_body("    node* p = &k;\n    p->value = 1;"));
+    TEST_ASSERT_FALSE(check_node_body("    node* mut p = &k;\n    p->value = 1;"));
+    TEST_ASSERT_TRUE(check_node_body("    node mut* p = &m;\n    p->value = 1;"));
+    TEST_ASSERT_TRUE(check_node_body("    node mut* mut p = &m;\n    p->value = 1;"));
+    TEST_ASSERT_FALSE(check_node_body("    i32@ s = {};\n    s[0] = 1;"));
+    TEST_ASSERT_FALSE(check_node_body("    i32@ mut s = {};\n    s[0] = 1;"));
+    TEST_ASSERT_TRUE(check_node_body("    i32 mut@ s = {};\n    s[0] = 1;"));
+    // `node* mut@ t`: the slots are writable and the nodes behind them are
+    // not; `node mut*@ t` is the other way round.
+    TEST_ASSERT_TRUE(check_node_body("    node* mut@ t = {};\n    t[0] = &k;"));
+    TEST_ASSERT_FALSE(check_node_body("    node* mut@ t = {};\n    t[0]->value = 1;"));
+    TEST_ASSERT_FALSE(check_node_body("    node mut*@ t = {};\n    t[0] = &m;"));
+    TEST_ASSERT_TRUE(check_node_body("    node mut*@ t = {};\n    t[0]->value = 1;"));
+    // `node* mut* pp`: `*pp` is writable, `**pp` is not.
+    TEST_ASSERT_TRUE(check_node_body("    node* mut p = &k;\n    node* mut* pp = &p;\n"
+                                     "    *pp = &k;"));
+    TEST_ASSERT_FALSE(check_node_body("    node* mut p = &k;\n    node* mut* pp = &p;\n"
+                                      "    (*pp)->value = 1;"));
+    TEST_ASSERT_FALSE(check_node_body("    node mut* p = &m;\n    node mut** pp = &p;\n"
+                                      "    *pp = &m;"));
+    TEST_ASSERT_TRUE(check_node_body("    node mut* p = &m;\n    node mut** pp = &p;\n"
+                                     "    (*pp)->value = 1;"));
+    // The out-parameter shapes of D3.6.
+    TEST_ASSERT_TRUE(check_node_body("    u8 mut@ mut b = {};\n    u8 mut@ mut* out = &b;\n"
+                                     "    (*out)[0] = 1;"));
+    TEST_ASSERT_FALSE(check_node_body("    u8@ mut b = {};\n    u8@ mut* out = &b;\n"
+                                      "    (*out)[0] = 1;"));
+    // A fixed array of pointers: the slots follow the array, the pointees
+    // their own marker.
+    TEST_ASSERT_TRUE(check_node_body("    node*[4] mut t = {};\n    t[0] = &k;"));
+    TEST_ASSERT_FALSE(check_node_body("    node*[4] mut t = {};\n    t[0]->value = 1;"));
+    // A string's characters are never mutable (D3.7, D5.2).
+    TEST_ASSERT_FALSE(check_node_body("    string mut s = \"a\";\n    s[0] = 'b';"));
+})
+
 // ---- the cast matrix (D3.14) --------------------------------------------------------
 
 TEST(a_cast_converts_between_pointers_and_integers, {
@@ -360,6 +420,8 @@ int main(int argc, char** argv) {
     TEST_RUN(ownership_drops_where_mutability_does);
     TEST_RUN(ownership_is_never_added_implicitly);
     TEST_RUN(an_owning_span_lends_its_elements);
+    TEST_RUN(the_binding_marker_says_what_may_be_rebound);
+    TEST_RUN(a_marker_behind_an_indirection_says_what_may_be_written);
     TEST_RUN(a_cast_converts_between_pointers_and_integers);
     TEST_RUN(a_cast_adds_mutability_and_ownership);
     TEST_RUN(a_cast_converts_among_string_and_byte_spans);
