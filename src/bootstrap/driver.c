@@ -601,10 +601,23 @@ static bool load_closure(const driver_options_t* opts, const char* argv0, module
     return module_set_load(set, opts->entry);
 }
 
+void driver_analysis_init(driver_analysis_t* an) {
+    module_set_init(&an->set);
+    check_init(&an->ck);
+}
+
+void driver_analysis_free(driver_analysis_t* an) {
+    // The checker first: every annotation on a tree points into it, and a
+    // symbol's name points into the source the module set owns (sym.h).
+    check_free(&an->ck);
+    module_set_free(&an->set);
+}
+
 int driver_front_end(const driver_options_t* opts,
                      const char* argv0,
                      const char* ir_path,
                      driver_files_t* files,
+                     driver_analysis_t* an,
                      FILE* err) {
     // Step 1 of toolchain.md 2: an unreadable entry file is exit 2 (D14.1).
     FILE* entry = fopen(opts->entry, "rb");
@@ -618,24 +631,22 @@ int driver_front_end(const driver_options_t* opts,
     // (D14.2's diagnostics are the run's result, not only its output), and
     // the next diag_reset releases them.
     diag_reset();
-    module_set_t set;
-    module_set_init(&set);
-    const bool loaded = load_closure(opts, argv0, &set);
+    const bool loaded = load_closure(opts, argv0, &an->set);
     if (files != NULL) {
-        collect_files(&set, files);
+        collect_files(&an->set, files);
     }
     // Step 3: every module that parsed is checked, the dependency order
     // first, so one file that did not parse never hides the errors of the
     // others (D9.10, D14.2 as amended).
-    check_t ck;
-    check_init(&ck);
+    //
+    // Neither the modules nor the checker is released here: the annotations
+    // they own live until the caller frees the analysis, which is what lets
+    // the index walk read the trees afterwards (D20.3, sym.h).
     // A compilation builds a program, so the entry module defines main
     // (D8.6); --check inspects one module instead, and the entry rule does
     // not apply to it (D20.1).
-    ck.require_main = ir_path != NULL;
-    const bool checked = check_program(&ck, &set);
-    check_free(&ck);
-    module_set_free(&set);
+    an->ck.require_main = ir_path != NULL;
+    const bool checked = check_program(&an->ck, &an->set);
     if (!loaded || !checked) {
         // At least one compile error was reported, which is exit 1 (D14.1).
         return FORT_EXIT_COMPILE_ERROR;
@@ -707,6 +718,10 @@ static void write_document(FILE* out, const driver_files_t* files) {
 static int compile_entry(const driver_options_t* opts, const char* argv0, FILE* err) {
     str_pool_t pool;
     str_pool_init(&pool);
+    // A build reads no tree after the front end returned, so its analysis is
+    // released on every path out of this function (sym.h).
+    driver_analysis_t an;
+    driver_analysis_init(&an);
     const char* out_path = opts->output;
     if (out_path == NULL) {
         out_path = driver_default_output(opts, &pool).ptr;
@@ -714,7 +729,8 @@ static int compile_entry(const driver_options_t* opts, const char* argv0, FILE* 
     if (opts->emit_ir) {
         // -S writes the module to the output and stops, so it needs no
         // temporary (toolchain.md 2).
-        const int status = driver_front_end(opts, argv0, out_path, NULL, err);
+        const int status = driver_front_end(opts, argv0, out_path, NULL, &an, err);
+        driver_analysis_free(&an);
         str_pool_free(&pool);
         return status;
     }
@@ -723,11 +739,13 @@ static int compile_entry(const driver_options_t* opts, const char* argv0, FILE* 
     const str_t dir = make_temp_dir(&pool, &parent, &failure);
     if (dir.ptr == NULL) {
         error_path(err, "cannot create a temporary directory in", parent, strerror(failure));
+        driver_analysis_free(&an);
         str_pool_free(&pool);
         return FORT_EXIT_USAGE;
     }
     const str_t ir_path = join_path(&pool, dir.ptr, driver_entry_base(opts->entry), ".ll");
-    int status = driver_front_end(opts, argv0, ir_path.ptr, NULL, err);
+    int status = driver_front_end(opts, argv0, ir_path.ptr, NULL, &an, err);
+    driver_analysis_free(&an);
     if (status == FORT_EXIT_OK) {
         status = run_cc(opts, argv0, ir_path.ptr, out_path, err);
     }
@@ -742,12 +760,16 @@ static int compile_entry(const driver_options_t* opts, const char* argv0, FILE* 
 static int check_entry(const driver_options_t* opts, const char* argv0, FILE* out, FILE* err) {
     driver_files_t files;
     driver_files_init(&files);
+    // The analysis outlives the run: the document is written from the trees
+    // it holds, so it is freed only after the last byte of it (D20.3, sym.h).
+    driver_analysis_t an;
+    driver_analysis_init(&an);
     if (opts->json) {
         // --json writes no text diagnostic (D20.2); the records stay in the
         // sink either way, which is where the document reads them.
         diag_set_text(false);
     }
-    const int status = driver_front_end(opts, argv0, NULL, &files, err);
+    const int status = driver_front_end(opts, argv0, NULL, &files, &an, err);
     if (opts->json) {
         // The document is written only for a verdict: a usage, toolchain or
         // internal error is exit 2 with stdout empty (D20.2, D14.1).
@@ -758,6 +780,7 @@ static int check_entry(const driver_options_t* opts, const char* argv0, FILE* ou
         // must not change the next in a process that makes several.
         diag_set_text(true);
     }
+    driver_analysis_free(&an);
     driver_files_free(&files);
     return status;
 }

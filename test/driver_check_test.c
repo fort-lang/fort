@@ -16,10 +16,14 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 
+#include "ast.h"
+#include "check.h"
 #include "diag.h"
 #include "driver.h"
 #include "driver_helpers.h"
+#include "modules.h"
 #include "str.h"
+#include "sym.h"
 
 #include "test.h"
 
@@ -373,19 +377,61 @@ TEST(the_front_end_hands_out_the_files_it_read, {
     opts.check = true;
     driver_files_t files;
     driver_files_init(&files);
+    driver_analysis_t an;
+    driver_analysis_init(&an);
     sb_t sink;
     sb_init(&sink);
     diag_capture(&sink);
     // The seam itself: no module is written when `ir_path` is NULL, and the
     // files come back in read order (D20.1, D20.2).
-    const int status = driver_front_end(&opts, "fort", NULL, &files, stderr);
+    const int status = driver_front_end(&opts, "fort", NULL, &files, &an, stderr);
     diag_capture(NULL);
     sb_free(&sink);
     TEST_ASSERT_EQ_INT32(status, FORT_EXIT_OK);
     TEST_ASSERT_EQ_UINT64(driver_files_count(&files), (uint64_t)2);
     TEST_ASSERT_EQ_STR(driver_files_at(&files, 0), box.entry);
     TEST_ASSERT_EQ_STR(driver_files_at(&files, 1), util);
+    driver_analysis_free(&an);
     driver_files_free(&files);
+    driver_options_free(&opts);
+    sandbox_close(&box);
+})
+
+TEST(the_analysis_outlives_the_front_end, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    TEST_ASSERT_TRUE(write_source(box.entry, "import util;\nfn i32 main() { return 0; }\n"));
+    char util[PATH_CAP];
+    join(util, sizeof util, box.dir, "util.ft");
+    TEST_ASSERT_TRUE(write_source(util, "fn i32 add(i32 a, i32 b) { return a + b; }\n"));
+    driver_options_t opts;
+    driver_options_init(&opts);
+    opts.entry = box.entry;
+    opts.check = true;
+    driver_analysis_t an;
+    driver_analysis_init(&an);
+    sb_t sink;
+    sb_init(&sink);
+    diag_capture(&sink);
+    const int status = driver_front_end(&opts, "fort", NULL, NULL, &an, stderr);
+    diag_capture(NULL);
+    sb_free(&sink);
+    TEST_ASSERT_EQ_INT32(status, FORT_EXIT_OK);
+    // The trees and every annotation on them are readable after the run: the
+    // symbols live until the caller frees the analysis (sym.h, D20.3).
+    TEST_ASSERT_EQ_UINT64(module_set_count(&an.set), (uint64_t)2);
+    const module_t* entry = module_set_entry(&an.set);
+    TEST_ASSERT_NONNULL(entry);
+    TEST_ASSERT_NONNULL(entry->ast->sym);
+    TEST_ASSERT_EQ_INT32((int32_t)entry->ast->sym->kind, (int32_t)SYM_MODULE);
+    TEST_ASSERT_TRUE(str_eq(entry->ast->sym->name, str_from_cstr("main")));
+    // The module's one declaration is `fn i32 main()`, whose symbol the
+    // checker left on its node.
+    const ast_node_t* decl = ast_child(entry->ast, ast_len(entry->ast) - 1);
+    TEST_ASSERT_NONNULL(decl->sym);
+    TEST_ASSERT_EQ_INT32((int32_t)decl->sym->kind, (int32_t)SYM_FN);
+    TEST_ASSERT_TRUE(check_sym_count(&an.ck) > 0);
+    driver_analysis_free(&an);
     driver_options_free(&opts);
     sandbox_close(&box);
 })
@@ -399,8 +445,11 @@ TEST(a_front_end_that_wants_no_files_gets_none, {
     opts.check = true;
     // A caller that writes no document passes NULL and nothing is collected
     // (D20.2).
-    const int status = driver_front_end(&opts, "fort", NULL, NULL, stderr);
+    driver_analysis_t an;
+    driver_analysis_init(&an);
+    const int status = driver_front_end(&opts, "fort", NULL, NULL, &an, stderr);
     TEST_ASSERT_EQ_INT32(status, FORT_EXIT_OK);
+    driver_analysis_free(&an);
     driver_options_free(&opts);
     sandbox_close(&box);
 })
@@ -432,7 +481,9 @@ static void check_run_then_internal_error(void) {
     opts.json = true;
     driver_files_t files;
     driver_files_init(&files);
-    TEST_UNUSED(driver_front_end(&opts, "fort", NULL, &files, stderr));
+    driver_analysis_t an;
+    driver_analysis_init(&an);
+    TEST_UNUSED(driver_front_end(&opts, "fort", NULL, &files, &an, stderr));
     fatal_internal("simulated");
 }
 
@@ -509,6 +560,7 @@ int main(int argc, char** argv) {
     TEST_RUN(a_quote_in_a_file_name_is_escaped_in_the_document);
     TEST_RUN(a_non_ascii_file_name_passes_through_the_document);
     TEST_RUN(the_front_end_hands_out_the_files_it_read);
+    TEST_RUN(the_analysis_outlives_the_front_end);
     TEST_RUN(a_front_end_that_wants_no_files_gets_none);
     TEST_RUN(the_files_of_a_run_are_forgotten_when_the_list_is_freed);
     TEST_RUN(an_unreadable_entry_under_json_leaves_stdout_empty);
