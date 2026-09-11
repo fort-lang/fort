@@ -1439,6 +1439,9 @@ class EndToEnd(TempRoot):
             [
                 "clang",
                 "--target=x86_64-linux-gnu",
+                # The fort side is compiled at -O1, and a helper built at -O0
+                # re-narrows its parameters and hides a wrong extension.
+                "-O1",
                 "-o",
                 "/tmp/w/prog",
                 "/tmp/w/prog.o",

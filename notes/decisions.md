@@ -618,9 +618,10 @@ Owner: `module-system.md`.
   (or `u8*`); `size_t` to `u64`; `ssize_t` and
   `off_t` to `i64`; `mode_t` to `u32`; `int` to `i32`; `long` to `i64`; `double` to `f64`. The
   same C symbol may be declared `extern` in several modules provided the signatures are
-  identical, `own` qualifiers included (D17.13). Fort `char` is C's `unsigned char` at the
-  boundary (`i8 zeroext`, D3.2). The compiler never emits a call to a C library symbol of its own
-  accord: anything it needs at run time is a runtime entry point of `toolchain.md` 5.1, in the
+  identical as written, parameter names excepted, `own` qualifiers included (D17.13). Fort `char`
+  is C's `unsigned char` at the boundary (`i8 zeroext`, D3.2). The compiler never emits a call to
+  a C library symbol of its own accord: anything it needs at run time is a runtime entry point of
+  `toolchain.md` 5.1, in the
   `fort_rt_` space no C library occupies. A compiler-emitted `@memcmp` would be a second
   declaration of an ELF symbol a program may also declare `extern`, against D9.7's one entity per
   symbol, and it is the library-call rewriting `nobuiltin` exists two sentences above to prevent.
@@ -628,7 +629,16 @@ Owner: `module-system.md`.
   fort ABI surface. Amended 2026-09-10 with D19: the compiler itself set `al` to
   the vector-register count before every extern call, and extended narrow values by hand. Amended
   2026-09-11: T-015 found that `string ==` needed `memcmp` and stopped rather than invent a fourth
-  declaration group for `toolchain.md` 6 item 8; there is no fourth group.
+  declaration group for `toolchain.md` 6 item 8; there is no fourth group. Amended 2026-09-11:
+  "identical" did not say whether it meant the types or what the two modules wrote, and the
+  bootstrap compares the written declarations. That refuses a binding-level `mut`, which is not
+  part of a function type (D3.10) and changes no emitted byte, and it refuses two spellings of one
+  imported enum -- for which no shared spelling exists, since a module can neither qualify a name
+  with its own module name nor import itself, so such a program cannot be written at all. The
+  first is accepted as the price of a comparison that runs before types exist; the second is a
+  defect, and comparing types instead means moving the check to where types exist (T-025's
+  review, T-074). Until then the diagnostic names the differing parameter and the note carries the
+  workaround: declare the symbol in one module and export a fort function the others import.
 - **D9.9** Internal calling convention (v1 simplification): integers, pointers, `bool`, `char`,
   enums, function pointers and floats are passed and returned in registers per System V; every
   aggregate (struct, fixed array, span, `string`) is passed by a hidden pointer to a caller-made
@@ -921,6 +931,17 @@ helper function); raw strings; a blank identifier; compile-time function evaluat
 string `switch`; linear ownership, that is compile-time detection of leaks and of use after
 `move` (idiom: `defer del`, and the zeroing that `move` and `del` leave behind, D17); `goto`
 (never). Amended 2026-09-10: spans were called slices (D3.5).
+
+Deferred at the C boundary (2026-09-11, T-025). An `extern` has no link name of its own: its
+symbol is the name it declares (D9.8), so two prototypes for two argument shapes of one variadic
+C function cannot coexist, since a second fort name is a second C symbol and one module may not
+declare a name twice (D7.9). Exactly one shape of any variadic C symbol is therefore reachable in
+a program; the idiom is to pick the shape the program needs, and an extern link name or alias is
+the capability that would lift it. Nor can the compiler check the default argument promotions a
+variadic callee applies: a fixed prototype makes every declared parameter a fixed LLVM parameter,
+and nothing distinguishes a genuinely fixed `f32` parameter from one standing in a variadic
+position, so `module-system.md` 8.4 states the promotions as the caller's obligation and no rule
+enforces them.
 
 Deferred on the toolchain side (user decision, 2026-09-10): building the module in process
 through the LLVM C API, and everything that would come with it (a JIT, per-function control of

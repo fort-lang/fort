@@ -448,7 +448,18 @@ A safe(r) C-like systems programming language.
   calling convention therefore asserts the emitted text and proves the assertion by mutation --
   change the emitter, watch that one test fail, change it back -- rather than trusting that a run
   test would have caught it. The same held for the `llvm.trap` of D19.7: the review broke it and
-  all 55 suites and 280 language tests stayed green.
+  all 55 suites and 280 language tests stayed green. **A C mirror is the exception, and only when
+  the mirror is optimised.** T-025 re-measured the `zeroext`/`signext` swap with
+  `test/lang/run/ffi/007` sending `i8`, `u8`, `i16`, `u16`, `char` and `bool` into separately
+  compiled helpers: with the helper at `-O0` the whole corpus stayed green, with the helper at
+  `-O1` it printed `4295032812` for `-20` and failed. An unoptimised callee spills its narrow
+  parameter to a stack slot and re-narrows it from there, which repairs the caller's mistake; at
+  `-O1` the callee keeps the argument under the `AssertSext`/`AssertZext` its parameter attribute
+  states, folds the re-narrowing away, and the wrong extension reaches the arithmetic. That is why
+  `link_command` in `test/lang/run_tests.py` passes `-O1`, matching the `-O1` the driver gives the
+  fort side: a mirror built at `-O0` silently answers a weaker question than the one it was
+  written to ask. So the emitted text in `test/gen*_test.c` is where a convention rule is pinned
+  *first*, and a `run/ffi` mirror is the second, independent witness -- not a blind one.
   **Under opaque pointers a field's type in a named struct type is observable only through the
   offsets it moves.** A substitution that leaves every later offset and the struct's size and
   alignment unchanged is invisible to `opt`, to every run test and to C interop: same-size swaps

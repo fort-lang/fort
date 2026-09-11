@@ -219,8 +219,15 @@ extern fn void free(void* own p);
 
 `extern fn` declares a C function with the System V x86-64 ABI (D9.8; `grammar.md` section 3). It
 is top-level only, has no body, and its symbol is the declared name. Parameter names are required
-by the grammar and otherwise unused. An `extern` function is called like any function, is usable
-as a function-pointer value, and may be `noreturn` (D8.5).
+by the grammar and otherwise unused. An `extern` function is called like any function and may be
+`noreturn` (D8.5), but its name is not a value: every extern is called through a variadic LLVM
+function type, which an indirect call site cannot take from a callee it does not name (D3.10 as
+amended, D9.8). A fort function wrapping the call is how one reaches C as a pointer: that call is
+direct and keeps the variadic form (D3.10).
+
+A `fn R(P...)` in an extern signature is allowed exactly when its own signature is extern-legal,
+result type included, since C calls through it with the same convention (D9.8, D9.9): the rule
+reaches a function pointer nested inside another and one in result position.
 
 | Allowed in an extern signature                  | Not allowed                          |
 |-------------------------------------------------|--------------------------------------|
@@ -244,6 +251,22 @@ convention on the fort side: `void* own malloc(u64 n)` says the caller must free
 `free(cast(move(p), void* own))` and is `null` afterwards (D17.5). A C function that stores or
 frees nothing takes plain `T*`. Because `own` is part of type identity (D17.1), two modules that
 declare one C symbol with and without it have conflicting declarations (D9.8, section 13):
+
+Two declarations are compared as written, parameter names excepted (D9.8): the check runs while
+the closure is loaded, before types exist. So a binding-level `mut`, which is not part of a
+function type (D3.10), counts as a difference, and so do two spellings of one type -- `color` in
+the module that declares the enum and `shade.color` in another. For an imported enum no shared
+spelling exists, since a module can neither qualify a name with its own module name nor import
+itself, so a program whose modules disagree that way cannot be written at all. The workaround, and
+the note the compiler prints, is to stop declaring the symbol twice: one module declares it and
+exports a fort function that the others import.
+
+```fort
+// shade.ft
+enum color { red, green }
+extern fn void paint(color c);                  // declared once, here
+fn void paint_red() { paint(color.red); }       // and reached from elsewhere through this
+```
 
 ```fort
 extern fn void* own malloc(u64 n);
@@ -301,10 +324,27 @@ declared with a fixed prototype for the arguments actually passed, such as
 `extern fn i32 printf(char* fmt, i64 n, f64 x);`. This is safe because System V passes fixed and
 variadic arguments identically and tells a variadic callee how many vector registers were used;
 the compiler declares and calls every extern function through a variadic LLVM function type, so
-that count is always passed (D9.8, `toolchain.md` 6 item 8). Each argument shape needs its own
-prototype under its own fort name, since one module cannot declare `printf` twice (D7.9).
-Integer promotions are the caller's business: a `char` bound for an `int` slot is widened with
-`cast(c, i32)`.
+that count is always passed (D9.8, `toolchain.md` 6 item 8).
+
+One shape per symbol. An extern's symbol is the name it declares (section 8.1), so a second
+prototype under a second fort name is a second C symbol, and one module cannot declare a name
+twice (D7.9) while two modules declaring one symbol must agree (D9.8). Exactly one argument shape
+of a variadic C function is therefore reachable in a program: pick the one the program needs, or
+wrap the call in a fort function per shape *of that one prototype*. An extern link name, which
+would lift this, is deferred (D15).
+
+**The prototype must already be promoted, and nothing checks it.** A variadic callee reads its
+arguments with the default argument promotions applied: `float` arrives as `double`, and
+`_Bool`, `char`, `signed char`, `unsigned char`, `short` and `unsigned short` arrive as `int`.
+The declared parameters of a fort prototype are *fixed* LLVM parameters, so the compiler passes
+each exactly as written and cannot know which position is really variadic -- a genuinely fixed
+`f32` parameter and an `f32` standing in a variadic position are the same declaration. A
+variadic position may therefore spell only `i32`, `i64`, `f64`, a pointer or a function
+pointer. `f32` there is wrong: it is passed in the low half of the vector register and the
+callee's `va_arg(double)` reads the other half as well. A narrow integer there happens to
+survive, because the extension attributes of section 8.3 fill the 32-bit register the callee
+reads, but write the promotion anyway: `printf("%d\n".ptr, cast(c, i32))`. The obligation is the
+caller's and no rule enforces it (D15).
 
 ### 8.5 Fort functions as C callbacks
 

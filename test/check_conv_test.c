@@ -338,6 +338,68 @@ TEST(an_extern_signature_takes_scalars_and_pointers, {
     TEST_ASSERT_FALSE(check_src("extern fn void take(i32[2] a);\n"
                                 "fn i32 main() {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("extern signature cannot use type 'i32[2]'"));
+    // The rest of the "not allowed" column of module-system.md 8.1: a struct
+    // by value, a span, and an owning span or string, each of which would
+    // have to cross whole (D9.8). A pointer to the same struct is allowed,
+    // since that is how a struct crosses.
+    TEST_ASSERT_FALSE(check_src("struct point {\n    i32 x;\n}\n"
+                                "extern fn void take(point p);\n"
+                                "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("extern signature cannot use type 'point'"));
+    TEST_ASSERT_TRUE(check_src("struct point {\n    i32 x;\n}\n"
+                               "extern fn void take(point mut* p);\n"
+                               "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_FALSE(check_src("extern fn void take(i32@ xs);\n"
+                                "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("extern signature cannot use type 'i32@'"));
+    TEST_ASSERT_FALSE(check_src("extern fn void take(u8 mut@ own xs);\n"
+                                "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("extern signature cannot use type 'u8 mut@ own'"));
+    TEST_ASSERT_FALSE(check_src("extern fn string own grab();\n"
+                                "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("extern signature cannot use type 'string own'"));
+})
+
+TEST(an_extern_function_pointer_parameter_needs_an_extern_legal_signature, {
+    // A `fn R(P...)` parameter is allowed exactly when its own signature is
+    // extern-legal (module-system.md 8.1): C calls through it with the same
+    // convention, so a struct or span in it would cross the boundary after
+    // all (D9.8, D9.9).
+    TEST_ASSERT_TRUE(check_src("extern fn void sort(void* base, fn i32(void*, void*) cmp);\n"
+                               "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_FALSE(check_src("struct point {\n    i32 x;\n}\n"
+                                "extern fn void each(fn void(point) cb);\n"
+                                "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("extern signature cannot use type 'fn void(point)'"));
+})
+
+TEST(an_extern_function_pointer_result_and_nesting_are_checked_too, {
+    // The rule reaches the result type of the function pointer and the
+    // function pointers inside it, since each is one more signature C calls
+    // through (D9.8, module-system.md 8.1).
+    TEST_ASSERT_FALSE(check_src("extern fn i32 make(fn string(i32) f);\n"
+                                "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("extern signature cannot use type 'fn string(i32)'"));
+    TEST_ASSERT_FALSE(check_src("extern fn void nest(fn void(fn i32(string)) h);\n"
+                                "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("extern signature cannot use type 'fn void(fn i32(string))'"));
+    // A result position is an extern signature like any other, so a function
+    // pointer returned to C is checked the same way.
+    TEST_ASSERT_FALSE(check_src("struct point {\n    i32 x;\n}\n"
+                                "extern fn fn void(point) getter();\n"
+                                "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("extern signature cannot use type 'fn void(point)'"));
+})
+
+TEST(a_fort_signature_may_still_carry_an_aggregate_function_pointer, {
+    // The rule is the C boundary's, not the function type's: the same type is
+    // ordinary inside fort, where D9.9's own convention passes the aggregate
+    // by a hidden pointer.
+    TEST_ASSERT_TRUE(check_src("struct point {\n    i32 x;\n}\n"
+                               "fn void one(point p) {\n    println(p.x);\n}\n"
+                               "fn void each(fn void(point) cb, point p) {\n    cb(p);\n}\n"
+                               "fn i32 main() {\n    point p = {2};\n"
+                               "    each(one, p);\n    return 0;\n}\n"));
 })
 
 TEST(an_extern_may_not_declare_the_program_entry_point, {
@@ -566,6 +628,9 @@ int main(int argc, char** argv) {
     TEST_RUN(a_function_type_ignores_the_binding_mut_of_its_parameters);
     TEST_RUN(a_void_parameter_is_refused);
     TEST_RUN(an_extern_signature_takes_scalars_and_pointers);
+    TEST_RUN(an_extern_function_pointer_parameter_needs_an_extern_legal_signature);
+    TEST_RUN(an_extern_function_pointer_result_and_nesting_are_checked_too);
+    TEST_RUN(a_fort_signature_may_still_carry_an_aggregate_function_pointer);
     TEST_RUN(an_extern_may_not_declare_the_program_entry_point);
     TEST_RUN(a_noreturn_function_pointer_keeps_its_type);
     TEST_RUN(an_importer_is_checked_although_its_import_did_not_parse);

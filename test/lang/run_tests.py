@@ -1176,9 +1176,16 @@ def link_command(config, test, prog, obj):
     """`<cc> --target=<triple> -o prog prog.o <link: files> fort_rt.o` for a test with helpers.
 
     `--cc` is a clang and names its target on the command line (D14.1, D14.3),
-    so the harness spells the triple here exactly as the compiler does.
+    so the harness spells the triple here exactly as the compiler does, and
+    `-O1` as well: the compiler builds the fort side at `-O1` (toolchain.md 2),
+    and a helper built at `-O0` cannot see a wrong `zeroext`/`signext` on the
+    fort side, because an unoptimised callee spills its narrow parameter to a
+    stack slot and re-narrows it. At `-O1` the callee keeps the argument under
+    the assertion its parameter attribute states and folds the re-narrowing
+    away, so the caller's wrong extension reaches the arithmetic and the
+    mirror reports it (D9.8, D9.9).
     """
-    argv = [config.cc, "--target=" + config.target, "-o", prog, obj]
+    argv = [config.cc, "--target=" + config.target, "-O1", "-o", prog, obj]
     argv.extend(str(config.root / link) for link in test.links)
     argv.append(os.path.join(config.std_dir, "fort_rt.o"))
     return argv

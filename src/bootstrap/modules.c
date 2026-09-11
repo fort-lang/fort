@@ -408,19 +408,51 @@ static void error_redeclaration(module_set_t* set, loc_t first, loc_t second, st
     diag_note(earlier, msg_end(&set->msg));
 }
 
-// `conflicting declarations of extern 'write'`: the same C symbol may be
-// declared in several modules provided the signatures are identical, `own`
-// included (D9.8, D17.1, module-system.md 6).
-static void error_extern_conflict(module_set_t* set, loc_t at, loc_t first, str_t name) {
+// What two `extern fn` declarations of one C symbol disagree about. The
+// comparison is of what the two modules wrote, parameter names excepted
+// (D9.8 as amended), so the report names the written difference rather than a
+// type difference it cannot compute here.
+typedef enum {
+    EXTERN_SAME,
+    EXTERN_DIFF_RESULT,
+    EXTERN_DIFF_COUNT,
+    EXTERN_DIFF_PARAM,
+} extern_diff_t;
+
+// `conflicting declarations of extern 'write': parameter 1 differs`: the same
+// C symbol may be declared in several modules provided the signatures are
+// identical as written, parameter names excepted (D9.8, D17.1,
+// module-system.md 8.1). Naming the difference matters because two spellings
+// of one type differ as written and not as types, and the note then says what
+// to do about it.
+static void error_extern_conflict(
+    module_set_t* set, loc_t at, loc_t first, str_t name, extern_diff_t diff, uint64_t param) {
     msg_begin(&set->msg);
     msg_str(&set->msg, "conflicting declarations of extern ");
     msg_quote(&set->msg, name);
+    if (diff == EXTERN_DIFF_RESULT) {
+        msg_str(&set->msg, ": the result type differs");
+    } else if (diff == EXTERN_DIFF_COUNT) {
+        msg_str(&set->msg, ": the number of parameters differs");
+    } else {
+        msg_str(&set->msg, ": parameter ");
+        msg_uint(&set->msg, param);
+        msg_str(&set->msg, " differs");
+    }
     diag_error(at, msg_end(&set->msg));
     msg_begin(&set->msg);
     msg_str(&set->msg, "previous declaration of ");
     msg_quote(&set->msg, name);
     msg_str(&set->msg, " here");
     diag_note(first, msg_end(&set->msg));
+    msg_begin(&set->msg);
+    // The two declarations are compared as written, so one type spelled two
+    // ways is a difference here; a module that cannot spell it the same way
+    // imports a fort function instead of declaring the C symbol again.
+    msg_str(&set->msg,
+            "extern signatures are compared as written, parameter names excepted: declare the "
+            "symbol in one module and call it through a fort function the others import");
+    diag_note(at, msg_end(&set->msg));
 }
 
 // ---- the module namespace (D7.9) ------------------------------------------------------
@@ -511,19 +543,26 @@ static bool same_written_type(const ast_node_t* a, const ast_node_t* b) {
     return true;
 }
 
-// Whether two `extern fn` declarations of one C symbol agree: the result type
-// and the parameter types, since parameter names are required by the grammar
-// and otherwise unused (module-system.md 8.1).
-static bool same_extern_signature(const ast_node_t* a, const ast_node_t* b) {
-    if (!same_written_type(a->a, b->a) || ast_len(a) != ast_len(b)) {
-        return false;
+// What two `extern fn` declarations of one C symbol disagree about: the
+// result type, the parameter count, or the first parameter whose written type
+// differs, whose 1-based position is left in `*param`. Parameter names are
+// required by the grammar and otherwise unused, so they are not compared
+// (module-system.md 8.1).
+static extern_diff_t extern_difference(const ast_node_t* a, const ast_node_t* b, uint64_t* param) {
+    *param = 0;
+    if (!same_written_type(a->a, b->a)) {
+        return EXTERN_DIFF_RESULT;
+    }
+    if (ast_len(a) != ast_len(b)) {
+        return EXTERN_DIFF_COUNT;
     }
     for (uint64_t i = 0; i < ast_len(a); i++) {
         if (!same_written_type(ast_child(a, i)->a, ast_child(b, i)->a)) {
-            return false;
+            *param = i + 1;
+            return EXTERN_DIFF_PARAM;
         }
     }
-    return true;
+    return EXTERN_SAME;
 }
 
 // Every module that calls a C function declares it, and the same C symbol may
@@ -550,8 +589,10 @@ static bool check_extern_signatures(module_set_t* set) {
                 continue;
             }
             const binding_t* earlier = (const binding_t*)first.items[at];
-            if (!same_extern_signature(earlier->node, b->node)) {
-                error_extern_conflict(set, b->loc, earlier->loc, b->name);
+            uint64_t param = 0;
+            const extern_diff_t diff = extern_difference(earlier->node, b->node, &param);
+            if (diff != EXTERN_SAME) {
+                error_extern_conflict(set, b->loc, earlier->loc, b->name, diff, param);
                 ok = false;
             }
         }

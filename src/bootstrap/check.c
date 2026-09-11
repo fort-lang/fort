@@ -2781,16 +2781,29 @@ static void resolve_enum(check_t* ck, sym_t* s) {
 }
 
 // The types an extern signature may use (D9.8): no spans, strings, structs or
-// arrays.
+// arrays. A function-pointer parameter is legal exactly when its own
+// signature is extern-legal, result type included, since the C side calls
+// through it with the same convention (module-system.md 8.1, D9.9); the
+// recursion terminates because a function type is built from types written
+// before it and cannot reach itself.
 static bool extern_legal(const type_t* t) {
     switch (t->kind) {
     case TYPE_PRIM:
     case TYPE_ENUM:
     case TYPE_PTR:
     case TYPE_VOIDPTR:
-    case TYPE_FN:
     case TYPE_VOID:
     case TYPE_ERROR:
+        return true;
+    case TYPE_FN:
+        if (!extern_legal(t->elem)) {
+            return false;
+        }
+        for (uint32_t i = 0; i < t->nparams; i++) {
+            if (!extern_legal(t->params[i])) {
+                return false;
+            }
+        }
         return true;
     default:
         return false;

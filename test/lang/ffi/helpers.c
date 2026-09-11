@@ -39,3 +39,28 @@ int64_t helper_sum_to(int64_t n) {
     }
     return sum;
 }
+
+// Narrow parameters and a narrow result travelling from fort into C, which is
+// the direction run/ffi/002 and 005 do not cover: the extension attributes of
+// D9.9 normalize both sides, and each value below is read here in a wider type
+// so that a truncation or a wrong extension changes the answer.
+int64_t helper_narrow_sum(int8_t a, uint8_t b, int16_t c, uint16_t d) {
+    return (int64_t)a + (int64_t)b + (int64_t)c + (int64_t)d;
+}
+
+// fort `char` is C's `unsigned char` at the boundary (D9.8), so a byte above
+// 127 arrives unchanged rather than as a negative number.
+uint8_t helper_char_code(unsigned char c) {
+    return (uint8_t)c;
+}
+
+// `bool` crosses as a single 0 or 1 (module-system.md 8.3).
+bool helper_not(bool b) {
+    return !b;
+}
+
+// A fort enum crosses as `i32` (D9.8), so C sees a plain integer and the
+// answer comes back as the enum it was declared with.
+int32_t helper_enum_next(int32_t c) {
+    return c + 1;
+}

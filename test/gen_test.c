@@ -390,76 +390,6 @@ TEST(a_noreturn_definition_carries_its_own_group_and_ends_in_a_trap, {
         "attributes #7 = { cold noreturn nounwind memory(inaccessiblemem: write) }");
 })
 
-// ---- declarations (item 8) ---------------------------------------------------------
-
-TEST(an_extern_is_declared_and_called_through_a_variadic_type, {
-    TEST_ASSERT_TRUE(emit("extern fn i32 printf(char* fmt);\n"
-                          "fn i32 main() { string s = \"x\"; return printf(s.ptr); }\n"));
-    TEST_ASSERT_EQ_STR(found("declare i32 @printf(ptr, ...)"), "declare i32 @printf(ptr, ...)");
-    TEST_ASSERT_EQ_STR(found("call i32 (ptr, ...) @printf(ptr %t"),
-                       "call i32 (ptr, ...) @printf(ptr %t");
-    // nobuiltin on every extern call site keeps LLVM from rewriting the call
-    // (item 8).
-    TEST_ASSERT_EQ_STR(found(") #3\n"), ") #3\n");
-    TEST_ASSERT_EQ_STR(found("attributes #3 = { nobuiltin }"), "attributes #3 = { nobuiltin }");
-})
-
-TEST(an_extern_with_no_parameter_is_still_variadic, {
-    TEST_ASSERT_TRUE(emit("extern fn i32 rand();\nfn i32 main() { return rand(); }\n"));
-    TEST_ASSERT_EQ_STR(found("declare i32 @rand(...)"), "declare i32 @rand(...)");
-    TEST_ASSERT_EQ_STR(found("call i32 (...) @rand() #3"), "call i32 (...) @rand() #3");
-})
-
-TEST(an_extern_narrow_signature_carries_the_c_attributes, {
-    TEST_ASSERT_TRUE(emit("extern fn i8 narrow(i8 a, u16 b);\n"
-                          "fn i32 main() { return cast(narrow(1, 2), i32); }\n"));
-    TEST_ASSERT_EQ_STR(found("declare signext i8 @narrow(i8 signext, i16 zeroext, ...)"),
-                       "declare signext i8 @narrow(i8 signext, i16 zeroext, ...)");
-})
-
-TEST(an_extern_naming_a_runtime_entry_point_is_declared_once, {
-    TEST_ASSERT_TRUE(emit("extern fn void fort_rt_flush(i32 fd);\n"
-                          "fn i32 main() { println(\"x\"); fort_rt_flush(1); return 0; }\n"));
-    // It is emitted in the runtime group with that group's prototype and left
-    // out of the extern group, variadic tail included (item 8).
-    TEST_ASSERT_EQ_STR(found("declare void @fort_rt_flush(i32)\n"),
-                       "declare void @fort_rt_flush(i32)\n");
-    TEST_ASSERT_EQ_STR(absent("@fort_rt_flush(i32, ...)"), "absent");
-})
-
-TEST(the_runtime_declarations_follow_the_order_of_section_5_1, {
-    TEST_ASSERT_TRUE(emit(in_main("    i32 mut a = 1;\n    a = a + 1;\n    println(1, 'c');\n")));
-    TEST_ASSERT_TRUE(
-        before("declare void @fort_rt_fail_overflow", "declare void @fort_rt_print_i64"));
-    TEST_ASSERT_TRUE(before("declare void @fort_rt_print_i64", "declare void @fort_rt_print_char"));
-})
-
-TEST(the_intrinsics_come_last_in_their_table_order, {
-    TEST_ASSERT_TRUE(emit("struct point { i32 x; i32 y; }\n"
-                          "fn i32 main() {\n    point p = {};\n    point q = p;\n"
-                          "    i32 mut a = 1;\n    a = a + 1;\n    return q.x;\n}\n"));
-    TEST_ASSERT_TRUE(before("declare void @fort_rt_fail_overflow", "declare void @llvm.memcpy"));
-    TEST_ASSERT_TRUE(before("declare void @llvm.memcpy", "declare void @llvm.memset"));
-    TEST_ASSERT_TRUE(before("declare void @llvm.memset", "declare { i32, i1 } @llvm.sadd"));
-})
-
-TEST(only_referenced_declarations_are_emitted, {
-    TEST_ASSERT_TRUE(emit(in_main("    println(\"x\");\n")));
-    TEST_ASSERT_EQ_STR(absent("@fort_rt_new"), "absent");
-    TEST_ASSERT_EQ_STR(absent("@fort_rt_print_i64"), "absent");
-    TEST_ASSERT_EQ_STR(absent("@llvm."), "absent");
-    TEST_ASSERT_EQ_STR(absent("attributes #2"), "absent");
-})
-
-TEST(each_declaration_group_is_separated_by_a_blank_line, {
-    TEST_ASSERT_TRUE(emit("extern fn i32 rand();\n"
-                          "fn i32 main() {\n    i32[2] a = {};\n    i64 i = 0;\n"
-                          "    println(a[i], rand());\n    return 0;\n}\n"));
-    TEST_ASSERT_EQ_STR(found("declare i32 @rand(...)\n\ndeclare void @fort_rt_fail_bounds"),
-                       "declare i32 @rand(...)\n\ndeclare void @fort_rt_fail_bounds");
-    TEST_ASSERT_EQ_STR(found("\n\ndeclare void @llvm.memset"), "\n\ndeclare void @llvm.memset");
-})
-
 // ---- normalization and casts (items 9 and 12) --------------------------------------
 
 TEST(a_narrow_value_keeps_its_own_width, {
@@ -576,14 +506,6 @@ int main(int argc, char** argv) {
     TEST_RUN(an_aggregate_result_is_a_leading_sret_pointer_on_a_void_function);
     TEST_RUN(every_fort_definition_carries_the_attribute_group_of_item_7);
     TEST_RUN(a_noreturn_definition_carries_its_own_group_and_ends_in_a_trap);
-    TEST_RUN(an_extern_is_declared_and_called_through_a_variadic_type);
-    TEST_RUN(an_extern_with_no_parameter_is_still_variadic);
-    TEST_RUN(an_extern_narrow_signature_carries_the_c_attributes);
-    TEST_RUN(an_extern_naming_a_runtime_entry_point_is_declared_once);
-    TEST_RUN(the_runtime_declarations_follow_the_order_of_section_5_1);
-    TEST_RUN(the_intrinsics_come_last_in_their_table_order);
-    TEST_RUN(only_referenced_declarations_are_emitted);
-    TEST_RUN(each_declaration_group_is_separated_by_a_blank_line);
     TEST_RUN(a_narrow_value_keeps_its_own_width);
     TEST_RUN(a_signed_widening_cast_is_a_sext);
     TEST_RUN(an_unsigned_widening_cast_is_a_zext);

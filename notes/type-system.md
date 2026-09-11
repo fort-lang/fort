@@ -1325,9 +1325,10 @@ ordinary scalar parameters, a plain `ptr` parameter for an aggregate argument an
 Struct layout is identical to the C layout of the same declaration, so passing `&s` to C works.
 A fort function is usable as a C callback, and an `extern` function may be declared, exactly when
 every parameter and the result are integers, floats, `bool`, `char`, enums (passed as `i32`),
-pointers or function pointers; spans, strings, structs and arrays never cross an `extern`
-boundary (D9.8). Narrow integers and `bool` are zero- or sign-extended on both sides of the
-boundary; C `char*` maps to `char*` or `u8*`, C `size_t` to `u64` (D9.8). `own` may appear in
+pointers or function pointers whose own signature is extern-legal in turn; spans, strings,
+structs and arrays never cross an `extern` boundary (D9.8). Narrow integers and `bool` are zero-
+or sign-extended on both sides of the boundary; C `char*` maps to `char*` or `u8*`, C `size_t`
+to `u64` (D9.8). `own` may appear in
 an `extern` signature (D17.13): it is erased like everywhere else and documents the C side's
 convention, so a fort caller must `move` into an `own` parameter and must land an `own` result.
 A `void*` result is `void* own`, never `void mut* own`, because `void*` has no target level for

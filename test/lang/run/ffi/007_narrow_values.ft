@@ -1,0 +1,42 @@
+//! run
+//! link: ffi/helpers.c
+//! stdout:
+//| -20
+//| 32894
+//| 200 65
+//| false true
+//| green
+// Narrow integers and `bool` are normalized on both sides of the boundary with
+// `zeroext` and `signext` (D9.8, module-system.md 8.3). run/ffi/002 and 005
+// read a narrow value coming out of C; here every narrow value goes into C,
+// which widens it again, so a truncation or the wrong extension on the way in
+// changes the number printed. This is the one shape that can see the
+// convention itself: the helper is a separate translation unit built at -O1,
+// where the callee trusts the attribute instead of re-narrowing, so swapping
+// `zeroext` and `signext` in the emitter prints 4295032812 for the first line.
+// The attributes are also asserted on the emitted text in test/gen_decl_test.c.
+extern fn i64 helper_narrow_sum(i8 a, u8 b, i16 c, u16 d);
+extern fn u8 helper_char_code(char c);
+extern fn bool helper_not(bool b);
+
+enum color {
+    red,
+    green,
+}
+
+// An enum parameter and an enum result cross as `i32` (D9.8): C adds one to
+// the ordinal and fort reads the member back.
+extern fn color helper_enum_next(color c);
+
+fn i32 main() {
+    // -100 + 200 - 30000 + 29880 == -20: a `u8` read as `i8`, or an `i16` read
+    // as a `u16`, lands nowhere near it.
+    println(helper_narrow_sum(-100, 200, -30000, 29880));
+    // The extremes of each narrow type at once: -128 + 255 + -32768 + 65535.
+    println(helper_narrow_sum(-128, 255, -32768, 65535));
+    // 200 is 0xC8, above the signed range of a byte, and 'A' is 65.
+    println(helper_char_code(cast(200, char)), " ", helper_char_code('A'));
+    println(helper_not(true), " ", helper_not(false));
+    println(helper_enum_next(color.red));
+    return 0;
+}

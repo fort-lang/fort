@@ -634,12 +634,16 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    LLVM passes the vector-register count a variadic callee reads exactly when the call-site type
    is variadic, so declaring every extern variadic is what makes a fixed-prototype declaration
    of a variadic C function safe (D9.8); a non-variadic callee ignores that count, so the
-   declaration is ABI-identical for it. `#3 = { nobuiltin }` on every extern call site keeps
-   LLVM from rewriting a declared symbol into another library call, and is preferred to a
-   driver-wide `-fno-builtin`, which would also change how our `llvm.memcpy` and `llvm.memset`
-   are lowered. A call through a function pointer is not variadic (D3.10 has no variadic
-   function type) and needs no such declaration; it is also never a call of an extern, whose name
-   is not a value, so every extern call in the module carries the variadic type above (D3.10).
+   declaration is ABI-identical for it. `#3 = { nobuiltin }` on every extern call site that goes
+   through that variadic type keeps LLVM from rewriting a declared symbol into another library
+   call, and is preferred to a driver-wide `-fno-builtin`, which would also change how our
+   `llvm.memcpy` and `llvm.memset` are lowered. An `extern fn` naming a runtime entry point is
+   the exception at both ends: it takes that group's prototype rather than the variadic type
+   (below), and its call site carries no `#3`, since no C library occupies the `fort_rt_` space
+   and there is nothing to rewrite it into. A call through a function pointer is not variadic
+   (D3.10 has no variadic function type) and needs no such declaration; it is also never a call of
+   an extern, whose name is not a value, so every extern call of a C library symbol in the module
+   carries the variadic type above (D3.10).
 
    The runtime entry points are declared with the C prototypes of section 5.1 and are never
    variadic, whether the compiler emits the call itself or the standard library reached the
