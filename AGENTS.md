@@ -131,12 +131,14 @@ A safe(r) C-like systems programming language.
 - `tools/vm gate` is the merge gate: `format-check`, `tidy`, and `check-all` under `debug`,
   `asan` and `ubsan` (it configures `debug` first, then configures and builds each preset before
   its `check-all`).
-- A run test's program executes in a fresh empty temporary directory (`tempfile.mkdtemp`), so it
-  cannot open a file that ships beside it. A program that must read one is given `/dev/stdin` as
-  its argument and fed by a `//! stdin:` block, which is how `programs/wc.ft`, `cat.ft` and
-  `wordfreq.ft` run. `programs/wc.ft` is additionally the fenced block of `notes/stdlib.md` 4 byte
-  for byte below its directives, so an edit to either must be made to both; strip the `//!`, `//|`
-  and `//<` lines and diff to check.
+- A run test's program executes in a temporary directory (`tempfile.mkdtemp`) holding only the
+  compiled program itself, so it cannot open a **pre-existing** file that ships beside the test. It
+  may freely create a file there and read it back, which `run/stdlib/051`, `054` and `055` do. A
+  program that must read a file it did not write is given `/dev/stdin` as its argument and fed by a
+  `//! stdin:` block -- the harness gives the child a pipe on fd 0 and opening `/dev/stdin` re-opens
+  it -- which is how `programs/wc.ft`, `cat.ft` and `wordfreq.ft` run. `programs/wc.ft` is
+  additionally the fenced block of `notes/stdlib.md` 4 byte for byte below its directives, so an
+  edit to either must be made to both; strip the `//!`, `//|` and `//<` lines and diff to check.
 - Language tests: `test/lang/run_tests.py [filter]` (decisions D14.4, D14.5; toolchain.md 7.3
   describes every option and verdict). `test/lang/xfail.txt` lists tests the compiler cannot
   pass yet; a listed test that passes fails the run, so shrink the list in the same commit that
