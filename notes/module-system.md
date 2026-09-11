@@ -720,6 +720,7 @@ All diagnostics follow D14.2: `<file>:<line>:<col>: error: <message>`, optionall
 | local reusing an enclosing local   | `'i' shadows an enclosing local` (or `a parameter`)      |
 | same extern, different signatures  | `conflicting declarations of extern 'write'`             |
 | `extern` declaring `fort_entry`    | `'fort_entry' is reserved: the compiler emits it`        |
+| `fort_rt_*` extern, bad signature  | `conflicting declarations of extern 'fort_rt_del'`       |
 | same extern, `own` differs (D17.1) | `conflicting declarations of extern 'free'`              |
 | import after a declaration         | `imports must precede declarations`                      |
 | module binding as a value or type  | `'io' is a module, not a value` (or `not a type`)        |
@@ -734,12 +735,23 @@ is reported the same way in both modes, and `--check --json` reports them as the
 `toolchain.md` 4.1, with the same positions.
 
 Notes accompany some of these: "not found" lists `note: looked for <path>` once per root and
-reading; the ambiguous case gives the full paths in the message and the same-file case adds
-`note: both name <real path>`; a redeclaration points at the
-earlier one with `note: previous declaration of 'add' here`; the missing-`main` message continues
-`or 'fn i32 main(string@ args)'`. Tests pin these with `//! error: <substring>` on the offending
-line, or `//! error-any:` for the cycle case, where the closing import depends on walk order
-(D14.5).
+reading; the ambiguous case gives the full paths in the message and the same-file case adds `note:
+both name <real path>`; a redeclaration points at the earlier one with `note: previous declaration
+of 'add' here`; the missing-`main` message continues `or 'fn i32 main(string@ args)'`. Every
+conflicting-extern row names the difference in the same words: `: the result type differs`, `: the
+number of parameters differs` or `: parameter N differs`, and the runtime row adds `from the
+runtime's`, since the declaration it conflicts with is the compiler's own (D9.8). An `extern fn`
+naming a runtime entry point of `toolchain.md` 5.1 is legitimate -- the standard library declares
+five of them (D13.1) -- and is held against that section's prototype, the position being the
+parameter, the written result type or the name for an arity; two types agree when they take the same
+IR form, attribute included (D9.9), so `u64` and `i64` both match an `int64_t` and `char` matches a
+`uint8_t`. Its note shows the declaration the compiler emits instead of pointing at an earlier one,
+since the declaration in conflict is the compiler's own: `note: the compiler declares it as 'declare
+void @fort_rt_del(ptr)'`. `own` is not part of that comparison, unlike the extern-versus-extern one
+above: `own` is erased at run time (D17.1) and the runtime's C prototype has no notion of it, so
+`fort_rt_del(u8* own p)` agrees, while two fort declarations of one C symbol can disagree about
+ownership and must not. Tests pin these with `//! error: <substring>` on the offending line, or `//!
+error-any:` for the cycle case, where the closing import depends on walk order (D14.5).
 
 ## 14. Not in v1
 

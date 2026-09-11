@@ -563,7 +563,7 @@ static gen_val_t gen_call(gen_t* g, ast_node_t* n, const gen_place_t* dst) {
     // An `extern fn` naming a runtime entry point takes that group's
     // prototype, variadic tail included, so it is called through it and not
     // through the variadic type of D9.8 (item 8).
-    const bool variadic = is_extern && gen_runtime_entry(s->name) == RT_COUNT;
+    const bool variadic = is_extern && rt_entry_of(s->name) == RT_COUNT;
     if (is_extern) {
         gen_use_extern(g, s);
     }

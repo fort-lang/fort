@@ -150,21 +150,45 @@ TEST(an_extern_naming_a_runtime_entry_point_is_declared_once, {
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
-TEST(a_runtime_entry_point_declared_with_the_wrong_signature_is_not_caught, {
-    // The hole T-072 exists to close, pinned here so that closing it changes
-    // this test rather than passing unnoticed. `gen_runtime_entry` matches an
-    // `extern fn` to a runtime entry point by name alone, so the declaration
-    // below is accepted, the declaration group emits the runtime's own
-    // prototype, and the call site emits the signature the user wrote.
-    TEST_ASSERT_TRUE(emit("extern fn void fort_rt_del(i32 wrong);\n"
-                          "fn i32 main() { fort_rt_del(5); return 0; }\n"));
+TEST(a_runtime_entry_point_an_extern_declares_is_called_through_its_prototype, {
+    // An `extern fn` naming a runtime entry point takes that group's
+    // prototype rather than the variadic type of an extern, and its call site
+    // carries no `#3`, since no C library occupies the `fort_rt_` space
+    // (item 8, D13.1). The checker has held the declaration against the
+    // canonical signature first (check_conv_test.c), so the two agree.
+    TEST_ASSERT_TRUE(emit("extern fn void fort_rt_del(void* p);\n"
+                          "fn i32 main() { fort_rt_del(null); return 0; }\n"));
     TEST_ASSERT_EQ_STR(found("declare void @fort_rt_del(ptr)"), "declare void @fort_rt_del(ptr)");
-    TEST_ASSERT_EQ_STR(found("call void @fort_rt_del(i32 5)"), "call void @fort_rt_del(i32 5)");
-    // And no tool below the compiler objects: opaque pointers make a call
-    // site's type independent of its callee's, so the verifier accepts the
-    // pair and the program dies at run time instead. The check has to be the
-    // checker's.
+    TEST_ASSERT_EQ_STR(found("call void @fort_rt_del(ptr null)"),
+                       "call void @fort_rt_del(ptr null)");
+    TEST_ASSERT_EQ_STR(absent("@fort_rt_del(ptr, ...)"), "absent");
     TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+TEST(a_fort_rt_name_no_entry_point_takes_is_an_ordinary_extern, {
+    // The runtime group is the table of section 5.1 and not the `fort_rt_`
+    // prefix: a C symbol the runtime does not declare is declared and called
+    // through the variadic type of an extern, with the `#3` of item 8.
+    TEST_ASSERT_TRUE(emit("extern fn i32 fort_rt_helper(i32 n);\n"
+                          "fn i32 main() { return fort_rt_helper(1); }\n"));
+    TEST_ASSERT_EQ_STR(found("declare i32 @fort_rt_helper(i32, ...)"),
+                       "declare i32 @fort_rt_helper(i32, ...)");
+    TEST_ASSERT_EQ_STR(found("call i32 (i32, ...) @fort_rt_helper(i32 1) #3"),
+                       "call i32 (i32, ...) @fort_rt_helper(i32 1) #3");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+TEST(a_runtime_entry_point_declared_with_the_wrong_signature_is_refused, {
+    // The hole T-072 closed. The emitter replaces the declaration with the
+    // runtime's own prototype, so a call written against a wrong signature
+    // reaches no tool below the compiler: opaque pointers make a call site's
+    // type independent of its callee's, `opt` accepts the pair and the
+    // program dies at run time. The front end takes the rejection over, and
+    // nothing is emitted at all.
+    TEST_ASSERT_FALSE(emit("extern fn void fort_rt_del(i32 wrong);\n"
+                           "fn i32 main() { fort_rt_del(5); return 0; }\n"));
+    // Nothing is emitted at all: the emitter never ran.
+    TEST_ASSERT_EQ_STR(ir(), "");
 })
 
 TEST(the_runtime_declarations_follow_the_order_of_section_5_1, {
@@ -213,7 +237,9 @@ int main(int argc, char** argv) {
     TEST_RUN(an_extern_narrow_signature_carries_the_c_attributes);
     TEST_RUN(a_wide_extern_signature_carries_no_extension_attribute);
     TEST_RUN(an_extern_naming_a_runtime_entry_point_is_declared_once);
-    TEST_RUN(a_runtime_entry_point_declared_with_the_wrong_signature_is_not_caught);
+    TEST_RUN(a_runtime_entry_point_an_extern_declares_is_called_through_its_prototype);
+    TEST_RUN(a_fort_rt_name_no_entry_point_takes_is_an_ordinary_extern);
+    TEST_RUN(a_runtime_entry_point_declared_with_the_wrong_signature_is_refused);
     TEST_RUN(the_runtime_declarations_follow_the_order_of_section_5_1);
     TEST_RUN(the_intrinsics_come_last_in_their_table_order);
     TEST_RUN(only_referenced_declarations_are_emitted);

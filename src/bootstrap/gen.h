@@ -40,44 +40,10 @@
 #include "check.h"
 #include "containers.h"
 #include "modules.h"
+#include "runtime_sig.h"
 #include "str.h"
 #include "sym.h"
 #include "types.h"
-
-// The runtime entry points of toolchain.md 5.1, in the order that section
-// lists them, which is the order their declarations are emitted in (D19.5).
-typedef enum {
-    RT_NEW,
-    RT_DEL,
-    RT_STR_EQ,
-    RT_FAIL_BOUNDS,
-    RT_FAIL_SPAN,
-    RT_FAIL_OVERFLOW,
-    RT_FAIL_SHIFT,
-    RT_FAIL_DIV_ZERO,
-    RT_FAIL_DIV_OVERFLOW,
-    RT_FAIL_ALLOC_COUNT,
-    RT_FAIL_OVERWRITE,
-    RT_FAIL_ENUM,
-    RT_PANIC,
-    RT_ASSERT_FAIL,
-    RT_PRINT_I64,
-    RT_PRINT_U64,
-    RT_PRINT_F32,
-    RT_PRINT_F64,
-    RT_PRINT_BOOL,
-    RT_PRINT_CHAR,
-    RT_PRINT_PTR,
-    RT_PRINT_STR,
-    RT_PRINT_ENUM,
-    RT_FLUSH,
-    RT_FLUSH_ALL,
-    RT_ARGS_INIT,
-    RT_ARGS_PTR,
-    RT_ARGS_LEN,
-    RT_EXIT,
-    RT_COUNT,
-} gen_rt_t;
 
 // The intrinsics of toolchain.md 6 item 8, in the fixed order that item
 // gives: memcpy, memset, the overflow family by operation then by ascending
@@ -482,8 +448,8 @@ void gen_switch_end(gen_t* g);
 
 // A call to a runtime entry point, which is declared on first use (item 8).
 // The result form names the value; the void form emits none.
-void gen_call_rt(gen_t* g, gen_rt_t rt, const gen_args_t* args);
-gen_val_t gen_call_rt_value(gen_t* g, gen_rt_t rt, str_t ret, const gen_args_t* args);
+void gen_call_rt(gen_t* g, rt_entry_t rt, const gen_args_t* args);
+gen_val_t gen_call_rt_value(gen_t* g, rt_entry_t rt, str_t ret, const gen_args_t* args);
 
 // The `ptr @.file.N, i32 <line>, i32 <col>` every runtime failure takes: the
 // position of D11.4, which is the operator's token (toolchain.md 4).
@@ -496,7 +462,8 @@ void gen_args_add_loc(gen_t* g, gen_args_t* args, loc_t loc);
 // first, and false for `assert` alone, whose operand is already the success
 // condition (D12.2). The caller adds the check's own values to `args`; the
 // location of D11.4 is appended here.
-void gen_check(gen_t* g, gen_val_t cond, bool fail_when, gen_rt_t rt, gen_args_t* args, loc_t loc);
+void gen_check(
+    gen_t* g, gen_val_t cond, bool fail_when, rt_entry_t rt, gen_args_t* args, loc_t loc);
 
 // One failure block of D19.6 that no check's branch reaches: the default of a
 // `switch` over an enum with no `default` clause arrives by the switch's own
@@ -504,7 +471,7 @@ void gen_check(gen_t* g, gen_val_t cond, bool fail_when, gen_rt_t rt, gen_args_t
 // to `rt` and `unreachable` like every other, the location of D11.4 is
 // appended to `args` here, and it is written to the failure buffer, so the
 // caller emits it while its label is still the smallest one outstanding.
-void gen_fail_block(gen_t* g, uint64_t label, gen_rt_t rt, gen_args_t* args, loc_t loc);
+void gen_fail_block(gen_t* g, uint64_t label, rt_entry_t rt, gen_args_t* args, loc_t loc);
 
 // Marks an intrinsic or an attribute group used, so that only referenced
 // declarations are emitted (item 8, D19.5).
@@ -535,14 +502,13 @@ uint64_t gen_enum_count(const sym_t* e);
 
 // Records an `extern` function so that its declaration is emitted in
 // first-use order, once per C name: two modules may each declare the same
-// function, which is two symbols and one ELF symbol (item 8).
+// function, which is two symbols and one ELF symbol (item 8). One naming a
+// runtime entry point (rt_entry_of, runtime_sig.h) goes to the runtime group
+// instead, with that group's prototype and attributes, and is left out of the
+// extern group, variadic tail included, so it is called through that
+// prototype too (item 8, D13.1); the checker has already held the declaration
+// against the canonical signature (D9.8).
 void gen_use_extern(gen_t* g, const sym_t* s);
-
-// The runtime entry point a C name denotes, or RT_COUNT. An `extern fn`
-// naming one is declared in the runtime group with that group's prototype and
-// attributes and left out of the extern group, variadic tail included, so it
-// is called through that prototype too (item 8, D13.1).
-gen_rt_t gen_runtime_entry(str_t name);
 
 // Appends the private data, the declarations and the attribute groups, then
 // assembles the module into `g->out` (item 1).

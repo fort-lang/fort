@@ -710,6 +710,11 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    the extern group, variadic tail included. A plain runtime declaration carries no attribute
    group; the `_Noreturn` entry points of section 5.1 carry `#2` (item 14), `fort_rt_exit`
    included, whether the compiler or an `extern fn` brought them in.
+   Because that declaration replaces the one the program wrote, an `extern fn` naming an entry
+   point must agree with section 5.1's prototype, and a disagreement is a compile error the
+   front end reports (`module-system.md` 13): a call written against a wrong signature would
+   otherwise be emitted against the canonical declaration, which no tool below the compiler
+   objects to, opaque pointers making a call site's type independent of its callee's (D9.8).
 
 9. **Normalization** (D9.8, D19.2). A narrow value is not widened to 32 bits: an `i8` value has
    type `i8` and its width is in the type. The only extensions the emitter produces are the

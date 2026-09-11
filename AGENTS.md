@@ -175,7 +175,10 @@ A safe(r) C-like systems programming language.
   standard library only, wrapped at 100 columns (the host's `ruff format --line-length 100` is
   the reference); `run_tests_test.py` scripts a fake `fort` with `//@` lines, extend it rather
   than calling the real compiler.
-- Unit tests: `test/<component>_test.c` with `test/test.h`; every `test/*_test.c` is globbed
+- Unit tests: `test/<component>_test.c` with `test/test.h`; the suite name is the file stem and
+  `test/` already holds one per component, `runtime_test.c` being the C runtime's and not the
+  compiler's, so check the name is free before writing the file (a shell redirection overwrites a
+  suite silently and the gate then reports only its absence); every `test/*_test.c` is globbed
   into an executable `build/<preset>/test/<component>_test` linked against `fort_core` and
   `fort_rt_native`, and a ctest `unit-<component>`. A `TEST` body is one macro argument: a comma
   outside parentheses (a brace initializer, for example) splits it. `#val` in an assertion
@@ -419,26 +422,35 @@ A safe(r) C-like systems programming language.
   run at the wrong place; and because the expansion duplicates code at every exit, an emitter
   test that adds one asserts `verified()`, since a missed `g->terminated` check there writes an
   instruction after a terminator that `opt -passes=verify` alone accepts.
-  **A runtime entry point is described in four places that nothing holds together**: the C
-  prototype in `runtime/fort_rt.h` and `.c`, the table in `toolchain.md` 5.1, the declaration
-  list of item 8, and the three positional arrays of `gen_data.c` (`RT_DECL`, `RT_NAME`,
-  `RT_RESULT`) indexed by the `gen_rt_t` of `gen.h`, and `rt_is_noreturn` beside them, which
-  spells the `_Noreturn` entry points as a *range* over that enum (`RT_FAIL_BOUNDS` to
-  `RT_ASSERT_FAIL`, plus `RT_EXIT`): an entry point added inside that run is `cold noreturn
-  nounwind` whether or not it returns, and one added just outside it silently is not. Adding one
-  in the middle of 5.1's order shifts every later index of all three arrays at once, and only
-  `RT_RESULT`, whose entries are short, can absorb a miscount without the compiler noticing, so
-  write the five together and count that array by hand (T-072 exists because nothing checks the
-  agreement). A narrow result
-  carries its extension attribute in the declaration *and* at the call site (`declare zeroext i8
-  @fort_rt_str_eq(...)`, `%t = call zeroext i8 @...`), which is why `RT_RESULT` holds a type text
-  and not a type. `opt` accepts a call site whose attributes differ from the callee's and LLVM
-  falls back to the callee's, so *dropping* one at a call site cannot change the assumption while
-  *adding* one the declaration lacks can: T-021's review dropped the `zeroext` from the
-  `fort_rt_str_eq` call site and the entire language corpus stayed green, only the emitted-text
-  assertion failing. The attribute is not decorative -- on a return it licenses eliding the
-  `movzbl` -- and it stops being invisible the moment a lowering compares or widens the narrow
-  result instead of truncating it straight to `i1`.
+  **A runtime entry point is described in three places, and a test now holds all three together**:
+  the C prototype in `runtime/fort_rt.h` and `.c`, the table in `toolchain.md` 5.1 with the
+  declaration list of item 8, and one row per entry point in `src/bootstrap/runtime_sig.c`
+  (`RT_SIG`, indexed by the `rt_entry_t` of `runtime_sig.h`), which carries the C name, the result
+  form, the `_Noreturn` mark and the parameter forms. The emitter renders its `declare` lines and
+  its call-site result types from that row, and the checker holds an `extern fn` naming an entry
+  point against the same row (D9.8, T-072), so the IR and the diagnostic cannot disagree. The
+  witness is `test/runtime_sig_test.c`'s `RT_ENTRIES` X-macro: each row is expanded once into a
+  `_Static_assert(_Generic(&name, cresult (*) cparams: 1, default: 0), #name)`, which pins the row's
+  C column to the real header, and once into runtime assertions that every form of `RT_SIG` is
+  `IR_OF` of the C type beside it, which pins the table to that column. Both halves are needed --
+  T-072's review showed that the `_Generic` assertion alone witnesses the header against the
+  assertion's own text and would miss a wrong row -- and the per-parameter half must be runtime
+  assertions, since `rt_entry_param` is a function call. `IR_OF`'s `default:` is `IR_NONE` and no
+  row may hold one: a `default: IR_PTR` would silently swallow a future scalar, C's `char` being a
+  type distinct from `signed char` and `unsigned char` under `_Generic`. The one column no construct
+  can witness is `_Noreturn`, which is a function specifier and not part of the function's type (C11
+  6.7.4), so `_Generic`, `__builtin_types_compatible_p` and everything else are blind to it; it is
+  checked by reading 5.1. Before that witness existed, giving `fort_rt_print_f64` an `i64` parameter
+  or `fort_rt_fail_div_zero` a 64-bit line number left the whole gate green. A narrow result carries
+  its extension attribute in the declaration *and* at the call site (`declare zeroext i8
+  @fort_rt_str_eq(...)`, `%t = call zeroext i8 @...`), which is why a form in `RT_SIG` is a type
+  text with its attribute and not a type. `opt` accepts a call site whose attributes differ from the
+  callee's and LLVM falls back to the callee's, so *dropping* one at a call site cannot change the
+  assumption while *adding* one the declaration lacks can: T-021's review dropped the `zeroext` from
+  the `fort_rt_str_eq` call site and the entire language corpus stayed green, only the emitted-text
+  assertion failing. The attribute is not decorative -- on a return it licenses eliding the `movzbl`
+  -- and it stops being invisible the moment a lowering compares or widens the narrow result instead
+  of truncating it straight to `i1`.
   **The emitter decides lvalue-ness syntactically.** The checker computes `expr_t.lvalue` (D6.7)
   and writes no bit for it on the node, so `is_place_expr` in `gen_expr.c` re-derives it from the
   node kind for the one question that needs it, whether `del` empties its operand (D17.9). A new
@@ -461,6 +473,15 @@ A safe(r) C-like systems programming language.
   that declared a wrong signature (T-018's review). When a tool's rejection is the only thing
   standing between a legal-looking program and wrong code, the front end takes the rejection over
   before the emitter stops producing it.
+  **`opt -passes=verify` does not reject a call whose argument types disagree with its callee's
+  `declare`.** Opaque pointers make a call site's type independent of its callee's, so
+  `call void @fort_rt_fail_div_zero(ptr @.file.0, i32 4, i32 14)` against
+  `declare void @fort_rt_fail_div_zero(ptr, i64, i32)` verifies, links and then reads a register
+  the caller never set (T-072's review). Together with the attribute fact above and the terminator
+  fact below, this is why the emitter suites are a weak oracle for a *declaration*: they check the
+  text they assert, and `only_referenced_declarations_are_emitted` means most runtime declarations
+  appear in no gen test at all. A declaration is pinned against the C header that defines it, not
+  against the IR a tool accepts.
   **`opt -passes=verify` does not reject an instruction after a terminator.** It splits the block,
   invents an unnamed successor which it prints as `0: ; No predecessors!`, and exits 0 -- so it
   quietly manufactures the implicit numbering D19.5 forbids rather than reporting the module that

@@ -794,7 +794,7 @@ void gen_args_add_loc(gen_t* g, gen_args_t* args, loc_t loc) {
 // One failure block: the call to the entry point and `unreachable`, and
 // nothing else, because the callee aborts (item 14). It is written to the
 // function's failure buffer, which is appended after every normal block.
-static void fail_block(gen_t* g, uint64_t label, gen_rt_t rt, const gen_args_t* args) {
+static void fail_block(gen_t* g, uint64_t label, rt_entry_t rt, const gen_args_t* args) {
     // A failure block is built in the same shape as a normal one, so it is
     // written through the body buffer and moved afterwards.
     const uint64_t mark = g->body.len;
@@ -816,7 +816,8 @@ void gen_zero_owner(gen_t* g, gen_place_t p) {
     gen_store_place(g, p, gen_literal(g, str_from_cstr("ptr"), "null"));
 }
 
-void gen_check(gen_t* g, gen_val_t cond, bool fail_when, gen_rt_t rt, gen_args_t* args, loc_t loc) {
+void gen_check(
+    gen_t* g, gen_val_t cond, bool fail_when, rt_entry_t rt, gen_args_t* args, loc_t loc) {
     // The continuation label is allocated before the failure label (D19.6).
     const uint64_t cont = gen_label(g);
     const uint64_t bad = gen_label(g);
@@ -833,7 +834,7 @@ void gen_check(gen_t* g, gen_val_t cond, bool fail_when, gen_rt_t rt, gen_args_t
     gen_block_begin(g, cont);
 }
 
-void gen_fail_block(gen_t* g, uint64_t label, gen_rt_t rt, gen_args_t* args, loc_t loc) {
+void gen_fail_block(gen_t* g, uint64_t label, rt_entry_t rt, gen_args_t* args, loc_t loc) {
     gen_args_add_loc(g, args, loc);
     fail_block(g, label, rt, args);
 }

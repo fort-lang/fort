@@ -12,6 +12,7 @@
 #include "diag.h"
 #include "gen.h"
 #include "lexer.h"
+#include "runtime_sig.h"
 #include "str.h"
 #include "sym.h"
 #include "types.h"
@@ -23,101 +24,6 @@ static const char MODULE_HEADER[] = "target triple = \"x86_64-unknown-linux-gnu\
 // The program entry point the compiler emits in the entry module (D11.6): the
 // one C name a fort program's own definitions occupy.
 static const char ENTRY_NAME[] = "fort_entry";
-
-// The declarations of the runtime entry points, with the C prototypes of
-// toolchain.md 5.1 mapped to IR types by item 8, in that section's order
-// (D19.5).
-static const char* const RT_DECL[RT_COUNT] = {
-    "declare ptr @fort_rt_new(i64, i64, ptr, i32, i32)",
-    "declare void @fort_rt_del(ptr)",
-    "declare zeroext i8 @fort_rt_str_eq(ptr, i64, ptr, i64)",
-    "declare void @fort_rt_fail_bounds(i64, i64, ptr, i32, i32) #2",
-    "declare void @fort_rt_fail_span(i64, i64, i64, ptr, i32, i32) #2",
-    "declare void @fort_rt_fail_overflow(ptr, i32, i32) #2",
-    "declare void @fort_rt_fail_shift(i64, ptr, ptr, i32, i32) #2",
-    "declare void @fort_rt_fail_div_zero(ptr, i32, i32) #2",
-    "declare void @fort_rt_fail_div_overflow(ptr, i32, i32) #2",
-    "declare void @fort_rt_fail_alloc_count(i64, ptr, i32, i32) #2",
-    "declare void @fort_rt_fail_overwrite(ptr, i32, i32) #2",
-    "declare void @fort_rt_fail_enum(i64, ptr, ptr, i32, i32) #2",
-    "declare void @fort_rt_panic(ptr, i64, ptr, i32, i32) #2",
-    "declare void @fort_rt_assert_fail(ptr, ptr, i32, i32) #2",
-    "declare void @fort_rt_print_i64(i32, i64)",
-    "declare void @fort_rt_print_u64(i32, i64)",
-    "declare void @fort_rt_print_f32(i32, float)",
-    "declare void @fort_rt_print_f64(i32, double)",
-    "declare void @fort_rt_print_bool(i32, i8 zeroext)",
-    "declare void @fort_rt_print_char(i32, i8 zeroext)",
-    "declare void @fort_rt_print_ptr(i32, ptr)",
-    "declare void @fort_rt_print_str(i32, ptr, i64)",
-    "declare void @fort_rt_print_enum(i32, i32, ptr, i64)",
-    "declare void @fort_rt_flush(i32)",
-    "declare void @fort_rt_flush_all()",
-    "declare void @fort_rt_args_init(i32, ptr)",
-    "declare ptr @fort_rt_args_ptr()",
-    "declare i64 @fort_rt_args_len()",
-    "declare void @fort_rt_exit(i32) #2",
-};
-
-// The symbol of each entry point, for a call site and for the rule that an
-// `extern fn` naming one is declared in this group and not twice (item 8).
-static const char* const RT_NAME[RT_COUNT] = {
-    "@fort_rt_new",
-    "@fort_rt_del",
-    "@fort_rt_str_eq",
-    "@fort_rt_fail_bounds",
-    "@fort_rt_fail_span",
-    "@fort_rt_fail_overflow",
-    "@fort_rt_fail_shift",
-    "@fort_rt_fail_div_zero",
-    "@fort_rt_fail_div_overflow",
-    "@fort_rt_fail_alloc_count",
-    "@fort_rt_fail_overwrite",
-    "@fort_rt_fail_enum",
-    "@fort_rt_panic",
-    "@fort_rt_assert_fail",
-    "@fort_rt_print_i64",
-    "@fort_rt_print_u64",
-    "@fort_rt_print_f32",
-    "@fort_rt_print_f64",
-    "@fort_rt_print_bool",
-    "@fort_rt_print_char",
-    "@fort_rt_print_ptr",
-    "@fort_rt_print_str",
-    "@fort_rt_print_enum",
-    "@fort_rt_flush",
-    "@fort_rt_flush_all",
-    "@fort_rt_args_init",
-    "@fort_rt_args_ptr",
-    "@fort_rt_args_len",
-    "@fort_rt_exit",
-};
-
-// The result type of each entry point: fort_rt_new, fort_rt_str_eq,
-// fort_rt_args_ptr and fort_rt_args_len are the four that return a value. A
-// narrow result carries the extension attribute of item 7 here and at the call
-// site, so the two sides of the boundary normalize alike (D9.9).
-static const char* const RT_RESULT[RT_COUNT] = {
-    "ptr",  "void", "zeroext i8", "void", "void", "void", "void", "void", "void", "void",
-    "void", "void", "void",       "void", "void", "void", "void", "void", "void", "void",
-    "void", "void", "void",       "void", "void", "void", "ptr",  "i64",  "void",
-};
-
-// Whether toolchain.md 5.1 declares the entry point `_Noreturn`, which is
-// what puts `cold noreturn nounwind` on its declaration (section 5, item 14).
-static bool rt_is_noreturn(gen_rt_t rt) {
-    return (rt >= RT_FAIL_BOUNDS && rt <= RT_ASSERT_FAIL) || rt == RT_EXIT;
-}
-
-gen_rt_t gen_runtime_entry(str_t name) {
-    for (uint64_t i = 0; i < (uint64_t)RT_COUNT; i++) {
-        // RT_NAME holds the operand, so its first byte is the `@`.
-        if (str_eq(str_from_cstr(RT_NAME[i] + 1), name)) {
-            return (gen_rt_t)i;
-        }
-    }
-    return RT_COUNT;
-}
 
 // The overflow intrinsics of item 15, in the order `sadd ssub smul uadd usub
 // umul` and, within each, the widths `i8 i16 i32 i64`.
@@ -642,12 +548,12 @@ void gen_global(gen_t* g, const ast_node_t* decl) {
 
 void gen_use_extern(gen_t* g, const sym_t* s) {
     const str_t name = s->name;
-    const gen_rt_t rt = gen_runtime_entry(name);
+    const rt_entry_t rt = rt_entry_of(name);
     if (rt != RT_COUNT) {
         // An `extern fn` naming a runtime entry point is declared in the
         // runtime group with that group's prototype, once (item 8).
         g->rt[rt] = true;
-        if (rt_is_noreturn(rt)) {
+        if (rt_entry_noreturn(rt)) {
             gen_use_attr(g, ATTR_FAIL);
         }
         return;
@@ -736,32 +642,33 @@ static void emit_intrinsic(sb_t* out, uint64_t which) {
 // ---- calls to the runtime (item 8) ------------------------------------------------
 
 // Marks an entry point used and appends `@fort_rt_x(<args>)`.
-static void call_rt_tail(gen_t* g, gen_rt_t rt, const gen_args_t* args) {
+static void call_rt_tail(gen_t* g, rt_entry_t rt, const gen_args_t* args) {
     g->rt[rt] = true;
-    if (rt_is_noreturn(rt)) {
+    if (rt_entry_noreturn(rt)) {
         // A `_Noreturn` entry point is declared `cold noreturn nounwind`
         // (item 14, section 5).
         gen_use_attr(g, ATTR_FAIL);
     }
-    gen_text_append(g, RT_NAME[rt]);
+    gen_text_append(g, "@");
+    gen_text_append(g, rt_entry_name(rt));
     gen_text_append(g, "(");
     gen_text_append_str(g, sb_view(&args->text));
     gen_text_append(g, ")");
     gen_ins_end(g);
 }
 
-void gen_call_rt(gen_t* g, gen_rt_t rt, const gen_args_t* args) {
+void gen_call_rt(gen_t* g, rt_entry_t rt, const gen_args_t* args) {
     gen_ins(g);
     gen_text_append(g, "call ");
-    gen_text_append(g, RT_RESULT[rt]);
+    gen_text_append(g, ir_result_text(rt_entry_result(rt)));
     gen_text_append(g, " ");
     call_rt_tail(g, rt, args);
 }
 
-gen_val_t gen_call_rt_value(gen_t* g, gen_rt_t rt, str_t ret, const gen_args_t* args) {
+gen_val_t gen_call_rt_value(gen_t* g, rt_entry_t rt, str_t ret, const gen_args_t* args) {
     const gen_val_t r = gen_temp(g, ret);
     gen_text_append(g, "call ");
-    gen_text_append(g, RT_RESULT[rt]);
+    gen_text_append(g, ir_result_text(rt_entry_result(rt)));
     gen_text_append(g, " ");
     call_rt_tail(g, rt, args);
     return r;
@@ -806,8 +713,7 @@ void gen_finish(gen_t* g) {
     // Then the runtime entry points in the order of toolchain.md 5.1.
     for (uint64_t i = 0; i < (uint64_t)RT_COUNT; i++) {
         if (g->rt[i]) {
-            sb_append(&runtime, RT_DECL[i]);
-            sb_push(&runtime, '\n');
+            rt_declaration(&runtime, (rt_entry_t)i);
         }
     }
     sb_t intrinsics;
