@@ -13,12 +13,49 @@ static sb_t* capture_sink = NULL;
 static uint64_t mute_depth = 0;
 static uint64_t mute_saved_count = 0;
 
+// A position with no extent yet: the end is the start (D20.4).
 loc_t loc_make(const char* file, uint32_t line, uint32_t col) {
+    return loc_range(file, line, col, line, col);
+}
+
+loc_t loc_range(
+    const char* file, uint32_t line, uint32_t col, uint32_t end_line, uint32_t end_col) {
     loc_t loc;
     loc.file = file;
     loc.line = line;
     loc.col = col;
+    loc.end_line = end_line;
+    loc.end_col = end_col;
     return loc;
+}
+
+// Whether the position `line_a`:`col_a` is at or before `line_b`:`col_b`.
+static bool pos_at_or_before(uint32_t line_a, uint32_t col_a, uint32_t line_b, uint32_t col_b) {
+    if (line_a != line_b) {
+        return line_a < line_b;
+    }
+    return col_a <= col_b;
+}
+
+bool loc_starts_at_or_before(loc_t a, loc_t b) {
+    return pos_at_or_before(a.line, a.col, b.line, b.col);
+}
+
+bool loc_ends_at_or_before(loc_t a, loc_t b) {
+    return pos_at_or_before(a.end_line, a.end_col, b.end_line, b.end_col);
+}
+
+bool loc_is_ordered(loc_t loc) {
+    return pos_at_or_before(loc.line, loc.col, loc.end_line, loc.end_col);
+}
+
+// The start of `a` and the later of the two ends, so extending never moves
+// the start and never shrinks the range (D20.4).
+loc_t loc_extend(loc_t a, loc_t b) {
+    if (loc_ends_at_or_before(a, b)) {
+        return loc_range(a.file, a.line, a.col, b.end_line, b.end_col);
+    }
+    return a;
 }
 
 // Writes one `<file>:<line>:<col>: <kind>: <msg>` line (toolchain.md 4).
