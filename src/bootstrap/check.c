@@ -354,8 +354,10 @@ static const binding_t* module_declaration(const module_t* m, str_t name) {
 }
 
 // The type a name in type position denotes: a struct or an enum, of this
-// module or, qualified, of an imported one (D9.4).
-static const type_t* named_type(check_t* ck, ast_node_t* n) {
+// module or, qualified, of an imported one (D9.4). `stores_base` says whether
+// the written type puts a value of that name in its own storage, which is
+// what decides whether the name is a layout dependency.
+static const type_t* named_type(check_t* ck, ast_node_t* n, bool stores_base) {
     const binding_t* b = lookup(ck, n->name);
     if (b == NULL) {
         if (!from_a_failed_import(ck, n->name)) {
@@ -403,8 +405,19 @@ static const type_t* named_type(check_t* ck, ast_node_t* n) {
         return type_error(&ck->types);
     }
     // The declaration may still be unresolved: a type name is one of the
-    // places the lazy resolution of D7.10 reaches another declaration.
-    resolve_sym(ck, (sym_t*)s);
+    // places the lazy resolution of D7.10 reaches another declaration. A
+    // struct the written type does not store by value is not one of them:
+    // its size is no part of this type's size, so forcing it would put it on
+    // the resolution path of a struct that does not contain it, and
+    // check_layout would read that unfinished layout as an infinite size
+    // (D3.8). The resolution edges are exactly the value-containment edges,
+    // which is what makes the two declaration orders of a pair one program
+    // (D7.10). collect_module gave every struct its type before any field
+    // was read, so the name already denotes the right type (D3.8).
+    const bool identity_only = s->kind == SYM_STRUCT && !stores_base && s->type != NULL;
+    if (!identity_only) {
+        resolve_sym(ck, (sym_t*)s);
+    }
     return s->type;
 }
 
@@ -448,9 +461,11 @@ static bool is_noreturn(const ast_node_t* t) {
     return t->kind == AST_TYPE_NORETURN;
 }
 
+static check_type_t check_type_at(check_t* ck, ast_node_t* node, type_pos_t pos, bool in_storage);
+
 // The base type of a written type (grammar.md 4): a primitive, `string`,
 // `void`, `noreturn`, a qualified name or a function type.
-static const type_t* base_type(check_t* ck, ast_node_t* n, bool allow_noreturn) {
+static const type_t* base_type(check_t* ck, ast_node_t* n, bool allow_noreturn, bool stores_base) {
     const type_t* t = type_error(&ck->types);
     switch (n->kind) {
     case AST_TYPE_PRIM: {
@@ -481,7 +496,7 @@ static const type_t* base_type(check_t* ck, ast_node_t* n, bool allow_noreturn) 
         }
         break;
     case AST_TYPE_NAME:
-        t = named_type(ck, n);
+        t = named_type(ck, n, stores_base);
         break;
     case AST_TYPE_FN: {
         const type_t* params[CHECK_MAX_MEMBERS];
@@ -490,12 +505,15 @@ static const type_t* base_type(check_t* ck, ast_node_t* n, bool allow_noreturn) 
             check_error(ck, n->loc, "too many parameters");
             break;
         }
-        const check_type_t ret = check_type(ck, n->a, TYPE_POS_RETURN);
+        // A function pointer is one word and its signature is stored
+        // nowhere (D3.10), so neither the result nor a parameter is a
+        // layout dependency of whatever holds the pointer.
+        const check_type_t ret = check_type_at(ck, n->a, TYPE_POS_RETURN, false);
         bool ok = !check_poisoned(ret.type);
         for (uint64_t i = 0; i < count; i++) {
             // A binding-level `mut` on a parameter is not part of the
             // function's type (D3.10), so mut0 is dropped here.
-            const check_type_t p = check_type(ck, ast_child(n, i), TYPE_POS_BINDING);
+            const check_type_t p = check_type_at(ck, ast_child(n, i), TYPE_POS_BINDING, false);
             params[i] = p.type;
             ok = ok && !check_poisoned(p.type);
         }
@@ -511,10 +529,35 @@ static const type_t* base_type(check_t* ck, ast_node_t* n, bool allow_noreturn) 
     return t;
 }
 
-check_type_t check_type(check_t* ck, ast_node_t* node, type_pos_t pos) {
+// Whether the base of a written type ends up in the storage the type
+// describes. A reference suffix anywhere breaks the chain: `node*` is one
+// word and `node* @` two, whatever a `node` is (D3.11, D3.5, D5.8), while a
+// fixed array is N of its element and carries the base through (D3.4). It is
+// the written form of the rule `type_layout_pending` applies to the built
+// type, which looks behind fixed arrays and stops at every reference.
+static bool suffixes_store_base(const ast_node_t* node) {
+    if (node->kind != AST_TYPE) {
+        // A bare base type node, which a speculative parse hands over: it
+        // carries no suffix at all.
+        return true;
+    }
+    for (uint64_t i = 0; i < ast_len(node); i++) {
+        if ((suffix_kind_t)ast_child(node, i)->op != SUFFIX_ARRAY) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// `check_type` with the answer to "does anything store a value of the base
+// type here": a function type's own result and parameters are written types
+// that store nothing, and pass false whatever their suffixes say.
+static check_type_t check_type_at(check_t* ck, ast_node_t* node, type_pos_t pos, bool in_storage) {
     const bool wrapped = node->kind == AST_TYPE;
     ast_node_t* base = wrapped ? node->a : node;
-    const type_t* b = base_type(ck, base, pos == TYPE_POS_RETURN);
+    const bool allow_noreturn = pos == TYPE_POS_RETURN;
+    const bool stores_base = in_storage && suffixes_store_base(node);
+    const type_t* b = base_type(ck, base, allow_noreturn, stores_base);
     if (base->kind == AST_TYPE_NORETURN && wrapped && ast_len(node) > 0) {
         // `noreturn` is a return type and nothing else (D8.5).
         check_error(ck, node->loc, "'noreturn' is a return type");
@@ -581,6 +624,12 @@ check_type_t check_type(check_t* ck, ast_node_t* node, type_pos_t pos) {
     }
     node->type = built.type;
     return type_result(built.type, built.mut0);
+}
+
+check_type_t check_type(check_t* ck, ast_node_t* node, type_pos_t pos) {
+    // Every written type outside a function type's own signature describes
+    // storage: a field, a binding, a parameter, a result or a cast target.
+    return check_type_at(ck, node, pos, true);
 }
 
 // ---- ownership (D17) -------------------------------------------------------------
@@ -2479,7 +2528,7 @@ void check_initializer(
 // own name gives (D6.5).
 static void check_literal(check_t* ck, ast_node_t* n, expr_t* out, bool array) {
     const check_type_t t = array ? check_type(ck, n->a, TYPE_POS_BINDING)
-                                 : type_result(base_type(ck, n->a, false), false);
+                                 : type_result(base_type(ck, n->a, false, true), false);
     if (check_poisoned(t.type)) {
         expr_t ignored;
         check_brace(ck, n->b, t.type, &ignored);

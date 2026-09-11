@@ -146,7 +146,17 @@ Owner: `type-system.md`.
   C/System V layout (fields in order, natural alignment, size rounded to alignment). No methods,
   no inheritance, no per-field `mut` at the field's own level (D5.5). An empty struct is an
   error. A struct may contain itself only through a pointer or span; value-containment cycles
-  are "infinite size" errors.
+  are "infinite size" errors. Amended 2026-09-11 (T-082): "value containment" is stated
+  positively, because it decides which declarations a struct's layout may wait for and two
+  declaration orders of one pair must be one program (D7.10). A struct B is contained by value in
+  a struct A when a field of A is written `B`, or a fixed array of any rank over it (D3.4), and in
+  no other case: a `*` or `@` anywhere in the written type ends the containment (D3.11, D5.8, the
+  reference is a word or two whatever it refers to), and so does a `fn` signature, since a
+  function pointer is an ordinary pointer whose identity is structural over its signature (D3.10),
+  nothing stores the signature, and an aggregate crosses a call through a hidden pointer (D9.9),
+  so even a call through such a pointer needs the layout only at the call site. An infinite size
+  is therefore a cycle of value-containment edges alone, and a compiler that makes a struct's
+  layout wait for one it does not contain by value reports an infinite size for a finite struct.
 - **D3.9** Enums: `enum color { red, green = 5, blue }`. Underlying type `i32`, size 4, and `i32`
   is the signed type of D3.1: a member may be negative, a widening `cast` sign-extends, and the
   enum table of `toolchain.md` 6 prints the member signed. Members

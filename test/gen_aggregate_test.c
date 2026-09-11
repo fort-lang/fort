@@ -433,6 +433,85 @@ TEST(a_named_struct_type_holds_the_memory_type_of_every_field_in_order, {
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
+// The two declaration orders of a pair of mutually recursive structs, and the
+// buffers their modules are held against each other in. LLVM's type
+// definitions follow the order the file declares the structs in, so what the
+// two modules must agree on byte for byte is each definition on its own and
+// the whole of the rest of the module (D7.10).
+static const char RECURSIVE_SPAN_FIRST[] =
+    "struct vec { node mut* mut@ own items; }\n"
+    "struct node { vec list; i32 tag; }\n"
+    "fn i32 main() { node mut n = {}; n.tag = 3;\n"
+    "    return cast(n.list.items.len, i32) + n.tag - 3; }\n";
+static const char RECURSIVE_VALUE_FIRST[] =
+    "struct node { vec list; i32 tag; }\n"
+    "struct vec { node mut* mut@ own items; }\n"
+    "fn i32 main() { node mut n = {}; n.tag = 3;\n"
+    "    return cast(n.list.items.len, i32) + n.tag - 3; }\n";
+
+enum { LINES_CAP = 8192 };
+static char first_order[LINES_CAP];
+static char second_order[LINES_CAP];
+
+// Copies into `dst` the lines of the emitted module that begin with `prefix`
+// when `keep`, and the lines that do not otherwise, in order. It returns
+// whether they fitted rather than the text, so that a caller that saves one
+// module and compares the next against it asserts the overflow of both: a
+// truncation would otherwise show up as a difference between two modules,
+// which is the finding this test exists to report.
+static const char* module_lines(char* dst, size_t cap, const char* prefix, bool keep) {
+    size_t used = 0;
+    const char* p = ir();
+    while (*p != '\0') {
+        const char* eol = strchr(p, '\n');
+        if (eol == NULL) {
+            break;
+        }
+        const size_t len = (size_t)(eol - p) + 1;
+        if (gen_starts_with(p, prefix) == keep) {
+            if (used + len >= cap) {
+                return "the module did not fit its buffer";
+            }
+            TEST_UNUSED(memcpy(dst + used, p, len));
+            used += len;
+        }
+        p = eol + 1;
+    }
+    dst[used] = '\0';
+    return "the module fitted";
+}
+
+TEST(mutually_recursive_structs_emit_one_module_in_either_order, {
+    // A span of pointers to a struct that holds the span by value: neither
+    // size depends on the other, so neither declaration order is special
+    // (D7.10, D3.5, D3.11). The span is the two words of `%fort.span`
+    // whichever order the file is written in, which is the assertion that
+    // makes the two layouts the same one: under opaque pointers a field's IR
+    // type is observable only through the offsets it moves.
+    TEST_ASSERT_TRUE(emit(RECURSIVE_SPAN_FIRST));
+    TEST_ASSERT_EQ_STR(found("%struct.main.vec = type { %fort.span }\n"),
+                       "%struct.main.vec = type { %fort.span }\n");
+    TEST_ASSERT_EQ_STR(found("%struct.main.node = type { %struct.main.vec, i32 }\n"),
+                       "%struct.main.node = type { %struct.main.vec, i32 }\n");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+    TEST_ASSERT_EQ_UINT64(occurrences("%struct.main.vec = type"), (uint64_t)1);
+    TEST_ASSERT_EQ_UINT64(occurrences("%struct.main.node = type"), (uint64_t)1);
+    TEST_ASSERT_EQ_STR(module_lines(first_order, sizeof first_order, "%struct.", false),
+                       "the module fitted");
+    TEST_ASSERT_TRUE(emit(RECURSIVE_VALUE_FIRST));
+    TEST_ASSERT_EQ_STR(found("%struct.main.vec = type { %fort.span }\n"),
+                       "%struct.main.vec = type { %fort.span }\n");
+    TEST_ASSERT_EQ_STR(found("%struct.main.node = type { %struct.main.vec, i32 }\n"),
+                       "%struct.main.node = type { %struct.main.vec, i32 }\n");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+    // Everything but the two type definitions is the same text: the same
+    // offsets in the same getelementptrs, the same memset width, the same
+    // order of definitions.
+    TEST_ASSERT_EQ_STR(module_lines(second_order, sizeof second_order, "%struct.", false),
+                       "the module fitted");
+    TEST_ASSERT_EQ_STR(second_order, first_order);
+})
+
 TEST(an_enum_field_is_four_bytes_and_moves_the_fields_after_it, {
     // An enum's underlying type is `i32` and its size 4 (D3.9), so a field of
     // one pads like an `i32`: `i64 big` lands at 8 and the struct is 16
@@ -649,6 +728,7 @@ int main(int argc, char** argv) {
     TEST_RUN(a_cast_of_an_aggregate_reaches_its_field_through_a_temporary);
     TEST_RUN(an_arrow_reaches_the_pseudo_fields_of_a_string);
     TEST_RUN(a_named_struct_type_holds_the_memory_type_of_every_field_in_order);
+    TEST_RUN(mutually_recursive_structs_emit_one_module_in_either_order);
     TEST_RUN(an_enum_field_is_four_bytes_and_moves_the_fields_after_it);
     TEST_RUN(a_struct_wider_than_two_words_is_returned_and_copied_whole);
     TEST_RUN(a_copy_and_a_zero_move_the_padded_size_of_the_struct);

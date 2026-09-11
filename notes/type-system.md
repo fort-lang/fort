@@ -281,6 +281,21 @@ C struct. A struct has no methods and no inheritance. An empty struct is an erro
 contain itself only through a pointer or a span; containment by value is an "infinite size"
 error (D3.8, D7.10). Structs are values (section 1) and support neither `==` nor `!=` (D3.13).
 
+A struct `B` is contained **by value** in a struct `A` when a field of `A` is written `B`, or a
+fixed array of any rank over it, and in no other case (D3.8). A `*` or an `@` anywhere in the
+written type ends the containment, since the reference is a word or two whatever it refers to
+(D3.11, D5.8), and so does a `fn` signature, a function pointer being an ordinary pointer whose
+identity is structural over its signature (D3.10) and an aggregate crossing a call through a
+hidden pointer (D9.9). That is the relation the "infinite size" error is a cycle of, and the one
+a struct's size may depend on, so it is also what a declaration may wait for: top-level
+declarations are order-independent within a module (D7.10), and a pair of structs that reach each
+other by anything but value containment compiles in either order.
+
+```fort
+struct vec  { node mut* mut@ own items; }   // a span of pointers: two words
+struct node { vec kids; i32 tag; }          // by value: three words
+```
+
 ```fort
 struct rec {
     u8 tag;

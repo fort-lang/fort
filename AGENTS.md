@@ -414,6 +414,31 @@ A safe(r) C-like systems programming language.
   being checked rather than compared against itself; and the notes of such a diagnostic are
   written under `if (!ck->mute)`, since `check_error` mutes the error but `diag_note` is not
   routed through it.
+- **Lazy struct layout in the checker** (D3.8, D7.10): the resolution edges a written type opens
+  must be exactly the value-containment edges, because `check_layout` reads "this struct is still
+  being resolved" as "it contains itself by value" and reports an infinite size. So `named_type`
+  resolves a named struct only when the written type stores it: `suffixes_store_base` in
+  `check.c` answers that off the written suffixes -- a `*` or `@` anywhere stops it, a fixed
+  array carries it through -- and a function type's own result and parameters pass false whatever
+  their suffixes say, since a function pointer is a word. That made
+  `struct vec { node mut* mut@ own items; }` before `struct node { vec list; }` an "infinite
+  size" error while the same two declarations in the other order compiled, contradicting D7.10
+  outright (T-082). The mechanism is worth stating exactly, because it is not a recursion:
+  `resolve_sym` already returns early for a struct it is resolving, so the eager resolve never
+  re-entered `vec` -- it resolved `node` while `vec` was mid-layout, and `node`'s own `vec` field
+  then asked `check_layout` for a layout that had not finished. A demand graph with an edge the
+  layout does not need is enough; it does not have to close a loop. The rule is D3.8's, amended
+  there: value containment is a field written
+  `B` or a fixed array of any rank over it, and nothing else. The rule to keep: a declaration
+  order that changes whether a program compiles is a bug in the demand graph, not a limitation.
+  10 of `test/check_layout_test.c`'s 17 tests check both declaration orders
+  (`grep -c 'TEST_RUN(.*_in_either_order)'` against `grep -c 'TEST_RUN('`), and
+  `test/gen_aggregate_test.c` holds the two emitted modules against each other line by line,
+  since a layout is only observable through the offsets it moves. What the suite cannot reach,
+  for T-035 and the port: `suffixes_store_base` is the third spelling of "look behind fixed
+  arrays" beside `behind_arrays` in `types.c` and `struct_of` in `check.c`, and its generality is
+  untestable in stage1 by construction, since `b[2][3]` is refused as multi-dimensional and
+  `b[3] mut@` as a span of arrays. Keep the three in step by reading, not by testing.
 - **Ownership in the checker** (D17): `check_owning(t)` is the one answer to "does a value of
   this type own an allocation" -- an `own` reference or an owning aggregate -- and it guards the
   layout, since `type_is_owning_aggregate` fatals on a struct that has none. Every own place is
@@ -859,10 +884,12 @@ A safe(r) C-like systems programming language.
   `test/fort/support/`; what that directory is and what it costs is under **Build and test**
   above, in one place rather than two. `tools/lines.py` counts
   `src/fort`, so the ported lines carry the 3:1 ratio like any others.
-  Nine more facts the first ports paid for: five from T-032 (`prim.ft`, `consts.ft`,
-  `types.ft`) -- keywords, `new(T, n)`, `==`, enum ordering, the forked tests -- and four from
-  T-033 (`ast.ft`, `parser.ft`, `test/fort/support/parse_env.ft`) -- mutually recursive structs,
-  joining strings, the NULL-for-no-message parameter, and the fixture's token vector.
+  Eight more facts the first ports paid for: five from T-032 (`prim.ft`, `consts.ft`,
+  `types.ft`) -- keywords, `new(T, n)`, `==`, enum ordering, the forked tests -- and three from
+  T-033 (`ast.ft`, `parser.ft`, `test/fort/support/parse_env.ft`) -- joining strings, the
+  NULL-for-no-message parameter, and the fixture's token vector. A fourth, that two mutually
+  recursive structs had to be declared in one particular order, was a stage1 bug and is gone
+  (T-082).
   - **Keywords take the names first.** `type`, `const`, `match` and the rest of D2.4's reserved
     list, and every type keyword, are not identifiers, so `type_t` cannot be `type`, a field
     cannot be `mut`, `own` or `noreturn`, and an enum member cannot be `i8`, `bool` or `null`.
@@ -878,12 +905,6 @@ A safe(r) C-like systems programming language.
   - **`==` does not drop `mut`.** Operands lend `own` (D17.4) and nothing else, so comparing a
     `node mut*` with a `node*` is a type error: give the test a `node*` binding rather than
     casting.
-  - **Two mutually recursive structs must be declared with the one that holds the other by value
-    first.** stage1 lays a struct out in declaration order and resolves a field's struct even
-    behind a pointer, so `struct vec { node mut* mut@ own items; }` before `struct node { vec
-    list; }` is `struct vec has infinite size`, while the same two in the other order compile
-    (T-033, `src/fort/ast.ft`). The bug is stage1's; the port works around it by ordering the
-    declarations, which costs nothing, and a comment at the site says why.
   - **Neither adjacent string literals nor `+` join two strings** (D2.9, D3.7), so a C message or
     expected text wrapped across two literals becomes a module constant whose text stands on a
     line of its own (`MUT_BEFORE_ARRAY_ERROR` in `parser.ft`), a second `msg_str` call, or, in a
