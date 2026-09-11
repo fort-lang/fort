@@ -249,11 +249,15 @@ A safe(r) C-like systems programming language.
   helper that is not a suite, such as `test/fake_vscode.js`, defines no test of its own, since
   Node 18 loads every file under `test/`.
 - The cross pipeline: `test/ir/*.ll` are hand-written LLVM 18 modules in the form
-  `notes/toolchain.md` 6 specifies (D19.1); its two worked examples are these files byte for
-  byte, so a change to one changes the other. `test/pipeline_test.sh <build-dir>`
+  `notes/toolchain.md` 6 specifies (D19.1); `hello.ll` and `abort.ll` are its two worked
+  examples byte for byte, so a change to one changes the other, while `floats.ll` and
+  `colons.ll` answer questions of their own (`test/ir/README.md` says which).
+  `test/pipeline_test.sh <build-dir>`
   verifies each with `opt-18 -passes=verify`, compiles and links it with `clang
   --target=x86_64-linux-gnu` and `<build-dir>/std/fort_rt.o`, runs it under qemu and checks
-  stdout, stderr and the status byte-exactly; ctest `pipeline` (label `unit`). `*.ll` is
+  stdout, stderr and the status byte-exactly; ctest `pipeline` (label `unit`). Adding one means
+  adding its name to the `for prog in` loop of that script and a block of expectations beside
+  the others; the list is not globbed, since each module's output is its own. `*.ll` is
   gitignored except `test/ir/*.ll`. `run_tests.py --verify-ir` runs the same verifier over the
   `-S` output of every language test that compiles.
 - Test code that is compiled rather than included lives in a `test/*.c` that is not a suite:
@@ -780,7 +784,7 @@ A safe(r) C-like systems programming language.
     outermost `mut` (D5.5), so `int count;` in a struct the code writes through is just
     `i32 count;` and the mutability comes from the access path.
   - **Adjacent string literals do not concatenate** (D2.9), which C uses to wrap a long text
-    across lines, and a `.ft` line is 100 columns: build the text with a `std::strbuf` or split
+    across lines, and a `.ft` line is 100 columns: build the text with a `std.strbuf` or split
     the statement into several. T-031 found it in a test that lexed the forty-one keywords of
     D2.4 as one line.
   - **A `case` label is a constant expression**, so a C `switch` over byte values held in an
@@ -816,7 +820,14 @@ A safe(r) C-like systems programming language.
   oracle cannot see before trusting it: the AST dump prints no position, so a node's range and
   its name range (D20.4) are invisible to it and are pinned instead by
   `test/fort/parser_range_test.ft`, whose expected values are the ones `test/parser_loc_test.c`
-  asserts of the C parser, source for source. A tree dump is one long line, so the script reports
+  asserts of the C parser, source for source. Both scripts also see only what the corpus
+  **spells**, which is not the same as what the language has: T-080 removed `::` from the
+  language and then gave the fort lexer alone a rule that still lexed one, and both scripts
+  stayed green over the whole corpus, because after the same ticket no `.ft` file held a `::`
+  outside a string literal or a comment. A construct the corpus does not write is held by the
+  two lexer suites (`test/lexer_test.c` and `test/fort/lexer_test.ft`) and by nothing else, so a
+  ticket that *removes* a construct writes the assertion that it is gone into both of them
+  rather than trusting the differential. A tree dump is one long line, so the script reports
   the first differing byte and a window of each side rather than a `diff` of two whole trees.
   **The root of `test/fort` holds tests and nothing else** -- a `.ft` directly there whose
   stem does not end in `_test` is a lint failure, since `run_tests.py` registers every root `.ft`
@@ -892,7 +903,7 @@ A safe(r) C-like systems programming language.
   `src/fort/` holds forty of them.
 - A new `std/*.ft` reaches the language harness only after `tools/vm build <preset>` copies it
   into `build/<preset>/std`, next to `fort_rt.o`: running `run_tests.py` by hand against a source
-  that has not been copied reports `module 'std::x' not found`. `test/lang/run/stdlib` is where a
+  that has not been copied reports `module 'std.x' not found`. `test/lang/run/stdlib` is where a
   library module is tested.
 - **Writing a library module against C** (`stdlib.md` 1.4, D13.4): a span is not a pointer, so
   `cast(u8 mut@ own, void* own)` is rejected (D3.14 lists pointer-to-pointer, not span-to-pointer).

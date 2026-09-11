@@ -250,7 +250,7 @@ TEST(a_re_exported_enum_member_is_refused_at_the_module_binding, {
 TEST(a_symbol_a_module_imported_is_not_one_of_its_declarations, {
     begin();
     add("deep.ft", "fn i32 base() {\n    return 1;\n}\n");
-    add("mid.ft", "import deep::base;\nfn i32 step() {\n    return base();\n}\n");
+    add("mid.ft", "import deep.base;\nfn i32 step() {\n    return base();\n}\n");
     add("main.ft", "import mid;\nfn i32 main() {\n    return mid.base();\n}\n");
     // The other import binding of D9.3, with the same answer.
     TEST_ASSERT_FALSE(check_entry("main.ft"));
@@ -273,7 +273,7 @@ TEST(an_imported_declaration_is_used_through_its_short_name, {
     begin();
     add("util.ft", "i32 SIZE = 3;\nstruct pair {\n    i32 a;\n    i32 b;\n}\n");
     add("main.ft",
-        "import util::{SIZE, pair};\n"
+        "import util.{SIZE, pair};\n"
         "fn i32 main() {\n    pair p = {1, 2};\n    i32[SIZE] t = {};\n"
         "    return p.a + t[2];\n}\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
@@ -458,7 +458,7 @@ TEST(an_extern_of_a_runtime_entry_point_that_agrees_is_accepted, {
     // The standard library reaches the runtime through ordinary `extern fn`
     // declarations (D13.1), so the check is "agrees with the canonical
     // signature" and never "may not be declared": these are the five
-    // declarations of std::libc.
+    // declarations of std.libc.
     TEST_ASSERT_TRUE(check_src("extern fn void* fort_rt_args_ptr();\n"
                                "extern fn u64 fort_rt_args_len();\n"
                                "extern fn void fort_rt_flush(i32 fd);\n"
@@ -568,10 +568,10 @@ TEST(a_multi_segment_import_path_names_its_module, {
     begin();
     add("util/strings.ft", "i32 LEN = 3;\nfn i32 helper() {\n    return LEN;\n}\n");
     add("main.ft",
-        "import util::strings;\nimport util::strings::helper;\n"
+        "import util.strings;\nimport util.strings.helper;\n"
         "fn i32 main() {\n    return strings.LEN + helper();\n}\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
-    const sym_t* module = module_at("util::strings")->ast->sym;
+    const sym_t* module = module_at("util.strings")->ast->sym;
     ast_node_t* mod = module_at("main")->ast;
     const ast_node_t* first = ast_child(mod, 0);
     const ast_node_t* second = ast_child(mod, 1);
@@ -580,7 +580,7 @@ TEST(a_multi_segment_import_path_names_its_module, {
     // (D9.3). The segments before those name directories and carry nothing.
     TEST_ASSERT_TRUE(ast_child(first->a, 1)->sym == module);
     TEST_ASSERT_NULL(ast_child(first->a, 0)->sym);
-    TEST_ASSERT_TRUE(ast_child(second->a, 2)->sym == sym_of("util::strings", "helper"));
+    TEST_ASSERT_TRUE(ast_child(second->a, 2)->sym == sym_of("util.strings", "helper"));
     TEST_ASSERT_TRUE(ast_child(second->a, 1)->sym == module);
     TEST_ASSERT_NULL(unresolved_name(mod));
 })

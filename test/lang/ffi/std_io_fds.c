@@ -1,4 +1,4 @@
-// C11 helpers linked into test/lang/run/stdlib/065 and 066: they hand std::io
+// C11 helpers linked into test/lang/run/stdlib/065 and 066: they hand std.io
 // two descriptors whose behaviour a fort program cannot produce on its own but
 // which stdlib.md 2.4 gives rules for -- one that accepts a short write and one
 // that yields bytes and then fails.

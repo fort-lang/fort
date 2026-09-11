@@ -1,4 +1,4 @@
-// Unit tests of the byte buffer sb_t of str.h, which mirrors std::strbuf
+// Unit tests of the byte buffer sb_t of str.h, which mirrors std.strbuf
 // (stdlib.md 2.6): growth, appends, decimal formatting, views and copies.
 #include <stdint.h>
 #include <stdlib.h>

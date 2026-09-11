@@ -4,7 +4,7 @@
 // dependency order the later passes walk.
 //
 // One source file is one module (D9.1); its module path is its file path
-// relative to a search root with `/` replaced by `::` and `.ft` dropped. The
+// relative to a search root with `/` replaced by `.` and `.ft` dropped. The
 // roots are the directory containing the entry file, then each `-I`
 // directory, then the standard library directory, which is the only place a
 // path beginning with `std` is looked up and is never used for any other path
@@ -45,7 +45,7 @@ typedef enum {
 } module_state_t;
 
 typedef struct {
-    str_t path;      // the module path, `std::io` (D9.1)
+    str_t path;      // the module path, `std.io` (D9.1)
     str_t file;      // the file as the compiler opened it, the `<file>` of D14.2
     str_t real;      // the real path: the module's identity (D9.2)
     str_t source;    // the file's bytes, which the tree's names point into

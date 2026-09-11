@@ -53,8 +53,7 @@ line_comment  = "//" { any byte except newline } ;       (* the only comment for
 
 operator = "+%=" | "-%=" | "*%=" | "<<=" | ">>="
          | "+%" | "-%" | "*%" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^="
-         | "==" | "!=" | "<=" | ">=" | "&&" | "||" | "<<" | ">>" | "++" | "--"
-         | "::" | "->" | ".."
+         | "==" | "!=" | "<=" | ">=" | "&&" | "||" | "<<" | ">>" | "++" | "--" | "->" | ".."
          | "+" | "-" | "*" | "/" | "%" | "=" | "<" | ">" | "!" | "&" | "|" | "^" | "~"
          | "?" | ":" | "." | "," | ";" | "(" | ")" | "[" | "]" | "{" | "}"
          | "@" ;                                    (* D2.10; "@" is the span suffix, D3.5 *)
@@ -74,8 +73,8 @@ Notes:
 module      = { import_decl } { top_decl } ;               (* D9.3: imports first *)
 
 import_decl = "import" import_path [ "as" identifier ] ";"
-            | "import" import_path "::" "{" import_item { "," import_item } [ "," ] "}" ";" ;
-import_path = identifier { "::" identifier } ;
+            | "import" import_path "." "{" import_item { "," import_item } [ "," ] "}" ";" ;
+import_path = identifier { "." identifier } ;
 import_item = identifier [ "as" identifier ] ;
 
 top_decl    = fn_decl | extern_decl | struct_decl | enum_decl | global_decl ;

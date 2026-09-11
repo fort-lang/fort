@@ -14,8 +14,8 @@
 // (str.h) so that the compiler never formats with printf: begin, append
 // pieces, end, and pass the result to diag_error or diag_note.
 //
-// The file mirrors what the self-hosted compiler will do with std::strbuf and
-// std::io: no unions, no function pointers, no macros beyond constants.
+// The file mirrors what the self-hosted compiler will do with std.strbuf and
+// std.io: no unions, no function pointers, no macros beyond constants.
 #ifndef FORT_DIAG_H
 #define FORT_DIAG_H
 

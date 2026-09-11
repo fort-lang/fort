@@ -230,9 +230,9 @@ under inspection rather than a program.
 - An object from `-c` contains the whole program except the runtime; linking it needs
   `<std-dir>/fort_rt.o` and nothing else (D9.10).
 
-Where things live: `<std-dir>/*.ft` holds the standard library modules of D13.2 (`std::sys`,
-`std::libc`, `std::mem`, `std::io`, `std::str`, `std::strbuf`, `std::vec`, `std::strmap`,
-`std::math`) as source, compiled with every program that imports them; `<std-dir>/fort_rt.o` is
+Where things live: `<std-dir>/*.ft` holds the standard library modules of D13.2 (`std.sys`,
+`std.libc`, `std.mem`, `std.io`, `std.str`, `std.strbuf`, `std.vec`, `std.strmap`,
+`std.math`) as source, compiled with every program that imports them; `<std-dir>/fort_rt.o` is
 the C runtime object, built from `runtime/fort_rt.c` by the compiler's own build; `<bindir>/fort` is
 the compiler, and `<bindir>/std` its fallback `--std-dir`. Only modules in the import closure
 are read (module-system.md 10).
@@ -408,7 +408,7 @@ The runtime is `runtime/fort_rt.c`, compiled to `<std-dir>/fort_rt.o`; it is C a
 (D13.1). It owns process start and exit (D11.6), heap allocation (D10.2, D10.3), the
 runtime-error and panic paths (D11.4, including the ownership overwrite check of D17.11),
 formatting and buffering for the print family (D11.5, D11.7, D12.2, D18), and the program
-arguments for `std::sys`. The compiler emits calls to the entry points below and declares each
+arguments for `std.sys`. The compiler emits calls to the entry points below and declares each
 one it uses in the module with the prototype shown, mapped to IR types by section 6 item 8 and
 with `cold noreturn nounwind` on the `_Noreturn` ones; the standard library declares the ones it
 needs with `extern fn` (module-system.md 7).
@@ -484,11 +484,11 @@ void fort_rt_flush_all(void);
 // span from argv (one string per argument, NUL-terminated since it is the argv
 // byte sequence itself), then fort_entry, then fort_rt_flush_all, and returns
 // status & 0xFF. fort_entry is emitted by the compiler (module-system.md 11).
-// The args span lives for the whole process and std::libc declares
+// The args span lives for the whole process and std.libc declares
 // fort_rt_args_ptr and fort_rt_args_len for sys.args(); fort_rt_args_init is
 // called by main only and exists so the native runtime object, built without
 // main, can be tested. fort_rt_exit flushes every buffer, then
-// exit(status & 0xFF); std::libc declares it for sys.exit.
+// exit(status & 0xFF); std.libc declares it for sys.exit.
 int main(int argc, char** argv);
 int32_t fort_entry(const struct fort_span* args);
 void fort_rt_args_init(int argc, char** argv);
@@ -514,7 +514,7 @@ the text D18.2 fixes; it need not reproduce this search.
 
 This list is complete (D11.6): the standard library declares no other `fort_rt_*` symbol. It
 declares `fort_rt_args_ptr`, `fort_rt_args_len`, `fort_rt_flush`, `fort_rt_flush_all` and
-`fort_rt_exit` in `std::libc` (`stdlib.md` 3) and reaches `errno` through libc's
+`fort_rt_exit` in `std.libc` (`stdlib.md` 3) and reaches `errno` through libc's
 `__errno_location`.
 
 ### 5.2 Messages
@@ -592,7 +592,7 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    | `T*`, `void*`, `fn R(P)` | `ptr`             | `ptr`           | opaque (D3.10, D3.11)        |
    | `T[N]`                   | none              | `[N x T]`       | outside in (D3.6)            |
    | `T@`, `string`           | none              | `%fort.span`    | `type { ptr, i64 }`          |
-   | `struct a::b::s`         | none              | `%struct.a.b.s` | fields in order, no `packed` |
+   | `struct a.b.s`           | none              | `%struct.a.b.s` | fields in order, no `packed` |
    | `enum`                   | `i32`             | `i32`           | D3.9                         |
    | `void`                   | `void`            | none            | result type only             |
 
@@ -787,7 +787,7 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    first-use order, then the runtime entry points in the order of section 5.1 above, then the
    intrinsics in the order of the table above, each group separated from the next by a blank
    line. A symbol is declared exactly once, so an `extern fn` naming a runtime entry point
-   (`fort_rt_flush`, `fort_rt_exit`, the rest of section 5.1 that `std::libc` declares, D13.1)
+   (`fort_rt_flush`, `fort_rt_exit`, the rest of section 5.1 that `std.libc` declares, D13.1)
    is emitted in the runtime group with that group's prototype and attributes and is left out of
    the extern group, variadic tail included. A plain runtime declaration carries no attribute
    group; the `_Noreturn` entry points of section 5.1 carry `#2` (item 14), `fort_rt_exit`
@@ -875,7 +875,7 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
     `unreachable`; nothing else, because the callee aborts (D11.4).
     Every `_Noreturn` entry point of section 5.1 is declared `#2 = { cold noreturn nounwind }`:
     the `fort_rt_fail_*` family, `fort_rt_panic` and `fort_rt_assert_fail`, which the failure
-    blocks call, and `fort_rt_exit`, which only `std::libc` reaches. `noreturn` is truthful,
+    blocks call, and `fort_rt_exit`, which only `std.libc` reaches. `noreturn` is truthful,
     since each is `_Noreturn` in `runtime/fort_rt.h`, and `cold` lays the block out of line,
     which on an exit path is a layout hint and nothing more. No attribute is put on a failure
     call site.
@@ -1371,7 +1371,7 @@ A multi-file test, `test/lang/run/modules/<name>/main.ft` with `util.ft` beside 
 //! stdout:
 //| 7
 import util;
-import util::twice;
+import util.twice;
 
 fn i32 main() {
     println(util.inc(twice(3)));
@@ -1565,7 +1565,7 @@ editor needs; without it `"symbols"` is the empty array.
   of it, and `"decl"` is the range of the declaring name token: for a declaration, its own range.
   An `as` alias declares its name in the importing module (D9.3), so it is the one record with
   `"is_decl"` true whose `"decl"` lies elsewhere: going to the definition of `double` in
-  `import util::twice as double;` lands on `twice`, while the alias is still the anchor a rename of
+  `import util.twice as double;` lands on `twice`, while the alias is still the anchor a rename of
   `double` in this file starts from. An import without an alias introduces the name its declaration
   already has, so its occurrence is a use.
 - `"decl"` is `null` for a builtin, which no source declares (D12.2), and the empty range at 1:1 of

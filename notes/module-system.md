@@ -13,22 +13,22 @@ model; 11 Entry point and program start; 12 Worked examples; 13 Module diagnosti
 ## 1. Modules and files
 
 One source file is one module (D9.1). A file contains no module declaration; its module path is
-the file path relative to a search root (section 2) with `/` replaced by `::` and `.ft` dropped.
+the file path relative to a search root (section 2) with `/` replaced by `.` and `.ft` dropped.
 The last segment is the short name, which an import binds by default.
 
-| Module path     | File                     |
-|-----------------|--------------------------|
-| `main`          | `<root>/main.ft`         |
-| `std::io`       | `<std>/io.ft`            |
-| `std::str`      | `<std>/str.ft`           |
-| `util::strings` | `<root>/util/strings.ft` |
-| `geom::vec`     | `<root>/geom/vec.ft`     |
+| Module path    | File                     |
+|----------------|--------------------------|
+| `main`         | `<root>/main.ft`         |
+| `std.io`       | `<std>/io.ft`            |
+| `std.str`      | `<std>/str.ft`           |
+| `util.strings` | `<root>/util/strings.ft` |
+| `geom.vec`     | `<root>/geom/vec.ft`     |
 
 - The extension is `.ft` (D1.1). A file with any other extension is never a module.
 - Every segment is an identifier (D2.3) that is neither a keyword nor a reserved word (D2.4); a
   file or directory named otherwise is unreachable by any import. This is why the standard
-  library's string module is `std::str`, not `std::string` (D9.1).
-- A directory is not a module: `util::strings` says nothing about `<root>/util.ft`, which would
+  library's string module is `std.str`, not `std.string` (D9.1).
+- A directory is not a module: `util.strings` says nothing about `<root>/util.ft`, which would
   be the unrelated module `util`. Paths are case-sensitive like the file names they map to.
 
 ## 2. Search roots and the entry file
@@ -37,12 +37,12 @@ The entry file is the one `.ft` file named on the `fort` command line (D14.1). I
 its base name without `.ft`: `main.ft` is the module `main`, `src/app.ft` is the module `app`.
 The base name need not satisfy the segment rule of section 1 (D9.1): the entry file is named on the
 command line, not reached by an import path, so `007_case.ft` and `my-app.ft` are legal entries
-whose modules are `007_case` and `my-app`. The two characters it may not contain are `.` and `:`,
-which would let the entry's symbols collide with another module's (section 7): `my.app.ft` would be
-the module `my.app`, whose `main` is the `my.app.main` a module `my::app` already emits, and
-`my:app.ft` would emit `myapp.main`, which is module `myapp`'s. Every other character reaches the
-symbol unchanged and so cannot spell a path. A module whose name is not an identifier cannot be
-imported, since no import path spells it.
+whose modules are `007_case` and `my-app`. The one character it may not contain is `.`, which
+would let the entry's symbols collide with another module's (section 7): `my.app.ft` would be the
+module `my.app`, whose `main` is the `my.app.main` that `my/app.ft` already emits. Every other
+character reaches the symbol unchanged (section 7) and so cannot spell a path, whose every segment
+is an identifier, `my:app.ft` emitting the symbol `my:app.main` that nothing else can. A module
+whose name is not an identifier cannot be imported, since no import path spells it.
 
 Search roots, in order (D9.2):
 
@@ -53,14 +53,14 @@ Search roots, in order (D9.2):
 
 The first segment `std` is reserved for the standard library. A path beginning with `std` is
 looked up only in the standard library directory, `std` mapping to that directory itself
-(`std::io` is `<std>/io.ft`); a path that does not begin with `std` is never looked up there. A
+(`std.io` is `<std>/io.ft`); a path that does not begin with `std` is never looked up there. A
 file `std/x.ft` under any other root is unreachable.
 
 - The current working directory is never a root. `fort src/main.ft` run from the project
   directory makes `src/` a root, not `.`; a module in `./lib/` needs `-I .` and is then
-  `lib::name`.
+  `lib.name`.
 - Import paths are root-relative, never file-relative: `util/a.ft` imports its sibling as
-  `util::b`.
+  `util.b`.
 - For one reading of a path (section 3), the first root in order that contains the file wins.
 - A module's identity is the real path of its file, after resolving symbolic links and `..`.
   Reaching one file through two module paths, for example through `-I .` combined with the entry
@@ -71,21 +71,21 @@ file `std/x.ft` under any other root is unreachable.
 Imports appear at the top of a file, before any declaration (D9.3; `grammar.md` section 2). An
 `import` after a declaration is a parse error. The order of imports is irrelevant.
 
-| Form                                       | Binds                           | Use              |
-|--------------------------------------------|---------------------------------|------------------|
-| `import std::io;`                          | `io` to the module `std::io`    | `io.close(fd)`   |
-| `import std::io as sysio;`                 | `sysio` to the module `std::io` | `sysio.close(fd)`|
-| `import std::str::cmp;`                    | `cmp` to that declaration       | `cmp(a, b)`      |
-| `import std::str::cmp as compare;`         | `compare` to that declaration   | `compare(a, b)`  |
-| `import std::str::{find, cmp as compare};` | `find` and `compare` separately | `find(s, c)`     |
+| Form                                     | Binds                           | Use               |
+|------------------------------------------|---------------------------------|-------------------|
+| `import std.io;`                         | `io` to the module `std.io`     | `io.close(fd)`    |
+| `import std.io as sysio;`                | `sysio` to the module `std.io`  | `sysio.close(fd)` |
+| `import std.str.cmp;`                    | `cmp` to that declaration       | `cmp(a, b)`       |
+| `import std.str.cmp as compare;`         | `compare` to that declaration   | `compare(a, b)`   |
+| `import std.str.{find, cmp as compare};` | `find` and `compare` separately | `find(s, c)`      |
 
-Resolution of `import a::b::c;` (D9.3). The grammar does not know whether `c` is a module or a
+Resolution of `import a.b.c;` (D9.3). The grammar does not know whether `c` is a module or a
 declaration; the loader tries two readings, of which exactly one must succeed:
 
-| Reading | Condition                                        | Result                            |
-|---------|--------------------------------------------------|-----------------------------------|
-| module  | a file `a/b/c.ft` exists under some root         | `c` bound to the module `a::b::c` |
-| symbol  | `a/b.ft` exists under some root and declares `c` | `c` bound to that declaration     |
+| Reading | Condition                                        | Result                          |
+|---------|--------------------------------------------------|---------------------------------|
+| module  | a file `a/b/c.ft` exists under some root         | `c` bound to the module `a.b.c` |
+| symbol  | `a/b.ft` exists under some root and declares `c` | `c` bound to that declaration   |
 
 - If both readings succeed the import is ambiguous and an error, whichever roots the two files
   live under.
@@ -94,9 +94,9 @@ declaration; the loader tries two readings, of which exactly one must succeed:
 - At most one trailing segment names a declaration, so a one-segment path (`import math;`) has
   only the module reading.
 
-The braced form `import a::b::{s1, s2 as t};` is sugar for `import a::b::s1; import a::b::s2 as
-t;` with the symbol reading forced: `a::b` must be a module file and every item one of its
-declarations. `import std::{io, str};` is an error because `std` is not a module file.
+The braced form `import a.b.{s1, s2 as t};` is sugar for `import a.b.s1; import a.b.s2 as
+t;` with the symbol reading forced: `a.b` must be a module file and every item one of its
+declarations. `import std.{io, str};` is an error because `std` is not a module file.
 
 Bindings:
 
@@ -104,9 +104,9 @@ Bindings:
   name already declared or already bound in the file is a duplicate-binding error.
 - Importable declarations are functions, `extern` functions, structs, enums, constants and
   globals. The import bindings of another module are not importable; there is no re-export.
-- Enum members are not declarations. `import m::color::red;` fails with "module 'm::color::red'
+- Enum members are not declarations. `import m.color.red;` fails with "module 'm.color.red'
   not found" because neither `m/color/red.ft` nor `m/color.ft` is a file. Write
-  `import m::color;` and use `color.red`.
+  `import m.color;` and use `color.red`.
 - One module may be imported under several names, and together with some of its declarations;
   the bindings name the same entities.
 - There is no wildcard import. An unused import is not diagnosed (no warnings, D14.2).
@@ -149,7 +149,7 @@ Lookup of an unqualified name proceeds (D7.9):
 
 - A local or parameter may not reuse the name of an enclosing local or parameter.
 - A local or parameter may shadow a module-level name, import bindings included, or a universe
-  name; the shadowed name is inaccessible in that scope. After `import std::io;` a parameter
+  name; the shadowed name is inaccessible in that scope. After `import std.io;` a parameter
   named `io` is legal, and `io` in its scope names the parameter, not the module.
 - A module-level declaration or import binding may shadow a universe name: a module declaring
   `fn void print(string s)` loses the builtin `print` throughout its body.
@@ -174,25 +174,27 @@ Everything at module level is exported (D9.6); `pub` and `priv` are reserved wor
 naming conventions for helpers are not enforced. `extern` declarations are per-module: every
 module that calls a C function declares it, and the same C symbol may be declared in several
 modules provided the signatures are identical (D9.8); differing signatures are an error
-(section 13). `std::libc` (D13.2) collects the common libc prototypes so most modules import
+(section 13). `std.libc` (D13.2) collects the common libc prototypes so most modules import
 them instead.
 
 ## 7. Symbol names
 
 | Entity                          | ELF symbol                   | Example             |
 |---------------------------------|------------------------------|---------------------|
-| function in module `a::b`       | `a.b.name`                   | `std.io.close`      |
-| constant or global in `a::b`    | `a.b.NAME`                   | `main.TABLE`        |
+| function in module `a.b`        | `a.b.name`                   | `std.io.close`      |
+| constant or global in `a.b`     | `a.b.NAME`                   | `main.TABLE`        |
 | `main` of the entry module      | `<entry>.main`               | `main.main`         |
 | program entry, compiler-emitted | `fort_entry`                 | `fort_entry`        |
 | runtime                         | `fort_rt_<name>`             | `fort_rt_print_i64` |
 | `extern fn`                     | the declared name, unmangled | `write`             |
 | struct, enum, import binding    | none                         |                     |
 
-The module path joined with `.`, then `.` and the declaration name, is injective: `.` is legal in
-ELF symbols and cannot occur in an identifier, and every segment is an identifier (D9.7). The
-entry module is the one whose path need not be (section 2, D9.1), and `.` and `:` are barred from
-its base name for exactly this reason: they are the two characters the mangling reads. A
+The module path, a `.` and the declaration name is injective: a module path is already
+`.`-separated (D9.1), so the mangling copies it across unchanged, `.` is legal in ELF symbols and
+cannot occur in an identifier, and every segment is an identifier (D9.7). Splitting a symbol on
+its dots therefore recovers the segments it was built from, the last being the declaration name.
+The entry module is the one whose path need not be a segment (section 2, D9.1), and `.` is barred
+from its base name for exactly this reason: it is the one character the splitting reads. A
 double-underscore scheme is not injective (`a__b` is also one identifier). Fort symbols never
 collide with C symbols because C identifiers cannot contain `.`; the only undotted symbols the
 compiler emits are `fort_entry` (D11.6), runtime references and `extern` names. `fort_entry` is
@@ -514,7 +516,7 @@ is generated in the entry module: it receives the span by hidden pointer (sectio
 the parameter, and taking neither the copy nor an argument when it does not (`toolchain.md` 6
 item 22). `args[0]` is the program
 name. The runtime keeps the span for the life of the process and exposes it through
-`fort_rt_args_ptr()` and `fort_rt_args_len()`, declared in `std::libc` (`stdlib.md` 3) so that
+`fort_rt_args_ptr()` and `fort_rt_args_len()`, declared in `std.libc` (`stdlib.md` 3) so that
 `sys.args()` works in modules whose `main` takes no parameter. `sys.exit` (D13.2) is the other
 normal exit; a runtime error exits through `abort()` (D11.4).
 
@@ -549,7 +551,7 @@ fn f64 dot(vector a, vector b) {
 ```fort
 // main.ft
 import math;
-import math::{add, multiply as mul};
+import math.{add, multiply as mul};
 
 fn i32 main() {
     i32 sum = add(5, 3);
@@ -663,8 +665,8 @@ fn key poll() {
 
 ```fort
 // render.ft
-import geom::vec;
-import geom::vec::vec2;
+import geom.vec;
+import geom.vec.vec2;
 
 struct window {
     i32 width;
@@ -680,9 +682,9 @@ fn void draw(window* win, vec2 pos) {
 
 ```fort
 // main.ft
-import geom::vec::vec2;
+import geom.vec.vec2;
 import render;
-import render::window;
+import render.window;
 import input as inp;
 
 fn i32 main() {
@@ -706,7 +708,7 @@ fn i32 main() {
 ```
 
 `fort main.ft -o game` from any directory builds it; `game/` is the root because it contains the
-entry file, so `geom::vec` is `game/geom/vec.ft`. Output:
+entry file, so `geom.vec` is `game/geom/vec.ft`. Output:
 
 ```sh
 draw at -1.0,0.0 in 800x600
@@ -723,27 +725,29 @@ another module as a field, a parameter and a nested brace initializer (D6.5); an
 All diagnostics follow D14.2: `<file>:<line>:<col>: error: <message>`, optionally followed by
 `note:` lines. The position is the `import` keyword unless stated; file-level errors use `1:1`.
 
-| Situation                          | Message                                                  |
-|------------------------------------|----------------------------------------------------------|
-| no file for either reading         | `module 'util::strings' not found`                       |
-| symbol reading, name absent        | `module 'util' has no declaration named 'strngs'`        |
-| both readings find a file          | `ambiguous import 'a::b::c': a/b/c.ft and a/b.ft exist`  |
-| importing an import binding        | `cannot import 'x': it is an import of module 'a::b'`    |
-| cycle (at the closing import)      | `circular import: 'main' imports 'util' imports 'main'`  |
-| one file, two paths                | `module 'util::x' is the same file as module 'x'`        |
-| module file that cannot be read    | `cannot read 'lib/util.ft'`                              |
-| module-level name reused           | `redeclaration of 'add'`                                 |
-| local reusing an enclosing local   | `'i' shadows an enclosing local` (or `a parameter`)      |
-| same extern, different signatures  | `conflicting declarations of extern 'write'`             |
-| `extern` declaring `fort_entry`    | `'fort_entry' is reserved: the compiler emits it`        |
-| `fort_rt_*` extern, bad signature  | `conflicting declarations of extern 'fort_rt_del'`       |
-| same extern, `own` differs (D17.1) | `conflicting declarations of extern 'free'`              |
-| import after a declaration         | `imports must precede declarations`                      |
-| module binding as a value or type  | `'io' is a module, not a value` (or `not a type`)        |
-| `m.x` with no such declaration     | `module 'std::io' has no declaration named 'x'`          |
-| entry module without a valid `main`| `entry module 'main' must define 'fn i32 main()'`        |
-| entry base name with `.` or `:`    | `entry file name 'my.app' cannot contain '.'`            |
-| aggregate in an extern signature   | `extern signature cannot use type 'i32@'`                |
+| Situation                           | Message                                                 |
+|-------------------------------------|---------------------------------------------------------|
+| no file for either reading          | `module 'util.strings' not found`                       |
+| symbol reading, name absent         | `module 'util' has no declaration named 'strngs'`       |
+| both readings find a file           | `ambiguous import 'a.b.c': a/b/c.ft and a/b.ft exist`   |
+| importing an import binding         | `cannot import 'x': it is an import of module 'a.b'`    |
+| cycle (at the closing import)       | `circular import: 'main' imports 'util' imports 'main'` |
+| one file, two paths                 | `module 'util.x' is the same file as module 'x'`        |
+| module file that cannot be read     | `cannot read 'lib/util.ft'`                             |
+| module-level name reused            | `redeclaration of 'add'`                                |
+| local reusing an enclosing local    | `'i' shadows an enclosing local` (or `a parameter`)     |
+| same extern, different signatures   | `conflicting declarations of extern 'write'`            |
+| `extern` declaring `fort_entry`     | `'fort_entry' is reserved: the compiler emits it`       |
+| `fort_rt_*` extern, bad signature   | `conflicting declarations of extern 'fort_rt_del'`      |
+| same extern, `own` differs (D17.1)  | `conflicting declarations of extern 'free'`             |
+| import after a declaration          | `an import comes before every declaration`              |
+| path separator written `::`         | `a module path is separated by '.', not '::'`           |
+| path separator written `..`         | `a module path is separated by '.', not '..'`           |
+| module binding as a value or type   | `'io' is a module, not a value` (or `not a type`)       |
+| `m.x` with no such declaration      | `module 'std.io' has no declaration named 'x'`          |
+| entry module without a valid `main` | `entry module 'main' must define 'fn i32 main()'`       |
+| entry base name with a `.`          | `entry file name 'my.app' cannot contain '.'`           |
+| aggregate in an extern signature    | `extern signature cannot use type 'i32@'`               |
 
 The missing-`main` row is the one diagnostic a build reports and `fort --check` does not: under
 `--check` the root is a module under inspection and D8.6 is not applied (D20.1). Every other row

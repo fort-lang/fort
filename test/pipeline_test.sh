@@ -8,8 +8,9 @@
 # binfmt_misc. hello must print its line and exit 0; abort must
 # print its line, then the runtime error of D11.4 on stderr, and die with
 # SIGABRT (status 134); floats must print the D11.7 text of each of its
-# values. Every binary must be position independent (D14.3). ctest runs it as
-# the unit test `pipeline`.
+# values; colons must print its line and exit 0 with a `:` inside its one
+# fort symbol. Every binary must be position independent (D14.3). ctest runs
+# it as the unit test `pipeline`.
 set -eu
 
 if [ $# -ne 1 ]; then
@@ -48,16 +49,16 @@ test -f "$runtime" || {
 
 # A missing tool is a broken environment, not a failing module: report it as
 # such (exit 2) instead of letting the verification or the link fail below.
-for tool in "$opt" "$cc"; do
+for tool in "$opt" "$cc" readelf nm; do
     command -v "$tool" >/dev/null || {
-        echo "pipeline: $tool not found (llvm-18 and clang, see tools/provision.sh)" >&2
+        echo "pipeline: $tool not found (llvm-18, clang and binutils, see tools/provision.sh)" >&2
         exit 2
     }
 done
 
 # The module must satisfy the IR verifier before anything compiles it, so a
 # malformed module is reported as such and not as a compiler crash.
-for prog in hello abort floats; do
+for prog in hello abort floats colons; do
     "$opt" -passes=verify -disable-output "$ir/$prog.ll" ||
         fail "$prog: the IR verifier rejected the module"
     "$cc" --target="$target" -O1 -fPIE -pie -Wno-override-module \
@@ -119,6 +120,22 @@ nan
 16777216.0
 '
 expect_file floats.stderr "$work/floats.err" ''
+
+# colons: an entry base name may hold any byte but `.` (D9.1), so the module
+# path and every symbol of it may hold a `:`. LLVM quotes such a name, the
+# assembler quotes the label in turn and the ELF symbol is the name itself
+# (D9.7), which nothing before the link can check: this is the witness that
+# the toolchain carries the byte end to end.
+status=0
+"$work/colons" >"$work/colons.out" 2>"$work/colons.err" || status=$?
+[ "$status" -eq 0 ] || fail "colons: exit status $status, expected 0"
+expect_file colons.stdout "$work/colons.out" 'colon
+'
+expect_file colons.stderr "$work/colons.err" ''
+if ! nm "$work/colons" | grep -q ' T my:app.main$'; then
+    fail "colons: the ELF symbol table holds no 'my:app.main':"
+    nm "$work/colons" >&2
+fi
 
 if [ "$failures" -ne 0 ]; then
     echo "pipeline: $failures failure(s)" >&2

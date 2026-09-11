@@ -361,19 +361,10 @@ str_t gen_symbol(gen_t* g, const sym_t* s) {
     }
     sb_clear(&g->scratch);
     if (s->owner != NULL && s->owner->kind == SYM_MODULE) {
-        // The module path joined with dots plus the declaration name
-        // (D9.7): `std::io::read_file` is `std.io.read_file`.
-        const str_t path = s->owner->name;
-        for (uint64_t i = 0; i < path.len; i++) {
-            if (path.ptr[i] == ':') {
-                if (i + 1 < path.len && path.ptr[i + 1] == ':') {
-                    sb_push(&g->scratch, '.');
-                    i++;
-                }
-                continue;
-            }
-            sb_push(&g->scratch, path.ptr[i]);
-        }
+        // The module path, a dot and the declaration name (D9.7): a path is
+        // dot-separated already (D9.1), so it is copied across unchanged and
+        // `std.io` gives `std.io.read_file`.
+        sb_append_str(&g->scratch, s->owner->name);
         sb_push(&g->scratch, '.');
     }
     sb_append_str(&g->scratch, s->name);

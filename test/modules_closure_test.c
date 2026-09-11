@@ -64,13 +64,13 @@ TEST(a_diamond_is_not_a_cycle, {
 TEST(one_file_reached_through_two_paths_is_an_error, {
     begin();
     add("main.ft",
-        "import sub::x;\n"
+        "import sub.x;\n"
         "import x;\n"
         "fn i32 main() { return 0; }\n");
     add("sub/x.ft", "fn i32 f() { return 0; }\n");
     root("sub");
     TEST_ASSERT_FALSE(load("main.ft"));
-    TEST_ASSERT_TRUE(said("module 'x' is the same file as module 'sub::x'"));
+    TEST_ASSERT_TRUE(said("module 'x' is the same file as module 'sub.x'"));
 })
 
 TEST(a_symbolic_link_reaches_the_same_module, {
@@ -103,7 +103,7 @@ TEST(a_module_and_one_of_its_declarations_may_be_imported_together, {
     begin();
     add("main.ft",
         "import util;\n"
-        "import util::add;\n"
+        "import util.add;\n"
         "fn i32 main() { return add(1, 2); }\n");
     add("util.ft", src_add());
     TEST_ASSERT_TRUE(load("main.ft"));
@@ -251,19 +251,19 @@ TEST(a_module_that_did_not_parse_is_not_in_the_pass_order, {
 
 TEST(the_symbol_reading_works_at_any_depth, {
     begin();
-    add("main.ft", "import a::b::c::d;\nfn i32 main() { return d(1); }\n");
+    add("main.ft", "import a.b.c.d;\nfn i32 main() { return d(1); }\n");
     add("a/b/c.ft", "fn i32 d(i32 x) { return x; }\n");
     TEST_ASSERT_TRUE(load("main.ft"));
-    TEST_ASSERT_EQ_STR(ordered(0), "a::b::c");
+    TEST_ASSERT_EQ_STR(ordered(0), "a.b.c");
     TEST_ASSERT_EQ_INT32((int32_t)bound("main", "d")->kind, (int32_t)BIND_SYMBOL);
 })
 
 TEST(the_file_of_a_module_is_its_root_joined_path, {
     begin();
-    add("src/main.ft", "import geom::vec;\nfn i32 main() { return 0; }\n");
+    add("src/main.ft", "import geom.vec;\nfn i32 main() { return 0; }\n");
     add("src/geom/vec.ft", "struct vec2 { i64 x; i64 y; }\n");
     TEST_ASSERT_TRUE(load("src/main.ft"));
-    const module_t* vec = module_set_find(&set, str_from_cstr("geom::vec"));
+    const module_t* vec = module_set_find(&set, str_from_cstr("geom.vec"));
     TEST_ASSERT_NONNULL(vec);
     // The file is the root as given followed by the path (toolchain.md 4).
     TEST_ASSERT_NONNULL(strstr(vec->file.ptr, "/src/geom/vec.ft"));
@@ -272,7 +272,7 @@ TEST(the_file_of_a_module_is_its_root_joined_path, {
 TEST(a_root_spelled_with_dot_dot_reaches_the_same_module, {
     begin();
     add("main.ft",
-        "import sub::x;\n"
+        "import sub.x;\n"
         "import x;\n"
         "fn i32 main() { return 0; }\n");
     add("sub/x.ft", "fn i32 f() { return 0; }\n");
@@ -280,12 +280,12 @@ TEST(a_root_spelled_with_dot_dot_reaches_the_same_module, {
     // module's identity is the real path of its file, `..` resolved (D9.2).
     root("sub/../sub");
     TEST_ASSERT_FALSE(load("main.ft"));
-    TEST_ASSERT_TRUE(said("module 'x' is the same file as module 'sub::x'"));
+    TEST_ASSERT_TRUE(said("module 'x' is the same file as module 'sub.x'"));
 })
 
 TEST(the_notes_of_a_missing_module_name_every_root_and_reading, {
     begin();
-    add("main.ft", "import util::strings;\nfn i32 main() { return 0; }\n");
+    add("main.ft", "import util.strings;\nfn i32 main() { return 0; }\n");
     root("lib");
     TEST_ASSERT_FALSE(load("main.ft"));
     // One note per root and reading: two roots, two readings (D9.2,
@@ -302,7 +302,7 @@ TEST(a_namespace_holds_the_files_imports_and_its_declarations, {
     begin();
     add("main.ft",
         "import util;\n"
-        "import util::add as plus;\n"
+        "import util.add as plus;\n"
         "fn i32 main() { return plus(1, 2); }\n");
     add("util.ft", src_add());
     TEST_ASSERT_TRUE(load("main.ft"));

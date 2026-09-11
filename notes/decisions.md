@@ -82,8 +82,10 @@ Owner: `core-language.md` (Lexical structure), `grammar.md` (Lexical grammar).
   adjacent-literal concatenation; no raw strings.
 - **D2.10** Operators and punctuation:
   `+ - * / % +% -% *% = += -= *= /= %= +%= -%= *%= &= |= ^= <<= >>= == != < <= > >= && || ! & | ^ ~
-  << >> ++ -- ? : :: . -> .. ( ) [ ] { } , ; @`. Longest match wins (`+%=` before `+%` before `+`).
-  `%` is never a prefix operator, so `+%` is unambiguous. `>>` and `<<` are single tokens.
+  << >> ++ -- ? : . -> .. ( ) [ ] { } , ; @`. Longest match wins (`+%=` before `+%` before `+`).
+  `%` is never a prefix operator, so `+%` is unambiguous. `>>` and `<<` are single tokens. Amended
+  2026-09-11: the list held `::`, the module path separator of D9.1; that separator became `.`, so
+  `::` is no longer a token and a source holding one lexes two colons.
 - **D2.11** Nesting of blocks, parentheses, brackets, braces and type suffixes deeper than 256 is a
   compile error, so a recursive-descent compiler written in fort never needs an unbounded stack.
 
@@ -494,7 +496,7 @@ Owner: `core-language.md` (Statements).
   parameter may not reuse the name of any enclosing local or parameter. It may shadow a
   module-level name (including an import binding) or a universe name, which is then
   inaccessible within its scope; a module-level declaration may likewise shadow a universe name.
-  Rationale: otherwise `import std::io;` would forbid a parameter named `io` anywhere in the
+  Rationale: otherwise `import std.io;` would forbid a parameter named `io` anywhere in the
   module. Enum members are not in the module namespace (D3.9). Sibling scopes may reuse names.
   A local's scope starts after its own declaration (`i32 x = x;` is an error).
 - **D7.10** Module-level declarations. `Type NAME = init;` is a compile-time constant: it lives in
@@ -545,49 +547,64 @@ Owner: `core-language.md` (Functions).
 Owner: `module-system.md`.
 
 - **D9.1** One module per file; the module path is the file path relative to a search root, with
-  `::` separating segments and `.ft` dropped: `std::io` is `<std>/io.ft`, `util::strings` is
+  `.` separating segments and `.ft` dropped: `std.io` is `<std>/io.ft`, `util.strings` is
   `<root>/util/strings.ft`. Every segment must be an identifier that is not a keyword, so the
-  earlier `std::string` is `std::str`. The entry file is the exception: it is named on the command
+  earlier `std.string` is `std.str`. The entry file is the exception: it is named on the command
   line rather than reached by an import path, so its base name need not be an identifier, and a name
   that is not one simply cannot be imported by anything (`007_case.ft` is the module `007_case`,
-  whose name reaches the generated module only inside a quoted symbol, D9.7). It may contain
-  neither a `.` nor a `:`, the two characters that break the injectivity D9.7 rests on, because
-  they are the two a module path is spelled with: an entry `my.app.ft` is the module `my.app` and
-  emits `my.app.main`, already the symbol of a `main` in a module `my::app`; and `my:app.ft` emits
-  `myapp.main`, because the mangler writes a `::` as `.` and drops a `:` it cannot pair (D9.7), so
-  it collides with a module `myapp`. Nothing else is barred: every other character reaches the
-  symbol verbatim, and a name made of those cannot spell a path. Amended 2026-09-10:
+  whose name reaches the generated module only inside a quoted symbol, D9.7). It may not contain a
+  `.`, the one character a module path is spelled with and so the one that breaks the injectivity
+  D9.7 rests on: an entry `my.app.ft` is the module `my.app` and emits `my.app.main`, already the
+  symbol of a `main` in the module `my.app` that is `my/app.ft`. Nothing else is barred: the
+  mangler is the identity on a module path (D9.7), so every other character reaches the symbol
+  verbatim, and a name holding one cannot spell a path, whose every segment is an identifier.
+  Amended 2026-09-10:
   module-system.md required the entry base name to be a segment, which would have rejected every
   test file D14.4 names `NNN_name.ft`. Amended 2026-09-10, separately: that exception admitted a
   dotted base name, which the compiler accepted and then emitted two definitions of one symbol for
   -- invalid IR, exit 0, caught only by `opt`. Amended 2026-09-10, a third time: barring `.` alone
   was incomplete, since the mangler also transforms `:`; T-070's review found `my:app.ft` still
-  colliding with a module `myapp`, by the same silent route.
+  colliding with a module `myapp`, by the same silent route. Amended 2026-09-11 by T-080, which
+  made the separator `.` where it had been `::`: a `:` was barred because the mangler wrote a `::`
+  as `.` and dropped a `:` it could not pair, so `my:app.ft` emitted `myapp.main` and collided with
+  a module `myapp`. The mangler now translates nothing, `my:app.ft` emits `my:app.main`, and no
+  module path can spell that, since every segment of one is an identifier and an identifier holds
+  no `:`. The bar on `:` is therefore dropped and only the bar on `.` is re-derived. A `:` reaches
+  the ELF symbol through a quoted LLVM name (D9.7) and through the assembler, which quotes it in
+  turn; `test/ir/colons.ll` is that witness end to end.
 - **D9.2** Search roots, in order: the directory containing the entry file; each `-I` directory;
   the standard library directory. The first segment `std` is reserved for the standard library
   directory. The current working directory is never searched. Import paths are root-relative
-  (a file in `util/` imports its sibling as `util::other`). A module's identity is the real path
+  (a file in `util/` imports its sibling as `util.other`). A module's identity is the real path
   of its file; reaching one file through two different paths is an error.
 - **D9.3** Import forms, only at the top of a file before any declaration:
-  `import a::b;` binds the short name `b` to the module; `import a::b as c;` renames it;
-  `import a::b::sym;` binds the symbol `sym` from module `a::b`; `import a::b::sym as alias;`;
-  `import a::b::{s1, s2 as t};` is sugar for independent symbol imports of `s1` and `s2` from
-  module `a::b` (the prefix must be a module; the braces never name modules). Resolution of a
-  path `p::last`: the module reading (`p/last.ft` exists) and the symbol reading (`p.ft` exists
+  `import a.b;` binds the short name `b` to the module; `import a.b as c;` renames it;
+  `import a.b.sym;` binds the symbol `sym` from module `a.b`; `import a.b.sym as alias;`;
+  `import a.b.{s1, s2 as t};` is sugar for independent symbol imports of `s1` and `s2` from
+  module `a.b` (the prefix must be a module; the braces never name modules). Resolution of a
+  path `p.last`: the module reading (`p/last.ft` exists) and the symbol reading (`p.ft` exists
   and declares `last`) are both tried; exactly one must succeed, otherwise the import is an
   error: "not found" when neither reading succeeds, "has no declaration named" when only `p.ft`
   exists but lacks `last`, "ambiguous" when both succeed. No wildcard imports. A duplicate
   binding is an error;
   importing the same module under two names is allowed; import bindings are not re-exported.
+  Amended 2026-09-11: every form was spelled with `::`, `import a::b::{s1, s2 as t};` included;
+  T-080 made the separator `.` throughout, so the grouped form is `import a.b.{s1, s2 as t};` and
+  `::` ceases to be a token with no exception (D2.10).
 - **D9.4** Qualified access uses a dot in expressions and in type positions: `io.read_file(p)`,
   `math.vector v = ...;`, `m.color.red`. Rationale: consistent with field access, and the
   resolver knows which identifiers are modules.
 - **D9.5** Circular imports are a compile error even though whole-program compilation would
   permit them. Consequence, documented: mutually referential types must live in one module.
 - **D9.6** Everything at module level is exported in v1. Visibility modifiers are deferred.
-- **D9.7** Symbol names in the generated code are the module path joined with dots plus the
-  declaration name: `std.io.read_file`, `main.main`. Dots are legal in ELF symbols and cannot
-  appear in identifiers, so the scheme is injective. Runtime symbols are prefixed `fort_rt_`;
+- **D9.7** Symbol names in the generated code are the module path, a dot and the declaration
+  name: `std.io.read_file`, `main.main`. The path is dot-separated already (D9.1), so the mangler
+  is the identity on it and copies it across. Dots are legal in ELF symbols and cannot appear in
+  identifiers, so splitting a symbol on its dots recovers the segments it was built from, the last
+  being the declaration name and the rest the module path, and the scheme is injective. That
+  argument needs every segment of a module path to hold no dot, which is why the entry file's base
+  name, the one segment that need not be an identifier, may hold none either (D9.1).
+  Runtime symbols are prefixed `fort_rt_`;
   the compiler emits `fort_entry` in the entry module (D11.6). `extern` names are unmangled.
   A name is quoted in LLVM IR when LLVM's unquoted identifier syntax does not admit it
   (`@"std.io.read_file"`), and a `"`, a `\` or any byte outside the printable range within it is
@@ -604,7 +621,9 @@ Owner: `module-system.md`.
   and to keep the emitter free of per-name analysis, which left a legal entry base name holding a
   `"` emitting invalid IR that clang rejected, and made `extern fn fort_entry` a `declare` beside a
   `define` -- caught by `opt` until T-018 dropped the declaration, and a silent SIGSEGV after
-  (T-018's review).
+  (T-018's review). Amended 2026-09-11: a module path was spelled with `::` (D9.1) and the mangler
+  wrote each `::` as a `.` and dropped a `:` it could not pair; T-080 made the separator `.`, so
+  there is nothing left to translate and the injectivity argument is the splitting one above.
 - **D9.8** `extern fn i64 write(i32 fd, void* buf, u64 n);` declares a C function with the
   System V x86-64 ABI. Extern signatures may use only integers, floats, `bool`, `char`, enums
   (passed as `i32`), pointers and function pointers: no spans, strings, structs or arrays, and
@@ -823,13 +842,13 @@ Owner: `stdlib.md`.
 
 - **D13.1** The standard library is written in fort on top of `extern` declarations, plus the C
   runtime (`fort_rt_*`), which is permanent and is not a self-hosting goal.
-- **D13.2** v1 modules: `std::sys` (exit, args, errno), `std::libc` (thin libc externs, named
-  so that its short name does not collide with the common parameter name `c`), `std::mem`
-  (copy, fill, equal), `std::io` (descriptors, read/write whole files and streams, close),
-  `std::str` (compare, search, classify, parse integers, duplicate, NUL-terminated copies for
-  C), `std::strbuf`
-  (growable byte buffer), `std::vec` (`ptr_vec`, `int_vec`, the non-generic pattern), `std::strmap`
-  (string-keyed open-addressing table), `std::math` (float bit casts, abs/min/max per type).
+- **D13.2** v1 modules: `std.sys` (exit, args, errno), `std.libc` (thin libc externs, named
+  so that its short name does not collide with the common parameter name `c`), `std.mem`
+  (copy, fill, equal), `std.io` (descriptors, read/write whole files and streams, close),
+  `std.str` (compare, search, classify, parse integers, duplicate, NUL-terminated copies for
+  C), `std.strbuf`
+  (growable byte buffer), `std.vec` (`ptr_vec`, `int_vec`, the non-generic pattern), `std.strmap`
+  (string-keyed open-addressing table), `std.math` (float bit casts, abs/min/max per type).
 - **D13.3** Error handling idiom (the earlier TBD): functions return `bool` or an error enum, with
   results delivered through `T mut*` out-parameters; `-1`/`null` sentinels where conventional;
   `panic` for programming errors; `defer` for cleanup. No `Result` type in v1.
@@ -1002,6 +1021,16 @@ Findings from the design reviews that look like bugs but are deliberate.
 - `defer` captures nothing; after `defer del(p);`, a later `del(p); p = move(q);` frees `q`.
 - `break` inside a `switch` inside a loop exits the switch, not the loop.
 - Symbol mangling uses dots, not double underscores, because `a__b` is not injective.
+- The module path separator and the member accessor are the same character on purpose (D9.1,
+  D9.4), so `import std.io;` reads like a field access and nothing tells a module path from a
+  qualified name by shape alone -- the dot is also the field accessor, the enum-member accessor
+  (D3.9) and the qualified-name separator. Nothing has to tell them apart: an import path is its
+  own grammar production and appears in no other construct, so there is nothing to parse either
+  way, and the gain is one separator instead of two and a mangler that translates nothing (D9.7).
+  The cost is paid in the diagnostics instead: a path whose separator is spelled `::` or `..` is
+  named where it stands rather than reported as the `;` that ending the path early leaves missing
+  (module-system.md 13). Weighed and rejected with it on 2026-09-11: dropping the separator before
+  the brace of the grouped form, and leaving that one form on `::`.
 - `extern` signatures exclude aggregates so the compiler does not need System V aggregate
   classification in v1.
 - Generated code must be position-independent: `--cc` is invoked with `-fPIE -pie` (D14.3) and

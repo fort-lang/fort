@@ -4,7 +4,7 @@
 //| ok
 import ast;
 import parse_env;
-import std::strbuf;
+import std.strbuf;
 
 // The diagnostics of src/fort/parser.ft and the recovery of D14.2: what is
 // reported, where, how often, and what the tree holds afterwards.
@@ -51,6 +51,48 @@ fn void a_missing_identifier_is_reported_as_such() {
            == "1:15: error: expected an identifier, found integer literal");
     parse_env.parse(&e, "struct { i32 x; }\n");
     assert(parse_env.diag_at(&e, 0) == "1:8: error: expected an identifier, found '{'");
+}
+
+// The separator a source spells wrongly is named where it stands, rather than
+// ending the path and being reported as the `;` that is then missing. `::` is
+// the one that matters: it separated a module path until the separator became
+// `.` (D9.1), so it is what every source written before that spells, and it
+// now lexes as two colons (D2.10).
+fn void the_old_path_separator_names_the_mistake() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    parse_env.parse(&e, "import a::b;\nfn i32 main() { return 0; }\n");
+    assert(parse_env.errors(&e) == 1);
+    assert(parse_env.diag_at(&e, 0)
+           == "1:9: error: a module path is separated by '.', not '::'");
+    parse_env.parse(&e, "import a.b::{c};\nfn i32 main() { return 0; }\n");
+    assert(parse_env.diag_at(&e, 0)
+           == "1:11: error: a module path is separated by '.', not '::'");
+    // One colon is not two, and the message says which one it found.
+    parse_env.parse(&e, "import a:b;\nfn i32 main() { return 0; }\n");
+    assert(parse_env.diag_at(&e, 0) == "1:9: error: a module path is separated by '.', not ':'");
+    // A colon before the first segment is not a separator at all.
+    parse_env.parse(&e, "import ::a;\nfn i32 main() { return 0; }\n");
+    assert(parse_env.diag_at(&e, 0) == "1:8: error: expected an identifier, found ':'");
+}
+
+// `..` is one token and longest match wins (D2.10), so the separator of a
+// path written with two dots is the range operator and never reaches the
+// parser as two separators; the diagnostic says so rather than reporting the
+// `;` the path's end would then be missing (D9.1).
+fn void a_path_separator_written_twice_names_the_mistake() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    parse_env.parse(&e, "import a..b;\nfn i32 main() { return 0; }\n");
+    assert(parse_env.errors(&e) == 1);
+    assert(parse_env.diag_at(&e, 0)
+           == "1:9: error: a module path is separated by '.', not '..'");
+    parse_env.parse(&e, "import a.b..c;\nfn i32 main() { return 0; }\n");
+    assert(parse_env.diag_at(&e, 0)
+           == "1:11: error: a module path is separated by '.', not '..'");
+    // A `..` before the first segment is not a separator at all.
+    parse_env.parse(&e, "import ..a;\nfn i32 main() { return 0; }\n");
+    assert(parse_env.diag_at(&e, 0) == "1:8: error: expected an identifier, found '..'");
 }
 
 fn void the_marker_placement_rules_are_reported_at_the_marker() {
@@ -306,6 +348,8 @@ fn i32 main() {
     a_missing_token_is_reported_where_it_is_missing();
     a_token_that_starts_no_expression_or_type_is_reported();
     a_missing_identifier_is_reported_as_such();
+    the_old_path_separator_names_the_mistake();
+    a_path_separator_written_twice_names_the_mistake();
     the_marker_placement_rules_are_reported_at_the_marker();
     the_constructs_the_bootstrap_lacks_are_reported_as_unsupported();
     new_refuses_the_markers_it_does_not_take();

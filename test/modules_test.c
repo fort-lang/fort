@@ -89,41 +89,45 @@ TEST(a_dotted_entry_file_is_never_read, {
 
 TEST(a_dotted_entry_is_rejected_beside_the_module_it_would_collide_with, {
     begin();
-    add("my.app.ft", "import my::app;\nfn i32 main() { return app.main(); }\n");
+    add("my.app.ft", "import my.app;\nfn i32 main() { return app.main(); }\n");
     add("my/app.ft", src_main());
     // `my.app.ft` is the module `my.app`, whose `main` is the `my.app.main`
-    // the module `my::app` already emits (D9.1, module-system.md 7).
+    // the module `my/app.ft` already emits (D9.1, module-system.md 7).
     TEST_ASSERT_FALSE(load("my.app.ft"));
     TEST_ASSERT_TRUE(said("cannot contain '.'"));
 })
 
-TEST(a_colon_in_the_entry_base_name_is_rejected, {
+TEST(a_colon_in_the_entry_base_name_is_accepted, {
     begin();
     add("my:app.ft", src_main());
-    // The mangler writes a `::` as `.` and drops a `:` it cannot pair, so
-    // `my:app` would emit `myapp.main`, the symbol of a module `myapp`
-    // (D9.1, D9.7). The message names the character it found.
-    TEST_ASSERT_FALSE(load("my:app.ft"));
-    TEST_ASSERT_TRUE(said("entry file name 'my:app' cannot contain ':'"));
+    // Only `.` is barred, since only `.` separates a module path (D9.1): the
+    // mangler copies the path across, so `my:app.ft` emits `my:app.main`,
+    // which no module path can spell because a segment is an identifier.
+    TEST_ASSERT_TRUE(load("my:app.ft"));
+    TEST_ASSERT_EQ_STR(ordered(0), "my:app");
 })
 
-TEST(a_colon_entry_is_rejected_beside_the_module_it_would_collide_with, {
+TEST(a_colon_entry_stands_beside_the_module_it_once_collided_with, {
     begin();
     add("my:app.ft", "import myapp;\nfn i32 main() { return myapp.main(); }\n");
     add("myapp.ft", src_main());
-    TEST_ASSERT_FALSE(load("my:app.ft"));
-    TEST_ASSERT_TRUE(said("cannot contain ':'"));
-    TEST_ASSERT_EQ_UINT64(module_set_count(&set), (uint64_t)0);
+    // The mangler used to drop a `:` it could not pair, so `my:app.main` was
+    // `myapp.main`; it translates nothing now, so the two modules coexist
+    // (D9.1 amended 2026-09-11, D9.7).
+    TEST_ASSERT_TRUE(load("my:app.ft"));
+    TEST_ASSERT_EQ_UINT64(module_set_count(&set), (uint64_t)2);
+    TEST_ASSERT_EQ_STR(ordered(0), "myapp");
+    TEST_ASSERT_EQ_STR(ordered(1), "my:app");
 })
 
-TEST(a_doubled_colon_entry_base_name_is_rejected_as_a_name, {
+TEST(a_doubled_colon_entry_base_name_is_accepted_as_a_name, {
     begin();
     add("my::app.ft", src_main());
-    // `my::app` spells a module path outright. The loader's own path map
-    // would collide first and blame a cycle, so the name is judged before
-    // anything is read (D9.1).
-    TEST_ASSERT_FALSE(load("my::app.ft"));
-    TEST_ASSERT_TRUE(said("entry file name 'my::app' cannot contain ':'"));
+    // A doubled colon spelled a module path until T-080 made the separator a
+    // `.`; it is not a token at all now (D2.10), so the base name is just a
+    // name and the loader's path map holds it beside no other (D9.1).
+    TEST_ASSERT_TRUE(load("my::app.ft"));
+    TEST_ASSERT_EQ_STR(ordered(0), "my::app");
     TEST_ASSERT_FALSE(said("circular import"));
 })
 
@@ -152,8 +156,8 @@ TEST(an_entry_named_exactly_ft_keeps_its_whole_base_name, {
 TEST(a_hyphenated_entry_base_name_is_accepted, {
     begin();
     add("my-app.ft", src_main());
-    // Only `.` and `:` are barred; every other base name is a legal entry,
-    // whatever it holds (D9.1).
+    // Only `.` is barred; every other base name is a legal entry, whatever
+    // it holds (D9.1).
     TEST_ASSERT_TRUE(load("my-app.ft"));
     TEST_ASSERT_EQ_STR(ordered(0), "my-app");
 })
@@ -212,10 +216,10 @@ TEST(an_import_binds_the_short_name_to_the_module, {
 
 TEST(a_nested_path_names_a_file_in_a_directory, {
     begin();
-    add("main.ft", "import geom::vec;\nfn i32 main() { return 0; }\n");
+    add("main.ft", "import geom.vec;\nfn i32 main() { return 0; }\n");
     add("geom/vec.ft", "struct vec2 {\n    i64 x;\n    i64 y;\n}\n");
     TEST_ASSERT_TRUE(load("main.ft"));
-    TEST_ASSERT_EQ_STR(ordered(0), "geom::vec");
+    TEST_ASSERT_EQ_STR(ordered(0), "geom.vec");
     TEST_ASSERT_NONNULL(bound("main", "vec"));
 })
 
@@ -230,17 +234,17 @@ TEST(as_renames_a_module_binding, {
 
 TEST(import_paths_are_root_relative_and_not_file_relative, {
     begin();
-    add("main.ft", "import util::a;\nfn i32 main() { return 0; }\n");
-    add("util/a.ft", "import util::b;\nfn i32 one() { return b.two(); }\n");
+    add("main.ft", "import util.a;\nfn i32 main() { return 0; }\n");
+    add("util/a.ft", "import util.b;\nfn i32 one() { return b.two(); }\n");
     add("util/b.ft", "fn i32 two() { return 2; }\n");
     TEST_ASSERT_TRUE(load("main.ft"));
-    TEST_ASSERT_EQ_STR(ordered(0), "util::b");
-    TEST_ASSERT_EQ_STR(ordered(1), "util::a");
+    TEST_ASSERT_EQ_STR(ordered(0), "util.b");
+    TEST_ASSERT_EQ_STR(ordered(1), "util.a");
 })
 
 TEST(a_sibling_is_not_reachable_by_its_short_name, {
     begin();
-    add("main.ft", "import util::a;\nfn i32 main() { return 0; }\n");
+    add("main.ft", "import util.a;\nfn i32 main() { return 0; }\n");
     add("util/a.ft", "import b;\nfn i32 one() { return b.two(); }\n");
     add("util/b.ft", "fn i32 two() { return 2; }\n");
     TEST_ASSERT_FALSE(load("main.ft"));
@@ -285,20 +289,20 @@ TEST(include_roots_are_searched_in_command_line_order, {
 
 TEST(a_std_path_is_looked_up_in_the_standard_library_directory, {
     begin();
-    add("main.ft", "import std::io;\nfn i32 main() { return 0; }\n");
+    add("main.ft", "import std.io;\nfn i32 main() { return 0; }\n");
     add("lib/io.ft", "fn i32 close(i32 fd) { return fd; }\n");
     std_dir("lib");
     TEST_ASSERT_TRUE(load("main.ft"));
-    TEST_ASSERT_EQ_STR(ordered(0), "std::io");
+    TEST_ASSERT_EQ_STR(ordered(0), "std.io");
     TEST_ASSERT_NONNULL(bound("main", "io"));
 })
 
 TEST(a_std_path_is_not_looked_up_under_any_other_root, {
     begin();
-    add("main.ft", "import std::io;\nfn i32 main() { return 0; }\n");
+    add("main.ft", "import std.io;\nfn i32 main() { return 0; }\n");
     add("std/io.ft", "fn i32 close(i32 fd) { return fd; }\n");
     TEST_ASSERT_FALSE(load("main.ft"));
-    TEST_ASSERT_TRUE(said("module 'std::io' not found"));
+    TEST_ASSERT_TRUE(said("module 'std.io' not found"));
 })
 
 TEST(a_path_that_does_not_begin_with_std_never_reaches_the_library, {
@@ -323,7 +327,7 @@ TEST(std_alone_is_a_directory_and_not_a_module, {
 
 TEST(a_trailing_declaration_is_bound_to_that_declaration, {
     begin();
-    add("main.ft", "import util::add;\nfn i32 main() { return add(1, 2); }\n");
+    add("main.ft", "import util.add;\nfn i32 main() { return add(1, 2); }\n");
     add("util.ft", src_add());
     TEST_ASSERT_TRUE(load("main.ft"));
     const binding_t* b = bound("main", "add");
@@ -335,7 +339,7 @@ TEST(a_trailing_declaration_is_bound_to_that_declaration, {
 TEST(as_renames_an_imported_declaration, {
     begin();
     add("main.ft",
-        "import util::add as plus;\n"
+        "import util.add as plus;\n"
         "fn i32 main() { return plus(1, 2); }\n");
     add("util.ft", src_add());
     TEST_ASSERT_TRUE(load("main.ft"));
@@ -346,7 +350,7 @@ TEST(as_renames_an_imported_declaration, {
 TEST(braces_are_sugar_for_independent_symbol_imports, {
     begin();
     add("main.ft",
-        "import util::{add, mul as times};\n"
+        "import util.{add, mul as times};\n"
         "fn i32 main() { return add(1, times(2, 3)); }\n");
     add("util.ft",
         "fn i32 add(i32 a, i32 b) { return a + b; }\n"
@@ -359,7 +363,7 @@ TEST(braces_are_sugar_for_independent_symbol_imports, {
 
 TEST(a_braced_import_whose_prefix_is_no_module_file_is_an_error, {
     begin();
-    add("main.ft", "import std::{io, str};\nfn i32 main() { return 0; }\n");
+    add("main.ft", "import std.{io, str};\nfn i32 main() { return 0; }\n");
     add("lib/io.ft", "fn i32 close(i32 fd) { return fd; }\n");
     std_dir("lib");
     TEST_ASSERT_FALSE(load("main.ft"));
@@ -368,7 +372,7 @@ TEST(a_braced_import_whose_prefix_is_no_module_file_is_an_error, {
 
 TEST(a_declaration_the_module_lacks_is_an_error, {
     begin();
-    add("main.ft", "import util::strngs;\nfn i32 main() { return 0; }\n");
+    add("main.ft", "import util.strngs;\nfn i32 main() { return 0; }\n");
     add("util.ft", src_add());
     TEST_ASSERT_FALSE(load("main.ft"));
     TEST_ASSERT_TRUE(said("module 'util' has no declaration named 'strngs'"));
@@ -376,7 +380,7 @@ TEST(a_declaration_the_module_lacks_is_an_error, {
 
 TEST(an_import_binding_of_another_module_is_not_importable, {
     begin();
-    add("main.ft", "import util::other;\nfn i32 main() { return 0; }\n");
+    add("main.ft", "import util.other;\nfn i32 main() { return 0; }\n");
     add("util.ft", "import other;\nfn i32 add(i32 a) { return other.one(); }\n");
     add("other.ft", "fn i32 one() { return 1; }\n");
     TEST_ASSERT_FALSE(load("main.ft"));
@@ -393,10 +397,10 @@ TEST(a_one_segment_path_has_only_the_module_reading, {
 
 TEST(a_missing_module_lists_the_paths_it_looked_for, {
     begin();
-    add("main.ft", "import util::strings;\nfn i32 main() { return 0; }\n");
+    add("main.ft", "import util.strings;\nfn i32 main() { return 0; }\n");
     root("lib");
     TEST_ASSERT_FALSE(load("main.ft"));
-    TEST_ASSERT_TRUE(said("module 'util::strings' not found"));
+    TEST_ASSERT_TRUE(said("module 'util.strings' not found"));
     TEST_ASSERT_TRUE(said("note: looked for"));
     TEST_ASSERT_TRUE(said("util/strings.ft"));
     TEST_ASSERT_TRUE(said("util.ft"));
@@ -406,28 +410,28 @@ TEST(a_missing_module_lists_the_paths_it_looked_for, {
 
 TEST(both_readings_succeeding_is_ambiguous, {
     begin();
-    add("main.ft", "import a::b::c;\nfn i32 main() { return 0; }\n");
+    add("main.ft", "import a.b.c;\nfn i32 main() { return 0; }\n");
     add("a/b.ft", "fn i32 c(i32 x) { return x; }\n");
     add("a/b/c.ft", "fn i32 f() { return 0; }\n");
     TEST_ASSERT_FALSE(load("main.ft"));
-    TEST_ASSERT_TRUE(said("ambiguous import 'a::b::c'"));
+    TEST_ASSERT_TRUE(said("ambiguous import 'a.b.c'"));
     TEST_ASSERT_TRUE(said("a/b/c.ft"));
     TEST_ASSERT_TRUE(said("a/b.ft"));
 })
 
 TEST(ambiguity_holds_whichever_roots_the_two_files_live_under, {
     begin();
-    add("src/main.ft", "import a::b::c;\nfn i32 main() { return 0; }\n");
+    add("src/main.ft", "import a.b.c;\nfn i32 main() { return 0; }\n");
     add("src/a/b.ft", "fn i32 c(i32 x) { return x; }\n");
     add("lib/a/b/c.ft", "fn i32 f() { return 0; }\n");
     root("lib");
     TEST_ASSERT_FALSE(load("src/main.ft"));
-    TEST_ASSERT_TRUE(said("ambiguous import 'a::b::c'"));
+    TEST_ASSERT_TRUE(said("ambiguous import 'a.b.c'"));
 })
 
 TEST(a_prefix_that_lacks_the_name_leaves_the_module_reading, {
     begin();
-    add("main.ft", "import a::b::c;\nfn i32 main() { return 0; }\n");
+    add("main.ft", "import a.b.c;\nfn i32 main() { return 0; }\n");
     add("a/b.ft", "fn i32 other() { return 0; }\n");
     add("a/b/c.ft", "fn i32 f() { return 0; }\n");
     TEST_ASSERT_TRUE(load("main.ft"));
@@ -438,7 +442,7 @@ TEST(a_prefix_that_lacks_the_name_leaves_the_module_reading, {
 
 TEST(a_missing_module_file_leaves_the_symbol_reading, {
     begin();
-    add("main.ft", "import a::b::c;\nfn i32 main() { return 0; }\n");
+    add("main.ft", "import a.b.c;\nfn i32 main() { return 0; }\n");
     add("a/b.ft", "fn i32 c(i32 x) { return x; }\n");
     TEST_ASSERT_TRUE(load("main.ft"));
     const binding_t* b = bound("main", "c");
@@ -450,7 +454,7 @@ TEST(a_missing_module_file_leaves_the_symbol_reading, {
 
 TEST(a_prefix_that_lacks_the_name_is_not_read_into_the_closure, {
     begin();
-    add("main.ft", "import util::helper;\nfn i32 main() { return 0; }\n");
+    add("main.ft", "import util.helper;\nfn i32 main() { return 0; }\n");
     add("util/helper.ft", "fn i32 help() { return 0; }\n");
     add("util.ft", "fn i32 unrelated() { return 0; }\n");
     TEST_ASSERT_TRUE(load("main.ft"));
@@ -458,12 +462,12 @@ TEST(a_prefix_that_lacks_the_name_is_not_read_into_the_closure, {
     // is never read into the closure (module-system.md 10).
     TEST_ASSERT_EQ_UINT64(module_set_count(&set), (uint64_t)2);
     TEST_ASSERT_NULL(module_set_find(&set, str_from_cstr("util")));
-    TEST_ASSERT_EQ_STR(ordered(0), "util::helper");
+    TEST_ASSERT_EQ_STR(ordered(0), "util.helper");
 })
 
 TEST(a_syntax_error_in_a_prefix_the_module_reading_beats_is_not_reported, {
     begin();
-    add("main.ft", "import util::helper;\nfn i32 main() { return 0; }\n");
+    add("main.ft", "import util.helper;\nfn i32 main() { return 0; }\n");
     add("util/helper.ft", "fn i32 help() { return 0; }\n");
     add("util.ft", "fn i32 broken(i32 a i32 b) { return a; }\n");
     TEST_ASSERT_TRUE(load("main.ft"));
@@ -472,7 +476,7 @@ TEST(a_syntax_error_in_a_prefix_the_module_reading_beats_is_not_reported, {
 
 TEST(an_import_of_the_entry_from_such_a_prefix_is_not_a_cycle, {
     begin();
-    add("main.ft", "import util::helper;\nfn i32 main() { return 0; }\n");
+    add("main.ft", "import util.helper;\nfn i32 main() { return 0; }\n");
     add("util/helper.ft", "fn i32 help() { return 0; }\n");
     add("util.ft", "import main;\nfn i32 unrelated() { return 0; }\n");
     TEST_ASSERT_TRUE(load("main.ft"));
@@ -482,7 +486,7 @@ TEST(an_import_of_the_entry_from_such_a_prefix_is_not_a_cycle, {
 TEST(an_extern_of_such_a_prefix_conflicts_with_nothing, {
     begin();
     add("main.ft",
-        "import util::helper;\n"
+        "import util.helper;\n"
         "extern fn i64 write(i32 fd, void* buf, u64 n);\n"
         "fn i32 main() { return 0; }\n");
     add("util/helper.ft", "fn i32 help() { return 0; }\n");
@@ -495,14 +499,14 @@ TEST(a_prefix_the_closure_already_holds_answers_from_its_namespace, {
     begin();
     add("main.ft",
         "import util;\n"
-        "import util::add;\n"
+        "import util.add;\n"
         "fn i32 main() { return 0; }\n");
     add("util.ft", src_add());
     add("util/add.ft", "fn i32 f() { return 0; }\n");
     // `util` is in the closure, so the symbol reading is answered from its
     // namespace, and both readings succeeding is ambiguous (D9.3).
     TEST_ASSERT_FALSE(load("main.ft"));
-    TEST_ASSERT_TRUE(said("ambiguous import 'util::add'"));
+    TEST_ASSERT_TRUE(said("ambiguous import 'util.add'"));
 })
 
 TEST(every_failing_import_of_one_module_is_reported, {
@@ -566,9 +570,9 @@ int main(int argc, char** argv) {
     TEST_RUN(a_dotted_entry_is_reported_at_the_start_of_the_file);
     TEST_RUN(a_dotted_entry_file_is_never_read);
     TEST_RUN(a_dotted_entry_is_rejected_beside_the_module_it_would_collide_with);
-    TEST_RUN(a_colon_in_the_entry_base_name_is_rejected);
-    TEST_RUN(a_colon_entry_is_rejected_beside_the_module_it_would_collide_with);
-    TEST_RUN(a_doubled_colon_entry_base_name_is_rejected_as_a_name);
+    TEST_RUN(a_colon_in_the_entry_base_name_is_accepted);
+    TEST_RUN(a_colon_entry_stands_beside_the_module_it_once_collided_with);
+    TEST_RUN(a_doubled_colon_entry_base_name_is_accepted_as_a_name);
     TEST_RUN(a_dot_first_or_last_in_the_entry_base_name_is_rejected);
     TEST_RUN(an_entry_named_exactly_ft_keeps_its_whole_base_name);
     TEST_RUN(a_hyphenated_entry_base_name_is_accepted);

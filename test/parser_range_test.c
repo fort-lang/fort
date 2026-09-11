@@ -109,10 +109,10 @@ static const char* const STMTS[] = {"i32 n = 1;",
 
 static const char* const MODULES[] = {"",
                                       "i32 N = 4;\n",
-                                      "import std::io;\n"
-                                      "import std::str as s;\n"
-                                      "import util::text::trim;\n"
-                                      "import util::text::{pad, split as cut};\n"
+                                      "import std.io;\n"
+                                      "import std.str as s;\n"
+                                      "import util.text.trim;\n"
+                                      "import util.text.{pad, split as cut};\n"
                                       "\n"
                                       "fn void main() {\n"
                                       "    io.println(s.dup(\"x\"));\n"

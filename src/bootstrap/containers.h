@@ -1,7 +1,7 @@
 // Containers of the bootstrap compiler: vectors of pointers and of integers,
 // and a hash map from string views to integers.
 //
-// The file mirrors std::vec and std::strmap (stdlib.md 2.7, 2.8) so that the
+// The file mirrors std.vec and std.strmap (stdlib.md 2.7, 2.8) so that the
 // self-hosted compiler can transliterate it: fat structs laid out in the open,
 // growth written as allocate, copy, free, no unions, no function pointers, no
 // macros beyond constants. Zero-initialized storage is a valid empty value of

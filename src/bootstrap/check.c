@@ -3338,7 +3338,7 @@ static void annotate_path(const ast_node_t* imp, const sym_t* last, const sym_t*
     const uint64_t n = ast_len(path);
     ast_child(path, n - 1)->sym = last;
     if (n >= 2 && module != NULL && module != last) {
-        // `import a::b::c;` reads `c` in the module `a::b` (D9.3).
+        // `import a.b.c;` reads `c` in the module `a.b` (D9.3).
         ast_child(path, n - 2)->sym = module;
     }
 }

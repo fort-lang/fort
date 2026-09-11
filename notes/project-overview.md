@@ -58,26 +58,26 @@ Seed tests that exercise every feature live under `test/lang/` in the format def
 
 ## What fort changes relative to C
 
-| Area          | C                                  | fort                                       |
-|---------------|------------------------------------|--------------------------------------------|
-| Mutability    | mutable by default, `const`        | immutable by default, `mut` (D5)           |
-| Conversions   | implicit promotions and narrowing  | none; `cast(x, T)` (D3.14)                 |
-| Arrays        | decay to pointers, no length       | `T[N]` values and `T@` spans with `.len`   |
-| Strings       | `char*` with NUL                   | `string`: immutable `{ptr, len}` (D3.7)    |
-| Overflow      | undefined for signed               | trap in checked builds, wrap in release    |
-| Bounds        | unchecked                          | always checked (D10.6)                     |
-| Initialization| optional                           | mandatory; `new` zeroes (D7.1, D10.2)      |
-| Null          | `0`/`NULL`                         | `null` keyword, pointers only (D10.5)      |
-| Switch        | fallthrough                        | none; `case a, b:`; exhaustive enums (D7.6)|
-| Cleanup       | manual on every path               | `defer` (D7.8)                             |
-| Ownership     | `malloc`/`free` by convention      | `own` types, `move`, `del` that empties    |
-|               |                                    | its operand (D17)                          |
-| Control flow  | `goto`, optional braces            | no `goto`; braces required (D7.4)          |
-| Modules       | headers and `#include`             | `import a::b;`, one module per file (D9)   |
-| Functions     | `int f(int)`                       | `fn i32 f(i32)`; function-pointer types    |
-|               |                                    | read the same (D8.1)                       |
-| Enums         | integer constants                  | typed, scoped `color.red` (D3.9)           |
-| Bool          | `int`                              | `bool`, `true`, `false` (D3.3)             |
+| Area           | C                                 | fort                                        |
+|----------------|-----------------------------------|---------------------------------------------|
+| Mutability     | mutable by default, `const`       | immutable by default, `mut` (D5)            |
+| Conversions    | implicit promotions and narrowing | none; `cast(x, T)` (D3.14)                  |
+| Arrays         | decay to pointers, no length      | `T[N]` values and `T@` spans with `.len`    |
+| Strings        | `char*` with NUL                  | `string`: immutable `{ptr, len}` (D3.7)     |
+| Overflow       | undefined for signed              | trap in checked builds, wrap in release     |
+| Bounds         | unchecked                         | always checked (D10.6)                      |
+| Initialization | optional                          | mandatory; `new` zeroes (D7.1, D10.2)       |
+| Null           | `0`/`NULL`                        | `null` keyword, pointers only (D10.5)       |
+| Switch         | fallthrough                       | none; `case a, b:`; exhaustive enums (D7.6) |
+| Cleanup        | manual on every path              | `defer` (D7.8)                              |
+| Ownership      | `malloc`/`free` by convention     | `own` types, `move`, `del` that empties     |
+|                |                                   | its operand (D17)                           |
+| Control flow   | `goto`, optional braces           | no `goto`; braces required (D7.4)           |
+| Modules        | headers and `#include`            | `import a.b;`, one module per file (D9)     |
+| Functions      | `int f(int)`                      | `fn i32 f(i32)`; function-pointer types     |
+|                |                                   | read the same (D8.1)                        |
+| Enums          | integer constants                 | typed, scoped `color.red` (D3.9)            |
+| Bool           | `int`                             | `bool`, `true`, `false` (D3.3)              |
 
 ## Deliberately not in v1
 

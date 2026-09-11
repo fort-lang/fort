@@ -651,11 +651,11 @@ TEST(a_skip_consumes_the_block_of_the_failed_statement, {
 // imports and declarations after it are read (D9.3).
 TEST(a_broken_import_does_not_stop_the_imports, {
     TEST_ASSERT_EQ_STR(parse_fails("import ;\n"
-                                   "import std::io;\n"
+                                   "import std.io;\n"
                                    "fn i32 main() { return 0; }\n"),
                        "t.ft:1:8: error: expected an identifier, found ';'\n");
     TEST_ASSERT_EQ_STR(parse_dump("import ;\n"
-                                  "import std::io;\n"
+                                  "import std.io;\n"
                                   "fn i32 main() { return 0; }\n"),
                        "(module (error) (import (path std io) nil) "
                        "(fn (type (prim i32)) main (params) (block (return (int 0)))))");
@@ -666,11 +666,11 @@ TEST(a_broken_import_does_not_stop_the_imports, {
 // that keeps parse_module from spinning (D14.2).
 TEST(a_late_import_is_reported_once_and_skipped, {
     TEST_ASSERT_EQ_STR(parse_fails("fn i32 main() { return 0; }\n"
-                                   "import std::io;\n"
+                                   "import std.io;\n"
                                    "fn i32 g() { return 1; }\n"),
                        "t.ft:2:1: error: an import comes before every declaration\n");
     TEST_ASSERT_EQ_STR(parse_dump("fn i32 main() { return 0; }\n"
-                                  "import std::io;\n"
+                                  "import std.io;\n"
                                   "fn i32 g() { return 1; }\n"),
                        "(module (fn (type (prim i32)) main (params) (block (return (int 0)))) "
                        "(error) (fn (type (prim i32)) g (params) (block (return (int 1)))))");
@@ -742,7 +742,7 @@ TEST(an_unclosed_bracket_costs_its_construct_and_no_more, {
 
 // ---- the fail corpus (D14.4) ----------------------------------------------
 
-enum { CORPUS_PATH_CAP = 512, CORPUS_CHUNK = 4096, CORPUS_FILES = 193 };
+enum { CORPUS_PATH_CAP = 512, CORPUS_CHUNK = 4096, CORPUS_FILES = 195 };
 
 // The files walked, the source of the one being read, and the lines that were
 // reported on without an annotation, one per line.

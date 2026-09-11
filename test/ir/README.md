@@ -37,6 +37,18 @@ block at the end of the function, which calls
 program prints `before`, then the D11.4 line
 `abort.ft:12:13: runtime error: index 5 out of range for length 3`, and dies with SIGABRT.
 
+`colons.ll` is
+
+```fort
+fn i32 main() { println("colon"); return 0; }
+```
+
+in `my:app.ft`, whose module path is therefore `my:app` and whose `main` is the symbol
+`my:app.main` (D9.1, D9.7). It is `hello.ll` with that one name changed, and it exists because
+nothing before the link can check that the byte survives: LLVM quotes a name its unquoted
+identifier syntax does not admit, the assembler quotes the label in turn, and the ELF symbol is
+the name itself. The pipeline test reads it back out of the symbol table with `nm`.
+
 `floats.ll` is
 
 ```fort

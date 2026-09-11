@@ -40,7 +40,7 @@ TEST(a_declaration_starts_at_its_type, {
 })
 
 TEST(a_struct_an_enum_and_an_import_start_at_their_keyword, {
-    const ast_node_t* mod = parse_text("import std::io;\n"
+    const ast_node_t* mod = parse_text("import std.io;\n"
                                        "struct point {\n"
                                        "    i32 x;\n"
                                        "}\n"
@@ -308,17 +308,17 @@ TEST(an_empty_case_body_is_an_empty_range_after_the_colon, {
 })
 
 TEST(an_import_covers_its_semicolon_and_its_items, {
-    const ast_node_t* mod = parse_text("import std::io;\n"
-                                       "import util::strings as s;\n"
-                                       "import a::b::{c, d as e};\n");
+    const ast_node_t* mod = parse_text("import std.io;\n"
+                                       "import util.strings as s;\n"
+                                       "import a.b.{c, d as e};\n");
     TEST_ASSERT_NONNULL(mod);
-    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 0)), "import std::io;");
-    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 0)->a), "std::io");
-    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 1)), "import util::strings as s;");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 0)), "import std.io;");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 0)->a), "std.io");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 1)), "import util.strings as s;");
     TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 1)->b), "as s");
-    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 2)), "import a::b::{c, d as e};");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 2)), "import a.b.{c, d as e};");
     // The path ends at its last segment; the item list is not part of it.
-    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 2)->a), "a::b");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 2)->a), "a.b");
     TEST_ASSERT_EQ_STR(text_of(ast_child(pt_decl(mod, 2), 0)), "c");
     TEST_ASSERT_EQ_STR(text_of(ast_child(pt_decl(mod, 2), 1)), "d as e");
 })
@@ -398,8 +398,8 @@ TEST(a_name_range_is_the_name_token, {
 })
 
 TEST(mentions_of_a_name_carry_its_range, {
-    const ast_node_t* mod = parse_text("import std::io;\n"
-                                       "import a::{b as c};\n"
+    const ast_node_t* mod = parse_text("import std.io;\n"
+                                       "import a.{b as c};\n"
                                        "point d = point{.x = 1};\n"
                                        "i32 e = f.g;\n"
                                        "i32 h = p->q;\n"
@@ -460,8 +460,8 @@ TEST(the_out_parameter_signature_of_d17_2, {
 // A module with imports, a struct, an enum, a global and a function that
 // uses most of the statement forms.
 TEST(a_whole_module_parses_end_to_end, {
-    const ast_node_t* mod = parse_text("import std::io;\n"
-                                       "import util::strings as s;\n"
+    const ast_node_t* mod = parse_text("import std.io;\n"
+                                       "import util.strings as s;\n"
                                        "\n"
                                        "struct node {\n"
                                        "    i32 value;\n"
@@ -491,8 +491,8 @@ TEST(a_whole_module_parses_end_to_end, {
 })
 
 TEST(a_whole_module_in_the_east_marker_spelling, {
-    const ast_node_t* mod = parse_text("import std::io;\n"
-                                       "import util::strings as s;\n"
+    const ast_node_t* mod = parse_text("import std.io;\n"
+                                       "import util.strings as s;\n"
                                        "\n"
                                        "struct node {\n"
                                        "    i32 value;\n"

@@ -233,7 +233,7 @@ TEST(every_named_node_of_a_clean_module_carries_a_symbol, {
     add("util.ft", "i32 ONE = 1;\nfn i32 one() {\n    return ONE;\n}\n");
     add("main.ft",
         "import util as u;\n"
-        "import util::{one as first};\n"
+        "import util.{one as first};\n"
         "struct point {\n    i32 x;\n    i32 y;\n}\n"
         "enum color {\n    red,\n    green,\n}\n"
         "i32 MAX = 3;\n"
@@ -381,7 +381,7 @@ TEST(an_import_carries_the_module_it_binds, {
 TEST(an_import_item_carries_the_declaration, {
     begin();
     add("util.ft", "fn i32 one() {\n    return 1;\n}\n");
-    add("main.ft", "import util::{one as first};\nfn i32 main() {\n    return first();\n}\n");
+    add("main.ft", "import util.{one as first};\nfn i32 main() {\n    return first();\n}\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
     const sym_t* one = sym_of("util", "one");
     const ast_node_t* item = node_find(module_at("main")->ast, AST_IMPORT_ITEM, "one");
@@ -519,7 +519,7 @@ TEST(a_failed_declaration_silences_its_uses, {
 TEST(an_error_typed_declaration_silences_its_uses_in_an_importing_module, {
     begin();
     add("util.ft", "i32 A = nope;\n");
-    add("main.ft", "import util::A;\nfn i32 main() {\n    return A + 1;\n}\n");
+    add("main.ft", "import util.A;\nfn i32 main() {\n    return A + 1;\n}\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("util.ft:1:9: error: unknown name 'nope'"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
@@ -528,7 +528,7 @@ TEST(an_error_typed_declaration_silences_its_uses_in_an_importing_module, {
 TEST(an_importer_is_checked_in_full_after_its_import_failed, {
     begin();
     add("util.ft", "i32 A = nope;\n");
-    add("main.ft", "import util::A;\nfn i32 main() {\n    i32 x = \"s\";\n    return x + A;\n}\n");
+    add("main.ft", "import util.A;\nfn i32 main() {\n    i32 x = \"s\";\n    return x + A;\n}\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     // Every module of the closure is checked in dependency order, and the
     // importer sees its own errors and no cascade of the import's (D14.2 as

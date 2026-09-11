@@ -251,7 +251,7 @@ byte that `len` does not count; a literal's `.ptr` can therefore be handed to C 
 Sub-strings are not NUL-terminated. Indexing yields `char`, a span of a `string` is a `string`,
 `.len` is `u64` and `.ptr` is `char*`. `==` and `!=` compare `len` first and then the bytes, so the
 zero string `{null, 0}` equals `""`; only `.ptr == null` tells them apart (D3.7, D10.5). Bytes are
-UTF-8 by convention and never validated. There is no `+`; `std::str` and `std::strbuf` concatenate
+UTF-8 by convention and never validated. There is no `+`; `std.str` and `std.strbuf` concatenate
 and return the owned form `string own` (D3.7, D13.2, section 8.6). Characters of a string are never
 mutable (D5.2), whether or not the string is `own`.
 
@@ -1093,7 +1093,7 @@ f32 f = cast(16777217, f32);         // 16777216.0: rounded to nearest even
 i32 s1 = cast(1e10, i32);            // 2147483647: saturated
 i32 s2 = cast(-3.99, i32);           // -3: truncated toward zero
 u8 s3 = cast(-1.0, u8);              // 0: saturated
-i32 s4 = cast(math.f64_nan(), i32);  // 0: NaN (std::math provides NaN, D6.12)
+i32 s4 = cast(math.f64_nan(), i32);  // 0: NaN (std.math provides NaN, D6.12)
 i32 b = cast(true, i32);             // 1
 bool x = cast(1, bool);              // error: no cast from integer to bool
 i32 c = cast('A', i32);              // 65

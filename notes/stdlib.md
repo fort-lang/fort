@@ -12,11 +12,11 @@ writable with nothing but this library and the builtins (D12).
 ### 1.1 What the library is
 
 - Every module is one fort source file under the standard library directory (D9.1, D14.1):
-  `std::io` is `<std>/io.ft`. The library is ordinary fort (D13.1); the compiler knows nothing
+  `std.io` is `<std>/io.ft`. The library is ordinary fort (D13.1); the compiler knows nothing
   about it beyond resolving the `std` search root.
 - Everything at module level is exported (D9.6). Names not documented here (helpers such as
   `strmap.find_slot`) are implementation details and may change; programs must not use them.
-- Foreign calls go through the `extern` declarations collected in `std::libc` (D9.8) and the C
+- Foreign calls go through the `extern` declarations collected in `std.libc` (D9.8) and the C
   runtime's `fort_rt_*` entry points (section 3); a program may redeclare any of those C
   symbols with an identical signature (D9.8). The runtime is permanent; it is not a
   self-hosting goal (D13.1).
@@ -124,19 +124,19 @@ import binding's name for a local even though D7.9 permits it.
 
 ### 1.6 Module list
 
-| Module        | Imports                               | Purpose                                |
-|---------------|---------------------------------------|----------------------------------------|
-| `std::libc`   | none                                  | libc and runtime `extern`s, flags      |
-| `std::mem`    | `libc`                                | copy, fill and compare bytes           |
-| `std::str`    | `libc`, `mem`                         | compare, search, classify, parse, dup  |
-| `std::sys`    | `libc`, `str`                         | exit, args, errno, env                 |
-| `std::strbuf` | `mem`                                 | growable text and byte buffer          |
-| `std::io`     | `libc`, `mem`, `sys`, `str`, `strbuf` | descriptors, whole files and streams   |
-| `std::vec`    | none                                  | `ptr_vec`, `int_vec`, template pattern |
-| `std::strmap` | `str`                                 | string-keyed open-addressing table     |
-| `std::math`   | none                                  | float bit casts, abs, min, max, limits |
+| Module       | Imports                               | Purpose                                |
+|--------------|---------------------------------------|----------------------------------------|
+| `std.libc`   | none                                  | libc and runtime `extern`s, flags      |
+| `std.mem`    | `libc`                                | copy, fill and compare bytes           |
+| `std.str`    | `libc`, `mem`                         | compare, search, classify, parse, dup  |
+| `std.sys`    | `libc`, `str`                         | exit, args, errno, env                 |
+| `std.strbuf` | `mem`                                 | growable text and byte buffer          |
+| `std.io`     | `libc`, `mem`, `sys`, `str`, `strbuf` | descriptors, whole files and streams   |
+| `std.vec`    | none                                  | `ptr_vec`, `int_vec`, template pattern |
+| `std.strmap` | `str`                                 | string-keyed open-addressing table     |
+| `std.math`   | none                                  | float bit casts, abs, min, max, limits |
 
-The import graph is acyclic (D9.5). A program imports what it uses: `import std::io;` and then
+The import graph is acyclic (D9.5). A program imports what it uses: `import std.io;` and then
 `io.read_file(...)` (D9.3, D9.4).
 
 ## 2. Modules
@@ -145,7 +145,7 @@ Each module section lists its public struct definitions and constants exactly as
 then a block of function headers with the bodies omitted, then one entry per function with
 semantics, preconditions, runtime errors and ownership, then a short example.
 
-### 2.1 `std::sys`
+### 2.1 `std.sys`
 
 Process-level services.
 
@@ -175,7 +175,7 @@ fn bool env(string name, string mut* out)
   `*out` is a view of the environment (D17.3); it is never `del`ed.
 
 ```fort
-import std::sys;
+import std.sys;
 
 fn string std_dir() {
     string mut dir = "../std";
@@ -186,7 +186,7 @@ fn string std_dir() {
 }
 ```
 
-### 2.2 `std::libc`
+### 2.2 `std.libc`
 
 Thin `extern` declarations for the libc calls the other modules need, plus the runtime entry
 points of section 3, with the C types mapped per D9.8: `int` is `i32`, `size_t` is `u64`,
@@ -262,7 +262,7 @@ extern here takes and returns views, and the library wraps every ownership-beari
 Direct use looks like `libc.write(fd, cast(s.ptr, void*), s.len) == cast(s.len, i64)`, which
 writes a string to a descriptor, bypassing the runtime's buffers.
 
-### 2.3 `std::mem`
+### 2.3 `std.mem`
 
 Byte-span primitives over `memmove`, `memset` and `memcmp`.
 
@@ -280,11 +280,11 @@ fn bool equal(u8@ a, u8@ b)
   whatever their pointers. Ownership: none.
 
 Only `u8` spans are covered: a span cast never changes the element size (D3.14), so other
-element types are copied with a loop, as `std::vec` does, or through `libc.memmove` on `.ptr`
+element types are copied with a loop, as `std.vec` does, or through `libc.memmove` on `.ptr`
 with a byte count of `n * sizeof(T)`.
 
 ```fort
-import std::mem;
+import std.mem;
 
 fn void demo() {
     u8[16] mut key = {};
@@ -293,7 +293,7 @@ fn void demo() {
 }
 ```
 
-### 2.4 `std::io`
+### 2.4 `std.io`
 
 File descriptors, whole-file and stream I/O. Everything here goes straight to the descriptor;
 the print family (D12.2) writes through the runtime's per-descriptor buffers (D11.5), so a
@@ -358,9 +358,9 @@ fn bool write_file(string path, u8@ data)
   Ownership: none.
 
 ```fort
-import std::io;
-import std::strbuf;
-import std::sys;
+import std.io;
+import std.strbuf;
+import std.sys;
 
 // cat: copies one file to standard output.
 fn i32 main(string@ args) {
@@ -377,7 +377,7 @@ fn i32 main(string@ args) {
 }
 ```
 
-### 2.5 `std::str`
+### 2.5 `std.str`
 
 Operations on `string` (D3.7). None of them allocates unless the entry says so; the three that
 do return `own` values (D13.5).
@@ -452,7 +452,7 @@ fn bool is_hex(char ch)
   above `0x80` classifies as `false`.
 
 ```fort
-import std::str;
+import std.str;
 
 // Splits "name=123"; false on malformed input, in which case *name and *value are unchanged.
 fn bool parse_binding(string line, string mut* name, i64 mut* value) {
@@ -475,7 +475,7 @@ fn string own keep(string name) {
 }
 ```
 
-### 2.6 `std::strbuf`
+### 2.6 `std.strbuf`
 
 A growable buffer for building text and byte sequences.
 
@@ -551,8 +551,8 @@ b->data = move(bigger);                 // the slot is zero, so the store passes
   `del` (D17.12).
 
 ```fort
-import std::io;
-import std::strbuf;
+import std.io;
+import std.strbuf;
 
 // Formats "    mov <reg>, <imm>\n". Ownership: the caller dels the result.
 fn string own mov_imm(string reg, i64 imm) {
@@ -573,7 +573,7 @@ fn bool emit_mov(i32 fd) {
 }
 ```
 
-### 2.7 `std::vec`
+### 2.7 `std.vec`
 
 Growable sequences of pointers and of `i64`, and the pattern for every other element type.
 
@@ -637,7 +637,7 @@ through `mut` storage, D17.6, and is left `null`); the growth loop moves each el
 a range loop over the live span lends, `for (node mut* n : v->items[..v->len])` (D17.10).
 
 ```fort
-import std::vec;
+import std.vec;
 
 struct node { i64 value; }
 
@@ -653,7 +653,7 @@ fn i64 demo() {
 }
 ```
 
-### 2.8 `std::strmap`
+### 2.8 `std.strmap`
 
 A hash table from `string` to `i64` with open addressing, linear probing, tombstones and
 `str.hash` (FNV-1a).
@@ -724,8 +724,8 @@ holds two containers is itself an owning aggregate (D17.7), so it is passed by p
 a `free` of its own:
 
 ```fort
-import std::strmap;
-import std::vec;
+import std.strmap;
+import std.vec;
 
 struct sym { string name; i64 offset; }
 
@@ -757,7 +757,7 @@ fn void symtab_free(sym_tab mut* t) {
 }
 ```
 
-### 2.9 `std::math`
+### 2.9 `std.math`
 
 Integer limits, float bit casts and per-type `abs`, `min`, `max`. There is no overloading
 (D8.3), so each function names its type.
@@ -803,7 +803,7 @@ fn f64 max_f64(f64 a, f64 b)
   the comparison is false and `b` is returned; do not rely on NaN propagation.
 
 ```fort
-import std::math;
+import std.math;
 
 fn bool is_negative_zero(f64 x) {
     return math.f64_bits(x) == 0x8000000000000000;
@@ -816,7 +816,7 @@ fn bool is_negative_zero(f64 x) {
 buffers and process start. This section names only what the library calls. The library uses
 the builtins `new`, `del`, `move`, `panic`, `assert` and the print family as any program does
 (D12); the runtime calls behind them, including the overwrite check of D17.11, are emitted by
-the compiler and never named in library source. Beyond that, `std::libc` declares five runtime
+the compiler and never named in library source. Beyond that, `std.libc` declares five runtime
 entry points, whose C prototypes are fixed in `toolchain.md` 5.1:
 
 ```fort
@@ -851,9 +851,9 @@ slots read as zero and why a fresh `own` slot passes the overwrite check (D17.11
 only this library and the builtins. Every line is v1 fort.
 
 ```fort
-import std::io;
-import std::str;
-import std::sys;
+import std.io;
+import std.str;
+import std.sys;
 
 fn i32 main(string@ args) {
     if (args.len != 2) {
@@ -903,14 +903,14 @@ Deliberately absent, with the idiom to use instead; the language-level list is D
 
 - Formatted output beyond the print family: build text in a `str_buf` with `append`,
   `append_i64` and `append_u64`, then `io.write_all` or `print` the result.
-- Generic containers: copy `std::vec` for each element type (2.7); use `str_map` with indices
+- Generic containers: copy `std.vec` for each element type (2.7); use `str_map` with indices
   for pointer values (2.8).
-- Containers that own their elements: copy `std::vec` with a `node mut* own mut@ own` slot type
+- Containers that own their elements: copy `std.vec` with a `node mut* own mut@ own` slot type
   and a `free` that `del`s every element (2.7).
 - Compile-time leak and use-after-`move` detection (D15, D17.14): the idiom is `defer del`
   right after the declaration, and the zero value that `move` and `del` leave behind (1.3).
 - Unicode: strings are bytes (D3.7); the classification functions are ASCII-only.
 - Floating-point formatting and parsing beyond what the print family emits (D11.7): a program
-  that needs a float from text writes its own conversion or calls C through `std::libc`.
+  that needs a float from text writes its own conversion or calls C through `std.libc`.
 - Threads, signals, networking, directories, time, line-at-a-time input: call libc through your
-  own `extern` declarations following the `std::libc` conventions, or `read_all` and scan.
+  own `extern` declarations following the `std.libc` conventions, or `read_all` and scan.

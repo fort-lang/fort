@@ -38,8 +38,8 @@ typedef enum {
     BIND_STRUCT,     // `struct` (D3.8)
     BIND_ENUM,       // `enum` (D3.9)
     BIND_VAR,        // a module-level constant or `mut` global (D7.10)
-    BIND_MODULE,     // `import a::b;`: the name denotes a module (D9.3)
-    BIND_SYMBOL,     // `import a::b::c;`: the name denotes a declaration of a::b
+    BIND_MODULE,     // `import a.b;`: the name denotes a module (D9.3)
+    BIND_SYMBOL,     // `import a.b.c;`: the name denotes a declaration of a.b
     BIND_LOCAL,      // a local of a block (D7.1)
     BIND_PARAM,      // a parameter (D8.1)
     BIND_KIND_COUNT, // one past the last kind, for tables
@@ -106,7 +106,7 @@ uint64_t scope_count(const scope_t* s);
 const binding_t* scope_at(const scope_t* s, uint64_t i);
 
 // Whether the binding denotes a declaration, as opposed to one of the two
-// import bindings: what `import a::b::c;` needs of `c` for its symbol
+// import bindings: what `import a.b.c;` needs of `c` for its symbol
 // reading, since import bindings are not re-exported (D9.3).
 bool bind_is_declaration(const binding_t* b);
 

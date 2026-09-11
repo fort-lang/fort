@@ -186,7 +186,7 @@ TEST(one_record_per_occurrence_and_no_more, {
 TEST(an_alias_declares_a_name_here_for_a_declaration_elsewhere, {
     begin();
     add("util.ft", "fn i32 twice(i32 n) { return n + n; }\n");
-    add("main.ft", "import util::twice as double;\nfn i32 main() { return double(2); }\n");
+    add("main.ft", "import util.twice as double;\nfn i32 main() { return double(2); }\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
     index_closure();
     char want[TEXT_CAP];

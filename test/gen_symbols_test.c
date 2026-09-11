@@ -70,14 +70,14 @@ TEST(a_name_escapes_what_a_quoted_name_cannot_hold, {
 
 // ---- the module path in the symbol (D9.7) ------------------------------------------
 
-// The module `util::chars`, reached by `import util::chars;` from the entry
+// The module `util.chars`, reached by `import util.chars;` from the entry
 // file beside its directory (D9.1, D9.2).
 static const char CHARS_SOURCE[] = "struct pair {\n    i32 x;\n    i32 y;\n}\n"
                                    "enum color {\n    red,\n    green,\n}\n"
                                    "fn i32 twice(i32 n) { return n +% n; }\n"
                                    "fn color pick() { return color.green; }\n";
 
-static const char CHARS_MAIN[] = "import util::chars;\n"
+static const char CHARS_MAIN[] = "import util.chars;\n"
                                  "fn i32 main() {\n"
                                  "    chars.pair p = {1, 2};\n"
                                  "    println(chars.twice(p.x), chars.pick());\n"
@@ -85,17 +85,19 @@ static const char CHARS_MAIN[] = "import util::chars;\n"
 
 TEST(a_nested_module_path_joins_every_segment_with_a_dot, {
     TEST_ASSERT_TRUE(emit_two("main.ft", CHARS_MAIN, "util/chars.ft", CHARS_SOURCE));
-    // `util::chars::twice` is `util.chars.twice`: the path joined with dots
-    // plus the declaration name, quoted because it is dotted (D9.7).
+    // `twice` in the module `util.chars` is `util.chars.twice`: the module
+    // path, a dot and the declaration name, quoted because it is dotted
+    // (D9.7).
     TEST_ASSERT_EQ_STR(found("define dso_local i32 @\"util.chars.twice\"(i32 %n.in) #0 {"),
                        "define dso_local i32 @\"util.chars.twice\"(i32 %n.in) #0 {");
     TEST_ASSERT_EQ_STR(found("%struct.util.chars.pair = type { i32, i32 }"),
                        "%struct.util.chars.pair = type { i32, i32 }");
     TEST_ASSERT_EQ_STR(found("@.enum.util.chars.color = private"),
                        "@.enum.util.chars.color = private");
-    // The separator of a module path never reaches the generated module: the
-    // mangler writes every `::` as a `.` (D9.7).
-    TEST_ASSERT_EQ_STR(absent("::"), "absent");
+    // The file path separator never reaches the symbol: the module path is
+    // `util.chars`, not `util/chars`, and the mangler copies it across
+    // unchanged (D9.1, D9.7).
+    TEST_ASSERT_EQ_STR(absent("util/chars"), "absent");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -121,7 +123,7 @@ TEST(a_byte_a_quoted_name_cannot_hold_is_written_as_a_hex_escape, {
                              "enum color {\n    red,\n}\n"
                              "fn i32 main() {\n    point p = {7};\n"
                              "    println(p.x, color.red);\n    return 0;\n}\n"));
-    // D9.1 bars `.` and `:` from an entry base name and nothing else, so a
+    // D9.1 bars `.` from an entry base name and nothing else, so a
     // `\"` reaches the symbol; LLVM reads `\\22` back to that byte, so the ELF
     // symbol is `a\"b.main` and the quoting stays spelling only (D9.7).
     TEST_ASSERT_EQ_STR(found("define dso_local i32 @\"a\\22b.main\"() #0 {"),
@@ -132,6 +134,29 @@ TEST(a_byte_a_quoted_name_cannot_hold_is_written_as_a_hex_escape, {
                        "%\"struct.a\\22b.point\" = type { i32 }");
     TEST_ASSERT_EQ_STR(found("@\".enum.a\\22b.color\" = private"),
                        "@\".enum.a\\22b.color\" = private");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+TEST(a_colon_in_the_entry_base_name_reaches_the_symbol, {
+    TEST_ASSERT_TRUE(emit_as("my:app.ft",
+                             "struct point {\n    i32 x;\n}\n"
+                             "enum color {\n    red,\n}\n"
+                             "fn i32 main() {\n    point p = {7};\n"
+                             "    println(p.x, color.red);\n    return 0;\n}\n"));
+    // `:` was barred from an entry base name while the mangler wrote a `::`
+    // as a `.` and dropped a `:` it could not pair, which made `my:app.main`
+    // the `myapp.main` of a module `myapp`. The mangler copies the path
+    // across now (D9.7), so the symbol holds the byte and no module path can
+    // spell it, every segment of one being an identifier (D9.1).
+    TEST_ASSERT_EQ_STR(found("define dso_local i32 @\"my:app.main\"() #0 {"),
+                       "define dso_local i32 @\"my:app.main\"() #0 {");
+    TEST_ASSERT_EQ_STR(absent("@\"myapp.main\""), "absent");
+    // `:` is outside LLVM's unquoted identifiers, so the named type and the
+    // enum table are quoted where a dotted path leaves them bare (item 5).
+    TEST_ASSERT_EQ_STR(found("%\"struct.my:app.point\" = type { i32 }"),
+                       "%\"struct.my:app.point\" = type { i32 }");
+    TEST_ASSERT_EQ_STR(found("@\".enum.my:app.color\" = private"),
+                       "@\".enum.my:app.color\" = private");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -147,7 +172,7 @@ TEST(a_control_byte_in_the_entry_base_name_reaches_the_symbol, {
     TEST_ASSERT_TRUE(emit_as("a\x01"
                              "b.ft",
                              "fn i32 main() {\n    println(1);\n    return 0;\n}\n"));
-    // D9.1 bars `.` and `:` alone, so a control byte is a legal entry base
+    // D9.1 bars `.` alone, so a control byte is a legal entry base
     // name and its module path holds it; `\\XX` is how a quoted name does
     // (D9.7, item 5).
     TEST_ASSERT_EQ_STR(found("define dso_local i32 @\"a\\01b.main\"() #0 {"),
@@ -191,7 +216,7 @@ TEST(the_program_entry_point_is_one_entity_of_the_module, {
 // bindings name the same entities (D9.3).
 static const char TWICE_MAIN[] = "import util;\n"
                                  "import util as tools;\n"
-                                 "import util::twice;\n"
+                                 "import util.twice;\n"
                                  "fn i32 main() {\n"
                                  "    println(util.twice(1), tools.twice(2), twice(3));\n"
                                  "    return 0;\n}\n";
@@ -290,6 +315,7 @@ int main(int argc, char** argv) {
     TEST_RUN(a_nested_module_path_joins_every_segment_with_a_dot);
     TEST_RUN(an_entry_base_name_that_is_no_identifier_reaches_its_symbols);
     TEST_RUN(a_byte_a_quoted_name_cannot_hold_is_written_as_a_hex_escape);
+    TEST_RUN(a_colon_in_the_entry_base_name_reaches_the_symbol);
     TEST_RUN(a_backslash_reaches_the_symbol_through_its_own_escape);
     TEST_RUN(a_control_byte_in_the_entry_base_name_reaches_the_symbol);
     TEST_RUN(a_c_name_is_never_quoted);

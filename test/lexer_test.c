@@ -444,13 +444,13 @@ TEST(every_operator_lexes_alone_as_its_kind, {
         ASSERT_TOK_RANGE(0, 0, strlen(op));
         ASSERT_TOK_POS(1, 1, strlen(op) + 1);
     }
-    TEST_ASSERT_EQ_INT64((int64_t)(TOK_OP_LAST - TOK_OP_FIRST + 1), (int64_t)54);
+    TEST_ASSERT_EQ_INT64((int64_t)(TOK_OP_LAST - TOK_OP_FIRST + 1), (int64_t)53);
 })
 
 TEST(the_operator_list_of_d2_10, {
     ASSERT_LEX_OK("+ - * / % +% -% *% = += -= *= /= %= +%= -%= *%= &= |= ^= <<= >>= == != < <= "
-                  "> >= && || ! & | ^ ~ << >> ++ -- ? : :: . -> .. ( ) [ ] { } , ; @",
-                  54);
+                  "> >= && || ! & | ^ ~ << >> ++ -- ? : . -> .. ( ) [ ] { } , ; @",
+                  53);
     for (int k = TOK_OP_FIRST; k <= TOK_OP_LAST; k++) {
         ASSERT_TOK_KIND((uint64_t)(k - TOK_OP_FIRST), (tok_kind_t)k);
     }
@@ -492,10 +492,15 @@ TEST(longest_match_without_spaces, {
     ASSERT_TOK_KIND(1, TOK_SHR_ASSIGN);
     ASSERT_LEX_OK("p->q", 3);
     ASSERT_TOK_KIND(1, TOK_ARROW);
-    ASSERT_LEX_OK("a::b", 3);
-    ASSERT_TOK_KIND(1, TOK_COLON_COLON);
+    ASSERT_LEX_OK("a.b", 3);
+    ASSERT_TOK_KIND(1, TOK_DOT);
     ASSERT_LEX_OK("a..b", 3);
     ASSERT_TOK_KIND(1, TOK_DOT_DOT);
+    // The module path separator is `.` and `..` is the longer match (D2.10),
+    // so `a...b` is a range between `a.` and `b` and not three separators.
+    ASSERT_LEX_OK("a...b", 4);
+    ASSERT_TOK_KIND(1, TOK_DOT_DOT);
+    ASSERT_TOK_KIND(2, TOK_DOT);
 })
 
 TEST(runs_of_operator_characters_split_greedily, {
@@ -520,9 +525,12 @@ TEST(runs_of_operator_characters_split_greedily, {
     ASSERT_LEX_OK("-->", 2);
     ASSERT_TOK_KIND(0, TOK_MINUS_MINUS);
     ASSERT_TOK_KIND(1, TOK_GT);
-    ASSERT_LEX_OK(":::", 2);
-    ASSERT_TOK_KIND(0, TOK_COLON_COLON);
+    // `::` is not a token: the module path separator is `.` (D2.10, D9.1).
+    ASSERT_LEX_OK("::", 2);
+    ASSERT_TOK_KIND(0, TOK_COLON);
     ASSERT_TOK_KIND(1, TOK_COLON);
+    ASSERT_LEX_OK(":::", 3);
+    ASSERT_TOK_KIND(2, TOK_COLON);
     ASSERT_LEX_OK("<<<=", 2);
     ASSERT_TOK_KIND(0, TOK_SHL);
     ASSERT_TOK_KIND(1, TOK_LE);
@@ -657,7 +665,7 @@ TEST(kind_names_of_the_literal_classes, {
     TEST_ASSERT_EQ_STR(tok_kind_name(TOK_STRING), "string literal");
     TEST_ASSERT_EQ_STR(tok_kind_name(TOK_KW_OWN), "own");
     TEST_ASSERT_EQ_STR(tok_kind_name(TOK_PLUS_WRAP_ASSIGN), "+%=");
-    TEST_ASSERT_EQ_INT64((int64_t)TOK_COUNT, (int64_t)(6 + 41 + 54));
+    TEST_ASSERT_EQ_INT64((int64_t)TOK_COUNT, (int64_t)(6 + 41 + 53));
 })
 
 TEST(kind_names_are_distinct, {

@@ -338,7 +338,7 @@ TEST(an_indexed_alias_declares_its_name_and_points_elsewhere, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
     TEST_ASSERT_TRUE(write_source(
-        box.entry, "import util::add as plus;\nfn i32 main() { return plus(1, 2); }\n"));
+        box.entry, "import util.add as plus;\nfn i32 main() { return plus(1, 2); }\n"));
     char util[PATH_CAP];
     join(util, sizeof util, box.dir, "util.ft");
     TEST_ASSERT_TRUE(write_source(util, "fn i32 add(i32 a, i32 b) { return a + b; }\n"));

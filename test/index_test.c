@@ -196,14 +196,14 @@ TEST(the_records_of_one_line_are_in_column_order, {
 TEST(a_directory_segment_of_an_import_path_carries_no_record, {
     begin();
     add("sub/util.ft", "fn i32 twice(i32 n) { return n + n; }\n");
-    add("main.ft", "import sub::util;\nfn i32 main() { return util.twice(1); }\n");
+    add("main.ft", "import sub.util;\nfn i32 main() { return util.twice(1); }\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
     index_closure();
     // `sub` names a search directory and not a module, so only the last
     // segment of the path denotes anything (D9.2, D9.3, D20.3).
     TEST_ASSERT_EQ_STR(text_in("main.ft", 1, 8), "<none>");
-    TEST_ASSERT_EQ_STR(text_in("main.ft", 1, 13),
-                       "main.ft:1:13-1:17 module util '' use sub/util.ft:1:1");
+    TEST_ASSERT_EQ_STR(text_in("main.ft", 1, 12),
+                       "main.ft:1:12-1:16 module util '' use sub/util.ft:1:1");
 })
 
 TEST(an_alias_of_an_import_that_failed_carries_no_record, {
@@ -268,18 +268,18 @@ TEST(a_module_whose_import_failed_is_indexed_all_the_same, {
 TEST(an_alias_import_records_the_declaration_and_the_alias, {
     begin();
     add("util.ft", "fn i32 twice(i32 n) { return n + n; }\n");
-    add("main.ft", "import util::twice as double;\nfn i32 main() { return double(2); }\n");
+    add("main.ft", "import util.twice as double;\nfn i32 main() { return double(2); }\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
     index_closure();
     // The path's last segment is the declaration it binds and the alias
     // denotes the same declaration under its own name (D9.3).
-    TEST_ASSERT_EQ_STR(text_in("main.ft", 1, 14),
-                       "main.ft:1:14-1:19 fn twice 'fn i32(i32)' use util.ft:1:8");
+    TEST_ASSERT_EQ_STR(text_in("main.ft", 1, 13),
+                       "main.ft:1:13-1:18 fn twice 'fn i32(i32)' use util.ft:1:8");
     // A record names the identifier as it is spelled there, and the alias
     // declares that name in this module while pointing at the declaration it
     // binds, so a rename starts here and a jump lands there (D9.3, D20.3).
-    TEST_ASSERT_EQ_STR(text_in("main.ft", 1, 23),
-                       "main.ft:1:23-1:29 fn double 'fn i32(i32)' decl util.ft:1:8");
+    TEST_ASSERT_EQ_STR(text_in("main.ft", 1, 22),
+                       "main.ft:1:22-1:28 fn double 'fn i32(i32)' decl util.ft:1:8");
     TEST_ASSERT_EQ_STR(text_in("main.ft", 2, 24),
                        "main.ft:2:24-2:30 fn double 'fn i32(i32)' use util.ft:1:8");
 })
@@ -314,19 +314,19 @@ TEST(one_module_imported_under_two_names_declares_both, {
 TEST(an_item_list_records_the_module_and_every_item, {
     begin();
     add("util.ft", "fn i32 twice(i32 n) { return n + n; }\ni32 LIMIT = 4;\n");
-    add("main.ft", "import util::{twice, LIMIT as CAP};\nfn i32 main() { return twice(CAP); }\n");
+    add("main.ft", "import util.{twice, LIMIT as CAP};\nfn i32 main() { return twice(CAP); }\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
     index_closure();
     // The path of an item list names the module every item comes from (D9.3).
     TEST_ASSERT_EQ_STR(text_in("main.ft", 1, 8), "main.ft:1:8-1:12 module util '' use util.ft:1:1");
-    TEST_ASSERT_EQ_STR(text_in("main.ft", 1, 15),
-                       "main.ft:1:15-1:20 fn twice 'fn i32(i32)' use util.ft:1:8");
-    TEST_ASSERT_EQ_STR(text_in("main.ft", 1, 22),
-                       "main.ft:1:22-1:27 constant LIMIT 'i32' use util.ft:2:5");
+    TEST_ASSERT_EQ_STR(text_in("main.ft", 1, 14),
+                       "main.ft:1:14-1:19 fn twice 'fn i32(i32)' use util.ft:1:8");
+    TEST_ASSERT_EQ_STR(text_in("main.ft", 1, 21),
+                       "main.ft:1:21-1:26 constant LIMIT 'i32' use util.ft:2:5");
     // The alias of an item declares its name here too (D9.3); the item
     // without one introduces the name its declaration already has.
-    TEST_ASSERT_EQ_STR(text_in("main.ft", 1, 31),
-                       "main.ft:1:31-1:34 constant CAP 'i32' decl util.ft:2:5");
+    TEST_ASSERT_EQ_STR(text_in("main.ft", 1, 30),
+                       "main.ft:1:30-1:33 constant CAP 'i32' decl util.ft:2:5");
 })
 
 TEST(a_designator_records_the_field_it_names, {

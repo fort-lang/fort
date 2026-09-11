@@ -186,8 +186,6 @@ const char* tok_kind_name(tok_kind_t kind) {
         return "?";
     case TOK_COLON:
         return ":";
-    case TOK_COLON_COLON:
-        return "::";
     case TOK_DOT:
         return ".";
     case TOK_ARROW:
@@ -900,9 +898,10 @@ static tok_kind_t operator_kind(const lexer_t* lx, uint64_t* len) {
     case '?':
         one = TOK_QUESTION;
         break;
+    // `:` stands alone: the module path separator is `.` (D9.1), so `::`
+    // is not a token and a pair of them lexes as two colons (D2.10).
     case ':':
         one = TOK_COLON;
-        two = c1 == ':' ? TOK_COLON_COLON : TOK_EOF;
         break;
     case '.':
         one = TOK_DOT;

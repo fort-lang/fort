@@ -120,8 +120,8 @@ TEST(a_missing_identifier, {
                        "t.ft:1:8: error: expected an identifier, found ';'\n");
     TEST_ASSERT_EQ_STR(parse_fails("import a as ;"),
                        "t.ft:1:13: error: expected an identifier, found ';'\n");
-    TEST_ASSERT_EQ_STR(parse_fails("import a::{b as };"),
-                       "t.ft:1:17: error: expected an identifier, found '}'\n");
+    TEST_ASSERT_EQ_STR(parse_fails("import a.{b as };"),
+                       "t.ft:1:16: error: expected an identifier, found '}'\n");
     TEST_ASSERT_EQ_STR(expr_fails("p->"), "t.ft:1:12: error: expected an identifier, found ';'\n");
     TEST_ASSERT_EQ_STR(expr_fails("point{.= 1}"),
                        "t.ft:1:16: error: expected an identifier, found '='\n");

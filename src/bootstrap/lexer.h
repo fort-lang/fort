@@ -115,7 +115,6 @@ typedef enum {
     TOK_MINUS_MINUS,       // --
     TOK_QUESTION,          // ?
     TOK_COLON,             // :
-    TOK_COLON_COLON,       // ::
     TOK_DOT,               // .
     TOK_ARROW,             // ->
     TOK_DOT_DOT,           // ..

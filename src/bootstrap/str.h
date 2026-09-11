@@ -2,7 +2,7 @@
 // owns copies until the end of the compilation (toolchain.md 8, memory), and
 // a growable byte buffer.
 //
-// The file mirrors std::str and std::strbuf (stdlib.md 2.5, 2.6) so that the
+// The file mirrors std.str and std.strbuf (stdlib.md 2.5, 2.6) so that the
 // self-hosted compiler can transliterate it: no unions, no function pointers,
 // no macros beyond constants, every struct laid out in the open, and growth
 // written as allocate, copy, free. A `str_t` is a view: it never owns its

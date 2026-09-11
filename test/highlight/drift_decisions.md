@@ -15,5 +15,5 @@ decisions and not to the grammar is caught without anyone editing `notes/decisio
   `async await const match pub priv trait type union yield`.
 - **D2.10** Operators and punctuation:
   `+ - * / % +% -% *% = += -= *= /= %= +%= -%= *%= &= |= ^= <<= >>= == != < <= > >= && || ! & | ^ ~
-  << >> ++ -- ? : :: . -> .. <-> ( ) [ ] { } , ; @`. Longest match wins.
+  << >> ++ -- ? : . -> .. <-> ( ) [ ] { } , ; @`. Longest match wins.
 - **D2.11** Nesting deeper than 256 is a compile error.

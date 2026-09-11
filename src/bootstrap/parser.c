@@ -2152,7 +2152,7 @@ static ast_node_t* parse_enum_decl(parser_t* p) {
 }
 
 // import_decl = "import" import_path [ "as" identifier ] ";" or "import"
-// import_path "::" "{" import_item { "," import_item } [ "," ] "}" ";"
+// import_path "." "{" import_item { "," import_item } [ "," ] "}" ";"
 // (D9.3); whether the last segment names a module or a symbol is
 // resolution's business.
 static bool parse_import_items(parser_t* p, ast_node_t* n) {
@@ -2183,6 +2183,28 @@ static bool parse_import_items(parser_t* p, ast_node_t* n) {
     return expect(p, TOK_RBRACE, "'}'");
 }
 
+// The two spellings a path separator is mistaken for, each reported where the
+// separator stands. `..` is one token and longest match wins (D2.10), so the
+// separator of `import a..b;` never reaches the test for `.`; `::` separated a
+// path until the separator became `.` (D9.1), so it is what every source
+// written before that spells. Either would otherwise end the path and be
+// reported as the `;` that is then missing, which names the wrong mistake.
+static bool check_path_separator(parser_t* p) {
+    if (at(p, TOK_DOT_DOT)) {
+        error_here(p, "a module path is separated by '.', not '..'");
+        return false;
+    }
+    if (!at(p, TOK_COLON)) {
+        return true;
+    }
+    if (peek_kind(p, 1) == TOK_COLON) {
+        error_here(p, "a module path is separated by '.', not '::'");
+    } else {
+        error_here(p, "a module path is separated by '.', not ':'");
+    }
+    return false;
+}
+
 static ast_node_t* parse_import(parser_t* p) {
     ast_node_t* n = node_at(p, AST_IMPORT, here(p));
     bump(p);
@@ -2195,9 +2217,12 @@ static ast_node_t* parse_import(parser_t* p) {
         }
         ast_push(path, finish(p, segment));
         // The path ends at its last segment, so it is extended here and not
-        // after the loop: the `::{ ... }` of an item list is not part of it.
+        // after the loop: the `.{ ... }` of an item list is not part of it.
         (void)finish(p, path);
-        if (!at(p, TOK_COLON_COLON)) {
+        if (!check_path_separator(p)) {
+            return NULL;
+        }
+        if (!at(p, TOK_DOT)) {
             break;
         }
         bump(p);

@@ -37,7 +37,7 @@ SOURCE_GLOBS = fort_lint.SOURCE_GLOBS
 # The whole verdict over test/fort_lint/bad_names.ft, in the order the tool
 # prints it. Every line is one rule of D1.4 (the last one is the width check).
 BAD_NAMES_PROBLEMS = [
-    "test/fort_lint/bad_names.ft:5:20: module 'Mem' is not lower_case (D1.4)",
+    "test/fort_lint/bad_names.ft:5:19: module 'Mem' is not lower_case (D1.4)",
     "test/fort_lint/bad_names.ft:8:5: constant 'max_nodes' is not UPPER_CASE (D1.4)",
     "test/fort_lint/bad_names.ft:11:9: global 'Counter' is not lower_case (D1.4)",
     "test/fort_lint/bad_names.ft:13:8: struct 'Point' is not lower_case (D1.4)",
@@ -173,7 +173,7 @@ class ShadowRule(unittest.TestCase):
         self.assertIsNone(fort_lint.shadow_problem("parameter", "bx", "box"))
 
     def test_a_variable_may_take_the_module_qualifier(self):
-        """import std::io forbids no parameter named io (D7.9)."""
+        """import std.io forbids no parameter named io (D7.9)."""
         self.assertIsNone(fort_lint.shadow_problem("local", "strbuf", "strbuf.str_buf"))
 
     def test_a_variable_of_function_type_is_not_compared(self):
@@ -350,7 +350,7 @@ class SourceText(unittest.TestCase):
 
     def test_a_declaration_is_source(self):
         self.assertTrue(fort_lint.has_source_text("// c\nfn void f() {}\n"))
-        self.assertTrue(fort_lint.has_source_text("import std::io;"))
+        self.assertTrue(fort_lint.has_source_text("import std.io;"))
 
 
 class KindTables(unittest.TestCase):

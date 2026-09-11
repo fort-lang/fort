@@ -82,7 +82,7 @@ string s = "a" "b";       // error: expected ';' (literals do not concatenate)
 ### 2.5 Operators, punctuation and nesting (D2.10, D2.11)
 
 The tokens are `+ - * / % +% -% *% = += -= *= /= %= +%= -%= *%= &= |= ^= <<= >>= == != < <= > >=
-&& || ! & | ^ ~ << >> ++ -- ? : :: . -> .. ( ) [ ] { } , ; @`, the last of them the span suffix
+&& || ! & | ^ ~ << >> ++ -- ? : . -> .. ( ) [ ] { } , ; @`, the last of them the span suffix
 of a type (D3.5, section 4). The lexer takes the longest match (`+%=` before `+%` before `+`).
 `%` is never a prefix operator, so `a+%b` is unambiguously `a +% b`. `<<` and `>>` are single
 tokens. Nesting of blocks, parentheses, brackets, braces and type suffixes deeper than 256 is a
@@ -287,7 +287,7 @@ may shadow a universe name. Enum members live in their enum (`color.red`), not i
 namespace. Sibling scopes may reuse names.
 
 ```fort
-import std::io;
+import std.io;
 struct point { i32 x; i32 y; }
 fn void point() { }               // error: 'point' is already declared in this module
 fn void f(i32 n) {
@@ -521,7 +521,7 @@ either behavior. `+% -% *%` wrap in both modes (5.12). Integer division (D6.13, 
 truncates toward zero and `%` takes the sign of the dividend, as on x86-64 and in C; division by
 zero, `MIN / -1` and `MIN % -1` are runtime errors in every build mode, checked at every width.
 Floats (D6.12) follow IEEE 754: `NaN != NaN`, `-0.0 == 0.0`, division by zero yields an infinity
-or NaN and never traps; there are no infinity or NaN literals (`std::math` provides bit casts);
+or NaN and never traps; there are no infinity or NaN literals (`std.math` provides bit casts);
 `% ++ -- ~ & | ^ << >>` are errors on floats.
 
 ```fort

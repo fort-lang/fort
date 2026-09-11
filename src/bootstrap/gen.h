@@ -272,9 +272,9 @@ bool gen_field_index(const sym_t* field, uint64_t* out);
 
 // ---- names (item 4, D9.7) ---------------------------------------------------------
 
-// The ELF symbol of a declaration: the module path joined with dots plus the
-// declaration name (`main.add`), or the unmangled C name of an `extern`
-// function.
+// The ELF symbol of a declaration: the module path, a dot and the declaration
+// name (`main.add`), the path being dot-separated already (D9.1), or the
+// unmangled C name of an `extern` function.
 str_t gen_symbol(gen_t* g, const sym_t* s);
 
 // The operand naming a declaration: `@"main.add"` for a fort symbol, `@name`

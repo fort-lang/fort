@@ -28,7 +28,7 @@ extern char* realpath(const char* name, char* resolved);
 static const char MODULE_SUFFIX[] = ".ft";
 
 // The separator of module paths (D9.1) and the one of file paths.
-static const char PATH_SEPARATOR[] = "::";
+enum { PATH_SEPARATOR = '.' };
 enum { DIRECTORY_SEPARATOR = '/' };
 
 // The first segment reserved for the standard library: a path beginning with
@@ -93,16 +93,16 @@ static str_t base_name(str_t path) {
     return base;
 }
 
-// The first character of `base` that a module path is spelled with, `.` or
-// `:`, or NUL when it holds neither: those two are what the mangler of D9.7
-// reads, and every other character reaches the symbol verbatim (D9.1).
-static char path_character_in(str_t base) {
+// Whether `base` holds the one character a module path is spelled with, the
+// `.` that the symbol splitting of D9.7 reads; every other character reaches
+// the symbol verbatim and cannot spell a path (D9.1).
+static bool holds_path_separator(str_t base) {
     for (uint64_t i = 0; i < base.len; i++) {
-        if (base.ptr[i] == '.' || base.ptr[i] == ':') {
-            return base.ptr[i];
+        if (base.ptr[i] == PATH_SEPARATOR) {
+            return true;
         }
     }
-    return '\0';
+    return false;
 }
 
 // The `i`-th segment of an import path: the path node holds one identifier
@@ -111,14 +111,14 @@ static str_t segment_at(const ast_node_t* path, uint64_t i) {
     return ast_child(path, i)->name;
 }
 
-// The first `n` segments joined with `::`, the spelling of a module path in a
+// The first `n` segments joined with `.`, the spelling of a module path in a
 // diagnostic (D9.1).
 static str_t path_text(module_set_t* set, const ast_node_t* path, uint64_t n) {
     sb_t* b = &set->msg;
     sb_clear(b);
     for (uint64_t i = 0; i < n; i++) {
         if (i > 0) {
-            sb_append(b, PATH_SEPARATOR);
+            sb_push(b, PATH_SEPARATOR);
         }
         sb_append_str(b, segment_at(path, i));
     }
@@ -126,7 +126,7 @@ static str_t path_text(module_set_t* set, const ast_node_t* path, uint64_t n) {
 }
 
 // `<dir>/<segments from..n joined with '/'>.ft` in `out`: the file the
-// segments name under one root, `/` standing for the `::` of the module path
+// segments name under one root, `/` standing for the `.` of the module path
 // (D9.1). A root of zero length, which the entry file's directory is when the
 // entry names no directory, contributes no separator (toolchain.md 4). The
 // result is a NUL-terminated view of `out`, valid until the next call on it,
@@ -174,7 +174,7 @@ static uint64_t candidate_count(const module_set_t* set, const ast_node_t* path,
 static str_t candidate_at(
     const module_set_t* set, sb_t* out, const ast_node_t* path, uint64_t n, uint64_t i) {
     if (is_std_path(path, n)) {
-        // `std` maps to the standard library directory itself, so `std::io`
+        // `std` maps to the standard library directory itself, so `std.io`
         // is `<std>/io.ft` (D9.2).
         return file_of(out, set->std_dir, path, 1, n);
     }
@@ -275,7 +275,7 @@ static void note_candidates(module_set_t* set, loc_t at, const ast_node_t* path,
     sb_free(&b);
 }
 
-// `module 'util::strings' not found`: no file exists for either reading
+// `module 'util.strings' not found`: no file exists for either reading
 // (module-system.md 13).
 static void error_not_found(module_set_t* set, loc_t at, const ast_node_t* path, uint64_t n) {
     const str_t name = path_text(set, path, n);
@@ -301,7 +301,7 @@ static void error_no_declaration(module_set_t* set, loc_t at, str_t module, str_
     diag_error(at, msg_end(&set->msg));
 }
 
-// `cannot import 'x': it is an import of module 'a::b'`: the import bindings
+// `cannot import 'x': it is an import of module 'a.b'`: the import bindings
 // of another module are not importable, there is no re-export (D9.3).
 static void error_not_exported(module_set_t* set, loc_t at, str_t module, str_t name) {
     msg_begin(&set->msg);
@@ -312,7 +312,7 @@ static void error_not_exported(module_set_t* set, loc_t at, str_t module, str_t 
     diag_error(at, msg_end(&set->msg));
 }
 
-// `ambiguous import 'a::b::c': a/b/c.ft and a/b.ft exist`: both readings
+// `ambiguous import 'a.b.c': a/b/c.ft and a/b.ft exist`: both readings
 // succeed, whichever roots the two files live under (module-system.md 3).
 static void error_ambiguous(module_set_t* set,
                             loc_t at,
@@ -332,13 +332,12 @@ static void error_ambiguous(module_set_t* set,
     diag_error(at, msg_end(&set->msg));
 }
 
-// `entry file name 'my.app' cannot contain '.'`, naming the character found:
-// the entry base name is the entry module's path, and a `.` or a `:` in it
-// spells another module's symbol prefix, which the injectivity of D9.7 rests
-// on (D9.1, module-system.md 2 and 13).
-static void error_entry_name_char(module_set_t* set, loc_t at, str_t base, char found) {
+// `entry file name 'my.app' cannot contain '.'`: the entry base name is the
+// entry module's path, and a `.` in it spells another module's symbol prefix,
+// which the injectivity of D9.7 rests on (D9.1, module-system.md 2 and 13).
+static void error_entry_name_separator(module_set_t* set, loc_t at, str_t base) {
     char text[2];
-    text[0] = found;
+    text[0] = PATH_SEPARATOR;
     text[1] = '\0';
     msg_begin(&set->msg);
     msg_str(&set->msg, "entry file name ");
@@ -349,7 +348,7 @@ static void error_entry_name_char(module_set_t* set, loc_t at, str_t base, char 
     diag_error(at, msg_end(&set->msg));
 }
 
-// `module 'util::x' is the same file as module 'x'`: one file reached through
+// `module 'util.x' is the same file as module 'x'`: one file reached through
 // two module paths, a module's identity being the real path of its file
 // (D9.2).
 static void error_same_file(module_set_t* set, loc_t at, str_t path, str_t other, str_t real) {
@@ -628,8 +627,8 @@ static bool prefix_declares(module_set_t* set, str_t path, str_t file, str_t nam
     return declares;
 }
 
-// `import a::b::{s1, s2 as t};` is sugar for independent symbol imports from
-// `a::b`, with the symbol reading forced: the prefix must be a module file
+// `import a.b.{s1, s2 as t};` is sugar for independent symbol imports from
+// `a.b`, with the symbol reading forced: the prefix must be a module file
 // and every item one of its declarations (D9.3).
 static bool resolve_items(module_set_t* set, module_t* m, const ast_node_t* imp) {
     const ast_node_t* path = imp->a;
@@ -653,7 +652,7 @@ static bool resolve_items(module_set_t* set, module_t* m, const ast_node_t* imp)
     return true;
 }
 
-// The two readings of `import a::b::c;` (D9.3): the module reading when
+// The two readings of `import a.b.c;` (D9.3): the module reading when
 // `a/b/c.ft` exists under some root, the symbol reading when `a/b.ft` exists
 // and declares `c`. Exactly one must succeed; a one-segment path has only the
 // module reading, since at most one trailing segment names a declaration.
@@ -872,15 +871,14 @@ bool module_set_load(module_set_t* set, const char* entry) {
     // (D9.1, module-system.md 2), so `007_case.ft` is the module `007_case`,
     // which no import path can spell.
     const str_t base = str_pool_intern(&set->pool, base_name(file));
-    // The base name may contain neither a `.` nor a `:`, the two characters a
-    // module path is spelled with: `my.app.ft` is the module `my.app`, whose
-    // `main` is the `my.app.main` a module `my::app` already emits, and
-    // `my:app.ft` emits `myapp.main`, since the mangler writes a `::` as `.`
-    // and drops a `:` it cannot pair (D9.1, D9.7). The error has no position
+    // The base name may not contain a `.`, the one character a module path is
+    // spelled with: `my.app.ft` is the module `my.app`, whose `main` is the
+    // `my.app.main` that the module `my/app.ft` already emits (D9.1, D9.7).
+    // Every other character reaches the symbol verbatim, `my:app.ft` emitting
+    // `my:app.main`, which no module path can spell. The error has no position
     // in the file, so it is reported at 1:1 (D14.2).
-    const char found = path_character_in(base);
-    if (found != '\0') {
-        error_entry_name_char(set, file_start(file), base, found);
+    if (holds_path_separator(base)) {
+        error_entry_name_separator(set, file_start(file), base);
         return false;
     }
     if (load_module(set, base, file, file_start(file), true) == NULL) {

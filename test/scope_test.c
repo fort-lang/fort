@@ -222,7 +222,7 @@ TEST(a_module_namespace_searched_for_blocks_alone_yields_nothing, {
 TEST(a_module_binding_carries_the_module_it_denotes, {
     scope_t s;
     scope_init(&s, SCOPE_MODULE, NULL);
-    const char* target = "std::io";
+    const char* target = "std.io";
     binding_t* b = scope_declare(&s, name("io"), BIND_MODULE, at(1), NULL);
     TEST_ASSERT_NONNULL(b);
     b->module = target;

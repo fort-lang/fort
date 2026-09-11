@@ -154,7 +154,7 @@ static inline void gen_begin(void) {
 }
 
 // Writes `text` at `name` in the sandbox, making the one directory a nested
-// module path needs (`util/chars.ft` is the module `util::chars`, D9.1).
+// module path needs (`util/chars.ft` is the module `util.chars`, D9.1).
 static inline void gen_write(const char* name, const char* text) {
     char path[GEN_PATH_CAP];
     const char* slash = strchr(name, '/');

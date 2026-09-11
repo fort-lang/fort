@@ -44,23 +44,23 @@ so no value ever starts undefined, and every result is an owning reference: the 
 type says that this value is the one responsible for freeing the allocation (D17.3; section
 2.3).
 
-| Form              | Result type           | Meaning                                         |
-|-------------------|-----------------------|-------------------------------------------------|
-| `new(T)`          | `T mut* own`          | one zeroed `T`, for every `T` (D10.2)           |
-| `new(T[K])`       | `T[K] mut* own`       | one zeroed array object; `K` is a constant      |
-| `new(T, n)`       | `T mut@ own`          | `n` zeroed elements; `n` is any integer type    |
-| `new(T[K], n)`    | `T[K] mut@ own`       | `n` zeroed rows of `T[K]`                       |
-| `new(T*)`         | `T mut* mut* own`     | one zeroed pointer slot (D10.2)                 |
-| `new(T*, n)`      | `T mut* mut@ own`     | `n` zeroed slots, each a borrowed pointer       |
-| `new(T* own, n)`  | `T mut* own mut@ own` | `n` owned slots, all `null` (D17.3)             |
-| `new(void*)`      | `void* mut* own`      | one zeroed `void*` slot (D17.3)                 |
-| `new(void*, n)`   | `void* mut@ own`      | `n` zeroed `void*` slots (`std::vec`)           |
-| `new(T{...})`     | error                 | allocate, then assign the fields                |
-| `new(T@)`         | error                 | a span header is not an object to allocate      |
-| `new(void)`       | error                 | `void` has no size                              |
-| `new(T mut)`      | error                 | `mut` never parses inside `new` (D10.2)         |
-| `new(string own)` | error                 | `own` parses only after a `*` (D10.2, D17.3)    |
-| `new(own T)`      | error                 | nothing precedes the base type (D5.3)           |
+| Form              | Result type           | Meaning                                      |
+|-------------------|-----------------------|----------------------------------------------|
+| `new(T)`          | `T mut* own`          | one zeroed `T`, for every `T` (D10.2)        |
+| `new(T[K])`       | `T[K] mut* own`       | one zeroed array object; `K` is a constant   |
+| `new(T, n)`       | `T mut@ own`          | `n` zeroed elements; `n` is any integer type |
+| `new(T[K], n)`    | `T[K] mut@ own`       | `n` zeroed rows of `T[K]`                    |
+| `new(T*)`         | `T mut* mut* own`     | one zeroed pointer slot (D10.2)              |
+| `new(T*, n)`      | `T mut* mut@ own`     | `n` zeroed slots, each a borrowed pointer    |
+| `new(T* own, n)`  | `T mut* own mut@ own` | `n` owned slots, all `null` (D17.3)          |
+| `new(void*)`      | `void* mut* own`      | one zeroed `void*` slot (D17.3)              |
+| `new(void*, n)`   | `void* mut@ own`      | `n` zeroed `void*` slots (`std.vec`)         |
+| `new(T{...})`     | error                 | allocate, then assign the fields             |
+| `new(T@)`         | error                 | a span header is not an object to allocate   |
+| `new(void)`       | error                 | `void` has no size                           |
+| `new(T mut)`      | error                 | `mut` never parses inside `new` (D10.2)      |
+| `new(string own)` | error                 | `own` parses only after a `*` (D10.2, D17.3) |
+| `new(own T)`      | error                 | nothing precedes the base type (D5.3)        |
 
 The element count is the second argument, never part of the type (D10.2): `new(T)` allocates one
 `T` and `new(T, n)` allocates `n` of them as a span, so brackets inside `new(...)` are always
@@ -74,7 +74,7 @@ a `*` of the element type (grammar section 6): `new(node*)` allocates one pointe
 a `node mut* mut* own`, `new(node*, n)` yields a `node mut* mut@ own`, a span of borrowed
 pointers, and `new(node* own, n)` yields a `node mut* own mut@ own`, a span of owned slots that
 are all `null` (D17.3). `void*` is an element type like any other, since a pointer to `void` has a
-size: `new(void*)` is one slot and `new(void*, n)` is the span `std::vec`'s `ptr_vec` allocates.
+size: `new(void*)` is one slot and `new(void*, n)` is the span `std.vec`'s `ptr_vec` allocates.
 `void` itself has no target level to mark writable, so no `mut` appears after it (D3.11) and
 `new(void)` stays the error above (D10.2, D17.3).
 
@@ -640,7 +640,7 @@ so replacing `s` inside the loop does not change what is iterated.
 A string literal is stored in read-only memory with one NUL byte after its last character that
 `len` does not count; its `.ptr` may be passed to a C function expecting a NUL-terminated
 `char*` (D3.7). A sub-string shares its source's bytes and is not NUL-terminated. A string built
-at run time (section 9.5) is NUL-terminated only if the program put a NUL there. `std::str`
+at run time (section 9.5) is NUL-terminated only if the program put a NUL there. `std.str`
 provides duplication with a trailing NUL, and standard-library functions that hand a path to C
 copy it into a NUL-terminated buffer first (D13.2, D13.4). Writing through a string that was
 cast to `u8 mut@` is undefined when the bytes are read-only (D10.7).
@@ -1019,7 +1019,7 @@ fn void use_both() {
 One struct per element type: an `own` backing span plus a count of the elements in use
 (D13.5). The backing span is replaced by a larger one when full, and because `del` empties the
 field first, the replacement passes the overwrite check (D17.11). The struct is an owning
-aggregate and is passed by pointer (D17.7); `std::vec` provides `int_vec` and `ptr_vec` on this
+aggregate and is passed by pointer (D17.7); `std.vec` provides `int_vec` and `ptr_vec` on this
 pattern (D13.2).
 
 ```fort
@@ -1060,7 +1060,7 @@ Place a `defer` right after each acquisition; deferred statements run in reverse
 resources are released in the opposite order of acquisition.
 
 ```fort
-import std::io;
+import std.io;
 
 fn bool copy_file(string src, string dst) {
     i32 mut in = io.open_read(src);
@@ -1102,7 +1102,7 @@ fn void demo() {
 }
 ```
 
-For strings whose length is not known in advance, `std::strbuf` grows a `u8 mut@ own` with
+For strings whose length is not known in advance, `std.strbuf` grows a `u8 mut@ own` with
 the pattern of section 9.3, hands out `string` views of the bytes written so far, and returns
 a `string own` from `take` (D13.2, D13.5).
 

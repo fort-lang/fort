@@ -299,16 +299,16 @@ TEST(global_declarations, {
 })
 
 TEST(import_forms, {
-    TEST_ASSERT_EQ_STR(parse_dump("import std::io;"), "(module (import (path std io) nil))");
+    TEST_ASSERT_EQ_STR(parse_dump("import std.io;"), "(module (import (path std io) nil))");
     TEST_ASSERT_EQ_STR(parse_dump("import a;"), "(module (import (path a) nil))");
-    TEST_ASSERT_EQ_STR(parse_dump("import a::b as c;"), "(module (import (path a b) (ident c)))");
-    TEST_ASSERT_EQ_STR(parse_dump("import a::b::{s1, s2 as t,};"),
+    TEST_ASSERT_EQ_STR(parse_dump("import a.b as c;"), "(module (import (path a b) (ident c)))");
+    TEST_ASSERT_EQ_STR(parse_dump("import a.b.{s1, s2 as t,};"),
                        "(module (import (path a b) nil (item s1 nil) (item s2 (ident t))))");
 })
 
 TEST(a_module_is_imports_then_declarations, {
     TEST_ASSERT_EQ_STR(parse_dump(""), "(module)");
-    TEST_ASSERT_EQ_STR(parse_dump("import std::io;\ni32 N = 1;\nfn void f() { }"),
+    TEST_ASSERT_EQ_STR(parse_dump("import std.io;\ni32 N = 1;\nfn void f() { }"),
                        "(module (import (path std io) nil) (var N (type (prim i32)) (int 1))"
                        " (fn (type (void)) f (params) (block)))");
     TEST_ASSERT_EQ_STR(parse_fails("i32 N = 4;\nimport a;"),
@@ -366,8 +366,8 @@ TEST(unterminated_constructs_end_at_the_end_of_the_file, {
                        "t.ft:1:9: error: expected an identifier, found end of file\n");
     TEST_ASSERT_EQ_STR(parse_fails("point x = {"),
                        "t.ft:1:12: error: expected an expression, found end of file\n");
-    TEST_ASSERT_EQ_STR(parse_fails("import a::"),
-                       "t.ft:1:11: error: expected an identifier, found end of file\n");
+    TEST_ASSERT_EQ_STR(parse_fails("import a."),
+                       "t.ft:1:10: error: expected an identifier, found end of file\n");
     TEST_ASSERT_EQ_STR(parse_fails("i32"),
                        "t.ft:1:4: error: expected an identifier, found end of file\n");
 })
