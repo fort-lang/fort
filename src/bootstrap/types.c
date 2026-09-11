@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 // Sizes fixed by D3.1 and D3.15.
-enum { PTR_SIZE = 8, PTR_ALIGN = 8, SLICE_SIZE = 16, ENUM_SIZE = 4 };
+enum { PTR_SIZE = 8, PTR_ALIGN = 8, SPAN_SIZE = 16, ENUM_SIZE = 4 };
 
 // ---- table and interning ---------------------------------------------------------
 
@@ -159,7 +159,7 @@ const type_t* type_voidptr(type_table_t* tt, bool own) {
     return intern(tt, &key);
 }
 
-// The element checks shared by pointers, slices and arrays; true when the
+// The element checks shared by pointers, spans and arrays; true when the
 // result is the poisoned error type.
 static bool elem_poisons(const type_t* elem) {
     if (elem->kind == TYPE_VOID) {
@@ -182,11 +182,11 @@ const type_t* type_ptr(type_table_t* tt, const type_t* elem, bool own, bool mut)
     return intern(tt, &key);
 }
 
-const type_t* type_slice(type_table_t* tt, const type_t* elem, bool own, bool mut) {
+const type_t* type_span(type_table_t* tt, const type_t* elem, bool own, bool mut) {
     if (elem_poisons(elem)) {
         return elem;
     }
-    type_t key = key_of(TYPE_SLICE);
+    type_t key = key_of(TYPE_SPAN);
     key.elem = elem;
     key.own = own;
     key.mut = mut;
@@ -275,7 +275,7 @@ const type_t* type_enum(type_table_t* tt, str_t name, const void* decl) {
 // ---- queries ---------------------------------------------------------------------
 
 bool type_is_reference(const type_t* t) {
-    return t->kind == TYPE_PTR || t->kind == TYPE_VOIDPTR || t->kind == TYPE_SLICE ||
+    return t->kind == TYPE_PTR || t->kind == TYPE_VOIDPTR || t->kind == TYPE_SPAN ||
            t->kind == TYPE_STRING;
 }
 
@@ -300,10 +300,10 @@ static const type_t* behind_arrays(const type_t* t) {
     return t;
 }
 
-// A reference that reaches a level: a pointer or a slice, not `void*` or a
+// A reference that reaches a level: a pointer or a span, not `void*` or a
 // string, which have no target level (D5.2).
 static bool has_target_level(const type_t* t) {
-    return t->kind == TYPE_PTR || t->kind == TYPE_SLICE;
+    return t->kind == TYPE_PTR || t->kind == TYPE_SPAN;
 }
 
 uint32_t type_levels(const type_t* t) {
@@ -380,7 +380,7 @@ static bool same(const type_t* a, const type_t* b, bool bits) {
     case TYPE_VOIDPTR:
         return !bits || a->own == b->own;
     case TYPE_PTR:
-    case TYPE_SLICE:
+    case TYPE_SPAN:
         return (!bits || (a->own == b->own && a->mut == b->mut)) && same(a->elem, b->elem, bits);
     case TYPE_ARRAY:
         return a->len == b->len && same(a->elem, b->elem, bits);
@@ -450,7 +450,7 @@ static bool convertible(const type_t* dst,
     case TYPE_STRING:
     case TYPE_VOIDPTR:
     case TYPE_PTR:
-    case TYPE_SLICE:
+    case TYPE_SPAN:
         break;
     }
     if (dst->mut && !src->mut) {
@@ -487,7 +487,7 @@ bool type_assignable(const type_t* dst, const type_t* src) {
     }
     if (src->kind == TYPE_NULL) {
         // `null` takes the type of a pointer, `void*` or function pointer,
-        // never of a slice or a string, whose zero value is `{}` (D10.5,
+        // never of a span or a string, whose zero value is `{}` (D10.5,
         // D3.5, D3.7).
         return dst->kind == TYPE_PTR || dst->kind == TYPE_VOIDPTR || dst->kind == TYPE_FN;
     }
@@ -507,7 +507,7 @@ static bool string_family(const type_t* t) {
     if (t->kind == TYPE_STRING) {
         return true;
     }
-    return t->kind == TYPE_SLICE && t->elem->kind == TYPE_PRIM &&
+    return t->kind == TYPE_SPAN && t->elem->kind == TYPE_PRIM &&
            (t->elem->prim == PRIM_CHAR || t->elem->prim == PRIM_U8);
 }
 
@@ -572,13 +572,13 @@ static bool own_orphaned(const type_t* dst, const type_t* src, bool outer_own) {
     return false;
 }
 
-// The slice row of the matrix: a slice casts to a slice of the same element
+// The span row of the matrix: a span casts to a span of the same element
 // type whose marks differ only in mutability, added or dropped at any level,
 // the cast-away-const escape a pointer has, and whose `own` marks may be
 // added or dropped at any reference (D3.14). The element type must be the
 // same: the marks inside a function type are part of its identity, so
 // `fn void(node mut*)@` does not cast to `fn void(node*)@` (D3.10).
-static bool slice_cast_allowed(const type_t* dst, const type_t* src) {
+static bool span_cast_allowed(const type_t* dst, const type_t* src) {
     return type_same_shape(dst, src) && !own_orphaned(dst, src, false);
 }
 
@@ -622,8 +622,8 @@ bool type_cast_allowed(const type_t* dst, const type_t* src) {
     if (string_family(src) && string_family(dst)) {
         return true;
     }
-    if (src->kind == TYPE_SLICE && dst->kind == TYPE_SLICE) {
-        return slice_cast_allowed(dst, src);
+    if (src->kind == TYPE_SPAN && dst->kind == TYPE_SPAN) {
+        return span_cast_allowed(dst, src);
     }
     return false;
 }
@@ -701,10 +701,10 @@ static bool size_checked(const type_t* t, uint64_t* out) {
         // A pointer and a function pointer are 8 bytes (D3.1, D3.15).
         *out = PTR_SIZE;
         return true;
-    case TYPE_SLICE:
+    case TYPE_SPAN:
     case TYPE_STRING:
-        // A slice and a string are the fat pointer `{ptr, len}` (D3.5, D3.7).
-        *out = SLICE_SIZE;
+        // A span and a string are the fat pointer `{ptr, len}` (D3.5, D3.7).
+        *out = SPAN_SIZE;
         return true;
     case TYPE_ARRAY:
         // `N * sizeof(T)`, exactly: elements are contiguous (D3.4, D3.15).
@@ -746,7 +746,7 @@ uint64_t type_alignof(const type_t* t) {
     case TYPE_PTR:
     case TYPE_VOIDPTR:
     case TYPE_FN:
-    case TYPE_SLICE:
+    case TYPE_SPAN:
     case TYPE_STRING:
         return PTR_ALIGN;
     case TYPE_ARRAY:
@@ -870,7 +870,7 @@ static bool is_array_node(const type_t* t) {
 
 // A `*` or `@` suffix: the two that introduce a reference (D3.6).
 static bool is_ref_node(const type_t* t) {
-    return t->kind == TYPE_PTR || t->kind == TYPE_VOIDPTR || t->kind == TYPE_SLICE;
+    return t->kind == TYPE_PTR || t->kind == TYPE_VOIDPTR || t->kind == TYPE_SPAN;
 }
 
 static void spine_collect(spine_t* sp, const type_t* t) {
@@ -954,7 +954,7 @@ static void spell_base(const type_t* t, sb_t* out) {
     case TYPE_PTR:
     case TYPE_VOIDPTR:
     case TYPE_ARRAY:
-    case TYPE_SLICE:
+    case TYPE_SPAN:
         break;
     }
     fatal_internal("spelling a reference as a base");
@@ -989,7 +989,7 @@ static void spell_suffix(const spine_t* sp, uint32_t i, bool mut0, sb_t* out) {
         }
         return;
     }
-    sb_append(out, t->kind == TYPE_SLICE ? "@" : "*");
+    sb_append(out, t->kind == TYPE_SPAN ? "@" : "*");
     if (t->own) {
         sb_append(out, " own");
     }
@@ -1060,7 +1060,7 @@ static type_build_t build_error(const char* msg) {
 
 // A `*` or `@` suffix, the two that introduce a reference (D3.6).
 static bool suffix_is_ref(const type_suffix_t* s) {
-    return s->kind == SUFFIX_PTR || s->kind == SUFFIX_SLICE;
+    return s->kind == SUFFIX_PTR || s->kind == SUFFIX_SPAN;
 }
 
 // The three groups of a suffix list: [0, e) references applying to the base,
@@ -1171,8 +1171,8 @@ type_build_t type_build(type_table_t* tt,
             pending_mut = pending_mut || s->mut;
             continue;
         }
-        if (s->kind == SUFFIX_SLICE) {
-            t = type_slice(tt, t, s->own, pending_mut);
+        if (s->kind == SUFFIX_SPAN) {
+            t = type_span(tt, t, s->own, pending_mut);
         } else if (t->kind == TYPE_VOID) {
             t = type_voidptr(tt, s->own);
         } else {

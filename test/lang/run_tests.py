@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parent
 # The areas of D14.4, in the order the decision lists them.
 AREAS = (
     "lexical constants operators casts mutability ownership declarations control switch "
-    "defer functions structs enums arrays slices strings pointers globals builtins errors "
+    "defer functions structs enums arrays spans strings pointers globals builtins errors "
     "modes modules ffi stdlib"
 ).split()
 

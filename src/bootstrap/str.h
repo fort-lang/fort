@@ -54,8 +54,9 @@ typedef struct {
 // the zero view.
 str_t str_from_cstr(const char* s);
 
-// The view of `len` bytes at `ptr`.
-str_t str_from_span(const char* ptr, uint64_t len);
+// The view of the byte range of `len` bytes at `ptr` (a source extent is a
+// range, never a span: a span is the fort type `T@`, D3.5).
+str_t str_from_range(const char* ptr, uint64_t len);
 
 // Byte-wise equality.
 bool str_eq(str_t a, str_t b);

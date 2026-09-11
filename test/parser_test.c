@@ -106,13 +106,13 @@ TEST(calls_take_their_arguments_in_order, {
                        "(call (call (ident f) (call (ident g) (int 1))) (int 2))");
 })
 
-TEST(indexing_and_the_four_slicing_forms, {
+TEST(indexing_and_the_four_span_forms, {
     TEST_ASSERT_EQ_STR(dump_expr("a[i]"), "(index (ident a) (ident i))");
     TEST_ASSERT_EQ_STR(dump_expr("a[i + 1]"), "(index (ident a) (binary + (ident i) (int 1)))");
-    TEST_ASSERT_EQ_STR(dump_expr("s[1..2]"), "(slice (ident s) (int 1) (int 2))");
-    TEST_ASSERT_EQ_STR(dump_expr("s[1..]"), "(slice (ident s) (int 1) nil)");
-    TEST_ASSERT_EQ_STR(dump_expr("s[..2]"), "(slice (ident s) nil (int 2))");
-    TEST_ASSERT_EQ_STR(dump_expr("s[..]"), "(slice (ident s) nil nil)");
+    TEST_ASSERT_EQ_STR(dump_expr("s[1..2]"), "(span (ident s) (int 1) (int 2))");
+    TEST_ASSERT_EQ_STR(dump_expr("s[1..]"), "(span (ident s) (int 1) nil)");
+    TEST_ASSERT_EQ_STR(dump_expr("s[..2]"), "(span (ident s) nil (int 2))");
+    TEST_ASSERT_EQ_STR(dump_expr("s[..]"), "(span (ident s) nil nil)");
 })
 
 TEST(field_and_arrow_access, {
@@ -140,7 +140,7 @@ TEST(sizeof_takes_a_type_only, {
                        "(sizeof (type (fn-type (type (prim i32)) (type (prim i32)))))");
 })
 
-// new(T) allocates one T and new(T, n) a slice of n (D10.2).
+// new(T) allocates one T and new(T, n) a span of n (D10.2).
 TEST(new_with_and_without_a_count, {
     TEST_ASSERT_EQ_STR(dump_expr("new(node)"), "(new (type (name node)) nil)");
     TEST_ASSERT_EQ_STR(dump_expr("new(i32, n)"), "(new (type (prim i32)) (ident n))");
@@ -293,7 +293,7 @@ TEST(postfix_chains_lean_left, {
     TEST_ASSERT_EQ_STR(dump_expr("f(1).x[0]"),
                        "(index (field (call (ident f) (int 1)) x) (int 0))");
     TEST_ASSERT_EQ_STR(dump_expr("xs[0..2][1]"),
-                       "(index (slice (ident xs) (int 0) (int 2)) (int 1))");
+                       "(index (span (ident xs) (int 0) (int 2)) (int 1))");
     TEST_ASSERT_EQ_STR(dump_expr("(*p).f"), "(field (unary * (ident p)) f)");
     TEST_ASSERT_EQ_STR(dump_expr("(*p)[0]"), "(index (unary * (ident p)) (int 0))");
 })
@@ -325,14 +325,14 @@ TEST(arguments_and_members_are_full_expressions, {
                        "(array-lit (type (prim i32) (array (int 2)))"
                        " (init (call (ident f) (int 1)) (field (ident x) y)))");
     TEST_ASSERT_EQ_STR(dump_expr("s[a + 1 .. b - 1]"),
-                       "(slice (ident s) (binary + (ident a) (int 1))"
+                       "(span (ident s) (binary + (ident a) (int 1))"
                        " (binary - (ident b) (int 1)))");
 })
 
 // Casts and sizeof take full types, including function and marked ones.
 TEST(cast_and_sizeof_take_any_type, {
     TEST_ASSERT_EQ_STR(dump_expr("cast(p, void*)"), "(cast (ident p) (type (void) (ptr)))");
-    TEST_ASSERT_EQ_STR(dump_expr("cast(s, u8@)"), "(cast (ident s) (type (prim u8) (slice)))");
+    TEST_ASSERT_EQ_STR(dump_expr("cast(s, u8@)"), "(cast (ident s) (type (prim u8) (span)))");
     TEST_ASSERT_EQ_STR(dump_expr("cast(f, fn i32(i32))"),
                        "(cast (ident f) (type (fn-type (type (prim i32)) (type (prim i32)))))");
     TEST_ASSERT_EQ_STR(dump_expr("cast(x + 1, i64)"),
@@ -355,7 +355,7 @@ int main(int argc, char** argv) {
     TEST_RUN(the_five_unary_operators);
     TEST_RUN(unary_binds_tighter_than_binary_and_looser_than_postfix);
     TEST_RUN(calls_take_their_arguments_in_order);
-    TEST_RUN(indexing_and_the_four_slicing_forms);
+    TEST_RUN(indexing_and_the_four_span_forms);
     TEST_RUN(field_and_arrow_access);
     TEST_RUN(cast_takes_an_expression_and_a_type);
     TEST_RUN(sizeof_takes_a_type_only);

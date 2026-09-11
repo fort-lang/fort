@@ -110,8 +110,8 @@ const char* ast_kind_name(ast_kind_t kind) {
         return "call";
     case AST_INDEX:
         return "index";
-    case AST_SLICE:
-        return "slice";
+    case AST_SPAN:
+        return "span";
     case AST_FIELD:
         return "field";
     case AST_ARROW:

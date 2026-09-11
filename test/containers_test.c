@@ -594,12 +594,12 @@ TEST(strmap_distinguishes_keys_with_embedded_nul, {
     strmap_init(&m);
     const char a[] = "x\0a";
     const char b[] = "x\0b";
-    TEST_ASSERT_TRUE(strmap_put(&m, str_from_span(a, 3), 1));
-    TEST_ASSERT_TRUE(strmap_put(&m, str_from_span(b, 3), 2));
-    TEST_ASSERT_TRUE(strmap_put(&m, str_from_span(a, 1), 3));
+    TEST_ASSERT_TRUE(strmap_put(&m, str_from_range(a, 3), 1));
+    TEST_ASSERT_TRUE(strmap_put(&m, str_from_range(b, 3), 2));
+    TEST_ASSERT_TRUE(strmap_put(&m, str_from_range(a, 1), 3));
     TEST_ASSERT_EQ_UINT64(strmap_count(&m), (uint64_t)3);
     int64_t v = 0;
-    TEST_ASSERT_TRUE(strmap_get(&m, str_from_span(b, 3), &v));
+    TEST_ASSERT_TRUE(strmap_get(&m, str_from_range(b, 3), &v));
     TEST_ASSERT_EQ_INT64(v, (int64_t)2);
     TEST_ASSERT_TRUE(strmap_get(&m, s("x"), &v));
     TEST_ASSERT_EQ_INT64(v, (int64_t)3);

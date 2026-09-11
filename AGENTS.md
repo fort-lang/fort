@@ -170,6 +170,13 @@ A safe(r) C-like systems programming language.
   (new decision number or amended decision with a note), then in the specification document that
   owns the topic, then in the tests under `test/lang/`. Specification text never contains "TBD",
   "pending" or "not finalized"; deferred features live only in decision D15.
+- **Renaming a term**: sweep the stem, not the word. `grep -rni slice` never matches "Slicing",
+  so a rename of `slice` to `span` must sweep `slic` (and any other inflected stem) with
+  `grep -rni` before the criterion is ticked; markdown width is not covered by the gate, so run the
+  `awk 'length > 100'` check over every file touched.
+- **"span" names the fort type `T@`** (D3.5), so a byte or source extent is a **range** everywhere
+  in the compiler: `str_from_range`, token byte ranges, `ASSERT_TOK_RANGE`, and `loc_t` ranges in
+  the editor-support work. Never call an extent a span.
 - **Citing decisions in code**: a citation goes on the line or function that implements the
   rule, with a phrase stating the rule (`// pointers print as 0x + lowercase hex, 0x0 for null
   (D11.7)`), so a reader learns the rule without opening the log. A bare tag list at file or

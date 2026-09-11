@@ -20,27 +20,27 @@
 TEST(empty_file_is_only_eof, {
     ASSERT_LEX_OK("", 0);
     ASSERT_TOK_POS(0, 1, 1);
-    ASSERT_TOK_SPAN(0, 0, 0);
+    ASSERT_TOK_RANGE(0, 0, 0);
     TEST_ASSERT_EQ_UINT64(tok(0)->text.len, (uint64_t)0);
 })
 
 TEST(whitespace_only_file_is_only_eof, {
     ASSERT_LEX_OK(" \t\r\n \n", 0);
     ASSERT_TOK_POS(0, 3, 1);
-    ASSERT_TOK_SPAN(0, 6, 0);
+    ASSERT_TOK_RANGE(0, 6, 0);
 })
 
 TEST(file_without_trailing_newline, {
     ASSERT_LEX_OK("x", 1);
     ASSERT_TOK_KIND(0, TOK_IDENT);
     ASSERT_TOK_POS(1, 1, 2);
-    ASSERT_TOK_SPAN(1, 1, 0);
+    ASSERT_TOK_RANGE(1, 1, 0);
 })
 
 TEST(eof_sits_after_the_trailing_newline, {
     ASSERT_LEX_OK("x;\n", 2);
     ASSERT_TOK_POS(2, 2, 1);
-    ASSERT_TOK_SPAN(2, 3, 0);
+    ASSERT_TOK_RANGE(2, 3, 0);
 })
 
 TEST(bom_is_skipped_and_takes_no_column, {
@@ -48,10 +48,10 @@ TEST(bom_is_skipped_and_takes_no_column, {
     ASSERT_TOK_KIND(0, TOK_IDENT);
     ASSERT_TOK_TEXT(0, "x");
     ASSERT_TOK_POS(0, 1, 1);
-    ASSERT_TOK_SPAN(0, 3, 1);
+    ASSERT_TOK_RANGE(0, 3, 1);
     ASSERT_LEX_OK("\xEF\xBB\xBF", 0);
     ASSERT_TOK_POS(0, 1, 1);
-    ASSERT_TOK_SPAN(0, 3, 0);
+    ASSERT_TOK_RANGE(0, 3, 0);
 })
 
 TEST(cr_is_whitespace, {
@@ -65,8 +65,8 @@ TEST(tab_counts_as_one_column, {
     ASSERT_LEX_OK("\t\tx\ty", 2);
     ASSERT_TOK_POS(0, 1, 3);
     ASSERT_TOK_POS(1, 1, 5);
-    ASSERT_TOK_SPAN(0, 2, 1);
-    ASSERT_TOK_SPAN(1, 4, 1);
+    ASSERT_TOK_RANGE(0, 2, 1);
+    ASSERT_TOK_RANGE(1, 4, 1);
 })
 
 TEST(positions_advance_across_lines, {
@@ -81,8 +81,8 @@ TEST(positions_advance_across_lines, {
     ASSERT_TOK_POS(7, 2, 13);
     ASSERT_TOK_POS(8, 3, 1);
     ASSERT_TOK_POS(9, 4, 1);
-    ASSERT_TOK_SPAN(5, 16, 6);
-    ASSERT_TOK_SPAN(9, 28, 0);
+    ASSERT_TOK_RANGE(5, 16, 6);
+    ASSERT_TOK_RANGE(9, 28, 0);
 })
 
 TEST(non_ascii_outside_strings_and_comments_is_an_error, {
@@ -210,7 +210,7 @@ TEST(identifier_text_is_a_view_into_the_source, {
     TEST_ASSERT_TRUE(lex(src));
     TEST_ASSERT_TRUE(tok(0)->text.ptr == src + 2);
     TEST_ASSERT_EQ_UINT64(tok(0)->text.len, (uint64_t)5);
-    ASSERT_TOK_SPAN(0, 2, 5);
+    ASSERT_TOK_RANGE(0, 2, 5);
 })
 
 TEST(identifiers_have_no_length_limit, {
@@ -232,7 +232,7 @@ TEST(every_keyword_lexes_as_its_kind, {
         ASSERT_LEX_OK(word, 1);
         ASSERT_TOK_KIND(0, (tok_kind_t)k);
         ASSERT_TOK_TEXT(0, word);
-        ASSERT_TOK_SPAN(0, 0, strlen(word));
+        ASSERT_TOK_RANGE(0, 0, strlen(word));
     }
     TEST_ASSERT_EQ_INT64((int64_t)(TOK_KW_LAST - TOK_KW_FIRST + 1), (int64_t)41);
 })
@@ -311,7 +311,7 @@ TEST(every_operator_lexes_alone_as_its_kind, {
         ASSERT_LEX_OK(op, 1);
         ASSERT_TOK_KIND(0, (tok_kind_t)k);
         ASSERT_TOK_TEXT(0, op);
-        ASSERT_TOK_SPAN(0, 0, strlen(op));
+        ASSERT_TOK_RANGE(0, 0, strlen(op));
         ASSERT_TOK_POS(1, 1, strlen(op) + 1);
     }
     TEST_ASSERT_EQ_INT64((int64_t)(TOK_OP_LAST - TOK_OP_FIRST + 1), (int64_t)54);
@@ -343,9 +343,9 @@ TEST(three_character_operators_and_their_prefixes, {
     ASSERT_TOK_KIND(12, TOK_SHR_ASSIGN);
     ASSERT_TOK_KIND(13, TOK_SHR);
     ASSERT_TOK_KIND(14, TOK_GT);
-    ASSERT_TOK_SPAN(0, 0, 3);
-    ASSERT_TOK_SPAN(1, 4, 2);
-    ASSERT_TOK_SPAN(2, 7, 1);
+    ASSERT_TOK_RANGE(0, 0, 3);
+    ASSERT_TOK_RANGE(1, 4, 2);
+    ASSERT_TOK_RANGE(2, 7, 1);
 })
 
 TEST(longest_match_without_spaces, {
@@ -416,28 +416,28 @@ TEST(slash_operators_beside_comments, {
     ASSERT_TOK_KIND(1, TOK_SLASH);
 })
 
-TEST(at_lexes_as_the_slice_suffix_token, {
-    // `@` is a one-byte operator token, the slice suffix (D2.10, D3.5).
+TEST(at_lexes_as_the_span_suffix_token, {
+    // `@` is a one-byte operator token, the span suffix (D2.10, D3.5).
     ASSERT_LEX_OK("@", 1);
     ASSERT_TOK_KIND(0, TOK_AT);
     ASSERT_TOK_TEXT(0, "@");
     ASSERT_TOK_POS(0, 1, 1);
-    ASSERT_TOK_SPAN(0, 0, 1);
+    ASSERT_TOK_RANGE(0, 0, 1);
     ASSERT_LEX_OK("a\n  @ b", 3);
     ASSERT_TOK_KIND(1, TOK_AT);
     ASSERT_TOK_POS(1, 2, 3);
-    ASSERT_TOK_SPAN(1, 4, 1);
+    ASSERT_TOK_RANGE(1, 4, 1);
 })
 
 TEST(at_in_a_type_lexes_beside_its_neighbours, {
-    // A slice of writable bytes, `u8 mut@ mut s` (D3.5, D5.3).
+    // A span of writable bytes, `u8 mut@ mut s` (D3.5, D5.3).
     ASSERT_LEX_OK("u8 mut@ mut s", 5);
     ASSERT_TOK_KIND(0, TOK_KW_U8);
     ASSERT_TOK_KIND(1, TOK_KW_MUT);
     ASSERT_TOK_KIND(2, TOK_AT);
     ASSERT_TOK_KIND(3, TOK_KW_MUT);
     ASSERT_TOK_KIND(4, TOK_IDENT);
-    ASSERT_TOK_SPAN(2, 6, 1);
+    ASSERT_TOK_RANGE(2, 6, 1);
     // Reference suffixes may be adjacent and repeat: `node*@`, `u8@*`, `u8@@`.
     ASSERT_LEX_OK("node*@ u8@* u8@@", 9);
     ASSERT_TOK_KIND(1, TOK_STAR);
@@ -474,7 +474,7 @@ TEST(at_inside_a_literal_or_a_comment_is_an_ordinary_byte, {
     ASSERT_LEX_OK("'@'", 1);
     ASSERT_TOK_KIND(0, TOK_CHAR);
     TEST_ASSERT_EQ_UINT64(tok(0)->ival, (uint64_t)0x40);
-    ASSERT_TOK_SPAN(0, 0, 3);
+    ASSERT_TOK_RANGE(0, 0, 3);
     // A comment swallows it (D2.2).
     ASSERT_LEX_OK("a // @ @\n@", 2);
     ASSERT_TOK_KIND(0, TOK_IDENT);
@@ -483,7 +483,7 @@ TEST(at_inside_a_literal_or_a_comment_is_an_ordinary_byte, {
 })
 
 TEST(a_statement_lexes_into_the_expected_sequence, {
-    // An owned slice of writable bytes from new(T, n) (D5.3, D17.2, D10.2).
+    // An owned span of writable bytes from new(T, n) (D5.3, D17.2, D10.2).
     ASSERT_LEX_OK("u8 mut@ own mut s = new(u8, n +% 1);", 16);
     ASSERT_TOK_KIND(0, TOK_KW_U8);
     ASSERT_TOK_KIND(1, TOK_KW_MUT);
@@ -590,7 +590,7 @@ TEST(lexing_a_long_file_grows_the_output, {
     ASSERT_TOK_POS(3000, 501, 1);
     ASSERT_TOK_KIND(2999, TOK_SEMI);
     ASSERT_TOK_POS(2999, 500, 10);
-    ASSERT_TOK_SPAN(2999, 500 * 11 - 2, 1);
+    ASSERT_TOK_RANGE(2999, 500 * 11 - 2, 1);
     TEST_ASSERT_EQ_UINT64(diag_count(), (uint64_t)0);
     sb_free(&src);
 })
@@ -636,7 +636,7 @@ int main(int argc, char** argv) {
     TEST_RUN(longest_match_without_spaces);
     TEST_RUN(runs_of_operator_characters_split_greedily);
     TEST_RUN(slash_operators_beside_comments);
-    TEST_RUN(at_lexes_as_the_slice_suffix_token);
+    TEST_RUN(at_lexes_as_the_span_suffix_token);
     TEST_RUN(at_in_a_type_lexes_beside_its_neighbours);
     TEST_RUN(at_starts_no_longer_operator);
     TEST_RUN(at_inside_a_literal_or_a_comment_is_an_ordinary_byte);

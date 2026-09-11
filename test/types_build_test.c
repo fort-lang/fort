@@ -47,22 +47,22 @@ TEST(the_d3_6_shapes_round_trip, {
 TEST(the_d3_6_shapes_are_the_ones_it_names, {
     tenv_t e;
     tenv_init(&e);
-    // `node*@` is a slice of pointers, `u8@*` a pointer to a slice.
-    const type_t* slice_of_ptr = tenv_type(&e, "node*@");
-    TEST_ASSERT_TRUE(slice_of_ptr->kind == TYPE_SLICE);
-    TEST_ASSERT_TRUE(slice_of_ptr->elem->kind == TYPE_PTR);
-    const type_t* ptr_to_slice = tenv_type(&e, "u8@*");
-    TEST_ASSERT_TRUE(ptr_to_slice->kind == TYPE_PTR);
-    TEST_ASSERT_TRUE(ptr_to_slice->elem->kind == TYPE_SLICE);
-    // `node*[16]` is sixteen pointers, `node@[4]` four slices.
+    // `node*@` is a span of pointers, `u8@*` a pointer to a span.
+    const type_t* span_of_ptr = tenv_type(&e, "node*@");
+    TEST_ASSERT_TRUE(span_of_ptr->kind == TYPE_SPAN);
+    TEST_ASSERT_TRUE(span_of_ptr->elem->kind == TYPE_PTR);
+    const type_t* ptr_to_span = tenv_type(&e, "u8@*");
+    TEST_ASSERT_TRUE(ptr_to_span->kind == TYPE_PTR);
+    TEST_ASSERT_TRUE(ptr_to_span->elem->kind == TYPE_SPAN);
+    // `node*[16]` is sixteen pointers, `node@[4]` four spans.
     const type_t* ptrs = tenv_type(&e, "node*[16]");
     TEST_ASSERT_TRUE(ptrs->kind == TYPE_ARRAY);
     TEST_ASSERT_EQ_UINT64(ptrs->len, (uint64_t)16);
     TEST_ASSERT_TRUE(ptrs->elem->kind == TYPE_PTR);
-    const type_t* slices = tenv_type(&e, "node@[4]");
-    TEST_ASSERT_TRUE(slices->kind == TYPE_ARRAY);
-    TEST_ASSERT_TRUE(slices->elem->kind == TYPE_SLICE);
-    // `i32[4]*` points to the whole array, `i32[4]@` slices it.
+    const type_t* spans = tenv_type(&e, "node@[4]");
+    TEST_ASSERT_TRUE(spans->kind == TYPE_ARRAY);
+    TEST_ASSERT_TRUE(spans->elem->kind == TYPE_SPAN);
+    // `i32[4]*` points to the whole array, `i32[4]@` spans it.
     TEST_ASSERT_TRUE(tenv_type(&e, "i32[4]*")->elem->kind == TYPE_ARRAY);
     TEST_ASSERT_TRUE(tenv_type(&e, "i32[4]@")->elem->kind == TYPE_ARRAY);
     // `i32[3][4]` is three arrays of four, indexed a[i][j].
@@ -148,7 +148,7 @@ TEST(builder_errors_of_lengths_and_void, {
     TEST_ASSERT_EQ_STR(tenv_spell(&e, "void*@"), "void*@");
     TEST_ASSERT_EQ_STR(tenv_spell_decl(&e, "void* mut"), "void* mut");
     // `void` has no target level, so `void mut*` and `void own` are errors,
-    // and a slice or an array of `void` does not exist (D3.11, D5.3).
+    // and a span or an array of `void` does not exist (D3.11, D5.3).
     TEST_ASSERT_EQ_STR(tenv_spell(&e, "void mut*"),
                        "error: 'void' is only a return type or the base of 'void*'");
     TEST_ASSERT_EQ_STR(tenv_spell(&e, "void own"),
@@ -432,7 +432,7 @@ TEST(suffixes_after_a_function_type_apply_to_it, {
     // `fn i32(i32)*`: a pointer to a slot holding a function pointer.
     TEST_ASSERT_EQ_STR(tenv_str(&e, type_ptr(&e.tt, f, false, false)), "fn i32(i32)*");
     TEST_ASSERT_EQ_STR(tenv_str(&e, type_ptr(&e.tt, f, false, true)), "fn i32(i32) mut*");
-    TEST_ASSERT_EQ_STR(tenv_str(&e, type_slice(&e.tt, f, false, false)), "fn i32(i32)@");
+    TEST_ASSERT_EQ_STR(tenv_str(&e, type_span(&e.tt, f, false, false)), "fn i32(i32)@");
     tenv_free(&e);
 })
 
@@ -446,17 +446,17 @@ TEST(every_combination_of_markers_has_a_spelling, {
     // position on its own (D5.3).
     const type_t* mut_node_ptr = tenv_type(&e, "node mut*");
     TEST_ASSERT_EQ_STR(tenv_str(&e, type_ptr(&e.tt, mut_node_ptr, false, false)), "node mut**");
-    const type_t* mut_slice = tenv_type(&e, "i32 mut@");
-    TEST_ASSERT_EQ_STR(tenv_str(&e, type_slice(&e.tt, mut_slice, false, false)), "i32 mut@@");
+    const type_t* mut_span = tenv_type(&e, "i32 mut@");
+    TEST_ASSERT_EQ_STR(tenv_str(&e, type_span(&e.tt, mut_span, false, false)), "i32 mut@@");
     // An owned string inside a type has its own position too (D3.7, D17.2).
     const type_t* own_string = tenv_type(&e, "string own");
     TEST_ASSERT_EQ_STR(tenv_str(&e, type_ptr(&e.tt, own_string, false, false)), "string own*");
-    TEST_ASSERT_EQ_STR(tenv_str(&e, type_slice(&e.tt, own_string, false, false)), "string own@");
+    TEST_ASSERT_EQ_STR(tenv_str(&e, type_span(&e.tt, own_string, false, false)), "string own@");
     // Each of those spellings reads back as the type it came from.
     TEST_ASSERT_TRUE(tenv_type(&e, "node mut**") == type_ptr(&e.tt, mut_node_ptr, false, false));
-    TEST_ASSERT_TRUE(tenv_type(&e, "i32 mut@@") == type_slice(&e.tt, mut_slice, false, false));
+    TEST_ASSERT_TRUE(tenv_type(&e, "i32 mut@@") == type_span(&e.tt, mut_span, false, false));
     TEST_ASSERT_TRUE(tenv_type(&e, "string own*") == type_ptr(&e.tt, own_string, false, false));
-    TEST_ASSERT_TRUE(tenv_type(&e, "string own@") == type_slice(&e.tt, own_string, false, false));
+    TEST_ASSERT_TRUE(tenv_type(&e, "string own@") == type_span(&e.tt, own_string, false, false));
     tenv_free(&e);
 })
 
@@ -468,8 +468,8 @@ TEST(only_an_array_behind_a_reference_needs_parentheses, {
     // the inner type in parentheses.
     const type_t* arr_ptr = type_ptr(&e.tt, tenv_type(&e, "i32[4]"), false, false);
     TEST_ASSERT_EQ_STR(tenv_str(&e, type_array(&e.tt, arr_ptr, 2)), "(i32[4])*[2]");
-    const type_t* arr_slice = type_slice(&e.tt, tenv_type(&e, "i32[4]"), false, true);
-    TEST_ASSERT_EQ_STR(tenv_str(&e, type_array(&e.tt, arr_slice, 2)), "(i32[4] mut)@[2]");
+    const type_t* arr_span = type_span(&e.tt, tenv_type(&e, "i32[4]"), false, true);
+    TEST_ASSERT_EQ_STR(tenv_str(&e, type_array(&e.tt, arr_span, 2)), "(i32[4] mut)@[2]");
     // The marker of the storage behind the parentheses is written inside
     // them, since the position after `)` belongs to the suffix that follows.
     TEST_ASSERT_EQ_STR(
@@ -541,14 +541,14 @@ TEST(spelling_a_type_appends_to_the_buffer, {
 TEST(the_builder_reads_the_three_suffix_groups, {
     tenv_t e;
     tenv_init(&e);
-    // `node*@*` is a pointer to a slice of pointers: reference suffixes read
+    // `node*@*` is a pointer to a span of pointers: reference suffixes read
     // inside-out (D3.6), and each position carries its own markers (D5.3).
     type_suffix_t suffixes[3];
     suffixes[0].kind = SUFFIX_PTR;
     suffixes[0].len = 0;
     suffixes[0].own = false;
     suffixes[0].mut = false;
-    suffixes[1].kind = SUFFIX_SLICE;
+    suffixes[1].kind = SUFFIX_SPAN;
     suffixes[1].len = 0;
     suffixes[1].own = false;
     suffixes[1].mut = false;
@@ -561,7 +561,7 @@ TEST(the_builder_reads_the_three_suffix_groups, {
     TEST_ASSERT_TRUE(r.mut0);
     TEST_ASSERT_TRUE(r.type->kind == TYPE_PTR);
     TEST_ASSERT_TRUE(r.type->own);
-    TEST_ASSERT_TRUE(r.type->elem->kind == TYPE_SLICE);
+    TEST_ASSERT_TRUE(r.type->elem->kind == TYPE_SPAN);
     TEST_ASSERT_FALSE(r.type->elem->own);
     TEST_ASSERT_TRUE(r.type->elem->elem->kind == TYPE_PTR);
     TEST_ASSERT_TRUE(r.type->elem->elem->elem == e.node);
@@ -577,7 +577,7 @@ TEST(the_builder_reads_the_three_suffix_groups, {
     mixed[1].len = 4;
     mixed[1].own = false;
     mixed[1].mut = true;
-    mixed[2].kind = SUFFIX_SLICE;
+    mixed[2].kind = SUFFIX_SPAN;
     mixed[2].len = 0;
     mixed[2].own = true;
     mixed[2].mut = false;
@@ -649,7 +649,7 @@ TEST(the_builder_interns_what_the_constructors_intern, {
     TEST_ASSERT_TRUE(tenv_type(&e, "node*") == type_ptr(&e.tt, e.node, false, false));
     TEST_ASSERT_TRUE(tenv_type(&e, "node mut* own") == type_ptr(&e.tt, e.node, true, true));
     TEST_ASSERT_TRUE(tenv_type(&e, "i32 mut@") ==
-                     type_slice(&e.tt, type_prim(&e.tt, PRIM_I32), false, true));
+                     type_span(&e.tt, type_prim(&e.tt, PRIM_I32), false, true));
     TEST_ASSERT_TRUE(tenv_type(&e, "string own") == type_string(&e.tt, true));
     TEST_ASSERT_TRUE(tenv_type(&e, "void* own") == type_voidptr(&e.tt, true));
     TEST_ASSERT_TRUE(tenv_type(&e, "i32[4]") == type_array(&e.tt, type_prim(&e.tt, PRIM_I32), 4));

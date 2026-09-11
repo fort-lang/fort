@@ -22,7 +22,7 @@ static const ast_node_t* body_stmt(const ast_node_t* mod, uint64_t d, uint64_t i
 // NOLINTBEGIN(readability-magic-numbers) the programs and the trees they
 // parse to are the test data.
 
-// A map over a slice of buckets: `new(T, n)`, indexing, `->`, `del` and the
+// A map over a span of buckets: `new(T, n)`, indexing, `->`, `del` and the
 // ownership markers of D17.2 in fields and locals.
 TEST(a_hash_map_module_parses, {
     const ast_node_t* mod = parse_text("struct entry {\n"
@@ -56,7 +56,7 @@ TEST(a_hash_map_module_parses, {
     TEST_ASSERT_EQ_STR(parse_diags(), "");
     TEST_ASSERT_EQ_UINT64(ast_len(mod), (uint64_t)4);
     TEST_ASSERT_EQ_STR(dumped(ast_child(pt_decl(mod, 1), 0)),
-                       "(field-decl (type (name entry) mut (ptr own mut) (slice own)) buckets)");
+                       "(field-decl (type (name entry) mut (ptr own mut) (span own)) buckets)");
     TEST_ASSERT_EQ_STR(dumped(body_stmt(mod, 2, 1)),
                        "(assign = (field (ident m) buckets)"
                        " (new (type (name entry) (ptr own)) (ident n)))");
@@ -69,7 +69,7 @@ TEST(a_hash_map_module_parses, {
                        " (call (ident move) (ident e)))");
 })
 
-// A tokenizer: `char` literals, `switch` over them, string slicing, an enum
+// A tokenizer: `char` literals, `switch` over them, string spans, an enum
 // and a range loop.
 TEST(a_tokenizer_module_parses, {
     const ast_node_t* mod = parse_text("enum kind { ident, number, symbol, end }\n"
@@ -150,7 +150,7 @@ TEST(a_tokenizer_module_in_the_east_marker_spelling_parses, {
                        "(case (labels (char 43) (char 45) (char 42) (char 47))"
                        " (block (assign = (unary * (ident pos)) (binary + (ident i) (int 1)))"
                        " (return (struct-lit (name token) (init (field (ident kind) symbol)"
-                       " (slice (ident src) (ident i) (binary + (ident i) (int 1))))))))");
+                       " (span (ident src) (ident i) (binary + (ident i) (int 1))))))))");
 })
 
 // An FFI module: externs, `void*`, casts and a `noreturn` function (D9.8,
@@ -176,12 +176,11 @@ TEST(an_ffi_module_parses, {
     TEST_ASSERT_EQ_STR(dumped(pt_decl(mod, 3)),
                        "(extern-fn (type (noreturn)) exit"
                        " (params (param (type (prim i32)) status)) nil)");
-    TEST_ASSERT_EQ_STR(dumped(pt_decl(mod, 4)->a), "(type (prim u8) mut (slice own))");
+    TEST_ASSERT_EQ_STR(dumped(pt_decl(mod, 4)->a), "(type (prim u8) mut (span own))");
     TEST_ASSERT_EQ_STR(dumped(body_stmt(mod, 4, 2)),
                        "(var p (type (prim u8) mut (ptr own))"
                        " (cast (ident raw) (type (prim u8) mut (ptr own))))");
-    TEST_ASSERT_EQ_STR(dumped(body_stmt(mod, 4, 3)),
-                       "(return (slice (ident p) (int 0) (ident n)))");
+    TEST_ASSERT_EQ_STR(dumped(body_stmt(mod, 4, 3)), "(return (span (ident p) (int 0) (ident n)))");
 })
 
 // A module that imports in every form and qualifies names across modules

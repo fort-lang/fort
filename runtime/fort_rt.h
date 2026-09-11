@@ -15,7 +15,7 @@ struct fort_string {
     uint64_t len;
 };
 
-struct fort_slice {
+struct fort_span {
     void* ptr;
     uint64_t len;
 };
@@ -33,7 +33,7 @@ void fort_rt_del(void* p);
 // Failures (D11.4): flush every buffer, write one line to stderr, abort().
 _Noreturn void fort_rt_fail_bounds(
     int64_t index, uint64_t len, const char* file, uint32_t line, uint32_t col);
-_Noreturn void fort_rt_fail_slice(
+_Noreturn void fort_rt_fail_span(
     int64_t lo, int64_t hi, uint64_t len, const char* file, uint32_t line, uint32_t col);
 _Noreturn void fort_rt_fail_overflow(const char* file, uint32_t line, uint32_t col);
 _Noreturn void fort_rt_fail_shift(
@@ -60,12 +60,12 @@ void fort_rt_flush(int32_t fd);
 void fort_rt_flush_all(void);
 
 // Process (D11.6, D8.6). fort_entry is emitted by the compiler. main calls
-// fort_rt_args_init, which builds the args slice that fort_rt_args_ptr and
+// fort_rt_args_init, which builds the args span that fort_rt_args_ptr and
 // fort_rt_args_len return, then fort_entry, then fort_rt_flush_all.
 #ifndef FORT_RT_NO_MAIN
 int main(int argc, char** argv);
 #endif
-int32_t fort_entry(const struct fort_slice* args);
+int32_t fort_entry(const struct fort_span* args);
 void fort_rt_args_init(int argc, char** argv);
 const struct fort_string* fort_rt_args_ptr(void);
 uint64_t fort_rt_args_len(void);

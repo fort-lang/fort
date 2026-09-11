@@ -74,7 +74,7 @@ str_t str_from_cstr(const char* s) {
     return r;
 }
 
-str_t str_from_span(const char* ptr, uint64_t len) {
+str_t str_from_range(const char* ptr, uint64_t len) {
     str_t r;
     r.ptr = ptr;
     r.len = len;
@@ -121,7 +121,7 @@ bool str_starts_with(str_t s, str_t prefix) {
     if (prefix.len > s.len) {
         return false;
     }
-    return str_eq(str_from_span(s.ptr, prefix.len), prefix);
+    return str_eq(str_from_range(s.ptr, prefix.len), prefix);
 }
 
 int64_t str_index_of(str_t s, char ch) {
@@ -144,7 +144,7 @@ str_t str_dup(str_t s) {
     char* copy = mem_alloc(mem_add(s.len, 1U));
     copy_bytes(copy, s.ptr, s.len);
     copy[s.len] = '\0';
-    return str_from_span(copy, s.len);
+    return str_from_range(copy, s.len);
 }
 
 void str_del(str_t s) {
@@ -210,7 +210,7 @@ str_t str_pool_intern(str_pool_t* p, str_t s) {
     }
     copy_bytes(dst, s.ptr, s.len);
     dst[s.len] = '\0';
-    return str_from_span(dst, s.len);
+    return str_from_range(dst, s.len);
 }
 
 // ---- growable byte buffer ---------------------------------------------------------
@@ -292,7 +292,7 @@ void sb_clear(sb_t* b) {
 }
 
 str_t sb_view(const sb_t* b) {
-    return str_from_span(b->data, b->len);
+    return str_from_range(b->data, b->len);
 }
 
 const char* sb_cstr(sb_t* b) {

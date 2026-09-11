@@ -181,7 +181,7 @@ TEST(layout_of_a_struct_with_a_struct_field, {
     tenv_free(&e);
 })
 
-TEST(layout_of_arrays_slices_and_pointers_in_a_struct, {
+TEST(layout_of_arrays_spans_and_pointers_in_a_struct, {
     tenv_t e;
     tenv_init(&e);
     // struct box { u8 a; i32[3] xs; }
@@ -195,20 +195,20 @@ TEST(layout_of_arrays_slices_and_pointers_in_a_struct, {
     TEST_ASSERT_EQ_UINT64(box_offsets[1], (uint64_t)4);
     TEST_ASSERT_EQ_UINT64(type_sizeof(box), (uint64_t)16);
     TEST_ASSERT_EQ_UINT64(type_alignof(box), (uint64_t)4);
-    // struct span { u8 a; i32@ s; node* p; }: a slice is 16 aligned 8.
-    const type_t* span = type_struct(&e.tt, str_from_cstr("span"), "span");
-    const type_t* span_fields[3];
-    uint64_t span_offsets[3];
-    span_fields[0] = tenv_type(&e, "u8");
-    span_fields[1] = tenv_type(&e, "i32@");
-    span_fields[2] = tenv_type(&e, "node*");
-    TEST_ASSERT_TRUE(type_layout_begin(span));
-    TEST_ASSERT_TRUE(type_layout_struct(span, span_fields, 3, span_offsets));
-    TEST_ASSERT_EQ_UINT64(span_offsets[0], (uint64_t)0);
-    TEST_ASSERT_EQ_UINT64(span_offsets[1], (uint64_t)8);
-    TEST_ASSERT_EQ_UINT64(span_offsets[2], (uint64_t)24);
-    TEST_ASSERT_EQ_UINT64(type_sizeof(span), (uint64_t)32);
-    TEST_ASSERT_EQ_UINT64(type_alignof(span), (uint64_t)8);
+    // struct bag { u8 a; i32@ s; node* p; }: a span is 16 aligned 8.
+    const type_t* bag = type_struct(&e.tt, str_from_cstr("bag"), "bag");
+    const type_t* bag_fields[3];
+    uint64_t bag_offsets[3];
+    bag_fields[0] = tenv_type(&e, "u8");
+    bag_fields[1] = tenv_type(&e, "i32@");
+    bag_fields[2] = tenv_type(&e, "node*");
+    TEST_ASSERT_TRUE(type_layout_begin(bag));
+    TEST_ASSERT_TRUE(type_layout_struct(bag, bag_fields, 3, bag_offsets));
+    TEST_ASSERT_EQ_UINT64(bag_offsets[0], (uint64_t)0);
+    TEST_ASSERT_EQ_UINT64(bag_offsets[1], (uint64_t)8);
+    TEST_ASSERT_EQ_UINT64(bag_offsets[2], (uint64_t)24);
+    TEST_ASSERT_EQ_UINT64(type_sizeof(bag), (uint64_t)32);
+    TEST_ASSERT_EQ_UINT64(type_alignof(bag), (uint64_t)8);
     tenv_free(&e);
 })
 
@@ -251,7 +251,7 @@ TEST(owning_aggregates_are_recognised_through_fields_and_elements, {
     TEST_ASSERT_TRUE(type_layout_struct(pair, pair_fields, 2, pair_offsets));
     TEST_ASSERT_TRUE(type_is_owning_aggregate(pair));
     TEST_ASSERT_EQ_UINT64(type_sizeof(pair), (uint64_t)48);
-    // A fixed array of `own` pointers is owning; a slice of them is not,
+    // A fixed array of `own` pointers is owning; a span of them is not,
     // since its elements are not held by value (D17.7).
     TEST_ASSERT_TRUE(type_is_owning_aggregate(tenv_type(&e, "node* own[4]")));
     TEST_ASSERT_FALSE(type_is_owning_aggregate(tenv_type(&e, "node*[4]")));
@@ -295,7 +295,7 @@ TEST(owning_reaches_through_arrays_of_structs_and_struct_fields, {
     TEST_ASSERT_TRUE(type_layout_struct(nest, nest_fields, 1, nest_offsets));
     TEST_ASSERT_TRUE(type_is_owning_aggregate(nest));
     TEST_ASSERT_EQ_UINT64(type_sizeof(nest), (uint64_t)80);
-    // A borrowed slice of owned pointers is not owning: its elements are not
+    // A borrowed span of owned pointers is not owning: its elements are not
     // held by value (D17.7).
     const type_t* view = type_struct(&e.tt, str_from_cstr("view"), "view");
     const type_t* view_fields[1];
@@ -316,7 +316,7 @@ TEST(layout_pending_names_the_struct_a_size_needs, {
                      e.rec);
     // A reference to a struct needs no layout: it is 8 or 16 bytes.
     TEST_ASSERT_NULL(type_layout_pending(type_ptr(&e.tt, e.rec, false, false)));
-    TEST_ASSERT_NULL(type_layout_pending(type_slice(&e.tt, e.rec, false, false)));
+    TEST_ASSERT_NULL(type_layout_pending(type_span(&e.tt, e.rec, false, false)));
     TEST_ASSERT_NULL(type_layout_pending(tenv_type(&e, "i32[4]")));
     TEST_ASSERT_NULL(type_layout_pending(e.point)); // already resolved
     TEST_ASSERT_TRUE(type_layout_state(e.rec) == LAYOUT_UNRESOLVED);
@@ -362,13 +362,13 @@ TEST(a_struct_containing_itself_by_value_is_a_cycle, {
     TEST_ASSERT_FALSE(type_layout_begin(loop));
     type_layout_fail(loop);
     TEST_ASSERT_EQ_UINT64(type_sizeof(loop), (uint64_t)0);
-    // A self-reference through a pointer or a slice is not a cycle: `node`
+    // A self-reference through a pointer or a span is not a cycle: `node`
     // and `tree` lay out (D3.8).
     const type_t* tree = type_struct(&e.tt, str_from_cstr("tree"), "tree");
     const type_t* fields[2];
     uint64_t offsets[2];
     fields[0] = tenv_type(&e, "i32");
-    fields[1] = type_slice(&e.tt, tree, false, false);
+    fields[1] = type_span(&e.tt, tree, false, false);
     TEST_ASSERT_TRUE(type_layout_begin(tree));
     TEST_ASSERT_NULL(type_layout_pending(fields[1]));
     TEST_ASSERT_TRUE(type_layout_struct(tree, fields, 2, offsets));
@@ -464,7 +464,7 @@ TEST(a_type_past_the_ceiling_does_not_fit, {
     // A reference to an object that could never exist is 8 or 16 bytes and
     // fits: only the object itself is too large (D3.4, D3.5).
     TEST_ASSERT_TRUE(type_size_fits(type_ptr(&e.tt, type_array(&e.tt, u8, max), false, false)));
-    TEST_ASSERT_TRUE(type_size_fits(type_slice(&e.tt, u8, false, false)));
+    TEST_ASSERT_TRUE(type_size_fits(type_span(&e.tt, u8, false, false)));
     tenv_free(&e);
 })
 
@@ -613,10 +613,10 @@ static void primitive_void(void) {
     tenv_free(&e);
 }
 
-static void slice_of_null(void) {
+static void span_of_null(void) {
     tenv_t e;
     tenv_init(&e);
-    TEST_UNUSED(type_slice(&e.tt, type_null(&e.tt), false, false));
+    TEST_UNUSED(type_span(&e.tt, type_null(&e.tt), false, false));
     tenv_free(&e);
 }
 
@@ -862,7 +862,7 @@ TEST(layout_of_a_struct_with_an_owned_pointer_field, {
     tenv_free(&e);
 })
 
-TEST(sizeof_of_arrays_of_structs_and_slices, {
+TEST(sizeof_of_arrays_of_structs_and_spans, {
     tenv_t e;
     tenv_init(&e);
     TEST_ASSERT_EQ_UINT64(type_sizeof(type_array(&e.tt, e.point, 3)), (uint64_t)24);
@@ -878,7 +878,7 @@ TEST(sizeof_of_arrays_of_structs_and_slices, {
 
 TEST(the_null_type_is_never_an_element_or_a_signature_part, {
     char err[ERR_MAX];
-    TEST_ASSERT_EQ_INT32(run_forked(slice_of_null, err, sizeof err), 2);
+    TEST_ASSERT_EQ_INT32(run_forked(span_of_null, err, sizeof err), 2);
     TEST_ASSERT_EQ_STR(err, "fort: error: internal error: null as an element type\n");
     TEST_ASSERT_EQ_INT32(run_forked(function_returning_null, err, sizeof err), 2);
     TEST_ASSERT_EQ_STR(err, "fort: error: internal error: null as a return type\n");
@@ -961,7 +961,7 @@ int main(int argc, char** argv) {
     TEST_RUN(layout_of_rec_matches_the_c_abi);
     TEST_RUN(layout_of_a_map_entry_is_40_bytes);
     TEST_RUN(layout_of_a_struct_with_a_struct_field);
-    TEST_RUN(layout_of_arrays_slices_and_pointers_in_a_struct);
+    TEST_RUN(layout_of_arrays_spans_and_pointers_in_a_struct);
     TEST_RUN(layout_of_a_struct_holding_a_struct_array);
     TEST_RUN(owning_aggregates_are_recognised_through_fields_and_elements);
     TEST_RUN(owning_reaches_through_arrays_of_structs_and_struct_fields);
@@ -980,7 +980,7 @@ int main(int argc, char** argv) {
     TEST_RUN(layout_rounds_the_size_up_to_the_alignment);
     TEST_RUN(layout_of_reference_and_function_pointer_fields);
     TEST_RUN(layout_of_a_struct_with_an_owned_pointer_field);
-    TEST_RUN(sizeof_of_arrays_of_structs_and_slices);
+    TEST_RUN(sizeof_of_arrays_of_structs_and_spans);
     TEST_RUN(a_type_at_the_ceiling_still_fits);
     TEST_RUN(a_type_past_the_ceiling_does_not_fit);
     TEST_RUN(a_struct_past_the_ceiling_is_reported_like_a_cycle);

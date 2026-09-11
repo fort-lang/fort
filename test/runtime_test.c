@@ -430,24 +430,24 @@ TEST(bounds_message_at_the_extremes, {
                        "of range for length 18446744073709551615\n");
 })
 
-static void fail_slice(void) {
-    fort_rt_fail_slice(2, 7, 3, FILE_NAME, LINE, COL);
+static void fail_span(void) {
+    fort_rt_fail_span(2, 7, 3, FILE_NAME, LINE, COL);
 }
 
-TEST(slice_message, {
+TEST(span_message, {
     ASSERT_ABORTS_WITH(
-        fail_slice,
-        "dir/main.ft:12:14: runtime error: slice bounds 2..7 out of range for length 3\n");
+        fail_span,
+        "dir/main.ft:12:14: runtime error: span bounds 2..7 out of range for length 3\n");
 })
 
-static void fail_slice_negative(void) {
-    fort_rt_fail_slice(-4, -2, 9, FILE_NAME, LINE, COL);
+static void fail_span_negative(void) {
+    fort_rt_fail_span(-4, -2, 9, FILE_NAME, LINE, COL);
 }
 
-TEST(slice_message_prints_the_bounds_signed, {
+TEST(span_message_prints_the_bounds_signed, {
     ASSERT_ABORTS_WITH(
-        fail_slice_negative,
-        "dir/main.ft:12:14: runtime error: slice bounds -4..-2 out of range for length 9\n");
+        fail_span_negative,
+        "dir/main.ft:12:14: runtime error: span bounds -4..-2 out of range for length 9\n");
 })
 
 static void fail_overflow(void) {
@@ -757,8 +757,8 @@ int main(int argc, char** argv) {
     TEST_RUN(bounds_message);
     TEST_RUN(bounds_message_prints_the_index_signed);
     TEST_RUN(bounds_message_at_the_extremes);
-    TEST_RUN(slice_message);
-    TEST_RUN(slice_message_prints_the_bounds_signed);
+    TEST_RUN(span_message);
+    TEST_RUN(span_message_prints_the_bounds_signed);
     TEST_RUN(overflow_message);
     TEST_RUN(shift_message);
     TEST_RUN(shift_message_prints_the_count_signed);

@@ -93,7 +93,7 @@ Owner: `type-system.md`.
 
 - **D3.1** Primitive types: `i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 bool char void`. Sizes: 1, 2,
   4, 8 bytes for the integers, 4 and 8 for the floats, 1 for `bool` and `char`; alignment equals
-  size. Pointers, function pointers, slices and strings align to 8; arrays to their element;
+  size. Pointers, function pointers, spans and strings align to 8; arrays to their element;
   structs to their most-aligned field. `void` is only a return type or the base of `void*`.
   There is no `byte` type.
 - **D3.2** `char` is a distinct one-byte character type. It supports `== != < <= > >=` (ordered
@@ -110,37 +110,40 @@ Owner: `type-system.md`.
   compile error, "type is too large", at the declaration that introduces it, reported like the
   infinite-size error of D3.8 rather than as an out-of-memory failure of the compiler. Amended
   2026-09-10 (T-011 review): the limit was unstated.
-- **D3.5** Slices `T@` (the reference suffix `@`, D3.6; until 2026-09-10 spelled `T[]`) replace the
-  earlier "dynamic array". A slice is a fat pointer `{T* ptr; u64 len}`; whether it owns its
-  elements is part of its type (`own`, D17); all slices of the same element type, element mutability
+- **D3.5** Spans `T@` (the reference suffix `@`, D3.6; until 2026-09-10 spelled `T[]`) replace the
+  earlier "dynamic array". A span is a fat pointer `{T* ptr; u64 len}`; whether it owns its
+  elements is part of its type (`own`, D17); all spans of the same element type, element mutability
   (D5) and ownership are one type; the zero value is `{null, 0}`. `.len` (type `u64`) and `.ptr` (a
   pointer to the element type, carrying the element level's mutability: `node* mut@` gives `node*
-  mut*`) are read-only pseudo-fields. Slices are produced by `new(T, n)` (D10.2, as `T mut@ own`),
-  by slicing (D6.9, always a view) and by the zero initializer `{}`. A slice literal `{1, 2, 3}`
-  does not exist.
-- **D3.6** Type suffixes read as follows. A reference suffix, `*` (pointer) or `@` (slice,
+  mut*`) are read-only pseudo-fields. Spans are produced by `new(T, n)` (D10.2, as `T mut@ own`),
+  by taking a span (D6.9, always a view) and by the zero initializer `{}`. A span literal
+  `{1, 2, 3}` does not exist. Amended 2026-09-10: the type was called a slice until then, and the
+  operation slicing.
+- **D3.6** Type suffixes read as follows. A reference suffix, `*` (pointer) or `@` (span,
   D3.5), applies to everything to its left, so a sequence of them reads inside-out: `node**` is a
-  pointer to a pointer, `node*@` a slice of pointers, `u8@*` a pointer to a slice, `u8@@` a slice of
-  slices. Fixed-array suffixes form one group that reads outside-in like C declarators: `i32[3][4]`
+  pointer to a pointer, `node*@` a span of pointers, `u8@*` a pointer to a span, `u8@@` a span of
+  spans. Fixed-array suffixes form one group that reads outside-in like C declarators: `i32[3][4]`
   is three arrays of four, indexed `a[i][j]` with `i < 3`, `j < 4`. Reference suffixes may precede
   the array group, making arrays of references (`node*[16]` is sixteen pointers, `node@[4]` four
-  slices), or follow it, making references to the whole array (`i32[4]*` points to an `i32[4]`,
-  `i32[4]@` is a slice of `i32[4]`, and `new(i32[4], n)` returns `i32[4] mut@ own`); no array suffix
+  spans), or follow it, making references to the whole array (`i32[4]*` points to an `i32[4]`,
+  `i32[4]@` is a span of `i32[4]`, and `new(i32[4], n)` returns `i32[4] mut@ own`); no array suffix
   may follow a trailing reference suffix (`i32[4]*[2]` does not parse; wrap it in a struct). `u8@*`
   is the usual shape of an out-parameter (`fn bool read_file(string path, u8 mut@ own mut* out)`,
   D17.2). Suffixes after a function type apply to the function type: `fn i32(i32)[4]` is an array of
-  four function pointers, `fn i32[4](i32)` returns an `i32[4]`. Amended 2026-09-10: slices were
-  spelled `T[]` and read with the array group, so `i32[][4]` was the slice of `i32[4]`.
-- **D3.7** `string` is a distinct type: an immutable slice of `char` (`{char* ptr; u64 len}`).
+  four function pointers, `fn i32[4](i32)` returns an `i32[4]`. Amended 2026-09-10: spans were
+  called slices and spelled `T[]`, read with the array group, so `i32[][4]` was the span of
+  `i32[4]`.
+- **D3.7** `string` is a distinct type: an immutable span of `char` (`{char* ptr; u64 len}`).
   Literals have type `string` and are stored in read-only memory with a trailing NUL that is not
-  counted in `len`. Sub-strings are not NUL-terminated. Indexing yields `char`; slicing yields
-  `string`; `.len` and `.ptr` (`char*`) exist; `==`/`!=` compare `len` then bytes, so the zero
-  string equals `""`. Bytes are UTF-8 by convention and never validated. There is no `+`; the
-  standard library concatenates and returns `string own`, the owned form (D17.12).
+  counted in `len`. Sub-strings are not NUL-terminated. Indexing yields `char`; a span of a
+  `string` is a `string`; `.len` and `.ptr` (`char*`) exist; `==`/`!=` compare `len` then bytes,
+  so the zero string equals `""`. Bytes are UTF-8 by convention and never validated. There is no
+  `+`; the standard library concatenates and returns `string own`, the owned form (D17.12). Amended
+  2026-09-10: spans were called slices (D3.5).
 - **D3.8** Structs: `struct name { T1 f1; T2 f2; }` with no trailing semicolon, nominal typing,
   C/System V layout (fields in order, natural alignment, size rounded to alignment). No methods,
   no inheritance, no per-field `mut` at the field's own level (D5.5). An empty struct is an
-  error. A struct may contain itself only through a pointer or slice; value-containment cycles
+  error. A struct may contain itself only through a pointer or span; value-containment cycles
   are "infinite size" errors.
 - **D3.9** Enums: `enum color { red, green = 5, blue }`. Underlying type `i32`, size 4. Members
   are scoped: `color.red` everywhere, including `case` labels; `m.color.red` across modules.
@@ -156,14 +159,14 @@ Owner: `type-system.md`.
   undefined behavior. `==`/`!=` compare identity. Function pointers are in the C bootstrap's
   subset (`toolchain.md` 7.3): a function pointer is an ordinary `ptr` value and a call through
   one an ordinary `call` in LLVM IR (D19.2), so the bootstrap implements them.
-- **D3.11** `void*` is an opaque pointer with no pointee level: no `*`, `->`, indexing or slicing.
-  Conversion to and from any pointer, function pointer or `u64` requires `cast`.
+- **D3.11** `void*` is an opaque pointer with no pointee level: no `*`, `->`, indexing or span
+  expression. Conversion to and from any pointer, function pointer or `u64` requires `cast`.
 - **D3.12** Type identity: primitives by name; structs and enums nominally; arrays by element type
-  and length; slices, pointers and function types structurally, including mutability levels
+  and length; spans, pointers and function types structurally, including mutability levels
   behind indirections (D5.2).
 - **D3.13** Equality `==`/`!=` is defined on integers, floats, `bool`, `char`, enums, pointers
   (identity), function pointers (identity) and `string` (contents). It is a compile error on
-  structs, fixed arrays and slices. This narrows type-system.md's earlier "all types support ==".
+  structs, fixed arrays and spans. This narrows type-system.md's earlier "all types support ==".
 - **D3.14** Conversions. The only implicit conversion is dropping mutability (D5.4). Everything else
   is `cast(expr, Type)` (D6.4). Allowed casts: integer to integer (widening sign- or zero-extends by
   the source's signedness, narrowing truncates, same-width sign change reinterprets); integer to
@@ -172,19 +175,19 @@ Owner: `type-system.md`.
   integer; any pointer to any pointer or `void*` (mutability may be added, this is the cast-away-
   const escape); pointer to and from `u64`; function pointer to and from `void*`; among `string`,
   `char@`, `u8@`, `char mut@` and `u8 mut@` (a `mut` in the outermost position of a cast target is
-  an error: a cast result has no binding); a slice to a slice of the same element type whose marks
+  an error: a cast result has no binding); a span to a span of the same element type whose marks
   differ only in mutability, added or dropped at any level (the cast-away-const escape, as for
   pointers; amended 2026-09-10 from the T-011 review, which found the earlier `T@` to `mut T@`
   wording narrower than the rule); any cast that only drops mutability or ownership, at any level (a
   no-op, since the implicit conversions of D5.4 and D17.4 cover it); adding `own` to a pointer or
-  slice (adoption, D17.3); identity. The result of a cast is `own` exactly when its target type says
+  span (adoption, D17.3); identity. The result of a cast is `own` exactly when its target type says
   `own`: an `own` source cast to a non-`own` target lends (the result is a view), a non-`own` source
   cast to an `own` target adopts, and an `own` lvalue cast to an `own` target is a copy that must be
-  written `cast(move(x), ...)` (D17.5). Forbidden: integer to `bool`, any other slice-to-slice cast
-  (the element type of a slice never changes, because `len` counts elements), pointer to slice,
+  written `cast(move(x), ...)` (D17.5). Forbidden: integer to `bool`, any other span-to-span cast
+  (the element type of a span never changes, because `len` counts elements), pointer to span,
   struct or array casts. Casts never trap: float to integer is emitted as `llvm.fptosi.sat` or
   `llvm.fptoui.sat`, whose saturating result is this rule (plain `fptosi` would be poison out of
-  range, D19.2).
+  range, D19.2). Amended 2026-09-10: spans were called slices (D3.5).
 - **D3.15** `sizeof(Type)` takes a type only, yields an untyped integer constant (D4). `sizeof` of
   `void` is an error. `sizeof(T@)` and `sizeof(string)` are 16; function pointers are 8; `bool`
   and `char` are 1; enums are 4. There is no `alignof` in v1.
@@ -197,7 +200,7 @@ Owner: `type-system.md` (Constants), `core-language.md` (Literals).
 - **D4.1** Integer, float and char literals are untyped constants. An untyped constant takes its
   type from context: the declared type of the variable being initialized or assigned, the other
   operand of a binary operator, the parameter type, the return type, the `case` operand type, or
-  an index, slice-bound or `new` count position (any integer type is fine there; a negative
+  an index, span-bound or `new` count position (any integer type is fine there; a negative
   constant in such a position is a compile error). This is the Go model. A `cast` is not a
   context: in `cast(c, T)` an untyped `c` first takes its default type (D4.5) and is then
   converted to `T` with runtime semantics (D4.4). The count operand of a shift is not a context
@@ -236,8 +239,8 @@ Owner: `type-system.md` (Constants), `core-language.md` (Literals).
   comparison and logical operators, `?:`, `cast` among numeric types, `char` and enums (so
   `cast(color.blue, i32) + 1` may size an array), parentheses, and struct or array literals whose
   leaves are constant expressions. Not constant: calls, `&` (except `&global` in module-level
-  initializers, D7.10), field access, indexing, slicing, `.len` of slices or strings, reads of
-  `mut` globals, `null` in a `cast`. Typed constant folding respects the declared type and
+  initializers, D7.10), field access, indexing, span expressions, `.len` of spans or strings,
+  reads of `mut` globals, `null` in a `cast`. Typed constant folding respects the declared type and
   applies every checked-mode rule at compile time (overflow, shift count, division by zero,
   `MIN / -1` and `MIN % -1` are all compile errors in a typed constant): `i32 A = 2147483647;`
   then
@@ -249,21 +252,22 @@ Owner: `type-system.md` (Constants), `core-language.md` (Literals).
 Owner: `core-language.md` (Declarations and mutability), `type-system.md` (Mutability levels).
 
 - **D5.1** Everything is immutable unless marked `mut`. This applies to variables, parameters,
-  the targets of pointers and the elements of slices.
+  the targets of pointers and the elements of spans.
 - **D5.2** Storage levels. A declared type is a chain of storage levels numbered from the
   binding inward: level 0 is the binding's own storage; level 1 is the storage reached through
   the outermost indirection (the `*` or `@` whose value the binding holds); level 2 the storage
   reached through the next indirection, and so on. With the suffix-reading rules of D3.6, the
   outermost indirection is always the last reference suffix: of `node**` the last `*` (level 1
   holds a `node*`, level 2 a `node`), of `node*@` the `@` (level 1 holds `node*` elements, level
-  2 the nodes), of `i32@@` the last `@`, and of `u8@*` the trailing `*` (level 1 holds the slice
+  2 the nodes), of `i32@@` the last `@`, and of `u8@*` the trailing `*` (level 1 holds the span
   header, level 2 the bytes). Fixed arrays and structs do not add a level: their elements
   and fields share the storage of the value that contains them. `string` has a single level (its
-  characters are never mutable). `void*` has a single level (D3.11).
+  characters are never mutable). `void*` has a single level (D3.11). Amended 2026-09-10: spans
+  were called slices (D3.5).
 - **D5.3** Placement rule. A `mut` marks the storage of the type element it follows: after the base
-  type, values of that type (`node mut*` points to writable nodes, `u8 mut@` is a slice of writable
+  type, values of that type (`node mut*` points to writable nodes, `u8 mut@` is a span of writable
   bytes); after a `*`, the pointer that suffix introduces, that is, the storage holding it (`node*
-  mut p` is rebindable); after an `@`, the slice header (`u8@ mut s`); after a fixed-array suffix,
+  mut p` is rebindable); after an `@`, the span header (`u8@ mut s`); after a fixed-array suffix,
   the array, whose elements share its storage (D5.2), so `i32[4] mut a` marks both and `i32 mut[4]`
   is an error ("mark the array after its length"). Nothing precedes the base type: `mut node* p` is
   an error ("write `node mut* p` or `node* mut p`"). Each storage level has exactly one position, so
@@ -300,7 +304,7 @@ Owner: `core-language.md` (Declarations and mutability), `type-system.md` (Mutab
   the base type marked every level including the binding and a postfix `mut` marked the storage
   holding that pointer or header, which made the front `mut` mean the variable for scalars and
   the data for pointers, swapped C's positions, and left "writable target, fixed binding"
-  unspellable.
+  unspellable. Amended 2026-09-10: spans were called slices (D3.5).
 - **D5.4** Dropping mutability is the one implicit conversion. Level 0 (the receiving binding) is
   unconstrained. For a level `k >= 1`, mutability may be dropped only if every level between 1 and
   `k - 1` is immutable in the target type. So `node mut* mut@` converts to `node*@` and to `node
@@ -319,13 +323,13 @@ Owner: `core-language.md` (Declarations and mutability), `type-system.md` (Mutab
   position (D3.10).
 - **D5.7** Mutability of an lvalue (D6.7): a variable has its level-0 bit; `*p` and `p->f` have
   level 1 of `p`'s type; `e.f` and `e[i]` on a fixed array have the mutability of `e`; `s[i]` on
-  a slice has level 1 of `s`'s type; `str[i]` is immutable. Assignment, compound assignment,
+  a span has level 1 of `s`'s type; `str[i]` is immutable. Assignment, compound assignment,
   `++`, `--` and `&` producing a `T mut*` all require a mutable lvalue.
 - **D5.8** `&e` has type `T*` where the level-1 bit is the mutability of `e` and deeper levels come
   from `e`'s type. `new` returns the storage it allocates writable at every level and the reference
   it creates `own`, with no outermost `mut` (an rvalue has no binding): `new(T)` returns `T mut*
   own`, `new(T, n)` returns `T mut@ own` (D17.3).
-- **D5.9** Shallow model. Immutability of a variable never propagates through a pointer or slice
+- **D5.9** Shallow model. Immutability of a variable never propagates through a pointer or span
   it contains; the levels behind an indirection are fixed by the type. `node n` with a field
   `node mut* next`: `n.value = 1` is an error, `n.next->value = 1` is allowed.
 
@@ -333,8 +337,8 @@ Owner: `core-language.md` (Declarations and mutability), `type-system.md` (Mutab
 
 Owner: `core-language.md` (Expressions).
 
-- **D6.1** Precedence, highest first: primary (`()` `[]` `.` `->` calls, slicing, `cast`,
-  `sizeof`, `new`, struct and array literals); unary (`! ~ - * &`); `* / % *%`; `+ - +% -%`;
+- **D6.1** Precedence, highest first: primary (`()` `[]` `.` `->` calls, span expressions,
+  `cast`, `sizeof`, `new`, struct and array literals); unary (`! ~ - * &`); `* / % *%`; `+ - +% -%`;
   `<< >>`; `< <= > >=`; `== !=`; `&`; `^`; `|`; `&&`; `||`; `?:` (right-associative).
   Assignment is a statement, not an expression (D7.2). There is no comma operator and no unary
   `+`.
@@ -367,33 +371,34 @@ Owner: `core-language.md` (Expressions).
   Typed array literals `i32[3]{1, 2, 3}`
   must have exactly `N` elements or be `{}`. A bare `{...}` is allowed only as the initializer of
   a declaration (local, global, `for` init) whose type is a struct or array, and nested inside
-  another literal; `= {}` zero-initializes any aggregate, slice, string or enum; `i32 x = {};`
+  another literal; `= {}` zero-initializes any aggregate, span, string or enum; `i32 x = {};`
   is an error. Trailing commas are allowed in brace lists and enum bodies, not in parameter or
   argument lists. `IDENT {` is never a block because every control-flow condition is
   parenthesized and every body is braced.
 - **D6.6** `?:` requires a `bool` condition and two operands of one type; untyped constants adopt
   the other operand's type.
 - **D6.7** Lvalues: variables and parameters, module-level constants and globals, `*p`, `p->f`,
-  `e.f` where `e` is an lvalue, `e[i]` where `e` is an lvalue fixed array or any slice or string
+  `e.f` where `e` is an lvalue, `e[i]` where `e` is an lvalue fixed array or any span or string
   expression, and parenthesized lvalues (a constant is an immutable lvalue: addressable and
-  sliceable, never assignable). `.len` and `.ptr` are never lvalues. Field access and indexing
-  on an rvalue struct or array are allowed and yield rvalues (copied through a temporary). `&e`
-  requires an lvalue.
-  Returning the address of a local or a slice of a local array is not diagnosed (documented
+  the operand of a span expression, never assignable). `.len` and `.ptr` are never lvalues. Field
+  access and indexing on an rvalue struct or array are allowed and yield rvalues (copied through a
+  temporary). `&e` requires an lvalue.
+  Returning the address of a local or a span of a local array is not diagnosed (documented
   undefined behavior, as in C).
-- **D6.8** Indexing `e[i]`: `e` is a fixed array, slice or string; `i` is any integer type or an
+- **D6.8** Indexing `e[i]`: `e` is a fixed array, span or string; `i` is any integer type or an
   untyped constant. Signed indices are sign-extended, unsigned zero-extended, and one unsigned
   comparison against the length catches negatives. Out of range is a runtime error (D10.6); a
   constant index out of range for a fixed array is a compile error. Pointers cannot be indexed.
-- **D6.9** Slicing `e[lo..hi]`, `e[lo..]`, `e[..hi]`, `e[..]`: `e` is a fixed array (lvalue
-  only), a slice, or a string; bounds are any integer type or untyped constants; the result is a
-  slice (or string) whose mutability is that of `e`'s elements. The runtime check is
+- **D6.9** Span expressions `e[lo..hi]`, `e[lo..]`, `e[..hi]`, `e[..]`: `e` is a fixed array (lvalue
+  only), a span, or a string; bounds are any integer type or untyped constants; the result is a
+  span (or string) whose mutability is that of `e`'s elements. The runtime check is
   `0 <= lo <= hi <= len`, relative to the operand, not the original allocation. `p[lo..hi]` on a
   `T*` or `T mut*` produces a `T@` or `T mut@` with no check; this is the explicit unsafe
-  escape for foreign memory. `void*` cannot be sliced.
+  escape for foreign memory. No span can be taken of a `void*`. Amended 2026-09-10: the operation
+  was called slicing and its result a slice (D3.5).
 - **D6.10** `->` is `(*p).f` and is required for pointers; `.` on a pointer is an error with a
-  hint. Through a pointer to a slice or string, `->` also reaches the `.len` and `.ptr`
-  pseudo-fields (`out->len`). Indexing through a pointer to an array or slice is written
+  hint. Through a pointer to a span or string, `->` also reaches the `.len` and `.ptr`
+  pseudo-fields (`out->len`). Indexing through a pointer to an array or span is written
   `(*p)[i]`, never `p[i]` (D10.4). Rationale: C familiarity and an explicit dereference.
 - **D6.11** Calls: arguments are matched by position; no defaults, no named arguments, no
   overloading, no variadics. An `own` parameter takes ownership of its argument (D17.5): an
@@ -429,7 +434,7 @@ Owner: `core-language.md` (Statements).
   assignment, `++`, `--`, a call, or empty; `for (;;)` is legal. The induction variable must be
   declared `mut` like any other (`for (mut i32 i = 0; i < n; i++)`); there is no exception.
   Range loop `for (T x : coll) { }` and `for (mut T x : coll) { }` where `coll` is a fixed array,
-  slice or string expression evaluated once before the loop (a fixed array is copied as a
+  span or string expression evaluated once before the loop (a fixed array is copied as a
   value); `x` is a fresh copy of each element, taken at the start of its iteration. `break` and
   `continue` target the innermost enclosing loop (`continue` in a `for` runs `step`). There is no
   labeled `break`.
@@ -484,7 +489,7 @@ Owner: `core-language.md` (Functions).
   result: `fn void main() { }`. Function-pointer types read the same way: `fn i32(i32, i32)`.
   Rationale: user choice ("fn <ret> name(params)"); the keyword makes top-level and
   statement-level parsing unambiguous while the declaration still reads like C.
-- **D8.2** Parameters are passed by value: primitives, pointers, slices and strings by copying the
+- **D8.2** Parameters are passed by value: primitives, pointers, spans and strings by copying the
   scalar or the fat pointer; structs and fixed arrays by copying the whole value. Results are
   returned by value likewise. There are no reference parameters; use `mut T*`.
 - **D8.3** No nested functions, closures, overloading, default arguments, variadics or methods.
@@ -549,7 +554,7 @@ Owner: `module-system.md`.
   spelled this became IR linkage words.
 - **D9.8** `extern fn i64 write(i32 fd, void* buf, u64 n);` declares a C function with the
   System V x86-64 ABI. Extern signatures may use only integers, floats, `bool`, `char`, enums
-  (passed as `i32`), pointers and function pointers: no slices, strings, structs or arrays, and
+  (passed as `i32`), pointers and function pointers: no spans, strings, structs or arrays, and
   no variadics. Every extern function is declared and called through a variadic LLVM function
   type (`declare i32 @printf(ptr, ...)`, called as `call i32 (ptr, ...) @printf(...)`), which
   makes the caller pass the vector-register count the ABI requires of callers of variadic
@@ -567,17 +572,18 @@ Owner: `module-system.md`.
   the vector-register count before every extern call, and extended narrow values by hand.
 - **D9.9** Internal calling convention (v1 simplification): integers, pointers, `bool`, `char`,
   enums, function pointers and floats are passed and returned in registers per System V; every
-  aggregate (struct, fixed array, slice, `string`) is passed by a hidden pointer to a caller-made
+  aggregate (struct, fixed array, span, `string`) is passed by a hidden pointer to a caller-made
   copy and returned through a hidden result pointer. Struct layout stays C-compatible, so
   pointer-based interop works. A fort function is usable as a C callback exactly when its
   signature is extern-legal, function-pointer parameters included (D3.10). In LLVM IR an
   aggregate argument is a plain `ptr` parameter, never `byval`, and an aggregate result is a
-  leading `ptr sret(%T)` parameter on a function returning `void`; a slice or `string` stays one
+  leading `ptr sret(%T)` parameter on a function returning `void`; a span or `string` stays one
   hidden pointer and is never split into two scalars, so `fort_entry`'s C prototype
-  (`const struct fort_slice*`, D11.6) is literally true. `bool`, `char`, `u8` and `u16`
+  (`const struct fort_span*`, D11.6) is literally true. `bool`, `char`, `u8` and `u16`
   parameters and results carry `zeroext`, `i8` and `i16` carry `signext`, and nothing wider
   carries an extension attribute, in fort and extern signatures alike (D9.8). Amended
-  2026-09-10 with D19: the register-level spelling of the same convention is now LLVM's job.
+  2026-09-10 with D19: the register-level spelling of the same convention is now LLVM's job, and
+  the prototype read `const struct fort_slice*` while spans were called slices (D3.5).
 - **D9.10** Whole-program compilation: the compiler walks the import closure from the entry file,
   type-checks every module, emits one LLVM IR module (D19.1), and runs `--cc` over it once to
   compile and link it with the runtime (D14.3). Interface files, separate compilation, a module
@@ -599,22 +605,23 @@ Owner: `memory-model.md`.
   so `new(T mut)` and `new(string own)` do not parse; `new(T*)` allocates one pointer slot and is
   legal. Rationale for zero-initialization: keeps "no undefined values" true at the cost of one
   `calloc`; the earlier "uninitialized" text is withdrawn. Amended 2026-09-10: the count was written
-  inside the type (`new(T[n])`), which left no spelling for one array object.
+  inside the type (`new(T[n])`), which left no spelling for one array object, and a span was called
+  a slice (D3.5).
 - **D10.3** `del(x)` frees the allocation designated by its operand, which must have an `own`
   type; the full rules, including that `del` empties an lvalue operand and that `del` of a view,
-  sub-slice, `.ptr`, stack address or literal is a compile error, are D17.9. Allocation has no
+  sub-span, `.ptr`, stack address or literal is a compile error, are D17.9. Allocation has no
   header, so `new`/`del` and C `malloc`/`free` are interchangeable; memory from C is adopted with
   `cast` (D17.3).
 - **D10.4** No pointer arithmetic: `p + 1`, `p++` and `p[i]` are errors. The only ways to get a
   pointer are `null`, `&`, `new`, `.ptr`, `cast`, a function name, and calls; the only way to
-  get a slice from a raw pointer is the two-bound form `p[lo..hi]` (D6.9); `p[lo..]`, `p[..hi]`
+  get a span from a raw pointer is the two-bound form `p[lo..hi]` (D6.9); `p[lo..]`, `p[..hi]`
   and `p[..]` are errors because a pointer has no length.
 - **D10.5** `null` is the zero pointer and function-pointer value. `== null` and `!= null` are
-  allowed only on pointers, `void*` and function pointers; slices and strings compare `.len`
+  allowed only on pointers, `void*` and function pointers; spans and strings compare `.len`
   or `.ptr`. `null` has no type of its own: it is usable only where a pointer, `void*` or
   function-pointer type is expected, so `print(null)` and `null == null` are errors.
   Dereferencing `null` is undefined behavior (a segfault in practice).
-- **D10.6** Bounds checks are performed on every index and slice operation, in every build mode;
+- **D10.6** Bounds checks are performed on every index and span operation, in every build mode;
   `--no-bounds-check` disables them for benchmarking and is documented as unsafe.
 - **D10.7** Undefined behavior in v1 is limited to: using a view, or a copy made before a
   `move` or `del`, after the allocation was freed; `del` of adopted memory (D17.3) that is not
@@ -654,7 +661,7 @@ Owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime)
   | Check                              | Message                                            |
   |------------------------------------|----------------------------------------------------|
   | index                              | `index 5 out of range for length 3` (`-1` prints signed) |
-  | slice bounds                       | `slice bounds 2..7 out of range for length 3`      |
+  | span bounds                        | `span bounds 2..7 out of range for length 3`       |
   | overflow of `+ - *`, `++`, `--`, unary `-` | `integer overflow`                         |
   | shift count                        | `shift count 64 out of range for i64`              |
   | division or remainder by zero      | `division by zero`                                 |
@@ -668,7 +675,8 @@ Owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime)
   conforming body never reaches it. `<file>` is the path the compiler opened (search
   root as given plus the relative module path); the column of a check is that of its operator
   token, or of the builtin's name for `new`, `assert` and `panic`; the `assert` text is the
-  source text of the expression, verbatim.
+  source text of the expression, verbatim. Amended 2026-09-10: the bounds message read `slice
+  bounds ...` while spans were called slices (D3.5).
 - **D11.5** Output buffering: `print`/`println` write to a runtime buffer for stdout;
   `eprint`/`eprintln` are unbuffered; `fprint`/`fprintln` use one runtime buffer per descriptor,
   and `fprint(1, ...)` shares the stdout buffer with `print`. An `extern` write to a descriptor
@@ -678,9 +686,10 @@ Owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime)
   which is how a library call flushes a buffer the runtime owns.
 - **D11.6** Process start: the C runtime owns `main(argc, argv)`, builds `string@ args`, calls
   the compiler-emitted `fort_entry(args)`, flushes, and exits with `status & 0xFF`.
-  `fort_entry` takes the argument slice by pointer and is the one compiler-emitted exception to
+  `fort_entry` takes the argument span by pointer and is the one compiler-emitted exception to
   D9.8's ban on aggregates at the C boundary; `toolchain.md` fixes its C prototype and the names
-  of every other runtime entry point.
+  of every other runtime entry point. Amended 2026-09-10: the prototype took a `const struct
+  fort_slice*` and the failure was `fort_rt_fail_slice`, while spans were called slices (D3.5).
 - **D11.7** Value formatting by the print family: integers in decimal; `bool` as `true`/`false`;
   `char` as its byte; `u8` as a number; enums as the member name, or the number if no member
   matches; pointers, `void*` and function pointers as `0x` plus lowercase hex (`0x0` for
@@ -729,8 +738,9 @@ Owner: `stdlib.md`.
 - **D13.3** Error handling idiom (the earlier TBD): functions return `bool` or an error enum, with
   results delivered through `mut T*` out-parameters; `-1`/`null` sentinels where conventional;
   `panic` for programming errors; `defer` for cleanup. No `Result` type in v1.
-- **D13.4** The stdlib never passes slices, strings or structs across an `extern` boundary; it
+- **D13.4** The stdlib never passes spans, strings or structs across an `extern` boundary; it
   unpacks `.ptr` and `.len`. Functions that hand a path to C copy it into a NUL-terminated buffer.
+  Amended 2026-09-10: spans were called slices (D3.5).
 - **D13.5** Ownership in the library (D17): every function that allocates returns an `own`
   value (`str.dup`, `str.concat` and `strbuf.take` return `string own`, exact length, no NUL;
   `str.to_cstr` returns `char mut@ own` with a trailing NUL) or delivers it through an `own`
@@ -774,7 +784,7 @@ Owner: `toolchain.md`.
 - **D14.4** Language tests live under `test/lang/`: `run/<area>/NNN_name.ft` (compile, run,
   compare), `fail/<area>/NNN_name.ft` (must not compile), where `<area>` is one of `lexical
   constants operators casts mutability ownership declarations control switch defer functions
-  structs enums arrays slices strings pointers globals builtins errors modes modules ffi stdlib`,
+  structs enums arrays spans strings pointers globals builtins errors modes modules ffi stdlib`,
   plus
   `run/modules/<name>/main.ft` and
   `fail/modules/<name>/main.ft` for multi-file tests (the harness compiles `main.ft` with the
@@ -814,14 +824,14 @@ Deferred deliberately. The specification lists each with the idiom to use instea
 Generics; untagged unions (idiom: a fat struct with a kind field); tagged unions and `Result`
 (idiom: D13.3); methods; closures and nested functions; variadic functions; overloading; default
 and named arguments; visibility modifiers; type aliases; integer-range `for`; struct, array and
-slice equality; definite-assignment analysis (idiom: initialize with `{}` or a sentinel);
+span equality; definite-assignment analysis (idiom: initialize with `{}` or a sentinel);
 alignment and packed attributes (idiom: an opaque `u8[N]` field and a C shim); separate
 compilation and interface files; conditional compilation; labeled `break` (idiom: a flag or a
 helper function); raw strings; a blank identifier; compile-time function evaluation; `alignof`;
 `sizeof(expr)`; array suffixes after a trailing pointer suffix (`i32[4]*[2]`, idiom: a struct);
 string `switch`; linear ownership, that is compile-time detection of leaks and of use after
 `move` (idiom: `defer del`, and the zeroing that `move` and `del` leave behind, D17); `goto`
-(never).
+(never). Amended 2026-09-10: spans were called slices (D3.5).
 
 Deferred on the toolchain side (user decision, 2026-09-10): building the module in process
 through the LLVM C API, and everything that would come with it (a JIT, per-function control of
@@ -836,13 +846,14 @@ Findings from the design reviews that look like bugs but are deliberate.
 
 - Level-0 mutability is excluded from the monotone drop rule (D5.4) on purpose: the receiving
   variable's own mutability cannot alias anything.
-- `.len` of a slice is `u64` and nothing converts implicitly, so `for (u64 mut i = 0; ...)` is the
-  idiom; `.len` of a fixed array is an untyped constant precisely to soften this.
+- `.len` of a span is `u64` and nothing converts implicitly, so `for (u64 mut i = 0; ...)` is the
+  idiom; `.len` of a fixed array is an untyped constant precisely to soften this. Amended
+  2026-09-10: spans were called slices (D3.5).
 - `print('a')` prints `a` and `print(cast('a', u8))` prints `97`, because `char` is distinct.
 - `new(T)` returns `T mut* own` (D17.3); the earlier example `Point* p = new(Point);
   p->x = 10;` is now an error and must read `point mut* own p`.
 - `for (i32 i = 0; ...)` is an error; the induction variable needs `mut`.
-- Unsigned subtraction traps in checked mode (`len - 1` on an empty slice); test before
+- Unsigned subtraction traps in checked mode (`len - 1` on an empty span); test before
   subtracting or use `-%` when wrapping is intended.
 - `defer` captures nothing; after `defer del(p);`, a later `del(p); p = move(q);` frees `q`.
 - `break` inside a `switch` inside a loop exits the switch, not the loop.
@@ -894,16 +905,17 @@ decision or document says ownership is "by convention", this section supersedes 
   `del(buf)` require (D17.9). Each `own` marks one reference only: the safe failure mode for `node*
   mut@ own kids` is that `del(kids[i])` does not compile when the nodes belong to someone else (an
   arena, say). Amended 2026-09-10 with D5.3: until then an `own` before the base type marked the
-  outermost reference and `node* own p` was an error.
+  outermost reference and `node* own p` was an error. Amended 2026-09-10, separately: spans were
+  called slices (D3.5).
 
   | Declaration                    | Meaning                                                  |
   |--------------------------------|----------------------------------------------------------|
-  | `u8 mut@ own buf`              | owned slice of writable bytes                            |
-  | `u8@ own data`                 | owned slice, read-only through this binding              |
+  | `u8 mut@ own buf`              | owned span of writable bytes                             |
+  | `u8@ own data`                 | owned span, read-only through this binding               |
   | `node mut* own n`              | owned writable node; `n` itself is fixed                 |
-  | `node* mut@ own items`         | owned slice of borrowed pointers, entries assignable     |
-  | `node mut* own mut@ own kids`  | owned slice of owned writable nodes, entries assignable  |
-  | `node* own@ view`              | borrowed slice of owned nodes                            |
+  | `node* mut@ own items`         | owned span of borrowed pointers, entries assignable      |
+  | `node mut* own mut@ own kids`  | owned span of owned writable nodes, entries assignable   |
+  | `node* own@ view`              | borrowed span of owned nodes                             |
   | `u8 mut@ own mut* out`         | borrowed pointer to an owned slot (an out-parameter)     |
   | `string own name`              | owned immutable characters (`str.dup`, `strbuf.take`)    |
 
@@ -911,9 +923,9 @@ decision or document says ownership is "by convention", this section supersedes 
   that is not itself `own`, `mut` or a reference to `void` (`new(u8[4], n)` is `u8[4] mut@ own`,
   `new(node* own, n)` is `node mut* own mut@ own` whose slots are null; the result is always `own`
   and writable at every level, D5.8); standard-library functions that allocate return `own` (D13.5).
-  `cast` may add `own` to a pointer or slice, adopting memory that came from C (`cast(p, u8 mut*
+  `cast` may add `own` to a pointer or span, adopting memory that came from C (`cast(p, u8 mut*
   own)` for a `void*` from an extern that does not say `own`, the same unsafe escape as adding
-  `mut`), and may drop it; the target type of a cast decides (D3.14). Slicing (`buf[..]`,
+  `mut`), and may drop it; the target type of a cast decides (D3.14). Span expressions (`buf[..]`,
   `buf[lo..hi]`) and `.ptr` always yield views, as do `&`, literals and the runtime's `args`.
   Amended 2026-09-10: the count moved out of the type, `new(T[n])` to `new(T, n)`.
 - **D17.4** Lending. `own X` converts implicitly to `X` wherever a value meets an expected type,
@@ -947,19 +959,19 @@ decision or document says ownership is "by convention", this section supersedes 
 - **D17.8** Temporaries must land. An `own` rvalue may only be bound to an `own` place, passed
   to an `own` parameter, or `del`ed. Anything else is a compile error ("owning temporary would
   leak"), because nothing could ever `del` it: converting or casting it to a non-`own` type
-  (`node mut* n = new(node);`, `use(str.dup(x))`, `cast(new(node), node*)`), slicing, indexing or
-  taking `.ptr` of it (`new(u8, 8)[..4]`, `new(i32, 2)[0]`), accessing a field of an owning
-  aggregate rvalue, and discarding it as an expression statement (`move(x);`, `str.dup(s);`).
+  (`node mut* n = new(node);`, `use(str.dup(x))`, `cast(new(node), node*)`), taking a span of it,
+  indexing or taking `.ptr` of it (`new(u8, 8)[..4]`, `new(i32, 2)[0]`), accessing a field of an
+  owning aggregate rvalue, and discarding it as an expression statement (`move(x);`, `str.dup(s);`).
 - **D17.9** `del(x)` requires an `own` operand of any mutability: an `own` pointer, `void* own`,
-  `own` slice or `string own`, as an lvalue or an rvalue. On an lvalue, `del` empties the operand
+  `own` span or `string own`, as an lvalue or an rvalue. On an lvalue, `del` empties the operand
   under the rules of D17.6, with the same mutability requirement through indirections; on an
-  rvalue it only frees. `del(null)` (the literal adopts `void* own`) and `del` of a zero slice or
+  rvalue it only frees. `del(null)` (the literal adopts `void* own`) and `del` of a zero span or
   string are no-ops, so
   `del(buf); del(buf);` frees once, and a use after `del` or `move` dereferences `null`. `del`
-  of a view, a sub-slice, a `.ptr`, a stack address or a literal is a compile error, because
+  of a view, a sub-span, a `.ptr`, a stack address or a literal is a compile error, because
   none of them has an `own` type. This supersedes the earlier "del does not null its argument".
 - **D17.10** Loops. The collection expression of a range `for` lends: an owning collection
-  (an `own` slice, or an owning fixed array) is iterated in place, never moved or copied. The
+  (an `own` span, or an owning fixed array) is iterated in place, never moved or copied. The
   loop variable's type is the element type with its outermost `own` removed (`for (node mut* c
   : kids)` over `node mut* own mut@ own kids`); declaring it `own` is an error, and elements that
   are owning aggregates cannot be copied into a loop variable at all, so such a collection is
@@ -1031,19 +1043,20 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   `float` and `double`. Every pointer, `void*` and function pointer is the opaque `ptr` (D3.11,
   D3.10); the pointee type is the compiler's business and appears only on the instructions that
   need it, so a function pointer is a `ptr` and a call through one an ordinary `call`. `T[N]` is
-  `[N x T]` (D3.4); a slice and `string` are the one type `%fort.slice = type { ptr, i64 }`
+  `[N x T]` (D3.4); a span and `string` are the one type `%fort.span = type { ptr, i64 }`
   (D3.5, D3.7); a struct is `%struct.<dotted name>` with its fields in declaration order and
   never `packed`, because LLVM lays that type out exactly as C does (D3.8); an enum is `i32`
   (D3.9); `void` is `void` and only a result type. Float to integer uses the saturating
-  intrinsics of D3.14 and every other conversion the obvious cast instruction.
-- **D19.3** Aggregates live in memory. Only scalars are SSA values: a struct, fixed array, slice
+  intrinsics of D3.14 and every other conversion the obvious cast instruction. Amended 2026-09-10:
+  the IR type was `%fort.slice` while spans were called slices (D3.5).
+- **D19.3** Aggregates live in memory. Only scalars are SSA values: a struct, fixed array, span
   or `string` always occupies a place (an `alloca`, a global, or memory reached through a `ptr`)
   and is never loaded or stored as one value, so the emitter never writes `insertvalue` or
   `extractvalue` on a fort aggregate (its only `extractvalue` takes apart the `{iN, i1}` that an
   overflow intrinsic returns, D19.6). Copying an aggregate is `llvm.memcpy`, zeroing one is
   `llvm.memset` and reaching a field or element is `getelementptr`. This is D9.9's model spelled
   in IR, and it is what keeps code generation one tree walk with a destination place per
-  expression (D19.1).
+  expression (D19.1). Amended 2026-09-10: spans were called slices (D3.5).
 - **D19.4** Entry-block allocas and SSA discipline. Every local, parameter copy and compiler
   temporary is an `alloca` in the entry block, before any other instruction and in declaration
   order, because LLVM's promotion passes look only there; no `alloca` is variable-length (array
@@ -1091,7 +1104,7 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   The failure entry points are declared `cold noreturn nounwind`: `noreturn` is truthful, since
   every one of them is `_Noreturn` and aborts, and `cold` lays the block out of line, which is
   what the out-of-line failure stubs used to do. `--no-bounds-check` removes exactly the index
-  and slice branches (D10.6).
+  and span branches (D10.6).
 - **D19.7** The trap D8.5 requires after the body of a `noreturn` function and after every call
   to one is `call void @llvm.trap()` followed by `unreachable`. `llvm.trap` is `ud2` on x86-64,
   so D11.4's SIGILL with no message is unchanged; `unreachable` alone is not a trap, since LLVM

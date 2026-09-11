@@ -87,8 +87,8 @@ static void dump_suffix(const ast_node_t* n, sb_t* out) {
     case SUFFIX_PTR:
         sexp_open(out, "ptr");
         break;
-    case SUFFIX_SLICE:
-        sexp_open(out, "slice");
+    case SUFFIX_SPAN:
+        sexp_open(out, "span");
         break;
     case SUFFIX_ARRAY:
         sexp_open(out, "array");
@@ -299,7 +299,7 @@ static void dump_expr(const ast_node_t* n, sb_t* out) {
         }
         break;
     case AST_TERNARY:
-    case AST_SLICE:
+    case AST_SPAN:
         sexp_open(out, ast_kind_name(n->kind));
         sexp_child(n->a, out);
         sexp_child(n->b, out);

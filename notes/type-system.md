@@ -22,7 +22,7 @@ All types are resolved at compile time. There is no run-time type information, n
 | opaque pointer   | `void*`, `void* own` | reference  | 8             | `null`      | D3.11    |
 | function pointer | `fn R(P1, P2)`    | reference     | 8             | `null`      | D3.10    |
 | fixed array      | `T[N]`            | aggregate     | `N*sizeof(T)` | all zero    | D3.4     |
-| slice            | `T@`, `T@ own`    | reference     | 16            | `{null, 0}` | D3.5     |
+| span             | `T@`, `T@ own`    | reference     | 16            | `{null, 0}` | D3.5     |
 | string           | `string`, `string own` | reference | 16           | `{null, 0}` | D3.7     |
 | struct           | `name`            | aggregate     | fields, padded| all zero    | D3.8     |
 | enum             | `name`            | scalar        | 4             | `0`         | D3.9     |
@@ -32,8 +32,8 @@ The three kinds differ in what a copy means:
 - A **scalar** is copied as a machine word; the copy is independent of the original.
 - An **aggregate** (struct, fixed array) is a value: assignment, argument passing and `return`
   copy every field or element (D3.4, D3.8, D8.2).
-- A **reference** value (pointer, `void*`, function pointer, slice, `string`) is itself copied by
-  value, but the copy designates the same target storage as the original. Two slices obtained from
+- A **reference** value (pointer, `void*`, function pointer, span, `string`) is itself copied by
+  value, but the copy designates the same target storage as the original. Two spans obtained from
   one `new` alias the same elements; two pointers to one variable alias that variable.
 
 A reference type other than a function pointer may be qualified `own` (section 8): `T* own`,
@@ -42,7 +42,7 @@ of a live allocation that `del` may free; it changes neither size, layout nor ze
 is part of the type, and copying an `own` value out of a variable is written `move` (D17.1,
 D17.5). A struct or array that contains an `own` reference is an owning aggregate (section 8.5).
 
-The zero value is what `= {}` produces for aggregates, slices, strings and enums (D6.5), what
+The zero value is what `= {}` produces for aggregates, spans, strings and enums (D6.5), what
 `new` fills allocations with (D10.2), and what a zeroed scalar field holds.
 
 `noreturn` is a return type, not a type (D8.5): `noreturn x = ...;` does not parse.
@@ -128,7 +128,7 @@ void[4] a = {};                      // error: void is not an element type
 u64 n = sizeof(void);                // error: sizeof(void) (D3.15)
 ```
 
-## 3. Arrays, slices and strings
+## 3. Arrays, spans and strings
 
 ### 3.1 Fixed arrays `T[N]`
 
@@ -136,7 +136,7 @@ u64 n = sizeof(void);                // error: sizeof(void) (D3.15)
 (D4.6) greater than 0. Arrays of different lengths are different types. A fixed array is a
 value: assignment, argument passing and `return` copy all `N` elements (D8.2). `a.len` is an
 untyped integer constant equal to `N` (D3.4, D4.6). A fixed array has no `.ptr`; obtain a
-pointer to an element with `&a[i]` or a slice with `a[lo..hi]` (D6.9). A constant index that is
+pointer to an element with `&a[i]` or a span with `a[lo..hi]` (D6.9). A constant index that is
 out of range or negative is a compile error (D6.8, D4.1); any other index is checked at run time.
 
 ```fort
@@ -154,21 +154,21 @@ bool same = a == b;                  // error: no == on fixed arrays (D3.13)
 Array literals are `i32[3]{1, 2, 3}` anywhere, `{1, 2, 3}` as the initializer of a declaration of
 array type, and `{}` for all-zero (D6.5). A literal must supply exactly `N` elements or be empty.
 
-### 3.2 Slices `T@`
+### 3.2 Spans `T@`
 
-A slice is a fat pointer `{T* ptr; u64 len}` designating `len` elements of `T` that live
-elsewhere; whether it owns them is part of its type (D3.5): a slice from `new` is `own` and a
-slice made by slicing is a view (section 8.3). All slices with the same element type, the same
-element mutability and the same ownership are one type. The zero value is `{null, 0}`. Slices
-come from `new(T, n)` (D10.2), from slicing an array, slice, string or pointer (D6.9), from the
-runtime (`string@ args`, D8.6) and from the zero initializer `{}`. There is no slice literal.
+A span is a fat pointer `{T* ptr; u64 len}` designating `len` elements of `T` that live
+elsewhere; whether it owns them is part of its type (D3.5): a span from `new` is `own` and a
+span taken of something is a view (section 8.3). All spans with the same element type, the same
+element mutability and the same ownership are one type. The zero value is `{null, 0}`. Spans
+come from `new(T, n)` (D10.2), from a span of an array, span, string or pointer (D6.9), from the
+runtime (`string@ args`, D8.6) and from the zero initializer `{}`. There is no span literal.
 
 `.len` (type `u64`) and `.ptr` are read-only pseudo-fields (D3.5). `s.ptr` is a pointer to the
-element type whose target has the mutability of the slice's elements and which is never `own`
+element type whose target has the mutability of the span's elements and which is never `own`
 itself (D17.3): textually, delete the trailing `@` together with any `own` or `mut` that follows
 it, and append `*`.
 
-| Slice type      | `.ptr` type   | Slice type               | `.ptr` type          |
+| Span type       | `.ptr` type   | Span type                | `.ptr` type          |
 |-----------------|---------------|--------------------------|----------------------|
 | `i32@`          | `i32*`        | `node* mut@`             | `node* mut*`         |
 | `i32 mut@`      | `i32 mut*`    | `node mut*@`             | `node mut**`         |
@@ -185,9 +185,9 @@ u64 n = s.len;                       // 8
 i32 mut* p = s.ptr;                  // a view of the elements
 i32 mut* own q = s.ptr;              // error: .ptr is a view; cannot add own
 i32@ e = {};                         // {null, 0}
-i32@ u = {1, 2, 3};                  // error: there is no slice literal
+i32@ u = {1, 2, 3};                  // error: there is no span literal
 s.len = 4;                           // error: .len is not an lvalue (D6.7)
-bool same = s == t;                  // error: no == on slices (D3.13)
+bool same = s == t;                  // error: no == on spans (D3.13)
 ```
 
 ### 3.3 Reading type suffixes
@@ -195,7 +195,7 @@ bool same = s == t;                  // error: no == on slices (D3.13)
 A type is `base_type [own] [mut] { ref_suffix } { array_suffix } { ref_suffix }`, where a
 `ref_suffix` is `*` or `@` followed by its own optional `own` and `mut` (grammar section 4). A
 reference suffix applies to everything to its left, so a sequence of them reads inside-out
-(`node**` is a pointer to a pointer, `node*@` a slice of pointers, `u8@*` a pointer to a slice);
+(`node**` is a pointer to a pointer, `node*@` a span of pointers, `u8@*` a pointer to a span);
 fixed-array suffixes form one group that reads outside-in like C declarators (`i32[3][4]` is
 three arrays of four); reference suffixes before the group make arrays of references
 (`node*[16]`, `node@[4]`) and after it references to the whole array (`i32[4]*`, `i32[4]@`); and
@@ -208,21 +208,21 @@ position being the binding's (sections 7.3 and 8.2).
 | `node*[16]`              | array of 16 pointers to `node`                       | 128      |
 | `node**`                 | pointer to a pointer to `node`                       | 8        |
 | `i32[3][4]`              | 3 arrays of 4 `i32`; `a[i][j]` with `i < 3`, `j < 4` | 48       |
-| `i32[4]@`                | slice whose elements are `i32[4]`                    | 16       |
-| `i32@[4]`                | array of 4 slices of `i32`                           | 64       |
-| `i32@@`                  | slice whose elements are slices of `i32`             | 16       |
-| `node* mut@`             | slice of mutable slots, each holding a `node*`       | 16       |
-| `u8@*`                   | pointer to a slice header of `u8`                    | 8        |
+| `i32[4]@`                | span whose elements are `i32[4]`                     | 16       |
+| `i32@[4]`                | array of 4 spans of `i32`                            | 64       |
+| `i32@@`                  | span whose elements are spans of `i32`               | 16       |
+| `node* mut@`             | span of mutable slots, each holding a `node*`        | 16       |
+| `u8@*`                   | pointer to a span header of `u8`                     | 8        |
 | `i32[4]*`                | pointer to a whole `i32[4]`                          | 8        |
-| `node*@*`                | pointer to a slice of `node*`                        | 8        |
+| `node*@*`                | pointer to a span of `node*`                         | 8        |
 | `fn i32(i32)[4]`         | array of 4 pointers to functions `fn i32(i32)`       | 32       |
 | `fn i32[4](i32)`         | pointer to a function taking `i32`, returning `i32[4]`| 8       |
 | `fn i32(i32)*`           | pointer to a slot holding a function pointer         | 8        |
 | `void*[2]`               | array of 2 opaque pointers                           | 16       |
-| `u8 mut@ own`            | owned slice of writable bytes                        | 16       |
-| `node mut* own mut@ own` | owned slice of owned pointers to mutable nodes       | 16       |
-| `node* own@`             | borrowed slice whose slots hold owned pointers       | 16       |
-| `u8 mut@ own mut*`       | borrowed pointer to a slot holding an owned slice    | 8        |
+| `u8 mut@ own`            | owned span of writable bytes                         | 16       |
+| `node mut* own mut@ own` | owned span of owned pointers to mutable nodes        | 16       |
+| `node* own@`             | borrowed span whose slots hold owned pointers        | 16       |
+| `u8 mut@ own mut*`       | borrowed pointer to a slot holding an owned span     | 8        |
 | `node* own[4]`           | array of 4 owned pointers: an owning aggregate       | 32       |
 | `i32[4]*[2]`             | error: no array suffix after a reference suffix      |          |
 | `i32 mut[4]`             | error: mark the array after its length, `i32[4] mut` |          |
@@ -230,20 +230,20 @@ position being the binding's (sections 7.3 and 8.2).
 | `node*[4] own`           | error: `own` never follows a fixed-array suffix      |          |
 | `node own*`              | error: `own` marks a reference, not the base type    |          |
 
-`new(i32[4], n)` returns `i32[4] mut@ own`: an owned slice of `n` rows of four (D3.6, D10.2,
+`new(i32[4], n)` returns `i32[4] mut@ own`: an owned span of `n` rows of four (D3.6, D10.2,
 D17.3).
 
 ### 3.4 `string`
 
-`string` is a distinct type with the layout of an immutable slice of `char`,
-`{char* ptr; u64 len}` (D3.7). String literals have type `string` and are stored in read-only
-memory followed by one NUL byte that `len` does not count; a literal's `.ptr` can therefore be
-handed to C directly. Sub-strings are not NUL-terminated. Indexing yields `char`, slicing yields
-`string`, `.len` is `u64` and `.ptr` is `char*`. `==` and `!=` compare `len` first and then the
-bytes, so the zero string `{null, 0}` equals `""`; only `.ptr == null` tells them apart (D3.7,
-D10.5). Bytes are UTF-8 by convention and never validated. There is no `+`; `std::str` and
-`std::strbuf` concatenate and return the owned form `string own` (D3.7, D13.2, section 8.6).
-Characters of a string are never mutable (D5.2), whether or not the string is `own`.
+`string` is a distinct type with the layout of an immutable span of `char`, `{char* ptr; u64 len}`
+(D3.7). String literals have type `string` and are stored in read-only memory followed by one NUL
+byte that `len` does not count; a literal's `.ptr` can therefore be handed to C directly.
+Sub-strings are not NUL-terminated. Indexing yields `char`, a span of a `string` is a `string`,
+`.len` is `u64` and `.ptr` is `char*`. `==` and `!=` compare `len` first and then the bytes, so the
+zero string `{null, 0}` equals `""`; only `.ptr == null` tells them apart (D3.7, D10.5). Bytes are
+UTF-8 by convention and never validated. There is no `+`; `std::str` and `std::strbuf` concatenate
+and return the owned form `string own` (D3.7, D13.2, section 8.6). Characters of a string are never
+mutable (D5.2), whether or not the string is `own`.
 
 ```fort
 string s = "hello";                  // storage: h e l l o NUL; s.len == 5
@@ -268,7 +268,7 @@ del(s);                              // error: 's' is a string, not a string own
 are laid out in declaration order with natural alignment and the size is rounded up to the
 struct's alignment (the largest field alignment), exactly as the System V C ABI lays out the same
 C struct. A struct has no methods and no inheritance. An empty struct is an error. A struct may
-contain itself only through a pointer or a slice; containment by value is an "infinite size"
+contain itself only through a pointer or a span; containment by value is an "infinite size"
 error (D3.8, D7.10). Structs are values (section 1) and support neither `==` nor `!=` (D3.13).
 
 ```fort
@@ -294,7 +294,7 @@ struct rec {
 struct empty { }                     // error: empty struct
 struct loop { i32 v; loop next; }    // error: struct loop has infinite size
 struct list { i32 v; list* next; }   // ok: self-reference through a pointer
-struct tree { i32 v; tree@ kids; }   // ok: self-reference through a slice
+struct tree { i32 v; tree@ kids; }   // ok: self-reference through a span
 struct vec { i32 mut@ own data; u64 len; }   // ok: an owning struct (section 8.5)
 rec a = rec{1, 2, 3, 4.0};           // positional: every field, in order
 rec b = rec{.x = 1.0, .tag = 7};     // designated: any order, omitted fields zero
@@ -379,10 +379,10 @@ fn i32(i32, i32) own u = add;        // error: own on a function-pointer type
 ### 5.2 `void*`
 
 `void*` is an opaque pointer with a single storage level: it cannot be dereferenced, cannot reach
-fields, and cannot be indexed or sliced (D3.11, D5.2). Every conversion to or from `void*`
-requires `cast` (D3.14); `== null` is allowed (D10.5). `void* own` is its owned form (D17.1):
-`del` accepts it, a `cast` between it and a typed pointer yields `own` exactly when the target
-says `own` (D3.14, section 9.2), and it is the type C's `malloc` and `free` are declared with
+fields, cannot be indexed and has no span expression (D3.11, D5.2). Every conversion to or from
+`void*` requires `cast` (D3.14); `== null` is allowed (D10.5). `void* own` is its owned form
+(D17.1): `del` accepts it, a `cast` between it and a typed pointer yields `own` exactly when the
+target says `own` (D3.14, section 9.2), and it is the type C's `malloc` and `free` are declared with
 (section 11.2).
 
 ```fort
@@ -392,7 +392,7 @@ void* w = &x;                        // error: pointer to void* requires cast
 i32 v = *vp;                         // error: void* cannot be dereferenced
 i32 f = vp->x;                       // error: void* has no fields
 i32 g = vp[0];                       // error: void* cannot be indexed
-i32@ h = vp[0..1];                   // error: void* cannot be sliced
+i32@ h = vp[0..1];                   // error: cannot take a span of a void*
 i32 mut* back = cast(vp, i32 mut*);
 u64 addr = cast(vp, u64);
 bool isnull = vp == null;
@@ -411,7 +411,7 @@ Two types are identical when (D3.12):
 | primitive        | same name                                                              |
 | struct, enum     | same declaration (nominal); `m.vector` and `vector` inside `m` agree   |
 | fixed array      | identical element type and equal length                                |
-| slice            | identical element type, element mutability (level 1) and `own` mark    |
+| span             | identical element type, element mutability (level 1) and `own` mark    |
 | pointer          | identical pointee type, level-1 mutability and `own` mark              |
 | `void*`          | same `own` mark                                                        |
 | function type    | structurally, as in section 5.1, `own` marks included                  |
@@ -433,7 +433,7 @@ p2 b = a;                            // error: p1 is not p2, even with the same 
 
 `==` and `!=` are defined on integers, floats, `bool`, `char`, enums, pointers (address
 identity), `void*`, function pointers (identity) and `string` (contents). They are compile errors
-on structs, fixed arrays and slices (D3.13). Both operands must have identical types, including
+on structs, fixed arrays and spans (D3.13). Both operands must have identical types, including
 mutability levels, because the implicit drop of section 7.4 does not apply to comparison operands
 (D6.2); an untyped constant takes the other operand's type (D4.1), and `null` takes the type of
 a pointer operand (D10.5).
@@ -458,7 +458,7 @@ node* own k = m;                     // error: node* own is not node*; cast adop
 ### 7.1 Immutable by default
 
 Everything is immutable unless marked `mut`: variables, parameters, the targets of pointers and
-the elements of slices (D5.1). Struct fields and array elements share the mutability of the value
+the elements of spans (D5.1). Struct fields and array elements share the mutability of the value
 that contains them.
 
 ```fort
@@ -477,7 +477,7 @@ section 3.3: because reference suffixes read inside-out, the last reference suff
 level 1, the one before it level 2, and so on, whether it is a `*` or an `@`. Fixed arrays and
 structs add no level: their elements and fields live in the storage of the containing value.
 `string` has exactly one level (its characters are never mutable) and so does `void*` and every
-function type. Each `*` and `@` also introduces a reference, the pointer or slice header stored
+function type. Each `*` and `@` also introduces a reference, the pointer or span header stored
 at the level just outside the one it reaches; references, not levels, carry the `own` mark
 (section 8.2).
 
@@ -489,7 +489,7 @@ at the level just outside the one it reaches; references, not levels, carry the 
 | `i32@ s`        | `s`        | `s[i]`                      |                        |
 | `i32@@ s`       | `s`        | `s[i]` (an `i32@` header)   | `s[i][j]`              |
 | `node*@ t`      | `t`        | `t[i]` (a `node*` slot)     | `*t[i]`, `t[i]->f`     |
-| `u8@* out`      | `out`      | `*out` (a slice header)     | `(*out)[i]`            |
+| `u8@* out`      | `out`      | `*out` (a span header)      | `(*out)[i]`            |
 | `i32[4]* pa`    | `pa`       | `*pa`, `(*pa)[i]`           |                        |
 | `i32[3][4] m`   | `m`, `m[i][j]` |                         |                        |
 | `point q`       | `q`, `q.x` |                             |                        |
@@ -499,7 +499,7 @@ at the level just outside the one it reaches; references, not levels, carry the 
 
 A `mut` marks the storage of the type element it follows (D5.3): after the base type, values of
 that type; after a `*`, the pointer that suffix introduces, that is, the storage holding it;
-after an `@`, the slice header; after a fixed-array suffix, the array, whose elements share its
+after an `@`, the span header; after a fixed-array suffix, the array, whose elements share its
 storage, so `i32[4] mut a` marks both and `i32 mut[4]` is an error ("mark the array after its
 length"). Nothing precedes the base type, so `mut node* p` does not parse. Each storage level
 has exactly one position, therefore every type has exactly one spelling and a doubled marker
@@ -562,7 +562,7 @@ The last four rows carry `own` marks (section 8) and read exactly like their unq
 `s[i]` and a cell `s[i][j]` are both at level 1. In `node*[4] mut a` the `[4]` adds no level
 either, so the slots are level 0 and the `mut` after the array's length makes the binding, and
 with it every slot, assignable. In `u8@ mut* out` the `mut` after the `*` marks the storage that
-holds the pointer, which is `out` itself; the slice header `*out` is level 1 and writable because
+holds the pointer, which is `out` itself; the span header `*out` is level 1 and writable because
 the `*` reaches it.
 
 Rationale (D5.3): this is C's east-const (`int const x`, `node const* p`, `node* const p`) with
@@ -628,7 +628,7 @@ struct node {
     node mut* next;                  // *next is writable through any node, even an immutable one
     node* prev;                      // *prev is read-only
     i32 mut@ items;                  // elements writable
-    u8 mut@ own name;                // an owned slice; node is now an owning aggregate
+    u8 mut@ own name;                // an owned span; node is now an owning aggregate
 }
 struct b1 { i32 mut x; }             // error: 'mut' on the field's own storage
 struct b2 { node* mut next; }        // error: 'mut' on the field's own storage
@@ -672,7 +672,7 @@ An lvalue (D6.7) is mutable according to the table below (D5.7). Assignment, com
 | module constant `K`, global `g` | `g` was declared `mut`; `K` never (addressable, D7.10)  |
 | `*p`, `p->f`                  | level 1 of `p`'s type is mutable                          |
 | `e.f`, `e[i]` on a fixed array| `e` is a mutable lvalue                                   |
-| `s[i]` on a slice             | level 1 of `s`'s type is mutable                          |
+| `s[i]` on a span              | level 1 of `s`'s type is mutable                          |
 | `str[i]` on a string          | never                                                     |
 | `(e)`                         | as `e`                                                    |
 | `s.len`, `s.ptr`, `a.len`     | not lvalues                                               |
@@ -736,7 +736,7 @@ i32* r = &(1 + 2);                   // error: & requires an lvalue
 
 ### 7.9 The shallow model
 
-Immutability of a variable never propagates through a pointer or slice it contains; the levels
+Immutability of a variable never propagates through a pointer or span it contains; the levels
 behind an indirection are fixed by the type alone (D5.9).
 
 ```fort
@@ -755,7 +755,7 @@ n.next->value = 1;                   // ok: level 1 of the field type is mutable
 
 ### 8.1 The `own` qualifier
 
-A pointer, `void*`, slice or `string` type may be qualified `own` (D17.1): `T* own`,
+A pointer, `void*`, span or `string` type may be qualified `own` (D17.1): `T* own`,
 `void* own`, `T@ own`, `string own`. The qualifier states that the reference designates the
 start of a live allocation obtained from `new`, or adopted with `cast` (section 9.2), and that
 `del` on it is meaningful (`core-language.md` 8.2). It changes nothing at run time: an `own`
@@ -779,14 +779,14 @@ node* own c = b;                     // error: cannot add own implicitly; cast a
 
 ### 8.2 Placement and levels
 
-Each `*` and `@` suffix introduces a reference, a pointer or a slice header, that is stored at
+Each `*` and `@` suffix introduces a reference, a pointer or a span header, that is stored at
 the level just outside the level the suffix reaches (section 7.2); the outermost reference is
 stored at level 0, in the binding. `own` marks references, not levels (D17.2): an `own` follows
 the `*` or `@` whose reference it marks as owning its target, and `string`, a reference without a
 suffix (section 3.4), takes it directly (`string own name`). In a position it precedes `mut`
 (`node* own mut p`), and nothing precedes the base type.
 
-Each `own` marks one reference: in `node* mut@ own items` the slice is owned and the pointers in
+Each `own` marks one reference: in `node* mut@ own items` the span is owned and the pointers in
 it are borrowed, the safe reading when the nodes belong to an arena. Because the outermost
 reference is the one the binding holds, the `own` immediately before the name is what `del(x)`
 requires. An `own` never follows a non-reference base type (`node own*`) nor a fixed-array suffix
@@ -830,12 +830,14 @@ i32 own w = 1;                       // error: own on a non-reference type
 `new(T)` yields `T mut* own`, `new(T, n)` yields `T mut@ own`, `new(T[K], n)` yields
 `T[K] mut@ own`, and standard-library functions that allocate return `own` (D17.3, D13.5).
 `cast` may add `own` to a reference, adopting memory (section 9.2). Everything else yields a
-view: slicing, `.ptr`, `&`, literals and the runtime's `args` never produce an `own` reference,
+view: a span expression, `.ptr`, `&`, literals and the runtime's `args` never produce an `own`
+reference,
 although the `own` marks inside the element or pointee type survive. An `own` rvalue must land
 in an `own` place (a declaration, an assignment target, an `own` parameter, an `own` field or
 element of a literal, a `return`) or be freed with `del`; anything else is the error "owning
 temporary would leak", because nothing could free it afterwards (D17.8): converting or casting it
-to a non-`own` type, slicing it or taking its `.ptr`, accessing a field of an owning aggregate
+to a non-`own` type, taking a span of it or taking its `.ptr`, accessing a field of an owning
+aggregate
 rvalue (section 8.5), and discarding it as an expression statement.
 
 | Expression                                     | Type                                   |
@@ -856,13 +858,13 @@ rvalue (section 8.5), and discarding it as an expression statement.
 | `str.dup(s)`, `strbuf.take(&b)`                | `string own`                           |
 
 `new` always marks the outermost reference; an `own` after a `*` of the element type marks the
-slots, so `new(node* own, n)` is an owned slice of `n` owned slots, all `null` (D17.3), while a
+slots, so `new(node* own, n)` is an owned span of `n` owned slots, all `null` (D17.3), while a
 count-less `new(node*)` allocates one pointer slot (D10.2). Nothing precedes the base type inside
 `new(...)`, and `mut` never parses there (grammar section 6).
 
 ```fort
 u8 mut@ own mut buf = new(u8, 16);
-u8 mut@ own part = buf[4..];         // error: slicing yields a view; cannot add own
+u8 mut@ own part = buf[4..];         // error: taking a span yields a view; cannot add own
 u8 mut* own p = buf.ptr;             // error: .ptr is a view; cannot add own
 u8 mut@ own mut* slot = &buf;        // ok: a borrowed pointer to the owned slot
 u8 mut@ own mut* own bad = &buf;     // error: & yields a borrowed pointer
@@ -982,7 +984,7 @@ string own t2 = cast(d, string);     // error: cannot add own; cast(d, string) o
 The implicit conversions are dropping mutability under the rule of section 7.4 and dropping
 `own` under the rule of section 8.4 (D3.14, D5.4, D17.4); the two combine. They apply to
 initialization, assignment, argument passing and `return`. Nothing else converts
-implicitly: not integer widths, not signedness, not integer to float, not array to slice, not
+implicitly: not integer widths, not signedness, not integer to float, not array to span, not
 `char@` to `string`. Untyped constants are not converted; they take a type from context
 (section 10).
 
@@ -1042,9 +1044,9 @@ first takes its default type (D4.5) and is then converted with the runtime seman
 | `own` rvalue        | any `own` target above   | transfer: the result is `own`                 |
 | `own` lvalue        | any `own` target above   | error unless `cast(move(x), T)` (D17.5)       |
 | `T mut*`            | `T*`                     | drop mutability, as the implicit conversion   |
-| slice               | other element type       | error: `len` counts elements of one type      |
-| pointer             | slice                    | error (use `p[lo..hi]`)                       |
-| slice               | pointer                  | error (use `.ptr`)                            |
+| span                | other element type       | error: `len` counts elements of one type      |
+| pointer             | span                     | error (use `p[lo..hi]`)                       |
+| span                | pointer                  | error (use `.ptr`)                            |
 | fixed array         | anything                 | error (use `a[..]`)                           |
 | struct              | anything                 | error                                         |
 | anything            | fixed array, struct      | error                                         |
@@ -1056,7 +1058,7 @@ its indirections (D3.14). `null` is not a valid cast
 operand, because it has no type of its own (D10.5).
 
 Ownership in casts (D3.14, D17.3, D17.12): the result of a cast is `own` exactly when its target
-type says `own`. A cast may add `own` to any reference of a pointer or slice type, adopting
+type says `own`. A cast may add `own` to any reference of a pointer or span type, adopting
 memory that came from C, the same unsafe escape as adding `mut` (a later `del` of adopted memory
 that is not the start of an allocation is undefined behavior, D10.7); it may drop `own` at any
 level, including where the implicit drop of section 8.4 refuses, and then lends: the result is a
@@ -1088,8 +1090,8 @@ u64 a = cast(p, u64);
 i32 n = cast(p, i32);                // error: pointer casts only to u64
 u8 mut@ bytes = cast("abc", u8 mut@);   // aliases read-only memory; writing it is undefined
 u8@ ro = cast("abc", u8@);              // ok
-i8@ sb = cast(ro, i8@);                 // error: element type of a slice never changes
-i32@ q = cast(p, i32@);                 // error: no cast from pointer to slice
+i8@ sb = cast(ro, i8@);                 // error: element type of a span never changes
+i32@ q = cast(p, i32@);                 // error: no cast from pointer to span
 point pt = cast(r, point);           // error: no struct casts
 u8 mut* own m = cast(libc.malloc(64), u8 mut* own);    // own rvalue to own type; del(m) frees it
 u8 mut@ own got = cast(p2[0..n], u8 mut@ own);         // adopts C memory at a u8 mut* p2
@@ -1113,7 +1115,7 @@ type of its own; it takes one from context:
 - the type of the other operand of a binary operator, except that the count operand of a shift
   is never a context for the shifted operand (section 10.4);
 - the parameter type in a call, the return type in `return`, the operand type in a `case` label;
-- an index, slice-bound or `new` count position, where any integer type is accepted and a
+- an index, span-bound or `new` count position, where any integer type is accepted and a
   negative constant is a compile error (D4.1, D6.8, D6.9, D10.2).
 
 `cast(c, T)` is not a context: an untyped `c` takes its default type first (D4.1, D4.5).
@@ -1212,8 +1214,8 @@ expressions. A constant expression is one of:
 - a struct or array literal whose leaves are constant expressions.
 
 Not constant: calls, `&` (except `&` of a module-level declaration inside a module-level
-initializer, D7.10), indexing, slicing, field access, `.len` of a slice or string, reads of
-`mut` globals, `cast` involving `bool`, pointers or slices (`cast` of `null` is an error
+initializer, D7.10), indexing, span expressions, field access, `.len` of a span or string, reads of
+`mut` globals, `cast` involving `bool`, pointers or spans (`cast` of `null` is an error
 outright, D10.5), and a `?:` whose condition is not constant.
 
 ```fort
@@ -1294,7 +1296,7 @@ calling convention realizes this as follows (D9.9):
 |-----------------------------------------------|-------------------------------|-----------------|
 | integers, `bool`, `char`, enums, all pointers | integer registers (System V)  | `rax`           |
 | `f32`, `f64`                                  | SSE registers (System V)      | `xmm0`          |
-| struct, fixed array, slice, `string`          | pointer to a caller-made copy | hidden pointer  |
+| struct, fixed array, span, `string`           | pointer to a caller-made copy | hidden pointer  |
 
 The registers are what System V assigns; the compiler expresses the convention in LLVM IR as
 ordinary scalar parameters, a plain `ptr` parameter for an aggregate argument and a leading
@@ -1304,7 +1306,7 @@ ordinary scalar parameters, a plain `ptr` parameter for an aggregate argument an
 Struct layout is identical to the C layout of the same declaration, so passing `&s` to C works.
 A fort function is usable as a C callback, and an `extern` function may be declared, exactly when
 every parameter and the result are integers, floats, `bool`, `char`, enums (passed as `i32`),
-pointers or function pointers; slices, strings, structs and arrays never cross an `extern`
+pointers or function pointers; spans, strings, structs and arrays never cross an `extern`
 boundary (D9.8). Narrow integers and `bool` are zero- or sign-extended on both sides of the
 boundary; C `char*` maps to `char*` or `u8*`, C `size_t` to `u64` (D9.8). `own` may appear in
 an `extern` signature (D17.13): it is erased like everywhere else and documents the C side's
@@ -1315,7 +1317,7 @@ C symbol with and without it conflict.
 
 ```fort
 extern fn i64 write(i32 fd, void* buf, u64 n);
-extern fn void sort(i32@ xs);        // error: slices cannot cross an extern boundary
+extern fn void sort(i32@ xs);        // error: spans cannot cross an extern boundary
 extern fn void* own malloc(u64 n);
 extern fn void mut* own calloc(u64 n, u64 size);   // error: 'mut' on void*: no target level
 extern fn void free(void* own p);
@@ -1328,7 +1330,7 @@ void* lost = malloc(16);             // error: owning temporary would leak
 ## 12. Not in v1
 
 Generics, unions (tagged or untagged), `Result`, methods, closures, overloading, default and
-named arguments, type aliases, struct, array and slice equality, alignment and packed attributes,
+named arguments, type aliases, struct, array and span equality, alignment and packed attributes,
 `alignof`, `sizeof(expr)`, string `switch` and linear ownership (compile-time detection of leaks
 and of use after `move`, of which section 8 is the intended base, D17.14) are deferred; D15
 lists each with the idiom to use instead (a fat struct with a kind field for unions, `bool` plus

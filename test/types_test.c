@@ -105,7 +105,7 @@ TEST(error_type_poisons_every_constructor, {
     const type_t* err = type_error(&e.tt);
     const type_t* i32 = type_prim(&e.tt, PRIM_I32);
     TEST_ASSERT_TRUE(type_ptr(&e.tt, err, false, false) == err);
-    TEST_ASSERT_TRUE(type_slice(&e.tt, err, true, true) == err);
+    TEST_ASSERT_TRUE(type_span(&e.tt, err, true, true) == err);
     TEST_ASSERT_TRUE(type_array(&e.tt, err, 4) == err);
     TEST_ASSERT_TRUE(tenv_fn(&e, err, i32, NULL) == err);
     TEST_ASSERT_TRUE(tenv_fn(&e, i32, err, NULL) == err);
@@ -184,7 +184,7 @@ TEST(identity_of_arrays_is_element_and_length, {
     tenv_free(&e);
 })
 
-TEST(identity_of_pointers_and_slices_includes_every_mark, {
+TEST(identity_of_pointers_and_spans_includes_every_mark, {
     tenv_t e;
     tenv_init(&e);
     TEST_ASSERT_FALSE(type_equal(tenv_type(&e, "node*"), tenv_type(&e, "node mut*")));
@@ -258,10 +258,10 @@ TEST(same_shape_ignores_mut_and_own, {
     TEST_ASSERT_FALSE(type_same_shape(takes_node, takes_mut));
     TEST_ASSERT_FALSE(type_same_shape(takes_node, takes_own));
     TEST_ASSERT_TRUE(type_same_shape(takes_node, takes_node));
-    TEST_ASSERT_FALSE(type_same_shape(type_slice(&e.tt, takes_node, false, false),
-                                      type_slice(&e.tt, takes_mut, false, false)));
-    TEST_ASSERT_TRUE(type_same_shape(type_slice(&e.tt, takes_node, true, true),
-                                     type_slice(&e.tt, takes_node, false, false)));
+    TEST_ASSERT_FALSE(type_same_shape(type_span(&e.tt, takes_node, false, false),
+                                      type_span(&e.tt, takes_mut, false, false)));
+    TEST_ASSERT_TRUE(type_same_shape(type_span(&e.tt, takes_node, true, true),
+                                     type_span(&e.tt, takes_node, false, false)));
     TEST_ASSERT_FALSE(type_same_shape(tenv_fn(&e, tenv_type(&e, "node*"), NULL, NULL),
                                       tenv_fn(&e, tenv_type(&e, "node mut*"), NULL, NULL)));
     tenv_free(&e);
@@ -340,7 +340,7 @@ int main(int argc, char** argv) {
     TEST_RUN(identity_of_primitives_is_the_name);
     TEST_RUN(identity_of_struct_and_enum_is_the_declaration);
     TEST_RUN(identity_of_arrays_is_element_and_length);
-    TEST_RUN(identity_of_pointers_and_slices_includes_every_mark);
+    TEST_RUN(identity_of_pointers_and_spans_includes_every_mark);
     TEST_RUN(identity_of_voidptr_and_string_is_the_own_mark);
     TEST_RUN(identity_of_function_types_is_structural);
     TEST_RUN(same_shape_ignores_mut_and_own);

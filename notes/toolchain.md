@@ -25,7 +25,7 @@ file (D14.1). Options and the entry file may appear in any order.
 | `-I <dir>`          | add a search root after the entry directory; repeatable    | none       |
 | `--std-dir <dir>`   | standard library directory                                 | see below  |
 | `--release`         | release mode (section 3, D11.1)                            | checked    |
-| `--no-bounds-check` | remove index and slice checks (D10.6); unsafe              | checks on  |
+| `--no-bounds-check` | remove index and span checks (D10.6); unsafe               | checks on  |
 | `-l<lib>`           | passed to the linker as given; repeatable, in order        | none       |
 | `--cc <path>`       | the clang that compiles and links the IR (D14.3)           | `clang`    |
 | `--target <triple>` | passed to `--cc` as `--target=<triple>` (D14.1)            | see below  |
@@ -146,7 +146,7 @@ the checks below is that `--cc` compiles the module with `-O2` instead of `-O1` 
 | shift count negative or `>=` width (D11.1)         | trap    | masked      | unchanged           |
 | `/ %` by zero, `MIN / -1`, `MIN % -1` (D6.13)      | trap    | trap        | unchanged           |
 | index out of range (D6.8)                          | trap    | trap        | removed             |
-| slice bounds `0 <= lo <= hi <= len` (D6.9)         | trap    | trap        | removed             |
+| span bounds `0 <= lo <= hi <= len` (D6.9)          | trap    | trap        | removed             |
 | `new`: negative count, size overflow, no memory    | trap    | trap        | unchanged           |
 | store over a live `own` value (D17.11)             | trap    | no check    | unchanged           |
 | `assert(cond)` (D12.2)                             | trap    | trap        | unchanged           |
@@ -224,7 +224,7 @@ function, `fort_rt_panic`, `fort_rt_assert_fail` and `fort_rt_exit` is `_Noretur
 ```c
 // Types shared with generated code.
 struct fort_string { const char* ptr; uint64_t len; };    // fort string, D3.7
-struct fort_slice  { void* ptr; uint64_t len; };          // fort T@, D3.5
+struct fort_span   { void* ptr; uint64_t len; };          // fort T@, D3.5
 struct fort_rt_enum_member { int32_t value; const char* name; };
 
 // Allocation (D10.2, D10.3). fort_rt_new returns zeroed storage for count elements
@@ -244,7 +244,7 @@ void  fort_rt_del(void* p);
 // assignment to an own reference-typed lvalue whose current value is not zero
 // (D17.11), emitted in checked builds only.
 void fort_rt_fail_bounds(int64_t index, uint64_t len, loc);
-void fort_rt_fail_slice(int64_t lo, int64_t hi, uint64_t len, loc);
+void fort_rt_fail_span(int64_t lo, int64_t hi, uint64_t len, loc);
 void fort_rt_fail_overflow(loc);
 void fort_rt_fail_shift(int64_t count, const char* type, loc);
 void fort_rt_fail_div_zero(loc);
@@ -274,16 +274,16 @@ void fort_rt_flush(int32_t fd);
 void fort_rt_flush_all(void);
 
 // Process (D11.6, D8.6). main calls fort_rt_args_init, which builds the args
-// slice from argv (one string per argument, NUL-terminated since it is the argv
+// span from argv (one string per argument, NUL-terminated since it is the argv
 // byte sequence itself), then fort_entry, then fort_rt_flush_all, and returns
 // status & 0xFF. fort_entry is emitted by the compiler (module-system.md 11).
-// The args slice lives for the whole process and std::libc declares
+// The args span lives for the whole process and std::libc declares
 // fort_rt_args_ptr and fort_rt_args_len for sys.args(); fort_rt_args_init is
 // called by main only and exists so the native runtime object, built without
 // main, can be tested. fort_rt_exit flushes every buffer, then
 // exit(status & 0xFF); std::libc declares it for sys.exit.
 int main(int argc, char** argv);
-int32_t fort_entry(const struct fort_slice* args);
+int32_t fort_entry(const struct fort_span* args);
 void fort_rt_args_init(int argc, char** argv);
 const struct fort_string* fort_rt_args_ptr(void);
 uint64_t fort_rt_args_len(void);
@@ -317,7 +317,7 @@ Each failure writes exactly one line, after `fort_rt_flush_all`, then calls `abo
 | Entry point                 | Line after `<file>:<line>:<col>: ` (D11.4)                 |
 |-----------------------------|------------------------------------------------------------|
 | `fort_rt_fail_bounds`       | `runtime error: index 5 out of range for length 3`         |
-| `fort_rt_fail_slice`        | `runtime error: slice bounds 2..7 out of range for length 3` |
+| `fort_rt_fail_span`         | `runtime error: span bounds 2..7 out of range for length 3`  |
 | `fort_rt_fail_overflow`     | `runtime error: integer overflow`                          |
 | `fort_rt_fail_shift`        | `runtime error: shift count 64 out of range for i64`       |
 | `fort_rt_fail_div_zero`     | `runtime error: division by zero`                          |
@@ -329,7 +329,7 @@ Each failure writes exactly one line, after `fort_rt_flush_all`, then calls `abo
 | `fort_rt_panic`             | `panic: <message bytes>`                                   |
 | `fort_rt_assert_fail`       | `assertion failed: <expression text>`                      |
 
-`<file>` is as in section 4. Numbers in messages are decimal; the index, the slice bounds and
+`<file>` is as in section 4. Numbers in messages are decimal; the index, the span bounds and
 the allocation count are printed as signed values. Falling off the end of a `noreturn` function
 executes the trap of section 6 item 20 (D8.5, D19.7): the process dies with SIGILL and no
 message.
@@ -383,7 +383,7 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    | `f32`, `f64`             | `float`, `double` | same            | D3.1                         |
    | `T*`, `void*`, `fn R(P)` | `ptr`             | `ptr`           | opaque (D3.10, D3.11)        |
    | `T[N]`                   | none              | `[N x T]`       | outside in (D3.6)            |
-   | `T@`, `string`           | none              | `%fort.slice`   | `type { ptr, i64 }`          |
+   | `T@`, `string`           | none              | `%fort.span`    | `type { ptr, i64 }`          |
    | `struct a::b::s`         | none              | `%struct.a.b.s` | fields in order, no `packed` |
    | `enum`                   | `i32`             | `i32`           | D3.9                         |
    | `void`                   | `void`            | none            | result type only             |
@@ -392,20 +392,20 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    in, so `i32[3][4]` is `[3 x [4 x i32]]` (D3.6). Every load of a `bool` place is a
    `load i8` and a `trunc`, every store a `zext` and a `store i8`, so a `bool` field has C's
    `_Bool` layout and `fort_rt_print_bool(int32_t, uint8_t)` needs no special case; the
-   `trunc`/`zext` pairs disappear in the optimizer. One `%fort.slice` serves every slice and
+   `trunc`/`zext` pairs disappear in the optimizer. One `%fort.span` serves every span and
    `string`, because with opaque pointers `i32@`, `u8@` and `string` have identical IR (D3.5,
-   D3.7). `%fort.slice` and `%fort.enum_member = type { i32, ptr }` are emitted in every module,
+   D3.7). `%fort.span` and `%fort.enum_member = type { i32, ptr }` are emitted in every module,
    used or not, so the emitter tracks nothing; unused named types are legal.
 
 3. **Aggregates live in memory** (D19.3). Only scalars are SSA values: a struct, fixed array,
-   slice or `string` always occupies a place, is copied with `llvm.memcpy.p0.p0.i64`, zeroed
+   span or `string` always occupies a place, is copied with `llvm.memcpy.p0.p0.i64`, zeroed
    (`{}`, `del`, `move`) with `llvm.memset.p0.i64`, and reached field by field or element by
    element with `getelementptr`. The emitter never loads or stores an aggregate as one value and
    never writes `insertvalue` or `extractvalue` on one; its only `extractvalue` takes apart the
    `{iN, i1}` of an overflow intrinsic (item 15). Exactly three `getelementptr` shapes exist,
    and all three always carry `inbounds`: `inbounds <arrty>, ptr %a, i64 0, i64 %i` for an
    element of a fixed array, `inbounds <elemty>, ptr %p, i64 %i` for an element reached through
-   a pointer or a slice's `.ptr`, and `inbounds %struct.x, ptr %s, i32 0, i32 <k>` for a field.
+   a pointer or a span's `.ptr`, and `inbounds %struct.x, ptr %s, i32 0, i32 <k>` for a field.
    `inbounds` is always true: an element access is preceded by its bounds check (item 16) and a
    field or header access is in bounds by construction, and `--no-bounds-check` removes the
    check's branch, never the `inbounds` (D10.6). This is D9.9's model spelled in IR.
@@ -453,12 +453,12 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
 
 7. **Calling convention, fort to fort** (D9.9). Scalars (integers, `bool`, `char`, enums,
    pointers, function pointers, floats) are ordinary parameters and results and LLVM applies
-   System V. A struct, fixed array, slice or `string` argument is a plain `ptr` parameter: the
+   System V. A struct, fixed array, span or `string` argument is a plain `ptr` parameter: the
    caller allocates a copy in its entry block, `llvm.memcpy`s into it and passes its address,
    and `byval` is never used, since it would mean a callee-visible copy on the stack rather than
    the pointer in the integer slot D9.9 requires. An aggregate result is a leading
    `ptr sret(%T) %ret.sret` parameter on a function whose result type is `void`; the pointer
-   arrives in `rdi` and is echoed in `rax`, which is D9.9's ABI. A slice or `string` is one
+   arrives in `rdi` and is echoed in `rax`, which is D9.9's ABI. A span or `string` is one
    hidden pointer and is never split into two scalars, so `fort_entry`'s C prototype stays
    literally true (D11.6). `bool`, `char`, `u8` and `u16` parameters and results carry `zeroext`
    and `i8` and `i16` carry `signext`, in fort and extern signatures alike, so an extern-legal
@@ -498,7 +498,7 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    declare ptr  @fort_rt_new(i64, i64, ptr, i32, i32)
    declare void @fort_rt_del(ptr)
    declare void @fort_rt_fail_bounds(i64, i64, ptr, i32, i32) #2
-   declare void @fort_rt_fail_slice(i64, i64, i64, ptr, i32, i32) #2
+   declare void @fort_rt_fail_span(i64, i64, i64, ptr, i32, i32) #2
    declare void @fort_rt_fail_overflow(ptr, i32, i32) #2
    declare void @fort_rt_fail_shift(i64, ptr, ptr, i32, i32) #2
    declare void @fort_rt_fail_div_zero(ptr, i32, i32) #2
@@ -569,7 +569,7 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
     aggregate parameter is not copied again: its place is the caller-made copy the incoming
     `ptr` designates (item 7), which the callee may write to, since D8.2's by-value rule is
     satisfied by the caller's copy. `fort_entry` is the exception, because its caller is the C
-    runtime rather than fort code, which is why item 22 copies the argument slice. Control flow
+    runtime rather than fort code, which is why item 22 copies the argument span. Control flow
     is explicit blocks: `if`, `while`,
     `for`, `break` and `continue` become `br`; a fort `switch` on an integer, `char` or enum
     becomes an LLVM `switch` with one case per label and a default block (D7.7); `&&`, `||` and
@@ -659,10 +659,10 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
       %t5 = getelementptr inbounds i32, ptr %t4, i64 %t3
     ```
 
-    Slicing checks both bounds with one branch (`icmp ugt i64 %hi, %len`, `icmp ugt i64 %lo,
-    %hi`, `or i1`) into `fort_rt_fail_slice(i64 %lo, i64 %hi, i64 %len, ...)`. A fixed array's
-    length is an `i64` literal. `--no-bounds-check` removes exactly these branches and keeps the
-    `inbounds`, which is what makes it unsafe (D10.6).
+    A span expression checks both bounds with one branch (`icmp ugt i64 %hi, %len`,
+    `icmp ugt i64 %lo, %hi`, `or i1`) into `fort_rt_fail_span(i64 %lo, i64 %hi, i64 %len, ...)`. A
+    fixed array's length is an `i64` literal. `--no-bounds-check` removes exactly these branches and
+    keeps the `inbounds`, which is what makes it unsafe (D10.6).
 
 17. **`new` and `del`** (D10.2, D10.3, D17.9).
 
@@ -673,10 +673,10 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
     `new(T, n)` materializes `n` as `i64` first and, when its fort type is signed, branches on
     `icmp slt i64 %n, 0` to `fort_rt_fail_alloc_count(i64 %n, ...)`; it then calls
     `fort_rt_new(sizeof(T), %n, loc)` and writes the header field by field into the destination
-    place (`getelementptr inbounds %fort.slice, ptr %d, i32 0, i32 0` for `ptr`, `i32 0, i32 1`
-    for `len`). `del(x)` loads the pointer (field 0 for a slice or `string`), calls `fort_rt_del`
+    place (`getelementptr inbounds %fort.span, ptr %d, i32 0, i32 0` for `ptr`, `i32 0, i32 1`
+    for `len`). `del(x)` loads the pointer (field 0 for a span or `string`), calls `fort_rt_del`
     and, on an lvalue operand, zeroes the place: `store ptr null` for a pointer, a 16-byte
-    `llvm.memset` for a slice or `string`. On an rvalue nothing is stored.
+    `llvm.memset` for a span or `string`. On an rvalue nothing is stored.
 
 18. **Ownership** (D17). `own` is erased: same types, same ABI, same normalization, and neither
     the module nor the runtime carries ownership information. `move(lv)` copies the operand's
@@ -686,7 +686,7 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
     right-hand side is evaluated and immediately before the store:
 
     ```llvm
-      %t7 = getelementptr inbounds %fort.slice, ptr %v.2, i32 0, i32 0
+      %t7 = getelementptr inbounds %fort.span, ptr %v.2, i32 0, i32 0
       %t8 = load ptr, ptr %t7, align 8
       %t9 = icmp ne ptr %t8, null
       br i1 %t9, label %L5, label %L4
@@ -746,14 +746,14 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
     16-byte layout with its 4 bytes of padding, so it matches `struct fort_rt_enum_member`
     (section 5.1). A table is emitted only for an enum some `print` of that type reaches.
 
-22. **`fort_entry`** (D11.6, D8.6). Emitted in the entry module, it receives the argument slice
+22. **`fort_entry`** (D11.6, D8.6). Emitted in the entry module, it receives the argument span
     by hidden pointer, copies it into its own frame when `main` declares the parameter, and
     returns what `main` returns:
 
     ```llvm
     define dso_local i32 @fort_entry(ptr %args.in) #0 {
     entry:
-      %args.0 = alloca %fort.slice, align 8
+      %args.0 = alloca %fort.span, align 8
       call void @llvm.memcpy.p0.p0.i64(ptr align 8 %args.0, ptr align 8 %args.in, i64 16, i1 false)
       %t0 = call i32 @"main.main"(ptr %args.0)
       ret i32 %t0
@@ -797,7 +797,7 @@ in `main.ft` compiles to `test/ir/hello.ll`:
 ```llvm
 target triple = "x86_64-unknown-linux-gnu"
 
-%fort.slice = type { ptr, i64 }
+%fort.span = type { ptr, i64 }
 %fort.enum_member = type { i32, ptr }
 
 define dso_local i32 @"main.main"() #0 {
@@ -837,7 +837,7 @@ in `abort.ft`, with the `[` of `a[i]` at line 12, column 14, compiles to `test/i
 ```llvm
 target triple = "x86_64-unknown-linux-gnu"
 
-%fort.slice = type { ptr, i64 }
+%fort.span = type { ptr, i64 }
 %fort.enum_member = type { i32, ptr }
 
 define dso_local i32 @"main.main"() #0 {
@@ -883,7 +883,7 @@ attributes #6 = { nocallback nofree nounwind willreturn memory(argmem: write) }
 ```
 
 The locals are entry-block allocas, the array is zeroed with `llvm.memset`, the bounds check of
-item 16 branches to a failure block at the end of the function, and `%fort.slice` and
+item 16 branches to a failure block at the end of the function, and `%fort.span` and
 `%fort.enum_member` are emitted although nothing uses them (item 2). The program prints
 `before`, then `abort.ft:12:14: runtime error: index 5 out of range for length 3`, and dies with
 SIGABRT (D11.4).
@@ -911,7 +911,7 @@ test/
 ```
 
 `<area>` is one of `lexical constants operators casts mutability declarations control switch
-defer functions structs enums arrays slices strings pointers globals builtins errors modes modules
+defer functions structs enums arrays spans strings pointers globals builtins errors modes modules
 ffi stdlib ownership`: `errors` holds the `abort` tests of the runtime checks (the overwrite
 check of D17.11 included, with its `--release` twin under `modes`), `modes` the `--release`
 tests, `stdlib` the tests of the standard library once it exists, and `ownership` the run tests
@@ -1197,7 +1197,7 @@ in files:
 | structs                 | 30  | 20   |
 | enums                   | 20  | 15   |
 | arrays                  | 30  | 15   |
-| slices and `new`/`del`  | 35  | 20   |
+| spans and `new`/`del`   | 35  | 20   |
 | strings                 | 30  | 10   |
 | pointers                | 25  | 20   |
 | defer                   | 20  | 10   |

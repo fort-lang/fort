@@ -269,7 +269,7 @@ TEST(typed_add_and_sub_stay_in_range, {
 
 TEST(typed_unsigned_subtraction_below_zero_is_an_error, {
     cval_t r = i(1);
-    TEST_ASSERT_FALSE(cv_typed_sub(i(0), i(1), PRIM_U8, &r)); // len - 1 on an empty slice
+    TEST_ASSERT_FALSE(cv_typed_sub(i(0), i(1), PRIM_U8, &r)); // len - 1 on an empty span
     TEST_ASSERT_TRUE(r.kind == CV_NONE);
     TEST_ASSERT_FALSE(cv_typed_sub(i(0), i(1), PRIM_U64, &r));
     TEST_ASSERT_TRUE(cv_typed_sub(i(1), i(1), PRIM_U64, &r));

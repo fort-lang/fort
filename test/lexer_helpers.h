@@ -33,7 +33,7 @@ static inline bool lex_bytes(const char* src, uint64_t len) {
     str_pool_free(&pool);
     tokvec_free(&toks);
     diag_reset();
-    return lex_file("t.ft", str_from_span(src, len), &pool, &toks);
+    return lex_file("t.ft", str_from_range(src, len), &pool, &toks);
 }
 
 static inline bool lex(const char* src) {
@@ -66,7 +66,7 @@ static inline bool text_is(uint64_t i, const char* expected) {
     return str_eq(tok(i)->text, str_from_cstr(expected));
 }
 
-// The kind, the text, the position and the span of token i.
+// The kind, the text, the position and the byte range of token i.
 #define ASSERT_TOK_KIND(i, k) TEST_ASSERT_EQ_STR(tok_kind_name(tok(i)->kind), tok_kind_name(k))
 #define ASSERT_TOK_TEXT(i, s) TEST_ASSERT_TRUE(text_is(i, s))
 #define ASSERT_TOK_POS(i, l, c)                                                                    \
@@ -74,7 +74,7 @@ static inline bool text_is(uint64_t i, const char* expected) {
         TEST_ASSERT_EQ_INT64((int64_t)tok(i)->line, (int64_t)(l));                                 \
         TEST_ASSERT_EQ_INT64((int64_t)tok(i)->col, (int64_t)(c));                                  \
     } while (0)
-#define ASSERT_TOK_SPAN(i, o, n)                                                                   \
+#define ASSERT_TOK_RANGE(i, o, n)                                                                  \
     do {                                                                                           \
         TEST_ASSERT_EQ_UINT64(tok(i)->off, (uint64_t)(o));                                         \
         TEST_ASSERT_EQ_UINT64(tok(i)->len, (uint64_t)(n));                                         \

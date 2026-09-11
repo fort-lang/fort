@@ -331,7 +331,7 @@ class DriftTest(unittest.TestCase):
 
     def test_operator_dropped_from_the_grammar_is_caught(self):
         decisions = decision_lexicon(DECISIONS_PATH.read_text(encoding="utf-8"))
-        rule = self.grammar["repository"]["operator-slice"]
+        rule = self.grammar["repository"]["operator-span"]
         rule["match"] = "(?:\u00a7)"
         self.assertEqual(decisions.operators - grammar_lexicon(self.grammar).operators, {"@"})
 

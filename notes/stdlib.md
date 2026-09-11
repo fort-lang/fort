@@ -62,7 +62,7 @@ library follows:
   the `overwriting owned value` runtime error in checked builds and a leak in release builds
   (D17.11). A caller that reuses a slot `del`s it first.
 - **Accessors return views** (D17.3). Functions named `view` or `bytes`, `sys.args`, `sys.env`,
-  `str.from_cstr` and every sub-slice yield values without `own`; `del` on them does not
+  `str.from_cstr` and every sub-span yield values without `own`; `del` on them does not
   compile (D17.9). A view into a container is valid until the next mutating call on that
   container; a view of an owned value is valid until the value is `del`ed or moved away, which
   nothing checks (D10.7, D17.14).
@@ -73,7 +73,7 @@ library follows:
   u8 mut@ own mut data = {};
   defer del(data);
   if (!io.read_file_bytes(path, &data)) {
-      return false;   // del of a zero slice is a no-op (D17.9)
+      return false;   // del of a zero span is a no-op (D17.9)
   }
   ```
 
@@ -85,14 +85,14 @@ library follows:
   error in checked builds (D17.11).
 - Nothing in the library allocates without saying so in its entry, and the library stays clear
   of what D17.14 leaves untracked: it never makes two `own` copies of one allocation through
-  `cast`, and it applies a cast between `string` and the byte slices (D3.14) only to a view
+  `cast`, and it applies a cast between `string` and the byte spans (D3.14) only to a view
   (`buf[..]`) or to the `own` rvalue that `move` yields (`cast(move(buf), string own)`, D17.12).
 
 ### 1.4 Talking to C
 
-- Slices, strings and structs never cross an `extern` boundary (D13.4). A call unpacks `.ptr`
+- Spans, strings and structs never cross an `extern` boundary (D13.4). A call unpacks `.ptr`
   and `.len`: `libc.write(fd, cast(buf.ptr, void*), buf.len)`. A fixed array has no `.ptr`
-  (D3.4); slice it first: `arr[..].ptr`. `.ptr` is a view (D17.3), so C never receives
+  (D3.4); span it first: `arr[..].ptr`. `.ptr` is a view (D17.3), so C never receives
   ownership this way; `own` in an `extern` signature is erased and documents C's convention
   (D17.13), as `libc.malloc` and `libc.free` show.
 - NUL termination. These strings carry a `0` after their last character: literals (D3.7), the
@@ -106,7 +106,7 @@ library follows:
 - Out-parameters. Scalar results use `i64 mut* out` and similar. A function that produces a
   whole file or stream fills a `strbuf.str_buf` through `strbuf.str_buf mut* out`, so that the
   caller can keep reading into the same storage and release it once; `io.read_file_bytes`
-  delivers a plain heap slice through `u8 mut@ own mut* out` (level 0 is `out`, level 1 the `own`
+  delivers a plain heap span through `u8 mut@ own mut* out` (level 0 is `out`, level 1 the `own`
   slot the callee fills, level 2 the bytes, D5.2, D17.2) for callers that want one allocation
   and one `del`.
 - Buffer parameters of externs are `void*`; reaching it takes a `cast` (D3.11), so the caller
@@ -162,9 +162,9 @@ fn bool env(string name, string mut* out)
   (`toolchain.md` 5.1). Ownership: none.
 - `args`: returns the same `string@` that `main` received (D8.6, D11.6): `args()[0]` is the
   program name and every element is NUL-terminated. Implemented as
-  `cast(libc.fort_rt_args_ptr(), string*)[0..libc.fort_rt_args_len()]` (unchecked pointer
-  slicing, D6.9). Ownership: a view of storage the runtime owns (D17.3, D13.5); `string@`
-  carries no `own`, so `del` of the slice or of an element does not compile (D17.9).
+  `cast(libc.fort_rt_args_ptr(), string*)[0..libc.fort_rt_args_len()]` (an unchecked span taken
+  of a pointer, D6.9). Ownership: a view of storage the runtime owns (D17.3, D13.5); `string@`
+  carries no `own`, so `del` of the span or of an element does not compile (D17.9).
 - `errno`: the value of C `errno` for the calling thread, read through
   `libc.__errno_location()`. It is meaningful only after a library call has reported failure.
   Ownership: none.
@@ -264,7 +264,7 @@ writes a string to a descriptor, bypassing the runtime's buffers.
 
 ### 2.3 `std::mem`
 
-Byte-slice primitives over `memmove`, `memset` and `memcmp`.
+Byte-span primitives over `memmove`, `memset` and `memcmp`.
 
 ```fort
 fn void copy(u8 mut@ dst, u8@ src)
@@ -274,12 +274,12 @@ fn bool equal(u8@ a, u8@ b)
 
 - `copy`: copies `src.len` bytes to the start of `dst`; the ranges may overlap (`memmove`
   semantics). Panics with `"mem.copy: destination too short"` when `dst.len < src.len`. An empty
-  `src` is a no-op and makes no C call. Ownership: none; an `own` slice argument lends (D17.4).
+  `src` is a no-op and makes no C call. Ownership: none; an `own` span argument lends (D17.4).
 - `fill`: sets every byte of `dst` to `v`. Ownership: none.
-- `equal`: `true` when the lengths are equal and the bytes match; two empty slices are equal
+- `equal`: `true` when the lengths are equal and the bytes match; two empty spans are equal
   whatever their pointers. Ownership: none.
 
-Only `u8` slices are covered: a slice cast never changes the element size (D3.14), so other
+Only `u8` spans are covered: a span cast never changes the element size (D3.14), so other
 element types are copied with a loop, as `std::vec` does, or through `libc.memmove` on `.ptr`
 with a byte count of `n * sizeof(T)`.
 
@@ -345,7 +345,7 @@ fn bool write_file(string path, u8@ data)
   `out->len` restored and `sys.errno()` describing the failing call (`close(2)` leaves `errno`
   alone when it succeeds). On success the contents are `strbuf.bytes(out)` and, as text,
   `strbuf.view(out)`. Ownership: as `read_all`.
-- `read_file_bytes`: the same as `read_file`, delivering a plain heap slice. Precondition:
+- `read_file_bytes`: the same as `read_file`, delivering a plain heap span. Precondition:
   `*out` is empty (`{}`). On success the callee stores a fresh, exact-size allocation holding
   the file's bytes into `*out` (`u8 mut@ own bytes = new(u8, n); ...; *out = move(bytes);`,
   D17.5), so `out->len` is the file's length and an empty file yields a zero-length, non-null
@@ -429,7 +429,7 @@ fn bool is_hex(char ch)
 - `concat`: heap copy of `a` followed by `b`, not NUL-terminated; `result.len` is
   `a.len + b.len`, which is also the allocation size. Ownership: as `dup`.
 - `to_cstr`: the one sanctioned way to hand a string to C: a heap copy with a trailing `'\0'`,
-  returned as an owned `char` slice of length `s.len + 1` whose `.ptr` is the C string and
+  returned as an owned `char` span of length `s.len + 1` whose `.ptr` is the C string and
   whose `[..s.len]` is the text (`new(char, s.len + 1)` is already zeroed, D10.2). If `s`
   contains `\0`, C sees the prefix. Ownership: returns `char mut@ own`; the caller releases it
   with `del`, usually `char mut@ own c = str.to_cstr(path); defer del(c);` and then
@@ -530,7 +530,7 @@ b->data = move(bigger);                 // the slot is zero, so the store passes
   and releases with `free`.
 - `free`: `del(b->data)`, which frees the storage and empties the field (D17.9), then sets
   `b->len` to 0, leaving `str_buf{}`; calling it twice, or on `str_buf{}`, is harmless because
-  `del` of a zero slice is a no-op.
+  `del` of a zero span is a no-op.
 - `reserve`: ensures `data.len >= len + extra`, growing per the policy. Ownership: none.
 - `push`, `push_byte`: append one `char` or one `u8`.
 - `append`, `append_bytes`: append the bytes of `s` or `src`. Precondition: `src` must not
@@ -595,7 +595,7 @@ pointer and `*_free` releases them. Prefix `own` marks one level (D17.2), so a `
 slots and borrows every pointer in them: `ptr_push` lends its argument (D17.4), `ptr_pop`
 returns a view, and `ptr_free` never touches a pointee. The live elements are
 `v.items[..v.len]`. Indexing `v.items[i]` with `v.len <= i < v.items.len` is not a runtime
-error; it reads a zero or stale slot, so code that wants a bounds check indexes the live slice.
+error; it reads a zero or stale slot, so code that wants a bounds check indexes the live span.
 
 ```fort
 fn ptr_vec ptr_create()
@@ -615,7 +615,7 @@ fn i64 int_pop(int_vec mut* v)
 
 - `*_create`, `*_with_cap`, `*_free`, `*_reserve`: exactly as their `strbuf` counterparts,
   counting elements instead of bytes and using the same growth policy (16, then doubling).
-  Growth copies the elements to fresh storage with an element loop, then `del`s the old slice
+  Growth copies the elements to fresh storage with an element loop, then `del`s the old span
   and stores the new one (`del(v->items); v->items = move(bigger);`, D17.11), which is what
   makes the file usable as a template. Ownership: `*_free` `del`s the slots and leaves `{}`; it
   never frees the pointees of a `ptr_vec`.
@@ -628,13 +628,13 @@ forty lines, type-checked like any other code. `ptr_vec` is for elements that mu
 copied and belong to someone else (an arena, a fixed array, an owner that outlives the vector):
 store `cast(p, void*)` and cast back on retrieval; a pointer cast may add mutability (D3.14),
 so a `node mut*` survives the round trip. When the vector is to own its elements, copy the file
-with the slot type `node mut* own mut@ own items;` instead, an owned slice of owned nodes (D17.2):
+with the slot type `node mut* own mut@ own items;` instead, an owned span of owned nodes (D17.2):
 `node_push(node_vec mut* v, node mut* own n)` stores `v->items[v->len] = move(n);` (a parameter
 is an `own` lvalue, D17.5, and a fresh slot is zero, D10.2, so the store passes D17.11);
 `node_pop` returns `node mut* own` with `return move(v->items[v->len]);` (the slot is reached
 through `mut` storage, D17.6, and is left `null`); the growth loop moves each element,
-`bigger[i] = move(v->items[i]);`; `node_free` `del`s every live element before the slice; and
-a range loop over the live slice lends, `for (node mut* n : v->items[..v->len])` (D17.10).
+`bigger[i] = move(v->items[i]);`; `node_free` `del`s every live element before the span; and
+a range loop over the live span lends, `for (node mut* n : v->items[..v->len])` (D17.10).
 
 ```fort
 import std::vec;
@@ -825,7 +825,7 @@ extern fn noreturn fort_rt_exit(i32 status);
 
 - `fort_rt_args_ptr`, `fort_rt_args_len`: the element pointer and length of the `string@` the
   runtime built from `argv` at process start (D11.6). They describe the same storage `main`
-  receives, so `sys.args()` and `main`'s parameter are equal slice for slice. The C prototype
+  receives, so `sys.args()` and `main`'s parameter are equal span for span. The C prototype
   returns a pointer to the runtime's string struct; the declaration says `void*` and `sys.args`
   casts it to `string*` (2.1). The result is a view (D17.3): the runtime keeps the storage.
 - `fort_rt_flush`: writes out the runtime's buffer for one descriptor, if it has one, and is a
@@ -888,8 +888,8 @@ fn i32 main(string@ args) {
 Notes: `data` is declared `u8 mut@ own mut` so that `&data` has type `u8 mut@ own mut*` (D5.8,
 D17.2), the slot type `read_file_bytes` fills, and it starts as `{}` because the callee stores
 over it (D17.11); `defer del(data)` is registered before the call, so both later `return` paths
-free the bytes (D7.8), and on the failure path `del` of the still-zero slice is a no-op (D17.9);
-`text` is a view of the bytes (`data[..]` and a cast between the slice families, D17.3, D3.14),
+free the bytes (D7.8), and on the failure path `del` of the still-zero span is a no-op (D17.9);
+`text` is a view of the bytes (`data[..]` and a cast between the span families, D17.3, D3.14),
 so no second owner exists; the counters are `u64` because `.len` is (D16); and the
 `text.len > 0` guard keeps `text.len - 1` from trapping on an empty file (D11.1).
 

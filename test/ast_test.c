@@ -214,7 +214,7 @@ TEST(dump_of_literals, {
 TEST(dump_escapes_string_bytes, {
     reset();
     ast_node_t* s = node(AST_STRING);
-    s->name = str_from_span("a\"b\\c\n\x7F\xC3", 8);
+    s->name = str_from_range("a\"b\\c\n\x7F\xC3", 8);
     TEST_ASSERT_EQ_STR(dump(s), "(str \"a\\\"b\\\\c\\x0A\\x7F\\xC3\")");
     ast_node_t* empty = node(AST_STRING);
     empty->name = str_from_cstr("");
@@ -252,10 +252,10 @@ TEST(dump_of_a_type_with_marks_and_suffixes, {
     reset();
     ast_node_t* t = prim_type(PRIM_U8, AST_FLAG_MUT);
     ast_node_t* suffix = node(AST_TYPE_SUFFIX);
-    suffix->op = SUFFIX_SLICE;
+    suffix->op = SUFFIX_SPAN;
     suffix->flags = AST_FLAG_OWN;
     ast_push(t, suffix);
-    TEST_ASSERT_EQ_STR(dump(t), "(type (prim u8) mut (slice own))");
+    TEST_ASSERT_EQ_STR(dump(t), "(type (prim u8) mut (span own))");
 })
 
 TEST(dump_of_array_and_pointer_suffixes, {
@@ -319,10 +319,10 @@ TEST(dump_keeps_the_position_of_absent_children, {
     TEST_ASSERT_EQ_STR(dump(loop), "(for nil nil nil (block))");
     ast_node_t* ret = node(AST_RETURN);
     TEST_ASSERT_EQ_STR(dump(ret), "(return nil)");
-    ast_node_t* sl = node(AST_SLICE);
+    ast_node_t* sl = node(AST_SPAN);
     sl->a = ident("s");
     sl->c = int_lit(3);
-    TEST_ASSERT_EQ_STR(dump(sl), "(slice (ident s) nil (int 3))");
+    TEST_ASSERT_EQ_STR(dump(sl), "(span (ident s) nil (int 3))");
 })
 
 TEST(dump_of_a_module_with_declarations, {

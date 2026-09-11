@@ -1,7 +1,7 @@
 # fort memory model
 
 This document specifies where fort values live, how heap memory is obtained and released, what
-pointers, slices and strings are at run time, which checks the compiled program performs, and
+pointers, spans and strings are at run time, which checks the compiled program performs, and
 what is undefined. It implements the decisions in `decisions.md`, cited as `(Dn.m)`; where it
 disagrees with `decisions.md` or `grammar.md`, they win and this document has a bug. Types and
 mutability are specified in `type-system.md`; build modes and the runtime library in
@@ -54,23 +54,23 @@ type says that this value is the one responsible for freeing the allocation (D17
 | `new(T*, n)`      | `T mut* mut@ own`     | `n` zeroed slots, each a borrowed pointer       |
 | `new(T* own, n)`  | `T mut* own mut@ own` | `n` owned slots, all `null` (D17.3)             |
 | `new(T{...})`     | error                 | allocate, then assign the fields                |
-| `new(T@)`         | error                 | a slice header is not an object to allocate     |
+| `new(T@)`         | error                 | a span header is not an object to allocate      |
 | `new(void)`       | error                 | `void` has no size                              |
 | `new(T mut)`      | error                 | `mut` never parses inside `new` (D10.2)         |
 | `new(string own)` | error                 | `own` parses only after a `*` (D10.2, D17.3)    |
 | `new(own T)`      | error                 | nothing precedes the base type (D5.3)           |
 
 The element count is the second argument, never part of the type (D10.2): `new(T)` allocates one
-`T` and `new(T, n)` allocates `n` of them as a slice, so brackets inside `new(...)` are always
+`T` and `new(T, n)` allocates `n` of them as a span, so brackets inside `new(...)` are always
 fixed-array dimensions of the element type (grammar section 6). `new(i32[4])` is therefore one
 `i32[4] mut* own`, and `new(i32, 4)` a four-element `i32 mut@ own`. An untyped constant count may
 take any integer type, and a negative constant count is a compile error (D4.1). A negative count
 at run time, a total size that overflows, and allocation failure are runtime errors (section 6);
-`n == 0` is allowed and yields a slice of length 0 with a non-null `.ptr`, because the runtime
+`n == 0` is allowed and yields a span of length 0 with a non-null `.ptr`, because the runtime
 allocates at least one byte (D10.2). `mut` does not parse inside `new(...)`, and `own` only after
 a `*` of the element type (grammar section 6): `new(node*)` allocates one pointer slot and yields
-a `node mut* mut* own`, `new(node*, n)` yields a `node mut* mut@ own`, a slice of borrowed
-pointers, and `new(node* own, n)` yields a `node mut* own mut@ own`, a slice of owned slots that
+a `node mut* mut* own`, `new(node*, n)` yields a `node mut* mut@ own`, a span of borrowed
+pointers, and `new(node* own, n)` yields a `node mut* own mut@ own`, a span of owned slots that
 are all `null` (D17.3).
 
 The result is an rvalue that must land in an `own` place (D17.8): the initializer of an `own`
@@ -89,7 +89,7 @@ node mut* own mut@ own k2 = new(own node*, 4);    // error: nothing precedes the
 del(new(point));                        // allocated and freed in one statement
 point mut* q = new(point);              // error: owning temporary would leak (D17.8)
 point mut* own q2 = new(point{1, 2});   // error: new takes a type, not a literal
-i32 mut@ own bad = new(i32@, 4);        // error: a slice header is not an element type
+i32 mut@ own bad = new(i32@, 4);        // error: a span header is not an element type
 void* own v = new(void);                // error: cannot allocate void
 i32 mut@ own neg = new(i32, -1);        // error: negative constant count (D4.1)
 i32 mut@ own neg2 = new(i32, k);        // runtime error when k == -1: negative allocation count -1
@@ -98,30 +98,30 @@ i32 mut@ own neg2 = new(i32, k);        // runtime error when k == -1: negative 
 ### 2.2 `del`
 
 `del(x)` is a universe function that yields no value (D12.2). Its operand must have an `own`
-type, of any mutability: an `own` pointer, a `void* own`, an `own` slice or a `string own`
+type, of any mutability: an `own` pointer, a `void* own`, an `own` span or a `string own`
 (D17.9). `del` frees the allocation the operand designates (D10.3) and, when the operand is an
-lvalue, empties it: the pointer becomes `null`, the slice or string `{null, 0}` (D17.9, D17.6).
+lvalue, empties it: the pointer becomes `null`, the span or string `{null, 0}` (D17.9, D17.6).
 Emptying is not an assignment, so the binding need not be `mut`; an operand reached through an
 indirection (`*p`, `p->f`, `s[i]`) needs that level to be mutable, because the store is visible
-to everyone else who holds the pointer or slice (D17.6). A zero operand is a no-op, so
+to everyone else who holds the pointer or span (D17.6). A zero operand is a no-op, so
 `del(buf); del(buf);` frees once, and a use after `del` dereferences `null` instead of freed
 memory (D17.9). On an rvalue operand `del` only frees.
 
-| Operand                                            | Effect                                    |
-|----------------------------------------------------|-------------------------------------------|
-| `T* own` or `T mut* own` lvalue from `new(T)`      | frees the object; the operand is `null`   |
-| `void* own` holding an allocation address          | frees it; the operand is `null`           |
-| `T@ own` or `T mut@ own` from `new(T, n)`          | frees the elements; operand `{null, 0}`   |
-| `T[K] mut@ own` from `new(T[K], n)`                | frees the rows; operand `{null, 0}`       |
-| `string own` (D17.12)                              | frees the characters; operand `{null, 0}` |
-| an `own` rvalue: a call result, `move(x)`, a cast  | frees; there is nothing to empty          |
-| `null` (the literal adopts `void* own`)            | no-op (D17.9)                             |
-| a zero slice or string                             | no-op                                     |
-| `T*`, `T@`, `string`, `void*` without `own`        | error: a view, not an `own` type          |
-| a sub-slice `s[lo..hi]` or `s[..]`, a `.ptr`       | error: slicing and `.ptr` yield views     |
-| `&local`, a literal                                | error: not an `own` type                  |
-| a function pointer                                 | error: not an allocation                  |
-| an integer, struct or fixed array                  | error: `del` is shallow (D17.7)           |
+| Operand                                            | Effect                                      |
+|----------------------------------------------------|---------------------------------------------|
+| `T* own` or `T mut* own` lvalue from `new(T)`      | frees the object; the operand is `null`     |
+| `void* own` holding an allocation address          | frees it; the operand is `null`             |
+| `T@ own` or `T mut@ own` from `new(T, n)`          | frees the elements; operand `{null, 0}`     |
+| `T[K] mut@ own` from `new(T[K], n)`                | frees the rows; operand `{null, 0}`         |
+| `string own` (D17.12)                              | frees the characters; operand `{null, 0}`   |
+| an `own` rvalue: a call result, `move(x)`, a cast  | frees; there is nothing to empty            |
+| `null` (the literal adopts `void* own`)            | no-op (D17.9)                               |
+| a zero span or string                              | no-op                                       |
+| `T*`, `T@`, `string`, `void*` without `own`        | error: a view, not an `own` type            |
+| a sub-span `s[lo..hi]` or `s[..]`, a `.ptr`        | error: taking a span and `.ptr` yield views |
+| `&local`, a literal                                | error: not an `own` type                    |
+| a function pointer                                 | error: not an allocation                    |
+| an integer, struct or fixed array                  | error: `del` is shallow (D17.7)             |
 
 ```fort
 node mut* own n = new(node);
@@ -131,7 +131,7 @@ n->value = 1;                        // dereferences null: a segfault, never a w
 i32 mut@ own xs = new(i32, 8);
 i32@ view = xs;                      // lends: view designates the same elements (D17.4)
 del(view);                           // error: cannot del 'view': not an own type (D17.9)
-del(xs[2..4]);                       // error: cannot del a sub-slice: slicing yields a view (D17.9)
+del(xs[2..4]);                       // error: cannot del a sub-span: it is a view (D17.9)
 del(xs.ptr);                         // error: cannot del a .ptr: it is a view (D17.9)
 del(null);                           // no-op
 i32 mut@ own empty = {};
@@ -343,7 +343,7 @@ free_list(&l);
 
 **Freeing a tree.** A node whose children are `node mut* own mut@ own` frees each child, then the
 slots, then itself; the element level is reached through a mutable path, so `move` out of the
-slice is allowed (D17.6):
+span is allowed (D17.6):
 
 ```fort
 struct tree {
@@ -361,9 +361,9 @@ fn void free_tree(tree mut* own t) {
 }
 ```
 
-**An arena that hands out views.** One `own` block, many borrowed sub-slices: the callers can
-use the memory but not free it, because slicing yields views (D17.3), and `del` of a view does
-not compile (D17.9):
+**An arena that hands out views.** One `own` block, many borrowed sub-spans: the callers can use the
+memory but not free it, because taking a span yields a view (D17.3), and `del` of a view does not
+compile (D17.9):
 
 ```fort
 struct arena {
@@ -403,9 +403,9 @@ the same sixteen as a view, with the same alignment, layout and calling conventi
 exactly three things for ownership:
 
 - **`move(lv)`** loads the operand's value and stores its zero value into the operand: eight
-  zero bytes for a pointer or `void*`, sixteen for a slice or string, the whole value for an
+  zero bytes for a pointer or `void*`, sixteen for a span or string, the whole value for an
   owning aggregate (D17.6).
-- **`del(lv)`** passes the pointer (or the slice's `ptr`) to the runtime's `free` and then
+- **`del(lv)`** passes the pointer (or the span's `ptr`) to the runtime's `free` and then
   stores the zero value into the operand; `del(rv)` only frees (D17.9; `toolchain.md` 6).
 - **The overwrite check.** In a checked build (D11.1), every assignment to an lvalue of `own`
   reference type loads the current pointer word after the right-hand side has been evaluated,
@@ -462,7 +462,7 @@ itself in every operand position (D17.4); only `del` and `move` distinguish them
 | `*p`        | the object `p` points to, an lvalue    | a `T*`, never `void*` or a fn pointer    |
 | `p->f`      | `(*p).f`                               | a pointer to a struct                    |
 | `p == null` | `p` is null                            | a pointer, `void*` or fn pointer         |
-| `p[lo..hi]` | unchecked slice of `hi - lo` elements  | a `T*` or `T mut*`                       |
+| `p[lo..hi]` | unchecked span of `hi - lo` elements   | a `T*` or `T mut*`                       |
 
 ```fort
 i32 mut x = 10;
@@ -491,7 +491,7 @@ del(o);                              // o == null; w now dangles
 `null` is the zero pointer and function-pointer value (D10.5). Dereferencing `null` or a dangling
 pointer is undefined behavior, in practice a segmentation fault (D10.5, D10.7).
 
-### 3.1 From a raw pointer to a slice
+### 3.1 From a raw pointer to a span
 
 There is no pointer arithmetic (D10.4). The only way to view memory behind a raw pointer as
 elements is `p[lo..hi]`, which yields a `T@` (or `T mut@` from a `T mut*`) with `ptr` advanced
@@ -499,7 +499,7 @@ by `lo` elements and `len == hi - lo`, performing no check at all (D6.9). The re
 whether or not `p` is `own` (D17.3). It is the explicit unsafe escape for foreign memory: a
 range that extends beyond the object, or `hi < lo`, is undefined behavior (D10.7). Only the
 two-bound form exists for pointers, because a pointer has no length; `p[lo..]`, `p[..hi]` and
-`p[..]` are errors, as is any slicing of `void*` (D6.9).
+`p[..]` are errors, as is any span expression on a `void*` (D6.9).
 
 ```fort
 extern fn u64 strlen(char* s);
@@ -512,7 +512,7 @@ fn string env_value(string name) {   // name must be NUL-terminated, for example
 }
 char@ tail = p[3..];                 // error: a pointer has no length
 void* vp = cast(p, void*);
-u8@ bytes = vp[0..4];                // error: void* cannot be sliced
+u8@ bytes = vp[0..4];                // error: cannot take a span of a void*
 u8 mut* own raw = new(u8);
 u8 mut@ one = raw[0..1];             // a view of the allocation, not a second owner
 del(one);                            // error: cannot del 'one': not an own type (D17.9)
@@ -521,9 +521,10 @@ del(raw);                            // frees the byte; one now dangles
 
 ### 3.2 `void*`
 
-`void*` is an address with no pointee type: it cannot be dereferenced, cannot reach fields, and
-cannot be indexed or sliced; every conversion to and from it is a `cast` (D3.11). It exists for
-`extern` signatures and for storing an address whose type is recovered later with `cast`.
+`void*` is an address with no pointee type: it cannot be dereferenced, cannot reach fields,
+cannot be indexed and has no span expression; every conversion to and from it is a `cast` (D3.11).
+It exists for `extern` signatures and for storing an address whose type is recovered later with
+`cast`.
 `void* own` is its owning form (D17.1): what `malloc` returns and `free` takes (D17.13), a
 legal operand of `del`, and the type a container such as `ptr_vec` would use if it owned what it
 stores. A `cast` between `void* own` and a typed `own` pointer yields `own` because its target
@@ -539,17 +540,17 @@ del(pt);
 del(blob);                           // no-op: blob is null
 ```
 
-## 4. Slices and strings in memory
+## 4. Spans and strings in memory
 
 ### 4.1 Layout
 
-A slice `T@` is sixteen bytes: a pointer to the first element followed by a `u64` element count
+A span `T@` is sixteen bytes: a pointer to the first element followed by a `u64` element count
 (D3.5). A `string` has the same layout with `char` elements (D3.7). Both have alignment 8.
-Whether the header owns its elements is part of the type, never of the bits: an `own` slice or
-`string own` is the same two words as a view (D17.1). A view's elements live on the stack (a
-sliced local array), on the heap (`new`, seen through a lent or sliced `own` value), in
-read-only data (a literal, a sliced module constant) or in foreign memory (`p[lo..hi]`); an
-`own` slice's elements always start a heap allocation (D17.1).
+Whether the header owns its elements is part of the type, never of the bits: an `own` span or
+`string own` is the same two words as a view (D17.1). A view's elements live on the stack (a span
+of a local array), on the heap (`new`, seen through a lent `own` value or a span of one), in
+read-only data (a literal, a span of a module constant) or in foreign memory (`p[lo..hi]`); an
+`own` span's elements always start a heap allocation (D17.1).
 
 | Offset | Word  | Type  | Holds                                                    |
 |--------|-------|-------|----------------------------------------------------------|
@@ -558,18 +559,18 @@ read-only data (a literal, a sliced module constant) or in foreign memory (`p[lo
 
 `.ptr` and `.len` read the two words; neither is an lvalue (D6.7). The zero value `{null, 0}` is
 what `= {}` produces and what a zeroed struct field holds. There is no expression form for a
-zero slice outside a declaration initializer: to reset a borrowed slice-typed field, declare a
-variable with `= {}` and assign it. An `own` slice field is reset by `del` or `move`, which
+zero span outside a declaration initializer: to reset a borrowed span-typed field, declare a
+variable with `= {}` and assign it. An `own` span field is reset by `del` or `move`, which
 leave `{null, 0}` behind (D17.6, D17.9).
 
-### 4.2 Slicing
+### 4.2 Span expressions
 
-`e[lo..hi]`, `e[lo..]`, `e[..hi]` and `e[..]` on a fixed array lvalue, a slice or a string produce
-a slice (or string) of the same elements with `ptr` advanced by `lo` elements and `len` set to
+`e[lo..hi]`, `e[lo..]`, `e[..hi]` and `e[..]` on a fixed array lvalue, a span or a string produce
+a span (or string) of the same elements with `ptr` advanced by `lo` elements and `len` set to
 `hi - lo`; omitted bounds are `0` and `len` (D6.9). The check `0 <= lo <= hi <= len` is against
-the operand's own `len`, not the original allocation, so a slice can only shrink. The result's
+the operand's own `len`, not the original allocation, so a span can only shrink. The result's
 element mutability is that of the operand's elements (D6.9). The result is always a view, even
-`a[..]` of an `own` slice or `string own` (D17.3): it cannot be `del`ed (D17.9), and it enters
+`a[..]` of an `own` span or `string own` (D17.3): it cannot be `del`ed (D17.9), and it enters
 an `own` place only through the adoption `cast` (D17.3), which is meant for memory from C.
 
 ```fort
@@ -577,18 +578,18 @@ i32 mut@ own a = new(i32, 6);        // {p, 6}
 i32 mut@ b = a[2..5];                // {p + 2 * 4 bytes, 3}
 i32@ c = b[1..];                     // {p + 3 * 4 bytes, 2}
 i32@ d = a[..];                      // same header as a, elements immutable
-i32@ e = b[0..4];                    // runtime error: slice bounds 0..4 out of range for length 3
-i32@ f = a[4..2];                    // runtime error: slice bounds 4..2 out of range for length 6
+i32@ e = b[0..4];                    // runtime error: span bounds 0..4 out of range for length 3
+i32@ f = a[4..2];                    // runtime error: span bounds 4..2 out of range for length 6
 i32[4] mut arr = {1, 2, 3, 4};
 i32 mut@ g = arr[1..3];              // points into arr's stack storage
-i32@ h = make_array()[..];           // error: a fixed array rvalue cannot be sliced
+i32@ h = make_array()[..];           // error: cannot take a span of a fixed array rvalue
 i32 mut@ own i = a[..];              // error: a view cannot initialize an own place (D17.3)
-del(b);                              // error: cannot del a sub-slice: it is a view (D17.9)
+del(b);                              // error: cannot del a sub-span: it is a view (D17.9)
 ```
 
 ### 4.3 Aliasing and lifetime
 
-A slice and its source designate the same elements: writes through one are visible through the
+A span and its source designate the same elements: writes through one are visible through the
 other, and both are invalidated together when the storage goes away.
 
 ```fort
@@ -611,7 +612,7 @@ del(c);                              // w now dangles (D10.7); a and c are {null
 i32 gone = a[0];                     // runtime error: index 0 out of range for length 0
 ```
 
-Slicing a local array produces a slice into the current frame. Returning it, storing it in a
+Taking a span of a local array produces a span into the current frame. Returning it, storing it in a
 heap object, or keeping it past the block is undefined behavior, exactly as returning `&local` is
 in C; the compiler does not diagnose it (D6.7, D10.7).
 
@@ -622,7 +623,7 @@ fn i32@ window() {
 }
 ```
 
-Copying a slice copies the header only (D8.2); the elements are shared. A `for (T x : s)` loop
+Copying a span copies the header only (D8.2); the elements are shared. A `for (T x : s)` loop
 evaluates `s` once before the loop and copies each element at the start of its iteration (D7.5),
 so replacing `s` inside the loop does not change what is iterated.
 
@@ -665,7 +666,7 @@ del(d);                              // frees the copy; d is {null, 0}, which eq
 
 ### 4.5 Handing memory to C
 
-Slices, strings, structs and fixed arrays never cross an `extern` boundary (D9.8, D13.4). Unpack
+Spans, strings, structs and fixed arrays never cross an `extern` boundary (D9.8, D13.4). Unpack
 `.ptr` and `.len`, cast the pointer to the declared C type, and pass a struct by address.
 
 ```fort
@@ -678,7 +679,7 @@ fn void put(string s) {
 fn void clear(u8 mut@ b) {
     memset(cast(b.ptr, void*), 0, b.len);
 }
-extern fn void sum(i32@ xs);        // error: slices cannot cross an extern boundary
+extern fn void sum(i32@ xs);        // error: spans cannot cross an extern boundary
 ```
 
 `own` in an `extern` signature is erased and records who frees (D17.13): a result type
@@ -686,10 +687,10 @@ extern fn void sum(i32@ xs);        // error: slices cannot cross an extern boun
 takes no `mut`, having no target level (D17.13, D5.5).
 Memory received from C is used through `p[lo..hi]` (section 3.1) and released with `del` or the
 C library's own function, whichever the C side documents; `new`/`del` and `malloc`/`free` are
-interchangeable (D10.3). Adoption, a `cast` that adds `own` to a pointer or slice, is how
+interchangeable (D10.3). Adoption, a `cast` that adds `own` to a pointer or span, is how
 memory from C enters the `own` discipline (D17.3, D3.14); handing an `own` value to a C
 function that frees it is a `move` into its `own` parameter. Declare a C result `own` when the
-pointer itself will be `del`ed, and plain when it will be adopted as a slice, so that exactly
+pointer itself will be `del`ed, and plain when it will be adopted as a span, so that exactly
 one `own` value exists per allocation (D17.14). `del` of adopted memory that does not start an
 allocation is undefined (D10.7).
 
@@ -703,7 +704,7 @@ u8 mut@ bytes = raw[0..64];                    // a view for filling
 free(cast(move(raw), void* own));              // or del(raw); raw == null either way
 u64 mut n = 0;
 char mut* line = read_line(&n);                // a view until adopted
-char mut@ own text = cast(line[0..n], char mut@ own);   // adopted as an own slice
+char mut@ own text = cast(line[0..n], char mut@ own);   // adopted as an own span
 del(text);                                     // frees what C allocated
 char mut@ own mid = cast(line[1..n], char mut@ own);
 del(mid);                                      // undefined: not the start of an allocation (D10.7)
@@ -712,7 +713,7 @@ free(cast(b.ptr, void* own));                  // adopts a view: b is now a seco
 ```
 
 The last line is legal and dangerous: after it `b` still looks live, so `del(b)` would free
-twice and an assignment to `b` would trap on the overwrite check. Free `own` slices with `del`.
+twice and an assignment to `b` would trap on the overwrite check. Free `own` spans with `del`.
 
 ## 5. Fixed arrays and structs
 
@@ -732,11 +733,11 @@ fn void zero(i32[4] mut arr) { arr[0] = 0; }
 zero(a);                             // a is unchanged: arr was a copy
 fn void zero_in_place(i32 mut@ arr) { arr[0] = 0; }
 i32[4] mut c = {1, 2, 3, 4};
-zero_in_place(c[..]);                // c[0] == 0: the slice points into c
+zero_in_place(c[..]);                // c[0] == 0: the span points into c
 ```
 
 Multi-dimensional arrays are arrays of arrays, laid out row-major (D3.6). `i32[3][4] m` is 48
-bytes; `m[i][j]` is at byte offset `(i * 4 + j) * 4`; `m[i]` is an `i32[4]` lvalue. A slice of
+bytes; `m[i][j]` is at byte offset `(i * 4 + j) * 4`; `m[i]` is an `i32[4]` lvalue. A span of
 rows, `i32[4] mut@ own`, comes from `new(i32[4], n)` (D3.6, D10.2).
 
 ```fort
@@ -745,7 +746,7 @@ m[2][3] = 1;                         // offset 44
 i32[4] row = m[2];                   // copies 16 bytes
 i32[4] mut@ own rows = new(i32[4], n);  // n rows, zeroed
 rows[0][1] = 7;
-rows[1] = row;                       // copies a whole row into the slice's storage
+rows[1] = row;                       // copies a whole row into the span's storage
 u64 k = m[i].len;                    // 4: a constant; m[i] is not evaluated (D4.6)
 ```
 
@@ -758,7 +759,7 @@ except where the table says otherwise. Casts never trap (D3.14) and float arithm
 | Check           | Fires when                    | Message (values in decimal)                   |
 |-----------------|-------------------------------|-----------------------------------------------|
 | index `e[i]`    | `i >= len`, compared unsigned | `index 5 out of range for length 3`           |
-| slice `e[a..b]` | not `0 <= a <= b <= len`      | `slice bounds 2..7 out of range for length 3` |
+| span `e[a..b]`  | not `0 <= a <= b <= len`      | `span bounds 2..7 out of range for length 3`  |
 | `+ - *`, `-e`   | result does not fit           | `integer overflow`                            |
 | `++ --`         | result does not fit           | `integer overflow`                            |
 | `+= -= *=`      | result does not fit           | `integer overflow`                            |
@@ -779,7 +780,7 @@ the offending values of the failing check, written as signed decimals.
 
 | Check                       | Checked (default) | Release (`--release`)    | `--no-bounds-check` |
 |-----------------------------|-------------------|--------------------------|---------------------|
-| index, slice                | runtime error     | runtime error            | check removed       |
+| index, span                 | runtime error     | runtime error            | check removed       |
 | `+ - *`, unary `-`, `++ --` | runtime error     | wraps (two's complement) | unchanged           |
 | `+= -= *=`                  | runtime error     | wraps (two's complement) | unchanged           |
 | `+% -% *%`, `+%= -%= *%=`   | wraps             | wraps                    | unchanged           |
@@ -792,11 +793,11 @@ the offending values of the failing check, written as signed decimals.
 
 Notes:
 
-- Index and slice checks compare unsigned: a signed index is sign-extended and a negative value
+- Index and span checks compare unsigned: a signed index is sign-extended and a negative value
   becomes a huge unsigned number that fails the single comparison (D6.8). A constant index out of
   range for a fixed array is a compile error instead (D6.8). `p[lo..hi]` on a pointer is never
   checked (D6.9).
-- Overflow checks cover signed and unsigned integers alike, so `len - 1` on an empty slice traps
+- Overflow checks cover signed and unsigned integers alike, so `len - 1` on an empty span traps
   in checked mode (D11.1, D16). The wrapping operators exist so hashes and counters behave
   identically in both modes (D11.2). Programs must not rely on either overflow behavior (D11.1).
 - `<<` discards bits shifted out without a check, so `1 << 31` on `i32` is `-2147483648` in
@@ -888,13 +889,13 @@ a diagnosed error (D10.7). None of these is detected.
 | calling a null function pointer                | `fn void() f = null; f();`                 |
 | data races                                     | two threads from `extern` writing one `g`  |
 
-Returning or storing a slice of a local array is the slice form of the dangling-pointer case
+Returning or storing a span of a local array is the span form of the dangling-pointer case
 (section 4.3). Reading an object after its `del` through any alias, including a copy of the
 `own` value made by lending before the `del` or `move`, is the first row (D10.7, D17.14). Use
 after `del` or `move` through the emptied reference itself is not in the list: it dereferences
-`null` or indexes a zero-length slice, a segfault or a bounds error (D17.9); double `del`
+`null` or indexes a zero-length span, a segfault or a bounds error (D17.9); double `del`
 through one reference is a no-op (D17.9), and through two copies it is the first row. `del` of
-a view, a sub-slice, a `.ptr`, a stack address or a literal is a compile error (D17.9), so only
+a view, a sub-span, a `.ptr`, a stack address or a literal is a compile error (D17.9), so only
 the adoption `cast` can turn such a value into the second row (D17.3). Not undefined and not
 detected: an `own` value that is never freed, and two `own` references to one allocation made
 through `cast` (D17.14).
@@ -950,7 +951,7 @@ fn void demo() {
 
 Functions return `bool` or an error enum and deliver results through `T mut*` out-parameters;
 `-1` and `null` sentinels are used where C convention expects them; `panic` is for programming
-errors (D13.3). A slice result uses a pointer to an `own` slot, `u8 mut@ own mut* out` (D3.6,
+errors (D13.3). A span result uses a pointer to an `own` slot, `u8 mut@ own mut* out` (D3.6,
 D13.5, D17.2): the callee moves the header through `*out`, and the caller, who initialized the
 slot to `{}` so that the store passes the overwrite check (D17.11), owns the elements.
 
@@ -1007,8 +1008,8 @@ fn void use_both() {
 
 ### 9.3 A growable buffer without generics
 
-One struct per element type: an `own` backing slice plus a count of the elements in use
-(D13.5). The backing slice is replaced by a larger one when full, and because `del` empties the
+One struct per element type: an `own` backing span plus a count of the elements in use
+(D13.5). The backing span is replaced by a larger one when full, and because `del` empties the
 field first, the replacement passes the overwrite check (D17.11). The struct is an owning
 aggregate and is passed by pointer (D17.7); `std::vec` provides `int_vec` and `ptr_vec` on this
 pattern (D13.2).
@@ -1069,7 +1070,7 @@ fn bool copy_file(string src, string dst) {
 
 ### 9.5 Building a string in a `u8 mut@ own`
 
-Allocate the bytes, fill them, and `cast` the moved slice to `string own` (D3.14, D17.12). The
+Allocate the bytes, fill them, and `cast` the moved span to `string own` (D3.14, D17.12). The
 cast's result is `own` because its target says so, and an `own` lvalue cast to an `own` target
 must be moved (D17.5), which empties the buffer so that the characters have exactly one owner
 (D17.14); the caller frees the result with `del`. Allocate the exact length: a prefix such

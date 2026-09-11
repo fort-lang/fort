@@ -274,7 +274,7 @@ TEST(msg_view_appends_a_view, {
     sb_init(&m);
     msg_begin(&m);
     msg_str(&m, "in ");
-    msg_view(&m, str_from_span("functionality", 8));
+    msg_view(&m, str_from_range("functionality", 8));
     TEST_ASSERT_EQ_STR(msg_end(&m), "in function");
     sb_free(&m);
 })
@@ -329,7 +329,7 @@ TEST(msg_quote_of_a_view_takes_only_the_view, {
     sb_t m;
     sb_init(&m);
     msg_begin(&m);
-    msg_quote(&m, str_from_span("name_and_more", 4));
+    msg_quote(&m, str_from_range("name_and_more", 4));
     msg_str(&m, " shadows a parameter");
     TEST_ASSERT_EQ_STR(msg_end(&m), "'name' shadows a parameter");
     sb_free(&m);
