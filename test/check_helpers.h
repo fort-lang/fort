@@ -72,6 +72,22 @@ static inline bool check_body(const char* body) {
     return check_src(source);
 }
 
+// Checks the entry module even though it did not parse, which the driver
+// never does but an editor mode will: the error nodes of D14.2 stand where
+// statements, fields and declarations were expected, and every pass skips
+// them.
+static inline bool check_broken(const char* text) {
+    begin();
+    add("main.ft", text);
+    TEST_UNUSED(load("main.ft"));
+    check_reset();
+    check_init(&checker);
+    checker_live = true;
+    checker.require_main = false;
+    const module_t* m = module_set_find(&set, str_from_cstr("main"));
+    return m != NULL && check_module(&checker, m);
+}
+
 // The module of the closure at `path`, or NULL.
 static inline const module_t* module_at(const char* path) {
     return module_set_find(&set, str_from_cstr(path));
