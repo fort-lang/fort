@@ -684,7 +684,7 @@ TEST(an_unclosed_bracket_costs_its_construct_and_no_more, {
 
 // ---- the fail corpus (D14.4) ----------------------------------------------
 
-enum { CORPUS_PATH_CAP = 512, CORPUS_CHUNK = 4096, CORPUS_MIN_FILES = 90 };
+enum { CORPUS_PATH_CAP = 512, CORPUS_CHUNK = 4096, CORPUS_FILES = 112 };
 
 // The files walked, the source of the one being read, and the lines that were
 // reported on without an annotation, one per line.
@@ -826,7 +826,50 @@ TEST(the_fail_corpus_reports_only_on_annotated_lines, {
     sb_clear(&corpus_report);
     walk_corpus(FORT_LANG_DIR "/fail");
     TEST_ASSERT_EQ_STR(sb_cstr(&corpus_report), "");
-    TEST_ASSERT_GE_SIZE((size_t)corpus_files, (size_t)CORPUS_MIN_FILES);
+    // The exact count, so that a file that stops being walked is noticed.
+    TEST_ASSERT_EQ_UINT64(corpus_files, (uint64_t)CORPUS_FILES);
+})
+
+// The corpus files whose syntax errors are all reported, with the number of
+// diagnostics each must produce. The walk above says only that nothing
+// unannotated was reported, which a parser that gave up after the first error
+// would also satisfy; these counts say that recovery happens (D14.2).
+static const char* const MULTI_ERROR_FILES[] = {
+    "/fail/mutability/004_doubled_mut_marker.ft",
+    "/fail/mutability/006_marker_before_base_type.ft",
+    "/fail/ownership/009_doubled_own_marker.ft",
+    "/fail/ownership/010_own_non_reference.ft",
+    "/fail/ownership/022_own_before_base_type.ft",
+    "/fail/declarations/007_two_missing_initializers.ft",
+    "/fail/structs/004_two_bad_fields.ft"};
+static const uint64_t MULTI_ERROR_COUNTS[] = {2, 2, 2, 3, 2, 2, 2};
+
+// Records the files of the table above whose diagnostic count is not the one
+// expected, as `<path>: <got> diagnostics, expected <want>`.
+static void check_corpus_counts(void) {
+    for (uint64_t i = 0; i < sizeof(MULTI_ERROR_FILES) / sizeof(MULTI_ERROR_FILES[0]); i++) {
+        char path[CORPUS_PATH_CAP];
+        TEST_UNUSED(snprintf(path, sizeof path, "%s%s", FORT_LANG_DIR, MULTI_ERROR_FILES[i]));
+        uint64_t count = 0;
+        if (read_source(path, &corpus_src)) {
+            TEST_UNUSED(parse_text(sb_cstr(&corpus_src)));
+            count = diag_count();
+        }
+        if (count != MULTI_ERROR_COUNTS[i]) {
+            sb_append(&corpus_report, MULTI_ERROR_FILES[i]);
+            sb_append(&corpus_report, ": ");
+            msg_uint(&corpus_report, count);
+            sb_append(&corpus_report, " diagnostics, expected ");
+            msg_uint(&corpus_report, MULTI_ERROR_COUNTS[i]);
+            sb_push(&corpus_report, '\n');
+        }
+    }
+}
+
+TEST(the_corpus_files_with_two_syntax_errors_report_both, {
+    sb_clear(&corpus_report);
+    check_corpus_counts();
+    TEST_ASSERT_EQ_STR(sb_cstr(&corpus_report), "");
 })
 
 // NOLINTEND(readability-magic-numbers)
@@ -871,6 +914,7 @@ int main(int argc, char** argv) {
     TEST_RUN(every_recovery_point_records_what_it_skipped);
     TEST_RUN(an_unclosed_bracket_costs_its_construct_and_no_more);
     TEST_RUN(the_fail_corpus_reports_only_on_annotated_lines);
+    TEST_RUN(the_corpus_files_with_two_syntax_errors_report_both);
     sb_free(&corpus_report);
     sb_free(&corpus_src);
     parse_done();

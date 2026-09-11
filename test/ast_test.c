@@ -192,6 +192,18 @@ TEST(dump_of_null_is_nil, {
     TEST_ASSERT_EQ_STR(dump(NULL), "nil");
 })
 
+// The node that stands for a region the parser skipped after a syntax error
+// prints without children, whatever was left in it (D14.2).
+TEST(dump_of_an_error_node_has_no_children, {
+    reset();
+    ast_node_t* err = node(AST_ERROR);
+    TEST_ASSERT_EQ_STR(ast_kind_name(AST_ERROR), "error");
+    TEST_ASSERT_EQ_STR(dump(err), "(error)");
+    err->a = node(AST_BREAK);
+    ast_push(err, node(AST_CONTINUE));
+    TEST_ASSERT_EQ_STR(dump(err), "(error)");
+})
+
 // NOLINTBEGIN(readability-magic-numbers) the literals below are the test data.
 TEST(dump_of_literals, {
     reset();
@@ -506,6 +518,7 @@ int main(int argc, char** argv) {
     TEST_RUN(marks_are_read_from_the_flags);
     TEST_RUN(every_kind_has_a_name);
     TEST_RUN(dump_of_null_is_nil);
+    TEST_RUN(dump_of_an_error_node_has_no_children);
     TEST_RUN(dump_of_literals);
     TEST_RUN(dump_escapes_string_bytes);
     TEST_RUN(dump_of_operators_uses_the_token_spelling);
