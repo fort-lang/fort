@@ -327,8 +327,18 @@ static gen_val_t gen_call(gen_t* g, ast_node_t* n, const gen_place_t* dst) {
         return none;
     }
     const bool is_extern = s->kind == SYM_EXTERN_FN;
+    // An `extern fn` naming a runtime entry point takes that group's
+    // prototype, variadic tail included, so it is called through it and not
+    // through the variadic type of D9.8 (item 8).
+    const bool variadic = is_extern && gen_runtime_entry(s->name) == RT_COUNT;
     if (is_extern) {
         gen_use_extern(g, s);
+    }
+    if (gen_is_aggregate(sig->elem) && dst == NULL) {
+        // An aggregate result needs the place it is written into (item 7);
+        // reaching this without one would drop the `sret` argument.
+        gen_todo(g, n->loc, "an aggregate result read without a destination");
+        return none;
     }
     gen_args_t args;
     gen_args_init(&args);
@@ -360,7 +370,7 @@ static gen_val_t gen_call(gen_t* g, ast_node_t* n, const gen_place_t* dst) {
     }
     gen_text_append_str(g, ret);
     gen_text_append(g, " ");
-    if (is_extern) {
+    if (variadic) {
         // An extern call goes through the matching variadic call type, which
         // is what makes the vector-register count right (item 8, D9.8).
         gen_text_append(g, "(");
@@ -379,8 +389,9 @@ static gen_val_t gen_call(gen_t* g, ast_node_t* n, const gen_place_t* dst) {
     gen_text_append(g, "(");
     gen_text_append_str(g, sb_view(&args.text));
     gen_text_append(g, ")");
-    if (is_extern) {
-        // `#3 = { nobuiltin }` on every extern call site (item 8).
+    if (variadic) {
+        // `#3 = { nobuiltin }` on every extern call site (item 8); a runtime
+        // entry point is not one, and its group carries no attribute.
         gen_use_attr(g, ATTR_NOBUILTIN);
         gen_text_append(g, " #3");
     }

@@ -70,6 +70,10 @@ typedef enum {
     RT_PRINT_ENUM,
     RT_FLUSH,
     RT_FLUSH_ALL,
+    RT_ARGS_INIT,
+    RT_ARGS_PTR,
+    RT_ARGS_LEN,
+    RT_EXIT,
     RT_COUNT,
 } gen_rt_t;
 
@@ -400,8 +404,15 @@ str_t gen_enum_ref(gen_t* g, const sym_t* e);
 uint64_t gen_enum_count(const sym_t* e);
 
 // Records an `extern` function so that its declaration is emitted in
-// first-use order (item 8).
+// first-use order, once per C name: two modules may each declare the same
+// function, which is two symbols and one ELF symbol (item 8).
 void gen_use_extern(gen_t* g, const sym_t* s);
+
+// The runtime entry point a C name denotes, or RT_COUNT. An `extern fn`
+// naming one is declared in the runtime group with that group's prototype and
+// attributes and left out of the extern group, variadic tail included, so it
+// is called through that prototype too (item 8, D13.1).
+gen_rt_t gen_runtime_entry(str_t name);
 
 // Appends the private data, the declarations and the attribute groups, then
 // assembles the module into `g->out` (item 1).

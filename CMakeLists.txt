@@ -153,10 +153,16 @@ endforeach()
 
 # The emitter suites run the LLVM verifier over every module they emit (D19.1)
 # and compare two of them with the worked examples of toolchain.md 6, which
-# live in test/ir, so they need the verifier's path and that directory.
-find_program(FORT_OPT_PATH NAMES opt-18 opt REQUIRED)
-foreach(gen_suite gen_test gen_check_test gen_module_test gen_aggregate_test)
-    if(TARGET "${gen_suite}")
+# live in test/ir, so they need the verifier's path and that directory. Every
+# test/gen*_test.c gets them, so a new suite is covered by adding the file, and
+# `opt` is a default rather than a configure-time requirement of every preset,
+# as it is for the pipeline test and for the language harness.
+find_program(FORT_OPT_PATH NAMES opt-18 opt)
+if(NOT FORT_OPT_PATH)
+    set(FORT_OPT_PATH "opt-18")
+endif()
+foreach(gen_suite IN LISTS FORT_UNIT_TEST_TARGETS)
+    if(gen_suite MATCHES "^gen")
         target_compile_definitions("${gen_suite}"
             PRIVATE FORT_OPT="${FORT_OPT_PATH}" FORT_IR_DIR="${FORT_TEST_DIR}/ir")
     endif()

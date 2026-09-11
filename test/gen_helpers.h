@@ -178,6 +178,23 @@ static inline bool emit_unchecked(const char* text) {
     return gen_ok;
 }
 
+// The module of a two-file program: `other` is written beside the entry file
+// and reached by an `import`, so the closure has two modules and the emitter
+// walks them in dependency order (D9.10, item 1).
+static inline bool emit_two(const char* entry_name,
+                            const char* entry_text,
+                            const char* other_name,
+                            const char* other_text) {
+    gen_begin();
+    gen_write(other_name, other_text);
+    gen_write(entry_name, entry_text);
+    gen_options_t opts;
+    opts.release = false;
+    opts.no_bounds_check = false;
+    gen_ok = gen_emit_file(entry_name, opts);
+    return gen_ok;
+}
+
 // The module of `text` under the file name `name`, which the `@.file.N`
 // constants of its checks hold (D19.5).
 static inline bool emit_as(const char* name, const char* text) {

@@ -46,6 +46,10 @@ static const char* const RT_DECL[RT_COUNT] = {
     "declare void @fort_rt_print_enum(i32, i32, ptr, i64)",
     "declare void @fort_rt_flush(i32)",
     "declare void @fort_rt_flush_all()",
+    "declare void @fort_rt_args_init(i32, ptr)",
+    "declare ptr @fort_rt_args_ptr()",
+    "declare i64 @fort_rt_args_len()",
+    "declare void @fort_rt_exit(i32) #2",
 };
 
 // The symbol of each entry point, for a call site and for the rule that an
@@ -74,13 +78,35 @@ static const char* const RT_NAME[RT_COUNT] = {
     "@fort_rt_print_enum",
     "@fort_rt_flush",
     "@fort_rt_flush_all",
+    "@fort_rt_args_init",
+    "@fort_rt_args_ptr",
+    "@fort_rt_args_len",
+    "@fort_rt_exit",
 };
 
-// The result type of each entry point: only fort_rt_new returns a value.
+// The result type of each entry point: fort_rt_new, fort_rt_args_ptr and
+// fort_rt_args_len are the three that return a value.
 static const char* const RT_RESULT[RT_COUNT] = {
-    "ptr",  "void", "void", "void", "void", "void", "void", "void", "void", "void", "void", "void",
-    "void", "void", "void", "void", "void", "void", "void", "void", "void", "void", "void",
+    "ptr",  "void", "void", "void", "void", "void", "void", "void", "void",
+    "void", "void", "void", "void", "void", "void", "void", "void", "void",
+    "void", "void", "void", "void", "void", "void", "ptr",  "i64",  "void",
 };
+
+// Whether toolchain.md 5.1 declares the entry point `_Noreturn`, which is
+// what puts `cold noreturn nounwind` on its declaration (section 5, item 14).
+static bool rt_is_noreturn(gen_rt_t rt) {
+    return (rt >= RT_FAIL_BOUNDS && rt <= RT_ASSERT_FAIL) || rt == RT_EXIT;
+}
+
+gen_rt_t gen_runtime_entry(str_t name) {
+    for (uint64_t i = 0; i < (uint64_t)RT_COUNT; i++) {
+        // RT_NAME holds the operand, so its first byte is the `@`.
+        if (str_eq(str_from_cstr(RT_NAME[i] + 1), name)) {
+            return (gen_rt_t)i;
+        }
+    }
+    return RT_COUNT;
+}
 
 // The overflow intrinsics of item 15, in the order `sadd ssub smul uadd usub
 // umul` and, within each, the widths `i8 i16 i32 i64`.
@@ -199,7 +225,7 @@ str_t gen_enum_ref(gen_t* g, const sym_t* e) {
     r->sym = e;
     r->first = g->strs.len;
     r->count = 0;
-    for (uint64_t i = 0; i < ast_len(e->node); i++) {
+    for (uint64_t i = 0; e->node != NULL && i < ast_len(e->node); i++) {
         const ast_node_t* m = ast_child(e->node, i);
         if (m->kind != AST_ENUM_MEMBER) {
             continue;
@@ -259,7 +285,7 @@ static void emit_data(gen_t* g, sb_t* out) {
         sb_append_u64(out, r->count);
         sb_append(out, " x %fort.enum_member] [");
         uint64_t at = 0;
-        for (uint64_t k = 0; k < ast_len(r->sym->node); k++) {
+        for (uint64_t k = 0; r->sym->node != NULL && k < ast_len(r->sym->node); k++) {
             const ast_node_t* m = ast_child(r->sym->node, k);
             if (m->kind != AST_ENUM_MEMBER) {
                 continue;
@@ -285,19 +311,21 @@ static void emit_data(gen_t* g, sb_t* out) {
 
 void gen_use_extern(gen_t* g, const sym_t* s) {
     const str_t name = s->name;
-    for (uint64_t i = 0; i < (uint64_t)RT_COUNT; i++) {
-        if (str_eq(str_from_cstr(RT_NAME[i] + 1), name)) {
-            // An `extern fn` naming a runtime entry point is declared in the
-            // runtime group with that group's prototype, once (item 8).
-            g->rt[i] = true;
-            if (i >= (uint64_t)RT_FAIL_BOUNDS && i <= (uint64_t)RT_ASSERT_FAIL) {
-                gen_use_attr(g, ATTR_FAIL);
-            }
-            return;
+    const gen_rt_t rt = gen_runtime_entry(name);
+    if (rt != RT_COUNT) {
+        // An `extern fn` naming a runtime entry point is declared in the
+        // runtime group with that group's prototype, once (item 8).
+        g->rt[rt] = true;
+        if (rt_is_noreturn(rt)) {
+            gen_use_attr(g, ATTR_FAIL);
         }
+        return;
     }
     for (uint64_t i = 0; i < g->externs.len; i++) {
-        if (g->externs.items[i] == (void*)s) {
+        // A symbol is declared exactly once (item 8), and what the linker
+        // sees is the C name: two modules of one program may each declare the
+        // same function, which is two sym_t and one ELF symbol.
+        if (str_eq(((const sym_t*)g->externs.items[i])->name, name)) {
             return;
         }
     }
@@ -376,9 +404,9 @@ static void emit_intrinsic(sb_t* out, uint64_t which) {
 // Marks an entry point used and appends `@fort_rt_x(<args>)`.
 static void call_rt_tail(gen_t* g, gen_rt_t rt, const gen_args_t* args) {
     g->rt[rt] = true;
-    if (rt >= RT_FAIL_BOUNDS && rt <= RT_ASSERT_FAIL) {
-        // The failure entry points are declared `cold noreturn nounwind`
-        // (item 14).
+    if (rt_is_noreturn(rt)) {
+        // A `_Noreturn` entry point is declared `cold noreturn nounwind`
+        // (item 14, section 5).
         gen_use_attr(g, ATTR_FAIL);
     }
     gen_text_append(g, RT_NAME[rt]);

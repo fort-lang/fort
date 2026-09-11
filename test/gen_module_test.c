@@ -492,6 +492,90 @@ TEST(every_module_of_the_corpus_is_reproduced_byte_for_byte, {
     sb_free(&first);
 })
 
+// ---- several modules in one program (item 1, D9.10) --------------------------------
+
+// The imported module: a struct, a function and an `extern` the importer
+// declares as well.
+static const char UTIL_SOURCE[] = "extern fn i32 puts(char* s);\n"
+                                  "struct point { i32 x; i32 y; }\n"
+                                  "fn i32 shout(char* s) { return puts(s); }\n";
+
+static const char APP_SOURCE[] = "import util;\n"
+                                 "extern fn i32 puts(char* s);\n"
+                                 "fn i32 main() {\n"
+                                 "    util.point p = {1, 2};\n"
+                                 "    string s = \"hi\";\n"
+                                 "    i32 a = puts(s.ptr);\n"
+                                 "    i32 b = util.shout(s.ptr);\n"
+                                 "    println(p.x +% p.y +% a +% b);\n"
+                                 "    return 0;\n"
+                                 "}\n";
+
+TEST(the_modules_of_a_closure_are_emitted_in_dependency_order, {
+    TEST_ASSERT_TRUE(emit_two("app.ft", APP_SOURCE, "util.ft", UTIL_SOURCE));
+    // An imported module stands before its importer (D9.10, D19.5), and each
+    // symbol is its own module path plus its name (D9.7).
+    TEST_ASSERT_TRUE(
+        before("define dso_local i32 @\"util.shout\"", "define dso_local i32 @\"app.main\""));
+    TEST_ASSERT_TRUE(before("define dso_local i32 @\"app.main\"", "@fort_entry"));
+    TEST_ASSERT_EQ_STR(found("%struct.util.point = type { i32, i32 }"),
+                       "%struct.util.point = type { i32, i32 }");
+    TEST_ASSERT_EQ_STR(found("getelementptr inbounds %struct.util.point, ptr %p.0, i32 0, i32 0"),
+                       "getelementptr inbounds %struct.util.point, ptr %p.0, i32 0, i32 0");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+TEST(a_c_function_two_modules_declare_is_declared_once, {
+    TEST_ASSERT_TRUE(emit_two("app.ft", APP_SOURCE, "util.ft", UTIL_SOURCE));
+    // A symbol is declared exactly once (item 8): the two `extern fn puts`
+    // are two symbols and one ELF symbol, and a second declaration is a
+    // redefinition the verifier rejects.
+    TEST_ASSERT_EQ_STR(found("declare i32 @puts(ptr, ...)\n"), "declare i32 @puts(ptr, ...)\n");
+    TEST_ASSERT_NULL(
+        strstr(strstr(ir(), "declare i32 @puts(ptr, ...)") + 1, "declare i32 @puts(ptr, ...)"));
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+// ---- the runtime group reached through an extern fn (item 8, D13.1) ----------------
+
+TEST(an_extern_naming_a_runtime_entry_point_takes_that_groups_prototype, {
+    TEST_ASSERT_TRUE(emit("extern fn noreturn fort_rt_exit(i32 status);\n"
+                          "fn i32 main() { println(\"bye\"); fort_rt_exit(3); }\n"));
+    // It is emitted in the runtime group with that group's prototype and
+    // attributes and left out of the extern group, variadic tail included,
+    // so the call site goes through that prototype too (item 8).
+    TEST_ASSERT_EQ_STR(found("declare void @fort_rt_exit(i32) #2\n"),
+                       "declare void @fort_rt_exit(i32) #2\n");
+    TEST_ASSERT_EQ_STR(absent("@fort_rt_exit(i32, ...)"), "absent");
+    TEST_ASSERT_EQ_STR(found("  call void @fort_rt_exit(i32 3)\n"),
+                       "  call void @fort_rt_exit(i32 3)\n");
+    TEST_ASSERT_EQ_STR(absent("@fort_rt_exit(i32 3) #3"), "absent");
+    // `_Noreturn` is the runtime's own guarantee, so the declaration carries
+    // it (item 20), and the call site still ends in the trap of D8.5.
+    TEST_ASSERT_EQ_STR(found("attributes #2 = { cold noreturn nounwind }"),
+                       "attributes #2 = { cold noreturn nounwind }");
+    TEST_ASSERT_EQ_STR(found("  call void @llvm.trap()\n  unreachable\n"),
+                       "  call void @llvm.trap()\n  unreachable\n");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+TEST(the_argument_entry_points_are_declared_from_section_5_1, {
+    TEST_ASSERT_TRUE(
+        emit("extern fn u64 fort_rt_args_len();\n"
+             "extern fn void fort_rt_flush(i32 fd);\n"
+             "fn i32 main() { fort_rt_flush(1); return cast(fort_rt_args_len(), i32); }\n"));
+    TEST_ASSERT_EQ_STR(found("declare void @fort_rt_flush(i32)\n"),
+                       "declare void @fort_rt_flush(i32)\n");
+    TEST_ASSERT_EQ_STR(found("declare i64 @fort_rt_args_len()\n"),
+                       "declare i64 @fort_rt_args_len()\n");
+    // The runtime group keeps the order of toolchain.md 5.1, where flush
+    // comes before the argument entry points.
+    TEST_ASSERT_TRUE(before("declare void @fort_rt_flush(i32)", "declare i64 @fort_rt_args_len()"));
+    TEST_ASSERT_EQ_STR(found("%t0 = call i64 @fort_rt_args_len()"),
+                       "%t0 = call i64 @fort_rt_args_len()");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
 // ---- unfinished constructs are refused, never miscompiled --------------------------
 
 TEST(a_construct_the_emitter_cannot_lower_yet_is_a_diagnostic, {
@@ -532,6 +616,10 @@ int main(int argc, char** argv) {
     TEST_RUN(every_module_of_the_corpus_verifies_in_release_mode);
     TEST_RUN(every_module_of_the_corpus_verifies_without_bounds_checks);
     TEST_RUN(every_module_of_the_corpus_is_reproduced_byte_for_byte);
+    TEST_RUN(the_modules_of_a_closure_are_emitted_in_dependency_order);
+    TEST_RUN(a_c_function_two_modules_declare_is_declared_once);
+    TEST_RUN(an_extern_naming_a_runtime_entry_point_takes_that_groups_prototype);
+    TEST_RUN(the_argument_entry_points_are_declared_from_section_5_1);
     TEST_RUN(a_construct_the_emitter_cannot_lower_yet_is_a_diagnostic);
     sb_free(&golden_text);
     gen_done();

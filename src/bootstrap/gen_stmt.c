@@ -72,6 +72,14 @@ static void gen_assign(gen_t* g, ast_node_t* n) {
     }
     const int32_t op = compound_operator(n->op);
     if (op == TOK_ASSIGN) {
+        if (!g->opts.release && type_is_reference(target.type) && target.type->own) {
+            // Storing over a live `own` value traps in the checked mode
+            // (D11.1, D17.11), and that check is T-022's: the bare store below
+            // is the release-mode lowering and would silently be a checked
+            // build without its check (item 18).
+            gen_todo(g, n->loc, "an assignment to an owning reference");
+            return;
+        }
         gen_expr_into(g, n->b, target);
         return;
     }

@@ -851,9 +851,11 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
          %fort.enum_member { i32 6, ptr @.str.5 }], align 8
     ```
 
-    One entry per member in declaration order; `%fort.enum_member = type { i32, ptr }` has C's
-    16-byte layout with its 4 bytes of padding, so it matches `struct fort_rt_enum_member`
-    (section 5.1). A table is emitted only for an enum some `print` of that type reaches.
+    The table is one line in the module and is wrapped here only to fit the page, as the
+    `llvm.memcpy` declaration of item 8 is. One entry per member in declaration order;
+    `%fort.enum_member = type { i32, ptr }` has C's 16-byte layout with its 4 bytes of padding, so
+    it matches `struct fort_rt_enum_member` (section 5.1). A table is emitted only for an enum
+    some `print` of that type reaches.
 
 22. **`fort_entry`** (D11.6, D8.6). Emitted in the entry module, it receives the argument span
     by hidden pointer, copies it into its own frame when `main` declares the parameter, and
