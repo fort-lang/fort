@@ -422,6 +422,13 @@ Fort v1 compiles a whole program at once (D9.10):
 4. One LLVM IR module is emitted for the entire closure (D19.1).
 5. `--cc` compiles that module and links it with the runtime object in one invocation (D14.3).
 
+`fort --check` runs steps 1 to 3 and stops (D20.1): every module of the closure is checked in
+dependency order, as in a build, but nothing is emitted and no `--cc` runs. The file it is given
+is the root of the closure rather than the entry point of a program, so it need not define `main`
+(D8.6); every other rule of this section holds, the search roots and the cycle rule included. A
+module the root does not reach is still never read, so checking a library means checking a file
+that imports it.
+
 A module outside the closure is never read, so an error in an unimported standard library module
 is never reported. There is no separate compilation: no interface files, no per-module objects, no
 module cache, no incremental rebuild, no parallel compilation of modules and no `--module-path`
@@ -668,6 +675,11 @@ All diagnostics follow D14.2: `<file>:<line>:<col>: error: <message>`, optionall
 | `m.x` with no such declaration     | `module 'std::io' has no declaration named 'x'`          |
 | entry module without a valid `main`| `entry module 'main' must define 'fn i32 main()'`        |
 | aggregate in an extern signature   | `extern signature cannot use type 'i32@'`                |
+
+The missing-`main` row is the one diagnostic a build reports and `fort --check` does not: under
+`--check` the root is a module under inspection and D8.6 is not applied (D20.1). Every other row
+is reported the same way in both modes, and `--check --json` reports them as the document of
+`toolchain.md` 4.1, with the same positions.
 
 Notes accompany some of these: "not found" lists `note: looked for <path>` once per root and
 reading; the ambiguous case gives the full paths in the message and the same-file case adds

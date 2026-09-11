@@ -30,6 +30,8 @@ file (D14.1). Options and the entry file may appear in any order.
 | `--cc <path>`       | the clang that compiles and links the IR (D14.3)           | `clang`    |
 | `--target <triple>` | passed to `--cc` as `--target=<triple>` (D14.1)            | see below  |
 | `-Xcc <arg>`        | passed to `--cc` verbatim, after the arguments below       | none       |
+| `--check`           | run the front end only and stop (D20.1)                    | off        |
+| `--json`            | write the check document to stdout (D20.2), needs `--check`| off        |
 | `--help`            | print the usage line and exit 0                            |            |
 | `--version`         | print the compiler version and exit 0                      |            |
 
@@ -46,6 +48,12 @@ file (D14.1). Options and the entry file may appear in any order.
 - `-S` and `-c` together stop at the IR. With `-S`, `-l`, `--cc`, `--target` and `-Xcc` are
   unused.
 - `--release` and `--no-bounds-check` are independent and may be combined.
+- `--check` runs steps 1 to 3 of section 2 and stops there: no IR, no `--cc`, no temporary, and
+  the entry module need not define `main`, since it is a module under inspection and not a
+  program (D20.1, D8.6). With it, `-o`, `-S`, `-c`, `-l`, `--cc`, `--target` and `-Xcc` are
+  unused. `--json` replaces the text diagnostics of section 4 with the document of section 4.1 on
+  stdout and is a usage error without `--check`, since a build spawns a `--cc` that inherits
+  stdout and could not promise a complete document or nothing (D20.2).
 - The entry file's directory is always a root and the current directory never is (D9.2).
 
 Exit status (D14.1):
@@ -61,15 +69,16 @@ on stderr, for example `fort: error: cannot read 'x.ft': No such file or directo
 `fort: error: cc failed with status 1`. `fort` with no arguments prints one usage line and exits
 with 2; `--help` prints that line and then the table above, and exits 0.
 
-These are all the `fort: error: <message>` texts, each of them exit status 2 (D14.1). Four report
-a command line the compiler cannot use and are followed by the usage line: `missing argument for
-option '<opt>'`, `unexpected argument '<arg>'` (a second entry file), `unknown option '<opt>'`
-and `no entry file`. Four report an operation of section 2 that failed, with the system's error
-text as `<reason>`: `cannot read '<file>': <reason>` (the entry file), `cannot write '<file>':
-<reason>` (the LLVM IR module), `cannot create a temporary directory in '<dir>': <reason>`
-(`mkdtemp` under `$TMPDIR`) and `cannot run '<cc>': <reason>` (`--cc` could not be started). Two
-report the outcome of `--cc`: `cc failed with status <n>` and `cc failed with signal <n>`. The
-last two are the compiler's own failures: `internal error: <what>` and `out of memory`.
+These are all the `fort: error: <message>` texts, each of them exit status 2 (D14.1). Five report a
+command line the compiler cannot use and are followed by the usage line: `missing argument for
+option '<opt>'`, `unexpected argument '<arg>'` (a second entry file), `unknown option '<opt>'`, `no
+entry file` and `--json requires --check` (D20.2). Four report an operation of section 2 that
+failed, with the system's error text as `<reason>`: `cannot read '<file>': <reason>` (the entry
+file), `cannot write '<file>': <reason>` (the LLVM IR module), `cannot create a temporary directory
+in '<dir>': <reason>` (`mkdtemp` under `$TMPDIR`) and `cannot run '<cc>': <reason>` (`--cc` could
+not be started). Two report the outcome of `--cc`: `cc failed with status <n>` and `cc failed with
+signal <n>`. The last two are the compiler's own failures: `internal error: <what>` and `out of
+memory`.
 
 ```sh
 fort main.ft -o main                          # build ./main in checked mode
@@ -80,6 +89,8 @@ fort --release -o main main.ft                # release mode
 fort --release --no-bounds-check -o bench main.ft
 fort -I lib -I vendor -lm main.ft             # extra roots, link libm
 fort --cc clang-18 --target x86_64-linux-gnu -Xcc -fuse-ld=lld main.ft
+fort --check lib/util.ft                      # check that module and its imports, print nothing
+fort --check --json main.ft                   # one JSON document on stdout, for an editor
 FORT_STD_DIR=/opt/fort/std fort main.ft
 ```
 
@@ -112,6 +123,10 @@ Compilation is whole-program (D9.10):
    the module's own target triple, and `-x ir` must not be passed because `-x` is sticky and
    would also treat `fort_rt.o` as IR.
 6. Remove the temporary directory.
+
+`--check` stops after step 3 (D20.1): it emits no module, creates no temporary directory, runs no
+`--cc`, and does not apply the entry-point rule of D8.6, since the file it is given is a module
+under inspection rather than a program.
 
 - The temporary directory comes from `mkdtemp` under `$TMPDIR` (default `/tmp`) and is removed
   whether or not `--cc` succeeded.
@@ -256,6 +271,43 @@ The position of a runtime error is the operator token of the failing operation (
 assignment for the overwrite check of D17.11) or the builtin name for `new`, `assert` and
 `panic`. The assertion text is the verbatim source text of the argument. Runtime messages are
 listed in section 5.
+
+### 4.1 The check document (D20.2)
+
+`fort --check --json entry.ft` writes one JSON document to stdout instead of the
+compile-time lines of this section and no text diagnostic; the `fort: error:` lines of section 1
+stay on stderr. The document is built whole and written with one `fwrite`, so stdout holds a
+complete document or nothing: a client reads exit 0 or 1 with a document as a verdict and exit 2
+with empty stdout as a crash. The document is one line ended by a newline; it is shown here over
+several:
+
+```json
+{"version": 1,
+ "files": ["main.ft", "util.ft"],
+ "diagnostics": [{"file": "main.ft", "line": 7, "col": 5, "end_line": 7, "end_col": 6,
+                  "severity": "error", "message": "cannot assign to immutable 'x'",
+                  "notes": [{"file": "main.ft", "line": 3, "col": 9, "end_line": 3, "end_col": 10,
+                             "message": "'x' declared here"}]}],
+ "symbols": []}
+```
+
+- `"version"` is 1 for this form; a client that reads another number stops.
+- `"files"` lists every file the compiler read, in that order, each spelled as the `<file>` of a
+  diagnostic is, so a client knows which files it may clear stale diagnostics for. A file that was
+  reached but could not be read is not listed.
+- A diagnostic carries the whole range of D20.4: `"line"` and `"col"` are the start the text form
+  prints, `"end_line"` and `"end_col"` are one past its last byte, all 1-based with a tab counting
+  as one column. Columns are byte columns; converting them to UTF-16 code units is the client's
+  job. `"severity"` is `"error"`, the only severity v1 emits, since there are no warnings (D14.2).
+- The `note:` lines of an error are nested in its `"notes"`, in order, each with its own range; a
+  note carries no severity. A note that follows no error stands as a diagnostic of severity
+  `"note"`.
+- `"symbols"` is the identifier index, which is empty until D20.3 decides it.
+- Diagnostics appear in the order they were reported, which is the order of the text form.
+- `--json` is a usage error without `--check`: the `--cc` a build spawns inherits stdout, so the
+  guarantee above is the check mode's alone (D20.2). The document is written only when the
+  compiler reaches a verdict: a usage error, a toolchain error or an internal error leaves stdout
+  empty and exits 2 (D14.1).
 
 ## 5. The C runtime
 
