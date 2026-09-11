@@ -45,6 +45,7 @@ the //@ stderr lines that look like diagnostics unless one of these overrides it
 //@ json TEXT       write TEXT as the document instead of the derived one
 //@ json-none       write nothing at all to stdout
 //@ json-stderr T   print T on stderr under --check --json, which must write none
+//@ symbol TEXT     one record of the document's "symbols", written under --index
 """
 import json
 import os
@@ -68,8 +69,9 @@ status, program = 0, ["#!/bin/sh"]
 ir_status, module = 0, ['target triple = "x86_64-unknown-linux-gnu"']
 check = "--check" in args
 as_json = check and "--json" in args
+indexed = as_json and "--index" in args
 check_status, json_status = None, None
-diagnostics, doc_lines, doc_files = [], [], []
+diagnostics, doc_lines, doc_files, symbols = [], [], [], []
 no_document = False
 with open(entry) as f:
     for line in f:
@@ -88,6 +90,8 @@ with open(entry) as f:
             sys.stderr.write(line[16:] + "\n")
         elif line.startswith("//@ json "):
             doc_lines.append(line[9:])
+        elif line.startswith("//@ symbol "):
+            symbols.append(line[11:])
         elif line.startswith("//@ stderr "):
             diagnostics.append(line[11:])
             if not as_json:
@@ -128,7 +132,7 @@ if check:
                 "version": 1,
                 "files": [entry] + doc_files,
                 "diagnostics": records,
-                "symbols": [],
+                "symbols": [json.loads(s) for s in symbols] if indexed else [],
             }
             sys.stdout.write(json.dumps(document, separators=(",", ":")) + "\n")
     code = status if check_status is None else check_status
@@ -1565,11 +1569,13 @@ class CheckJson(EndToEnd):
         )
         self.assertEqual(status, 0)
 
-    def test_only_fail_tests_are_selected(self):
+    def test_a_test_with_nothing_to_compare_is_not_selected(self):
         self.write_corpus()
+        # A run test with no golden index has neither diagnostics nor an index
+        # to hold the document against (D20.2, D20.3).
         status, lines = self.run_main("--check-json", "run/control")
         self.assertEqual(status, 1)
-        self.assertEqual(lines, ["run_tests.py: error: no fail test matches run/control"])
+        self.assertEqual(lines, ["run_tests.py: error: no document test matches run/control"])
 
     def test_a_listed_test_is_not_expected_to_fail(self):
         self.write_corpus()
@@ -1836,6 +1842,258 @@ class CheckJson(EndToEnd):
         status, lines = self.only("001_chatty")
         self.assertEqual(status, 1)
         self.assertIn("--json wrote to stderr: noise", lines[0])
+
+
+# ---- the identifier index (D20.3) ------------------------------------------------------
+
+
+class GoldenIndex(EndToEnd):
+    """`--check-json` over a test with an `index.json` beside it (D20.3)."""
+
+    def symbol(self, file, line, col, end_col, name, kind, type_, is_decl, decl=None):
+        """One record of the index, a range on one line (D20.3, D20.4)."""
+        return {
+            "file": file,
+            "line": line,
+            "col": col,
+            "end_line": line,
+            "end_col": end_col,
+            "name": name,
+            "kind": kind,
+            "type": type_,
+            "is_decl": is_decl,
+            "decl": decl,
+        }
+
+    def range_of(self, record):
+        return {key: record[key] for key in run_tests.RANGE_KEYS}
+
+    def write_test(self, symbols, golden=None, directives=()):
+        """A run test of two lines whose index is `symbols`, with its golden."""
+        path = "run/modules/indexed"
+        entry = path + "/main.ft"
+        body = "//! run\n//@ program echo ok\n" + "\n".join(directives) + "\n"
+        write(self.corpus, entry, body)
+        write(
+            self.corpus,
+            path + "/" + run_tests.INDEX_NAME,
+            run_tests.render_index(symbols if golden is None else golden),
+        )
+        return path, entry
+
+    def record(self, entry, line=2, **rest):
+        args = dict(name="main", kind="fn", type_="fn i32()", is_decl=True)
+        args.update(rest)
+        rec = self.symbol(entry, line, 8, 12, **args)
+        if rec["decl"] is None and rec["kind"] != "builtin":
+            rec["decl"] = self.range_of(rec)
+        return rec
+
+    def run_indexed(self, symbols, golden=None, extra=()):
+        path, entry = self.write_test(
+            symbols, golden, ["//@ symbol " + json.dumps(s) for s in symbols] + list(extra)
+        )
+        status, lines = self.run_main("--check-json", path)
+        return status, lines, entry
+
+    def test_a_golden_index_that_matches_passes(self):
+        _, entry = self.write_test([])
+        symbols = [self.record(entry)]
+        status, lines, _ = self.run_indexed(symbols)
+        self.assertEqual((status, lines[0]), (0, "PASS run/modules/indexed"))
+
+    def test_a_test_with_a_golden_index_is_selected(self):
+        self.write_corpus()
+        _, entry = self.write_test([])
+        symbols = [self.record(entry)]
+        status, lines, _ = self.run_indexed(symbols)
+        # A run test has no diagnostics to compare, so only its golden index
+        # selects it (D20.3).
+        self.assertEqual(status, 0)
+        self.assertIn("PASS run/modules/indexed", lines)
+
+    def test_a_differing_record_names_the_line(self):
+        _, entry = self.write_test([])
+        symbols = [self.record(entry)]
+        golden = [self.record(entry, name="other")]
+        status, lines, _ = self.run_indexed(symbols, golden)
+        self.assertEqual(status, 1)
+        self.assertIn("index.json:1: expected", lines[0])
+        self.assertIn('"name": "other"', lines[0])
+
+    def test_a_missing_record_is_reported(self):
+        _, entry = self.write_test([])
+        symbols = [self.record(entry)]
+        golden = symbols + [self.record(entry, name="gone", line=3)]
+        status, lines, _ = self.run_indexed(symbols, golden)
+        self.assertEqual(status, 1)
+        self.assertIn("index.json:2: expected", lines[0])
+        self.assertIn("got (no record)", lines[0])
+
+    def test_a_builtin_is_the_only_record_without_a_declaration(self):
+        _, entry = self.write_test([])
+        symbols = [self.record(entry, name="println", kind="builtin", type_="", is_decl=False)]
+        status, lines, _ = self.run_indexed(symbols)
+        self.assertEqual((status, lines[0]), (0, "PASS run/modules/indexed"))
+
+    def test_a_null_declaration_on_anything_else_fails(self):
+        _, entry = self.write_test([])
+        symbols = [self.record(entry, kind="local", type_="i32", is_decl=False)]
+        symbols[0]["decl"] = None
+        # The golden is well formed, so what fails is the document's own
+        # record and not the lint of the file (D20.3).
+        status, lines, _ = self.run_indexed(symbols, [self.record(entry)])
+        self.assertEqual(status, 1)
+        self.assertIn('symbols[0]: only a builtin has a null "decl"', lines[0])
+
+    def test_an_unknown_kind_fails(self):
+        _, entry = self.write_test([])
+        symbols = [self.record(entry, kind="widget")]
+        status, lines, _ = self.run_indexed(symbols, [self.record(entry)])
+        self.assertEqual(status, 1)
+        self.assertIn("symbols[0]: kind is 'widget'", lines[0])
+
+    def test_a_declaration_whose_decl_is_not_its_own_range_fails(self):
+        _, entry = self.write_test([])
+        symbols = [self.record(entry)]
+        symbols[0]["decl"]["line"] = 1
+        status, lines, _ = self.run_indexed(symbols, [self.record(entry)])
+        self.assertEqual(status, 1)
+        self.assertIn('symbols[0]: the declaration\'s "decl" is not its own range', lines[0])
+
+    def test_an_alias_declares_a_name_for_a_declaration_elsewhere(self):
+        _, entry = self.write_test([])
+        symbols = [self.record(entry, name="double", is_decl=True)]
+        symbols[0]["decl"] = {
+            "file": "run/modules/indexed/other.ft",
+            "line": 1,
+            "col": 1,
+            "end_line": 1,
+            "end_col": 1,
+        }
+        write(self.corpus, "run/modules/indexed/other.ft", "fn i32 f() { return 0; }\n")
+        # An `as` alias is the one declaration whose "decl" is in another file
+        # (D9.3, D20.3), so the harness accepts it and nothing else.
+        status, lines, _ = self.run_indexed(
+            symbols, extra=["//@ json-file run/modules/indexed/other.ft"]
+        )
+        self.assertEqual((status, lines[0]), (0, "PASS run/modules/indexed"))
+
+    def test_a_null_type_is_a_declaration_that_failed_to_check(self):
+        _, entry = self.write_test([])
+        symbols = [self.record(entry, kind="local", type_=None, is_decl=True)]
+        status, lines, _ = self.run_indexed(symbols)
+        self.assertEqual((status, lines[0]), (0, "PASS run/modules/indexed"))
+
+    def test_a_type_that_is_neither_a_string_nor_null_fails(self):
+        _, entry = self.write_test([])
+        symbols = [self.record(entry, type_=7)]
+        status, lines, _ = self.run_indexed(symbols, [self.record(entry)])
+        self.assertEqual(status, 1)
+        self.assertIn("symbols[0]: type is 7", lines[0])
+
+    def test_a_range_outside_its_file_fails(self):
+        _, entry = self.write_test([])
+        symbols = [self.record(entry, line=99)]
+        status, lines, _ = self.run_indexed(symbols, [self.record(entry)])
+        self.assertEqual(status, 1)
+        self.assertIn("symbols[0]: start line 99 is outside the file", lines[0])
+
+    def test_symbols_must_be_empty_without_the_golden(self):
+        # The fake writes the records only under --index, so a fail test whose
+        # document holds any is one the harness never asked for (D20.3).
+        path = "fail/mutability/001_extra.ft"
+        doc = self.document([path], [], symbols=[self.record(path)])
+        self.script("001_extra.ft", ["//@ exit 1", "//@ json " + json.dumps(doc)], "scripted")
+        status, lines = self.run_main("--check-json", "001_extra")
+        self.assertEqual(status, 1)
+        self.assertIn("symbols is not empty", lines[0])
+
+    def document(self, files, diagnostics, **rest):
+        doc = {
+            "version": 1,
+            "files": list(files),
+            "diagnostics": list(diagnostics),
+            "symbols": [],
+        }
+        doc.update(rest)
+        return doc
+
+    def script(self, name, directives, expected="scripted"):
+        path = "fail/mutability/%s" % name
+        header = "//! fail\n//! error-any: %s\nfn i32 main() { return 0; }\n" % expected
+        write(self.corpus, path, header + "\n".join(directives) + "\n")
+        return path
+
+
+class GoldenIndexLint(unittest.TestCase):
+    """The lint of a golden index file, which runs without a compiler (D20.3)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.root = Path(self.dir)
+
+    def golden(self, text):
+        path = self.root / "run" / "modules" / "t" / run_tests.INDEX_NAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return run_tests.golden_index_problems(self.root, path)
+
+    def record(self, **rest):
+        rec = {
+            "file": "run/modules/t/main.ft",
+            "line": 1,
+            "col": 8,
+            "end_line": 1,
+            "end_col": 12,
+            "name": "main",
+            "kind": "fn",
+            "type": "fn i32()",
+            "is_decl": True,
+            "decl": None,
+        }
+        rec.update(rest)
+        return rec
+
+    def test_a_well_formed_golden_has_no_problem(self):
+        self.assertEqual(self.golden(run_tests.render_index([self.record()])), [])
+
+    def test_an_empty_golden_is_a_problem(self):
+        self.assertEqual(self.golden(""), ["run/modules/t/index.json: no records"])
+
+    def test_a_line_that_is_not_json_is_reported(self):
+        problems = self.golden("{not json}\n")
+        self.assertEqual(len(problems), 1)
+        self.assertIn("run/modules/t/index.json:1: not one JSON record", problems[0])
+
+    def test_a_missing_key_is_reported(self):
+        record = self.record()
+        del record["type"]
+        problems = self.golden(run_tests.render_index([record]))
+        self.assertEqual(len(problems), 1)
+        self.assertIn("run/modules/t/index.json:1: keys are", problems[0])
+
+    def test_an_unknown_kind_is_reported(self):
+        problems = self.golden(run_tests.render_index([self.record(kind="widget")]))
+        self.assertEqual(problems, ["run/modules/t/index.json:1: kind is 'widget'"])
+
+    def test_another_spelling_of_the_same_record_is_reported(self):
+        text = json.dumps(self.record(), separators=(",", ":")) + "\n"
+        problems = self.golden(text)
+        self.assertEqual(
+            problems,
+            ["run/modules/t/index.json:1: not spelled as the harness writes a record"],
+        )
+
+    def test_a_golden_beside_a_test_is_not_an_unexpected_file(self):
+        write(self.root, "run/modules/t/main.ft", "//! run\n")
+        (self.root / "run" / "modules" / "t" / run_tests.INDEX_NAME).write_text(
+            run_tests.render_index([self.record()]), encoding="utf-8"
+        )
+        tests, problems = run_tests.discover(self.root)
+        self.assertEqual(problems, [])
+        self.assertEqual([(t.path, t.golden_index) for t in tests], [("run/modules/t", True)])
 
 
 if __name__ == "__main__":

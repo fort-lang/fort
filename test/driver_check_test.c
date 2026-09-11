@@ -16,10 +16,14 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 
+#include "ast.h"
+#include "check.h"
 #include "diag.h"
 #include "driver.h"
 #include "driver_helpers.h"
+#include "modules.h"
 #include "str.h"
+#include "sym.h"
 
 #include "test.h"
 
@@ -189,6 +193,139 @@ TEST(the_document_of_a_failing_module_is_exact, {
     TEST_UNUSED(
         snprintf(want, sizeof want, BAD_IMPORT_DOCUMENT, box.entry, box.entry, box.entry, box.dir));
     TEST_ASSERT_EQ_STR(run.out, want);
+    sandbox_close(&box);
+})
+
+// The whole document of the sandbox entry under --index: one record for the
+// one name the module declares (D20.3, toolchain.md 9.1).
+static const char INDEXED_DOCUMENT[] =
+    "{\"version\":1,\"files\":[\"%s\"],\"diagnostics\":[],\"symbols\":[{\"file\":\"%s\","
+    "\"line\":1,\"col\":8,\"end_line\":1,\"end_col\":12,\"name\":\"main\",\"kind\":\"fn\","
+    "\"type\":\"fn i32()\",\"is_decl\":true,\"decl\":{\"file\":\"%s\",\"line\":1,\"col\":8,"
+    "\"end_line\":1,\"end_col\":12}}]}\n";
+
+TEST(index_implies_check_and_json_and_fills_the_symbols, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    // --index is the whole command line an editor gives the compiler: it
+    // turns on --check and --json by itself (D20.3).
+    const run_t run = RUN_CAPTURED("--index", box.entry);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
+    char want[CAPTURE_MAX];
+    TEST_UNUSED(snprintf(want, sizeof want, INDEXED_DOCUMENT, box.entry, box.entry, box.entry));
+    TEST_ASSERT_EQ_STR(run.out, want);
+    sandbox_close(&box);
+})
+
+TEST(index_runs_the_front_end_alone, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    // The check mode emits nothing and spawns no `--cc` (D20.1), which
+    // --index does not change.
+    const run_t run = RUN_CAPTURED("--index", "--cc", FORT_FAKE_CC, "-o", box.out, box.entry);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
+    TEST_ASSERT_EQ_INT32(access(box.log, F_OK), -1);
+    TEST_ASSERT_EQ_INT32(access(box.out, F_OK), -1);
+    sandbox_close(&box);
+})
+
+TEST(an_indexed_use_points_at_the_declaration_in_the_other_file, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    TEST_ASSERT_TRUE(
+        write_source(box.entry, "import util;\nfn i32 main() { return util.add(1, 2); }\n"));
+    char util[PATH_CAP];
+    join(util, sizeof util, box.dir, "util.ft");
+    TEST_ASSERT_TRUE(write_source(util, "fn i32 add(i32 a, i32 b) { return a + b; }\n"));
+    const run_t run = RUN_CAPTURED("--index", box.entry);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
+    // The use of `add` in the entry carries the declaration's name range in
+    // the imported file, which is what go-to-definition follows (D20.3).
+    char want[CAPTURE_MAX];
+    TEST_UNUSED(snprintf(want,
+                         sizeof want,
+                         "{\"file\":\"%s\",\"line\":2,\"col\":29,\"end_line\":2,"
+                         "\"end_col\":32,\"name\":\"add\",\"kind\":\"fn\","
+                         "\"type\":\"fn i32(i32, i32)\",\"is_decl\":false,"
+                         "\"decl\":{\"file\":\"%s\",\"line\":1,\"col\":8,\"end_line\":1,"
+                         "\"end_col\":11}}",
+                         box.entry,
+                         util));
+    TEST_ASSERT_NONNULL(strstr(run.out, want));
+    sandbox_close(&box);
+})
+
+TEST(an_indexed_run_with_an_error_still_indexes_what_resolved, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    TEST_ASSERT_TRUE(write_source(box.entry, BAD_IMPORT_SOURCE));
+    const run_t run = RUN_CAPTURED("--index", box.entry);
+    // A verdict is exit 0 or 1 with a document (D20.2), and a file with
+    // errors still indexes everything the checker resolved (D20.3).
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
+    TEST_ASSERT_NONNULL(strstr(run.out, "\"message\":\"module 'nothere' not found\""));
+    TEST_ASSERT_NONNULL(strstr(run.out, "\"name\":\"main\",\"kind\":\"fn\""));
+    sandbox_close(&box);
+})
+
+TEST(an_indexed_run_that_cannot_read_the_entry_leaves_stdout_empty, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    char missing[PATH_CAP];
+    join(missing, sizeof missing, box.dir, "gone.ft");
+    // An unreadable entry is a usage error: exit 2 with stdout empty, which
+    // is how a client tells a crash from a verdict (D14.1, D20.2).
+    const run_t run = RUN_CAPTURED("--index", missing);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_USAGE);
+    TEST_ASSERT_EQ_SIZE(strlen(run.out), (size_t)0);
+    sandbox_close(&box);
+})
+
+TEST(index_after_check_and_json_is_the_same_run, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    // --index implies the two options, so spelling them as well changes
+    // nothing (D20.3).
+    const run_t implied = RUN_CAPTURED("--index", box.entry);
+    char want[CAPTURE_MAX];
+    TEST_UNUSED(snprintf(want, sizeof want, "%s", implied.out));
+    const run_t spelled = RUN_CAPTURED("--check", "--json", "--index", box.entry);
+    TEST_ASSERT_EQ_INT32(spelled.status, FORT_EXIT_OK);
+    TEST_ASSERT_EQ_STR(spelled.out, want);
+    sandbox_close(&box);
+})
+
+TEST(an_indexed_alias_declares_its_name_and_points_elsewhere, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    TEST_ASSERT_TRUE(write_source(
+        box.entry, "import util::add as plus;\nfn i32 main() { return plus(1, 2); }\n"));
+    char util[PATH_CAP];
+    join(util, sizeof util, box.dir, "util.ft");
+    TEST_ASSERT_TRUE(write_source(util, "fn i32 add(i32 a, i32 b) { return a + b; }\n"));
+    const run_t run = RUN_CAPTURED("--index", box.entry);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
+    // The alias declares `plus` in the entry and its declaration is the
+    // function in the imported file (D9.3, D20.3).
+    char want[CAPTURE_MAX];
+    TEST_UNUSED(snprintf(want,
+                         sizeof want,
+                         "\"name\":\"plus\",\"kind\":\"fn\",\"type\":\"fn i32(i32, i32)\","
+                         "\"is_decl\":true,\"decl\":{\"file\":\"%s\",\"line\":1,\"col\":8,"
+                         "\"end_line\":1,\"end_col\":11}}",
+                         util));
+    TEST_ASSERT_NONNULL(strstr(run.out, want));
+    sandbox_close(&box);
+})
+
+TEST(a_document_without_index_has_an_empty_symbols_array, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    // The index is a member of every document and is filled by --index alone
+    // (D20.2, D20.3).
+    const run_t run = RUN_CAPTURED("--check", "--json", box.entry);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
+    TEST_ASSERT_NONNULL(strstr(run.out, "\"symbols\":[]}"));
     sandbox_close(&box);
 })
 
@@ -373,19 +510,61 @@ TEST(the_front_end_hands_out_the_files_it_read, {
     opts.check = true;
     driver_files_t files;
     driver_files_init(&files);
+    driver_analysis_t an;
+    driver_analysis_init(&an);
     sb_t sink;
     sb_init(&sink);
     diag_capture(&sink);
     // The seam itself: no module is written when `ir_path` is NULL, and the
     // files come back in read order (D20.1, D20.2).
-    const int status = driver_front_end(&opts, "fort", NULL, &files, stderr);
+    const int status = driver_front_end(&opts, "fort", NULL, &files, &an, stderr);
     diag_capture(NULL);
     sb_free(&sink);
     TEST_ASSERT_EQ_INT32(status, FORT_EXIT_OK);
     TEST_ASSERT_EQ_UINT64(driver_files_count(&files), (uint64_t)2);
     TEST_ASSERT_EQ_STR(driver_files_at(&files, 0), box.entry);
     TEST_ASSERT_EQ_STR(driver_files_at(&files, 1), util);
+    driver_analysis_free(&an);
     driver_files_free(&files);
+    driver_options_free(&opts);
+    sandbox_close(&box);
+})
+
+TEST(the_analysis_outlives_the_front_end, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    TEST_ASSERT_TRUE(write_source(box.entry, "import util;\nfn i32 main() { return 0; }\n"));
+    char util[PATH_CAP];
+    join(util, sizeof util, box.dir, "util.ft");
+    TEST_ASSERT_TRUE(write_source(util, "fn i32 add(i32 a, i32 b) { return a + b; }\n"));
+    driver_options_t opts;
+    driver_options_init(&opts);
+    opts.entry = box.entry;
+    opts.check = true;
+    driver_analysis_t an;
+    driver_analysis_init(&an);
+    sb_t sink;
+    sb_init(&sink);
+    diag_capture(&sink);
+    const int status = driver_front_end(&opts, "fort", NULL, NULL, &an, stderr);
+    diag_capture(NULL);
+    sb_free(&sink);
+    TEST_ASSERT_EQ_INT32(status, FORT_EXIT_OK);
+    // The trees and every annotation on them are readable after the run: the
+    // symbols live until the caller frees the analysis (sym.h, D20.3).
+    TEST_ASSERT_EQ_UINT64(module_set_count(&an.set), (uint64_t)2);
+    const module_t* entry = module_set_entry(&an.set);
+    TEST_ASSERT_NONNULL(entry);
+    TEST_ASSERT_NONNULL(entry->ast->sym);
+    TEST_ASSERT_EQ_INT32((int32_t)entry->ast->sym->kind, (int32_t)SYM_MODULE);
+    TEST_ASSERT_TRUE(str_eq(entry->ast->sym->name, str_from_cstr("main")));
+    // The module's one declaration is `fn i32 main()`, whose symbol the
+    // checker left on its node.
+    const ast_node_t* decl = ast_child(entry->ast, ast_len(entry->ast) - 1);
+    TEST_ASSERT_NONNULL(decl->sym);
+    TEST_ASSERT_EQ_INT32((int32_t)decl->sym->kind, (int32_t)SYM_FN);
+    TEST_ASSERT_TRUE(check_sym_count(&an.ck) > 0);
+    driver_analysis_free(&an);
     driver_options_free(&opts);
     sandbox_close(&box);
 })
@@ -399,8 +578,11 @@ TEST(a_front_end_that_wants_no_files_gets_none, {
     opts.check = true;
     // A caller that writes no document passes NULL and nothing is collected
     // (D20.2).
-    const int status = driver_front_end(&opts, "fort", NULL, NULL, stderr);
+    driver_analysis_t an;
+    driver_analysis_init(&an);
+    const int status = driver_front_end(&opts, "fort", NULL, NULL, &an, stderr);
     TEST_ASSERT_EQ_INT32(status, FORT_EXIT_OK);
+    driver_analysis_free(&an);
     driver_options_free(&opts);
     sandbox_close(&box);
 })
@@ -432,7 +614,9 @@ static void check_run_then_internal_error(void) {
     opts.json = true;
     driver_files_t files;
     driver_files_init(&files);
-    TEST_UNUSED(driver_front_end(&opts, "fort", NULL, &files, stderr));
+    driver_analysis_t an;
+    driver_analysis_init(&an);
+    TEST_UNUSED(driver_front_end(&opts, "fort", NULL, &files, &an, stderr));
     fatal_internal("simulated");
 }
 
@@ -508,7 +692,16 @@ int main(int argc, char** argv) {
     TEST_RUN(an_include_root_is_searched_under_check);
     TEST_RUN(a_quote_in_a_file_name_is_escaped_in_the_document);
     TEST_RUN(a_non_ascii_file_name_passes_through_the_document);
+    TEST_RUN(index_implies_check_and_json_and_fills_the_symbols);
+    TEST_RUN(index_runs_the_front_end_alone);
+    TEST_RUN(an_indexed_use_points_at_the_declaration_in_the_other_file);
+    TEST_RUN(an_indexed_run_with_an_error_still_indexes_what_resolved);
+    TEST_RUN(an_indexed_run_that_cannot_read_the_entry_leaves_stdout_empty);
+    TEST_RUN(index_after_check_and_json_is_the_same_run);
+    TEST_RUN(an_indexed_alias_declares_its_name_and_points_elsewhere);
+    TEST_RUN(a_document_without_index_has_an_empty_symbols_array);
     TEST_RUN(the_front_end_hands_out_the_files_it_read);
+    TEST_RUN(the_analysis_outlives_the_front_end);
     TEST_RUN(a_front_end_that_wants_no_files_gets_none);
     TEST_RUN(the_files_of_a_run_are_forgotten_when_the_list_is_freed);
     TEST_RUN(an_unreadable_entry_under_json_leaves_stdout_empty);

@@ -9,6 +9,8 @@
 // `--check` stops after the front end, with no module, no temporary and no
 // `--cc` (D20.1), and `--json` reports what it found as one JSON document on
 // stdout instead of the text diagnostics of D14.2 (D20.2, toolchain.md 4.1).
+// `--index` implies both and fills that document's identifier index, which
+// index.h builds from the trees the run leaves behind (D20.3).
 //
 // The file mirrors what the self-hosted compiler will do: no unions, no
 // function pointers, messages assembled with sb_t instead of printf formats.
@@ -18,7 +20,9 @@
 #include <stdbool.h>
 #include <stdio.h>
 
+#include "check.h"
 #include "containers.h"
+#include "modules.h"
 #include "str.h"
 
 // The version printed by --version.
@@ -60,6 +64,7 @@ typedef struct {
     bool no_bounds_check; // --no-bounds-check
     bool check;           // --check: the front end alone (D20.1)
     bool json;            // --json: the document of D20.2 on stdout
+    bool index;           // --index: the identifier index of D20.3 in it
     ptrvec_t includes;    // -I roots, searched in command-line order (D9.2)
     ptrvec_t libs;        // -l<lib> as given, passed to the linker in order
     ptrvec_t cc_args;     // -Xcc arguments, passed verbatim after the rest
@@ -137,6 +142,26 @@ void driver_files_free(driver_files_t* files);
 uint64_t driver_files_count(const driver_files_t* files);
 const char* driver_files_at(const driver_files_t* files, uint64_t i);
 
+// What a front-end run leaves behind: the modules it read, which own every
+// syntax tree, and the checker, which owns every symbol and type the
+// annotations on those trees point to. Every `sym` and `type` slot of a tree
+// dangles once the checker is freed (sym.h), so the caller owns the analysis
+// and releases it only after the last pass that reads a tree, which is the
+// index walk of D20.3 running after the front end returned. Zero-initialized
+// storage is not one: driver_analysis_init prepares it, and one analysis
+// serves one run.
+typedef struct {
+    module_set_t set; // the import closure and the arena that owns every tree
+    check_t ck;       // the symbols and types the annotations point into
+} driver_analysis_t;
+
+void driver_analysis_init(driver_analysis_t* an);
+
+// Releases the checker and then the modules, in that order because an
+// annotation points into the checker and a symbol's name points into a
+// module's source; the analysis is empty and no tree may be read afterwards.
+void driver_analysis_free(driver_analysis_t* an);
+
 // The front end of toolchain.md 2, steps 1 to 4: read the entry file, parse
 // the import closure (module-system.md 10), check every module in dependency
 // order and write the program's LLVM IR module to `ir_path` (D19.1). The
@@ -155,10 +180,16 @@ const char* driver_files_at(const driver_files_t* files, uint64_t i);
 // collects the closure's file names for the document of D20.2 and is NULL
 // when the caller wants none. The diagnostics the run reported stay in the
 // sink of diag.h, where diag_write_json reads them.
+//
+// `an` is the caller's, prepared by driver_analysis_init and never freed
+// here: it holds the trees and the annotations the run produced, so a caller
+// that indexes them reads them after this returns and frees the analysis when
+// it is done (D20.3, sym.h).
 int driver_front_end(const driver_options_t* opts,
                      const char* argv0,
                      const char* ir_path,
                      driver_files_t* files,
+                     driver_analysis_t* an,
                      FILE* err);
 
 // Runs the compiler with argv[1..argc-1]; out and err are where --help,

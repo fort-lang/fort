@@ -263,6 +263,44 @@ TEST(a_chain_is_ordered_from_the_deepest_module_up, {
     TEST_ASSERT_EQ_STR(ordered(3), "main");
 })
 
+TEST(the_pass_order_is_the_dependency_order_when_every_module_loaded, {
+    begin();
+    add("main.ft", "import a;\nfn i32 main() { return 0; }\n");
+    add("a.ft", "fn i32 f() { return 0; }\n");
+    TEST_ASSERT_TRUE(load("main.ft"));
+    // A closure that resolved is ordered end to end, so the pass order of
+    // D9.10 is the dependency order and nothing more.
+    TEST_ASSERT_EQ_UINT64(module_set_pass_count(&set), module_set_count(&set));
+    TEST_ASSERT_EQ_STR(passed(0), "a");
+    TEST_ASSERT_EQ_STR(passed(1), "main");
+})
+
+TEST(the_pass_order_ends_with_the_modules_the_loader_never_ordered, {
+    begin();
+    add("main.ft", "import a;\nfn i32 main() { return 0; }\n");
+    add("a.ft", "import nothere;\nfn i32 f() { return 0; }\n");
+    TEST_ASSERT_FALSE(load("main.ft"));
+    // `a` never resolved and `main` was never reached, so neither is in the
+    // dependency order; both parsed, so a pass still visits them, the
+    // imported module first (D14.2, D20.1).
+    TEST_ASSERT_EQ_UINT64(module_set_count(&set), (uint64_t)0);
+    TEST_ASSERT_EQ_UINT64(module_set_pass_count(&set), (uint64_t)2);
+    TEST_ASSERT_EQ_STR(passed(0), "a");
+    TEST_ASSERT_EQ_STR(passed(1), "main");
+    TEST_ASSERT_FALSE(module_set_is_ordered(&set, module_set_find(&set, str_from_cstr("main"))));
+})
+
+TEST(a_module_that_did_not_parse_is_not_in_the_pass_order, {
+    begin();
+    add("main.ft", "import a;\nfn i32 main() { return 0; }\n");
+    add("a.ft", "fn i32 f() { return 0\n");
+    TEST_ASSERT_FALSE(load("main.ft"));
+    // A file with a syntax error is not checked, so no pass visits it
+    // (D14.2); the importer that parsed is visited.
+    TEST_ASSERT_EQ_UINT64(module_set_pass_count(&set), (uint64_t)1);
+    TEST_ASSERT_EQ_STR(passed(0), "main");
+})
+
 TEST(the_symbol_reading_works_at_any_depth, {
     begin();
     add("main.ft", "import a::b::c::d;\nfn i32 main() { return d(1); }\n");
@@ -360,6 +398,9 @@ int main(int argc, char** argv) {
     TEST_RUN(a_module_with_nothing_in_it_loads_with_an_empty_namespace);
     TEST_RUN(a_module_is_read_once_however_many_modules_import_it);
     TEST_RUN(a_chain_is_ordered_from_the_deepest_module_up);
+    TEST_RUN(the_pass_order_is_the_dependency_order_when_every_module_loaded);
+    TEST_RUN(the_pass_order_ends_with_the_modules_the_loader_never_ordered);
+    TEST_RUN(a_module_that_did_not_parse_is_not_in_the_pass_order);
     TEST_RUN(the_symbol_reading_works_at_any_depth);
     TEST_RUN(the_file_of_a_module_is_its_root_joined_path);
     TEST_RUN(a_root_spelled_with_dot_dot_reaches_the_same_module);

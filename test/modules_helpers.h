@@ -147,6 +147,15 @@ static inline const char* ordered(uint64_t i) {
     return module_set_at(&set, i)->path.ptr;
 }
 
+// The module path of the `i`-th module of the pass order, or the diagnostics
+// when there is no such module (D9.10, D14.2).
+static inline const char* passed(uint64_t i) {
+    if (i >= module_set_pass_count(&set)) {
+        return diags();
+    }
+    return module_set_pass_at(&set, i)->path.ptr;
+}
+
 // The binding of `name` in the namespace of the module `path`, or NULL.
 static inline const binding_t* bound(const char* path, const char* name) {
     const module_t* m = module_set_find(&set, str_from_cstr(path));

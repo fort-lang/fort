@@ -12,7 +12,9 @@ bootstrap diagnostic. `--lint` validates the directives without a compiler and
 `--verify-ir` runs the LLVM verifier over the module of every test that
 compiles. `--check-json` is a mode of its own: it runs `fort --check --json`
 over every fail test and holds the document of D20.2 against the text form of
-D14.2 instead of judging the test.
+D14.2 instead of judging the test; a test with an `index.json` beside it is
+selected too, and its golden identifier index is held against the `"symbols"`
+of a `--index` run (D20.3).
 
 Standard library only; Python 3.12.
 """
@@ -70,7 +72,39 @@ VERDICTS = ("PASS", "FAIL", "XFAIL", "XPASS", "ERROR")
 DOCUMENT_KEYS = ("version", "files", "diagnostics", "symbols")
 DIAGNOSTIC_KEYS = ("file", "line", "col", "end_line", "end_col", "severity", "message", "notes")
 NOTE_KEYS = ("file", "line", "col", "end_line", "end_col", "message")
+# One record of the identifier index and the range nested in its "decl" (D20.3).
+SYMBOL_KEYS = (
+    "file",
+    "line",
+    "col",
+    "end_line",
+    "end_col",
+    "name",
+    "kind",
+    "type",
+    "is_decl",
+    "decl",
+)
+RANGE_KEYS = ("file", "line", "col", "end_line", "end_col")
+# The kinds of D20.3, spelled as a diagnostic spells them.
+SYMBOL_KINDS = (
+    "module",
+    "fn",
+    "extern fn",
+    "struct",
+    "enum",
+    "enum member",
+    "field",
+    "constant",
+    "global",
+    "local",
+    "parameter",
+    "builtin",
+)
 DOCUMENT_VERSION = 1
+# The golden identifier index of a test: the "symbols" of its `--index` run,
+# one record per line, beside the test it is about (D20.3).
+INDEX_NAME = "index.json"
 
 DIRECTIVE_RE = re.compile(r"^//! ([a-z][a-z-]*)(:(.*))?$")
 ANNOTATION_RE = re.compile(r"^(.*?\S)\s*//! error:(.*)$")
@@ -137,6 +171,7 @@ class Test:
     errors: list = dataclasses.field(default_factory=list)  # (file, line, substring)
     error_any: list = dataclasses.field(default_factory=list)
     problems: list = dataclasses.field(default_factory=list)
+    golden_index: bool = False  # an index.json beside it: the golden of D20.3
 
     @property
     def multi(self):
@@ -395,10 +430,18 @@ def _discover_dir(root, directory, expected_kind, numbered, tests, problems):
                 problems.append("%s: bad test name" % rel)
             else:
                 names.append(entry.name)
-                tests.append(Test(rel, rel + "/main.ft", expected_kind))
+                test = Test(rel, rel + "/main.ft", expected_kind)
+                # The golden identifier index of D20.3 lives beside the test's
+                # sources, so it is the one file there that is not fort.
+                test.golden_index = (entry / INDEX_NAME).is_file()
+                tests.append(test)
                 for extra in sorted(entry.rglob("*")):
-                    if extra.is_file() and extra.suffix != ".ft":
-                        problems.append("%s: unexpected file" % extra.relative_to(root).as_posix())
+                    if not extra.is_file() or extra.suffix == ".ft":
+                        continue
+                    if extra.parent == entry and extra.name == INDEX_NAME:
+                        problems.extend(golden_index_problems(root, extra))
+                        continue
+                    problems.append("%s: unexpected file" % extra.relative_to(root).as_posix())
         elif entry.suffix == ".ft":
             valid = NUMBERED_RE.match(entry.stem) if numbered else NAME_RE.match(entry.stem)
             if not valid:
@@ -698,7 +741,9 @@ def empty_range_is_allowed(record, lines):
         return True
     if record["line"] == len(lines) and record["col"] == len(lines[-1]) + 1:
         return True
-    return any(text in record["message"] for text in LEXICAL_MESSAGES)
+    # A record of the index has no message and no other empty range: a name
+    # token has bytes (D20.3).
+    return any(text in record.get("message", "") for text in LEXICAL_MESSAGES)
 
 
 def range_problems(where, record, lines):
@@ -733,6 +778,56 @@ def _record_problems(where, record, keys, root, files, cache):
     problems = _keys_problem(where, record, keys)
     if problems:
         return problems
+    return _range_problems(where, record, root, files, cache)
+
+
+def render_index(symbols):
+    """The golden form of the `"symbols"` array: one record per line (D20.3).
+
+    The keys keep the document's order, so a golden file is a diff of the index
+    and never of a formatter.
+    """
+    return "".join(json.dumps(record, separators=(", ", ": ")) + "\n" for record in symbols)
+
+
+def golden_index_problems(root, path):
+    """The lint of a golden index: one record per line, each of the shape of D20.3.
+
+    A record is also held against `render_index`, so a golden file that was
+    hand-edited into another spelling of the same records fails here rather
+    than in the run it is compared byte for byte in.
+    """
+    where = path.relative_to(root).as_posix()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        return ["%s: cannot be read: %s" % (where, e)]
+    problems = []
+    lines = text.splitlines()
+    if not lines:
+        problems.append("%s: no records" % where)
+    for i, line in enumerate(lines, start=1):
+        try:
+            record = json.loads(line)
+        except ValueError as e:
+            problems.append("%s:%d: not one JSON record: %s" % (where, i, e))
+            continue
+        if not isinstance(record, dict):
+            problems.append("%s:%d: not an object" % (where, i))
+            continue
+        found = _keys_problem("%s:%d" % (where, i), record, SYMBOL_KEYS)
+        if found:
+            problems.extend(found)
+        elif record["kind"] not in SYMBOL_KINDS:
+            problems.append("%s:%d: kind is %r" % (where, i, record["kind"]))
+        elif render_index([record]) != line + "\n":
+            problems.append("%s:%d: not spelled as the harness writes a record" % (where, i))
+    return problems
+
+
+def _range_problems(where, record, root, files, cache):
+    """One range of D20.4: in a file of the closure, inside it and ordered."""
+    problems = []
     file = _normalize_file(record["file"], root)
     if file not in files:
         problems.append("%s: '%s' is not in \"files\"" % (where, file))
@@ -744,7 +839,47 @@ def _record_problems(where, record, keys, root, files, cache):
     return problems
 
 
-def document_problems(doc, root, cache):
+def symbol_problems(where, record, root, files, cache):
+    """The problems of one record of the identifier index (D20.3).
+
+    Its shape, its kind, its type, its own range, and its declaration:
+    `"type"` is a string or null, `"decl"` is a range in the closure, it is
+    null only for a builtin, and on an occurrence that declares the name it is
+    that occurrence's own range -- except on an `as` alias, which declares a
+    name here for a declaration that stands in another file (D9.3).
+    """
+    problems = _keys_problem(where, record, SYMBOL_KEYS)
+    if problems:
+        return problems
+    if record["kind"] not in SYMBOL_KINDS:
+        problems.append("%s: kind is %r" % (where, record["kind"]))
+    if not isinstance(record["is_decl"], bool):
+        problems.append("%s: is_decl is %r" % (where, record["is_decl"]))
+    if record["type"] is not None and not isinstance(record["type"], str):
+        # The type is absent only when the declaration failed to check (D20.3).
+        problems.append("%s: type is %r" % (where, record["type"]))
+    problems.extend(_range_problems(where, record, root, files, cache))
+    decl = record["decl"]
+    if decl is None:
+        # No source declares a builtin, and everything else is declared
+        # somewhere (D12.2, D20.3).
+        if record["kind"] != "builtin":
+            problems.append('%s: only a builtin has a null "decl"' % where)
+        return problems
+    found = _keys_problem("%s.decl" % where, decl, RANGE_KEYS)
+    if found:
+        return problems + found
+    problems.extend(_range_problems("%s.decl" % where, decl, root, files, cache))
+    same_range = [decl[k] for k in RANGE_KEYS] == [record[k] for k in RANGE_KEYS]
+    elsewhere = _normalize_file(decl["file"], root) != _normalize_file(record["file"], root)
+    if record["is_decl"] and not same_range and not elsewhere:
+        # A declaration is its own "decl"; only an alias declares a name here
+        # for something declared in another file (D9.3, D20.3).
+        problems.append('%s: the declaration\'s "decl" is not its own range' % where)
+    return problems
+
+
+def document_problems(doc, root, cache, indexed=False):
     """The problems of one document of D20.2: its shape, its files and its ranges."""
     if not isinstance(doc, dict):
         return ["the document is not an object"]
@@ -753,12 +888,18 @@ def document_problems(doc, root, cache):
         return problems
     if doc["version"] != DOCUMENT_VERSION:
         problems.append("version is %r, expected %d" % (doc["version"], DOCUMENT_VERSION))
-    if doc["symbols"] != []:
-        problems.append("symbols is not empty: %r" % (doc["symbols"],))
     files = [_normalize_file(f, root) for f in doc["files"]]
     for file in files:
         if source_lines(root, file, cache) is None:
             problems.append("files: '%s' cannot be read" % file)
+    if not indexed:
+        # The index is filled by --index alone and is a member of every
+        # document either way (D20.2, D20.3).
+        if doc["symbols"] != []:
+            problems.append("symbols is not empty: %r" % (doc["symbols"],))
+    else:
+        for i, record in enumerate(doc["symbols"]):
+            problems.extend(symbol_problems("symbols[%d]" % i, record, root, files, cache))
     after_error = False
     for i, diagnostic in enumerate(doc["diagnostics"]):
         where = "diagnostics[%d]" % i
@@ -858,6 +999,29 @@ def files_problems(test, files):
     return ["files: the entry '%s' is missing" % test.entry]
 
 
+def golden_index_diff(test, symbols, root):
+    """The first line on which the index differs from the test's golden (D20.3).
+
+    The golden is the `"symbols"` of the run, one record per line, so a
+    mismatch names the line and shows both spellings of it.
+    """
+    path = root / test.path / INDEX_NAME
+    try:
+        want = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        return ["%s: cannot be read: %s" % (INDEX_NAME, e)]
+    got = render_index(symbols)
+    if got == want:
+        return []
+    want_lines, got_lines = want.splitlines(), got.splitlines()
+    for i in range(max(len(want_lines), len(got_lines))):
+        wanted = want_lines[i] if i < len(want_lines) else "(no record)"
+        found = got_lines[i] if i < len(got_lines) else "(no record)"
+        if wanted != found:
+            return ["%s:%d: expected %s, got %s" % (INDEX_NAME, i + 1, wanted, found)]
+    return ["%s: differs from the index" % INDEX_NAME]
+
+
 def judge_check_json(test, text_proc, json_proc, root=ROOT):
     """Judge one test's `--check --json` run against its own text form.
 
@@ -867,7 +1031,9 @@ def judge_check_json(test, text_proc, json_proc, root=ROOT):
     runs must agree on the exit status and, record for record and in order, on
     the errors and notes the text form of D14.2 prints. A run that exits 2 is
     not an answer (D14.1) and must leave stdout empty, which is how a client
-    tells a crash from a verdict (D20.2).
+    tells a crash from a verdict (D20.2). A test with a golden index was run
+    with `--index`, so its `"symbols"` must match that file byte for byte
+    (D20.3).
     """
     document_verdict, document_reason = _answer_problem(json_proc, "--json")
     if document_verdict and json_proc.stdout:
@@ -889,13 +1055,15 @@ def judge_check_json(test, text_proc, json_proc, root=ROOT):
         doc = json.loads(json_proc.stdout.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as e:
         return "FAIL", "; ".join(problems + ["stdout is not one JSON document: %s" % e])
-    problems.extend(document_problems(doc, root, {}))
+    problems.extend(document_problems(doc, root, {}, test.golden_index))
     if problems:
         return "FAIL", "; ".join(problems)
     problems.extend(files_problems(test, [_normalize_file(f, root) for f in doc["files"]]))
     problems.extend(
         sequence_problems(parse_reports(text_proc.stderr, root), document_reports(doc, root))
     )
+    if test.golden_index:
+        problems.extend(golden_index_diff(test, doc["symbols"], root))
     if problems:
         return "FAIL", "; ".join(problems)
     return "PASS", ""
@@ -986,16 +1154,19 @@ def compile_command(config, test, output, compile_only=False, emit_ir=False):
     return argv
 
 
-def check_command(config, test, as_json):
-    """`fort --check [--json] <flags> <entry>`: the front end alone (D20.1).
+def check_command(config, test, as_json, indexed=False):
+    """`fort --check [--json] [--index] <flags> <entry>`: the front end alone (D20.1).
 
     `-o`, `-c`, `-S` and `--cc` are unused under `--check`, so the command
     carries neither an output nor a compiler; `--json` turns the text
-    diagnostics into the one document of D20.2 on stdout.
+    diagnostics into the one document of D20.2 on stdout, and `--index` fills
+    that document's identifier index (D20.3).
     """
     argv = [config.fort, "--check", "--std-dir", config.std_dir]
     if as_json:
         argv.append("--json")
+    if indexed:
+        argv.append("--index")
     argv.extend(test.flags)
     argv.append(test.entry)
     return argv
@@ -1062,7 +1233,8 @@ def execute_check_json(config, test):
     try:
         text = run_process(check_command(config, test, False), config.root, env, config.timeout)
         procs.append(text)
-        document = run_process(check_command(config, test, True), config.root, env, config.timeout)
+        argv = check_command(config, test, True, test.golden_index)
+        document = run_process(argv, config.root, env, config.timeout)
         procs.append(document)
         verdict, reason = judge_check_json(test, text, document, config.root)
         return Result(test, verdict, reason, procs, workdir)
@@ -1176,7 +1348,7 @@ def parse_args(argv):
     parser.add_argument(
         "--check-json",
         action="store_true",
-        help="instead of running the tests, hold `fort --check --json` against the text form",
+        help="instead of running the tests, hold the check document against the text form",
     )
     parser.add_argument("--opt", default=DEFAULT_OPT, help="LLVM opt (default: %(default)s)")
     parser.add_argument(
@@ -1247,9 +1419,10 @@ def main(argv=None):
     tests, problems, xfail, unsupported = load_corpus(root, args)
     selected = select(tests, args.filters)
     if args.check_json:
-        # The document is compared on the tests that have diagnostics to
-        # compare: every fail test of the corpus (D20.2).
-        selected = [t for t in selected if t.kind == "fail"]
+        # The document is compared on the tests that have something to compare:
+        # every fail test, which has diagnostics (D20.2), and every test with a
+        # golden identifier index beside it (D20.3).
+        selected = [t for t in selected if t.kind == "fail" or t.golden_index]
     if args.list:
         for test in selected:
             print(test.path)
@@ -1265,7 +1438,7 @@ def main(argv=None):
         return 0
     if not selected:
         if args.check_json:
-            print("run_tests.py: error: no fail test matches %s" % " ".join(args.filters))
+            print("run_tests.py: error: no document test matches %s" % " ".join(args.filters))
         else:
             print("run_tests.py: error: no test matches %s" % " ".join(args.filters))
         return 1

@@ -97,6 +97,21 @@ bool module_set_load(module_set_t* set, const char* entry);
 uint64_t module_set_count(const module_set_t* set);
 const module_t* module_set_at(const module_set_t* set, uint64_t i);
 
+// The modules a whole-closure pass visits, in the order it must visit them
+// (D9.10, D14.2): the dependency order above first, then every other module
+// the loader read that parsed -- one whose own import failed, or an importer
+// of a file that did not parse -- in the reverse of the read order, which is
+// depth first, so an imported module comes before its importer in that group
+// too. The checker walks this order and so does the index walk, which is what
+// makes the file order of the index the order D20.3 documents; the two may not
+// drift, so neither builds an order of its own.
+uint64_t module_set_pass_count(const module_set_t* set);
+const module_t* module_set_pass_at(const module_set_t* set, uint64_t i);
+
+// Whether the loader put `m` in the dependency order, as opposed to the
+// modules the pass order visits after it (D9.5, D14.2).
+bool module_set_is_ordered(const module_set_t* set, const module_t* m);
+
 // The files of every module the loader read, in the order it read them,
 // whether or not the module parsed and whether or not the closure is
 // complete: the "files" array of the check mode's document, which tells a
