@@ -1,0 +1,99 @@
+//! run
+//! link: ffi/layout.c
+//! stdout:
+//| true true true true true
+//| true true
+//| 11 222 3333 44444
+//| true
+//| true 8
+//| true 5 h
+//| true 6
+// fort computes struct layout itself (D3.8) and C computes it again; D9.9 says
+// the two agree, so that pointer-based interop works. A fort-only program
+// cannot see a disagreement, because a wrong layout used consistently agrees
+// with itself: every field below is written on one side of the boundary and
+// read on the other, and each size is held against C's sizeof.
+struct interop {
+    u8 tag;
+    i32 n;
+    u16 k;
+    i64 big;
+}
+
+struct flagged {
+    bool on;
+    i32 n;
+    bool off;
+}
+
+struct named {
+    u8 tag;
+    string name;
+}
+
+struct cell {
+    i32 n;
+    u8 tag;
+}
+
+struct table {
+    cell[3] rows;
+    u8 tag;
+}
+
+extern fn u64 layout_sizeof_interop();
+extern fn u64 layout_offsetof_interop(i32 field);
+extern fn void layout_fill(interop mut* r);
+extern fn bool layout_check(interop* r);
+extern fn u64 layout_sizeof_flagged();
+extern fn i64 layout_read_flagged(flagged* f);
+extern fn u64 layout_sizeof_named();
+extern fn u64 layout_named_len(named* s);
+extern fn char layout_named_first(named* s);
+extern fn u64 layout_sizeof_table();
+extern fn i64 layout_sum_rows(table* t);
+
+// The distance between two addresses, which is fort's own offset of a field
+// (D3.11: a pointer reaches `u64` through `cast`).
+fn u64 off(void* base, void* field) {
+    return cast(field, u64) - cast(base, u64);
+}
+
+fn i32 main() {
+    interop mut r = {};
+    // Every field lands where C's offsetof puts it, and the struct is as
+    // large as C's sizeof (D3.8).
+    println(sizeof(interop) == layout_sizeof_interop(), " ",
+            off(cast(&r, void*), cast(&r.tag, void*)) == layout_offsetof_interop(0), " ",
+            off(cast(&r, void*), cast(&r.n, void*)) == layout_offsetof_interop(1), " ",
+            off(cast(&r, void*), cast(&r.k, void*)) == layout_offsetof_interop(2), " ",
+            off(cast(&r, void*), cast(&r.big, void*)) == layout_offsetof_interop(3));
+    // The stride between two array elements is the size LLVM gave the struct,
+    // so this line holds the compiler's own layout (D3.8) against LLVM's and
+    // against C's at once: fort == C above, LLVM == C here.
+    interop[2] pair = {};
+    println(off(cast(&pair[0], void*), cast(&pair[1], void*)) == layout_sizeof_interop(), " ",
+            sizeof(interop[2]) == layout_sizeof_interop() * 2);
+    // C writes one distinct value into each field and fort reads them back.
+    layout_fill(&r);
+    println(r.tag, " ", r.n, " ", r.k, " ", r.big);
+    // And the other way round.
+    interop mut w = {};
+    w.tag = 11;
+    w.n = 222;
+    w.k = 3333;
+    w.big = 44444;
+    println(layout_check(&w));
+    // A `bool` field is one byte in memory, as C's `_Bool` is (D19.2), so it
+    // pads like a `u8` and the `i32` beside it does not move.
+    flagged f = {true, 7, false};
+    println(sizeof(flagged) == layout_sizeof_flagged(), " ", layout_read_flagged(&f));
+    // A `string` field is one two-word header and is never split (D9.9).
+    named s = {1, "hello"};
+    println(sizeof(named) == layout_sizeof_named(), " ", layout_named_len(&s), " ",
+            layout_named_first(&s));
+    // An array field strides by the element's padded size (D3.4).
+    table t = {{{1, 0}, {2, 0}, {3, 0}}, 0};
+    println(sizeof(table) == layout_sizeof_table(), " ", layout_sum_rows(&t));
+    return 0;
+}

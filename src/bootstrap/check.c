@@ -2478,7 +2478,14 @@ static void resolve_struct(check_t* ck, sym_t* s) {
     for (uint64_t i = 0; i < ast_len(decl); i++) {
         ast_node_t* f = ast_child(decl, i);
         if (f->kind == AST_FIELD_DECL) {
-            // Codegen reads a field's byte offset from its declaration (D3.8).
+            // The byte offset D3.8 gives the field, recorded on its
+            // declaration. The IR emitter names a field by its index and lets
+            // LLVM compute the address from the same layout (toolchain.md 6
+            // item 3), so the only consumers are check_test.c and
+            // check_conv_test.c, where these offsets are the one place the
+            // compiler states its own answer for a whole declaration; the
+            // loop walks exactly the fields of the struct's IR type, since
+            // every field that failed left `ok` false above.
             f->aux = offsets[at];
             at++;
         }

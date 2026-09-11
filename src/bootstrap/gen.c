@@ -1023,6 +1023,13 @@ static void gen_fort_entry(gen_t* g, const sym_t* main_sym) {
 
 // The named type of every struct the module declares, in source order, so
 // that a field access names a type the module defines (item 2).
+//
+// This loop, the field index of gen_expr.c and the positional literal there
+// must count the same declarations, or a field index names the wrong field
+// and every GEP after it reads the wrong bytes. All three take the
+// AST_FIELD_DECL children in order and skip on the kind alone; a field with
+// no type would leave the three disagreeing, so it ends the compilation here
+// rather than shifting an index silently.
 static void gen_struct_type(gen_t* g, const ast_node_t* decl) {
     const sym_t* s = decl->sym;
     if (s == NULL || s->error || s->type == NULL || s->type->kind != TYPE_STRUCT) {
@@ -1033,8 +1040,13 @@ static void gen_struct_type(gen_t* g, const ast_node_t* decl) {
     uint64_t written = 0;
     for (uint64_t i = 0; i < ast_len(decl); i++) {
         const ast_node_t* f = ast_child(decl, i);
-        if (f->kind != AST_FIELD_DECL || f->type == NULL) {
+        if (f->kind != AST_FIELD_DECL) {
             continue;
+        }
+        if (f->type == NULL) {
+            // The checker types every field of a struct it lets through, so
+            // this is a broken tree and not a program the emitter refuses.
+            fatal_internal("gen: a struct field with no type");
         }
         if (written > 0) {
             sb_append(&g->named, ", ");

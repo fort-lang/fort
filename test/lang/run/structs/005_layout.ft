@@ -1,0 +1,103 @@
+//! run
+//! stdout:
+//| 0 4 8 16 24 24
+//| 0 8 16 16
+//| 0 4 8 8
+//| 0 24 28 28
+//| 0 8 24 40 48
+//| 24 8 24
+//| 8 24 32 0
+//| 1 2 3 4
+// C/System V layout (D3.8): fields in declaration order, each at the next
+// multiple of its alignment, the size rounded up to the largest alignment.
+// The offsets are read at run time, so this test states what the target
+// actually does and not what the compiler believes; test/lang/run/ffi/006
+// holds the same layouts against a C compiler.
+struct rec {
+    u8 tag;
+    i32 n;
+    u16 k;
+    i64 big;
+}
+
+// The largest member first, so the struct ends in padding.
+struct wide {
+    i64 big;
+    u8 tail;
+}
+
+// Three bytes of trailing padding, which an array of it strides over.
+struct small {
+    i32 n;
+    u8 tag;
+}
+
+struct grid {
+    small[3] cells;
+    u8 tag;
+}
+
+// A `bool` is one byte in memory, so it pads like a `u8` (D19.2), and a span
+// and a `string` are one two-word header each, never split (D9.9).
+struct flagged {
+    bool on;
+    string name;
+    i32@ vals;
+    u8 tail;
+}
+
+// A struct may contain itself through a pointer or a span, which add a level
+// of indirection and so have a size of their own; only value containment is
+// an infinite size (D3.8).
+struct tree {
+    i32 v;
+    tree@ kids;
+    tree* up;
+}
+
+fn u64 off(void* base, void* field) {
+    return cast(field, u64) - cast(base, u64);
+}
+
+fn i32 main() {
+    rec r = {};
+    println(off(cast(&r, void*), cast(&r.tag, void*)), " ",
+            off(cast(&r, void*), cast(&r.n, void*)), " ",
+            off(cast(&r, void*), cast(&r.k, void*)), " ",
+            off(cast(&r, void*), cast(&r.big, void*)), " ",
+            sizeof(rec), " ", sizeof(rec[2]) - sizeof(rec));
+    wide w = {};
+    println(off(cast(&w, void*), cast(&w.big, void*)), " ",
+            off(cast(&w, void*), cast(&w.tail, void*)), " ",
+            sizeof(wide), " ", sizeof(wide[2]) - sizeof(wide));
+    small s = {};
+    println(off(cast(&s, void*), cast(&s.n, void*)), " ",
+            off(cast(&s, void*), cast(&s.tag, void*)), " ",
+            sizeof(small), " ", sizeof(small[2]) - sizeof(small));
+    grid g = {};
+    println(off(cast(&g, void*), cast(&g.cells, void*)), " ",
+            off(cast(&g, void*), cast(&g.tag, void*)), " ",
+            sizeof(grid), " ", sizeof(grid[2]) - sizeof(grid));
+    flagged f = {};
+    println(off(cast(&f, void*), cast(&f.on, void*)), " ",
+            off(cast(&f, void*), cast(&f.name, void*)), " ",
+            off(cast(&f, void*), cast(&f.vals, void*)), " ",
+            off(cast(&f, void*), cast(&f.tail, void*)), " ",
+            sizeof(flagged));
+    // The stride between two elements of an array is the size the compiler
+    // gave the struct, which is also what a copy of one moves.
+    rec[2] pair = {};
+    println(off(cast(&pair[0], void*), cast(&pair[1], void*)), " ",
+            off(cast(&g.cells[0], void*), cast(&g.cells[1], void*)), " ",
+            sizeof(small[3]));
+    tree t = {};
+    println(off(cast(&t, void*), cast(&t.kids, void*)), " ",
+            off(cast(&t, void*), cast(&t.up, void*)), " ", sizeof(tree), " ", t.v);
+    // Every field survives a copy, the one behind the trailing padding
+    // included (D19.3: an aggregate is copied whole).
+    rec mut full = {1, 2, 3, 4};
+    rec copy = full;
+    full.tag = 9;
+    println(copy.tag, " ", copy.n, " ", copy.k, " ", copy.big);
+    return 0;
+}

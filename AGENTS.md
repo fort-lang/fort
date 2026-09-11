@@ -381,6 +381,27 @@ A safe(r) C-like systems programming language.
   change the emitter, watch that one test fail, change it back -- rather than trusting that a run
   test would have caught it. The same held for the `llvm.trap` of D19.7: the review broke it and
   all 55 suites and 280 language tests stayed green.
+  **Under opaque pointers a field's type in a named struct type is observable only through the
+  offsets it moves.** A substitution that leaves every later offset and the struct's size and
+  alignment unchanged is invisible to `opt`, to every run test and to C interop: same-size swaps
+  (`i32` for an enum, `i64` for a `ptr`), and any widening that fits in padding the field already
+  had (`u16` as `i32` or as `i64` in `{ u8; i32; u16; i64 }`). So exactly one assertion pins a
+  field's IR type, the string comparison on `%struct.<name> = type { ... }`, and a struct that
+  appears in no such assertion has its field types unchecked. The bootstrap cannot *produce* that
+  bug -- `gen_mem_type` is the single fort-type-to-memory-type map and a wrong mapping is wrong in
+  the stores too, where it is observable -- but a second map (a packed path, an ABI-classification
+  table) would break that argument, so the assertion stays and grows a field per type family.
+  **A `test/lang/run/ffi/*` test with a cross-compiled C mirror is the only shape in this
+  repository that can see a fort-vs-LLVM-vs-C layout disagreement.** `//! link: ffi/<file>.c`
+  compiles that C file for the target with the same clang, so a helper reading a struct through
+  C's `offsetof` while fort reads it through its own GEPs makes the boundary observable;
+  `run/ffi/006_struct_layout.ft` is the worked example, and it closes the third edge by comparing
+  the stride between two array elements -- LLVM's own size for the struct -- against C's `sizeof`.
+  Struct pointers are extern-legal (D9.8), structs by value are not.
+  **Pick the size classes deliberately.** Every `sret` and aggregate `memcpy` assertion used a
+  struct of 8 or 16 bytes until T-019, so a mutation that dropped `sret(%T)` or shortened a
+  `memcpy` only for a struct wider than two words passed the entire gate. An assertion about an
+  aggregate convention covers one size unless a second size is written down.
 - **A whole directory in `xfail.txt` hides a class of programs from every pass behind it.** Both
   bugs the deep review of T-015 found were at a module boundary, because `run/modules/` is
   entirely expected to fail, so no program with two modules had ever reached the emitter: an

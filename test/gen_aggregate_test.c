@@ -341,6 +341,170 @@ TEST(an_aggregate_never_becomes_an_ssa_value, {
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
+TEST(a_struct_literal_read_for_one_field_is_built_in_a_temporary, {
+    // Field access on an rvalue struct is allowed and copies it through a
+    // temporary (D6.7), which is the `%tmp<K>` counter of D19.5.
+    TEST_ASSERT_TRUE(emit(in_typed_main("    println(point{3, 4}.x);\n")));
+    TEST_ASSERT_EQ_STR(found("  %tmp0 = alloca %struct.main.point, align 4\n"),
+                       "  %tmp0 = alloca %struct.main.point, align 4\n");
+    TEST_ASSERT_EQ_STR(
+        found("  %t0 = getelementptr inbounds %struct.main.point, ptr %tmp0, i32 0, i32 0\n"
+              "  store i32 3, ptr %t0, align 4\n"
+              "  %t1 = getelementptr inbounds %struct.main.point, ptr %tmp0, i32 0, i32 1\n"
+              "  store i32 4, ptr %t1, align 4\n"
+              "  %t2 = getelementptr inbounds %struct.main.point, ptr %tmp0, i32 0, i32 0\n"
+              "  %t3 = load i32, ptr %t2, align 4\n"),
+        "  %t0 = getelementptr inbounds %struct.main.point, ptr %tmp0, i32 0, i32 0\n"
+        "  store i32 3, ptr %t0, align 4\n"
+        "  %t1 = getelementptr inbounds %struct.main.point, ptr %tmp0, i32 0, i32 1\n"
+        "  store i32 4, ptr %t1, align 4\n"
+        "  %t2 = getelementptr inbounds %struct.main.point, ptr %tmp0, i32 0, i32 0\n"
+        "  %t3 = load i32, ptr %t2, align 4\n");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+TEST(an_array_literal_indexed_is_built_in_a_temporary_too, {
+    // The same rule for an index on an rvalue array (D6.7): the literal is
+    // the array's place and the element is read out of it.
+    TEST_ASSERT_TRUE(emit(in_main("    println(i32[2]{7, 8}[1]);\n")));
+    TEST_ASSERT_EQ_STR(found("  %tmp0 = alloca [2 x i32], align 4\n"),
+                       "  %tmp0 = alloca [2 x i32], align 4\n");
+    TEST_ASSERT_EQ_STR(found("getelementptr inbounds [2 x i32], ptr %tmp0, i64 0, i64 0\n"),
+                       "getelementptr inbounds [2 x i32], ptr %tmp0, i64 0, i64 0\n");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+TEST(a_cast_of_an_aggregate_reaches_its_field_through_a_temporary, {
+    // A cast between aggregates only drops marks and emits nothing of its
+    // own, but its result is an rvalue, so a field of it is read out of a
+    // copy (D3.14, D5.4, D6.7).
+    TEST_ASSERT_TRUE(emit(in_typed_main("    point p = {1, 2};\n"
+                                        "    println(cast(p, point).y);\n")));
+    TEST_ASSERT_EQ_STR(found("  %tmp0 = alloca %struct.main.point, align 4\n"),
+                       "  %tmp0 = alloca %struct.main.point, align 4\n");
+    TEST_ASSERT_EQ_STR(
+        found("  call void @llvm.memcpy.p0.p0.i64(ptr align 4 %tmp0, ptr align 4 %p.0, i64 8, "
+              "i1 false)\n"),
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 4 %tmp0, ptr align 4 %p.0, i64 8, "
+        "i1 false)\n");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+TEST(an_arrow_reaches_the_pseudo_fields_of_a_string, {
+    // Through a pointer to a span or string, `->` reaches `.len` and `.ptr`,
+    // since `p->f` is `(*p).f` (D6.10): the pointer is loaded and the header
+    // field is read at it, with no place of its own.
+    TEST_ASSERT_TRUE(emit(in_main("    string s = \"hi\";\n    string* p = &s;\n"
+                                  "    println(p->len);\n")));
+    TEST_ASSERT_EQ_STR(found("  %t2 = load ptr, ptr %p.1, align 8\n"
+                             "  %t3 = getelementptr inbounds %fort.span, ptr %t2, i32 0, i32 1\n"
+                             "  %t4 = load i64, ptr %t3, align 8\n"),
+                       "  %t2 = load ptr, ptr %p.1, align 8\n"
+                       "  %t3 = getelementptr inbounds %fort.span, ptr %t2, i32 0, i32 1\n"
+                       "  %t4 = load i64, ptr %t3, align 8\n");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+TEST(a_named_struct_type_holds_the_memory_type_of_every_field_in_order, {
+    // Fields in declaration order and never packed (D3.8), each as its memory
+    // type: `i8` for `bool`, one `%fort.span` for a `string`, `i32` for an
+    // enum and `ptr` for every pointer and function pointer (D19.2, D3.9,
+    // D3.10, D9.9).
+    //
+    // This one string is the whole check, and it has to be: under opaque
+    // pointers a field's IR type is observable only through the offsets it
+    // moves, so a substitution that keeps every later offset and the size --
+    // `i32` for an enum, `i64` for a `ptr`, a wider type in padding the field
+    // already had -- is invisible to every run test and to `opt`. It is also
+    // unreachable: gen_mem_type is the one fort-type-to-memory-type map and
+    // every path goes through it, so a wrong mapping is wrong in the stores
+    // as well, where it is observable. A second map (a packed path, an ABI
+    // classification table) would break that, and this assertion is what
+    // would catch it.
+    TEST_ASSERT_TRUE(emit("enum color { red, green }\n"
+                          "struct point { i32 x; i32 y; }\n"
+                          "struct rec { u8 tag; i32 n; u16 k; i64 big; bool on; string s;"
+                          " point p; i32[3] cells; color c; point* up; fn i32(i32) f; }\n"
+                          "fn i32 main() { rec r = {}; return r.n; }\n"));
+    TEST_ASSERT_EQ_STR(found("%struct.main.rec = type { i8, i32, i16, i64, i8, %fort.span, "
+                             "%struct.main.point, [3 x i32], i32, ptr, ptr }\n"),
+                       "%struct.main.rec = type { i8, i32, i16, i64, i8, %fort.span, "
+                       "%struct.main.point, [3 x i32], i32, ptr, ptr }\n");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+TEST(an_enum_field_is_four_bytes_and_moves_the_fields_after_it, {
+    // An enum's underlying type is `i32` and its size 4 (D3.9), so a field of
+    // one pads like an `i32`: `i64 big` lands at 8 and the struct is 16
+    // bytes, where an enum laid out as `i64` would make it 24.
+    TEST_ASSERT_TRUE(emit("enum color { red, green }\n"
+                          "struct tagged { u8 t; color c; i64 big; }\n"
+                          "fn i32 main() { tagged mut v = {}; v.big = 1;"
+                          " return cast(v.c, i32); }\n"));
+    TEST_ASSERT_EQ_STR(found("%struct.main.tagged = type { i8, i32, i64 }\n"),
+                       "%struct.main.tagged = type { i8, i32, i64 }\n");
+    TEST_ASSERT_EQ_STR(
+        found("  call void @llvm.memset.p0.i64(ptr align 8 %v.0, i8 0, i64 16, i1 false)\n"),
+        "  call void @llvm.memset.p0.i64(ptr align 8 %v.0, i8 0, i64 16, i1 false)\n");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+TEST(a_struct_wider_than_two_words_is_returned_and_copied_whole, {
+    // Every aggregate is passed by a hidden pointer to a caller-made copy and
+    // returned through a hidden result pointer, whatever its size (D9.9):
+    // there is no size at which a struct starts travelling in registers, so a
+    // struct wider than the two words the other tests use is asserted here.
+    TEST_ASSERT_TRUE(emit("struct big { i64 a; i64 b; i64 c; i64 d; }\n"
+                          "fn big make() { big b = {1, 2, 3, 4}; return b; }\n"
+                          "fn i64 last(big b) { return b.d; }\n"
+                          "fn i32 main() { big x = make(); big y = x;"
+                          " println(last(y)); return 0; }\n"));
+    TEST_ASSERT_EQ_STR(
+        found("define dso_local void @\"main.make\"(ptr sret(%struct.main.big) %ret.sret) #0 {\n"),
+        "define dso_local void @\"main.make\"(ptr sret(%struct.main.big) %ret.sret) #0 {\n");
+    TEST_ASSERT_EQ_STR(found("define dso_local i64 @\"main.last\"(ptr %b.in) #0 {\n"),
+                       "define dso_local i64 @\"main.last\"(ptr %b.in) #0 {\n");
+    // The result goes straight into the destination, the copy and the
+    // argument copy each move all thirty-two bytes.
+    TEST_ASSERT_EQ_STR(
+        found("  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %b.0, "
+              "i64 32, i1 false)\n"),
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %b.0, "
+        "i64 32, i1 false)\n");
+    TEST_ASSERT_EQ_STR(
+        found("  call void @\"main.make\"(ptr %x.0)\n"
+              "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %y.1, ptr align 8 %x.0, i64 32, "
+              "i1 false)\n"
+              "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %y.1, i64 32, "
+              "i1 false)\n"
+              "  %t0 = call i64 @\"main.last\"(ptr %tmp0)\n"),
+        "  call void @\"main.make\"(ptr %x.0)\n"
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %y.1, ptr align 8 %x.0, i64 32, "
+        "i1 false)\n"
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %y.1, i64 32, "
+        "i1 false)\n"
+        "  %t0 = call i64 @\"main.last\"(ptr %tmp0)\n");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+TEST(a_copy_and_a_zero_move_the_padded_size_of_the_struct, {
+    // `struct wide { i64 big; u8 tail; }` is nine bytes of fields and sixteen
+    // of storage: the size C rounds up to the alignment (D3.8). A memcpy or a
+    // memset of anything less would leave the tail of the destination behind.
+    TEST_ASSERT_TRUE(emit("struct wide { i64 big; u8 tail; }\n"
+                          "fn i32 main() { wide mut w = {}; wide v = w; w.tail = 1;"
+                          " return cast(v.tail, i32); }\n"));
+    TEST_ASSERT_EQ_STR(
+        found("  call void @llvm.memset.p0.i64(ptr align 8 %w.0, i8 0, i64 16, i1 false)\n"),
+        "  call void @llvm.memset.p0.i64(ptr align 8 %w.0, i8 0, i64 16, i1 false)\n");
+    TEST_ASSERT_EQ_STR(
+        found("  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %v.1, ptr align 8 %w.0, i64 16, "
+              "i1 false)\n"),
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %v.1, ptr align 8 %w.0, i64 16, "
+        "i1 false)\n");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
 TEST(the_alignment_of_every_place_comes_from_its_type, {
     TEST_ASSERT_TRUE(emit(in_typed_main("    holder h = {};\n    i8 a = 1;\n    i16 b = 2;\n"
                                         "    i64 c = 3;\n    println(h.tag, a, b, c);\n")));
@@ -384,6 +548,14 @@ int main(int argc, char** argv) {
     TEST_RUN(a_discarded_call_still_runs);
     TEST_RUN(a_discarded_aggregate_call_gets_a_place_nothing_reads);
     TEST_RUN(an_aggregate_never_becomes_an_ssa_value);
+    TEST_RUN(a_struct_literal_read_for_one_field_is_built_in_a_temporary);
+    TEST_RUN(an_array_literal_indexed_is_built_in_a_temporary_too);
+    TEST_RUN(a_cast_of_an_aggregate_reaches_its_field_through_a_temporary);
+    TEST_RUN(an_arrow_reaches_the_pseudo_fields_of_a_string);
+    TEST_RUN(a_named_struct_type_holds_the_memory_type_of_every_field_in_order);
+    TEST_RUN(an_enum_field_is_four_bytes_and_moves_the_fields_after_it);
+    TEST_RUN(a_struct_wider_than_two_words_is_returned_and_copied_whole);
+    TEST_RUN(a_copy_and_a_zero_move_the_padded_size_of_the_struct);
     TEST_RUN(the_alignment_of_every_place_comes_from_its_type);
     gen_done();
     TEST_EXIT();

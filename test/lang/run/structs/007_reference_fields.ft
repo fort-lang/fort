@@ -1,0 +1,48 @@
+//! run
+//! stdout:
+//| 20 4 true
+//| 30 4 false
+//| true true
+//| 20 true
+// A field may be a pointer, a `void*` (D3.11), a function pointer (D3.10) or
+// a `bool`, which is one byte in memory and `i1` in a value (D19.2). Each is
+// read and written through the struct, and a copy carries all of them.
+struct ops {
+    fn i32(i32) apply;
+    i32* cell;
+    void* opaque;
+    bool on;
+}
+
+fn i32 twice(i32 v) {
+    return v * 2;
+}
+
+fn i32 thrice(i32 v) {
+    return v * 3;
+}
+
+fn i32 run_field(ops* o) {
+    // Called through the field, which is an ordinary pointer value (D3.10).
+    return o->apply(*o->cell);
+}
+
+fn i32 main() {
+    i32 n = 10;
+    ops mut o = {twice, &n, cast(&n, void*), true};
+    println(run_field(&o), " ", *o.cell - 6, " ", o.on);
+    // Writing each field through the struct.
+    o.apply = thrice;
+    o.on = false;
+    println(run_field(&o), " ", *o.cell - 6, " ", o.on);
+    // The `void*` field round-trips to a typed pointer and back (D3.11).
+    i32* back = cast(o.opaque, i32*);
+    println(back == o.cell, " ", cast(back, void*) == o.opaque);
+    // A copy carries every field, and the copy's `apply` is the one the
+    // original held when it was copied (D19.3).
+    ops copy = o;
+    o.apply = twice;
+    o.on = true;
+    println(run_field(&copy) - 10, " ", o.on);
+    return 0;
+}

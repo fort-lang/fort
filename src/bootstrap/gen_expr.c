@@ -855,7 +855,8 @@ static gen_place_t gen_index_place(gen_t* g, ast_node_t* n) {
 }
 
 // The index of a field in its struct, which is what the field shape of item 3
-// names.
+// names: the position among the AST_FIELD_DECL children, which is the order
+// the named type of gen.c writes them in.
 static bool field_index(const sym_t* field, uint64_t* out) {
     const sym_t* owner = field != NULL ? field->owner : NULL;
     if (owner == NULL || owner->node == NULL) {
@@ -900,6 +901,15 @@ static gen_place_t gen_field_place(gen_t* g, ast_node_t* n, bool arrow) {
     return out;
 }
 
+// The place of an rvalue: a field access or an index on an rvalue struct or
+// array is allowed and copies it through a temporary (D6.7), and a `string`
+// literal and an aggregate call result reach their place the same way (D19.3).
+static gen_place_t rvalue_place(gen_t* g, ast_node_t* n) {
+    const gen_place_t tmp = gen_temp_place(g, n->type);
+    gen_expr_into(g, n, tmp);
+    return tmp;
+}
+
 gen_place_t gen_expr_place(gen_t* g, ast_node_t* n) {
     gen_place_t out;
     out.addr = gen_literal(g, str_from_cstr("ptr"), "null");
@@ -929,21 +939,24 @@ gen_place_t gen_expr_place(gen_t* g, ast_node_t* n) {
             return out;
         }
         break;
-    case AST_STRING: {
-        // A string literal is a place only as the source of a copy: its
-        // header is built in a temporary (D3.7).
-        const gen_place_t tmp = gen_temp_place(g, n->type);
-        gen_expr_into(g, n, tmp);
-        return tmp;
-    }
-    case AST_CALL: {
+    case AST_STRING:
+    case AST_STRUCT_LIT:
+    case AST_ARRAY_LIT:
+    case AST_BRACE_INIT:
+        // A `string` literal is a place only as the source of a copy, whose
+        // header is built in a temporary (D3.7), and `point{1, 2}.x` and
+        // `i32[3]{7, 8, 9}[1]` read a member out of the literal's own
+        // temporary (D6.5, D6.7).
+        return rvalue_place(g, n);
+    case AST_CAST:
+    case AST_CALL:
         if (gen_is_aggregate(n->type)) {
-            const gen_place_t tmp = gen_temp_place(g, n->type);
-            gen_expr_into(g, n, tmp);
-            return tmp;
+            // A call result, and a cast between aggregates, which only drops
+            // marks and emits nothing of its own, are rvalues as well, so a
+            // member of either is read out of a copy (D3.14, D5.4, D6.7).
+            return rvalue_place(g, n);
         }
         break;
-    }
     default:
         break;
     }
@@ -956,7 +969,13 @@ gen_place_t gen_expr_place(gen_t* g, ast_node_t* n) {
 // `.len` and `.ptr` of a span or `string` are its header fields; `.len` of a
 // fixed array is a constant the checker already folded (D3.4, D3.5).
 static bool pseudo_field_value(gen_t* g, ast_node_t* n, gen_val_t* out) {
+    // Through a pointer to a span or string, `->` reaches them too, since
+    // `p->f` is `(*p).f` (D6.10).
+    const bool arrow = n->kind == AST_ARROW;
     const type_t* ot = n->a != NULL ? n->a->type : NULL;
+    if (arrow) {
+        ot = ot != NULL && ot->kind == TYPE_PTR ? ot->elem : NULL;
+    }
     if (ot == NULL || (ot->kind != TYPE_SPAN && ot->kind != TYPE_STRING)) {
         return false;
     }
@@ -965,13 +984,15 @@ static bool pseudo_field_value(gen_t* g, ast_node_t* n, gen_val_t* out) {
     if (!len && !ptr) {
         return false;
     }
-    const gen_place_t operand = gen_expr_place(g, n->a);
+    // The header is where the pointer reaches for `->` and where the operand
+    // stands for `.` (D6.7, D6.10).
+    const gen_val_t base = arrow ? gen_expr_value(g, n->a) : gen_expr_place(g, n->a).addr;
     if (g->failed) {
         *out = gen_literal(g, str_from_cstr("i64"), "0");
         return true;
     }
-    const gen_val_t field = gen_gep_field(
-        g, str_from_cstr("%fort.span"), operand.addr, len ? SPAN_FIELD_LEN : SPAN_FIELD_PTR);
+    const gen_val_t field =
+        gen_gep_field(g, str_from_cstr("%fort.span"), base, len ? SPAN_FIELD_LEN : SPAN_FIELD_PTR);
     *out = gen_load(g,
                     len ? str_from_cstr("i64") : str_from_cstr("ptr"),
                     field,
@@ -1047,8 +1068,16 @@ gen_val_t gen_expr_value(gen_t* g, ast_node_t* n) {
         return gen_load_place(g, gen_expr_place(g, n));
     }
     case AST_INDEX:
-    case AST_ARROW:
         return gen_load_place(g, gen_expr_place(g, n));
+    case AST_ARROW: {
+        gen_val_t v;
+        // `out->len` and `out->ptr` read the header the pointer reaches
+        // (D6.10).
+        if (pseudo_field_value(g, n, &v)) {
+            return v;
+        }
+        return gen_load_place(g, gen_expr_place(g, n));
+    }
     case AST_FIELD: {
         gen_val_t v;
         // A qualified name `m.f` of a function is that function's address,
