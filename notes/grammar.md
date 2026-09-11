@@ -111,7 +111,7 @@ designated   = "." identifier "=" initializer ;
 ```
 
 A `struct_decl` has no trailing semicolon. A `brace_init` is legal only as the `initializer` of a
-`var_decl_head` whose type is a struct or array, as `{}` for any aggregate, slice, string or
+`var_decl_head` whose type is a struct or array, as `{}` for any aggregate, span, string or
 enum, and nested inside another `brace_init` or typed literal (D6.5).
 
 ## 4. Types
@@ -119,7 +119,7 @@ enum, and nested inside another `brace_init` or typed literal (D6.5).
 ```ebnf
 type         = base_type [ "own" ] [ "mut" ] { ref_suffix } { array_suffix } { ref_suffix } ;
                                                             (* D3.6, D5.3, D17.2 *)
-ref_suffix   = ( "*" | "@" ) [ "own" ] [ "mut" ] ;             (* pointer, slice D3.5 *)
+ref_suffix   = ( "*" | "@" ) [ "own" ] [ "mut" ] ;             (* pointer, span D3.5 *)
 array_suffix = "[" const_expr "]" [ "mut" ] ;                   (* fixed array, D3.4 *)
 base_type    = prim_type | "string" | "void" | fn_type | qualified_name ;
 prim_type    = "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
@@ -130,17 +130,16 @@ qualified_name = identifier [ "." identifier ] ;                    (* D9.4 *)
 
 Reading rules (D3.6, D5.2, D5.3):
 
-- A reference suffix (`*` pointer, `@` slice) applies to everything to its left, so they read
-  inside-out: `node*@` is a slice of pointers, `u8@*` a pointer to a slice, `u8@@` a slice of
-  slices.
+- A reference suffix (`*` pointer, `@` span) applies to everything to its left, so they read
+  inside-out: `node*@` is a span of pointers, `u8@*` a pointer to a span, `u8@@` a span of spans.
 - Fixed-array suffixes form one group and read outside-in like C: `i32[3][4]` is three arrays of
   four. Reference suffixes before the group make arrays of references (`node*[16]`, `node@[4]`);
-  after it, references to the whole array (`i32[4]*`, `i32[4]@` is a slice of `i32[4]`). No array
+  after it, references to the whole array (`i32[4]*`, `i32[4]@` is a span of `i32[4]`). No array
   suffix may follow a trailing reference suffix (`i32[4]*[2]` does not parse; wrap it in a struct).
 - `void` is legal as a `base_type` only when followed by at least one `*` (D3.11).
 - A `fn_type` used as `base_type` may take suffixes: `fn i32(i32)[4]` is four function pointers.
 - A `mut` marks the storage of what it follows: after the base type, values of that type; after
-  a `*` or `@`, the pointer or slice header that suffix introduces (the storage holding it); after
+  a `*` or `@`, the pointer or span header that suffix introduces (the storage holding it); after
   `[N]`, the array, whose elements share its storage, so a `mut` between an element type and its
   `[N]` is an error. Nothing precedes the base type. The outermost position is the binding:
   `i32 mut x`, `node* mut p`, `u8@ mut s` (D5.3).
@@ -223,7 +222,7 @@ unary_expr   = ( "!" | "~" | "-" | "*" | "&" ) unary_expr
 postfix_expr = primary_expr { postfix } ;
 postfix      = "(" [ arg_list ] ")"                                   (* call *)
              | "[" expr "]"                                           (* index, D6.8 *)
-             | "[" [ expr ] ".." [ expr ] "]"                         (* slice, D6.9 *)
+             | "[" [ expr ] ".." [ expr ] "]"                         (* span, D6.9 *)
              | "." identifier                                         (* field, .len, .ptr *)
              | "->" identifier ;                                      (* D6.10 *)
 arg_list     = expr { "," expr } ;
@@ -253,7 +252,7 @@ Notes:
   postfix; the checker resolves module, type and enum qualification (D9.4, D3.9).
 - Comparison operators do not chain: `a < b < c` parses but is a type error (`bool < T`).
 - `-x` on an unsigned type, and `!`/`~` on the wrong types, are type errors, not parse errors.
-- `new(T)` allocates one `T` and `new(T, n)` allocates `n` of them as a slice; the brackets in
+- `new(T)` allocates one `T` and `new(T, n)` allocates `n` of them as a span; the brackets in
   an `alloc_type` are fixed-array dimensions of `T` (`new(i32[4], n)` yields `i32[4] mut@ own`).
   `mut` does not parse inside `new(...)`, and `own` only after a `*` of the element type
   (`new(node* own, n)`, D17.3); the result is writable at every level and owned (D5.8, D17.3).
