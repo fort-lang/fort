@@ -22,18 +22,20 @@ in `main.ft`: two runtime calls and `fort_entry`, which forwards the result of `
 fn i32 main() {
     println("before");
     i32[3] a = {};
-    mut i64 i = 5;
+    i64 mut i = 5;
     return a[i];
 }
 ```
 
-in `abort.ft`, with the `[` of `a[i]` at line 12, column 14. The locals are allocas in the entry
+in `abort.ft`, whose module path is therefore `abort` and whose `main` is the symbol
+`abort.main` (D9.1, D9.7), with the `[` of `a[i]` at line 12, column 13. The locals are
+allocas in the entry
 block, the array is zeroed with `llvm.memset`, and the bounds check of D6.8 is an `icmp uge`
 against the length (one unsigned compare catches a negative index too) branching to a failure
 block at the end of the function, which calls
 `fort_rt_fail_bounds` (index, length, file, line, column) and is followed by `unreachable`. The
 program prints `before`, then the D11.4 line
-`abort.ft:12:14: runtime error: index 5 out of range for length 3`, and dies with SIGABRT.
+`abort.ft:12:13: runtime error: index 5 out of range for length 3`, and dies with SIGABRT.
 
 `floats.ll` is
 

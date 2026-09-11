@@ -600,11 +600,12 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    function type) and needs no such declaration.
 
    The runtime entry points are declared with the C prototypes of section 5.1 and are never
-   variadic; a `fort_rt_*` function the standard library declares with `extern fn` is an
-   ordinary extern declaration instead (D13.1):
+   variadic, whether the compiler emits the call itself or the standard library reached the
+   entry point with an `extern fn` (D13.1), which is the rule the paragraph below the intrinsics
+   states in full:
 
    ```llvm
-   declare ptr  @fort_rt_new(i64, i64, ptr, i32, i32)
+   declare ptr @fort_rt_new(i64, i64, ptr, i32, i32)
    declare void @fort_rt_del(ptr)
    declare void @fort_rt_fail_bounds(i64, i64, ptr, i32, i32) #2
    declare void @fort_rt_fail_span(i64, i64, i64, ptr, i32, i32) #2
@@ -627,6 +628,10 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    declare void @fort_rt_print_enum(i32, i32, ptr, i64)
    declare void @fort_rt_flush(i32)
    declare void @fort_rt_flush_all()
+   declare void @fort_rt_args_init(i32, ptr)
+   declare ptr @fort_rt_args_ptr()
+   declare i64 @fort_rt_args_len()
+   declare void @fort_rt_exit(i32) #2
    ```
 
    The intrinsics are declared with the spellings LLVM 18 prints, in this fixed order, one per
@@ -655,7 +660,8 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    (`fort_rt_flush`, `fort_rt_exit`, the rest of section 5.1 that `std::libc` declares, D13.1)
    is emitted in the runtime group with that group's prototype and attributes and is left out of
    the extern group, variadic tail included. A plain runtime declaration carries no attribute
-   group; the failure entry points carry `#2` (item 14).
+   group; the `_Noreturn` entry points of section 5.1 carry `#2` (item 14), `fort_rt_exit`
+   included, whether the compiler or an `extern fn` brought them in.
 
 9. **Normalization** (D9.8, D19.2). A narrow value is not widened to 32 bits: an `i8` value has
    type `i8` and its width is in the type. The only extensions the emitter produces are the
@@ -725,9 +731,12 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
     label order (D19.5). Each failure block holds exactly one call to the section 5.1 entry
     point, with the check's values, `ptr @.file.N` and the `i32` line and column of section 4's
     position rule, followed by `unreachable`; nothing else, because the callee aborts (D11.4).
-    The failure entry points are declared `#2 = { cold noreturn nounwind }`: `noreturn` is
-    truthful, since each is `_Noreturn` in `runtime/fort_rt.h`, and `cold` lays the block out of
-    line. No attribute is put on a failure call site.
+    Every `_Noreturn` entry point of section 5.1 is declared `#2 = { cold noreturn nounwind }`:
+    the `fort_rt_fail_*` family, `fort_rt_panic` and `fort_rt_assert_fail`, which the failure
+    blocks call, and `fort_rt_exit`, which only `std::libc` reaches. `noreturn` is truthful,
+    since each is `_Noreturn` in `runtime/fort_rt.h`, and `cold` lays the block out of line,
+    which on an exit path is a layout hint and nothing more. No attribute is put on a failure
+    call site.
 
 15. **Integer checks** (D11.1, D11.3). In checked mode one intrinsic per operation, at the
     operand's width:
@@ -851,9 +860,11 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
          %fort.enum_member { i32 6, ptr @.str.5 }], align 8
     ```
 
-    One entry per member in declaration order; `%fort.enum_member = type { i32, ptr }` has C's
-    16-byte layout with its 4 bytes of padding, so it matches `struct fort_rt_enum_member`
-    (section 5.1). A table is emitted only for an enum some `print` of that type reaches.
+    The table is one line in the module and is wrapped here only to fit the page, as the
+    `llvm.memcpy` declaration of item 8 is. One entry per member in declaration order;
+    `%fort.enum_member = type { i32, ptr }` has C's 16-byte layout with its 4 bytes of padding, so
+    it matches `struct fort_rt_enum_member` (section 5.1). A table is emitted only for an enum
+    some `print` of that type reaches.
 
 22. **`fort_entry`** (D11.6, D8.6). Emitted in the entry module, it receives the argument span
     by hidden pointer, copies it into its own frame when `main` declares the parameter, and
@@ -882,7 +893,7 @@ numbering are normal (D19.5):
 
 - `#0 = { nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }` on every fort definition
   (item 7), and `#1`, the same set plus `noreturn`, on a `noreturn` definition (item 20).
-- `#2 = { cold noreturn nounwind }` on the failure entry points (item 14).
+- `#2 = { cold noreturn nounwind }` on the `_Noreturn` entry points of section 5.1 (item 14).
 - `#3 = { nobuiltin }` on every extern call site (item 8).
 - `#4 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }` on the
   overflow intrinsics (item 15) and on `llvm.fptosi.sat` and `llvm.fptoui.sat` (item 12).
@@ -941,7 +952,9 @@ fn i32 main() {
 }
 ```
 
-in `abort.ft`, with the `[` of `a[i]` at line 12, column 14, compiles to `test/ir/abort.ll`:
+in `abort.ft`, whose module path is therefore `abort` (D9.1) and whose `main` is the symbol
+`abort.main` (D9.7), with the `[` of `a[i]` at line 12, column 13, compiles to
+`test/ir/abort.ll`:
 
 ```llvm
 target triple = "x86_64-unknown-linux-gnu"
@@ -949,7 +962,7 @@ target triple = "x86_64-unknown-linux-gnu"
 %fort.span = type { ptr, i64 }
 %fort.enum_member = type { i32, ptr }
 
-define dso_local i32 @"main.main"() #0 {
+define dso_local i32 @"abort.main"() #0 {
 entry:
   %a.0 = alloca [3 x i32], align 4
   %i.1 = alloca i64, align 8
@@ -967,13 +980,13 @@ L0:
   ret i32 %t3
 
 L1:
-  call void @fort_rt_fail_bounds(i64 %t0, i64 3, ptr @.file.0, i32 12, i32 14)
+  call void @fort_rt_fail_bounds(i64 %t0, i64 3, ptr @.file.0, i32 12, i32 13)
   unreachable
 }
 
 define dso_local i32 @fort_entry(ptr %args.in) #0 {
 entry:
-  %t0 = call i32 @"main.main"()
+  %t0 = call i32 @"abort.main"()
   ret i32 %t0
 }
 
@@ -994,7 +1007,7 @@ attributes #6 = { nocallback nofree nounwind willreturn memory(argmem: write) }
 The locals are entry-block allocas, the array is zeroed with `llvm.memset`, the bounds check of
 item 16 branches to a failure block at the end of the function, and `%fort.span` and
 `%fort.enum_member` are emitted although nothing uses them (item 2). The program prints
-`before`, then `abort.ft:12:14: runtime error: index 5 out of range for length 3`, and dies with
+`before`, then `abort.ft:12:13: runtime error: index 5 out of range for length 3`, and dies with
 SIGABRT (D11.4).
 
 ## 7. Testing

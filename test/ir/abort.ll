@@ -3,7 +3,7 @@ target triple = "x86_64-unknown-linux-gnu"
 %fort.span = type { ptr, i64 }
 %fort.enum_member = type { i32, ptr }
 
-define dso_local i32 @"main.main"() #0 {
+define dso_local i32 @"abort.main"() #0 {
 entry:
   %a.0 = alloca [3 x i32], align 4
   %i.1 = alloca i64, align 8
@@ -21,13 +21,13 @@ L0:
   ret i32 %t3
 
 L1:
-  call void @fort_rt_fail_bounds(i64 %t0, i64 3, ptr @.file.0, i32 12, i32 14)
+  call void @fort_rt_fail_bounds(i64 %t0, i64 3, ptr @.file.0, i32 12, i32 13)
   unreachable
 }
 
 define dso_local i32 @fort_entry(ptr %args.in) #0 {
 entry:
-  %t0 = call i32 @"main.main"()
+  %t0 = call i32 @"abort.main"()
   ret i32 %t0
 }
 

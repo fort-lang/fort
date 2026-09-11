@@ -268,6 +268,33 @@ A safe(r) C-like systems programming language.
   (modules.h): the dependency order, then the modules the loader read but never ordered. The
   checker and the index walk share it because the index's file order is documented as the
   checker's order (D20.3), and two copies of that loop would drift with no test able to see it.
+- **The IR emitter** (`src/bootstrap/gen*.c`, toolchain.md 6): it runs inside that window, before
+  the caller frees the analysis, because every annotation it reads points into the checker
+  (`check.h`); an emitter called after the analysis is released walks freed memory. It builds its
+  operand and type texts in one shared `g->scratch`, so a function that has begun writing there
+  must compute a nested text first and only then compose -- `nominal_type_name` and `enum_name`
+  each call `gen_symbol`,
+  which clears the same buffer, and both got `%struct.` and `@.enum.` silently dropped before the
+  name was built first. A construct the emitter does not lower yet reports
+  `cannot generate code yet for <what>` through `gen_todo` and fails the compilation: an unfinished
+  path is a diagnostic, never wrong code, and the ticket that implements it deletes its `gen_todo`.
+  Two C declarations of one name are one ELF symbol, so anything the module emits once -- an
+  `extern` declaration above all -- deduplicates by the C name and never by `sym_t*`: two modules
+  declaring the same function are two symbols, and a second `declare` is a redefinition `opt`
+  rejects. The suites (`test/gen*_test.c` over `test/gen_helpers.h`) emit into a sandbox they
+  `chdir` into, so `@.file.N` holds a bare file name and the text does not depend on the build
+  directory; CMake gives every `test/gen*_test.c` `FORT_OPT` and `FORT_IR_DIR`, and the ctest
+  `lang` passes `--verify-ir`, so every module either suite produces is checked by
+  `opt -passes=verify`. `opt` is a default, not a configure-time requirement, so each suite must
+  report a missing one as a broken environment (`gen_no_verifier`, exit `TEST_RESULT_ERR`) the
+  way `test/pipeline_test.sh` exits 2: a spawn that succeeds and a child that exits 127 otherwise
+  reads as "the verifier rejected this IR", which blames the wrong thing.
+- **A whole directory in `xfail.txt` hides a class of programs from every pass behind it.** Both
+  bugs the deep review of T-015 found were at a module boundary, because `run/modules/` is
+  entirely expected to fail, so no program with two modules had ever reached the emitter: an
+  `extern` declared in each of two modules was emitted twice, and nothing else crossed a module
+  at all. A ticket that adds a pass reads `xfail.txt` for the directories its pass now walks and
+  writes one test per class they cover, rather than trusting the corpus it can see.
 - **Citing decisions in code**: a citation goes on the line or function that implements the
   rule, with a phrase stating the rule (`// pointers print as 0x + lowercase hex, 0x0 for null
   (D11.7)`), so a reader learns the rule without opening the log. A bare tag list at file or

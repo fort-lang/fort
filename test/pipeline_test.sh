@@ -93,7 +93,7 @@ drop_qemu_notice "$work/abort.err"
 expect_file abort.stdout "$work/abort.out" 'before
 '
 expect_file abort.stderr "$work/abort.err" \
-    'abort.ft:12:14: runtime error: index 5 out of range for length 3
+    'abort.ft:12:13: runtime error: index 5 out of range for length 3
 '
 
 # With both descriptors on one pipe the stdout line is flushed before the
@@ -101,7 +101,7 @@ expect_file abort.stderr "$work/abort.err" \
 "$work/abort" >"$work/abort.both" 2>&1 || true
 drop_qemu_notice "$work/abort.both"
 expect_file abort.order "$work/abort.both" 'before
-abort.ft:12:14: runtime error: index 5 out of range for length 3
+abort.ft:12:13: runtime error: index 5 out of range for length 3
 '
 
 # floats: the D11.7 rendering of each value on stdout, nothing on stderr and
