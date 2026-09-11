@@ -1,0 +1,49 @@
+//! run
+//! stdout:
+//| true hello
+//| true
+//| true 42
+//| true
+//| abcdefgh
+import std::libc;
+import std::mem;
+
+// libc.malloc returns void* own and libc.free takes void* own: the qualifiers
+// are erased at the boundary and state C's convention (D17.13), so the pair is
+// interchangeable with new and del (D10.3, stdlib.md 2.2).
+fn i32 main() {
+    // A block sized in bytes, typed by the cast, whose target says own so the
+    // result adopts (D3.14). p[0..n] is a view of it (D6.9).
+    u8 mut* own block = cast(libc.malloc(32), u8 mut* own);
+    if (block == null) {
+        return 1;
+    }
+    u8 mut@ bytes = block[0..32];
+    mem.copy(bytes, cast("hello", u8@));
+    println(block != null, " ", cast(bytes[..5], string));
+    // del releases what malloc returned, frees by the pointer alone, and
+    // empties the lvalue (D10.3, D17.9, stdlib.md 3).
+    del(block);
+    println(block == null);
+
+    // The other direction: libc.free releases what new returned. The own
+    // lvalue must be moved into the own parameter (D6.11) and is left null
+    // afterwards (D17.6).
+    i64 mut* own slot = new(i64);
+    *slot = 42;
+    println(slot != null, " ", *slot);
+    libc.free(cast(move(slot), void* own));
+    println(slot == null);
+
+    // memcpy returns its dst, a view, so the result stays void* and is
+    // discarded (stdlib.md 2.2).
+    u8[8] mut src = {};
+    u8[8] mut dst = {};
+    mem.copy(src[..], cast("abcdefgh", u8@));
+    libc.memcpy(cast(dst[..].ptr, void*), cast(src[..].ptr, void*), 8);
+    if (!mem.equal(dst[..], src[..])) {
+        return 1;
+    }
+    println(cast(dst[..], string));
+    return 0;
+}

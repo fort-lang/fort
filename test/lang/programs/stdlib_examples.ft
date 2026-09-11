@@ -1,0 +1,93 @@
+//! run
+//! stderr: FORT_STDLIB_EXAMPLE_DIR not set, using ../std
+//! stdout:
+//| ../std
+//| abc.............
+//| true n 123
+//| true PATH 8080
+//| false
+//| false
+//| false
+//| alpha 5
+import std::mem;
+import std::str;
+import std::sys;
+
+// The worked examples of stdlib.md 2.1, 2.3 and 2.5, run so that the
+// specification's own sample code is held against the library it describes.
+// Each function below is the example as the document spells it, except that
+// 2.1 reads a variable named so that no developer's environment can be set to
+// it; stdlib.md names FORT_STD_DIR there, which the guest leaves unset but a
+// caller might not.
+
+// stdlib.md 2.1.
+fn string std_dir() {
+    string mut dir = "../std";
+    if (!sys.env("FORT_STDLIB_EXAMPLE_DIR", &dir)) {
+        eprintln("FORT_STDLIB_EXAMPLE_DIR not set, using ", dir);
+    }
+    return dir;
+}
+
+// stdlib.md 2.3, with the key returned so that the result can be shown.
+fn void demo(u8 mut@ key) {
+    mem.copy(key, cast("abc", u8@));   // key[0..3] = "abc", rest zero
+    mem.fill(key[3..], cast('.', u8));
+}
+
+// stdlib.md 2.5: splits "name=123"; false on malformed input, in which case
+// *name and *value are unchanged.
+fn bool parse_binding(string line, string mut* name, i64 mut* value) {
+    i64 eq = str.index_of(line, '=');
+    if (eq < 0) {
+        return false;
+    }
+    u64 at = cast(eq, u64);
+    if (!str.parse_i64(line[at + 1..], value)) {
+        return false;
+    }
+    *name = line[..at];
+    return true;
+}
+
+// stdlib.md 2.5, the second example of the section.
+// Keeps a copy of a name that outlives the buffer it was scanned from.
+fn string own keep(string name) {
+    string own copy = str.dup(name);
+    return copy;   // implicit move of an own local (D17.5)
+}
+
+fn void show(string line) {
+    string mut name = "<unchanged>";
+    i64 mut value = -1;
+    if (parse_binding(line, &name, &value)) {
+        println(true, " ", name, " ", value);
+    } else {
+        println(false);
+    }
+}
+
+fn i32 main() {
+    println(std_dir());
+
+    u8[16] mut key = {};
+    demo(key[..]);
+    println(cast(key[..], string));
+
+    show("n=123");
+    show("PATH=8080");
+    // No '=', a value that is not a number, and an empty value.
+    show("bare");
+    show("n=x");
+    show("n=");
+
+    // keep outlives the buffer its argument was scanned from: the name is a
+    // view into a heap block that is deleted before the copy is read.
+    u8 mut@ own scanned = new(u8, 5);
+    mem.copy(scanned, cast("alpha", u8@));
+    string own kept = keep(cast(scanned[..], string));
+    defer del(kept);
+    del(scanned);
+    println(kept, " ", kept.len);
+    return 0;
+}

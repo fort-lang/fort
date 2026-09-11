@@ -322,7 +322,11 @@ Owner: `core-language.md` (Declarations and mutability), `type-system.md` (Mutab
   mut*@`, and converting it to `node* mut@` is refused (a mutable slot could then hold a pointer to
   what the source still sees as a mutable node). This closes the C `T** -> const T**` hole with a
   short recursive check. Adding mutability requires `cast` (D3.14). Dropping `own` (D17.4) is the
-  other implicit conversion and follows the same monotone shape.
+  other implicit conversion and follows the same monotone shape. The drop applies to
+  initialization, assignment, argument passing and `return` only: comparison and `?:` require
+  identical types, mutability levels included (D6.2). Amended 2026-09-11: the last sentence is a
+  signpost added after T-027 read this decision to ask whether `char*` compares with `char mut*`
+  and found no answer here.
 - **D5.5** Struct fields. A field's own storage is as mutable as the struct value that contains it
   (level 0 of the field is inherited from the access path), so the outermost position of a field
   type never carries `mut`: `i32 mut count` and `node* mut next` are errors ("a field's own storage
@@ -697,7 +701,10 @@ Owner: `memory-model.md`.
   allowed only on pointers, `void*` and function pointers; spans and strings compare `.len`
   or `.ptr`. `null` has no type of its own: it is usable only where a pointer, `void*` or
   function-pointer type is expected, so `print(null)` and `null == null` are errors.
-  Dereferencing `null` is undefined behavior (a segfault in practice).
+  Dereferencing `null` is undefined behavior (a segfault in practice). Between two operands
+  neither of which is `null`, the same-type rule is D6.2's. Amended 2026-09-11: the last sentence
+  is a signpost added after T-027 consulted this decision for a pointer comparison that did not
+  involve `null`.
 - **D10.6** Bounds checks are performed on every index and span operation, in every build mode;
   `--no-bounds-check` disables them for benchmarking and is documented as unsafe.
 - **D10.7** Undefined behavior in v1 is limited to: using a view, or a copy made before a

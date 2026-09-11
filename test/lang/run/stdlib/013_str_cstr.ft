@@ -1,0 +1,53 @@
+//! run
+//! stdout:
+//| 5 4 path
+//| 1 0 true
+//| 3 abc
+//| 0 true true true
+//| 0 true
+//| 6
+import std::libc;
+import std::str;
+
+// str.to_cstr is the one sanctioned way to hand a string to C (D13.4): an
+// owned char span of length s.len + 1 whose .ptr is the C string, and
+// str.from_cstr wraps a C string back without copying (stdlib.md 2.5).
+fn i32 main() {
+    char mut@ own path = str.to_cstr("path");
+    defer del(path);
+    println(path.len, " ", libc.strlen(path.ptr), " ", cast(path[..4], string));
+
+    // to_cstr("") is one byte, the terminator, and C reads an empty string.
+    char mut@ own empty = str.to_cstr("");
+    defer del(empty);
+    println(empty.len, " ", libc.strlen(empty.ptr), " ", empty.ptr != null);
+
+    // An embedded NUL means C sees the prefix while fort still sees the whole.
+    char mut@ own cut = str.to_cstr("abc\x00de");
+    defer del(cut);
+    println(libc.strlen(cut.ptr), " ", str.from_cstr(cut.ptr));
+
+    // from_cstr(null) is the zero string, not "": both have length 0 and D3.7
+    // makes them ==, but a literal's .ptr is never null, so only the null .ptr
+    // lets a caller tell the wrap of a null pointer from the wrap of an empty
+    // C string (stdlib.md 2.5).
+    string zero = str.from_cstr(null);
+    println(zero.len, " ", zero == "", " ", zero.ptr == null, " ", "".ptr != null);
+    // The wrap of an empty C string is empty too, but its .ptr is the C one.
+    char mut@ own nothing = str.to_cstr("");
+    defer del(nothing);
+    string wrapped_empty = str.from_cstr(nothing.ptr);
+    // .ptr of a string is char* and of a char mut@ is char mut*, and the
+    // operands of == must be of identical type, mutability levels included:
+    // the implicit drop of D5.4 reaches initialization, assignment, argument
+    // passing and return, but not a comparison (D6.2). So the writable one is
+    // cast down.
+    println(wrapped_empty.len, " ", wrapped_empty.ptr == cast(nothing.ptr, char*));
+
+    // The wrap is a view: it aliases the bytes rather than copying them.
+    char mut@ own text = str.to_cstr("abcdef");
+    defer del(text);
+    string wrapped = str.from_cstr(text.ptr);
+    println(wrapped.len);
+    return 0;
+}

@@ -1,0 +1,44 @@
+//! run
+//! stdout:
+//| 0 true
+//| ========
+//| true true true
+//| false false
+//| false false
+//| true true
+import std::mem;
+
+// Two things mem.equal and its neighbours must get right that the ordinary
+// cases cannot see: a zero span whose .ptr is null, which C forbids as an
+// argument to memmove, memset and memcmp even for zero bytes, and a length
+// mismatch in either direction when one side is a prefix of the other
+// (stdlib.md 2.3).
+fn i32 main() {
+    // A span from {} is zero-length with a null pointer (D3.5).
+    u8 mut@ null_span = {};
+    println(null_span.len, " ", null_span.ptr == null);
+
+    // None of the three makes a C call with it, so none hands C a null.
+    u8[8] mut buf = {};
+    mem.fill(buf[..], cast('=', u8));
+    mem.copy(buf[..], null_span);
+    mem.fill(null_span, 7);
+    mem.copy(null_span, null_span);
+    println(cast(buf[..], string));
+
+    // Two empty spans are equal whatever their pointers, null ones included.
+    println(mem.equal(null_span, null_span), " ", mem.equal(null_span, buf[3..3]), " ",
+            mem.equal(buf[0..0], null_span));
+
+    // A length mismatch is unequal in both directions, even when the shorter
+    // side is a prefix of the longer: the first argument shorter, then the
+    // second, with identical bytes as far as the shorter one reaches.
+    u8[8] mut other = {};
+    mem.fill(other[..], cast('=', u8));
+    println(mem.equal(buf[0..7], other[..]), " ", mem.equal(buf[..], other[0..7]));
+    println(mem.equal(buf[0..0], other[..]), " ", mem.equal(buf[..], other[0..0]));
+
+    // And equal bytes of equal length still compare equal after all that.
+    println(mem.equal(buf[..], other[..]), " ", mem.equal(buf[0..7], other[0..7]));
+    return 0;
+}

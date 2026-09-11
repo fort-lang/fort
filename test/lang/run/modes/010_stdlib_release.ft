@@ -1,0 +1,58 @@
+//! run
+//! flags: --release
+//! stdout:
+//| foobar 6
+//| true
+//| 0 true
+//| 5 4 path
+//| abc.............
+//| 2 3 2 0
+//| taken: moved
+//| true 0 true
+import std::mem;
+import std::str;
+
+// The library's owning paths in release mode, where the overwrite check of
+// D17.11 is not emitted and the arithmetic does not trap (D11.1): the same
+// answers as run/stdlib/011, 012, 013 and run/stdlib/001 give with the checks
+// on, since del still frees by the pointer alone and move still empties its
+// operand in either mode (D10.3, D17.1, D17.6).
+fn void take(string own given) {
+    println("taken: ", given);
+    del(given);
+}
+
+fn i32 main() {
+    string own joined = str.concat("foo", "bar");
+    defer del(joined);
+    println(joined, " ", joined.len);
+
+    string own copied = str.dup(joined);
+    defer del(copied);
+    println(copied == joined);
+
+    // A zero-length allocation is still non-null in release mode (D10.2).
+    string own empty = str.dup("");
+    defer del(empty);
+    println(empty.len, " ", empty.ptr != null);
+
+    char mut@ own path = str.to_cstr("path");
+    defer del(path);
+    println(path.len, " ", str.from_cstr(path.ptr).len, " ", cast(path[..4], string));
+
+    u8[16] mut buf = {};
+    mem.fill(buf[..], cast('.', u8));
+    mem.copy(buf[..], cast("abc", u8@));
+    println(cast(buf[..], string));
+
+    string text = cast(buf[..], string);
+    println(str.index_of(text, 'c'), " ", str.last_index_of(text, '.') - 12, " ",
+            str.find(text, "c."), " ", str.cmp(text, text));
+
+    // move empties its operand and del of the emptied value is a no-op, in
+    // release mode as in checked (D17.6, D17.9).
+    string own moved = str.dup("moved");
+    take(move(moved));
+    println(moved.len == 0, " ", moved.len, " ", moved.ptr == null);
+    return 0;
+}

@@ -1,0 +1,93 @@
+//! run
+//! link: ffi/std_libc_flags.c
+//! stdout:
+//| flags agree
+//| 11 true
+//| 11 hello world
+//| 6 world
+//| 0 0
+//| true 0
+import std::libc;
+import std::str;
+
+// The libc externs and the flag values of std::libc (stdlib.md 2.2): the
+// flags are held against the system headers, then open, write, lseek, read
+// and close are driven through one file in the test's own directory.
+extern fn i32 std_o_rdonly();
+extern fn i32 std_o_wronly();
+extern fn i32 std_o_rdwr();
+extern fn i32 std_o_creat();
+extern fn i32 std_o_trunc();
+extern fn i32 std_o_append();
+extern fn i32 std_seek_set();
+extern fn i32 std_seek_cur();
+extern fn i32 std_seek_end();
+extern fn i32 std_enoent();
+extern fn i32 std_eintr();
+extern fn i32 std_eacces();
+
+fn bool same(string name, i32 mine, i32 theirs) {
+    if (mine == theirs) {
+        return true;
+    }
+    println("flag ", name, ": std::libc says ", mine, " but C says ", theirs);
+    return false;
+}
+
+// Every constant is compared, and the conjunction is written with the call on
+// the left, so that one disagreement does not hide the eleven behind it.
+fn bool flags_agree() {
+    bool mut ok = same("O_RDONLY", libc.O_RDONLY, std_o_rdonly());
+    ok = same("O_WRONLY", libc.O_WRONLY, std_o_wronly()) && ok;
+    ok = same("O_RDWR", libc.O_RDWR, std_o_rdwr()) && ok;
+    ok = same("O_CREAT", libc.O_CREAT, std_o_creat()) && ok;
+    ok = same("O_TRUNC", libc.O_TRUNC, std_o_trunc()) && ok;
+    ok = same("O_APPEND", libc.O_APPEND, std_o_append()) && ok;
+    ok = same("SEEK_SET", libc.SEEK_SET, std_seek_set()) && ok;
+    ok = same("SEEK_CUR", libc.SEEK_CUR, std_seek_cur()) && ok;
+    ok = same("SEEK_END", libc.SEEK_END, std_seek_end()) && ok;
+    ok = same("ENOENT", libc.ENOENT, std_enoent()) && ok;
+    ok = same("EINTR", libc.EINTR, std_eintr()) && ok;
+    ok = same("EACCES", libc.EACCES, std_eacces()) && ok;
+    return ok;
+}
+
+fn i32 main() {
+    if (!flags_agree()) {
+        return 1;
+    }
+    println("flags agree");
+
+    char mut@ own path = str.to_cstr("t027-libc.txt");
+    defer del(path);
+
+    // Create and truncate, then write the whole text.
+    i32 out = libc.open(path.ptr, libc.O_WRONLY | libc.O_CREAT | libc.O_TRUNC, 0o644);
+    if (out < 0) {
+        return 1;
+    }
+    string text = "hello world";
+    i64 written = libc.write(out, cast(text.ptr, void*), text.len);
+    println(written, " ", libc.close(out) == 0);
+
+    // Read it back whole, then from an offset that lseek sets.
+    i32 in = libc.open(path.ptr, libc.O_RDONLY, 0);
+    if (in < 0) {
+        return 1;
+    }
+    u8 mut@ own buf = new(u8, 64);
+    defer del(buf);
+    i64 n = libc.read(in, cast(buf.ptr, void*), buf.len);
+    println(n, " ", cast(buf[0..cast(n, u64)], string));
+
+    i64 at = libc.lseek(in, 6, libc.SEEK_SET);
+    i64 rest = libc.read(in, cast(buf.ptr, void*), buf.len);
+    println(at, " ", cast(buf[0..cast(rest, u64)], string));
+
+    // SEEK_END reports the size, SEEK_SET rewinds.
+    println(libc.lseek(in, 0, libc.SEEK_END) - cast(text.len, i64), " ",
+            libc.lseek(in, 0, libc.SEEK_SET));
+    i64 again = libc.read(in, cast(buf.ptr, void*), buf.len);
+    println(libc.close(in) == 0, " ", again - written);
+    return 0;
+}

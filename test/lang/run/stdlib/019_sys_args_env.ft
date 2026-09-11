@@ -1,0 +1,66 @@
+//! run
+//! args: alpha beta
+//! stdout:
+//| 3 3
+//| true
+//| alpha beta
+//| 5 5 true
+//| true
+//| false <unchanged>
+//| false <unchanged>
+//| true true
+//| true
+//| -1 true
+//| 0
+import std::libc;
+import std::str;
+import std::sys;
+
+// sys.args returns the same string@ that main received (D8.6, D11.6), a view
+// of storage the runtime owns whose elements are NUL-terminated; sys.env
+// looks a variable up and leaves *out alone when it is absent; sys.errno
+// reports C errno after a failed call (stdlib.md 1.4, 2.1).
+fn i32 main(string@ args) {
+    string@ from_sys = sys.args();
+    println(args.len, " ", from_sys.len);
+
+    // Equal span for span, argv[0] included.
+    bool mut same = args.len == from_sys.len;
+    for (u64 mut i = 0; i < args.len; i += 1) {
+        same = same && args[i] == from_sys[i];
+    }
+    println(same);
+    println(from_sys[1], " ", from_sys[2]);
+
+    // The elements are the argv bytes, so C reads each one as a string.
+    println(from_sys[1].len, " ", libc.strlen(from_sys[1].ptr), " ",
+            from_sys[1].ptr == args[1].ptr);
+
+    // Two calls describe the same storage, not two copies of it.
+    println(sys.args().ptr == from_sys.ptr);
+
+    string mut value = "<unchanged>";
+    println(sys.env("FORT_T027_ABSENT_VARIABLE", &value), " ", value);
+    // An empty name cannot name a variable either.
+    println(sys.env("", &value), " ", value);
+
+    // PATH is set for every process the harness starts.
+    println(sys.env("PATH", &value), " ", value.len > 0);
+    // The result aliases the environment, so C reads it as a string.
+    println(libc.strlen(value.ptr) == value.len);
+
+    // errno after a failed call: opening a file that does not exist.
+    char mut@ own path = str.to_cstr("no/such/file/for/T027");
+    defer del(path);
+    i32 fd = libc.open(path.ptr, libc.O_RDONLY, 0);
+    println(fd, " ", sys.errno() == libc.ENOENT);
+
+    // The name is copied for the call, so a name with no NUL behind it works.
+    string packed = "PATHX";
+    if (sys.env(packed[..4], &value)) {
+        println(0);
+    } else {
+        println(1);
+    }
+    return 0;
+}

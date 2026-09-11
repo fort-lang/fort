@@ -1,0 +1,50 @@
+//! run
+//! flags: --release --no-bounds-check
+//! args: alpha
+//! stdout:
+//| 2 alpha
+//| 0 true
+//| -1 -1 -1
+//| 0 0 0
+//| true true
+//| ok
+import std::mem;
+import std::str;
+import std::sys;
+
+// With the index and span checks removed (D10.6) the library must still be
+// correct on its own account: every loop it runs stops at .len by arithmetic
+// and not because a check would have caught it. These are the boundary cases
+// -- empty inputs, a needle as long as the string, the last index, the whole
+// span -- that a missing check would turn into silent corruption instead of a
+// runtime error.
+fn i32 main() {
+    // sys.args takes an unchecked span of the runtime's pointer (D6.9), which
+    // is what this mode leaves unguarded.
+    string@ args = sys.args();
+    println(args.len, " ", args[args.len - 1]);
+
+    // The empty string: every search runs zero iterations.
+    println(str.find("", ""), " ", str.hash("") == 14695981039346656037);
+    println(str.index_of("", 'a'), " ", str.last_index_of("", 'a'), " ", str.find("", "a"));
+    println(str.cmp("", ""), " ", str.find("abc", "abc"), " ", str.find("abc", ""));
+
+    // A prefix and a suffix as long as the string, and one byte longer.
+    println(str.starts_with("abc", "abc") && str.ends_with("abc", "abc"), " ",
+            !str.starts_with("abc", "abcd") && !str.ends_with("abc", "abcd"));
+
+    // Copies and comparisons at both ends of a span.
+    u8[4] mut buf = {};
+    mem.copy(buf[..], cast("wxyz", u8@));
+    mem.copy(buf[3..], buf[0..1]);
+    mem.copy(buf[0..0], cast("", u8@));
+    if (!mem.equal(buf[..], cast("wxyw", u8@)) || !mem.equal(buf[4..], buf[0..0])) {
+        return 1;
+    }
+    // The last byte of a string, reached through last_index_of.
+    if (str.last_index_of(cast(buf[..], string), 'w') != 3) {
+        return 1;
+    }
+    println("ok");
+    return 0;
+}

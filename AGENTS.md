@@ -556,7 +556,22 @@ A safe(r) C-like systems programming language.
   underscores, struct and enum type names and enum members included; only module constants are
   UPPER_CASE. A variable never takes its type's name (`point p`, `box bx`, `list mut* mut l`); a
   field may (`node mut* own node`), since fields are not variables and are outside the module
-  namespace (D7.9).
+  namespace (D7.9). Nothing formats or lints `.ft`, so wrap at 100 columns by hand and check with
+  the same `awk 'length > 100'` the markdown rule uses.
+- **The standard library is invisible to the tooling that watches the compiler.** `tools/lines.py`
+  counts `src/bootstrap`, `src/fort` and `test/`, so a ticket that writes `std/*.ft` passes the 3:1
+  ratio without the ratio having seen its code; state the real figure (library lines against the
+  test lines that exercise them) in the ticket log rather than quoting the tool. `test/lang` is
+  where a library module is tested, under `run/stdlib`; `test/highlight_test.py` tokenizes
+  `test/lang/run` but not `std/`, so a construct only the library uses is not held against the
+  TextMate grammar. A new `std/*.ft` reaches the harness only after `tools/vm build <preset>`
+  copies it into `build/<preset>/std`, next to `fort_rt.o`: running `run_tests.py` by hand against
+  a source that has not been copied reports `module 'std::x' not found`.
+- **Writing a library module against C** (`stdlib.md` 1.4, D13.4): a span is not a pointer, so
+  `cast(u8 mut@ own, void* own)` is rejected (D3.14 lists pointer-to-pointer, not span-to-pointer).
+  The `libc.free(cast(move(p), void* own))` idiom of `stdlib.md` 2.2 therefore applies to a
+  `T mut* own` from `new(T)` or `libc.malloc`; a `T mut@ own` from `new(T, n)` is released with
+  `del`, and what crosses to C is its `.ptr`, a view.
 - **Shell scripts**: bash with `set -eu`, clean under shellcheck at its default severity; the
   host has no shellcheck, run it in the guest: `tools/vm run 'shellcheck tools/vm
   tools/provision.sh'`.

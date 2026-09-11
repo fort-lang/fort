@@ -1,0 +1,28 @@
+//! fail
+import std::libc;
+import std::str;
+import std::sys;
+
+// The accessors return views (D17.3, stdlib.md 1.3): sys.args, str.from_cstr
+// and every sub-span yield values without own, so del on them does not
+// compile, and neither does del of a .ptr or of a sub-span of an owned value
+// (D17.9).
+fn i32 main() {
+    // sys.args is a view of storage the runtime owns.
+    del(sys.args());                     //! error: needs an owning operand, not string@
+    del(sys.args()[0]);                  //! error: needs an owning operand, not string
+
+    // str.from_cstr wraps a C string without copying.
+    char* env = libc.getenv("PATH".ptr);
+    del(str.from_cstr(env));             //! error: needs an owning operand, not string
+
+    // A sub-span and a .ptr of an owned value are views of it.
+    char mut@ own path = str.to_cstr("path");
+    del(path[..2]);                      //! error: needs an owning operand, not char mut@
+    del(path.ptr);                       //! error: needs an owning operand, not char mut*
+    del(path);
+
+    // A string literal is not owned either.
+    del("abc");                          //! error: needs an owning operand, not string
+    return 0;
+}
