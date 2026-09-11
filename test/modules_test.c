@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "fork.h"
 #include "modules_helpers.h"
 #include "scope.h"
 #include "str.h"
@@ -532,8 +533,31 @@ TEST(no_further_module_is_read_after_an_import_failed, {
     TEST_ASSERT_TRUE(said("module 'nothere' not found"));
 })
 
+// ---- the sandbox helpers themselves -------------------------------------------------
+
+enum { ERR_MAX = 1024 };
+
+// A relative path longer than the buffer the helper joins into, so that the
+// join cannot fit whatever the sandbox directory is.
+static void join_a_path_that_cannot_fit(void) {
+    char rel[PATH_CAP + 1];
+    TEST_UNUSED(memset(rel, 'x', sizeof rel - 1));
+    rel[sizeof rel - 1] = '\0';
+    TEST_UNUSED(in_sandbox(rel));
+}
+
+TEST(a_path_that_does_not_fit_the_buffer_ends_the_suite, {
+    // Silently truncated, the path would name another file and every test
+    // built on it would answer about that one instead.
+    char err[ERR_MAX];
+    const int status = run_forked(join_a_path_that_cannot_fit, err, sizeof err);
+    TEST_ASSERT_EQ_INT32(status, (int32_t)TEST_RESULT_ERR);
+    TEST_ASSERT_NONNULL(strstr(err, "modules: path too long for 512 bytes: "));
+})
+
 int main(int argc, char** argv) {
     TEST_INIT("modules", argc, argv);
+    TEST_RUN(a_path_that_does_not_fit_the_buffer_ends_the_suite);
     TEST_RUN(the_entry_module_path_is_its_base_name);
     TEST_RUN(an_entry_file_in_a_directory_keeps_only_its_base_name);
     TEST_RUN(the_entry_directory_is_the_first_search_root);

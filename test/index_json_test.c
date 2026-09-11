@@ -40,7 +40,7 @@ static const char* symbols_text(void) {
 // `<sandbox>/<rel>`, which is the `"file"` of every record of that module.
 static const char* file_of(const char* rel) {
     static char path[PATH_CAP];
-    TEST_UNUSED(snprintf(path, sizeof path, "%s/%s", sandbox, rel));
+    join_sandbox_path(path, sizeof path, sandbox, rel);
     return path;
 }
 

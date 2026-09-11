@@ -131,6 +131,18 @@ A safe(r) C-like systems programming language.
 - `tools/vm gate` is the merge gate: `format-check`, `tidy`, and `check-all` under `debug`,
   `asan` and `ubsan` (it configures `debug` first, then configures and builds each preset before
   its `check-all`).
+- The `gcc` preset is the project's only cross-compiler check and it is **not** part of the gate,
+  whose three presets are all clang, so nothing runs it unless someone does: run
+  `tools/vm workflow gcc` by hand whenever compiler or test-helper code changes. It went unbuilt
+  long enough to accumulate errors in shared test helpers (`-Wformat-truncation` on every sandbox
+  path join, `-Warray-compare` on a pointer comparison written as an array one), which clang does
+  not diagnose at all. `tools/vm build gcc` on its own, in a worktree that never configured the
+  preset, reports "not a directory": that is the missing build directory, not the failure, and
+  `workflow` does the configure itself. gcc's truncation warning is level 1, so using the
+  `snprintf` result silences it: check it against the capacity and fail the test with a message
+  (`join_sandbox_path`, `gen_join_path`), never widen the buffer or cast the result away. A guard
+  only gcc enforces is a guard no test holds, so assert each one -- the call sites too, not only
+  the helper -- as `test/modules_test.c` and `test/gen_test.c` do.
 - A run test's program executes in a temporary directory (`tempfile.mkdtemp`) holding only the
   compiled program itself, so it cannot open a **pre-existing** file that ships beside the test. It
   may freely create a file there and read it back, which `run/stdlib/051`, `054` and `055` do. A

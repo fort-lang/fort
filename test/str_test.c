@@ -98,7 +98,11 @@ TEST(eq_of_two_empty_views_holds_whatever_their_pointers, {
 TEST(eq_does_not_depend_on_the_pointer, {
     char a[] = "same";
     char b[] = "same";
-    TEST_ASSERT_TRUE(a != b);
+    // The two buffers are distinct objects: compared as arrays rather than as
+    // pointers, gcc rejects the test (-Warray-compare).
+    const char* first = a;
+    const char* second = b;
+    TEST_ASSERT_TRUE(first != second);
     TEST_ASSERT_TRUE(str_eq(str_from_cstr(a), str_from_cstr(b)));
 })
 

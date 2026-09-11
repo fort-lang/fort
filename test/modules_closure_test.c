@@ -80,7 +80,7 @@ TEST(a_symbolic_link_reaches_the_same_module, {
         "fn i32 main() { return 0; }\n");
     add("util.ft", src_add());
     char target[PATH_CAP];
-    TEST_UNUSED(snprintf(target, sizeof target, "%s/util.ft", sandbox));
+    join_sandbox_path(target, sizeof target, sandbox, "util.ft");
     TEST_UNUSED(symlink(target, in_sandbox("link.ft")));
     TEST_ASSERT_FALSE(load("main.ft"));
     TEST_ASSERT_TRUE(said("is the same file as module 'util'"));

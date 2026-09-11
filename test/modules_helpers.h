@@ -27,6 +27,30 @@
 
 enum { PATH_CAP = 512 };
 
+// Stops the suite when a sandbox path did not fit its buffer, naming the path
+// that overflowed. A truncated path names a file other than the one the test
+// asked for, and the helpers below read it, write it and delete it, so
+// working on the truncation would answer about the wrong file, or remove it.
+// `written` is the snprintf result: using it is also what keeps gcc from
+// warning that the call may truncate.
+static inline void sandbox_path_fits(int written, size_t cap, const char* what) {
+    if (written < 0 || (size_t)written >= cap) {
+        TEST_UNUSED(fprintf(stderr, "modules: path too long for %zu bytes: %s\n", cap, what));
+        exit(TEST_RESULT_ERR);
+    }
+}
+
+// Writes `<dir>/<rel>` into `dst` under that rule. Not named `join_path`:
+// that is a function of src/bootstrap/driver.c, which every suite links.
+static inline void join_sandbox_path(char* dst, size_t cap, const char* dir, const char* rel) {
+    const int written = snprintf(dst, cap, "%s/%s", dir, rel);
+    if (written < 0 || (size_t)written >= cap) {
+        TEST_UNUSED(
+            fprintf(stderr, "modules: path too long for %zu bytes: %s/%s\n", cap, dir, rel));
+        exit(TEST_RESULT_ERR);
+    }
+}
+
 // Removes a directory and everything below it.
 static inline void remove_tree(const char* path) {
     DIR* dir = opendir(path);
@@ -38,7 +62,7 @@ static inline void remove_tree(const char* path) {
     while (entry != NULL) {
         if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
             char child[PATH_CAP];
-            TEST_UNUSED(snprintf(child, sizeof child, "%s/%s", path, entry->d_name));
+            join_sandbox_path(child, sizeof child, path, entry->d_name);
             remove_tree(child);
         }
         entry = readdir(dir);
@@ -78,7 +102,9 @@ static inline void begin(void) {
         TEST_UNUSED(fputs("modules: cannot create the sandbox directory\n", stderr));
         exit(TEST_RESULT_ERR);
     }
-    TEST_UNUSED(snprintf(sandbox, sizeof sandbox, "%s", pattern));
+    // Under the same rule as every other write of a sandbox path, though
+    // mkdtemp's rewritten literal is far shorter than the buffer.
+    sandbox_path_fits(snprintf(sandbox, sizeof sandbox, "%s", pattern), sizeof sandbox, pattern);
     sb_init(&captured);
     diag_capture(&captured);
     diag_reset();
@@ -88,7 +114,7 @@ static inline void begin(void) {
 
 // `<sandbox>/<rel>`, valid until the next call.
 static inline const char* in_sandbox(const char* rel) {
-    TEST_UNUSED(snprintf(scratch, sizeof scratch, "%s/%s", sandbox, rel));
+    join_sandbox_path(scratch, sizeof scratch, sandbox, rel);
     return scratch;
 }
 
@@ -96,7 +122,7 @@ static inline const char* in_sandbox(const char* rel) {
 // path names.
 static inline void add(const char* rel, const char* text) {
     char path[PATH_CAP];
-    TEST_UNUSED(snprintf(path, sizeof path, "%s/%s", sandbox, rel));
+    join_sandbox_path(path, sizeof path, sandbox, rel);
     for (char* cursor = path + strlen(sandbox) + 1; *cursor != '\0'; cursor++) {
         if (*cursor == '/') {
             *cursor = '\0';

@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "fork.h"
 #include "gen_helpers.h"
 #include "str.h"
 
@@ -416,8 +417,63 @@ TEST(the_blocks_of_a_short_circuit_and_a_check_each_end_in_one_terminator, {
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
+// ---- the sandbox helpers themselves -------------------------------------------------
+
+enum { GEN_ERR_MAX = 1024 };
+
+// A module name longer than the buffer the sandbox path is joined into, so
+// that the join cannot fit whatever the sandbox directory is.
+static void write_a_path_that_cannot_fit(void) {
+    char name[GEN_PATH_CAP + 1];
+    TEST_UNUSED(memset(name, 'x', sizeof name - 1));
+    name[sizeof name - 1] = '\0';
+    gen_write(name, "fn i32 main() { return 0; }\n");
+}
+
+TEST(a_sandbox_path_that_does_not_fit_ends_the_suite, {
+    // Silently truncated, the path would name another file, and the emitter
+    // would be asked about a module the test never wrote.
+    char err[GEN_ERR_MAX];
+    const int status = run_forked(write_a_path_that_cannot_fit, err, sizeof err);
+    TEST_ASSERT_EQ_INT32(status, (int32_t)TEST_RESULT_ERR);
+    TEST_ASSERT_NONNULL(strstr(err, "gen: path too long for 512 bytes: "));
+})
+
+// A module whose one block carries a label as long as the scan's buffer and
+// two terminators, so that the report of it cannot fit.
+static const char* module_with_a_very_long_label(char* text, size_t cap) {
+    enum { LABEL_LEN = 500 };
+    char label[LABEL_LEN + 1];
+    TEST_UNUSED(memset(label, 'b', LABEL_LEN));
+    label[LABEL_LEN] = '\0';
+    TEST_UNUSED(
+        snprintf(text, cap, "define i32 @main() {\n%s:\n  ret i32 0\n  ret i32 0\n}\n", label));
+    return text;
+}
+
+TEST(a_block_report_too_long_to_write_is_reported_where_it_is_written, {
+    // The two call sites that write a report are held by this, not by the
+    // helper's own test: dropping their wrapping leaves the scan naming a
+    // block by a truncated label, which no other test would see.
+    char text[GEN_PATH_CAP * 2];
+    TEST_ASSERT_EQ_STR(gen_block_terminators_of(module_with_a_very_long_label(text, sizeof text)),
+                       "the block report did not fit its buffer");
+})
+
+TEST(a_block_report_that_does_not_fit_says_so_instead_of_naming_a_block, {
+    const char* report = "b1 has 2 terminators";
+    TEST_ASSERT_EQ_STR(gen_fitted(report, (int)strlen(report), strlen(report) + 1), report);
+    TEST_ASSERT_EQ_STR(gen_fitted(report, (int)strlen(report), strlen(report)),
+                       "the block report did not fit its buffer");
+    TEST_ASSERT_EQ_STR(gen_fitted(report, -1, sizeof "long enough"),
+                       "the block report did not fit its buffer");
+})
+
 int main(int argc, char** argv) {
     TEST_INIT("gen", argc, argv);
+    TEST_RUN(a_sandbox_path_that_does_not_fit_ends_the_suite);
+    TEST_RUN(a_block_report_that_does_not_fit_says_so_instead_of_naming_a_block);
+    TEST_RUN(a_block_report_too_long_to_write_is_reported_where_it_is_written);
     TEST_RUN(the_module_begins_with_the_normalized_triple);
     TEST_RUN(the_module_carries_no_datalayout_or_module_flags);
     TEST_RUN(the_module_carries_no_comment);

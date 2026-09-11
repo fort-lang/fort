@@ -51,6 +51,37 @@ enum { EXEC_FAILED_STATUS = 127 };
 // _POSIX_C_SOURCE does not set, so the suite declares it itself.
 extern char** environ;
 
+// Stops the suite when a sandbox path did not fit its buffer, naming the path
+// that overflowed: a truncated path names a file other than the one the test
+// asked for, so writing it, reading it or removing it would answer about the
+// wrong module, or delete the wrong file. `written` is the snprintf result:
+// using it is also what keeps gcc from warning that the call may truncate.
+static inline void gen_path_fits(int written, size_t cap, const char* what) {
+    if (written < 0 || (size_t)written >= cap) {
+        TEST_UNUSED(fprintf(stderr, "gen: path too long for %zu bytes: %s\n", cap, what));
+        exit(TEST_RESULT_ERR);
+    }
+}
+
+// Writes `<dir>/<rel>` into `dst` under that rule, naming both halves, since
+// either of them may be the long one.
+static inline void gen_join_path(char* dst, size_t cap, const char* dir, const char* rel) {
+    const int written = snprintf(dst, cap, "%s/%s", dir, rel);
+    if (written < 0 || (size_t)written >= cap) {
+        TEST_UNUSED(fprintf(stderr, "gen: path too long for %zu bytes: %s/%s\n", cap, dir, rel));
+        exit(TEST_RESULT_ERR);
+    }
+}
+
+// The block report just written, or a fixed message when it did not fit: a
+// truncated report would name a block the module does not hold.
+static inline const char* gen_fitted(const char* report, int written, size_t cap) {
+    if (written < 0 || (size_t)written >= cap) {
+        return "the block report did not fit its buffer";
+    }
+    return report;
+}
+
 // Removes a directory and everything below it.
 static inline void gen_remove_tree(const char* path) {
     DIR* dir = opendir(path);
@@ -62,7 +93,7 @@ static inline void gen_remove_tree(const char* path) {
     while (entry != NULL) {
         if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
             char child[GEN_PATH_CAP];
-            TEST_UNUSED(snprintf(child, sizeof child, "%s/%s", path, entry->d_name));
+            gen_join_path(child, sizeof child, path, entry->d_name);
             gen_remove_tree(child);
         }
         entry = readdir(dir);
@@ -110,7 +141,10 @@ static inline void gen_begin(void) {
         TEST_UNUSED(fputs("gen: cannot create the sandbox directory\n", stderr));
         exit(TEST_RESULT_ERR);
     }
-    TEST_UNUSED(snprintf(gen_sandbox, sizeof gen_sandbox, "%s", pattern));
+    // Under the same rule as every other write of a sandbox path, though
+    // mkdtemp's rewritten literal is far shorter than the buffer.
+    gen_path_fits(
+        snprintf(gen_sandbox, sizeof gen_sandbox, "%s", pattern), sizeof gen_sandbox, pattern);
     sb_init(&gen_module);
     sb_init(&gen_diags);
     diag_capture(&gen_diags);
@@ -126,10 +160,12 @@ static inline void gen_write(const char* name, const char* text) {
     const char* slash = strchr(name, '/');
     if (slash != NULL) {
         char dir[GEN_PATH_CAP];
-        TEST_UNUSED(snprintf(dir, sizeof dir, "%s/%.*s", gen_sandbox, (int)(slash - name), name));
+        gen_path_fits(snprintf(dir, sizeof dir, "%s/%.*s", gen_sandbox, (int)(slash - name), name),
+                      sizeof dir,
+                      name);
         TEST_UNUSED(mkdir(dir, S_IRWXU));
     }
-    TEST_UNUSED(snprintf(path, sizeof path, "%s/%s", gen_sandbox, name));
+    gen_join_path(path, sizeof path, gen_sandbox, name);
     FILE* file = fopen(path, "wb");
     if (file == NULL) {
         return;
@@ -356,16 +392,20 @@ static inline const char* gen_block_terminators_of(const char* text) {
             open = false;
         } else if (len == 1 && *p == '}') {
             if (open && count != 1) {
-                TEST_UNUSED(snprintf(
-                    report, sizeof report, "%s has %lld terminators", label, (long long)count));
-                return report;
+                return gen_fitted(
+                    report,
+                    snprintf(
+                        report, sizeof report, "%s has %lld terminators", label, (long long)count),
+                    sizeof report);
             }
             in_function = false;
         } else if (len > 1 && *p != ' ' && p[len - 1] == ':') {
             if (open && count != 1) {
-                TEST_UNUSED(snprintf(
-                    report, sizeof report, "%s has %lld terminators", label, (long long)count));
-                return report;
+                return gen_fitted(
+                    report,
+                    snprintf(
+                        report, sizeof report, "%s has %lld terminators", label, (long long)count),
+                    sizeof report);
             }
             const size_t keep = len < sizeof label ? len : sizeof label - 1;
             TEST_UNUSED(memcpy(label, p, keep));
@@ -376,9 +416,11 @@ static inline const char* gen_block_terminators_of(const char* text) {
             if (gen_is_terminator(p)) {
                 count++;
             } else if (count > 0) {
-                TEST_UNUSED(snprintf(
-                    report, sizeof report, "%s has an instruction after its terminator", label));
-                return report;
+                return gen_fitted(
+                    report,
+                    snprintf(
+                        report, sizeof report, "%s has an instruction after its terminator", label),
+                    sizeof report);
             }
         }
         p = eol + 1;
@@ -412,7 +454,7 @@ static inline const char* verified(void) {
         return blocks;
     }
     char path[GEN_PATH_CAP];
-    TEST_UNUSED(snprintf(path, sizeof path, "%s/module.ll", gen_sandbox));
+    gen_join_path(path, sizeof path, gen_sandbox, "module.ll");
     FILE* file = fopen(path, "wb");
     if (file == NULL) {
         return "the module could not be written";
