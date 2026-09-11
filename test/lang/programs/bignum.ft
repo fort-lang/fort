@@ -1,0 +1,274 @@
+//! run
+//! stdout:
+//| 10! value=3628800 (1 limbs, 7 digits)
+//| 20! value=2432902008176640000 (3 limbs, 19 digits)
+//| 30! value=265252859812191058636308480000000 (4 limbs, 33 digits)
+//| 2^128=340282366920938463463374607431768211456 (5 limbs, 39 digits)
+//| 2^256=115792089237316195423570985008687907853269984665640564039457584007913129639936 (9 limbs, 78 digits)
+//| doubling agrees=true
+//| a=999999999 (1 limbs, 9 digits)
+//| a+1=1000000000 (2 limbs, 10 digits)
+//| a+1-1=999999999 (1 limbs, 9 digits)
+//| round trip=true
+//| order=-1 1 0
+//| zero=0 (1 limbs, 1 digits)
+//| 0*2^256=0 (1 limbs, 1 digits)
+//| identity=true
+// Arbitrary-precision unsigned integers as owning spans of base-10^9 limbs,
+// least significant first. Addition, subtraction, multiplication by a small
+// number, long multiplication, comparison and decimal printing, used to print
+// factorials and powers of two exactly. Every limb stays below 10^9, so no
+// product of two limbs can overflow u64 and the checked build never traps
+// (D11.2).
+u64 BASE = 1000000000;
+u64 BASE_DIGITS = 9;
+
+struct big {
+    u64 mut@ own limbs;
+    u64 count;
+}
+
+fn big make(u64 cap) {
+    big mut b = {};
+    b.limbs = new(u64, cap);
+    b.count = 0;
+    return move(b);
+}
+
+fn void free_big(big mut* b) {
+    del(b->limbs);
+    b->count = 0;
+}
+
+fn void trim(big mut* b) {
+    while (b->count > 1 && b->limbs[b->count - 1] == 0) {
+        b->count--;
+    }
+}
+
+fn big from_u64(u64 v) {
+    big mut b = make(4);
+    u64 mut rest = v;
+    b.count = 0;
+    while (true) {
+        b.limbs[b.count] = rest % BASE;
+        b.count++;
+        rest /= BASE;
+        if (rest == 0) {
+            break;
+        }
+    }
+    return move(b);
+}
+
+fn big copy_big(big* a, u64 extra) {
+    big mut out = make(a->count + extra);
+    for (u64 mut i = 0; i < a->count; i++) {
+        out.limbs[i] = a->limbs[i];
+    }
+    out.count = a->count;
+    return move(out);
+}
+
+fn i32 compare_big(big* a, big* b) {
+    if (a->count != b->count) {
+        if (a->count < b->count) {
+            return -1;
+        }
+        return 1;
+    }
+    u64 mut i = a->count;
+    while (i > 0) {
+        i--;
+        if (a->limbs[i] < b->limbs[i]) {
+            return -1;
+        }
+        if (a->limbs[i] > b->limbs[i]) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+fn big add_big(big* a, big* b) {
+    u64 mut n = a->count;
+    if (b->count > n) {
+        n = b->count;
+    }
+    big mut out = make(n + 1);
+    u64 mut carry = 0;
+    for (u64 mut i = 0; i < n; i++) {
+        u64 mut sum = carry;
+        if (i < a->count) {
+            sum += a->limbs[i];
+        }
+        if (i < b->count) {
+            sum += b->limbs[i];
+        }
+        out.limbs[i] = sum % BASE;
+        carry = sum / BASE;
+    }
+    out.limbs[n] = carry;
+    out.count = n + 1;
+    trim(&out);
+    return move(out);
+}
+
+// a - b, defined only when a >= b, which the caller checks.
+fn big sub_big(big* a, big* b) {
+    big mut out = make(a->count);
+    u64 mut borrow = 0;
+    for (u64 mut i = 0; i < a->count; i++) {
+        u64 mut take = borrow;
+        if (i < b->count) {
+            take += b->limbs[i];
+        }
+        if (a->limbs[i] >= take) {
+            out.limbs[i] = a->limbs[i] - take;
+            borrow = 0;
+        } else {
+            out.limbs[i] = a->limbs[i] + BASE - take;
+            borrow = 1;
+        }
+    }
+    out.count = a->count;
+    trim(&out);
+    return move(out);
+}
+
+fn big mul_small(big* a, u64 k) {
+    big mut out = make(a->count + 2);
+    u64 mut carry = 0;
+    for (u64 mut i = 0; i < a->count; i++) {
+        u64 product = a->limbs[i] * k + carry;
+        out.limbs[i] = product % BASE;
+        carry = product / BASE;
+    }
+    u64 mut at = a->count;
+    while (carry != 0) {
+        out.limbs[at] = carry % BASE;
+        carry /= BASE;
+        at++;
+    }
+    out.count = at;
+    if (out.count == 0) {
+        out.count = 1;
+    }
+    trim(&out);
+    return move(out);
+}
+
+fn big mul_big(big* a, big* b) {
+    big mut out = make(a->count + b->count + 1);
+    out.count = a->count + b->count + 1;
+    for (u64 mut i = 0; i < a->count; i++) {
+        u64 mut carry = 0;
+        for (u64 mut j = 0; j < b->count; j++) {
+            u64 cur = out.limbs[i + j] + a->limbs[i] * b->limbs[j] + carry;
+            out.limbs[i + j] = cur % BASE;
+            carry = cur / BASE;
+        }
+        u64 mut at = i + b->count;
+        while (carry != 0) {
+            u64 cur = out.limbs[at] + carry;
+            out.limbs[at] = cur % BASE;
+            carry = cur / BASE;
+            at++;
+        }
+    }
+    trim(&out);
+    return move(out);
+}
+
+// The decimal text: the top limb without padding, every other limb padded to
+// nine digits.
+fn void show(string name, big* b) {
+    print(name, "=");
+    u64 mut i = b->count;
+    i--;
+    print(b->limbs[i]);
+    while (i > 0) {
+        i--;
+        u64 v = b->limbs[i];
+        u64 mut divisor = BASE / 10;
+        while (divisor > 0) {
+            print((v / divisor) % 10);
+            divisor /= 10;
+        }
+    }
+    println(" (", b->count, " limbs, ", digit_count(b), " digits)");
+}
+
+fn u64 digit_count(big* b) {
+    u64 top = b->limbs[b->count - 1];
+    u64 mut n = 1;
+    u64 mut rest = top;
+    while (rest >= 10) {
+        rest /= 10;
+        n++;
+    }
+    return n + (b->count - 1) * BASE_DIGITS;
+}
+
+fn i32 main() {
+    big mut acc = from_u64(1);
+    defer free_big(&acc);
+    for (u64 mut k = 1; k <= 30; k++) {
+        big mut next = mul_small(&acc, k);
+        free_big(&acc);
+        acc = move(next);
+        if (k == 10 || k == 20 || k == 30) {
+            print(k, "! ");
+            show("value", &acc);
+        }
+    }
+
+    // 2^256 by repeated doubling, and 2^128 * 2^128 by long multiplication:
+    // the two must agree.
+    big mut two_128 = from_u64(1);
+    defer free_big(&two_128);
+    for (u64 mut i = 0; i < 128; i++) {
+        big mut next = mul_small(&two_128, 2);
+        free_big(&two_128);
+        two_128 = move(next);
+    }
+    show("2^128", &two_128);
+    big mut doubled = copy_big(&two_128, 0);
+    defer free_big(&doubled);
+    for (u64 mut i = 0; i < 128; i++) {
+        big mut next = mul_small(&doubled, 2);
+        free_big(&doubled);
+        doubled = move(next);
+    }
+    big mut squared = mul_big(&two_128, &two_128);
+    defer free_big(&squared);
+    show("2^256", &squared);
+    println("doubling agrees=", compare_big(&doubled, &squared) == 0);
+
+    // (a + b) - b == a over numbers that need a carry in every limb.
+    big mut a = from_u64(999999999);
+    defer free_big(&a);
+    big mut b = from_u64(1);
+    defer free_big(&b);
+    big mut sum = add_big(&a, &b);
+    defer free_big(&sum);
+    show("a", &a);
+    show("a+1", &sum);
+    big mut back = sub_big(&sum, &b);
+    defer free_big(&back);
+    show("a+1-1", &back);
+    println("round trip=", compare_big(&back, &a) == 0);
+    println("order=", compare_big(&a, &sum), " ", compare_big(&sum, &a), " ",
+            compare_big(&a, &a));
+
+    big mut zero = from_u64(0);
+    defer free_big(&zero);
+    show("zero", &zero);
+    big mut zero_times = mul_big(&zero, &squared);
+    defer free_big(&zero_times);
+    show("0*2^256", &zero_times);
+    big mut one_times = mul_small(&squared, 1);
+    defer free_big(&one_times);
+    println("identity=", compare_big(&one_times, &squared) == 0);
+    return 0;
+}

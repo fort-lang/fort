@@ -1,0 +1,469 @@
+//! run
+//! stdout:
+//| {"name": "fort", "version": 1, "tags": ["safe", "small"], "ok": true} => {"name":"fort","version":1,"tags":["safe","small"],"ok":true} (children=4 depth=3)
+//|   name -> "fort"
+//|   tags.1 -> "small"
+//|   a.b.c.2 -> missing
+//|   a.b.missing -> missing
+//|   tags.9 -> missing
+//| [1, -2, [3, [4, [5]]], {}, [], null] => [1,-2,[3,[4,[5]]],{},[],null] (children=6 depth=5)
+//|   name -> missing
+//|   tags.1 -> missing
+//|   a.b.c.2 -> missing
+//|   a.b.missing -> missing
+//|   tags.9 -> missing
+//| {"escaped": "a\"b\nc\td", "empty": ""} => {"escaped":"a\"b\nc\td","empty":""} (children=2 depth=2)
+//|   name -> missing
+//|   tags.1 -> missing
+//|   a.b.c.2 -> missing
+//|   a.b.missing -> missing
+//|   tags.9 -> missing
+//| {"a": {"b": {"c": [10, 20, 30]}}} => {"a":{"b":{"c":[10,20,30]}}} (children=1 depth=5)
+//|   name -> missing
+//|   tags.1 -> missing
+//|   a.b.c.2 -> 30
+//|   a.b.missing -> missing
+//|   tags.9 -> missing
+//| [1, 2 => error at 5: expected , or ]
+//| {"k" 1} => error at 5: expected :
+// A JSON reader without floats: it parses objects, arrays, strings with the
+// usual escapes, integers, `true`, `false` and `null` into an owning tree,
+// prints the tree back in a canonical form and answers dotted-path queries.
+// Every child is owned by its parent, so freeing the root frees the document
+// (D17), and the parser reports the first error with its offset instead of
+// trapping.
+enum jkind {
+    jnull,
+    jbool,
+    jint,
+    jstring,
+    jarray,
+    jobject,
+}
+
+struct jvalue {
+    jkind kind;
+    bool boolean;
+    i64 number;
+    string text;
+    // A member of an object carries its key; an array element leaves it empty.
+    string key;
+    jvalue mut* own first;
+    jvalue mut* own next;
+}
+
+struct reader {
+    string src;
+    u64 pos;
+    bool failed;
+    string message;
+    u64 where;
+}
+
+fn void fail(reader mut* r, string why) {
+    if (!r->failed) {
+        r->failed = true;
+        r->message = why;
+        r->where = r->pos;
+    }
+}
+
+fn void skip_space(reader mut* r) {
+    while (r->pos < r->src.len) {
+        char c = r->src[r->pos];
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
+            return;
+        }
+        r->pos++;
+    }
+}
+
+fn char peek(reader* r) {
+    if (r->pos >= r->src.len) {
+        return '\0';
+    }
+    return r->src[r->pos];
+}
+
+fn bool eat(reader mut* r, char c) {
+    if (peek(r) == c) {
+        r->pos++;
+        return true;
+    }
+    return false;
+}
+
+fn bool literal(reader mut* r, string word) {
+    if (r->pos + word.len > r->src.len) {
+        return false;
+    }
+    if (r->src[r->pos..r->pos + word.len] != word) {
+        return false;
+    }
+    r->pos += word.len;
+    return true;
+}
+
+fn jvalue mut* own fresh(jkind k) {
+    jvalue mut* own v = new(jvalue);
+    v->kind = k;
+    return move(v);
+}
+
+// A JSON string, unescaped into freshly owned storage, which the value keeps
+// as a `string` view of bytes it owns for the life of the document.
+fn char mut@ own read_string(reader mut* r) {
+    if (!eat(r, '"')) {
+        fail(r, "expected a string");
+        return new(char, 0);
+    }
+    u64 start = r->pos;
+    u64 mut n = 0;
+    while (r->pos < r->src.len && r->src[r->pos] != '"') {
+        if (r->src[r->pos] == '\\') {
+            r->pos++;
+            if (r->pos >= r->src.len) {
+                fail(r, "unterminated escape");
+                return new(char, 0);
+            }
+        }
+        r->pos++;
+        n++;
+    }
+    if (!eat(r, '"')) {
+        fail(r, "unterminated string");
+        return new(char, 0);
+    }
+    char mut@ own text = new(char, n);
+    u64 mut at = 0;
+    u64 mut i = start;
+    while (at < n) {
+        char mut c = r->src[i];
+        if (c == '\\') {
+            i++;
+            char e = r->src[i];
+            if (e == 'n') {
+                c = '\n';
+            } else if (e == 't') {
+                c = '\t';
+            } else {
+                c = e;
+            }
+        }
+        text[at] = c;
+        at++;
+        i++;
+    }
+    return move(text);
+}
+
+fn i64 read_int(reader mut* r) {
+    bool mut negative = eat(r, '-');
+    if (peek(r) < '0' || peek(r) > '9') {
+        fail(r, "expected a digit");
+        return 0;
+    }
+    i64 mut v = 0;
+    while (peek(r) >= '0' && peek(r) <= '9') {
+        v = v * 10 + cast(cast(peek(r), i64) - cast('0', i64), i64);
+        r->pos++;
+    }
+    if (negative) {
+        return -v;
+    }
+    return v;
+}
+
+// Owned string storage is chained off the document so that nothing outlives
+// the value that points into it.
+struct arena {
+    char mut@ own block;
+    arena mut* own next;
+}
+
+fn void keep(arena mut* head, char mut@ own block) {
+    arena mut* own cell = new(arena);
+    cell->block = move(block);
+    cell->next = move(head->next);
+    head->next = move(cell);
+}
+
+fn jvalue mut* own parse_value(reader mut* r, arena mut* strings) {
+    skip_space(r);
+    char c = peek(r);
+    if (c == 'n') {
+        if (!literal(r, "null")) {
+            fail(r, "expected null");
+        }
+        return fresh(jkind.jnull);
+    }
+    if (c == 't' || c == 'f') {
+        jvalue mut* own v = fresh(jkind.jbool);
+        if (literal(r, "true")) {
+            v->boolean = true;
+        } else if (literal(r, "false")) {
+            v->boolean = false;
+        } else {
+            fail(r, "expected a boolean");
+        }
+        return move(v);
+    }
+    if (c == '"') {
+        char mut@ own owned = read_string(r);
+        jvalue mut* own v = fresh(jkind.jstring);
+        v->text = cast(owned, string);
+        keep(strings, move(owned));
+        return move(v);
+    }
+    if (c == '-' || (c >= '0' && c <= '9')) {
+        jvalue mut* own v = fresh(jkind.jint);
+        v->number = read_int(r);
+        return move(v);
+    }
+    if (c == '[') {
+        r->pos++;
+        jvalue mut* own v = fresh(jkind.jarray);
+        skip_space(r);
+        if (eat(r, ']')) {
+            return move(v);
+        }
+        jvalue mut* mut tail = null;
+        while (!r->failed) {
+            jvalue mut* own child = parse_value(r, strings);
+            if (tail == null) {
+                v->first = move(child);
+                tail = v->first;
+            } else {
+                tail->next = move(child);
+                tail = tail->next;
+            }
+            skip_space(r);
+            if (eat(r, ',')) {
+                continue;
+            }
+            if (!eat(r, ']')) {
+                fail(r, "expected , or ]");
+            }
+            break;
+        }
+        return move(v);
+    }
+    if (c == '{') {
+        r->pos++;
+        jvalue mut* own v = fresh(jkind.jobject);
+        skip_space(r);
+        if (eat(r, '}')) {
+            return move(v);
+        }
+        jvalue mut* mut tail = null;
+        while (!r->failed) {
+            skip_space(r);
+            char mut@ own owned = read_string(r);
+            string key = cast(owned, string);
+            keep(strings, move(owned));
+            skip_space(r);
+            if (!eat(r, ':')) {
+                fail(r, "expected :");
+                break;
+            }
+            jvalue mut* own child = parse_value(r, strings);
+            child->key = key;
+            if (tail == null) {
+                v->first = move(child);
+                tail = v->first;
+            } else {
+                tail->next = move(child);
+                tail = tail->next;
+            }
+            skip_space(r);
+            if (eat(r, ',')) {
+                continue;
+            }
+            if (!eat(r, '}')) {
+                fail(r, "expected , or }");
+            }
+            break;
+        }
+        return move(v);
+    }
+    fail(r, "unexpected character");
+    r->pos++;
+    return fresh(jkind.jnull);
+}
+
+fn void print_escaped(string s) {
+    print("\"");
+    for (char c : s) {
+        if (c == '"') {
+            print("\\\"");
+        } else if (c == '\n') {
+            print("\\n");
+        } else if (c == '\t') {
+            print("\\t");
+        } else if (c == '\\') {
+            print("\\\\");
+        } else {
+            print(c);
+        }
+    }
+    print("\"");
+}
+
+fn void render(jvalue* v) {
+    if (v->kind == jkind.jnull) {
+        print("null");
+    } else if (v->kind == jkind.jbool) {
+        print(v->boolean);
+    } else if (v->kind == jkind.jint) {
+        print(v->number);
+    } else if (v->kind == jkind.jstring) {
+        print_escaped(v->text);
+    } else if (v->kind == jkind.jarray) {
+        print("[");
+        jvalue* mut child = v->first;
+        bool mut first = true;
+        while (child != null) {
+            if (!first) {
+                print(",");
+            }
+            render(child);
+            first = false;
+            child = child->next;
+        }
+        print("]");
+    } else {
+        print("{");
+        jvalue* mut child = v->first;
+        bool mut first = true;
+        while (child != null) {
+            if (!first) {
+                print(",");
+            }
+            print_escaped(child->key);
+            print(":");
+            render(child);
+            first = false;
+            child = child->next;
+        }
+        print("}");
+    }
+}
+
+fn u64 count_children(jvalue* v) {
+    u64 mut n = 0;
+    jvalue* mut child = v->first;
+    while (child != null) {
+        n++;
+        child = child->next;
+    }
+    return n;
+}
+
+fn u64 depth(jvalue* v) {
+    u64 mut deepest = 0;
+    jvalue* mut child = v->first;
+    while (child != null) {
+        u64 d = depth(child);
+        if (d > deepest) {
+            deepest = d;
+        }
+        child = child->next;
+    }
+    return deepest + 1;
+}
+
+// A dotted path: object members by name, array elements by index.
+fn jvalue* lookup(jvalue* v, string path) {
+    jvalue* mut here = v;
+    u64 mut i = 0;
+    while (i <= path.len && here != null) {
+        u64 start = i;
+        while (i < path.len && path[i] != '.') {
+            i++;
+        }
+        string step = path[start..i];
+        i++;
+        if (step.len == 0) {
+            break;
+        }
+        if (here->kind == jkind.jobject) {
+            jvalue* mut child = here->first;
+            here = null;
+            while (child != null) {
+                if (child->key == step) {
+                    here = child;
+                    break;
+                }
+                child = child->next;
+            }
+        } else if (here->kind == jkind.jarray) {
+            u64 mut want = 0;
+            for (char c : step) {
+                want = want * 10 + cast(cast(c, u64) - cast('0', u64), u64);
+            }
+            jvalue* mut child = here->first;
+            u64 mut at = 0;
+            here = null;
+            while (child != null) {
+                if (at == want) {
+                    here = child;
+                    break;
+                }
+                at++;
+                child = child->next;
+            }
+        } else {
+            return null;
+        }
+    }
+    return here;
+}
+
+string[6] DOCUMENTS = {
+    "{\"name\": \"fort\", \"version\": 1, \"tags\": [\"safe\", \"small\"], \"ok\": true}",
+    "[1, -2, [3, [4, [5]]], {}, [], null]",
+    "{\"escaped\": \"a\\\"b\\nc\\td\", \"empty\": \"\"}",
+    "{\"a\": {\"b\": {\"c\": [10, 20, 30]}}}",
+    "[1, 2",
+    "{\"k\" 1}"};
+
+string[6] PATHS = {"name", "tags.1", "a.b.c.2", "a.b.missing", "tags.9", ""};
+
+fn void inspect(string src) {
+    reader mut r = reader{src, 0, false, "", 0};
+    arena mut strings = {};
+    defer del(strings.next);
+    jvalue mut* own doc = parse_value(&r, &strings);
+    defer del(doc);
+    skip_space(&r);
+    if (!r.failed && r.pos != src.len) {
+        fail(&r, "trailing input");
+    }
+    print(src, " => ");
+    if (r.failed) {
+        println("error at ", r.where, ": ", r.message);
+        return;
+    }
+    render(doc);
+    println(" (children=", count_children(doc), " depth=", depth(doc), ")");
+    for (u64 mut i = 0; i < PATHS.len; i++) {
+        jvalue* found = lookup(doc, PATHS[i]);
+        if (PATHS[i].len == 0) {
+            continue;
+        }
+        print("  ", PATHS[i], " -> ");
+        if (found == null) {
+            println("missing");
+        } else {
+            render(found);
+            println();
+        }
+    }
+}
+
+fn i32 main() {
+    for (u64 mut i = 0; i < DOCUMENTS.len; i++) {
+        inspect(DOCUMENTS[i]);
+    }
+    return 0;
+}

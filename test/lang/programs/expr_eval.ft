@@ -1,0 +1,347 @@
+//! run
+//! stdout:
+//| 1 + 2 * 3 => (1 + (2 * 3)) = 7
+//| (1 + 2) * 3 => ((1 + 2) * 3) = 9
+//| 2 * 3 + 4 * 5 => ((2 * 3) + (4 * 5)) = 26
+//| 100 / 7 % 5 => ((100 / 7) % 5) = 4
+//| x * y - n => ((x * y) - n) = 33
+//| -x + 3 => ((0 - x) + 3) = -7
+//| -(x + 3) => (0 - (x + 3)) = -13
+//| 2 * (3 + (4 - 1) * 2) => (2 * (3 + ((4 - 1) * 2))) = 18
+//| x / (y - 4) => (x / (y - 4)) : division by zero
+//| z + 1 => (z + 1) : unknown name
+//| 1 +  => parse error: expected an operand
+//| (1 + 2 => parse error: expected )
+// A recursive-descent expression evaluator: it lexes a string into tokens,
+// parses them into an owning tree with the usual precedences, prints the tree
+// as fully parenthesized text and evaluates it over i64 with named variables.
+// Division by zero and unknown names are reported rather than trapped, so the
+// checked build never has to abort here (D11.2).
+enum kind {
+    num,
+    name,
+    plus,
+    minus,
+    star,
+    slash,
+    percent,
+    lparen,
+    rparen,
+    eof,
+    bad,
+}
+
+struct token {
+    kind k;
+    i64 value;
+    string text;
+}
+
+struct lexer {
+    string src;
+    u64 pos;
+}
+
+struct expr {
+    kind op;
+    i64 value;
+    string text;
+    expr mut* own left;
+    expr mut* own right;
+}
+
+struct parser {
+    token mut@ own toks;
+    u64 pos;
+    bool failed;
+    string message;
+}
+
+struct env {
+    string@ names;
+    i64@ values;
+}
+
+fn bool is_digit(char c) {
+    return c >= '0' && c <= '9';
+}
+
+fn bool is_alpha(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+
+fn bool is_space(char c) {
+    return c == ' ' || c == '\t';
+}
+
+fn token next_token(lexer mut* lx) {
+    while (lx->pos < lx->src.len && is_space(lx->src[lx->pos])) {
+        lx->pos++;
+    }
+    if (lx->pos >= lx->src.len) {
+        return token{kind.eof, 0, ""};
+    }
+    char c = lx->src[lx->pos];
+    if (is_digit(c)) {
+        u64 start = lx->pos;
+        i64 mut v = 0;
+        while (lx->pos < lx->src.len && is_digit(lx->src[lx->pos])) {
+            v = v * 10 + cast(cast(lx->src[lx->pos], i64) - cast('0', i64), i64);
+            lx->pos++;
+        }
+        return token{kind.num, v, lx->src[start..lx->pos]};
+    }
+    if (is_alpha(c)) {
+        u64 start = lx->pos;
+        while (lx->pos < lx->src.len &&
+               (is_alpha(lx->src[lx->pos]) || is_digit(lx->src[lx->pos]))) {
+            lx->pos++;
+        }
+        return token{kind.name, 0, lx->src[start..lx->pos]};
+    }
+    lx->pos++;
+    if (c == '+') {
+        return token{kind.plus, 0, "+"};
+    }
+    if (c == '-') {
+        return token{kind.minus, 0, "-"};
+    }
+    if (c == '*') {
+        return token{kind.star, 0, "*"};
+    }
+    if (c == '/') {
+        return token{kind.slash, 0, "/"};
+    }
+    if (c == '%') {
+        return token{kind.percent, 0, "%"};
+    }
+    if (c == '(') {
+        return token{kind.lparen, 0, "("};
+    }
+    if (c == ')') {
+        return token{kind.rparen, 0, ")"};
+    }
+    return token{kind.bad, 0, lx->src[lx->pos - 1..lx->pos]};
+}
+
+// Lexing twice -- once to count, once to fill -- keeps the token array exactly
+// the size it needs with one allocation.
+fn token mut@ own lex_all(string src) {
+    lexer mut counter = lexer{src, 0};
+    u64 mut n = 0;
+    while (true) {
+        token t = next_token(&counter);
+        n++;
+        if (t.k == kind.eof) {
+            break;
+        }
+    }
+    token mut@ own out = new(token, n);
+    lexer mut filler = lexer{src, 0};
+    for (u64 mut i = 0; i < n; i++) {
+        out[i] = next_token(&filler);
+    }
+    return move(out);
+}
+
+fn token peek(parser* p) {
+    return p->toks[p->pos];
+}
+
+fn void fail(parser mut* p, string why) {
+    if (!p->failed) {
+        p->failed = true;
+        p->message = why;
+    }
+}
+
+fn expr mut* own leaf(kind op, i64 value, string text) {
+    expr mut* own e = new(expr);
+    e->op = op;
+    e->value = value;
+    e->text = text;
+    return move(e);
+}
+
+fn expr mut* own branch(kind op, expr mut* own l, expr mut* own r) {
+    expr mut* own e = new(expr);
+    e->op = op;
+    e->left = move(l);
+    e->right = move(r);
+    return move(e);
+}
+
+fn expr mut* own parse_atom(parser mut* p) {
+    token t = peek(p);
+    if (t.k == kind.num) {
+        p->pos++;
+        return leaf(kind.num, t.value, t.text);
+    }
+    if (t.k == kind.name) {
+        p->pos++;
+        return leaf(kind.name, 0, t.text);
+    }
+    if (t.k == kind.minus) {
+        p->pos++;
+        expr mut* own inner = parse_atom(p);
+        return branch(kind.minus, leaf(kind.num, 0, "0"), move(inner));
+    }
+    if (t.k == kind.lparen) {
+        p->pos++;
+        expr mut* own inner = parse_sum(p);
+        if (peek(p).k != kind.rparen) {
+            fail(p, "expected )");
+            return move(inner);
+        }
+        p->pos++;
+        return move(inner);
+    }
+    fail(p, "expected an operand");
+    p->pos++;
+    return leaf(kind.num, 0, "0");
+}
+
+fn expr mut* own parse_product(parser mut* p) {
+    expr mut* own mut left = parse_atom(p);
+    while (!p->failed) {
+        kind k = peek(p).k;
+        if (k != kind.star && k != kind.slash && k != kind.percent) {
+            break;
+        }
+        p->pos++;
+        expr mut* own right = parse_atom(p);
+        left = branch(k, move(left), move(right));
+    }
+    return move(left);
+}
+
+fn expr mut* own parse_sum(parser mut* p) {
+    expr mut* own mut left = parse_product(p);
+    while (!p->failed) {
+        kind k = peek(p).k;
+        if (k != kind.plus && k != kind.minus) {
+            break;
+        }
+        p->pos++;
+        expr mut* own right = parse_product(p);
+        left = branch(k, move(left), move(right));
+    }
+    return move(left);
+}
+
+fn void show(expr* e) {
+    if (e->op == kind.num) {
+        print(e->value);
+        return;
+    }
+    if (e->op == kind.name) {
+        print(e->text);
+        return;
+    }
+    print("(");
+    show(e->left);
+    if (e->op == kind.plus) {
+        print(" + ");
+    } else if (e->op == kind.minus) {
+        print(" - ");
+    } else if (e->op == kind.star) {
+        print(" * ");
+    } else if (e->op == kind.slash) {
+        print(" / ");
+    } else {
+        print(" % ");
+    }
+    show(e->right);
+    print(")");
+}
+
+fn i64 eval(expr* e, env* vars, bool mut* ok, string mut* why) {
+    if (!*ok) {
+        return 0;
+    }
+    if (e->op == kind.num) {
+        return e->value;
+    }
+    if (e->op == kind.name) {
+        for (u64 mut i = 0; i < vars->names.len; i++) {
+            if (vars->names[i] == e->text) {
+                return vars->values[i];
+            }
+        }
+        *ok = false;
+        *why = "unknown name";
+        return 0;
+    }
+    i64 l = eval(e->left, vars, ok, why);
+    i64 r = eval(e->right, vars, ok, why);
+    if (!*ok) {
+        return 0;
+    }
+    if (e->op == kind.plus) {
+        return l + r;
+    }
+    if (e->op == kind.minus) {
+        return l - r;
+    }
+    if (e->op == kind.star) {
+        return l * r;
+    }
+    if (r == 0) {
+        *ok = false;
+        *why = "division by zero";
+        return 0;
+    }
+    if (e->op == kind.slash) {
+        return l / r;
+    }
+    return l % r;
+}
+
+string[3] NAMES = {"x", "y", "n"};
+i64[3] VALUES = {10, 4, 7};
+
+string[12] INPUTS = {"1 + 2 * 3",
+                     "(1 + 2) * 3",
+                     "2 * 3 + 4 * 5",
+                     "100 / 7 % 5",
+                     "x * y - n",
+                     "-x + 3",
+                     "-(x + 3)",
+                     "2 * (3 + (4 - 1) * 2)",
+                     "x / (y - 4)",
+                     "z + 1",
+                     "1 + ",
+                     "(1 + 2"};
+
+fn void run_one(string src, env* vars) {
+    parser mut p = parser{};
+    p.toks = lex_all(src);
+    defer del(p.toks);
+    expr mut* own tree = parse_sum(&p);
+    defer del(tree);
+    if (!p.failed && peek(&p).k != kind.eof) {
+        fail(&p, "trailing input");
+    }
+    print(src, " => ");
+    if (p.failed) {
+        println("parse error: ", p.message);
+        return;
+    }
+    show(tree);
+    bool mut ok = true;
+    string mut why = "";
+    i64 v = eval(tree, vars, &ok, &why);
+    if (ok) {
+        println(" = ", v);
+    } else {
+        println(" : ", why);
+    }
+}
+
+fn i32 main() {
+    env vars = env{NAMES[0..NAMES.len], VALUES[0..VALUES.len]};
+    for (u64 mut i = 0; i < INPUTS.len; i++) {
+        run_one(INPUTS[i], &vars);
+    }
+    return 0;
+}

@@ -26,6 +26,12 @@ int32_t helper_apply(int32_t (*cb)(int32_t), int32_t x) {
     return cb(x);
 }
 
+// Calls back into a fort function through a floating-point signature, so the
+// callback's argument and result travel in SSE registers (D9.9).
+double helper_apply_f64(double (*cb)(double), double x) {
+    return cb(x);
+}
+
 // Calls back with narrow arguments and a narrow result, which the extension
 // attributes of D9.9 normalize on both sides of the boundary.
 uint8_t helper_apply_narrow(uint8_t (*cb)(int8_t, uint16_t), int8_t a, uint16_t b) {

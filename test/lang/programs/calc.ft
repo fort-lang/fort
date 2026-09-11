@@ -1,0 +1,298 @@
+//! run
+//! args: /dev/stdin
+//! stdin:
+//< x = 3 + 4
+//< y = x * x
+//< y - 1
+//< let = 2
+//< y / (x - 7)
+//< z + 1
+//< # a comment line
+//<
+//< x = x + 1
+//< x * y
+//! stdout:
+//| x = 7
+//| y = 49
+//| y - 1 = 48
+//| let = 2
+//| y / (x - 7) : division by zero
+//| z + 1 : unknown name
+//| x = 8
+//| x * y = 392
+//| names=3
+import std::io;
+import std::str;
+import std::strbuf;
+import std::sys;
+
+// A calculator that reads a file of lines -- the test hands it /dev/stdin --
+// evaluates each as an expression over named i64 variables and prints the
+// result. It is the standard library's line reading, string comparison and
+// integer parsing driving a shunting-yard evaluator, so an operator's
+// precedence is data rather than a call graph.
+struct binding {
+    string name;
+    i64 value;
+}
+
+struct machine {
+    binding mut@ own names;
+    u64 count;
+    i64 mut@ own values;
+    u64 value_top;
+    char mut@ own ops;
+    u64 op_top;
+    bool failed;
+    string message;
+}
+
+fn machine create() {
+    machine mut m = {};
+    m.names = new(binding, 32);
+    m.values = new(i64, 64);
+    m.ops = new(char, 64);
+    return move(m);
+}
+
+fn void free_machine(machine mut* m) {
+    del(m->names);
+    del(m->values);
+    del(m->ops);
+    m->count = 0;
+}
+
+fn void oops(machine mut* m, string why) {
+    if (!m->failed) {
+        m->failed = true;
+        m->message = why;
+    }
+}
+
+fn bool get_var(machine* m, string name, i64 mut* out) {
+    for (u64 mut i = 0; i < m->count; i++) {
+        if (str.equal(m->names[i].name, name)) {
+            *out = m->names[i].value;
+            return true;
+        }
+    }
+    return false;
+}
+
+fn void set_var(machine mut* m, string name, i64 value) {
+    for (u64 mut i = 0; i < m->count; i++) {
+        if (str.equal(m->names[i].name, name)) {
+            m->names[i].value = value;
+            return;
+        }
+    }
+    if (m->count == m->names.len) {
+        oops(m, "too many names");
+        return;
+    }
+    m->names[m->count] = binding{name, value};
+    m->count++;
+}
+
+fn u64 precedence(char op) {
+    if (op == '+' || op == '-') {
+        return 1;
+    }
+    if (op == '*' || op == '/' || op == '%') {
+        return 2;
+    }
+    return 0;
+}
+
+fn void push_value(machine mut* m, i64 v) {
+    m->values[m->value_top] = v;
+    m->value_top++;
+}
+
+fn i64 pop_value(machine mut* m) {
+    if (m->value_top == 0) {
+        oops(m, "missing operand");
+        return 0;
+    }
+    m->value_top--;
+    return m->values[m->value_top];
+}
+
+fn void apply(machine mut* m, char op) {
+    i64 b = pop_value(m);
+    i64 a = pop_value(m);
+    if (m->failed) {
+        return;
+    }
+    if (op == '+') {
+        push_value(m, a + b);
+    } else if (op == '-') {
+        push_value(m, a - b);
+    } else if (op == '*') {
+        push_value(m, a * b);
+    } else if (b == 0) {
+        oops(m, "division by zero");
+    } else if (op == '/') {
+        push_value(m, a / b);
+    } else {
+        push_value(m, a % b);
+    }
+}
+
+// The shunting yard: operands go straight to the value stack, operators wait
+// on the operator stack until one of lower precedence arrives.
+fn i64 evaluate(machine mut* m, string src) {
+    m->value_top = 0;
+    m->op_top = 0;
+    u64 mut i = 0;
+    bool mut want_operand = true;
+    while (i < src.len && !m->failed) {
+        char c = src[i];
+        if (str.is_space(c)) {
+            i++;
+            continue;
+        }
+        if (str.is_digit(c)) {
+            u64 start = i;
+            while (i < src.len && str.is_digit(src[i])) {
+                i++;
+            }
+            i64 mut v = 0;
+            if (!str.parse_i64(src[start..i], &v)) {
+                oops(m, "bad number");
+            }
+            push_value(m, v);
+            want_operand = false;
+            continue;
+        }
+        if (str.is_alpha(c)) {
+            u64 start = i;
+            while (i < src.len && str.is_alnum(src[i])) {
+                i++;
+            }
+            i64 mut v = 0;
+            if (!get_var(m, src[start..i], &v)) {
+                oops(m, "unknown name");
+            }
+            push_value(m, v);
+            want_operand = false;
+            continue;
+        }
+        i++;
+        if (c == '(') {
+            m->ops[m->op_top] = c;
+            m->op_top++;
+            want_operand = true;
+            continue;
+        }
+        if (c == ')') {
+            while (m->op_top > 0 && m->ops[m->op_top - 1] != '(') {
+                m->op_top--;
+                apply(m, m->ops[m->op_top]);
+            }
+            if (m->op_top == 0) {
+                oops(m, "unbalanced )");
+                break;
+            }
+            m->op_top--;
+            want_operand = false;
+            continue;
+        }
+        if (precedence(c) == 0) {
+            oops(m, "bad operator");
+            break;
+        }
+        if (c == '-' && want_operand) {
+            push_value(m, 0);
+        }
+        while (m->op_top > 0 && precedence(m->ops[m->op_top - 1]) >= precedence(c)) {
+            m->op_top--;
+            apply(m, m->ops[m->op_top]);
+        }
+        m->ops[m->op_top] = c;
+        m->op_top++;
+        want_operand = true;
+    }
+    while (m->op_top > 0 && !m->failed) {
+        m->op_top--;
+        if (m->ops[m->op_top] == '(') {
+            oops(m, "unbalanced (");
+            break;
+        }
+        apply(m, m->ops[m->op_top]);
+    }
+    if (m->failed) {
+        return 0;
+    }
+    if (m->value_top != 1) {
+        oops(m, "leftover operands");
+        return 0;
+    }
+    return pop_value(m);
+}
+
+fn string trim(string s) {
+    u64 mut lo = 0;
+    u64 mut hi = s.len;
+    while (lo < hi && str.is_space(s[lo])) {
+        lo++;
+    }
+    while (hi > lo && str.is_space(s[hi - 1])) {
+        hi--;
+    }
+    return s[lo..hi];
+}
+
+fn void run_line(machine mut* m, string line) {
+    string text = trim(line);
+    if (text.len == 0 || text[0] == '#') {
+        return;
+    }
+    m->failed = false;
+    m->message = "";
+    i64 equals = str.index_of(text, '=');
+    string mut target = "";
+    string mut expression = text;
+    if (equals >= 0) {
+        target = trim(text[0..cast(equals, u64)]);
+        expression = trim(text[cast(equals, u64) + 1..text.len]);
+    }
+    i64 value = evaluate(m, expression);
+    if (m->failed) {
+        println(text, " : ", m->message);
+        return;
+    }
+    if (target.len > 0) {
+        set_var(m, target, value);
+        println(target, " = ", value);
+        return;
+    }
+    println(text, " = ", value);
+}
+
+fn i32 main(string@ args) {
+    if (args.len != 2) {
+        eprintln("usage: calc FILE");
+        return 2;
+    }
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    if (!io.read_file(args[1], &source)) {
+        eprintln("calc: ", args[1], ": errno ", sys.errno());
+        return 1;
+    }
+    machine mut m = create();
+    defer free_machine(&m);
+    string text = strbuf.view(&source);
+    u64 mut start = 0;
+    for (u64 mut i = 0; i <= text.len; i++) {
+        if (i == text.len || text[i] == '\n') {
+            if (i > start || i < text.len) {
+                run_line(&m, text[start..i]);
+            }
+            start = i + 1;
+        }
+    }
+    println("names=", m.count);
+    return 0;
+}

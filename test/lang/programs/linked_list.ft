@@ -1,0 +1,205 @@
+//! run
+//! stdout:
+//| front: 5 4 3 2 1 (5)
+//| back: 5 4 3 2 1 99 (6)
+//| sum=114 has3=true has7=false
+//| reversed: 99 1 2 3 4 5 (6)
+//| remove 3=true remove 7=false
+//| removed: 99 1 2 4 5 (5)
+//| pop=true 99 count=4
+//| cleared count=0 empty=true
+//| pop empty=false
+//| odd: 1 3 5 7 9 (5)
+//| even: 2 4 6 8 10 (5)
+//| merged: 1 2 3 4 5 6 7 8 9 10 (10)
+//| drained=0 0 true true
+// A singly linked list that owns its nodes (D17): every node holds the next
+// one, so freeing the head frees the chain, and the list is walked with a
+// borrowed pointer that never owns what it sees. Reversal, splicing and a
+// merge of two sorted lists all move nodes rather than copying their payloads.
+struct node {
+    i64 value;
+    node mut* own next;
+}
+
+struct list {
+    node mut* own head;
+    u64 count;
+}
+
+// A node is pushed by taking the old head into its `next` slot, which the
+// move empties, and then adopting the new node as the head (D17.5).
+fn void push_front(list mut* l, i64 v) {
+    node mut* own fresh = new(node);
+    fresh->value = v;
+    fresh->next = move(l->head);
+    l->head = move(fresh);
+    l->count++;
+}
+
+// Popping hands the value back and frees exactly one node: the tail is moved
+// out of the node before the node is deleted, or `del` would free it too.
+fn bool pop_front(list mut* l, i64 mut* out) {
+    if (l->head == null) {
+        return false;
+    }
+    node mut* own gone = move(l->head);
+    *out = gone->value;
+    l->head = move(gone->next);
+    del(gone);
+    l->count--;
+    return true;
+}
+
+fn void push_back(list mut* l, i64 v) {
+    node mut* own fresh = new(node);
+    fresh->value = v;
+    if (l->head == null) {
+        l->head = move(fresh);
+        l->count++;
+        return;
+    }
+    node mut* mut tail = l->head;
+    while (tail->next != null) {
+        tail = tail->next;
+    }
+    tail->next = move(fresh);
+    l->count++;
+}
+
+fn void clear(list mut* l) {
+    while (l->head != null) {
+        node mut* own gone = move(l->head);
+        l->head = move(gone->next);
+        del(gone);
+    }
+    l->count = 0;
+}
+
+fn void show(string name, list* l) {
+    print(name, ":");
+    node* mut p = l->head;
+    while (p != null) {
+        print(" ", p->value);
+        p = p->next;
+    }
+    println(" (", l->count, ")");
+}
+
+fn i64 sum(list* l) {
+    i64 mut total = 0;
+    node* mut p = l->head;
+    while (p != null) {
+        total += p->value;
+        p = p->next;
+    }
+    return total;
+}
+
+fn bool contains(list* l, i64 v) {
+    node* mut p = l->head;
+    while (p != null) {
+        if (p->value == v) {
+            return true;
+        }
+        p = p->next;
+    }
+    return false;
+}
+
+// Reversal in place: each node is unhooked from the source chain and pushed
+// onto the result, so no node is ever owned twice.
+fn void reverse(list mut* l) {
+    node mut* own mut done = null;
+    while (l->head != null) {
+        node mut* own step = move(l->head);
+        l->head = move(step->next);
+        step->next = move(done);
+        done = move(step);
+    }
+    l->head = move(done);
+}
+
+// Remove the first node whose value matches, returning whether one did.
+fn bool remove_first(list mut* l, i64 v) {
+    if (l->head == null) {
+        return false;
+    }
+    if (l->head->value == v) {
+        i64 mut ignored = 0;
+        return pop_front(l, &ignored);
+    }
+    node mut* mut prev = l->head;
+    while (prev->next != null) {
+        if (prev->next->value == v) {
+            node mut* own gone = move(prev->next);
+            prev->next = move(gone->next);
+            del(gone);
+            l->count--;
+            return true;
+        }
+        prev = prev->next;
+    }
+    return false;
+}
+
+// Merge two sorted lists into a fresh one by repeatedly moving the smaller
+// head; both sources end up empty.
+fn void merge_sorted(list mut* a, list mut* b, list mut* out) {
+    while (a->head != null || b->head != null) {
+        bool mut take_a = b->head == null;
+        if (a->head != null && b->head != null) {
+            take_a = a->head->value <= b->head->value;
+        }
+        i64 mut v = 0;
+        if (take_a) {
+            pop_front(a, &v);
+        } else {
+            pop_front(b, &v);
+        }
+        push_back(out, v);
+    }
+}
+
+fn i32 main() {
+    list mut l = {};
+    defer clear(&l);
+    for (i64 mut i = 1; i <= 5; i++) {
+        push_front(&l, i);
+    }
+    show("front", &l);
+    push_back(&l, 99);
+    show("back", &l);
+    println("sum=", sum(&l), " has3=", contains(&l, 3), " has7=", contains(&l, 7));
+
+    reverse(&l);
+    show("reversed", &l);
+
+    println("remove 3=", remove_first(&l, 3), " remove 7=", remove_first(&l, 7));
+    show("removed", &l);
+
+    i64 mut v = 0;
+    println("pop=", pop_front(&l, &v), " ", v, " count=", l.count);
+
+    clear(&l);
+    println("cleared count=", l.count, " empty=", l.head == null);
+    println("pop empty=", pop_front(&l, &v));
+
+    list mut odd = {};
+    list mut even = {};
+    list mut merged = {};
+    defer clear(&merged);
+    for (i64 mut i = 9; i >= 1; i -= 2) {
+        push_front(&odd, i);
+    }
+    for (i64 mut i = 10; i >= 2; i -= 2) {
+        push_front(&even, i);
+    }
+    show("odd", &odd);
+    show("even", &even);
+    merge_sorted(&odd, &even, &merged);
+    show("merged", &merged);
+    println("drained=", odd.count, " ", even.count, " ", odd.head == null, " ",
+            even.head == null);
+    return 0;
+}

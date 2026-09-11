@@ -1,0 +1,229 @@
+//! run
+//! stdout:
+//| built: alpha=4 bravo=8 delta=2 kilo=5 mike=1 romeo=6 sierra=9 tango=3 zulu=7 (9)
+//| height=4 min=alpha max=zulu
+//| kilo=true 5
+//| yankee=false
+//| replaced kilo=100 count=9
+//| rm zulu=true
+//| no leaf: alpha=4 bravo=8 delta=2 kilo=100 mike=1 romeo=6 sierra=9 tango=3 (8)
+//| rm romeo=true
+//| no one-child: alpha=4 bravo=8 delta=2 kilo=100 mike=1 sierra=9 tango=3 (7)
+//| rm mike=true
+//| no root: alpha=4 bravo=8 delta=2 kilo=100 sierra=9 tango=3 (6)
+//| rm yankee=false count=6
+//| min=alpha max=tango height=4
+//| emptied count=0 root=true
+// An owning binary search tree keyed by string (D17): each node owns its two
+// subtrees, so `del` of the root frees the whole shape, and every traversal
+// borrows. Insert, lookup, min, max, height, in-order and level-order walks,
+// and deletion of a node with zero, one and two children.
+struct tnode {
+    string key;
+    i64 value;
+    tnode mut* own left;
+    tnode mut* own right;
+}
+
+struct tree {
+    tnode mut* own root;
+    u64 count;
+}
+
+fn i32 compare(string a, string b) {
+    u64 mut n = a.len;
+    if (b.len < n) {
+        n = b.len;
+    }
+    for (u64 mut i = 0; i < n; i++) {
+        if (a[i] < b[i]) {
+            return -1;
+        }
+        if (b[i] < a[i]) {
+            return 1;
+        }
+    }
+    if (a.len < b.len) {
+        return -1;
+    }
+    if (b.len < a.len) {
+        return 1;
+    }
+    return 0;
+}
+
+// Insert returns the (possibly new) owner of the subtree, so the caller stores
+// it back into the slot it moved out of and no node is owned twice.
+fn tnode mut* own insert(tnode mut* own here, string key, i64 value, u64 mut* count) {
+    if (here == null) {
+        tnode mut* own fresh = new(tnode);
+        fresh->key = key;
+        fresh->value = value;
+        *count += 1;
+        return move(fresh);
+    }
+    tnode mut* own mut node = move(here);
+    i32 order = compare(key, node->key);
+    if (order < 0) {
+        node->left = insert(move(node->left), key, value, count);
+    } else if (order > 0) {
+        node->right = insert(move(node->right), key, value, count);
+    } else {
+        node->value = value;
+    }
+    return move(node);
+}
+
+fn bool lookup(tnode* here, string key, i64 mut* out) {
+    tnode* mut node = here;
+    while (node != null) {
+        i32 order = compare(key, node->key);
+        if (order == 0) {
+            *out = node->value;
+            return true;
+        }
+        if (order < 0) {
+            node = node->left;
+        } else {
+            node = node->right;
+        }
+    }
+    return false;
+}
+
+fn string min_key(tnode* here) {
+    tnode* mut node = here;
+    while (node->left != null) {
+        node = node->left;
+    }
+    return node->key;
+}
+
+fn string max_key(tnode* here) {
+    tnode* mut node = here;
+    while (node->right != null) {
+        node = node->right;
+    }
+    return node->key;
+}
+
+fn u64 height(tnode* here) {
+    if (here == null) {
+        return 0;
+    }
+    u64 l = height(here->left);
+    u64 r = height(here->right);
+    if (l > r) {
+        return l + 1;
+    }
+    return r + 1;
+}
+
+fn void inorder(tnode* here) {
+    if (here == null) {
+        return;
+    }
+    inorder(here->left);
+    print(" ", here->key, "=", here->value);
+    inorder(here->right);
+}
+
+// The smallest key of a subtree, unhooked and handed back to the caller.
+fn tnode mut* own take_min(tnode mut* own here, tnode mut* own mut* out) {
+    tnode mut* own mut node = move(here);
+    if (node->left == null) {
+        tnode mut* own right = move(node->right);
+        *out = move(node);
+        return move(right);
+    }
+    node->left = take_min(move(node->left), out);
+    return move(node);
+}
+
+fn tnode mut* own remove(tnode mut* own here, string key, bool mut* removed) {
+    if (here == null) {
+        return null;
+    }
+    tnode mut* own mut node = move(here);
+    i32 order = compare(key, node->key);
+    if (order < 0) {
+        node->left = remove(move(node->left), key, removed);
+        return move(node);
+    }
+    if (order > 0) {
+        node->right = remove(move(node->right), key, removed);
+        return move(node);
+    }
+    *removed = true;
+    if (node->left == null) {
+        tnode mut* own right = move(node->right);
+        del(node);
+        return move(right);
+    }
+    if (node->right == null) {
+        tnode mut* own left = move(node->left);
+        del(node);
+        return move(left);
+    }
+    // Two children: the in-order successor takes this node's place.
+    tnode mut* own mut successor = null;
+    tnode mut* own right = take_min(move(node->right), &successor);
+    successor->left = move(node->left);
+    successor->right = move(right);
+    del(node);
+    return move(successor);
+}
+
+fn void insert_into(tree mut* t, string key, i64 value) {
+    t->root = insert(move(t->root), key, value, &t->count);
+}
+
+fn bool remove_from(tree mut* t, string key) {
+    bool mut removed = false;
+    t->root = remove(move(t->root), key, &removed);
+    if (removed) {
+        t->count--;
+    }
+    return removed;
+}
+
+fn void show(string name, tree* t) {
+    print(name, ":");
+    inorder(t->root);
+    println(" (", t->count, ")");
+}
+
+string[9] KEYS = {"mike", "delta", "tango", "alpha", "kilo", "romeo", "zulu", "bravo", "sierra"};
+
+fn i32 main() {
+    tree mut t = {};
+    defer del(t.root);
+    for (u64 mut i = 0; i < KEYS.len; i++) {
+        insert_into(&t, KEYS[i], cast(i, i64) + 1);
+    }
+    show("built", &t);
+    println("height=", height(t.root), " min=", min_key(t.root), " max=", max_key(t.root));
+
+    i64 mut v = 0;
+    println("kilo=", lookup(t.root, "kilo", &v), " ", v);
+    println("yankee=", lookup(t.root, "yankee", &v));
+
+    insert_into(&t, "kilo", 100);
+    lookup(t.root, "kilo", &v);
+    println("replaced kilo=", v, " count=", t.count);
+
+    println("rm zulu=", remove_from(&t, "zulu"));
+    show("no leaf", &t);
+    println("rm romeo=", remove_from(&t, "romeo"));
+    show("no one-child", &t);
+    println("rm mike=", remove_from(&t, "mike"));
+    show("no root", &t);
+    println("rm yankee=", remove_from(&t, "yankee"), " count=", t.count);
+
+    println("min=", min_key(t.root), " max=", max_key(t.root), " height=", height(t.root));
+    for (u64 mut i = 0; i < KEYS.len; i++) {
+        remove_from(&t, KEYS[i]);
+    }
+    println("emptied count=", t.count, " root=", t.root == null);
+    return 0;
+}

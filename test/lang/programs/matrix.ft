@@ -1,0 +1,271 @@
+//! run
+//! stdout:
+//| a 2x3:
+//|   1 2 3
+//|   4 5 6
+//| b 3x2:
+//|   7 8
+//|   9 10
+//|   11 12
+//| a*b 2x2:
+//|   58 64
+//|   139 154
+//| transpose law=true
+//| identity=true true
+//| s 3x3:
+//|   2 -1 0
+//|   -1 2 -1
+//|   0 -1 2
+//| det(s)=4 rank(s)=3
+//| s*s 3x3:
+//|   5 -4 1
+//|   -4 6 -4
+//|   1 -4 5
+//| det(s*s)=16 == det(s)^2 is true
+//| det(singular)=0 rank=2
+//| a+a 2x3:
+//|   2 4 6
+//|   8 10 12
+//| det(1x1)=1 rows=2
+// Dense matrices over i64 stored row-major in one owning span, because the
+// bootstrap has no multi-dimensional arrays: the index arithmetic is the
+// program's own. Multiply, transpose, power, an identity, a determinant by
+// Laplace expansion and a Gaussian rank, each checked against a property the
+// mathematics guarantees.
+struct matrix {
+    u64 rows;
+    u64 cols;
+    i64 mut@ own cells;
+}
+
+fn matrix make(u64 rows, u64 cols) {
+    matrix mut m = {};
+    m.rows = rows;
+    m.cols = cols;
+    m.cells = new(i64, rows * cols);
+    return move(m);
+}
+
+fn void free_matrix(matrix mut* m) {
+    del(m->cells);
+    m->rows = 0;
+    m->cols = 0;
+}
+
+fn i64 at(matrix* m, u64 r, u64 c) {
+    return m->cells[r * m->cols + c];
+}
+
+fn void put(matrix mut* m, u64 r, u64 c, i64 v) {
+    m->cells[r * m->cols + c] = v;
+}
+
+fn matrix identity(u64 n) {
+    matrix mut m = make(n, n);
+    for (u64 mut i = 0; i < n; i++) {
+        put(&m, i, i, 1);
+    }
+    return move(m);
+}
+
+fn matrix from_rows(u64 rows, u64 cols, i64@ values) {
+    matrix mut m = make(rows, cols);
+    for (u64 mut i = 0; i < values.len; i++) {
+        m.cells[i] = values[i];
+    }
+    return move(m);
+}
+
+fn matrix multiply(matrix* a, matrix* b) {
+    matrix mut out = make(a->rows, b->cols);
+    for (u64 mut r = 0; r < a->rows; r++) {
+        for (u64 mut c = 0; c < b->cols; c++) {
+            i64 mut sum = 0;
+            for (u64 mut k = 0; k < a->cols; k++) {
+                sum += at(a, r, k) * at(b, k, c);
+            }
+            put(&out, r, c, sum);
+        }
+    }
+    return move(out);
+}
+
+fn matrix transpose(matrix* a) {
+    matrix mut out = make(a->cols, a->rows);
+    for (u64 mut r = 0; r < a->rows; r++) {
+        for (u64 mut c = 0; c < a->cols; c++) {
+            put(&out, c, r, at(a, r, c));
+        }
+    }
+    return move(out);
+}
+
+fn matrix add_matrix(matrix* a, matrix* b) {
+    matrix mut out = make(a->rows, a->cols);
+    for (u64 mut i = 0; i < a->cells.len; i++) {
+        out.cells[i] = a->cells[i] + b->cells[i];
+    }
+    return move(out);
+}
+
+fn bool equal(matrix* a, matrix* b) {
+    if (a->rows != b->rows || a->cols != b->cols) {
+        return false;
+    }
+    for (u64 mut i = 0; i < a->cells.len; i++) {
+        if (a->cells[i] != b->cells[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The square matrix with row `skip` and column `drop_col` removed.
+fn matrix minor(matrix* a, u64 skip, u64 drop_col) {
+    matrix mut out = make(a->rows - 1, a->cols - 1);
+    u64 mut rr = 0;
+    for (u64 mut r = 0; r < a->rows; r++) {
+        if (r == skip) {
+            continue;
+        }
+        u64 mut cc = 0;
+        for (u64 mut c = 0; c < a->cols; c++) {
+            if (c == drop_col) {
+                continue;
+            }
+            put(&out, rr, cc, at(a, r, c));
+            cc++;
+        }
+        rr++;
+    }
+    return move(out);
+}
+
+fn i64 determinant(matrix* a) {
+    if (a->rows == 1) {
+        return at(a, 0, 0);
+    }
+    if (a->rows == 2) {
+        return at(a, 0, 0) * at(a, 1, 1) - at(a, 0, 1) * at(a, 1, 0);
+    }
+    i64 mut total = 0;
+    i64 mut sign = 1;
+    for (u64 mut c = 0; c < a->cols; c++) {
+        matrix mut sub = minor(a, 0, c);
+        total += sign * at(a, 0, c) * determinant(&sub);
+        free_matrix(&sub);
+        sign = -sign;
+    }
+    return total;
+}
+
+// Rank over the rationals, computed by fraction-free Gaussian elimination so
+// that everything stays an integer.
+fn u64 rank(matrix* a) {
+    matrix mut work = make(a->rows, a->cols);
+    defer free_matrix(&work);
+    for (u64 mut i = 0; i < a->cells.len; i++) {
+        work.cells[i] = a->cells[i];
+    }
+    u64 mut pivot_row = 0;
+    for (u64 mut c = 0; c < work.cols && pivot_row < work.rows; c++) {
+        u64 mut found = work.rows;
+        for (u64 mut r = pivot_row; r < work.rows; r++) {
+            if (at(&work, r, c) != 0) {
+                found = r;
+                break;
+            }
+        }
+        if (found == work.rows) {
+            continue;
+        }
+        for (u64 mut c2 = 0; c2 < work.cols; c2++) {
+            i64 t = at(&work, pivot_row, c2);
+            put(&work, pivot_row, c2, at(&work, found, c2));
+            put(&work, found, c2, t);
+        }
+        i64 p = at(&work, pivot_row, c);
+        for (u64 mut r = pivot_row + 1; r < work.rows; r++) {
+            i64 factor = at(&work, r, c);
+            if (factor == 0) {
+                continue;
+            }
+            for (u64 mut c2 = 0; c2 < work.cols; c2++) {
+                put(&work, r, c2, at(&work, r, c2) * p - at(&work, pivot_row, c2) * factor);
+            }
+        }
+        pivot_row++;
+    }
+    return pivot_row;
+}
+
+fn void show(string name, matrix* m) {
+    println(name, " ", m->rows, "x", m->cols, ":");
+    for (u64 mut r = 0; r < m->rows; r++) {
+        print(" ");
+        for (u64 mut c = 0; c < m->cols; c++) {
+            print(" ", at(m, r, c));
+        }
+        println();
+    }
+}
+
+i64[6] A_CELLS = {1, 2, 3, 4, 5, 6};
+i64[6] B_CELLS = {7, 8, 9, 10, 11, 12};
+i64[9] S_CELLS = {2, -1, 0, -1, 2, -1, 0, -1, 2};
+i64[9] SINGULAR = {1, 2, 3, 2, 4, 6, 7, 8, 9};
+
+fn i32 main() {
+    matrix mut a = from_rows(2, 3, A_CELLS[0..A_CELLS.len]);
+    defer free_matrix(&a);
+    matrix mut b = from_rows(3, 2, B_CELLS[0..B_CELLS.len]);
+    defer free_matrix(&b);
+    show("a", &a);
+    show("b", &b);
+
+    matrix mut ab = multiply(&a, &b);
+    defer free_matrix(&ab);
+    show("a*b", &ab);
+
+    // (a*b)^T == b^T * a^T is the property that checks both operations.
+    matrix mut abt = transpose(&ab);
+    defer free_matrix(&abt);
+    matrix mut at_ = transpose(&a);
+    defer free_matrix(&at_);
+    matrix mut bt = transpose(&b);
+    defer free_matrix(&bt);
+    matrix mut bt_at = multiply(&bt, &at_);
+    defer free_matrix(&bt_at);
+    println("transpose law=", equal(&abt, &bt_at));
+
+    // The identity is neutral on both sides.
+    matrix mut i2 = identity(2);
+    defer free_matrix(&i2);
+    matrix mut i3 = identity(3);
+    defer free_matrix(&i3);
+    matrix mut left = multiply(&i2, &a);
+    defer free_matrix(&left);
+    matrix mut right = multiply(&a, &i3);
+    defer free_matrix(&right);
+    println("identity=", equal(&left, &a), " ", equal(&right, &a));
+
+    matrix mut s = from_rows(3, 3, S_CELLS[0..S_CELLS.len]);
+    defer free_matrix(&s);
+    show("s", &s);
+    println("det(s)=", determinant(&s), " rank(s)=", rank(&s));
+    matrix mut s2 = multiply(&s, &s);
+    defer free_matrix(&s2);
+    show("s*s", &s2);
+    println("det(s*s)=", determinant(&s2), " == det(s)^2 is ",
+            determinant(&s2) == determinant(&s) * determinant(&s));
+
+    matrix mut sing = from_rows(3, 3, SINGULAR[0..SINGULAR.len]);
+    defer free_matrix(&sing);
+    println("det(singular)=", determinant(&sing), " rank=", rank(&sing));
+
+    matrix mut sum = add_matrix(&a, &a);
+    defer free_matrix(&sum);
+    show("a+a", &sum);
+    println("det(1x1)=", determinant(&i2), " rows=", i2.rows);
+    return 0;
+}

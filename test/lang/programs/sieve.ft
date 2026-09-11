@@ -1,0 +1,181 @@
+//! run
+//! stdout:
+//| primes: 2 3 5 7 11 13 17 19 23 29 31 37 41 43 47 53 59 61 67 71
+//| count=46 bits=201 words=4
+//| disagreements=0
+//| tail clear=true false
+//| empty=0
+//| edges=true true true true count=4
+//| cleared=false false count=2
+//| full=130 of 130
+//| 2 = 2 (rest=1 product=2 ok=true)
+//| 97 = 97 (rest=1 product=97 ok=true)
+//| 360 = 2 * 2 * 2 * 3 * 3 * 5 (rest=1 product=360 ok=true)
+//| 1001 = 7 * 11 * 13 (rest=1 product=1001 ok=true)
+//| 5040 = 2 * 2 * 2 * 2 * 3 * 3 * 5 * 7 (rest=1 product=5040 ok=true)
+// A bitset over u64 words and the sieve of Eratosthenes on top of it, so the
+// program is mostly shifts, masks and wrapping-free bit arithmetic. Every
+// answer is checked against trial division, which shares no code with the
+// sieve.
+struct bitset {
+    u64 mut@ own words;
+    u64 bits;
+}
+
+u64 WORD_BITS = 64;
+u64 ONE = 1;
+
+fn bitset make(u64 bits) {
+    bitset mut b = {};
+    b.bits = bits;
+    b.words = new(u64, (bits + WORD_BITS - 1) / WORD_BITS);
+    return move(b);
+}
+
+fn void free_bits(bitset mut* b) {
+    del(b->words);
+    b->bits = 0;
+}
+
+fn void set_bit(bitset mut* b, u64 i) {
+    b->words[i / WORD_BITS] |= ONE << (i % WORD_BITS);
+}
+
+fn void clear_bit(bitset mut* b, u64 i) {
+    b->words[i / WORD_BITS] &= ~(ONE << (i % WORD_BITS));
+}
+
+fn bool test_bit(bitset* b, u64 i) {
+    return (b->words[i / WORD_BITS] >> (i % WORD_BITS)) % 2 == 1;
+}
+
+fn void set_all(bitset mut* b) {
+    for (u64 mut i = 0; i < b->words.len; i++) {
+        b->words[i] = ~cast(0, u64);
+    }
+    // The tail of the last word is outside the set and must stay clear.
+    for (u64 mut i = b->bits; i < b->words.len * WORD_BITS; i++) {
+        clear_bit(b, i);
+    }
+}
+
+// Population count by Kernighan's loop: each turn clears the lowest set bit.
+fn u64 popcount(bitset* b) {
+    u64 mut n = 0;
+    for (u64 w : b->words) {
+        u64 mut x = w;
+        while (x != 0) {
+            x &= x - 1;
+            n++;
+        }
+    }
+    return n;
+}
+
+fn bitset sieve(u64 limit) {
+    bitset mut b = make(limit + 1);
+    set_all(&b);
+    clear_bit(&b, 0);
+    if (limit >= 1) {
+        clear_bit(&b, 1);
+    }
+    u64 mut p = 2;
+    while (p * p <= limit) {
+        if (test_bit(&b, p)) {
+            u64 mut m = p * p;
+            while (m <= limit) {
+                clear_bit(&b, m);
+                m += p;
+            }
+        }
+        p++;
+    }
+    return move(b);
+}
+
+fn bool is_prime_by_division(u64 n) {
+    if (n < 2) {
+        return false;
+    }
+    u64 mut d = 2;
+    while (d * d <= n) {
+        if (n % d == 0) {
+            return false;
+        }
+        d++;
+    }
+    return true;
+}
+
+fn i32 main() {
+    u64 limit = 200;
+    bitset mut primes = sieve(limit);
+    defer free_bits(&primes);
+
+    print("primes:");
+    u64 mut shown = 0;
+    for (u64 mut i = 0; i <= limit; i++) {
+        if (test_bit(&primes, i) && shown < 20) {
+            print(" ", i);
+            shown++;
+        }
+    }
+    println();
+    println("count=", popcount(&primes), " bits=", primes.bits, " words=", primes.words.len);
+
+    // The sieve and trial division must agree at every index.
+    u64 mut disagreements = 0;
+    for (u64 mut i = 0; i <= limit; i++) {
+        if (test_bit(&primes, i) != is_prime_by_division(i)) {
+            disagreements++;
+        }
+    }
+    println("disagreements=", disagreements);
+
+    // The bits past the end of the set are never counted, even though the
+    // last word has room for them.
+    println("tail clear=", primes.words.len * WORD_BITS > primes.bits, " ",
+            test_bit(&primes, limit));
+
+    // The bitset on its own: set, clear, retest, and a word boundary.
+    bitset mut b = make(130);
+    defer free_bits(&b);
+    println("empty=", popcount(&b));
+    set_bit(&b, 0);
+    set_bit(&b, 63);
+    set_bit(&b, 64);
+    set_bit(&b, 129);
+    println("edges=", test_bit(&b, 0), " ", test_bit(&b, 63), " ", test_bit(&b, 64), " ",
+            test_bit(&b, 129), " count=", popcount(&b));
+    clear_bit(&b, 63);
+    clear_bit(&b, 64);
+    println("cleared=", test_bit(&b, 63), " ", test_bit(&b, 64), " count=", popcount(&b));
+    set_all(&b);
+    println("full=", popcount(&b), " of ", b.bits);
+
+    // Factorization using the sieve, with the product checked back.
+    u64[5] SAMPLES = {2, 97, 360, 1001, 5040};
+    for (u64 mut i = 0; i < SAMPLES.len; i++) {
+        u64 n = SAMPLES[i];
+        u64 mut rest = n;
+        u64 mut product = 1;
+        print(n, " =");
+        bool mut first = true;
+        for (u64 mut p = 2; p <= limit && rest > 1; p++) {
+            if (!test_bit(&primes, p)) {
+                continue;
+            }
+            while (rest % p == 0) {
+                if (!first) {
+                    print(" *");
+                }
+                print(" ", p);
+                first = false;
+                product *= p;
+                rest /= p;
+            }
+        }
+        println(" (rest=", rest, " product=", product, " ok=", product * rest == n, ")");
+    }
+    return 0;
+}

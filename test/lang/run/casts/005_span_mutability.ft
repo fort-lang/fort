@@ -1,0 +1,63 @@
+//! run
+//! stdout:
+//| 1 2 3
+//| 10 2 3
+//| 10 20 3
+//| 5 7
+//| 5 99
+//| true 3
+struct cell {
+    i32 v;
+}
+
+fn i64 sum(i32@ xs) {
+    i64 mut total = 0;
+    for (i64 mut i = 0; i < cast(xs.len, i64); i++) {
+        total += cast(xs[i], i64);
+    }
+    return total;
+}
+
+fn i32 main() {
+    i32 mut@ own xs = new(i32, 3);
+    xs[0] = 1;
+    xs[1] = 2;
+    xs[2] = 3;
+
+    // Dropping writability is the implicit conversion of D5.4, so a read-only
+    // span parameter takes the writable span with no cast at all.
+    i32@ ro = xs;
+    println(ro[0], " ", ro[1], " ", ro[2]);
+
+    // Adding it back is the cast-away-const escape a span shares with a
+    // pointer: the marks may differ in mutability at any level (D3.14).
+    i32 mut@ rw = cast(ro, i32 mut@);
+    rw[0] = 10;
+    println(xs[0], " ", xs[1], " ", xs[2]);
+
+    // The header itself is another level: `i32 mut@ mut` is an assignable
+    // binding over writable elements, and the cast target may not name the
+    // outermost `mut`, so the binding takes it.
+    i32 mut@ mut cursor = cast(ro, i32 mut@);
+    cursor = rw[1..3];
+    cursor[0] = 20;
+    println(xs[0], " ", xs[1], " ", xs[2]);
+
+    // A span of pointers has a mark for the slots and one for the pointees,
+    // and a cast may change either without changing the element type (D5.3).
+    cell mut a = cell{5};
+    cell mut b = cell{7};
+    cell mut* mut@ own slots = new(cell*, 2);
+    slots[0] = &a;
+    slots[1] = &b;
+    cell*@ frozen = cast(slots, cell*@);
+    println(frozen[0]->v, " ", frozen[1]->v);
+    cell mut*@ thawed = cast(frozen, cell mut*@);
+    thawed[1]->v = 99;
+    println(a.v, " ", b.v);
+
+    println(sum(xs) == 33, " ", xs.len);
+    del(slots);
+    del(xs);
+    return 0;
+}

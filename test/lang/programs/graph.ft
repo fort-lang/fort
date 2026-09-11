@@ -1,0 +1,266 @@
+//! run
+//! stdout:
+//| nodes=8 edges=11
+//| adj[0]: 1 2 6
+//| adj[1]: 3 4
+//| adj[2]: 3 5
+//| adj[3]: 4
+//| adj[4]: 5
+//| adj[5]:
+//| adj[6]: 4
+//| adj[7]: 6
+//| bfs from 0: 0 1 1 2 2 2 1 -
+//| bfs from 7: - - - - 2 3 1 0
+//| bfs from 5: - - - - - 0 - -
+//| dfs from 0: 0 1 3 4 5 2 6
+//| dfs rest: 7
+//| topological (0 stuck): 0 7 1 2 6 3 4 5
+//| all edges forwards=true components=1
+//| cycle stuck=4 components=1
+//| split bfs: 0 1 - - -
+//| split components=3
+// A directed graph in compressed adjacency form: one owning span of edge
+// targets and one of row starts, built from an edge list by counting sort.
+// On top of it, breadth-first distances, depth-first order, a topological
+// sort by Kahn's algorithm, cycle detection and the connected components of
+// the underlying undirected graph.
+struct graph {
+    u64 nodes;
+    u64 mut@ own starts;
+    u64 mut@ own targets;
+}
+
+struct edge {
+    u64 from;
+    u64 to;
+}
+
+fn graph build(u64 nodes, edge@ edges) {
+    graph mut g = {};
+    g.nodes = nodes;
+    g.starts = new(u64, nodes + 1);
+    g.targets = new(u64, edges.len);
+    for (edge e : edges) {
+        g.starts[e.from + 1]++;
+    }
+    for (u64 mut i = 0; i < nodes; i++) {
+        g.starts[i + 1] += g.starts[i];
+    }
+    u64 mut@ own cursor = new(u64, nodes);
+    defer del(cursor);
+    for (u64 mut i = 0; i < nodes; i++) {
+        cursor[i] = g.starts[i];
+    }
+    for (edge e : edges) {
+        g.targets[cursor[e.from]] = e.to;
+        cursor[e.from]++;
+    }
+    return move(g);
+}
+
+fn void free_graph(graph mut* g) {
+    del(g->starts);
+    del(g->targets);
+    g->nodes = 0;
+}
+
+fn u64@ neighbours(graph* g, u64 node) {
+    return g->targets[g->starts[node]..g->starts[node + 1]];
+}
+
+u64 NONE = 18446744073709551615;
+
+// Breadth-first distances from `source`, NONE where the node is unreachable.
+fn u64 mut@ own distances(graph* g, u64 source) {
+    u64 mut@ own dist = new(u64, g->nodes);
+    for (u64 mut i = 0; i < g->nodes; i++) {
+        dist[i] = NONE;
+    }
+    u64 mut@ own queue = new(u64, g->nodes);
+    defer del(queue);
+    u64 mut head = 0;
+    u64 mut tail = 0;
+    dist[source] = 0;
+    queue[tail] = source;
+    tail++;
+    while (head < tail) {
+        u64 node = queue[head];
+        head++;
+        for (u64 next : neighbours(g, node)) {
+            if (dist[next] == NONE) {
+                dist[next] = dist[node] + 1;
+                queue[tail] = next;
+                tail++;
+            }
+        }
+    }
+    return move(dist);
+}
+
+fn void dfs(graph* g, u64 node, bool mut@ seen) {
+    if (seen[node]) {
+        return;
+    }
+    seen[node] = true;
+    print(" ", node);
+    for (u64 next : neighbours(g, node)) {
+        dfs(g, next, seen);
+    }
+}
+
+// Kahn's algorithm: it emits a topological order and reports how many nodes
+// it could not place, which is zero exactly when the graph is acyclic.
+fn u64 topological(graph* g, u64 mut@ order) {
+    u64 mut@ own indegree = new(u64, g->nodes);
+    defer del(indegree);
+    for (u64 mut i = 0; i < g->nodes; i++) {
+        for (u64 next : neighbours(g, i)) {
+            indegree[next]++;
+        }
+    }
+    u64 mut placed = 0;
+    u64 mut head = 0;
+    for (u64 mut i = 0; i < g->nodes; i++) {
+        if (indegree[i] == 0) {
+            order[placed] = i;
+            placed++;
+        }
+    }
+    while (head < placed) {
+        u64 node = order[head];
+        head++;
+        for (u64 next : neighbours(g, node)) {
+            indegree[next]--;
+            if (indegree[next] == 0) {
+                order[placed] = next;
+                placed++;
+            }
+        }
+    }
+    return g->nodes - placed;
+}
+
+// Union-find over the undirected edges, path-compressed on the fly.
+fn u64 find_root(u64 mut@ parent, u64 x) {
+    u64 mut root = x;
+    while (parent[root] != root) {
+        root = parent[root];
+    }
+    u64 mut walk = x;
+    while (parent[walk] != root) {
+        u64 next = parent[walk];
+        parent[walk] = root;
+        walk = next;
+    }
+    return root;
+}
+
+fn u64 components(graph* g) {
+    u64 mut@ own parent = new(u64, g->nodes);
+    defer del(parent);
+    for (u64 mut i = 0; i < g->nodes; i++) {
+        parent[i] = i;
+    }
+    u64 mut count = g->nodes;
+    for (u64 mut i = 0; i < g->nodes; i++) {
+        for (u64 next : neighbours(g, i)) {
+            u64 a = find_root(parent, i);
+            u64 b = find_root(parent, next);
+            if (a != b) {
+                parent[a] = b;
+                count--;
+            }
+        }
+    }
+    return count;
+}
+
+fn void show_distances(string name, u64@ dist) {
+    print(name, ":");
+    for (u64 mut i = 0; i < dist.len; i++) {
+        if (dist[i] == NONE) {
+            print(" -");
+        } else {
+            print(" ", dist[i]);
+        }
+    }
+    println();
+}
+
+edge[11] DAG = {edge{0, 1}, edge{0, 2}, edge{1, 3}, edge{2, 3}, edge{3, 4}, edge{4, 5},
+                edge{2, 5}, edge{6, 4}, edge{7, 6}, edge{1, 4}, edge{0, 6}};
+edge[4] CYCLE = {edge{0, 1}, edge{1, 2}, edge{2, 0}, edge{2, 3}};
+edge[3] SPLIT = {edge{0, 1}, edge{2, 3}, edge{3, 2}};
+
+fn i32 main() {
+    graph mut g = build(8, DAG[0..DAG.len]);
+    defer free_graph(&g);
+    println("nodes=", g.nodes, " edges=", g.targets.len);
+    for (u64 mut i = 0; i < g.nodes; i++) {
+        print("adj[", i, "]:");
+        for (u64 next : neighbours(&g, i)) {
+            print(" ", next);
+        }
+        println();
+    }
+
+    u64 mut@ own d0 = distances(&g, 0);
+    defer del(d0);
+    show_distances("bfs from 0", d0);
+    u64 mut@ own d7 = distances(&g, 7);
+    defer del(d7);
+    show_distances("bfs from 7", d7);
+    u64 mut@ own d5 = distances(&g, 5);
+    defer del(d5);
+    show_distances("bfs from 5", d5);
+
+    bool mut@ own seen = new(bool, g.nodes);
+    defer del(seen);
+    print("dfs from 0:");
+    dfs(&g, 0, seen);
+    println();
+    print("dfs rest:");
+    for (u64 mut i = 0; i < g.nodes; i++) {
+        dfs(&g, i, seen);
+    }
+    println();
+
+    u64 mut@ own order = new(u64, g.nodes);
+    defer del(order);
+    u64 stuck = topological(&g, order);
+    print("topological (", stuck, " stuck):");
+    for (u64 n : order) {
+        print(" ", n);
+    }
+    println();
+
+    // The order is valid exactly when every edge runs forwards in it.
+    u64 mut@ own place = new(u64, g.nodes);
+    defer del(place);
+    for (u64 mut i = 0; i < g.nodes; i++) {
+        place[order[i]] = i;
+    }
+    bool mut forwards = true;
+    for (u64 mut i = 0; i < g.nodes; i++) {
+        for (u64 next : neighbours(&g, i)) {
+            if (place[i] >= place[next]) {
+                forwards = false;
+            }
+        }
+    }
+    println("all edges forwards=", forwards, " components=", components(&g));
+
+    graph mut c = build(4, CYCLE[0..CYCLE.len]);
+    defer free_graph(&c);
+    u64 mut@ own corder = new(u64, c.nodes);
+    defer del(corder);
+    println("cycle stuck=", topological(&c, corder), " components=", components(&c));
+
+    graph mut s = build(5, SPLIT[0..SPLIT.len]);
+    defer free_graph(&s);
+    u64 mut@ own sd = distances(&s, 0);
+    defer del(sd);
+    show_distances("split bfs", sd);
+    println("split components=", components(&s));
+    return 0;
+}

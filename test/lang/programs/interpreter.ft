@@ -1,0 +1,566 @@
+//! run
+//! stdout:
+//| gcd: 18 instructions, error=""
+//| gcd(48, 18) = 6
+//|   reference=6 agrees=true
+//| gcd(270, 192) = 6
+//|   reference=6 agrees=true
+//| gcd(17, 5) = 1
+//|   reference=1 agrees=true
+//| gcd(12, 0) = 12
+//|   reference=12 agrees=true
+//| factorial: 19 instructions, error=""
+//| factorial(0) = 1
+//| factorial(1) = 1
+//| factorial(5) = 120
+//| factorial(10) = 3628800
+//| fib: 19 instructions, error=""
+//| fib(0) = 0
+//|   reference=0 agrees=true
+//| fib(1) = 1
+//|   reference=1 agrees=true
+//| fib(6) = 8
+//|   reference=8 agrees=true
+//| fib(10) = 55
+//|   reference=55 agrees=true
+//| fib(15) = 610
+//|   reference=610 agrees=true
+//| divzero: 4 instructions, error=""
+//| divzero() faulted: division by zero
+//| unknown mnemonic: 3 instructions, error="unknown mnemonic"
+//| unknown label: 3 instructions, error="unknown label"
+//| bad operand: 2 instructions, error="bad operand"
+// A stack-machine interpreter: it assembles a textual program into an owning
+// span of instructions, resolving labels in a second pass, then executes it
+// with an operand stack, a call stack of frames and local slots. The programs
+// it runs are gcd, factorial, fibonacci and a loop that sums a range, so the
+// interpreter exercises calls, conditional jumps, locals and recursion.
+enum op {
+    halt,
+    push,
+    load,
+    store,
+    add,
+    sub,
+    mul,
+    div,
+    rem,
+    neg,
+    dup,
+    drop,
+    swap,
+    lt,
+    le,
+    eq,
+    jmp,
+    jz,
+    call,
+    ret,
+    out,
+}
+
+struct insn {
+    op code;
+    i64 arg;
+}
+
+struct frame {
+    u64 return_pc;
+    u64 base;
+}
+
+struct vm {
+    insn@ code;
+    i64 mut@ own stack;
+    u64 top;
+    frame mut@ own frames;
+    u64 depth;
+    i64 mut@ own locals;
+    u64 locals_top;
+    bool halted;
+    string fault;
+}
+
+fn void push_value(vm mut* m, i64 v) {
+    if (m->top == m->stack.len) {
+        m->fault = "stack overflow";
+        m->halted = true;
+        return;
+    }
+    m->stack[m->top] = v;
+    m->top++;
+}
+
+fn i64 pop_value(vm mut* m) {
+    if (m->top == 0) {
+        m->fault = "stack underflow";
+        m->halted = true;
+        return 0;
+    }
+    m->top--;
+    return m->stack[m->top];
+}
+
+fn void step(vm mut* m, u64 mut* pc) {
+    insn i = m->code[*pc];
+    *pc += 1;
+    if (i.code == op.halt) {
+        m->halted = true;
+    } else if (i.code == op.push) {
+        push_value(m, i.arg);
+    } else if (i.code == op.load) {
+        u64 slot = m->frames[m->depth - 1].base + cast(i.arg, u64);
+        push_value(m, m->locals[slot]);
+    } else if (i.code == op.store) {
+        u64 slot = m->frames[m->depth - 1].base + cast(i.arg, u64);
+        m->locals[slot] = pop_value(m);
+    } else if (i.code == op.add) {
+        i64 b = pop_value(m);
+        push_value(m, pop_value(m) + b);
+    } else if (i.code == op.sub) {
+        i64 b = pop_value(m);
+        push_value(m, pop_value(m) - b);
+    } else if (i.code == op.mul) {
+        i64 b = pop_value(m);
+        push_value(m, pop_value(m) * b);
+    } else if (i.code == op.div) {
+        i64 b = pop_value(m);
+        i64 a = pop_value(m);
+        if (b == 0) {
+            m->fault = "division by zero";
+            m->halted = true;
+            return;
+        }
+        push_value(m, a / b);
+    } else if (i.code == op.rem) {
+        i64 b = pop_value(m);
+        i64 a = pop_value(m);
+        if (b == 0) {
+            m->fault = "division by zero";
+            m->halted = true;
+            return;
+        }
+        push_value(m, a % b);
+    } else if (i.code == op.neg) {
+        push_value(m, -pop_value(m));
+    } else if (i.code == op.dup) {
+        i64 a = pop_value(m);
+        push_value(m, a);
+        push_value(m, a);
+    } else if (i.code == op.drop) {
+        pop_value(m);
+    } else if (i.code == op.swap) {
+        i64 b = pop_value(m);
+        i64 a = pop_value(m);
+        push_value(m, b);
+        push_value(m, a);
+    } else if (i.code == op.lt) {
+        i64 b = pop_value(m);
+        push_value(m, cast(pop_value(m) < b, i64));
+    } else if (i.code == op.le) {
+        i64 b = pop_value(m);
+        push_value(m, cast(pop_value(m) <= b, i64));
+    } else if (i.code == op.eq) {
+        i64 b = pop_value(m);
+        push_value(m, cast(pop_value(m) == b, i64));
+    } else if (i.code == op.jmp) {
+        *pc = cast(i.arg, u64);
+    } else if (i.code == op.jz) {
+        if (pop_value(m) == 0) {
+            *pc = cast(i.arg, u64);
+        }
+    } else if (i.code == op.call) {
+        if (m->depth == m->frames.len) {
+            m->fault = "call depth";
+            m->halted = true;
+            return;
+        }
+        m->frames[m->depth] = frame{*pc, m->locals_top};
+        m->depth++;
+        m->locals_top += 4;
+        *pc = cast(i.arg, u64);
+    } else if (i.code == op.ret) {
+        m->depth--;
+        m->locals_top = m->frames[m->depth].base;
+        *pc = m->frames[m->depth].return_pc;
+    } else {
+        println("out ", pop_value(m));
+    }
+}
+
+// ---- the assembler -------------------------------------------------------
+// A line is `mnemonic [operand]`, a label is `name:` and `#` starts a comment.
+// Pass one records where each label lands, pass two emits the instructions and
+// resolves the jump and call targets against that table.
+fn string trim(string line) {
+    u64 mut lo = 0;
+    u64 mut hi = line.len;
+    for (u64 mut i = 0; i < line.len; i++) {
+        if (line[i] == '#') {
+            hi = i;
+            break;
+        }
+    }
+    while (lo < hi && (line[lo] == ' ' || line[lo] == '\t')) {
+        lo++;
+    }
+    while (hi > lo && (line[hi - 1] == ' ' || line[hi - 1] == '\t')) {
+        hi--;
+    }
+    return line[lo..hi];
+}
+
+fn bool is_label(string line) {
+    return line.len > 0 && line[line.len - 1] == ':';
+}
+
+fn string word(string line, u64 n) {
+    u64 mut seen = 0;
+    u64 mut i = 0;
+    while (i < line.len) {
+        while (i < line.len && line[i] == ' ') {
+            i++;
+        }
+        u64 start = i;
+        while (i < line.len && line[i] != ' ') {
+            i++;
+        }
+        if (start == i) {
+            break;
+        }
+        if (seen == n) {
+            return line[start..i];
+        }
+        seen++;
+    }
+    return "";
+}
+
+fn op mnemonic(string w, bool mut* ok) {
+    *ok = true;
+    if (w == "halt") {
+        return op.halt;
+    }
+    if (w == "push") {
+        return op.push;
+    }
+    if (w == "load") {
+        return op.load;
+    }
+    if (w == "store") {
+        return op.store;
+    }
+    if (w == "add") {
+        return op.add;
+    }
+    if (w == "sub") {
+        return op.sub;
+    }
+    if (w == "mul") {
+        return op.mul;
+    }
+    if (w == "div") {
+        return op.div;
+    }
+    if (w == "rem") {
+        return op.rem;
+    }
+    if (w == "neg") {
+        return op.neg;
+    }
+    if (w == "dup") {
+        return op.dup;
+    }
+    if (w == "drop") {
+        return op.drop;
+    }
+    if (w == "swap") {
+        return op.swap;
+    }
+    if (w == "lt") {
+        return op.lt;
+    }
+    if (w == "le") {
+        return op.le;
+    }
+    if (w == "eq") {
+        return op.eq;
+    }
+    if (w == "jmp") {
+        return op.jmp;
+    }
+    if (w == "jz") {
+        return op.jz;
+    }
+    if (w == "call") {
+        return op.call;
+    }
+    if (w == "ret") {
+        return op.ret;
+    }
+    if (w == "out") {
+        return op.out;
+    }
+    *ok = false;
+    return op.halt;
+}
+
+fn bool takes_label(op code) {
+    return code == op.jmp || code == op.jz || code == op.call;
+}
+
+fn i64 parse_int(string w, bool mut* ok) {
+    *ok = w.len > 0;
+    u64 mut i = 0;
+    bool mut negative = false;
+    if (w.len > 0 && w[0] == '-') {
+        negative = true;
+        i = 1;
+        *ok = w.len > 1;
+    }
+    i64 mut v = 0;
+    while (i < w.len) {
+        if (w[i] < '0' || w[i] > '9') {
+            *ok = false;
+            return 0;
+        }
+        v = v * 10 + cast(cast(w[i], i64) - cast('0', i64), i64);
+        i++;
+    }
+    if (negative) {
+        return -v;
+    }
+    return v;
+}
+
+fn insn mut@ own assemble(string@ src, string mut* error) {
+    // Pass one: count instructions and note each label's address.
+    u64 mut n = 0;
+    u64 mut label_count = 0;
+    for (string raw : src) {
+        string line = trim(raw);
+        if (line.len == 0) {
+            continue;
+        }
+        if (is_label(line)) {
+            label_count++;
+        } else {
+            n++;
+        }
+    }
+    string mut@ own names = new(string, label_count);
+    defer del(names);
+    u64 mut@ own places = new(u64, label_count);
+    defer del(places);
+    u64 mut seen = 0;
+    u64 mut here = 0;
+    for (string raw : src) {
+        string line = trim(raw);
+        if (line.len == 0) {
+            continue;
+        }
+        if (is_label(line)) {
+            names[seen] = line[0..line.len - 1];
+            places[seen] = here;
+            seen++;
+        } else {
+            here++;
+        }
+    }
+
+    // Pass two: emit, resolving a label operand against the table.
+    insn mut@ own code = new(insn, n);
+    u64 mut at = 0;
+    for (string raw : src) {
+        string line = trim(raw);
+        if (line.len == 0 || is_label(line)) {
+            continue;
+        }
+        bool mut ok = false;
+        op what = mnemonic(word(line, 0), &ok);
+        if (!ok) {
+            *error = "unknown mnemonic";
+            return move(code);
+        }
+        string operand = word(line, 1);
+        i64 mut arg = 0;
+        if (takes_label(what)) {
+            bool mut found = false;
+            for (u64 mut i = 0; i < seen; i++) {
+                if (names[i] == operand) {
+                    arg = cast(places[i], i64);
+                    found = true;
+                }
+            }
+            if (!found) {
+                *error = "unknown label";
+                return move(code);
+            }
+        } else if (operand.len > 0) {
+            arg = parse_int(operand, &ok);
+            if (!ok) {
+                *error = "bad operand";
+                return move(code);
+            }
+        }
+        code[at] = insn{what, arg};
+        at++;
+    }
+    return move(code);
+}
+
+fn i64 run(insn@ code, i64@ args, string name) {
+    vm mut m = vm{};
+    m.code = code;
+    m.stack = new(i64, 64);
+    defer del(m.stack);
+    m.frames = new(frame, 64);
+    defer del(m.frames);
+    m.locals = new(i64, 512);
+    defer del(m.locals);
+    m.frames[0] = frame{0, 0};
+    m.depth = 1;
+    m.locals_top = 4;
+    for (i64 a : args) {
+        push_value(&m, a);
+    }
+    u64 mut pc = 0;
+    u64 mut steps = 0;
+    while (!m.halted && pc < code.len && steps < 200000) {
+        step(&m, &pc);
+        steps++;
+    }
+    print(name, "(");
+    for (u64 mut i = 0; i < args.len; i++) {
+        if (i > 0) {
+            print(", ");
+        }
+        print(args[i]);
+    }
+    if (m.fault != "") {
+        println(") faulted: ", m.fault);
+        return 0;
+    }
+    i64 result = pop_value(&m);
+    if (m.fault != "") {
+        println(") faulted: ", m.fault);
+        return 0;
+    }
+    println(") = ", result);
+    return result;
+}
+
+string[22] GCD_SRC = {"  store 1        # b", "  store 0        # a", "loop:", "  load 1",
+                      "  push 0",         "  eq",             "  jz body",
+                      "  jmp done",       "body:",            "  load 0",
+                      "  load 1",         "  rem",            "  store 2",
+                      "  load 1",         "  store 0",        "  load 2",
+                      "  store 1",        "  jmp loop",       "done:",
+                      "  load 0",         "  halt",           ""};
+
+string[19] FACT_SRC = {"  store 0", "  push 1", "  store 1", "loop:", "  load 0", "  push 2",
+                       "  lt",      "  jz body", "  jmp done", "body:", "  load 1", "  load 0",
+                       "  mul",     "  store 1", "  load 0",  "  push 1", "  sub", "  store 0",
+                       "  jmp loop"};
+
+string[6] FACT_TAIL = {"done:", "  load 1", "  halt", "", "", ""};
+
+string[24] FIB_SRC = {"  call fib",  "  halt",     "fib:",       "  store 0",  "  load 0",
+                      "  push 2",    "  lt",       "  jz rec",   "  load 0",   "  ret",
+                      "rec:",        "  load 0",   "  push 1",   "  sub",      "  call fib",
+                      "  load 0",    "  push 2",   "  sub",      "  call fib", "  add",
+                      "  ret",       "",           "",           ""};
+
+string[9] BAD_SRC = {"  push 1", "  push 0", "  div", "  halt", "", "", "", "", ""};
+string[3] UNKNOWN_SRC = {"  push 1", "  frobnicate 2", "  halt"};
+string[3] NOLABEL_SRC = {"  push 1", "  jmp nowhere", "  halt"};
+string[3] BADARG_SRC = {"  push twelve", "  halt", ""};
+
+fn i64 gcd_reference(i64 a, i64 b) {
+    i64 mut x = a;
+    i64 mut y = b;
+    while (y != 0) {
+        i64 t = x % y;
+        x = y;
+        y = t;
+    }
+    return x;
+}
+
+fn i64 fib_reference(i64 n) {
+    if (n < 2) {
+        return n;
+    }
+    return fib_reference(n - 1) + fib_reference(n - 2);
+}
+
+fn insn mut@ own build(string@ src, string label) {
+    string mut error = "";
+    insn mut@ own code = assemble(src, &error);
+    println(label, ": ", code.len, " instructions, error=\"", error, "\"");
+    return move(code);
+}
+
+fn i32 main() {
+    insn mut@ own gcd = build(GCD_SRC[0..GCD_SRC.len], "gcd");
+    defer del(gcd);
+    i64[8] pairs = {48, 18, 270, 192, 17, 5, 12, 0};
+    for (u64 mut i = 0; i < pairs.len; i += 2) {
+        i64 mut@ own args = new(i64, 2);
+        args[0] = pairs[i];
+        args[1] = pairs[i + 1];
+        i64 got = run(gcd, args, "gcd");
+        println("  reference=", gcd_reference(pairs[i], pairs[i + 1]), " agrees=",
+                got == gcd_reference(pairs[i], pairs[i + 1]));
+        del(args);
+    }
+
+    // The factorial source is two arrays joined, which also proves the
+    // assembler does not care where a line came from.
+    string mut@ own fact_src = new(string, FACT_SRC.len + FACT_TAIL.len);
+    defer del(fact_src);
+    for (u64 mut i = 0; i < FACT_SRC.len; i++) {
+        fact_src[i] = FACT_SRC[i];
+    }
+    for (u64 mut i = 0; i < FACT_TAIL.len; i++) {
+        fact_src[FACT_SRC.len + i] = FACT_TAIL[i];
+    }
+    insn mut@ own fact = build(fact_src, "factorial");
+    defer del(fact);
+    i64[4] ns = {0, 1, 5, 10};
+    for (u64 mut i = 0; i < ns.len; i++) {
+        i64 mut@ own args = new(i64, 1);
+        args[0] = ns[i];
+        run(fact, args, "factorial");
+        del(args);
+    }
+
+    insn mut@ own fib = build(FIB_SRC[0..FIB_SRC.len], "fib");
+    defer del(fib);
+    i64[5] fibs = {0, 1, 6, 10, 15};
+    for (u64 mut i = 0; i < fibs.len; i++) {
+        i64 mut@ own args = new(i64, 1);
+        args[0] = fibs[i];
+        i64 got = run(fib, args, "fib");
+        println("  reference=", fib_reference(fibs[i]), " agrees=",
+                got == fib_reference(fibs[i]));
+        del(args);
+    }
+
+    // Faults are diagnosed, never trapped: the checked build would abort on
+    // the division itself, so the interpreter tests the divisor first (D11.2).
+    i64 mut@ own none = new(i64, 0);
+    defer del(none);
+    insn mut@ own bad = build(BAD_SRC[0..BAD_SRC.len], "divzero");
+    defer del(bad);
+    run(bad, none, "divzero");
+
+    // And the assembler's own three errors.
+    insn mut@ own e1 = build(UNKNOWN_SRC[0..UNKNOWN_SRC.len], "unknown mnemonic");
+    del(e1);
+    insn mut@ own e2 = build(NOLABEL_SRC[0..NOLABEL_SRC.len], "unknown label");
+    del(e2);
+    insn mut@ own e3 = build(BADARG_SRC[0..BADARG_SRC.len], "bad operand");
+    del(e3);
+    return 0;
+}

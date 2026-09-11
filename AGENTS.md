@@ -554,18 +554,82 @@ A safe(r) C-like systems programming language.
   comparable one in a `main` (`SOURCE` in `test/gen_control_test.c`).
   The bootstrap must also stay transliterable into fort: no unions, no macro tricks, and no
   compiler builtin fort lacks (function-pointer tables are fine, the bootstrap subset has
-  function pointers). `__builtin_add_overflow` and
-  `__builtin_mul_overflow` are the exception the exact constant folder needs; the port replaces
-  their three sites in `src/bootstrap/consts.c` by pre-checks, `am > UINT64_MAX - bm` in
-  `add_raw`, `a.mag != 0 && b.mag > UINT64_MAX / a.mag` in `cv_mul` and `a.mag == UINT64_MAX` in
-  `cv_not`, so no new builtin may be added without the same note. `__builtin_clzll` was removed
-  for that reason: `mag > (UINT64_MAX >> n)` says the same thing.
+  function pointers). `__builtin_clzll` was removed for that reason: `mag > (UINT64_MAX >> n)`
+  says the same thing. The whole list, and what replaces each construct, is **Transliterating the
+  bootstrap into fort** below; consult it before writing a C file the port will have to carry.
 - **fort sources**: identifier conventions per decision D1.4: everything is lower_case with
   underscores, struct and enum type names and enum members included; only module constants are
   UPPER_CASE. A variable never takes its type's name (`point p`, `box bx`, `list mut* mut l`); a
   field may (`node mut* own node`), since fields are not variables and are outside the module
   namespace (D7.9). Nothing formats or lints `.ft`, so wrap at 100 columns by hand and check with
   the same `awk 'length > 100'` the markdown rule uses.
+- **Transliterating the bootstrap into fort.** Phase B rewrites `src/bootstrap/*.c` as
+  `src/fort/*.ft`, and stage2 is compiled by stage1, so a compiler source may use only what the
+  bootstrap itself accepts. `test/lang/bootstrap-unsupported.txt` is that list: no floats (`f32`,
+  `f64`, float literals), no multi-dimensional arrays, no `do { } while` and no `?:`. Function
+  pointers are inside the subset (D3.10), so a dispatch table is fine. These are the constructs a
+  C file may hold that have no fort spelling, with what replaces each; the rules the bootstrap
+  already follows so that it stays portable are the first four.
+  - No unions, no bitfields, no anonymous struct or union members: a fat tagged struct with a
+    kind enum and every field in the open, which is what `ast.h`, `types.h` and `sym.h` already
+    are.
+  - No macro beyond a constant, and no token pasting or stringizing: a module constant
+    (`u64 WORD_BITS = 64;`) or an ordinary function. A C `enum { NAME = value }` becomes a module
+    constant or a fort `enum`, whose members are qualified (`kind.num`, D3.9).
+  - No compiler builtin fort lacks. `__builtin_add_overflow` and `__builtin_mul_overflow` are
+    the exception the exact constant folder needs, and the port replaces their three sites in
+    `src/bootstrap/consts.c` by pre-checks: `am > UINT64_MAX - bm` in `add_raw`,
+    `a.mag != 0 && b.mag > UINT64_MAX / a.mag` in `cv_mul` and `a.mag == UINT64_MAX` in `cv_not`.
+    No new builtin may be added without the same note.
+  - No `goto`, no `switch` fallthrough, and an `enum` switch must name every member or carry a
+    `default` (D7.6). The bootstrap uses none of the three today; keep it that way.
+  - **No pointer arithmetic at all** (D10.4): `p + 1`, `p++` and `p[i]` are errors, and
+    `src/bootstrap/str.c` is the file that uses them (`p->cur + p->used`, `b->data + b->len`).
+    The fort form is a span and an index; the only way from a raw pointer to a span is the
+    two-bound `p[lo..hi]` (D6.9).
+  - **No implicit conversion but dropping `mut` and `own`** (D5.4, D17.4) and **no integer
+    promotion, not even for `u8`/`i8`** (D6.2). Every mixed-width or mixed-signedness expression
+    that C writes silently needs an explicit `cast`, and that is the single largest mechanical
+    difference in the port. `.len` is a `u64`, so an `i64` loop counter over a span is a type
+    error rather than a warning.
+  - `char` is a distinct one-byte type with no arithmetic and no bitwise operators (D3.2):
+    `c - '0'` becomes `cast(c, i64) - cast('0', i64)`.
+  - `sizeof` takes a type, never an expression (D3.15): `sizeof(x)` becomes `sizeof(T)`.
+  - A C string is a NUL-terminated `const char*`; a fort `string` is a pointer and a length and
+    may hold an embedded NUL (D3.7). A literal carries a trailing NUL that `len` does not count,
+    so `s.ptr` is a C string for a literal and for nothing else: a sub-string is not
+    NUL-terminated, and `str.to_cstr` is the conversion at the C boundary, `str.from_cstr` the
+    one coming back. `strcmp` of two names becomes `==` on two `string`s, which compares `len`
+    and then the bytes.
+  - A fixed array is a value: `T[N]` copies on assignment, on argument passing and on return
+    (D3.4), where C decays it to a pointer. A parameter that means "the caller's array" is a span
+    `T@`, and `T[N]` has no `.ptr`.
+  - No variadics in either direction. An extern signature may not declare one (D9.8); a C
+    variadic is declared with a fixed prototype for the arguments actually passed, and only
+    `i32`, `i64`, `f64` or a pointer may stand in a variadic position (module-system.md 8.4).
+    The print family is a builtin (D11.7), so `printf`, `fprintf` and `snprintf` inside the
+    compiler become `print`/`println`/`eprintln` or an explicit string buffer.
+  - No function-scope `static`: a module-level `mut` global replaces it, and it is visible to the
+    whole module rather than to one function.
+  - No forward declaration: top-level declarations are order-independent within a module (D7.10),
+    so every C prototype the file carried for ordering disappears.
+  - `_Static_assert` has no fort spelling. The invariant becomes a unit test, or a runtime
+    `assert` at the one place that depends on it; `prim.h`'s assertion on the order of
+    `prim_kind_t` is the site.
+  - `malloc`/`free` become `new`/`del` with ownership (D17), and **there is no `realloc`**: growth
+    is allocate, copy, `del`, as `std/vec.ft` and `src/bootstrap/str.c` already write it.
+  - Checked arithmetic traps where C wrapped (D11.1). Every place that means to wrap -- a hash, a
+    checksum, a fingerprint -- must be written `+% -% *%` (D11.2), or the checked build aborts on
+    input the C compiler handled.
+  - `const` is a reserved word (D2.4) and immutability is the default, so a C `const` disappears
+    and a C non-`const` gains `mut` in the position D5.3 gives it. A field never carries the
+    outermost `mut` (D5.5), so `int count;` in a struct the code writes through is just
+    `i32 count;` and the mutability comes from the access path.
+  - Nesting deeper than 256 is a compile error (D2.11), parentheses, blocks, brackets and type
+    suffixes together.
+  A ported module is judged against the C one it replaces: the same unit suite runs over both, so
+  the oracle is the existing test, not a reading of the new code. `tools/lines.py` counts
+  `src/fort`, so the ported lines carry the 3:1 ratio like any others.
 - **The standard library is invisible to the tooling that watches the compiler.** `tools/lines.py`
   counts `src/bootstrap`, `src/fort` and `test/`, so a ticket that writes `std/*.ft` passes the 3:1
   ratio without the ratio having seen its code; state the real figure (library lines against the

@@ -1,0 +1,245 @@
+//! run
+//! stdout:
+//| insertion: -20 -3 -3 -1 0 1 3 3 5 7 8 9 9 17 42 100
+//|   sorted=true permutation=true
+//| selection: -20 -3 -3 -1 0 1 3 3 5 7 8 9 9 17 42 100
+//|   sorted=true permutation=true
+//| quick: -20 -3 -3 -1 0 1 3 3 5 7 8 9 9 17 42 100
+//|   sorted=true permutation=true
+//| merge: -20 -3 -3 -1 0 1 3 3 5 7 8 9 9 17 42 100
+//|   sorted=true permutation=true
+//| agree=true
+//| bounds=0 6 8 16
+//| empty=0 true
+//| one=7
+//| down=1 8 true
+// Four sorting algorithms over one owning span of i32, each checked against the
+// same oracle: the result is sorted and is a permutation of the input. Written
+// with core features only -- spans, `new`/`del`, recursion and ownership (D17).
+i32[16] SAMPLE = {5, -3, 17, 0, 8, -3, 42, 1, 9, 9, -20, 7, 3, 3, 100, -1};
+
+fn i32 mut@ own copy_of(i32@ src) {
+    i32 mut@ own out = new(i32, src.len);
+    for (u64 mut i = 0; i < src.len; i++) {
+        out[i] = src[i];
+    }
+    return move(out);
+}
+
+fn void swap(i32 mut@ xs, u64 a, u64 b) {
+    i32 t = xs[a];
+    xs[a] = xs[b];
+    xs[b] = t;
+}
+
+fn bool is_sorted(i32@ xs) {
+    for (u64 mut i = 1; i < xs.len; i++) {
+        if (xs[i - 1] > xs[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Two spans are permutations of one another when each element of the first
+// occurs in the second as often as it does in the first.
+fn bool same_multiset(i32@ a, i32@ b) {
+    if (a.len != b.len) {
+        return false;
+    }
+    for (u64 mut i = 0; i < a.len; i++) {
+        u64 mut na = 0;
+        u64 mut nb = 0;
+        for (u64 mut j = 0; j < a.len; j++) {
+            if (a[j] == a[i]) {
+                na++;
+            }
+            if (b[j] == a[i]) {
+                nb++;
+            }
+        }
+        if (na != nb) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn void insertion_sort(i32 mut@ xs) {
+    for (u64 mut i = 1; i < xs.len; i++) {
+        i32 key = xs[i];
+        u64 mut j = i;
+        while (j > 0 && xs[j - 1] > key) {
+            xs[j] = xs[j - 1];
+            j--;
+        }
+        xs[j] = key;
+    }
+}
+
+fn void selection_sort(i32 mut@ xs) {
+    for (u64 mut i = 0; i + 1 < xs.len; i++) {
+        u64 mut least = i;
+        for (u64 mut j = i + 1; j < xs.len; j++) {
+            if (xs[j] < xs[least]) {
+                least = j;
+            }
+        }
+        if (least != i) {
+            swap(xs, i, least);
+        }
+    }
+}
+
+// Lomuto partition around the last element, recursing on the sub-spans the
+// pivot leaves; a span of one element or none is already sorted.
+fn void quick_sort(i32 mut@ xs) {
+    if (xs.len < 2) {
+        return;
+    }
+    i32 pivot = xs[xs.len - 1];
+    u64 mut wall = 0;
+    for (u64 mut i = 0; i + 1 < xs.len; i++) {
+        if (xs[i] < pivot) {
+            swap(xs, i, wall);
+            wall++;
+        }
+    }
+    swap(xs, wall, xs.len - 1);
+    quick_sort(xs[0..wall]);
+    quick_sort(xs[wall + 1..xs.len]);
+}
+
+// Bottom-up merge sort with one scratch buffer, so the recursion depth is not
+// the input's and the allocation happens once.
+fn void merge_run(i32 mut@ xs, i32 mut@ scratch, u64 lo, u64 mid, u64 hi) {
+    u64 mut i = lo;
+    u64 mut j = mid;
+    u64 mut k = lo;
+    while (i < mid && j < hi) {
+        if (xs[j] < xs[i]) {
+            scratch[k] = xs[j];
+            j++;
+        } else {
+            scratch[k] = xs[i];
+            i++;
+        }
+        k++;
+    }
+    while (i < mid) {
+        scratch[k] = xs[i];
+        i++;
+        k++;
+    }
+    while (j < hi) {
+        scratch[k] = xs[j];
+        j++;
+        k++;
+    }
+    for (u64 mut n = lo; n < hi; n++) {
+        xs[n] = scratch[n];
+    }
+}
+
+fn void merge_sort(i32 mut@ xs) {
+    i32 mut@ own scratch = new(i32, xs.len);
+    defer del(scratch);
+    u64 mut width = 1;
+    while (width < xs.len) {
+        u64 mut lo = 0;
+        while (lo < xs.len) {
+            u64 mut mid = lo + width;
+            u64 mut hi = lo + width * 2;
+            if (mid > xs.len) {
+                mid = xs.len;
+            }
+            if (hi > xs.len) {
+                hi = xs.len;
+            }
+            merge_run(xs, scratch, lo, mid, hi);
+            lo = hi;
+        }
+        width *= 2;
+    }
+}
+
+// Lower bound: the first index whose element is not less than `needle`.
+fn u64 lower_bound(i32@ xs, i32 needle) {
+    u64 mut lo = 0;
+    u64 mut hi = xs.len;
+    while (lo < hi) {
+        u64 mid = lo + (hi - lo) / 2;
+        if (xs[mid] < needle) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+fn void show(string name, i32@ xs, i32@ original) {
+    print(name, ":");
+    for (i32 v : xs) {
+        print(" ", v);
+    }
+    println();
+    println("  sorted=", is_sorted(xs), " permutation=", same_multiset(original, xs));
+}
+
+fn i32 main() {
+    i32@ src = SAMPLE[0..SAMPLE.len];
+
+    i32 mut@ own a = copy_of(src);
+    insertion_sort(a);
+    show("insertion", a, src);
+
+    i32 mut@ own b = copy_of(src);
+    selection_sort(b);
+    show("selection", b, src);
+
+    i32 mut@ own c = copy_of(src);
+    quick_sort(c);
+    show("quick", c, src);
+
+    i32 mut@ own d = copy_of(src);
+    merge_sort(d);
+    show("merge", d, src);
+
+    // Every algorithm must agree element by element.
+    bool mut agree = true;
+    for (u64 mut i = 0; i < a.len; i++) {
+        if (a[i] != b[i] || b[i] != c[i] || c[i] != d[i]) {
+            agree = false;
+        }
+    }
+    println("agree=", agree);
+
+    println("bounds=", lower_bound(a, -20), " ", lower_bound(a, 3), " ", lower_bound(a, 4), " ",
+            lower_bound(a, 101));
+
+    // The degenerate inputs: empty, one element, already sorted, reversed.
+    i32 mut@ own empty = new(i32, 0);
+    quick_sort(empty);
+    merge_sort(empty);
+    println("empty=", empty.len, " ", is_sorted(empty));
+    i32 mut@ own one = new(i32, 1);
+    one[0] = 7;
+    quick_sort(one);
+    println("one=", one[0]);
+    i32 mut@ own down = new(i32, 8);
+    for (u64 mut i = 0; i < down.len; i++) {
+        down[i] = cast(8 - cast(i, i32), i32);
+    }
+    quick_sort(down);
+    println("down=", down[0], " ", down[down.len - 1], " ", is_sorted(down));
+
+    del(down);
+    del(one);
+    del(empty);
+    del(d);
+    del(c);
+    del(b);
+    del(a);
+    return 0;
+}

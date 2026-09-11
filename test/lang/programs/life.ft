@@ -1,0 +1,238 @@
+//! run
+//! stdout:
+//| block:
+//|   .....
+//|   .##..
+//|   .##..
+//|   .....
+//|   .....
+//| block stable=true population=4
+//| blinker:
+//|   .....
+//|   .....
+//|   .###.
+//|   .....
+//|   .....
+//| blinker t=1:
+//|   .....
+//|   ..#..
+//|   ..#..
+//|   ..#..
+//|   .....
+//| turned=true population=3
+//| period two=true
+//| glider t=0:
+//|   .#......
+//|   ..#.....
+//|   ###.....
+//|   ........
+//|   ........
+//|   ........
+//|   ........
+//|   ........
+//| glider t=4:
+//|   ........
+//|   ..#.....
+//|   ...#....
+//|   .###....
+//|   ........
+//|   ........
+//|   ........
+//|   ........
+//| population=5 moved=true unmoved=false
+//| lone dies=true
+//| empty stays=true
+// Conway's Game of Life on a bounded grid held in one owning span of bool,
+// with the two buffers swapped by `move` each generation. The patterns are
+// the classical ones and each is checked against the behaviour it is known
+// for: a block never changes, a blinker has period two, a glider returns to
+// its own shape displaced by one cell diagonally after four generations.
+struct board {
+    u64 width;
+    u64 height;
+    bool mut@ own cells;
+}
+
+fn board make(u64 width, u64 height) {
+    board mut b = {};
+    b.width = width;
+    b.height = height;
+    b.cells = new(bool, width * height);
+    return move(b);
+}
+
+fn void free_board(board mut* b) {
+    del(b->cells);
+    b->width = 0;
+    b->height = 0;
+}
+
+fn bool alive(board* b, i64 x, i64 y) {
+    if (x < 0 || y < 0 || x >= cast(b->width, i64) || y >= cast(b->height, i64)) {
+        return false;
+    }
+    return b->cells[cast(y, u64) * b->width + cast(x, u64)];
+}
+
+fn void set_cell(board mut* b, u64 x, u64 y, bool v) {
+    b->cells[y * b->width + x] = v;
+}
+
+fn u64 living_neighbours(board* b, i64 x, i64 y) {
+    u64 mut n = 0;
+    for (i64 mut dy = -1; dy <= 1; dy++) {
+        for (i64 mut dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) {
+                continue;
+            }
+            if (alive(b, x + dx, y + dy)) {
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
+fn void step(board* from, board mut* into) {
+    for (u64 mut y = 0; y < from->height; y++) {
+        for (u64 mut x = 0; x < from->width; x++) {
+            u64 n = living_neighbours(from, cast(x, i64), cast(y, i64));
+            bool was = alive(from, cast(x, i64), cast(y, i64));
+            bool mut now = n == 3;
+            if (was && n == 2) {
+                now = true;
+            }
+            set_cell(into, x, y, now);
+        }
+    }
+}
+
+fn void show(string name, board* b) {
+    println(name, ":");
+    for (u64 mut y = 0; y < b->height; y++) {
+        print("  ");
+        for (u64 mut x = 0; x < b->width; x++) {
+            if (b->cells[y * b->width + x]) {
+                print("#");
+            } else {
+                print(".");
+            }
+        }
+        println();
+    }
+}
+
+fn u64 population(board* b) {
+    u64 mut n = 0;
+    for (bool c : b->cells) {
+        if (c) {
+            n++;
+        }
+    }
+    return n;
+}
+
+fn bool same(board* a, board* b) {
+    if (a->width != b->width || a->height != b->height) {
+        return false;
+    }
+    for (u64 mut i = 0; i < a->cells.len; i++) {
+        if (a->cells[i] != b->cells[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn board copy_board(board* a) {
+    board mut out = make(a->width, a->height);
+    for (u64 mut i = 0; i < a->cells.len; i++) {
+        out.cells[i] = a->cells[i];
+    }
+    return move(out);
+}
+
+// `a` becomes the next generation and `b` the scratch, with the two spans
+// exchanged rather than copied.
+fn void advance(board mut* a, board mut* b) {
+    step(a, b);
+    bool mut@ own held = move(a->cells);
+    a->cells = move(b->cells);
+    b->cells = move(held);
+}
+
+// The glider translated by (dx, dy) matches the original exactly.
+fn bool shifted_match(board* now, board* before, i64 dx, i64 dy) {
+    for (i64 mut y = 0; y < cast(now->height, i64); y++) {
+        for (i64 mut x = 0; x < cast(now->width, i64); x++) {
+            if (alive(now, x, y) != alive(before, x - dx, y - dy)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+u64[8] BLOCK = {1, 1, 2, 1, 1, 2, 2, 2};
+u64[6] BLINKER = {1, 2, 2, 2, 3, 2};
+u64[10] GLIDER = {1, 0, 2, 1, 0, 2, 1, 2, 2, 2};
+
+fn void place(board mut* b, u64@ points) {
+    for (u64 mut i = 0; i < points.len; i += 2) {
+        set_cell(b, points[i], points[i + 1], true);
+    }
+}
+
+fn i32 main() {
+    board mut still = make(5, 5);
+    defer free_board(&still);
+    board mut scratch = make(5, 5);
+    defer free_board(&scratch);
+    place(&still, BLOCK[0..BLOCK.len]);
+    board mut original = copy_board(&still);
+    defer free_board(&original);
+    show("block", &still);
+    advance(&still, &scratch);
+    println("block stable=", same(&still, &original), " population=", population(&still));
+
+    board mut osc = make(5, 5);
+    defer free_board(&osc);
+    board mut osc_scratch = make(5, 5);
+    defer free_board(&osc_scratch);
+    place(&osc, BLINKER[0..BLINKER.len]);
+    board mut osc_start = copy_board(&osc);
+    defer free_board(&osc_start);
+    show("blinker", &osc);
+    advance(&osc, &osc_scratch);
+    show("blinker t=1", &osc);
+    println("turned=", !same(&osc, &osc_start), " population=", population(&osc));
+    advance(&osc, &osc_scratch);
+    println("period two=", same(&osc, &osc_start));
+
+    board mut g = make(8, 8);
+    defer free_board(&g);
+    board mut g_scratch = make(8, 8);
+    defer free_board(&g_scratch);
+    place(&g, GLIDER[0..GLIDER.len]);
+    board mut g_start = copy_board(&g);
+    defer free_board(&g_start);
+    show("glider t=0", &g);
+    for (u64 mut i = 0; i < 4; i++) {
+        advance(&g, &g_scratch);
+    }
+    show("glider t=4", &g);
+    println("population=", population(&g), " moved=", shifted_match(&g, &g_start, 1, 1),
+            " unmoved=", shifted_match(&g, &g_start, 0, 0));
+
+    // A lone cell dies, and an empty board stays empty.
+    board mut lone = make(3, 3);
+    defer free_board(&lone);
+    board mut lone_scratch = make(3, 3);
+    defer free_board(&lone_scratch);
+    set_cell(&lone, 1, 1, true);
+    advance(&lone, &lone_scratch);
+    println("lone dies=", population(&lone) == 0);
+    advance(&lone, &lone_scratch);
+    println("empty stays=", population(&lone) == 0);
+    return 0;
+}
