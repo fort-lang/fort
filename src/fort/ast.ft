@@ -1,0 +1,817 @@
+// ast: the syntax tree of the self-hosted compiler (toolchain.md 8, parser),
+// the transliteration of src/bootstrap/ast.h, ast.c and ast_dump.c: one fat
+// tagged node for every production of grammar.md, an arena that owns the
+// nodes, the small queries the later passes need, and the S-expression
+// printer `fort --ast` writes (D14.1).
+//
+// One node type carries every construct, so this file is what its C original
+// already was: no unions, no anonymous members, every field in the open.
+// `kind` names the production; `loc` is the range of the construct (D20.4):
+// it starts at the construct's first token, except on the nodes named after
+// an operator or a punctuation mark (unary, binary, assignment, increment,
+// call, index, span, field, arrow, type suffix), which start at that token,
+// since a runtime error is reported at the operator of the failing operation
+// and the overwrite check at the `=` of an assignment (toolchain.md 4,
+// D17.11), and ends one past the last byte of the construct's last token;
+// `name_loc` is the range of the name token on a node a name declares or
+// mentions; `op` is the small kind code the construct needs (a token kind for
+// an operator, a suffix kind for a type suffix, a primitive kind for a
+// primitive type); `a` to `d` are the fixed children, absent ones null; `list`
+// holds the children of variable arity (statements of a block, arguments of a
+// call, suffixes of a type); `name` is an identifier or the bytes of a
+// literal; `ival` is a literal's value; `flags` holds the marks (`own`, `mut`,
+// `extern`, designated, `default`).
+//
+// A node is never freed on its own: the arena owns every node and its list,
+// and frees them together (toolchain.md 8, memory). Names and literal bytes
+// are views into the source or into the session's pool, so the session must
+// outlive the tree.
+//
+// The annotation slots src/bootstrap/ast.h ends with -- `type`, `sym`, `aux`,
+// `ann` -- are not here: they belong to the checker, which is not ported yet,
+// and three of the four name things this compiler has no representation for.
+// The ticket that ports check.c adds them; nothing the parser writes reads
+// them.
+//
+// Names: the kind enum members carry a `k_` prefix, as types.ft's do, because
+// two thirds of the C constants' bare names are keywords (`if`, `while`,
+// `struct`, `char`, `null`, `cast`, `new`) and cannot be members (D2.4); the
+// functions keep their C names, so a reader holds the two files against each
+// other name by name.
+//
+// Re-entrancy (D20.5): the arena is a value the caller owns and frees, not a
+// module-level pool, so two analyses in one process are two arenas and share
+// nothing, and every node of an analysis dies with its arena. Nothing here
+// ends the process: an index past the end of a list is a violated
+// precondition and panics at the call that broke it (D13.3), where
+// src/bootstrap/ast.c calls fatal_internal. A panic aborts like any other
+// failure (D11.4), so what it buys is a documented boundary, not in-process
+// recovery.
+//
+// Dispatch: none. The case analysis is the switches the C wrote, over the
+// kind enum, and no table of function pointers (D3.10).
+import containers;
+import diag;
+import lexer;
+import prim;
+import types;
+import std::strbuf;
+
+// The productions of grammar.md, in its order: module and declarations,
+// types, statements, expressions, and last the error node that stands for a
+// region no production accepted (D14.2).
+enum ast_kind {
+    k_none, // never produced by the parser; the zero of a fresh node
+
+    // ---- module and declarations (grammar.md 2, 3) ----
+    k_module,      // list: imports then declarations, in source order
+    k_import,      // a: path; b: `as` alias or null; list: brace items
+    k_path,        // list: the identifiers of an import path (D9.1)
+    k_import_item, // name: the symbol; a: `as` alias or null
+    k_fn_decl,     // a: return type; list: params; b: body, null when extern
+    k_param,       // a: type; name: the parameter
+    k_struct_decl, // name; list: fields
+    k_field_decl,  // a: type; name: the field
+    k_enum_decl,   // name; list: members
+    k_enum_member, // name; a: the explicit value or null
+    k_var_decl,    // a: type; name; b: initializer (a global or a local)
+
+    // ---- types (grammar.md 4) ----
+    k_type,          // a: base type; flags: the base position's own and mut;
+                     // list: the suffixes in source order
+    k_type_prim,     // op: the prim_kind of prim.ft
+    k_type_string,   // `string`
+    k_type_void,     // `void`
+    k_type_noreturn, // `noreturn`, a return type only (D8.5)
+    k_type_name,     // name: the first identifier; a: the second or null (D9.4)
+    k_type_fn,       // a: return type; list: parameter types (D3.10)
+    k_type_suffix,   // op: a suffix_kind of types.ft; flags: own and mut;
+                     // a: the length of an array suffix
+
+    // ---- statements (grammar.md 5) ----
+    k_block,      // list: the statements
+    k_assign,     // op: the assignment token; a: target; b: value
+    k_incdec,     // op: plus_plus or minus_minus; a: target
+    k_call_stmt,  // a: the call expression (D7.3)
+    k_if,         // a: condition; b: then block; c: else block or k_if
+    k_while,      // a: condition; b: body
+    k_do_while,   // a: body; b: condition
+    k_for,        // a: init; b: condition; c: step; d: body; a, b, c may be null
+    k_range_for,  // a: element type; name: the element; b: collection; c: body
+    k_switch,     // a: the operand; list: the case clauses
+    k_case,       // list: the labels, empty with FLAG_DEFAULT; a: body block
+    k_defer,      // a: the deferred statement (D7.8)
+    k_return,     // a: the value or null
+    k_break,      //
+    k_continue,   //
+    k_brace_init, // list: the initializers; FLAG_DESIGNATED for `.f = v`
+    k_designator, // name: the field; a: its initializer
+
+    // ---- expressions (grammar.md 6) ----
+    k_int,        // ival: the magnitude (D2.5)
+    k_float,      // name: the literal (D2.6)
+    k_char,       // ival: the byte value (D2.7)
+    k_string,     // name: the decoded bytes (D2.9)
+    k_bool,       // ival: 1 for `true`, 0 for `false`
+    k_null,       // `null` (D10.5)
+    k_ident,      // name: the identifier
+    k_unary,      // op: the operator token; a: the operand
+    k_binary,     // op: the operator token; a, b: the operands
+    k_ternary,    // a: condition; b: then; c: else (D6.6)
+    k_call,       // a: the callee; list: the arguments
+    k_index,      // a: the operand; b: the index (D6.8)
+    k_span,       // a: the operand; b: low or null; c: high or null (D6.9)
+    k_field,      // a: the operand; name: the field (`.`)
+    k_arrow,      // a: the operand; name: the field (`->`, D6.10)
+    k_cast,       // a: the expression; b: the target type (D6.4)
+    k_sizeof,     // a: the type (D3.15)
+    k_new,        // a: the allocated type; b: the count or null (D10.2)
+    k_struct_lit, // a: the qualified name; b: the brace initializer (D6.5)
+    k_array_lit,  // a: the array type; b: the brace initializer (D6.5)
+
+    // ---- recovery (D14.2) ----
+    // The tokens a syntax error made the parser skip; never has children. It
+    // stands wherever a list holds children of that level -- the statements
+    // of a block, the clauses of a switch, the fields of a struct, the
+    // declarations of a module -- so every pass that walks one of those lists
+    // skips a node of this kind (D14.2).
+    k_error,
+}
+
+// The bits of `flags` (D1.4: a module constant is UPPER_CASE).
+u32 FLAG_OWN = 1;        // k_type, k_type_suffix: an `own` in the position (D17.2)
+u32 FLAG_MUT = 2;        // k_type, k_type_suffix: a `mut` in the position (D5.3)
+u32 FLAG_EXTERN = 4;     // k_fn_decl: an `extern fn` declaration (D9.8)
+u32 FLAG_DEFAULT = 8;    // k_case: the `default` clause (D7.6)
+u32 FLAG_DESIGNATED = 16; // k_brace_init: `.field = value` members (D6.5)
+
+// The first non-zero capacity of a child list and of the arena's node vector;
+// growth doubles from there.
+u64 LIST_MIN_CAP = 4;
+u64 ARENA_MIN_CAP = 64;
+
+// ---- the node and its child list -----------------------------------------------
+
+// One node. Every field a kind does not use holds its zero value, as the C's
+// fat struct does.
+struct node {
+    ast_kind kind;
+    diag.loc loc;
+    // The range of the name token of a node a name declares or mentions, the
+    // empty range on every other node (D20.4), so an editor jumps to the name
+    // and not to the construct's first token. It is a whole loc, repeating
+    // `loc`'s file on a node that has a name, so that a name range is passed
+    // to diag.error and printed like any other range with no conversion.
+    diag.loc name_loc;
+    i32 op;      // a tok_kind, a suffix_kind or a prim_kind; 0 otherwise
+    node mut* a; // the fixed children, in the order the comments above give
+    node mut* b;
+    node mut* c;
+    node mut* d;
+    node_vec list; // the children of variable arity, owned by the arena
+    string name;   // an identifier or the bytes of a literal
+    u64 ival;      // an integer or char literal, 0 or 1 for a bool
+    u32 flags;
+}
+
+// The children of variable arity of one node. src/bootstrap/ast.h uses the
+// ptrvec_t of containers.h, a vector of `void*`; a typed vector says the same
+// thing without a cast at every read. `items.len` is the capacity and `len`
+// the slots in use, as containers.str_vec is written. The vector owns its
+// slots and borrows every node in them: the arena owns the nodes (D17.3). It
+// stands after `node` rather than before it: stage1 lays a struct out in
+// declaration order and a struct whose field points at one declared later
+// reports "infinite size", so the type holding the other by value comes
+// first.
+struct node_vec {
+    node mut* mut@ own items;
+    u64 len;
+}
+
+// Releases the slots of one list; the nodes they held belong to the arena and
+// are left alone (D13.5).
+fn void list_free(node_vec mut* v) {
+    del(v->items);
+    v->len = 0;
+}
+
+// Ensures room for one more child, growing to the largest of LIST_MIN_CAP and
+// twice the capacity.
+fn void list_reserve(node_vec mut* v) {
+    if (v->len < v->items.len) {
+        return;
+    }
+    u64 mut cap = LIST_MIN_CAP;
+    if (v->items.len >= cap) {
+        // A pointer is more than one byte, so a capacity can never reach half
+        // the address space; the doubling is guarded all the same, since
+        // nothing here may detect an overflow by performing one (D11.1).
+        if (v->items.len > containers.U64_MAX / 2) {
+            panic("ast.list_reserve: capacity overflow");
+        }
+        cap = v->items.len * 2;
+    }
+    node mut* mut@ own bigger = new(node*, cap);
+    u64 mut i = 0;
+    while (i < v->len) {
+        bigger[i] = v->items[i];
+        i += 1;
+    }
+    del(v->items);
+    v->items = move(bigger);
+}
+
+// ---- the arena -----------------------------------------------------------------
+
+// Owns every node it hands out. arena{} is a valid empty arena, so a struct
+// holding one is initialized with {}.
+//
+// src/bootstrap/ast.c hands nodes out of blocks of 256, because a C vector
+// grows with realloc and would move the nodes a parse already points at. Here
+// the vector holds an owned pointer per node, as types.ft's table does, so the
+// nodes never move and the block bookkeeping disappears; ast_arena_count still
+// answers the nodes handed out, which is what its callers ask.
+//
+// That is a choice and not a limit of the language: a block is
+// `struct block { node mut@ own nodes; }` and the arena a
+// `block mut* mut@ own`, which is one wrapper struct away and would restore
+// the C's 256 nodes per allocation. It is deferred, and the cost of deferring
+// it is one allocation per node instead of one per 256 -- about 256 times the
+// allocator traffic in the parser's hot path, which stage3 pays in full when
+// it compiles the compiler. Whoever profiles the fixpoint should start
+// here.
+struct arena {
+    node mut* own mut@ own nodes;
+    u64 count;
+}
+
+// Zeroes the arena, as src/bootstrap/ast.c's init does over raw storage.
+// `arena{}` is the same value, so a caller that declares its arena needs no
+// call at all.
+fn void ast_arena_init(arena mut* ar) {
+    *ar = arena{};
+}
+
+// Releases every node and every node's list; the arena is empty and usable
+// afterwards. A node owns its list and `del` is shallow (D17.7), so the list
+// goes before the node does.
+fn void ast_arena_free(arena mut* ar) {
+    u64 mut i = 0;
+    while (i < ar->count) {
+        node mut* own n = move(ar->nodes[i]);
+        list_free(&n->list);
+        del(n);
+        i += 1;
+    }
+    del(ar->nodes);
+    ar->count = 0;
+}
+
+// The number of nodes the arena has handed out.
+fn u64 ast_arena_count(arena* ar) {
+    return ar->count;
+}
+
+// Ensures room for one more node, growing to the largest of ARENA_MIN_CAP and
+// twice the capacity.
+fn void arena_reserve(arena mut* ar) {
+    if (ar->count < ar->nodes.len) {
+        return;
+    }
+    u64 mut cap = ARENA_MIN_CAP;
+    if (ar->nodes.len >= cap) {
+        if (ar->nodes.len > containers.U64_MAX / 2) {
+            panic("ast.arena_reserve: capacity overflow");
+        }
+        cap = ar->nodes.len * 2;
+    }
+    node mut* own mut@ own bigger = new(node* own, cap);
+    u64 mut i = 0;
+    while (i < ar->count) {
+        bigger[i] = move(ar->nodes[i]);
+        i += 1;
+    }
+    del(ar->nodes);
+    ar->nodes = move(bigger);
+}
+
+// A zeroed node of `kind` at `loc`, owned by the arena and returned as a view
+// of it (D17.3).
+fn node mut* ast_new(arena mut* ar, ast_kind kind, diag.loc at_loc) {
+    node mut* own fresh = new(node);
+    fresh->kind = kind;
+    fresh->loc = at_loc;
+    arena_reserve(ar);
+    ar->nodes[ar->count] = move(fresh);
+    ar->count += 1;
+    return ar->nodes[ar->count - 1];
+}
+
+// ---- children ------------------------------------------------------------------
+
+// Appends `child`, which may not be null, to `parent`'s list.
+fn void ast_push(node mut* parent, node mut* child) {
+    if (child == null) {
+        panic("ast.ast_push of a null child");
+    }
+    list_reserve(&parent->list);
+    parent->list.items[parent->list.len] = child;
+    parent->list.len += 1;
+}
+
+// The number of children in `n`'s list.
+fn u64 ast_len(node* n) {
+    return n->list.len;
+}
+
+// The child at `i`; an index at or past the count is a violated precondition
+// and panics (D13.3), since the slots beyond it hold stale pointers.
+fn node* ast_child(node* n, u64 i) {
+    if (i >= n->list.len) {
+        panic("ast.ast_child: index out of range");
+    }
+    return n->list.items[i];
+}
+
+// Whether the node carries the mark: the `own` or `mut` of a type position
+// (D5.3, D17.2).
+fn bool ast_is_own(node* n) {
+    return (n->flags & FLAG_OWN) != 0;
+}
+
+fn bool ast_is_mut(node* n) {
+    return (n->flags & FLAG_MUT) != 0;
+}
+
+// The name of a kind as the S-expression dumper and diagnostics spell it:
+// "module", "var-decl", "type-suffix", "binary".
+fn string ast_kind_name(ast_kind kind) {
+    switch (kind) {
+    case ast_kind.k_none:
+        return "none";
+    case ast_kind.k_module:
+        return "module";
+    case ast_kind.k_import:
+        return "import";
+    case ast_kind.k_path:
+        return "path";
+    case ast_kind.k_import_item:
+        return "item";
+    case ast_kind.k_fn_decl:
+        return "fn";
+    case ast_kind.k_param:
+        return "param";
+    case ast_kind.k_struct_decl:
+        return "struct";
+    case ast_kind.k_field_decl:
+        return "field-decl";
+    case ast_kind.k_enum_decl:
+        return "enum";
+    case ast_kind.k_enum_member:
+        return "member";
+    case ast_kind.k_var_decl:
+        return "var";
+    case ast_kind.k_type:
+        return "type";
+    case ast_kind.k_type_prim:
+        return "prim";
+    case ast_kind.k_type_string:
+        return "string";
+    case ast_kind.k_type_void:
+        return "void";
+    case ast_kind.k_type_noreturn:
+        return "noreturn";
+    case ast_kind.k_type_name:
+        return "name";
+    case ast_kind.k_type_fn:
+        return "fn-type";
+    case ast_kind.k_type_suffix:
+        return "suffix";
+    case ast_kind.k_block:
+        return "block";
+    case ast_kind.k_assign:
+        return "assign";
+    case ast_kind.k_incdec:
+        return "incdec";
+    case ast_kind.k_call_stmt:
+        return "call-stmt";
+    case ast_kind.k_if:
+        return "if";
+    case ast_kind.k_while:
+        return "while";
+    case ast_kind.k_do_while:
+        return "do";
+    case ast_kind.k_for:
+        return "for";
+    case ast_kind.k_range_for:
+        return "range-for";
+    case ast_kind.k_switch:
+        return "switch";
+    case ast_kind.k_case:
+        return "case";
+    case ast_kind.k_defer:
+        return "defer";
+    case ast_kind.k_return:
+        return "return";
+    case ast_kind.k_break:
+        return "break";
+    case ast_kind.k_continue:
+        return "continue";
+    case ast_kind.k_brace_init:
+        return "init";
+    case ast_kind.k_designator:
+        return "designator";
+    case ast_kind.k_int:
+        return "int";
+    case ast_kind.k_float:
+        return "float";
+    case ast_kind.k_char:
+        return "char";
+    case ast_kind.k_string:
+        return "str";
+    case ast_kind.k_bool:
+        return "bool";
+    case ast_kind.k_null:
+        return "null";
+    case ast_kind.k_ident:
+        return "ident";
+    case ast_kind.k_unary:
+        return "unary";
+    case ast_kind.k_binary:
+        return "binary";
+    case ast_kind.k_ternary:
+        return "ternary";
+    case ast_kind.k_call:
+        return "call";
+    case ast_kind.k_index:
+        return "index";
+    case ast_kind.k_span:
+        return "span";
+    case ast_kind.k_field:
+        return "field";
+    case ast_kind.k_arrow:
+        return "arrow";
+    case ast_kind.k_cast:
+        return "cast";
+    case ast_kind.k_sizeof:
+        return "sizeof";
+    case ast_kind.k_new:
+        return "new";
+    case ast_kind.k_struct_lit:
+        return "struct-lit";
+    case ast_kind.k_array_lit:
+        return "array-lit";
+    // The region a syntax error made the parser skip (D14.2).
+    case ast_kind.k_error:
+        return "error";
+    }
+    return "?";
+}
+
+// ---- the tree dump (--ast, toolchain.md 1) -------------------------------------
+
+// Bytes outside this range print as \xHH inside a string literal.
+i64 PRINTABLE_LOW = 32;
+i64 PRINTABLE_HIGH = 126;
+u64 HEX_RADIX = 16;
+string HEX_DIGITS = "0123456789ABCDEF";
+
+fn void sexp_open(strbuf.str_buf mut* out, string head) {
+    strbuf.push(out, '(');
+    strbuf.append(out, head);
+}
+
+fn void sexp_close(strbuf.str_buf mut* out) {
+    strbuf.push(out, ')');
+}
+
+fn void sexp_word(strbuf.str_buf mut* out, string w) {
+    strbuf.push(out, ' ');
+    strbuf.append(out, w);
+}
+
+fn void sexp_name(strbuf.str_buf mut* out, string s) {
+    strbuf.push(out, ' ');
+    strbuf.append(out, s);
+}
+
+fn void sexp_uint(strbuf.str_buf mut* out, u64 v) {
+    strbuf.push(out, ' ');
+    strbuf.append_u64(out, v);
+}
+
+// The bytes of a literal between double quotes, with `"`, `\` and every
+// non-printable byte escaped.
+fn void sexp_quoted(strbuf.str_buf mut* out, string s) {
+    strbuf.append(out, " \"");
+    for (char c : s) {
+        i64 byte = cast(c, i64);
+        if (byte == cast('"', i64) || byte == cast('\\', i64)) {
+            strbuf.push(out, '\\');
+            strbuf.push(out, c);
+        } else if (byte < PRINTABLE_LOW || byte > PRINTABLE_HIGH) {
+            strbuf.append(out, "\\x");
+            strbuf.push(out, HEX_DIGITS[cast(byte, u64) / HEX_RADIX]);
+            strbuf.push(out, HEX_DIGITS[cast(byte, u64) % HEX_RADIX]);
+        } else {
+            strbuf.push(out, c);
+        }
+    }
+    strbuf.push(out, '"');
+}
+
+fn void sexp_child(node* n, strbuf.str_buf mut* out) {
+    strbuf.push(out, ' ');
+    ast_dump(n, out);
+}
+
+// Every child of the node's list, in order.
+fn void sexp_list(node* n, strbuf.str_buf mut* out) {
+    u64 mut i = 0;
+    while (i < ast_len(n)) {
+        sexp_child(ast_child(n, i), out);
+        i += 1;
+    }
+}
+
+// The `own` and `mut` of a type position, in the order the source writes them
+// (D17.2: an `own` precedes the `mut` in a position).
+fn void sexp_marks(node* n, strbuf.str_buf mut* out) {
+    if (ast_is_own(n)) {
+        sexp_word(out, "own");
+    }
+    if (ast_is_mut(n)) {
+        sexp_word(out, "mut");
+    }
+}
+
+fn void dump_suffix(node* n, strbuf.str_buf mut* out) {
+    types.suffix_kind kind = cast(n->op, types.suffix_kind);
+    switch (kind) {
+    case types.suffix_kind.s_ptr:
+        sexp_open(out, "ptr");
+    case types.suffix_kind.s_span:
+        sexp_open(out, "span");
+    case types.suffix_kind.s_array:
+        sexp_open(out, "array");
+        sexp_child(n->a, out);
+    }
+    sexp_marks(n, out);
+    sexp_close(out);
+}
+
+fn void dump_type(node* n, strbuf.str_buf mut* out) {
+    if (n->kind == ast_kind.k_type) {
+        sexp_open(out, "type");
+        sexp_child(n->a, out);
+        sexp_marks(n, out);
+        sexp_list(n, out);
+    } else if (n->kind == ast_kind.k_type_prim) {
+        sexp_open(out, "prim");
+        sexp_word(out, prim.prim_name(cast(n->op, prim.prim_kind)));
+    } else if (n->kind == ast_kind.k_type_name) {
+        sexp_open(out, "name");
+        sexp_name(out, n->name);
+        if (n->a != null) {
+            sexp_name(out, n->a->name);
+        }
+    } else if (n->kind == ast_kind.k_type_fn) {
+        sexp_open(out, "fn-type");
+        sexp_child(n->a, out);
+        sexp_list(n, out);
+    } else {
+        sexp_open(out, ast_kind_name(n->kind));
+    }
+    sexp_close(out);
+}
+
+fn void dump_decl(node* n, strbuf.str_buf mut* out) {
+    if (n->kind == ast_kind.k_import) {
+        sexp_open(out, "import");
+        sexp_child(n->a, out);
+        sexp_child(n->b, out);
+        sexp_list(n, out);
+    } else if (n->kind == ast_kind.k_import_item) {
+        sexp_open(out, "item");
+        sexp_name(out, n->name);
+        sexp_child(n->a, out);
+    } else if (n->kind == ast_kind.k_path) {
+        // The segments are identifiers, printed as words: (path std io).
+        sexp_open(out, "path");
+        u64 mut i = 0;
+        while (i < ast_len(n)) {
+            sexp_name(out, ast_child(n, i)->name);
+            i += 1;
+        }
+    } else if (n->kind == ast_kind.k_fn_decl) {
+        if ((n->flags & FLAG_EXTERN) != 0) {
+            sexp_open(out, "extern-fn");
+        } else {
+            sexp_open(out, "fn");
+        }
+        sexp_child(n->a, out);
+        sexp_name(out, n->name);
+        strbuf.append(out, " (params");
+        sexp_list(n, out);
+        sexp_close(out);
+        sexp_child(n->b, out);
+    } else if (n->kind == ast_kind.k_param || n->kind == ast_kind.k_field_decl) {
+        sexp_open(out, ast_kind_name(n->kind));
+        sexp_child(n->a, out);
+        sexp_name(out, n->name);
+    } else if (n->kind == ast_kind.k_enum_member) {
+        sexp_open(out, "member");
+        sexp_name(out, n->name);
+        sexp_child(n->a, out);
+    } else if (n->kind == ast_kind.k_var_decl) {
+        sexp_open(out, "var");
+        sexp_name(out, n->name);
+        sexp_child(n->a, out);
+        sexp_child(n->b, out);
+    } else if (n->kind == ast_kind.k_struct_decl || n->kind == ast_kind.k_enum_decl) {
+        sexp_open(out, ast_kind_name(n->kind));
+        sexp_name(out, n->name);
+        sexp_list(n, out);
+    } else {
+        sexp_open(out, ast_kind_name(n->kind));
+        sexp_list(n, out);
+    }
+    sexp_close(out);
+}
+
+fn void dump_stmt(node* n, strbuf.str_buf mut* out) {
+    if (n->kind == ast_kind.k_assign) {
+        sexp_open(out, "assign");
+        sexp_word(out, lexer.tok_kind_name(cast(n->op, lexer.tok_kind)));
+        sexp_child(n->a, out);
+        sexp_child(n->b, out);
+    } else if (n->kind == ast_kind.k_incdec) {
+        sexp_open(out, "incdec");
+        sexp_word(out, lexer.tok_kind_name(cast(n->op, lexer.tok_kind)));
+        sexp_child(n->a, out);
+    } else if (n->kind == ast_kind.k_if) {
+        sexp_open(out, "if");
+        sexp_child(n->a, out);
+        sexp_child(n->b, out);
+        sexp_child(n->c, out);
+    } else if (n->kind == ast_kind.k_for) {
+        sexp_open(out, "for");
+        sexp_child(n->a, out);
+        sexp_child(n->b, out);
+        sexp_child(n->c, out);
+        sexp_child(n->d, out);
+    } else if (n->kind == ast_kind.k_range_for) {
+        sexp_open(out, "range-for");
+        sexp_child(n->a, out);
+        sexp_name(out, n->name);
+        sexp_child(n->b, out);
+        sexp_child(n->c, out);
+    } else if (n->kind == ast_kind.k_switch) {
+        sexp_open(out, "switch");
+        sexp_child(n->a, out);
+        sexp_list(n, out);
+    } else if (n->kind == ast_kind.k_case) {
+        sexp_open(out, "case");
+        if ((n->flags & FLAG_DEFAULT) != 0) {
+            sexp_word(out, "default");
+        } else {
+            strbuf.append(out, " (labels");
+            sexp_list(n, out);
+            sexp_close(out);
+        }
+        sexp_child(n->a, out);
+    } else if (n->kind == ast_kind.k_brace_init) {
+        sexp_open(out, "init");
+        sexp_list(n, out);
+    } else if (n->kind == ast_kind.k_designator) {
+        sexp_open(out, "designator");
+        sexp_name(out, n->name);
+        sexp_child(n->a, out);
+    } else if (n->kind == ast_kind.k_block) {
+        sexp_open(out, "block");
+        sexp_list(n, out);
+    } else if (n->kind == ast_kind.k_while || n->kind == ast_kind.k_do_while) {
+        sexp_open(out, ast_kind_name(n->kind));
+        sexp_child(n->a, out);
+        sexp_child(n->b, out);
+    } else {
+        // call-stmt, defer, return, break, continue: one child or none.
+        sexp_open(out, ast_kind_name(n->kind));
+        if (n->kind != ast_kind.k_break && n->kind != ast_kind.k_continue) {
+            sexp_child(n->a, out);
+        }
+    }
+    sexp_close(out);
+}
+
+fn void dump_expr(node* n, strbuf.str_buf mut* out) {
+    if (n->kind == ast_kind.k_int || n->kind == ast_kind.k_char) {
+        sexp_open(out, ast_kind_name(n->kind));
+        sexp_uint(out, n->ival);
+    } else if (n->kind == ast_kind.k_float || n->kind == ast_kind.k_string) {
+        sexp_open(out, ast_kind_name(n->kind));
+        sexp_quoted(out, n->name);
+    } else if (n->kind == ast_kind.k_bool) {
+        sexp_open(out, "bool");
+        if (n->ival != 0) {
+            sexp_word(out, "true");
+        } else {
+            sexp_word(out, "false");
+        }
+    } else if (n->kind == ast_kind.k_ident) {
+        sexp_open(out, "ident");
+        sexp_name(out, n->name);
+    } else if (n->kind == ast_kind.k_unary || n->kind == ast_kind.k_binary) {
+        sexp_open(out, ast_kind_name(n->kind));
+        sexp_word(out, lexer.tok_kind_name(cast(n->op, lexer.tok_kind)));
+        sexp_child(n->a, out);
+        if (n->kind == ast_kind.k_binary) {
+            sexp_child(n->b, out);
+        }
+    } else if (n->kind == ast_kind.k_ternary || n->kind == ast_kind.k_span) {
+        sexp_open(out, ast_kind_name(n->kind));
+        sexp_child(n->a, out);
+        sexp_child(n->b, out);
+        sexp_child(n->c, out);
+    } else if (n->kind == ast_kind.k_call) {
+        sexp_open(out, "call");
+        sexp_child(n->a, out);
+        sexp_list(n, out);
+    } else if (n->kind == ast_kind.k_field || n->kind == ast_kind.k_arrow) {
+        sexp_open(out, ast_kind_name(n->kind));
+        sexp_child(n->a, out);
+        sexp_name(out, n->name);
+    } else if (n->kind == ast_kind.k_sizeof) {
+        sexp_open(out, "sizeof");
+        sexp_child(n->a, out);
+    } else {
+        // null, index, cast, new, struct-lit, array-lit: two children or none.
+        sexp_open(out, ast_kind_name(n->kind));
+        if (n->kind != ast_kind.k_null) {
+            sexp_child(n->a, out);
+            sexp_child(n->b, out);
+        }
+    }
+    sexp_close(out);
+}
+
+// Whether the kind is one of the type productions, which dump_type prints.
+fn bool is_type_kind(ast_kind kind) {
+    return kind == ast_kind.k_type || kind == ast_kind.k_type_prim
+        || kind == ast_kind.k_type_string || kind == ast_kind.k_type_void
+        || kind == ast_kind.k_type_noreturn || kind == ast_kind.k_type_name
+        || kind == ast_kind.k_type_fn;
+}
+
+// Whether the kind is a declaration or the module, which dump_decl prints.
+fn bool is_decl_kind(ast_kind kind) {
+    return kind == ast_kind.k_module || kind == ast_kind.k_import || kind == ast_kind.k_path
+        || kind == ast_kind.k_import_item || kind == ast_kind.k_fn_decl
+        || kind == ast_kind.k_param || kind == ast_kind.k_struct_decl
+        || kind == ast_kind.k_field_decl || kind == ast_kind.k_enum_decl
+        || kind == ast_kind.k_enum_member || kind == ast_kind.k_var_decl;
+}
+
+// Whether the kind is a statement, which dump_stmt prints.
+fn bool is_stmt_kind(ast_kind kind) {
+    return kind == ast_kind.k_block || kind == ast_kind.k_assign || kind == ast_kind.k_incdec
+        || kind == ast_kind.k_call_stmt || kind == ast_kind.k_if || kind == ast_kind.k_while
+        || kind == ast_kind.k_do_while || kind == ast_kind.k_for
+        || kind == ast_kind.k_range_for || kind == ast_kind.k_switch
+        || kind == ast_kind.k_case || kind == ast_kind.k_defer || kind == ast_kind.k_return
+        || kind == ast_kind.k_break || kind == ast_kind.k_continue
+        || kind == ast_kind.k_brace_init || kind == ast_kind.k_designator;
+}
+
+// Appends the S-expression of `n` to `out`; a null node prints as `nil`. It
+// is what `fort --ast` writes and what the parser suites assert against, and
+// src/bootstrap/ast_dump.c writes the same bytes: tools/diff_ast.sh holds the
+// two against each other over every .ft file in the repository.
+fn void ast_dump(node* n, strbuf.str_buf mut* out) {
+    if (n == null) {
+        strbuf.append(out, "nil");
+        return;
+    }
+    if (n->kind == ast_kind.k_error) {
+        // The skipped region of a syntax error has no children (D14.2).
+        strbuf.append(out, "(error)");
+        return;
+    }
+    if (is_type_kind(n->kind)) {
+        dump_type(n, out);
+        return;
+    }
+    if (n->kind == ast_kind.k_type_suffix) {
+        dump_suffix(n, out);
+        return;
+    }
+    if (is_decl_kind(n->kind)) {
+        dump_decl(n, out);
+        return;
+    }
+    if (is_stmt_kind(n->kind)) {
+        dump_stmt(n, out);
+        return;
+    }
+    dump_expr(n, out);
+}

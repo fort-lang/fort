@@ -1,0 +1,314 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| ok
+import parse_env;
+
+// The marker placement rules of D5.3 and D17.2, which the parser decides from
+// the written form alone, in every position a type may stand in: a
+// declaration, a parameter, a field, a return type, a cast target, a
+// `sizeof`, an allocated type and an array literal's type.
+//
+// The companion suite parser_test.ft asserts the shape of one type per rule;
+// what this one asserts is that each rule holds in every position, which is
+// the half a reader cannot check by looking at one function of the parser
+// (the C suite test/parser_type_test.c makes the same distinction).
+
+// The eight positions a type is written in, each wrapped so that the type
+// under test stands where the grammar puts it (grammar.md 4, 6).
+string DECL_BEFORE = "";
+string DECL_AFTER = " x = 0;\n";
+string PARAM_BEFORE = "fn void f(";
+string PARAM_AFTER = " p) {\n}\n";
+string FIELD_BEFORE = "struct s {\n    ";
+string FIELD_AFTER = " f;\n}\n";
+string RETURN_BEFORE = "fn ";
+string RETURN_AFTER = " f() {\n}\n";
+string CAST_BEFORE = "fn void f() {\n    g(cast(x, ";
+string CAST_AFTER = "));\n}\n";
+string SIZEOF_BEFORE = "fn void f() {\n    g(sizeof(";
+string SIZEOF_AFTER = "));\n}\n";
+
+// Whether `src`, written in the position `before`/`after` wraps, parses with
+// no diagnostic at all.
+fn bool parses_in(parse_env.env mut* e, string before, string src, string after) {
+    parse_env.parse_wrapped(e, before, src, after);
+    return parse_env.errors(e) == 0;
+}
+
+// The message the position reports for `src`, or the empty string when it
+// parses; only the message is returned, since the position of the marker
+// moves with the wrapper.
+fn string message_in(parse_env.env mut* e, string before, string src, string after) {
+    parse_env.parse_wrapped(e, before, src, after);
+    if (parse_env.errors(e) == 0) {
+        return "";
+    }
+    string text = parse_env.diag_at(e, 0);
+    // The `<line>:<col>: error: ` prefix is dropped: what is asserted here is
+    // which rule fired, not where the wrapper put the marker.
+    u64 mut i = 0;
+    while (i + 7 <= text.len) {
+        if (text[i..i + 7] == "error: ") {
+            return text[i + 7..text.len];
+        }
+        i += 1;
+    }
+    return text;
+}
+
+// Whether the written type parses in all six positions.
+fn bool parses_everywhere(parse_env.env mut* e, string src) {
+    return parses_in(e, DECL_BEFORE, src, DECL_AFTER)
+        && parses_in(e, PARAM_BEFORE, src, PARAM_AFTER)
+        && parses_in(e, FIELD_BEFORE, src, FIELD_AFTER)
+        && parses_in(e, RETURN_BEFORE, src, RETURN_AFTER)
+        && parses_in(e, CAST_BEFORE, src, CAST_AFTER)
+        && parses_in(e, SIZEOF_BEFORE, src, SIZEOF_AFTER);
+}
+
+// Whether the written type is refused with `message` in all six positions.
+fn bool refused_everywhere(parse_env.env mut* e, string src, string message) {
+    return message_in(e, DECL_BEFORE, src, DECL_AFTER) == message
+        && message_in(e, PARAM_BEFORE, src, PARAM_AFTER) == message
+        && message_in(e, FIELD_BEFORE, src, FIELD_AFTER) == message
+        && message_in(e, RETURN_BEFORE, src, RETURN_AFTER) == message
+        && message_in(e, CAST_BEFORE, src, CAST_AFTER) == message
+        && message_in(e, SIZEOF_BEFORE, src, SIZEOF_AFTER) == message;
+}
+
+// ---- the table of D5.3 ---------------------------------------------------------
+
+fn void the_written_forms_of_d5_3_parse_in_every_position() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // Scalars and their binding's own storage.
+    assert(parses_everywhere(&e, "i32"));
+    assert(parses_everywhere(&e, "i32 mut"));
+    // Pointers: the pointee's storage before the `*`, the pointer's after it.
+    assert(parses_everywhere(&e, "node*"));
+    assert(parses_everywhere(&e, "node mut*"));
+    assert(parses_everywhere(&e, "node* mut"));
+    assert(parses_everywhere(&e, "node mut* mut"));
+    // Spans, which mark the same two storages (D3.5).
+    assert(parses_everywhere(&e, "i32@"));
+    assert(parses_everywhere(&e, "i32 mut@"));
+    assert(parses_everywhere(&e, "i32@ mut"));
+    assert(parses_everywhere(&e, "i32 mut@ mut"));
+    // Arrays, whose elements share the array's storage (D3.4).
+    assert(parses_everywhere(&e, "i32[4]"));
+    assert(parses_everywhere(&e, "i32[4] mut"));
+    // References to arrays and arrays of references (D3.6).
+    assert(parses_everywhere(&e, "i32[4]*"));
+    assert(parses_everywhere(&e, "node*[4]"));
+    assert(parses_everywhere(&e, "node mut*[4] mut"));
+}
+
+fn void the_owning_forms_of_d17_2_parse_in_every_position() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    assert(parses_everywhere(&e, "node* own"));
+    assert(parses_everywhere(&e, "node* own mut"));
+    assert(parses_everywhere(&e, "node mut* own"));
+    assert(parses_everywhere(&e, "i32@ own"));
+    assert(parses_everywhere(&e, "i32 mut@ own"));
+    assert(parses_everywhere(&e, "i32 mut@ own mut"));
+    // `string` is the one reference with no suffix, so its `own` follows the
+    // base type (D3.7).
+    assert(parses_everywhere(&e, "string"));
+    assert(parses_everywhere(&e, "string own"));
+    // The out-parameter shape of D3.6: an owning span reached through a
+    // mutable pointer.
+    assert(parses_everywhere(&e, "u8 mut@ own mut*"));
+}
+
+// ---- the forms no position accepts ---------------------------------------------
+
+fn void a_marker_before_the_base_type_is_refused_everywhere() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // Every `mut` and `own` follows the element it qualifies, so no type
+    // begins with one (D5.3, D17.2).
+    string mut_first = "a mut never precedes the base type: write 'node mut* p' or 'node* mut p'";
+    string own_first = "an own never precedes the base type: write 'node* own p' or 'string own s'";
+    assert(refused_everywhere(&e, "mut i32", mut_first));
+    assert(refused_everywhere(&e, "own node*", own_first));
+    assert(refused_everywhere(&e, "mut node*", mut_first));
+}
+
+fn void a_doubled_marker_is_refused_everywhere() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // Each storage level has exactly one position (D5.3, D17.2).
+    string twice_mut = "a mut appears once in a type position";
+    string twice_own = "an own appears once in a type position";
+    assert(refused_everywhere(&e, "i32 mut mut", twice_mut));
+    assert(refused_everywhere(&e, "node* mut mut", twice_mut));
+    assert(refused_everywhere(&e, "node* own own", twice_own));
+    assert(refused_everywhere(&e, "i32@ own own", twice_own));
+}
+
+fn void an_own_after_the_mut_of_its_position_is_refused_everywhere() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // An `own` precedes the `mut` of its position (D17.2).
+    string order = "an own precedes the mut of its position: write 'node* own mut p'";
+    assert(refused_everywhere(&e, "node* mut own", order));
+    assert(refused_everywhere(&e, "i32@ mut own", order));
+}
+
+fn void an_own_where_no_reference_is_is_refused_everywhere() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // An `own` marks a reference, so after a base type it is legal on
+    // `string` alone (D3.7, D17.2), and it never follows an array suffix,
+    // which introduces no reference.
+    string on_value = "an own marks a reference: write it after a '*' or an '@', or on a string";
+    assert(refused_everywhere(&e, "i32 own", on_value));
+    assert(refused_everywhere(&e, "node own", on_value));
+    string after_array = parse_env.join2(&e, "an own never follows a fixed-array suffix: write",
+                                         " it after the '*' or '@' it marks");
+    // The message is built in the environment's buffer, which message_in
+    // overwrites, so it is compared one position at a time.
+    assert(message_in(&e, DECL_BEFORE, "i32[4] own", DECL_AFTER)
+           == parse_env.join2(&e, "an own never follows a fixed-array suffix: write",
+                              " it after the '*' or '@' it marks"));
+    assert(after_array.len > 0);
+}
+
+fn void a_mut_on_the_position_an_array_follows_is_refused_everywhere() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // The elements share the array's storage, so the position a `[N]`
+    // follows carries no `mut` (D5.3).
+    assert(message_in(&e, DECL_BEFORE, "i32 mut[4]", DECL_AFTER)
+           == parse_env.join2(&e, "the elements share the array's storage: write the mut after",
+                              " the length, as 'i32[4] mut'"));
+    assert(message_in(&e, PARAM_BEFORE, "node* mut[4]", PARAM_AFTER)
+           == parse_env.join2(&e, "the elements share the array's storage: write the mut after",
+                              " the length, as 'i32[4] mut'"));
+    assert(message_in(&e, FIELD_BEFORE, "i32@ mut[4]", FIELD_AFTER)
+           == parse_env.join2(&e, "the elements share the array's storage: write the mut after",
+                              " the length, as 'i32[4] mut'"));
+    // A `mut` on a position no array follows is the ordinary form: `node
+    // mut*[4]` is an array of pointers to mutable nodes.
+    assert(parses_everywhere(&e, "node mut*[4]"));
+}
+
+fn void an_array_after_a_trailing_reference_suffix_is_refused_everywhere() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // No array suffix follows a trailing reference suffix (D3.6).
+    string wrap = "no array suffix follows a reference suffix: wrap the array in a struct";
+    assert(refused_everywhere(&e, "i32[4]*[2]", wrap));
+    assert(refused_everywhere(&e, "i32[4]@[2]", wrap));
+}
+
+fn void a_second_aggregate_level_is_refused_everywhere() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // The C bootstrap has at most one array or span level in one written type
+    // (toolchain.md 7.3), and the self-hosted compiler answers alike.
+    assert(refused_everywhere(&e, "i32[2][3]",
+                              "not supported by the bootstrap compiler: multi-dimensional arrays"));
+    assert(refused_everywhere(&e, "i32[2]@",
+                              "not supported by the bootstrap compiler: spans of arrays"));
+    string spans = "not supported by the bootstrap compiler: spans of spans";
+    assert(refused_everywhere(&e, "u8@@", spans));
+    assert(refused_everywhere(&e, "node@[4]",
+                              "not supported by the bootstrap compiler: arrays of spans"));
+    // One level with any number of pointers is fine: a pointer is no
+    // aggregate.
+    assert(parses_everywhere(&e, "i32[4]**"));
+    assert(parses_everywhere(&e, "u8 mut@ own mut* mut*"));
+    // The count is per written type, so two types of one declaration each get
+    // their own level.
+    assert(parses_in(&e, "", "fn i32@(u8@)", DECL_AFTER));
+}
+
+// ---- the positions with rules of their own -------------------------------------
+
+fn void noreturn_parses_as_a_return_type_and_nowhere_else() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // `noreturn` is a return type only (D8.5).
+    assert(parses_in(&e, RETURN_BEFORE, "noreturn", RETURN_AFTER));
+    assert(parses_in(&e, "", "fn noreturn()", DECL_AFTER));
+    assert(message_in(&e, DECL_BEFORE, "noreturn", DECL_AFTER)
+           == "expected a type, found 'noreturn'");
+    assert(message_in(&e, PARAM_BEFORE, "noreturn", PARAM_AFTER)
+           == "expected a type, found 'noreturn'");
+    assert(message_in(&e, FIELD_BEFORE, "noreturn", FIELD_AFTER)
+           == "expected a type, found 'noreturn'");
+    assert(message_in(&e, CAST_BEFORE, "noreturn", CAST_AFTER)
+           == "expected a type, found 'noreturn'");
+}
+
+fn void an_allocated_type_takes_pointers_and_dimensions_only() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // alloc_type = base_type { "*" [ "own" ] } { "[" const_expr "]" }
+    // (grammar.md 6): no `mut`, no `@`, and an `own` only after a `*`.
+    assert(parse_env.expr_dump(&e, "new(node)") == "(new (type (name node)) nil)");
+    assert(parse_env.expr_dump(&e, "new(node*)") == "(new (type (name node) (ptr)) nil)");
+    assert(parse_env.expr_dump(&e, "new(node* own)")
+           == "(new (type (name node) (ptr own)) nil)");
+    assert(parse_env.expr_dump(&e, "new(i32[4])")
+           == "(new (type (prim i32) (array (int 4))) nil)");
+    assert(parse_env.expr_dump(&e, "new(u8, n)")
+           == "(new (type (prim u8)) (ident n))");
+    // A `mut` anywhere inside it does not parse, wherever it stands.
+    parse_env.parse(&e, "fn void f() {\n    g(new(node* mut));\n}\n");
+    assert(parse_env.errors(&e) == 1);
+    parse_env.parse(&e, "fn void f() {\n    g(new(node mut));\n}\n");
+    assert(parse_env.errors(&e) == 1);
+}
+
+fn void an_array_literal_type_carries_no_marker() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // array_type = base_type { ref_suffix } "[" const_expr "]" { ... }
+    // (grammar.md 6): the dimensions carry no marker and no trailing
+    // reference suffix follows.
+    assert(parse_env.expr_dump(&e, "i32[2]{1, 2}")
+           == "(array-lit (type (prim i32) (array (int 2))) (init (int 1) (int 2)))");
+    assert(parse_env.expr_dump(&e, "node*[1]{null}")
+           == "(array-lit (type (name node) (ptr) (array (int 1))) (init (null)))");
+    // A `mut` after the length is not part of the literal's type, so the
+    // speculation fails and the statement is read as an expression, which
+    // then reports.
+    parse_env.parse(&e, "fn void f() {\n    g(i32[2] mut{1, 2});\n}\n");
+    assert(parse_env.errors(&e) == 1);
+}
+
+fn void a_function_type_nests_and_takes_suffixes() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // fn_type = "fn" return_type "(" [ type { "," type } ] ")" (D3.10), and a
+    // function type is a base type like any other.
+    assert(parses_everywhere(&e, "fn void()"));
+    assert(parses_everywhere(&e, "fn i32(i32, bool)"));
+    assert(parses_everywhere(&e, "fn void()*"));
+    assert(parses_everywhere(&e, "fn void()[4]"));
+    assert(parses_everywhere(&e, "fn fn void()(fn i32(i32))"));
+    assert(parse_env.type_dump(&e, "fn fn void()()")
+           == "(type (fn-type (type (fn-type (type (void))))))");
+}
+
+fn i32 main() {
+    the_written_forms_of_d5_3_parse_in_every_position();
+    the_owning_forms_of_d17_2_parse_in_every_position();
+    a_marker_before_the_base_type_is_refused_everywhere();
+    a_doubled_marker_is_refused_everywhere();
+    an_own_after_the_mut_of_its_position_is_refused_everywhere();
+    an_own_where_no_reference_is_is_refused_everywhere();
+    a_mut_on_the_position_an_array_follows_is_refused_everywhere();
+    an_array_after_a_trailing_reference_suffix_is_refused_everywhere();
+    a_second_aggregate_level_is_refused_everywhere();
+    noreturn_parses_as_a_return_type_and_nowhere_else();
+    an_allocated_type_takes_pointers_and_dimensions_only();
+    an_array_literal_type_carries_no_marker();
+    a_function_type_nests_and_takes_suffixes();
+    println("ok");
+    return 0;
+}

@@ -176,6 +176,34 @@ TEST(marks_are_read_from_the_flags, {
     TEST_ASSERT_TRUE(ast_is_mut(both));
 })
 
+// The kind names `fort --ast` writes, in the order of the enum, as the list
+// in toolchain.md 1 spells them: a dump is a documented form now that the
+// option ships, so a rename that nobody meant fails here rather than
+// silently changing what an editor reads. `none` is in the enum and in no
+// dump, and the three suffix spellings (`ptr`, `span`, `array`) are written
+// by dump_suffix rather than by this table.
+static const char KIND_NAMES[] =
+    "none module import path item fn param struct field-decl enum member var "
+    "type prim string void noreturn name fn-type suffix "
+    "block assign incdec call-stmt if while do for range-for switch case defer return "
+    "break continue init designator "
+    "int float char str bool null ident unary binary ternary call index span field arrow "
+    "cast sizeof new struct-lit array-lit error";
+
+TEST(the_kind_names_are_the_ones_toolchain_md_1_lists, {
+    sb_t names;
+    sb_init(&names);
+    for (int32_t k = 0; k < (int32_t)AST_KIND_COUNT; k++) {
+        if (k != 0) {
+            sb_push(&names, ' ');
+        }
+        sb_append(&names, ast_kind_name((ast_kind_t)k));
+    }
+    const char* joined = sb_cstr(&names);
+    TEST_ASSERT_EQ_STR(joined, KIND_NAMES);
+    sb_free(&names);
+})
+
 TEST(every_kind_has_a_name, {
     for (int32_t k = 0; k < (int32_t)AST_KIND_COUNT; k++) {
         const char* name = ast_kind_name((ast_kind_t)k);
@@ -517,6 +545,7 @@ int main(int argc, char** argv) {
     TEST_RUN(children_are_pushed_and_read_back);
     TEST_RUN(marks_are_read_from_the_flags);
     TEST_RUN(every_kind_has_a_name);
+    TEST_RUN(the_kind_names_are_the_ones_toolchain_md_1_lists);
     TEST_RUN(dump_of_null_is_nil);
     TEST_RUN(dump_of_an_error_node_has_no_children);
     TEST_RUN(dump_of_literals);

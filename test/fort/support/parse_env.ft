@@ -1,0 +1,441 @@
+// The parser environment the parser suites share: one session, one token
+// vector, one arena and one buffer, a parse of a source text, the
+// S-expression of a node, the range queries D20.4 needs and the tree walk
+// that holds a parsed module against its range invariants.
+//
+// This is the port of test/parser_helpers.h, which the C suites include. A
+// `test/fort` test is a program rather than a translation unit, so the shared
+// part is a module the tests import with `-I support`; the directory is not a
+// test area, so the harness discovers nothing in it (run_tests.py walks `run`,
+// `fail`, `programs` and the `*_test.ft` of the root).
+//
+// What the suites over this module are for: tools/diff_ast.sh already holds
+// stage2's tree and diagnostics against stage1's over every .ft file in the
+// repository, so what needs asserting by name here is what a dump cannot show
+// -- a node's range and its name range (D20.4), the arena's ownership, and
+// the diagnostics of sources the repository does not hold.
+import ast;
+import diag;
+import lexer;
+import parser;
+import session;
+import std::strbuf;
+
+// The name every parse of a suite gives its source, which is what a
+// diagnostic and a range carry.
+string FILE_NAME = "t.ft";
+
+// Everything one parse needs, and the source it ran over, which the range
+// queries read back. env{} is a valid empty environment.
+struct env {
+    session.session sess;
+    lexer.tok_vec toks;
+    ast.arena arena;
+    strbuf.str_buf buf; // the text a query is building, valid until the next
+    strbuf.str_buf src_buf; // the source a wrapper built, which the tokens view
+    strbuf.str_buf join_buf; // the text join2 and join3 built
+    string src;
+}
+
+fn env create() {
+    return env{session.create(), lexer.tokvec_create(), ast.arena{}, strbuf.create(),
+               strbuf.create(), strbuf.create(), ""};
+}
+
+// Releases everything one parse allocated: the nodes, the tokens, the
+// diagnostics and the interned strings (D20.5).
+fn void free(env mut* e) {
+    ast.ast_arena_free(&e->arena);
+    lexer.tokvec_free(&e->toks);
+    strbuf.free(&e->buf);
+    strbuf.free(&e->src_buf);
+    strbuf.free(&e->join_buf);
+    session.free(&e->sess);
+}
+
+// Lexes and parses `src` into a module node, as `fort --ast` does. The
+// diagnostics stay in the session's sink, where errors() and diag_at() read
+// them; nothing is written to stderr.
+//
+// Each parse starts from an empty token vector and an empty sink, so an
+// environment answers for the source it was last given and a suite may reuse
+// one across its assertions: the tokens are appended to the vector and
+// parse_module reads it from the first token, so a second lex into the same
+// vector would parse the first source again. The nodes stay in the arena
+// until free, since a caller may still hold the tree of an earlier parse.
+fn ast.node mut* parse(env mut* e, string src) {
+    e->src = src;
+    lexer.tokvec_truncate(&e->toks, 0);
+    diag.reset(session.diags(&e->sess));
+    lexer.lex_file(&e->sess, FILE_NAME, src, &e->toks);
+    return parser.parse_module(&e->sess, FILE_NAME, &e->toks, &e->arena);
+}
+
+// The errors reported by the parse, the lexer's included (D14.2).
+fn u64 errors(env* e) {
+    return session.error_count(&e->sess);
+}
+
+// The diagnostics recorded, errors and notes together.
+fn u64 diag_count(env mut* e) {
+    return diag.record_count(session.diags(&e->sess));
+}
+
+// The `i`-th diagnostic as `<line>:<col>: error: <message>`, which is the
+// text form of toolchain.md 4 without the file name every one of them
+// shares; a note carries `note:` instead (D14.2).
+fn string diag_at(env mut* e, u64 i) {
+    diag.record r = diag.record_at(session.diags(&e->sess), i);
+    strbuf.clear(&e->buf);
+    strbuf.append_u64(&e->buf, cast(r.loc.line, u64));
+    strbuf.push(&e->buf, ':');
+    strbuf.append_u64(&e->buf, cast(r.loc.col, u64));
+    if (r.severity == diag.severity.error) {
+        strbuf.append(&e->buf, ": error: ");
+    } else {
+        strbuf.append(&e->buf, ": note: ");
+    }
+    strbuf.append(&e->buf, r.msg);
+    return strbuf.view(&e->buf);
+}
+
+// The S-expression of `n` (ast.ft), valid until the next query.
+fn string dump(env mut* e, ast.node* n) {
+    strbuf.clear(&e->buf);
+    ast.ast_dump(n, &e->buf);
+    return strbuf.view(&e->buf);
+}
+
+// Parses `src` and returns the S-expression of the module it yields.
+fn string parse_dump(env mut* e, string src) {
+    ast.node mut* mod = parse(e, src);
+    return dump(e, mod);
+}
+
+// ---- joining a text too long for one line --------------------------------------
+
+// The pieces of a source or of an expected dump, joined in a buffer of the
+// environment's own. The C writes such a text as adjacent string literals,
+// which fort does not join (D2.9), and neither does it have an operator for
+// it; the result is valid until the next join and lives in a buffer neither
+// parse nor dump touches, so it may stand on either side of a comparison.
+fn string join2(env mut* e, string a, string b) {
+    strbuf.clear(&e->join_buf);
+    strbuf.append(&e->join_buf, a);
+    strbuf.append(&e->join_buf, b);
+    return strbuf.view(&e->join_buf);
+}
+
+fn string join3(env mut* e, string a, string b, string c) {
+    strbuf.clear(&e->join_buf);
+    strbuf.append(&e->join_buf, a);
+    strbuf.append(&e->join_buf, b);
+    strbuf.append(&e->join_buf, c);
+    return strbuf.view(&e->join_buf);
+}
+
+fn string join4(env mut* e, string a, string b, string c, string d) {
+    strbuf.clear(&e->join_buf);
+    strbuf.append(&e->join_buf, a);
+    strbuf.append(&e->join_buf, b);
+    strbuf.append(&e->join_buf, c);
+    strbuf.append(&e->join_buf, d);
+    return strbuf.view(&e->join_buf);
+}
+
+// ---- the three wrappers a short source is parsed in ----------------------------
+
+// Parses `before` + `src` + `after` as a module. The text is built in the
+// environment's own buffer, since the tokens and the names in the tree are
+// views into the source and must outlive the parse (parser.ft).
+fn ast.node mut* parse_wrapped(env mut* e, string before, string src, string after) {
+    strbuf.clear(&e->src_buf);
+    strbuf.append(&e->src_buf, before);
+    strbuf.append(&e->src_buf, src);
+    strbuf.append(&e->src_buf, after);
+    return parse(e, strbuf.view(&e->src_buf));
+}
+
+// The S-expression of `src` read as an expression: the initializer of a
+// global.
+fn string expr_dump(env mut* e, string src) {
+    ast.node mut* mod = parse_wrapped(e, "i32 N = ", src, ";\n");
+    ast.node mut* d0 = decl(mod, 0);
+    if (d0 == null) {
+        return dump(e, mod);
+    }
+    return dump(e, d0->b);
+}
+
+// The S-expression of `src` read as a type: the type of a global.
+fn string type_dump(env mut* e, string src) {
+    ast.node mut* mod = parse_wrapped(e, "", src, " x = 0;\n");
+    ast.node mut* d0 = decl(mod, 0);
+    if (d0 == null) {
+        return dump(e, mod);
+    }
+    return dump(e, d0->a);
+}
+
+// The S-expression of `src` read as the first statement of a function body.
+fn string stmt_dump(env mut* e, string src) {
+    ast.node mut* mod = parse_wrapped(e, "fn void f() {\n", src, "\n}\n");
+    return dump(e, body_stmt(mod, 0, 0));
+}
+
+// ---- the tree the suites index into --------------------------------------------
+
+// The `i`-th declaration of a module, or null.
+fn ast.node mut* decl(ast.node mut* mod, u64 i) {
+    if (mod == null || i >= ast.ast_len(mod)) {
+        return null;
+    }
+    return mod->list.items[i];
+}
+
+// The `i`-th statement of the body of the `d`-th declaration, or null.
+fn ast.node mut* body_stmt(ast.node mut* mod, u64 d, u64 i) {
+    ast.node mut* d0 = decl(mod, d);
+    if (d0 == null || d0->b == null || ast.ast_len(d0->b) <= i) {
+        return null;
+    }
+    return d0->b->list.items[i];
+}
+
+// The `i`-th child of a node's list, or null.
+fn ast.node mut* child(ast.node mut* n, u64 i) {
+    if (n == null || i >= ast.ast_len(n)) {
+        return null;
+    }
+    return n->list.items[i];
+}
+
+// The only statement of the only declaration's body, which is the shape most
+// statement assertions parse.
+fn ast.node mut* only_stmt(env mut* e, string src) {
+    ast.node mut* mod = parse(e, src);
+    return body_stmt(mod, 0, 0);
+}
+
+// ---- ranges (D20.4) ------------------------------------------------------------
+
+// `<line>:<col>`, the start of a node's range, which is where a diagnostic
+// about that node is reported (toolchain.md 4).
+fn string loc_of(env mut* e, ast.node* n) {
+    strbuf.clear(&e->buf);
+    if (n == null) {
+        strbuf.append(&e->buf, "nil");
+        return strbuf.view(&e->buf);
+    }
+    strbuf.append_u64(&e->buf, cast(n->loc.line, u64));
+    strbuf.push(&e->buf, ':');
+    strbuf.append_u64(&e->buf, cast(n->loc.col, u64));
+    return strbuf.view(&e->buf);
+}
+
+// `<line>:<col>-<end_line>:<end_col>`, the whole range, its end exclusive.
+fn string range_of(env mut* e, ast.node* n) {
+    strbuf.clear(&e->buf);
+    if (n == null) {
+        strbuf.append(&e->buf, "nil");
+        return strbuf.view(&e->buf);
+    }
+    strbuf.append_u64(&e->buf, cast(n->loc.line, u64));
+    strbuf.push(&e->buf, ':');
+    strbuf.append_u64(&e->buf, cast(n->loc.col, u64));
+    strbuf.push(&e->buf, '-');
+    strbuf.append_u64(&e->buf, cast(n->loc.end_line, u64));
+    strbuf.push(&e->buf, ':');
+    strbuf.append_u64(&e->buf, cast(n->loc.end_col, u64));
+    return strbuf.view(&e->buf);
+}
+
+// `<line>:<col>-<end_line>:<end_col>` of the node's name range (D20.4),
+// which is the empty range on a node no name declares or mentions.
+fn string name_range_of(env mut* e, ast.node* n) {
+    strbuf.clear(&e->buf);
+    if (n == null) {
+        strbuf.append(&e->buf, "nil");
+        return strbuf.view(&e->buf);
+    }
+    strbuf.append_u64(&e->buf, cast(n->name_loc.line, u64));
+    strbuf.push(&e->buf, ':');
+    strbuf.append_u64(&e->buf, cast(n->name_loc.col, u64));
+    strbuf.push(&e->buf, '-');
+    strbuf.append_u64(&e->buf, cast(n->name_loc.end_line, u64));
+    strbuf.push(&e->buf, ':');
+    strbuf.append_u64(&e->buf, cast(n->name_loc.end_col, u64));
+    return strbuf.view(&e->buf);
+}
+
+// The byte offset of `line`:`col` in the source last parsed; the end of the
+// source when the position is past it. A column is a byte column with a tab
+// counting as one (D20.4), so the offset is the line's start plus col - 1.
+fn u64 offset_of(env* e, u32 line, u32 col) {
+    // The empty range of a node no name declares is 0:0 (D20.4), which names
+    // no position at all; it reads as the start of the source, so that the
+    // text it covers is the empty string rather than a trap.
+    if (line == 0 || col == 0) {
+        return 0;
+    }
+    u64 mut off = 0;
+    u32 mut at_line = 1;
+    while (at_line < line && off < e->src.len) {
+        if (e->src[off] == '\n') {
+            at_line += 1;
+        }
+        off += 1;
+    }
+    u64 within = off + cast(col, u64) - 1;
+    if (within > e->src.len) {
+        return e->src.len;
+    }
+    return within;
+}
+
+// The source text a range covers, which is what makes a range assertion
+// readable: a node whose range is right spells the construct back.
+fn string text_of(env* e, diag.loc l) {
+    u64 from = offset_of(e, l.line, l.col);
+    u64 to = offset_of(e, l.end_line, l.end_col);
+    if (to < from) {
+        return "";
+    }
+    return e->src[from..to];
+}
+
+// The source text a node's range covers.
+fn string node_text(env* e, ast.node* n) {
+    if (n == null) {
+        return "";
+    }
+    return text_of(e, n->loc);
+}
+
+// The source text a node's name range covers (D20.4), which is where an
+// editor jumps for the name.
+fn string name_text(env* e, ast.node* n) {
+    if (n == null) {
+        return "";
+    }
+    return text_of(e, n->name_loc);
+}
+
+// ---- the range invariants ------------------------------------------------------
+
+// The nodes named after the operator that follows their first child (binary,
+// assignment, increment, call, index, span, field, arrow): the child starts
+// before the operator the node is anchored at, so it is the one child that
+// may begin before its parent (toolchain.md 4).
+fn bool is_infix_kind(ast.ast_kind k) {
+    return k == ast.ast_kind.k_binary || k == ast.ast_kind.k_assign
+        || k == ast.ast_kind.k_incdec || k == ast.ast_kind.k_call
+        || k == ast.ast_kind.k_index || k == ast.ast_kind.k_span
+        || k == ast.ast_kind.k_field || k == ast.ast_kind.k_arrow;
+}
+
+// Whether `inner` begins at or after `outer` begins.
+fn bool starts_within(diag.loc inner, diag.loc outer) {
+    return inner.line > outer.line || (inner.line == outer.line && inner.col >= outer.col);
+}
+
+// Whether `inner` ends at or before `outer` ends.
+fn bool ends_within(diag.loc inner, diag.loc outer) {
+    return inner.end_line < outer.end_line
+        || (inner.end_line == outer.end_line && inner.end_col <= outer.end_col);
+}
+
+// The violations found so far, one line each, and the kinds the walk reached.
+// They are module-level because the walk is a recursion the suite reads the
+// result of. walk_begin empties the violations only: the kinds are
+// deliberately accumulated across every walk of a run, since what a suite
+// asks of them is which kinds the whole corpus reached.
+strbuf.str_buf mut report = strbuf.str_buf{};
+// One slot per kind, sized above the enum rather than at it, since fort has
+// no way to read a member count; `seen` and `walk` hold an index against it
+// so that a kind added past the end fails with a message rather than writing
+// past the array.
+u64 KIND_SLOTS = 128;
+bool[128] mut kind_seen = {};
+
+fn void walk_begin() {
+    strbuf.clear(&report);
+}
+
+fn void walk_free() {
+    strbuf.free(&report);
+}
+
+// The violations the walks since walk_begin found, empty when there were
+// none.
+fn string violations() {
+    return strbuf.view(&report);
+}
+
+// Whether a node of `kind` was reached by some walk.
+fn bool seen(ast.ast_kind kind) {
+    u64 slot = cast(cast(kind, i32), u64);
+    if (slot >= KIND_SLOTS) {
+        panic("parse_env.seen: the kind enum outgrew kind_seen");
+    }
+    return kind_seen[slot];
+}
+
+// `binary 1:11-1:18 leaves if 2:5-2:9`, or the same without a parent.
+fn void note(string what, ast.node* n, ast.node* parent) {
+    strbuf.append(&report, ast.ast_kind_name(n->kind));
+    strbuf.push(&report, ' ');
+    strbuf.append_u64(&report, cast(n->loc.line, u64));
+    strbuf.push(&report, ':');
+    strbuf.append_u64(&report, cast(n->loc.col, u64));
+    strbuf.push(&report, ' ');
+    strbuf.append(&report, what);
+    if (parent != null) {
+        strbuf.push(&report, ' ');
+        strbuf.append(&report, ast.ast_kind_name(parent->kind));
+    }
+    strbuf.push(&report, '\n');
+}
+
+// Checks one node against the invariants of D20.4 and recurses: every node
+// ends at or after it starts, a name range sits inside the node that carries
+// it, and a child's range sits inside its parent's, the left operand of an
+// infix node excepted.
+fn void walk(ast.node* n, ast.node* parent) {
+    if (n == null) {
+        return;
+    }
+    u64 slot = cast(cast(n->kind, i32), u64);
+    if (slot >= KIND_SLOTS) {
+        panic("parse_env.walk: the kind enum outgrew kind_seen");
+    }
+    kind_seen[slot] = true;
+    if (!diag.loc_is_ordered(n->loc)) {
+        note("ends before it starts", n, null);
+    }
+    if (n->name_loc.line != 0
+        && (!starts_within(n->name_loc, n->loc) || !ends_within(n->name_loc, n->loc))) {
+        note("has a name range outside itself", n, null);
+    }
+    if (parent != null) {
+        // `==` does not drop `mut` (D5.4), so the first child is read into
+        // an immutable binding before it is compared with `n`.
+        ast.node* first = parent->a;
+        bool infix_left = is_infix_kind(parent->kind) && n == first;
+        if (!infix_left && !starts_within(n->loc, parent->loc)) {
+            note("starts before", n, parent);
+        }
+        if (!ends_within(n->loc, parent->loc)) {
+            note("leaves", n, parent);
+        }
+    }
+    walk(n->a, n);
+    walk(n->b, n);
+    walk(n->c, n);
+    walk(n->d, n);
+    u64 mut i = 0;
+    while (i < ast.ast_len(n)) {
+        walk(ast.ast_child(n, i), n);
+        i += 1;
+    }
+}

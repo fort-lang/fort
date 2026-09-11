@@ -142,14 +142,22 @@ add_custom_target(fort_stage2 ALL DEPENDS "${FORT_STAGE2_BINARY}")
 
 # ---- unit tests ----------------------------------------------------------------
 # The test-only helpers that are compiled rather than included: every
-# test/*.c that is not a suite, such as the syntax tree's S-expression
-# printer. They are linked into every suite so that -Werror and clang-tidy
-# cover them once.
+# test/*.c that is not a suite. They are linked into every suite so that
+# -Werror and clang-tidy cover them once. The list is empty today -- the
+# syntax tree's S-expression printer, which used to be the one member, became
+# what `fort --ast` writes and moved into src/bootstrap (D14.1) -- so the
+# target is created only when the glob finds something, since a library with
+# no source is a configure error. The glob and the link below stay: the next
+# test/*.c that is not a suite is built and linked with no CMake edit.
 file(GLOB FORT_TEST_SUPPORT_SOURCES CONFIGURE_DEPENDS "${FORT_TEST_DIR}/*.c")
 list(FILTER FORT_TEST_SUPPORT_SOURCES EXCLUDE REGEX "_test\\.c$")
-add_library(fort_test_support OBJECT ${FORT_TEST_SUPPORT_SOURCES})
-target_include_directories(fort_test_support PUBLIC "${FORT_TEST_DIR}")
-target_link_libraries(fort_test_support PUBLIC fort_core)
+set(FORT_TEST_SUPPORT_LIB "")
+if(FORT_TEST_SUPPORT_SOURCES)
+    add_library(fort_test_support OBJECT ${FORT_TEST_SUPPORT_SOURCES})
+    target_include_directories(fort_test_support PUBLIC "${FORT_TEST_DIR}")
+    target_link_libraries(fort_test_support PUBLIC fort_core)
+    set(FORT_TEST_SUPPORT_LIB fort_test_support)
+endif()
 
 # One executable and one ctest, labelled unit, per test/<component>_test.c
 # (toolchain.md 7.5). The ctest is named unit-<component>.
@@ -160,7 +168,8 @@ foreach(test_source IN LISTS FORT_UNIT_TEST_SOURCES)
     string(REGEX REPLACE "_test$" "" test_component "${test_target}")
     add_executable("${test_target}" "${test_source}")
     target_include_directories("${test_target}" PRIVATE "${FORT_TEST_DIR}")
-    target_link_libraries("${test_target}" PRIVATE fort_core fort_rt_native fort_test_support)
+    target_link_libraries("${test_target}" PRIVATE fort_core fort_rt_native
+        ${FORT_TEST_SUPPORT_LIB})
     set_target_properties("${test_target}" PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test")
     add_test(NAME "unit-${test_component}" COMMAND "${test_target}")
@@ -174,7 +183,8 @@ endforeach()
 # line the driver built (D14.3) instead of compiling it, so they need its path;
 # the check suite needs it to assert that `--check` spawns nothing (D20.1) and
 # the conformance suite to assert the same of the runs that stop before it.
-foreach(driver_suite driver_test driver_check_test driver_conformance_test driver_tokens_test)
+foreach(driver_suite driver_test driver_check_test driver_conformance_test driver_tokens_test
+                     driver_ast_test)
     if(TARGET "${driver_suite}")
         target_compile_definitions("${driver_suite}"
             PRIVATE FORT_FAKE_CC="${FORT_TEST_DIR}/fake_cc.sh")
@@ -333,6 +343,17 @@ add_test(NAME diff-tokens
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_tokens.sh" "${CMAKE_BINARY_DIR}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(diff-tokens PROPERTIES LABELS lang)
+
+# The two parsers over the whole repository, the same comparison one pass
+# later: `fort --ast` writes the file's syntax tree as one S-expression
+# (D14.1, toolchain.md 1) and tools/diff_ast.sh compares stage1's with
+# stage2's, together with their diagnostics and their exit statuses, over
+# every .ft file there is. It is the oracle the transliterated parser is
+# judged against.
+add_test(NAME diff-ast
+    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ast.sh" "${CMAKE_BINARY_DIR}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(diff-ast PROPERTIES LABELS lang)
 add_test(NAME lang_lint COMMAND "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}" --lint)
 set_tests_properties(lang_lint PROPERTIES LABELS unit)
 add_test(NAME lang_selftest
@@ -410,6 +431,7 @@ add_custom_target(check-lang
     COMMAND ${FORT_MODULE_TEST_COMMAND}
     COMMAND ${FORT_LANG_STAGE2_COMMAND}
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_tokens.sh" "${CMAKE_BINARY_DIR}"
+    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ast.sh" "${CMAKE_BINARY_DIR}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Running the language tests"
     USES_TERMINAL

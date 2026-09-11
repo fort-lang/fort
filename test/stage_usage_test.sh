@@ -95,6 +95,10 @@ usage_cases=(
     "--tokens --check main.ft"
     "--tokens --json main.ft"
     "--tokens --index main.ft"
+    "--ast --tokens main.ft"
+    "--ast --check main.ft"
+    "--ast --json main.ft"
+    "--ast --index main.ft"
     "- main.ft"
 )
 for line in "${usage_cases[@]}"; do
@@ -142,6 +146,10 @@ accepted_cases=(
     "--tokens -o $tmp/out.o -I $tmp --std-dir $tmp --cc nosuchcc --target t -Xcc -v $entry"
     "--tokens -S -c --release --no-bounds-check -lm -lfoo $entry"
     "$entry --tokens"
+    "--ast $entry"
+    "--ast -o $tmp/out.o -I $tmp --std-dir $tmp --cc nosuchcc --target t -Xcc -v $entry"
+    "--ast -S -c --release --no-bounds-check -lm -lfoo $entry"
+    "$entry --ast"
     "$entry --help"
 )
 for line in "${accepted_cases[@]}"; do
@@ -175,6 +183,15 @@ done
 one=$("$stage1" --tokens "$entry")
 if [ "${one##*$'\n'}" != '2:1-2:1 0 "" end of file' ]; then
     echo "stage_usage_test.sh: --tokens did not dump the entry file:" >&2
+    printf '%s\n' "$one" >&2
+    status=1
+fi
+
+# The same for --ast: the tree of the entry file, and not an empty module,
+# which is what a binary that parsed nothing would print (D14.1).
+one=$("$stage1" --ast "$entry")
+if [ "$one" != "(module (fn (type (prim i32)) main (params) (block (return (int 0)))))" ]; then
+    echo "stage_usage_test.sh: --ast did not dump the entry file:" >&2
     printf '%s\n' "$one" >&2
     status=1
 fi

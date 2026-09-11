@@ -34,6 +34,7 @@ file (D14.1). Options and the entry file may appear in any order.
 | `--json`            | write the check document to stdout (D20.2), needs `--check`| off        |
 | `--index`           | fill the document's identifier index (D20.3)               | off        |
 | `--tokens`          | write the entry file's tokens to stdout and stop (D14.1)   | off        |
+| `--ast`             | write the entry file's tree to stdout and stop (D14.1)     | off        |
 | `--help`            | print the usage line and exit 0                            |            |
 | `--version`         | print the compiler version and exit 0                      |            |
 
@@ -93,6 +94,49 @@ file (D14.1). Options and the entry file may appear in any order.
   together with their diagnostics and their exit statuses, over every `.ft` file in the
   repository, and that is how the self-hosted lexer is held against the bootstrap's (the ctest
   `diff-tokens`).
+- `--ast` runs the lexer and the parser over the entry file and stops there: it resolves no
+  import, checks nothing and needs no standard library, so it is what a compiler with a parser
+  and no checker can do (D14.1). It writes the entry file's syntax tree to stdout as one
+  S-expression followed by one newline, and is a usage error together with `--tokens`, which
+  writes a dump of its own, or with `--check`, `--json` or `--index`, which all need a front end;
+  every other option is unused, as under `--tokens`. A lexical error is reported and lexing
+  resumes at the next line, and a syntax error is reported and the parser skips to the next
+  boundary (D14.2), so a tree covering the whole file is written either way and the status is
+  then 1. The form is `(kind field... child...)`, `nil` for an absent fixed child, so that the
+  position of every child is visible. A kind is one of
+
+  ```sh
+  module import path item fn extern-fn param struct field-decl enum member var
+  type prim string void noreturn name fn-type ptr span array
+  block assign incdec call-stmt if while do for range-for switch case defer return
+  break continue init designator
+  int float char str bool null ident unary binary ternary call index span field arrow
+  cast sizeof new struct-lit array-lit error
+  ```
+
+  one per production of `grammar.md` in its order, with three spellings that are not
+  productions: an `extern fn` (D9.8) prints as `extern-fn` rather than `fn`, a `default` clause
+  (D7.6) as `(case default ...)`, and a type suffix prints as the suffix it is, `ptr`, `span` or
+  `array`. Four things the form adds to a bare tree: a function's parameters and
+  a clause's labels stand in a group of their own, `(params ...)` and `(labels ...)`, so that
+  they are not read as the children after them; a type position prints its `own` and `mut` as
+  words after what they qualify (D5.3, D17.2), and a type suffix prints as `(ptr ...)`,
+  `(span ...)` or `(array <length> ...)` with its own markers; an operator prints as the token
+  kind a diagnostic names it by (`+`, `<<=`, `++`); and a region a syntax error made the parser
+  skip prints as `(error)`, with no children (D14.2). The decoded bytes of a string literal and
+  the text of a float literal print between double quotes with `"` and `\` escaped and **every**
+  byte outside printable ASCII written as `\xHH` with uppercase hex digits -- `\x0A` for a
+  newline and `\x09` for a tab, where the token dump above writes `\n` and `\t` -- so that a
+  tree is one line. So `fort --ast` on a file holding `fn void f() { i32 mut x = 1; }` writes
+
+  ```sh
+  (module (fn (type (void)) f (params) (block (var x (type (prim i32) mut) (int 1)))))
+  ```
+
+  Both compilers write those bytes: `tools/diff_ast.sh` compares stage1's tree with stage2's,
+  together with their diagnostics and their exit statuses, over every `.ft` file in the
+  repository, and that is how the self-hosted parser is held against the bootstrap's (the ctest
+  `diff-ast`).
 - The entry file's directory is always a root and the current directory never is (D9.2).
 
 Exit status (D14.1):

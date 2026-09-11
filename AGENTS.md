@@ -256,11 +256,14 @@ A safe(r) C-like systems programming language.
   stdout, stderr and the status byte-exactly; ctest `pipeline` (label `unit`). `*.ll` is
   gitignored except `test/ir/*.ll`. `run_tests.py --verify-ir` runs the same verifier over the
   `-S` output of every language test that compiles.
-- Test code that is compiled rather than included lives in a `test/*.c` that is not a suite
-  (`test/ast_dump.c`, the syntax tree's S-expression printer): CMake globs every such file into
-  the `fort_test_support` object library and links it into every suite, so `-Werror` and
-  clang-tidy cover it once. A suite links `fort_core`, so a helper may not take the name of a
-  compiler function (`type_error` is types.h's error-type constructor, not a test helper).
+- Test code that is compiled rather than included lives in a `test/*.c` that is not a suite:
+  CMake globs every such file into the `fort_test_support` object library and links it into every
+  suite, so `-Werror` and clang-tidy cover it once. The list is empty today -- its one member,
+  `test/ast_dump.c`, became what `fort --ast` writes and moved to `src/bootstrap/ast_dump.c`
+  (T-033) -- so the library is created only when the glob finds something, a CMake target with no
+  source being a configure error; the glob and the link stay, so the next such file needs no CMake
+  edit. A suite links `fort_core`, so a helper may not take the name of a compiler function
+  (`type_error` is types.h's error-type constructor, not a test helper).
 - clang-tidy's `readability-function-size` caps `main` at about 60 `TEST_RUN`s (statement
   threshold 800; each `TEST_RUN` expands to about 13 statements, so 89 measured 1162): split a
   larger suite into two files with a shared `test/<component>_helpers.h` whose helpers are
@@ -794,8 +797,9 @@ A safe(r) C-like systems programming language.
     suffixes together.
   A ported module is judged against the C one it replaces: the same unit suite runs over both, so
   the oracle is the existing test, not a reading of the new code. A module that the two compilers
-  can both be made to *show* -- the lexer, through `fort --tokens` (D14.1) -- gets a differential
-  oracle as well, and that one is worth building before the port: `tools/diff_tokens.sh` compares
+  can both be made to *show* -- the lexer, through `fort --tokens`, and the parser, through
+  `fort --ast` (D14.1) -- gets a differential oracle as well, and that one is worth building
+  before the port: `tools/diff_tokens.sh` compares
   the two token dumps, their diagnostics and their exit statuses over every `.ft` file in the
   repository (the ctest `diff-tokens`, a command of `check-lang` so that the gate runs it), and it
   caught every mutation the port was probed with. Two guards make it an oracle rather than a
@@ -806,13 +810,24 @@ A safe(r) C-like systems programming language.
   compared, because two compilers that both refuse `--tokens` agree about everything, and the
   script passed over the whole corpus with both binaries replaced by a stub. The same check is
   what a path with a space needs, since word-splitting the file list makes both compilers fail
-  alike. **The root of `test/fort` holds tests and nothing else** -- a `.ft` directly there whose
+  alike. `tools/diff_ast.sh` (the ctest `diff-ast`, T-033) is the same script one pass later over
+  the S-expression of `fort --ast`, with the same two guards and the same `FT_FILES` equality, so
+  a ticket that adds a `.ft` file raises the constant in **both** scripts. Read what such an
+  oracle cannot see before trusting it: the AST dump prints no position, so a node's range and
+  its name range (D20.4) are invisible to it and are pinned instead by
+  `test/fort/parser_range_test.ft`, whose expected values are the ones `test/parser_loc_test.c`
+  asserts of the C parser, source for source. A tree dump is one long line, so the script reports
+  the first differing byte and a window of each side rather than a `diff` of two whole trees.
+  **The root of `test/fort` holds tests and nothing else** -- a `.ft` directly there whose
   stem does not end in `_test` is a lint failure, since `run_tests.py` registers every root `.ft`
   as a test -- so a fixture common to several suites is either repeated in each or put in
   `test/fort/support/`; what that directory is and what it costs is under **Build and test**
   above, in one place rather than two. `tools/lines.py` counts
   `src/fort`, so the ported lines carry the 3:1 ratio like any others.
-  Five more facts the first ports paid for (T-032, `prim.ft`, `consts.ft`, `types.ft`).
+  Nine more facts the first ports paid for: five from T-032 (`prim.ft`, `consts.ft`,
+  `types.ft`) -- keywords, `new(T, n)`, `==`, enum ordering, the forked tests -- and four from
+  T-033 (`ast.ft`, `parser.ft`, `test/fort/support/parse_env.ft`) -- mutually recursive structs,
+  joining strings, the NULL-for-no-message parameter, and the fixture's token vector.
   - **Keywords take the names first.** `type`, `const`, `match` and the rest of D2.4's reserved
     list, and every type keyword, are not identifiers, so `type_t` cannot be `type`, a field
     cannot be `mut`, `own` or `noreturn`, and an enum member cannot be `i8`, `bool` or `null`.
@@ -828,6 +843,26 @@ A safe(r) C-like systems programming language.
   - **`==` does not drop `mut`.** Operands lend `own` (D17.4) and nothing else, so comparing a
     `node mut*` with a `node*` is a type error: give the test a `node*` binding rather than
     casting.
+  - **Two mutually recursive structs must be declared with the one that holds the other by value
+    first.** stage1 lays a struct out in declaration order and resolves a field's struct even
+    behind a pointer, so `struct vec { node mut* mut@ own items; }` before `struct node { vec
+    list; }` is `struct vec has infinite size`, while the same two in the other order compile
+    (T-033, `src/fort/ast.ft`). The bug is stage1's; the port works around it by ordering the
+    declarations, which costs nothing, and a comment at the site says why.
+  - **Neither adjacent string literals nor `+` join two strings** (D2.9, D3.7), so a C message or
+    expected text wrapped across two literals becomes a module constant whose text stands on a
+    line of its own (`MUT_BEFORE_ARRAY_ERROR` in `parser.ft`), a second `msg_str` call, or, in a
+    test, a `join2`/`join3`/`join4` helper over a buffer of the fixture
+    (`test/fort/support/parse_env.ft`). A test fixture that hands out views of one buffer needs
+    one buffer per role -- the source being built, the dump being compared, the text being
+    joined -- or an assertion compares a string with itself.
+  - **A `const char*` parameter that is NULL for "no message" becomes the empty string**, since
+    no message is empty (`parse_markers`'s `own_error`); state the sentinel in the comment.
+  - **A fixture that reuses one token vector must truncate it before each parse.** `lex_file`
+    appends and `parse_module` reads from the first token, so a second parse into the same vector
+    silently re-parses the first source and the second assertion passes for the wrong reason
+    (T-033); the same fixture resets the diagnostic sink, so that an error count answers for the
+    source it was just given.
   - **An enum has no ordering operators** (D3.9), so a C range test over a kind enum
     (`k <= PRIM_U64`) becomes a comparison of `cast(k, i32)`, and the `_Static_assert` that
     pinned the order becomes a test (`test/fort/prim_test.ft`).

@@ -4,7 +4,8 @@
 // it can go: it parses the command line of D14.1, answers `--help` and
 // `--version`, reports the usage errors of toolchain.md 1 in the same words,
 // and serves `--tokens`, which lexes the entry file and writes its tokens to
-// stdout. An invocation that would need a parser -- a build, `--check` -- is
+// stdout, and `--ast`, which parses it and writes its syntax tree. An
+// invocation that would need the checker -- a build, `--check` -- is
 // reported as an internal error rather than pretending to build something,
 // and exits 2 like every other usage, toolchain or internal error (D14.1).
 //
@@ -18,9 +19,11 @@
 // list, in the order src/bootstrap/driver.c walks it, so the two compilers
 // answer one command line alike. The tables of function pointers belong to
 // the parser and the emitter (D3.10).
+import ast;
 import containers;
 import diag;
 import lexer;
+import parser;
 import session;
 import std::str;
 import std::strbuf;
@@ -68,6 +71,7 @@ struct options {
     bool json;            // --json: the document of D20.2 on stdout
     bool index;           // --index: the identifier index of D20.3 in it
     bool tokens;          // --tokens: the entry file's tokens on stdout (D14.1)
+    bool ast;             // --ast: the entry file's syntax tree on stdout (D14.1)
     containers.str_vec includes; // -I roots, searched in command-line order (D9.2)
     containers.str_vec libs;     // -l<lib> as given, passed to the linker in order
     containers.str_vec cc_args;  // -Xcc arguments, passed verbatim after the rest
@@ -114,6 +118,7 @@ fn void help() {
     println("  --json             write the check document to stdout; needs --check");
     println("  --index            fill the document's identifier index; implies --check --json");
     println("  --tokens           write the entry file's tokens to stdout and stop");
+    println("  --ast              write the entry file's syntax tree to stdout and stop");
     println("  --help             print this help and exit");
     println("  --version          print the compiler version and exit");
 }
@@ -169,8 +174,8 @@ fn bool take_argument(string@ args, u64 mut* i, string mut* out) {
 }
 
 // The options that carry no value: -S, -c, --release, --no-bounds-check,
-// --check, --json, --index and --tokens, each of which sets one flag (D14.1,
-// D20.1, D20.2, D20.3).
+// --check, --json, --index, --tokens and --ast, each of which sets one flag
+// (D14.1, D20.1, D20.2, D20.3).
 fn bool parse_flag(options mut* opts, string arg) {
     if (arg == "-S") {
         opts->emit_ir = true;
@@ -194,6 +199,10 @@ fn bool parse_flag(options mut* opts, string arg) {
         // --tokens lexes the entry file and stops there, so it implies
         // nothing and combines with nothing (D14.1).
         opts->tokens = true;
+    } else if (arg == "--ast") {
+        // --ast parses the entry file and stops there, so it implies nothing
+        // and combines with nothing either (D14.1).
+        opts->ast = true;
     } else {
         return false;
     }
@@ -282,6 +291,12 @@ fn i32 parse(options mut* opts, string@ args) {
         usage_error("--tokens does not combine with --check, --json or --index");
         return PARSE_ERROR;
     }
+    if (opts->ast && (opts->tokens || opts->check || opts->json || opts->index)) {
+        // --ast stops before the checker and after the lexer, so there is no
+        // front end for --check and no dump for --tokens to write (D14.1).
+        usage_error("--ast does not combine with --tokens, --check, --json or --index");
+        return PARSE_ERROR;
+    }
     if (opts->json && !opts->check) {
         // A build spawns a `--cc` that inherits stdout, so only the check mode
         // can promise a complete document or nothing (D20.2).
@@ -323,6 +338,45 @@ fn i32 tokens_entry(options* opts) {
     return EXIT_COMPILE_ERROR;
 }
 
+// --ast lexes and parses the entry file alone -- no import is resolved and
+// nothing is checked -- and writes its syntax tree to stdout as one
+// S-expression followed by one newline, in the form of toolchain.md 1. A
+// lexical error costs the lexer its line and a syntax error costs the parser
+// its construct, and both go on (D14.2), so the tree covers the whole file
+// either way; the status is then the compile error of D14.1.
+fn i32 ast_entry(options* opts) {
+    // The session the lexer and the parser take: it owns the sink the
+    // diagnostics go to and the pool the decoded strings are interned in, and
+    // freeing it frees them (D20.5).
+    session.session mut s = session.create();
+    defer session.free(&s);
+    string mut source = "";
+    if (!session.read_source(&s, opts->entry, &source)) {
+        error_path("cannot read", opts->entry, str.from_cstr(strerror(sys.errno())));
+        return EXIT_USAGE;
+    }
+    // A batch driver writes the text form of every diagnostic as it arrives,
+    // which the library leaves off (D14.2, D20.2).
+    diag.set_text(session.diags(&s), true);
+    lexer.tok_vec mut toks = lexer.tokvec_create();
+    defer lexer.tokvec_free(&toks);
+    lexer.lex_file(&s, opts->entry, source, &toks);
+    // The tokens cover the whole file whatever the lexer reported, so the
+    // parse runs either way (D14.2).
+    ast.arena mut ar = ast.arena{};
+    defer ast.ast_arena_free(&ar);
+    ast.node mut* mod = parser.parse_module(&s, opts->entry, &toks, &ar);
+    strbuf.str_buf mut dump = strbuf.create();
+    defer strbuf.free(&dump);
+    ast.ast_dump(mod, &dump);
+    strbuf.push(&dump, '\n');
+    print(strbuf.view(&dump));
+    if (session.error_count(&s) == 0) {
+        return EXIT_OK;
+    }
+    return EXIT_COMPILE_ERROR;
+}
+
 fn i32 main(string@ args) {
     // fort with no arguments prints one usage line and exits with 2
     // (toolchain.md 1).
@@ -341,6 +395,9 @@ fn i32 main(string@ args) {
     }
     if (opts.tokens) {
         return tokens_entry(&opts);
+    }
+    if (opts.ast) {
+        return ast_entry(&opts);
     }
     // An internal error is not a usage error, so no usage line follows it:
     // toolchain.md 1 puts that line after the six errors that report a

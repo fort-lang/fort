@@ -11,6 +11,8 @@
 
 #include <sys/wait.h>
 
+#include "ast.h"
+#include "ast_dump.h"
 #include "check.h"
 #include "containers.h"
 #include "diag.h"
@@ -19,6 +21,7 @@
 #include "json.h"
 #include "lexer.h"
 #include "modules.h"
+#include "parser.h"
 #include "str.h"
 
 // The environment handed to the spawned `--cc`. POSIX declares it in
@@ -46,6 +49,7 @@ static const char* const HELP_LINES[] = {
     "  --json             write the check document to stdout; needs --check",
     "  --index            fill the document's identifier index; implies --check --json",
     "  --tokens           write the entry file's tokens to stdout and stop",
+    "  --ast              write the entry file's syntax tree to stdout and stop",
     "  --help             print this help and exit",
     "  --version          print the compiler version and exit",
 };
@@ -125,6 +129,7 @@ void driver_options_init(driver_options_t* opts) {
     opts->json = false;
     opts->index = false;
     opts->tokens = false;
+    opts->ast = false;
     ptrvec_init(&opts->includes);
     ptrvec_init(&opts->libs);
     ptrvec_init(&opts->cc_args);
@@ -168,8 +173,8 @@ static bool is_link_option(const char* arg) {
 }
 
 // The options that carry no value: -S, -c, --release, --no-bounds-check,
-// --check, --json, --index and --tokens, each of which sets one flag (D14.1,
-// D20.1, D20.2, D20.3).
+// --check, --json, --index, --tokens and --ast, each of which sets one flag
+// (D14.1, D20.1, D20.2, D20.3).
 static bool parse_flag(driver_options_t* opts, const char* arg) {
     if (strcmp(arg, "-S") == 0) {
         opts->emit_ir = true;
@@ -193,6 +198,10 @@ static bool parse_flag(driver_options_t* opts, const char* arg) {
         // --tokens lexes the entry file and stops there, so it implies
         // nothing and combines with nothing (D14.1).
         opts->tokens = true;
+    } else if (strcmp(arg, "--ast") == 0) {
+        // --ast parses the entry file and stops there, so it implies nothing
+        // and combines with nothing either (D14.1).
+        opts->ast = true;
     } else {
         return false;
     }
@@ -277,6 +286,12 @@ int driver_parse(driver_options_t* opts, int argc, char** argv, FILE* out, FILE*
         // --tokens stops before the parser, so there is no front end for
         // --check to run and no document for --json to write (D14.1).
         usage_error(err, "--tokens does not combine with --check, --json or --index", NULL);
+        return DRIVER_PARSE_ERROR;
+    }
+    if (opts->ast && (opts->tokens || opts->check || opts->json || opts->index)) {
+        // --ast stops before the checker and after the lexer, so there is no
+        // front end for --check and no dump for --tokens to write (D14.1).
+        usage_error(err, "--ast does not combine with --tokens, --check, --json or --index", NULL);
         return DRIVER_PARSE_ERROR;
     }
     if (opts->json && !opts->check) {
@@ -830,6 +845,47 @@ static int tokens_entry(const driver_options_t* opts, FILE* out, FILE* err) {
     return clean ? FORT_EXIT_OK : FORT_EXIT_COMPILE_ERROR;
 }
 
+// ---- the syntax tree dump (--ast, D14.1) -----------------------------------------
+
+// --ast lexes and parses the entry file alone -- no import is resolved and
+// nothing is checked -- and writes the S-expression of ast_dump.h to `out`,
+// followed by one newline. The parser recovers from a syntax error and the
+// lexer from a lexical one (D14.2), so a tree covering the whole file is
+// dumped either way and the status is then the compile error of D14.1.
+static int ast_entry(const driver_options_t* opts, FILE* out, FILE* err) {
+    sb_t source;
+    sb_init(&source);
+    if (!read_entry(opts->entry, &source, err)) {
+        sb_free(&source);
+        return FORT_EXIT_USAGE;
+    }
+    // Each run starts from an empty sink, as the front end does.
+    diag_reset();
+    str_pool_t pool;
+    str_pool_init(&pool);
+    tokvec_t toks;
+    tokvec_init(&toks);
+    (void)lex_file(opts->entry, sb_view(&source), &pool, &toks);
+    // The tokens cover the whole file whatever the lexer reported, so the
+    // parse runs either way (D14.2).
+    ast_arena_t arena;
+    ast_arena_init(&arena);
+    const ast_node_t* mod = parse_module(opts->entry, toks.items, toks.len, &arena);
+    sb_t dump;
+    sb_init(&dump);
+    ast_dump(mod, &dump);
+    sb_push(&dump, '\n');
+    const str_t text = sb_view(&dump);
+    (void)fwrite(text.ptr, 1, (size_t)text.len, out);
+    (void)fflush(out);
+    sb_free(&dump);
+    ast_arena_free(&arena);
+    tokvec_free(&toks);
+    str_pool_free(&pool);
+    sb_free(&source);
+    return diag_count() == 0 ? FORT_EXIT_OK : FORT_EXIT_COMPILE_ERROR;
+}
+
 // ---- the pipeline (toolchain.md 2) ------------------------------------------------
 
 // Emits the module and, unless -S stops there, compiles and links it,
@@ -924,11 +980,13 @@ int driver_main(int argc, char** argv, FILE* out, FILE* err) {
     if (parsed == DRIVER_PARSE_ERROR) {
         status = FORT_EXIT_USAGE;
     } else if (parsed == DRIVER_PARSE_OK) {
-        // --tokens stops after the lexer and --check after the front end;
-        // every other run goes through the whole pipeline of toolchain.md 2
-        // (D14.1, D20.1).
+        // --tokens stops after the lexer, --ast after the parser and --check
+        // after the front end; every other run goes through the whole
+        // pipeline of toolchain.md 2 (D14.1, D20.1).
         if (opts.tokens) {
             status = tokens_entry(&opts, out, err);
+        } else if (opts.ast) {
+            status = ast_entry(&opts, out, err);
         } else if (opts.check) {
             status = check_entry(&opts, argv[0], out, err);
         } else {

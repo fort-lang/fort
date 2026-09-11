@@ -1,0 +1,398 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| ok
+import parse_env;
+
+// The expressions and the types of grammar.md 4 and 6 as src/fort/parser.ft
+// reads them, asserted through the S-expression of ast.ft: the precedence
+// ladder of D6.1, the postfix forms, the literals, and the marker placement
+// rules of D5.3 and D17.2 that the parser decides from the written form.
+//
+// This suite is the named half of the parser's evidence. The other half is
+// differential: tools/diff_ast.sh compares this parser's tree with
+// src/bootstrap/parser.c's over every .ft file in the repository, so a
+// construct the repository writes is already held against the C parser. What
+// stands here is what a reader of one compiler should be able to check
+// without the other: one assertion per rule, spelled out.
+
+// ---- literals (D2.5 to D2.9, D10.5) --------------------------------------------
+
+fn void int_literals_carry_their_magnitude() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    assert(parse_env.expr_dump(&e, "0") == "(int 0)");
+    assert(parse_env.expr_dump(&e, "42") == "(int 42)");
+    // The value is the magnitude the lexer computed, not the spelling (D2.5).
+    assert(parse_env.expr_dump(&e, "0x10") == "(int 16)");
+    assert(parse_env.expr_dump(&e, "0b1010") == "(int 10)");
+    assert(parse_env.expr_dump(&e, "0o17") == "(int 15)");
+    assert(parse_env.expr_dump(&e, "1_000") == "(int 1000)");
+}
+
+fn void char_string_bool_and_null_literals() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // A char literal carries its byte value (D2.7).
+    assert(parse_env.expr_dump(&e, "'a'") == "(char 97)");
+    assert(parse_env.expr_dump(&e, "'\\n'") == "(char 10)");
+    // A string literal carries its decoded bytes (D2.9), escaped by the dump.
+    assert(parse_env.expr_dump(&e, "\"hi\"") == "(str \"hi\")");
+    assert(parse_env.expr_dump(&e, "\"a\\nb\"") == "(str \"a\\x0Ab\")");
+    assert(parse_env.expr_dump(&e, "\"q\\\"q\"") == "(str \"q\\\"q\")");
+    assert(parse_env.expr_dump(&e, "true") == "(bool true)");
+    assert(parse_env.expr_dump(&e, "false") == "(bool false)");
+    assert(parse_env.expr_dump(&e, "null") == "(null)");
+    assert(parse_env.expr_dump(&e, "x") == "(ident x)");
+}
+
+// ---- the precedence ladder (D6.1) ----------------------------------------------
+
+fn void multiplication_binds_tighter_than_addition() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    assert(parse_env.expr_dump(&e, "a + b * c")
+           == "(binary + (ident a) (binary * (ident b) (ident c)))");
+    assert(parse_env.expr_dump(&e, "a * b + c")
+           == "(binary + (binary * (ident a) (ident b)) (ident c))");
+}
+
+fn void wrapping_operators_have_their_plain_precedence() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // `+%` binds like `+` and `*%` like `*` (D11.2).
+    assert(parse_env.expr_dump(&e, "a +% b *% c")
+           == "(binary +% (ident a) (binary *% (ident b) (ident c)))");
+    assert(parse_env.expr_dump(&e, "a -% b")
+           == "(binary -% (ident a) (ident b))");
+}
+
+fn void binary_operators_are_left_associative() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    assert(parse_env.expr_dump(&e, "a - b - c")
+           == "(binary - (binary - (ident a) (ident b)) (ident c))");
+    assert(parse_env.expr_dump(&e, "a / b / c")
+           == "(binary / (binary / (ident a) (ident b)) (ident c))");
+    assert(parse_env.expr_dump(&e, "a << b << c")
+           == "(binary << (binary << (ident a) (ident b)) (ident c))");
+}
+
+fn void the_precedence_ladder_of_d6_1() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // Each level binds tighter than the one below it, so the looser operator
+    // is the root of the tree.
+    assert(parse_env.expr_dump(&e, "a || b && c")
+           == "(binary || (ident a) (binary && (ident b) (ident c)))");
+    assert(parse_env.expr_dump(&e, "a && b | c")
+           == "(binary && (ident a) (binary | (ident b) (ident c)))");
+    assert(parse_env.expr_dump(&e, "a | b ^ c")
+           == "(binary | (ident a) (binary ^ (ident b) (ident c)))");
+    assert(parse_env.expr_dump(&e, "a ^ b & c")
+           == "(binary ^ (ident a) (binary & (ident b) (ident c)))");
+    assert(parse_env.expr_dump(&e, "a & b == c")
+           == "(binary & (ident a) (binary == (ident b) (ident c)))");
+    assert(parse_env.expr_dump(&e, "a == b < c")
+           == "(binary == (ident a) (binary < (ident b) (ident c)))");
+    assert(parse_env.expr_dump(&e, "a < b << c")
+           == "(binary < (ident a) (binary << (ident b) (ident c)))");
+    assert(parse_env.expr_dump(&e, "a << b + c")
+           == "(binary << (ident a) (binary + (ident b) (ident c)))");
+    assert(parse_env.expr_dump(&e, "a + b * c")
+           == "(binary + (ident a) (binary * (ident b) (ident c)))");
+}
+
+fn void parentheses_override_precedence() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    assert(parse_env.expr_dump(&e, "(a + b) * c")
+           == "(binary * (binary + (ident a) (ident b)) (ident c))");
+    // A parenthesized expression is the expression itself: no node of its own.
+    assert(parse_env.expr_dump(&e, "(a)") == "(ident a)");
+    assert(parse_env.expr_dump(&e, "((a))") == "(ident a)");
+}
+
+fn void every_binary_operator_parses() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    assert(parse_env.expr_dump(&e, "a % b") == "(binary % (ident a) (ident b))");
+    assert(parse_env.expr_dump(&e, "a != b") == "(binary != (ident a) (ident b))");
+    assert(parse_env.expr_dump(&e, "a <= b") == "(binary <= (ident a) (ident b))");
+    assert(parse_env.expr_dump(&e, "a > b") == "(binary > (ident a) (ident b))");
+    assert(parse_env.expr_dump(&e, "a >= b") == "(binary >= (ident a) (ident b))");
+    assert(parse_env.expr_dump(&e, "a >> b") == "(binary >> (ident a) (ident b))");
+}
+
+fn void comparisons_parse_but_do_not_chain() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // The parser reads `a < b < c` as `(a < b) < c`; refusing it is the
+    // checker's business (D6.1 gives the relations one level).
+    assert(parse_env.expr_dump(&e, "a < b < c")
+           == "(binary < (binary < (ident a) (ident b)) (ident c))");
+}
+
+// ---- unary and postfix (grammar.md 6) ------------------------------------------
+
+fn void the_five_unary_operators() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    assert(parse_env.expr_dump(&e, "-x") == "(unary - (ident x))");
+    assert(parse_env.expr_dump(&e, "!x") == "(unary ! (ident x))");
+    assert(parse_env.expr_dump(&e, "~x") == "(unary ~ (ident x))");
+    assert(parse_env.expr_dump(&e, "*p") == "(unary * (ident p))");
+    assert(parse_env.expr_dump(&e, "&x") == "(unary & (ident x))");
+}
+
+fn void unary_operators_stack_and_bind_tighter_than_binary() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    assert(parse_env.expr_dump(&e, "!!x") == "(unary ! (unary ! (ident x)))");
+    assert(parse_env.expr_dump(&e, "-*p") == "(unary - (unary * (ident p)))");
+    assert(parse_env.expr_dump(&e, "-a * b")
+           == "(binary * (unary - (ident a)) (ident b))");
+    // Postfix binds tighter than unary: the call is the operand of the `*`.
+    assert(parse_env.expr_dump(&e, "*f(x)")
+           == "(unary * (call (ident f) (ident x)))");
+}
+
+fn void calls_take_their_arguments_in_order() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    assert(parse_env.expr_dump(&e, "f()") == "(call (ident f))");
+    assert(parse_env.expr_dump(&e, "f(1, 2)") == "(call (ident f) (int 1) (int 2))");
+    assert(parse_env.expr_dump(&e, "f(g(x), h)")
+           == "(call (ident f) (call (ident g) (ident x)) (ident h))");
+}
+
+fn void indexing_and_the_four_span_forms() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // An index has one operand and one subscript (D6.8).
+    assert(parse_env.expr_dump(&e, "v[0]") == "(index (ident v) (int 0))");
+    // A span carries its two bounds, either of which may be absent (D6.9).
+    assert(parse_env.expr_dump(&e, "s[1..2]") == "(span (ident s) (int 1) (int 2))");
+    assert(parse_env.expr_dump(&e, "s[..2]") == "(span (ident s) nil (int 2))");
+    assert(parse_env.expr_dump(&e, "s[1..]") == "(span (ident s) (int 1) nil)");
+    assert(parse_env.expr_dump(&e, "s[..]") == "(span (ident s) nil nil)");
+}
+
+fn void field_and_arrow_access() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    assert(parse_env.expr_dump(&e, "p.f") == "(field (ident p) f)");
+    // `->` is required through a pointer (D6.10) and is a node of its own.
+    assert(parse_env.expr_dump(&e, "p->f") == "(arrow (ident p) f)");
+}
+
+fn void postfix_chains_lean_left() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    assert(parse_env.expr_dump(&e, "p->f.g[0]")
+           == "(index (field (arrow (ident p) f) g) (int 0))");
+    assert(parse_env.expr_dump(&e, "f(1)(2)")
+           == "(call (call (ident f) (int 1)) (int 2))");
+    assert(parse_env.expr_dump(&e, "v[0].x") == "(field (index (ident v) (int 0)) x)");
+}
+
+// ---- the expression forms that embed a type ------------------------------------
+
+fn void cast_takes_an_expression_and_a_type() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    assert(parse_env.expr_dump(&e, "cast(x, u8)")
+           == "(cast (ident x) (type (prim u8)))");
+    assert(parse_env.expr_dump(&e, "cast(p, node*)")
+           == "(cast (ident p) (type (name node) (ptr)))");
+}
+
+fn void sizeof_takes_a_type_only() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // sizeof takes a type, never an expression (D3.15).
+    assert(parse_env.expr_dump(&e, "sizeof(i32)") == "(sizeof (type (prim i32)))");
+    assert(parse_env.expr_dump(&e, "sizeof(node*)")
+           == "(sizeof (type (name node) (ptr)))");
+}
+
+fn void new_with_and_without_a_count() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // One `T` without a count, a span of `n` elements with one (D10.2).
+    assert(parse_env.expr_dump(&e, "new(node)") == "(new (type (name node)) nil)");
+    assert(parse_env.expr_dump(&e, "new(u8, 16)") == "(new (type (prim u8)) (int 16))");
+    assert(parse_env.expr_dump(&e, "new(node* own, 4)")
+           == "(new (type (name node) (ptr own)) (int 4))");
+}
+
+fn void struct_literals_are_positional_or_designated() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    assert(parse_env.expr_dump(&e, "point{1, 2}")
+           == "(struct-lit (name point) (init (int 1) (int 2)))");
+    assert(parse_env.expr_dump(&e, "point{.x = 1, .y = 2}")
+           == "(struct-lit (name point) (init (designator x (int 1)) (designator y (int 2))))");
+    // A qualified name names a struct of another module (D9.4).
+    assert(parse_env.expr_dump(&e, "io.point{1}")
+           == "(struct-lit (name io point) (init (int 1)))");
+}
+
+fn void array_literals_carry_their_type() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    assert(parse_env.expr_dump(&e, "i32[2]{1, 2}")
+           == "(array-lit (type (prim i32) (array (int 2))) (init (int 1) (int 2)))");
+    assert(parse_env.expr_dump(&e, "node*[2]{null, null}")
+           == "(array-lit (type (name node) (ptr) (array (int 2))) (init (null) (null)))");
+}
+
+fn void brace_lists_allow_a_trailing_comma_and_nest() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    assert(parse_env.expr_dump(&e, "point{1, 2,}")
+           == "(struct-lit (name point) (init (int 1) (int 2)))");
+    assert(parse_env.expr_dump(&e, "pair{{1, 2}, {3, 4}}")
+           == "(struct-lit (name pair) (init (init (int 1) (int 2)) (init (int 3) (int 4))))");
+}
+
+fn void an_identifier_before_a_bracket_is_not_a_literal() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // The speculation of grammar.md 7.2 asks for a `{` after the type; an
+    // index has none, so `v[0]` stays an index.
+    assert(parse_env.expr_dump(&e, "v[0]") == "(index (ident v) (int 0))");
+    assert(parse_env.expr_dump(&e, "v[i + 1]")
+           == "(index (ident v) (binary + (ident i) (int 1)))");
+}
+
+// ---- types (grammar.md 4, D5.3, D17.2) -----------------------------------------
+
+fn void every_primitive_is_a_base_type() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    assert(parse_env.type_dump(&e, "i8") == "(type (prim i8))");
+    assert(parse_env.type_dump(&e, "i16") == "(type (prim i16))");
+    assert(parse_env.type_dump(&e, "i32") == "(type (prim i32))");
+    assert(parse_env.type_dump(&e, "i64") == "(type (prim i64))");
+    assert(parse_env.type_dump(&e, "u8") == "(type (prim u8))");
+    assert(parse_env.type_dump(&e, "u16") == "(type (prim u16))");
+    assert(parse_env.type_dump(&e, "u32") == "(type (prim u32))");
+    assert(parse_env.type_dump(&e, "u64") == "(type (prim u64))");
+    assert(parse_env.type_dump(&e, "f32") == "(type (prim f32))");
+    assert(parse_env.type_dump(&e, "f64") == "(type (prim f64))");
+    assert(parse_env.type_dump(&e, "bool") == "(type (prim bool))");
+    assert(parse_env.type_dump(&e, "char") == "(type (prim char))");
+}
+
+fn void string_void_and_names_are_base_types() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    assert(parse_env.type_dump(&e, "string") == "(type (string))");
+    assert(parse_env.type_dump(&e, "void*") == "(type (void) (ptr))");
+    assert(parse_env.type_dump(&e, "node") == "(type (name node))");
+    // A qualified name is a type of another module (D9.4).
+    assert(parse_env.type_dump(&e, "io.writer") == "(type (name io writer))");
+}
+
+fn void the_marker_positions_of_d5_3() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // A marker follows the element it qualifies: on the base type it is the
+    // binding's own storage, on a suffix the storage that suffix reaches.
+    assert(parse_env.type_dump(&e, "i32 mut") == "(type (prim i32) mut)");
+    assert(parse_env.type_dump(&e, "node*") == "(type (name node) (ptr))");
+    assert(parse_env.type_dump(&e, "node mut*") == "(type (name node) mut (ptr))");
+    assert(parse_env.type_dump(&e, "node* mut") == "(type (name node) (ptr mut))");
+    assert(parse_env.type_dump(&e, "node mut* mut") == "(type (name node) mut (ptr mut))");
+    assert(parse_env.type_dump(&e, "i32@") == "(type (prim i32) (span))");
+    assert(parse_env.type_dump(&e, "i32 mut@") == "(type (prim i32) mut (span))");
+    assert(parse_env.type_dump(&e, "i32[4]") == "(type (prim i32) (array (int 4)))");
+    assert(parse_env.type_dump(&e, "i32[4] mut") == "(type (prim i32) (array (int 4) mut))");
+}
+
+fn void the_owning_references_of_d17_2() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // An `own` marks a reference, and precedes the `mut` of its position.
+    assert(parse_env.type_dump(&e, "node* own") == "(type (name node) (ptr own))");
+    assert(parse_env.type_dump(&e, "node* own mut")
+           == "(type (name node) (ptr own mut))");
+    assert(parse_env.type_dump(&e, "i32@ own") == "(type (prim i32) (span own))");
+    // `string` is the reference with no suffix, so it takes the `own` after
+    // the base type (D3.7).
+    assert(parse_env.type_dump(&e, "string own") == "(type (string) own)");
+    assert(parse_env.type_dump(&e, "u8 mut@ own mut*")
+           == "(type (prim u8) mut (span own mut) (ptr))");
+}
+
+fn void function_types_read_as_a_base_type() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // fn_type = "fn" return_type "(" [ type { "," type } ] ")" (D3.10).
+    assert(parse_env.type_dump(&e, "fn void()") == "(type (fn-type (type (void))))");
+    assert(parse_env.type_dump(&e, "fn i32(i32, bool)")
+           == "(type (fn-type (type (prim i32)) (type (prim i32)) (type (prim bool))))");
+    // A function type takes suffixes like any other base type.
+    assert(parse_env.type_dump(&e, "fn void()*")
+           == "(type (fn-type (type (void))) (ptr))");
+}
+
+fn void the_array_group_stands_between_the_reference_groups() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // type = base [own] [mut] { ref } { array } { ref } (grammar.md 4), and
+    // the suffixes are kept in source order.
+    assert(parse_env.type_dump(&e, "node*[4]")
+           == "(type (name node) (ptr) (array (int 4)))");
+    assert(parse_env.type_dump(&e, "i32[4]*")
+           == "(type (prim i32) (array (int 4)) (ptr))");
+    // An array length is an expression here; the checker asks for a constant.
+    assert(parse_env.type_dump(&e, "i32[N + 1]")
+           == "(type (prim i32) (array (binary + (ident N) (int 1))))");
+}
+
+fn void noreturn_is_only_a_return_type() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // `noreturn` is a return type and nothing else (D8.5), so it parses in
+    // the return position of a declaration and of a function type.
+    assert(parse_env.parse_dump(&e, "fn noreturn die() {\n    f();\n}\n")
+           == "(module (fn (type (noreturn)) die (params) (block (call-stmt (call (ident f))))))");
+    assert(parse_env.type_dump(&e, "fn noreturn()")
+           == "(type (fn-type (type (noreturn))))");
+}
+
+fn i32 main() {
+    int_literals_carry_their_magnitude();
+    char_string_bool_and_null_literals();
+    multiplication_binds_tighter_than_addition();
+    wrapping_operators_have_their_plain_precedence();
+    binary_operators_are_left_associative();
+    the_precedence_ladder_of_d6_1();
+    parentheses_override_precedence();
+    every_binary_operator_parses();
+    comparisons_parse_but_do_not_chain();
+    the_five_unary_operators();
+    unary_operators_stack_and_bind_tighter_than_binary();
+    calls_take_their_arguments_in_order();
+    indexing_and_the_four_span_forms();
+    field_and_arrow_access();
+    postfix_chains_lean_left();
+    cast_takes_an_expression_and_a_type();
+    sizeof_takes_a_type_only();
+    new_with_and_without_a_count();
+    struct_literals_are_positional_or_designated();
+    array_literals_carry_their_type();
+    brace_lists_allow_a_trailing_comma_and_nest();
+    an_identifier_before_a_bracket_is_not_a_literal();
+    every_primitive_is_a_base_type();
+    string_void_and_names_are_base_types();
+    the_marker_positions_of_d5_3();
+    the_owning_references_of_d17_2();
+    function_types_read_as_a_base_type();
+    the_array_group_stands_between_the_reference_groups();
+    noreturn_is_only_a_return_type();
+    println("ok");
+    return 0;
+}
