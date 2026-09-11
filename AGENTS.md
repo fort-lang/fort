@@ -130,6 +130,11 @@ A safe(r) C-like systems programming language.
   stdout, stderr and the status byte-exactly; ctest `pipeline` (label `unit`). `*.ll` is
   gitignored except `test/ir/*.ll`. `run_tests.py --verify-ir` runs the same verifier over the
   `-S` output of every language test that compiles.
+- Test code that is compiled rather than included lives in a `test/*.c` that is not a suite
+  (`test/ast_dump.c`, the syntax tree's S-expression printer): CMake globs every such file into
+  the `fort_test_support` object library and links it into every suite, so `-Werror` and
+  clang-tidy cover it once. A suite links `fort_core`, so a helper may not take the name of a
+  compiler function (`type_error` is types.h's error-type constructor, not a test helper).
 - clang-tidy's `readability-function-size` caps `main` at about 60 `TEST_RUN`s (statement
   threshold 800; each `TEST_RUN` expands to about 13 statements, so 89 measured 1162): split a
   larger suite into two files with a shared `test/<component>_helpers.h` whose helpers are
