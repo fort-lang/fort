@@ -13,6 +13,7 @@
 
 #include "ast.h"
 #include "check.h"
+#include "consts.h"
 #include "modules.h"
 #include "modules_helpers.h"
 #include "scope.h"
@@ -154,6 +155,29 @@ static inline const char* sym_type_text(const sym_t* s) {
         type_to_str_decl(s->type, s->mut0, &out);
     }
     return sb_cstr(&out);
+}
+
+// The folded value of the initializer of the local or module declaration
+// `name`, as an int64_t; false when it is not an integer constant.
+static inline bool init_int(const char* name, int64_t* out) {
+    const ast_node_t* d = node_in_main(AST_VAR_DECL, name);
+    if (d == NULL || d->b == NULL) {
+        return false;
+    }
+    return cv_to_i64(check_node_value(&checker, d->b), out);
+}
+
+// The type the checker gave the initializer of the declaration `name`.
+static inline const char* init_type(const char* name) {
+    const ast_node_t* d = node_in_main(AST_VAR_DECL, name);
+    return type_text(d != NULL && d->b != NULL ? d->b->type : NULL);
+}
+
+// The declared type of the local or module declaration `name`, level 0
+// included (D5.3).
+static inline const char* decl_type(const char* name) {
+    const ast_node_t* d = node_in_main(AST_VAR_DECL, name);
+    return sym_type_text(d != NULL ? d->sym : NULL);
 }
 
 // The number of diagnostic lines the compilation reported.

@@ -541,7 +541,7 @@ static bool type_is_integer_prim(const type_t* t) {
 
 // Whether the untyped constant `v` may take the type `t` (D4.2, D4.3, D10.5),
 // with the diagnostic that names the reason.
-static bool constant_fits(check_t* ck, loc_t loc, cval_t v, const type_t* t) {
+static bool constant_fits(check_t* ck, loc_t loc, cval_t v, const type_t* t, const char* what) {
     if (v.kind == CV_NULL) {
         // `null` has no type of its own: it takes a pointer, `void*` or
         // function-pointer type from its context (D10.5).
@@ -567,11 +567,17 @@ static bool constant_fits(check_t* ck, loc_t loc, cval_t v, const type_t* t) {
     } else if (t->kind == TYPE_PRIM && t->prim == PRIM_BOOL) {
         // There is no truthiness: a condition is a `bool` (D3.3).
         msg_str(&ck->msg, "an integer constant does not become bool: write '!= 0'");
-    } else {
+    } else if (t->kind == TYPE_PRIM) {
         msg_str(&ck->msg, "constant ");
         cv_to_str(v, &ck->msg);
         msg_str(&ck->msg, " does not fit ");
         check_msg_type(ck, t);
+    } else {
+        // No constant has that type at all, so the context names itself.
+        msg_str(&ck->msg, what != NULL ? what : "the expression");
+        msg_str(&ck->msg, " expects ");
+        check_msg_type(ck, t);
+        msg_str(&ck->msg, ", not a constant");
     }
     check_msg_end(ck, loc);
     return false;
@@ -600,7 +606,8 @@ static bool check_no_value(check_t* ck, ast_node_t* n, expr_t* e) {
 // value meets the context (D4.4: the intermediates are exact); a node that
 // did not fold, `1 << n` with a variable count, passes the context on to the
 // operands that do carry a value.
-static bool retype_untyped(check_t* ck, ast_node_t* n, const type_t* t, bool fit) {
+static bool retype_untyped(
+    check_t* ck, ast_node_t* n, const type_t* t, bool fit, const char* what) {
     if ((n->ann & CHECK_ANN_UNTYPED) == 0) {
         return true;
     }
@@ -610,7 +617,7 @@ static bool retype_untyped(check_t* ck, ast_node_t* n, const type_t* t, bool fit
     bool ok = true;
     bool deeper = fit;
     if (v.kind != CV_NONE) {
-        ok = !fit || constant_fits(ck, n->loc, v, t);
+        ok = !fit || constant_fits(ck, n->loc, v, t, what);
         if (ok && v.kind == CV_CHAR && type_is_integer_prim(t)) {
             // A char constant in an integer context is its code point (D4.3).
             set_value(ck, n, cv_as_int(v));
@@ -619,12 +626,12 @@ static bool retype_untyped(check_t* ck, ast_node_t* n, const type_t* t, bool fit
     }
     ast_node_t* const kids[] = {n->a, n->b, n->c, n->d};
     for (uint64_t i = 0; i < sizeof kids / sizeof kids[0]; i++) {
-        if (kids[i] != NULL && !retype_untyped(ck, kids[i], t, deeper)) {
+        if (kids[i] != NULL && !retype_untyped(ck, kids[i], t, deeper, what)) {
             ok = false;
         }
     }
     for (uint64_t i = 0; i < ast_len(n); i++) {
-        if (!retype_untyped(ck, ast_child(n, i), t, deeper)) {
+        if (!retype_untyped(ck, ast_child(n, i), t, deeper, what)) {
             ok = false;
         }
     }
@@ -654,7 +661,7 @@ static void default_type(check_t* ck, ast_node_t* n, expr_t* e) {
     } else {
         e->type = type_prim(&ck->types, k);
     }
-    if (!retype_untyped(ck, n, e->type, true)) {
+    if (!retype_untyped(ck, n, e->type, true, NULL)) {
         e->type = type_error(&ck->types);
     }
     n->type = e->type;
@@ -678,7 +685,7 @@ static void convert(check_t* ck, ast_node_t* n, expr_t* e, const type_t* target,
         e->untyped = false;
         if (check_poisoned(target)) {
             e->type = target;
-        } else if (retype_untyped(ck, n, target, true)) {
+        } else if (retype_untyped(ck, n, target, true, what)) {
             e->type = target;
             e->value = check_node_value(ck, n);
         } else {
@@ -1044,6 +1051,37 @@ static void check_untyped_pair(
     out->type = cv_default_kind(v, &k) ? type_prim(&ck->types, k) : type_error(&ck->types);
 }
 
+// The operand rules of D6.2 on the type the operator is applied to.
+static bool operand_kind_ok(check_t* ck, loc_t loc, int32_t op, const type_t* t) {
+    if (check_poisoned(t)) {
+        return true;
+    }
+    if (op_is_logical(op)) {
+        // `! && ||` take bool only (D3.3).
+        if (t->kind != TYPE_PRIM || t->prim != PRIM_BOOL) {
+            error_operand(ck, loc, op, "bool operands", t);
+            return false;
+        }
+        return true;
+    }
+    if (op_is_comparison(op)) {
+        if (op_is_ordering(op) ? !type_has_ordering(t) : !type_has_equality(t)) {
+            error_operand(
+                ck, loc, op, op_is_ordering(op) ? "ordered operands" : "comparable operands", t);
+            return false;
+        }
+        return true;
+    }
+    // Arithmetic, wrapping and bitwise operators take integers, and `+ - * /`
+    // floats as well (D6.2).
+    if (!type_is_integer_prim(t) && !(op_takes_floats(op) && type_is_float(t))) {
+        error_operand(
+            ck, loc, op, op_takes_floats(op) ? "numeric operands" : "integer operands", t);
+        return false;
+    }
+    return true;
+}
+
 void check_operands(check_t* ck,
                     loc_t loc,
                     int32_t op,
@@ -1064,6 +1102,12 @@ void check_operands(check_t* ck,
     }
     if (a->untyped && b->untyped) {
         check_untyped_pair(ck, loc, op, a, b, out);
+        return;
+    }
+    // The typed operand decides whether the operator applies at all, before
+    // the untyped one adopts its type, so that `c + 1` on a char reports the
+    // arithmetic rule of D3.2 and not a constant that does not fit.
+    if (!operand_kind_ok(ck, loc, op, a->untyped ? b->type : a->type)) {
         return;
     }
     // An untyped operand takes the type of the other one (D4.1).
@@ -1664,16 +1708,18 @@ static void check_span_expr(check_t* ck, ast_node_t* n, expr_t* out) {
 static void check_cast(check_t* ck, ast_node_t* n, expr_t* out) {
     expr_t a;
     check_expr(ck, n->a, &a);
+    if (a.value.kind == CV_NULL) {
+        // `null` is not a valid operand, having no type of its own (D3.14,
+        // D10.5).
+        check_error(ck, n->a->loc, "'null' is not a cast operand");
+        (void)check_type(ck, n->b, TYPE_POS_CAST);
+        return;
+    }
     // A `cast` is not a context: an untyped operand takes its default type
     // first and is then converted with run-time semantics (D4.1, D3.14).
     value_of(ck, n->a, &a);
     const check_type_t target = check_type(ck, n->b, TYPE_POS_CAST);
     if (check_poisoned(a.type) || check_poisoned(target.type)) {
-        return;
-    }
-    if (a.type->kind == TYPE_NULL) {
-        // `null` is not a valid operand, having no type of its own (D10.5).
-        check_error(ck, n->loc, "'null' is not a cast operand");
         return;
     }
     if (!check_layout(ck, target.type) || !check_size_fits(ck, n->loc, target.type)) {

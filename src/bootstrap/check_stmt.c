@@ -136,6 +136,11 @@ static bool check_target(check_t* ck, ast_node_t* n, expr_t* lv, const char* ver
         msg_str(&ck->msg, verb);
         msg_str(&ck->msg, " immutable ");
         if (lv->sym != NULL) {
+            // A field's own storage follows the value that contains it, so
+            // the diagnostic says which one is immutable (D5.5, D5.7).
+            if (lv->sym->kind == SYM_FIELD) {
+                msg_str(&ck->msg, "field ");
+            }
             msg_quote(&ck->msg, lv->sym->name);
         } else {
             check_msg_type(ck, lv->type);
