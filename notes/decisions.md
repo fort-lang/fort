@@ -525,9 +525,15 @@ Owner: `module-system.md`.
   earlier `std::string` is `std::str`. The entry file is the exception: it is named on the command
   line rather than reached by an import path, so its base name need not be an identifier, and a name
   that is not one simply cannot be imported by anything (`007_case.ft` is the module `007_case`,
-  whose name reaches the generated module only inside a quoted symbol, D9.7). Amended 2026-09-10:
+  whose name reaches the generated module only inside a quoted symbol, D9.7). It may not contain a
+  `.`, the one character that would break the injectivity D9.7 rests on: an entry `my.app.ft` is
+  the module `my.app` and emits `my.app.main`, which is already the symbol of a `main` in a module
+  `my::app`. Nothing else is barred, since a module path is identifiers joined with `.` and a base
+  name without a dot cannot spell one whatever else it contains. Amended 2026-09-10:
   module-system.md required the entry base name to be a segment, which would have rejected every
-  test file D14.4 names `NNN_name.ft`.
+  test file D14.4 names `NNN_name.ft`. Amended 2026-09-10, separately: that exception admitted a
+  dotted base name, which the compiler accepted and then emitted two definitions of one symbol for
+  -- invalid IR, exit 0, caught only by `opt`.
 - **D9.2** Search roots, in order: the directory containing the entry file; each `-I` directory;
   the standard library directory. The first segment `std` is reserved for the standard library
   directory. The current working directory is never searched. Import paths are root-relative
@@ -947,15 +953,24 @@ decision or document says ownership is "by convention", this section supersedes 
   | `u8 mut@ own mut* out`         | borrowed pointer to an owned slot (an out-parameter)     |
   | `string own name`              | owned immutable characters (`str.dup`, `strbuf.take`)    |
 
-- **D17.3** Producers. `new(T)` yields `T mut* own` and `new(T, n)` yields `T mut@ own`, for any `T`
-  that is not itself `own`, `mut` or a reference to `void` (`new(u8[4], n)` is `u8[4] mut@ own`,
-  `new(node* own, n)` is `node mut* own mut@ own` whose slots are null; the result is always `own`
-  and writable at every level, D5.8); standard-library functions that allocate return `own` (D13.5).
+- **D17.3** Producers. `new(T)` yields `T mut* own` and `new(T, n)` yields `T mut@ own`, for every
+  `T` that `new` accepts, which is D10.2's rule and not a second one: no `mut` anywhere in `T`, an
+  `own` only after a `*`, and `T` itself neither `void` nor a span. `new(u8[4], n)` is
+  `u8[4] mut@ own` and `new(node* own, n)` is `node mut* own mut@ own` whose slots are null, the
+  result being always `own` and writable at every level (D5.8) -- which is why `T` may not spell a
+  `mut` of its own: `new` supplies every one of them, so there is one spelling for each type.
+  `new(void*)` is legal and yields `void* mut* own`, one pointer slot, since a pointer to `void`
+  has a size; it is `new(void)` that does not, and D10.2 rejects that one. Standard-library
+  functions that allocate return `own` (D13.5).
   `cast` may add `own` to a pointer or span, adopting memory that came from C (`cast(p, u8 mut*
   own)` for a `void*` from an extern that does not say `own`, the same unsafe escape as adding
   `mut`), and may drop it; the target type of a cast decides (D3.14). Span expressions (`buf[..]`,
   `buf[lo..hi]`) and `.ptr` always yield views, as do `&`, literals and the runtime's `args`.
-  Amended 2026-09-10: the count moved out of the type, `new(T[n])` to `new(T, n)`.
+  Amended 2026-09-10: the count moved out of the type, `new(T[n])` to `new(T, n)`. Amended
+  2026-09-10, separately: the restriction read "not itself `own`, `mut` or a reference to `void`",
+  which contradicted the `new(node* own, n)` in its own next clause, D10.2's parse rule, and
+  `void* own` (D17.1); it was a second statement of D10.2's rule that had drifted from it, so it
+  now cites it instead of restating it.
 - **D17.4** Lending. `own X` converts implicitly to `X` wherever a value meets an expected type,
   like dropping `mut` (D5.4); the two drops combine (`u8 mut@ own` to `u8@`). Dropping `own`
   at a level `k` is allowed only if every level between 1 and `k - 1` is immutable in the target
@@ -1164,11 +1179,14 @@ decided here and lands after the self-hosted compiler.
   `{"version": 1, "files": [...], "diagnostics": [...], "symbols": [...]}`, one line, `"version"`
   1 for this form. `"files"` lists every file the compiler read, in that order, as the `<file>`
   of D14.2, so a client can clear the stale diagnostics of a file that no longer has any. A
-  diagnostic is `{"file", "line", "col", "end_line", "end_col", "severity": "error", "message",
-  "notes": [{"file", "line", "col", "end_line", "end_col", "message"}]}`, the notes of D14.2
-  nested under the error they follow; positions are the 1-based byte columns of D14.2 and D20.4
-  with the end exclusive, and converting them to UTF-16 is the client's job. `"symbols"` is the
-  identifier index of D20.3, which is empty unless `--index` was given.
+  diagnostic is `{"file", "line", "col", "end_line", "end_col", "severity", "message", "notes":
+  [{"file", "line", "col", "end_line", "end_col", "message"}]}`, the notes of D14.2 nested under
+  the error they follow. `"severity"` is `"error"` on every diagnostic the compiler reports as
+  one, there being no warnings in v1, and `"note"` on a note that follows no error and so has none
+  to nest under; a nested note carries no severity of its own, its place saying what it is.
+  Positions are the 1-based byte columns of D14.2 and D20.4 with the end exclusive, and converting
+  them to UTF-16 is the client's job. `"symbols"` is the identifier index of D20.3, which is empty
+  unless `--index` was given.
 - **D20.3** `fort --index entry.ft` fills `"symbols"` with the identifier index. `--index` implies
   `--check` and `--json`, so the index is always a member of the document of D20.2 and is the empty
   array without it. The index holds one record per identifier occurrence the checker resolved, in
@@ -1193,16 +1211,21 @@ decided here and lands after the self-hosted compiler.
   builtin, which no source declares, and the empty range at 1:1 of the module's own file for a
   module, which is declared by a file and has no name token (D9.1, and D14.2's position for what has
   none): going to the definition of a module qualifier then opens that file at the top, where
-  `null` would be indistinguishable from a builtin's nothing to jump to. The consequence is that no
-  record has `"is_decl"` true for kind `module`, so a module has no rename anchor. Records are
-  ordered by file, an imported module before its importers (D9.10), and within a file by the start
-  of the occurrence. A name the checker did not resolve carries no record, so a file with errors
-  still indexes everything that resolved; neither does a construct that has no name token of its
-  own, nor a segment of an import path before its last, which names a search directory and not a
-  module (D9.2, D9.3), nor the pseudo-fields `.len` and `.ptr`, which are a property of the type
-  rather than a declaration of any module (D3.4, D3.5, D3.7). An occurrence and its declaration each
-  carry the type and the declaration range in full: the document is read once and thrown away, so a
-  client never resolves a reference into a second table.
+  `null` would be indistinguishable from a builtin's nothing to jump to. The consequence is that an
+  `as` alias is the only kind `module` record whose `"is_decl"` is true: a module declared by a file
+  has no name token for a rename to anchor on, and an import without an alias is a use like any
+  other. Records are ordered by file, an imported module before its importers (D9.10), and within a
+  file by the start of the occurrence. A name the checker did not resolve carries no record, so a
+  file with errors still indexes everything that resolved; neither does a construct that has no name
+  token of its own, nor a segment of an import path before its last, which names a search directory
+  and not a module (D9.2, D9.3), nor the pseudo-fields `.len` and `.ptr`, which are a property of
+  the type rather than a declaration of any module (D3.4, D3.5, D3.7). An occurrence and its
+  declaration each carry the type and the declaration range in full: the document is read once and
+  thrown away, so a client never resolves a reference into a second table. Amended 2026-09-10: the
+  consequence read "no record has `"is_decl"` true for kind `module`", contradicting the alias rule
+  three sentences above it and the index the compiler already emits, where `import m as alias;`
+  gives `alias` an
+  `"is_decl"` of true.
 - **D20.4** Ranges. A position is a range: from the first byte of its first token to one past the
   last byte of its last token, the start inclusive and the end exclusive, both 1-based byte
   columns with a tab counting as one column (D14.2). No token spans lines (D2.9), so the range of
