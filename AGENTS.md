@@ -641,10 +641,14 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
 - Reviewer: read-only; runs the `code-review` skill on the branch against `main` at its tier's
   effort; also checks spec citations, tests added, `xfail.txt` updates, AGENTS.md updates and
   commit hygiene; returns findings with file:line and severity; never edits, commits or merges.
-- Coordinator: re-runs the gate on the branch, merges per the Change Implementation Loop
-  (squash for a single unit, `--no-ff` for a multi-unit feature), deletes the worktree and
-  branch, appends the merge sha and the agents' token counts to the ticket log, and assigns the
-  tickets it unblocked.
+- Coordinator: re-runs the gate on the branch, **reads the diff's file list**, merges per the
+  Change Implementation Loop (squash for a single unit, `--no-ff` for a multi-unit feature),
+  deletes the worktree and branch, appends the merge sha and the agents' token counts to the
+  ticket log, and assigns the tickets it unblocked. The file list is a separate job from the gate,
+  which has no opinion about a file that should not exist: T-022 merged five scratch `.ft` probes
+  into the repository root behind a green gate, and the review that called its scope clean had read
+  the commit before the fix round that added them. `git diff --stat main...HEAD` before every
+  merge, and look for what is new rather than what changed.
 
 ### Self-Updating Context (AGENTS.md Auto-Amendment)
 AGENTS.md MUST be amended whenever a learning or course correction occurs. This applies in two
