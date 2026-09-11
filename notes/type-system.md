@@ -138,6 +138,16 @@ value: assignment, argument passing and `return` copy all `N` elements (D8.2). `
 untyped integer constant equal to `N` (D3.4, D4.6). A fixed array has no `.ptr`; obtain a
 pointer to an element with `&a[i]` or a span with `a[lo..hi]` (D6.9). A constant index that is
 out of range or negative is a compile error (D6.8, D4.1); any other index is checked at run time.
+Sizes are computed exactly, and a type whose size would exceed `2^63 - 1` bytes, the range of an
+`i64` index, is the compile error "type is too large" at the declaration that introduces it,
+reported like the infinite-size error of section 4.1 rather than as an allocation failure of the
+compiler (D3.4).
+
+```fort
+u8[9223372036854775807] ok = {};     // 2^63 - 1 bytes: the largest type there is
+u16[9223372036854775807] big = {};   // error: type is too large
+struct wide { u8[4611686018427387904] a; u8[4611686018427387904] b; }   // error: type is too large
+```
 
 ```fort
 i32[4] a = {1, 2, 3, 4};
@@ -1159,11 +1169,15 @@ char e = 65;                         // error: use cast(65, char)
 Operators applied to untyped constants fold at compile time. Integer with integer stays an
 untyped integer, so `1 / 2` is `0`; integer with float becomes an untyped float; `~c` on an
 untyped integer is `-c - 1`; constant `/` and `%` truncate toward zero exactly as at run time
-(D6.13), so `-7 / 2` is `-3` and `-7 % 2` is `-1`. Untyped integers are evaluated exactly in
-`[-2^63, 2^64 - 1]`; an intermediate outside that range, and division by zero, are compile
-errors. Untyped floats are evaluated as `f64`; an `f32` constant is the rounding of that `f64`
-value. The shifted operand of a shift takes its type from the context of the whole shift
-expression, never from the count.
+(D6.13), so `-7 / 2` is `-3` and `-7 % 2` is `-1`. `&`, `|` and `^` operate on the infinite
+two's-complement extension of their operands, which is Go's rule, so `-1 & 0xFFFFFFFFFFFFFFFF` is
+`18446744073709551615` and only `^` can leave the range; a shift folds exactly too, `<<` as
+a multiplication and `>>` as a floor division (`-3 >> 1` is `-2`), with a count in `0..63`
+(D4.4). Untyped integers are evaluated exactly in `[-2^63, 2^64 - 1]`; an intermediate outside
+that range, a shift count outside `0..63`, and division by zero, are compile errors. Untyped
+floats are evaluated as `f64`; an `f32` constant is the rounding of that `f64` value. The shifted
+operand of a shift takes its type from the context of the whole shift expression, never from the
+count.
 
 ```fort
 f64 h = 1 / 2;                       // 0.0: integer division folded first
@@ -1172,7 +1186,7 @@ i32 q = 1 << 40 >> 38;               // 4: folded exactly, then fits i32
 u32 m = ~0;                          // error: ~0 is -1, which does not fit u32
 u32 m2 = 0xFFFFFFFF;                 // ok
 i32 z = 1 / 0;                       // error: constant division by zero
-u64 big = 1 << 64;                   // error: intermediate outside the constant range
+u64 big = 1 << 64;                   // error: constant shift count must be in 0..63
 u64 sh = 1 << n;                     // 1 is u64 from the declaration, whatever n's type
 i32 mixed = 1 + 0.5;                 // error: 1.5 is a float constant
 f64 mixed2 = 1 + 0.5;                // 1.5

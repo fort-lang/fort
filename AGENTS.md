@@ -192,7 +192,15 @@ A safe(r) C-like systems programming language.
 - **Renaming a term**: sweep the stem, not the word. `grep -rni slice` never matches "Slicing",
   so a rename of `slice` to `span` must sweep `slic` (and any other inflected stem) with
   `grep -rni` before the criterion is ticked; markdown width is not covered by the gate, so run the
-  `awk 'length > 100'` check over every file touched.
+  `awk 'length > 100'` check over every file touched. The same holds for a change of syntax, and
+  its hard half runs the other way: the decisions and sections that *define* the old form are the
+  ones a sweep finds and the author rewrites, while the ones that merely *use* it -- an example, a
+  table row, a history note quoting the wording it replaced -- keep the dead spelling and read as
+  normative ever after. So sweep for the old form's *shape*, not for the name of the thing that
+  changed, which the uses never mention: for the east-const amendment that search is
+  `grep -rnE '\b(mut|own) ([iuf][0-9]+|bool|char|string)\b' notes/`, a qualifier standing before
+  a base type. Read every hit, including those in decisions already marked amended -- T-069 found
+  its leftovers inside decisions the original sweep had rewritten.
 - **"span" names the fort type `T@`** (D3.5), so a byte or source extent is a **range** everywhere
   in the compiler: `str_from_range`, token byte ranges, `ASSERT_TOK_RANGE`, and `loc_t` ranges in
   the editor-support work. Never call an extent a span.

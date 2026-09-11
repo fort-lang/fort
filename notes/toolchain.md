@@ -198,8 +198,9 @@ Compile-time diagnostics (D14.2) are written to stderr, one per line:
   and `<col>` to one past the last byte of the construct's last token, and every syntax-tree
   node carries that range and the range of its name. The text form above prints the start only,
   so an end never appears in a diagnostic line.
-- An error without a position in the file (a missing `main`, an entry base name that is not a
-  valid module name) uses `1:1` (D14.2).
+- An error without a position in the file, such as a missing `main`, uses `1:1` (D14.2). The
+  entry file's base name is not one of these: it need not be a valid module name at all (D9.1,
+  `module-system.md` 2).
 - A lexical error is reported and lexing resumes at the start of the next line (D14.2): the line
   the error stands on is dropped whole, the tokens already lexed on it included, so a file reports
   at most one lexical diagnostic per line and the token stream covers the rest of the file and
@@ -302,10 +303,11 @@ several:
 - A diagnostic carries the whole range of D20.4: `"line"` and `"col"` are the start the text form
   prints, `"end_line"` and `"end_col"` are one past its last byte, all 1-based with a tab counting
   as one column. Columns are byte columns; converting them to UTF-16 code units is the client's
-  job. `"severity"` is `"error"`, the only severity v1 emits, since there are no warnings (D14.2).
+  job. `"severity"` is `"error"` on every diagnostic the compiler reports as one, there being no
+  warnings in v1 (D14.2, D20.2).
 - The `note:` lines of an error are nested in its `"notes"`, in order, each with its own range; a
-  note carries no severity. A note that follows no error stands as a diagnostic of severity
-  `"note"`.
+  note carries no severity there. A note that follows no error has no error to nest under and
+  stands as a diagnostic of its own, whose `"severity"` is `"note"`.
 - `"symbols"` is the identifier index of section 9.1, which `--index` fills and which is the
   empty array without it (D20.3).
 - Diagnostics appear in the order they were reported, which is the order of the text form.

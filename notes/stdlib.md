@@ -47,7 +47,7 @@ library follows:
 - **Allocating functions return `own`** (D13.5, D17.3). `str.dup`, `str.concat` and
   `strbuf.take` return `string own`; `str.to_cstr` returns `char mut@ own`. The caller binds
   the result to an `own` variable, passes it to an `own` parameter or `del`s it; using it where
-  a plain `string` is expected is the "owning temporary would leak" error (D17.8). `del` of an
+  a plain `string` is expected is the "owning temporary would leak" error (D17.8). `del` of a
   `string own` frees it (D17.12); the earlier `del(cast(s, u8@))` is gone.
 - **Containers own their storage, not their contents.** `str_buf`, `ptr_vec`, `int_vec` and
   `str_map` keep their storage in an `own` field, which makes each an owning aggregate (D17.7):
@@ -97,7 +97,7 @@ library follows:
   (D17.13), as `libc.malloc` and `libc.free` show.
 - NUL termination. These strings carry a `0` after their last character: literals (D3.7), the
   elements of `sys.args()` (D8.6), the result of `sys.env`, and the C string at the `.ptr` of a
-  `str.to_cstr` result. Owned strings from `str.dup`, `str.concat` and `strbuf.take` do not: an
+  `str.to_cstr` result. Owned strings from `str.dup`, `str.concat` and `strbuf.take` do not: a
   `string own` occupies exactly `len` bytes, so that `cast(move(buf), string own)` (D17.12)
   turns an exact-size buffer into one without a second allocation. Sub-strings, `strbuf.view`
   results and file contents are not NUL-terminated either. The one way to hand a string to C
@@ -591,7 +591,7 @@ struct int_vec {
 
 Both structs are 24 bytes with `items` at offset 0 and `len` at offset 16 (`own` is erased,
 D17.1); `{}` is a valid empty vector. Both are owning aggregates (D17.7): functions take them by
-pointer and `*_free` releases them. Prefix `own` marks one level (D17.2), so a `ptr_vec` owns its
+pointer and `*_free` releases them. Each `own` marks one reference (D17.2), so a `ptr_vec` owns its
 slots and borrows every pointer in them: `ptr_push` lends its argument (D17.4), `ptr_pop`
 returns a view, and `ptr_free` never touches a pointee. The live elements are
 `v.items[..v.len]`. Indexing `v.items[i]` with `v.len <= i < v.items.len` is not a runtime

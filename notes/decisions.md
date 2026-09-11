@@ -177,8 +177,9 @@ Owner: `type-system.md`.
   `char@`, `u8@`, `char mut@` and `u8 mut@` (a `mut` in the outermost position of a cast target is
   an error: a cast result has no binding); a span to a span of the same element type whose marks
   differ only in mutability, added or dropped at any level (the cast-away-const escape, as for
-  pointers; amended 2026-09-10 from the T-011 review, which found the earlier `T@` to `mut T@`
-  wording narrower than the rule); any cast that only drops mutability or ownership, at any level (a
+  pointers; amended 2026-09-10 from the T-011 review, which found the earlier wording, which only
+  added writability to a span's elements, narrower than the rule); any cast that only drops
+  mutability or ownership, at any level (a
   no-op, since the implicit conversions of D5.4 and D17.4 cover it); adding `own` to a pointer or
   span (adoption, D17.3); identity. The result of a cast is `own` exactly when its target type says
   `own`: an `own` source cast to a non-`own` target lends (the result is a view), a non-`own` source
@@ -416,8 +417,9 @@ Owner: `core-language.md` (Expressions).
 
 Owner: `core-language.md` (Statements).
 
-- **D7.1** Declarations: `Type name = init;` and `mut Type name = init;`, one declarator per
-  declaration, initializer mandatory (no definite-assignment analysis). A declaration is
+- **D7.1** Declarations: `Type name = init;` and `Type mut name = init;`, the marker before the
+  name being the binding's own storage (D5.3), one declarator per declaration, initializer
+  mandatory (no definite-assignment analysis). A declaration is
   recognized as a type-looking prefix followed by an identifier (`grammar.md`, Disambiguation).
 - **D7.2** Assignment `lv = e;`, compound assignment `lv op= e;` for `+ - * / % +% -% *% & | ^ <<
   >>`, and postfix `lv++;` `lv--;` (integer types only) are statements. They are not
@@ -432,8 +434,8 @@ Owner: `core-language.md` (Statements).
   not visible in the condition); `for (init; cond; step) { }` where `init` is one declaration, an
   assignment statement, a call, or empty, `cond` is `bool` or empty (true), `step` is an
   assignment, `++`, `--`, a call, or empty; `for (;;)` is legal. The induction variable must be
-  declared `mut` like any other (`for (mut i32 i = 0; i < n; i++)`); there is no exception.
-  Range loop `for (T x : coll) { }` and `for (mut T x : coll) { }` where `coll` is a fixed array,
+  declared `mut` like any other (`for (i32 mut i = 0; i < n; i++)`); there is no exception.
+  Range loop `for (T x : coll) { }` and `for (T mut x : coll) { }` where `coll` is a fixed array,
   span or string expression evaluated once before the loop (a fixed array is copied as a
   value); `x` is a fresh copy of each element, taken at the start of its iteration. `break` and
   `continue` target the innermost enclosing loop (`continue` in a `for` runs `step`). There is no
@@ -473,7 +475,7 @@ Owner: `core-language.md` (Statements).
   A local's scope starts after its own declaration (`i32 x = x;` is an error).
 - **D7.10** Module-level declarations. `Type NAME = init;` is a compile-time constant: it lives in
   read-only memory, is addressable, and is usable in array lengths and `case` labels.
-  `mut Type g = init;` is a global in writable memory. Initializers must be constant expressions
+  `Type mut g = init;` is a global in writable memory. Initializers must be constant expressions
   (D4.6) extended with `null`, function names, `&` of a module-level declaration from any module,
   and struct or array literals of those. No calls and no reads of `mut` globals, so there is no
   initialization order. Top-level declarations are order-independent within a module (no forward
@@ -491,7 +493,7 @@ Owner: `core-language.md` (Functions).
   statement-level parsing unambiguous while the declaration still reads like C.
 - **D8.2** Parameters are passed by value: primitives, pointers, spans and strings by copying the
   scalar or the fat pointer; structs and fixed arrays by copying the whole value. Results are
-  returned by value likewise. There are no reference parameters; use `mut T*`.
+  returned by value likewise. There are no reference parameters; use `T mut*`.
 - **D8.3** No nested functions, closures, overloading, default arguments, variadics or methods.
   Recursion is allowed; depth is bounded only by the OS stack.
 - **D8.4** Terminating statements: `return`; a call to a `noreturn` function or to `panic`; an
@@ -743,7 +745,7 @@ Owner: `stdlib.md`.
   (growable byte buffer), `std::vec` (`ptr_vec`, `int_vec`, the non-generic pattern), `std::strmap`
   (string-keyed open-addressing table), `std::math` (float bit casts, abs/min/max per type).
 - **D13.3** Error handling idiom (the earlier TBD): functions return `bool` or an error enum, with
-  results delivered through `mut T*` out-parameters; `-1`/`null` sentinels where conventional;
+  results delivered through `T mut*` out-parameters; `-1`/`null` sentinels where conventional;
   `panic` for programming errors; `defer` for cleanup. No `Result` type in v1.
 - **D13.4** The stdlib never passes spans, strings or structs across an `extern` boundary; it
   unpacks `.ptr` and `.len`. Functions that hand a path to C copy it into a NUL-terminated buffer.

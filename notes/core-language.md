@@ -82,11 +82,11 @@ string s = "a" "b";       // error: expected ';' (literals do not concatenate)
 ### 2.5 Operators, punctuation and nesting (D2.10, D2.11)
 
 The tokens are `+ - * / % +% -% *% = += -= *= /= %= +%= -%= *%= &= |= ^= <<= >>= == != < <= > >=
-&& || ! & | ^ ~ << >> ++ -- ? : :: . -> .. ( ) [ ] { } , ;`. The lexer takes the longest match
-(`+%=` before `+%` before `+`). `%` is never a prefix operator, so `a+%b` is unambiguously
-`a +% b`. `<<` and `>>` are single tokens. Nesting of blocks, parentheses, brackets, braces and
-type suffixes deeper than 256 is a compile error, so a recursive-descent compiler written in
-fort never needs an unbounded stack.
+&& || ! & | ^ ~ << >> ++ -- ? : :: . -> .. ( ) [ ] { } , ; @`, the last of them the span suffix
+of a type (D3.5, section 4). The lexer takes the longest match (`+%=` before `+%` before `+`).
+`%` is never a prefix operator, so `a+%b` is unambiguously `a +% b`. `<<` and `>>` are single
+tokens. Nesting of blocks, parentheses, brackets, braces and type suffixes deeper than 256 is a
+compile error, so a recursive-descent compiler written in fort never needs an unbounded stack.
 
 ## 3. Declarations and mutability
 
@@ -503,7 +503,7 @@ Every mixed-type operation is an error: there is no promotion, not even for `u8`
 type" for comparison and `?:` operands means identical, mutability levels included (D3.12): the
 implicit drop of 3.4 applies only to initialization, assignment, argument passing and `return`.
 The `own` mark is the exception: the operands of `==`, `!=` and `?:` are lent first (D17.4), so
-`n == m` compares an `node* own` with a `node*`, while an `own` rvalue operand is an error
+`n == m` compares a `node* own` with a `node*`, while an `own` rvalue operand is an error
 (D17.8). Equality is defined on integers, floats, `bool`, `char`, enums, pointers (identity),
 function pointers (identity) and `string` (contents: `len` then bytes, so the zero string equals
 `""`); it is an error on structs, fixed arrays and spans. `>>` is arithmetic for signed and
