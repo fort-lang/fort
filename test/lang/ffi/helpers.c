@@ -5,6 +5,9 @@
 
 enum { BYTE_MASK = 0xFFU };
 
+// What helper_paint multiplies its enum by, so the answer names the member.
+enum { PAINT_SCALE = 10 };
+
 int32_t helper_add(int32_t a, int32_t b) {
     return a + b;
 }
@@ -69,4 +72,12 @@ bool helper_not(bool b) {
 // answer comes back as the enum it was declared with.
 int32_t helper_enum_next(int32_t c) {
     return c + 1;
+}
+
+// The C side of run/modules/extern_enum: one symbol that two fort modules
+// declare, one spelling the enum parameter `color` and the other
+// `shade.color`. The two declarations are identical because they are compared
+// as types (D9.8, D9.4).
+int32_t helper_paint(int32_t color) {
+    return color * PAINT_SCALE;
 }

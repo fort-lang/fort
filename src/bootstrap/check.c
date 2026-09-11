@@ -39,6 +39,8 @@ void check_init(check_t* ck) {
     ptrvec_init(&ck->values);
     sb_init(&ck->msg);
     strmap_init(&ck->bad_imports);
+    strmap_init(&ck->extern_first);
+    ptrvec_init(&ck->externs);
     // One symbol per universe name of D12.2, so that every use of a builtin
     // denotes the same record.
     for (uint64_t i = 0; i < UNIVERSE_COUNT; i++) {
@@ -73,6 +75,8 @@ void check_free(check_t* ck) {
     }
     ptrvec_free(&ck->values);
     strmap_free(&ck->bad_imports);
+    strmap_free(&ck->extern_first);
+    ptrvec_free(&ck->externs);
     sb_free(&ck->msg);
     type_table_free(&ck->types);
 }
@@ -2945,6 +2949,226 @@ static bool check_runtime_signature(check_t* ck,
     return true;
 }
 
+// ---- two extern declarations of one C symbol (D9.8) ------------------------------------
+
+// Whether a primitive is the byte C spells `unsigned char`: fort `char` is
+// that type at the boundary (D3.2), so `char` and `u8` name one C type and
+// `char*` may equally be written `u8*` (D9.8).
+static bool is_c_byte(prim_kind_t k) {
+    return k == PRIM_U8 || k == PRIM_CHAR;
+}
+
+// Whether two types in an extern signature name one C type. D9.8 requires the
+// declarations of one C symbol to be identical, so this is type identity --
+// interning makes it pointer equality below the nominal types, whose identity
+// is their declaration (D3.8, D3.9) -- with the one relaxation D9.8 states
+// itself, `char` for `u8`. Level marks below the binding are part of a type
+// (D3.12) and `own` is too (D17.1), so both are compared; a binding-level
+// `mut` is not part of a function type (D3.10) and never reaches here.
+static bool extern_type_agrees(const type_t* a, const type_t* b) {
+    if (a == NULL || b == NULL) {
+        return a == b;
+    }
+    if (a == b) {
+        return true;
+    }
+    if (a->kind != b->kind) {
+        return false;
+    }
+    switch (a->kind) {
+    case TYPE_VOID:
+        return true;
+    case TYPE_PRIM:
+        return a->prim == b->prim || (is_c_byte(a->prim) && is_c_byte(b->prim));
+    case TYPE_PTR:
+        return a->mut == b->mut && a->own == b->own && extern_type_agrees(a->elem, b->elem);
+    case TYPE_VOIDPTR:
+        return a->own == b->own;
+    case TYPE_FN:
+        if (a->noreturn != b->noreturn || a->nparams != b->nparams ||
+            !extern_type_agrees(a->elem, b->elem)) {
+            return false;
+        }
+        for (uint32_t i = 0; i < a->nparams; i++) {
+            if (!extern_type_agrees(a->params[i], b->params[i])) {
+                return false;
+            }
+        }
+        return true;
+    default:
+        // A struct or enum reached through a pointer, and every kind an
+        // extern signature may not use: two nodes the interning above did not
+        // equate are two types.
+        return false;
+    }
+}
+
+// Whether a struct or an enum, whose identity is the declaration it comes
+// from and not its spelling (D3.8, D3.9).
+static bool is_nominal(const type_t* t) {
+    return t->kind == TYPE_STRUCT || t->kind == TYPE_ENUM;
+}
+
+// Whether either side of the first difference between two disagreeing extern
+// types names a struct or an enum, whose identity is its declaration and not
+// its spelling (D3.8, D3.9): that is the case where writing the same words in
+// both modules cannot make the declarations agree, so the note must offer the
+// type or the wrapper. It says "either side" and not "each": one module
+// spelling the parameter `i32` where the other names an enum is the same
+// class of fix, the enum being importable. Two spellings of one type never
+// reach here, since `color` and `shade.color` denote one declaration (D9.4)
+// and the comparison above already agreed.
+//
+// It runs only after extern_type_agrees returned false, so it is a second
+// walk over a pair known to differ and never a verdict on its own. Two
+// deliberate differences from that walk: it stops at a `void*`, which erases
+// its pointee and so can hide no nominal type, and it tolerates two function
+// types of unequal arity by walking the shorter list, since it is asked which
+// kind of difference was found and not whether one exists.
+static bool differs_by_nominal(const type_t* a, const type_t* b) {
+    if (a == NULL || b == NULL || a == b) {
+        return false;
+    }
+    if (is_nominal(a) || is_nominal(b)) {
+        return true;
+    }
+    if (a->kind != b->kind) {
+        return false;
+    }
+    if (a->kind == TYPE_PTR) {
+        return differs_by_nominal(a->elem, b->elem);
+    }
+    if (a->kind == TYPE_FN) {
+        if (differs_by_nominal(a->elem, b->elem)) {
+            return true;
+        }
+        for (uint32_t i = 0; i < a->nparams && i < b->nparams; i++) {
+            if (differs_by_nominal(a->params[i], b->params[i])) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// `conflicting declarations of extern 'write': parameter 1 differs`, in the
+// wording module-system.md 13 gives every row of this conflict: the error at
+// the piece of the later declaration that carries the difference, then a note
+// at the earlier declaration. `param` is the 1-based parameter for the
+// difference that names one and 0 otherwise; `wrapper` asks for the note that
+// says what to do when no shared spelling exists.
+static void error_extern_conflict(check_t* ck,
+                                  loc_t at,
+                                  loc_t first,
+                                  str_t name,
+                                  const char* what,
+                                  uint64_t param,
+                                  bool wrapper) {
+    check_msg_begin(ck);
+    msg_str(&ck->msg, "conflicting declarations of extern ");
+    msg_quote(&ck->msg, name);
+    msg_str(&ck->msg, what);
+    if (param > 0) {
+        msg_uint(&ck->msg, param);
+        msg_str(&ck->msg, " differs");
+    }
+    check_msg_end(ck, at);
+    // A muted checker annotates the tree without reporting, so the notes
+    // follow the error rather than standing alone (D20.2).
+    if (ck->mute) {
+        return;
+    }
+    msg_begin(&ck->msg);
+    msg_str(&ck->msg, "previous declaration of ");
+    msg_quote(&ck->msg, name);
+    msg_str(&ck->msg, " here");
+    diag_note(first, msg_end(&ck->msg));
+    if (!wrapper) {
+        return;
+    }
+    msg_begin(&ck->msg);
+    // A struct or an enum is identified by its declaration (D3.8, D3.9), so a
+    // module that names one where the other names another type, or another
+    // module's, cannot reach agreement by rewording: it imports the type, or
+    // one module declares the symbol and exports a fort function the others
+    // call (module-system.md 8.1).
+    msg_str(&ck->msg,
+            "a struct or an enum stands here, and its identity is its declaration and not its "
+            "spelling: give both declarations that one type, importing it where it is missing, or "
+            "declare the symbol in one module and call it through a fort function the others "
+            "import");
+    diag_note(at, msg_end(&ck->msg));
+}
+
+// The same C symbol may be declared `extern` in several modules provided the
+// signatures are identical, `own` included (D9.8, D17.13): every module of
+// the closure is checked in the dependency order the loader left, so the
+// first declaration of a name is the one every later declaration is held
+// against, and the difference is reported at the later one. The comparison is
+// of types and not of what the two modules wrote, which is why it stands here
+// and not in the loader: two spellings of one imported type are one type
+// (D9.4), and two local types of one spelling are two.
+static bool check_extern_agreement(check_t* ck, const ast_node_t* decl, const sym_t* s) {
+    int64_t at = 0;
+    if (!strmap_get(&ck->extern_first, s->name, &at)) {
+        (void)strmap_put(&ck->extern_first, s->name, (int64_t)ck->externs.len);
+        ptrvec_push(&ck->externs, (void*)s);
+        return true;
+    }
+    const sym_t* first = (const sym_t*)ck->externs.items[at];
+    if (first->node == decl) {
+        // The same declaration, checked a second time through one checker
+        // (the editor mode of D20.2): its symbol and the nominal types it
+        // names are new records of the old tree, so the entry is replaced
+        // rather than compared against itself. Replacing assumes this second
+        // pass reaches here at all, which it does only when the declaration
+        // still checks: a pass that fails it leaves the map pointing at the
+        // first pass's symbol, whose nominal types belong to a resolution
+        // that has been superseded, so a later module would be held against
+        // types no module can name any more. Every failure path above this
+        // one reports first, so such a run is already diagnosed and the stale
+        // comparison can only add to a file that is not compiling; nothing
+        // reaches it otherwise.
+        ck->externs.items[at] = (void*)s;
+        return true;
+    }
+    const type_t* a = first->type;
+    const type_t* b = s->type;
+    if (a == NULL || b == NULL || a->kind != TYPE_FN || b->kind != TYPE_FN) {
+        return true;
+    }
+    const loc_t note = first->node->name_loc;
+    if (a->noreturn != b->noreturn || !extern_type_agrees(a->elem, b->elem)) {
+        error_extern_conflict(ck,
+                              decl->a->loc,
+                              note,
+                              s->name,
+                              ": the result type differs",
+                              0,
+                              differs_by_nominal(a->elem, b->elem));
+        return false;
+    }
+    if (a->nparams != b->nparams) {
+        error_extern_conflict(
+            ck, decl->name_loc, note, s->name, ": the number of parameters differs", 0, false);
+        return false;
+    }
+    for (uint32_t i = 0; i < a->nparams; i++) {
+        if (extern_type_agrees(a->params[i], b->params[i])) {
+            continue;
+        }
+        error_extern_conflict(ck,
+                              param_at(decl, i)->loc,
+                              note,
+                              s->name,
+                              ": parameter ",
+                              i + 1,
+                              differs_by_nominal(a->params[i], b->params[i]));
+        return false;
+    }
+    return true;
+}
+
 // The program entry point the compiler emits in the entry module (D11.6),
 // whose name an `extern` may not declare (D9.7).
 static const char ENTRY_SYMBOL[] = "fort_entry";
@@ -3031,6 +3255,13 @@ static void resolve_fn(check_t* ck, sym_t* s) {
         return;
     }
     s->type = type_fn(&ck->types, ret.type, params, (uint32_t)n, is_noreturn(decl->a));
+    if (is_extern && !check_extern_agreement(ck, decl, s)) {
+        // The declaration is well formed and what failed is its agreement
+        // with another module's declaration of the same C symbol, but the
+        // program has no one signature for it, so the symbol is poisoned and
+        // every call to it in this module stays silent (D9.8, D14.2).
+        sym_fail(ck, s);
+    }
 }
 
 static void resolve_var(check_t* ck, sym_t* s) {

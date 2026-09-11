@@ -88,8 +88,10 @@ void module_set_std_dir(module_set_t* set, const char* dir);
 
 // Reads `entry`, derives its module path from its base name and walks the
 // import closure (module-system.md 2, 10). Returns false after reporting a
-// diagnostic: an unreadable file, a lexical or syntax error, or any of the
-// import errors of module-system.md 13.
+// diagnostic: an unreadable file, a lexical or syntax error, or an import
+// error of module-system.md 13 that a namespace answers -- not every row of
+// that table is the loader's, since two `extern` declarations of one C symbol
+// are compared as types and so in the checker (D9.8).
 bool module_set_load(module_set_t* set, const char* entry);
 
 // The modules of the closure in dependency order, every module after the ones

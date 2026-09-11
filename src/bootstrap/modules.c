@@ -408,53 +408,6 @@ static void error_redeclaration(module_set_t* set, loc_t first, loc_t second, st
     diag_note(earlier, msg_end(&set->msg));
 }
 
-// What two `extern fn` declarations of one C symbol disagree about. The
-// comparison is of what the two modules wrote, parameter names excepted
-// (D9.8 as amended), so the report names the written difference rather than a
-// type difference it cannot compute here.
-typedef enum {
-    EXTERN_SAME,
-    EXTERN_DIFF_RESULT,
-    EXTERN_DIFF_COUNT,
-    EXTERN_DIFF_PARAM,
-} extern_diff_t;
-
-// `conflicting declarations of extern 'write': parameter 1 differs`: the same
-// C symbol may be declared in several modules provided the signatures are
-// identical as written, parameter names excepted (D9.8, D17.1,
-// module-system.md 8.1). Naming the difference matters because two spellings
-// of one type differ as written and not as types, and the note then says what
-// to do about it.
-static void error_extern_conflict(
-    module_set_t* set, loc_t at, loc_t first, str_t name, extern_diff_t diff, uint64_t param) {
-    msg_begin(&set->msg);
-    msg_str(&set->msg, "conflicting declarations of extern ");
-    msg_quote(&set->msg, name);
-    if (diff == EXTERN_DIFF_RESULT) {
-        msg_str(&set->msg, ": the result type differs");
-    } else if (diff == EXTERN_DIFF_COUNT) {
-        msg_str(&set->msg, ": the number of parameters differs");
-    } else {
-        msg_str(&set->msg, ": parameter ");
-        msg_uint(&set->msg, param);
-        msg_str(&set->msg, " differs");
-    }
-    diag_error(at, msg_end(&set->msg));
-    msg_begin(&set->msg);
-    msg_str(&set->msg, "previous declaration of ");
-    msg_quote(&set->msg, name);
-    msg_str(&set->msg, " here");
-    diag_note(first, msg_end(&set->msg));
-    msg_begin(&set->msg);
-    // The two declarations are compared as written, so one type spelled two
-    // ways is a difference here; a module that cannot spell it the same way
-    // imports a fort function instead of declaring the C symbol again.
-    msg_str(&set->msg,
-            "extern signatures are compared as written, parameter names excepted: declare the "
-            "symbol in one module and call it through a fort function the others import");
-    diag_note(at, msg_end(&set->msg));
-}
-
 // ---- the module namespace (D7.9) ------------------------------------------------------
 
 // The binding kind of a top-level declaration; BIND_NONE for a node that is
@@ -515,90 +468,6 @@ static bool collect_declarations(module_set_t* set, module_t* m) {
             ok = false;
         }
     }
-    return ok;
-}
-
-// ---- extern signatures (D9.8) -----------------------------------------------------------
-
-// Whether two written types are the same tree: the bootstrap compares extern
-// signatures before types exist, so it compares the syntax the two modules
-// wrote, `own` included, which is part of type identity (D17.1).
-static bool same_written_type(const ast_node_t* a, const ast_node_t* b) {
-    if (a == NULL || b == NULL) {
-        return a == b;
-    }
-    if (a->kind != b->kind || a->op != b->op || a->flags != b->flags || a->ival != b->ival ||
-        !str_eq(a->name, b->name) || ast_len(a) != ast_len(b)) {
-        return false;
-    }
-    if (!same_written_type(a->a, b->a) || !same_written_type(a->b, b->b) ||
-        !same_written_type(a->c, b->c) || !same_written_type(a->d, b->d)) {
-        return false;
-    }
-    for (uint64_t i = 0; i < ast_len(a); i++) {
-        if (!same_written_type(ast_child(a, i), ast_child(b, i))) {
-            return false;
-        }
-    }
-    return true;
-}
-
-// What two `extern fn` declarations of one C symbol disagree about: the
-// result type, the parameter count, or the first parameter whose written type
-// differs, whose 1-based position is left in `*param`. Parameter names are
-// required by the grammar and otherwise unused, so they are not compared
-// (module-system.md 8.1).
-static extern_diff_t extern_difference(const ast_node_t* a, const ast_node_t* b, uint64_t* param) {
-    *param = 0;
-    if (!same_written_type(a->a, b->a)) {
-        return EXTERN_DIFF_RESULT;
-    }
-    if (ast_len(a) != ast_len(b)) {
-        return EXTERN_DIFF_COUNT;
-    }
-    for (uint64_t i = 0; i < ast_len(a); i++) {
-        if (!same_written_type(ast_child(a, i)->a, ast_child(b, i)->a)) {
-            *param = i + 1;
-            return EXTERN_DIFF_PARAM;
-        }
-    }
-    return EXTERN_SAME;
-}
-
-// Every module that calls a C function declares it, and the same C symbol may
-// be declared in several modules provided the signatures are identical
-// (D9.8): the closure is walked once, in dependency order, and a second
-// declaration that disagrees with the first is reported at itself.
-static bool check_extern_signatures(module_set_t* set) {
-    strmap_t seen;
-    strmap_init(&seen);
-    ptrvec_t first;
-    ptrvec_init(&first);
-    bool ok = true;
-    for (uint64_t i = 0; ok && i < set->order.len; i++) {
-        const module_t* m = (const module_t*)set->order.items[i];
-        for (uint64_t k = 0; ok && k < scope_count(&m->names); k++) {
-            const binding_t* b = scope_at(&m->names, k);
-            if (b->kind != BIND_EXTERN_FN) {
-                continue;
-            }
-            int64_t at = 0;
-            if (!strmap_get(&seen, b->name, &at)) {
-                (void)strmap_put(&seen, b->name, (int64_t)first.len);
-                ptrvec_push(&first, (void*)b);
-                continue;
-            }
-            const binding_t* earlier = (const binding_t*)first.items[at];
-            uint64_t param = 0;
-            const extern_diff_t diff = extern_difference(earlier->node, b->node, &param);
-            if (diff != EXTERN_SAME) {
-                error_extern_conflict(set, b->loc, earlier->loc, b->name, diff, param);
-                ok = false;
-            }
-        }
-    }
-    ptrvec_free(&first);
-    strmap_free(&seen);
     return ok;
 }
 
@@ -1015,9 +884,6 @@ bool module_set_load(module_set_t* set, const char* entry) {
         return false;
     }
     if (load_module(set, base, file, file_start(file), true) == NULL) {
-        return false;
-    }
-    if (!check_extern_signatures(set)) {
         return false;
     }
     return diag_count() == before;

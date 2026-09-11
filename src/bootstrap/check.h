@@ -136,6 +136,13 @@ typedef struct {
     // loader reported each one, so a use of one is silent, as a use of a
     // declaration that failed to check is (D14.2).
     strmap_t bad_imports;
+    // The first `extern fn` declaration of each C symbol, over the whole
+    // closure: `extern_first` maps the C name to a position in `externs`,
+    // which holds that declaration's symbol. A later declaration of the same
+    // symbol is held against it, since the declarations of one C symbol must
+    // have identical signatures (D9.8). The symbols are owned by `syms`.
+    strmap_t extern_first;
+    ptrvec_t externs;
     const sym_t* builtins[UNIVERSE_COUNT]; // the universe functions of D12.2
     bool mute;                             // annotate without reporting, for an editor mode (D20.2)
     bool require_main; // the entry module defines main (D8.6); off for a check-only run

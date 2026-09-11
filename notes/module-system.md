@@ -252,20 +252,36 @@ convention on the fort side: `void* own malloc(u64 n)` says the caller must free
 frees nothing takes plain `T*`. Because `own` is part of type identity (D17.1), two modules that
 declare one C symbol with and without it have conflicting declarations (D9.8, section 13):
 
-Two declarations are compared as written, parameter names excepted (D9.8): the check runs while
-the closure is loaded, before types exist. So a binding-level `mut`, which is not part of a
-function type (D3.10), counts as a difference, and so do two spellings of one type -- `color` in
-the module that declares the enum and `shade.color` in another. For an imported enum no shared
-spelling exists, since a module can neither qualify a name with its own module name nor import
-itself, so a program whose modules disagree that way cannot be written at all. The workaround, and
-the note the compiler prints, is to stop declaring the symbol twice: one module declares it and
-exports a fort function that the others import.
+Two declarations are compared as types, parameter names excepted (D9.8): the check runs in the
+checker, over the whole closure in the dependency order of D9.10, where the types exist. So two
+spellings of one type agree -- `color` in the module that declares the enum and `shade.color` in
+another are one type (D9.4) -- and so do `char` and `u8`, which are one C type at the boundary
+(D3.2). A binding-level `mut` is not part of a function type (D3.10) and is not a difference
+either. What does differ is what the types differ in: `own` (D17.13), the mutability of any level
+below the binding (D3.12), `noreturn` (D8.5), the parameter count, two integer types of one width
+that differ in signedness -- `i32` against `u32` is a difference here, where C's `int` and
+`unsigned int` are two types and either module may write either name, although the two emit the
+same IR -- and two nominal types of one spelling, since a struct or an enum is identified by the
+declaration it comes from (D3.8, D3.9).
+Two modules that each declare their own `color` and both declare `paint(color c)` therefore
+conflict although every enum crosses as `i32`: the program has no one signature for that C
+symbol. No spelling makes those two agree, so the note the compiler prints there is to share one
+type, or to stop declaring the symbol twice -- one module declares it and exports a fort function
+that the others import. That note stands whenever *either* declaration names a struct or an enum and
+not only when both do: a module that writes the `i32` an enum crosses as draws it too, importing the
+enum being the same fix:
 
 ```fort
 // shade.ft
 enum color { red, green }
-extern fn void paint(color c);                  // declared once, here
-fn void paint_red() { paint(color.red); }       // and reached from elsewhere through this
+extern fn void paint(color c);                  // the enum's own module spells it `color`
+fn void paint_red() { paint(color.red); }       // reachable from elsewhere through this
+```
+
+```fort
+// main.ft
+import shade;
+extern fn void paint(shade.color c);            // the only other spelling there is; one type
 ```
 
 ```fort
@@ -740,11 +756,16 @@ both name <real path>`; a redeclaration points at the earlier one with `note: pr
 of 'add' here`; the missing-`main` message continues `or 'fn i32 main(string@ args)'`. Every
 conflicting-extern row names the difference in the same words: `: the result type differs`, `: the
 number of parameters differs` or `: parameter N differs`, and the runtime row adds `from the
-runtime's`, since the declaration it conflicts with is the compiler's own (D9.8). An `extern fn`
-naming a runtime entry point of `toolchain.md` 5.1 is legitimate -- the standard library declares
-five of them (D13.1) -- and is held against that section's prototype, the position being the
-parameter, the written result type or the name for an arity; two types agree when they take the same
-IR form, attribute included (D9.9), so `u64` and `i64` both match an `int64_t` and `char` matches a
+runtime's`, since the declaration it conflicts with is the compiler's own (D9.8). A conflict between
+two modules is reported at the later declaration of the dependency order, on the piece that carries
+the difference, with `note: previous declaration of 'write' here` at the earlier one; when either of
+the two types names a struct or an enum, a second note says that such a type is its declaration and
+not its spelling and gives the two ways out, since no rewording reaches one (section 8.1). Either
+and not both: an enum against the `i32` it crosses as draws that note too. An `extern fn` naming a
+runtime entry point of `toolchain.md` 5.1 is legitimate -- the standard library declares five of
+them (D13.1) -- and is held against that section's prototype, the position being the parameter, the
+written result type or the name for an arity; two types agree when they take the same IR form,
+attribute included (D9.9), so `u64` and `i64` both match an `int64_t` and `char` matches a
 `uint8_t`. Its note shows the declaration the compiler emits instead of pointing at an earlier one,
 since the declaration in conflict is the compiler's own: `note: the compiler declares it as 'declare
 void @fort_rt_del(ptr)'`. `own` is not part of that comparison, unlike the extern-versus-extern one

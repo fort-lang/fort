@@ -174,10 +174,14 @@ A safe(r) C-like systems programming language.
   stem (the name without `.ft`) against `^(\d{3})_([a-z0-9_]+)$` or `^[a-z0-9_]+$`, so the corpus
   cannot host a test whose *file name* is the thing under test: `fail/structs/my.app.ft` is
   `lint: fail/structs/my.app.ft: bad test name`, and a rule about a file name (a dotted entry
-  name, D9.1) is pinned by a unit test instead. The harness and its unit tests are Python 3.12,
-  standard library only, wrapped at 100 columns (the host's `ruff format --line-length 100` is
-  the reference); `run_tests_test.py` scripts a fake `fort` with `//@` lines, extend it rather
-  than calling the real compiler.
+  name, D9.1) is pinned by a unit test instead. A directory test (`<name>/main.ft`) may stand only
+  under a `modules` area, whatever else it exercises -- elsewhere the lint is `directory test
+  outside modules` -- and its name there is a bare `[a-z0-9_]+` rather than the numbered form the
+  single-file areas use; a `//! link:` path is relative to `test/lang`, so a multi-module test
+  reaches `ffi/helpers.c` from `run/modules` like any other. The harness and its unit tests are
+  Python 3.12, standard library only, wrapped at 100 columns (the host's
+  `ruff format --line-length 100` is the reference); `run_tests_test.py` scripts a fake `fort`
+  with `//@` lines, extend it rather than calling the real compiler.
 - Unit tests: `test/<component>_test.c` with `test/test.h`; the suite name is the file stem and
   `test/` already holds one per component, `runtime_test.c` being the C runtime's and not the
   compiler's, so check the name is free before writing the file (a shell redirection overwrites a
@@ -304,6 +308,21 @@ A safe(r) C-like systems programming language.
   asserts a re-check wipes them, and ties `CHECK_ANN_END` to the highest declared bit. Write that
   test shape for any "cleared before it is written" invariant: asserting that a bit *is* set
   after a second pass passes whether or not the clearing happens, so it proves nothing.
+- **A rule about two modules belongs in the checker, not in the loader.** The loader builds the
+  namespaces before any type exists, so a cross-module comparison written there can only compare
+  syntax, and syntax is not the rule: T-074 moved D9.8's "two extern declarations of one C symbol
+  must have identical signatures" out of `modules.c` because comparing spellings both refused a
+  program no spelling could express (an enum the declaring module can only call `color` and the
+  importer only `shade.color`) and accepted two genuinely different local types of one name. One
+  `check_t` spans the whole closure and `check_program` already visits every declaration in the
+  dependency order of D9.10, so such a rule rides on the `resolve_*` that gives the declaration
+  its type -- a map in `check_t` holding the first declaration of each C name -- and duplicates no
+  walk. Two consequences for anything keyed that way: `check_module` may be called twice on one
+  module through one checker (the editor mode of D20.2) and the second pass makes *new* symbols
+  and new nominal types for the same tree, so an entry is replaced when its AST node is the one
+  being checked rather than compared against itself; and the notes of such a diagnostic are
+  written under `if (!ck->mute)`, since `check_error` mutes the error but `diag_note` is not
+  routed through it.
 - **Ownership in the checker** (D17): `check_owning(t)` is the one answer to "does a value of
   this type own an allocation" -- an `own` reference or an owning aggregate -- and it guards the
   layout, since `type_is_owning_aggregate` fatals on a struct that has none. Every own place is

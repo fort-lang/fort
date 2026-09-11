@@ -622,7 +622,7 @@ Owner: `module-system.md`.
   (or `u8*`); `size_t` to `u64`; `ssize_t` and
   `off_t` to `i64`; `mode_t` to `u32`; `int` to `i32`; `long` to `i64`; `double` to `f64`. The
   same C symbol may be declared `extern` in several modules provided the signatures are
-  identical as written, parameter names excepted, `own` qualifiers included (D17.13). Fort `char`
+  identical, parameter names excepted, `own` qualifiers included (D17.13). Fort `char`
   is C's `unsigned char` at the boundary (`i8 zeroext`, D3.2). The compiler never emits a call to
   a C library symbol of its own accord: anything it needs at run time is a runtime entry point of
   `toolchain.md` 5.1, in the
@@ -635,14 +635,22 @@ Owner: `module-system.md`.
   2026-09-11: T-015 found that `string ==` needed `memcmp` and stopped rather than invent a fourth
   declaration group for `toolchain.md` 6 item 8; there is no fourth group. Amended 2026-09-11:
   "identical" did not say whether it meant the types or what the two modules wrote, and the
-  bootstrap compares the written declarations. That refuses a binding-level `mut`, which is not
-  part of a function type (D3.10) and changes no emitted byte, and it refuses two spellings of one
-  imported enum -- for which no shared spelling exists, since a module can neither qualify a name
-  with its own module name nor import itself, so such a program cannot be written at all. The
-  first is accepted as the price of a comparison that runs before types exist; the second is a
-  defect, and comparing types instead means moving the check to where types exist (T-025's
-  review, T-074). Until then the diagnostic names the differing parameter and the note carries the
-  workaround: declare the symbol in one module and export a fort function the others import.
+  bootstrap read it as the written declarations, since the check ran in the loader, before types
+  exist. That refused a binding-level `mut`, which is not part of a function type (D3.10) and
+  changes no emitted byte, and it refused two spellings of one imported enum -- for which no
+  shared spelling exists, since a module can neither qualify a name with its own module name nor
+  import itself, so such a program could not be written at all -- while accepting two genuinely
+  different local types of one spelling. Amended 2026-09-11 (T-074): "as written" is withdrawn
+  and the word is again "identical", meaning the types; the check runs in the checker, where they
+  exist. `char` and `u8` are one C type there, since fort `char` is C's `unsigned char` (D3.2)
+  and this decision maps a C `char*` to either, and a struct or an enum is identified by the
+  declaration it comes from (D3.8, D3.9), so two modules that each declare one do conflict. The
+  diagnostic names the differing parameter and, where either declaration names a struct or an
+  enum, carries a note saying that such a type is its declaration and not its spelling, with the
+  two ways out: give both declarations that one type, importing it where it is missing, or
+  declare the symbol in one module and export a fort function the others import. Either, not
+  each: one module writing the `i32` an enum crosses as is the same class of fix, the enum being
+  importable.
 - **D9.9** Internal calling convention (v1 simplification): integers, pointers, `bool`, `char`,
   enums, function pointers and floats are passed and returned in registers per System V; every
   aggregate (struct, fixed array, span, `string`) is passed by a hidden pointer to a caller-made
