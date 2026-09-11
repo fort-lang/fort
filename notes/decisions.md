@@ -1116,6 +1116,32 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   is free to let control fall through it, which is why the call is emitted and not just the
   terminator.
 
+## D20 Editor support
+
+Decided 2026-09-10. Owner: `toolchain.md` (4). An editor underlines the construct a diagnostic is
+about and jumps to the name a declaration introduces, so both are recorded from the parser on.
+Only this preamble and D20.4 are decided here; the check mode, the JSON form, the identifier index
+and the language server (D20.1 to D20.3, D20.5) land with the check mode, after the checker.
+
+- **D20.4** Ranges. A position is a range: from the first byte of its first token to one past the
+  last byte of its last token, the start inclusive and the end exclusive, both 1-based byte
+  columns with a tab counting as one column (D14.2). No token spans lines (D2.9), so the range of
+  a single token ends on the line it starts on. Every syntax-tree node carries the range from its
+  own anchor token, which is its first token except on the nodes named after an operator, where it
+  is that operator (`toolchain.md` 4), to the end of the last token of the construct; the
+  runtime-error position of `toolchain.md` 4 is the start of that range and is unchanged. A node
+  whose start cannot move over the opening delimiter of the construct does not stretch over the
+  closing one either: a parenthesized expression is the inner expression's own node, anchored at
+  its own first token or at its operator, so it covers neither parenthesis rather than covering
+  the `)` alone and reading as a range that begins inside the text it is about. Every node that a
+  name declares or mentions also carries the range of that name token, and a node without a name
+  carries the empty range for it. A node with no token of its own, such as the implicit block of a
+  case body (D7.6), begins as the empty range where the construct it stands for begins. Extending
+  a range moves its end to the later of the two ends and never moves its start, so extending it
+  again with a token it already covers changes nothing and a node anchored at its operator never
+  ends up with an end before its start. An error without a position in the file is the empty range
+  at 1:1 (D14.2). The text form of D14.2 prints the start only, so no diagnostic text changes.
+
 ## Ready-to-implement checklist
 
 - [x] Every TBD in the original notes has a decision above.
