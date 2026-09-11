@@ -22,13 +22,13 @@
 static const char HELLO_SOURCE[] = "fn i32 main() { println(\"hello, world!\"); return 0; }\n";
 
 // The program of toolchain.md 6.2, which compiles to test/ir/abort.ll. That
-// section fixes the `[` of `a[i]` at line 12, column 14, so the seven comment
-// lines put the statement on line 12 and its indentation puts the `[` on
-// column 14; nothing else about the source is free, since every instruction
-// of the golden module comes from it.
+// section fixes the `[` of `a[i]` at line 12, column 13, so the seven comment
+// lines put the statement on line 12 and its four spaces of indentation put
+// the `[` on column 13; nothing else about the source is free, since every
+// instruction of the golden module comes from it.
 static const char ABORT_SOURCE[] = "// The program of toolchain.md 6.2, whose bounds check fails\n"
                                    "// at run time. The lines above the body put the indexing on\n"
-                                   "// line 12 and its indentation puts the `[` on column 14,\n"
+                                   "// line 12 and its indentation puts the `[` on column 13,\n"
                                    "// which is the position that section fixes and the module\n"
                                    "// records in its call to fort_rt_fail_bounds (D11.4).\n"
                                    "//\n"
@@ -37,52 +37,36 @@ static const char ABORT_SOURCE[] = "// The program of toolchain.md 6.2, whose bo
                                    "    println(\"before\");\n"
                                    "    i32[3] a = {};\n"
                                    "    i64 mut i = 5;\n"
-                                   "     return a[i];\n"
+                                   "    return a[i];\n"
                                    "}\n";
 
 static sb_t golden_text;
 
-// The golden module of `name` under test/ir, with `from` replaced by `to`
-// everywhere. The substitution exists for one reason, given at its only use.
-static const char* golden(const char* name, const char* from, const char* to) {
+// The golden module of `name` under test/ir, which toolchain.md 6 quotes byte
+// for byte as its worked example (D19.1).
+static const char* golden(const char* name) {
     char path[GEN_PATH_CAP];
     TEST_UNUSED(snprintf(path, sizeof path, "%s/%s", FORT_IR_DIR, name));
-    static sb_t raw;
-    const char* text = gen_read(path, &raw);
+    const char* text = gen_read(path, &golden_text);
     if (text == NULL) {
         return "the golden module could not be read";
     }
-    sb_clear(&golden_text);
-    const uint64_t width = (uint64_t)strlen(from);
-    while (*text != '\0') {
-        if (width > 0 && strncmp(text, from, (size_t)width) == 0) {
-            sb_append(&golden_text, to);
-            text += width;
-            continue;
-        }
-        sb_push(&golden_text, *text);
-        text++;
-    }
-    return sb_cstr(&golden_text);
+    return text;
 }
 
 // ---- the worked examples (toolchain.md 6.1, 6.2) -----------------------------------
 
 TEST(the_program_of_section_6_1_compiles_to_hello_ll, {
     TEST_ASSERT_TRUE(emit(HELLO_SOURCE));
-    TEST_ASSERT_EQ_STR(ir(), golden("hello.ll", "", ""));
+    TEST_ASSERT_EQ_STR(ir(), golden("hello.ll"));
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
 TEST(the_program_of_section_6_2_compiles_to_abort_ll, {
     TEST_ASSERT_TRUE(emit_as("abort.ft", ABORT_SOURCE));
-    // The golden module names @"main.main" although its source is abort.ft,
-    // whose module path is its base name (D9.1) and whose symbol is therefore
-    // main.add's sibling abort.main (D9.7). The decisions win over the
-    // document (AGENTS.md), so the emitter mangles by them and the test
-    // substitutes that one name; everything else, the file constant and the
-    // 12:14 of the check included, is compared byte for byte.
-    TEST_ASSERT_EQ_STR(ir(), golden("abort.ll", "@\"main.main\"", "@\"abort.main\""));
+    // The whole module, the file constant and the 12:13 of the bounds check
+    // included, which is why the source above is not free to change.
+    TEST_ASSERT_EQ_STR(ir(), golden("abort.ll"));
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 

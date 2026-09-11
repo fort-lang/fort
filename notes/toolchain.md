@@ -941,7 +941,9 @@ fn i32 main() {
 }
 ```
 
-in `abort.ft`, with the `[` of `a[i]` at line 12, column 14, compiles to `test/ir/abort.ll`:
+in `abort.ft`, whose module path is therefore `abort` (D9.1) and whose `main` is the symbol
+`abort.main` (D9.7), with the `[` of `a[i]` at line 12, column 13, compiles to
+`test/ir/abort.ll`:
 
 ```llvm
 target triple = "x86_64-unknown-linux-gnu"
@@ -949,7 +951,7 @@ target triple = "x86_64-unknown-linux-gnu"
 %fort.span = type { ptr, i64 }
 %fort.enum_member = type { i32, ptr }
 
-define dso_local i32 @"main.main"() #0 {
+define dso_local i32 @"abort.main"() #0 {
 entry:
   %a.0 = alloca [3 x i32], align 4
   %i.1 = alloca i64, align 8
@@ -967,13 +969,13 @@ L0:
   ret i32 %t3
 
 L1:
-  call void @fort_rt_fail_bounds(i64 %t0, i64 3, ptr @.file.0, i32 12, i32 14)
+  call void @fort_rt_fail_bounds(i64 %t0, i64 3, ptr @.file.0, i32 12, i32 13)
   unreachable
 }
 
 define dso_local i32 @fort_entry(ptr %args.in) #0 {
 entry:
-  %t0 = call i32 @"main.main"()
+  %t0 = call i32 @"abort.main"()
   ret i32 %t0
 }
 
@@ -994,7 +996,7 @@ attributes #6 = { nocallback nofree nounwind willreturn memory(argmem: write) }
 The locals are entry-block allocas, the array is zeroed with `llvm.memset`, the bounds check of
 item 16 branches to a failure block at the end of the function, and `%fort.span` and
 `%fort.enum_member` are emitted although nothing uses them (item 2). The program prints
-`before`, then `abort.ft:12:14: runtime error: index 5 out of range for length 3`, and dies with
+`before`, then `abort.ft:12:13: runtime error: index 5 out of range for length 3`, and dies with
 SIGABRT (D11.4).
 
 ## 7. Testing
