@@ -72,6 +72,27 @@ A safe(r) C-like systems programming language.
   subcommands (`configure`, `build`, `test`, `workflow`, the targets below and `gate`) run at
   the top of the host git worktree containing the cwd and default to the `debug` preset. Every
   guest command sources `/etc/profile.d/fort.sh` and disables core dumps.
+- **Give a ticket its own VM.** `$FORT_VM_DIR` selects the VM directory and the VirtualBox machine
+  is named `fort-dev-<directory name>`, so a worktree that exports `FORT_VM_DIR="$PWD"` gets a
+  machine of its own that cannot collide with the main checkout's. Measured on 2026-09-12, on a
+  host with 10 CPUs and 32 GiB: `FORT_VM_DIR="$PWD" FORT_VM_CPUS=4 FORT_VM_MEMORY=8192
+  tools/vm up` creates, provisions and boots in **99 s**, and one preset from cold -- configure,
+  build and ctest -- takes **6 m 22 s** on 4 CPUs, so a three-preset gate is about 19 minutes.
+  A shared 6-CPU VM ran the same gate in 22 to 30 minutes **because four agents were queuing on
+  it**. So a dedicated smaller machine is both faster and predictable, and provisioning is cheap
+  enough to do per ticket.
+  Two VMs at 4 CPUs and 8 GiB leave the host 2 CPUs and 16 GiB. Three at 3 CPUs fit the arithmetic
+  and are the wrong shape: `test/fort/driver_lifetime_test.ft` is one qemu program that takes 63 s
+  of a 60 s budget, the harness runs `-j 6`, and a 3-CPU machine oversubscribes and can time the
+  probe out with no other agent present.
+- **A worktree chooses its VM before it configures, and cannot change its mind cheaply.**
+  `/vagrant` is the main checkout on the shared machine and the worktree root on its own, so every
+  absolute path in the CMake cache is bound to that choice. Switching later means deleting
+  `build/` and rebuilding from scratch. Free for a new worktree; wasteful for one mid-ticket.
+- **What one shared VM cost on 2026-09-12**, so the trade is on the record: four agents gating at
+  once drove the load to 19 on 6 CPUs, produced two false red gates that each cost an hour of
+  diagnosis, and made one agent run `pkill -f ctest` in a machine three other worktrees were
+  using. Every one of those is a contention failure and not a code failure.
 - When the Mac sleeps, VirtualBox pauses the VM ("paused due to host power management") and
   `tools/vm status` shows `paused`; guest commands then fail after the 10 s ssh timeout and
   `tools/vm up` cannot resume it. Recover with `VBoxManage controlvm fort-dev-<name> savestate`
