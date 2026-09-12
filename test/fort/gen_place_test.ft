@@ -1,0 +1,543 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| places ok
+//| aggregates ok
+//| ownership ok
+//| ok
+import gen;
+import gen_env;
+import runtime_sig;
+import std.strbuf;
+
+// The places and the aggregates of src/fort/gen_expr.ft: the index of D6.8,
+// the span expressions of D6.9, the field accesses of D6.10, the pseudo
+// fields of D3.5, the initializers of D6.5 and the ownership operations of
+// D10.2, D17.6 and D17.9.
+//
+// Every expected block was read off `fort -S` run by stage1 over a program
+// whose body is the one the test writes, with the temporaries and the labels
+// renumbered from zero, which is what the emitter produces when the
+// expression is a function's first. The line and column of each failure call
+// are the ones stage1 wrote for the same operator (D11.4).
+
+// A point, a value of it, a pointer to it and a read through each: the module
+// the field assertions are made against. `p` is slot 0 and `q` slot 2.
+fn bool open_point(gen_env.env mut* e) {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "struct point {\n    i32 x;\n    i32 y;\n}\n");
+    strbuf.append(&b, "fn i32 main() {\n");
+    strbuf.append(&b, "    point mut p = point{1, 2};\n");
+    strbuf.append(&b, "    i32 mut c = p.x;\n");
+    strbuf.append(&b, "    point mut* mut q = &p;\n");
+    strbuf.append(&b, "    i32 mut d = q->y;\n");
+    strbuf.append(&b, "    return 0;\n}\n");
+    return gen_env.open_src(e, strbuf.view(&b));
+}
+
+string ARR = "    i32[3] mut arr = {1, 2, 3};";
+string IDX = "    i32 mut i = 1;";
+
+// ---- D6.8: the index ------------------------------------------------------------------
+
+fn void an_index_into_an_array_is_checked_against_its_written_length() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    string[3] mut lines = {ARR, IDX, "    i32 mut a = arr[i];"};
+    assert(gen_env.open_lines(&e, lines[..]));
+    gen_env.emit_value(&e, "a");
+    // Item 16: the index is extended by its own signedness, so a negative one
+    // fails the same unsigned compare, and a fixed array's length is a
+    // literal.
+    gen_env.expect_text(
+        gen_env.body(&e),
+        gen_env.join6(&e, "  %t0 = load i32, ptr %i.1, align 4\n",
+                      "  %t1 = sext i32 %t0 to i64\n", "  %t2 = icmp uge i64 %t1, 3\n",
+                      "  br i1 %t2, label %L1, label %L0\n\nL0:\n",
+                      "  %t3 = getelementptr inbounds [3 x i32], ptr %arr.0, i64 0, i64 %t1\n",
+                      "  %t4 = load i32, ptr %t3, align 4\n"));
+    gen_env.expect_text(
+        gen_env.fail(&e),
+        gen_env.join4(&e, "\nL1:\n",
+                      "  call void @fort_rt_fail_bounds(i64 %t1, i64 3, ptr @.file.0, ",
+                      "i32 4, i32 20)\n",
+                      "  unreachable\n"));
+}
+
+fn void an_index_into_a_span_reads_the_length_out_of_its_header() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    string[4] mut lines = {ARR, IDX, "    i32 mut@ mut sp = arr[..];", "    i32 mut b = sp[i];"};
+    assert(gen_env.open_lines(&e, lines[..]));
+    gen_env.emit_value(&e, "b");
+    // Item 3: a span's elements are reached through its `.ptr`, and its
+    // length is the header field the check compares against.
+    gen_env.join8(&e, "  %t0 = load i32, ptr %i.1, align 4\n",
+                  "  %t1 = sext i32 %t0 to i64\n",
+                  "  %t2 = getelementptr inbounds %fort.span, ptr %sp.2, i32 0, i32 1\n",
+                  "  %t3 = load i64, ptr %t2, align 8\n", "  %t4 = icmp uge i64 %t1, %t3\n",
+                  "  br i1 %t4, label %L1, label %L0\n\nL0:\n",
+                  "  %t5 = getelementptr inbounds %fort.span, ptr %sp.2, i32 0, i32 0\n",
+                  "  %t6 = load ptr, ptr %t5, align 8\n");
+    gen_env.join_more(&e, "  %t7 = getelementptr inbounds i32, ptr %t6, i64 %t1\n");
+    gen_env.expect_text(gen_env.body(&e),
+                        gen_env.join_more(&e, "  %t8 = load i32, ptr %t7, align 4\n"));
+}
+
+fn void no_bounds_check_removes_the_branch_and_nothing_else() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open_with(&e, gen.gen_options{false, true});
+    defer gen_env.close(&e);
+    string[3] mut lines = {ARR, IDX, "    i32 mut a = arr[i];"};
+    assert(gen_env.open_lines(&e, lines[..]));
+    gen_env.emit_value(&e, "a");
+    // D10.6: `--no-bounds-check` removes the index branch, and the element is
+    // reached the same way.
+    gen_env.expect_text(
+        gen_env.body(&e),
+        gen_env.join4(&e, "  %t0 = load i32, ptr %i.1, align 4\n",
+                      "  %t1 = sext i32 %t0 to i64\n",
+                      "  %t2 = getelementptr inbounds [3 x i32], ptr %arr.0, i64 0, i64 %t1\n",
+                      "  %t3 = load i32, ptr %t2, align 4\n"));
+    gen_env.expect_text(gen_env.fail(&e), "");
+}
+
+// ---- D6.9: span expressions --------------------------------------------------------------
+
+fn void a_span_of_an_array_checks_both_bounds_in_one_branch() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    string[3] mut lines = {ARR, IDX, "    i32 mut@ mut sp = arr[..];"};
+    assert(gen_env.open_lines(&e, lines[..]));
+    gen_env.into_text(&e, "sp");
+    // Item 16: `0 <= lo <= hi <= len` in one branch, both compares unsigned,
+    // and an absent low bound is zero and an absent high one the length.
+    gen_env.join8(&e, "  %t0 = icmp ugt i64 3, 3\n", "  %t1 = icmp ugt i64 0, 3\n",
+                  "  %t2 = or i1 %t0, %t1\n", "  br i1 %t2, label %L1, label %L0\n\nL0:\n",
+                  "  %t3 = getelementptr inbounds [3 x i32], ptr %arr.0, i64 0, i64 0\n",
+                  "  %t4 = sub i64 3, 0\n",
+                  "  %t5 = getelementptr inbounds %fort.span, ptr %sp.2, i32 0, i32 0\n",
+                  "  store ptr %t3, ptr %t5, align 8\n");
+    gen_env.join_more(&e, "  %t6 = getelementptr inbounds %fort.span, ptr %sp.2, i32 0, i32 1\n");
+    gen_env.expect_text(gen_env.body(&e),
+                        gen_env.join_more(&e, "  store i64 %t4, ptr %t6, align 8\n"));
+    gen_env.expect_text(
+        gen_env.fail(&e),
+        gen_env.join4(&e, "\nL1:\n",
+                      "  call void @fort_rt_fail_span(i64 0, i64 3, i64 3, ptr @.file.0, ",
+                      "i32 4, i32 26)\n",
+                      "  unreachable\n"));
+}
+
+// ---- D6.10 and D3.5: fields and pseudo fields ----------------------------------------------
+
+fn void a_field_of_a_value_and_a_field_behind_a_pointer_are_one_shape() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_point(&e));
+    gen_env.emit_value(&e, "c");
+    gen_env.expect_text(
+        gen_env.body(&e),
+        gen_env.join2(&e,
+                      "  %t0 = getelementptr inbounds %struct.main.point, ptr %p.0, i32 0, i32 0\n",
+                      "  %t1 = load i32, ptr %t0, align 4\n"));
+    // D6.10: `p->f` is `(*p).f`, so the pointer is loaded first and the same
+    // shape follows.
+    gen_env.emit_value(&e, "d");
+    gen_env.expect_text(
+        gen_env.body(&e),
+        gen_env.join3(&e, "  %t0 = load ptr, ptr %q.2, align 8\n",
+                      "  %t1 = getelementptr inbounds %struct.main.point, ptr %t0, i32 0, i32 1\n",
+                      "  %t2 = load i32, ptr %t1, align 4\n"));
+}
+
+fn void the_pseudo_fields_of_a_span_are_its_header_fields() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    string[4] mut lines = {ARR, IDX, "    i32 mut@ mut sp = arr[..];", "    u64 mut n = sp.len;"};
+    assert(gen_env.open_lines(&e, lines[..]));
+    gen_env.emit_value(&e, "n");
+    // D3.5: `.len` and `.ptr` are the two header fields and not a load of a
+    // struct member the user declared.
+    gen_env.expect_text(
+        gen_env.body(&e),
+        gen_env.join2(&e,
+                      "  %t0 = getelementptr inbounds %fort.span, ptr %sp.2, i32 0, i32 1\n",
+                      "  %t1 = load i64, ptr %t0, align 8\n"));
+}
+
+// ---- D6.5: the initializers ---------------------------------------------------------------
+
+fn void a_positional_struct_literal_writes_its_members_in_field_order() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_point(&e));
+    gen_env.into_text(&e, "p");
+    // The four walks that count field declarations must agree, so the
+    // literal's members land at the indices the named type wrote (item 2).
+    gen_env.expect_text(
+        gen_env.body(&e),
+        gen_env.join4(&e,
+                      "  %t0 = getelementptr inbounds %struct.main.point, ptr %p.0, i32 0, i32 0\n",
+                      "  store i32 1, ptr %t0, align 4\n",
+                      "  %t1 = getelementptr inbounds %struct.main.point, ptr %p.0, i32 0, i32 1\n",
+                      "  store i32 2, ptr %t1, align 4\n"));
+}
+
+fn void a_designated_literal_zeroes_the_place_first() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "struct point {\n    i32 x;\n    i32 y;\n}\n");
+    strbuf.append(&b, "fn i32 main() {\n    point mut z = point{.y = 5};\n");
+    strbuf.append(&b, "    i32[2] mut arr = {};\n    return 0;\n}\n");
+    assert(gen_env.open_src(&e, strbuf.view(&b)));
+    gen_env.into_text(&e, "z");
+    // D6.5: omitted fields are zeroed, so the designated form memsets the
+    // place before it writes the members it names.
+    gen_env.expect_text(
+        gen_env.body(&e),
+        gen_env.join3(&e,
+                      "  call void @llvm.memset.p0.i64(ptr align 4 %z.0, i8 0, i64 8, i1 false)\n",
+                      "  %t0 = getelementptr inbounds %struct.main.point, ptr %z.0, i32 0, i32 1\n",
+                      "  store i32 5, ptr %t0, align 4\n"));
+    // `{}` is the zero value of the type, whatever the type is (D6.5).
+    gen_env.into_text(&e, "arr");
+    gen_env.expect_text(
+        gen_env.body(&e),
+        "  call void @llvm.memset.p0.i64(ptr align 4 %arr.1, i8 0, i64 8, i1 false)\n");
+}
+
+fn void an_array_literal_writes_one_element_at_a_time() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    string[2] mut lines = {ARR, IDX};
+    assert(gen_env.open_lines(&e, lines[..]));
+    gen_env.into_text(&e, "arr");
+    // Item 3: the array shape, with the element index a literal.
+    gen_env.expect_text(
+        gen_env.body(&e),
+        gen_env.join6(&e,
+                      "  %t0 = getelementptr inbounds [3 x i32], ptr %arr.0, i64 0, i64 0\n",
+                      "  store i32 1, ptr %t0, align 4\n",
+                      "  %t1 = getelementptr inbounds [3 x i32], ptr %arr.0, i64 0, i64 1\n",
+                      "  store i32 2, ptr %t1, align 4\n",
+                      "  %t2 = getelementptr inbounds [3 x i32], ptr %arr.0, i64 0, i64 2\n",
+                      "  store i32 3, ptr %t2, align 4\n"));
+}
+
+fn void a_string_value_is_its_two_header_fields() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    string[2] mut lines = {"    string mut s = \"hi\";", IDX};
+    assert(gen_env.open_lines(&e, lines[..]));
+    gen_env.into_text(&e, "s");
+    // D3.7: the bytes and the length the trailing NUL excludes.
+    gen_env.expect_text(
+        gen_env.body(&e),
+        gen_env.join4(&e,
+                      "  %t0 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 0\n",
+                      "  store ptr @.str.0, ptr %t0, align 8\n",
+                      "  %t1 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 1\n",
+                      "  store i64 2, ptr %t1, align 8\n"));
+}
+
+// ---- D10.2, D17.6, D17.9: the ownership operations -------------------------------------------
+
+// The module the ownership assertions are made against: `p` is slot 0, `s`
+// slot 1, `t` slot 2 and `u` slot 3, and the three `del` statements are
+// statements 3, 4 and 5 of the body.
+fn bool open_own(gen_env.env mut* e) {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "fn i32 main() {\n");
+    strbuf.append(&b, "    i32 mut* own mut p = new(i32);\n");
+    strbuf.append(&b, "    i32 mut@ own mut s = new(i32, 3);\n");
+    strbuf.append(&b, "    i32 mut@ own mut t = move(s);\n");
+    strbuf.append(&b, "    del(p);\n");
+    strbuf.append(&b, "    del(s);\n");
+    strbuf.append(&b, "    del(new(i32));\n");
+    strbuf.append(&b, "    i32 mut* own mut u = move(p);\n");
+    strbuf.append(&b, "    return 0;\n}\n");
+    return gen_env.open_src(e, strbuf.view(&b));
+}
+
+fn void new_of_one_object_is_a_call_whose_result_is_an_ordinary_scalar() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_own(&e));
+    gen_env.emit_value(&e, "p");
+    // D10.2: the runtime zeroes the storage and never returns null, so the
+    // module emits no test of the result; the position is the builtin's name
+    // (D11.4).
+    gen_env.expect_text(
+        gen_env.body(&e),
+        "  %t0 = call ptr @fort_rt_new(i64 4, i64 1, ptr @.file.0, i32 2, i32 26)\n");
+    assert(gen.gen_uses_rt(&e.g, runtime_sig.rt_entry.rt_new));
+}
+
+fn void new_of_a_span_writes_the_header_it_allocated() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_own(&e));
+    gen_env.into_text(&e, "s");
+    // The count is an `i32` even when it is a literal, so it is widened to 64
+    // bits and checked; the header is then written field by field (item 17).
+    gen_env.join8(&e, "  %t0 = sext i32 3 to i64\n", "  %t1 = icmp slt i64 %t0, 0\n",
+                  "  br i1 %t1, label %L1, label %L0\n\nL0:\n",
+                  "  %t2 = call ptr @fort_rt_new(i64 4, i64 %t0, ptr @.file.0, i32 3, i32 26)\n",
+                  "  %t3 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 0\n",
+                  "  store ptr %t2, ptr %t3, align 8\n",
+                  "  %t4 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 1\n",
+                  "  store i64 %t0, ptr %t4, align 8\n");
+    gen_env.expect_text(gen_env.body(&e), gen_env.join_more(&e, ""));
+}
+
+fn void an_unsigned_count_needs_no_branch_at_all() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    string[2] mut lines = {"    u64 mut m = 3;", "    i32 mut@ own mut s = new(i32, m);"};
+    assert(gen_env.open_lines(&e, lines[..]));
+    gen_env.into_text(&e, "s");
+    // An unsigned count is never negative, so the check of D10.2 is on the
+    // signed path alone and the width already agrees, so nothing widens it
+    // either (item 9).
+    gen_env.join5(&e, "  %t0 = load i64, ptr %m.0, align 8\n",
+                  "  %t1 = call ptr @fort_rt_new(i64 4, i64 %t0, ptr @.file.0, i32 3, i32 26)\n",
+                  "  %t2 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 0\n",
+                  "  store ptr %t1, ptr %t2, align 8\n",
+                  "  %t3 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 1\n");
+    gen_env.expect_text(gen_env.body(&e),
+                        gen_env.join_more(&e, "  store i64 %t0, ptr %t3, align 8\n"));
+    gen_env.expect_text(gen_env.fail(&e), "");
+}
+
+fn void a_negative_count_is_checked_and_the_check_survives_release_mode() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open_with(&e, gen.gen_options{true, true});
+    defer gen_env.close(&e);
+    string[2] mut lines = {"    i32 mut n = 3;", "    i32 mut@ own mut s = new(i32, n);"};
+    assert(gen_env.open_lines(&e, lines[..]));
+    gen_env.into_text(&e, "s");
+    // D10.6: it is not a bounds check, so neither `--release` nor
+    // `--no-bounds-check` removes it, and it is reported with the signed
+    // value the source wrote (D10.2).
+    gen_env.join6(&e, "  %t0 = load i32, ptr %n.0, align 4\n",
+                  "  %t1 = sext i32 %t0 to i64\n", "  %t2 = icmp slt i64 %t1, 0\n",
+                  "  br i1 %t2, label %L1, label %L0\n\nL0:\n",
+                  "  %t3 = call ptr @fort_rt_new(i64 4, i64 %t1, ptr @.file.0, i32 3, i32 26)\n",
+                  "  %t4 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 0\n");
+    gen_env.join_more(&e, "  store ptr %t3, ptr %t4, align 8\n");
+    gen_env.join_more(&e, "  %t5 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 1\n");
+    gen_env.expect_text(gen_env.body(&e),
+                        gen_env.join_more(&e, "  store i64 %t1, ptr %t5, align 8\n"));
+    gen_env.expect_text(
+        gen_env.fail(&e),
+        gen_env.join4(&e, "\nL1:\n",
+                      "  call void @fort_rt_fail_alloc_count(i64 %t1, ptr @.file.0, ",
+                      "i32 3, i32 26)\n",
+                      "  unreachable\n"));
+}
+
+fn void del_of_an_lvalue_frees_the_pointer_and_empties_the_storage() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_own(&e));
+    gen_env.discard_at(&e, 3);
+    // D17.9: the emptying is not an assignment and carries no overwrite
+    // check, which is what makes `del(v); v = new(...)` pass one (item 18).
+    gen_env.expect_text(gen_env.body(&e),
+                        gen_env.join3(&e, "  %t0 = load ptr, ptr %p.0, align 8\n",
+                                      "  call void @fort_rt_del(ptr %t0)\n",
+                                      "  store ptr null, ptr %p.0, align 8\n"));
+    assert(gen.gen_uses_rt(&e.g, runtime_sig.rt_entry.rt_del));
+}
+
+fn void move_of_an_aggregate_goes_through_an_intermediate() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_own(&e));
+    gen_env.into_text(&e, "t");
+    // Item 18, D17.6: the destination may be the operand itself and nothing
+    // here can tell, so the value is read into a place of the emitter's own
+    // and the operand is emptied before it is handed on.
+    gen_env.expect_text(
+        gen_env.allocas(&e), "  %tmp0 = alloca %fort.span, align 8\n");
+    gen_env.expect_text(
+        gen_env.body(&e),
+        gen_env.join5(&e,
+                      "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ",
+                      "ptr align 8 %s.1, i64 16, i1 false)\n",
+                      "  call void @llvm.memset.p0.i64(ptr align 8 %s.1, i8 0, i64 16, i1 false)\n",
+                      "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t.2, ",
+                      "ptr align 8 %tmp0, i64 16, i1 false)\n"));
+}
+
+fn void an_arrow_reaches_the_header_the_pointer_points_at() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    string[3] mut lines = {"    string mut s = \"hi\";", "    string mut* mut q = &s;",
+                           "    u64 mut n = q->len;"};
+    assert(gen_env.open_lines(&e, lines[..]));
+    gen_env.emit_value(&e, "n");
+    // D6.10: `p->f` is `(*p).f`, so the pointer is loaded and the header
+    // field is read where it reaches; the `.len` of D3.5 is that field and
+    // not a member the user declared.
+    gen_env.expect_text(
+        gen_env.body(&e),
+        gen_env.join3(&e, "  %t0 = load ptr, ptr %q.1, align 8\n",
+                      "  %t1 = getelementptr inbounds %fort.span, ptr %t0, i32 0, i32 1\n",
+                      "  %t2 = load i64, ptr %t1, align 8\n"));
+}
+
+fn void a_span_of_a_pointer_checks_nothing_at_all() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    string[3] mut lines = {ARR, "    i32 mut* mut p = &arr[0];",
+                           "    i32 mut@ mut w = p[1..3];"};
+    assert(gen_env.open_lines(&e, lines[..]));
+    gen_env.into_text(&e, "w");
+    // D6.9, D10.4: a pointer has no length, so only the two-bound form
+    // exists and it is the explicit unsafe escape.
+    gen_env.join6(&e, "  %t0 = load ptr, ptr %p.1, align 8\n", "  %t1 = sext i32 1 to i64\n",
+                  "  %t2 = sext i32 3 to i64\n",
+                  "  %t3 = getelementptr inbounds i32, ptr %t0, i64 %t1\n",
+                  "  %t4 = sub i64 %t2, %t1\n",
+                  "  %t5 = getelementptr inbounds %fort.span, ptr %w.2, i32 0, i32 0\n");
+    gen_env.join_more(&e, "  store ptr %t3, ptr %t5, align 8\n");
+    gen_env.join_more(&e, "  %t6 = getelementptr inbounds %fort.span, ptr %w.2, i32 0, i32 1\n");
+    gen_env.expect_text(gen_env.body(&e),
+                        gen_env.join_more(&e, "  store i64 %t4, ptr %t6, align 8\n"));
+    gen_env.expect_text(gen_env.fail(&e), "");
+}
+
+fn void a_written_high_bound_makes_the_length_a_read_of_its_own() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    string[3] mut lines = {ARR, "    i32 mut@ mut sp = arr[..];",
+                           "    i32 mut@ mut v = sp[1..3];"};
+    assert(gen_env.open_lines(&e, lines[..]));
+    gen_env.into_text(&e, "v");
+    // D6.3: the length is read after the bounds the source writes, so the
+    // check holds against the length the operation sees; with both bounds
+    // written it is a load of its own, where `sp[1..]` reads it once and uses
+    // it as the high bound as well.
+    gen_env.join8(&e, "  %t0 = sext i32 1 to i64\n", "  %t1 = sext i32 3 to i64\n",
+                  "  %t2 = getelementptr inbounds %fort.span, ptr %sp.1, i32 0, i32 1\n",
+                  "  %t3 = load i64, ptr %t2, align 8\n", "  %t4 = icmp ugt i64 %t1, %t3\n",
+                  "  %t5 = icmp ugt i64 %t0, %t1\n", "  %t6 = or i1 %t4, %t5\n",
+                  "  br i1 %t6, label %L1, label %L0\n\nL0:\n");
+    gen_env.join_more(&e, "  %t7 = getelementptr inbounds %fort.span, ptr %sp.1, i32 0, i32 0\n");
+    gen_env.join_more(&e, "  %t8 = load ptr, ptr %t7, align 8\n");
+    gen_env.join_more(&e, "  %t9 = getelementptr inbounds i32, ptr %t8, i64 %t0\n");
+    gen_env.join_more(&e, "  %t10 = sub i64 %t1, %t0\n");
+    gen_env.join_more(&e, "  %t11 = getelementptr inbounds %fort.span, ptr %v.2, i32 0, i32 0\n");
+    gen_env.join_more(&e, "  store ptr %t9, ptr %t11, align 8\n");
+    gen_env.join_more(&e, "  %t12 = getelementptr inbounds %fort.span, ptr %v.2, i32 0, i32 1\n");
+    gen_env.expect_text(gen_env.body(&e),
+                        gen_env.join_more(&e, "  store i64 %t10, ptr %t12, align 8\n"));
+    // The three bounds the failure carries are the low, the high and the
+    // length the check compared (item 16).
+    gen_env.expect_text(
+        gen_env.fail(&e),
+        gen_env.join4(&e, "\nL1:\n",
+                      "  call void @fort_rt_fail_span(i64 %t0, i64 %t1, i64 %t3, ptr @.file.0, ",
+                      "i32 4, i32 24)\n", "  unreachable\n"));
+}
+
+fn void del_of_a_span_frees_its_pointer_and_zeroes_its_header() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_own(&e));
+    // The second statement of the body is the `del(s)` of the span.
+    gen_env.discard_at(&e, 4);
+    // Item 17, D17.9: a span or `string` operand is an aggregate, so its
+    // pointer is field 0 and the emptying is a 16-byte memset.
+    gen_env.join3(&e, "  %t0 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 0\n",
+                  "  %t1 = load ptr, ptr %t0, align 8\n",
+                  "  call void @fort_rt_del(ptr %t1)\n");
+    gen_env.expect_text(
+        gen_env.body(&e),
+        gen_env.join_more(
+            &e, "  call void @llvm.memset.p0.i64(ptr align 8 %s.1, i8 0, i64 16, i1 false)\n"));
+}
+
+fn void del_of_an_rvalue_stores_nothing() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_own(&e));
+    gen_env.discard_at(&e, 5);
+    // D17.9: `del` empties storage, and an `own` rvalue -- here the result of
+    // `new` -- designates none, so it is freed and nothing is stored.
+    gen_env.expect_text(
+        gen_env.body(&e),
+        gen_env.join2(&e,
+                      "  %t0 = call ptr @fort_rt_new(i64 4, i64 1, ptr @.file.0, i32 7, i32 9)\n",
+                      "  call void @fort_rt_del(ptr %t0)\n"));
+}
+
+fn void move_of_a_scalar_reads_the_value_before_it_empties_the_operand() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_own(&e));
+    gen.gen_val v = gen_env.emit_value(&e, "u");
+    // Item 18, D17.6: the order is the whole of the rule -- the value is read
+    // into the register the `load` names and the operand is zeroed only
+    // afterwards, so `p = move(p)` yields what `p` held.
+    gen_env.expect_text(gen_env.body(&e),
+                        gen_env.join2(&e, "  %t0 = load ptr, ptr %p.0, align 8\n",
+                                      "  store ptr null, ptr %p.0, align 8\n"));
+    gen_env.expect_text(v.val, "%t0");
+}
+
+fn i32 main() {
+    an_index_into_an_array_is_checked_against_its_written_length();
+    an_index_into_a_span_reads_the_length_out_of_its_header();
+    no_bounds_check_removes_the_branch_and_nothing_else();
+    a_span_of_an_array_checks_both_bounds_in_one_branch();
+    a_field_of_a_value_and_a_field_behind_a_pointer_are_one_shape();
+    the_pseudo_fields_of_a_span_are_its_header_fields();
+    an_arrow_reaches_the_header_the_pointer_points_at();
+    a_span_of_a_pointer_checks_nothing_at_all();
+    a_written_high_bound_makes_the_length_a_read_of_its_own();
+    println("places ok");
+    a_positional_struct_literal_writes_its_members_in_field_order();
+    a_designated_literal_zeroes_the_place_first();
+    an_array_literal_writes_one_element_at_a_time();
+    a_string_value_is_its_two_header_fields();
+    println("aggregates ok");
+    new_of_one_object_is_a_call_whose_result_is_an_ordinary_scalar();
+    new_of_a_span_writes_the_header_it_allocated();
+    an_unsigned_count_needs_no_branch_at_all();
+    a_negative_count_is_checked_and_the_check_survives_release_mode();
+    del_of_an_lvalue_frees_the_pointer_and_empties_the_storage();
+    del_of_a_span_frees_its_pointer_and_zeroes_its_header();
+    del_of_an_rvalue_stores_nothing();
+    move_of_a_scalar_reads_the_value_before_it_empties_the_operand();
+    move_of_an_aggregate_goes_through_an_intermediate();
+    println("ownership ok");
+    println("ok");
+    return 0;
+}

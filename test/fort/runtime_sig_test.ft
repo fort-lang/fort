@@ -1,0 +1,247 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| declarations ok
+//| rows ok
+//| forms ok
+//| ok
+import gen_env;
+import prim;
+import runtime_sig;
+import std.strbuf;
+import types;
+
+// The runtime entry points of src/fort/runtime_sig.ft, held against the
+// declaration list of toolchain.md 5, item 8, line by line.
+//
+// Why this suite exists. A runtime entry point is described in three places
+// -- the C prototype in runtime/fort_rt.h, the table of toolchain.md 5.1 with
+// that declaration list, and one row of runtime_sig.ft -- and the emitter
+// renders both its `declare` line and its call-site result type from the row,
+// so a wrong row is wrong code that nothing else catches:
+// `opt -passes=verify` accepts a call whose arguments disagree with its
+// callee's declaration, and a fort program is one module whose caller and
+// callee agree with each other about a convention both get wrong (AGENTS.md).
+// test/runtime_sig_test.c pins the C table to the real header with `_Generic`;
+// fort has no `_Generic`, so what is pinned here is the other edge: the
+// rendered declaration against the text of section 5.1, transcribed below.
+// Eighteen of the twenty-nine rows were named by no test at all before this
+// one.
+//
+// The count is tied to the enum rather than kept beside it: `RT_ENTRY_COUNT`
+// is a module constant fort cannot read off `rt_none`, so the equality is
+// asserted instead of trusted.
+
+// The `declare` line of one entry point, as rt_declaration renders it.
+fn string rendered(gen_env.env mut* e, runtime_sig.rt_entry rt) {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    runtime_sig.rt_declaration(&b, rt);
+    // The text dies with the buffer, so it is copied into the environment's
+    // own before it is compared.
+    return gen_env.join2(e, strbuf.view(&b), "");
+}
+
+fn void want(gen_env.env mut* e, runtime_sig.rt_entry rt, string text) {
+    gen_env.expect_text(rendered(e, rt), text);
+}
+
+// ---- section 5, item 8: the declaration list -------------------------------------------
+
+fn void the_allocation_and_comparison_entry_points_render_as_5_1_writes_them() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    want(&e, runtime_sig.rt_entry.rt_new, "declare ptr @fort_rt_new(i64, i64, ptr, i32, i32)\n");
+    want(&e, runtime_sig.rt_entry.rt_del, "declare void @fort_rt_del(ptr)\n");
+    // A narrow result carries its extension attribute in the declaration as
+    // well as at the call site (D9.9, item 7).
+    want(&e, runtime_sig.rt_entry.rt_str_eq,
+         "declare zeroext i8 @fort_rt_str_eq(ptr, i64, ptr, i64)\n");
+}
+
+fn void every_failure_entry_point_renders_as_5_1_writes_it() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    // Item 14: each is `_Noreturn`, so each carries the `cold noreturn
+    // nounwind` group `#2`.
+    want(&e, runtime_sig.rt_entry.rt_fail_bounds,
+         "declare void @fort_rt_fail_bounds(i64, i64, ptr, i32, i32) #2\n");
+    want(&e, runtime_sig.rt_entry.rt_fail_span,
+         "declare void @fort_rt_fail_span(i64, i64, i64, ptr, i32, i32) #2\n");
+    want(&e, runtime_sig.rt_entry.rt_fail_overflow,
+         "declare void @fort_rt_fail_overflow(ptr, i32, i32) #2\n");
+    want(&e, runtime_sig.rt_entry.rt_fail_shift,
+         "declare void @fort_rt_fail_shift(i64, ptr, ptr, i32, i32) #2\n");
+    want(&e, runtime_sig.rt_entry.rt_fail_div_zero,
+         "declare void @fort_rt_fail_div_zero(ptr, i32, i32) #2\n");
+    want(&e, runtime_sig.rt_entry.rt_fail_div_overflow,
+         "declare void @fort_rt_fail_div_overflow(ptr, i32, i32) #2\n");
+    want(&e, runtime_sig.rt_entry.rt_fail_alloc_count,
+         "declare void @fort_rt_fail_alloc_count(i64, ptr, i32, i32) #2\n");
+    want(&e, runtime_sig.rt_entry.rt_fail_overwrite,
+         "declare void @fort_rt_fail_overwrite(ptr, i32, i32) #2\n");
+    want(&e, runtime_sig.rt_entry.rt_fail_enum,
+         "declare void @fort_rt_fail_enum(i64, ptr, ptr, i32, i32) #2\n");
+    want(&e, runtime_sig.rt_entry.rt_panic,
+         "declare void @fort_rt_panic(ptr, i64, ptr, i32, i32) #2\n");
+    want(&e, runtime_sig.rt_entry.rt_assert_fail,
+         "declare void @fort_rt_assert_fail(ptr, ptr, i32, i32) #2\n");
+}
+
+fn void every_print_entry_point_renders_as_5_1_writes_it() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    want(&e, runtime_sig.rt_entry.rt_print_i64, "declare void @fort_rt_print_i64(i32, i64)\n");
+    want(&e, runtime_sig.rt_entry.rt_print_u64, "declare void @fort_rt_print_u64(i32, i64)\n");
+    // The two float rows the bootstrap compiler never reaches, which is why
+    // nothing but this suite names them.
+    want(&e, runtime_sig.rt_entry.rt_print_f32, "declare void @fort_rt_print_f32(i32, float)\n");
+    want(&e, runtime_sig.rt_entry.rt_print_f64, "declare void @fort_rt_print_f64(i32, double)\n");
+    want(&e, runtime_sig.rt_entry.rt_print_bool,
+         "declare void @fort_rt_print_bool(i32, i8 zeroext)\n");
+    want(&e, runtime_sig.rt_entry.rt_print_char,
+         "declare void @fort_rt_print_char(i32, i8 zeroext)\n");
+    want(&e, runtime_sig.rt_entry.rt_print_ptr, "declare void @fort_rt_print_ptr(i32, ptr)\n");
+    want(&e, runtime_sig.rt_entry.rt_print_str,
+         "declare void @fort_rt_print_str(i32, ptr, i64)\n");
+    want(&e, runtime_sig.rt_entry.rt_print_enum,
+         "declare void @fort_rt_print_enum(i32, i32, ptr, i64)\n");
+    want(&e, runtime_sig.rt_entry.rt_flush, "declare void @fort_rt_flush(i32)\n");
+    want(&e, runtime_sig.rt_entry.rt_flush_all, "declare void @fort_rt_flush_all()\n");
+}
+
+fn void the_startup_entry_points_render_as_5_1_writes_them() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    want(&e, runtime_sig.rt_entry.rt_args_init, "declare void @fort_rt_args_init(i32, ptr)\n");
+    want(&e, runtime_sig.rt_entry.rt_args_ptr, "declare ptr @fort_rt_args_ptr()\n");
+    want(&e, runtime_sig.rt_entry.rt_args_len, "declare i64 @fort_rt_args_len()\n");
+    want(&e, runtime_sig.rt_entry.rt_exit, "declare void @fort_rt_exit(i32) #2\n");
+}
+
+// ---- the rows themselves -----------------------------------------------------------------
+
+fn void the_count_is_the_length_of_the_enum() {
+    // The C derives its count from the enum and cannot drift; fort cannot
+    // read a module constant off `rt_none`, so the equality is asserted.
+    assert(cast(runtime_sig.rt_entry.rt_none, i32) == cast(runtime_sig.RT_ENTRY_COUNT, i32));
+}
+
+fn void every_entry_point_is_found_by_its_own_c_name() {
+    // rt_entry_of is what tells an `extern fn` naming an entry point from an
+    // ordinary extern (item 8, D9.8), so the round trip holds for all of
+    // them and for nothing else.
+    u64 mut i = 0;
+    while (i < runtime_sig.RT_ENTRY_COUNT) {
+        runtime_sig.rt_entry rt = runtime_sig.rt_at(i);
+        assert(runtime_sig.rt_entry_of(runtime_sig.rt_entry_name(rt)) == rt);
+        i += 1;
+    }
+    assert(runtime_sig.rt_entry_of("fort_rt_nope") == runtime_sig.rt_entry.rt_none);
+    assert(runtime_sig.rt_entry_of("printf") == runtime_sig.rt_entry.rt_none);
+    assert(runtime_sig.rt_entry_of("") == runtime_sig.rt_entry.rt_none);
+}
+
+fn void an_arity_is_read_off_the_row_and_the_row_ends_at_its_first_gap() {
+    // The list ends at the first ir_none, so an arity is never a number kept
+    // beside the row.
+    assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_flush_all) == 0);
+    assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_del) == 1);
+    assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_print_str) == 3);
+    assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_new) == 5);
+    // The widest row of section 5.1.
+    assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_fail_span) == 6);
+    u64 mut i = 0;
+    while (i < runtime_sig.RT_ENTRY_COUNT) {
+        runtime_sig.rt_entry rt = runtime_sig.rt_at(i);
+        u64 n = runtime_sig.rt_entry_param_count(rt);
+        assert(n <= runtime_sig.RT_MAX_PARAMS);
+        // Every slot up to the arity is a form and every one past it is not.
+        u64 mut k = 0;
+        while (k < runtime_sig.RT_MAX_PARAMS) {
+            bool used = runtime_sig.rt_entry_param(rt, k) != runtime_sig.ir_form.ir_none;
+            assert(used == (k < n));
+            k += 1;
+        }
+        i += 1;
+    }
+}
+
+fn void only_the_rows_5_1_marks_noreturn_are_noreturn() {
+    // The one column no construct can witness in C either, since `_Noreturn`
+    // is not part of a function's type: it is read off section 5.1. Every
+    // `fort_rt_fail_*`, `fort_rt_panic`, `fort_rt_assert_fail` and
+    // `fort_rt_exit` is one, and nothing else is: twelve of the twenty-nine
+    // lines of section 5 item 8 carry `#2`.
+    u64 mut noreturns = 0;
+    u64 mut i = 0;
+    while (i < runtime_sig.RT_ENTRY_COUNT) {
+        runtime_sig.rt_entry rt = runtime_sig.rt_at(i);
+        if (runtime_sig.rt_entry_noreturn(rt)) {
+            noreturns += 1;
+        }
+        i += 1;
+    }
+    assert(noreturns == 12);
+    assert(runtime_sig.rt_entry_noreturn(runtime_sig.rt_entry.rt_exit));
+    assert(runtime_sig.rt_entry_noreturn(runtime_sig.rt_entry.rt_panic));
+    assert(!runtime_sig.rt_entry_noreturn(runtime_sig.rt_entry.rt_new));
+    assert(!runtime_sig.rt_entry_noreturn(runtime_sig.rt_entry.rt_flush));
+}
+
+// ---- item 7 and item 8: the form texts ------------------------------------------------------
+
+fn void a_form_carries_its_extension_attribute_in_a_parameter_list() {
+    // D9.9: the attribute is part of the form, since a form is a type text
+    // and not a type, and `bool` is a form of its own because it is `i1` as a
+    // value and `i8` in memory (D19.2).
+    gen_env.expect_text(runtime_sig.ir_param_text(runtime_sig.ir_form.ir_ptr), "ptr");
+    gen_env.expect_text(runtime_sig.ir_param_text(runtime_sig.ir_form.ir_bool), "i1 zeroext");
+    gen_env.expect_text(runtime_sig.ir_param_text(runtime_sig.ir_form.ir_i8), "i8 signext");
+    gen_env.expect_text(runtime_sig.ir_param_text(runtime_sig.ir_form.ir_u8), "i8 zeroext");
+    gen_env.expect_text(runtime_sig.ir_param_text(runtime_sig.ir_form.ir_i16), "i16 signext");
+    gen_env.expect_text(runtime_sig.ir_param_text(runtime_sig.ir_form.ir_u16), "i16 zeroext");
+    gen_env.expect_text(runtime_sig.ir_param_text(runtime_sig.ir_form.ir_i32), "i32");
+    gen_env.expect_text(runtime_sig.ir_param_text(runtime_sig.ir_form.ir_i64), "i64");
+    gen_env.expect_text(runtime_sig.ir_param_text(runtime_sig.ir_form.ir_f32), "float");
+    gen_env.expect_text(runtime_sig.ir_param_text(runtime_sig.ir_form.ir_f64), "double");
+    // A result drops the attribute nowhere: `zeroext i8` leads the callee.
+    gen_env.expect_text(runtime_sig.ir_result_text(runtime_sig.ir_form.ir_void), "void");
+    gen_env.expect_text(runtime_sig.ir_result_text(runtime_sig.ir_form.ir_u8), "zeroext i8");
+    gen_env.expect_text(runtime_sig.ir_result_text(runtime_sig.ir_form.ir_ptr), "ptr");
+    gen_env.expect_text(runtime_sig.ir_result_text(runtime_sig.ir_form.ir_i64), "i64");
+}
+
+fn void a_fort_type_maps_to_the_form_the_boundary_gives_it() {
+    // Item 8: `u64` and `i64` are `i64`, an enum is `i32`, `char` is C's
+    // `unsigned char` (D3.2) and every pointer is `ptr` (D3.10, D3.11).
+    assert(runtime_sig.ir_of_prim(prim.prim_kind.prim_u64) == runtime_sig.ir_form.ir_i64);
+    assert(runtime_sig.ir_of_prim(prim.prim_kind.prim_i64) == runtime_sig.ir_form.ir_i64);
+    assert(runtime_sig.ir_of_prim(prim.prim_kind.prim_char) == runtime_sig.ir_form.ir_u8);
+    assert(runtime_sig.ir_of_prim(prim.prim_kind.prim_u8) == runtime_sig.ir_form.ir_u8);
+    assert(runtime_sig.ir_of_prim(prim.prim_kind.prim_i8) == runtime_sig.ir_form.ir_i8);
+    assert(runtime_sig.ir_of_prim(prim.prim_kind.prim_bool) == runtime_sig.ir_form.ir_bool);
+    assert(runtime_sig.ir_of_prim(prim.prim_kind.prim_void) == runtime_sig.ir_form.ir_void);
+}
+
+fn i32 main() {
+    the_allocation_and_comparison_entry_points_render_as_5_1_writes_them();
+    every_failure_entry_point_renders_as_5_1_writes_it();
+    every_print_entry_point_renders_as_5_1_writes_it();
+    the_startup_entry_points_render_as_5_1_writes_them();
+    println("declarations ok");
+    the_count_is_the_length_of_the_enum();
+    every_entry_point_is_found_by_its_own_c_name();
+    an_arity_is_read_off_the_row_and_the_row_ends_at_its_first_gap();
+    only_the_rows_5_1_marks_noreturn_are_noreturn();
+    println("rows ok");
+    a_form_carries_its_extension_attribute_in_a_parameter_list();
+    a_fort_type_maps_to_the_form_the_boundary_gives_it();
+    println("forms ok");
+    println("ok");
+    return 0;
+}

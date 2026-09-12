@@ -1,0 +1,359 @@
+// The environment the emitter suites share: the checked sandbox of
+// check_env.ft and an emitter over the same session, with the small queries
+// an assertion about emitted text needs.
+//
+// What this stands in for, and why. src/bootstrap/gen.c emits a whole
+// function -- the signature, the allocas of the parameters and locals, the
+// body and the failure blocks -- and test/gen*_test.c therefore compiles a
+// whole program and reads the module back. The fort emitter has no function
+// definitions yet: they call the statement emitter, which is T-038, so an
+// expression is driven here one node at a time. Two jobs of gen_function are
+// done by this module until then, both of them spelled the way gen_function
+// spells them so that the names in an assertion are the names the emitter
+// will produce: the slot of every parameter and local (`%<ident>.<k>`,
+// `%<ident>.in` for an aggregate parameter, D19.5), and the per-function
+// reset of the counters and buffers.
+//
+// What it cannot do, and what covers that instead. Nothing here runs
+// `opt -passes=verify`, since a module with no function definition in it is
+// not a module LLVM would accept; block structure, dominance and the
+// terminator rule of item 10 are therefore asserted as text here and verified
+// for real when T-038 emits a definition. An assertion about the emitted text
+// is how a convention rule is pinned in any case, since no language run test
+// can see one (AGENTS.md).
+import ast;
+import check;
+import check_env;
+import gen;
+import gen_expr;
+import modules;
+import std.strbuf;
+import types;
+
+// The sandbox with its checker, the emitter over its session, and a buffer
+// the source builders below use. The emitter is initialised at the address it
+// is used at, since it stores the session it reports through (gen.ft).
+struct env {
+    check_env.env c;
+    gen.emitter g;
+    strbuf.str_buf buf;
+}
+
+// Prepares a fresh sandbox and an emitter over it, in the default build mode:
+// checked arithmetic and bounds checks on (D11.1, D10.6).
+fn void open(env mut* e) {
+    check_env.open(&e->c);
+    gen.gen_init(&e->g, &e->c.m.s, gen.gen_options{});
+}
+
+// The same with the options a `--release` or `--no-bounds-check` build has.
+fn void open_with(env mut* e, gen.gen_options opts) {
+    check_env.open(&e->c);
+    gen.gen_init(&e->g, &e->c.m.s, opts);
+}
+
+// Releases the emitter, then the checker and the sandbox: every text the
+// emitter interned is its own, and every annotation it read is the checker's
+// (D20.5).
+fn void close(env mut* e) {
+    gen.gen_free(&e->g);
+    strbuf.free(&e->buf);
+    check_env.close(&e->c);
+}
+
+// ---- driving one function ----------------------------------------------------------
+
+// Checks `body` as the whole of the body of `fn i32 main()` and prepares the
+// emitter over it: the annotations the emitter reads, the module `assert`
+// quotes its argument out of, and one slot per parameter and local. False
+// when the source did not check clean, which is what an assertion asks first.
+fn bool open_body(env mut* e, string body) {
+    if (!check_env.check_body(&e->c, body)) {
+        return false;
+    }
+    return open_main(e);
+}
+
+// The same for a whole module source, which is how a test that needs a
+// declaration beside `main` writes one.
+fn bool open_src(env mut* e, string src) {
+    if (!check_env.check_src(&e->c, src)) {
+        return false;
+    }
+    return open_main(e);
+}
+
+// Points the emitter at the checked entry module and binds the slots of
+// `main`.
+fn bool open_main(env mut* e) {
+    e->g.ck = &e->c.ck;
+    e->g.module = check_env.module_at(&e->c, "main");
+    ast.node* fn_node = check_env.node_in_main(&e->c, ast.ast_kind.k_fn_decl, "main");
+    if (e->g.module == null || fn_node == null) {
+        return false;
+    }
+    bind_slots(e, fn_node);
+    return true;
+}
+
+// The parameters and then the locals in declaration order, under the names
+// gen_function gives them (D19.4, D19.5). It is the slot half of
+// src/bootstrap/gen.c's gen_function and nothing else: no alloca is emitted,
+// since the entry block is the function emitter's (T-038).
+fn void bind_slots(env mut* e, ast.node* fn_node) {
+    u64 mut at = 0;
+    u64 mut i = 0;
+    while (i < ast.ast_len(fn_node)) {
+        ast.node* p = ast.ast_child(fn_node, i);
+        if (p->kind == ast.ast_kind.k_param && p->sym != null) {
+            // An aggregate parameter's place is the caller-made copy the
+            // incoming pointer designates (item 10).
+            bool incoming = gen.gen_is_aggregate(p->sym->ty);
+            gen.slot_add(&e->g, p->sym, gen.slot_name(&e->g, p->sym, at, incoming));
+            at += 1;
+        }
+        i += 1;
+    }
+    bind_locals(e, fn_node->b, &at);
+}
+
+// Every local of the body, in declaration order, as gen.c's collect_locals
+// walks them: a range `for` declares its loop variable on the loop node
+// itself and that variable is a local like any other (D7.5).
+fn void bind_locals(env mut* e, ast.node* n, u64 mut* at) {
+    if (n == null) {
+        return;
+    }
+    if ((n->kind == ast.ast_kind.k_var_decl || n->kind == ast.ast_kind.k_range_for) &&
+        n->sym != null) {
+        gen.slot_add(&e->g, n->sym, gen.slot_name(&e->g, n->sym, *at, false));
+        *at += 1;
+    }
+    bind_locals(e, n->a, at);
+    bind_locals(e, n->b, at);
+    bind_locals(e, n->c, at);
+    bind_locals(e, n->d, at);
+    u64 mut i = 0;
+    while (i < ast.ast_len(n)) {
+        bind_locals(e, ast.ast_child(n, i), at);
+        i += 1;
+    }
+}
+
+// The per-function reset of src/bootstrap/gen.c's function_begin, minus the
+// slots, so that two assertions of one test each start from `%t0` and `L0`
+// (D19.5).
+fn void begin(env mut* e) {
+    e->g.temps = 0;
+    e->g.labels = 0;
+    e->g.tmps = 0;
+    strbuf.clear(&e->g.allocas);
+    strbuf.clear(&e->g.body);
+    strbuf.clear(&e->g.fail);
+    e->g.terminated = false;
+    e->g.failed = false;
+}
+
+// ---- the nodes of the checked body -------------------------------------------------
+
+// The declaration of the local named `name` in `main`.
+fn ast.node* decl_of(env* e, string name) {
+    return check_env.node_in_main(&e->c, ast.ast_kind.k_var_decl, name);
+}
+
+// Its initializer, which is the expression a test emits.
+fn ast.node* init_of(env* e, string name) {
+    ast.node* d = decl_of(e, name);
+    if (d == null) {
+        return null;
+    }
+    return d->b;
+}
+
+// The place of that local, which is what an initializer is written into.
+fn gen.gen_place place_of(env mut* e, string name) {
+    return gen.gen_slot_place(&e->g, decl_of(e, name)->sym);
+}
+
+// ---- emitting -----------------------------------------------------------------------
+
+// Emits the initializer of the local `name` as a scalar value and answers the
+// operand it lands in; the text it produced is body(e).
+fn gen.gen_val emit_value(env mut* e, string name) {
+    begin(e);
+    return gen_expr.gen_expr_value(&e->g, init_of(e, name));
+}
+
+// The same, answering the text of the blocks it produced.
+fn string value_text(env mut* e, string name) {
+    emit_value(e, name);
+    return body(e);
+}
+
+// The expression of the `i`-th statement of `main`, with the call statement
+// of D7.3 unwrapped to the call it holds.
+fn ast.node* stmt_expr(env* e, u64 i) {
+    return check_env.body_expr(&e->c, "main", i);
+}
+
+// Emits that statement's expression for its effects alone, which is what a
+// call statement is (D7.3).
+fn string discard_at(env mut* e, u64 i) {
+    begin(e);
+    gen_expr.gen_expr_discard(&e->g, stmt_expr(e, i));
+    return body(e);
+}
+
+// Emits it into that local's own place, which is how every aggregate is
+// produced (D19.3).
+fn string into_text(env mut* e, string name) {
+    begin(e);
+    gen_expr.gen_expr_into(&e->g, init_of(e, name), place_of(e, name));
+    return body(e);
+}
+
+// The normal blocks emitted so far, a view valid until the next emission.
+fn string body(env* e) {
+    return strbuf.view(&e->g.body);
+}
+
+// The failure blocks of D19.6, which are held apart until the definition is
+// assembled.
+fn string fail(env* e) {
+    return strbuf.view(&e->g.fail);
+}
+
+// The entry-block allocas a temporary place asked for (D19.4).
+fn string allocas(env* e) {
+    return strbuf.view(&e->g.allocas);
+}
+
+// The type of the local `name`, which is how a test over the type lowering
+// names a fort type: it writes a declaration and reads the type the checker
+// gave it.
+fn types.node* type_of(env* e, string name) {
+    ast.node* d = decl_of(e, name);
+    if (d == null || d->sym == null) {
+        return null;
+    }
+    return d->sym->ty;
+}
+
+// The symbol of a top-level declaration of the entry module.
+fn ast.sym* sym_main(env* e, string name) {
+    return check_env.sym_main(&e->c, name);
+}
+
+// Asserts that emitted text is exactly `expected`, printing both when they
+// differ: an assertion over a block of IR is unreadable without the two texts
+// beside each other, and `assert` quotes its argument and not its value
+// (D11.4).
+fn void expect_text(string got, string expected) {
+    if (got != expected) {
+        eprint("got:      [");
+        eprint(got);
+        eprintln("]");
+        eprint("expected: [");
+        eprint(expected);
+        eprintln("]");
+    }
+    assert(got == expected);
+}
+
+// Two to five lines of expected IR joined into one text: fort joins no two
+// adjacent string literals (D2.9) and a `.ft` line is 100 columns, so an
+// expected block of instructions is written a line at a time. The buffer is
+// the environment's own and serves this one role, so a test holds emitted
+// text (a view of the emitter's body) against a joined text and never a view
+// of one buffer against another view of it.
+fn string join2(env mut* e, string a, string b) {
+    strbuf.clear(&e->buf);
+    strbuf.append(&e->buf, a);
+    strbuf.append(&e->buf, b);
+    return strbuf.view(&e->buf);
+}
+
+fn string join3(env mut* e, string a, string b, string c) {
+    join2(e, a, b);
+    strbuf.append(&e->buf, c);
+    return strbuf.view(&e->buf);
+}
+
+fn string join4(env mut* e, string a, string b, string c, string d) {
+    join3(e, a, b, c);
+    strbuf.append(&e->buf, d);
+    return strbuf.view(&e->buf);
+}
+
+fn string join5(env mut* e, string a, string b, string c, string d, string f) {
+    join4(e, a, b, c, d);
+    strbuf.append(&e->buf, f);
+    return strbuf.view(&e->buf);
+}
+
+fn string join6(env mut* e, string a, string b, string c, string d, string f, string h) {
+    join5(e, a, b, c, d, f);
+    strbuf.append(&e->buf, h);
+    return strbuf.view(&e->buf);
+}
+
+fn string join8(env mut* e, string a, string b, string c, string d, string f, string h,
+                string i, string j) {
+    join6(e, a, b, c, d, f, h);
+    strbuf.append(&e->buf, i);
+    strbuf.append(&e->buf, j);
+    return strbuf.view(&e->buf);
+}
+
+// ---- diagnostics --------------------------------------------------------------------
+
+// Whether any diagnostic reported so far holds `text`: what gen_todo wrote is
+// read back here, since an unfinished construct is a diagnostic and never
+// wrong code.
+fn bool said(env mut* e, string text) {
+    return check_env.said(&e->c, text);
+}
+
+// The errors reported so far, notes excluded (D14.2).
+fn u64 errors(env* e) {
+    return check_env.errors(&e->c);
+}
+
+// One more piece appended to the text the last join built, for a block longer
+// than eight lines.
+fn string join_more(env mut* e, string a) {
+    strbuf.append(&e->buf, a);
+    return strbuf.view(&e->buf);
+}
+
+// The body of `main` written a line at a time, which is how a suite lays a
+// probe out exactly as the program stage1 was run over: a statement on line
+// `i` of `lines` is on line `i + 2` of the module check_body builds, so the
+// position a failure call carries is the position of the operator the test
+// wrote (D11.4).
+fn bool open_lines(env mut* e, string@ lines) {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut i = 0;
+    while (i < lines.len) {
+        if (i > 0) {
+            strbuf.push(&b, '\n');
+        }
+        strbuf.append(&b, lines[i]);
+        i += 1;
+    }
+    return open_body(e, strbuf.view(&b));
+}
+
+// The bytes of the `i`-th string constant the emitter made, which is how the
+// text `assert` quoted out of the source is read back (item 5, D11.4).
+fn string record_text(env* e, u64 i) {
+    return gen.records_at(&e->g.strs, i).text;
+}
+
+// Emits the initializer of the local `name` as a place, which is what an
+// lvalue has and a value does not (D6.7).
+fn gen.gen_place emit_place(env mut* e, string name) {
+    begin(e);
+    return gen_expr.gen_expr_place(&e->g, init_of(e, name));
+}

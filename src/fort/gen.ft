@@ -1,0 +1,1649 @@
+// gen: the LLVM IR emitter of the self-hosted compiler (toolchain.md 6, D19),
+// the transliteration of src/bootstrap/gen.c: the emitter value and its
+// sections, type lowering, names, the emission primitives, the three
+// getelementptr shapes, blocks, the checks of D19.6, the private data and the
+// calls to the runtime.
+//
+// What it reads. The checker (check.ft) left a type on every expression, a
+// symbol on every name and a folded value on every constant node, so the
+// emitter asks no questions of its own: a node marked check.ANN_CONST is
+// emitted as a literal, every other node is lowered instruction by
+// instruction. The tree, the symbols and the type table must still be alive,
+// so a caller emits before check.check_free.
+//
+// The model (D19.3, D19.4). Only scalars are SSA values; a struct, fixed
+// array, span or `string` always occupies a place, so an expression is
+// lowered in one of three ways: gen_expr_value for a scalar, gen_expr_place
+// for an lvalue and gen_expr_into for a value written into a destination
+// (gen_expr.ft). Every local, parameter slot and compiler temporary is an
+// entry-block alloca, and no `phi` is ever built.
+//
+// Determinism (D19.5). Every counter is per function and reset at each
+// definition, every list is appended to in emission order and nothing is
+// iterated out of a hash table, so the text is a function of the program
+// alone.
+//
+// How this file is cut, and why it is not src/bootstrap/gen.c's cut. The C
+// emitter is four files that call each other in both directions: gen.c calls
+// gen_data.c's gen_file_ref, gen_call_rt and gen_append_name, gen_data.c
+// calls gen.c's primitives, and gen_stmt.c and gen_expr.c call both. Circular
+// imports are a compile error (D9.5), so the fort emitter is layered instead:
+// this module holds gen.c's primitives together with the private data, the
+// name spelling and the runtime calls of gen_data.c, which are what the
+// checks of D19.6 need; gen_expr.ft is gen_expr.c above it; and the function
+// definitions of gen.c (gen_function, gen_fort_entry, gen_module,
+// gen_program) go with the statements and the module assembly, which they
+// call, into the modules T-038 adds. Every function keeps its C name, so the
+// two emitters are read side by side whatever file each name stands in.
+//
+// Re-entrancy (D20.5): the emitter is a value the caller creates, passes down
+// and frees, with no module-level mutable state, and it reports through the
+// session it is given rather than through a file-scope sink as
+// src/bootstrap/diag.c does. Every text it builds belongs to its own pool and
+// dies with it. Nothing here ends the process: a broken precondition is a
+// panic at the call that broke it (D13.3), where the C calls fatal_internal.
+//
+// Dispatch: none. The kind analyses are the plain switches the C wrote, not a
+// function-pointer table (D3.10).
+import ast;
+import check;
+import consts;
+import containers;
+import diag;
+import modules;
+import prim;
+import runtime_sig;
+import session;
+import std.strbuf;
+import types;
+
+// The two named types every module carries, used or not, so that the emitter
+// tracks nothing (item 2). `%fort.span` serves every span and `string`, since
+// with opaque pointers they have identical IR (D3.5, D3.7).
+string SPAN_TYPE = "%fort.span";
+string ENUM_MEMBER_TYPE = "%fort.enum_member";
+
+// The bytes a span or `string` header occupies: a pointer and a 64-bit
+// length (D3.5).
+u64 SPAN_SIZE = 16;
+u64 SPAN_ALIGN = 8;
+
+// The bytes a pointer and a 64-bit length occupy on their own, which is what
+// a load or a store of one span header field is aligned to.
+u64 PTR_BYTES = 8;
+u64 LEN_BYTES = 8;
+
+// The width of the widest integer the emitter prints a constant of.
+u32 BITS_PER_U64 = 64;
+
+// The header fields of a span, in the order item 17 gives them.
+u64 SPAN_FIELD_PTR = 0;
+u64 SPAN_FIELD_LEN = 1;
+
+// The intrinsics of toolchain.md 6 item 8, in the fixed order that item
+// gives: memcpy, memset, the overflow family by operation then by ascending
+// width, then llvm.trap. The float conversions of item 12 have no slot: the
+// bootstrap compiler rejects floats before code generation. They are module
+// constants and not an enum because the overflow slot of an operation is
+// computed from the family and the width (item 15) and an enum has no
+// arithmetic (D3.9).
+u64 IN_MEMCPY = 0;
+u64 IN_MEMSET = 1;
+u64 IN_OVERFLOW_FIRST = 2;
+u64 IN_TRAP = 26;
+u64 IN_COUNT = 27;
+
+// The overflow intrinsics, in the order `sadd ssub smul uadd usub umul` and,
+// within each, the widths `i8 i16 i32 i64` (item 15).
+u64 OVF_SADD = 0;
+u64 OVF_SSUB = 1;
+u64 OVF_SMUL = 2;
+u64 OVF_UADD = 3;
+u64 OVF_USUB = 4;
+u64 OVF_UMUL = 5;
+u64 OVF_COUNT = 6;
+
+// The widths an overflow intrinsic exists at, `i8 i16 i32 i64` (item 15).
+u64 OVF_WIDTHS = 4;
+
+// The attribute groups of toolchain.md 6, at their fixed indices; only the
+// used ones are emitted, so gaps in the numbering are normal (D19.5).
+u64 ATTR_FN = 0;        // #0, every fort definition (item 7)
+u64 ATTR_FN_NORET = 1;  // #1, a `noreturn` definition (item 20)
+u64 ATTR_FAIL = 2;      // #2, the failure entry points (item 14)
+u64 ATTR_NOBUILTIN = 3; // #3, every extern call site (item 8)
+u64 ATTR_OVERFLOW = 4;  // #4, the overflow intrinsics (item 15)
+u64 ATTR_MEMCPY = 5;    // #5
+u64 ATTR_MEMSET = 6;    // #6
+u64 ATTR_TRAP = 7;      // #7, llvm.trap (item 20)
+u64 ATTR_COUNT = 8;
+
+// The first byte that needs no `\XX` escape and the last: a string constant
+// writes every other byte as a hex pair (item 5).
+u64 PRINTABLE_FIRST = 32;
+u64 PRINTABLE_LAST = 126;
+u64 HEX_DIGITS = 16;
+
+// The hex digits of a `\XX` escape, which a string constant and a quoted name
+// both write (item 5).
+string HEX = "0123456789ABCDEF";
+
+// The first non-zero capacity of a vector of this module; growth doubles from
+// there, as containers.str_vec grows.
+u64 VEC_MIN_CAP = 16;
+
+// ---- the values the emitter passes around -----------------------------------------
+
+// An IR operand: the type text and the value text, both stable for the life
+// of the emitter. `ty` may carry a parameter attribute at a call site
+// (`i8 zeroext`), which is why it is text and not a type; it is spelled `ty`
+// because `type` is reserved (D2.4).
+struct gen_val {
+    string ty;
+    string val;
+}
+
+// A place: the address of storage and the fort type it holds (D19.3). Every
+// aggregate and every local lives in one.
+struct gen_place {
+    gen_val addr;
+    types.node* ty;
+}
+
+// The argument text of one call, built left to right so that a call of any
+// arity needs no fixed bound.
+struct gen_args {
+    strbuf.str_buf text;
+    u64 count;
+}
+
+// The build mode the module is emitted in (D11.1, D10.6).
+struct gen_options {
+    bool release;         // --release: wrapping arithmetic, no overwrite check
+    bool no_bounds_check; // --no-bounds-check: no index or span branch
+}
+
+// One local or parameter place: the symbol it belongs to and the name of its
+// storage (D19.5). An aggregate parameter's place is the caller-made copy the
+// incoming pointer designates, so its name is `%<ident>.in` (item 10).
+struct slot {
+    ast.sym* sym;
+    string name;
+}
+
+// The slots of the function being emitted, in the order their allocas are.
+// src/bootstrap/gen.c boxes each record into a ptrvec_t of `void*`; a slot is
+// a plain value, so the vector holds them by value, as check.ft's folded
+// values are held.
+struct slot_vec {
+    slot mut@ own items;
+    u64 len;
+}
+
+// One record of the private data: a file name, a string literal or an enum
+// table, each numbered on first use (D19.5).
+struct record {
+    string text;   // the bytes of a file name or a string literal
+    ast.sym* sym;  // an enum table's declaration
+    u64 first;     // its first member-name string
+    u64 count;     // its member count
+}
+
+// A vector of those records, by value for the same reason.
+struct record_vec {
+    record mut@ own items;
+    u64 len;
+}
+
+// The `extern` functions the module refers to, in first-use order: the
+// symbols are the checker's and are borrowed (D17.4).
+struct sym_vec {
+    ast.sym* mut@ own items;
+    u64 len;
+}
+
+// The emitter. src/bootstrap/gen.h calls it `gen_t`; here it is the
+// `emitter` beside check.ft's `checker`, since a module named `gen` cannot
+// also hand out a type of that name a reader would spell `gen.gen`.
+//
+// The fields this module does not write are the sections item 1 assembles and
+// the two lists a caller reads: they are here because gen_init and gen_free
+// answer for the whole value. The defer scope stack of D7.8 and the `break`
+// and `continue` targets of the C's struct are the statement emitter's alone
+// and arrive with it (T-038).
+struct emitter {
+    gen_options opts;
+    session.session mut* sess; // borrowed: the diagnostics of the analysis
+    check.checker* ck;         // borrowed: the annotations the emitter reads
+
+    // ---- the sections of item 1, assembled in order at the end ----
+    strbuf.str_buf named;   // the named types
+    strbuf.str_buf globals; // the module-level data (D7.10)
+    strbuf.str_buf funcs;   // the function definitions
+    strbuf.str_buf out;     // the whole module, written by gen_finish
+
+    // ---- the function being emitted ----
+    strbuf.str_buf allocas; // its entry-block allocas, in declaration order (D19.4)
+    strbuf.str_buf body;    // its normal blocks
+    strbuf.str_buf fail;    // its failure blocks, emitted after them (D19.6)
+    u64 temps;
+    u64 labels;
+    u64 tmps;
+    slot_vec slots;  // the locals and parameters in order
+    bool terminated; // the block being written already ended in a terminator
+
+    // ---- what the module refers to, in first-use order (D19.5) ----
+    record_vec files; // @.file.N, one per file
+    record_vec strs;  // @.str.N, never deduplicated by content
+    record_vec enums; // @.enum.<path.name>, one per enum some print reaches
+    sym_vec externs;  // the extern C functions, in first-use order
+    bool[runtime_sig.RT_ENTRY_COUNT] rt;
+    bool[IN_COUNT] intrinsics;
+    bool[ATTR_COUNT] attrs;
+
+    // The `char` a `string`'s elements are, which its type does not carry
+    // (D3.7): gen_element_type hands it out so that the emitter has no second
+    // spelling of `char`'s IR type (item 2).
+    types.node char_type;
+
+    containers.pool pool;   // owns every operand and type text the emitter builds
+    strbuf.str_buf scratch; // the buffer those texts are built in
+    modules.module* module; // the module being emitted
+    bool entry_defined;     // `fort_entry` was emitted, so nothing declares it (D9.7, D11.6)
+    bool failed;            // a construct the emitter cannot lower yet was reported
+}
+
+// ---- the three vectors ------------------------------------------------------------
+
+// Ensures room for one more slot, growing to the largest of VEC_MIN_CAP and
+// twice the capacity, as every vector of the compiler grows.
+fn void slots_reserve(slot_vec mut* v) {
+    if (v->len < v->items.len) {
+        return;
+    }
+    u64 mut cap = VEC_MIN_CAP;
+    if (v->items.len >= cap) {
+        // Nothing here may detect an overflow by performing one (D11.1).
+        if (v->items.len > containers.U64_MAX / 2) {
+            panic("gen.slots_reserve: capacity overflow");
+        }
+        cap = v->items.len * 2;
+    }
+    slot mut@ own bigger = new(slot, cap);
+    u64 mut i = 0;
+    while (i < v->len) {
+        bigger[i] = v->items[i];
+        i += 1;
+    }
+    del(v->items);
+    v->items = move(bigger);
+}
+
+fn void slots_push(slot_vec mut* v, slot s) {
+    slots_reserve(v);
+    v->items[v->len] = s;
+    v->len += 1;
+}
+
+// Empties the vector and releases its storage; the symbols it borrowed are
+// the checker's and are left alone (D13.5).
+fn void slots_free(slot_vec mut* v) {
+    del(v->items);
+    v->len = 0;
+}
+
+fn void records_reserve(record_vec mut* v) {
+    if (v->len < v->items.len) {
+        return;
+    }
+    u64 mut cap = VEC_MIN_CAP;
+    if (v->items.len >= cap) {
+        if (v->items.len > containers.U64_MAX / 2) {
+            panic("gen.records_reserve: capacity overflow");
+        }
+        cap = v->items.len * 2;
+    }
+    record mut@ own bigger = new(record, cap);
+    u64 mut i = 0;
+    while (i < v->len) {
+        bigger[i] = v->items[i];
+        i += 1;
+    }
+    del(v->items);
+    v->items = move(bigger);
+}
+
+fn void records_push(record_vec mut* v, record r) {
+    records_reserve(v);
+    v->items[v->len] = r;
+    v->len += 1;
+}
+
+// The record at `i`; an index at or past len is a violated precondition and
+// panics (D13.3), since the slots beyond len hold stale records.
+fn record records_at(record_vec* v, u64 i) {
+    if (i >= v->len) {
+        panic("gen.records_at: index out of range");
+    }
+    return v->items[i];
+}
+
+fn void records_free(record_vec mut* v) {
+    del(v->items);
+    v->len = 0;
+}
+
+fn void syms_reserve(sym_vec mut* v) {
+    if (v->len < v->items.len) {
+        return;
+    }
+    u64 mut cap = VEC_MIN_CAP;
+    if (v->items.len >= cap) {
+        if (v->items.len > containers.U64_MAX / 2) {
+            panic("gen.syms_reserve: capacity overflow");
+        }
+        cap = v->items.len * 2;
+    }
+    // new(T, n) is mutable at every level (D5.8) and the elements here are
+    // pointers to immutable records, so the allocation is cast once, at the
+    // one place it is made, as types.ft casts its parameter lists.
+    ast.sym* mut@ own bigger = cast(new(ast.sym*, cap), ast.sym* mut@ own);
+    u64 mut i = 0;
+    while (i < v->len) {
+        bigger[i] = v->items[i];
+        i += 1;
+    }
+    del(v->items);
+    v->items = move(bigger);
+}
+
+fn void syms_push(sym_vec mut* v, ast.sym* s) {
+    syms_reserve(v);
+    v->items[v->len] = s;
+    v->len += 1;
+}
+
+// The symbol at `i`, with the precondition records_at has.
+fn ast.sym* syms_at(sym_vec* v, u64 i) {
+    if (i >= v->len) {
+        panic("gen.syms_at: index out of range");
+    }
+    return v->items[i];
+}
+
+fn void syms_free(sym_vec mut* v) {
+    del(v->items);
+    v->len = 0;
+}
+
+// ---- the argument list of one call ------------------------------------------------
+
+// The empty argument list; allocates nothing.
+fn gen_args gen_args_init() {
+    return gen_args{};
+}
+
+fn void gen_args_free(gen_args mut* a) {
+    strbuf.free(&a->text);
+    a->count = 0;
+}
+
+// Appends `<ty> <val>`, with the parameter attribute of item 7 between them
+// for the _ext form (`i8 zeroext 10`); `attr` is the empty string when the
+// value carries none, since no attribute is empty (src/bootstrap/gen.h passes
+// NULL there).
+fn void gen_args_add_ext(gen_args mut* a, gen_val v, string attr) {
+    if (a->count > 0) {
+        strbuf.append(&a->text, ", ");
+    }
+    strbuf.append(&a->text, v.ty);
+    if (attr.len > 0) {
+        strbuf.push(&a->text, ' ');
+        strbuf.append(&a->text, attr);
+    }
+    strbuf.push(&a->text, ' ');
+    strbuf.append(&a->text, v.val);
+    a->count += 1;
+}
+
+fn void gen_args_add(gen_args mut* a, gen_val v) {
+    gen_args_add_ext(a, v, "");
+}
+
+// The text built so far, a view valid until the next append.
+fn string gen_args_text(gen_args* a) {
+    return strbuf.view(&a->text);
+}
+
+// ---- the emitter ------------------------------------------------------------------
+
+// Prepares an emitter that reports through `s`. Every field a zeroed emitter
+// already has the right value for is left alone, as types.type_table_init
+// leaves a zeroed table: what is set is what src/bootstrap/gen.c's gen_init
+// sets to something other than zero. The one type node the emitter builds
+// itself is the `char` a `string`'s elements are, which `string` does not
+// carry (D3.7).
+//
+// The session is borrowed, so it must outlive the emitter, and it is stored:
+// an emitter initialised against a session that later moves reports into
+// freed storage, so initialise one at the address it will be used at
+// (check.check_init has the same precondition).
+fn void gen_init(emitter mut* g, session.session mut* s, gen_options opts) {
+    g->opts = opts;
+    g->sess = s;
+    reset_state(g);
+    g->char_type.kind = types.type_kind.k_prim;
+    g->char_type.prim = prim.prim_kind.prim_char;
+}
+
+// The scalar state of an emitter, set to what a fresh one holds.
+// src/bootstrap/gen.c writes every field of its struct in gen_init, over raw
+// storage; here the buffers and the vectors are values that are already empty
+// at `emitter{}` and are emptied again by gen_free, and this is the rest. It
+// is what makes an emitter reusable, which is the re-entrancy of D20.5: an
+// `init` after a `free` on one value must start from the state the first
+// `init` did, and a `failed` left behind would silence every later emission.
+fn void reset_state(emitter mut* g) {
+    g->temps = 0;
+    g->labels = 0;
+    g->tmps = 0;
+    g->terminated = false;
+    g->module = null;
+    g->ck = null;
+    g->entry_defined = false;
+    g->failed = false;
+    u64 mut i = 0;
+    while (i < runtime_sig.RT_ENTRY_COUNT) {
+        g->rt[i] = false;
+        i += 1;
+    }
+    i = 0;
+    while (i < IN_COUNT) {
+        g->intrinsics[i] = false;
+        i += 1;
+    }
+    i = 0;
+    while (i < ATTR_COUNT) {
+        g->attrs[i] = false;
+        i += 1;
+    }
+}
+
+// Releases every buffer and every record; the emitter is empty afterwards.
+fn void gen_free(emitter mut* g) {
+    strbuf.free(&g->named);
+    strbuf.free(&g->globals);
+    strbuf.free(&g->funcs);
+    strbuf.free(&g->out);
+    strbuf.free(&g->allocas);
+    strbuf.free(&g->body);
+    strbuf.free(&g->fail);
+    slots_free(&g->slots);
+    records_free(&g->files);
+    records_free(&g->strs);
+    records_free(&g->enums);
+    syms_free(&g->externs);
+    containers.pool_free(&g->pool);
+    strbuf.free(&g->scratch);
+    // Every buffer and every list is empty now, so the rest of the state is
+    // put back with them: the emitter is a value a caller may init again
+    // (D20.5), and src/bootstrap/gen.c, whose emitter is never reused, leaves
+    // this out.
+    reset_state(g);
+}
+
+// A copy of the text of `scratch`, owned by the emitter's pool and stable
+// until gen_free; the buffer is empty afterwards.
+fn string gen_take(emitter mut* g) {
+    string s = containers.pool_intern(&g->pool, strbuf.view(&g->scratch));
+    strbuf.clear(&g->scratch);
+    return s;
+}
+
+// The emitted module, valid until the next call on `g`.
+fn string gen_text(emitter* g) {
+    return strbuf.view(&g->out);
+}
+
+// Reports that the emitter cannot lower `what` yet and fails the module, so
+// that an unfinished construct is a diagnostic and never wrong code. The
+// tickets after this one remove these as they lower each construct.
+fn void gen_todo(emitter mut* g, diag.loc at, string what) {
+    strbuf.clear(&g->scratch);
+    strbuf.append(&g->scratch, "the bootstrap compiler cannot generate code yet for ");
+    strbuf.append(&g->scratch, what);
+    diag.error(session.diags(g->sess), at, strbuf.view(&g->scratch));
+    strbuf.clear(&g->scratch);
+    g->failed = true;
+}
+
+// ---- types (item 2) ---------------------------------------------------------------
+
+// Whether `t` lives in a place rather than in a register: a struct, fixed
+// array, span or `string` (D19.3).
+fn bool gen_is_aggregate(types.node* t) {
+    // Only scalars are SSA values; everything else occupies a place (D19.3).
+    return t != null && (t->kind == types.type_kind.k_array ||
+                         t->kind == types.type_kind.k_span ||
+                         t->kind == types.type_kind.k_string ||
+                         t->kind == types.type_kind.k_struct);
+}
+
+// The bit width of an integer, `char`, `bool` or enum type: what a `trunc`
+// or an extension compares (item 9).
+fn u32 gen_int_bits(types.node* t) {
+    if (t == null) {
+        return 0;
+    }
+    if (t->kind == types.type_kind.k_enum) {
+        // An enum is `i32` (D3.9).
+        return cast(4 * prim.PRIM_BITS_PER_BYTE, u32);
+    }
+    if (t->kind != types.type_kind.k_prim) {
+        return 0;
+    }
+    if (t->prim == prim.prim_kind.prim_bool) {
+        // `bool` is `i1` as a value (D3.3).
+        return 1;
+    }
+    return prim.prim_size(t->prim) * cast(prim.PRIM_BITS_PER_BYTE, u32);
+}
+
+// Whether a value of `t` is compared, extended and printed as signed: the
+// four signed integers and every enum, since `char` is an unsigned byte,
+// `bool` is 0 or 1 (D3.1, D3.2, D3.3) and an enum's `i32` is D3.1's signed
+// type (D3.9). One predicate, because two would let the constant a member
+// folds to disagree with the cast that widens it, which is two spellings of
+// one program (D19.5).
+fn bool gen_is_signed(types.node* t) {
+    if (t == null) {
+        return false;
+    }
+    if (t->kind == types.type_kind.k_enum) {
+        // An enum's `i32` is the signed type of D3.1: a member may be
+        // negative, so its constants print signed and a widening cast of one
+        // sign-extends (D3.9).
+        return true;
+    }
+    return t->kind == types.type_kind.k_prim && prim.prim_is_signed(t->prim);
+}
+
+// The dotted name of a nominal type's declaration, `%struct.main.point`
+// (item 2, D9.7).
+fn string nominal_type_name(emitter mut* g, types.node* t) {
+    ast.sym* s = check.nominal_sym(t);
+    // The dotted name is built first: gen_symbol builds its own text in the
+    // same scratch buffer.
+    string mut dotted = "";
+    if (s != null) {
+        dotted = gen_symbol(g, s);
+    }
+    strbuf.clear(&g->scratch);
+    strbuf.push(&g->scratch, '%');
+    gen_append_name(&g->scratch, "struct.", dotted, false);
+    return gen_take(g);
+}
+
+// The memory type of `t`, what an alloca, a global or a field holds: `i8` for
+// `bool`, `%fort.span` for a span or `string`, `[N x T]` for a fixed array
+// (D19.2).
+fn string gen_mem_type(emitter mut* g, types.node* t) {
+    if (t == null) {
+        return "void";
+    }
+    switch (t->kind) {
+    case types.type_kind.k_void:
+        return "void";
+    case types.type_kind.k_prim:
+        return prim_mem_type(t->prim);
+    case types.type_kind.k_ptr, types.type_kind.k_voidptr, types.type_kind.k_fn:
+        // Every pointer, `void*` and function pointer is the opaque `ptr`
+        // (D3.10, D3.11).
+        return "ptr";
+    case types.type_kind.k_array:
+        // An array type nests outside in, so `i32[3][4]` is
+        // `[3 x [4 x i32]]` (D3.6).
+        return array_mem_type(g, t);
+    case types.type_kind.k_span, types.type_kind.k_string:
+        // One `%fort.span` serves every span and `string` (D3.5, D3.7).
+        return SPAN_TYPE;
+    case types.type_kind.k_struct:
+        return nominal_type_name(g, t);
+    case types.type_kind.k_enum:
+        return "i32";
+    case types.type_kind.k_null:
+        return "ptr";
+    case types.type_kind.k_error:
+        return "void";
+    }
+}
+
+// The memory type of a primitive: the arm of the switch above, which stands
+// on its own because a fort case label may not fall through (D7.6) and the C
+// nests a second switch there.
+fn string prim_mem_type(prim.prim_kind k) {
+    switch (k) {
+    case prim.prim_kind.prim_i8, prim.prim_kind.prim_u8, prim.prim_kind.prim_char,
+         prim.prim_kind.prim_bool:
+        // `bool` is `i8` in memory, with C's `_Bool` layout (D19.2).
+        return "i8";
+    case prim.prim_kind.prim_i16, prim.prim_kind.prim_u16:
+        return "i16";
+    case prim.prim_kind.prim_i32, prim.prim_kind.prim_u32:
+        return "i32";
+    case prim.prim_kind.prim_i64, prim.prim_kind.prim_u64:
+        return "i64";
+    case prim.prim_kind.prim_f32:
+        return "float";
+    case prim.prim_kind.prim_f64:
+        return "double";
+    case prim.prim_kind.prim_void:
+        return "void";
+    }
+}
+
+// `[N x T]` for a fixed array, the element type built before the brackets
+// since it is built in the same scratch buffer.
+fn string array_mem_type(emitter mut* g, types.node* t) {
+    string elem = gen_mem_type(g, t->elem);
+    strbuf.clear(&g->scratch);
+    strbuf.push(&g->scratch, '[');
+    strbuf.append_u64(&g->scratch, t->len);
+    strbuf.append(&g->scratch, " x ");
+    strbuf.append(&g->scratch, elem);
+    strbuf.push(&g->scratch, ']');
+    return gen_take(g);
+}
+
+// The value type of `t`, what a temporary holds: `i1` for `bool` (D19.2).
+fn string gen_value_type(emitter mut* g, types.node* t) {
+    if (t != null && t->kind == types.type_kind.k_prim && t->prim == prim.prim_kind.prim_bool) {
+        // `bool` is `i1` as a value and `i8` in memory (D19.2).
+        return "i1";
+    }
+    return gen_mem_type(g, t);
+}
+
+// The IR type of a function's result: `void` for an aggregate result, which
+// is returned through the `sret` pointer of item 7.
+fn string gen_result_type(emitter mut* g, types.node* t) {
+    if (gen_is_aggregate(t)) {
+        // An aggregate result is a leading `sret` pointer on a function whose
+        // result type is `void` (item 7).
+        return "void";
+    }
+    return gen_value_type(g, t);
+}
+
+// The parameter attribute of item 7, or the empty string: `zeroext` for
+// `bool`, `char`, `u8` and `u16`, `signext` for `i8` and `i16`.
+fn string gen_ext_attr(types.node* t) {
+    if (t == null || t->kind != types.type_kind.k_prim) {
+        return "";
+    }
+    switch (t->prim) {
+    case prim.prim_kind.prim_bool, prim.prim_kind.prim_char, prim.prim_kind.prim_u8,
+         prim.prim_kind.prim_u16:
+        // `bool`, `char`, `u8` and `u16` carry `zeroext` (item 7).
+        return "zeroext";
+    case prim.prim_kind.prim_i8, prim.prim_kind.prim_i16:
+        return "signext";
+    case prim.prim_kind.prim_i32, prim.prim_kind.prim_i64, prim.prim_kind.prim_u32,
+         prim.prim_kind.prim_u64, prim.prim_kind.prim_f32, prim.prim_kind.prim_f64,
+         prim.prim_kind.prim_void:
+        return "";
+    }
+}
+
+// ---- names (item 4, D9.7) ---------------------------------------------------------
+
+// The index of a field in its struct: the position among the k_field_decl
+// children of the declaration, which is the order the named type of item 2
+// writes them in, so the field shape of item 3 and a constant initializer
+// name the same field. The one map from a field symbol to its index: a second
+// one would let the initializer's order drift from the named type's.
+fn bool gen_field_index(ast.sym* field, u64 mut* out) {
+    ast.sym* mut owner = null;
+    if (field != null) {
+        owner = field->owner;
+    }
+    if (owner == null || owner->node == null) {
+        return false;
+    }
+    u64 mut at = 0;
+    u64 mut i = 0;
+    while (i < ast.ast_len(owner->node)) {
+        ast.node* f = ast.ast_child(owner->node, i);
+        if (f->kind == ast.ast_kind.k_field_decl) {
+            if (f->sym == field) {
+                *out = at;
+                return true;
+            }
+            at += 1;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// The ELF symbol of a declaration: the module path, a dot and the declaration
+// name (`main.add`), the path being dot-separated already (D9.1), or the
+// unmangled C name of an `extern` function.
+fn string gen_symbol(emitter mut* g, ast.sym* s) {
+    if (s == null) {
+        return "";
+    }
+    if (s->kind == ast.sym_kind.s_extern_fn) {
+        // `extern` names are unmangled (D9.7).
+        return s->name;
+    }
+    strbuf.clear(&g->scratch);
+    if (s->owner != null && s->owner->kind == ast.sym_kind.s_module) {
+        // The module path, a dot and the declaration name (D9.7): a path is
+        // dot-separated already (D9.1), so it is copied across unchanged and
+        // `std.io` gives `std.io.read_file`.
+        strbuf.append(&g->scratch, s->owner->name);
+        strbuf.push(&g->scratch, '.');
+    }
+    strbuf.append(&g->scratch, s->name);
+    return gen_take(g);
+}
+
+// The operand naming a declaration: `@"main.add"` for a fort symbol, `@name`
+// for a C one, since a dotted name is quoted and quoting is spelling only
+// (D9.7).
+fn string gen_symbol_ref(emitter mut* g, ast.sym* s) {
+    string name = gen_symbol(g, s);
+    strbuf.clear(&g->scratch);
+    strbuf.push(&g->scratch, '@');
+    if (s != null && s->kind == ast.sym_kind.s_extern_fn) {
+        // A C name is an identifier and stands unquoted (D9.7).
+        gen_append_name(&g->scratch, "", name, false);
+        return gen_take(g);
+    }
+    // A dotted name is quoted, which is spelling only: the ELF symbol is
+    // unchanged (D9.7).
+    gen_append_name(&g->scratch, "", name, true);
+    return gen_take(g);
+}
+
+// Appends `\XX` for `byte`.
+fn void append_hex(strbuf.str_buf mut* out, u64 byte) {
+    strbuf.push(out, '\\');
+    strbuf.push(out, HEX[byte / HEX_DIGITS]);
+    strbuf.push(out, HEX[byte % HEX_DIGITS]);
+}
+
+// Whether `byte` may stand in an IR name with no quotes around it: LLVM's
+// unquoted identifiers are `[-a-zA-Z$._][-a-zA-Z$._0-9]*`, which every module
+// path satisfies, since its segments are identifiers joined with dots (D9.1).
+fn bool name_byte_is_plain(char byte, bool first) {
+    if (byte == '-' || byte == '$' || byte == '.' || byte == '_') {
+        return true;
+    }
+    if ((byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z')) {
+        return true;
+    }
+    return !first && byte >= '0' && byte <= '9';
+}
+
+// Whether `prefix` followed by `name` needs quotes around it.
+fn bool name_needs_quotes(string prefix, string name) {
+    u64 mut at = 0;
+    u64 mut i = 0;
+    while (i < prefix.len) {
+        if (!name_byte_is_plain(prefix[i], at == 0)) {
+            return true;
+        }
+        at += 1;
+        i += 1;
+    }
+    i = 0;
+    while (i < name.len) {
+        if (!name_byte_is_plain(name[i], at == 0)) {
+            return true;
+        }
+        at += 1;
+        i += 1;
+    }
+    return at == 0;
+}
+
+// Appends `<prefix><name>` after the `@` or `%` of an IR name: quoted when
+// `always` asks, as every fort symbol is (D9.7), and otherwise only when
+// LLVM's unquoted identifier rules do not admit it, which a module path never
+// needs and an entry base name of D9.1 may. Inside the quotes the two bytes a
+// quoted name cannot hold, `"` and `\`, and every byte outside the printable
+// range are written as the `\XX` hex pair of item 5, which LLVM reads back to
+// the byte, so the ELF symbol is the name itself and quoting stays spelling
+// only (D9.7).
+fn void gen_append_name(strbuf.str_buf mut* out, string prefix, string name, bool always) {
+    if (!always && !name_needs_quotes(prefix, name)) {
+        strbuf.append(out, prefix);
+        strbuf.append(out, name);
+        return;
+    }
+    strbuf.push(out, '"');
+    strbuf.append(out, prefix);
+    u64 mut i = 0;
+    while (i < name.len) {
+        u64 byte = cast(name[i], u64);
+        // The two bytes a quoted name cannot hold, and every byte outside the
+        // printable range, are written as the `\XX` hex pair of item 5, which
+        // LLVM reads back to the byte: the ELF symbol is the name itself
+        // (D9.7).
+        if (byte < PRINTABLE_FIRST || byte > PRINTABLE_LAST || name[i] == '"' ||
+            name[i] == '\\') {
+            append_hex(out, byte);
+        } else {
+            strbuf.push(out, name[i]);
+        }
+        i += 1;
+    }
+    strbuf.push(out, '"');
+}
+
+// ---- emission primitives ----------------------------------------------------------
+
+fn void gen_text_append(emitter mut* g, string s) {
+    strbuf.append(&g->body, s);
+}
+
+fn void gen_text_append_u64(emitter mut* g, u64 v) {
+    strbuf.append_u64(&g->body, v);
+}
+
+fn void gen_text_append_i64(emitter mut* g, i64 v) {
+    strbuf.append_i64(&g->body, v);
+}
+
+// Begins an instruction that produces none: two spaces of indent.
+fn void gen_ins(emitter mut* g) {
+    strbuf.append(&g->body, "  ");
+}
+
+// Ends the instruction being written.
+fn void gen_ins_end(emitter mut* g) {
+    strbuf.push(&g->body, '\n');
+}
+
+// Begins an instruction that produces a value: `  %tN = `, and names it.
+fn gen_val gen_temp(emitter mut* g, string ty) {
+    // Instruction results are `%t<N>` in emission order, per function
+    // (D19.5).
+    strbuf.clear(&g->scratch);
+    strbuf.append(&g->scratch, "%t");
+    strbuf.append_u64(&g->scratch, g->temps);
+    g->temps += 1;
+    gen_val mut v = gen_val{};
+    v.ty = ty;
+    v.val = gen_take(g);
+    strbuf.append(&g->body, "  ");
+    strbuf.append(&g->body, v.val);
+    strbuf.append(&g->body, " = ");
+    return v;
+}
+
+// ---- values -----------------------------------------------------------------------
+
+// A value with the given type and literal text (`null`, `true`, `0`).
+fn gen_val gen_literal(emitter mut* g, string ty, string text) {
+    gen_val mut v = gen_val{};
+    v.ty = ty;
+    v.val = containers.pool_intern(&g->pool, text);
+    return v;
+}
+
+// An integer literal printed with the signedness of its fort type: `i8 -1`
+// for an `i8` and `i8 255` for a `u8` (D19.5).
+fn gen_val gen_const_signed(emitter mut* g, string ty, i64 v) {
+    strbuf.clear(&g->scratch);
+    strbuf.append_i64(&g->scratch, v);
+    gen_val mut out = gen_val{};
+    out.ty = ty;
+    out.val = gen_take(g);
+    return out;
+}
+
+fn gen_val gen_const_unsigned(emitter mut* g, string ty, u64 v) {
+    strbuf.clear(&g->scratch);
+    strbuf.append_u64(&g->scratch, v);
+    gen_val mut out = gen_val{};
+    out.ty = ty;
+    out.val = gen_take(g);
+    return out;
+}
+
+// A negative constant from its magnitude, so that a value whose magnitude is
+// 2^63 (`i64` MIN) never has to be negated in a signed type (D19.5).
+fn gen_val const_negative(emitter mut* g, string ty, u64 magnitude) {
+    strbuf.clear(&g->scratch);
+    strbuf.push(&g->scratch, '-');
+    strbuf.append_u64(&g->scratch, magnitude);
+    gen_val mut out = gen_val{};
+    out.ty = ty;
+    out.val = gen_take(g);
+    return out;
+}
+
+// The low `bits` of `x` as the fort type reads them: sign-extended for a
+// signed type, zero-extended otherwise (D19.5). The magnitude of a negative
+// value is the two's complement of the pattern, computed in unsigned
+// arithmetic so that every width behaves alike.
+fn gen_val const_bits(emitter mut* g, string ty, u64 x, u32 bits, bool sign) {
+    u32 mut width = bits;
+    if (bits == 0 || bits > BITS_PER_U64) {
+        width = BITS_PER_U64;
+    }
+    u64 mut mask = containers.U64_MAX;
+    if (width != BITS_PER_U64) {
+        mask = (cast(1, u64) << width) - 1;
+    }
+    u64 low = x & mask;
+    if (sign && (low & (cast(1, u64) << (width - 1))) != 0) {
+        // A negative value of a signed type prints as `i8 -1` (D19.5).
+        return const_negative(g, ty, (~low & mask) + 1);
+    }
+    return gen_const_unsigned(g, ty, low);
+}
+
+// The smallest value of a signed type of `bits` bits, printed as a signed
+// decimal: the operand the division check of item 15 compares against. It is
+// built from the bit pattern, since negating the magnitude of `i64` MIN
+// overflows the type that would hold it.
+fn gen_val gen_const_min(emitter mut* g, string ty, u32 bits) {
+    // The pattern with the sign bit alone set, read as the signed type says
+    // (D19.5): `i8` MIN is -128 and `i64` MIN -9223372036854775808.
+    return const_bits(g, ty, cast(1, u64) << (bits - 1), bits, true);
+}
+
+// The value of a folded constant of type `t` (check.ANN_CONST): an integer,
+// `bool`, `char`, `null` or an enum member. A string constant is not a scalar
+// and has no value form.
+fn gen_val gen_const_value(emitter mut* g, types.node* t, consts.cval v) {
+    string ty = gen_value_type(g, t);
+    if (v.kind == consts.cval_kind.cv_bool) {
+        if (v.mag != 0) {
+            return gen_literal(g, ty, "true");
+        }
+        return gen_literal(g, ty, "false");
+    }
+    if (v.kind == consts.cval_kind.cv_null) {
+        return gen_literal(g, ty, "null");
+    }
+    if (t != null && (t->kind == types.type_kind.k_ptr || t->kind == types.type_kind.k_voidptr ||
+                      t->kind == types.type_kind.k_fn)) {
+        // A pointer constant is `null`; no other address folds (D10.5).
+        return gen_literal(g, ty, "null");
+    }
+    // A char in an integer context is its code point, so the folder is asked
+    // for the integer of an integer-like value (D4.3).
+    return const_bits(g, ty, consts.cv_bits(consts.cv_as_int(v)), gen_int_bits(t),
+                      gen_is_signed(t));
+}
+
+// The same constant in its memory form, what a global initializer or a field
+// of one holds: a `bool` is `i8 0` or `i8 1` there rather than the `i1 true`
+// of a value (D19.2).
+fn gen_val gen_const_mem_value(emitter mut* g, types.node* t, consts.cval v) {
+    // The memory type is asked for first, since gen_const_value builds its own
+    // text in the same scratch buffer.
+    string ty = gen_mem_type(g, t);
+    if (v.kind == consts.cval_kind.cv_bool) {
+        // A `bool` in memory is 0 or 1 in an `i8`, never the `i1 true` of a
+        // value (D19.2, D3.3).
+        u64 mut bit = 0;
+        if (v.mag != 0) {
+            bit = 1;
+        }
+        return gen_const_unsigned(g, ty, bit);
+    }
+    gen_val mut out = gen_const_value(g, t, v);
+    out.ty = ty;
+    return out;
+}
+
+// `  %tN = <op> <ty> <a>, <b>`, the shape every arithmetic and bitwise
+// instruction has.
+fn gen_val gen_binary(emitter mut* g, string op, gen_val a, gen_val b) {
+    gen_val r = gen_temp(g, a.ty);
+    strbuf.append(&g->body, op);
+    strbuf.push(&g->body, ' ');
+    strbuf.append(&g->body, a.ty);
+    strbuf.push(&g->body, ' ');
+    strbuf.append(&g->body, a.val);
+    strbuf.append(&g->body, ", ");
+    strbuf.append(&g->body, b.val);
+    strbuf.push(&g->body, '\n');
+    return r;
+}
+
+// `  %tN = icmp <pred> <ty> <a>, <b>`, whose result is `i1`.
+fn gen_val gen_icmp(emitter mut* g, string pred, gen_val a, gen_val b) {
+    gen_val r = gen_temp(g, "i1");
+    strbuf.append(&g->body, "icmp ");
+    strbuf.append(&g->body, pred);
+    strbuf.push(&g->body, ' ');
+    strbuf.append(&g->body, a.ty);
+    strbuf.push(&g->body, ' ');
+    strbuf.append(&g->body, a.val);
+    strbuf.append(&g->body, ", ");
+    strbuf.append(&g->body, b.val);
+    strbuf.push(&g->body, '\n');
+    return r;
+}
+
+// `  %tN = <op> <ty> <a> to <to>`: trunc, zext, sext, ptrtoint, inttoptr
+// (item 12).
+fn gen_val gen_cast_op(emitter mut* g, string op, gen_val a, string to) {
+    gen_val r = gen_temp(g, to);
+    strbuf.append(&g->body, op);
+    strbuf.push(&g->body, ' ');
+    strbuf.append(&g->body, a.ty);
+    strbuf.push(&g->body, ' ');
+    strbuf.append(&g->body, a.val);
+    strbuf.append(&g->body, " to ");
+    strbuf.append(&g->body, to);
+    strbuf.push(&g->body, '\n');
+    return r;
+}
+
+// Narrows or widens `v` from `from` bits to the `to`-bit type `ty`, by
+// `sign`, and emits nothing when the widths already agree (item 9).
+fn gen_val gen_resize(emitter mut* g, gen_val v, u32 from, string ty, u32 to, bool sign) {
+    if (from == to) {
+        // A narrow value is not widened to 32 bits: its width is in its type
+        // (item 9).
+        return v;
+    }
+    if (from > to) {
+        return gen_cast_op(g, "trunc", v, ty);
+    }
+    // Widening reads the source's signedness (item 12).
+    if (sign) {
+        return gen_cast_op(g, "sext", v, ty);
+    }
+    return gen_cast_op(g, "zext", v, ty);
+}
+
+// `  %tN = load <ty>, ptr <addr>, align <n>`.
+fn gen_val gen_load(emitter mut* g, string ty, gen_val addr, u64 align) {
+    gen_val r = gen_temp(g, ty);
+    strbuf.append(&g->body, "load ");
+    strbuf.append(&g->body, ty);
+    strbuf.append(&g->body, ", ptr ");
+    strbuf.append(&g->body, addr.val);
+    // Every load and store carries an explicit alignment (item 5).
+    strbuf.append(&g->body, ", align ");
+    strbuf.append_u64(&g->body, align);
+    strbuf.push(&g->body, '\n');
+    return r;
+}
+
+fn void gen_store(emitter mut* g, gen_val v, gen_val addr, u64 align) {
+    strbuf.append(&g->body, "  store ");
+    strbuf.append(&g->body, v.ty);
+    strbuf.push(&g->body, ' ');
+    strbuf.append(&g->body, v.val);
+    strbuf.append(&g->body, ", ptr ");
+    strbuf.append(&g->body, addr.val);
+    strbuf.append(&g->body, ", align ");
+    strbuf.append_u64(&g->body, align);
+    strbuf.push(&g->body, '\n');
+}
+
+// Whether a place holds a `bool`, which is `i8` in memory and `i1` as a value
+// (D19.2): the one question both gen_load_place and gen_store_place ask.
+fn bool place_is_bool(types.node* t) {
+    return t != null && t->kind == types.type_kind.k_prim && t->prim == prim.prim_kind.prim_bool;
+}
+
+// The scalar value held in a place: a `bool` place is loaded as `i8` and
+// truncated (D19.2).
+fn gen_val gen_load_place(emitter mut* g, gen_place p) {
+    u64 align = types.type_alignof(p.ty);
+    gen_val raw = gen_load(g, gen_mem_type(g, p.ty), p.addr, align);
+    if (place_is_bool(p.ty)) {
+        // Every load of a `bool` place is a `load i8` and a `trunc` (D19.2).
+        return gen_cast_op(g, "trunc", raw, "i1");
+    }
+    return raw;
+}
+
+// Stores a scalar into a place: a `bool` is zero-extended to `i8` (D19.2).
+fn void gen_store_place(emitter mut* g, gen_place p, gen_val v) {
+    u64 align = types.type_alignof(p.ty);
+    gen_val mut out = v;
+    if (place_is_bool(p.ty)) {
+        // Every store of a `bool` place is a `zext` and a `store i8` (D19.2).
+        out = gen_cast_op(g, "zext", v, "i8");
+    }
+    gen_store(g, out, p.addr, align);
+}
+
+// ---- the three getelementptr shapes (item 3) ---------------------------------------
+
+// Opens `  %tN = getelementptr inbounds <ty>, ptr <base>`; `inbounds` is
+// always true, since a bounds check precedes an element access and a field
+// access is in bounds by construction (item 3).
+fn gen_val gep_begin(emitter mut* g, string ty, gen_val base) {
+    gen_val r = gen_temp(g, "ptr");
+    strbuf.append(&g->body, "getelementptr inbounds ");
+    strbuf.append(&g->body, ty);
+    strbuf.append(&g->body, ", ptr ");
+    strbuf.append(&g->body, base.val);
+    return r;
+}
+
+// `getelementptr inbounds <arrty>, ptr <base>, i64 0, i64 <index>`: an
+// element of a fixed array.
+fn gen_val gen_gep_array(emitter mut* g, types.node* array, gen_val base, gen_val index) {
+    // The type text is built before the instruction is opened: gen_mem_type
+    // writes into the same scratch buffer gen_temp does.
+    string ty = gen_mem_type(g, array);
+    gen_val r = gep_begin(g, ty, base);
+    strbuf.append(&g->body, ", i64 0, i64 ");
+    strbuf.append(&g->body, index.val);
+    strbuf.push(&g->body, '\n');
+    return r;
+}
+
+// `getelementptr inbounds <elemty>, ptr <base>, i64 <index>`: an element
+// reached through a pointer or a span's `.ptr`.
+fn gen_val gen_gep_element(emitter mut* g, types.node* elem, gen_val base, gen_val index) {
+    string ty = gen_mem_type(g, elem);
+    gen_val r = gep_begin(g, ty, base);
+    strbuf.append(&g->body, ", i64 ");
+    strbuf.append(&g->body, index.val);
+    strbuf.push(&g->body, '\n');
+    return r;
+}
+
+// `getelementptr inbounds <ty>, ptr <base>, i32 0, i32 <k>`: a field of a
+// struct or a header field of a span.
+fn gen_val gen_gep_field(emitter mut* g, string ty, gen_val base, u64 k) {
+    gen_val r = gep_begin(g, ty, base);
+    strbuf.append(&g->body, ", i32 0, i32 ");
+    strbuf.append_u64(&g->body, k);
+    strbuf.push(&g->body, '\n');
+    return r;
+}
+
+// ---- the span header (item 17) -----------------------------------------------------
+
+// The two header fields of a span or `string` place: field 0 is the pointer
+// and field 1 the length (D3.5, D3.7), so every site that reads or writes one
+// spells the layout once.
+fn gen_val gen_span_ptr(emitter mut* g, gen_val base) {
+    // Field 0 of `%fort.span` is the pointer (D3.5, D19.2).
+    gen_val field = gen_gep_field(g, SPAN_TYPE, base, SPAN_FIELD_PTR);
+    return gen_load(g, "ptr", field, PTR_BYTES);
+}
+
+fn gen_val gen_span_len(emitter mut* g, gen_val base) {
+    // Field 1 is the length, a `u64` (D3.5, D19.2).
+    gen_val field = gen_gep_field(g, SPAN_TYPE, base, SPAN_FIELD_LEN);
+    return gen_load(g, "i64", field, LEN_BYTES);
+}
+
+fn void gen_span_init(emitter mut* g, gen_val base, gen_val ptr, gen_val len) {
+    // The header is written field by field, pointer first (item 17).
+    gen_val pf = gen_gep_field(g, SPAN_TYPE, base, SPAN_FIELD_PTR);
+    gen_store(g, ptr, pf, PTR_BYTES);
+    gen_val lf = gen_gep_field(g, SPAN_TYPE, base, SPAN_FIELD_LEN);
+    gen_store(g, len, lf, LEN_BYTES);
+}
+
+// ---- aggregates (item 3) ----------------------------------------------------------
+
+// `llvm.memcpy` of `size` bytes from `src` to `dst`, the copy of every
+// aggregate (D19.3).
+fn void gen_memcpy(emitter mut* g, gen_val dst, u64 dst_align, gen_val src, u64 src_align,
+                   u64 size) {
+    gen_use_intrinsic(g, IN_MEMCPY);
+    gen_use_attr(g, ATTR_MEMCPY);
+    strbuf.append(&g->body, "  call void @llvm.memcpy.p0.p0.i64(ptr align ");
+    strbuf.append_u64(&g->body, dst_align);
+    strbuf.push(&g->body, ' ');
+    strbuf.append(&g->body, dst.val);
+    strbuf.append(&g->body, ", ptr align ");
+    strbuf.append_u64(&g->body, src_align);
+    strbuf.push(&g->body, ' ');
+    strbuf.append(&g->body, src.val);
+    strbuf.append(&g->body, ", i64 ");
+    strbuf.append_u64(&g->body, size);
+    strbuf.append(&g->body, ", i1 false)\n");
+}
+
+// `llvm.memset` of `size` zero bytes: `{}`, `del` and `move` zero a place.
+fn void gen_memset_zero(emitter mut* g, gen_val dst, u64 align, u64 size) {
+    gen_use_intrinsic(g, IN_MEMSET);
+    gen_use_attr(g, ATTR_MEMSET);
+    strbuf.append(&g->body, "  call void @llvm.memset.p0.i64(ptr align ");
+    strbuf.append_u64(&g->body, align);
+    strbuf.push(&g->body, ' ');
+    strbuf.append(&g->body, dst.val);
+    strbuf.append(&g->body, ", i8 0, i64 ");
+    strbuf.append_u64(&g->body, size);
+    strbuf.append(&g->body, ", i1 false)\n");
+}
+
+// ---- blocks (item 10) -------------------------------------------------------------
+
+// A fresh block label, `%L<N>` in creation order (D19.5). The number is
+// returned; gen_block_begin opens it.
+fn u64 gen_label(emitter mut* g) {
+    // Blocks are `%L<N>` in creation order, the entry block excepted (D19.5).
+    u64 n = g->labels;
+    g->labels += 1;
+    return n;
+}
+
+// Opens the block `L<n>`: a blank line, the label, and a fresh terminator
+// state.
+fn void gen_block_begin(emitter mut* g, u64 n) {
+    strbuf.push(&g->body, '\n');
+    strbuf.push(&g->body, 'L');
+    strbuf.append_u64(&g->body, n);
+    strbuf.append(&g->body, ":\n");
+    g->terminated = false;
+}
+
+fn void gen_br(emitter mut* g, u64 n) {
+    strbuf.append(&g->body, "  br label %L");
+    strbuf.append_u64(&g->body, n);
+    strbuf.push(&g->body, '\n');
+    g->terminated = true;
+}
+
+fn void gen_br_cond(emitter mut* g, gen_val cond, u64 t, u64 f) {
+    strbuf.append(&g->body, "  br i1 ");
+    strbuf.append(&g->body, cond.val);
+    strbuf.append(&g->body, ", label %L");
+    strbuf.append_u64(&g->body, t);
+    strbuf.append(&g->body, ", label %L");
+    strbuf.append_u64(&g->body, f);
+    strbuf.push(&g->body, '\n');
+    g->terminated = true;
+}
+
+// A fort `switch` is one LLVM `switch` on the operand, with one case per
+// label and a default block (item 10). The case list is indented one level
+// further than an instruction, and the `]` that closes it stands where an
+// instruction does, which is how LLVM prints it.
+fn void gen_switch_begin(emitter mut* g, gen_val operand, u64 default_label) {
+    strbuf.append(&g->body, "  switch ");
+    strbuf.append(&g->body, operand.ty);
+    strbuf.push(&g->body, ' ');
+    strbuf.append(&g->body, operand.val);
+    strbuf.append(&g->body, ", label %L");
+    strbuf.append_u64(&g->body, default_label);
+    strbuf.append(&g->body, " [\n");
+}
+
+fn void gen_switch_case(emitter mut* g, gen_val value, u64 label) {
+    strbuf.append(&g->body, "    ");
+    strbuf.append(&g->body, value.ty);
+    strbuf.push(&g->body, ' ');
+    strbuf.append(&g->body, value.val);
+    strbuf.append(&g->body, ", label %L");
+    strbuf.append_u64(&g->body, label);
+    strbuf.push(&g->body, '\n');
+}
+
+fn void gen_switch_end(emitter mut* g) {
+    strbuf.append(&g->body, "  ]\n");
+    g->terminated = true;
+}
+
+// ---- private data (item 5) --------------------------------------------------------
+
+// One record holding `text`, the shape a file name and a string literal take.
+fn record record_new(string text) {
+    return record{text, null, 0, 0};
+}
+
+// `@.<kind>.<n>`, the name of a private datum.
+fn string data_name(emitter mut* g, string kind, u64 n) {
+    strbuf.clear(&g->scratch);
+    strbuf.append(&g->scratch, "@.");
+    strbuf.append(&g->scratch, kind);
+    strbuf.push(&g->scratch, '.');
+    strbuf.append_u64(&g->scratch, n);
+    return gen_take(g);
+}
+
+// `@.file.N` for the file of `at`, assigned on first use, one per file.
+fn string gen_file_ref(emitter mut* g, diag.loc at) {
+    string file = at.file;
+    u64 mut i = 0;
+    while (i < g->files.len) {
+        if (records_at(&g->files, i).text == file) {
+            return data_name(g, "file", i);
+        }
+        i += 1;
+    }
+    // `@.file.N` holds the path exactly as the compiler opened it (D19.5).
+    records_push(&g->files, record_new(containers.pool_intern(&g->pool, file)));
+    return data_name(g, "file", g->files.len - 1);
+}
+
+// `@.str.N` holding `s` with the trailing NUL of D3.7, assigned on first use
+// and never deduplicated by content (D19.5).
+fn string gen_str_ref(emitter mut* g, string s) {
+    // String constants are assigned on first use and never deduplicated by
+    // content (D19.5).
+    records_push(&g->strs, record_new(containers.pool_intern(&g->pool, s)));
+    return data_name(g, "str", g->strs.len - 1);
+}
+
+// The number of members in an enum's table (item 21).
+fn u64 gen_enum_count(ast.sym* e) {
+    if (e == null || e->node == null) {
+        return 0;
+    }
+    u64 mut n = 0;
+    u64 mut i = 0;
+    while (i < ast.ast_len(e->node)) {
+        if (ast.ast_child(e->node, i)->kind == ast.ast_kind.k_enum_member) {
+            n += 1;
+        }
+        i += 1;
+    }
+    return n;
+}
+
+// `@.enum.<path.name>`, the table's name (item 21).
+fn string enum_name(emitter mut* g, ast.sym* e) {
+    // The dotted name is built first: gen_symbol builds its own text in the
+    // same scratch buffer.
+    string dotted = gen_symbol(g, e);
+    strbuf.clear(&g->scratch);
+    strbuf.push(&g->scratch, '@');
+    gen_append_name(&g->scratch, ".enum.", dotted, false);
+    return gen_take(g);
+}
+
+// `@.enum.<path.name>` for the table of an enum some `print` reaches (item
+// 21), which is emitted on first use and once.
+fn string gen_enum_ref(emitter mut* g, ast.sym* e) {
+    u64 mut i = 0;
+    while (i < g->enums.len) {
+        if (records_at(&g->enums, i).sym == e) {
+            return enum_name(g, e);
+        }
+        i += 1;
+    }
+    // A table is emitted only for an enum some `print` of that type reaches
+    // (item 21); its member names are string constants of their own.
+    record mut r = record_new("");
+    r.sym = e;
+    r.first = g->strs.len;
+    r.count = 0;
+    i = 0;
+    while (e->node != null && i < ast.ast_len(e->node)) {
+        ast.node* m = ast.ast_child(e->node, i);
+        if (m->kind == ast.ast_kind.k_enum_member) {
+            gen_str_ref(g, m->name);
+            r.count += 1;
+        }
+        i += 1;
+    }
+    records_push(&g->enums, r);
+    return enum_name(g, e);
+}
+
+// Records an `extern` function so that its declaration is emitted in
+// first-use order, once per C name: two modules may each declare the same
+// function, which is two symbols and one ELF symbol (item 8). One naming a
+// runtime entry point (runtime_sig.rt_entry_of) goes to the runtime group
+// instead, with that group's prototype and attributes, and is left out of the
+// extern group, variadic tail included, so it is called through that
+// prototype too (item 8, D13.1); the checker has already held the declaration
+// against the canonical signature (D9.8).
+fn void gen_use_extern(emitter mut* g, ast.sym* s) {
+    string name = s->name;
+    runtime_sig.rt_entry rt = runtime_sig.rt_entry_of(name);
+    if (rt != runtime_sig.rt_entry.rt_none) {
+        // An `extern fn` naming a runtime entry point is declared in the
+        // runtime group with that group's prototype, once (item 8).
+        gen_use_rt(g, rt);
+        return;
+    }
+    u64 mut i = 0;
+    while (i < g->externs.len) {
+        // A symbol is declared exactly once (item 8), and what the linker
+        // sees is the C name: two modules of one program may each declare the
+        // same function, which is two records and one ELF symbol.
+        if (syms_at(&g->externs, i)->name == name) {
+            return;
+        }
+        i += 1;
+    }
+    syms_push(&g->externs, s);
+}
+
+// ---- calls to the runtime (item 8) ------------------------------------------------
+
+// Marks an entry point used, and its attribute group with it: a `_Noreturn`
+// entry point is declared `cold noreturn nounwind` (item 14, section 5.1).
+// The C indexes `g->rt` at each of its three call sites; one function here
+// keeps the attribute from being forgotten at a fourth.
+fn void gen_use_rt(emitter mut* g, runtime_sig.rt_entry rt) {
+    g->rt[cast(cast(rt, i32), u64)] = true;
+    if (runtime_sig.rt_entry_noreturn(rt)) {
+        gen_use_attr(g, ATTR_FAIL);
+    }
+}
+
+// Whether an entry point is one the module refers to, which is what decides
+// its declaration (item 8).
+fn bool gen_uses_rt(emitter* g, runtime_sig.rt_entry rt) {
+    return g->rt[cast(cast(rt, i32), u64)];
+}
+
+// Marks an entry point used and appends `@fort_rt_x(<args>)`.
+fn void call_rt_tail(emitter mut* g, runtime_sig.rt_entry rt, gen_args* args) {
+    gen_use_rt(g, rt);
+    gen_text_append(g, "@");
+    gen_text_append(g, runtime_sig.rt_entry_name(rt));
+    gen_text_append(g, "(");
+    gen_text_append(g, gen_args_text(args));
+    gen_text_append(g, ")");
+    gen_ins_end(g);
+}
+
+// A call to a runtime entry point, which is declared on first use (item 8);
+// this form emits no result.
+fn void gen_call_rt(emitter mut* g, runtime_sig.rt_entry rt, gen_args* args) {
+    gen_ins(g);
+    gen_text_append(g, "call ");
+    gen_text_append(g, runtime_sig.ir_result_text(runtime_sig.rt_entry_result(rt)));
+    gen_text_append(g, " ");
+    call_rt_tail(g, rt, args);
+}
+
+// The same, naming the result.
+fn gen_val gen_call_rt_value(emitter mut* g, runtime_sig.rt_entry rt, string ret,
+                             gen_args* args) {
+    gen_val r = gen_temp(g, ret);
+    gen_text_append(g, "call ");
+    gen_text_append(g, runtime_sig.ir_result_text(runtime_sig.rt_entry_result(rt)));
+    gen_text_append(g, " ");
+    call_rt_tail(g, rt, args);
+    return r;
+}
+
+// ---- checks and failure blocks (item 14, D19.6) -----------------------------------
+
+// The `ptr @.file.N, i32 <line>, i32 <col>` every runtime failure takes: the
+// position of D11.4, which is the operator's token (toolchain.md 4).
+fn void gen_args_add_loc(emitter mut* g, gen_args mut* args, diag.loc at) {
+    // Each failure call carries the file constant and the line and column of
+    // D11.4's position rule (item 14).
+    string file = gen_file_ref(g, at);
+    gen_args_add(args, gen_literal(g, "ptr", file));
+    gen_args_add(args, gen_const_unsigned(g, "i32", cast(at.line, u64)));
+    gen_args_add(args, gen_const_unsigned(g, "i32", cast(at.col, u64)));
+}
+
+// One failure block: the call to the entry point and `unreachable`, and
+// nothing else, because the callee aborts (item 14). It is written to the
+// function's failure buffer, which is appended after every normal block.
+fn void fail_block(emitter mut* g, u64 label, runtime_sig.rt_entry rt, gen_args* args) {
+    // A failure block is built in the same shape as a normal one, so it is
+    // written through the body buffer and moved afterwards.
+    u64 mark = strbuf.view(&g->body).len;
+    gen_block_begin(g, label);
+    gen_call_rt(g, rt, args);
+    strbuf.append(&g->body, "  unreachable\n");
+    strbuf.append(&g->fail, strbuf.view(&g->body)[mark..]);
+    strbuf.truncate(&g->body, mark);
+}
+
+// The zero value of an owning place: `store ptr null` for a pointer or
+// `void*`, a `llvm.memset` of the whole value for a span, a `string` or an
+// owning aggregate. It is what `move`, the implicit move of a `return` and
+// `del` leave behind, and it is not an assignment, so it never carries the
+// overwrite check of D17.11 (item 18, D17.6, D17.9).
+fn void gen_zero_owner(emitter mut* g, gen_place p) {
+    if (gen_is_aggregate(p.ty)) {
+        // A span, a `string` or an owning aggregate is zeroed whole (D17.6).
+        gen_memset_zero(g, p.addr, types.type_alignof(p.ty), types.type_sizeof(p.ty));
+        return;
+    }
+    // The zero value of a pointer or a `void*` is `null` (D17.6).
+    gen_store_place(g, p, gen_literal(g, "ptr", "null"));
+}
+
+// The check of D19.6: the continuation label is allocated before the failure
+// label, and the failure block holds one call to `rt` and `unreachable` and
+// is emitted after every normal block. `fail_when` is true for every check,
+// whose `i1` is true on failure and whose branch names the failure block
+// first, and false for `assert` alone, whose operand is already the success
+// condition (D12.2). The caller adds the check's own values to `args`; the
+// location of D11.4 is appended here.
+fn void gen_check(emitter mut* g, gen_val cond, bool fail_when, runtime_sig.rt_entry rt,
+                  gen_args mut* args, diag.loc at) {
+    // The continuation label is allocated before the failure label (D19.6).
+    u64 cont = gen_label(g);
+    u64 bad = gen_label(g);
+    // Every check computes one `i1` that is true on failure and branches with
+    // the failure label first; `assert` is the exception, since its operand is
+    // already the success condition (D19.6, D12.2).
+    if (fail_when) {
+        gen_br_cond(g, cond, bad, cont);
+    } else {
+        gen_br_cond(g, cond, cont, bad);
+    }
+    gen_args_add_loc(g, args, at);
+    fail_block(g, bad, rt, args);
+    gen_block_begin(g, cont);
+}
+
+// One failure block of D19.6 that no check's branch reaches: the default of a
+// `switch` over an enum with no `default` clause arrives by the switch's own
+// default edge (D7.7). The caller allocated `label`; the block holds one call
+// to `rt` and `unreachable` like every other, the location of D11.4 is
+// appended to `args` here, and it is written to the failure buffer, so the
+// caller emits it while its label is still the smallest one outstanding.
+fn void gen_fail_block(emitter mut* g, u64 label, runtime_sig.rt_entry rt, gen_args mut* args,
+                       diag.loc at) {
+    gen_args_add_loc(g, args, at);
+    fail_block(g, label, rt, args);
+}
+
+// Marks an intrinsic or an attribute group used, so that only referenced
+// declarations are emitted (item 8, D19.5).
+fn void gen_use_intrinsic(emitter mut* g, u64 which) {
+    g->intrinsics[which] = true;
+}
+
+fn void gen_use_attr(emitter mut* g, u64 which) {
+    g->attrs[which] = true;
+}
+
+// Whether an intrinsic or an attribute group is one the module refers to.
+fn bool gen_uses_intrinsic(emitter* g, u64 which) {
+    return g->intrinsics[which];
+}
+
+fn bool gen_uses_attr(emitter* g, u64 which) {
+    return g->attrs[which];
+}
+
+// ---- slots (item 10) --------------------------------------------------------------
+
+// The name of a local's or a parameter's storage, under the spelling D19.5
+// gives it.
+fn string slot_name(emitter mut* g, ast.sym* s, u64 at, bool incoming) {
+    strbuf.clear(&g->scratch);
+    strbuf.push(&g->scratch, '%');
+    strbuf.append(&g->scratch, s->name);
+    strbuf.push(&g->scratch, '.');
+    if (incoming) {
+        // A parameter arrives as `%<ident>.in` (D19.5).
+        strbuf.append(&g->scratch, "in");
+    } else {
+        strbuf.append_u64(&g->scratch, at);
+    }
+    return gen_take(g);
+}
+
+// Records the place of a local or parameter.
+fn void slot_add(emitter mut* g, ast.sym* s, string name) {
+    slots_push(&g->slots, slot{s, name});
+}
+
+// The place of a local or parameter, whose storage gen_function made. A
+// symbol with no slot is a broken precondition and panics (D13.3), where
+// src/bootstrap/gen.c calls fatal_internal.
+fn gen_place gen_slot_place(emitter mut* g, ast.sym* s) {
+    gen_place mut p = gen_place{};
+    p.addr.ty = "ptr";
+    p.addr.val = "";
+    if (s != null) {
+        p.ty = s->ty;
+    }
+    u64 mut i = 0;
+    while (i < g->slots.len) {
+        if (g->slots.items[i].sym == s) {
+            p.addr.val = g->slots.items[i].name;
+            return p;
+        }
+        i += 1;
+    }
+    panic("gen.gen_slot_place: a local with no slot");
+}
+
+// The same, for a place with no fort type: the `i64` counter of a range
+// `for`, whose memory type and alignment are given directly (D19.5).
+fn gen_place gen_temp_place_raw(emitter mut* g, string mem_type, u64 align) {
+    // A place the compiler invents is `%tmp<K>` from a third counter, and
+    // never contains a dot, so it cannot collide with a local (D19.5).
+    strbuf.clear(&g->scratch);
+    strbuf.append(&g->scratch, "%tmp");
+    strbuf.append_u64(&g->scratch, g->tmps);
+    g->tmps += 1;
+    gen_place mut p = gen_place{};
+    p.addr.ty = "ptr";
+    p.addr.val = gen_take(g);
+    p.ty = null;
+    // Every compiler temporary is an alloca in the entry block (D19.4).
+    strbuf.append(&g->allocas, "  ");
+    strbuf.append(&g->allocas, p.addr.val);
+    strbuf.append(&g->allocas, " = alloca ");
+    strbuf.append(&g->allocas, mem_type);
+    strbuf.append(&g->allocas, ", align ");
+    strbuf.append_u64(&g->allocas, align);
+    strbuf.push(&g->allocas, '\n');
+    return p;
+}
+
+// A place the compiler invents, `%tmp<K>` from its own counter (D19.5), for
+// an aggregate argument copy or a short-circuit slot.
+fn gen_place gen_temp_place(emitter mut* g, types.node* t) {
+    gen_place mut p = gen_temp_place_raw(g, gen_mem_type(g, t), types.type_alignof(t));
+    p.ty = t;
+    return p;
+}

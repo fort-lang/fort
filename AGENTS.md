@@ -1068,6 +1068,25 @@ A safe(r) C-like systems programming language.
     in `src/fort` (D13.3), a panic ends the program (D11.4), and a `test/fort` test cannot fork,
     so each broken precondition is a `<module>_<case>_panic_test.ft` that prints one line, calls
     the site and carries the message in a `//! stderr:` directive.
+  - **`fort -S` run by stage1 is the oracle for the emitter port** (T-037). The IR of a program
+    is a function of the program alone (D19.5), so the expected text of a fort emitter test is
+    read off stage1's own output over a program whose body the test writes, and never
+    transcribed from the fort under test. One mechanical step makes the two comparable: a suite
+    that drives one expression at a time renumbers `%tN` and `%LN` from zero, which is what the
+    emitter produces when the expression is a function's first, so a probe body puts only
+    integer-constant declarations before the expression under test (a `bool` or a `string`
+    initializer emits instructions and shifts the numbering). It earns its keep: the port and
+    the reading of D10.2 disagreed about whether `new(T, 3)` checks its literal count, and the
+    oracle said the emitter was right.
+  - **The C emitter's four files are one dependency cycle, so the fort port is layered and not
+    cut where the C is.** `gen.c` calls `gen_data.c` (`gen_file_ref`, `gen_call_rt`,
+    `gen_append_name`) and `gen_stmt.c` (`gen_block_scoped`), and both call back, which no set of
+    fort modules can express (D9.5). `src/fort/gen.ft` is therefore gen.c's primitives together
+    with gen_data.c's private data, name spelling and runtime calls -- what the checks of D19.6
+    need -- `gen_expr.ft` sits above it, and gen.c's function definitions (`gen_function`,
+    `gen_fort_entry`, `gen_module`, `gen_program`) belong with the statements and the module
+    assembly they call. Every function keeps its C name, so the two emitters are still read side
+    by side name by name.
 - **What checks `.ft` source, and what does not** (T-076). Three things do. `tools/fort_lint.py`
   (ctest `fort_lint`, target `fort-lint`) holds `std/*.ft` and `src/fort/*.ft` to the identifier
   conventions of D1.4 and to 100 columns; it reads `fort --index` (D20.3) rather than tokenizing

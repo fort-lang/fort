@@ -1,0 +1,519 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| shapes ok
+//| blocks ok
+//| data ok
+//| slots ok
+//| ok
+import ast;
+import diag;
+import gen;
+import gen_env;
+import runtime_sig;
+import std.strbuf;
+import types;
+
+// The instruction shapes of src/fort/gen.ft that carry a rule of their own:
+// the three getelementptr forms of item 3, the span header of item 17, the
+// aggregate copies of D19.3, the blocks and the `switch` of item 10, the
+// checks and failure blocks of D19.6, the private data of item 5, the calls
+// to the runtime of item 8 and the slots of item 10.
+//
+// Each is held against the text src/bootstrap/gen.c writes. A block structure
+// is asserted as text here rather than through `opt -passes=verify`, which
+// this ticket cannot run -- a module with no function definition in it is not
+// a module LLVM would accept -- and which would not answer anyway: `opt`
+// accepts an instruction after a terminator and a call whose arguments
+// disagree with its callee (AGENTS.md).
+
+// The module the assertions below read their types and symbols out of.
+fn bool open_shapes(gen_env.env mut* e) {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "struct point {\n    i32 x;\n    i32 y;\n}\n");
+    strbuf.append(&b, "enum color {\n    red,\n    green,\n    blue,\n}\n");
+    strbuf.append(&b, "extern fn i32 puts(char* s);\n");
+    strbuf.append(&b, "extern fn void fort_rt_flush(i32 fd);\n");
+    strbuf.append(&b, "fn i32 main() {\n");
+    strbuf.append(&b, "    i32[3] mut v_arr = {1, 2, 3};\n");
+    strbuf.append(&b, "    i32 mut@ v_span = v_arr[..];\n");
+    strbuf.append(&b, "    point mut v_point = point{1, 2};\n");
+    strbuf.append(&b, "    string mut v_str = \"hi\";\n");
+    strbuf.append(&b, "    i32 mut* mut v_ptr = &v_arr[0];\n");
+    strbuf.append(&b, "    color mut v_color = color.red;\n");
+    strbuf.append(&b, "    return 0;\n}\n");
+    return gen_env.open_src(e, strbuf.view(&b));
+}
+
+fn gen.gen_val operand(string ty, string val) {
+    return gen.gen_val{ty, val};
+}
+
+fn gen.gen_val ptr_to(string val) {
+    return gen.gen_val{"ptr", val};
+}
+
+// ---- item 3: the three getelementptr shapes -----------------------------------------
+
+fn void an_array_element_is_reached_with_two_indices() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_shapes(&e));
+    gen_env.begin(&e);
+    // Item 3: the array shape names the array type and leads with `i64 0`.
+    gen.gen_gep_array(&e.g, gen_env.type_of(&e, "v_arr"), ptr_to("%v_arr.0"),
+                      operand("i64", "%i"));
+    gen_env.expect_text(gen_env.body(&e),
+                        "  %t0 = getelementptr inbounds [3 x i32], ptr %v_arr.0, i64 0, i64 %i\n");
+}
+
+fn void an_element_behind_a_pointer_is_reached_with_one() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_shapes(&e));
+    gen_env.begin(&e);
+    // Item 3: the element shape names the element type.
+    types.node* span_type = gen_env.type_of(&e, "v_span");
+    gen.gen_gep_element(&e.g, span_type->elem, ptr_to("%p"), operand("i64", "%i"));
+    gen_env.expect_text(gen_env.body(&e),
+                        "  %t0 = getelementptr inbounds i32, ptr %p, i64 %i\n");
+}
+
+fn void a_field_is_reached_with_two_i32_indices() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_shapes(&e));
+    gen_env.begin(&e);
+    // Item 3: a field access is in bounds by construction, so `inbounds`
+    // stands here as it does everywhere.
+    gen.gen_gep_field(&e.g, gen.gen_mem_type(&e.g, gen_env.type_of(&e, "v_point")),
+                      ptr_to("%v_point.0"), 1);
+    gen_env.expect_text(
+        gen_env.body(&e),
+        "  %t0 = getelementptr inbounds %struct.main.point, ptr %v_point.0, i32 0, i32 1\n");
+}
+
+// ---- item 17: the span header --------------------------------------------------------
+
+fn void the_pointer_is_field_zero_and_the_length_field_one() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    // D3.5, D3.7: one layout, spelled once, for every span and every
+    // `string`.
+    gen.gen_span_ptr(&e.g, ptr_to("%s.0"));
+    gen.gen_span_len(&e.g, ptr_to("%s.0"));
+    gen_env.expect_text(
+        gen_env.body(&e),
+        gen_env.join4(&e,
+                      "  %t0 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 0\n",
+                      "  %t1 = load ptr, ptr %t0, align 8\n",
+                      "  %t2 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 1\n",
+                      "  %t3 = load i64, ptr %t2, align 8\n"));
+}
+
+fn void a_header_is_written_pointer_first() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    // Item 17: field by field, and in that order, so the text is a function
+    // of the program alone (D19.5).
+    gen.gen_span_init(&e.g, ptr_to("%s.0"), ptr_to("%p"), operand("i64", "7"));
+    gen_env.expect_text(
+        gen_env.body(&e),
+        gen_env.join4(&e,
+                      "  %t0 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 0\n",
+                      "  store ptr %p, ptr %t0, align 8\n",
+                      "  %t1 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 1\n",
+                      "  store i64 7, ptr %t1, align 8\n"));
+}
+
+// ---- D19.3: the aggregate copies ------------------------------------------------------
+
+fn void an_aggregate_is_copied_with_a_memcpy_of_its_own_size() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    // A struct of two `i32` is eight bytes aligned to four, and a span is
+    // sixteen aligned to eight: the two sizes are written down, since an
+    // assertion about an aggregate convention covers one size unless a second
+    // is (AGENTS.md).
+    gen.gen_memcpy(&e.g, ptr_to("%d"), 4, ptr_to("%s"), 4, 8);
+    gen.gen_memcpy(&e.g, ptr_to("%d2"), 8, ptr_to("%s2"), 8, 16);
+    gen_env.expect_text(
+        gen_env.body(&e),
+        gen_env.join4(&e, "  call void @llvm.memcpy.p0.p0.i64(ptr align 4 %d, ",
+                      "ptr align 4 %s, i64 8, i1 false)\n",
+                      "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %d2, ",
+                      "ptr align 8 %s2, i64 16, i1 false)\n"));
+    // Only referenced declarations are emitted, so the use is recorded (item
+    // 8, D19.5).
+    assert(gen.gen_uses_intrinsic(&e.g, gen.IN_MEMCPY));
+    assert(gen.gen_uses_attr(&e.g, gen.ATTR_MEMCPY));
+    assert(!gen.gen_uses_intrinsic(&e.g, gen.IN_MEMSET));
+}
+
+fn void a_place_is_zeroed_with_a_memset() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    gen.gen_memset_zero(&e.g, ptr_to("%d"), 8, 16);
+    gen_env.expect_text(
+        gen_env.body(&e),
+        "  call void @llvm.memset.p0.i64(ptr align 8 %d, i8 0, i64 16, i1 false)\n");
+    assert(gen.gen_uses_intrinsic(&e.g, gen.IN_MEMSET));
+    assert(gen.gen_uses_attr(&e.g, gen.ATTR_MEMSET));
+}
+
+fn void the_zero_value_of_an_owner_is_null_or_a_memset() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_shapes(&e));
+    gen_env.begin(&e);
+    // D17.6: a pointer is emptied with `store ptr null` and an aggregate
+    // whole, and neither is an assignment, so neither carries the overwrite
+    // check of D17.11 (item 18).
+    gen.gen_zero_owner(&e.g, gen.gen_place{ptr_to("%p.0"), gen_env.type_of(&e, "v_ptr")});
+    gen_env.expect_text(gen_env.body(&e), "  store ptr null, ptr %p.0, align 8\n");
+    gen_env.begin(&e);
+    gen.gen_zero_owner(&e.g, gen.gen_place{ptr_to("%s.0"), gen_env.type_of(&e, "v_str")});
+    gen_env.expect_text(
+        gen_env.body(&e),
+        "  call void @llvm.memset.p0.i64(ptr align 8 %s.0, i8 0, i64 16, i1 false)\n");
+}
+
+// ---- item 10: blocks -----------------------------------------------------------------
+
+fn void blocks_are_numbered_in_creation_order() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    // D19.5: `%L<N>` in creation order, the entry block excepted, and the
+    // counter is per function.
+    assert(gen.gen_label(&e.g) == 0);
+    assert(gen.gen_label(&e.g) == 1);
+    gen_env.begin(&e);
+    assert(gen.gen_label(&e.g) == 0);
+}
+
+fn void a_branch_terminates_the_block_and_a_label_opens_a_fresh_one() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(!e.g.terminated);
+    gen.gen_br(&e.g, 1);
+    // The emitter's own record of item 10's rule: nothing may be written
+    // after a terminator, which `opt` does not reject (AGENTS.md).
+    assert(e.g.terminated);
+    gen.gen_block_begin(&e.g, 1);
+    assert(!e.g.terminated);
+    gen.gen_br_cond(&e.g, operand("i1", "%c"), 2, 3);
+    assert(e.g.terminated);
+    gen_env.expect_text(gen_env.body(&e),
+                        gen_env.join3(&e, "  br label %L1\n", "\nL1:\n",
+                                      "  br i1 %c, label %L2, label %L3\n"));
+}
+
+fn void a_switch_is_one_terminator_written_over_several_lines() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    // Item 10: the case list is indented one level further than an
+    // instruction and the `]` stands where an instruction does.
+    gen.gen_switch_begin(&e.g, operand("i32", "%v"), 9);
+    assert(!e.g.terminated);
+    gen.gen_switch_case(&e.g, operand("i32", "0"), 1);
+    gen.gen_switch_case(&e.g, operand("i32", "1"), 2);
+    gen.gen_switch_end(&e.g);
+    assert(e.g.terminated);
+    gen_env.expect_text(gen_env.body(&e),
+                        gen_env.join4(&e, "  switch i32 %v, label %L9 [\n",
+                                      "    i32 0, label %L1\n", "    i32 1, label %L2\n",
+                                      "  ]\n"));
+}
+
+// ---- D19.6: the checks and their failure blocks ----------------------------------------
+
+fn void a_check_allocates_its_continuation_before_its_failure_block() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    gen.gen_args mut args = gen.gen_args_init();
+    defer gen.gen_args_free(&args);
+    gen.gen_args_add(&args, operand("i64", "%i"));
+    gen.gen_check(&e.g, operand("i1", "%bad"), true, runtime_sig.rt_entry.rt_fail_bounds, &args,
+                  where_at());
+    // D19.6: the continuation is allocated first, so the branch names the
+    // failure block second and the numbering of a nest of checks is stable.
+    gen_env.expect_text(gen_env.body(&e),
+                        gen_env.join2(&e, "  br i1 %bad, label %L1, label %L0\n", "\nL0:\n"));
+    // The failure block is held apart and emitted after every normal block.
+    gen_env.expect_text(
+        gen_env.fail(&e),
+        gen_env.join3(&e, "\nL1:\n",
+                      "  call void @fort_rt_fail_bounds(i64 %i, ptr @.file.0, i32 7, i32 3)\n",
+                      "  unreachable\n"));
+    // Item 14: a `_Noreturn` entry point carries the `cold noreturn nounwind`
+    // group.
+    assert(gen.gen_uses_rt(&e.g, runtime_sig.rt_entry.rt_fail_bounds));
+    assert(gen.gen_uses_attr(&e.g, gen.ATTR_FAIL));
+}
+
+fn void assert_branches_the_other_way_because_its_operand_is_the_success() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    gen.gen_args mut args = gen.gen_args_init();
+    defer gen.gen_args_free(&args);
+    // D12.2: `assert`'s operand is already the success condition, so the
+    // continuation comes first in the branch.
+    gen.gen_check(&e.g, operand("i1", "%ok"), false, runtime_sig.rt_entry.rt_assert_fail, &args,
+                  where_at());
+    gen_env.expect_text(gen_env.body(&e),
+                        gen_env.join2(&e, "  br i1 %ok, label %L0, label %L1\n", "\nL0:\n"));
+}
+
+fn void a_failure_block_no_branch_reaches_is_written_the_same_way() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    // D7.7: the default of a `switch` over an enum with no `default` clause
+    // arrives by the switch's own default edge, so the block is emitted with
+    // no branch of its own.
+    u64 label = gen.gen_label(&e.g);
+    gen.gen_args mut args = gen.gen_args_init();
+    defer gen.gen_args_free(&args);
+    gen.gen_args_add(&args, operand("i32", "%v"));
+    gen.gen_fail_block(&e.g, label, runtime_sig.rt_entry.rt_fail_enum, &args, where_at());
+    gen_env.expect_text(gen_env.body(&e), "");
+    gen_env.expect_text(
+        gen_env.fail(&e),
+        gen_env.join3(&e, "\nL0:\n",
+                      "  call void @fort_rt_fail_enum(i32 %v, ptr @.file.0, i32 7, i32 3)\n",
+                      "  unreachable\n"));
+}
+
+// ---- item 5: the private data ----------------------------------------------------------
+
+// The position every failure call carries, which is the operator's token
+// (D11.4, toolchain.md 4).
+fn diag.loc where_at() {
+    return diag.loc_make("probe.ft", 7, 3);
+}
+
+fn void a_file_is_numbered_once_however_often_it_is_named() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    // D19.5: `@.file.N` holds the path exactly as the compiler opened it, one
+    // per file, assigned on first use.
+    gen_env.expect_text(gen.gen_file_ref(&e.g, diag.loc_make("a.ft", 1, 1)), "@.file.0");
+    gen_env.expect_text(gen.gen_file_ref(&e.g, diag.loc_make("b.ft", 9, 4)), "@.file.1");
+    gen_env.expect_text(gen.gen_file_ref(&e.g, diag.loc_make("a.ft", 2, 2)), "@.file.0");
+    assert(e.g.files.len == 2);
+}
+
+fn void a_string_constant_is_never_deduplicated_by_content() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    // D19.5: two equal strings are two constants, so the numbering depends on
+    // the order of use alone and not on what the bytes are.
+    gen_env.expect_text(gen.gen_str_ref(&e.g, "hi"), "@.str.0");
+    gen_env.expect_text(gen.gen_str_ref(&e.g, "hi"), "@.str.1");
+    assert(e.g.strs.len == 2);
+}
+
+fn void an_enum_table_is_emitted_once_with_a_string_per_member() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_shapes(&e));
+    ast.sym* color = gen_env.sym_main(&e, "color");
+    // Item 21: a table stands for an enum some `print` of that type reaches,
+    // and its member names are string constants of their own.
+    assert(gen.gen_enum_count(color) == 3);
+    assert(gen.gen_enum_count(null) == 0);
+    gen_env.expect_text(gen.gen_enum_ref(&e.g, color), "@.enum.main.color");
+    assert(e.g.enums.len == 1);
+    assert(e.g.strs.len == 3);
+    // A second use adds nothing: the member strings are not numbered twice.
+    gen_env.expect_text(gen.gen_enum_ref(&e.g, color), "@.enum.main.color");
+    assert(e.g.enums.len == 1);
+    assert(e.g.strs.len == 3);
+}
+
+fn void an_extern_is_recorded_once_per_c_name() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_shapes(&e));
+    // Item 8: what the linker sees is the C name, so two symbols of one name
+    // are one declaration. A second module's `puts` is the same ELF symbol.
+    gen.gen_use_extern(&e.g, gen_env.sym_main(&e, "puts"));
+    assert(e.g.externs.len == 1);
+    gen.gen_use_extern(&e.g, gen_env.sym_main(&e, "puts"));
+    assert(e.g.externs.len == 1);
+    // An `extern fn` naming a runtime entry point goes to the runtime group
+    // with that group's prototype instead, and is left out of the extern
+    // group (item 8, D13.1).
+    gen.gen_use_extern(&e.g, gen_env.sym_main(&e, "fort_rt_flush"));
+    assert(e.g.externs.len == 1);
+    assert(gen.gen_uses_rt(&e.g, runtime_sig.rt_entry.rt_flush));
+    // `fort_rt_flush` is not `_Noreturn`, so it asks for no attribute group.
+    assert(!gen.gen_uses_attr(&e.g, gen.ATTR_FAIL));
+}
+
+// ---- item 8: the calls to the runtime ---------------------------------------------------
+
+fn void a_runtime_call_names_the_result_of_its_row() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    gen.gen_args mut args = gen.gen_args_init();
+    defer gen.gen_args_free(&args);
+    gen.gen_args_add(&args, ptr_to("%p"));
+    gen.gen_call_rt(&e.g, runtime_sig.rt_entry.rt_del, &args);
+    // The result text comes from the row of runtime_sig.ft and from nowhere
+    // else, so the call site and the declaration cannot disagree (item 8).
+    gen_env.expect_text(gen_env.body(&e), "  call void @fort_rt_del(ptr %p)\n");
+    assert(gen.gen_uses_rt(&e.g, runtime_sig.rt_entry.rt_del));
+}
+
+fn void a_runtime_call_with_a_value_names_a_temporary() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    gen.gen_args mut args = gen.gen_args_init();
+    defer gen.gen_args_free(&args);
+    gen.gen_args_add(&args, operand("i64", "8"));
+    gen.gen_args_add(&args, operand("i64", "%n"));
+    gen.gen_args_add_loc(&e.g, &args, where_at());
+    gen.gen_val r = gen.gen_call_rt_value(&e.g, runtime_sig.rt_entry.rt_new, "ptr", &args);
+    gen_env.expect_text(r.val, "%t0");
+    // Item 14: the file constant and the line and column of D11.4 close every
+    // failure-capable call.
+    gen_env.expect_text(
+        gen_env.body(&e),
+        "  %t0 = call ptr @fort_rt_new(i64 8, i64 %n, ptr @.file.0, i32 7, i32 3)\n");
+}
+
+fn void an_argument_carries_its_extension_attribute_between_type_and_value() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    gen.gen_args mut args = gen.gen_args_init();
+    defer gen.gen_args_free(&args);
+    // Item 7: `i8 zeroext 10`, the attribute between the type and the value.
+    gen.gen_args_add(&args, operand("i32", "1"));
+    gen.gen_args_add_ext(&args, operand("i8", "10"), "zeroext");
+    gen.gen_args_add_ext(&args, operand("i8", "%c"), "");
+    gen_env.expect_text(gen.gen_args_text(&args), "i32 1, i8 zeroext 10, i8 %c");
+    assert(args.count == 3);
+}
+
+// ---- item 10: slots and compiler temporaries ---------------------------------------------
+
+fn void a_local_is_named_after_itself_and_its_position() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_shapes(&e));
+    // D19.5: `%<ident>.<k>`, so two locals of one name in two scopes are two
+    // storages, and the place of a local is the slot gen_function made.
+    gen.gen_place p = gen_env.place_of(&e, "v_arr");
+    gen_env.expect_text(p.addr.val, "%v_arr.0");
+    gen_env.expect_text(p.addr.ty, "ptr");
+    gen_env.expect_text(gen_env.place_of(&e, "v_span").addr.val, "%v_span.1");
+    // The place carries the declaration's own type: a place is storage, not
+    // the expression that reached it.
+    assert(p.ty == gen_env.type_of(&e, "v_arr"));
+}
+
+fn void a_parameter_arrives_under_its_incoming_name() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_shapes(&e));
+    ast.sym* s = gen_env.sym_main(&e, "main");
+    // Item 10: an aggregate parameter's place is the caller-made copy the
+    // incoming pointer designates, so its name is `%<ident>.in`; a scalar
+    // one is stored into a slot of its own.
+    gen_env.expect_text(gen.slot_name(&e.g, s, 2, false), "%main.2");
+    gen_env.expect_text(gen.slot_name(&e.g, s, 0, true), "%main.in");
+}
+
+fn void a_compiler_temporary_is_an_alloca_in_the_entry_block() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_shapes(&e));
+    gen_env.begin(&e);
+    // D19.4, D19.5: `%tmp<K>` from a counter of its own, which never holds a
+    // dot and so cannot collide with a local, and its storage is an entry
+    // block alloca.
+    gen.gen_place a = gen.gen_temp_place(&e.g, gen_env.type_of(&e, "v_point"));
+    gen.gen_place b = gen.gen_temp_place_raw(&e.g, "i64", 8);
+    gen_env.expect_text(a.addr.val, "%tmp0");
+    gen_env.expect_text(b.addr.val, "%tmp1");
+    assert(a.ty == gen_env.type_of(&e, "v_point"));
+    assert(b.ty == null);
+    gen_env.expect_text(gen_env.allocas(&e),
+                        gen_env.join2(&e, "  %tmp0 = alloca %struct.main.point, align 4\n",
+                                      "  %tmp1 = alloca i64, align 8\n"));
+    // Nothing of it reaches the body: an alloca stands in the entry block
+    // whatever the block being written is (D19.4).
+    gen_env.expect_text(gen_env.body(&e), "");
+}
+
+fn void an_unlowered_construct_is_a_diagnostic_and_never_wrong_code() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(!e.g.failed);
+    gen.gen_todo(&e.g, where_at(), "this expression");
+    // The emitter reports and fails the module rather than writing something
+    // it cannot justify.
+    assert(e.g.failed);
+    assert(gen_env.said(&e, "cannot generate code yet for this expression"));
+    assert(gen_env.errors(&e) == 1);
+}
+
+fn i32 main() {
+    an_array_element_is_reached_with_two_indices();
+    an_element_behind_a_pointer_is_reached_with_one();
+    a_field_is_reached_with_two_i32_indices();
+    the_pointer_is_field_zero_and_the_length_field_one();
+    a_header_is_written_pointer_first();
+    an_aggregate_is_copied_with_a_memcpy_of_its_own_size();
+    a_place_is_zeroed_with_a_memset();
+    the_zero_value_of_an_owner_is_null_or_a_memset();
+    println("shapes ok");
+    blocks_are_numbered_in_creation_order();
+    a_branch_terminates_the_block_and_a_label_opens_a_fresh_one();
+    a_switch_is_one_terminator_written_over_several_lines();
+    a_check_allocates_its_continuation_before_its_failure_block();
+    assert_branches_the_other_way_because_its_operand_is_the_success();
+    a_failure_block_no_branch_reaches_is_written_the_same_way();
+    println("blocks ok");
+    a_file_is_numbered_once_however_often_it_is_named();
+    a_string_constant_is_never_deduplicated_by_content();
+    an_enum_table_is_emitted_once_with_a_string_per_member();
+    an_extern_is_recorded_once_per_c_name();
+    a_runtime_call_names_the_result_of_its_row();
+    a_runtime_call_with_a_value_names_a_temporary();
+    an_argument_carries_its_extension_attribute_between_type_and_value();
+    println("data ok");
+    a_local_is_named_after_itself_and_its_position();
+    a_parameter_arrives_under_its_incoming_name();
+    a_compiler_temporary_is_an_alloca_in_the_entry_block();
+    an_unlowered_construct_is_a_diagnostic_and_never_wrong_code();
+    println("slots ok");
+    println("ok");
+    return 0;
+}

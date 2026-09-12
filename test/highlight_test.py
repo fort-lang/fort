@@ -62,14 +62,12 @@ CORPUS_DIRS = (
 # that adds or removes a `.ft` under CORPUS_DIRS reads the new number off the
 # failure and writes it here, as it does for CORPUS_FILES in
 # test/parser_recovery_test.c and FT_FILES in tools/diff_tokens.sh.
-CORPUS_FILES = 454
-# The `.ft` of the repository that are deliberately outside the corpus.
-# test/lang/fail is the corpus of programs the compiler must reject and
-# test/highlight/scopes.ft carries the errors the fixture test enumerates, both
-# meant to hold a lexical error. editors/vscode/test/fixtures is outside for the
-# other reason: those files are the extension's own fixtures, written to produce
-# particular documents from the compiler -- a bad literal, a conflicting extern,
-# a two-file project -- and not examples of how fort is written.
+CORPUS_FILES = 466
+# The `.ft` of the repository that are deliberately outside the corpus, each
+# because it is meant to hold a lexical error: test/lang/fail is the corpus of
+# programs the compiler must reject, test/highlight/scopes.ft carries the
+# errors the fixture test enumerates, and editors/vscode/test/fixtures holds
+# lexical.ft, whose bad literal is the diagnostic the extension displays.
 EXCLUDED_DIRS = (LANG_FAIL_DIR, FIXTURE_DIR, EDITOR_FIXTURE_DIR)
 # Directories of the worktree that hold no source of the project: the build
 # tree copies std/*.ft next to the runtime, and a dot directory is git's or a

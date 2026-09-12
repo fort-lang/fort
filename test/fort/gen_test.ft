@@ -1,0 +1,499 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| types ok
+//| names ok
+//| values ok
+//| ok
+import ast;
+import consts;
+import gen;
+import gen_env;
+import prim;
+import std.strbuf;
+import types;
+
+// The type lowering, the names and the values of src/fort/gen.ft, held
+// against toolchain.md 6 items 2, 4, 5, 9 and 12 and against the C emitter
+// this module transliterates.
+//
+// Every type below is read off a checked declaration rather than built by
+// hand, so what is lowered is a type the checker made. The two float rows of
+// the memory-type map have no fort declaration to read them off -- the
+// bootstrap subset has no floats (test/lang/bootstrap-unsupported.txt) -- so
+// they are asked of the primitive map directly, which is the only row in this
+// file not reached through a declaration.
+//
+// Why the texts are asserted at all: no language run test can see an
+// internal-ABI rule (AGENTS.md), so the extension attribute of a narrow
+// value, the `i1`-versus-`i8` split of D19.2 and the signedness a constant
+// prints with are pinned here and nowhere else.
+
+// One local per type family, plus a struct, an enum, an extern and a function
+// to name. Written a line at a time, since adjacent string literals do not
+// join (D2.9).
+fn bool open_types(gen_env.env mut* e) {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "struct point {\n    i32 x;\n    i32 y;\n}\n");
+    strbuf.append(&b, "enum color {\n    red,\n    green,\n}\n");
+    strbuf.append(&b, "extern fn i32 puts(char* s);\n");
+    strbuf.append(&b, "fn i32 helper(i32 n) {\n    return n;\n}\n");
+    strbuf.append(&b, "fn i32 main() {\n");
+    strbuf.append(&b, "    i8 mut v_i8 = 0;\n    u8 mut v_u8 = 0;\n");
+    strbuf.append(&b, "    i16 mut v_i16 = 0;\n    u16 mut v_u16 = 0;\n");
+    strbuf.append(&b, "    i32 mut v_i32 = 0;\n    u32 mut v_u32 = 0;\n");
+    strbuf.append(&b, "    i64 mut v_i64 = 0;\n    u64 mut v_u64 = 0;\n");
+    strbuf.append(&b, "    bool mut v_bool = false;\n    char mut v_char = 'a';\n");
+    strbuf.append(&b, "    point mut v_point = point{1, 2};\n");
+    strbuf.append(&b, "    color mut v_color = color.red;\n");
+    strbuf.append(&b, "    i32[3] mut v_arr = {1, 2, 3};\n");
+    strbuf.append(&b, "    i32 mut@ v_span = v_arr[..];\n");
+    strbuf.append(&b, "    string mut v_str = \"hi\";\n");
+    strbuf.append(&b, "    i32 mut* v_ptr = &v_i32;\n");
+    strbuf.append(&b, "    void* mut v_vp = cast(v_ptr, void*);\n");
+    strbuf.append(&b, "    fn i32(i32) mut v_fn = helper;\n");
+    strbuf.append(&b, "    return 0;\n}\n");
+    return gen_env.open_src(e, strbuf.view(&b));
+}
+
+// The memory type of `name`'s type, what an alloca, a global or a field holds.
+fn string mem_of(gen_env.env mut* e, string name) {
+    return gen.gen_mem_type(&e->g, gen_env.type_of(e, name));
+}
+
+fn string value_of(gen_env.env mut* e, string name) {
+    return gen.gen_value_type(&e->g, gen_env.type_of(e, name));
+}
+
+// ---- item 2: the memory and value types --------------------------------------------
+
+fn void every_integer_lowers_to_the_width_its_size_gives_it() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_types(&e));
+    gen_env.expect_text(mem_of(&e, "v_i8"), "i8");
+    gen_env.expect_text(mem_of(&e, "v_u8"), "i8");
+    gen_env.expect_text(mem_of(&e, "v_i16"), "i16");
+    gen_env.expect_text(mem_of(&e, "v_u16"), "i16");
+    gen_env.expect_text(mem_of(&e, "v_i32"), "i32");
+    gen_env.expect_text(mem_of(&e, "v_u32"), "i32");
+    gen_env.expect_text(mem_of(&e, "v_i64"), "i64");
+    gen_env.expect_text(mem_of(&e, "v_u64"), "i64");
+    // Signedness is in the instruction and never in the type (D3.1).
+    gen_env.expect_text(value_of(&e, "v_u32"), "i32");
+}
+
+fn void a_bool_is_i8_in_memory_and_i1_as_a_value() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_types(&e));
+    // D19.2: C's `_Bool` layout in memory, one bit as a value.
+    gen_env.expect_text(mem_of(&e, "v_bool"), "i8");
+    gen_env.expect_text(value_of(&e, "v_bool"), "i1");
+    // `char` is an unsigned byte and is `i8` in both forms (D3.2).
+    gen_env.expect_text(mem_of(&e, "v_char"), "i8");
+    gen_env.expect_text(value_of(&e, "v_char"), "i8");
+}
+
+fn void every_pointer_is_the_opaque_ptr() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_types(&e));
+    // D3.10, D3.11: a pointer, a `void*` and a function pointer are one type.
+    gen_env.expect_text(mem_of(&e, "v_ptr"), "ptr");
+    gen_env.expect_text(mem_of(&e, "v_vp"), "ptr");
+    gen_env.expect_text(mem_of(&e, "v_fn"), "ptr");
+}
+
+fn void a_span_and_a_string_share_one_named_type() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_types(&e));
+    // D3.5, D3.7: with opaque pointers the two have identical IR.
+    gen_env.expect_text(mem_of(&e, "v_span"), "%fort.span");
+    gen_env.expect_text(mem_of(&e, "v_str"), "%fort.span");
+}
+
+fn void an_array_nests_outside_in_and_a_struct_is_its_dotted_name() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_types(&e));
+    // D3.6 and item 2: `[N x T]`, and `%struct.<module>.<name>` (D9.7).
+    gen_env.expect_text(mem_of(&e, "v_arr"), "[3 x i32]");
+    gen_env.expect_text(mem_of(&e, "v_point"), "%struct.main.point");
+    // An enum is `i32` (D3.9).
+    gen_env.expect_text(mem_of(&e, "v_color"), "i32");
+}
+
+fn void a_float_lowers_to_its_llvm_name() {
+    // The one map row no fort declaration reaches: the bootstrap subset has
+    // no floats, so the primitive map is asked directly (item 2).
+    gen_env.expect_text(gen.prim_mem_type(prim.prim_kind.prim_f32), "float");
+    gen_env.expect_text(gen.prim_mem_type(prim.prim_kind.prim_f64), "double");
+    gen_env.expect_text(gen.prim_mem_type(prim.prim_kind.prim_void), "void");
+}
+
+fn void an_aggregate_result_makes_the_function_void() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_types(&e));
+    // Item 7: an aggregate result is returned through the `sret` pointer, so
+    // the function's own result type is `void`.
+    gen_env.expect_text(gen.gen_result_type(&e.g, gen_env.type_of(&e, "v_point")), "void");
+    gen_env.expect_text(gen.gen_result_type(&e.g, gen_env.type_of(&e, "v_str")), "void");
+    gen_env.expect_text(gen.gen_result_type(&e.g, gen_env.type_of(&e, "v_bool")), "i1");
+    gen_env.expect_text(gen.gen_result_type(&e.g, null), "void");
+}
+
+fn void only_a_narrow_scalar_carries_an_extension_attribute() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_types(&e));
+    // Item 7: `zeroext` for `bool`, `char`, `u8` and `u16`, `signext` for
+    // `i8` and `i16`, nothing wider. Nothing else in the repository pins
+    // this: an extension a caller and a callee both get wrong agrees with
+    // itself (AGENTS.md).
+    gen_env.expect_text(gen.gen_ext_attr(gen_env.type_of(&e, "v_bool")), "zeroext");
+    gen_env.expect_text(gen.gen_ext_attr(gen_env.type_of(&e, "v_char")), "zeroext");
+    gen_env.expect_text(gen.gen_ext_attr(gen_env.type_of(&e, "v_u8")), "zeroext");
+    gen_env.expect_text(gen.gen_ext_attr(gen_env.type_of(&e, "v_u16")), "zeroext");
+    gen_env.expect_text(gen.gen_ext_attr(gen_env.type_of(&e, "v_i8")), "signext");
+    gen_env.expect_text(gen.gen_ext_attr(gen_env.type_of(&e, "v_i16")), "signext");
+    gen_env.expect_text(gen.gen_ext_attr(gen_env.type_of(&e, "v_i32")), "");
+    gen_env.expect_text(gen.gen_ext_attr(gen_env.type_of(&e, "v_u32")), "");
+    gen_env.expect_text(gen.gen_ext_attr(gen_env.type_of(&e, "v_i64")), "");
+    gen_env.expect_text(gen.gen_ext_attr(gen_env.type_of(&e, "v_ptr")), "");
+    gen_env.expect_text(gen.gen_ext_attr(gen_env.type_of(&e, "v_color")), "");
+    gen_env.expect_text(gen.gen_ext_attr(null), "");
+}
+
+fn void an_aggregate_is_what_lives_in_a_place() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_types(&e));
+    // D19.3: only scalars are SSA values.
+    assert(gen.gen_is_aggregate(gen_env.type_of(&e, "v_arr")));
+    assert(gen.gen_is_aggregate(gen_env.type_of(&e, "v_span")));
+    assert(gen.gen_is_aggregate(gen_env.type_of(&e, "v_str")));
+    assert(gen.gen_is_aggregate(gen_env.type_of(&e, "v_point")));
+    assert(!gen.gen_is_aggregate(gen_env.type_of(&e, "v_ptr")));
+    assert(!gen.gen_is_aggregate(gen_env.type_of(&e, "v_color")));
+    assert(!gen.gen_is_aggregate(gen_env.type_of(&e, "v_i64")));
+    assert(!gen.gen_is_aggregate(null));
+}
+
+fn void the_bit_width_is_the_one_a_trunc_compares() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_types(&e));
+    // Item 9: a `bool` is one bit, an enum four bytes (D3.9), and a type with
+    // no width answers zero.
+    assert(gen.gen_int_bits(gen_env.type_of(&e, "v_i8")) == 8);
+    assert(gen.gen_int_bits(gen_env.type_of(&e, "v_u16")) == 16);
+    assert(gen.gen_int_bits(gen_env.type_of(&e, "v_char")) == 8);
+    assert(gen.gen_int_bits(gen_env.type_of(&e, "v_bool")) == 1);
+    assert(gen.gen_int_bits(gen_env.type_of(&e, "v_color")) == 32);
+    assert(gen.gen_int_bits(gen_env.type_of(&e, "v_i64")) == 64);
+    assert(gen.gen_int_bits(gen_env.type_of(&e, "v_ptr")) == 0);
+    assert(gen.gen_int_bits(gen_env.type_of(&e, "v_point")) == 0);
+    assert(gen.gen_int_bits(null) == 0);
+}
+
+fn void the_signed_types_are_the_four_integers_and_every_enum() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_types(&e));
+    // One predicate answers every question about signedness (D3.1, D3.9), so
+    // a constant and the cast that widens it cannot disagree (D19.5).
+    assert(gen.gen_is_signed(gen_env.type_of(&e, "v_i8")));
+    assert(gen.gen_is_signed(gen_env.type_of(&e, "v_i64")));
+    assert(gen.gen_is_signed(gen_env.type_of(&e, "v_color")));
+    assert(!gen.gen_is_signed(gen_env.type_of(&e, "v_u8")));
+    assert(!gen.gen_is_signed(gen_env.type_of(&e, "v_char")));
+    assert(!gen.gen_is_signed(gen_env.type_of(&e, "v_bool")));
+    assert(!gen.gen_is_signed(gen_env.type_of(&e, "v_ptr")));
+    assert(!gen.gen_is_signed(null));
+}
+
+// ---- item 4: names (D9.7) ----------------------------------------------------------
+
+fn void a_fort_symbol_is_its_module_path_and_its_name() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_types(&e));
+    // D9.7: the ELF symbol is the dotted name, and the operand quotes it,
+    // which is spelling only.
+    gen_env.expect_text(gen.gen_symbol(&e.g, gen_env.sym_main(&e, "helper")), "main.helper");
+    gen_env.expect_text(gen.gen_symbol_ref(&e.g, gen_env.sym_main(&e, "helper")),
+                        "@\"main.helper\"");
+    gen_env.expect_text(gen.gen_symbol(&e.g, null), "");
+}
+
+fn void an_extern_name_is_unmangled_and_unquoted() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_types(&e));
+    // D9.7: a C name is an identifier and stands bare on both sides.
+    gen_env.expect_text(gen.gen_symbol(&e.g, gen_env.sym_main(&e, "puts")), "puts");
+    gen_env.expect_text(gen.gen_symbol_ref(&e.g, gen_env.sym_main(&e, "puts")), "@puts");
+}
+
+fn void a_name_llvm_admits_bare_is_written_bare() {
+    // LLVM's unquoted identifiers are `[-a-zA-Z$._][-a-zA-Z$._0-9]*`, which
+    // every module path satisfies (D9.1).
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    gen.gen_append_name(&b, ".enum.", "main.color", false);
+    gen_env.expect_text(strbuf.view(&b), ".enum.main.color");
+    strbuf.clear(&b);
+    // `always` is what every fort symbol asks for (D9.7).
+    gen.gen_append_name(&b, "", "main.color", true);
+    gen_env.expect_text(strbuf.view(&b), "\"main.color\"");
+    strbuf.clear(&b);
+    // A name that starts with a digit is not an unquoted identifier.
+    gen.gen_append_name(&b, "", "0bad", false);
+    gen_env.expect_text(strbuf.view(&b), "\"0bad\"");
+    strbuf.clear(&b);
+    // The empty name is quoted rather than written as nothing at all.
+    gen.gen_append_name(&b, "", "", false);
+    gen_env.expect_text(strbuf.view(&b), "\"\"");
+}
+
+fn void a_byte_a_quoted_name_cannot_hold_is_a_hex_pair() {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    // Item 5: `"`, `\` and every byte outside the printable range are written
+    // as `\XX`, which LLVM reads back to the byte, so the ELF symbol is the
+    // name itself (D9.7).
+    gen.gen_append_name(&b, "", "a\"b", true);
+    gen_env.expect_text(strbuf.view(&b), "\"a\\22b\"");
+    strbuf.clear(&b);
+    gen.gen_append_name(&b, "", "a\\b", true);
+    gen_env.expect_text(strbuf.view(&b), "\"a\\5Cb\"");
+    strbuf.clear(&b);
+    gen.gen_append_name(&b, "", "a\nb", true);
+    gen_env.expect_text(strbuf.view(&b), "\"a\\0Ab\"");
+    strbuf.clear(&b);
+    // The boundaries of the printable range: a space stands and a delete does
+    // not.
+    gen.gen_append_name(&b, "", " ~\x7f", true);
+    gen_env.expect_text(strbuf.view(&b), "\" ~\\7F\"");
+}
+
+fn void a_field_takes_the_index_of_its_declaration() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_types(&e));
+    // The one map from a field symbol to its index: the position among the
+    // field declarations, which is the order the named type writes them in.
+    ast.sym* point = gen_env.sym_main(&e, "point");
+    ast.node* decl = point->node;
+    u64 mut k = 0;
+    assert(gen.gen_field_index(ast.ast_child(decl, 0)->sym, &k));
+    assert(k == 0);
+    assert(gen.gen_field_index(ast.ast_child(decl, 1)->sym, &k));
+    assert(k == 1);
+    // A symbol that is not a field of a declaration has no index.
+    assert(!gen.gen_field_index(null, &k));
+    assert(!gen.gen_field_index(gen_env.sym_main(&e, "helper"), &k));
+}
+
+// ---- item 5 and item 9: values and the instructions that shape them -----------------
+
+// Two operands to build instructions out of, which no expression produced:
+// the assertions below are about the instruction's shape and not about what
+// reached it.
+fn gen.gen_val operand(string ty, string val) {
+    return gen.gen_val{ty, val};
+}
+
+fn void an_instruction_result_is_a_temporary_in_emission_order() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    // D19.5: `%t<N>` per function, in emission order, and the counter is
+    // reset at each definition.
+    gen.gen_binary(&e.g, "add", operand("i32", "%a"), operand("i32", "%b"));
+    gen.gen_binary(&e.g, "mul", operand("i32", "%t0"), operand("i32", "2"));
+    gen_env.expect_text(gen_env.body(&e),
+                        "  %t0 = add i32 %a, %b\n  %t1 = mul i32 %t0, 2\n");
+    gen_env.begin(&e);
+    gen.gen_binary(&e.g, "add", operand("i32", "%a"), operand("i32", "%b"));
+    gen_env.expect_text(gen_env.body(&e), "  %t0 = add i32 %a, %b\n");
+}
+
+fn void a_comparison_is_an_icmp_whose_result_is_one_bit() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    gen.gen_val r = gen.gen_icmp(&e.g, "slt", operand("i32", "%a"), operand("i32", "%b"));
+    gen_env.expect_text(gen_env.body(&e), "  %t0 = icmp slt i32 %a, %b\n");
+    gen_env.expect_text(r.ty, "i1");
+}
+
+fn void a_conversion_names_both_types() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    // Item 12: trunc, zext, sext, ptrtoint and inttoptr all take this shape.
+    gen.gen_cast_op(&e.g, "trunc", operand("i32", "%a"), "i8");
+    gen_env.expect_text(gen_env.body(&e), "  %t0 = trunc i32 %a to i8\n");
+}
+
+fn void a_resize_to_the_same_width_emits_nothing() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    // Item 9: a narrow value is not widened to 32 bits; its width is in its
+    // type.
+    gen.gen_val same = gen.gen_resize(&e.g, operand("i8", "%a"), 8, "i8", 8, true);
+    gen_env.expect_text(gen_env.body(&e), "");
+    gen_env.expect_text(same.val, "%a");
+    gen.gen_resize(&e.g, operand("i8", "%a"), 8, "i64", 64, true);
+    gen.gen_resize(&e.g, operand("i8", "%b"), 8, "i64", 64, false);
+    gen.gen_resize(&e.g, operand("i64", "%c"), 64, "i8", 8, true);
+    // Widening reads the source's signedness; narrowing never does.
+    gen_env.expect_text(gen_env.body(&e),
+                        gen_env.join3(&e, "  %t0 = sext i8 %a to i64\n",
+                                      "  %t1 = zext i8 %b to i64\n",
+                                      "  %t2 = trunc i64 %c to i8\n"));
+}
+
+fn void a_load_and_a_store_carry_their_alignment() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    // Item 5: every load and store carries an explicit alignment.
+    gen.gen_load(&e.g, "i32", operand("ptr", "%p"), 4);
+    gen.gen_store(&e.g, operand("i32", "%v"), operand("ptr", "%p"), 4);
+    gen_env.expect_text(gen_env.body(&e),
+                        "  %t0 = load i32, ptr %p, align 4\n  store i32 %v, ptr %p, align 4\n");
+}
+
+fn void a_bool_place_is_loaded_as_a_byte_and_stored_as_one() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_types(&e));
+    gen_env.begin(&e);
+    gen.gen_place p = gen.gen_place{operand("ptr", "%b.0"), gen_env.type_of(&e, "v_bool")};
+    gen.gen_load_place(&e.g, p);
+    gen.gen_store_place(&e.g, p, operand("i1", "%v"));
+    // D19.2: the memory form is `i8` and the value form `i1`, so a load ends
+    // in a `trunc` and a store begins with a `zext`.
+    gen_env.expect_text(gen_env.body(&e),
+                        gen_env.join4(&e, "  %t0 = load i8, ptr %b.0, align 1\n",
+                                      "  %t1 = trunc i8 %t0 to i1\n",
+                                      "  %t2 = zext i1 %v to i8\n",
+                                      "  store i8 %t2, ptr %b.0, align 1\n"));
+}
+
+fn void an_integer_constant_prints_with_the_signedness_of_its_type() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_types(&e));
+    // D19.5: the same bit pattern is `i8 -1` in an `i8` and `i8 255` in a
+    // `u8`, so the text is a function of the program alone.
+    consts.cval all_ones = consts.cv_from_u64(255);
+    gen_env.expect_text(gen.gen_const_value(&e.g, gen_env.type_of(&e, "v_u8"), all_ones).val,
+                        "255");
+    gen_env.expect_text(gen.gen_const_value(&e.g, gen_env.type_of(&e, "v_i8"), all_ones).val,
+                        "-1");
+    consts.cval minus_one = consts.cv_from_i64(-1);
+    gen_env.expect_text(gen.gen_const_value(&e.g, gen_env.type_of(&e, "v_i64"), minus_one).val,
+                        "-1");
+    gen_env.expect_text(gen.gen_const_value(&e.g, gen_env.type_of(&e, "v_u64"), minus_one).val,
+                        "18446744073709551615");
+    // A `char` in an integer context is its code point (D4.3).
+    gen_env.expect_text(gen.gen_const_value(&e.g, gen_env.type_of(&e, "v_char"),
+                                            consts.cv_from_char(97)).val, "97");
+}
+
+fn void a_bool_a_null_and_a_pointer_constant_have_their_own_spellings() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open_types(&e));
+    types.node* bool_type = gen_env.type_of(&e, "v_bool");
+    gen.gen_val yes = gen.gen_const_value(&e.g, bool_type, consts.cv_from_bool(true));
+    gen_env.expect_text(yes.ty, "i1");
+    gen_env.expect_text(yes.val, "true");
+    gen_env.expect_text(gen.gen_const_value(&e.g, bool_type, consts.cv_from_bool(false)).val,
+                        "false");
+    // A `bool` in memory is 0 or 1 in an `i8`, never the `i1 true` of a value
+    // (D19.2, D3.3).
+    gen.gen_val mem = gen.gen_const_mem_value(&e.g, bool_type, consts.cv_from_bool(true));
+    gen_env.expect_text(mem.ty, "i8");
+    gen_env.expect_text(mem.val, "1");
+    gen_env.expect_text(gen.gen_const_mem_value(&e.g, bool_type,
+                                                consts.cv_from_bool(false)).val, "0");
+    // A pointer constant is `null`; no other address folds (D10.5).
+    gen_env.expect_text(gen.gen_const_value(&e.g, gen_env.type_of(&e, "v_ptr"),
+                                            consts.cv_null()).val, "null");
+    // An integer in a memory form keeps that form's type.
+    gen_env.expect_text(gen.gen_const_mem_value(&e.g, gen_env.type_of(&e, "v_i32"),
+                                                consts.cv_from_i64(7)).ty, "i32");
+}
+
+fn void the_smallest_value_of_a_signed_type_is_built_from_its_bit_pattern() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    // Negating the magnitude of `i64` MIN overflows the type that would hold
+    // it, so the operand the division check of item 15 compares against is
+    // read off the pattern (D19.5).
+    gen_env.expect_text(gen.gen_const_min(&e.g, "i8", 8).val, "-128");
+    gen_env.expect_text(gen.gen_const_min(&e.g, "i16", 16).val, "-32768");
+    gen_env.expect_text(gen.gen_const_min(&e.g, "i32", 32).val, "-2147483648");
+    gen_env.expect_text(gen.gen_const_min(&e.g, "i64", 64).val, "-9223372036854775808");
+    gen_env.expect_text(gen.gen_const_signed(&e.g, "i32", -1).val, "-1");
+    gen_env.expect_text(gen.gen_const_unsigned(&e.g, "i64", 0).val, "0");
+}
+
+fn i32 main() {
+    every_integer_lowers_to_the_width_its_size_gives_it();
+    a_bool_is_i8_in_memory_and_i1_as_a_value();
+    every_pointer_is_the_opaque_ptr();
+    a_span_and_a_string_share_one_named_type();
+    an_array_nests_outside_in_and_a_struct_is_its_dotted_name();
+    a_float_lowers_to_its_llvm_name();
+    an_aggregate_result_makes_the_function_void();
+    only_a_narrow_scalar_carries_an_extension_attribute();
+    an_aggregate_is_what_lives_in_a_place();
+    the_bit_width_is_the_one_a_trunc_compares();
+    the_signed_types_are_the_four_integers_and_every_enum();
+    println("types ok");
+    a_fort_symbol_is_its_module_path_and_its_name();
+    an_extern_name_is_unmangled_and_unquoted();
+    a_name_llvm_admits_bare_is_written_bare();
+    a_byte_a_quoted_name_cannot_hold_is_a_hex_pair();
+    a_field_takes_the_index_of_its_declaration();
+    println("names ok");
+    an_instruction_result_is_a_temporary_in_emission_order();
+    a_comparison_is_an_icmp_whose_result_is_one_bit();
+    a_conversion_names_both_types();
+    a_resize_to_the_same_width_emits_nothing();
+    a_load_and_a_store_carry_their_alignment();
+    a_bool_place_is_loaded_as_a_byte_and_stored_as_one();
+    an_integer_constant_prints_with_the_signedness_of_its_type();
+    a_bool_a_null_and_a_pointer_constant_have_their_own_spellings();
+    the_smallest_value_of_a_signed_type_is_built_from_its_bit_pattern();
+    println("values ok");
+    println("ok");
+    return 0;
+}
