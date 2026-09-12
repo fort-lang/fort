@@ -368,6 +368,13 @@ fn bool const_value(gen.emitter mut* g, strbuf.str_buf mut* out, types.node* t, 
             // it stands on (D4.6).
             gen.gen_val c = gen.gen_const_mem_value(g, t, v);
             strbuf.append(out, c.val);
+            if (consts.cv_is_float(v)) {
+                // A float is all-zero bytes for +0.0 alone: -0.0 has its sign
+                // bit set and `zeroinitializer` would lose it (D6.12). Its
+                // magnitude field is not the value, so the pattern is what
+                // answers here (consts.ft).
+                return consts.cv_float_bits(v) == 0;
+            }
             return v.kind == consts.cval_kind.cv_null || v.mag == 0;
         }
     }
@@ -501,6 +508,17 @@ fn void emit_intrinsic(strbuf.str_buf mut* out, u64 which) {
     }
     if (which == gen.IN_TRAP) {
         strbuf.append(out, "declare void @llvm.trap() #7\n");
+        return;
+    }
+    if (which >= gen.IN_FPCONV_FIRST) {
+        // A saturating float-to-integer conversion (items 8 and 12).
+        strbuf.append(out, "declare ");
+        strbuf.append(out, gen.gen_fpconv_int_type(which));
+        strbuf.append(out, " @");
+        gen.gen_fpconv_name(out, which);
+        strbuf.push(out, '(');
+        strbuf.append(out, gen.gen_fpconv_float_type(which));
+        strbuf.append(out, ") #4\n");
         return;
     }
     u64 at = which - gen.IN_OVERFLOW_FIRST;

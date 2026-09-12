@@ -1,0 +1,934 @@
+// flt: the IEEE 754 values a float constant may hold, each kept as the bit
+// pattern of a binary64 (D3.1, D6.12). It is the arithmetic consts.ft folds
+// float constants with, and the source of the text gen.ft writes for one.
+//
+// Why a bit pattern and not a float. stage1 compiles stage2 and stage1
+// rejects every float (toolchain.md 7.3), so the compiler's own source has no
+// f32 and no f64 and cannot hold a float value in a variable. A float
+// constant is therefore a u64 that holds the binary64 bits of the value, and
+// every operation on one is integer arithmetic in this module.
+//
+// An f32 constant is held as the binary64 of its binary32 value. That number
+// is exactly representable in binary64 -- 24 mantissa bits out of 53 -- and
+// it is also the form the IR needs, since an LLVM `float 0x...` literal
+// carries the binary64 pattern of a value the type holds exactly.
+//
+// Every value here is finite. D4.4 makes a constant that is not finite in its
+// type a compile error, so no function returns an infinity or a NaN: it
+// returns false and the checker reports the error. Nothing below reads an
+// exponent field of 2047 except the guard that says the caller broke that
+// rule.
+//
+// How the rounding works. Each operation states its exact result as a
+// rational number -- a pair of arbitrary-precision integers -- and
+// round_ratio rounds that one rational to the target format once, to nearest
+// with ties to even. One rounding step and not two, which is the same answer
+// the hardware gives and is reached the same way it reaches it.
+//
+// For the four operations the second rounding would be innocuous and no test
+// could see the difference: binary64 has 53 mantissa bits and 53 >= 2 * 24 + 2,
+// so an exact sum, difference, product or quotient of two binary32 values
+// rounded to binary64 and then to binary32 is the binary32 the exact result
+// rounds to, always (Figueroa's condition). Reading a decimal is the one
+// place where two roundings are observable, and D4.4 asks for two there: a
+// literal is evaluated in binary64 and the constant then takes f32 from its
+// context (the note on D4.4).
+//
+// The bignum is a fixed array of 32-bit limbs and not a container, so nothing
+// here allocates and no function of this module can fail on memory. Its size
+// is proved below against the largest value the decimal reader and the four
+// operations can build.
+//
+// Re-entrancy (D20.5): nothing here is state. Every function is a query over
+// its arguments and its own locals, and a violated precondition -- an
+// infinity, a bignum past its limbs -- is a panic at the call that broke it
+// (D13.3).
+//
+// Dispatch: none. The case analysis is `if` chains and switches (D3.10).
+import std.strbuf;
+
+// ---- the two formats ---------------------------------------------------------------
+
+// The mantissa bits of a format, the implicit one included; the least
+// exponent of a value written m * 2^e with m in that many bits; the greatest
+// (D3.1). binary64 holds m * 2^e for m < 2^53, e in [-1074, 971]; binary32
+// for m < 2^24, e in [-149, 104].
+u64 F64_MANT = 53;
+i64 F64_EXP_MIN = -1074;
+i64 F64_EXP_MAX = 971;
+u64 F32_MANT = 24;
+i64 F32_EXP_MIN = -149;
+i64 F32_EXP_MAX = 104;
+
+// The binary64 pattern: the sign bit, the mantissa field, the implicit bit
+// above it, the width of the exponent field and the field of an infinity or a
+// NaN. The bias is 1023 + 52, the amount added to the exponent of a value
+// written with the implicit bit in place.
+u64 F64_SIGN = 0x8000000000000000;
+u64 F64_FRAC_MASK = 0x000FFFFFFFFFFFFF;
+u64 F64_MAG_MASK = 0x7FFFFFFFFFFFFFFF;
+u64 F64_HIDDEN = 0x0010000000000000;
+u64 F64_FRAC_BITS = 52;
+u64 F64_FIELD_MASK = 0x7FF;
+u64 F64_FIELD_INF = 0x7FF;
+i64 F64_BIAS = 1075;
+
+// The hex digits a constant prints with, most significant first, and the four
+// bits each one carries (item 5 of toolchain.md 6 spells a byte the same way).
+string HEX_DIGITS = "0123456789ABCDEF";
+u64 HEX_BITS = 4;
+u64 HEX_MASK = 15;
+u64 HEX_COUNT = 16;
+
+// ---- bignums -----------------------------------------------------------------------
+
+// The limbs of a bignum and the width of one. 160 limbs are 5120 bits, and
+// the largest value any caller builds is 3733 bits: the digits of a decimal
+// literal (800 at most, 2658 bits) shifted left by the 1075 places
+// round_ratio needs for the least subnormal. The decimal denominator is
+// 10^1150 at most, 3821 bits, and the four operations reach 3173 bits. So the
+// array has a quarter of its bits spare and every overflow of it is a bug
+// here rather than a program the compiler must accept.
+u64 BN_LIMBS = 160;
+u64 LIMB_BITS = 32;
+u64 LIMB_MASK = 0xFFFFFFFF;
+u64 LIMB_BASE = 0x100000000;
+
+// The significant decimal digits a literal is read to. The exact midpoint
+// between two binary64 values has 767 of them at most, so 800 digits decide
+// every rounding; a nonzero digit below them only breaks a tie upward, which
+// is what the `tail` flag of round_ratio does.
+u64 FLT_MAX_DIGITS = 800;
+
+// The decimal exponent of the leading digit above which a literal is not
+// finite in binary64, and below which it rounds to zero. 10^311 is past the
+// largest binary64 (about 1.8e308) and 10^-351 is below half the least
+// subnormal (about 2.5e-324), so both answers are decided before any bignum
+// is built, which is what bounds BN_LIMBS.
+i64 FLT_POINT_MAX = 310;
+i64 FLT_POINT_MIN = -350;
+
+// The digits a decimal chunk carries, and the power of ten it multiplies by:
+// reading nine digits at a time costs one bignum pass instead of nine.
+u64 DEC_CHUNK = 9;
+u64 DEC_CHUNK_BASE = 1000000000;
+u64 DEC_BASE = 10;
+
+// An arbitrary-precision unsigned integer: `len` limbs of 32 bits, least
+// significant first, with no zero limb on top. A length of 0 is the value 0.
+struct bignum {
+    u32[BN_LIMBS] limb;
+    u64 len;
+}
+
+// The number of bits of `v`, 0 for 0.
+fn u64 bits_of_u64(u64 v) {
+    u64 mut n = 0;
+    u64 mut x = v;
+    while (x != 0) {
+        x = x >> 1;
+        n += 1;
+    }
+    return n;
+}
+
+// Appends one limb above the others. The array is sized so that no caller
+// reaches its end (BN_LIMBS), so a full array is a bug in this module.
+fn void bn_push(bignum mut* n, u32 v) {
+    if (n->len >= BN_LIMBS) {
+        panic("flt.bn_push: a constant needed more limbs than the bignum has");
+    }
+    n->limb[n->len] = v;
+    n->len += 1;
+}
+
+// Drops the zero limbs on top, so that `len` and bn_bits answer about the
+// value and not about the history of the buffer.
+fn void bn_trim(bignum mut* n) {
+    while (n->len > 0 && n->limb[n->len - 1] == 0) {
+        n->len -= 1;
+    }
+}
+
+fn void bn_set_u64(bignum mut* n, u64 v) {
+    n->len = 0;
+    u64 mut x = v;
+    while (x != 0) {
+        bn_push(n, cast(x & LIMB_MASK, u32));
+        x = x >> LIMB_BITS;
+    }
+}
+
+// The 128-bit value `hi * 2^64 + lo`, which is how a product of two mantissas
+// arrives.
+fn void bn_set_u128(bignum mut* n, u64 hi, u64 lo) {
+    bn_set_u64(n, lo);
+    while (n->len < 2) {
+        bn_push(n, 0);
+    }
+    bn_push(n, cast(hi & LIMB_MASK, u32));
+    bn_push(n, cast(hi >> LIMB_BITS, u32));
+    bn_trim(n);
+}
+
+fn bool bn_is_zero(bignum* n) {
+    return n->len == 0;
+}
+
+// The number of bits of the value, 0 for 0.
+fn u64 bn_bits(bignum* n) {
+    if (n->len == 0) {
+        return 0;
+    }
+    return (n->len - 1) * LIMB_BITS + bits_of_u64(cast(n->limb[n->len - 1], u64));
+}
+
+// Whether bit `i` is set, counting from the least significant.
+fn bool bn_bit(bignum* n, u64 i) {
+    u64 at = i / LIMB_BITS;
+    if (at >= n->len) {
+        return false;
+    }
+    return ((cast(n->limb[at], u64) >> (i % LIMB_BITS)) & 1) != 0;
+}
+
+// Sets the least significant bit: the next bit of the dividend in bn_div.
+fn void bn_set_bit0(bignum mut* n) {
+    if (n->len == 0) {
+        bn_push(n, 1);
+        return;
+    }
+    n->limb[0] = n->limb[0] | 1;
+}
+
+// n = n * mul + add, with both below 2^32. The product of two limbs plus a
+// carry stays below 2^64, so the checked build does not trap here (D11.1).
+fn void bn_mul_add(bignum mut* n, u64 mul, u64 add) {
+    u64 mut carry = add;
+    u64 mut i = 0;
+    while (i < n->len) {
+        u64 cur = cast(n->limb[i], u64) * mul + carry;
+        n->limb[i] = cast(cur & LIMB_MASK, u32);
+        carry = cur >> LIMB_BITS;
+        i += 1;
+    }
+    while (carry != 0) {
+        bn_push(n, cast(carry & LIMB_MASK, u32));
+        carry = carry >> LIMB_BITS;
+    }
+    bn_trim(n);
+}
+
+// a = a + b.
+fn void bn_add(bignum mut* a, bignum* b) {
+    while (a->len < b->len) {
+        bn_push(a, 0);
+    }
+    u64 mut carry = 0;
+    u64 mut i = 0;
+    while (i < a->len) {
+        u64 mut sum = cast(a->limb[i], u64) + carry;
+        if (i < b->len) {
+            sum += cast(b->limb[i], u64);
+        }
+        a->limb[i] = cast(sum & LIMB_MASK, u32);
+        carry = sum >> LIMB_BITS;
+        i += 1;
+    }
+    if (carry != 0) {
+        bn_push(a, cast(carry, u32));
+    }
+    bn_trim(a);
+}
+
+// a = a - b, where a is at least b. A limb that borrows takes 2^32 from the
+// limb above it, which is why the difference is formed in a u64.
+fn void bn_sub(bignum mut* a, bignum* b) {
+    if (bn_cmp(a, b) < 0) {
+        panic("flt.bn_sub: the difference would be negative");
+    }
+    u64 mut borrow = 0;
+    u64 mut i = 0;
+    while (i < a->len) {
+        u64 mut take = borrow;
+        if (i < b->len) {
+            take += cast(b->limb[i], u64);
+        }
+        u64 cur = cast(a->limb[i], u64);
+        if (cur >= take) {
+            a->limb[i] = cast(cur - take, u32);
+            borrow = 0;
+        } else {
+            a->limb[i] = cast(cur + LIMB_BASE - take, u32);
+            borrow = 1;
+        }
+        i += 1;
+    }
+    bn_trim(a);
+}
+
+// -1, 0 or 1 as a is below, equal to or above b.
+fn i32 bn_cmp(bignum* a, bignum* b) {
+    if (a->len != b->len) {
+        if (a->len < b->len) {
+            return -1;
+        }
+        return 1;
+    }
+    u64 mut i = a->len;
+    while (i > 0) {
+        i -= 1;
+        if (a->limb[i] != b->limb[i]) {
+            if (a->limb[i] < b->limb[i]) {
+                return -1;
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// n = n << bits.
+fn void bn_shl(bignum mut* n, u64 bits) {
+    if (n->len == 0 || bits == 0) {
+        return;
+    }
+    u64 whole = bits / LIMB_BITS;
+    u64 part = bits % LIMB_BITS;
+    u64 mut top = n->len + whole + 1;
+    if (top > BN_LIMBS) {
+        panic("flt.bn_shl: a constant needed more limbs than the bignum has");
+    }
+    u64 mut i = top;
+    while (i > 0) {
+        i -= 1;
+        u64 mut v = 0;
+        if (i >= whole) {
+            u64 from = i - whole;
+            if (from < n->len) {
+                v = cast(n->limb[from], u64) << part;
+            }
+            if (part != 0 && from > 0 && from - 1 < n->len) {
+                v = v | (cast(n->limb[from - 1], u64) >> (LIMB_BITS - part));
+            }
+        }
+        n->limb[i] = cast(v & LIMB_MASK, u32);
+    }
+    n->len = top;
+    bn_trim(n);
+}
+
+// n = n >> bits, discarding what leaves the bottom.
+fn void bn_shr(bignum mut* n, u64 bits) {
+    if (n->len == 0 || bits == 0) {
+        return;
+    }
+    u64 whole = bits / LIMB_BITS;
+    u64 part = bits % LIMB_BITS;
+    if (whole >= n->len) {
+        n->len = 0;
+        return;
+    }
+    u64 keep = n->len - whole;
+    u64 mut i = 0;
+    while (i < keep) {
+        u64 mut v = cast(n->limb[i + whole], u64) >> part;
+        if (part != 0 && i + whole + 1 < n->len) {
+            v = v | (cast(n->limb[i + whole + 1], u64) << (LIMB_BITS - part));
+        }
+        n->limb[i] = cast(v & LIMB_MASK, u32);
+        i += 1;
+    }
+    n->len = keep;
+    bn_trim(n);
+}
+
+// floor(num / den), which every caller has arranged to fit 64 bits, with
+// `*sticky` true when the division leaves a remainder.
+//
+// The loop is the school division of the `count` quotient bits: the remainder
+// starts as the bits of the dividend above them and takes one more bit at
+// each step. The bits below the quotient's first one are not walked at all,
+// which is what keeps a 3800-bit dividend to 55 steps.
+fn u64 bn_div(bignum* num, bignum* den, bool mut* sticky) {
+    if (bn_is_zero(den)) {
+        panic("flt.bn_div: division by zero");
+    }
+    u64 nb = bn_bits(num);
+    u64 db = bn_bits(den);
+    if (nb < db) {
+        *sticky = !bn_is_zero(num);
+        return 0;
+    }
+    u64 count = nb - db + 1;
+    if (count > 64) {
+        panic("flt.bn_div: the quotient does not fit 64 bits");
+    }
+    bignum mut rem = bignum{};
+    rem = *num;
+    bn_shr(&rem, count);
+    u64 mut q = 0;
+    u64 mut i = count;
+    while (i > 0) {
+        i -= 1;
+        bn_shl(&rem, 1);
+        if (bn_bit(num, i)) {
+            bn_set_bit0(&rem);
+        }
+        q = q << 1;
+        if (bn_cmp(&rem, den) >= 0) {
+            bn_sub(&rem, den);
+            q += 1;
+        }
+    }
+    *sticky = !bn_is_zero(&rem);
+    return q;
+}
+
+// ---- rounding ----------------------------------------------------------------------
+
+// The binary64 bits of m * 2^e, with m below 2^53 and the value inside the
+// range of binary64. A binary64 subnormal keeps its exponent field at 0; every
+// other value is normalized so that the top bit of m stands at bit 52.
+fn u64 f64_bits(u64 m, i64 e) {
+    if (m == 0) {
+        return 0;
+    }
+    if (m < F64_HIDDEN && e == F64_EXP_MIN) {
+        return m;
+    }
+    u64 shift = F64_MANT - bits_of_u64(m);
+    u64 top = m << shift;
+    i64 field = e - cast(shift, i64) + F64_BIAS;
+    if (field <= 0 || field >= cast(F64_FIELD_INF, i64)) {
+        panic("flt.f64_bits: the value is outside binary64");
+    }
+    return (cast(field, u64) << F64_FRAC_BITS) | (top & F64_FRAC_MASK);
+}
+
+// The value of finite binary64 bits as (-1)^neg * m * 2^e, with m == 0 for a
+// zero of either sign.
+fn void flt_parts(u64 bits, bool mut* neg, u64 mut* m, i64 mut* e) {
+    *neg = (bits & F64_SIGN) != 0;
+    u64 field = (bits >> F64_FRAC_BITS) & F64_FIELD_MASK;
+    u64 frac = bits & F64_FRAC_MASK;
+    if (field == F64_FIELD_INF) {
+        panic("flt.flt_parts: an infinity or a NaN is not a constant");
+    }
+    if (field == 0) {
+        *m = frac;
+        *e = F64_EXP_MIN;
+        return;
+    }
+    *m = frac | F64_HIDDEN;
+    *e = cast(field, i64) - F64_BIAS;
+}
+
+// The exact rational (-1)^neg * num / den, rounded once to the format
+// `is_f32` names and returned as binary64 bits; false when the result is not
+// finite in that format, which D4.4 makes a compile error.
+//
+// `tail` says that a nonzero amount stands below the last digit of `num`: the
+// decimal reader sets it for the digits it did not keep, and it can only turn
+// a tie into a round away from zero. `num` and `den` are left in an
+// unspecified state, since the scaling below writes into them.
+//
+// The steps: `est` brackets the value between 2^(est-1) and 2^(est+1), `k`
+// scales it so that the quotient holds the mantissa and one guard bit (or,
+// when the value is subnormal, so that the guard bit stands one place below
+// the least exponent), the division yields that quotient and the sticky bit,
+// and the rounding is to nearest with ties to even (D6.12).
+fn bool round_ratio(bignum mut* num, bignum mut* den, bool neg, bool tail, bool is_f32,
+                    u64 mut* out) {
+    u64 mut mant = F64_MANT;
+    i64 mut emin = F64_EXP_MIN;
+    i64 mut emax = F64_EXP_MAX;
+    if (is_f32) {
+        mant = F32_MANT;
+        emin = F32_EXP_MIN;
+        emax = F32_EXP_MAX;
+    }
+    u64 mut sign = 0;
+    if (neg) {
+        sign = F64_SIGN;
+    }
+    if (bn_is_zero(num)) {
+        *out = sign;
+        return true;
+    }
+    i64 est = cast(bn_bits(num), i64) - cast(bn_bits(den), i64);
+    i64 mut k = cast(mant, i64) + 1 - est;
+    if (k > 1 - emin) {
+        k = 1 - emin;
+    }
+    if (k > 0) {
+        bn_shl(num, cast(k, u64));
+    } else if (k < 0) {
+        bn_shl(den, cast(0 - k, u64));
+    }
+    bool mut sticky = tail;
+    bool mut rest = false;
+    u64 q = bn_div(num, den, &rest);
+    if (rest) {
+        sticky = true;
+    }
+    u64 qbits = bits_of_u64(q);
+    u64 mut extra = 1;
+    if (qbits > mant + 1) {
+        extra = qbits - mant;
+    }
+    if (extra > 2) {
+        panic("flt.round_ratio: the quotient has more bits than the scaling allows");
+    }
+    u64 round = (q >> (extra - 1)) & 1;
+    if (extra == 2 && (q & 1) != 0) {
+        sticky = true;
+    }
+    u64 mut m = q >> extra;
+    i64 mut e = cast(extra, i64) - k;
+    if (round != 0 && (sticky || (m & 1) != 0)) {
+        // To nearest, ties to even: the tie goes up only when the mantissa
+        // kept is odd, or something stands below the guard bit (D6.12).
+        m += 1;
+        if (m == (cast(1, u64) << mant)) {
+            m = m >> 1;
+            e += 1;
+        }
+    }
+    if (m == 0) {
+        // The value is below half the least subnormal and rounds to a zero of
+        // its own sign.
+        *out = sign;
+        return true;
+    }
+    if (e > emax) {
+        return false;
+    }
+    *out = sign | f64_bits(m, e);
+    return true;
+}
+
+// ---- reading a literal (D2.6) ------------------------------------------------------
+
+// The digits of a literal and where its decimal point stands: the value is
+// 0.<digit[0..len]> * 10^point. `tail` records a nonzero digit below the
+// last one kept.
+struct decimal {
+    u8[FLT_MAX_DIGITS] digit;
+    u64 len;
+    i64 point;
+    bool tail;
+}
+
+// The exponent a literal is read to before it saturates. Any value past it
+// puts the decimal point far outside FLT_POINT_MIN and FLT_POINT_MAX, so the
+// answer is the same and the accumulation cannot overflow (D11.1).
+i64 FLT_EXP_LIMIT = 100000;
+
+fn i64 byte_of(char c) {
+    return cast(c, i64);
+}
+
+fn bool is_digit(i64 c) {
+    return c >= byte_of('0') && c <= byte_of('9');
+}
+
+// The digits, the point and the exponent of a float literal. The lexer has
+// already checked the shape (D2.6), so a byte that is not a digit, `_`, `.`,
+// `e`, `E`, `+` or `-` is a broken precondition and not a program error.
+fn void read_decimal(string text, decimal mut* d) {
+    d->len = 0;
+    d->point = 0;
+    d->tail = false;
+    bool mut seen_point = false;
+    u64 mut i = 0;
+    while (i < text.len) {
+        i64 c = byte_of(text[i]);
+        if (c == byte_of('e') || c == byte_of('E')) {
+            break;
+        }
+        i += 1;
+        if (c == byte_of('_')) {
+            continue;
+        }
+        if (c == byte_of('.')) {
+            seen_point = true;
+            continue;
+        }
+        if (!is_digit(c)) {
+            panic("flt.read_decimal: the text is not a float literal");
+        }
+        u64 v = cast(c - byte_of('0'), u64);
+        if (d->len == 0 && v == 0) {
+            // A zero above the first significant digit adds no digit; below
+            // the point it moves the point instead.
+            if (seen_point) {
+                d->point -= 1;
+            }
+            continue;
+        }
+        if (d->len < FLT_MAX_DIGITS) {
+            d->digit[d->len] = cast(v, u8);
+            d->len += 1;
+        } else if (v != 0) {
+            d->tail = true;
+        }
+        if (!seen_point) {
+            d->point += 1;
+        }
+    }
+    if (i >= text.len) {
+        return;
+    }
+    read_exponent(text, i + 1, d);
+}
+
+// The `e` part of a literal, starting at `from`: an optional sign and the
+// digits, added to the decimal point.
+fn void read_exponent(string text, u64 from, decimal mut* d) {
+    u64 mut i = from;
+    bool mut neg = false;
+    if (i < text.len && (text[i] == '+' || text[i] == '-')) {
+        neg = text[i] == '-';
+        i += 1;
+    }
+    i64 mut value = 0;
+    while (i < text.len) {
+        i64 c = byte_of(text[i]);
+        i += 1;
+        if (c == byte_of('_')) {
+            continue;
+        }
+        if (!is_digit(c)) {
+            panic("flt.read_exponent: the text is not a float literal");
+        }
+        if (value < FLT_EXP_LIMIT) {
+            value = value * 10 + (c - byte_of('0'));
+        }
+    }
+    if (neg) {
+        d->point -= value;
+    } else {
+        d->point += value;
+    }
+}
+
+// The digits as an integer, nine at a time.
+fn void decimal_digits(decimal* d, bignum mut* n) {
+    bn_set_u64(n, 0);
+    u64 mut i = 0;
+    while (i < d->len) {
+        u64 mut chunk = 0;
+        u64 mut base = 1;
+        u64 mut taken = 0;
+        while (taken < DEC_CHUNK && i < d->len) {
+            chunk = chunk * DEC_BASE + cast(d->digit[i], u64);
+            base = base * DEC_BASE;
+            taken += 1;
+            i += 1;
+        }
+        bn_mul_add(n, base, chunk);
+    }
+}
+
+// n = n * 10^e.
+fn void bn_mul_pow10(bignum mut* n, u64 e) {
+    u64 mut left = e;
+    while (left >= DEC_CHUNK) {
+        bn_mul_add(n, DEC_CHUNK_BASE, 0);
+        left -= DEC_CHUNK;
+    }
+    while (left > 0) {
+        bn_mul_add(n, DEC_BASE, 0);
+        left -= 1;
+    }
+}
+
+// The value of a float literal (D2.6) as binary64 bits, which is the type an
+// untyped float constant is evaluated in (D4.4); false when it is not finite
+// in binary64, which D4.4 makes a compile error. The text carries no sign:
+// unary minus is an operator (D6.2).
+fn bool flt_parse(string text, u64 mut* out) {
+    decimal mut d = decimal{};
+    read_decimal(text, &d);
+    *out = 0;
+    if (d.len == 0) {
+        // Every digit was a zero.
+        return true;
+    }
+    if (d.point > FLT_POINT_MAX) {
+        return false;
+    }
+    if (d.point < FLT_POINT_MIN) {
+        // Below half the least subnormal, so the value rounds to zero.
+        return true;
+    }
+    bignum mut num = bignum{};
+    bignum mut den = bignum{};
+    decimal_digits(&d, &num);
+    bn_set_u64(&den, 1);
+    i64 e10 = d.point - cast(d.len, i64);
+    if (e10 > 0) {
+        bn_mul_pow10(&num, cast(e10, u64));
+    } else if (e10 < 0) {
+        bn_mul_pow10(&den, cast(0 - e10, u64));
+    }
+    return round_ratio(&num, &den, false, d.tail, false, out);
+}
+
+// ---- the operations a constant folder needs ----------------------------------------
+
+// (-1)^neg * value * 2^e, rounded to the format `is_f32` names.
+fn bool round_scaled(bignum mut* value, i64 e, bool neg, bool is_f32, u64 mut* out) {
+    bignum mut den = bignum{};
+    bn_set_u64(&den, 1);
+    if (e > 0) {
+        bn_shl(value, cast(e, u64));
+    } else if (e < 0) {
+        bn_shl(&den, cast(0 - e, u64));
+    }
+    return round_ratio(value, &den, neg, false, is_f32, out);
+}
+
+// The 128-bit product of two u64 values, in halves: the mantissas a
+// multiplication folds are 53 bits each and their product is 106.
+fn void mul_u64(u64 a, u64 b, u64 mut* hi, u64 mut* lo) {
+    u64 a0 = a & LIMB_MASK;
+    u64 a1 = a >> LIMB_BITS;
+    u64 b0 = b & LIMB_MASK;
+    u64 b1 = b >> LIMB_BITS;
+    u64 low = a0 * b0;
+    u64 cross1 = a0 * b1;
+    u64 cross2 = a1 * b0;
+    u64 high = a1 * b1;
+    u64 mid = (low >> LIMB_BITS) + (cross1 & LIMB_MASK) + (cross2 & LIMB_MASK);
+    *lo = (low & LIMB_MASK) | ((mid & LIMB_MASK) << LIMB_BITS);
+    *hi = high + (cross1 >> LIMB_BITS) + (cross2 >> LIMB_BITS) + (mid >> LIMB_BITS);
+}
+
+// Whether the value is a zero of either sign (D6.12: -0.0 == 0.0).
+fn bool flt_is_zero(u64 bits) {
+    return (bits & F64_MAG_MASK) == 0;
+}
+
+// The same value with the sign bit flipped, which is what unary minus does to
+// a constant: a negation and not a subtraction from zero, since the two
+// differ on a zero (D6.12).
+fn u64 flt_neg(u64 bits) {
+    return bits ^ F64_SIGN;
+}
+
+// a + b, rounded once to the format.
+fn bool flt_add(u64 a, u64 b, bool is_f32, u64 mut* out) {
+    bool mut a_neg = false;
+    u64 mut a_mant = 0;
+    i64 mut a_exp = 0;
+    flt_parts(a, &a_neg, &a_mant, &a_exp);
+    bool mut b_neg = false;
+    u64 mut b_mant = 0;
+    i64 mut b_exp = 0;
+    flt_parts(b, &b_neg, &b_mant, &b_exp);
+    if (a_mant == 0 && b_mant == 0) {
+        // Two zeros: the sum is -0.0 only when both are, and +0.0 otherwise,
+        // which is the sum to nearest (D6.12).
+        *out = 0;
+        if (a_neg && b_neg) {
+            *out = F64_SIGN;
+        }
+        return true;
+    }
+    i64 mut e = a_exp;
+    if (b_exp < e) {
+        e = b_exp;
+    }
+    bignum mut x = bignum{};
+    bignum mut y = bignum{};
+    bn_set_u64(&x, a_mant);
+    bn_shl(&x, cast(a_exp - e, u64));
+    bn_set_u64(&y, b_mant);
+    bn_shl(&y, cast(b_exp - e, u64));
+    bool mut neg = a_neg;
+    if (a_neg == b_neg) {
+        bn_add(&x, &y);
+    } else {
+        i32 order = bn_cmp(&x, &y);
+        if (order == 0) {
+            // x + (-x) is +0.0 to nearest, whatever the sign of x (D6.12).
+            *out = 0;
+            return true;
+        }
+        if (order > 0) {
+            bn_sub(&x, &y);
+        } else {
+            bn_sub(&y, &x);
+            x = y;
+            neg = b_neg;
+        }
+    }
+    return round_scaled(&x, e, neg, is_f32, out);
+}
+
+// a - b, which is a + (-b) exactly (D6.12).
+fn bool flt_sub(u64 a, u64 b, bool is_f32, u64 mut* out) {
+    return flt_add(a, flt_neg(b), is_f32, out);
+}
+
+fn bool flt_mul(u64 a, u64 b, bool is_f32, u64 mut* out) {
+    bool mut a_neg = false;
+    u64 mut a_mant = 0;
+    i64 mut a_exp = 0;
+    flt_parts(a, &a_neg, &a_mant, &a_exp);
+    bool mut b_neg = false;
+    u64 mut b_mant = 0;
+    i64 mut b_exp = 0;
+    flt_parts(b, &b_neg, &b_mant, &b_exp);
+    bool neg = a_neg != b_neg;
+    u64 mut sign = 0;
+    if (neg) {
+        sign = F64_SIGN;
+    }
+    if (a_mant == 0 || b_mant == 0) {
+        // A product with a zero is a zero whose sign is the two signs
+        // combined (D6.12).
+        *out = sign;
+        return true;
+    }
+    u64 mut high = 0;
+    u64 mut low = 0;
+    mul_u64(a_mant, b_mant, &high, &low);
+    bignum mut x = bignum{};
+    bn_set_u128(&x, high, low);
+    return round_scaled(&x, a_exp + b_exp, neg, is_f32, out);
+}
+
+// a / b. A division by zero yields an infinity or a NaN, neither of which is
+// a constant (D4.4, D6.12), so it returns false and the checker reports it.
+fn bool flt_div(u64 a, u64 b, bool is_f32, u64 mut* out) {
+    bool mut a_neg = false;
+    u64 mut a_mant = 0;
+    i64 mut a_exp = 0;
+    flt_parts(a, &a_neg, &a_mant, &a_exp);
+    bool mut b_neg = false;
+    u64 mut b_mant = 0;
+    i64 mut b_exp = 0;
+    flt_parts(b, &b_neg, &b_mant, &b_exp);
+    bool neg = a_neg != b_neg;
+    if (b_mant == 0) {
+        return false;
+    }
+    if (a_mant == 0) {
+        *out = 0;
+        if (neg) {
+            *out = F64_SIGN;
+        }
+        return true;
+    }
+    bignum mut num = bignum{};
+    bignum mut den = bignum{};
+    bn_set_u64(&num, a_mant);
+    bn_set_u64(&den, b_mant);
+    i64 e = a_exp - b_exp;
+    if (e > 0) {
+        bn_shl(&num, cast(e, u64));
+    } else if (e < 0) {
+        bn_shl(&den, cast(0 - e, u64));
+    }
+    return round_ratio(&num, &den, neg, false, is_f32, out);
+}
+
+// -1, 0 or 1 as a is below, equal to or above b. Both are finite, so the
+// ordering is the ordering of the patterns, with the zeros equal (D6.12).
+fn i32 flt_cmp(u64 a, u64 b) {
+    if (flt_is_zero(a) && flt_is_zero(b)) {
+        return 0;
+    }
+    bool a_neg = (a & F64_SIGN) != 0;
+    bool b_neg = (b & F64_SIGN) != 0;
+    if (a_neg != b_neg) {
+        if (a_neg) {
+            return -1;
+        }
+        return 1;
+    }
+    u64 a_mag = a & F64_MAG_MASK;
+    u64 b_mag = b & F64_MAG_MASK;
+    if (a_mag == b_mag) {
+        return 0;
+    }
+    bool mut below = a_mag < b_mag;
+    if (a_neg) {
+        // Below zero the larger pattern is the smaller value.
+        below = !below;
+    }
+    if (below) {
+        return -1;
+    }
+    return 1;
+}
+
+// The integer constant (-1)^neg * mag as a value of the format `is_f32`
+// names, rounded to nearest (D3.14); false when it is not finite there, which
+// no integer of 64 bits is in either format.
+fn bool flt_from_int(bool neg, u64 mag, bool is_f32, u64 mut* out) {
+    bignum mut num = bignum{};
+    bignum mut den = bignum{};
+    bn_set_u64(&num, mag);
+    bn_set_u64(&den, 1);
+    return round_ratio(&num, &den, neg, false, is_f32, out);
+}
+
+// The binary64 value rounded to binary32, held as the binary64 of that
+// binary32 (D3.14); false when it is not finite in binary32. The conversion
+// the other way is the identity, since the value is kept in binary64 already.
+fn bool flt_to_f32(u64 bits, u64 mut* out) {
+    bool mut neg = false;
+    u64 mut mant = 0;
+    i64 mut exp = 0;
+    flt_parts(bits, &neg, &mant, &exp);
+    if (mant == 0) {
+        *out = bits & F64_SIGN;
+        return true;
+    }
+    bignum mut num = bignum{};
+    bn_set_u64(&num, mant);
+    return round_scaled(&num, exp, neg, true, out);
+}
+
+// The value truncated toward zero as a sign and a magnitude (D3.14); false
+// when the magnitude is past 2^64 - 1, which the caller saturates.
+fn bool flt_to_int(u64 bits, bool mut* neg, u64 mut* mag) {
+    u64 mut mant = 0;
+    i64 mut exp = 0;
+    flt_parts(bits, neg, &mant, &exp);
+    *mag = 0;
+    if (mant == 0) {
+        return true;
+    }
+    if (exp >= 0) {
+        if (bits_of_u64(mant) + cast(exp, u64) > 64) {
+            return false;
+        }
+        *mag = mant << cast(exp, u64);
+        return true;
+    }
+    u64 down = cast(0 - exp, u64);
+    if (down >= 64) {
+        // Every bit of the value stands below the point, so the integer part
+        // is zero (D3.14 truncates toward zero).
+        return true;
+    }
+    *mag = mant >> down;
+    return true;
+}
+
+// `0x` and the sixteen hex digits of the binary64 pattern: the form an LLVM
+// `double` or `float` constant takes, a `float` carrying the pattern of the
+// binary64 its value equals exactly (item 5 of toolchain.md 6, D19.1).
+fn void flt_hex(u64 bits, strbuf.str_buf mut* out) {
+    strbuf.append(out, "0x");
+    u64 mut i = HEX_COUNT;
+    while (i > 0) {
+        i -= 1;
+        strbuf.push(out, HEX_DIGITS[(bits >> (i * HEX_BITS)) & HEX_MASK]);
+    }
+}

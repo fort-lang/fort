@@ -58,19 +58,19 @@ done
 # them: an equality and not a floor, so that a file cannot slip out of the
 # comparison. A ticket that adds or removes a .ft file changes all four lines
 # in the same commit.
-FT_FILES=774
+FT_FILES=836
 
 # The files of that corpus stage1 compiles into a module, which are the ones
 # compared. It is an equality for the reason FT_FILES is: a comparison that
 # shrank would otherwise pass while seeing less, and ctest reads the exit
 # status and not the counts printed below.
-# It is 8 above diff_check.sh's CLEAN_FILES, and the two sets are not nested:
-# they differ by 80 files one way and 72 the other. This script's roots are
-# wider -- -I src/fort -I test/fort/support reaches the 80 test/fort tests that
+# It is 9 above diff_check.sh's CLEAN_FILES, and the two sets are not nested:
+# they differ by 82 files one way and 73 the other. This script's roots are
+# wider -- -I src/fort -I test/fort/support reaches the 82 test/fort tests that
 # import a support module, which that script cannot resolve and skips -- and
-# its question is narrower, since the 72 files that check clean and hold no
+# its question is narrower, since the 73 files that check clean and hold no
 # `main` compile into no module and are skipped here.
-PROGRAM_FILES=458
+PROGRAM_FILES=466
 
 # The search roots every run is given: the standard library the build copied,
 # src/fort so that the compiler's own modules resolve, and test/fort/support

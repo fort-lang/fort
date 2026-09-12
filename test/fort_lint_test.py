@@ -765,10 +765,23 @@ class IncludeRoots(unittest.TestCase):
     def test_the_set_holds_every_file_of_every_glob_once(self):
         files = fort_lint.default_file_set(ROOT)
         paths = [path for path, _ in files]
+        skipped = {(ROOT / name).resolve() for name in fort_lint.SKIPPED}
         self.assertEqual(len(paths), len(set(paths)))
         self.assertEqual(paths, sorted(paths))
         for glob in fort_lint.SOURCE_GLOBS:
-            self.assertTrue(set(fort_lint.collect(ROOT, (glob,))) <= set(paths), glob)
+            matched = {p for p in fort_lint.collect(ROOT, (glob,)) if p.resolve() not in skipped}
+            self.assertTrue(matched <= set(paths), glob)
+
+    def test_the_float_runtime_is_left_to_the_compiler_that_has_floats(self):
+        """std/rt_float.ft holds floats and the C bootstrap rejects them
+        (D18.1), so the default set leaves it out and the ctest
+        fort_lint_float lints it with stage2. A skipped file that does not
+        exist would be a typo nothing reports, so it is checked as well."""
+        files = {path.relative_to(ROOT).as_posix() for path, _ in fort_lint.default_file_set(ROOT)}
+        self.assertEqual(fort_lint.SKIPPED, ("std/rt_float.ft",))
+        for name in fort_lint.SKIPPED:
+            self.assertNotIn(name, files)
+            self.assertTrue((ROOT / name).is_file(), name)
 
     def test_the_set_is_the_four_corpora(self):
         """The count the ctest reports, so a glob that stops matching is seen."""
@@ -818,9 +831,12 @@ class RealCompiler(unittest.TestCase):
         self.assertEqual(got.stdout.strip().split("\n"), BAD_NAMES_PROBLEMS)
 
     def test_the_standard_library_conforms(self):
-        got = self.run_lint(
-            *[str(p.relative_to(ROOT)) for p in sorted((ROOT / "std").glob("*.ft"))]
-        )
+        """Every module of std but the ones SKIPPED names, which the compiler
+        this test runs -- the C bootstrap -- cannot check (D18.1)."""
+        skipped = {(ROOT / name).resolve() for name in fort_lint.SKIPPED}
+        files = [p for p in sorted((ROOT / "std").glob("*.ft")) if p.resolve() not in skipped]
+        self.assertEqual(len(files) + len(skipped), len(list((ROOT / "std").glob("*.ft"))))
+        got = self.run_lint(*[str(p.relative_to(ROOT)) for p in files])
         self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
 
     def test_a_rejected_file_is_reported_and_still_judged(self):

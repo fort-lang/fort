@@ -8,6 +8,13 @@
 // false; the caller turns that into the compile error. Nothing here wraps
 // unless the operation is a `cast` (D3.14) or a wrapping operator (D11.2).
 //
+// A float constant is the binary64 bit pattern of a finite value, held and
+// computed on by flt.ft, since the compiler's own source has no float type.
+// Every float constant is finite: D4.4 makes one that is not an error, so each
+// fold below answers false where the exact result leaves the format and the
+// checker reports it. An f32 constant holds the binary64 of its binary32
+// value, which that format holds exactly.
+//
 // The other kinds are the remaining constants of D4.6: `bool`, a char literal
 // (a code point 0..255 whose default type is `char`, D4.3), `null`, a string
 // literal (a view of its decoded bytes) and "none", the value of an expression
@@ -51,6 +58,7 @@
 // a stated precondition, not in-process recovery.
 //
 // Dispatch: none. The case analysis is the switches the C wrote (D3.10).
+import flt;
 import prim;
 import std.strbuf;
 
@@ -90,15 +98,17 @@ enum cval_kind {
     cv_char, // a char literal: a code point 0..255
     cv_null, // the literal null
     cv_str,  // a string literal: a view of its decoded bytes
+    cv_float, // a float: the binary64 bits of a finite value (D4.4)
 }
 
 // One constant value. cval{} is the none value, so a struct holding one is
 // initialized with {}.
 struct cval {
     cval_kind kind;
-    bool neg;   // cv_int: the value is -mag; never set when mag is 0
-    u64 mag;    // cv_int: |value|; cv_char: the code point; cv_bool: 0/1
-    string str; // cv_str: the bytes
+    bool neg;    // cv_int: the value is -mag; never set when mag is 0
+    u64 mag;     // cv_int: |value|; cv_char: the code point; cv_bool: 0/1
+    string str;  // cv_str: the bytes
+    u64 fbits;   // cv_float: the binary64 pattern of the value (flt.ft)
 }
 
 // The comparison operators of cv_compare.
@@ -114,7 +124,7 @@ enum cv_rel {
 // ---- construction --------------------------------------------------------------
 
 fn cval int_make(bool neg, u64 mag) {
-    return cval{cval_kind.cv_int, neg && mag != 0, mag, ""};
+    return cval{cval_kind.cv_int, neg && mag != 0, mag, "", 0};
 }
 
 // Stores `-mag` or `mag` when it lies in the constant range, else none.
@@ -143,7 +153,7 @@ fn void require_bool(cval v) {
 }
 
 fn cval cv_none() {
-    return cval{cval_kind.cv_none, false, 0, ""};
+    return cval{cval_kind.cv_none, false, 0, "", 0};
 }
 
 fn cval cv_from_i64(i64 v) {
@@ -166,28 +176,67 @@ fn cval cv_from_char(u64 code) {
     if (code > CV_CHAR_MAX) {
         panic("consts.cv_from_char: char constant outside 0..255");
     }
-    return cval{cval_kind.cv_char, false, code, ""};
+    return cval{cval_kind.cv_char, false, code, "", 0};
 }
 
 fn cval cv_from_bool(bool b) {
     if (b) {
-        return cval{cval_kind.cv_bool, false, 1, ""};
+        return cval{cval_kind.cv_bool, false, 1, "", 0};
     }
-    return cval{cval_kind.cv_bool, false, 0, ""};
+    return cval{cval_kind.cv_bool, false, 0, "", 0};
 }
 
 fn cval cv_null() {
-    return cval{cval_kind.cv_null, false, 0, ""};
+    return cval{cval_kind.cv_null, false, 0, "", 0};
+}
+
+// A float constant from the text of a literal (D2.6), evaluated in binary64
+// (D4.4); false when the value is not finite there, which D4.4 makes a
+// compile error.
+fn bool cv_from_float_text(string text, cval mut* out) {
+    u64 mut bits = 0;
+    if (!flt.flt_parse(text, &bits)) {
+        *out = cv_none();
+        return false;
+    }
+    *out = cv_from_float(bits);
+    return true;
+}
+
+// A float constant from the binary64 pattern of a finite value; the pattern
+// of an f32 constant is the binary64 its binary32 value equals exactly.
+fn cval cv_from_float(u64 bits) {
+    return cval{cval_kind.cv_float, false, 0, "", bits};
 }
 
 fn cval cv_from_str(string s) {
-    return cval{cval_kind.cv_str, false, 0, s};
+    return cval{cval_kind.cv_str, false, 0, s, 0};
 }
 
 // ---- queries -------------------------------------------------------------------
 
 fn bool cv_is_int(cval v) {
     return v.kind == cval_kind.cv_int;
+}
+
+fn bool cv_is_float(cval v) {
+    return v.kind == cval_kind.cv_float;
+}
+
+// The binary64 pattern of a float constant; every other kind is a broken
+// precondition, since the checker asks only where it has typed the value.
+fn u64 cv_float_bits(cval v) {
+    if (v.kind != cval_kind.cv_float) {
+        panic("consts.cv_float_bits: the constant is not a float");
+    }
+    return v.fbits;
+}
+
+// The format a float constant is folded in: binary32 for f32 and binary64 for
+// every other float context, which is also what an untyped float is evaluated
+// in (D4.4).
+fn bool is_f32(prim.prim_kind t) {
+    return t == prim.prim_kind.prim_f32;
 }
 
 // An integer or a char: a char in an integer context is its code point (D4.3).
@@ -206,13 +255,23 @@ fn cval cv_as_int(cval v) {
     return v;
 }
 
-// Whether the integer is 0, or negative (a negative constant in an index,
-// bound or count position is a compile error, D4.1).
+// Whether the value is zero, which is what the division check of D4.4 asks of
+// a divisor. A float has two zeros and both answer true (D6.12); a char is
+// its code point, since a divisor may be one (`4 / '\0'`), and every other
+// kind is a broken precondition as it is for the arithmetic.
 fn bool cv_is_zero(cval v) {
+    if (v.kind == cval_kind.cv_float) {
+        return flt.flt_is_zero(v.fbits);
+    }
+    if (v.kind == cval_kind.cv_char) {
+        return v.mag == 0;
+    }
     require_int(v);
     return v.mag == 0;
 }
 
+// Whether the integer is negative: a negative constant in an index, bound or
+// count position is a compile error (D4.1).
 fn bool cv_is_neg(cval v) {
     require_int(v);
     return v.neg;
@@ -278,6 +337,14 @@ fn bool int_from_bits(bool high, u64 bits, cval mut* out) {
 
 // Two integers or two chars in order: -1, 0 or 1.
 fn i32 cv_cmp(cval a, cval b) {
+    if (a.kind == cval_kind.cv_float || b.kind == cval_kind.cv_float) {
+        if (a.kind != b.kind) {
+            panic("consts.cv_cmp: a float constant compared with another kind");
+        }
+        // Every float constant is finite, so the ordering is the ordering of
+        // the values and the two zeros are equal (D6.12).
+        return flt.flt_cmp(a.fbits, b.fbits);
+    }
     if (a.kind != cval_kind.cv_char || b.kind != cval_kind.cv_char) {
         require_int(a);
         require_int(b);
@@ -317,6 +384,9 @@ fn bool cv_eq(cval a, cval b) {
         return true;
     case cval_kind.cv_str:
         return a.str == b.str;
+    case cval_kind.cv_float:
+        // -0.0 == 0.0, and no constant is a NaN (D6.12, D4.4).
+        return flt.flt_cmp(a.fbits, b.fbits) == 0;
     }
     return false;
 }
@@ -576,10 +646,49 @@ fn bool cv_fits(cval v, prim.prim_kind t) {
                (prim.prim_is_integer(t) && int_fits(cv_as_int(v), t));
     case cval_kind.cv_bool:
         return t == prim.prim_kind.prim_bool;
+    case cval_kind.cv_float:
+        // A float constant takes a float type and no other, not even when it
+        // is integral (D4.2); it must be finite in that one (D4.4).
+        if (!prim.prim_is_float(t)) {
+            return false;
+        }
+        u64 mut bits = 0;
+        return cv_to_float_bits(v, t, &bits);
     case cval_kind.cv_none, cval_kind.cv_null, cval_kind.cv_str:
         return false;
     }
     return false;
+}
+
+// The value of an integer, char or float constant in the float type `t`,
+// rounded to nearest (D4.2, D3.14); false when it is not finite there, which
+// D4.4 makes a compile error.
+fn bool cv_to_float_bits(cval v, prim.prim_kind t, u64 mut* out) {
+    if (!prim.prim_is_float(t)) {
+        panic("consts.cv_to_float_bits: the target is not a float type");
+    }
+    if (v.kind == cval_kind.cv_float) {
+        if (!is_f32(t)) {
+            // Every constant is already held in binary64, so widening it is
+            // the identity.
+            *out = v.fbits;
+            return true;
+        }
+        return flt.flt_to_f32(v.fbits, out);
+    }
+    cval i = cv_as_int(v);
+    return flt.flt_from_int(i.neg, i.mag, is_f32(t), out);
+}
+
+// The same conversion as a constant (D4.2).
+fn bool cv_to_float(cval v, prim.prim_kind t, cval mut* out) {
+    u64 mut bits = 0;
+    if (!cv_to_float_bits(v, t, &bits)) {
+        *out = cv_none();
+        return false;
+    }
+    *out = cv_from_float(bits);
+    return true;
 }
 
 // The default type of a constant with no context (D4.5): i32 if the integer
@@ -602,6 +711,10 @@ fn bool cv_default_kind(cval v, prim.prim_kind mut* out) {
         return true;
     case cval_kind.cv_bool:
         *out = prim.prim_kind.prim_bool;
+        return true;
+    case cval_kind.cv_float:
+        // An untyped float with no context becomes f64 (D4.5).
+        *out = prim.prim_kind.prim_f64;
         return true;
     case cval_kind.cv_none, cval_kind.cv_null, cval_kind.cv_str:
         return false;
@@ -631,13 +744,38 @@ fn cval int_from_truncated(u64 bits, prim.prim_kind t) {
 // integer type keeps the low bits of its two's-complement pattern and sign- or
 // zero-extends by the target (`cast(300, u8)` is 44, `cast(-1, u32)` is
 // 4294967295, `cast(0x80000000, i32)` is -2147483648); to `char` it keeps the
-// low byte; a bool becomes 0 or 1. False for a cast to `bool` (D3.14 forbids
-// it), to a float (unsupported by the bootstrap), to `void`, and for null,
-// strings and none.
+// low byte; a bool becomes 0 or 1; an integer to a float rounds to nearest and
+// a float to an integer truncates toward zero and saturates. False for a cast
+// to `bool` (D3.14 forbids it), to `void`, from a `char` or a `bool` to a
+// float, from a float to anything but a number, for a float result that is
+// not finite (D4.4), and for null, strings and none.
 fn bool cv_cast(cval v, prim.prim_kind t, cval mut* out) {
+    if (v.kind == cval_kind.cv_float) {
+        if (prim.prim_is_integer(t)) {
+            return float_to_int(v, t, out);
+        }
+        if (prim.prim_is_float(t)) {
+            // Float to float rounds to nearest, and a result that is not
+            // finite in the target is a compile error (D3.14, D4.4).
+            return cv_to_float(v, t, out);
+        }
+        // A float reaches `char`, `bool` and an enum through no row of D3.14.
+        *out = cv_none();
+        return false;
+    }
     if (!cv_is_int_like(v) && v.kind != cval_kind.cv_bool) {
         *out = cv_none();
         return false;
+    }
+    if (prim.prim_is_float(t)) {
+        if (v.kind != cval_kind.cv_int) {
+            // `char` and `bool` reach an integer type and nothing else: no row
+            // of D3.14 takes either of them to a float.
+            *out = cv_none();
+            return false;
+        }
+        // An integer reaches a float by rounding to nearest (D3.14).
+        return cv_to_float(v, t, out);
     }
     u64 mut bits = v.mag;
     if (v.kind != cval_kind.cv_bool) {
@@ -651,10 +789,116 @@ fn bool cv_cast(cval v, prim.prim_kind t, cval mut* out) {
         *out = cv_from_char(bits & CV_CHAR_MAX);
         return true;
     }
-    // Integer to bool is forbidden (D3.14); floats are not in the bootstrap
-    // (T-041); void is never a value; bool to char is not a cast of D3.14.
+    // Integer to bool is forbidden (D3.14); void is never a value; bool to
+    // char and bool to float are not casts of D3.14 either.
     *out = cv_none();
     return false;
+}
+
+// `cast(v, t)` from a float to an integer type: the value truncated toward
+// zero and saturated at the range of `t`, which is what the saturating
+// intrinsic of D19.2 computes at run time (D3.14). No constant is a NaN
+// (D4.4), so the NaN row of that rule has no case here.
+fn bool float_to_int(cval v, prim.prim_kind t, cval mut* out) {
+    bool mut neg = false;
+    u64 mut mag = 0;
+    bool inside = flt.flt_to_int(v.fbits, &neg, &mag);
+    u64 width = int_width(t);
+    u64 one = 1;
+    u64 mut limit = U64_MAX;
+    if (prim.prim_is_signed(t)) {
+        // The magnitude of the least value of a signed type is one above its
+        // largest value.
+        limit = one << (width - 1);
+        if (!neg) {
+            limit -= 1;
+        }
+    } else if (neg) {
+        // A negative value saturates at zero: an unsigned type holds none.
+        limit = 0;
+    } else if (width != WORD_BITS) {
+        limit = (one << width) - 1;
+    }
+    if (!inside || mag > limit) {
+        mag = limit;
+    }
+    *out = int_make(neg, mag);
+    return true;
+}
+
+// ---- float folding (D4.4, D6.12) -----------------------------------------------
+
+// The four operations on two constants in the float type `t`, each rounding
+// the exact result once (D6.12). An integer or char operand takes `t` first,
+// which is the contextual conversion of D4.2 and the rule of D4.4 that an
+// integer with a float folds as a float. False, and cv_none, where an operand
+// or the result is not finite in `t`, or where a division has a zero divisor:
+// D4.4 admits no such constant.
+fn bool cv_float_add(cval a, cval b, prim.prim_kind t, cval mut* out) {
+    u64 mut x = 0;
+    u64 mut y = 0;
+    u64 mut r = 0;
+    *out = cv_none();
+    if (!cv_to_float_bits(a, t, &x) || !cv_to_float_bits(b, t, &y)) {
+        return false;
+    }
+    if (!flt.flt_add(x, y, is_f32(t), &r)) {
+        return false;
+    }
+    *out = cv_from_float(r);
+    return true;
+}
+
+fn bool cv_float_sub(cval a, cval b, prim.prim_kind t, cval mut* out) {
+    u64 mut x = 0;
+    u64 mut y = 0;
+    u64 mut r = 0;
+    *out = cv_none();
+    if (!cv_to_float_bits(a, t, &x) || !cv_to_float_bits(b, t, &y)) {
+        return false;
+    }
+    if (!flt.flt_sub(x, y, is_f32(t), &r)) {
+        return false;
+    }
+    *out = cv_from_float(r);
+    return true;
+}
+
+fn bool cv_float_mul(cval a, cval b, prim.prim_kind t, cval mut* out) {
+    u64 mut x = 0;
+    u64 mut y = 0;
+    u64 mut r = 0;
+    *out = cv_none();
+    if (!cv_to_float_bits(a, t, &x) || !cv_to_float_bits(b, t, &y)) {
+        return false;
+    }
+    if (!flt.flt_mul(x, y, is_f32(t), &r)) {
+        return false;
+    }
+    *out = cv_from_float(r);
+    return true;
+}
+
+fn bool cv_float_div(cval a, cval b, prim.prim_kind t, cval mut* out) {
+    u64 mut x = 0;
+    u64 mut y = 0;
+    u64 mut r = 0;
+    *out = cv_none();
+    if (!cv_to_float_bits(a, t, &x) || !cv_to_float_bits(b, t, &y)) {
+        return false;
+    }
+    if (!flt.flt_div(x, y, is_f32(t), &r)) {
+        return false;
+    }
+    *out = cv_from_float(r);
+    return true;
+}
+
+// Unary minus on a float constant flips the sign bit, which is exact in both
+// formats and is not a subtraction from zero: the two differ on a zero and on
+// a NaN (D6.12).
+fn cval cv_float_neg(cval v) {
+    return cv_from_float(flt.flt_neg(cv_float_bits(v)));
 }
 
 // ---- typed folding (D4.6, D6.2, D6.13, D11.2) ----------------------------------
@@ -878,8 +1122,16 @@ fn void str_to_str(string s, strbuf.str_buf mut* out) {
 // `false`, `null`, a string as a string literal between double quotes with the
 // escapes of D2.8 (so a quote, a newline or a NUL byte cannot break the
 // diagnostic line), and `<none>`.
+// The text of a constant in a diagnostic. A float constant has no text form
+// here: the shortest decimal that reads back is the runtime's work (D18.2)
+// and no message of the checker prints a float value, since the two that
+// print a constant at all -- the one that does not fit its type and the enum
+// value that does not fit i32 -- name the float rather than print it. Asking
+// for one is therefore a broken precondition (D13.3).
 fn void cv_to_str(cval v, strbuf.str_buf mut* out) {
     switch (v.kind) {
+    case cval_kind.cv_float:
+        panic("consts.cv_to_str: a float constant has no text form");
     case cval_kind.cv_none:
         strbuf.append(out, "<none>");
         return;

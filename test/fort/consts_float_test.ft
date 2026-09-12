@@ -1,0 +1,358 @@
+//! run
+//! flags: -I ../../src/fort
+//! stdout:
+//| model ok
+//| context ok
+//| casts ok
+//| folding ok
+//| ok
+import consts;
+import flt;
+import prim;
+
+// The float constants of src/fort/consts.ft: the kind of D4.4, the contextual
+// conversion of D4.2 and D4.5, the casts of D3.14 and the folding of D4.4 and
+// D4.6.
+//
+// flt_test.ft holds the arithmetic itself against an exact oracle; this suite
+// holds the layer above it -- which constant takes which type, which cast
+// folds and what a fold does with an integer operand -- so the values here are
+// the plain ones whose patterns a reader can check by eye.
+
+// The binary64 patterns the cases below name, each written as its decimal
+// value in the comment.
+u64 ONE = 0x3FF0000000000000;        // 1.0
+u64 TWO = 0x4000000000000000;        // 2.0
+u64 THREE = 0x4008000000000000;      // 3.0
+u64 HALF = 0x3FE0000000000000;       // 0.5
+u64 MINUS_ONE = 0xBFF0000000000000;  // -1.0
+u64 MINUS_TWO = 0xC000000000000000;  // -2.0
+u64 ZERO = 0x0000000000000000;       // 0.0
+u64 MINUS_ZERO = 0x8000000000000000; // -0.0
+u64 TENTH = 0x3FB999999999999A;      // 0.1
+u64 FIFTH = 0x3FC999999999999A;      // 0.2
+u64 THIRD = 0x3FD5555555555555;      // 1.0 / 3.0
+u64 THREE_TENTHS = 0x3FD3333333333333;   // 0.3
+u64 TENTH_PLUS_FIFTH = 0x3FD3333333333334; // 0.1 + 0.2, which is not 0.3
+u64 TWO_AND_HALF = 0x4004000000000000;   // 2.5
+u64 MINUS_TWO_AND_HALF = 0xC004000000000000; // -2.5
+u64 TWO_POINT_NINE = 0x4007333333333333;  // 2.9
+u64 THREE_HUNDRED = 0x4072C00000000000;   // 300.0
+u64 E20 = 0x4415AF1D78B58C40;        // 1e20
+u64 E300 = 0x7E37E43C8800759C;       // 1e300
+u64 MINUS_E20 = 0xC415AF1D78B58C40;  // -1e20
+u64 TENTH_F32 = 0x3FB99999A0000000;  // 0.1 in binary32
+u64 THIRD_F32 = 0x3FD5555560000000;  // 1.0 / 3.0 in binary32
+u64 TWO53 = 0x4340000000000000;      // 2^53, and 2^53 + 1 rounded to it
+u64 TWO24 = 0x4170000000000000;      // 2^24, and 2^24 + 1 rounded to it in f32
+
+i64 I32_MAX = 2147483647;
+i64 I32_MIN = -2147483648;
+i64 I64_MAX = 9223372036854775807;
+i64 I64_MIN = -9223372036854775808;
+u64 U8_MAX = 255;
+u64 U64_MAX = 18446744073709551615;
+
+fn consts.cval f(u64 bits) {
+    return consts.cv_from_float(bits);
+}
+
+fn consts.cval i(i64 v) {
+    return consts.cv_from_i64(v);
+}
+
+fn void want_bits(string what, consts.cval v, u64 bits) {
+    u64 got = consts.cv_float_bits(v);
+    if (got != bits) {
+        println(what, " = ", got, ", want ", bits);
+    }
+    assert(got == bits);
+}
+
+fn void want_u64(string what, consts.cval v, u64 value) {
+    u64 mut got = 0;
+    bool ok = consts.cv_to_u64(v, &got);
+    if (!ok || got != value) {
+        println(what, " = ", got, " ok ", ok, ", want ", value);
+    }
+    assert(ok);
+    assert(got == value);
+}
+
+fn void want_int(string what, consts.cval v, i64 value) {
+    i64 mut got = 0;
+    bool ok = consts.cv_to_i64(v, &got);
+    if (!ok || got != value) {
+        println(what, " = ", got, " ok ", ok, ", want ", value);
+    }
+    assert(ok);
+    assert(got == value);
+}
+
+// ---- the model -------------------------------------------------------------------
+
+// A float constant is its own kind, and it is neither an integer nor
+// int-like: nothing that folds integers may take one (D4.4).
+fn void a_float_constant_is_its_own_kind() {
+    consts.cval v = f(TENTH);
+    assert(consts.cv_is_float(v));
+    assert(!consts.cv_is_int(v));
+    assert(!consts.cv_is_int_like(v));
+    assert(consts.cv_float_bits(v) == TENTH);
+    assert(!consts.cv_is_float(i(1)));
+    assert(!consts.cv_is_float(consts.cv_none()));
+}
+
+// Both zeros answer true, which is what the division check of D4.4 asks of a
+// divisor: 1.0 / -0.0 is an infinity like 1.0 / 0.0 (D6.12).
+fn void the_two_zeros_are_both_zero() {
+    assert(consts.cv_is_zero(f(ZERO)));
+    assert(consts.cv_is_zero(f(MINUS_ZERO)));
+    assert(!consts.cv_is_zero(f(TENTH)));
+}
+
+// Equality is the equality of the values, so the two zeros are one constant
+// and 0.1 + 0.2 is not 0.3 (D6.12).
+fn void equality_is_the_equality_of_the_values() {
+    assert(consts.cv_eq(f(ZERO), f(MINUS_ZERO)));
+    assert(consts.cv_eq(f(TENTH), f(TENTH)));
+    assert(!consts.cv_eq(f(TENTH), f(FIFTH)));
+    assert(!consts.cv_eq(f(TENTH_PLUS_FIFTH), f(THREE_TENTHS)));
+    // A float and an integer are constants of different kinds and never equal.
+    assert(!consts.cv_eq(f(ONE), i(1)));
+}
+
+fn void the_ordering_is_the_ordering_of_the_values() {
+    assert(consts.cv_compare(consts.cv_rel.cv_rel_lt, f(TENTH), f(FIFTH)).mag == 1);
+    assert(consts.cv_compare(consts.cv_rel.cv_rel_gt, f(MINUS_ONE), f(ONE)).mag == 0);
+    assert(consts.cv_compare(consts.cv_rel.cv_rel_le, f(MINUS_ZERO), f(ZERO)).mag == 1);
+    assert(consts.cv_compare(consts.cv_rel.cv_rel_ge, f(MINUS_ZERO), f(ZERO)).mag == 1);
+    assert(consts.cv_compare(consts.cv_rel.cv_rel_ne, f(ZERO), f(MINUS_ZERO)).mag == 0);
+    assert(consts.cv_compare(consts.cv_rel.cv_rel_lt, f(MINUS_TWO), f(MINUS_ONE)).mag == 1);
+}
+
+fn void model() {
+    a_float_constant_is_its_own_kind();
+    the_two_zeros_are_both_zero();
+    equality_is_the_equality_of_the_values();
+    the_ordering_is_the_ordering_of_the_values();
+    println("model ok");
+}
+
+// ---- taking a type (D4.2, D4.5) --------------------------------------------------
+
+// A float constant takes a float type and no other, not even when it is
+// integral: `i32 x = 2.0;` is an error (D4.2).
+fn void a_float_constant_fits_a_float_type_only() {
+    assert(consts.cv_fits(f(TENTH), prim.prim_kind.prim_f64));
+    assert(consts.cv_fits(f(TENTH), prim.prim_kind.prim_f32));
+    assert(!consts.cv_fits(f(TWO), prim.prim_kind.prim_i32));
+    assert(!consts.cv_fits(f(TWO), prim.prim_kind.prim_i64));
+    assert(!consts.cv_fits(f(TWO), prim.prim_kind.prim_u8));
+    assert(!consts.cv_fits(f(TWO), prim.prim_kind.prim_char));
+    assert(!consts.cv_fits(f(TWO), prim.prim_kind.prim_bool));
+}
+
+// A float constant that is not finite in the type it is given is an error
+// (D4.4): 1e300 has no binary32.
+fn void a_float_constant_outside_binary32_does_not_fit_it() {
+    assert(consts.cv_fits(f(E300), prim.prim_kind.prim_f64));
+    assert(!consts.cv_fits(f(E300), prim.prim_kind.prim_f32));
+    assert(consts.cv_fits(f(E20), prim.prim_kind.prim_f32));
+}
+
+// An integer constant fits either float type, whatever its magnitude: it
+// rounds (D4.2).
+fn void an_integer_constant_fits_either_float_type() {
+    assert(consts.cv_fits(i(7), prim.prim_kind.prim_f32));
+    assert(consts.cv_fits(i(7), prim.prim_kind.prim_f64));
+    assert(consts.cv_fits(consts.cv_from_u64(U64_MAX), prim.prim_kind.prim_f32));
+    assert(consts.cv_fits(i(I64_MIN), prim.prim_kind.prim_f64));
+}
+
+// An untyped float with no context becomes f64 (D4.5).
+fn void an_untyped_float_defaults_to_binary64() {
+    prim.prim_kind mut k = prim.prim_kind.prim_i32;
+    assert(consts.cv_default_kind(f(TENTH), &k));
+    assert(k == prim.prim_kind.prim_f64);
+}
+
+// The conversion itself: an integer rounds to nearest, a float narrows to
+// binary32 and a widening is the identity, since a constant is held in
+// binary64 already (D4.2, D3.14).
+fn void the_conversion_rounds_once_to_the_type() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_to_float(i(7), prim.prim_kind.prim_f64, &r));
+    want_bits("7 as f64", r, 0x401C000000000000);
+    assert(consts.cv_to_float(i(3), prim.prim_kind.prim_f32, &r));
+    want_bits("3 as f32", r, 0x4008000000000000);
+    // 2^53 + 1 has no binary64 and goes to the even mantissa, which is 2^53.
+    assert(consts.cv_to_float(consts.cv_from_u64(9007199254740993), prim.prim_kind.prim_f64, &r));
+    want_bits("2^53 + 1 as f64", r, TWO53);
+    // 2^24 + 1 has no binary32 and goes the same way.
+    assert(consts.cv_to_float(consts.cv_from_u64(16777217), prim.prim_kind.prim_f32, &r));
+    want_bits("2^24 + 1 as f32", r, TWO24);
+    assert(consts.cv_to_float(f(TENTH), prim.prim_kind.prim_f32, &r));
+    want_bits("0.1 as f32", r, TENTH_F32);
+    assert(consts.cv_to_float(f(TENTH_F32), prim.prim_kind.prim_f64, &r));
+    want_bits("0.1 in f32 as f64", r, TENTH_F32);
+    assert(!consts.cv_to_float(f(E300), prim.prim_kind.prim_f32, &r));
+    assert(r.kind == consts.cval_kind.cv_none);
+}
+
+fn void context() {
+    a_float_constant_fits_a_float_type_only();
+    a_float_constant_outside_binary32_does_not_fit_it();
+    an_integer_constant_fits_either_float_type();
+    an_untyped_float_defaults_to_binary64();
+    the_conversion_rounds_once_to_the_type();
+    println("context ok");
+}
+
+// ---- casts (D3.14) ---------------------------------------------------------------
+
+// A float to an integer truncates toward zero.
+fn void a_cast_to_an_integer_truncates_toward_zero() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_cast(f(TWO_AND_HALF), prim.prim_kind.prim_i32, &r));
+    want_int("cast(2.5, i32)", r, 2);
+    assert(consts.cv_cast(f(MINUS_TWO_AND_HALF), prim.prim_kind.prim_i32, &r));
+    want_int("cast(-2.5, i32)", r, -2);
+    assert(consts.cv_cast(f(TWO_POINT_NINE), prim.prim_kind.prim_u8, &r));
+    want_int("cast(2.9, u8)", r, 2);
+    assert(consts.cv_cast(f(HALF), prim.prim_kind.prim_i64, &r));
+    want_int("cast(0.5, i64)", r, 0);
+    assert(consts.cv_cast(f(MINUS_ZERO), prim.prim_kind.prim_i32, &r));
+    want_int("cast(-0.0, i32)", r, 0);
+}
+
+// It saturates at both ends of the target's range, which is what the
+// saturating intrinsic computes at run time (D3.14, D19.2).
+fn void a_cast_to_an_integer_saturates_at_both_ends() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_cast(f(E20), prim.prim_kind.prim_i32, &r));
+    want_int("cast(1e20, i32)", r, I32_MAX);
+    assert(consts.cv_cast(f(MINUS_E20), prim.prim_kind.prim_i32, &r));
+    want_int("cast(-1e20, i32)", r, I32_MIN);
+    assert(consts.cv_cast(f(E300), prim.prim_kind.prim_i64, &r));
+    want_int("cast(1e300, i64)", r, I64_MAX);
+    assert(consts.cv_cast(f(THREE_HUNDRED), prim.prim_kind.prim_u8, &r));
+    want_u64("cast(300.0, u8)", r, U8_MAX);
+    assert(consts.cv_cast(f(MINUS_TWO_AND_HALF), prim.prim_kind.prim_u8, &r));
+    want_u64("cast(-2.5, u8)", r, 0);
+    assert(consts.cv_cast(f(MINUS_E20), prim.prim_kind.prim_u64, &r));
+    want_u64("cast(-1e20, u64)", r, 0);
+    assert(consts.cv_cast(f(E300), prim.prim_kind.prim_u64, &r));
+    want_u64("cast(1e300, u64)", r, U64_MAX);
+    assert(consts.cv_cast(f(MINUS_E20), prim.prim_kind.prim_i64, &r));
+    want_int("cast(-1e20, i64)", r, I64_MIN);
+}
+
+// Float to float rounds, and a result that is not finite in the target is a
+// compile error (D3.14, D4.4).
+fn void a_cast_between_the_float_types_rounds() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_cast(f(TENTH), prim.prim_kind.prim_f32, &r));
+    want_bits("cast(0.1, f32)", r, TENTH_F32);
+    assert(consts.cv_cast(f(TENTH), prim.prim_kind.prim_f64, &r));
+    want_bits("cast(0.1, f64)", r, TENTH);
+    assert(!consts.cv_cast(f(E300), prim.prim_kind.prim_f32, &r));
+    assert(r.kind == consts.cval_kind.cv_none);
+}
+
+// No row of D3.14 takes a float to `char` or to `bool`.
+fn void a_cast_from_a_float_to_char_or_bool_is_no_cast() {
+    consts.cval mut r = consts.cv_none();
+    assert(!consts.cv_cast(f(ONE), prim.prim_kind.prim_char, &r));
+    assert(!consts.cv_cast(f(ONE), prim.prim_kind.prim_bool, &r));
+    assert(!consts.cv_cast(f(ONE), prim.prim_kind.prim_void, &r));
+}
+
+fn void casts() {
+    a_cast_to_an_integer_truncates_toward_zero();
+    a_cast_to_an_integer_saturates_at_both_ends();
+    a_cast_between_the_float_types_rounds();
+    a_cast_from_a_float_to_char_or_bool_is_no_cast();
+    println("casts ok");
+}
+
+// ---- folding (D4.4, D4.6) --------------------------------------------------------
+
+// The four operations fold in the type the context gave them.
+fn void the_four_operations_fold_in_binary64() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_float_add(f(TENTH), f(FIFTH), prim.prim_kind.prim_f64, &r));
+    want_bits("0.1 + 0.2", r, TENTH_PLUS_FIFTH);
+    assert(consts.cv_float_sub(f(ONE), f(ONE), prim.prim_kind.prim_f64, &r));
+    want_bits("1.0 - 1.0", r, ZERO);
+    assert(consts.cv_float_mul(f(TWO), f(HALF), prim.prim_kind.prim_f64, &r));
+    want_bits("2.0 * 0.5", r, ONE);
+    assert(consts.cv_float_div(f(ONE), f(THREE), prim.prim_kind.prim_f64, &r));
+    want_bits("1.0 / 3.0", r, THIRD);
+}
+
+// An f32 fold rounds to binary32 directly, so 1.0 / 3.0 in f32 is the
+// binary32 quotient and not the binary64 one narrowed.
+fn void a_binary32_fold_rounds_to_binary32() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_float_div(f(ONE), f(THREE), prim.prim_kind.prim_f32, &r));
+    want_bits("1.0 / 3.0 in f32", r, THIRD_F32);
+    assert(consts.cv_float_add(f(TENTH_F32), f(ZERO), prim.prim_kind.prim_f32, &r));
+    want_bits("0.1 + 0.0 in f32", r, TENTH_F32);
+}
+
+// An integer operand takes the float type first, which is D4.4's rule that an
+// integer with a float folds as a float.
+fn void an_integer_operand_takes_the_float_type() {
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_float_div(i(-5), f(TWO), prim.prim_kind.prim_f64, &r));
+    want_bits("-5 / 2.0", r, MINUS_TWO_AND_HALF);
+    assert(consts.cv_float_add(i(1), f(HALF), prim.prim_kind.prim_f64, &r));
+    want_bits("1 + 0.5", r, 0x3FF8000000000000);
+    assert(consts.cv_float_mul(i(2), i(3), prim.prim_kind.prim_f64, &r));
+    want_bits("2 * 3 in a float context", r, 0x4018000000000000);
+}
+
+// A fold whose result is not finite, and a division by either zero, is no
+// constant at all (D4.4, D6.12).
+fn void a_fold_that_leaves_the_range_is_refused() {
+    consts.cval mut r = f(ONE);
+    assert(!consts.cv_float_div(f(ONE), f(ZERO), prim.prim_kind.prim_f64, &r));
+    assert(r.kind == consts.cval_kind.cv_none);
+    assert(!consts.cv_float_div(f(ONE), f(MINUS_ZERO), prim.prim_kind.prim_f64, &r));
+    assert(!consts.cv_float_div(f(ZERO), f(ZERO), prim.prim_kind.prim_f64, &r));
+    assert(!consts.cv_float_mul(f(E300), f(E300), prim.prim_kind.prim_f64, &r));
+    assert(!consts.cv_float_add(f(E300), f(E300), prim.prim_kind.prim_f32, &r));
+    // An operand that has no binary32 stops an f32 fold before it starts.
+    assert(!consts.cv_float_add(f(E300), f(ONE), prim.prim_kind.prim_f32, &r));
+}
+
+// Unary minus flips the sign bit: -(0.0) is -0.0, while 0.0 - 0.0 is +0.0
+// (D6.12).
+fn void unary_minus_flips_the_sign_bit() {
+    want_bits("-(1.0)", consts.cv_float_neg(f(ONE)), MINUS_ONE);
+    want_bits("-(-1.0)", consts.cv_float_neg(f(MINUS_ONE)), ONE);
+    want_bits("-(0.0)", consts.cv_float_neg(f(ZERO)), MINUS_ZERO);
+    want_bits("-(-0.0)", consts.cv_float_neg(f(MINUS_ZERO)), ZERO);
+    consts.cval mut r = consts.cv_none();
+    assert(consts.cv_float_sub(f(ZERO), f(ZERO), prim.prim_kind.prim_f64, &r));
+    want_bits("0.0 - 0.0", r, ZERO);
+}
+
+fn void folding() {
+    the_four_operations_fold_in_binary64();
+    a_binary32_fold_rounds_to_binary32();
+    an_integer_operand_takes_the_float_type();
+    a_fold_that_leaves_the_range_is_refused();
+    unary_minus_flips_the_sign_bit();
+    println("folding ok");
+}
+
+fn i32 main() {
+    model();
+    context();
+    casts();
+    folding();
+    println("ok");
+    return 0;
+}

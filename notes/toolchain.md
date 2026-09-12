@@ -1449,8 +1449,18 @@ compiler`, whatever its own kind.
 `--xfail` and `--unsupported` name other lists; `--no-xfail` and `--no-unsupported` ignore
 them. Each compiler has one list of each kind: `xfail-stage2.txt` and `unsupported-stage2.txt`
 are stage2's, and the CMake test `lang-stage2` names both, because stage2 reads the nested
-levels stage1 refuses and implements the `do`-`while` and `?:` stage1 refuses (D6.6, D7.5), and
-must be judged for all of them like any other test.
+levels stage1 refuses, implements the `do`-`while` and `?:` stage1 refuses (D6.6, D7.5) and
+accepts the floats stage1 refuses (D2.6, D3.1), and must be judged for all of them like any
+other test.
+
+Each compiler answers for its own list. `unsupported-stage2.txt` is the list the self-hosted
+compiler is run with, and it is empty: the four families the C bootstrap lacks are the nested
+array and span levels of D3.6, `do`-`while`, `?:` and floats, and stage2 implements all four, so
+it refuses nothing the corpus holds and answers for every test as for any other. Every one of
+those entries stays in `bootstrap-unsupported.txt`, which is stage1's and which nothing empties,
+since the C bootstrap is frozen. An entry arrives in stage2's list the day stage2 refuses a test
+stage1's list also holds, and leaves it the day stage2 implements the feature. Neither run passes
+`--no-unsupported`, so neither compiler is excused any test of the corpus.
 
 The harness prints one `PASS`, `FAIL`, `XFAIL`, `XPASS` or `ERROR` line per test with the
 reason where there is one, then a summary, and exits with 1 if any test is `FAIL`, `XPASS` or

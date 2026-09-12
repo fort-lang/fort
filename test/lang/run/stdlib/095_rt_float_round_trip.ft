@@ -1,0 +1,171 @@
+//! run
+//! stdout:
+//| f64 patterns ok
+//| f64 powers ok
+//| f32 patterns ok
+//| f32 powers ok
+import std.libc;
+import std.rt_float;
+
+// The property D18.2 states, over the encoding rather than over samples: the
+// text std.rt_float writes for a value reads back as that value, in the
+// value's own type.
+//
+// It asks the module for the decimal and lays it out with the module's own
+// layout, so the text is the one print_f64 would write; what it does not do
+// is print it, which keeps the test free of a descriptor and of the print
+// family. run/builtins holds the printed bytes value by value, and
+// run/stdlib/094 holds the entry points themselves.
+//
+// The oracle is the C library's reader, which is the other half of the method
+// toolchain.md 5.1 describes: strtod for an f64 and strtof for an f32. What
+// is not checked here is that the digits are the *shortest* such text, which
+// the tests beside this one hold value by value.
+//
+// The powers of two are the values where a wrong search still looks right:
+// the interval of texts that read back is not centred on them, so the nearest
+// decimal of the shortest length can fall outside it while the next one up
+// falls inside (toolchain.md 5.1). Every one of both types is walked.
+extern fn f64 strtod(char* s, void* end);
+extern fn f32 strtof(char* s, void* end);
+extern fn void* memcpy(void* dst, void* src, u64 n);
+
+// The bits of a float and a float of those bits: the one way a fort program
+// reaches every encoding, since a cast converts values and not patterns
+// (D3.14).
+fn f64 f64_of_bits(u64 bits) {
+    f64 mut v = 0.0;
+    u64 mut source = bits;
+    memcpy(cast(&v, void*), cast(&source, void*), 8);
+    return v;
+}
+
+fn f32 f32_of_bits(u32 bits) {
+    f32 mut v = 0.0;
+    u32 mut source = bits;
+    memcpy(cast(&v, void*), cast(&source, void*), 4);
+    return v;
+}
+
+// The pseudo-random generator the C runtime's own suite used, so the two walk
+// the same patterns. It multiplies and adds modulo 2^64, which fort spells
+// with the wrapping operators (D11.2).
+fn u64 next_bits(u64 state) {
+    return state *% 6364136223846793005 +% 1442695040888963407;
+}
+
+// 2^e as an f64: a subnormal below -1022 and a normal at or above it.
+fn f64 power_of_two_f64(i64 e) {
+    if (e < -1022) {
+        return f64_of_bits(1 << cast(e + 1074, u64));
+    }
+    return f64_of_bits(cast(e + 1023, u64) << 52);
+}
+
+fn f32 power_of_two_f32(i64 e) {
+    if (e < -126) {
+        return f32_of_bits(cast(1 << cast(e + 149, u64), u32));
+    }
+    return f32_of_bits(cast(e + 127, u32) << 23);
+}
+
+// The text the module would print for a finite magnitude, NUL-terminated.
+fn bool reads_back_f64(f64 magnitude) {
+    rt_float.decimal mut d = rt_float.decimal{};
+    rt_float.decimal_f64(magnitude, &d);
+    char[41] mut text = {};
+    rt_float.decimal_text(&d, text[..]);
+    return strtod(&text[0], null) == magnitude;
+}
+
+fn bool reads_back_f32(f32 magnitude) {
+    rt_float.decimal mut d = rt_float.decimal{};
+    rt_float.decimal_f32(magnitude, &d);
+    char[41] mut text = {};
+    rt_float.decimal_text(&d, text[..]);
+    return strtof(&text[0], null) == magnitude;
+}
+
+// A finite magnitude, never negative and never a NaN, is what the search
+// takes (rt_float.ft).
+fn bool usable_f64(f64 v) {
+    return v == v && v <= 1.7976931348623157e308 && v >= 0.0;
+}
+
+fn bool usable_f32(f32 v) {
+    return v == v && v <= 3.4028234663852886e38 && v >= 0.0;
+}
+
+fn void f64_patterns() {
+    u64 mut state = 12345;
+    u64 mut checked = 0;
+    u64 mut i = 0;
+    while (i < 400) {
+        state = next_bits(state);
+        f64 v = f64_of_bits(state);
+        if (usable_f64(v)) {
+            if (!reads_back_f64(v)) {
+                println("f64 pattern ", state, " does not read back");
+                assert(false);
+            }
+            checked += 1;
+        }
+        i += 1;
+    }
+    assert(checked > 100);
+    println("f64 patterns ok");
+}
+
+fn void f64_powers() {
+    i64 mut e = -1074;
+    while (e <= 1023) {
+        f64 v = power_of_two_f64(e);
+        if (!reads_back_f64(v)) {
+            println("2^", e, " does not read back");
+            assert(false);
+        }
+        e += 1;
+    }
+    println("f64 powers ok");
+}
+
+fn void f32_patterns() {
+    u64 mut state = 98765;
+    u64 mut checked = 0;
+    u64 mut i = 0;
+    while (i < 400) {
+        state = next_bits(state);
+        f32 v = f32_of_bits(cast(state >> 32, u32));
+        if (usable_f32(v)) {
+            if (!reads_back_f32(v)) {
+                println("f32 pattern ", state, " does not read back");
+                assert(false);
+            }
+            checked += 1;
+        }
+        i += 1;
+    }
+    assert(checked > 100);
+    println("f32 patterns ok");
+}
+
+fn void f32_powers() {
+    i64 mut e = -149;
+    while (e <= 127) {
+        f32 v = power_of_two_f32(e);
+        if (!reads_back_f32(v)) {
+            println("2^", e, " does not read back in f32");
+            assert(false);
+        }
+        e += 1;
+    }
+    println("f32 powers ok");
+}
+
+fn i32 main() {
+    f64_patterns();
+    f64_powers();
+    f32_patterns();
+    f32_powers();
+    return 0;
+}

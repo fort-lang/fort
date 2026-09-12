@@ -1,0 +1,2348 @@
+//! run
+//! flags: -I ../../src/fort
+//! stdout:
+//| literals ok
+//| binary32 ok
+//| arithmetic ok
+//| binary32 arithmetic ok
+//| comparison ok
+//| integers ok
+//| text ok
+//| parsed values ok
+//| parsed digits ok
+//| binary64 operations ok
+//| binary32 operations ok
+//| narrowings ok
+//| integer conversions ok
+//| orderings ok
+//| ok
+import flt;
+import std.strbuf;
+
+// The float values of src/fort/flt.ft: the decimal reader of D2.6, the
+// rounding of D6.12, the four operations a constant folder needs, the
+// conversions of D3.14 and the constant text the IR carries.
+//
+// Where the expected numbers come from. Each one is the IEEE 754 binary64
+// pattern of the value, computed off this tree with exact rational
+// arithmetic -- rounded to the format once, to nearest with ties to even --
+// and the oracle that produced them was checked against CPython's own double
+// arithmetic on 4000 random pairs, so it is not this module's algorithm
+// written a second time. A binary32 result is the binary64 of the binary32
+// value, which is how an f32 constant is held and what the IR needs.
+//
+// The values stand where a wrong implementation still looks right: the two
+// subnormal boundary values that broke PHP and Java, the least subnormal and
+// the thresholds of a zero either side of it, 2^53 and its neighbours, the
+// largest finite value and the first decimal above it, a literal of 902
+// digits whose last digit decides the rounding, and a division in binary32
+// whose result differs when it is rounded in binary64 first.
+
+fn void want_parse(string text, u64 bits) {
+    u64 mut got = 0;
+    bool ok = flt.flt_parse(text, &got);
+    if (!ok || got != bits) {
+        println("flt_parse(", text, ") = ", got, " ok ", ok, ", want ", bits);
+    }
+    assert(ok);
+    assert(got == bits);
+}
+
+// A literal the format cannot hold: D4.4 makes it a compile error, so the
+// reader answers false and the checker reports it.
+fn void want_parse_refused(string text) {
+    u64 mut got = 0;
+    bool ok = flt.flt_parse(text, &got);
+    if (ok) {
+        println("flt_parse(", text, ") = ", got, ", want a refusal");
+    }
+    assert(!ok);
+}
+
+fn void want_bits(string what, u64 got, u64 bits) {
+    if (got != bits) {
+        println(what, " = ", got, ", want ", bits);
+    }
+    assert(got == bits);
+}
+
+fn void want_int(string what, i64 got, i64 value) {
+    if (got != value) {
+        println(what, " = ", got, ", want ", value);
+    }
+    assert(got == value);
+}
+
+// Every literal of D2.6 reads to the binary64 nearest its exact decimal
+// value, ties to even; an untyped float constant is evaluated in binary64
+// (D4.4).
+fn void the_reader_gives_a_literal_the_binary64_nearest_its_value() {
+    want_parse("1.0", 0x3FF0000000000000);
+    want_parse("0.1", 0x3FB999999999999A);
+    want_parse("0.0", 0x0000000000000000);
+    want_parse("3.5", 0x400C000000000000);
+    want_parse("100.0", 0x4059000000000000);
+    want_parse("0.0001", 0x3F1A36E2EB1C432D);
+    want_parse("1e16", 0x4341C37937E08000);
+    want_parse("2.5e-3", 0x3F647AE147AE147B);
+    want_parse("1e10", 0x4202A05F20000000);
+    want_parse("3.25", 0x400A000000000000);
+    want_parse("1E2", 0x4059000000000000);
+    want_parse("0.5", 0x3FE0000000000000);
+    want_parse("1.5e0", 0x3FF8000000000000);
+    want_parse("12_5.0e-3", 0x3FC0000000000000);
+    want_parse("1.0e6", 0x412E848000000000);
+    want_parse("1.0E-3", 0x3F50624DD2F1A9FC);
+    want_parse("7.5", 0x401E000000000000);
+    want_parse("2.0", 0x4000000000000000);
+    want_parse("0.2", 0x3FC999999999999A);
+    want_parse("0.3", 0x3FD3333333333333);
+    want_parse("1e21", 0x444B1AE4D6E2EF50);
+    want_parse("123456.789", 0x40FE240C9FBE76C9);
+    want_parse("0.25", 0x3FD0000000000000);
+    want_parse("1e6", 0x412E848000000000);
+    want_parse("0e1", 0x0000000000000000);
+    want_parse("000.000", 0x0000000000000000);
+    want_parse("1_000.000_1", 0x408F4000346DC5D6);
+    want_parse("0.1000000000000000055511151231257827021181583404541015625", 0x3FB999999999999A);
+    want_parse("9007199254740992.0", 0x4340000000000000);
+    want_parse("9007199254740993.0", 0x4340000000000000);
+    want_parse("9007199254740995.0", 0x4340000000000002);
+    want_parse("0.000000000000000000001", 0x3B92E3B40A0E9B4F);
+    want_parse("1e-300", 0x01A56E1FC2F8F359);
+    want_parse("1e300", 0x7E37E43C8800759C);
+    want_parse("12345678901234567890.0", 0x43E56A95319D63E1);
+    want_parse("0.000001", 0x3EB0C6F7A0B5ED8D);
+    want_parse("1e-5", 0x3EE4F8B588E368F1);
+    want_parse("1234567890123456789012345678901234567890.0", 0x480D064903AE06E0);
+}
+
+// The exact midpoint between 1.0 and the value above it has 55 digits and
+// goes to the even mantissa, which is 1.0. One more digit below it puts the
+// value above the midpoint and it goes up.
+fn void a_tie_goes_to_the_even_mantissa_and_one_digit_below_it_goes_up() {
+    want_parse("1.00000000000000011102230246251565404236316680908203125", 0x3FF0000000000000);
+    want_parse("1.000000000000000111022302462515654042363166809082031251", 0x3FF0000000000001);
+}
+
+// The reader keeps 800 significant digits and records a nonzero digit below
+// them, which can only turn a tie away from zero. This literal has 902
+// digits: it is above 1.0 and below the value after it, so it rounds to 1.0,
+// and the reader must not read it as the 1.0 its first 800 digits spell and
+// lose the difference.
+fn void a_digit_below_the_eight_hundred_kept_still_decides_a_tie() {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "1.");
+    u64 mut i = 0;
+    while (i < 900) {
+        strbuf.push(&b, '0');
+        i += 1;
+    }
+    strbuf.push(&b, '1');
+    want_parse(strbuf.view(&b), 0x3FF0000000000000);
+}
+
+// A constant that is not finite in its type is a compile error (D4.4), so
+// the reader refuses it rather than producing an infinity. The last one is
+// the first decimal above the rounding threshold of the largest finite
+// value, which is where a reader starts producing an infinity.
+fn void a_literal_past_binary64_is_refused() {
+    want_parse_refused("1e309");
+    want_parse_refused("1.7976931348623159e308");
+    want_parse_refused("1e400");
+    want_parse_refused("1.797693134862315808e308");
+}
+
+// The least subnormal, the values either side of half of it -- which round
+// to zero and to the least subnormal -- the two values at the boundary
+// between the subnormals and the normals, and the largest finite value.
+fn void the_edges_of_the_range_read_exactly() {
+    want_parse("4.9406564584124654e-324", 0x0000000000000001);
+    want_parse("1e-323", 0x0000000000000002);
+    want_parse("1e-324", 0x0000000000000000);
+    want_parse("2.4703282292062327e-324", 0x0000000000000000);
+    want_parse("2.4703282292062328e-324", 0x0000000000000001);
+    want_parse("1e-400", 0x0000000000000000);
+    want_parse("1e-500", 0x0000000000000000);
+    want_parse("2.2250738585072011e-308", 0x000FFFFFFFFFFFFF);
+    want_parse("2.2250738585072012e-308", 0x0010000000000000);
+    want_parse("2.2250738585072014e-308", 0x0010000000000000);
+    want_parse("1.7976931348623157e308", 0x7FEFFFFFFFFFFFFF);
+    want_parse("1.797693134862315508e308", 0x7FEFFFFFFFFFFFFE);
+    want_parse("1e308", 0x7FE1CCF385EBC8A0);
+    want_parse("1.7976931348623158e308", 0x7FEFFFFFFFFFFFFF);
+}
+
+fn void literals() {
+    the_reader_gives_a_literal_the_binary64_nearest_its_value();
+    a_tie_goes_to_the_even_mantissa_and_one_digit_below_it_goes_up();
+    a_digit_below_the_eight_hundred_kept_still_decides_a_tie();
+    a_literal_past_binary64_is_refused();
+    the_edges_of_the_range_read_exactly();
+    println("literals ok");
+}
+
+
+// The result of one operation, and the refusal of one that is not finite.
+fn void want_op(string what, bool ok, u64 got, u64 bits) {
+    if (!ok || got != bits) {
+        println(what, " = ", got, " ok ", ok, ", want ", bits);
+    }
+    assert(ok);
+    assert(got == bits);
+}
+
+fn void want_refused(string what, bool ok) {
+    if (ok) {
+        println(what, " was folded, want a refusal");
+    }
+    assert(!ok);
+}
+
+// flt_to_f32 rounds to binary32 and answers with the binary64 of that
+// value, which is exact (D3.14): 24 mantissa bits out of 53.
+fn void a_value_rounds_to_binary32_once_and_keeps_its_binary64_form() {
+    // 0.1
+    want_bits("f32 0.1", to_f32(0x3FB999999999999A), 0x3FB99999A0000000);
+    // 1.5
+    want_bits("f32 1.5", to_f32(0x3FF8000000000000), 0x3FF8000000000000);
+    // 0.25
+    want_bits("f32 0.25", to_f32(0x3FD0000000000000), 0x3FD0000000000000);
+    // 16777217.0
+    want_bits("f32 16777217.0", to_f32(0x4170000010000000), 0x4170000000000000);
+    // 16777219.0
+    want_bits("f32 16777219.0", to_f32(0x4170000030000000), 0x4170000040000000);
+    // 0.0
+    want_bits("f32 0.0", to_f32(0x0000000000000000), 0x0000000000000000);
+    // the least binary32 subnormal
+    want_bits("f32 1.401298464324817e-45", to_f32(0x36A0000000000000), 0x36A0000000000000);
+    // half of it, a tie that goes to zero
+    want_bits("f32 7.006492321624085e-46", to_f32(0x3690000000000000), 0x0000000000000000);
+    // just above half of it
+    want_bits("f32 7.006492321624087e-46", to_f32(0x3690000000000001), 0x36A0000000000000);
+    // below half of it
+    want_bits("f32 1e-46", to_f32(0x366244CE242C5561), 0x0000000000000000);
+    // the largest finite binary32
+    want_bits("f32 3.4028234663852886e38", to_f32(0x47EFFFFFE0000000), 0x47EFFFFFE0000000);
+    // above it and below the rounding threshold
+    want_bits("f32 3.402823466385289e38", to_f32(0x47EFFFFFE0000001), 0x47EFFFFFE0000000);
+    // the least normal binary32
+    want_bits("f32 1.1754943508222875e-38", to_f32(0x3810000000000000), 0x3810000000000000);
+    // far below the subnormals of binary32
+    want_bits("f32 1e-300", to_f32(0x01A56E1FC2F8F359), 0x0000000000000000);
+}
+
+// The rounding threshold of binary32 is (2 - 2^-24) * 2^127; from it upward
+// the value is not finite in binary32, which D4.4 makes a compile error.
+fn void a_value_past_binary32_is_refused() {
+    want_f32_refused("3.4028235677973366e38", 0x47EFFFFFF0000000);
+    want_f32_refused("3.5e38", 0x47F074F8C4D3CD7B);
+    want_f32_refused("1e39", 0x48078287F49C4A1D);
+    want_f32_refused("1e300", 0x7E37E43C8800759C);
+}
+
+// A zero rounds to a zero of the same sign (D6.12: the sign bit is the only
+// thing that tells the two apart, since they compare equal).
+fn void a_zero_keeps_its_sign_through_binary32() {
+    want_bits("f32 -0.0", to_f32(0x8000000000000000), 0x8000000000000000);
+    want_bits("f32 0.0", to_f32(0), 0);
+}
+
+// flt_to_f32 as an expression, since every case below asserts its result.
+fn u64 to_f32(u64 bits) {
+    u64 mut got = 0;
+    bool ok = flt.flt_to_f32(bits, &got);
+    assert(ok);
+    return got;
+}
+
+fn void want_f32_refused(string text, u64 bits) {
+    u64 mut got = 0;
+    bool ok = flt.flt_to_f32(bits, &got);
+    if (ok) {
+        println("f32 ", text, " = ", got, ", want a refusal");
+    }
+    assert(!ok);
+}
+
+fn void binary32() {
+    a_value_rounds_to_binary32_once_and_keeps_its_binary64_form();
+    a_value_past_binary32_is_refused();
+    a_zero_keeps_its_sign_through_binary32();
+    println("binary32 ok");
+}
+
+// Each result is the exact sum, difference, product or quotient rounded to
+// binary64 once, to nearest with ties to even (D6.12). The zeros carry the
+// signs IEEE 754 gives them: a sum of two zeros is negative only when both
+// are, x - x is +0.0, and a product takes the two signs combined.
+fn void the_four_operations_round_their_exact_result_once() {
+    u64 mut got = 0;
+    want_op("0.1 + 0.2", flt.flt_add(0x3FB999999999999A, 0x3FC999999999999A, false, &got), got,
+            0x3FD3333333333334);
+    want_op("7.5 + 2.0", flt.flt_add(0x401E000000000000, 0x4000000000000000, false, &got), got,
+            0x4023000000000000);
+    want_op("7.5 / 2.0", flt.flt_div(0x401E000000000000, 0x4000000000000000, false, &got), got,
+            0x400E000000000000);
+    want_op("2.0 * 0.5", flt.flt_mul(0x4000000000000000, 0x3FE0000000000000, false, &got), got,
+            0x3FF0000000000000);
+    want_op("1.0 / 3.0", flt.flt_div(0x3FF0000000000000, 0x4008000000000000, false, &got), got,
+            0x3FD5555555555555);
+    want_op("-5.0 / 2.0", flt.flt_div(0xC014000000000000, 0x4000000000000000, false, &got), got,
+            0xC004000000000000);
+    want_op("1.0 - 0.9", flt.flt_sub(0x3FF0000000000000, 0x3FECCCCCCCCCCCCD, false, &got), got,
+            0x3FB9999999999998);
+    want_op("1e16 + 1.0", flt.flt_add(0x4341C37937E08000, 0x3FF0000000000000, false, &got), got,
+            0x4341C37937E08000);
+    want_op("1e300 + 1e-300", flt.flt_add(0x7E37E43C8800759C, 0x01A56E1FC2F8F359, false, &got),
+            got, 0x7E37E43C8800759C);
+    want_op("1e300 * 1e-300", flt.flt_mul(0x7E37E43C8800759C, 0x01A56E1FC2F8F359, false, &got),
+            got, 0x3FF0000000000000);
+    want_op("2^53 + 1.0", flt.flt_add(0x4340000000000000, 0x3FF0000000000000, false, &got), got,
+            0x4340000000000000);
+    want_op("2^53 + 2.0", flt.flt_add(0x4340000000000000, 0x4000000000000000, false, &got), got,
+            0x4340000000000001);
+    want_op("2^53 + 2 + 1.0", flt.flt_add(0x4340000000000001, 0x3FF0000000000000, false, &got),
+            got, 0x4340000000000002);
+    want_op("0.1 * 0.1", flt.flt_mul(0x3FB999999999999A, 0x3FB999999999999A, false, &got), got,
+            0x3F847AE147AE147C);
+    want_op("123456.789 - 123456.0", flt.flt_sub(0x40FE240C9FBE76C9, 0x40FE240000000000, false,
+            &got), got, 0x3FE93F7CED920000);
+    want_op("least subnormal * 1.5", flt.flt_mul(0x0000000000000001, 0x3FF8000000000000, false,
+            &got), got, 0x0000000000000002);
+    want_op("least subnormal / 2.0", flt.flt_div(0x0000000000000001, 0x4000000000000000, false,
+            &got), got, 0x0000000000000000);
+    want_op("three subnormals / 2.0", flt.flt_div(0x0000000000000003, 0x4000000000000000, false,
+            &got), got, 0x0000000000000002);
+    want_op("1e-320 * 1e-10", flt.flt_mul(0x00000000000007E8, 0x3DDB7CDFD9D7BDBB, false, &got),
+            got, 0x0000000000000000);
+    want_op("least normal / 2.0", flt.flt_div(0x0010000000000000, 0x4000000000000000, false, &got),
+            got, 0x0008000000000000);
+    want_op("1.0 * 0.0", flt.flt_mul(0x3FF0000000000000, 0x0000000000000000, false, &got), got,
+            0x0000000000000000);
+    want_op("-1.0 * 0.0", flt.flt_mul(0xBFF0000000000000, 0x0000000000000000, false, &got), got,
+            0x8000000000000000);
+    want_op("0.0 / -1.0", flt.flt_div(0x0000000000000000, 0xBFF0000000000000, false, &got), got,
+            0x8000000000000000);
+    want_op("1.0 - 1.0", flt.flt_sub(0x3FF0000000000000, 0x3FF0000000000000, false, &got), got,
+            0x0000000000000000);
+    want_op("-0.0 + 0.0", flt.flt_add(0x8000000000000000, 0x0000000000000000, false, &got), got,
+            0x0000000000000000);
+    want_op("-0.0 + -0.0", flt.flt_add(0x8000000000000000, 0x8000000000000000, false, &got), got,
+            0x8000000000000000);
+    want_op("0.0 - 0.0", flt.flt_sub(0x0000000000000000, 0x0000000000000000, false, &got), got,
+            0x0000000000000000);
+    want_op("0.0 - -0.0", flt.flt_sub(0x0000000000000000, 0x8000000000000000, false, &got), got,
+            0x0000000000000000);
+    want_op("-0.0 - 0.0", flt.flt_sub(0x8000000000000000, 0x0000000000000000, false, &got), got,
+            0x8000000000000000);
+    want_op("max + 1e291", flt.flt_add(0x7FEFFFFFFFFFFFFF, 0x7C59A742461887F6, false, &got), got,
+            0x7FEFFFFFFFFFFFFF);
+}
+
+// A division by zero yields an infinity or a NaN and an overflow yields an
+// infinity. Neither is a constant, so the fold answers false and the checker
+// reports the error (D4.4, D6.12).
+fn void an_operation_that_leaves_the_range_is_refused() {
+    u64 mut got = 0;
+    want_refused("1.0 / 0.0", flt.flt_div(0x3FF0000000000000, 0x0000000000000000, false, &got));
+    want_refused("-1.0 / 0.0", flt.flt_div(0xBFF0000000000000, 0x0000000000000000, false, &got));
+    want_refused("0.0 / 0.0", flt.flt_div(0x0000000000000000, 0x0000000000000000, false, &got));
+    want_refused("1.0 / -0.0", flt.flt_div(0x3FF0000000000000, 0x8000000000000000, false, &got));
+    want_refused("1e308 + 1e308", flt.flt_add(0x7FE1CCF385EBC8A0, 0x7FE1CCF385EBC8A0, false, &got));
+    want_refused("max * 2.0", flt.flt_mul(0x7FEFFFFFFFFFFFFF, 0x4000000000000000, false, &got));
+    want_refused("max + 1e292", flt.flt_add(0x7FEFFFFFFFFFFFFF, 0x7C9008896BCF54FA, false, &got));
+    want_refused("-max - 1e292", flt.flt_sub(0xFFEFFFFFFFFFFFFF, 0x7C9008896BCF54FA, false, &got));
+    want_refused("1e300 / 1e-300", flt.flt_div(0x7E37E43C8800759C, 0x01A56E1FC2F8F359, false,
+                 &got));
+}
+
+fn void arithmetic() {
+    the_four_operations_round_their_exact_result_once();
+    an_operation_that_leaves_the_range_is_refused();
+    println("arithmetic ok");
+}
+
+// The operands are binary32 values held in binary64 and the result is the
+// exact result rounded to binary32, not to binary64 and then narrowed.
+fn void a_binary32_operation_rounds_to_binary32_directly() {
+    u64 mut got = 0;
+    want_op("1.5 + 0.25", flt.flt_add(0x3FF8000000000000, 0x3FD0000000000000, true, &got), got,
+            0x3FFC000000000000);
+    want_op("0.1 + 0.2", flt.flt_add(0x3FB99999A0000000, 0x3FC99999A0000000, true, &got), got,
+            0x3FD3333340000000);
+    want_op("1.0 / 3.0", flt.flt_div(0x3FF0000000000000, 0x4008000000000000, true, &got), got,
+            0x3FD5555560000000);
+    want_op("16777216.0 + 1.0", flt.flt_add(0x4170000000000000, 0x3FF0000000000000, true, &got),
+            got, 0x4170000000000000);
+    want_op("16777216.0 + 2.0", flt.flt_add(0x4170000000000000, 0x4000000000000000, true, &got),
+            got, 0x4170000020000000);
+    want_op("least subnormal / 2.0", flt.flt_div(0x36A0000000000000, 0x4000000000000000, true,
+            &got), got, 0x0000000000000000);
+    want_op("least subnormal * 1.5", flt.flt_mul(0x36A0000000000000, 0x3FF8000000000000, true,
+            &got), got, 0x36B0000000000000);
+}
+
+// A quotient of two binary32 values, rounded to binary32 from the exact
+// result.
+//
+// It pins the result and not a difference between two methods, because
+// there is no difference to pin: binary64 has 53 mantissa bits and
+// 53 >= 2 * 24 + 2, so rounding an exact binary32 sum, difference, product or
+// quotient to binary64 and then to binary32 gives the binary32 the exact
+// result rounds to, always (Figueroa's condition). A search over 231660
+// operand pairs of the four operations, half of them drawn from subnormal
+// exponents, found no pair where the two differ. The reading of D4.4 is the
+// one class where two roundings are observable, and
+// run/constants/011_float_two_roundings.ft holds it.
+fn void a_binary32_division_rounds_to_binary32_directly() {
+    u64 mut got = 0;
+    want_op("the quotient of two binary32 values",
+            flt.flt_div(0x3DD8B9EC00000000, 0xC1B98C5920000000, true, &got), got,
+            0xBC0EF86F20000000);
+}
+
+fn void a_binary32_operation_past_the_range_is_refused() {
+    u64 mut got = 0;
+    want_refused("largest binary32 * 2.0", flt.flt_mul(0x47EFFFFFE0000000, 0x4000000000000000,
+                 true, &got));
+    want_refused("largest binary32 + itself", flt.flt_add(0x47EFFFFFE0000000, 0x47EFFFFFE0000000,
+                 true, &got));
+}
+
+fn void binary32_arithmetic() {
+    a_binary32_operation_rounds_to_binary32_directly();
+    a_binary32_division_rounds_to_binary32_directly();
+    a_binary32_operation_past_the_range_is_refused();
+    println("binary32 arithmetic ok");
+}
+
+// Every value here is finite, so the comparison is the ordering of the
+// numbers, with a negative value below a positive one whatever the patterns
+// say and the two zeros equal (D6.12).
+fn void the_ordering_is_the_ordering_of_the_values() {
+    u64 mut zero = 0;
+    want_int("cmp 0.1 0.2", cast(flt.flt_cmp(0x3FB999999999999A, 0x3FC999999999999A), i64), -1);
+    want_int("cmp -0.1 -0.2", cast(flt.flt_cmp(0xBFB999999999999A, 0xBFC999999999999A), i64), 1);
+    want_int("cmp -0.1 0.2", cast(flt.flt_cmp(0xBFB999999999999A, 0x3FC999999999999A), i64), -1);
+    want_int("cmp 0.2 0.1", cast(flt.flt_cmp(0x3FC999999999999A, 0x3FB999999999999A), i64), 1);
+    want_int("cmp -0.2 -0.1", cast(flt.flt_cmp(0xBFC999999999999A, 0xBFB999999999999A), i64), -1);
+    want_int("cmp -0.2 0.1", cast(flt.flt_cmp(0xBFC999999999999A, 0x3FB999999999999A), i64), -1);
+    want_int("cmp 1.0 1.0", cast(flt.flt_cmp(0x3FF0000000000000, 0x3FF0000000000000), i64), 0);
+    want_int("cmp -1.0 -1.0", cast(flt.flt_cmp(0xBFF0000000000000, 0xBFF0000000000000), i64), 0);
+    want_int("cmp -1.0 1.0", cast(flt.flt_cmp(0xBFF0000000000000, 0x3FF0000000000000), i64), -1);
+    want_int("cmp 0.0 0.0", cast(flt.flt_cmp(0x0000000000000000, 0x0000000000000000), i64), 0);
+    want_int("cmp -0.0 -0.0", cast(flt.flt_cmp(0x8000000000000000, 0x8000000000000000), i64), 0);
+    want_int("cmp -0.0 0.0", cast(flt.flt_cmp(0x8000000000000000, 0x0000000000000000), i64), 0);
+    want_int("cmp 1e300 1e-300", cast(flt.flt_cmp(0x7E37E43C8800759C, 0x01A56E1FC2F8F359), i64), 1);
+    want_int("cmp -1e300 -1e-300", cast(flt.flt_cmp(0xFE37E43C8800759C, 0x81A56E1FC2F8F359), i64),
+             -1);
+    want_int("cmp -1e300 1e-300", cast(flt.flt_cmp(0xFE37E43C8800759C, 0x01A56E1FC2F8F359), i64),
+             -1);
+    want_int("cmp 4.9406564584124654e-324 0.0", cast(flt.flt_cmp(0x0000000000000001,
+             0x0000000000000000), i64), 1);
+    want_int("cmp -4.9406564584124654e-324 -0.0", cast(flt.flt_cmp(0x8000000000000001,
+             0x8000000000000000), i64), -1);
+    want_int("cmp -4.9406564584124654e-324 0.0", cast(flt.flt_cmp(0x8000000000000001,
+             0x0000000000000000), i64), -1);
+    want_int("cmp 1.7976931348623157e308 1e300", cast(flt.flt_cmp(0x7FEFFFFFFFFFFFFF,
+             0x7E37E43C8800759C), i64), 1);
+    want_int("cmp -1.7976931348623157e308 -1e300", cast(flt.flt_cmp(0xFFEFFFFFFFFFFFFF,
+             0xFE37E43C8800759C), i64), -1);
+    want_int("cmp -1.7976931348623157e308 1e300", cast(flt.flt_cmp(0xFFEFFFFFFFFFFFFF,
+             0x7E37E43C8800759C), i64), -1);
+}
+
+// -0.0 == 0.0 (D6.12), and unary minus flips the sign bit rather than
+// subtracting from zero: the two differ on a zero, since 0.0 - 0.0 is +0.0
+// and -(0.0) is -0.0.
+fn void the_two_zeros_are_equal_and_a_negation_is_the_sign_bit() {
+    want_int("cmp 0.0 -0.0", cast(flt.flt_cmp(0, 0x8000000000000000), i64), 0);
+    want_int("cmp -0.0 0.0", cast(flt.flt_cmp(0x8000000000000000, 0), i64), 0);
+    assert(flt.flt_is_zero(0));
+    assert(flt.flt_is_zero(0x8000000000000000));
+    assert(!flt.flt_is_zero(0x0000000000000001));
+    want_bits("-(0.0)", flt.flt_neg(0), 0x8000000000000000);
+    want_bits("-(-0.0)", flt.flt_neg(0x8000000000000000), 0);
+    want_bits("-(1.0)", flt.flt_neg(0x3FF0000000000000), 0xBFF0000000000000);
+    want_bits("-(-1.0)", flt.flt_neg(0xBFF0000000000000), 0x3FF0000000000000);
+}
+
+fn void comparison() {
+    the_ordering_is_the_ordering_of_the_values();
+    the_two_zeros_are_equal_and_a_negation_is_the_sign_bit();
+    println("comparison ok");
+}
+
+// An integer constant in a float context takes that float type, rounded to
+// nearest (D4.2, D3.14): 2^53 + 1 and 2^24 + 1 are the first values their
+// formats cannot hold, and each one goes to the even mantissa.
+fn void an_integer_constant_rounds_to_the_nearest_value() {
+    u64 mut got = 0;
+    want_from_int(false, 0, false, 0x0000000000000000);
+    want_from_int(false, 1, false, 0x3FF0000000000000);
+    want_from_int(true, 1, false, 0xBFF0000000000000);
+    want_from_int(false, 2, false, 0x4000000000000000);
+    want_from_int(true, 2, false, 0xC000000000000000);
+    want_from_int(false, 7, false, 0x401C000000000000);
+    want_from_int(true, 7, false, 0xC01C000000000000);
+    want_from_int(false, 255, false, 0x406FE00000000000);
+    want_from_int(true, 255, false, 0xC06FE00000000000);
+    want_from_int(false, 12345, false, 0x40C81C8000000000);
+    want_from_int(true, 12345, false, 0xC0C81C8000000000);
+    want_from_int(false, 16777216, false, 0x4170000000000000);
+    want_from_int(true, 16777216, false, 0xC170000000000000);
+    want_from_int(false, 16777217, false, 0x4170000010000000);
+    want_from_int(true, 16777217, false, 0xC170000010000000);
+    want_from_int(false, 16777219, false, 0x4170000030000000);
+    want_from_int(true, 16777219, false, 0xC170000030000000);
+    want_from_int(false, 9007199254740992, false, 0x4340000000000000);
+    want_from_int(true, 9007199254740992, false, 0xC340000000000000);
+    want_from_int(false, 9007199254740993, false, 0x4340000000000000);
+    want_from_int(true, 9007199254740993, false, 0xC340000000000000);
+    want_from_int(false, 9007199254740995, false, 0x4340000000000002);
+    want_from_int(true, 9007199254740995, false, 0xC340000000000002);
+    want_from_int(false, 9223372036854775808, false, 0x43E0000000000000);
+    want_from_int(true, 9223372036854775808, false, 0xC3E0000000000000);
+    want_from_int(false, 18446744073709551615, false, 0x43F0000000000000);
+    want_from_int(true, 18446744073709551615, false, 0xC3F0000000000000);
+    want_from_int(false, 16777217, false, 0x4170000010000000);
+    want_from_int(true, 16777217, false, 0xC170000010000000);
+    want_from_int(false, 10000000000000000000, false, 0x43E158E460913D00);
+    want_from_int(true, 10000000000000000000, false, 0xC3E158E460913D00);
+}
+
+// The same rule in binary32, where 16777217 is the first integer the format
+// cannot hold.
+fn void an_integer_constant_rounds_to_binary32_the_same_way() {
+    u64 mut got = 0;
+    want_from_int(false, 0, true, 0x0000000000000000);
+    want_from_int(false, 1, true, 0x3FF0000000000000);
+    want_from_int(false, 16777216, true, 0x4170000000000000);
+    want_from_int(false, 16777217, true, 0x4170000000000000);
+    want_from_int(false, 16777219, true, 0x4170000040000000);
+    want_from_int(false, 16777217, true, 0x4170000000000000);
+    want_from_int(false, 9007199254740992, true, 0x4340000000000000);
+    want_from_int(false, 18446744073709551615, true, 0x43F0000000000000);
+    want_from_int(false, 12345, true, 0x40C81C8000000000);
+}
+
+// A float to integer cast truncates toward zero (D3.14), so 2.5 gives 2 and
+// -2.5 gives -2; the sign of the zero comes through, since the caller needs
+// it to saturate at the right end.
+fn void a_value_truncates_toward_zero() {
+    bool mut neg = false;
+    u64 mut mag = 0;
+    want_to_int("2.5", 0x4004000000000000, false, 2);
+    want_to_int("-2.5", 0xC004000000000000, true, 2);
+    want_to_int("0.5", 0x3FE0000000000000, false, 0);
+    want_to_int("-0.5", 0xBFE0000000000000, true, 0);
+    want_to_int("0.0", 0x0000000000000000, false, 0);
+    want_to_int("-0.0", 0x8000000000000000, true, 0);
+    want_to_int("1.0", 0x3FF0000000000000, false, 1);
+    want_to_int("-1.0", 0xBFF0000000000000, true, 1);
+    want_to_int("123456.789", 0x40FE240C9FBE76C9, false, 123456);
+    want_to_int("1e19", 0x43E158E460913D00, false, 10000000000000000000);
+    want_to_int("9223372036854775808.0", 0x43E0000000000000, false, 9223372036854775808);
+    want_to_int("4.9406564584124654e-324", 0x0000000000000001, false, 0);
+    want_to_int("18446744073709549568.0", 0x43EFFFFFFFFFFFFF, false, 18446744073709549568);
+}
+
+// flt_to_int answers false when the magnitude is past 2^64 - 1, and the
+// caller saturates at the range of the target type (D3.14).
+fn void a_value_past_the_widest_integer_is_left_to_the_caller() {
+    bool mut neg = false;
+    u64 mut mag = 0;
+    want_to_int_refused("1e20", 0x4415AF1D78B58C40);
+    want_to_int_refused("1.7976931348623157e308", 0x7FEFFFFFFFFFFFFF);
+    want_to_int_refused("1e30", 0x46293E5939A08CEA);
+}
+
+fn void integers() {
+    an_integer_constant_rounds_to_the_nearest_value();
+    an_integer_constant_rounds_to_binary32_the_same_way();
+    a_value_truncates_toward_zero();
+    a_value_past_the_widest_integer_is_left_to_the_caller();
+    println("integers ok");
+}
+
+// An LLVM float or double constant is written as 0x and the sixteen hex
+// digits of the binary64 pattern, upper case (D19.1). The last line is the
+// binary32 value of 0.1, whose pattern ends in 29 zero bits because an f32
+// constant must be a binary64 the type holds exactly.
+fn void a_constant_prints_as_the_sixteen_hex_digits_of_its_pattern() {
+    want_hex(0x3FB999999999999A, "0x3FB999999999999A");
+    want_hex(0x3FF0000000000000, "0x3FF0000000000000");
+    want_hex(0x0000000000000000, "0x0000000000000000");
+    want_hex(0x4341C37937E08000, "0x4341C37937E08000");
+    want_hex(0x400C000000000000, "0x400C000000000000");
+    want_hex(0x3F647AE147AE147B, "0x3F647AE147AE147B");
+    want_hex(0x8000000000000000, "0x8000000000000000");
+    want_hex(0x3FB99999A0000000, "0x3FB99999A0000000");
+    // The largest finite value of each format and the least subnormal: every
+    // digit of the pattern moves, so a text built from the wrong end or with
+    // a short digit count is caught here.
+    want_hex(0x7FEFFFFFFFFFFFFF, "0x7FEFFFFFFFFFFFFF");
+    want_hex(0x47EFFFFFE0000000, "0x47EFFFFFE0000000");
+    want_hex(0x0000000000000001, "0x0000000000000001");
+}
+
+fn void text() {
+    a_constant_prints_as_the_sixteen_hex_digits_of_its_pattern();
+    println("text ok");
+}
+
+fn void want_from_int(bool neg, u64 mag, bool is_f32, u64 bits) {
+    u64 mut got = 0;
+    bool ok = flt.flt_from_int(neg, mag, is_f32, &got);
+    if (!ok || got != bits) {
+        println("from_int(", neg, ", ", mag, ") = ", got, " ok ", ok, ", want ", bits);
+    }
+    assert(ok);
+    assert(got == bits);
+}
+
+fn void want_to_int(string what, u64 bits, bool neg, u64 mag) {
+    bool mut got_neg = false;
+    u64 mut got_mag = 0;
+    bool ok = flt.flt_to_int(bits, &got_neg, &got_mag);
+    if (!ok || got_neg != neg || got_mag != mag) {
+        println("to_int(", what, ") = ", got_neg, " ", got_mag, " ok ", ok, ", want ", neg,
+                " ", mag);
+    }
+    assert(ok);
+    assert(got_neg == neg);
+    assert(got_mag == mag);
+}
+
+fn void want_to_int_refused(string what, u64 bits) {
+    bool mut neg = false;
+    u64 mut mag = 0;
+    bool ok = flt.flt_to_int(bits, &neg, &mag);
+    if (ok) {
+        println("to_int(", what, ") = ", mag, ", want a refusal");
+    }
+    assert(!ok);
+}
+
+fn void want_hex(u64 bits, string text) {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    flt.flt_hex(bits, &b);
+    string got = strbuf.view(&b);
+    if (got != text) {
+        println("flt_hex(", bits, ") = ", got, ", want ", text);
+    }
+    assert(got == text);
+}
+
+// ---- the vectors -----------------------------------------------------------------
+
+// What follows is a corpus of values held against an oracle of exact rational
+// arithmetic computed off this tree, the same one the cases above use. It is
+// here rather than in a note about a run someone once made, because a number
+// in a file is evidence anyone can re-run.
+//
+// The values are drawn at random from five classes -- a normal of any
+// exponent, a small integer times a power of two (what a program writes), an
+// exponent near the subnormal boundary, a subnormal, and an exponent near the
+// largest finite value -- because the rounding path differs between them: the
+// boundary classes are where the guard bit, the clamp to the least exponent
+// and the carry out of the mantissa meet.
+
+// A literal and the pattern it reads to.
+fn void p(string text, u64 bits) {
+    want_parse(text, bits);
+}
+
+// One operation in binary64 and in binary32.
+fn void fadd64(u64 a, u64 b, u64 want) {
+    u64 mut got = 0;
+    want_op("add", flt.flt_add(a, b, false, &got), got, want);
+}
+
+fn void fsub64(u64 a, u64 b, u64 want) {
+    u64 mut got = 0;
+    want_op("sub", flt.flt_sub(a, b, false, &got), got, want);
+}
+
+fn void fmul64(u64 a, u64 b, u64 want) {
+    u64 mut got = 0;
+    want_op("mul", flt.flt_mul(a, b, false, &got), got, want);
+}
+
+fn void fdiv64(u64 a, u64 b, u64 want) {
+    u64 mut got = 0;
+    want_op("div", flt.flt_div(a, b, false, &got), got, want);
+}
+
+fn void fadd32(u64 a, u64 b, u64 want) {
+    u64 mut got = 0;
+    want_op("add32", flt.flt_add(a, b, true, &got), got, want);
+}
+
+fn void fsub32(u64 a, u64 b, u64 want) {
+    u64 mut got = 0;
+    want_op("sub32", flt.flt_sub(a, b, true, &got), got, want);
+}
+
+fn void fmul32(u64 a, u64 b, u64 want) {
+    u64 mut got = 0;
+    want_op("mul32", flt.flt_mul(a, b, true, &got), got, want);
+}
+
+fn void fdiv32(u64 a, u64 b, u64 want) {
+    u64 mut got = 0;
+    want_op("div32", flt.flt_div(a, b, true, &got), got, want);
+}
+
+// A narrowing to binary32, and one the format cannot hold.
+fn void n(u64 bits, u64 want) {
+    want_bits("to_f32", to_f32(bits), want);
+}
+
+fn void n_refused(u64 bits) {
+    want_f32_refused("to_f32", bits);
+}
+
+// An integer to a float, in either format.
+fn void fi(bool neg, u64 mag, u64 want) {
+    want_from_int(neg, mag, false, want);
+}
+
+fn void fi32(bool neg, u64 mag, u64 want) {
+    want_from_int(neg, mag, true, want);
+}
+
+// A float to an integer, truncated toward zero.
+fn void ti(u64 bits, bool neg, u64 mag) {
+    want_to_int("trunc", bits, neg, mag);
+}
+
+fn void ti_refused(u64 bits) {
+    want_to_int_refused("trunc", bits);
+}
+
+// One comparison.
+fn void c(u64 a, u64 b, i64 want) {
+    want_int("cmp", cast(flt.flt_cmp(a, b), i64), want);
+}
+
+// 350 literals, one per value, drawn from the five classes: each is the
+// shortest decimal of the value, which is what a program writes and what
+// the runtime prints (D11.7, D18.2).
+fn void parsed_values_1() {
+    p("2.1238426269156665e-82", 0x2EF9C97A0FE8F576);
+    p("8.525603822614502e-44", 0x36FE6B9D6E6D7582);
+    p("7.709585325755396e-272", 0x07A4DA791E955CF1);
+    p("7.216816635140817e+264", 0x76ECA5F99F23DAA7);
+    p("2.722259769827447e-218", 0x12C33820B360F560);
+    p("8.372407333844895e-89", 0x2DA55190FE7DA77D);
+    p("1.2450624239149596e+268", 0x779822199951C6E7);
+    p("1.0870139939060595e+176", 0x647B77FAD502ECA8);
+    p("4.4732426627451145e+277", 0x7994300BE0BB065E);
+    p("8.514552645025423e-63", 0x330C057F14E61D13);
+    p("7.911284158631869e-212", 0x141AA21BB1E7DA1D);
+    p("6.319153187646755e+243", 0x728D9D737CB4F55C);
+    p("1.2524824185951992e-71", 0x313621238F507560);
+    p("4.411109030653353e-240", 0x0E3D69D09056CC71);
+    p("4.872802435853459e-195", 0x1796C3F3A877541E);
+    p("6.758233351900953e+102", 0x554823A9106C6B4C);
+    p("5.260767440871141e-73", 0x30EDBE70CF3BADD6);
+    p("3.032163116232704e-263", 0x096E8DA7FD61A658);
+    p("6.665937160349401e+41", 0x489E9BC57F617D80);
+    p("4.747950761070691e+249", 0x73C538800B720FBC);
+    p("9.239014182083859e+297", 0x7DCC4105FD79DBCE);
+    p("3.7469886032979335e+233", 0x706E2B2BE966F542);
+    p("1.68695627257637e-178", 0x1B05E00A827E2648);
+    p("1.6008308171596693e+303", 0x7EE2ACCA796CF7CC);
+    p("3.154654226885632e-225", 0x1152AEDE70C7C484);
+    p("1.5675992653661701e-24", 0x3AFE52602650094B);
+    p("3.162382567268095e-230", 0x10488C5C209C2812);
+    p("6.277436719172542e-24", 0x3B1E5B171B32716C);
+    p("1.0832141191623818e+99", 0x547FB2033F63CBC7);
+    p("5.49056914915651e-19", 0x3C2441B22969091E);
+    p("2.2041672737853754e-37", 0x3852C0405195B685);
+    p("2.1943628959070677e+215", 0x6CA45E9B2263D7D2);
+    p("4.388385486810823e+270", 0x78209D081B2EC295);
+    p("3.654068054270835e-74", 0x30B0871F2A7F13D6);
+    p("8.279425999913077e-276", 0x06D25885395BE997);
+    p("5.442530557898982e+75", 0x4FA810B9EC69CB9A);
+    p("5.293115030527627e-174", 0x1BF4F24573A201AD);
+    p("2.7458904810483072e+81", 0x50D7287E4617EA0F);
+    p("1.5540286923452985e-261", 0x09C8779E0DB26C50);
+    p("1.574925115398333e+249", 0x73AC27FA53899436);
+}
+
+fn void parsed_values_2() {
+    p("4.236775033100867e-22", 0x3B80018EB0AFE6BD);
+    p("4.011238227830453e+216", 0x6CE7459A3BAA33FF);
+    p("8.384595423094059e-223", 0x11D365AE76463DD7);
+    p("6.0439646002289295e-134", 0x2445F7062684A112);
+    p("1.9256978636912967e-98", 0x2BA50F56EED0B654);
+    p("1.4876260595243609e-229", 0x106CDE9CC59D7532);
+    p("2.9839345215627408e-43", 0x371A9E1A1359446A);
+    p("2.6086364306466273e+224", 0x6E868D55ACD22B0F);
+    p("1.8384249328758005e-213", 0x13C3CE0E6B09E32C);
+    p("1.2705553450936597e+163", 0x61CC3DCB1613EB48);
+    p("7.628384631249563e-69", 0x31CA531830FAA6FB);
+    p("2.976420340340779e-97", 0x2BE458245C8F0E6A);
+    p("2.154185761477534e+66", 0x4DB47489172B2D0D);
+    p("1.176729771295529e+272", 0x786BD7B835B86D7C);
+    p("6.061296344124029e-276", 0x06CADC906B8CE3BF);
+    p("2.1986870673091156e-64", 0x32B727A60B1FC704);
+    p("9.085359200560567e-231", 0x102C35DABF4A78A5);
+    p("3.5421456424096463e+171", 0x638D5498FB29DD1C);
+    p("4.169343567070659e+150", 0x5F34611B90541204);
+    p("1.2757787895257984e+46", 0x4981E0A1C7FF4EB0);
+    p("2.08559974916342e-165", 0x1DBEBEF99F45D5E1);
+    p("3.647396299167518e-207", 0x1512BC7336CFBB87);
+    p("4.2237636517356065e+237", 0x7144C1A6809EBF5D);
+    p("4.47409415765138e-181", 0x1A7DB45B404B97B5);
+    p("2.6297194036139506e-162", 0x1E62EDEDC6F22E72);
+    p("3.347357073380262e+109", 0x56AC817DAE1FC81A);
+    p("2.633097599180842e-103", 0x2AA2DF345E046EFE);
+    p("2.1157255523675443e-302", 0x014D0490A67EC6D1);
+    p("1.2320727550755717e+107", 0x562ADC3087BDF49D);
+    p("5.116360314225372e-48", 0x361DE907D77D2687);
+    p("2.995037078857422", 0x4007F5D600000000);
+    p("1.341132156085223e-05", 0x3EEC202600000000);
+    p("648533770240.0", 0x4262DFF400000000);
+    p("0.09545564651489258", 0x3FB86FC800000000);
+    p("70820352.0", 0x4190E28800000000);
+    p("422748094464.0", 0x42589B7000000000);
+    p("0.00701923668384552", 0x3F7CC03400000000);
+    p("206905088.0", 0x41A8AA3E00000000);
+    p("77356655968256.0", 0x42D196C000000000);
+    p("41948.75", 0x40E47B9800000000);
+}
+
+fn void parsed_values_3() {
+    p("0.0009895693510770798", 0x3F50368E00000000);
+    p("22.9676513671875", 0x4036F7B800000000);
+    p("1.882049560546875", 0x3FFE1CE000000000);
+    p("0.0017980393022298813", 0x3F5D758600000000);
+    p("3.8861180655658245e-05", 0x3F045FDC00000000);
+    p("1777059495936.0", 0x4279DC1000000000);
+    p("62352000.0", 0x418DBB5400000000);
+    p("95.7958984375", 0x4057F2F000000000);
+    p("0.00034664664417505264", 0x3F36B7C400000000);
+    p("5236764704768.0", 0x42930D1E00000000);
+    p("5.619131139563192e+17", 0x439F314400000000);
+    p("2.3722572326660156", 0x4002FA6200000000);
+    p("0.2821483612060547", 0x3FD20EB800000000);
+    p("13.178009033203125", 0x402A5B2400000000);
+    p("275.06982421875", 0x4071311E00000000);
+    p("0.0005886591970920563", 0x3F434A0800000000);
+    p("234335.25", 0x410C9AFA00000000);
+    p("16698212352.0", 0x420F1A5400000000);
+    p("28790.1875", 0x40DC1D8C00000000);
+    p("48149760.0", 0x4186F5A800000000);
+    p("0.07720863819122314", 0x3FB3C3F200000000);
+    p("0.04879719018936157", 0x3FA8FBF200000000);
+    p("9312141312.0", 0x4201586000000000);
+    p("1.3183773262426257e-05", 0x3EEBA5FC00000000);
+    p("1026635.0", 0x412F549600000000);
+    p("6959.546875", 0x40BB2F8C00000000);
+    p("14836224.0", 0x416C4C4000000000);
+    p("454787644522496.0", 0x42F9DA0800000000);
+    p("5.795613105874509e-06", 0x3ED84EFE00000000);
+    p("9987.8125", 0x40C381E800000000);
+    p("3.175460733473301e-06", 0x3ECAA34000000000);
+    p("15759.84375", 0x40CEC7EC00000000);
+    p("13731643392.0", 0x420993C200000000);
+    p("6611088.0", 0x4159382400000000);
+    p("677109760.0", 0x41C42DF000000000);
+    p("9.09413763914924e+17", 0x43A93DC600000000);
+    p("2087.6875", 0x40A04F6000000000);
+    p("196.462890625", 0x40688ED000000000);
+    p("2.7439804077148438", 0x4005F3AC00000000);
+    p("4.809611709788442e-06", 0x3ED42C4800000000);
+}
+
+fn void parsed_values_4() {
+    p("1657799394197504.0", 0x43178F0A00000000);
+    p("2734.09765625", 0x40A55C3200000000);
+    p("1602601615360.0", 0x4277522800000000);
+    p("1581064192.0", 0x41D78F4800000000);
+    p("7344799744.0", 0x41FB5C8C00000000);
+    p("1.5241650086556467e+17", 0x4380EBF000000000);
+    p("47027.6875", 0x40E6F67600000000);
+    p("1.0485305786132812", 0x3FF0C6C800000000);
+    p("14.138656616210938", 0x402C46FE00000000);
+    p("2540.85546875", 0x40A3D9B600000000);
+    p("485783040.0", 0x41BCF47600000000);
+    p("38.11065673828125", 0x40430E2A00000000);
+    p("6.357477104756981e-07", 0x3EA5550800000000);
+    p("1.2542936019599438e-05", 0x3EEA4DF000000000);
+    p("415089152.0", 0x41B8BDC200000000);
+    p("479.677734375", 0x407DFAD800000000);
+    p("2.044246378099507e+16", 0x4352281400000000);
+    p("0.0009267134591937065", 0x3F4E5DD600000000);
+    p("0.023896455764770508", 0x3F98785000000000);
+    p("1635.046875", 0x40998C3000000000);
+    p("1.2273992316331052e-301", 0x01750AEE7B973AA1);
+    p("4.755067730652512e-302", 0x01604DE713AFB68E);
+    p("1.1486353748669212e-303", 0x010934CB246CE540);
+    p("1.751210080312959e-303", 0x011336F755EBFC84);
+    p("1.8495151903413905e-302", 0x01495DDE615812CB);
+    p("7.493105565797869e-299", 0x02091724459377AF);
+    p("1.2852473226946898e-296", 0x0280CF9ADADB0353);
+    p("6.528708899698711e-305", 0x00C6EC4EBDD76CB1);
+    p("3.4783910435449328e-307", 0x004F43F127E7E403);
+    p("1.4099809543935519e-306", 0x006FAF14F4EF2975);
+    p("5.065088533067274e-307", 0x0056C38101408100);
+    p("5.2473007717822705e-298", 0x0235F687272BE83E);
+    p("1.8793646069377145e-306", 0x00751DA22411B6BB);
+    p("8.987783917327681e-298", 0x0242CF3E711D078F);
+    p("1.5294107736204332e-302", 0x0144F9F19FC2757E);
+    p("9.188260611386324e-298", 0x02433AA67138133A);
+    p("1.1408931733267682e-302", 0x013F4B9FD346EA03);
+    p("2.1049745358943626e-299", 0x01EC31983C0797D7);
+    p("4.772834493121042e-308", 0x00212901CAED8C05);
+    p("3.3995667839953744e-304", 0x00EDD738EB094585);
+}
+
+fn void parsed_values_5() {
+    p("1.9159222939564754e-307", 0x004138A0ADF09D6D);
+    p("2.646132620529511e-305", 0x00B294EF37D80D71);
+    p("2.2955039846143103e-307", 0x0044A21023BDAE69);
+    p("3.359606300613533e-308", 0x0018287D7BD5ECEB);
+    p("5.070245601333028e-307", 0x0056C96FEFE307B3);
+    p("5.5023233409502265e-298", 0x023707C96CFE3065);
+    p("6.601734420937985e-299", 0x02061B0D5D35A2BD);
+    p("6.679186602610533e-298", 0x023BF4CE51ABC5EA);
+    p("7.93554409199011e-305", 0x00CBDCD6294E68CE);
+    p("2.6740848953135256e-302", 0x0152568403BBE90F);
+    p("1.1206719679018346e-305", 0x009F7A7F4951D49B);
+    p("5.348536307901431e-301", 0x0196EC8BF8174F07);
+    p("1.1166765138852783e-305", 0x009F5DC44DC211C2);
+    p("1.5020555025515084e-304", 0x00DA5E96504D14D3);
+    p("8.747275511953156e-304", 0x010332095EF51251);
+    p("2.575910965622892e-306", 0x007CF11DADDE3CF5);
+    p("2.1197209760989433e-298", 0x0221BE993A032265);
+    p("1.6267142483190215e-302", 0x01464F9684AED815);
+    p("5.185035988544772e-306", 0x008D20E20474CBF5);
+    p("1.9636717462205386e-301", 0x0180D52DC1626187);
+    p("1.1904195111843237e-306", 0x006AC0075BD7BE2B);
+    p("1.6698952923300203e-307", 0x003E05040C7D62E9);
+    p("9.503166217866739e-299", 0x020FD22DF4EA8421);
+    p("1.2130539869559233e-301", 0x0174CBF8C3EE4E69);
+    p("2.216311825279026e-304", 0x00E3744F89769802);
+    p("5.203187771168575e-301", 0x01964D11156CD814);
+    p("2.871818133529464e-303", 0x011F82A318E7D743);
+    p("5.303667190504089e-299", 0x0201C2570C8FB5AC);
+    p("8.816769012294505e-298", 0x0242739F379957DA);
+    p("1.1725291730592164e-305", 0x00A077B1FE80F43E);
+    p("1.0714457407689877e-301", 0x01725E77A868C54B);
+    p("3.176979537690165e-306", 0x0081D8FCC91A9D3C);
+    p("2.0018455932520333e-306", 0x00767DED30F18E2C);
+    p("1.5172153787960174e-306", 0x00710BFAF32A5C35);
+    p("6.045758609244968e-302", 0x0164BAD857E66530);
+    p("1.2862719242840973e-303", 0x010C3A01C42B0363);
+    p("2.0231692456617824e-305", 0x00AC6A132E6D822E);
+    p("2.4869270862390137e-305", 0x00B176BB53F50A41);
+    p("5.2374116636537536e-303", 0x012CBBABCC668A37);
+    p("4.274786216488233e-304", 0x00F2C2F89D0E70BA);
+}
+
+fn void parsed_values_6() {
+    p("1.3457744531036036e-307", 0x00383161904FBE07);
+    p("2.4985929019315007e-304", 0x00E5EEA10EE0CE0E);
+    p("2.4096971317472384e-300", 0x01B9D1F2DF157D40);
+    p("8.665269737020474e-301", 0x01A291DFDE5C041E);
+    p("1.6593484398117998e-298", 0x021BC8064867C446);
+    p("1.1527459126580519e-297", 0x02481FE2C62F4C7A);
+    p("8.472109622831969e-300", 0x01D6B1E16CAB4D68);
+    p("8.700317934826643e-303", 0x0137DD922EA84FD0);
+    p("2.436706763399032e-304", 0x00E563905393E105);
+    p("1.158862521874e-307", 0x0034D531DB3CBB06);
+    p("1.9711423540741605e-308", 0x000E2C8DA4C827C4);
+    p("1.9961795607551336e-308", 0x000E5AA48A0A7B8E);
+    p("1.0477374441309745e-308", 0x000788B6F3FA466D);
+    p("9.423621010451905e-309", 0x0006C6BC5A07180D);
+    p("9.51450495726705e-309", 0x0006D7774C5C319C);
+    p("2.1642282739088763e-308", 0x000F8FFE3F0F8048);
+    p("1.608779617477133e-309", 0x00012826755DAC95);
+    p("2.179124773149748e-308", 0x000FAB6A49C5A68F);
+    p("2.61253468143947e-309", 0x0001E0ECDD4C1B7E);
+    p("1.448760933671497e-308", 0x000A6AEF10913846);
+    p("1.207047113727467e-308", 0x0008ADFA58C8BDA1);
+    p("2.322052462552137e-309", 0x0001AB73C2931486);
+    p("1.3352850063454345e-308", 0x00099A0B06DDE041);
+    p("1.8257614390763754e-308", 0x000D20EE3CDDB505);
+    p("9.887935722349323e-309", 0x00071C3563D59789);
+    p("1.47553373418189e-308", 0x000A9C37DDDA0490);
+    p("9.77373446739015e-309", 0x0007072F9AD42816);
+    p("1.376431973658992e-308", 0x0009E5C9B8146798);
+    p("1.8442447279118944e-308", 0x000D42F491FA588A);
+    p("1.4378263182008804e-308", 0x000A56CE140BECDC);
+    p("3.052706362972545e-309", 0x000231F426D2CAA8);
+    p("1.23642605302478e-308", 0x0008E40F4DA229DE);
+    p("1.4383337878648285e-308", 0x000A57BD39C476D6);
+    p("7.04093928083076e-309", 0x0005101F6909E565);
+    p("2.160021057792733e-308", 0x000F883F93B1DFA2);
+    p("2.215531390928454e-308", 0x000FEE6F11CB3348);
+    p("1.031798975713642e-308", 0x00076B5FE0E99CD2);
+    p("2.183501316478586e-309", 0x000191F279B25779);
+    p("1.584280073365476e-308", 0x000B646710A0A7A5);
+    p("1.9314222772765144e-308", 0x000DE36F6145F07E);
+}
+
+fn void parsed_values_7() {
+    p("4.085047835177084e-309", 0x0002EFFDB4745319);
+    p("8.6369285112441e-309", 0x000635EB1DB630EA);
+    p("1.6828917268886716e-308", 0x000C19EE3F548F17);
+    p("1.5867197083369294e-308", 0x000B68E4C0FB50EC);
+    p("1.152076599765536e-308", 0x000848C93F16838B);
+    p("1.8786113980468205e-308", 0x000D82380461C6CF);
+    p("1.661207684040077e-308", 0x000BF2038B97A1E9);
+    p("1.2791881129065604e-308", 0x000932C71D7632DF);
+    p("1.8702198851425274e-308", 0x000D72C57AAA17D0);
+    p("1.372751887551957e-308", 0x0009DF0376480758);
+    p("1.486884397192435e-309", 0x000111B6177B7B7F);
+    p("1.0845910095332504e-308", 0x0007CC8E5C45A03F);
+    p("1.4975066014935215e-308", 0x000AC4AAADB40AE8);
+    p("4.95063968672561e-309", 0x00038F551B957D46);
+    p("5.170885196785167e-309", 0x0003B7E0469D990E);
+    p("1.500219678732301e-308", 0x000AC9A93A720691);
+    p("1.907600627231e-308", 0x000DB795522846DF);
+    p("1.991583175848926e-308", 0x000E522E78E839E5);
+    p("1.4221206519289596e-308", 0x000A39E4B67FA89E);
+    p("5.50874297921139e-309", 0x0003F611F98EA1CD);
+    p("1.960955477302733e-309", 0x000168FAE73B38AA);
+    p("1.382096581691368e-308", 0x0009F03730DFA554);
+    p("1.7068699326601545e-308", 0x000C461215821128);
+    p("2.0152901690669127e-308", 0x000E7DD27FB130CD);
+    p("1.5922759807949425e-308", 0x000B731F2C0C482C);
+    p("2.4165670258106e-310", 0x00002C7C2E1BA005);
+    p("7.8300210595035e-310", 0x0000902352FD5330);
+    p("1.415570467136944e-308", 0x000A2DD5E8B616AE);
+    p("9.131499665610917e-309", 0x000690F600B3B06B);
+    p("4.71878924996473e-309", 0x000364A70D6389E8);
+    p("1.978133418337822e-308", 0x000E396C36C5EA89);
+    p("1.4814628912970585e-308", 0x000AA722022649B0);
+    p("9.75014276522718e-309", 0x000702D7D5D5AFC2);
+    p("1.722710665888371e-308", 0x000C633B19B0292E);
+    p("1.122834179724477e-309", 0x0000CEB21001FE8C);
+    p("2.2070185079134494e-308", 0x000FDEC355D8E37F);
+    p("1.3660011451759736e-308", 0x0009D29624FF621E);
+    p("1.415393636855846e-308", 0x000A2D8293B4302E);
+    p("1.318272083253035e-308", 0x00097AB99C5C3E99);
+    p("3.291148266275446e-309", 0x00025DD8D5399AC7);
+}
+
+fn void parsed_values_8() {
+    p("4.279701538082983e+304", 0x7F2F342DF2DDAE9A);
+    p("1.0451305141770348e+298", 0x7DCFF61982332F61);
+    p("3.3104091588059363e+305", 0x7F5E2BB6090E55E2);
+    p("1.6720987434861524e+295", 0x7D3A2E55B4FEAAF2);
+    p("1.4667227738944285e+304", 0x7F15635B23AEBE77);
+    p("2.566826353567809e+296", 0x7D791E70B13AFFA9);
+    p("1.4293638965330355e+298", 0x7DD5DB16F2BC45FF);
+    p("1.0767970541650815e+302", 0x7EA419451414574A);
+    p("2.223149368171533e+305", 0x7F5442F607FF5CA0);
+    p("5.703987684354288e+303", 0x7F00A2A8CB17E5F0);
+    p("2.5099095955261088e+306", 0x7F8C9805D9575D29);
+    p("7.147545094988779e+299", 0x7E31139B8A9F4D88);
+    p("4.216104882643046e+295", 0x7D5080E45A62112B);
+    p("8.793570022003837e+306", 0x7FA90B7FCBB054B7);
+    p("1.2936226197079328e+308", 0x7FE706F9A8A7A0BD);
+    p("1.0326469106258329e+307", 0x7FAD692795BB976F);
+    p("1.0027478715112127e+307", 0x7FAC8F2836CA66ED);
+    p("1.4380791452400605e+306", 0x7F8062158EB360FC);
+    p("1.1039702751821074e+295", 0x7D314915A7CF3FA9);
+    p("3.72713220993219e+297", 0x7DB6CBC816F96A72);
+    p("4.9509964496199453e+294", 0x7D1F021AB68ADB02);
+    p("1.5080949465714028e+299", 0x7E0CD3179C2116B0);
+    p("8.801395794123441e+302", 0x7ED488F971B87DC2);
+    p("1.59922028659044e+298", 0x7DD873F9597B1828);
+    p("1.4271699775498857e+294", 0x7D01E07656C2F57A);
+    p("6.390687035007649e+303", 0x7F02A35B47E24304);
+    p("1.1374681389021882e+295", 0x7D31CF5AF5880B01);
+    p("3.8670108481741102e+295", 0x7D4E46240ACB93A9);
+    p("8.95537248044594e+299", 0x7E3565514B8C500E);
+    p("5.2390771784620015e+299", 0x7E2908AFDCAB32E0);
+    p("5.3893514198673634e+303", 0x7EFF6F7F398E5854);
+    p("1.0817891861028355e+308", 0x7FE341A91CE3BC7F);
+    p("1.1539386388109933e+302", 0x7EA589E05013DF62);
+    p("4.968005518450698e+302", 0x7EC72EAAD26449E3);
+    p("1.1497641728798667e+295", 0x7D3200A45710CA54);
+    p("1.6915199134381142e+302", 0x7EAF929B267182EB);
+    p("2.746561714312066e+306", 0x7F8F4A34E62EE48A);
+    p("9.800032475566182e+302", 0x7ED6DD72E560F364);
+    p("1.600925493926694e+303", 0x7EE2AD12DB857D8D);
+    p("3.175999187170968e+307", 0x7FC69D263F34437E);
+}
+
+fn void parsed_values_9() {
+    p("4.163131278569145e+300", 0x7E58DDAC7F5A8578);
+    p("8.086099975856035e+304", 0x7F3D7A76821FEFF8);
+    p("9.93800873099757e+294", 0x7D2F1EFA20DED5FA);
+    p("1.2838840832427316e+294", 0x7D0014FDE4C6859C);
+    p("2.7126044945499954e+300", 0x7E5033BB8D0F4C8A);
+    p("1.512679592462454e+300", 0x7E4211F3F9CDF08D);
+    p("6.132986225513304e+297", 0x7DC2C161B1CE523B);
+    p("3.5264764305943716e+295", 0x7D4B9BA70939A36E);
+    p("3.649046716354248e+303", 0x7EF548D6088FE5D3);
+    p("2.1708913305225994e+297", 0x7DAA8E2CAFE331E9);
+    p("1.5269370451820982e+297", 0x7DA2AD9F90C2C2E2);
+    p("9.72191274262156e+306", 0x7FABB05D7E349CEB);
+    p("5.289595104607452e+306", 0x7F9E216AAAC6E0E6);
+    p("2.3989047194741844e+299", 0x7E16ECE84AFEE6C7);
+    p("3.9810914277721556e+300", 0x7E57C752F9E466E5);
+    p("3.728192626804278e+302", 0x7EC1659D61C29947);
+    p("1.4518614545451519e+308", 0x7FE9D80FD7E207AD);
+    p("7.072824848733512e+295", 0x7D5BAF90DE179C54);
+    p("5.559737849089756e+307", 0x7FD3CB174407B6B7);
+    p("2.0750559027406588e+294", 0x7D09FE04A9DBCC20);
+    p("1.4147576142551118e+306", 0x7F801E1172C44C37);
+    p("3.2761546858776004e+298", 0x7DE90C1364177224);
+    p("2.8455874475008144e+304", 0x7F24BF5DD15FBF4E);
+    p("2.714037098517875e+298", 0x7DE4BFE6D1F7A53E);
+    p("1.4659669498825623e+298", 0x7DD66A5E49F47B54);
+    p("2.790243885651345e+304", 0x7F245810F32B2BAE);
+    p("1.8648191197737224e+307", 0x7FBA8E4FD6EE528B);
+    p("8.124790843542816e+306", 0x7FA723E257276CA2);
+    p("1.5850609554562082e+295", 0x7D38D1754188BE63);
+    p("3.582309512746284e+305", 0x7F60530C86391528);
+}
+
+fn void parsed_values() {
+    parsed_values_1();
+    parsed_values_2();
+    parsed_values_3();
+    parsed_values_4();
+    parsed_values_5();
+    parsed_values_6();
+    parsed_values_7();
+    parsed_values_8();
+    parsed_values_9();
+    println("parsed values ok");
+}
+
+// 150 digit strings of 1 to 850 significant digits with exponents from
+// -330 to 300: the reader keeps 800 digits and a nonzero digit below them
+// only breaks a tie, so the long ones exercise the tail and the bignum
+// scaling that the short ones never reach.
+fn void parsed_digits_1() {
+    p("0.506082194293008195508508512375e217", 0x6CED5C792ECEF0F5);
+    p("0.9209727564999960e93", 0x533C41D37E3DD1EE);
+    p("0.888047305408788516483472e-14", 0x3D03FF3E826BD4A3);
+    p("0.1425006723411926537788275950778127633504530094801345457e-111", 0x28B5EECFF7C7C4D6);
+    p("0.6975074684255569554970001564012846067269219221367941847e108", 0x565301FB00B1BA87);
+    p("0.5611992852643878853855887714274625941527e44", 0x490421CD2DD4C07E);
+    p("0.3177693898061622379858506065576188227540e-267", 0x0864FC06CE4EB243);
+    p("0.1388912794830884212960628759329115886973e-5", 0x3EB74D55C49401FC);
+    p("0.332111714423144725486600374165e-213", 0x139C9F403C196CD2);
+    p("0.7418291251620014844549e214", 0x6C560923EF8B6A56);
+    p("0.1734527034838548130803e258", 0x75571A975138D511);
+    p("0.56402315e161", 0x61500C15354F9FAA);
+    p("0.7e-91", 0x2D024078BD783920);
+    p("0.539414688e-248", 0x0C634F7043D44380);
+    p("0.947e155", 0x601C408FD4C8DB7D);
+    p("0.943935378095588406301063854308e213", 0x6C266E6C9D637FCE);
+    p("0.124e-309", 0x000016D38E2FD5BB);
+    p("0.1828681855393982315323e-285", 0x049BD86E7AEB7094);
+    p("0.6579352877849441966680783906173511396918698409847236101e98", 0x543ECD6A237F2236);
+    p("0.9767103411024944312994286517830714949269e282", 0x7A7AE75003BD4CDC);
+    p("0.25e138", 0x5C757F48BB41DB7C);
+    p("0.474586504709196671970213295352660230797326779709682205e101", 0x54D5B2A6AAC774CC);
+    p("0.98693942938416825e272", 0x78675A1DC917BC18);
+    p("0.3936755415601333148809e-143", 0x22289441467F168A);
+    p("0.944792216e145", 0x5E08363D437CA115);
+    p("0.26e92", 0x52E986FC377198F2);
+    p("0.182972618777979697e-156", 0x1F6418DCDCA0E956);
+    p("0.4865210931778330039165292677368326507080653439569752707e-12", 0x3D611E3142F43A26);
+    p("0.76927e-321", 0x000000000000009C);
+    p("0.620737537204591e44", 0x49064492EFC899C2);
+    p("0.7862999594233404384796373768159466613529e-142", 0x226EAED1846EDF61);
+    p("0.66132e-327", 0x0000000000000000);
+    p("0.91043279110986897e-207", 0x14F2B5000DCAFF9F);
+    p("0.8968836548697582872004e211", 0x6BBB47EAD8E92CA0);
+    p("0.2208746024245971071e-240", 0x0DF79091874DE909);
+    p("0.86821e-76", 0x30241B3B0FC8AB0D);
+    p("0.985319357e102", 0x551C27BA88C1005F);
+    p("0.681e-55", 0x347AB787B16A0F56);
+    p("0.361571515698250471e98", 0x5430ED77BA646FE1);
+    p("0.6311185021089425708880226056196941582840e-55", 0x3478C28D54926E8B);
+}
+
+fn void parsed_digits_2() {
+    p("0.22e20", 0x43F314FB37062980);
+    p("0.4107163842749376056050007513857105124604109630832164572e84", 0x514B0FC3F622CF3D);
+    p("0.7426000929678567528134633522335962628659388811637621870e-203", 0x15C2A04870C2D587);
+    p("0.93e262", 0x7652E6E676431B73);
+    p("0.232027490e-11", 0x3D8468CB6A166E04);
+    p("0.152812538365027441468847807706e-177", 0x1B03D0C8B7EDB6BA);
+    p("0.6e-211", 0x141432EC8B0B8436);
+    p("0.2787611386479195713724484659186955071069e-158", 0x1F03987D449C9E08);
+    p("0.6477078103159940397937036647666320350320e11", 0x422E29475ECF32E5);
+    p("0.77610e-130", 0x24EB8B3E82312905);
+    p("0.819387705931357e-29", 0x39E4C621590013AA);
+    p("0.48888e-75", 0x304C4DE14004021C);
+    p("0.45e70", 0x4E64DD41C1613350);
+    p("0.1798565837273804547429e192", 0x67A42F01C40ED4B3);
+    p("0.52450e277", 0x7962EFBDBE482F35);
+    p("0.745506005587453656407222977459e-217", 0x12DA51059FEBD9E1);
+    p("0.5e3", 0x407F400000000000);
+    p("0.2478e-144", 0x21E8C11462A145D7);
+    p("0.16e75", 0x4F56A3A275D49491);
+    p("0.736292742350464991e9", 0x41C5F177C32CDC09);
+    p("0.9791359716099472579087860042691383578697e-104", 0x2A5674DB3713383D);
+    p("0.7578726e-4", 0x3F13DDFF366DDB94);
+    p("0.6439254992975748108889e-319", 0x00000000000032E9);
+    p("0.410106132e-9", 0x3DFC2EA9D2C101D5);
+    p("0.13175570201347679e291", 0x7C2B0A30C050B857);
+    p("0.9623946310734276058770516e112", 0x573001D672CF2AF4);
+    p("0.2654615333606676337e20", 0x43F7066E1CFC54F7);
+    p("0.1517485897070074198395094331166264921835025471550666171e195", 0x6840A154B6BF9536);
+    p("0.7649421893354985377e-276", 0x069B1EA393D1E8E6);
+    p("0.9561325265646600992403e-223", 0x11A1B211B139CBB5);
+    p("0.2463598827157812614e69", 0x4E2246A766CC6900);
+    p("0.9e-24", 0x3AF168958A4AE6CA);
+    p("0.76735e103", 0x554B68922CE621AF);
+    p("0.8328760402841020250883708097821735798810e277", 0x796E11EFA3F9A5BD);
+    p("0.5761935359539031832e99", 0x5470DC152835B616);
+    p("0.155584745096789590e-221", 0x11E1FF2A3C8F9A68);
+    p("0.7942994429102495810067983973329704465285e108", 0x5655A539834273D9);
+    p("0.2343177093917431832889614e-94", 0x2C4906650E1662A7);
+    p("0.784789016e-283", 0x052757031427398F);
+    p("0.2804372555992651478872584748160678870720e-294", 0x02C6ECF6AA6EB160);
+}
+
+fn void parsed_digits_3() {
+    p("0.204e96", 0x53B873181B6925D6);
+    p("0.83164118e-237", 0x0EB5A965385BDB24);
+    p("0.5e100", 0x54A249AD2594C37D);
+    p("0.36061885265308757e-20", 0x3BB1079D4AA3169B);
+    p("0.5e-160", 0x1EA67E9C127B6E74);
+    p("0.36487e-302", 0x0124046896968808);
+    p("0.706e-218", 0x12A3F00286BC7603);
+    p("0.755182198422506384e-109", 0x2946B3A8AEDE7EFC);
+    p("0.926506173254540e-111", 0x28E1D346769DDDA1);
+    p("0.337313708627627e166", 0x624D49AB83447B40);
+    p("0.9e269", 0x77C5CE573054D86B);
+    p("0.6402352704795900439780757e149", 0x5ED4073783578825);
+    p("0.9574065323735693605981701e-162", 0x1E4B911023A476C1);
+    p("0.534e-71", 0x3122DEB383578AC9);
+    p("0.9336932371314503486e-219", 0x127518170F8A9649);
+    p("0.136e-290", 0x038B24B7B60DDDAB);
+    p("0.7313942324361523357994159e-233", 0x0F87414E07D73B3E);
+    p("0.40366767144786133e-107", 0x29A2F5EAD1D55D53);
+    p("0.540e-140", 0x22D0765C4C8A8E82);
+    p("0.99514e254", 0x74AB2591510B91F7);
+    p("0.93e-248", 0x0C70A5780A0812AB);
+    p("0.8885657506145389444e-119", 0x2736F1EABBFE817F);
+    p("0.723e-34", 0x38D8069A9176A412);
+    p("0.4072437206690552628410e-225", 0x11234B7A7D16CC71);
+    p("0.395248972043637e-313", 0x00000001DCD537C0);
+    p("0.921e38", 0x47D15274257BC176);
+    p("0.2101154724945884853086200120432333567675015293657844410e298", 0x7DA9B3CB20B02879);
+    p("0.7631630912796552925e-23", 0x3B2273C0303C058A);
+    p("0.413474322532791011153341055116e115", 0x57BADD2D0F6A868C);
+    p("0.916531045657968398818990834429103438407e-278", 0x0634CBD1297B5640);
+    p("0.98451e195", 0x686AF92574A38181);
+    p("0.465816211667996123e-6", 0x3E9F42A95D52A1C4);
+    p("0.585803048e232", 0x700E2F9ADAF6E3B0);
+    p("0.6586402138109312e-312", 0x0000001F09E93062);
+    p("0.727640248927822e-264", 0x0917766174E1D720);
+    p("0.65247e-208", 0x14B573545335EAE3);
+    p("0.7653840242614290e250", 0x73D11AAD63A5DAD5);
+    p("0.377912531132547385043725696880e112", 0x5719248BA75B0499);
+    p("0.104939747688162141638265862031e-161", 0x1E4E372152BEFF47);
+    p("0.903684793302868086e263", 0x7686F579500D32C4);
+}
+
+fn void parsed_digits_4() {
+    p("0.4764048923423096413040088e-305", 0x008AC3703D472DCC);
+    p("0.87881e-49", 0x35C070A9ECCDC31D);
+    p("0.43971964645812946e-158", 0x1F0EE90B0ABF1A7C);
+    p("0.2876649201461225824629e-87", 0x2DC24FDECE0F8820);
+    p("0.40455e274", 0x78BDE9A90240A350);
+    p("0.98840e289", 0x7BF03A4A54ADA7FA);
+    p("0.5987384885258515070287e121", 0x59028CA2C488D20E);
+    p("0.82076e-42", 0x37324DB615779164);
+    p("0.1432518601422825887e13", 0x4274D88C32ACED37);
+    p("0.6629585893274127817803e152", 0x5F7440C22F3B510A);
+    p("0.939885411200922742355e129", 0x5AB5B1E2006E1E72);
+    p("0.815091191881426029988142049476e93", 0x5339022C95167898);
+    p("0.2067482421468629608365e294", 0x7CD4B7C93AC69943);
+    p("0.7360315334256401449440e5", 0x40F1F83274175518);
+    p("0.76479e-256", 0x0AC25F9444B32245);
+    p("0.615e139", 0x5CC086A64FF43A54);
+    p("0.4509253115342101802353922e19", 0x43CF4A0AE89F250F);
+    p("0.457340481e-73", 0x30B4AFA4172F6CDB);
+    p("0.2058595140410085620e-227", 0x10A8F8032CAC7D90);
+    p("0.64e-230", 0x1023DF4A91A4DCB5);
+    p("0.167549868580184346627936424497e273", 0x7873D270276124E9);
+    p("0.677764306568465e154", 0x5FE02D0DBC23CCD3);
+    p("0.25501537303298598e24", 0x44CB00349E0A12E6);
+    p("0.102e-256", 0x0A939A875C63BF24);
+    p("0.188813357e-94", 0x2C442A46E2DFFCE4);
+    p("0.35e120", 0x58C15965F1702484);
+    p("0.559530348e252", 0x743389947AF159F3);
+    p("0.6228373206521899088599e-247", 0x0C9BDEF386A3F0E5);
+    p("0.3312954366514172397399e47", 0x499736520A3CA85C);
+    p("0.316035271447636674133792363942e-237", 0x0EA076A7CF051C0A);
+}
+
+fn void parsed_digits() {
+    parsed_digits_1();
+    parsed_digits_2();
+    parsed_digits_3();
+    parsed_digits_4();
+    println("parsed digits ok");
+}
+
+// 333 operations in binary64, each rounded once from the exact result.
+fn void binary64_operations_1() {
+    fadd64(0xBAE83C0C722735D3, 0x816B1CC0E5621A5A, 0xBAE83C0C722735D3);
+    fadd64(0x703021FA9EB04539, 0x80008920A49D3111, 0x703021FA9EB04539);
+    fadd64(0xD033B2503EB1F3EA, 0x000C5250FFE1418E, 0xD033B2503EB1F3EA);
+    fadd64(0xB868B7D3DF16FB9D, 0xA36C5C4A051C3E5D, 0xB868B7D3DF16FB9D);
+    fadd64(0x33F1AFE3E4BE3214, 0xFDEC4C3CA23C97BC, 0xFDEC4C3CA23C97BC);
+    fadd64(0x228B834253CBC06A, 0x7F1D8B3B508E9086, 0x7F1D8B3B508E9086);
+    fadd64(0xD801B05281127C4F, 0x01352FDF72E67809, 0xD801B05281127C4F);
+    fadd64(0xB39FF58F30A61D71, 0x0000CBF4DCED009D, 0xB39FF58F30A61D71);
+    fadd64(0xA10A8E7AF5BB8787, 0x80015A21C91776B2, 0xA10A8E7AF5BB8787);
+    fadd64(0xAFE1E7904B2DE429, 0xC7DA0BBEC79C0768, 0xC7DA0BBEC79C0768);
+    fadd64(0xF51F60C43A835D53, 0x000CF0A4DC696990, 0xF51F60C43A835D53);
+    fadd64(0xF6EB257DDDBE2275, 0x3FE4896000000000, 0xF6EB257DDDBE2275);
+    fadd64(0xF1BDEAD504306945, 0x008293B5AAB86B05, 0xF1BDEAD504306945);
+    fadd64(0xB0B259DBDB826BF2, 0x0008EA3648770555, 0xB0B259DBDB826BF2);
+    fadd64(0xCD9B58FD765F9FC5, 0x63939F3CFA3FAEF3, 0x63939F3CFA3FAEF3);
+    fadd64(0x231A032F1B9C9454, 0xFED4981ECE0EB72C, 0xFED4981ECE0EB72C);
+    fadd64(0x5A3C6DE679CEE9A3, 0x7E0C44D9EA064FDF, 0x7E0C44D9EA064FDF);
+    fadd64(0x88B60638D0FEF6F7, 0x0008C16C94F4F31A, 0x88B60638D0FEF6F7);
+    fadd64(0x6C9B45A5F7F84345, 0x180279B6144F0BBD, 0x6C9B45A5F7F84345);
+    fadd64(0x28117D497D6B152A, 0x800D3CC52449466C, 0x28117D497D6B152A);
+    fadd64(0x04D6ADEE3F74844C, 0x00051C10E3806068, 0x04D6ADEE3F74844C);
+    fadd64(0x52F6DCF6C12DAD6B, 0x30361302B2B8B7AA, 0x52F6DCF6C12DAD6B);
+    fadd64(0xBFFEF1BA00000000, 0x559DF49458F8E711, 0x559DF49458F8E711);
+    fadd64(0x436016B000000000, 0x45057CF73824D402, 0x45057CF73C2A8002);
+    fadd64(0x3FB26D8400000000, 0x7D0074BF1C3A2929, 0x7D0074BF1C3A2929);
+    fadd64(0xC08D5E7800000000, 0x452CBC145CED7A3C, 0x452CBC145CED7A3C);
+    fadd64(0xC0E8223A00000000, 0x0E650AE406FA5B0B, 0xC0E8223A00000000);
+    fadd64(0xC278E97400000000, 0x800898EC91127016, 0xC278E97400000000);
+    fadd64(0xC25A834000000000, 0xFEB3F35FE3DF5CFC, 0xFEB3F35FE3DF5CFC);
+    fadd64(0xC1C297F200000000, 0xFFDAD1AE8DC41047, 0xFFDAD1AE8DC41047);
+    fadd64(0x42ADAA1400000000, 0xC26AB63400000000, 0x42ABFEB0C0000000);
+    fadd64(0xBF2B3BA800000000, 0x58BA974C8DB84AB0, 0x58BA974C8DB84AB0);
+    fadd64(0xC02D587000000000, 0x7FE9B472489F6387, 0x7FE9B472489F6387);
+    fadd64(0xC31FB0DC00000000, 0x3F30C54800000000, 0xC31FB0DC00000000);
+    fadd64(0xC2D05E1800000000, 0x800A14DA2E8F6A5B, 0xC2D05E1800000000);
+    fadd64(0x42996D5000000000, 0x017B2E371AACF26F, 0x42996D5000000000);
+    fadd64(0x42F6E4E400000000, 0x00021B4EFD89BBAD, 0x42F6E4E400000000);
+    fadd64(0xC2363B0000000000, 0xC3B98D7F44784625, 0xC3B98D7F5AB34625);
+    fadd64(0xC2123B8C00000000, 0x027362CF1D12DF04, 0xC2123B8C00000000);
+    fadd64(0xC0DB8FE800000000, 0x96FFA5FCD91C9111, 0xC0DB8FE800000000);
+}
+
+fn void binary64_operations_2() {
+    fadd64(0x403C095000000000, 0xE1EB1D0A0732047C, 0xE1EB1D0A0732047C);
+    fadd64(0xBF0FF16000000000, 0x0007579B7F6EDAFB, 0xBF0FF16000000000);
+    fadd64(0xBF479F8400000000, 0x3EC3662000000000, 0xBF478C1DE0000000);
+    fadd64(0x4247111C00000000, 0x816E2F6495902929, 0x4247111C00000000);
+    fadd64(0x808DAE33B5859F58, 0x7EB171836536CD11, 0x7EB171836536CD11);
+    fadd64(0x014D69995DF3825A, 0x3EEFC3F200000000, 0x3EEFC3F200000000);
+    fadd64(0x8195644374719F97, 0xC1A862B000000000, 0xC1A862B000000000);
+    fadd64(0x002F2D91A2C12CAE, 0xC2037AA000000000, 0xC2037AA000000000);
+    fadd64(0x0220A6CC47A60EE3, 0xBFAFE7A400000000, 0xBFAFE7A400000000);
+    fadd64(0x00DAABBDAE73A7BC, 0x800F045DAF52ED32, 0x00DAAACD6898B28D);
+    fadd64(0x80BC2996C78A355B, 0x820007B0357C0098, 0x820007B116C8B6D4);
+    fadd64(0x80104CD103251054, 0x0197F6E87231366D, 0x0197F6E861E4656A);
+    fadd64(0x82060D01E8F14398, 0x3F698EAD11E8509F, 0x3F698EAD11E8509F);
+    fadd64(0x80A66B941B291292, 0x80E931593EC0A44F, 0x80EA981280733578);
+    fadd64(0x8127070EE066C142, 0xC289AE2000000000, 0xC289AE2000000000);
+    fadd64(0x0038FFCC8DBE48D5, 0x0174137B43B09F86, 0x0174137CD3AD6862);
+    fadd64(0x0157E6B5C902CCEF, 0x02295DBEFA36FF51, 0x02295E7E2FE54767);
+    fadd64(0x81FE047D9C40A1DF, 0x00030F1C68120684, 0x81FE047D9C34656D);
+    fadd64(0x81525EF51F698450, 0x7FE619CC1F11609F, 0x7FE619CC1F11609F);
+    fadd64(0x01EFE79C47C951B3, 0x06CDAA5E12E3D9CD, 0x06CDAA5E12E3D9CD);
+    fadd64(0x002698CA47FBB2FE, 0x643AA86BFC69325F, 0x643AA86BFC69325F);
+    fadd64(0x0226A285BFCC6B37, 0x3FF38ECE00000000, 0x3FF38ECE00000000);
+    fadd64(0x01E4A08CB454AA87, 0x8263FC1A2135EA8D, 0x8263E779948195E2);
+    fadd64(0x00CEFBF526164B84, 0x80274310D6AF4468, 0x00CEF62461E09FB3);
+    fadd64(0x0159C6281BD1DF94, 0xFECD3DC26C12ED85, 0xFECD3DC26C12ED85);
+    fadd64(0x01967392C0C29F68, 0x00DDA97AE041B28E, 0x0196756D5870A383);
+    fadd64(0x0006C789B99CDC8E, 0x000342E142BDA1B6, 0x000A0A6AFC5A7E44);
+    fadd64(0x8005E2ECF70F3AC9, 0x438BE7E200000000, 0x438BE7E200000000);
+    fadd64(0x0007D4E912F05125, 0xFEF07886063AC335, 0xFEF07886063AC335);
+    fadd64(0x800B119DDF6BDBF8, 0xEF338A41CE60C14F, 0xEF338A41CE60C14F);
+    fadd64(0x000B2D63765187BF, 0x016A63861F16A93C, 0x016A63867881C4EF);
+    fadd64(0x0000E73B96B10B37, 0x82730DBC40272005, 0x82730DBC40271C68);
+    fadd64(0x000381BE91D29FEB, 0xC1F5BE4000000000, 0xC1F5BE4000000000);
+    fadd64(0x800D0720E09F31AB, 0x004DB64EEC609E8C, 0x004C156AD04CB857);
+    fadd64(0x000BDB9A92C0DDB1, 0xC1B4C60A00000000, 0xC1B4C60A00000000);
+    fadd64(0x800805831C1C0EF1, 0x818F4019A633BFEC, 0x818F4019B63EC624);
+    fadd64(0x00028F5B78C9D9F0, 0xBF13D98000000000, 0xBF13D98000000000);
+    fadd64(0x000E9895C7CB4457, 0x74158591DF1EC055, 0x74158591DF1EC055);
+    fadd64(0x8006AA720472A469, 0xFD6663DAA48BD024, 0xFD6663DAA48BD024);
+    fadd64(0x00052FA369B21040, 0xFE3E0688ED176D1C, 0xFE3E0688ED176D1C);
+}
+
+fn void binary64_operations_3() {
+    fadd64(0x000E8831CF3D8A20, 0x80D705272BF90A53, 0x80D7043EA8DC167A);
+    fadd64(0x000C747328714D25, 0x7FB94B40CB7C52C9, 0x7FB94B40CB7C52C9);
+    fadd64(0x0002BA5A824ACBB7, 0x80064A1C27442DD6, 0x80038FC1A4F9621F);
+    fadd64(0x800ACAA2905DA6F1, 0xBF5B4E1400000000, 0xBF5B4E1400000000);
+    fadd64(0x8001980D2D455456, 0xE69E715A690E8109, 0xE69E715A690E8109);
+    fadd64(0x000B7BA2AD4BF221, 0xFE1D84E44C63C16B, 0xFE1D84E44C63C16B);
+    fadd64(0x800AE43C2FE6B672, 0x3EFFB79600000000, 0x3EFFB79600000000);
+    fadd64(0x8004D490A92AF3D3, 0x80AA1CF05916A75C, 0x80AA1F5AA16B3CD6);
+    fsub64(0xE88B84F7052CC8ED, 0x3B29C20C0656F08F, 0xE88B84F7052CC8ED);
+    fsub64(0xEA25EC498EA6131A, 0xFD0CF0DDAE4ED98C, 0x7D0CF0DDAE4ED98C);
+    fsub64(0x2901AE5DFDF5B78F, 0x9563771C928F5D64, 0x2901AE5DFDF5B78F);
+    fsub64(0x242BAEDA795D395F, 0x01B5D6B110D37B74, 0x242BAEDA795D395F);
+    fsub64(0xD9EA8CF365EA5729, 0xFD1E993E7BB1226C, 0x7D1E993E7BB1226C);
+    fsub64(0x590185B2E3764A4A, 0xFECF19CB2BD90D61, 0x7ECF19CB2BD90D61);
+    fsub64(0xBFF060AE0A614377, 0xC56390977CA874AB, 0x456390977CA874AB);
+    fsub64(0x6794DAECA145FE80, 0x800AA13B1FC77C14, 0x6794DAECA145FE80);
+    fsub64(0x0D16AE3B3D730B03, 0x3F65037F7EFE53B0, 0xBF65037F7EFE53B0);
+    fsub64(0xB1686E19994B546C, 0xFF361CF93C014F93, 0x7F361CF93C014F93);
+    fsub64(0xF2BDFF8352FAE8EB, 0xC275CCF000000000, 0xF2BDFF8352FAE8EB);
+    fsub64(0x7F63FE9F942C3F46, 0x00009EA2E100F45C, 0x7F63FE9F942C3F46);
+    fsub64(0xAABEFE7F807ADB98, 0x7F01C00083DBA154, 0xFF01C00083DBA154);
+    fsub64(0x5F574A746D1CB60C, 0x800808827E2818B4, 0x5F574A746D1CB60C);
+    fsub64(0x228BB6CD2A54AAD7, 0xD3356EDB4CDB9740, 0x53356EDB4CDB9740);
+    fsub64(0x0AD3E64FB9DB1FA2, 0x66FDB1E19FAB418B, 0xE6FDB1E19FAB418B);
+    fsub64(0x7CD70CCAD0B40806, 0x0004F10AD34A96A7, 0x7CD70CCAD0B40806);
+    fsub64(0x6518D6096D641736, 0x80558CF1D72EDFEE, 0x6518D6096D641736);
+    fsub64(0xFD65D072F97A143B, 0xFE8D297C05D53729, 0x7E8D297691B878CA);
+    fsub64(0x6F9608778411D3A2, 0xD3CC606CAB0A6DF2, 0x6F9608778411D3A2);
+    fsub64(0x357BD2C1283639D5, 0x8006C84F4B1C7A60, 0x357BD2C1283639D5);
+    fsub64(0x037B97856B6DD13D, 0xFEB1B7896113F496, 0x7EB1B7896113F496);
+    fsub64(0xC23E2BB400000000, 0xC25D95A000000000, 0x42560AB300000000);
+    fsub64(0xC1E862E000000000, 0x8004FD1421C39B69, 0xC1E862E000000000);
+    fsub64(0xC3AA582A00000000, 0x00006E78035EAFEF, 0xC3AA582A00000000);
+    fsub64(0xC2EFC89400000000, 0xFD228B39B6AA44DA, 0x7D228B39B6AA44DA);
+    fsub64(0xC24441BC00000000, 0x8009C9235FE97B75, 0xC24441BC00000000);
+    fsub64(0x42F0DC1000000000, 0x587627D8A46453E9, 0xD87627D8A46453E9);
+    fsub64(0xC263D2C400000000, 0x8263C89E5B9C6A60, 0xC263D2C400000000);
+    fsub64(0x40ED620400000000, 0xB047D86F00805866, 0x40ED620400000000);
+    fsub64(0x42FABFFE00000000, 0x8712B98C58A5F696, 0x42FABFFE00000000);
+    fsub64(0x42F2FFE000000000, 0x000CB00E2236BD55, 0x42F2FFE000000000);
+}
+
+fn void binary64_operations_4() {
+    fsub64(0xBFD1C93800000000, 0x561F63C8D6D3D44A, 0xD61F63C8D6D3D44A);
+    fsub64(0xC05A4A2000000000, 0xC286267A00000000, 0x42862679FFFCB6BC);
+    fsub64(0xC039D2B400000000, 0x72FEE9E47D6EC936, 0xF2FEE9E47D6EC936);
+    fsub64(0xC1063A4000000000, 0x457BDC13CA380614, 0xC57BDC13CA380614);
+    fsub64(0x425E4CF000000000, 0xC0D5D38200000000, 0x425E4CF015D38200);
+    fsub64(0xC2651CBA00000000, 0xBF6AB6A800000000, 0xC2651CB9FFFFFFE5);
+    fsub64(0xC372AD3A00000000, 0x800A61F98579E2E9, 0xC372AD3A00000000);
+    fsub64(0x4013EEA800000000, 0x39F37117CF5C12E8, 0x4013EEA800000000);
+    fsub64(0x4160E42400000000, 0xFDCB82524B8FE816, 0x7DCB82524B8FE816);
+    fsub64(0x3F21979A00000000, 0xFDD0CF7FD6E334D2, 0x7DD0CF7FD6E334D2);
+    fsub64(0xC0661C7C00000000, 0x02353055C70F1C57, 0xC0661C7C00000000);
+    fsub64(0x3F011B7800000000, 0x7E137FC3AE27BDD8, 0xFE137FC3AE27BDD8);
+    fsub64(0x81DB0AF4CF6E90B3, 0xC0852CD400000000, 0x40852CD400000000);
+    fsub64(0x01F6CC2A7F2EBBCB, 0xFF0B5434DEABF9D3, 0x7F0B5434DEABF9D3);
+    fsub64(0x8161CFEB3A12678D, 0x000DA8FDD1494F3D, 0x8161CFEBA75A5617);
+    fsub64(0x8116CA68C536E662, 0x01BB3E79E00DDE38, 0x81BB442C7A3F2BF2);
+    fsub64(0x802BE13B59D29D1C, 0x7F1F144973BDEC17, 0xFF1F144973BDEC17);
+    fsub64(0x00E80ECFA1BECFA9, 0x025BF3CC73A27F02, 0x825BF3CC4384DFBF);
+    fsub64(0x8189792936D41EDD, 0x011332E9705A9E2F, 0x81899F8F09B4D419);
+    fsub64(0x01D2E196C3003F61, 0x7FCF64D6433A01B8, 0xFFCF64D6433A01B8);
+    fsub64(0x025AA5C1E6DDEBD7, 0x7DE81F2B71ACD43A, 0xFDE81F2B71ACD43A);
+    fsub64(0x020C818A1229570D, 0x0EA5D2536B7BAF9A, 0x8EA5D2536B7BAF9A);
+    fsub64(0x00B62F7C5D2E9191, 0x8005A6BCF794C9F5, 0x00B630E60C6C76C3);
+    fsub64(0x81D03DA4D70C4AB3, 0xA1D4200F181A17B0, 0x21D4200F181A17B0);
+    fsub64(0x0025FA2FF81A6F08, 0xFE068979BADE2957, 0x7E068979BADE2957);
+    fsub64(0x824A326138CEFFCE, 0xFEE83F5026B39B8C, 0x7EE83F5026B39B8C);
+    fsub64(0x80450FD410CE92A6, 0x7F5309014B93C9A1, 0xFF5309014B93C9A1);
+    fsub64(0x01B2592B326F49D0, 0x022155A2DD84BB40, 0x822130F0871FDCAC);
+    fsub64(0x01B950D0BA5619F0, 0x439C9BAA00000000, 0xC39C9BAA00000000);
+    fsub64(0x005877363302067E, 0x7F8B294A7D4C4E04, 0xFF8B294A7D4C4E04);
+    fsub64(0x81C2F221E15E28CC, 0xFF6BC7657091B833, 0x7F6BC7657091B833);
+    fsub64(0x0010C2ED59E52C66, 0x0050D1A9A8C258BE, 0x804F8AF5A6480BEF);
+    fsub64(0x023E7DFBC1BE621C, 0x000C501ED3B8F026, 0x023E7DFBC1BB4E14);
+    fsub64(0x0116AD8F5BDC0200, 0x7E5F996E31D89281, 0xFE5F996E31D89281);
+    fsub64(0x8002A5D749516C85, 0x000030D0C1E36035, 0x8002D6A80B34CCBA);
+    fsub64(0x800657A8A2BC883E, 0x800625C935DB3065, 0x800031DF6CE157D9);
+    fsub64(0x800D6CF8BC210BD0, 0x80260E8EDE073296, 0x001EB024FFED595C);
+    fsub64(0x0002840FABCCEFE0, 0x4372A43000000000, 0xC372A43000000000);
+    fsub64(0x0002D1AAB9A43A53, 0x000626FDB2D58F22, 0x80035552F93154CF);
+    fsub64(0x800FC94233D32D9F, 0x2F0AEFA3F06FE852, 0xAF0AEFA3F06FE852);
+}
+
+fn void binary64_operations_5() {
+    fsub64(0x0009625C5C542961, 0x406449783C74B414, 0xC06449783C74B414);
+    fsub64(0x80050B5977B300FC, 0x00066E809A240DE2, 0x800B79DA11D70EDE);
+    fsub64(0x8001D27F561B6C92, 0x800CCF64A66C8A7E, 0x000AFCE550511DEC);
+    fsub64(0x800D1A5BCD437BE8, 0x00E19465F662B304, 0x80E194CEC9411D20);
+    fsub64(0x0009D2590C2C013F, 0x0219B760D0B7928A, 0x8219B760D0ADC031);
+    fsub64(0x00048C6364C2FB2F, 0x00039502BBBA6468, 0x0000F760A90896C7);
+    fsub64(0x00091E36934DC0BB, 0xCC8E30576AA0833D, 0x4C8E30576AA0833D);
+    fsub64(0x8002F718D537DD84, 0x000CDC6DE898A5F5, 0x800FD386BDD08379);
+    fsub64(0x00063BF9BAFB7238, 0x7926845B7A67545D, 0xF926845B7A67545D);
+    fsub64(0x8009F170E560EF2C, 0x3FEB41D800000000, 0xBFEB41D800000000);
+    fsub64(0x80082154B24B5912, 0x43A4A22E00000000, 0xC3A4A22E00000000);
+    fsub64(0x000F9208BB97A770, 0x804F1E2F8FE2658C, 0x0050883853AAAD3D);
+    fsub64(0x0006D8A023A1BB36, 0x7F1DA8AE3A6AADC9, 0xFF1DA8AE3A6AADC9);
+    fsub64(0x8007BB695ECC7E2B, 0x5811C2BB9291D105, 0xD811C2BB9291D105);
+    fsub64(0x80069EFDA5B4FED8, 0x3708E0A5377FF8BB, 0xB708E0A5377FF8BB);
+    fsub64(0x000CA94D9A16C587, 0x000BC036DF3C94B9, 0x0000E916BADA30CE);
+    fmul64(0x3A8E623EF2BC0673, 0xDBCD2D405AE41D45, 0xD66BB4004F4A8C8F);
+    fmul64(0x1B17A9336A16AB31, 0x000A1CD43C9F1464, 0x0000000000000000);
+    fmul64(0xA545A235570FC173, 0xC253C7B000000000, 0x27AABE9EC718475C);
+    fmul64(0xD1A3CD16A0FD23A8, 0xBEC2A83000000000, 0x507716DE49FB0D0B);
+    fmul64(0x676D322A783321E2, 0x0005209841FC661E, 0x2772B64EDEF86778);
+    fmul64(0xBF78E69488047C88, 0x0259F4E8746CFAD1, 0x81E432B7191E256F);
+    fmul64(0x0C77DFF173EB461F, 0xFDA3FC5F6401ECAC, 0xCA2DD2842B6D4156);
+    fmul64(0x064065B4F8B1F748, 0x7EBD43A302F1BD04, 0x450DFDA8F7BC134E);
+    fmul64(0x9BE15FE9A30BE6D0, 0x8002724DBFF67C8F, 0x0000000000000000);
+    fmul64(0xD545BCEC4D0A08D1, 0x003B5902C6ACB0F3, 0x959293DEB4FBC5F0);
+    fmul64(0x8550ABA03F791DFA, 0xFE62C319747EACC9, 0x43C38C5A7DF87E64);
+    fmul64(0xCC2944F7492F82E5, 0xC218964400000000, 0x4E536A6270982C66);
+    fmul64(0xB01CA3C83FB57AB6, 0x4384107000000000, 0xB3B1F513492E266A);
+    fmul64(0x839D95CAAD5A83A5, 0x7D3DAD3A74D1B169, 0xC0EB6FE788536FE7);
+    fmul64(0x10BA711D19C9DF0D, 0x800DB705B69B857A, 0x8000000000000000);
+    fmul64(0x4E3E912C395D1499, 0x012C4B276BC7037E, 0x0F7B06D099B95018);
+    fmul64(0x08AAF2A1D2B26903, 0x80E754345A511954, 0x8000000000000000);
+    fmul64(0x668F00B7D7963201, 0x0008A3F3EA052985, 0x26A0BE0BDD0BFEB5);
+    fmul64(0xD1336DCC8FDDB7B4, 0x02140C40CD8FEC71, 0x93585820BE10DCC6);
+    fmul64(0xD83F67C539CEC725, 0x800F9F9E25119B2F, 0x185EAA96879E7358);
+    fmul64(0x3EF18E2800000000, 0x013ED847819CD763, 0x0040EBEC4883DC6C);
+    fmul64(0x40D43C4400000000, 0x3EDE419E00000000, 0x3FC321FE13AFC000);
+    fmul64(0xC0D9C75000000000, 0x525C5AAA5FA3A6AC, 0xD346D76FD0E48B04);
+    fmul64(0x42CEBD1C00000000, 0x802AA94C3EEFD262, 0x83099C46B97744C0);
+}
+
+fn void binary64_operations_6() {
+    fmul64(0xBF65496E00000000, 0x0001A40DA406FAA8, 0x800001176CD6B1A8);
+    fmul64(0x4387AEB800000000, 0x42030D0200000000, 0x459C32BB6B570000);
+    fmul64(0x4175ADA800000000, 0x804EA6047D0BC742, 0x81D4C34561EB52EE);
+    fmul64(0xBF56D6A800000000, 0x2848B9A9FD43EC31, 0xA7B1A5804DA8DA42);
+    fmul64(0x430CEB8000000000, 0x4162B2D600000000, 0x4480E6175EE80000);
+    fmul64(0x401B3CBA00000000, 0x000486B6C656E67B, 0x001ED208E89CB208);
+    fmul64(0x41773B4600000000, 0xC152AAD800000000, 0xC2DB1ABE27F10000);
+    fmul64(0x42A70F6C00000000, 0x80015DAF8F90BB14, 0x828F7FD6B57ADAD1);
+    fmul64(0x41FEC78600000000, 0x00F56B93330FA122, 0x03049A68ADBC9613);
+    fmul64(0x3ECE9D2000000000, 0xBECFBB2C00000000, 0xBDAE5B474B0C0000);
+    fmul64(0xC23598E000000000, 0x3F39615400000000, 0xC181211F184C0000);
+    fmul64(0x3EE452E000000000, 0x016CD27A0C2B8851, 0x00624E3161B0B9F1);
+    fmul64(0x428EF1E000000000, 0xB2D3DCD99C11D75E, 0xB573352E532364C3);
+    fmul64(0x4351F69400000000, 0x8C566D798AE12E4A, 0x8FB92DF3C4EACBF9);
+    fmul64(0xC0B8D39000000000, 0x000DAD68EDBBEDE5, 0x80D538F755095EC4);
+    fmul64(0xBF13083400000000, 0x422ADD0000000000, 0xC14FF435CE400000);
+    fmul64(0x01C3DC0C31EF52EC, 0x01C2C9E496E26A82, 0x0000000000000000);
+    fmul64(0x8156C20618518D01, 0xF97B3FB1CBE76369, 0x3AE3610192B9CC03);
+    fmul64(0x00EC941E9A6B8B61, 0x800F5825541ECEFA, 0x8000000000000000);
+    fmul64(0x0247A226841A87AF, 0x811A87A7ED8DB97F, 0x8000000000000000);
+    fmul64(0x8046BAD84F81E544, 0x7E8F450E1993E632, 0xBEE6360E735AEFCB);
+    fmul64(0x811933C6D59E60FD, 0x76B7D83164C77BEC, 0xB7E2C77B4E5322D0);
+    fmul64(0x817D407B6B70DBFC, 0xC2A9A7D800000000, 0x043773CE6349F613);
+    fmul64(0x80C9F90188B18F22, 0xC16953A800000000, 0x02448E6F6A0D5202);
+    fmul64(0x816277CAF3AD78E1, 0x0000A3FE9E1851AB, 0x8000000000000000);
+    fmul64(0x01355557A4F66FC2, 0x3FFA264600000000, 0x01416EDB38CBD84D);
+    fmul64(0x82487B9ED82B9A10, 0xBEBCF91000000000, 0x01162AB926F7A62B);
+    fmul64(0x8141887D4989CC2B, 0x3ED8BD4200000000, 0x802B1C2089482D55);
+    fmul64(0x011CD4E9388B9A15, 0x800B54D59D86ADEE, 0x8000000000000000);
+    fmul64(0x8013F03F2DC4A588, 0x7E4D2DA5B8137237, 0xBE722E2A5BC9DFA1);
+    fmul64(0x01CDEC1138251455, 0x9180DA28FABFA804, 0x8000000000000000);
+    fmul64(0x824F89B5230718BD, 0xFDBB43CB5D42B466, 0x401ADF01964E5E2F);
+    fmul64(0x01B99D3FFB08A5DF, 0x00EA3AC9A1B2FF83, 0x0000000000000000);
+    fmul64(0x8006E0D496054AC4, 0x0004EF10BB119529, 0x8000000000000000);
+    fmul64(0x00C4237AFDF96354, 0xC15FBC2400000000, 0x8233F8C640880F19);
+    fmul64(0x80FFCCFDA2159363, 0x4077F8D000000000, 0x8187D299AE9846B2);
+    fmul64(0x81D6BF9E93035C69, 0x7D04BAFD63F63B59, 0xBEED79620F4C6AF0);
+    fmul64(0x820FFBCB60A08618, 0x800F1E10C9ACE697, 0x0000000000000000);
+    fmul64(0x0009D8D9AA73E59D, 0x0001009E7C588B63, 0x0000000000000000);
+    fmul64(0x0005BD9CF3B14721, 0x80C59EF49F9BD056, 0x8000000000000000);
+}
+
+fn void binary64_operations_7() {
+    fmul64(0x0003C37FD6480F75, 0xFDFEE98A1A70439F, 0xBDFD15FC8F391AB4);
+    fmul64(0x80020E48C99A3619, 0x5CEDC0FD9D46A412, 0x9CDE957F677771D3);
+    fmul64(0x000A4524FBE7849A, 0x68CFC29BC0F8E1C4, 0x28E462E20232ACDB);
+    fmul64(0x00074ED438FD2E42, 0x7EDDD3053AA4D489, 0x3EEB3E8532CB95B3);
+    fmul64(0x000D20EF0D0FF004, 0x81005DE35D9DD4CC, 0x8000000000000000);
+    fmul64(0x000756A663C6D9C3, 0x800F6CEE495B6CE0, 0x8000000000000000);
+    fmul64(0x000E4DBF9DC9E51F, 0x7E19096CE2259A63, 0x3E3661E8794D7109);
+    fmul64(0x800946817C6E230D, 0x143A9BCC468CDC1B, 0x8000000000000000);
+    fmul64(0x8003F2F3B7A41ECB, 0xC069D8D800000000, 0x00698487E3E71B92);
+    fmul64(0x800C89A79A50D981, 0xFD0F6ED2A519095C, 0x3D28A18C2B588979);
+    fmul64(0x800395C1EB8578A0, 0x7ED9FE76A3815F3F, 0xBED74C0BEE51027E);
+    fmul64(0x800ABD76CD5108EC, 0x0114C8F87D2046CE, 0x8000000000000000);
+    fmul64(0x00036FB966D3DAD2, 0x800BFF0DD99F8C12, 0x8000000000000000);
+    fmul64(0x8002169B8B89B7AF, 0x7FD6E004EB8D4A6E, 0xBFC7E2982F22280E);
+    fmul64(0x80008C156E1BF48F, 0x7F0AD4E7C43F54BE, 0xBEDD5D5B817ED071);
+    fmul64(0x80005D923AAAAEE6, 0x000A901BE84550D6, 0x8000000000000000);
+    fmul64(0x000CD87532B725FA, 0x42C9006400000000, 0x02E41287681AA84F);
+    fmul64(0x0006E316A3C89AB3, 0x64978B4BB16A28D3, 0x24A444CBE9EE72B4);
+    fmul64(0x80093E34C9CAE2DD, 0x28CA9D1D57865185, 0x8000000000000000);
+    fmul64(0x0008971060D1BAE6, 0x019C1C2EE187796D, 0x0000000000000000);
+    fdiv64(0x23FE69A57D30F70D, 0x00588B0C004D982F, 0x6393D3906F9224AE);
+    fdiv64(0x23F862066D037DE9, 0xFDBBD4AD57570ECC, 0x8000000000000000);
+    fdiv64(0xC4AEF3D85789A98D, 0x33D44620C5E8123D, 0xD0C86D6C766A7733);
+    fdiv64(0x65A777418B00A4CE, 0x411E936000000000, 0x64788F1807D1BDB5);
+    fdiv64(0x1B10CCD8A63B0F32, 0x800554C10D4BC804, 0xDB093601E893CDBC);
+    fdiv64(0xB86A7C6D883D91E7, 0x021F76D2773394BD, 0xF63AEFE6F17BD8E3);
+    fdiv64(0x9D33421B5C68C139, 0x8003D31A0EF60329, 0x5D34242F3923334B);
+    fdiv64(0x2DDD60D7CA53D404, 0xC198F0BA00000000, 0xAC32D8DA9708CD78);
+    fdiv64(0x15B0F627303504D2, 0x000259A9BF61BF6F, 0x55BCDE1FBFBB72AC);
+    fdiv64(0x059FF5BF59DDEE68, 0xC00D931800000000, 0x85814A5DE328DDE8);
+    fdiv64(0x547E1655DB6A7E75, 0xBECBFE0400000000, 0xD5A1328DA4D8F711);
+    fdiv64(0x2B7BB34F82D9DDDB, 0xC141D26800000000, 0xAA28DE6112311264);
+    fdiv64(0xB2D1E58782BD54B6, 0xFFECDF2B4A4B2FFE, 0x0000000000000000);
+    fdiv64(0xA84E0B46EB448C71, 0x3F690A5800000000, 0xA8D3327976E0205A);
+    fdiv64(0x381AF6A091FF3CFE, 0x09759CDA79CF4E11, 0x6E93F60CF641B59F);
+    fdiv64(0x8CB8540F7E69CE50, 0x4F362CA963086245, 0x8000000000000463);
+    fdiv64(0x124FE139451FD175, 0x80DE0F1408D697D7, 0xD160F81FAEE053BF);
+    fdiv64(0xBFF49EC000000000, 0x80B1327F8294D45E, 0x7F332F3F7E19FE62);
+    fdiv64(0x3FF27C0000000000, 0xBEE0158000000000, 0xC102634A93C9695A);
+    fdiv64(0xBF208D3800000000, 0x01F432DDD919D890, 0xFD1A38DBC99A240A);
+}
+
+fn void binary64_operations_8() {
+    fdiv64(0xBFE7DF7000000000, 0x804466309516A436, 0x7F92B97A2E8BF8D0);
+    fdiv64(0xBFDD68AC00000000, 0x818560E64ADEDBC4, 0x7E4602921DFAD707);
+    fdiv64(0x42B27C0800000000, 0x9599B3166F71B0C5, 0xED07041FBCC5553E);
+    fdiv64(0xBE90569000000000, 0xCFDCC7788C02D826, 0x2EA22AA737A31B87);
+    fdiv64(0xBF69D2B800000000, 0x816AC90F3218A825, 0x7DEED9B395B592DF);
+    fdiv64(0xBF780B9800000000, 0x42E0824400000000, 0xBC874DDC56D60411);
+    fdiv64(0x4376747E00000000, 0xE4FBED5FCBF8BDF3, 0x9E69BAD22B9C5892);
+    fdiv64(0x3F273CD000000000, 0x800D43BB35C33E47, 0xFF0C079410479FDA);
+    fdiv64(0xC2757E6000000000, 0xC164F48C00000000, 0x4100693C71279E2E);
+    fdiv64(0x423491A800000000, 0x7F3ABCEBDB54FCF0, 0x02E89DEF9D2ABD2A);
+    fdiv64(0xBF1BFB0A00000000, 0x015AD4F2026F1C73, 0xFDB0AF5EC0ECCDAD);
+    fdiv64(0x0004210D0FB79EF6, 0x823A37D9507CD16F, 0xBDA428A44C85A155);
+    fdiv64(0x0226D36E3C9429F3, 0x81449A447220B65D, 0xC0D1BA033A0523DE);
+    fdiv64(0x809D54038082D9B5, 0xBFCFE44000000000, 0x00BD6D887CDF2336);
+    fdiv64(0x81F700346AC40D49, 0x014C96328C43E305, 0xC099BF43A6CA6A04);
+    fdiv64(0x80E9E34C5EB62117, 0x2F34EAC962920B96, 0x91A3CD5FA1AE0573);
+    fdiv64(0x801E1B815D96F1B4, 0x7F87BB613AF8D4B1, 0x8000000000000000);
+    fdiv64(0x0093B6D952563B64, 0xC0B8DD0000000000, 0x8000CAFBE916929E);
+    fdiv64(0x005B7B074FE65912, 0x1BBCD504A81A9465, 0x248E7FFEBFFF1B96);
+    fdiv64(0x00457ADFA7D566B1, 0x7D1ACAD211F39EDD, 0x0000000000000000);
+    fdiv64(0x02420E0BA6BAE340, 0xC14944E800000000, 0x80E6DD32FE4DCF9D);
+    fdiv64(0x01EB537B72AC85AC, 0x437CBF8C00000000, 0x0000000001E6AC16);
+    fdiv64(0x8104BDB5E7C8ECE0, 0x7FCE3CAF39AEF74F, 0x8000000000000000);
+    fdiv64(0x80FDA024F725CA6F, 0x4187584800000000, 0x80000289BFB54E81);
+    fdiv64(0x8216C515F52C3E7A, 0x7DC5D508C81C3565, 0x8000000000000000);
+    fdiv64(0x807A4EA6E1BC612E, 0x0000593DE9EAE38B, 0xC0B2DDC56DF96E7C);
+    fdiv64(0x002B8EB737A97530, 0x81D5E44279F43584, 0xBE4424193E1E46AA);
+    fdiv64(0x0061C9C9A4E93006, 0x9F77F386F6D3FADC, 0xA0D7C4116A2E4191);
+    fdiv64(0x81DF97BB274529BA, 0x026F7C4EE104D664, 0xBF600DEF7CA8A372);
+    fdiv64(0x81F42040E3D07542, 0x815EBEC87E1A399E, 0x4084F2860A45FAAA);
+    fdiv64(0x80AF1E36EF9A5ABB, 0x26F646C192A69FE2, 0x99A659BA2A238A22);
+    fdiv64(0x00D0BCE753B825AC, 0xFFAFA4D549339EC5, 0x8000000000000000);
+    fdiv64(0x80689B82B0451CD8, 0xFFA69C5BFDD1AB6C, 0x0000000000000000);
+    fdiv64(0x0005B1E32FD92728, 0x0086D75FAE47EA76, 0x3F5FE9D4C2C7756F);
+    fdiv64(0x000822FDB7096EF9, 0x951F07907B609CF8, 0xAAD0C846091A0F6D);
+    fdiv64(0x00050075109D734A, 0x4141488C00000000, 0x00000000250B02AE);
+    fdiv64(0x00080AA2F9E0CC7E, 0x0008206F1AE73B66, 0x3FEFAA2B7613935A);
+    fdiv64(0x000F2F02FA9D91EA, 0x800AB0165015F687, 0xBFF6BAF76FED0050);
+    fdiv64(0x0000A4E27B1A0E13, 0x405B301000000000, 0x00000184238CCF8C);
+    fdiv64(0x0002EC304569194A, 0xBDEA0C3C6D57FE93, 0x81ECB94305B4DCAF);
+}
+
+fn void binary64_operations_9() {
+    fdiv64(0x00019D2AE4BB3266, 0x3FF5478200000000, 0x000136A98055B95B);
+    fdiv64(0x00004A8ED90EFA15, 0x81AB950BC707BF4E, 0xBDF59FFCDFC42D18);
+    fdiv64(0x8002A68F2C710370, 0x7D5E6B0F359BCD88, 0x8000000000000000);
+    fdiv64(0x00086ABC78CD000E, 0x7D5D1C69E73ABBCE, 0x0000000000000000);
+    fdiv64(0x8002F6244ED2D470, 0x1147339563A3EC1B, 0xAE905694D3986EB3);
+    fdiv64(0x8006857DBE6B6EA4, 0xE87B816DA69CBF3E, 0x0000000000000000);
+    fdiv64(0x8005137E2AA30C64, 0x4147621C00000000, 0x800000001BC96E90);
+    fdiv64(0x8008DFBA2CFEE8D9, 0x00252548A1DC27EE, 0xBFCADBACC9468F70);
+    fdiv64(0x800ED835EF7EBC81, 0x8191A560F4B8C3A4, 0x3E6AEB75413BE0FA);
+    fdiv64(0x800BC5C66E57643A, 0x800295F96DFAFCC2, 0x401235F8CC4F7B0C);
+    fdiv64(0x000476D7227BD887, 0x017E6486D4FEB1D7, 0x3E62CD1E36DEC3A6);
+    fdiv64(0x000DE27F3F1FC57F, 0x3F8D56C000000000, 0x006E49CDB36D619E);
+    fdiv64(0x800B82868742751B, 0x80089DBD1F82F33C, 0x3FF55F9F32FAF43B);
+    fdiv64(0x000361F8F888163E, 0x800D39543DB0052C, 0xBFD05F0D9CE6AD24);
+    fdiv64(0x000A5F1C75ED844B, 0x3ED27AD800000000, 0x0121F5A15DB71F39);
+}
+
+fn void binary64_operations() {
+    binary64_operations_1();
+    binary64_operations_2();
+    binary64_operations_3();
+    binary64_operations_4();
+    binary64_operations_5();
+    binary64_operations_6();
+    binary64_operations_7();
+    binary64_operations_8();
+    binary64_operations_9();
+    println("binary64 operations ok");
+}
+
+// 163 operations in binary32 on random binary32 operands, where the
+// exact result is rounded straight to binary32.
+fn void binary32_operations_1() {
+    fadd32(0xC251AA72E0000000, 0x436BBCD980000000, 0x436BBCD0A0000000);
+    fadd32(0xBB0F2341A0000000, 0xBF8CA5DCA0000000, 0xBF8CA5DCA0000000);
+    fadd32(0xC29C5650A0000000, 0xB848F51D60000000, 0xC29C5650A0000000);
+    fadd32(0x3E57493AA0000000, 0xB9B0090380000000, 0x3E57493AA0000000);
+    fadd32(0x427EE035E0000000, 0x39417244E0000000, 0x427EE035E0000000);
+    fadd32(0xC2F85D30C0000000, 0xBD14108460000000, 0xC2F85D30C0000000);
+    fadd32(0xBA480786A0000000, 0xC441BD1C40000000, 0xC441BD1C40000000);
+    fadd32(0x39CB1B7C80000000, 0x47B2E86780000000, 0x47B2E86780000000);
+    fadd32(0xC1DF1E5800000000, 0xBBCA9B60A0000000, 0xC1DF1E5800000000);
+    fadd32(0x393925A8C0000000, 0x39897F72C0000000, 0x398A48A000000000);
+    fadd32(0x3EED827B80000000, 0x398F7F44E0000000, 0x3EED827B80000000);
+    fadd32(0x3BDA786360000000, 0x3D372E8120000000, 0x3D372E8180000000);
+    fadd32(0x394FE839C0000000, 0x3CF95D10C0000000, 0x3CF95D10C0000000);
+    fadd32(0xBA0DA88DC0000000, 0xC7298DFF80000000, 0xC7298DFF80000000);
+    fadd32(0x42AD0AE3C0000000, 0x3A0D09E960000000, 0x42AD0AE3C0000000);
+    fadd32(0xC28CBD38C0000000, 0xB9DB413E20000000, 0xC28CBD38C0000000);
+    fadd32(0xB904F96FA0000000, 0x3D35A20620000000, 0x3D35A20620000000);
+    fadd32(0xC10D558280000000, 0xC30F3AA8E0000000, 0xC30F3AA8E0000000);
+    fadd32(0x3867B95460000000, 0x4115679B20000000, 0x4115679B20000000);
+    fadd32(0x3A9C9081E0000000, 0x45F5130060000000, 0x45F5130060000000);
+    fadd32(0xC362E71BE0000000, 0x3B3EC11B80000000, 0xC362E71BE0000000);
+    fadd32(0x3A38C0F6C0000000, 0xB955939340000000, 0x3A38C0A080000000);
+    fadd32(0xBA255D6700000000, 0xBB8E98F7A0000000, 0xBB8E98F800000000);
+    fadd32(0x45A9ADA360000000, 0x44F5393060000000, 0x45A9B04A80000000);
+    fadd32(0xC7A8DF2180000000, 0xC5CA635720000000, 0xC7A8DF2180000000);
+    fadd32(0xC4B1679F80000000, 0xB9FF554E80000000, 0xC4B1679F80000000);
+    fadd32(0x3829237260000000, 0xC4DC347F60000000, 0xC4DC347F60000000);
+    fadd32(0x39837D0620000000, 0x45674A1E20000000, 0x45674A1E20000000);
+    fadd32(0x39B299E380000000, 0xB87D187F20000000, 0x39B299E1A0000000);
+    fadd32(0x40B7B50880000000, 0xC75FE215C0000000, 0xC75FE215C0000000);
+    fadd32(0x45FF026580000000, 0x43E3908B80000000, 0x45FF026580000000);
+    fadd32(0x43EA1F3440000000, 0xC50172B480000000, 0xC50172AE00000000);
+    fadd32(0x447C5534E0000000, 0xB90C251160000000, 0x447C5534E0000000);
+    fadd32(0xC34C78A0E0000000, 0x3A2CDE3C00000000, 0xC34C78A0E0000000);
+    fadd32(0x405F8B9EA0000000, 0xBF9CC09E00000000, 0x405F89D2A0000000);
+    fadd32(0x44576DF060000000, 0x3E5A51C3C0000000, 0x44576DF060000000);
+    fadd32(0x4228254A40000000, 0x3EDB35D420000000, 0x4228254A40000000);
+    fadd32(0x4489ABF380000000, 0x458B1F3860000000, 0x458B1F5200000000);
+    fadd32(0xB9A03B2800000000, 0x3DF2FBC320000000, 0x3DF2FBC320000000);
+    fadd32(0x439D489080000000, 0xC7B8A5F4A0000000, 0xC7B8A5F4A0000000);
+}
+
+fn void binary32_operations_2() {
+    fadd32(0xC7A1F7D4A0000000, 0xBFEA1814A0000000, 0xC7A1F7D4A0000000);
+    fadd32(0xC48C1A7140000000, 0x3A7B8212C0000000, 0xC48C1A7140000000);
+    fadd32(0x406E2708A0000000, 0x3CCBA53C00000000, 0x406E2708A0000000);
+    fadd32(0x3B92B31120000000, 0x3AD7C132C0000000, 0x3B92B48D40000000);
+    fadd32(0x46A6E36420000000, 0x411CA11680000000, 0x46A6E36420000000);
+    fsub32(0x38693156A0000000, 0xBA7CAC71A0000000, 0x3A7CAC71A0000000);
+    fsub32(0x472E86FC00000000, 0x47C50B38E0000000, 0xC7C5039720000000);
+    fsub32(0x46305E60E0000000, 0x42ACEC1360000000, 0x46305E60E0000000);
+    fsub32(0x46C429C5A0000000, 0xC163225D80000000, 0x46C429C5A0000000);
+    fsub32(0xB897196960000000, 0xC3DBAA62E0000000, 0x43DBAA62E0000000);
+    fsub32(0x45140631E0000000, 0x3AE1D51900000000, 0x45140631E0000000);
+    fsub32(0x3EC786E860000000, 0x3891A8DB80000000, 0x3EC786E860000000);
+    fsub32(0x3AD85D08E0000000, 0x42ED017880000000, 0xC2ED017880000000);
+    fsub32(0x42FDADE9C0000000, 0xB98079F700000000, 0x42FDADE9C0000000);
+    fsub32(0xBCA2C323E0000000, 0xBF6D358940000000, 0x3F6D358940000000);
+    fsub32(0x39FB77D140000000, 0x39DB1AB060000000, 0x39F4B12520000000);
+    fsub32(0x3A56615920000000, 0x4623C57BC0000000, 0xC623C57BC0000000);
+    fsub32(0xBD6C4BD280000000, 0x3BAE326380000000, 0xBD6C4BD280000000);
+    fsub32(0x3A0144AB00000000, 0xBD86A514C0000000, 0x3D86A514C0000000);
+    fsub32(0xC108416700000000, 0x4625C04E80000000, 0xC625C04E80000000);
+    fsub32(0xBFB9DD1DE0000000, 0x40866007E0000000, 0xC08660D6C0000000);
+    fsub32(0x404CC03020000000, 0xC0BFBD4780000000, 0x40BFF6C7E0000000);
+    fsub32(0xC76C89F720000000, 0x4285574140000000, 0xC76C89F720000000);
+    fsub32(0x421D1A8AE0000000, 0xC7024D5780000000, 0x47024D5780000000);
+    fsub32(0x445A876CE0000000, 0xB9C0F28580000000, 0x445A876CE0000000);
+    fsub32(0xC29F868600000000, 0xC450022160000000, 0x4450022160000000);
+    fsub32(0x4260E0F080000000, 0x453A55B260000000, 0xC53A55B260000000);
+    fsub32(0xBE6C4E89E0000000, 0xBBE143C9A0000000, 0xBE6C4E89E0000000);
+    fsub32(0xC460785C40000000, 0xC4E13F4700000000, 0x44E12ECEA0000000);
+    fsub32(0x3EF31C35A0000000, 0xBF09472E40000000, 0x3F116AA480000000);
+    fsub32(0xC40D12F5E0000000, 0x396476D400000000, 0xC40D12F5E0000000);
+    fsub32(0xC229433C00000000, 0xC23910E060000000, 0x4228DE84C0000000);
+    fsub32(0x447FD01AC0000000, 0x4428BD47A0000000, 0x447F0A3080000000);
+    fsub32(0x3B3852E840000000, 0xC633AC63A0000000, 0x4633AC63A0000000);
+    fsub32(0x38D99B5440000000, 0xBDA5DE0F40000000, 0x3DA5DE0F40000000);
+    fsub32(0x3FFC162780000000, 0xBFF4E0AE80000000, 0x40087B6B00000000);
+    fsub32(0xBFECBF2160000000, 0xBB573102A0000000, 0xBFECBF2160000000);
+    fsub32(0xC1FDA09B40000000, 0x3AE51D1020000000, 0xC1FDA09B40000000);
+    fsub32(0x3DC237DA80000000, 0x389EA28720000000, 0x3DC237DA80000000);
+    fsub32(0x3C9AD2F0C0000000, 0x4268F0AD60000000, 0xC268F0AD60000000);
+}
+
+fn void binary32_operations_3() {
+    fsub32(0xC71559DAC0000000, 0xC43F55BCE0000000, 0xC71559DAC0000000);
+    fsub32(0x3CFBED4880000000, 0x460637E3E0000000, 0xC60637E3E0000000);
+    fsub32(0x409A3CDEE0000000, 0x391C361D60000000, 0x409A3CDEE0000000);
+    fsub32(0xC2F7CBD420000000, 0x45089CB780000000, 0xC5089CB780000000);
+    fsub32(0xB9CE5C61A0000000, 0xB9D8776AE0000000, 0x39C2927420000000);
+    fsub32(0x4661DDCAE0000000, 0xBA90AB4B20000000, 0x4661DDCAE0000000);
+    fsub32(0x3DE9EF7160000000, 0xC409838A40000000, 0x4409838A40000000);
+    fsub32(0xC390FAB680000000, 0x3E039A7C60000000, 0xC390FAB680000000);
+    fsub32(0x40A66AD8A0000000, 0xC3FBACAF40000000, 0x43FBACAF40000000);
+    fsub32(0x3A4F1B3DC0000000, 0x4049E69A20000000, 0xC049E69A20000000);
+    fmul32(0x41BB3EE040000000, 0xC300A16A00000000, 0xC4CC51BD80000000);
+    fmul32(0xB8D860AF40000000, 0xC61BAEFC80000000, 0x3F0516E200000000);
+    fmul32(0xBF0A937BE0000000, 0x40991E28A0000000, 0xBFB4DC44C0000000);
+    fmul32(0xBF48CC52A0000000, 0xC79558D8A0000000, 0x46F08AF000000000);
+    fmul32(0xC1032492A0000000, 0x3FA9EC6B00000000, 0xC0BF0400A0000000);
+    fmul32(0x40862703A0000000, 0xB9E5F373E0000000, 0xBA7E6445C0000000);
+    fmul32(0xC1A7B7D780000000, 0xBA402A51A0000000, 0x3BF7F69320000000);
+    fmul32(0xBA15339260000000, 0xC436EDE720000000, 0x3E5E622760000000);
+    fmul32(0x3EFFD1A020000000, 0x388076BB80000000, 0x37905EE000000000);
+    fmul32(0xC6AF7DE4C0000000, 0x3DDAAD5940000000, 0xC49A40E240000000);
+    fmul32(0x3F3B38B560000000, 0xC72794D520000000, 0xC6740F5E00000000);
+    fmul32(0x3B85E50E60000000, 0x418C7F0640000000, 0x3D237F55E0000000);
+    fmul32(0x3C9C1CDC40000000, 0x4796BDD520000000, 0x4443FA9D20000000);
+    fmul32(0x405A229560000000, 0xC2AE74C140000000, 0xC318DFC740000000);
+    fmul32(0x43C6F46040000000, 0x39CF522EA0000000, 0x3DA677B0E0000000);
+    fmul32(0x3C889EBE60000000, 0x43D4B2BF00000000, 0x406FD979E0000000);
+    fmul32(0x40E57F8780000000, 0x44AD288E80000000, 0x45A396D200000000);
+    fmul32(0xBAFFBE3F80000000, 0xC4CB2CE360000000, 0x3FDAF50CC0000000);
+    fmul32(0x45766233C0000000, 0x418863E0E0000000, 0x47110F83E0000000);
+    fmul32(0x42135432C0000000, 0xC4FD6BE2A0000000, 0xC721C57860000000);
+    fmul32(0xBAAAA27160000000, 0xC30AECCFA0000000, 0x3DC6691700000000);
+    fmul32(0xBD53F70780000000, 0xBE80236460000000, 0x3BE4233120000000);
+    fmul32(0x3C5C8DDDA0000000, 0x3E069A8AE0000000, 0x3A742B6F00000000);
+    fmul32(0xC3E9825220000000, 0xBA10109500000000, 0x3E099CC200000000);
+    fmul32(0x451C2C46C0000000, 0x388FA7E640000000, 0x3DBBDEB660000000);
+    fmul32(0x45E49EDEC0000000, 0x3ACFFFDB00000000, 0x40C49EC6E0000000);
+    fmul32(0x413A8D4FA0000000, 0x3A21240440000000, 0x3B6C71E9A0000000);
+    fmul32(0xC2A33C6700000000, 0xB91D74CE00000000, 0x3BD1B4F420000000);
+    fmul32(0x3F955C7980000000, 0x3CD3F7B820000000, 0x3C7AA889A0000000);
+    fmul32(0x3B035240E0000000, 0xB8AFEEC6C0000000, 0x8000000000000000);
+}
+
+fn void binary32_operations_4() {
+    fmul32(0xBF2B713960000000, 0xBD91295E20000000, 0x3CCD6F4080000000);
+    fmul32(0x37F9157C00000000, 0xC47D679980000000, 0xBC870CADE0000000);
+    fmul32(0x383A4885A0000000, 0x3928BD05E0000000, 0x0000000000000000);
+    fmul32(0xC523894940000000, 0xBA01CA8900000000, 0x3F35B92A60000000);
+    fmul32(0x41424E6080000000, 0xC6114A5720000000, 0xC763C854C0000000);
+    fmul32(0x44D130AA20000000, 0xBDE72BB240000000, 0xC2C8E4E6E0000000);
+    fmul32(0x422EAFAB80000000, 0xC07D02B2C0000000, 0xC2BBD1C9C0000000);
+    fmul32(0xC2FDEABAC0000000, 0xC3BDE918A0000000, 0x46CBF6A560000000);
+    fmul32(0x38B7C61500000000, 0x3D1D2046A0000000, 0x0000000000000000);
+    fmul32(0xC64D052400000000, 0xBC2F14C040000000, 0x428C2FCC60000000);
+    fmul32(0x3C1539D040000000, 0x38CC51B240000000, 0x0000000000000000);
+    fmul32(0x3A9DA69D80000000, 0x43A0779F40000000, 0x3E4E844BE0000000);
+    fmul32(0xB984072DE0000000, 0x3A5BB9F980000000, 0x8000000000000000);
+    fmul32(0xBD32CE7180000000, 0x46485ED820000000, 0xC38CA52520000000);
+    fdiv32(0x3D56A26940000000, 0x3B95F07C20000000, 0x41B081C220000000);
+    fdiv32(0x416840D6C0000000, 0xC2962FAE80000000, 0xBEC17D9C60000000);
+    fdiv32(0xBB0B6422E0000000, 0xBCAF7D15E0000000, 0x3E4BD60400000000);
+    fdiv32(0x3F6753F880000000, 0xB8152E6F20000000, 0xC7419F1C00000000);
+    fdiv32(0xBBDC1009C0000000, 0x47BC357560000000, 0x8000000000000000);
+    fdiv32(0xBA82F43EE0000000, 0xBC47741200000000, 0x3E29DC7100000000);
+    fdiv32(0x3C49F84460000000, 0xC589572BE0000000, 0xB6B0000000000000);
+    fdiv32(0xC49CAB8000000000, 0x4779252B60000000, 0xBD123E2840000000);
+    fdiv32(0xC287603A20000000, 0x4262044960000000, 0xC014C25E80000000);
+    fdiv32(0xC200ED3CC0000000, 0x437B2AEE40000000, 0xBE73EFFCE0000000);
+    fdiv32(0x411DE93C20000000, 0x400ABC2D60000000, 0x4101E69620000000);
+    fdiv32(0xBDA99EA1C0000000, 0xC18CAE5AC0000000, 0x3C0C959620000000);
+    fdiv32(0xBABACCCA80000000, 0x43D8F36020000000, 0xB6D2000000000000);
+    fdiv32(0xBCECDFC7E0000000, 0x441CFF7E60000000, 0xB8BFDD0100000000);
+    fdiv32(0x3991359C80000000, 0xBDFEE21820000000, 0xBB81D4EE20000000);
+    fdiv32(0xBCF7C74C80000000, 0xBFA8BD1000000000, 0x3D3EC21900000000);
+    fdiv32(0x47A64078A0000000, 0x4510BEE380000000, 0x428542D0E0000000);
+    fdiv32(0x449FE8E060000000, 0x3DBD012480000000, 0x46D19A45E0000000);
+    fdiv32(0x4748BA9800000000, 0x40942EFBA0000000, 0x46A39A6CA0000000);
+    fdiv32(0xC0290A2A00000000, 0xC24F7CCC60000000, 0x3DC9727FC0000000);
+    fdiv32(0xBBC91CB220000000, 0xC5D24C6D20000000, 0x0000000000000000);
+    fdiv32(0xBE25D26B00000000, 0x406474B8C0000000, 0xBDB1118580000000);
+    fdiv32(0x3BEC296920000000, 0x4628066D20000000, 0x0000000000000000);
+    fdiv32(0xBD4B8BED40000000, 0xB969C14E20000000, 0x43D11CE980000000);
+    fdiv32(0xB97EADE5A0000000, 0x4781427DA0000000, 0x8000000000000000);
+    fdiv32(0xBE08F6A4E0000000, 0x3B0055E9C0000000, 0xC2F8735AE0000000);
+}
+
+fn void binary32_operations_5() {
+    fdiv32(0x3EC4017C40000000, 0x3FF42648E0000000, 0x3EBFC58EE0000000);
+    fdiv32(0xC2B2D6AEA0000000, 0x3E0A062BC0000000, 0xC4972A1C60000000);
+    fdiv32(0xBD12D52560000000, 0x3B454B39C0000000, 0xC1BC4D20C0000000);
+    fdiv32(0x431FCF7BA0000000, 0x4676681B80000000, 0x3C96B70AC0000000);
+    fdiv32(0x40C54C4460000000, 0x3B68F57DC0000000, 0x454B4E6140000000);
+    fdiv32(0x3C157803E0000000, 0x448D63A600000000, 0x3777600000000000);
+    fdiv32(0x39E4171E40000000, 0x4500F4DC40000000, 0x0000000000000000);
+    fdiv32(0xC1FFE31160000000, 0x3B844E22E0000000, 0xC669204A80000000);
+    fdiv32(0x3CEBF69A20000000, 0x4196726BC0000000, 0x3B43EE9740000000);
+    fdiv32(0xBC627BCB80000000, 0x4376862B80000000, 0xB8DA427680000000);
+    fdiv32(0x43DC5E69E0000000, 0xC619C68D60000000, 0xBDB19C1640000000);
+    fdiv32(0x3ADB9DDB20000000, 0x391D6B5BC0000000, 0x41AE0A03E0000000);
+    fdiv32(0xBA178ECB80000000, 0xC5E34021A0000000, 0x0000000000000000);
+}
+
+fn void binary32_operations() {
+    binary32_operations_1();
+    binary32_operations_2();
+    binary32_operations_3();
+    binary32_operations_4();
+    binary32_operations_5();
+    println("binary32 operations ok");
+}
+
+// 120 narrowings to binary32, the ones the format cannot hold included.
+fn void narrowings_1() {
+    n(0x02B8B1CCE28E5B5A, 0x0000000000000000);
+    n_refused(0xD03F5B96E32BD3F4);
+    n(0x04A64FF00519C88E, 0x0000000000000000);
+    n(0x1A87A4DE7842F12F, 0x0000000000000000);
+    n_refused(0x4E8DAB34F4BDB928);
+    n_refused(0x7891A5F427A11A43);
+    n(0x0569C5F45C7F5350, 0x0000000000000000);
+    n_refused(0x4F55097AE3A62AAD);
+    n_refused(0x69CF35F280093AFF);
+    n_refused(0x5DE6672FD1238C67);
+    n(0xC7CFED021244BD06, 0xC7CFED0220000000);
+    n_refused(0xE9F0C62CEBEB275F);
+    n(0x3A29B9E186C566F1, 0x3A29B9E180000000);
+    n_refused(0x5AC902A34A0E9116);
+    n(0x343017DF09763FBC, 0x0000000000000000);
+    n(0xB3B64A28EA9DC308, 0x8000000000000000);
+    n(0x084EFFAEEDA6CE35, 0x0000000000000000);
+    n_refused(0x7C493E207B79221B);
+    n(0xAAD216B08AE69FF8, 0x8000000000000000);
+    n(0x0073CB5999CE4127, 0x0000000000000000);
+    n_refused(0xF1CEFC9EF618C883);
+    n(0x0EA88DCB79ECC955, 0x0000000000000000);
+    n_refused(0x6CEE121C5A9415DB);
+    n(0x11407E2F33359207, 0x0000000000000000);
+    n(0xBF9CA48800000000, 0xBF9CA48800000000);
+    n(0x41289FB600000000, 0x41289FB600000000);
+    n(0x420A12C800000000, 0x420A12C800000000);
+    n(0x3F82210000000000, 0x3F82210000000000);
+    n(0xC0FC01FC00000000, 0xC0FC01FC00000000);
+    n(0x406BE56800000000, 0x406BE56800000000);
+    n(0x40D989AC00000000, 0x40D989AC00000000);
+    n(0x4360A8D800000000, 0x4360A8D800000000);
+    n(0x432674C000000000, 0x432674C000000000);
+    n(0x3FDA777E00000000, 0x3FDA777E00000000);
+    n(0x42B8116800000000, 0x42B8116800000000);
+    n(0xBF4AEF3000000000, 0xBF4AEF3000000000);
+    n(0xBF3170B200000000, 0xBF3170B200000000);
+    n(0xC320846800000000, 0xC320846800000000);
+    n(0xC001661000000000, 0xC001661000000000);
+    n(0x4290208C00000000, 0x4290208C00000000);
+}
+
+fn void narrowings_2() {
+    n(0x430D397000000000, 0x430D397000000000);
+    n(0x3F0A1F5C00000000, 0x3F0A1F5C00000000);
+    n(0xBF56D6E800000000, 0xBF56D6E800000000);
+    n(0x3F74925A00000000, 0x3F74925A00000000);
+    n(0x40ACE35A00000000, 0x40ACE35A00000000);
+    n(0x3EAF2C0400000000, 0x3EAF2C0400000000);
+    n(0xBEF57F2000000000, 0xBEF57F2000000000);
+    n(0xC149F54000000000, 0xC149F54000000000);
+    n(0x810932116BA52270, 0x8000000000000000);
+    n(0x01B24E38965A1E81, 0x0000000000000000);
+    n(0x0118A4B5D372DA96, 0x0000000000000000);
+    n(0x0074E0C11C56AA8B, 0x0000000000000000);
+    n(0x82393E22D9B66523, 0x8000000000000000);
+    n(0x0184D14A4F4BC2F4, 0x0000000000000000);
+    n(0x01FDB975A2EF8F79, 0x0000000000000000);
+    n(0x0209A668624F6322, 0x0000000000000000);
+    n(0x025D0A1CD7360D3E, 0x0000000000000000);
+    n(0x01DF6A74736CDA31, 0x0000000000000000);
+    n(0x8194CB34F07495D9, 0x8000000000000000);
+    n(0x8214CB4B66CE98A3, 0x8000000000000000);
+    n(0x8198828448442A6C, 0x8000000000000000);
+    n(0x8050199307389A21, 0x8000000000000000);
+    n(0x003D89270A1DA5BB, 0x0000000000000000);
+    n(0x0250931F25667946, 0x0000000000000000);
+    n(0x80B8CBDB5C53139C, 0x8000000000000000);
+    n(0x800E2D0CCC4782EE, 0x8000000000000000);
+    n(0x01FC56EE00841D91, 0x0000000000000000);
+    n(0x0221A5F53E5A29C5, 0x0000000000000000);
+    n(0x0000A3118A881EBE, 0x0000000000000000);
+    n(0x00C173AB7021584C, 0x0000000000000000);
+    n(0x80244B522FE56646, 0x8000000000000000);
+    n(0x8211A6FF04DE023A, 0x8000000000000000);
+    n(0x80010FE4051BBAF0, 0x8000000000000000);
+    n(0x00023B72D3FFEF83, 0x0000000000000000);
+    n(0x8006D247EE1AE42E, 0x8000000000000000);
+    n(0x800351816FC1815A, 0x8000000000000000);
+    n(0x80071AC7E9C071A9, 0x8000000000000000);
+    n(0x0000CF07C910F028, 0x0000000000000000);
+    n(0x8009E0A01D43783D, 0x8000000000000000);
+    n(0x8005E9D543A3AE72, 0x8000000000000000);
+}
+
+fn void narrowings_3() {
+    n(0x800900236E2703DA, 0x8000000000000000);
+    n(0x000A38CB3CEC4FB9, 0x0000000000000000);
+    n(0x8009F097B94ED927, 0x8000000000000000);
+    n(0x8000555F1C1D085C, 0x8000000000000000);
+    n(0x000162A0F18356F5, 0x0000000000000000);
+    n(0x000406FE704A49A9, 0x0000000000000000);
+    n(0x00002D68025817BB, 0x0000000000000000);
+    n(0x00051D48F7A1D132, 0x0000000000000000);
+    n(0x0007C2DCD35D5F96, 0x0000000000000000);
+    n(0x0005881B9090B063, 0x0000000000000000);
+    n(0x8008925F817F3D17, 0x8000000000000000);
+    n(0x8007509802CC9FD4, 0x8000000000000000);
+    n(0x000864B21A0B1EFE, 0x0000000000000000);
+    n(0x0008A4438BD9B2E2, 0x0000000000000000);
+    n(0x000C34F1496265D0, 0x0000000000000000);
+    n(0x000D3831CC1C5896, 0x0000000000000000);
+    n_refused(0x7F1B9AAB1EFCD7E0);
+    n_refused(0x7FAC6241AF9335BE);
+    n_refused(0xFF7B5181DDBCF73E);
+    n_refused(0x7D0B02F4AE6B3411);
+    n_refused(0x7F7A7BE33E738792);
+    n_refused(0x7F1B0DE7EF4129E1);
+    n_refused(0xFD908CBB055C41A9);
+    n_refused(0x7F5DB49DC746D079);
+    n_refused(0xFDDACB863542D934);
+    n_refused(0xFDDB953E7922351A);
+    n_refused(0xFE140A8E160DFAE7);
+    n_refused(0x7E13EE0741AA279A);
+    n_refused(0xFF73C303D7ED8F24);
+    n_refused(0x7E626964B7D62615);
+    n_refused(0x7DBA37EF9D000BA6);
+    n_refused(0xFD980BC6FB83E67F);
+    n_refused(0xFD628A9DF556C6FA);
+    n_refused(0xFE0FC41AEBD14483);
+    n_refused(0xFE1285E5C5C2537B);
+    n_refused(0x7DE1DD07F2B90A84);
+    n_refused(0x7F44121568161FE3);
+    n_refused(0x7E12FEB6B0C07BCF);
+    n_refused(0x7D22B1EA9A3F5FD7);
+    n_refused(0xFDB204AE8E9E7753);
+}
+
+fn void narrowings() {
+    narrowings_1();
+    narrowings_2();
+    narrowings_3();
+    println("narrowings ok");
+}
+
+// 120 integers of 1 to 64 bits in both formats, and 80 values truncated
+// toward zero, the ones past 2^64 - 1 included.
+fn void integer_conversions_1() {
+    fi(true, 1, 0xBFF0000000000000);
+    fi32(true, 1, 0xBFF0000000000000);
+    fi(true, 4067673917253468, 0xC32CE70E45CCCEB8);
+    fi32(true, 4067673917253468, 0xC32CE70E40000000);
+    fi(true, 244872253677250774, 0xC38B2FB0237E4147);
+    fi32(true, 244872253677250774, 0xC38B2FB020000000);
+    fi(true, 10531355001044593, 0xC342B51B14EB9F38);
+    fi32(true, 10531355001044593, 0xC342B51B20000000);
+    fi(true, 4836595020460265, 0xC3312EDB881DF0E9);
+    fi32(true, 4836595020460265, 0xC3312EDB80000000);
+    fi(false, 11876510931807528193, 0x43E49A3AF893ADCD);
+    fi32(false, 11876510931807528193, 0x43E49A3B00000000);
+    fi(false, 9124925006473647445, 0x43DFA88FBCA33C35);
+    fi32(false, 9124925006473647445, 0x43DFA88FC0000000);
+    fi(false, 45, 0x4046800000000000);
+    fi32(false, 45, 0x4046800000000000);
+    fi(false, 312102220672908, 0x42F1BDAF5FF2F8C0);
+    fi32(false, 312102220672908, 0x42F1BDAF60000000);
+    fi(true, 1318821035738765, 0xC312BDD7CD6E1A34);
+    fi32(true, 1318821035738765, 0xC312BDD7C0000000);
+    fi(true, 10118893, 0xC1634CDDA0000000);
+    fi32(true, 10118893, 0xC1634CDDA0000000);
+    fi(true, 2726265177866555, 0xC3235F0C26FB0276);
+    fi32(true, 2726265177866555, 0xC3235F0C20000000);
+    fi(false, 7747305048490474450, 0x43DAE0FD3941775F);
+    fi32(false, 7747305048490474450, 0x43DAE0FD40000000);
+    fi(false, 8727856, 0x4160A5A600000000);
+    fi32(false, 8727856, 0x4160A5A600000000);
+    fi(false, 1, 0x3FF0000000000000);
+    fi32(false, 1, 0x3FF0000000000000);
+    fi(true, 3482325613891915, 0xC328BE503A6AA296);
+    fi32(true, 3482325613891915, 0xC328BE5040000000);
+    fi(true, 13554888990143975, 0xC348140CC39D1AF4);
+    fi32(true, 13554888990143975, 0xC348140CC0000000);
+    fi(false, 3287760132356896767, 0x43C6D03C35E5E97C);
+    fi32(false, 3287760132356896767, 0x43C6D03C40000000);
+    fi(true, 13257887, 0xC1694993E0000000);
+    fi32(true, 13257887, 0xC1694993E0000000);
+    fi(false, 5088395409688229034, 0x43D1A7672A99CC7D);
+    fi32(false, 5088395409688229034, 0x43D1A76720000000);
+}
+
+fn void integer_conversions_2() {
+    fi(true, 5998941, 0xC156E25740000000);
+    fi32(true, 5998941, 0xC156E25740000000);
+    fi(false, 53, 0x404A800000000000);
+    fi32(false, 53, 0x404A800000000000);
+    fi(false, 4228029956036484026, 0x43CD567D6C06A1EE);
+    fi32(false, 4228029956036484026, 0x43CD567D60000000);
+    fi(true, 0, 0x8000000000000000);
+    fi32(true, 0, 0x8000000000000000);
+    fi(true, 32181598, 0xC17EB0D5E0000000);
+    fi32(true, 32181598, 0xC17EB0D5E0000000);
+    fi(false, 17379193192729045, 0x434EDF245E5E24EA);
+    fi32(false, 17379193192729045, 0x434EDF2460000000);
+    fi(true, 1913330, 0xC13D31F200000000);
+    fi32(true, 1913330, 0xC13D31F200000000);
+    fi(true, 7829564, 0xC15DDE0F00000000);
+    fi32(true, 7829564, 0xC15DDE0F00000000);
+    fi(false, 7338820732827165737, 0x43D9762EA4B89BD9);
+    fi32(false, 7338820732827165737, 0x43D9762EA0000000);
+    fi(true, 711035643772183, 0xC304357717C1E8B8);
+    fi32(true, 711035643772183, 0xC304357720000000);
+    fi(false, 13429732764751781, 0x4347DB22A96F8BD2);
+    fi32(false, 13429732764751781, 0x4347DB22A0000000);
+    fi(true, 1, 0xBFF0000000000000);
+    fi32(true, 1, 0xBFF0000000000000);
+    fi(true, 17509157799581887011, 0xC3EE5FA0C80A0AD5);
+    fi32(true, 17509157799581887011, 0xC3EE5FA0C0000000);
+    fi(true, 401785832916998, 0xC2F6D6C0DD8C8060);
+    fi32(true, 401785832916998, 0xC2F6D6C0E0000000);
+    fi(false, 4778394004642272, 0x4330F9EC8D3E59E0);
+    fi32(false, 4778394004642272, 0x4330F9EC80000000);
+    fi(true, 8486655631590483055, 0xC3DD71AA154B0139);
+    fi32(true, 8486655631590483055, 0xC3DD71AA20000000);
+    fi(true, 2271223, 0xC14153FB80000000);
+    fi32(true, 2271223, 0xC14153FB80000000);
+    fi(true, 866399763665360823, 0xC3A80C23FD45832F);
+    fi32(true, 866399763665360823, 0xC3A80C2400000000);
+    fi(true, 1, 0xBFF0000000000000);
+    fi32(true, 1, 0xBFF0000000000000);
+    fi(true, 297537, 0xC112290400000000);
+    fi32(true, 297537, 0xC112290400000000);
+}
+
+fn void integer_conversions_3() {
+    fi(false, 4998124, 0x415310FB00000000);
+    fi32(false, 4998124, 0x415310FB00000000);
+    fi(true, 0, 0x8000000000000000);
+    fi32(true, 0, 0x8000000000000000);
+    fi(true, 18536372, 0xC171AD7B40000000);
+    fi32(true, 18536372, 0xC171AD7B40000000);
+    fi(false, 1548300608232589209, 0x43B57CAB332F3988);
+    fi32(false, 1548300608232589209, 0x43B57CAB40000000);
+    fi(false, 10925693692407424979, 0x43E2F3FB90D89575);
+    fi32(false, 10925693692407424979, 0x43E2F3FBA0000000);
+    fi(true, 8487057, 0xC160301220000000);
+    fi32(true, 8487057, 0xC160301220000000);
+    fi(true, 5980391091883573392, 0xC3D4BFA780CE6860);
+    fi32(true, 5980391091883573392, 0xC3D4BFA780000000);
+    fi(true, 4172695, 0xC14FD5CB80000000);
+    fi32(true, 4172695, 0xC14FD5CB80000000);
+    fi(true, 4758058455353182, 0xC330E76DD00D475E);
+    fi32(true, 4758058455353182, 0xC330E76DE0000000);
+    fi(false, 1, 0x3FF0000000000000);
+    fi32(false, 1, 0x3FF0000000000000);
+    fi(true, 15669293, 0xC16DE305A0000000);
+    fi32(true, 15669293, 0xC16DE305A0000000);
+    fi(false, 7601986741161295969, 0x43DA5FEBAA7F8980);
+    fi32(false, 7601986741161295969, 0x43DA5FEBA0000000);
+    fi(true, 15467404, 0xC16D807180000000);
+    fi32(true, 15467404, 0xC16D807180000000);
+    fi(true, 1, 0xBFF0000000000000);
+    fi32(true, 1, 0xBFF0000000000000);
+    fi(false, 443849058918706, 0x42F93ADA97DA1320);
+    fi32(false, 443849058918706, 0x42F93ADAA0000000);
+    fi(true, 16447595, 0xC16F5F0D60000000);
+    fi32(true, 16447595, 0xC16F5F0D60000000);
+    fi(false, 6033721079702353723, 0x43D4EF0556A75C7E);
+    fi32(false, 6033721079702353723, 0x43D4EF0560000000);
+    fi(false, 7317272, 0x415BE9C600000000);
+    fi32(false, 7317272, 0x415BE9C600000000);
+    fi(true, 13624664644498511, 0xC34833C7B828DA28);
+    fi32(true, 13624664644498511, 0xC34833C7C0000000);
+    fi(false, 4201050, 0x4150069680000000);
+    fi32(false, 4201050, 0x4150069680000000);
+}
+
+fn void integer_conversions_4() {
+    ti_refused(0xFAEEB6B570859884);
+    ti(0xC10B3A10EFD683C7, true, 223042);
+    ti_refused(0xC6703D6F144496F1);
+    ti_refused(0xC436258D842C3C5D);
+    ti(0xC12E919C166F9C03, true, 1001678);
+    ti_refused(0x672A7743088DF267);
+    ti(0x85580C75AA34E858, true, 0);
+    ti(0x91B07B5F0588761C, true, 0);
+    ti_refused(0x53ECE0DF195618F9);
+    ti_refused(0xF241D825A7AFA14A);
+    ti(0x84E049AD9B6133DE, true, 0);
+    ti(0x27EBF09B658D3EEA, false, 0);
+    ti_refused(0xEBDFE4DF0A8168C0);
+    ti(0x9E67B0D3D88D1EC3, true, 0);
+    ti_refused(0x5CB0D6E9233FF212);
+    ti_refused(0xEEC155A768800238);
+    ti(0x080FAC7F48C996A1, false, 0);
+    ti(0x1EFDE857081126C2, false, 0);
+    ti_refused(0xD9043D9C8DB2368E);
+    ti(0x912B9AF7BD626722, true, 0);
+    ti(0xC0ED8D7000000000, true, 60523);
+    ti(0xBEE06C9000000000, true, 0);
+    ti(0xC1198A1000000000, true, 418436);
+    ti(0xC3A13DD200000000, true, 621189984832978944);
+    ti(0xBEED163600000000, true, 0);
+    ti(0x41A88D3000000000, false, 205953024);
+    ti(0x41A319A000000000, false, 160223232);
+    ti(0xC211D24000000000, true, 19135463424);
+    ti(0xC229EB1C00000000, true, 55659331584);
+    ti(0x4028C62800000000, false, 12);
+    ti(0x42E2FCF200000000, false, 167020809158656);
+    ti(0xC3AF0BE400000000, true, 1118566164285358080);
+    ti(0x4165968200000000, false, 11318288);
+    ti(0x4167E67800000000, false, 12530624);
+    ti(0xC0208B6200000000, true, 8);
+    ti(0xBE9EEA5C00000000, true, 0);
+    ti(0x40CEE89000000000, false, 15825);
+    ti(0xBF42680200000000, true, 0);
+    ti(0xC19D270000000000, true, 122273792);
+    ti(0xC34AB03C00000000, true, 15024242278006784);
+}
+
+fn void integer_conversions_5() {
+    ti(0x0235B6E6B65B8BAA, false, 0);
+    ti(0x815917E47E2F3E3A, true, 0);
+    ti(0x817E74988F84BF81, true, 0);
+    ti(0x0188809362CD5B82, false, 0);
+    ti(0x002C35028D024265, false, 0);
+    ti(0x801229728BDEDE72, true, 0);
+    ti(0x802A91A74266F244, true, 0);
+    ti(0x8222B2A5823D8487, true, 0);
+    ti(0x82469085049F3E05, true, 0);
+    ti(0x01B7A1B86790EA6E, false, 0);
+    ti(0x02791A381ABD9D0E, false, 0);
+    ti(0x025B89B5AA0E30D3, false, 0);
+    ti(0x818AEF1970A64574, true, 0);
+    ti(0x814366FDA9A5F3DE, true, 0);
+    ti(0x00F8BF28B4A01F24, false, 0);
+    ti(0x003E4F3999A47738, false, 0);
+    ti(0x80885396A3A3D229, true, 0);
+    ti(0x81A3EFFF9A38BE28, true, 0);
+    ti(0x00DF865137A612AE, false, 0);
+    ti(0x010A94DA1279DCD1, false, 0);
+    ti(0x800056D97B885564, true, 0);
+    ti(0x000E766D1D2C151F, false, 0);
+    ti(0x000942216BE9E251, false, 0);
+    ti(0x800913016EF6728C, true, 0);
+    ti(0x000FBF967C00D0AA, false, 0);
+    ti(0x80001DBFB201A42B, true, 0);
+    ti(0x80018FC1613F10DE, true, 0);
+    ti(0x0005797CD260D3AF, false, 0);
+    ti(0x0003EEBD95B53124, false, 0);
+    ti(0x00097EA30B8BEB15, false, 0);
+    ti(0x800E30502F7ED3C4, true, 0);
+    ti(0x000DCA9862452121, false, 0);
+    ti(0x000573CDFCA1FFAE, false, 0);
+    ti(0x00068CAE87D9128C, false, 0);
+    ti(0x000DFE176419B798, false, 0);
+    ti(0x00092698F2C39585, false, 0);
+    ti(0x800054951023BBD7, true, 0);
+    ti(0x0001F3B5FE6A96D6, false, 0);
+    ti(0x8002D14A3D765BD5, true, 0);
+    ti(0x000FB12F25D74A4B, false, 0);
+}
+
+fn void integer_conversions() {
+    integer_conversions_1();
+    integer_conversions_2();
+    integer_conversions_3();
+    integer_conversions_4();
+    integer_conversions_5();
+    println("integer conversions ok");
+}
+
+// 80 comparisons of two values of any class.
+fn void orderings_1() {
+    c(0xC14EB6C3342FB611, 0x800915A491273E14, -1);
+    c(0x800B3DB24902122A, 0x813EA2E5EC8FAA00, 1);
+    c(0x41497C0E00000000, 0x7EADF0A9E8A37A0D, -1);
+    c(0x3FE29F0000000000, 0x0229417AFA880BAA, 1);
+    c(0x00043B503D0227BF, 0xC25004E600000000, 1);
+    c(0xFE7C12139D0EF789, 0x8007D6FFF95C1C6B, -1);
+    c(0x8000A8ED09DB2A6D, 0x0008424E41CBBB46, -1);
+    c(0x85E97790FE5E3522, 0xFFB610BBE6DDAD56, 1);
+    c(0x0009BC5D51270535, 0x7F0B9179714D9DFF, -1);
+    c(0xC4ECABB70BFBA8DF, 0x95E69F85DDF4DD54, -1);
+    c(0x0005B0277A92ABF5, 0x1009F542AF1818BE, -1);
+    c(0x8005B3FAF8592DE8, 0x0277BF5A6949AD43, -1);
+    c(0xC1DDE11800000000, 0xD88AC77DEA4C24A5, 1);
+    c(0xFF1D58EFD5CA35EF, 0x97AB9B867CF261FD, -1);
+    c(0x007757B6136DC5B0, 0x8003BD3855573511, 1);
+    c(0x41E745A800000000, 0x0183CD8717BE94CA, 1);
+    c(0x823F5ACD7BDF7570, 0x000CA3B87C3DB07E, -1);
+    c(0x23F9A14BAA59AD52, 0x3766F8A5B3090BFC, -1);
+    c(0xC38048B000000000, 0x0FC4C17707BA785C, -1);
+    c(0x80BAB23AEF9C8B4D, 0xC1E3740000000000, 1);
+    c(0x8008F2092268B188, 0x88BE697B2AFC09BD, 1);
+    c(0xAEB593469BAC8B23, 0xFD2B5DD00B7C2888, 1);
+    c(0xFF65880D5CDA9410, 0x0007AA451D62F51C, -1);
+    c(0x01A7DBB47FF58BC3, 0x823BE8A5DD6A7B95, 1);
+    c(0x800B8270B8E6C66C, 0x01EEA9E116E5F422, -1);
+    c(0xC1D2F4A90BE3DFAF, 0x00BA511D2E9E00A2, -1);
+    c(0xBF5103BC00000000, 0xC109FACC00000000, 1);
+    c(0x421059E800000000, 0x0006F4526360DAA8, 1);
+    c(0x000C11F31F209FFA, 0x800C853CF8DFDE46, 1);
+    c(0xC12D094000000000, 0x8005D6D13AF258A5, -1);
+    c(0x0001FA08374436A0, 0x81FE05E6221C0777, 1);
+    c(0x0083F3D9FE542CE7, 0x0046E2A9852468CF, 1);
+    c(0x80CD3D7837CE46C8, 0xFDF4B9113207342D, 1);
+    c(0x0000B1FAA77E04DC, 0xFD360A0A9852D252, 1);
+    c(0x7E2FCFE382001F2D, 0xC087EFE800000000, 1);
+    c(0xFDBE45F2DD8C152F, 0x814ACFD3CD507D96, -1);
+    c(0x800BA911BC44F6E8, 0x8003C9EF1BCD8975, -1);
+    c(0xC22A23E200000000, 0x800C058145A88830, -1);
+    c(0x7D6A6F48D71EA08D, 0xD4B97B4825A79718, 1);
+    c(0x800043D87EB6F2CF, 0x3F7F7EF000000000, -1);
+}
+
+fn void orderings_2() {
+    c(0xAE1442A42DD11F2D, 0xC0F0E0C000000000, 1);
+    c(0x80018AE0918371DE, 0x0203DEABD5CA8C76, -1);
+    c(0x3F4CF63000000000, 0x80A7C397C648B77C, 1);
+    c(0x8286356A2863184C, 0x800DFB083B8D7F70, -1);
+    c(0x575A482A56FAB912, 0x3F9DF03800000000, 1);
+    c(0x0144A0F0A2F888E3, 0x981068B6DEF61244, 1);
+    c(0x32FBAEB5F49EE830, 0x41A0B5F000000000, -1);
+    c(0x3F0CA6CA00000000, 0x427E7E7800000000, -1);
+    c(0x809FC6DB76D3DE5B, 0xC19C101000000000, 1);
+    c(0x81E65B2A5B6FDB44, 0xFF5F7E9A0D937313, 1);
+    c(0x8007F620AC8EA0BF, 0x000114AA7B5C376C, -1);
+    c(0x80011BBBC4D46ECA, 0x2D4D3BCA88B72160, -1);
+    c(0x800C702332DA0FE0, 0x80060E1FDE09FEF2, -1);
+    c(0x5D3A3FB5F640AD21, 0xFFB4676652377574, 1);
+    c(0x8002027CC0506E26, 0x000BCD7453F48D39, -1);
+    c(0x8032D610C88E3379, 0x000289B16504B9C1, -1);
+    c(0x471E3E099DA1EB51, 0xC08D698400000000, 1);
+    c(0x000B23A690C01D81, 0x8003CE9B164176F5, 1);
+    c(0x7EF1638D67C1DB5F, 0x0008DD67D06C4098, 1);
+    c(0xFF1EBB2E9E745BD1, 0xB502BF09658CFA76, -1);
+    c(0x01BA59A3322248AF, 0x420865A000000000, -1);
+    c(0xF76DDBCA666E27EA, 0x8025386AE805E450, -1);
+    c(0x81C5D6FE37AE67EC, 0x800A9DDB96F4EEF1, -1);
+    c(0x3F7EE0B800000000, 0x8A7717CEB29E097B, 1);
+    c(0x822D7A5D6F9FABD1, 0x4356A02A00000000, -1);
+    c(0x2E67A97EC7AC100F, 0x401B3CFA00000000, -1);
+    c(0xFFB1FC2A976504F0, 0xFFD5F7A70330EDE9, 1);
+    c(0xC2DE38E000000000, 0x8029D20ADFC5C07D, -1);
+    c(0x42B19EB000000000, 0x8004E8BADB45171D, 1);
+    c(0x7DE8552CA3EB8E80, 0x7E98058BD1BC08FC, -1);
+    c(0x004A622597966733, 0xFDE9E71B89B971CE, 1);
+    c(0x800C4B00E6AA1C20, 0x7DD9C3DFD42ECF08, -1);
+    c(0x8049DB4C08167442, 0x0003A4EBE4D6BE4D, -1);
+    c(0xC83422657D1FA010, 0xF66131FFB877D97D, 1);
+    c(0x3F57E28C00000000, 0xC39E94A400000000, 1);
+    c(0x800E19AA70EC2C8D, 0x408EE8C600000000, -1);
+    c(0xBEE6BE5000000000, 0x14F4B6AF87C09425, -1);
+    c(0x82427D31DEBAD1C8, 0xC606B558B6EFFD0B, 1);
+    c(0x7D020D2D283BE9DF, 0x802AFCD2661B8DC0, 1);
+    c(0x000ADCAEC2C704F1, 0x44B7138275E4A6F4, -1);
+}
+
+fn void orderings() {
+    orderings_1();
+    orderings_2();
+    println("orderings ok");
+}
+
+
+fn i32 main() {
+    literals();
+    binary32();
+    arithmetic();
+    binary32_arithmetic();
+    comparison();
+    integers();
+    text();
+    parsed_values();
+    parsed_digits();
+    binary64_operations();
+    binary32_operations();
+    narrowings();
+    integer_conversions();
+    orderings();
+    println("ok");
+    return 0;
+}

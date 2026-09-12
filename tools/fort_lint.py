@@ -41,7 +41,7 @@ not judged as the next entry. A file that no closure reaches becomes an entry
 itself, so every file of the set is judged.
 
 Usage: fort_lint.py --fort build/<preset>/fort [-I dir ...] [file.ft ...].
-With no file it checks the globs of SOURCE_SETS. Problems print as
+With no file it checks the globs of SOURCE_SETS, less SKIPPED. Problems print as
 <file>:<line>:<col>: <message> and the exit status is 1 when it reported
 anything.
 """
@@ -69,6 +69,14 @@ SOURCE_SETS = (
     ("test/fort/support/*.ft", ("src/fort", "test/fort/support")),
 )
 SOURCE_GLOBS = tuple(glob for glob, _ in SOURCE_SETS)
+
+# The sources the default set leaves out, with the reason. `std/rt_float.ft`
+# holds floats, which the C bootstrap rejects (D18.1), and the ctest `fort_lint`
+# runs this tool with that compiler; the ctest `fort_lint_float` runs it with
+# stage2 over exactly this file, so nothing goes unlinted. A file named on the
+# command line is linted whatever this tuple says, which is how that second
+# ctest reaches it.
+SKIPPED = ("std/rt_float.ft",)
 MAX_COLUMNS = 100
 
 LOWER_CASE = re.compile(r"\A[a-z_][a-z0-9_]*\Z")
@@ -119,9 +127,12 @@ def default_file_set(root, sets=SOURCE_SETS):
     that matched it, so the set is a function of the table's order and not of
     the filesystem's.
     """
+    skipped = {(root / name).resolve() for name in SKIPPED}
     chosen = {}
     for pattern, includes in sets:
         for path in collect(root, (pattern,)):
+            if path.resolve() in skipped:
+                continue
             chosen.setdefault(path, tuple(includes))
     return [(path, chosen[path]) for path in sorted(chosen)]
 
@@ -324,7 +335,7 @@ def document_problems(document, root, relative, has_source_text=True):
     return file_problems(records, diagnostic_problems(document), has_source_text)
 
 
-def index_document(fort, root, relative, includes=()):
+def index_document(fort, root, relative, includes=(), std_dir=None):
     """Run `fort --index` over one file and return (document, error).
 
     The compiler exits 0 with an empty diagnostics array on a clean file and 1
@@ -332,6 +343,10 @@ def index_document(fort, root, relative, includes=()):
     document, is a broken environment rather than a lint verdict.
     """
     command = [str(fort), "--index"]
+    if std_dir is not None:
+        # A compiler that is not the one the build put the library beside needs
+        # the directory named, as the driver's --std-dir does (toolchain.md 1).
+        command.extend(["--std-dir", str(std_dir)])
     for include in includes:
         # The compiler takes one search root per `-I` (D9.2); they are spelled
         # relative to the working directory, which is the repository root.
@@ -371,16 +386,23 @@ def text_problems(relative, text):
     return problems
 
 
-def lint_files(fort, root, files):
+def lint_files(fort, root, files, std_dir=None):
     """Return the formatted problems of each file, and the number of runs.
+
+    `std_dir` is the whole run's, never one entry's: it comes from the command
+    line and names the standard library for a compiler the build did not put it
+    beside (the ctest `fort_lint_float` runs stage2 that way). It is therefore
+    the same for every entry and cannot change the rule below, which compares
+    the search roots of two files.
 
     One `fort --index` run indexes the whole import closure of its entry and
     names the file of every record (D20.3), so the run judges every file of the
     set that its closure holds. The loop takes the first file it has not judged
     as the next entry and judges the closure with it. One run per file instead
     re-checks each closure once per member, which is O(n^2) checker work: the
-    166 files of the default set took 166 runs and 46.9 s under the debug
-    preset, and take 141 runs and 14.9 s this way (T-095).
+    default set of 166 files took 166 runs and 46.9 s under the debug preset,
+    and took 141 runs and 14.9 s this way (T-095, which measured it). The set
+    is 175 files and 149 runs today, since T-041 added two sources.
 
     A run that fails costs its entry the index, not the checks that read only
     the text, and leaves every other file of the set for a run of its own. The
@@ -400,7 +422,7 @@ def lint_files(fort, root, files):
     for index, (relative, includes, _, _) in enumerate(entries):
         if reports[index] is not None:
             continue
-        document, error = index_document(fort, root, relative, includes)
+        document, error = index_document(fort, root, relative, includes, std_dir)
         runs += 1
         if error is not None:
             reports[index] = [(1, 1, error)]
@@ -459,6 +481,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--fort", required=True, help="the compiler binary to read the index from")
     parser.add_argument(
+        "--std-dir",
+        default=None,
+        help="the standard library directory (default: the compiler's own)",
+    )
+    parser.add_argument(
         "--root",
         type=Path,
         default=Path(__file__).resolve().parent.parent,
@@ -490,7 +517,7 @@ def main(argv=None):
 
     problems = []
     files_with_problems = 0
-    reports, _ = lint_files(args.fort, args.root, files)
+    reports, _ = lint_files(args.fort, args.root, files, args.std_dir)
     for found in reports:
         if found:
             files_with_problems += 1

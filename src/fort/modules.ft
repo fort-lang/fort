@@ -77,6 +77,13 @@ string STD_SEGMENT = "std";
 string RUNTIME_PATH = "std.rt";
 string RUNTIME_FILE = "rt.ft";
 
+// The float printers, which stand in a module of their own because a compiler
+// without floats cannot compile them (D18.1). This one has floats, so it
+// loads the module -- but only into a closure that holds a float somewhere,
+// and not into every closure, for the reason load_float_runtime states.
+string FLOAT_RUNTIME_PATH = "std.rt_float";
+string FLOAT_RUNTIME_FILE = "rt_float.ft";
+
 // The first non-zero capacity of the module vectors; growth doubles from
 // there.
 u64 VEC_MIN_CAP = 8;
@@ -130,6 +137,7 @@ struct module_set {
     ast.arena arena;           // owns every module's nodes until free
     strbuf.str_buf msg;        // the message under construction
     bool stopped;              // a module has errors: read no further file (D14.2)
+    bool uses_floats;          // a float stands in some file of the closure (D18.1)
 }
 
 // ---- the module vectors ------------------------------------------------------------
@@ -644,6 +652,28 @@ fn bool collect_declarations(session.session mut* s, module_set mut* set, module
 // if it is new; null after a diagnostic was reported at `at`. A module
 // already on the walk closes a cycle (D9.5) and a file already read under
 // another path is one file with two identities (D9.2).
+// Whether a file holds a float anywhere: a float literal or one of the two
+// type keywords (D2.6, D3.1). It is the question load_float_runtime asks of a
+// closure, one file at a time, and it is asked of the tokens rather than of
+// the tree because a file that fails to parse still answers it.
+//
+// It over-approximates in one direction only, which is the safe one: a
+// program that names `f64` and prints no float loads a module it does not
+// call, and no program that prints a float fails to load it. A comment or a
+// string holding the text is no token and answers no.
+fn bool holds_a_float(lexer.tok_vec* toks) {
+    u64 mut i = 0;
+    while (i < toks->len) {
+        lexer.tok_kind k = toks->items[i].kind;
+        if (k == lexer.tok_kind.float_lit || k == lexer.tok_kind.kw_f32
+            || k == lexer.tok_kind.kw_f64) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
 fn module mut* load_module(session.session mut* s, module_set mut* set, string path, string file,
                            diag.loc at, bool entry) {
     i64 mut known = 0;
@@ -698,6 +728,9 @@ fn module mut* load_module(session.session mut* s, module_set mut* set, string p
     // A lexical error costs its line and lexing resumes at the next one, so
     // the tokens cover the whole file and the parser runs either way (D14.2).
     lexer.lex_file(s, m->file, m->source, &toks);
+    if (holds_a_float(&toks)) {
+        set->uses_floats = true;
+    }
     m->ast = parser.parse_module(s, m->file, &toks, &set->arena);
     lexer.tokvec_free(&toks);
     m->parsed = session.error_count(s) == before;
@@ -943,6 +976,7 @@ fn void free(module_set mut* set) {
     set->entry_dir = "";
     set->std_dir = "";
     set->stopped = false;
+    set->uses_floats = false;
     // The pool holds every path above and every file name a loc borrows, so
     // it goes last.
     containers.pool_free(&set->pool);
@@ -1126,6 +1160,49 @@ fn module mut* entry_already_read(module_set mut* set, string real) {
 // error of module-system.md 13 that a namespace answers -- not every row of
 // that table is the loader's, since two `extern` declarations of one C symbol
 // are compared as types and so in the checker (D9.8).
+// `<std-dir>/rt_float.ft` in `out`, the file of the float printers, searched
+// under the standard library directory like any other `std` module (D9.2).
+fn string float_runtime_file(module_set* set, strbuf.str_buf mut* out) {
+    strbuf.clear(out);
+    strbuf.append(out, set->std_dir);
+    if (set->std_dir.len > 0 && set->std_dir[set->std_dir.len - 1] != DIRECTORY_SEPARATOR) {
+        strbuf.push(out, DIRECTORY_SEPARATOR);
+    }
+    strbuf.append(out, FLOAT_RUNTIME_FILE);
+    return strbuf.view(out);
+}
+
+// Loads `std.rt_float` as a root of the closure when a float stands in it
+// (D18.1). It runs after the entry file, since the question is about every
+// file the closure holds and the last of them is read there.
+//
+// Why not into every closure, which is what D18.1's `a root of every closure`
+// says. The C bootstrap has no floats and never loads this module, so a
+// closure that held it always would make the two compilers emit different
+// modules for every program, and tools/diff_ir.sh compares exactly the
+// programs the two both compile -- which are the float-free ones. Loading it
+// on demand keeps that comparison, and the decision's reason for the rule is
+// kept whole: a program that prints a float holds the printers, and one that
+// cannot print a float needs nothing.
+//
+// A set with no standard library directory has none to load, and a file that
+// is the module itself is left to be the entry file, since one file cannot be
+// two modules (D9.2).
+fn bool load_float_runtime(session.session mut* s, module_set mut* set, string entry_real) {
+    if (!set->uses_floats || set->std_dir.len == 0) {
+        return true;
+    }
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string file = float_runtime_file(set, &b);
+    if (real_path(set, file) == entry_real) {
+        return true;
+    }
+    string path = containers.pool_intern(&set->pool, FLOAT_RUNTIME_PATH);
+    string interned = containers.pool_intern(&set->pool, file);
+    return load_module(s, set, path, interned, file_start(interned), false) != null;
+}
+
 fn bool load(session.session mut* s, module_set mut* set, string entry_file) {
     u64 before = session.error_count(s);
     string file = containers.pool_intern(&set->pool, entry_file);
@@ -1157,6 +1234,9 @@ fn bool load(session.session mut* s, module_set mut* set, string entry_file) {
         return session.error_count(s) == before;
     }
     if (load_module(s, set, base, file, file_start(file), true) == null) {
+        return false;
+    }
+    if (!load_float_runtime(s, set, real_path(set, file))) {
         return false;
     }
     return session.error_count(s) == before;

@@ -50,6 +50,7 @@ import check;
 import consts;
 import containers;
 import diag;
+import flt;
 import modules;
 import prim;
 import runtime_sig;
@@ -88,16 +89,16 @@ u64 SPAN_FIELD_LEN = 1;
 
 // The intrinsics of toolchain.md 6 item 8, in the fixed order that item
 // gives: memcpy, memset, the overflow family by operation then by ascending
-// width, then llvm.trap. The float conversions of item 12 have no slot: the
-// bootstrap compiler rejects floats before code generation. They are module
-// constants and not an enum because the overflow slot of an operation is
-// computed from the family and the width (item 15) and an enum has no
+// width, the saturating float-to-integer family of item 12, then llvm.trap.
+// They are module constants and not an enum because the slot of an operation
+// is computed from its family and its width (item 15) and an enum has no
 // arithmetic (D3.9).
 u64 IN_MEMCPY = 0;
 u64 IN_MEMSET = 1;
 u64 IN_OVERFLOW_FIRST = 2;
-u64 IN_TRAP = 26;
-u64 IN_COUNT = 27;
+u64 IN_FPCONV_FIRST = 26;
+u64 IN_TRAP = 42;
+u64 IN_COUNT = 43;
 
 // The overflow intrinsics, in the order `sadd ssub smul uadd usub umul` and,
 // within each, the widths `i8 i16 i32 i64` (item 15).
@@ -112,13 +113,25 @@ u64 OVF_COUNT = 6;
 // The widths an overflow intrinsic exists at, `i8 i16 i32 i64` (item 15).
 u64 OVF_WIDTHS = 4;
 
+// The saturating float-to-integer intrinsics of item 12, in the order item 8
+// declares them -- `fptosi` from f32, `fptosi` from f64, `fptoui` from f32,
+// `fptoui` from f64 -- and, within each, the target widths `i8 i16 i32 i64`.
+// They are what D3.14 asks for: truncation toward zero, saturation at the
+// target's range and 0 for a NaN, where a plain `fptosi` would be poison out
+// of range (D19.2).
+u64 FP_SI_F32 = 0;
+u64 FP_SI_F64 = 1;
+u64 FP_UI_F32 = 2;
+u64 FP_UI_F64 = 3;
+u64 FP_WIDTHS = 4;
+
 // The attribute groups of toolchain.md 6, at their fixed indices; only the
 // used ones are emitted, so gaps in the numbering are normal (D19.5).
 u64 ATTR_FN = 0;        // #0, every fort definition (item 7)
 u64 ATTR_FN_NORET = 1;  // #1, a `noreturn` definition (item 20)
 u64 ATTR_UNUSED_2 = 2;  // #2, never emitted: it held the C runtime's declarations
 u64 ATTR_NOBUILTIN = 3; // #3, every extern call site (item 8)
-u64 ATTR_OVERFLOW = 4;  // #4, the overflow intrinsics (item 15)
+u64 ATTR_OVERFLOW = 4;  // #4, the overflow and conversion intrinsics (items 15, 12)
 u64 ATTR_MEMCPY = 5;    // #5
 u64 ATTR_MEMSET = 6;    // #6
 u64 ATTR_TRAP = 7;      // #7, llvm.trap (item 20)
@@ -1126,6 +1139,9 @@ fn gen_val gen_const_min(emitter mut* g, string ty, u32 bits) {
 // and has no value form.
 fn gen_val gen_const_value(emitter mut* g, types.node* t, consts.cval v) {
     string ty = gen_value_type(g, t);
+    if (t != null && types.type_is_float(t)) {
+        return gen_const_float(g, ty, t, v);
+    }
     if (v.kind == consts.cval_kind.cv_bool) {
         if (v.mag != 0) {
             return gen_literal(g, ty, "true");
@@ -1144,6 +1160,28 @@ fn gen_val gen_const_value(emitter mut* g, types.node* t, consts.cval v) {
     // for the integer of an integer-like value (D4.3).
     return const_bits(g, ty, consts.cv_bits(consts.cv_as_int(v)), gen_int_bits(t),
                       gen_is_signed(t));
+}
+
+// A float constant: `0x` and the sixteen hex digits of the binary64 pattern of
+// its value, which is the form an LLVM `float` or `double` literal takes. A
+// `float` carries the pattern of the binary64 its value equals exactly, which
+// an f32 constant always is (item 5, consts.ft). An integer constant reaches
+// here where the checker gave a float type to an untyped constant it did not
+// fold further, so it takes that type first, exactly as the checker would.
+fn gen_val gen_const_float(emitter mut* g, string ty, types.node* t, consts.cval v) {
+    consts.cval mut f = v;
+    if (!consts.cv_is_float(v)) {
+        if (!consts.cv_to_float(v, t->prim, &f)) {
+            // A constant that is not finite in its type is a compile error the
+            // checker has already reported (D4.4), so the emitter never sees
+            // one; an unfinished path is a diagnostic and not wrong code.
+            gen_todo(g, diag.loc{}, "a float constant that is not finite");
+            return gen_literal(g, ty, "0.0");
+        }
+    }
+    strbuf.clear(&g->scratch);
+    flt.flt_hex(consts.cv_float_bits(f), &g->scratch);
+    return gen_literal(g, ty, gen_take(g));
 }
 
 // The same constant in its memory form, what a global initializer or a field
@@ -1193,6 +1231,36 @@ fn gen_val gen_icmp(emitter mut* g, string pred, gen_val a, gen_val b) {
     strbuf.append(&g->body, a.val);
     strbuf.append(&g->body, ", ");
     strbuf.append(&g->body, b.val);
+    strbuf.push(&g->body, '\n');
+    return r;
+}
+
+// `  %tN = fcmp <pred> <ty> <a>, <b>`, whose result is `i1`. The predicate
+// carries the NaN rule of D6.12 and no fast-math flag is ever written beside
+// it (D16).
+fn gen_val gen_fcmp(emitter mut* g, string pred, gen_val a, gen_val b) {
+    gen_val r = gen_temp(g, "i1");
+    strbuf.append(&g->body, "fcmp ");
+    strbuf.append(&g->body, pred);
+    strbuf.push(&g->body, ' ');
+    strbuf.append(&g->body, a.ty);
+    strbuf.push(&g->body, ' ');
+    strbuf.append(&g->body, a.val);
+    strbuf.append(&g->body, ", ");
+    strbuf.append(&g->body, b.val);
+    strbuf.push(&g->body, '\n');
+    return r;
+}
+
+// `  %tN = <op> <ty> <a>`, an instruction with one operand and the operand's
+// type: `fneg` is the only one (item 12, D6.12). No fast-math flag (D16).
+fn gen_val gen_unary_op(emitter mut* g, string op, gen_val a) {
+    gen_val r = gen_temp(g, a.ty);
+    strbuf.append(&g->body, op);
+    strbuf.push(&g->body, ' ');
+    strbuf.append(&g->body, a.ty);
+    strbuf.push(&g->body, ' ');
+    strbuf.append(&g->body, a.val);
     strbuf.push(&g->body, '\n');
     return r;
 }
@@ -1695,6 +1763,55 @@ fn void gen_fail_block(emitter mut* g, u64 label, runtime_sig.rt_entry rt, gen_a
 // declarations are emitted (item 8, D19.5).
 fn void gen_use_intrinsic(emitter mut* g, u64 which) {
     g->intrinsics[which] = true;
+}
+
+// The target integer type of a conversion slot.
+fn string gen_fpconv_int_type(u64 slot) {
+    u64 width = (slot - IN_FPCONV_FIRST) % FP_WIDTHS;
+    if (width == 0) {
+        return "i8";
+    }
+    if (width == 1) {
+        return "i16";
+    }
+    if (width == 2) {
+        return "i32";
+    }
+    return "i64";
+}
+
+// The source float type of a conversion slot, as a value type.
+fn string gen_fpconv_float_type(u64 slot) {
+    u64 family = (slot - IN_FPCONV_FIRST) / FP_WIDTHS;
+    if (family == FP_SI_F32 || family == FP_UI_F32) {
+        return "float";
+    }
+    return "double";
+}
+
+// `llvm.fptosi.sat.i32.f64`, the name of a conversion slot: the mangling
+// LLVM 18 prints, whose float suffix is `f32` or `f64` where the type text is
+// `float` or `double` (item 8).
+fn void gen_fpconv_name(strbuf.str_buf mut* out, u64 slot) {
+    u64 family = (slot - IN_FPCONV_FIRST) / FP_WIDTHS;
+    strbuf.append(out, "llvm.");
+    if (family == FP_SI_F32 || family == FP_SI_F64) {
+        strbuf.append(out, "fptosi.sat.");
+    } else {
+        strbuf.append(out, "fptoui.sat.");
+    }
+    strbuf.append(out, gen_fpconv_int_type(slot));
+    if (family == FP_SI_F32 || family == FP_UI_F32) {
+        strbuf.append(out, ".f32");
+    } else {
+        strbuf.append(out, ".f64");
+    }
+}
+
+// The same name written into the instruction being built, which is what a
+// call site needs (item 12).
+fn void gen_fpconv_call_name(emitter mut* g, u64 slot) {
+    gen_fpconv_name(&g->body, slot);
 }
 
 fn void gen_use_attr(emitter mut* g, u64 which) {

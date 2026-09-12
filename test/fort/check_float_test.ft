@@ -1,0 +1,204 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| types ok
+//| constants ok
+//| diagnostics ok
+//| ok
+import check_env;
+
+// The float rules of src/fort/check.ft: the type of D3.1, the untyped
+// constant of D4.1 to D4.5, the folding of D4.4 and D4.6, the operand rules
+// of D6.12 and the diagnostics each one reports.
+//
+// The language corpus runs these rules end to end under stage2; this suite
+// holds the checker's own answers -- the type it gave a declaration, the
+// value it folded and the words it reported -- which no run test can see.
+//
+// The expected patterns are the binary64 of each value: 1.0 is
+// 0x3FF0000000000000 and 0.1 is 0x3FB999999999999A, and the f32 of 0.1 is
+// 0x3FB99999A0000000, whose last 29 bits are zero because a binary32 value
+// is a binary64 with 24 mantissa bits.
+
+u64 ONE = 0x3FF0000000000000;
+u64 HALF = 0x3FE0000000000000;
+u64 THREE = 0x4008000000000000;
+u64 SEVEN = 0x401C000000000000;
+u64 TENTH = 0x3FB999999999999A;
+u64 TENTH_F32 = 0x3FB99999A0000000;
+u64 MINUS_ONE = 0xBFF0000000000000;
+u64 MINUS_ZERO = 0x8000000000000000;
+u64 THIRD = 0x3FD5555555555555;
+u64 THIRD_F32 = 0x3FD5555560000000;
+
+// The type of `T probe = <expr>;` as the checker resolved it.
+fn void want_type(string type_text, string expr_text, string want) {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    if (!check_env.check_init_of(&e, type_text, expr_text)) {
+        println("check_float: ", type_text, " probe = ", expr_text, "; did not check clean");
+    }
+    assert(check_env.errors(&e) == 0);
+    string got = check_env.probe_type(&e);
+    if (got != want) {
+        println("type of ", expr_text, " = ", got, ", want ", want);
+    }
+    assert(got == want);
+}
+
+// The value the checker folded for the same declaration.
+fn void want_value(string type_text, string expr_text, u64 bits) {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    if (!check_env.check_init_of(&e, type_text, expr_text)) {
+        println("check_float: ", type_text, " probe = ", expr_text, "; did not check clean");
+    }
+    assert(check_env.errors(&e) == 0);
+    u64 mut got = 0;
+    bool ok = check_env.init_float(&e, "probe", &got);
+    if (!ok || got != bits) {
+        println("value of ", expr_text, " = ", got, " ok ", ok, ", want ", bits);
+    }
+    assert(ok);
+    assert(got == bits);
+}
+
+// The diagnostic that declaration reports.
+fn void want_error(string type_text, string expr_text, string text) {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    bool clean = check_env.check_init_of(&e, type_text, expr_text);
+    if (clean || !check_env.said(&e, text)) {
+        println(type_text, " probe = ", expr_text, "; clean ", clean, ", want ", text);
+        println("  said: ", check_env.report_text(&e, 0));
+    }
+    assert(!clean);
+    assert(check_env.said(&e, text));
+}
+
+// ---- the types (D3.1) ------------------------------------------------------------
+
+// A float type resolves like any other primitive, and an untyped float takes
+// its type from the declaration (D4.1).
+fn void a_float_declaration_takes_its_written_type() {
+    want_type("f64", "1.5", "f64");
+    want_type("f32", "1.5", "f32");
+    want_type("f64", "7", "f64");
+    want_type("f32", "7", "f32");
+    want_type("f64", "1.0 + 2.0", "f64");
+    want_type("f32", "1.0 / 3.0", "f32");
+    want_type("bool", "1.0 < 2.0", "bool");
+    want_type("f64[2]", "{1.0, 2.0}", "f64[2]");
+    want_type("f64", "cast(3, f64)", "f64");
+    want_type("i32", "cast(1.5, i32)", "i32");
+}
+
+fn void types() {
+    a_float_declaration_takes_its_written_type();
+    println("types ok");
+}
+
+// ---- the constants (D4.4, D4.6) --------------------------------------------------
+
+// A literal reads to the binary64 nearest its value, and the four operations
+// fold in the type the context gave them.
+fn void a_literal_and_a_fold_carry_their_value() {
+    want_value("f64", "1.0", ONE);
+    want_value("f64", "0.1", TENTH);
+    want_value("f64", "0.5", HALF);
+    want_value("f64", "1.0 + 2.0", THREE);
+    want_value("f64", "4.0 * 0.5", 0x4000000000000000);
+    want_value("f64", "1.0 / 3.0", THIRD);
+    want_value("f64", "-1.0", MINUS_ONE);
+    want_value("f64", "-0.0", MINUS_ZERO);
+}
+
+// An integer constant in a float context takes that float type, rounded to
+// nearest (D4.2), and an integer with a float folds as a float (D4.4).
+fn void an_integer_constant_becomes_the_float_of_its_context() {
+    want_value("f64", "7", SEVEN);
+    want_value("f64", "1 + 6", SEVEN);
+    want_value("f64", "14 / 2.0", SEVEN);
+    want_value("f64", "-5 / 2.0", 0xC004000000000000);
+}
+
+// An f32 context rounds the value to binary32, which is the pattern an f32
+// constant is held as (D4.2).
+fn void an_f32_context_rounds_to_binary32() {
+    want_value("f32", "0.1", TENTH_F32);
+    want_value("f32", "1.0 / 3.0", THIRD_F32);
+    want_value("f32", "1.0", ONE);
+    want_value("f32", "3", THREE);
+}
+
+fn void constants() {
+    a_literal_and_a_fold_carry_their_value();
+    an_integer_constant_becomes_the_float_of_its_context();
+    an_f32_context_rounds_to_binary32();
+    println("constants ok");
+}
+
+// ---- the diagnostics -------------------------------------------------------------
+
+// A float constant becomes a float type and no other (D4.2), and it must be
+// finite in the one it is given (D4.4).
+fn void a_float_constant_reaches_no_integer_type() {
+    want_error("i32", "2.0", "a float constant does not become i32");
+    want_error("u8", "1.5", "a float constant does not become u8");
+    want_error("char", "65.0", "a float constant does not become char");
+    want_error("bool", "1.0", "a float constant does not become bool");
+}
+
+fn void a_constant_outside_its_format_is_an_error() {
+    want_error("f64", "1e309", "float literal out of range for f64");
+    want_error("f64", "1e400", "float literal out of range for f64");
+    want_error("f32", "1e300", "a float constant out of range for f32");
+    want_error("f32", "cast(1e300, f32)", "a float constant out of range for f32");
+    want_error("f64", "1.0 / 0.0", "constant division by zero");
+    want_error("f64", "1.0 / -0.0", "constant division by zero");
+    want_error("f64", "0.0 / 0.0", "constant division by zero");
+}
+
+// Every operator but `+ - * /` and the comparisons is an error on floats
+// (D6.12), and the two float types do not mix (D6.2).
+fn void an_integer_only_operator_names_the_float() {
+    want_error("f64", "7.5 % 2.0", "'%' takes integer operands, not f64");
+    want_error("f64", "6.0 & 3.0", "'&' takes integer operands, not f64");
+    want_error("f64", "6.0 | 3.0", "'|' takes integer operands, not f64");
+    want_error("f64", "6.0 ^ 3.0", "'^' takes integer operands, not f64");
+    want_error("f64", "~1.5", "'~' takes an integer operand, not f64");
+    want_error("f64", "1.5 << 2", "'<<' takes an integer left operand, not f64");
+    want_error("f64", "1.5 >> 2", "'>>' takes an integer left operand, not f64");
+    want_error("f64", "1.0 +% 2.0", "'+%' takes integer operands, not f64");
+    // The typed operand decides whether the operator applies at all, so
+    // `1.0 && true` reports the constant that may not become bool and not the
+    // operand rule; fail/operators/014 holds the rule itself, on two floats.
+    want_error("bool", "1.0 && true", "a float constant does not become bool");
+}
+
+// A float is no index, no count and no array length (D6.8, D10.2, D3.4).
+fn void a_float_is_no_length_and_no_index() {
+    want_error("i32", "sizeof(f64[1.5])", "an array length must be an integer, not f64");
+    want_error("f64", "cast('a', f64)", "cannot cast char to f64");
+    want_error("f64", "cast(true, f64)", "cannot cast bool to f64");
+    want_error("bool", "cast(1.0, bool)", "cannot cast f64 to bool");
+}
+
+fn void diagnostics() {
+    a_float_constant_reaches_no_integer_type();
+    a_constant_outside_its_format_is_an_error();
+    an_integer_only_operator_names_the_float();
+    a_float_is_no_length_and_no_index();
+    println("diagnostics ok");
+}
+
+fn i32 main() {
+    types();
+    constants();
+    diagnostics();
+    println("ok");
+    return 0;
+}

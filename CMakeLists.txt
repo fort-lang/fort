@@ -305,21 +305,22 @@ set_tests_properties(fort-modules PROPERTIES
 #
 # It passes --verify-ir for a reason T-043 created (the other two commands
 # always did). Until that ticket, every module stage2 emitted was emitted by
-# stage1 as well and read by `opt` on the stage1 command; now the 23 tests that
-# use a nested array or span level compile under stage2 alone, diff_ir.sh skips
-# them because stage1 refuses them, and test/fort/support/gen_env.ft runs no
-# `opt` by design. Without the flag no verifier would read that IR at all.
+# stage1 as well and read by `opt` on the stage1 command; now the tests that
+# use a nested array or span level, a `?:`, a `do`-`while` or a float compile
+# under stage2 alone, diff_ir.sh skips them because stage1 refuses them, and
+# test/fort/support/gen_env.ft runs no `opt` by design. Without the flag no
+# verifier would read that IR at all.
 #
 # It passes a list of its own instead (T-043). The two compilers no longer
 # refuse the same set: src/fort reads the nested array and span levels of D3.6
 # and src/bootstrap does not, so the tests that use them must be rejected
 # under stage1 and must compile and run under stage2. One list per compiler
 # says exactly that, and each name is judged by one rule or the other and
-# never excused. T-044 is the second ticket of that shape: stage2 implements
-# `do`-`while` and `?:` (D6.6, D7.5) and stage1 refuses both, so those six
-# entries left stage2's list and stayed in stage1's. The day stage2
-# implements floats, stage1 does too, since one compiles the other, and the
-# entry leaves both lists then.
+# never excused. T-044 is the second ticket of that shape and T-041 the third:
+# stage2 implements `do`-`while` and `?:` (D6.6, D7.5) and floats (D2.6, D3.1,
+# D18), and stage1 refuses all of them. With the last of those four families
+# stage2's list is empty: it refuses nothing the corpus holds, and every entry
+# of them stays in stage1's, which is frozen.
 set(FORT_LANG_STAGE2_COMMAND
     "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}"
     --fort "${FORT_STAGE2_BINARY}"
@@ -491,6 +492,16 @@ set_tests_properties(fort_lint PROPERTIES
     LABELS unit
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
 
+# The one source the ctest above leaves out: std/rt_float.ft holds floats and
+# the C bootstrap rejects them (D18.1), so stage2 lints it. It is label lang
+# rather than unit because it runs stage2, an x86-64 binary, under qemu, and it
+# names --std-dir because the library does not stand beside that binary.
+add_test(NAME fort_lint_float
+    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
+            --fort "${FORT_STAGE2_BINARY}" --std-dir "${FORT_STD_DIR}" std/rt_float.ft
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(fort_lint_float PROPERTIES LABELS lang)
+
 # Its own unit tests (label unit): the rules over synthetic index records, the
 # plumbing against a fake compiler, and the fixtures in test/fort_lint through
 # the real one, which FORT_BINARY names.
@@ -529,6 +540,8 @@ add_custom_target(check-lang
     COMMAND ${FORT_MODULE_TEST_COMMAND}
     COMMAND ${FORT_LANG_STAGE2_COMMAND}
     COMMAND ${FORT_LANG_STAGE2_COMMAND} --check-json
+    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
+            --fort "${FORT_STAGE2_BINARY}" --std-dir "${FORT_STD_DIR}" std/rt_float.ft
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_tokens.sh" "${CMAKE_BINARY_DIR}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ast.sh" "${CMAKE_BINARY_DIR}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_check.sh" "${CMAKE_BINARY_DIR}"
@@ -596,11 +609,13 @@ endif()
 add_custom_target(fort-lint
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
             --fort "$<TARGET_FILE:fort>"
+    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
+            --fort "${FORT_STAGE2_BINARY}" --std-dir "${FORT_STD_DIR}" std/rt_float.ft
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Checking the identifier conventions of D1.4 in the project's fort"
     VERBATIM
 )
-add_dependencies(fort-lint fort fort_std)
+add_dependencies(fort-lint fort fort_std fort_stage2)
 
 add_custom_target(lines
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/lines.py"

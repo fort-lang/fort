@@ -53,3 +53,23 @@ library module against C" bullet of `AGENTS.md`.
 
 The constructs the bootstrap subset lacks and what replaces each, the re-entrancy rules of
 `src/fort` (D20.5), and the rule that a ported pass answers to its C oracle.
+
+**A feature stage2 has and stage1 lacks is written without using it** (T-041, floats). The
+compiler may accept a construct its own source may not hold, and the two halves of that are
+separate: the checker and the emitter gain the construct, and the code that implements it stays in
+the bootstrap subset. `src/fort/flt.ft` holds an IEEE 754 value as the `u64` of its binary64
+pattern and computes on it with integer arithmetic over bignums, because a float variable in the
+compiler's own source would stop stage1 building stage2. Three costs a ticket of this shape pays:
+`tools/diff_ast.sh` cannot compare a file the two parsers disagree about, so it skips the ones
+whose stage1 diagnostics carry the refusal and holds the number skipped as an equality; the corpus
+needs one unsupported list per compiler (`notes/testing.md`); and the differential oracles see
+less, so the new construct is pinned by named assertions -- `test/fort/gen_float_test.ft` for the
+emitted text and `test/fort/check_float_test.ft` for the checker's answers -- rather than by
+stage1's output.
+
+**The standard library may use such a feature before `src/fort` can.** `std/rt_float.ft` holds the
+float printers of D18.1 and is written with floats, because stage1 never loads it: the loader
+takes it into a closure that holds a float and into no other (`src/fort/modules.ft`), so the
+compiler that has no floats never reads it and `tools/diff_ir.sh` keeps comparing every program
+both compilers build. What that costs is one ctest of its own, `fort_lint_float`, since the lint
+runs the compiler without floats over `std/*.ft` and cannot check that one.

@@ -812,6 +812,15 @@ fn bool array_length(checker mut* ck, ast.node mut* e, u64 mut* out) {
     if (check_poisoned(v.ty)) {
         return false;
     }
+    if (consts.cv_is_float(v.value)) {
+        // A float constant is a constant expression, so the length names the
+        // rule it broke: a length is an integer (D3.4, D4.2).
+        check_msg_begin(ck);
+        msg_str(ck, "an array length must be an integer, not ");
+        check_msg_type(ck, v.ty);
+        check_msg_end(ck, e->loc);
+        return false;
+    }
     if (!consts.cv_is_int_like(v.value)) {
         check_error(ck, e->loc, "an array length must be a constant expression");
         return false;
@@ -845,10 +854,7 @@ fn types.node* base_type(checker mut* ck, ast.node mut* n, bool allow_noreturn, 
     switch (n->kind) {
     case ast.ast_kind.k_type_prim:
         prim.prim_kind k = cast(n->op, prim.prim_kind);
-        if (prim.prim_is_float(k)) {
-            // Floats are outside the C bootstrap's subset (toolchain.md 7.3).
-            check_error(ck, n->loc, "not supported by the bootstrap compiler: floats");
-        } else if (k == prim.prim_kind.prim_void) {
+        if (k == prim.prim_kind.prim_void) {
             t = types.type_void(&ck->types);
         } else {
             t = types.type_prim(&ck->types, k);
@@ -1111,7 +1117,21 @@ fn bool constant_fits(checker mut* ck, diag.loc at, consts.cval v, types.node* t
         return true;
     }
     check_msg_begin(ck);
-    if (t->kind == types.type_kind.k_enum) {
+    if (consts.cv_is_float(v) && t->kind == types.type_kind.k_prim
+        && prim.prim_is_float(t->prim)) {
+        // The type is a float and the value is one, so what failed is D4.4:
+        // the constant is not finite in that format. The value is not printed,
+        // since the shortest decimal that reads back is the runtime's work
+        // (D18.2).
+        msg_str(ck, "a float constant out of range for ");
+        check_msg_type(ck, t);
+    } else if (consts.cv_is_float(v)) {
+        // A float constant becomes a float type and no other, not even when it
+        // is integral: `i32 x = 2.0;` is an error (D4.2).
+        msg_str(ck, "a float constant does not become ");
+        check_msg_type(ck, t);
+        msg_str(ck, ": use cast");
+    } else if (t->kind == types.type_kind.k_enum) {
         // An integer never becomes an enum implicitly (D3.9).
         msg_str(ck, "an integer constant does not become an enum: use cast");
     } else if (t->kind == types.type_kind.k_prim && t->prim == prim.prim_kind.prim_char) {
@@ -1170,6 +1190,16 @@ fn bool retype_untyped(checker mut* ck, ast.node mut* n, types.node* t, bool fit
     n->ann &= ~ANN_UNTYPED;
     n->ty = t;
     consts.cval v = check_node_value(ck, n);
+    if (v.kind == consts.cval_kind.cv_none && n->kind == ast.ast_kind.k_binary
+        && op_is_shift(n->op) && types.type_is_float(t)) {
+        // A shift whose count is a variable folds to no value, so the context
+        // reaches the shift itself rather than a constant; `<<` and `>>` take
+        // an integer left operand, which no context may change (D6.12, D6.2).
+        // A shift that folded is an integer constant and takes a float type
+        // like any other (D4.2), which is why the value decides here.
+        error_operand(ck, n->loc, n->op, "an integer left operand", t);
+        return false;
+    }
     bool mut ok = true;
     bool mut deeper = fit;
     if (v.kind != consts.cval_kind.cv_none) {
@@ -1177,6 +1207,16 @@ fn bool retype_untyped(checker mut* ck, ast.node mut* n, types.node* t, bool fit
         if (ok && v.kind == consts.cval_kind.cv_char && type_is_integer_prim(t)) {
             // A char constant in an integer context is its code point (D4.3).
             set_value(ck, n, consts.cv_as_int(v));
+        }
+        if (ok && types.type_is_float(t) && v.kind != consts.cval_kind.cv_none) {
+            // The constant takes the float type here, rounded to nearest: an
+            // integer becomes that float and an f64 constant in an f32 context
+            // becomes the f32 the type holds (D4.2, D4.4). constant_fits has
+            // already reported a value the format cannot hold.
+            consts.cval mut f = consts.cv_none();
+            if (consts.cv_to_float(v, t->prim, &f)) {
+                set_value(ck, n, f);
+            }
         }
         deeper = false;
     }
@@ -1568,6 +1608,41 @@ fn bool fold_typed(checker mut* ck, diag.loc at, i32 op, consts.cval a, consts.c
     return ok;
 }
 
+// `a op b` on two float constants of the type `t`, or on a float and an
+// integer, which takes `t` first (D4.4). The exact result is rounded to `t`
+// once (D6.12), and a division by zero or a result that is not finite is a
+// compile error, since D4.4 admits no such constant. It serves the untyped
+// fold, where `t` is f64, and the typed one.
+fn bool fold_float(checker mut* ck, diag.loc at, i32 op, consts.cval a, consts.cval b,
+                   prim.prim_kind t, consts.cval mut* out) {
+    if (op_of(op) == lexer.tok_kind.slash && consts.cv_is_zero(b)) {
+        // A division by zero yields an infinity or a NaN (D6.12), and neither
+        // is a constant.
+        check_error(ck, at, "constant division by zero");
+        return false;
+    }
+    bool mut ok = true;
+    switch (op_of(op)) {
+    case lexer.tok_kind.plus:
+        ok = consts.cv_float_add(a, b, t, out);
+    case lexer.tok_kind.minus:
+        ok = consts.cv_float_sub(a, b, t, out);
+    case lexer.tok_kind.star:
+        ok = consts.cv_float_mul(a, b, t, out);
+    case lexer.tok_kind.slash:
+        ok = consts.cv_float_div(a, b, t, out);
+    default:
+        panic("check.fold_float: folding an operator that takes no floats");
+    }
+    if (!ok) {
+        check_msg_begin(ck);
+        msg_str(ck, "constant expression overflows ");
+        msg_str(ck, prim.prim_name(t));
+        check_msg_end(ck, at);
+    }
+    return ok;
+}
+
 fn consts.cv_rel relation_of(i32 op) {
     switch (op_of(op)) {
     case lexer.tok_kind.eq:
@@ -1598,7 +1673,9 @@ fn void check_shift(checker mut* ck, diag.loc at, i32 op, expr mut* a, ast.node 
         error_operand(ck, at, op, "an integer count", b->ty);
         return;
     }
-    if (!a->untyped && !type_is_integer_prim(a->ty)) {
+    if (consts.cv_is_float(a->value) || (!a->untyped && !type_is_integer_prim(a->ty))) {
+        // `<< >>` are errors on floats (D6.12), an untyped float included: its
+        // provisional type is f64 and no context can make it an integer (D4.2).
         error_operand(ck, at, op, "an integer left operand", a->ty);
         return;
     }
@@ -1669,6 +1746,35 @@ fn void check_shift(checker mut* ck, diag.loc at, i32 op, expr mut* a, ast.node 
     }
 }
 
+// A char constant beside a float constant, which is an error: D4.2 lets an
+// untyped float become a float type and no other, and no row of D3.14 takes a
+// char to a float either. D4.4 settles "integer with float" and says nothing
+// about a char, so this is the conservative reading, and it is the one the
+// typed operands already get: `c + 0.5` on a char variable reports the
+// operand rule of the char, and `c < 0.5` reports the float that may not
+// become one (check_operands, cv_fits). True when it reported.
+fn bool chars_beside_a_float(checker mut* ck, diag.loc at, i32 op, expr mut* a, expr mut* b) {
+    consts.cval mut ch = a->value;
+    types.node* mut ch_ty = a->ty;
+    consts.cval mut other = b->value;
+    if (ch.kind != consts.cval_kind.cv_char) {
+        ch = b->value;
+        ch_ty = b->ty;
+        other = a->value;
+    }
+    if (ch.kind != consts.cval_kind.cv_char) {
+        return false;
+    }
+    if (op_is_comparison(op)) {
+        // A char is comparable and ordered (D3.2), so what fails is the float
+        // that may not become one (D4.2).
+        constant_fits(ck, at, other, ch_ty, "the operand");
+        return true;
+    }
+    error_operand(ck, at, op, "numeric operands", ch_ty);
+    return true;
+}
+
 // Two untyped constants: the arithmetic folds exactly and a comparison yields
 // a bool (D4.4).
 fn void check_untyped_pair(checker mut* ck, diag.loc at, i32 op, expr mut* a, expr mut* b,
@@ -1683,6 +1789,21 @@ fn void check_untyped_pair(checker mut* ck, diag.loc at, i32 op, expr mut* a, ex
     }
     if (op_is_logical(op)) {
         error_operand(ck, at, op, "bool operands", a->ty);
+        return;
+    }
+    bool floats = consts.cv_is_float(a->value) || consts.cv_is_float(b->value);
+    if (floats && chars_beside_a_float(ck, at, op, a, b)) {
+        return;
+    }
+    if (floats && !op_is_comparison(op) && !op_takes_floats(op)) {
+        // `% ++ -- ~ & | ^ << >>` and the wrapping operators are errors on
+        // floats (D6.12, D11.2); the untyped operand whose type names the
+        // error is f64, the type an untyped float is evaluated in (D4.4).
+        types.node* mut named = a->ty;
+        if (!consts.cv_is_float(a->value)) {
+            named = b->ty;
+        }
+        error_operand(ck, at, op, "integer operands", named);
         return;
     }
     if (a->value.kind == consts.cval_kind.cv_none
@@ -1700,7 +1821,19 @@ fn void check_untyped_pair(checker mut* ck, diag.loc at, i32 op, expr mut* a, ex
         out->ty = types.type_prim(&ck->types, prim.prim_kind.prim_bool);
         consts.cval mut lhs = a->value;
         consts.cval mut rhs = b->value;
-        if (!chars) {
+        if (floats) {
+            // An integer beside a float compares as a float (D4.4), and both
+            // are evaluated in binary64. The conversion cannot fail here: a
+            // float constant is already binary64 and no integer of 64 bits
+            // leaves that format, so the branch is a defensive one and the
+            // message is not reachable by any program.
+            if (!consts.cv_to_float(a->value, prim.prim_kind.prim_f64, &lhs)
+                || !consts.cv_to_float(b->value, prim.prim_kind.prim_f64, &rhs)) {
+                check_error(ck, at, "constant expression overflows f64");
+                out->ty = types.type_error(&ck->types);
+                return;
+            }
+        } else if (!chars) {
             lhs = consts.cv_as_int(a->value);
             rhs = consts.cv_as_int(b->value);
         }
@@ -1708,13 +1841,27 @@ fn void check_untyped_pair(checker mut* ck, diag.loc at, i32 op, expr mut* a, ex
         return;
     }
     consts.cval mut v = consts.cv_none();
+    if (floats) {
+        // An untyped float is evaluated in binary64, and an integer with a
+        // float folds as a float (D4.4).
+        if (!fold_float(ck, at, op, a->value, b->value, prim.prim_kind.prim_f64, &v)) {
+            return;
+        }
+        untyped_result(ck, v, out);
+        return;
+    }
     if (!fold_untyped(ck, at, op, consts.cv_as_int(a->value), consts.cv_as_int(b->value), &v)) {
         return;
     }
+    untyped_result(ck, v, out);
+}
+
+// The folded value of two untyped constants, with the provisional type D4.5
+// gives it; a context replaces that type (D4.1).
+fn void untyped_result(checker mut* ck, consts.cval v, expr mut* out) {
     out->value = v;
     out->untyped = true;
     prim.prim_kind mut k = prim.prim_kind.prim_i32;
-    // The provisional type is the default one; a context replaces it (D4.5).
     if (consts.cv_default_kind(v, &k)) {
         out->ty = types.type_prim(&ck->types, k);
     } else {
@@ -1860,6 +2007,18 @@ fn void check_operands(checker mut* ck, diag.loc at, i32 op, ast.node mut* lhs, 
         return;
     }
     out->ty = t;
+    if (types.type_is_float(t) && consts.cv_is_float(a->value)
+        && consts.cv_is_float(b->value)) {
+        // Two float constants fold in their own type, rounding once (D4.6,
+        // D6.12), which is what a module-level initializer needs.
+        consts.cval mut v = consts.cv_none();
+        if (!fold_float(ck, at, op, a->value, b->value, t->prim, &v)) {
+            out->ty = types.type_error(&ck->types);
+            return;
+        }
+        out->value = v;
+        return;
+    }
     if (consts.cv_is_int(a->value) && consts.cv_is_int(b->value)) {
         consts.cval mut v = consts.cv_none();
         if (!fold_typed(ck, at, op, a->value, b->value, t->prim, &v)) {
@@ -2311,6 +2470,12 @@ fn void check_unary(checker mut* ck, ast.node mut* n, expr mut* out) {
     if (a.untyped) {
         // `-c` and `~c` fold exactly on an untyped constant, `~c` being
         // `-c - 1` (D4.4).
+        if (consts.cv_is_float(a.value) && op_of(n->op) == lexer.tok_kind.minus) {
+            // Unary minus on a float flips the sign bit, which never leaves
+            // the format and never rounds (D6.12).
+            untyped(ck, n, out, consts.cv_float_neg(a.value));
+            return;
+        }
         if (consts.cv_is_int_like(a.value)) {
             consts.cval mut v = consts.cv_none();
             consts.cval x = consts.cv_as_int(a.value);
@@ -2344,6 +2509,12 @@ fn void check_unary(checker mut* ck, ast.node mut* n, expr mut* out) {
         return;
     }
     out->ty = a.ty;
+    if (consts.cv_is_float(a.value)) {
+        // The same negation on a typed float constant (D6.12).
+        out->value = consts.cv_float_neg(a.value);
+        out->init_const = true;
+        return;
+    }
     if (consts.cv_is_int(a.value)) {
         consts.cval mut v = consts.cv_none();
         bool mut ok = false;
@@ -2586,7 +2757,7 @@ fn void check_cast(checker mut* ck, ast.node mut* n, expr mut* out) {
     // the one the run time would produce (D3.14).
     bool numeric = target.ty->kind == types.type_kind.k_prim
         || target.ty->kind == types.type_kind.k_enum;
-    if (numeric && consts.cv_is_int_like(a.value)
+    if (numeric && (consts.cv_is_int_like(a.value) || consts.cv_is_float(a.value))
         && (a.ty->kind == types.type_kind.k_prim || a.ty->kind == types.type_kind.k_enum)) {
         prim.prim_kind mut k = target.ty->prim;
         if (target.ty->kind == types.type_kind.k_enum) {
@@ -2596,6 +2767,15 @@ fn void check_cast(checker mut* ck, ast.node mut* n, expr mut* out) {
         if (consts.cv_cast(a.value, k, &v)) {
             out->value = v;
             out->init_const = true;
+        } else if (types.type_is_float(target.ty)) {
+            // Every other row that fails here is one type_cast_allowed has
+            // already refused, so what is left is a float constant the target
+            // format cannot hold, which is a compile error (D4.4).
+            check_msg_begin(ck);
+            msg_str(ck, "a float constant out of range for ");
+            check_msg_type(ck, target.ty);
+            check_msg_end(ck, n->loc);
+            out->ty = types.type_error(&ck->types);
         }
     }
 }
@@ -3234,6 +3414,20 @@ fn void check_ternary(checker mut* ck, ast.node mut* n, expr mut* out) {
     fold_ternary(ck, n, &a, &b, out);
 }
 
+// A float literal is an untyped constant evaluated in binary64 (D2.6, D4.1,
+// D4.4). The lexer has checked its shape, so the one thing left to report is
+// a value the format cannot hold, which D4.4 makes an error rather than an
+// infinity.
+fn void check_float_literal(checker mut* ck, ast.node mut* n, expr mut* out) {
+    consts.cval mut v = consts.cv_none();
+    if (!consts.cv_from_float_text(n->name, &v)) {
+        check_error(ck, n->loc, "float literal out of range for f64");
+        out->ty = types.type_error(&ck->types);
+        return;
+    }
+    untyped(ck, n, out, v);
+}
+
 // ---- the dispatch ------------------------------------------------------------------
 
 // Checks one expression and annotates its node.
@@ -3244,6 +3438,8 @@ fn void check_expr(checker mut* ck, ast.node mut* n, expr mut* out) {
         // An integer literal is an untyped constant (D4.1); the parser holds
         // its magnitude (D2.5).
         untyped(ck, n, out, consts.cv_from_u64(n->ival));
+    case ast.ast_kind.k_float:
+        check_float_literal(ck, n, out);
     case ast.ast_kind.k_char:
         untyped(ck, n, out, consts.cv_from_char(n->ival));
     case ast.ast_kind.k_null:
@@ -3480,6 +3676,14 @@ fn void resolve_enum(checker mut* ck, ast.sym mut* s) {
             // to the enum itself (D3.9).
             expr mut e = expr{};
             check_expr_default(ck, m->a, &e);
+            if (consts.cv_is_float(e.value)) {
+                // A float constant is a constant expression, so the member
+                // names the rule it broke: an enum is an i32 (D3.9, D4.2).
+                check_error(ck, m->a->loc, "an enum value is an integer constant, not a float");
+                sym_fail(ck, ms);
+                ok = false;
+                continue;
+            }
             if (!consts.cv_is_int(e.value)) {
                 if (!check_poisoned(e.ty)) {
                     check_error(ck, m->a->loc, "an enum value must be a constant expression");

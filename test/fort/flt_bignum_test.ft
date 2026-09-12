@@ -1,0 +1,350 @@
+//! run
+//! flags: -I ../../src/fort
+//! stdout:
+//| building ok
+//| shifting ok
+//| comparing ok
+//| dividing ok
+//| ok
+import flt;
+
+// The bignum of src/fort/flt.ft: the arbitrary-precision integers every
+// rounding step is stated over. flt_test.ft reaches this layer through the
+// float operations, which exercise it with the operands those operations
+// produce; this suite drives it directly, at the limb boundaries a float
+// operand rarely lands on.
+//
+// Why those boundaries matter. A limb is 32 bits, so a shift of 0, of 31, of
+// 32 and of 33 places take four different paths through bn_shl and bn_shr,
+// and a subtraction borrows across a limb only when the limb below it is
+// zero. A wrong answer in any of them moves a mantissa by a power of two,
+// which the value vectors would catch only if a vector landed on it.
+
+u64 LIMB = 4294967296;     // 2^32, the base of one limb
+u64 LIMB_MAX = 4294967295; // 2^32 - 1, the largest limb
+
+fn void want_u64(string what, u64 got, u64 value) {
+    if (got != value) {
+        println(what, " = ", got, ", want ", value);
+    }
+    assert(got == value);
+}
+
+// The value of a bignum that fits 64 bits, read back through bn_bit so that
+// the test does not reach into the limbs.
+fn u64 value_of(flt.bignum* n) {
+    u64 mut v = 0;
+    u64 mut i = flt.bn_bits(n);
+    while (i > 0) {
+        i -= 1;
+        v = v << 1;
+        if (flt.bn_bit(n, i)) {
+            v = v | 1;
+        }
+    }
+    return v;
+}
+
+// ---- building ---------------------------------------------------------------------
+
+// A u64 takes one limb below 2^32 and two above it, and zero has no limb at
+// all, which is what bn_is_zero and bn_bits answer about.
+fn void a_u64_becomes_one_or_two_limbs() {
+    flt.bignum mut n = flt.bignum{};
+    flt.bn_set_u64(&n, 0);
+    assert(flt.bn_is_zero(&n));
+    assert(flt.bn_bits(&n) == 0);
+    assert(n.len == 0);
+    flt.bn_set_u64(&n, 1);
+    assert(!flt.bn_is_zero(&n));
+    want_u64("bits of 1", flt.bn_bits(&n), 1);
+    want_u64("value of 1", value_of(&n), 1);
+    flt.bn_set_u64(&n, LIMB_MAX);
+    want_u64("bits of 2^32 - 1", flt.bn_bits(&n), 32);
+    want_u64("limbs of 2^32 - 1", n.len, 1);
+    flt.bn_set_u64(&n, LIMB);
+    want_u64("bits of 2^32", flt.bn_bits(&n), 33);
+    want_u64("limbs of 2^32", n.len, 2);
+    flt.bn_set_u64(&n, 18446744073709551615);
+    want_u64("bits of 2^64 - 1", flt.bn_bits(&n), 64);
+    want_u64("value of 2^64 - 1", value_of(&n), 18446744073709551615);
+}
+
+// A 128-bit product arrives as two halves, and a zero high half leaves no
+// limb above the low one.
+fn void a_u128_becomes_up_to_four_limbs() {
+    flt.bignum mut n = flt.bignum{};
+    flt.bn_set_u128(&n, 0, 5);
+    want_u64("value of 5", value_of(&n), 5);
+    want_u64("limbs of 5", n.len, 1);
+    flt.bn_set_u128(&n, 0, 0);
+    assert(flt.bn_is_zero(&n));
+    flt.bn_set_u128(&n, 1, 0);
+    want_u64("bits of 2^64", flt.bn_bits(&n), 65);
+    want_u64("limbs of 2^64", n.len, 3);
+    flt.bn_set_u128(&n, 18446744073709551615, 18446744073709551615);
+    want_u64("bits of 2^128 - 1", flt.bn_bits(&n), 128);
+    want_u64("limbs of 2^128 - 1", n.len, 4);
+}
+
+// bn_mul_add multiplies by a value below 2^32 and adds one, carrying through
+// every limb; the carry out of the top limb grows the number.
+fn void a_multiply_and_add_carries_through_the_limbs() {
+    flt.bignum mut n = flt.bignum{};
+    flt.bn_set_u64(&n, 0);
+    flt.bn_mul_add(&n, 10, 7);
+    want_u64("0 * 10 + 7", value_of(&n), 7);
+    flt.bn_mul_add(&n, 10, 3);
+    want_u64("7 * 10 + 3", value_of(&n), 73);
+    flt.bn_set_u64(&n, LIMB_MAX);
+    flt.bn_mul_add(&n, 2, 1);
+    want_u64("(2^32 - 1) * 2 + 1", value_of(&n), 8589934591);
+    want_u64("its limbs", n.len, 2);
+    flt.bn_set_u64(&n, 1);
+    u64 mut i = 0;
+    while (i < 64) {
+        flt.bn_mul_add(&n, 2, 0);
+        i += 1;
+    }
+    // 2^64 has 65 bits and three limbs, the top one holding a single bit.
+    want_u64("bits of 2^64", flt.bn_bits(&n), 65);
+    assert(flt.bn_bit(&n, 64));
+    assert(!flt.bn_bit(&n, 63));
+    assert(!flt.bn_bit(&n, 1000));
+}
+
+// bn_add carries across limbs and grows the number by one limb at most.
+fn void an_addition_carries_across_a_limb() {
+    flt.bignum mut a = flt.bignum{};
+    flt.bignum mut b = flt.bignum{};
+    flt.bn_set_u64(&a, LIMB_MAX);
+    flt.bn_set_u64(&b, 1);
+    flt.bn_add(&a, &b);
+    want_u64("2^32 - 1 + 1", value_of(&a), LIMB);
+    want_u64("its limbs", a.len, 2);
+    flt.bn_set_u64(&a, 18446744073709551615);
+    flt.bn_set_u64(&b, 1);
+    flt.bn_add(&a, &b);
+    want_u64("bits of 2^64", flt.bn_bits(&a), 65);
+    flt.bn_set_u64(&a, 0);
+    flt.bn_set_u64(&b, 12345);
+    flt.bn_add(&a, &b);
+    want_u64("0 + 12345", value_of(&a), 12345);
+    flt.bn_add(&a, &a);
+    want_u64("12345 + itself", value_of(&a), 24690);
+}
+
+fn void building() {
+    a_u64_becomes_one_or_two_limbs();
+    a_u128_becomes_up_to_four_limbs();
+    a_multiply_and_add_carries_through_the_limbs();
+    an_addition_carries_across_a_limb();
+    println("building ok");
+}
+
+// ---- shifting ---------------------------------------------------------------------
+
+// A shift of 0, of 31, of 32 and of 33 places are four paths through bn_shl:
+// no move, a move inside a limb, a move of whole limbs and both together.
+fn void a_left_shift_moves_whole_limbs_and_bits() {
+    flt.bignum mut n = flt.bignum{};
+    flt.bn_set_u64(&n, 1);
+    flt.bn_shl(&n, 0);
+    want_u64("1 << 0", value_of(&n), 1);
+    flt.bn_shl(&n, 31);
+    want_u64("1 << 31", value_of(&n), 2147483648);
+    flt.bn_set_u64(&n, 1);
+    flt.bn_shl(&n, 32);
+    want_u64("1 << 32", value_of(&n), LIMB);
+    flt.bn_set_u64(&n, 1);
+    flt.bn_shl(&n, 33);
+    want_u64("1 << 33", value_of(&n), 8589934592);
+    flt.bn_set_u64(&n, 3);
+    flt.bn_shl(&n, 62);
+    want_u64("bits of 3 << 62", flt.bn_bits(&n), 64);
+    flt.bn_set_u64(&n, LIMB_MAX);
+    flt.bn_shl(&n, 32);
+    want_u64("bits of (2^32 - 1) << 32", flt.bn_bits(&n), 64);
+    want_u64("its limbs", n.len, 2);
+    // A shift of a zero is a zero, whatever the distance.
+    flt.bn_set_u64(&n, 0);
+    flt.bn_shl(&n, 1000);
+    assert(flt.bn_is_zero(&n));
+}
+
+// The same four paths through bn_shr, and a shift that drops every bit.
+fn void a_right_shift_drops_what_leaves_the_bottom() {
+    flt.bignum mut n = flt.bignum{};
+    flt.bn_set_u64(&n, 12345);
+    flt.bn_shr(&n, 0);
+    want_u64("12345 >> 0", value_of(&n), 12345);
+    flt.bn_shr(&n, 3);
+    want_u64("12345 >> 3", value_of(&n), 1543);
+    flt.bn_set_u64(&n, LIMB);
+    flt.bn_shr(&n, 31);
+    want_u64("2^32 >> 31", value_of(&n), 2);
+    flt.bn_set_u64(&n, LIMB);
+    flt.bn_shr(&n, 32);
+    want_u64("2^32 >> 32", value_of(&n), 1);
+    flt.bn_set_u64(&n, LIMB);
+    flt.bn_shr(&n, 33);
+    assert(flt.bn_is_zero(&n));
+    flt.bn_set_u64(&n, 18446744073709551615);
+    flt.bn_shr(&n, 1);
+    want_u64("(2^64 - 1) >> 1", value_of(&n), 9223372036854775807);
+    flt.bn_shr(&n, 1000);
+    assert(flt.bn_is_zero(&n));
+}
+
+// A shift up and back down is the identity when nothing leaves the bottom,
+// which is the property the scaling of round_ratio depends on.
+fn void a_shift_up_and_down_restores_the_value() {
+    flt.bignum mut n = flt.bignum{};
+    u64 mut places = 0;
+    while (places < 70) {
+        flt.bn_set_u64(&n, 1234567890123);
+        flt.bn_shl(&n, places);
+        flt.bn_shr(&n, places);
+        want_u64("round trip", value_of(&n), 1234567890123);
+        places += 1;
+    }
+}
+
+fn void shifting() {
+    a_left_shift_moves_whole_limbs_and_bits();
+    a_right_shift_drops_what_leaves_the_bottom();
+    a_shift_up_and_down_restores_the_value();
+    println("shifting ok");
+}
+
+// ---- comparing --------------------------------------------------------------------
+
+// bn_cmp orders by length first and then by the top differing limb, which is
+// the ordering the division loop tests at every step.
+fn void the_comparison_orders_by_length_and_then_by_limb() {
+    flt.bignum mut a = flt.bignum{};
+    flt.bignum mut b = flt.bignum{};
+    flt.bn_set_u64(&a, 0);
+    flt.bn_set_u64(&b, 0);
+    assert(flt.bn_cmp(&a, &b) == 0);
+    flt.bn_set_u64(&a, 1);
+    assert(flt.bn_cmp(&a, &b) == 1);
+    assert(flt.bn_cmp(&b, &a) == -1);
+    flt.bn_set_u64(&a, LIMB);
+    flt.bn_set_u64(&b, LIMB_MAX);
+    assert(flt.bn_cmp(&a, &b) == 1);
+    flt.bn_set_u64(&a, LIMB + 1);
+    flt.bn_set_u64(&b, LIMB);
+    assert(flt.bn_cmp(&a, &b) == 1);
+    assert(flt.bn_cmp(&b, &a) == -1);
+    flt.bn_set_u64(&b, LIMB + 1);
+    assert(flt.bn_cmp(&a, &b) == 0);
+}
+
+// bn_sub borrows across a limb, and a borrow that runs through a zero limb is
+// the case a wrong carry chain gets wrong.
+fn void a_subtraction_borrows_across_the_limbs() {
+    flt.bignum mut a = flt.bignum{};
+    flt.bignum mut b = flt.bignum{};
+    flt.bn_set_u64(&a, LIMB);
+    flt.bn_set_u64(&b, 1);
+    flt.bn_sub(&a, &b);
+    want_u64("2^32 - 1", value_of(&a), LIMB_MAX);
+    want_u64("its limbs", a.len, 1);
+    flt.bn_set_u64(&a, 18446744073709551615);
+    flt.bn_set_u64(&b, 18446744073709551615);
+    flt.bn_sub(&a, &b);
+    assert(flt.bn_is_zero(&a));
+    // 2^64 - 1 borrows through the whole middle limb.
+    flt.bn_set_u128(&a, 1, 0);
+    flt.bn_set_u64(&b, 1);
+    flt.bn_sub(&a, &b);
+    want_u64("2^64 - 1", value_of(&a), 18446744073709551615);
+    flt.bn_set_u64(&a, 1000);
+    flt.bn_set_u64(&b, 999);
+    flt.bn_sub(&a, &b);
+    want_u64("1000 - 999", value_of(&a), 1);
+}
+
+fn void comparing() {
+    the_comparison_orders_by_length_and_then_by_limb();
+    a_subtraction_borrows_across_the_limbs();
+    println("comparing ok");
+}
+
+// ---- dividing ---------------------------------------------------------------------
+
+// bn_div answers the quotient and whether a remainder was left, which is the
+// sticky bit of every rounding step.
+fn void the_division_answers_the_quotient_and_the_remainder() {
+    flt.bignum mut a = flt.bignum{};
+    flt.bignum mut b = flt.bignum{};
+    bool mut sticky = false;
+    flt.bn_set_u64(&a, 100);
+    flt.bn_set_u64(&b, 7);
+    want_u64("100 / 7", flt.bn_div(&a, &b, &sticky), 14);
+    assert(sticky);
+    flt.bn_set_u64(&a, 98);
+    want_u64("98 / 7", flt.bn_div(&a, &b, &sticky), 14);
+    assert(!sticky);
+    flt.bn_set_u64(&a, 0);
+    want_u64("0 / 7", flt.bn_div(&a, &b, &sticky), 0);
+    assert(!sticky);
+    flt.bn_set_u64(&a, 3);
+    want_u64("3 / 7", flt.bn_div(&a, &b, &sticky), 0);
+    assert(sticky);
+    flt.bn_set_u64(&a, 7);
+    want_u64("7 / 7", flt.bn_div(&a, &b, &sticky), 1);
+    assert(!sticky);
+}
+
+// A dividend of many limbs over a divisor of one, and over a divisor of
+// several: the quotient fits 64 bits by construction, which is what every
+// caller arranges.
+fn void a_division_of_many_limbs_by_a_few() {
+    flt.bignum mut a = flt.bignum{};
+    flt.bignum mut b = flt.bignum{};
+    bool mut sticky = false;
+    // 2^64 / 2^32 is 2^32 exactly.
+    flt.bn_set_u128(&a, 1, 0);
+    flt.bn_set_u64(&b, LIMB);
+    want_u64("2^64 / 2^32", flt.bn_div(&a, &b, &sticky), LIMB);
+    assert(!sticky);
+    // (2^64 + 1) / 2^32 leaves a remainder.
+    flt.bn_set_u128(&a, 1, 1);
+    want_u64("(2^64 + 1) / 2^32", flt.bn_div(&a, &b, &sticky), LIMB);
+    assert(sticky);
+    // A dividend of 200 bits over a divisor of 140 leaves a quotient of 60.
+    flt.bn_set_u64(&a, 1);
+    flt.bn_shl(&a, 199);
+    flt.bn_set_u64(&b, 1);
+    flt.bn_shl(&b, 140);
+    want_u64("2^199 / 2^140", flt.bn_div(&a, &b, &sticky), 576460752303423488);
+    assert(!sticky);
+    // The same with one bit set below, which the sticky bit must see.
+    flt.bn_set_u64(&a, 1);
+    flt.bn_shl(&a, 199);
+    flt.bn_set_u64(&b, 1);
+    flt.bn_set_u64(&b, 1);
+    flt.bn_shl(&b, 140);
+    flt.bignum mut one = flt.bignum{};
+    flt.bn_set_u64(&one, 1);
+    flt.bn_add(&a, &one);
+    want_u64("(2^199 + 1) / 2^140", flt.bn_div(&a, &b, &sticky), 576460752303423488);
+    assert(sticky);
+}
+
+fn void dividing() {
+    the_division_answers_the_quotient_and_the_remainder();
+    a_division_of_many_limbs_by_a_few();
+    println("dividing ok");
+}
+
+fn i32 main() {
+    building();
+    shifting();
+    comparing();
+    dividing();
+    println("ok");
+    return 0;
+}

@@ -5,6 +5,10 @@
 
 enum { BYTE_MASK = 0xFFU };
 
+// What helper_half divides by: clang-tidy reads a literal in an expression as
+// a magic number, and a named constant says what the half is.
+static const float HALF_DIVISOR = 2.0F;
+
 // What helper_paint multiplies its enum by, so the answer names the member.
 enum { PAINT_SCALE = 10 };
 
@@ -32,6 +36,24 @@ int32_t helper_apply(int32_t (*cb)(int32_t), int32_t x) {
 // Calls back into a fort function through a floating-point signature, so the
 // callback's argument and result travel in SSE registers (D9.9).
 double helper_apply_f64(double (*cb)(double), double x) {
+    return cb(x);
+}
+
+// A binary32 argument and result, which travel in SSE registers of their own
+// width: a float passed as a double, or read back as one, gives the wrong
+// number rather than a wrong type, which no compiler diagnoses (D9.9).
+float helper_half(float x) {
+    return x / HALF_DIVISOR;
+}
+
+// Both float widths and an integer in one signature, so the two SSE classes
+// and the integer class are assigned together (D9.9).
+double helper_mix(float a, double b, int32_t k) {
+    return (double)a + b * (double)k;
+}
+
+// Calls back into a fort function through a binary32 signature.
+float helper_apply_f32(float (*cb)(float), float x) {
     return cb(x);
 }
 

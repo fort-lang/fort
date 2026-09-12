@@ -255,6 +255,16 @@ Owner: `type-system.md` (Constants), `core-language.md` (Literals).
   evaluated as `f64`. `cast` on a constant has runtime semantics (`cast(0x80000000, i32)` is
   `-2147483648`, `cast(-1, u32)` is `4294967295`). A float constant that is not finite in the
   target type is an error.
+  Note 2026-09-12 (T-041, the first implementation of floats): "evaluated as `f64`" is two
+  roundings for an `f32` context, and the text is read as written. A literal is rounded to
+  binary64, and the constant then takes `f32` from its context (D4.2), which rounds again. The
+  two differ from one rounding exactly when the literal lands on a binary64 value midway between
+  two binary32 values, where the second rounding is a tie and goes to the even mantissa:
+  `f32 x = 1.000000059604644776257986737988403547205962240695953369140625;` is `1.0` in fort and
+  `1.0000001` in C, whose `strtof` rounds the decimal straight to binary32
+  (`run/constants/011_float_two_roundings.ft`). No other class of literal can tell the two apart.
+  The rule stands as written: one evaluation type for every untyped float keeps the folding of
+  this decision in one format, and a second reading would need a rule for every mixed expression.
 - **D4.5** With no context at all (for example an argument to `print`), an untyped integer
   becomes `i32` if it fits, otherwise `i64`, otherwise it is an error; an untyped float becomes
   `f64`; a char literal becomes `char`.
