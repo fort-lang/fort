@@ -1,0 +1,44 @@
+//! run
+//! stdout:
+//| 3 5 0 2
+//| 5 0 true
+//| 3 0 7
+//| 9 4 0
+//| 0 9
+// Ownership at a second aggregate level (D17): an array of owning spans owns
+// one allocation per element, `move` empties the element it takes from
+// (D17.6), and `del` of an element frees that element alone.
+struct rows {
+    i32 mut@ own[2] parts;
+}
+
+fn i32 main() {
+    i32 n = 3;
+    i32 mut@ own[2] mut owners = {};
+    owners[0] = new(i32, n);
+    owners[1] = new(i32, n);
+    owners[0][1] = 5;
+    println(owners[0].len, " ", owners[0][1], " ", owners[1][0], " ", owners.len);
+    // `move` of an element hands the allocation over and leaves the zero span
+    // behind (D3.5, D17.6).
+    i32 mut@ own taken = move(owners[0]);
+    println(taken[1], " ", owners[0].len, " ", owners[1].len == 3);
+    del(taken);
+    del(owners[1]);
+    // A span of arrays owns one allocation of n rows, and `del` frees it once
+    // (D10.2, D10.3).
+    i32[3] mut@ own g = new(i32[3], n);
+    g[2][2] = 7;
+    println(g.len, " ", g[0][0], " ", g[2][2]);
+    println(g.len * g[0].len, " ", sizeof(i32[3]) / 3, " ", g[1][1]);
+    del(g);
+    // An owning array inside a struct: the field is reached through the
+    // struct and the element is emptied by the move (D17.5).
+    rows mut r = rows{};
+    r.parts[1] = new(i32, n);
+    r.parts[1][0] = 9;
+    i32 mut@ own last = move(r.parts[1]);
+    println(r.parts[1].len, " ", last[0]);
+    del(last);
+    return 0;
+}

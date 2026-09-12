@@ -1,0 +1,64 @@
+//! run
+//! stdout:
+//| 2 3 0
+//| 5 7 2
+//| 3 3 12
+//| 1 2 3 4 5 6
+//| 21 2
+//| 2 3 99
+//| 2 2 3 24
+//| 7 9 0
+// A span whose element is a fixed array (D3.5, D3.6): `new(i32[3], n)` gives
+// `i32[3] mut@ own`, its `.len` is the number of rows, and `g[i].len` is the
+// dimension the type writes, so it is a constant (D4.6).
+fn i64 sum(i32[3]@ rows) {
+    i64 mut total = 0;
+    u64 mut i = 0;
+    while (i < rows.len) {
+        i32 mut j = 0;
+        while (j < 3) {
+            total += cast(rows[i][j], i64);
+            j++;
+        }
+        i++;
+    }
+    return total;
+}
+
+fn i32 main() {
+    i32 n = 2;
+    i32[3] mut@ own g = new(i32[3], n);
+    println(g.len, " ", g[1].len, " ", g[1][2]);
+    g[1][2] = 5;
+    // A row read out of the span copies, so the write below leaves the span
+    // alone (D3.4).
+    i32[3] mut row = g[1];
+    row[2] = 7;
+    println(g[1][2], " ", row[2], " ", g.len);
+    // The element type is one array, so sizeof of it is the row's size.
+    println(sizeof(i32[3]) / sizeof(i32), " ", g[0].len, " ", sizeof(i32[3]));
+    g[0][0] = 1;
+    g[0][1] = 2;
+    g[0][2] = 3;
+    g[1][0] = 4;
+    g[1][1] = 5;
+    g[1][2] = 6;
+    println(g[0][0], " ", g[0][1], " ", g[0][2], " ", g[1][0], " ", g[1][1], " ", g[1][2]);
+    println(sum(g), " ", g.len);
+    // A range of a span of arrays is a view of the same rows, so a write
+    // through it is seen through the owner (D6.9).
+    i32[3] mut@ view = g[1..2];
+    view[0][0] = 99;
+    println(view.len + 1, " ", view[0].len, " ", g[1][0]);
+    del(g);
+    // The element may itself hold two dimensions: `new(i32[2][3], n)` is a
+    // span of n arrays of two arrays of three, whose stride is 24 bytes
+    // (D3.6, D10.2).
+    i32[2][3] mut@ own cube = new(i32[2][3], n);
+    println(cube.len, " ", cube[0].len, " ", cube[0][0].len, " ", sizeof(i32[2][3]));
+    cube[1][1][2] = 7;
+    cube[0][0][0] = 9;
+    println(cube[1][1][2], " ", cube[0][0][0], " ", cube[1][0][0]);
+    del(cube);
+    return 0;
+}

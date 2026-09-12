@@ -1,0 +1,107 @@
+//! run
+//! link: ffi/multidim.c
+//! stdout:
+//| 24 12 48 28 48 96 16
+//| true true true true true true true
+//| 0 1 2 10 11 12
+//| 112233 true
+//| 24 48
+//| 1122334 4
+//| true true
+//| 33 63 2 12
+// fort computes the layout of a nested array and C computes it again; D9.9
+// says the two agree. A fort-only program cannot see a disagreement, because
+// a wrong stride used on both sides of every access agrees with itself: under
+// opaque pointers the element type of `[2 x [3 x i32]]` is observable only
+// through the offsets it moves. Every value below is written on one side of
+// the boundary and read on the other, and every size is held against C's
+// sizeof.
+struct cell {
+    i32 n;
+    u8 tag;
+}
+
+struct block {
+    i32[2][3] grid;
+    u8 tag;
+}
+
+extern fn u64 multidim_sizeof_grid();
+extern fn u64 multidim_sizeof_row();
+extern fn u64 multidim_sizeof_cube();
+extern fn u64 multidim_sizeof_block();
+extern fn u64 multidim_offsetof_block_tag();
+extern fn u64 multidim_sizeof_cell_grid();
+extern fn u64 multidim_sizeof_span();
+extern fn void multidim_fill(i32 mut* grid);
+extern fn i64 multidim_digest(i32* grid);
+extern fn i64 multidim_block_digest(block* b);
+extern fn i32 multidim_at(i32* grid, i32 i, i32 j);
+extern fn i32 multidim_cell_at(cell* cells, i32 i, i32 j);
+extern fn i64 multidim_span_row_sum(i32* rows, u64 len, u64 k);
+extern fn u64 multidim_span_len_at(void* spans, u64 k);
+extern fn i32 multidim_span_first_at(void* spans, u64 k);
+
+// A nested array in read-only memory, laid out by the emitter's initializer
+// and by LLVM rather than element by element at run time (D7.10).
+i32[2][3] CONST_GRID = {{1, 1, 2}, {2, 3, 3}};
+
+// The distance between two addresses, which is fort's own offset (D3.11).
+fn u64 off(void* base, void* field) {
+    return cast(field, u64) - cast(base, u64);
+}
+
+fn i32 main() {
+    println(sizeof(i32[2][3]), " ", sizeof(i32[3]), " ", sizeof(i32[2][2][3]), " ",
+            sizeof(block), " ", sizeof(cell[2][3]), " ", sizeof(cell[2][3][2]), " ",
+            sizeof(i32 mut@));
+    // Each size is C's, and each stride is the size of what it strides over.
+    i32[2][3] mut m = {};
+    println(sizeof(i32[2][3]) == multidim_sizeof_grid(), " ",
+            sizeof(i32[3]) == multidim_sizeof_row(), " ",
+            sizeof(i32[2][2][3]) == multidim_sizeof_cube(), " ",
+            sizeof(block) == multidim_sizeof_block(), " ",
+            sizeof(cell[2][3]) == multidim_sizeof_cell_grid(), " ",
+            off(cast(&m[0][0], void*), cast(&m[1][0], void*)) == multidim_sizeof_row(), " ",
+            off(cast(&m[0][0], void*), cast(&m[0][1], void*)) == sizeof(i32));
+    // C writes 10 * i + j into each element and fort reads them back at its
+    // own two indices, which a transposed or mis-strided row would spoil.
+    multidim_fill(&m[0][0]);
+    println(m[0][0], " ", m[0][1], " ", m[0][2], " ", m[1][0], " ", m[1][1], " ", m[1][2]);
+    // And the other way: fort writes, C reads every element in row-major
+    // order and folds them into one number.
+    i32[2][3] mut w = {{1, 1, 2}, {2, 3, 3}};
+    println(multidim_digest(&w[0][0]), " ", multidim_at(&w[0][0], 1, 2) == 3);
+    // A nested array as a struct field starts at offset 0 and the field after
+    // it lands where C's offsetof puts it.
+    block mut b = block{w, 4};
+    println(off(cast(&b, void*), cast(&b.grid[0][0], void*)) + multidim_offsetof_block_tag(), " ",
+            off(cast(&b, void*), cast(&b.tag, void*)) + sizeof(i32[2][3]));
+    println(multidim_block_digest(&b), " ", b.tag);
+    // An array of structs at rank two strides by the element's padded size in
+    // both dimensions.
+    cell[2][3] mut cells = {};
+    cells[1][2] = cell{7, 0};
+    cells[0][1] = cell{5, 0};
+    println(multidim_cell_at(&cells[0][0], 1, 2) == 7, " ",
+            multidim_cell_at(&cells[0][0], 0, 1) == 5);
+    // A span of rows hands C the pointer and the length of D3.5: its element
+    // is an i32[3], so C strides by 12 bytes over it. An array of spans hands
+    // C the two-word header of each element, at the stride of D19.2.
+    i32 n = 2;
+    i32[3] mut@ own rows = new(i32[3], n);
+    rows[0][0] = 10;
+    rows[0][1] = 11;
+    rows[0][2] = 12;
+    rows[1][0] = 21;
+    rows[1][1] = 22;
+    rows[1][2] = 20;
+    i32 mut@[2] mut spans = {rows[0][0..3], rows[1][0..2]};
+    println(multidim_span_row_sum(&rows[0][0], rows.len, 0), " ",
+            multidim_span_row_sum(&rows[0][0], rows.len, 1), " ",
+            multidim_span_len_at(cast(&spans[0], void*), 1), " ",
+            multidim_span_first_at(cast(&spans[0], void*), 0)
+                + multidim_at(&CONST_GRID[0][0], 1, 0));
+    del(rows);
+    return 0;
+}

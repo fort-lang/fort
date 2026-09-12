@@ -196,6 +196,13 @@ A safe(r) C-like systems programming language.
 - `tools/vm gate` is the merge gate: `format-check`, `tidy`, and `check-all` under `debug`,
   `asan` and `ubsan` (it configures `debug` first, then configures and builds each preset before
   its `check-all`).
+  **Never kill a guest process by pattern.** The VM is shared by every worktree, so
+  `tools/vm run 'pkill -f ctest'` or `pkill -f run_tests.py` ends the runs of the other agents as
+  well, and each of them reads the kill as a test failure in their own branch. T-043 did it to
+  stop its own gate and had to report the damage it could not undo. To stop a run of your own,
+  kill the host process you started (`pkill -f 'tools/vm gate'` matches only host shells, and even
+  that matches another agent's monitor loop, so prefer the pid the shell gave you); a guest
+  command then dies with its ssh session.
   **One worktree has one `build/<preset>`, so two gates in it collide** and the collision reads as
   a test failure rather than as contention: two ninja processes drive the same directory, one
   rewrites an object the other is linking, and the tail of the log names whichever test lost. The
@@ -238,12 +245,14 @@ A safe(r) C-like systems programming language.
   describes every option and verdict). `test/lang/xfail.txt` lists tests the compiler cannot
   pass yet; a listed test that passes fails the run, so shrink the list in the same commit that
   makes tests pass. `test/lang/bootstrap-unsupported.txt` lists tests that use features the C
-  bootstrap deliberately lacks (floats, multi-dimensional arrays, do-while, `?:`; function
-  pointers are in its subset, D3.10); keep such features out of core tests, or split them into
-  their own test, so the core tests exercise stage1. `run_tests.py --lint` validates directives
-  without a compiler and runs before every test run; `run_tests.py --check-json` is a mode of its
-  own (ctest `lang_check_json`, also run by check-lang) that holds the document of `fort --check
-  --json` against the text form on every fail test and ignores `xfail.txt`, since it judges the
+  bootstrap deliberately lacks (floats, the nested array and span levels of D3.6, do-while,
+  `?:`; function pointers are in its subset, D3.10), and `test/lang/unsupported-stage2.txt` is
+  the same list for stage2, which reads those levels; keep such features out of core tests, or
+  split them into their own test, so the core tests exercise stage1. `run_tests.py --lint`
+  validates directives without a compiler and runs before every test run;
+  `run_tests.py --check-json` is a mode of its own (ctest `lang_check_json`, also run by
+  check-lang) that holds the document of `fort --check --json` against the text form on every fail
+  test and ignores `xfail.txt`, since it judges the
   two forms of one run rather than the test. It also selects a test with an `index.json` beside
   it, runs that one with `--index` and holds its `"symbols"` against the file byte for byte
   (D20.3): the golden is one record per line as `render_index` spells it, it is the one non-`.ft`
@@ -568,11 +577,12 @@ A safe(r) C-like systems programming language.
   the flush around it, and `diag_mute_test.ft` and `driver_test.ft` call it rather than repeating
   the redirect. A mute that kept printing passed the directive form of that test and failed the
   captured form.
-  **`lang-stage2` does not pass `--no-unsupported`, and `xfail-stage2.txt` is empty.** It did
-  pass the flag until T-038 measured what the flag costs. `bootstrap-unsupported.txt` demands
-  that the compiler *reject* the features the C bootstrap lacks; stage2 is the transliteration of
-  that compiler and rejects them for the same reasons, so with the flag stage2 passes 519 of the
-  538 tests and nineteen entries stay in `xfail-stage2.txt` for ever, while without it stage2
+  **`lang-stage2` does not pass `--no-unsupported`; it passes a list of its own, and
+  `xfail-stage2.txt` is empty.** It did pass the flag until T-038 measured what the flag costs.
+  `bootstrap-unsupported.txt` demands that the compiler *reject* the features the C bootstrap
+  lacks; stage2 is the transliteration of that compiler and rejects them for the same reasons,
+  so with the flag stage2 passes 519 of the 538 tests and nineteen entries stay in
+  `xfail-stage2.txt` for ever, while without it stage2
   passes all 538 and the file holds nothing. Take the stronger property. The argument the flag
   was added on -- that inheriting the list would keep twenty entries in the file for ever -- runs
   the other way: it is the flag that keeps nineteen of them. (`bootstrap-unsupported.txt` holds
@@ -580,6 +590,16 @@ A safe(r) C-like systems programming language.
   `fail/constants/002_float_to_int.ft` whatever the flag says.)
   stage1 compiles stage2, so the day one gains floats or `?:` is the day the
   other does, and the entry leaves `bootstrap-unsupported.txt` then.
+  **Two compilers, two lists** (T-043). The two subsets stopped being equal when `src/fort`
+  gained the nested array and span levels of D3.6 (`i32[3][4]`, `i32[4]@`, `u8@@`, `node@[4]`)
+  that `src/bootstrap` refuses: those tests must be *rejected* under stage1 and must *run* under
+  stage2, which one shared list cannot say. `test/lang/unsupported-stage2.txt` is stage2's list
+  and `bootstrap-unsupported.txt` stays stage1's; `lang-stage2` names the first with
+  `--unsupported`. Neither run excuses a test. A ticket that gives stage2 a feature stage1 lacks
+  takes the entry out of stage2's list alone, and it also raises `NESTED_FILES` in
+  `tools/diff_ast.sh`, which skips exactly the files stage1 refuses for a nested level and holds
+  that number as an equality: the differential compares two trees, and a file only one compiler
+  parses has no second tree.
   ctest `stage-usage` (label `unit`) diffs stage1's and stage2's `--help`, `--version` and
   usage line, which is what holds the option table `src/fort/main.ft` copies from
   `src/bootstrap/driver.c` to it.
@@ -657,11 +677,15 @@ A safe(r) C-like systems programming language.
   10 of `test/check_layout_test.c`'s 17 tests check both declaration orders
   (`grep -c 'TEST_RUN(.*_in_either_order)'` against `grep -c 'TEST_RUN('`), and
   `test/gen_aggregate_test.c` holds the two emitted modules against each other line by line,
-  since a layout is only observable through the offsets it moves. What the suite cannot reach,
-  for T-035 and the port: `suffixes_store_base` is the third spelling of "look behind fixed
-  arrays" beside `behind_arrays` in `types.c` and `struct_of` in `check.c`, and its generality is
-  untestable in stage1 by construction, since `b[2][3]` is refused as multi-dimensional and
-  `b[3] mut@` as a span of arrays. Keep the three in step by reading, not by testing.
+  since a layout is only observable through the offsets it moves. `suffixes_store_base` is the
+  third spelling of "look behind fixed arrays" beside `behind_arrays` in `types.c` and
+  `struct_of` in `check.c`; keep the three in step by reading them together. Its generality was
+  untestable in stage1 by construction, since that compiler refuses `b[2][3]` and `b[3] mut@`,
+  and T-043 made it testable in stage2 and tested it:
+  `test/fort/check_resolve_test.ft` writes `node mut*[2][3]` and `node[3] mut@ own` (identity
+  only, both declaration orders) beside `node[2][3]` (value containment, an infinite size in both
+  orders), which are the two answers the demand graph must tell apart at rank two. A rule stated
+  as untestable is worth re-reading whenever the subset grows.
 - **Ownership in the checker** (D17): `check_owning(t)` is the one answer to "does a value of
   this type own an allocation" -- an `own` reference or an owning aggregate -- and it guards the
   layout, since `type_is_owning_aggregate` fatals on a struct that has none. Every own place is
@@ -1030,7 +1054,8 @@ A safe(r) C-like systems programming language.
 - **Transliterating the bootstrap into fort.** Phase B rewrites `src/bootstrap/*.c` as
   `src/fort/*.ft`, and stage2 is compiled by stage1, so a compiler source may use only what the
   bootstrap itself accepts. `test/lang/bootstrap-unsupported.txt` is that list: no floats (`f32`,
-  `f64`, float literals), no multi-dimensional arrays, no `do { } while` and no `?:`. Function
+  `f64`, float literals), no second array or span level in one written type (`i32[3][4]`,
+  `i32[4]@`, `u8@@`, `node@[4]`, T-043), no `do { } while` and no `?:`. Function
   pointers are inside the subset (D3.10), so a dispatch table is fine. These are the constructs a
   C file may hold that have no fort spelling, with what replaces each; the rules the bootstrap
   already follows so that it stays portable are the first four.

@@ -22,13 +22,12 @@ import types;
 // path of a struct that does not contain it, and `check_layout` then reads the
 // unfinished layout as an infinite size.
 //
-// What cannot be tested from here, and is stated rather than asserted: the
-// generality of that rule over a type whose base sits behind both an array and
-// a reference, `b[2][3]` or `b[3] mut@`, since the bootstrap subset refuses
-// multi-dimensional arrays and spans of arrays outright
-// (test/lang/bootstrap-unsupported.txt). This is the third spelling of "look
-// behind fixed arrays", beside `behind_arrays` in types.ft and `struct_of` in
-// check.ft, and the three are kept in step by reading them together.
+// The generality of that rule over a type whose base sits behind both an array
+// and a reference, `b[2][3]` or `b[3] mut@`, is asserted since T-043: this
+// compiler reads those two forms and the suite below writes them in both
+// declaration orders. This is the third spelling of "look behind fixed
+// arrays", beside `behind_arrays` in types.ft and `struct_of` in check.ft, and
+// the three are kept in step by reading them together as well.
 
 fn bool decls(check_env.env mut* e, string one, string two, string three) {
     strbuf.str_buf mut b = strbuf.create();
@@ -119,6 +118,69 @@ fn void a_pair_that_reaches_through_a_span_checks_in_either_order() {
     assert(check_env.errors(&f) == 0);
     assert(check_env.field_offset(&f, "node", "kids") == 0);
     assert(check_env.field_offset(&f, "node", "tag") == 16);
+}
+
+fn void a_reference_behind_two_array_levels_is_identity_only() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // `node*[2][3]` is six pointers: the array levels carry the base through
+    // and the `*` ends the containment, so `vec` stores no `node` by value and
+    // the pair checks in this order (D3.4, D3.8, D3.11). This is the rank-two
+    // half of T-082, which stage1 cannot write at all.
+    assert(decls(&e, "struct vec {\n    node mut*[2][3] rows;\n}\n",
+                 "struct node {\n    vec kids;\n    i32 tag;\n}\n", "vec v = {};\n"));
+    assert(check_env.errors(&e) == 0);
+    assert(types.type_sizeof(check_env.sym_main(&e, "v")->ty) == 48);
+    check_env.env mut f = check_env.env{};
+    check_env.open(&f);
+    defer check_env.close(&f);
+    // And in the other order, which is the same program (D7.10).
+    assert(decls(&f, "struct node {\n    vec kids;\n    i32 tag;\n}\n",
+                 "struct vec {\n    node mut*[2][3] rows;\n}\n", "vec v = {};\n"));
+    assert(check_env.errors(&f) == 0);
+    assert(check_env.field_offset(&f, "node", "kids") == 0);
+    assert(check_env.field_offset(&f, "node", "tag") == 48);
+}
+
+fn void a_span_of_arrays_of_a_struct_is_identity_only_as_well() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // `node[3] mut@ own` is two words whatever it views, the array level
+    // inside it included (D3.5, D3.6), so it opens no resolution edge and the
+    // pair checks in both orders.
+    assert(decls(&e, "struct vec {\n    node[3] mut@ own rows;\n}\n",
+                 "struct node {\n    vec kids;\n    i32 tag;\n}\n", "vec v = {};\n"));
+    assert(check_env.errors(&e) == 0);
+    assert(types.type_sizeof(check_env.sym_main(&e, "v")->ty) == 16);
+    check_env.env mut f = check_env.env{};
+    check_env.open(&f);
+    defer check_env.close(&f);
+    assert(decls(&f, "struct node {\n    vec kids;\n    i32 tag;\n}\n",
+                 "struct vec {\n    node[3] mut@ own rows;\n}\n", "vec v = {};\n"));
+    assert(check_env.errors(&f) == 0);
+    assert(check_env.field_offset(&f, "node", "kids") == 0);
+    assert(check_env.field_offset(&f, "node", "tag") == 16);
+}
+
+fn void an_array_of_arrays_of_a_struct_contains_it_by_value() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // A fixed array of any rank over `node` contains `node` by value (D3.8),
+    // so this pair is a cycle and the error is the same in both orders. The
+    // two tests above and this one are the two answers the demand graph must
+    // tell apart at rank two.
+    assert(!decls(&e, "struct vec {\n    node[2][3] rows;\n}\n",
+                  "struct node {\n    vec kids;\n}\n", "vec v = {};\n"));
+    assert(check_env.said(&e, "has infinite size"));
+    check_env.env mut f = check_env.env{};
+    check_env.open(&f);
+    defer check_env.close(&f);
+    assert(!decls(&f, "struct node {\n    vec kids;\n}\n",
+                  "struct vec {\n    node[2][3] rows;\n}\n", "vec v = {};\n"));
+    assert(check_env.said(&f, "has infinite size"));
 }
 
 fn void a_function_type_stores_neither_its_result_nor_its_parameters() {
@@ -226,6 +288,9 @@ fn i32 main() {
     a_struct_behind_a_reference_is_identity_only();
     a_span_of_a_struct_is_identity_only_as_well();
     a_pair_that_reaches_through_a_span_checks_in_either_order();
+    a_reference_behind_two_array_levels_is_identity_only();
+    a_span_of_arrays_of_a_struct_is_identity_only_as_well();
+    an_array_of_arrays_of_a_struct_contains_it_by_value();
     a_function_type_stores_neither_its_result_nor_its_parameters();
     two_structs_that_contain_each_other_by_value_have_infinite_size();
     a_constant_reached_from_another_is_resolved_on_the_spot();

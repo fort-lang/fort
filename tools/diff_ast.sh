@@ -23,6 +23,18 @@
 # name ranges, nor anything the checker would say. Ranges are pinned by the
 # assertions in test/parser_loc_test.c and test/fort/parser_range_test.ft.
 #
+# The one construct the two parsers read differently is skipped here, and it
+# is skipped by name rather than by silence (T-043): src/fort reads the nested
+# array and span levels of D3.6 (`i32[3][4]`, `i32[4]@`, `u8@@`, `node@[4]`)
+# and src/bootstrap refuses them, so stage1 answers such a file with `not
+# supported by the bootstrap compiler: <one of four features>` and no tree the
+# comparison could use. A file whose stage1 diagnostics name one of those four
+# features is therefore counted and skipped, and nothing else is: the count is
+# an equality like FT_FILES, so a file cannot leave the comparison quietly. The
+# skip asks stage2's side too -- that it took the file and printed no such
+# message of its own -- and it stands after the two guards below, so that a
+# stage1 which exits 2 while printing the message is reported and not counted.
+#
 # The corpus is every .ft file the repository holds, not only test/lang:
 # std/*.ft, src/fort/*.ft, test/fort/*.ft and test/fort_lint/*.ft hold
 # constructs the language tests do not. The copies under build/ are the same
@@ -51,7 +63,18 @@ done
 # constant: a file must not be able to slip out of the comparison. A ticket
 # that adds or removes a .ft file changes all four lines in the same commit:
 # diff_tokens.sh, diff_ast.sh, diff_check.sh and diff_ir.sh.
-FT_FILES=745
+FT_FILES=768
+
+# The files of that corpus src/bootstrap refuses for a nested array or span
+# level, which src/fort reads (D3.6, T-043). They are skipped below, and this
+# is an equality for the reason FT_FILES is: a comparison that shrank would
+# otherwise pass while seeing less. A ticket that adds or removes a test using
+# a nested level raises or lowers it beside FT_FILES.
+NESTED_FILES=24
+
+# The four diagnostics src/bootstrap reports for such a type
+# (src/bootstrap/parser.c, check_one_aggregate_level).
+NESTED_MESSAGES='multi-dimensional arrays|spans of arrays|arrays of spans|spans of spans'
 
 files=$(find . -name '*.ft' -not -path './build/*' -not -path './.git/*' \
     -not -path './.worktrees/*' | sort)
@@ -71,6 +94,7 @@ trap 'rm -rf "$work"' EXIT
 
 status=0
 differing=0
+nested=0
 # The list is read line by line rather than word by word: a path holding a
 # space would otherwise be split into two paths neither compiler can open,
 # and two compilers failing alike is what this script would call agreement.
@@ -104,6 +128,36 @@ while IFS= read -r file; do
         continue
         ;;
     esac
+    # stage1 refuses a nested array or span level and stage2 reads it, so
+    # there is nothing to compare: count the file and go on. It stands after
+    # the two guards above, so a stage1 that exited 2 while printing the
+    # message is still reported rather than counted, and it asks stage2's side
+    # as well: stage2 must have taken the file (exit 0, or 1 for a diagnostic
+    # of its own) and must not have printed the message itself, since a stage2
+    # that began refusing these forms again would otherwise let this script
+    # print agreement while the language corpus catches it alone.
+    if grep -Eq "not supported by the bootstrap compiler: ($NESTED_MESSAGES)" \
+        "$work/one.err"; then
+        if [ "$two_status" -gt 1 ]; then
+            echo "diff_ast.sh: $file: stage1 refuses a nested level, stage2 exited" \
+                "$two_status" >&2
+            cat "$work/two.err" >&2
+            status=1
+            differing=$((differing + 1))
+            continue
+        fi
+        if grep -Eq "not supported by the bootstrap compiler: ($NESTED_MESSAGES)" \
+            "$work/two.err"; then
+            echo "diff_ast.sh: $file: stage2 refuses a nested level too; it reads every" >&2
+            echo "diff_ast.sh: form of D3.6 since T-043, so this is a regression" >&2
+            cat "$work/two.err" >&2
+            status=1
+            differing=$((differing + 1))
+            continue
+        fi
+        nested=$((nested + 1))
+        continue
+    fi
     if [ "$one_status" -ne "$two_status" ]; then
         echo "diff_ast.sh: $file: stage1 exited $one_status, stage2 $two_status" >&2
         status=1
@@ -137,9 +191,16 @@ done <<EOF
 $files
 EOF
 
+if [ "$nested" -ne "$NESTED_FILES" ]; then
+    echo "diff_ast.sh: skipped $nested files for a nested array or span level," >&2
+    echo "diff_ast.sh: expected exactly $NESTED_FILES; a ticket that adds or removes a test" >&2
+    echo "diff_ast.sh: using one raises or lowers NESTED_FILES beside FT_FILES" >&2
+    exit 1
+fi
 if [ "$status" -eq 0 ]; then
     echo "stage1 and stage2 agree about the syntax tree, the diagnostics and the exit"
-    echo "status of all $count .ft files in the repository"
+    echo "status of $((count - nested)) of the $count .ft files in the repository;"
+    echo "$nested use a nested array or span level, which stage1 alone refuses"
 else
     echo "diff_ast.sh: $differing of $count .ft files differ" >&2
 fi

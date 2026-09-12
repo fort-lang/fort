@@ -47,11 +47,16 @@
 //
 // Features the C bootstrap deliberately lacks are reported here as `not
 // supported by the bootstrap compiler: <feature>` (toolchain.md 7.3): float
-// literals, a second array or span level in one type (`i32[3][4]`, `i32[4]@`,
-// `u8@@`, `node@[4]`), `do`-`while` and `?:`. A speculative parse skips the
-// check, so the construct still decides the shape and the committed parse
-// reports it. The self-hosted compiler reports them too, since stage2 must
-// answer for a program the way stage1 does while both exist.
+// literals, `do`-`while` and `?:`. A speculative parse skips the check, so
+// the construct still decides the shape and the committed parse reports it.
+// The self-hosted compiler reports these three too, since stage2 must answer
+// for a program the way stage1 does while both exist.
+//
+// One item of that list is gone from this parser and stays in the C one
+// (T-043): a written type here may hold any number of array and span levels
+// (`i32[3][4]`, `i32[4]@`, `u8@@`, `node@[4]`), which D3.6 spells and
+// src/bootstrap/parser.c refuses. So stage2 accepts a program stage1 rejects,
+// and the two diverge on exactly the files tools/diff_ast.sh counts.
 //
 // Deviations from the C, all of them forced by the language rather than
 // chosen. A `const char*` that is NULL to mean "this position takes an own"
@@ -710,45 +715,6 @@ fn bool parse_array_suffixes(parser mut* p, ast.node mut* t, bool marked) {
     return true;
 }
 
-// The C bootstrap has at most one array or span level in one written type
-// (toolchain.md 7.3): a second one is a nested aggregate its layout and
-// codegen do not do.
-fn bool check_one_aggregate_level(parser mut* p, ast.node* t) {
-    u64 mut arrays = 0;
-    u64 mut spans = 0;
-    u64 mut first_extra = 0;
-    u64 mut i = 0;
-    while (i < ast.ast_len(t)) {
-        ast.node* s = ast.ast_child(t, i);
-        types.suffix_kind sk = cast(s->op, types.suffix_kind);
-        bool counted = sk == types.suffix_kind.s_array || sk == types.suffix_kind.s_span;
-        if (sk == types.suffix_kind.s_array) {
-            arrays += 1;
-        } else if (sk == types.suffix_kind.s_span) {
-            spans += 1;
-        }
-        if (counted && arrays + spans == 2) {
-            first_extra = i;
-        }
-        i += 1;
-    }
-    if (arrays + spans < 2) {
-        return true;
-    }
-    string mut feature = "spans of spans";
-    if (arrays >= 2) {
-        feature = "multi-dimensional arrays";
-    } else if (spans == 1
-               && cast(ast.ast_child(t, first_extra)->op, types.suffix_kind)
-                      == types.suffix_kind.s_span) {
-        feature = "spans of arrays";
-    } else if (spans == 1) {
-        feature = "arrays of spans";
-    }
-    diag.loc at_loc = ast.ast_child(t, first_extra)->loc;
-    return !unsupported(p, at_loc, feature);
-}
-
 // type = base_type [own] [mut] { ref_suffix } { array_suffix } { ref_suffix }
 // (grammar.md 4), with the base type already parsed.
 fn ast.node mut* parse_type_after_base(parser mut* p, diag.loc at_loc, ast.node mut* base) {
@@ -774,9 +740,6 @@ fn ast.node mut* parse_type_after_base(parser mut* p, diag.loc at_loc, ast.node 
     // No array suffix follows a trailing reference suffix (D3.6).
     if (at(p, lexer.tok_kind.lbracket)) {
         error_here(p, "no array suffix follows a reference suffix: wrap the array in a struct");
-        return null;
-    }
-    if (!check_one_aggregate_level(p, t)) {
         return null;
     }
     return finish(p, t);
@@ -821,7 +784,7 @@ fn ast.node mut* parse_array_type(parser mut* p) {
                 error_expected(p, "'[' of an array type");
             }
             t = null;
-        } else if (!parse_array_suffixes(p, t, false) || !check_one_aggregate_level(p, t)) {
+        } else if (!parse_array_suffixes(p, t, false)) {
             t = null;
         }
     }
@@ -880,9 +843,7 @@ fn ast.node mut* parse_alloc_type(parser mut* p) {
         if (p->failed) {
             t = null;
         }
-        if (t != null
-            && (!parse_array_suffixes(p, t, false) || !check_alloc_marker(p)
-                || !check_one_aggregate_level(p, t))) {
+        if (t != null && (!parse_array_suffixes(p, t, false) || !check_alloc_marker(p))) {
             t = null;
         }
     }

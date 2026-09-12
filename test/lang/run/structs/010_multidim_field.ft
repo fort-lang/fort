@@ -1,0 +1,53 @@
+//! run
+//! stdout:
+//| 28 24 4
+//| 1 2 3 4 5 6 7
+//| 9 1 8
+//| 1 2 3 4 5 6
+//| 82 2 3
+// A struct with a nested array field is a value like any other (D3.4, D3.8):
+// it copies on assignment, on argument passing and on return, and the copy
+// carries every element. This one is 28 bytes, which is past the two-word
+// boundary of the calling convention (D9.9), so the copy goes through memory.
+struct block {
+    i32[2][3] grid;
+    i32 tag;
+}
+
+struct pair {
+    block a;
+    block b;
+}
+
+fn block bumped(block mut b) {
+    b.grid[0][0] = 9;
+    b.tag = 8;
+    return b;
+}
+
+fn i32 sum(block b) {
+    i32 mut total = 0;
+    for (i32[3] row : b.grid) {
+        for (i32 v : row) {
+            total += v;
+        }
+    }
+    return total + b.tag;
+}
+
+fn i32 main() {
+    println(sizeof(block), " ", sizeof(i32[2][3]), " ", sizeof(i32));
+    block mut b = block{{{1, 2, 3}, {4, 5, 6}}, 7};
+    println(b.grid[0][0], " ", b.grid[0][1], " ", b.grid[0][2], " ", b.grid[1][0], " ",
+            b.grid[1][1], " ", b.grid[1][2], " ", b.tag);
+    // The callee writes to its own copy and returns a second one.
+    block c = bumped(b);
+    println(c.grid[0][0], " ", b.grid[0][0], " ", c.tag);
+    // A struct of structs copies the nested arrays inside it.
+    pair mut p = pair{b, c};
+    p.a.grid[1][2] = 60;
+    println(b.grid[0][0], " ", b.grid[0][1], " ", b.grid[0][2], " ", b.grid[1][0], " ",
+            b.grid[1][1], " ", b.grid[1][2]);
+    println(sum(p.a), " ", p.b.grid[0][1], " ", p.a.grid[0][2]);
+    return 0;
+}

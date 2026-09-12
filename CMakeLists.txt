@@ -308,16 +308,27 @@ set_tests_properties(fort-modules PROPERTIES
 # commit that makes its tests pass (D14.4). stage2 is an x86-64 binary, so
 # every run of it here goes through qemu.
 #
-# It does not pass --no-unsupported, and T-038 measured why. stage2 is the
-# transliteration of the C bootstrap, so it rejects the features
-# bootstrap-unsupported.txt lists for exactly the reasons stage1 rejects them.
-# With the flag, stage2 passes 519 of 538 tests and nineteen entries stay in
-# xfail-stage2.txt for ever; without it, stage2 passes all 538 and the file is
-# empty. (bootstrap-unsupported.txt holds twenty entries. stage2 fails nineteen
-# of them under the flag and passes fail/constants/002_float_to_int.ft either
-# way.) The stronger property is the one asserted. The day stage2 implements
-# floats or `?:` is the day stage1 does too, since one compiles the other, and
-# the entry leaves bootstrap-unsupported.txt then.
+# It does not pass --no-unsupported, and T-038 measured why. stage2 rejects
+# almost every feature bootstrap-unsupported.txt lists, for the reasons stage1
+# rejects it. With the flag, stage2 passed 519 of 538 tests and nineteen
+# entries stayed in xfail-stage2.txt for ever; without it, stage2 passed all
+# 538 and the file is empty. The stronger property is the one asserted.
+#
+# It passes --verify-ir for a reason T-043 created (the other two commands
+# always did). Until that ticket, every module stage2 emitted was emitted by
+# stage1 as well and read by `opt` on the stage1 command; now the 23 tests that
+# use a nested array or span level compile under stage2 alone, diff_ir.sh skips
+# them because stage1 refuses them, and test/fort/support/gen_env.ft runs no
+# `opt` by design. Without the flag no verifier would read that IR at all.
+#
+# It passes a list of its own instead (T-043). The two compilers no longer
+# refuse the same set: src/fort reads the nested array and span levels of D3.6
+# and src/bootstrap does not, so the tests that use them must be rejected
+# under stage1 and must compile and run under stage2. One list per compiler
+# says exactly that, and each name is judged by one rule or the other and
+# never excused. The day stage2 implements floats, `?:` or do-while is the day
+# stage1 does too, since one compiles the other, and the entry leaves both
+# lists then.
 set(FORT_LANG_STAGE2_COMMAND
     "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}"
     --fort "${FORT_STAGE2_BINARY}"
@@ -325,6 +336,8 @@ set(FORT_LANG_STAGE2_COMMAND
     --cc "${FORT_TARGET_CC_PATH}"
     --opt "${FORT_OPT_PATH}"
     --xfail "${FORT_LANG_DIR}/xfail-stage2.txt"
+    --unsupported "${FORT_LANG_DIR}/unsupported-stage2.txt"
+    --verify-ir
     -j "${FORT_LANG_JOBS}"
 )
 add_test(NAME lang-stage2 COMMAND ${FORT_LANG_STAGE2_COMMAND})
@@ -335,10 +348,13 @@ set_tests_properties(lang-stage2 PROPERTIES LABELS lang)
 # with a golden index.json beside it, held against that file byte for byte
 # (D20.2, D20.3). It is the oracle of the json and index ports (T-093).
 #
-# What it covers and what it does not. --check-json selects 194 of the 538
-# tests: the 192 `fail` tests, which have diagnostics, and the 2 tests with a
+# What it covers and what it does not. --check-json selects 200 of the 559
+# tests: the 198 `fail` tests, which have diagnostics, and the 2 tests with a
 # golden index beside them. So the document of a **clean** compile is
-# exercised here by two tests, and the diagnostics half by all 192. Against a
+# exercised here by two tests, and the diagnostics half by all 198. The three
+# numbers are read off `run_tests.py --check-json --list`; the pair before
+# T-043 (194 of 538, 192 fail tests) counted the fail tests wrong as well.
+# Against a
 # golden the comparison is stricter than a diff of two compilers for the value
 # and the order of every record, since it holds both compilers against a file
 # in the repository; it is weaker for whitespace, because run_tests.py

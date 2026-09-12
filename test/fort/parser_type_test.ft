@@ -204,25 +204,30 @@ fn void an_array_after_a_trailing_reference_suffix_is_refused_everywhere() {
     assert(refused_everywhere(&e, "i32[4]@[2]", wrap));
 }
 
-fn void a_second_aggregate_level_is_refused_everywhere() {
+fn void a_second_aggregate_level_parses_everywhere() {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
-    // The C bootstrap has at most one array or span level in one written type
-    // (toolchain.md 7.3), and the self-hosted compiler answers alike.
-    assert(refused_everywhere(&e, "i32[2][3]",
-                              "not supported by the bootstrap compiler: multi-dimensional arrays"));
-    assert(refused_everywhere(&e, "i32[2]@",
-                              "not supported by the bootstrap compiler: spans of arrays"));
-    string spans = "not supported by the bootstrap compiler: spans of spans";
-    assert(refused_everywhere(&e, "u8@@", spans));
-    assert(refused_everywhere(&e, "node@[4]",
-                              "not supported by the bootstrap compiler: arrays of spans"));
+    // A written type holds any number of array and span levels (D3.6). The C
+    // bootstrap refuses a second one (toolchain.md 7.3) and this parser takes
+    // it, which is the one place the two diverge (T-043).
+    assert(parses_everywhere(&e, "i32[2][3]"));
+    assert(parses_everywhere(&e, "i32[2]@"));
+    assert(parses_everywhere(&e, "u8@@"));
+    assert(parses_everywhere(&e, "node@[4]"));
+    assert(parses_everywhere(&e, "i32[2][3][4]"));
+    // The suffixes stand in the tree in the order they were written, which is
+    // what tells `i32[2][3]` (two arrays of three) from `i32[3][2]`.
+    string two_of_three = parse_env.join2(&e, "(type (prim i32) (array (int 2))",
+                                          " (array (int 3)))");
+    assert(parse_env.type_dump(&e, "i32[2][3]") == two_of_three);
+    assert(parse_env.type_dump(&e, "i32[2]@") == "(type (prim i32) (array (int 2)) (span))");
+    assert(parse_env.type_dump(&e, "u8@@") == "(type (prim u8) (span) (span))");
+    assert(parse_env.type_dump(&e, "node@[4]") == "(type (name node) (span) (array (int 4)))");
     // One level with any number of pointers is fine: a pointer is no
     // aggregate.
     assert(parses_everywhere(&e, "i32[4]**"));
     assert(parses_everywhere(&e, "u8 mut@ own mut* mut*"));
-    // The count is per written type, so two types of one declaration each get
-    // their own level.
+    // A function type holds two written types, and each reads on its own.
     assert(parses_in(&e, "", "fn i32@(u8@)", DECL_AFTER));
 }
 
@@ -257,6 +262,13 @@ fn void an_allocated_type_takes_pointers_and_dimensions_only() {
            == "(new (type (prim i32) (array (int 4))) nil)");
     assert(parse_env.expr_dump(&e, "new(u8, n)")
            == "(new (type (prim u8)) (ident n))");
+    // The dimension group takes any number of dimensions here too (D3.6), so
+    // `new(i32[2][3], n)` allocates n arrays of two arrays of three.
+    string rank2 = parse_env.join2(&e, "(new (type (prim i32) (array (int 2))",
+                                   " (array (int 3))) (ident n))");
+    assert(parse_env.expr_dump(&e, "new(i32[2][3], n)") == rank2);
+    assert(parse_env.expr_dump(&e, "new(node*[2][3])")
+           == "(new (type (name node) (ptr) (array (int 2)) (array (int 3))) nil)");
     // A `mut` anywhere inside it does not parse, wherever it stands.
     parse_env.parse(&e, "fn void f() {\n    g(new(node* mut));\n}\n");
     assert(parse_env.errors(&e) == 1);
@@ -304,7 +316,7 @@ fn i32 main() {
     an_own_where_no_reference_is_is_refused_everywhere();
     a_mut_on_the_position_an_array_follows_is_refused_everywhere();
     an_array_after_a_trailing_reference_suffix_is_refused_everywhere();
-    a_second_aggregate_level_is_refused_everywhere();
+    a_second_aggregate_level_parses_everywhere();
     noreturn_parses_as_a_return_type_and_nowhere_else();
     an_allocated_type_takes_pointers_and_dimensions_only();
     an_array_literal_type_carries_no_marker();

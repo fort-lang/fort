@@ -1227,7 +1227,9 @@ test/
     run_tests.py               runs every language test below
     run_tests_test.py          the harness's own unit tests
     xfail.txt                  tests the compiler cannot pass yet
-    bootstrap-unsupported.txt  tests the C bootstrap must reject
+    bootstrap-unsupported.txt  tests stage1 must reject
+    xfail-stage2.txt           tests stage2 cannot pass yet
+    unsupported-stage2.txt     tests stage2 must reject
     run/<area>/NNN_name.ft     compile, run, compare
     fail/<area>/NNN_name.ft    must not compile, with annotated errors
     run/modules/<name>/main.ft multi-file run test; the directory is the root
@@ -1329,12 +1331,14 @@ Two expectation files beside the harness list path prefixes of tests (relative t
 `#` comments allowed). `xfail.txt` names the tests the compiler cannot pass yet: a listed test
 that fails or errors is `XFAIL`, a listed test that passes is `XPASS` and fails the run, so the
 list shrinks in the commit that makes tests pass. `bootstrap-unsupported.txt` names the tests
-that use features the C bootstrap deliberately lacks (floats, multi-dimensional arrays,
-`do`-`while` and `?:`; function pointers are in its subset, D3.10); each is judged as a `fail`
-test whose only expectation is a diagnostic containing `not supported by the bootstrap
-compiler`, whatever its own kind, and `--no-unsupported` (for the self-hosted compiler) judges
-them normally.
-`--xfail` and `--unsupported` name other lists; `--no-xfail` ignores the first.
+that use features the C bootstrap deliberately lacks (floats, the nested array and span levels
+of D3.6, `do`-`while` and `?:`; function pointers are in its subset, D3.10); each is judged as a
+`fail` test whose only expectation is a diagnostic containing `not supported by the bootstrap
+compiler`, whatever its own kind.
+`--xfail` and `--unsupported` name other lists; `--no-xfail` and `--no-unsupported` ignore
+them. Each compiler has one list of each kind: `xfail-stage2.txt` and `unsupported-stage2.txt`
+are stage2's, and the CMake test `lang-stage2` names both, because stage2 reads the nested
+levels stage1 refuses and must be judged for them like any other run test.
 
 The harness prints one `PASS`, `FAIL`, `XFAIL`, `XPASS` or `ERROR` line per test with the
 reason where there is one, then a summary, and exits with 1 if any test is `FAIL`, `XPASS` or
