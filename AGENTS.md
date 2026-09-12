@@ -27,7 +27,7 @@ A safe(r) C-like systems programming language.
 - The rule applies to text you write or change. It does not ask anyone to rewrite the documents
   that are already there; that sweep is its own ticket if the user wants it.
 
-## Naming## Naming
+## Naming
 - The language is `fort`. Source files use the extension `.ft`. The compiler binary is `fort`.
 
 ## Project Layout
