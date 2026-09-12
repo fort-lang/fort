@@ -41,6 +41,17 @@ Read them in this order. Two are normative and win over the rest.
 | `toolchain.md`       | The `fort` command, build modes, diagnostics, the runtime, code       |
 |                      | generation contract, test conventions.                                |
 
+These five describe the implementation rather than the language, and every document above wins
+over them (D1.2). `README.md` indexes the whole directory.
+
+| Document             | Role                                                                  |
+|----------------------|-----------------------------------------------------------------------|
+| `environment.md`     | The VM, `tools/vm`, the shared folder, the cross toolchain, the build.|
+| `testing.md`         | The merge gate, each test corpus, how to write a test.                |
+| `compiler.md`        | The invariant of each pass, the runtime, the port to fort.            |
+| `style.md`           | Comments, C and fort conventions, markdown, shell, commit messages.   |
+| `README.md`          | The index of this directory.                                          |
+
 Seed tests that exercise every feature live under `test/lang/` in the format defined in
 `toolchain.md`; they are the first tests the compiler has to pass.
 

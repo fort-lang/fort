@@ -35,7 +35,11 @@ Sections:
 - **D1.2** The design lives in `notes/`. `decisions.md` (this file) and `grammar.md` are normative;
   `core-language.md`, `type-system.md`, `memory-model.md`, `module-system.md`, `stdlib.md` and
   `toolchain.md` are the specification proper, each owning one topic. `project-overview.md` is the
-  entry point.
+  entry point. Amended 2026-09-12 (T-098): `notes/` also holds the engineering knowledge, in
+  `environment.md` (the VM, the build), `testing.md` (the tests), `compiler.md` (the passes) and
+  `style.md` (the conventions), and `README.md` indexes the directory. Those five files describe
+  the implementation, not the language; every file in this list wins over them, and the routing
+  rule of `AGENTS.md` says which one takes a new fact.
 - **D1.3** Markdown wraps at 100 columns (AGENTS.md).
 - **D1.4** Identifier conventions (not enforced by the compiler): modules, functions, variables,
   fields, struct and enum type names, and enum members are lower_case with underscores

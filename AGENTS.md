@@ -32,9 +32,11 @@ A safe(r) C-like systems programming language.
 - The language is `fort`. Source files use the extension `.ft`. The compiler binary is `fort`.
 
 ## Project Layout
-- `notes/`: the language specification. `notes/decisions.md` (numbered decision log) and
-  `notes/grammar.md` are normative and win over every other document. Start at
-  `notes/project-overview.md`.
+- `notes/`: the language specification and the engineering knowledge, indexed by
+  `notes/README.md`. `notes/decisions.md` (numbered decision log) and `notes/grammar.md` are
+  normative and win over every other document. Start at `notes/project-overview.md`.
+  `notes/environment.md`, `notes/testing.md`, `notes/compiler.md` and `notes/style.md` take the
+  facts the routing rule at the end of this file sends them.
 - `test/`: `test/test.h` is the C macro framework for the compiler's unit tests
   (`test/common.h` provides `TEST_UNUSED`); `test/lang/` holds language tests in the directive
   format defined in `notes/toolchain.md`.
@@ -995,10 +997,13 @@ A safe(r) C-like systems programming language.
   in the sandbox and names that directory. A `fn noreturn` in such a stub needs a terminating
   statement (D8.4, D8.5): an empty body is `a noreturn function must end in a terminating
   statement`, and `while (true) { }` is the shortest one that asks for no intrinsic of its own.
-- **Citing decisions in code**: a citation goes on the line or function that implements the
-  rule, with a phrase stating the rule (`// pointers print as 0x + lowercase hex, 0x0 for null
-  (D11.7)`), so a reader learns the rule without opening the log. A bare tag list at file or
-  section level (`// Printing (D11.5, D11.7, D12.2).`) is not a citation.
+- **Citing decisions in code**: **superseded by `notes/style.md` 1, the comment policy (T-098).**
+  The old rule asked for "a phrase stating the rule" (`// pointers print as 0x + lowercase hex,
+  0x0 for null (D11.7)`) and refused a bare tag list; it produced 2962 tagged comment lines in
+  `src/`, of which 0 match the shape in force now. T-101 rewrites them. The rule in force: a
+  citation is a tag on the line or above the line it governs, `// D17.5`, and it takes one clause
+  after a colon only where the tag alone leaves the rule unclear, `// D17.5: an own lvalue moves`.
+  Write every new comment to `notes/style.md` 1.
 - **Writing specification text**: cite the decision each rule implements as `(Dn.m)`. An agent
   that needs a rule the decision log does not settle uses the most conservative reading, marks it,
   and reports it to the lead for ratification; it never invents syntax or semantics. Every
@@ -1479,8 +1484,10 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
   which fixes or explicitly declines each one in the ticket log. A second review round happens
   only when the fixes changed behaviour.
 - Reviewer: read-only; runs the `code-review` skill on the branch against `main` at its tier's
-  effort; also checks spec citations, tests added, `xfail.txt` updates, AGENTS.md updates and
-  commit hygiene; returns findings with file:line and severity; never edits, commits or merges.
+  effort; also checks spec citations, tests added, `xfail.txt` updates, commit hygiene, and the
+  knowledge the ticket wrote down: the routing rule at the end of this file says which file takes
+  it, so a learning lands in `notes/` or in `editors/README.md` more often than in `AGENTS.md`;
+  returns findings with file:line and severity; never edits, commits or merges.
 - Coordinator: re-runs the gate on the branch, **reads the diff's file list**, merges per the
   Change Implementation Loop (squash for a single unit, `--no-ff` for a multi-unit feature),
   deletes the worktree and branch, appends the merge sha and the agents' token counts to the
@@ -1490,14 +1497,42 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
   the commit before the fix round that added them. `git diff --stat main...HEAD` before every
   merge, and look for what is new rather than what changed.
 
-### Self-Updating Context (AGENTS.md Auto-Amendment)
-AGENTS.md MUST be amended whenever a learning or course correction occurs. This applies in two
-cases:
-- **Autonomous**: When any process/agent discovers something important during development (e.g., a
-  new convention, a gotcha, a pattern that works or fails), they MUST update the relevant section of
-  AGENTS.md.
-- **User-directed**: When the user gives an instruction that changes how the project works (e.g.,
-  new tooling, changed workflow, updated conventions), the receiving agent MUST update AGENTS.md to
-  reflect the change immediately.
+### Self-Updating Context (the routing rule)
 
+An agent MUST write down a learning or a course correction at once. Two cases start an amendment:
+- **Autonomous**: an agent finds something during development: a convention, a trap, a pattern
+  that works or one that fails.
+- **User-directed**: the user gives an instruction that changes how the project works: new
+  tooling, a changed workflow, an updated convention.
 
+**One home for each kind of knowledge.** `AGENTS.md` is not the default home: before T-098 it
+measured 1491 lines and 128 KB, and the cause was a rule that sent every learning here. The table
+says where a fact goes. **The first row that fits wins**, so a fact that two rows accept goes to
+the higher row: the `pkill` rule is the VM's, `tools/lines.py` and the 3:1 ratio are the tests',
+and "What checks `.ft` source" is the tests' as well.
+
+| what you learned | where it goes |
+|---|---|
+| a rule of the language | `notes/decisions.md`, then the specification document that owns it |
+| an invariant of a compiler pass | `notes/compiler.md` |
+| the runtime or the standard library | `notes/compiler.md` |
+| how a test is written or judged | `notes/testing.md` |
+| the VM, the build, the shared folder | `notes/environment.md` |
+| the VS Code extension | `editors/README.md` |
+| a convention for code, text or commits | `notes/style.md` |
+| process: tickets, agents, review, the change loop | `AGENTS.md` |
+| a fact that one ticket needs | that ticket's Notes |
+
+`AGENTS.md` keeps three kinds of knowledge -- the project layout, the process rules, and this
+routing table -- and links to the rest. Its budget is 150 lines. It is over that budget until
+T-099 moves the `## Environment`, `## Build and test` and `## Technical Standards` sections into
+the `notes/` files above; those three sections split across `environment.md`, `testing.md`,
+`compiler.md` and `style.md`, and T-099 routes each bullet by this table.
+
+Five rules for an entry:
+- Say what happened in one sentence, with a number, a command or a file path.
+- Say what to do in one sentence or two.
+- Cite the ticket, as `T-098`.
+- Match the shape of the neighbours in that section.
+- **Read the section before you append.** Extend the entry that is already there rather than add
+  a second entry on the same subject.
