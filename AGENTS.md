@@ -1,6 +1,22 @@
 # fort
 A safe(r) C-like systems programming language.
 
+## Talking to the user
+- **Write to the user in ASD-STE (Simplified Technical English).** The user asked for this on
+  2026-09-11 and again later the same day, so it is a standing instruction and not a preference
+  for one reply. Short sentences, one idea each. Active voice. The simple present where it
+  works. One meaning per word, and the same word for the same thing every time -- a gate is a
+  gate, never "the check" in the next sentence. Plain words over long ones: *use*, not *utilise*;
+  *start*, not *initiate*; *before*, not *prior to*. Say who does what: "the agent refused the
+  instruction", not "the instruction was refused". Cut the throat-clearing ("it is worth noting
+  that", "as we can see"). No metaphor and no idiom.
+- This governs **user-facing text only**. It does not govern code, comments, commit messages,
+  ticket text, specification documents, or the prompts that go to agents -- those keep the
+  conventions their own sections set, and `notes/` in particular is written to be precise rather
+  than simple.
+- A number, a command or a file path is clearer than an adjective. Prefer "the gate exited 1"
+  over "the gate had a problem", and "395 of 666 files" over "most files".
+
 ## Naming
 - The language is `fort`. Source files use the extension `.ft`. The compiler binary is `fort`.
 
