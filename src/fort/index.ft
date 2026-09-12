@@ -1,0 +1,346 @@
+// index: the identifier index of the check mode (D20.3, toolchain.md 9.1).
+//
+// One record per identifier occurrence the checker resolved, which is what an
+// editor answers hover and go-to-definition from. The walk reads the `sym`
+// annotation of every node of every module that was checked, so it runs after
+// the front end and before the analysis is freed: a record lives as long as
+// the checker that made it (ast.ft). What it produces borrows from the trees
+// too -- a name is a view into a module's source and every file name is the
+// module set's -- and owns only the type spellings it builds, so the whole
+// index dies with the run that made it.
+//
+// Records come out ordered by file, an imported module before its importers
+// (D9.10), and within a file by the start of the occurrence, which is the
+// order of D20.3.
+//
+// Two differences from src/bootstrap/index.c, both of them storage.
+// src/bootstrap/index.c allocates one record per occurrence and keeps a vector
+// of pointers to them; here the records are values in one grown span and `at`
+// hands one out by value, as diag.record_at does, so an index owns two
+// allocations and not one per record. And a violated precondition panics
+// (D13.3) where the C ends the process (D20.5).
+//
+// Re-entrancy (D20.5): an index is a value the caller owns, every allocation
+// of it dies with it, and nothing here is module-level state.
+//
+// Dispatch: none. The walk is the plain recursion src/bootstrap/index.c
+// writes, not a table of function pointers (D3.10).
+import ast;
+import containers;
+import diag;
+import json;
+import modules;
+import std.strbuf;
+import types;
+
+// The first non-zero capacity of the record vector; growth doubles from there.
+u64 ENTRY_MIN_CAP = 64;
+
+// One occurrence of one name (D20.3). `loc` is that name token's own range and
+// never the construct's first token (D20.4); `name` is the identifier as it is
+// spelled here, so an `as` alias reads as the alias (D9.3); `ty` is what a
+// declaration of it would spell (D5.2), empty for a name that denotes no value
+// type and absent, which `has_type` says, when the declaration failed to
+// check; `is_decl` marks an occurrence that declares the name in this module,
+// the `as` alias of an import included; `decl` is the declaring name's range,
+// which `has_decl` denies to a builtin alone, since no source declares one
+// (D12.2). `type` is a keyword, so the slot the C calls `type` is `ty`, as
+// ast.ft spells it (D2.4).
+struct entry {
+    diag.loc loc;
+    string name;
+    ast.sym_kind kind;
+    string ty;
+    bool has_type;
+    bool is_decl;
+    bool has_decl;
+    diag.loc decl;
+}
+
+// The records of one run. index{} is a valid empty index, so a struct holding
+// one is initialized with {}.
+struct index {
+    entry mut@ own entries;  // items[..count] are the records, in the order of D20.3
+    u64 count;
+    containers.pool pool;    // owns every type spelling
+    strbuf.str_buf msg;      // the buffer a spelling is built in
+}
+
+// The empty index; allocates nothing.
+fn index create() {
+    return index{};
+}
+
+// Releases every record and every spelling; the index is empty and usable
+// afterwards.
+fn void free(index mut* ix) {
+    del(ix->entries);
+    ix->count = 0;
+    containers.pool_free(&ix->pool);
+    strbuf.free(&ix->msg);
+}
+
+// The records, in the order of D20.3.
+fn u64 count(index* ix) {
+    return ix->count;
+}
+
+// The record at `i`, by value: appending a record moves the array, so a
+// pointer into it would dangle at the next walk. An index at or past count is
+// a violated precondition and panics (D13.3).
+fn entry at(index* ix, u64 i) {
+    if (i >= ix->count) {
+        panic("index.at: index out of range");
+    }
+    return ix->entries[i];
+}
+
+// Ensures room for one more record, growing to the largest of ENTRY_MIN_CAP
+// and twice the capacity.
+fn void reserve(index mut* ix) {
+    if (ix->count < ix->entries.len) {
+        return;
+    }
+    u64 mut cap = ENTRY_MIN_CAP;
+    if (ix->entries.len >= cap) {
+        // A record is more than one byte, so a capacity can never reach half
+        // the address space; the doubling is guarded all the same, since
+        // nothing here may detect an overflow by performing one (D11.1).
+        if (ix->entries.len > containers.U64_MAX / 2) {
+            panic("index.reserve: capacity overflow");
+        }
+        cap = ix->entries.len * 2;
+    }
+    entry mut@ own bigger = new(entry, cap);
+    u64 mut i = 0;
+    while (i < ix->count) {
+        bigger[i] = ix->entries[i];
+        i += 1;
+    }
+    del(ix->entries);
+    ix->entries = move(bigger);
+}
+
+// ---- one record (D20.3) --------------------------------------------------------
+
+// Whether the name denotes something with a type to show. A module, a struct
+// name, an enum name and a builtin denote no value type, so their records
+// carry the empty spelling (D20.3).
+fn bool has_value_type(ast.sym* s) {
+    return s->ty != null && s->kind != ast.sym_kind.s_module &&
+           s->kind != ast.sym_kind.s_struct && s->kind != ast.sym_kind.s_enum;
+}
+
+// The type of the name as a declaration of it would spell it, level-0
+// mutability included (D5.2, D5.3). A declaration that failed to check has the
+// poison of D14.2, which says nothing a reader wants, so its record carries no
+// type at all rather than the empty spelling of a name that has none: the two
+// cases are told apart by the client (D20.3).
+fn string type_spelling(index mut* ix, ast.sym* s) {
+    if (!has_value_type(s)) {
+        return "";
+    }
+    strbuf.clear(&ix->msg);
+    types.type_to_str_decl(s->ty, s->mut0, &ix->msg);
+    return containers.pool_intern(&ix->pool, strbuf.view(&ix->msg));
+}
+
+// Where the declaration of the name is. A module is declared by a file and has
+// no name token, so it is the empty range at 1:1 of that file, which is
+// D14.2's position for what has none, and go-to-definition on a module
+// qualifier opens the module (D9.1, D20.3).
+fn diag.loc declaration_range(ast.sym* s) {
+    if (s->decl.file.len > 0) {
+        return s->decl;
+    }
+    return diag.loc_make(s->node->loc.file, 1, 1);
+}
+
+// Whether `a` begins before `b`: line, then byte column (D20.4).
+fn bool starts_before(diag.loc a, diag.loc b) {
+    if (a.line != b.line) {
+        return a.line < b.line;
+    }
+    return a.col < b.col;
+}
+
+// Whether the occurrence is the `as` alias of an import, which declares that
+// name in this module while the declaration it binds stands elsewhere (D9.3,
+// D20.3): the alias of a whole-module import hangs on the import node and the
+// alias of an item on the item. An import without an alias introduces the name
+// its declaration already has, so it is a use.
+fn bool is_import_alias(ast.node* parent, ast.node* n) {
+    if (parent == null) {
+        return false;
+    }
+    // The two children are read into immutable bindings: `==` lends `own` and
+    // nothing else, so a `node mut*` and a `node*` are not comparable (D17.4).
+    if (parent->kind == ast.ast_kind.k_import) {
+        ast.node* alias = parent->b;
+        return n == alias;
+    }
+    if (parent->kind == ast.ast_kind.k_import_item) {
+        ast.node* alias = parent->a;
+        return n == alias;
+    }
+    return false;
+}
+
+fn void record(index mut* ix, ast.node* n, ast.node* parent) {
+    ast.sym* s = n->sym;
+    reserve(ix);
+    entry mut e = entry{};
+    // The occurrence's own name token, never the construct's first one
+    // (D20.4), so an editor underlines the name and nothing else.
+    e.loc = n->name_loc;
+    e.name = n->name;
+    e.kind = s->kind;
+    e.ty = type_spelling(ix, s);
+    // A declaration that failed to check has no type to show (D20.3).
+    e.has_type = !s->error;
+    // `sym->node` is the declaring node, so the declaration is the occurrence
+    // that stands on it (ast.ft), and an alias declares its own name here.
+    e.is_decl = s->node == n || is_import_alias(parent, n);
+    // A builtin is declared by no source, so it has no declaration range
+    // (D12.2, D20.3).
+    e.has_decl = s->node != null;
+    e.decl = diag.loc_make("", 1, 1);
+    if (e.has_decl) {
+        e.decl = declaration_range(s);
+    }
+    ix->entries[ix->count] = e;
+    ix->count += 1;
+}
+
+// ---- the walk ------------------------------------------------------------------
+
+// `parent` is the node this one hangs on, which is what tells an `as` alias
+// from an ordinary occurrence (D9.3); it is null at the module node.
+fn void walk(index mut* ix, ast.node* n, ast.node* parent) {
+    if (n == null) {
+        return;
+    }
+    // A node with a symbol but no name token of its own is not an occurrence
+    // of anything: the module node carries the module's record, and the import
+    // node the binding's, while the name a reader sees is on the path segment
+    // or on the alias beside them (D20.3, ast.ft).
+    if (n->sym != null && n->name_loc.file.len > 0) {
+        record(ix, n, parent);
+    }
+    walk(ix, n->a, n);
+    walk(ix, n->b, n);
+    walk(ix, n->c, n);
+    walk(ix, n->d, n);
+    u64 mut i = 0;
+    while (i < ast.ast_len(n)) {
+        walk(ix, ast.ast_child(n, i), n);
+        i += 1;
+    }
+}
+
+// Orders the records added since `start` by the start of the occurrence
+// (D20.3). The walk visits a parent before its children, so a record is almost
+// always in place already and only a `.` or an import path moves one back;
+// insertion sort pays for the moves it makes and nothing more, and keeps the
+// walk's order between two records at one position.
+fn void sort_from(index mut* ix, u64 start) {
+    if (ix->count == 0) {
+        return;
+    }
+    u64 mut i = start + 1;
+    while (i < ix->count) {
+        entry e = ix->entries[i];
+        u64 mut j = i;
+        while (j > start && starts_before(e.loc, ix->entries[j - 1].loc)) {
+            ix->entries[j] = ix->entries[j - 1];
+            j -= 1;
+        }
+        ix->entries[j] = e;
+        i += 1;
+    }
+}
+
+// One file's records, grouped and ordered (D20.3). A module that did not parse
+// was not checked either, so it has no annotation to read (D14.2).
+fn void index_module(index mut* ix, modules.module* m) {
+    if (!m->parsed || m->ast == null) {
+        return;
+    }
+    u64 start = ix->count;
+    walk(ix, m->ast, null);
+    sort_from(ix, start);
+}
+
+// Walks every module of `set` the checker checked and records what it resolved
+// (D20.3). The set and the checker that annotated it must both still be alive,
+// since every record is read out of an annotation (ast.ft); the records are
+// appended to whatever the index already holds.
+fn void build(index mut* ix, modules.module_set* set) {
+    // The pass order of modules.ft, which is the order the checker used: an
+    // imported module before its importers (D9.10), then the modules the
+    // loader read but never ordered, so a file being edited is indexed
+    // whatever its imports do (D14.2, D20.1). The index's file order is that
+    // order (D20.3), so it is read from one place and not rebuilt here.
+    u64 mut i = 0;
+    while (i < modules.pass_count(set)) {
+        index_module(ix, modules.pass_at(set, i));
+        i += 1;
+    }
+}
+
+// ---- the document (D20.2, D20.3) -----------------------------------------------
+
+// A range as a diagnostic's is written: the file and the 1-based byte columns
+// of both ends, the end exclusive (D20.2, D20.4).
+fn void write_range(json.writer mut* j, diag.loc l) {
+    json.json_key(j, "file");
+    json.json_str(j, l.file);
+    json.json_key(j, "line");
+    json.json_uint(j, cast(l.line, u64));
+    json.json_key(j, "col");
+    json.json_uint(j, cast(l.col, u64));
+    json.json_key(j, "end_line");
+    json.json_uint(j, cast(l.end_line, u64));
+    json.json_key(j, "end_col");
+    json.json_uint(j, cast(l.end_col, u64));
+}
+
+// Writes the records as the "symbols" array of the document, the key already
+// written by the caller (D20.2, D20.3).
+fn void write_json(index* ix, json.writer mut* j) {
+    json.json_array_begin(j);
+    u64 mut i = 0;
+    while (i < ix->count) {
+        entry e = at(ix, i);
+        json.json_object_begin(j);
+        write_range(j, e.loc);
+        json.json_key(j, "name");
+        json.json_str(j, e.name);
+        // The kind as a diagnostic spells it: "enum member", "parameter"
+        // (D20.3).
+        json.json_key(j, "kind");
+        json.json_str(j, ast.sym_kind_name(e.kind));
+        json.json_key(j, "type");
+        if (e.has_type) {
+            json.json_str(j, e.ty);
+        } else {
+            // The declaration failed to check, so there is no type to show and
+            // the client renders it as unknown (D14.2, D20.3).
+            json.json_null(j);
+        }
+        json.json_key(j, "is_decl");
+        json.json_bool(j, e.is_decl);
+        json.json_key(j, "decl");
+        if (e.has_decl) {
+            json.json_object_begin(j);
+            write_range(j, e.decl);
+            json.json_object_end(j);
+        } else {
+            // A builtin has no declaration to jump to (D12.2, D20.3).
+            json.json_null(j);
+        }
+        json.json_object_end(j);
+        i += 1;
+    }
+    json.json_array_end(j);
+}

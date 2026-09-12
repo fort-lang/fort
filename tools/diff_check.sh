@@ -57,18 +57,24 @@ done
 # comparison. A ticket that adds or removes a .ft file changes all four
 # lines in the same commit: diff_tokens.sh, diff_ast.sh, diff_check.sh and
 # diff_ir.sh.
-FT_FILES=730
+FT_FILES=745
 
 # The files of that corpus stage1 checks clean, which are the ones compared.
 # It is an equality for the reason FT_FILES is: a comparison that shrank would
 # otherwise pass while seeing less, and ctest reads the exit status and not the
 # counts printed below. A ticket that adds a clean .ft file, or that makes
 # stage1 accept or refuse one, changes this line with FT_FILES.
-# It is 3 below diff_ir.sh's PROGRAM_FILES for a reason and not by error: that
-# script passes -I src/fort -I test/fort/support, so it reaches the test/fort
-# tests that import a support module, and this one passes -I "$ROOT" alone and
-# skips them. Move the two numbers together only when the roots agree.
-CLEAN_FILES=444
+# It is 7 below diff_ir.sh's PROGRAM_FILES for a reason and not by error, and
+# the two sets are not nested: they differ by 79 files one way and 72 the
+# other, which is why the gap is not the number of files a ticket adds. That
+# script passes -I src/fort -I test/fort/support, so it reaches the 79
+# test/fort tests that import a support module, and this one passes -I "$ROOT"
+# alone and skips them; this one compares every file that checks clean,
+# including the 72 that hold no `main` -- std, src/fort, the fixtures under
+# test/fort/support and the imported half of a multi-module test -- which that
+# script skips because they compile into no module. Move the two numbers
+# together only when both the roots and those two questions agree.
+CLEAN_FILES=451
 
 # The search roots every run is given: the standard library the build copied,
 # and src/fort, so that the compiler's own modules resolve their imports. A

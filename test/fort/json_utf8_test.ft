@@ -1,0 +1,265 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| controls ok
+//| ascii ok
+//| utf8 ok
+//| ok
+import json;
+import json_env;
+import std.strbuf;
+
+// Every byte of the ASCII range and the UTF-8 corpus of test/json_test.c, held
+// against the bytes src/fort/json.ft writes for them. The document of the
+// check mode must be valid UTF-8 whatever a message held, since fort source is
+// never validated (D2.1, D3.7): a well-formed sequence goes through unchanged
+// and a byte that is part of none costs one U+FFFD and no more.
+
+// The JSON form of every byte from 0x00 to 0x1F, written out here so that the
+// table is a golden and not a second copy of the writer's rule: the control
+// bytes fort spells out (D2.8) are spelled out, every other one is \u00XX with
+// uppercase hex digits.
+string[32] CONTROL_FORMS = {
+    "\\u0000", "\\u0001", "\\u0002", "\\u0003", "\\u0004", "\\u0005", "\\u0006", "\\u0007",
+    "\\u0008", "\\t",     "\\n",     "\\u000B", "\\u000C", "\\r",     "\\u000E", "\\u000F",
+    "\\u0010", "\\u0011", "\\u0012", "\\u0013", "\\u0014", "\\u0015", "\\u0016", "\\u0017",
+    "\\u0018", "\\u0019", "\\u001A", "\\u001B", "\\u001C", "\\u001D", "\\u001E", "\\u001F",
+};
+
+// The UTF-8 bytes of U+FFFD, which a byte that is part of no well-formed
+// sequence is written as, and that text repeated up to four times, since two
+// string literals beside each other do not join (D2.9).
+string ONE_REPLACEMENT = "\xEF\xBF\xBD";
+string TWO_REPLACEMENTS = "\xEF\xBF\xBD\xEF\xBF\xBD";
+string THREE_REPLACEMENTS = "\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD";
+string FOUR_REPLACEMENTS = "\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD";
+
+// The last control byte, the DEL byte, the first byte of the non-ASCII range
+// and the last byte of all.
+u64 CONTROL_MAX = 31;
+u64 ASCII_MAX = 127;
+u64 HIGH_MIN = 128;
+u64 BYTE_MAX = 255;
+
+// The document one string produces.
+fn string document_of(json_env.env mut* e, string bytes) {
+    json_env.open(e);
+    json.json_str(&e->j, bytes);
+    return json_env.written(e);
+}
+
+// ---- the control bytes and the ASCII range -------------------------------------
+
+// Every byte of the control range, the NUL of D2.8's \0 included, has the form
+// the golden table gives.
+fn void every_control_byte_is_escaped() {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    u64 mut byte = 0;
+    while (byte <= CONTROL_MAX) {
+        json_env.env mut e = json_env.env{};
+        string got = document_of(&e, json_env.one_byte(&text, byte));
+        json_env.check(got, json_env.quoted(&want, CONTROL_FORMS[byte]), CONTROL_FORMS[byte]);
+        json_env.close(&e);
+        byte += 1;
+    }
+}
+
+// Every byte of the ASCII range in one pass: a control byte takes the form the
+// golden table gives, the quote and the backslash are escaped, and the 0x20
+// boundary falls between the last escaped byte and the first kept one.
+fn void every_ascii_byte_takes_its_form() {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    u64 mut byte = 0;
+    while (byte <= ASCII_MAX) {
+        json_env.env mut e = json_env.env{};
+        string got = document_of(&e, json_env.one_byte(&text, byte));
+        if (byte <= CONTROL_MAX) {
+            json_env.check(got, json_env.quoted(&want, CONTROL_FORMS[byte]), "a control byte");
+        } else if (byte == cast('"', u64)) {
+            json_env.check(got, json_env.quoted(&want, "\\\""), "the quote");
+        } else if (byte == cast('\\', u64)) {
+            json_env.check(got, json_env.quoted(&want, "\\\\"), "the backslash");
+        } else {
+            json_env.check(got, json_env.quoted(&want, json_env.one_byte(&text, byte)),
+                           "a printable byte");
+        }
+        json_env.close(&e);
+        byte += 1;
+    }
+}
+
+// Exactly two bytes of the printable range are escaped, and the first byte
+// that is not escaped at all is the space.
+fn void only_the_quote_and_the_backslash_are_escaped_above_the_controls() {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut escaped = 0;
+    u64 mut byte = CONTROL_MAX + 1;
+    while (byte <= ASCII_MAX) {
+        json_env.env mut e = json_env.env{};
+        if (document_of(&e, json_env.one_byte(&text, byte)).len != 3) {
+            escaped += 1;
+        }
+        json_env.close(&e);
+        byte += 1;
+    }
+    assert(escaped == 2);
+    json_env.env mut e = json_env.env{};
+    defer json_env.close(&e);
+    assert(document_of(&e, json_env.one_byte(&text, CONTROL_MAX + 1)) == "\" \"");
+}
+
+// The document is valid UTF-8 whatever the message held, so a byte that starts
+// no sequence becomes U+FFFD.
+fn void a_byte_that_starts_no_sequence_becomes_the_replacement_character() {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    u64 mut byte = HIGH_MIN;
+    while (byte <= BYTE_MAX) {
+        json_env.env mut e = json_env.env{};
+        string got = document_of(&e, json_env.one_byte(&text, byte));
+        json_env.check(got, json_env.quoted(&want, ONE_REPLACEMENT), "a high byte alone");
+        json_env.close(&e);
+        byte += 1;
+    }
+}
+
+// ---- the UTF-8 corpus ----------------------------------------------------------
+
+// One case of the corpus, checked twice: the bytes alone, and the same bytes
+// between two ASCII letters. A case that is well-formed alone is well-formed
+// in a sentence too, and one that is not costs exactly its own bytes there as
+// well, so the text around a bad byte is untouched.
+fn void utf8_case(string bytes, string want, string what) {
+    strbuf.str_buf mut expected = strbuf.create();
+    defer strbuf.free(&expected);
+    json_env.env mut alone = json_env.env{};
+    json_env.check(document_of(&alone, bytes), json_env.quoted(&expected, want), what);
+    json_env.close(&alone);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.push(&text, 'a');
+    strbuf.append(&text, bytes);
+    strbuf.push(&text, 'z');
+    strbuf.clear(&expected);
+    strbuf.append(&expected, "\"a");
+    strbuf.append(&expected, want);
+    strbuf.append(&expected, "z\"");
+    json_env.env mut inside = json_env.env{};
+    json_env.check(document_of(&inside, strbuf.view(&text)), strbuf.view(&expected), what);
+    json_env.close(&inside);
+}
+
+// Both edges of every range of every sequence length: the writer replaces
+// nothing it must keep.
+fn void every_well_formed_sequence_is_kept() {
+    utf8_case("\xC2\x80", "\xC2\x80", "U+0080, the lowest two-byte sequence");
+    utf8_case("\xC2\xBF", "\xC2\xBF", "U+00BF, the last of the lowest lead byte");
+    utf8_case("\xDF\x80", "\xDF\x80", "U+07C0, the first of the highest lead byte");
+    utf8_case("\xDF\xBF", "\xDF\xBF", "U+07FF, the highest two-byte sequence");
+    utf8_case("\xE0\xA0\x80", "\xE0\xA0\x80", "U+0800, the lowest three-byte sequence");
+    utf8_case("\xE0\xBF\xBF", "\xE0\xBF\xBF", "U+0FFF, the last of lead E0");
+    utf8_case("\xE1\x80\x80", "\xE1\x80\x80", "U+1000, the first of lead E1");
+    utf8_case("\xEC\xBF\xBF", "\xEC\xBF\xBF", "U+CFFF, the last of lead EC");
+    utf8_case("\xED\x80\x80", "\xED\x80\x80", "U+D000, the first of lead ED");
+    utf8_case("\xED\x9F\xBF", "\xED\x9F\xBF", "U+D7FF, the last before the surrogates");
+    utf8_case("\xEE\x80\x80", "\xEE\x80\x80", "U+E000, the first after the surrogates");
+    utf8_case("\xEF\xBF\xBF", "\xEF\xBF\xBF", "U+FFFF, the highest three-byte sequence");
+    utf8_case("\xF0\x90\x80\x80", "\xF0\x90\x80\x80", "U+10000, the lowest four-byte sequence");
+    utf8_case("\xF0\xBF\xBF\xBF", "\xF0\xBF\xBF\xBF", "U+3FFFF, the last of lead F0");
+    utf8_case("\xF1\x80\x80\x80", "\xF1\x80\x80\x80", "U+40000, the first of lead F1");
+    utf8_case("\xF3\xBF\xBF\xBF", "\xF3\xBF\xBF\xBF", "U+FFFFF, the last of lead F3");
+    utf8_case("\xF4\x80\x80\x80", "\xF4\x80\x80\x80", "U+100000, the first of lead F4");
+    utf8_case("\xF4\x8F\xBF\xBF", "\xF4\x8F\xBF\xBF", "U+10FFFF, the highest code point");
+}
+
+// The five ways a sequence is refused -- a stray continuation byte, a lead byte
+// no sequence starts with, an overlong form, a UTF-16 surrogate and a value
+// past U+10FFFF -- and sequences cut short or with a continuation byte one step
+// out of range. The writer keeps nothing it must replace.
+fn void every_ill_formed_sequence_is_replaced() {
+    utf8_case("\x80", ONE_REPLACEMENT, "a stray continuation byte, the lowest");
+    utf8_case("\xBF", ONE_REPLACEMENT, "a stray continuation byte, the highest");
+    utf8_case("\xC0\x80", TWO_REPLACEMENTS, "C0, a lead byte only an overlong form uses");
+    utf8_case("\xC1\xBF", TWO_REPLACEMENTS, "C1, the other lead byte of an overlong form");
+    utf8_case("\xE0\x80\x80", THREE_REPLACEMENTS, "an overlong U+0000 in three bytes");
+    utf8_case("\xE0\x9F\xBF", THREE_REPLACEMENTS, "an overlong U+07FF, one below its length");
+    utf8_case("\xF0\x80\x80\x80", FOUR_REPLACEMENTS, "an overlong U+0000 in four bytes");
+    utf8_case("\xF0\x8F\xBF\xBF", FOUR_REPLACEMENTS, "an overlong U+FFFF, one below its length");
+    utf8_case("\xED\xA0\x80", THREE_REPLACEMENTS, "U+D800, the first UTF-16 surrogate");
+    utf8_case("\xED\xBF\xBF", THREE_REPLACEMENTS, "U+DFFF, the last UTF-16 surrogate");
+    utf8_case("\xF4\x90\x80\x80", FOUR_REPLACEMENTS, "U+110000, one past the highest code point");
+    utf8_case("\xF5\x80\x80\x80", FOUR_REPLACEMENTS, "F5, the first lead byte past the highest");
+    utf8_case("\xF7\xBF\xBF\xBF", FOUR_REPLACEMENTS, "F7, the last of the old five-byte range");
+    utf8_case("\xF8\x88\x80\x80", FOUR_REPLACEMENTS, "F8, a lead byte of no sequence at all");
+    utf8_case("\xFE", ONE_REPLACEMENT, "FE, a byte UTF-8 never uses");
+    utf8_case("\xFF", ONE_REPLACEMENT, "FF, the other byte UTF-8 never uses");
+    utf8_case("\xC2", ONE_REPLACEMENT, "a two-byte sequence cut short");
+    utf8_case("\xE1\x80", TWO_REPLACEMENTS, "a three-byte sequence cut short");
+    utf8_case("\xF1\x80\x80", THREE_REPLACEMENTS, "a four-byte sequence cut short");
+}
+
+// A second byte outside the continuation range ends the sequence there, and the
+// ASCII byte that stood in its place is still itself.
+fn void a_continuation_byte_out_of_range_ends_the_sequence() {
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, ONE_REPLACEMENT);
+    strbuf.append(&want, "\x7F");
+    utf8_case("\xC2\x7F", strbuf.view(&want), "a second byte one below the range");
+    utf8_case("\xC2\xC0", TWO_REPLACEMENTS, "a second byte one above the range");
+    strbuf.clear(&want);
+    strbuf.append(&want, TWO_REPLACEMENTS);
+    strbuf.append(&want, "\x7F");
+    utf8_case("\xE1\x80\x7F", strbuf.view(&want), "a third byte one below the range");
+    utf8_case("\xF1\x80\x80\xC0", FOUR_REPLACEMENTS, "a fourth byte one above the range");
+}
+
+// One message with a byte of every kind: two escapes, a control byte, an ASCII
+// run, a well-formed sequence and a byte that is part of none.
+fn void a_message_of_every_kind_of_byte_is_written_once() {
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, "\"a\\\"b\\\\c\\nd\\u0001e\xC3\xA9f");
+    strbuf.append(&want, ONE_REPLACEMENT);
+    strbuf.append(&want, "g\"");
+    json_env.env mut e = json_env.env{};
+    defer json_env.close(&e);
+    string got = document_of(&e, "a\"b\\c\nd\x01e\xC3\xA9f\xFFg");
+    json_env.check(got, strbuf.view(&want), "a byte of every kind");
+}
+
+// A well-formed sequence of each length in one string, so a document that was
+// UTF-8 stays UTF-8.
+fn void a_sequence_of_every_length_goes_through_verbatim() {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.append(&text, "\xC2\x80\xDF\xBF\xE0\xA0\x80\xED\x9F\xBF");
+    strbuf.append(&text, "\xEE\x80\x80\xEF\xBF\xBD\xF0\x90\x80\x80\xF4\x8F\xBF\xBF");
+    utf8_case(strbuf.view(&text), strbuf.view(&text), "one sequence of every length");
+}
+
+fn i32 main() {
+    every_control_byte_is_escaped();
+    println("controls ok");
+    every_ascii_byte_takes_its_form();
+    only_the_quote_and_the_backslash_are_escaped_above_the_controls();
+    a_byte_that_starts_no_sequence_becomes_the_replacement_character();
+    println("ascii ok");
+    every_well_formed_sequence_is_kept();
+    every_ill_formed_sequence_is_replaced();
+    a_continuation_byte_out_of_range_ends_the_sequence();
+    a_message_of_every_kind_of_byte_is_written_once();
+    a_sequence_of_every_length_goes_through_verbatim();
+    println("utf8 ok");
+    println("ok");
+    return 0;
+}

@@ -33,6 +33,8 @@ import containers;
 import diag;
 import gen;
 import gen_stmt;
+import index;
+import json;
 import lexer;
 import modules;
 import parser;
@@ -953,8 +955,9 @@ fn i32 front_end(session.session mut* s, options* opts, string program, analysis
         return EXIT_USAGE;
     }
     // A batch driver writes the text form of every diagnostic as it arrives,
-    // which the library leaves off (D14.2, D20.2).
-    diag.set_text(session.diags(s), true);
+    // which the library leaves off (D14.2). --json writes the records as the
+    // document instead and no text line at all (D20.2).
+    diag.set_text(session.diags(s), !opts->json);
     bool loaded = load_closure(s, opts, program, an);
     // Step 3: every module that parsed is checked, the dependency order
     // first, so one file that did not parse never hides the errors of the
@@ -998,6 +1001,82 @@ fn i32 emit_module(session.session mut* s, options* opts, analysis mut* an, stri
     return EXIT_OK;
 }
 
+// ---- the document of the check mode (D20.2, toolchain.md 4.1) ----------------------
+
+// "version" is 1 for this form of the document (D20.2).
+u64 JSON_VERSION = 1;
+
+// Copies the file of every module the loader read, in that order: the names
+// the module set hands out die with it, so the document is written from copies
+// of its own (D20.2). src/bootstrap/driver.c keeps the pair as a
+// driver_files_t; a pool and a vector of string say the same thing.
+fn void collect_files(containers.pool mut* p, modules.module_set* set,
+                      containers.str_vec mut* files) {
+    u64 mut i = 0;
+    while (i < modules.file_count(set)) {
+        containers.str_push(files, containers.pool_intern(p, modules.file_at(set, i)));
+        i += 1;
+    }
+}
+
+// Builds the whole document into `out`: the version, the files of the closure,
+// the diagnostics of the run and the identifier index (D20.2).
+fn void build_document(strbuf.str_buf mut* out, session.session mut* s,
+                       containers.str_vec* files, index.index* ix) {
+    json.writer mut j = json.writer{};
+    json.json_init(&j, out);
+    json.json_object_begin(&j);
+    json.json_key(&j, "version");
+    json.json_uint(&j, JSON_VERSION);
+    // Every file the compiler read, so a client can clear the stale
+    // diagnostics of one that no longer has any (D20.2).
+    json.json_key(&j, "files");
+    json.json_array_begin(&j);
+    u64 mut i = 0;
+    while (i < files->len) {
+        json.json_str(&j, containers.str_at(files, i));
+        i += 1;
+    }
+    json.json_array_end(&j);
+    json.json_key(&j, "diagnostics");
+    diag.write_json(session.diags(s), &j);
+    // The identifier index of D20.3, which is the empty array without --index:
+    // a member of every document rather than one of two shapes (D20.2).
+    json.json_key(&j, "symbols");
+    index.write_json(ix, &j);
+    json.json_object_end(&j);
+}
+
+// Writes the document with one print, so stdout holds a complete document or
+// nothing and a client tells a crash from a verdict (D20.2). The document is
+// one line ended by a newline (toolchain.md 4.1).
+fn void write_document(session.session mut* s, containers.str_vec* files, index.index* ix) {
+    strbuf.str_buf mut doc = strbuf.create();
+    defer strbuf.free(&doc);
+    build_document(&doc, s, files, ix);
+    strbuf.push(&doc, '\n');
+    print(strbuf.view(&doc));
+}
+
+// --check --json reports what the front end found as the document of D20.2 on
+// stdout instead of the text diagnostics of D14.2, and --index fills its
+// identifier index (D20.3). The document is written only for a verdict: a
+// usage, toolchain or internal error is exit 2 with stdout empty (D20.2,
+// D14.1). The analysis is still alive here and is released by the caller,
+// since every record of the index is read out of an annotation (ast.ft).
+fn void check_document(session.session mut* s, options* opts, analysis mut* an,
+                       containers.pool mut* p) {
+    containers.str_vec mut files = containers.str_create();
+    defer containers.str_free(&files);
+    collect_files(p, &an->set, &files);
+    index.index mut ix = index.create();
+    defer index.free(&ix);
+    if (opts->index) {
+        index.build(&ix, &an->set);
+    }
+    write_document(s, &files, &ix);
+}
+
 // A build, or `--check`: the front end, and then the passes this compiler
 // does not carry yet. The session and the analysis die here, in that order of
 // declaration and the reverse order of release, since every name of a tree
@@ -1016,23 +1095,19 @@ fn i32 compile_entry(options* opts, string program) {
     bool mut analysis_live = true;
     defer analysis_release(&an, &analysis_live);
     i32 status = front_end(&s, opts, program, &an);
+    if (opts->check && opts->json && (status == EXIT_OK || status == EXIT_COMPILE_ERROR)) {
+        // The document answers for both verdicts, so it is written before the
+        // compile error returns (D20.2).
+        check_document(&s, opts, &an, &p);
+        return status;
+    }
     if (status != EXIT_OK) {
         return status;
     }
     if (opts->check) {
-        if (!opts->json) {
-            // --check stops after the front end: no module is emitted, and
-            // the file was a module under inspection rather than a program
-            // (D20.1).
-            return EXIT_OK;
-        }
-        // An internal error is not a usage error, so no usage line follows
-        // it: toolchain.md 1 puts that line after the six errors that report
-        // a command line the compiler cannot use, and this command line is
-        // fine. What is missing is the document of D20.2, which needs the
-        // JSON writer and the index walk.
-        error("internal error: this compiler cannot write the check document yet");
-        return EXIT_USAGE;
+        // --check stops after the front end: no module is emitted, and the
+        // file was a module under inspection rather than a program (D20.1).
+        return EXIT_OK;
     }
     string mut out_path = opts->output;
     if (!opts->have_output) {

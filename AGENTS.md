@@ -162,7 +162,9 @@ A safe(r) C-like systems programming language.
   and the runtime (D14.6, amended by T-076), target 3:1, `--min RATIO` fails
   below it; `--since REF` measures a branch's own diff instead of the whole repository, which
   is how a ticket answers for the code it introduces rather than hiding behind the corpus
-  already there; its own tests are the ctest `lines_selftest`).
+  already there; **`--since` reads the commits, not the working tree**, so a file that is only
+  written or only staged counts as 0 lines and the ratio answers about the last commit: commit
+  first, then measure (T-093); its own tests are the ctest `lines_selftest`).
   `tools/vm <target> [preset]` runs one.
 - A CMake variable derived from a cache variable must not be cached itself: `find_program`
   caches by default, so `FORT_TARGET_CC_PATH` kept resolving to the old program after
@@ -1166,6 +1168,12 @@ A safe(r) C-like systems programming language.
     by name; it renames a field to `is_mut`/`is_own`/`is_noreturn` and gives an enum member the
     C constant's prefix (`cv_int` for `CV_INT`), or a short one where the C name is already a
     function's (`k_ptr` for `TYPE_PTR`, beside the constructor `type_ptr`).
+    **A module drops the C prefix only when every name it holds stays legal.** `diag.ft`,
+    `modules.ft` and `index.ft` drop it (`diag.error` for `diag_error`, `index.build` for
+    `index_build`), since the module name already says which module it is. `json.ft` keeps it on
+    every function (`json.json_bool`, `json.json_null`), because `bool` and `null` are keywords
+    (D2.4) and a module with two spellings in it is worse than one stutter. Pick one rule per
+    module and say which in the header comment.
     **A universe function's name is taken too, but only where the module needs the builtin.**
     `del`, `move`, `panic`, `assert` and the print family are universe-scope names that a
     module-level declaration shadows inside that module (D12.2, D7.9), so a module that declares

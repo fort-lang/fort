@@ -1,0 +1,446 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| values ok
+//| separators ok
+//| escapes ok
+//| documents ok
+//| depth ok
+//| ok
+import json;
+import json_env;
+import std.strbuf;
+
+// The JSON writer of src/fort/json.ft, held against the same shapes
+// test/json_test.c holds src/bootstrap/json.c against: the containers, the
+// separators, the escapes of a string, the numbers and the depth limit. The
+// UTF-8 corpus is a test of its own, test/fort/json_utf8_test.ft, and the four
+// violated preconditions are a file each, since a panic ends the program
+// (D11.4).
+
+// ---- values --------------------------------------------------------------------
+
+fn void an_empty_object_is_two_braces() {
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_object_begin(&e.j);
+    json.json_object_end(&e.j);
+    assert(json_env.written(&e) == "{}");
+}
+
+fn void an_empty_array_is_two_brackets() {
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_array_begin(&e.j);
+    json.json_array_end(&e.j);
+    assert(json_env.written(&e) == "[]");
+}
+
+fn void a_document_may_be_a_bare_value() {
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_str(&e.j, "alone");
+    assert(json_env.written(&e) == "\"alone\"");
+}
+
+fn void booleans_and_null_are_written_as_literals() {
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_array_begin(&e.j);
+    json.json_bool(&e.j, true);
+    json.json_bool(&e.j, false);
+    json.json_null(&e.j);
+    json.json_array_end(&e.j);
+    assert(json_env.written(&e) == "[true,false,null]");
+}
+
+fn void numbers_are_decimal_with_a_sign_for_a_negative_one() {
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_array_begin(&e.j);
+    json.json_uint(&e.j, 0);
+    json.json_int(&e.j, -1);
+    json.json_int(&e.j, 42);
+    json.json_array_end(&e.j);
+    assert(json_env.written(&e) == "[0,-1,42]");
+}
+
+// The widest numbers of both signs, which is where a writer that formats
+// through a narrower type loses digits.
+fn void the_widest_numbers_are_written_in_full() {
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_array_begin(&e.j);
+    json.json_uint(&e.j, 18446744073709551615);
+    json.json_int(&e.j, -9223372036854775808);
+    json.json_array_end(&e.j);
+    assert(json_env.written(&e) == "[18446744073709551615,-9223372036854775808]");
+}
+
+// A fort string holds its length, so a NUL inside it is one more byte to
+// escape and not the end of the text (D3.7).
+fn void a_string_view_may_hold_any_bytes_including_a_nul() {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.push(&text, 'a');
+    strbuf.push_byte(&text, 0);
+    strbuf.push(&text, 'b');
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_str(&e.j, strbuf.view(&text));
+    assert(json_env.written(&e) == "\"a\\u0000b\"");
+}
+
+// ---- separators ----------------------------------------------------------------
+
+fn void object_members_are_separated_by_commas() {
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_object_begin(&e.j);
+    json.json_key(&e.j, "a");
+    json.json_uint(&e.j, 1);
+    json.json_key(&e.j, "b");
+    json.json_uint(&e.j, 2);
+    json.json_object_end(&e.j);
+    assert(json_env.written(&e) == "{\"a\":1,\"b\":2}");
+}
+
+// A member's value follows its key with no comma between them, whatever the
+// value is.
+fn void no_comma_separates_a_key_from_its_value() {
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_object_begin(&e.j);
+    json.json_key(&e.j, "list");
+    json.json_array_begin(&e.j);
+    json.json_array_end(&e.j);
+    json.json_object_end(&e.j);
+    assert(json_env.written(&e) == "{\"list\":[]}");
+}
+
+fn void array_elements_are_separated_by_commas() {
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_array_begin(&e.j);
+    json.json_str(&e.j, "x");
+    json.json_str(&e.j, "y");
+    json.json_array_end(&e.j);
+    assert(json_env.written(&e) == "[\"x\",\"y\"]");
+}
+
+// A comma belongs to the container that is open, so a closed container is one
+// element of its parent.
+fn void a_closed_container_is_an_element_of_its_parent() {
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_array_begin(&e.j);
+    json.json_object_begin(&e.j);
+    json.json_key(&e.j, "n");
+    json.json_uint(&e.j, 1);
+    json.json_object_end(&e.j);
+    json.json_object_begin(&e.j);
+    json.json_key(&e.j, "n");
+    json.json_uint(&e.j, 2);
+    json.json_object_end(&e.j);
+    json.json_array_end(&e.j);
+    assert(json_env.written(&e) == "[{\"n\":1},{\"n\":2}]");
+}
+
+fn void a_reopened_container_starts_empty_again() {
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_array_begin(&e.j);
+    json.json_array_begin(&e.j);
+    json.json_uint(&e.j, 1);
+    json.json_uint(&e.j, 2);
+    json.json_array_end(&e.j);
+    json.json_array_begin(&e.j);
+    json.json_uint(&e.j, 3);
+    json.json_array_end(&e.j);
+    json.json_array_end(&e.j);
+    assert(json_env.written(&e) == "[[1,2],[3]]");
+}
+
+// The document is one line: no indentation and no space between two tokens.
+fn void the_document_holds_no_whitespace() {
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_object_begin(&e.j);
+    json.json_key(&e.j, "a");
+    json.json_array_begin(&e.j);
+    json.json_uint(&e.j, 1);
+    json.json_str(&e.j, "t");
+    json.json_array_end(&e.j);
+    json.json_object_end(&e.j);
+    for (char c : json_env.written(&e)) {
+        assert(c != ' ' && c != '\t' && c != '\n' && c != '\r');
+    }
+}
+
+// json_init does not empty the buffer, so a document may follow other bytes.
+fn void a_document_is_appended_to_the_buffer() {
+    json_env.env mut e = json_env.env{};
+    e.out = strbuf.create();
+    defer json_env.close(&e);
+    strbuf.append(&e.out, "before:");
+    json.json_init(&e.j, &e.out);
+    json.json_null(&e.j);
+    assert(json_env.written(&e) == "before:null");
+}
+
+// ---- escapes -------------------------------------------------------------------
+
+fn void the_quote_and_the_backslash_are_escaped() {
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_str(&e.j, "a\"b\\c");
+    assert(json_env.written(&e) == "\"a\\\"b\\\\c\"");
+}
+
+// The control bytes fort spells out are spelled out here too (D2.8).
+fn void newline_tab_and_return_are_spelled_out() {
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_str(&e.j, "\n\t\r");
+    assert(json_env.written(&e) == "\"\\n\\t\\r\"");
+}
+
+fn void a_key_is_escaped_like_a_string() {
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_object_begin(&e.j);
+    json.json_key(&e.j, "a\"b\nc");
+    json.json_uint(&e.j, 1);
+    json.json_object_end(&e.j);
+    assert(json_env.written(&e) == "{\"a\\\"b\\nc\":1}");
+}
+
+// 0x7F is not a control byte for JSON and needs no escape.
+fn void delete_goes_through_verbatim() {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_str(&e.j, json_env.one_byte(&text, 127));
+    assert(json_env.written(&e).len == 3);
+    assert(json_env.written(&e) == "\"\x7F\"");
+}
+
+// Every printable ASCII byte other than the quote and the backslash is written
+// as it stands.
+fn void a_printable_string_is_written_unchanged() {
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_str(&e.j, " !#$%&'()*+,-./0123456789:;<=>?@AZ[]^_`az{|}~");
+    assert(json_env.written(&e) == "\" !#$%&'()*+,-./0123456789:;<=>?@AZ[]^_`az{|}~\"");
+}
+
+fn void an_empty_string_is_two_quotes() {
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_str(&e.j, "");
+    assert(json_env.written(&e) == "\"\"");
+}
+
+// An escape at each end of a string is written like one in the middle.
+fn void an_escape_at_either_end_is_written() {
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_str(&e.j, "\n x \"");
+    assert(json_env.written(&e) == "\"\\n x \\\"\"");
+}
+
+// ---- documents -----------------------------------------------------------------
+
+// A value may follow a closed container in the same object, which is the shape
+// a document of diagnostics has.
+fn void a_member_may_follow_a_nested_container() {
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_object_begin(&e.j);
+    json.json_key(&e.j, "version");
+    json.json_uint(&e.j, 1);
+    json.json_key(&e.j, "files");
+    json.json_array_begin(&e.j);
+    json.json_str(&e.j, "main.ft");
+    json.json_array_end(&e.j);
+    json.json_key(&e.j, "ok");
+    json.json_bool(&e.j, false);
+    json.json_object_end(&e.j);
+    assert(json_env.written(&e) == "{\"version\":1,\"files\":[\"main.ft\"],\"ok\":false}");
+}
+
+// One document of the shape the check mode writes, so the pieces are seen
+// together: an array of objects, each with a nested array of objects. The
+// expected text is built in a buffer, since two string literals beside each
+// other do not join (D2.9).
+fn void a_document_of_diagnostics_is_written_whole() {
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_array_begin(&e.j);
+    json.json_object_begin(&e.j);
+    json.json_key(&e.j, "file");
+    json.json_str(&e.j, "main.ft");
+    json.json_key(&e.j, "line");
+    json.json_uint(&e.j, 7);
+    json.json_key(&e.j, "message");
+    json.json_str(&e.j, "cannot assign to immutable 'x'");
+    json.json_key(&e.j, "notes");
+    json.json_array_begin(&e.j);
+    json.json_object_begin(&e.j);
+    json.json_key(&e.j, "line");
+    json.json_uint(&e.j, 3);
+    json.json_key(&e.j, "decl");
+    json.json_null(&e.j);
+    json.json_object_end(&e.j);
+    json.json_array_end(&e.j);
+    json.json_object_end(&e.j);
+    json.json_array_end(&e.j);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, "[{\"file\":\"main.ft\",\"line\":7,");
+    strbuf.append(&want, "\"message\":\"cannot assign to immutable 'x'\",");
+    strbuf.append(&want, "\"notes\":[{\"line\":3,\"decl\":null}]}]");
+    assert(json_env.written(&e) == strbuf.view(&want));
+}
+
+// A string longer than the buffer's first capacity is written in full: the
+// buffer grows under the writer, which holds no pointer into it.
+fn void a_long_string_is_written_in_full() {
+    u64 long_len = 1000;
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < long_len) {
+        strbuf.push(&text, 'x');
+        i += 1;
+    }
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_str(&e.j, strbuf.view(&text));
+    string got = json_env.written(&e);
+    assert(got.len == long_len + 2);
+    assert(got[0] == '"');
+    assert(got[long_len + 1] == '"');
+}
+
+// ---- depth ---------------------------------------------------------------------
+
+// JSON_MAX_DEPTH containers may be open at once.
+fn void nesting_to_the_limit_is_written() {
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    u64 mut i = 0;
+    while (i < json.JSON_MAX_DEPTH) {
+        json.json_array_begin(&e.j);
+        i += 1;
+    }
+    json.json_uint(&e.j, 1);
+    i = 0;
+    while (i < json.JSON_MAX_DEPTH) {
+        json.json_array_end(&e.j);
+        i += 1;
+    }
+    assert(json_env.written(&e) == "[[[[[[[[1]]]]]]]]");
+}
+
+// Objects and arrays count against the same limit.
+fn void objects_and_arrays_share_the_limit() {
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    u64 mut i = 0;
+    while (i < json.JSON_MAX_DEPTH / 2) {
+        json.json_object_begin(&e.j);
+        json.json_key(&e.j, "k");
+        json.json_array_begin(&e.j);
+        i += 1;
+    }
+    i = 0;
+    while (i < json.JSON_MAX_DEPTH / 2) {
+        json.json_array_end(&e.j);
+        json.json_object_end(&e.j);
+        i += 1;
+    }
+    assert(json_env.written(&e) == "{\"k\":[{\"k\":[{\"k\":[{\"k\":[]}]}]}]}");
+}
+
+// Closing every container brings the depth back, so a long document of sibling
+// containers is not a nesting error.
+fn void siblings_do_not_add_up_to_the_limit() {
+    u64 siblings = json.JSON_MAX_DEPTH + json.JSON_MAX_DEPTH;
+    json_env.env mut e = json_env.env{};
+    json_env.open(&e);
+    defer json_env.close(&e);
+    json.json_array_begin(&e.j);
+    u64 mut i = 0;
+    while (i < siblings) {
+        json.json_object_begin(&e.j);
+        json.json_object_end(&e.j);
+        i += 1;
+    }
+    json.json_array_end(&e.j);
+    // The brackets, one "{}" per sibling and one comma between two of them.
+    assert(json_env.written(&e).len == 2 + 2 * siblings + siblings - 1);
+}
+
+fn i32 main() {
+    an_empty_object_is_two_braces();
+    an_empty_array_is_two_brackets();
+    a_document_may_be_a_bare_value();
+    booleans_and_null_are_written_as_literals();
+    numbers_are_decimal_with_a_sign_for_a_negative_one();
+    the_widest_numbers_are_written_in_full();
+    a_string_view_may_hold_any_bytes_including_a_nul();
+    println("values ok");
+    object_members_are_separated_by_commas();
+    no_comma_separates_a_key_from_its_value();
+    array_elements_are_separated_by_commas();
+    a_closed_container_is_an_element_of_its_parent();
+    a_reopened_container_starts_empty_again();
+    the_document_holds_no_whitespace();
+    a_document_is_appended_to_the_buffer();
+    println("separators ok");
+    the_quote_and_the_backslash_are_escaped();
+    newline_tab_and_return_are_spelled_out();
+    a_key_is_escaped_like_a_string();
+    delete_goes_through_verbatim();
+    a_printable_string_is_written_unchanged();
+    an_empty_string_is_two_quotes();
+    an_escape_at_either_end_is_written();
+    println("escapes ok");
+    a_member_may_follow_a_nested_container();
+    a_document_of_diagnostics_is_written_whole();
+    a_long_string_is_written_in_full();
+    println("documents ok");
+    nesting_to_the_limit_is_written();
+    objects_and_arrays_share_the_limit();
+    siblings_do_not_add_up_to_the_limit();
+    println("depth ok");
+    println("ok");
+    return 0;
+}

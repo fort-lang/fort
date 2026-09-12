@@ -1,0 +1,351 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| records ok
+//| order ok
+//| document ok
+//| ok
+import check_env;
+import index;
+import index_env;
+import json;
+import std.str;
+import std.strbuf;
+
+// The "symbols" array the identifier index writes (D20.2, D20.3,
+// toolchain.md 9.1): the members of a record, their order, the two shapes of
+// "decl" and the order of the records in the array. It is the port of
+// test/index_json_test.c.
+//
+// The array is compared as one string, since that is what a client reads. The
+// "file" of a record is the sandbox's path, so an expectation that names a
+// file is built in a buffer with that path in it.
+
+// One line of a source, as index_test.ft writes it.
+fn void line(strbuf.str_buf mut* b, string text) {
+    strbuf.append(b, text);
+    strbuf.push(b, '\n');
+}
+
+// The "symbols" array of the index the last walk left, as the document carries
+// it. The result is a view of `out`.
+fn string symbols_text(index_env.env mut* e, strbuf.str_buf mut* out) {
+    strbuf.clear(out);
+    json.writer mut j = json.writer{};
+    json.json_init(&j, out);
+    index.write_json(&e->ix, &j);
+    return strbuf.view(out);
+}
+
+// `<sandbox>/<rel>`, which is the "file" of every record of that module.
+fn void append_file(index_env.env* e, strbuf.str_buf mut* b, string rel) {
+    strbuf.append(b, e->c.m.dir);
+    strbuf.push(b, '/');
+    strbuf.append(b, rel);
+}
+
+// Whether `text` holds `needle`.
+fn bool holds(string text, string needle) {
+    return str.find(text, needle) >= 0;
+}
+
+// ---- the members of a record (D20.3) -------------------------------------------
+
+fn void an_empty_index_writes_an_empty_array() {
+    index_env.env mut e = index_env.env{};
+    index_env.open(&e);
+    defer index_env.close(&e);
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    // The index is a member of every document and is empty without --index
+    // (D20.2, D20.3).
+    assert(symbols_text(&e, &out) == "[]");
+}
+
+fn void a_record_writes_every_member_in_order() {
+    index_env.env mut e = index_env.env{};
+    index_env.open(&e);
+    defer index_env.close(&e);
+    assert(index_env.index_src(&e, "fn i32 main() { return 0; }\n"));
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    // The range, the name, the kind, the type, whether it is the declaration
+    // and the declaration's range, in the order of D20.3.
+    strbuf.append(&want, "[{\"file\":\"");
+    append_file(&e, &want, "main.ft");
+    strbuf.append(&want, "\",\"line\":1,\"col\":8,\"end_line\":1,\"end_col\":12,");
+    strbuf.append(&want, "\"name\":\"main\",\"kind\":\"fn\",\"type\":\"fn i32()\",");
+    strbuf.append(&want, "\"is_decl\":true,\"decl\":{\"file\":\"");
+    append_file(&e, &want, "main.ft");
+    strbuf.append(&want, "\",\"line\":1,\"col\":8,\"end_line\":1,\"end_col\":12}}]");
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    assert(symbols_text(&e, &out) == strbuf.view(&want));
+}
+
+fn void a_builtin_writes_a_null_declaration() {
+    index_env.env mut e = index_env.env{};
+    index_env.open(&e);
+    defer index_env.close(&e);
+    e.c.want_main = false;
+    assert(index_env.index_src(&e, "fn void say() { println(1); }\n"));
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    // No source declares a universe function (D12.2), and a record with no
+    // type writes the empty string rather than dropping the member (D20.3).
+    strbuf.append(&want, "\"name\":\"println\",\"kind\":\"builtin\",\"type\":\"\",");
+    strbuf.append(&want, "\"is_decl\":false,\"decl\":null}");
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    assert(holds(symbols_text(&e, &out), strbuf.view(&want)));
+}
+
+fn void a_module_writes_the_empty_range_of_its_file() {
+    index_env.env mut e = index_env.env{};
+    index_env.open(&e);
+    defer index_env.close(&e);
+    check_env.add(&e.c, "util.ft", "i32 LIMIT = 4;\n");
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    line(&b, "import util;");
+    line(&b, "fn i32 main() { return util.LIMIT; }");
+    check_env.add(&e.c, "main.ft", strbuf.view(&b));
+    assert(index_env.index_entry(&e, "main.ft"));
+    // A module is declared by a file and has no name token, so a client that
+    // follows the record opens the file at 1:1 (D9.1, D20.3).
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, "\"name\":\"util\",\"kind\":\"module\",\"type\":\"\",");
+    strbuf.append(&want, "\"is_decl\":false,\"decl\":{\"file\":\"");
+    append_file(&e, &want, "util.ft");
+    strbuf.append(&want, "\",\"line\":1,\"col\":1,\"end_line\":1,\"end_col\":1}}");
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    assert(holds(symbols_text(&e, &out), strbuf.view(&want)));
+}
+
+fn void a_type_with_a_marker_is_written_as_a_declaration_spells_it() {
+    index_env.env mut e = index_env.env{};
+    index_env.open(&e);
+    defer index_env.close(&e);
+    e.c.want_main = false;
+    assert(index_env.index_src(&e, "fn void f(i32 mut* own p) { del(p); }\n"));
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    // The spelling is type_to_str_decl's, level-0 mutability included (D5.2,
+    // D5.3).
+    assert(holds(symbols_text(&e, &out),
+                 "\"name\":\"p\",\"kind\":\"parameter\",\"type\":\"i32 mut* own\""));
+}
+
+fn void a_declaration_that_failed_to_check_writes_a_null_type() {
+    index_env.env mut e = index_env.env{};
+    index_env.open(&e);
+    defer index_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    line(&b, "fn i32 main() {");
+    line(&b, "    nope n = 1;");
+    line(&b, "    return 0;");
+    line(&b, "}");
+    assert(!index_env.index_src(&e, strbuf.view(&b)));
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    // `null` is the type of a declaration that failed and `""` the type of a
+    // name that denotes no value type, so a client tells them apart (D20.3).
+    assert(holds(symbols_text(&e, &out), "\"name\":\"n\",\"kind\":\"local\",\"type\":null,"));
+    assert(!holds(symbols_text(&e, &out), "<error>"));
+}
+
+fn void an_alias_declares_a_name_here_for_a_declaration_elsewhere() {
+    index_env.env mut e = index_env.env{};
+    index_env.open(&e);
+    defer index_env.close(&e);
+    check_env.add(&e.c, "util.ft", "fn i32 twice(i32 n) { return n + n; }\n");
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    line(&b, "import util.twice as double;");
+    line(&b, "fn i32 main() { return double(2); }");
+    check_env.add(&e.c, "main.ft", strbuf.view(&b));
+    assert(index_env.index_entry(&e, "main.ft"));
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, "\"name\":\"double\",\"kind\":\"fn\",\"type\":\"fn i32(i32)\",");
+    strbuf.append(&want, "\"is_decl\":true,\"decl\":{\"file\":\"");
+    append_file(&e, &want, "util.ft");
+    strbuf.append(&want, "\",\"line\":1,\"col\":8,\"end_line\":1,\"end_col\":13}}");
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    // The alias declares `double` in this module while the declaration it
+    // binds stands in the other file, so a rename anchors here and a jump
+    // lands there (D9.3, D20.3).
+    assert(holds(symbols_text(&e, &out), strbuf.view(&want)));
+}
+
+fn void a_record_of_the_entry_names_the_file_the_compiler_opened() {
+    index_env.env mut e = index_env.env{};
+    index_env.open(&e);
+    defer index_env.close(&e);
+    assert(index_env.index_src(&e, "fn i32 main() { return 0; }\n"));
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    // The file is spelled as the `<file>` of a diagnostic is, so a client
+    // matches a record against the document's "files" (D14.2, D20.2).
+    strbuf.append(&want, "[{\"file\":\"");
+    append_file(&e, &want, "main.ft");
+    strbuf.append(&want, "\",");
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    assert(holds(symbols_text(&e, &out), strbuf.view(&want)));
+}
+
+// ---- the order of the array (D20.3) --------------------------------------------
+
+fn void the_records_are_written_in_the_index_order() {
+    index_env.env mut e = index_env.env{};
+    index_env.open(&e);
+    defer index_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    line(&b, "fn i32 main() {");
+    line(&b, "    i32 n = 1;");
+    line(&b, "    return n;");
+    line(&b, "}");
+    assert(index_env.index_src(&e, strbuf.view(&b)));
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    string text = symbols_text(&e, &out);
+    i64 first = str.find(text, "\"name\":\"main\"");
+    strbuf.str_buf mut key = strbuf.create();
+    defer strbuf.free(&key);
+    strbuf.append(&key, "\"name\":\"n\",\"kind\":\"local\",\"type\":\"i32\",\"is_decl\":true");
+    i64 second = str.find(text, strbuf.view(&key));
+    strbuf.clear(&key);
+    strbuf.append(&key, "\"name\":\"n\",\"kind\":\"local\",\"type\":\"i32\",\"is_decl\":false");
+    i64 third = str.find(text, strbuf.view(&key));
+    assert(first >= 0 && second >= 0 && third >= 0);
+    // The array is the index in order: the declaration before the use, both
+    // after the function that holds them (D20.3).
+    assert(first < second);
+    assert(second < third);
+}
+
+fn void one_record_per_occurrence_and_no_more() {
+    index_env.env mut e = index_env.env{};
+    index_env.open(&e);
+    defer index_env.close(&e);
+    e.c.want_main = false;
+    assert(index_env.index_src(&e, "fn i32 twice(i32 n) { return n + n; }\n"));
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    string text = symbols_text(&e, &out);
+    // Every record has one "name" and its nested "decl" has none, so the
+    // member counts the records of the array.
+    u64 mut records = 0;
+    u64 mut i = 0;
+    while (i < text.len) {
+        i64 next = str.find(text[i..], "\"name\":");
+        if (next < 0) {
+            i = text.len;
+        } else {
+            records += 1;
+            i += cast(next, u64) + 1;
+        }
+    }
+    // `twice`, `n` and its two uses: one record per identifier occurrence the
+    // checker resolved and none for anything else (D20.3).
+    assert(records == 4);
+    assert(index.count(&e.ix) == 4);
+}
+
+fn void the_array_carries_the_records_of_every_file_of_the_closure() {
+    index_env.env mut e = index_env.env{};
+    index_env.open(&e);
+    defer index_env.close(&e);
+    check_env.add(&e.c, "util.ft", "i32 LIMIT = 4;\n");
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    line(&b, "import util;");
+    line(&b, "fn i32 main() { return util.LIMIT; }");
+    check_env.add(&e.c, "main.ft", strbuf.view(&b));
+    assert(index_env.index_entry(&e, "main.ft"));
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    string text = symbols_text(&e, &out);
+    strbuf.str_buf mut util_path = strbuf.create();
+    defer strbuf.free(&util_path);
+    append_file(&e, &util_path, "util.ft");
+    strbuf.str_buf mut main_path = strbuf.create();
+    defer strbuf.free(&main_path);
+    append_file(&e, &main_path, "main.ft");
+    i64 imported = str.find(text, strbuf.view(&util_path));
+    i64 entry = str.find(text, strbuf.view(&main_path));
+    assert(imported >= 0 && entry >= 0);
+    // One array holds every module of the closure, the imported one first
+    // (D9.10, D20.3).
+    assert(imported < entry);
+}
+
+// ---- the document (D20.2) ------------------------------------------------------
+
+fn void the_array_nests_under_the_symbols_key_of_a_document() {
+    index_env.env mut e = index_env.env{};
+    index_env.open(&e);
+    defer index_env.close(&e);
+    assert(index_env.index_src(&e, "fn i32 main() { return 0; }\n"));
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    json.writer mut j = json.writer{};
+    json.json_init(&j, &out);
+    json.json_object_begin(&j);
+    json.json_key(&j, "symbols");
+    index.write_json(&e.ix, &j);
+    json.json_object_end(&j);
+    // The writer emits the value of a key the caller has written, which is how
+    // the document holds it (D20.2).
+    string text = strbuf.view(&out);
+    assert(holds(text, "{\"symbols\":[{\"file\":"));
+    assert(text[text.len - 3..] == "}]}");
+}
+
+fn void a_document_of_a_module_with_an_error_still_carries_what_resolved() {
+    index_env.env mut e = index_env.env{};
+    index_env.open(&e);
+    defer index_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    line(&b, "fn i32 main() {");
+    line(&b, "    i32 n = nope;");
+    line(&b, "    return n;");
+    line(&b, "}");
+    assert(!index_env.index_src(&e, strbuf.view(&b)));
+    assert(check_env.said(&e.c, "unknown name 'nope'"));
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    string text = symbols_text(&e, &out);
+    // Everything the checker resolved is in the index; the name it could not
+    // resolve is in none of it (D20.3).
+    assert(holds(text, "\"name\":\"n\",\"kind\":\"local\""));
+    assert(!holds(text, "nope"));
+}
+
+fn i32 main() {
+    an_empty_index_writes_an_empty_array();
+    a_record_writes_every_member_in_order();
+    a_builtin_writes_a_null_declaration();
+    a_module_writes_the_empty_range_of_its_file();
+    a_type_with_a_marker_is_written_as_a_declaration_spells_it();
+    a_declaration_that_failed_to_check_writes_a_null_type();
+    an_alias_declares_a_name_here_for_a_declaration_elsewhere();
+    a_record_of_the_entry_names_the_file_the_compiler_opened();
+    println("records ok");
+    the_records_are_written_in_the_index_order();
+    one_record_per_occurrence_and_no_more();
+    the_array_carries_the_records_of_every_file_of_the_closure();
+    println("order ok");
+    the_array_nests_under_the_symbols_key_of_a_document();
+    a_document_of_a_module_with_an_error_still_carries_what_resolved();
+    println("document ok");
+    println("ok");
+    return 0;
+}

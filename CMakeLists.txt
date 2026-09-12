@@ -330,6 +330,25 @@ set(FORT_LANG_STAGE2_COMMAND
 add_test(NAME lang-stage2 COMMAND ${FORT_LANG_STAGE2_COMMAND})
 set_tests_properties(lang-stage2 PROPERTIES LABELS lang)
 
+# The check mode of stage2 over the same corpus: `fort --check --json` on every
+# fail test, held against the text form of D14.2, and `--index` on every test
+# with a golden index.json beside it, held against that file byte for byte
+# (D20.2, D20.3). It is the oracle of the json and index ports (T-093).
+#
+# What it covers and what it does not. --check-json selects 194 of the 538
+# tests: the 192 `fail` tests, which have diagnostics, and the 2 tests with a
+# golden index beside them. So the document of a **clean** compile is
+# exercised here by two tests, and the diagnostics half by all 192. Against a
+# golden the comparison is stricter than a diff of two compilers for the value
+# and the order of every record, since it holds both compilers against a file
+# in the repository; it is weaker for whitespace, because run_tests.py
+# re-serialises the records with separators of its own before it compares.
+# --check-json ignores the expectation list, so the --xfail of the stage2
+# command above does not apply here. It is a command of check-lang as well as
+# a ctest, which is what makes the gate run it.
+add_test(NAME lang_check_json-stage2 COMMAND ${FORT_LANG_STAGE2_COMMAND} --check-json)
+set_tests_properties(lang_check_json-stage2 PROPERTIES LABELS lang)
+
 # src/fort/main.ft carries the option table of toolchain.md 1 and the version
 # string of src/bootstrap/driver.h as a second copy of what driver.c prints.
 # Both binaries exist here, so the two copies are held against each other by
@@ -502,6 +521,7 @@ add_custom_target(check-lang
     COMMAND ${FORT_LANG_COMMAND} --check-json
     COMMAND ${FORT_MODULE_TEST_COMMAND}
     COMMAND ${FORT_LANG_STAGE2_COMMAND}
+    COMMAND ${FORT_LANG_STAGE2_COMMAND} --check-json
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_tokens.sh" "${CMAKE_BINARY_DIR}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ast.sh" "${CMAKE_BINARY_DIR}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_check.sh" "${CMAKE_BINARY_DIR}"

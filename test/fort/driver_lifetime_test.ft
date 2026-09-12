@@ -28,9 +28,10 @@ import std.strbuf;
 // moves the address for a reason that is not a leak. Its first act is the
 // loop.
 //
-// Each of the four modes is measured, since each releases a different set:
+// Each of the six modes is measured, since each releases a different set:
 // --tokens holds a session and a token vector, --ast a syntax tree as well, a
-// build the module set of the whole closure and the checker over it, and the
+// build the module set of the whole closure and the checker over it, the
+// sixth the identifier index and the file list of the check document, and the
 // fourth a program written so that the checker allocates everything it has --
 // a folded constant for its value vector, an `extern fn` for its extern
 // vector and its map, an import that binds nothing for the map of names it
@@ -83,6 +84,24 @@ u64 BOUND = 4096;
 // performs is a round's worth rather than a block's.
 u64 EMIT_ROUNDS = 400;
 u64 EMIT_WIDTH = 60;
+
+// The rounds `--check --json --index` is measured over, and how many
+// declarations its program carries. The five releases that mode adds are the
+// three of index.free -- the record span, the pool of type spellings and the
+// buffer a spelling is built in -- and the two of driver.check_document, the
+// file list and the index itself. The width is what makes the two small ones
+// visible: a spelling buffer and a vector of one file name are 256 bytes a
+// round each, and every record carries a long type spelling so that the pool
+// and the buffer are a round's worth rather than a block's.
+//
+// The round count is a quarter of the front end's, and that is measured and
+// not guessed: all five releases turn this test red at 1000 rounds, where
+// the two small ones leak 256 KB apiece. It is not higher because this
+// program is the sixth mode of a test the harness kills at 60 seconds:
+// 4000 rounds here took the whole test to 48 s, which passed by hand and
+// timed out under the gate's third preset.
+u64 INDEX_ROUNDS = 1000;
+u64 INDEX_WIDTH = 40;
 
 // How many of the last rounds are held against the early one. The allocator
 // does not hand a round the same small block every time: over the emitter's
@@ -268,6 +287,14 @@ fn i32 main() {
     // buffer the emitter owns.
     string[3] mut emitted = {"fort", "-S", "emitted.ft"};
     assert(measure_rounds(emitted[0..3], EMIT_ROUNDS, false) < BOUND);
+    write_indexed();
+    // The sixth program is the check document's: --index runs the front end,
+    // the index walk and the document writer every round, and the document
+    // goes to the captured stdout (D20.2, D20.3).
+    // --index implies --check --json (D14.1), so the three of them are one
+    // option here.
+    string[3] mut indexed = {"fort", "--index", "indexed.ft"};
+    assert(measure_rounds(indexed[0..3], INDEX_ROUNDS, true) < BOUND);
     println("ok");
     return 0;
 }
@@ -356,4 +383,95 @@ fn void write_emitted() {
     strbuf.append(&b, "    print(GREETING);\n");
     strbuf.append(&b, "    return part_one.one() + part_two.two() + cast(total % 2, i32);\n}\n");
     write_file("emitted.ft", strbuf.view(&b));
+}
+
+// A program that makes the identifier index allocate everything it owns, so
+// that each release index.free and driver.check_document perform is witnessed
+// by a round that made the allocation: a record per identifier occurrence for
+// the record span, a type spelling per record for the pool, and a spelling
+// long enough to grow the buffer it is built in.
+//
+// Verified by deletion, one at a time, each moving a view past BOUND:
+// `del(ix->entries)`, `containers.pool_free(&ix->pool)` and
+// `strbuf.free(&ix->msg)` in index.free, and `containers.str_free(&files)`
+// and the `defer index.free(&ix)` of driver.check_document.
+//
+// The width is what makes the two small ones visible. A file list of one name
+// and a buffer holding one spelling are a few hundred bytes a round, so the
+// type of every local is written `a_structure_with_a_long_name mut* own`,
+// which is 38 bytes interned once per record, and the round count is the
+// front end's 4000 rather than the emitter's 400.
+fn void write_indexed() {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "struct a_structure_with_a_long_name {\n    i32 value;\n}\n");
+    u64 mut i = 0;
+    while (i < INDEX_WIDTH) {
+        // One constant apiece: a declaration and a use are two records, and
+        // each record interns a spelling of its own, since the pool copies
+        // rather than deduplicates (containers.ft).
+        strbuf.append(&b, "i32 LIMIT");
+        strbuf.append_u64(&b, i);
+        strbuf.append(&b, " = ");
+        strbuf.append_u64(&b, i);
+        strbuf.append(&b, ";\n");
+        i += 1;
+    }
+    strbuf.append(&b, "fn i32 main() {\n    i32 mut total = 0;\n");
+    i = 0;
+    while (i < INDEX_WIDTH) {
+        // One owning local apiece, whose type spelling is the longest this
+        // program writes: the record of its declaration and the record of its
+        // use in `del` each carry it.
+        strbuf.append(&b, "    a_structure_with_a_long_name mut* own p");
+        strbuf.append_u64(&b, i);
+        strbuf.append(&b, " = new(a_structure_with_a_long_name);\n");
+        strbuf.append(&b, "    total += p");
+        strbuf.append_u64(&b, i);
+        strbuf.append(&b, "->value + LIMIT");
+        strbuf.append_u64(&b, i);
+        strbuf.append(&b, ";\n    del(p");
+        strbuf.append_u64(&b, i);
+        strbuf.append(&b, ");\n");
+        i += 1;
+    }
+    // One function of INDEX_WIDTH parameters and a function pointer to it:
+    // its type is the longest spelling of the program, about two hundred
+    // bytes, which is what grows the buffer a spelling is built in past a
+    // block's worth. With the spelling of the owning local alone, 38 bytes,
+    // deleting `strbuf.free(&ix->msg)` left this test green.
+    strbuf.append(&b, "    fn i32(");
+    i = 0;
+    while (i < INDEX_WIDTH) {
+        if (i > 0) {
+            strbuf.append(&b, ", ");
+        }
+        strbuf.append(&b, "i32");
+        i += 1;
+    }
+    strbuf.append(&b, ") op = wide;\n    total += op(");
+    i = 0;
+    while (i < INDEX_WIDTH) {
+        if (i > 0) {
+            strbuf.append(&b, ", ");
+        }
+        strbuf.append_u64(&b, i);
+        i += 1;
+    }
+    strbuf.append(&b, ");\n");
+    strbuf.append(&b, "    return total;\n}\n");
+    // The function the pointer above denotes, declared after it: a module's
+    // declarations are order-independent (D7.10).
+    strbuf.append(&b, "fn i32 wide(");
+    i = 0;
+    while (i < INDEX_WIDTH) {
+        if (i > 0) {
+            strbuf.append(&b, ", ");
+        }
+        strbuf.append(&b, "i32 a");
+        strbuf.append_u64(&b, i);
+        i += 1;
+    }
+    strbuf.append(&b, ") {\n    return a0;\n}\n");
+    write_file("indexed.ft", strbuf.view(&b));
 }

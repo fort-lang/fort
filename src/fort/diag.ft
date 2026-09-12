@@ -22,6 +22,7 @@
 // Dispatch: none. Severity is an enum of two members read by one `if`, not a
 // table of function pointers (D3.10).
 import containers;
+import json;
 
 // The errors one file may report (D14.2): at most twenty, counted across its
 // lexical and its syntax errors together, so a file that is mistyped from end
@@ -295,4 +296,79 @@ fn void write_line(loc l, severity sev, string msg) {
     } else {
         eprintln(l.file, ":", l.line, ":", l.col, ": note: ", msg);
     }
+}
+
+// ---- the structured form (D20.2) ---------------------------------------------
+
+// The range of a diagnostic: the start D14.2 prints and the exclusive end an
+// editor underlines, both 1-based byte columns (D20.4).
+fn void write_range(json.writer mut* j, loc l) {
+    json.json_key(j, "file");
+    json.json_str(j, l.file);
+    json.json_key(j, "line");
+    json.json_uint(j, cast(l.line, u64));
+    json.json_key(j, "col");
+    json.json_uint(j, cast(l.col, u64));
+    json.json_key(j, "end_line");
+    json.json_uint(j, cast(l.end_line, u64));
+    json.json_key(j, "end_col");
+    json.json_uint(j, cast(l.end_col, u64));
+}
+
+// The severity as the text form spells it (D14.2).
+fn string severity_name(severity sev) {
+    switch (sev) {
+    case severity.error:
+        return "error";
+    case severity.note:
+        return "note";
+    }
+}
+
+// The record at `i` as one diagnostic, with the notes that follow it nested
+// under it: a note belongs to the error it follows (D14.2).
+fn void write_diagnostic(sink* s, json.writer mut* j, u64 i) {
+    record rec = s->records[i];
+    json.json_object_begin(j);
+    write_range(j, rec.loc);
+    json.json_key(j, "severity");
+    json.json_str(j, severity_name(rec.severity));
+    json.json_key(j, "message");
+    json.json_str(j, rec.msg);
+    json.json_key(j, "notes");
+    json.json_array_begin(j);
+    if (rec.severity == severity.error) {
+        u64 mut k = i + 1;
+        while (k < s->count && s->records[k].severity == severity.note) {
+            json.json_object_begin(j);
+            write_range(j, s->records[k].loc);
+            json.json_key(j, "message");
+            json.json_str(j, s->records[k].msg);
+            json.json_object_end(j);
+            k += 1;
+        }
+    }
+    json.json_array_end(j);
+    json.json_object_end(j);
+}
+
+// Every record of the sink as the "diagnostics" array of the document, the key
+// already written by the caller (D20.2). A record's file name and message are
+// the sink's own copies, so the array is right after the module set that
+// reported them was freed.
+fn void write_json(sink* s, json.writer mut* j) {
+    json.json_array_begin(j);
+    // A note is written under the error it follows; one that follows no error
+    // stands alone rather than being dropped.
+    bool mut after_error = false;
+    u64 mut i = 0;
+    while (i < s->count) {
+        severity sev = s->records[i].severity;
+        if (sev != severity.note || !after_error) {
+            write_diagnostic(s, j, i);
+            after_error = sev == severity.error;
+        }
+        i += 1;
+    }
+    json.json_array_end(j);
 }

@@ -1,0 +1,61 @@
+// json_env: the buffer and the writer the JSON tests write through.
+//
+// test/fort/json_test.ft and test/fort/json_utf8_test.ft both need it, and the
+// root of test/fort holds tests and nothing else, so the fixture stands here
+// (test/fort/support). test/json_test.c keeps the same pair as two file-scope
+// statics.
+import json;
+import std.strbuf;
+
+// The buffer and the writer over it. The writer holds a pointer into the
+// buffer beside it, so an env is filled in place and never returned: a return
+// would copy the pair and leave the pointer at the dead local.
+struct env {
+    strbuf.str_buf out;
+    json.writer j;
+}
+
+// Starts a writer over an empty buffer.
+fn void open(env mut* e) {
+    e->out = strbuf.create();
+    json.json_init(&e->j, &e->out);
+}
+
+// Releases the buffer.
+fn void close(env mut* e) {
+    strbuf.free(&e->out);
+}
+
+// What the writer has written so far.
+fn string written(env* e) {
+    return strbuf.view(&e->out);
+}
+
+// `form` between two quotes: the document a one-byte string produces. The
+// result is a view of `b`, so a caller that needs two of them needs two
+// buffers.
+fn string quoted(strbuf.str_buf mut* b, string form) {
+    strbuf.clear(b);
+    strbuf.push(b, '"');
+    strbuf.append(b, form);
+    strbuf.push(b, '"');
+    return strbuf.view(b);
+}
+
+// The one-byte string of `byte`, built in `b`.
+fn string one_byte(strbuf.str_buf mut* b, u64 byte) {
+    strbuf.clear(b);
+    strbuf.push_byte(b, cast(byte, u8));
+    return strbuf.view(b);
+}
+
+// Reports `what` when the two texts differ, so that a failure over a table
+// names the case, and then fails the test.
+fn void check(string got, string want, string what) {
+    if (got != want) {
+        println("case: ", what);
+        println("  want: ", want);
+        println("  got:  ", got);
+    }
+    assert(got == want);
+}

@@ -1,0 +1,202 @@
+// index_env: the environment the index suites share.
+//
+// The port of test/index_helpers.h: the module sandbox and the checker of
+// check_env.ft, an index over the closure they leave, and one spelling of a
+// record, so that a test compares a whole record in one assertion (D20.3).
+//
+// The C helpers hand out a `const index_entry_t*` and use NULL for "no record
+// here". A record is a value in this port (index.ft), so a query fills the
+// caller's record and returns whether it found one, and the text form of a
+// record that is not there is "<none>", exactly as the C spells it.
+import ast;
+import check_env;
+import diag;
+import index;
+import std.strbuf;
+
+// The sandbox and the checker, the index over them, and the two buffers the
+// text queries build their answers in. A record's text and a file's list are
+// compared in one assertion, so they are two buffers and not one.
+struct env {
+    check_env.env c;
+    index.index ix;
+    strbuf.str_buf text;
+    strbuf.str_buf lines;
+}
+
+// Prepares a fresh sandbox, checker and index. It fills a caller's value
+// rather than returning one, since the checker holds the session beside it
+// (check_env.ft).
+fn void open(env mut* e) {
+    check_env.open(&e->c);
+    e->ix = index.create();
+}
+
+// Releases the index, the buffers, and then the checker and the sandbox.
+fn void close(env mut* e) {
+    index.free(&e->ix);
+    strbuf.free(&e->text);
+    strbuf.free(&e->lines);
+    check_env.close(&e->c);
+}
+
+// Closes the environment and opens a fresh one at the same address, which is
+// what a test calls between two checks (check_env.reopen).
+fn void begin(env mut* e) {
+    close(e);
+    open(e);
+}
+
+// Indexes the closure the last check left (D20.3).
+fn void index_closure(env mut* e) {
+    index.free(&e->ix);
+    index.build(&e->ix, &e->c.m.set);
+}
+
+// Checks the entry module `rel` of the sandbox and indexes the closure.
+fn bool index_entry(env mut* e, string rel) {
+    bool ok = check_env.check_entry(&e->c, rel);
+    index_closure(e);
+    return ok;
+}
+
+// Checks `text` as the entry module `main.ft` and indexes the closure.
+fn bool index_src(env mut* e, string text) {
+    bool ok = check_env.check_src(&e->c, text);
+    index_closure(e);
+    return ok;
+}
+
+// A file name without the sandbox directory, so that a test names `main.ft`
+// and not the temporary directory of the run.
+fn string rel_file(env* e, string file) {
+    if (file.len == 0) {
+        return "<none>";
+    }
+    string dir = e->c.m.dir;
+    if (file.len > dir.len && file[0..dir.len] == dir && file[dir.len] == '/') {
+        return file[dir.len + 1..];
+    }
+    return file;
+}
+
+fn void append_pos(env* e, strbuf.str_buf mut* out, diag.loc l) {
+    strbuf.append(out, rel_file(e, l.file));
+    strbuf.push(out, ':');
+    strbuf.append_u64(out, cast(l.line, u64));
+    strbuf.push(out, ':');
+    strbuf.append_u64(out, cast(l.col, u64));
+}
+
+// The record whose occurrence begins at `line`:`col` of the file `rel`, or
+// false; an empty `rel` takes the first file that has one.
+fn bool entry_in(env* e, string rel, u32 line, u32 col, index.entry mut* out) {
+    u64 mut i = 0;
+    while (i < index.count(&e->ix)) {
+        index.entry found = index.at(&e->ix, i);
+        if (found.loc.line == line && found.loc.col == col &&
+            (rel.len == 0 || rel_file(e, found.loc.file) == rel)) {
+            *out = found;
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+fn bool entry_at(env* e, u32 line, u32 col, index.entry mut* out) {
+    return entry_in(e, "", line, col, out);
+}
+
+// One record as a line: the range of the occurrence, the kind, the name, the
+// type in quotes or a bare `null` when the declaration failed to check, `decl`
+// or `use`, and the declaration's position or `null` (D20.3). Valid until the
+// next call.
+fn string entry_text(env mut* e, string rel, u32 line, u32 col) {
+    strbuf.clear(&e->text);
+    index.entry mut found = index.entry{};
+    if (!entry_in(e, rel, line, col, &found)) {
+        strbuf.append(&e->text, "<none>");
+        return strbuf.view(&e->text);
+    }
+    append_pos(e, &e->text, found.loc);
+    strbuf.push(&e->text, '-');
+    strbuf.append_u64(&e->text, cast(found.loc.end_line, u64));
+    strbuf.push(&e->text, ':');
+    strbuf.append_u64(&e->text, cast(found.loc.end_col, u64));
+    strbuf.push(&e->text, ' ');
+    strbuf.append(&e->text, ast.sym_kind_name(found.kind));
+    strbuf.push(&e->text, ' ');
+    strbuf.append(&e->text, found.name);
+    strbuf.push(&e->text, ' ');
+    if (found.has_type) {
+        strbuf.push(&e->text, '\'');
+        strbuf.append(&e->text, found.ty);
+        strbuf.push(&e->text, '\'');
+    } else {
+        strbuf.append(&e->text, "null");
+    }
+    strbuf.push(&e->text, ' ');
+    if (found.is_decl) {
+        strbuf.append(&e->text, "decl ");
+    } else {
+        strbuf.append(&e->text, "use ");
+    }
+    if (found.has_decl) {
+        append_pos(e, &e->text, found.decl);
+    } else {
+        strbuf.append(&e->text, "null");
+    }
+    return strbuf.view(&e->text);
+}
+
+// The spelling of the record at `line`:`col`, or "<none>".
+fn string text_at(env mut* e, u32 line, u32 col) {
+    return entry_text(e, "", line, col);
+}
+
+// The same in one named file, which is what a test over two modules asks.
+fn string text_in(env mut* e, string rel, u32 line, u32 col) {
+    return entry_text(e, rel, line, col);
+}
+
+// Every record of the file `rel`, one per line, in the order the index holds
+// them: what a test asserts when the order is the point. Valid until the next
+// call.
+fn string file_text(env mut* e, string rel) {
+    strbuf.clear(&e->lines);
+    u64 mut i = 0;
+    while (i < index.count(&e->ix)) {
+        index.entry found = index.at(&e->ix, i);
+        if (rel_file(e, found.loc.file) == rel) {
+            if (strbuf.view(&e->lines).len > 0) {
+                strbuf.push(&e->lines, '\n');
+            }
+            strbuf.append(&e->lines, found.name);
+            strbuf.push(&e->lines, '@');
+            strbuf.append_u64(&e->lines, cast(found.loc.line, u64));
+            strbuf.push(&e->lines, ':');
+            strbuf.append_u64(&e->lines, cast(found.loc.col, u64));
+        }
+        i += 1;
+    }
+    return strbuf.view(&e->lines);
+}
+
+// The number of records of the file `rel`.
+fn u64 file_count(env* e, string rel) {
+    u64 mut n = 0;
+    u64 mut i = 0;
+    while (i < index.count(&e->ix)) {
+        if (rel_file(e, index.at(&e->ix, i).loc.file) == rel) {
+            n += 1;
+        }
+        i += 1;
+    }
+    return n;
+}
+
+// The file of the record at `i`, without the sandbox directory.
+fn string file_of(env* e, u64 i) {
+    return rel_file(e, index.at(&e->ix, i).loc.file);
+}

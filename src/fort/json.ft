@@ -1,0 +1,294 @@
+// json: the JSON writer of the check mode (D20.2, toolchain.md 4.1).
+//
+// The document of `fort --check --json` is built with these calls over a
+// std.strbuf buffer and written in one piece, so the compiler formats nothing
+// with a print statement. A writer emits one document on one line, valid
+// UTF-8: no indentation, no space between two tokens. A comma comes from a
+// per-depth "first" flag, so a caller opens a container, writes keys and
+// values, and closes it.
+//
+// Nesting deeper than JSON_MAX_DEPTH is a violated precondition and panics
+// (D13.3), as is closing a container that was never opened and writing a key
+// outside an object; src/bootstrap/json.c ends the process there instead
+// (D20.5).
+//
+// Two differences from src/bootstrap/json.h, both of them spelling. The C
+// names are kept, prefix and all, so each function answers to the C function
+// it replaces. json_cstr is gone: it exists in C because a literal is a
+// `const char*` and a message is a `str_t`, and a fort `string` is both
+// (D3.7), so json_str writes either.
+//
+// Re-entrancy (D20.5): a writer is a value the caller owns and it allocates
+// nothing; the buffer it writes into belongs to the caller too.
+//
+// Dispatch: none. The escape rule is a chain of comparisons over one byte, as
+// src/bootstrap/json.c writes it, and not a table of function pointers
+// (D3.10).
+import std.strbuf;
+
+// The deepest nesting of objects and arrays a writer accepts. The deepest
+// document the check mode writes nests five deep: the root object, the
+// "diagnostics" array, one diagnostic object, its "notes" array and one note
+// object. (src/bootstrap/json.h says four, which is one short of the same
+// path.)
+u64 JSON_MAX_DEPTH = 8;
+
+// The hex digits of a \u00XX escape, uppercase as in the compiler's other hex
+// spellings (consts.ft, lexer.ft), and the shift and the mask that pick the
+// two digits of one byte out.
+string HEX_DIGITS = "0123456789ABCDEF";
+u64 HEX_SHIFT = 4;
+u64 HEX_MASK = 15;
+
+// The bytes the escape rule names: `"` and `\`, which are escaped, and the
+// three control bytes JSON spells out.
+u64 QUOTE_BYTE = 34;
+u64 BACKSLASH_BYTE = 92;
+u64 NEWLINE_BYTE = 10;
+u64 TAB_BYTE = 9;
+u64 RETURN_BYTE = 13;
+
+// The last control byte: a byte at or below it is escaped.
+u64 CONTROL_MAX = 31;
+
+// The last ASCII byte, and the byte ranges of a well-formed UTF-8 sequence
+// (RFC 3629): a lead byte of two, three or four bytes, the continuation bytes
+// that follow it, and the four second-byte ranges that rule out an overlong
+// form, a UTF-16 surrogate and a value past U+10FFFF.
+u64 ASCII_MAX = 127;
+u64 UTF8_CONT_MIN = 128;
+u64 UTF8_CONT_MAX = 191;
+u64 UTF8_LEAD2_MIN = 194;
+u64 UTF8_LEAD2_MAX = 223;
+u64 UTF8_LEAD3_MIN = 224;
+u64 UTF8_LEAD3_MAX = 239;
+u64 UTF8_LEAD4_MIN = 240;
+u64 UTF8_LEAD4_MAX = 244;
+u64 UTF8_LEAD3_OVERLONG = 224;
+u64 UTF8_LEAD3_SURROGATE = 237;
+u64 UTF8_LEAD4_OVERLONG = 240;
+u64 UTF8_LEAD4_HIGHEST = 244;
+u64 UTF8_E0_MIN = 160;
+u64 UTF8_ED_MAX = 159;
+u64 UTF8_F0_MIN = 144;
+u64 UTF8_F4_MAX = 143;
+
+// The bytes of U+FFFD, the replacement character a byte that is part of no
+// well-formed sequence is written as, so that the document is valid UTF-8
+// whatever the message held.
+string REPLACEMENT = "\xEF\xBF\xBD";
+
+// A writer over a borrowed buffer. `depth` is the number of containers open;
+// `first[d]` says whether the container at depth `d` is still empty, which is
+// what decides a separating comma. writer{} is not a valid writer: json_init
+// sets the buffer.
+struct writer {
+    strbuf.str_buf mut* out;    // the buffer the document is built in
+    u64 depth;                  // containers currently open
+    bool[JSON_MAX_DEPTH] first; // whether the container at that depth is empty
+}
+
+// Starts a writer over `out`, which is borrowed until the last call and is not
+// emptied: a caller may write a document after other bytes. A writer with no
+// buffer is a violated precondition and panics (D13.3).
+fn void json_init(writer mut* j, strbuf.str_buf mut* out) {
+    if (out == null) {
+        panic("json.json_init: no buffer");
+    }
+    j->out = out;
+    j->depth = 0;
+    u64 mut i = 0;
+    while (i < JSON_MAX_DEPTH) {
+        j->first[i] = true;
+        i += 1;
+    }
+}
+
+// Writes the comma that separates two members or elements of the container
+// that is open now, and marks that container non-empty. At depth 0 the
+// document is one value, so nothing separates it.
+fn void json_sep(writer mut* j) {
+    if (j->depth == 0) {
+        return;
+    }
+    u64 level = j->depth - 1;
+    if (j->first[level]) {
+        j->first[level] = false;
+    } else {
+        strbuf.push(j->out, ',');
+    }
+}
+
+// Opens a container after its separator: the new level starts empty.
+fn void json_begin(writer mut* j, char open) {
+    if (j->depth >= JSON_MAX_DEPTH) {
+        panic("json: nesting too deep");
+    }
+    json_sep(j);
+    strbuf.push(j->out, open);
+    j->first[j->depth] = true;
+    j->depth += 1;
+}
+
+fn void json_end(writer mut* j, char close) {
+    if (j->depth == 0) {
+        panic("json: no container is open");
+    }
+    j->depth -= 1;
+    strbuf.push(j->out, close);
+}
+
+fn void json_object_begin(writer mut* j) {
+    json_begin(j, '{');
+}
+
+fn void json_object_end(writer mut* j) {
+    json_end(j, '}');
+}
+
+fn void json_array_begin(writer mut* j) {
+    json_begin(j, '[');
+}
+
+fn void json_array_end(writer mut* j) {
+    json_end(j, ']');
+}
+
+// The number of bytes of the well-formed UTF-8 sequence that starts at `i`, or
+// 0 when the bytes there are not one: a truncated sequence, a stray
+// continuation byte, an overlong form, a UTF-16 surrogate and a value past
+// U+10FFFF are all refused (RFC 3629).
+fn u64 utf8_sequence_len(u8@ bytes, u64 i) {
+    u64 lead = cast(bytes[i], u64);
+    u64 mut len = 0;
+    u64 mut second_min = UTF8_CONT_MIN;
+    u64 mut second_max = UTF8_CONT_MAX;
+    if (lead >= UTF8_LEAD2_MIN && lead <= UTF8_LEAD2_MAX) {
+        len = 2;
+    } else if (lead >= UTF8_LEAD3_MIN && lead <= UTF8_LEAD3_MAX) {
+        len = 3;
+        if (lead == UTF8_LEAD3_OVERLONG) {
+            second_min = UTF8_E0_MIN;
+        }
+        if (lead == UTF8_LEAD3_SURROGATE) {
+            second_max = UTF8_ED_MAX;
+        }
+    } else if (lead >= UTF8_LEAD4_MIN && lead <= UTF8_LEAD4_MAX) {
+        len = 4;
+        if (lead == UTF8_LEAD4_OVERLONG) {
+            second_min = UTF8_F0_MIN;
+        }
+        if (lead == UTF8_LEAD4_HIGHEST) {
+            second_max = UTF8_F4_MAX;
+        }
+    } else {
+        return 0;
+    }
+    if (bytes.len - i < len) {
+        return 0;
+    }
+    u64 second = cast(bytes[i + 1], u64);
+    if (second < second_min || second > second_max) {
+        return 0;
+    }
+    u64 mut k = 2;
+    while (k < len) {
+        u64 cont = cast(bytes[i + k], u64);
+        if (cont < UTF8_CONT_MIN || cont > UTF8_CONT_MAX) {
+            return 0;
+        }
+        k += 1;
+    }
+    return len;
+}
+
+// The quoted form of `s`: the quote and the backslash escaped, a control byte
+// as \n, \t or \r, the control bytes fort itself spells out (D2.8), or as the
+// \u00XX JSON has in place of fort's \xHH. A multi-byte UTF-8 sequence goes
+// through unchanged, and a byte that is part of no well-formed sequence is
+// written as U+FFFD, so the document is valid UTF-8 although fort source is
+// never validated (D2.1, D3.7).
+fn void json_quoted(writer mut* j, string s) {
+    u8@ bytes = cast(s, u8@);
+    strbuf.push(j->out, '"');
+    u64 mut i = 0;
+    while (i < s.len) {
+        u64 byte = cast(bytes[i], u64);
+        u64 mut step = 1;
+        if (byte == QUOTE_BYTE || byte == BACKSLASH_BYTE) {
+            strbuf.push(j->out, '\\');
+            strbuf.push_byte(j->out, cast(byte, u8));
+        } else if (byte == NEWLINE_BYTE) {
+            strbuf.append(j->out, "\\n");
+        } else if (byte == TAB_BYTE) {
+            strbuf.append(j->out, "\\t");
+        } else if (byte == RETURN_BYTE) {
+            strbuf.append(j->out, "\\r");
+        } else if (byte <= CONTROL_MAX) {
+            strbuf.append(j->out, "\\u00");
+            strbuf.push(j->out, HEX_DIGITS[byte >> HEX_SHIFT]);
+            strbuf.push(j->out, HEX_DIGITS[byte & HEX_MASK]);
+        } else if (byte <= ASCII_MAX) {
+            strbuf.push_byte(j->out, cast(byte, u8));
+        } else {
+            step = utf8_sequence_len(bytes, i);
+            if (step == 0) {
+                strbuf.append(j->out, REPLACEMENT);
+                step = 1;
+            } else {
+                strbuf.append_bytes(j->out, bytes[i..i + step]);
+            }
+        }
+        i += step;
+    }
+    strbuf.push(j->out, '"');
+}
+
+// A member name is a string followed by a colon; the value that follows is the
+// member's own, so the level is marked empty again and the value's separator
+// writes no comma. A key outside an object is a violated precondition and
+// panics (D13.3).
+fn void json_key(writer mut* j, string name) {
+    if (j->depth == 0) {
+        panic("json.json_key: no object is open");
+    }
+    json_sep(j);
+    json_quoted(j, name);
+    strbuf.push(j->out, ':');
+    j->first[j->depth - 1] = true;
+}
+
+// Writes a quoted string: `"` and `\` are escaped, a byte below 0x20 is
+// written as \n, \t, \r or \u00XX, and a well-formed multi-byte UTF-8 sequence
+// goes through unchanged.
+fn void json_str(writer mut* j, string s) {
+    json_sep(j);
+    json_quoted(j, s);
+}
+
+// Writes a number in decimal, `-` first for a negative one.
+fn void json_uint(writer mut* j, u64 v) {
+    json_sep(j);
+    strbuf.append_u64(j->out, v);
+}
+
+fn void json_int(writer mut* j, i64 v) {
+    json_sep(j);
+    strbuf.append_i64(j->out, v);
+}
+
+// Writes `true` or `false`.
+fn void json_bool(writer mut* j, bool v) {
+    json_sep(j);
+    if (v) {
+        strbuf.append(j->out, "true");
+    } else {
+        strbuf.append(j->out, "false");
+    }
+}
+
+// Writes `null`.
+fn void json_null(writer mut* j) {
+    json_sep(j);
+    strbuf.append(j->out, "null");
+}
