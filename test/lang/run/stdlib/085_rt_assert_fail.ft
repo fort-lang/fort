@@ -1,0 +1,30 @@
+//! run
+//! abort
+//! stderr: src/app.ft:6:5: assertion failed: x > 0
+//! stdout:
+//| src/app.ft:6:5: assertion failed: x > 0
+//| before
+import std.rt;
+
+// assert runs in both build modes, and its message is the source text of the
+// expression, byte for byte (D11.4, D12.2). run/errors/008 holds the C entry
+// point to this text. The text reaches the runtime as a C string.
+string FILE = "src/app.ft";
+
+fn i32 main() {
+    u32 line = 6;
+    u32 col = 5;
+    string text = "x > 0";
+    // The C runtime writes the same line. The compiler still lowers every
+    // println to it (D12.2). This flushes that line before the fort runtime
+    // writes anything, so the two directives above hold one text against both
+    // runtimes, the position and every digit included.
+    println(FILE, ":", line, ":", col, ": assertion failed: ", text);
+    rt.fort_rt_flush_all();
+
+    // This line stays in the fort runtime's buffer. The failure path calls
+    // flush_all, and that call puts the line on stdout before it writes to
+    // stderr (D11.4).
+    rt.print_str(1, "before\n".ptr, 7);
+    rt.assert_fail(text.ptr, FILE.ptr, line, col);
+}

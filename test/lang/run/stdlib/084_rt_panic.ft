@@ -1,0 +1,32 @@
+//! run
+//! abort
+//! stderr: src/app.ft:8:5: panic: boom
+//! stdout:
+//| src/app.ft:8:5: panic: boom
+//| before
+import std.rt;
+
+// The panic builtin calls this entry point (D12.2). Its message is a fort
+// string, so it arrives as a pointer and a length and may hold any byte.
+// run/errors/009 holds the C entry point to this text. std.rt implements this
+// builtin and never calls it, which is why the entry point may take the name
+// panic (toolchain.md 5.1).
+string FILE = "src/app.ft";
+
+fn i32 main() {
+    u32 line = 8;
+    u32 col = 5;
+    string msg = "boom";
+    // The C runtime writes the same line. The compiler still lowers every
+    // println to it (D12.2). This flushes that line before the fort runtime
+    // writes anything, so the two directives above hold one text against both
+    // runtimes, the position and every digit included.
+    println(FILE, ":", line, ":", col, ": panic: ", msg);
+    rt.fort_rt_flush_all();
+
+    // This line stays in the fort runtime's buffer. The failure path calls
+    // flush_all, and that call puts the line on stdout before it writes to
+    // stderr (D11.4).
+    rt.print_str(1, "before\n".ptr, 7);
+    rt.panic(msg.ptr, msg.len, FILE.ptr, line, col);
+}

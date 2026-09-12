@@ -1,0 +1,39 @@
+//! run
+//! abort
+//! stderr: src/app.ft:8:5: panic: yyyyyyyyyy
+//! stderr: end-of-panic-message
+//! stdout:
+//| before
+import std.rt;
+
+// A panic message arrives as a pointer and a length and may be any size
+// (D12.2). It can therefore be larger than the buffer the failure line is
+// built in. This is the one place where D11.5's straight-to-the-descriptor
+// path runs inside a failure path. The prefix already in the buffer goes out
+// first. The message goes to stderr next. The newline fail_end adds goes out
+// last.
+//
+// A stderr directive is a containment check, so two of them would match in
+// any order and would say nothing about which text came first. The first
+// directive above therefore holds the prefix and the first ten bytes of the
+// message as one string. That string occurs only when the prefix stands
+// immediately before the block, which is the order this test adds over
+// run/stdlib/084. The second directive holds the marker at the end of the
+// block, so the whole block arrived.
+string FILE = "src/app.ft";
+string MARKER = "end-of-panic-message";
+
+fn i32 main() {
+    u32 line = 8;
+    u32 col = 5;
+    u64 n = 200000;
+    char mut@ own msg = new(char, n);
+    for (u64 mut i = 0; i < n; i++) {
+        msg[i] = 'y';
+    }
+    for (u64 mut i = 0; i < MARKER.len; i++) {
+        msg[n - MARKER.len + i] = MARKER[i];
+    }
+    rt.print_str(1, "before\n".ptr, 7);
+    rt.panic(msg.ptr, n, FILE.ptr, line, col);
+}

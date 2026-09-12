@@ -1,0 +1,78 @@
+//! run
+//! stdout:
+//| true true
+//| true true
+//| true true
+//| true true 0
+//| true true
+//| true true
+//| freed
+import std.rt;
+
+// new and del call alloc and free (D10.2, D10.3, toolchain.md 5.1). The
+// compiler still lowers those two builtins to the C runtime. Each line below
+// therefore asks one question of a block new made and of a block alloc made:
+// is it zeroed, is it not null, and does it accept a write to its last byte.
+//
+// The entry points are not called new and del. new is a keyword (D2.4). A
+// module-level declaration named del would shadow the universe function, and
+// std.rt calls del on its own storage (D12.2, D7.9).
+string FILE = "070_rt_alloc_free.ft";
+
+// Answers whether all n bytes at p are zero. D10.2 promises that of both.
+fn bool all_zero(void* p, u64 n) {
+    u8@ bytes = cast(p, u8*)[0..n];
+    for (u64 mut i = 0; i < n; i++) {
+        if (bytes[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn i32 main() {
+    u64 n = 64;
+    u8 mut@ own from_new = new(u8, n);
+    void* own from_alloc = rt.alloc(1, n, FILE.ptr, 1, 1);
+    println(from_new.ptr != null, " ", all_zero(cast(from_new.ptr, void*), n));
+    println(from_alloc != null, " ", all_zero(from_alloc, n));
+
+    // This writes the first and the last byte of each block. A count used as
+    // a size, or a size used as a count, gives out a block that is too short,
+    // and the last byte is where that shows.
+    u8 mut@ alloc_bytes = cast(from_alloc, u8 mut*)[0..n];
+    from_new[0] = 7;
+    from_new[n - 1] = 9;
+    alloc_bytes[0] = 7;
+    alloc_bytes[n - 1] = 9;
+    println(from_new[0] == alloc_bytes[0], " ", from_new[n - 1] == alloc_bytes[n - 1]);
+
+    // new(T, 0) allocates and does not answer null (D10.2). alloc gets there
+    // by asking for one byte when the product is zero. An element size of zero
+    // reaches the same line from the other side.
+    i32@ own empty_new = new(i32, 0);
+    void* own empty_alloc = rt.alloc(4, 0, FILE.ptr, 1, 1);
+    void* own zero_elem = rt.alloc(0, 100, FILE.ptr, 1, 1);
+    println(empty_new.ptr != null, " ", empty_alloc != null, " ", empty_new.len);
+    println(zero_elem != null, " ", all_zero(zero_elem, 1));
+
+    // A product larger than one page, zeroed the whole way. calloc zeroes a
+    // large block by asking the kernel for fresh pages. That is a different
+    // path in the C library from the small block above.
+    u64 big = 1048576;
+    void* own large = rt.alloc(8, big / 8, FILE.ptr, 1, 1);
+    println(large != null, " ", all_zero(large, big));
+
+    // free releases what alloc answered with. A null p does nothing, and del
+    // of a zero own value does nothing either (D10.3, D17.9).
+    void* own nothing = null;
+    rt.free(move(nothing));
+    rt.free(move(from_alloc));
+    rt.free(move(empty_alloc));
+    rt.free(move(zero_elem));
+    rt.free(move(large));
+    del(from_new);
+    del(empty_new);
+    println("freed");
+    return 0;
+}

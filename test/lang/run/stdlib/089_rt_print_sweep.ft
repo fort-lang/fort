@@ -1,0 +1,180 @@
+//! run
+//! stdout:
+//| 474 true 2967 2967
+import std.libc;
+import std.mem;
+import std.rt;
+
+// run/stdlib/067 holds a few values against the text D11.7 fixes, one line at
+// a time. This test compares the two runtimes over every value a loop can
+// reach. The C runtime writes each value to one file, because the compiler
+// still lowers a print to it (D12.2). The fort runtime writes the same value
+// to a second file. The program then compares the two files byte for byte.
+// The comparison is wide and the expectation is narrow: the number of values,
+// the verdict, and the bytes each runtime wrote. What this test witnesses is
+// therefore agreement between the two runtimes plus two byte counts. It does
+// not hold any absolute text. run/stdlib/067 and run/stdlib/068 hold the
+// absolute bytes, value by value. The two byte counts are here so that a
+// comparison that shrank could not pass.
+//
+// The values are the boundaries. Every power of ten and the value on each
+// side of it, which is where a decimal gains a digit and where a buffer
+// filled from its end is one byte out. The same for negative values. The ends
+// of i64 and u64. Every power of sixteen as a pointer, which is where a hex
+// text gains a digit. Every byte from 0 to 255 as a char, NUL and newline
+// included, which the directives of run/stdlib/067 cannot carry. Strings that
+// hold a NUL, which D3.7 allows, and the empty string.
+string C_PATH = "c.txt";
+string F_PATH = "f.txt";
+
+fn i32 open_write(string path) {
+    return libc.open(path.ptr, libc.O_WRONLY | libc.O_CREAT | libc.O_TRUNC, 0o644);
+}
+
+// Reads the whole file at path into buf. Answers with the byte count.
+fn u64 read_file(string path, u8 mut@ buf) {
+    i32 fd = libc.open(path.ptr, libc.O_RDONLY, 0);
+    if (fd < 0) {
+        return 0;
+    }
+    u64 mut total = 0;
+    while (total < buf.len) {
+        i64 n = libc.read(fd, cast(buf[total..].ptr, void*), buf.len - total);
+        if (n <= 0) {
+            break;
+        }
+        total += cast(n, u64);
+    }
+    libc.close(fd);
+    return total;
+}
+
+i32 mut c_fd = -1;
+i32 mut f_fd = -1;
+u64 mut written = 0;
+
+fn void pair_u64(u64 v) {
+    fprint(c_fd, v, "\n");
+    rt.print_u64(f_fd, v);
+    rt.print_char(f_fd, '\n');
+    written += 1;
+}
+
+fn void pair_i64(i64 v) {
+    fprint(c_fd, v, "\n");
+    rt.print_i64(f_fd, v);
+    rt.print_char(f_fd, '\n');
+    written += 1;
+}
+
+fn void pair_ptr(u64 bits) {
+    void* p = cast(bits, void*);
+    fprint(c_fd, p, "\n");
+    rt.print_ptr(f_fd, p);
+    rt.print_char(f_fd, '\n');
+    written += 1;
+}
+
+fn void pair_char(char c) {
+    fprint(c_fd, c, "\n");
+    rt.print_char(f_fd, c);
+    rt.print_char(f_fd, '\n');
+    written += 1;
+}
+
+fn void pair_str(string s) {
+    fprint(c_fd, s, "\n");
+    rt.print_str(f_fd, s.ptr, s.len);
+    rt.print_char(f_fd, '\n');
+    written += 1;
+}
+
+fn i32 main() {
+    c_fd = open_write(C_PATH);
+    f_fd = open_write(F_PATH);
+    u64 u64_max = 18446744073709551615;
+    i64 i64_max = 9223372036854775807;
+    i64 i64_min = -9223372036854775808;
+
+    // Every power of ten a u64 holds, and the value on each side of it.
+    u64 mut power = 1;
+    while (true) {
+        pair_u64(power - 1);
+        pair_u64(power);
+        pair_u64(power + 1);
+        if (power > u64_max / 10) {
+            break;
+        }
+        power *= 10;
+    }
+    pair_u64(u64_max);
+    pair_u64(u64_max - 1);
+
+    // The same for i64, on both sides of zero. A minus sign takes the byte
+    // before the digits.
+    i64 mut signed_power = 1;
+    while (true) {
+        pair_i64(signed_power - 1);
+        pair_i64(signed_power);
+        pair_i64(signed_power + 1);
+        pair_i64(-signed_power + 1);
+        pair_i64(-signed_power);
+        pair_i64(-signed_power - 1);
+        if (signed_power > i64_max / 10) {
+            break;
+        }
+        signed_power *= 10;
+    }
+    pair_i64(i64_max);
+    pair_i64(i64_max - 1);
+    pair_i64(i64_min);
+    pair_i64(i64_min + 1);
+
+    // Every power of sixteen, which is where a pointer's hex text gains a
+    // digit, and both ends of the range.
+    u64 mut hex = 1;
+    while (true) {
+        pair_ptr(hex - 1);
+        pair_ptr(hex);
+        if (hex > u64_max / 16) {
+            break;
+        }
+        hex *= 16;
+    }
+    pair_ptr(u64_max);
+
+    // Every byte a char can hold. The two files carry NUL, newline and byte
+    // 255 as bytes, so this reaches the values no directive of this corpus
+    // can spell.
+    for (u64 mut i = 0; i < 256; i++) {
+        pair_char(cast(i, char));
+    }
+
+    // A string prints its bytes and stops at its length, not at a NUL (D3.7),
+    // so these three hold a NUL at the start, in the middle and at the end.
+    // The last two are the empty string and the zero string, which print no
+    // byte at all.
+    string zero = {};
+    pair_str("\0ab");
+    pair_str("a\0b");
+    pair_str("ab\0");
+    pair_str("");
+    pair_str(zero);
+
+    // Each runtime holds its bytes back, so this flushes both before it reads
+    // the files (D11.5).
+    rt.fort_rt_flush_all();
+    rt.flush_all();
+    libc.close(c_fd);
+    libc.close(f_fd);
+
+    u8 mut@ own c_bytes = new(u8, 8192);
+    u8 mut@ own f_bytes = new(u8, 8192);
+    u64 c_len = read_file(C_PATH, c_bytes);
+    u64 f_len = read_file(F_PATH, f_bytes);
+    println(written, " ", mem.equal(c_bytes[..c_len], f_bytes[..f_len]), " ", c_len,
+            " ", f_len);
+    del(c_bytes);
+    del(f_bytes);
+    return 0;
+}

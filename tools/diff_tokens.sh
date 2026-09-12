@@ -38,7 +38,7 @@ done
 # floor: the point of the constant is that a file cannot slip out of the
 # comparison, and a floor only notices the walk losing all of them. A ticket
 # that adds or removes a .ft file changes this line in the same commit.
-FT_FILES=678
+FT_FILES=722
 
 files=$(find . -name '*.ft' -not -path './build/*' -not -path './.git/*' \
     -not -path './.worktrees/*' | sort)

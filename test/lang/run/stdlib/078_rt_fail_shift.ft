@@ -1,0 +1,33 @@
+//! run
+//! abort
+//! stderr: src/app.ft:4294967295:1: runtime error: shift count 64 out of range for i64
+//! stdout:
+//| src/app.ft:4294967295:1: runtime error: shift count 64 out of range for i64
+//| before
+import std.rt;
+
+// fail_shift names the type of the shifted operand as well as the count
+// (D11.4, toolchain.md 5.1). run/errors/005 holds the C entry point to this
+// text. The line number below is the largest a u32 holds. That is the widest
+// position either runtime can be asked to print.
+string FILE = "src/app.ft";
+string TYPE = "i64";
+
+fn i32 main() {
+    u32 line = 4294967295;
+    u32 col = 1;
+    i64 count = 64;
+    // The C runtime writes the same line. The compiler still lowers every
+    // println to it (D12.2). This flushes that line before the fort runtime
+    // writes anything, so the two directives above hold one text against both
+    // runtimes, the position and every digit included.
+    println(FILE, ":", line, ":", col, ": runtime error: shift count ", count,
+            " out of range for ", TYPE);
+    rt.fort_rt_flush_all();
+
+    // This line stays in the fort runtime's buffer. The failure path calls
+    // flush_all, and that call puts the line on stdout before it writes to
+    // stderr (D11.4).
+    rt.print_str(1, "before\n".ptr, 7);
+    rt.fail_shift(count, TYPE.ptr, FILE.ptr, line, col);
+}

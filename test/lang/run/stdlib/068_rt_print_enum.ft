@@ -1,0 +1,73 @@
+//! run
+//! stdout:
+//| red red
+//| green green
+//| blue blue
+//| 7 7
+//| -5 -5
+//| 0
+//| true 16 16
+import std.rt;
+
+// print_enum names the first member of the table whose value matches. It
+// prints the value itself when no member matches (D11.7, D7.7). The compiler
+// passes its own @.enum.<path> table to the runtime (toolchain.md 6 item 21).
+// Every println below hands that table to the C runtime. The fort runtime
+// gets the table this file builds, whose rows carry the enum's own values. So
+// each line names one value twice. If the two disagree about the layout of
+// enum_member, about the search, or about the fallback, the right half of the
+// line changes.
+enum color {
+    red,
+    green,
+    blue = -1,
+}
+
+rt.enum_member[3] mut table = {};
+
+fn void both_enum(color c) {
+    print(c, " ");
+    rt.fort_rt_flush(1);
+    rt.print_enum(1, cast(c, i32), &table[0], 3);
+    rt.print_char(1, '\n');
+    rt.flush(1);
+}
+
+fn i32 main() {
+    // Each value comes from the enum itself and not from a repeated literal.
+    // This table therefore cannot drift away from the compiler's.
+    table[0].value = cast(color.red, i32);
+    table[0].name = "red".ptr;
+    table[1].value = cast(color.green, i32);
+    table[1].name = "green".ptr;
+    table[2].value = cast(color.blue, i32);
+    table[2].name = "blue".ptr;
+
+    // The first member, one in the middle, and the last. The last one holds a
+    // negative value.
+    both_enum(color.red);
+    both_enum(color.green);
+    both_enum(color.blue);
+
+    // A value that no member holds prints as a signed number (D11.7). The
+    // second value below is negative for that reason, and it is not blue's -1.
+    // A cast from an integer to an enum is unchecked (D3.9), so both runtimes
+    // get the same value.
+    i32 seven = 7;
+    i32 minus_five = -5;
+    both_enum(cast(seven, color));
+    both_enum(cast(minus_five, color));
+
+    // An empty table matches nothing, so every value prints as itself. No
+    // fort enum is empty, so nothing can ask the C runtime this question.
+    rt.print_enum(1, cast(color.red, i32), &table[0], 0);
+    rt.print_char(1, '\n');
+    rt.flush(1);
+
+    // This table strides the way the compiler's [N x %fort.enum_member]
+    // strides, and %fort.enum_member has C's 16-byte layout (toolchain.md 6
+    // item 21). run/ffi/011 holds the two fields against C's own offsets.
+    println(sizeof(rt.enum_member) == 16, " ", sizeof(rt.enum_member), " ",
+            cast(&table[1], u64) - cast(&table[0], u64));
+    return 0;
+}

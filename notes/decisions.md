@@ -944,7 +944,14 @@ Owner: `stdlib.md`.
   qualification. Amended 2026-09-11 (T-088): `std.rt` held `extern` declarations of the C
   runtime's entry points and nothing else; it is the runtime (D13.1 as amended), so it declares
   no `fort_rt_` symbol and every module of this list is fort; `std.rt_float` joins the list with
-  the float entry points D18.1 moves out of C.
+  the float entry points D18.1 moves out of C. Note 2026-09-11 (T-090, T-091): "declares no
+  `fort_rt_` symbol" holds after T-091 and not during the migration. T-090 writes the runtime in
+  fort while the compiler still lowers every builtin to the C one, so `std.rt` keeps five
+  `extern fn fort_rt_*` declarations for that window: `std.sys` and `std.io` call four of them,
+  and the differential tests of `test/lang/run/stdlib` call them beside each fort entry point to
+  compare the two runtimes. T-091 retargets the builtins and deletes the C file, those five
+  declarations and that comparison, and this sentence with them. A `grep` for `fort_rt_` against
+  this decision reads a violation until then.
 - **D13.3** Error handling idiom (the earlier TBD): functions return `bool` or an error enum, with
   results delivered through `T mut*` out-parameters; `-1`/`null` sentinels where conventional;
   `panic` for programming errors; `defer` for cleanup. No `Result` type in v1.

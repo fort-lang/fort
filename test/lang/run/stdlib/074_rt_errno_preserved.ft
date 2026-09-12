@@ -1,0 +1,69 @@
+//! run
+//! stdout:
+//| -1 2 2
+//| -1 2 2
+//| -1 2 2
+//| -1 2 2
+import std.libc;
+import std.rt;
+import std.sys;
+
+// A runtime asks the operating system one question when it takes a buffer:
+// isatty. The answer decides whether the descriptor is line-buffered (D11.5).
+// isatty fails with ENOTTY on everything that is not a terminal, and it writes
+// that errno.
+//
+// sys.errno() hands a program the errno of its own last library call
+// (stdlib.md 2.4), and a print runs between the program's call and its read.
+// So a runtime saves errno and writes it back around that question. Without
+// that, the first print after a failed open reports ENOTTY and not the
+// program's own error (toolchain.md 5.3). run/stdlib/053 found this in the C
+// runtime.
+//
+// This program asks both runtimes, and it asks each one while its buffers do
+// not exist yet, so each one really does call isatty.
+string MISSING = "no-such-file-here";
+
+fn i32 open_write(string path) {
+    return libc.open(path.ptr, libc.O_WRONLY | libc.O_CREAT | libc.O_TRUNC, 0o644);
+}
+
+fn i32 main() {
+    i32 c_fd = open_write("c.txt");
+    i32 f_fd = open_write("f.txt");
+
+    // The C runtime has no buffer yet, so this print asks isatty about stdout
+    // and about c_fd. errno must come out as the open left it.
+    i32 c_bad = libc.open(MISSING.ptr, libc.O_RDONLY, 0);
+    i32 c_before = sys.errno();
+    fprint(c_fd, "c");
+    i32 c_after = sys.errno();
+
+    // The fort runtime, which has no buffer yet either.
+    i32 f_bad = libc.open(MISSING.ptr, libc.O_RDONLY, 0);
+    i32 f_before = sys.errno();
+    rt.print_str(f_fd, "f".ptr, 1);
+    i32 f_after = sys.errno();
+
+    // Once more through buffers that now exist. Neither runtime asks isatty
+    // here: no print may carry a system call of its own (D11.5).
+    i32 c_bad2 = libc.open(MISSING.ptr, libc.O_RDONLY, 0);
+    i32 c_before2 = sys.errno();
+    fprint(c_fd, "c");
+    i32 c_after2 = sys.errno();
+    i32 f_bad2 = libc.open(MISSING.ptr, libc.O_RDONLY, 0);
+    i32 f_before2 = sys.errno();
+    rt.print_str(f_fd, "f".ptr, 1);
+    i32 f_after2 = sys.errno();
+
+    // ENOENT is 2 (stdlib.md 2.2). That number must survive, not merely some
+    // error.
+    println(c_bad, " ", c_before, " ", c_after);
+    println(f_bad, " ", f_before, " ", f_after);
+    println(c_bad2, " ", c_before2, " ", c_after2);
+    println(f_bad2, " ", f_before2, " ", f_after2);
+    rt.flush_all();
+    libc.close(c_fd);
+    libc.close(f_fd);
+    return 0;
+}

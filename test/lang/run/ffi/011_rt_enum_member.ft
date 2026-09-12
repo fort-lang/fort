@@ -1,0 +1,78 @@
+//! run
+//! link: ffi/rt_enum.c
+//! stdout:
+//| true true true
+//| true 16
+//| minus_seven zero million 42
+//| true true
+import std.rt;
+
+// std.rt declares struct enum_member { i32 value; char* name; }. The compiler
+// emits the table a print of an enum reads as [N x %fort.enum_member], and
+// %fort.enum_member is { i32, ptr } (toolchain.md 5.1, 6 items 2 and 21).
+//
+// No fort-only program can see those two disagree. A table that one wrong
+// layout writes and reads answers correctly, and under opaque pointers a
+// field's type shows only through the offsets it moves. The C file beside
+// this test is the boundary that can see it: it is the declaration the C
+// runtime read the compiler's own tables through. So C writes a table here
+// and the fort runtime prints from it, and then fort writes a table and C
+// reads it back.
+extern fn u64 rt_enum_sizeof();
+extern fn u64 rt_enum_offset_value();
+extern fn u64 rt_enum_offset_name();
+extern fn void rt_enum_fill(rt.enum_member mut* m);
+extern fn bool rt_enum_check(rt.enum_member* m);
+
+// Answers with the distance between two addresses. That distance is fort's
+// own offset of a field (D3.11: a pointer reaches u64 through cast).
+fn u64 off(void* base, void* field) {
+    return cast(field, u64) - cast(base, u64);
+}
+
+fn i32 main() {
+    rt.enum_member[3] mut table = {};
+
+    // The size and both offsets: fort's answers against C's.
+    println(sizeof(rt.enum_member) == rt_enum_sizeof(), " ",
+            off(cast(&table[0], void*), cast(&table[0].value, void*)) ==
+                rt_enum_offset_value(), " ",
+            off(cast(&table[0], void*), cast(&table[0].name, void*)) ==
+                rt_enum_offset_name());
+
+    // The stride between two rows is the size LLVM gave the struct. The
+    // compiler's own table strides by that same size.
+    println(off(cast(&table[0], void*), cast(&table[1], void*)) == rt_enum_sizeof(), " ",
+            sizeof(rt.enum_member));
+
+    // C fills the table and print_enum reads it. A name that comes back right
+    // says print_enum found the pointer where C put it. A value that matches
+    // says it found the i32 there too. No row holds 42, so the last call takes
+    // the fallback, which says the search read the values and did not match by
+    // position.
+    rt.fort_rt_flush(1);
+    rt_enum_fill(&table[0]);
+    i32 first = -7;
+    i32 third = 1000000;
+    i32 absent = 42;
+    rt.print_enum(1, first, &table[0], 3);
+    rt.print_char(1, ' ');
+    rt.print_enum(1, 0, &table[0], 3);
+    rt.print_char(1, ' ');
+    rt.print_enum(1, third, &table[0], 3);
+    rt.print_char(1, ' ');
+    rt.print_enum(1, absent, &table[0], 3);
+    rt.print_char(1, '\n');
+    rt.flush(1);
+
+    // Now the other way round: fort writes the rows and C reads them.
+    rt.enum_member[3] mut mine = {};
+    mine[0].value = first;
+    mine[0].name = "minus_seven".ptr;
+    mine[1].value = 0;
+    mine[1].name = "zero".ptr;
+    mine[2].value = third;
+    mine[2].name = "million".ptr;
+    println(rt_enum_check(&mine[0]), " ", rt_enum_check(&table[0]));
+    return 0;
+}

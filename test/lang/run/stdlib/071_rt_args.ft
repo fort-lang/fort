@@ -1,0 +1,61 @@
+//! run
+//! args: alpha beta
+//! stdout:
+//| 3 3
+//| true true true
+//| true true true
+//| true true true
+//| alpha beta
+//| 0 true
+//| 3 true
+import std.rt;
+
+// args_init builds the argument span from argv, and args hands it out (D11.6,
+// D8.6, stdlib.md 3). The C runtime did that before main ran, and main's
+// parameter is that span. This program gives the fort runtime the same argv
+// and compares the two spans: the same count, the same lengths, and the same
+// element pointers. Both runtimes view the argv bytes. Neither copies them
+// (D17.3).
+fn i32 main(string@ argv) {
+    // This rebuilds the argv the C runtime was given as the char* mut* that
+    // args_init takes. A fixed array has addressable elements, so &raw[0] is
+    // that pointer and no allocation is needed. The args directive above fixes
+    // the length, and it counts the program path.
+    char*[3] mut raw = {};
+    for (u64 mut i = 0; i < argv.len; i++) {
+        raw[i] = argv[i].ptr;
+    }
+    rt.args_init(cast(argv.len, i32), &raw[0]);
+    string@ mine = rt.args();
+    println(argv.len, " ", mine.len);
+
+    // One line for each element: equal bytes, equal lengths, and the same
+    // pointer. The same pointer is what "a view of the runtime's storage"
+    // means.
+    for (u64 mut i = 0; i < mine.len; i++) {
+        println(mine[i] == argv[i], " ", mine[i].len == argv[i].len, " ",
+                mine[i].ptr == argv[i].ptr);
+    }
+
+    // The two arguments the directive gave, read from the fort runtime's span
+    // and written by the fort runtime's print_str. Each runtime buffers fd 1
+    // on its own (D11.5), so the C buffer goes out first. Without that flush
+    // the lines above arrive after this one.
+    rt.fort_rt_flush(1);
+    rt.print_str(1, mine[1].ptr, mine[1].len);
+    rt.print_char(1, ' ');
+    rt.print_str(1, mine[2].ptr, mine[2].len);
+    rt.print_char(1, '\n');
+    rt.flush(1);
+
+    // An argc of 0 or less leaves no argument at all. That is the state
+    // before the first call. A second call releases what the first allocated,
+    // so it neither leaks nor fires the overwrite check of D17.11.
+    rt.args_init(0, &raw[0]);
+    println(rt.args().len, " ", rt.args().ptr == null);
+
+    // args_init emptied the slot, so it can build the span again.
+    rt.args_init(cast(argv.len, i32), &raw[0]);
+    println(rt.args().len, " ", rt.args()[2] == argv[2]);
+    return 0;
+}

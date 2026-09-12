@@ -353,6 +353,19 @@ A safe(r) C-like systems programming language.
   at a substring (`"bye" in text`) returns before the newline that follows it arrives in the next
   chunk, which is a flake of about one run in five: wait for the whole line (`"bye\n"`), and
   prove a pty harness is not flaky with `ctest --repeat until-fail:20` rather than one green run.
+  It drives one program for each runtime, `test/tty/print_then_wait.ft` and
+  `rt_print_then_wait.ft`, because `std.rt` and the C runtime are both live until T-091 and each
+  one holds its own buffers.
+- **A blocking write never returns short, so no test here witnesses a retry loop over `write(2)`.**
+  POSIX makes a blocking write to a pipe or to a file return only after it has written every byte.
+  `write_all` in `std/rt.ft` therefore runs its loop a second time only after `EINTR` or on a
+  non-blocking descriptor, and a fort program can arrange neither: `std/libc.ft` declares no
+  `pipe`, no `mkfifo` and no `socket`, and `O_NONBLOCK` does nothing on a regular file. A
+  200000-byte write to the harness's pipe arrives whole, and cutting that loop to a single `write`
+  left `run/stdlib/090` green. The `EINTR` branch beside it is uncovered for the same reason, so
+  name **both** branches when you record the gap. Assert that every byte arrives, which does catch
+  a bypass path that drops bytes, and write in the test what it cannot see instead of claiming the
+  loop.
 - **A system call added to a print path must give errno back.** `sys.errno()` hands a program the
   errno of its own last library call (`stdlib.md` 2.4), and the print family runs between the two:
   the `isatty` of D11.5 fails with `ENOTTY` on every pipe, so the first `print` after a failed
@@ -1220,7 +1233,10 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
   every future ticket hits 3:1 exactly. Measure it with
   `tools/vm run 'python3 tools/lines.py'` before quoting it; never repeat the figure from this
   line. A ticket that cannot reach 3:1 says so in its log with the reason rather than lowering the
-  number.
+  number. `--since` reads `git diff main...HEAD`, so it counts **committed** work only. A branch
+  whose tests are still staged or untracked reads as the ratio of the commits before them. That
+  number is smaller than the truth, and it sends an implementor off to write tests the branch
+  already has. Commit first, then measure.
 - The ratio is a prompt, not a verdict: what a review asks is which rules of the decisions a ticket
   cites have no test at all, unit or language, and the answer decides the ticket. T-014 measured
   0.76 and merged, because the number could not see that it took 57 entries out of xfail.txt -- a

@@ -1,0 +1,95 @@
+//! run
+//! stderr: unbuffered
+//! stdout:
+//| 0 3
+//| 3 8195 8196
+//| 17196
+//| 17196 17199
+//| dropped
+import std.libc;
+import std.rt;
+
+// This watches the buffering policy of D11.5 and toolchain.md 5.3 from
+// outside the runtime. A descriptor's bytes wait in its buffer until the
+// buffer fills or something flushes it, and the file on disk says when they
+// arrived. stderr is the exception: the runtime writes it at once. The stderr
+// directive in this test's header sees that, because nothing in this program
+// flushes the fort runtime's buffers before the line it asserts.
+string PATH = "buffered.txt";
+
+// Answers with the bytes the file holds now. It reads them through libc, so
+// the answer comes from the operating system and not from the runtime that
+// wrote them.
+fn i64 file_size() {
+    i32 fd = libc.open(PATH.ptr, libc.O_RDONLY, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    u8 mut@ own buf = new(u8, 4096);
+    i64 mut total = 0;
+    while (true) {
+        i64 n = libc.read(fd, cast(buf.ptr, void*), buf.len);
+        if (n <= 0) {
+            break;
+        }
+        total += n;
+    }
+    del(buf);
+    libc.close(fd);
+    return total;
+}
+
+fn i32 main() {
+    // The runtime does not buffer stderr, so this line is out before anything
+    // flushes (D11.5).
+    rt.print_str(2, "unbuffered\n".ptr, 11);
+
+    i32 fd = libc.open(PATH.ptr, libc.O_WRONLY | libc.O_CREAT | libc.O_TRUNC, 0o644);
+    u64 buffer_size = 8192;
+    char mut@ own filler = new(char, 9000);
+    for (u64 mut i = 0; i < filler.len; i++) {
+        filler[i] = 'x';
+    }
+
+    // A descriptor other than 1 and 2 gets a buffer of its own, under the
+    // same policy (toolchain.md 5.3). Three bytes wait, and flush writes
+    // them.
+    rt.print_str(fd, "abc".ptr, 3);
+    i64 before_flush = file_size();
+    rt.flush(fd);
+    println(before_flush, " ", file_size());
+
+    // BUFFER_SIZE bytes fill the buffer and do not flush it. The byte after
+    // them does not fit, so the buffer goes out first and that byte stays
+    // behind. At this boundary a > written as a >= loses a byte, or writes
+    // one too many.
+    rt.print_str(fd, filler.ptr, buffer_size);
+    i64 exactly_full = file_size();
+    rt.print_str(fd, filler.ptr, 1);
+    i64 after_overflow = file_size();
+    rt.flush(fd);
+    println(exactly_full, " ", after_overflow, " ", file_size());
+
+    // A write larger than the buffer never fits. It goes straight to the
+    // descriptor, so it is out before any flush.
+    rt.print_str(fd, filler.ptr, 9000);
+    println(file_size());
+
+    // flush_all writes out every buffer, this descriptor's included. The
+    // failure paths and exit call it (D11.4, D11.6).
+    rt.print_str(fd, "end".ptr, 3);
+    i64 held = file_size();
+    rt.flush_all();
+    println(held, " ", file_size());
+
+    // flush of a descriptor that has no buffer does nothing. A negative
+    // descriptor has no buffer either, and the runtime drops its bytes
+    // (toolchain.md 5.3).
+    rt.flush(99);
+    rt.print_str(-1, "lost".ptr, 4);
+    rt.flush(-1);
+    println("dropped");
+    libc.close(fd);
+    del(filler);
+    return 0;
+}

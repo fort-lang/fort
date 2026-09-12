@@ -56,14 +56,14 @@ done
 # them: an equality and not a floor, so that a file cannot slip out of the
 # comparison. A ticket that adds or removes a .ft file changes all three
 # lines in the same commit.
-FT_FILES=678
+FT_FILES=722
 
 # The files of that corpus stage1 checks clean, which are the ones compared.
 # It is an equality for the reason FT_FILES is: a comparison that shrank would
 # otherwise pass while seeing less, and ctest reads the exit status and not the
 # counts printed below. A ticket that adds a clean .ft file, or that makes
 # stage1 accept or refuse one, changes this line with FT_FILES.
-CLEAN_FILES=398
+CLEAN_FILES=442
 
 # The search roots every run is given: the standard library the build copied,
 # and src/fort, so that the compiler's own modules resolve their imports. A

@@ -1,0 +1,57 @@
+//! run
+//! stdout:
+//| true true
+//| false false
+//| false false
+//| true true
+//| true true
+//| true true
+//| false false
+//| true true
+//| false false
+//| true true
+//| false false
+//| false false
+import std.rt;
+
+// == and != on two strings call str_eq (D3.7, toolchain.md 5.1). It answers
+// true for the same length and the same bytes. The left half of each line
+// below is the operator, which the compiler still lowers to the C runtime.
+// The right half is the fort entry point, asked the same question.
+fn void both_eq(string a, string b) {
+    print(a == b, " ");
+    rt.fort_rt_flush(1);
+    rt.print_bool(1, rt.str_eq(a.ptr, a.len, b.ptr, b.len));
+    rt.print_char(1, '\n');
+    rt.flush(1);
+}
+
+fn i32 main() {
+    both_eq("abc", "abc");
+    both_eq("abc", "abd");
+
+    // A prefix is not the string. str_eq compares the length first.
+    both_eq("abc", "ab");
+
+    // The zero string equals "" (D3.7). Neither pointer may reach memcmp: C
+    // forbids a null pointer there even for zero bytes.
+    string zero = {};
+    both_eq("", "");
+    both_eq(zero, "");
+    both_eq(zero, zero);
+    both_eq("a", "");
+
+    // A string may hold a NUL (D3.7). str_eq compares len bytes and does not
+    // stop at a terminator. These two strings differ only after a NUL.
+    both_eq("a\0b", "a\0b");
+    both_eq("a\0b", "a\0c");
+
+    // These are longer than a word. The second differs in its first byte and
+    // the third in its last byte. A loop over bytes and a loop over words
+    // disagree at exactly those two places.
+    string long_text = "the quick brown fox jumps over the lazy dog";
+    both_eq(long_text, "the quick brown fox jumps over the lazy dog");
+    both_eq(long_text, "Xhe quick brown fox jumps over the lazy dog");
+    both_eq(long_text, "the quick brown fox jumps over the lazy doh");
+    return 0;
+}

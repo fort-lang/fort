@@ -1,0 +1,146 @@
+//! run
+//! stdout:
+//| 0 0
+//| 1 1
+//| -1 -1
+//| 9 9
+//| 10 10
+//| -9 -9
+//| -10 -10
+//| 9223372036854775807 9223372036854775807
+//| -9223372036854775808 -9223372036854775808
+//| 0 0
+//| 1 1
+//| 9 9
+//| 10 10
+//| 18446744073709551614 18446744073709551614
+//| 18446744073709551615 18446744073709551615
+//| true true
+//| false false
+//| a a
+//| Z Z
+//| 0 0
+//| ~ ~
+//|    
+//| 0x0 0x0
+//| 0x1 0x1
+//| 0xff 0xff
+//| 0x123456789 0x123456789
+//| 0xffffffffffffffff 0xffffffffffffffff
+//|  
+//| x x
+//| hello world hello world
+import std.rt;
+
+// std.rt formats and buffers every value the print family writes (D11.7,
+// toolchain.md 5.1). runtime/fort_rt.c still does the same for the builtins
+// the compiler lowers to it (D12.2). Both runtimes are therefore live in this
+// program, and each line below holds one value written twice: first by the C
+// runtime through print, then by the fort runtime through the entry point
+// beside it. The two texts are the same bytes, or the line does not match.
+//
+// Each runtime buffers fd 1 on its own (D11.5). So each helper below flushes
+// the C buffer before the fort runtime writes, and flushes the fort buffer
+// before it returns. That order puts the two texts on one line.
+fn void both_i64(i64 v) {
+    print(v, " ");
+    rt.fort_rt_flush(1);
+    rt.print_i64(1, v);
+    rt.print_char(1, '\n');
+    rt.flush(1);
+}
+
+fn void both_u64(u64 v) {
+    print(v, " ");
+    rt.fort_rt_flush(1);
+    rt.print_u64(1, v);
+    rt.print_char(1, '\n');
+    rt.flush(1);
+}
+
+fn void both_bool(bool v) {
+    print(v, " ");
+    rt.fort_rt_flush(1);
+    rt.print_bool(1, v);
+    rt.print_char(1, '\n');
+    rt.flush(1);
+}
+
+fn void both_char(char c) {
+    print(c, " ");
+    rt.fort_rt_flush(1);
+    rt.print_char(1, c);
+    rt.print_char(1, '\n');
+    rt.flush(1);
+}
+
+fn void both_ptr(void* p) {
+    print(p, " ");
+    rt.fort_rt_flush(1);
+    rt.print_ptr(1, p);
+    rt.print_char(1, '\n');
+    rt.flush(1);
+}
+
+fn void both_str(string s) {
+    print(s, " ");
+    rt.fort_rt_flush(1);
+    rt.print_str(1, s.ptr, s.len);
+    rt.print_char(1, '\n');
+    rt.flush(1);
+}
+
+fn i32 main() {
+    // The ends of i64 and u64, and the values where a decimal gains a digit.
+    // A buffer that fills from its end, and a loop that stops at zero, are
+    // one byte out at exactly those values.
+    i64 i64_min = -9223372036854775808;
+    i64 i64_max = 9223372036854775807;
+    both_i64(0);
+    both_i64(1);
+    both_i64(-1);
+    both_i64(9);
+    both_i64(10);
+    both_i64(-9);
+    both_i64(-10);
+    both_i64(i64_max);
+    both_i64(i64_min);
+    u64 u64_max = 18446744073709551615;
+    both_u64(0);
+    both_u64(1);
+    both_u64(9);
+    both_u64(10);
+    both_u64(u64_max - 1);
+    both_u64(u64_max);
+
+    both_bool(true);
+    both_bool(false);
+
+    // A char prints as its byte (D11.7). These are a letter, a capital, a
+    // digit, the last printable byte and a space.
+    both_char('a');
+    both_char('Z');
+    both_char('0');
+    both_char('~');
+    both_char(' ');
+
+    // A pointer prints as 0x and lowercase hex with no leading zero, and as
+    // 0x0 for null (D11.7). The last value below gives the widest text there
+    // is: 0x and 16 digits, which fills the buffer format_hex writes into.
+    void* p = null;
+    u64 one = 1;
+    u64 byte_max = 255;
+    u64 nine_digits = 4886718345;
+    both_ptr(p);
+    both_ptr(cast(one, void*));
+    both_ptr(cast(byte_max, void*));
+    both_ptr(cast(nine_digits, void*));
+    both_ptr(cast(u64_max, void*));
+
+    // A string prints as its bytes. The empty string writes no byte, so that
+    // line holds the separator alone.
+    both_str("");
+    both_str("x");
+    both_str("hello world");
+    return 0;
+}

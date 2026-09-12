@@ -1,0 +1,30 @@
+// test/tty_test.py drives this program second. It writes what
+// test/tty/print_then_wait.ft writes, but through std.rt's entry points
+// instead of the print family. The two programs then answer D11.5's
+// interactive question side by side: on a terminal the runtime flushes each
+// line as the program writes it, and on a pipe stdout waits while stderr does
+// not. The compiler still lowers a print to the C runtime, so one program
+// cannot do both jobs.
+//
+// This program calls flush_all itself at the end. The main the compiler emits
+// flushes the C runtime's buffers and not these. That call is the only
+// difference from the program beside it, and it runs after the parent has
+// read everything it asks about.
+import std.io;
+import std.rt;
+
+fn i32 main() {
+    rt.print_str(1, "out\n".ptr, 4);
+    rt.print_str(2, "err\n".ptr, 4);
+    // This blocks until the parent sends a byte. Nothing below it runs, and
+    // nothing flushes, while the parent reads what arrived.
+    u8[1] mut gate = {};
+    io.read(io.STDIN, gate[..]);
+    rt.print_str(1, "bye\n".ptr, 4);
+    // This blocks a second time, so the parent reads the line above while the
+    // process still runs. Closing the last slave of a pty drops what is still
+    // in its buffer, so a line read after the exit would be a race.
+    io.read(io.STDIN, gate[..]);
+    rt.flush_all();
+    return 0;
+}

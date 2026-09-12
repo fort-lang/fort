@@ -238,7 +238,7 @@ extern fn i64 lseek(i32 fd, i64 offset, i32 whence);
 extern fn i32 isatty(i32 fd);
 
 // <errno.h>: errno is a macro over this accessor in glibc and musl.
-extern fn i32* __errno_location();
+extern fn i32 mut* __errno_location();
 ```
 
 Semantics are those of the C functions. `malloc` returns `void* own` (no `mut`: `void*` has no
@@ -247,7 +247,10 @@ boundary and state C's convention, so the pair is interchangeable with `new` and
 and exists for code that sizes an allocation in bytes.
 `calloc` returns zeroed storage for `n` items of `size` bytes, or null, and is what `std.rt`
 allocates with, since `new` promises zeroed memory (D10.2, `toolchain.md` 5.1); `isatty` answers
-D11.5's question about a descriptor and is asked once per buffer (`toolchain.md` 5.3). Both are
+D11.5's question about a descriptor and is asked once per buffer (`toolchain.md` 5.3).
+`__errno_location` returns `i32 mut*` because C returns `int*`, whose target is mutable: `std.rt`
+writes errno back around that `isatty` (`toolchain.md` 5.3), and a caller that only reads it drops
+the `mut` on the way (D5.4), which is what `sys.errno()` does. Both are
 here because the runtime is a module of this library and imports `std.libc` like any other
 (D13.1); no other module calls them.
 `u8 mut* own p = cast(libc.malloc(n), u8 mut* own);` types the block, the cast's result being

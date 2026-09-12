@@ -10,6 +10,11 @@ while the program is still blocked in a read of stdin and its exit flush has not
   on a terminal  both of its lines, in the order it printed them (stdout is line-buffered),
   on a pipe      the stderr line alone, the stdout line waiting for the flush at exit.
 
+It does that for two programs. Two runtimes are live while the compiler still lowers its builtins
+to the C one. `print_then_wait.ft` writes through the print family, which reaches
+runtime/fort_rt.c. `rt_print_then_wait.ft` writes through std.rt's own entry points. Both programs
+must behave the same way, and no language test can see either one.
+
 ctest runs it as the unit test `tty` (toolchain.md 5.3). Exit status: 0 when both runs behave,
 1 when either does not, 2 when the environment cannot be measured at all.
 """
@@ -25,7 +30,11 @@ import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SOURCE = os.path.join(HERE, "tty", "print_then_wait.ft")
+# One program for each runtime, named after the runtime whose buffers it writes through.
+SOURCES = (
+    ("C runtime", "print_then_wait"),
+    ("fort runtime", "rt_print_then_wait"),
+)
 
 # Seconds to wait for output the program has already written; generous, because it is only
 # reached when the output never comes, which is the failing path.
@@ -108,13 +117,14 @@ def run_on_pipe(program, env):
         return err + more.decode(), running, running + out.decode(), proc.returncode
 
 
-def compile_program(args, work):
-    """Compile the fort program for the target, as the language harness does (toolchain.md 2)."""
-    program = os.path.join(work, "print_then_wait")
-    argv = [args.fort, "--cc", args.cc, "--std-dir", args.std_dir, "-o", program, SOURCE]
+def compile_program(args, work, stem):
+    """Compile one fort program for the target, as the language harness does (toolchain.md 2)."""
+    source = os.path.join(HERE, "tty", stem + ".ft")
+    program = os.path.join(work, stem)
+    argv = [args.fort, "--cc", args.cc, "--std-dir", args.std_dir, "-o", program, source]
     done = subprocess.run(argv, capture_output=True, text=True, check=False)
     if done.returncode != 0:
-        print("tty: compiling %s failed:\n%s%s" % (SOURCE, done.stdout, done.stderr), end="")
+        print("tty: compiling %s failed:\n%s%s" % (source, done.stdout, done.stderr), end="")
         return None
     return program
 
@@ -140,23 +150,24 @@ def main():
     env.setdefault("QEMU_LD_PREFIX", DEFAULT_QEMU_LD_PREFIX)
     failures = []
     with tempfile.TemporaryDirectory() as work:
-        program = compile_program(args, work)
-        if program is None:
-            return 1
-        running, rest, status = run_on_terminal(program, env)
-        # On a terminal each line is flushed as it is written, so both lines are there while the
-        # program still runs, and they are in the order the program printed them (D11.5).
-        check(failures, "terminal, while running", running, "out\nerr\n")
-        check(failures, "terminal, after the read", "bye\n" in rest, True)
-        check(failures, "terminal, exit status", status, 0)
+        for label, stem in SOURCES:
+            program = compile_program(args, work, stem)
+            if program is None:
+                return 1
+            running, rest, status = run_on_terminal(program, env)
+            # On a terminal the runtime flushes each line as the program writes it. Both lines
+            # are there while the program still runs, in the order it printed them (D11.5).
+            check(failures, label + ", terminal, while running", running, "out\nerr\n")
+            check(failures, label + ", terminal, after the read", "bye\n" in rest, True)
+            check(failures, label + ", terminal, exit status", status, 0)
 
-        err, running, out, status = run_on_pipe(program, env)
-        # On a pipe stderr is still unbuffered and stdout still waits for the flush at exit, so
-        # redirecting a program gives the same bytes in the same few writes as before (D11.5).
-        check(failures, "pipe, stderr", err, "err\n")
-        check(failures, "pipe, stdout while running", running, "")
-        check(failures, "pipe, stdout after exit", out, "out\nbye\n")
-        check(failures, "pipe, exit status", status, 0)
+            err, running, out, status = run_on_pipe(program, env)
+            # On a pipe the runtime still does not buffer stderr, and stdout still waits for a
+            # flush. A redirected program gives the same bytes in the same few writes (D11.5).
+            check(failures, label + ", pipe, stderr", err, "err\n")
+            check(failures, label + ", pipe, stdout while running", running, "")
+            check(failures, label + ", pipe, stdout after exit", out, "out\nbye\n")
+            check(failures, label + ", pipe, exit status", status, 0)
 
     for failure in failures:
         print(failure, file=sys.stderr)

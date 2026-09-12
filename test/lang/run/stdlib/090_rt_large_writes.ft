@@ -1,0 +1,93 @@
+//! run
+//! stderr: end-of-large-write
+//! stdout:
+//| 200000 200000 true
+//| true true
+import std.libc;
+import std.mem;
+import std.rt;
+
+// A block larger than a buffer never fits in one. The runtime writes it
+// straight to the descriptor (D11.5, toolchain.md 5.3). Every byte of it must
+// arrive. The marker sits at the end of the block and travels in the same
+// call as the 199981 bytes before it, so the stderr directive in this test's
+// header sees the marker only if the whole block went out. The same block
+// goes to two files, one through each runtime, and this program compares
+// them byte for byte.
+//
+// This test cannot see write_all's retry. A blocking write to a pipe or to a
+// file returns only after it has written every byte, so the loop after the
+// first call never runs here. Only a signal or a non-blocking descriptor
+// makes a write short, and a fort program can arrange neither.
+string MARKER = "end-of-large-write\n";
+string F_PATH = "large-f.txt";
+string C_PATH = "large-c.txt";
+
+fn i32 open_write(string path) {
+    return libc.open(path.ptr, libc.O_WRONLY | libc.O_CREAT | libc.O_TRUNC, 0o644);
+}
+
+fn u64 read_file(string path, u8 mut@ buf) {
+    i32 fd = libc.open(path.ptr, libc.O_RDONLY, 0);
+    if (fd < 0) {
+        return 0;
+    }
+    u64 mut total = 0;
+    while (total < buf.len) {
+        i64 n = libc.read(fd, cast(buf[total..].ptr, void*), buf.len - total);
+        if (n <= 0) {
+            break;
+        }
+        total += cast(n, u64);
+    }
+    libc.close(fd);
+    return total;
+}
+
+fn i32 main() {
+    u64 n = 200000;
+    char mut@ own block = new(char, n);
+    for (u64 mut i = 0; i < n; i++) {
+        block[i] = 'x';
+    }
+    for (u64 mut i = 0; i < MARKER.len; i++) {
+        block[n - MARKER.len + i] = MARKER[i];
+    }
+    string text = cast(block[..], string);
+
+    // One call for each destination. No buffer can hold a block this large.
+    i32 f_fd = open_write(F_PATH);
+    i32 c_fd = open_write(C_PATH);
+    rt.print_str(f_fd, block.ptr, n);
+    fprint(c_fd, text);
+    rt.print_str(2, block.ptr, n);
+
+    // Neither block entered a buffer, so neither runtime still holds a byte.
+    // The flushes are here so that each runtime answers for its own file.
+    rt.flush_all();
+    rt.fort_rt_flush_all();
+    libc.close(f_fd);
+    libc.close(c_fd);
+
+    u64 room = 262144;
+    u8 mut@ own f_bytes = new(u8, room);
+    u8 mut@ own c_bytes = new(u8, room);
+    u64 f_len = read_file(F_PATH, f_bytes);
+    u64 c_len = read_file(C_PATH, c_bytes);
+    println(f_len, " ", c_len, " ", mem.equal(f_bytes[..f_len], c_bytes[..c_len]));
+
+    // Every byte arrived, and in order. The marker stands at the end, and
+    // only 'x' stands before it.
+    bool tail_ok = cast(f_bytes[f_len - MARKER.len..f_len], string) == MARKER;
+    bool mut body_ok = true;
+    for (u64 mut i = 0; i < f_len - MARKER.len; i++) {
+        if (f_bytes[i] != cast('x', u8)) {
+            body_ok = false;
+        }
+    }
+    println(tail_ok, " ", body_ok);
+    del(f_bytes);
+    del(c_bytes);
+    del(block);
+    return 0;
+}

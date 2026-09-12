@@ -1,0 +1,84 @@
+//! run
+//! stdout:
+//| 0 0 0 0 0 0 0 0
+//| 2 0 0 0 0 0 0 0 0
+//| 2 2 0 0 0 0 0 0 0 0
+//| 2 2 2 2 2 2 2 2 2 2
+import std.libc;
+import std.rt;
+
+// The runtime keeps one buffer for each descriptor (D11.5), and the pool that
+// holds them is finite: stdout and eight others. The ninth descriptor a
+// program writes to therefore takes the oldest slot. The runtime flushes that
+// slot before it hands it over. toolchain.md 5.3 leaves the count to the
+// runtime, and nine is that count. The file behind each descriptor says when
+// its bytes arrived, so each new 2 at the left end of a line below is one
+// eviction.
+string[10] PATHS = {"p0.txt", "p1.txt", "p2.txt", "p3.txt", "p4.txt",
+                    "p5.txt", "p6.txt", "p7.txt", "p8.txt", "p9.txt"};
+
+fn i32 open_write(string path) {
+    return libc.open(path.ptr, libc.O_WRONLY | libc.O_CREAT | libc.O_TRUNC, 0o644);
+}
+
+fn i64 file_size(string path) {
+    i32 fd = libc.open(path.ptr, libc.O_RDONLY, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    u8 mut@ own buf = new(u8, 64);
+    i64 mut total = 0;
+    while (true) {
+        i64 n = libc.read(fd, cast(buf.ptr, void*), buf.len);
+        if (n <= 0) {
+            break;
+        }
+        total += n;
+    }
+    del(buf);
+    libc.close(fd);
+    return total;
+}
+
+// Prints the size of each of the first n files. A size says whether that
+// descriptor's bytes have arrived.
+fn void sizes(u64 n) {
+    for (u64 mut i = 0; i < n; i++) {
+        if (i > 0) {
+            print(" ");
+        }
+        print(file_size(PATHS[i]));
+    }
+    println();
+}
+
+fn i32 main() {
+    i32[10] mut fds = {};
+
+    // Eight descriptors fill the pool beside stdout. Every write waits.
+    for (u64 mut i = 0; i < 8; i++) {
+        fds[i] = open_write(PATHS[i]);
+        rt.print_str(fds[i], "ab".ptr, 2);
+    }
+    sizes(8);
+
+    // The ninth finds no free slot, so the runtime flushes the oldest one and
+    // hands it over. The first descriptor's two bytes are on disk now. The
+    // eight others still wait.
+    fds[8] = open_write(PATHS[8]);
+    rt.print_str(fds[8], "ab".ptr, 2);
+    sizes(9);
+
+    // The tenth takes the next slot in the same order.
+    fds[9] = open_write(PATHS[9]);
+    rt.print_str(fds[9], "ab".ptr, 2);
+    sizes(10);
+
+    // flush_all reaches every slot, whichever descriptor holds it now.
+    rt.flush_all();
+    sizes(10);
+    for (u64 mut i = 0; i < 10; i++) {
+        libc.close(fds[i]);
+    }
+    return 0;
+}

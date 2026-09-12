@@ -471,24 +471,25 @@ fn void free(void* own p);
 fn bool str_eq(char* a, u64 a_len, char* b, u64 b_len);
 
 // Failures (D11.4): flush every buffer, write one line to stderr, abort.
-// Values arrive sign-extended to 64 bits; `hi` is `len` for `e[lo..]`; `type` is
-// the NUL-terminated name of the shifted operand's type; `text` is the
+// Values arrive sign-extended to 64 bits; `hi` is `len` for `e[lo..]`;
+// `type_name` is the NUL-terminated name of the shifted operand's type, and it
+// carries the suffix because `type` is a reserved word (D2.4); `text` is the
 // NUL-terminated source text of the assert argument. `fail_div_overflow` is
 // `MIN / -1` and `MIN % -1`; `fail_alloc_count` is `new(T, n)` with a negative
 // signed `n`; `fail_overwrite` is an assignment to an `own` reference-typed
 // lvalue whose current value is not zero (D17.11), emitted in checked builds
 // only; `fail_enum` is the default a switch over an enum with no `default`
-// clause is given (D7.7), where `type` is the enum's name, and it is emitted in
-// both build modes.
+// clause is given (D7.7), where `type_name` is the enum's name, and it is
+// emitted in both build modes.
 fn noreturn fail_bounds(i64 index, u64 len, char* file, u32 line, u32 col);
 fn noreturn fail_span(i64 lo, i64 hi, u64 len, char* file, u32 line, u32 col);
 fn noreturn fail_overflow(char* file, u32 line, u32 col);
-fn noreturn fail_shift(i64 count, char* type, char* file, u32 line, u32 col);
+fn noreturn fail_shift(i64 count, char* type_name, char* file, u32 line, u32 col);
 fn noreturn fail_div_zero(char* file, u32 line, u32 col);
 fn noreturn fail_div_overflow(char* file, u32 line, u32 col);
 fn noreturn fail_alloc_count(i64 n, char* file, u32 line, u32 col);
 fn noreturn fail_overwrite(char* file, u32 line, u32 col);
-fn noreturn fail_enum(i64 v, char* type, char* file, u32 line, u32 col);
+fn noreturn fail_enum(i64 v, char* type_name, char* file, u32 line, u32 col);
 fn noreturn panic(char* ptr, u64 len, char* file, u32 line, u32 col);
 fn noreturn assert_fail(char* text, char* file, u32 line, u32 col);
 

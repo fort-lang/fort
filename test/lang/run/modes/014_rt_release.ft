@@ -1,0 +1,159 @@
+//! run
+//! flags: --release
+//! args: alpha
+//! stdout:
+//| 0 0
+//| -9223372036854775808 -9223372036854775808
+//| 9223372036854775807 9223372036854775807
+//| 18446744073709551615 18446744073709551615
+//| true true
+//| false false
+//| blue blue
+//| ~ ~
+//| 0xffffffffffffffff 0xffffffffffffffff
+//| hello hello
+//| true true
+//| false false
+//| true true
+//| true true true
+//| 2 true true
+//| buffered
+//| done
+import std.rt;
+
+// This runs std.rt in release mode. In that mode the arithmetic does not trap
+// and the compiler does not emit the overwrite check of D17.11 (D11.1). Every
+// entry point that formats, compares, allocates or buffers must still give
+// the answers run/stdlib/067 to 073 record with the checks on, because none
+// of them depends on a check. One piece of arithmetic does depend on
+// wrapping: the magnitude of i64's minimum. It is written to wrap in both
+// modes (D11.2), so the second line below is where the two modes would
+// differ.
+//
+// The compiler still lowers a print to the C runtime (D12.2). Each line here
+// therefore holds one value written by both runtimes, as run/stdlib/067
+// does.
+enum color {
+    red,
+    blue = 2,
+}
+
+rt.enum_member[2] mut table = {};
+
+fn void both_i64(i64 v) {
+    print(v, " ");
+    rt.fort_rt_flush(1);
+    rt.print_i64(1, v);
+    rt.print_char(1, '\n');
+    rt.flush(1);
+}
+
+fn void both_u64(u64 v) {
+    print(v, " ");
+    rt.fort_rt_flush(1);
+    rt.print_u64(1, v);
+    rt.print_char(1, '\n');
+    rt.flush(1);
+}
+
+fn void both_bool(bool v) {
+    print(v, " ");
+    rt.fort_rt_flush(1);
+    rt.print_bool(1, v);
+    rt.print_char(1, '\n');
+    rt.flush(1);
+}
+
+fn void both_eq(string a, string b) {
+    print(a == b, " ");
+    rt.fort_rt_flush(1);
+    rt.print_bool(1, rt.str_eq(a.ptr, a.len, b.ptr, b.len));
+    rt.print_char(1, '\n');
+    rt.flush(1);
+}
+
+fn i32 main(string@ argv) {
+    i64 i64_min = -9223372036854775808;
+    u64 u64_max = 18446744073709551615;
+    both_i64(0);
+    both_i64(i64_min);
+    both_i64(9223372036854775807);
+    both_u64(u64_max);
+    both_bool(true);
+    both_bool(false);
+
+    // print_enum reads a table and not a check, so the mode changes nothing
+    // here either. The C runtime gets the compiler's own table for the same
+    // value (D11.7, D7.7).
+    table[0].value = cast(color.red, i32);
+    table[0].name = "red".ptr;
+    table[1].value = cast(color.blue, i32);
+    table[1].name = "blue".ptr;
+    print(color.blue, " ");
+    rt.fort_rt_flush(1);
+    rt.print_enum(1, cast(color.blue, i32), &table[0], 2);
+    rt.print_char(1, '\n');
+    rt.flush(1);
+
+    print('~', " ");
+    rt.fort_rt_flush(1);
+    rt.print_char(1, '~');
+    rt.print_char(1, '\n');
+    rt.flush(1);
+
+    void* p = cast(u64_max, void*);
+    print(p, " ");
+    rt.fort_rt_flush(1);
+    rt.print_ptr(1, p);
+    rt.print_char(1, '\n');
+    rt.flush(1);
+
+    string greeting = "hello";
+    print(greeting, " ");
+    rt.fort_rt_flush(1);
+    rt.print_str(1, greeting.ptr, greeting.len);
+    rt.print_char(1, '\n');
+    rt.flush(1);
+
+    both_eq("abc", "abc");
+    both_eq("abc", "abd");
+    string zero = {};
+    both_eq(zero, "");
+
+    // alloc still zeroes its block and still never answers null. free still
+    // releases what alloc made (D10.2, D10.3).
+    u64 n = 32;
+    void* own block = rt.alloc(1, n, "modes.ft".ptr, 1, 1);
+    u8 mut@ bytes = cast(block, u8 mut*)[0..n];
+    bool mut zeroed = true;
+    for (u64 mut i = 0; i < n; i++) {
+        if (bytes[i] != 0) {
+            zeroed = false;
+        }
+    }
+    bytes[n - 1] = 5;
+    println(block != null, " ", zeroed, " ", bytes[n - 1] == 5);
+    rt.free(move(block));
+
+    // args_init and args answer with the span main was given. The second call
+    // is the one the overwrite check refuses in the other mode, unless
+    // args_init releases what the first call allocated (D17.11).
+    char*[2] mut raw = {};
+    for (u64 mut i = 0; i < argv.len; i++) {
+        raw[i] = argv[i].ptr;
+    }
+    rt.args_init(cast(argv.len, i32), &raw[0]);
+    rt.args_init(cast(argv.len, i32), &raw[0]);
+    string@ mine = rt.args();
+    println(mine.len, " ", mine.len == argv.len, " ", mine[1] == argv[1]);
+
+    // The buffer still holds bytes back until something flushes it, and
+    // print_str of nothing still writes nothing. Each runtime buffers fd 1 on
+    // its own (D11.5), so the C buffer goes out first.
+    rt.fort_rt_flush(1);
+    rt.print_str(1, greeting.ptr, 0);
+    rt.print_str(1, "buffered\n".ptr, 9);
+    rt.flush_all();
+    println("done");
+    return 0;
+}
