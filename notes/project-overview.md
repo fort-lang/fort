@@ -38,7 +38,7 @@ Read them in this order. Two are normative and win over the rest.
 | `module-system.md`   | Files and imports, name resolution, mangling, C FFI, calling          |
 |                      | convention, entry point.                                              |
 | `stdlib.md`          | The v1 standard library, module by module, with signatures.           |
-| `toolchain.md`       | The `fort` command, build modes, diagnostics, the C runtime, code     |
+| `toolchain.md`       | The `fort` command, build modes, diagnostics, the runtime, code       |
 |                      | generation contract, test conventions.                                |
 
 Seed tests that exercise every feature live under `test/lang/` in the format defined in
@@ -54,7 +54,8 @@ Seed tests that exercise every feature live under `test/lang/` in the format def
 4. **Manual control.** Explicit `new`/`del`, with `own` in the type saying who frees and `move`
    passing that job on (D17), C-compatible struct layout, a raw-pointer escape hatch
    (`p[lo..hi]`) for foreign memory.
-5. **Minimal runtime.** A few hundred lines of C: allocation, checks, printing, process start.
+5. **Minimal runtime.** A few hundred lines of fort in `std.rt`: allocation, checks, printing,
+   process start (D13.1).
 
 ## What fort changes relative to C
 

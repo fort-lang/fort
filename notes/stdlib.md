@@ -4,7 +4,7 @@ This document specifies the v1 standard library. It implements decisions D13.1 t
 the language decisions it depends on, including the ownership rules of D17 wherever a signature
 carries `own`; `decisions.md` and `grammar.md` win wherever they disagree with this file. It is
 written for two readers: the team implementing the library in fort on top of `extern`
-declarations and the C runtime, and the author of the self-hosted compiler, which must be
+declarations, the runtime included, and the author of the self-hosted compiler, which must be
 writable with nothing but this library and the builtins (D12).
 
 ## 1. Principles
@@ -13,13 +13,14 @@ writable with nothing but this library and the builtins (D12).
 
 - Every module is one fort source file under the standard library directory (D9.1, D14.1):
   `std.io` is `<std>/io.ft`. The library is ordinary fort (D13.1); the compiler knows nothing
-  about it beyond resolving the `std` search root.
+  about it beyond resolving the `std` search root, `std.rt` excepted, whose entry points a
+  builtin lowers to and which is in every import closure (D12.2, D9.10, 2.10).
 - Everything at module level is exported (D9.6). Names not documented here (helpers such as
   `strmap.find_slot`) are implementation details and may change; programs must not use them.
-- Foreign calls go through the `extern` declarations collected in `std.libc` (D9.8) and the C
-  runtime's `fort_rt_*` entry points, which `std.rt` collects (section 3); a program may
-  redeclare any of those C symbols with an identical signature (D9.8). The runtime is
-  permanent; it is not a self-hosting goal (D13.1).
+- Foreign calls go through the `extern` declarations collected in `std.libc` (D9.8); a program
+  may redeclare any of those C symbols with an identical signature (D9.8). The runtime is one of
+  the library's own modules, `std.rt` (D13.1, section 3), and calls libc through `std.libc` like
+  every other module.
 - Struct field lists and their order are part of the contract (layout per D3.8); the sizes and
   offsets stated below may be relied on. `own` is erased at run time (D17.1), so an `own` field
   has the size and offset of the same field without it.
@@ -124,18 +125,19 @@ import binding's name for a local even though D7.9 permits it.
 
 ### 1.6 Module list
 
-| Module       | Imports                                     | Purpose                             |
-|--------------|---------------------------------------------|-------------------------------------|
-| `std.libc`   | none                                        | libc `extern`s, flags, errno values |
-| `std.rt`     | none                                        | the runtime `extern`s of section 3  |
-| `std.mem`    | `libc`                                      | copy, fill and compare bytes        |
-| `std.str`    | `libc`, `mem`                               | compare, search, classify, parse    |
-| `std.sys`    | `libc`, `rt`, `str`                         | exit, args, errno, env              |
-| `std.strbuf` | `mem`                                       | growable text and byte buffer       |
-| `std.io`     | `libc`, `rt`, `mem`, `sys`, `str`, `strbuf` | descriptors, whole files, streams   |
-| `std.vec`    | none                                        | `ptr_vec`, `int_vec`, the pattern   |
-| `std.strmap` | `str`                                       | string-keyed open-addressing table  |
-| `std.math`   | none                                        | float bit casts, abs, min, max      |
+| Module          | Imports                                     | Purpose                          |
+|-----------------|---------------------------------------------|----------------------------------|
+| `std.libc`      | none                                        | libc `extern`s, flags, errno     |
+| `std.rt`        | `libc`                                      | the runtime itself (section 3)   |
+| `std.rt_float`  | `libc`                                      | the float printers (D18.1)       |
+| `std.mem`       | `libc`                                      | copy, fill and compare bytes     |
+| `std.str`       | `libc`, `mem`                               | compare, search, classify, parse |
+| `std.sys`       | `libc`, `rt`, `str`                         | exit, args, errno, env           |
+| `std.strbuf`    | `mem`                                       | growable text and byte buffer    |
+| `std.io`        | `libc`, `rt`, `mem`, `sys`, `str`, `strbuf` | descriptors, whole files, streams|
+| `std.vec`       | none                                        | `ptr_vec`, `int_vec`, the pattern|
+| `std.strmap`    | `str`                                       | string-keyed open-addressing map |
+| `std.math`      | none                                        | float bit casts, abs, min, max   |
 
 The import graph is acyclic (D9.5). A program imports what it uses: `import std.io;` and then
 `io.read_file(...)` (D9.3, D9.4).
@@ -159,12 +161,11 @@ fn bool env(string name, string mut* out)
 
 - `exit`: flushes every runtime output buffer (D11.5) and terminates the process with status
   `code & 0xFF` (D11.6). Deferred statements of the calling function do not run. Implemented as
-  `rt.fort_rt_exit(code);`, the runtime entry point that flushes and calls C `exit`
+  `rt.exit(code);`, the runtime entry point that flushes and ends the process
   (`toolchain.md` 5.1). Ownership: none.
 - `args`: returns the same `string@` that `main` received (D8.6, D11.6): `args()[0]` is the
-  program name and every element is NUL-terminated. Implemented as
-  `cast(rt.fort_rt_args_ptr(), string*)[0..rt.fort_rt_args_len()]` (an unchecked span taken
-  of a pointer, D6.9). Ownership: a view of storage the runtime owns (D17.3, D13.5); `string@`
+  program name and every element is NUL-terminated. Implemented as `rt.args()`. Ownership: a
+  view of storage the runtime owns (D17.3, D13.5); `string@`
   carries no `own`, so `del` of the span or of an element does not compile (D17.9).
 - `errno`: the value of C `errno` for the calling thread, read through
   `libc.__errno_location()`. It is meaningful only after a library call has reported failure.
@@ -217,6 +218,7 @@ i32 EACCES = 13;
 
 // <stdlib.h>, <string.h>
 extern fn void* own malloc(u64 size);
+extern fn void* own calloc(u64 n, u64 size);
 extern fn void free(void* own p);
 extern fn void* memcpy(void* dst, void* src, u64 n);
 extern fn void* memmove(void* dst, void* src, u64 n);
@@ -233,6 +235,7 @@ extern fn i64 read(i32 fd, void* buf, u64 n);
 extern fn i64 write(i32 fd, void* buf, u64 n);
 extern fn i32 close(i32 fd);
 extern fn i64 lseek(i32 fd, i64 offset, i32 whence);
+extern fn i32 isatty(i32 fd);
 
 // <errno.h>: errno is a macro over this accessor in glibc and musl.
 extern fn i32* __errno_location();
@@ -242,6 +245,11 @@ Semantics are those of the C functions. `malloc` returns `void* own` (no `mut`: 
 target level, D17.13) and `free` takes `void* own` (D17.13): the qualifiers are erased at the
 boundary and state C's convention, so the pair is interchangeable with `new` and `del` (D10.3)
 and exists for code that sizes an allocation in bytes.
+`calloc` returns zeroed storage for `n` items of `size` bytes, or null, and is what `std.rt`
+allocates with, since `new` promises zeroed memory (D10.2, `toolchain.md` 5.1); `isatty` answers
+D11.5's question about a descriptor and is asked once per buffer (`toolchain.md` 5.3). Both are
+here because the runtime is a module of this library and imports `std.libc` like any other
+(D13.1); no other module calls them.
 `u8 mut* own p = cast(libc.malloc(n), u8 mut* own);` types the block, the cast's result being
 `own` because its target says so (D3.14; `p` is `null` when C is out of memory, where `new`
 would trap, D10.2), `p[0..n]` is a
@@ -250,8 +258,9 @@ would trap, D10.2), `p[0..n]` is a
 parameter (D6.11) and is left `null` (D17.6). `memcpy`, `memmove` and `memset` return their
 `dst` argument, a view, so their results stay `void*`. `libc.exit` does not flush the runtime's
 output buffers; programs call `sys.exit`. `libc.abort` is what the runtime calls after a
-runtime error (D11.4). Ownership: `malloc` and `free` carry it in their types; every other
-extern here takes and returns views, and the library wraps every ownership-bearing call below.
+runtime error (D11.4). Ownership: `malloc`, `calloc` and `free` carry it in their types, so a
+`calloc` result is released like a `malloc` one and not dropped; every other extern here takes
+and returns views, and the library wraps every ownership-bearing call below.
 Direct use looks like `libc.write(fd, cast(s.ptr, void*), s.len) == cast(s.len, i64)`, which
 writes a string to a descriptor, bypassing the runtime's buffers.
 
@@ -316,7 +325,7 @@ fn bool write_file(string path, u8@ data)
   in the types; the caller releases the descriptor with `close`.
 - `open_write`: opens `path` with `O_WRONLY | O_CREAT | O_TRUNC` and mode `0o644`, creating or
   truncating the file. Same result and ownership as `open_read`.
-- `close`: flushes the runtime's buffer for `fd` if one exists (D11.5, via `fort_rt_flush`),
+- `close`: flushes the runtime's buffer for `fd` if one exists (D11.5, via `rt.flush`),
   then calls `close(2)`. Returns `true` when `close(2)` returned 0. The descriptor is invalid
   afterwards in either case. Ownership: none in the types; `close` consumes `fd`.
 - `flush`: flushes the runtime's buffer for `fd` if one exists and does nothing otherwise.
@@ -805,39 +814,39 @@ fn bool is_negative_zero(f64 x) {
 
 ### 2.10 `std.rt`
 
-The library's view of the C runtime (D13.1, D13.2): the five entry points of section 3, which
-lists them with their semantics, and nothing else. The module declares no libc symbol and holds
-no constant, no type and no function of its own; `sys` and `io` are its only importers inside
-the library. Names are unmangled (D9.7), so the declared name is the C name `toolchain.md` 5.1
-fixes, `fort_rt_` prefix included.
+The runtime (D13.1, D13.2): process start and exit, allocation, the failure paths and the print
+buffers, written in fort over `std.libc`. `toolchain.md` 5 fixes what each entry point does and
+section 3 below names the four the rest of the library calls; `sys` and `io` are its only
+importers inside the library, and everything else in it is an implementation detail (1.1).
+Its names are mangled like any module's (`std.rt.flush`, D9.7); the compiler knows them, because
+a builtin lowers to a call of one (D12.2), and calls them like any other fort function.
 
 ## 3. The runtime surface the library relies on
 
-`toolchain.md` owns the C runtime: the full `fort_rt_*` list, the C prototypes, the print
-buffers and process start. This section names only what the library calls. The library uses
-the builtins `new`, `del`, `move`, `panic`, `assert` and the print family as any program does
-(D12); the runtime calls behind them, including the overwrite check of D17.11, are emitted by
-the compiler and never named in library source. Beyond that, `std.rt` (D13.2) declares five
-runtime entry points, whose C prototypes are fixed in `toolchain.md` 5.1, and nothing else:
+`toolchain.md` owns the runtime: the full entry-point list, the signatures, the print buffers and
+process start. `std.rt` is a library module like any other (D13.1, 2.10) and this section names
+only what the rest of the library calls of it. The library uses the builtins `new`, `del`,
+`move`, `panic`, `assert` and the print family as any program does (D12); the runtime calls
+behind them, including the overwrite check of D17.11, are emitted by the compiler and never named
+in library source. Beyond that, `sys` and `io` import `std.rt` and call four of its functions,
+whose signatures `toolchain.md` 5.1 fixes:
 
 ```fort
-extern fn void* fort_rt_args_ptr();
-extern fn u64 fort_rt_args_len();
-extern fn void fort_rt_flush(i32 fd);
-extern fn void fort_rt_flush_all();
-extern fn noreturn fort_rt_exit(i32 status);
+fn string@ args();
+fn void flush(i32 fd);
+fn void flush_all();
+fn noreturn exit(i32 status);
 ```
 
-- `fort_rt_args_ptr`, `fort_rt_args_len`: the element pointer and length of the `string@` the
-  runtime built from `argv` at process start (D11.6). They describe the same storage `main`
-  receives, so `sys.args()` and `main`'s parameter are equal span for span. The C prototype
-  returns a pointer to the runtime's string struct; the declaration says `void*` and `sys.args`
-  casts it to `string*` (2.1). The result is a view (D17.3): the runtime keeps the storage.
-- `fort_rt_flush`: writes out the runtime's buffer for one descriptor, if it has one, and is a
+- `args`: the `string@` the runtime built from `argv` at process start (D11.6). It is the same
+  span `main` receives, so `sys.args()` and `main`'s parameter are equal span for span. The
+  result is a view (D17.3): the runtime keeps the storage, and the span carries no `own`.
+- `flush`: writes out the runtime's buffer for one descriptor, if it has one, and is a
   no-op otherwise. `io.close` and `io.flush` call it, as D11.5 specifies.
-- `fort_rt_flush_all`: writes out every runtime buffer. The library does not call it; it is
-  declared for programs that write through `libc.write` after printing (2.2).
-- `fort_rt_exit`: flushes every runtime buffer and exits with `status & 0xFF`; `sys.exit` is a
+- `flush_all`: writes out every runtime buffer. The library does not call it; it is
+  there for programs that write through `libc.write` after printing (2.2), and the `main` the
+  compiler emits calls it at exit (D11.6).
+- `exit`: flushes every runtime buffer and exits with `status & 0xFF`; `sys.exit` is a
   call to it.
 
 Three properties of the runtime the library also depends on: `del` frees by the pointer alone,

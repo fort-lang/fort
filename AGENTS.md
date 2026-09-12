@@ -1031,6 +1031,15 @@ A safe(r) C-like systems programming language.
     by name; it renames a field to `is_mut`/`is_own`/`is_noreturn` and gives an enum member the
     C constant's prefix (`cv_int` for `CV_INT`), or a short one where the C name is already a
     function's (`k_ptr` for `TYPE_PTR`, beside the constructor `type_ptr`).
+    **A universe function's name is taken too, but only where the module needs the builtin.**
+    `del`, `move`, `panic`, `assert` and the print family are universe-scope names that a
+    module-level declaration shadows inside that module (D12.2, D7.9), so a module that declares
+    one loses the builtin for its own body. The question to ask is therefore not "is this name
+    reserved" but "does this module call the builtin it would shadow": `std.rt` may define
+    `panic`, which it implements and never calls, and may not define `del`, which it calls on its
+    own buffers -- so the entry points behind `new` and `del` are `alloc` and `free` while the one
+    behind `panic` is `panic` (`toolchain.md` 5.1, T-088). A keyword, by contrast, is never
+    available: `new` is one (D2.4), so no declaration of that name exists at all.
   - **`new(T, n)` gives its result `mut` at every level** (D5.8), so `new(node*, n)` is
     `node mut* mut@ own` and storing it in a `node* mut@ own` field is refused: dropping the
     pointee's `mut` behind a mutable span is D5.4's `T** -> const T**` hole. A `cast` is the

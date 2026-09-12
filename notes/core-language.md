@@ -1234,8 +1234,9 @@ fn i32 checked(i32 x) {
 The module given to `fort` must define `fn i32 main()` or `fn i32 main(string@ args)`.
 `args[0]` is the program name, and every element is NUL-terminated because it comes from `argv`.
 The return value is the exit status; the process exits with `status & 0xFF`. A `main` returning
-`void` is an error. A `main` in any other module is an ordinary function. The C runtime owns the
-process entry: it builds `args`, calls the program, flushes output and exits.
+`void` is an error. A `main` in any other module is an ordinary function. The compiler emits the
+process entry: a `main(argc, argv)` that asks the runtime for `args`, calls the program, flushes
+output and returns the status (D11.6, D13.1).
 
 ```fort
 fn i32 main(string@ args) {
@@ -1345,7 +1346,7 @@ unbuffered; `fprint` and `fprintln` use one buffer per descriptor. An `extern` w
 descriptor bypasses the buffers. Buffers flush when full, at exit and before any runtime error,
 and a buffer whose descriptor is a terminal flushes at every newline as well, so a program run
 interactively shows each `println` as it happens and one redirected to a file or a pipe does not;
-the runtime exports `fort_rt_flush(i32 fd)` and `fort_rt_flush_all()`, and `io.close` and
+the runtime exports `std.rt.flush(i32 fd)` and `std.rt.flush_all()`, and `io.close` and
 `io.flush` call the former (`memory-model.md` section 7).
 
 ```fort

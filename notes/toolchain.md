@@ -1,11 +1,11 @@
 # fort toolchain
 
 This document specifies the `fort` compiler's command line, build pipeline, build modes,
-diagnostics, C runtime, code generation contract and test conventions for v1. It implements D14
+diagnostics, runtime, code generation contract and test conventions for v1. It implements D14
 together with D9.10, D10, D11, D12, D18 and the run-time side of D17. Where it disagrees with
 `decisions.md` or `grammar.md`, those files win (D1.2).
 
-Sections: 1 Command line; 2 Build pipeline; 3 Build modes; 4 Diagnostics; 5 The C runtime;
+Sections: 1 Command line; 2 Build pipeline; 3 Build modes; 4 Diagnostics; 5 The runtime;
 6 Code generation contract; 7 Testing; 8 Compiler architecture sketch; 9 Not in v1.
 
 ## 1. Command line
@@ -168,7 +168,7 @@ memory`.
 fort main.ft -o main                          # build ./main in checked mode
 fort -S main.ft                               # write main.ll and stop
 fort -c main.ft                               # write main.o and stop
-clang --target=x86_64-linux-gnu -o main main.o "$FORT_STD_DIR/fort_rt.o"   # link -c by hand
+clang --target=x86_64-linux-gnu -o main main.o          # link the -c object by hand
 fort --release -o main main.ft                # release mode
 fort --release --no-bounds-check -o bench main.ft
 fort -I lib -I vendor -lm main.ft             # extra roots, link libm
@@ -194,7 +194,9 @@ Compilation is whole-program (D9.10):
    `007_case.ft` is the module `007_case` and nothing can import it, and `my-app.ft` is legal too
    (D9.1 as amended).
 2. Parse it; resolve each import (module-system.md 2 and 3); parse each newly reached module
-   until the closure is complete; reject cycles and duplicate identities (exit 1).
+   until the closure is complete; reject cycles and duplicate identities (exit 1). `std.rt` is a
+   root of the closure beside the entry file and is loaded whether or not anything imports it
+   (D9.10, section 5).
 3. Check every module in dependency order, imported modules first (exit 1).
 4. Emit one LLVM IR module for the closure to `<tmp>/<entry>.ll` (D19.1), or to the `-S` output
    and stop.
@@ -203,15 +205,16 @@ Compilation is whole-program (D9.10):
 
    ```sh
    clang --target=x86_64-linux-gnu -O1 -fPIE -pie -Wno-override-module \
-       -o <out> <tmp>/<entry>.ll <std-dir>/fort_rt.o <-l options> <-Xcc args>
+       -o <out> <tmp>/<entry>.ll <-l options> <-Xcc args>
    ```
 
-   with `-O2` in place of `-O1` under `--release` (D14.3), and `-c` before `-o`, no `-pie`, no
-   runtime object and no `-l` for `-c`. That clang finds the cross sysroot, its `Scrt1.o`,
+   with `-O2` in place of `-O1` under `--release` (D14.3), and `-c` before `-o`, no `-pie` and
+   no `-l` for `-c`. The module is the only input the compiler names: it holds the whole program,
+   the runtime included (D9.10, D13.1). That clang finds the cross sysroot, its `Scrt1.o`,
    `crti.o` and `crtn.o` and `x86_64-linux-gnu-ld` by itself, so no `--sysroot`,
    `--gcc-toolchain` or `-fuse-ld` is needed; `-Wno-override-module` silences the warning about
-   the module's own target triple, and `-x ir` must not be passed because `-x` is sticky and
-   would also treat `fort_rt.o` as IR.
+   the module's own target triple, and the `.ll` suffix is what tells clang the input is IR, so
+   `-x ir` is not passed.
 6. Remove the temporary directory.
 
 `--check` stops after step 3 (D20.1): it emits no module, creates no temporary directory, runs no
@@ -227,15 +230,18 @@ under inspection rather than a program.
   modules in the form the compiler emits and `test/pipeline_test.sh` runs this pipeline over
   them; the language-test harness verifies the module of every test that compiles
   (`run_tests.py --verify-ir`, section 7.3).
-- An object from `-c` contains the whole program except the runtime; linking it needs
-  `<std-dir>/fort_rt.o` and nothing else (D9.10).
+- An object from `-c` contains the whole program, the runtime included, so linking it needs no
+  input the compiler produced beyond the object itself (D9.10, D13.1).
 
 Where things live: `<std-dir>/*.ft` holds the standard library modules of D13.2 (`std.sys`,
 `std.libc`, `std.rt`, `std.mem`, `std.io`, `std.str`, `std.strbuf`, `std.vec`,
 `std.strmap`, `std.math`) as source, compiled with every program that imports them;
-`<std-dir>/fort_rt.o` is the C runtime object, built from `runtime/fort_rt.c` by the compiler's
-own build; `<bindir>/fort` is the compiler, and `<bindir>/std` its fallback `--std-dir`. Only
-modules in the import closure are read (module-system.md 10).
+`std.rt` is the runtime (section 5) and is compiled with every program, imported or not (D9.10);
+`<bindir>/fort` is the compiler, and `<bindir>/std` its fallback `--std-dir`. Only
+modules in the import closure are read (module-system.md 10). A `--std-dir` (or `FORT_STD_DIR`)
+that does not hold the library therefore fails every compile, a program with no `import` at all
+included, with `module 'std.rt' not found` naming a module the user never wrote: the runtime is
+read from there like any other standard library module.
 
 ## 3. Build modes
 
@@ -402,142 +408,162 @@ several:
   compiler reaches a verdict: a usage error, a toolchain error or an internal error leaves stdout
   empty and exits 2 (D14.1).
 
-## 5. The C runtime
+## 5. The runtime
 
-The runtime is `runtime/fort_rt.c`, compiled to `<std-dir>/fort_rt.o`; it is C and permanent
-(D13.1). It owns process start and exit (D11.6), heap allocation (D10.2, D10.3), the
-runtime-error and panic paths (D11.4, including the ownership overwrite check of D17.11),
-formatting and buffering for the print family (D11.5, D11.7, D12.2, D18), and the program
-arguments for `std.sys`. The compiler emits calls to the entry points below and declares each
-one it uses in the module with the prototype shown, mapped to IR types by section 6 item 8 and
-with `cold noreturn nounwind` on the `_Noreturn` ones; the standard library declares the ones it
-needs with `extern fn` (module-system.md 7).
+The runtime is `std.rt`, an ordinary fort module (`<std-dir>/rt.ft`) that the compiler loads into
+every import closure and emits into the program's module like any other (D13.1, D9.10). It owns
+process start and exit (D11.6), heap allocation (D10.2, D10.3), the runtime-error and panic paths
+(D11.4, including the ownership overwrite check of D17.11), formatting and buffering for the print
+family (D11.5, D11.7, D12.2, D18), and the program arguments for `std.sys`. It imports `std.libc`
+and reaches the operating system through it (D9.8): `write` for the buffers, `calloc` and `free`
+for `alloc` and `free` below, `abort` for the failure paths, `isatty` for D11.5's question and
+`strlen` for `args_init`. A program that writes `import std.rt;` calls it as it calls any module
+(D9.3).
+
+Four things about it are not ordinary, and they are the whole list: it is a root of every closure,
+imported or not (D9.10); the compiler knows the names of section 5.1 and emits calls to them
+(D12.2); its `struct enum_member` is the `%fort.enum_member` of section 6 item 2 rather than a
+`%struct.` of its own; and the definitions of its `noreturn` entry points carry the attribute
+group of item 14, which no other fort function gets. Everything else in it -- its buffers, its
+helpers, its own `extern` declarations -- is an ordinary module's.
+
+The compiler holds the list of names below, since fort has no attribute with which a module could
+mark a declaration as the target of a builtin (D12.2), and emits its calls against the signatures
+this section fixes, by the mangled names of D9.7 (`@"std.rt.print_i64"`). It emits no declaration
+for any of them: the module that holds the call holds the definition too (section 6 item 8).
 
 ### 5.1 Entry points
 
-`loc` abbreviates `const char* file, uint32_t line, uint32_t col`. Every `fort_rt_fail_*`
-function, `fort_rt_panic`, `fort_rt_assert_fail` and `fort_rt_exit` is `_Noreturn`.
+The signatures are fort, and `std.rt` defines each one; fort has no prototype, so the bodies are
+simply left out here. Their IR follows from the type table of section 6
+item 2 and the convention of item 7 and is nothing special: a `bool` result is `zeroext i8`, a
+`char` parameter `i8 zeroext`, `u64` and `i64` are both `i64` (D9.9). `loc` abbreviates the three
+parameters `char* file, u32 line, u32 col`, the position of D11.4. Every `fail_*` function,
+`panic`, `assert_fail` and `exit` is `fn noreturn` (D8.5).
 
-```c
-// Types shared with generated code.
-struct fort_string { const char* ptr; uint64_t len; };    // fort string, D3.7
-struct fort_span   { void* ptr; uint64_t len; };          // fort T@, D3.5
-struct fort_rt_enum_member { int32_t value; const char* name; };
+```fort
+// The table a print of an enum reads (D3.9, D12.2). It is the fort type of the
+// `%fort.enum_member` the compiler emits (section 6 items 2 and 21).
+struct enum_member { i32 value; char* name; }
 
-// Allocation (D10.2, D10.3). fort_rt_new returns zeroed storage for count elements
-// of elem_size bytes, at least one byte so the result is never null (new(T, 0) is
-// non-null); an overflowing product or a failed calloc is a runtime error at loc.
-// fort_rt_del is free(p); a null p is a no-op. Ownership (D17) is erased: the
-// runtime sees plain pointers, and the compiler zeroes a del or move operand
-// itself (section 6, items 17 and 18).
-void* fort_rt_new(uint64_t elem_size, uint64_t count, loc);
-void  fort_rt_del(void* p);
+// Allocation (D10.2, D10.3). `alloc` returns zeroed storage for `count` elements
+// of `elem_size` bytes, at least one byte so the result is never null (`new(T, 0)`
+// is non-null); an overflowing product or a failed allocation is a runtime error
+// at `loc`. `free` releases what `alloc` returned; a null `p` is a no-op.
+// Ownership (D17) is erased: the runtime sees plain pointers, and the compiler
+// zeroes a `del` or `move` operand itself (section 6, items 17 and 18). The
+// result is `void* own` and carries no `mut`, `void*` having no target level
+// (D17.13), which is `libc.malloc`'s type too (`stdlib.md` 2.2).
+// The two are not called `new` and `del`: `new` is a keyword (D2.4), and `del`
+// is a universe function that a module-level declaration of that name shadows
+// (D12.2, D7.9) -- inside `std.rt`, which releases its own buffers and its argv
+// storage with `del`, that would cost the module the operation it needs. A name
+// is free to take when the module implements the builtin rather than using it,
+// which is why `panic` below is `panic`.
+fn void* own alloc(u64 elem_size, u64 count, char* file, u32 line, u32 col);
+fn void free(void* own p);
 
-// Strings (D3.7). fort_rt_str_eq is 1 when the two strings have the same length
-// and the same bytes and 0 otherwise, which is what == and != on strings compare,
-// so the zero string equals "". The compiler emits no call to a C library symbol
-// of its own accord (D9.8), so the memcmp this needs lives in the runtime, where
-// it is an implementation detail and not a fort ABI surface.
-uint8_t fort_rt_str_eq(const char* a, uint64_t a_len, const char* b, uint64_t b_len);
+// Strings (D3.7). `str_eq` is true when the two strings have the same length and
+// the same bytes, which is what `==` and `!=` on strings compare, so the zero
+// string equals `""`. The compiler emits no call to a C symbol of its own accord
+// (D9.8), so the byte comparison this needs is the runtime's, reached through
+// `std.libc` like every other call it makes.
+fn bool str_eq(char* a, u64 a_len, char* b, u64 b_len);
 
-// Failures (D11.4): flush every buffer, write one line to stderr, abort().
-// Values arrive sign-extended to 64 bits; hi is len for e[lo..]; type is the
-// NUL-terminated name of the shifted operand's type; text is the NUL-terminated
-// source text of the assert argument. fail_div_overflow is MIN / -1 and MIN % -1;
-// fail_alloc_count is new(T, n) with a negative signed n; fail_overwrite is an
-// assignment to an own reference-typed lvalue whose current value is not zero
-// (D17.11), emitted in checked builds only; fail_enum is the default a switch
-// over an enum with no `default` clause is given (D7.7), where type is the
-// enum's name, and it is emitted in both build modes.
-void fort_rt_fail_bounds(int64_t index, uint64_t len, loc);
-void fort_rt_fail_span(int64_t lo, int64_t hi, uint64_t len, loc);
-void fort_rt_fail_overflow(loc);
-void fort_rt_fail_shift(int64_t count, const char* type, loc);
-void fort_rt_fail_div_zero(loc);
-void fort_rt_fail_div_overflow(loc);
-void fort_rt_fail_alloc_count(int64_t n, loc);
-void fort_rt_fail_overwrite(loc);
-void fort_rt_fail_enum(int64_t v, const char* type, loc);
-void fort_rt_panic(const char* ptr, uint64_t len, loc);
-void fort_rt_assert_fail(const char* text, loc);
+// Failures (D11.4): flush every buffer, write one line to stderr, abort.
+// Values arrive sign-extended to 64 bits; `hi` is `len` for `e[lo..]`; `type` is
+// the NUL-terminated name of the shifted operand's type; `text` is the
+// NUL-terminated source text of the assert argument. `fail_div_overflow` is
+// `MIN / -1` and `MIN % -1`; `fail_alloc_count` is `new(T, n)` with a negative
+// signed `n`; `fail_overwrite` is an assignment to an `own` reference-typed
+// lvalue whose current value is not zero (D17.11), emitted in checked builds
+// only; `fail_enum` is the default a switch over an enum with no `default`
+// clause is given (D7.7), where `type` is the enum's name, and it is emitted in
+// both build modes.
+fn noreturn fail_bounds(i64 index, u64 len, char* file, u32 line, u32 col);
+fn noreturn fail_span(i64 lo, i64 hi, u64 len, char* file, u32 line, u32 col);
+fn noreturn fail_overflow(char* file, u32 line, u32 col);
+fn noreturn fail_shift(i64 count, char* type, char* file, u32 line, u32 col);
+fn noreturn fail_div_zero(char* file, u32 line, u32 col);
+fn noreturn fail_div_overflow(char* file, u32 line, u32 col);
+fn noreturn fail_alloc_count(i64 n, char* file, u32 line, u32 col);
+fn noreturn fail_overwrite(char* file, u32 line, u32 col);
+fn noreturn fail_enum(i64 v, char* type, char* file, u32 line, u32 col);
+fn noreturn panic(char* ptr, u64 len, char* file, u32 line, u32 col);
+fn noreturn assert_fail(char* text, char* file, u32 line, u32 col);
 
 // Printing (D11.5, D11.7, D12.2): format one value per D11.7 and append it to the
-// buffer of fd. A float arrives in its own type and prints with the shortest digits
-// that round-trip in that type, which the runtime obtains from the C library and
-// lays out itself (D18); the two entry points are the only float ones (D18.4).
-// fort_rt_flush writes out one buffer (io.close and io.flush call it);
-// fort_rt_flush_all writes out every buffer, at exit and before every failure.
-// A buffer whose descriptor is a terminal is written out at every newline too
-// (D11.5, section 5.3).
-void fort_rt_print_i64(int32_t fd, int64_t v);
-void fort_rt_print_u64(int32_t fd, uint64_t v);
-void fort_rt_print_f32(int32_t fd, float v);
-void fort_rt_print_f64(int32_t fd, double v);
-void fort_rt_print_bool(int32_t fd, uint8_t v);
-void fort_rt_print_char(int32_t fd, uint8_t c);
-void fort_rt_print_ptr(int32_t fd, const void* p);
-void fort_rt_print_str(int32_t fd, const char* ptr, uint64_t len);
-void fort_rt_print_enum(int32_t fd, int32_t v, const struct fort_rt_enum_member* m,
-                        uint64_t n);
-void fort_rt_flush(int32_t fd);
-void fort_rt_flush_all(void);
+// buffer of `fd`. A float arrives in its own type and prints with the shortest
+// digits that round-trip in that type (D18); its two entry points are
+// `std.rt_float.print_f32` and `std.rt_float.print_f64` (D18.1, D18.4), which are
+// not part of this module and arrive with the rest of the float work.
+// `flush` writes out one buffer (`io.close` and `io.flush` call it); `flush_all`
+// writes out every buffer, at exit and before every failure. A buffer whose
+// descriptor is a terminal is written out at every newline too (D11.5, 5.3).
+fn void print_i64(i32 fd, i64 v);
+fn void print_u64(i32 fd, u64 v);
+fn void print_bool(i32 fd, bool v);
+fn void print_char(i32 fd, char c);
+fn void print_ptr(i32 fd, void* p);
+fn void print_str(i32 fd, char* ptr, u64 len);
+fn void print_enum(i32 fd, i32 v, enum_member* m, u64 n);
+fn void flush(i32 fd);
+fn void flush_all();
 
-// Process (D11.6, D8.6). main calls fort_rt_args_init, which builds the args
-// span from argv (one string per argument, NUL-terminated since it is the argv
-// byte sequence itself), then fort_entry, then fort_rt_flush_all, and returns
-// status & 0xFF. fort_entry is emitted by the compiler (module-system.md 11).
-// The args span lives for the whole process and std.rt declares
-// fort_rt_args_ptr and fort_rt_args_len for sys.args(); fort_rt_args_init is
-// called by main only and exists so the native runtime object, built without
-// main, can be tested. fort_rt_exit flushes every buffer, then
-// exit(status & 0xFF); std.rt declares it for sys.exit.
-int main(int argc, char** argv);
-int32_t fort_entry(const struct fort_span* args);
-void fort_rt_args_init(int argc, char** argv);
-const struct fort_string* fort_rt_args_ptr(void);
-uint64_t fort_rt_args_len(void);
-void fort_rt_exit(int32_t status);
+// Process (D11.6, D8.6). The compiler emits `main(argc, argv)` in the entry
+// module (section 6 item 22): it calls `args_init`, which builds the argument
+// span from `argv` (one string per argument, NUL-terminated, since it is the
+// `argv` byte sequence itself), then the `fort_entry` it emits beside it, then
+// `flush_all`, and returns `status & 0xFF`. The span lives for the whole process
+// and `args()` hands it out for `sys.args()`. `exit` flushes every buffer and
+// ends the process with `status & 0xFF`; `sys.exit` is a call to it.
+fn void args_init(i32 argc, char* mut* argv);
+fn string@ args();
+fn noreturn exit(i32 status);
 ```
 
-The float printers are the one place where the runtime uses the C library to format a value.
-`fort_rt_print_f64` asks `snprintf("%.*e", ...)` for one significant digit, then two, and so on,
-and keeps the first length whose text `strtod` reads back as the value; 17 digits for `f64` and
-9 for `f32` (`strtof`) always read back, so the search ends. `printf` returns the nearest decimal
-of the length asked for, which is not always the one to keep: for a normal power of two above the
-minimum normal the values that read back as it reach half an ulp above and only a quarter below,
-the binade below being coarser, so the nearest decimal can fall short of that interval while the
-next one up falls inside it, and the runtime tries that neighbour before lengthening. The
-neighbour below never needs trying, the gap below a float never being wider than the gap above.
-This asks two things of the C library that the standard permits but does not require and glibc
-provides: a correctly rounded `printf` (ties to even) and a correctly rounded `strtod`, down to
-the subnormals, where it also reports `ERANGE`, which the runtime ignores because only the value
-matters. The runtime lays the digits out itself. A rewrite of the runtime in fort must reproduce
-the text D18.2 fixes; it need not reproduce this search.
+`std.rt` and `std.rt_float` are the only modules the compiler names, and the list above together
+with D18.1's two float printers is every name it knows (D11.6, D18.4). The module's buffers, its
+helpers and everything else it needs are its own and are exported like any module's (D9.6), which
+makes them implementation details a program must not use (`stdlib.md` 1.1); `sys` and `io` import it
+for `exit`, `args`, `flush` and `flush_all` (`stdlib.md` 3) and the rest of the library leaves it
+alone. `errno` is not its business either: `sys.errno()` reaches libc's `__errno_location` directly.
 
-This list is complete (D11.6): the standard library declares no other `fort_rt_*` symbol. It
-declares `fort_rt_args_ptr`, `fort_rt_args_len`, `fort_rt_flush`, `fort_rt_flush_all` and
-`fort_rt_exit` in `std.rt` (`stdlib.md` 3) and reaches `errno` through libc's
-`__errno_location`.
+The float printers of `std.rt_float` are the one place where the runtime asks for a formatted value
+rather than laying the bytes out itself. What D18.2 fixes is the text, not the method; one method,
+and the one the C runtime used, is to ask `snprintf("%.*e", ...)` for one significant digit, then
+two, and so on, and keep the first length whose text `strtod` reads back as the value, since 17
+digits for `f64` and 9 for `f32` (`strtof`) always read back. `printf` returns the nearest decimal
+of the length asked for, which is not always the one to keep: for a normal power of two above the
+minimum normal the values that read back as it reach half an ulp above and only a quarter below, the
+binade below being coarser, so the nearest decimal can fall short of that interval while the next
+one up falls inside it, and that neighbour is worth trying before lengthening. The neighbour below
+never needs trying, the gap below a float never being wider than the gap above. That method asks two
+things of the C library which the standard permits but does not require and glibc provides, a
+correctly rounded `printf` (ties to even) and a correctly rounded `strtod` down to the subnormals,
+where it also reports `ERANGE`, which the caller ignores because only the value matters. Any
+implementation that produces the digits of D18.2 and the layout of D18.3 is admissible.
 
 ### 5.2 Messages
 
-Each failure writes exactly one line, after `fort_rt_flush_all`, then calls `abort()` (D11.4):
+Each failure writes exactly one line, after `flush_all`, then aborts (D11.4). The entry points
+are those of 5.1, in `std.rt`:
 
-| Entry point                 | Line after `<file>:<line>:<col>: ` (D11.4)                 |
-|-----------------------------|------------------------------------------------------------|
-| `fort_rt_fail_bounds`       | `runtime error: index 5 out of range for length 3`         |
-| `fort_rt_fail_span`         | `runtime error: span bounds 2..7 out of range for length 3`  |
-| `fort_rt_fail_overflow`     | `runtime error: integer overflow`                          |
-| `fort_rt_fail_shift`        | `runtime error: shift count 64 out of range for i64`       |
-| `fort_rt_fail_div_zero`     | `runtime error: division by zero`                          |
-| `fort_rt_fail_div_overflow` | `runtime error: division overflow`                         |
-| `fort_rt_fail_alloc_count`  | `runtime error: negative allocation count -1`              |
-| `fort_rt_new` (overflow)    | `runtime error: allocation size overflow`                  |
-| `fort_rt_new` (no memory)   | `runtime error: out of memory`                             |
-| `fort_rt_fail_overwrite`    | `runtime error: overwriting owned value`                   |
-| `fort_rt_fail_enum`         | `runtime error: enum value 0 is not a member of level`     |
-| `fort_rt_panic`             | `panic: <message bytes>`                                   |
-| `fort_rt_assert_fail`       | `assertion failed: <expression text>`                      |
+| Entry point           | Line after `<file>:<line>:<col>: ` (D11.4)                   |
+|-----------------------|--------------------------------------------------------------|
+| `fail_bounds`         | `runtime error: index 5 out of range for length 3`           |
+| `fail_span`           | `runtime error: span bounds 2..7 out of range for length 3`  |
+| `fail_overflow`       | `runtime error: integer overflow`                            |
+| `fail_shift`          | `runtime error: shift count 64 out of range for i64`         |
+| `fail_div_zero`       | `runtime error: division by zero`                            |
+| `fail_div_overflow`   | `runtime error: division overflow`                           |
+| `fail_alloc_count`    | `runtime error: negative allocation count -1`                |
+| `alloc` (overflow)    | `runtime error: allocation size overflow`                    |
+| `alloc` (no memory)   | `runtime error: out of memory`                               |
+| `fail_overwrite`      | `runtime error: overwriting owned value`                     |
+| `fail_enum`           | `runtime error: enum value 0 is not a member of level`       |
+| `panic`               | `panic: <message bytes>`                                     |
+| `assert_fail`         | `assertion failed: <expression text>`                        |
 
 `<file>` is as in section 4. Numbers in messages are decimal; the index, the span bounds and
 the allocation count are printed as signed values. Falling off the end of a `noreturn` function
@@ -582,7 +608,11 @@ interactive path, and the script drives a compiled program on a real pseudo term
 
 This section is normative for the compiler. The LLVM IR module it emits must satisfy every item
 and must pass `opt -passes=verify` (D19.1). The two examples at the end are `test/ir/hello.ll`
-and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (section 2).
+and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (section 2). They
+are hand-written modules that exercise the pipeline, not output of the compiler, which is why
+they `declare` the entry points they call and link against an object that defines them: a module
+the compiler builds from a program defines them itself, `std.rt` being in the closure (item 8,
+D13.1). The two files and the object they link against move together.
 
 1. **Form and module header.** One textual module (`.ll`, LLVM 18 syntax, opaque pointers) holds
    the whole program (D9.10, D19.1) and is built by appending text in one forward pass. It
@@ -621,11 +651,13 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    Signedness is in the instruction, never in the type (D3.1), and an array type nests outside
    in, so `i32[3][4]` is `[3 x [4 x i32]]` (D3.6). Every load of a `bool` place is a
    `load i8` and a `trunc`, every store a `zext` and a `store i8`, so a `bool` field has C's
-   `_Bool` layout and `fort_rt_print_bool(int32_t, uint8_t)` needs no special case; the
+   `_Bool` layout and `std.rt.print_bool(i32, bool)` needs no special case; the
    `trunc`/`zext` pairs disappear in the optimizer. One `%fort.span` serves every span and
    `string`, because with opaque pointers `i32@`, `u8@` and `string` have identical IR (D3.5,
    D3.7). `%fort.span` and `%fort.enum_member = type { i32, ptr }` are emitted in every module,
-   used or not, so the emitter tracks nothing; unused named types are legal.
+   used or not, so the emitter tracks nothing; unused named types are legal. `%fort.enum_member`
+   is the IR of `std.rt`'s own `struct enum_member` (section 5.1) and is emitted under that name
+   rather than as `%struct.std.rt.enum_member`, one named type for one layout.
 
 3. **Aggregates live in memory** (D19.3). Only scalars are SSA values: a struct, fixed array,
    span or `string` always occupies a place, is copied with `llvm.memcpy.p0.p0.i64`, zeroed
@@ -642,12 +674,13 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
 
 4. **Symbols, linkage, visibility** (D9.7). The dotted names of D9.7 are quoted:
    `@"main.add"`, `@"std.io.read_file"`, `@"main.LIMIT"`; quoting is uniform and does not change
-   the ELF symbol, which is `main.add`. C names (`extern` declarations, `fort_rt_*`,
-   `fort_entry`) are unquoted. Fort functions, constants and globals are `dso_local` with the
-   default external linkage (D9.6), so fort-to-fort calls are direct and fort data is addressed
-   PC-relative; `extern` and `fort_rt_*` symbols carry no `dso_local` and go through the
-   procedure linkage and global offset tables. Private data (`@.str.N`, `@.file.N`,
-   `@.enum.<path.name>`) is `private unnamed_addr`.
+   the ELF symbol, which is `main.add`. C names (`extern` declarations, and the `fort_entry` and
+   `main` the compiler emits) are unquoted; the runtime is fort, so `@"std.rt.print_i64"` is
+   quoted like every other dotted name (D9.7). Fort functions, constants and globals are
+   `dso_local` with the default external linkage (D9.6), so fort-to-fort calls are direct, a call
+   into the runtime among them, and fort data is addressed PC-relative; `extern` symbols carry no
+   `dso_local` and go through the procedure linkage and global offset tables. Private data
+   (`@.str.N`, `@.file.N`, `@.enum.<path.name>`) is `private unnamed_addr`.
 
    A name LLVM's unquoted identifiers (`[-a-zA-Z$._][-a-zA-Z$._0-9]*`) do not admit is quoted
    too, which only an entry module's can be, since every other module path is identifiers
@@ -655,11 +688,11 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    file `a"b.ft`. Inside the quotes, the two bytes a quoted name cannot hold, `"` and `\`, and
    every byte outside the printable range are written as the `\XX` hex pair of item 5, which
    LLVM reads back to the byte: the ELF symbol is the name itself, so this stays spelling only
-   like the quoting of every dotted name (D9.7). One ELF symbol is one IR entity: an `extern fn`
-   naming a runtime entry point is replaced by that group's canonical declaration (item 8), and
-   `fort_entry` is reserved, so the checker refuses an `extern` that declares it (D9.7,
-   module-system.md 13) and the emitter declares no name it defines, which leaves the definition
-   of item 22 alone.
+   like the quoting of every dotted name (D9.7). One ELF symbol is one IR entity: `fort_entry` and
+   `main` are reserved, so the checker refuses an `extern` that declares either (D9.7,
+   module-system.md 13) and the emitter declares no name it defines, which leaves the two
+   definitions of item 22 alone. A runtime entry point is a fort definition in the module like any
+   other, so nothing declares it either (item 8).
 
 5. **Data emission.** Private data follows the function definitions, `@.file.N` constants before
    `@.str.N` before `@.enum.*` (D19.5):
@@ -689,7 +722,7 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
 
 6. **Position independence** (D14.3, D16). Nothing in the IR expresses it: `dso_local` (item 4)
    and the `-fPIE -pie` of section 2 give RIP-relative data, direct fort-to-fort calls and
-   linkage-table calls to `extern` and runtime symbols. The one requirement the module carries
+   linkage-table calls to `extern` symbols. The one requirement the module carries
    is that an address is never an integer constant derived from a symbol; addresses appear only
    as `ptr` values and as `ptr` constants in initializers.
 
@@ -722,7 +755,7 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    an extern is called through the variadic type of item 8, which only its declaration can
    supply.
 
-8. **Extern and runtime declarations** (D9.8). An `extern` function is declared with its C types,
+8. **Extern declarations** (D9.8). An `extern` function is declared with its C types,
    unmangled, and with a variadic tail, and is called through the matching variadic call type:
 
    ```llvm
@@ -741,50 +774,16 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    declaration is ABI-identical for it. `#3 = { nobuiltin }` on every extern call site that goes
    through that variadic type keeps LLVM from rewriting a declared symbol into another library
    call, and is preferred to a driver-wide `-fno-builtin`, which would also change how our
-   `llvm.memcpy` and `llvm.memset` are lowered. An `extern fn` naming a runtime entry point is
-   the exception at both ends: it takes that group's prototype rather than the variadic type
-   (below), and its call site carries no `#3`, since no C library occupies the `fort_rt_` space
-   and there is nothing to rewrite it into. A call through a function pointer is not variadic
+   `llvm.memcpy` and `llvm.memset` are lowered. A call through a function pointer is not variadic
    (D3.10 has no variadic function type) and needs no such declaration; it is also never a call of
    an extern, whose name is not a value, so every extern call of a C library symbol in the module
    carries the variadic type above (D3.10).
 
-   The runtime entry points are declared with the C prototypes of section 5.1 and are never
-   variadic, whether the compiler emits the call itself or the standard library reached the
-   entry point with an `extern fn` (D13.1), which is the rule the paragraph below the intrinsics
-   states in full:
-
-   ```llvm
-   declare ptr @fort_rt_new(i64, i64, ptr, i32, i32)
-   declare void @fort_rt_del(ptr)
-   declare zeroext i8 @fort_rt_str_eq(ptr, i64, ptr, i64)
-   declare void @fort_rt_fail_bounds(i64, i64, ptr, i32, i32) #2
-   declare void @fort_rt_fail_span(i64, i64, i64, ptr, i32, i32) #2
-   declare void @fort_rt_fail_overflow(ptr, i32, i32) #2
-   declare void @fort_rt_fail_shift(i64, ptr, ptr, i32, i32) #2
-   declare void @fort_rt_fail_div_zero(ptr, i32, i32) #2
-   declare void @fort_rt_fail_div_overflow(ptr, i32, i32) #2
-   declare void @fort_rt_fail_alloc_count(i64, ptr, i32, i32) #2
-   declare void @fort_rt_fail_overwrite(ptr, i32, i32) #2
-   declare void @fort_rt_fail_enum(i64, ptr, ptr, i32, i32) #2
-   declare void @fort_rt_panic(ptr, i64, ptr, i32, i32) #2
-   declare void @fort_rt_assert_fail(ptr, ptr, i32, i32) #2
-   declare void @fort_rt_print_i64(i32, i64)
-   declare void @fort_rt_print_u64(i32, i64)
-   declare void @fort_rt_print_f32(i32, float)
-   declare void @fort_rt_print_f64(i32, double)
-   declare void @fort_rt_print_bool(i32, i8 zeroext)
-   declare void @fort_rt_print_char(i32, i8 zeroext)
-   declare void @fort_rt_print_ptr(i32, ptr)
-   declare void @fort_rt_print_str(i32, ptr, i64)
-   declare void @fort_rt_print_enum(i32, i32, ptr, i64)
-   declare void @fort_rt_flush(i32)
-   declare void @fort_rt_flush_all()
-   declare void @fort_rt_args_init(i32, ptr)
-   declare ptr @fort_rt_args_ptr()
-   declare i64 @fort_rt_args_len()
-   declare void @fort_rt_exit(i32) #2
-   ```
+   The runtime needs no declaration at all: `std.rt` is in the closure (D9.10), so the module
+   that holds a call to `@"std.rt.print_i64"` holds its definition, emitted from fort source like
+   every other function (item 7). A `declare` beside a `define` is a redefinition `opt` rejects,
+   and a call into the runtime is an ordinary fort-to-fort call, non-variadic, with the parameter
+   and result attributes item 7 gives the fort signature of section 5.1 and no `#3`.
 
    The intrinsics are declared with the spellings LLVM 18 prints, in this fixed order, one per
    type actually used and none otherwise:
@@ -806,19 +805,11 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    12), then `llvm.trap` (item 20). The parameter attributes shown are part of the spelling.
 
    Only referenced declarations are emitted, in a fixed order (D19.5): `extern` C functions in
-   first-use order, then the runtime entry points in the order of section 5.1 above, then the
-   intrinsics in the order of the table above, each group separated from the next by a blank
-   line. A symbol is declared exactly once, so an `extern fn` naming a runtime entry point
-   (`fort_rt_flush`, `fort_rt_exit`, the rest of section 5.1 that `std.rt` declares, D13.1)
-   is emitted in the runtime group with that group's prototype and attributes and is left out of
-   the extern group, variadic tail included. A plain runtime declaration carries no attribute
-   group; the `_Noreturn` entry points of section 5.1 carry `#2` (item 14), `fort_rt_exit`
-   included, whether the compiler or an `extern fn` brought them in.
-   Because that declaration replaces the one the program wrote, an `extern fn` naming an entry
-   point must agree with section 5.1's prototype, and a disagreement is a compile error the
-   front end reports (`module-system.md` 13): a call written against a wrong signature would
-   otherwise be emitted against the canonical declaration, which no tool below the compiler
-   objects to, opaque pointers making a call site's type independent of its callee's (D9.8).
+   first-use order, then the intrinsics in the order of the table above, the two groups separated
+   by a blank line. There are two groups and no third: a symbol is declared exactly once, and
+   every fort function the module calls, the runtime's included, is defined in it. Two modules
+   that declare one C symbol are two fort declarations of one ELF symbol and yield one `declare`,
+   which is why the extern group is keyed by the C name and not by the declaration (D9.7, D9.8).
 
 9. **Normalization** (D9.8, D19.2). A narrow value is not widened to 32 bits: an `i8` value has
    type `i8` and its width is in the type. The only extensions the emitter produces are the
@@ -846,7 +837,7 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
     `for`, `break` and `continue` become `br`; a fort `switch` on an integer, `char` or enum
     becomes an LLVM `switch` with one case per label and a default block: the `default` clause
     wherever it stands, the continuation when there is none, and, for an enum switch with no
-    `default` clause, a failure block calling `fort_rt_fail_enum` with the operand
+    `default` clause, a failure block calling `std.rt.fail_enum` with the operand
     sign-extended to 64 bits and the enum's name, which is the default D7.7 gives it and which
     neither build mode removes; `&&`, `||` and
     `?:` short-circuit through a stack slot rather than a `phi`, so the tree walk never has to
@@ -894,13 +885,21 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
     before the bodies of its clauses, whose own checks take larger labels. Each failure block
     holds exactly one call to the section 5.1 entry point, with the check's values,
     `ptr @.file.N` and the `i32` line and column of section 4's position rule, followed by
-    `unreachable`; nothing else, because the callee aborts (D11.4).
-    Every `_Noreturn` entry point of section 5.1 is declared `#2 = { cold noreturn nounwind }`:
-    the `fort_rt_fail_*` family, `fort_rt_panic` and `fort_rt_assert_fail`, which the failure
-    blocks call, and `fort_rt_exit`, which only `std.rt` reaches. `noreturn` is truthful,
-    since each is `_Noreturn` in `runtime/fort_rt.h`, and `cold` lays the block out of line,
-    which on an exit path is a layout hint and nothing more. No attribute is put on a failure
-    call site.
+    `unreachable`; nothing else, because the callee aborts (D11.4). A failure block is the
+    emitter's own code and not a call the program wrote, so the call-site trap of D8.5 and D19.7
+    does not stand in it; a program that calls an entry point of section 5.1 itself gets that
+    trap like any other call to a `noreturn` function (item 20).
+    Every `noreturn` entry point of section 5.1 carries `#8 = { cold noreturn nounwind
+    "frame-pointer"="all" "probe-stack"="inline-asm" }` on its definition: the `std.rt.fail_*`
+    family, `std.rt.panic` and `std.rt.assert_fail`, which the failure blocks call, and
+    `std.rt.exit`, which only `std.rt` reaches. `noreturn` is truthful,
+    since each is `fn noreturn` in fort and aborts (D8.5), and `cold` lays the block out of line,
+    which on an exit path is a layout hint and nothing more. `#8` is `#1` of item 20 plus `cold`,
+    since these are fort definitions and carry what every fort definition carries (item 7); the
+    emitter gives it to the definitions of the names it knows (section 5.1) and to no other fort
+    function. It is a new index rather than the `#2` that used to hold `{ cold noreturn nounwind }`
+    on the runtime's C declarations, because those two sets of attributes are not the same and one
+    index cannot mean both. No attribute is put on a failure call site.
 
 15. **Integer checks** (D11.1, D11.3). In checked mode one intrinsic per operation, at the
     operand's width:
@@ -922,18 +921,18 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
 
     A shift count is materialized at 64 bits (`sext` for a signed count type, `zext` for an
     unsigned one) so that a negative count is reported with its signed value, then
-    `icmp uge i64 %cnt, <width>` branches to a `fort_rt_fail_shift(i64 %cnt, ptr @.str.T, ...)`
+    `icmp uge i64 %cnt, <width>` branches to a `std.rt.fail_shift(i64 %cnt, ptr @.str.T, ...)`
     block, where `@.str.T` is the shifted operand's type name; release mode replaces the check
     with `and i64 %cnt, <width - 1>` (D11.1). The count is then truncated to the operand's type
     and the shift is `shl`, `ashr` for a signed operand or `lshr` for an unsigned one (D6.2), so
     a shift never produces poison. Division and remainder, in both modes (D6.13): `icmp eq %d,
-    0` branches to `fort_rt_fail_div_zero`; for a signed type the conjunction of
-    `icmp eq %d, -1` and `icmp eq %n, <MIN>` branches to `fort_rt_fail_div_overflow`; then
+    0` branches to `std.rt.fail_div_zero`; for a signed type the conjunction of
+    `icmp eq %d, -1` and `icmp eq %n, <MIN>` branches to `std.rt.fail_div_overflow`; then
     `sdiv`, `srem`, `udiv` or `urem`.
 
 16. **Bounds checks** (D6.8, D6.9). The index is sign-extended (signed) or zero-extended
     (unsigned) to `i64`, then one `icmp uge i64 %idx, %len` branches to
-    `fort_rt_fail_bounds(i64 %idx, i64 %len, ...)`, so a negative index fails the same compare.
+    `std.rt.fail_bounds(i64 %idx, i64 %len, ...)`, so a negative index fails the same compare.
     Element addressing is `getelementptr inbounds` (item 3):
 
     ```llvm
@@ -942,21 +941,21 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
     ```
 
     A span expression checks both bounds with one branch (`icmp ugt i64 %hi, %len`,
-    `icmp ugt i64 %lo, %hi`, `or i1`) into `fort_rt_fail_span(i64 %lo, i64 %hi, i64 %len, ...)`. A
+    `icmp ugt i64 %lo, %hi`, `or i1`) into `std.rt.fail_span(i64 %lo, i64 %hi, i64 %len, ...)`. A
     fixed array's length is an `i64` literal. `--no-bounds-check` removes exactly these branches and
     keeps the `inbounds`, which is what makes it unsafe (D10.6).
 
 17. **`new` and `del`** (D10.2, D10.3, D17.9).
 
     ```llvm
-      %t0 = call ptr @fort_rt_new(i64 4, i64 1, ptr @.file.0, i32 7, i32 13)
+      %t0 = call ptr @"std.rt.alloc"(i64 4, i64 1, ptr @.file.0, i32 7, i32 13)
     ```
 
     `new(T, n)` materializes `n` as `i64` first and, when its fort type is signed, branches on
-    `icmp slt i64 %n, 0` to `fort_rt_fail_alloc_count(i64 %n, ...)`; it then calls
-    `fort_rt_new(sizeof(T), %n, loc)` and writes the header field by field into the destination
+    `icmp slt i64 %n, 0` to `std.rt.fail_alloc_count(i64 %n, ...)`; it then calls
+    `std.rt.alloc(sizeof(T), %n, loc)` and writes the header field by field into the destination
     place (`getelementptr inbounds %fort.span, ptr %d, i32 0, i32 0` for `ptr`, `i32 0, i32 1`
-    for `len`). `del(x)` loads the pointer (field 0 for a span or `string`), calls `fort_rt_del`
+    for `len`). `del(x)` loads the pointer (field 0 for a span or `string`), calls `std.rt.free`
     and, on an lvalue operand, zeroes the place: `store ptr null` for a pointer, a 16-byte
     `llvm.memset` for a span or `string`. On an rvalue nothing is stored.
 
@@ -978,7 +977,7 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
       br i1 %t9, label %L5, label %L4
     ```
 
-    with `fort_rt_fail_overwrite(ptr @.file.N, i32 line, i32 col)` at the `=` token. A span or
+    with `std.rt.fail_overwrite(ptr @.file.N, i32 line, i32 col)` at the `=` token. A span or
     `string` target is produced into a compiler temporary first, an aggregate being written into
     a place rather than held in a register (D19.3), and the header is copied over after the
     check; a pointer target's value is already in a register, so the store follows the check
@@ -993,15 +992,17 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
 
 19. **Builtins** (D12.2). The print family evaluates `fd` once (`1`, `2`, or the first argument)
     and then each argument left to right, one call per argument (D11.5): `i8 i16 i32 i64`
-    sign-extended to `i64` to `fort_rt_print_i64`; `u8 u16 u32 u64` zero-extended to `i64` to
-    `fort_rt_print_u64`; `f32` and `f64` to `_f32` and `_f64`; `bool` `zext`ed from `i1` to `i8`
-    to `_bool`; `char` to `_char`; an enum as `(i32 %v, ptr @.enum.<path.name>, i64 <count>)` to
-    `_enum`; a pointer, `void*` or function pointer to `_ptr`; a `string` as its `ptr` and `len`
-    fields, or as `(ptr @.str.N, i64 <len>)` for a literal, to `_str`. `println` and its
-    relatives end with `fort_rt_print_char(i32 %fd, i8 zeroext 10)`. `assert(cond)` branches to
-    a block that calls `fort_rt_assert_fail(ptr @.str.N, ptr @.file.N, i32 line, i32 col)` and
+    sign-extended to `i64` to `std.rt.print_i64`; `u8 u16 u32 u64` zero-extended to `i64` to
+    `print_u64`; `f32` and `f64` to `std.rt_float.print_f32` and `print_f64` (D18.1); `bool`
+    `zext`ed from `i1` to `i8` to `print_bool`; `char` to `print_char`; an enum as
+    `(i32 %v, ptr @.enum.<path.name>, i64 <count>)` to `print_enum`; a pointer, `void*` or
+    function pointer to `print_ptr`; a `string` as its `ptr` and `len`
+    fields, or as `(ptr @.str.N, i64 <len>)` for a literal, to `print_str`. Each unqualified name
+    here is a function of `std.rt` (section 5.1). `println` and its
+    relatives end with `std.rt.print_char(i32 %fd, i8 zeroext 10)`. `assert(cond)` branches to
+    a block that calls `std.rt.assert_fail(ptr @.str.N, ptr @.file.N, i32 line, i32 col)` and
     is followed by `unreachable`, in both build modes, where `@.str.N` is the verbatim source
-    text of the argument; `panic(msg)` calls `fort_rt_panic(ptr, i64, ptr, i32, i32)` and is
+    text of the argument; `panic(msg)` calls `std.rt.panic(ptr, i64, ptr, i32, i32)` and is
     followed by `unreachable` (D11.4).
 
 20. **`noreturn`** (D8.5, D19.7). A `noreturn` fort function is
@@ -1019,12 +1020,11 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
     since LLVM may let control fall through it. Reaching either raises SIGILL with no message
     (D11.4).
 
-    `noreturn` is emitted on a fort definition, as `#1` above, and never on a declaration of a
-    C function the program wrote with `extern fn`, whatever its fort return type; the runtime
-    entry points are the exception, since their `_Noreturn` is the runtime's own guarantee
-    (section 5.1, item 14). The reason is that the optimizer deletes the trap after a call to a
-    function it is told never returns: for a fort definition that is harmless, because the trap
-    at the end of the body survives, but an `extern` that returns anyway must still hit a trap
+    `noreturn` is emitted on a fort definition, as `#1` above and as the `#8` of item 14 on the
+    runtime's, and never on a declaration of a C function the program wrote with `extern fn`,
+    whatever its fort return type. The reason is that the optimizer deletes the trap after a call
+    to a function it is told never returns: for a fort definition that is harmless, because the
+    trap at the end of the body survives, but an `extern` that returns anyway must still hit a trap
     at the call site (`memory-model.md` 6), which only an unadorned declaration preserves.
 
 21. **Enum tables** (D3.9, D12.2).
@@ -1039,10 +1039,12 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
     The table is one line in the module and is wrapped here only to fit the page, as the
     `llvm.memcpy` declaration of item 8 is. One entry per member in declaration order;
     `%fort.enum_member = type { i32, ptr }` has C's 16-byte layout with its 4 bytes of padding, so
-    it matches `struct fort_rt_enum_member` (section 5.1). A table is emitted only for an enum
+    it matches `std.rt`'s `struct enum_member` (section 5.1), which is emitted under this name
+    and not as a `%struct.` of its own (item 2). A table is emitted only for an enum
     some `print` of that type reaches.
 
-22. **`fort_entry`** (D11.6, D8.6). Emitted in the entry module, it receives the argument span
+22. **`fort_entry` and `main`** (D11.6, D8.6). Both are emitted in the entry module and are the
+    only unmangled definitions in it (D9.7). `fort_entry` receives the argument span
     by hidden pointer, copies it into its own frame when `main` declares the parameter, and
     returns what `main` returns:
 
@@ -1057,7 +1059,27 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
     ```
 
     When `main` takes no parameter there is no `alloca` and no copy, only the call and the
-    `ret` (the second example below).
+    `ret` (the second example below). `@main` is the C entry point the start-up code calls, so it
+    takes C's `argc` and `argv` and returns C's `int`; it is a definition of this module like any
+    other and carries `dso_local` and `#0` (item 4, item 7):
+
+    ```llvm
+    define dso_local i32 @main(i32 %argc, ptr %argv) #0 {
+    entry:
+      %args = alloca %fort.span, align 8
+      call void @"std.rt.args_init"(i32 %argc, ptr %argv)
+      call void @"std.rt.args"(ptr %args)
+      %t0 = call i32 @fort_entry(ptr %args)
+      call void @"std.rt.flush_all"()
+      %t1 = and i32 %t0, 255
+      ret i32 %t1
+    }
+    ```
+
+    `std.rt.args` returns an aggregate, so it takes the destination as the hidden result pointer
+    of item 7, written `sret(%fort.span)` on its own definition and a plain `ptr` here (D9.9);
+    `args_init` runs first, since `args` hands out what it built. The `and` is D11.6's
+    `status & 0xFF`.
 
 23. **`-S` and `-c`** (D14.1). `-S` writes the module and stops, so the text above is exactly
     what a user reads; `-c` writes it into the temporary directory and runs `--cc -c` over it
@@ -1069,13 +1091,17 @@ numbering are normal (D19.5):
 
 - `#0 = { nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }` on every fort definition
   (item 7), and `#1`, the same set plus `noreturn`, on a `noreturn` definition (item 20).
-- `#2 = { cold noreturn nounwind }` on the `_Noreturn` entry points of section 5.1 (item 14).
+- `#2` is not emitted: it held `{ cold noreturn nounwind }` on the runtime's `_Noreturn` C
+  declarations, which item 8 no longer produces. The hand-written modules of 6.1 and 6.2 declare
+  what they call and number their own groups (preamble), which is why one of them still shows it.
 - `#3 = { nobuiltin }` on every extern call site (item 8).
 - `#4 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }` on the
   overflow intrinsics (item 15) and on `llvm.fptosi.sat` and `llvm.fptoui.sat` (item 12).
 - `#5 = { nocallback nofree nounwind willreturn memory(argmem: readwrite) }` on `llvm.memcpy`
   and `#6 = { nocallback nofree nounwind willreturn memory(argmem: write) }` on `llvm.memset`.
 - `#7 = { cold noreturn nounwind memory(inaccessiblemem: write) }` on `llvm.trap` (item 20).
+- `#8 = { cold noreturn nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }`, `#1` plus
+  `cold`, on the definitions of the `noreturn` entry points of section 5.1 (item 14).
 
 `mustprogress` is deliberately absent everywhere, from `#4`, `#5` and `#6`, where clang would
 print it, and from fort definitions: it licenses the optimizer to delete a loop with no side
@@ -1088,7 +1114,8 @@ D14.2 emits no warning about what follows it).
 fn i32 main() { println("hello, world!"); return 0; }
 ```
 
-in `main.ft` compiles to `test/ir/hello.ll`:
+in `main.ft` is `test/ir/hello.ll`, which is that program's module with everything `std.rt`
+contributes replaced by the declarations a hand-written module needs (preamble above):
 
 ```llvm
 target triple = "x86_64-unknown-linux-gnu"
@@ -1129,8 +1156,8 @@ fn i32 main() {
 ```
 
 in `abort.ft`, whose module path is therefore `abort` (D9.1) and whose `main` is the symbol
-`abort.main` (D9.7), with the `[` of `a[i]` at line 12, column 13, compiles to
-`test/ir/abort.ll`:
+`abort.main` (D9.7), with the `[` of `a[i]` at line 12, column 13, is `test/ir/abort.ll` on the
+same terms:
 
 ```llvm
 target triple = "x86_64-unknown-linux-gnu"
@@ -1268,7 +1295,7 @@ inherited and core dumps disabled:
 | `fail`       | `fort <flags> -o prog <test>` must exit 1 with only annotated errors        |
 | `flags:`     | appended to the `fort` command line                                         |
 | `args:`      | appended to the program's command line                                      |
-| `link:`      | `fort -c`, then `cc -o prog prog.o <helpers> <std-dir>/fort_rt.o`           |
+| `link:`      | `fort -c`, then `cc -o prog prog.o <helpers>`                               |
 | `stdin:`     | the `//< ` lines, each with a newline, are the program's stdin; else empty   |
 | `stdout:`    | the program's stdout must equal the `//| ` lines; with no directive, empty   |
 | `exit:`      | the program's exit status must equal `N`                                    |
@@ -1487,9 +1514,9 @@ the token stream, the parser's speculative rewinds, constant folding at the edge
 
 The corpus aims at about three lines of test for each line of source: `wc -l` over `test/*.c`,
 `test/*.h`, `test/**/*.ft` and `test/lang/ffi/*.c` against `wc -l` over `src/bootstrap/*.c`,
-`src/bootstrap/*.h`, `src/fort/*.ft`, `std/*.ft` and `runtime/*.c` and `*.h`. The standard library
-and the runtime are source and not test (D14.6): they are code the project ships, and the tests
-that exercise them are `test/lang/run/stdlib` and `test/runtime_test.c`. The seed tests of the
+`src/bootstrap/*.h`, `src/fort/*.ft` and `std/*.ft`, the runtime among them (D13.1). The
+standard library is source and not test (D14.6): it is code the project ships, and the tests that
+exercise it are `test/lang/run/stdlib`. The seed tests of the
 design phase establish the format with one example per area; the full corpus is sized as follows,
 in files:
 
@@ -1527,9 +1554,9 @@ This section is not normative. It records the intended shape so that the other s
 implementable; the design is to be planned in the implementation phase.
 
 - **Language and dependencies.** C11, POSIX, no external libraries; one binary `fort`. The
-  repository holds `src/` (compiler), `runtime/fort_rt.c` (runtime), `std/*.ft` (standard library),
-  `test/` (section 7) and a build script producing `build/fort` and `build/std/` with the library
-  sources and `fort_rt.o`.
+  repository holds `src/` (compiler), `std/*.ft` (standard library, the runtime `std.rt`
+  included), `test/` (section 7) and a build script producing `build/fort` and `build/std/` with
+  the library sources.
 - **Driver.** Parses options (section 1), owns the module table keyed by real path, runs the
   passes below, invokes `--cc` over the emitted module (D14.3) and maps failures to exit
   statuses.

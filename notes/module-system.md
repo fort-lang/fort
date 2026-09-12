@@ -175,19 +175,20 @@ naming conventions for helpers are not enforced. `extern` declarations are per-m
 module that calls a C function declares it, and the same C symbol may be declared in several
 modules provided the signatures are identical (D9.8); differing signatures are an error
 (section 13). `std.libc` (D13.2) collects the common libc prototypes so most modules import
-them instead, and `std.rt` the runtime entry points the library calls (`stdlib.md` 3).
+them instead, and `std.rt` is the runtime, an ordinary fort module the library calls like any
+other (`stdlib.md` 3).
 
 ## 7. Symbol names
 
-| Entity                          | ELF symbol                   | Example             |
-|---------------------------------|------------------------------|---------------------|
-| function in module `a.b`        | `a.b.name`                   | `std.io.close`      |
-| constant or global in `a.b`     | `a.b.NAME`                   | `main.TABLE`        |
-| `main` of the entry module      | `<entry>.main`               | `main.main`         |
-| program entry, compiler-emitted | `fort_entry`                 | `fort_entry`        |
-| runtime                         | `fort_rt_<name>`             | `fort_rt_print_i64` |
-| `extern fn`                     | the declared name, unmangled | `write`             |
-| struct, enum, import binding    | none                         |                     |
+| Entity                          | ELF symbol                   | Example                |
+|---------------------------------|------------------------------|------------------------|
+| function in module `a.b`        | `a.b.name`                   | `std.io.close`         |
+| constant or global in `a.b`     | `a.b.NAME`                   | `main.TABLE`           |
+| `main` of the entry module      | `<entry>.main`               | `main.main`            |
+| program entry, compiler-emitted | `fort_entry` and `main`      | `fort_entry`, `main`   |
+| runtime function in `std.rt`    | `std.rt.<name>`              | `std.rt.print_i64`     |
+| `extern fn`                     | the declared name, unmangled | `write`                |
+| struct, enum, import binding    | none                         |                        |
 
 The module path, a `.` and the declaration name is injective: a module path is already
 `.`-separated (D9.1), so the mangling copies it across unchanged, `.` is legal in ELF symbols and
@@ -197,11 +198,13 @@ The entry module is the one whose path need not be a segment (section 2, D9.1), 
 from its base name for exactly this reason: it is the one character the splitting reads. A
 double-underscore scheme is not injective (`a__b` is also one identifier). Fort symbols never
 collide with C symbols because C identifiers cannot contain `.`; the only undotted symbols the
-compiler emits are `fort_entry` (D11.6), runtime references and `extern` names. `fort_entry` is
-reserved for that definition: an `extern` declaring the name is an error (section 13), because
-nothing can check a declared signature against a definition the compiler writes itself, and a
-mismatch would otherwise be a silent call through the wrong type (D9.7). The standard
-library reaches the runtime through ordinary `extern fn fort_rt_...` declarations (D13.1).
+compiler emits are the `fort_entry` and `main` of D11.6 and `extern` names. Both are reserved for
+those definitions: an `extern` declaring either name is an error (section 13), because nothing
+can check a declared signature against a definition the compiler writes itself, and a mismatch
+would otherwise be a silent call through the wrong type (D9.7). The reserved `main` is the C
+entry point and not the entry module's `fn i32 main`, whose symbol is `<entry>.main`. The runtime
+is fort, so the compiler reaches it by the dotted names of this table (D13.1) and the standard
+library reaches it with an `import` like any other module.
 In the generated LLVM IR a name is quoted when LLVM's unquoted identifier syntax does not admit
 it (`@"std.io.close"`), with a `"`, a `\` or a non-printable byte inside it written `\XX`, which
 changes the spelling only: LLVM reads the escape back to the byte, so the ELF symbol is the one in
@@ -485,17 +488,21 @@ Fort v1 compiles a whole program at once (D9.10):
 
 1. The entry file is parsed and its imports are resolved (sections 2 and 3).
 2. Every imported module is parsed in turn until the import closure is complete; cycles and
-   duplicate identities are errors here.
+   duplicate identities are errors here. `std.rt` is a root of the closure beside the entry file
+   and is loaded whether or not anything imports it (D9.10, D13.1); being in the closure does not
+   bind its name, so a module that wants to call it writes `import std.rt;` like any other
+   importer.
 3. Modules are type-checked in dependency order, an imported module before its importers.
 4. One LLVM IR module is emitted for the entire closure (D19.1).
-5. `--cc` compiles that module and links it with the runtime object in one invocation (D14.3).
+5. `--cc` compiles and links that module in one invocation (D14.3); it holds the whole program,
+   the runtime included (D13.1).
 
 `fort --check` runs steps 1 to 3 and stops (D20.1): every module of the closure is checked in
 dependency order, as in a build, but nothing is emitted and no `--cc` runs. The file it is given
 is the root of the closure rather than the entry point of a program, so it need not define `main`
 (D8.6); every other rule of this section holds, the search roots and the cycle rule included. A
-module the root does not reach is still never read, so checking a library means checking a file
-that imports it.
+module the root does not reach is still never read, except `std.rt`, which is a root of every
+closure in both modes (D9.10), so checking a library means checking a file that imports it.
 
 A module outside the closure is never read, so an error in an unimported standard library module
 is never reported. There is no separate compilation: no interface files, no per-module objects, no
@@ -508,17 +515,17 @@ The entry module must define `fn i32 main()` or `fn i32 main(string@ args)` (D8.
 returning `void` or taking other parameters is an error. `main` in any other module is an ordinary
 function.
 
-Start-up (D11.6): the C runtime owns `main(argc, argv)`. It builds a `string@` of `argc` strings
-whose bytes are the `argv` entries, each NUL-terminated, calls the compiler-emitted `fort_entry`
-with that span, flushes every output buffer (D11.5) and exits with `status & 0xFF`. `fort_entry`
-is generated in the entry module: it receives the span by hidden pointer (section 9) and calls
+Start-up (D11.6): the compiler emits `main(argc, argv)` in the entry module, beside `fort_entry`
+and by the same rule (D9.7). That `main` calls `std.rt.args_init`, which builds a `string@` of
+`argc` strings whose bytes are the `argv` entries, each NUL-terminated, then `fort_entry` with
+that span, then `std.rt.flush_all` (D11.5), and returns `status & 0xFF`. `fort_entry` is
+generated in the entry module too: it receives the span by hidden pointer (section 9) and calls
 `<entry>.main`, copying the span into its own frame and passing that copy when `main` declares
 the parameter, and taking neither the copy nor an argument when it does not (`toolchain.md` 6
-item 22). `args[0]` is the program
-name. The runtime keeps the span for the life of the process and exposes it through
-`fort_rt_args_ptr()` and `fort_rt_args_len()`, declared in `std.rt` (`stdlib.md` 3) so that
-`sys.args()` works in modules whose `main` takes no parameter. `sys.exit` (D13.2) is the other
-normal exit; a runtime error exits through `abort()` (D11.4).
+item 22). `args[0]` is the program name. The runtime keeps the span for the life of the process
+and hands it out through `std.rt.args()` (`stdlib.md` 3), so that `sys.args()` works in modules
+whose `main` takes no parameter. `sys.exit` (D13.2) is the other normal exit; a runtime error
+aborts (D11.4).
 
 ## 12. Worked examples
 
@@ -738,7 +745,7 @@ All diagnostics follow D14.2: `<file>:<line>:<col>: error: <message>`, optionall
 | local reusing an enclosing local    | `'i' shadows an enclosing local` (or `a parameter`)     |
 | same extern, different signatures   | `conflicting declarations of extern 'write'`            |
 | `extern` declaring `fort_entry`     | `'fort_entry' is reserved: the compiler emits it`       |
-| `fort_rt_*` extern, bad signature   | `conflicting declarations of extern 'fort_rt_del'`      |
+| `extern` declaring `main`           | `'main' is reserved: the compiler emits it`             |
 | same extern, `own` differs (D17.1)  | `conflicting declarations of extern 'free'`             |
 | import after a declaration          | `an import comes before every declaration`              |
 | path separator written `::`         | `a module path is separated by '.', not '::'`           |
@@ -759,24 +766,23 @@ reading; the ambiguous case gives the full paths in the message and the same-fil
 both name <real path>`; a redeclaration points at the earlier one with `note: previous declaration
 of 'add' here`; the missing-`main` message continues `or 'fn i32 main(string@ args)'`. Every
 conflicting-extern row names the difference in the same words: `: the result type differs`, `: the
-number of parameters differs` or `: parameter N differs`, and the runtime row adds `from the
-runtime's`, since the declaration it conflicts with is the compiler's own (D9.8). A conflict between
-two modules is reported at the later declaration of the dependency order, on the piece that carries
-the difference, with `note: previous declaration of 'write' here` at the earlier one; when either of
-the two types names a struct or an enum, a second note says that such a type is its declaration and
-not its spelling and gives the two ways out, since no rewording reaches one (section 8.1). Either
-and not both: an enum against the `i32` it crosses as draws that note too. An `extern fn` naming a
-runtime entry point of `toolchain.md` 5.1 is legitimate -- the standard library declares five of
-them (D13.1) -- and is held against that section's prototype, the position being the parameter, the
-written result type or the name for an arity; two types agree when they take the same IR form,
-attribute included (D9.9), so `u64` and `i64` both match an `int64_t` and `char` matches a
-`uint8_t`. Its note shows the declaration the compiler emits instead of pointing at an earlier one,
-since the declaration in conflict is the compiler's own: `note: the compiler declares it as 'declare
-void @fort_rt_del(ptr)'`. `own` is not part of that comparison, unlike the extern-versus-extern one
-above: `own` is erased at run time (D17.1) and the runtime's C prototype has no notion of it, so
-`fort_rt_del(u8* own p)` agrees, while two fort declarations of one C symbol can disagree about
-ownership and must not. Tests pin these with `//! error: <substring>` on the offending line, or `//!
-error-any:` for the cycle case, where the closing import depends on walk order (D14.5).
+number of parameters differs` or `: parameter N differs`. A conflict between two modules is reported
+at the later declaration of the dependency order, on the piece that carries the difference, with
+`note: previous declaration of 'write' here` at the earlier one; when either of the two types names
+a struct or an enum, a second note says that such a type is its declaration and not its spelling and
+gives the two ways out, since no rewording reaches one (section 8.1). Either and not both: an enum
+against the `i32` it crosses as draws that note too. The runtime is fort and occupies no C name
+(D13.1, D9.7), so no `extern` declaration can conflict with it and there is no rule about one:
+`extern fn void fort_rt_del(void* p);` declares an ordinary C symbol and answers to the rows above
+like any other. What the runtime does bring is `std.libc`, which is in every closure behind it
+(D9.10), so a program declaring a libc symbol itself is held against `std.libc`'s declaration of it
+whether or not it imports the library. The row it draws is the ordinary `conflicting declarations of
+extern 'write'`, and `std.libc` is the earlier declaration in it because `std.rt` is loaded as a
+root of the closure and so precedes the program in the dependency order this diagnostic reports
+against (D9.10): the error therefore lands on the program's line and names the library's, which also
+moves it in a program whose two modules disagree, from the first of them to the second. Tests pin
+these with `//! error: <substring>` on the offending line, or `//! error-any:` for the cycle case,
+where the closing import depends on walk order (D14.5).
 
 ## 14. Not in v1
 

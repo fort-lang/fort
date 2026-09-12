@@ -614,19 +614,23 @@ Owner: `module-system.md`.
   being the declaration name and the rest the module path, and the scheme is injective. That
   argument needs every segment of a module path to hold no dot, which is why the entry file's base
   name, the one segment that need not be an identifier, may hold none either (D9.1).
-  Runtime symbols are prefixed `fort_rt_`;
-  the compiler emits `fort_entry` in the entry module (D11.6). `extern` names are unmangled.
+  The runtime is ordinary fort and its symbols are mangled like every other module's
+  (`std.rt.print_i64`, D13.1). The compiler emits two unmangled definitions, both in the entry
+  module: `fort_entry` and `main` (D11.6). `extern` names are unmangled.
   A name is quoted in LLVM IR when LLVM's unquoted identifier syntax does not admit it
   (`@"std.io.read_file"`), and a `"`, a `\` or any byte outside the printable range within it is
   written `\XX`; that is spelling only, since LLVM reads `\XX` back to the byte, so the ELF symbol
-  is the name of the first sentence unchanged. `fort_entry` is reserved: the compiler emits its
-  definition (D11.6), so an `extern` declaring that name is an error and not a second declaration
-  of it -- nothing can check a declared signature against a definition the compiler writes itself,
-  and a mismatch is otherwise a silent call through the wrong type.
+  is the name of the first sentence unchanged. `fort_entry` and `main` are reserved: the
+  compiler emits their definitions (D11.6), so an `extern` declaring either name is an error and
+  not a second declaration of it -- nothing can check a declared signature against a definition
+  the compiler writes itself, and a mismatch is otherwise a silent call through the wrong type.
+  The reserved `main` is the C entry point and not the entry module's `fn i32 main`, whose symbol
+  is `<entry>.main` (D8.6) and which collides with nothing.
   Fort functions, constants and globals are `dso_local` with the default external
   linkage (D9.6), so fort-to-fort calls are direct and fort data is addressed PC-relative;
-  `extern` and `fort_rt_*` symbols are not `dso_local` and are reached through the procedure
-  linkage and global offset tables. Amended 2026-09-10 with D19: the assembler directives that
+  `extern` symbols are not `dso_local` and are reached through the procedure linkage and global
+  offset tables; the runtime is fort, so a call into it is a direct fort-to-fort call like any
+  other. Amended 2026-09-10 with D19: the assembler directives that
   spelled this became IR linkage words. Amended 2026-09-11: quoting was said to cover dotted names
   and to keep the emitter free of per-name analysis, which left a legal entry base name holding a
   `"` emitting invalid IR that clang rejected, and made `extern fn fort_entry` a `declare` beside a
@@ -634,6 +638,9 @@ Owner: `module-system.md`.
   (T-018's review). Amended 2026-09-11: a module path was spelled with `::` (D9.1) and the mangler
   wrote each `::` as a `.` and dropped a `:` it could not pair; T-080 made the separator `.`, so
   there is nothing left to translate and the injectivity argument is the splitting one above.
+  Amended 2026-09-11 (T-088): runtime symbols were C names in a reserved `fort_rt_` space, that
+  reservation is withdrawn with the C runtime (D13.1 as amended), and `main` joined `fort_entry`
+  as a name the compiler emits and an `extern` may not declare (D11.6).
 - **D9.8** `extern fn i64 write(i32 fd, void* buf, u64 n);` declares a C function with the
   System V x86-64 ABI. Extern signatures may use only integers, floats, `bool`, `char`, enums
   (passed as `i32`), pointers and function pointers: no spans, strings, structs or arrays, and
@@ -653,14 +660,22 @@ Owner: `module-system.md`.
   same C symbol may be declared `extern` in several modules provided the signatures are
   identical, parameter names excepted, `own` qualifiers included (D17.13). Fort `char`
   is C's `unsigned char` at the boundary (`i8 zeroext`, D3.2). The compiler never emits a call to
-  a C library symbol of its own accord: anything it needs at run time is a runtime entry point of
-  `toolchain.md` 5.1, in the
-  `fort_rt_` space no C library occupies. A compiler-emitted `@memcmp` would be a second
+  a C symbol of its own accord: anything it needs at run time is a call to a function of `std.rt`
+  (D13.1), whose symbols are mangled fort names (D9.7) and so cannot be the name of any C
+  library function. A compiler-emitted `@memcmp` would be a second
   declaration of an ELF symbol a program may also declare `extern`, against D9.7's one entity per
   symbol, and it is the library-call rewriting `nobuiltin` exists two sentences above to prevent.
-  The runtime may use the C library internally, where it is an implementation detail and not a
-  fort ABI surface. Amended 2026-09-10 with D19: the compiler itself set `al` to
-  the vector-register count before every extern call, and extended narrow values by hand. Amended
+  `std.rt` reaches the C library through `std.libc`, with `extern` declarations that answer to
+  this decision like every other module's. The runtime occupies no C name of its own, so nothing
+  a program declares `extern` can collide with `std.rt` itself; but `std.rt` is in every closure
+  (D9.10) and imports are transitive, so `std.libc`'s declarations are in every closure too, and
+  a program that declares one of those C symbols itself must now agree with `std.libc`'s
+  signature, `own` included (D17.13). That is a real tightening and it is this decision working:
+  two disagreeing declarations of one C symbol are one ELF symbol reached through two types, which
+  is the bug the identity rule exists to catch. A program that wants a different spelling of
+  `write` or `free` imports `std.libc` and calls it rather than redeclaring it.
+  Amended 2026-09-10 with D19: the compiler itself set `al` to the vector-register count before
+  every extern call, and extended narrow values by hand. Amended
   2026-09-11: T-015 found that `string ==` needed `memcmp` and stopped rather than invent a fourth
   declaration group for `toolchain.md` 6 item 8; there is no fourth group. Amended 2026-09-11:
   "identical" did not say whether it meant the types or what the two modules wrote, and the
@@ -679,7 +694,16 @@ Owner: `module-system.md`.
   two ways out: give both declarations that one type, importing it where it is missing, or
   declare the symbol in one module and export a fort function the others import. Either, not
   each: one module writing the `i32` an enum crosses as is the same class of fix, the enum being
-  importable.
+  importable. Amended 2026-09-11 (T-088): an `extern fn` naming a runtime entry point was a case
+  of its own -- the checker held it against the compiler's own prototype and the emitter replaced
+  it with a canonical declaration -- because the runtime was C and shared the C name space with
+  every program. The runtime is fort (D13.1 as amended), so there is no such name to declare and
+  the case is withdrawn: an `extern` naming `fort_rt_del` is an ordinary declaration of an
+  ordinary C symbol, and `toolchain.md` 6 item 8 has two declaration groups, externs and
+  intrinsics. The same amendment tightens this rule where it used not to bite: `std.libc` rides
+  into every closure behind `std.rt` (D9.10), so a program's own declaration of a libc symbol is
+  now held against `std.libc`'s, where before it was held against nothing unless the program
+  imported the library.
 - **D9.9** Internal calling convention (v1 simplification): integers, pointers, `bool`, `char`,
   enums, function pointers and floats are passed and returned in registers per System V; every
   aggregate (struct, fixed array, span, `string`) is passed by a hidden pointer to a caller-made
@@ -688,8 +712,8 @@ Owner: `module-system.md`.
   signature is extern-legal, function-pointer parameters included (D3.10). In LLVM IR an
   aggregate argument is a plain `ptr` parameter, never `byval`, and an aggregate result is a
   leading `ptr sret(%T)` parameter on a function returning `void`; a span or `string` stays one
-  hidden pointer and is never split into two scalars, so `fort_entry`'s C prototype
-  (`const struct fort_span*`, D11.6) is literally true. `bool`, `char`, `u8` and `u16`
+  hidden pointer and is never split into two scalars, so `fort_entry` takes the argument span as
+  one `ptr` (D11.6) by this rule and by no exception to it. `bool`, `char`, `u8` and `u16`
   parameters and results carry `zeroext`, `i8` and `i16` carry `signext`, and nothing wider
   carries an extension attribute, in fort and extern signatures alike (D9.8). `sret(%T)` is
   written on the definition's parameter and not at the call site, which passes the destination as
@@ -701,12 +725,24 @@ Owner: `module-system.md`.
   question would have to be asked again, which D9.8 forbids by keeping aggregates out of extern
   signatures. Amended
   2026-09-10 with D19: the register-level spelling of the same convention is now LLVM's job, and
-  the prototype read `const struct fort_slice*` while spans were called slices (D3.5).
+  the prototype read `const struct fort_slice*` while spans were called slices (D3.5). Amended
+  2026-09-11 (T-088): `fort_entry` was called from the C runtime, so this decision stated its C
+  prototype; with `main` emitted by the compiler (D11.6 as amended) its span parameter is an
+  ordinary aggregate parameter of this convention.
 - **D9.10** Whole-program compilation: the compiler walks the import closure from the entry file,
   type-checks every module, emits one LLVM IR module (D19.1), and runs `--cc` over it once to
-  compile and link it with the runtime (D14.3). Interface files, separate compilation, a module
-  cache and incremental rebuilds are deferred. Amended 2026-09-10 with D19: the compiler emitted
-  one assembly file that the system C compiler assembled and linked.
+  compile and link it (D14.3). Interface files, separate compilation, a module cache and
+  incremental rebuilds are deferred. Every closure holds `std.rt` (D13.1), which the compiler
+  loads as a root of its own beside the entry file, in a build and under `--check` alike, so the
+  runtime is parsed, checked and emitted like any other module and its records appear in the
+  index (D20.3). What `std.rt` imports is in the closure with it, `std.libc` above all, so every
+  program is now compiled against those `extern` declarations and D9.8's identity rule binds its
+  own declarations of those C symbols to them. Membership does not bind the name: a module that
+  wants to name the runtime writes `import std.rt;` like any other importer (D9.3), and one that
+  does not never sees it. A flag that leaves it out is deferred (D15).
+  Amended 2026-09-10 with D19: the compiler emitted one assembly file that the system C compiler
+  assembled and linked. Amended 2026-09-11 (T-088): the closure was the entry file's alone and
+  `--cc` linked the C runtime object into it (D13.1 as amended).
 
 ## D10 Memory and runtime checks
 
@@ -811,17 +847,26 @@ Owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime)
   `isatty` of the descriptor, and the runtime asks once, when it creates that descriptor's
   buffer, so that no `print` carries a system call of its own; every buffered descriptor is
   decided that way and not stdout alone, since `fprint(fd, ...)` on any descriptor has the same
-  policy. The runtime exports `fort_rt_flush(i32 fd)` and `fort_rt_flush_all()`; `io.close` and
+  policy. The runtime exports `std.rt.flush(i32 fd)` and `std.rt.flush_all()`; `io.close` and
   `io.flush` call the former, which is how a library call flushes a buffer the runtime owns.
   Amended 2026-09-11 (T-083): buffering was unconditional, so a program on a terminal showed
   nothing until it exited and its `print` output arrived after its `eprint` output whatever the
-  order in the source.
-- **D11.6** Process start: the C runtime owns `main(argc, argv)`, builds `string@ args`, calls
-  the compiler-emitted `fort_entry(args)`, flushes, and exits with `status & 0xFF`.
-  `fort_entry` takes the argument span by pointer and is the one compiler-emitted exception to
-  D9.8's ban on aggregates at the C boundary; `toolchain.md` fixes its C prototype and the names
-  of every other runtime entry point. Amended 2026-09-10: the prototype took a `const struct
-  fort_slice*` and the failure was `fort_rt_fail_slice`, while spans were called slices (D3.5).
+  order in the source. Amended 2026-09-11 (T-088): the two names were the C runtime's
+  `fort_rt_flush` and `fort_rt_flush_all`; the behaviour is unchanged and only the runtime moved
+  (D13.1 as amended).
+- **D11.6** Process start: the compiler emits `main(argc, argv)` in the entry module, beside
+  `fort_entry` and by the same rule (D9.7). That `main` calls `std.rt.args_init(argc, argv)`,
+  which builds the `string@` of arguments from `argv`, then `fort_entry(args)`, then
+  `std.rt.flush_all()`, and returns `status & 0xFF`. `fort_entry` is unchanged: it takes the
+  argument span by pointer, which is D9.9's internal convention for an aggregate parameter, and
+  calls the entry module's `main` (D8.6). `toolchain.md` 5 fixes the runtime entry points and
+  `toolchain.md` 6 the two definitions the compiler writes. Amended 2026-09-10: the prototype took
+  a `const struct fort_slice*` and the failure was `fort_rt_fail_slice`, while spans were called
+  slices (D3.5). Amended 2026-09-11 (T-088): the C runtime owned `main(argc, argv)` and called
+  `fort_entry` from C, which made `fort_entry` the one compiler-emitted exception to D9.8's ban on
+  aggregates at the C boundary. With the runtime in fort (D13.1 as amended) the compiler emits
+  `main` itself, so that exception is gone and the only C ABI surface left in a program the
+  compiler builds is `main`, which the C start-up code calls with C types.
 - **D11.7** Value formatting by the print family: integers in decimal; `bool` as `true`/`false`;
   `char` as its byte; `u8` as a number; enums as the member name, or the number if no member
   matches; pointers, `void*` and function pointers as `0x` plus lowercase hex (`0x0` for
@@ -852,14 +897,37 @@ Owner: `core-language.md` (Builtins).
   Each argument compiles to one per-type runtime call. An untyped constant argument takes its
   default type (D4.5). Universe functions other than `move` yield no value: they are usable
   only as call statements (including as `defer` operands and in `for` init and step positions).
-  `assert` is active in both build modes.
+  `assert` is active in both build modes. Every runtime call a builtin makes is a call to a named
+  function of `std.rt` (D13.1), an ordinary fort function reached by its mangled name (D9.7): the
+  compiler holds the list of names, since fort has no attribute with which a module could mark a
+  declaration as the target of a builtin, and `toolchain.md` 5.1 is that list. Not every builtin
+  makes one. `move` is compiled where it stands, a read of the operand and a zeroing of it
+  (D17.6), and `assert` calls only on the failing branch; `del` calls, and so do `panic` and every
+  member of the print family. Amended 2026-09-11
+  (T-088): the calls named the C runtime's `fort_rt_*` entry points, the runtime being C
+  (D13.1 as amended).
 
 ## D13 Standard library scope
 
 Owner: `stdlib.md`.
 
-- **D13.1** The standard library is written in fort on top of `extern` declarations, plus the C
-  runtime (`fort_rt_*`), which is permanent and is not a self-hosting goal.
+- **D13.1** The standard library is written in fort on top of `extern` declarations, and the
+  runtime is part of it: `std.rt` is an ordinary fort module, in every import closure (D9.10) and
+  compiled into the program like any other (D19.1). It owns process start and exit (D11.6),
+  allocation (D10.2, D10.3), the runtime-error and panic paths (D11.4, the ownership overwrite
+  check of D17.11 included), and the formatting and buffering of the print family (D11.5, D11.7,
+  D12.2); it reaches the operating system through `std.libc`, with ordinary `extern`
+  declarations (D9.8). `toolchain.md` 5 names its entry points and fixes what each one does.
+  Amended 2026-09-11 (T-088): the runtime was `runtime/fort_rt.c`, compiled to
+  `<std-dir>/fort_rt.o` and linked into every program, and this decision then called it permanent
+  and not a self-hosting goal. The argument that reverses it: a builtin needs the compiler for one
+  thing, the type-directed fan-out of one call into N typed calls, since fort has neither
+  variadics nor generics; the *target* of each typed call can be an ordinary fort function,
+  reached by its mangled name (D9.7) and compiled with the program by whole-program compilation
+  (D9.10), exactly as `std.str.dup` already is. Go lowers `println` to `runtime.printint`, a Go
+  package, and Rust lowers `v[i]` to `core::panicking::panic_bounds_check`, Rust code in `core`.
+  Neither of the two things that kept the runtime in C applies to that target: nothing about it
+  needs a C name and nothing needs a `.o`.
 - **D13.2** v1 modules: `std.sys` (exit, args, errno), `std.libc` (thin libc externs, named
   so that its short name does not collide with the common parameter name `c`), `std.mem`
   (copy, fill, equal), `std.io` (descriptors, read/write whole files and streams, close),
@@ -867,10 +935,16 @@ Owner: `stdlib.md`.
   C), `std.strbuf`
   (growable byte buffer), `std.vec` (`ptr_vec`, `int_vec`, the non-generic pattern), `std.strmap`
   (string-keyed open-addressing table), `std.math` (float bit casts, abs/min/max per type),
-  `std.rt` (the library's view of the runtime entry points of `toolchain.md` 5.1, and nothing
-  else). Amended 2026-09-11 (T-087): the five `fort_rt_*` declarations stood in `std.libc`,
-  whose header had to describe itself as libc "plus" the runtime; they moved to `std.rt`, so
-  "thin libc externs" is true of `std.libc` without qualification.
+  `std.rt` (the runtime itself, D13.1: process start and exit, allocation, the failure paths and
+  the print buffers, over `std.libc`) and `std.rt_float` (the two float printers of D18.1, apart
+  from `std.rt` because a compiler without floats cannot compile them). Amended 2026-09-11
+  (T-087): the five `fort_rt_*`
+  declarations stood in `std.libc`, whose header had to describe itself as libc "plus" the
+  runtime; they moved to `std.rt`, so "thin libc externs" is true of `std.libc` without
+  qualification. Amended 2026-09-11 (T-088): `std.rt` held `extern` declarations of the C
+  runtime's entry points and nothing else; it is the runtime (D13.1 as amended), so it declares
+  no `fort_rt_` symbol and every module of this list is fort; `std.rt_float` joins the list with
+  the float entry points D18.1 moves out of C.
 - **D13.3** Error handling idiom (the earlier TBD): functions return `bool` or an error enum, with
   results delivered through `T mut*` out-parameters; `-1`/`null` sentinels where conventional;
   `panic` for programming errors; `defer` for cleanup. No `Result` type in v1.
@@ -941,11 +1015,13 @@ Owner: `toolchain.md`.
   diagnostic, the file was never parsed, and the cap of 20 counted syntax errors alone.
 - **D14.3** Generated code is LLVM IR (D19.1), compiled and linked by `--cc` in one invocation,
   `<cc> --target=<triple> -O1 -fPIE -pie -Wno-override-module -o <out> <entry>.ll
-  <std-dir>/fort_rt.o [-l<lib>...] [<-Xcc args>...]`, `-O2` in place of `-O1` under `--release`
+  [-l<lib>...] [<-Xcc args>...]`, `-O2` in place of `-O1` under `--release`
   and `-c` before `-o` when the compiler stops at the object; the executable is
-  position-independent and the runtime object is compiled for the same triple. Amended
-  2026-09-10 with D19: generated code was GNU assembly, assembled and linked by the system C
-  compiler.
+  position-independent. The module holds the whole program, the runtime included (D9.10, D13.1),
+  so the only inputs the line names are that module and the libraries the program asked for.
+  Amended 2026-09-10 with D19: generated code was GNU assembly, assembled and linked by the system
+  C compiler. Amended 2026-09-11 (T-088): the line also named `<std-dir>/fort_rt.o`, the C
+  runtime object (D13.1 as amended).
 - **D14.4** Language tests live under `test/lang/`: `run/<area>/NNN_name.ft` (compile, run,
   compare), `fail/<area>/NNN_name.ft` (must not compile), where `<area>` is one of `lexical
   constants operators casts mutability ownership declarations control switch defer functions
@@ -989,7 +1065,10 @@ Owner: `toolchain.md`.
   `test/runtime_test.c` counted 850 lines into the numerator while the 851 lines it tests counted
   nowhere, and a ticket writing `std/*.ft` met the ratio without the ratio seeing its code. The
   editor extension (`editors/`) still counts on neither side, that being a separate question about
-  non-compiler code.
+  non-compiler code. Amended 2026-09-11 (T-088): the runtime is `std.rt` now (D13.1 as amended)
+  and counts with `std/*.ft`. `runtime/*.c` and `*.h` stay on the source side of the list above
+  while those files exist, which is what `tools/lines.py` globs today; T-091 deletes them and the
+  glob with them, and the source side is then the compiler and the standard library.
 
 ## D15 Not in v1
 
@@ -1017,6 +1096,11 @@ variadic callee applies: a fixed prototype makes every declared parameter a fixe
 and nothing distinguishes a genuinely fixed `f32` parameter from one standing in a variadic
 position, so `module-system.md` 8.4 states the promotions as the caller's obligation and no rule
 enforces them.
+
+Deferred in the runtime (2026-09-11, T-088): a flag that leaves `std.rt` out of the import
+closure, for a program that carries a runtime of its own or targets an environment with none.
+Every closure holds it (D9.10, D13.1) and there is no way to ask for a program without it; a
+program that must not link one is outside v1.
 
 Deferred on the toolchain side (user decision, 2026-09-10): building the module in process
 through the LLVM C API, and everything that would come with it (a JIT, per-function control of
@@ -1223,14 +1307,23 @@ decision or document says ownership is "by convention", this section supersedes 
 Owner: `toolchain.md` (5.1 entry points). Names the entry points that produce D11.7's float text
 and settles what D11.7 leaves to the runtime.
 
-- **D18.1** The runtime exports exactly two float entry points, `fort_rt_print_f32(i32 fd, f32 v)`
-  and `fort_rt_print_f64(i32 fd, f64 v)`. The print family (D12.2) calls one of them per float
-  argument and passes the value in the argument's own type: an `f32` is never widened to `f64`
-  first, because the digits printed depend on the type (D11.7).
+- **D18.1** The runtime exports exactly two float entry points,
+  `std.rt_float.print_f32(i32 fd, f32 v)` and `std.rt_float.print_f64(i32 fd, f64 v)`. The print
+  family (D12.2) calls one of them per float argument and passes the value in the argument's own
+  type: an `f32` is never widened to `f64` first, because the digits printed depend on the type
+  (D11.7). They stand in `std.rt_float` and not in `std.rt` because a compiler that builds the
+  runtime must accept floats to compile them, and the C bootstrap does not: it rejects a float
+  literal and a float type outright (`toolchain.md` 7.3), so no program it builds can reach a
+  float printer. This decision, and not D9.10, settles its membership: a compiler that accepts
+  floats loads `std.rt_float` as a root of every closure exactly as D9.10 loads `std.rt`, and one
+  that does not neither loads it nor needs it. It is a module of the library like any other
+  (D13.2).
+  Amended 2026-09-11 (T-088): the two were C entry points named `fort_rt_print_f32` and
+  `fort_rt_print_f64`, back when the runtime was C (D13.1 as amended).
 - **D18.2** Shortest round-trip. The digits are the shortest decimal that reads back as the value
   in that type and, among the strings of that length that read back as it, the one nearest the
-  value, ties going to the even last digit. That text is what this decision fixes; how a runtime
-  arrives at it is an implementation matter, described for the C runtime in `toolchain.md` 5.1.
+  value, ties going to the even last digit. That text is what this decision fixes; how the runtime
+  arrives at it is an implementation matter, described in `toolchain.md` 5.1.
   The layout around the digits is the runtime's own work, so the bytes are D11.7's and not a C
   library's `%g`.
 - **D18.3** Layout. D11.7's choice of form is decided on the decimal exponent `e` of the leading
@@ -1334,10 +1427,13 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   Failure blocks are emitted after every normal block of the function, in ascending label order;
   each holds exactly one call to the `toolchain.md` 5.1 entry point, with the offending values,
   the file constant and the line and column of D11.4's position rule, followed by `unreachable`.
-  The failure entry points are declared `cold noreturn nounwind`: `noreturn` is truthful, since
-  every one of them is `_Noreturn` and aborts, and `cold` lays the block out of line, which is
-  what the out-of-line failure stubs used to do. `--no-bounds-check` removes exactly the index
-  and span branches (D10.6).
+  The failure entry points carry `cold noreturn nounwind`: `noreturn` is truthful, since every
+  one of them is `fn noreturn` in `std.rt` (D8.5, D13.1) and aborts, and `cold` lays the block
+  out of line, which is what the out-of-line failure stubs used to do. `--no-bounds-check`
+  removes exactly the index and span branches (D10.6). Amended 2026-09-11 (T-088): the attributes
+  stood on a `declare` of a C entry point and `noreturn` was truthful because the C function was
+  `_Noreturn`; the runtime is fort (D13.1 as amended) and the module defines it, so they stand on
+  the definition the compiler emits from its `noreturn` fort signature.
 - **D19.7** The trap D8.5 requires after the body of a `noreturn` function and after every call
   to one is `call void @llvm.trap()` followed by `unreachable`. `llvm.trap` is `ud2` on x86-64,
   so D11.4's SIGILL with no message is unchanged; `unreachable` alone is not a trap, since LLVM
@@ -1446,7 +1542,7 @@ the bootstrap fixpoint.
   can hand it a buffer it holds in memory instead of a path. The C bootstrap satisfies none of
   these and is not required to: it is a batch process that exits when it is done, and D14.6's
   freeze (T-046) leaves it that way. What a `panic` buys over an exit is a documented boundary and
-  a stated precondition, not in-process recovery -- `fort_rt_panic` aborts like any other failure
+  a stated precondition, not in-process recovery -- `std.rt.panic` aborts like any other failure
   (D11.4), and a server that must survive a malformed document runs the analysis where it can
   observe that abort. The protocol, the wire format and the server's own structure are not decided
   here and land after the bootstrap fixpoint (D19.5); this decision fixes only what the compiler's

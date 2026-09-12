@@ -4,7 +4,7 @@ This document specifies where fort values live, how heap memory is obtained and 
 pointers, spans and strings are at run time, which checks the compiled program performs, and
 what is undefined. It implements the decisions in `decisions.md`, cited as `(Dn.m)`; where it
 disagrees with `decisions.md` or `grammar.md`, they win and this document has a bug. Types and
-mutability are specified in `type-system.md`; build modes and the runtime library in
+mutability are specified in `type-system.md`; build modes and the runtime in
 `toolchain.md`.
 
 ## 1. Memory regions
@@ -880,9 +880,10 @@ output printed before a failure is never lost. A buffer whose descriptor is inte
 `isatty` accepts, asked once when the runtime creates that buffer -- flushes at every newline as
 well, which is C's rule: the same program shows each `println` as it runs on a terminal and holds
 its output until it exits when it is redirected to a file or a pipe. The runtime exports
-`fort_rt_flush(i32 fd)` and `fort_rt_flush_all()`; `io.close` and `io.flush` call the former.
-Program start and exit are owned by the C runtime, which builds `args`, calls the compiled
-`fort_entry`, flushes, and exits with `main`'s result masked to eight bits (D11.6).
+`std.rt.flush(i32 fd)` and `std.rt.flush_all()`; `io.close` and `io.flush` call the former.
+Program start and exit are the `main` the compiler emits beside `fort_entry`: it asks the runtime
+to build `args`, calls `fort_entry`, flushes, and returns `main`'s result masked to eight bits
+(D11.6). The runtime is `std.rt`, fort like the rest of the library (D13.1).
 
 ## 8. Undefined behavior
 
