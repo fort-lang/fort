@@ -109,6 +109,16 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
   state is the directory: `todo/`, `inprogress/`, `done/`. Template and numbering rule in
   `.tickets/README.md`; fields: id, title, size, critical-path, depends-on, impl, review,
   deliverable, spec, branch, worktree, assignee, acceptance criteria (checkboxes), notes, log.
+  `Notes` holds four subsections in this order: `Design`, `Open questions`, `Deviations` and
+  `Review findings`. An open question gives the question in one line, an `owner:` line and a
+  `resolution:` block whose first line is the ruling and whose following lines give the reason; a
+  one-line resolution loses the measurement that makes a ruling checkable (T-102, measured on
+  T-099 and T-086). A deviation cites its decision as `(Dn.m)` and names who ratified it. A review
+  finding carries `file:line`, a severity and either `fixed: <evidence>` or `declined: <reason>`.
+  `Log` holds one line for each event, in one shape: `- YYYY-MM-DD role: event; evidence`. A
+  ruling, a measurement or a finding goes into the matching Notes subsection and the Log line
+  points at it. **`.tickets/` is gitignored and `.tickets/README.md` is untracked**, so the
+  template reaches no commit and a reader verifies it by reading the file in the main checkout.
 - A ticket is assigned only when every ticket in its `depends-on` is in `done/`. Independent
   tickets are assigned concurrently, one implementor each.
 - Acceptance criteria are verifiable inside the VM; the log records every hand-off with its
