@@ -1,23 +1,33 @@
 # fort
 A safe(r) C-like systems programming language.
 
-## Talking to the user
-- **Write to the user in ASD-STE (Simplified Technical English).** The user asked for this on
-  2026-09-11 and again later the same day, so it is a standing instruction and not a preference
-  for one reply. Short sentences, one idea each. Active voice. The simple present where it
-  works. One meaning per word, and the same word for the same thing every time -- a gate is a
-  gate, never "the check" in the next sentence. Plain words over long ones: *use*, not *utilise*;
-  *start*, not *initiate*; *before*, not *prior to*. Say who does what: "the agent refused the
-  instruction", not "the instruction was refused". Cut the throat-clearing ("it is worth noting
-  that", "as we can see"). No metaphor and no idiom.
-- This governs **user-facing text only**. It does not govern code, comments, commit messages,
-  ticket text, specification documents, or the prompts that go to agents -- those keep the
-  conventions their own sections set, and `notes/` in particular is written to be precise rather
-  than simple.
-- A number, a command or a file path is clearer than an adjective. Prefer "the gate exited 1"
-  over "the gate had a problem", and "395 of 666 files" over "most files".
+## Writing: ASD-STE everywhere
+- **Write in ASD-STE (Simplified Technical English).** The user asked for this on 2026-09-11 and
+  then said "use it everywhere", so it governs **all** the text this project writes: replies to
+  the user, code comments, commit messages, ticket text, the prompts that go to agents, and the
+  specification documents in `notes/`. There is no exempt category.
+- The rules:
+  - Write short sentences. Put one idea in each. Keep an instruction to 20 words and a
+    description to 25.
+  - Use the active voice. Say who does the action: "the agent refused the instruction", not
+    "the instruction was refused".
+  - Use the simple present where it works.
+  - Give a word one meaning, and use the same word for that thing every time. A gate is a gate.
+    Do not call it "the check" in the next sentence.
+  - Use plain words: *use*, not *utilise*; *start*, not *initiate*; *before*, not *prior to*;
+    *about*, not *approximately*.
+  - Do not use idiom or metaphor. "The test went red" is jargon this project keeps, because it
+    names one thing exactly; "bitten by", "load-bearing" and "throat-clearing" are not.
+  - Cut the opening noise: "it is worth noting that", "as we can see", "interestingly".
+  - Write a number, a command or a file path instead of an adjective. "The gate exited 1" says
+    more than "the gate had a problem". "395 of 666 files" says more than "most files".
+- **Exactness wins over simplicity.** A rule in `notes/` must stay exact. If a short sentence
+  would change what a decision means, write two short sentences. Do not drop a condition to make
+  a sentence shorter.
+- The rule applies to text you write or change. It does not ask anyone to rewrite the documents
+  that are already there; that sweep is its own ticket if the user wants it.
 
-## Naming
+## Naming## Naming
 - The language is `fort`. Source files use the extension `.ft`. The compiler binary is `fort`.
 
 ## Project Layout
