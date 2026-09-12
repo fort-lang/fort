@@ -61,7 +61,13 @@ import std.strbuf;
 // `strmap.free(&ck->extern_first)`, `strmap.free(&ck->bad_imports)`,
 // `strbuf.free(&ck->msg)` and `types.type_table_free`. That is every release
 // check.check_free performs, and the fourth program is what makes the last
-// five of them reachable at all.
+// five of them reachable at all. The fourth program also carries a function
+// body, so the scopes check_stmt.check_block, check_function_body, check_for
+// and check_range_for open are released here too: dropping any one of those
+// four `scope.free` calls moves a view past BOUND. The body carries a
+// `for (T x : coll)` as well as a `for (init; cond; step)` for that reason,
+// and the reason is the third part of the rule above: check_range_for's
+// release was invisible here until a round opened the scope it frees.
 // Past the point where the smallest release measured here is visible: a leak
 // of about 144 bytes a round needs roughly nine hundred rounds to push the
 // break out of the heap the process starts with, and the early sample is
@@ -177,7 +183,19 @@ fn i32 main() {
     strbuf.append(&program, "extern fn i32 puts(char* s);\n");
     strbuf.append(&program, "i32 FOLDED = 41 + 1;\n");
     strbuf.append(&program, "i32 bad = nosuch;\n");
-    strbuf.append(&program, "fn i32 main() {\n    return 0;\n}\n");
+    // A body whose blocks the statement checker opens and closes: every block
+    // is a scope that owns its bindings, and a parameter scope stands around
+    // the body (check_stmt.ft, D7.9), so a scope left unfreed is a leak this
+    // round can see and a clean module-level program cannot.
+    strbuf.append(&program, "fn i32 sum(i32 n) {\n    i32 mut total = 0;\n");
+    strbuf.append(&program, "    for (i32 mut i = 0; i < n; i++) {\n");
+    strbuf.append(&program, "        i32 step = i;\n        total += step;\n    }\n");
+    strbuf.append(&program, "    i32[2] steps = {1, 2};\n");
+    strbuf.append(&program, "    for (i32 s : steps) {\n        total += s;\n    }\n");
+    strbuf.append(&program, "    switch (total) {\n    case 0:\n        i32 zero = 0;\n");
+    strbuf.append(&program, "        total += zero;\n    default:\n    }\n");
+    strbuf.append(&program, "    return total;\n}\n");
+    strbuf.append(&program, "fn i32 main() {\n    return sum(3);\n}\n");
     write_file("checked.ft", strbuf.view(&program));
     string[3] mut tokens = {"fort", "--tokens", "clean.ft"};
     string[3] mut ast = {"fort", "--ast", "clean.ft"};

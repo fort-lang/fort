@@ -26,6 +26,7 @@
 // are two fields of one checked expression, which no diagnostic prints apart.
 import ast;
 import check;
+import check_stmt;
 import consts;
 import modules;
 import modules_env;
@@ -73,6 +74,18 @@ fn void close(env mut* e) {
     modules_env.close(&e->m);
 }
 
+// Closes the environment and opens a fresh one at the same address, which is
+// what test/check_helpers.h's begin() does before every check. A module set
+// answers a path it has already loaded from the tree that load left, so a
+// second check_src over one environment would check the first source again;
+// and the diagnostics of the first check would still be in the sink. A test
+// that checks two sources calls this between them, after the assertions about
+// the first.
+fn void reopen(env mut* e) {
+    close(e);
+    open(e);
+}
+
 // Writes a module at `rel` under the sandbox.
 fn void add(env mut* e, string rel, string text) {
     modules_env.add(&e->m, rel, text);
@@ -96,7 +109,7 @@ fn bool check_entry(env mut* e, string rel) {
     e->ck.mute = e->want_mute;
     e->want_main = true;
     e->want_mute = false;
-    bool checked = check.check_program(&e->ck, &e->m.set);
+    bool checked = check_stmt.check_program(&e->ck, &e->m.set);
     return checked && loaded;
 }
 
@@ -116,6 +129,42 @@ fn bool check_decls(env mut* e, string decls) {
     strbuf.append(&b, decls);
     strbuf.append(&b, "fn i32 main() {\n    return 0;\n}\n");
     return check_src(e, strbuf.view(&b));
+}
+
+// `body` as the whole of the body of `fn i32 main()`, with the `return 0;`
+// D8.4 asks of it appended: the shape most statement assertions are written
+// against, as test/check_helpers.h's check_body is. A statement on line n of
+// `body` is on line n + 1 of the module.
+fn bool check_body(env mut* e, string body) {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "fn i32 main() {\n");
+    strbuf.append(&b, body);
+    strbuf.append(&b, "\n    return 0;\n}\n");
+    return check_src(e, strbuf.view(&b));
+}
+
+// Checks the entry module even though it did not parse, which the driver
+// never does but an editor mode will: the error nodes of D14.2 stand where
+// statements, fields and declarations were expected, and every pass skips
+// them (D20.1). The entry rule of D8.6 does not apply to a file under
+// inspection, so it is off.
+//
+// It differs from test/check_helpers.h's check_broken in one way: the C's
+// begins a fresh sandbox and a fresh checker, and this one uses the
+// environment it is given, so a caller that checks a second source calls
+// reopen first, exactly as after check_src. The options are applied and reset
+// as check_entry does them, so a want_mute set for this call does not leak
+// into the next one.
+fn bool check_broken(env mut* e, string text) {
+    add(e, "main.ft", text);
+    modules_env.load(&e->m, "main.ft");
+    e->ck.require_main = false;
+    e->ck.mute = e->want_mute;
+    e->want_main = true;
+    e->want_mute = false;
+    modules.module* m = module_at(e, "main");
+    return m != null && check_stmt.check_module(&e->ck, m);
 }
 
 // `T N = <expr>;` as the whole of a module: the one context in which an
@@ -325,8 +374,13 @@ fn void diag_record_text(env mut* e, u64 i) {
 
 // Loads the entry module `main.ft` written from `text` and resolves its
 // declarations, leaving the module in place so that probe_expr may check an
-// expression against it. check_module_decls stops before the function bodies,
-// which check_module_finish would end the module pass after (check.ft).
+// expression against it. It deliberately stops where check_module_decls does,
+// short of the function bodies check_stmt.check_module_bodies now checks: a
+// probe checks one expression of a body by hand and asserts the fields of the
+// result, and a body already checked would report each of its diagnostics a
+// second time and hand the probe an expression whose annotations are not the
+// ones this call produced. A test that wants the whole module checked, bodies
+// included, calls check_src or check_body.
 fn bool open_module(env mut* e, string text) {
     add(e, "main.ft", text);
     bool loaded = modules_env.load(&e->m, "main.ft");

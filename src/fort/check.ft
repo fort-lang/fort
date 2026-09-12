@@ -31,10 +31,13 @@
 // src/bootstrap/check_stmt.c call each other: the statements use the
 // expressions, and check_module's last loop checks the function bodies. Two
 // fort modules cannot do that, since circular imports are a compile error
-// (D9.5), so the one edge that closes the cycle is cut here: check_module
-// resolves every declaration of a module and stops before the bodies, and
-// check_module_bodies, check_stmt, check_block, check_function_body and
-// check_program stand in check_stmt.ft, which imports this module. Everything
+// (D9.5), so the one edge that closes the cycle is cut here. What is left of
+// check_module is its two halves: check_module_decls resolves every
+// declaration of a module, check_module_finish ends the pass over it, and the
+// loop between them is check_stmt.ft's, together with check_module,
+// check_program, check_stmt, check_block and check_function_body. A caller
+// checks a module or a closure through check_stmt.ft, which is the only place
+// either is complete; nothing here answers for a whole module. Everything
 // else is where the C put it.
 //
 // Re-entrancy (D20.5): the checker is a value the caller creates, passes down
@@ -4132,7 +4135,8 @@ fn void check_main(checker mut* ck, modules.module* m) {
 // declarations, then each of them resolved on demand, so that a type or a
 // constant reached from another one is complete when it is read (D7.10).
 // The bodies come after this, when every declaration of the module has a
-// type, and they are check_stmt.ft's (T-036).
+// type, and they are check_stmt.check_module_bodies's; check_stmt.check_module
+// is the pass over a whole module and this is half of it.
 fn void check_module_decls(checker mut* ck, modules.module* m) {
     ck->module = m;
     ck->scope = null;
@@ -4163,41 +4167,4 @@ fn void check_module_finish(checker mut* ck, modules.module* m) {
     }
     ck->module = null;
     ck->module_sym = null;
-}
-
-// Checks one module. Every module it imports must have been checked already,
-// which check_program's order guarantees.
-//
-// The function bodies are not checked here: the loop that checks them stands
-// between check_module_decls and check_module_finish in
-// src/bootstrap/check.c, and it calls check_function_body, which is
-// check_stmt.ft's (T-036). Until that module lands, this pass reports the
-// diagnostics of the declarations of a module and says nothing about the
-// statements inside them.
-fn bool check_module(checker mut* ck, modules.module* m) {
-    if (m->ast == null) {
-        return true;
-    }
-    u64 before = ck->errors;
-    check_module_decls(ck, m);
-    check_module_finish(ck, m);
-    return ck->errors == before;
-}
-
-// Checks the closure: every module the loader put in the dependency order
-// first (D9.10, D14.2), then every other module that parsed, deepest first,
-// so that a file whose import failed is still checked and an editor sees its
-// own errors (D20.1). A module that did not parse is not checked (D14.2).
-// Returns whether none reported an error. The index walk reads the same
-// order, which is why neither builds one of its own.
-fn bool check_program(checker mut* ck, modules.module_set* set) {
-    bool mut ok = true;
-    u64 mut i = 0;
-    while (i < modules.pass_count(set)) {
-        if (!check_module(ck, modules.pass_at(set, i))) {
-            ok = false;
-        }
-        i += 1;
-    }
-    return ok;
 }

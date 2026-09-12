@@ -166,6 +166,13 @@ A safe(r) C-like systems programming language.
   (`join_sandbox_path`, `gen_join_path`), never widen the buffer or cast the result away. A guard
   only gcc enforces is a guard no test holds, so assert each one -- the call sites too, not only
   the helper -- as `test/modules_test.c` and `test/gen_test.c` do.
+- **A `test/fort` suite that checks two sources must reopen its environment between them.** A
+  module set answers a path it has already loaded from the tree that load left, so a second
+  `check_env.check_src` over one environment silently re-checks the first source and its
+  assertions then pass or fail for the wrong reason; the first sink still holds the first check's
+  diagnostics as well. `check_env.reopen` is `test/check_helpers.h`'s `begin()` and goes between
+  the assertions about one source and the next check. The C helpers reset per check, so a
+  translated suite that drops the reset is the failure mode to look for.
 - A run test's program executes in a temporary directory (`tempfile.mkdtemp`) holding only the
   compiled program itself, so it cannot open a **pre-existing** file that ships beside the test. It
   may freely create a file there and read it back, which `run/stdlib/051`, `054` and `055` do. A
@@ -900,8 +907,13 @@ A safe(r) C-like systems programming language.
     (`src/fort/ast.ft`), and `scope.ft`'s `void* module` is the other way out where one of the
     two may be opaque. **The same cut applies to two C files that call each other**: `check.c`
     and `check_stmt.c` do, so `src/fort/check.ft` stops where the single reverse edge is --
-    `check_module` resolves the declarations and the body loop moves to the module that imports
-    it -- and the split is a ticket boundary rather than a copy of the C's.
+    `check_module_decls` resolves the declarations, `check_module_finish` ends the pass, and the
+    body loop between them, with `check_module` and `check_program` themselves, is
+    `src/fort/check_stmt.ft`'s -- and the split is a ticket boundary rather than a copy of the
+    C's. **The half that is cut may not keep the whole function's name**: `check.check_module`
+    returning a bodies-unchecked result was the shape T-035 left and T-036 deleted, since a later
+    caller gets the wrong answer from a function whose name promises the right one. Name the
+    halves for what they do and let the module that closes the cycle own the complete function.
   - **A value must not store a pointer into storage that returning it copies**: itself, or a
     field beside the pointer. A `return` of a local aggregate copies the whole value to the
     caller, so a pointer inside it that named the local -- or a sibling field of the local --
