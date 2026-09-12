@@ -2,11 +2,19 @@
 
 Hand-written LLVM IR modules (LLVM 18, opaque pointers) in the form the compiler emits, one per
 program. `test/pipeline_test.sh` verifies each module with `opt -passes=verify`, compiles and
-links it with `<build-dir>/std/fort_rt.o` and runs it under qemu (toolchain.md 2). The code
-generation contract (toolchain.md 6, D19.1) quotes both files as its worked examples, byte for
-byte, so a change here is a change there, and every rule about the module's form (the section
-order, the always-emitted named types, the fixed order of the declarations, the attribute-group
-indices) is stated there, not here.
+links it with the target clang and runs it under qemu (toolchain.md 2). The link takes the module
+alone: one module holds the whole program, the runtime included (D9.10, D13.1), so each file here
+defines the handful of `std.rt` entry points it calls, over `write` and `abort` from the C
+library. The code generation contract (toolchain.md 6, D19.1) quotes `hello.ll` and `abort.ll` as
+its worked examples, byte for byte, so a change here is a change there, and every rule about the
+module's form (the section order, the always-emitted named types, the fixed order of the
+declarations, the attribute-group indices) is stated there, not here.
+
+What these files are not: the module the compiler emits for the program beside each one. That
+module also holds every definition of `std.rt` and of `std.libc`, some three thousand lines of
+it, because every closure holds the runtime (D9.10). The five definitions here stand for it. The
+emitter's own output is held against its expected text by `test/gen_module_test.c`, where the
+runtime is out of the closure and the calls into it stand alone.
 
 `hello.ll` is
 
@@ -14,7 +22,9 @@ indices) is stated there, not here.
 fn i32 main() { println("hello, world!"); return 0; }
 ```
 
-in `main.ft`: two runtime calls and `fort_entry`, which forwards the result of `main.main`.
+in `main.ft`: two calls into the runtime, `fort_entry`, which forwards the result of `main.main`,
+and the `main(argc, argv)` of D11.6, which calls `std.rt.args_init`, `std.rt.args`, `fort_entry`
+and `std.rt.flush_all` and returns the status masked to one byte.
 
 `abort.ll` is
 
@@ -33,9 +43,14 @@ allocas in the entry
 block, the array is zeroed with `llvm.memset`, and the bounds check of D6.8 is an `icmp uge`
 against the length (one unsigned compare catches a negative index too) branching to a failure
 block at the end of the function, which calls
-`fort_rt_fail_bounds` (index, length, file, line, column) and is followed by `unreachable`. The
+`std.rt.fail_bounds` (index, length, file, line, column) and is followed by `unreachable`. The
 program prints `before`, then the D11.4 line
 `abort.ft:12:13: runtime error: index 5 out of range for length 3`, and dies with SIGABRT.
+
+It is also where the attribute group `#8` of toolchain.md 6 item 14 is carried end to end: the
+definition of `std.rt.fail_bounds` is `cold noreturn nounwind` plus what every fort definition
+carries, and its call to the C library's `abort` is followed by the `llvm.trap` of item 20, which
+nothing before the link checks.
 
 `colons.ll` is
 
@@ -49,24 +64,5 @@ nothing before the link can check that the byte survives: LLVM quotes a name its
 identifier syntax does not admit, the assembler quotes the label in turn, and the ELF symbol is
 the name itself. The pipeline test reads it back out of the symbol table with `nm`.
 
-`floats.ll` is
-
-```fort
-fn i32 main() {
-    println(0.1);
-    println(1e17);
-    println(-0.0);
-    println(f64.from_bits(0x7FF0000000000000));   // inf
-    println(f64.from_bits(0x7FF8000000000000));   // nan
-    println(cast(0.1, f32));
-    println(cast(16777217.0, f32));
-    return 0;
-}
-```
-
-in `floats.ft`: an `f64` argument is a `double` and an `f32` argument a `float`, each in its own
-type, because the digits printed depend on it (D18.1). Float constants are LLVM hex literals,
-exact by construction; a `float` one carries the value widened to `double`, so `0.1f` is
-`0x3FB99999A0000000` and the unrepresentable `16777217.0` is the `f32` it rounds to,
-`0x4170000000000000`. The program prints `0.1`, `1e+17`, `-0.0`, `inf`, `nan`, `0.1` and
-`16777216.0`, one per line, and exits 0 (D11.7, D18.3).
+There is no float module here. `std.rt_float` holds the two float printers, which a compiler
+without floats cannot compile (D18.1), so the module that exercised them returns with that work.

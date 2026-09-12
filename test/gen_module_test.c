@@ -13,24 +13,19 @@
 
 #include "test.h"
 
-// The directory holding the worked examples; CMake passes its path.
-#ifndef FORT_IR_DIR
-#define FORT_IR_DIR "test/ir"
-#endif
-
-// The program of toolchain.md 6.1, which compiles to test/ir/hello.ll.
+// The program of toolchain.md 6.1, whose module that section shows.
 static const char HELLO_SOURCE[] = "fn i32 main() { println(\"hello, world!\"); return 0; }\n";
 
-// The program of toolchain.md 6.2, which compiles to test/ir/abort.ll. That
-// section fixes the `[` of `a[i]` at line 12, column 13, so the seven comment
-// lines put the statement on line 12 and its four spaces of indentation put
-// the `[` on column 13; nothing else about the source is free, since every
-// instruction of the golden module comes from it.
+// The program of toolchain.md 6.2, whose module that section shows. It fixes
+// the `[` of `a[i]` at line 12, column 13, so the seven comment lines put the
+// statement on line 12 and its four spaces of indentation put the `[` on
+// column 13; nothing else about the source is free, since every instruction
+// of the expected module comes from it.
 static const char ABORT_SOURCE[] = "// The program of toolchain.md 6.2, whose bounds check fails\n"
                                    "// at run time. The lines above the body put the indexing on\n"
                                    "// line 12 and its indentation puts the `[` on column 13,\n"
                                    "// which is the position that section fixes and the module\n"
-                                   "// records in its call to fort_rt_fail_bounds (D11.4).\n"
+                                   "// records in its call to std.rt.fail_bounds (D11.4).\n"
                                    "//\n"
                                    "//\n"
                                    "fn i32 main() {\n"
@@ -40,33 +35,104 @@ static const char ABORT_SOURCE[] = "// The program of toolchain.md 6.2, whose bo
                                    "    return a[i];\n"
                                    "}\n";
 
-static sb_t golden_text;
-
-// The golden module of `name` under test/ir, which toolchain.md 6 quotes byte
-// for byte as its worked example (D19.1).
-static const char* golden(const char* name) {
-    char path[GEN_PATH_CAP];
-    TEST_UNUSED(snprintf(path, sizeof path, "%s/%s", FORT_IR_DIR, name));
-    const char* text = gen_read(path, &golden_text);
-    if (text == NULL) {
-        return "the golden module could not be read";
-    }
-    return text;
-}
-
 // ---- the worked examples (toolchain.md 6.1, 6.2) -----------------------------------
 
-TEST(the_program_of_section_6_1_compiles_to_hello_ll, {
+TEST(the_program_of_section_6_1_is_emitted_as_that_section_shows, {
     TEST_ASSERT_TRUE(emit(HELLO_SOURCE));
-    TEST_ASSERT_EQ_STR(ir(), golden("hello.ll"));
+    TEST_ASSERT_EQ_STR(
+        ir(),
+        "target triple = \"x86_64-unknown-linux-gnu\"\n"
+        "\n"
+        "%fort.span = type { ptr, i64 }\n"
+        "%fort.enum_member = type { i32, ptr }\n"
+        "\n"
+        "define dso_local i32 @\"main.main\"() #0 {\n"
+        "entry:\n"
+        "  call void @\"std.rt.print_str\"(i32 1, ptr @.str.0, i64 13)\n"
+        "  call void @\"std.rt.print_char\"(i32 1, i8 zeroext 10)\n"
+        "  ret i32 0\n"
+        "}\n"
+        "\n"
+        "define dso_local i32 @fort_entry(ptr %args.in) #0 {\n"
+        "entry:\n"
+        "  %t0 = call i32 @\"main.main\"()\n"
+        "  ret i32 %t0\n"
+        "}\n"
+        "\n"
+        "define dso_local i32 @main(i32 %argc, ptr %argv) #0 {\n"
+        "entry:\n"
+        "  %args = alloca %fort.span, align 8\n"
+        "  call void @\"std.rt.args_init\"(i32 %argc, ptr %argv)\n"
+        "  call void @\"std.rt.args\"(ptr %args)\n"
+        "  %t0 = call i32 @fort_entry(ptr %args)\n"
+        "  call void @\"std.rt.flush_all\"()\n"
+        "  %t1 = and i32 %t0, 255\n"
+        "  ret i32 %t1\n"
+        "}\n"
+        "\n"
+        "@.str.0 = private unnamed_addr constant [14 x i8] c\"hello, world!\\00\", align 1\n"
+        "\n"
+        "attributes #0 = { nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\" }\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
-TEST(the_program_of_section_6_2_compiles_to_abort_ll, {
+TEST(the_program_of_section_6_2_is_emitted_as_that_section_shows, {
     TEST_ASSERT_TRUE(emit_as("abort.ft", ABORT_SOURCE));
     // The whole module, the file constant and the 12:13 of the bounds check
     // included, which is why the source above is not free to change.
-    TEST_ASSERT_EQ_STR(ir(), golden("abort.ll"));
+    TEST_ASSERT_EQ_STR(
+        ir(),
+        "target triple = \"x86_64-unknown-linux-gnu\"\n"
+        "\n"
+        "%fort.span = type { ptr, i64 }\n"
+        "%fort.enum_member = type { i32, ptr }\n"
+        "\n"
+        "define dso_local i32 @\"abort.main\"() #0 {\n"
+        "entry:\n"
+        "  %a.0 = alloca [3 x i32], align 4\n"
+        "  %i.1 = alloca i64, align 8\n"
+        "  call void @\"std.rt.print_str\"(i32 1, ptr @.str.0, i64 6)\n"
+        "  call void @\"std.rt.print_char\"(i32 1, i8 zeroext 10)\n"
+        "  call void @llvm.memset.p0.i64(ptr align 4 %a.0, i8 0, i64 12, i1 false)\n"
+        "  store i64 5, ptr %i.1, align 8\n"
+        "  %t0 = load i64, ptr %i.1, align 8\n"
+        "  %t1 = icmp uge i64 %t0, 3\n"
+        "  br i1 %t1, label %L1, label %L0\n"
+        "\n"
+        "L0:\n"
+        "  %t2 = getelementptr inbounds [3 x i32], ptr %a.0, i64 0, i64 %t0\n"
+        "  %t3 = load i32, ptr %t2, align 4\n"
+        "  ret i32 %t3\n"
+        "\n"
+        "L1:\n"
+        "  call void @\"std.rt.fail_bounds\"(i64 %t0, i64 3, ptr @.file.0, i32 12, i32 13)\n"
+        "  unreachable\n"
+        "}\n"
+        "\n"
+        "define dso_local i32 @fort_entry(ptr %args.in) #0 {\n"
+        "entry:\n"
+        "  %t0 = call i32 @\"abort.main\"()\n"
+        "  ret i32 %t0\n"
+        "}\n"
+        "\n"
+        "define dso_local i32 @main(i32 %argc, ptr %argv) #0 {\n"
+        "entry:\n"
+        "  %args = alloca %fort.span, align 8\n"
+        "  call void @\"std.rt.args_init\"(i32 %argc, ptr %argv)\n"
+        "  call void @\"std.rt.args\"(ptr %args)\n"
+        "  %t0 = call i32 @fort_entry(ptr %args)\n"
+        "  call void @\"std.rt.flush_all\"()\n"
+        "  %t1 = and i32 %t0, 255\n"
+        "  ret i32 %t1\n"
+        "}\n"
+        "\n"
+        "@.file.0 = private unnamed_addr constant [9 x i8] c\"abort.ft\\00\", align 1\n"
+        "@.str.0 = private unnamed_addr constant [7 x i8] c\"before\\00\", align 1\n"
+        "\n"
+        "declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg) #6\n"
+        "\n"
+        "attributes #0 = { nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\" }\n"
+        "attributes #6 = { nocallback nofree nounwind willreturn memory(argmem: write) }\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -97,7 +163,7 @@ TEST(the_checked_fragment_of_item_15_is_emitted_as_the_section_shows, {
         "  ret i32 %t3\n"
         "\n"
         "L1:\n"
-        "  call void @fort_rt_fail_overflow(ptr @.file.0, i32 4, i32 14)\n"
+        "  call void @\"std.rt.fail_overflow\"(ptr @.file.0, i32 4, i32 14)\n"
         "  unreachable\n"
         "}\n"
         "\n"
@@ -107,14 +173,22 @@ TEST(the_checked_fragment_of_item_15_is_emitted_as_the_section_shows, {
         "  ret i32 %t0\n"
         "}\n"
         "\n"
-        "@.file.0 = private unnamed_addr constant [8 x i8] c\"main.ft\\00\", align 1\n"
+        "define dso_local i32 @main(i32 %argc, ptr %argv) #0 {\n"
+        "entry:\n"
+        "  %args = alloca %fort.span, align 8\n"
+        "  call void @\"std.rt.args_init\"(i32 %argc, ptr %argv)\n"
+        "  call void @\"std.rt.args\"(ptr %args)\n"
+        "  %t0 = call i32 @fort_entry(ptr %args)\n"
+        "  call void @\"std.rt.flush_all\"()\n"
+        "  %t1 = and i32 %t0, 255\n"
+        "  ret i32 %t1\n"
+        "}\n"
         "\n"
-        "declare void @fort_rt_fail_overflow(ptr, i32, i32) #2\n"
+        "@.file.0 = private unnamed_addr constant [8 x i8] c\"main.ft\\00\", align 1\n"
         "\n"
         "declare { i32, i1 } @llvm.sadd.with.overflow.i32(i32, i32) #4\n"
         "\n"
         "attributes #0 = { nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\" }\n"
-        "attributes #2 = { cold noreturn nounwind }\n"
         "attributes #4 = { nocallback nofree nosync nounwind speculatable willreturn "
         "memory(none) }\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
@@ -145,6 +219,17 @@ TEST(the_release_counterpart_of_that_fragment_is_a_plain_add, {
                        "entry:\n"
                        "  %t0 = call i32 @\"main.main\"()\n"
                        "  ret i32 %t0\n"
+                       "}\n"
+                       "\n"
+                       "define dso_local i32 @main(i32 %argc, ptr %argv) #0 {\n"
+                       "entry:\n"
+                       "  %args = alloca %fort.span, align 8\n"
+                       "  call void @\"std.rt.args_init\"(i32 %argc, ptr %argv)\n"
+                       "  call void @\"std.rt.args\"(ptr %args)\n"
+                       "  %t0 = call i32 @fort_entry(ptr %args)\n"
+                       "  call void @\"std.rt.flush_all\"()\n"
+                       "  %t1 = and i32 %t0, 255\n"
+                       "  ret i32 %t1\n"
                        "}\n"
                        "\n"
                        "attributes #0 = { nounwind \"frame-pointer\"=\"all\" "
@@ -273,8 +358,8 @@ TEST(a_fresh_block_opens_after_a_terminating_statement, {
                           "    return 0;\n}\n"));
     // D14.2 allows the statements after a terminating one, so the emitter
     // opens a block for them (item 10).
-    TEST_ASSERT_EQ_STR(found("  ret i32 1\n\nL0:\n  call void @fort_rt_print_str"),
-                       "  ret i32 1\n\nL0:\n  call void @fort_rt_print_str");
+    TEST_ASSERT_EQ_STR(found("  ret i32 1\n\nL0:\n  call void @\"std.rt.print_str\""),
+                       "  ret i32 1\n\nL0:\n  call void @\"std.rt.print_str\"");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -302,8 +387,8 @@ TEST(fort_entry_calls_main_directly_when_it_takes_no_parameter, {
 
 TEST(fort_entry_copies_the_argument_span_when_main_declares_it, {
     TEST_ASSERT_TRUE(emit("fn i32 main(string@ args) { return cast(args.len, i32); }\n"));
-    // Its caller is the C runtime rather than fort code, so the span is
-    // copied into its own frame (item 22).
+    // Its caller is the `main` of item 22 rather than the body of a fort
+    // function, so the span is copied into its own frame.
     TEST_ASSERT_EQ_STR(
         found("define dso_local i32 @fort_entry(ptr %args.in) #0 {\n"
               "entry:\n"
@@ -338,48 +423,48 @@ TEST(each_integer_type_reaches_its_own_printer, {
     // i8 i16 i32 i64 are sign-extended to i64 and u8 u16 u32 u64
     // zero-extended to it (item 19).
     TEST_ASSERT_EQ_STR(found("sext i8 %t0 to i64"), "sext i8 %t0 to i64");
-    TEST_ASSERT_EQ_STR(found("@fort_rt_print_i64(i32 1, i64 %t1)"),
-                       "@fort_rt_print_i64(i32 1, i64 %t1)");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.print_i64\"(i32 1, i64 %t1)"),
+                       "@\"std.rt.print_i64\"(i32 1, i64 %t1)");
     TEST_ASSERT_EQ_STR(found("zext i8 %t2 to i64"), "zext i8 %t2 to i64");
-    TEST_ASSERT_EQ_STR(found("@fort_rt_print_u64(i32 1, i64 %t3)"),
-                       "@fort_rt_print_u64(i32 1, i64 %t3)");
-    TEST_ASSERT_EQ_STR(found("@fort_rt_print_i64(i32 1, i64 %t4)"),
-                       "@fort_rt_print_i64(i32 1, i64 %t4)");
-    TEST_ASSERT_EQ_STR(found("@fort_rt_print_u64(i32 1, i64 %t5)"),
-                       "@fort_rt_print_u64(i32 1, i64 %t5)");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.print_u64\"(i32 1, i64 %t3)"),
+                       "@\"std.rt.print_u64\"(i32 1, i64 %t3)");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.print_i64\"(i32 1, i64 %t4)"),
+                       "@\"std.rt.print_i64\"(i32 1, i64 %t4)");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.print_u64\"(i32 1, i64 %t5)"),
+                       "@\"std.rt.print_u64\"(i32 1, i64 %t5)");
 })
 
 TEST(a_bool_a_char_and_a_pointer_reach_their_printers, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    bool t = true;\n    char c = 'a';\n"
                           "    void* p = null;\n    println(t, c, p);\n    return 0;\n}\n"));
-    TEST_ASSERT_EQ_STR(found("@fort_rt_print_bool(i32 1, i8 zeroext %t"),
-                       "@fort_rt_print_bool(i32 1, i8 zeroext %t");
-    TEST_ASSERT_EQ_STR(found("@fort_rt_print_char(i32 1, i8 zeroext %t"),
-                       "@fort_rt_print_char(i32 1, i8 zeroext %t");
-    TEST_ASSERT_EQ_STR(found("@fort_rt_print_ptr(i32 1, ptr %t"),
-                       "@fort_rt_print_ptr(i32 1, ptr %t");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.print_bool\"(i32 1, i1 zeroext %t"),
+                       "@\"std.rt.print_bool\"(i32 1, i1 zeroext %t");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.print_char\"(i32 1, i8 zeroext %t"),
+                       "@\"std.rt.print_char\"(i32 1, i8 zeroext %t");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.print_ptr\"(i32 1, ptr %t"),
+                       "@\"std.rt.print_ptr\"(i32 1, ptr %t");
 })
 
 TEST(a_string_literal_prints_as_its_constant_and_length, {
     TEST_ASSERT_TRUE(emit("fn i32 main() { print(\"hi\"); return 0; }\n"));
-    TEST_ASSERT_EQ_STR(found("call void @fort_rt_print_str(i32 1, ptr @.str.0, i64 2)"),
-                       "call void @fort_rt_print_str(i32 1, ptr @.str.0, i64 2)");
+    TEST_ASSERT_EQ_STR(found("call void @\"std.rt.print_str\"(i32 1, ptr @.str.0, i64 2)"),
+                       "call void @\"std.rt.print_str\"(i32 1, ptr @.str.0, i64 2)");
     // print writes no newline (D12.2).
     TEST_ASSERT_EQ_STR(absent("i8 zeroext 10"), "absent");
 })
 
 TEST(println_ends_with_the_newline_byte, {
     TEST_ASSERT_TRUE(emit("fn i32 main() { println(); return 0; }\n"));
-    TEST_ASSERT_EQ_STR(found("call void @fort_rt_print_char(i32 1, i8 zeroext 10)"),
-                       "call void @fort_rt_print_char(i32 1, i8 zeroext 10)");
+    TEST_ASSERT_EQ_STR(found("call void @\"std.rt.print_char\"(i32 1, i8 zeroext 10)"),
+                       "call void @\"std.rt.print_char\"(i32 1, i8 zeroext 10)");
 })
 
 TEST(eprint_writes_to_the_second_descriptor, {
     TEST_ASSERT_TRUE(emit("fn i32 main() { eprintln(\"warn\"); return 0; }\n"));
-    TEST_ASSERT_EQ_STR(found("call void @fort_rt_print_str(i32 2, ptr @.str.0, i64 4)"),
-                       "call void @fort_rt_print_str(i32 2, ptr @.str.0, i64 4)");
-    TEST_ASSERT_EQ_STR(found("call void @fort_rt_print_char(i32 2, i8 zeroext 10)"),
-                       "call void @fort_rt_print_char(i32 2, i8 zeroext 10)");
+    TEST_ASSERT_EQ_STR(found("call void @\"std.rt.print_str\"(i32 2, ptr @.str.0, i64 4)"),
+                       "call void @\"std.rt.print_str\"(i32 2, ptr @.str.0, i64 4)");
+    TEST_ASSERT_EQ_STR(found("call void @\"std.rt.print_char\"(i32 2, i8 zeroext 10)"),
+                       "call void @\"std.rt.print_char\"(i32 2, i8 zeroext 10)");
 })
 
 TEST(fprint_evaluates_its_descriptor_once, {
@@ -388,13 +473,13 @@ TEST(fprint_evaluates_its_descriptor_once, {
     // `fd` is evaluated once and then each argument left to right (D6.3,
     // D12.2).
     TEST_ASSERT_EQ_STR(found("  %t0 = call i32 @\"main.fd\"()\n"
-                             "  call void @fort_rt_print_str(i32 %t0, ptr @.str.0, i64 1)\n"
-                             "  call void @fort_rt_print_str(i32 %t0, ptr @.str.1, i64 1)\n"
-                             "  call void @fort_rt_print_char(i32 %t0, i8 zeroext 10)\n"),
+                             "  call void @\"std.rt.print_str\"(i32 %t0, ptr @.str.0, i64 1)\n"
+                             "  call void @\"std.rt.print_str\"(i32 %t0, ptr @.str.1, i64 1)\n"
+                             "  call void @\"std.rt.print_char\"(i32 %t0, i8 zeroext 10)\n"),
                        "  %t0 = call i32 @\"main.fd\"()\n"
-                       "  call void @fort_rt_print_str(i32 %t0, ptr @.str.0, i64 1)\n"
-                       "  call void @fort_rt_print_str(i32 %t0, ptr @.str.1, i64 1)\n"
-                       "  call void @fort_rt_print_char(i32 %t0, i8 zeroext 10)\n");
+                       "  call void @\"std.rt.print_str\"(i32 %t0, ptr @.str.0, i64 1)\n"
+                       "  call void @\"std.rt.print_str\"(i32 %t0, ptr @.str.1, i64 1)\n"
+                       "  call void @\"std.rt.print_char\"(i32 %t0, i8 zeroext 10)\n");
 })
 
 TEST(a_string_variable_prints_as_its_two_header_fields, {
@@ -403,20 +488,20 @@ TEST(a_string_variable_prints_as_its_two_header_fields, {
                              "  %t3 = load ptr, ptr %t2, align 8\n"
                              "  %t4 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 1\n"
                              "  %t5 = load i64, ptr %t4, align 8\n"
-                             "  call void @fort_rt_print_str(i32 1, ptr %t3, i64 %t5)\n"),
+                             "  call void @\"std.rt.print_str\"(i32 1, ptr %t3, i64 %t5)\n"),
                        "  %t2 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 0\n"
                        "  %t3 = load ptr, ptr %t2, align 8\n"
                        "  %t4 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 1\n"
                        "  %t5 = load i64, ptr %t4, align 8\n"
-                       "  call void @fort_rt_print_str(i32 1, ptr %t3, i64 %t5)\n");
+                       "  call void @\"std.rt.print_str\"(i32 1, ptr %t3, i64 %t5)\n");
 })
 
 TEST(an_enum_prints_with_its_table_and_member_count, {
     TEST_ASSERT_TRUE(emit("enum color { red, green }\n"
                           "fn i32 main() { color g = color.green; print(g); return 0; }\n"));
     TEST_ASSERT_EQ_STR(
-        found("call void @fort_rt_print_enum(i32 1, i32 %t0, ptr @.enum.main.color, i64 2)"),
-        "call void @fort_rt_print_enum(i32 1, i32 %t0, ptr @.enum.main.color, i64 2)");
+        found("call void @\"std.rt.print_enum\"(i32 1, i32 %t0, ptr @.enum.main.color, i64 2)"),
+        "call void @\"std.rt.print_enum\"(i32 1, i32 %t0, ptr @.enum.main.color, i64 2)");
 })
 
 // ---- the verifier over a corpus (D19.1) --------------------------------------------
@@ -550,43 +635,107 @@ TEST(two_declarations_of_one_c_name_never_reach_the_emitter_disagreeing, {
     TEST_ASSERT_NONNULL(strstr(gen_said(), "conflicting declarations of extern 'puts'"));
 })
 
-// ---- the runtime group reached through an extern fn (item 8, D13.1) ----------------
+// ---- the runtime in the closure (item 14, item 22, D9.10, D13.1) -------------------
 
-TEST(an_extern_naming_a_runtime_entry_point_takes_that_groups_prototype, {
-    TEST_ASSERT_TRUE(emit("extern fn noreturn fort_rt_exit(i32 status);\n"
-                          "fn i32 main() { println(\"bye\"); fort_rt_exit(3); }\n"));
-    // It is emitted in the runtime group with that group's prototype and
-    // attributes and left out of the extern group, variadic tail included,
-    // so the call site goes through that prototype too (item 8).
-    TEST_ASSERT_EQ_STR(found("declare void @fort_rt_exit(i32) #2\n"),
-                       "declare void @fort_rt_exit(i32) #2\n");
-    TEST_ASSERT_EQ_STR(absent("@fort_rt_exit(i32, ...)"), "absent");
-    TEST_ASSERT_EQ_STR(found("  call void @fort_rt_exit(i32 3)\n"),
-                       "  call void @fort_rt_exit(i32 3)\n");
-    TEST_ASSERT_EQ_STR(absent("@fort_rt_exit(i32 3) #3"), "absent");
-    // `_Noreturn` is the runtime's own guarantee, so the declaration carries
-    // it (item 20), and the call site still ends in the trap of D8.5.
-    TEST_ASSERT_EQ_STR(found("attributes #2 = { cold noreturn nounwind }"),
-                       "attributes #2 = { cold noreturn nounwind }");
-    TEST_ASSERT_EQ_STR(found("  call void @llvm.trap()\n  unreachable\n"),
-                       "  call void @llvm.trap()\n  unreachable\n");
+// A runtime for the tests below: the entry points these programs reach, with
+// bodies that do nothing. A program the compiler builds holds the whole of
+// `std/rt.ft`; what these tests ask about is the shape the emitter gives a
+// definition of `std.rt`, which does not depend on the body.
+static const char RUNTIME_SOURCE[] =
+    "struct enum_member { i32 value; char* name; }\n"
+    "string mut@ own mut args_store = {};\n"
+    "fn void args_init(i32 argc, char* mut* argv) { }\n"
+    "fn string@ args() { return args_store; }\n"
+    "fn void flush_all() { }\n"
+    "fn void print_i64(i32 fd, i64 v) { }\n"
+    "fn void print_str(i32 fd, char* ptr, u64 len) { }\n"
+    "fn void print_char(i32 fd, char c) { }\n"
+    "fn void print_enum(i32 fd, i32 v, enum_member* m, u64 n) { }\n"
+    "fn noreturn fail_div_zero(char* file, u32 line, u32 col) { while (true) { } }\n"
+    "fn noreturn fail_div_overflow(char* file, u32 line, u32 col) { while (true) { } }\n";
+
+TEST(a_noreturn_entry_point_of_section_5_1_carries_the_attribute_group_8, {
+    TEST_ASSERT_TRUE(emit_with_runtime(
+        RUNTIME_SOURCE, "fn i32 main() {\n    i32 a = 7;\n    i32 b = 0;\n    return a / b;\n}\n"));
+    // `#8` is `#1` plus `cold`, on the definitions of the `noreturn` entry
+    // points of section 5.1 and on no other fort function (item 14).
+    TEST_ASSERT_EQ_STR(
+        found("define dso_local void @\"std.rt.fail_div_zero\"(ptr %file.in, i32 %line.in,"
+              " i32 %col.in) #8 {"),
+        "define dso_local void @\"std.rt.fail_div_zero\"(ptr %file.in, i32 %line.in,"
+        " i32 %col.in) #8 {");
+    TEST_ASSERT_EQ_STR(found("attributes #8 = { cold noreturn nounwind \"frame-pointer\"=\"all\""
+                             " \"probe-stack\"=\"inline-asm\" }"),
+                       "attributes #8 = { cold noreturn nounwind \"frame-pointer\"=\"all\""
+                       " \"probe-stack\"=\"inline-asm\" }");
+    // `#2` held that set on the C runtime's declarations and is never
+    // emitted; its index stays so that `#3` to `#7` keep their numbers
+    // (item 14, D19.5).
+    TEST_ASSERT_EQ_STR(absent("attributes #2 ="), "absent");
+    // The module that holds the call holds the definition, so nothing is
+    // declared (item 8).
+    TEST_ASSERT_EQ_STR(absent("declare void @\"std.rt."), "absent");
+    TEST_ASSERT_EQ_STR(found("  call void @\"std.rt.fail_div_zero\"(ptr @.file.0,"),
+                       "  call void @\"std.rt.fail_div_zero\"(ptr @.file.0,");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
-TEST(the_argument_entry_points_are_declared_from_section_5_1, {
-    TEST_ASSERT_TRUE(
-        emit("extern fn u64 fort_rt_args_len();\n"
-             "extern fn void fort_rt_flush(i32 fd);\n"
-             "fn i32 main() { fort_rt_flush(1); return cast(fort_rt_args_len(), i32); }\n"));
-    TEST_ASSERT_EQ_STR(found("declare void @fort_rt_flush(i32)\n"),
-                       "declare void @fort_rt_flush(i32)\n");
-    TEST_ASSERT_EQ_STR(found("declare i64 @fort_rt_args_len()\n"),
-                       "declare i64 @fort_rt_args_len()\n");
-    // The runtime group keeps the order of toolchain.md 5.1, where flush
-    // comes before the argument entry points.
-    TEST_ASSERT_TRUE(before("declare void @fort_rt_flush(i32)", "declare i64 @fort_rt_args_len()"));
-    TEST_ASSERT_EQ_STR(found("%t0 = call i64 @fort_rt_args_len()"),
-                       "%t0 = call i64 @fort_rt_args_len()");
+TEST(an_entry_point_that_returns_carries_the_ordinary_group, {
+    TEST_ASSERT_TRUE(emit_with_runtime(RUNTIME_SOURCE, HELLO_SOURCE));
+    TEST_ASSERT_EQ_STR(found("define dso_local void @\"std.rt.print_char\"(i32 %fd.in,"
+                             " i8 zeroext %c.in) #0 {"),
+                       "define dso_local void @\"std.rt.print_char\"(i32 %fd.in,"
+                       " i8 zeroext %c.in) #0 {");
+    // An entry point that returns takes `#0` like any fort definition
+    // (item 7), which is what the `#8` of the `noreturn` ones beside it in
+    // the same module is held against (item 14).
+    TEST_ASSERT_EQ_STR(absent("@\"std.rt.print_char\"(i32 %fd.in, i8 zeroext %c.in) #8"), "absent");
+    // An aggregate result is the leading `ptr sret(%T)` of item 7, which is
+    // what `main` passes its own place to (item 22).
+    TEST_ASSERT_EQ_STR(
+        found("define dso_local void @\"std.rt.args\"(ptr sret(%fort.span) %ret.sret) #0 {"),
+        "define dso_local void @\"std.rt.args\"(ptr sret(%fort.span) %ret.sret) #0 {");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+TEST(a_noreturn_function_outside_the_runtime_keeps_the_group_of_item_20, {
+    // The emitter matches the mangled name of D9.7, so a function of another
+    // module whose short name is an entry point's takes `#1` and not `#8`.
+    TEST_ASSERT_TRUE(emit_with_runtime(
+        RUNTIME_SOURCE,
+        "fn noreturn fail_div_zero(char* file, u32 line, u32 col) { while (true) { } }\n"
+        "fn i32 main() {\n    i32 a = 7;\n    i32 b = 0;\n    return a / b;\n}\n"));
+    TEST_ASSERT_EQ_STR(found("define dso_local void @\"main.fail_div_zero\"(ptr %file.in,"
+                             " i32 %line.in, i32 %col.in) #1 {"),
+                       "define dso_local void @\"main.fail_div_zero\"(ptr %file.in,"
+                       " i32 %line.in, i32 %col.in) #1 {");
+    TEST_ASSERT_EQ_STR(found("define dso_local void @\"std.rt.fail_div_zero\"(ptr %file.in,"
+                             " i32 %line.in, i32 %col.in) #8 {"),
+                       "define dso_local void @\"std.rt.fail_div_zero\"(ptr %file.in,"
+                       " i32 %line.in, i32 %col.in) #8 {");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+TEST(the_enum_member_of_std_rt_is_the_named_type_every_module_carries, {
+    // `%fort.enum_member` is the IR of `std.rt`'s own `struct enum_member`
+    // and is emitted under that name rather than as a `%struct.` of its own:
+    // one named type for one layout (item 2, item 21).
+    TEST_ASSERT_TRUE(emit_with_runtime(RUNTIME_SOURCE,
+                                       "enum color { red, green }\n"
+                                       "fn i32 main() { println(color.green); return 0; }\n"));
+    TEST_ASSERT_EQ_STR(absent("%struct.std.rt.enum_member"), "absent");
+    TEST_ASSERT_EQ_SIZE(occurrences("%fort.enum_member = type { i32, ptr }"), (size_t)1);
+    TEST_ASSERT_EQ_STR(found("[2 x %fort.enum_member]"), "[2 x %fort.enum_member]");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+TEST(the_runtime_stands_before_the_program_in_the_module, {
+    // `std.rt` is a root of the closure and the program imports nothing, so
+    // the dependency order puts the runtime first (D9.10, D19.5).
+    TEST_ASSERT_TRUE(emit_with_runtime(RUNTIME_SOURCE, HELLO_SOURCE));
+    TEST_ASSERT_TRUE(before("define dso_local void @\"std.rt.args_init\"",
+                            "define dso_local i32 @\"main.main\""));
+    TEST_ASSERT_TRUE(before("define dso_local i32 @\"main.main\"", "define dso_local i32 @main("));
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -608,8 +757,8 @@ TEST(no_construct_the_front_end_admits_reaches_the_emitters_refusal, {
 
 int main(int argc, char** argv) {
     TEST_INIT("gen_module", argc, argv);
-    TEST_RUN(the_program_of_section_6_1_compiles_to_hello_ll);
-    TEST_RUN(the_program_of_section_6_2_compiles_to_abort_ll);
+    TEST_RUN(the_program_of_section_6_1_is_emitted_as_that_section_shows);
+    TEST_RUN(the_program_of_section_6_2_is_emitted_as_that_section_shows);
     TEST_RUN(the_checked_fragment_of_item_15_is_emitted_as_the_section_shows);
     TEST_RUN(the_release_counterpart_of_that_fragment_is_a_plain_add);
     TEST_RUN(two_runs_on_the_same_input_produce_byte_identical_text);
@@ -640,10 +789,12 @@ int main(int argc, char** argv) {
     TEST_RUN(the_modules_of_a_closure_are_emitted_in_dependency_order);
     TEST_RUN(a_c_function_two_modules_declare_is_declared_once);
     TEST_RUN(two_declarations_of_one_c_name_never_reach_the_emitter_disagreeing);
-    TEST_RUN(an_extern_naming_a_runtime_entry_point_takes_that_groups_prototype);
-    TEST_RUN(the_argument_entry_points_are_declared_from_section_5_1);
+    TEST_RUN(a_noreturn_entry_point_of_section_5_1_carries_the_attribute_group_8);
+    TEST_RUN(an_entry_point_that_returns_carries_the_ordinary_group);
+    TEST_RUN(a_noreturn_function_outside_the_runtime_keeps_the_group_of_item_20);
+    TEST_RUN(the_enum_member_of_std_rt_is_the_named_type_every_module_carries);
+    TEST_RUN(the_runtime_stands_before_the_program_in_the_module);
     TEST_RUN(no_construct_the_front_end_admits_reaches_the_emitters_refusal);
-    sb_free(&golden_text);
     gen_done();
     TEST_EXIT();
 }

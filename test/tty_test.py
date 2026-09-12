@@ -10,10 +10,10 @@ while the program is still blocked in a read of stdin and its exit flush has not
   on a terminal  both of its lines, in the order it printed them (stdout is line-buffered),
   on a pipe      the stderr line alone, the stdout line waiting for the flush at exit.
 
-It does that for two programs. Two runtimes are live while the compiler still lowers its builtins
-to the C one. `print_then_wait.ft` writes through the print family, which reaches
-runtime/fort_rt.c. `rt_print_then_wait.ft` writes through std.rt's own entry points. Both programs
-must behave the same way, and no language test can see either one.
+It does that for two programs. `print_then_wait.ft` writes through the print family, which the
+compiler lowers to std.rt (D12.2). `rt_print_then_wait.ft` calls the same entry points itself.
+Both programs must behave the same way -- a lowering that reached a wrong entry point would show
+here -- and no language test can see either one.
 
 ctest runs it as the unit test `tty` (toolchain.md 5.3). Exit status: 0 when both runs behave,
 1 when either does not, 2 when the environment cannot be measured at all.

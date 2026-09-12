@@ -63,6 +63,26 @@ static inline bool check_src(const char* text) {
     return check_entry("main.ft");
 }
 
+// The standard library sources, which CMake names for the suites that ask for
+// it. The real `std/libc.ft` is what D9.8's closure-wide rule holds a
+// program's own declaration of a libc symbol against (D9.10), so a test of
+// that rule reads the library and not a copy of its text.
+#ifndef FORT_STD_SOURCE_DIR
+#define FORT_STD_SOURCE_DIR "std"
+#endif
+
+// The same as check_src, with the real standard library as the `--std-dir`:
+// the closure then holds `std.rt` and, behind it, `std.libc`, exactly as a
+// build does (D9.10, D13.1). Every other helper here leaves the directory
+// unnamed, so the runtime stays out of the closure and the assertions stay
+// about the module the test wrote.
+static inline bool check_src_with_library(const char* text) {
+    begin();
+    add("main.ft", text);
+    module_set_std_dir(&set, FORT_STD_SOURCE_DIR);
+    return check_entry("main.ft");
+}
+
 // The same for a source that is a function body: the wrapper is
 // `fn i32 main() {` on line 1, so a statement of `body` on its own line n is
 // on line n + 1 of the module.

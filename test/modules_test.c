@@ -293,8 +293,101 @@ TEST(a_std_path_is_looked_up_in_the_standard_library_directory, {
     add("lib/io.ft", "fn i32 close(i32 fd) { return fd; }\n");
     std_dir("lib");
     TEST_ASSERT_TRUE(load("main.ft"));
-    TEST_ASSERT_EQ_STR(ordered(0), "std.io");
+    // `std.rt` is a root of every closure, so it is the first module of the
+    // dependency order and the imported one follows it (D9.10, D13.1).
+    TEST_ASSERT_EQ_STR(ordered(0), "std.rt");
+    TEST_ASSERT_EQ_STR(ordered(1), "std.io");
     TEST_ASSERT_NONNULL(bound("main", "io"));
+})
+
+// ---- the runtime root of every closure (D9.10, D13.1) -------------------------------
+
+TEST(every_closure_holds_the_runtime, {
+    begin();
+    add("main.ft", src_main());
+    std_dir("lib");
+    TEST_ASSERT_TRUE(load("main.ft"));
+    TEST_ASSERT_EQ_UINT64(module_set_count(&set), (uint64_t)2);
+    // The compiler loads it as a root of its own beside the entry file, so it
+    // precedes the program in the dependency order (D9.10).
+    TEST_ASSERT_EQ_STR(ordered(0), "std.rt");
+    TEST_ASSERT_EQ_STR(ordered(1), "main");
+    // Membership does not bind the name: a module that wants to call it
+    // writes `import std.rt;` like any other importer (D9.3, D9.10).
+    TEST_ASSERT_NULL(bound("main", "rt"));
+    TEST_ASSERT_NULL(bound("main", "std"));
+})
+
+TEST(the_runtime_is_read_from_the_standard_library_directory, {
+    begin();
+    add("main.ft", src_main());
+    std_dir("lib");
+    TEST_ASSERT_TRUE(load("main.ft"));
+    const module_t* rt = module_set_find(&set, str_from_cstr("std.rt"));
+    TEST_ASSERT_NONNULL(rt);
+    TEST_ASSERT_NONNULL(strstr(rt->file.ptr, "lib/rt.ft"));
+})
+
+TEST(a_standard_library_directory_with_no_runtime_is_an_error, {
+    begin();
+    add("main.ft", src_main());
+    std_dir_without_runtime("lib");
+    TEST_ASSERT_FALSE(load("main.ft"));
+    TEST_ASSERT_TRUE(said("cannot read"));
+    TEST_ASSERT_TRUE(said("rt.ft"));
+})
+
+TEST(a_set_with_no_standard_library_directory_holds_no_runtime, {
+    // Such a set cannot spell `std.rt` at all: `import std.rt;` there is
+    // already `module 'std.rt' not found` (D9.2). The driver always names a
+    // directory (toolchain.md 1).
+    begin();
+    add("main.ft", src_main());
+    TEST_ASSERT_TRUE(load("main.ft"));
+    TEST_ASSERT_EQ_UINT64(module_set_count(&set), (uint64_t)1);
+    TEST_ASSERT_EQ_STR(ordered(0), "main");
+})
+
+TEST(a_file_of_the_runtimes_closure_is_the_entry_and_not_a_second_module, {
+    // One file is one module (D9.2), so an entry file the runtime's closure
+    // already read is that module and not a second identity of it. Two files
+    // of the repository are such an entry, `std/rt.ft` and `std/libc.ft`, and
+    // `fort --check std/libc.ft` reported `module 'libc' is the same file as
+    // module 'std.libc'` until this was written. The module keeps the path
+    // its importer gave it.
+    begin();
+    add("lib/rt.ft", "import std.helper;\nfn i32 one() { return helper.two(); }\n");
+    add("lib/helper.ft", "fn i32 two() { return 2; }\n");
+    std_dir_without_runtime("lib");
+    TEST_ASSERT_TRUE(load("lib/rt.ft"));
+    TEST_ASSERT_EQ_UINT64(module_set_count(&set), (uint64_t)2);
+    TEST_ASSERT_EQ_STR(ordered(0), "std.helper");
+    TEST_ASSERT_EQ_STR(ordered(1), "std.rt");
+    const module_t* entry = module_set_entry(&set);
+    TEST_ASSERT_NONNULL(entry);
+    TEST_ASSERT_EQ_STR(entry->path.ptr, "std.rt");
+    // The same for a module the runtime imports rather than the runtime
+    // itself: it is read as `std.helper` and the entry file is that module.
+    begin();
+    add("lib/rt.ft", "import std.helper;\nfn i32 one() { return helper.two(); }\n");
+    add("lib/helper.ft", "fn i32 two() { return 2; }\n");
+    std_dir_without_runtime("lib");
+    TEST_ASSERT_TRUE(load("lib/helper.ft"));
+    TEST_ASSERT_EQ_UINT64(module_set_count(&set), (uint64_t)2);
+    const module_t* twin = module_set_entry(&set);
+    TEST_ASSERT_NONNULL(twin);
+    TEST_ASSERT_EQ_STR(twin->path.ptr, "std.helper");
+})
+
+TEST(the_runtime_is_loaded_once_when_the_program_imports_it, {
+    begin();
+    add("main.ft", "import std.rt;\nfn i32 main() { return 0; }\n");
+    std_dir("lib");
+    TEST_ASSERT_TRUE(load("main.ft"));
+    TEST_ASSERT_EQ_UINT64(module_set_count(&set), (uint64_t)2);
+    TEST_ASSERT_EQ_STR(ordered(0), "std.rt");
+    // The import binds the name the root alone does not (D9.3).
+    TEST_ASSERT_NONNULL(bound("main", "rt"));
 })
 
 TEST(a_std_path_is_not_looked_up_under_any_other_root, {
@@ -590,6 +683,12 @@ int main(int argc, char** argv) {
     TEST_RUN(the_entry_directory_wins_over_an_include_root);
     TEST_RUN(include_roots_are_searched_in_command_line_order);
     TEST_RUN(a_std_path_is_looked_up_in_the_standard_library_directory);
+    TEST_RUN(every_closure_holds_the_runtime);
+    TEST_RUN(the_runtime_is_read_from_the_standard_library_directory);
+    TEST_RUN(a_standard_library_directory_with_no_runtime_is_an_error);
+    TEST_RUN(a_set_with_no_standard_library_directory_holds_no_runtime);
+    TEST_RUN(a_file_of_the_runtimes_closure_is_the_entry_and_not_a_second_module);
+    TEST_RUN(the_runtime_is_loaded_once_when_the_program_imports_it);
     TEST_RUN(a_std_path_is_not_looked_up_under_any_other_root);
     TEST_RUN(a_path_that_does_not_begin_with_std_never_reaches_the_library);
     TEST_RUN(std_alone_is_a_directory_and_not_a_module);

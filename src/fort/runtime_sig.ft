@@ -1,16 +1,17 @@
 // runtime_sig: the runtime entry points of toolchain.md 5.1, the one table of
-// their canonical signatures, which both the emitter and the checker read.
+// their canonical signatures, which the emitter reads.
 //
-// This is src/bootstrap/runtime_sig.c transliterated. The IR types of one
-// entry point are written once, and the declaration text of item 8, the
-// result type of a call site, the `_Noreturn` attribute group and the
-// signature the checker holds an `extern fn` against are all derived from
-// that one row (D9.8).
+// This is src/bootstrap/runtime_sig.c transliterated. The runtime is
+// `std.rt`, an ordinary fort module (D13.1), so a row carries the mangled
+// name of D9.7 and the emitter writes it quoted. It emits no declaration for
+// any of them: the module that holds the call holds the definition too
+// (item 8).
 //
 // The alphabet is the IR parameter forms of toolchain.md 6 item 7, attribute
-// included, and not the fort types: what the check of D9.8 asks is whether
-// the call the emitter would write matches the declaration it emits, which is
-// a question about IR types.
+// included, and not the fort types: what a reader of this table asks is what
+// the call the emitter writes is made of, which is a question about IR types.
+// `test/fort/runtime_sig_test.ft` holds every row against the fort signature
+// in `std/rt.ft`, which is the one thing that defines the entry point.
 //
 // Two things differ from the C and neither is behaviour. The C's table is a
 // static array of rows whose `params` is an array of RT_MAX_PARAMS forms; a
@@ -30,15 +31,13 @@
 // function pointers (D3.10).
 import prim;
 import types;
-import std.strbuf;
 
 // The runtime entry points of toolchain.md 5.1, in the order that section
-// lists them, which is the order their declarations are emitted in (D19.5).
-// `rt_none` is the C's RT_COUNT: no entry point, which is what a name that is
-// not one denotes.
+// lists them. `rt_none` is the C's RT_COUNT: no entry point, which is what a
+// name that is not one denotes.
 enum rt_entry {
-    rt_new,
-    rt_del,
+    rt_alloc,
+    rt_free,
     rt_str_eq,
     rt_fail_bounds,
     rt_fail_span,
@@ -63,8 +62,7 @@ enum rt_entry {
     rt_flush,
     rt_flush_all,
     rt_args_init,
-    rt_args_ptr,
-    rt_args_len,
+    rt_args,
     rt_exit,
     rt_none,
 }
@@ -89,14 +87,15 @@ enum ir_form {
 }
 
 // The entry points of section 5.1, which is what rt_entry_of walks.
-u64 RT_ENTRY_COUNT = 29;
+u64 RT_ENTRY_COUNT = 28;
 
 // The widest parameter list of toolchain.md 5.1, which is
-// `fort_rt_fail_span(i64, i64, i64, ptr, i32, i32)`.
+// `fail_span(i64, i64, i64, ptr, i32, i32)`.
 u64 RT_MAX_PARAMS = 6;
 
-// One entry point: its C name, its result form, whether section 5.1 declares
-// it `_Noreturn`, and its parameter forms in order, padded with ir_none. The
+// One entry point: its mangled fort name, its result form, whether section
+// 5.1 declares it `fn noreturn`, and its parameter forms in order, padded
+// with ir_none. The
 // list ends at the first ir_none, so the arity is read off the row rather
 // than counted by hand beside it.
 struct rt_sig {
@@ -157,89 +156,92 @@ fn rt_sig row6(string name, ir_form result, bool is_noreturn, ir_form p0, ir_for
     return r;
 }
 
-// The C prototypes of toolchain.md 5.1, in that section's order (D19.5),
-// mapped to IR forms by item 8: `u64` and `i64` are `i64`, `i32` is `i32`,
-// `u8` is `i8 zeroext`, every pointer is `ptr` and `loc` is the three
-// parameters `ptr, i32, i32`. Every `fort_rt_fail_*` function,
-// `fort_rt_panic`, `fort_rt_assert_fail` and `fort_rt_exit` is `_Noreturn`
+// The fort signatures of toolchain.md 5.1, in that section's order, mapped to
+// IR forms by item 7: `u64` and `i64` are `i64`, `u32` is `i32`, `char` is
+// `i8 zeroext`, `bool` is `i1 zeroext`, every pointer is `ptr` and `loc` is
+// the three parameters `ptr, i32, i32`. `args` returns a `string@`, an
+// aggregate, so it is a `void` function with a leading `ptr` (item 7, D9.9).
+// Every `fail_*` function, `panic`, `assert_fail` and `exit` is `fn noreturn`
 // (section 5.1), which is stated per row rather than as a range over the
 // enum, so an entry point added in the middle of the order cannot inherit the
-// attribute by position.
+// attribute by position. The two float printers stand in `std.rt_float` and
+// not in `std.rt`, because a compiler without floats cannot compile them
+// (D18.1).
 fn rt_sig rt_sig_of(rt_entry rt) {
     switch (rt) {
-    case rt_entry.rt_new:
-        return row5("fort_rt_new", ir_form.ir_ptr, false, ir_form.ir_i64, ir_form.ir_i64,
+    case rt_entry.rt_alloc:
+        return row5("std.rt.alloc", ir_form.ir_ptr, false, ir_form.ir_i64, ir_form.ir_i64,
                     ir_form.ir_ptr, ir_form.ir_i32, ir_form.ir_i32);
-    case rt_entry.rt_del:
-        return row1("fort_rt_del", ir_form.ir_void, false, ir_form.ir_ptr);
+    case rt_entry.rt_free:
+        return row1("std.rt.free", ir_form.ir_void, false, ir_form.ir_ptr);
     case rt_entry.rt_str_eq:
-        return row4("fort_rt_str_eq", ir_form.ir_u8, false, ir_form.ir_ptr, ir_form.ir_i64,
+        return row4("std.rt.str_eq", ir_form.ir_bool, false, ir_form.ir_ptr, ir_form.ir_i64,
                     ir_form.ir_ptr, ir_form.ir_i64);
     case rt_entry.rt_fail_bounds:
-        return row5("fort_rt_fail_bounds", ir_form.ir_void, true, ir_form.ir_i64, ir_form.ir_i64,
+        return row5("std.rt.fail_bounds", ir_form.ir_void, true, ir_form.ir_i64, ir_form.ir_i64,
                     ir_form.ir_ptr, ir_form.ir_i32, ir_form.ir_i32);
     case rt_entry.rt_fail_span:
-        return row6("fort_rt_fail_span", ir_form.ir_void, true, ir_form.ir_i64, ir_form.ir_i64,
+        return row6("std.rt.fail_span", ir_form.ir_void, true, ir_form.ir_i64, ir_form.ir_i64,
                     ir_form.ir_i64, ir_form.ir_ptr, ir_form.ir_i32, ir_form.ir_i32);
     case rt_entry.rt_fail_overflow:
-        return row3("fort_rt_fail_overflow", ir_form.ir_void, true, ir_form.ir_ptr,
+        return row3("std.rt.fail_overflow", ir_form.ir_void, true, ir_form.ir_ptr,
                     ir_form.ir_i32, ir_form.ir_i32);
     case rt_entry.rt_fail_shift:
-        return row5("fort_rt_fail_shift", ir_form.ir_void, true, ir_form.ir_i64, ir_form.ir_ptr,
+        return row5("std.rt.fail_shift", ir_form.ir_void, true, ir_form.ir_i64, ir_form.ir_ptr,
                     ir_form.ir_ptr, ir_form.ir_i32, ir_form.ir_i32);
     case rt_entry.rt_fail_div_zero:
-        return row3("fort_rt_fail_div_zero", ir_form.ir_void, true, ir_form.ir_ptr,
+        return row3("std.rt.fail_div_zero", ir_form.ir_void, true, ir_form.ir_ptr,
                     ir_form.ir_i32, ir_form.ir_i32);
     case rt_entry.rt_fail_div_overflow:
-        return row3("fort_rt_fail_div_overflow", ir_form.ir_void, true, ir_form.ir_ptr,
+        return row3("std.rt.fail_div_overflow", ir_form.ir_void, true, ir_form.ir_ptr,
                     ir_form.ir_i32, ir_form.ir_i32);
     case rt_entry.rt_fail_alloc_count:
-        return row4("fort_rt_fail_alloc_count", ir_form.ir_void, true, ir_form.ir_i64,
+        return row4("std.rt.fail_alloc_count", ir_form.ir_void, true, ir_form.ir_i64,
                     ir_form.ir_ptr, ir_form.ir_i32, ir_form.ir_i32);
     case rt_entry.rt_fail_overwrite:
-        return row3("fort_rt_fail_overwrite", ir_form.ir_void, true, ir_form.ir_ptr,
+        return row3("std.rt.fail_overwrite", ir_form.ir_void, true, ir_form.ir_ptr,
                     ir_form.ir_i32, ir_form.ir_i32);
     case rt_entry.rt_fail_enum:
-        return row5("fort_rt_fail_enum", ir_form.ir_void, true, ir_form.ir_i64, ir_form.ir_ptr,
+        return row5("std.rt.fail_enum", ir_form.ir_void, true, ir_form.ir_i64, ir_form.ir_ptr,
                     ir_form.ir_ptr, ir_form.ir_i32, ir_form.ir_i32);
     case rt_entry.rt_panic:
-        return row5("fort_rt_panic", ir_form.ir_void, true, ir_form.ir_ptr, ir_form.ir_i64,
+        return row5("std.rt.panic", ir_form.ir_void, true, ir_form.ir_ptr, ir_form.ir_i64,
                     ir_form.ir_ptr, ir_form.ir_i32, ir_form.ir_i32);
     case rt_entry.rt_assert_fail:
-        return row4("fort_rt_assert_fail", ir_form.ir_void, true, ir_form.ir_ptr, ir_form.ir_ptr,
+        return row4("std.rt.assert_fail", ir_form.ir_void, true, ir_form.ir_ptr, ir_form.ir_ptr,
                     ir_form.ir_i32, ir_form.ir_i32);
     case rt_entry.rt_print_i64:
-        return row2("fort_rt_print_i64", ir_form.ir_void, false, ir_form.ir_i32, ir_form.ir_i64);
+        return row2("std.rt.print_i64", ir_form.ir_void, false, ir_form.ir_i32, ir_form.ir_i64);
     case rt_entry.rt_print_u64:
-        return row2("fort_rt_print_u64", ir_form.ir_void, false, ir_form.ir_i32, ir_form.ir_i64);
+        return row2("std.rt.print_u64", ir_form.ir_void, false, ir_form.ir_i32, ir_form.ir_i64);
     case rt_entry.rt_print_f32:
-        return row2("fort_rt_print_f32", ir_form.ir_void, false, ir_form.ir_i32, ir_form.ir_f32);
+        return row2("std.rt_float.print_f32", ir_form.ir_void, false, ir_form.ir_i32,
+                    ir_form.ir_f32);
     case rt_entry.rt_print_f64:
-        return row2("fort_rt_print_f64", ir_form.ir_void, false, ir_form.ir_i32, ir_form.ir_f64);
+        return row2("std.rt_float.print_f64", ir_form.ir_void, false, ir_form.ir_i32,
+                    ir_form.ir_f64);
     case rt_entry.rt_print_bool:
-        return row2("fort_rt_print_bool", ir_form.ir_void, false, ir_form.ir_i32, ir_form.ir_u8);
+        return row2("std.rt.print_bool", ir_form.ir_void, false, ir_form.ir_i32, ir_form.ir_bool);
     case rt_entry.rt_print_char:
-        return row2("fort_rt_print_char", ir_form.ir_void, false, ir_form.ir_i32, ir_form.ir_u8);
+        return row2("std.rt.print_char", ir_form.ir_void, false, ir_form.ir_i32, ir_form.ir_u8);
     case rt_entry.rt_print_ptr:
-        return row2("fort_rt_print_ptr", ir_form.ir_void, false, ir_form.ir_i32, ir_form.ir_ptr);
+        return row2("std.rt.print_ptr", ir_form.ir_void, false, ir_form.ir_i32, ir_form.ir_ptr);
     case rt_entry.rt_print_str:
-        return row3("fort_rt_print_str", ir_form.ir_void, false, ir_form.ir_i32, ir_form.ir_ptr,
+        return row3("std.rt.print_str", ir_form.ir_void, false, ir_form.ir_i32, ir_form.ir_ptr,
                     ir_form.ir_i64);
     case rt_entry.rt_print_enum:
-        return row4("fort_rt_print_enum", ir_form.ir_void, false, ir_form.ir_i32, ir_form.ir_i32,
+        return row4("std.rt.print_enum", ir_form.ir_void, false, ir_form.ir_i32, ir_form.ir_i32,
                     ir_form.ir_ptr, ir_form.ir_i64);
     case rt_entry.rt_flush:
-        return row1("fort_rt_flush", ir_form.ir_void, false, ir_form.ir_i32);
+        return row1("std.rt.flush", ir_form.ir_void, false, ir_form.ir_i32);
     case rt_entry.rt_flush_all:
-        return row("fort_rt_flush_all", ir_form.ir_void, false);
+        return row("std.rt.flush_all", ir_form.ir_void, false);
     case rt_entry.rt_args_init:
-        return row2("fort_rt_args_init", ir_form.ir_void, false, ir_form.ir_i32, ir_form.ir_ptr);
-    case rt_entry.rt_args_ptr:
-        return row("fort_rt_args_ptr", ir_form.ir_ptr, false);
-    case rt_entry.rt_args_len:
-        return row("fort_rt_args_len", ir_form.ir_i64, false);
+        return row2("std.rt.args_init", ir_form.ir_void, false, ir_form.ir_i32, ir_form.ir_ptr);
+    case rt_entry.rt_args:
+        return row1("std.rt.args", ir_form.ir_void, false, ir_form.ir_ptr);
     case rt_entry.rt_exit:
-        return row1("fort_rt_exit", ir_form.ir_void, true, ir_form.ir_i32);
+        return row1("std.rt.exit", ir_form.ir_void, true, ir_form.ir_i32);
     case rt_entry.rt_none:
         panic("runtime_sig.rt_sig_of: not an entry point");
     }
@@ -255,7 +257,9 @@ fn rt_entry rt_at(u64 i) {
     return cast(cast(i, i32), rt_entry);
 }
 
-// The entry point a C name denotes, or rt_none.
+// The entry point a mangled symbol name denotes, or rt_none. The name is the
+// one D9.7 builds, `std.rt.print_i64`, since that is what the emitter writes
+// and what the definitions in `std/rt.ft` carry.
 fn rt_entry rt_entry_of(string name) {
     u64 mut i = 0;
     while (i < RT_ENTRY_COUNT) {
@@ -268,13 +272,14 @@ fn rt_entry rt_entry_of(string name) {
     return rt_entry.rt_none;
 }
 
-// The C name of an entry point, unmangled as every extern name is (D9.7).
+// The mangled fort name of an entry point (D9.7). It is written `@"..."`,
+// quoted like every other dotted name (item 4).
 fn string rt_entry_name(rt_entry rt) {
     return rt_sig_of(rt).name;
 }
 
-// Whether toolchain.md 5.1 declares the entry point `_Noreturn`, which is
-// what puts `cold noreturn nounwind` on its declaration (section 5, item 14).
+// Whether toolchain.md 5.1 declares the entry point `fn noreturn`, which is
+// what puts the attribute group `#8` of item 14 on its definition.
 fn bool rt_entry_noreturn(rt_entry rt) {
     return rt_sig_of(rt).is_noreturn;
 }
@@ -350,7 +355,7 @@ fn string ir_param_text(ir_form t) {
 // the attribute precedes the type (`zeroext i8`), as item 7 spells it.
 fn string ir_result_text(ir_form t) {
     // A narrow result carries its extension attribute before the type
-    // (`declare zeroext i8 @fort_rt_str_eq(...)`, item 7).
+    // (`call zeroext i1 @"std.rt.str_eq"(...)`, item 7).
     if (t == ir_form.ir_bool) {
         return "zeroext i1";
     } else if (t == ir_form.ir_i8) {
@@ -392,9 +397,8 @@ fn ir_form ir_of_prim(prim.prim_kind k) {
     }
 }
 
-// The IR form a fort type takes at the C boundary, or ir_none: the value type
-// of item 7 with its extension attribute, which is what an extern call site
-// passes and what an extern declaration states (D9.8, D9.9).
+// The IR form a fort type takes as a scalar value, or ir_none for an
+// aggregate: the value type of item 7 with its extension attribute of D9.9.
 fn ir_form ir_form_of_type(types.node* t) {
     if (t == null) {
         return ir_form.ir_none;
@@ -409,7 +413,7 @@ fn ir_form ir_form_of_type(types.node* t) {
         // (D3.10, D3.11).
         return ir_form.ir_ptr;
     case types.type_kind.k_enum:
-        // An enum crosses the C boundary as `i32` (D9.8, D3.9).
+        // An enum is passed as `i32` (D9.8, D3.9).
         return ir_form.ir_i32;
     case types.type_kind.k_array, types.type_kind.k_span, types.type_kind.k_string,
          types.type_kind.k_struct, types.type_kind.k_null, types.type_kind.k_error:
@@ -417,28 +421,73 @@ fn ir_form ir_form_of_type(types.node* t) {
     }
 }
 
-// `declare <result> @fort_rt_x(<params>) [#2]`: a runtime entry point is
-// declared with the C prototype of section 5.1, mapped to IR types by item 8,
-// and never variadic, whether the compiler emits the call itself or the
-// standard library reached the entry point with an `extern fn` (D13.1). A
-// `_Noreturn` one carries the `cold noreturn nounwind` group of item 14.
-fn void rt_declaration(strbuf.str_buf mut* out, rt_entry rt) {
-    strbuf.append(out, "declare ");
-    strbuf.append(out, ir_result_text(rt_entry_result(rt)));
-    strbuf.append(out, " @");
-    strbuf.append(out, rt_entry_name(rt));
-    strbuf.push(out, '(');
+// Whether a fort type is one of the aggregates of item 7, which travel as a
+// plain `ptr`.
+fn bool form_is_aggregate(types.node* t) {
+    if (t == null) {
+        return false;
+    }
+    return t->kind == types.type_kind.k_struct || t->kind == types.type_kind.k_array ||
+           t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string;
+}
+
+// The form of one parameter of a fort signature: an aggregate argument is a
+// plain `ptr` parameter (item 7), and every other type takes its value form.
+fn ir_form param_form(types.node* t) {
+    if (form_is_aggregate(t)) {
+        return ir_form.ir_ptr;
+    }
+    return ir_form_of_type(t);
+}
+
+// The IR call shape of a fort function type, by item 7, as a row: an
+// aggregate result becomes a leading `ptr` parameter and a `void` result.
+// `name` is copied into the row so that a caller compares it with `rt_sig_of`
+// field by field. This is how a row is held against the fort signature that
+// defines it, which nothing below the compiler does: opaque pointers make a
+// call site's types independent of its callee's, so a call that disagrees
+// with the definition it reaches verifies, links, and then reads a register
+// the caller never set.
+//
+// A signature with more parameters than a row holds is a violated
+// precondition and panics (D13.3).
+fn rt_sig rt_signature_of_type(string name, types.node* sig) {
+    if (sig == null || sig->kind != types.type_kind.k_fn) {
+        panic("runtime_sig.rt_signature_of_type: not a function type");
+    }
+    ir_form mut result = ir_form.ir_void;
+    u64 mut lead = 0;
+    if (form_is_aggregate(sig->elem)) {
+        lead = 1;
+    } else {
+        result = ir_form_of_type(sig->elem);
+    }
+    if (lead + sig->params.len > RT_MAX_PARAMS) {
+        panic("runtime_sig.rt_signature_of_type: too many parameters");
+    }
+    rt_sig mut r = row(name, result, sig->is_noreturn);
+    if (lead == 1) {
+        // The hidden result pointer of item 7, a plain `ptr` at the call site.
+        r.p0 = ir_form.ir_ptr;
+    }
     u64 mut i = 0;
-    while (i < rt_entry_param_count(rt)) {
-        if (i > 0) {
-            strbuf.append(out, ", ");
+    while (i < sig->params.len) {
+        ir_form form = param_form(sig->params[i]);
+        u64 at = lead + i;
+        if (at == 0) {
+            r.p0 = form;
+        } else if (at == 1) {
+            r.p1 = form;
+        } else if (at == 2) {
+            r.p2 = form;
+        } else if (at == 3) {
+            r.p3 = form;
+        } else if (at == 4) {
+            r.p4 = form;
+        } else {
+            r.p5 = form;
         }
-        strbuf.append(out, ir_param_text(rt_entry_param(rt, i)));
         i += 1;
     }
-    strbuf.push(out, ')');
-    if (rt_entry_noreturn(rt)) {
-        strbuf.append(out, " #2");
-    }
-    strbuf.push(out, '\n');
+    return r;
 }

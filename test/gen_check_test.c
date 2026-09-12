@@ -38,20 +38,23 @@ TEST(the_failure_block_holds_one_call_and_unreachable, {
     TEST_ASSERT_TRUE(emit(ADD_I32));
     // The column of a check is that of its operator token (D11.4).
     TEST_ASSERT_EQ_STR(
-        found("\nL1:\n  call void @fort_rt_fail_overflow(ptr @.file.0, i32 4, i32 14)"
+        found("\nL1:\n  call void @\"std.rt.fail_overflow\"(ptr @.file.0, i32 4, i32 14)"
               "\n  unreachable\n}"),
-        "\nL1:\n  call void @fort_rt_fail_overflow(ptr @.file.0, i32 4, i32 14)"
+        "\nL1:\n  call void @\"std.rt.fail_overflow\"(ptr @.file.0, i32 4, i32 14)"
         "\n  unreachable\n}");
 })
 
-TEST(the_failure_entry_points_are_declared_cold_noreturn_nounwind, {
+TEST(a_failure_entry_point_is_neither_declared_nor_marked_at_the_call_site, {
     TEST_ASSERT_TRUE(emit(ADD_I32));
-    TEST_ASSERT_EQ_STR(found("declare void @fort_rt_fail_overflow(ptr, i32, i32) #2"),
-                       "declare void @fort_rt_fail_overflow(ptr, i32, i32) #2");
-    TEST_ASSERT_EQ_STR(found("attributes #2 = { cold noreturn nounwind }"),
-                       "attributes #2 = { cold noreturn nounwind }");
-    // No attribute is put on a failure call site (item 14).
-    TEST_ASSERT_EQ_STR(absent("@fort_rt_fail_overflow(ptr @.file.0, i32 4, i32 14) #"), "absent");
+    // `std.rt` is in the closure, so the module that holds the call holds the
+    // definition and nothing declares it (item 8). The `cold noreturn
+    // nounwind` of the old C declaration was `#2`, which is never emitted now
+    // and whose index stays reserved so that `#3` to `#7` keep their numbers
+    // (item 14, D19.5). No attribute is put on a failure call site either.
+    TEST_ASSERT_EQ_STR(absent("declare void @\"std.rt.fail_overflow\""), "absent");
+    TEST_ASSERT_EQ_STR(absent("attributes #2 ="), "absent");
+    TEST_ASSERT_EQ_STR(absent("@\"std.rt.fail_overflow\"(ptr @.file.0, i32 4, i32 14) #"),
+                       "absent");
 })
 
 TEST(an_unsigned_addition_uses_the_unsigned_intrinsic, {
@@ -103,7 +106,7 @@ TEST(release_mode_emits_a_plain_add, {
     TEST_ASSERT_EQ_STR(found("  %t2 = add i32 %t0, %t1\n  ret i32 %t2\n"),
                        "  %t2 = add i32 %t0, %t1\n  ret i32 %t2\n");
     TEST_ASSERT_EQ_STR(absent("llvm.sadd"), "absent");
-    TEST_ASSERT_EQ_STR(absent("fort_rt_fail_overflow"), "absent");
+    TEST_ASSERT_EQ_STR(absent("std.rt.fail_overflow"), "absent");
     TEST_ASSERT_EQ_STR(absent("\nL0:"), "absent");
 })
 
@@ -184,8 +187,8 @@ TEST(a_shift_count_is_materialized_at_64_bits_and_checked, {
                        "  br i1 %t3, label %L1, label %L0\n");
     // The type name is the shifted operand's (item 15).
     TEST_ASSERT_EQ_STR(
-        found("@fort_rt_fail_shift(i64 %t2, ptr @.str.0, ptr @.file.0, i32 4, i32 14)"),
-        "@fort_rt_fail_shift(i64 %t2, ptr @.str.0, ptr @.file.0, i32 4, i32 14)");
+        found("@\"std.rt.fail_shift\"(i64 %t2, ptr @.str.0, ptr @.file.0, i32 4, i32 14)"),
+        "@\"std.rt.fail_shift\"(i64 %t2, ptr @.str.0, ptr @.file.0, i32 4, i32 14)");
     TEST_ASSERT_EQ_STR(found("@.str.0 = private unnamed_addr constant [4 x i8] c\"i32\\00\""),
                        "@.str.0 = private unnamed_addr constant [4 x i8] c\"i32\\00\"");
 })
@@ -227,7 +230,7 @@ TEST(release_mode_masks_the_shift_count_instead_of_checking_it, {
                              "  %t5 = shl i32 %t0, %t4\n"),
                        "  %t3 = and i64 %t2, 31\n  %t4 = trunc i64 %t3 to i32\n"
                        "  %t5 = shl i32 %t0, %t4\n");
-    TEST_ASSERT_EQ_STR(absent("fort_rt_fail_shift"), "absent");
+    TEST_ASSERT_EQ_STR(absent("std.rt.fail_shift"), "absent");
 })
 
 // ---- division and remainder (item 15, D6.13) ---------------------------------------
@@ -261,17 +264,17 @@ TEST(an_unsigned_division_checks_zero_alone, {
                           "    println(a / b, a % b);\n    return 0;\n}\n"));
     TEST_ASSERT_EQ_STR(found("udiv i32 %t"), "udiv i32 %t");
     TEST_ASSERT_EQ_STR(found("urem i32 %t"), "urem i32 %t");
-    TEST_ASSERT_EQ_STR(absent("fort_rt_fail_div_overflow"), "absent");
+    TEST_ASSERT_EQ_STR(absent("std.rt.fail_div_overflow"), "absent");
 })
 
 TEST(a_remainder_takes_the_same_two_checks, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 a = 7;\n    i32 b = 3;\n"
                           "    return a % b;\n}\n"));
     TEST_ASSERT_EQ_STR(found("srem i32 %t0, %t1"), "srem i32 %t0, %t1");
-    TEST_ASSERT_EQ_STR(found("@fort_rt_fail_div_zero(ptr @.file.0, i32 4, i32 14)"),
-                       "@fort_rt_fail_div_zero(ptr @.file.0, i32 4, i32 14)");
-    TEST_ASSERT_EQ_STR(found("@fort_rt_fail_div_overflow(ptr @.file.0, i32 4, i32 14)"),
-                       "@fort_rt_fail_div_overflow(ptr @.file.0, i32 4, i32 14)");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.fail_div_zero\"(ptr @.file.0, i32 4, i32 14)"),
+                       "@\"std.rt.fail_div_zero\"(ptr @.file.0, i32 4, i32 14)");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.fail_div_overflow\"(ptr @.file.0, i32 4, i32 14)"),
+                       "@\"std.rt.fail_div_overflow\"(ptr @.file.0, i32 4, i32 14)");
 })
 
 TEST(release_mode_keeps_both_division_checks, {
@@ -279,8 +282,8 @@ TEST(release_mode_keeps_both_division_checks, {
                                   "    return a / b;\n}\n"));
     // Division by zero and MIN / -1 are runtime errors in every build mode
     // (D11.3, D6.13).
-    TEST_ASSERT_EQ_STR(found("@fort_rt_fail_div_zero"), "@fort_rt_fail_div_zero");
-    TEST_ASSERT_EQ_STR(found("@fort_rt_fail_div_overflow"), "@fort_rt_fail_div_overflow");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.fail_div_zero\""), "@\"std.rt.fail_div_zero\"");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.fail_div_overflow\""), "@\"std.rt.fail_div_overflow\"");
 })
 
 // ---- bounds checks (item 16, D6.8) -------------------------------------------------
@@ -294,8 +297,9 @@ TEST(an_index_is_extended_to_64_bits_and_compared_unsigned, {
                        "  %t0 = load i64, ptr %i.1, align 8\n"
                        "  %t1 = icmp uge i64 %t0, 3\n"
                        "  br i1 %t1, label %L1, label %L0\n");
-    TEST_ASSERT_EQ_STR(found("@fort_rt_fail_bounds(i64 %t0, i64 3, ptr @.file.0, i32 4, i32 13)"),
-                       "@fort_rt_fail_bounds(i64 %t0, i64 3, ptr @.file.0, i32 4, i32 13)");
+    TEST_ASSERT_EQ_STR(
+        found("@\"std.rt.fail_bounds\"(i64 %t0, i64 3, ptr @.file.0, i32 4, i32 13)"),
+        "@\"std.rt.fail_bounds\"(i64 %t0, i64 3, ptr @.file.0, i32 4, i32 13)");
 })
 
 TEST(a_signed_index_is_sign_extended_so_a_negative_one_fails_the_same_compare, {
@@ -327,7 +331,7 @@ TEST(no_bounds_check_removes_the_branch_and_keeps_the_inbounds, {
                                     "    return a[i];\n}\n"));
     // --no-bounds-check removes exactly the index branch, which is what makes
     // it unsafe (D10.6).
-    TEST_ASSERT_EQ_STR(absent("fort_rt_fail_bounds"), "absent");
+    TEST_ASSERT_EQ_STR(absent("std.rt.fail_bounds"), "absent");
     TEST_ASSERT_EQ_STR(found("getelementptr inbounds [3 x i32], ptr %a.0, i64 0, i64 %t0"),
                        "getelementptr inbounds [3 x i32], ptr %a.0, i64 0, i64 %t0");
 })
@@ -345,11 +349,11 @@ TEST(failure_blocks_are_emitted_after_every_normal_block_in_ascending_order, {
     TEST_ASSERT_TRUE(before("\nL0:", "\nL1:"));
     TEST_ASSERT_TRUE(before("\nL2:", "\nL4:"));
     // Every failure block stands after the last normal one.
-    TEST_ASSERT_TRUE(before("ret i32 ", "\nL1:\n  call void @fort_rt_fail_overflow"));
-    TEST_ASSERT_TRUE(before("\nL1:\n  call void @fort_rt_fail_overflow",
-                            "\nL3:\n  call void @fort_rt_fail_div_zero"));
-    TEST_ASSERT_TRUE(before("\nL3:\n  call void @fort_rt_fail_div_zero",
-                            "\nL5:\n  call void @fort_rt_fail_div_overflow"));
+    TEST_ASSERT_TRUE(before("ret i32 ", "\nL1:\n  call void @\"std.rt.fail_overflow\""));
+    TEST_ASSERT_TRUE(before("\nL1:\n  call void @\"std.rt.fail_overflow\"",
+                            "\nL3:\n  call void @\"std.rt.fail_div_zero\""));
+    TEST_ASSERT_TRUE(before("\nL3:\n  call void @\"std.rt.fail_div_zero\"",
+                            "\nL5:\n  call void @\"std.rt.fail_div_overflow\""));
 })
 
 TEST(the_continuation_label_is_allocated_before_the_failure_label, {
@@ -381,14 +385,14 @@ TEST(assert_branches_to_the_continuation_first_and_quotes_its_argument, {
     // is the builtin's name (D11.4).
     TEST_ASSERT_EQ_STR(found("@.str.0 = private unnamed_addr constant [6 x i8] c\"x > 0\\00\""),
                        "@.str.0 = private unnamed_addr constant [6 x i8] c\"x > 0\\00\"");
-    TEST_ASSERT_EQ_STR(found("@fort_rt_assert_fail(ptr @.str.0, ptr @.file.0, i32 3, i32 5)"),
-                       "@fort_rt_assert_fail(ptr @.str.0, ptr @.file.0, i32 3, i32 5)");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.assert_fail\"(ptr @.str.0, ptr @.file.0, i32 3, i32 5)"),
+                       "@\"std.rt.assert_fail\"(ptr @.str.0, ptr @.file.0, i32 3, i32 5)");
 })
 
 TEST(assert_is_active_in_release_mode_too, {
     TEST_ASSERT_TRUE(emit_release("fn i32 main() {\n    i32 x = 0;\n    assert(x > 0);\n"
                                   "    return 0;\n}\n"));
-    TEST_ASSERT_EQ_STR(found("@fort_rt_assert_fail"), "@fort_rt_assert_fail");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.assert_fail\""), "@\"std.rt.assert_fail\"");
 })
 
 TEST(assert_of_a_constant_still_branches, {
@@ -401,9 +405,9 @@ TEST(assert_of_a_constant_still_branches, {
 TEST(panic_calls_the_runtime_and_is_followed_by_unreachable, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    println(\"before\");\n    panic(\"boom\");\n}\n"));
     TEST_ASSERT_EQ_STR(
-        found("  call void @fort_rt_panic(ptr @.str.1, i64 4, ptr @.file.0, i32 3, i32 5)\n"
+        found("  call void @\"std.rt.panic\"(ptr @.str.1, i64 4, ptr @.file.0, i32 3, i32 5)\n"
               "  unreachable\n"),
-        "  call void @fort_rt_panic(ptr @.str.1, i64 4, ptr @.file.0, i32 3, i32 5)\n"
+        "  call void @\"std.rt.panic\"(ptr @.str.1, i64 4, ptr @.file.0, i32 3, i32 5)\n"
         "  unreachable\n");
 })
 
@@ -514,7 +518,7 @@ int main(int argc, char** argv) {
     TEST_INIT("gen_check", argc, argv);
     TEST_RUN(a_checked_signed_addition_is_the_intrinsic_and_its_two_extractvalues);
     TEST_RUN(the_failure_block_holds_one_call_and_unreachable);
-    TEST_RUN(the_failure_entry_points_are_declared_cold_noreturn_nounwind);
+    TEST_RUN(a_failure_entry_point_is_neither_declared_nor_marked_at_the_call_site);
     TEST_RUN(an_unsigned_addition_uses_the_unsigned_intrinsic);
     TEST_RUN(subtraction_and_multiplication_use_their_own_intrinsics);
     TEST_RUN(the_intrinsic_is_taken_at_the_operands_width);

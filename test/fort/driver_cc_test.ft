@@ -38,7 +38,7 @@ fn string invocation(strbuf.str_buf mut* out, driver.options* opts) {
     defer containers.pool_free(&p);
     containers.str_vec mut argv = containers.str_create();
     defer containers.str_free(&argv);
-    driver.cc_argv(&p, opts, "/tmp/t/main.ll", "prog", "/std", &argv);
+    driver.cc_argv(&p, opts, "/tmp/t/main.ll", "prog", &argv);
     strbuf.clear(out);
     u64 mut i = 0;
     while (i < argv.len) {
@@ -93,7 +93,7 @@ fn void the_checked_invocation_is_the_line_of_toolchain_two() {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     string[2] mut argv = {"fort", "main.ft"};
-    string[10] mut want = {
+    string[9] mut want = {
         "clang",
         "--target=x86_64-linux-gnu",
         "-O1",
@@ -103,10 +103,9 @@ fn void the_checked_invocation_is_the_line_of_toolchain_two() {
         "-o",
         "prog",
         "/tmp/t/main.ll",
-        "/std/fort_rt.o",
     };
-    expect(invocation_for(&out, argv[0..2]), lines(&b, want[0..10]));
-    // No -x ir: -x is sticky and would also treat fort_rt.o as IR.
+    expect(invocation_for(&out, argv[0..2]), lines(&b, want[0..9]));
+    // No -x ir: clang reads a `.ll` by its suffix and -x is sticky.
     assert(str.find(invocation_for(&out, argv[0..2]), "\n-x\n") < 0);
 }
 
@@ -129,7 +128,7 @@ fn void the_target_option_becomes_the_target_argument() {
                            "clang-18\n--target=x86_64-linux-musl\n"));
 }
 
-// -l arguments in command-line order after the runtime object, then the -Xcc
+// -l arguments in command-line order after the module, then the -Xcc
 // arguments last, verbatim and in command-line order (D14.1).
 fn void libraries_then_cc_arguments_close_the_line() {
     strbuf.str_buf mut out = strbuf.create();
@@ -138,7 +137,7 @@ fn void libraries_then_cc_arguments_close_the_line() {
     defer strbuf.free(&b);
     string[8] mut argv = {"fort", "-lm", "-Xcc", "-fuse-ld=lld", "-lz", "-Xcc", "-static",
                           "main.ft"};
-    string[14] mut want = {
+    string[13] mut want = {
         "clang",
         "--target=x86_64-linux-gnu",
         "-O1",
@@ -148,17 +147,15 @@ fn void libraries_then_cc_arguments_close_the_line() {
         "-o",
         "prog",
         "/tmp/t/main.ll",
-        "/std/fort_rt.o",
         "-lm",
         "-lz",
         "-fuse-ld=lld",
         "-static",
     };
-    expect(invocation_for(&out, argv[0..8]), lines(&b, want[0..14]));
+    expect(invocation_for(&out, argv[0..8]), lines(&b, want[0..13]));
 }
 
-// -c stops at the object, so it takes no -pie, no runtime object and no -l
-// (toolchain.md 2).
+// -c stops at the object, so it takes no -pie and no -l (toolchain.md 2).
 fn void compile_only_puts_c_before_o_and_drops_the_link_arguments() {
     strbuf.str_buf mut out = strbuf.create();
     defer strbuf.free(&out);
@@ -217,7 +214,7 @@ fn void the_default_output_is_decided_by_the_mode() {
 fn void a_joined_path_leaves_out_what_it_is_not_given() {
     containers.pool mut p = containers.pool_create();
     defer containers.pool_free(&p);
-    assert(driver.join_path(&p, "/std", "fort_rt.o", "") == "/std/fort_rt.o");
+    assert(driver.join_path(&p, "/std", "rt.ft", "") == "/std/rt.ft");
     assert(driver.join_path(&p, "", "prog", ".ll") == "prog.ll");
     assert(driver.join_path(&p, "/tmp/t", "main", ".ll") == "/tmp/t/main.ll");
 }
@@ -377,7 +374,7 @@ fn void the_child_receives_the_arguments_cc_argv_built() {
     defer del(path);
     assert(chmod(path.ptr, 493) == 0);
     set_env("TMPDIR", ".");
-    string[11] mut whole = {"fort", "--cc", "./logger.sh", "--std-dir", "/std", "-lm",
+    string[11] mut whole = {"fort", "--cc", "./logger.sh", "--std-dir", "std", "-lm",
                             "-Xcc", "-static", "-o", "out", "unit.ft"};
     assert(run_quiet(whole[0..11]) == driver.EXIT_OK);
     unset_env("TMPDIR");
@@ -401,18 +398,17 @@ fn void the_child_receives_the_arguments_cc_argv_built() {
         "out",
     };
     assert(str.starts_with(got, lines(&b, head[0..7])));
-    string[4] mut tail = {
-        "/std/fort_rt.o",
+    string[3] mut tail = {
         "-lm",
         "-static",
         "",
     };
-    assert(str.ends_with(got, lines(&b, tail[0..3])));
-    assert(str.find(got, "/unit.ll\n/std/fort_rt.o\n") >= 0);
+    assert(str.ends_with(got, lines(&b, tail[0..2])));
+    assert(str.find(got, "/unit.ll\n-lm\n") >= 0);
     // Every argument stands on a line of its own, so the block holds exactly
     // as many lines as cc_argv put in the vector, less argv[0]: the seven
-    // above, the module, and the three below.
-    assert(count_lines(got) == 11);
+    // above, the module, and the two below.
+    assert(count_lines(got) == 10);
 }
 
 // The lines of `text`, which is one argument per line.
@@ -478,6 +474,23 @@ fn void write_file(string path, string text) {
     assert(io.write_file(path, cast(text, u8@)));
 }
 
+// Creates one directory, which may already exist.
+extern fn i32 mkdir(char* path, u32 mode);
+
+// The errno a directory that already exists reports (stdlib.md 2.2).
+i32 EEXIST = 17;
+
+// Every closure holds `std.rt`, which the driver reads from `<std-dir>/rt.ft`
+// and looks for in `std` beside the program when nothing names one (D9.10,
+// toolchain.md 1). The runs below give `fort` as argv[0], so that directory
+// is `std` of this test's own working directory. What the driver needs there
+// is a file that parses, not a runtime: nothing these tests build is ever
+// run.
+fn void write_runtime() {
+    assert(mkdir("std".ptr, 0o700) == 0 || sys.errno() == EEXIST);
+    write_file("std/rt.ft", "// The empty runtime of a driver test.\n");
+}
+
 // The driver's stderr is captured into a file of this test's own directory,
 // so that what reaches the harness is this file's own `println`s alone
 // (support/capture.ft).
@@ -506,6 +519,7 @@ fn string own captured() {
 }
 
 fn i32 main() {
+    write_runtime();
     the_entry_base_is_the_last_component_without_its_suffix();
     the_default_output_is_decided_by_the_mode();
     a_joined_path_leaves_out_what_it_is_not_given();

@@ -31,8 +31,8 @@ static const char PROBE_ATTRIBUTE[] = "\"probe-stack\"=\"inline-asm\"";
 // The runtime entry point of a failed bounds check and the one of a failed
 // overflow check (toolchain.md 5.1), which tell the branches `--no-bounds-check`
 // removes from the ones it leaves alone (D10.6).
-static const char BOUNDS_FAILURE[] = "@fort_rt_fail_bounds";
-static const char OVERFLOW_FAILURE[] = "@fort_rt_fail_overflow";
+static const char BOUNDS_FAILURE[] = "@\"std.rt.fail_bounds\"";
+static const char OVERFLOW_FAILURE[] = "@\"std.rt.fail_overflow\"";
 
 // A `getelementptr` of the indexed array below: `--no-bounds-check` keeps the
 // `inbounds` of every one of them (D10.6, toolchain.md 6).
@@ -230,10 +230,10 @@ TEST(the_checks_of_a_module_are_the_bounds_and_the_overflow_ones, {
     const run_t run = emit_module(&box, INDEXED_SOURCE, NULL, module, sizeof module);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     // Three indexes and two additions, each checked in every build mode
-    // (D10.6, D11.1); the declaration of each entry point is one more
-    // occurrence of its name.
-    TEST_ASSERT_EQ_INT32(count_of(module, BOUNDS_FAILURE), 3 + 1);
-    TEST_ASSERT_EQ_INT32(count_of(module, OVERFLOW_FAILURE), 2 + 1);
+    // (D10.6, D11.1). Nothing declares an entry point, so the name appears
+    // once per call and no more (toolchain.md 6 item 8).
+    TEST_ASSERT_EQ_INT32(count_of(module, BOUNDS_FAILURE), 3);
+    TEST_ASSERT_EQ_INT32(count_of(module, OVERFLOW_FAILURE), 2);
     // Three stores of the array literal and three indexes, each addressed by
     // an `inbounds` getelementptr (toolchain.md 6).
     TEST_ASSERT_EQ_INT32(count_of(module, ARRAY_GEP), 3 + 3);
@@ -277,7 +277,7 @@ TEST(no_bounds_check_leaves_the_other_checks_alone, {
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     // Only the index and span checks are removed; the arithmetic of the same
     // program keeps the traps of checked mode (toolchain.md 3).
-    TEST_ASSERT_EQ_INT32(count_of(module, OVERFLOW_FAILURE), 2 + 1);
+    TEST_ASSERT_EQ_INT32(count_of(module, OVERFLOW_FAILURE), 2);
     sandbox_close(&box);
 })
 
@@ -289,7 +289,7 @@ TEST(release_and_no_bounds_check_are_independent, {
     // switches are independent and may be combined (toolchain.md 1 and 3).
     const run_t released = emit_module(&box, INDEXED_SOURCE, "--release", module, sizeof module);
     TEST_ASSERT_EQ_INT32(released.status, FORT_EXIT_OK);
-    TEST_ASSERT_EQ_INT32(count_of(module, BOUNDS_FAILURE), 3 + 1);
+    TEST_ASSERT_EQ_INT32(count_of(module, BOUNDS_FAILURE), 3);
     TEST_ASSERT_EQ_INT32(count_of(module, OVERFLOW_FAILURE), 0);
     sandbox_close(&box);
 })

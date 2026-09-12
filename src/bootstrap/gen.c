@@ -110,9 +110,6 @@ void gen_init(gen_t* g, gen_options_t opts) {
     ptrvec_init(&g->strs);
     ptrvec_init(&g->enums);
     ptrvec_init(&g->externs);
-    for (uint64_t i = 0; i < (uint64_t)RT_COUNT; i++) {
-        g->rt[i] = false;
-    }
     for (uint64_t i = 0; i < (uint64_t)IN_COUNT; i++) {
         g->intrinsics[i] = false;
     }
@@ -213,6 +210,12 @@ bool gen_is_signed(const type_t* t) {
     return t->kind == TYPE_PRIM && prim_is_signed(t->prim);
 }
 
+// The `struct enum_member` of `std.rt`, which the emitter writes as
+// `%fort.enum_member` and not as a `%struct.` of its own: one named type for
+// one layout, since the enum table of item 21 is built out of it (item 2,
+// section 5.1).
+static const char ENUM_MEMBER_STRUCT[] = "std.rt.enum_member";
+
 // The dotted name of a nominal type's declaration, `%struct.main.point`
 // (item 2, D9.7).
 static str_t nominal_type_name(gen_t* g, const type_t* t) {
@@ -220,6 +223,9 @@ static str_t nominal_type_name(gen_t* g, const type_t* t) {
     // The dotted name is built first: gen_symbol builds its own text in the
     // same scratch buffer.
     const str_t dotted = s != NULL ? gen_symbol(g, s) : str_from_cstr("");
+    if (str_eq(dotted, str_from_cstr(ENUM_MEMBER_STRUCT))) {
+        return str_from_cstr(ENUM_MEMBER_TYPE);
+    }
     sb_clear(&g->scratch);
     sb_push(&g->scratch, '%');
     gen_append_name(&g->scratch, "struct.", dotted, false);
@@ -949,6 +955,11 @@ static void definition_begin(gen_t* g) {
 }
 
 static void emit_signature(gen_t* g, const ast_node_t* fn, const sym_t* s, const type_t* sig) {
+    // Whether this definition is a `noreturn` entry point of toolchain.md
+    // 5.1, read off the mangled name (D9.7), so that only the module the
+    // entry point lives in can carry the attribute group of item 14.
+    const rt_entry_t rt = rt_entry_of(gen_symbol(g, s));
+    const bool rt_noreturn = rt != RT_COUNT && rt_entry_noreturn(rt);
     definition_begin(g);
     sb_append(&g->funcs, "define dso_local ");
     const char* ret_attr = gen_ext_attr(sig->elem);
@@ -995,8 +1006,14 @@ static void emit_signature(gen_t* g, const ast_node_t* fn, const sym_t* s, const
         sb_append_str(&g->funcs, slot_name(g, p->sym, 0, true));
     }
     sb_push(&g->funcs, ')');
-    // `#0` on every fort definition, `#1` when it is `noreturn` (items 7, 20).
-    if (sig->noreturn) {
+    // `#0` on every fort definition, `#1` when it is `noreturn`, and `#8`,
+    // which is `#1` plus `cold`, on the definition of a `noreturn` entry
+    // point of toolchain.md 5.1 and on no other fort function (items 7, 14,
+    // 20).
+    if (sig->noreturn && rt_noreturn) {
+        gen_use_attr(g, ATTR_RT_NORET);
+        sb_append(&g->funcs, " #8 {\n");
+    } else if (sig->noreturn) {
         gen_use_attr(g, ATTR_FN_NORET);
         sb_append(&g->funcs, " #1 {\n");
     } else {
@@ -1138,7 +1155,7 @@ static void gen_fort_entry(gen_t* g, const sym_t* main_sym) {
     gen_args_init(&args);
     if (main_sym->type->nparams == 1) {
         // It copies the span into its own frame when `main` declares the
-        // parameter, because its caller is the C runtime (item 22).
+        // parameter, because its caller is the `main` of item 22.
         gen_val_t slot;
         slot.ty = str_from_cstr("ptr");
         slot.val = str_from_cstr("%args.0");
@@ -1166,6 +1183,58 @@ static void gen_fort_entry(gen_t* g, const sym_t* main_sym) {
     function_end(g);
 }
 
+// ---- main (item 22, D11.6) --------------------------------------------------------
+
+// The byte the process status keeps, which is D11.6's `status & 0xFF`.
+enum { STATUS_MASK = 255 };
+
+// `@main` is the C entry point the start-up code calls, so it takes C's
+// `argc` and `argv` and returns C's `int`. It is a definition of this module
+// like any other and carries `dso_local` and `#0` (items 4, 7, 22). It calls
+// `std.rt.args_init`, then `std.rt.args`, which builds the span it hands to
+// `fort_entry`, then `std.rt.flush_all`, and returns the status masked to one
+// byte (D11.6). `args_init` runs first, since `args` hands out what it built.
+static void gen_main(gen_t* g) {
+    function_begin(g);
+    gen_use_attr(g, ATTR_FN);
+    definition_begin(g);
+    sb_append(&g->funcs, "define dso_local i32 @main(i32 %argc, ptr %argv) #0 {\n");
+    // The argument span is an entry-block alloca like every other place
+    // (item 10); its name embeds no fort identifier, `main` being the
+    // compiler's own definition and not a fort function (D19.5).
+    gen_val_t span;
+    span.ty = str_from_cstr("ptr");
+    span.val = str_from_cstr("%args");
+    sb_append(&g->allocas, "  %args = alloca ");
+    sb_append(&g->allocas, SPAN_TYPE);
+    sb_append(&g->allocas, ", align ");
+    sb_append_u64(&g->allocas, (uint64_t)SPAN_ALIGN);
+    sb_push(&g->allocas, '\n');
+    gen_args_t args;
+    gen_args_init(&args);
+    gen_args_add(&args, gen_literal(g, str_from_cstr("i32"), "%argc"));
+    gen_args_add(&args, gen_literal(g, str_from_cstr("ptr"), "%argv"));
+    gen_call_rt(g, RT_ARGS_INIT, &args);
+    gen_args_free(&args);
+    // `std.rt.args` returns an aggregate, so it takes the destination as the
+    // hidden result pointer of item 7, a plain `ptr` at the call site (D9.9).
+    gen_args_init(&args);
+    gen_args_add(&args, span);
+    gen_call_rt(g, RT_ARGS, &args);
+    gen_args_free(&args);
+    const gen_val_t status = gen_temp(g, str_from_cstr("i32"));
+    sb_append(&g->body, "call i32 @fort_entry(ptr %args)\n");
+    gen_args_init(&args);
+    gen_call_rt(g, RT_FLUSH_ALL, &args);
+    gen_args_free(&args);
+    const gen_val_t masked =
+        gen_binary(g, "and", status, gen_const_unsigned(g, str_from_cstr("i32"), STATUS_MASK));
+    sb_append(&g->body, "  ret i32 ");
+    sb_append_str(&g->body, masked.val);
+    sb_push(&g->body, '\n');
+    function_end(g);
+}
+
 // ---- the module (item 1) ----------------------------------------------------------
 
 // The named type of every struct the module declares, in source order, so
@@ -1184,7 +1253,14 @@ static void gen_struct_type(gen_t* g, const ast_node_t* decl) {
     if (s == NULL || s->error || s->type == NULL || s->type->kind != TYPE_STRUCT) {
         return;
     }
-    sb_append_str(&g->named, gen_mem_type(g, s->type));
+    const str_t named = gen_mem_type(g, s->type);
+    if (str_eq(named, str_from_cstr(ENUM_MEMBER_TYPE))) {
+        // `std.rt`'s `struct enum_member` is the `%fort.enum_member` every
+        // module already carries, so its declaration is written once and in
+        // the header rather than twice (item 2).
+        return;
+    }
+    sb_append_str(&g->named, named);
     sb_append(&g->named, " = type { ");
     uint64_t written = 0;
     for (uint64_t i = 0; i < ast_len(decl); i++) {
@@ -1256,8 +1332,11 @@ bool gen_program(gen_t* g, const check_t* ck, const module_set_t* set) {
             if (decl->kind == AST_FN_DECL && decl->sym != NULL && !decl->sym->error &&
                 decl->sym->type != NULL && decl->sym->type->kind == TYPE_FN &&
                 str_eq(decl->sym->name, str_from_cstr("main"))) {
-                // `fort_entry` is emitted in the entry module (D11.6).
+                // `fort_entry` and `main` are emitted in the entry module
+                // and are the only unmangled definitions in it (D11.6,
+                // item 22).
                 gen_fort_entry(g, decl->sym);
+                gen_main(g);
             }
         }
     }

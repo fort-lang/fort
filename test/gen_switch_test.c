@@ -371,7 +371,7 @@ TEST(an_enum_switch_with_no_default_clause_gets_the_default_of_d7_7, {
                        "  ]\n";
     TEST_ASSERT_EQ_STR(found(want), want);
     const char* block = "\nL3:\n"
-                        "  call void @fort_rt_fail_enum(i64 %t1, ptr @.str.0, ptr @.file.0, "
+                        "  call void @\"std.rt.fail_enum\"(i64 %t1, ptr @.str.0, ptr @.file.0, "
                         "i32 5, i32 5)\n"
                         "  unreachable\n";
     TEST_ASSERT_EQ_STR(found(block), block);
@@ -402,10 +402,10 @@ TEST(the_generated_default_is_kept_in_both_build_modes, {
     // It is not a bounds check, so neither `--release` nor
     // `--no-bounds-check` removes it (D7.7, D10.6).
     TEST_ASSERT_TRUE(emit_release(ENUM_NAME_FN));
-    TEST_ASSERT_EQ_UINT64(occurrences("call void @fort_rt_fail_enum"), (uint64_t)1);
+    TEST_ASSERT_EQ_UINT64(occurrences("call void @\"std.rt.fail_enum\""), (uint64_t)1);
     TEST_ASSERT_EQ_STR(verified(), "verified");
     TEST_ASSERT_TRUE(emit_unchecked(ENUM_NAME_FN));
-    TEST_ASSERT_EQ_UINT64(occurrences("call void @fort_rt_fail_enum"), (uint64_t)1);
+    TEST_ASSERT_EQ_UINT64(occurrences("call void @\"std.rt.fail_enum\""), (uint64_t)1);
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -418,7 +418,7 @@ TEST(an_enum_switch_with_a_default_clause_gets_no_failure_block, {
                           "    }\n    return r;\n}\n"));
     // The clause covers every other value, so there is nothing to report
     // (D7.7), and no `sext` of the operand is emitted either.
-    TEST_ASSERT_EQ_STR(absent("fort_rt_fail_enum"), "absent");
+    TEST_ASSERT_EQ_STR(absent("std.rt.fail_enum"), "absent");
     TEST_ASSERT_EQ_STR(absent("sext i32"), "absent");
     TEST_ASSERT_EQ_STR(found("  switch i32 %t0, label %L1 [\n"), "  switch i32 %t0, label %L1 [\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
@@ -431,7 +431,7 @@ TEST(a_switch_on_an_integer_with_no_default_gets_no_failure_block, {
     // Every value of an integer type is a legal value of it, so a switch no
     // label matches simply falls to the continuation (D7.6); the default of
     // D7.7 belongs to enums alone.
-    TEST_ASSERT_EQ_STR(absent("fort_rt_fail_enum"), "absent");
+    TEST_ASSERT_EQ_STR(absent("std.rt.fail_enum"), "absent");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -446,7 +446,8 @@ TEST(the_generated_default_precedes_the_failure_blocks_of_the_bodies, {
     // Failure blocks are emitted after every normal block, in ascending label
     // order (D19.6), so the switch's own block, whose label was taken before
     // the bodies were walked, stands before the overflow check's.
-    TEST_ASSERT_TRUE(before("call void @fort_rt_fail_enum", "call void @fort_rt_fail_overflow"));
+    TEST_ASSERT_TRUE(
+        before("call void @\"std.rt.fail_enum\"", "call void @\"std.rt.fail_overflow\""));
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 

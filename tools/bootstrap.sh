@@ -62,7 +62,7 @@ fi
 
 # stage1 and the runtime object every generated program links against.
 echo "== stage1: building the C bootstrap compiler (preset $preset)"
-cmake --build "$build" --target fort fort_rt
+cmake --build "$build" --target fort fort_std
 
 entry=$root/src/fort/main.ft
 std=$build/std

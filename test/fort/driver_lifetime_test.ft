@@ -7,6 +7,7 @@ import containers;
 import driver;
 import std.io;
 import std.strbuf;
+import std.sys;
 
 // A run of the driver owns its session and its analysis and releases both on
 // every path out (D20.5), and no other test can see a release that is
@@ -239,7 +240,25 @@ fn void write_file(string path, string text) {
     assert(io.write_file(path, cast(text, u8@)));
 }
 
+// Creates one directory, which may already exist.
+extern fn i32 mkdir(char* path, u32 mode);
+
+// The errno a directory that already exists reports (stdlib.md 2.2).
+i32 EEXIST = 17;
+
+// Every closure holds `std.rt`, which the driver reads from `<std-dir>/rt.ft`
+// and looks for in `std` beside the program when nothing names one (D9.10,
+// toolchain.md 1). The runs below give `fort` as argv[0], so that directory
+// is `std` of this test's own working directory. What the driver needs there
+// is a file that parses, not a runtime: nothing these tests build is ever
+// run.
+fn void write_runtime() {
+    assert(mkdir("std".ptr, 0o700) == 0 || sys.errno() == EEXIST);
+    write_file("std/rt.ft", "// The empty runtime of a driver test.\n");
+}
+
 fn i32 main() {
+    write_runtime();
     write_file("clean.ft", "fn i32 main() {\n    return 0;\n}\n");
     write_file("closure.ft", "import helper;\nfn i32 main() {\n    return helper.one();\n}\n");
     write_file("helper.ft", "fn i32 one() {\n    return 1;\n}\n");

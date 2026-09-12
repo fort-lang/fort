@@ -11,37 +11,46 @@
 import std.rt;
 
 // args_init builds the argument span from argv, and args hands it out (D11.6,
-// D8.6, stdlib.md 3). The C runtime did that before main ran, and main's
-// parameter is that span. This program gives the fort runtime the same argv
-// and compares the two spans: the same count, the same lengths, and the same
-// element pointers. Both runtimes view the argv bytes. Neither copies them
-// (D17.3).
+// D8.6, stdlib.md 3). The main the compiler emits calls both before
+// fort_entry, so main's parameter is already that span. This program gives
+// args_init the same argv a second time and compares the new span with the
+// bytes of the first: the same count, the same lengths and the same element
+// pointers. The span views the argv bytes. It does not copy them (D17.3).
+//
+// args_init releases what an earlier call allocated, so the span main
+// received points into freed storage once the first call below returns. The
+// headers are therefore copied into `saved` first, and every comparison
+// afterwards reads `saved` and never `argv`. Each `string` in it views the
+// argv bytes, which live as long as the process does.
 fn i32 main(string@ argv) {
-    // This rebuilds the argv the C runtime was given as the char* mut* that
-    // args_init takes. A fixed array has addressable elements, so &raw[0] is
-    // that pointer and no allocation is needed. The args directive above fixes
-    // the length, and it counts the program path.
+    string[3] mut saved = {};
     char*[3] mut raw = {};
-    for (u64 mut i = 0; i < argv.len; i++) {
+    u64 count = argv.len;
+    for (u64 mut i = 0; i < count; i++) {
+        saved[i] = argv[i];
         raw[i] = argv[i].ptr;
     }
-    rt.args_init(cast(argv.len, i32), &raw[0]);
+
+    // `raw` is the char* mut* that args_init takes. A fixed array has
+    // addressable elements, so &raw[0] is that pointer and no allocation is
+    // needed. The args directive above fixes the length, and it counts the
+    // program path.
+    rt.args_init(cast(count, i32), &raw[0]);
     string@ mine = rt.args();
-    println(argv.len, " ", mine.len);
+    println(count, " ", mine.len);
 
     // One line for each element: equal bytes, equal lengths, and the same
     // pointer. The same pointer is what "a view of the runtime's storage"
     // means.
     for (u64 mut i = 0; i < mine.len; i++) {
-        println(mine[i] == argv[i], " ", mine[i].len == argv[i].len, " ",
-                mine[i].ptr == argv[i].ptr);
+        println(mine[i] == saved[i], " ", mine[i].len == saved[i].len, " ",
+                mine[i].ptr == saved[i].ptr);
     }
 
-    // The two arguments the directive gave, read from the fort runtime's span
-    // and written by the fort runtime's print_str. Each runtime buffers fd 1
-    // on its own (D11.5), so the C buffer goes out first. Without that flush
-    // the lines above arrive after this one.
-    rt.fort_rt_flush(1);
+    // The two arguments the directive gave, read from the span and written by
+    // print_str rather than by the print family. Both go into one buffer, so
+    // the flush below is what puts these bytes after the lines above (D11.5).
+    rt.flush(1);
     rt.print_str(1, mine[1].ptr, mine[1].len);
     rt.print_char(1, ' ');
     rt.print_str(1, mine[2].ptr, mine[2].len);
@@ -55,7 +64,7 @@ fn i32 main(string@ argv) {
     println(rt.args().len, " ", rt.args().ptr == null);
 
     // args_init emptied the slot, so it can build the span again.
-    rt.args_init(cast(argv.len, i32), &raw[0]);
-    println(rt.args().len, " ", rt.args()[2] == argv[2]);
+    rt.args_init(cast(count, i32), &raw[0]);
+    println(rt.args().len, " ", rt.args()[2] == saved[2]);
     return 0;
 }

@@ -1,21 +1,20 @@
-// The table of runtime entry points (toolchain.md 5.1) and the two maps over
-// it: the IR text of a form, and the form a fort type takes at the C
-// boundary; see runtime_sig.h.
+// The table of runtime entry points (toolchain.md 5.1) and the maps over it:
+// the IR text of a form, the form a fort type takes as a value, and the call
+// shape of a fort signature; see runtime_sig.h.
 #include "runtime_sig.h"
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#include "containers.h"
 #include "prim.h"
 #include "str.h"
 #include "types.h"
 
-// One entry point: its C name, its result form, whether section 5.1 declares
-// it `_Noreturn`, and its parameter forms in order, padded with IR_NONE.
-// The list ends at the first IR_NONE, so the arity is read off the row
-// rather than counted by hand beside it.
+// One entry point: its mangled fort name, its result form, whether section
+// 5.1 declares it `fn noreturn`, and its parameter forms in order, padded
+// with IR_NONE. The list ends at the first IR_NONE, so the arity is read off
+// the row rather than counted by hand beside it.
 typedef struct {
     const char* name;
     ir_form_t result;
@@ -23,47 +22,55 @@ typedef struct {
     ir_form_t params[RT_MAX_PARAMS];
 } rt_sig_t;
 
-// The C prototypes of toolchain.md 5.1, in that section's order (D19.5),
-// mapped to IR forms by item 8: `uint64_t` and `int64_t` are `i64`,
-// `int32_t` is `i32`, `uint8_t` is `i8 zeroext`, every pointer is `ptr` and
-// `loc` is the three parameters `ptr, i32, i32`. Every `fort_rt_fail_*`
-// function, `fort_rt_panic`, `fort_rt_assert_fail` and `fort_rt_exit` is
-// `_Noreturn` (section 5.1), which is stated per row rather than as a range
-// over the enum, so an entry point added in the middle of the order cannot
-// inherit the attribute by position.
+// The fort signatures of toolchain.md 5.1, in that section's order, mapped to
+// IR forms by item 7: `u64` and `i64` are both `i64`, `u32` is `i32`, `char`
+// is `i8 zeroext`, `bool` is `i1 zeroext`, every pointer is `ptr` and `loc`
+// is the three parameters `ptr, i32, i32`. `args` returns a `string@`, an
+// aggregate, so it is a `void` function with a leading `ptr` (item 7, D9.9).
+// Every `fail_*` function, `panic`, `assert_fail` and `exit` is `fn noreturn`
+// (section 5.1), which is stated per row rather than as a range over the
+// enum, so an entry point added in the middle of the order cannot inherit the
+// attribute by position. The two float printers stand in `std.rt_float` and
+// not in `std.rt`, because a compiler without floats cannot compile them
+// (D18.1).
 static const rt_sig_t RT_SIG[RT_COUNT] = {
-    {"fort_rt_new", IR_PTR, false, {IR_I64, IR_I64, IR_PTR, IR_I32, IR_I32, IR_NONE}},
-    {"fort_rt_del", IR_VOID, false, {IR_PTR, IR_NONE, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
-    {"fort_rt_str_eq", IR_U8, false, {IR_PTR, IR_I64, IR_PTR, IR_I64, IR_NONE, IR_NONE}},
-    {"fort_rt_fail_bounds", IR_VOID, true, {IR_I64, IR_I64, IR_PTR, IR_I32, IR_I32, IR_NONE}},
-    {"fort_rt_fail_span", IR_VOID, true, {IR_I64, IR_I64, IR_I64, IR_PTR, IR_I32, IR_I32}},
-    {"fort_rt_fail_overflow", IR_VOID, true, {IR_PTR, IR_I32, IR_I32, IR_NONE, IR_NONE, IR_NONE}},
-    {"fort_rt_fail_shift", IR_VOID, true, {IR_I64, IR_PTR, IR_PTR, IR_I32, IR_I32, IR_NONE}},
-    {"fort_rt_fail_div_zero", IR_VOID, true, {IR_PTR, IR_I32, IR_I32, IR_NONE, IR_NONE, IR_NONE}},
-    {"fort_rt_fail_div_overflow",
+    {"std.rt.alloc", IR_PTR, false, {IR_I64, IR_I64, IR_PTR, IR_I32, IR_I32, IR_NONE}},
+    {"std.rt.free", IR_VOID, false, {IR_PTR, IR_NONE, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
+    {"std.rt.str_eq", IR_BOOL, false, {IR_PTR, IR_I64, IR_PTR, IR_I64, IR_NONE, IR_NONE}},
+    {"std.rt.fail_bounds", IR_VOID, true, {IR_I64, IR_I64, IR_PTR, IR_I32, IR_I32, IR_NONE}},
+    {"std.rt.fail_span", IR_VOID, true, {IR_I64, IR_I64, IR_I64, IR_PTR, IR_I32, IR_I32}},
+    {"std.rt.fail_overflow", IR_VOID, true, {IR_PTR, IR_I32, IR_I32, IR_NONE, IR_NONE, IR_NONE}},
+    {"std.rt.fail_shift", IR_VOID, true, {IR_I64, IR_PTR, IR_PTR, IR_I32, IR_I32, IR_NONE}},
+    {"std.rt.fail_div_zero", IR_VOID, true, {IR_PTR, IR_I32, IR_I32, IR_NONE, IR_NONE, IR_NONE}},
+    {"std.rt.fail_div_overflow",
      IR_VOID,
      true,
      {IR_PTR, IR_I32, IR_I32, IR_NONE, IR_NONE, IR_NONE}},
-    {"fort_rt_fail_alloc_count", IR_VOID, true, {IR_I64, IR_PTR, IR_I32, IR_I32, IR_NONE, IR_NONE}},
-    {"fort_rt_fail_overwrite", IR_VOID, true, {IR_PTR, IR_I32, IR_I32, IR_NONE, IR_NONE, IR_NONE}},
-    {"fort_rt_fail_enum", IR_VOID, true, {IR_I64, IR_PTR, IR_PTR, IR_I32, IR_I32, IR_NONE}},
-    {"fort_rt_panic", IR_VOID, true, {IR_PTR, IR_I64, IR_PTR, IR_I32, IR_I32, IR_NONE}},
-    {"fort_rt_assert_fail", IR_VOID, true, {IR_PTR, IR_PTR, IR_I32, IR_I32, IR_NONE, IR_NONE}},
-    {"fort_rt_print_i64", IR_VOID, false, {IR_I32, IR_I64, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
-    {"fort_rt_print_u64", IR_VOID, false, {IR_I32, IR_I64, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
-    {"fort_rt_print_f32", IR_VOID, false, {IR_I32, IR_F32, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
-    {"fort_rt_print_f64", IR_VOID, false, {IR_I32, IR_F64, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
-    {"fort_rt_print_bool", IR_VOID, false, {IR_I32, IR_U8, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
-    {"fort_rt_print_char", IR_VOID, false, {IR_I32, IR_U8, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
-    {"fort_rt_print_ptr", IR_VOID, false, {IR_I32, IR_PTR, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
-    {"fort_rt_print_str", IR_VOID, false, {IR_I32, IR_PTR, IR_I64, IR_NONE, IR_NONE, IR_NONE}},
-    {"fort_rt_print_enum", IR_VOID, false, {IR_I32, IR_I32, IR_PTR, IR_I64, IR_NONE, IR_NONE}},
-    {"fort_rt_flush", IR_VOID, false, {IR_I32, IR_NONE, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
-    {"fort_rt_flush_all", IR_VOID, false, {IR_NONE, IR_NONE, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
-    {"fort_rt_args_init", IR_VOID, false, {IR_I32, IR_PTR, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
-    {"fort_rt_args_ptr", IR_PTR, false, {IR_NONE, IR_NONE, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
-    {"fort_rt_args_len", IR_I64, false, {IR_NONE, IR_NONE, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
-    {"fort_rt_exit", IR_VOID, true, {IR_I32, IR_NONE, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
+    {"std.rt.fail_alloc_count", IR_VOID, true, {IR_I64, IR_PTR, IR_I32, IR_I32, IR_NONE, IR_NONE}},
+    {"std.rt.fail_overwrite", IR_VOID, true, {IR_PTR, IR_I32, IR_I32, IR_NONE, IR_NONE, IR_NONE}},
+    {"std.rt.fail_enum", IR_VOID, true, {IR_I64, IR_PTR, IR_PTR, IR_I32, IR_I32, IR_NONE}},
+    {"std.rt.panic", IR_VOID, true, {IR_PTR, IR_I64, IR_PTR, IR_I32, IR_I32, IR_NONE}},
+    {"std.rt.assert_fail", IR_VOID, true, {IR_PTR, IR_PTR, IR_I32, IR_I32, IR_NONE, IR_NONE}},
+    {"std.rt.print_i64", IR_VOID, false, {IR_I32, IR_I64, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
+    {"std.rt.print_u64", IR_VOID, false, {IR_I32, IR_I64, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
+    {"std.rt_float.print_f32",
+     IR_VOID,
+     false,
+     {IR_I32, IR_F32, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
+    {"std.rt_float.print_f64",
+     IR_VOID,
+     false,
+     {IR_I32, IR_F64, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
+    {"std.rt.print_bool", IR_VOID, false, {IR_I32, IR_BOOL, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
+    {"std.rt.print_char", IR_VOID, false, {IR_I32, IR_U8, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
+    {"std.rt.print_ptr", IR_VOID, false, {IR_I32, IR_PTR, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
+    {"std.rt.print_str", IR_VOID, false, {IR_I32, IR_PTR, IR_I64, IR_NONE, IR_NONE, IR_NONE}},
+    {"std.rt.print_enum", IR_VOID, false, {IR_I32, IR_I32, IR_PTR, IR_I64, IR_NONE, IR_NONE}},
+    {"std.rt.flush", IR_VOID, false, {IR_I32, IR_NONE, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
+    {"std.rt.flush_all", IR_VOID, false, {IR_NONE, IR_NONE, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
+    {"std.rt.args_init", IR_VOID, false, {IR_I32, IR_PTR, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
+    {"std.rt.args", IR_VOID, false, {IR_PTR, IR_NONE, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
+    {"std.rt.exit", IR_VOID, true, {IR_I32, IR_NONE, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
 };
 
 rt_entry_t rt_entry_of(str_t name) {
@@ -128,13 +135,13 @@ const char* ir_param_text(ir_form_t t) {
     }
     // A type with no IR form has no text either: the spelling is deliberately
     // not IR so that a form that escaped a check fails a tool rather than
-    // emitting a plausible declaration.
+    // emitting a plausible call.
     return "<none>";
 }
 
 const char* ir_result_text(ir_form_t t) {
     // A narrow result carries its extension attribute before the type
-    // (`declare zeroext i8 @fort_rt_str_eq(...)`, item 7).
+    // (`call zeroext i1 @"std.rt.str_eq"(...)`, item 7).
     switch (t) {
     case IR_BOOL:
         return "zeroext i1";
@@ -199,34 +206,53 @@ ir_form_t ir_form_of_type(const type_t* t) {
         // (D3.10, D3.11).
         return IR_PTR;
     case TYPE_ENUM:
-        // An enum crosses the C boundary as `i32` (D9.8, D3.9).
+        // An enum is passed as `i32` (D3.9, D9.8).
         return IR_I32;
     default:
         break;
     }
+    // A struct, fixed array, span or `string` has no value form: it lives in
+    // memory and travels as a pointer (D19.3).
     return IR_NONE;
 }
 
-// `declare <result> @fort_rt_x(<params>) [#2]`: a runtime entry point is
-// declared with the C prototype of section 5.1, mapped to IR types by item 8,
-// and never variadic, whether the compiler emits the call itself or the
-// standard library reached the entry point with an `extern fn` (D13.1). A
-// `_Noreturn` one carries the `cold noreturn nounwind` group of item 14.
-void rt_declaration(sb_t* out, rt_entry_t rt) {
-    sb_append(out, "declare ");
-    sb_append(out, ir_result_text(rt_entry_result(rt)));
-    sb_append(out, " @");
-    sb_append(out, rt_entry_name(rt));
-    sb_push(out, '(');
-    for (uint32_t i = 0; i < rt_entry_param_count(rt); i++) {
-        if (i > 0) {
-            sb_append(out, ", ");
+// Whether a fort type is one of the aggregates of item 7, which travel as a
+// plain `ptr`.
+static bool form_is_aggregate(const type_t* t) {
+    if (t == NULL) {
+        return false;
+    }
+    return t->kind == TYPE_STRUCT || t->kind == TYPE_ARRAY || t->kind == TYPE_SPAN ||
+           t->kind == TYPE_STRING;
+}
+
+bool rt_signature_of_type(const type_t* fn, ir_form_t* result, ir_form_t* params, uint32_t* n) {
+    if (fn == NULL || fn->kind != TYPE_FN) {
+        return false;
+    }
+    uint32_t count = 0;
+    if (form_is_aggregate(fn->elem)) {
+        // An aggregate result is a leading `ptr sret(%T)` parameter on a
+        // function whose result type is `void` (item 7).
+        *result = IR_VOID;
+        params[count] = IR_PTR;
+        count++;
+    } else {
+        *result = ir_form_of_type(fn->elem);
+    }
+    for (uint32_t i = 0; i < fn->nparams; i++) {
+        if (count >= (uint32_t)RT_MAX_PARAMS) {
+            return false;
         }
-        sb_append(out, ir_param_text(rt_entry_param(rt, i)));
+        // An aggregate argument is a plain `ptr` parameter (item 7); no entry
+        // point takes one, so this keeps the map total rather than covering a
+        // row.
+        params[count] = form_is_aggregate(fn->params[i]) ? IR_PTR : ir_form_of_type(fn->params[i]);
+        count++;
     }
-    sb_push(out, ')');
-    if (rt_entry_noreturn(rt)) {
-        sb_append(out, " #2");
+    *n = count;
+    for (uint32_t i = count; i < (uint32_t)RT_MAX_PARAMS; i++) {
+        params[i] = IR_NONE;
     }
-    sb_push(out, '\n');
+    return true;
 }

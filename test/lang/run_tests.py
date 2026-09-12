@@ -1073,18 +1073,34 @@ def files_problems(test, files):
     return ["files: the entry '%s' is missing" % test.entry]
 
 
+def index_of_the_test(test, symbols):
+    """The records of `symbols` that are about the test's own files (D20.3).
+
+    The index covers every module of the closure that was checked, and every
+    closure holds `std.rt` and what it imports (D9.10), so a run over any test
+    answers with the whole standard library's records too. Those cannot stand
+    in a golden: their file names are the `--std-dir` the run was given, which
+    is a build directory and differs between machines. The golden therefore
+    holds the records of the files under the test's own directory, which is
+    what the test is about, and the library's records are dropped here.
+    """
+    prefix = test.path + "/"
+    return [record for record in symbols if str(record.get("file", "")).startswith(prefix)]
+
+
 def golden_index_diff(test, symbols, root):
     """The first line on which the index differs from the test's golden (D20.3).
 
-    The golden is the `"symbols"` of the run, one record per line, so a
-    mismatch names the line and shows both spellings of it.
+    The golden is the `"symbols"` of the run over the test's own files, one
+    record per line, so a mismatch names the line and shows both spellings of
+    it.
     """
     path = root / test.path / INDEX_NAME
     try:
         want = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
         return ["%s: cannot be read: %s" % (INDEX_NAME, e)]
-    got = render_index(symbols)
+    got = render_index(index_of_the_test(test, symbols))
     if got == want:
         return []
     want_lines, got_lines = want.splitlines(), got.splitlines()
@@ -1249,8 +1265,10 @@ def check_command(config, test, as_json, indexed=False):
 
 
 def link_command(config, test, prog, obj):
-    """`<cc> --target=<triple> -o prog prog.o <link: files> fort_rt.o` for a test with helpers.
+    """`<cc> --target=<triple> -o prog prog.o <link: files>` for a test with helpers.
 
+    The object holds the whole program, the runtime included (D9.10, D13.1),
+    so the link takes no object beside the helpers.
     `--cc` is a clang and names its target on the command line (D14.1, D14.3),
     so the harness spells the triple here exactly as the compiler does, and
     `-O1` as well: the compiler builds the fort side at `-O1` (toolchain.md 2),
@@ -1263,7 +1281,6 @@ def link_command(config, test, prog, obj):
     """
     argv = [config.cc, "--target=" + config.target, "-O1", "-o", prog, obj]
     argv.extend(str(config.root / link) for link in test.links)
-    argv.append(os.path.join(config.std_dir, "fort_rt.o"))
     return argv
 
 

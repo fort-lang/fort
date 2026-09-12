@@ -27,9 +27,12 @@
 
 #include "test.h"
 
-// The document a clean module yields, with the entry file as its only file.
+// The document a clean module yields. Every closure holds `std.rt`, which the
+// compiler loads as a root of its own before the entry file (D9.10), so the
+// runtime's file stands first in the list and the entry file second. The
+// sandbox's runtime is empty, so it contributes no symbol of its own.
 static const char CLEAN_DOCUMENT[] =
-    "{\"version\":1,\"files\":[\"%s\"],\"diagnostics\":[],\"symbols\":[]}\n";
+    "{\"version\":1,\"files\":[\"%s\",\"%s\"],\"diagnostics\":[],\"symbols\":[]}\n";
 
 // A module that declares no `main`: under --check the file is a module under
 // inspection and not a program, so D8.6 is not applied (D20.1).
@@ -108,7 +111,7 @@ TEST(the_document_of_a_clean_module_is_one_line_with_four_keys, {
     const run_t run = RUN_CAPTURED("--check", "--json", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     char want[CAPTURE_MAX];
-    expect1(want, sizeof want, CLEAN_DOCUMENT, box.entry);
+    expect2(want, sizeof want, CLEAN_DOCUMENT, box.rt, box.entry);
     // Version, files, diagnostics and symbols, in that order, on one line
     // ended by a newline (D20.2, toolchain.md 4.1).
     TEST_ASSERT_EQ_STR(run.out, want);
@@ -127,7 +130,7 @@ TEST(the_document_lists_every_file_the_compiler_read, {
     // Every file read, in read order, so a client can clear stale
     // diagnostics (D20.2).
     char want[CAPTURE_MAX];
-    expect2(want, sizeof want, "\"files\":[\"%s\",\"%s\"]", box.entry, util);
+    expect3(want, sizeof want, "\"files\":[\"%s\",\"%s\",\"%s\"]", box.rt, box.entry, util);
     TEST_ASSERT_NONNULL(strstr(run.out, want));
     sandbox_close(&box);
 })
@@ -152,6 +155,9 @@ TEST(a_relative_entry_is_named_in_the_document_exactly_as_it_was_given, {
     run.out[0] = '\0';
     run.err[0] = '\0';
     if (moved) {
+        // A relative standard library directory too, so that no absolute path
+        // reaches the document from the sandbox's own environment.
+        TEST_UNUSED(setenv("FORT_STD_DIR", "std", 1));
         run = RUN_CAPTURED("--check", "--json", "main.ft");
         TEST_UNUSED(chdir(home));
     }
@@ -159,7 +165,7 @@ TEST(a_relative_entry_is_named_in_the_document_exactly_as_it_was_given, {
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
     // The file list and the diagnostic both name it the way the command line
     // did, with no directory part added.
-    TEST_ASSERT_NONNULL(strstr(run.out, "\"files\":[\"main.ft\"]"));
+    TEST_ASSERT_NONNULL(strstr(run.out, "\"files\":[\"std/rt.ft\",\"main.ft\"]"));
     TEST_ASSERT_NONNULL(strstr(run.out, "\"file\":\"main.ft\",\"line\":1,\"col\":1"));
     TEST_ASSERT_NULL(strstr(run.out, box.dir));
     sandbox_close(&box);
@@ -184,13 +190,14 @@ TEST(a_relative_entry_below_the_directory_keeps_its_directory_part, {
     run.out[0] = '\0';
     run.err[0] = '\0';
     if (moved) {
+        TEST_UNUSED(setenv("FORT_STD_DIR", "std", 1));
         run = RUN_CAPTURED("--check", "--json", "src/main.ft");
         TEST_UNUSED(chdir(home));
     }
     TEST_ASSERT_TRUE(moved);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     char want[CAPTURE_MAX];
-    expect1(want, sizeof want, CLEAN_DOCUMENT, "src/main.ft");
+    expect2(want, sizeof want, CLEAN_DOCUMENT, "std/rt.ft", "src/main.ft");
     TEST_ASSERT_EQ_STR(run.out, want);
     sandbox_close(&box);
 })
@@ -240,7 +247,7 @@ TEST(the_document_nests_a_note_under_its_error, {
 // The whole document of a module with one error, note included: the shape a
 // client parses (D20.2, toolchain.md 4.1).
 static const char BAD_IMPORT_DOCUMENT[] =
-    "{\"version\":1,\"files\":[\"%s\"],\"diagnostics\":[{\"file\":\"%s\",\"line\":1,"
+    "{\"version\":1,\"files\":[\"%s\",\"%s\"],\"diagnostics\":[{\"file\":\"%s\",\"line\":1,"
     "\"col\":1,\"end_line\":1,\"end_col\":16,\"severity\":\"error\",\"message\":"
     "\"module 'nothere' not found\",\"notes\":[{\"file\":\"%s\",\"line\":1,\"col\":1,"
     "\"end_line\":1,\"end_col\":16,\"message\":\"looked for %s/nothere.ft\"}]}],"
@@ -253,8 +260,8 @@ TEST(the_document_of_a_failing_module_is_exact, {
     const run_t run = RUN_CAPTURED("--check", "--json", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
     char want[CAPTURE_MAX];
-    TEST_UNUSED(
-        snprintf(want, sizeof want, BAD_IMPORT_DOCUMENT, box.entry, box.entry, box.entry, box.dir));
+    TEST_UNUSED(snprintf(
+        want, sizeof want, BAD_IMPORT_DOCUMENT, box.rt, box.entry, box.entry, box.entry, box.dir));
     TEST_ASSERT_EQ_STR(run.out, want);
     sandbox_close(&box);
 })
@@ -262,7 +269,7 @@ TEST(the_document_of_a_failing_module_is_exact, {
 // The whole document of the sandbox entry under --index: one record for the
 // one name the module declares (D20.3, toolchain.md 9.1).
 static const char INDEXED_DOCUMENT[] =
-    "{\"version\":1,\"files\":[\"%s\"],\"diagnostics\":[],\"symbols\":[{\"file\":\"%s\","
+    "{\"version\":1,\"files\":[\"%s\",\"%s\"],\"diagnostics\":[],\"symbols\":[{\"file\":\"%s\","
     "\"line\":1,\"col\":8,\"end_line\":1,\"end_col\":12,\"name\":\"main\",\"kind\":\"fn\","
     "\"type\":\"fn i32()\",\"is_decl\":true,\"decl\":{\"file\":\"%s\",\"line\":1,\"col\":8,"
     "\"end_line\":1,\"end_col\":12}}]}\n";
@@ -314,7 +321,8 @@ TEST(index_implies_check_and_json_and_fills_the_symbols, {
     const run_t run = RUN_CAPTURED("--index", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     char want[CAPTURE_MAX];
-    TEST_UNUSED(snprintf(want, sizeof want, INDEXED_DOCUMENT, box.entry, box.entry, box.entry));
+    TEST_UNUSED(
+        snprintf(want, sizeof want, INDEXED_DOCUMENT, box.rt, box.entry, box.entry, box.entry));
     TEST_ASSERT_EQ_STR(run.out, want);
     sandbox_close(&box);
 })
@@ -524,7 +532,7 @@ TEST(a_diagnostic_of_an_imported_module_names_that_module, {
     // Every module of the closure is read and reported on, each diagnostic
     // naming its own file (D14.2, module-system.md 10).
     char want[CAPTURE_MAX];
-    expect2(want, sizeof want, "\"files\":[\"%s\",\"%s\"]", box.entry, util);
+    expect3(want, sizeof want, "\"files\":[\"%s\",\"%s\",\"%s\"]", box.rt, box.entry, util);
     TEST_ASSERT_NONNULL(strstr(run.out, want));
     expect1(want, sizeof want, "\"file\":\"%s\",\"line\":1,\"col\":18", util);
     TEST_ASSERT_NONNULL(strstr(run.out, want));
@@ -563,7 +571,7 @@ TEST(an_include_root_is_searched_under_check, {
     const run_t run = RUN_CAPTURED("--check", "--json", "-I", lib, box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     char want[CAPTURE_MAX];
-    expect2(want, sizeof want, "\"files\":[\"%s\",\"%s\"]", box.entry, util);
+    expect3(want, sizeof want, "\"files\":[\"%s\",\"%s\",\"%s\"]", box.rt, box.entry, util);
     TEST_ASSERT_NONNULL(strstr(run.out, want));
     sandbox_close(&box);
 })
@@ -579,7 +587,7 @@ TEST(a_quote_in_a_file_name_is_escaped_in_the_document, {
     const run_t run = RUN_CAPTURED("--check", "--json", quoted);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     char want[CAPTURE_MAX];
-    expect1(want, sizeof want, "\"files\":[\"%s/q\\\".ft\"]", box.dir);
+    expect2(want, sizeof want, "\"files\":[\"%s\",\"%s/q\\\".ft\"]", box.rt, box.dir);
     TEST_ASSERT_NONNULL(strstr(run.out, want));
     sandbox_close(&box);
 })
@@ -594,7 +602,7 @@ TEST(a_non_ascii_file_name_passes_through_the_document, {
     const run_t run = RUN_CAPTURED("--check", "--json", accented);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     char want[CAPTURE_MAX];
-    expect1(want, sizeof want, "\"files\":[\"%s\"]", accented);
+    expect2(want, sizeof want, "\"files\":[\"%s\",\"%s\"]", box.rt, accented);
     TEST_ASSERT_NONNULL(strstr(run.out, want));
     sandbox_close(&box);
 })
@@ -623,9 +631,11 @@ TEST(the_front_end_hands_out_the_files_it_read, {
     diag_capture(NULL);
     sb_free(&sink);
     TEST_ASSERT_EQ_INT32(status, FORT_EXIT_OK);
-    TEST_ASSERT_EQ_UINT64(driver_files_count(&files), (uint64_t)2);
-    TEST_ASSERT_EQ_STR(driver_files_at(&files, 0), box.entry);
-    TEST_ASSERT_EQ_STR(driver_files_at(&files, 1), util);
+    // The runtime is read first, being a root of the closure (D9.10).
+    TEST_ASSERT_EQ_UINT64(driver_files_count(&files), (uint64_t)3);
+    TEST_ASSERT_EQ_STR(driver_files_at(&files, 0), box.rt);
+    TEST_ASSERT_EQ_STR(driver_files_at(&files, 1), box.entry);
+    TEST_ASSERT_EQ_STR(driver_files_at(&files, 2), util);
     driver_analysis_free(&an);
     driver_files_free(&files);
     driver_options_free(&opts);
@@ -654,7 +664,7 @@ TEST(the_analysis_outlives_the_front_end, {
     TEST_ASSERT_EQ_INT32(status, FORT_EXIT_OK);
     // The trees and every annotation on them are readable after the run: the
     // symbols live until the caller frees the analysis (sym.h, D20.3).
-    TEST_ASSERT_EQ_UINT64(module_set_count(&an.set), (uint64_t)2);
+    TEST_ASSERT_EQ_UINT64(module_set_count(&an.set), (uint64_t)3);
     const module_t* entry = module_set_entry(&an.set);
     TEST_ASSERT_NONNULL(entry);
     TEST_ASSERT_NONNULL(entry->ast->sym);

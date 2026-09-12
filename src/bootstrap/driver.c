@@ -485,7 +485,6 @@ static void remove_temp_dir(const char* dir, const char* ir_path) {
 void driver_cc_argv(const driver_options_t* opts,
                     const char* ir_path,
                     const char* out_path,
-                    const char* std_dir,
                     str_pool_t* pool,
                     ptrvec_t* argv) {
     sb_t b;
@@ -503,7 +502,7 @@ void driver_cc_argv(const driver_options_t* opts,
     push_arg(argv, "-fPIE");
     if (!opts->compile_only) {
         // The executable is position-independent; -c stops at the object, so
-        // it takes no -pie, no runtime object and no -l (toolchain.md 2).
+        // it takes no -pie and no -l (toolchain.md 2).
         push_arg(argv, "-pie");
     }
     // The module carries its own target triple, which clang would warn about
@@ -514,12 +513,11 @@ void driver_cc_argv(const driver_options_t* opts,
     }
     push_arg(argv, "-o");
     push_arg(argv, out_path);
-    // No -x ir: -x is sticky and would also treat fort_rt.o as IR
-    // (toolchain.md 2).
+    // The one input is the module, which holds the whole program, the
+    // runtime included (D9.10, D13.1). No -x ir: clang reads a `.ll` by its
+    // suffix and -x is sticky (toolchain.md 2).
     push_arg(argv, ir_path);
     if (!opts->compile_only) {
-        const str_t runtime = join_path(pool, std_dir, str_from_cstr(FORT_RUNTIME_OBJECT), NULL);
-        push_arg(argv, runtime.ptr);
         for (uint64_t i = 0; i < opts->libs.len; i++) {
             push_arg(argv, arg_at(&opts->libs, i));
         }
@@ -548,16 +546,14 @@ static void error_cc_status(FILE* err, const char* what, int64_t value) {
 // (D14.3). Returns FORT_EXIT_OK, or FORT_EXIT_USAGE after reporting the
 // failure (D14.1).
 static int run_cc(const driver_options_t* opts,
-                  const char* argv0,
                   const char* ir_path,
                   const char* out_path,
                   FILE* err) {
     str_pool_t pool;
     str_pool_init(&pool);
-    const str_t std_dir = driver_std_dir(opts, argv0, &pool);
     ptrvec_t argv;
     ptrvec_init(&argv);
-    driver_cc_argv(opts, ir_path, out_path, std_dir.ptr, &pool, &argv);
+    driver_cc_argv(opts, ir_path, out_path, &pool, &argv);
     pid_t child = 0;
     const int spawned =
         posix_spawnp(&child, opts->cc, NULL, NULL, (char* const*)argv.items, environ);
@@ -922,7 +918,7 @@ static int compile_entry(const driver_options_t* opts, const char* argv0, FILE* 
     int status = driver_front_end(opts, argv0, ir_path.ptr, NULL, &an, err);
     driver_analysis_free(&an);
     if (status == FORT_EXIT_OK) {
-        status = run_cc(opts, argv0, ir_path.ptr, out_path, err);
+        status = run_cc(opts, ir_path.ptr, out_path, err);
     }
     remove_temp_dir(dir.ptr, ir_path.ptr);
     str_pool_free(&pool);

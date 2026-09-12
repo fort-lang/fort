@@ -39,9 +39,9 @@ A safe(r) C-like systems programming language.
   (`test/common.h` provides `TEST_UNUSED`); `test/lang/` holds language tests in the directive
   format defined in `notes/toolchain.md`.
 - `src/bootstrap/`: the C bootstrap compiler (stage1), frozen once the compiler is self-hosted.
-  `src/fort/`: the compiler written in fort (stage2 and stage3). `runtime/`: the C runtime
-  linked into every program. `std/`: the standard library in fort. `tools/`: `vm`,
-  `provision.sh`, `lines.py`, `bootstrap.sh`.
+  `src/fort/`: the compiler written in fort (stage2 and stage3). `std/`: the standard library in
+  fort, the runtime (`std/rt.ft`) among its modules; there is no C runtime and no object linked
+  beside the program (T-091). `tools/`: `vm`, `provision.sh`, `lines.py`, `bootstrap.sh`.
 - `editors/`: `editors/vscode/` is the VS Code extension -- `package.json`,
   `language-configuration.json`, `syntaxes/fort.tmLanguage.json`, `extension.js`, and the one pure
   module it is tested through, `lib/check.js` -- and `editors/README.md` is its install guide, its
@@ -166,11 +166,10 @@ A safe(r) C-like systems programming language.
   directories are `build/<preset>` inside the worktree. `-Wall -Wextra -Wpedantic -Werror
   -Wshadow -Wvla -Wstrict-prototypes -Wmissing-prototypes -Wundef` apply to every C target.
 - Targets: `fort_core` (static library, `src/bootstrap/*.c` except `main.c`, globbed), `fort`
-  (`build/<preset>/fort`), `fort_rt` (`runtime/fort_rt.c` cross-compiled by `FORT_TARGET_CC`,
-  a clang (default `clang`) with `--target=${FORT_TARGET_TRIPLE}` (default
-  `x86_64-linux-gnu`), into `build/<preset>/std/fort_rt.o` next to a copy of
-  `std/*.ft`), `fort_rt_native` (the runtime compiled natively with `-DFORT_RT_NO_MAIN` for the
-  unit tests and tidy), `lang_ffi_helpers` (`test/lang/ffi/*.c` built natively so `-Werror` and
+  (`build/<preset>/fort`), `fort_std` (a copy of `std/*.ft` in `build/<preset>/std`, which is
+  what the compiler reads as `--std-dir`; `FORT_TARGET_CC`, a clang (default `clang`) with
+  `--target=${FORT_TARGET_TRIPLE}` (default `x86_64-linux-gnu`), is what the driver runs over the
+  emitted module), `lang_ffi_helpers` (`test/lang/ffi/*.c` built natively so `-Werror` and
   tidy cover them), `check` (ctest label `unit`, including `lang_lint` and `lang_selftest`),
   `check-lang` (`test/lang/run_tests.py` with the built compiler; the same command is the ctest
   `lang`, label `lang`), `check-all` (both), `format` and `format-check` (clang-format
@@ -276,8 +275,8 @@ A safe(r) C-like systems programming language.
   `test/` already holds one per component, `runtime_test.c` being the C runtime's and not the
   compiler's, so check the name is free before writing the file (a shell redirection overwrites a
   suite silently and the gate then reports only its absence); every `test/*_test.c` is globbed
-  into an executable `build/<preset>/test/<component>_test` linked against `fort_core` and
-  `fort_rt_native`, and a ctest `unit-<component>`. A `TEST` body is one macro argument: a comma
+  into an executable `build/<preset>/test/<component>_test` linked against `fort_core`, and a
+  ctest `unit-<component>`. A `TEST` body is one macro argument: a comma
   outside parentheses (a brace initializer, for example) splits it. `#val` in an assertion
   message is the argument after macro expansion, so compare through a variable when the
   expected text matters. Suites are ordinary C11: no `__VA_OPT__`, and `-Wtype-limits` (gcc)
@@ -365,12 +364,13 @@ A safe(r) C-like systems programming language.
   handed to a shell in the guest, so a path is quoted before it goes in.
 - The cross pipeline: `test/ir/*.ll` are hand-written LLVM 18 modules in the form
   `notes/toolchain.md` 6 specifies (D19.1); `hello.ll` and `abort.ll` are its two worked
-  examples byte for byte, so a change to one changes the other, while `floats.ll` and
-  `colons.ll` answer questions of their own (`test/ir/README.md` says which).
-  `test/pipeline_test.sh <build-dir>`
+  examples byte for byte, so a change to one changes the other, while `colons.ll` answers a
+  question of its own (`test/ir/README.md` says which). `test/pipeline_test.sh`
   verifies each with `opt-18 -passes=verify`, compiles and links it with `clang
-  --target=x86_64-linux-gnu` and `<build-dir>/std/fort_rt.o`, runs it under qemu and checks
-  stdout, stderr and the status byte-exactly; ctest `pipeline` (label `unit`). Adding one means
+  --target=x86_64-linux-gnu` alone -- a module holds the whole program, the runtime included, so
+  each file defines the handful of `std.rt` entry points it calls over libc -- runs it under
+  qemu and checks stdout, stderr and the status byte-exactly; ctest `pipeline` (label `unit`).
+  Adding one means
   adding its name to the `for prog in` loop of that script and a block of expectations beside
   the others; the list is not globbed, since each module's output is its own. `*.ll` is
   gitignored except `test/ir/*.ll`. `run_tests.py --verify-ir` runs the same verifier over the
@@ -815,35 +815,37 @@ A safe(r) C-like systems programming language.
   run at the wrong place; and because the expansion duplicates code at every exit, an emitter
   test that adds one asserts `verified()`, since a missed `g->terminated` check there writes an
   instruction after a terminator that `opt -passes=verify` alone accepts.
-  **A runtime entry point is described in three places, and a test now holds all three together**:
-  the C prototype in `runtime/fort_rt.h` and `.c`, the table in `toolchain.md` 5.1 with the
-  declaration list of item 8, and one row per entry point in `src/bootstrap/runtime_sig.c`
-  (`RT_SIG`, indexed by the `rt_entry_t` of `runtime_sig.h`), which carries the C name, the result
-  form, the `_Noreturn` mark and the parameter forms. The emitter renders its `declare` lines and
-  its call-site result types from that row, and the checker holds an `extern fn` naming an entry
-  point against the same row (D9.8, T-072), so the IR and the diagnostic cannot disagree. The
-  witness is `test/runtime_sig_test.c`'s `RT_ENTRIES` X-macro: each row is expanded once into a
-  `_Static_assert(_Generic(&name, cresult (*) cparams: 1, default: 0), #name)`, which pins the row's
-  C column to the real header, and once into runtime assertions that every form of `RT_SIG` is
-  `IR_OF` of the C type beside it, which pins the table to that column. Both halves are needed --
-  T-072's review showed that the `_Generic` assertion alone witnesses the header against the
-  assertion's own text and would miss a wrong row -- and the per-parameter half must be runtime
-  assertions, since `rt_entry_param` is a function call. `IR_OF`'s `default:` is `IR_NONE` and no
-  row may hold one: a `default: IR_PTR` would silently swallow a future scalar, C's `char` being a
-  type distinct from `signed char` and `unsigned char` under `_Generic`. The one column no construct
-  can witness is `_Noreturn`, which is a function specifier and not part of the function's type (C11
-  6.7.4), so `_Generic`, `__builtin_types_compatible_p` and everything else are blind to it; it is
-  checked by reading 5.1. Before that witness existed, giving `fort_rt_print_f64` an `i64` parameter
-  or `fort_rt_fail_div_zero` a 64-bit line number left the whole gate green. A narrow result carries
-  its extension attribute in the declaration *and* at the call site (`declare zeroext i8
-  @fort_rt_str_eq(...)`, `%t = call zeroext i8 @...`), which is why a form in `RT_SIG` is a type
-  text with its attribute and not a type. `opt` accepts a call site whose attributes differ from the
-  callee's and LLVM falls back to the callee's, so *dropping* one at a call site cannot change the
-  assumption while *adding* one the declaration lacks can: T-021's review dropped the `zeroext` from
-  the `fort_rt_str_eq` call site and the entire language corpus stayed green, only the emitted-text
-  assertion failing. The attribute is not decorative -- on a return it licenses eliding the `movzbl`
-  -- and it stops being invisible the moment a lowering compares or widens the narrow result instead
-  of truncating it straight to `i1`.
+  **A runtime entry point is described in two places, and one test holds them together**: the
+  fort signature in `std/rt.ft`, which is what defines it, and one row per entry point in
+  `src/bootstrap/runtime_sig.c` (`RT_SIG`, indexed by the `rt_entry_t` of `runtime_sig.h`), which
+  carries the mangled name of D9.7, the result form, the `noreturn` mark and the parameter forms;
+  `toolchain.md` 5.1 states the same signatures in prose. The emitter writes its call sites from
+  the row's name, result form and `noreturn` mark, and declares nothing, since the module holds
+  the definition too (item 8). **The argument list of a call is not in the table**: each site
+  builds its own operands in `gen_expr.c` and `gen_stmt.c`, so a wrong argument type or a wrong
+  order is held by the per-site text assertions in `test/gen*_test.c` and by nothing else --
+  every entry point a program can reach has one today, by count and not by construction, so a
+  ticket that adds an argument to a call writes the assertion with it. The witness for the row is
+  `test/runtime_sig_test.c`'s `every_row_is_the_fort_signature_of_std_rt`, which loads `std/rt.ft`
+  with the compiler's own front end (CMake passes `FORT_STD_SOURCE_DIR`) and holds each row
+  against the declaration of the same name: the result form, the arity, each parameter form and
+  the `noreturn` mark, plus the text the emitter writes for that definition's result, which is
+  what a call site must state for the two to agree. Nothing below the compiler holds them
+  together, so there is no second oracle: before a witness existed, giving `fort_rt_print_f64` an
+  `i64` parameter or `fort_rt_fail_div_zero` a 64-bit line number left the whole gate green. The
+  fort table (`src/fort/runtime_sig.ft`) cannot read that file -- a `test/fort` program runs in a
+  temporary directory holding only itself -- so `test/fort/runtime_sig_test.ft` holds every row
+  against the text of 5.1 transcribed into it, and `tools/diff_ir.sh` holds the two tables against
+  each other over every program the corpus spells. A narrow result carries its extension attribute
+  on the definition *and* at the call site (`define dso_local zeroext i1 @"std.rt.str_eq"(...)`,
+  `%t = call zeroext i1 @...`), which is why a form in `RT_SIG` is a type text with its attribute
+  and not a type. `opt` accepts a call site whose attributes differ from the callee's and LLVM
+  falls back to the callee's, so *dropping* one at a call site cannot change the assumption while
+  *adding* one the definition lacks can: T-021's review dropped the `zeroext` from the
+  `fort_rt_str_eq` call site and the entire language corpus stayed green, only the emitted-text
+  assertion failing. The attribute is not decorative -- on a return it licenses eliding the
+  `movzbl` -- and it stops being invisible the moment a lowering compares or widens the narrow
+  result instead of truncating it straight to `i1`.
   **The emitter decides lvalue-ness syntactically.** The checker computes `expr_t.lvalue` (D6.7)
   and writes no bit for it on the node, so `is_place_expr` in `gen_expr.c` re-derives it from the
   node kind for the one question that needs it, whether `del` empties its operand (D17.9). A new
@@ -868,13 +870,12 @@ A safe(r) C-like systems programming language.
   before the emitter stops producing it.
   **`opt -passes=verify` does not reject a call whose argument types disagree with its callee's
   `declare`.** Opaque pointers make a call site's type independent of its callee's, so
-  `call void @fort_rt_fail_div_zero(ptr @.file.0, i32 4, i32 14)` against
-  `declare void @fort_rt_fail_div_zero(ptr, i64, i32)` verifies, links and then reads a register
-  the caller never set (T-072's review). Together with the attribute fact above and the terminator
-  fact below, this is why the emitter suites are a weak oracle for a *declaration*: they check the
-  text they assert, and `only_referenced_declarations_are_emitted` means most runtime declarations
-  appear in no gen test at all. A declaration is pinned against the C header that defines it, not
-  against the IR a tool accepts.
+  `call void @"std.rt.fail_div_zero"(ptr @.file.0, i32 4, i32 14)` against a definition taking
+  `(ptr, i64, i32)` verifies, links and then reads a register the caller never set (T-072's
+  review). Together with the attribute fact above and the terminator fact below, this is why the
+  emitter suites are a weak oracle for a *call*: they check the text they assert and nothing
+  more, so a call site no suite spells is unjudged. The runtime's signatures are pinned against
+  `std/rt.ft`, which defines them, and not against the IR a tool accepts.
   **`opt -passes=verify` does not reject an instruction after a terminator.** It splits the block,
   invents an unnamed successor which it prints as `0: ; No predecessors!`, and exits 0 -- so it
   quietly manufactures the implicit numbering D19.5 forbids rather than reporting the module that
@@ -970,6 +971,30 @@ A safe(r) C-like systems programming language.
   `extern` declared in each of two modules was emitted twice, and nothing else crossed a module
   at all. A ticket that adds a pass reads `xfail.txt` for the directories its pass now walks and
   writes one test per class they cover, rather than trusting the corpus it can see.
+- **The runtime is `std.rt` and every closure holds it** (D9.10, D13.1, T-091). Three consequences
+  a ticket meets before it meets anything else. A module set with a standard library directory
+  loads `<std-dir>/rt.ft` as a root **before** the entry file, so `std.libc` rides in behind it
+  and D9.8 holds a program's own `extern` declaration of a libc symbol against the library's,
+  `own` included: `run/ownership/015` and `019` gained the `own` `std.libc` carries. A set with no
+  such directory loads no runtime, which is what every in-process unit suite is, so a suite that
+  drives the whole driver writes an **empty** `std/rt.ft` in its sandbox (`test/driver_helpers.h`,
+  `test/modules_helpers.h`, `test/fort/support/modules_env.ft` and the three `test/fort/driver*`
+  suites) rather than the real one: the driver needs a file that parses and the assertions stay
+  short. And the `"files"` of D20.2 and the `"symbols"` of D20.3 now hold the library's records
+  too, whose file names are the `--std-dir` the run was given, so `run_tests.py`'s golden index
+  compares the records of the test's own directory alone (`index_of_the_test`) -- a byte-for-byte
+  golden of the whole index would name a build directory and could not be checked out on another
+  machine.
+- **The gen suites emit with no runtime in the closure**, so the calls the emitter writes into it
+  reach a name the module neither defines nor declares, which LLVM rejects as a forward reference
+  to nothing. `verified()` appends a `declare` for every row of `runtime_sig.h` to the file the
+  verifier reads and to nothing else, so `ir()` stays the emitter's own text
+  (`gen_runtime_declarations` in `test/gen_helpers.h`, which skips a name the module defines).
+  A test that needs the runtime's own definitions -- the `#8` of item 14, the `%fort.enum_member`
+  of item 2, the dependency order -- calls `emit_with_runtime`, which writes a small `std/rt.ft`
+  in the sandbox and names that directory. A `fn noreturn` in such a stub needs a terminating
+  statement (D8.4, D8.5): an empty body is `a noreturn function must end in a terminating
+  statement`, and `while (true) { }` is the shortest one that asks for no intrinsic of its own.
 - **Citing decisions in code**: a citation goes on the line or function that implements the
   rule, with a phrase stating the rule (`// pointers print as 0x + lowercase hex, 0x0 for null
   (D11.7)`), so a reader learns the rule without opening the log. A bare tag list at file or
@@ -1043,7 +1068,7 @@ A safe(r) C-like systems programming language.
   bootstrap ends the process at 73 sites across 17 modules:
   `grep -rn 'fatal_internal(\|fatal_oom(\|\bexit(' src/bootstrap/*.c | grep -v fail.c | wc -l`;
   and its arenas are never freed). A panic buys a documented boundary and a stated precondition,
-  not in-process recovery: `fort_rt_panic` aborts like every other failure (D11.4), so a server that
+  not in-process recovery: `std.rt.panic` aborts like every other failure (D11.4), so a server that
   must survive a malformed document runs the analysis where it can observe that abort (D20.5).
   And every read of a source file goes through `session.read_source`, which answers from the
   overlay a `session.set_source` installed before it opens anything, so a server points the
@@ -1305,7 +1330,7 @@ A safe(r) C-like systems programming language.
   root entry (`--index` indexes the closure and `same_file` already attributes each record) before
   `src/fort/` holds forty of them.
 - A new `std/*.ft` reaches the language harness only after `tools/vm build <preset>` copies it
-  into `build/<preset>/std`, next to `fort_rt.o`: running `run_tests.py` by hand against a source
+  into `build/<preset>/std`: running `run_tests.py` by hand against a source
   that has not been copied reports `module 'std.x' not found`. `test/lang/run/stdlib` is where a
   library module is tested.
 - **Writing a library module against C** (`stdlib.md` 1.4, D13.4): a span is not a pointer, so

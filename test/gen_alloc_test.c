@@ -1,5 +1,5 @@
 // Unit tests of `new` and `del` (toolchain.md 6 item 17; D10.2, D10.3,
-// D17.3, D17.9): the call to fort_rt_new with the element size and the count,
+// D17.3, D17.9): the call to std.rt.alloc with the element size and the count,
 // the negative-count check, the span header the counted form writes, and the
 // free that empties an lvalue operand and leaves an rvalue alone.
 #include <stdbool.h>
@@ -30,13 +30,13 @@ TEST(new_of_one_object_is_the_element_size_and_a_count_of_one, {
     // The column of the check is the builtin's name (D11.4). The declaration
     // carries the overwrite check of D17.11, so the store stands in its
     // continuation block (item 18).
-    TEST_ASSERT_EQ_STR(found("  %t0 = call ptr @fort_rt_new(i64 4, i64 1, ptr @.file.0, "
+    TEST_ASSERT_EQ_STR(found("  %t0 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, "
                              "i32 2, i32 22)\n"
                              "  %t1 = load ptr, ptr %p.0, align 8\n"
                              "  %t2 = icmp ne ptr %t1, null\n"
                              "  br i1 %t2, label %L1, label %L0\n"
                              "\nL0:\n  store ptr %t0, ptr %p.0, align 8\n"),
-                       "  %t0 = call ptr @fort_rt_new(i64 4, i64 1, ptr @.file.0, "
+                       "  %t0 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, "
                        "i32 2, i32 22)\n"
                        "  %t1 = load ptr, ptr %p.0, align 8\n"
                        "  %t2 = icmp ne ptr %t1, null\n"
@@ -57,16 +57,16 @@ TEST(new_of_a_struct_asks_for_its_whole_size, {
     TEST_ASSERT_TRUE(emit("struct point {\n    i32 x;\n    i32 y;\n}\n"
                           "fn i32 main() {\n    point mut* own p = new(point);\n"
                           "    println(p->x);\n    del(p);\n    return 0;\n}\n"));
-    TEST_ASSERT_EQ_STR(found("call ptr @fort_rt_new(i64 8, i64 1, "),
-                       "call ptr @fort_rt_new(i64 8, i64 1, ");
+    TEST_ASSERT_EQ_STR(found("call ptr @\"std.rt.alloc\"(i64 8, i64 1, "),
+                       "call ptr @\"std.rt.alloc\"(i64 8, i64 1, ");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
 TEST(new_of_a_wide_struct_asks_for_its_padded_size, {
     TEST_ASSERT_TRUE(emit(WIDE "fn i32 main() {\n    wide mut* own p = new(wide);\n"
                                "    println(p->d);\n    del(p);\n    return 0;\n}\n"));
-    TEST_ASSERT_EQ_STR(found("call ptr @fort_rt_new(i64 32, i64 1, "),
-                       "call ptr @fort_rt_new(i64 32, i64 1, ");
+    TEST_ASSERT_EQ_STR(found("call ptr @\"std.rt.alloc\"(i64 32, i64 1, "),
+                       "call ptr @\"std.rt.alloc\"(i64 32, i64 1, ");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -74,8 +74,8 @@ TEST(new_of_an_array_allocates_one_array_object, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    u8[4] mut* own p = new(u8[4]);\n"
                           "    println((*p)[0]);\n    del(p);\n    return 0;\n}\n"));
     // `new(u8[4])` is one `u8[4]`, not four `u8` (D10.2).
-    TEST_ASSERT_EQ_STR(found("call ptr @fort_rt_new(i64 4, i64 1, "),
-                       "call ptr @fort_rt_new(i64 4, i64 1, ");
+    TEST_ASSERT_EQ_STR(found("call ptr @\"std.rt.alloc\"(i64 4, i64 1, "),
+                       "call ptr @\"std.rt.alloc\"(i64 4, i64 1, ");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -84,8 +84,8 @@ TEST(new_of_a_pointer_allocates_one_slot, {
                           "fn i32 main() {\n    node mut* mut* own pp = new(node*);\n"
                           "    println(*pp == null);\n    del(pp);\n    return 0;\n}\n"));
     // `new(T*)` allocates one pointer slot and is legal (D10.2, D17.3).
-    TEST_ASSERT_EQ_STR(found("call ptr @fort_rt_new(i64 8, i64 1, "),
-                       "call ptr @fort_rt_new(i64 8, i64 1, ");
+    TEST_ASSERT_EQ_STR(found("call ptr @\"std.rt.alloc\"(i64 8, i64 1, "),
+                       "call ptr @\"std.rt.alloc\"(i64 8, i64 1, ");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -101,18 +101,18 @@ TEST(a_counted_new_writes_the_header_field_by_field, {
     // item 18 and copied into the slot after the check.
     TEST_ASSERT_EQ_STR(
         found("  %t0 = load i64, ptr %n.0, align 8\n"
-              "  %t1 = call ptr @fort_rt_new(i64 4, i64 %t0, ptr @.file.0, i32 3, i32 22)\n"
+              "  %t1 = call ptr @\"std.rt.alloc\"(i64 4, i64 %t0, ptr @.file.0, i32 3, i32 22)\n"
               "  %t2 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0\n"
               "  store ptr %t1, ptr %t2, align 8\n"
               "  %t3 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 1\n"
               "  store i64 %t0, ptr %t3, align 8\n"),
         "  %t0 = load i64, ptr %n.0, align 8\n"
-        "  %t1 = call ptr @fort_rt_new(i64 4, i64 %t0, ptr @.file.0, i32 3, i32 22)\n"
+        "  %t1 = call ptr @\"std.rt.alloc\"(i64 4, i64 %t0, ptr @.file.0, i32 3, i32 22)\n"
         "  %t2 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0\n"
         "  store ptr %t1, ptr %t2, align 8\n"
         "  %t3 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 1\n"
         "  store i64 %t0, ptr %t3, align 8\n");
-    TEST_ASSERT_EQ_STR(absent("fort_rt_fail_alloc_count"), "absent");
+    TEST_ASSERT_EQ_STR(absent("std.rt.fail_alloc_count"), "absent");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -130,10 +130,11 @@ TEST(a_signed_count_is_checked_against_zero, {
                        "  %t1 = sext i32 %t0 to i64\n"
                        "  %t2 = icmp slt i64 %t1, 0\n"
                        "  br i1 %t2, label %L1, label %L0\n");
-    TEST_ASSERT_EQ_STR(found("\nL1:\n  call void @fort_rt_fail_alloc_count(i64 %t1, ptr @.file.0, "
-                             "i32 3, i32 22)\n  unreachable\n"),
-                       "\nL1:\n  call void @fort_rt_fail_alloc_count(i64 %t1, ptr @.file.0, "
-                       "i32 3, i32 22)\n  unreachable\n");
+    TEST_ASSERT_EQ_STR(
+        found("\nL1:\n  call void @\"std.rt.fail_alloc_count\"(i64 %t1, ptr @.file.0, "
+              "i32 3, i32 22)\n  unreachable\n"),
+        "\nL1:\n  call void @\"std.rt.fail_alloc_count\"(i64 %t1, ptr @.file.0, "
+        "i32 3, i32 22)\n  unreachable\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -143,7 +144,7 @@ TEST(a_narrow_count_is_extended_by_its_own_signedness, {
                           "    println(s.len);\n    del(s);\n    return 0;\n}\n"));
     // An unsigned count is zero-extended and never negative (item 16).
     TEST_ASSERT_EQ_STR(found("zext i8 %t0 to i64"), "zext i8 %t0 to i64");
-    TEST_ASSERT_EQ_STR(absent("fort_rt_fail_alloc_count"), "absent");
+    TEST_ASSERT_EQ_STR(absent("std.rt.fail_alloc_count"), "absent");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -151,8 +152,8 @@ TEST(a_counted_new_of_a_wide_element_asks_for_its_stride, {
     TEST_ASSERT_TRUE(emit(WIDE "fn i32 main() {\n    u64 n = 2;\n"
                                "    wide mut@ own s = new(wide, n);\n"
                                "    println(s.len);\n    del(s);\n    return 0;\n}\n"));
-    TEST_ASSERT_EQ_STR(found("call ptr @fort_rt_new(i64 32, i64 %t0, "),
-                       "call ptr @fort_rt_new(i64 32, i64 %t0, ");
+    TEST_ASSERT_EQ_STR(found("call ptr @\"std.rt.alloc\"(i64 32, i64 %t0, "),
+                       "call ptr @\"std.rt.alloc\"(i64 32, i64 %t0, ");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -162,8 +163,8 @@ TEST(a_count_of_zero_is_allocated_like_any_other, {
                           "    println(s.len, s.ptr != null);\n    del(s);\n    return 0;\n}\n"));
     // `n == 0` is allowed and yields a non-null pointer, which the runtime
     // guarantees, so the module tests nothing (D10.2).
-    TEST_ASSERT_EQ_STR(found("call ptr @fort_rt_new(i64 4, i64 %t0, "),
-                       "call ptr @fort_rt_new(i64 4, i64 %t0, ");
+    TEST_ASSERT_EQ_STR(found("call ptr @\"std.rt.alloc\"(i64 4, i64 %t0, "),
+                       "call ptr @\"std.rt.alloc\"(i64 4, i64 %t0, ");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -174,10 +175,10 @@ TEST(the_allocation_count_check_survives_both_switches, {
     // A negative count is a runtime error of D10.2 and not a bounds check, so
     // neither `--release` nor `--no-bounds-check` removes it (D10.6, D11.1).
     TEST_ASSERT_TRUE(emit_release(PROGRAM));
-    TEST_ASSERT_EQ_STR(found("@fort_rt_fail_alloc_count"), "@fort_rt_fail_alloc_count");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.fail_alloc_count\""), "@\"std.rt.fail_alloc_count\"");
     TEST_ASSERT_EQ_STR(verified(), "verified");
     TEST_ASSERT_TRUE(emit_unchecked(PROGRAM));
-    TEST_ASSERT_EQ_STR(found("@fort_rt_fail_alloc_count"), "@fort_rt_fail_alloc_count");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.fail_alloc_count\""), "@\"std.rt.fail_alloc_count\"");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -187,12 +188,14 @@ TEST(del_of_a_pointer_lvalue_frees_it_and_stores_null, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut* own p = new(i32);\n"
                           "    del(p);\n    println(p == null);\n    return 0;\n}\n"));
     TEST_ASSERT_EQ_STR(found("  %t3 = load ptr, ptr %p.0, align 8\n"
-                             "  call void @fort_rt_del(ptr %t3)\n"
+                             "  call void @\"std.rt.free\"(ptr %t3)\n"
                              "  store ptr null, ptr %p.0, align 8\n"),
                        "  %t3 = load ptr, ptr %p.0, align 8\n"
-                       "  call void @fort_rt_del(ptr %t3)\n"
+                       "  call void @\"std.rt.free\"(ptr %t3)\n"
                        "  store ptr null, ptr %p.0, align 8\n");
-    TEST_ASSERT_EQ_STR(found("declare void @fort_rt_del(ptr)"), "declare void @fort_rt_del(ptr)");
+    // Nothing declares the entry point: `std.rt` is in the closure, so the
+    // module that holds the call holds the definition (item 8).
+    TEST_ASSERT_EQ_STR(absent("declare void @\"std.rt.free\""), "absent");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -205,11 +208,11 @@ TEST(del_of_a_span_lvalue_frees_the_pointer_field_and_zeroes_the_header, {
     TEST_ASSERT_EQ_STR(
         found("  %t7 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 0\n"
               "  %t8 = load ptr, ptr %t7, align 8\n"
-              "  call void @fort_rt_del(ptr %t8)\n"
+              "  call void @\"std.rt.free\"(ptr %t8)\n"
               "  call void @llvm.memset.p0.i64(ptr align 8 %s.1, i8 0, i64 16, i1 false)\n"),
         "  %t7 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 0\n"
         "  %t8 = load ptr, ptr %t7, align 8\n"
-        "  call void @fort_rt_del(ptr %t8)\n"
+        "  call void @\"std.rt.free\"(ptr %t8)\n"
         "  call void @llvm.memset.p0.i64(ptr align 8 %s.1, i8 0, i64 16, i1 false)\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
@@ -218,10 +221,10 @@ TEST(del_of_an_rvalue_frees_and_stores_nothing, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    del(new(i32));\n    return 0;\n}\n"));
     // An `own` rvalue may be `del`ed and has no place to empty (D17.8,
     // D17.9); the uncounted `new` is a scalar, so it needs no place at all.
-    TEST_ASSERT_EQ_STR(found("  %t0 = call ptr @fort_rt_new(i64 4, i64 1, ptr @.file.0, "
-                             "i32 2, i32 9)\n  call void @fort_rt_del(ptr %t0)\n  ret i32 0\n"),
-                       "  %t0 = call ptr @fort_rt_new(i64 4, i64 1, ptr @.file.0, "
-                       "i32 2, i32 9)\n  call void @fort_rt_del(ptr %t0)\n  ret i32 0\n");
+    TEST_ASSERT_EQ_STR(found("  %t0 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, "
+                             "i32 2, i32 9)\n  call void @\"std.rt.free\"(ptr %t0)\n  ret i32 0\n"),
+                       "  %t0 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, "
+                       "i32 2, i32 9)\n  call void @\"std.rt.free\"(ptr %t0)\n  ret i32 0\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -231,7 +234,7 @@ TEST(del_of_a_counted_new_frees_the_allocation_it_just_made, {
     // (D17.8), so `new(T, n)` has a place like any other aggregate rvalue:
     // its header lands in a temporary whose pointer is freed, and nothing is
     // stored back (D17.9).
-    TEST_ASSERT_EQ_STR(found("  %t2 = call ptr @fort_rt_new(i64 1, i64 %t0, ptr @.file.0, "
+    TEST_ASSERT_EQ_STR(found("  %t2 = call ptr @\"std.rt.alloc\"(i64 1, i64 %t0, ptr @.file.0, "
                              "i32 2, i32 9)\n"
                              "  %t3 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0\n"
                              "  store ptr %t2, ptr %t3, align 8\n"
@@ -239,8 +242,8 @@ TEST(del_of_a_counted_new_frees_the_allocation_it_just_made, {
                              "  store i64 %t0, ptr %t4, align 8\n"
                              "  %t5 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0\n"
                              "  %t6 = load ptr, ptr %t5, align 8\n"
-                             "  call void @fort_rt_del(ptr %t6)\n"),
-                       "  %t2 = call ptr @fort_rt_new(i64 1, i64 %t0, ptr @.file.0, "
+                             "  call void @\"std.rt.free\"(ptr %t6)\n"),
+                       "  %t2 = call ptr @\"std.rt.alloc\"(i64 1, i64 %t0, ptr @.file.0, "
                        "i32 2, i32 9)\n"
                        "  %t3 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0\n"
                        "  store ptr %t2, ptr %t3, align 8\n"
@@ -248,7 +251,7 @@ TEST(del_of_a_counted_new_frees_the_allocation_it_just_made, {
                        "  store i64 %t0, ptr %t4, align 8\n"
                        "  %t5 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0\n"
                        "  %t6 = load ptr, ptr %t5, align 8\n"
-                       "  call void @fort_rt_del(ptr %t6)\n");
+                       "  call void @\"std.rt.free\"(ptr %t6)\n");
     TEST_ASSERT_EQ_STR(absent("llvm.memset"), "absent");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
@@ -262,11 +265,11 @@ TEST(del_of_a_span_rvalue_frees_the_pointer_of_its_temporary, {
     TEST_ASSERT_EQ_STR(found("  call void @\"main.make\"(ptr %tmp0, i64 3)\n"
                              "  %t0 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0\n"
                              "  %t1 = load ptr, ptr %t0, align 8\n"
-                             "  call void @fort_rt_del(ptr %t1)\n  ret i32 0\n"),
+                             "  call void @\"std.rt.free\"(ptr %t1)\n  ret i32 0\n"),
                        "  call void @\"main.make\"(ptr %tmp0, i64 3)\n"
                        "  %t0 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0\n"
                        "  %t1 = load ptr, ptr %t0, align 8\n"
-                       "  call void @fort_rt_del(ptr %t1)\n  ret i32 0\n");
+                       "  call void @\"std.rt.free\"(ptr %t1)\n  ret i32 0\n");
     TEST_ASSERT_EQ_STR(absent("llvm.memset"), "absent");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
@@ -274,8 +277,8 @@ TEST(del_of_a_span_rvalue_frees_the_pointer_of_its_temporary, {
 TEST(del_of_a_null_literal_is_one_call_with_null, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    del(null);\n    return 0;\n}\n"));
     // `del(null)` is a no-op the runtime absorbs (D17.9).
-    TEST_ASSERT_EQ_STR(found("  call void @fort_rt_del(ptr null)\n"),
-                       "  call void @fort_rt_del(ptr null)\n");
+    TEST_ASSERT_EQ_STR(found("  call void @\"std.rt.free\"(ptr null)\n"),
+                       "  call void @\"std.rt.free\"(ptr null)\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -287,11 +290,11 @@ TEST(del_through_an_indirection_empties_the_storage_it_reaches, {
     // the caller's slot (D6.7, D17.9).
     TEST_ASSERT_EQ_STR(found("  %t0 = load ptr, ptr %p.0, align 8\n"
                              "  %t1 = load ptr, ptr %t0, align 8\n"
-                             "  call void @fort_rt_del(ptr %t1)\n"
+                             "  call void @\"std.rt.free\"(ptr %t1)\n"
                              "  store ptr null, ptr %t0, align 8\n"),
                        "  %t0 = load ptr, ptr %p.0, align 8\n"
                        "  %t1 = load ptr, ptr %t0, align 8\n"
-                       "  call void @fort_rt_del(ptr %t1)\n"
+                       "  call void @\"std.rt.free\"(ptr %t1)\n"
                        "  store ptr null, ptr %t0, align 8\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
@@ -304,10 +307,10 @@ TEST(del_of_a_field_empties_that_field_alone, {
     // An `own` rvalue flows into an `own` field of a literal with no `move`
     // (D17.5), and `del` empties that field alone (D17.9).
     TEST_ASSERT_EQ_STR(found("  %t4 = load ptr, ptr %t3, align 8\n"
-                             "  call void @fort_rt_del(ptr %t4)\n"
+                             "  call void @\"std.rt.free\"(ptr %t4)\n"
                              "  store ptr null, ptr %t3, align 8\n"),
                        "  %t4 = load ptr, ptr %t3, align 8\n"
-                       "  call void @fort_rt_del(ptr %t4)\n"
+                       "  call void @\"std.rt.free\"(ptr %t4)\n"
                        "  store ptr null, ptr %t3, align 8\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
@@ -317,9 +320,9 @@ TEST(del_is_the_same_in_both_build_modes, {
                                   "    del(p);\n    return 0;\n}\n";
     // `del` empties its operand in both build modes (item 18, D17.6).
     TEST_ASSERT_TRUE(emit_release(PROGRAM));
-    TEST_ASSERT_EQ_STR(found("  call void @fort_rt_del(ptr %t1)\n"
+    TEST_ASSERT_EQ_STR(found("  call void @\"std.rt.free\"(ptr %t1)\n"
                              "  store ptr null, ptr %p.0, align 8\n"),
-                       "  call void @fort_rt_del(ptr %t1)\n"
+                       "  call void @\"std.rt.free\"(ptr %t1)\n"
                        "  store ptr null, ptr %p.0, align 8\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })

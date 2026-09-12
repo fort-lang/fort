@@ -25,7 +25,6 @@ import check;
 import consts;
 import gen;
 import lexer;
-import runtime_sig;
 import std.strbuf;
 import types;
 
@@ -48,7 +47,11 @@ fn string attr_text(u64 which) {
         return "nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"";
     } else if (which == gen.ATTR_FN_NORET) {
         return "noreturn nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"";
-    } else if (which == gen.ATTR_FAIL) {
+    } else if (which == gen.ATTR_UNUSED_2) {
+        // `#2` is never emitted: it held `cold noreturn nounwind` on the C
+        // runtime's declarations, which item 8 no longer produces. The index
+        // stays so that `#3` to `#7` keep the numbers item 14 fixes for them
+        // (D19.5).
         return "cold noreturn nounwind";
     } else if (which == gen.ATTR_NOBUILTIN) {
         return "nobuiltin";
@@ -58,8 +61,10 @@ fn string attr_text(u64 which) {
         return "nocallback nofree nounwind willreturn memory(argmem: readwrite)";
     } else if (which == gen.ATTR_MEMSET) {
         return "nocallback nofree nounwind willreturn memory(argmem: write)";
+    } else if (which == gen.ATTR_TRAP) {
+        return "cold noreturn nounwind memory(inaccessiblemem: write)";
     }
-    return "cold noreturn nounwind memory(inaccessiblemem: write)";
+    return "cold noreturn nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"";
 }
 
 // The overflow intrinsics of item 15, in the order `sadd ssub smul uadd usub
@@ -165,7 +170,7 @@ fn void emit_data(gen.emitter mut* g, strbuf.str_buf mut* out) {
             k += 1;
         }
         // `%fort.enum_member` has C's 16-byte layout, so the table matches
-        // struct fort_rt_enum_member (item 21).
+        // std.rt's struct enum_member (item 21).
         strbuf.append(out, "], align 8\n");
         i += 1;
     }
@@ -551,16 +556,6 @@ fn void gen_finish(gen.emitter mut* g) {
         }
         i += 1;
     }
-    strbuf.str_buf mut runtime = strbuf.create();
-    defer strbuf.free(&runtime);
-    // Then the runtime entry points in the order of toolchain.md 5.1.
-    i = 0;
-    while (i < runtime_sig.RT_ENTRY_COUNT) {
-        if (gen.gen_uses_rt(g, runtime_sig.rt_at(i))) {
-            runtime_sig.rt_declaration(&runtime, runtime_sig.rt_at(i));
-        }
-        i += 1;
-    }
     strbuf.str_buf mut intrinsics = strbuf.create();
     defer strbuf.free(&intrinsics);
     // Then the intrinsics in the fixed table order.
@@ -591,7 +586,6 @@ fn void gen_finish(gen.emitter mut* g) {
     section(&g->out, strbuf.view(&g->funcs));
     section(&g->out, strbuf.view(&data));
     section(&g->out, strbuf.view(&externs));
-    section(&g->out, strbuf.view(&runtime));
     section(&g->out, strbuf.view(&intrinsics));
     section(&g->out, strbuf.view(&attributes));
 }

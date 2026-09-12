@@ -395,8 +395,98 @@ fn void a_std_path_is_looked_up_in_the_standard_library_directory() {
     modules_env.add(&e, "lib/io.ft", "fn i32 close(i32 fd) { return fd; }\n");
     modules_env.std_dir(&e, "lib");
     assert(modules_env.load(&e, "main.ft"));
-    assert(modules_env.ordered(&e, 0) == "std.io");
+    // `std.rt` is a root of every closure, so it is the first module of the
+    // dependency order and the imported one follows it (D9.10, D13.1).
+    assert(modules_env.ordered(&e, 0) == "std.rt");
+    assert(modules_env.ordered(&e, 1) == "std.io");
     assert(modules_env.bound(&e, "main", "io") != null);
+}
+
+// ---- the runtime root of every closure (D9.10, D13.1) ---------------------------
+
+fn void every_closure_holds_the_runtime() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", modules_env.src_main());
+    modules_env.std_dir(&e, "lib");
+    assert(modules_env.load(&e, "main.ft"));
+    assert(modules.count(&e.set) == 2);
+    // The compiler loads it as a root of its own beside the entry file, so it
+    // precedes the program in the dependency order (D9.10).
+    assert(modules_env.ordered(&e, 0) == "std.rt");
+    assert(modules_env.ordered(&e, 1) == "main");
+    // Membership does not bind the name: a module that wants to call it
+    // writes `import std.rt;` like any other importer (D9.3, D9.10).
+    assert(modules_env.bound(&e, "main", "rt") == null);
+    assert(modules_env.bound(&e, "main", "std") == null);
+}
+
+fn void a_standard_library_directory_with_no_runtime_is_an_error() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", modules_env.src_main());
+    modules_env.std_dir_without_runtime(&e, "lib");
+    assert(!modules_env.load(&e, "main.ft"));
+    assert(modules_env.said(&e, "cannot read"));
+    assert(modules_env.said(&e, "rt.ft"));
+}
+
+fn void a_set_with_no_standard_library_directory_holds_no_runtime() {
+    // Such a set cannot spell `std.rt` at all: `import std.rt;` there is
+    // already `module 'std.rt' not found` (D9.2). The driver always names a
+    // directory (toolchain.md 1).
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", modules_env.src_main());
+    assert(modules_env.load(&e, "main.ft"));
+    assert(modules.count(&e.set) == 1);
+    assert(modules_env.ordered(&e, 0) == "main");
+}
+
+fn void a_file_of_the_runtimes_closure_is_the_entry_and_not_a_second_module() {
+    // One file is one module (D9.2), so an entry file the runtime's closure
+    // already read is that module and not a second identity of it. Two files
+    // of the repository are such an entry, std/rt.ft and std/libc.ft, and
+    // `fort --check std/libc.ft` reported `module 'libc' is the same file as
+    // module 'std.libc'` until this was written. The module keeps the path
+    // its importer gave it.
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add2(&e, "lib/rt.ft", "import std.helper;\n",
+                     "fn i32 one() { return helper.two(); }\n");
+    modules_env.add(&e, "lib/helper.ft", "fn i32 two() { return 2; }\n");
+    modules_env.std_dir_without_runtime(&e, "lib");
+    assert(modules_env.load(&e, "lib/rt.ft"));
+    assert(modules.count(&e.set) == 2);
+    assert(modules_env.ordered(&e, 0) == "std.helper");
+    assert(modules_env.ordered(&e, 1) == "std.rt");
+    assert(modules.entry(&e.set) != null);
+    assert(modules.entry(&e.set)->path == "std.rt");
+
+    // The same for a module the runtime imports rather than the runtime
+    // itself: it is read as std.helper and the entry file is that module.
+    modules_env.env mut f = modules_env.open();
+    defer modules_env.close(&f);
+    modules_env.add2(&f, "lib/rt.ft", "import std.helper;\n",
+                     "fn i32 one() { return helper.two(); }\n");
+    modules_env.add(&f, "lib/helper.ft", "fn i32 two() { return 2; }\n");
+    modules_env.std_dir_without_runtime(&f, "lib");
+    assert(modules_env.load(&f, "lib/helper.ft"));
+    assert(modules.count(&f.set) == 2);
+    assert(modules.entry(&f.set) != null);
+    assert(modules.entry(&f.set)->path == "std.helper");
+}
+
+fn void the_runtime_is_loaded_once_when_the_program_imports_it() {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "import std.rt;\nfn i32 main() { return 0; }\n");
+    modules_env.std_dir(&e, "lib");
+    assert(modules_env.load(&e, "main.ft"));
+    assert(modules.count(&e.set) == 2);
+    assert(modules_env.ordered(&e, 0) == "std.rt");
+    // The import binds the name the root alone does not (D9.3).
+    assert(modules_env.bound(&e, "main", "rt") != null);
 }
 
 fn void a_std_path_is_not_looked_up_under_any_other_root() {
@@ -693,6 +783,11 @@ fn i32 main() {
     include_roots_are_searched_in_command_line_order();
     println("roots ok");
     a_std_path_is_looked_up_in_the_standard_library_directory();
+    every_closure_holds_the_runtime();
+    a_standard_library_directory_with_no_runtime_is_an_error();
+    a_set_with_no_standard_library_directory_holds_no_runtime();
+    a_file_of_the_runtimes_closure_is_the_entry_and_not_a_second_module();
+    the_runtime_is_loaded_once_when_the_program_imports_it();
     a_std_path_is_not_looked_up_under_any_other_root();
     a_path_that_does_not_begin_with_std_never_reaches_the_library();
     std_alone_is_a_directory_and_not_a_module();

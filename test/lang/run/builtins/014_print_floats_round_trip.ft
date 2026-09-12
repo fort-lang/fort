@@ -1,0 +1,219 @@
+//! run
+//! stdout:
+//| f64 patterns ok
+//| f64 powers ok
+//| f32 patterns ok
+//| f32 powers ok
+import std.io;
+import std.str;
+import std.strbuf;
+
+// The property D18.2 states, over the whole encoding rather than over
+// samples: the text a float prints reads back as that float, in its own type.
+// This is the C runtime's four property tests transcribed before that runtime
+// was deleted (T-091). The compiler that builds the float printers is stage2,
+// so this test is in bootstrap-unsupported.txt and stage1 must refuse it;
+// what it is here for is to hold std.rt_float to the property when T-041
+// writes it.
+//
+// The oracle is the C library's own reader, which is the other half of the
+// method toolchain.md 5.1 describes: strtod for an f64 and strtof for an f32.
+// What is not checked here is that the digits are the *shortest* such text;
+// the corpus tests beside this one hold the shortest form value by value.
+//
+// The printed text reaches the reader through a file, because the print
+// family writes to a descriptor and to nothing else (D12.2): one family of
+// values is printed one per line, the file is read back whole, and each line
+// is handed to the reader with the value that produced it.
+extern fn f64 strtod(char* s, void* end);
+extern fn f32 strtof(char* s, void* end);
+
+// The bits of a float and a float of those bits: the one way a fort program
+// reaches every encoding, since a cast converts values and not patterns
+// (D3.14).
+extern fn void* memcpy(void* dst, void* src, u64 n);
+
+string PATH = "floats.txt";
+
+// How many values one round writes. The power-of-two families are longer than
+// that, so each round takes a slice of them.
+u64 ROUND = 256;
+
+fn f64 f64_of_bits(u64 bits) {
+    f64 mut v = 0.0;
+    u64 mut source = bits;
+    memcpy(cast(&v, void*), cast(&source, void*), 8);
+    return v;
+}
+
+fn f32 f32_of_bits(u32 bits) {
+    f32 mut v = 0.0;
+    u32 mut source = bits;
+    memcpy(cast(&v, void*), cast(&source, void*), 4);
+    return v;
+}
+
+// The pseudo-random generator the C suite used, so the two suites walk the
+// same patterns. It multiplies and adds modulo 2^64, which fort spells with
+// the wrapping operators (D11.2).
+fn u64 next_bits(u64 state) {
+    return state *% 6364136223846793005 +% 1442695040888963407;
+}
+
+// 2^e as an f64: a subnormal below -1022 and a normal at or above it.
+fn f64 power_of_two_f64(i64 e) {
+    if (e < -1022) {
+        return f64_of_bits(1 << cast(e + 1074, u64));
+    }
+    return f64_of_bits(cast(e + 1023, u64) << 52);
+}
+
+// 2^e as an f32, the same way.
+fn f32 power_of_two_f32(i64 e) {
+    if (e < -126) {
+        return f32_of_bits(cast(1 << cast(e + 149, u64), u32));
+    }
+    return f32_of_bits(cast(e + 127, u32) << 23);
+}
+
+// Reads the file back and hands each line to `strtod`, with the value that
+// wrote it. Answers false at the first line that does not read back.
+fn bool lines_read_back_as_f64(f64@ values) {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    if (!io.read_file(PATH, &text)) {
+        return false;
+    }
+    char mut@ own bytes = str.to_cstr(strbuf.view(&text));
+    defer del(bytes);
+    u64 mut at = 0;
+    u64 mut i = 0;
+    while (i < values.len) {
+        u64 mut end = at;
+        while (end < bytes.len && bytes[end] != '\n') {
+            end += 1;
+        }
+        // The line ends where the newline is, and to_cstr already put a NUL
+        // after the last byte, so overwriting the newline ends this line.
+        bytes[end] = cast(0, char);
+        if (strtod(&bytes[at], null) != values[i]) {
+            return false;
+        }
+        at = end + 1;
+        i += 1;
+    }
+    return true;
+}
+
+fn bool lines_read_back_as_f32(f32@ values) {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    if (!io.read_file(PATH, &text)) {
+        return false;
+    }
+    char mut@ own bytes = str.to_cstr(strbuf.view(&text));
+    defer del(bytes);
+    u64 mut at = 0;
+    u64 mut i = 0;
+    while (i < values.len) {
+        u64 mut end = at;
+        while (end < bytes.len && bytes[end] != '\n') {
+            end += 1;
+        }
+        bytes[end] = cast(0, char);
+        if (strtof(&bytes[at], null) != values[i]) {
+            return false;
+        }
+        at = end + 1;
+        i += 1;
+    }
+    return true;
+}
+
+fn bool round_f64(f64@ values) {
+    i32 fd = io.open_write(PATH);
+    if (fd < 0) {
+        return false;
+    }
+    u64 mut i = 0;
+    while (i < values.len) {
+        fprintln(fd, values[i]);
+        i += 1;
+    }
+    io.close(fd);
+    return lines_read_back_as_f64(values);
+}
+
+fn bool round_f32(f32@ values) {
+    i32 fd = io.open_write(PATH);
+    if (fd < 0) {
+        return false;
+    }
+    u64 mut i = 0;
+    while (i < values.len) {
+        fprintln(fd, values[i]);
+        i += 1;
+    }
+    io.close(fd);
+    return lines_read_back_as_f32(values);
+}
+
+fn i32 main() {
+    f64[256] mut wide = {};
+    f32[256] mut narrow = {};
+
+    // Two hundred pseudo-random patterns. A NaN reads back as a NaN and never
+    // compares equal, so it is left to the form tests beside this one (D6.12).
+    u64 mut state = 1;
+    u64 mut n = 0;
+    while (n < 200) {
+        state = next_bits(state);
+        f64 v = f64_of_bits(state);
+        if (v == v) {
+            wide[n] = v;
+            n += 1;
+        }
+    }
+    assert(round_f64(wide[0..n]));
+    println("f64 patterns ok");
+
+    // Every power of two, subnormals included: the one family where the
+    // values that read back are not centred on the value.
+    i64 mut e = -1074;
+    while (e <= 1023) {
+        n = 0;
+        while (n < ROUND && e <= 1023) {
+            wide[n] = power_of_two_f64(e);
+            n += 1;
+            e += 1;
+        }
+        assert(round_f64(wide[0..n]));
+    }
+    println("f64 powers ok");
+
+    state = 7;
+    n = 0;
+    while (n < 200) {
+        state = next_bits(state);
+        f32 v = f32_of_bits(cast(state >> 32, u32));
+        if (v == v) {
+            narrow[n] = v;
+            n += 1;
+        }
+    }
+    assert(round_f32(narrow[0..n]));
+    println("f32 patterns ok");
+
+    e = -149;
+    while (e <= 127) {
+        n = 0;
+        while (n < ROUND && e <= 127) {
+            narrow[n] = power_of_two_f32(e);
+            n += 1;
+            e += 1;
+        }
+        assert(round_f32(narrow[0..n]));
+    }
+    println("f32 powers ok");
+    return 0;
+}

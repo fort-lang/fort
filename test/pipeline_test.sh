@@ -1,25 +1,24 @@
 #!/bin/bash
-# test/pipeline_test.sh <build-dir>: the cross pipeline of toolchain.md 2 on
+# test/pipeline_test.sh: the cross pipeline of toolchain.md 2 on
 # the hand-written LLVM IR modules under test/ir, which are the reference for
 # the form of a module (D19.1). Every emitted module must pass the verifier
 # (D19.1), so each one is verified with `opt -passes=verify` first, then
-# compiled and linked by the target clang with <build-dir>/std/fort_rt.o,
-# exactly as the compiler does it (D14.3), and run under qemu through
-# binfmt_misc. hello must print its line and exit 0; abort must
-# print its line, then the runtime error of D11.4 on stderr, and die with
-# SIGABRT (status 134); floats must print the D11.7 text of each of its
-# values; colons must print its line and exit 0 with a `:` inside its one
-# fort symbol. Every binary must be position independent (D14.3). ctest runs
-# it as the unit test `pipeline`.
+# compiled and linked by the target clang, exactly as the compiler does it
+# (D14.3), and run under qemu through binfmt_misc. The link takes the module
+# alone: a module holds the whole program, the runtime included (D9.10,
+# D13.1), so each file here defines the handful of `std.rt` entry points it
+# calls. hello must print its line and exit 0; abort must print its line,
+# then the runtime error of D11.4 on stderr, and die with SIGABRT (status
+# 134); colons must print its line and exit 0 with a `:` inside its one fort
+# symbol. Every binary must be position independent (D14.3). ctest runs it as
+# the unit test `pipeline`.
 set -eu
 
-if [ $# -ne 1 ]; then
-    echo "usage: $0 <build-dir>" >&2
+if [ $# -ne 0 ]; then
+    echo "usage: $0" >&2
     exit 2
 fi
-build=$1
 ir=$(cd "$(dirname "$0")/ir" && pwd)
-runtime=$build/std/fort_rt.o
 cc=${FORT_TARGET_CC:-clang}
 opt=${FORT_OPT:-opt-18}
 target=${FORT_TARGET_TRIPLE:-x86_64-linux-gnu}
@@ -42,11 +41,6 @@ expect_file() {
     fi
 }
 
-test -f "$runtime" || {
-    echo "pipeline: $runtime not found (build the fort_rt target first)" >&2
-    exit 2
-}
-
 # A missing tool is a broken environment, not a failing module: report it as
 # such (exit 2) instead of letting the verification or the link fail below.
 for tool in "$opt" "$cc" readelf nm; do
@@ -58,11 +52,11 @@ done
 
 # The module must satisfy the IR verifier before anything compiles it, so a
 # malformed module is reported as such and not as a compiler crash.
-for prog in hello abort floats colons; do
+for prog in hello abort colons; do
     "$opt" -passes=verify -disable-output "$ir/$prog.ll" ||
         fail "$prog: the IR verifier rejected the module"
     "$cc" --target="$target" -O1 -fPIE -pie -Wno-override-module \
-        -o "$work/$prog" "$ir/$prog.ll" "$runtime" ||
+        -o "$work/$prog" "$ir/$prog.ll" ||
         fail "$prog: compiling and linking failed"
     if ! readelf -h "$work/$prog" | grep -q 'Type: *DYN'; then
         fail "$prog: not a position-independent executable"
@@ -104,22 +98,6 @@ drop_qemu_notice "$work/abort.both"
 expect_file abort.order "$work/abort.both" 'before
 abort.ft:12:13: runtime error: index 5 out of range for length 3
 '
-
-# floats: the D11.7 rendering of each value on stdout, nothing on stderr and
-# status 0. The digits come from the target's own C library (D18.2), so this is
-# where the printers are checked on the target.
-status=0
-"$work/floats" >"$work/floats.out" 2>"$work/floats.err" || status=$?
-[ "$status" -eq 0 ] || fail "floats: exit status $status, expected 0"
-expect_file floats.stdout "$work/floats.out" '0.1
-1e+17
--0.0
-inf
-nan
-0.1
-16777216.0
-'
-expect_file floats.stderr "$work/floats.err" ''
 
 # colons: an entry base name may hold any byte but `.` (D9.1), so the module
 # path and every symbol of it may hold a `:`. LLVM quotes such a name, the

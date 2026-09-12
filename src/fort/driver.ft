@@ -526,7 +526,6 @@ fn string std_dir(containers.pool mut* p, options* opts, string program) {
 // directory of toolchain.md 2 is built from. src/bootstrap/driver.h spells
 // the first two as macros and driver.c the rest as file-scope arrays.
 string DEFAULT_OUTPUT = "a.out";
-string RUNTIME_OBJECT = "fort_rt.o";
 string TMP_DIR_DEFAULT = "/tmp";
 string TMP_DIR_TEMPLATE = "/fort-XXXXXX";
 string IR_SUFFIX = ".ll";
@@ -638,7 +637,7 @@ fn void remove_temp_dir(string dir, string ir_path) {
 // builds it; every string is interned in `p` or borrowed from the options, so
 // the vector owns only its slots.
 fn void cc_argv(containers.pool mut* p, options* opts, string ir_path, string out_path,
-                string dir, containers.str_vec mut* argv) {
+                containers.str_vec mut* argv) {
     containers.str_push(argv, opts->cc);
     containers.str_push(argv, join_path(p, "", "--target=", opts->target));
     // -O2 in place of -O1 under --release; the compiler itself optimizes
@@ -651,7 +650,7 @@ fn void cc_argv(containers.pool mut* p, options* opts, string ir_path, string ou
     containers.str_push(argv, "-fPIE");
     if (!opts->compile_only) {
         // The executable is position-independent; -c stops at the object, so
-        // it takes no -pie, no runtime object and no -l (toolchain.md 2).
+        // it takes no -pie and no -l (toolchain.md 2).
         containers.str_push(argv, "-pie");
     }
     // The module carries its own target triple, which clang would warn about
@@ -662,11 +661,11 @@ fn void cc_argv(containers.pool mut* p, options* opts, string ir_path, string ou
     }
     containers.str_push(argv, "-o");
     containers.str_push(argv, out_path);
-    // No -x ir: -x is sticky and would also treat fort_rt.o as IR
-    // (toolchain.md 2).
+    // The one input is the module, which holds the whole program, the runtime
+    // included (D9.10, D13.1). No -x ir: clang reads a `.ll` by its suffix and
+    // -x is sticky (toolchain.md 2).
     containers.str_push(argv, ir_path);
     if (!opts->compile_only) {
-        containers.str_push(argv, join_path(p, dir, RUNTIME_OBJECT, ""));
         u64 mut i = 0;
         while (i < opts->libs.len) {
             containers.str_push(argv, containers.str_at(&opts->libs, i));
@@ -777,12 +776,12 @@ i32 EXEC_FAILED_STATUS = 127;
 // Runs --cc once over the module: it compiles and links in one invocation
 // (D14.3). Returns EXIT_OK, or EXIT_USAGE after reporting the failure
 // (D14.1).
-fn i32 run_cc(options* opts, string program, string ir_path, string out_path) {
+fn i32 run_cc(options* opts, string ir_path, string out_path) {
     containers.pool mut p = containers.pool_create();
     defer containers.pool_free(&p);
     containers.str_vec mut argv = containers.str_create();
     defer containers.str_free(&argv);
-    cc_argv(&p, opts, ir_path, out_path, std_dir(&p, opts, program), &argv);
+    cc_argv(&p, opts, ir_path, out_path, &argv);
     cc_command mut cmd = cc_command_build(&argv);
     defer cc_command_free(&cmd);
     i32[2] mut fds = {};
@@ -1135,7 +1134,7 @@ fn i32 compile_entry(options* opts, string program) {
     // so the peak of a large program doubles for the length of the link.
     analysis_release(&an, &analysis_live);
     if (built == EXIT_OK) {
-        built = run_cc(opts, program, ir_path, out_path);
+        built = run_cc(opts, ir_path, out_path);
     }
     remove_temp_dir(dir, ir_path);
     return built;

@@ -1,11 +1,16 @@
 // Unit tests of the runtime entry-point table (runtime_sig.h, toolchain.md
-// 5.1): the name lookup, the arity and result of every row, the `_Noreturn`
-// set, the IR text of every form, the `declare` line each row renders, the
-// agreement of every row with the C prototype in `runtime/fort_rt.h`, and the
-// form a fort type takes at the C boundary. The table is the one description
-// of an entry point the compiler holds, so the emitter's declarations
-// (test/gen_decl_test.c) and the checker's comparison against an `extern fn`
-// (test/check_conv_test.c) both answer from what is asserted here.
+// 5.1): the name lookup, the arity and result of every row, the `noreturn`
+// set, the IR text of every form, the agreement of every row with the fort
+// signature in `std/rt.ft`, and the form a fort type takes as a value.
+//
+// The table is the one description of an entry point the compiler holds, and
+// `std/rt.ft` is the one thing that defines it. Nothing below the compiler
+// holds the two together: opaque pointers make a call site's type independent
+// of its callee's, so `opt -passes=verify` accepts a call whose arguments
+// disagree with the definition it reaches, and the program then reads a
+// register the caller never set. That is why this suite reads `std/rt.ft`
+// with the compiler's own parser and checker rather than a copy of the
+// signatures.
 #include "runtime_sig.h"
 
 #include <stdbool.h>
@@ -13,14 +18,23 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "ast.h"
+#include "check.h"
 #include "containers.h"
-#include "fort_rt.h"
+#include "diag.h"
 #include "gen.h"
+#include "modules.h"
 #include "prim.h"
 #include "str.h"
 #include "types.h"
 
 #include "test.h"
+
+// The standard library sources, which CMake names. `std/rt.ft` is the
+// definition of every entry point of section 5.1 that `std.rt` owns.
+#ifndef FORT_STD_SOURCE_DIR
+#define FORT_STD_SOURCE_DIR "std"
+#endif
 
 static type_table_t types;
 static bool types_live = false;
@@ -80,81 +94,102 @@ static const char* emitted_param(const type_t* t) {
 
 // ---- the table (toolchain.md 5.1) --------------------------------------------------
 
-TEST(a_c_name_finds_its_entry_point_and_nothing_else_does, {
-    TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("fort_rt_new")) == RT_NEW);
-    TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("fort_rt_exit")) == RT_EXIT);
-    TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("fort_rt_print_enum")) == RT_PRINT_ENUM);
-    // A name outside the `fort_rt_` space, and a name inside it that no entry
-    // point takes: the list of section 5.1 is complete (D11.6).
-    TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("write")) == RT_COUNT);
-    TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("fort_rt_print")) == RT_COUNT);
-    TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("fort_rt_news")) == RT_COUNT);
+TEST(a_mangled_name_finds_its_entry_point_and_nothing_else_does, {
+    TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("std.rt.alloc")) == RT_ALLOC);
+    TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("std.rt.exit")) == RT_EXIT);
+    TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("std.rt.print_enum")) == RT_PRINT_ENUM);
+    TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("std.rt_float.print_f64")) == RT_PRINT_F64);
+    // The short name alone is not an entry point: the emitter matches the
+    // mangled name of D9.7, so a function of another module named `alloc` or
+    // `exit` cannot take the attribute group of item 14.
+    TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("alloc")) == RT_COUNT);
+    TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("main.exit")) == RT_COUNT);
+    TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("std.rt.print")) == RT_COUNT);
+    TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("std.rt.allocs")) == RT_COUNT);
+    // The C names the runtime used to have are ordinary C names now (D9.8).
+    TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("fort_rt_new")) == RT_COUNT);
     TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("fort_entry")) == RT_COUNT);
+    TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("write")) == RT_COUNT);
 })
 
 TEST(every_row_names_the_entry_point_its_enumerator_does, {
-    // The enum of runtime_sig.h is positional, so a row inserted in the middle of
-    // section 5.1's order moves every later one: each name is held against
+    // The enum of runtime_sig.h is positional, so a row inserted in the middle
+    // of section 5.1's order moves every later one: each name is held against
     // the enumerator it is indexed by.
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_NEW), "fort_rt_new");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_DEL), "fort_rt_del");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_STR_EQ), "fort_rt_str_eq");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_FAIL_BOUNDS), "fort_rt_fail_bounds");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_FAIL_SPAN), "fort_rt_fail_span");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_FAIL_OVERFLOW), "fort_rt_fail_overflow");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_FAIL_SHIFT), "fort_rt_fail_shift");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_FAIL_DIV_ZERO), "fort_rt_fail_div_zero");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_FAIL_DIV_OVERFLOW), "fort_rt_fail_div_overflow");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_FAIL_ALLOC_COUNT), "fort_rt_fail_alloc_count");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_FAIL_OVERWRITE), "fort_rt_fail_overwrite");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_FAIL_ENUM), "fort_rt_fail_enum");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_PANIC), "fort_rt_panic");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_ASSERT_FAIL), "fort_rt_assert_fail");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_I64), "fort_rt_print_i64");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_U64), "fort_rt_print_u64");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_F32), "fort_rt_print_f32");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_F64), "fort_rt_print_f64");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_BOOL), "fort_rt_print_bool");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_CHAR), "fort_rt_print_char");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_PTR), "fort_rt_print_ptr");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_STR), "fort_rt_print_str");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_ENUM), "fort_rt_print_enum");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_FLUSH), "fort_rt_flush");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_FLUSH_ALL), "fort_rt_flush_all");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_ARGS_INIT), "fort_rt_args_init");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_ARGS_PTR), "fort_rt_args_ptr");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_ARGS_LEN), "fort_rt_args_len");
-    TEST_ASSERT_EQ_STR(rt_entry_name(RT_EXIT), "fort_rt_exit");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_ALLOC), "std.rt.alloc");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_FREE), "std.rt.free");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_STR_EQ), "std.rt.str_eq");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_FAIL_BOUNDS), "std.rt.fail_bounds");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_FAIL_SPAN), "std.rt.fail_span");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_FAIL_OVERFLOW), "std.rt.fail_overflow");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_FAIL_SHIFT), "std.rt.fail_shift");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_FAIL_DIV_ZERO), "std.rt.fail_div_zero");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_FAIL_DIV_OVERFLOW), "std.rt.fail_div_overflow");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_FAIL_ALLOC_COUNT), "std.rt.fail_alloc_count");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_FAIL_OVERWRITE), "std.rt.fail_overwrite");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_FAIL_ENUM), "std.rt.fail_enum");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_PANIC), "std.rt.panic");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_ASSERT_FAIL), "std.rt.assert_fail");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_I64), "std.rt.print_i64");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_U64), "std.rt.print_u64");
+    // The two float printers stand in `std.rt_float`, because a compiler
+    // without floats cannot compile them (D18.1).
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_F32), "std.rt_float.print_f32");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_F64), "std.rt_float.print_f64");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_BOOL), "std.rt.print_bool");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_CHAR), "std.rt.print_char");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_PTR), "std.rt.print_ptr");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_STR), "std.rt.print_str");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_ENUM), "std.rt.print_enum");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_FLUSH), "std.rt.flush");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_FLUSH_ALL), "std.rt.flush_all");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_ARGS_INIT), "std.rt.args_init");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_ARGS), "std.rt.args");
+    TEST_ASSERT_EQ_STR(rt_entry_name(RT_EXIT), "std.rt.exit");
 })
 
-TEST(the_four_entry_points_that_return_a_value_are_the_only_ones, {
-    // fort_rt_new, fort_rt_str_eq, fort_rt_args_ptr and fort_rt_args_len
-    // (section 5.1); every other row is `void`.
+TEST(every_entry_point_is_a_mangled_fort_name_of_the_runtime, {
+    // A call into the runtime is an ordinary fort-to-fort call by the mangled
+    // name of D9.7, so no row may hold a C name: an unmangled name would be a
+    // second declaration of an ELF symbol a program may declare itself (D9.8).
+    for (uint64_t i = 0; i < (uint64_t)RT_COUNT; i++) {
+        const char* name = rt_entry_name((rt_entry_t)i);
+        const bool rt = strncmp(name, "std.rt.", strlen("std.rt.")) == 0;
+        const bool floats = strncmp(name, "std.rt_float.", strlen("std.rt_float.")) == 0;
+        TEST_ASSERT_TRUE(rt || floats);
+        TEST_ASSERT_NULL(strstr(name, "fort_rt"));
+    }
+})
+
+TEST(the_two_entry_points_that_return_a_value_are_the_only_ones, {
+    // `alloc` and `str_eq` (section 5.1); `args` returns an aggregate, which
+    // item 7 makes a `void` function with a leading `ptr`, and every other row
+    // is `void`.
     uint64_t returning = 0;
     for (uint64_t i = 0; i < (uint64_t)RT_COUNT; i++) {
         if (rt_entry_result((rt_entry_t)i) != IR_VOID) {
             returning++;
         }
     }
-    TEST_ASSERT_EQ_UINT64(returning, (uint64_t)4);
-    TEST_ASSERT_EQ_STR(ir_result_text(rt_entry_result(RT_NEW)), "ptr");
+    TEST_ASSERT_EQ_UINT64(returning, (uint64_t)2);
+    TEST_ASSERT_EQ_STR(ir_result_text(rt_entry_result(RT_ALLOC)), "ptr");
     // A narrow result carries its extension attribute before the type, which
-    // is what licenses eliding the caller's re-narrowing (D9.9, item 7).
-    TEST_ASSERT_EQ_STR(ir_result_text(rt_entry_result(RT_STR_EQ)), "zeroext i8");
-    TEST_ASSERT_EQ_STR(ir_result_text(rt_entry_result(RT_ARGS_PTR)), "ptr");
-    TEST_ASSERT_EQ_STR(ir_result_text(rt_entry_result(RT_ARGS_LEN)), "i64");
-    TEST_ASSERT_EQ_STR(ir_result_text(rt_entry_result(RT_DEL)), "void");
+    // is what licenses eliding the caller's re-narrowing (D9.9, item 7). A
+    // fort `bool` result is `i1` and not `i8`: `i8` is its memory type alone
+    // (item 2).
+    TEST_ASSERT_EQ_STR(ir_result_text(rt_entry_result(RT_STR_EQ)), "zeroext i1");
+    TEST_ASSERT_EQ_STR(ir_result_text(rt_entry_result(RT_ARGS)), "void");
+    TEST_ASSERT_EQ_STR(ir_result_text(rt_entry_result(RT_FREE)), "void");
 })
 
 TEST(the_noreturn_entry_points_are_the_ones_section_5_1_names, {
-    // Every `fort_rt_fail_*` function, `fort_rt_panic`, `fort_rt_assert_fail`
-    // and `fort_rt_exit` is `_Noreturn`, and nothing else is: that is what
-    // puts `cold noreturn nounwind` on the declaration (item 14).
+    // Every `fail_*` function, `panic`, `assert_fail` and `exit` is
+    // `fn noreturn`, and nothing else is: that is what puts the attribute
+    // group `#8` on the definition (item 14).
     uint64_t noreturn = 0;
     for (uint64_t i = 0; i < (uint64_t)RT_COUNT; i++) {
         const rt_entry_t rt = (rt_entry_t)i;
-        const bool named =
-            strncmp(rt_entry_name(rt), "fort_rt_fail_", strlen("fort_rt_fail_")) == 0;
+        const bool named = strncmp(rt_entry_name(rt), "std.rt.fail_", strlen("std.rt.fail_")) == 0;
         const bool listed = named || rt == RT_PANIC || rt == RT_ASSERT_FAIL || rt == RT_EXIT;
         TEST_ASSERT_TRUE(rt_entry_noreturn(rt) == listed);
         if (rt_entry_noreturn(rt)) {
@@ -164,24 +199,28 @@ TEST(the_noreturn_entry_points_are_the_ones_section_5_1_names, {
     TEST_ASSERT_EQ_UINT64(noreturn, (uint64_t)12);
 })
 
-TEST(the_parameter_list_of_a_row_is_the_c_prototype_of_section_5_1, {
+TEST(the_parameter_list_of_a_row_is_the_fort_signature_of_section_5_1, {
     // `loc` is the three parameters `ptr, i32, i32`, so the arity of a
     // failure entry point counts them.
-    TEST_ASSERT_EQ_UINT64((uint64_t)rt_entry_param_count(RT_NEW), (uint64_t)5);
-    TEST_ASSERT_EQ_UINT64((uint64_t)rt_entry_param_count(RT_DEL), (uint64_t)1);
+    TEST_ASSERT_EQ_UINT64((uint64_t)rt_entry_param_count(RT_ALLOC), (uint64_t)5);
+    TEST_ASSERT_EQ_UINT64((uint64_t)rt_entry_param_count(RT_FREE), (uint64_t)1);
     TEST_ASSERT_EQ_UINT64((uint64_t)rt_entry_param_count(RT_STR_EQ), (uint64_t)4);
     TEST_ASSERT_EQ_UINT64((uint64_t)rt_entry_param_count(RT_FAIL_SPAN), (uint64_t)6);
     TEST_ASSERT_EQ_UINT64((uint64_t)rt_entry_param_count(RT_FAIL_OVERFLOW), (uint64_t)3);
     TEST_ASSERT_EQ_UINT64((uint64_t)rt_entry_param_count(RT_PRINT_ENUM), (uint64_t)4);
+    // `args` takes no fort parameter: its one `ptr` is the hidden result
+    // pointer of item 7.
+    TEST_ASSERT_EQ_UINT64((uint64_t)rt_entry_param_count(RT_ARGS), (uint64_t)1);
+    TEST_ASSERT_EQ_STR(ir_param_text(rt_entry_param(RT_ARGS, 0)), "ptr");
     // The rows with no parameter at all: the arity is read off the row, so an
     // empty list is not a miscount of a padded one.
     TEST_ASSERT_EQ_UINT64((uint64_t)rt_entry_param_count(RT_FLUSH_ALL), (uint64_t)0);
-    TEST_ASSERT_EQ_UINT64((uint64_t)rt_entry_param_count(RT_ARGS_PTR), (uint64_t)0);
-    TEST_ASSERT_EQ_UINT64((uint64_t)rt_entry_param_count(RT_ARGS_LEN), (uint64_t)0);
-    TEST_ASSERT_EQ_STR(ir_param_text(rt_entry_param(RT_NEW, 0)), "i64");
-    TEST_ASSERT_EQ_STR(ir_param_text(rt_entry_param(RT_NEW, 2)), "ptr");
-    TEST_ASSERT_EQ_STR(ir_param_text(rt_entry_param(RT_NEW, 4)), "i32");
-    TEST_ASSERT_EQ_STR(ir_param_text(rt_entry_param(RT_PRINT_BOOL, 1)), "i8 zeroext");
+    TEST_ASSERT_EQ_STR(ir_param_text(rt_entry_param(RT_ALLOC, 0)), "i64");
+    TEST_ASSERT_EQ_STR(ir_param_text(rt_entry_param(RT_ALLOC, 2)), "ptr");
+    TEST_ASSERT_EQ_STR(ir_param_text(rt_entry_param(RT_ALLOC, 4)), "i32");
+    // A fort `bool` parameter is `i1 zeroext` and a `char` parameter
+    // `i8 zeroext`: the two are different forms (item 2, D19.2).
+    TEST_ASSERT_EQ_STR(ir_param_text(rt_entry_param(RT_PRINT_BOOL, 1)), "i1 zeroext");
     TEST_ASSERT_EQ_STR(ir_param_text(rt_entry_param(RT_PRINT_CHAR, 1)), "i8 zeroext");
     TEST_ASSERT_EQ_STR(ir_param_text(rt_entry_param(RT_PRINT_F32, 1)), "float");
     TEST_ASSERT_EQ_STR(ir_param_text(rt_entry_param(RT_PRINT_F64, 1)), "double");
@@ -202,297 +241,218 @@ static const prim_kind_t SCALARS[] = {PRIM_I8,
                                       PRIM_F32,
                                       PRIM_F64};
 
-// The declaration list of toolchain.md 6 item 8, byte for byte and in its
-// order. What it witnesses is the rendering: the spelling of every form, the
-// `#2` of a `_Noreturn` row, the order of the group and the text the emitter
-// used to hold as a table of its own. What it cannot witness is a wrong row,
-// since a hand-written golden agrees with whatever was written beside it --
-// the mutation that gave `fort_rt_print_f64` an `i64` parameter passed here
-// once the line was edited to match. That question is
-// every_row_is_the_c_prototype_of_the_runtime_header's, which reads the C
-// header instead. One entry per row of RT_SIG, which is why the array is at
-// file scope and not in the TEST body.
-static const char* const DECLARATIONS[RT_COUNT] = {
-    "declare ptr @fort_rt_new(i64, i64, ptr, i32, i32)\n",
-    "declare void @fort_rt_del(ptr)\n",
-    "declare zeroext i8 @fort_rt_str_eq(ptr, i64, ptr, i64)\n",
-    "declare void @fort_rt_fail_bounds(i64, i64, ptr, i32, i32) #2\n",
-    "declare void @fort_rt_fail_span(i64, i64, i64, ptr, i32, i32) #2\n",
-    "declare void @fort_rt_fail_overflow(ptr, i32, i32) #2\n",
-    "declare void @fort_rt_fail_shift(i64, ptr, ptr, i32, i32) #2\n",
-    "declare void @fort_rt_fail_div_zero(ptr, i32, i32) #2\n",
-    "declare void @fort_rt_fail_div_overflow(ptr, i32, i32) #2\n",
-    "declare void @fort_rt_fail_alloc_count(i64, ptr, i32, i32) #2\n",
-    "declare void @fort_rt_fail_overwrite(ptr, i32, i32) #2\n",
-    "declare void @fort_rt_fail_enum(i64, ptr, ptr, i32, i32) #2\n",
-    "declare void @fort_rt_panic(ptr, i64, ptr, i32, i32) #2\n",
-    "declare void @fort_rt_assert_fail(ptr, ptr, i32, i32) #2\n",
-    "declare void @fort_rt_print_i64(i32, i64)\n",
-    "declare void @fort_rt_print_u64(i32, i64)\n",
-    "declare void @fort_rt_print_f32(i32, float)\n",
-    "declare void @fort_rt_print_f64(i32, double)\n",
-    "declare void @fort_rt_print_bool(i32, i8 zeroext)\n",
-    "declare void @fort_rt_print_char(i32, i8 zeroext)\n",
-    "declare void @fort_rt_print_ptr(i32, ptr)\n",
-    "declare void @fort_rt_print_str(i32, ptr, i64)\n",
-    "declare void @fort_rt_print_enum(i32, i32, ptr, i64)\n",
-    "declare void @fort_rt_flush(i32)\n",
-    "declare void @fort_rt_flush_all()\n",
-    "declare void @fort_rt_args_init(i32, ptr)\n",
-    "declare ptr @fort_rt_args_ptr()\n",
-    "declare i64 @fort_rt_args_len()\n",
-    "declare void @fort_rt_exit(i32) #2\n",
-};
+// ---- the fort signatures of std/rt.ft (D13.1) --------------------------------------
 
-TEST(every_entry_point_renders_the_declaration_of_item_8, {
-    sb_t out;
-    sb_init(&out);
-    for (uint64_t i = 0; i < (uint64_t)RT_COUNT; i++) {
-        sb_clear(&out);
-        rt_declaration(&out, (rt_entry_t)i);
-        TEST_ASSERT_EQ_STR(sb_cstr(&out), DECLARATIONS[i]);
+// The runtime's module, parsed and checked by the compiler's own front end.
+// It is loaded as the entry file, so its module path is the base name `rt`
+// and the runtime root of D9.10 is not loaded beside it; what this suite
+// reads off it is the signature of each declaration, which the path does not
+// change.
+static module_set_t rt_set;
+static check_t rt_check;
+static bool rt_live = false;
+static sb_t rt_diags;
+
+// Loads `std/rt.ft`. Answers with the module, or NULL when the front end
+// reported anything, which is a broken standard library rather than a failing
+// row.
+static const module_t* rt_open(void) {
+    sb_init(&rt_diags);
+    diag_capture(&rt_diags);
+    diag_reset();
+    module_set_init(&rt_set);
+    check_init(&rt_check);
+    rt_check.require_main = false;
+    rt_live = true;
+    module_set_std_dir(&rt_set, FORT_STD_SOURCE_DIR);
+    if (!module_set_load(&rt_set, FORT_STD_SOURCE_DIR "/rt.ft")) {
+        return NULL;
     }
-    sb_free(&out);
-})
+    if (!check_program(&rt_check, &rt_set)) {
+        return NULL;
+    }
+    return module_set_entry(&rt_set);
+}
 
-// ---- the C prototypes of runtime/fort_rt.h (D13.1) ---------------------------------
+static void rt_close(void) {
+    if (!rt_live) {
+        return;
+    }
+    check_free(&rt_check);
+    module_set_free(&rt_set);
+    diag_capture(NULL);
+    sb_free(&rt_diags);
+    rt_live = false;
+}
 
-// The one place the rows of RT_SIG are held against the C runtime they
-// describe. Each row carries the enumerator, the C name, the C result type
-// with the macro that checks it, the C parameter list and the macro that
-// unpacks it, and it is expanded twice: once into a `_Static_assert` whose
-// `_Generic` matches the function's real type in `runtime/fort_rt.h`, which
-// pins the row's C column to the header, and once into a runtime check that
-// every form of RT_SIG is the form of the C type beside it, which pins the
-// table to that column. Neither half alone is a witness: the first compares
-// the row with the header, the second the row with the table, and only both
-// make a wrong form in RT_SIG fail.
-//
-// What no construct can witness is the `_Noreturn` column: `_Noreturn` is a
-// function specifier and not part of the function's type (C11 6.7.4), so
-// `_Generic` cannot see it and neither can anything else. That column is
-// checked against `toolchain.md` 5.1 by reading, here and in the table.
-//
-// The parameter list is written once per row. The unpacking macro names the
-// arity, so a list whose length disagrees with it fails to compile with the
-// wrong number of macro arguments.
-#define RT_ENTRIES(X)                                                                              \
-    X(RT_NEW,                                                                                      \
-      fort_rt_new,                                                                                 \
-      void*,                                                                                       \
-      RT_RVAL,                                                                                     \
-      (uint64_t, uint64_t, const char*, uint32_t, uint32_t),                                       \
-      RT_P5)                                                                                       \
-    X(RT_DEL, fort_rt_del, void, RT_RVOID, (void*), RT_P1)                                         \
-    X(RT_STR_EQ,                                                                                   \
-      fort_rt_str_eq,                                                                              \
-      uint8_t,                                                                                     \
-      RT_RVAL,                                                                                     \
-      (const char*, uint64_t, const char*, uint64_t),                                              \
-      RT_P4)                                                                                       \
-    X(RT_FAIL_BOUNDS,                                                                              \
-      fort_rt_fail_bounds,                                                                         \
-      void,                                                                                        \
-      RT_RVOID,                                                                                    \
-      (int64_t, uint64_t, const char*, uint32_t, uint32_t),                                        \
-      RT_P5)                                                                                       \
-    X(RT_FAIL_SPAN,                                                                                \
-      fort_rt_fail_span,                                                                           \
-      void,                                                                                        \
-      RT_RVOID,                                                                                    \
-      (int64_t, int64_t, uint64_t, const char*, uint32_t, uint32_t),                               \
-      RT_P6)                                                                                       \
-    X(RT_FAIL_OVERFLOW,                                                                            \
-      fort_rt_fail_overflow,                                                                       \
-      void,                                                                                        \
-      RT_RVOID,                                                                                    \
-      (const char*, uint32_t, uint32_t),                                                           \
-      RT_P3)                                                                                       \
-    X(RT_FAIL_SHIFT,                                                                               \
-      fort_rt_fail_shift,                                                                          \
-      void,                                                                                        \
-      RT_RVOID,                                                                                    \
-      (int64_t, const char*, const char*, uint32_t, uint32_t),                                     \
-      RT_P5)                                                                                       \
-    X(RT_FAIL_DIV_ZERO,                                                                            \
-      fort_rt_fail_div_zero,                                                                       \
-      void,                                                                                        \
-      RT_RVOID,                                                                                    \
-      (const char*, uint32_t, uint32_t),                                                           \
-      RT_P3)                                                                                       \
-    X(RT_FAIL_DIV_OVERFLOW,                                                                        \
-      fort_rt_fail_div_overflow,                                                                   \
-      void,                                                                                        \
-      RT_RVOID,                                                                                    \
-      (const char*, uint32_t, uint32_t),                                                           \
-      RT_P3)                                                                                       \
-    X(RT_FAIL_ALLOC_COUNT,                                                                         \
-      fort_rt_fail_alloc_count,                                                                    \
-      void,                                                                                        \
-      RT_RVOID,                                                                                    \
-      (int64_t, const char*, uint32_t, uint32_t),                                                  \
-      RT_P4)                                                                                       \
-    X(RT_FAIL_OVERWRITE,                                                                           \
-      fort_rt_fail_overwrite,                                                                      \
-      void,                                                                                        \
-      RT_RVOID,                                                                                    \
-      (const char*, uint32_t, uint32_t),                                                           \
-      RT_P3)                                                                                       \
-    X(RT_FAIL_ENUM,                                                                                \
-      fort_rt_fail_enum,                                                                           \
-      void,                                                                                        \
-      RT_RVOID,                                                                                    \
-      (int64_t, const char*, const char*, uint32_t, uint32_t),                                     \
-      RT_P5)                                                                                       \
-    X(RT_PANIC,                                                                                    \
-      fort_rt_panic,                                                                               \
-      void,                                                                                        \
-      RT_RVOID,                                                                                    \
-      (const char*, uint64_t, const char*, uint32_t, uint32_t),                                    \
-      RT_P5)                                                                                       \
-    X(RT_ASSERT_FAIL,                                                                              \
-      fort_rt_assert_fail,                                                                         \
-      void,                                                                                        \
-      RT_RVOID,                                                                                    \
-      (const char*, const char*, uint32_t, uint32_t),                                              \
-      RT_P4)                                                                                       \
-    X(RT_PRINT_I64, fort_rt_print_i64, void, RT_RVOID, (int32_t, int64_t), RT_P2)                  \
-    X(RT_PRINT_U64, fort_rt_print_u64, void, RT_RVOID, (int32_t, uint64_t), RT_P2)                 \
-    X(RT_PRINT_F32, fort_rt_print_f32, void, RT_RVOID, (int32_t, float), RT_P2)                    \
-    X(RT_PRINT_F64, fort_rt_print_f64, void, RT_RVOID, (int32_t, double), RT_P2)                   \
-    X(RT_PRINT_BOOL, fort_rt_print_bool, void, RT_RVOID, (int32_t, uint8_t), RT_P2)                \
-    X(RT_PRINT_CHAR, fort_rt_print_char, void, RT_RVOID, (int32_t, uint8_t), RT_P2)                \
-    X(RT_PRINT_PTR, fort_rt_print_ptr, void, RT_RVOID, (int32_t, const void*), RT_P2)              \
-    X(RT_PRINT_STR, fort_rt_print_str, void, RT_RVOID, (int32_t, const char*, uint64_t), RT_P3)    \
-    X(RT_PRINT_ENUM,                                                                               \
-      fort_rt_print_enum,                                                                          \
-      void,                                                                                        \
-      RT_RVOID,                                                                                    \
-      (int32_t, int32_t, const struct fort_rt_enum_member*, uint64_t),                             \
-      RT_P4)                                                                                       \
-    X(RT_FLUSH, fort_rt_flush, void, RT_RVOID, (int32_t), RT_P1)                                   \
-    X(RT_FLUSH_ALL, fort_rt_flush_all, void, RT_RVOID, (void), RT_P0)                              \
-    X(RT_ARGS_INIT, fort_rt_args_init, void, RT_RVOID, (int, char**), RT_P2)                       \
-    X(RT_ARGS_PTR, fort_rt_args_ptr, const struct fort_string*, RT_RVAL, (void), RT_P0)            \
-    X(RT_ARGS_LEN, fort_rt_args_len, uint64_t, RT_RVAL, (void), RT_P0)                             \
-    X(RT_EXIT, fort_rt_exit, void, RT_RVOID, (int32_t), RT_P1)
+// The declaration of `name` at module level, or NULL.
+static const ast_node_t* rt_decl(const module_t* m, str_t name) {
+    for (uint64_t i = 0; i < ast_len(m->ast); i++) {
+        const ast_node_t* decl = ast_child(m->ast, i);
+        if (decl->kind == AST_FN_DECL && str_eq(decl->name, name)) {
+            return decl;
+        }
+    }
+    return NULL;
+}
 
-// The IR form of a C type of those prototypes, as the emitter would give it
-// (toolchain.md 6 items 7 and 8): `int32_t` and `uint32_t` are `i32`, the
-// 64-bit integers are `i64`, `uint8_t` is `i8 zeroext` and every pointer is
-// `ptr`. The default is IR_NONE and never IR_PTR: C's `char` is a type of its
-// own beside `signed char` and `unsigned char`, so a pointer default would
-// swallow a scalar this list does not name instead of failing.
-#define IR_OF(v)                                                                                   \
-    _Generic((v),                                                                                  \
-        void*: IR_PTR,                                                                             \
-        const void*: IR_PTR,                                                                       \
-        char**: IR_PTR,                                                                            \
-        const char*: IR_PTR,                                                                       \
-        const struct fort_string*: IR_PTR,                                                         \
-        const struct fort_rt_enum_member*: IR_PTR,                                                 \
-        uint8_t: IR_U8,                                                                            \
-        int32_t: IR_I32,                                                                           \
-        uint32_t: IR_I32,                                                                          \
-        int64_t: IR_I64,                                                                           \
-        uint64_t: IR_I64,                                                                          \
-        float: IR_F32,                                                                             \
-        double: IR_F64,                                                                            \
-        default: IR_NONE)
+// The part of a mangled name after its last dot, which D9.7 makes the
+// declaration name.
+static str_t short_name(const char* mangled) {
+    const char* last = strrchr(mangled, '.');
+    return str_from_cstr(last != NULL ? last + 1 : mangled);
+}
 
-// The result column: `void` cannot be a `_Generic` association, so a void
-// result is checked as IR_VOID and the four that return a value through
-// IR_OF. The function-pointer assertion below covers the result type itself.
-#define RT_RVOID(t) IR_VOID
-#define RT_RVAL(t) IR_OF((t)0)
+// The module path a mangled name carries, `std.rt` or `std.rt_float`.
+static bool in_module(const char* mangled, const char* path) {
+    const size_t n = strlen(path);
+    return strncmp(mangled, path, n) == 0 && mangled[n] == '.';
+}
 
-// The parameter columns, as the elements after the leading IR_NONE of the
-// array the check reads: one macro per arity, so the count is part of the row.
-#define RT_P0(a)
-#define RT_P1(a) , IR_OF((a)0)
-#define RT_P2(a, b) , IR_OF((a)0), IR_OF((b)0)
-#define RT_P3(a, b, c) , IR_OF((a)0), IR_OF((b)0), IR_OF((c)0)
-#define RT_P4(a, b, c, d) , IR_OF((a)0), IR_OF((b)0), IR_OF((c)0), IR_OF((d)0)
-#define RT_P5(a, b, c, d, e) , IR_OF((a)0), IR_OF((b)0), IR_OF((c)0), IR_OF((d)0), IR_OF((e)0)
-#define RT_P6(a, b, c, d, e, f)                                                                    \
-    , IR_OF((a)0), IR_OF((b)0), IR_OF((c)0), IR_OF((d)0), IR_OF((e)0), IR_OF((f)0)
+// The widest text either helper below builds: `zeroext i16` and the widest
+// row report, `std.rt.fail_div_overflow: parameter 6 is i16 signext,
+// std/rt.ft's i16 zeroext`.
+enum { RESULT_CAP = 64, REPORT_CAP = 160 };
 
-// The row's C prototype is the one `runtime/fort_rt.h` declares. `_Generic`
-// selects on the type of `&name`, so the association is the function pointer
-// the C column spells; a header that changed makes this fail to compile. The
-// arguments cannot be parenthesized: `res` and `params` spell a type, where a
-// parenthesis is a different type or none at all.
-// NOLINTBEGIN(bugprone-macro-parentheses) a type argument cannot be parenthesized
-#define WITNESS_C_TYPE(e, name, res, rescheck, params, pmacro)                                     \
-    _Static_assert(_Generic(&name, res(*) params: 1, default: 0), #name);
-// NOLINTEND(bugprone-macro-parentheses)
+// The result text the emitter writes on the definition of `t`, which is what
+// a call site must state for the two to agree (item 7, D9.9).
+static const char* emitted_result(const type_t* t) {
+    static char text[RESULT_CAP];
+    gen_options_t opts;
+    opts.release = false;
+    opts.no_bounds_check = false;
+    gen_t g;
+    gen_init(&g, opts);
+    const char* attr = gen_ext_attr(t);
+    const str_t ty = gen_result_type(&g, t);
+    // One snprintf rather than two strncat calls: the attribute and the type
+    // are one text and the truncation rule is then the one the buffer states.
+    const int written = snprintf(text,
+                                 sizeof text,
+                                 "%s%s%.*s",
+                                 attr != NULL ? attr : "",
+                                 attr != NULL ? " " : "",
+                                 (int)ty.len,
+                                 ty.ptr);
+    gen_free(&g);
+    if (written < 0 || (size_t)written >= sizeof text) {
+        return "the result text did not fit its buffer";
+    }
+    return text;
+}
 
-// The forms of one row, with a leading IR_NONE so that a prototype with no
-// parameter still initializes an array.
-#define RT_FORMS(params, pmacro) ((const ir_form_t[]){IR_NONE pmacro params})
-
-#define WITNESS_ROW(e, name, res, rescheck, params, pmacro)                                        \
-    TEST_ASSERT_EQ_STR(row_mismatch(e,                                                             \
-                                    #name,                                                         \
-                                    rescheck(res),                                                 \
-                                    sizeof RT_FORMS(params, pmacro) / sizeof(ir_form_t) - 1,       \
-                                    RT_FORMS(params, pmacro)),                                     \
-                       "");
-
-RT_ENTRIES(WITNESS_C_TYPE)
-
-// The first disagreement between the row `e` of RT_SIG and the C prototype
-// beside it, or "": the name, the result form, the arity, and each parameter
-// form. A form of IR_NONE is a disagreement of its own, since no row may hold
-// one and IR_OF answers IR_NONE for a C type it does not know.
-static const char* row_mismatch(
-    rt_entry_t e, const char* name, ir_form_t result, uint64_t nparams, const ir_form_t* forms) {
-    static char text[128];
-    if (strcmp(rt_entry_name(e), name) != 0) {
-        TEST_UNUSED(snprintf(text, sizeof text, "%s: the row names %s", name, rt_entry_name(e)));
+// The first disagreement between the row `e` of RT_SIG and the fort signature
+// `sig`, or "": the result form, the arity and each parameter form, all read
+// through the one map of item 7.
+static const char* row_mismatch(rt_entry_t e, const char* name, const type_t* sig) {
+    static char text[REPORT_CAP];
+    ir_form_t result = IR_NONE;
+    ir_form_t params[RT_MAX_PARAMS];
+    uint32_t nparams = 0;
+    if (!rt_signature_of_type(sig, &result, params, &nparams)) {
+        TEST_UNUSED(snprintf(text, sizeof text, "%s: the signature has no IR call shape", name));
         return text;
     }
     if (result == IR_NONE || rt_entry_result(e) != result) {
         TEST_UNUSED(snprintf(text,
                              sizeof text,
-                             "%s: the result is %s, the C prototype %s",
+                             "%s: the row's result is %s, std/rt.ft's %s",
                              name,
                              ir_result_text(rt_entry_result(e)),
                              ir_result_text(result)));
         return text;
     }
-    if ((uint64_t)rt_entry_param_count(e) != nparams) {
+    if (rt_entry_param_count(e) != nparams) {
         TEST_UNUSED(snprintf(text,
                              sizeof text,
-                             "%s: the row takes %u parameters, the C prototype %llu",
+                             "%s: the row takes %u parameters, std/rt.ft's %u",
                              name,
                              rt_entry_param_count(e),
-                             (unsigned long long)nparams));
+                             nparams));
         return text;
     }
-    for (uint64_t i = 0; i < nparams; i++) {
-        if (forms[i + 1] != IR_NONE && rt_entry_param(e, (uint32_t)i) == forms[i + 1]) {
+    for (uint32_t i = 0; i < nparams; i++) {
+        if (params[i] != IR_NONE && rt_entry_param(e, i) == params[i]) {
             continue;
         }
         TEST_UNUSED(snprintf(text,
                              sizeof text,
-                             "%s: parameter %llu is %s, the C prototype %s",
+                             "%s: parameter %u is %s, std/rt.ft's %s",
                              name,
-                             (unsigned long long)(i + 1),
-                             ir_param_text(rt_entry_param(e, (uint32_t)i)),
-                             ir_param_text(forms[i + 1])));
+                             i + 1,
+                             ir_param_text(rt_entry_param(e, i)),
+                             ir_param_text(params[i])));
         return text;
     }
     return "";
 }
 
-TEST(every_row_is_the_c_prototype_of_the_runtime_header,
-     {// The must-fix of T-072's review: before this, a row could name a form no
-      // C prototype had and the whole gate stayed green -- `fort_rt_print_f64`
-      // taking an `i64` and `fort_rt_fail_div_zero` a 64-bit line number both
-      // passed every test, the second emitting a call `opt -passes=verify`
-      // accepted against a declaration it disagreed with.
-      RT_ENTRIES(WITNESS_ROW)})
+TEST(every_row_is_the_fort_signature_of_std_rt, {
+    // The one place the rows are held against the thing that defines them.
+    // Nothing below the compiler does it: a call site's argument types are
+    // independent of its callee's under opaque pointers, so a wrong row emits
+    // a call `opt -passes=verify` accepts and the callee then reads a
+    // register the caller never set.
+    const module_t* m = rt_open();
+    TEST_ASSERT_NONNULL(m);
+    TEST_ASSERT_EQ_STR(sb_cstr(&rt_diags), "");
+    uint64_t checked = 0;
+    for (uint64_t i = 0; i < (uint64_t)RT_COUNT; i++) {
+        const rt_entry_t e = (rt_entry_t)i;
+        const char* name = rt_entry_name(e);
+        if (!in_module(name, "std.rt")) {
+            continue;
+        }
+        const ast_node_t* decl = rt_decl(m, short_name(name));
+        TEST_ASSERT_NONNULL(decl);
+        TEST_ASSERT_NONNULL(decl->sym);
+        TEST_ASSERT_EQ_STR(row_mismatch(e, name, decl->sym->type), "");
+        // The call site states the result the definition states, attribute
+        // included: `opt` accepts a disagreement and LLVM then falls back to
+        // the callee's, which is an assumption the caller never made (D9.9).
+        TEST_ASSERT_EQ_STR(ir_result_text(rt_entry_result(e)),
+                           emitted_result(decl->sym->type->elem));
+        // `noreturn` is part of the signature: it is what the attribute group
+        // of item 14 states of the definition (D8.5).
+        TEST_ASSERT_TRUE(decl->sym->type->noreturn == rt_entry_noreturn(e));
+        checked++;
+    }
+    // Every row but the two float printers, which stand in `std.rt_float`
+    // and arrive with the float work (D18.1).
+    TEST_ASSERT_EQ_UINT64(checked, (uint64_t)RT_COUNT - 2);
+    rt_close();
+})
+
+TEST(std_rt_declares_no_runtime_c_symbol, {
+    // D13.2: `std.rt` is the runtime, so it declares no `fort_rt_` symbol.
+    // Its own `extern` declarations are `std.libc`'s and it has none of its
+    // own.
+    const module_t* m = rt_open();
+    TEST_ASSERT_NONNULL(m);
+    uint64_t externs = 0;
+    for (uint64_t i = 0; i < ast_len(m->ast); i++) {
+        const ast_node_t* decl = ast_child(m->ast, i);
+        if (decl->kind != AST_FN_DECL || (decl->flags & AST_FLAG_EXTERN) == 0) {
+            continue;
+        }
+        externs++;
+    }
+    TEST_ASSERT_EQ_UINT64(externs, (uint64_t)0);
+    rt_close();
+})
+
+TEST(std_rt_defines_the_float_printers_nowhere, {
+    // The two float rows name `std.rt_float`, and `std.rt` neither defines
+    // them nor is loaded with them: a compiler that rejects floats cannot
+    // compile them (D18.1, D18.4).
+    const module_t* m = rt_open();
+    TEST_ASSERT_NONNULL(m);
+    TEST_ASSERT_TRUE(in_module(rt_entry_name(RT_PRINT_F32), "std.rt_float"));
+    TEST_ASSERT_TRUE(in_module(rt_entry_name(RT_PRINT_F64), "std.rt_float"));
+    TEST_ASSERT_NULL(rt_decl(m, str_from_cstr("print_f32")));
+    TEST_ASSERT_NULL(rt_decl(m, str_from_cstr("print_f64")));
+    rt_close();
+})
 
 // ---- the form of a fort type at the boundary (D9.8, D9.9) --------------------------
 
@@ -568,17 +528,20 @@ TEST(the_form_of_a_type_is_the_text_the_emitter_writes_for_it, {
 
 int main(int argc, char** argv) {
     TEST_INIT("runtime_sig", argc, argv);
-    TEST_RUN(a_c_name_finds_its_entry_point_and_nothing_else_does);
+    TEST_RUN(a_mangled_name_finds_its_entry_point_and_nothing_else_does);
     TEST_RUN(every_row_names_the_entry_point_its_enumerator_does);
-    TEST_RUN(the_four_entry_points_that_return_a_value_are_the_only_ones);
+    TEST_RUN(every_entry_point_is_a_mangled_fort_name_of_the_runtime);
+    TEST_RUN(the_two_entry_points_that_return_a_value_are_the_only_ones);
     TEST_RUN(the_noreturn_entry_points_are_the_ones_section_5_1_names);
-    TEST_RUN(the_parameter_list_of_a_row_is_the_c_prototype_of_section_5_1);
-    TEST_RUN(every_entry_point_renders_the_declaration_of_item_8);
-    TEST_RUN(every_row_is_the_c_prototype_of_the_runtime_header);
+    TEST_RUN(the_parameter_list_of_a_row_is_the_fort_signature_of_section_5_1);
+    TEST_RUN(every_row_is_the_fort_signature_of_std_rt);
+    TEST_RUN(std_rt_declares_no_runtime_c_symbol);
+    TEST_RUN(std_rt_defines_the_float_printers_nowhere);
     TEST_RUN(a_fort_type_takes_the_ir_form_of_its_c_counterpart);
     TEST_RUN(every_pointer_takes_the_opaque_ptr_form);
     TEST_RUN(a_type_no_extern_signature_may_use_has_no_form);
     TEST_RUN(the_form_of_a_type_is_the_text_the_emitter_writes_for_it);
     types_end();
+    rt_close();
     TEST_EXIT();
 }

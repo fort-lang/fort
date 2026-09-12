@@ -57,7 +57,7 @@ done
 # comparison. A ticket that adds or removes a .ft file changes all four
 # lines in the same commit: diff_tokens.sh, diff_ast.sh, diff_check.sh and
 # diff_ir.sh.
-FT_FILES=772
+FT_FILES=774
 
 # The files of that corpus stage1 checks clean, which are the ones compared.
 # It is an equality for the reason FT_FILES is: a comparison that shrank would
@@ -74,7 +74,7 @@ FT_FILES=772
 # test/fort/support and the imported half of a multi-module test -- which that
 # script skips because they compile into no module. Move the two numbers
 # together only when both the roots and those two questions agree.
-CLEAN_FILES=451
+CLEAN_FILES=450
 
 # The search roots every run is given: the standard library the build copied,
 # and src/fort, so that the compiler's own modules resolve their imports. A

@@ -71,24 +71,21 @@ TEST(string_equality_is_one_call_to_the_runtime_entry_point, {
               "  %t3 = load ptr, ptr %t2, align 8\n"
               "  %t4 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 1\n"
               "  %t5 = load i64, ptr %t4, align 8\n"
-              "  %t6 = call zeroext i8 @fort_rt_str_eq(ptr %t3, i64 %t5, ptr @.str.1, i64 5)\n"
-              "  %t7 = trunc i8 %t6 to i1\n"),
+              "  %t6 = call zeroext i1 @\"std.rt.str_eq\"(ptr %t3, i64 %t5, ptr @.str.1, i64 5)\n"),
         "  %t2 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 0\n"
         "  %t3 = load ptr, ptr %t2, align 8\n"
         "  %t4 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 1\n"
         "  %t5 = load i64, ptr %t4, align 8\n"
-        "  %t6 = call zeroext i8 @fort_rt_str_eq(ptr %t3, i64 %t5, ptr @.str.1, i64 5)\n"
-        "  %t7 = trunc i8 %t6 to i1\n");
+        "  %t6 = call zeroext i1 @\"std.rt.str_eq\"(ptr %t3, i64 %t5, ptr @.str.1, i64 5)\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
 TEST(inequality_is_the_same_call_negated, {
     TEST_ASSERT_TRUE(emit(NE_LITERAL));
-    TEST_ASSERT_EQ_STR(found("  %t7 = trunc i8 %t6 to i1\n  %t8 = xor i1 %t7, true\n"),
-                       "  %t7 = trunc i8 %t6 to i1\n  %t8 = xor i1 %t7, true\n");
+    TEST_ASSERT_EQ_STR(found("  %t7 = xor i1 %t6, true\n"), "  %t7 = xor i1 %t6, true\n");
     // One call either way: the negation is in the module and not in the
     // runtime (D3.7).
-    TEST_ASSERT_EQ_SIZE(occurrences("call zeroext i8 @fort_rt_str_eq("), (size_t)1);
+    TEST_ASSERT_EQ_SIZE(occurrences("call zeroext i1 @\"std.rt.str_eq\"("), (size_t)1);
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -106,7 +103,7 @@ TEST(comparing_two_places_reads_both_headers, {
               "  %t5 = load ptr, ptr %t4, align 8\n"
               "  %t6 = getelementptr inbounds %fort.span, ptr %b.in, i32 0, i32 1\n"
               "  %t7 = load i64, ptr %t6, align 8\n"
-              "  %t8 = call zeroext i8 @fort_rt_str_eq(ptr %t1, i64 %t3, ptr %t5, i64 %t7)\n"),
+              "  %t8 = call zeroext i1 @\"std.rt.str_eq\"(ptr %t1, i64 %t3, ptr %t5, i64 %t7)\n"),
         "  %t0 = getelementptr inbounds %fort.span, ptr %a.in, i32 0, i32 0\n"
         "  %t1 = load ptr, ptr %t0, align 8\n"
         "  %t2 = getelementptr inbounds %fort.span, ptr %a.in, i32 0, i32 1\n"
@@ -115,7 +112,7 @@ TEST(comparing_two_places_reads_both_headers, {
         "  %t5 = load ptr, ptr %t4, align 8\n"
         "  %t6 = getelementptr inbounds %fort.span, ptr %b.in, i32 0, i32 1\n"
         "  %t7 = load i64, ptr %t6, align 8\n"
-        "  %t8 = call zeroext i8 @fort_rt_str_eq(ptr %t1, i64 %t3, ptr %t5, i64 %t7)\n");
+        "  %t8 = call zeroext i1 @\"std.rt.str_eq\"(ptr %t1, i64 %t3, ptr %t5, i64 %t7)\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -125,26 +122,23 @@ TEST(the_left_operand_is_evaluated_before_the_right, {
                           "fn i32 main() {\n    println(left() == right());\n    return 0;\n}\n"));
     // Each argument is evaluated in turn, left to right (D6.3).
     TEST_ASSERT_TRUE(before("call void @\"main.left\"", "call void @\"main.right\""));
-    TEST_ASSERT_TRUE(before("call void @\"main.right\"", "@fort_rt_str_eq("));
+    TEST_ASSERT_TRUE(before("call void @\"main.right\"", "@\"std.rt.str_eq\"("));
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
-TEST(the_entry_point_is_declared_once_in_the_runtime_group, {
+TEST(the_entry_point_is_never_declared, {
     TEST_ASSERT_TRUE(emit("extern fn i32 puts(char* s);\n"
                           "fn i32 main() {\n    string s = \"hi\";\n"
                           "    println(s == \"hi\", s == \"ho\");\n"
                           "    return puts(s.ptr);\n}\n"));
-    // A symbol is declared exactly once, the `extern` group comes before the
-    // runtime group, and a plain entry point carries no attribute group
-    // (item 8, item 14).
-    TEST_ASSERT_EQ_SIZE(occurrences("declare zeroext i8 @fort_rt_str_eq(ptr, i64, ptr, i64)"),
-                        (size_t)1);
-    TEST_ASSERT_EQ_SIZE(occurrences("call zeroext i8 @fort_rt_str_eq("), (size_t)2);
-    TEST_ASSERT_TRUE(before("declare i32 @puts(", "declare zeroext i8 @fort_rt_str_eq("));
-    TEST_ASSERT_TRUE(
-        before("declare zeroext i8 @fort_rt_str_eq(", "declare void @fort_rt_print_bool("));
-    TEST_ASSERT_EQ_STR(absent("declare zeroext i8 @fort_rt_str_eq(ptr, i64, ptr, i64) #"),
-                       "absent");
+    // `std.rt` is in the closure, so the module that holds the call holds the
+    // definition and nothing declares it: a `declare` beside a `define` is a
+    // redefinition `opt` rejects (item 8). The declarations section holds the
+    // externs and the intrinsics and no third group.
+    TEST_ASSERT_EQ_SIZE(occurrences("call zeroext i1 @\"std.rt.str_eq\"("), (size_t)2);
+    TEST_ASSERT_EQ_STR(absent("declare zeroext i1 @\"std.rt.str_eq\""), "absent");
+    TEST_ASSERT_EQ_STR(absent("declare void @\"std.rt."), "absent");
+    TEST_ASSERT_EQ_STR(found("declare i32 @puts(ptr, ...)"), "declare i32 @puts(ptr, ...)");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -152,7 +146,7 @@ TEST(a_program_that_compares_no_string_declares_no_entry_point, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    string s = \"hi\";\n"
                           "    println(s.len);\n    return 0;\n}\n"));
     // Only referenced declarations are emitted (item 8, D19.5).
-    TEST_ASSERT_EQ_STR(absent("fort_rt_str_eq"), "absent");
+    TEST_ASSERT_EQ_STR(absent("std.rt.str_eq"), "absent");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -160,15 +154,15 @@ TEST(release_mode_compares_strings_the_same_way, {
     TEST_ASSERT_TRUE(emit_release(EQ_LITERAL));
     // The comparison is not a check, so neither build mode changes it
     // (D11.1).
-    TEST_ASSERT_EQ_STR(found("@fort_rt_str_eq(ptr %t3, i64 %t5, ptr @.str.1, i64 5)"),
-                       "@fort_rt_str_eq(ptr %t3, i64 %t5, ptr @.str.1, i64 5)");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.str_eq\"(ptr %t3, i64 %t5, ptr @.str.1, i64 5)"),
+                       "@\"std.rt.str_eq\"(ptr %t3, i64 %t5, ptr @.str.1, i64 5)");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
 TEST(no_bounds_check_compares_strings_the_same_way, {
     TEST_ASSERT_TRUE(emit_unchecked(EQ_LITERAL));
-    TEST_ASSERT_EQ_STR(found("@fort_rt_str_eq(ptr %t3, i64 %t5, ptr @.str.1, i64 5)"),
-                       "@fort_rt_str_eq(ptr %t3, i64 %t5, ptr @.str.1, i64 5)");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.str_eq\"(ptr %t3, i64 %t5, ptr @.str.1, i64 5)"),
+                       "@\"std.rt.str_eq\"(ptr %t3, i64 %t5, ptr @.str.1, i64 5)");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -181,7 +175,7 @@ TEST(indexing_a_string_reaches_its_bytes_through_the_pointer_field, {
     // through the header's pointer (item 3).
     TEST_ASSERT_EQ_STR(found("getelementptr inbounds i8, ptr %t7, i64 %t2"),
                        "getelementptr inbounds i8, ptr %t7, i64 %t2");
-    TEST_ASSERT_EQ_STR(found("@fort_rt_print_char"), "@fort_rt_print_char");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.print_char\""), "@\"std.rt.print_char\"");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -227,7 +221,7 @@ int main(int argc, char** argv) {
     TEST_RUN(inequality_is_the_same_call_negated);
     TEST_RUN(comparing_two_places_reads_both_headers);
     TEST_RUN(the_left_operand_is_evaluated_before_the_right);
-    TEST_RUN(the_entry_point_is_declared_once_in_the_runtime_group);
+    TEST_RUN(the_entry_point_is_never_declared);
     TEST_RUN(a_program_that_compares_no_string_declares_no_entry_point);
     TEST_RUN(release_mode_compares_strings_the_same_way);
     TEST_RUN(no_bounds_check_compares_strings_the_same_way);

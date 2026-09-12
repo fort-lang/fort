@@ -52,14 +52,17 @@ class GlobMatching(unittest.TestCase):
             self.assertFalse(lines.path_matches(path, source), path)
             self.assertFalse(lines.path_matches(path, tests), path)
 
-    def test_the_runtime_is_source_and_its_suite_is_test(self):
-        """851 runtime lines counted nowhere while their 850 test lines counted (D14.6)."""
+    def test_the_runtime_counts_with_the_standard_library(self):
+        """The runtime is std.rt, so no glob names a runtime directory (D13.1, D14.6)."""
         source = [lines.glob_to_regex(g) for g in lines.SOURCE_GLOBS]
         tests = [lines.glob_to_regex(g) for g in lines.TEST_GLOBS]
+        self.assertTrue(lines.path_matches("std/rt.ft", source))
+        self.assertFalse(lines.path_matches("std/rt.ft", tests))
+        # The C runtime is gone with T-091, and so is the glob that named it:
+        # a file put back there would count on neither side.
         for path in ("runtime/fort_rt.c", "runtime/fort_rt.h"):
-            self.assertTrue(lines.path_matches(path, source), path)
+            self.assertFalse(lines.path_matches(path, source), path)
             self.assertFalse(lines.path_matches(path, tests), path)
-        self.assertTrue(lines.path_matches("test/runtime_test.c", tests))
 
     def test_the_standard_library_is_source_and_not_test(self):
         """std/*.ft is code the project ships, so it is the denominator (D14.6)."""
@@ -83,7 +86,7 @@ class GlobMatching(unittest.TestCase):
         names = {p.name for p in counted if p.parent.name == "std"}
         self.assertIn("io.ft", names)
         self.assertGreaterEqual(len(names), 8)
-        self.assertIn("fort_rt.c", {p.name for p in counted if p.parent.name == "runtime"})
+        self.assertIn("rt.ft", names)
 
 
 class Ratio(unittest.TestCase):

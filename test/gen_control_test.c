@@ -390,9 +390,9 @@ TEST(a_range_for_emits_no_bounds_check_of_its_own, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32[3] a = {1, 2, 3};\n    i32 mut s = 0;\n"
                           "    for (i32 v : a) {\n        s = s +% v;\n    }\n    return s;\n}\n"));
     // The counter is bounded by the length the head compares against, so the
-    // element address needs no `fort_rt_fail_bounds` branch of its own (item
+    // element address needs no `std.rt.fail_bounds` branch of its own (item
     // 16); a program with no check has no `@.file.N` either (item 5).
-    TEST_ASSERT_EQ_STR(absent("@fort_rt_fail_bounds"), "absent");
+    TEST_ASSERT_EQ_STR(absent("@\"std.rt.fail_bounds\""), "absent");
     TEST_ASSERT_EQ_STR(absent("@.file."), "absent");
 })
 
@@ -459,8 +459,8 @@ TEST(a_noreturn_step_leaves_the_back_edge_out, {
     // `step` may be a call too, and `panic` is `noreturn` (D8.4, item 19), so
     // the step block ends at its `unreachable` and not at a second
     // terminator.
-    TEST_ASSERT_EQ_STR(found("\nL2:\n  call void @fort_rt_panic("),
-                       "\nL2:\n  call void @fort_rt_panic(");
+    TEST_ASSERT_EQ_STR(found("\nL2:\n  call void @\"std.rt.panic\"("),
+                       "\nL2:\n  call void @\"std.rt.panic\"(");
     TEST_ASSERT_EQ_STR(found("  unreachable\n\nL3:\n"), "  unreachable\n\nL3:\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
@@ -473,7 +473,7 @@ TEST(a_check_inside_a_loop_puts_its_failure_block_after_every_normal_one, {
     // (D19.6), so a check inside a loop leaves its block below the loop's,
     // while its `%tN` operands are defined inside the loop that dominates it
     // (item 11).
-    TEST_ASSERT_TRUE(before("\nL3:\n", "\nL5:\n  call void @fort_rt_fail_bounds"));
+    TEST_ASSERT_TRUE(before("\nL3:\n", "\nL5:\n  call void @\"std.rt.fail_bounds\""));
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 

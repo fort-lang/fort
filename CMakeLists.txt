@@ -29,14 +29,14 @@ set(FORT_C_WARNINGS
 add_compile_definitions(_POSIX_C_SOURCE=200809L)
 add_compile_options(${FORT_C_WARNINGS})
 
-# FORT_SANITIZER instruments every native target (the compiler, the native
-# runtime object and the unit tests) but never the cross-compiled fort_rt.o.
+# FORT_SANITIZER instruments every native target: the compiler and the unit
+# tests. The programs the compiler builds are cross-compiled and are never
+# instrumented.
 include(cmake/sanitizers.cmake)
 
 enable_testing()
 
 set(FORT_SRC_DIR "${CMAKE_SOURCE_DIR}/src/bootstrap")
-set(FORT_RUNTIME_DIR "${CMAKE_SOURCE_DIR}/runtime")
 set(FORT_TEST_DIR "${CMAKE_SOURCE_DIR}/test")
 set(FORT_STD_SRC_DIR "${CMAKE_SOURCE_DIR}/std")
 set(FORT_EDITORS_DIR "${CMAKE_SOURCE_DIR}/editors")
@@ -59,14 +59,14 @@ add_executable(fort "${FORT_SRC_DIR}/main.c")
 target_link_libraries(fort PRIVATE fort_core)
 set_target_properties(fort PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 
-# ---- the C runtime -------------------------------------------------------------
-# fort_rt.o is the runtime object linked into every generated program
-# (toolchain.md 2, 5). It is built for the x86-64 target by FORT_TARGET_CC,
-# outside CMake's compiler settings, so it is never sanitized. FORT_TARGET_CC
-# must name a clang, since the compiler drives the same program over the LLVM
-# IR it emits, with --target=${FORT_TARGET_TRIPLE} (D14.1, D14.3).
+# ---- the standard library ------------------------------------------------------
+# The compiler reads `std/*.ft` from <std-dir> and emits every module of the
+# closure into the program (D9.10, D13.1), so a build copies the sources next
+# to the binary and links no object beside the module. FORT_TARGET_CC must
+# name a clang, since the compiler drives the same program over the LLVM IR it
+# emits, with --target=${FORT_TARGET_TRIPLE} (D14.1, D14.3).
 set(FORT_TARGET_CC "clang" CACHE STRING
-    "clang that builds the target (x86-64) runtime object fort_rt.o")
+    "clang that compiles and links the LLVM IR the compiler emits")
 set(FORT_TARGET_TRIPLE "x86_64-linux-gnu" CACHE STRING
     "target of FORT_TARGET_CC, passed as --target=")
 # NO_CACHE: the path must follow FORT_TARGET_CC. A cached result would survive
@@ -77,20 +77,6 @@ if(NOT FORT_TARGET_CC_PATH)
     message(FATAL_ERROR "FORT_TARGET_CC: clang not found: ${FORT_TARGET_CC}")
 endif()
 
-set(FORT_RT_OBJECT "${FORT_STD_DIR}/fort_rt.o")
-add_custom_command(
-    OUTPUT "${FORT_RT_OBJECT}"
-    COMMAND "${CMAKE_COMMAND}" -E make_directory "${FORT_STD_DIR}"
-    COMMAND "${FORT_TARGET_CC_PATH}" "--target=${FORT_TARGET_TRIPLE}"
-            -std=c11 -D_POSIX_C_SOURCE=200809L -O2 -g -fPIE ${FORT_C_WARNINGS}
-            -c -o "${FORT_RT_OBJECT}" "${FORT_RUNTIME_DIR}/fort_rt.c"
-    DEPENDS "${FORT_RUNTIME_DIR}/fort_rt.c" "${FORT_RUNTIME_DIR}/fort_rt.h"
-    COMMENT "Cross-compiling runtime/fort_rt.c with ${FORT_TARGET_CC} for ${FORT_TARGET_TRIPLE}"
-    VERBATIM
-)
-
-# The standard library sources are copied next to fort_rt.o; the compiler
-# reads them from <std-dir> (toolchain.md 2).
 file(GLOB FORT_STD_SOURCES CONFIGURE_DEPENDS "${FORT_STD_SRC_DIR}/*.ft")
 set(FORT_STD_OUTPUTS "")
 foreach(std_source IN LISTS FORT_STD_SOURCES)
@@ -106,13 +92,7 @@ foreach(std_source IN LISTS FORT_STD_SOURCES)
     list(APPEND FORT_STD_OUTPUTS "${std_output}")
 endforeach()
 
-add_custom_target(fort_rt ALL DEPENDS "${FORT_RT_OBJECT}" ${FORT_STD_OUTPUTS})
-
-# The same runtime compiled natively, without main, for the unit tests and
-# for clang-tidy.
-add_library(fort_rt_native OBJECT "${FORT_RUNTIME_DIR}/fort_rt.c")
-target_compile_definitions(fort_rt_native PRIVATE FORT_RT_NO_MAIN)
-target_include_directories(fort_rt_native PUBLIC "${FORT_RUNTIME_DIR}")
+add_custom_target(fort_std ALL DEPENDS ${FORT_STD_OUTPUTS})
 
 # ---- the self-hosted compiler --------------------------------------------------
 # stage2 is src/fort compiled by stage1 (toolchain.md 8): the binary is
@@ -129,12 +109,11 @@ add_custom_command(
             --target "${FORT_TARGET_TRIPLE}" -o "${FORT_STAGE2_BINARY}"
             "${FORT_FORT_SRC_DIR}/main.ft"
     # The file inputs, not just the targets: a DEPENDS on the custom target
-    # fort_rt is an order-only edge, so with fort_rt alone an edit to
+    # fort_std is an order-only edge, so with fort_std alone an edit to
     # std/strmap.ft -- which session.ft imports -- left stage2/fort untouched
     # and lang-stage2 and stage-usage then judged the previous build's binary.
-    # The copies in <build>/std are what stage1 actually reads, and fort_rt.o
-    # is what it links.
-    DEPENDS fort fort_rt ${FORT_FORT_SOURCES} ${FORT_STD_OUTPUTS} "${FORT_RT_OBJECT}"
+    # The copies in <build>/std are what stage1 actually reads.
+    DEPENDS fort fort_std ${FORT_FORT_SOURCES} ${FORT_STD_OUTPUTS}
     COMMENT "Compiling src/fort with stage1 into stage2/fort"
     VERBATIM
 )
@@ -168,8 +147,7 @@ foreach(test_source IN LISTS FORT_UNIT_TEST_SOURCES)
     string(REGEX REPLACE "_test$" "" test_component "${test_target}")
     add_executable("${test_target}" "${test_source}")
     target_include_directories("${test_target}" PRIVATE "${FORT_TEST_DIR}")
-    target_link_libraries("${test_target}" PRIVATE fort_core fort_rt_native
-        ${FORT_TEST_SUPPORT_LIB})
+    target_link_libraries("${test_target}" PRIVATE fort_core ${FORT_TEST_SUPPORT_LIB})
     set_target_properties("${test_target}" PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test")
     add_test(NAME "unit-${test_component}" COMMAND "${test_target}")
@@ -192,11 +170,10 @@ foreach(driver_suite driver_test driver_check_test driver_conformance_test drive
 endforeach()
 
 # The emitter suites run the LLVM verifier over every module they emit (D19.1)
-# and compare two of them with the worked examples of toolchain.md 6, which
-# live in test/ir, so they need the verifier's path and that directory. Every
-# test/gen*_test.c gets them, so a new suite is covered by adding the file, and
-# `opt` is a default rather than a configure-time requirement of every preset,
-# as it is for the pipeline test and for the language harness.
+# so they need the verifier's path. Every test/gen*_test.c gets it, so a new
+# suite is covered by adding the file, and `opt` is a default rather than a
+# configure-time requirement of every preset, as it is for the pipeline test
+# and for the language harness.
 find_program(FORT_OPT_PATH NAMES opt-18 opt)
 if(NOT FORT_OPT_PATH)
     set(FORT_OPT_PATH "opt-18")
@@ -204,17 +181,29 @@ endif()
 foreach(gen_suite IN LISTS FORT_UNIT_TEST_TARGETS)
     if(gen_suite MATCHES "^gen")
         target_compile_definitions("${gen_suite}"
-            PRIVATE FORT_OPT="${FORT_OPT_PATH}" FORT_IR_DIR="${FORT_TEST_DIR}/ir")
+            PRIVATE FORT_OPT="${FORT_OPT_PATH}")
+    endif()
+endforeach()
+
+# runtime_sig_test reads std/rt.ft and check_conv_test std/libc.ft: the first
+# holds every row of the entry-point table against the fort signature that
+# defines it (toolchain.md 5.1), the second holds D9.8's closure-wide rule
+# against the library's own declarations (D9.10). Both need the sources.
+foreach(std_reader runtime_sig_test check_conv_test)
+    if(TARGET "${std_reader}")
+        target_compile_definitions("${std_reader}"
+            PRIVATE FORT_STD_SOURCE_DIR="${FORT_STD_SRC_DIR}")
     endif()
 endforeach()
 
 # The cross pipeline: the hand-written LLVM IR modules under test/ir, which
-# are in the form of toolchain.md 6 and are its worked examples (D19.1), are
-# verified with opt, compiled and linked with the cross-compiled fort_rt.o and
-# run under qemu (toolchain.md 2). It is a unit test so that check covers it;
-# it needs the runtime object, not the compiler.
+# are in the form of toolchain.md 6 (D19.1), are verified with opt, compiled
+# and linked on their own and run under qemu (toolchain.md 2). A module holds
+# the whole program, the runtime included (D9.10, D13.1), so the link takes no
+# object beside it. It is a unit test so that check covers it; it needs the
+# target clang, not the compiler.
 add_test(NAME pipeline
-    COMMAND bash "${FORT_TEST_DIR}/pipeline_test.sh" "${CMAKE_BINARY_DIR}"
+    COMMAND bash "${FORT_TEST_DIR}/pipeline_test.sh"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(pipeline PROPERTIES
     LABELS unit
@@ -234,7 +223,7 @@ add_custom_target(check
     COMMENT "Running the unit tests"
     USES_TERMINAL
 )
-add_dependencies(check fort fort_rt fort_stage2)
+add_dependencies(check fort fort_std fort_stage2)
 if(FORT_UNIT_TEST_TARGETS)
     add_dependencies(check ${FORT_UNIT_TEST_TARGETS})
 endif()
@@ -550,7 +539,7 @@ add_custom_target(check-lang
     USES_TERMINAL
     VERBATIM
 )
-add_dependencies(check-lang fort fort_rt fort_stage2)
+add_dependencies(check-lang fort fort_std fort_stage2)
 
 add_custom_target(check-all COMMENT "Running every test")
 add_dependencies(check-all check check-lang)
@@ -558,7 +547,6 @@ add_dependencies(check-all check check-lang)
 # ---- format, tidy, lines -----------------------------------------------------------
 file(GLOB_RECURSE FORT_LINT_SOURCES CONFIGURE_DEPENDS
     "${FORT_SRC_DIR}/*.c" "${FORT_SRC_DIR}/*.h"
-    "${FORT_RUNTIME_DIR}/*.c" "${FORT_RUNTIME_DIR}/*.h"
     "${FORT_TEST_DIR}/*.c" "${FORT_TEST_DIR}/*.h"
 )
 
@@ -595,9 +583,9 @@ find_program(FORT_RUN_CLANG_TIDY NAMES run-clang-tidy run-clang-tidy-18)
 if(FORT_RUN_CLANG_TIDY)
     add_custom_target(tidy
         COMMAND "${FORT_RUN_CLANG_TIDY}" -p "${CMAKE_BINARY_DIR}" -quiet
-                "${FORT_SRC_DIR}" "${FORT_RUNTIME_DIR}" "${FORT_TEST_DIR}"
+                "${FORT_SRC_DIR}" "${FORT_TEST_DIR}"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-        COMMENT "Running clang-tidy over src, runtime and test"
+        COMMENT "Running clang-tidy over src and test"
         VERBATIM
     )
 else()
@@ -612,7 +600,7 @@ add_custom_target(fort-lint
     COMMENT "Checking the identifier conventions of D1.4 in the project's fort"
     VERBATIM
 )
-add_dependencies(fort-lint fort fort_rt)
+add_dependencies(fort-lint fort fort_std)
 
 add_custom_target(lines
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/lines.py"

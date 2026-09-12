@@ -77,12 +77,13 @@ enum { GEN_OVF_WIDTHS = 4 };
 typedef enum {
     ATTR_FN,        // #0, every fort definition (item 7)
     ATTR_FN_NORET,  // #1, a `noreturn` definition (item 20)
-    ATTR_FAIL,      // #2, the failure entry points (item 14)
+    ATTR_UNUSED_2,  // #2, never emitted: it held the C runtime's declarations
     ATTR_NOBUILTIN, // #3, every extern call site (item 8)
     ATTR_OVERFLOW,  // #4, the overflow intrinsics (item 15)
     ATTR_MEMCPY,    // #5
     ATTR_MEMSET,    // #6
     ATTR_TRAP,      // #7, llvm.trap (item 20)
+    ATTR_RT_NORET,  // #8, a `noreturn` entry point of 5.1 (item 14)
     ATTR_COUNT,
 } gen_attr_t;
 
@@ -199,7 +200,6 @@ struct gen {
     ptrvec_t strs;    // @.str.N, never deduplicated by content
     ptrvec_t enums;   // @.enum.<path.name>, one per enum some print reaches
     ptrvec_t externs; // const sym_t*: the extern C functions, in first-use order
-    bool rt[RT_COUNT];
     bool intrinsics[IN_COUNT];
     bool attrs[ATTR_COUNT];
 
@@ -502,12 +502,9 @@ uint64_t gen_enum_count(const sym_t* e);
 
 // Records an `extern` function so that its declaration is emitted in
 // first-use order, once per C name: two modules may each declare the same
-// function, which is two symbols and one ELF symbol (item 8). One naming a
-// runtime entry point (rt_entry_of, runtime_sig.h) goes to the runtime group
-// instead, with that group's prototype and attributes, and is left out of the
-// extern group, variadic tail included, so it is called through that
-// prototype too (item 8, D13.1); the checker has already held the declaration
-// against the canonical signature (D9.8).
+// function, which is two symbols and one ELF symbol (item 8). The runtime is
+// not declared at all: `std.rt` is in the closure, so the module that holds a
+// call to an entry point holds its definition (item 8, D13.1).
 void gen_use_extern(gen_t* g, const sym_t* s);
 
 // Appends the private data, the declarations and the attribute groups, then

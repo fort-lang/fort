@@ -53,15 +53,14 @@ fn void a_bool_is_widened_to_a_byte_before_it_is_printed() {
     defer gen_env.close(&e);
     assert(open_prints(&e));
     gen_env.discard_at(&e, 6);
-    // D19.2: the value is an `i1` and the entry point takes an `i8 zeroext`,
-    // so the `zext` stands at the call site, and `print` writes to stdout
-    // (D11.5).
+    // Item 2: a `bool` place holds `i8` and a `bool` value is `i1`, so the
+    // load is a `trunc` and the entry point, whose parameter is a fort
+    // `bool`, takes that `i1` as it stands; `print` writes to stdout (D11.5).
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join4(&e, "  %t0 = load i8, ptr %b.0, align 1\n",
                                       "  %t1 = trunc i8 %t0 to i1\n",
-                                      "  %t2 = zext i1 %t1 to i8\n",
-                                      "  call void @fort_rt_print_bool(i32 1, i8 zeroext %t2)\n"));
-    assert(gen.gen_uses_rt(&e.g, runtime_sig.rt_entry.rt_print_bool));
+                                      "  call void @\"std.rt.print_bool\"(i32 1, ",
+                                      "i1 zeroext %t1)\n"));
 }
 
 fn void a_char_goes_to_its_own_entry_point_unwidened() {
@@ -73,8 +72,9 @@ fn void a_char_goes_to_its_own_entry_point_unwidened() {
     // D3.2: `char` is an unsigned byte, so it is `i8 zeroext` and is never
     // widened to an integer.
     gen_env.expect_text(gen_env.body(&e),
-                        gen_env.join2(&e, "  %t0 = load i8, ptr %c.1, align 1\n",
-                                      "  call void @fort_rt_print_char(i32 1, i8 zeroext %t0)\n"));
+                        gen_env.join3(&e, "  %t0 = load i8, ptr %c.1, align 1\n",
+                                      "  call void @\"std.rt.print_char\"(i32 1, ",
+                                      "i8 zeroext %t0)\n"));
 }
 
 fn void an_enum_prints_through_its_table_and_its_member_count() {
@@ -88,7 +88,7 @@ fn void an_enum_prints_through_its_table_and_its_member_count() {
     gen_env.expect_text(
         gen_env.body(&e),
         gen_env.join3(&e, "  %t0 = load i32, ptr %k.2, align 4\n",
-                      "  call void @fort_rt_print_enum(i32 1, i32 %t0, ",
+                      "  call void @\"std.rt.print_enum\"(i32 1, i32 %t0, ",
                       "ptr @.enum.main.color, i64 2)\n"));
     assert(e.g.enums.len == 1);
 }
@@ -101,7 +101,7 @@ fn void a_pointer_prints_through_the_pointer_entry_point() {
     gen_env.discard_at(&e, 9);
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join2(&e, "  %t0 = load ptr, ptr %p.3, align 8\n",
-                                      "  call void @fort_rt_print_ptr(i32 1, ptr %t0)\n"));
+                                      "  call void @\"std.rt.print_ptr\"(i32 1, ptr %t0)\n"));
 }
 
 fn void an_integer_is_extended_to_64_bits_by_its_own_signedness() {
@@ -114,12 +114,12 @@ fn void an_integer_is_extended_to_64_bits_by_its_own_signedness() {
     // already agrees here, so nothing widens it (item 9).
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join2(&e, "  %t0 = load i64, ptr %u.4, align 8\n",
-                                      "  call void @fort_rt_print_u64(i32 1, i64 %t0)\n"));
+                                      "  call void @\"std.rt.print_u64\"(i32 1, i64 %t0)\n"));
     // `eprint` is the same call to descriptor 2 (D11.5).
     gen_env.discard_at(&e, 11);
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join2(&e, "  %t0 = load i64, ptr %u.4, align 8\n",
-                                      "  call void @fort_rt_print_u64(i32 2, i64 %t0)\n"));
+                                      "  call void @\"std.rt.print_u64\"(i32 2, i64 %t0)\n"));
 }
 
 fn void println_ends_with_a_newline_byte_of_its_own() {
@@ -134,8 +134,8 @@ fn void println_ends_with_a_newline_byte_of_its_own() {
         gen_env.body(&e),
         gen_env.join4(&e, "  %t0 = load i32, ptr %n.5, align 4\n",
                       "  %t1 = sext i32 %t0 to i64\n",
-                      "  call void @fort_rt_print_i64(i32 1, i64 %t1)\n",
-                      "  call void @fort_rt_print_char(i32 1, i8 zeroext 10)\n"));
+                      "  call void @\"std.rt.print_i64\"(i32 1, i64 %t1)\n",
+                      "  call void @\"std.rt.print_char\"(i32 1, i8 zeroext 10)\n"));
 }
 
 fn void a_string_literal_prints_as_its_constant_and_its_length() {
@@ -147,7 +147,7 @@ fn void a_string_literal_prints_as_its_constant_and_its_length() {
     // Item 19: a literal is `@.str.N` and its length, with no header built
     // for it at all (D3.7).
     gen_env.expect_text(gen_env.body(&e),
-                        "  call void @fort_rt_print_str(i32 1, ptr @.str.0, i64 2)\n");
+                        "  call void @\"std.rt.print_str\"(i32 1, ptr @.str.0, i64 2)\n");
 }
 
 fn void fprint_evaluates_its_descriptor_once_and_before_the_arguments() {
@@ -160,7 +160,7 @@ fn void fprint_evaluates_its_descriptor_once_and_before_the_arguments() {
     // before the arguments, left to right.
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join2(&e, "  %t0 = load i64, ptr %u.4, align 8\n",
-                                      "  call void @fort_rt_print_u64(i32 2, i64 %t0)\n"));
+                                      "  call void @\"std.rt.print_u64\"(i32 2, i64 %t0)\n"));
 }
 
 // ---- D12.2: assert and panic -------------------------------------------------------
@@ -182,7 +182,7 @@ fn void assert_quotes_its_argument_as_the_user_wrote_it() {
     gen_env.expect_text(
         gen_env.fail(&e),
         gen_env.join4(&e, "\nL1:\n",
-                      "  call void @fort_rt_assert_fail(ptr @.str.0, ptr @.file.0, ",
+                      "  call void @\"std.rt.assert_fail\"(ptr @.str.0, ptr @.file.0, ",
                       "i32 3, i32 5)\n", "  unreachable\n"));
     // The quoted text is the one string constant this call made.
     assert(e.g.strs.len == 1);
@@ -201,7 +201,7 @@ fn void panic_writes_its_message_and_ends_the_block() {
     gen_env.expect_text(
         gen_env.body(&e),
         gen_env.join2(&e,
-                      "  call void @fort_rt_panic(ptr @.str.0, i64 3, ptr @.file.0, ",
+                      "  call void @\"std.rt.panic\"(ptr @.str.0, i64 3, ptr @.file.0, ",
                       "i32 3, i32 5)\n  unreachable\n"));
     assert(e.g.terminated);
 }

@@ -79,7 +79,7 @@ TEST(indexing_a_span_checks_against_its_header_length, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    u64 n = 3;\n"
                           "    i32 mut@ own s = new(i32, n);\n    u64 i = 1;\n"
                           "    println(s[i]);\n    del(s);\n    return 0;\n}\n"));
-    // One `icmp uge i64 %idx, %len` branches to fort_rt_fail_bounds, and the
+    // One `icmp uge i64 %idx, %len` branches to std.rt.fail_bounds, and the
     // element is reached through the header's pointer (item 16, item 3).
     TEST_ASSERT_EQ_STR(found("  %t8 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 1\n"
                              "  %t9 = load i64, ptr %t8, align 8\n"
@@ -89,8 +89,9 @@ TEST(indexing_a_span_checks_against_its_header_length, {
                        "  %t9 = load i64, ptr %t8, align 8\n"
                        "  %t10 = icmp uge i64 %t7, %t9\n"
                        "  br i1 %t10, label %L3, label %L2\n");
-    TEST_ASSERT_EQ_STR(found("@fort_rt_fail_bounds(i64 %t7, i64 %t9, ptr @.file.0, i32 5, i32 14)"),
-                       "@fort_rt_fail_bounds(i64 %t7, i64 %t9, ptr @.file.0, i32 5, i32 14)");
+    TEST_ASSERT_EQ_STR(
+        found("@\"std.rt.fail_bounds\"(i64 %t7, i64 %t9, ptr @.file.0, i32 5, i32 14)"),
+        "@\"std.rt.fail_bounds\"(i64 %t7, i64 %t9, ptr @.file.0, i32 5, i32 14)");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -101,8 +102,8 @@ TEST(an_element_of_a_span_of_pointers_is_a_pointer_slot, {
                           "    println(s[i] == null);\n    del(s);\n    return 0;\n}\n"));
     // `new(node* own, n)`-shaped spans hold pointer slots, so the element
     // stride is a pointer (D17.3).
-    TEST_ASSERT_EQ_STR(found("call ptr @fort_rt_new(i64 8, i64 %t0, "),
-                       "call ptr @fort_rt_new(i64 8, i64 %t0, ");
+    TEST_ASSERT_EQ_STR(found("call ptr @\"std.rt.alloc\"(i64 8, i64 %t0, "),
+                       "call ptr @\"std.rt.alloc\"(i64 8, i64 %t0, ");
     TEST_ASSERT_EQ_STR(found("getelementptr inbounds ptr, ptr %t12, i64 %t7"),
                        "getelementptr inbounds ptr, ptr %t12, i64 %t7");
     TEST_ASSERT_EQ_STR(verified(), "verified");
@@ -127,9 +128,9 @@ TEST(a_two_bound_span_checks_both_bounds_in_one_branch, {
     // The failure takes the two bounds and the length, and is reported at the
     // `[` of the span expression (D11.4, toolchain.md 4).
     TEST_ASSERT_EQ_STR(
-        found("\nL1:\n  call void @fort_rt_fail_span(i64 %t1, i64 %t2, i64 5, ptr @.file.0, "
+        found("\nL1:\n  call void @\"std.rt.fail_span\"(i64 %t1, i64 %t2, i64 5, ptr @.file.0, "
               "i32 7, i32 15)\n  unreachable\n"),
-        "\nL1:\n  call void @fort_rt_fail_span(i64 %t1, i64 %t2, i64 5, ptr @.file.0, "
+        "\nL1:\n  call void @\"std.rt.fail_span\"(i64 %t1, i64 %t2, i64 5, ptr @.file.0, "
         "i32 7, i32 15)\n  unreachable\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
@@ -161,8 +162,8 @@ TEST(an_absent_low_bound_is_zero, {
                        "  %t1 = icmp ugt i64 %t0, 5\n  %t2 = icmp ugt i64 0, %t0\n");
     TEST_ASSERT_EQ_STR(found("getelementptr inbounds [5 x i32], ptr %a.0, i64 0, i64 0"),
                        "getelementptr inbounds [5 x i32], ptr %a.0, i64 0, i64 0");
-    TEST_ASSERT_EQ_STR(found("@fort_rt_fail_span(i64 0, i64 %t0, i64 5, "),
-                       "@fort_rt_fail_span(i64 0, i64 %t0, i64 5, ");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.fail_span\"(i64 0, i64 %t0, i64 5, "),
+                       "@\"std.rt.fail_span\"(i64 0, i64 %t0, i64 5, ");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -190,8 +191,8 @@ TEST(the_whole_span_form_still_branches, {
                           "    i32@ s = a[..];\n    println(s.len);\n    return 0;\n}\n"));
     // Bounds checks are performed on every span operation, in every build
     // mode (D10.6); the optimizer folds the one `e[..]` cannot fail.
-    TEST_ASSERT_EQ_STR(found("@fort_rt_fail_span(i64 0, i64 3, i64 3, "),
-                       "@fort_rt_fail_span(i64 0, i64 3, i64 3, ");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.fail_span\"(i64 0, i64 3, i64 3, "),
+                       "@\"std.rt.fail_span\"(i64 0, i64 3, i64 3, ");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -225,7 +226,7 @@ TEST(a_span_of_a_pointer_is_unchecked, {
                           "    i32 mut@ s = p[1..3];\n    println(s.len);\n    return 0;\n}\n"));
     // `p[lo..hi]` on a raw pointer is the explicit unsafe escape for foreign
     // memory and checks nothing (D6.9, D10.4).
-    TEST_ASSERT_EQ_STR(absent("fort_rt_fail_span"), "absent");
+    TEST_ASSERT_EQ_STR(absent("std.rt.fail_span"), "absent");
     TEST_ASSERT_EQ_STR(found("  %t3 = load ptr, ptr %p.1, align 8\n"
                              "  %t4 = sext i32 1 to i64\n"
                              "  %t5 = sext i32 3 to i64\n"
@@ -248,7 +249,7 @@ TEST(a_span_of_a_span_expression_lands_in_a_temporary, {
                        "%tmp0 = alloca %fort.span, align 8");
     TEST_ASSERT_EQ_STR(found("%tmp1 = alloca %fort.span, align 8"),
                        "%tmp1 = alloca %fort.span, align 8");
-    TEST_ASSERT_EQ_SIZE(occurrences("call void @fort_rt_fail_span("), (size_t)2);
+    TEST_ASSERT_EQ_SIZE(occurrences("call void @\"std.rt.fail_span\"("), (size_t)2);
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -260,7 +261,7 @@ TEST(the_operand_is_evaluated_before_the_bounds, {
     // Left to right (D6.3), and the operand's length is read after both
     // bounds have run.
     TEST_ASSERT_TRUE(before("call i32 @\"main.lo\"", "call i32 @\"main.hi\""));
-    TEST_ASSERT_TRUE(before("call i32 @\"main.hi\"", "call void @fort_rt_fail_span"));
+    TEST_ASSERT_TRUE(before("call i32 @\"main.hi\"", "call void @\"std.rt.fail_span\""));
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -269,7 +270,7 @@ TEST(the_operand_is_evaluated_before_the_bounds, {
 TEST(no_bounds_check_removes_the_span_branch_and_keeps_the_inbounds, {
     TEST_ASSERT_TRUE(emit_unchecked(ARRAY_SPAN));
     // `--no-bounds-check` removes exactly the index and span branches (D10.6).
-    TEST_ASSERT_EQ_STR(absent("fort_rt_fail_span"), "absent");
+    TEST_ASSERT_EQ_STR(absent("std.rt.fail_span"), "absent");
     TEST_ASSERT_EQ_STR(absent("icmp ugt"), "absent");
     TEST_ASSERT_EQ_STR(found("  %t3 = getelementptr inbounds [5 x i32], ptr %a.0, i64 0, i64 %t1\n"
                              "  %t4 = sub i64 %t2, %t1\n"),
@@ -320,7 +321,7 @@ TEST(no_bounds_check_still_reads_the_length_an_absent_bound_needs, {
                              "  %t4 = load i64, ptr %t3, align 8\n"),
                        "  %t3 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 1\n"
                        "  %t4 = load i64, ptr %t3, align 8\n");
-    TEST_ASSERT_EQ_STR(absent("fort_rt_fail_span"), "absent");
+    TEST_ASSERT_EQ_STR(absent("std.rt.fail_span"), "absent");
     TEST_ASSERT_EQ_STR(found("sub i64 %t4, %t2"), "sub i64 %t4, %t2");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
@@ -329,8 +330,8 @@ TEST(release_mode_keeps_the_span_branch, {
     TEST_ASSERT_TRUE(emit_release(ARRAY_SPAN));
     // Bounds checks are performed in every build mode; only
     // `--no-bounds-check` removes them (D10.6).
-    TEST_ASSERT_EQ_STR(found("@fort_rt_fail_span(i64 %t1, i64 %t2, i64 5, "),
-                       "@fort_rt_fail_span(i64 %t1, i64 %t2, i64 5, ");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.fail_span\"(i64 %t1, i64 %t2, i64 5, "),
+                       "@\"std.rt.fail_span\"(i64 %t1, i64 %t2, i64 5, ");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -344,8 +345,8 @@ TEST(no_bounds_check_leaves_the_allocation_and_enum_checks_alone, {
                                     "    del(s);\n    return 0;\n}\n"));
     // Neither the negative-count check of D10.2 nor the enum default of D7.7
     // is a bounds check (D10.6).
-    TEST_ASSERT_EQ_STR(found("@fort_rt_fail_alloc_count"), "@fort_rt_fail_alloc_count");
-    TEST_ASSERT_EQ_STR(found("@fort_rt_fail_enum"), "@fort_rt_fail_enum");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.fail_alloc_count\""), "@\"std.rt.fail_alloc_count\"");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.fail_enum\""), "@\"std.rt.fail_enum\"");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -396,7 +397,7 @@ TEST(a_range_for_over_a_span_walks_it_by_index_with_no_check, {
     // (D17.10): the loop reads the length and the pointer out of the
     // collection's own slot, and the one memcpy of the module is the
     // declaration's checked store (D17.11).
-    TEST_ASSERT_EQ_STR(absent("fort_rt_fail_bounds"), "absent");
+    TEST_ASSERT_EQ_STR(absent("std.rt.fail_bounds"), "absent");
     TEST_ASSERT_EQ_STR(found("icmp ult i64 "), "icmp ult i64 ");
     TEST_ASSERT_EQ_SIZE(occurrences("call void @llvm.memcpy"), (size_t)1);
     TEST_ASSERT_EQ_STR(found("  %t7 = load i64, ptr %tmp1, align 8\n"
@@ -416,7 +417,7 @@ TEST(a_range_for_over_a_span_expression_copies_it_once, {
     // before the first iteration (D7.5).
     TEST_ASSERT_EQ_STR(found("%tmp0 = alloca %fort.span, align 8"),
                        "%tmp0 = alloca %fort.span, align 8");
-    TEST_ASSERT_EQ_SIZE(occurrences("call void @fort_rt_fail_span("), (size_t)1);
+    TEST_ASSERT_EQ_SIZE(occurrences("call void @\"std.rt.fail_span\"("), (size_t)1);
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 

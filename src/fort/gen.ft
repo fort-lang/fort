@@ -63,6 +63,12 @@ import types;
 string SPAN_TYPE = "%fort.span";
 string ENUM_MEMBER_TYPE = "%fort.enum_member";
 
+// The `struct enum_member` of `std.rt`, which the emitter writes as
+// `%fort.enum_member` and not as a `%struct.` of its own: one named type for
+// one layout, since the enum table of item 21 is built out of it (item 2,
+// section 5.1).
+string ENUM_MEMBER_STRUCT = "std.rt.enum_member";
+
 // The bytes a span or `string` header occupies: a pointer and a 64-bit
 // length (D3.5).
 u64 SPAN_SIZE = 16;
@@ -110,13 +116,14 @@ u64 OVF_WIDTHS = 4;
 // used ones are emitted, so gaps in the numbering are normal (D19.5).
 u64 ATTR_FN = 0;        // #0, every fort definition (item 7)
 u64 ATTR_FN_NORET = 1;  // #1, a `noreturn` definition (item 20)
-u64 ATTR_FAIL = 2;      // #2, the failure entry points (item 14)
+u64 ATTR_UNUSED_2 = 2;  // #2, never emitted: it held the C runtime's declarations
 u64 ATTR_NOBUILTIN = 3; // #3, every extern call site (item 8)
 u64 ATTR_OVERFLOW = 4;  // #4, the overflow intrinsics (item 15)
 u64 ATTR_MEMCPY = 5;    // #5
 u64 ATTR_MEMSET = 6;    // #6
 u64 ATTR_TRAP = 7;      // #7, llvm.trap (item 20)
-u64 ATTR_COUNT = 8;
+u64 ATTR_RT_NORET = 8;  // #8, a `noreturn` entry point of 5.1 (item 14)
+u64 ATTR_COUNT = 9;
 
 // The first byte that needs no `\XX` escape and the last: a string constant
 // writes every other byte as a hex pair (item 5).
@@ -295,7 +302,6 @@ struct emitter {
     record_vec strs;  // @.str.N, never deduplicated by content
     record_vec enums; // @.enum.<path.name>, one per enum some print reaches
     sym_vec externs;  // the extern C functions, in first-use order
-    bool[runtime_sig.RT_ENTRY_COUNT] rt;
     bool[IN_COUNT] intrinsics;
     bool[ATTR_COUNT] attrs;
 
@@ -611,11 +617,6 @@ fn void reset_state(emitter mut* g) {
     g->entry_defined = false;
     g->failed = false;
     u64 mut i = 0;
-    while (i < runtime_sig.RT_ENTRY_COUNT) {
-        g->rt[i] = false;
-        i += 1;
-    }
-    i = 0;
     while (i < IN_COUNT) {
         g->intrinsics[i] = false;
         i += 1;
@@ -737,6 +738,9 @@ fn string nominal_type_name(emitter mut* g, types.node* t) {
     string mut dotted = "";
     if (s != null) {
         dotted = gen_symbol(g, s);
+    }
+    if (dotted == ENUM_MEMBER_STRUCT) {
+        return ENUM_MEMBER_TYPE;
     }
     strbuf.clear(&g->scratch);
     strbuf.push(&g->scratch, '%');
@@ -1555,21 +1559,11 @@ fn string gen_enum_ref(emitter mut* g, ast.sym* e) {
 
 // Records an `extern` function so that its declaration is emitted in
 // first-use order, once per C name: two modules may each declare the same
-// function, which is two symbols and one ELF symbol (item 8). One naming a
-// runtime entry point (runtime_sig.rt_entry_of) goes to the runtime group
-// instead, with that group's prototype and attributes, and is left out of the
-// extern group, variadic tail included, so it is called through that
-// prototype too (item 8, D13.1); the checker has already held the declaration
-// against the canonical signature (D9.8).
+// function, which is two symbols and one ELF symbol (item 8). The runtime is
+// not declared at all: `std.rt` is in the closure, so the module that holds a
+// call to an entry point holds its definition (item 8, D13.1).
 fn void gen_use_extern(emitter mut* g, ast.sym* s) {
     string name = s->name;
-    runtime_sig.rt_entry rt = runtime_sig.rt_entry_of(name);
-    if (rt != runtime_sig.rt_entry.rt_none) {
-        // An `extern fn` naming a runtime entry point is declared in the
-        // runtime group with that group's prototype, once (item 8).
-        gen_use_rt(g, rt);
-        return;
-    }
     u64 mut i = 0;
     while (i < g->externs.len) {
         // A symbol is declared exactly once (item 8), and what the linker
@@ -1585,36 +1579,20 @@ fn void gen_use_extern(emitter mut* g, ast.sym* s) {
 
 // ---- calls to the runtime (item 8) ------------------------------------------------
 
-// Marks an entry point used, and its attribute group with it: a `_Noreturn`
-// entry point is declared `cold noreturn nounwind` (item 14, section 5.1).
-// The C indexes `g->rt` at each of its three call sites; one function here
-// keeps the attribute from being forgotten at a fourth.
-fn void gen_use_rt(emitter mut* g, runtime_sig.rt_entry rt) {
-    g->rt[cast(cast(rt, i32), u64)] = true;
-    if (runtime_sig.rt_entry_noreturn(rt)) {
-        gen_use_attr(g, ATTR_FAIL);
-    }
-}
-
-// Whether an entry point is one the module refers to, which is what decides
-// its declaration (item 8).
-fn bool gen_uses_rt(emitter* g, runtime_sig.rt_entry rt) {
-    return g->rt[cast(cast(rt, i32), u64)];
-}
-
-// Marks an entry point used and appends `@fort_rt_x(<args>)`.
+// Appends `@"std.rt.x"(<args>)`. A call into the runtime is an ordinary
+// fort-to-fort call by the mangled name of D9.7, quoted like every other
+// dotted name, and no attribute stands on it (items 4, 8, 14).
 fn void call_rt_tail(emitter mut* g, runtime_sig.rt_entry rt, gen_args* args) {
-    gen_use_rt(g, rt);
     gen_text_append(g, "@");
-    gen_text_append(g, runtime_sig.rt_entry_name(rt));
+    gen_append_name(&g->body, "", runtime_sig.rt_entry_name(rt), true);
     gen_text_append(g, "(");
     gen_text_append(g, gen_args_text(args));
     gen_text_append(g, ")");
     gen_ins_end(g);
 }
 
-// A call to a runtime entry point, which is declared on first use (item 8);
-// this form emits no result.
+// A call to a runtime entry point, which the module defines (item 8); this
+// form emits no result.
 fn void gen_call_rt(emitter mut* g, runtime_sig.rt_entry rt, gen_args* args) {
     gen_ins(g);
     gen_text_append(g, "call ");

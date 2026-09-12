@@ -81,6 +81,20 @@ fn void write_file(string path, string text) {
     assert(io.write_file(path, cast(text, u8@)));
 }
 
+// The errno a directory that already exists reports (stdlib.md 2.2).
+i32 EEXIST = 17;
+
+// Every closure holds `std.rt`, which the driver reads from `<std-dir>/rt.ft`
+// and looks for in `std` beside the program when nothing names one (D9.10,
+// toolchain.md 1). The runs below give `fort` as argv[0], so that directory
+// is `std` of this test's own working directory. What the driver needs there
+// is a file that parses, not a runtime: nothing these tests build is ever
+// run.
+fn void write_runtime() {
+    assert(mkdir("std".ptr, 0o700) == 0 || sys.errno() == EEXIST);
+    write_file("std/rt.ft", "// The empty runtime of a driver test.\n");
+}
+
 // ---- the flags that carry no value (D14.1) --------------------------------------
 
 // Each spelling sets its own flag and nothing else; the parse stops at
@@ -630,6 +644,10 @@ fn void an_empty_std_dir_option_counts_as_named() {
 fn void an_empty_std_dir_option_resolves_no_std_import() {
     assert(make_directory("stdlib"));
     write_file("stdlib/thing.ft", "fn i32 one() {\n    return 1;\n}\n");
+    // Every closure holds `std.rt`, which the loader reads from
+    // `<std-dir>/rt.ft` (D9.10), so the directory the environment names holds
+    // one too.
+    write_file("stdlib/rt.ft", "// The empty runtime of a driver test.\n");
     write_file("uses_std.ft", "import std.thing;\nfn i32 main() { return thing.one(); }\n");
     set_env("FORT_STD_DIR", "stdlib");
     // With the environment alone the import resolves and the program is
@@ -708,6 +726,7 @@ fn void a_hundred_runs_answer_alike() {
 }
 
 fn i32 main() {
+    write_runtime();
     every_flag_sets_its_own_option();
     index_implies_check_and_json();
     the_two_dumps_imply_nothing();

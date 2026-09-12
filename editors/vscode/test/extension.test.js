@@ -210,7 +210,7 @@ test('a note becomes related information of its error', () => {
   assert.equal(items[0].severity, ERROR);
   assert.equal(items[0].relatedInformation.length, 1);
   const related = items[0].relatedInformation[0];
-  assert.match(related.message, /the compiler declares it as/);
+  assert.match(related.message, /looked for/);
   assert.equal(related.location.uri.fsPath, NOTES_FT);
   assert.deepEqual(related.location.range, items[0].range);
 });

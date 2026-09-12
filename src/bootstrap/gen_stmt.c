@@ -69,7 +69,7 @@ static bool overwrite_checked(const gen_t* g, const type_t* t) {
 
 // The check itself (item 18): the current pointer word is loaded -- field 0
 // of a span or `string` header, the value itself for a pointer or `void*` --
-// and a non-null one branches to `fort_rt_fail_overwrite`, because the
+// and a non-null one branches to `std.rt.fail_overwrite`, because the
 // previous allocation would leak. `loc` is the `=` token (D11.4, D17.11).
 static void gen_overwrite_check(gen_t* g, gen_place_t target, loc_t loc) {
     const gen_val_t held =

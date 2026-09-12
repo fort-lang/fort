@@ -122,8 +122,10 @@ static void gen_print_arg(gen_t* g, ast_node_t* n, gen_val_t fd) {
         return;
     }
     if (is_bool(t)) {
-        // A `bool` is `zext`ed from `i1` to `i8` (item 19).
-        gen_args_add_ext(&args, gen_cast_op(g, "zext", v, str_from_cstr("i8")), "zeroext");
+        // `std.rt.print_bool` takes a fort `bool`, which is `i1 zeroext` at a
+        // call and `i8` only in memory, so the value passes as it stands
+        // (items 2, 7, 19).
+        gen_args_add_ext(&args, v, "zeroext");
         gen_call_rt(g, RT_PRINT_BOOL, &args);
         gen_args_free(&args);
         return;
@@ -258,7 +260,7 @@ static bool is_place_expr(const ast_node_t* n) {
 }
 
 // `del(x)` (item 17): the pointer is loaded (field 0 for a span or `string`),
-// `fort_rt_del` frees it, and an lvalue operand is emptied -- `store ptr null`
+// `std.rt.free` frees it, and an lvalue operand is emptied -- `store ptr null`
 // for a pointer, a 16-byte `llvm.memset` for a span or `string` (D17.9). A
 // null operand is a no-op in the runtime, so `del(null)` and `del` of a zero
 // span need no test of their own (D17.9). The emptying is not an assignment
@@ -297,7 +299,7 @@ static void gen_del(gen_t* g, ast_node_t* n) {
     gen_args_t args;
     gen_args_init(&args);
     gen_args_add(&args, p);
-    gen_call_rt(g, RT_DEL, &args);
+    gen_call_rt(g, RT_FREE, &args);
     gen_args_free(&args);
     if (!lvalue) {
         // On an rvalue nothing is stored (item 17).
@@ -336,7 +338,7 @@ static gen_val_t alloc_count(gen_t* g, ast_node_t* n, ast_node_t* count) {
     return v;
 }
 
-// `fort_rt_new(sizeof(T), count, loc)` (item 17): the runtime zeroes the
+// `std.rt.alloc(sizeof(T), count, loc)` (item 17): the runtime zeroes the
 // storage and never returns null, `n == 0` included (D10.2), and an
 // overflowing size or a failed allocation is its runtime error, so the module
 // emits no test of the result.
@@ -347,7 +349,7 @@ static gen_val_t alloc_call(gen_t* g, ast_node_t* n, const type_t* elem, gen_val
     gen_args_add(&args, gen_const_unsigned(g, i64ty, type_sizeof(elem)));
     gen_args_add(&args, count);
     gen_args_add_loc(g, &args, n->loc);
-    const gen_val_t p = gen_call_rt_value(g, RT_NEW, str_from_cstr("ptr"), &args);
+    const gen_val_t p = gen_call_rt_value(g, RT_ALLOC, str_from_cstr("ptr"), &args);
     gen_args_free(&args);
     return p;
 }
@@ -560,10 +562,10 @@ static gen_val_t gen_call(gen_t* g, ast_node_t* n, const gen_place_t* dst) {
         return none;
     }
     const bool is_extern = direct && s->kind == SYM_EXTERN_FN;
-    // An `extern fn` naming a runtime entry point takes that group's
-    // prototype, variadic tail included, so it is called through it and not
-    // through the variadic type of D9.8 (item 8).
-    const bool variadic = is_extern && rt_entry_of(s->name) == RT_COUNT;
+    // Every extern is declared and called through a variadic function type,
+    // which is what makes a fixed-prototype declaration of a variadic C
+    // function safe (D9.8, item 8).
+    const bool variadic = is_extern;
     if (is_extern) {
         gen_use_extern(g, s);
     }
@@ -690,7 +692,7 @@ static const char* overflow_name(gen_overflow_t which) {
 
 // One checked operation: the intrinsic, the two `extractvalue`s of the
 // `{iN, i1}` it returns, and the branch into a failure block that calls
-// fort_rt_fail_overflow (item 15, D19.6).
+// std.rt.fail_overflow (item 15, D19.6).
 static gen_val_t gen_checked(gen_t* g, gen_overflow_t which, gen_val_t a, gen_val_t b, loc_t loc) {
     sb_clear(&g->scratch);
     sb_append(&g->scratch, "{ ");
@@ -903,11 +905,12 @@ static gen_val_t gen_string_compare(gen_t* g, ast_node_t* n) {
     gen_args_add(&args, alen);
     gen_args_add(&args, bptr);
     gen_args_add(&args, blen);
-    // The entry point answers in a `u8`, which is `i8 zeroext` at the
-    // boundary and `i1` as a value (D9.9, D19.2).
-    const gen_val_t r = gen_call_rt_value(g, RT_STR_EQ, str_from_cstr("i8"), &args);
+    // The entry point is `fn bool str_eq(...)`, and a fort `bool` result is
+    // `zeroext i1` (items 2, 7), so the value needs no narrowing. The
+    // attribute is not decorative: a call site that states one the definition
+    // lacks changes what LLVM may assume of the result (D9.9).
+    const gen_val_t eq = gen_call_rt_value(g, RT_STR_EQ, str_from_cstr("i1"), &args);
     gen_args_free(&args);
-    const gen_val_t eq = gen_cast_op(g, "trunc", r, str_from_cstr("i1"));
     if (n->op == TOK_EQ) {
         return eq;
     }
@@ -1035,7 +1038,7 @@ gen_val_t gen_element_addr(gen_t* g, const type_t* t, gen_val_t base, gen_val_t 
 }
 
 // `e[i]` (D6.8): the index is extended to `i64`, one `icmp uge` branches to
-// fort_rt_fail_bounds, and the element is reached with the array or the
+// std.rt.fail_bounds, and the element is reached with the array or the
 // element shape of item 3.
 static gen_place_t gen_index_place(gen_t* g, ast_node_t* n) {
     gen_place_t out;

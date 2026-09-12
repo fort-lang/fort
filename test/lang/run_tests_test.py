@@ -1234,7 +1234,7 @@ class EndToEnd(TempRoot):
             //! run
             //! link: ffi/helpers.c
             //! stdout:
-            //| linked helpers.c fort_rt.o
+            //| linked helpers.c
             """,
         )
         write(
@@ -1624,7 +1624,6 @@ class EndToEnd(TempRoot):
                 "/tmp/w/prog",
                 "/tmp/w/prog.o",
                 str(self.corpus / "ffi/helpers.c"),
-                "/std/fort_rt.o",
             ],
         )
 
@@ -2266,6 +2265,29 @@ class GoldenIndexLint(unittest.TestCase):
             problems,
             ["run/modules/t/index.json:1: not spelled as the harness writes a record"],
         )
+
+    def test_the_golden_holds_the_records_of_the_test_and_not_the_library(self):
+        # Every closure holds std.rt and what it imports (D9.10), so an
+        # --index run over any test answers with the standard library's
+        # records too. Their file names are the --std-dir the run was given,
+        # which is a build directory and differs between machines, so the
+        # golden holds the records of the test's own files alone.
+        test = run_tests.Test("run/modules/t", "run/modules/t/main.ft", "run")
+        mine = self.record()
+        library = self.record(file="/vagrant/build/debug/std/libc.ft", name="O_RDONLY")
+        other = self.record(file="run/modules/u/main.ft")
+        kept = run_tests.index_of_the_test(test, [library, mine, other])
+        self.assertEqual(kept, [mine])
+
+    def test_the_golden_is_compared_against_the_filtered_index(self):
+        write(self.root, "run/modules/t/main.ft", "//! run\n")
+        (self.root / "run" / "modules" / "t" / run_tests.INDEX_NAME).write_text(
+            run_tests.render_index([self.record()]), encoding="utf-8"
+        )
+        test = run_tests.Test("run/modules/t", "run/modules/t/main.ft", "run")
+        library = self.record(file="/vagrant/build/debug/std/rt.ft", name="alloc")
+        problems = run_tests.golden_index_diff(test, [library, self.record()], self.root)
+        self.assertEqual(problems, [])
 
     def test_a_golden_beside_a_test_is_not_an_unexpected_file(self):
         write(self.root, "run/modules/t/main.ft", "//! run\n")

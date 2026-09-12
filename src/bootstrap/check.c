@@ -12,7 +12,6 @@
 #include "lexer.h"
 #include "modules.h"
 #include "prim.h"
-#include "runtime_sig.h"
 #include "scope.h"
 #include "str.h"
 #include "sym.h"
@@ -2907,97 +2906,6 @@ static const ast_node_t* param_at(const ast_node_t* decl, uint64_t k) {
     return decl;
 }
 
-// `note: the compiler declares it as 'declare void @fort_rt_del(ptr)'`: the
-// declaration the program conflicts with is the compiler's own, so the note
-// shows it rather than pointing at an earlier one, as the note of a conflict
-// between two modules does (module-system.md 13). A muted checker annotates
-// the tree without reporting (D20.2), so the note follows the error.
-static void note_runtime_declaration(check_t* ck, loc_t at, rt_entry_t rt) {
-    if (ck->mute) {
-        return;
-    }
-    sb_t decl;
-    sb_init(&decl);
-    rt_declaration(&decl, rt);
-    str_t text = sb_view(&decl);
-    if (text.len > 0 && text.ptr[text.len - 1] == '\n') {
-        // The rendering ends the line; a note is one line already.
-        text.len--;
-    }
-    msg_begin(&ck->msg);
-    msg_str(&ck->msg, "the compiler declares it as '");
-    msg_view(&ck->msg, text);
-    msg_str(&ck->msg, "'");
-    diag_note(at, msg_end(&ck->msg));
-    sb_free(&decl);
-}
-
-// `conflicting declarations of extern 'fort_rt_del': parameter 1 differs from
-// the runtime's`, in the wording module-system.md 13 gives the same conflict
-// between two modules. `param` is the 1-based parameter for the difference
-// that names one and 0 otherwise.
-static void error_runtime_conflict(
-    check_t* ck, loc_t at, str_t name, rt_entry_t rt, const char* what, uint64_t param) {
-    check_msg_begin(ck);
-    msg_str(&ck->msg, "conflicting declarations of extern ");
-    msg_quote(&ck->msg, name);
-    msg_str(&ck->msg, what);
-    if (param > 0) {
-        msg_uint(&ck->msg, param);
-        msg_str(&ck->msg, " differs");
-    }
-    msg_str(&ck->msg, " from the runtime's");
-    check_msg_end(ck, at);
-    note_runtime_declaration(ck, at, rt);
-}
-
-// An `extern fn` naming a runtime entry point must agree with the signature
-// toolchain.md 5.1 fixes for it. D9.8 requires the extern declarations of one
-// symbol to agree with each other, and the compiler's own declaration is one
-// of them: it replaces the user's with the canonical prototype (item 8), so a
-// mismatch reaches no tool below -- opaque pointers make a call site's type
-// independent of its callee's -- and is silently ABI-wrong. The standard
-// library declares these legitimately (D13.1), so what is refused is a
-// disagreement and never the declaration itself. Two signatures agree when
-// each type takes the same IR form, attribute included (D9.9), since that is
-// what the call the emitter writes is made of. Reports the first difference
-// only, at the piece of the declaration that carries it.
-static bool check_runtime_signature(check_t* ck,
-                                    const ast_node_t* decl,
-                                    str_t name,
-                                    const type_t* ret,
-                                    const type_t* const* params,
-                                    uint64_t nparams) {
-    const rt_entry_t rt = rt_entry_of(name);
-    if (rt == RT_COUNT) {
-        return true;
-    }
-    // A `noreturn` declaration of an entry point that returns claims more
-    // than is true and suppresses the missing-`return` analysis of D8.5, so
-    // the mark is part of the result; an entry point section 5.1 declares
-    // `_Noreturn` may be written `void`, which claims less and is safe by
-    // construction, since `gen_use_extern` stamps the `cold noreturn nounwind`
-    // group from the table and never from the user's spelling (item 14).
-    const bool noreturn = is_noreturn(decl->a);
-    if (ir_form_of_type(ret) != rt_entry_result(rt) || (noreturn && !rt_entry_noreturn(rt))) {
-        error_runtime_conflict(ck, decl->a->loc, name, rt, ": the result type differs", 0);
-        return false;
-    }
-    if (nparams != (uint64_t)rt_entry_param_count(rt)) {
-        error_runtime_conflict(
-            ck, decl->name_loc, name, rt, ": the number of parameters differs", 0);
-        return false;
-    }
-    for (uint64_t i = 0; i < nparams; i++) {
-        if (ir_form_of_type(params[i]) == rt_entry_param(rt, (uint32_t)i)) {
-            continue;
-        }
-        error_runtime_conflict(ck, param_at(decl, i)->loc, name, rt, ": parameter ", i + 1);
-        return false;
-    }
-    return true;
-}
-
 // ---- two extern declarations of one C symbol (D9.8) ------------------------------------
 
 // Whether a primitive is the byte C spells `unsigned char`: fort `char` is
@@ -3218,17 +3126,24 @@ static bool check_extern_agreement(check_t* ck, const ast_node_t* decl, const sy
     return true;
 }
 
-// The program entry point the compiler emits in the entry module (D11.6),
-// whose name an `extern` may not declare (D9.7).
+// The two unmangled definitions the compiler emits in the entry module
+// (D11.6), whose names an `extern` may not declare (D9.7).
 static const char ENTRY_SYMBOL[] = "fort_entry";
+static const char MAIN_SYMBOL[] = "main";
+
+// Whether the name is one of them.
+static bool is_reserved_c_name(str_t name) {
+    return str_eq(name, str_from_cstr(ENTRY_SYMBOL)) || str_eq(name, str_from_cstr(MAIN_SYMBOL));
+}
 
 static void resolve_fn(check_t* ck, sym_t* s) {
     ast_node_t* decl = (ast_node_t*)s->node;
     const bool is_extern = s->kind == SYM_EXTERN_FN;
-    if (is_extern && str_eq(s->name, str_from_cstr(ENTRY_SYMBOL))) {
-        // `fort_entry` is reserved: the compiler emits its definition, so an
-        // `extern` declaring it is not a second declaration of one C function
-        // but a signature nothing can check against that definition (D9.7).
+    if (is_extern && is_reserved_c_name(s->name)) {
+        // `fort_entry` and `main` are reserved: the compiler emits their
+        // definitions, so an `extern` declaring one is not a second
+        // declaration of one C function but a signature nothing can check
+        // against that definition (D9.7, D11.6).
         check_msg_begin(ck);
         msg_quote(&ck->msg, s->name);
         msg_str(&ck->msg, " is reserved: the compiler emits it");
@@ -3294,9 +3209,6 @@ static void resolve_fn(check_t* ck, sym_t* s) {
         check_msg_type(ck, ret.type);
         msg_str(&ck->msg, "'");
         check_msg_end(ck, decl->a->loc);
-        ok = false;
-    }
-    if (ok && is_extern && !check_runtime_signature(ck, decl, s->name, ret.type, params, n)) {
         ok = false;
     }
     if (!ok) {

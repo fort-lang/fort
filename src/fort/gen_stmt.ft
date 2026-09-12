@@ -101,7 +101,7 @@ fn bool overwrite_checked(gen.emitter* g, types.node* t) {
 
 // The check itself (item 18): the current pointer word is loaded -- field 0
 // of a span or `string` header, the value itself for a pointer or `void*` --
-// and a non-null one branches to `fort_rt_fail_overwrite`, because the
+// and a non-null one branches to `std.rt.fail_overwrite`, because the
 // previous allocation would leak. `at` is the `=` token (D11.4, D17.11).
 fn void gen_overwrite_check(gen.emitter mut* g, gen.gen_place target, diag.loc at) {
     gen.gen_val mut held = gen.gen_val{};
@@ -902,6 +902,11 @@ fn void definition_begin(gen.emitter mut* g) {
 // parameters, an aggregate is a plain `ptr`, and an aggregate result is a
 // leading `ptr sret(%T) %ret.sret` on a `void` function.
 fn void emit_signature(gen.emitter mut* g, ast.node* fn_node, ast.sym* s, types.node* sig) {
+    // Whether this definition is a `noreturn` entry point of toolchain.md
+    // 5.1, read off the mangled name (D9.7), so that only the module the
+    // entry point lives in can carry the attribute group of item 14.
+    runtime_sig.rt_entry rt = runtime_sig.rt_entry_of(gen.gen_symbol(g, s));
+    bool rt_noreturn = rt != runtime_sig.rt_entry.rt_none && runtime_sig.rt_entry_noreturn(rt);
     definition_begin(g);
     strbuf.append(&g->funcs, "define dso_local ");
     string ret_attr = gen.gen_ext_attr(sig->elem);
@@ -949,8 +954,14 @@ fn void emit_signature(gen.emitter mut* g, ast.node* fn_node, ast.sym* s, types.
         i += 1;
     }
     strbuf.push(&g->funcs, ')');
-    // `#0` on every fort definition, `#1` when it is `noreturn` (items 7, 20).
-    if (sig->is_noreturn) {
+    // `#0` on every fort definition, `#1` when it is `noreturn`, and `#8`,
+    // which is `#1` plus `cold`, on the definition of a `noreturn` entry
+    // point of toolchain.md 5.1 and on no other fort function (items 7, 14,
+    // 20).
+    if (sig->is_noreturn && rt_noreturn) {
+        gen.gen_use_attr(g, gen.ATTR_RT_NORET);
+        strbuf.append(&g->funcs, " #8 {\n");
+    } else if (sig->is_noreturn) {
         gen.gen_use_attr(g, gen.ATTR_FN_NORET);
         strbuf.append(&g->funcs, " #1 {\n");
     } else {
@@ -1107,7 +1118,7 @@ fn void gen_fort_entry(gen.emitter mut* g, ast.sym* main_sym) {
     defer gen.gen_args_free(&args);
     if (main_sym->ty->params.len == 1) {
         // It copies the span into its own frame when `main` declares the
-        // parameter, because its caller is the C runtime (item 22).
+        // parameter, because its caller is the `main` of item 22.
         gen.gen_val mut slot = gen.gen_val{};
         slot.ty = "ptr";
         slot.val = "%args.0";
@@ -1134,6 +1145,57 @@ fn void gen_fort_entry(gen.emitter mut* g, ast.sym* main_sym) {
     function_end(g);
 }
 
+// ---- main (item 22, D11.6) --------------------------------------------------------
+
+// The byte the process status keeps, which is D11.6's `status & 0xFF`.
+u64 STATUS_MASK = 255;
+
+// `@main` is the C entry point the start-up code calls, so it takes C's
+// `argc` and `argv` and returns C's `int`. It is a definition of this module
+// like any other and carries `dso_local` and `#0` (items 4, 7, 22). It calls
+// `std.rt.args_init`, then `std.rt.args`, which builds the span it hands to
+// `fort_entry`, then `std.rt.flush_all`, and returns the status masked to one
+// byte (D11.6). `args_init` runs first, since `args` hands out what it built.
+fn void gen_main(gen.emitter mut* g) {
+    function_begin(g);
+    gen.gen_use_attr(g, gen.ATTR_FN);
+    definition_begin(g);
+    strbuf.append(&g->funcs, "define dso_local i32 @main(i32 %argc, ptr %argv) #0 {\n");
+    // The argument span is an entry-block alloca like every other place
+    // (item 10); its name embeds no fort identifier, `main` being the
+    // compiler's own definition and not a fort function (D19.5).
+    gen.gen_val mut span = gen.gen_val{};
+    span.ty = "ptr";
+    span.val = "%args";
+    strbuf.append(&g->allocas, "  %args = alloca ");
+    strbuf.append(&g->allocas, gen.SPAN_TYPE);
+    strbuf.append(&g->allocas, ", align ");
+    strbuf.append_u64(&g->allocas, gen.SPAN_ALIGN);
+    strbuf.push(&g->allocas, '\n');
+    gen.gen_args mut init_args = gen.gen_args_init();
+    gen.gen_args_add(&init_args, gen.gen_literal(g, "i32", "%argc"));
+    gen.gen_args_add(&init_args, gen.gen_literal(g, "ptr", "%argv"));
+    gen.gen_call_rt(g, runtime_sig.rt_entry.rt_args_init, &init_args);
+    gen.gen_args_free(&init_args);
+    // `std.rt.args` returns an aggregate, so it takes the destination as the
+    // hidden result pointer of item 7, a plain `ptr` at the call site (D9.9).
+    gen.gen_args mut args_args = gen.gen_args_init();
+    gen.gen_args_add(&args_args, span);
+    gen.gen_call_rt(g, runtime_sig.rt_entry.rt_args, &args_args);
+    gen.gen_args_free(&args_args);
+    gen.gen_val status = gen.gen_temp(g, "i32");
+    strbuf.append(&g->body, "call i32 @fort_entry(ptr %args)\n");
+    gen.gen_args mut flush_args = gen.gen_args_init();
+    gen.gen_call_rt(g, runtime_sig.rt_entry.rt_flush_all, &flush_args);
+    gen.gen_args_free(&flush_args);
+    gen.gen_val masked =
+        gen.gen_binary(g, "and", status, gen.gen_const_unsigned(g, "i32", STATUS_MASK));
+    strbuf.append(&g->body, "  ret i32 ");
+    strbuf.append(&g->body, masked.val);
+    strbuf.push(&g->body, '\n');
+    function_end(g);
+}
+
 // ---- the module (item 1) ----------------------------------------------------------
 
 // The named type of every struct the module declares, in source order, so
@@ -1152,7 +1214,14 @@ fn void gen_struct_type(gen.emitter mut* g, ast.node* decl) {
     if (s == null || s->error || s->ty == null || s->ty->kind != types.type_kind.k_struct) {
         return;
     }
-    strbuf.append(&g->named, gen.gen_mem_type(g, s->ty));
+    string named = gen.gen_mem_type(g, s->ty);
+    if (named == gen.ENUM_MEMBER_TYPE) {
+        // `std.rt`'s `struct enum_member` is the `%fort.enum_member` every
+        // module already carries, so its declaration is written once and in
+        // the header rather than twice (item 2).
+        return;
+    }
+    strbuf.append(&g->named, named);
     strbuf.append(&g->named, " = type { ");
     u64 mut written = 0;
     u64 mut i = 0;
@@ -1241,8 +1310,11 @@ fn bool gen_program(gen.emitter mut* g, check.checker* ck, modules.module_set* s
             if (decl->kind == ast.ast_kind.k_fn_decl && decl->sym != null && !decl->sym->error &&
                 decl->sym->ty != null && decl->sym->ty->kind == types.type_kind.k_fn &&
                 decl->sym->name == "main") {
-                // `fort_entry` is emitted in the entry module (D11.6).
+                // `fort_entry` and `main` are emitted in the entry module
+                // and are the only unmangled definitions in it (D11.6,
+                // item 22).
                 gen_fort_entry(g, decl->sym);
+                gen_main(g);
             }
             i += 1;
         }

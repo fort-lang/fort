@@ -296,7 +296,6 @@ TEST(the_defaults_are_the_ones_the_header_names, {
     TEST_ASSERT_EQ_STR(FORT_DEFAULT_CC, "clang");
     TEST_ASSERT_EQ_STR(FORT_DEFAULT_TARGET, "x86_64-linux-gnu");
     TEST_ASSERT_EQ_STR(FORT_DEFAULT_OUTPUT, "a.out");
-    TEST_ASSERT_EQ_STR(FORT_RUNTIME_OBJECT, "fort_rt.o");
 })
 
 TEST(every_flag_sets_its_option, {
@@ -516,7 +515,7 @@ static void build_argv(char** command, char* buf, size_t size) {
     str_pool_t pool;
     str_pool_init(&pool);
     if (parse(&opts, command, &run) == DRIVER_PARSE_OK) {
-        driver_cc_argv(&opts, "/tmp/t/main.ll", "prog", "/std", &pool, &argv);
+        driver_cc_argv(&opts, "/tmp/t/main.ll", "prog", &pool, &argv);
         argv_lines(&argv, buf, size);
     } else {
         TEST_UNUSED(snprintf(buf, size, "parse error: %s", run.err));
@@ -540,8 +539,7 @@ TEST(the_checked_invocation_is_the_line_of_toolchain_2, {
                        "-Wno-override-module\n"
                        "-o\n"
                        "prog\n"
-                       "/tmp/t/main.ll\n"
-                       "/std/fort_rt.o\n");
+                       "/tmp/t/main.ll\n");
 })
 
 TEST(release_compiles_the_module_with_o2, {
@@ -572,7 +570,6 @@ TEST(libraries_then_cc_arguments_close_the_line, {
                        "-o\n"
                        "prog\n"
                        "/tmp/t/main.ll\n"
-                       "/std/fort_rt.o\n"
                        "-lm\n"
                        "-lz\n"
                        "-fuse-ld=lld\n"
@@ -606,7 +603,7 @@ TEST(the_module_is_never_introduced_by_x_ir, {
 TEST(a_checked_build_spawns_the_invocation_and_removes_the_temporary, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    const run_t run = RUN("--cc", FORT_FAKE_CC, "--std-dir", "/std", "-o", box.out, box.entry);
+    const run_t run = RUN("--cc", FORT_FAKE_CC, "-o", box.out, box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     TEST_ASSERT_EQ_SIZE(strlen(run.err), (size_t)0);
     cc_log_t log;
@@ -622,8 +619,7 @@ TEST(a_checked_build_spawns_the_invocation_and_removes_the_temporary, {
             "-Wno-override-module\n"
             "-o\n"
             "%s\n"
-            "<tmp>/main.ll\n"
-            "/std/fort_rt.o\n",
+            "<tmp>/main.ll\n",
             FORT_FAKE_CC,
             box.out);
     TEST_ASSERT_EQ_STR(log.joined, expected);
@@ -646,8 +642,6 @@ TEST(a_release_build_passes_o2_the_target_the_libraries_and_the_cc_arguments, {
                           FORT_FAKE_CC,
                           "--target",
                           "x86_64-linux-musl",
-                          "--std-dir",
-                          "/std",
                           "-lm",
                           "-Xcc",
                           "-fuse-ld=lld",
@@ -669,7 +663,6 @@ TEST(a_release_build_passes_o2_the_target_the_libraries_and_the_cc_arguments, {
             "-o\n"
             "%s\n"
             "<tmp>/main.ll\n"
-            "/std/fort_rt.o\n"
             "-lm\n"
             "-fuse-ld=lld\n",
             FORT_FAKE_CC,
@@ -682,8 +675,7 @@ TEST(a_release_build_passes_o2_the_target_the_libraries_and_the_cc_arguments, {
 TEST(compile_only_stops_at_the_object_and_names_it_after_the_entry, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    const run_t run =
-        RUN("-c", "--cc", FORT_FAKE_CC, "--std-dir", "/std", "-o", box.out, box.entry);
+    const run_t run = RUN("-c", "--cc", FORT_FAKE_CC, "-o", box.out, box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     cc_log_t log;
     TEST_ASSERT_TRUE(cc_log_load(box.log, &log));
@@ -706,16 +698,18 @@ TEST(compile_only_stops_at_the_object_and_names_it_after_the_entry, {
     sandbox_close(&box);
 })
 
-TEST(the_std_dir_environment_variable_locates_the_runtime_object, {
+TEST(the_std_dir_environment_variable_locates_the_runtime_source, {
+    // The standard library directory is where the compiler reads `std.rt`
+    // from, and every closure holds it (D9.10, D13.1), so a directory with no
+    // `rt.ft` in it stops the compilation before `--cc` runs.
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
     TEST_UNUSED(setenv("FORT_STD_DIR", "/env/std", 1));
-    const run_t run = RUN("--cc", FORT_FAKE_CC, "-o", box.out, box.entry);
+    const run_t run = RUN_CAPTURED("--cc", FORT_FAKE_CC, "-o", box.out, box.entry);
     TEST_UNUSED(unsetenv("FORT_STD_DIR"));
-    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
-    cc_log_t log;
-    TEST_ASSERT_TRUE(cc_log_load(box.log, &log));
-    TEST_ASSERT_NONNULL(strstr(log.joined, "\n/env/std/fort_rt.o\n"));
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
+    TEST_ASSERT_NONNULL(strstr(last_diags, "cannot read '/env/std/rt.ft'"));
+    TEST_ASSERT_EQ_INT32(access(box.log, F_OK), -1);
     sandbox_close(&box);
 })
 
@@ -754,7 +748,7 @@ TEST(a_failing_compiler_is_exit_2_and_still_removes_the_temporary, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
     TEST_UNUSED(setenv("FORT_FAKE_CC_STATUS", "3", 1));
-    const run_t run = RUN("--cc", FORT_FAKE_CC, "--std-dir", "/std", "-o", box.out, box.entry);
+    const run_t run = RUN("--cc", FORT_FAKE_CC, "-o", box.out, box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_USAGE);
     TEST_ASSERT_EQ_STR(run.err, "fort: error: cc failed with status 3\n");
     cc_log_t log;
@@ -768,7 +762,7 @@ TEST(a_compiler_killed_by_a_signal_is_exit_2_and_says_so, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
     TEST_UNUSED(setenv("FORT_FAKE_CC_SIGNAL", "TERM", 1));
-    const run_t run = RUN("--cc", FORT_FAKE_CC, "--std-dir", "/std", "-o", box.out, box.entry);
+    const run_t run = RUN("--cc", FORT_FAKE_CC, "-o", box.out, box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_USAGE);
     char expected[CAPTURE_MAX];
     TEST_UNUSED(
@@ -785,7 +779,7 @@ TEST(an_empty_tmpdir_variable_counts_as_unset, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
     TEST_UNUSED(setenv("TMPDIR", "", 1));
-    const run_t run = RUN("--cc", FORT_FAKE_CC, "--std-dir", "/std", "-o", box.out, box.entry);
+    const run_t run = RUN("--cc", FORT_FAKE_CC, "-o", box.out, box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     cc_log_t log;
     TEST_ASSERT_TRUE(cc_log_load(box.log, &log));
@@ -807,7 +801,7 @@ TEST(an_entry_without_the_ft_suffix_keeps_its_whole_name, {
     // A base name with no suffix at all keeps its whole self (toolchain.md
     // 2); that only a `.ft` suffix is dropped is the test above, since every
     // other suffix carries a `.`, which an entry may not (D9.1).
-    const run_t run = RUN("--cc", FORT_FAKE_CC, "--std-dir", "/std", "-o", box.out, entry);
+    const run_t run = RUN("--cc", FORT_FAKE_CC, "-o", box.out, entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     cc_log_t log;
     TEST_ASSERT_TRUE(cc_log_load_named(box.log, &log, "/prog.ll"));
@@ -822,8 +816,7 @@ TEST(an_entry_without_the_ft_suffix_keeps_its_whole_name, {
             "-Wno-override-module\n"
             "-o\n"
             "%s\n"
-            "<tmp>/prog.ll\n"
-            "/std/fort_rt.o\n",
+            "<tmp>/prog.ll\n",
             FORT_FAKE_CC,
             box.out);
     TEST_ASSERT_EQ_STR(log.joined, expected);
@@ -873,8 +866,7 @@ TEST(the_default_module_of_an_entry_without_a_suffix_keeps_its_whole_name, {
 TEST(a_compiler_that_cannot_be_run_is_exit_2, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    const run_t run =
-        RUN("--cc", "/nonexistent/clang", "--std-dir", "/std", "-o", box.out, box.entry);
+    const run_t run = RUN("--cc", "/nonexistent/clang", "-o", box.out, box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_USAGE);
     TEST_ASSERT_EQ_STR(run.err,
                        "fort: error: cannot run '/nonexistent/clang': "
@@ -906,7 +898,7 @@ TEST(the_object_of_c_is_named_after_the_entry_in_the_current_directory, {
     TEST_ASSERT_TRUE(box.ok);
     // The entry lives in the sandbox, but the default output is placed in the
     // current directory as cc does (toolchain.md 1).
-    const run_t run = RUN("-c", "--cc", FORT_FAKE_CC, "--std-dir", "/std", box.entry);
+    const run_t run = RUN("-c", "--cc", FORT_FAKE_CC, box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     cc_log_t log;
     TEST_ASSERT_TRUE(cc_log_load(box.log, &log));
@@ -931,7 +923,7 @@ TEST(without_tmpdir_the_temporary_goes_under_slash_tmp, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
     TEST_UNUSED(unsetenv("TMPDIR"));
-    const run_t run = RUN("--cc", FORT_FAKE_CC, "--std-dir", "/std", "-o", box.out, box.entry);
+    const run_t run = RUN("--cc", FORT_FAKE_CC, "-o", box.out, box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     cc_log_t log;
     TEST_ASSERT_TRUE(cc_log_load(box.log, &log));
@@ -1114,7 +1106,7 @@ int main(int argc, char** argv) {
     TEST_RUN(a_checked_build_spawns_the_invocation_and_removes_the_temporary);
     TEST_RUN(a_release_build_passes_o2_the_target_the_libraries_and_the_cc_arguments);
     TEST_RUN(compile_only_stops_at_the_object_and_names_it_after_the_entry);
-    TEST_RUN(the_std_dir_environment_variable_locates_the_runtime_object);
+    TEST_RUN(the_std_dir_environment_variable_locates_the_runtime_source);
     TEST_RUN(emitting_the_module_stops_before_the_compiler);
     TEST_RUN(the_default_module_is_named_after_the_entry_in_the_current_directory);
     TEST_RUN(a_failing_compiler_is_exit_2_and_still_removes_the_temporary);

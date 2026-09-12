@@ -133,7 +133,7 @@ class MainTest(unittest.TestCase):
 
     def test_the_default_globs_cover_the_c_sources(self):
         self.write("src/bootstrap/a.c", "/* no */\n")
-        self.write("runtime/b.h", "/* no */\n")
+        self.write("src/bootstrap/b.h", "/* no */\n")
         self.write("test/c_test.c", "/* no */\n")
         self.write("test/lang/ffi/helpers.c", "/* no */\n")
         self.write("test/lang/run/x.ft", "/* not a C source */\n")
@@ -144,8 +144,8 @@ class MainTest(unittest.TestCase):
         self.assertEqual(
             reported,
             [
-                "runtime/b.h",
                 "src/bootstrap/a.c",
+                "src/bootstrap/b.h",
                 "test/c_test.c",
                 "test/lang/ffi/helpers.c",
             ],

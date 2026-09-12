@@ -30,9 +30,9 @@ import std.rt;
 // modes (D11.2), so the second line below is where the two modes would
 // differ.
 //
-// The compiler still lowers a print to the C runtime (D12.2). Each line here
-// therefore holds one value written by both runtimes, as run/stdlib/067
-// does.
+// The compiler lowers a print to an entry point of this module (D12.2), so
+// each line here holds one value written twice: through the builtin, then
+// through the entry point beside it, as run/stdlib/067 does.
 enum color {
     red,
     blue = 2,
@@ -42,7 +42,7 @@ rt.enum_member[2] mut table = {};
 
 fn void both_i64(i64 v) {
     print(v, " ");
-    rt.fort_rt_flush(1);
+    rt.flush(1);
     rt.print_i64(1, v);
     rt.print_char(1, '\n');
     rt.flush(1);
@@ -50,7 +50,7 @@ fn void both_i64(i64 v) {
 
 fn void both_u64(u64 v) {
     print(v, " ");
-    rt.fort_rt_flush(1);
+    rt.flush(1);
     rt.print_u64(1, v);
     rt.print_char(1, '\n');
     rt.flush(1);
@@ -58,7 +58,7 @@ fn void both_u64(u64 v) {
 
 fn void both_bool(bool v) {
     print(v, " ");
-    rt.fort_rt_flush(1);
+    rt.flush(1);
     rt.print_bool(1, v);
     rt.print_char(1, '\n');
     rt.flush(1);
@@ -66,7 +66,7 @@ fn void both_bool(bool v) {
 
 fn void both_eq(string a, string b) {
     print(a == b, " ");
-    rt.fort_rt_flush(1);
+    rt.flush(1);
     rt.print_bool(1, rt.str_eq(a.ptr, a.len, b.ptr, b.len));
     rt.print_char(1, '\n');
     rt.flush(1);
@@ -83,34 +83,34 @@ fn i32 main(string@ argv) {
     both_bool(false);
 
     // print_enum reads a table and not a check, so the mode changes nothing
-    // here either. The C runtime gets the compiler's own table for the same
+    // here either. The builtin passes the compiler's own table for the same
     // value (D11.7, D7.7).
     table[0].value = cast(color.red, i32);
     table[0].name = "red".ptr;
     table[1].value = cast(color.blue, i32);
     table[1].name = "blue".ptr;
     print(color.blue, " ");
-    rt.fort_rt_flush(1);
+    rt.flush(1);
     rt.print_enum(1, cast(color.blue, i32), &table[0], 2);
     rt.print_char(1, '\n');
     rt.flush(1);
 
     print('~', " ");
-    rt.fort_rt_flush(1);
+    rt.flush(1);
     rt.print_char(1, '~');
     rt.print_char(1, '\n');
     rt.flush(1);
 
     void* p = cast(u64_max, void*);
     print(p, " ");
-    rt.fort_rt_flush(1);
+    rt.flush(1);
     rt.print_ptr(1, p);
     rt.print_char(1, '\n');
     rt.flush(1);
 
     string greeting = "hello";
     print(greeting, " ");
-    rt.fort_rt_flush(1);
+    rt.flush(1);
     rt.print_str(1, greeting.ptr, greeting.len);
     rt.print_char(1, '\n');
     rt.flush(1);
@@ -148,9 +148,10 @@ fn i32 main(string@ argv) {
     println(mine.len, " ", mine.len == argv.len, " ", mine[1] == argv[1]);
 
     // The buffer still holds bytes back until something flushes it, and
-    // print_str of nothing still writes nothing. Each runtime buffers fd 1 on
-    // its own (D11.5), so the C buffer goes out first.
-    rt.fort_rt_flush(1);
+    // print_str of nothing still writes nothing. Both the builtin above and
+    // the calls below write into the one buffer of fd 1, so this flush is
+    // what puts the line above before the bytes below (D11.5).
+    rt.flush(1);
     rt.print_str(1, greeting.ptr, 0);
     rt.print_str(1, "buffered\n".ptr, 9);
     rt.flush_all();

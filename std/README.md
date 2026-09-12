@@ -11,13 +11,14 @@ of the library calls),
 `std.io` (descriptors, whole files and streams) are written; `std.math` arrives with ticket
 T-042.
 
-Two runtimes are live until T-091 retargets the compiler's builtins. A `print`, a `new` and a
-`panic` still call `runtime/fort_rt.c`. So `std.rt` also declares the five `fort_rt_*` entry points
-that `std.sys` and `std.io` reach it through, and each test under `test/lang/run/stdlib` calls a
-fort entry point beside its C counterpart and compares the two. T-091 deletes the C file, those
-declarations and that comparison.
+`std.rt` is the only runtime there is. A `print`, a `new` and a `panic` are calls to its entry
+points, which the compiler emits by their mangled names (D9.7, D12.2), and the module declares no
+C symbol of its own: what it needs of the operating system it reaches through `std.libc`. Every
+import closure holds it, so every program carries it (D9.10). The tests under
+`test/lang/run/stdlib` call an entry point directly beside the builtin the compiler lowers to it,
+which is what holds the lowering to the text D11.7 and D11.4 fix.
 
-The build copies `std/*.ft` next to the runtime object into `build/<preset>/std/`, which the
+The build copies `std/*.ft` into `build/<preset>/std/`, which the
 compiler uses as its fallback `--std-dir` (`notes/toolchain.md` sections 1 and 2), so a new module
 is visible to `test/lang/run_tests.py` only after `tools/vm build <preset>` has copied it. The
 language tests of the library are `test/lang/run/stdlib/`.

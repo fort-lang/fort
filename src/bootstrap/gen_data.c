@@ -44,12 +44,16 @@ static const char* const OVERFLOW_WIDTH[GEN_OVF_WIDTHS] = {"i8", "i16", "i32", "
 static const char* const ATTR_TEXT[ATTR_COUNT] = {
     "nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"",
     "noreturn nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"",
+    // `#2` is never emitted: it held `cold noreturn nounwind` on the C
+    // runtime's declarations, which item 8 no longer produces. The index stays
+    // so that `#3` to `#7` keep the numbers item 14 fixes for them (D19.5).
     "cold noreturn nounwind",
     "nobuiltin",
     "nocallback nofree nosync nounwind speculatable willreturn memory(none)",
     "nocallback nofree nounwind willreturn memory(argmem: readwrite)",
     "nocallback nofree nounwind willreturn memory(argmem: write)",
     "cold noreturn nounwind memory(inaccessiblemem: write)",
+    "cold noreturn nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"",
 };
 
 // The first byte that needs no `\XX` escape and the last: a string constant
@@ -281,7 +285,7 @@ static void emit_data(gen_t* g, sb_t* out) {
             at++;
         }
         // `%fort.enum_member` has C's 16-byte layout, so the table matches
-        // struct fort_rt_enum_member (item 21).
+        // std.rt's struct enum_member (item 21).
         sb_append(out, "], align 8\n");
     }
 }
@@ -548,16 +552,6 @@ void gen_global(gen_t* g, const ast_node_t* decl) {
 
 void gen_use_extern(gen_t* g, const sym_t* s) {
     const str_t name = s->name;
-    const rt_entry_t rt = rt_entry_of(name);
-    if (rt != RT_COUNT) {
-        // An `extern fn` naming a runtime entry point is declared in the
-        // runtime group with that group's prototype, once (item 8).
-        g->rt[rt] = true;
-        if (rt_entry_noreturn(rt)) {
-            gen_use_attr(g, ATTR_FAIL);
-        }
-        return;
-    }
     for (uint64_t i = 0; i < g->externs.len; i++) {
         // A symbol is declared exactly once (item 8), and what the linker
         // sees is the C name: two modules of one program may each declare the
@@ -641,16 +635,12 @@ static void emit_intrinsic(sb_t* out, uint64_t which) {
 
 // ---- calls to the runtime (item 8) ------------------------------------------------
 
-// Marks an entry point used and appends `@fort_rt_x(<args>)`.
+// Appends `@"std.rt.x"(<args>)`. A call into the runtime is an ordinary
+// fort-to-fort call by the mangled name of D9.7, quoted like every other
+// dotted name, and no attribute stands on it (items 4, 8, 14).
 static void call_rt_tail(gen_t* g, rt_entry_t rt, const gen_args_t* args) {
-    g->rt[rt] = true;
-    if (rt_entry_noreturn(rt)) {
-        // A `_Noreturn` entry point is declared `cold noreturn nounwind`
-        // (item 14, section 5).
-        gen_use_attr(g, ATTR_FAIL);
-    }
     gen_text_append(g, "@");
-    gen_text_append(g, rt_entry_name(rt));
+    gen_append_name(&g->body, "", str_from_cstr(rt_entry_name(rt)), true);
     gen_text_append(g, "(");
     gen_text_append_str(g, sb_view(&args->text));
     gen_text_append(g, ")");
@@ -708,14 +698,6 @@ void gen_finish(gen_t* g) {
         }
         emit_extern(g, &externs, s);
     }
-    sb_t runtime;
-    sb_init(&runtime);
-    // Then the runtime entry points in the order of toolchain.md 5.1.
-    for (uint64_t i = 0; i < (uint64_t)RT_COUNT; i++) {
-        if (g->rt[i]) {
-            rt_declaration(&runtime, (rt_entry_t)i);
-        }
-    }
     sb_t intrinsics;
     sb_init(&intrinsics);
     // Then the intrinsics in the fixed table order.
@@ -743,12 +725,10 @@ void gen_finish(gen_t* g) {
     section(&g->out, sb_view(&g->funcs));
     section(&g->out, sb_view(&data));
     section(&g->out, sb_view(&externs));
-    section(&g->out, sb_view(&runtime));
     section(&g->out, sb_view(&intrinsics));
     section(&g->out, sb_view(&attributes));
     sb_free(&data);
     sb_free(&externs);
-    sb_free(&runtime);
     sb_free(&intrinsics);
     sb_free(&attributes);
 }

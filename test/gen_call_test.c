@@ -373,8 +373,8 @@ TEST(printing_a_function_pointer_reaches_the_pointer_printer, {
     TEST_ASSERT_TRUE(emit("fn i32 a(i32 x) { return x; }\n"
                           "fn i32 main() { fn i32(i32) f = a; println(f); return 0; }\n"));
     // A pointer, `void*` or function pointer goes to `_ptr` (item 19).
-    TEST_ASSERT_EQ_STR(found("call void @fort_rt_print_ptr(i32 1, ptr %t0)"),
-                       "call void @fort_rt_print_ptr(i32 1, ptr %t0)");
+    TEST_ASSERT_EQ_STR(found("call void @\"std.rt.print_ptr\"(i32 1, ptr %t0)"),
+                       "call void @\"std.rt.print_ptr\"(i32 1, ptr %t0)");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 

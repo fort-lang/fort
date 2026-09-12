@@ -143,8 +143,24 @@ static inline void root(const char* rel) {
     module_set_add_root(&set, in_sandbox(rel));
 }
 
-// Names the standard library directory, as `--std-dir` does (D14.1).
+// The runtime file a standard library directory must hold: every closure
+// holds `std.rt`, which the loader reads from `<std-dir>/rt.ft` (D9.10,
+// D13.1). The tests below care about the loader and not about the runtime, so
+// the file is empty.
+static const char SANDBOX_RUNTIME[] = "// The empty runtime of a loader test.\n";
+
+// Names the standard library directory, as `--std-dir` does (D14.1), and puts
+// the runtime in it.
 static inline void std_dir(const char* rel) {
+    char path[PATH_CAP];
+    join_sandbox_path(path, sizeof path, rel, "rt.ft");
+    add(path, SANDBOX_RUNTIME);
+    module_set_std_dir(&set, in_sandbox(rel));
+}
+
+// Names a standard library directory and puts no runtime in it, which is what
+// a directory the compiler cannot read `std.rt` from is.
+static inline void std_dir_without_runtime(const char* rel) {
     module_set_std_dir(&set, in_sandbox(rel));
 }
 

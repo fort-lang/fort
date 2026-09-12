@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Count test lines per source line (notes/toolchain.md 7.6, D14.6).
 
-Source lines are src/bootstrap/*.c and *.h, src/fort/*.ft, std/*.ft and
-runtime/*.c and *.h; test lines are test/*.c, test/*.h, test/**/*.ft and
-test/lang/ffi/*.c. The standard library and the runtime are on the source side
-because they are hand-written code the project ships and must test, and
-crediting them to the tests would raise the ratio for writing library code
-while test/runtime_test.c already counted as tests (D14.6, amended by T-076).
-The editor extension is still on neither side. The target ratio is 3:1; --min
-fails the run when the ratio is below the given value.
+Source lines are src/bootstrap/*.c and *.h, src/fort/*.ft and std/*.ft; test
+lines are test/*.c, test/*.h, test/**/*.ft and test/lang/ffi/*.c. The standard
+library is on the source side because it is hand-written code the project
+ships and must test, and crediting it to the tests would raise the ratio for
+writing library code (D14.6, amended by T-076). The runtime counts with it:
+the runtime is std.rt, an ordinary module of std/*.ft, since T-091 deleted
+runtime/fort_rt.c and the glob that named it (D13.1, D14.6 as T-088 amends
+it). The editor extension is still on neither side. The target ratio is 3:1;
+--min fails the run when the ratio is below the given value.
 
 --since REF measures a branch instead of the repository: it counts the lines
 a diff against REF adds and removes on each side, so a ticket answers for the
@@ -27,8 +28,6 @@ SOURCE_GLOBS = (
     "src/bootstrap/*.h",
     "src/fort/*.ft",
     "std/*.ft",
-    "runtime/*.c",
-    "runtime/*.h",
 )
 TEST_GLOBS = ("test/*.c", "test/*.h", "test/**/*.ft", "test/lang/ffi/*.c")
 TARGET_RATIO = 3.0

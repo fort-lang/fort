@@ -55,10 +55,6 @@ enum {
 #define FORT_DEFAULT_OUTPUT "a.out"
 #define FORT_STD_DIR_NAME "std"
 
-// The C runtime object linked into every program, inside <std-dir>
-// (toolchain.md 2).
-#define FORT_RUNTIME_OBJECT "fort_rt.o"
-
 // The command line after parsing (toolchain.md 1). Every pointer borrows an
 // argv string or a literal above; the three vectors hold `char*` argv
 // strings in command-line order and own only their slots.
@@ -129,7 +125,6 @@ str_t driver_std_dir(const driver_options_t* opts, const char* argv0, str_pool_t
 void driver_cc_argv(const driver_options_t* opts,
                     const char* ir_path,
                     const char* out_path,
-                    const char* std_dir,
                     str_pool_t* pool,
                     ptrvec_t* argv);
 

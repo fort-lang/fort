@@ -416,108 +416,63 @@ TEST(an_extern_may_not_declare_the_program_entry_point, {
                                "fn i32 main() {\n    return fort_entry();\n}\n"));
 })
 
-TEST(an_extern_of_a_runtime_entry_point_must_match_its_canonical_signature, {
-    // D9.8 requires the extern declarations of one symbol to agree, and the
-    // compiler's own is one of them: it replaces the user's with the
-    // prototype of toolchain.md 5.1 (item 8), so a mismatch reaches no tool
-    // below the compiler and is silently ABI-wrong. A wrong parameter type, a
-    // wrong arity and a wrong result each conflict.
-    TEST_ASSERT_FALSE(check_src("extern fn void fort_rt_del(i32 wrong);\n"
-                                "fn i32 main() {\n    fort_rt_del(5);\n    return 0;\n}\n"));
-    TEST_ASSERT_TRUE(said("conflicting declarations of extern 'fort_rt_del': parameter 1 differs"));
-    // The declaration in conflict is the compiler's own, so the note shows it
-    // rather than pointing at an earlier declaration (module-system.md 13).
-    TEST_ASSERT_TRUE(said("note: the compiler declares it as 'declare void @fort_rt_del(ptr)'"));
-    TEST_ASSERT_FALSE(check_src("extern fn void fort_rt_flush(i32 fd, i32 extra);\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
-    TEST_ASSERT_TRUE(said("conflicting declarations of extern 'fort_rt_flush': the number of "
-                          "parameters differs"));
-    TEST_ASSERT_FALSE(check_src("extern fn i32 fort_rt_flush(i32 fd);\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
-    TEST_ASSERT_TRUE(
-        said("conflicting declarations of extern 'fort_rt_flush': the result type differs"));
-})
-
-TEST(the_position_of_a_runtime_signature_conflict_is_the_piece_that_differs, {
-    // Every diagnostic carries a position (D14.2), and the one worth giving
-    // is the type that disagrees rather than the declaration as a whole: the
-    // parameter for a parameter, the written result type for a result, and
-    // the name for an arity, which no single type carries.
-    TEST_ASSERT_FALSE(check_src("extern fn void fort_rt_flush(i64 fd);\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
-    TEST_ASSERT_TRUE(said("main.ft:1:30: error: conflicting declarations"));
-    TEST_ASSERT_FALSE(check_src("extern fn i32 fort_rt_flush(i32 fd);\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
-    TEST_ASSERT_TRUE(said("main.ft:1:11: error: conflicting declarations"));
-    TEST_ASSERT_FALSE(check_src("extern fn void fort_rt_flush();\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
-    TEST_ASSERT_TRUE(said("main.ft:1:16: error: conflicting declarations"));
-})
-
-TEST(an_extern_of_a_runtime_entry_point_that_agrees_is_accepted, {
-    // The standard library reaches the runtime through ordinary `extern fn`
-    // declarations (D13.1), so the check is "agrees with the canonical
-    // signature" and never "may not be declared": these are the five
-    // declarations of std.libc.
-    TEST_ASSERT_TRUE(check_src("extern fn void* fort_rt_args_ptr();\n"
-                               "extern fn u64 fort_rt_args_len();\n"
-                               "extern fn void fort_rt_flush(i32 fd);\n"
-                               "extern fn void fort_rt_flush_all();\n"
-                               "extern fn noreturn fort_rt_exit(i32 status);\n"
-                               "fn i32 main() {\n    fort_rt_flush(1);\n    return 0;\n}\n"));
-})
-
-TEST(two_types_of_one_ir_form_both_agree_with_a_runtime_signature, {
-    // Signatures agree when each type takes the same IR form, attribute
-    // included (D9.9), which is what the emitted call is made of: `u64` and
-    // `i64` are both `i64`, fort `char` is C's `unsigned char` (D3.2) and so
-    // is the form of a `uint8_t` parameter, and every pointer is `ptr`
-    // (D3.11).
-    TEST_ASSERT_TRUE(check_src("extern fn void fort_rt_print_i64(i32 fd, u64 v);\n"
-                               "extern fn void fort_rt_print_char(i32 fd, char c);\n"
-                               "extern fn void fort_rt_print_str(i32 fd, char* p, u64 n);\n"
-                               "extern fn void* fort_rt_new(u64 size, u64 n, char* f, u32 l,"
-                               " u32 c);\n"
+TEST(a_fort_rt_name_is_an_ordinary_extern_declaration, {
+    // The runtime is fort and occupies no C name (D13.1, D9.7), so the
+    // `fort_rt_` space is reserved for nothing and an `extern` naming what
+    // used to be an entry point is an ordinary declaration of an ordinary C
+    // symbol, held against the other declarations of that symbol and against
+    // nothing else (D9.8 as amended).
+    TEST_ASSERT_TRUE(check_src("extern fn void fort_rt_del(i32 wrong);\n"
+                               "fn i32 main() {\n    fort_rt_del(5);\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(check_src("extern fn void fort_rt_flush(i32 fd, i32 extra);\n"
                                "fn i32 main() {\n    return 0;\n}\n"));
-    // `own` and `mut` are not part of this comparison, unlike the one between
-    // two extern declarations (module-system.md 13): `own` is erased at run
-    // time (D17.1), so the pointer is the same `ptr` and the runtime's C
-    // prototype has no notion of ownership to disagree with.
-    TEST_ASSERT_TRUE(check_src("extern fn void fort_rt_del(u8 mut* own p);\n"
+    TEST_ASSERT_TRUE(check_src("extern fn i32 fort_rt_flush(i32 fd);\n"
                                "fn i32 main() {\n    return 0;\n}\n"));
-    // `bool` is `i1` as a value and `i8` in memory (D19.2), so it is not the
-    // form of the `uint8_t` fort_rt_print_bool takes.
-    TEST_ASSERT_FALSE(check_src("extern fn void fort_rt_print_bool(i32 fd, bool b);\n"
+    TEST_ASSERT_TRUE(check_src("extern fn noreturn fort_rt_exit(i32 status);\n"
+                               "fn i32 main() {\n    return 0;\n}\n"));
+    // What is refused of such a declaration is what is refused of any other:
+    // a type an extern signature may not use (D9.8).
+    TEST_ASSERT_FALSE(check_src("extern fn void fort_rt_print_str(i32 fd, string s);\n"
                                 "fn i32 main() {\n    return 0;\n}\n"));
-    TEST_ASSERT_TRUE(said("conflicting declarations of extern 'fort_rt_print_bool'"));
+    TEST_ASSERT_TRUE(said("extern signature cannot use type 'string'"));
 })
 
-TEST(a_noreturn_mark_is_part_of_a_runtime_signature, {
-    // An entry point section 5.1 declares `_Noreturn` may be written `void`,
-    // which claims less and is safe by construction: `gen_use_extern` stamps
-    // the `cold noreturn nounwind` group from the table and never from the
-    // user's spelling, so the call still exits and the only cost is that
-    // fort's own flow analysis turns conservative. Claiming `noreturn` of one
-    // that returns claims more than is true and would suppress the
-    // missing-`return` analysis (D8.5), so that direction is refused.
-    TEST_ASSERT_TRUE(check_src("extern fn void fort_rt_exit(i32 status);\n"
-                               "fn i32 main() {\n    return 0;\n}\n"));
-    // A `_Noreturn` entry point's note carries the attribute group of item 14,
-    // the note being the declaration the module carries.
-    TEST_ASSERT_FALSE(check_src("extern fn void fort_rt_exit(i32 status, i32 extra);\n"
+TEST(main_is_reserved_like_fort_entry, {
+    // The compiler emits `main(argc, argv)` in the entry module (D11.6), so
+    // an `extern` declaring the name is not a second declaration of one C
+    // function but a signature nothing can check against that definition
+    // (D9.7 as amended).
+    TEST_ASSERT_FALSE(check_src("extern fn i32 main(i32 argc, char* mut* argv);\n"
                                 "fn i32 main() {\n    return 0;\n}\n"));
-    TEST_ASSERT_TRUE(
-        said("note: the compiler declares it as 'declare void @fort_rt_exit(i32) #2'"));
-    TEST_ASSERT_FALSE(check_src("extern fn noreturn fort_rt_flush(i32 fd);\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
-    TEST_ASSERT_TRUE(
-        said("conflicting declarations of extern 'fort_rt_flush': the result type differs"));
+    TEST_ASSERT_TRUE(said("'main' is reserved: the compiler emits it"));
+    // The name is reserved for `extern` alone: the entry module's own
+    // `fn i32 main` is the symbol `<entry>.main` and collides with nothing
+    // (D8.6, D9.7).
+    TEST_ASSERT_TRUE(check_src("fn i32 main() {\n    return 0;\n}\n"));
 })
 
-TEST(a_name_outside_the_runtime_table_keeps_its_own_signature, {
-    // The comparison is with the table of section 5.1 and not with the
-    // `fort_rt_` prefix: a C symbol the runtime does not declare is an
-    // ordinary extern, whatever it is called (D9.8).
+TEST(a_declaration_of_a_libc_symbol_is_held_against_the_librarys, {
+    // `std.rt` is a root of every closure and imports `std.libc`, so a
+    // program that declares one of those C symbols itself must agree with the
+    // library's declaration of it, `own` included (D9.8, D9.10, D17.13). The
+    // real `std/libc.ft` is read here rather than a copy of its text, so the
+    // assertion cannot agree with a spelling the library no longer has.
+    TEST_ASSERT_FALSE(check_src_with_library("extern fn void free(void* p);\n"
+                                             "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("conflicting declarations of extern 'free'"));
+    TEST_ASSERT_TRUE(said("previous declaration of 'free' here"));
+    // The identical declaration is accepted: what the rule refuses is a
+    // disagreement and never the declaration itself.
+    TEST_ASSERT_TRUE(check_src_with_library("extern fn void free(void* own p);\n"
+                                            "fn i32 main() {\n    return 0;\n}\n"));
+    // And a C symbol the library does not declare is held against nothing.
+    TEST_ASSERT_TRUE(check_src_with_library("extern fn i32 puts(char* s);\n"
+                                            "fn i32 main() {\n    return 0;\n}\n"));
+})
+
+TEST(a_fort_rt_name_keeps_its_own_signature, {
+    // No table holds it: a C symbol of that name is an ordinary extern,
+    // whatever it is called (D9.8).
     TEST_ASSERT_TRUE(check_src("extern fn i32 fort_rt_helper(string* s);\n"
                                "fn i32 main() {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(check_src("extern fn i64 write(i32 fd, void* buf, u64 n);\n"
@@ -740,12 +695,10 @@ int main(int argc, char** argv) {
     TEST_RUN(an_extern_function_pointer_result_and_nesting_are_checked_too);
     TEST_RUN(a_fort_signature_may_still_carry_an_aggregate_function_pointer);
     TEST_RUN(an_extern_may_not_declare_the_program_entry_point);
-    TEST_RUN(an_extern_of_a_runtime_entry_point_must_match_its_canonical_signature);
-    TEST_RUN(the_position_of_a_runtime_signature_conflict_is_the_piece_that_differs);
-    TEST_RUN(an_extern_of_a_runtime_entry_point_that_agrees_is_accepted);
-    TEST_RUN(two_types_of_one_ir_form_both_agree_with_a_runtime_signature);
-    TEST_RUN(a_noreturn_mark_is_part_of_a_runtime_signature);
-    TEST_RUN(a_name_outside_the_runtime_table_keeps_its_own_signature);
+    TEST_RUN(a_fort_rt_name_is_an_ordinary_extern_declaration);
+    TEST_RUN(main_is_reserved_like_fort_entry);
+    TEST_RUN(a_declaration_of_a_libc_symbol_is_held_against_the_librarys);
+    TEST_RUN(a_fort_rt_name_keeps_its_own_signature);
     TEST_RUN(a_noreturn_function_pointer_keeps_its_type);
     TEST_RUN(an_importer_is_checked_although_its_import_did_not_parse);
     TEST_RUN(a_failed_import_silences_every_use_of_its_name);

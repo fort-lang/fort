@@ -164,7 +164,7 @@ TEST(one_table_serves_every_print_of_its_enum, {
     // The table is assigned on first use and shared afterwards, so three
     // prints in two definitions emit one table (item 21, D19.5).
     TEST_ASSERT_EQ_UINT64(occurrences("@.enum.main.color = "), (uint64_t)1);
-    TEST_ASSERT_EQ_UINT64(occurrences("call void @fort_rt_print_enum"), (uint64_t)3);
+    TEST_ASSERT_EQ_UINT64(occurrences("call void @\"std.rt.print_enum\""), (uint64_t)3);
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 

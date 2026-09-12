@@ -111,7 +111,7 @@ TEST(move_is_the_same_in_both_build_modes, {
                        "  store ptr %t1, ptr %q.1, align 8\n");
     // Release mode neither zeroes the slots nor checks the declarations
     // (D11.1, D17.11).
-    TEST_ASSERT_EQ_STR(absent("fort_rt_fail_overwrite"), "absent");
+    TEST_ASSERT_EQ_STR(absent("std.rt.fail_overwrite"), "absent");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -128,7 +128,7 @@ TEST(del_of_a_moved_span_frees_the_copy_and_empties_the_source, {
               "i64 16, i1 false)\n"
               "  %t8 = getelementptr inbounds %fort.span, ptr %tmp1, i32 0, i32 0\n"
               "  %t9 = load ptr, ptr %t8, align 8\n"
-              "  call void @fort_rt_del(ptr %t9)\n"),
+              "  call void @\"std.rt.free\"(ptr %t9)\n"),
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp2, ptr align 8 %s.0, "
         "i64 16, i1 false)\n"
         "  call void @llvm.memset.p0.i64(ptr align 8 %s.0, i8 0, i64 16, i1 false)\n"
@@ -136,7 +136,7 @@ TEST(del_of_a_moved_span_frees_the_copy_and_empties_the_source, {
         "i64 16, i1 false)\n"
         "  %t8 = getelementptr inbounds %fort.span, ptr %tmp1, i32 0, i32 0\n"
         "  %t9 = load ptr, ptr %t8, align 8\n"
-        "  call void @fort_rt_del(ptr %t9)\n");
+        "  call void @\"std.rt.free\"(ptr %t9)\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -224,10 +224,10 @@ TEST(an_assignment_to_an_own_pointer_loads_compares_and_branches, {
     // The failure block calls the entry point of D11.4 at the `=` token and
     // is followed by `unreachable` (D19.6).
     TEST_ASSERT_EQ_STR(found("\nL3:\n"
-                             "  call void @fort_rt_fail_overwrite(ptr @.file.0, i32 4, i32 7)\n"
+                             "  call void @\"std.rt.fail_overwrite\"(ptr @.file.0, i32 4, i32 7)\n"
                              "  unreachable\n"),
                        "\nL3:\n"
-                       "  call void @fort_rt_fail_overwrite(ptr @.file.0, i32 4, i32 7)\n"
+                       "  call void @\"std.rt.fail_overwrite\"(ptr @.file.0, i32 4, i32 7)\n"
                        "  unreachable\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
@@ -325,9 +325,9 @@ TEST(an_owning_locals_slot_is_zeroed_once_and_its_declaration_is_checked, {
     TEST_ASSERT_EQ_UINT64(occurrences("store ptr null, ptr %p.1"), (uint64_t)1);
     // One check, written once however often the loop runs, reported at the
     // declared name, the declaration having no operator token (D11.4).
-    TEST_ASSERT_EQ_STR(found("call void @fort_rt_fail_overwrite(ptr @.file.0, i32 3, i32 22)"),
-                       "call void @fort_rt_fail_overwrite(ptr @.file.0, i32 3, i32 22)");
-    TEST_ASSERT_EQ_UINT64(occurrences("@fort_rt_fail_overwrite(ptr @.file"), (uint64_t)1);
+    TEST_ASSERT_EQ_STR(found("call void @\"std.rt.fail_overwrite\"(ptr @.file.0, i32 3, i32 22)"),
+                       "call void @\"std.rt.fail_overwrite\"(ptr @.file.0, i32 3, i32 22)");
+    TEST_ASSERT_EQ_UINT64(occurrences("@\"std.rt.fail_overwrite\"(ptr @.file"), (uint64_t)1);
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -339,7 +339,7 @@ TEST(an_owning_aggregate_local_is_neither_zeroed_nor_checked, {
     // D17.11 checks an `own` reference and nothing else, so an owning
     // aggregate's slot needs no zeroing of its own and its declaration
     // carries no check.
-    TEST_ASSERT_EQ_STR(absent("fort_rt_fail_overwrite"), "absent");
+    TEST_ASSERT_EQ_STR(absent("std.rt.fail_overwrite"), "absent");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -349,7 +349,7 @@ TEST(an_owning_aggregate_assignment_is_not_checked_field_by_field, {
                               "    b = move(a);\n    del(b.data);\n    return 0;\n}\n"));
     // The assignment of the whole struct emits no check; the one to `a.data`
     // above it does, so exactly one is there (D17.11).
-    TEST_ASSERT_EQ_UINT64(occurrences("@fort_rt_fail_overwrite(ptr @.file"), (uint64_t)1);
+    TEST_ASSERT_EQ_UINT64(occurrences("@\"std.rt.fail_overwrite\"(ptr @.file"), (uint64_t)1);
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -357,19 +357,19 @@ TEST(a_move_and_a_del_empty_their_operand_without_a_check, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut@ own mut s = new(i32, 2);\n"
                           "    del(s);\n    s = new(i32, 3);\n    del(s);\n"
                           "    return 0;\n}\n"));
-    // Emptying is not an assignment: the `fort_rt_del` is followed straight
+    // Emptying is not an assignment: the `std.rt.free` is followed straight
     // by the zeroing with no branch between them, which is what makes
     // `del(v); v = new()` pass the check (item 17, item 18).
     TEST_ASSERT_EQ_STR(
-        found("  call void @fort_rt_del(ptr %t9)\n"
+        found("  call void @\"std.rt.free\"(ptr %t9)\n"
               "  call void @llvm.memset.p0.i64(ptr align 8 %s.0, i8 0, i64 16, i1 false)\n"
               "  %t10 = sext i32 3 to i64\n"),
-        "  call void @fort_rt_del(ptr %t9)\n"
+        "  call void @\"std.rt.free\"(ptr %t9)\n"
         "  call void @llvm.memset.p0.i64(ptr align 8 %s.0, i8 0, i64 16, i1 false)\n"
         "  %t10 = sext i32 3 to i64\n");
     // One check for the declaration and one for the assignment, and none for
     // either `del` (D17.11).
-    TEST_ASSERT_EQ_UINT64(occurrences("@fort_rt_fail_overwrite(ptr @.file"), (uint64_t)2);
+    TEST_ASSERT_EQ_UINT64(occurrences("@\"std.rt.fail_overwrite\"(ptr @.file"), (uint64_t)2);
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -381,7 +381,7 @@ TEST(release_mode_stores_over_an_owning_reference_without_a_check, {
     // is not tracked (D11.1, D17.11, D17.14).
     TEST_ASSERT_EQ_STR(found("store ptr null, ptr %p.0, align 8"),
                        "store ptr null, ptr %p.0, align 8");
-    TEST_ASSERT_EQ_STR(absent("fort_rt_fail_overwrite"), "absent");
+    TEST_ASSERT_EQ_STR(absent("std.rt.fail_overwrite"), "absent");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -390,7 +390,7 @@ TEST(release_mode_stores_a_span_directly_with_no_temporary, {
                                   "    s = new(i32, 2);\n    del(s);\n    return 0;\n}\n"));
     // With no check to stand before, the header is written into the target
     // itself (item 18, D19.3).
-    TEST_ASSERT_EQ_STR(absent("fort_rt_fail_overwrite"), "absent");
+    TEST_ASSERT_EQ_STR(absent("std.rt.fail_overwrite"), "absent");
     TEST_ASSERT_EQ_STR(absent("%tmp0"), "absent");
     TEST_ASSERT_EQ_STR(found("  %t3 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 0\n"
                              "  store ptr %t2, ptr %t3, align 8\n"),
@@ -405,8 +405,8 @@ TEST(no_bounds_check_keeps_the_overwrite_check, {
                                     "    p = grab();\n    del(p);\n    return 0;\n}\n"));
     // `--no-bounds-check` removes the index and span branches and nothing
     // else, so the overwrite check stands (D10.6, D17.11).
-    TEST_ASSERT_EQ_STR(found("call void @fort_rt_fail_overwrite(ptr @.file.0, i32 4, i32 7)"),
-                       "call void @fort_rt_fail_overwrite(ptr @.file.0, i32 4, i32 7)");
+    TEST_ASSERT_EQ_STR(found("call void @\"std.rt.fail_overwrite\"(ptr @.file.0, i32 4, i32 7)"),
+                       "call void @\"std.rt.fail_overwrite\"(ptr @.file.0, i32 4, i32 7)");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -420,7 +420,7 @@ TEST(an_assignment_to_an_owned_slot_checks_the_element_it_reaches, {
     // D6.3, then the right-hand side runs, then the check reads that address
     // and the store follows it (item 18).
     TEST_ASSERT_EQ_STR(found("  %t14 = getelementptr inbounds ptr, ptr %t13, i64 %t8\n"
-                             "  %t15 = call ptr @fort_rt_new(i64 4, i64 1, ptr @.file.0, "
+                             "  %t15 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, "
                              "i32 6, i32 15)\n"
                              "  %t16 = load ptr, ptr %t14, align 8\n"
                              "  %t17 = icmp ne ptr %t16, null\n"
@@ -428,7 +428,7 @@ TEST(an_assignment_to_an_owned_slot_checks_the_element_it_reaches, {
                              "\nL6:\n"
                              "  store ptr %t15, ptr %t14, align 8\n"),
                        "  %t14 = getelementptr inbounds ptr, ptr %t13, i64 %t8\n"
-                       "  %t15 = call ptr @fort_rt_new(i64 4, i64 1, ptr @.file.0, "
+                       "  %t15 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, "
                        "i32 6, i32 15)\n"
                        "  %t16 = load ptr, ptr %t14, align 8\n"
                        "  %t17 = icmp ne ptr %t16, null\n"
@@ -474,7 +474,7 @@ TEST(a_move_and_a_check_inside_a_loop_are_emitted_once, {
     // One check per store into an `own` reference -- three assignments and
     // three declarations -- written once each however often the loop runs
     // (D17.11).
-    TEST_ASSERT_EQ_UINT64(occurrences("@fort_rt_fail_overwrite(ptr @.file"), (uint64_t)6);
+    TEST_ASSERT_EQ_UINT64(occurrences("@\"std.rt.fail_overwrite\"(ptr @.file"), (uint64_t)6);
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -485,7 +485,7 @@ TEST(the_failure_blocks_of_several_checks_stay_in_ascending_label_order, {
     // The failure buffer is appended after every normal block, in the order
     // the labels were allocated (D19.5, D19.6).
     TEST_ASSERT_TRUE(before("\nL1:\n", "\nL5:\n") && before("\nL5:\n", "\nL9:\n"));
-    TEST_ASSERT_EQ_UINT64(occurrences("@fort_rt_fail_overwrite(ptr @.file"), (uint64_t)3);
+    TEST_ASSERT_EQ_UINT64(occurrences("@\"std.rt.fail_overwrite\"(ptr @.file"), (uint64_t)3);
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 

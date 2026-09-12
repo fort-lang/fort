@@ -436,10 +436,12 @@ for any of them: the module that holds the call holds the definition too (sectio
 
 The signatures are fort, and `std.rt` defines each one; fort has no prototype, so the bodies are
 simply left out here. Their IR follows from the type table of section 6
-item 2 and the convention of item 7 and is nothing special: a `bool` result is `zeroext i8`, a
-`char` parameter `i8 zeroext`, `u64` and `i64` are both `i64` (D9.9). `loc` abbreviates the three
-parameters `char* file, u32 line, u32 col`, the position of D11.4. Every `fail_*` function,
-`panic`, `assert_fail` and `exit` is `fn noreturn` (D8.5).
+item 2 and the convention of item 7 and is nothing special: a `bool` result is `zeroext i1` and a
+`bool` parameter `i1 zeroext`, `i8` being `bool`'s memory type alone; a `char` parameter is
+`i8 zeroext`; `u64` and `i64` are both `i64` (D9.9). An aggregate result is the leading
+`ptr sret(%T)` of item 7 on a `void` function, which is what `args` returns through. `loc`
+abbreviates the three parameters `char* file, u32 line, u32 col`, the position of D11.4. Every
+`fail_*` function, `panic`, `assert_fail` and `exit` is `fn noreturn` (D8.5).
 
 ```fort
 // The table a print of an enum reads (D3.9, D12.2). It is the fort type of the
@@ -610,10 +612,9 @@ interactive path, and the script drives a compiled program on a real pseudo term
 This section is normative for the compiler. The LLVM IR module it emits must satisfy every item
 and must pass `opt -passes=verify` (D19.1). The two examples at the end are `test/ir/hello.ll`
 and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (section 2). They
-are hand-written modules that exercise the pipeline, not output of the compiler, which is why
-they `declare` the entry points they call and link against an object that defines them: a module
-the compiler builds from a program defines them itself, `std.rt` being in the closure (item 8,
-D13.1). The two files and the object they link against move together.
+are hand-written modules that exercise the pipeline, not output of the compiler: each defines the
+handful of `std.rt` entry points it calls, over the C library, where a module the compiler builds
+holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a change here.
 
 1. **Form and module header.** One textual module (`.ll`, LLVM 18 syntax, opaque pointers) holds
    the whole program (D9.10, D19.1) and is built by appending text in one forward pass. It
@@ -995,7 +996,8 @@ D13.1). The two files and the object they link against move together.
     and then each argument left to right, one call per argument (D11.5): `i8 i16 i32 i64`
     sign-extended to `i64` to `std.rt.print_i64`; `u8 u16 u32 u64` zero-extended to `i64` to
     `print_u64`; `f32` and `f64` to `std.rt_float.print_f32` and `print_f64` (D18.1); `bool`
-    `zext`ed from `i1` to `i8` to `print_bool`; `char` to `print_char`; an enum as
+    passed as it stands to `print_bool`, whose parameter is a fort `bool`; `char` to
+    `print_char`; an enum as
     `(i32 %v, ptr @.enum.<path.name>, i64 <count>)` to `print_enum`; a pointer, `void*` or
     function pointer to `print_ptr`; a `string` as its `ptr` and `len`
     fields, or as `(ptr @.str.N, i64 <len>)` for a literal, to `print_str`. Each unqualified name
@@ -1115,8 +1117,7 @@ D14.2 emits no warning about what follows it).
 fn i32 main() { println("hello, world!"); return 0; }
 ```
 
-in `main.ft` is `test/ir/hello.ll`, which is that program's module with everything `std.rt`
-contributes replaced by the declarations a hand-written module needs (preamble above):
+in `main.ft` is `test/ir/hello.ll`:
 
 ```llvm
 target triple = "x86_64-unknown-linux-gnu"
@@ -1124,10 +1125,43 @@ target triple = "x86_64-unknown-linux-gnu"
 %fort.span = type { ptr, i64 }
 %fort.enum_member = type { i32, ptr }
 
+define dso_local void @"std.rt.print_str"(i32 %fd, ptr %ptr, i64 %len) #0 {
+entry:
+  %t0 = call i64 (i32, ptr, i64, ...) @write(i32 %fd, ptr %ptr, i64 %len) #3
+  ret void
+}
+
+define dso_local void @"std.rt.print_char"(i32 %fd, i8 zeroext %c) #0 {
+entry:
+  %byte.0 = alloca i8, align 1
+  store i8 %c, ptr %byte.0, align 1
+  %t0 = call i64 (i32, ptr, i64, ...) @write(i32 %fd, ptr %byte.0, i64 1) #3
+  ret void
+}
+
+define dso_local void @"std.rt.args_init"(i32 %argc, ptr %argv) #0 {
+entry:
+  ret void
+}
+
+define dso_local void @"std.rt.args"(ptr sret(%fort.span) %ret.sret) #0 {
+entry:
+  %t0 = getelementptr inbounds %fort.span, ptr %ret.sret, i32 0, i32 0
+  store ptr null, ptr %t0, align 8
+  %t1 = getelementptr inbounds %fort.span, ptr %ret.sret, i32 0, i32 1
+  store i64 0, ptr %t1, align 8
+  ret void
+}
+
+define dso_local void @"std.rt.flush_all"() #0 {
+entry:
+  ret void
+}
+
 define dso_local i32 @"main.main"() #0 {
 entry:
-  call void @fort_rt_print_str(i32 1, ptr @.str.0, i64 13)
-  call void @fort_rt_print_char(i32 1, i8 zeroext 10)
+  call void @"std.rt.print_str"(i32 1, ptr @.str.0, i64 13)
+  call void @"std.rt.print_char"(i32 1, i8 zeroext 10)
   ret i32 0
 }
 
@@ -1137,13 +1171,31 @@ entry:
   ret i32 %t0
 }
 
+define dso_local i32 @main(i32 %argc, ptr %argv) #0 {
+entry:
+  %args = alloca %fort.span, align 8
+  call void @"std.rt.args_init"(i32 %argc, ptr %argv)
+  call void @"std.rt.args"(ptr %args)
+  %t0 = call i32 @fort_entry(ptr %args)
+  call void @"std.rt.flush_all"()
+  %t1 = and i32 %t0, 255
+  ret i32 %t1
+}
+
 @.str.0 = private unnamed_addr constant [14 x i8] c"hello, world!\00", align 1
 
-declare void @fort_rt_print_char(i32, i8 zeroext)
-declare void @fort_rt_print_str(i32, ptr, i64)
+declare i64 @write(i32, ptr, i64, ...)
 
 attributes #0 = { nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }
+attributes #3 = { nobuiltin }
 ```
+
+The module the compiler emits for that program differs from this one in one way, and the way is
+the size: it also holds every definition of `std.rt` and of `std.libc`, because every closure
+holds the runtime (D9.10, D13.1). The five definitions above stand for them, over the C library's
+`write`, so that the file is small enough to read and the pipeline test links it on its own. Every
+other byte is what the compiler writes: `main.main`, `fort_entry` and the `main` of item 22, the
+quoted dotted names of item 4, the private data of item 5 and the attribute group of item 7.
 
 ### 6.2 A program with a check
 
@@ -1166,12 +1218,53 @@ target triple = "x86_64-unknown-linux-gnu"
 %fort.span = type { ptr, i64 }
 %fort.enum_member = type { i32, ptr }
 
+define dso_local void @"std.rt.print_str"(i32 %fd, ptr %ptr, i64 %len) #0 {
+entry:
+  %t0 = call i64 (i32, ptr, i64, ...) @write(i32 %fd, ptr %ptr, i64 %len) #3
+  ret void
+}
+
+define dso_local void @"std.rt.print_char"(i32 %fd, i8 zeroext %c) #0 {
+entry:
+  %byte.0 = alloca i8, align 1
+  store i8 %c, ptr %byte.0, align 1
+  %t0 = call i64 (i32, ptr, i64, ...) @write(i32 %fd, ptr %byte.0, i64 1) #3
+  ret void
+}
+
+define dso_local void @"std.rt.args_init"(i32 %argc, ptr %argv) #0 {
+entry:
+  ret void
+}
+
+define dso_local void @"std.rt.args"(ptr sret(%fort.span) %ret.sret) #0 {
+entry:
+  %t0 = getelementptr inbounds %fort.span, ptr %ret.sret, i32 0, i32 0
+  store ptr null, ptr %t0, align 8
+  %t1 = getelementptr inbounds %fort.span, ptr %ret.sret, i32 0, i32 1
+  store i64 0, ptr %t1, align 8
+  ret void
+}
+
+define dso_local void @"std.rt.flush_all"() #0 {
+entry:
+  ret void
+}
+
+define dso_local void @"std.rt.fail_bounds"(i64 %i, i64 %n, ptr %f, i32 %l, i32 %c) #8 {
+entry:
+  %t0 = call i64 (i32, ptr, i64, ...) @write(i32 2, ptr @.str.1, i64 65) #3
+  call void (...) @abort() #3
+  call void @llvm.trap()
+  unreachable
+}
+
 define dso_local i32 @"abort.main"() #0 {
 entry:
   %a.0 = alloca [3 x i32], align 4
   %i.1 = alloca i64, align 8
-  call void @fort_rt_print_str(i32 1, ptr @.str.0, i64 6)
-  call void @fort_rt_print_char(i32 1, i8 zeroext 10)
+  call void @"std.rt.print_str"(i32 1, ptr @.str.0, i64 6)
+  call void @"std.rt.print_char"(i32 1, i8 zeroext 10)
   call void @llvm.memset.p0.i64(ptr align 4 %a.0, i8 0, i64 12, i1 false)
   store i64 5, ptr %i.1, align 8
   %t0 = load i64, ptr %i.1, align 8
@@ -1184,7 +1277,7 @@ L0:
   ret i32 %t3
 
 L1:
-  call void @fort_rt_fail_bounds(i64 %t0, i64 3, ptr @.file.0, i32 12, i32 13)
+  call void @"std.rt.fail_bounds"(i64 %t0, i64 3, ptr @.file.0, i32 12, i32 13)
   unreachable
 }
 
@@ -1194,25 +1287,43 @@ entry:
   ret i32 %t0
 }
 
+define dso_local i32 @main(i32 %argc, ptr %argv) #0 {
+entry:
+  %args = alloca %fort.span, align 8
+  call void @"std.rt.args_init"(i32 %argc, ptr %argv)
+  call void @"std.rt.args"(ptr %args)
+  %t0 = call i32 @fort_entry(ptr %args)
+  call void @"std.rt.flush_all"()
+  %t1 = and i32 %t0, 255
+  ret i32 %t1
+}
+
 @.file.0 = private unnamed_addr constant [9 x i8] c"abort.ft\00", align 1
 @.str.0 = private unnamed_addr constant [7 x i8] c"before\00", align 1
+@.str.1 = private unnamed_addr constant [66 x i8]
+    c"abort.ft:12:13: runtime error: index 5 out of range for length 3\0A\00", align 1
 
-declare void @fort_rt_fail_bounds(i64, i64, ptr, i32, i32) #2
-declare void @fort_rt_print_char(i32, i8 zeroext)
-declare void @fort_rt_print_str(i32, ptr, i64)
+declare void @abort(...)
+declare i64 @write(i32, ptr, i64, ...)
 
 declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg) #6
+declare void @llvm.trap() #7
 
 attributes #0 = { nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }
-attributes #2 = { cold noreturn nounwind }
+attributes #3 = { nobuiltin }
 attributes #6 = { nocallback nofree nounwind willreturn memory(argmem: write) }
+attributes #7 = { cold noreturn nounwind memory(inaccessiblemem: write) }
+attributes #8 = { cold noreturn nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }
 ```
 
-The locals are entry-block allocas, the array is zeroed with `llvm.memset`, the bounds check of
-item 16 branches to a failure block at the end of the function, and `%fort.span` and
-`%fort.enum_member` are emitted although nothing uses them (item 2). The program prints
-`before`, then `abort.ft:12:13: runtime error: index 5 out of range for length 3`, and dies with
-SIGABRT (D11.4).
+The `@.str.1` constant is one line in the module and is wrapped here only to fit the page, as the
+`llvm.memcpy` declaration of item 8 is. The locals are entry-block allocas, the array is zeroed
+with `llvm.memset`, the bounds check of item 16 branches to a failure block at the end of the
+function, and `%fort.span` and `%fort.enum_member` are emitted although nothing but `main` uses
+them (item 2). The definition of `std.rt.fail_bounds` carries the `#8` of item 14 and ends with
+the `llvm.trap` of item 20 after its call to a C function declared `noreturn` nowhere. The
+program prints `before`, then `abort.ft:12:13: runtime error: index 5 out of range for length 3`,
+and dies with SIGABRT (D11.4).
 
 ## 7. Testing
 

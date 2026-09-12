@@ -41,8 +41,13 @@ function noLines() {
 
 test('a real check document parses to its files and diagnostics', () => {
   const document = check.parseDocument(DOCUMENT);
-  assert.equal(document.files[0], 'main.ft');
-  assert.equal(document.files[1], 'mathx.ft');
+  // Every closure holds std.rt, which the compiler reads before the entry file,
+  // and load_module resolves a module's imports before it returns, so std.libc
+  // follows the runtime and the entry file comes third.
+  assert.equal(document.files[0], '/vagrant/build/release/std/rt.ft');
+  assert.equal(document.files[1], '/vagrant/build/release/std/libc.ft');
+  assert.equal(document.files[2], 'main.ft');
+  assert.equal(document.files[3], 'mathx.ft');
   assert.equal(document.version, check.DOCUMENT_VERSION);
   assert.equal(document.diagnostics.length, 1);
   assert.equal(document.diagnostics[0].message, "unknown name 'nope'");
@@ -339,14 +344,14 @@ test('a note is carried by the error it follows, with its own place', () => {
   const items = check.diagnosticsByFile(document, FIXTURES, linesOnDisk).get(file);
   assert.equal(items.length, 1);
   assert.equal(items[0].severity, 'error');
-  assert.match(items[0].message, /conflicting declarations of extern 'fort_rt_del'/);
+  assert.match(items[0].message, /module 'nothere' not found/);
   assert.equal(items[0].notes.length, 1);
   assert.equal(items[0].notes[0].file, file);
-  assert.match(items[0].notes[0].message, /the compiler declares it as/);
+  assert.match(items[0].notes[0].message, /looked for/);
   assert.deepEqual(items[0].notes[0].range, items[0].range);
   assert.deepEqual(items[0].range, {
-    start: { line: 3, character: 27 },
-    end: { line: 3, character: 32 },
+    start: { line: 3, character: 0 },
+    end: { line: 3, character: 15 },
   });
 });
 

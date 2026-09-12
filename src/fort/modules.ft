@@ -69,6 +69,14 @@ char DIRECTORY_SEPARATOR = '/';
 // is ever looked up there (D9.2).
 string STD_SEGMENT = "std";
 
+// The runtime, which every closure holds: the compiler loads it as a root of
+// its own beside the entry file, in a build and under `--check` alike, so it
+// is parsed, checked and emitted like any other module (D9.10, D13.1).
+// Membership does not bind the name: a module that wants to call it writes
+// `import std.rt;` like any other importer (D9.3).
+string RUNTIME_PATH = "std.rt";
+string RUNTIME_FILE = "rt.ft";
+
 // The first non-zero capacity of the module vectors; growth doubles from
 // there.
 u64 VEC_MIN_CAP = 8;
@@ -1068,6 +1076,50 @@ fn module* entry(module_set* set) {
     return null;
 }
 
+// `<std-dir>/rt.ft`, the file of the runtime, in `out`. The runtime is
+// searched under the standard library directory like any other `std` module
+// (D9.2).
+fn string runtime_file(module_set* set, strbuf.str_buf mut* out) {
+    strbuf.clear(out);
+    strbuf.append(out, set->std_dir);
+    if (set->std_dir.len > 0 && set->std_dir[set->std_dir.len - 1] != DIRECTORY_SEPARATOR) {
+        strbuf.push(out, DIRECTORY_SEPARATOR);
+    }
+    strbuf.append(out, RUNTIME_FILE);
+    return strbuf.view(out);
+}
+
+// Loads `std.rt` as a root of the closure, before the entry file, so that its
+// modules stand before the program's in the dependency order and a diagnostic
+// about two declarations of one C symbol names the program's (D9.8, D9.10).
+// A set with no standard library directory has no runtime to load and no way
+// to spell one, `import std.rt;` failing there already; the driver always
+// names a directory (toolchain.md 1).
+fn bool load_runtime(session.session mut* s, module_set mut* set) {
+    if (set->std_dir.len == 0) {
+        return true;
+    }
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string path = containers.pool_intern(&set->pool, RUNTIME_PATH);
+    string file = containers.pool_intern(&set->pool, runtime_file(set, &b));
+    return load_module(s, set, path, file, file_start(file), false) != null;
+}
+
+// The module the runtime's closure already read at `real`, or null: the entry
+// file may be a file of that closure, `std/rt.ft` and `std/libc.ft` being the
+// two the repository holds. One file is one module (D9.2), so that module is
+// the entry rather than a second identity of the same file, which is what
+// error_same_file would otherwise report. It keeps the path the runtime's
+// import gave it, since a module path is what its importer wrote.
+fn module mut* entry_already_read(module_set mut* set, string real) {
+    i64 mut at = 0;
+    if (!strmap.get(&set->by_real, real, &at)) {
+        return null;
+    }
+    return set->modules.items[cast(at, u64)];
+}
+
 // Reads `entry_file`, derives its module path from its base name and walks the
 // import closure (module-system.md 2, 10). Returns false after reporting a
 // diagnostic: an unreadable file, a lexical or syntax error, or an import
@@ -1095,6 +1147,14 @@ fn bool load(session.session mut* s, module_set mut* set, string entry_file) {
     if (holds_path_separator(base)) {
         error_entry_name_separator(s, set, file_start(file), base);
         return false;
+    }
+    if (!load_runtime(s, set)) {
+        return false;
+    }
+    module mut* twin = entry_already_read(set, real_path(set, file));
+    if (twin != null) {
+        twin->entry = true;
+        return session.error_count(s) == before;
     }
     if (load_module(s, set, base, file, file_start(file), true) == null) {
         return false;

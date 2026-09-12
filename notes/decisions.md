@@ -944,14 +944,12 @@ Owner: `stdlib.md`.
   qualification. Amended 2026-09-11 (T-088): `std.rt` held `extern` declarations of the C
   runtime's entry points and nothing else; it is the runtime (D13.1 as amended), so it declares
   no `fort_rt_` symbol and every module of this list is fort; `std.rt_float` joins the list with
-  the float entry points D18.1 moves out of C. Note 2026-09-11 (T-090, T-091): "declares no
-  `fort_rt_` symbol" holds after T-091 and not during the migration. T-090 writes the runtime in
-  fort while the compiler still lowers every builtin to the C one, so `std.rt` keeps five
-  `extern fn fort_rt_*` declarations for that window: `std.sys` and `std.io` call four of them,
-  and the differential tests of `test/lang/run/stdlib` call them beside each fort entry point to
-  compare the two runtimes. T-091 retargets the builtins and deletes the C file, those five
-  declarations and that comparison, and this sentence with them. A `grep` for `fort_rt_` against
-  this decision reads a violation until then.
+  the float entry points D18.1 moves out of C. Note 2026-09-11 (T-091): the migration window
+  the note here described is closed. T-090 wrote the runtime in fort while the compiler still
+  lowered every builtin to the C one, so `std.rt` held five `extern fn fort_rt_*` declarations
+  for that window; T-091 retargeted the builtins, deleted the C runtime and those declarations,
+  and "declares no `fort_rt_` symbol" is true of the module from that commit on
+  (`test/runtime_sig_test.c`, `std_rt_declares_no_runtime_c_symbol`).
 - **D13.3** Error handling idiom (the earlier TBD): functions return `bool` or an error enum, with
   results delivered through `T mut*` out-parameters; `-1`/`null` sentinels where conventional;
   `panic` for programming errors; `defer` for cleanup. No `Result` type in v1.
@@ -1062,8 +1060,8 @@ Owner: `toolchain.md`.
     diagnostic may occur; `//! error-any: <substring>` at the top for errors without a useful
     line (for example circular imports).
 - **D14.6** Coverage target from the prompt: about three lines of test for each line of source the
-  project writes and ships -- the compiler (`src/bootstrap/*.c`, `*.h`, `src/fort/*.ft`), the
-  standard library (`std/*.ft`) and the runtime (`runtime/*.c`, `*.h`) -- measured against
+  project writes and ships -- the compiler (`src/bootstrap/*.c`, `*.h`, `src/fort/*.ft`) and the
+  standard library (`std/*.ft`), the runtime included, since it is `std.rt` -- measured against
   `test/*.c`, `test/*.h`, `test/**/*.ft` and `test/lang/ffi/*.c` by `tools/lines.py`. The
   implementation plan will size the corpus; the seed tests written in this phase establish the
   format and one example per feature area. Amended 2026-09-11 (T-076): until then the target was
@@ -1073,9 +1071,9 @@ Owner: `toolchain.md`.
   nowhere, and a ticket writing `std/*.ft` met the ratio without the ratio seeing its code. The
   editor extension (`editors/`) still counts on neither side, that being a separate question about
   non-compiler code. Amended 2026-09-11 (T-088): the runtime is `std.rt` now (D13.1 as amended)
-  and counts with `std/*.ft`. `runtime/*.c` and `*.h` stay on the source side of the list above
-  while those files exist, which is what `tools/lines.py` globs today; T-091 deletes them and the
-  glob with them, and the source side is then the compiler and the standard library.
+  and counts with `std/*.ft`; `runtime/*.c` and `*.h` stayed on the source side while those files
+  existed. Amended 2026-09-12 (T-091): they are deleted and `tools/lines.py` globs them no longer,
+  so the source side is the compiler and the standard library and nothing else.
 
 ## D15 Not in v1
 
@@ -1438,11 +1436,12 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   label; `assert` is the exception, since its operand is already the success condition (D12.2),
   and so is the `default` D7.7 gives an enum `switch`, which the switch's own default edge
   reaches. Amended 2026-09-11 (T-020): the `switch` default was added, with
-  `fort_rt_fail_enum` in `toolchain.md` 5.1.
+  `std.rt.fail_enum` in `toolchain.md` 5.1, which was then the C `fort_rt_fail_enum`.
   Failure blocks are emitted after every normal block of the function, in ascending label order;
   each holds exactly one call to the `toolchain.md` 5.1 entry point, with the offending values,
   the file constant and the line and column of D11.4's position rule, followed by `unreachable`.
-  The failure entry points carry `cold noreturn nounwind`: `noreturn` is truthful, since every
+  The failure entry points carry `cold noreturn nounwind` on their definitions, in the group
+  `#8` of `toolchain.md` 6 item 14: `noreturn` is truthful, since every
   one of them is `fn noreturn` in `std.rt` (D8.5, D13.1) and aborts, and `cold` lays the block
   out of line, which is what the out-of-line failure stubs used to do. `--no-bounds-check`
   removes exactly the index and span branches (D10.6). Amended 2026-09-11 (T-088): the attributes

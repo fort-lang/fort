@@ -233,7 +233,7 @@ TEST(returning_an_own_local_empties_it_before_the_deferred_del_reads_it, {
     const char* want = "  %t3 = load ptr, ptr %p.0, align 8\n"
                        "  store ptr null, ptr %p.0, align 8\n"
                        "  %t4 = load ptr, ptr %p.0, align 8\n"
-                       "  call void @fort_rt_del(ptr %t4)\n"
+                       "  call void @\"std.rt.free\"(ptr %t4)\n"
                        "  store ptr null, ptr %p.0, align 8\n"
                        "  ret ptr %t3\n";
     TEST_ASSERT_EQ_STR(found(want), want);
@@ -436,7 +436,7 @@ TEST(a_runtime_check_branches_to_its_failure_block_without_deferred_code, {
                           "    defer note();\n    return a[i];\n}\n"));
     // A runtime error aborts without running deferred code (D7.8, D11.4), so
     // the failure block holds the report and the trap alone.
-    const char* want = "  call void @fort_rt_fail_bounds(";
+    const char* want = "  call void @\"std.rt.fail_bounds\"(";
     TEST_ASSERT_EQ_STR(found(want), want);
     TEST_ASSERT_EQ_UINT64(occurrences("call void @\"main.note\"()"), (uint64_t)1);
     TEST_ASSERT_EQ_STR(verified(), "verified");

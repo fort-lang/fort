@@ -3,7 +3,7 @@
 
 `//` to the end of the line is the only comment form in fort, and AGENTS.md
 extends the rule to the C sources so the bootstrap compiler stays
-transliterable into fort. This tool scans src/, runtime/ and test/ (the same
+transliterable into fort. This tool scans src/ and test/ (the same
 files the format and tidy targets cover) character by character, tracking
 string literals, character literals, escapes and `//` comments, and reports
 every `/*` that is really a comment opener as `<file>:<line>: block comment`.
@@ -17,8 +17,6 @@ from pathlib import Path
 SOURCE_GLOBS = (
     "src/**/*.c",
     "src/**/*.h",
-    "runtime/*.c",
-    "runtime/*.h",
     "test/*.c",
     "test/*.h",
     "test/lang/ffi/*.c",

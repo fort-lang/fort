@@ -107,10 +107,8 @@ struct enum_member {
 // every slot is taken, it takes them back in the same order.
 //
 // These nine buffers and the message buffer below hold 82080 bytes together.
-// Every program that imports std.io or std.sys imports this module, so every
-// such program carries those bytes in BSS. Until T-091 retargets the
-// builtins, no program uses one of them: a print reaches the C runtime's
-// buffers instead.
+// Every closure holds this module (D9.10), so every program carries those
+// bytes in BSS.
 buffer[BUFFER_COUNT] mut buffers = {};
 bool mut buffers_ready = false;
 u64 mut next_eviction = 1;
@@ -638,9 +636,8 @@ fn bool str_eq(char* a, u64 a_len, char* b, u64 b_len) {
 // compiler builds can reach that case; a program that calls args_init itself
 // can.
 //
-// The allocation is an ordinary new. After T-091 a failed allocation here
-// therefore names a line of std/rt.ft, where the C runtime printed
-// <startup>:0:0. No decision states either form.
+// The allocation is an ordinary new, so a failed allocation here names the
+// line of std/rt.ft that made it. No decision states that position.
 fn void args_init(i32 argc, char* mut* argv) {
     del(args_store);
     if (argc <= 0) {
@@ -668,22 +665,3 @@ fn noreturn exit(i32 status) {
     flush_all();
     libc.exit(status & EXIT_STATUS_MASK);
 }
-
-// ---- the C runtime, while both are live -------------------------------------
-
-// The compiler still lowers every builtin to runtime/fort_rt.c (D12.2). A
-// print, a new and a panic therefore use the C runtime's buffers and its
-// argument span, not the ones above. std.sys and std.io reach those five C
-// entry points through the declarations below. The tests under
-// test/lang/run/stdlib call them beside the fort entry points above and
-// compare the two runtimes.
-//
-// T-091 retargets the compiler. It deletes this section, the C file and those
-// calls. D13.2 says std.rt declares no fort_rt_ symbol; that becomes true of
-// this module then. These names are unmangled, so each one is the C name
-// toolchain.md 5.1 fixed (D9.7).
-extern fn void* fort_rt_args_ptr();
-extern fn u64 fort_rt_args_len();
-extern fn void fort_rt_flush(i32 fd);
-extern fn void fort_rt_flush_all();
-extern fn noreturn fort_rt_exit(i32 status);

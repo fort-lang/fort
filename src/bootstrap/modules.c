@@ -36,6 +36,14 @@ enum { DIRECTORY_SEPARATOR = '/' };
 // is ever looked up there (D9.2).
 static const char STD_SEGMENT[] = "std";
 
+// The runtime, which every closure holds: the compiler loads it as a root of
+// its own beside the entry file, in a build and under `--check` alike, so it
+// is parsed, checked and emitted like any other module (D9.10, D13.1).
+// Membership does not bind the name: a module that wants to call it writes
+// `import std.rt;` like any other importer (D9.3).
+static const char RUNTIME_PATH[] = "std.rt";
+static const char RUNTIME_FILE[] = "rt.ft";
+
 // Bytes read from a source file per call.
 enum { READ_CHUNK = 4096 };
 
@@ -859,6 +867,51 @@ const module_t* module_set_entry(const module_set_t* set) {
     return NULL;
 }
 
+// `<std-dir>/rt.ft`, the file of the runtime, in `out`. The runtime is
+// searched under the standard library directory like any other `std` module
+// (D9.2).
+static str_t runtime_file(const module_set_t* set, sb_t* out) {
+    sb_clear(out);
+    sb_append_str(out, set->std_dir);
+    if (set->std_dir.len > 0 && set->std_dir.ptr[set->std_dir.len - 1] != DIRECTORY_SEPARATOR) {
+        sb_push(out, DIRECTORY_SEPARATOR);
+    }
+    sb_append(out, RUNTIME_FILE);
+    return str_from_range(sb_cstr(out), out->len);
+}
+
+// Loads `std.rt` as a root of the closure, before the entry file, so that its
+// modules stand before the program's in the dependency order and a
+// diagnostic about two declarations of one C symbol names the program's
+// (D9.8, D9.10). A set with no standard library directory has no runtime to
+// load and no way to spell one, `import std.rt;` failing there already; the
+// driver always names a directory (toolchain.md 1).
+static bool load_runtime(module_set_t* set) {
+    if (set->std_dir.len == 0) {
+        return true;
+    }
+    sb_t b;
+    sb_init(&b);
+    const str_t path = str_pool_intern(&set->pool, str_from_cstr(RUNTIME_PATH));
+    const str_t file = str_pool_intern(&set->pool, runtime_file(set, &b));
+    sb_free(&b);
+    return load_module(set, path, file, file_start(file), false) != NULL;
+}
+
+// The module the runtime's closure already read at `real`, or NULL: the
+// entry file may be a file of that closure, `std/rt.ft` and `std/libc.ft`
+// being the two the repository holds. One file is one module (D9.2), so that
+// module is the entry rather than a second identity of the same file, which
+// is what `error_same_file` would otherwise report. It keeps the path the
+// runtime's import gave it, since a module path is what its importer wrote.
+static module_t* entry_already_read(module_set_t* set, str_t real) {
+    int64_t at = 0;
+    if (!strmap_get(&set->by_real, real, &at)) {
+        return NULL;
+    }
+    return (module_t*)set->modules.items[at];
+}
+
 bool module_set_load(module_set_t* set, const char* entry) {
     const uint64_t before = diag_count();
     const str_t file = str_pool_intern(&set->pool, str_from_cstr(entry));
@@ -880,6 +933,14 @@ bool module_set_load(module_set_t* set, const char* entry) {
     if (holds_path_separator(base)) {
         error_entry_name_separator(set, file_start(file), base);
         return false;
+    }
+    if (!load_runtime(set)) {
+        return false;
+    }
+    module_t* twin = entry_already_read(set, real_path(set, file));
+    if (twin != NULL) {
+        twin->entry = true;
+        return diag_count() == before;
     }
     if (load_module(set, base, file, file_start(file), true) == NULL) {
         return false;

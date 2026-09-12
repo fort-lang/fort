@@ -34,7 +34,7 @@ fn bool open_shapes(gen_env.env mut* e) {
     strbuf.append(&b, "struct point {\n    i32 x;\n    i32 y;\n}\n");
     strbuf.append(&b, "enum color {\n    red,\n    green,\n    blue,\n}\n");
     strbuf.append(&b, "extern fn i32 puts(char* s);\n");
-    strbuf.append(&b, "extern fn void fort_rt_flush(i32 fd);\n");
+    strbuf.append(&b, "extern fn i32 rand();\n");
     strbuf.append(&b, "fn i32 main() {\n");
     strbuf.append(&b, "    i32[3] mut v_arr = {1, 2, 3};\n");
     strbuf.append(&b, "    i32 mut@ v_span = v_arr[..];\n");
@@ -256,12 +256,15 @@ fn void a_check_allocates_its_continuation_before_its_failure_block() {
     gen_env.expect_text(
         gen_env.fail(&e),
         gen_env.join3(&e, "\nL1:\n",
-                      "  call void @fort_rt_fail_bounds(i64 %i, ptr @.file.0, i32 7, i32 3)\n",
+                      "  call void @\"std.rt.fail_bounds\"(i64 %i, ptr @.file.0, i32 7, i32 3)\n",
                       "  unreachable\n"));
-    // Item 14: a `_Noreturn` entry point carries the `cold noreturn nounwind`
-    // group.
-    assert(gen.gen_uses_rt(&e.g, runtime_sig.rt_entry.rt_fail_bounds));
-    assert(gen.gen_uses_attr(&e.g, gen.ATTR_FAIL));
+    // Item 14: no attribute is put on a failure call site.
+    string text = gen_env.fail(&e);
+    u64 mut i = 0;
+    while (i < text.len) {
+        assert(text[i] != '#');
+        i += 1;
+    }
 }
 
 fn void assert_branches_the_other_way_because_its_operand_is_the_success() {
@@ -294,7 +297,7 @@ fn void a_failure_block_no_branch_reaches_is_written_the_same_way() {
     gen_env.expect_text(
         gen_env.fail(&e),
         gen_env.join3(&e, "\nL0:\n",
-                      "  call void @fort_rt_fail_enum(i32 %v, ptr @.file.0, i32 7, i32 3)\n",
+                      "  call void @\"std.rt.fail_enum\"(i32 %v, ptr @.file.0, i32 7, i32 3)\n",
                       "  unreachable\n"));
 }
 
@@ -359,14 +362,9 @@ fn void an_extern_is_recorded_once_per_c_name() {
     assert(e.g.externs.len == 1);
     gen.gen_use_extern(&e.g, gen_env.sym_main(&e, "puts"));
     assert(e.g.externs.len == 1);
-    // An `extern fn` naming a runtime entry point goes to the runtime group
-    // with that group's prototype instead, and is left out of the extern
-    // group (item 8, D13.1).
-    gen.gen_use_extern(&e.g, gen_env.sym_main(&e, "fort_rt_flush"));
-    assert(e.g.externs.len == 1);
-    assert(gen.gen_uses_rt(&e.g, runtime_sig.rt_entry.rt_flush));
-    // `fort_rt_flush` is not `_Noreturn`, so it asks for no attribute group.
-    assert(!gen.gen_uses_attr(&e.g, gen.ATTR_FAIL));
+    // A second C name is a second record (item 8).
+    gen.gen_use_extern(&e.g, gen_env.sym_main(&e, "rand"));
+    assert(e.g.externs.len == 2);
 }
 
 // ---- item 8: the calls to the runtime ---------------------------------------------------
@@ -378,11 +376,10 @@ fn void a_runtime_call_names_the_result_of_its_row() {
     gen.gen_args mut args = gen.gen_args_init();
     defer gen.gen_args_free(&args);
     gen.gen_args_add(&args, ptr_to("%p"));
-    gen.gen_call_rt(&e.g, runtime_sig.rt_entry.rt_del, &args);
+    gen.gen_call_rt(&e.g, runtime_sig.rt_entry.rt_free, &args);
     // The result text comes from the row of runtime_sig.ft and from nowhere
-    // else, so the call site and the declaration cannot disagree (item 8).
-    gen_env.expect_text(gen_env.body(&e), "  call void @fort_rt_del(ptr %p)\n");
-    assert(gen.gen_uses_rt(&e.g, runtime_sig.rt_entry.rt_del));
+    // else, and the name is quoted like every other dotted name (items 4, 8).
+    gen_env.expect_text(gen_env.body(&e), "  call void @\"std.rt.free\"(ptr %p)\n");
 }
 
 fn void a_runtime_call_with_a_value_names_a_temporary() {
@@ -394,13 +391,13 @@ fn void a_runtime_call_with_a_value_names_a_temporary() {
     gen.gen_args_add(&args, operand("i64", "8"));
     gen.gen_args_add(&args, operand("i64", "%n"));
     gen.gen_args_add_loc(&e.g, &args, where_at());
-    gen.gen_val r = gen.gen_call_rt_value(&e.g, runtime_sig.rt_entry.rt_new, "ptr", &args);
+    gen.gen_val r = gen.gen_call_rt_value(&e.g, runtime_sig.rt_entry.rt_alloc, "ptr", &args);
     gen_env.expect_text(r.val, "%t0");
     // Item 14: the file constant and the line and column of D11.4 close every
     // failure-capable call.
     gen_env.expect_text(
         gen_env.body(&e),
-        "  %t0 = call ptr @fort_rt_new(i64 8, i64 %n, ptr @.file.0, i32 7, i32 3)\n");
+        "  %t0 = call ptr @\"std.rt.alloc\"(i64 8, i64 %n, ptr @.file.0, i32 7, i32 3)\n");
 }
 
 fn void an_argument_carries_its_extension_attribute_between_type_and_value() {

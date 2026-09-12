@@ -45,14 +45,21 @@ TEST(both_named_types_are_emitted_used_or_not, {
 })
 
 TEST(the_sections_appear_in_the_order_of_item_1, {
+    // The declarations section holds the externs and the intrinsics and
+    // nothing else: the runtime is defined in the module rather than declared
+    // (item 8), so the program below declares a C function to fill it.
     TEST_ASSERT_TRUE(emit("struct point { i32 x; i32 y; }\n"
-                          "fn i32 main() {\n    println(\"x\");\n    return 0;\n}\n"));
+                          "extern fn i32 puts(char* s);\n"
+                          "fn i32 main() {\n"
+                          "    println(\"x\");\n"
+                          "    return puts(\"y\".ptr);\n"
+                          "}\n"));
     TEST_ASSERT_TRUE(before("target triple", "%fort.span"));
     TEST_ASSERT_TRUE(before("%fort.span", "%struct.main.point"));
     TEST_ASSERT_TRUE(before("%struct.main.point", "define dso_local"));
     TEST_ASSERT_TRUE(before("define dso_local", "@.str.0"));
-    TEST_ASSERT_TRUE(before("@.str.0", "declare void @fort_rt_print_str"));
-    TEST_ASSERT_TRUE(before("declare void @fort_rt_print_str", "attributes #0"));
+    TEST_ASSERT_TRUE(before("@.str.0", "declare i32 @puts(ptr, ...)"));
+    TEST_ASSERT_TRUE(before("declare i32 @puts(ptr, ...)", "attributes #0"));
 })
 
 TEST(a_blank_line_stands_between_two_definitions, {

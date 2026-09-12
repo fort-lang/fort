@@ -136,7 +136,7 @@ TEST(an_element_assignment_is_checked_like_a_read, {
     TEST_ASSERT_TRUE(emit(in_main("    i32[2] mut a = {};\n    i64 i = 0;\n    a[i] = 5;\n")));
     TEST_ASSERT_EQ_STR(found("  %t1 = icmp uge i64 %t0, 2\n  br i1 %t1, label %L1, label %L0\n"),
                        "  %t1 = icmp uge i64 %t0, 2\n  br i1 %t1, label %L1, label %L0\n");
-    TEST_ASSERT_EQ_STR(found("@fort_rt_fail_bounds"), "@fort_rt_fail_bounds");
+    TEST_ASSERT_EQ_STR(found("@\"std.rt.fail_bounds\""), "@\"std.rt.fail_bounds\"");
 })
 
 TEST(a_string_assignment_writes_both_header_fields, {
@@ -242,9 +242,9 @@ TEST(an_array_length_from_sizeof_is_a_constant, {
     // `.len` of a fixed array is an untyped constant and its operand is not
     // evaluated, so nothing loads the array (D3.4, D4.6).
     TEST_ASSERT_EQ_STR(found("  %t0 = sext i32 8 to i64\n"
-                             "  call void @fort_rt_print_i64(i32 1, i64 %t0)\n"),
+                             "  call void @\"std.rt.print_i64\"(i32 1, i64 %t0)\n"),
                        "  %t0 = sext i32 8 to i64\n"
-                       "  call void @fort_rt_print_i64(i32 1, i64 %t0)\n");
+                       "  call void @\"std.rt.print_i64\"(i32 1, i64 %t0)\n");
 })
 
 // ---- aggregates across calls (item 7) ----------------------------------------------

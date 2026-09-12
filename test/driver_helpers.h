@@ -122,7 +122,17 @@ typedef struct {
     char log[PATH_CAP];   // where fake_cc.sh records its command line
     char entry[PATH_CAP]; // <dir>/main.ft
     char out[PATH_CAP];   // <dir>/prog, the -o argument
+    char std[PATH_CAP];   // <dir>/std, the standard library directory
+    char rt[PATH_CAP];    // <dir>/std/rt.ft, the runtime every closure holds
 } sandbox_t;
+
+// The runtime file of the sandbox. Every closure holds `std.rt` (D9.10), so
+// a run that reads a program reads this file too and lists it first in the
+// document of D20.2. It is deliberately empty: these suites drive the driver,
+// and a `--check` needs the file to parse while a build with fake_cc.sh never
+// compiles the module, so an empty runtime keeps every expected document
+// short and adds no index record of its own (D20.3).
+static const char SANDBOX_RUNTIME[] = "// The empty runtime of a driver test.\n";
 
 // Clears every variable these tests and the driver read (toolchain.md 1),
 // so that a test which returns early on a failed assertion cannot leave one
@@ -149,7 +159,9 @@ static inline sandbox_t sandbox_open(void) {
     join(box.log, sizeof box.log, box.dir, "cc.log");
     join(box.entry, sizeof box.entry, box.dir, "main.ft");
     join(box.out, sizeof box.out, box.dir, "prog");
-    if (mkdir(box.tmp, S_IRWXU) != 0) {
+    join(box.std, sizeof box.std, box.dir, "std");
+    join(box.rt, sizeof box.rt, box.std, "rt.ft");
+    if (mkdir(box.tmp, S_IRWXU) != 0 || mkdir(box.std, S_IRWXU) != 0) {
         return box;
     }
     FILE* entry = fopen(box.entry, "wb");
@@ -158,9 +170,17 @@ static inline sandbox_t sandbox_open(void) {
     }
     TEST_UNUSED(fputs("fn i32 main() { return 0; }\n", entry));
     TEST_UNUSED(fclose(entry));
-    // The driver reads TMPDIR (toolchain.md 1) and fake_cc.sh reads the
-    // FORT_FAKE_CC variables; env_reset above cleared everything else.
+    FILE* runtime = fopen(box.rt, "wb");
+    if (runtime == NULL) {
+        return box;
+    }
+    TEST_UNUSED(fputs(SANDBOX_RUNTIME, runtime));
+    TEST_UNUSED(fclose(runtime));
+    // The driver reads TMPDIR and FORT_STD_DIR (toolchain.md 1) and
+    // fake_cc.sh reads the FORT_FAKE_CC variables; env_reset above cleared
+    // everything else.
     TEST_UNUSED(setenv("TMPDIR", box.tmp, 1));
+    TEST_UNUSED(setenv("FORT_STD_DIR", box.std, 1));
     TEST_UNUSED(setenv("FORT_FAKE_CC_LOG", box.log, 1));
     box.ok = true;
     return box;
@@ -187,6 +207,11 @@ static inline void expect1(char* dst, size_t size, const char* format, const cha
 static inline void expect2(
     char* dst, size_t size, const char* format, const char* a, const char* b) {
     TEST_UNUSED(snprintf(dst, size, format, a, b));
+}
+
+static inline void expect3(
+    char* dst, size_t size, const char* format, const char* a, const char* b, const char* c) {
+    TEST_UNUSED(snprintf(dst, size, format, a, b, c));
 }
 
 // ---- the diagnostics of a run (D14.2) --------------------------------------------

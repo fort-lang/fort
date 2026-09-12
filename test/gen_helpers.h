@@ -29,6 +29,7 @@
 #include "diag.h"
 #include "gen.h"
 #include "modules.h"
+#include "runtime_sig.h"
 #include "str.h"
 
 #include "test.h"
@@ -104,6 +105,7 @@ static inline void gen_remove_tree(const char* path) {
 
 static char gen_sandbox[GEN_PATH_CAP];
 static char gen_home[GEN_PATH_CAP];
+static char gen_std[GEN_PATH_CAP];
 static sb_t gen_module;
 static sb_t gen_diags;
 static bool gen_open = false;
@@ -119,6 +121,7 @@ static inline void gen_done(void) {
     sb_free(&gen_diags);
     gen_remove_tree(gen_sandbox);
     gen_sandbox[0] = '\0';
+    gen_std[0] = '\0';
     gen_open = false;
 }
 
@@ -149,6 +152,7 @@ static inline void gen_begin(void) {
     sb_init(&gen_diags);
     diag_capture(&gen_diags);
     diag_reset();
+    gen_std[0] = '\0';
     gen_open = true;
     gen_ok = false;
 }
@@ -186,6 +190,14 @@ static inline bool gen_emit_file(const char* name, gen_options_t opts) {
     }
     module_set_t set;
     module_set_init(&set);
+    if (gen_std[0] != '\0') {
+        // A standard library directory makes the loader take `std.rt` into
+        // the closure as a root, which is what a build does (D9.10); without
+        // one the emitter's calls into the runtime reach a name the module
+        // neither defines nor declares, which is what gen_runtime_declarations
+        // answers for.
+        module_set_std_dir(&set, gen_std);
+    }
     const bool loaded = module_set_load(&set, name);
     check_t ck;
     check_init(&ck);
@@ -268,6 +280,23 @@ static inline bool emit_files(const char* const* names, const char* const* texts
     opts.release = false;
     opts.no_bounds_check = false;
     gen_ok = count > 0 && gen_emit_file(names[0], opts);
+    return gen_ok;
+}
+
+// The module of `text` as `main.ft` with `runtime` as `std/rt.ft` beside it
+// and that directory named as the standard library: the closure then holds
+// `std.rt` like every program the compiler builds (D9.10, D13.1), so the
+// emitted module holds the runtime's own definitions and the attribute group
+// item 14 puts on them.
+static inline bool emit_with_runtime(const char* runtime, const char* text) {
+    gen_begin();
+    gen_write("std/rt.ft", runtime);
+    gen_write("main.ft", text);
+    gen_join_path(gen_std, sizeof gen_std, gen_sandbox, "std");
+    gen_options_t opts;
+    opts.release = false;
+    opts.no_bounds_check = false;
+    gen_ok = gen_emit_file("main.ft", opts);
     return gen_ok;
 }
 
@@ -448,6 +477,59 @@ static inline const char* gen_block_terminators(void) {
 // `; No predecessors!` on the second, so the verifier alone does not prove
 // item 10's "every block ends in exactly one terminator". Every caller of
 // `verified` therefore asserts both halves at once.
+// Appends a `declare` for every entry point of toolchain.md 5.1, rendered
+// from the one table the emitter calls them through (runtime_sig.h).
+//
+// These suites emit a module with no `std.rt` in its closure, so the calls the
+// emitter writes into the runtime reach a name the module neither defines nor
+// declares, which LLVM rejects as a forward reference to nothing. A program
+// the compiler builds defines them itself (item 8), so the declarations are
+// written only into the file the verifier reads and never into `ir()`: what
+// every assertion in these suites sees stays the emitter's own text. This is
+// what `test/ir/*.ll` does for the same reason.
+static inline bool gen_defines(const char* symbol) {
+    const char* line = sb_cstr(&gen_module);
+    while (line != NULL && *line != '\0') {
+        const char* end_of_line = strchr(line, '\n');
+        const char* hit = strstr(line, symbol);
+        if (strncmp(line, "define ", strlen("define ")) == 0 && hit != NULL &&
+            (end_of_line == NULL || hit < end_of_line)) {
+            return true;
+        }
+        line = end_of_line;
+        if (line != NULL) {
+            line++;
+        }
+    }
+    return false;
+}
+
+static inline void gen_runtime_declarations(FILE* file) {
+    TEST_UNUSED(fputs("\n", file));
+    for (uint64_t i = 0; i < (uint64_t)RT_COUNT; i++) {
+        const rt_entry_t rt = (rt_entry_t)i;
+        char symbol[GEN_PATH_CAP];
+        TEST_UNUSED(snprintf(symbol, sizeof symbol, "@\"%s\"(", rt_entry_name(rt)));
+        if (gen_defines(symbol)) {
+            // The module defines it, so a declaration beside it would be the
+            // redefinition `opt` rejects (item 8).
+            continue;
+        }
+        TEST_UNUSED(fputs("declare ", file));
+        TEST_UNUSED(fputs(ir_result_text(rt_entry_result(rt)), file));
+        TEST_UNUSED(fputs(" @\"", file));
+        TEST_UNUSED(fputs(rt_entry_name(rt), file));
+        TEST_UNUSED(fputs("\"(", file));
+        for (uint32_t p = 0; p < rt_entry_param_count(rt); p++) {
+            if (p > 0) {
+                TEST_UNUSED(fputs(", ", file));
+            }
+            TEST_UNUSED(fputs(ir_param_text(rt_entry_param(rt, p)), file));
+        }
+        TEST_UNUSED(fputs(")\n", file));
+    }
+}
+
 static inline const char* verified(void) {
     const char* blocks = gen_block_terminators();
     if (strcmp(blocks, "one terminator per block") != 0) {
@@ -461,6 +543,7 @@ static inline const char* verified(void) {
     }
     const str_t text = sb_view(&gen_module);
     TEST_UNUSED(fwrite(text.ptr, 1, (size_t)text.len, file));
+    gen_runtime_declarations(file);
     TEST_UNUSED(fclose(file));
     char program[] = FORT_OPT;
     char passes[] = "-passes=verify";
@@ -484,23 +567,6 @@ static inline const char* verified(void) {
         return ir();
     }
     return "verified";
-}
-
-// The contents of a file of the repository, as a NUL-terminated string owned
-// by the caller-visible buffer, for the golden modules under test/ir.
-static inline const char* gen_read(const char* path, sb_t* into) {
-    FILE* file = fopen(path, "rb");
-    if (file == NULL) {
-        return NULL;
-    }
-    sb_clear(into);
-    int byte = fgetc(file);
-    while (byte != EOF) {
-        sb_push(into, (char)byte);
-        byte = fgetc(file);
-    }
-    TEST_UNUSED(fclose(file));
-    return sb_cstr(into);
 }
 
 // A program whose body is `body` inside `fn i32 main()`, the shape most of

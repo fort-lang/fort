@@ -252,30 +252,30 @@ fn void the_declaration_groups_stand_in_their_fixed_order() {
     assert(gen_stmt.gen_program(&e.g, &e.c.ck, &e.c.m.set));
     string got = gen_env.module_text(&e);
     gen_env.expect_blocks(&e, got);
-    string[9] mut want = {
+    // Two groups and no third: the runtime is defined in the module rather
+    // than declared (item 8, D13.1).
+    string[5] mut want = {
         "declare void @swap(i8 zeroext, i16 signext, ...)\n",
         "declare i32 @puts(ptr, ...)\n",
-        "\n",
-        "declare void @fort_rt_fail_overflow(ptr, i32, i32) #2\n",
-        "declare void @fort_rt_print_i64(i32, i64)\n",
-        "declare void @fort_rt_print_char(i32, i8 zeroext)\n",
         "\n",
         "declare { i64, i1 } @llvm.sadd.with.overflow.i64(i64, i64) #4\n",
         "",
     };
-    assert(str.find(got, gen_env.join_lines(&e, want[0..8])) >= 0);
-    string[5] mut groups = {
+    assert(str.find(got, gen_env.join_lines(&e, want[0..4])) >= 0);
+    assert(str.find(got, "declare void @\"std.rt.") < 0);
+    string[4] mut groups = {
         "attributes #0 = { nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\" }\n",
-        "attributes #2 = { cold noreturn nounwind }\n",
         "attributes #3 = { nobuiltin }\n",
         "attributes #4 = { nocallback nofree nosync nounwind speculatable willreturn ",
         "memory(none) }\n",
     };
-    assert(str.find(got, gen_env.join_lines(&e, groups[0..5])) >= 0);
-    // The groups a module does not use leave no trace, so #1 and #5 to #7 are
-    // absent here (D19.5).
+    assert(str.find(got, gen_env.join_lines(&e, groups[0..4])) >= 0);
+    // The groups a module does not use leave no trace, so #1, #2 and #5 to
+    // #8 are absent here (D19.5); `#2` is never emitted at all (item 14).
     assert(str.find(got, "attributes #1 =") < 0);
+    assert(str.find(got, "attributes #2 =") < 0);
     assert(str.find(got, "attributes #5 =") < 0);
+    assert(str.find(got, "attributes #8 =") < 0);
 }
 
 // The text of every attribute group, at its fixed index: the one place the
@@ -288,7 +288,13 @@ fn void every_attribute_group_has_its_text() {
            "nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"");
     assert(gen_data.attr_text(gen.ATTR_FN_NORET) ==
            "noreturn nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"");
-    assert(gen_data.attr_text(gen.ATTR_FAIL) == "cold noreturn nounwind");
+    // `#2` is never emitted: it held the C runtime's declarations, and its
+    // index stays so that `#3` to `#7` keep the numbers item 14 fixes for
+    // them (D19.5). `#8` is `#1` plus `cold`, on the definitions of the
+    // `noreturn` entry points of 5.1.
+    assert(gen_data.attr_text(gen.ATTR_UNUSED_2) == "cold noreturn nounwind");
+    assert(gen_data.attr_text(gen.ATTR_RT_NORET) ==
+           "cold noreturn nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"");
     assert(gen_data.attr_text(gen.ATTR_NOBUILTIN) == "nobuiltin");
     assert(gen_data.attr_text(gen.ATTR_OVERFLOW) ==
            "nocallback nofree nosync nounwind speculatable willreturn memory(none)");
@@ -298,7 +304,7 @@ fn void every_attribute_group_has_its_text() {
            "nocallback nofree nounwind willreturn memory(argmem: write)");
     assert(gen_data.attr_text(gen.ATTR_TRAP) ==
            "cold noreturn nounwind memory(inaccessiblemem: write)");
-    assert(gen_data.attr_text(gen.ATTR_TRAP) != gen_data.attr_text(gen.ATTR_FAIL));
+    assert(gen_data.attr_text(gen.ATTR_TRAP) != gen_data.attr_text(gen.ATTR_UNUSED_2));
 }
 
 // The overflow intrinsics of item 15, in the order `sadd ssub smul uadd usub

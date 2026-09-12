@@ -58,7 +58,7 @@ done
 # them: an equality and not a floor, so that a file cannot slip out of the
 # comparison. A ticket that adds or removes a .ft file changes all four lines
 # in the same commit.
-FT_FILES=772
+FT_FILES=774
 
 # The files of that corpus stage1 compiles into a module, which are the ones
 # compared. It is an equality for the reason FT_FILES is: a comparison that
@@ -70,7 +70,7 @@ FT_FILES=772
 # import a support module, which that script cannot resolve and skips -- and
 # its question is narrower, since the 72 files that check clean and hold no
 # `main` compile into no module and are skipped here.
-PROGRAM_FILES=459
+PROGRAM_FILES=458
 
 # The search roots every run is given: the standard library the build copied,
 # src/fort so that the compiler's own modules resolve, and test/fort/support
