@@ -13,7 +13,7 @@ branch, the worktree and the ticket file.
 - Run the `code-review` skill on the branch against `main` at `high` effort and report its
   findings.
 - Additionally check: every rule implemented cites the decision it comes from (`Dn.m`) and
-  matches `notes/decisions.md`, which is normative; the tests grew with the code and cover the
+  matches `spec/decisions.md`, which is normative; the tests grew with the code and cover the
   boundaries, not just the middle; `test/lang/xfail.txt` shrank for every test the change makes
   pass; the ticket's criteria are ticked with evidence including a green `gate`; AGENTS.md was
   amended for any learning; the commits follow AGENTS.md; nothing outside the ticket's scope

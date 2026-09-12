@@ -1,7 +1,7 @@
 # Language tests
 
 End-to-end tests for the `fort` compiler. The convention is fixed by decisions D14.4 and D14.5
-in `notes/decisions.md` and described in `notes/toolchain.md` section 7; this file is the short
+in `spec/decisions.md` and described in `spec/toolchain.md` section 7; this file is the short
 version. Each test is a `.ft` file whose expected behavior is encoded in `//!` directives at the
 top of the file.
 
@@ -15,7 +15,7 @@ top of the file.
   no `//!` directives.
 - `ffi/*.c`: C helpers that tests link in with `//! link:`.
 - `programs/*.ft`: larger programs that exercise many features at once, treated as run tests.
-  `programs/wc.ft` is the worked example of `notes/stdlib.md` section 4 byte for byte below
+  `programs/wc.ft` is the worked example of `spec/stdlib.md` section 4 byte for byte below
   its directives, so a change to one is a change to the other; `programs/cat.ft` is the
   example of section 2.4 with its `?:` written as an `if`, which stage1 admits.
 
@@ -68,7 +68,7 @@ tests, `-v` shows the commands and outputs of failures and `--keep` keeps the te
 directories. From the VM, `tools/vm check-lang` runs it with the debug build. `xfail.txt` lists
 the tests the compiler cannot pass yet (a listed test that passes fails the run) and
 `bootstrap-unsupported.txt` the tests the C bootstrap must reject with `not supported by the
-bootstrap compiler`; see `notes/toolchain.md` 7.3. `python3 -m unittest run_tests_test` runs
+bootstrap compiler`; see `spec/toolchain.md` 7.3. `python3 -m unittest run_tests_test` runs
 the harness's own tests.
 
 ## How a test is judged

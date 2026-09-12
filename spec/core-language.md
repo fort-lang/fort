@@ -3,8 +3,8 @@
 ## 1. Introduction and notation
 
 This document is the reference for the core of fort v1: lexical structure, declarations and
-mutability, expressions, statements, functions and builtins. `notes/decisions.md` is the decision
-log and `notes/grammar.md` is the grammar; both are normative, and where this document disagrees
+mutability, expressions, statements, functions and builtins. `spec/decisions.md` is the decision
+log and `spec/grammar.md` is the grammar; both are normative, and where this document disagrees
 with either, this document has the bug. Rules cite decisions as `(D5.3)`. Types are summarized
 in section 4 and specified in `type-system.md`; ownership (`own`, `move`) is introduced in 3.9
 and its memory rules are in `memory-model.md`, as are the runtime checks; modules, imports and

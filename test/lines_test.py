@@ -48,7 +48,7 @@ class GlobMatching(unittest.TestCase):
                      "test/fort/containers_test.ft"):
             self.assertTrue(lines.path_matches(path, tests), path)
             self.assertFalse(lines.path_matches(path, source), path)
-        for path in ("tools/lines.py", "notes/decisions.md", "editors/vscode/extension.js"):
+        for path in ("tools/lines.py", "spec/decisions.md", "editors/vscode/extension.js"):
             self.assertFalse(lines.path_matches(path, source), path)
             self.assertFalse(lines.path_matches(path, tests), path)
 

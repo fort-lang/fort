@@ -3,7 +3,7 @@
 # tokens.
 #
 # `fort --tokens <file>` lexes that one file and writes one line per token in
-# the form of notes/toolchain.md 1 (D14.1). Both compilers implement it --
+# the form of spec/toolchain.md 1 (D14.1). Both compilers implement it --
 # src/bootstrap/lexer.c and src/fort/lexer.ft -- and this script is what holds
 # the second against the first while Phase B is written: for every .ft file it
 # compares the two dumps, the two sets of diagnostics and the two exit

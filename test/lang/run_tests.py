@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the fort language tests (notes/toolchain.md 7, decisions D14.4 and D14.5).
+"""Run the fort language tests (spec/toolchain.md 7, decisions D14.4 and D14.5).
 
 Every test is a `.ft` file whose expected behavior is encoded in `//!`
 directives; a directory containing `main.ft` is one multi-file test. Each test

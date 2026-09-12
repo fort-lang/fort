@@ -38,7 +38,7 @@ which is the shortest path from a wrong colour to the rule that produced it.
 ## Diagnostics
 
 Nothing is built on the host, so the compiler that answers is the one in the development VM
-(`AGENTS.md`, Environment), and the repository already owns the crossing. On every open and every
+(`notes/environment.md` 1), and the repository already owns the crossing. On every open and every
 save of a `.ft` file the extension runs, in a child process and never on the UI thread:
 
 ```sh
@@ -72,7 +72,7 @@ information naming the second place it points at: the two often carry the same r
 squiggles over one span would say nothing about being one diagnostic. The extension publishes the
 diagnostics of every file of the closure that lies in the workspace folder, which clears the
 squiggles of a file that is now clean, and drops the rest: the closure includes the standard
-library, whose paths name files in the guest that the host cannot open (`notes/toolchain.md` 9.2). A
+library, whose paths name files in the guest that the host cannot open (`spec/toolchain.md` 9.2). A
 note whose file is dropped that way goes with it, while its error stands.
 
 Two conversions matter and are what the unit tests are mostly about. The document counts 1-based
@@ -138,7 +138,7 @@ reads the old plist `.tmLanguage` or its own `.sublime-syntax`, not the JSON for
 conversion of this file. GitHub's file view highlights only the languages Linguist ships a grammar
 for, and fort is not one of them; that takes a Linguist submission once fort is public. Zed,
 Neovim and Helix are tree-sitter only. A tree-sitter grammar for fort is the follow-up and is a
-transliteration of `notes/grammar.md`; it is deliberately not part of this extension.
+transliteration of `spec/grammar.md`; it is deliberately not part of this extension.
 
 ## What the grammar knows
 
@@ -157,7 +157,7 @@ declaration such as `node mut* own mut@ own kids`.
 Two shapes in the file are load-bearing. A rule that names keywords writes them as one word group,
 `\b(?:a|b)\b` or `\b(a|b)`, and a rule that names operators or punctuation writes them as one
 alternation of literals, `(?:\+|-)`. `test/highlight_test.py` reads those two shapes out of the
-grammar and compares them with the lists of D2.4 and D2.10 in `notes/decisions.md`, so a keyword
+grammar and compares them with the lists of D2.4 and D2.10 in `spec/decisions.md`, so a keyword
 added to the decision log and not to the grammar fails the build (ctest `highlight_selftest`); a
 rule whose scope is in a keyword or operator family but whose pattern matches neither shape is an
 error too, so a rule cannot escape the comparison by being written some other way.
@@ -182,3 +182,14 @@ Python's `re`, a stand-in for the Oniguruma engine VS Code uses, so a pattern th
 differently would pass the test and still misbehave in the editor. The grammar therefore sticks to
 constructs both engines share -- character classes, non-capturing groups, `\b`, and lookahead --
 and uses no back-reference, no `\G` and no variable-width lookbehind.
+
+## Conventions for these sources
+
+- The VS Code extension's sources are plain JavaScript wrapped at 100 columns, and no gate target
+  lints them, so the conventions are here: `'use strict'` at the top of every file, CommonJS
+  (`require`/`module.exports`, no ESM and no bundler), `//` comments only as in C and fort (D2.2),
+  two-space indentation, single quotes, semicolons, `const` unless a binding is reassigned, no npm
+  dependency and no devDependency, and no API beyond Node's standard library and `vscode` (which
+  only `extension.js` may require). A file is tested by `node --test` or it is `extension.js`.
+  `test/package.test.js` asserts the last two by reading the sources, so a second
+  `require('vscode')` or a second module under `lib/` is a red test.

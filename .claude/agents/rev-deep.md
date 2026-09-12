@@ -16,7 +16,7 @@ adversarially.
 - Run the `code-review` skill on the branch against `main` at `max` effort and report its
   findings.
 - Then work independently of the implementation:
-  - re-derive the invariants from `notes/decisions.md` and `notes/toolchain.md` section 6, and
+  - re-derive the invariants from `spec/decisions.md` and `spec/toolchain.md` section 6, and
     check the code against your derivation rather than against its own comments;
   - enumerate the boundary cases yourself (minimum and maximum values, zero length, first and
     last element, the trapping path, the empty and single-element inputs) and find the ones the

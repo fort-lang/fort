@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Count test lines per source line (notes/toolchain.md 7.6, D14.6).
+"""Count test lines per source line (spec/toolchain.md 7.6, D14.6).
 
 Source lines are src/bootstrap/*.c and *.h, src/fort/*.ft and std/*.ft; test
 lines are test/*.c, test/*.h, test/**/*.ft and test/lang/ffi/*.c. The standard

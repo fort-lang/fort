@@ -1,5 +1,5 @@
 // Unit tests of lexer.h's token dump, the output of `fort --tokens` (D14.1)
-// whose form notes/toolchain.md 1 documents:
+// whose form spec/toolchain.md 1 documents:
 //
 //     <line>:<col>-<end_line>:<end_col> <value> "<spelling>" <kind>
 //

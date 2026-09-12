@@ -2,7 +2,7 @@
 
 Not the real decision log: this file is a copy of the D2.4 and D2.10 bullets with one keyword
 (`effect`) and one operator (`<->`) added, so the drift test can prove that a token added to the
-decisions and not to the grammar is caught without anyone editing `notes/decisions.md`.
+decisions and not to the grammar is caught without anyone editing `spec/decisions.md`.
 
 ## D2 Lexical structure
 

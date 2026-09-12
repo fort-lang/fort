@@ -2,7 +2,7 @@
 #ifndef FORT_TEST_COMMON_H
 #define FORT_TEST_COMMON_H
 
-// Discards a call result on purpose (AGENTS.md, C sources).
+// Discards a call result on purpose (notes/style.md 2).
 #define TEST_UNUSED(expr) ((void)(expr))
 
 #endif

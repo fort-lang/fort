@@ -2,8 +2,8 @@
 # vi: set ft=ruby :
 #
 # The fort development VM: Ubuntu 24.04 arm64 on VirtualBox with the native and
-# x86-64 cross toolchains installed by tools/provision.sh (see AGENTS.md,
-# Environment).
+# x86-64 cross toolchains installed by tools/provision.sh (see
+# notes/environment.md 1).
 #
 # Do not run `vagrant` directly. Run it only through `tools/vm`, which points
 # VAGRANT_CWD at the VM directory ($FORT_VM_DIR, or else the main checkout) so

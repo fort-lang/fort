@@ -2,7 +2,7 @@
 """Unit tests of the TextMate grammar in editors/vscode/syntaxes/fort.tmLanguage.json.
 
 Two things are checked. First, drift: the keyword and reserved lists of D2.4
-and the operator list of D2.10 are read out of notes/decisions.md and compared
+and the operator list of D2.10 are read out of spec/decisions.md and compared
 with the sets the grammar names, so an amendment to the decision log that the
 grammar does not follow fails the build. The grammar writes keywords as one
 word group, `\\b(?:a|b)\\b`, and operators as one alternation of literals,
@@ -34,7 +34,7 @@ from pathlib import Path
 TEST_DIR = Path(__file__).resolve().parent
 ROOT = TEST_DIR.parent
 GRAMMAR_PATH = ROOT / "editors" / "vscode" / "syntaxes" / "fort.tmLanguage.json"
-DECISIONS_PATH = ROOT / "notes" / "decisions.md"
+DECISIONS_PATH = ROOT / "spec" / "decisions.md"
 FIXTURE_DIR = TEST_DIR / "highlight"
 LANG_RUN_DIR = ROOT / "test" / "lang" / "run"
 LANG_PROGRAMS_DIR = ROOT / "test" / "lang" / "programs"

@@ -3,7 +3,7 @@
 # syntax tree.
 #
 # `fort --ast <file>` lexes and parses that one file and writes its tree as
-# one S-expression in the form of notes/toolchain.md 1 (D14.1). Both compilers
+# one S-expression in the form of spec/toolchain.md 1 (D14.1). Both compilers
 # implement it -- src/bootstrap/ast_dump.c and src/fort/ast.ft -- and this
 # script is what holds the second against the first while Phase B is written:
 # for every .ft file it compares the two trees, the two sets of diagnostics

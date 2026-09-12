@@ -1,4 +1,4 @@
-# Sanitizer selection for the native build (AGENTS.md, Build and test).
+# Sanitizer selection for the native build (notes/environment.md 5).
 #
 # FORT_SANITIZER names the sanitizer, or is empty. The flags are applied with
 # add_compile_options/add_link_options so that every native target (the

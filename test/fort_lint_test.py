@@ -26,7 +26,7 @@ from pathlib import Path
 
 TEST_DIR = Path(__file__).resolve().parent
 ROOT = TEST_DIR.parent
-DECISIONS_PATH = ROOT / "notes" / "decisions.md"
+DECISIONS_PATH = ROOT / "spec" / "decisions.md"
 sys.path.insert(0, str(ROOT / "tools"))
 
 import fort_lint  # noqa: E402

@@ -13,9 +13,9 @@ fort is a C-like systems language: immutable by default, sized arrays and spans,
 (`own`/`move`), modules, checked arithmetic. It targets x86-64 Linux through GNU assembly and a
 small C runtime. You write C11 in `src/bootstrap/` or fort in `src/fort/`.
 
-Normative order: `notes/decisions.md` (numbered `Dn.m`) and `notes/grammar.md` win over the
+Normative order: `spec/decisions.md` (numbered `Dn.m`) and `spec/grammar.md` win over the
 specification documents, which win over comments and code. Read only what your ticket cites:
-grep the decision numbers (`grep -n 'D7\.8' notes/decisions.md`) rather than reading whole
+grep the decision numbers (`grep -n 'D7\.8' spec/decisions.md`) rather than reading whole
 documents; `decisions.md` alone is about 900 lines.
 
 The bootstrap compiler must stay transliterable into fort: no unions, no function-pointer
@@ -38,7 +38,7 @@ later, in generated assembly, so front-load the thinking:
 - Before writing code, enumerate the cases in the ticket's Notes and name the invariant each one
   preserves, citing the decision that owns it. Include the cases you decide are impossible and
   say why.
-- Where the ticket produces assembly, hand-verify a sample against `notes/toolchain.md` section
+- Where the ticket produces assembly, hand-verify a sample against `spec/toolchain.md` section
   6 (PIE addressing, 16-byte alignment at calls, `al` before extern calls, narrow-value
   normalisation, out-of-line check stubs) and keep a golden test for it.
 - Expect the specification to be silent somewhere. Record the conservative reading in the Notes

@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 project(fort LANGUAGES C)
 
 # ---- toolchain --------------------------------------------------------------
-# C11 without extensions and with POSIX.1-2008 visible (AGENTS.md, C sources).
+# C11 without extensions and with POSIX.1-2008 visible (notes/style.md 2).
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
@@ -473,7 +473,7 @@ set_tests_properties(check_comments_selftest PROPERTIES
 
 # The unit tests of tools/lines.py (label unit): the glob matcher, which the
 # guest's Python 3.12 cannot delegate to pathlib, and the --since mode that
-# measures a branch's own diff (AGENTS.md, Build and test).
+# measures a branch's own diff (notes/testing.md 9).
 add_test(NAME lines_selftest
     COMMAND "${FORT_PYTHON3}" -m unittest lines_test
     WORKING_DIRECTORY "${FORT_TEST_DIR}")

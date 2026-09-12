@@ -10,8 +10,9 @@
 //
 // VS Code runs on the host and the compiler runs in the development VM, and the
 // repository already owns that crossing: `tools/vm run <command>` runs a command
-// in the guest directory matching the host working directory (AGENTS.md,
-// Environment). `spawnCheck` below is the only function that knows any of this.
+// in the guest directory matching the host working directory
+// (notes/environment.md 1). `spawnCheck` below is the only function that knows
+// any of this.
 
 const childProcess = require('child_process');
 const fs = require('fs');
@@ -21,7 +22,7 @@ const vscode = require('vscode');
 const check = require('./lib/check');
 
 // The compiler: the release build in the guest, which is where everything this
-// project builds is built (AGENTS.md, Environment). It is a constant rather than
+// project builds is built (notes/environment.md 1). It is a constant rather than
 // a setting because there is one right answer. It finds its own standard library
 // in the `std` directory beside it (D14.1), so the command needs no other
 // argument, and imports resolve from the importing file's directory (D9.2).
