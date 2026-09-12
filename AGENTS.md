@@ -1,8 +1,9 @@
 # fort
 A safe(r) C-like systems programming language.
 
-## Writing: ASD-STE everywhere
-- **Write in ASD-STE (Simplified Technical English).** The user asked for this on 2026-09-11 and
+## Writing: ASD-STE100 everywhere
+- **Write in ASD-STE100**, the ASD Simplified Technical English specification. Name it in
+  full: the standard is ASD-STE100, not "ASD-STE". The user asked for this on 2026-09-11 and
   then said "use it everywhere", so it governs **all** the text this project writes: replies to
   the user, code comments, commit messages, ticket text, the prompts that go to agents, and the
   specification documents in `notes/`. There is no exempt category.
