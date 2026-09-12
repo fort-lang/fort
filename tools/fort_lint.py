@@ -34,6 +34,12 @@ from `test/fort/support`, so without them every such file reports `module
 default glob with the roots its files need, and `-I` on the command line adds
 roots for the files named there.
 
+One run of `fort --index` indexes the whole import closure of the file it
+names, and each record carries the file it came from, so one run judges every
+file of the set that the closure holds. The tool takes the first file it has
+not judged as the next entry. A file that no closure reaches becomes an entry
+itself, so every file of the set is judged.
+
 Usage: fort_lint.py --fort build/<preset>/fort [-I dir ...] [file.ft ...].
 With no file it checks the globs of SOURCE_SETS. Problems print as
 <file>:<line>:<col>: <message> and the exit status is 1 when it reported
@@ -213,17 +219,33 @@ def has_source_text(text):
     return False
 
 
-def same_file(root, recorded, wanted):
-    """Whether an index record's file is the file being linted.
+def real_path(root, recorded, cache):
+    """The real path of a file name a record or the file set spells.
 
     An import resolves to the copy of the library beside the compiler, so the
     closure of one module holds records of files under build/<preset>/std as
-    well; each is linted when it is the entry itself. Comparing real paths
-    keeps a record that spells the same file differently from being dropped.
+    well. Real paths make a record that spells the same file differently equal
+    to it. The cache holds one entry per distinct name: one run names 33000
+    records over 40 files, and os.path.realpath is a syscall for each component
+    of each name. The cache is keyed on the recorded name alone, so one cache
+    serves one root; every caller passes the root it built the cache with.
     """
-    return os.path.realpath(os.path.join(root, recorded)) == os.path.realpath(
-        os.path.join(root, wanted)
-    )
+    resolved = cache.get(recorded)
+    if resolved is None:
+        resolved = os.path.realpath(os.path.join(root, recorded))
+        cache[recorded] = resolved
+    return resolved
+
+
+def same_file(root, recorded, wanted):
+    """Whether an index record's file is the file being linted.
+
+    No production path calls this since T-095, which reads the records of a
+    whole closure through group_records instead. It stays as the one-pair form
+    of the comparison, and test/fort_lint_test.py tests it.
+    """
+    cache = {}
+    return real_path(root, recorded, cache) == real_path(root, wanted, cache)
 
 
 def diagnostic_problems(document):
@@ -244,8 +266,22 @@ def diagnostic_problems(document):
     return [(1, 1, "fort could not check this closure: %s:%d:%d: %s" % row) for row in keyed]
 
 
-def document_problems(document, root, relative, has_source_text=True):
-    """The problems the index document reports about one file, sorted.
+def group_records(document, root, cache):
+    """The document's records, in a dict keyed by the real path of their file.
+
+    One run indexes the whole import closure (D20.3) and every record names the
+    file it came from, so one pass over the records serves every file of the
+    closure. The lint reads the dict once per file instead of reading the whole
+    record list once per file.
+    """
+    buckets = {}
+    for record in document.get("symbols", []):
+        buckets.setdefault(real_path(root, record["file"], cache), []).append(record)
+    return buckets
+
+
+def file_problems(records, diagnostics, has_source_text=True):
+    """The problems one run reports about one file, sorted by position.
 
     A file the checker rejected is still indexed for everything that resolved
     (D20.3), so the rules run over those records too: one broken module must
@@ -254,14 +290,10 @@ def document_problems(document, root, relative, has_source_text=True):
     lexical error stops the file before the checker (D14.2) and leaves no
     record at all.
     """
-    problems = diagnostic_problems(document)
+    problems = list(diagnostics)
     seen = set()
-    records = 0
     found = []
-    for record in document.get("symbols", []):
-        if not same_file(root, record["file"], relative):
-            continue
-        records += 1
+    for record in records:
         for message in record_problems(record):
             key = (record["line"], record["col"], message)
             if key in seen:
@@ -272,13 +304,24 @@ def document_problems(document, root, relative, has_source_text=True):
     # tool must not depend on that to report in it.
     found.sort(key=lambda problem: (problem[0], problem[1]))
     problems.extend(found)
-    if records == 0 and not problems and has_source_text:
+    if not records and not problems and has_source_text:
         # The guard against a silent pass: a file whose records the filter
         # above never matched would be linted by nothing at all. A file that
         # declares nothing (an empty module, a stub of comments) is not that
         # case, and a file with a diagnostic has its reason already.
         problems.append((1, 1, "fort --index reported no identifier in this file"))
     return problems
+
+
+def document_problems(document, root, relative, has_source_text=True):
+    """The problems one document reports about one file, sorted.
+
+    The one-file form of file_problems, for a caller that holds a document and
+    asks about a single file.
+    """
+    cache = {}
+    records = group_records(document, root, cache).get(real_path(root, relative, cache), [])
+    return file_problems(records, diagnostic_problems(document), has_source_text)
 
 
 def index_document(fort, root, relative, includes=()):
@@ -318,29 +361,76 @@ def index_document(fort, root, relative, includes=()):
     return document, None
 
 
-def lint_file(fort, root, path, includes=()):
-    """Return the formatted problems of one file, in source order.
-
-    A broken environment costs the file its index, not the checks that read
-    only its text: the width and module-name problems already computed are
-    reported beside the failure rather than thrown away. The sort is by
-    position and stable, so two problems at one position keep the order the
-    rules produced them in.
-    """
-    relative = os.path.relpath(str(path), str(root))
+def text_problems(relative, text):
+    """The problems the file's own text carries: its module name and its width."""
     problems = []
-    name = module_name_problem(path)
+    name = module_name_problem(relative)
     if name is not None:
         problems.append((1, 1, name))
-    text = Path(path).read_text(encoding="utf-8")
     problems.extend(width_problems(text))
-    document, error = index_document(fort, root, relative, includes)
-    if error is not None:
-        problems.append((1, 1, error))
-    else:
-        problems.extend(document_problems(document, root, relative, has_source_text(text)))
-    problems.sort(key=lambda problem: (problem[0], problem[1]))
-    return ["%s:%d:%d: %s" % (relative, line, col, message) for line, col, message in problems]
+    return problems
+
+
+def lint_files(fort, root, files):
+    """Return the formatted problems of each file, and the number of runs.
+
+    One `fort --index` run indexes the whole import closure of its entry and
+    names the file of every record (D20.3), so the run judges every file of the
+    set that its closure holds. The loop takes the first file it has not judged
+    as the next entry and judges the closure with it. One run per file instead
+    re-checks each closure once per member, which is O(n^2) checker work: the
+    166 files of the default set took 166 runs and 46.9 s under the debug
+    preset, and take 141 runs and 14.9 s this way (T-095).
+
+    A run that fails costs its entry the index, not the checks that read only
+    the text, and leaves every other file of the set for a run of its own. The
+    run's diagnostics go to every file the run judges, so a broken module names
+    itself once in each file of its closure; that reports more than one run per
+    file did, never less. The sort is by position and stable, so two problems at
+    one position keep the order the rules produced them in.
+    """
+    cache = {}
+    entries = []
+    for path, includes in files:
+        relative = os.path.relpath(str(path), str(root))
+        text = Path(path).read_text(encoding="utf-8")
+        entries.append((relative, tuple(includes), real_path(root, relative, cache), text))
+    reports = [None] * len(entries)
+    runs = 0
+    for index, (relative, includes, _, _) in enumerate(entries):
+        if reports[index] is not None:
+            continue
+        document, error = index_document(fort, root, relative, includes)
+        runs += 1
+        if error is not None:
+            reports[index] = [(1, 1, error)]
+            continue
+        buckets = group_records(document, root, cache)
+        diagnostics = diagnostic_problems(document)
+        for other in range(index, len(entries)):
+            if reports[other] is not None:
+                continue
+            records = buckets.get(entries[other][2])
+            if other != index and (not records or entries[other][1] != includes):
+                # The whole design rests on one fact: a file's records depend on
+                # that file's own import closure and on nothing wider, so the
+                # records of a file in this document are the records its own run
+                # would give. The search roots are the one thing that can change
+                # that closure (D9.2), so a run judges a file only when the roots
+                # agree. The default set loses no run to the rule: std/ resolves
+                # through the copy beside the compiler, which is another file,
+                # and the test/fort tests carry the roots of test/fort/support.
+                continue
+            source = has_source_text(entries[other][3])
+            reports[other] = file_problems(records or [], diagnostics, source)
+    lines = []
+    for index, (relative, _, _, text) in enumerate(entries):
+        problems = text_problems(relative, text) + reports[index]
+        problems.sort(key=lambda problem: (problem[0], problem[1]))
+        lines.append(
+            ["%s:%d:%d: %s" % (relative, line, col, message) for line, col, message in problems]
+        )
+    return lines, runs
 
 
 def empty_set_problems(root, paths):
@@ -400,8 +490,8 @@ def main(argv=None):
 
     problems = []
     files_with_problems = 0
-    for path, includes in files:
-        found = lint_file(args.fort, args.root, path, includes)
+    reports, _ = lint_files(args.fort, args.root, files)
+    for found in reports:
         if found:
             files_with_problems += 1
         problems.extend(found)

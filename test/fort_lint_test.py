@@ -504,6 +504,195 @@ class FakeCompiler(unittest.TestCase):
         self.assertIn("no identifier", got.stdout)
 
 
+class RunPerClosure(unittest.TestCase):
+    """One `fort --index` run judges every file of the closure it indexed.
+
+    The tool ran one `fort --index` per file until T-095. Each run re-checked
+    the whole import closure of its file, so the checker did O(n^2) work and
+    the ctest took 48.9 s under the debug preset for 166 files. A run now
+    judges every file of the set that its document names (D20.3), and the
+    fake compiler here counts the runs.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.log = self.root / "runs.log"
+        for name in ("a.ft", "b.ft", "c.ft"):
+            # A declaration, so the empty-index guard is live for these tests.
+            (self.root / name).write_text("// %s\nfn void f() {}\n" % name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def fake_fort(self, body):
+        """A fake compiler that logs the file it was given, then runs the body."""
+        path = self.root / "fake_fort"
+        path.write_text(
+            "#!%s\nimport sys\n" % sys.executable
+            + "entry = sys.argv[-1]\n"
+            + "open(%r, 'a').write(entry + '\\n')\n" % str(self.log)
+            + body
+        )
+        path.chmod(0o755)
+        return str(path)
+
+    def runs(self):
+        """The files the fake compiler was asked to index, in order."""
+        if not self.log.exists():
+            return []
+        return self.log.read_text().split()
+
+    def lint(self, fort, *names):
+        return fort_lint.lint_files(fort, self.root, [(self.root / name, ()) for name in names])
+
+    def document(self, *records):
+        return '{"diagnostics":[],"symbols":[%s]}' % ",".join(records)
+
+    def declaration(self, file, name, line=1, col=1):
+        return (
+            '{"file":"%s","line":%d,"col":%d,"name":"%s",'
+            '"kind":"fn","type":"fn void()","is_decl":true}' % (file, line, col, name)
+        )
+
+    def test_one_run_judges_every_file_of_its_closure(self):
+        document = self.document(
+            self.declaration("a.ft", "ok"),
+            self.declaration("b.ft", "also_ok", line=2),
+            self.declaration("c.ft", "Bad", line=3, col=4),
+        )
+        fort = self.fake_fort("print(%r)\n" % document)
+        reports, runs = self.lint(fort, "a.ft", "b.ft", "c.ft")
+        self.assertEqual(runs, 1)
+        self.assertEqual(self.runs(), ["a.ft"])
+        self.assertEqual(reports[0], [])
+        self.assertEqual(reports[1], [])
+        self.assertEqual(reports[2], ["c.ft:3:4: fn 'Bad' is not lower_case (D1.4)"])
+
+    def test_a_file_no_closure_names_becomes_an_entry_itself(self):
+        """The rule that keeps every file judged: coverage decides, not the closure's size."""
+        fort = self.fake_fort(
+            "print(%r if entry == 'a.ft' else %r)\n"
+            % (
+                self.document(self.declaration("a.ft", "ok"), self.declaration("c.ft", "ok")),
+                self.document(self.declaration("b.ft", "Bad", line=5, col=6)),
+            )
+        )
+        reports, runs = self.lint(fort, "a.ft", "b.ft", "c.ft")
+        self.assertEqual(runs, 2)
+        self.assertEqual(self.runs(), ["a.ft", "b.ft"])
+        self.assertEqual(reports[1], ["b.ft:5:6: fn 'Bad' is not lower_case (D1.4)"])
+        self.assertEqual(reports[2], [])
+
+    def test_a_file_with_other_search_roots_takes_a_run_of_its_own(self):
+        """A file keeps the roots its own set gives it (D9.2), so the roots must agree."""
+        document = self.document(
+            self.declaration("a.ft", "ok"), self.declaration("b.ft", "Bad", line=3, col=2)
+        )
+        fort = self.fake_fort("print(%r)\n" % document)
+        files = [(self.root / "a.ft", ()), (self.root / "b.ft", ("x",))]
+        reports, runs = fort_lint.lint_files(fort, self.root, files)
+        self.assertEqual(runs, 2)
+        self.assertEqual(self.runs(), ["a.ft", "b.ft"])
+        self.assertEqual(reports[1], ["b.ft:3:2: fn 'Bad' is not lower_case (D1.4)"])
+
+    def test_a_record_that_spells_the_file_differently_still_matches(self):
+        """Real paths decide, so `./c.ft` is c.ft (the copy of std beside the compiler)."""
+        document = self.document(
+            self.declaration("a.ft", "ok"), self.declaration("./c.ft", "Bad", line=7, col=8)
+        )
+        fort = self.fake_fort("print(%r)\n" % document)
+        reports, runs = self.lint(fort, "a.ft", "c.ft")
+        self.assertEqual(runs, 1)
+        self.assertEqual(reports[1], ["c.ft:7:8: fn 'Bad' is not lower_case (D1.4)"])
+
+    def test_a_file_that_fails_to_compile_is_judged_by_nothing(self):
+        """D20.3 gives a file the checker never reached no record, so no rule runs on it.
+
+        b.ft holds a name D1.4 forbids. The compiler reports a diagnostic and
+        indexes nothing, so the run reports the diagnostic and no D1.4
+        problem. The lint must not widen: it judges records, not text.
+        """
+        broken = (
+            '{"diagnostics":[{"file":"b.ft","line":2,"col":1,"message":"expected \';\'"}],'
+            '"symbols":[]}'
+        )
+        fort = self.fake_fort(
+            "print(%r if entry == 'a.ft' else %r)\n"
+            % (self.document(self.declaration("a.ft", "ok")), broken)
+            + "sys.exit(0 if entry == 'a.ft' else 1)\n"
+        )
+        reports, runs = self.lint(fort, "a.ft", "b.ft")
+        self.assertEqual(runs, 2)
+        self.assertEqual(reports[0], [])
+        self.assertEqual(len(reports[1]), 1)
+        self.assertIn("expected ';'", reports[1][0])
+        self.assertNotIn("D1.4", reports[1][0])
+
+    def test_a_run_gives_its_diagnostics_to_every_file_it_judges(self):
+        """The one behaviour T-095 changed, and the shape no other test has.
+
+        The run holds a diagnostic and judges two files. Both hear about it.
+        One run per file gave a file the diagnostics of its own closure; a run
+        now gives them to every file of the closure it indexed, which reports
+        more and never less. A rule that sent them to the entry alone, or to
+        the wrong file, would pass every other test of this class.
+        """
+        document = (
+            '{"diagnostics":[{"file":"c.ft","line":4,"col":2,"message":"unknown name \'q\'"}],'
+            '"symbols":[%s,%s]}'
+            % (self.declaration("a.ft", "ok"), self.declaration("b.ft", "Bad", line=6, col=3))
+        )
+        fort = self.fake_fort("print(%r)\nsys.exit(1)\n" % document)
+        reports, runs = self.lint(fort, "a.ft", "b.ft")
+        self.assertEqual(runs, 1)
+        self.assertEqual(len(reports[0]), 1)
+        self.assertEqual(
+            reports[0][0], "a.ft:1:1: fort could not check this closure: c.ft:4:2: unknown name 'q'"
+        )
+        self.assertEqual(
+            reports[1],
+            [
+                "b.ft:1:1: fort could not check this closure: c.ft:4:2: unknown name 'q'",
+                "b.ft:6:3: fn 'Bad' is not lower_case (D1.4)",
+            ],
+        )
+
+    def test_a_failed_run_leaves_every_other_file_a_run_of_its_own(self):
+        """A broken environment must not take the other files down with it."""
+        fort = self.fake_fort("sys.stderr.write('boom\\n')\nsys.exit(2)\n")
+        reports, runs = self.lint(fort, "a.ft", "b.ft", "c.ft")
+        self.assertEqual(runs, 3)
+        self.assertEqual(self.runs(), ["a.ft", "b.ft", "c.ft"])
+        for report in reports:
+            self.assertEqual(len(report), 1)
+            self.assertIn("fort exited with status 2", report[0])
+
+    def test_the_checks_that_read_the_text_run_for_every_file_of_a_closure(self):
+        """The width check is the file's own, so one run must not cost it."""
+        (self.root / "b.ft").write_text("// " + "x" * 120 + "\nfn void f() {}\n")
+        document = self.document(
+            self.declaration("a.ft", "ok"), self.declaration("b.ft", "ok", line=2)
+        )
+        fort = self.fake_fort("print(%r)\n" % document)
+        reports, runs = self.lint(fort, "a.ft", "b.ft")
+        self.assertEqual(runs, 1)
+        self.assertEqual(len(reports[1]), 1)
+        self.assertIn("over the 100 of the house style", reports[1][0])
+
+    def test_the_empty_index_guard_still_covers_a_file_of_a_closure(self):
+        """A file the run indexed nothing for is reported, not passed in silence."""
+        fort = self.fake_fort(
+            "print(%r)\n" % self.document(self.declaration("a.ft", "ok")) + "sys.exit(0)\n"
+        )
+        reports, runs = self.lint(fort, "a.ft", "b.ft")
+        # b.ft is not in a.ft's document, so it takes a run of its own, whose
+        # document names no record of it either.
+        self.assertEqual(runs, 2)
+        self.assertEqual(len(reports[1]), 1)
+        self.assertIn("no identifier", reports[1][0])
+
+
 class DefaultFileSet(unittest.TestCase):
     """The guard against a lint that is green because it checked nothing."""
 

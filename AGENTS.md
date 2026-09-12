@@ -1324,11 +1324,23 @@ A safe(r) C-like systems programming language.
   lint, because a test exercises the language rather than exemplifying the conventions; and nothing
   checks import order, doc comments or dead code. Block comments need no check: `/*` is a lexical
   error in the compiler itself (D2.2). A new fort source outside `std/` and `src/fort/` is checked
-  by nothing until a glob in `fort_lint.py` names it. One `fort --index` per file re-checks that
-  file's whole import closure, so linting *n* modules costs O(n^2) checker work under each of the
-  gate's three presets: 0.1 s for the eight `std/` modules, and worth rewriting as one run per
-  root entry (`--index` indexes the closure and `same_file` already attributes each record) before
-  `src/fort/` holds forty of them.
+  by nothing until a glob in `fort_lint.py` names it. **One `fort --index` run judges every file
+  of the closure it indexed**, not only the file it names: the run indexes the whole import
+  closure and each record carries its own file (D20.3), so `lint_files` takes the first file it
+  has not judged as the next entry and reads the records of every file of the set out of that one
+  document. One run per file re-checked each closure once per member, which is O(n^2) checker
+  work: the 166 files of the default set took 166 runs and 46.9 s under the debug preset, and take
+  141 runs and 14.9 s this way (T-095). 127 of those 141 runs are the `test/fort` tests, which no
+  module imports, so 141 is near the floor until `fort` accepts more than one entry file. Four
+  rules hold the new shape to the old verdict, and a change there must keep all four. A file the
+  document does not name stays pending and becomes an entry itself, so no file goes unjudged; a
+  run judges a file only when that file's search roots equal the entry's, since a file keeps the
+  roots its own set gives it (D9.2), and the default set loses no run to that rule; a run that
+  fails gives its error to its entry alone and leaves the other files a run each; `real_path`
+  memoises `os.path.realpath` per distinct name, because one document holds 33000 records and the
+  uncached filter cost 0.39 s per file, more than the compiler run it filtered. The one behaviour
+  that did change: a run's diagnostics go to every file that run judges, so a broken module now
+  names itself once in each file of its closure rather than once in each file that imports it.
 - A new `std/*.ft` reaches the language harness only after `tools/vm build <preset>` copies it
   into `build/<preset>/std`: running `run_tests.py` by hand against a source
   that has not been copied reports `module 'std.x' not found`. `test/lang/run/stdlib` is where a
