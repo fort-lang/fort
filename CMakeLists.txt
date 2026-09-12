@@ -385,6 +385,31 @@ add_test(NAME diff-ir
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(diff-ir PROPERTIES LABELS lang)
 
+# The fixed point of the bootstrap (D19.5): stage2 is src/fort
+# compiled by stage1, stage3 is src/fort compiled by stage2, and the two must
+# be the same program. tools/fixpoint.sh compares the module stage1 and stage2
+# emit for src/fort, runs the IR verifier over both (D19.1), and compares the
+# stage2 and stage3 binaries byte for byte. It does that twice, once in
+# checked mode and once in release mode, because the two modes emit different
+# code (D11.1) and a fixed point in one mode does not prove the other.
+#
+# It is a test and not a hand-run script because a change that breaks
+# self-hosting must go red by itself. It is label lang because it runs stage2
+# under qemu. It costs 12.2 s under debug, 12.7 s under asan and 14.4 s under
+# ubsan (measured 2026-09-12), against 259 s for the whole of check-all under
+# debug. Most of that is clang, which no preset instruments.
+# The three tools are arguments and not an environment, so that this test and
+# the check-lang command below measure the toolchain the build configured.
+set(FORT_FIXPOINT_COMMAND
+    bash "${CMAKE_SOURCE_DIR}/tools/fixpoint.sh" "${CMAKE_BINARY_DIR}"
+    --cc "${FORT_TARGET_CC_PATH}"
+    --target "${FORT_TARGET_TRIPLE}"
+    --opt "${FORT_OPT_PATH}")
+add_test(NAME bootstrap
+    COMMAND ${FORT_FIXPOINT_COMMAND}
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(bootstrap PROPERTIES LABELS lang)
+
 # The interactive half of D11.5 (toolchain.md 5.3): a program whose stdout is
 # a terminal flushes each line as it writes it. No language test can see that,
 # because run_tests.py captures stdout through a pipe and every test therefore
@@ -481,6 +506,7 @@ add_custom_target(check-lang
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ast.sh" "${CMAKE_BINARY_DIR}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_check.sh" "${CMAKE_BINARY_DIR}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ir.sh" "${CMAKE_BINARY_DIR}"
+    COMMAND ${FORT_FIXPOINT_COMMAND}
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Running the language tests"
     USES_TERMINAL

@@ -1425,6 +1425,13 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   `unreachable` is followed by a `br`, splits it and prints the remainder as `0: ; No
   predecessors!` -- an implicitly numbered block, which is the one thing this decision forbids. The
   verifier is a floor; the emitter's own tests assert block structure.
+  Amended 2026-09-12 (T-039) with which comparison performs it. `tools/fixpoint.sh` does not run
+  stage3 with `-S`: it compares the stage2 and stage3 **binaries** with `cmp`, and equal bytes are
+  one program, which emits one module for one input. The module comparison it does run is
+  stage1's against stage2's, which this decision does not ask for and which is stronger, since it
+  holds the two compilers against each other rather than one compiler against itself. It runs in
+  both build modes, as this decision requires, and `diff` is still the debugging output. A ticket
+  that reads the sentence above must not add a third `-S` run to perform it literally.
 - **D19.6** Checks and failure blocks. Every runtime check (D10.6, D11.1, D11.3, D17.11)
   computes one `i1` that is true on failure and branches with the failure block as the first
   label; `assert` is the exception, since its operand is already the success condition (D12.2),

@@ -401,30 +401,61 @@ A safe(r) C-like systems programming language.
 - Running `run-clang-tidy` by hand: its positional arguments are regexes matched against the
   absolute paths in `compile_commands.json`, so a relative path such as `../../test` silently
   selects nothing and reports success. Use `tools/vm tidy` or absolute guest paths.
-- Binaries: `build/<preset>/fort` is stage1 (the C compiler); `build/<preset>/stage2/fort` and
-  `stage3/fort` are the self-hosted compiler built by stage1 and by stage2. The `fort_stage2`
-  target builds stage2 at every build (stage1 over `src/fort/main.ft`, whose imports pull the rest
-  of `src/fort` in), so a module stage1 rejects fails the build rather than the test run; stage2 is
-  an x86-64 binary and runs under qemu like every program the compiler builds.
-  `tools/bootstrap.sh [--preset <preset>] [--stage3]` drives the same steps by hand in the guest
-  and, with `--stage3`, compiles `src/fort` with stage2 and compares the two binaries byte for
-  byte -- the fixed point self-hosting means. It is not in the gate. **It passes as of T-038**:
-  `bash tools/bootstrap.sh --preset debug --stage3` prints `stage2 and stage3 are identical: the
-  compiler is self-hosted`.
-  `tools/diff_ir.sh` runs that same module comparison inside the gate, which is what is new: it
-  compares stage1's and stage2's module for `src/fort/main.ft` among the rest, and
-  `tools/bootstrap.sh` already compares those two modules itself before it builds stage3. So the
-  gate now sees a difference between the two emitters the day it appears, instead of on the day
-  somebody runs a three-stage build by hand.
-  **It is not a proof of the fixed point, and do not read it as one.** The step from "the two
-  modules agree" to "stage2 and stage3 are the same bytes" needs three assumptions and the
-  repository checks one of them. The one it checks is that the two compilers emit the same module
-  text. The two it does not: `clang` must be deterministic over one input and one command line,
-  which nothing here asserts; and `diff_ir.sh` compiles `main.ft` from the top of the worktree
-  with `-I src/fort -I test/fort/support`, while `tools/bootstrap.sh` uses its own working
-  directory and its own roots, so the module `diff_ir.sh` compares is not byte for byte the
-  module that built stage2. `bash tools/bootstrap.sh --preset debug --stage3` is still the
-  answer when the question is asked.
+- Binaries: `build/<preset>/fort` is stage1 (the C compiler); `build/<preset>/stage2/fort` is the
+  self-hosted compiler, which stage1 builds from `src/fort`. The `fort_stage2` target builds it at
+  every build (stage1 over `src/fort/main.ft`, whose imports pull the rest of `src/fort` in), so a
+  module stage1 rejects fails the build rather than the test run; stage2 is an x86-64 binary and
+  runs under qemu like every program the compiler builds.
+  `tools/bootstrap.sh [--preset <preset>] [--stage3]` builds stage1 and that stage2 by hand in the
+  guest. With `--stage3` it builds stage1 and hands the fixed point to `tools/fixpoint.sh`, and it
+  writes no stage2 of its own, since that script builds one per build mode.
+- **The fixed point is the ctest `bootstrap` (T-039) and the gate runs it.** `tools/fixpoint.sh
+  <build-dir>` compiles `src/fort` with stage1 into stage2 and `src/fort` with stage2 into stage3,
+  under `<build-dir>/fixpoint/<mode>/`, and it does that twice: once in checked mode and once with
+  `--release`. The two modes emit different code, because checked arithmetic traps and release
+  arithmetic does not (D11.1), so a fixed point in one mode does not prove the other. In each mode
+  it holds stage1's module for `src/fort` against stage2's, runs `opt-18 -passes=verify` over both
+  (D19.1), and compares the stage2 and stage3 binaries byte for byte. The module comes first
+  because it names the guilty program: two identical modules that link to different bytes are
+  clang or the linker. It is label `lang` and a command of `check-lang`, so `check-all` and the
+  gate run it. It costs 12.2 s under `debug`, 12.7 s under `asan` and 14.4 s under `ubsan`
+  (measured 2026-09-12), against 259 s for the whole of `check-all` under `debug`: most of the
+  work is clang, which no preset instruments, and the two stage2 runs, which qemu runs and no
+  preset instruments either. `tools/vm run 'ctest --preset debug -R bootstrap'` asks in one line.
+  **Its binary comparison is the artefact check `tools/diff_ir.sh` cannot make.** That script
+  compares the two emitters' module for `src/fort/main.ft` among 446 other files, and it is the
+  stronger oracle for the emitter, but the step from "the two modules agree" to "stage2 and stage3
+  are the same bytes" needs two assumptions that nothing checked before T-039: `clang` must be
+  deterministic over one input and one command line, and `diff_ir.sh` compiles `main.ft` from the
+  top of the worktree with `-I src/fort -I test/fort/support`, so the module it compares is not
+  byte for byte the module that built stage2. Read the two halves of the `bootstrap` test apart.
+  The **binary** comparison retires both assumptions, because it compiles and compares the
+  artefacts themselves. The module comparison beside it rests on neither, since it compares two
+  texts and links nothing, and it answers a different question: which of the two emitters is
+  wrong. The binary half is also the only check in the repository that holds stage1's clang
+  command line against stage2's. A different `-O` level, a different link order or a different
+  `--target` in `src/fort/driver.ft` leaves both modules byte-identical and makes the binaries
+  differ, which `test/driver_test.c` and `test/fort/driver_cc_test.ft` cannot see: each holds one
+  compiler against its own written text.
+  **A file path reaches the binary, so the two stages of a mode differ in nothing the module
+  holds.** They differ in the `-o` path, which no module holds, and in `--cc`, which `-S` never
+  reads; everything else is spelled the same way. The compiler names each
+  file the path it opened it by (D14.2) and writes that path into the module as a `@.file.N`
+  string (D19.6). Compiling `src/fort/main.ft` by its absolute path and by its relative path from
+  the top of the worktree gives two binaries that differ in 27233 of 480088 bytes, and both run.
+  `tools/fixpoint.sh` builds its own stage2 for that reason. Reusing `<build-dir>/stage2/fort`,
+  which the CMake target compiles by absolute path, compared two different programs and reported
+  `the emitted modules agree but the binaries differ` on a compiler that is a fixed point. It is
+  also why the script writes no file another test reads: `<build-dir>/stage2/fort` belongs to
+  `fort_stage2`, and `lang-stage2`, `diff-ir` and `stage-usage` judge it.
+  **A comparison needs the guard that its inputs exist.** The script removes each binary and each
+  module before it writes it, checks that the compiler wrote the binary, and holds each module
+  against the first line of D19.1 before it compares the two: two empty files compare equal and
+  `opt` accepts an empty module, so a compiler that exits 0 and writes nothing would otherwise
+  read as a fixed point. `tools/diff_ir.sh` carries the same guard for the same reason. A stub
+  `fort` that exits 0 and writes nothing is how both were proved: it prints
+  `exited 0 and wrote no ...` and exits 1, and a stub that writes empty modules prints
+  `is no module to compare`.
 - Two corpora beside `test/lang` run through the same `run_tests.py`, which takes the corpus root
   as `--root`: ctest `lang-stage2` (label `lang`) holds the language corpus against stage2 with
   `--xfail test/lang/xfail-stage2.txt`, which started as the whole corpus (`run/`, `fail/`,
@@ -980,6 +1011,15 @@ A safe(r) C-like systems programming language.
   pointers are inside the subset (D3.10), so a dispatch table is fine. These are the constructs a
   C file may hold that have no fort spelling, with what replaces each; the rules the bootstrap
   already follows so that it stays portable are the first four.
+  **`src/fort` stays inside that subset until T-046**, the ticket that freezes stage1. stage1
+  compiles stage2 at every build and the ctest `bootstrap` compiles it twice more, so a `src/fort`
+  file that uses a construct stage1 lacks breaks the build and the fixed point on the same
+  commit. A feature leaves `test/lang/bootstrap-unsupported.txt` when stage1 gains it, not when
+  stage2 does.
+  **`src/lsp` is under no such rule**: stage2 compiles it, so it may use anything `src/fort`
+  implements (D20.5). T-039 and not T-046 is the gate for the language server, because the server
+  needs a self-hosted compiler that reproduces itself and not the frozen bootstrap. The ctest
+  `bootstrap` is what says the compiler reproduces itself.
   - No unions, no bitfields, no anonymous struct or union members: a fat tagged struct with a
     kind enum and every field in the open, which is what `ast.h`, `types.h` and `sym.h` already
     are.

@@ -1,16 +1,21 @@
 #!/bin/bash
-# Build the self-hosted compiler from the C bootstrap (notes/toolchain.md 8).
+# Build the self-hosted compiler from the C bootstrap (D19.5).
 #
 # stage1 is build/<preset>/fort, the compiler in C; stage2 is src/fort compiled
 # by stage1; stage3 is src/fort compiled by stage2. stage2 and stage3 are built
-# from the same sources by two different compilers, so once stage2 compiles
-# what stage1 compiles the two binaries must agree -- that is the fixed point
-# self-hosting means, and --stage3 is what checks it.
+# from the same sources by two different compilers, so the two binaries must
+# agree. That is the fixed point self-hosting means.
 #
-# Until then stage2 is a driver skeleton that cannot compile a program, so
-# stage3 is not attempted unless it is asked for. Runs in the guest, from
-# anywhere in the worktree; the CMake target fort_stage2 runs the stage2 step
-# of this script at every build.
+# This script builds stage1 and stage2. With --stage3 it builds stage1 and
+# hands the fixed point to tools/fixpoint.sh, which checks it in both build
+# modes and which ctest runs as the test `bootstrap`. The two therefore check
+# the same thing: this script is the way to ask by hand, and the ctest is the
+# way the gate asks. It builds no stage2 of its own then, because fixpoint.sh
+# builds one per build mode and must not write build/<preset>/stage2/fort,
+# which lang-stage2, diff-ir and stage-usage read.
+#
+# Runs in the guest, from anywhere in the worktree; the CMake target
+# fort_stage2 runs the stage2 step of this script at every build.
 set -eu
 
 usage() {
@@ -66,45 +71,17 @@ std=$build/std
 cc=${FORT_TARGET_CC:-clang}
 target=${FORT_TARGET_TRIPLE:-x86_64-linux-gnu}
 
-echo "== stage2: compiling src/fort with stage1"
-mkdir -p "$build/stage2"
-"$build/fort" --std-dir "$std" --cc "$cc" --target "$target" \
-    -o "$build/stage2/fort" "$entry"
-
 if [ "$stage3" != yes ]; then
+    echo "== stage2: compiling src/fort with stage1"
+    mkdir -p "$build/stage2"
+    "$build/fort" --std-dir "$std" --cc "$cc" --target "$target" \
+        -o "$build/stage2/fort" "$entry"
     echo "stage2: $build/stage2/fort"
-    echo "stage3 is not attempted; pass --stage3 once stage2 can compile src/fort"
+    echo "stage3 needs --stage3"
     exit 0
 fi
 
-# stage2 is built for the target, so it runs under qemu-user; binfmt runs it
-# transparently, as it does every program the compiler builds.
-echo "== stage3: compiling src/fort with stage2"
-mkdir -p "$build/stage3"
-"$build/stage2/fort" --std-dir "$std" --cc "$cc" --target "$target" \
-    -o "$build/stage3/fort" "$entry"
-
-# The emitted LLVM IR is the function of the program the compiler is (D19.5),
-# so the text is compared first: two identical modules that link to different
-# bytes are clang or the linker being nondeterministic, which is not the
-# compiler failing to be a fixed point, and the two cases are worth telling
-# apart before anyone debugs the wrong one.
-echo "== comparing the modules stage1 and stage2 emit"
-"$build/fort" --std-dir "$std" -S -o "$build/stage2/fort.ll" "$entry"
-"$build/stage2/fort" --std-dir "$std" -S -o "$build/stage3/fort.ll" "$entry"
-if cmp -s "$build/stage2/fort.ll" "$build/stage3/fort.ll"; then
-    echo "the emitted modules are identical"
-else
-    echo "bootstrap.sh: the modules stage1 and stage2 emit differ" >&2
-    echo "  diff $build/stage2/fort.ll $build/stage3/fort.ll" >&2
-    exit 1
-fi
-
-echo "== comparing stage2 and stage3"
-if cmp -s "$build/stage2/fort" "$build/stage3/fort"; then
-    echo "stage2 and stage3 are identical: the compiler is self-hosted"
-    exit 0
-fi
-echo "bootstrap.sh: the emitted modules agree but the binaries differ;" >&2
-echo "that is clang or the linker, not the compiler" >&2
-exit 1
+# The fixed point, in both build modes, with the verifier over each module.
+# fixpoint.sh builds stage2 and stage3 of each mode itself.
+echo "== the fixed point (tools/fixpoint.sh)"
+exec bash "$root/tools/fixpoint.sh" "$build" --cc "$cc" --target "$target"
