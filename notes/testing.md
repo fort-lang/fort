@@ -189,7 +189,8 @@ bullet at a time and without a rewrite.
   (`the_blocks_a_node_owns_are_released_with_it` in `test/fort/types_table_test.ft`, T-032).
   Verify such a witness by deleting the `del` it covers and watching it go red; two of them in
   `types.ft` had no witness at all until that was measured.
-  **An allocator probe needs two views, because each is blind to what the other sees** (T-034).
+  **An allocator probe needs two views, because each is blind to what the other sees** (T-034), and
+  both of them are blind to a leaked block above 128 KB (section 4 of this file, T-094).
   The address a round is handed catches a leak the allocator serves out of its own free chunks --
   a 64-byte vector -- and misses a large one, because a small probe block still comes back at the
   same address while the heap has grown: with `defer analysis_free` deleted in the driver the
@@ -226,8 +227,33 @@ bullet at a time and without a rewrite.
   the block-view noise of the four rounds before it. Check that the program the probe compiles
   actually compiles, by hand, before reading a single deletion result.
   A probe over a whole driver run belongs in a file of its own
-  (`test/fort/driver_lifetime_test.ft`), since forty other tests in the same program fragment the
+  (`test/fort/driver_lifetime_*_test.ft`), since forty other tests in the same program fragment the
   heap for reasons that are not leaks.
+  **One probe holds one mode, because `run_tests.py` kills a program at 60 s.** The six
+  `test/fort/driver_lifetime_*_test.ft` files were one program until T-094. That program ran 63 s
+  alone and 92 s to 98 s while three worktrees gated together, so it timed out twice for a reason
+  that was not the branch under test. Do not lower the rounds to fit the clock: T-084 proved that
+  a round which is too small witnesses no leak at all. Give each mode a program of its own, which
+  divides the work of each program and leaves every round as it was. Measured on a 4-CPU VM: the
+  longest program run went from 16.7 s to 6.7 s, the six programs together cost 15 s more CPU,
+  because the harness compiles six programs and not one, and each mode gets a heap that no earlier
+  mode fragmented (T-094).
+  **Neither view sees a leak of a block above 128 KB while the round frees no other block of that
+  size.** glibc serves an allocation above `M_MMAP_THRESHOLD`, 131072 by default, by mmap, so the
+  program break does not move; and a round large enough to ask for one is a round whose block view
+  is already off. The condition is the whole rule: glibc raises that threshold to the size of any
+  mmap'd chunk it frees, up to 32 MB, so a round that frees one 227 KB block and leaks a second of
+  the same size takes the second out of the heap and **does** move the break. A release whose call
+  never runs never raises the threshold, which is the case measured here. T-094 measured it on
+  `strbuf.free(&g->out)`: the emitter probe emits a module of 226998 bytes and stays green when
+  that release is deleted, while the closure probe, whose module is about two kilobytes, goes red.
+  A release is therefore witnessed by the mode whose round keeps it inside the heap, so run a
+  deletion sweep over **every** probe and not over the one that looks right. T-094's sweep took 46
+  releases, one deletion at a time, each against all six probes: 45 of them turned at least one
+  probe red, and the 46th is the `slots_free` pair that two calls share. That sweep also found the
+  rule above twice: `strbuf.free(&doc)` in `driver.write_document` had no witness at all until the
+  width of the index probe came down from 40 to 27, which takes the document from 92003 bytes to
+  62541 and its buffer from an mmap block of 131072 to a heap block of 65536 (T-094).
   **A probe also sizes its round**: a release of one small block per round is seen by neither view,
   because the allocator serves the next round's block out of the chunk the round just freed while
   the break stands still -- deleting `del(t->params)` in `types.ft` left `types_table_test.ft`

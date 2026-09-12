@@ -39,9 +39,9 @@ without a rewrite.
   it**. So a dedicated smaller machine is both faster and predictable, and provisioning is cheap
   enough to do per ticket.
   Two VMs at 4 CPUs and 8 GiB leave the host 2 CPUs and 16 GiB. Three at 3 CPUs fit the arithmetic
-  and are the wrong shape: `test/fort/driver_lifetime_test.ft` is one qemu program that takes 63 s
-  of a 60 s budget, the harness runs `-j 6`, and a 3-CPU machine oversubscribes and can time the
-  probe out with no other agent present.
+  and were the wrong shape while one qemu program took 63 s of a 60 s budget: the harness runs
+  `-j 6`, and a 3-CPU machine oversubscribes. T-094 split that program into six, the longest of
+  which runs 6.7 s, so the margin is now a factor of nine rather than a factor of 0.95.
 - **A worktree chooses its VM before it configures, and cannot change its mind cheaply.**
   `/vagrant` is the main checkout on the shared machine and the worktree root on its own, so every
   absolute path in the CMake cache is bound to that choice. Switching later means deleting
@@ -54,6 +54,43 @@ without a rewrite.
   `tools/vm status` shows `paused`; guest commands then fail after the 10 s ssh timeout and
   `tools/vm up` cannot resume it. Recover with `VBoxManage controlvm fort-dev-<name> savestate`
   followed by `tools/vm up`.
+
+- **A wall-clock measurement in the guest can hold a VirtualBox pause, and the pause reads as a
+  slow test.** T-094 measured `test/fort/driver_lifetime_index_test.ft` at 1449.81 s and at
+  1862.02 s under `/usr/bin/time`, and the test passed both times. `uptime` said `up 41 min`
+  before and `up 42 min` after the run whose wall clock advanced 31 minutes, so the VM was paused
+  for 30 of them. The guest monotonic clock stops while the VM is paused: `run_tests.py` times a
+  step inside `subprocess.communicate(timeout=...)`, which Python measures on the monotonic clock,
+  so no step timed out, and `/usr/bin/time` reads the wall clock that the host corrects on resume,
+  so it counted the pause. Print `uptime` before and after any measurement
+  you will quote, and compare the two "up N min" values with the wall time. The same command at
+  the same guest load measured 35.33 s (T-094).
+- **Before you call a failure contention, look for your own abandoned processes.** A dedicated VM
+  stops one agent competing with another. It does nothing about an agent competing with itself,
+  and that is what a whole afternoon of "contention from other worktrees" was on 2026-09-12. Two
+  shapes. A background waiter loop outlives the thing it waits for: it builds nothing, and it
+  polls on a timer for as long as it lives. T-041 found **three of its own**, still spinning after
+  nine hours. An orphaned `tools/vm gate` keeps driving a ninja in the guest: one ran 87 minutes
+  against a normal 23, with parent PID 1. The two look the same from the outside as the failure
+  they cause, which is a slow gate or a test that times out. The check is two commands:
+
+      ps -eo pid,ppid,etime,command | grep "tools/vm gate"
+      lsof -a -p <pid> -d cwd        # names the worktree it belongs to
+
+  A parent of 1 is an orphan. An elapsed time past 30 minutes on a gate is suspect, because a full
+  gate takes about 23 minutes. The working directory in `lsof` says whether the process is yours
+  or a neighbour's, which is the whole question (T-041, T-094).
+- **A waiter must match its own job, not the pattern.** This is the cause of the shape above. A
+  loop written `until ! pgrep -f 'tools/vm gate'; do sleep 90; done` matches **every** worktree's
+  gate, so it waits for a build it does not own and its own agent reads the delay as contention.
+  One such loop ran 2 hours 21 minutes on 2026-09-12, against a worktree that was deleted an hour
+  before, and it held up a second agent's waiter while that agent's gate held up its own. Write
+  the waiter against one job. Three shapes do it: capture the pid at launch
+  (`tools/vm gate > build/gate.log 2>&1 & pid=$!; wait "$pid"`), which is the shortest and needs
+  no loop; wait for a marker the job writes (`[ -s build/gate.log ]` and the last line of the
+  log); or, where a pattern is unavoidable, put the worktree path in it
+  (`pgrep -f "fort-t094.*tools/vm gate"`). A bare pattern makes every agent's waiter a dependency
+  on every other agent's build, which looks exactly like contention and is not (T-094).
 
 ## 2. The shared folder
 
@@ -207,3 +244,9 @@ without a rewrite.
   standard library under `/vagrant/build/release/std` -- and those files are the guest's, so an
   editor drops them rather than painting a path the host cannot open. The argument of `run` is
   handed to a shell in the guest, so a path is quoted before it goes in.
+- **git does not work in the guest of a VM that a worktree owns.** `/vagrant` is then the worktree,
+  and the worktree's `.git` file names `<main checkout>/.git/worktrees/<name>`, which that guest
+  has no path to. `git diff main...HEAD` exits 128, and `tools/lines.py --since main` ends in a
+  CalledProcessError from that command. Run `python3 tools/lines.py --since main --min 3.0` on the
+  host: it needs git and Python 3 and nothing of the build. On the shared VM git works, because
+  provisioning symlinks the host path of the main checkout to `/vagrant` (T-094).

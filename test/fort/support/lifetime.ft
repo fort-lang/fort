@@ -1,0 +1,207 @@
+// lifetime: the heap probe that the driver lifetime tests share.
+//
+// A run of the driver owns its session and its analysis. It releases both on
+// every path out. No other test sees a release that is missing: the
+// gate sanitizers instrument the C compiler and not the x86-64 program that
+// the harness runs.
+//
+// The heap sees one. Many runs of one command line ask for the same blocks
+// in the same order. A run that gives the blocks back leaves the program
+// break where it was. A run that keeps one block pushes the break up by the
+// leaked bytes of each round.
+//
+// The probe watches two views, because each view is blind to what the other
+// view sees. The program break does not move for a leak that the allocator
+// serves out of a free chunk it already holds. The address of a fresh block
+// does not move for a large leak: an address probe read 0 with
+// `analysis_free` deleted, while the break had climbed by megabytes. The
+// answer is the larger of the two distances.
+//
+// Two views are necessary and not sufficient. A round must also be large
+// enough for the release that it claims to witness. A deleted `del(ck->syms)`
+// leaks about 144 bytes for each analysis. Two hundred rounds of that stay
+// inside the 132 KB that glibc gives a process at startup, so neither view
+// moves and the probe reads 0. ROUNDS is therefore above the point where the
+// smallest release becomes visible. A release added later gets the same
+// standard: delete it, watch the test go red, and increase ROUNDS until the
+// test goes red.
+//
+// Neither view sees a leak of a block above 128 KB. glibc serves such an
+// allocation by mmap, so the program break does not move, and a round that is
+// large enough to need one is also a round that makes the block view useless.
+// The emitter mode measured that: its module is 226998 bytes, its buffer for
+// the module is an mmap block, and a deletion of the release of that buffer
+// leaves the emitter test green. The closure mode emits about two kilobytes
+// and is the witness of that one release. So a release is held by the mode
+// whose round keeps it inside the heap.
+//
+// Each mode of the driver is a test file of its own, and this module is what
+// those files share. One mode in each program keeps every program below the
+// 60 s that the harness gives a program (toolchain.md 7.3). One mode in each
+// program also gives each mode a heap that no earlier mode fragmented: the
+// measurement is a measurement of the allocator, so the first act of each
+// program is its own loop.
+//
+// D3.10: this module uses no function-pointer dispatch table
+// D20.5
+
+import capture;
+import driver;
+import std.io;
+import std.sys;
+
+// The rounds of a front-end mode, and the distance in bytes that fails it.
+//
+// A leak of about 144 bytes for each round needs about nine hundred rounds to
+// push the break out of the heap that the process starts with. The early
+// sample comes at half the rounds. The count is therefore well above twice
+// nine hundred.
+u64 ROUNDS = 4000;
+u64 BOUND = 4096;
+
+// How many of the last rounds the probe holds against the early round. The
+// allocator does not hand a round the same small block every time: over the
+// emitter program the address runs through a cycle of eight, so two late
+// samples did not find one round in step with the early round and the probe
+// read 26512 with nothing leaked. Sixteen covers that cycle two times. A leak
+// moves every sample, so the smallest distance costs nothing.
+u64 LATE_SAMPLES = 16;
+
+// The exit status of D14.1 that a refused program leaves. The mode that
+// compiles a refused program asserts this status of its first round.
+i32 EXIT_COMPILE_ERROR = 1;
+
+// The current program break, which is the end of the heap. sbrk(0) moves
+// nothing and reports the break. std has no binding for it and these tests
+// are its only callers.
+// D9.8
+extern fn void* sbrk(i64 increment);
+
+fn u64 probe_address() {
+    return cast(sbrk(0), u64);
+}
+
+// The other view: the address that a small fresh block gets. It moves when a
+// round kept a block that the next round would have got. The probe releases
+// the block at once, so the probe itself leaks nothing.
+u64 PROBE_BLOCK = 32;
+
+fn u64 probe_block() {
+    u8 mut@ own block = new(u8, PROBE_BLOCK);
+    u64 at = cast(block.ptr, u64);
+    del(block);
+    return at;
+}
+
+// Measures a front-end mode over ROUNDS rounds, with both views on.
+fn u64 measure(string@ args) {
+    return measure_rounds(args, ROUNDS, true);
+}
+
+// The same over a round count of its own, and with the block view under a
+// switch. The emitter mode compiles a much larger program, so it runs fewer
+// rounds and its program is rich enough that every release it witnesses is
+// the size of a round and not the size of a block. notes/testing.md 4 states
+// that rule.
+//
+// The block view is off for the emitter mode, and the reason is a
+// measurement. A round that allocates a hundred kilobytes and gives it back
+// leaves the heap with free chunks of every size, so the address that a
+// 32-byte probe gets lands where one of those chunks starts: it moved through
+// a range of 450 KB over rounds that leaked nothing, and no window or cycle
+// makes it repeat. The break is the view that answers for that mode, and it
+// answers for all of it: each of the sixteen releases there is at least a
+// kilobyte for each round, so a missing release pushes the break out by
+// hundreds of kilobytes. The block view stays on for the four front-end modes
+// and for the index mode, where it is steady and where it is the only view
+// that sees a small release.
+fn u64 measure_rounds(string@ args, u64 rounds, bool watch_block) {
+    return measure_status(args, rounds, watch_block, 0);
+}
+
+// The same, for a mode whose command line ends in a diagnostic: the program
+// of the checked mode is refused by the checker, so its rounds exit 1 and a
+// round that exits 0 is the broken one.
+fn u64 measure_status(string@ args, u64 rounds, bool watch_block, i32 want_status) {
+    u64 mut early = 0;
+    u64 mut early_block = 0;
+    u64 mut broke = 0;
+    u64 mut block = 0;
+    bool mut sampled = false;
+    u64 mut i = 0;
+    while (i < rounds) {
+        // The driver writes to both descriptors. The test captures them, so
+        // that the stdout of the test is its one line.
+        i32 saved_out = capture.begin(io.STDOUT, "out.txt");
+        i32 saved_err = capture.begin(io.STDERR, "err.txt");
+        i32 status = driver.run(args);
+        capture.end(io.STDERR, saved_err);
+        capture.end(io.STDOUT, saved_out);
+        if (i == 0) {
+            // The first round answers for the rest. A round that stops early
+            // does not make the allocations of a pass that the probe claims
+            // to watch, and a probe that watches nothing is green. The
+            // emitter mode ran for a whole afternoon over a program with a
+            // type error: `-S` stopped at the front end, and every deletion
+            // of a release in gen.gen_free was unwitnessed.
+            assert(status == want_status);
+        }
+        if (i == rounds / 2) {
+            early = probe_address();
+            early_block = probe_block();
+        }
+        if (i + LATE_SAMPLES >= rounds) {
+            u64 broke_now = distance(probe_address(), early);
+            u64 mut block_now = 0;
+            if (watch_block) {
+                block_now = distance(probe_block(), early_block);
+            }
+            if (!sampled || broke_now < broke) {
+                broke = broke_now;
+            }
+            if (!sampled || block_now < block) {
+                block = block_now;
+            }
+            sampled = true;
+        }
+        i += 1;
+    }
+    assert(early != 0 && early_block != 0 && sampled);
+    // A move of either view is a leak, so the answer is the larger distance.
+    if (broke > block) {
+        return broke;
+    }
+    return block;
+}
+
+// How far apart two addresses are, whichever way the allocator moved. A leak
+// that hands a later round a lower address is a leak too, and a subtraction
+// the wrong way round traps before the assertion.
+// D11.1
+fn u64 distance(u64 a, u64 b) {
+    if (a > b) {
+        return a - b;
+    }
+    return b - a;
+}
+
+fn void write_file(string path, string text) {
+    assert(io.write_file(path, cast(text, u8@)));
+}
+
+// Creates one directory, which may already exist.
+extern fn i32 mkdir(char* path, u32 mode);
+
+// The errno that a directory which already exists reports (stdlib.md 2.2).
+i32 EEXIST = 17;
+
+// Every closure holds `std.rt`. The driver reads it from `<std-dir>/rt.ft` and
+// looks for that directory in `std` beside the program when nothing names one.
+// toolchain.md 1 states where it looks. The runs give `fort` as argv[0], so
+// the directory is `std` of the working directory of the test. The driver
+// needs a file there that parses, and not a runtime: these tests run nothing
+// that they build.
+fn void write_runtime() {
+    assert(mkdir("std".ptr, 0o700) == 0 || sys.errno() == EEXIST);
+    write_file("std/rt.ft", "// The empty runtime of a driver test.\n");
+}

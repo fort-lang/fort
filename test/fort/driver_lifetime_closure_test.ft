@@ -1,0 +1,39 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| ok
+import lifetime;
+
+// A build of a closure of two modules, as far as the module that `-S` stops
+// at. The driver gives back everything it takes: the module set of the whole
+// closure, the checker over it and the emitter. `-S` also spawns no clang for
+// each round.
+// D19.1, D20.5
+//
+// support/lifetime.ft states the rule of the probe, the two views and the
+// size of a round. This file is one of six, one for each mode of the driver,
+// because the harness kills a program at 60 s (toolchain.md 7.3) and the six
+// modes in one program passed alone and timed out under load.
+// T-094: one probe for each mode of the driver
+//
+// Verified by deletion, one release at a time, each one moving a view past
+// lifetime.BOUND and turning this test red: the `defer
+// containers.pool_free(&p)`, the `defer session.free(&s)` and the `defer
+// analysis_release(&an, &analysis_live)` of driver.compile_entry; the `defer
+// containers.pool_free(&p)` of driver.load_closure and the `defer
+// strbuf.free(&b)` of driver.std_dir_beside; the symbol
+// loop, `del(ck->syms)`, `del(ck->values)` and `types.type_table_free` of
+// check.check_free; and `named`, `funcs`, `out`, `allocas`, `body`, `scopes`
+// and the pool of gen.gen_free. This test is the only witness of
+// `strbuf.free(&g->out)`. T-094 measured all 46 releases of the six modes
+// against all six tests.
+fn i32 main() {
+    lifetime.write_runtime();
+    lifetime.write_file("closure.ft",
+        "import helper;\nfn i32 main() {\n    return helper.one();\n}\n");
+    lifetime.write_file("helper.ft", "fn i32 one() {\n    return 1;\n}\n");
+    string[3] mut build = {"fort", "-S", "closure.ft"};
+    assert(lifetime.measure(build[0..3]) < lifetime.BOUND);
+    println("ok");
+    return 0;
+}

@@ -1,0 +1,131 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| ok
+import lifetime;
+import std.strbuf;
+
+// The emitter mode. `-S` runs gen_init, gen_program and gen_free in each
+// round, and the program reaches every list and every buffer that the emitter
+// owns. The emitter gives all of it back.
+// D20.5
+//
+// support/lifetime.ft states the rule of the probe, the two views and the
+// size of a round. This file is one of six, one for each mode of the driver,
+// because the harness kills a program at 60 s (toolchain.md 7.3) and the six
+// modes in one program passed alone and timed out under load.
+// T-094: one probe for each mode of the driver
+//
+// The emitter allocates much more in each round than the front end does: a
+// pool that holds every operand text, seven vectors and eight buffers. A
+// smaller count of rounds therefore reaches the same bound. The program is
+// large enough that each of the sixteen releases of gen.gen_free is the size
+// of a round and not the size of a block.
+u64 EMIT_ROUNDS = 400;
+u64 EMIT_WIDTH = 60;
+
+fn i32 main() {
+    lifetime.write_runtime();
+    write_emitted();
+    string[3] mut emitted = {"fort", "-S", "emitted.ft"};
+    assert(lifetime.measure_rounds(emitted[0..3], EMIT_ROUNDS, false) < lifetime.BOUND);
+    println("ok");
+    return 0;
+}
+
+// Writes a program that makes the emitter allocate everything that it owns,
+// so that a round makes the allocation of each release that gen.gen_free
+// performs: three files for the file list, an enum that a `print` reaches for
+// the enum list and its member strings, `extern` declarations for the extern
+// list, a string literal in each statement for the string list, a struct for
+// the named types, a module-level constant for the globals section, a body
+// with a slot for each local for the slot list, nested blocks with a `defer`
+// in each for the scope stack and the deferred list, and an index and an
+// `assert` for the failure buffer.
+//
+// Verified by deletion, one release at a time, each one moving the break past
+// lifetime.BOUND and turning this test red: fourteen of the sixteen releases
+// that gen.gen_free performs -- the seven buffers `named`, `globals`,
+// `funcs`, `allocas`, `body`, `fail` and `scratch`, the six vectors `scopes`,
+// `defers`, `files`, `strs`, `enums` and `externs`, and the pool. This test is
+// the only witness of `globals`, `fail`, `defers`, `files`, `strs`, `enums`,
+// `externs` and `scratch`.
+//
+// The fifteenth, `strbuf.free(&g->out)`, turns
+// driver_lifetime_closure_test.ft red and leaves this test green, and the
+// reason is a measurement: the module of this program is 226998 bytes, so the
+// buffer that holds it is above the 128 KB threshold at which glibc serves an
+// allocation by mmap and not out of the heap. A leak of such a block does not
+// move the program break, and the block view is off for this mode, so neither
+// view sees it. The closure mode emits a module of about two kilobytes, which
+// comes out of the heap. Read the two files together for gen.gen_free.
+//
+// The sixteenth, `slots_free(&g->slots)`, has no witness of its own and can
+// have none: gen_stmt's function_begin releases the same vector at each
+// definition, and `fort_entry` is always the last definition, so the vector
+// that gen_free gets is already empty. A deletion of either call alone leaks
+// nothing and leaves all six tests green. A deletion of both turns this test
+// red, which is the measured form of "exactly one of the two runs". What the
+// call in function_begin answers for is a stale slot and not a leak: a symbol
+// of the previous definition still in the vector would be found by
+// gen_slot_place, which the emitted text of every other suite covers.
+//
+// The width is what makes the small releases visible. With the emitter round
+// driven by the two-line program of another mode, ten of the sixteen had no
+// witness, and only `named`, `funcs`, `out`, `body`, `scopes` and the pool
+// turned this test red. `externs` needed more than the width: the extern list
+// holds what a module refers to and not what it declares, so it stayed empty
+// until the program called every function that it declares.
+fn void write_emitted() {
+    lifetime.write_file("part_one.ft", "fn i32 one() {\n    return 1;\n}\n");
+    lifetime.write_file("part_two.ft", "fn i32 two() {\n    return 2;\n}\n");
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "import part_one;\nimport part_two;\n");
+    strbuf.append(&b, "enum colour {\n    red,\n    green,\n    blue,\n}\n");
+    strbuf.append(&b, "string GREETING = \"hello\";\n");
+    u64 mut i = 0;
+    while (i < EMIT_WIDTH) {
+        // A struct and an `extern` apiece, so the named types and the extern
+        // list grow with the width.
+        strbuf.append(&b, "struct box");
+        strbuf.append_u64(&b, i);
+        strbuf.append(&b, " {\n    i64 value;\n}\n");
+        strbuf.append(&b, "extern fn i64 helper");
+        strbuf.append_u64(&b, i);
+        strbuf.append(&b, "(i64 v);\n");
+        i += 1;
+    }
+    strbuf.append(&b, "fn i32 main() {\n");
+    strbuf.append(&b, "    colour c = colour.green;\n    println(c);\n");
+    strbuf.append(&b, "    i64[4] values = {1, 2, 3, 4};\n    i64 mut total = 0;\n");
+    i = 0;
+    while (i < EMIT_WIDTH) {
+        // Each `extern` is called as well as declared: the extern list holds
+        // what the module refers to and not what it declares, so a
+        // declaration alone leaves `syms_free` unwitnessed. -S stops at the
+        // module, so nothing has to link.
+        strbuf.append(&b, "    total += helper");
+        strbuf.append_u64(&b, i);
+        strbuf.append(&b, "(total);\n");
+        i += 1;
+    }
+    i = 0;
+    while (i < EMIT_WIDTH) {
+        // One local, one string constant, one `defer` and one nested block
+        // per step, so the slot list, the string list, the deferred list and
+        // the scope stack all grow with the width.
+        strbuf.append(&b, "    {\n        i64 step");
+        strbuf.append_u64(&b, i);
+        strbuf.append(&b, " = values[total % 4];\n");
+        strbuf.append(&b, "        defer println(\"left step ");
+        strbuf.append_u64(&b, i);
+        strbuf.append(&b, "\");\n        total += step");
+        strbuf.append_u64(&b, i);
+        strbuf.append(&b, ";\n        assert(total >= 0);\n    }\n");
+        i += 1;
+    }
+    strbuf.append(&b, "    print(GREETING);\n");
+    strbuf.append(&b, "    return part_one.one() + part_two.two() + cast(total % 2, i32);\n}\n");
+    lifetime.write_file("emitted.ft", strbuf.view(&b));
+}
