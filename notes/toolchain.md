@@ -231,11 +231,11 @@ under inspection rather than a program.
   `<std-dir>/fort_rt.o` and nothing else (D9.10).
 
 Where things live: `<std-dir>/*.ft` holds the standard library modules of D13.2 (`std.sys`,
-`std.libc`, `std.mem`, `std.io`, `std.str`, `std.strbuf`, `std.vec`, `std.strmap`,
-`std.math`) as source, compiled with every program that imports them; `<std-dir>/fort_rt.o` is
-the C runtime object, built from `runtime/fort_rt.c` by the compiler's own build; `<bindir>/fort` is
-the compiler, and `<bindir>/std` its fallback `--std-dir`. Only modules in the import closure
-are read (module-system.md 10).
+`std.libc`, `std.rt`, `std.mem`, `std.io`, `std.str`, `std.strbuf`, `std.vec`,
+`std.strmap`, `std.math`) as source, compiled with every program that imports them;
+`<std-dir>/fort_rt.o` is the C runtime object, built from `runtime/fort_rt.c` by the compiler's
+own build; `<bindir>/fort` is the compiler, and `<bindir>/std` its fallback `--std-dir`. Only
+modules in the import closure are read (module-system.md 10).
 
 ## 3. Build modes
 
@@ -486,11 +486,11 @@ void fort_rt_flush_all(void);
 // span from argv (one string per argument, NUL-terminated since it is the argv
 // byte sequence itself), then fort_entry, then fort_rt_flush_all, and returns
 // status & 0xFF. fort_entry is emitted by the compiler (module-system.md 11).
-// The args span lives for the whole process and std.libc declares
+// The args span lives for the whole process and std.rt declares
 // fort_rt_args_ptr and fort_rt_args_len for sys.args(); fort_rt_args_init is
 // called by main only and exists so the native runtime object, built without
 // main, can be tested. fort_rt_exit flushes every buffer, then
-// exit(status & 0xFF); std.libc declares it for sys.exit.
+// exit(status & 0xFF); std.rt declares it for sys.exit.
 int main(int argc, char** argv);
 int32_t fort_entry(const struct fort_span* args);
 void fort_rt_args_init(int argc, char** argv);
@@ -516,7 +516,7 @@ the text D18.2 fixes; it need not reproduce this search.
 
 This list is complete (D11.6): the standard library declares no other `fort_rt_*` symbol. It
 declares `fort_rt_args_ptr`, `fort_rt_args_len`, `fort_rt_flush`, `fort_rt_flush_all` and
-`fort_rt_exit` in `std.libc` (`stdlib.md` 3) and reaches `errno` through libc's
+`fort_rt_exit` in `std.rt` (`stdlib.md` 3) and reaches `errno` through libc's
 `__errno_location`.
 
 ### 5.2 Messages
@@ -809,7 +809,7 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
    first-use order, then the runtime entry points in the order of section 5.1 above, then the
    intrinsics in the order of the table above, each group separated from the next by a blank
    line. A symbol is declared exactly once, so an `extern fn` naming a runtime entry point
-   (`fort_rt_flush`, `fort_rt_exit`, the rest of section 5.1 that `std.libc` declares, D13.1)
+   (`fort_rt_flush`, `fort_rt_exit`, the rest of section 5.1 that `std.rt` declares, D13.1)
    is emitted in the runtime group with that group's prototype and attributes and is left out of
    the extern group, variadic tail included. A plain runtime declaration carries no attribute
    group; the `_Noreturn` entry points of section 5.1 carry `#2` (item 14), `fort_rt_exit`
@@ -897,7 +897,7 @@ and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (se
     `unreachable`; nothing else, because the callee aborts (D11.4).
     Every `_Noreturn` entry point of section 5.1 is declared `#2 = { cold noreturn nounwind }`:
     the `fort_rt_fail_*` family, `fort_rt_panic` and `fort_rt_assert_fail`, which the failure
-    blocks call, and `fort_rt_exit`, which only `std.libc` reaches. `noreturn` is truthful,
+    blocks call, and `fort_rt_exit`, which only `std.rt` reaches. `noreturn` is truthful,
     since each is `_Noreturn` in `runtime/fort_rt.h`, and `cold` lays the block out of line,
     which on an exit path is a layout hint and nothing more. No attribute is put on a failure
     call site.

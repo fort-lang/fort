@@ -866,7 +866,11 @@ Owner: `stdlib.md`.
   `std.str` (compare, search, classify, parse integers, duplicate, NUL-terminated copies for
   C), `std.strbuf`
   (growable byte buffer), `std.vec` (`ptr_vec`, `int_vec`, the non-generic pattern), `std.strmap`
-  (string-keyed open-addressing table), `std.math` (float bit casts, abs/min/max per type).
+  (string-keyed open-addressing table), `std.math` (float bit casts, abs/min/max per type),
+  `std.rt` (the library's view of the runtime entry points of `toolchain.md` 5.1, and nothing
+  else). Amended 2026-09-11 (T-087): the five `fort_rt_*` declarations stood in `std.libc`,
+  whose header had to describe itself as libc "plus" the runtime; they moved to `std.rt`, so
+  "thin libc externs" is true of `std.libc` without qualification.
 - **D13.3** Error handling idiom (the earlier TBD): functions return `bool` or an error enum, with
   results delivered through `T mut*` out-parameters; `-1`/`null` sentinels where conventional;
   `panic` for programming errors; `defer` for cleanup. No `Result` type in v1.

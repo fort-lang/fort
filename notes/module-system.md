@@ -175,7 +175,7 @@ naming conventions for helpers are not enforced. `extern` declarations are per-m
 module that calls a C function declares it, and the same C symbol may be declared in several
 modules provided the signatures are identical (D9.8); differing signatures are an error
 (section 13). `std.libc` (D13.2) collects the common libc prototypes so most modules import
-them instead.
+them instead, and `std.rt` the runtime entry points the library calls (`stdlib.md` 3).
 
 ## 7. Symbol names
 
@@ -516,7 +516,7 @@ is generated in the entry module: it receives the span by hidden pointer (sectio
 the parameter, and taking neither the copy nor an argument when it does not (`toolchain.md` 6
 item 22). `args[0]` is the program
 name. The runtime keeps the span for the life of the process and exposes it through
-`fort_rt_args_ptr()` and `fort_rt_args_len()`, declared in `std.libc` (`stdlib.md` 3) so that
+`fort_rt_args_ptr()` and `fort_rt_args_len()`, declared in `std.rt` (`stdlib.md` 3) so that
 `sys.args()` works in modules whose `main` takes no parameter. `sys.exit` (D13.2) is the other
 normal exit; a runtime error exits through `abort()` (D11.4).
 

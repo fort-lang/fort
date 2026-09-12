@@ -143,6 +143,17 @@ A safe(r) C-like systems programming language.
 - `tools/vm gate` is the merge gate: `format-check`, `tidy`, and `check-all` under `debug`,
   `asan` and `ubsan` (it configures `debug` first, then configures and builds each preset before
   its `check-all`).
+  **One worktree has one `build/<preset>`, so two gates in it collide** and the collision reads as
+  a test failure rather than as contention: two ninja processes drive the same directory, one
+  rewrites an object the other is linking, and the tail of the log names whichever test lost. The
+  worktree belongs to whoever holds the ticket until they hand it back, so a coordinator re-gates
+  only after the implementor has reported, never beside it (T-087, where a coordinator gate and
+  an implementor gate ran together and the exit 1 was the collision). Two other readings cost the
+  same hour there and are worth knowing as shapes: a `tail` of a log file the run has not finished
+  writing reports the previous run's verdict, and piping the gate into `head` closes the pipe
+  early, which kills it with SIGPIPE and yields a status that has nothing to do with the tests.
+  Capture the whole output to a file under the worktree, wait for the process, and report the
+  exit status the shell gives (`tools/vm gate > build/gate.log 2>&1; echo $?`).
 - The `gcc` preset is the project's only cross-compiler check and it is **not** part of the gate,
   whose three presets are all clang, so nothing runs it unless someone does: run
   `tools/vm workflow gcc` by hand whenever compiler or test-helper code changes. It went unbuilt

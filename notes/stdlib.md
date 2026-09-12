@@ -17,9 +17,9 @@ writable with nothing but this library and the builtins (D12).
 - Everything at module level is exported (D9.6). Names not documented here (helpers such as
   `strmap.find_slot`) are implementation details and may change; programs must not use them.
 - Foreign calls go through the `extern` declarations collected in `std.libc` (D9.8) and the C
-  runtime's `fort_rt_*` entry points (section 3); a program may redeclare any of those C
-  symbols with an identical signature (D9.8). The runtime is permanent; it is not a
-  self-hosting goal (D13.1).
+  runtime's `fort_rt_*` entry points, which `std.rt` collects (section 3); a program may
+  redeclare any of those C symbols with an identical signature (D9.8). The runtime is
+  permanent; it is not a self-hosting goal (D13.1).
 - Struct field lists and their order are part of the contract (layout per D3.8); the sizes and
   offsets stated below may be relied on. `own` is erased at run time (D17.1), so an `own` field
   has the size and offset of the same field without it.
@@ -124,17 +124,18 @@ import binding's name for a local even though D7.9 permits it.
 
 ### 1.6 Module list
 
-| Module       | Imports                               | Purpose                                |
-|--------------|---------------------------------------|----------------------------------------|
-| `std.libc`   | none                                  | libc and runtime `extern`s, flags      |
-| `std.mem`    | `libc`                                | copy, fill and compare bytes           |
-| `std.str`    | `libc`, `mem`                         | compare, search, classify, parse, dup  |
-| `std.sys`    | `libc`, `str`                         | exit, args, errno, env                 |
-| `std.strbuf` | `mem`                                 | growable text and byte buffer          |
-| `std.io`     | `libc`, `mem`, `sys`, `str`, `strbuf` | descriptors, whole files and streams   |
-| `std.vec`    | none                                  | `ptr_vec`, `int_vec`, template pattern |
-| `std.strmap` | `str`                                 | string-keyed open-addressing table     |
-| `std.math`   | none                                  | float bit casts, abs, min, max, limits |
+| Module       | Imports                                     | Purpose                             |
+|--------------|---------------------------------------------|-------------------------------------|
+| `std.libc`   | none                                        | libc `extern`s, flags, errno values |
+| `std.rt`     | none                                        | the runtime `extern`s of section 3  |
+| `std.mem`    | `libc`                                      | copy, fill and compare bytes        |
+| `std.str`    | `libc`, `mem`                               | compare, search, classify, parse    |
+| `std.sys`    | `libc`, `rt`, `str`                         | exit, args, errno, env              |
+| `std.strbuf` | `mem`                                       | growable text and byte buffer       |
+| `std.io`     | `libc`, `rt`, `mem`, `sys`, `str`, `strbuf` | descriptors, whole files, streams   |
+| `std.vec`    | none                                        | `ptr_vec`, `int_vec`, the pattern   |
+| `std.strmap` | `str`                                       | string-keyed open-addressing table  |
+| `std.math`   | none                                        | float bit casts, abs, min, max      |
 
 The import graph is acyclic (D9.5). A program imports what it uses: `import std.io;` and then
 `io.read_file(...)` (D9.3, D9.4).
@@ -158,11 +159,11 @@ fn bool env(string name, string mut* out)
 
 - `exit`: flushes every runtime output buffer (D11.5) and terminates the process with status
   `code & 0xFF` (D11.6). Deferred statements of the calling function do not run. Implemented as
-  `libc.fort_rt_exit(code);`, the runtime entry point that flushes and calls C `exit`
+  `rt.fort_rt_exit(code);`, the runtime entry point that flushes and calls C `exit`
   (`toolchain.md` 5.1). Ownership: none.
 - `args`: returns the same `string@` that `main` received (D8.6, D11.6): `args()[0]` is the
   program name and every element is NUL-terminated. Implemented as
-  `cast(libc.fort_rt_args_ptr(), string*)[0..libc.fort_rt_args_len()]` (an unchecked span taken
+  `cast(rt.fort_rt_args_ptr(), string*)[0..rt.fort_rt_args_len()]` (an unchecked span taken
   of a pointer, D6.9). Ownership: a view of storage the runtime owns (D17.3, D13.5); `string@`
   carries no `own`, so `del` of the span or of an element does not compile (D17.9).
 - `errno`: the value of C `errno` for the calling thread, read through
@@ -188,13 +189,12 @@ fn string std_dir() {
 
 ### 2.2 `std.libc`
 
-Thin `extern` declarations for the libc calls the other modules need, plus the runtime entry
-points of section 3, with the C types mapped per D9.8: `int` is `i32`, `size_t` is `u64`,
-`ssize_t` and `off_t` are `i64`, `mode_t` is `u32`, `char*` is `char*`, and every `void*`
-buffer is `void*`. Names are unmangled (D9.7). `open` is variadic in C; the fixed prototype is
-safe because every extern function is declared and called through a variadic LLVM function type,
-so a variadic callee always learns how many vector registers the call used (D9.8,
-`toolchain.md` 6 item 8).
+Thin `extern` declarations for the libc calls the other modules need, with the C types mapped per
+D9.8: `int` is `i32`, `size_t` is `u64`, `ssize_t` and `off_t` are `i64`, `mode_t` is `u32`,
+`char*` is `char*`, and every `void*` buffer is `void*`. Names are unmangled (D9.7). `open` is
+variadic in C; the fixed prototype is safe because every extern function is declared and called
+through a variadic LLVM function type, so a variadic callee always learns how many vector
+registers the call used (D9.8, `toolchain.md` 6 item 8).
 
 ```fort
 // open(2) flags, Linux x86-64 values.
@@ -236,13 +236,6 @@ extern fn i64 lseek(i32 fd, i64 offset, i32 whence);
 
 // <errno.h>: errno is a macro over this accessor in glibc and musl.
 extern fn i32* __errno_location();
-
-// fort runtime, section 3.
-extern fn void* fort_rt_args_ptr();
-extern fn u64 fort_rt_args_len();
-extern fn void fort_rt_flush(i32 fd);
-extern fn void fort_rt_flush_all();
-extern fn noreturn fort_rt_exit(i32 status);
 ```
 
 Semantics are those of the C functions. `malloc` returns `void* own` (no `mut`: `void*` has no
@@ -810,14 +803,22 @@ fn bool is_negative_zero(f64 x) {
 }
 ```
 
+### 2.10 `std.rt`
+
+The library's view of the C runtime (D13.1, D13.2): the five entry points of section 3, which
+lists them with their semantics, and nothing else. The module declares no libc symbol and holds
+no constant, no type and no function of its own; `sys` and `io` are its only importers inside
+the library. Names are unmangled (D9.7), so the declared name is the C name `toolchain.md` 5.1
+fixes, `fort_rt_` prefix included.
+
 ## 3. The runtime surface the library relies on
 
 `toolchain.md` owns the C runtime: the full `fort_rt_*` list, the C prototypes, the print
 buffers and process start. This section names only what the library calls. The library uses
 the builtins `new`, `del`, `move`, `panic`, `assert` and the print family as any program does
 (D12); the runtime calls behind them, including the overwrite check of D17.11, are emitted by
-the compiler and never named in library source. Beyond that, `std.libc` declares five runtime
-entry points, whose C prototypes are fixed in `toolchain.md` 5.1:
+the compiler and never named in library source. Beyond that, `std.rt` (D13.2) declares five
+runtime entry points, whose C prototypes are fixed in `toolchain.md` 5.1, and nothing else:
 
 ```fort
 extern fn void* fort_rt_args_ptr();
