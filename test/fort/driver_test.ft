@@ -23,12 +23,13 @@ import std.sys;
 // options each spelling sets, the usage errors, the exit statuses of every
 // mode this compiler carries, and the standard library directory.
 //
-// This is the half of test/driver_test.c that applies to a compiler with no
-// checker, no emitter and no `--cc` to spawn: the command line, the two
-// dumps, the front end and the exit statuses. The clang invocation of D14.3,
-// the temporary directory and the default output path are that suite's
-// other half and belong to the tickets that port the emitter and the
-// pipeline.
+// This is the half of test/driver_test.c a fort test can drive in process:
+// the command line, the two dumps, the front end, the emitter and the exit
+// statuses, together with the two ends of the --cc invocation of D14.3 -- a
+// program that cannot be run and one that runs and fails. What is left to
+// that suite is the whole clang command line, which it reads off
+// test/fake_cc.sh: a fort test has no working directory it can rely on and
+// cannot ship a script beside itself.
 //
 // Every run of the driver writes to stdout or to stderr, so each one is
 // captured into a file of this test's own directory and read back
@@ -176,8 +177,31 @@ fn void the_defaults_are_clang_and_the_linux_triple() {
     assert(opts.cc == "clang");
     assert(opts.target == "x86_64-linux-gnu");
     assert(!opts.have_entry);
+    assert(!opts.have_output);
     assert(opts.output.len == 0);
+    assert(!opts.have_std_dir);
     assert(opts.std_dir.len == 0);
+}
+
+// `-o ""` names an output of no characters. It is an output the command line
+// gave, not an option left out, so the driver hands that name to --cc and does
+// not fall back to `a.out`. src/bootstrap/driver.c compares the option against
+// NULL and answers the same way; a length test here would make the two
+// compilers answer one command line differently, which is the trap --std-dir
+// and the entry file already carry a flag for.
+fn void an_empty_output_option_is_an_output_that_was_named() {
+    string[4] mut argv = {"fort", "-o", "", "entry.ft"};
+    driver.options mut opts = driver.options_create();
+    defer driver.options_free(&opts);
+    assert(driver.parse(&opts, argv[0..4]) == driver.PARSE_OK);
+    assert(opts.have_output);
+    assert(opts.output.len == 0);
+    // The whole run answers the same way: --cc is given the empty name and
+    // fails, where the default would have made `a.out` and exited 0.
+    write_file("named.ft", "fn i32 main() {\n    return 0;\n}\n");
+    string[6] mut whole = {"fort", "--cc", "false", "-o", "", "named.ft"};
+    assert(run(whole[0..6]) == EXIT_USAGE);
+    assert(err_has("fort: error: cc failed with status 1\n"));
 }
 
 // An option that takes the following argument takes it whatever it looks
@@ -331,21 +355,52 @@ fn void an_entry_file_that_is_a_directory_is_the_loader_s_error() {
 // compiler does not carry: an internal error, exit 2, and no usage line after
 // it, since the command line was fine. `--check` alone stops here and is exit
 // 0 instead, since a check-only run emits nothing (D20.1).
-fn void a_clean_program_stops_at_the_missing_emitter() {
+fn void a_clean_program_is_emitted_and_handed_to_the_cc() {
     write_file("clean.ft", "fn i32 main() {\n    return 0;\n}\n");
-    string[2] mut argv = {"fort", "clean.ft"};
-    assert(run(argv[0..2]) == EXIT_USAGE);
-    string own err = captured_err();
-    defer del(err);
-    // One line and no usage line after it.
-    assert(str.starts_with(err, "fort: error: internal error: this compiler cannot"));
-    assert(str.ends_with(err, " build a program yet\n"));
-    assert(capture.line_count(err) == 1);
+    // -S stops at the module and needs no temporary and no --cc
+    // (toolchain.md 2).
+    string[5] mut emit = {"fort", "-S", "clean.ft", "-o", "clean.ll"};
+    assert(run(emit[0..5]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    strbuf.str_buf mut module = strbuf.create();
+    defer strbuf.free(&module);
+    assert(io.read_file("clean.ll", &module));
+    string text = strbuf.view(&module);
+    assert(str.starts_with(text, "target triple = \"x86_64-unknown-linux-gnu\"\n"));
+    assert(str.find(text, "define dso_local i32 @\"clean.main\"() #0 {\n") >= 0);
+    assert(str.find(text, "define dso_local i32 @fort_entry(ptr %args.in) #0 {\n") >= 0);
+    // A --cc that cannot be run is a toolchain error naming the program and
+    // the system's reason (toolchain.md 1, D14.3).
+    string[4] mut missing = {"fort", "--cc", "./nosuchcc", "clean.ft"};
+    assert(run(missing[0..4]) == EXIT_USAGE);
+    assert(err_has("fort: error: cannot run './nosuchcc': No such file or directory\n"));
+    // A --cc that runs and fails is reported by its status.
+    string[4] mut failing = {"fort", "--cc", "false", "clean.ft"};
+    assert(run(failing[0..4]) == EXIT_USAGE);
+    assert(err_has("fort: error: cc failed with status 1\n"));
     string[3] mut checked = {"fort", "--check", "clean.ft"};
     assert(run(checked[0..3]) == EXIT_OK);
     string own quiet = captured_err();
     defer del(quiet);
     assert(quiet == "");
+}
+
+// The default output path and the entry base of toolchain.md 1: -S names
+// `<entry>.ll`, -c names `<entry>.o` and a link names `a.out`, each in the
+// working directory and whatever directory the entry file stood in.
+fn void the_default_output_follows_the_mode() {
+    write_file("named.ft", "fn i32 main() {\n    return 0;\n}\n");
+    string[3] mut emit = {"fort", "-S", "named.ft"};
+    assert(run(emit[0..3]) == EXIT_OK);
+    strbuf.str_buf mut module = strbuf.create();
+    defer strbuf.free(&module);
+    assert(io.read_file("named.ll", &module));
+    assert(driver.entry_base("dir/sub/prog.ft") == "prog");
+    assert(driver.entry_base("prog.ft") == "prog");
+    // A name that is not a `.ft` keeps every byte, and a bare `.ft` is a name
+    // of three characters and not an empty one.
+    assert(driver.entry_base("prog") == "prog");
+    assert(driver.entry_base(".ft") == ".ft");
 }
 
 // A file with a syntax error is exit 1, with the diagnostic of D14.2 on
@@ -577,11 +632,11 @@ fn void an_empty_std_dir_option_resolves_no_std_import() {
     write_file("stdlib/thing.ft", "fn i32 one() {\n    return 1;\n}\n");
     write_file("uses_std.ft", "import std.thing;\nfn i32 main() { return thing.one(); }\n");
     set_env("FORT_STD_DIR", "stdlib");
-    // With the environment alone the import resolves and the run reaches the
-    // missing checker, which is exit 2 and no diagnostic.
-    string[2] mut plain = {"fort", "uses_std.ft"};
-    assert(run(plain[0..2]) == EXIT_USAGE);
-    assert(err_has("internal error"));
+    // With the environment alone the import resolves and the program is
+    // emitted, which -S stops at: exit 0 and no diagnostic.
+    string[3] mut plain = {"fort", "-S", "uses_std.ft"};
+    assert(run(plain[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
     // With an empty --std-dir it does not resolve at all.
     string[4] mut empty = {"fort", "--std-dir", "", "uses_std.ft"};
     assert(run(empty[0..4]) == EXIT_COMPILE_ERROR);
@@ -661,6 +716,7 @@ fn i32 main() {
     the_repeatable_options_keep_their_order();
     the_defaults_are_clang_and_the_linux_triple();
     a_valued_option_takes_the_next_argument_whatever_it_is();
+    an_empty_output_option_is_an_output_that_was_named();
     println("valued ok");
     an_unknown_option_is_a_usage_error();
     a_missing_option_argument_is_a_usage_error();
@@ -678,7 +734,8 @@ fn i32 main() {
     println("help ok");
     an_unreadable_entry_file_is_exit_two();
     an_entry_file_that_is_a_directory_is_the_loader_s_error();
-    a_clean_program_stops_at_the_missing_emitter();
+    a_clean_program_is_emitted_and_handed_to_the_cc();
+    the_default_output_follows_the_mode();
     a_syntax_error_is_exit_one();
     a_lexical_error_is_exit_one();
     a_missing_import_is_exit_one();

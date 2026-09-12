@@ -54,16 +54,21 @@ done
 
 # The number of .ft files the repository holds, as tools/diff_ast.sh counts
 # them: an equality and not a floor, so that a file cannot slip out of the
-# comparison. A ticket that adds or removes a .ft file changes all three
-# lines in the same commit.
-FT_FILES=722
+# comparison. A ticket that adds or removes a .ft file changes all four
+# lines in the same commit: diff_tokens.sh, diff_ast.sh, diff_check.sh and
+# diff_ir.sh.
+FT_FILES=730
 
 # The files of that corpus stage1 checks clean, which are the ones compared.
 # It is an equality for the reason FT_FILES is: a comparison that shrank would
 # otherwise pass while seeing less, and ctest reads the exit status and not the
 # counts printed below. A ticket that adds a clean .ft file, or that makes
 # stage1 accept or refuse one, changes this line with FT_FILES.
-CLEAN_FILES=442
+# It is 3 below diff_ir.sh's PROGRAM_FILES for a reason and not by error: that
+# script passes -I src/fort -I test/fort/support, so it reaches the test/fort
+# tests that import a support module, and this one passes -I "$ROOT" alone and
+# skips them. Move the two numbers together only when the roots agree.
+CLEAN_FILES=444
 
 # The search roots every run is given: the standard library the build copied,
 # and src/fort, so that the compiler's own modules resolve their imports. A

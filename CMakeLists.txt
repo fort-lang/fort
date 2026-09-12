@@ -306,12 +306,18 @@ set_tests_properties(fort-modules PROPERTIES
 # xfail-stage2.txt: the compiler being written in fort is held against the
 # same tests as the one it replaces, and an entry leaves that list in the
 # commit that makes its tests pass (D14.4). stage2 is an x86-64 binary, so
-# every run of it here goes through qemu. --no-unsupported:
-# bootstrap-unsupported.txt lists what the C bootstrap deliberately lacks and
-# demands that the compiler reject those tests with the bootstrap diagnostic,
-# which stage2 is under no such obligation to do -- inheriting it would make
-# those twenty tests fail the day stage2 implements floats or `?:`, and their
-# xfail entries could then never honestly leave the list.
+# every run of it here goes through qemu.
+#
+# It does not pass --no-unsupported, and T-038 measured why. stage2 is the
+# transliteration of the C bootstrap, so it rejects the features
+# bootstrap-unsupported.txt lists for exactly the reasons stage1 rejects them.
+# With the flag, stage2 passes 519 of 538 tests and nineteen entries stay in
+# xfail-stage2.txt for ever; without it, stage2 passes all 538 and the file is
+# empty. (bootstrap-unsupported.txt holds twenty entries. stage2 fails nineteen
+# of them under the flag and passes fail/constants/002_float_to_int.ft either
+# way.) The stronger property is the one asserted. The day stage2 implements
+# floats or `?:` is the day stage1 does too, since one compiles the other, and
+# the entry leaves bootstrap-unsupported.txt then.
 set(FORT_LANG_STAGE2_COMMAND
     "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}"
     --fort "${FORT_STAGE2_BINARY}"
@@ -319,7 +325,6 @@ set(FORT_LANG_STAGE2_COMMAND
     --cc "${FORT_TARGET_CC_PATH}"
     --opt "${FORT_OPT_PATH}"
     --xfail "${FORT_LANG_DIR}/xfail-stage2.txt"
-    --no-unsupported
     -j "${FORT_LANG_JOBS}"
 )
 add_test(NAME lang-stage2 COMMAND ${FORT_LANG_STAGE2_COMMAND})
@@ -366,6 +371,19 @@ add_test(NAME diff-check
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_check.sh" "${CMAKE_BINARY_DIR}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(diff-check PROPERTIES LABELS lang)
+
+# The two emitters over the whole repository, one pass later again: `fort -S`
+# writes the program's LLVM IR module and stops before --cc (toolchain.md 2),
+# and D19.5 makes that text a function of the program alone, so
+# tools/diff_ir.sh compares stage1's module with stage2's byte for byte over
+# every .ft file stage1 compiles -- every `run` and `programs` test, every
+# module test of test/fort, and src/fort/main.ft, which is the compiler
+# emitting itself. It is the oracle the transliterated emitter is judged
+# against, and it sees the whole front end with it.
+add_test(NAME diff-ir
+    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ir.sh" "${CMAKE_BINARY_DIR}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(diff-ir PROPERTIES LABELS lang)
 
 # The interactive half of D11.5 (toolchain.md 5.3): a program whose stdout is
 # a terminal flushes each line as it writes it. No language test can see that,
@@ -462,6 +480,7 @@ add_custom_target(check-lang
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_tokens.sh" "${CMAKE_BINARY_DIR}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ast.sh" "${CMAKE_BINARY_DIR}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_check.sh" "${CMAKE_BINARY_DIR}"
+    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ir.sh" "${CMAKE_BINARY_DIR}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Running the language tests"
     USES_TERMINAL

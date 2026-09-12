@@ -75,6 +75,27 @@ import std.strbuf;
 u64 ROUNDS = 4000;
 u64 BOUND = 4096;
 
+// The rounds the emitter's own mode is measured over, and how many
+// declarations its program carries. The emitter allocates far more per round
+// than the front end does -- a pool holding every operand text, seven vectors
+// and eight buffers -- so a smaller count reaches the same bound, and the
+// program is sized so that each of the sixteen releases gen.gen_free
+// performs is a round's worth rather than a block's.
+u64 EMIT_ROUNDS = 400;
+u64 EMIT_WIDTH = 60;
+
+// How many of the last rounds are held against the early one. The allocator
+// does not hand a round the same small block every time: over the emitter's
+// program the address it returns runs through a cycle of eight, so two late
+// samples are not enough to find one in step with the early round and the
+// probe read 26512 with nothing leaking at all. Sixteen covers that cycle
+// twice; a leak moves every sample, so taking the smallest costs nothing.
+u64 LATE_SAMPLES = 16;
+
+// The exit status of D14.1 a refused program leaves, which the fourth mode
+// asserts of its first round.
+i32 EXIT_COMPILE_ERROR = 1;
+
 // The current program break, which is where the heap ends: sbrk(0) moves
 // nothing and reports it. There is no std binding for it and this is its one
 // caller (D9.8).
@@ -101,58 +122,90 @@ fn u64 probe_block() {
 // address is a leak too, and a subtraction the wrong way round would trap
 // before the assertion (D11.1).
 //
-// The early round is held against the last two rounds and the smaller of the
-// two distances is the answer, which costs nothing when the break is steady
-// and absorbs an allocator that grows the heap on one round in two.
+// The early round is held against each of the last LATE_SAMPLES rounds and
+// the smallest of those distances is the answer, which costs nothing when the
+// heap is steady and absorbs an allocator whose small-block position runs
+// through a cycle: the address a round is handed here has a period of eight
+// over the emitter's program, so one late round in every cycle is in step
+// with the early one whatever the period, while a leak moves all of them.
 fn u64 measure(string@ args) {
+    return measure_rounds(args, ROUNDS, true);
+}
+
+// The same over a round count of its own, and with the block view under a
+// switch. The emitter's round below compiles a far larger program, so it is
+// measured over fewer rounds and the program is made rich enough that every
+// release it claims to witness is a round's worth rather than a block's
+// (AGENTS.md).
+//
+// **The block view is switched off for exactly that round, and the reason is
+// measured.** A round that allocates a hundred kilobytes and gives it back
+// leaves the heap holding free chunks of every size, so the address a 32-byte
+// probe is handed lands wherever one of them starts: it moved through a range
+// of 450 KB over rounds that leaked nothing at all, and no window or cycle
+// makes it repeat. The break is the view that answers for that round, and it
+// answers for all of it: each of the sixteen releases below is at least a
+// kilobyte a round there, so a missing one pushes the break out by hundreds
+// of kilobytes, which the deletion experiment confirms one release at a time.
+// The block view stays on for the four front-end rounds above, where it is
+// steady and where it is the only view that can see a small release.
+fn u64 measure_rounds(string@ args, u64 rounds, bool watch_block) {
+    return measure_status(args, rounds, watch_block, 0);
+}
+
+// The same, for a mode whose command line ends in a diagnostic: the fourth
+// program below is refused by the checker, so its rounds exit 1 and the round
+// that exits 0 would be the broken one.
+fn u64 measure_status(string@ args, u64 rounds, bool watch_block, i32 want_status) {
     u64 mut early = 0;
-    u64 mut late = 0;
-    u64 mut last = 0;
     u64 mut early_block = 0;
-    u64 mut late_block = 0;
-    u64 mut last_block = 0;
+    u64 mut broke = 0;
+    u64 mut block = 0;
+    bool mut sampled = false;
     u64 mut i = 0;
-    while (i < ROUNDS) {
+    while (i < rounds) {
         // The driver writes to both descriptors; they are captured so that
         // this test's own stdout is its one line.
         i32 saved_out = capture.begin(io.STDOUT, "out.txt");
         i32 saved_err = capture.begin(io.STDERR, "err.txt");
-        driver.run(args);
+        i32 status = driver.run(args);
         capture.end(io.STDERR, saved_err);
         capture.end(io.STDOUT, saved_out);
-        if (i == ROUNDS / 2) {
+        if (i == 0) {
+            // The first round answers for the rest: a round that stops early
+            // makes the allocations of a pass the probe claims to watch, and
+            // a probe that watches nothing is green. The emitter's round in
+            // particular ran for a whole afternoon over a program with a type
+            // error, so `-S` stopped at the front end and every deletion of a
+            // release in gen.gen_free was unwitnessed (AGENTS.md).
+            assert(status == want_status);
+        }
+        if (i == rounds / 2) {
             early = probe_address();
             early_block = probe_block();
         }
-        if (i == ROUNDS - 2) {
-            late = probe_address();
-            late_block = probe_block();
-        }
-        if (i == ROUNDS - 1) {
-            last = probe_address();
-            last_block = probe_block();
+        if (i + LATE_SAMPLES >= rounds) {
+            u64 broke_now = distance(probe_address(), early);
+            u64 mut block_now = 0;
+            if (watch_block) {
+                block_now = distance(probe_block(), early_block);
+            }
+            if (!sampled || broke_now < broke) {
+                broke = broke_now;
+            }
+            if (!sampled || block_now < block) {
+                block = block_now;
+            }
+            sampled = true;
         }
         i += 1;
     }
-    assert(early != 0 && late != 0 && last != 0);
-    assert(early_block != 0 && late_block != 0 && last_block != 0);
-    u64 broke = nearer(distance(late, early), distance(last, early));
-    u64 block = nearer(distance(late_block, early_block), distance(last_block, early_block));
+    assert(early != 0 && early_block != 0 && sampled);
     // Either view moving is a leak, so the answer is the larger distance.
     if (broke > block) {
         return broke;
     }
     return block;
-}
-
-// The smaller of two distances, which is what holding the early round against
-// the last two costs nothing when the heap is steady and absorbs an allocator
-// that grows it on one round in two.
-fn u64 nearer(u64 one, u64 other) {
-    if (one < other) {
-        return one;
-    }
-    return other;
 }
 
 // How far apart two addresses are, whichever way the allocator moved.
@@ -199,14 +252,108 @@ fn i32 main() {
     write_file("checked.ft", strbuf.view(&program));
     string[3] mut tokens = {"fort", "--tokens", "clean.ft"};
     string[3] mut ast = {"fort", "--ast", "clean.ft"};
-    // A build of a closure of two modules, which stops at the missing checker
-    // after the loader has read both (D14.1).
-    string[2] mut build = {"fort", "closure.ft"};
+    // A build of a closure of two modules as far as the module of D19.1,
+    // which -S stops at: the emitter runs and is released every round, and
+    // no clang is spawned four thousand times.
+    string[3] mut build = {"fort", "-S", "closure.ft"};
     assert(measure(tokens[0..3]) < BOUND);
     assert(measure(ast[0..3]) < BOUND);
-    assert(measure(build[0..2]) < BOUND);
+    assert(measure(build[0..3]) < BOUND);
     string[2] mut checked = {"fort", "checked.ft"};
-    assert(measure(checked[0..2]) < BOUND);
+    // `checked.ft` is refused by the checker, so its rounds exit 1 (D14.1).
+    assert(measure_status(checked[0..2], ROUNDS, true, EXIT_COMPILE_ERROR) < BOUND);
+    write_emitted();
+    // The fifth program is the emitter's: -S runs gen_init, gen_program and
+    // gen_free every round, and the program reaches every list and every
+    // buffer the emitter owns.
+    string[3] mut emitted = {"fort", "-S", "emitted.ft"};
+    assert(measure_rounds(emitted[0..3], EMIT_ROUNDS, false) < BOUND);
     println("ok");
     return 0;
+}
+
+// A program that makes the emitter allocate everything it owns, so that each
+// release gen.gen_free performs is witnessed by a round that made the
+// allocation: three files for the file list, an enum some `print` reaches for
+// the enum list and its member strings, `extern` declarations for the extern
+// list, a string literal per statement for the string list, a struct for the
+// named types and a module-level constant for the globals section, a body
+// with a slot per local for the slot list, nested blocks with a `defer` each
+// for the scope stack and the deferred list, and an index and an `assert` for
+// the failure buffer.
+//
+// Verified by deletion, one at a time, each moving the break past BOUND:
+// fifteen of the sixteen releases gen.gen_free performs -- the eight buffers
+// `named`, `globals`, `funcs`, `out`, `allocas`, `body`, `fail` and
+// `scratch`, the six vectors `scopes`, `defers`, `files`, `strs`, `enums`
+// and `externs`, and the pool.
+//
+// The sixteenth, `slots_free(&g->slots)`, is not witnessed on its own and
+// cannot be: gen_stmt's function_begin releases the same vector at every
+// definition and `fort_entry` is always the last definition emitted, so the
+// vector gen_free is handed is already empty. Deleting either call alone
+// leaks nothing and leaves this test green; deleting both moves the break
+// past BOUND, which is the measured form of "exactly one of the two runs".
+// What function_begin's call answers for is not a leak but a stale slot: a
+// symbol of the previous definition still in the vector would be found by
+// gen_slot_place, which the emitted text of every other suite covers.
+//
+// The width is what makes the small ones visible: with the emitter's round
+// driven by the two-line program of the mode above, ten of the sixteen were
+// left unwitnessed, and only `named`, `funcs`, `out`, `body`, `scopes` and
+// the pool turned this test red. `externs` needed more than the width: the
+// extern list holds what a module refers to and not what it declares, so it
+// stayed empty until the program called every function it declared.
+fn void write_emitted() {
+    write_file("part_one.ft", "fn i32 one() {\n    return 1;\n}\n");
+    write_file("part_two.ft", "fn i32 two() {\n    return 2;\n}\n");
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "import part_one;\nimport part_two;\n");
+    strbuf.append(&b, "enum colour {\n    red,\n    green,\n    blue,\n}\n");
+    strbuf.append(&b, "string GREETING = \"hello\";\n");
+    u64 mut i = 0;
+    while (i < EMIT_WIDTH) {
+        // A struct and an `extern` apiece, so the named types and the extern
+        // list grow with the width.
+        strbuf.append(&b, "struct box");
+        strbuf.append_u64(&b, i);
+        strbuf.append(&b, " {\n    i64 value;\n}\n");
+        strbuf.append(&b, "extern fn i64 helper");
+        strbuf.append_u64(&b, i);
+        strbuf.append(&b, "(i64 v);\n");
+        i += 1;
+    }
+    strbuf.append(&b, "fn i32 main() {\n");
+    strbuf.append(&b, "    colour c = colour.green;\n    println(c);\n");
+    strbuf.append(&b, "    i64[4] values = {1, 2, 3, 4};\n    i64 mut total = 0;\n");
+    i = 0;
+    while (i < EMIT_WIDTH) {
+        // Each `extern` is called as well as declared: the extern list holds
+        // what the module refers to and not what it declares (item 8), so a
+        // declaration alone leaves `syms_free` unwitnessed. -S stops at the
+        // module, so nothing has to link.
+        strbuf.append(&b, "    total += helper");
+        strbuf.append_u64(&b, i);
+        strbuf.append(&b, "(total);\n");
+        i += 1;
+    }
+    i = 0;
+    while (i < EMIT_WIDTH) {
+        // One local, one string constant, one `defer` and one nested block
+        // per step, so the slot list, the string list, the deferred list and
+        // the scope stack all grow with the width.
+        strbuf.append(&b, "    {\n        i64 step");
+        strbuf.append_u64(&b, i);
+        strbuf.append(&b, " = values[total % 4];\n");
+        strbuf.append(&b, "        defer println(\"left step ");
+        strbuf.append_u64(&b, i);
+        strbuf.append(&b, "\");\n        total += step");
+        strbuf.append_u64(&b, i);
+        strbuf.append(&b, ";\n        assert(total >= 0);\n    }\n");
+        i += 1;
+    }
+    strbuf.append(&b, "    print(GREETING);\n");
+    strbuf.append(&b, "    return part_one.one() + part_two.two() + cast(total % 2, i32);\n}\n");
+    write_file("emitted.ft", strbuf.view(&b));
 }

@@ -202,6 +202,46 @@ struct sym_vec {
     u64 len;
 }
 
+// The kind of a block scope: which exits leave it, and therefore run the
+// deferred statements it holds (D7.8). `break` leaves the innermost loop body
+// or case body, `continue` the innermost loop body, `return` every scope out
+// to the function body, and falling off the end of a block leaves that block
+// alone.
+enum scope_kind {
+    sc_block, // an ordinary block, left by falling off its end
+    sc_loop,  // a loop body, left by `break` and by `continue` too
+    sc_case,  // a case body, left by `break` (D7.6)
+    sc_fn,    // the function body, left by `return`
+}
+
+// One open block scope: its kind and the index into the emitter's `defers`
+// where its own deferred statements begin. src/bootstrap/gen.h keeps two
+// parallel intvec_t, `scope_kinds` and `scope_first`, indexed by the same
+// depth; one vector of pairs says the same thing and cannot fall out of step.
+struct block_scope {
+    scope_kind kind;
+    u64 first;
+}
+
+// The block scopes open at the statement being emitted, innermost last: the
+// set of deferred statements an exit runs is static, so the emitter reads it
+// off this stack and copies the code into every exit rather than keeping a
+// runtime list (D7.8). How many scopes an exit leaves is a property of the
+// tree being walked, which is what this stack is, and never a counter the
+// emitter maintains beside it.
+struct scope_vec {
+    block_scope mut@ own items;
+    u64 len;
+}
+
+// A vector of borrowed AST nodes: the k_defer nodes of every open scope in
+// textual order, and the local declarations gen_function walks. The arena
+// owns the nodes (D17.3).
+struct node_ref_vec {
+    ast.node* mut@ own items;
+    u64 len;
+}
+
 // The emitter. src/bootstrap/gen.h calls it `gen_t`; here it is the
 // `emitter` beside check.ft's `checker`, since a module named `gen` cannot
 // also hand out a type of that name a reader would spell `gen.gen`.
@@ -231,6 +271,24 @@ struct emitter {
     u64 tmps;
     slot_vec slots;  // the locals and parameters in order
     bool terminated; // the block being written already ended in a terminator
+    // `break` targets the innermost enclosing loop or `switch` and `continue`
+    // the innermost enclosing loop, which a `switch` between them does not
+    // interrupt (D7.5, D7.6), so the two targets are saved and set apart: a
+    // loop sets both, a `switch` the break target alone. The flags say
+    // whether a target is set at all, which is the only question asked of
+    // them, and each is saved and restored with its label.
+    u64 break_label;
+    u64 continue_label;
+    bool has_break;
+    bool has_continue;
+    node_ref_vec defers; // the k_defer nodes of every open scope (D7.8)
+    scope_vec scopes;    // the open block scopes, innermost last
+    // The scope an exit inside deferred code may not unwind past: the scopes
+    // below it are the ones the exit being expanded is already leaving, and
+    // `return`, `break` and `continue` inside deferred code are errors the
+    // checker refused (D7.8), so reaching it is an internal error rather than
+    // an unbounded re-entry into the same deferred statement.
+    u64 defer_floor;
 
     // ---- what the module refers to, in first-use order (D19.5) ----
     record_vec files; // @.file.N, one per file
@@ -376,6 +434,101 @@ fn void syms_free(sym_vec mut* v) {
     v->len = 0;
 }
 
+// The scope stack and the deferred-statement list grow like every other
+// vector of this module.
+fn void scopes_reserve(scope_vec mut* v) {
+    if (v->len < v->items.len) {
+        return;
+    }
+    u64 mut cap = VEC_MIN_CAP;
+    if (v->items.len >= cap) {
+        if (v->items.len > containers.U64_MAX / 2) {
+            panic("gen.scopes_reserve: capacity overflow");
+        }
+        cap = v->items.len * 2;
+    }
+    block_scope mut@ own bigger = new(block_scope, cap);
+    u64 mut i = 0;
+    while (i < v->len) {
+        bigger[i] = v->items[i];
+        i += 1;
+    }
+    del(v->items);
+    v->items = move(bigger);
+}
+
+fn void scopes_push(scope_vec mut* v, block_scope s) {
+    scopes_reserve(v);
+    v->items[v->len] = s;
+    v->len += 1;
+}
+
+// The scope at `i`, with the precondition records_at has.
+fn block_scope scopes_at(scope_vec* v, u64 i) {
+    if (i >= v->len) {
+        panic("gen.scopes_at: index out of range");
+    }
+    return v->items[i];
+}
+
+// Drops the innermost scope and answers it; an empty stack is a violated
+// precondition and panics (D13.3).
+fn block_scope scopes_pop(scope_vec mut* v) {
+    if (v->len == 0) {
+        panic("gen.scopes_pop: no open scope");
+    }
+    v->len -= 1;
+    return v->items[v->len];
+}
+
+fn void scopes_free(scope_vec mut* v) {
+    del(v->items);
+    v->len = 0;
+}
+
+fn void refs_reserve(node_ref_vec mut* v) {
+    if (v->len < v->items.len) {
+        return;
+    }
+    u64 mut cap = VEC_MIN_CAP;
+    if (v->items.len >= cap) {
+        if (v->items.len > containers.U64_MAX / 2) {
+            panic("gen.refs_reserve: capacity overflow");
+        }
+        cap = v->items.len * 2;
+    }
+    // new(T, n) is mutable at every level (D5.8) and the elements here are
+    // pointers to immutable nodes, so the allocation is cast once, at the one
+    // place it is made, as syms_reserve casts its own.
+    ast.node* mut@ own bigger = cast(new(ast.node*, cap), ast.node* mut@ own);
+    u64 mut i = 0;
+    while (i < v->len) {
+        bigger[i] = v->items[i];
+        i += 1;
+    }
+    del(v->items);
+    v->items = move(bigger);
+}
+
+fn void refs_push(node_ref_vec mut* v, ast.node* n) {
+    refs_reserve(v);
+    v->items[v->len] = n;
+    v->len += 1;
+}
+
+// The node at `i`, with the precondition records_at has.
+fn ast.node* refs_at(node_ref_vec* v, u64 i) {
+    if (i >= v->len) {
+        panic("gen.refs_at: index out of range");
+    }
+    return v->items[i];
+}
+
+fn void refs_free(node_ref_vec mut* v) {
+    del(v->items);
+    v->len = 0;
+}
+
 // ---- the argument list of one call ------------------------------------------------
 
 // The empty argument list; allocates nothing.
@@ -448,6 +601,11 @@ fn void reset_state(emitter mut* g) {
     g->labels = 0;
     g->tmps = 0;
     g->terminated = false;
+    g->break_label = 0;
+    g->continue_label = 0;
+    g->has_break = false;
+    g->has_continue = false;
+    g->defer_floor = 0;
     g->module = null;
     g->ck = null;
     g->entry_defined = false;
@@ -479,6 +637,8 @@ fn void gen_free(emitter mut* g) {
     strbuf.free(&g->body);
     strbuf.free(&g->fail);
     slots_free(&g->slots);
+    scopes_free(&g->scopes);
+    refs_free(&g->defers);
     records_free(&g->files);
     records_free(&g->strs);
     records_free(&g->enums);

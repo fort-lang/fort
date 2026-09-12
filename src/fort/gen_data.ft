@@ -1,0 +1,597 @@
+// gen_data: the data half of the LLVM IR emitter (toolchain.md 6 items 5, 8
+// and 21), the transliteration of the emit half of src/bootstrap/gen_data.c:
+// the module-level data of D7.10, the private data the emitter accumulated,
+// the module's declarations, the attribute groups and the assembly of the
+// sections into one module. See gen.ft.
+//
+// How this file is cut, and why it is not src/bootstrap/gen_data.c's cut. The
+// C file also holds the accounting halves -- gen_file_ref, gen_str_ref,
+// gen_enum_ref, gen_use_extern, gen_append_name and the calls to the runtime
+// -- which the checks of D19.6 need while an expression is being lowered, so
+// they went into gen.ft with the primitives they stand beside (T-037):
+// circular imports are a compile error (D9.5). What is left here is what runs
+// after a function has been emitted, and it depends on gen.ft alone. Every
+// function keeps its C name, so the two emitters are read side by side
+// whatever file each name stands in.
+//
+// Re-entrancy (D20.5): every function here works on the emitter it is given
+// and allocates out of that emitter's pool or out of a buffer it frees.
+// Nothing here ends the process.
+//
+// Dispatch: none. The kind analyses are the plain switches and if-chains the
+// C wrote, not a function-pointer table (D3.10).
+import ast;
+import check;
+import consts;
+import gen;
+import lexer;
+import runtime_sig;
+import std.strbuf;
+import types;
+
+// The module header of item 1: clang's normalized spelling of the triple, and
+// no datalayout, module flags, comments or source_filename (D19.1).
+string MODULE_HEADER = "target triple = \"x86_64-unknown-linux-gnu\"\n";
+
+// The program entry point the compiler emits in the entry module (D11.6): the
+// one C name a fort program's own definitions occupy.
+string ENTRY_NAME = "fort_entry";
+
+// The text of one attribute group of toolchain.md 6, at the fixed index
+// gen.ft's ATTR_* constants give; only the used ones are emitted (D19.5).
+// `mustprogress` is deliberately absent everywhere: it would license the
+// optimizer to delete a `while (true) { }`, which fort keeps running (D8.4).
+// src/bootstrap/gen_data.c indexes an array of these; a chain says the same
+// thing and keeps the order, which is the group numbering itself.
+fn string attr_text(u64 which) {
+    if (which == gen.ATTR_FN) {
+        return "nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"";
+    } else if (which == gen.ATTR_FN_NORET) {
+        return "noreturn nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"";
+    } else if (which == gen.ATTR_FAIL) {
+        return "cold noreturn nounwind";
+    } else if (which == gen.ATTR_NOBUILTIN) {
+        return "nobuiltin";
+    } else if (which == gen.ATTR_OVERFLOW) {
+        return "nocallback nofree nosync nounwind speculatable willreturn memory(none)";
+    } else if (which == gen.ATTR_MEMCPY) {
+        return "nocallback nofree nounwind willreturn memory(argmem: readwrite)";
+    } else if (which == gen.ATTR_MEMSET) {
+        return "nocallback nofree nounwind willreturn memory(argmem: write)";
+    }
+    return "cold noreturn nounwind memory(inaccessiblemem: write)";
+}
+
+// The overflow intrinsics of item 15, in the order `sadd ssub smul uadd usub
+// umul` and, within each, the widths `i8 i16 i32 i64`. The C keeps two arrays
+// here and a switch of the same names in gen_expr.c; the fort emitter keeps
+// the same two spellings, so that this file needs no import of gen_expr.ft.
+fn string overflow_op(u64 which) {
+    if (which == gen.OVF_SADD) {
+        return "sadd";
+    } else if (which == gen.OVF_SSUB) {
+        return "ssub";
+    } else if (which == gen.OVF_SMUL) {
+        return "smul";
+    } else if (which == gen.OVF_UADD) {
+        return "uadd";
+    } else if (which == gen.OVF_USUB) {
+        return "usub";
+    }
+    return "umul";
+}
+
+fn string overflow_width(u64 which) {
+    if (which == 0) {
+        return "i8";
+    } else if (which == 1) {
+        return "i16";
+    } else if (which == 2) {
+        return "i32";
+    }
+    return "i64";
+}
+
+// ---- private data (item 5) --------------------------------------------------------
+
+// Appends `c"..."` with the trailing NUL that `len` excludes (D3.7) and every
+// byte outside the printable range written as a `\XX` hex pair (item 5).
+fn void append_bytes(strbuf.str_buf mut* out, string s) {
+    strbuf.append(out, "c\"");
+    u64 mut i = 0;
+    while (i < s.len) {
+        u64 byte = cast(s[i], u64);
+        if (byte < gen.PRINTABLE_FIRST || byte > gen.PRINTABLE_LAST || s[i] == '"' ||
+            s[i] == '\\') {
+            gen.append_hex(out, byte);
+        } else {
+            strbuf.push(out, s[i]);
+        }
+        i += 1;
+    }
+    strbuf.append(out, "\\00\"");
+}
+
+// `@.x.N = private unnamed_addr constant [len + 1 x i8] c"...", align 1`:
+// private data marks `unnamed_addr`, a named fort constant never does (item
+// 5).
+fn void emit_bytes(strbuf.str_buf mut* out, string name, string bytes) {
+    strbuf.append(out, name);
+    strbuf.append(out, " = private unnamed_addr constant [");
+    strbuf.append_u64(out, bytes.len + 1);
+    strbuf.append(out, " x i8] ");
+    append_bytes(out, bytes);
+    strbuf.append(out, ", align 1\n");
+}
+
+// The private data of item 5: `@.file.N` before `@.str.N` before `@.enum.*`
+// (D19.5).
+fn void emit_data(gen.emitter mut* g, strbuf.str_buf mut* out) {
+    u64 mut i = 0;
+    while (i < g->files.len) {
+        string text = gen.records_at(&g->files, i).text;
+        emit_bytes(out, gen.data_name(g, "file", i), text);
+        i += 1;
+    }
+    i = 0;
+    while (i < g->strs.len) {
+        string text = gen.records_at(&g->strs, i).text;
+        emit_bytes(out, gen.data_name(g, "str", i), text);
+        i += 1;
+    }
+    i = 0;
+    while (i < g->enums.len) {
+        gen.record r = gen.records_at(&g->enums, i);
+        strbuf.append(out, gen.enum_name(g, r.sym));
+        strbuf.append(out, " = private unnamed_addr constant [");
+        strbuf.append_u64(out, r.count);
+        strbuf.append(out, " x %fort.enum_member] [");
+        u64 mut at = 0;
+        u64 mut k = 0;
+        while (r.sym->node != null && k < ast.ast_len(r.sym->node)) {
+            ast.node* m = ast.ast_child(r.sym->node, k);
+            if (m->kind == ast.ast_kind.k_enum_member) {
+                if (at > 0) {
+                    strbuf.append(out, ", ");
+                }
+                // One entry per member in declaration order (item 21).
+                strbuf.append(out, "%fort.enum_member { i32 ");
+                strbuf.append_i64(out, cast(consts.cv_bits(check.check_node_value(g->ck, m)), i64));
+                strbuf.append(out, ", ptr ");
+                strbuf.append(out, gen.data_name(g, "str", r.first + at));
+                strbuf.append(out, " }");
+                at += 1;
+            }
+            k += 1;
+        }
+        // `%fort.enum_member` has C's 16-byte layout, so the table matches
+        // struct fort_rt_enum_member (item 21).
+        strbuf.append(out, "], align 8\n");
+        i += 1;
+    }
+}
+
+// ---- module-level data (item 5, D7.10) --------------------------------------------
+
+// The zero constant of `t` as an initializer spells it: `zeroinitializer` for
+// an aggregate, `null` for a pointer and `0` for every other scalar (item 5).
+fn void const_zero(strbuf.str_buf mut* out, types.node* t) {
+    if (gen.gen_is_aggregate(t)) {
+        strbuf.append(out, "zeroinitializer");
+        return;
+    }
+    if (t != null && (t->kind == types.type_kind.k_ptr || t->kind == types.type_kind.k_voidptr ||
+                      t->kind == types.type_kind.k_fn)) {
+        strbuf.append(out, "null");
+        return;
+    }
+    strbuf.push(out, '0');
+}
+
+// `<memtype> <value>`: one element or field of a constant aggregate, whose
+// type is written before every member (item 5). A null node is a field the
+// designated form omitted, which is zeroed (D6.5).
+fn void const_member(gen.emitter mut* g, strbuf.str_buf mut* out, types.node* t, ast.node* n,
+                     bool mut* zero) {
+    // The member's type is appended before its value is built, since both
+    // texts come out of the emitter's one scratch buffer.
+    string ty = gen.gen_mem_type(g, t);
+    strbuf.append(out, ty);
+    strbuf.push(out, ' ');
+    if (n == null) {
+        const_zero(out, t);
+        return;
+    }
+    if (!const_value(g, out, t, n)) {
+        *zero = false;
+    }
+}
+
+// The member of a designated struct literal that initializes the field at
+// index `at`, or null when it omits it (D6.5). It places every designator
+// through gen_field_index, the one map from a field symbol to its index, so a
+// designator the emitter cannot place ends the compilation instead of leaving
+// a zeroed field in read-only memory: an unfinished path is a diagnostic,
+// never wrong data.
+fn ast.node* designated_value(gen.emitter mut* g, ast.node* lit, u64 at) {
+    u64 mut i = 0;
+    while (i < ast.ast_len(lit)) {
+        ast.node* d = ast.ast_child(lit, i);
+        u64 mut k = 0;
+        if (d->kind != ast.ast_kind.k_designator || !gen.gen_field_index(d->sym, &k)) {
+            gen.gen_todo(g, d->loc, "this initializer");
+            return null;
+        }
+        if (k == at) {
+            return d->a;
+        }
+        i += 1;
+    }
+    return null;
+}
+
+// A constant struct: its fields in declaration order, the order the named
+// type of gen_stmt.ft writes them in, with an omitted field zeroed (D6.5,
+// item 5). This is the fourth walk over the k_field_decl children of a
+// declaration; gen_stmt.ft's gen_struct_type names the other three and why
+// all four must agree.
+fn bool const_struct(gen.emitter mut* g, strbuf.str_buf mut* out, types.node* t, ast.node* n) {
+    ast.sym* s = check.nominal_sym(t);
+    if (s == null || s->node == null) {
+        gen.gen_todo(g, n->loc, "this initializer");
+        return true;
+    }
+    bool designated = (n->flags & ast.FLAG_DESIGNATED) != 0;
+    strbuf.str_buf mut buf = strbuf.create();
+    defer strbuf.free(&buf);
+    bool mut zero = true;
+    u64 mut at = 0;
+    strbuf.append(&buf, "{ ");
+    u64 mut i = 0;
+    while (i < ast.ast_len(s->node)) {
+        ast.node* f = ast.ast_child(s->node, i);
+        if (f->kind == ast.ast_kind.k_field_decl) {
+            if (at > 0) {
+                strbuf.append(&buf, ", ");
+            }
+            ast.node* mut v = null;
+            if (designated) {
+                v = designated_value(g, n, at);
+            } else if (at < ast.ast_len(n)) {
+                v = ast.ast_child(n, at);
+            }
+            const_member(g, &buf, f->ty, v, &zero);
+            if (g->failed) {
+                // One report per initializer: the walk stops at the first
+                // member the emitter cannot lower.
+                break;
+            }
+            at += 1;
+        }
+        i += 1;
+    }
+    strbuf.append(&buf, " }");
+    // An all-zero aggregate is `zeroinitializer` whatever its shape (item 5).
+    if (zero) {
+        strbuf.append(out, "zeroinitializer");
+    } else {
+        strbuf.append(out, strbuf.view(&buf));
+    }
+    return zero;
+}
+
+// A constant fixed array: exactly `N` elements or `{}` (D6.5, item 5).
+fn bool const_array(gen.emitter mut* g, strbuf.str_buf mut* out, types.node* t, ast.node* n) {
+    strbuf.str_buf mut buf = strbuf.create();
+    defer strbuf.free(&buf);
+    bool mut zero = true;
+    strbuf.push(&buf, '[');
+    u64 mut i = 0;
+    while (i < ast.ast_len(n)) {
+        if (i > 0) {
+            strbuf.append(&buf, ", ");
+        }
+        const_member(g, &buf, t->elem, ast.ast_child(n, i), &zero);
+        i += 1;
+    }
+    strbuf.push(&buf, ']');
+    if (zero) {
+        strbuf.append(out, "zeroinitializer");
+    } else {
+        strbuf.append(out, strbuf.view(&buf));
+    }
+    return zero;
+}
+
+// A constant `string` or span: its two header fields, the bytes and the
+// length the trailing NUL excludes (D3.7, item 5). The pointer is a
+// relocation, so the value is never all-zero.
+fn bool const_string(gen.emitter mut* g, strbuf.str_buf mut* out, string bytes) {
+    string ref = gen.gen_str_ref(g, bytes);
+    strbuf.append(out, "{ ptr ");
+    strbuf.append(out, ref);
+    strbuf.append(out, ", i64 ");
+    strbuf.append_u64(out, bytes.len);
+    strbuf.append(out, " }");
+    return false;
+}
+
+// The address of a module-level declaration, of a function, or the value of
+// another module-level declaration: the three forms D7.10 adds to the
+// constant expressions of D4.6. Returns false when `n` is none of them.
+fn bool const_symbol(gen.emitter mut* g, strbuf.str_buf mut* out, types.node* t, ast.node* n,
+                     bool mut* zero) {
+    ast.sym* s = n->sym;
+    if (s == null) {
+        return false;
+    }
+    if (s->kind == ast.sym_kind.s_fn) {
+        // A function name is a module-level initializer and its address is a
+        // relocation (D3.10, D7.10).
+        strbuf.append(out, gen.gen_symbol_ref(g, s));
+        *zero = false;
+        return true;
+    }
+    if (s->kind == ast.sym_kind.s_const && s->node != null && s->node->b != null) {
+        // A constant that names another one holds that one's value; the
+        // checker resolved the chain lazily and refused a cycle (D4.6,
+        // D7.10). Only an immutable declaration: a read of a `mut` global is
+        // not a constant expression, so one reaching here is refused rather
+        // than frozen into another constant (D4.6).
+        *zero = const_value(g, out, t, s->node->b);
+        return true;
+    }
+    return false;
+}
+
+// The value of a module-level initializer, appended to `out`, and whether
+// every byte of it is zero, which is what `zeroinitializer` spells (item 5).
+// The C declares this above const_zero, since the two recur through each
+// other; a fort module needs no forward declaration (D7.10).
+fn bool const_value(gen.emitter mut* g, strbuf.str_buf mut* out, types.node* t, ast.node* n) {
+    if (g->failed || t == null || n == null) {
+        const_zero(out, t);
+        return true;
+    }
+    if ((n->ann & check.ANN_CONST) != 0) {
+        consts.cval v = check.check_node_value(g->ck, n);
+        if (v.kind == consts.cval_kind.cv_str) {
+            return const_string(g, out, v.str);
+        }
+        if (v.kind != consts.cval_kind.cv_none) {
+            // Every folded constant is emitted as its literal, whatever node
+            // it stands on (D4.6).
+            gen.gen_val c = gen.gen_const_mem_value(g, t, v);
+            strbuf.append(out, c.val);
+            return v.kind == consts.cval_kind.cv_null || v.mag == 0;
+        }
+    }
+    if (n->kind == ast.ast_kind.k_brace_init) {
+        if (ast.ast_len(n) == 0) {
+            // `{}` zeroes any aggregate, span or string (D6.5).
+            const_zero(out, t);
+            return true;
+        }
+        if (t->kind == types.type_kind.k_array) {
+            return const_array(g, out, t, n);
+        }
+        if (t->kind == types.type_kind.k_struct) {
+            return const_struct(g, out, t, n);
+        }
+    } else if (n->kind == ast.ast_kind.k_struct_lit || n->kind == ast.ast_kind.k_array_lit) {
+        // A typed literal carries its brace list in `b` (D6.5).
+        return const_value(g, out, t, n->b);
+    } else if (n->kind == ast.ast_kind.k_ident || n->kind == ast.ast_kind.k_field) {
+        bool mut zero = true;
+        if (const_symbol(g, out, t, n, &zero)) {
+            return zero;
+        }
+    } else if (n->kind == ast.ast_kind.k_unary) {
+        if (cast(n->op, lexer.tok_kind) == lexer.tok_kind.amp && n->a != null &&
+            n->a->sym != null && (n->a->sym->kind == ast.sym_kind.s_const ||
+                                  n->a->sym->kind == ast.sym_kind.s_global)) {
+            // `&` of a module-level declaration from any module, and of
+            // nothing else, is an initializer (D7.10).
+            strbuf.append(out, gen.gen_symbol_ref(g, n->a->sym));
+            return false;
+        }
+    }
+    gen.gen_todo(g, n->loc, "this initializer");
+    const_zero(out, t);
+    return true;
+}
+
+// Appends the module-level declaration `decl` to the globals section: a
+// `dso_local constant` for an immutable declaration, which lives in read-only
+// memory, and a `dso_local global` for a `mut` one (D7.10). A declaration
+// that failed to check is skipped.
+fn void gen_global(gen.emitter mut* g, ast.node* decl) {
+    ast.sym* s = decl->sym;
+    if (s == null || s->error || s->ty == null) {
+        // A declaration that failed to check is silent here: the checker
+        // reported it (D14.2).
+        return;
+    }
+    if (s->kind != ast.sym_kind.s_const && s->kind != ast.sym_kind.s_global) {
+        return;
+    }
+    // Name, type and value each pass through the one scratch buffer, so each
+    // is finished before the next begins.
+    string name = gen.gen_symbol_ref(g, s);
+    string ty = gen.gen_mem_type(g, s->ty);
+    strbuf.str_buf mut init = strbuf.create();
+    defer strbuf.free(&init);
+    const_value(g, &init, s->ty, decl->b);
+    strbuf.append(&g->globals, name);
+    // An immutable declaration lives in read-only memory and a `mut` one in
+    // writable memory (D7.10); no section is named, since LLVM picks it from
+    // the initializer (item 5). A named fort constant is not `unnamed_addr`:
+    // its address is significant, because `&CONST` is expressible (D6.7).
+    if (s->kind == ast.sym_kind.s_global) {
+        strbuf.append(&g->globals, " = dso_local global ");
+    } else {
+        strbuf.append(&g->globals, " = dso_local constant ");
+    }
+    strbuf.append(&g->globals, ty);
+    strbuf.push(&g->globals, ' ');
+    strbuf.append(&g->globals, strbuf.view(&init));
+    // Every global carries an explicit `align N` from the compiler's own
+    // layout (D3.1, D3.8, item 5).
+    strbuf.append(&g->globals, ", align ");
+    strbuf.append_u64(&g->globals, types.type_alignof(s->ty));
+    strbuf.push(&g->globals, '\n');
+}
+
+// ---- declarations (item 8) --------------------------------------------------------
+
+// `declare <ret> @name(<params>, ...)`: an `extern` function is declared with
+// its C types, unmangled, and with a variadic tail, which is what makes a
+// fixed-prototype declaration of a variadic C function safe (item 8, D9.8).
+fn void emit_extern(gen.emitter mut* g, strbuf.str_buf mut* out, ast.sym* s) {
+    types.node* sig = s->ty;
+    strbuf.append(out, "declare ");
+    string ret_attr = gen.gen_ext_attr(sig->elem);
+    if (ret_attr.len > 0) {
+        strbuf.append(out, ret_attr);
+        strbuf.push(out, ' ');
+    }
+    strbuf.append(out, gen.gen_value_type(g, sig->elem));
+    strbuf.append(out, " @");
+    // Through the one spelling of item 4, like every other `@` name: an
+    // `extern` name is a fort identifier and comes out bare, and no site of
+    // the emitter has a rule of its own (D9.7).
+    gen.gen_append_name(out, "", s->name, false);
+    strbuf.push(out, '(');
+    u64 mut i = 0;
+    while (i < sig->params.len) {
+        if (i > 0) {
+            strbuf.append(out, ", ");
+        }
+        strbuf.append(out, gen.gen_value_type(g, sig->params[i]));
+        string attr = gen.gen_ext_attr(sig->params[i]);
+        if (attr.len > 0) {
+            strbuf.push(out, ' ');
+            strbuf.append(out, attr);
+        }
+        i += 1;
+    }
+    if (sig->params.len > 0) {
+        strbuf.append(out, ", ");
+    }
+    strbuf.append(out, "...)\n");
+}
+
+// The intrinsics, with the spellings LLVM 18 prints, in the fixed order of
+// item 8's table; the parameter attributes shown are part of the spelling.
+fn void emit_intrinsic(strbuf.str_buf mut* out, u64 which) {
+    if (which == gen.IN_MEMCPY) {
+        strbuf.append(out, "declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly, ");
+        strbuf.append(out, "ptr noalias nocapture readonly, i64, i1 immarg) #5\n");
+        return;
+    }
+    if (which == gen.IN_MEMSET) {
+        strbuf.append(out, "declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, ");
+        strbuf.append(out, "i1 immarg) #6\n");
+        return;
+    }
+    if (which == gen.IN_TRAP) {
+        strbuf.append(out, "declare void @llvm.trap() #7\n");
+        return;
+    }
+    u64 at = which - gen.IN_OVERFLOW_FIRST;
+    string op = overflow_op(at / gen.OVF_WIDTHS);
+    string width = overflow_width(at % gen.OVF_WIDTHS);
+    strbuf.append(out, "declare { ");
+    strbuf.append(out, width);
+    strbuf.append(out, ", i1 } @llvm.");
+    strbuf.append(out, op);
+    strbuf.append(out, ".with.overflow.");
+    strbuf.append(out, width);
+    strbuf.push(out, '(');
+    strbuf.append(out, width);
+    strbuf.append(out, ", ");
+    strbuf.append(out, width);
+    strbuf.append(out, ") #4\n");
+}
+
+// ---- assembly (item 1) ------------------------------------------------------------
+
+// Appends one section, separated from the one before it by a blank line
+// (item 1); an empty section is skipped, so the sections a module does not
+// need leave no trace.
+fn void section(strbuf.str_buf mut* out, string text) {
+    if (text.len == 0) {
+        return;
+    }
+    if (strbuf.view(out).len > 0) {
+        strbuf.push(out, '\n');
+    }
+    strbuf.append(out, text);
+}
+
+// Appends the private data, the declarations and the attribute groups, then
+// assembles the module into `g->out` (item 1).
+fn void gen_finish(gen.emitter mut* g) {
+    strbuf.str_buf mut data = strbuf.create();
+    defer strbuf.free(&data);
+    emit_data(g, &data);
+    strbuf.str_buf mut externs = strbuf.create();
+    defer strbuf.free(&externs);
+    // `extern` C functions in first-use order (D19.5), except one naming a
+    // symbol the module defines: one ELF symbol is one IR entity, so a
+    // `declare` beside a `define` of `fort_entry` would be a redefinition
+    // (item 8). The checker refuses such a declaration first, since the name
+    // is reserved (D9.7), so this only keeps the invariant local to the
+    // emitter.
+    u64 mut i = 0;
+    while (i < g->externs.len) {
+        ast.sym* s = gen.syms_at(&g->externs, i);
+        if (!g->entry_defined || s->name != ENTRY_NAME) {
+            emit_extern(g, &externs, s);
+        }
+        i += 1;
+    }
+    strbuf.str_buf mut runtime = strbuf.create();
+    defer strbuf.free(&runtime);
+    // Then the runtime entry points in the order of toolchain.md 5.1.
+    i = 0;
+    while (i < runtime_sig.RT_ENTRY_COUNT) {
+        if (gen.gen_uses_rt(g, runtime_sig.rt_at(i))) {
+            runtime_sig.rt_declaration(&runtime, runtime_sig.rt_at(i));
+        }
+        i += 1;
+    }
+    strbuf.str_buf mut intrinsics = strbuf.create();
+    defer strbuf.free(&intrinsics);
+    // Then the intrinsics in the fixed table order.
+    i = 0;
+    while (i < gen.IN_COUNT) {
+        if (gen.gen_uses_intrinsic(g, i)) {
+            emit_intrinsic(&intrinsics, i);
+        }
+        i += 1;
+    }
+    strbuf.str_buf mut attributes = strbuf.create();
+    defer strbuf.free(&attributes);
+    i = 0;
+    while (i < gen.ATTR_COUNT) {
+        if (gen.gen_uses_attr(g, i)) {
+            strbuf.append(&attributes, "attributes #");
+            strbuf.append_u64(&attributes, i);
+            strbuf.append(&attributes, " = { ");
+            strbuf.append(&attributes, attr_text(i));
+            strbuf.append(&attributes, " }\n");
+        }
+        i += 1;
+    }
+    strbuf.clear(&g->out);
+    section(&g->out, MODULE_HEADER);
+    section(&g->out, strbuf.view(&g->named));
+    section(&g->out, strbuf.view(&g->globals));
+    section(&g->out, strbuf.view(&g->funcs));
+    section(&g->out, strbuf.view(&data));
+    section(&g->out, strbuf.view(&externs));
+    section(&g->out, strbuf.view(&runtime));
+    section(&g->out, strbuf.view(&intrinsics));
+    section(&g->out, strbuf.view(&attributes));
+}

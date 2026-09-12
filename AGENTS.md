@@ -408,12 +408,28 @@ A safe(r) C-like systems programming language.
   an x86-64 binary and runs under qemu like every program the compiler builds.
   `tools/bootstrap.sh [--preset <preset>] [--stage3]` drives the same steps by hand in the guest
   and, with `--stage3`, compiles `src/fort` with stage2 and compares the two binaries byte for
-  byte -- the fixed point self-hosting means. It is not in the gate, and `--stage3` fails until
-  stage2 can compile `src/fort`.
+  byte -- the fixed point self-hosting means. It is not in the gate. **It passes as of T-038**:
+  `bash tools/bootstrap.sh --preset debug --stage3` prints `stage2 and stage3 are identical: the
+  compiler is self-hosted`.
+  `tools/diff_ir.sh` runs that same module comparison inside the gate, which is what is new: it
+  compares stage1's and stage2's module for `src/fort/main.ft` among the rest, and
+  `tools/bootstrap.sh` already compares those two modules itself before it builds stage3. So the
+  gate now sees a difference between the two emitters the day it appears, instead of on the day
+  somebody runs a three-stage build by hand.
+  **It is not a proof of the fixed point, and do not read it as one.** The step from "the two
+  modules agree" to "stage2 and stage3 are the same bytes" needs three assumptions and the
+  repository checks one of them. The one it checks is that the two compilers emit the same module
+  text. The two it does not: `clang` must be deterministic over one input and one command line,
+  which nothing here asserts; and `diff_ir.sh` compiles `main.ft` from the top of the worktree
+  with `-I src/fort -I test/fort/support`, while `tools/bootstrap.sh` uses its own working
+  directory and its own roots, so the module `diff_ir.sh` compares is not byte for byte the
+  module that built stage2. `bash tools/bootstrap.sh --preset debug --stage3` is still the
+  answer when the question is asked.
 - Two corpora beside `test/lang` run through the same `run_tests.py`, which takes the corpus root
   as `--root`: ctest `lang-stage2` (label `lang`) holds the language corpus against stage2 with
-  `--xfail test/lang/xfail-stage2.txt`, which starts as the whole corpus (`run/`, `fail/`,
-  `programs/`) and shrinks as Phase B lands passes; ctest `fort-modules` (label `lang`) runs
+  `--xfail test/lang/xfail-stage2.txt`, which started as the whole corpus (`run/`, `fail/`,
+  `programs/`) and is empty as of T-038, stage2 passing every test of it;
+  ctest `fort-modules` (label `lang`) runs
   `test/fort/<x>_test.ft`, the tests of the compiler's own modules. Both are commands of
   `check-lang`, so the gate runs them. A `test/fort` test is an ordinary run test in the D14.5
   directives whose header carries `//! flags: -I ../../src/fort` (the compiler's working
@@ -457,11 +473,32 @@ A safe(r) C-like systems programming language.
   dropped `del(set->order.items)` left the address of the module vector exactly where it was, so
   `modules_closure_test.ft` watches three addresses and the break, and every one of the six
   releases was verified against the view that moves. Sample the early round against the **last
-  two** rounds and take the smaller distance: the allocator alternates between two positions from
-  one round to the next once the program's own path is long enough to change a bin -- which the
+  sixteen** rounds and take the smallest distance: the allocator's small-block position runs
+  through a cycle once the program's own path is long enough to change a bin -- which the
   harness's `mkdtemp` directory is, while a hand run from `/tmp/prog` is not, so a probe reads 0
-  by hand and 12208 under `check-lang` -- and one of the two late rounds is in step whatever the
-  period, while a leak moves both. A probe over a whole driver run belongs in a file of its own
+  by hand and 12208 under `check-lang` -- and one late round in every cycle is in step with the
+  early one whatever the period, while a leak moves all of them. Two late samples were the rule
+  until T-038 measured a period of **eight** over the emitter's round and read 26512 with nothing
+  leaking; the window has to cover the cycle, and sixteen covers every period seen so far.
+  **A round large enough to witness a big release makes the block view useless**, which is the
+  other half of the same measurement: a round that allocates a hundred kilobytes and gives it all
+  back leaves free chunks of every size, so the 32-byte probe lands wherever one starts and ranged
+  over 450 KB with nothing leaking. Switch the block view off for such a round and say why in the
+  test, and earn it: every release that round covers must then be large enough for the *break* to
+  move, which the deletion experiment confirms one release at a time.
+  **Two calls that release the same vector cannot be witnessed apart.** `gen_free`'s `slots_free`
+  and `gen_stmt`'s `function_begin` both release the emitter's slot vector, and deleting either
+  alone leaks nothing: 15 of `gen_free`'s 16 releases turned T-038's probe red and the sixteenth
+  only did so when both were deleted. When a deletion leaves a probe green, ask whether a second
+  call already covers it before raising the round size, and write the answer down -- what the
+  redundant call answers for there is a stale slot and not a leak, which is a correctness question
+  with a witness of its own.
+  **A round that does nothing witnesses nothing, and it looks exactly like a round that works**:
+  T-038's first emitter round was driven by a program with a type error, so `-S` stopped at the
+  front end, the emitter never ran and *all sixteen* deletions still turned the test red -- from
+  the block-view noise of the four rounds before it. Check that the program the probe compiles
+  actually compiles, by hand, before reading a single deletion result.
+  A probe over a whole driver run belongs in a file of its own
   (`test/fort/driver_lifetime_test.ft`), since forty other tests in the same program fragment the
   heap for reasons that are not leaks.
   **A probe also sizes its round**: a release of one small block per round is seen by neither view,
@@ -477,10 +514,19 @@ A safe(r) C-like systems programming language.
   the flush around it, and `diag_mute_test.ft` and `driver_test.ft` call it rather than repeating
   the redirect. A mute that kept printing passed the directive form of that test and failed the
   captured form.
-  `lang-stage2` passes `--no-unsupported`: `bootstrap-unsupported.txt`
-  demands that the compiler *reject* the features the C bootstrap lacks, which stage2 is under no
-  such obligation to do, and inheriting it would keep twenty entries in `xfail-stage2.txt` for
-  ever. ctest `stage-usage` (label `unit`) diffs stage1's and stage2's `--help`, `--version` and
+  **`lang-stage2` does not pass `--no-unsupported`, and `xfail-stage2.txt` is empty.** It did
+  pass the flag until T-038 measured what the flag costs. `bootstrap-unsupported.txt` demands
+  that the compiler *reject* the features the C bootstrap lacks; stage2 is the transliteration of
+  that compiler and rejects them for the same reasons, so with the flag stage2 passes 519 of the
+  538 tests and nineteen entries stay in `xfail-stage2.txt` for ever, while without it stage2
+  passes all 538 and the file holds nothing. Take the stronger property. The argument the flag
+  was added on -- that inheriting the list would keep twenty entries in the file for ever -- runs
+  the other way: it is the flag that keeps nineteen of them. (`bootstrap-unsupported.txt` holds
+  twenty entries and stage2 fails nineteen of them under the flag: it passes
+  `fail/constants/002_float_to_int.ft` whatever the flag says.)
+  stage1 compiles stage2, so the day one gains floats or `?:` is the day the
+  other does, and the entry leaves `bootstrap-unsupported.txt` then.
+  ctest `stage-usage` (label `unit`) diffs stage1's and stage2's `--help`, `--version` and
   usage line, which is what holds the option table `src/fort/main.ft` copies from
   `src/bootstrap/driver.c` to it.
 - A directive lint gotcha: `run_tests.py --lint` rejects any line of a test whose text holds `//!`
@@ -798,20 +844,29 @@ A safe(r) C-like systems programming language.
   struct of 8 or 16 bytes until T-019, so a mutation that dropped `sret(%T)` or shortened a
   `memcpy` only for a struct wider than two words passed the entire gate. An assertion about an
   aggregate convention covers one size unless a second size is written down.
-- **Phase B has three differential oracles, and the third is the only one that can see a false
+- **Phase B has four differential oracles, and the third is the only one that can see a false
   positive.** `tools/diff_tokens.sh` and `tools/diff_ast.sh` compare stage1's and stage2's
   `--tokens` and `--ast` over every `.ft` file of the repository; `tools/diff_check.sh` compares
   `fort --check` over the files stage1 checks clean, which is where the compiler's own thirteen
-  thousand lines of fort and the standard library are. The language corpus under stage2 holds the
+  thousand lines of fort and the standard library are; `tools/diff_ir.sh` (T-038, ctest `diff-ir`,
+  a command of `check-lang`) compares `fort -S` byte for byte over every `.ft` file stage1
+  compiles into a module -- every `run` and `programs` test, every `test/fort` module test, and
+  `src/fort/main.ft`, which is the compiler emitting itself. That last is the strongest single
+  case there is, and the script is the strongest of the four, since D19.5 makes the text a
+  function of the program alone, so a type the checker built differently, a constant it folded
+  differently or a symbol it resolved differently all reach the text. What it cannot see is a
+  construct the corpus does not spell, and whether stage1's own text is right.
+  The language corpus under stage2 holds the
   diagnostics a ported pass must *report*; only diff_check holds the ones it must not, and T-035
   measured the difference: reverting T-082's `identity_only` in `named_type` left the whole
   495-test stage2 corpus green and was caught by diff_check, on
   `run/structs/008_recursive_span_first.ft`. The unit suite the same ticket added
   (`check_resolve_test.ft`) catches it too, and that is the shape to aim for -- the differential
   finds the class, a named assertion pins it -- so do not read the story as "the differential is
-  enough". All three carry the same `FT_FILES` equality, so a ticket that adds or removes a `.ft`
-  file changes **three** lines in the same commit, and `diff_check.sh` carries a second equality,
-  `CLEAN_FILES`, because a comparison that shrank would otherwise pass while seeing less.
+  enough". All four carry the same `FT_FILES` equality, so a ticket that adds or removes a `.ft`
+  file changes **four** lines in the same commit, and `diff_check.sh` and `diff_ir.sh` each carry
+  a second equality, `CLEAN_FILES` and `PROGRAM_FILES`, because a comparison that shrank would
+  otherwise pass while seeing less.
 - **A ported pass is judged on its diagnostics one by one, with a script and not a reading.**
   For every message the ported file builds -- each `check_error` text and each run of `msg_str`
   pieces between `check_msg_begin` and `check_msg_end` -- ask whether any suite under `test/fort`

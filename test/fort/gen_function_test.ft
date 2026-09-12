@@ -1,0 +1,480 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| signatures ok
+//| slots ok
+//| tails ok
+//| entry ok
+//| module ok
+//| ok
+import ast;
+import check_env;
+import gen;
+import gen_env;
+import gen_stmt;
+import std.str;
+import std.strbuf;
+
+// The function definitions of src/fort/gen_stmt.ft against toolchain.md 6
+// items 1, 2, 7, 10 and 22: the signature of every parameter and result
+// shape, the entry-block allocas of D19.4, the tail a body that falls off its
+// end gets, `fort_entry`, the named type of a struct and the assembly of the
+// sections into one module.
+//
+// This is the half of test/gen_test.c and test/gen_module_test.c that answers
+// for a whole definition. The expected text of each case was read off
+// stage1's own `fort -S` over the same program and pasted here, never
+// transcribed from the fort under test, and tools/diff_ir.sh holds the two
+// compilers' modules against each other over every program of the
+// repository; what is written here is what that differential cannot see,
+// which is whether stage1's shape is the shape toolchain.md 6 describes.
+//
+// Every case that emits a definition also runs the structural check of item
+// 10 over it (gen_env.expect_blocks): `opt -passes=verify` does not reject an
+// instruction after a terminator, so the rule that every block ends in
+// exactly one is asserted over the text (AGENTS.md).
+
+// ---- signatures (item 7) ----------------------------------------------------------
+
+fn void a_void_function_is_a_define_with_an_empty_entry_block() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(gen_env.open_module(&e, "fn void nothing() {\n}\nfn i32 main() {\n    return 0;\n}\n"));
+    string[4] mut want = {
+        "define dso_local void @\"main.nothing\"() #0 {\n",
+        "entry:\n",
+        "  ret void\n",
+        "}\n",
+    };
+    string got = gen_env.emit_function(&e, "nothing");
+    gen_env.expect_text(got, gen_env.join_lines(&e, want[0..4]));
+    gen_env.expect_blocks(&e, got);
+}
+
+fn void a_scalar_parameter_is_an_ordinary_one_and_lands_in_its_slot() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    strbuf.append(&src, "fn i64 second(i64 a, i64 b) {\n    return b;\n}\n");
+    strbuf.append(&src, "fn i32 main() {\n    return 0;\n}\n");
+    assert(gen_env.open_module(&e, strbuf.view(&src)));
+    string[9] mut want = {
+        "define dso_local i64 @\"main.second\"(i64 %a.in, i64 %b.in) #0 {\n",
+        "entry:\n",
+        "  %a.0 = alloca i64, align 8\n",
+        "  %b.1 = alloca i64, align 8\n",
+        "  store i64 %a.in, ptr %a.0, align 8\n",
+        "  store i64 %b.in, ptr %b.1, align 8\n",
+        "  %t0 = load i64, ptr %b.1, align 8\n",
+        "  ret i64 %t0\n",
+        "}\n",
+    };
+    string got = gen_env.emit_function(&e, "second");
+    gen_env.expect_text(got, gen_env.join_lines(&e, want[0..9]));
+    gen_env.expect_blocks(&e, got);
+}
+
+// A narrow result carries the same extension attribute as a narrow parameter,
+// so that LLVM normalizes on both sides of a call (item 7). No language test
+// can see that: caller and callee are compiled together and a convention both
+// sides get wrong agrees with itself (AGENTS.md), so the text is the witness.
+fn void a_narrow_parameter_and_result_carry_their_extension_attribute() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    strbuf.append(&src, "fn u8 narrow(u8 a, i16 b) {\n    return a;\n}\n");
+    strbuf.append(&src, "fn i32 main() {\n    return 0;\n}\n");
+    assert(gen_env.open_module(&e, strbuf.view(&src)));
+    string[9] mut want = {
+        "define dso_local zeroext i8 @\"main.narrow\"(i8 zeroext %a.in, i16 signext %b.in) #0 {\n",
+        "entry:\n",
+        "  %a.0 = alloca i8, align 1\n",
+        "  %b.1 = alloca i16, align 2\n",
+        "  store i8 %a.in, ptr %a.0, align 1\n",
+        "  store i16 %b.in, ptr %b.1, align 2\n",
+        "  %t0 = load i8, ptr %a.0, align 1\n",
+        "  ret i8 %t0\n",
+        "}\n",
+    };
+    string got = gen_env.emit_function(&e, "narrow");
+    gen_env.expect_text(got, gen_env.join_lines(&e, want[0..9]));
+    gen_env.expect_blocks(&e, got);
+}
+
+// An aggregate argument is a plain `ptr` parameter, `byval` is never used,
+// and an aggregate result is a leading `ptr sret(%T) %ret.sret` on a `void`
+// function (item 7). The parameter's place is the caller-made copy the
+// incoming pointer designates, so it has no alloca of its own (item 10).
+fn void an_aggregate_parameter_and_result_pass_by_pointer() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    strbuf.append(&src, "struct point {\n    i64 x;\n    i64 y;\n}\n");
+    strbuf.append(&src, "fn point same(point p) {\n    return p;\n}\n");
+    strbuf.append(&src, "fn i32 main() {\n    return 0;\n}\n");
+    assert(gen_env.open_module(&e, strbuf.view(&src)));
+    string[5] mut want = {
+        "define dso_local void @\"main.same\"(ptr sret(%struct.main.point) %ret.sret, ptr %p.in)",
+        " #0 {\nentry:\n",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %p.in, i64 16,",
+        " i1 false)\n",
+        "  ret void\n}\n",
+    };
+    string got = gen_env.emit_function(&e, "same");
+    gen_env.expect_text(got, gen_env.join_lines(&e, want[0..5]));
+    gen_env.expect_blocks(&e, got);
+}
+
+// A `noreturn` definition takes attribute group #1 and the block that would
+// fall off the end of its body ends in a trap (items 7, 20; D8.5, D19.7).
+fn void a_noreturn_definition_takes_the_noreturn_group_and_traps() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    strbuf.append(&src, "fn noreturn stuck() {\n    while (true) {\n    }\n}\n");
+    strbuf.append(&src, "fn i32 main() {\n    return 0;\n}\n");
+    assert(gen_env.open_module(&e, strbuf.view(&src)));
+    string[12] mut want = {
+        "define dso_local void @\"main.stuck\"() #1 {\n",
+        "entry:\n",
+        "  br label %L0\n",
+        "\n",
+        "L0:\n",
+        "  br i1 true, label %L1, label %L2\n",
+        "\n",
+        "L1:\n",
+        "  br label %L0\n",
+        "\n",
+        "L2:\n",
+        "  call void @llvm.trap()\n  unreachable\n}\n",
+    };
+    string got = gen_env.emit_function(&e, "stuck");
+    gen_env.expect_text(got, gen_env.join_lines(&e, want[0..12]));
+    gen_env.expect_blocks(&e, got);
+    assert(gen.gen_uses_attr(&e.g, gen.ATTR_FN_NORET));
+    assert(gen.gen_uses_intrinsic(&e.g, gen.IN_TRAP));
+    assert(gen.gen_uses_attr(&e.g, gen.ATTR_TRAP));
+}
+
+// ---- slots (item 10, D19.4) -------------------------------------------------------
+
+// The parameters first, then the locals in declaration order, which is the
+// order their allocas are emitted in; a range `for` declares its loop
+// variable on the loop node itself and that variable is a local like any
+// other (D7.5), and the compiler's own temporaries follow them all.
+fn void the_allocas_are_the_parameters_then_the_locals_in_declaration_order() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    strbuf.append(&src, "fn void walk(i64 n) {\n    i64 mut t = 0;\n");
+    strbuf.append(&src, "    i64[3] xs = {1, 2, 3};\n");
+    strbuf.append(&src, "    for (i64 x : xs) {\n        t += x;\n    }\n}\n");
+    strbuf.append(&src, "fn i32 main() {\n    return 0;\n}\n");
+    assert(gen_env.open_module(&e, strbuf.view(&src)));
+    string got = gen_env.emit_function(&e, "walk");
+    string[7] mut want = {
+        "entry:\n",
+        "  %n.0 = alloca i64, align 8\n",
+        "  %t.1 = alloca i64, align 8\n",
+        "  %xs.2 = alloca [3 x i64], align 8\n",
+        "  %x.3 = alloca i64, align 8\n",
+        "  %tmp0 = alloca [3 x i64], align 8\n",
+        "  %tmp1 = alloca i64, align 8\n",
+    };
+    assert(str.find(got, gen_env.join_lines(&e, want[0..7])) >= 0);
+    gen_env.expect_blocks(&e, got);
+}
+
+// The slot of an owning local is zeroed once in the entry block, so that the
+// overwrite check its declaration carries reads the zero value the first time
+// and whatever the slot still holds on a second execution (D17.11, D19.4).
+fn void an_owning_local_is_zeroed_in_the_entry_block() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    strbuf.append(&src, "fn i64 owning() {\n    i64 mut* own p = new(i64);\n");
+    strbuf.append(&src, "    del(p);\n    return 0;\n}\n");
+    strbuf.append(&src, "fn i32 main() {\n    return 0;\n}\n");
+    assert(gen_env.open_module(&e, strbuf.view(&src)));
+    string got = gen_env.emit_function(&e, "owning");
+    string[3] mut want = {
+        "  %p.0 = alloca ptr, align 8\n",
+        "  store ptr null, ptr %p.0, align 8\n",
+        "  %t0 = call ptr @fort_rt_new(",
+    };
+    assert(str.find(got, gen_env.join_lines(&e, want[0..3])) >= 0);
+    gen_env.expect_blocks(&e, got);
+}
+
+// ---- the tail of a body (items 7, 10) ----------------------------------------------
+
+// A `void` body that falls off its end returns, and a non-void one is
+// unreachable, the checker having proved it ends in a terminating statement
+// (D8.4).
+fn void the_tail_of_a_body_that_falls_off_its_end() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    strbuf.append(&src, "fn void quiet() {\n    return;\n    i64 dead = 1;\n}\n");
+    strbuf.append(&src, "fn i32 main() {\n    return 0;\n}\n");
+    assert(gen_env.open_module(&e, strbuf.view(&src)));
+    // After a terminating statement the emitter opens a fresh block for the
+    // unreachable statements D14.2 allows, and that block gets the same tail.
+    string[8] mut want = {
+        "define dso_local void @\"main.quiet\"() #0 {\n",
+        "entry:\n",
+        "  %dead.0 = alloca i64, align 8\n",
+        "  ret void\n",
+        "\n",
+        "L0:\n",
+        "  store i64 1, ptr %dead.0, align 8\n",
+        "  ret void\n}\n",
+    };
+    string got = gen_env.emit_function(&e, "quiet");
+    gen_env.expect_text(got, gen_env.join_lines(&e, want[0..8]));
+    gen_env.expect_blocks(&e, got);
+}
+
+// ---- fort_entry (item 22, D11.6) --------------------------------------------------
+
+fn void fort_entry_calls_main_and_returns_its_status() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(gen_env.open_module(&e, "fn i32 main() {\n    return 0;\n}\n"));
+    gen_stmt.gen_fort_entry(&e.g, gen_env.sym_main(&e, "main"));
+    string[5] mut want = {
+        "define dso_local i32 @fort_entry(ptr %args.in) #0 {\n",
+        "entry:\n",
+        "  %t0 = call i32 @\"main.main\"()\n",
+        "  ret i32 %t0\n",
+        "}\n",
+    };
+    string got = gen_env.funcs(&e);
+    gen_env.expect_text(got, gen_env.join_lines(&e, want[0..5]));
+    gen_env.expect_blocks(&e, got);
+    // The module defines the name from here on, so an `extern fn fort_entry`
+    // is not declared beside it (item 8).
+    assert(e.g.entry_defined);
+}
+
+// `fort_entry` copies the argument span into its own frame when `main`
+// declares the parameter, because its caller is the C runtime (item 22).
+fn void fort_entry_copies_the_argument_span_when_main_takes_one() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(gen_env.open_module(&e, "fn i32 main(string@ args) {\n    return 0;\n}\n"));
+    gen_stmt.gen_fort_entry(&e.g, gen_env.sym_main(&e, "main"));
+    string[7] mut want = {
+        "define dso_local i32 @fort_entry(ptr %args.in) #0 {\n",
+        "entry:\n",
+        "  %args.0 = alloca %fort.span, align 8\n",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %args.0, ptr align 8 %args.in, i64 16,",
+        " i1 false)\n",
+        "  %t0 = call i32 @\"main.main\"(ptr %args.0)\n",
+        "  ret i32 %t0\n}\n",
+    };
+    string got = gen_env.funcs(&e);
+    gen_env.expect_text(got, gen_env.join_lines(&e, want[0..7]));
+    gen_env.expect_blocks(&e, got);
+}
+
+// ---- the module (items 1, 2) -------------------------------------------------------
+
+// The named type of a struct is its fields in declaration order and never
+// `packed` (item 2, D3.8), and the two types every module carries stand
+// before it, used or not.
+fn void the_named_types_are_the_two_fixed_ones_then_every_struct() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    strbuf.append(&src, "struct point {\n    i64 x;\n    u8 flag;\n    string name;\n}\n");
+    strbuf.append(&src, "fn i32 main() {\n    return 0;\n}\n");
+    assert(gen_env.open_module(&e, strbuf.view(&src)));
+    assert(gen_stmt.gen_program(&e.g, &e.c.ck, &e.c.m.set));
+    string[3] mut want = {
+        "%fort.span = type { ptr, i64 }\n",
+        "%fort.enum_member = type { i32, ptr }\n",
+        "%struct.main.point = type { i64, i8, %fort.span }\n",
+    };
+    gen_env.expect_text(gen_env.named(&e), gen_env.join_lines(&e, want[0..3]));
+    gen_env.expect_blocks(&e, gen_env.module_text(&e));
+}
+
+// One blank line stands between two definitions (item 1).
+fn void two_definitions_are_separated_by_one_blank_line() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    strbuf.append(&src, "fn void one() {\n}\nfn void two() {\n}\n");
+    strbuf.append(&src, "fn i32 main() {\n    return 0;\n}\n");
+    assert(gen_env.open_module(&e, strbuf.view(&src)));
+    gen_env.emit_function(&e, "one");
+    string got = gen_env.emit_function(&e, "two");
+    string[8] mut want = {
+        "define dso_local void @\"main.one\"() #0 {\n",
+        "entry:\n",
+        "  ret void\n",
+        "}\n",
+        "\n",
+        "define dso_local void @\"main.two\"() #0 {\n",
+        "entry:\n",
+        "  ret void\n}\n",
+    };
+    gen_env.expect_text(got, gen_env.join_lines(&e, want[0..8]));
+    gen_env.expect_blocks(&e, got);
+}
+
+// The sections of item 1 in order, separated by a blank line, with the ones
+// the module does not need left out entirely.
+fn void the_module_is_the_sections_of_item_one_in_order() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(gen_env.open_module(&e, "fn i32 main() {\n    return 0;\n}\n"));
+    assert(gen_stmt.gen_program(&e.g, &e.c.ck, &e.c.m.set));
+    string[13] mut want = {
+        "target triple = \"x86_64-unknown-linux-gnu\"\n",
+        "\n",
+        "%fort.span = type { ptr, i64 }\n",
+        "%fort.enum_member = type { i32, ptr }\n",
+        "\n",
+        "define dso_local i32 @\"main.main\"() #0 {\n",
+        "entry:\n",
+        "  ret i32 0\n",
+        "}\n",
+        "\n",
+        "define dso_local i32 @fort_entry(ptr %args.in) #0 {\n",
+        "entry:\n",
+        "  %t0 = call i32 @\"main.main\"()\n  ret i32 %t0\n}\n",
+    };
+    string got = gen_env.module_text(&e);
+    string[2] mut tail = {
+        "\n",
+        "attributes #0 = { nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\" }\n",
+    };
+    assert(str.find(got, gen_env.join_lines(&e, want[0..13])) >= 0);
+    assert(str.find(got, gen_env.join_lines(&e, tail[0..2])) >= 0);
+    gen_env.expect_blocks(&e, got);
+}
+
+// A whole program, module by module, in the dependency order of D9.10: the
+// emitter walks the closure and `fort_entry` is emitted in the entry module
+// alone (D11.6).
+fn void a_program_emits_every_module_of_the_closure() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    check_env.add(&e.c, "helper.ft", "fn i64 one() {\n    return 1;\n}\n");
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    strbuf.append(&src, "import helper;\nfn i32 main() {\n");
+    strbuf.append(&src, "    return cast(helper.one(), i32);\n}\n");
+    assert(gen_env.open_module(&e, strbuf.view(&src)));
+    assert(gen_stmt.gen_program(&e.g, &e.c.ck, &e.c.m.set));
+    string got = gen_env.module_text(&e);
+    // The imported module comes first, every module after the ones it
+    // imports (D9.10, D19.5).
+    i64 helper_at = str.find(got, "define dso_local i64 @\"helper.one\"() #0 {\n");
+    i64 main_at = str.find(got, "define dso_local i32 @\"main.main\"() #0 {\n");
+    i64 entry_at = str.find(got, "define dso_local i32 @fort_entry(ptr %args.in) #0 {\n");
+    assert(helper_at >= 0 && main_at > helper_at && entry_at > main_at);
+    gen_env.expect_blocks(&e, got);
+}
+
+// ---- the structural check itself ---------------------------------------------------
+
+// The structural check runs over every definition and every module these
+// cases emit. Fourteen of the fifteen cases here emit one and call it; the
+// fifteenth is the block check below, which emits no IR at all. So
+// `grep -c '^ *gen_env.expect_blocks('` is 14 and not 15, and the count is
+// written here rather than claimed as "every case".
+//
+// The check of item 10 is only worth running if it can fail, so it is held
+// against three texts it must refuse: a block with two terminators, a block
+// with an instruction after its terminator and a module with no definition in
+// it at all.
+fn void the_block_check_refuses_what_it_is_there_to_refuse() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    string[6] mut twice = {
+        "define dso_local void @\"main.f\"() #0 {\n",
+        "entry:\n",
+        "  br label %L0\n",
+        "\nL0:\n",
+        "  ret void\n  ret void\n",
+        "}\n",
+    };
+    string got = gen_env.block_terminators(&e, gen_env.join_lines(&e, twice[0..6]));
+    assert(got == "L0: has 2 terminators");
+    string[6] mut after = {
+        "define dso_local void @\"main.f\"() #0 {\n",
+        "entry:\n",
+        "  br label %L0\n",
+        "\nL0:\n",
+        "  ret void\n  store i64 1, ptr %x.0, align 8\n",
+        "}\n",
+    };
+    assert(gen_env.block_terminators(&e, gen_env.join_lines(&e, after[0..6])) ==
+           "L0: has an instruction after its terminator");
+    assert(gen_env.block_terminators(&e, "target triple = \"x86_64\"\n") ==
+           "the module holds no closed definition");
+    // A `switch` is the one terminator LLVM prints over several lines, so the
+    // lines that continue it are not instructions of their own (item 10).
+    string[7] mut sw = {
+        "define dso_local void @\"main.f\"() #0 {\n",
+        "entry:\n",
+        "  switch i64 0, label %L0 [\n",
+        "    i64 0, label %L0\n",
+        "  ]\n",
+        "\nL0:\n",
+        "  ret void\n}\n",
+    };
+    assert(gen_env.block_terminators(&e, gen_env.join_lines(&e, sw[0..7])) == gen_env.BLOCKS_OK);
+}
+
+fn i32 main() {
+    a_void_function_is_a_define_with_an_empty_entry_block();
+    a_scalar_parameter_is_an_ordinary_one_and_lands_in_its_slot();
+    a_narrow_parameter_and_result_carry_their_extension_attribute();
+    an_aggregate_parameter_and_result_pass_by_pointer();
+    a_noreturn_definition_takes_the_noreturn_group_and_traps();
+    println("signatures ok");
+    the_allocas_are_the_parameters_then_the_locals_in_declaration_order();
+    an_owning_local_is_zeroed_in_the_entry_block();
+    println("slots ok");
+    the_tail_of_a_body_that_falls_off_its_end();
+    the_block_check_refuses_what_it_is_there_to_refuse();
+    println("tails ok");
+    fort_entry_calls_main_and_returns_its_status();
+    fort_entry_copies_the_argument_span_when_main_takes_one();
+    println("entry ok");
+    the_named_types_are_the_two_fixed_ones_then_every_struct();
+    two_definitions_are_separated_by_one_blank_line();
+    the_module_is_the_sections_of_item_one_in_order();
+    a_program_emits_every_module_of_the_closure();
+    println("module ok");
+    println("ok");
+    return 0;
+}

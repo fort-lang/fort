@@ -31,6 +31,8 @@ import check_stmt;
 import consts;
 import containers;
 import diag;
+import gen;
+import gen_stmt;
 import lexer;
 import modules;
 import parser;
@@ -75,13 +77,45 @@ i32 PARSE_ERROR = 2;
 extern fn char* strerror(i32 code);
 extern fn i64 readlink(char* path, char* buf, u64 size);
 
+// The temporary directory of toolchain.md 2 and the removal of what the
+// driver put in it; the standard library has no binding for any of them and
+// this is their one caller (D13.2, D9.8). `mkdtemp` replaces the six `X` at
+// the end of its argument in place, so the buffer it is given is the
+// compiler's own.
+extern fn char* mkdtemp(char mut* tmpl);
+extern fn i32 unlink(char* path);
+extern fn i32 rmdir(char* path);
+
+// Running --cc once over the module (D14.3). src/bootstrap/driver.c calls
+// posix_spawnp with `environ`, which fort cannot name: an `extern` declares a
+// function and never a variable (D9.8). `fork` and `execvp` say the same
+// thing -- `execvp` searches PATH and hands the child the caller's
+// environment, which is what posix_spawnp(..., environ) does -- and the pipe
+// below carries back the errno of a failed `execvp`, which is the value
+// posix_spawnp would have returned, so the two drivers report one command
+// line alike.
+extern fn i32 fork();
+extern fn i32 execvp(char* file, void* argv);
+extern fn i32 waitpid(i32 pid, i32 mut* status, i32 options);
+extern fn i32 pipe(i32 mut* fds);
+extern fn i32 fcntl(i32 fd, i32 cmd, i32 arg);
+extern fn noreturn _exit(i32 status);
+
 // The command line after parsing (toolchain.md 1). Every string borrows an
 // argument; the three vectors hold them in command-line order and own only
 // their slots.
 struct options {
     bool have_entry; // whether an entry file was seen; C compares against NULL
     string entry;
-    string output;   // -o, empty for the default
+    // Whether -o was given, which a fort `string` cannot say on its own, and
+    // the third option src/bootstrap/driver.c compares against NULL, beside
+    // --std-dir below and the entry file above. `fort -o "" main.ft` names an
+    // output of no characters: stage1 hands that empty name to --cc and
+    // reports `cc failed with status 1`, while a length test here would fall
+    // back to `a.out` and exit 0. Reading the length instead of the flag made
+    // the two compilers answer one command line differently.
+    bool have_output;
+    string output; // -o, read only when have_output
     // Whether --std-dir was given, which a fort `string` cannot say on its
     // own: src/bootstrap/driver.c compares the option against NULL, so an
     // explicit `--std-dir ""` is a directory that was named and is empty, and
@@ -260,6 +294,7 @@ fn bool parse_valued(options mut* opts, string@ args, u64 mut* i, bool mut* ok) 
         return true;
     }
     if (is_output) {
+        opts->have_output = true;
         opts->output = value;
     } else if (is_include) {
         containers.str_push(&opts->includes, value);
@@ -483,6 +518,347 @@ fn string std_dir(containers.pool mut* p, options* opts, string program) {
     return std_dir_beside(p, program);
 }
 
+// ---- paths (toolchain.md 1, 2) ------------------------------------------------------
+
+// The default output when -o is absent, and the two names the temporary
+// directory of toolchain.md 2 is built from. src/bootstrap/driver.h spells
+// the first two as macros and driver.c the rest as file-scope arrays.
+string DEFAULT_OUTPUT = "a.out";
+string RUNTIME_OBJECT = "fort_rt.o";
+string TMP_DIR_DEFAULT = "/tmp";
+string TMP_DIR_TEMPLATE = "/fort-XXXXXX";
+string IR_SUFFIX = ".ll";
+string OBJECT_SUFFIX = ".o";
+string FT_SUFFIX = ".ft";
+
+// EINTR, the one errno the driver compares against: a signal caught while
+// --cc runs interrupts the wait and not the child (waitpid(2)).
+i32 EINTR = 4;
+
+// The position after the last '/' of `path`, that is the start of its last
+// component.
+fn u64 last_component(string path) {
+    u64 mut start = 0;
+    u64 mut i = 0;
+    while (i < path.len) {
+        if (path[i] == '/') {
+            start = i + 1;
+        }
+        i += 1;
+    }
+    return start;
+}
+
+// The entry file's last component with `.ft` removed, which names the IR
+// module and the default object (D9.1, toolchain.md 1).
+fn string entry_base(string entry) {
+    string mut base = entry[last_component(entry)..];
+    if (base.len > FT_SUFFIX.len && str.ends_with(base, FT_SUFFIX)) {
+        base = base[0..base.len - FT_SUFFIX.len];
+    }
+    return base;
+}
+
+// `<dir>/<name><suffix>`, interned in `p`; an empty directory or suffix is
+// left out, where src/bootstrap/driver.c passes NULL.
+fn string join_path(containers.pool mut* p, string dir, string name, string suffix) {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    if (dir.len > 0) {
+        strbuf.append(&b, dir);
+        strbuf.push(&b, '/');
+    }
+    strbuf.append(&b, name);
+    strbuf.append(&b, suffix);
+    return containers.pool_intern(p, strbuf.view(&b));
+}
+
+fn string default_output(containers.pool mut* p, options* opts) {
+    // -S and -c together stop at the IR, so -S decides the suffix
+    // (toolchain.md 1).
+    if (opts->emit_ir) {
+        return join_path(p, "", entry_base(opts->entry), IR_SUFFIX);
+    }
+    if (opts->compile_only) {
+        return join_path(p, "", entry_base(opts->entry), OBJECT_SUFFIX);
+    }
+    return containers.pool_intern(p, DEFAULT_OUTPUT);
+}
+
+// ---- the temporary directory (toolchain.md 2) ------------------------------------
+
+// Creates the temporary directory with mkdtemp under $TMPDIR, `/tmp` by
+// default; the path is interned in `p` and the directory it was created in is
+// stored in *parent_out. Returns the empty string and the errno of the
+// failure in *error_out, captured before anything else can overwrite it.
+fn string make_temp_dir(containers.pool mut* p, string mut* parent_out, i32 mut* error_out) {
+    string mut parent = TMP_DIR_DEFAULT;
+    string mut value = "";
+    // An empty value names no directory, so it counts as unset (toolchain.md 1).
+    if (sys.env("TMPDIR", &value) && value.len > 0) {
+        parent = value;
+    }
+    *parent_out = parent;
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, parent);
+    strbuf.append(&b, TMP_DIR_TEMPLATE);
+    // mkdtemp replaces the six X in place, so it is given storage of the
+    // compiler's own (D13.4).
+    char mut@ own tmpl = str.to_cstr(strbuf.view(&b));
+    defer del(tmpl);
+    *error_out = 0;
+    if (mkdtemp(&tmpl[0]) == null) {
+        *error_out = sys.errno();
+        return "";
+    }
+    return containers.pool_intern(p, str.from_cstr(&tmpl[0]));
+}
+
+// Removes the temporary directory and the module in it, whether or not --cc
+// succeeded (toolchain.md 2). The compiler writes exactly one file there, the
+// `<entry>.ll` of D19.1, so no directory walk is needed; a file already gone
+// is not an error.
+fn void remove_temp_dir(string dir, string ir_path) {
+    if (ir_path.len > 0) {
+        char mut@ own path = str.to_cstr(ir_path);
+        defer del(path);
+        unlink(&path[0]);
+    }
+    char mut@ own d = str.to_cstr(dir);
+    defer del(d);
+    rmdir(&d[0]);
+}
+
+// ---- the clang invocation (D14.3) ------------------------------------------------
+
+// The command line --cc is run with, in the order src/bootstrap/driver.c
+// builds it; every string is interned in `p` or borrowed from the options, so
+// the vector owns only its slots.
+fn void cc_argv(containers.pool mut* p, options* opts, string ir_path, string out_path,
+                string dir, containers.str_vec mut* argv) {
+    containers.str_push(argv, opts->cc);
+    containers.str_push(argv, join_path(p, "", "--target=", opts->target));
+    // -O2 in place of -O1 under --release; the compiler itself optimizes
+    // nothing (D14.3, toolchain.md 3).
+    if (opts->release) {
+        containers.str_push(argv, "-O2");
+    } else {
+        containers.str_push(argv, "-O1");
+    }
+    containers.str_push(argv, "-fPIE");
+    if (!opts->compile_only) {
+        // The executable is position-independent; -c stops at the object, so
+        // it takes no -pie, no runtime object and no -l (toolchain.md 2).
+        containers.str_push(argv, "-pie");
+    }
+    // The module carries its own target triple, which clang would warn about
+    // (toolchain.md 2).
+    containers.str_push(argv, "-Wno-override-module");
+    if (opts->compile_only) {
+        containers.str_push(argv, "-c");
+    }
+    containers.str_push(argv, "-o");
+    containers.str_push(argv, out_path);
+    // No -x ir: -x is sticky and would also treat fort_rt.o as IR
+    // (toolchain.md 2).
+    containers.str_push(argv, ir_path);
+    if (!opts->compile_only) {
+        containers.str_push(argv, join_path(p, dir, RUNTIME_OBJECT, ""));
+        u64 mut i = 0;
+        while (i < opts->libs.len) {
+            containers.str_push(argv, containers.str_at(&opts->libs, i));
+            i += 1;
+        }
+    }
+    // -Xcc arguments come last, verbatim and in command-line order (D14.1).
+    u64 mut k = 0;
+    while (k < opts->cc_args.len) {
+        containers.str_push(argv, containers.str_at(&opts->cc_args, k));
+        k += 1;
+    }
+}
+
+// The bytes of every argument, each NUL-terminated, and a NULL-terminated
+// array of pointers into them: what execvp takes. src/bootstrap/driver.c
+// pushes the arguments as C strings it already has; a fort `string` is a
+// pointer and a length and is not NUL-terminated (D3.7), so they are copied
+// here, once, into storage the caller releases.
+struct cc_command {
+    char mut@ own bytes;      // every argument, each followed by its NUL
+    char mut* mut@ own items; // one pointer per argument, then null
+}
+
+fn cc_command cc_command_build(containers.str_vec* argv) {
+    u64 mut total = 0;
+    u64 mut i = 0;
+    while (i < argv->len) {
+        total += containers.str_at(argv, i).len + 1;
+        i += 1;
+    }
+    cc_command mut c = cc_command{};
+    c.bytes = new(char, total);
+    c.items = new(char*, argv->len + 1);
+    u64 mut at = 0;
+    i = 0;
+    while (i < argv->len) {
+        string arg = containers.str_at(argv, i);
+        c.items[i] = &c.bytes[at];
+        u64 mut k = 0;
+        while (k < arg.len) {
+            c.bytes[at] = arg[k];
+            at += 1;
+            k += 1;
+        }
+        c.bytes[at] = '\0';
+        at += 1;
+        i += 1;
+    }
+    c.items[argv->len] = null;
+    return c;
+}
+
+fn void cc_command_free(cc_command mut* c) {
+    del(c->bytes);
+    del(c->items);
+}
+
+// `cc failed with status N`, or `cc failed with signal N` for a --cc that
+// died by a signal, which toolchain.md 1 does not name.
+fn void error_cc_status(string what, i64 value) {
+    strbuf.str_buf mut m = strbuf.create();
+    defer strbuf.free(&m);
+    strbuf.append(&m, "cc failed with ");
+    strbuf.append(&m, what);
+    strbuf.push(&m, ' ');
+    strbuf.append_i64(&m, value);
+    error(strbuf.view(&m));
+}
+
+// The three wait(2) macros, which have no fort spelling: a status byte of
+// 0x7F means stopped, 0 means exited, anything else is the terminating
+// signal, and an exit status is the second byte (waitpid(2)).
+u32 WAIT_SIGNAL_MASK = 127;
+u32 WAIT_STATUS_SHIFT = 8;
+u32 WAIT_STATUS_MASK = 255;
+
+fn bool wait_signaled(i32 status) {
+    u32 low = cast(status, u32) & WAIT_SIGNAL_MASK;
+    return low != 0 && low != WAIT_SIGNAL_MASK;
+}
+
+fn i64 wait_signal(i32 status) {
+    return cast(cast(status, u32) & WAIT_SIGNAL_MASK, i64);
+}
+
+fn i64 wait_status(i32 status) {
+    return cast((cast(status, u32) >> WAIT_STATUS_SHIFT) & WAIT_STATUS_MASK, i64);
+}
+
+// The errno of a failed execvp, written by the child and read by the parent,
+// four bytes little end first. Nothing else is ever written to that pipe, so
+// a short read means the child reached execvp and a full one means it did
+// not.
+u64 ERRNO_BYTES = 4;
+u64 BYTE_BITS = 8;
+u64 BYTE_MASK = 255;
+
+// F_SETFD and FD_CLOEXEC of fcntl(2): the write end of the pipe closes at
+// execvp, which is what tells the parent the exec succeeded.
+i32 F_SETFD = 2;
+i32 FD_CLOEXEC = 1;
+
+// The status a child that could not exec leaves behind, which no --cc of
+// ours ever reports, since the parent reads the errno off the pipe first.
+i32 EXEC_FAILED_STATUS = 127;
+
+// Runs --cc once over the module: it compiles and links in one invocation
+// (D14.3). Returns EXIT_OK, or EXIT_USAGE after reporting the failure
+// (D14.1).
+fn i32 run_cc(options* opts, string program, string ir_path, string out_path) {
+    containers.pool mut p = containers.pool_create();
+    defer containers.pool_free(&p);
+    containers.str_vec mut argv = containers.str_create();
+    defer containers.str_free(&argv);
+    cc_argv(&p, opts, ir_path, out_path, std_dir(&p, opts, program), &argv);
+    cc_command mut cmd = cc_command_build(&argv);
+    defer cc_command_free(&cmd);
+    i32[2] mut fds = {};
+    if (pipe(&fds[0]) != 0) {
+        error_path("cannot run", opts->cc, str.from_cstr(strerror(sys.errno())));
+        return EXIT_USAGE;
+    }
+    if (fcntl(fds[1], F_SETFD, FD_CLOEXEC) != 0) {
+        // The write end has to close at execvp: that is what tells the parent
+        // the exec succeeded. A write end left open in --cc and in every
+        // process it starts would keep the read below blocked until the last
+        // one exits, which is a wait and not a wrong answer, so it is reported
+        // here rather than left to be read as a missing errno.
+        error_path("cannot run", opts->cc, str.from_cstr(strerror(sys.errno())));
+        io.close(fds[0]);
+        io.close(fds[1]);
+        return EXIT_USAGE;
+    }
+    i32 child = fork();
+    if (child < 0) {
+        i32 failure = sys.errno();
+        io.close(fds[0]);
+        io.close(fds[1]);
+        error_path("cannot run", opts->cc, str.from_cstr(strerror(failure)));
+        return EXIT_USAGE;
+    }
+    if (child == 0) {
+        // The child replaces itself with --cc; reaching the line after
+        // execvp means it could not, so the errno goes back up the pipe and
+        // the parent reports it exactly as posix_spawnp's result.
+        io.close(fds[0]);
+        execvp(&cmd.bytes[0], cast(&cmd.items[0], void*));
+        u64 e = cast(sys.errno(), u64);
+        u8[4] mut buf = {};
+        u64 mut i = 0;
+        while (i < ERRNO_BYTES) {
+            buf[i] = cast((e >> (i * BYTE_BITS)) & BYTE_MASK, u8);
+            i += 1;
+        }
+        io.write_all(fds[1], buf[0..ERRNO_BYTES]);
+        _exit(EXEC_FAILED_STATUS);
+    }
+    io.close(fds[1]);
+    u8[4] mut got = {};
+    i64 read = io.read(fds[0], got[0..ERRNO_BYTES]);
+    io.close(fds[0]);
+    i32 mut status = 0;
+    // The child is reaped whatever it did, so no zombie outlives the run. A
+    // signal caught while clang runs interrupts the wait, not the child.
+    i32 mut waited = waitpid(child, &status, 0);
+    while (waited < 0 && sys.errno() == EINTR) {
+        waited = waitpid(child, &status, 0);
+    }
+    if (read == cast(ERRNO_BYTES, i64)) {
+        u64 mut e = 0;
+        u64 mut i = 0;
+        while (i < ERRNO_BYTES) {
+            e |= cast(got[i], u64) << (i * BYTE_BITS);
+            i += 1;
+        }
+        error_path("cannot run", opts->cc, str.from_cstr(strerror(cast(e, i32))));
+        return EXIT_USAGE;
+    }
+    if (waited < 0) {
+        error_path("cannot wait for", opts->cc, str.from_cstr(strerror(sys.errno())));
+        return EXIT_USAGE;
+    }
+    if (wait_signaled(status)) {
+        error_cc_status("signal", wait_signal(status));
+        return EXIT_USAGE;
+    }
+    if (wait_status(status) != 0) {
+        error_cc_status("status", wait_status(status));
+        return EXIT_USAGE;
+    }
+    return EXIT_OK;
+}
+
 // ---- the front end (toolchain.md 2, steps 1 and 2) ---------------------------------
 
 // What a front-end run leaves behind: the modules it read, which own every
@@ -505,6 +881,19 @@ fn analysis analysis_create(session.session mut* s) {
     analysis mut an = analysis{};
     check.check_init(&an.ck, s);
     return an;
+}
+
+// Releases the analysis once, whichever of the two calls below reaches it
+// first: the build path releases it as soon as the emitter returns, and the
+// `defer` answers for the paths that return earlier. The flag is what makes
+// that safe, so that nothing rests on the nine releases of check.check_free
+// and modules.free each tolerating a second call.
+fn void analysis_release(analysis mut* an, bool mut* live) {
+    if (!*live) {
+        return;
+    }
+    *live = false;
+    analysis_free(an);
 }
 
 fn void analysis_free(analysis mut* an) {
@@ -586,31 +975,95 @@ fn i32 front_end(session.session mut* s, options* opts, string program, analysis
     return EXIT_OK;
 }
 
+// Step 4 of toolchain.md 2: the emitter writes one module for the whole
+// closure (D19.1, toolchain.md 6). An unwritable path is a toolchain error
+// (exit 2) and a construct the emitter cannot lower yet is a compile error
+// (exit 1), so a half-emitted module never reaches `--cc`. The emitter is
+// initialised at the address it is used at, since it stores the session it
+// reports through (gen.ft).
+fn i32 emit_module(session.session mut* s, options* opts, analysis mut* an, string ir_path) {
+    gen.gen_options mut gopts = gen.gen_options{};
+    gopts.release = opts->release;
+    gopts.no_bounds_check = opts->no_bounds_check;
+    gen.emitter mut g = gen.emitter{};
+    gen.gen_init(&g, s, gopts);
+    defer gen.gen_free(&g);
+    if (!gen_stmt.gen_program(&g, &an->ck, &an->set)) {
+        return EXIT_COMPILE_ERROR;
+    }
+    if (!io.write_file(ir_path, strbuf.bytes(&g.out))) {
+        error_path("cannot write", ir_path, str.from_cstr(strerror(sys.errno())));
+        return EXIT_USAGE;
+    }
+    return EXIT_OK;
+}
+
 // A build, or `--check`: the front end, and then the passes this compiler
 // does not carry yet. The session and the analysis die here, in that order of
 // declaration and the reverse order of release, since every name of a tree
 // points into the session (D20.5).
 fn i32 compile_entry(options* opts, string program) {
+    containers.pool mut p = containers.pool_create();
+    defer containers.pool_free(&p);
     session.session mut s = session.create();
     defer session.free(&s);
+    // A build reads no tree after the emitter has run, so its analysis is
+    // released on every path out of this function (ast.sym). The build path
+    // below releases it as soon as the emitter returns and before --cc is
+    // spawned; this `defer` answers for the paths that return earlier, and the
+    // flag makes exactly one of the two calls do the work.
     analysis mut an = analysis_create(&s);
-    defer analysis_free(&an);
+    bool mut analysis_live = true;
+    defer analysis_release(&an, &analysis_live);
     i32 status = front_end(&s, opts, program, &an);
     if (status != EXIT_OK) {
         return status;
     }
-    if (opts->check && !opts->json) {
-        // --check stops after the front end: no module is emitted, and the
-        // file was a module under inspection rather than a program (D20.1).
-        return EXIT_OK;
+    if (opts->check) {
+        if (!opts->json) {
+            // --check stops after the front end: no module is emitted, and
+            // the file was a module under inspection rather than a program
+            // (D20.1).
+            return EXIT_OK;
+        }
+        // An internal error is not a usage error, so no usage line follows
+        // it: toolchain.md 1 puts that line after the six errors that report
+        // a command line the compiler cannot use, and this command line is
+        // fine. What is missing is the document of D20.2, which needs the
+        // JSON writer and the index walk.
+        error("internal error: this compiler cannot write the check document yet");
+        return EXIT_USAGE;
     }
-    // An internal error is not a usage error, so no usage line follows it:
-    // toolchain.md 1 puts that line after the six errors that report a
-    // command line the compiler cannot use, and this command line is fine.
-    // What is missing is the document of D20.2, which needs the JSON writer
-    // and the index walk, and the emitter of toolchain.md 2 step 4.
-    error("internal error: this compiler cannot build a program yet");
-    return EXIT_USAGE;
+    string mut out_path = opts->output;
+    if (!opts->have_output) {
+        out_path = default_output(&p, opts);
+    }
+    if (opts->emit_ir) {
+        // -S writes the module to the output and stops, so it needs no
+        // temporary (toolchain.md 2).
+        return emit_module(&s, opts, &an, out_path);
+    }
+    string mut parent = TMP_DIR_DEFAULT;
+    i32 mut failure = 0;
+    string dir = make_temp_dir(&p, &parent, &failure);
+    if (dir.len == 0) {
+        error_path("cannot create a temporary directory in", parent,
+                   str.from_cstr(strerror(failure)));
+        return EXIT_USAGE;
+    }
+    string ir_path = join_path(&p, dir, entry_base(opts->entry), IR_SUFFIX);
+    i32 mut built = emit_module(&s, opts, &an, ir_path);
+    // The analysis dies here and not at the end of the function, as
+    // src/bootstrap/driver.c releases it before run_cc: every tree of the
+    // closure, every symbol and every type would otherwise stay resident
+    // while clang runs, and `fork` gives the child a copy of the page tables,
+    // so the peak of a large program doubles for the length of the link.
+    analysis_release(&an, &analysis_live);
+    if (built == EXIT_OK) {
+        built = run_cc(opts, program, ir_path, out_path);
+    }
+    remove_temp_dir(dir, ir_path);
+    return built;
 }
 
 // ---- the pipeline (toolchain.md 2) --------------------------------------------------

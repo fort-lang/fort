@@ -1,0 +1,533 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| paths ok
+//| invocation ok
+//| temporary ok
+//| status ok
+//| pipeline ok
+//| ok
+import capture;
+import containers;
+import driver;
+import std.io;
+import std.str;
+import std.strbuf;
+import std.sys;
+
+// The build half of src/fort/driver.ft against toolchain.md 1 and 2 and
+// D14.3: the paths a mode names, the clang command line, the temporary
+// directory the module is written into and the way --cc's outcome is
+// reported.
+//
+// It is the fort half of test/driver_test.c's clang-invocation section. That
+// suite reads the whole command line off test/fake_cc.sh, which a fort test
+// cannot do -- a run test's program executes in a temporary directory holding
+// only itself, so there is no script to point --cc at -- so the command line
+// is built here by calling driver.cc_argv, which is the function the spawn
+// takes its arguments from, and every outcome of the spawn is driven through
+// a program: one that does not exist, one that is not executable, one that
+// fails and one this test writes, which kills itself.
+
+// ---- the command line ---------------------------------------------------------------
+
+// The invocation `opts` would spawn, one argument per line, which is the form
+// test/driver_test.c compares.
+fn string invocation(strbuf.str_buf mut* out, driver.options* opts) {
+    containers.pool mut p = containers.pool_create();
+    defer containers.pool_free(&p);
+    containers.str_vec mut argv = containers.str_create();
+    defer containers.str_free(&argv);
+    driver.cc_argv(&p, opts, "/tmp/t/main.ll", "prog", "/std", &argv);
+    strbuf.clear(out);
+    u64 mut i = 0;
+    while (i < argv.len) {
+        strbuf.append(out, containers.str_at(&argv, i));
+        strbuf.push(out, '\n');
+        i += 1;
+    }
+    return strbuf.view(out);
+}
+
+// The same for a command line, which is how a case says which options it
+// means without writing an options value out field by field.
+fn string invocation_for(strbuf.str_buf mut* out, string@ args) {
+    driver.options mut opts = driver.options_create();
+    defer driver.options_free(&opts);
+    assert(driver.parse(&opts, args) == driver.PARSE_OK);
+    return invocation(out, &opts);
+}
+
+fn void expect(string got, string want) {
+    if (got != want) {
+        eprint("got:      [");
+        eprint(got);
+        eprintln("]");
+        eprint("expected: [");
+        eprint(want);
+        eprintln("]");
+    }
+    assert(got == want);
+}
+
+// Ten or fewer lines of an expected command line joined; a command line is
+// one argument per line and fort joins no two adjacent string literals (D2.9).
+fn string lines(strbuf.str_buf mut* b, string@ parts) {
+    strbuf.clear(b);
+    u64 mut i = 0;
+    while (i < parts.len) {
+        strbuf.append(b, parts[i]);
+        strbuf.push(b, '\n');
+        i += 1;
+    }
+    return strbuf.view(b);
+}
+
+// The checked build of toolchain.md 2: -O1 because the compiler optimizes
+// nothing itself, -fPIE and -pie because the executable is
+// position-independent, -Wno-override-module because the module carries its
+// own triple, and the runtime object last (D14.3).
+fn void the_checked_invocation_is_the_line_of_toolchain_two() {
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string[2] mut argv = {"fort", "main.ft"};
+    string[10] mut want = {
+        "clang",
+        "--target=x86_64-linux-gnu",
+        "-O1",
+        "-fPIE",
+        "-pie",
+        "-Wno-override-module",
+        "-o",
+        "prog",
+        "/tmp/t/main.ll",
+        "/std/fort_rt.o",
+    };
+    expect(invocation_for(&out, argv[0..2]), lines(&b, want[0..10]));
+    // No -x ir: -x is sticky and would also treat fort_rt.o as IR.
+    assert(str.find(invocation_for(&out, argv[0..2]), "\n-x\n") < 0);
+}
+
+// -O2 in place of -O1 under --release (D14.3, toolchain.md 3).
+fn void release_compiles_the_module_with_o2() {
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    string[3] mut argv = {"fort", "--release", "main.ft"};
+    string got = invocation_for(&out, argv[0..3]);
+    assert(str.find(got, "\n-O2\n") >= 0);
+    assert(str.find(got, "\n-O1\n") < 0);
+}
+
+// --cc names the program and --target the triple it is given (D14.1).
+fn void the_target_option_becomes_the_target_argument() {
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    string[6] mut argv = {"fort", "--target", "x86_64-linux-musl", "--cc", "clang-18", "main.ft"};
+    assert(str.starts_with(invocation_for(&out, argv[0..6]),
+                           "clang-18\n--target=x86_64-linux-musl\n"));
+}
+
+// -l arguments in command-line order after the runtime object, then the -Xcc
+// arguments last, verbatim and in command-line order (D14.1).
+fn void libraries_then_cc_arguments_close_the_line() {
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string[8] mut argv = {"fort", "-lm", "-Xcc", "-fuse-ld=lld", "-lz", "-Xcc", "-static",
+                          "main.ft"};
+    string[14] mut want = {
+        "clang",
+        "--target=x86_64-linux-gnu",
+        "-O1",
+        "-fPIE",
+        "-pie",
+        "-Wno-override-module",
+        "-o",
+        "prog",
+        "/tmp/t/main.ll",
+        "/std/fort_rt.o",
+        "-lm",
+        "-lz",
+        "-fuse-ld=lld",
+        "-static",
+    };
+    expect(invocation_for(&out, argv[0..8]), lines(&b, want[0..14]));
+}
+
+// -c stops at the object, so it takes no -pie, no runtime object and no -l
+// (toolchain.md 2).
+fn void compile_only_puts_c_before_o_and_drops_the_link_arguments() {
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string[6] mut argv = {"fort", "-c", "-lm", "-Xcc", "-static", "main.ft"};
+    string[10] mut want = {
+        "clang",
+        "--target=x86_64-linux-gnu",
+        "-O1",
+        "-fPIE",
+        "-Wno-override-module",
+        "-c",
+        "-o",
+        "prog",
+        "/tmp/t/main.ll",
+        "-static",
+    };
+    expect(invocation_for(&out, argv[0..6]), lines(&b, want[0..10]));
+}
+
+// ---- paths (toolchain.md 1) ---------------------------------------------------------
+
+// The entry file's last component with `.ft` removed, which names the IR
+// module and the default object (D9.1).
+fn void the_entry_base_is_the_last_component_without_its_suffix() {
+    assert(driver.entry_base("prog.ft") == "prog");
+    assert(driver.entry_base("dir/sub/prog.ft") == "prog");
+    assert(driver.entry_base("./prog.ft") == "prog");
+    // A name that is not a `.ft` keeps every byte, and a bare `.ft` is a name
+    // of three characters and not an empty one.
+    assert(driver.entry_base("prog") == "prog");
+    assert(driver.entry_base(".ft") == ".ft");
+    assert(driver.entry_base("dir/") == "");
+    assert(driver.entry_base("a.ft.ft") == "a.ft");
+}
+
+// -S and -c together stop at the IR, so -S decides the suffix
+// (toolchain.md 1); a link names `a.out`.
+fn void the_default_output_is_decided_by_the_mode() {
+    containers.pool mut p = containers.pool_create();
+    defer containers.pool_free(&p);
+    driver.options mut opts = driver.options_create();
+    defer driver.options_free(&opts);
+    opts.entry = "dir/prog.ft";
+    assert(driver.default_output(&p, &opts) == "a.out");
+    opts.compile_only = true;
+    assert(driver.default_output(&p, &opts) == "prog.o");
+    opts.emit_ir = true;
+    assert(driver.default_output(&p, &opts) == "prog.ll");
+    opts.compile_only = false;
+    assert(driver.default_output(&p, &opts) == "prog.ll");
+}
+
+// `<dir>/<name><suffix>`, with an empty directory or suffix left out.
+fn void a_joined_path_leaves_out_what_it_is_not_given() {
+    containers.pool mut p = containers.pool_create();
+    defer containers.pool_free(&p);
+    assert(driver.join_path(&p, "/std", "fort_rt.o", "") == "/std/fort_rt.o");
+    assert(driver.join_path(&p, "", "prog", ".ll") == "prog.ll");
+    assert(driver.join_path(&p, "/tmp/t", "main", ".ll") == "/tmp/t/main.ll");
+}
+
+// ---- the temporary directory (toolchain.md 2) ----------------------------------------
+
+// The directory is created under $TMPDIR, `/tmp` by default, and both it and
+// the module in it are gone once the run is over; a file already gone is not
+// an error.
+fn void the_temporary_directory_is_made_and_removed() {
+    containers.pool mut p = containers.pool_create();
+    defer containers.pool_free(&p);
+    string mut parent = "";
+    i32 mut failure = 1;
+    string dir = driver.make_temp_dir(&p, &parent, &failure);
+    assert(failure == 0);
+    assert(dir.len > 0);
+    assert(str.starts_with(dir, parent));
+    assert(str.find(dir, "/fort-") >= 0);
+    // The six X of the template were replaced, so two runs name two
+    // directories.
+    string second = driver.make_temp_dir(&p, &parent, &failure);
+    assert(second != dir);
+    strbuf.str_buf mut module = strbuf.create();
+    defer strbuf.free(&module);
+    string ir_path = driver.join_path(&p, dir, "main", ".ll");
+    assert(io.write_file(ir_path, cast("; empty\n", u8@)));
+    assert(io.read_file(ir_path, &module));
+    driver.remove_temp_dir(dir, ir_path);
+    assert(!io.read_file(ir_path, &module));
+    // A second removal of what is already gone reports nothing.
+    driver.remove_temp_dir(dir, ir_path);
+    driver.remove_temp_dir(second, "");
+}
+
+// An unwritable parent is a toolchain error and the errno is the one the
+// failing call left, captured before anything else can overwrite it
+// (toolchain.md 1).
+fn void a_temporary_directory_that_cannot_be_made_reports_its_errno() {
+    containers.pool mut p = containers.pool_create();
+    defer containers.pool_free(&p);
+    string mut parent = "";
+    i32 mut failure = 0;
+    set_env("TMPDIR", "nosuchdirectory");
+    string dir = driver.make_temp_dir(&p, &parent, &failure);
+    unset_env("TMPDIR");
+    assert(dir.len == 0);
+    assert(parent == "nosuchdirectory");
+    // ENOENT; the value is the system's and is read back through the same
+    // call the driver reports with.
+    assert(failure != 0);
+    assert(str.from_cstr(strerror(failure)) == "No such file or directory");
+}
+
+// An empty $TMPDIR names no directory, so it counts as unset (toolchain.md 1).
+fn void an_empty_tmpdir_falls_back_to_tmp() {
+    containers.pool mut p = containers.pool_create();
+    defer containers.pool_free(&p);
+    string mut parent = "";
+    i32 mut failure = 0;
+    set_env("TMPDIR", "");
+    string dir = driver.make_temp_dir(&p, &parent, &failure);
+    unset_env("TMPDIR");
+    assert(parent == "/tmp");
+    assert(dir.len > 0);
+    driver.remove_temp_dir(dir, "");
+}
+
+// ---- the wait status (waitpid(2)) ----------------------------------------------------
+
+// The three wait(2) macros, which have no fort spelling: a status byte of
+// 0x7F means stopped, 0 means exited, anything else is the terminating
+// signal, and an exit status is the second byte.
+fn void the_wait_status_is_read_the_way_the_macros_read_it() {
+    // Exited with 0, and with 1.
+    assert(!driver.wait_signaled(0));
+    assert(driver.wait_status(0) == 0);
+    assert(driver.wait_status(256) == 1);
+    assert(driver.wait_status(65280) == 255);
+    // Killed by SIGKILL, with and without a core.
+    assert(driver.wait_signaled(9));
+    assert(driver.wait_signal(9) == 9);
+    assert(driver.wait_signaled(134));
+    assert(driver.wait_signal(134) == 6);
+    // Stopped is neither, which is what the 0x7F low byte means.
+    assert(!driver.wait_signaled(127));
+}
+
+// ---- the spawn (D14.3) ---------------------------------------------------------------
+
+// A --cc that cannot be run is reported with the errno the exec left, which
+// is what src/bootstrap/driver.c reads off posix_spawnp's result; a --cc that
+// runs and fails is reported by its status (toolchain.md 1).
+fn void the_two_outcomes_of_the_spawn() {
+    write_file("prog.ft", "fn i32 main() {\n    return 0;\n}\n");
+    string[5] mut missing = {"fort", "--cc", "./nosuchcc", "prog.ft", "-o"};
+    assert(run_quiet(missing[0..4]) == driver.EXIT_USAGE);
+    assert(said("fort: error: cannot run './nosuchcc': No such file or directory\n"));
+    string[4] mut failing = {"fort", "--cc", "false", "prog.ft"};
+    assert(run_quiet(failing[0..4]) == driver.EXIT_USAGE);
+    assert(said("fort: error: cc failed with status 1\n"));
+    // A --cc that is a directory cannot be executed either, and the errno
+    // says so rather than being folded into a status.
+    string[4] mut a_dir = {"fort", "--cc", "/tmp", "prog.ft"};
+    assert(run_quiet(a_dir[0..4]) == driver.EXIT_USAGE);
+    assert(said("fort: error: cannot run '/tmp': Permission denied"));
+}
+
+// A build that reaches --cc writes the module into a temporary directory of
+// its own and removes that directory afterwards (toolchain.md 2). The --cc
+// here is `true`, which reads nothing and exits 0, so the run ends at EXIT_OK
+// and makes no executable.
+//
+// The test names its entry file `unit.ft`. The module a build writes is
+// `<entry>.ll`, so a module left behind in the working directory is `unit.ll`
+// here. The name must not be `prog.ll`: the harness compiles this test to
+// `prog` and `--verify-ir` writes `prog.ll` beside it, and an assertion over
+// that name reads the harness's file and not the driver's.
+fn void a_build_writes_its_module_outside_the_working_directory() {
+    write_file("unit.ft", "fn i32 main() {\n    return 0;\n}\n");
+    set_env("TMPDIR", ".");
+    string[6] mut argv = {"fort", "--cc", "true", "-o", "out", "unit.ft"};
+    assert(run_quiet(argv[0..6]) == driver.EXIT_OK);
+    unset_env("TMPDIR");
+    string own quiet = captured();
+    defer del(quiet);
+    assert(quiet.len == 0);
+    strbuf.str_buf mut leftover = strbuf.create();
+    defer strbuf.free(&leftover);
+    assert(!io.read_file("unit.ll", &leftover));
+    // -S writes the module to the output instead, so it needs no temporary
+    // and the file stands in the working directory.
+    string[3] mut emit = {"fort", "-S", "unit.ft"};
+    assert(run_quiet(emit[0..3]) == driver.EXIT_OK);
+    assert(io.read_file("unit.ll", &leftover));
+}
+
+// The argv the child receives, which is what cc_command_build made: the
+// arguments cc_argv put in the vector, each NUL-terminated in one block, with
+// a NULL after the last pointer. `cc_argv` is asserted above as a vector of
+// fort strings; nothing there sees the copy into C storage, so a wrong offset,
+// a dropped NUL or a missing terminator would pass every case above and every
+// spawn below, whose four --cc programs read no argument at all.
+//
+// The --cc here is a script this test writes. It puts each of its arguments on
+// a line of a file, which is what test/fake_cc.sh does for the C suite.
+// What this test proves, and what it cannot. It catches a wrong offset in
+// `c.items[i] = &c.bytes[at]`, which is the mutation it was written against.
+// It does not catch a dropped `c.bytes[at] = '\0'` or a dropped
+// `c.items[argv->len] = null`: `new(T, n)` is zero-initialised (D10.2), so
+// both stores write a byte that already holds zero. Those two stores say what
+// the code means and the test cannot see them.
+fn void the_child_receives_the_arguments_cc_argv_built() {
+    write_file("unit.ft", "fn i32 main() {\n    return 0;\n}\n");
+    write_file("logger.sh", "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\"; done > cc.log\n");
+    char mut@ own path = str.to_cstr("./logger.sh");
+    defer del(path);
+    assert(chmod(path.ptr, 493) == 0);
+    set_env("TMPDIR", ".");
+    string[11] mut whole = {"fort", "--cc", "./logger.sh", "--std-dir", "/std", "-lm",
+                            "-Xcc", "-static", "-o", "out", "unit.ft"};
+    assert(run_quiet(whole[0..11]) == driver.EXIT_OK);
+    unset_env("TMPDIR");
+    strbuf.str_buf mut log = strbuf.create();
+    defer strbuf.free(&log);
+    assert(io.read_file("cc.log", &log));
+    string got = strbuf.view(&log);
+    // The first argument is argv[1]: a shell script never sees argv[0]. The
+    // module's name is the temporary directory's, which changes from run to
+    // run, so the line before it and the lines after it are held whole and the
+    // module's own line is held by its ending.
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string[7] mut head = {
+        "--target=x86_64-linux-gnu",
+        "-O1",
+        "-fPIE",
+        "-pie",
+        "-Wno-override-module",
+        "-o",
+        "out",
+    };
+    assert(str.starts_with(got, lines(&b, head[0..7])));
+    string[4] mut tail = {
+        "/std/fort_rt.o",
+        "-lm",
+        "-static",
+        "",
+    };
+    assert(str.ends_with(got, lines(&b, tail[0..3])));
+    assert(str.find(got, "/unit.ll\n/std/fort_rt.o\n") >= 0);
+    // Every argument stands on a line of its own, so the block holds exactly
+    // as many lines as cc_argv put in the vector, less argv[0]: the seven
+    // above, the module, and the three below.
+    assert(count_lines(got) == 11);
+}
+
+// The lines of `text`, which is one argument per line.
+fn u64 count_lines(string text) {
+    u64 mut n = 0;
+    u64 mut i = 0;
+    while (i < text.len) {
+        if (text[i] == '\n') {
+            n += 1;
+        }
+        i += 1;
+    }
+    return n;
+}
+
+// A --cc that dies by a signal is reported by that signal, which
+// toolchain.md 1 does not name: the status a wait leaves is read the way the
+// macros read it, and a signal is not a status.
+fn void a_cc_that_dies_by_a_signal_is_reported_by_its_signal() {
+    write_file("prog.ft", "fn i32 main() {\n    return 0;\n}\n");
+    write_file("killer.sh", "#!/bin/sh\nkill -9 $$\n");
+    char mut@ own path = str.to_cstr("./killer.sh");
+    defer del(path);
+    // 0o755: the script has to be executable before it can be a --cc.
+    assert(chmod(path.ptr, 493) == 0);
+    string[4] mut argv = {"fort", "--cc", "./killer.sh", "prog.ft"};
+    assert(run_quiet(argv[0..4]) == driver.EXIT_USAGE);
+    assert(said("fort: error: cc failed with signal 9\n"));
+}
+
+// An unwritable module path is a toolchain error, not a compile error: the
+// front end succeeded and the module could not be put anywhere
+// (toolchain.md 2, D14.1).
+fn void a_module_that_cannot_be_written_is_a_toolchain_error() {
+    write_file("prog.ft", "fn i32 main() {\n    return 0;\n}\n");
+    string[5] mut argv = {"fort", "-S", "-o", "nosuchdir/prog.ll", "prog.ft"};
+    assert(run_quiet(argv[0..5]) == driver.EXIT_USAGE);
+    assert(said("fort: error: cannot write 'nosuchdir/prog.ll': No such file or directory\n"));
+}
+
+// ---- the sandbox ---------------------------------------------------------------------
+
+extern fn char* strerror(i32 code);
+extern fn i32 chmod(char* path, u32 mode);
+extern fn i32 setenv(char* name, char* value, i32 overwrite);
+extern fn i32 unsetenv(char* name);
+
+fn void set_env(string name, string value) {
+    char mut@ own key = str.to_cstr(name);
+    defer del(key);
+    char mut@ own text = str.to_cstr(value);
+    defer del(text);
+    assert(setenv(key.ptr, text.ptr, 1) == 0);
+}
+
+fn void unset_env(string name) {
+    char mut@ own key = str.to_cstr(name);
+    defer del(key);
+    assert(unsetenv(key.ptr) == 0);
+}
+
+fn void write_file(string path, string text) {
+    assert(io.write_file(path, cast(text, u8@)));
+}
+
+// The driver's stderr is captured into a file of this test's own directory,
+// so that what reaches the harness is this file's own `println`s alone
+// (support/capture.ft).
+fn i32 run_quiet(string@ args) {
+    i32 saved_out = capture.begin(io.STDOUT, "out.txt");
+    i32 saved_err = capture.begin(io.STDERR, "err.txt");
+    i32 status = driver.run(args);
+    capture.end(io.STDERR, saved_err);
+    capture.end(io.STDOUT, saved_out);
+    return status;
+}
+
+fn bool said(string text) {
+    string own err = captured();
+    defer del(err);
+    return str.find(err, text) >= 0;
+}
+
+fn string own captured() {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    if (!io.read_file("err.txt", &b)) {
+        return str.dup("");
+    }
+    return str.dup(strbuf.view(&b));
+}
+
+fn i32 main() {
+    the_entry_base_is_the_last_component_without_its_suffix();
+    the_default_output_is_decided_by_the_mode();
+    a_joined_path_leaves_out_what_it_is_not_given();
+    println("paths ok");
+    the_checked_invocation_is_the_line_of_toolchain_two();
+    release_compiles_the_module_with_o2();
+    the_target_option_becomes_the_target_argument();
+    libraries_then_cc_arguments_close_the_line();
+    compile_only_puts_c_before_o_and_drops_the_link_arguments();
+    println("invocation ok");
+    the_temporary_directory_is_made_and_removed();
+    a_temporary_directory_that_cannot_be_made_reports_its_errno();
+    an_empty_tmpdir_falls_back_to_tmp();
+    println("temporary ok");
+    the_wait_status_is_read_the_way_the_macros_read_it();
+    println("status ok");
+    the_two_outcomes_of_the_spawn();
+    the_child_receives_the_arguments_cc_argv_built();
+    a_cc_that_dies_by_a_signal_is_reported_by_its_signal();
+    a_module_that_cannot_be_written_is_a_toolchain_error();
+    a_build_writes_its_module_outside_the_working_directory();
+    println("pipeline ok");
+    println("ok");
+    return 0;
+}

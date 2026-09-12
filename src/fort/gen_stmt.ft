@@ -1,0 +1,1228 @@
+// gen_stmt: the statements of the LLVM IR emitter (toolchain.md 6 item 10,
+// D19.4) and the definitions they are assembled into, the transliteration of
+// src/bootstrap/gen_stmt.c together with the definition half of
+// src/bootstrap/gen.c. See gen.ft.
+//
+// One function per statement form. Control flow is explicit blocks, so after
+// a terminating statement the emitter opens a fresh `%L<N>` block for the
+// unreachable statements D14.2 allows.
+//
+// How this file is cut, and why it is not src/bootstrap/gen_stmt.c's cut. The
+// C emitter's four files call each other in both directions and circular
+// imports are a compile error (D9.5), so the fort emitter is layered:
+// gen.ft, then gen_expr.ft, then gen_data.ft, then this file, which is the
+// only one that may call all three. gen.c's gen_function, gen_fort_entry,
+// gen_struct_type, gen_module and gen_program stand here rather than in
+// gen.ft because they call the statement emitter below them and gen_global
+// and gen_finish beside them, and nothing calls them back. Every function
+// keeps its C name, so the two emitters are read side by side whatever file
+// each name stands in.
+//
+// Re-entrancy (D20.5): every function here works on the emitter it is given.
+// Nothing here ends the process; a broken precondition is a panic at the call
+// that broke it (D13.3), where the C calls fatal_internal.
+//
+// Dispatch: none. The kind analyses are the plain switches the C wrote (D3.10).
+import ast;
+import check;
+import diag;
+import gen;
+import gen_data;
+import gen_expr;
+import lexer;
+import modules;
+import runtime_sig;
+import std.strbuf;
+import types;
+
+// The width a failure entry point takes a value at: every value the runtime
+// reports arrives sign-extended to 64 bits (toolchain.md 5.1).
+u32 FAIL_VALUE_BITS = 64;
+
+// The bytes an `i64` occupies, which is the alignment and the size of the
+// counter a range `for` invents. The C writes `sizeof(uint64_t)`; `sizeof`
+// takes a type in fort too (D3.15), and this is that type's size.
+u64 I64_BYTES = 8;
+
+// What leaves a block, for deciding which scopes an exit unwinds through:
+// falling off the end of a block is the block's own business and needs no
+// kind of its own.
+enum exit_kind {
+    x_return,
+    x_break,
+    x_continue,
+}
+
+// The operator a compound assignment applies, or `assign` for a plain one:
+// `lv op= e` has the operand rules and the overflow behavior of `lv op e`
+// (D7.2).
+fn lexer.tok_kind compound_operator(lexer.tok_kind op) {
+    switch (op) {
+    case lexer.tok_kind.plus_assign:
+        return lexer.tok_kind.plus;
+    case lexer.tok_kind.minus_assign:
+        return lexer.tok_kind.minus;
+    case lexer.tok_kind.star_assign:
+        return lexer.tok_kind.star;
+    case lexer.tok_kind.slash_assign:
+        return lexer.tok_kind.slash;
+    case lexer.tok_kind.percent_assign:
+        return lexer.tok_kind.percent;
+    case lexer.tok_kind.plus_wrap_assign:
+        return lexer.tok_kind.plus_wrap;
+    case lexer.tok_kind.minus_wrap_assign:
+        return lexer.tok_kind.minus_wrap;
+    case lexer.tok_kind.star_wrap_assign:
+        return lexer.tok_kind.star_wrap;
+    case lexer.tok_kind.amp_assign:
+        return lexer.tok_kind.amp;
+    case lexer.tok_kind.pipe_assign:
+        return lexer.tok_kind.pipe;
+    case lexer.tok_kind.caret_assign:
+        return lexer.tok_kind.caret;
+    case lexer.tok_kind.shl_assign:
+        return lexer.tok_kind.shl;
+    case lexer.tok_kind.shr_assign:
+        return lexer.tok_kind.shr;
+    default:
+        break;
+    }
+    return lexer.tok_kind.assign;
+}
+
+// Whether an assignment to a place of type `t` carries the overwrite check of
+// D17.11: only an `own` reference, only in the checked mode of D11.1. An
+// owning aggregate is not checked field by field, a declaration's initializer
+// is never checked, and `--no-bounds-check` removes the index and span
+// branches alone, so it leaves this one standing (D10.6, item 18).
+fn bool overwrite_checked(gen.emitter* g, types.node* t) {
+    return !g->opts.release && types.type_is_reference(t) && t->is_own;
+}
+
+// The check itself (item 18): the current pointer word is loaded -- field 0
+// of a span or `string` header, the value itself for a pointer or `void*` --
+// and a non-null one branches to `fort_rt_fail_overwrite`, because the
+// previous allocation would leak. `at` is the `=` token (D11.4, D17.11).
+fn void gen_overwrite_check(gen.emitter mut* g, gen.gen_place target, diag.loc at) {
+    gen.gen_val mut held = gen.gen_val{};
+    if (gen.gen_is_aggregate(target.ty)) {
+        held = gen.gen_span_ptr(g, target.addr);
+    } else {
+        held = gen.gen_load_place(g, target);
+    }
+    gen.gen_val live = gen.gen_icmp(g, "ne", held, gen.gen_literal(g, "ptr", "null"));
+    gen.gen_args mut args = gen.gen_args_init();
+    defer gen.gen_args_free(&args);
+    gen.gen_check(g, live, true, runtime_sig.rt_entry.rt_fail_overwrite, &args, at);
+}
+
+// A plain assignment into an `own` reference: the right-hand side is fully
+// evaluated, the check runs, and only then does the store happen (item 18).
+fn void gen_checked_store(gen.emitter mut* g, gen.gen_place target, ast.node* value,
+                          diag.loc at) {
+    if (!gen.gen_is_aggregate(target.ty)) {
+        // A pointer's value is in a register, so the check stands between its
+        // evaluation and the store.
+        gen.gen_val v = gen_expr.gen_expr_value(g, value);
+        if (g->failed) {
+            return;
+        }
+        gen_overwrite_check(g, target, at);
+        gen.gen_store_place(g, target, v);
+        return;
+    }
+    // A span or a `string` is produced into a place, so the value lands in a
+    // temporary first and the header is copied over after the check (D19.3).
+    gen.gen_place tmp = gen.gen_temp_place(g, target.ty);
+    gen_expr.gen_expr_into(g, value, tmp);
+    if (g->failed) {
+        return;
+    }
+    gen_overwrite_check(g, target, at);
+    u64 align = types.type_alignof(target.ty);
+    gen.gen_memcpy(g, target.addr, align, tmp.addr, align, types.type_sizeof(target.ty));
+}
+
+// `Type name = init;` (D7.1): the local's storage is the entry-block alloca
+// gen_function made, so the statement is the initializer alone -- and, for an
+// owning local, the overwrite check of D17.11, since a declaration is a store
+// like any other. gen_function zeroed the slot once in the entry block, so the
+// first execution passes and a second one, in a loop whose body did not `del`,
+// traps instead of leaking. The check is reported at the declared name, the
+// declaration having no operator token of its own (D11.4).
+fn void gen_var_decl(gen.emitter mut* g, ast.node* n) {
+    if (n->b == null || n->sym == null) {
+        return;
+    }
+    gen.gen_place slot = gen.gen_slot_place(g, n->sym);
+    if (overwrite_checked(g, slot.ty)) {
+        gen_checked_store(g, slot, n->b, n->name_loc);
+        return;
+    }
+    gen_expr.gen_expr_into(g, n->b, slot);
+}
+
+fn void gen_assign(gen.emitter mut* g, ast.node* n) {
+    // The target is evaluated before the value, which is the source order the
+    // walk keeps (D6.3).
+    gen.gen_place target = gen_expr.gen_expr_place(g, n->a);
+    if (g->failed) {
+        return;
+    }
+    lexer.tok_kind op = compound_operator(cast(n->op, lexer.tok_kind));
+    if (op == lexer.tok_kind.assign) {
+        if (overwrite_checked(g, target.ty)) {
+            // Storing over a live `own` value is a runtime error in a checked
+            // build, the previous allocation being lost (D11.1, D17.11).
+            gen_checked_store(g, target, n->b, n->loc);
+            return;
+        }
+        gen_expr.gen_expr_into(g, n->b, target);
+        return;
+    }
+    gen.gen_val lhs = gen.gen_load_place(g, target);
+    gen.gen_val rhs = gen_expr.gen_expr_value(g, n->b);
+    // A compound assignment uses the intrinsics of its operator (item 15).
+    gen.gen_store_place(
+        g, target, gen_expr.gen_arith(g, n->loc, cast(op, i32), n->a->ty, lhs, n->b->ty, rhs));
+}
+
+// `++` and `--` use the same intrinsics as `+` and `-` (item 15).
+fn void gen_incdec(gen.emitter mut* g, ast.node* n) {
+    gen.gen_place target = gen_expr.gen_expr_place(g, n->a);
+    if (g->failed) {
+        return;
+    }
+    gen.gen_val before = gen.gen_load_place(g, target);
+    gen.gen_val one = gen.gen_const_unsigned(g, before.ty, 1);
+    lexer.tok_kind mut op = lexer.tok_kind.minus;
+    if (cast(n->op, lexer.tok_kind) == lexer.tok_kind.plus_plus) {
+        op = lexer.tok_kind.plus;
+    }
+    gen.gen_store_place(
+        g, target, gen_expr.gen_arith(g, n->loc, cast(op, i32), n->a->ty, before, n->a->ty, one));
+}
+
+// ---- deferred statements (D7.8) ----------------------------------------------------
+
+fn void scope_push(gen.emitter mut* g, gen.scope_kind kind) {
+    gen.scopes_push(&g->scopes, gen.block_scope{kind, g->defers.len});
+}
+
+// Closes the innermost scope: its deferred statements go out of scope with
+// it, so nothing an exit below it crosses can run them (D7.8).
+fn void scope_pop(gen.emitter mut* g) {
+    g->defers.len = gen.scopes_pop(&g->scopes).first;
+}
+
+// The deferred statements of the scope at `depth`, in reverse textual order:
+// those registered after that scope opened and before the next one did, so an
+// unwind through an outer scope runs that scope's own statements alone
+// (D7.8). A deferred statement that ends the block -- a call to a `noreturn`
+// function -- stops the expansion, the rest of the exit not being reached.
+fn void run_scope_defers(gen.emitter mut* g, u64 depth) {
+    u64 first = gen.scopes_at(&g->scopes, depth).first;
+    u64 mut end = g->defers.len;
+    if (depth + 1 < g->scopes.len) {
+        end = gen.scopes_at(&g->scopes, depth + 1).first;
+    }
+    // The scopes open now are the ones the exit is leaving, so an exit met
+    // inside the code below may not unwind past them (D7.8).
+    u64 saved_floor = g->defer_floor;
+    g->defer_floor = g->scopes.len;
+    u64 mut i = end;
+    while (i > first) {
+        if (g->failed || g->terminated) {
+            break;
+        }
+        ast.node* deferred = gen.refs_at(&g->defers, i - 1);
+        // Nothing was captured at `defer` time: the deferred statement is
+        // ordinary code emitted here, reading whatever its variables hold at
+        // the exit (D7.8).
+        gen_stmt(g, deferred->a);
+        i -= 1;
+    }
+    g->defer_floor = saved_floor;
+}
+
+// Whether an exit of kind `x` stops at a scope of kind `kind`: `break` leaves
+// the innermost loop body or case body, `continue` the innermost loop body,
+// and `return` unwinds out to the function body (D7.6, D7.8).
+fn bool exit_stops_at(exit_kind x, gen.scope_kind kind) {
+    if (x == exit_kind.x_return) {
+        return kind == gen.scope_kind.sc_fn;
+    }
+    if (x == exit_kind.x_continue) {
+        return kind == gen.scope_kind.sc_loop;
+    }
+    return kind == gen.scope_kind.sc_loop || kind == gen.scope_kind.sc_case;
+}
+
+// The deferred code an exit runs, copied into the exit itself: the set is
+// static, so every exited scope is expanded here, innermost first and in
+// reverse order within each (D7.8). How many scopes the exit leaves is read
+// off the scope stack, which is the shape of the tree being walked, so no
+// counter is kept beside it.
+fn void gen_unwind(gen.emitter mut* g, exit_kind x) {
+    u64 mut depth = g->scopes.len;
+    while (depth > g->defer_floor) {
+        depth -= 1;
+        run_scope_defers(g, depth);
+        if (g->failed || g->terminated) {
+            return;
+        }
+        if (exit_stops_at(x, gen.scopes_at(&g->scopes, depth).kind)) {
+            return;
+        }
+    }
+    // The scope an exit stops at always exists: the checker refused `return`,
+    // `break` and `continue` inside deferred code and `break` and `continue`
+    // with no construct around them (D7.8, check_stmt.ft), so an exit that
+    // walks past the floor is a checker that let one through, not a program.
+    // Without the floor the walk would re-enter the deferred statement that
+    // holds the exit, without end.
+    panic("gen_stmt.gen_unwind: return, break or continue inside deferred code");
+}
+
+// `return x` of a bare `own` local or parameter is an implicit `move`, which
+// the checker marked (D17.5, D17.7): the operand is emptied once its value has
+// been read, so that a `defer del(x)` written above sees the zero value and
+// frees nothing (D7.8, item 18).
+fn void gen_return_move(gen.emitter mut* g, ast.node* n) {
+    if ((n->ann & check.ANN_MOVE) == 0 || g->failed) {
+        return;
+    }
+    gen.gen_place src = gen_expr.gen_expr_place(g, n->a);
+    if (!g->failed) {
+        gen.gen_zero_owner(g, src);
+    }
+}
+
+// `  ret void`, which both the void and the `sret` forms end with.
+fn void emit_ret_void(gen.emitter mut* g) {
+    gen.gen_ins(g);
+    gen.gen_text_append(g, "ret void");
+    gen.gen_ins_end(g);
+    g->terminated = true;
+}
+
+fn void gen_return(gen.emitter mut* g, ast.node* n) {
+    if (n->a == null) {
+        gen_unwind(g, exit_kind.x_return);
+        if (g->failed || g->terminated) {
+            return;
+        }
+        emit_ret_void(g);
+        return;
+    }
+    if (gen.gen_is_aggregate(n->a->ty)) {
+        // An aggregate result is written through the `sret` pointer and the
+        // function returns `void` (item 7).
+        gen.gen_place mut sret = gen.gen_place{};
+        sret.addr.ty = "ptr";
+        sret.addr.val = "%ret.sret";
+        sret.ty = n->a->ty;
+        // The `sret` block belongs to the caller, which may have passed a
+        // pointer to it as an argument as well (`s = f(&s)` hands one block
+        // to both), so deferred code can reach it. The result therefore lands
+        // in a temporary of the callee's own, which nothing outside names,
+        // and is copied out after the deferred code has run: `return e`
+        // evaluates `e` before deferred code runs, which cannot then change
+        // the value returned (D7.8, D8.2). A function with nothing deferred
+        // writes the block directly and pays for no temporary.
+        bool through_temp = g->defers.len > 0;
+        gen.gen_place mut target = sret;
+        if (through_temp) {
+            target = gen.gen_temp_place(g, n->a->ty);
+        }
+        gen_expr.gen_expr_into(g, n->a, target);
+        // The operand of an implicit move is emptied before the deferred code
+        // too (D17.5).
+        gen_return_move(g, n);
+        gen_unwind(g, exit_kind.x_return);
+        if (g->failed || g->terminated) {
+            return;
+        }
+        if (through_temp) {
+            u64 align = types.type_alignof(n->a->ty);
+            gen.gen_memcpy(g, sret.addr, align, target.addr, align, types.type_sizeof(n->a->ty));
+        }
+        emit_ret_void(g);
+        return;
+    }
+    gen.gen_val v = gen_expr.gen_expr_value(g, n->a);
+    gen_return_move(g, n);
+    // The value is in a register before the deferred code runs, so a deferred
+    // statement that writes the variable it was read from does not change it
+    // (D7.8).
+    gen_unwind(g, exit_kind.x_return);
+    if (g->failed || g->terminated) {
+        return;
+    }
+    gen.gen_ins(g);
+    gen.gen_text_append(g, "ret ");
+    gen.gen_text_append(g, v.ty);
+    gen.gen_text_append(g, " ");
+    gen.gen_text_append(g, v.val);
+    gen.gen_ins_end(g);
+    g->terminated = true;
+}
+
+// ---- control flow (item 10, D19.4) ------------------------------------------------
+
+// `if (cond) { } else if (cond) { } else { }` (D7.4): the condition branches
+// to the then block and to the else block, or to the continuation when there
+// is no `else`, and each branch that has not terminated branches to the
+// continuation. Every block the emitter opens therefore ends in exactly one
+// terminator (item 10).
+fn void gen_if(gen.emitter mut* g, ast.node* n) {
+    gen.gen_val cond = gen_expr.gen_expr_value(g, n->a);
+    if (g->failed) {
+        return;
+    }
+    bool has_else = n->c != null;
+    // Labels are `%L<N>` in creation order, so the order they are allocated
+    // in is part of the emitted text (D19.5).
+    u64 then_label = gen.gen_label(g);
+    u64 mut else_label = 0;
+    if (has_else) {
+        else_label = gen.gen_label(g);
+    }
+    u64 done = gen.gen_label(g);
+    if (has_else) {
+        gen.gen_br_cond(g, cond, then_label, else_label);
+    } else {
+        gen.gen_br_cond(g, cond, then_label, done);
+    }
+    gen.gen_block_begin(g, then_label);
+    gen_block(g, n->b);
+    if (!g->terminated) {
+        gen.gen_br(g, done);
+    }
+    if (has_else) {
+        gen.gen_block_begin(g, else_label);
+        // The `else` is a block, or the `if` of an `else if` chain (D7.4).
+        gen_stmt(g, n->c);
+        if (!g->terminated) {
+            gen.gen_br(g, done);
+        }
+    }
+    gen.gen_block_begin(g, done);
+}
+
+// The body of a loop, with `break` and `continue` targeting it: they target
+// the innermost enclosing loop, so the enclosing targets are saved and
+// restored around it (D7.5).
+fn void gen_loop_body(gen.emitter mut* g, ast.node* body, u64 brk, u64 cont) {
+    u64 saved_break = g->break_label;
+    u64 saved_continue = g->continue_label;
+    bool had_break = g->has_break;
+    bool had_continue = g->has_continue;
+    g->break_label = brk;
+    g->continue_label = cont;
+    g->has_break = true;
+    g->has_continue = true;
+    // The body is a block that `break` and `continue` both leave, so its
+    // deferred statements run at either exit and at the end of every
+    // iteration (D7.8).
+    gen_block_scoped(g, body, gen.scope_kind.sc_loop);
+    g->break_label = saved_break;
+    g->continue_label = saved_continue;
+    g->has_break = had_break;
+    g->has_continue = had_continue;
+}
+
+// `while (cond) { }` (D7.5): a head block that re-evaluates the condition, a
+// body that branches back to it, and a continuation. `continue` targets the
+// head, `break` the continuation.
+fn void gen_while(gen.emitter mut* g, ast.node* n) {
+    u64 head = gen.gen_label(g);
+    u64 body = gen.gen_label(g);
+    u64 done = gen.gen_label(g);
+    gen.gen_br(g, head);
+    gen.gen_block_begin(g, head);
+    gen.gen_val cond = gen_expr.gen_expr_value(g, n->a);
+    if (g->failed) {
+        return;
+    }
+    gen.gen_br_cond(g, cond, body, done);
+    gen.gen_block_begin(g, body);
+    gen_loop_body(g, n->b, done, head);
+    if (!g->terminated) {
+        gen.gen_br(g, head);
+    }
+    gen.gen_block_begin(g, done);
+}
+
+// `for (init; cond; step) { }` (D7.5): `init` runs in the block the loop
+// stands in, the head tests the condition, the body branches to the step
+// block and the step branches back to the head. `continue` targets the step
+// block, because `continue` in a `for` runs `step`; an empty `cond` means
+// `true`, which is what `for (;;)` is.
+fn void gen_for(gen.emitter mut* g, ast.node* n) {
+    if (n->a != null) {
+        gen_stmt(g, n->a);
+    }
+    if (g->failed) {
+        return;
+    }
+    u64 head = gen.gen_label(g);
+    u64 body = gen.gen_label(g);
+    u64 step = gen.gen_label(g);
+    u64 done = gen.gen_label(g);
+    if (!g->terminated) {
+        // `init` may be a call (D7.5) and a call to a `noreturn` function
+        // already ended the block (D8.4), so the entry edge is conditional on
+        // the block still being open: every block ends in exactly one
+        // terminator (item 10).
+        gen.gen_br(g, head);
+    }
+    gen.gen_block_begin(g, head);
+    if (n->b == null) {
+        // An empty condition is `true`, so the head branches straight in
+        // (D7.5).
+        gen.gen_br(g, body);
+    } else {
+        gen.gen_val cond = gen_expr.gen_expr_value(g, n->b);
+        if (g->failed) {
+            return;
+        }
+        gen.gen_br_cond(g, cond, body, done);
+    }
+    gen.gen_block_begin(g, body);
+    gen_loop_body(g, n->d, done, step);
+    if (!g->terminated) {
+        gen.gen_br(g, step);
+    }
+    gen.gen_block_begin(g, step);
+    if (n->c != null) {
+        gen_stmt(g, n->c);
+    }
+    if (g->failed) {
+        return;
+    }
+    if (!g->terminated) {
+        // `step` may be a call too, with the same consequence as `init`.
+        gen.gen_br(g, head);
+    }
+    gen.gen_block_begin(g, done);
+}
+
+// The copy of one element into the loop variable's slot: a scalar is loaded
+// and stored, an aggregate is copied with `llvm.memcpy` (D19.3).
+fn void copy_into(gen.emitter mut* g, gen.gen_place dst, gen.gen_place src) {
+    if (gen.gen_is_aggregate(dst.ty)) {
+        u64 align = types.type_alignof(dst.ty);
+        gen.gen_memcpy(g, dst.addr, align, src.addr, align, types.type_sizeof(dst.ty));
+        return;
+    }
+    gen.gen_store_place(g, dst, gen.gen_load_place(g, src));
+}
+
+// The place the collection of a range `for` is iterated over (D7.5, D17.10).
+// The loop lends an owning collection, which is iterated in place and never
+// moved or copied; a collection that owns nothing is evaluated as a value
+// into a temporary, so that it is evaluated once before the first iteration
+// and the loop iterates over the copy.
+fn gen.gen_place range_collection(gen.emitter mut* g, ast.node* coll) {
+    if (coll->ty != null && (types.type_is_owning_aggregate(coll->ty) ||
+                             (types.type_is_reference(coll->ty) && coll->ty->is_own))) {
+        return gen_expr.gen_expr_place(g, coll);
+    }
+    gen.gen_place tmp = gen.gen_temp_place(g, coll->ty);
+    gen_expr.gen_expr_into(g, coll, tmp);
+    return tmp;
+}
+
+// `for (T x : coll) { }` (D7.5): an `i64` counter the compiler invents walks
+// the collection, and the loop variable is a fresh copy of each element taken
+// at the start of its iteration. The counter is bounded by the collection's
+// length, so its increment is a plain `add` and not a checked one (item 15).
+fn void gen_range_for(gen.emitter mut* g, ast.node* n) {
+    gen.gen_place coll = range_collection(g, n->b);
+    if (g->failed || n->sym == null || n->b->ty == null) {
+        return;
+    }
+    gen.gen_place index = gen.gen_temp_place_raw(g, "i64", I64_BYTES);
+    gen.gen_store(g, gen.gen_const_unsigned(g, "i64", 0), index.addr, I64_BYTES);
+    u64 head = gen.gen_label(g);
+    u64 body = gen.gen_label(g);
+    u64 step = gen.gen_label(g);
+    u64 done = gen.gen_label(g);
+    gen.gen_br(g, head);
+    gen.gen_block_begin(g, head);
+    gen.gen_val at = gen.gen_load(g, "i64", index.addr, I64_BYTES);
+    gen.gen_val len = gen_expr.gen_length_of(g, n->b->ty, coll.addr);
+    // The counter never passes the length, so the compare is unsigned and no
+    // bounds check is needed on the element address (item 16).
+    gen.gen_br_cond(g, gen.gen_icmp(g, "ult", at, len), body, done);
+    gen.gen_block_begin(g, body);
+    gen.gen_place mut element = gen.gen_place{};
+    element.addr = gen_expr.gen_element_addr(g, n->b->ty, coll.addr, at);
+    element.ty = n->sym->ty;
+    copy_into(g, gen.gen_slot_place(g, n->sym), element);
+    gen_loop_body(g, n->c, done, step);
+    if (!g->terminated) {
+        gen.gen_br(g, step);
+    }
+    gen.gen_block_begin(g, step);
+    gen.gen_val before = gen.gen_load(g, "i64", index.addr, I64_BYTES);
+    gen.gen_store(g, gen.gen_binary(g, "add", before, gen.gen_const_unsigned(g, "i64", 1)),
+                  index.addr, I64_BYTES);
+    gen.gen_br(g, head);
+    gen.gen_block_begin(g, done);
+}
+
+// `break` targets the innermost enclosing loop or `switch` (D7.5, D7.6) and
+// `continue` the innermost enclosing loop alone. The checker refused a
+// `break` with neither construct around it and a `continue` outside every
+// loop, so a target is always set here (check_stmt.ft).
+fn void gen_break(gen.emitter mut* g, bool cont) {
+    bool mut has_target = g->has_break;
+    if (cont) {
+        has_target = g->has_continue;
+    }
+    if (!has_target) {
+        panic("gen_stmt.gen_break: break or continue outside a loop or switch");
+    }
+    // The deferred statements of every block the jump leaves run before it
+    // (D7.8); in a `for`, `continue` therefore runs them before `step`.
+    if (cont) {
+        gen_unwind(g, exit_kind.x_continue);
+    } else {
+        gen_unwind(g, exit_kind.x_break);
+    }
+    if (g->failed || g->terminated) {
+        return;
+    }
+    if (cont) {
+        gen.gen_br(g, g->continue_label);
+    } else {
+        gen.gen_br(g, g->break_label);
+    }
+}
+
+// ---- switch (D7.6, D7.7) -----------------------------------------------------------
+
+// The body of one case clause, with `break` targeting the switch: a `break`
+// inside a `switch` inside a loop exits the switch and not the loop, and
+// `continue` still targets the loop the switch stands in (D7.6).
+fn void gen_case_body(gen.emitter mut* g, ast.node* body, u64 brk) {
+    u64 saved_break = g->break_label;
+    bool had_break = g->has_break;
+    g->break_label = brk;
+    g->has_break = true;
+    // A case body is a block too, which `break` leaves (D7.6, D7.8).
+    gen_block_scoped(g, body, gen.scope_kind.sc_case);
+    g->break_label = saved_break;
+    g->has_break = had_break;
+}
+
+// The clause that is the `default`, or `clauses` when the switch has none: at
+// most one, in any position (D7.6).
+fn u64 default_clause(ast.node* n, u64 clauses) {
+    u64 mut i = 0;
+    while (i < clauses) {
+        ast.node* clause = ast.ast_child(n, i);
+        if (clause->kind == ast.ast_kind.k_case && (clause->flags & ast.FLAG_DEFAULT) != 0) {
+            return i;
+        }
+        i += 1;
+    }
+    return clauses;
+}
+
+// `switch (e) { case a, b: ... default: ... }` (D7.6): one LLVM `switch` on
+// the operand with one case per label, a block per clause and a default
+// block, which is the `default` clause wherever it stands, the failure block
+// of D7.7 for an enum switch that has no `default`, and the continuation
+// itself otherwise (item 10). Each case body is an implicit block scope with
+// an implicit `break` at its end, so a body that has not terminated branches
+// to the continuation and no clause ever falls into the next.
+fn void gen_switch(gen.emitter mut* g, ast.node* n) {
+    gen.gen_val operand = gen_expr.gen_expr_value(g, n->a);
+    if (g->failed) {
+        return;
+    }
+    u64 clauses = ast.ast_len(n);
+    types.node* ot = n->a->ty;
+    u64 fallback_clause = default_clause(n, clauses);
+    // A `switch` over an enum with no `default` lists every member (D7.7) and
+    // still meets values outside the member set, since a zeroed enum holds 0
+    // whether or not 0 is a member and int-to-enum is unchecked (D3.9). That
+    // is not in D10.7's list of undefined behavior and cannot be diagnosed,
+    // so the compiler gives the switch a `default` of its own that reports a
+    // runtime error naming the enum and the value (D7.7).
+    bool generated_default =
+        fallback_clause == clauses && ot != null && ot->kind == types.type_kind.k_enum;
+    gen.gen_val mut reported = operand;
+    if (generated_default) {
+        // The value the failure names, widened in the block the switch stands
+        // in, which dominates the failure block (D19.4, D19.6).
+        reported = gen.gen_resize(g, operand, gen.gen_int_bits(ot), "i64", FAIL_VALUE_BITS, true);
+    }
+    // Labels are `%L<N>` in creation order, so one block per clause is
+    // allocated in clause order and the continuation last (D19.5); the
+    // counter hands out consecutive numbers, so clause `i` owns `first + i`.
+    u64 first = g->labels;
+    u64 mut i = 0;
+    while (i < clauses) {
+        gen.gen_label(g);
+        i += 1;
+    }
+    u64 done = gen.gen_label(g);
+    // The default target: the `default` clause wherever it stands, the
+    // failure block of D7.7 whose label follows the continuation's (D19.6),
+    // or the continuation itself.
+    u64 mut fallback = done;
+    if (generated_default) {
+        fallback = gen.gen_label(g);
+    } else if (fallback_clause != clauses) {
+        fallback = first + fallback_clause;
+    }
+    gen.gen_switch_begin(g, operand, fallback);
+    i = 0;
+    while (i < clauses) {
+        ast.node* clause = ast.ast_child(n, i);
+        if (clause->kind == ast.ast_kind.k_case) {
+            u64 mut k = 0;
+            while (k < ast.ast_len(clause)) {
+                // Every label is a constant the checker folded and converted
+                // to the operand's type, so it prints with that type's
+                // signedness (D7.6, D19.5).
+                ast.node* label = ast.ast_child(clause, k);
+                gen.gen_switch_case(
+                    g, gen.gen_const_value(g, n->a->ty, check.check_node_value(g->ck, label)),
+                    i + first);
+                k += 1;
+            }
+        }
+        i += 1;
+    }
+    gen.gen_switch_end(g);
+    if (generated_default) {
+        // Emitted here, while its label is the smallest one outstanding, so
+        // that the failure blocks of the case bodies follow it in ascending
+        // order (D19.6). It is not a bounds check, so neither `--release` nor
+        // `--no-bounds-check` removes it (D7.7, D10.6).
+        gen.gen_args mut args = gen.gen_args_init();
+        defer gen.gen_args_free(&args);
+        gen.gen_args_add(&args, reported);
+        gen.gen_args_add(&args, gen.gen_literal(g, "ptr", gen.gen_str_ref(g, ot->name)));
+        gen.gen_fail_block(g, fallback, runtime_sig.rt_entry.rt_fail_enum, &args, n->loc);
+    }
+    i = 0;
+    while (i < clauses) {
+        ast.node* clause = ast.ast_child(n, i);
+        gen.gen_block_begin(g, first + i);
+        if (clause->kind == ast.ast_kind.k_case) {
+            gen_case_body(g, clause->a, done);
+        }
+        if (g->failed) {
+            return;
+        }
+        if (!g->terminated) {
+            // The implicit `break` at the end of a case body (D7.6).
+            gen.gen_br(g, done);
+        }
+        i += 1;
+    }
+    gen.gen_block_begin(g, done);
+}
+
+fn void gen_stmt(gen.emitter mut* g, ast.node* n) {
+    if (n == null || g->failed) {
+        return;
+    }
+    switch (n->kind) {
+    case ast.ast_kind.k_block:
+        gen_block(g, n);
+        return;
+    case ast.ast_kind.k_var_decl:
+        gen_var_decl(g, n);
+        return;
+    case ast.ast_kind.k_assign:
+        gen_assign(g, n);
+        return;
+    case ast.ast_kind.k_incdec:
+        gen_incdec(g, n);
+        return;
+    case ast.ast_kind.k_call_stmt:
+        // A call statement evaluates the call for its effects (D7.3).
+        gen_expr.gen_expr_discard(g, n->a);
+        return;
+    case ast.ast_kind.k_return:
+        gen_return(g, n);
+        return;
+    case ast.ast_kind.k_error:
+        // The tokens a syntax error made the parser skip: the module is not
+        // emitted at all when one was reported (D14.2).
+        return;
+    case ast.ast_kind.k_if:
+        gen_if(g, n);
+        return;
+    case ast.ast_kind.k_while:
+        gen_while(g, n);
+        return;
+    case ast.ast_kind.k_do_while:
+        // The parser rejects `do`-`while` in the bootstrap subset, so this
+        // arm is defensive and no later ticket owns it (D15).
+        gen.gen_todo(g, n->loc, "a do-while loop");
+        return;
+    case ast.ast_kind.k_for:
+        gen_for(g, n);
+        return;
+    case ast.ast_kind.k_range_for:
+        gen_range_for(g, n);
+        return;
+    case ast.ast_kind.k_switch:
+        gen_switch(g, n);
+        return;
+    case ast.ast_kind.k_break:
+        gen_break(g, false);
+        return;
+    case ast.ast_kind.k_continue:
+        gen_break(g, true);
+        return;
+    case ast.ast_kind.k_defer:
+        // A `defer` emits nothing where it stands: it registers its statement
+        // in the innermost open scope, and every exit below it copies the
+        // statement out (D7.8).
+        gen.refs_push(&g->defers, n);
+        return;
+    default:
+        break;
+    }
+    gen.gen_todo(g, n->loc, "this statement");
+}
+
+// A block as an ordinary block scope, which only falling off its end exits
+// (D7.8).
+fn void gen_block(gen.emitter mut* g, ast.node* n) {
+    gen_block_scoped(g, n, gen.scope_kind.sc_block);
+}
+
+// A block as a scope of kind `kind`, which is what says which exits leave it
+// and therefore run its deferred statements (D7.8): gen_function opens the
+// body as sc_fn, a loop body as sc_loop and a case body as sc_case.
+fn void gen_block_scoped(gen.emitter mut* g, ast.node* n, gen.scope_kind kind) {
+    if (n == null) {
+        return;
+    }
+    scope_push(g, kind);
+    u64 mut i = 0;
+    while (i < ast.ast_len(n)) {
+        if (g->failed) {
+            break;
+        }
+        if (g->terminated) {
+            // After a terminating statement the emitter opens a fresh block
+            // for the unreachable statements D14.2 allows (item 10).
+            gen.gen_block_begin(g, gen.gen_label(g));
+        }
+        gen_stmt(g, ast.ast_child(n, i));
+        i += 1;
+    }
+    if (!g->failed && !g->terminated) {
+        // Falling off the end of the block exits it, and runs the deferred
+        // statements it holds in reverse order (D7.8).
+        run_scope_defers(g, g->scopes.len - 1);
+    }
+    scope_pop(g);
+}
+
+// ---- function definitions (item 7) ------------------------------------------------
+
+// Every local of the body, in declaration order, which is the order their
+// allocas are emitted in (D19.4).
+fn void collect_locals(ast.node* n, gen.node_ref_vec mut* out) {
+    if (n == null) {
+        return;
+    }
+    if ((n->kind == ast.ast_kind.k_var_decl || n->kind == ast.ast_kind.k_range_for) &&
+        n->sym != null) {
+        // A range `for` declares its loop variable on the loop node itself,
+        // and that variable is a local like any other (D7.5).
+        gen.refs_push(out, n);
+    }
+    collect_locals(n->a, out);
+    collect_locals(n->b, out);
+    collect_locals(n->c, out);
+    collect_locals(n->d, out);
+    u64 mut i = 0;
+    while (i < ast.ast_len(n)) {
+        collect_locals(ast.ast_child(n, i), out);
+        i += 1;
+    }
+}
+
+// `  %x.0 = alloca <ty>, align <n>`, the storage of one local or parameter.
+fn void emit_alloca(gen.emitter mut* g, string name, types.node* t) {
+    strbuf.append(&g->allocas, "  ");
+    strbuf.append(&g->allocas, name);
+    strbuf.append(&g->allocas, " = alloca ");
+    strbuf.append(&g->allocas, gen.gen_mem_type(g, t));
+    strbuf.append(&g->allocas, ", align ");
+    strbuf.append_u64(&g->allocas, types.type_alignof(t));
+    strbuf.push(&g->allocas, '\n');
+}
+
+// One blank line stands between two definitions (item 1).
+fn void definition_begin(gen.emitter mut* g) {
+    if (strbuf.view(&g->funcs).len > 0) {
+        strbuf.push(&g->funcs, '\n');
+    }
+}
+
+// The signature of a fort definition (item 7): scalars are ordinary
+// parameters, an aggregate is a plain `ptr`, and an aggregate result is a
+// leading `ptr sret(%T) %ret.sret` on a `void` function.
+fn void emit_signature(gen.emitter mut* g, ast.node* fn_node, ast.sym* s, types.node* sig) {
+    definition_begin(g);
+    strbuf.append(&g->funcs, "define dso_local ");
+    string ret_attr = gen.gen_ext_attr(sig->elem);
+    if (ret_attr.len > 0) {
+        // A narrow result carries the same attribute as a narrow parameter,
+        // so that LLVM normalizes on both sides of a call (item 7).
+        strbuf.append(&g->funcs, ret_attr);
+        strbuf.push(&g->funcs, ' ');
+    }
+    strbuf.append(&g->funcs, gen.gen_result_type(g, sig->elem));
+    strbuf.push(&g->funcs, ' ');
+    strbuf.append(&g->funcs, gen.gen_symbol_ref(g, s));
+    strbuf.push(&g->funcs, '(');
+    u64 mut written = 0;
+    if (gen.gen_is_aggregate(sig->elem)) {
+        strbuf.append(&g->funcs, "ptr sret(");
+        strbuf.append(&g->funcs, gen.gen_mem_type(g, sig->elem));
+        strbuf.append(&g->funcs, ") %ret.sret");
+        written += 1;
+    }
+    u64 mut i = 0;
+    while (i < ast.ast_len(fn_node)) {
+        ast.node* p = ast.ast_child(fn_node, i);
+        if (p->kind == ast.ast_kind.k_param && p->sym != null) {
+            if (written > 0) {
+                strbuf.append(&g->funcs, ", ");
+            }
+            written += 1;
+            types.node* t = p->sym->ty;
+            if (gen.gen_is_aggregate(t)) {
+                // A struct, fixed array, span or `string` argument is a plain
+                // `ptr` parameter and `byval` is never used (item 7).
+                strbuf.append(&g->funcs, "ptr ");
+            } else {
+                strbuf.append(&g->funcs, gen.gen_value_type(g, t));
+                string attr = gen.gen_ext_attr(t);
+                if (attr.len > 0) {
+                    strbuf.push(&g->funcs, ' ');
+                    strbuf.append(&g->funcs, attr);
+                }
+                strbuf.push(&g->funcs, ' ');
+            }
+            strbuf.append(&g->funcs, gen.slot_name(g, p->sym, 0, true));
+        }
+        i += 1;
+    }
+    strbuf.push(&g->funcs, ')');
+    // `#0` on every fort definition, `#1` when it is `noreturn` (items 7, 20).
+    if (sig->is_noreturn) {
+        gen.gen_use_attr(g, gen.ATTR_FN_NORET);
+        strbuf.append(&g->funcs, " #1 {\n");
+    } else {
+        gen.gen_use_attr(g, gen.ATTR_FN);
+        strbuf.append(&g->funcs, " #0 {\n");
+    }
+}
+
+// Resets the per-function counters and buffers: every name is fixed per
+// function and reset at each definition (D19.5).
+fn void function_begin(gen.emitter mut* g) {
+    g->temps = 0;
+    g->labels = 0;
+    g->tmps = 0;
+    g->break_label = 0;
+    g->continue_label = 0;
+    g->has_break = false;
+    g->has_continue = false;
+    gen.slots_free(&g->slots);
+    // No scope of the previous definition stays open: a deferred statement is
+    // expanded inside the function that wrote it (D7.8).
+    g->defers.len = 0;
+    g->scopes.len = 0;
+    g->defer_floor = 0;
+    strbuf.clear(&g->allocas);
+    strbuf.clear(&g->body);
+    strbuf.clear(&g->fail);
+    g->terminated = false;
+}
+
+// Appends the entry block, the normal blocks and then the failure blocks
+// (D19.6), and closes the definition.
+fn void function_end(gen.emitter mut* g) {
+    strbuf.append(&g->funcs, "entry:\n");
+    strbuf.append(&g->funcs, strbuf.view(&g->allocas));
+    strbuf.append(&g->funcs, strbuf.view(&g->body));
+    strbuf.append(&g->funcs, strbuf.view(&g->fail));
+    strbuf.append(&g->funcs, "}\n");
+}
+
+// The slot and the entry-block alloca of every parameter and every local, in
+// the order D19.4 gives them: the parameters first, then the locals in
+// declaration order, which is also the order `locals` is left holding them
+// in. src/bootstrap/gen.c writes this inline in gen_function; it stands on
+// its own here because test/fort/support/gen_env.ft drives one expression at
+// a time and needs the very slots the emitter produces, and a second copy of
+// the naming there could not be held against this one by anything.
+fn void gen_slots(gen.emitter mut* g, ast.node* fn_node, gen.node_ref_vec mut* locals) {
+    u64 mut at = 0;
+    u64 mut i = 0;
+    while (i < ast.ast_len(fn_node)) {
+        ast.node* p = ast.ast_child(fn_node, i);
+        if (p->kind == ast.ast_kind.k_param && p->sym != null) {
+            types.node* t = p->sym->ty;
+            if (gen.gen_is_aggregate(t)) {
+                // An aggregate parameter is not copied again: its place is
+                // the caller-made copy the incoming pointer designates
+                // (item 10).
+                gen.slot_add(g, p->sym, gen.slot_name(g, p->sym, at, true));
+            } else {
+                string name = gen.slot_name(g, p->sym, at, false);
+                gen.slot_add(g, p->sym, name);
+                emit_alloca(g, name, t);
+            }
+            at += 1;
+        }
+        i += 1;
+    }
+    collect_locals(fn_node->b, locals);
+    i = 0;
+    while (i < locals->len) {
+        ast.node* d = gen.refs_at(locals, i);
+        string name = gen.slot_name(g, d->sym, at, false);
+        gen.slot_add(g, d->sym, name);
+        emit_alloca(g, name, d->sym->ty);
+        at += 1;
+        i += 1;
+    }
+}
+
+fn void gen_function(gen.emitter mut* g, ast.node* fn_node) {
+    ast.sym* s = fn_node->sym;
+    if (s == null || s->error || s->ty == null || s->ty->kind != types.type_kind.k_fn) {
+        return;
+    }
+    types.node* sig = s->ty;
+    function_begin(g);
+    emit_signature(g, fn_node, s, sig);
+    gen.node_ref_vec mut locals = gen.node_ref_vec{};
+    defer gen.refs_free(&locals);
+    gen_slots(g, fn_node, &locals);
+    // A scalar parameter is stored into its slot immediately (item 10).
+    u64 mut i = 0;
+    while (i < ast.ast_len(fn_node)) {
+        ast.node* p = ast.ast_child(fn_node, i);
+        if (p->kind == ast.ast_kind.k_param && p->sym != null &&
+            !gen.gen_is_aggregate(p->sym->ty)) {
+            gen.gen_val mut incoming = gen.gen_val{};
+            incoming.ty = gen.gen_value_type(g, p->sym->ty);
+            incoming.val = gen.slot_name(g, p->sym, 0, true);
+            gen.gen_store_place(g, gen.gen_slot_place(g, p->sym), incoming);
+        }
+        i += 1;
+    }
+    // The slot of an owning local is zeroed once here, so that the overwrite
+    // check its declaration carries reads the zero value the first time and
+    // whatever the slot still holds on a second execution -- a declaration in
+    // a loop whose body did not `del` (D17.11 as amended, D19.4). Without it
+    // the check would read an uninitialized `alloca`.
+    i = 0;
+    while (i < locals.len) {
+        ast.node* d = gen.refs_at(&locals, i);
+        types.node* t = d->sym->ty;
+        if (types.type_is_reference(t) && t->is_own) {
+            gen.gen_zero_owner(g, gen.gen_slot_place(g, d->sym));
+        }
+        i += 1;
+    }
+    // The body is the scope a `return` unwinds out to, and falling off its
+    // end runs its deferred statements before the terminator below (D7.8).
+    gen_block_scoped(g, fn_node->b, gen.scope_kind.sc_fn);
+    if (!g->terminated) {
+        if (sig->is_noreturn) {
+            // The block that would fall off the end of a `noreturn` body ends
+            // with a trap (D8.5, D19.7).
+            gen.gen_use_intrinsic(g, gen.IN_TRAP);
+            gen.gen_use_attr(g, gen.ATTR_TRAP);
+            strbuf.append(&g->body, "  call void @llvm.trap()\n  unreachable\n");
+        } else if (sig->elem != null && sig->elem->kind == types.type_kind.k_void) {
+            strbuf.append(&g->body, "  ret void\n");
+        } else {
+            // The checker proved that a non-void body ends in a terminating
+            // statement (D8.4), so this block is unreachable.
+            strbuf.append(&g->body, "  unreachable\n");
+        }
+    }
+    function_end(g);
+}
+
+// ---- fort_entry (item 22, D11.6) --------------------------------------------------
+
+fn void gen_fort_entry(gen.emitter mut* g, ast.sym* main_sym) {
+    function_begin(g);
+    gen.gen_use_attr(g, gen.ATTR_FN);
+    definition_begin(g);
+    // `fort_entry` is a C name, so it is unquoted (D9.7), and it receives the
+    // argument span by hidden pointer (D11.6).
+    strbuf.append(&g->funcs, "define dso_local i32 @fort_entry(ptr %args.in) #0 {\n");
+    // The module defines the name from here on, so an `extern fn fort_entry`
+    // is not declared beside it: two C declarations of one name are one ELF
+    // symbol, and a `declare` beside a `define` is a redefinition (item 8).
+    g->entry_defined = true;
+    gen.gen_args mut args = gen.gen_args_init();
+    defer gen.gen_args_free(&args);
+    if (main_sym->ty->params.len == 1) {
+        // It copies the span into its own frame when `main` declares the
+        // parameter, because its caller is the C runtime (item 22).
+        gen.gen_val mut slot = gen.gen_val{};
+        slot.ty = "ptr";
+        slot.val = "%args.0";
+        strbuf.append(&g->allocas, "  %args.0 = alloca ");
+        strbuf.append(&g->allocas, gen.SPAN_TYPE);
+        strbuf.append(&g->allocas, ", align ");
+        strbuf.append_u64(&g->allocas, gen.SPAN_ALIGN);
+        strbuf.push(&g->allocas, '\n');
+        gen.gen_val mut incoming = gen.gen_val{};
+        incoming.ty = "ptr";
+        incoming.val = "%args.in";
+        gen.gen_memcpy(g, slot, gen.SPAN_ALIGN, incoming, gen.SPAN_ALIGN, gen.SPAN_SIZE);
+        gen.gen_args_add(&args, slot);
+    }
+    gen.gen_val r = gen.gen_temp(g, "i32");
+    strbuf.append(&g->body, "call i32 ");
+    strbuf.append(&g->body, gen.gen_symbol_ref(g, main_sym));
+    strbuf.push(&g->body, '(');
+    strbuf.append(&g->body, gen.gen_args_text(&args));
+    strbuf.append(&g->body, ")\n");
+    strbuf.append(&g->body, "  ret i32 ");
+    strbuf.append(&g->body, r.val);
+    strbuf.push(&g->body, '\n');
+    function_end(g);
+}
+
+// ---- the module (item 1) ----------------------------------------------------------
+
+// The named type of every struct the module declares, in source order, so
+// that a field access names a type the module defines (item 2).
+//
+// Four walks count the k_field_decl children of a declaration and must count
+// the same ones, or a field index names the wrong field and every GEP or
+// constant initializer after it reads or writes the wrong bytes: this one,
+// gen.ft's gen_field_index, the positional struct literal of gen_expr.ft and
+// the constant struct initializer of gen_data.ft. All four take those
+// children in order and skip on the kind alone; a field with no type would
+// leave them disagreeing, so it ends the compilation here rather than
+// shifting an index silently.
+fn void gen_struct_type(gen.emitter mut* g, ast.node* decl) {
+    ast.sym* s = decl->sym;
+    if (s == null || s->error || s->ty == null || s->ty->kind != types.type_kind.k_struct) {
+        return;
+    }
+    strbuf.append(&g->named, gen.gen_mem_type(g, s->ty));
+    strbuf.append(&g->named, " = type { ");
+    u64 mut written = 0;
+    u64 mut i = 0;
+    while (i < ast.ast_len(decl)) {
+        ast.node* f = ast.ast_child(decl, i);
+        if (f->kind == ast.ast_kind.k_field_decl) {
+            if (f->ty == null) {
+                // The checker types every field of a struct it lets through,
+                // so this is a broken tree and not a program the emitter
+                // refuses.
+                panic("gen_stmt.gen_struct_type: a struct field with no type");
+            }
+            if (written > 0) {
+                strbuf.append(&g->named, ", ");
+            }
+            written += 1;
+            // Fields in declaration order and never `packed` (D3.8).
+            strbuf.append(&g->named, gen.gen_mem_type(g, f->ty));
+        }
+        i += 1;
+    }
+    strbuf.append(&g->named, " }\n");
+}
+
+fn void gen_module(gen.emitter mut* g, modules.module* m) {
+    g->module = m;
+    u64 mut i = 0;
+    while (i < ast.ast_len(m->ast)) {
+        ast.node* decl = ast.ast_child(m->ast, i);
+        if (decl->kind == ast.ast_kind.k_struct_decl) {
+            gen_struct_type(g, decl);
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < ast.ast_len(m->ast)) {
+        ast.node* decl = ast.ast_child(m->ast, i);
+        if (decl->kind == ast.ast_kind.k_var_decl) {
+            // The module-level data of D7.10, in source order, and before the
+            // functions of the same module: forward references to a global
+            // are legal in `.ll`, so either order would do, and this one
+            // numbers a global's string constants before its bodies'
+            // (item 1, D19.5).
+            gen_data.gen_global(g, decl);
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < ast.ast_len(m->ast)) {
+        ast.node* decl = ast.ast_child(m->ast, i);
+        if (decl->kind == ast.ast_kind.k_fn_decl && decl->b != null) {
+            gen_function(g, decl);
+        }
+        i += 1;
+    }
+    g->module = null;
+}
+
+// Emits the whole program into `g`: every module of the closure in dependency
+// order, then `fort_entry` for the entry module (D9.10, D11.6). `ck` must be
+// the checker that annotated `set` and must not have been freed. Returns
+// whether the module is complete; a construct the emitter cannot lower yet is
+// reported as a diagnostic and returns false.
+//
+// src/bootstrap/gen.c stores the module set in the emitter beside the
+// checker; nothing ever reads it back, so it stays a parameter here.
+fn bool gen_program(gen.emitter mut* g, check.checker* ck, modules.module_set* set) {
+    g->ck = ck;
+    // The named types every module carries, used or not (item 2).
+    strbuf.append(&g->named, gen.SPAN_TYPE);
+    strbuf.append(&g->named, " = type { ptr, i64 }\n");
+    strbuf.append(&g->named, gen.ENUM_MEMBER_TYPE);
+    strbuf.append(&g->named, " = type { i32, ptr }\n");
+    // Modules in dependency order, every module after the ones it imports
+    // (D9.10, D19.5).
+    u64 mut i = 0;
+    while (i < modules.count(set)) {
+        gen_module(g, modules.at(set, i));
+        i += 1;
+    }
+    modules.module* entry = modules.entry(set);
+    if (entry != null && entry->ast != null) {
+        i = 0;
+        while (i < ast.ast_len(entry->ast)) {
+            ast.node* decl = ast.ast_child(entry->ast, i);
+            if (decl->kind == ast.ast_kind.k_fn_decl && decl->sym != null && !decl->sym->error &&
+                decl->sym->ty != null && decl->sym->ty->kind == types.type_kind.k_fn &&
+                decl->sym->name == "main") {
+                // `fort_entry` is emitted in the entry module (D11.6).
+                gen_fort_entry(g, decl->sym);
+            }
+            i += 1;
+        }
+    }
+    gen_data.gen_finish(g);
+    return !g->failed;
+}

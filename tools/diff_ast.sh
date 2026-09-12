@@ -49,8 +49,9 @@ done
 # The number of .ft files the repository holds. It is an equality and not a
 # floor, for the reason tools/diff_tokens.sh gives at its own copy of this
 # constant: a file must not be able to slip out of the comparison. A ticket
-# that adds or removes a .ft file changes both lines in the same commit.
-FT_FILES=722
+# that adds or removes a .ft file changes all four lines in the same commit:
+# diff_tokens.sh, diff_ast.sh, diff_check.sh and diff_ir.sh.
+FT_FILES=730
 
 files=$(find . -name '*.ft' -not -path './build/*' -not -path './.git/*' \
     -not -path './.worktrees/*' | sort)
