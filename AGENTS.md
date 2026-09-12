@@ -15,10 +15,12 @@ A safe(r) C-like systems programming language.
   `src/fort/`: the compiler written in fort (stage2 and stage3). `runtime/`: the C runtime
   linked into every program. `std/`: the standard library in fort. `tools/`: `vm`,
   `provision.sh`, `lines.py`, `bootstrap.sh`.
-- `editors/`: `editors/vscode/` is the VS Code extension (`package.json`,
-  `language-configuration.json`, `syntaxes/fort.tmLanguage.json`, and `extension.js` with the pure
-  modules it is tested through in `lib/`) and `editors/README.md` is its install guide, its manual
-  smoke test and its list of limitations.
+- `editors/`: `editors/vscode/` is the VS Code extension -- `package.json`,
+  `language-configuration.json`, `syntaxes/fort.tmLanguage.json`, `extension.js`, and the one pure
+  module it is tested through, `lib/check.js` -- and `editors/README.md` is its install guide, its
+  manual smoke test and its list of limitations. It highlights fort and shows the compiler's
+  diagnostics, and that is all it does (T-089): no hover, no go-to-definition, no `--index`, no
+  cache, no settings. It is installed on the **host**, where VS Code runs.
 - `CMakeLists.txt`, `CMakePresets.json` and `cmake/sanitizers.cmake` are the build;
   `.clang-format` and `.clang-tidy` (clang 18) are the C11 lint configuration.
 - `.tickets/` (gitignored, main checkout only) is the ticket board; `.claude/agents/` holds the
@@ -98,9 +100,10 @@ A safe(r) C-like systems programming language.
 - An ssh `ControlPath` under `os.tmpdir()` does not work on macOS: the host's temporary directory
   is `/var/folders/<...>/T`, ssh binds the socket under a temporary name of its own, and the total
   passes the 104-byte Unix domain socket limit, so ssh exits 255 with `unix_listener: path ... too
-  long` -- indistinguishable, to a caller, from a VM that is down. Anything multiplexing ssh from
-  the host measures the path and falls back to `/tmp/<something short>`
-  (`editors/vscode/lib/command.js`).
+  long` -- indistinguishable, to a caller, from a VM that is down. Anything that multiplexes ssh
+  from the host must measure the path and fall back to `/tmp/<something short>`. Nothing in the
+  repository does any more: T-089 deleted the extension's own transport, and `tools/vm` is now the
+  only thing that crosses into the guest.
 - Provisioning disables apport and sets `kernel.core_pattern=core`: Ubuntu's piped core pattern
   ignores `ulimit -c 0` and made every SIGABRT cost about a second. A VM provisioned before that
   change needs `tools/vm provision` once (or the same two commands by hand).
@@ -260,21 +263,46 @@ A safe(r) C-like systems programming language.
   two-space indentation, single quotes, semicolons, `const` unless a binding is reassigned, no npm
   dependency and no devDependency, and no API beyond Node's standard library and `vscode` (which
   only `extension.js` may require). A file is tested by `node --test` or it is `extension.js`.
+  `test/package.test.js` asserts the last two by reading the sources, so a second
+  `require('vscode')` or a second module under `lib/` is a red test.
 - The VS Code extension is plain JavaScript on the VS Code API, with no npm dependency and no
-  build step. Its logic lives in `editors/vscode/lib/*.js`, which never `require('vscode')`, so
+  build step. Its logic lives in `editors/vscode/lib/check.js`, which never `require('vscode')`, so
   Node's built-in runner tests it: `tools/vm run 'cd editors/vscode && node --test'` (ctest
   `extension_selftest`, label `unit`, run from `editors/vscode`; `node --test` with no argument
   discovers `test/*.test.js` itself, and naming the directory fails on newer Node). `extension.js`
   is the only file that may touch the API, so keep it thin and move anything with a case analysis
   into `lib/`; it is driven through `test/fake_vscode.js`, which answers its `require('vscode')`
   and its `require('child_process')` by patching `Module._load` before loading a fresh copy of it,
-  so a save, a crash, a hover and a definition are all tested with no editor and no ssh. What that
-  cannot check is that VS Code calls the extension the way its API is documented to, which is what
-  the manual smoke test in `editors/README.md` is for, and a change to `extension.js` is run
-  through it by hand. Its fixtures are real compiler output: regenerate them with
-  `fort --check --json --index` over `editors/vscode/test/fixtures/` rather than by hand, and a
-  helper that is not a suite, such as `test/fake_vscode.js`, defines no test of its own, since
-  Node 18 loads every file under `test/`.
+  so a save, a failed run, a close and two checks racing are all tested with no editor, no VM and
+  no compiler. **A check answers about a closure, not about one file**, so an ordering guard keyed
+  on the file that was checked is not enough: the first version dropped a superseded run of the
+  same file and still let an older run of `main.ft` repaint an error in `mathx.ft` that a newer
+  check of `mathx.ft` had just cleared. The generation is therefore recorded per *published* file
+  as well, and a test that means to see that has both files in **one** closure -- two disjoint
+  closures pass either way. What that cannot check is that VS Code calls the extension the way its
+  API is documented to, which is what the manual smoke test in `editors/README.md` is for, and a
+  change to `extension.js` is run through it by hand -- by the user, since VS Code runs on their
+  machine and an agent cannot reach it. Its fixtures are real compiler output: regenerate them with
+  `fort --check --json` over `editors/vscode/test/fixtures/` rather than by hand, and a helper that
+  is not a suite, such as `test/fake_vscode.js`, defines no test of its own, since Node 18 loads
+  every file under `test/`.
+- **`tools/vm run` is how anything on the host reaches the guest, and that includes the editor.**
+  VS Code runs on the host, there is no `~/.vscode-server` in the guest, and the extension crosses
+  by spawning `<workspace>/tools/vm run '<command>'` with its working directory set to the
+  workspace folder: `tools/vm run` resolves the VM directory and the cached ssh configuration
+  itself and runs the command in the guest directory matching the host's. It costs about 0.1 s
+  (five samples of a real check over this repository: 0.09, 0.13, 0.10, 0.10, 0.09 s), which is
+  well inside a save. The path needs no host-to-guest mapping in either direction, because the
+  compiler names each file the path it opened it by, the entry file as given on the command line
+  (`toolchain.md` 2, D14.2): pass a path relative to the workspace folder and the document names it
+  the same way, so it resolves against that folder on the host. That is the premise the whole
+  crossing rests on, and `a_relative_entry_is_named_in_the_document_exactly_as_it_was_given` in
+  `test/driver_check_test.c` is what pins it: an absolute path there would put every record outside
+  the workspace and the extension would go **silent** rather than wrong, which is the worst failure
+  shape an editor has. What comes back absolute is what the compiler found for itself -- the
+  standard library under `/vagrant/build/release/std` -- and those files are the guest's, so an
+  editor drops them rather than painting a path the host cannot open. The argument of `run` is
+  handed to a shell in the guest, so a path is quoted before it goes in.
 - The cross pipeline: `test/ir/*.ll` are hand-written LLVM 18 modules in the form
   `notes/toolchain.md` 6 specifies (D19.1); `hello.ll` and `abort.ll` are its two worked
   examples byte for byte, so a change to one changes the other, while `floats.ll` and

@@ -56,7 +56,7 @@ done
 # them: an equality and not a floor, so that a file cannot slip out of the
 # comparison. A ticket that adds or removes a .ft file changes all three
 # lines in the same commit.
-FT_FILES=665
+FT_FILES=666
 
 # The files of that corpus stage1 checks clean, which are the ones compared.
 # It is an equality for the reason FT_FILES is: a comparison that shrank would

@@ -132,6 +132,69 @@ TEST(the_document_lists_every_file_the_compiler_read, {
     sandbox_close(&box);
 })
 
+// The path in is the path out, byte for byte. A client that names the entry
+// relative to a directory of its own -- the VS Code extension names it relative
+// to the workspace folder -- resolves every file of the answer against that same
+// directory and needs no mapping of its own, which only holds while the compiler
+// echoes what it was given (toolchain.md 2, D14.2) rather than the absolute path
+// D9.2 could just as well print. The run is made from inside the sandbox, so the
+// argument is a bare file name; the working directory is restored before any
+// assertion, since a failing one returns from the body at once.
+TEST(a_relative_entry_is_named_in_the_document_exactly_as_it_was_given, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    TEST_ASSERT_TRUE(write_source(box.entry, BAD_IMPORT_SOURCE));
+    char home[PATH_CAP];
+    const bool known = getcwd(home, sizeof home) != NULL;
+    const bool moved = known && chdir(box.dir) == 0;
+    run_t run;
+    run.status = -1;
+    run.out[0] = '\0';
+    run.err[0] = '\0';
+    if (moved) {
+        run = RUN_CAPTURED("--check", "--json", "main.ft");
+        TEST_UNUSED(chdir(home));
+    }
+    TEST_ASSERT_TRUE(moved);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
+    // The file list and the diagnostic both name it the way the command line
+    // did, with no directory part added.
+    TEST_ASSERT_NONNULL(strstr(run.out, "\"files\":[\"main.ft\"]"));
+    TEST_ASSERT_NONNULL(strstr(run.out, "\"file\":\"main.ft\",\"line\":1,\"col\":1"));
+    TEST_ASSERT_NULL(strstr(run.out, box.dir));
+    sandbox_close(&box);
+})
+
+// The same holds one directory down, where an absolute path would be the
+// tempting thing to print: what comes back is the relative path as written.
+TEST(a_relative_entry_below_the_directory_keeps_its_directory_part, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    char sub[PATH_CAP];
+    join(sub, sizeof sub, box.dir, "src");
+    TEST_ASSERT_EQ_INT32(mkdir(sub, S_IRWXU), 0);
+    char entry[PATH_CAP];
+    join(entry, sizeof entry, sub, "main.ft");
+    TEST_ASSERT_TRUE(write_source(entry, NO_MAIN_SOURCE));
+    char home[PATH_CAP];
+    const bool known = getcwd(home, sizeof home) != NULL;
+    const bool moved = known && chdir(box.dir) == 0;
+    run_t run;
+    run.status = -1;
+    run.out[0] = '\0';
+    run.err[0] = '\0';
+    if (moved) {
+        run = RUN_CAPTURED("--check", "--json", "src/main.ft");
+        TEST_UNUSED(chdir(home));
+    }
+    TEST_ASSERT_TRUE(moved);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
+    char want[CAPTURE_MAX];
+    expect1(want, sizeof want, CLEAN_DOCUMENT, "src/main.ft");
+    TEST_ASSERT_EQ_STR(run.out, want);
+    sandbox_close(&box);
+})
+
 TEST(the_document_holds_the_diagnostic_the_text_form_holds, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
@@ -719,6 +782,8 @@ int main(int argc, char** argv) {
     TEST_RUN(check_reports_a_broken_module_as_a_compile_error);
     TEST_RUN(the_document_of_a_clean_module_is_one_line_with_four_keys);
     TEST_RUN(the_document_lists_every_file_the_compiler_read);
+    TEST_RUN(a_relative_entry_is_named_in_the_document_exactly_as_it_was_given);
+    TEST_RUN(a_relative_entry_below_the_directory_keeps_its_directory_part);
     TEST_RUN(the_document_holds_the_diagnostic_the_text_form_holds);
     TEST_RUN(the_document_nests_a_note_under_its_error);
     TEST_RUN(the_document_of_a_failing_module_is_exact);

@@ -1,296 +1,188 @@
 'use strict';
 
-// The fort extension: diagnostics on save, hover and go-to-definition, all
-// answered by one batch run of `fort --check --json --index` in the VM
-// (D20.1, D20.2, D20.3). The index is a batch answer about the file as it was
-// saved, so between two saves the answers are stale by design; the status bar
-// says when the last run did not produce one.
+// The fort extension: the compiler's diagnostics, and nothing else.
+//
+// One run of `fort --check --json <file>` answers a document opened and a
+// document saved (D20.1, D20.2), its diagnostics are published into one
+// collection, and a run that produces no document leaves the last ones standing
+// and says why in the output channel. There is no setting, no language server
+// and no state beyond the collection: the compiler is the whole interface.
+//
+// VS Code runs on the host and the compiler runs in the development VM, and the
+// repository already owns that crossing: `tools/vm run <command>` runs a command
+// in the guest directory matching the host working directory (AGENTS.md,
+// Environment). `spawnCheck` below is the only function that knows any of this.
 
 const childProcess = require('child_process');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const vscode = require('vscode');
 
-const cache = require('./lib/cache');
-const commands = require('./lib/command');
-const diagnostics = require('./lib/diagnostics');
-const documents = require('./lib/document');
-const paths = require('./lib/paths');
-const positions = require('./lib/positions');
-const symbols = require('./lib/symbols');
-const vmdir = require('./lib/vmdir');
+const check = require('./lib/check');
 
-// A hung ssh must not leave the user without an answer forever, and the index
-// of a large closure is far past execFile's default 1 MiB of output.
-const CHECK_TIMEOUT_MS = 120000;
-const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
+// The compiler: the release build in the guest, which is where everything this
+// project builds is built (AGENTS.md, Environment). It is a constant rather than
+// a setting because there is one right answer. It finds its own standard library
+// in the `std` directory beside it (D14.1), so the command needs no other
+// argument, and imports resolve from the importing file's directory (D9.2).
+const COMPILER = '/vagrant/build/release/fort';
 
-// A long session must not hold the index of every closure it ever checked, so
-// both maps below are bounded (lib/cache.js).
-const MAX_REMEMBERED_FILES = 512;
+// A compiler that hangs must not leave the reader without an answer for ever,
+// and a check document is far smaller than execFile's default 1 MiB only until
+// a closure grows.
+const CHECK_TIMEOUT_MS = 60000;
+const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 
-// The records of the last successful check, per file of its closure, and the
-// run that published each file, which is what keeps two checks finishing out of
-// order from publishing the older answer last.
-const indexByFile = new Map();
-const publishedAt = new Map();
-const checkedBuffer = new Map();
-
-let diagnosticCollection = null;
-let statusItem = null;
+let collection = null;
 let output = null;
-let lastStatusMessage = '';
-let lastRun = 0;
-let controlDir = null;
-const running = new Map();
+
+// Every run takes a number, and two maps read it, because a check answers about
+// a whole closure and not only about the file it was given. `runOf` is the run
+// last started for each checked file, which drops a superseded run whole --
+// its failure included, so a dead run cannot report over a live one. And
+// `publishedAt` is the run each file's diagnostics were last published from,
+// which is what keeps an older run of one file from repainting a newer answer
+// about another file its closure also names.
+const runOf = new Map();
+const publishedAt = new Map();
+let runs = 0;
 
 function activate(context) {
-  diagnosticCollection = vscode.languages.createDiagnosticCollection('fort');
-  statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
+  collection = vscode.languages.createDiagnosticCollection('fort');
   output = vscode.window.createOutputChannel('fort');
-  context.subscriptions.push(diagnosticCollection, statusItem, output);
+  context.subscriptions.push(collection, output);
   context.subscriptions.push(
-    vscode.workspace.onDidSaveTextDocument((document) => {
-      if (document.languageId === 'fort' || paths.isFortPath(document.uri.fsPath)) {
-        check(document.uri.fsPath);
-      }
-    })
+    vscode.workspace.onDidOpenTextDocument(run),
+    vscode.workspace.onDidSaveTextDocument(run),
+    vscode.workspace.onDidCloseTextDocument(forget)
   );
-  context.subscriptions.push(
-    vscode.languages.registerHoverProvider('fort', { provideHover }),
-    vscode.languages.registerDefinitionProvider('fort', { provideDefinition })
-  );
+  // A `.ft` file is what activates the extension, so its open event has already
+  // fired by the time this runs and the first file would otherwise go unchecked.
+  for (const document of vscode.workspace.textDocuments) run(document);
 }
 
 function deactivate() {
-  indexByFile.clear();
+  runOf.clear();
   publishedAt.clear();
-  checkedBuffer.clear();
-  running.clear();
-  if (controlDir !== null) {
-    try {
-      fs.rmSync(controlDir, { recursive: true, force: true });
-    } catch (error) {
-      // A socket another window still holds open is not this one's to mourn.
-    }
-    controlDir = null;
-  }
 }
 
-// ---- running the compiler ---------------------------------------------------
-
-function settingsFor(filePath) {
-  const uri = vscode.Uri.file(filePath);
-  const folder = vscode.workspace.getWorkspaceFolder(uri);
-  const workspaceFolder = folder ? folder.uri.fsPath : path.dirname(filePath);
-  const config = vscode.workspace.getConfiguration('fort', uri);
-  const raw = {
-    sshConfig: config.get('vm.sshConfig'),
-    host: config.get('vm.host'),
-    compiler: config.get('compiler'),
-    stdDir: config.get('stdDir'),
-    includeDirs: config.get('includeDirs'),
-  };
-  // `.vagrant/ssh-config` lives in the VM directory, which is the main checkout
-  // when the workspace is a worktree (AGENTS.md, Environment).
-  const vmDir = vmdir.vmDirectory(workspaceFolder, process.env, readTextFile);
-  return commands.resolveSettings(raw, workspaceFolder, vmDir);
+// A fort file the editor holds as a file on disk, which is what the compiler
+// can be pointed at.
+function isFortFile(document) {
+  return document.languageId === 'fort' && document.uri.scheme === 'file';
 }
 
-// A file's text, or null when it cannot be read -- a `.git` directory rather
-// than a worktree's `.git` file included.
-function readTextFile(file) {
-  try {
-    return fs.readFileSync(file, 'utf8');
-  } catch (error) {
-    return null;
-  }
+function forget(document) {
+  if (!isFortFile(document)) return;
+  runOf.delete(document.uri.fsPath);
+  publishedAt.delete(document.uri.fsPath);
+  collection.delete(vscode.Uri.file(document.uri.fsPath));
 }
 
-// One check of `filePath`. The compiler runs in a child process and every
-// answer arrives in its callback, so the UI thread is never blocked; a save
-// while a check is in flight queues exactly one more run of the same file.
-function check(filePath) {
-  const state = running.get(filePath);
-  if (state && state.running) {
-    state.rerun = true;
-    return;
-  }
-  running.set(filePath, { running: true, rerun: false });
-  lastRun += 1;
-  const generation = lastRun;
-  const settings = settingsFor(filePath);
-  const command = commands.checkCommand(settings, filePath, controlDirectory());
-  // The line the output channel shows is the line the user can paste into a
-  // terminal, so the remote word is quoted there exactly as it is passed.
-  output.appendLine(command.command + ' ' + commands.shellJoin(command.args));
-  const options = { timeout: CHECK_TIMEOUT_MS, maxBuffer: MAX_OUTPUT_BYTES };
-  childProcess.execFile(command.command, command.args, options, (error, stdout, stderr) => {
-    // A throw anywhere in the answer must still release the file: the bookkeeping
-    // lives in the `finally`, or a single failure would leave `running` set and
-    // that file would never be checked again, silently.
-    try {
-      finish(filePath, generation, {
-        error: spawnError(error),
-        status: exitStatus(error),
-        stdout,
-        stderr,
-      });
-    } catch (failure) {
-      output.appendLine('fort: the extension could not publish the answer: ' + String(failure));
-    } finally {
-      const state = running.get(filePath);
-      running.delete(filePath);
-      if (state && state.rerun) check(filePath);
-    }
+// How the compiler is reached, which is the one thing about it that could be
+// otherwise: `tools/vm run` of the workspace folder, spawned there, with the
+// file named relative to it. The compiler names each file the path it opened it
+// by, the entry file as given on the command line (`toolchain.md` 2, D14.2), so
+// a relative path comes back relative and the answer needs no host-to-guest
+// mapping in either direction. The guest command is one argument that
+// `tools/vm run` hands to a shell, so the file is quoted for it.
+// `done` is given the command line as the reader could paste it, the spawn error
+// if there was one, and the two output streams.
+function spawnCheck(folder, relativePath, done) {
+  // `tools/vm` of the workspace folder itself, which costs about a tenth of a
+  // second per run and needs no configuration of its own.
+  const tool = path.join(folder, 'tools', 'vm');
+  const guest = COMPILER + ' --check --json ' + shellQuote(relativePath);
+  const args = ['run', guest];
+  const options = { cwd: folder, timeout: CHECK_TIMEOUT_MS, maxBuffer: MAX_OUTPUT_BYTES };
+  childProcess.execFile(tool, args, options, (error, stdout, stderr) => {
+    done({ command: tool + ' run ' + shellQuote(guest), error, stdout, stderr });
   });
 }
 
-// Where the multiplexing socket lives. Two things constrain it. The socket name
-// `fort-%C` is a hash of the local host, the remote host, the port and the user,
-// so it is predictable: a local user who owns the directory first could leave a
-// socket there and `ControlMaster=auto` would attach to their multiplexer, which
-// would both leak the command line and let forged JSON come back as diagnostics
-// and jump targets. And a Unix domain socket path is short (lib/command.js),
-// which `os.tmpdir()` is not on macOS. So the directory is created by
-// `mkdtemp`, whose name nobody can predict and which fails rather than reusing
-// an existing path -- `mkdir` with `recursive: true` accepts a directory that is
-// already there whatever its mode, its owner or whether it is a symlink, so its
-// `mode` argument guarantees nothing -- inside whichever base a socket path fits
-// in. It is made once per activation and removed on deactivate.
-const CONTROL_PREFIX = 'fort-';
-const CONTROL_SAMPLE = CONTROL_PREFIX + 'XXXXXX';
-
-function controlDirectory() {
-  if (controlDir !== null) return controlDir;
-  const candidate = commands.controlDirectory(
-    path.join(os.tmpdir(), CONTROL_SAMPLE),
-    path.join('/tmp', CONTROL_SAMPLE)
-  );
-  try {
-    controlDir = fs.mkdtempSync(path.join(path.dirname(candidate), CONTROL_PREFIX));
-  } catch (error) {
-    // ssh then reports the socket it could not bind and the run reads as a VM
-    // that is unreachable, which is what it is.
-    output.appendLine('fort: could not create a control directory: ' + String(error));
-    controlDir = path.dirname(candidate);
-  }
-  return controlDir;
+// One word for a POSIX shell. Single quotes take everything literally, and a
+// single quote inside them is closed, escaped and reopened.
+function shellQuote(word) {
+  return "'" + word.split("'").join("'\\''") + "'";
 }
 
-// execFile reports a failed spawn, a timeout and a signal death through the
-// same error, and a plain non-zero exit through it too; only the first three
-// mean the connection itself failed.
-function spawnError(error) {
-  if (!error) return null;
-  if (typeof error.code === 'number') return null;
-  return error;
+// One check of the document. The compiler runs in a child process and its answer
+// arrives in the callback, so nothing waits on the VM; the publishing that
+// follows does read each answered file from disk, which is the text the columns
+// of the document are counted in. A file outside every workspace folder is
+// skipped: `tools/vm run` works in the directory matching its own, and there is
+// nothing to say about a file that has none.
+function run(document) {
+  if (!isFortFile(document)) return;
+  const filePath = document.uri.fsPath;
+  const folder = folderOf(document.uri);
+  if (folder === null) return;
+  runs += 1;
+  const generation = runs;
+  runOf.set(filePath, generation);
+  spawnCheck(folder, path.relative(folder, filePath), (result) => {
+    if (runOf.get(filePath) !== generation) return;
+    const answer = check.parseDocument(result.stdout);
+    if (answer === null) {
+      report(result);
+      return;
+    }
+    publish(folder, generation, answer);
+  });
 }
 
-function exitStatus(error) {
-  if (!error) return 0;
-  return typeof error.code === 'number' ? error.code : -1;
+// The workspace folder the file belongs to, or null when it belongs to none.
+function folderOf(uri) {
+  const folder = vscode.workspace.getWorkspaceFolder(uri);
+  return folder ? folder.uri.fsPath : null;
 }
 
-function finish(filePath, generation, result) {
-  const verdict = documents.classifyResult(result);
-  if (verdict.kind === 'verdict') {
-    apply(filePath, generation, verdict.document);
-    clearStatus();
-  } else {
-    report(verdict.message, result.stderr);
-  }
-}
-
-// The diagnostics of the document, published for every file of the closure and
-// cleared for the files that no longer have any (D20.2). The text of each file
-// is read here, because a byte column converts only against the line it names.
-function apply(entryPath, generation, document) {
-  const baseDir = path.dirname(entryPath);
-  const texts = new Map();
-  // The columns of the document are byte columns of the text the compiler read,
-  // which is the file on disk as it stood at check time and not a buffer some
-  // other window has edited since (D20.2).
-  const linesOf = (file) => {
-    if (!texts.has(file)) texts.set(file, readFileLines(paths.resolveDocumentPath(file, baseDir)));
-    return texts.get(file);
-  };
-  const byFile = diagnostics.diagnosticsByFile(document, linesOf);
+// The diagnostics of every file of the closure that lies in the workspace
+// folder, which clears the squiggles of a file that is now clean (D20.2). Their
+// columns are byte columns of the text the compiler read, which is the file on
+// disk and not a buffer edited since, so that is what they are converted
+// against.
+function publish(folder, generation, document) {
+  const byFile = check.diagnosticsByFile(document, folder, fileLines);
   for (const [file, items] of byFile) {
-    const absolute = paths.resolveDocumentPath(file, baseDir);
-    // A check of another file may have answered about this one later; its
-    // answer is the newer one and stands (lib/cache.js).
-    if (!cache.isNewer(publishedAt, absolute, generation)) continue;
-    cache.putGeneration(publishedAt, absolute, generation, MAX_REMEMBERED_FILES);
-    const uri = vscode.Uri.file(absolute);
-    diagnosticCollection.set(uri, items.map((item) => toVsDiagnostic(item, baseDir)));
-    const records = symbols.recordsForFile(document.symbols, file);
-    cache.put(indexByFile, absolute, records, MAX_REMEMBERED_FILES);
-    // What the buffer of this file was when the compiler read it, so a later
-    // hover can tell an answer about the text on screen from an older one.
-    cache.put(checkedBuffer, absolute, bufferStateOf(absolute), MAX_REMEMBERED_FILES);
+    // A later run may have answered about this file already -- a check of the
+    // file itself, or of another file whose closure holds it -- and that answer
+    // is the newer one and stands.
+    const published = publishedAt.get(file);
+    if (published !== undefined && published > generation) continue;
+    publishedAt.set(file, generation);
+    collection.set(vscode.Uri.file(file), items.map(toVsDiagnostic));
   }
 }
 
-// The text of a file on disk, or null when it cannot be read, which leaves the
+// The lines of a file's text, or null when it cannot be read, which leaves the
 // conversion its ASCII fallback.
-function readFileLines(absolutePath) {
+function fileLines(absolutePath) {
   try {
-    return positions.splitLines(fs.readFileSync(absolutePath, 'utf8'));
+    return check.splitLines(fs.readFileSync(absolutePath, 'utf8'));
   } catch (error) {
     return null;
   }
-}
-
-// The text of a file as the reader sees it: the open buffer when there is one
-// and the file on disk otherwise. This is for showing a position to the user,
-// where the buffer is what is on screen; a column that came out of the compiler
-// converts against `readFileLines` instead.
-function readLines(absolutePath) {
-  const open = openDocumentFor(absolutePath);
-  return open === null ? readFileLines(absolutePath) : positions.splitLines(open.getText());
-}
-
-function openDocumentFor(absolutePath) {
-  for (const open of vscode.workspace.textDocuments) {
-    if (open.uri.scheme === 'file' && open.uri.fsPath === absolutePath) return open;
-  }
-  return null;
-}
-
-// The version of the buffer of a file and whether it had unsaved edits, or null
-// when no window held it open.
-function bufferStateOf(absolutePath) {
-  const open = openDocumentFor(absolutePath);
-  if (open === null) return null;
-  return { version: open.version, dirty: open.isDirty === true };
 }
 
 // The two severities the document has: `error` on everything the compiler
 // reports as one, there being no warnings in v1, and `note` on a note that
-// follows no error and so stands on its own (D20.2). A note is not an error and
-// must not be painted as one.
-function toVsSeverity(severity) {
-  return severity === 'note'
-    ? vscode.DiagnosticSeverity.Information
-    : vscode.DiagnosticSeverity.Error;
-}
-
-function toVsDiagnostic(item, baseDir) {
-  const diagnostic = new vscode.Diagnostic(
-    toVsRange(item.range),
-    item.message,
-    toVsSeverity(item.severity)
-  );
+// follows no error and so stands on its own, which is not an error and must not
+// be painted as one (D20.2). A note that belongs to an error is that error's
+// related information and not a diagnostic of its own: the two often carry the
+// same range, and two squiggles over one span, with two rows in Problems, say
+// nothing about being one diagnostic.
+function toVsDiagnostic(item) {
+  const severity =
+    item.severity === 'note'
+      ? vscode.DiagnosticSeverity.Information
+      : vscode.DiagnosticSeverity.Error;
+  const diagnostic = new vscode.Diagnostic(toVsRange(item.range), item.message, severity);
   diagnostic.source = 'fort';
   diagnostic.relatedInformation = item.notes.map(
     (note) =>
       new vscode.DiagnosticRelatedInformation(
-        new vscode.Location(
-          vscode.Uri.file(paths.resolveDocumentPath(note.file, baseDir)),
-          toVsRange(note.range)
-        ),
+        new vscode.Location(vscode.Uri.file(note.file), toVsRange(note.range)),
         note.message
       )
   );
@@ -306,65 +198,24 @@ function toVsRange(range) {
   );
 }
 
-// ---- the status bar ---------------------------------------------------------
-
-// Exit 2 with an empty stdout is a crash and not a verdict, and a dead ssh is
-// no answer at all (D20.2), so the diagnostics already published stay and the
-// failure is said once, in the status bar, with the detail in the output
-// channel.
-function report(message, stderr) {
-  if (message !== lastStatusMessage) {
-    output.appendLine(message);
-    if (typeof stderr === 'string' && stderr.trim() !== '') output.appendLine(stderr.trim());
-  }
-  lastStatusMessage = message;
-  statusItem.text = '$(warning) fort: check failed';
-  statusItem.tooltip = message + ' (the diagnostics shown are from the last successful check)';
-  statusItem.show();
+// No document is no answer, not an answer of "no errors" -- the VM is down, the
+// binary is missing because nobody ran `tools/vm build release`, or the compiler
+// died (D20.1). The diagnostics already on screen therefore stay, and the
+// command and its stderr go to the output channel, where the line is the one the
+// reader can paste into a terminal.
+function report(result) {
+  output.appendLine(result.command);
+  output.appendLine('fort: no diagnostics from that run: ' + reason(result.error));
+  const stderr = result.stderr;
+  if (typeof stderr === 'string' && stderr.trim() !== '') output.appendLine(stderr.trim());
 }
 
-function clearStatus() {
-  lastStatusMessage = '';
-  statusItem.hide();
-}
-
-// ---- hover and definition ---------------------------------------------------
-
-// Both are served from the last successful check whose closure contained the
-// file (toolchain.md 9.2), so a file never checked has no answer.
-// The record under the cursor with the lines it was found against, or null. The
-// text is split once per request and only for a file some check has covered.
-function lookup(document, position) {
-  const records = indexByFile.get(document.uri.fsPath);
-  if (!records) return null;
-  const lines = positions.splitLines(document.getText());
-  const record = symbols.recordAtPosition(records, position, lines);
-  return record === null ? null : { record, lines };
-}
-
-function provideHover(document, position) {
-  const found = lookup(document, position);
-  if (!found) return null;
-  const { record, lines } = found;
-  // The answer is the one a past check gave. It is presented as current only
-  // when that check read this very text; anything else -- an edit, a failed
-  // check since, a file reloaded from disk, a file checked while another window
-  // held unsaved edits -- is marked, since the extension cannot know it is
-  // fresh and must not imply it (toolchain.md 9.2).
-  const fresh = cache.isFresh(checkedBuffer.get(document.uri.fsPath), document.version);
-  const markdown = new vscode.MarkdownString(symbols.hoverText(record, !fresh));
-  return new vscode.Hover(markdown, toVsRange(positions.toEditorRange(record, lines)));
-}
-
-function provideDefinition(document, position) {
-  const found = lookup(document, position);
-  if (!found) return null;
-  const baseDir = path.dirname(document.uri.fsPath);
-  const lineSource = (file) => readLines(paths.resolveDocumentPath(file, baseDir));
-  const target = symbols.definitionLocation(found.record, lineSource);
-  if (!target) return null;
-  const absolute = paths.resolveDocumentPath(target.file, baseDir);
-  return new vscode.Location(vscode.Uri.file(absolute), toVsRange(target.range));
+// execFile reports a failed spawn, a timeout and a signal death through the same
+// error as a non-zero exit, and only a numeric `code` is an exit status.
+function reason(error) {
+  if (!error) return 'it wrote no JSON document';
+  if (typeof error.code === 'number') return 'it exited ' + String(error.code);
+  return error.message;
 }
 
 module.exports = { activate, deactivate };

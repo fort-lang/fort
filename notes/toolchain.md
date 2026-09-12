@@ -1613,10 +1613,16 @@ The index is a batch answer about the file as it was saved, which is what an edi
 have any, and serves hover and definition from the records of the last run whose closure contained
 the file. `"files"` is the set a client may clear, not the set it publishes: every entry of
 `"diagnostics"` is published whether or not its file is listed, since an error about a file
-the compiler never read names a file that `"files"` cannot hold (section 4.1, D20.2). Between
-two saves the answers are stale, and a client says so rather than guessing. The VS Code
-extension in `editors/vscode` is the client this repository ships; `editors/README.md` is
-its install guide and its list of limitations.
+the compiler never read names a file that `"files"` cannot hold (section 4.1, D20.2) -- with the
+one exception that a client which cannot open a file may drop that file's diagnostics, there being
+nothing to show them against. Between two saves the answers are stale, and a client says so rather
+than guessing. The VS Code extension in `editors/vscode` is the client this repository ships, and
+it takes the smaller half of this: `--check --json` and the diagnostics alone, with no index, no
+hover and no definition (T-089). It is also the instance of that exception: it runs the compiler in
+the development VM and shows the answers on the host, so a diagnostic whose file lies outside the
+workspace folder -- the standard library, read from the compiler's own directory in the guest --
+names a file the editor cannot open, and it is dropped rather than published against a path that
+resolves to nothing. `editors/README.md` is its install guide and its list of limitations.
 
 ## 10. Not in v1
 

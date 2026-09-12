@@ -1,146 +1,134 @@
 # Editor support for fort
 
-`editors/vscode/` is a complete, minimal VS Code extension. It declares the language `fort` for
-the `.ft` extension, gives it `//` comment toggling, bracket matching and auto-closing pairs
-(`language-configuration.json`), and contributes the TextMate grammar in
-`syntaxes/fort.tmLanguage.json`; the colours appear the moment a `.ft` file is opened, with no
-compiler involvement and no build step. `extension.js` adds the three things a compiler can
-answer: diagnostics when a file is saved, hover, and go-to-definition. There is no language
-server and no npm dependency -- the extension is plain JavaScript on the VS Code API, and one
-batch run of `fort --check --json --index` is the whole interface (D20).
+`editors/vscode/` is a complete, minimal VS Code extension with one job beyond colours: it shows
+the compiler's diagnostics. It declares the language `fort` for the `.ft` extension, gives it `//`
+comment toggling, bracket matching and auto-closing pairs (`language-configuration.json`), and
+contributes the TextMate grammar in `syntaxes/fort.tmLanguage.json`; the colours appear the moment
+a `.ft` file is opened, with no compiler involvement and no build step. `extension.js` adds the
+diagnostics: it runs the compiler when a `.ft` file is opened and when it is saved, and paints what
+it says. There is no language server, no npm dependency and no setting -- one run of `fort --check
+--json` is the whole interface (D20.1, D20.2).
 
 ## Install
 
+VS Code runs on the host, so the extension is installed on the host: symlink this directory into
+the extensions directory of your own VS Code and reload the window.
+
 ```sh
-ln -s "$(git rev-parse --show-toplevel)/editors/vscode" ~/.vscode/extensions/fort-syntax
+ln -s "$(git rev-parse --show-toplevel)/editors/vscode" \
+    ~/.vscode/extensions/fort.fort-syntax-<version>
 ```
+
+`<version>` is the `version` field of `editors/vscode/package.json`, which is where the one copy of
+it lives; VS Code reads the directory name and expects it to match.
+
+That path is the usual one and it is yours to confirm rather than mine to state: VS Code Insiders
+uses `~/.vscode-insiders/extensions`, a VSCodium build uses `~/.vscode-oss/extensions`, and a
+portable installation puts it under the `data/` directory beside the application. `ls` the
+directory `code --list-extensions --show-versions` is reading from if you are unsure -- the
+extensions already installed sit there under exactly the `<publisher>.<name>-<version>` form the
+symlink above uses.
 
 Then run *Developer: Reload Window* from the command palette. It took if the status bar of an open
-`.ft` file says `fort`; if it says `Plain Text`, the symlink is in the wrong directory (VS Code
-Insiders uses `~/.vscode-insiders/extensions`, and a remote window reads the extensions of the
-remote host, `~/.vscode-server/extensions`). When something is coloured wrongly, put the cursor on
-it and run *Developer: Inspect Editor Tokens and Scopes*: the popup names the scope the grammar
-gave the token and the theme rule that painted it, which is the shortest path from a wrong colour
-to the rule that produced it.
+`.ft` file says `fort`; if it says `Plain Text`, the symlink is in the wrong directory. When
+something is coloured wrongly, put the cursor on it and run *Developer: Inspect Editor Tokens and
+Scopes*: the popup names the scope the grammar gave the token and the theme rule that painted it,
+which is the shortest path from a wrong colour to the rule that produced it.
 
-## Diagnostics, hover and definition
+## Diagnostics
 
 Nothing is built on the host, so the compiler that answers is the one in the development VM
-(`AGENTS.md`, Environment). On every save of a `.ft` file the extension runs, in a child process
-and never on the UI thread:
+(`AGENTS.md`, Environment), and the repository already owns the crossing. On every open and every
+save of a `.ft` file the extension runs, in a child process and never on the UI thread:
 
 ```sh
-ssh -F <fort.vm.sshConfig> -o ControlMaster=auto -o ControlPath=<tmp>/fort-%C \
-    -o ControlPersist=10m -- <fort.vm.host> \
-    <fort.compiler> --check --json --index --std-dir <fort.stdDir> [-I <dir>]... <path>
+<workspace>/tools/vm run '/vagrant/build/release/fort --check --json <path in the workspace>'
 ```
 
-The `--` before the host is deliberate: a `.vscode/settings.json` travels with a cloned
-repository, so without it a `fort.vm.host` of `-oProxyCommand=...` would be read by ssh as an
-option and run a command on the host machine, outside the VM.
+with the working directory set to the workspace folder the file belongs to. `tools/vm run` finds
+the VM directory and its cached ssh configuration itself and runs the command in the guest
+directory matching the host's, which is why the extension knows nothing about ssh, about
+`/vagrant`, or about which directory the VM was brought up from. One run costs about a tenth of a
+second, measured from the host over this repository.
 
-`<tmp>` is a fresh directory made by `mkdtemp` once per window and removed when the extension is
-deactivated. It is made rather than reused because the socket name is a hash of the local host, the
-remote host, the port and the user, and so is predictable: a local user who owned the directory
-first could leave a socket there for `ControlMaster=auto` to attach to, which would leak the
-command line and let forged JSON come back as diagnostics and jump targets. `mkdtemp` picks a name
-nobody can guess, creates it 0700 and fails rather than accepting a path that is already there,
-which `mkdir` would do whatever its mode, its owner or whether it is a symlink. It is placed under
-`os.tmpdir()` when a socket path fits there and under `/tmp` when it does not, which is the case on
-macOS: `os.tmpdir()` is `/var/folders/<...>/T`, and a Unix domain socket path is limited to 104
-bytes, so the control path overflows it and ssh exits 255 -- which reads as an unreachable VM and
-says nothing about the real cause.
+The path is relative to the workspace folder and quoted for the shell `tools/vm run` hands its
+argument to. That relative path is the whole of the host-to-guest mapping, in both directions: the
+compiler echoes each file exactly as it was given it (D14.2), so the document that comes back names
+the file the same way and it resolves against the same workspace folder on the host. A file that
+belongs to no workspace folder is not checked, since `tools/vm run` works in the directory matching
+its own and there is nothing to say about such a file.
 
-`<path>` is the host path of the saved file, which resolves inside the guest because provisioning
-symlinks the host repository path to `/vagrant`. The connection is multiplexed and outlives the
-run by ten minutes, so the second save costs one round trip rather than a new handshake. The
-settings, all of them workspace settings:
+The compiler needs no other argument. It finds its standard library in the `std` directory beside
+the binary (D14.1), and `/vagrant/build/release/std` sits next to `/vagrant/build/release/fort`, so
+`--std-dir` is unnecessary; imports resolve from the importing file's directory (D9.2), so `-I` is
+too. The answers therefore come from the **release** build in the main checkout: run `tools/vm
+build release` after a merge to keep them current. A window opened on a worktree gets that same
+compiler, since every worktree shares one VM and `/vagrant/build/release` is the main checkout's.
 
-| setting             | default                               | what it names                 |
-| ------------------- | ------------------------------------- | ----------------------------- |
-| `fort.vm.sshConfig` | `${fortVmDir}/.vagrant/ssh-config`    | the file `tools/vm up` cached |
-| `fort.vm.host`      | `default`                             | the host inside that file     |
-| `fort.compiler`     | `/vagrant/build/debug/fort`           | the compiler, in the guest    |
-| `fort.stdDir`       | `/vagrant/build/debug/std`            | `--std-dir`, in the guest     |
-| `fort.includeDirs`  | `[]`                                  | one `-I` each, in the guest   |
-
-A setting may hold `${workspaceFolder}`, the folder the saved file belongs to, and `${fortVmDir}`,
-the directory the VM was brought up from: `$FORT_VM_DIR` if it is set and the main checkout of the
-repository otherwise, which is what `tools/vm` itself uses (`AGENTS.md`, Environment). The second
-is the default of `fort.vm.sshConfig` because `.vagrant/` exists only in that directory: a window
-opened on a worktree under `.worktrees/`, which is how this project is normally worked in, has no
-`.vagrant/` of its own, and `${workspaceFolder}/.vagrant/ssh-config` would name a file that does
-not exist, so every check would report an unreachable VM. The main checkout is found through the
-worktree's `.git` file, which holds `gitdir: <main>/.git/worktrees/<name>`.
-
-`fort.vm.host` is the `Host` entry of that file, which `vagrant ssh-config` always names
-`default`; `fort-dev-fort` is the VirtualBox machine name and means nothing to `ssh -F`. The
-extension does not fall back to `vagrant ssh` as `tools/vm` does, so a configuration cached before
-the VM was recreated is fixed by `tools/vm up`, which rewrites it.
-
-The compiler answers with one JSON document (D20.2): the files it read, the diagnostics, and one
-record per resolved identifier (D20.3). A diagnostic is an error, or a note that follows no error
-and stands on its own, which is shown as information rather than as another error. Its columns are
-byte columns of the text the compiler read, so they are converted against the file on disk and not
-against a buffer edited since; a jump target, which is shown to the reader rather than read from
-the compiler, converts against the buffer. The extension publishes the diagnostics of every file in
-that closure, which clears the squiggles of a file that is now clean, and caches the records per
-file. Hover shows the record under the cursor as `kind name: type` in a fort code block -- a name
-that denotes no value type, such as a module or a struct name, shows no type, and a declaration
-that failed to check shows `unknown`. Go-to-definition jumps to the declaring name token, which
-for a module is the top of its file and for a builtin is nowhere.
+The compiler answers with one JSON document (D20.2): the files it read and the diagnostics. A
+diagnostic is an error, or a note that follows no error and so stands on its own, which is shown as
+information rather than as another error. A note belonging to an error is attached to it as related
+information naming the second place it points at: the two often carry the same range, and two
+squiggles over one span would say nothing about being one diagnostic. The extension publishes the
+diagnostics of every file of the closure that lies in the workspace folder, which clears the
+squiggles of a file that is now clean, and drops the rest: the closure includes the standard
+library, whose paths name files in the guest that the host cannot open (`notes/toolchain.md` 9.2). A
+note whose file is dropped that way goes with it, while its error stands.
 
 Two conversions matter and are what the unit tests are mostly about. The document counts 1-based
 byte columns with a tab as one column (D20.2, D20.4) while VS Code counts 0-based UTF-16 units, so
-a line holding `é` or `☃` converts only against its own text. And an empty range is a lexical
-error's position rather than a zero-width construct, so it is expanded to the word at that
-position and the error is visible.
+a line holding `é` or `☃` converts only against its own text, which is read from disk -- the text
+the compiler read, not a buffer edited since. And an empty range is a lexical error's position
+rather than a zero-width construct, so it is expanded to the word at that position and the error is
+visible.
 
-## When the VM does not answer
+## When there is no answer
 
-A run that exits 2 with an empty stdout is a crash and not a verdict: the document is complete or
-absent and never truncated (D20.2), so there is nothing to publish. The diagnostics already on
-screen therefore stay, the status bar shows `fort: check failed` once with the reason in its
-tooltip, and the *fort* output channel keeps the command line and the compiler's stderr. A dead
-ssh (exit 255, or a connection that could not be spawned) reads as `fort: the VM is unreachable`
-in the same place. The message disappears at the next successful check.
+A run that produces no JSON document is no answer, and never an answer of "no errors": the document
+is complete or absent and never truncated (D20.1). That covers a VM that is down, a
+`/vagrant/build/release/fort` nobody has built, and a compiler that died. The diagnostics already
+on screen therefore stay, and the *fort* output channel gets the command that ran, the reason, and
+the command's stderr. The command there is the line to paste into a terminal in the workspace
+folder; running it by hand is the next step.
 
 ## Limitations of this path
 
-The answers are a batch answer about the file as it was saved, so between two saves hover,
-definition and the squiggles are stale by design, and an unsaved buffer is never checked. A hover
-whose answer did not come from a check of the text on screen says so under the type -- *Answered
-from an earlier check of this file.* -- rather than passing it off as current, which is what a
-client owes the reader (`notes/toolchain.md` 9.2). That covers every way it can be old and not only
-an unsaved edit: a check that failed since, a buffer reloaded from disk, and a file that no window
-had open when it was checked all carry the marker, because the extension cannot know the answer is
-about this text. The squiggles and F12 carry no such marker and are stale in the same way. A file
-is only known once a check whose closure contained it has succeeded, so hover over a file never
-saved yet answers nothing. Diagnostics of a file that leaves the closure -- an
-import that was removed, say -- are left alone rather than cleared: the compiler said nothing about
-that file this run, and no information is not the same as no errors, so the last thing it did say
-stands until that file is itself checked again. Save it to clear it.
+Two of them meet a first-time user before anything else. The workspace folder must be a checkout
+that holds `tools/vm` and lies inside the VM directory -- the main checkout or a worktree under
+`.worktrees/` -- because that is the program the extension spawns and the directory it works in; a
+window opened anywhere else spawns an ENOENT on every open and every save, which the output channel
+reports. And a `.ft` file belonging to no workspace folder, the one opened straight from disk above
+all, is skipped in silence: nothing is painted and nothing is written to the channel, since there
+is no folder to run a check from.
 
-There is no rename, no completion, no semantic colouring and no workspace symbol search: all of
-those need the language server of D20.5, which lands after the self-hosted compiler.
+The answers are otherwise a batch answer about the file as it was saved, so between two saves the
+squiggles are stale by design and an unsaved buffer is never checked. The VM must be up (`tools/vm
+up`) and the release build must exist (`tools/vm build release`); neither is the extension's to
+arrange, and without them nothing is painted and the output channel says why. Diagnostics of a file
+that leaves the closure -- an import that was removed, say -- are left alone rather than cleared:
+the compiler said nothing about that file this run, and no information is not the same as no errors,
+so the last thing it did say stands until that file is itself checked again. Save it to clear it. A
+diagnostic reported inside the standard library is dropped rather than shown, since its path is the
+guest's.
+
+There is no hover, no go-to-definition, no rename, no completion, no semantic colouring and no
+workspace symbol search: those need the language server of D20.5, which lands after the self-hosted
+compiler.
 
 ## The manual smoke test
 
 `node --test` drives `extension.js` itself against a fake editor, but nothing can check that VS
 Code calls it the way its API is documented to, so after a change to `extension.js` open VS Code on
-the repository and check the five steps, with `tools/vm up` having
-run at least once so `.vagrant/ssh-config` exists and `tools/vm build` having built the compiler:
+the repository and check these four steps, with `tools/vm up` having run and `tools/vm build
+release` having built the compiler:
 
-1. Open `test/lang/run/modules/twofile/main.ft` and save it: no squiggle appears.
+1. Open `test/lang/run/modules/twofile/main.ft`: no squiggle appears.
 2. Break it -- rename `mathx.add` to `mathx.addd` -- and save: the squiggle covers `addd` and
    nothing else, and the message is the compiler's `unknown name`.
 3. Undo and save: the squiggle disappears, in that file and in `mathx.ft`.
-4. Hover `v`, the local: the popup reads `local v: vec`.
-5. Put the cursor on `add` in `mathx.add(1, 2)` and press F12: `mathx.ft` opens on the name `add`
-   of its declaration. Do the same on `mathx` itself: the file opens at its top.
-
-If nothing happens at all, the *fort* output channel holds the command that ran and its stderr;
-running that command by hand in a terminal is the next step.
+4. Halt the VM (`tools/vm halt`), save again: the squiggles that were on screen stay, and the
+   *fort* output channel holds the `tools/vm run` line and the failure. Bring it back up
+   (`tools/vm up`) and save once more: the answers return.
 
 ## Which editors this covers
 

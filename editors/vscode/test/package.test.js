@@ -1,7 +1,7 @@
 'use strict';
 
-// The manifest: the activation script, the settings the ticket fixes and the
-// grammar contribution that was there before it.
+// The manifest: the activation script, the language and grammar contributions,
+// and the settings there are none of.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -26,29 +26,21 @@ test('the extension has no dependency to install', () => {
 test('the language and the grammar are still contributed', () => {
   assert.deepEqual(MANIFEST.contributes.languages[0].extensions, ['.ft']);
   assert.equal(MANIFEST.contributes.grammars[0].scopeName, 'source.fort');
+  assert.equal(MANIFEST.contributes.languages[0].configuration, './language-configuration.json');
 });
 
-test('the settings are the five the extension reads, with their defaults', () => {
-  const properties = MANIFEST.contributes.configuration.properties;
-  assert.deepEqual(Object.keys(properties), [
-    'fort.vm.sshConfig',
-    'fort.vm.host',
-    'fort.compiler',
-    'fort.stdDir',
-    'fort.includeDirs',
-  ]);
-  // `.vagrant/` exists only in the VM directory, which is the main checkout
-  // when VS Code is opened on a worktree (AGENTS.md, Environment).
-  assert.equal(properties['fort.vm.sshConfig'].default, '${fortVmDir}/.vagrant/ssh-config');
-  // `vagrant ssh-config` names its one entry `default`; `fort-dev-fort` is
-  // the VirtualBox machine name, which ssh -F knows nothing about.
-  assert.equal(properties['fort.vm.host'].default, 'default');
-  assert.equal(properties['fort.compiler'].default, '/vagrant/build/debug/fort');
-  assert.equal(properties['fort.stdDir'].default, '/vagrant/build/debug/std');
-  assert.deepEqual(properties['fort.includeDirs'].default, []);
-  for (const property of Object.values(properties)) {
-    assert.equal(typeof property.description, 'string');
-  }
+// The compiler is a constant of extension.js, so there is nothing to set: a
+// manifest that offered a setting would be offering one nothing reads.
+test('the extension contributes no configuration at all', () => {
+  assert.equal(MANIFEST.contributes.configuration, undefined);
+  assert.deepEqual(Object.keys(MANIFEST.contributes), ['languages', 'grammars']);
+  const text = fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8');
+  assert.equal(/fort\.(vm|compiler|stdDir|includeDirs|transport)/.test(text), false);
+});
+
+test('the version says this is the stripped extension', () => {
+  assert.equal(MANIFEST.version, '0.3.0');
+  assert.match(MANIFEST.description, /diagnostics/);
 });
 
 // Everything else under editors/ wraps at 100 columns, and a JSON string
@@ -57,4 +49,19 @@ test('the settings are the five the extension reads, with their defaults', () =>
 test('no line of the manifest is wider than the rest of editors/', () => {
   const text = fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8');
   for (const line of text.split('\n')) assert.ok(line.length <= 100, line);
+});
+
+// One job means one require of the editor API and one pure module beside it
+// (CLAUDE.md, the VS Code extension bullets).
+test('only the activation script knows about the editor', () => {
+  const sources = [path.join(ROOT, 'extension.js')];
+  for (const name of fs.readdirSync(path.join(ROOT, 'lib'))) {
+    sources.push(path.join(ROOT, 'lib', name));
+  }
+  // Written as a pattern rather than as the text itself, so that a search for
+  // the editor API over the sources does not find this test.
+  const editorApi = /require\(['"]vscode['"]\)/;
+  const requiring = sources.filter((file) => editorApi.test(fs.readFileSync(file, 'utf8')));
+  assert.deepEqual(requiring, [path.join(ROOT, 'extension.js')]);
+  assert.deepEqual(fs.readdirSync(path.join(ROOT, 'lib')), ['check.js']);
 });

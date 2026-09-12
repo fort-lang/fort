@@ -444,10 +444,10 @@ set_tests_properties(highlight_selftest PROPERTIES
 
 # The unit tests of the VS Code extension in editors/vscode (label unit), under
 # Node's built-in runner: the check document of D20.2 turned into editor shapes,
-# the conversion of its 1-based byte columns to character offsets, the lookup in
-# the index of D20.3, and the activation script itself driven against a fake
-# editor (editors/vscode/test/fake_vscode.js), which leaves only what needs a
-# real one to the manual smoke test in editors/README.md.
+# the conversion of its 1-based byte columns to character offsets, and the
+# activation script itself driven against a fake editor
+# (editors/vscode/test/fake_vscode.js), which leaves only what needs a real one
+# to the manual smoke test in editors/README.md.
 find_program(FORT_NODE NAMES node nodejs REQUIRED)
 add_test(NAME extension_selftest
     COMMAND "${FORT_NODE}" --test

@@ -10,8 +10,7 @@
 // `editors/README.md` is for.
 
 const Module = require('node:module');
-const fs = require('node:fs');
-const os = require('node:os');
+const path = require('node:path');
 
 class Range {
   constructor(startLine, startCharacter, endLine, endCharacter) {
@@ -44,29 +43,6 @@ class DiagnosticRelatedInformation {
   }
 }
 
-class MarkdownString {
-  constructor(value) {
-    this.value = value;
-  }
-}
-
-class Hover {
-  constructor(contents, range) {
-    this.contents = contents;
-    this.range = range;
-  }
-}
-
-// The settings the extension reads, with the defaults of package.json already
-// resolved to a VM that is not there.
-const SETTINGS = {
-  'vm.sshConfig': '/tmp/fort-ssh-config',
-  'vm.host': 'default',
-  compiler: '/vagrant/build/debug/fort',
-  stdDir: '/vagrant/build/debug/std',
-  includeDirs: [],
-};
-
 function createApi(state) {
   const uriFile = (fsPath) => ({ scheme: 'file', fsPath, toString: () => 'file://' + fsPath });
   return {
@@ -75,50 +51,24 @@ function createApi(state) {
     Diagnostic,
     Location,
     DiagnosticRelatedInformation,
-    MarkdownString,
-    Hover,
     // The values VS Code gives them, which a test asserts by number.
     DiagnosticSeverity: { Error: 0, Warning: 1, Information: 2, Hint: 3 },
-    StatusBarAlignment: { Left: 1 },
     languages: {
       createDiagnosticCollection() {
         return {
           set(uri, items) {
-            if (state.throwOnPublish) {
-              state.throwOnPublish = false;
-              throw new Error('the collection is gone');
-            }
             state.published.push(uri.fsPath);
             state.diagnostics.set(uri.fsPath, items);
           },
+          delete(uri) {
+            state.cleared.push(uri.fsPath);
+            state.diagnostics.delete(uri.fsPath);
+          },
           dispose() {},
         };
-      },
-      registerHoverProvider(language, provider) {
-        state.hoverProvider = provider;
-        return { dispose() {} };
-      },
-      registerDefinitionProvider(language, provider) {
-        state.definitionProvider = provider;
-        return { dispose() {} };
       },
     },
     window: {
-      createStatusBarItem() {
-        return {
-          text: '',
-          tooltip: '',
-          show() {
-            state.status.visible = true;
-            state.status.text = this.text;
-            state.status.tooltip = this.tooltip;
-          },
-          hide() {
-            state.status.visible = false;
-          },
-          dispose() {},
-        };
-      },
       createOutputChannel() {
         return {
           appendLine(line) {
@@ -130,33 +80,47 @@ function createApi(state) {
     },
     workspace: {
       textDocuments: state.openDocuments,
+      // One folder, since what the extension asks is which folder a file
+      // belongs to and a file outside it belongs to none.
+      getWorkspaceFolder(uri) {
+        if (state.workspaceFolder === null) return undefined;
+        const inside = uri.fsPath.startsWith(state.workspaceFolder + path.sep);
+        return inside ? { uri: uriFile(state.workspaceFolder) } : undefined;
+      },
+      onDidOpenTextDocument(handler) {
+        state.openHandlers.push(handler);
+        return { dispose() {} };
+      },
       onDidSaveTextDocument(handler) {
         state.saveHandlers.push(handler);
         return { dispose() {} };
       },
-      getWorkspaceFolder() {
-        return state.workspaceFolder ? { uri: uriFile(state.workspaceFolder) } : undefined;
-      },
-      getConfiguration() {
-        return { get: (key) => state.settings[key] };
+      onDidCloseTextDocument(handler) {
+        state.closeHandlers.push(handler);
+        return { dispose() {} };
       },
     },
   };
 }
 
 // Load a fresh copy of the extension with the editor and the spawn faked.
+// `options.documents` are the ones the editor already holds open when it
+// activates, which is how VS Code starts an extension that `onLanguage:fort`
+// woke, and `options.workspaceFolder` is the folder it opened, null for a file
+// opened outside every folder.
 function install(options) {
+  const settings = options === undefined ? {} : options;
   const state = {
-    settings: Object.assign({}, SETTINGS, (options || {}).settings),
-    workspaceFolder: (options || {}).workspaceFolder || '',
+    workspaceFolder: settings.workspaceFolder === undefined ? null : settings.workspaceFolder,
     diagnostics: new Map(),
     published: [],
+    cleared: [],
     output: [],
-    status: { visible: false, text: '', tooltip: '' },
+    openHandlers: [],
     saveHandlers: [],
-    openDocuments: [],
+    closeHandlers: [],
+    openDocuments: settings.documents === undefined ? [] : settings.documents.slice(),
     calls: [],
-    throwOnPublish: false,
   };
   const api = createApi(state);
   const childProcess = {
@@ -165,15 +129,10 @@ function install(options) {
       return {};
     },
   };
-  // The temporary directory is faked too, so a test can hand the extension the
-  // `/var/folders/<...>/T` of macOS on any machine.
-  const tmpdir = (options || {}).tmpdir;
-  const fakeOs = tmpdir === undefined ? os : Object.assign({}, os, { tmpdir: () => tmpdir });
   const original = Module._load;
   Module._load = function fakeLoad(request, parent, isMain) {
     if (request === 'vscode') return api;
     if (request === 'child_process') return childProcess;
-    if (request === 'os') return fakeOs;
     return original.call(this, request, parent, isMain);
   };
   delete require.cache[require.resolve('../extension')];
@@ -187,63 +146,72 @@ function install(options) {
   return { extension, state };
 }
 
-// A document as the editor would hand it over: `version` counts every change
-// VS Code has applied to the buffer, `isDirty` says it has unsaved ones, and
-// `text` overrides what the buffer holds, which is the file on disk otherwise.
+// A document as the editor would hand it over: its path, its language and its
+// scheme, which is all the extension reads of one. `scheme` is `file` unless a
+// test says otherwise, since a diff view hands over the same path under another
+// one.
 function document(filePath, options) {
   const settings = options || {};
+  const scheme = settings.scheme === undefined ? 'file' : settings.scheme;
   return {
-    uri: { scheme: 'file', fsPath: filePath },
-    languageId: filePath.endsWith('.ft') ? 'fort' : 'plaintext',
-    isDirty: settings.dirty === true,
-    version: settings.version === undefined ? 1 : settings.version,
-    getText: () =>
-      settings.text === undefined
-        ? fs.existsSync(filePath)
-          ? fs.readFileSync(filePath, 'utf8')
-          : ''
-        : settings.text,
+    uri: { scheme, fsPath: filePath },
+    languageId: settings.languageId === undefined ? languageOf(filePath) : settings.languageId,
   };
 }
 
-// Open a document in the fake editor, replacing the one of that path.
-function open(state, doc) {
-  const at = state.openDocuments.findIndex((each) => each.uri.fsPath === doc.uri.fsPath);
+function languageOf(filePath) {
+  return filePath.endsWith('.ft') ? 'fort' : 'plaintext';
+}
+
+// Open a file in the fake editor, replacing the document of that path.
+function open(state, filePath, options) {
+  const doc = document(filePath, options);
+  const at = state.openDocuments.findIndex((each) => each.uri.fsPath === filePath);
   if (at < 0) state.openDocuments.push(doc);
   else state.openDocuments[at] = doc;
+  for (const handler of state.openHandlers) handler(doc);
   return doc;
 }
 
 // Save a file, which in an editor means the buffer is open and now clean.
 function save(state, filePath, options) {
-  const doc = open(state, document(filePath, options));
+  const doc = document(filePath, options);
   for (const handler of state.saveHandlers) handler(doc);
   return doc;
 }
 
-// Answer the pending run. `code` is the exit status of a process that ran;
+function close(state, filePath, options) {
+  const doc = document(filePath, options);
+  const at = state.openDocuments.findIndex((each) => each.uri.fsPath === filePath);
+  if (at >= 0) state.openDocuments.splice(at, 1);
+  for (const handler of state.closeHandlers) handler(doc);
+  return doc;
+}
+
+// Answer a pending run. `code` is the exit status of a process that ran;
 // `spawnFailure` is a spawn that never happened, which Node reports with a
 // *string* `code` such as `'ENOENT'` -- the very case the extension separates
 // from an exit status; and `timeout` is the run execFile killed, which carries
 // no code at all.
 function complete(call, result) {
-  const stdout = result.stdout === undefined ? '' : result.stdout;
-  const stderr = result.stderr === undefined ? '' : result.stderr;
+  const answer = result === undefined ? {} : result;
+  const stdout = answer.stdout === undefined ? '' : answer.stdout;
+  const stderr = answer.stderr === undefined ? '' : answer.stderr;
   let error = null;
-  if (result.spawnFailure) {
-    error = new Error('spawn ssh ' + result.spawnFailure);
-    error.code = result.spawnFailure;
+  if (answer.spawnFailure) {
+    error = new Error('spawn tools/vm ' + answer.spawnFailure);
+    error.code = answer.spawnFailure;
     error.errno = -2;
-    error.syscall = 'spawn ssh';
-  } else if (result.timeout) {
-    error = new Error('Command failed: ssh');
+    error.syscall = 'spawn tools/vm';
+  } else if (answer.timeout) {
+    error = new Error('Command failed: tools/vm run');
     error.killed = true;
     error.signal = 'SIGTERM';
-  } else if (result.code) {
+  } else if (answer.code) {
     error = new Error('Command failed');
-    error.code = result.code;
+    error.code = answer.code;
   }
   call.callback(error, stdout, stderr);
 }
 
-module.exports = { complete, document, install, open, save };
+module.exports = { close, complete, document, install, open, save };

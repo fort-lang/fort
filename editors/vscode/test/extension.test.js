@@ -1,352 +1,407 @@
 'use strict';
 
-// The glue: a save runs one check in a child process, its document is
-// published, and hover and definition are answered from it (D20.1, D20.2,
-// D20.3). The editor and the spawn are faked (test/fake_vscode.js), so what is
-// exercised here is the extension's own case analysis and not VS Code.
+// The glue: an open and a save each run the compiler through `tools/vm run` in a
+// child process, its document is published into the one collection, a close
+// clears the file, and a run that answers with no document leaves the last
+// diagnostics standing (D20.1, D20.2). The editor and the spawn are faked
+// (test/fake_vscode.js), so what is exercised here is the extension's own case
+// analysis, with no editor, no VM and no compiler.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 
-const commands = require('../lib/command');
 const fake = require('./fake_vscode');
-const symbols = require('../lib/symbols');
 
-const PROJECT = path.join(__dirname, 'fixtures', 'project');
+const FIXTURES = path.join(__dirname, 'fixtures');
+const PROJECT = path.join(FIXTURES, 'project');
 const MAIN = path.join(PROJECT, 'main.ft');
 const MATHX = path.join(PROJECT, 'mathx.ft');
-const DOCUMENT = fs.readFileSync(path.join(__dirname, 'fixtures', 'check-document.json'), 'utf8');
-const NOTE = symbols.STALE_NOTE;
-// main.ft with the multi-byte characters of line 5 replaced, so a byte column
-// converts to a different character offset against it than against the file.
-const PLAIN_MAIN = fs
-  .readFileSync(MAIN, 'utf8')
-  .replace('héllo ☃', 'hello xy')
-  .replace('\t', '    ');
+const NOTES_FT = path.join(FIXTURES, 'notes.ft');
+const LEXICAL_FT = path.join(FIXTURES, 'lexical.ft');
+const DOCUMENT = fs.readFileSync(path.join(FIXTURES, 'check-document.json'), 'utf8');
+const NOTES = fs.readFileSync(path.join(FIXTURES, 'notes-document.json'), 'utf8');
+const LEXICAL = fs.readFileSync(path.join(FIXTURES, 'lexical-document.json'), 'utf8');
+const COMPILER = '/vagrant/build/release/fort';
+const VM = path.join(PROJECT, 'tools', 'vm');
+// The guest command as `tools/vm run` receives it: one argument for a shell,
+// with the path relative to the workspace folder and quoted for it.
+const GUEST = COMPILER + " --check --json 'main.ft'";
+// Severities as VS Code numbers them, which the fake copies.
+const ERROR = 0;
+const INFORMATION = 2;
 const CLEAN = JSON.stringify({
   version: 1,
   files: ['main.ft', 'mathx.ft'],
   diagnostics: [],
   symbols: [],
 });
+// Two answers about one closure, in the shape check-document.json has: a check
+// of main.ft reporting an error in the module it imports, and a check of that
+// module alone finding it clean.
+const MAIN_WITH_STALE_MATHX = JSON.stringify({
+  version: 1,
+  files: ['main.ft', 'mathx.ft'],
+  diagnostics: [
+    {
+      file: 'mathx.ft',
+      line: 5,
+      col: 8,
+      end_line: 5,
+      end_col: 11,
+      severity: 'error',
+      message: 'the error the user has just fixed',
+      notes: [],
+    },
+    {
+      file: 'main.ft',
+      line: 6,
+      col: 31,
+      end_line: 6,
+      end_col: 35,
+      severity: 'error',
+      message: "unknown name 'nope'",
+      notes: [],
+    },
+  ],
+  symbols: [],
+});
+const MATHX_CLEAN = JSON.stringify({
+  version: 1,
+  files: ['mathx.ft'],
+  diagnostics: [],
+  symbols: [],
+});
 
-// A successful check of main.ft, with the fixture document as its answer.
-function checked() {
-  const harness = fake.install();
-  fake.save(harness.state, MAIN);
-  fake.complete(harness.state.calls[0], { stdout: DOCUMENT });
-  return harness;
+// A window opened on the fixture project, which is the workspace folder every
+// test below works in.
+function open(options) {
+  return fake.install(Object.assign({ workspaceFolder: PROJECT }, options));
 }
 
-test('a save spawns one ssh and publishes nothing until it answers', () => {
-  const { state } = fake.install();
+// A saved main.ft whose check answered with the fixture document.
+function checked() {
+  const harness = open();
+  fake.save(harness.state, MAIN);
+  fake.complete(harness.state.calls[0], { stdout: DOCUMENT, code: 1 });
+  return harness.state;
+}
+
+// ---- what is run ------------------------------------------------------------
+
+// The whole crossing: `tools/vm run` of the workspace folder, spawned there,
+// with the file named relative to it, since the compiler echoes the path it was
+// given and the answer then resolves against that same folder on the host.
+test('a save runs the compiler through tools/vm run and nothing else', () => {
+  const { state } = open();
   fake.save(state, MAIN);
   assert.equal(state.calls.length, 1);
-  assert.equal(state.calls[0].command, 'ssh');
-  assert.equal(state.calls[0].args[state.calls[0].args.length - 3], '--');
-  assert.match(state.calls[0].args[state.calls[0].args.length - 1], /--check --json --index/);
-  assert.equal(state.diagnostics.size, 0);
+  assert.equal(state.calls[0].command, VM);
+  assert.deepEqual(state.calls[0].args, ['run', GUEST]);
+  assert.equal(state.calls[0].options.cwd, PROJECT);
   assert.ok(state.calls[0].options.timeout > 0);
-  // The logged line is the one the README tells the user to paste, so the
-  // remote command is one quoted word there rather than loose text.
-  assert.equal(state.output[0], 'ssh ' + commands.shellJoin(state.calls[0].args));
-  assert.match(state.output[0], /^ssh -F \/tmp\/fort-ssh-config /);
-  assert.match(state.output[0], / -- default '\/vagrant\/build\/debug\/fort --check/);
+  assert.ok(state.calls[0].options.maxBuffer > 1024 * 1024);
+  // Nothing is published until the compiler has answered.
+  assert.equal(state.diagnostics.size, 0);
 });
 
-// The regression this closes shipped once: `os.tmpdir()` is
-// `/var/folders/<...>/T` on macOS, the control path overflowed the Unix domain
-// socket limit, and every check failed with ssh's exit 255.
-test('the control socket fits a socket path even under a macOS tmpdir', () => {
-  const macos = '/var/folders/6y/jxxbq7y547z69nkt88pbdr5m0000gn/T';
-  const { extension, state } = fake.install({ tmpdir: macos });
+test('a file in a sub-directory is named relative to the folder', () => {
+  const { state } = fake.install({ workspaceFolder: FIXTURES });
   fake.save(state, MAIN);
-  const argument = state.calls[0].args[5];
-  assert.match(argument, /^ControlPath=/);
-  const controlPath = argument.slice('ControlPath='.length);
-  assert.ok(
-    commands.controlPathLength(controlPath) <= commands.SOCKET_PATH_MAX,
-    controlPath + ' is ' + commands.controlPathLength(controlPath) + ' bytes'
-  );
-  // Nobody may have owned the directory first: it is made by mkdtemp, so its
-  // name is unpredictable, it is this user's, it is 0700 and it is no symlink.
-  const directory = path.dirname(controlPath);
-  const info = fs.lstatSync(directory);
-  assert.equal(info.isSymbolicLink(), false);
-  assert.equal(info.isDirectory(), true);
-  assert.equal(info.mode & 0o777, 0o700);
-  if (typeof process.getuid === 'function') assert.equal(info.uid, process.getuid());
-  assert.equal(directory.startsWith('/tmp/fort-'), true);
-  assert.notEqual(directory, '/tmp/fort-XXXXXX');
-  // One directory per activation, and it is gone afterwards.
-  fake.save(state, MATHX);
-  assert.equal(state.calls[1].args[5], argument);
-  extension.deactivate();
-  assert.equal(fs.existsSync(directory), false);
+  assert.equal(state.calls[0].command, path.join(FIXTURES, 'tools', 'vm'));
+  assert.deepEqual(state.calls[0].args, [
+    'run',
+    COMPILER + " --check --json 'project/main.ft'",
+  ]);
 });
 
-test('the control socket stays under the temporary directory when it fits', () => {
-  // Short enough for a socket path, which `os.tmpdir()` itself may not be.
-  const base = fs.mkdtempSync('/tmp/fort-test-');
-  const { extension, state } = fake.install({ tmpdir: base });
-  fake.save(state, MAIN);
-  const controlPath = state.calls[0].args[5].slice('ControlPath='.length);
-  assert.equal(path.dirname(path.dirname(controlPath)), base);
-  extension.deactivate();
-  fs.rmSync(base, { recursive: true, force: true });
+// `tools/vm run` hands its argument to a shell in the guest, so a quote in a
+// file name must not end the word the compiler is given.
+test('a file name holding a quote is quoted for the guest shell', () => {
+  const { state } = open();
+  fake.save(state, path.join(PROJECT, "it's.ft"));
+  assert.equal(state.calls[0].args[1], COMPILER + " --check --json 'it'\\''s.ft'");
 });
 
-test('a file that is not fort is not checked', () => {
-  const { state } = fake.install();
+test('opening a fort file checks it', () => {
+  const { state } = open();
+  fake.open(state, MAIN);
+  assert.equal(state.calls.length, 1);
+  assert.deepEqual(state.calls[0].args, ['run', GUEST]);
+});
+
+// `onLanguage:fort` is what wakes the extension, so the file that woke it is
+// already open and its open event has been and gone.
+test('activation checks the fort files already open', () => {
+  const documents = [fake.document(MAIN), fake.document(path.join(PROJECT, 'notes.txt'))];
+  const { state } = open({ documents });
+  assert.equal(state.calls.length, 1);
+  assert.deepEqual(state.calls[0].args, ['run', GUEST]);
+});
+
+test('a document that is not fort is not checked', () => {
+  const { state } = open();
   fake.save(state, path.join(PROJECT, 'notes.txt'));
+  fake.open(state, path.join(PROJECT, 'notes.txt'));
   assert.equal(state.calls.length, 0);
 });
 
-test('the document is published for every file of the closure', () => {
-  const { state } = checked();
-  assert.deepEqual([...state.diagnostics.keys()].sort(), [MAIN, MATHX].sort());
-  const errors = state.diagnostics.get(MAIN);
-  assert.equal(errors.length, 1);
-  assert.equal(errors[0].message, "unknown name 'nope'");
-  assert.equal(errors[0].source, 'fort');
-  // Byte columns 31 to 35 of a line holding a tab, `é` and `☃`.
-  assert.deepEqual(errors[0].range.start, { line: 4, character: 27 });
-  assert.deepEqual(errors[0].range.end, { line: 4, character: 31 });
-  assert.deepEqual(state.diagnostics.get(MATHX), []);
-  assert.equal(state.status.visible, false);
+// A diff view hands over a document of the same path under another scheme, and
+// the compiler can only be pointed at a file on disk.
+test('a fort document that is not a file on disk is not checked', () => {
+  const { state } = open();
+  fake.save(state, MAIN, { scheme: 'git' });
+  assert.equal(state.calls.length, 0);
 });
 
-// A note that follows no error stands as a diagnostic of its own, whose
-// severity is `note` (D20.2); painting it red would make it read as an error.
-test('a note is not painted as an error', () => {
-  const withNote = JSON.stringify({
+// `tools/vm run` works in the guest directory matching its own, so a file with
+// no workspace folder has nowhere to be checked from.
+test('a file outside every workspace folder is not checked', () => {
+  const nowhere = fake.install();
+  fake.save(nowhere.state, MAIN);
+  assert.equal(nowhere.state.calls.length, 0);
+  // A window opened on the project folder says nothing about a file beside it.
+  const { state } = open();
+  fake.save(state, LEXICAL_FT);
+  assert.equal(state.calls.length, 0);
+});
+
+// ---- what is published ------------------------------------------------------
+
+test('a save the compiler rejects publishes its diagnostics', () => {
+  const state = checked();
+  const items = state.diagnostics.get(MAIN);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].message, "unknown name 'nope'");
+  assert.equal(items[0].severity, ERROR);
+  assert.equal(items[0].source, 'fort');
+  // The range is the converted one: line 6 of main.ft holds two multi-byte
+  // characters before the name (D20.2, D20.4).
+  assert.deepEqual(items[0].range.start, { line: 5, character: 27 });
+  assert.deepEqual(items[0].range.end, { line: 5, character: 31 });
+});
+
+// The closure holds six standard library files, whose paths are the guest's:
+// they are dropped rather than published against a path the host cannot open.
+test('every file of the folder is published, so a clean one is cleared', () => {
+  const state = checked();
+  assert.deepEqual(state.published, [MAIN, MATHX]);
+  assert.deepEqual(state.diagnostics.get(MATHX), []);
+});
+
+test('a check with no diagnostic at all clears the file', () => {
+  const { state } = open();
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: DOCUMENT, code: 1 });
+  fake.save(state, MAIN);
+  fake.complete(state.calls[1], { stdout: CLEAN });
+  assert.deepEqual(state.diagnostics.get(MAIN), []);
+});
+
+// One diagnostic with its note attached, and not two overlapping squiggles: in
+// this real document the note carries the same range as its error.
+test('a note becomes related information of its error', () => {
+  const { state } = fake.install({ workspaceFolder: FIXTURES });
+  fake.save(state, NOTES_FT);
+  fake.complete(state.calls[0], { stdout: NOTES, code: 1 });
+  const items = state.diagnostics.get(NOTES_FT);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].severity, ERROR);
+  assert.equal(items[0].relatedInformation.length, 1);
+  const related = items[0].relatedInformation[0];
+  assert.match(related.message, /the compiler declares it as/);
+  assert.equal(related.location.uri.fsPath, NOTES_FT);
+  assert.deepEqual(related.location.range, items[0].range);
+});
+
+// A note that follows no error is a diagnostic of its own and is shown as
+// information rather than as another error (D20.2).
+test('a standalone note is published as information', () => {
+  const standalone = JSON.stringify({
     version: 1,
     files: ['main.ft'],
     diagnostics: [
       {
         file: 'main.ft',
-        line: 5,
-        col: 31,
-        end_line: 5,
-        end_col: 35,
+        line: 1,
+        col: 1,
+        end_line: 1,
+        end_col: 7,
         severity: 'note',
-        message: 'declared here',
-        notes: [],
-      },
-      {
-        file: 'main.ft',
-        line: 4,
-        col: 2,
-        end_line: 4,
-        end_col: 5,
-        severity: 'error',
-        message: 'unknown name',
+        message: 'on its own',
         notes: [],
       },
     ],
     symbols: [],
   });
-  const { state } = fake.install();
+  const { state } = open();
   fake.save(state, MAIN);
-  fake.complete(state.calls[0], { stdout: withNote, code: 1 });
+  fake.complete(state.calls[0], { stdout: standalone, code: 1 });
   const items = state.diagnostics.get(MAIN);
-  assert.equal(items[0].severity, 2, 'a note is Information');
-  assert.equal(items[1].severity, 0, 'an error is Error');
+  assert.equal(items[0].severity, INFORMATION);
+  assert.deepEqual(items[0].relatedInformation, []);
 });
 
-// The columns of the document are byte columns of what the compiler read, so a
-// buffer some window has edited since is the wrong text to convert against.
-test('a published range converts against the file, not an edited buffer', () => {
-  const { state } = fake.install();
-  fake.save(state, MAIN);
-  // The user keeps typing while ssh runs, so the buffer is no longer the text
-  // the compiler read by the time the answer arrives.
-  fake.open(state, fake.document(MAIN, { version: 9, dirty: true, text: PLAIN_MAIN }));
-  fake.complete(state.calls[0], { stdout: DOCUMENT });
-  // Byte column 31 is character 27 of the file and character 30 of that buffer.
-  assert.deepEqual(state.diagnostics.get(MAIN)[0].range.start, { line: 4, character: 27 });
+test('closing a file clears its diagnostics', () => {
+  const state = checked();
+  fake.close(state, MAIN);
+  assert.deepEqual(state.cleared, [MAIN]);
+  assert.equal(state.diagnostics.has(MAIN), false);
+  // The file that was only published about, not closed, keeps its entry.
+  assert.equal(state.diagnostics.has(MATHX), true);
 });
 
-// Showing a position to the reader is the other way round: the buffer is what
-// is on screen, so that is what a jump target converts against.
-test('a definition converts against the buffer the reader is looking at', () => {
-  const { state } = checked();
-  const shifted = ['', '', '', '', 'é' + 'fn i32 add(i32 a, i32 b) {', ''].join('\n');
-  fake.open(state, fake.document(MATHX, { version: 2, text: shifted }));
-  const target = state.definitionProvider.provideDefinition(fake.document(MAIN), {
-    line: 3,
-    character: 19,
-  });
-  assert.equal(target.uri.fsPath, MATHX);
-  // Byte column 8 is character 7 of the file and character 6 of that buffer,
-  // where a two-byte `é` stands before the name.
-  assert.deepEqual(target.range.start, { line: 4, character: 6 });
+test('closing a file that is not fort clears nothing', () => {
+  const state = checked();
+  fake.close(state, path.join(PROJECT, 'notes.txt'));
+  assert.deepEqual(state.cleared, []);
 });
 
-test('a crash keeps the diagnostics already published and says so', () => {
-  const { state } = checked();
-  fake.save(state, MAIN);
-  state.published.length = 0;
-  fake.complete(state.calls[1], { code: 2, stderr: 'fort: no such file\n' });
-  assert.deepEqual(state.published, []);
+// ---- when there is no answer ------------------------------------------------
+
+// No document is no answer and never "no errors" (D20.1): the squiggles on
+// screen are the last thing the compiler said and they stay until it says
+// something else.
+test('a run that produces no document leaves the diagnostics standing', () => {
+  const state = checked();
+  const before = state.published.length;
+  fake.complete(state.calls[0], { stdout: '', stderr: 'fort: internal error\n', code: 2 });
   assert.equal(state.diagnostics.get(MAIN).length, 1);
-  assert.equal(state.status.visible, true);
-  assert.match(state.status.tooltip, /last successful check/);
-  assert.ok(state.output.some((line) => line.includes('check failed (exit 2)')));
+  assert.equal(state.published.length, before);
 });
 
-test('a dead ssh reads as the VM being unreachable', () => {
-  const dead = [
-    { code: 255, stderr: 'ssh: connect failed' },
-    { spawnFailure: 'ENOENT' },
-    { timeout: true },
-  ];
-  for (const result of dead) {
-    const { state } = fake.install();
-    fake.save(state, MAIN);
-    fake.complete(state.calls[0], result);
-    assert.equal(state.diagnostics.size, 0);
-    assert.equal(state.status.visible, true);
-    assert.ok(state.output.some((line) => line.includes('the VM is unreachable')));
-  }
-});
-
-test('a successful check hides the failure of the one before it', () => {
-  const { state } = fake.install();
+test('a failed run writes the command and the stderr to the output channel', () => {
+  const { state } = open();
   fake.save(state, MAIN);
-  fake.complete(state.calls[0], { code: 255 });
-  assert.equal(state.status.visible, true);
+  fake.complete(state.calls[0], { stdout: '', stderr: 'fort: internal error\n', code: 2 });
+  assert.equal(state.output[0], VM + " run '" + GUEST.split("'").join("'\\''") + "'");
+  assert.match(state.output[1], /exited 2/);
+  assert.equal(state.output[2], 'fort: internal error');
+});
+
+// Nobody ran `tools/vm build release`, so there is no binary to spawn: Node
+// reports that with a string code rather than an exit status.
+test('a compiler that cannot be spawned is reported with its reason', () => {
+  const { state } = open();
   fake.save(state, MAIN);
-  fake.complete(state.calls[1], { stdout: DOCUMENT });
-  assert.equal(state.status.visible, false);
+  fake.complete(state.calls[0], { spawnFailure: 'ENOENT' });
+  assert.equal(state.output[0], VM + " run '" + GUEST.split("'").join("'\\''") + "'");
+  assert.match(state.output[1], /ENOENT/);
+  assert.equal(state.diagnostics.size, 0);
 });
 
-const AT_TOTAL = { line: 4, character: 21 };
-
-test('hover answers from the last check of the text on screen', () => {
-  const { state } = checked();
-  const hover = state.hoverProvider.provideHover(fake.document(MAIN), AT_TOTAL);
-  assert.equal(hover.contents.value, '```fort\nlocal total: i32\n```');
-  assert.deepEqual(hover.range.start, { line: 4, character: 20 });
-  const blank = state.hoverProvider.provideHover(fake.document(MAIN), { line: 5, character: 4 });
-  assert.equal(blank, null);
-});
-
-// `isDirty` says there are unsaved edits, which is not the question: the
-// question is whether the answer came from a check of this text (toolchain.md
-// 9.2), and these are the four ways it did not.
-test('an answer that is not about the text on screen says so', () => {
-  const { state } = checked();
-  const edited = fake.document(MAIN, { version: 2, dirty: true });
-  assert.ok(state.hoverProvider.provideHover(edited, AT_TOTAL).contents.value.endsWith(NOTE));
-  // Saved since, but the check of that save never produced a document: the
-  // buffer is clean and the answer is still two saves old.
-  fake.save(state, MAIN, { version: 3 });
-  fake.complete(state.calls[1], { code: 255 });
-  const saved = fake.document(MAIN, { version: 3 });
-  assert.ok(state.hoverProvider.provideHover(saved, AT_TOTAL).contents.value.endsWith(NOTE));
-  // A file of the closure that no window had open when it was checked.
-  const other = fake.document(MATHX);
-  const hover = state.hoverProvider.provideHover(other, { line: 4, character: 8 });
-  assert.ok(hover.contents.value.endsWith(NOTE));
-});
-
-test('a file checked while a window held unsaved edits is marked too', () => {
-  const { state } = fake.install();
-  fake.open(state, fake.document(MATHX, { version: 4, dirty: true }));
+test('a run killed by the timeout is reported too', () => {
+  const { state } = open();
   fake.save(state, MAIN);
-  fake.complete(state.calls[0], { stdout: DOCUMENT });
-  const clean = fake.document(MATHX, { version: 4 });
-  const hover = state.hoverProvider.provideHover(clean, { line: 4, character: 8 });
-  assert.ok(hover.contents.value.endsWith(NOTE));
-  // The file that was saved is the one the check is about, and it is fresh.
-  const main = state.hoverProvider.provideHover(fake.document(MAIN), AT_TOTAL);
-  assert.equal(main.contents.value.includes(NOTE), false);
+  fake.complete(state.calls[0], { timeout: true });
+  assert.match(state.output[1], /Command failed/);
 });
 
-test('a file no check has covered has no answer', () => {
-  const { state } = fake.install();
-  const other = fake.document(path.join(PROJECT, 'unchecked.ft'));
-  assert.equal(state.hoverProvider.provideHover(other, { line: 0, character: 0 }), null);
-  assert.equal(state.definitionProvider.provideDefinition(other, { line: 0, character: 0 }), null);
+test('stdout that is not a document is no answer whatever the status', () => {
+  const { state } = open();
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: 'usage: fort [options] <file>\n' });
+  assert.equal(state.diagnostics.size, 0);
+  assert.match(state.output[1], /no JSON document/);
 });
 
-test('definition jumps into the module that declares the name', () => {
-  const { state } = checked();
-  const target = state.definitionProvider.provideDefinition(fake.document(MAIN), {
-    line: 3,
-    character: 19,
-  });
-  assert.equal(target.uri.fsPath, MATHX);
-  assert.deepEqual(target.range.start, { line: 4, character: 7 });
-  assert.deepEqual(target.range.end, { line: 4, character: 10 });
-  const module = state.definitionProvider.provideDefinition(fake.document(MAIN), {
-    line: 0,
-    character: 8,
-  });
-  assert.equal(module.uri.fsPath, MATHX);
-  assert.deepEqual(module.range.start, { line: 0, character: 0 });
-  const builtin = state.definitionProvider.provideDefinition(fake.document(MAIN), {
-    line: 4,
-    character: 3,
-  });
-  assert.equal(builtin, null);
+test('a run with no stderr says only what it can', () => {
+  const { state } = open();
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { code: 2 });
+  assert.equal(state.output.length, 2);
 });
 
-test('a save while a check is in flight queues exactly one rerun', () => {
-  const { state } = fake.install();
+// ---- two checks of one file -------------------------------------------------
+
+// Whichever run finishes last, what stands is the answer about the newest text.
+test('the newer check publishes even when the older one answers last', () => {
+  const { state } = open();
   fake.save(state, MAIN);
   fake.save(state, MAIN);
-  fake.save(state, MAIN);
-  assert.equal(state.calls.length, 1);
-  fake.complete(state.calls[0], { stdout: DOCUMENT });
-  assert.equal(state.calls.length, 2);
-  fake.complete(state.calls[1], { stdout: DOCUMENT });
-  assert.equal(state.calls.length, 2);
-});
-
-// The file must be released whatever happens, or one failure would leave it
-// unchecked forever and silently.
-test('a throw while publishing still lets the file be checked again', () => {
-  const { state } = fake.install();
-  state.throwOnPublish = true;
-  fake.save(state, MAIN);
-  fake.complete(state.calls[0], { stdout: DOCUMENT });
-  assert.ok(state.output.some((line) => line.includes('could not publish')));
-  fake.save(state, MAIN);
-  assert.equal(state.calls.length, 2);
-  fake.complete(state.calls[1], { stdout: DOCUMENT });
-  assert.equal(state.diagnostics.get(MAIN).length, 1);
-});
-
-// Two saves whose closures overlap can finish in either order.
-test('an older run does not overwrite the answer of a newer one', () => {
-  const { state } = fake.install();
-  fake.save(state, MAIN);
-  fake.save(state, MATHX);
   assert.equal(state.calls.length, 2);
   fake.complete(state.calls[1], { stdout: CLEAN });
+  fake.complete(state.calls[0], { stdout: DOCUMENT, code: 1 });
   assert.deepEqual(state.diagnostics.get(MAIN), []);
-  fake.complete(state.calls[0], { stdout: DOCUMENT });
-  assert.deepEqual(state.diagnostics.get(MAIN), []);
+  assert.deepEqual(state.published, [MAIN, MATHX]);
 });
 
-test('the newer run does overwrite the answer of an older one', () => {
-  const { state } = fake.install();
+test('the newer check publishes when the older one answers first', () => {
+  const { state } = open();
   fake.save(state, MAIN);
-  fake.save(state, MATHX);
-  fake.complete(state.calls[0], { stdout: DOCUMENT });
-  assert.equal(state.diagnostics.get(MAIN).length, 1);
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: DOCUMENT, code: 1 });
   fake.complete(state.calls[1], { stdout: CLEAN });
   assert.deepEqual(state.diagnostics.get(MAIN), []);
 });
 
-test('deactivate forgets what the last check answered', () => {
-  const { extension, state } = checked();
-  extension.deactivate();
-  const hover = state.hoverProvider.provideHover(fake.document(MAIN), { line: 4, character: 21 });
-  assert.equal(hover, null);
+// The dropped answer is dropped whole: it must not reach the output channel
+// either, or a stale failure would be reported over a run that succeeded.
+test('a superseded run that failed is not reported', () => {
+  const { state } = open();
+  fake.save(state, MAIN);
+  fake.save(state, MAIN);
+  fake.complete(state.calls[1], { stdout: CLEAN });
+  fake.complete(state.calls[0], { stdout: '', stderr: 'boom', code: 2 });
+  assert.deepEqual(state.output, []);
+});
+
+// The bug this closes: the guard used to be keyed on the checked file while a
+// check publishes its whole closure, so a check of main.ft answering late could
+// repaint an error in mathx.ft that a newer check of mathx.ft had just cleared,
+// and it stayed painted until the user saved again.
+test('an older run does not repaint a file a newer run has answered about', () => {
+  const { state } = open();
+  fake.save(state, MAIN);
+  fake.save(state, MATHX);
+  // The newer check of mathx.ft answers first: that file is clean now.
+  fake.complete(state.calls[1], { stdout: MATHX_CLEAN });
+  // The older check of main.ft, whose closure holds mathx.ft, answers last with
+  // the error the user has already fixed.
+  fake.complete(state.calls[0], { stdout: MAIN_WITH_STALE_MATHX, code: 1 });
+  assert.deepEqual(state.diagnostics.get(MATHX), []);
+  // Its own file is still published: it is the newest answer about main.ft.
+  assert.equal(state.diagnostics.get(MAIN).length, 1);
+});
+
+test('a newer run does repaint a file an older run answered about', () => {
+  const { state } = open();
+  fake.save(state, MAIN);
+  fake.save(state, MATHX);
+  fake.complete(state.calls[0], { stdout: MAIN_WITH_STALE_MATHX, code: 1 });
+  assert.equal(state.diagnostics.get(MATHX).length, 1);
+  fake.complete(state.calls[1], { stdout: MATHX_CLEAN });
+  assert.deepEqual(state.diagnostics.get(MATHX), []);
+});
+
+test('checks of two files do not supersede each other', () => {
+  const { state } = fake.install({ workspaceFolder: FIXTURES });
+  fake.save(state, LEXICAL_FT);
+  fake.save(state, NOTES_FT);
+  fake.complete(state.calls[1], { stdout: NOTES, code: 1 });
+  fake.complete(state.calls[0], { stdout: LEXICAL, code: 1 });
+  assert.equal(state.diagnostics.get(LEXICAL_FT).length, 1);
+  assert.equal(state.diagnostics.get(NOTES_FT).length, 1);
+  assert.equal(state.diagnostics.get(NOTES_FT)[0].relatedInformation.length, 1);
+});
+
+// A file checked again after it was closed is the ordinary case of reopening
+// it, so nothing may be left behind that silences the new run.
+test('a file checked, closed and opened again is published again', () => {
+  const state = checked();
+  fake.close(state, MAIN);
+  fake.open(state, MAIN);
+  fake.complete(state.calls[1], { stdout: DOCUMENT, code: 1 });
+  assert.equal(state.diagnostics.get(MAIN).length, 1);
+});
+
+test('deactivation forgets the files that were checked', () => {
+  const harness = open();
+  fake.save(harness.state, MAIN);
+  harness.extension.deactivate();
+  fake.complete(harness.state.calls[0], { stdout: DOCUMENT, code: 1 });
+  // The run was started before deactivation and its file is no longer known,
+  // so its answer is dropped rather than published into a disposed collection.
+  assert.equal(harness.state.diagnostics.size, 0);
 });

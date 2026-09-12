@@ -50,7 +50,7 @@ done
 # floor, for the reason tools/diff_tokens.sh gives at its own copy of this
 # constant: a file must not be able to slip out of the comparison. A ticket
 # that adds or removes a .ft file changes both lines in the same commit.
-FT_FILES=665
+FT_FILES=666
 
 files=$(find . -name '*.ft' -not -path './build/*' -not -path './.git/*' \
     -not -path './.worktrees/*' | sort)
