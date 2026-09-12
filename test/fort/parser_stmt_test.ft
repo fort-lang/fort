@@ -136,15 +136,18 @@ fn void while_and_do_while_carry_body_and_condition() {
            == "(while (ident c) (block (break)))");
     assert(parse_env.stmt_dump(&e, "while (c) { continue; }")
            == "(while (ident c) (block (continue)))");
-    // `do`-`while` parses whole and is then refused as outside the C
-    // bootstrap's subset (D7.5, toolchain.md 7.3), so the statement is gone
-    // and the error is reported; the tree keeps the skipped region.
+    // `do { } while (cond);` (D7.5): the body is a block and the condition
+    // follows it, which is the order the tree keeps. stage1 parses the same
+    // form and then refuses it, because it is outside the C bootstrap's
+    // subset; the self-hosted compiler accepts it (toolchain.md 7.3, T-044).
     parse_env.env mut e2 = parse_env.create();
     defer parse_env.free(&e2);
-    assert(parse_env.stmt_dump(&e2, "do { f(); } while (c);") == "(error)");
-    assert(parse_env.errors(&e2) == 1);
-    assert(parse_env.diag_at(&e2, 0)
-           == "2:1: error: not supported by the bootstrap compiler: do-while");
+    assert(parse_env.stmt_dump(&e2, "do { f(); } while (c);")
+           == "(do (block (call-stmt (call (ident f)))) (ident c))");
+    assert(parse_env.errors(&e2) == 0);
+    assert(parse_env.stmt_dump(&e2, "do { continue; } while (c);")
+           == "(do (block (continue)) (ident c))");
+    assert(parse_env.errors(&e2) == 0);
 }
 
 fn void the_three_for_forms() {

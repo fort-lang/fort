@@ -14,7 +14,18 @@ import std.strbuf;
 // The scalar expressions of src/fort/gen_expr.ft: the checked arithmetic of
 // item 15, the division and shift checks of D6.13 and D11.1, the comparisons
 // of D6.2, the string comparison of D3.7, the short circuit of item 10 and
-// the casts of item 12.
+// the casts of item 12. The conditional of D6.6 is here too: stage1 refuses
+// that form, so its two cases are the one block of expected text below that
+// was read off stage2 and reasoned about line by line, not read off stage1
+// (T-044).
+//
+// No case in this suite runs the structural check of item 10, and none can:
+// every one emits a single expression and not a definition, and
+// gen_env.block_terminators reads whole `define` blocks. `grep -c
+// '^ *gen_env.expect_blocks('` here is 0 by construction. The block structure of
+// the conditional is asserted in test/fort/gen_stmt_test.ft instead, over two
+// whole definitions: the scalar shape in a `return` and the aggregate shape
+// that writes through gen_expr_into.
 //
 // Where the expected text comes from. Every block below was read off
 // `fort -S` run by stage1 -- the C emitter this module transliterates -- over
@@ -433,6 +444,51 @@ fn void the_two_short_circuit_operators_branch_the_other_way_round() {
                         gen_env.join_more(&e, "  %t9 = trunc i8 %t8 to i1\n"));
 }
 
+// `cond ? a : b` (D6.6): the condition branches to one arm or the other, each
+// arm writes into one slot and the continuation reads it back, so only the
+// arm the condition selects is evaluated. The slot is the same answer `&&`
+// and `||` give, and for the same reason: the tree walk never has to know a
+// block's predecessors (item 10, D19.4).
+fn void a_conditional_evaluates_one_arm_into_a_slot() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open3(&e, A_I32, B_I32, "    i32 mut c = a < b ? a : b;"));
+    gen_env.emit_value(&e, "c");
+    gen_env.expect_text(gen_env.allocas(&e), "  %tmp0 = alloca i32, align 4\n");
+    gen_env.join8(&e, LOAD_A, LOAD_B, "  %t2 = icmp slt i32 %t0, %t1\n",
+                  "  br i1 %t2, label %L0, label %L1\n\nL0:\n",
+                  "  %t3 = load i32, ptr %a.0, align 4\n",
+                  "  store i32 %t3, ptr %tmp0, align 4\n  br label %L2\n\nL1:\n",
+                  "  %t4 = load i32, ptr %b.1, align 4\n",
+                  "  store i32 %t4, ptr %tmp0, align 4\n  br label %L2\n\nL2:\n");
+    gen_env.expect_text(gen_env.body(&e),
+                        gen_env.join_more(&e, "  %t5 = load i32, ptr %tmp0, align 4\n"));
+}
+
+// An aggregate arm writes into the destination place itself, so the
+// conditional asks for no temporary of its own: the two arms build the two
+// header fields of the `string` in the local's own slot (D19.3, D3.7).
+fn void an_aggregate_conditional_writes_into_the_destination() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(open3(&e, A_I32, B_I32, "    string mut s = a < b ? \"yes\" : \"no\";"));
+    gen_env.into_text(&e, "s");
+    gen_env.expect_text(gen_env.allocas(&e), "");
+    gen_env.join8(&e, LOAD_A, LOAD_B,
+                  "  %t2 = icmp slt i32 %t0, %t1\n  br i1 %t2, label %L0, label %L1\n\nL0:\n",
+                  "  %t3 = getelementptr inbounds %fort.span, ptr %s.2, i32 0, i32 0\n",
+                  "  store ptr @.str.0, ptr %t3, align 8\n",
+                  "  %t4 = getelementptr inbounds %fort.span, ptr %s.2, i32 0, i32 1\n",
+                  "  store i64 3, ptr %t4, align 8\n  br label %L2\n\nL1:\n",
+                  "  %t5 = getelementptr inbounds %fort.span, ptr %s.2, i32 0, i32 0\n");
+    gen_env.join_more(&e, "  store ptr @.str.1, ptr %t5, align 8\n");
+    gen_env.join_more(&e, "  %t6 = getelementptr inbounds %fort.span, ptr %s.2, i32 0, i32 1\n");
+    gen_env.join_more(&e, "  store i64 2, ptr %t6, align 8\n");
+    gen_env.expect_text(gen_env.body(&e), gen_env.join_more(&e, "  br label %L2\n\nL2:\n"));
+}
+
 fn void a_bool_widens_to_an_integer_and_stays_itself_as_a_bool() {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -512,6 +568,8 @@ fn i32 main() {
     an_unequal_string_comparison_inverts_the_answer();
     a_short_circuit_goes_through_a_slot_and_never_a_phi();
     the_two_short_circuit_operators_branch_the_other_way_round();
+    a_conditional_evaluates_one_arm_into_a_slot();
+    an_aggregate_conditional_writes_into_the_destination();
     println("comparisons ok");
     an_integer_cast_widens_by_the_source_signedness();
     a_pointer_cast_emits_nothing_and_a_mixed_one_converts();

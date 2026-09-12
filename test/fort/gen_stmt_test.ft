@@ -3,6 +3,7 @@
 //! stdout:
 //| branches ok
 //| loops ok
+//| conditional ok
 //| switch ok
 //| stores ok
 //| ok
@@ -20,12 +21,16 @@ import std.strbuf;
 // stage1's own `fort -S` over the same program and pasted here, never
 // transcribed from the fort under test, and tools/diff_ir.sh holds the two
 // compilers' modules against each other over every program of the repository.
-// Every one of the eleven cases emits a definition through the `emit` helper
-// below, which runs the structural check of item 10 over it, since
+// The two `do`-`while` cases and the conditional case are the exception:
+// stage1 refuses both forms (toolchain.md 7.3), so there is no stage1 text to
+// read and their expected blocks are named one by one in the comments beside
+// them (T-044).
+// Every one of the fifteen cases emits a definition through the `emit`
+// helper below, which runs the structural check of item 10 over it, since
 // `opt -passes=verify` does not reject an instruction after a terminator
 // (AGENTS.md). The check therefore has one call site here and covers all
-// eleven; `grep -c '^ *gen_env.expect_blocks('` is 1, in `emit`, and
-// `grep -c '= emit(&e,'` is 12, one per case and two in the last, which emits
+// fifteen; `grep -c '^ *gen_env.expect_blocks('` is 1, in `emit`, and
+// `grep -c '= emit(&e,'` is 16, one per case and two in the last, which emits
 // the same function under two build modes.
 
 // One function of `src` emitted, with the structural check run over it.
@@ -161,6 +166,73 @@ fn void a_for_loop_branches_through_its_step_block() {
                         gen_env.join_lines(&e, want[0..16]));
 }
 
+// `do { } while (cond);`: the body runs once before the first test, so the
+// entry edge goes to the body; `continue` branches to the test block and the
+// test branches back to the body (D7.5, D7.6). The labels are allocated body,
+// test, done (D19.5).
+fn void a_do_while_tests_after_its_body() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    strbuf.append(&src, "fn void spin(bool go) {\n    do {\n        continue;\n");
+    strbuf.append(&src, "    } while (go);\n}\n");
+    string got = emit(&e, wrap(&b, strbuf.view(&src)), "spin");
+    string[10] mut want = {
+        // The entry edge goes to the body, which is what makes the body run
+        // before the first test.
+        "  br label %L0\n",
+        "\nL0:\n",
+        // `continue` branches to the test block and not to the top of the
+        // body.
+        "  br label %L1\n",
+        "\nL1:\n",
+        "  %t1 = load i8, ptr %go.0, align 1\n",
+        "  %t2 = trunc i8 %t1 to i1\n",
+        "  br i1 %t2, label %L0, label %L2\n",
+        "\nL2:\n",
+        "  ret void\n",
+        "}\n",
+    };
+    gen_env.expect_text(got[cast(str.find(got, "  br label %L0\n"), u64)..],
+                        gen_env.join_lines(&e, want[0..10]));
+}
+
+// `break` in a `do` leaves the loop without running the test, which is the
+// other exit of D7.6: the body branches to the continuation and the test
+// block keeps its own back edge.
+fn void a_break_in_a_do_while_skips_the_test() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    strbuf.append(&src, "fn void once(bool go) {\n    do {\n        break;\n");
+    strbuf.append(&src, "    } while (go);\n}\n");
+    string got = emit(&e, wrap(&b, strbuf.view(&src)), "once");
+    string[10] mut want = {
+        "  br label %L0\n",
+        "\nL0:\n",
+        // The `break` wrote the body's one terminator, so the back edge to
+        // the test is not written after it (item 10).
+        "  br label %L2\n",
+        "\nL1:\n",
+        "  %t1 = load i8, ptr %go.0, align 1\n",
+        "  %t2 = trunc i8 %t1 to i1\n",
+        "  br i1 %t2, label %L0, label %L2\n",
+        "\nL2:\n",
+        "  ret void\n",
+        "}\n",
+    };
+    gen_env.expect_text(got[cast(str.find(got, "  br label %L0\n"), u64)..],
+                        gen_env.join_lines(&e, want[0..10]));
+}
+
 // `for (T x : coll) { }`: an `i64` counter the compiler invents walks the
 // collection and the loop variable is a fresh copy of each element taken at
 // the start of its iteration. The counter is bounded by the length, so the
@@ -233,6 +305,80 @@ fn void a_break_in_a_switch_in_a_loop_leaves_the_switch_alone() {
         "",
     };
     assert(str.find(got, gen_env.join_lines(&e, want[0..11])) >= 0);
+}
+
+// ---- the conditional in a definition (D6.6) -----------------------------------------
+
+// A conditional in a `return` opens three blocks inside one definition, and
+// every one of them ends in exactly one terminator: the two arms branch to
+// the continuation and the continuation returns the slot the arms wrote
+// (D6.6, item 10). `emit` runs the structural check over the whole
+// definition, which is what sees an instruction written after a terminator.
+fn void a_conditional_in_a_return_ends_every_block_it_opens() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    strbuf.append(&src, "fn i64 pick(bool go, i64 a, i64 b) {\n    return go ? a : b;\n}\n");
+    string got = emit(&e, wrap(&b, strbuf.view(&src)), "pick");
+    string[13] mut want = {
+        "  %t1 = load i8, ptr %go.0, align 1\n",
+        "  %t2 = trunc i8 %t1 to i1\n",
+        "  br i1 %t2, label %L0, label %L1\n",
+        "\nL0:\n",
+        "  %t3 = load i64, ptr %a.1, align 8\n",
+        "  store i64 %t3, ptr %tmp0, align 8\n",
+        "  br label %L2\n",
+        "\nL1:\n",
+        "  %t4 = load i64, ptr %b.2, align 8\n",
+        "  store i64 %t4, ptr %tmp0, align 8\n",
+        "  br label %L2\n",
+        "\nL2:\n",
+        "  %t5 = load i64, ptr %tmp0, align 8\n  ret i64 %t5\n}\n",
+    };
+    gen_env.expect_text(got[cast(str.find(got, "  %t1 = load i8"), u64)..],
+                        gen_env.join_lines(&e, want[0..13]));
+}
+
+// An aggregate conditional writes through gen_expr_into, which is the other
+// half of the lowering: each arm writes the whole value into the one
+// destination and the two blocks meet at the continuation. The structural
+// check of item 10 runs over this definition as over every other here, since
+// the aggregate path duplicates a memcpy per arm (D19.3).
+fn void an_aggregate_conditional_writes_each_arm_into_the_destination() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    strbuf.append(&src, "struct buf {\n    u8 mut@ own data;\n    u64 len;\n}\n");
+    strbuf.append(&src, "fn buf take(bool go, buf mut* a, buf mut* b) {\n");
+    strbuf.append(&src, "    return go ? move(*a) : move(*b);\n}\n");
+    string got = emit(&e, wrap(&b, strbuf.view(&src)), "take");
+    string[14] mut want = {
+        "  br i1 %t2, label %L0, label %L1\n",
+        "\nL0:\n",
+        "  %t3 = load ptr, ptr %a.1, align 8\n",
+        // The move reads the operand into an intermediate, empties it and
+        // only then copies it into the destination (D17.6, item 18).
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %t3, i64 24,",
+        " i1 false)\n",
+        "  call void @llvm.memset.p0.i64(ptr align 8 %t3, i8 0, i64 24, i1 false)\n",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %tmp0, i64 24,",
+        " i1 false)\n",
+        "  br label %L2\n",
+        "\nL1:\n",
+        "  %t4 = load ptr, ptr %b.2, align 8\n",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp1, ptr align 8 %t4, i64 24,",
+        " i1 false)\n",
+        "  call void @llvm.memset.p0.i64(ptr align 8 %t4, i8 0, i64 24, i1 false)\n",
+    };
+    assert(str.find(got, gen_env.join_lines(&e, want[0..14])) >= 0);
 }
 
 // ---- switch (D7.6, D7.7) -------------------------------------------------------------
@@ -446,10 +592,15 @@ fn i32 main() {
     an_if_else_chain_opens_its_blocks_in_allocation_order();
     println("branches ok");
     a_while_loop_is_a_head_a_body_and_a_continuation();
+    a_do_while_tests_after_its_body();
+    a_break_in_a_do_while_skips_the_test();
     a_for_loop_branches_through_its_step_block();
     a_range_for_walks_an_invented_counter();
     a_break_in_a_switch_in_a_loop_leaves_the_switch_alone();
     println("loops ok");
+    a_conditional_in_a_return_ends_every_block_it_opens();
+    an_aggregate_conditional_writes_each_arm_into_the_destination();
+    println("conditional ok");
     a_switch_lists_every_label_and_falls_into_no_clause();
     an_enum_switch_with_no_default_gets_a_failure_block();
     println("switch ok");

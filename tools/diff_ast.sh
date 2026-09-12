@@ -35,6 +35,10 @@
 # message of its own -- and it stands after the two guards below, so that a
 # stage1 which exits 2 while printing the message is reported and not counted.
 #
+# `do`-`while` and `?:` are the second such construct and are skipped the same
+# way (D6.6, D7.5, T-044), with a count of their own and one guard more:
+# stage2 must not report the refusal stage1 reports.
+#
 # The corpus is every .ft file the repository holds, not only test/lang:
 # std/*.ft, src/fort/*.ft, test/fort/*.ft and test/fort_lint/*.ft hold
 # constructs the language tests do not. The copies under build/ are the same
@@ -63,7 +67,7 @@ done
 # constant: a file must not be able to slip out of the comparison. A ticket
 # that adds or removes a .ft file changes all four lines in the same commit:
 # diff_tokens.sh, diff_ast.sh, diff_check.sh and diff_ir.sh.
-FT_FILES=768
+FT_FILES=772
 
 # The files of that corpus src/bootstrap refuses for a nested array or span
 # level, which src/fort reads (D3.6, T-043). They are skipped below, and this
@@ -75,6 +79,15 @@ NESTED_FILES=24
 # The four diagnostics src/bootstrap reports for such a type
 # (src/bootstrap/parser.c, check_one_aggregate_level).
 NESTED_MESSAGES='multi-dimensional arrays|spans of arrays|arrays of spans|spans of spans'
+
+# The same for the second construct the two parsers read differently:
+# src/fort implements `do`-`while` and `?:` (D6.6, D7.5, T-044) and
+# src/bootstrap refuses both, so stage1 answers such a file with the refusal
+# and no tree to compare. These files are not skipped in silence either: the
+# count is an equality, and stage2 must not report the refusal itself, which
+# is what says the divergence is the one intended.
+FORM_FILES=12
+FORM_MESSAGES='do-while|\?:'
 
 files=$(find . -name '*.ft' -not -path './build/*' -not -path './.git/*' \
     -not -path './.worktrees/*' | sort)
@@ -95,6 +108,7 @@ trap 'rm -rf "$work"' EXIT
 status=0
 differing=0
 nested=0
+forms=0
 # The list is read line by line rather than word by word: a path holding a
 # space would otherwise be split into two paths neither compiler can open,
 # and two compilers failing alike is what this script would call agreement.
@@ -105,6 +119,49 @@ while IFS= read -r file; do
     "$stage2" --ast "$file" >"$work/two.out" 2>"$work/two.err"
     two_status=$?
     set -e
+    # stage1 refuses `do`-`while` and `?:` and stage2 reads both, so there is
+    # nothing to compare. The file is counted, and stage2 is held to the other
+    # half of the divergence: it must not report that refusal. Its status and
+    # the rest of its output are not compared, since such a file may hold an
+    # error of another kind as well -- test/highlight/scopes.ft holds a
+    # lexical one and run/constants/006_folding_float_ternary.ft a float
+    # literal, which both compilers refuse.
+    if grep -Eq "not supported by the bootstrap compiler: ($FORM_MESSAGES)" \
+        "$work/one.err"; then
+        forms=$((forms + 1))
+        if grep -Eq "not supported by the bootstrap compiler: ($FORM_MESSAGES)" \
+            "$work/two.err"; then
+            echo "diff_ast.sh: $file: stage2 must accept the construct stage1 refuses" >&2
+            head -n 5 "$work/two.err" >&2
+            status=1
+            differing=$((differing + 1))
+            continue
+        fi
+        # There is no tree to compare, so stage2's own answer is held against
+        # what a parser must produce, exactly as stage1's is below: a status
+        # of 0 or 1 and a dump that is one module node. Without this a stage2
+        # that crashed or wrote nothing on a `?:` would pass, which is the
+        # "two compilers that answer nothing agree about everything" trap this
+        # script is written against.
+        if [ "$two_status" -gt 1 ]; then
+            echo "diff_ast.sh: $file: stage2 exited $two_status, expected 0 or 1" >&2
+            cat "$work/two.err" >&2
+            status=1
+            differing=$((differing + 1))
+            continue
+        fi
+        case $(cat "$work/two.out") in
+        "(module"*")") ;;
+        *)
+            echo "diff_ast.sh: $file: stage2's dump is not a module node" >&2
+            head -c 200 "$work/two.out" >&2
+            echo >&2
+            status=1
+            differing=$((differing + 1))
+            ;;
+        esac
+        continue
+    fi
     # Two dead compilers agree about everything, so stage1's answer is held
     # against what a parser must produce before the two are compared at all: a
     # status of 0 (clean) or 1 (a diagnostic was reported, D14.1) and a tree
@@ -197,10 +254,17 @@ if [ "$nested" -ne "$NESTED_FILES" ]; then
     echo "diff_ast.sh: using one raises or lowers NESTED_FILES beside FT_FILES" >&2
     exit 1
 fi
+if [ "$forms" -ne "$FORM_FILES" ]; then
+    echo "diff_ast.sh: skipped $forms files for a do-while or a '?:'," >&2
+    echo "diff_ast.sh: expected exactly $FORM_FILES; a ticket that adds or removes a test" >&2
+    echo "diff_ast.sh: using one raises or lowers FORM_FILES beside FT_FILES" >&2
+    exit 1
+fi
 if [ "$status" -eq 0 ]; then
     echo "stage1 and stage2 agree about the syntax tree, the diagnostics and the exit"
-    echo "status of $((count - nested)) of the $count .ft files in the repository;"
-    echo "$nested use a nested array or span level, which stage1 alone refuses"
+    echo "status of $((count - nested - forms)) of the $count .ft files in the repository;"
+    echo "$nested use a nested array or span level and $forms a do-while or a '?:',"
+    echo "which stage1 alone refuses"
 else
     echo "diff_ast.sh: $differing of $count .ft files differ" >&2
 fi

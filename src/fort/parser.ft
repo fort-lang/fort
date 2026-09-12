@@ -1250,8 +1250,9 @@ fn ast.node mut* parse_binary(parser mut* p, i32 min_prec) {
 }
 
 // ternary_expr = or_expr [ "?" expr ":" ternary_expr ], right-associative
-// (D6.1). As for `do`-`while`, the whole form is parsed before `?:` is
-// reported as outside the C bootstrap's subset.
+// (D6.1). As for `do`-`while`, stage1 parses the whole form and then refuses
+// it, because `?:` is outside the C bootstrap's subset; the self-hosted
+// compiler keeps the parser and drops that refusal (toolchain.md 7.3, T-044).
 fn ast.node mut* parse_ternary(parser mut* p) {
     ast.node mut* cond = parse_binary(p, PREC_OR);
     if (cond == null || !at(p, lexer.tok_kind.question)) {
@@ -1270,9 +1271,6 @@ fn ast.node mut* parse_ternary(parser mut* p) {
     }
     leave(p);
     if (n->b == null || n->c == null) {
-        return null;
-    }
-    if (unsupported(p, at_loc, "?:")) {
         return null;
     }
     return finish(p, n);
@@ -1703,9 +1701,11 @@ fn ast.node mut* parse_while(parser mut* p) {
     return finish(p, n);
 }
 
-// do_stmt = "do" block "while" "(" expr ")" ";" (D7.5). The whole form is
-// parsed before `do`-`while` is reported as outside the C bootstrap's subset,
-// so this is the parser the self-hosted compiler keeps, minus the one check.
+// do_stmt = "do" block "while" "(" expr ")" ";" (D7.5). stage1 parses the
+// whole form and then refuses it, because `do`-`while` is outside the C
+// bootstrap's subset; the self-hosted compiler keeps the parser and drops
+// that refusal, so this form is the one difference the two parsers have here
+// (toolchain.md 7.3, T-044).
 fn ast.node mut* parse_do(parser mut* p) {
     diag.loc at_loc = here(p);
     ast.node mut* n = node_at(p, ast.ast_kind.k_do_while, at_loc);
@@ -1716,9 +1716,6 @@ fn ast.node mut* parse_do(parser mut* p) {
     }
     n->b = parse_condition(p);
     if (n->b == null || !expect(p, lexer.tok_kind.semi, "';'")) {
-        return null;
-    }
-    if (unsupported(p, at_loc, "do-while")) {
         return null;
     }
     return finish(p, n);

@@ -1054,6 +1054,55 @@ fn gen.gen_val gen_short_circuit(gen.emitter mut* g, ast.node* n) {
     return gen.gen_load_place(g, slot);
 }
 
+// ---- the conditional operator (D6.6) -----------------------------------------------
+
+// `cond ? a : b`: the condition branches to one arm or the other and only
+// that arm is evaluated (D6.6), so the two arms are two blocks that write
+// into one destination and meet at a continuation.
+//
+// Each arm ends in an unconditional `br` with no `g->terminated` guard, where
+// gen_if, gen_while and gen_do_while all have one, because no arm can end a
+// block: an expression writes a terminator only through a call that returns
+// nothing, and check.check_ternary refuses such an arm with "has no value"
+// (D8.5, D12.2). gen_short_circuit is written the same way for the same
+// reason. A ticket that lets an arm terminate adds the guard here, and
+// nothing else will report it: `opt -passes=verify` accepts an instruction
+// after a terminator (item 10, AGENTS.md). The destination is a stack
+// slot rather than a `phi`, as `&&` and `||` are, so the tree walk never has
+// to know its predecessors (item 10, D19.4). `dst` is the place the value
+// lands in, and it holds an aggregate arm as well (D19.3).
+fn void gen_ternary(gen.emitter mut* g, ast.node* n, gen.gen_place dst) {
+    gen.gen_val cond = gen_expr_value(g, n->a);
+    if (g->failed) {
+        return;
+    }
+    u64 then_block = gen.gen_label(g);
+    u64 else_block = gen.gen_label(g);
+    u64 done = gen.gen_label(g);
+    gen.gen_br_cond(g, cond, then_block, else_block);
+    gen.gen_block_begin(g, then_block);
+    gen_expr_into(g, n->b, dst);
+    if (g->failed) {
+        return;
+    }
+    gen.gen_br(g, done);
+    gen.gen_block_begin(g, else_block);
+    gen_expr_into(g, n->c, dst);
+    if (g->failed) {
+        return;
+    }
+    gen.gen_br(g, done);
+    gen.gen_block_begin(g, done);
+}
+
+// The same as a scalar value: the slot the two arms wrote into is read back
+// at the continuation.
+fn gen.gen_val gen_ternary_value(gen.emitter mut* g, ast.node* n) {
+    gen.gen_place slot = gen.gen_temp_place(g, n->ty);
+    gen_ternary(g, n, slot);
+    return gen.gen_load_place(g, slot);
+}
+
 // ---- casts (item 12, D3.14) -------------------------------------------------------
 
 fn gen.gen_val gen_cast(gen.emitter mut* g, ast.node* n) {
@@ -1375,11 +1424,13 @@ fn gen.gen_place gen_expr_place(gen.emitter mut* g, ast.node* n) {
             return out;
         }
     case ast.ast_kind.k_span, ast.ast_kind.k_string, ast.ast_kind.k_struct_lit,
-         ast.ast_kind.k_array_lit, ast.ast_kind.k_brace_init:
+         ast.ast_kind.k_array_lit, ast.ast_kind.k_brace_init, ast.ast_kind.k_ternary:
         // A span expression yields a view, which is a value and not storage
         // (D6.9), so its header is built in a temporary, as a `string`
         // literal's is (D3.7); `point{1, 2}.x` and `i32[3]{7, 8, 9}[1]` read
-        // a member out of the literal's own temporary (D6.5, D6.7).
+        // a member out of the literal's own temporary (D6.5, D6.7). A
+        // conditional is an rvalue as well and is read out of its own slot
+        // (D6.6, D6.7).
         return rvalue_place(g, n);
     case ast.ast_kind.k_cast, ast.ast_kind.k_call, ast.ast_kind.k_new:
         if (gen.gen_is_aggregate(n->ty)) {
@@ -1533,6 +1584,8 @@ fn gen.gen_val gen_expr_value(gen.emitter mut* g, ast.node* n) {
         return gen_unary_value(g, n);
     case ast.ast_kind.k_binary:
         return gen_binary_value(g, n);
+    case ast.ast_kind.k_ternary:
+        return gen_ternary_value(g, n);
     case ast.ast_kind.k_cast:
         return gen_cast(g, n);
     case ast.ast_kind.k_call:
@@ -1695,6 +1748,11 @@ fn void gen_expr_into(gen.emitter mut* g, ast.node* n, gen.gen_place dst) {
         return;
     case ast.ast_kind.k_span:
         gen_span_expr(g, n, dst);
+        return;
+    case ast.ast_kind.k_ternary:
+        // An aggregate arm is written into the destination by the arm itself,
+        // so the conditional needs no temporary of its own (D19.3).
+        gen_ternary(g, n, dst);
         return;
     default:
         break;

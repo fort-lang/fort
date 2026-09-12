@@ -1234,8 +1234,9 @@ decision or document says ownership is "by convention", this section supersedes 
   all, since lending it would leave nothing able to free it. `?:` is the exception: it yields
   `own` when both operands are `own` rvalues or `null`
   (D6.2), so the temporary lands wherever the conditional's value lands. Stage1 does not implement
-  `?:` at all (D3.10, `bootstrap-unsupported.txt`), so that clause is carried by the ticket that
-  adds it, together with a `fail` test for `use(flag ? new(node) : new(node))`. Amended
+  `?:` at all (D3.10), so that clause is carried by the self-hosted compiler alone: T-044 added
+  it, with the `fail` test for `use(flag ? new(node) : new(node))`
+  (`test/lang/fail/ownership/037_ternary_own_arms.ft`). Amended
   2026-09-11: the comparison clause read "so `own` never blocks a comparison" without
   distinguishing an lvalue from an rvalue, which D17.8's "anything else is a compile error"
   contradicts for the rvalue (T-022).

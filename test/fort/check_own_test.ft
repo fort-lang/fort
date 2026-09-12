@@ -271,6 +271,95 @@ fn void equality_lends_both_operands() {
     assert(check_env.type_text(&e, o.ty) == "bool");
 }
 
+// ---- the arms of the conditional (D6.6, D17.4) -------------------------------------
+
+// The arms of `?:` lend, so two owning lvalue arms yield a view and the
+// conditional owns nothing (D17.4).
+fn void the_arms_of_a_conditional_lend() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(open_probe2(&e, "fn void probe(bool go) {\n    borrow(go ? mine : theirs);\n}\n",
+        "fn void borrow(cell mut* p) {\n    return;\n}\n"));
+    scope.scope mut params = scope.scope{};
+    check_env.open_params(&e, &params, "probe");
+    check.expr o = check_env.probe_expr(&e,
+        check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_ternary, ""));
+    check_env.close_params(&e, &params);
+    assert(check_env.errors(&e) == 0);
+    assert(check_env.type_text(&e, o.ty) == "cell mut*");
+}
+
+// It yields `own` when both arms are `own` rvalues or `null`, which is the
+// one case where the value the conditional produces still has an owner
+// (D17.4). It is an rvalue, so it must land in an `own` place (D17.8).
+fn void two_owning_rvalue_arms_yield_an_owning_rvalue() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(open_probe2(&e, "fn void probe(bool go) {\n    keep(go ? new(cell) : null);\n}\n",
+        "fn void keep(cell mut* own p) {\n    del(p);\n}\n"));
+    scope.scope mut params = scope.scope{};
+    check_env.open_params(&e, &params, "probe");
+    check.expr o = check_env.probe_expr(&e,
+        check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_ternary, ""));
+    check_env.close_params(&e, &params);
+    assert(check_env.type_text(&e, o.ty) == "cell mut* own");
+    assert(!o.lvalue);
+}
+
+// An `own` rvalue beside an arm that does not own would be lent, and nothing
+// would be left to free it, which is the error of D17.8.
+fn void an_owning_rvalue_arm_beside_a_lending_one_would_leak() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(open_probe2(&e, "fn void probe(bool go) {\n    borrow(go ? theirs : new(cell));\n}\n",
+        "fn void borrow(cell mut* p) {\n    return;\n}\n"));
+    scope.scope mut params = scope.scope{};
+    check_env.open_params(&e, &params, "probe");
+    check_env.probe_expr(&e,
+        check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_ternary, ""));
+    check_env.close_params(&e, &params);
+    assert(check_env.said(&e, "owning temporary would leak: the other arm does not own"));
+}
+
+// Lending strips the `own` of a reference (D17.4) and not the `own` a struct
+// holds by value, so an owning aggregate arm still owns after check_lend and
+// the copy the conditional makes is the transfer of D17.7. Without this the
+// conditional would yield an owning rvalue that no arm was emptied for, and
+// `del` of each would free one allocation twice (T-044 review).
+fn void an_owning_aggregate_arm_is_a_transfer_and_needs_move() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(open_probe(&e, "fn void probe(bool go) {\n    hh = go ? hh : hh;\n}\n"));
+    scope.scope mut params = scope.scope{};
+    check_env.open_params(&e, &params, "probe");
+    check_env.probe_expr(&e,
+        check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_ternary, ""));
+    check_env.close_params(&e, &params);
+    assert(check_env.said(&e, "copying an owning value requires 'move'"));
+}
+
+// `move` in each arm is what the rule asks for, and two `move`s are two
+// owning rvalues, so the conditional yields an owning value that must land in
+// an owning place (D17.5, D17.6).
+fn void two_moved_aggregate_arms_yield_an_owning_rvalue() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(open_probe(&e, "fn void probe(bool go) {\n    hh = go ? move(hh) : move(hh);\n}\n"));
+    scope.scope mut params = scope.scope{};
+    check_env.open_params(&e, &params, "probe");
+    check.expr o = check_env.probe_expr(&e,
+        check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_ternary, ""));
+    check_env.close_params(&e, &params);
+    assert(check_env.errors(&e) == 0);
+    assert(check_env.type_text(&e, o.ty) == "holder");
+    assert(!o.lvalue);
+}
+
 // ---- the return of an owning value (D17.5, D17.7) ----------------------------------
 
 fn void returning_an_own_parameter_outright_is_an_implicit_move() {
@@ -404,6 +493,11 @@ fn i32 main() {
     casting_an_owning_rvalue_to_a_type_that_does_not_own_would_leak();
     an_owning_lvalue_lends_to_a_borrowing_parameter();
     equality_lends_both_operands();
+    the_arms_of_a_conditional_lend();
+    two_owning_rvalue_arms_yield_an_owning_rvalue();
+    an_owning_rvalue_arm_beside_a_lending_one_would_leak();
+    an_owning_aggregate_arm_is_a_transfer_and_needs_move();
+    two_moved_aggregate_arms_yield_an_owning_rvalue();
     returning_an_own_parameter_outright_is_an_implicit_move();
     returning_an_owning_value_that_names_no_local_needs_move();
     a_second_check_clears_every_annotation_it_will_write();

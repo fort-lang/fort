@@ -454,6 +454,32 @@ fn void gen_while(gen.emitter mut* g, ast.node* n) {
     gen.gen_block_begin(g, done);
 }
 
+// `do { } while (cond);` (D7.5): the body runs once before the first test,
+// so the entry edge goes to the body and not to a head block. The test block
+// re-evaluates the condition and branches back to the body. `continue`
+// targets the test block, because the test runs after every iteration of a
+// `do`, and `break` targets the continuation (D7.6).
+fn void gen_do_while(gen.emitter mut* g, ast.node* n) {
+    u64 body = gen.gen_label(g);
+    u64 test = gen.gen_label(g);
+    u64 done = gen.gen_label(g);
+    gen.gen_br(g, body);
+    gen.gen_block_begin(g, body);
+    gen_loop_body(g, n->a, done, test);
+    if (!g->terminated) {
+        // The body may have ended in a `break` or a `return`, which already
+        // wrote the block's one terminator (item 10).
+        gen.gen_br(g, test);
+    }
+    gen.gen_block_begin(g, test);
+    gen.gen_val cond = gen_expr.gen_expr_value(g, n->b);
+    if (g->failed) {
+        return;
+    }
+    gen.gen_br_cond(g, cond, body, done);
+    gen.gen_block_begin(g, done);
+}
+
 // `for (init; cond; step) { }` (D7.5): `init` runs in the block the loop
 // stands in, the head tests the condition, the body branches to the step
 // block and the step branches back to the head. `continue` targets the step
@@ -765,9 +791,7 @@ fn void gen_stmt(gen.emitter mut* g, ast.node* n) {
         gen_while(g, n);
         return;
     case ast.ast_kind.k_do_while:
-        // The parser rejects `do`-`while` in the bootstrap subset, so this
-        // arm is defensive and no later ticket owns it (D15).
-        gen.gen_todo(g, n->loc, "a do-while loop");
+        gen_do_while(g, n);
         return;
     case ast.ast_kind.k_for:
         gen_for(g, n);

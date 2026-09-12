@@ -3113,6 +3113,122 @@ fn void check_literal(checker mut* ck, ast.node mut* n, expr mut* out, bool arra
     check_brace(ck, n->b, t.ty, out);
 }
 
+// ---- the conditional operator (D6.6) -----------------------------------------------
+
+// Whether an arm keeps its `own` in the result: an `own` rvalue, which has no
+// other owner, or `null`, which owns nothing (D17.4). Two such arms are the
+// one case where the conditional yields an `own` value.
+fn bool arm_keeps_own(expr* e) {
+    return e->value.kind == consts.cval_kind.cv_null || is_owning_rvalue(e);
+}
+
+// The value of a conditional whose three parts are constants: the arm the
+// condition selects, since the other arm is not evaluated. That is what makes
+// `?:` a constant expression (D4.6).
+fn void fold_ternary(checker mut* ck, ast.node* n, expr* a, expr* b, expr mut* out) {
+    consts.cval c = check_node_value(ck, n->a);
+    if (c.kind != consts.cval_kind.cv_bool || a->value.kind == consts.cval_kind.cv_none
+        || b->value.kind == consts.cval_kind.cv_none) {
+        return;
+    }
+    out->init_const = a->init_const && b->init_const;
+    if (c.mag != 0) {
+        out->value = a->value;
+    } else {
+        out->value = b->value;
+    }
+}
+
+// Two untyped arms: the conditional is untyped too and takes its type from
+// the context, as every untyped constant does (D4.1, D6.6). A folded
+// condition also gives it the selected arm's value and provisional type.
+fn void ternary_untyped(checker mut* ck, ast.node* n, expr* a, expr* b, expr mut* out) {
+    out->untyped = true;
+    out->ty = a->ty;
+    consts.cval c = check_node_value(ck, n->a);
+    if (c.kind != consts.cval_kind.cv_bool) {
+        return;
+    }
+    fold_ternary(ck, n, a, b, out);
+    if (c.mag != 0) {
+        out->ty = a->ty;
+    } else {
+        out->ty = b->ty;
+    }
+}
+
+// `cond ? a : b` (D6.6): the condition is `bool`, an untyped arm adopts the
+// other arm's type (D4.1) and the two arms must then have one type, which
+// includes their mutability, since there is no promotion (D6.2).
+//
+// The arms lend, so an `own` lvalue arm yields a view (D17.4). The result is
+// `own` only when both arms are `own` rvalues or `null`: lending an `own`
+// rvalue would leave nothing able to free it, which is the error of D17.8.
+fn void check_ternary(checker mut* ck, ast.node mut* n, expr mut* out) {
+    check_condition(ck, n->a, "a condition");
+    expr mut a = expr{};
+    expr mut b = expr{};
+    check_expr(ck, n->b, &a);
+    check_expr(ck, n->c, &b);
+    expr_clear(ck, out);
+    if (check_no_value(ck, n->b, &a) || check_no_value(ck, n->c, &b)) {
+        return;
+    }
+    if (a.untyped && b.untyped) {
+        ternary_untyped(ck, n, &a, &b, out);
+        return;
+    }
+    // An untyped arm takes the type of the other one (D4.1, D6.6).
+    if (a.untyped) {
+        convert(ck, n->b, &a, b.ty, "the arm of '?:'");
+    } else if (b.untyped) {
+        convert(ck, n->c, &b, a.ty, "the arm of '?:'");
+    }
+    if (check_poisoned(a.ty) || check_poisoned(b.ty)) {
+        return;
+    }
+    types.node* mut lt = a.ty;
+    types.node* mut rt = b.ty;
+    if (!arm_keeps_own(&a) || !arm_keeps_own(&b)) {
+        if (check_owning_temporary(ck, n->b->loc, &a, "the other arm does not own")
+            || check_owning_temporary(ck, n->c->loc, &b, "the other arm does not own")) {
+            return;
+        }
+        lt = check_lend(ck, a.ty);
+        rt = check_lend(ck, b.ty);
+    }
+    if (!types.type_equal(lt, rt)) {
+        // Both arms must have one type, mutability levels included (D6.2,
+        // D6.6).
+        check_msg_begin(ck);
+        msg_str(ck, "'?:' takes two operands of the same type, not ");
+        check_msg_type(ck, a.ty);
+        msg_str(ck, " and ");
+        check_msg_type(ck, b.ty);
+        check_msg_end(ck, n->loc);
+        return;
+    }
+    out->ty = lt;
+    // Both arms then meet the result type, which is where the transfer rule
+    // of D17.5 and D17.7 lives. Lending strips the `own` of a reference
+    // (D17.4) and not the `own` a struct or a fixed array holds by value, so
+    // an owning aggregate arm still owns after check_lend: without this, two
+    // owning lvalue arms would be copied into an owning rvalue with nothing
+    // emptied, and `del` of each would free one allocation twice. Writing
+    // `move` in each arm is what the rule asks for, and that yields two
+    // owning rvalues, which is the case above. The first arm alone is
+    // converted when it fails, so one copy reports one diagnostic.
+    convert(ck, n->b, &a, lt, "the arm of '?:'");
+    if (!check_poisoned(a.ty)) {
+        convert(ck, n->c, &b, lt, "the arm of '?:'");
+    }
+    if (check_poisoned(a.ty) || check_poisoned(b.ty)) {
+        out->ty = types.type_error(&ck->types);
+        return;
+    }
+    fold_ternary(ck, n, &a, &b, out);
+}
+
 // ---- the dispatch ------------------------------------------------------------------
 
 // Checks one expression and annotates its node.
@@ -3173,7 +3289,7 @@ fn void check_expr(checker mut* ck, ast.node mut* n, expr mut* out) {
         // (D6.5).
         check_error(ck, n->loc, "a brace initializer is not an expression");
     case ast.ast_kind.k_ternary:
-        check_error(ck, n->loc, "not supported by the bootstrap compiler: ?:");
+        check_ternary(ck, n, out);
     case ast.ast_kind.k_error:
         // The tokens a syntax error made the parser skip: already reported
         // (D14.2).

@@ -103,6 +103,26 @@ fn void the_precedence_ladder_of_d6_1() {
            == "(binary + (ident a) (binary * (ident b) (ident c)))");
 }
 
+// `?:` is the loosest operator of D6.1 and it is right-associative, so a
+// second conditional in the else arm is nested there and not at the root.
+// stage1 parses the same tree and then refuses the form, because `?:` is
+// outside the C bootstrap's subset (toolchain.md 7.3, T-044).
+fn void the_conditional_is_the_loosest_operator_and_leans_right() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    assert(parse_env.expr_dump(&e, "a ? b : c")
+           == "(ternary (ident a) (ident b) (ident c))");
+    assert(parse_env.expr_dump(&e, "a || b ? c : d")
+           == "(ternary (binary || (ident a) (ident b)) (ident c) (ident d))");
+    assert(parse_env.expr_dump(&e, "a ? b : c ? d : f")
+           == "(ternary (ident a) (ident b) (ternary (ident c) (ident d) (ident f)))");
+    // The then arm is a whole expression, so a conditional there needs no
+    // parentheses either (D6.1).
+    assert(parse_env.expr_dump(&e, "a ? b ? c : d : f")
+           == "(ternary (ident a) (ternary (ident b) (ident c) (ident d)) (ident f))");
+    assert(parse_env.errors(&e) == 0);
+}
+
 fn void parentheses_override_precedence() {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
@@ -370,6 +390,7 @@ fn i32 main() {
     wrapping_operators_have_their_plain_precedence();
     binary_operators_are_left_associative();
     the_precedence_ladder_of_d6_1();
+    the_conditional_is_the_loosest_operator_and_leans_right();
     parentheses_override_precedence();
     every_binary_operator_parses();
     comparisons_parse_but_do_not_chain();

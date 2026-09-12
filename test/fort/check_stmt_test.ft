@@ -309,6 +309,45 @@ fn void every_condition_must_be_bool() {
     assert(check_env.said(&e, "a condition must be bool, not i32"));
 }
 
+// D7.5: the body of a `do` runs before the condition, and a variable
+// declared in that body is not visible in the condition, because the two are
+// separate scopes.
+fn void a_do_while_body_is_not_visible_in_its_condition() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(body2(&e, "    i32 mut n = 0;\n    do {\n        n++;\n",
+                 "    } while (n < 3);"));
+    check_env.reopen(&e);
+    assert(!body2(&e, "    do {\n        i32 k = 1;\n        println(k);\n",
+                  "    } while (k < 3);"));
+    assert(check_env.said(&e, "unknown name 'k'"));
+    check_env.reopen(&e);
+    // Its condition is a condition like any other (D3.3, D7.5).
+    assert(!body2(&e, "    i32 mut n = 0;\n    do {\n        n++;\n",
+                  "    } while (n);"));
+    assert(check_env.said(&e, "a condition must be bool, not i32"));
+}
+
+// `break` and `continue` target a `do` as they target any other loop (D7.6),
+// and `continue` runs its test.
+fn void break_and_continue_target_a_do_while() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(body2(&e, "    i32 mut n = 0;\n    do {\n        n++;\n        continue;\n",
+                 "    } while (n < 3);"));
+    check_env.reopen(&e);
+    assert(body2(&e, "    i32 mut n = 0;\n    do {\n        n++;\n        break;\n",
+                 "    } while (n < 3);"));
+    check_env.reopen(&e);
+    // A `break` inside deferred code is refused wherever the `defer` stands
+    // (D7.8).
+    assert(!body2(&e, "    do {\n        defer {\n            break;\n        }\n",
+                  "    } while (false);"));
+    assert(check_env.said(&e, "'break' inside deferred code"));
+}
+
 fn void an_else_if_chain_is_checked() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -841,6 +880,8 @@ fn i32 main() {
     a_call_statement_may_discard_its_result();
     an_owning_result_may_not_be_discarded();
     every_condition_must_be_bool();
+    a_do_while_body_is_not_visible_in_its_condition();
+    break_and_continue_target_a_do_while();
     an_else_if_chain_is_checked();
     a_for_init_variable_is_scoped_to_the_loop();
     a_for_induction_variable_must_be_mut();

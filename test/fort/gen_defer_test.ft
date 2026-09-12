@@ -23,9 +23,9 @@ import std.strbuf;
 // The expected text of each case was read off stage1's own `fort -S` over the
 // same program and pasted here, never transcribed from the fort under test.
 //
-// All five cases emit a definition through the `emit` helper below, which runs
+// All six cases emit a definition through the `emit` helper below, which runs
 // the structural check of item 10 over it, so the check has one call site here
-// and covers all five.
+// and covers all six.
 
 fn string emit(gen_env.env mut* e, string src, string name) {
     assert(gen_env.open_module(e, src));
@@ -122,6 +122,44 @@ fn void a_defer_in_a_loop_body_is_copied_into_every_exit() {
     assert(e.g.strs.len == 2);
 }
 
+// The same in a `do`, where the two exits go to two different blocks: the
+// `continue` runs the body's deferred statement and branches to the test, and
+// the `break` runs its own copy and branches to the continuation (D7.5, D7.6,
+// D7.8). stage1 refuses `do`-`while`, so the expected text of this one case
+// was read off stage2 and its blocks are named here (T-044).
+fn void a_defer_in_a_do_while_body_is_copied_into_both_exits() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    strbuf.append(&src, "fn void in_do(bool go) {\n    do {\n");
+    strbuf.append(&src, "        defer eprintln(\"step\");\n        if (go) {\n");
+    strbuf.append(&src, "            continue;\n        }\n        break;\n");
+    strbuf.append(&src, "    } while (go);\n}\n");
+    string got = emit(&e, wrap(&b, strbuf.view(&src)), "in_do");
+    string[10] mut want = {
+        "\nL3:\n",
+        "  call void @fort_rt_print_str(i32 2, ptr @.str.0, i64 4)\n",
+        "  call void @fort_rt_print_char(i32 2, i8 zeroext 10)\n",
+        // The `continue` branches to the test block, which is L1 here.
+        "  br label %L1\n",
+        "\nL4:\n",
+        "  call void @fort_rt_print_str(i32 2, ptr @.str.1, i64 4)\n",
+        "  call void @fort_rt_print_char(i32 2, i8 zeroext 10)\n",
+        // The `break` branches to the continuation and runs no test.
+        "  br label %L2\n",
+        "\nL1:\n",
+        "  %t3 = load i8, ptr %go.0, align 1\n",
+    };
+    assert(str.find(got, gen_env.join_lines(&e, want[0..10])) >= 0);
+    assert(gen_env.record_text(&e, 0) == "step");
+    assert(gen_env.record_text(&e, 1) == "step");
+    assert(e.g.strs.len == 2);
+}
+
 // `return e` evaluates `e` before the deferred code runs, which cannot then
 // change the value returned (D7.8, D8.2): the value is in a register first.
 fn void a_return_reads_its_value_before_the_deferred_code_runs() {
@@ -204,6 +242,7 @@ fn i32 main() {
     a_block_runs_its_own_deferred_statements_when_it_ends();
     println("scopes ok");
     a_defer_in_a_loop_body_is_copied_into_every_exit();
+    a_defer_in_a_do_while_body_is_copied_into_both_exits();
     a_return_reads_its_value_before_the_deferred_code_runs();
     println("exits ok");
     an_aggregate_return_lands_in_a_temporary_when_anything_is_deferred();

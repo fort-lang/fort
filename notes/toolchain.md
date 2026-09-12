@@ -1338,7 +1338,8 @@ compiler`, whatever its own kind.
 `--xfail` and `--unsupported` name other lists; `--no-xfail` and `--no-unsupported` ignore
 them. Each compiler has one list of each kind: `xfail-stage2.txt` and `unsupported-stage2.txt`
 are stage2's, and the CMake test `lang-stage2` names both, because stage2 reads the nested
-levels stage1 refuses and must be judged for them like any other run test.
+levels stage1 refuses and implements the `do`-`while` and `?:` stage1 refuses (D6.6, D7.5), and
+must be judged for all of them like any other test.
 
 The harness prints one `PASS`, `FAIL`, `XFAIL`, `XPASS` or `ERROR` line per test with the
 reason where there is one, then a summary, and exits with 1 if any test is `FAIL`, `XPASS` or

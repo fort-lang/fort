@@ -326,9 +326,11 @@ set_tests_properties(fort-modules PROPERTIES
 # and src/bootstrap does not, so the tests that use them must be rejected
 # under stage1 and must compile and run under stage2. One list per compiler
 # says exactly that, and each name is judged by one rule or the other and
-# never excused. The day stage2 implements floats, `?:` or do-while is the day
-# stage1 does too, since one compiles the other, and the entry leaves both
-# lists then.
+# never excused. T-044 is the second ticket of that shape: stage2 implements
+# `do`-`while` and `?:` (D6.6, D7.5) and stage1 refuses both, so those six
+# entries left stage2's list and stayed in stage1's. The day stage2
+# implements floats, stage1 does too, since one compiles the other, and the
+# entry leaves both lists then.
 set(FORT_LANG_STAGE2_COMMAND
     "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}"
     --fort "${FORT_STAGE2_BINARY}"

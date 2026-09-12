@@ -247,7 +247,8 @@ A safe(r) C-like systems programming language.
   makes tests pass. `test/lang/bootstrap-unsupported.txt` lists tests that use features the C
   bootstrap deliberately lacks (floats, the nested array and span levels of D3.6, do-while,
   `?:`; function pointers are in its subset, D3.10), and `test/lang/unsupported-stage2.txt` is
-  the same list for stage2, which reads those levels; keep such features out of core tests, or
+  the same list for stage2, which reads those levels and implements `do`-`while` and `?:`
+  (T-044); keep such features out of core tests, or
   split them into their own test, so the core tests exercise stage1. `run_tests.py --lint`
   validates directives without a compiler and runs before every test run;
   `run_tests.py --check-json` is a mode of its own (ctest `lang_check_json`, also run by
@@ -596,10 +597,17 @@ A safe(r) C-like systems programming language.
   stage2, which one shared list cannot say. `test/lang/unsupported-stage2.txt` is stage2's list
   and `bootstrap-unsupported.txt` stays stage1's; `lang-stage2` names the first with
   `--unsupported`. Neither run excuses a test. A ticket that gives stage2 a feature stage1 lacks
-  takes the entry out of stage2's list alone, and it also raises `NESTED_FILES` in
-  `tools/diff_ast.sh`, which skips exactly the files stage1 refuses for a nested level and holds
-  that number as an equality: the differential compares two trees, and a file only one compiler
-  parses has no second tree.
+  takes the entry out of stage2's list alone, and it also raises `NESTED_FILES` or `FORM_FILES`
+  in `tools/diff_ast.sh`, which skips exactly the files stage1 refuses for a nested level or for
+  a `do`-`while` or a `?:` and holds each number as an equality: the differential compares two
+  trees, and a file only one compiler parses has no second tree. The second family carries one
+  guard more, since its two forms are whole constructs and not a type suffix: stage2 must not
+  report the refusal stage1 reports, which is what says the divergence is the intended one.
+  T-044 is the second ticket of this shape, and two of its answers are worth keeping. A `fail`
+  test whose subject is not the rejection -- `fail/operators/008_mixed_mutability_ternary.ft`
+  asserts that the two arms of a `?:` must have one type -- leaves stage2's list like any `run`
+  test, because stage2 now reports the error the test annotates. And a **new** test of such a
+  feature is added to stage1's list, never to stage2's, since stage1 must still reject it.
   ctest `stage-usage` (label `unit`) diffs stage1's and stage2's `--help`, `--version` and
   usage line, which is what holds the option table `src/fort/main.ft` copies from
   `src/bootstrap/driver.c` to it.
@@ -1062,8 +1070,8 @@ A safe(r) C-like systems programming language.
   **`src/fort` stays inside that subset until T-046**, the ticket that freezes stage1. stage1
   compiles stage2 at every build and the ctest `bootstrap` compiles it twice more, so a `src/fort`
   file that uses a construct stage1 lacks breaks the build and the fixed point on the same
-  commit. A feature leaves `test/lang/bootstrap-unsupported.txt` when stage1 gains it, not when
-  stage2 does.
+  commit. A feature leaves `test/lang/bootstrap-unsupported.txt` when stage1 gains it, which it
+  never will now, and leaves `test/lang/unsupported-stage2.txt` when stage2 gains it.
   **`src/lsp` is under no such rule**: stage2 compiles it, so it may use anything `src/fort`
   implements (D20.5). T-039 and not T-046 is the gate for the language server, because the server
   needs a self-hosted compiler that reproduces itself and not the frozen bootstrap. The ctest
