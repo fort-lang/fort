@@ -1,0 +1,347 @@
+//! run
+//! flags: -I ../../src/fort -I support -I ../../src
+//! stdout:
+//| values ok
+//| bytes ok
+//| documents ok
+//| ok
+import json as compiler_json;
+import lsp.json;
+import lsp_json_env;
+import std.strbuf;
+
+// src/lsp/json.ft holds a copy of the writer of src/fort/json.ft, because a
+// module of the server may not import the compiler's `json` (the header of
+// src/lsp/json.ft says why). A copy can drift from its original, so this file
+// is what makes the drift visible: the same calls go to both writers and the
+// bytes must be equal.
+//
+// The whole escape rule is covered by one loop over the 256 bytes, and the
+// sequences that rule refuses by a table beside it.
+//
+// Two things are deliberately not compared here. The depth limit: the
+// compiler's writer allows eight levels, which is one more than the deepest
+// document the check mode writes, and this one allows sixty-four, which is the
+// reader's limit. And the four preconditions both writers share -- a writer
+// with no buffer, a key at depth 0, an end with no container open and a begin
+// past the limit -- because a panic ends the program, so one test file holds
+// one panic and cannot hold the same panic from two writers. Each of the four
+// has a test for each writer instead: json_buffer_panic_test.ft and
+// lsp_json_buffer_panic_test.ft, json_key_panic_test.ft and
+// lsp_json_key_panic_test.ft, json_close_panic_test.ft and
+// lsp_json_close_panic_test.ft, json_deep_panic_test.ft and
+// lsp_json_deep_panic_test.ft. A writer that dropped a precondition turns its
+// own file red and leaves this one green.
+
+// The depth both writers allow, which is the smaller of the two limits.
+u64 SHARED_DEPTH = 8;
+
+// The bytes of one byte value, as a string of length one.
+fn string one_byte(strbuf.str_buf mut* b, u64 byte) {
+    strbuf.clear(b);
+    strbuf.push_byte(b, cast(byte, u8));
+    return strbuf.view(b);
+}
+
+// What each writer makes of a string.
+fn void agree_on_string(string s, string what) {
+    strbuf.str_buf mut mine = strbuf.create();
+    defer strbuf.free(&mine);
+    strbuf.str_buf mut theirs = strbuf.create();
+    defer strbuf.free(&theirs);
+    json.writer mut w = json.writer{};
+    json.write_init(&w, &mine);
+    json.write_str(&w, s);
+    compiler_json.writer mut c = compiler_json.writer{};
+    compiler_json.json_init(&c, &theirs);
+    compiler_json.json_str(&c, s);
+    lsp_json_env.check(strbuf.view(&mine), strbuf.view(&theirs), what);
+}
+
+// What each writer makes of a member name.
+fn void agree_on_key(string name, string what) {
+    strbuf.str_buf mut mine = strbuf.create();
+    defer strbuf.free(&mine);
+    strbuf.str_buf mut theirs = strbuf.create();
+    defer strbuf.free(&theirs);
+    json.writer mut w = json.writer{};
+    json.write_init(&w, &mine);
+    json.write_object_begin(&w);
+    json.write_key(&w, name);
+    json.write_int(&w, 1);
+    json.write_object_end(&w);
+    compiler_json.writer mut c = compiler_json.writer{};
+    compiler_json.json_init(&c, &theirs);
+    compiler_json.json_object_begin(&c);
+    compiler_json.json_key(&c, name);
+    compiler_json.json_int(&c, 1);
+    compiler_json.json_object_end(&c);
+    lsp_json_env.check(strbuf.view(&mine), strbuf.view(&theirs), what);
+}
+
+// ---- the values ------------------------------------------------------------------
+
+fn void the_two_writers_agree_on_the_literals() {
+    strbuf.str_buf mut mine = strbuf.create();
+    defer strbuf.free(&mine);
+    strbuf.str_buf mut theirs = strbuf.create();
+    defer strbuf.free(&theirs);
+    json.writer mut w = json.writer{};
+    json.write_init(&w, &mine);
+    json.write_array_begin(&w);
+    json.write_bool(&w, true);
+    json.write_bool(&w, false);
+    json.write_null(&w);
+    json.write_array_end(&w);
+    compiler_json.writer mut c = compiler_json.writer{};
+    compiler_json.json_init(&c, &theirs);
+    compiler_json.json_array_begin(&c);
+    compiler_json.json_bool(&c, true);
+    compiler_json.json_bool(&c, false);
+    compiler_json.json_null(&c);
+    compiler_json.json_array_end(&c);
+    lsp_json_env.check(strbuf.view(&mine), strbuf.view(&theirs), "the three literals");
+}
+
+fn void the_two_writers_agree_on_the_numbers() {
+    strbuf.str_buf mut mine = strbuf.create();
+    defer strbuf.free(&mine);
+    strbuf.str_buf mut theirs = strbuf.create();
+    defer strbuf.free(&theirs);
+    json.writer mut w = json.writer{};
+    json.write_init(&w, &mine);
+    json.write_array_begin(&w);
+    json.write_uint(&w, 0);
+    json.write_uint(&w, 18446744073709551615);
+    json.write_int(&w, -9223372036854775807 - 1);
+    json.write_int(&w, 9223372036854775807);
+    json.write_int(&w, -1);
+    json.write_array_end(&w);
+    compiler_json.writer mut c = compiler_json.writer{};
+    compiler_json.json_init(&c, &theirs);
+    compiler_json.json_array_begin(&c);
+    compiler_json.json_uint(&c, 0);
+    compiler_json.json_uint(&c, 18446744073709551615);
+    compiler_json.json_int(&c, -9223372036854775807 - 1);
+    compiler_json.json_int(&c, 9223372036854775807);
+    compiler_json.json_int(&c, -1);
+    compiler_json.json_array_end(&c);
+    lsp_json_env.check(strbuf.view(&mine), strbuf.view(&theirs), "the widest numbers");
+}
+
+fn void the_two_writers_agree_on_the_separators() {
+    strbuf.str_buf mut mine = strbuf.create();
+    defer strbuf.free(&mine);
+    strbuf.str_buf mut theirs = strbuf.create();
+    defer strbuf.free(&theirs);
+    json.writer mut w = json.writer{};
+    json.write_init(&w, &mine);
+    json.write_object_begin(&w);
+    json.write_key(&w, "a");
+    json.write_array_begin(&w);
+    json.write_int(&w, 1);
+    json.write_int(&w, 2);
+    json.write_array_end(&w);
+    json.write_key(&w, "b");
+    json.write_object_begin(&w);
+    json.write_key(&w, "c");
+    json.write_null(&w);
+    json.write_object_end(&w);
+    json.write_object_end(&w);
+    compiler_json.writer mut c = compiler_json.writer{};
+    compiler_json.json_init(&c, &theirs);
+    compiler_json.json_object_begin(&c);
+    compiler_json.json_key(&c, "a");
+    compiler_json.json_array_begin(&c);
+    compiler_json.json_int(&c, 1);
+    compiler_json.json_int(&c, 2);
+    compiler_json.json_array_end(&c);
+    compiler_json.json_key(&c, "b");
+    compiler_json.json_object_begin(&c);
+    compiler_json.json_key(&c, "c");
+    compiler_json.json_null(&c);
+    compiler_json.json_object_end(&c);
+    compiler_json.json_object_end(&c);
+    lsp_json_env.check(strbuf.view(&mine), strbuf.view(&theirs), "the separators");
+}
+
+fn void the_two_writers_agree_to_the_shared_depth() {
+    strbuf.str_buf mut mine = strbuf.create();
+    defer strbuf.free(&mine);
+    strbuf.str_buf mut theirs = strbuf.create();
+    defer strbuf.free(&theirs);
+    json.writer mut w = json.writer{};
+    json.write_init(&w, &mine);
+    compiler_json.writer mut c = compiler_json.writer{};
+    compiler_json.json_init(&c, &theirs);
+    u64 mut i = 0;
+    while (i < SHARED_DEPTH) {
+        json.write_array_begin(&w);
+        compiler_json.json_array_begin(&c);
+        i += 1;
+    }
+    i = 0;
+    while (i < SHARED_DEPTH) {
+        json.write_array_end(&w);
+        compiler_json.json_array_end(&c);
+        i += 1;
+    }
+    lsp_json_env.check(strbuf.view(&mine), strbuf.view(&theirs), "eight levels");
+}
+
+// ---- every byte ------------------------------------------------------------------
+
+fn void the_two_writers_agree_on_every_byte_of_a_string() {
+    // 256 one-byte strings, which covers the whole escape rule: the quote and
+    // the backslash, the three spelled-out control bytes, the other control
+    // bytes, printable ASCII, and every byte above 127, each of which is a
+    // sequence of one byte that no rule of UTF-8 admits.
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    u64 mut byte = 0;
+    while (byte < 256) {
+        agree_on_string(one_byte(&source, byte), "one byte");
+        byte += 1;
+    }
+}
+
+fn void the_two_writers_agree_on_every_byte_of_a_name() {
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    u64 mut byte = 0;
+    while (byte < 256) {
+        agree_on_key(one_byte(&source, byte), "one byte as a name");
+        byte += 1;
+    }
+}
+
+fn void the_two_writers_agree_on_the_well_formed_sequences() {
+    agree_on_string("\xc2\x80", "the first two-byte sequence");
+    agree_on_string("\xdf\xbf", "the last two-byte sequence");
+    agree_on_string("\xe0\xa0\x80", "the first three-byte sequence");
+    agree_on_string("\xed\x9f\xbf", "the last sequence below the surrogates");
+    agree_on_string("\xee\x80\x80", "the first sequence above the surrogates");
+    agree_on_string("\xef\xbf\xbf", "the last three-byte sequence");
+    agree_on_string("\xf0\x90\x80\x80", "the first four-byte sequence");
+    agree_on_string("\xf4\x8f\xbf\xbf", "the last code point");
+}
+
+fn void the_two_writers_agree_on_the_sequences_utf8_refuses() {
+    agree_on_string("\xc0\xaf", "an overlong two-byte sequence");
+    agree_on_string("\xc1\xbf", "the other overlong lead");
+    agree_on_string("\xe0\x80\xaf", "an overlong three-byte sequence");
+    agree_on_string("\xed\xa0\x80", "a surrogate in UTF-8");
+    agree_on_string("\xed\xbf\xbf", "the last surrogate");
+    agree_on_string("\xf0\x80\x80\xaf", "an overlong four-byte sequence");
+    agree_on_string("\xf4\x90\x80\x80", "one past the last code point");
+    agree_on_string("\xf5\x80\x80\x80", "a lead byte of no sequence");
+    agree_on_string("\xc3", "a truncated two-byte sequence");
+    agree_on_string("\xe2\x82", "a truncated three-byte sequence");
+    agree_on_string("\xf0\x9f\x98", "a truncated four-byte sequence");
+    agree_on_string("\xc3\x28", "a bad continuation byte");
+    agree_on_string("a\xc3", "a truncated sequence after a letter");
+}
+
+fn void the_two_writers_agree_on_the_strings_of_the_corpus() {
+    agree_on_string("", "the empty string");
+    agree_on_string("abc", "three letters");
+    agree_on_string("a\nb\tc\rd", "the spelled-out control bytes");
+    agree_on_string("\x00\x01\x1f", "three control bytes");
+    agree_on_string("\"\\", "the quote and the backslash");
+    agree_on_string("/", "the solidus, which neither escapes");
+    agree_on_string("\x7f", "the byte above printable ASCII");
+    agree_on_string("file:///a.ft", "a URI");
+    agree_on_string("\xef\xbf\xbd", "the replacement character itself");
+}
+
+// ---- whole documents -------------------------------------------------------------
+
+fn void the_two_writers_agree_on_a_document_of_diagnostics() {
+    // The shape src/bootstrap/json.c was written for: the check document of
+    // D20.2, which is what both writers exist to write.
+    strbuf.str_buf mut mine = strbuf.create();
+    defer strbuf.free(&mine);
+    strbuf.str_buf mut theirs = strbuf.create();
+    defer strbuf.free(&theirs);
+    json.writer mut w = json.writer{};
+    json.write_init(&w, &mine);
+    json.write_object_begin(&w);
+    json.write_key(&w, "version");
+    json.write_uint(&w, 1);
+    json.write_key(&w, "diagnostics");
+    json.write_array_begin(&w);
+    json.write_object_begin(&w);
+    json.write_key(&w, "file");
+    json.write_str(&w, "a\\b.ft");
+    json.write_key(&w, "line");
+    json.write_uint(&w, 12);
+    json.write_key(&w, "message");
+    json.write_str(&w, "unknown name \"x\"\n");
+    json.write_object_end(&w);
+    json.write_array_end(&w);
+    json.write_object_end(&w);
+    compiler_json.writer mut c = compiler_json.writer{};
+    compiler_json.json_init(&c, &theirs);
+    compiler_json.json_object_begin(&c);
+    compiler_json.json_key(&c, "version");
+    compiler_json.json_uint(&c, 1);
+    compiler_json.json_key(&c, "diagnostics");
+    compiler_json.json_array_begin(&c);
+    compiler_json.json_object_begin(&c);
+    compiler_json.json_key(&c, "file");
+    compiler_json.json_str(&c, "a\\b.ft");
+    compiler_json.json_key(&c, "line");
+    compiler_json.json_uint(&c, 12);
+    compiler_json.json_key(&c, "message");
+    compiler_json.json_str(&c, "unknown name \"x\"\n");
+    compiler_json.json_object_end(&c);
+    compiler_json.json_array_end(&c);
+    compiler_json.json_object_end(&c);
+    lsp_json_env.check(strbuf.view(&mine), strbuf.view(&theirs), "a check document");
+}
+
+fn void a_document_the_compiler_wrote_is_read_by_the_reader() {
+    // The other direction of the same agreement: what the compiler's writer
+    // produces is a document this module reads and writes back unchanged.
+    strbuf.str_buf mut theirs = strbuf.create();
+    defer strbuf.free(&theirs);
+    compiler_json.writer mut c = compiler_json.writer{};
+    compiler_json.json_init(&c, &theirs);
+    compiler_json.json_object_begin(&c);
+    compiler_json.json_key(&c, "diagnostics");
+    compiler_json.json_array_begin(&c);
+    compiler_json.json_object_begin(&c);
+    compiler_json.json_key(&c, "message");
+    compiler_json.json_str(&c, "a\tb\n\x01\xc3\xa9");
+    compiler_json.json_key(&c, "column");
+    compiler_json.json_uint(&c, 7);
+    compiler_json.json_object_end(&c);
+    compiler_json.json_array_end(&c);
+    compiler_json.json_object_end(&c);
+    lsp_json_env.round_trip(strbuf.view(&theirs));
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, strbuf.view(&theirs)));
+    u32 first = json.at_of(&d, json.member_of(&d, json.root(&d), "diagnostics"), 0);
+    assert(json.text_of(&d, json.member_of(&d, first, "message")) == "a\tb\n\x01\xc3\xa9");
+    assert(json.int_of(&d, json.member_of(&d, first, "column")) == 7);
+}
+
+fn i32 main() {
+    the_two_writers_agree_on_the_literals();
+    the_two_writers_agree_on_the_numbers();
+    the_two_writers_agree_on_the_separators();
+    the_two_writers_agree_to_the_shared_depth();
+    println("values ok");
+    the_two_writers_agree_on_every_byte_of_a_string();
+    the_two_writers_agree_on_every_byte_of_a_name();
+    the_two_writers_agree_on_the_well_formed_sequences();
+    the_two_writers_agree_on_the_sequences_utf8_refuses();
+    the_two_writers_agree_on_the_strings_of_the_corpus();
+    println("bytes ok");
+    the_two_writers_agree_on_a_document_of_diagnostics();
+    a_document_the_compiler_wrote_is_read_by_the_reader();
+    println("documents ok");
+    println("ok");
+    return 0;
+}

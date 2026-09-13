@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Count test lines per source line (spec/toolchain.md 7.6, D14.6).
 
-Source lines are src/bootstrap/*.c and *.h, src/fort/*.ft and std/*.ft; test
-lines are test/*.c, test/*.h, test/**/*.ft and test/lang/ffi/*.c. The standard
+Source lines are src/bootstrap/*.c and *.h, src/fort/*.ft, src/lsp/*.ft and
+std/*.ft; test lines are test/*.c, test/*.h, test/**/*.ft and
+test/lang/ffi/*.c. The standard
 library is on the source side because it is hand-written code the project
 ships and must test, and crediting it to the tests would raise the ratio for
 writing library code (D14.6, amended by T-076). The runtime counts with it:
@@ -27,6 +28,7 @@ SOURCE_GLOBS = (
     "src/bootstrap/*.c",
     "src/bootstrap/*.h",
     "src/fort/*.ft",
+    "src/lsp/*.ft",
     "std/*.ft",
 )
 TEST_GLOBS = ("test/*.c", "test/*.h", "test/**/*.ft", "test/lang/ffi/*.c")

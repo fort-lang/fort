@@ -1,0 +1,496 @@
+//! run
+//! flags: -I ../../src/fort -I support -I ../../src
+//! stdout:
+//| scale ok
+//| paths ok
+//| protocol ok
+//| handles ok
+//| ok
+import lsp.json;
+import lsp_json_env;
+import std.str;
+import std.strbuf;
+
+// The queries of src/lsp/json.ft under the load the language server puts on
+// them: a container with thousands of children, a path of member names, and
+// the messages of the protocol the five tickets after T-063 read. The queries
+// themselves are held by lsp_json_test.ft; what is here is the behaviour at
+// scale and the shapes a server meets.
+
+// The children of the wide containers below. at_of costs one step for each
+// index, so a loop over a wide container uses first_of and next_of; this file
+// holds both and measures the same answer from each.
+u64 WIDE = 2000;
+
+// The members of the wide object below. A name is looked up by a walk, so a
+// wide object is what says the walk is right and not fast.
+u64 MEMBERS = 500;
+
+// Builds `[0,1,2,...]` of WIDE elements.
+fn void wide_array_into(strbuf.str_buf mut* b) {
+    strbuf.clear(b);
+    strbuf.push(b, '[');
+    u64 mut i = 0;
+    while (i < WIDE) {
+        if (i > 0) {
+            strbuf.push(b, ',');
+        }
+        strbuf.append_u64(b, i);
+        i += 1;
+    }
+    strbuf.push(b, ']');
+}
+
+// Builds `{"k0":0,"k1":1,...}` of MEMBERS members.
+fn void wide_object_into(strbuf.str_buf mut* b) {
+    strbuf.clear(b);
+    strbuf.push(b, '{');
+    u64 mut i = 0;
+    while (i < MEMBERS) {
+        if (i > 0) {
+            strbuf.push(b, ',');
+        }
+        strbuf.append(b, "\"k");
+        strbuf.append_u64(b, i);
+        strbuf.append(b, "\":");
+        strbuf.append_u64(b, i);
+        i += 1;
+    }
+    strbuf.push(b, '}');
+}
+
+// The name of the `i`-th member of that object, built in `b`.
+fn string member_name(strbuf.str_buf mut* b, u64 i) {
+    strbuf.clear(b);
+    strbuf.push(b, 'k');
+    strbuf.append_u64(b, i);
+    return strbuf.view(b);
+}
+
+// ---- scale -----------------------------------------------------------------------
+
+fn void a_wide_array_is_walked_in_one_pass() {
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    wide_array_into(&source);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, strbuf.view(&source)));
+    u32 root = json.root(&d);
+    assert(json.count_of(&d, root) == WIDE);
+    i64 mut sum = 0;
+    u64 mut seen = 0;
+    u32 mut child = json.first_of(&d, root);
+    while (child != 0) {
+        assert(json.int_of(&d, child) == cast(seen, i64));
+        sum += json.int_of(&d, child);
+        seen += 1;
+        child = json.next_of(&d, child);
+    }
+    assert(seen == WIDE);
+    // The sum of 0 to WIDE - 1.
+    assert(sum == cast(WIDE * (WIDE - 1) / 2, i64));
+}
+
+fn void at_of_answers_the_same_child_as_the_walk() {
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    wide_array_into(&source);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, strbuf.view(&source)));
+    u32 root = json.root(&d);
+    // Every hundredth index, since at_of walks the list again for each one.
+    u64 mut i = 0;
+    while (i < WIDE) {
+        assert(json.int_of(&d, json.at_of(&d, root, i)) == cast(i, i64));
+        i += 100;
+    }
+    assert(json.int_of(&d, json.at_of(&d, root, WIDE - 1)) == cast(WIDE - 1, i64));
+}
+
+fn void a_wide_object_answers_every_name() {
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    wide_object_into(&source);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, strbuf.view(&source)));
+    u32 root = json.root(&d);
+    assert(json.count_of(&d, root) == MEMBERS);
+    strbuf.str_buf mut name = strbuf.create();
+    defer strbuf.free(&name);
+    u64 mut i = 0;
+    while (i < MEMBERS) {
+        u32 member = json.member_of(&d, root, member_name(&name, i));
+        assert(member != 0);
+        assert(json.int_of(&d, member) == cast(i, i64));
+        i += 1;
+    }
+}
+
+fn void a_wide_object_answers_zero_for_a_name_it_lacks() {
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    wide_object_into(&source);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, strbuf.view(&source)));
+    u32 root = json.root(&d);
+    assert(json.member_of(&d, root, "k") == 0);
+    assert(json.member_of(&d, root, "k0000") == 0);
+    assert(json.member_of(&d, root, "") == 0);
+    strbuf.str_buf mut name = strbuf.create();
+    defer strbuf.free(&name);
+    assert(json.member_of(&d, root, member_name(&name, MEMBERS)) == 0);
+}
+
+fn void the_names_of_a_wide_object_are_read_in_order() {
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    wide_object_into(&source);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, strbuf.view(&source)));
+    strbuf.str_buf mut name = strbuf.create();
+    defer strbuf.free(&name);
+    u64 mut i = 0;
+    u32 mut member = json.first_of(&d, json.root(&d));
+    while (member != 0) {
+        assert(json.key_of(&d, member) == member_name(&name, i));
+        member = json.next_of(&d, member);
+        i += 1;
+    }
+    assert(i == MEMBERS);
+}
+
+fn void a_wide_array_of_strings_answers_every_text() {
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.push(&source, '[');
+    u64 mut i = 0;
+    while (i < WIDE) {
+        if (i > 0) {
+            strbuf.push(&source, ',');
+        }
+        strbuf.append(&source, "\"item ");
+        strbuf.append_u64(&source, i);
+        strbuf.append(&source, "\"");
+        i += 1;
+    }
+    strbuf.push(&source, ']');
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, strbuf.view(&source)));
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    u64 mut seen = 0;
+    u32 mut child = json.first_of(&d, json.root(&d));
+    while (child != 0) {
+        strbuf.clear(&want);
+        strbuf.append(&want, "item ");
+        strbuf.append_u64(&want, seen);
+        assert(json.text_of(&d, child) == strbuf.view(&want));
+        child = json.next_of(&d, child);
+        seen += 1;
+    }
+    assert(seen == WIDE);
+}
+
+// ---- a path of names -------------------------------------------------------------
+
+// The value at `path`, a dotted chain of member names, or 0 when any step is
+// missing: the query every module of the server above this one writes for
+// itself, written once here to hold the pieces it is built from.
+fn u32 at_path(json.doc* d, u32 from, string path) {
+    u32 mut here = from;
+    u64 mut at = 0;
+    while (at <= path.len) {
+        if (here == 0 || json.kind_of(d, here) != json.value_kind.k_object) {
+            return 0;
+        }
+        i64 dot = str.index_of(path[at..], '.');
+        u64 end = path.len;
+        if (dot >= 0) {
+            // The names of a path are ASCII, so a byte index is a name index.
+            here = json.member_of(d, here, path[at..at + cast(dot, u64)]);
+            at = at + cast(dot, u64) + 1;
+            continue;
+        }
+        return json.member_of(d, here, path[at..end]);
+    }
+    return 0;
+}
+
+fn void a_path_reaches_a_value_three_objects_down() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.append(&source, "{\"params\":{\"textDocument\":");
+    strbuf.append(&source, "{\"uri\":\"file:///a.ft\",\"version\":3}}}");
+    assert(json.parse(&d, strbuf.view(&source)));
+    u32 root = json.root(&d);
+    u32 uri = at_path(&d, root, "params.textDocument.uri");
+    assert(uri != 0);
+    assert(json.text_of(&d, uri) == "file:///a.ft");
+    assert(json.int_of(&d, at_path(&d, root, "params.textDocument.version")) == 3);
+}
+
+fn void a_path_answers_zero_when_a_step_is_missing() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "{\"params\":{\"a\":1}}"));
+    u32 root = json.root(&d);
+    assert(at_path(&d, root, "params.b") == 0);
+    assert(at_path(&d, root, "other.a") == 0);
+    assert(at_path(&d, root, "params.a.b") == 0);
+    assert(at_path(&d, root, "") == 0);
+}
+
+fn void a_path_of_one_name_is_a_member() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "{\"id\":5}"));
+    u32 root = json.root(&d);
+    assert(at_path(&d, root, "id") == json.member_of(&d, root, "id"));
+}
+
+fn void a_path_through_an_array_stops() {
+    // A path is a chain of names, so an array in the middle of one answers
+    // nothing: the caller walks the array itself.
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "{\"a\":[{\"b\":1}]}"));
+    assert(at_path(&d, json.root(&d), "a.b") == 0);
+    u32 first = json.at_of(&d, json.member_of(&d, json.root(&d), "a"), 0);
+    assert(json.int_of(&d, json.member_of(&d, first, "b")) == 1);
+}
+
+// ---- the messages of the protocol -------------------------------------------------
+
+fn void a_request_is_read_by_its_four_members() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.append(&source, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",");
+    strbuf.append(&source, "\"params\":{\"processId\":4242,\"rootUri\":null,");
+    strbuf.append(&source, "\"capabilities\":{}}}");
+    assert(json.parse(&d, strbuf.view(&source)));
+    u32 root = json.root(&d);
+    assert(json.text_of(&d, json.member_of(&d, root, "jsonrpc")) == "2.0");
+    assert(json.int_of(&d, json.member_of(&d, root, "id")) == 1);
+    assert(json.text_of(&d, json.member_of(&d, root, "method")) == "initialize");
+    u32 params = json.member_of(&d, root, "params");
+    assert(json.int_of(&d, json.member_of(&d, params, "processId")) == 4242);
+    assert(json.kind_of(&d, json.member_of(&d, params, "rootUri")) == json.value_kind.k_null);
+    assert(json.count_of(&d, json.member_of(&d, params, "capabilities")) == 0);
+}
+
+fn void a_notification_has_no_id() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.append(&source, "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}");
+    assert(json.parse(&d, strbuf.view(&source)));
+    u32 root = json.root(&d);
+    assert(json.member_of(&d, root, "id") == 0);
+    assert(json.member_of(&d, root, "method") != 0);
+}
+
+fn void an_id_is_a_number_or_a_string() {
+    // JSON-RPC allows both, so a server reads the kind before the value.
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "{\"id\":7}"));
+    u32 mut id = json.member_of(&d, json.root(&d), "id");
+    assert(json.kind_of(&d, id) == json.value_kind.k_int);
+    assert(json.int_of(&d, id) == 7);
+    assert(json.parse(&d, "{\"id\":\"7\"}"));
+    id = json.member_of(&d, json.root(&d), "id");
+    assert(json.kind_of(&d, id) == json.value_kind.k_string);
+    assert(json.text_of(&d, id) == "7");
+    assert(json.parse(&d, "{\"id\":null}"));
+    id = json.member_of(&d, json.root(&d), "id");
+    assert(json.kind_of(&d, id) == json.value_kind.k_null);
+}
+
+fn void a_position_is_two_numbers() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.append(&source, "{\"range\":{\"start\":{\"line\":0,\"character\":4},");
+    strbuf.append(&source, "\"end\":{\"line\":12,\"character\":0}}}");
+    assert(json.parse(&d, strbuf.view(&source)));
+    u32 root = json.root(&d);
+    assert(json.int_of(&d, at_path(&d, root, "range.start.line")) == 0);
+    assert(json.int_of(&d, at_path(&d, root, "range.start.character")) == 4);
+    assert(json.int_of(&d, at_path(&d, root, "range.end.line")) == 12);
+    assert(json.int_of(&d, at_path(&d, root, "range.end.character")) == 0);
+}
+
+fn void a_change_notification_carries_the_text_of_a_file() {
+    // The message that matters most to a server: the whole source of a file
+    // inside one string, escapes and all.
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.append(&source, "{\"method\":\"textDocument/didChange\",\"params\":");
+    strbuf.append(&source, "{\"contentChanges\":[{\"text\":");
+    strbuf.append(&source, "\"fn i32 main() {\\n    return 0;\\n}\\n\"}]}}");
+    assert(json.parse(&d, strbuf.view(&source)));
+    u32 changes = at_path(&d, json.root(&d), "params.contentChanges");
+    assert(json.count_of(&d, changes) == 1);
+    u32 text = json.member_of(&d, json.at_of(&d, changes, 0), "text");
+    assert(json.text_of(&d, text) == "fn i32 main() {\n    return 0;\n}\n");
+}
+
+fn void a_response_carries_a_result_or_an_error() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}"));
+    u32 mut root = json.root(&d);
+    assert(json.member_of(&d, root, "result") != 0);
+    assert(json.member_of(&d, root, "error") == 0);
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.append(&source, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":");
+    strbuf.append(&source, "{\"code\":-32601,\"message\":\"method not found\"}}");
+    assert(json.parse(&d, strbuf.view(&source)));
+    root = json.root(&d);
+    assert(json.member_of(&d, root, "result") == 0);
+    assert(json.int_of(&d, at_path(&d, root, "error.code")) == -32601);
+    assert(json.text_of(&d, at_path(&d, root, "error.message")) == "method not found");
+}
+
+fn void a_diagnostic_array_is_walked_and_written_back() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.append(&source, "{\"uri\":\"file:///a.ft\",\"diagnostics\":[");
+    strbuf.append(&source, "{\"severity\":1,\"message\":\"one\"},");
+    strbuf.append(&source, "{\"severity\":2,\"message\":\"two\"}]}");
+    string document = strbuf.view(&source);
+    assert(json.parse(&d, document));
+    u32 diagnostics = json.member_of(&d, json.root(&d), "diagnostics");
+    assert(json.count_of(&d, diagnostics) == 2);
+    i64 mut severities = 0;
+    u32 mut each = json.first_of(&d, diagnostics);
+    while (each != 0) {
+        severities += json.int_of(&d, json.member_of(&d, each, "severity"));
+        each = json.next_of(&d, each);
+    }
+    assert(severities == 3);
+    lsp_json_env.round_trip(document);
+}
+
+// ---- handles -----------------------------------------------------------------------
+
+fn void a_handle_names_a_value_until_the_next_parse() {
+    // A handle is an index into the arena, so the handles of one parse mean
+    // nothing after the next: a server reads a message and answers it before
+    // it reads another.
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "{\"a\":1,\"b\":2}"));
+    u32 first = json.member_of(&d, json.root(&d), "b");
+    assert(json.int_of(&d, first) == 2);
+    assert(json.parse(&d, "{\"b\":9,\"a\":8}"));
+    // The same handle now names the value the new tree built in that
+    // position, which is the second member of it and not the member "b".
+    assert(json.int_of(&d, first) == 8);
+    assert(json.int_of(&d, json.member_of(&d, json.root(&d), "b")) == 9);
+}
+
+fn void the_handles_of_a_document_are_the_order_the_values_were_read() {
+    // The reader builds a container before its children, so a handle is
+    // above its parent's and the root is 1.
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "[[1,2],3]"));
+    u32 root = json.root(&d);
+    assert(root == 1);
+    u32 inner = json.at_of(&d, root, 0);
+    assert(inner == 2);
+    assert(json.at_of(&d, inner, 0) == 3);
+    assert(json.at_of(&d, inner, 1) == 4);
+    assert(json.at_of(&d, root, 1) == 5);
+    assert(json.node_count(&d) == 6);
+}
+
+fn void a_text_view_stays_valid_while_the_document_lives() {
+    // Every string of a document is a view of one buffer, which the parse
+    // reserved once, so a view taken early is readable after every later
+    // query.
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.push(&source, '[');
+    u64 mut i = 0;
+    while (i < 200) {
+        if (i > 0) {
+            strbuf.push(&source, ',');
+        }
+        strbuf.append(&source, "\"value\"");
+        i += 1;
+    }
+    strbuf.push(&source, ']');
+    assert(json.parse(&d, strbuf.view(&source)));
+    string early = json.text_of(&d, json.at_of(&d, json.root(&d), 0));
+    u32 mut child = json.first_of(&d, json.root(&d));
+    while (child != 0) {
+        assert(json.text_of(&d, child) == "value");
+        child = json.next_of(&d, child);
+    }
+    assert(early == "value");
+}
+
+fn void two_documents_hold_their_own_handles() {
+    json.doc mut first = json.create();
+    defer json.free(&first);
+    json.doc mut second = json.create();
+    defer json.free(&second);
+    assert(json.parse(&first, "[1,2,3]"));
+    assert(json.parse(&second, "{\"a\":\"text\"}"));
+    assert(json.count_of(&first, json.root(&first)) == 3);
+    assert(json.count_of(&second, json.root(&second)) == 1);
+    // The same handle names a different value in each document.
+    assert(json.kind_of(&first, 2) == json.value_kind.k_int);
+    assert(json.kind_of(&second, 2) == json.value_kind.k_string);
+}
+
+fn i32 main() {
+    a_wide_array_is_walked_in_one_pass();
+    at_of_answers_the_same_child_as_the_walk();
+    a_wide_object_answers_every_name();
+    a_wide_object_answers_zero_for_a_name_it_lacks();
+    the_names_of_a_wide_object_are_read_in_order();
+    a_wide_array_of_strings_answers_every_text();
+    println("scale ok");
+    a_path_reaches_a_value_three_objects_down();
+    a_path_answers_zero_when_a_step_is_missing();
+    a_path_of_one_name_is_a_member();
+    a_path_through_an_array_stops();
+    println("paths ok");
+    a_request_is_read_by_its_four_members();
+    a_notification_has_no_id();
+    an_id_is_a_number_or_a_string();
+    a_position_is_two_numbers();
+    a_change_notification_carries_the_text_of_a_file();
+    a_response_carries_a_result_or_an_error();
+    a_diagnostic_array_is_walked_and_written_back();
+    println("protocol ok");
+    a_handle_names_a_value_until_the_next_parse();
+    the_handles_of_a_document_are_the_order_the_values_were_read();
+    a_text_view_stays_valid_while_the_document_lives();
+    two_documents_hold_their_own_handles();
+    println("handles ok");
+    println("ok");
+    return 0;
+}

@@ -58,25 +58,26 @@ done
 # them: an equality and not a floor, so that a file cannot slip out of the
 # comparison. A ticket that adds or removes a .ft file changes all four lines
 # in the same commit.
-FT_FILES=853
+FT_FILES=876
 
 # The files of that corpus stage1 compiles into a module, which are the ones
 # compared. It is an equality for the reason FT_FILES is: a comparison that
 # shrank would otherwise pass while seeing less, and ctest reads the exit
 # status and not the counts printed below.
-# It is 13 above diff_check.sh's CLEAN_FILES, and the two sets are not nested:
-# they differ by 87 files one way and 74 the other. This script's roots are
-# wider -- -I src/fort -I test/fort/support reaches the 87 test/fort tests that
-# import a support module, which that script cannot resolve and skips -- and
-# its question is narrower, since the 74 files that check clean and hold no
-# `main` compile into no module and are skipped here.
-PROGRAM_FILES=471
+# It is 20 above diff_check.sh's CLEAN_FILES, and the two sets are not nested:
+# they differ by 96 files one way and 76 the other. This script's roots are
+# wider -- -I src -I src/fort -I test/fort/support reaches the 96 test/fort
+# tests that import a support module, which that script cannot resolve and
+# skips -- and its question is narrower, since the 76 files that check clean
+# and hold no `main` compile into no module and are skipped here.
+PROGRAM_FILES=492
 
 # The search roots every run is given: the standard library the build copied,
-# src/fort so that the compiler's own modules resolve, and test/fort/support
-# so that a module test's fixture does. A file that needs none of them is
-# unaffected, since a root that holds no module of the path is simply not the
-# one that answers (D9.2).
+# src/fort so that the compiler's own modules resolve, test/fort/support so
+# that a module test's fixture does, and src so that a module of the language
+# server, whose module path is `lsp.<name>`, does as well (T-063). A file that
+# needs none of them is unaffected, since a root that holds no module of the
+# path is simply not the one that answers (D9.2).
 STD_DIR=$build/std
 
 files=$(find . -name '*.ft' -not -path './build/*' -not -path './.git/*' \
@@ -102,7 +103,7 @@ while IFS= read -r file; do
     # before it and report agreement.
     rm -f "$work/one.ll" "$work/two.ll"
     set +e
-    "$stage1" -S --std-dir "$STD_DIR" -I src/fort -I test/fort/support \
+    "$stage1" -S --std-dir "$STD_DIR" -I src -I src/fort -I test/fort/support \
         -o "$work/one.ll" "$file" >"$work/one.out" 2>"$work/one.err"
     one_status=$?
     set -e
@@ -118,7 +119,7 @@ while IFS= read -r file; do
     fi
     compared=$((compared + 1))
     set +e
-    "$stage2" -S --std-dir "$STD_DIR" -I src/fort -I test/fort/support \
+    "$stage2" -S --std-dir "$STD_DIR" -I src -I src/fort -I test/fort/support \
         -o "$work/two.ll" "$file" >"$work/two.out" 2>"$work/two.err"
     two_status=$?
     set -e

@@ -1,0 +1,31 @@
+//! run
+//! flags: -I ../../src/fort -I support -I ../../src
+//! abort
+//! stderr: panic: json.set_max_bytes: above the ceiling
+//! stdout:
+//| the cap ok
+import lsp.json;
+
+// The cap on a source is the caller's, and JSON_BYTES_CEILING is the largest
+// value it takes: a node holds the offset of its text in a u32, so a document
+// above that could not be addressed. A cap above it is a violated
+// precondition and panics (D13.3).
+fn i32 main() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.max_bytes(&d) == json.JSON_MAX_BYTES);
+    json.set_max_bytes(&d, 10);
+    assert(json.max_bytes(&d) == 10);
+    assert(!json.parse(&d, "[1,2,3,4,5]"));
+    assert(json.error_message(&d) == "the document is too large");
+    assert(json.error_offset(&d) == 10);
+    assert(json.parse(&d, "[1,2]"));
+    json.set_max_bytes(&d, 0);
+    assert(json.max_bytes(&d) == json.JSON_MAX_BYTES);
+    json.set_max_bytes(&d, json.JSON_BYTES_CEILING);
+    assert(json.max_bytes(&d) == json.JSON_BYTES_CEILING);
+    println("the cap ok");
+    json.set_max_bytes(&d, json.JSON_BYTES_CEILING + 1);
+    println(json.max_bytes(&d));
+    return 0;
+}

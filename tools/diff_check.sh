@@ -57,31 +57,35 @@ done
 # comparison. A ticket that adds or removes a .ft file changes all four
 # lines in the same commit: diff_tokens.sh, diff_ast.sh, diff_check.sh and
 # diff_ir.sh.
-FT_FILES=853
+FT_FILES=876
 
 # The files of that corpus stage1 checks clean, which are the ones compared.
 # It is an equality for the reason FT_FILES is: a comparison that shrank would
 # otherwise pass while seeing less, and ctest reads the exit status and not the
 # counts printed below. A ticket that adds a clean .ft file, or that makes
 # stage1 accept or refuse one, changes this line with FT_FILES.
-# It is 13 below diff_ir.sh's PROGRAM_FILES for a reason and not by error, and
-# the two sets are not nested: they differ by 87 files one way and 74 the
+# It is 20 below diff_ir.sh's PROGRAM_FILES for a reason and not by error, and
+# the two sets are not nested: they differ by 96 files one way and 76 the
 # other, which is why the gap is not the number of files a ticket adds. That
-# script passes -I src/fort -I test/fort/support, so it reaches the 87
-# test/fort tests that import a support module, and this one passes -I "$ROOT"
-# alone and skips them; this one compares every file that checks clean,
-# including the 74 that hold no `main` -- std, src/fort, the fixtures under
-# test/fort/support and the imported half of a multi-module test -- which that
-# script skips because they compile into no module. Move the two numbers
-# together only when both the roots and those two questions agree.
-CLEAN_FILES=458
+# script passes -I src -I src/fort -I test/fort/support, so it reaches the 96
+# test/fort tests that import a support module, which this one cannot resolve
+# and skips; this one compares every file that checks clean,
+# including the 76 that hold no `main` -- std, src/fort, src/lsp, the fixtures
+# under test/fort/support and the imported half of a multi-module test -- which
+# that script skips because they compile into no module. Move the two numbers
+# together only when both the roots and those two questions agree. T-063
+# measured the four numbers above with the roots this script passes now.
+CLEAN_FILES=472
 
 # The search roots every run is given: the standard library the build copied,
-# and src/fort, so that the compiler's own modules resolve their imports. A
-# file that needs neither is unaffected, since a root that holds no module of
-# the path is simply not the one that answers (D9.2).
+# src/fort, so that the compiler's own modules resolve their imports, and src,
+# so that a module of the language server, whose module path is `lsp.<name>`,
+# resolves as well (T-063). A file that needs none of them is unaffected, since
+# a root that holds no module of the path is simply not the one that answers
+# (D9.2).
 STD_DIR=$build/std
 ROOT=src/fort
+LSP_ROOT=src
 
 files=$(find . -name '*.ft' -not -path './build/*' -not -path './.git/*' \
     -not -path './.worktrees/*' | sort)
@@ -102,7 +106,7 @@ compared=0
 skipped=0
 while IFS= read -r file; do
     set +e
-    "$stage1" --check --std-dir "$STD_DIR" -I "$ROOT" "$file" \
+    "$stage1" --check --std-dir "$STD_DIR" -I "$ROOT" -I "$LSP_ROOT" "$file" \
         >"$work/one.out" 2>"$work/one.err"
     one_status=$?
     set -e
@@ -115,7 +119,7 @@ while IFS= read -r file; do
     fi
     compared=$((compared + 1))
     set +e
-    "$stage2" --check --std-dir "$STD_DIR" -I "$ROOT" "$file" \
+    "$stage2" --check --std-dir "$STD_DIR" -I "$ROOT" -I "$LSP_ROOT" "$file" \
         >"$work/two.out" 2>"$work/two.err"
     two_status=$?
     set -e

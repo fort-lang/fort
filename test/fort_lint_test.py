@@ -753,14 +753,27 @@ class IncludeRoots(unittest.TestCase):
         self.assertEqual(self.roots("src/fort/containers.ft"), ())
 
     def test_a_module_test_gets_the_compiler_and_the_fixtures(self):
-        """`-I ../../src/fort -I support` from the root of test/fort."""
+        """`-I ../../src/fort -I support -I ../../src` from the root of test/fort.
+
+        The third root reaches the language server, whose modules are
+        `lsp.<name>` under `src` so that none of them is the compiler's
+        `json` (D9.1, D9.7).
+        """
         self.assertEqual(
-            self.roots("test/fort/containers_test.ft"), ("src/fort", "test/fort/support")
+            self.roots("test/fort/containers_test.ft"), ("src", "src/fort", "test/fort/support")
         )
+
+    def test_a_module_test_of_the_server_gets_the_same_roots(self):
+        self.assertEqual(
+            self.roots("test/fort/lsp_json_test.ft"), ("src", "src/fort", "test/fort/support")
+        )
+
+    def test_a_server_module_gets_the_root_its_module_path_is_under(self):
+        self.assertEqual(self.roots("src/lsp/json.ft"), ("src", "src/fort"))
 
     def test_a_shared_fixture_gets_them_too(self):
         self.assertEqual(
-            self.roots("test/fort/support/types_env.ft"), ("src/fort", "test/fort/support")
+            self.roots("test/fort/support/types_env.ft"), ("src", "src/fort", "test/fort/support")
         )
 
     def test_the_set_holds_every_file_of_every_glob_once(self):
@@ -784,7 +797,7 @@ class IncludeRoots(unittest.TestCase):
             self.assertNotIn(name, files)
             self.assertTrue((ROOT / name).is_file(), name)
 
-    def test_the_set_is_the_four_corpora(self):
+    def test_the_set_is_the_five_corpora(self):
         """The count the ctest reports, so a glob that stops matching is seen."""
         files = fort_lint.default_file_set(ROOT)
         counts = {}
@@ -792,7 +805,10 @@ class IncludeRoots(unittest.TestCase):
             counts[path.parent.relative_to(ROOT).as_posix()] = (
                 counts.get(path.parent.relative_to(ROOT).as_posix(), 0) + 1
             )
-        self.assertEqual(sorted(counts), ["src/fort", "std", "test/fort", "test/fort/support"])
+        self.assertEqual(
+            sorted(counts),
+            ["src/fort", "src/lsp", "std", "test/fort", "test/fort/support"],
+        )
         self.assertGreaterEqual(counts["test/fort"], 80)
         self.assertGreaterEqual(counts["test/fort/support"], 4)
 

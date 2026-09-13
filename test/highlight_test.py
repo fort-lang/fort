@@ -47,6 +47,7 @@ LANG_PROGRAMS_DIR = ROOT / "test" / "lang" / "programs"
 LANG_FAIL_DIR = ROOT / "test" / "lang" / "fail"
 STD_DIR = ROOT / "std"
 FORT_SRC_DIR = ROOT / "src" / "fort"
+LSP_SRC_DIR = ROOT / "src" / "lsp"
 FORT_TESTS_DIR = ROOT / "test" / "fort"
 FORT_LINT_DIR = ROOT / "test" / "fort_lint"
 TTY_DIR = ROOT / "test" / "tty"
@@ -59,6 +60,7 @@ CORPUS_DIRS = (
     LANG_PROGRAMS_DIR,
     STD_DIR,
     FORT_SRC_DIR,
+    LSP_SRC_DIR,
     FORT_TESTS_DIR,
     FORT_LINT_DIR,
     TTY_DIR,
@@ -68,7 +70,7 @@ CORPUS_DIRS = (
 # that adds or removes a `.ft` under CORPUS_DIRS reads the new number off the
 # failure and writes it here, as it does for CORPUS_FILES in
 # test/parser_recovery_test.c and FT_FILES in tools/diff_tokens.sh.
-CORPUS_FILES = 615
+CORPUS_FILES = 638
 # The `.ft` of the repository that are deliberately outside the corpus, each
 # because it is meant to hold a lexical error: test/lang/fail is the corpus of
 # programs the compiler must reject, test/highlight/scopes.ft carries the

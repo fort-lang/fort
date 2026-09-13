@@ -62,11 +62,17 @@ from pathlib import Path
 # support` its own directives carry, spelled from the repository root, which is
 # this tool's working directory). `test/fort/support/*.ft` is in the set too:
 # it is fort the project wrote and D1.4 reaches it like any other.
+#
+# A module of the language server is reached through the root `src`, so that
+# its module path is `lsp.json` and not `json`, which is the compiler's
+# (D9.1, D9.7 and the header of src/lsp/json.ft say why). Every set that holds
+# a file importing one therefore carries `src` beside `src/fort`.
 SOURCE_SETS = (
     ("std/*.ft", ()),
     ("src/fort/*.ft", ()),
-    ("test/fort/*.ft", ("src/fort", "test/fort/support")),
-    ("test/fort/support/*.ft", ("src/fort", "test/fort/support")),
+    ("src/lsp/*.ft", ("src", "src/fort")),
+    ("test/fort/*.ft", ("src", "src/fort", "test/fort/support")),
+    ("test/fort/support/*.ft", ("src", "src/fort", "test/fort/support")),
 )
 SOURCE_GLOBS = tuple(glob for glob, _ in SOURCE_SETS)
 

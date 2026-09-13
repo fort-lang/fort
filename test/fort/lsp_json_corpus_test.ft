@@ -1,0 +1,409 @@
+//! run
+//! flags: -I ../../src/fort -I support -I ../../src
+//! stdout:
+//| accepted ok
+//| refused ok
+//| messages ok
+//| ok
+import lsp.json;
+import lsp_json_env;
+import std.strbuf;
+
+// The conformance corpus of src/lsp/json.ft: documents RFC 8259 admits, which
+// the reader must accept, and documents it does not, which the reader must
+// refuse with an offset and without ending the program.
+//
+// The last section is what makes the claim of criterion 3 of T-063 a number:
+// the module builds 19 error records, and the corpus below must produce every
+// one of them. The cap on a source is the caller's (json.set_max_bytes), so
+// even "the document is too large" is reached by a document of eleven bytes
+// under a cap of ten, and no message is excused.
+
+// The error records the module builds, in the order the reader can reach
+// them. A message added to src/lsp/json.ft is added here, and this test then
+// demands a document that produces it.
+u64 MESSAGE_COUNT = 19;
+
+fn void messages_into(string mut@ out) {
+    out[0] = "the document is too large";
+    out[1] = "a value was expected";
+    out[2] = "a document is one value";
+    out[3] = "the nesting is too deep";
+    out[4] = "a member name was expected";
+    out[5] = "a ':' was expected";
+    out[6] = "a ',' or a ']' was expected";
+    out[7] = "a ',' or a '}' was expected";
+    out[8] = "a digit was expected";
+    out[9] = "a number has no leading zero";
+    out[10] = "a fraction needs a digit";
+    out[11] = "an exponent needs a digit";
+    out[12] = "the string is not terminated";
+    out[13] = "a control byte in a string must be escaped";
+    out[14] = "the escape is not one of JSON's";
+    out[15] = "a \\u escape needs four hex digits";
+    out[16] = "a low surrogate must follow a high one";
+    out[17] = "a high surrogate needs a low one";
+    out[18] = "a string must be valid UTF-8";
+}
+
+// The documents the reader must refuse, which the coverage count below reads
+// as well. Each one is a case of its own; the message is not written beside it
+// here, since lsp_json_error_test.ft holds every offset and every message and
+// this file asks a different question.
+u64 REFUSED_COUNT = 40;
+
+fn void refused_into(string mut@ out) {
+    out[0] = "";
+    out[1] = "[";
+    out[2] = "]";
+    out[3] = "{";
+    out[4] = "}";
+    out[5] = "[1";
+    out[6] = "{\"a\"";
+    out[7] = "{\"a\":";
+    out[8] = "[1,]";
+    out[9] = "{\"a\":1,}";
+    out[10] = "{,}";
+    out[11] = "[,]";
+    out[12] = "{\"a\" 1}";
+    out[13] = "{a:1}";
+    out[14] = "[1 2]";
+    out[15] = "[1}";
+    out[16] = "tru";
+    out[17] = "NULL";
+    out[18] = "01";
+    out[19] = "-";
+    out[20] = "1.";
+    out[21] = "1e";
+    out[22] = "+1";
+    out[23] = ".5";
+    out[24] = "0x1";
+    out[25] = "\"";
+    out[26] = "\"\\";
+    out[27] = "\"\n\"";
+    out[28] = "\"\\q\"";
+    out[29] = "\"\\u00\"";
+    out[30] = "\"\\ud800\"";
+    out[31] = "\"\\udc00\"";
+    out[32] = "\"\x80\"";
+    out[33] = "1 2";
+    out[34] = "{}{}";
+    out[35] = "'a'";
+    out[36] = "[1,2,]";
+    out[37] = "{\"a\":1 \"b\":2}";
+    out[38] = "\"\\x41\"";
+    out[39] = "[\"a\"]]";
+}
+
+// The documents the reader must accept. Every one of them is spelled the way
+// the writer spells a document, so each also round-trips byte for byte.
+u64 ACCEPTED_COUNT = 44;
+
+fn void accepted_into(string mut@ out) {
+    out[0] = "null";
+    out[1] = "true";
+    out[2] = "false";
+    out[3] = "0";
+    out[4] = "-0";
+    out[5] = "1";
+    out[6] = "-1";
+    out[7] = "1.5";
+    out[8] = "-1.5";
+    out[9] = "1e5";
+    out[10] = "1E5";
+    out[11] = "1e+5";
+    out[12] = "1e-5";
+    out[13] = "1.5e10";
+    out[14] = "0.0";
+    out[15] = "0e0";
+    out[16] = "123456789012345678901234567890";
+    out[17] = "1.7976931348623157e308";
+    out[18] = "5e-324";
+    out[19] = "\"\"";
+    out[20] = "\"a\"";
+    out[21] = "\" \"";
+    out[22] = "\"\\\"\"";
+    out[23] = "\"\\\\\"";
+    out[24] = "\"\\n\"";
+    out[25] = "\"\\u0000\"";
+    out[26] = "\"\\u001F\"";
+    out[27] = "\"\xc3\xa9\"";
+    out[28] = "\"\xf0\x9f\x98\x80\"";
+    out[29] = "[]";
+    out[30] = "{}";
+    out[31] = "[[]]";
+    out[32] = "[{}]";
+    out[33] = "{\"a\":{}}";
+    out[34] = "{\"a\":[]}";
+    out[35] = "[1,2,3]";
+    out[36] = "{\"a\":1,\"b\":2}";
+    out[37] = "{\"\":0}";
+    out[38] = "[null,true,false]";
+    out[39] = "[[[[[1]]]]]";
+    out[40] = "{\"a\":{\"b\":{\"c\":[1,{\"d\":null}]}}}";
+    out[41] = "[\"\xe2\x82\xac\"]";
+    out[42] = "{\"a\":-0.5e-7}";
+    out[43] = "[{\"a\":[{\"b\":[]}]}]";
+}
+
+// ---- the documents that parse -----------------------------------------------------
+
+fn void every_accepted_document_parses() {
+    string mut@ own corpus = new(string, ACCEPTED_COUNT);
+    defer del(corpus);
+    accepted_into(corpus);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    u64 mut i = 0;
+    while (i < ACCEPTED_COUNT) {
+        if (!json.parse(&d, corpus[i])) {
+            println("case: ", corpus[i]);
+            println("  refused at ", json.error_offset(&d), ": ", json.error_message(&d));
+        }
+        assert(json.parse(&d, corpus[i]));
+        assert(json.root(&d) != 0);
+        assert(json.error_message(&d) == "");
+        i += 1;
+    }
+}
+
+fn void every_accepted_document_round_trips() {
+    string mut@ own corpus = new(string, ACCEPTED_COUNT);
+    defer del(corpus);
+    accepted_into(corpus);
+    u64 mut i = 0;
+    while (i < ACCEPTED_COUNT) {
+        lsp_json_env.round_trip(corpus[i]);
+        i += 1;
+    }
+}
+
+fn void whitespace_around_a_document_changes_nothing() {
+    // The same corpus with a space, a tab, a newline and a return on each
+    // side: the reader answers the same tree, so the writer answers the same
+    // bytes.
+    string mut@ own corpus = new(string, ACCEPTED_COUNT);
+    defer del(corpus);
+    accepted_into(corpus);
+    strbuf.str_buf mut padded = strbuf.create();
+    defer strbuf.free(&padded);
+    u64 mut i = 0;
+    while (i < ACCEPTED_COUNT) {
+        strbuf.clear(&padded);
+        strbuf.append(&padded, " \t\n\r");
+        strbuf.append(&padded, corpus[i]);
+        strbuf.append(&padded, "\r\n\t ");
+        lsp_json_env.reads_as(strbuf.view(&padded), corpus[i]);
+        i += 1;
+    }
+}
+
+fn void a_document_nested_in_an_array_parses_the_same_way() {
+    // Every accepted document is a value, so every one of them is an element
+    // of an array and a member of an object as well.
+    string mut@ own corpus = new(string, ACCEPTED_COUNT);
+    defer del(corpus);
+    accepted_into(corpus);
+    strbuf.str_buf mut wrapped = strbuf.create();
+    defer strbuf.free(&wrapped);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    u64 mut i = 0;
+    while (i < ACCEPTED_COUNT) {
+        strbuf.clear(&wrapped);
+        strbuf.append(&wrapped, "{\"k\":[");
+        strbuf.append(&wrapped, corpus[i]);
+        strbuf.append(&wrapped, "]}");
+        assert(json.parse(&d, strbuf.view(&wrapped)));
+        u32 array = json.member_of(&d, json.root(&d), "k");
+        assert(json.count_of(&d, array) == 1);
+        i += 1;
+    }
+}
+
+// ---- the documents that do not parse ---------------------------------------------
+
+fn void every_refused_document_is_refused_with_an_offset() {
+    string mut@ own corpus = new(string, REFUSED_COUNT);
+    defer del(corpus);
+    refused_into(corpus);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    u64 mut i = 0;
+    while (i < REFUSED_COUNT) {
+        if (json.parse(&d, corpus[i])) {
+            println("case: ", corpus[i]);
+            println("  parsed, and a refusal was expected");
+        }
+        assert(!json.parse(&d, corpus[i]));
+        // The offset names a byte of the document or the byte after its end,
+        // which is where a document that stops too early fails.
+        assert(json.error_offset(&d) <= corpus[i].len);
+        assert(json.error_message(&d) != "");
+        assert(json.root(&d) == 0);
+        i += 1;
+    }
+}
+
+fn void a_refused_document_ends_no_program() {
+    // The whole corpus through one document, in a loop: a reader that reached
+    // a panic over any of them would not reach the line after it.
+    string mut@ own corpus = new(string, REFUSED_COUNT);
+    defer del(corpus);
+    refused_into(corpus);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    u64 mut rounds = 0;
+    while (rounds < 10) {
+        u64 mut i = 0;
+        while (i < REFUSED_COUNT) {
+            assert(!json.parse(&d, corpus[i]));
+            i += 1;
+        }
+        rounds += 1;
+    }
+    assert(rounds == 10);
+    assert(json.parse(&d, "[1]"));
+}
+
+fn void a_refused_document_nested_in_a_container_is_refused_too() {
+    string mut@ own corpus = new(string, REFUSED_COUNT);
+    defer del(corpus);
+    refused_into(corpus);
+    strbuf.str_buf mut wrapped = strbuf.create();
+    defer strbuf.free(&wrapped);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    // The empty document is the one case the wrapper turns into a good one:
+    // `[]` is an array with no element, and not an array holding a document
+    // that broke a rule.
+    u64 mut i = 1;
+    assert(corpus[0] == "");
+    while (i < REFUSED_COUNT) {
+        strbuf.clear(&wrapped);
+        strbuf.append(&wrapped, "[");
+        strbuf.append(&wrapped, corpus[i]);
+        strbuf.append(&wrapped, "]");
+        if (json.parse(&d, strbuf.view(&wrapped))) {
+            println("case: ", strbuf.view(&wrapped));
+            println("  parsed, and a refusal was expected");
+        }
+        assert(!json.parse(&d, strbuf.view(&wrapped)));
+        i += 1;
+    }
+}
+
+fn void the_offset_of_a_refusal_is_inside_the_document_it_read() {
+    // A document that stops in the middle of a value reports the byte after
+    // its last, which is its length; every other refusal reports a byte of
+    // the document.
+    lsp_json_env.refused("[1", 2, "a ',' or a ']' was expected");
+    lsp_json_env.refused("[1x", 2, "a ',' or a ']' was expected");
+    lsp_json_env.refused("[1,2,3", 6, "a ',' or a ']' was expected");
+}
+
+// ---- the messages ----------------------------------------------------------------
+
+// The position of `message` in the table, or MESSAGE_COUNT when it is not one
+// the module builds.
+fn u64 message_index(string mut@ table, string message) {
+    u64 mut i = 0;
+    while (i < MESSAGE_COUNT) {
+        if (table[i] == message) {
+            return i;
+        }
+        i += 1;
+    }
+    return MESSAGE_COUNT;
+}
+
+// Marks the message the document `source` is refused with; a document that
+// parses, or one refused with a message the table does not hold, fails here.
+fn void mark(json.doc mut* d, string mut@ table, bool mut@ seen, string source) {
+    if (json.parse(d, source)) {
+        println("case: ", source);
+        println("  parsed, and a refusal was expected");
+    }
+    assert(!json.parse(d, source));
+    u64 at = message_index(table, json.error_message(d));
+    if (at == MESSAGE_COUNT) {
+        println("case: ", source);
+        println("  message not in the table: ", json.error_message(d));
+    }
+    assert(at < MESSAGE_COUNT);
+    seen[at] = true;
+}
+
+fn void every_message_the_module_builds_has_a_document() {
+    string mut@ own table = new(string, MESSAGE_COUNT);
+    defer del(table);
+    messages_into(table);
+    bool mut@ own seen = new(bool, MESSAGE_COUNT);
+    defer del(seen);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    string mut@ own corpus = new(string, REFUSED_COUNT);
+    defer del(corpus);
+    refused_into(corpus);
+    u64 mut i = 0;
+    while (i < REFUSED_COUNT) {
+        mark(&d, table, seen, corpus[i]);
+        i += 1;
+    }
+    // Two messages need a document built rather than written: the one past
+    // the depth limit, and the one past the cap on a source.
+    strbuf.str_buf mut deep = strbuf.create();
+    defer strbuf.free(&deep);
+    u64 mut level = 0;
+    while (level < json.JSON_MAX_DEPTH + 1) {
+        strbuf.push(&deep, '[');
+        level += 1;
+    }
+    mark(&d, table, seen, strbuf.view(&deep));
+    json.set_max_bytes(&d, 10);
+    mark(&d, table, seen, "[1,2,3,4,5]");
+    json.set_max_bytes(&d, 0);
+    u64 mut covered = 0;
+    u64 mut k = 0;
+    while (k < MESSAGE_COUNT) {
+        if (seen[k]) {
+            covered += 1;
+        } else {
+            println("no document produces: ", table[k]);
+        }
+        k += 1;
+    }
+    lsp_json_env.check_u64(covered, MESSAGE_COUNT, "the messages a document reaches");
+}
+
+fn void the_table_of_messages_holds_no_duplicate() {
+    // A message written twice would let one of the two go unreached while the
+    // count above still passed.
+    string mut@ own table = new(string, MESSAGE_COUNT);
+    defer del(table);
+    messages_into(table);
+    u64 mut i = 0;
+    while (i < MESSAGE_COUNT) {
+        assert(table[i] != "");
+        assert(message_index(table, table[i]) == i);
+        i += 1;
+    }
+}
+
+fn i32 main() {
+    every_accepted_document_parses();
+    every_accepted_document_round_trips();
+    whitespace_around_a_document_changes_nothing();
+    a_document_nested_in_an_array_parses_the_same_way();
+    println("accepted ok");
+    every_refused_document_is_refused_with_an_offset();
+    a_refused_document_ends_no_program();
+    a_refused_document_nested_in_a_container_is_refused_too();
+    the_offset_of_a_refusal_is_inside_the_document_it_read();
+    println("refused ok");
+    every_message_the_module_builds_has_a_document();
+    the_table_of_messages_holds_no_duplicate();
+    println("messages ok");
+    println("ok");
+    return 0;
+}

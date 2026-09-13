@@ -160,7 +160,11 @@ bullet at a time and without a rewrite.
   `test/fort/<x>_test.ft`, the tests of the compiler's own modules. Both are commands of
   `check-lang`, so the gate runs them. A `test/fort` test is an ordinary run test in the D14.5
   directives whose header carries `//! flags: -I ../../src/fort` (the compiler's working
-  directory is the corpus root, so the path has two `..`, not three); its file name is
+  directory is the corpus root, so the path has two `..`, not three). **`test/fort` holds the
+  tests of `src/lsp` as well**, and a test of a server module carries `-I ../../src` beside that
+  root, since a server module is `lsp.<name>` under the root `src` (T-063); the corpus needs no
+  second root of its own, and a test whose name is taken by a compiler module takes the `lsp_`
+  prefix (`lsp_json_test.ft`, `json_test.ft` being the compiler writer's). Its file name is
   `<module>_test.ft` or `<module>_<case>_panic_test.ft` for a test whose program must end in a
   panic, since a panic kills the program and each one needs a file; any other `.ft` at that root is
   `bad test name`, because a typo there would otherwise run nowhere and say nothing.
@@ -173,11 +177,20 @@ bullet at a time and without a rewrite.
   nothing. `_report_misplaced_tests` closes that (T-079): a `*_test.ft` anywhere below the root
   outside those three directories is `test outside the root of the corpus`, which is a lint
   problem and not a test, since what belongs under `support/` is shared code and nothing else.
-  `tools/lines.py` counts `test/fort/**/*.ft` as test lines and `src/fort/*.ft` as compiler lines,
-  `test/highlight_test.py` tokenizes them, and `tools/fort_lint.py` lints them with the search
-  roots its `SOURCE_SETS` table pairs with the glob (`-I src/fort -I test/fort/support`, the
-  `-I ../../src/fort -I support` of the directives spelled from the repository root); a file named
-  on its command line takes the roots of its own `-I` options. Without them `fort --index` reports
+  `tools/lines.py` counts `test/fort/**/*.ft` as test lines and `src/fort/*.ft` and `src/lsp/*.ft`
+  as source lines, `test/highlight_test.py` tokenizes them, and `tools/fort_lint.py` lints them
+  with the search roots its `SOURCE_SETS` table pairs with the glob
+  (`-I src -I src/fort -I test/fort/support`); a file named on its command line takes the roots of
+  its own `-I` options.
+  **The lint's roots are a superset of the directives' and not a copy of them**, which is the
+  property to keep. `grep -h '//! flags:' test/fort/*.ft | sort | uniq -c` counts three shapes
+  among the 161 tests: 87 carry `-I ../../src/fort -I support`, 53 carry `-I ../../src/fort`
+  alone and 21 carry `-I ../../src/fort -I support -I ../../src`. The lint gives all 161 the same
+  three roots, in another order. The two agree about which file answers an import only while no
+  root shadows another, and today nothing does, because `src/` holds no `.ft` of its own: a future
+  `src/<name>.ft` would be the module `<name>` under the lint's first root and something else
+  under a test's, and the lint would then judge a file the harness never compiles (T-063).
+  Without those roots `fort --index` reports
   `module 'containers' not found` and every name in the file goes unjudged, which it did until
   T-079. **`test/fort` is not a leak oracle**: the gate's `asan` and `ubsan`
   presets instrument the native compiler, not the x86-64 program the harness builds and runs under
@@ -386,6 +399,15 @@ bullet at a time and without a rewrite.
   is the number a ticket must move. Read each new value off the failure of the tool that owns it and
   never compute one: two branches that raise one constant by the same step merge with no
   conflict and are then both wrong.
+  **A search root moves a second equality, and a new file may move none.** The two rules are the
+  same rule read from each end. `-I src`, which T-063 added to `diff_check.sh` and to
+  `diff_ir.sh` so that the language server resolves, took `CLEAN_FILES` from 458 to 472 and
+  `PROGRAM_FILES` from 471 to 492, because a root that resolves an import moves a file out of the
+  skipped bucket and into the compared one. T-042 added eleven files and moved neither, because
+  stage1 refuses all eleven and the refused count rose by eleven with them. So the two second
+  equalities do not follow from the number of files a ticket adds in either direction, and two
+  branches that both moved them cannot add their increments: **rebase, then read all seven
+  numbers again, one command per file** (T-063, rebased onto T-042).
 - **A ported pass is judged on its diagnostics one by one, with a script and not a reading.**
   For every message the ported file builds -- each `check_error` text and each run of `msg_str`
   pieces between `check_msg_begin` and `check_msg_end` -- ask whether any suite under `test/fort`
@@ -469,7 +491,7 @@ bullet at a time and without a rewrite.
   line above must produce), of the D5.3 and D17.2 marker tables, and of **every fort source the
   project writes**, which must tokenize with no `invalid.` scope and no unscoped character, so a
   new file the grammar mishandles fails here. `CORPUS_DIRS` is that list -- `test/lang/run`,
-  `test/lang/programs`, `std`, `src/fort`, `test/fort` (its `support/` included) and
+  `test/lang/programs`, `std`, `src/fort`, `src/lsp`, `test/fort` (its `support/` included) and
   `test/fort_lint` -- and `CORPUS_FILES` is the exact number of files in it, so a ticket that adds
   or removes a `.ft` under any of them reads the new number off the failure and writes it there,
   as it does for `CORPUS_FILES` in `test/parser_recovery_test.c` and `FT_FILES` in
@@ -513,8 +535,9 @@ bullet at a time and without a rewrite.
   judged as usual and the error is reported beside them; `test/lang/**` is deliberately outside the
   lint, because a test exercises the language rather than exemplifying the conventions; and nothing
   checks import order, doc comments or dead code. Block comments need no check: `/*` is a lexical
-  error in the compiler itself (D2.2). A new fort source outside `std/` and `src/fort/` is checked
-  by nothing until a glob in `fort_lint.py` names it. **One `fort --index` run judges every file
+  error in the compiler itself (D2.2). A new fort source outside `std/`, `src/fort/`
+  and `src/lsp/` is checked by nothing until a glob in `fort_lint.py` names it.
+  **One `fort --index` run judges every file
   of the closure it indexed**, not only the file it names: the run indexes the whole import
   closure and each record carries its own file (D20.3), so `lint_files` takes the first file it
   has not judged as the next entry and reads the records of every file of the set out of that one

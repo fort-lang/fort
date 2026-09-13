@@ -42,9 +42,12 @@ A safe(r) C-like systems programming language.
   (`test/common.h` provides `TEST_UNUSED`); `test/lang/` holds language tests in the directive
   format defined in `spec/toolchain.md`.
 - `src/bootstrap/`: the C bootstrap compiler (stage1), frozen once the compiler is self-hosted.
-  `src/fort/`: the compiler written in fort (stage2 and stage3). `std/`: the standard library in
-  fort, the runtime (`std/rt.ft`) among its modules; there is no C runtime and no object linked
-  beside the program (T-091). `tools/`: `vm`, `provision.sh`, `lines.py`, `bootstrap.sh`.
+  `src/fort/`: the compiler written in fort (stage2 and stage3). `src/lsp/`: the language server
+  in fort, whose modules are reached through the search root `src` and are therefore `lsp.<name>`
+  and never `<name>`, since two files of one closure that share a module path emit one set of
+  symbols (T-063). `std/`: the standard library in fort, the runtime (`std/rt.ft`) among its
+  modules; there is no C runtime and no object linked beside the program (T-091). `tools/`:
+  `vm`, `provision.sh`, `lines.py`, `bootstrap.sh`.
 - `editors/`: `editors/vscode/` is the VS Code extension -- `package.json`,
   `language-configuration.json`, `syntaxes/fort.tmLanguage.json`, `extension.js`, and the one pure
   module it is tested through, `lib/check.js` -- and `editors/README.md` is its install guide, its

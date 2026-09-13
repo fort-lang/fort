@@ -1,0 +1,646 @@
+//! run
+//! flags: -I ../../src/fort -I support -I ../../src
+//! stdout:
+//| floor ok
+//| growth ok
+//| bound ok
+//| cap ok
+//| reuse ok
+//| release ok
+//| ok
+import lsp.json;
+import lsp_json_env;
+import std.strbuf;
+
+// The arena of src/lsp/json.ft: what a document costs, what bounds it, and
+// that json.free gives all of it back.
+//
+// The bound this file asserts is 20 times the size of the source, and the
+// number is derived and then measured. Every value of a document costs at
+// least two bytes of source, since the shortest element of an array is a
+// digit and a comma; a node is 36 bytes and a chunk of 256 of them costs 16
+// bytes more; the chunks hold at most 255 nodes more than the document needs;
+// the chunk vector holds one pointer per 256 nodes; and the byte buffer is
+// the length of the source. So the arena is below 36/2 + 1 = 19 times the
+// source for any document large enough to fill a chunk, and 20 is that with a
+// margin. The densest document JSON admits is an array of one-digit numbers,
+// which is what the measurement below parses: it reads 19.07 for a source of
+// one mebibyte (19997711 bytes for 1048575, 524289 nodes).
+//
+// **The bound is over the largest source the doc has parsed, not over the one
+// it holds.** A doc keeps its chunks and its buffer through json.clear, so a
+// doc that parsed a mebibyte and then parses ten bytes holds a mebibyte's
+// arena for a ten-byte document. Two tests below hold the invariant in that
+// form. The byte buffer keeps the bound true through reuse only because parse
+// releases a buffer that is too small instead of growing it: std.strbuf
+// doubles, so a buffer that grew from 1000000 bytes to 1000001 would hold
+// 2000000 and the total would read 20.02 times the source.
+//
+// The floor is one chunk, 9216 bytes, plus the chunk vector: a document of one
+// value costs that whatever its size, which is why a server that parses a
+// keystroke reuses one doc through json.clear rather than creating one per
+// message.
+//
+// notes/testing.md 4 says test/fort is not a leak oracle, so the release of
+// the arena is witnessed here by two views of the heap over many rounds, and
+// by json.arena_bytes, which the module keeps in band.
+
+// One mebibyte, the document size criterion 4 of T-063 names.
+u64 ONE_MEBIBYTE = 1048576;
+
+// The bound the arena must stay under, as a multiple of the source. The module
+// names the same number, since the cap on a source is chosen against it, and
+// the first assertion of the bound section holds the two together.
+u64 ARENA_BOUND = 20;
+
+// What a node costs, how many stand in one chunk, and what the chunk record
+// beside the slots costs: the derivation above rests on these and the
+// assertions below hold the module to them. A chunk record is a span, which
+// is a pointer and a length.
+u64 NODE_BYTES = 36;
+u64 CHUNK_NODES = 256;
+u64 CHUNK_RECORD = 16;
+u64 CHUNK_BYTES = 256 * 36 + 16;
+
+// The smallest capacity std.strbuf reserves, whatever it is asked for
+// (stdlib.md 2.6), which is the byte buffer of a document below sixteen bytes.
+u64 STRBUF_MIN_CAP = 16;
+
+// The rounds of the release probe and the distance in bytes that fails it.
+// Each round parses a document of 3999 bytes into 2001 nodes, so it allocates
+// 8 chunks, a chunk vector and the byte buffer -- 77919 bytes, measured with
+// json.arena_bytes -- and gives all of it back. A round that keeps one chunk
+// pushes the break out by 9232 bytes, and four hundred rounds push it far past
+// the heap a process starts with.
+u64 ROUNDS = 400;
+u64 BOUND = 4096;
+
+// How many of the last rounds the probe holds against the early round. The
+// allocator does not hand a round the same small block every time, so the
+// probe takes the smallest distance over a window that covers the cycle
+// (notes/testing.md 4).
+u64 LATE_SAMPLES = 16;
+
+// The current program break, which is the end of the heap. sbrk(0) moves
+// nothing and reports the break. std has no binding for it and these tests
+// are its only callers.
+// D9.8
+extern fn void* sbrk(i64 increment);
+
+fn u64 probe_address() {
+    return cast(sbrk(0), u64);
+}
+
+// The other view: the address a small fresh block gets. It moves when a round
+// kept a block the next round would have got. The probe releases the block at
+// once, so the probe itself leaks nothing.
+u64 PROBE_BLOCK = 32;
+
+fn u64 probe_block() {
+    u8 mut@ own block = new(u8, PROBE_BLOCK);
+    u64 at = cast(block.ptr, u64);
+    del(block);
+    return at;
+}
+
+// How far apart two addresses are, whichever way the allocator moved.
+// D11.1
+fn u64 distance(u64 a, u64 b) {
+    if (a > b) {
+        return a - b;
+    }
+    return b - a;
+}
+
+// An array of one-digit numbers of `size` bytes: `[1,1,...,1]`, the densest
+// document JSON admits, since every element is one digit and one comma.
+fn void dense_into(strbuf.str_buf mut* b, u64 size) {
+    strbuf.clear(b);
+    strbuf.push(b, '[');
+    // The brackets are two of the bytes, and every element but the last
+    // carries a comma.
+    u64 elements = (size - 1) / 2;
+    u64 mut i = 0;
+    while (i < elements) {
+        if (i > 0) {
+            strbuf.push(b, ',');
+        }
+        strbuf.push(b, '1');
+        i += 1;
+    }
+    strbuf.push(b, ']');
+}
+
+// A document of the shape a server receives: one object whose members are a
+// few numbers and one long string, which is a source file inside a message.
+fn void message_into(strbuf.str_buf mut* b, u64 size) {
+    strbuf.clear(b);
+    strbuf.append(b, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"text\":\"");
+    while (b->len < size - 4) {
+        strbuf.append(b, "fn i32 main() { return 0; }\\n");
+    }
+    strbuf.append(b, "\"}");
+}
+
+// The arena a document takes after parsing `source`.
+fn u64 arena_of(string source) {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, source));
+    return json.arena_bytes(&d);
+}
+
+// ---- the floor -------------------------------------------------------------------
+
+fn void a_document_of_one_value_takes_one_chunk() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "1"));
+    // One chunk with its record, the four pointers of the first chunk vector,
+    // and the byte buffer, which std.strbuf never reserves below sixteen
+    // bytes.
+    assert(json.arena_bytes(&d) == CHUNK_BYTES + 4 * 8 + STRBUF_MIN_CAP);
+    assert(CHUNK_BYTES == CHUNK_NODES * NODE_BYTES + CHUNK_RECORD);
+    assert(json.node_count(&d) == 2);
+}
+
+fn void a_node_costs_the_bytes_the_derivation_names() {
+    // 254 values and the absent node stay inside one chunk; the 256th value
+    // starts a second. The step is what NODE_BYTES and CHUNK_NODES say it is.
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    dense_into(&source, 2 * 254);
+    u64 one_chunk = arena_of(strbuf.view(&source));
+    dense_into(&source, 2 * 300);
+    u64 two_chunks = arena_of(strbuf.view(&source));
+    assert(two_chunks - one_chunk > CHUNK_BYTES);
+    assert(two_chunks - one_chunk < 2 * CHUNK_BYTES);
+}
+
+fn void an_empty_document_costs_nothing_until_it_is_parsed() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.arena_bytes(&d) == 0);
+}
+
+// ---- growth ----------------------------------------------------------------------
+
+fn void the_byte_buffer_is_reserved_once_at_the_size_of_the_source() {
+    // Every string and every number of a document is copied into the buffer
+    // and decoding never lengthens one, so the buffer the parse reserves is
+    // the buffer it ends with, whatever the document holds.
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.append(&source, "[\"\\u00e9\\u00e9\",\"abcdefgh\",12345,\"\\ud83d\\ude00\"]");
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    string document = strbuf.view(&source);
+    assert(json.parse(&d, document));
+    u64 chunks = CHUNK_BYTES + 4 * 8;
+    lsp_json_env.check_u64(json.arena_bytes(&d) - chunks, document.len, "the byte buffer");
+}
+
+fn void the_chunks_grow_one_at_a_time() {
+    // A document of a thousand values takes four chunks and no more: the
+    // arena never holds a copy of itself, which is what a doubling vector of
+    // nodes would do while it copies.
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    dense_into(&source, 2 * 1000);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    string document = strbuf.view(&source);
+    assert(json.parse(&d, document));
+    u64 nodes = json.node_count(&d);
+    u64 chunks = (nodes + CHUNK_NODES - 1) / CHUNK_NODES;
+    // Four chunks fill the first chunk vector, which grows only when a fifth
+    // one asks for room.
+    assert(chunks == 4);
+    lsp_json_env.check_u64(json.arena_bytes(&d), chunks * CHUNK_BYTES + 4 * 8 + document.len,
+        "four chunks");
+}
+
+// ---- the bound -------------------------------------------------------------------
+
+fn void a_mebibyte_of_the_densest_document_stays_under_the_bound() {
+    assert(ARENA_BOUND == json.JSON_ARENA_BOUND);
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    dense_into(&source, ONE_MEBIBYTE);
+    string document = strbuf.view(&source);
+    // The shape holds an odd number of bytes: two brackets, one digit for
+    // each element and one comma between two of them.
+    assert(document.len == ONE_MEBIBYTE - 1);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, document));
+    u64 allocated = json.arena_bytes(&d);
+    // Half a million values, one node for each, the array and the absent
+    // node.
+    assert(json.node_count(&d) == (document.len - 1) / 2 + 2);
+    if (allocated > ARENA_BOUND * ONE_MEBIBYTE) {
+        println("the arena took ", allocated, " bytes for ", document.len);
+    }
+    assert(allocated <= ARENA_BOUND * ONE_MEBIBYTE);
+}
+
+fn void a_mebibyte_of_a_message_costs_little_more_than_its_text() {
+    // The shape a server actually receives: the bound of the densest document
+    // is the worst case and not the common one.
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    message_into(&source, ONE_MEBIBYTE);
+    string document = strbuf.view(&source);
+    assert(document.len >= ONE_MEBIBYTE);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, document));
+    // The text of the document and one chunk of nodes: twice the source is
+    // already generous.
+    assert(json.arena_bytes(&d) < 2 * document.len);
+    assert(json.node_count(&d) == 5);
+}
+
+fn void a_document_of_strings_stays_under_the_bound() {
+    // The densest document of strings is an array of empty ones, three bytes
+    // for each value.
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.push(&source, '[');
+    u64 mut i = 0;
+    while (i < 20000) {
+        if (i > 0) {
+            strbuf.push(&source, ',');
+        }
+        strbuf.append(&source, "\"\"");
+        i += 1;
+    }
+    strbuf.push(&source, ']');
+    string document = strbuf.view(&source);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, document));
+    assert(json.arena_bytes(&d) <= ARENA_BOUND * document.len);
+}
+
+fn void a_document_of_members_stays_under_the_bound() {
+    // The densest object: a one-byte name, a one-digit value and a comma.
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.push(&source, '{');
+    u64 mut i = 0;
+    while (i < 20000) {
+        if (i > 0) {
+            strbuf.push(&source, ',');
+        }
+        strbuf.append(&source, "\"a\":1");
+        i += 1;
+    }
+    strbuf.push(&source, '}');
+    string document = strbuf.view(&source);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, document));
+    assert(json.arena_bytes(&d) <= ARENA_BOUND * document.len);
+}
+
+// ---- the cap ---------------------------------------------------------------------
+
+fn void a_document_exactly_at_the_cap_parses() {
+    // The cap is a length a document may have and not one it must stay below.
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    dense_into(&source, 1001);
+    string document = strbuf.view(&source);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    json.set_max_bytes(&d, document.len);
+    assert(json.parse(&d, document));
+    assert(json.count_of(&d, json.root(&d)) == 500);
+    assert(json.error_message(&d) == "");
+}
+
+fn void a_document_one_byte_above_the_cap_is_refused() {
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    dense_into(&source, 1001);
+    string document = strbuf.view(&source);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    json.set_max_bytes(&d, document.len - 1);
+    assert(!json.parse(&d, document));
+    lsp_json_env.check(json.error_message(&d), "the document is too large", "one byte above");
+    // The offset is the first byte the reader refuses to read, which is the
+    // cap: no byte of the source was read at all.
+    lsp_json_env.check_u64(json.error_offset(&d), document.len - 1, "the offset of a large one");
+    assert(json.root(&d) == 0);
+    assert(json.node_count(&d) == 1);
+}
+
+fn void a_refusal_for_size_allocates_nothing_but_the_first_chunk() {
+    // The document is refused before a byte of it is read, so the arena holds
+    // the chunk the absent node lives in and nothing else. That is what makes
+    // the cap a defence: a source above it costs nothing at all.
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    dense_into(&source, 200001);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    json.set_max_bytes(&d, 1000);
+    assert(!json.parse(&d, strbuf.view(&source)));
+    assert(json.arena_bytes(&d) == CHUNK_BYTES + 4 * 8);
+}
+
+fn void the_cap_bounds_what_a_document_asks_for() {
+    // The whole point of the cap: a source of `limit` bytes asks the
+    // allocator for at most ARENA_BOUND times that, whatever it holds.
+    u64 limit = 100001;
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    dense_into(&source, limit);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    json.set_max_bytes(&d, limit);
+    string document = strbuf.view(&source);
+    assert(document.len == limit);
+    assert(json.parse(&d, document));
+    assert(json.arena_bytes(&d) <= ARENA_BOUND * limit);
+}
+
+fn void the_default_cap_bounds_a_document_at_the_memory_the_module_names() {
+    // Sixteen mebibytes of source and twenty times that of arena is the 320
+    // MB the header of src/lsp/json.ft names. A ticket that moves either
+    // number moves this line and reads the product again.
+    assert(json.JSON_MAX_BYTES == 16 * 1024 * 1024);
+    assert(json.JSON_MAX_BYTES * json.JSON_ARENA_BOUND == 335544320);
+    // The ceiling is the largest offset a u32 field holds, which is what
+    // bounds a cap a caller sets.
+    assert(json.JSON_BYTES_CEILING == 4294967295);
+}
+
+fn void the_cap_of_a_document_outlives_its_storage() {
+    // free releases the arena and keeps the cap, because the cap belongs to
+    // the caller and the arena does not.
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    dense_into(&source, 10001);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    json.set_max_bytes(&d, 5000);
+    assert(!json.parse(&d, strbuf.view(&source)));
+    json.free(&d);
+    assert(json.arena_bytes(&d) == 0);
+    assert(json.max_bytes(&d) == 5000);
+    assert(!json.parse(&d, strbuf.view(&source)));
+    json.clear(&d);
+    assert(json.max_bytes(&d) == 5000);
+}
+
+fn void a_document_value_carries_the_default_cap() {
+    // doc{} is a valid empty document, so a struct holding one is initialized
+    // with {}; a zero in the field therefore has to mean the default rather
+    // than a cap of nothing.
+    json.doc mut d = json.doc{};
+    defer json.free(&d);
+    assert(json.max_bytes(&d) == json.JSON_MAX_BYTES);
+    assert(json.parse(&d, "[1,2,3]"));
+}
+
+// ---- reuse -----------------------------------------------------------------------
+
+fn void a_thousand_parses_through_one_document_do_not_grow_the_arena() {
+    // What D20.5 asks of a server: one document analysed again and again must
+    // not grow the heap.
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    message_into(&source, 4096);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, strbuf.view(&source)));
+    u64 first = json.arena_bytes(&d);
+    u64 mut i = 0;
+    while (i < 1000) {
+        assert(json.parse(&d, strbuf.view(&source)));
+        i += 1;
+    }
+    lsp_json_env.check_u64(json.arena_bytes(&d), first, "a thousand parses");
+}
+
+fn void a_larger_document_grows_the_arena_and_a_smaller_one_does_not_shrink_it() {
+    strbuf.str_buf mut small = strbuf.create();
+    defer strbuf.free(&small);
+    strbuf.str_buf mut large = strbuf.create();
+    defer strbuf.free(&large);
+    dense_into(&small, 100);
+    dense_into(&large, 10000);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, strbuf.view(&small)));
+    u64 after_small = json.arena_bytes(&d);
+    assert(json.parse(&d, strbuf.view(&large)));
+    u64 after_large = json.arena_bytes(&d);
+    assert(after_large > after_small);
+    assert(json.parse(&d, strbuf.view(&small)));
+    // The storage of the larger document is kept for the next one.
+    assert(json.arena_bytes(&d) == after_large);
+}
+
+fn void the_bound_holds_after_a_document_grows_by_one_byte() {
+    // The case that breaks a buffer which doubles: a source one byte above
+    // the one before it. The buffer is released and taken again at the new
+    // length, so the arena stays inside the bound and the buffer is never
+    // twice the source.
+    strbuf.str_buf mut small = strbuf.create();
+    defer strbuf.free(&small);
+    strbuf.str_buf mut large = strbuf.create();
+    defer strbuf.free(&large);
+    dense_into(&small, 100001);
+    // The same document and one byte of whitespace, which the reader skips
+    // and the buffer must hold room for.
+    strbuf.append(&large, strbuf.view(&small));
+    strbuf.push(&large, ' ');
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, strbuf.view(&small)));
+    string grown = strbuf.view(&large);
+    assert(grown.len == strbuf.view(&small).len + 1);
+    assert(json.parse(&d, grown));
+    lsp_json_env.check_u64(d.bytes.data.len, grown.len, "the buffer after it grew");
+    assert(json.arena_bytes(&d) <= ARENA_BOUND * grown.len);
+}
+
+fn void the_bound_is_over_the_largest_source_the_document_parsed() {
+    // A doc keeps its storage through a parse of a smaller document, so the
+    // bound answers for the largest source it has seen and not for the one it
+    // holds.
+    strbuf.str_buf mut large = strbuf.create();
+    defer strbuf.free(&large);
+    dense_into(&large, 100001);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    string document = strbuf.view(&large);
+    assert(json.parse(&d, document));
+    u64 allocated = json.arena_bytes(&d);
+    assert(json.parse(&d, "[1]"));
+    assert(json.arena_bytes(&d) == allocated);
+    assert(allocated <= ARENA_BOUND * document.len);
+    // Against the three bytes it holds now, the same arena is far above the
+    // bound, which is why the invariant names the largest source.
+    assert(allocated > ARENA_BOUND * 3);
+}
+
+fn void a_thousand_parses_of_a_failing_document_do_not_grow_the_arena() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(!json.parse(&d, "{\"a\":[1,2,"));
+    u64 first = json.arena_bytes(&d);
+    u64 mut i = 0;
+    while (i < 1000) {
+        assert(!json.parse(&d, "{\"a\":[1,2,"));
+        i += 1;
+    }
+    lsp_json_env.check_u64(json.arena_bytes(&d), first, "a thousand refusals");
+}
+
+// ---- the release -----------------------------------------------------------------
+
+fn void free_gives_every_block_back() {
+    // The in-band view: what the module says it holds after a free.
+    json.doc mut d = json.create();
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    dense_into(&source, 10000);
+    assert(json.parse(&d, strbuf.view(&source)));
+    assert(json.arena_bytes(&d) > 0);
+    json.free(&d);
+    assert(json.arena_bytes(&d) == 0);
+    assert(json.node_count(&d) == 0);
+}
+
+fn void many_rounds_of_parse_and_free_leave_the_heap_where_it_was() {
+    // The heap view, which is the one that would see a chunk the free forgot.
+    // Two views, because each is blind to what the other sees
+    // (notes/testing.md 4): the program break moves for a leak the allocator
+    // cannot serve out of a free chunk, and the address of a fresh block moves
+    // for a leak it can.
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    dense_into(&source, 4000);
+    string document = strbuf.view(&source);
+    // The same document with its last bracket taken off, which every parse
+    // refuses after it has read every element.
+    strbuf.str_buf mut broken = strbuf.create();
+    defer strbuf.free(&broken);
+    strbuf.append(&broken, document[..document.len - 1]);
+    string half = strbuf.view(&broken);
+    u64 mut early = 0;
+    u64 mut early_block = 0;
+    u64 mut broke = 0;
+    u64 mut block = 0;
+    bool mut sampled = false;
+    u64 mut i = 0;
+    while (i < ROUNDS) {
+        json.doc mut d = json.create();
+        assert(json.parse(&d, document));
+        assert(json.node_count(&d) > 1000);
+        // The failure path allocates as the success path does -- every node
+        // before the bad byte is in the arena -- so the round frees a document
+        // of each kind and a release the failure path forgot moves the break
+        // as well.
+        json.doc mut refused = json.create();
+        assert(!json.parse(&refused, half));
+        assert(json.node_count(&refused) > 1000);
+        json.free(&refused);
+        json.free(&d);
+        if (i == ROUNDS / 2) {
+            early = probe_address();
+            early_block = probe_block();
+        }
+        if (i + LATE_SAMPLES >= ROUNDS) {
+            u64 broke_now = distance(probe_address(), early);
+            u64 block_now = distance(probe_block(), early_block);
+            if (!sampled || broke_now < broke) {
+                broke = broke_now;
+            }
+            if (!sampled || block_now < block) {
+                block = block_now;
+            }
+            sampled = true;
+        }
+        i += 1;
+    }
+    assert(early != 0 && early_block != 0 && sampled);
+    if (broke >= BOUND || block >= BOUND) {
+        println("the break moved ", broke, " and a block moved ", block);
+    }
+    assert(broke < BOUND);
+    assert(block < BOUND);
+}
+
+fn void many_rounds_of_clear_leave_the_heap_where_it_was() {
+    // The other lifetime a server has: one document, cleared between
+    // messages, freed once at the end.
+    //
+    // The break is the only view here, and the measurement says why. The
+    // probe above gives a hundred kilobytes back over its rounds, so it
+    // leaves free chunks of every size and the 32-byte block view lands
+    // wherever one starts: two probe_block calls in a row differ by 54000
+    // bytes with nothing allocated between them (notes/testing.md 4). The
+    // break answers the question this round asks, since a clear that
+    // allocated anew would ask the allocator for another chunk of the same
+    // shape for each of four hundred rounds.
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    dense_into(&source, 4000);
+    string document = strbuf.view(&source);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, document));
+    u64 allocated = json.arena_bytes(&d);
+    u64 early = probe_address();
+    u64 mut i = 0;
+    while (i < ROUNDS) {
+        json.clear(&d);
+        assert(json.parse(&d, document));
+        i += 1;
+    }
+    assert(distance(probe_address(), early) < BOUND);
+    // What the arena itself says, which no view of the heap can see: the
+    // storage of the first parse served every round after it.
+    lsp_json_env.check_u64(json.arena_bytes(&d), allocated, "four hundred clears");
+}
+
+fn i32 main() {
+    a_document_of_one_value_takes_one_chunk();
+    a_node_costs_the_bytes_the_derivation_names();
+    an_empty_document_costs_nothing_until_it_is_parsed();
+    println("floor ok");
+    the_byte_buffer_is_reserved_once_at_the_size_of_the_source();
+    the_chunks_grow_one_at_a_time();
+    println("growth ok");
+    a_mebibyte_of_the_densest_document_stays_under_the_bound();
+    a_mebibyte_of_a_message_costs_little_more_than_its_text();
+    a_document_of_strings_stays_under_the_bound();
+    a_document_of_members_stays_under_the_bound();
+    println("bound ok");
+    a_document_exactly_at_the_cap_parses();
+    a_document_one_byte_above_the_cap_is_refused();
+    a_refusal_for_size_allocates_nothing_but_the_first_chunk();
+    the_cap_bounds_what_a_document_asks_for();
+    the_default_cap_bounds_a_document_at_the_memory_the_module_names();
+    the_cap_of_a_document_outlives_its_storage();
+    a_document_value_carries_the_default_cap();
+    println("cap ok");
+    a_thousand_parses_through_one_document_do_not_grow_the_arena();
+    a_larger_document_grows_the_arena_and_a_smaller_one_does_not_shrink_it();
+    a_thousand_parses_of_a_failing_document_do_not_grow_the_arena();
+    the_bound_holds_after_a_document_grows_by_one_byte();
+    the_bound_is_over_the_largest_source_the_document_parsed();
+    println("reuse ok");
+    free_gives_every_block_back();
+    many_rounds_of_parse_and_free_leave_the_heap_where_it_was();
+    many_rounds_of_clear_leave_the_heap_where_it_was();
+    println("release ok");
+    println("ok");
+    return 0;
+}

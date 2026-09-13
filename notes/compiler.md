@@ -431,6 +431,14 @@ gone.
   implements (D20.5). T-039 and not T-046 is the gate for the language server, because the server
   needs a self-hosted compiler that reproduces itself and not the frozen bootstrap. The ctest
   `bootstrap` is what says the compiler reproduces itself.
+  **T-063 wrote the first module of `src/lsp` and stayed inside the subset anyway**, and the
+  measurement says why. A file stage1 refuses is skipped by `diff_ast.sh`, by `diff_check.sh` and
+  by `diff_ir.sh`, and the ctest `fort-modules` drives `test/fort` with stage1, so a module with a
+  float in it leaves three of the four differential oracles and needs a corpus of its own under
+  qemu. `src/lsp/json.ft` therefore names no float type: a JSON number answers the bits of its
+  binary64 value through `flt.flt_parse`, the compiler's own literal reader, and a caller that
+  wants the value copies the bits into an `f64` as `std/rt_float.ft` does. The choice is each
+  module's to make again, and the first one that needs a float pays for the corpus.
   - No unions, no bitfields, no anonymous struct or union members: a fat tagged struct with a
     kind enum and every field in the open, which is what `ast.h`, `types.h` and `sym.h` already
     are.

@@ -1,0 +1,583 @@
+//! run
+//! flags: -I ../../src/fort -I support -I ../../src
+//! stdout:
+//| values ok
+//| containers ok
+//| queries ok
+//| walking ok
+//| reuse ok
+//| ok
+import lsp.json;
+import lsp_json_env;
+import std.strbuf;
+
+// The reader of src/lsp/json.ft: the kinds it builds, the tree it threads and
+// the queries it answers. The escapes are test/fort/lsp_json_escape_test.ft,
+// the numbers lsp_json_number_test.ft, the refusals lsp_json_error_test.ft,
+// the round trip lsp_json_roundtrip_test.ft, the arena lsp_json_arena_test.ft
+// and the two writers lsp_json_agreement_test.ft. The violated preconditions
+// are a file each, since a panic ends the program (D11.4).
+
+// ---- values ----------------------------------------------------------------------
+
+fn void a_document_may_be_a_bare_value() {
+    lsp_json_env.kind_is("null", json.value_kind.k_null, "null alone");
+    lsp_json_env.kind_is("true", json.value_kind.k_bool, "true alone");
+    lsp_json_env.kind_is("false", json.value_kind.k_bool, "false alone");
+    lsp_json_env.kind_is("0", json.value_kind.k_int, "a number alone");
+    lsp_json_env.kind_is("\"s\"", json.value_kind.k_string, "a string alone");
+    lsp_json_env.kind_is("[]", json.value_kind.k_array, "an array alone");
+    lsp_json_env.kind_is("{}", json.value_kind.k_object, "an object alone");
+}
+
+fn void the_two_booleans_carry_their_value() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "true"));
+    assert(json.bool_of(&d, json.root(&d)));
+    assert(json.parse(&d, "false"));
+    assert(!json.bool_of(&d, json.root(&d)));
+}
+
+fn void a_null_carries_nothing_but_its_kind() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "null"));
+    u32 root = json.root(&d);
+    assert(json.kind_of(&d, root) == json.value_kind.k_null);
+    assert(json.count_of(&d, root) == 0);
+    assert(json.first_of(&d, root) == 0);
+    assert(json.next_of(&d, root) == 0);
+    assert(json.key_of(&d, root) == "");
+}
+
+fn void a_string_may_hold_a_nul_byte_and_keeps_its_length() {
+    // A fort string carries its length (D3.7), so a NUL inside one is a byte
+    // like any other and the text that follows it is readable.
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "[\"a\\u0000b\"]"));
+    string text = json.text_of(&d, json.at_of(&d, json.root(&d), 0));
+    assert(text.len == 3);
+    assert(text[0] == 'a');
+    assert(text[1] == '\x00');
+    assert(text[2] == 'b');
+}
+
+fn void whitespace_stands_anywhere_between_two_tokens() {
+    lsp_json_env.reads_as(" \t\r\n[ 1 , 2 ] \n", "[1,2]");
+    lsp_json_env.reads_as("{ \"a\" : 1 }", "{\"a\":1}");
+    lsp_json_env.reads_as("\n\n\nnull\n\n", "null");
+}
+
+fn void the_root_of_a_document_is_handle_one() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "[]"));
+    // Handle 0 is the absent node, which parse builds first, so the first
+    // value of every document is handle 1.
+    assert(json.root(&d) == 1);
+    assert(json.node_count(&d) == 2);
+}
+
+fn void a_document_that_was_not_parsed_has_no_root() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.root(&d) == 0);
+    assert(!json.has(&d, 0));
+    assert(json.error_offset(&d) == 0);
+    assert(json.error_message(&d) == "");
+}
+
+fn void has_answers_for_every_handle_the_document_handed_out() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "[1,2,3]"));
+    // Four values and the absent node.
+    assert(json.node_count(&d) == 5);
+    assert(!json.has(&d, 0));
+    assert(json.has(&d, 1));
+    assert(json.has(&d, 4));
+    assert(!json.has(&d, 5));
+}
+
+// ---- containers ------------------------------------------------------------------
+
+fn void an_empty_array_has_no_children() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "[]"));
+    u32 root = json.root(&d);
+    assert(json.count_of(&d, root) == 0);
+    assert(json.first_of(&d, root) == 0);
+}
+
+fn void an_empty_object_has_no_members() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "{}"));
+    u32 root = json.root(&d);
+    assert(json.count_of(&d, root) == 0);
+    assert(json.first_of(&d, root) == 0);
+    assert(json.member_of(&d, root, "a") == 0);
+}
+
+fn void an_array_holds_its_elements_in_source_order() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "[10,20,30]"));
+    u32 root = json.root(&d);
+    assert(json.count_of(&d, root) == 3);
+    assert(json.int_of(&d, json.at_of(&d, root, 0)) == 10);
+    assert(json.int_of(&d, json.at_of(&d, root, 1)) == 20);
+    assert(json.int_of(&d, json.at_of(&d, root, 2)) == 30);
+}
+
+fn void an_object_holds_its_members_in_source_order() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "{\"z\":1,\"a\":2}"));
+    u32 root = json.root(&d);
+    assert(json.count_of(&d, root) == 2);
+    assert(json.key_of(&d, json.at_of(&d, root, 0)) == "z");
+    assert(json.key_of(&d, json.at_of(&d, root, 1)) == "a");
+}
+
+fn void a_member_carries_its_name_and_a_value_of_an_array_carries_none() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "{\"name\":[7]}"));
+    u32 member = json.member_of(&d, json.root(&d), "name");
+    assert(member != 0);
+    assert(json.key_of(&d, member) == "name");
+    assert(json.key_of(&d, json.at_of(&d, member, 0)) == "");
+}
+
+fn void an_empty_name_is_a_name() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "{\"\":1}"));
+    u32 member = json.member_of(&d, json.root(&d), "");
+    assert(member != 0);
+    assert(json.int_of(&d, member) == 1);
+    assert(json.key_of(&d, member) == "");
+}
+
+fn void a_name_may_hold_any_bytes_a_string_holds() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "{\"a\\nb\":1,\"\\u00e9\":2}"));
+    assert(json.member_of(&d, json.root(&d), "a\nb") != 0);
+    assert(json.member_of(&d, json.root(&d), "\xc3\xa9") != 0);
+}
+
+fn void a_name_may_be_repeated_and_the_first_answers() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "{\"a\":1,\"a\":2}"));
+    u32 root = json.root(&d);
+    assert(json.count_of(&d, root) == 2);
+    assert(json.int_of(&d, json.member_of(&d, root, "a")) == 1);
+}
+
+fn void containers_nest_to_the_limit() {
+    // The limit counts arrays and objects together, so a document that
+    // alternates them reaches it at the same depth.
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    u64 mut i = 0;
+    while (i < 64) {
+        strbuf.push(&source, '[');
+        i += 1;
+    }
+    i = 0;
+    while (i < 64) {
+        strbuf.push(&source, ']');
+        i += 1;
+    }
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, strbuf.view(&source)));
+    // One node per level, and the absent node.
+    assert(json.node_count(&d) == 65);
+}
+
+fn void siblings_do_not_add_up_to_the_limit() {
+    // Depth is the open containers and not the containers seen, so a
+    // thousand siblings at depth two stay at depth two.
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.push(&source, '[');
+    u64 mut i = 0;
+    while (i < 1000) {
+        if (i > 0) {
+            strbuf.push(&source, ',');
+        }
+        strbuf.append(&source, "[]");
+        i += 1;
+    }
+    strbuf.push(&source, ']');
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, strbuf.view(&source)));
+    assert(json.count_of(&d, json.root(&d)) == 1000);
+}
+
+fn void a_container_nests_every_kind() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "[null,true,1,1.5,\"s\",[],{}]"));
+    u32 root = json.root(&d);
+    assert(json.count_of(&d, root) == 7);
+    assert(json.kind_of(&d, json.at_of(&d, root, 0)) == json.value_kind.k_null);
+    assert(json.kind_of(&d, json.at_of(&d, root, 1)) == json.value_kind.k_bool);
+    assert(json.kind_of(&d, json.at_of(&d, root, 2)) == json.value_kind.k_int);
+    assert(json.kind_of(&d, json.at_of(&d, root, 3)) == json.value_kind.k_float);
+    assert(json.kind_of(&d, json.at_of(&d, root, 4)) == json.value_kind.k_string);
+    assert(json.kind_of(&d, json.at_of(&d, root, 5)) == json.value_kind.k_array);
+    assert(json.kind_of(&d, json.at_of(&d, root, 6)) == json.value_kind.k_object);
+}
+
+// ---- queries ---------------------------------------------------------------------
+
+fn void member_of_answers_zero_for_a_name_the_object_lacks() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "{\"a\":1}"));
+    assert(json.member_of(&d, json.root(&d), "b") == 0);
+    assert(json.member_of(&d, json.root(&d), "") == 0);
+    assert(json.member_of(&d, json.root(&d), "aa") == 0);
+}
+
+fn void member_of_answers_zero_for_a_value_that_is_no_object() {
+    // A query that asks what is there answers for every kind, as count_of and
+    // first_of do, so a server may walk a message it has not checked. Only a
+    // query that names a child which must exist panics.
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "[null,true,1,1.5,\"s\",[],{}]"));
+    u32 root = json.root(&d);
+    u64 mut i = 0;
+    while (i < 6) {
+        assert(json.member_of(&d, json.at_of(&d, root, i), "a") == 0);
+        assert(json.member_of(&d, json.at_of(&d, root, i), "") == 0);
+        i += 1;
+    }
+    // The empty object is the seventh, and it answers 0 for the same reason a
+    // non-object does: it holds no member of that name.
+    assert(json.member_of(&d, json.at_of(&d, root, 6), "a") == 0);
+}
+
+fn void the_cap_on_a_source_is_the_caller_s() {
+    // A source above the cap is an error record before a byte of it is read,
+    // which is what stands between a large message and D10.2.
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.max_bytes(&d) == json.JSON_MAX_BYTES);
+    assert(json.parse(&d, "[1,2,3]"));
+    json.set_max_bytes(&d, 4);
+    assert(!json.parse(&d, "[1,2,3]"));
+    assert(json.error_message(&d) == "the document is too large");
+    assert(json.error_offset(&d) == 4);
+    assert(json.root(&d) == 0);
+    assert(json.parse(&d, "[1]"));
+    // The cap is a setting of the caller's, so free and clear leave it.
+    json.clear(&d);
+    assert(json.max_bytes(&d) == 4);
+    json.free(&d);
+    assert(json.max_bytes(&d) == 4);
+    json.set_max_bytes(&d, 0);
+    assert(json.max_bytes(&d) == json.JSON_MAX_BYTES);
+}
+
+fn void member_of_matches_the_whole_name_and_not_a_prefix() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "{\"method\":1,\"me\":2}"));
+    assert(json.int_of(&d, json.member_of(&d, json.root(&d), "me")) == 2);
+    assert(json.int_of(&d, json.member_of(&d, json.root(&d), "method")) == 1);
+}
+
+fn void a_cap_that_moves_changes_what_the_next_parse_accepts() {
+    // A server that learns the size of a message from its header may raise
+    // the cap for that message and lower it again afterwards. The cap is read
+    // at the start of each parse, so it takes effect at once and never
+    // touches a document already parsed.
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    json.set_max_bytes(&d, 1);
+    assert(json.parse(&d, "1"));
+    assert(json.int_of(&d, json.root(&d)) == 1);
+    assert(!json.parse(&d, "12"));
+    assert(json.error_offset(&d) == 1);
+    json.set_max_bytes(&d, 2);
+    assert(json.parse(&d, "12"));
+    assert(json.int_of(&d, json.root(&d)) == 12);
+    json.set_max_bytes(&d, 1);
+    // The tree of the last parse stands until the next one, whatever the cap
+    // says now.
+    assert(json.int_of(&d, json.root(&d)) == 12);
+}
+
+fn void a_document_the_writer_built_is_refused_when_it_passes_the_cap() {
+    // The two halves of the module meet here: what the writer produces is
+    // what the reader reads, and the cap answers for it like any other
+    // source.
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    json.writer mut w = json.writer{};
+    json.write_init(&w, &out);
+    json.write_array_begin(&w);
+    u64 mut i = 0;
+    while (i < 50) {
+        json.write_uint(&w, i);
+        i += 1;
+    }
+    json.write_array_end(&w);
+    string document = strbuf.view(&out);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    json.set_max_bytes(&d, document.len - 1);
+    assert(!json.parse(&d, document));
+    assert(json.error_message(&d) == "the document is too large");
+    json.set_max_bytes(&d, document.len);
+    assert(json.parse(&d, document));
+    assert(json.count_of(&d, json.root(&d)) == 50);
+}
+
+fn void a_message_of_the_protocol_reads_member_by_member() {
+    // The shape every module of the server above this one reads: a request of
+    // JSON-RPC with a nested parameter object.
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    // A literal may not be split over two lines and two of them do not join
+    // (D2.9), so a message too wide for one line is built in a buffer.
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.append(&source, "{\"jsonrpc\":\"2.0\",\"id\":7,");
+    strbuf.append(&source, "\"method\":\"textDocument/didOpen\",\"params\":");
+    strbuf.append(&source, "{\"textDocument\":{\"uri\":\"file:///a.ft\",\"version\":2}}}");
+    assert(json.parse(&d, strbuf.view(&source)));
+    u32 root = json.root(&d);
+    assert(json.text_of(&d, json.member_of(&d, root, "jsonrpc")) == "2.0");
+    assert(json.int_of(&d, json.member_of(&d, root, "id")) == 7);
+    assert(json.text_of(&d, json.member_of(&d, root, "method")) == "textDocument/didOpen");
+    u32 params = json.member_of(&d, root, "params");
+    u32 text_document = json.member_of(&d, params, "textDocument");
+    assert(json.text_of(&d, json.member_of(&d, text_document, "uri")) == "file:///a.ft");
+    assert(json.int_of(&d, json.member_of(&d, text_document, "version")) == 2);
+}
+
+fn void count_of_is_zero_for_a_value_that_is_not_a_container() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "[null,true,1,\"s\"]"));
+    u32 root = json.root(&d);
+    u64 mut i = 0;
+    while (i < 4) {
+        assert(json.count_of(&d, json.at_of(&d, root, i)) == 0);
+        assert(json.first_of(&d, json.at_of(&d, root, i)) == 0);
+        i += 1;
+    }
+}
+
+fn void a_string_and_a_number_answer_text_of() {
+    lsp_json_env.text_is("\"abc\"", "abc");
+    lsp_json_env.text_is("\"\"", "");
+    lsp_json_env.text_is("12", "12");
+    lsp_json_env.text_is("-0.5e+2", "-0.5e+2");
+}
+
+fn void the_text_of_a_value_is_a_view_of_the_document() {
+    // Two values of one document give two views of one buffer, and both stay
+    // readable while the document lives.
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "[\"first\",\"second\"]"));
+    u32 root = json.root(&d);
+    string first = json.text_of(&d, json.at_of(&d, root, 0));
+    string second = json.text_of(&d, json.at_of(&d, root, 1));
+    assert(first == "first");
+    assert(second == "second");
+}
+
+// ---- walking ---------------------------------------------------------------------
+
+fn void first_of_and_next_of_walk_a_container_in_one_pass() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "[1,2,3,4,5]"));
+    i64 mut sum = 0;
+    u64 mut seen = 0;
+    u32 mut child = json.first_of(&d, json.root(&d));
+    while (child != 0) {
+        sum += json.int_of(&d, child);
+        seen += 1;
+        child = json.next_of(&d, child);
+    }
+    assert(sum == 15);
+    assert(seen == 5);
+}
+
+fn void the_last_child_of_a_container_has_no_sibling() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "[1,2]"));
+    u32 root = json.root(&d);
+    u32 last = json.at_of(&d, root, 1);
+    assert(json.next_of(&d, last) == 0);
+    assert(json.next_of(&d, json.at_of(&d, root, 0)) == last);
+}
+
+fn void walking_an_object_gives_each_member_with_its_name() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "{\"a\":1,\"b\":2,\"c\":3}"));
+    strbuf.str_buf mut names = strbuf.create();
+    defer strbuf.free(&names);
+    i64 mut sum = 0;
+    u32 mut member = json.first_of(&d, json.root(&d));
+    while (member != 0) {
+        strbuf.append(&names, json.key_of(&d, member));
+        sum += json.int_of(&d, member);
+        member = json.next_of(&d, member);
+    }
+    assert(strbuf.view(&names) == "abc");
+    assert(sum == 6);
+}
+
+fn void a_nested_container_is_walked_the_same_way() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "[[1,2],[3],[]]"));
+    u64 mut total = 0;
+    u32 mut outer = json.first_of(&d, json.root(&d));
+    while (outer != 0) {
+        total += json.count_of(&d, outer);
+        outer = json.next_of(&d, outer);
+    }
+    assert(total == 3);
+}
+
+fn void at_of_and_the_walk_answer_the_same_children() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "[9,8,7,6]"));
+    u32 root = json.root(&d);
+    u64 mut i = 0;
+    u32 mut child = json.first_of(&d, root);
+    while (child != 0) {
+        assert(json.at_of(&d, root, i) == child);
+        child = json.next_of(&d, child);
+        i += 1;
+    }
+    assert(i == json.count_of(&d, root));
+}
+
+// ---- reuse -----------------------------------------------------------------------
+
+fn void a_second_parse_replaces_the_first() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "[1,2,3]"));
+    assert(json.count_of(&d, json.root(&d)) == 3);
+    assert(json.parse(&d, "{\"a\":1}"));
+    assert(json.kind_of(&d, json.root(&d)) == json.value_kind.k_object);
+    assert(json.node_count(&d) == 3);
+}
+
+fn void a_parse_that_failed_leaves_no_tree_and_a_third_parse_works() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "[1]"));
+    assert(!json.parse(&d, "[1,]"));
+    assert(json.root(&d) == 0);
+    assert(json.error_message(&d) == "a value was expected");
+    assert(json.parse(&d, "[2]"));
+    assert(json.int_of(&d, json.at_of(&d, json.root(&d), 0)) == 2);
+    assert(json.error_offset(&d) == 0);
+    assert(json.error_message(&d) == "");
+}
+
+fn void clear_empties_a_document_and_keeps_its_storage() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "[1,2,3,4]"));
+    u64 allocated = json.arena_bytes(&d);
+    json.clear(&d);
+    assert(json.root(&d) == 0);
+    assert(json.node_count(&d) == 0);
+    assert(json.arena_bytes(&d) == allocated);
+}
+
+fn void free_gives_the_storage_back_and_leaves_a_usable_document() {
+    json.doc mut d = json.create();
+    assert(json.parse(&d, "[1,2,3]"));
+    json.free(&d);
+    assert(json.arena_bytes(&d) == 0);
+    assert(json.node_count(&d) == 0);
+    assert(json.root(&d) == 0);
+    // A freed document is doc{} again, so it parses like a fresh one and a
+    // second free is a no-op.
+    assert(json.parse(&d, "[4]"));
+    assert(json.int_of(&d, json.at_of(&d, json.root(&d), 0)) == 4);
+    json.free(&d);
+    json.free(&d);
+    assert(json.arena_bytes(&d) == 0);
+}
+
+fn void an_empty_document_is_created_without_allocating() {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.arena_bytes(&d) == 0);
+    assert(json.node_count(&d) == 0);
+}
+
+fn i32 main() {
+    a_document_may_be_a_bare_value();
+    the_two_booleans_carry_their_value();
+    a_null_carries_nothing_but_its_kind();
+    a_string_may_hold_a_nul_byte_and_keeps_its_length();
+    whitespace_stands_anywhere_between_two_tokens();
+    the_root_of_a_document_is_handle_one();
+    a_document_that_was_not_parsed_has_no_root();
+    has_answers_for_every_handle_the_document_handed_out();
+    println("values ok");
+    an_empty_array_has_no_children();
+    an_empty_object_has_no_members();
+    an_array_holds_its_elements_in_source_order();
+    an_object_holds_its_members_in_source_order();
+    a_member_carries_its_name_and_a_value_of_an_array_carries_none();
+    an_empty_name_is_a_name();
+    a_name_may_hold_any_bytes_a_string_holds();
+    a_name_may_be_repeated_and_the_first_answers();
+    containers_nest_to_the_limit();
+    siblings_do_not_add_up_to_the_limit();
+    a_container_nests_every_kind();
+    println("containers ok");
+    member_of_answers_zero_for_a_name_the_object_lacks();
+    member_of_answers_zero_for_a_value_that_is_no_object();
+    the_cap_on_a_source_is_the_caller_s();
+    member_of_matches_the_whole_name_and_not_a_prefix();
+    a_cap_that_moves_changes_what_the_next_parse_accepts();
+    a_document_the_writer_built_is_refused_when_it_passes_the_cap();
+    a_message_of_the_protocol_reads_member_by_member();
+    count_of_is_zero_for_a_value_that_is_not_a_container();
+    a_string_and_a_number_answer_text_of();
+    the_text_of_a_value_is_a_view_of_the_document();
+    println("queries ok");
+    first_of_and_next_of_walk_a_container_in_one_pass();
+    the_last_child_of_a_container_has_no_sibling();
+    walking_an_object_gives_each_member_with_its_name();
+    a_nested_container_is_walked_the_same_way();
+    at_of_and_the_walk_answer_the_same_children();
+    println("walking ok");
+    a_second_parse_replaces_the_first();
+    a_parse_that_failed_leaves_no_tree_and_a_third_parse_works();
+    clear_empties_a_document_and_keeps_its_storage();
+    free_gives_the_storage_back_and_leaves_a_usable_document();
+    an_empty_document_is_created_without_allocating();
+    println("reuse ok");
+    println("ok");
+    return 0;
+}
