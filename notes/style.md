@@ -193,6 +193,14 @@ above. T-101 rewrites them; until it lands, a file holds citations of both shape
   `grep -rnE '\b(mut|own) ([iuf][0-9]+|bool|char|string)\b' notes/`, a qualifier standing before
   a base type. Read every hit, including those in decisions already marked amended -- T-069 found
   its leftovers inside decisions the original sweep had rewritten.
+- **Moving a document**: cite a document by its section, never by a line number, and sweep for the
+  old document's **name** as well as for the new path. T-099 moved the markdown width and the C
+  comment rule out of `AGENTS.md` into this file. T-100 then swept `spec/` for the literal string
+  `notes/` and saw neither D1.3 nor D2.2, because each cited `(AGENTS.md)` and named no path at
+  all; `grep -rn 'AGENTS\.md' spec/` is the search that finds them, and it names the file the text
+  left rather than the file it reached. A line number goes stale at the next edit of the file it
+  points into, and it made these two citations stale twice, so `notes/style.md` 4 is a citation and
+  `notes/style.md:158` is not (T-105).
 - **Writing specification text**: cite the decision each rule implements as `(Dn.m)`. An agent
   that needs a rule the decision log does not settle uses the most conservative reading, marks it,
   and reports it to the lead for ratification; it never invents syntax or semantics. Every

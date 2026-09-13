@@ -55,7 +55,9 @@ Sections:
 
 ### D1.3 Markdown line width
 - owner: this file; section D1 names no specification document.
-- rule: Markdown wraps at 100 columns (AGENTS.md).
+- rule: Markdown wraps at 100 columns (`notes/style.md` 4).
+- history: Amended 2026-09-12 (T-105): the rule cited `AGENTS.md`. T-099 moved the markdown width
+  out of that file, and the rule now names `notes/style.md` 4, which holds it.
 
 ### D1.4 Identifier conventions
 - owner: this file; section D1 names no specification document.
@@ -82,7 +84,10 @@ Sections:
   sequence `/*` is a lexical error ("block comments are not supported, use `//`") rather than a
   division followed by a dereference, so the C habit fails loudly instead of parsing as something
   else; `a / *p`, with the operators separated, is that division and is legal.
-- rationale: user decision, and the same rule holds for the project's C sources (AGENTS.md).
+- rationale: user decision, and the same rule holds for the project's C sources (`notes/style.md`
+  2).
+- history: Amended 2026-09-12 (T-105): the rationale cited `AGENTS.md` for the C sources. T-099
+  moved that rule out of that file, and the rationale now names `notes/style.md` 2, which holds it.
 
 ### D2.3 Identifiers
 - owner: `core-language.md` (Lexical structure), `grammar.md` (Lexical grammar).
@@ -1547,12 +1552,16 @@ says ownership is "by convention", this section supersedes it.
   **rvalue** operand is the error of D17.8 instead, `make() == null` above all, since lending it
   would leave nothing able to free it. `?:` is the exception: it yields `own` when both operands are
   `own` rvalues or `null` (D6.2), so the temporary lands wherever the conditional's value lands.
-  Stage1 does not implement `?:` at all (D3.10), so that clause is carried by the self-hosted
-  compiler alone: T-044 added it, with the `fail` test for `use(flag ? new(node) : new(node))`
-  (`test/lang/fail/ownership/037_ternary_own_arms.ft`).
+  Stage1 does not implement `?:` at all (`toolchain.md` 7.3), so that clause is carried by the
+  self-hosted compiler alone: T-044 added it, with the `fail` test for
+  `use(flag ? new(node) : new(node))` (`test/lang/fail/ownership/037_ternary_own_arms.ft`).
 - history: Amended 2026-09-11: the comparison clause read "so `own` never blocks a comparison"
   without distinguishing an lvalue from an rvalue, which D17.8's "anything else is a compile error"
-  contradicts for the rvalue (T-022).
+  contradicts for the rvalue (T-022). Amended 2026-09-12 (T-105): the stage1 clause cited `(D3.10)`
+  for what stage1 does not implement. D3.10 decides function types and function pointers, and it
+  states that function pointers are inside the bootstrap's subset; it lists nothing stage1 lacks.
+  The list of the four families the C bootstrap lacks, `?:` among them, is `toolchain.md` 7.3, and
+  the clause names that section now.
 
 ### D17.5 Transfer
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
@@ -1950,13 +1959,28 @@ language server to use them, while the server itself lands after the bootstrap f
   `panic` at the API boundary that broke its precondition (D13.3) rather than an exit in a leaf; and
   every read of a source file goes through one function, so a server can hand it a buffer it holds
   in memory instead of a path. The C bootstrap satisfies none of these and is not required to: it is
-  a batch process that exits when it is done, and D14.6's freeze (T-046) leaves it that way. What a
-  `panic` buys over an exit is a documented boundary and a stated precondition, not in-process
-  recovery -- `std.rt.panic` aborts like any other failure (D11.4), and a server that must survive a
+  a batch process that exits when it is done, and the freeze of T-046 (`toolchain.md` 7.3,
+  `notes/compiler.md` 8) leaves it that way. What a `panic` buys over an exit is a documented
+  boundary and a stated precondition, not in-process recovery -- `std.rt.panic` aborts like any
+  other failure (D11.4), and a server that must survive a
   malformed document runs the analysis where it can observe that abort. The protocol, the wire
-  format and the server's own structure are not decided here and land after the bootstrap fixpoint
-  (D19.5); this decision fixes only what the compiler's modules must be for such a server to be
-  possible at all.
+  format and the server's own structure are not decided here and land after the bootstrap fixpoint,
+  which the ctest `bootstrap` and `tools/fixpoint.sh` perform (T-039); this decision fixes only what
+  the compiler's modules must be for such a server to be possible at all.
+- history: Amended 2026-09-12 (T-105): two citations. The first said the protocol and the server
+  "land after the bootstrap fixpoint (D19.5)". D19.5 requires the emitted text to be a function of
+  the program and states the condition of the fixpoint, and it decides no milestone. Its rule
+  still says the bootstrap script compares the two stages with `cmp` over `-S` output; T-039's
+  history note records that `tools/fixpoint.sh` compares the stage2 and stage3 **binaries** instead,
+  and that a ticket must not add a third `-S` run to perform the rule sentence literally. The
+  citation was accurate on 2026-09-11, when D19.5 was the only statement of that comparison. It
+  outlived its subject on 2026-09-12, when T-039 put the comparison that performs the fixpoint in
+  `tools/fixpoint.sh` and the ctest `bootstrap`; it became wrong rather than being wrong from the
+  start. The sentence names the ctest `bootstrap` and `tools/fixpoint.sh` now. The second citation
+  said "D14.6's freeze (T-046)". D14.6 is the test-to-source ratio and holds no freeze; that
+  citation was wrong when this decision was written on 2026-09-11, since D14.6 said the same thing
+  then. The freeze of the C bootstrap is `toolchain.md` 7.3 and `notes/compiler.md` 8, which the
+  sentence names now.
 
 ## Ready-to-implement checklist
 
