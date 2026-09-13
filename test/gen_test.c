@@ -1,9 +1,10 @@
 // Unit tests of the LLVM IR emitter: the module skeleton, the type mapping,
 // symbols, private data, locals, calls and the print family (toolchain.md 6
-// items 1 to 13 and 19; D19.1 to D19.5). The runtime checks are the other
-// half, in gen_check_test.c, the cast matrix of D3.14 is in gen_cast_test.c,
-// the module-level data of D7.10 in gen_global_test.c, and the whole-module
-// goldens are in gen_module_test.c.
+// items 1 to 13 and 19). The runtime checks are the other half, in
+// gen_check_test.c, the cast matrix is in gen_cast_test.c, the module-level
+// data in gen_global_test.c, and the whole-module goldens are in
+// gen_module_test.c.
+// D19.1 to D19.5, D3.14, D7.10
 #include "gen.h"
 
 #include <stdbool.h>
@@ -25,7 +26,8 @@ TEST(the_module_begins_with_the_normalized_triple, {
 
 TEST(the_module_carries_no_datalayout_or_module_flags, {
     TEST_ASSERT_TRUE(emit(in_main("")));
-    // No datalayout, module flags, ident or source_filename (D19.1).
+    // No datalayout, module flags, ident or source_filename.
+    // D19.1
     TEST_ASSERT_EQ_STR(absent("target datalayout"), "absent");
     TEST_ASSERT_EQ_STR(absent("!llvm.module.flags"), "absent");
     TEST_ASSERT_EQ_STR(absent("!llvm.ident"), "absent");
@@ -68,7 +70,8 @@ TEST(a_blank_line_stands_between_two_definitions, {
                        "}\n\ndefine dso_local i32 @\"main.main\"");
 })
 
-// ---- the type mapping (item 2, D19.2) ----------------------------------------------
+// ---- the type mapping (item 2) -----------------------------------------------------
+// D19.2
 
 TEST(the_integer_types_map_to_their_widths, {
     TEST_ASSERT_TRUE(
@@ -91,7 +94,8 @@ TEST(the_unsigned_types_share_the_signed_ones_ir_types, {
 TEST(a_bool_is_i8_in_memory_and_i1_as_a_value, {
     TEST_ASSERT_TRUE(emit(in_main("    bool b = true;\n    bool c = b;\n")));
     // Every store of a bool place is a zext and a store i8, a constant one
-    // included, so the rule has no exception to get wrong (D19.2).
+    // included, so the rule has no exception to get wrong.
+    // D19.2
     TEST_ASSERT_EQ_STR(found("%b.0 = alloca i8, align 1"), "%b.0 = alloca i8, align 1");
     TEST_ASSERT_EQ_STR(found("%t0 = zext i1 true to i8"), "%t0 = zext i1 true to i8");
     TEST_ASSERT_EQ_STR(found("store i8 %t0, ptr %b.0, align 1"), "store i8 %t0, ptr %b.0, align 1");
@@ -140,8 +144,8 @@ TEST(a_struct_is_a_named_type_with_its_fields_in_order, {
                           "fn i32 main() {\n    mixed m = {};\n    return 0;\n}\n"));
     TEST_ASSERT_EQ_STR(found("%struct.main.mixed = type { i8, i64 }"),
                        "%struct.main.mixed = type { i8, i64 }");
-    // The struct is never packed, so LLVM lays it out exactly as C does
-    // (D3.8).
+    // The struct is never packed, so LLVM lays it out exactly as C does.
+    // D3.8
     TEST_ASSERT_EQ_STR(absent("<{"), "absent");
     TEST_ASSERT_EQ_STR(found("%m.0 = alloca %struct.main.mixed, align 8"),
                        "%m.0 = alloca %struct.main.mixed, align 8");
@@ -216,12 +220,14 @@ TEST(the_emitter_never_writes_insertvalue_on_an_aggregate, {
     TEST_ASSERT_TRUE(emit("struct point { i32 x; i32 y; }\n"
                           "fn i32 main() {\n    point p = {1, 2};\n    point q = p;\n"
                           "    return q.y;\n}\n"));
-    // Only scalars are SSA values (D19.3).
+    // Only scalars are SSA values.
+    // D19.3
     TEST_ASSERT_EQ_STR(absent("insertvalue"), "absent");
     TEST_ASSERT_EQ_STR(absent("extractvalue"), "absent");
 })
 
-// ---- symbols, linkage and visibility (item 4, D9.7) -------------------------------
+// ---- symbols, linkage and visibility (item 4) -------------------------------------
+// D9.7
 
 TEST(a_fort_function_is_a_quoted_dotted_name, {
     TEST_ASSERT_TRUE(emit("fn i32 add(i32 a, i32 b) { return a +% b; }\n"
@@ -269,7 +275,8 @@ TEST(an_empty_string_literal_is_one_nul_byte, {
 TEST(a_string_constant_is_not_deduplicated_by_content, {
     TEST_ASSERT_TRUE(emit(in_main("    println(\"x\", \"x\");\n")));
     // Module-level counters are assigned on first use and never deduplicated
-    // by content (D19.5).
+    // by content.
+    // D19.5
     TEST_ASSERT_EQ_STR(found("@.str.0 = private unnamed_addr constant [2 x i8] c\"x\\00\""),
                        "@.str.0 = private unnamed_addr constant [2 x i8] c\"x\\00\"");
     TEST_ASSERT_EQ_STR(found("@.str.1 = private unnamed_addr constant [2 x i8] c\"x\\00\""),
@@ -320,7 +327,8 @@ TEST(an_enum_table_has_one_entry_per_member_in_declaration_order, {
     TEST_ASSERT_TRUE(before("@.str.2 = ", "@.enum.main.color = "));
 })
 
-// ---- the calling convention (item 7, D9.9) ----------------------------------------
+// ---- the calling convention (item 7) ----------------------------------------------
+// D9.9
 
 TEST(a_narrow_parameter_and_result_carry_the_extension_attribute, {
     TEST_ASSERT_TRUE(emit("fn i8 narrow(i8 a, i16 b, u8 c, u16 d, bool e, char f) { return a; }\n"
@@ -391,7 +399,8 @@ TEST(a_noreturn_definition_carries_its_own_group_and_ends_in_a_trap, {
                              "\"probe-stack\"=\"inline-asm\" }"),
                        "attributes #1 = { noreturn nounwind \"frame-pointer\"=\"all\" "
                        "\"probe-stack\"=\"inline-asm\" }");
-    // Every call site of a noreturn function traps too (D8.5, D19.7).
+    // Every call site of a noreturn function traps too.
+    // D8.5, D19.7
     TEST_ASSERT_EQ_STR(found("call void @\"main.stop\"()\n  call void @llvm.trap()\n  unreachable"),
                        "call void @\"main.stop\"()\n  call void @llvm.trap()\n  unreachable");
     TEST_ASSERT_EQ_STR(

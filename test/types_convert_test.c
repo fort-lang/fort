@@ -1,8 +1,8 @@
-// The conversions of a type: the implicit drops of mutability (D5.4) and of
-// ownership (D17.4), and the cast matrix of D3.14. Every example those
-// decisions give is one assertion, with the further rows the rules imply,
-// and the last four tests re-derive the matrix and the invariants that tie
-// the two together.
+// The conversions of a type: the implicit drops of mutability and of ownership,
+// and the cast matrix. Every example those rules give is one assertion, with the
+// further rows the rules imply, and the last four tests re-derive the matrix and
+// the invariants that tie the two together.
+// D5.4, D17.4, D3.14
 //
 // The representation, identity and levels of a type are tested in
 // types_test.c, its sizes and layout in types_layout_test.c, the builder and
@@ -18,23 +18,25 @@
 
 #include "test.h"
 
-// Whether a value of the type spelled `src` may be used where the type
-// spelled `dst` is expected (D5.4, D17.4).
+// Whether a value of the type spelled `src` may be used where the type spelled
+// `dst` is expected.
+// D5.4, D17.4
 static bool assignable(tenv_t* e, const char* dst, const char* src) {
     const type_t* d = tenv_type(e, dst);
     const type_t* s = tenv_type(e, src);
     return type_assignable(d, s);
 }
 
-// Whether `cast(expr, dst)` is allowed on an expression of type `src`
-// (D3.14).
+// Whether `cast(expr, dst)` is allowed on an expression of type `src`.
+// D3.14
 static bool castable(tenv_t* e, const char* dst, const char* src) {
     const type_t* d = tenv_type(e, dst);
     const type_t* s = tenv_type(e, src);
     return type_cast_allowed(d, s);
 }
 
-// The class of a scalar type in the cast matrix of D3.14.
+// The class of a scalar type in the cast matrix.
+// D3.14
 typedef enum {
     CLASS_INT,
     CLASS_FLOAT,
@@ -89,10 +91,11 @@ static uint32_t scalar_types(tenv_t* e, const type_t** types, scalar_class_t* cl
     return n;
 }
 
-// The reference and value types the invariant tests walk, function types
-// and references to them included: the marks inside a function type are part
-// of its identity (D3.10), so a property that never sees one cannot tell
-// whether a conversion respects them.
+// The reference and value types the invariant tests walk, function types and
+// references to them included: the marks inside a function type are part of its
+// identity, so a property that never sees one cannot tell whether a conversion
+// respects them.
+// D3.10
 enum { SAMPLES_MAX = 30 };
 
 static uint32_t sample_types(tenv_t* e, const type_t** types) {
@@ -138,7 +141,8 @@ static uint32_t sample_types(tenv_t* e, const type_t** types) {
     return n;
 }
 
-// ---- dropping mutability (D5.4) --------------------------------------------------
+// ---- dropping mutability ---------------------------------------------------------
+// D5.4
 
 TEST(the_d5_4_conversions_and_their_shape, {
     tenv_t e;
@@ -182,7 +186,8 @@ TEST(mutability_drops_through_further_shapes, {
     tenv_free(&e);
 })
 
-// ---- lending (D17.4) -------------------------------------------------------------
+// ---- lending ---------------------------------------------------------------------
+// D17.4
 
 TEST(the_d17_4_conversions_and_their_shape, {
     tenv_t e;
@@ -223,12 +228,14 @@ TEST(assignability_of_null_void_and_the_error_type, {
     const type_t* null = type_null(&e.tt);
     const type_t* err = type_error(&e.tt);
     const type_t* i32 = type_prim(&e.tt, PRIM_I32);
-    // `null` adopts a pointer, `void*` or function type (D10.5).
+    // `null` adopts a pointer, `void*` or function type.
+    // D10.5
     TEST_ASSERT_TRUE(type_assignable(tenv_type(&e, "node*"), null));
     TEST_ASSERT_TRUE(type_assignable(tenv_type(&e, "node mut* own"), null));
     TEST_ASSERT_TRUE(type_assignable(tenv_type(&e, "void*"), null));
     TEST_ASSERT_TRUE(type_assignable(tenv_fn(&e, i32, i32, NULL), null));
-    // Not a span, a string or a value type: the zero value is `{}` (D3.5).
+    // Not a span, a string or a value type: the zero value is `{}`.
+    // D3.5
     TEST_ASSERT_FALSE(type_assignable(tenv_type(&e, "i32@"), null));
     TEST_ASSERT_FALSE(type_assignable(tenv_type(&e, "string"), null));
     TEST_ASSERT_FALSE(type_assignable(tenv_type(&e, "i32"), null));
@@ -249,7 +256,8 @@ TEST(function_types_convert_only_to_themselves, {
     const type_t* v = type_void(&e.tt);
     TEST_ASSERT_TRUE(type_assignable(tenv_fn(&e, i32, i32, NULL), tenv_fn(&e, i32, i32, NULL)));
     TEST_ASSERT_FALSE(type_assignable(tenv_fn(&e, i32, i32, NULL), tenv_fn(&e, v, i32, NULL)));
-    // No variance on a parameter's pointee mutability or `own` (D3.10).
+    // No variance on a parameter's pointee mutability or `own`.
+    // D3.10
     const type_t* takes_node = tenv_fn(&e, v, tenv_type(&e, "node*"), NULL);
     const type_t* takes_mut = tenv_fn(&e, v, tenv_type(&e, "node mut*"), NULL);
     const type_t* takes_own = tenv_fn(&e, v, tenv_type(&e, "node* own"), NULL);
@@ -260,7 +268,8 @@ TEST(function_types_convert_only_to_themselves, {
     tenv_free(&e);
 })
 
-// ---- casts (D3.14) ---------------------------------------------------------------
+// ---- casts -----------------------------------------------------------------------
+// D3.14
 
 TEST(casts_among_numbers_bool_char_and_enums, {
     tenv_t e;
@@ -304,9 +313,10 @@ TEST(casts_refused_among_scalars, {
 TEST(casts_among_pointers_and_u64, {
     tenv_t e;
     tenv_init(&e);
-    TEST_ASSERT_TRUE(castable(&e, "point*", "node*"));        // any pointer to any pointer
-    TEST_ASSERT_TRUE(castable(&e, "node mut*", "node*"));     // adds mutability
-    TEST_ASSERT_TRUE(castable(&e, "node mut* own", "node*")); // adopts (D17.3)
+    TEST_ASSERT_TRUE(castable(&e, "point*", "node*"));    // any pointer to any pointer
+    TEST_ASSERT_TRUE(castable(&e, "node mut*", "node*")); // adds mutability
+    // D17.3
+    TEST_ASSERT_TRUE(castable(&e, "node mut* own", "node*")); // adopts
     TEST_ASSERT_TRUE(castable(&e, "node*", "node mut* own")); // lends
     TEST_ASSERT_TRUE(castable(&e, "void*", "node*"));
     TEST_ASSERT_TRUE(castable(&e, "node*", "void*"));
@@ -359,7 +369,8 @@ TEST(casts_within_the_string_family, {
     TEST_ASSERT_TRUE(castable(&e, "string", "u8 mut@"));
     TEST_ASSERT_TRUE(castable(&e, "u8@", "u8 mut@"));
     TEST_ASSERT_TRUE(castable(&e, "u8 mut@", "u8@"));
-    // Adoption and lending are both casts (D17.3, D17.12).
+    // Adoption and lending are both casts.
+    // D17.3, D17.12
     TEST_ASSERT_TRUE(castable(&e, "string own", "u8 mut@ own"));
     TEST_ASSERT_TRUE(castable(&e, "string", "u8 mut@ own"));
     TEST_ASSERT_TRUE(castable(&e, "string own", "string"));
@@ -379,10 +390,10 @@ TEST(a_span_cast_never_launders_a_signature_or_an_owner, {
     const type_t* takes_mut = tenv_fn(&e, v, tenv_type(&e, "node mut*"), NULL);
     const type_t* of_node = type_span(&e.tt, takes_node, false, false);
     const type_t* of_mut = type_span(&e.tt, takes_mut, false, false);
-    // The marks of a parameter are part of the function type's identity
-    // (D3.10), so those spans have different element types and the row for
-    // marks does not reach them, exactly as the cast on one element does
-    // not (D3.14).
+    // The marks of a parameter are part of the function type's identity, so those
+    // spans have different element types and the row for marks does not reach
+    // them, exactly as the cast on one element does not.
+    // D3.10, D3.14
     TEST_ASSERT_FALSE(type_cast_allowed(of_node, of_mut));
     TEST_ASSERT_FALSE(type_cast_allowed(of_mut, of_node));
     TEST_ASSERT_FALSE(type_cast_allowed(takes_node, takes_mut));
@@ -390,13 +401,15 @@ TEST(a_span_cast_never_launders_a_signature_or_an_owner, {
     TEST_ASSERT_TRUE(type_cast_allowed(of_node, of_node));
     // A span of function pointers still casts where its own marks differ.
     TEST_ASSERT_TRUE(type_cast_allowed(type_span(&e.tt, takes_node, true, true), of_node));
-    // Dropping an `own` under a reference the target still owns would leave
-    // its objects owned by nobody, which no cast licenses (D17.4).
+    // Dropping an `own` under a reference the target still owns would leave its
+    // objects owned by nobody, which no cast licenses.
+    // D17.4
     TEST_ASSERT_FALSE(castable(&e, "node mut* mut@ own", "node mut* own mut@ own"));
     TEST_ASSERT_FALSE(castable(&e, "node* mut@ own", "node* own@ own"));
     TEST_ASSERT_FALSE(castable(&e, "u8@ mut@ own", "u8@ own@ own"));
-    // Dropping it with no owner outside is lending, which a cast may do
-    // even where the implicit rule refuses (D3.14).
+    // Dropping it with no owner outside is lending, which a cast may do even
+    // where the implicit rule refuses.
+    // D3.14
     TEST_ASSERT_TRUE(castable(&e, "node mut* mut@", "node mut* own mut@ own"));
     TEST_ASSERT_TRUE(castable(&e, "node*@", "node mut* own mut@ own"));
     TEST_ASSERT_TRUE(castable(&e, "node mut* own mut@", "node mut* own mut@ own"));
@@ -407,7 +420,8 @@ TEST(casts_of_spans_change_only_the_marks, {
     tenv_t e;
     tenv_init(&e);
     // The element type never changes; mutability is added or dropped at any
-    // level, and `own` at any reference (D3.14, amended 2026-09-10).
+    // level, and `own` at any reference (amended 2026-09-10).
+    // D3.14
     TEST_ASSERT_TRUE(castable(&e, "node* mut@", "node*@"));
     TEST_ASSERT_TRUE(castable(&e, "node*@", "node* mut@"));
     TEST_ASSERT_TRUE(castable(&e, "node mut* mut@", "node* mut@"));
@@ -443,8 +457,9 @@ TEST(casts_refused_for_structs_and_fixed_arrays, {
 TEST(casts_between_a_reference_and_a_fat_pointer_are_refused, {
     tenv_t e;
     tenv_init(&e);
-    // A span is `{ptr, len}` and a pointer is an address: neither reaches
-    // the other, and a span expression or `.ptr` is the way across (D3.5, D3.14).
+    // A span is `{ptr, len}` and a pointer is an address: neither reaches the
+    // other, and a span expression or `.ptr` is the way across.
+    // D3.5, D3.14
     TEST_ASSERT_FALSE(castable(&e, "u8@", "u8*"));
     TEST_ASSERT_FALSE(castable(&e, "u8*", "u8@"));
     TEST_ASSERT_FALSE(castable(&e, "u8 mut@", "u8 mut*"));
@@ -471,7 +486,8 @@ TEST(casts_of_null_void_and_the_error_type, {
     const type_t* null = type_null(&e.tt);
     const type_t* v = type_void(&e.tt);
     const type_t* p = tenv_type(&e, "node*");
-    // `null` has no type of its own, so it is not a cast operand (D10.5).
+    // `null` has no type of its own, so it is not a cast operand.
+    // D10.5
     TEST_ASSERT_FALSE(type_cast_allowed(p, null));
     TEST_ASSERT_FALSE(type_cast_allowed(null, p));
     // `void` is not a value type.
@@ -509,8 +525,9 @@ TEST(assignability_is_reflexive_for_every_kind, {
 TEST(mutability_drops_along_a_three_level_chain, {
     tenv_t e;
     tenv_init(&e);
-    // `mut node***` has every level mutable; a target may drop a suffix of
-    // them, starting at the outermost (D5.4).
+    // `mut node***` has every level mutable; a target may drop a suffix of them,
+    // starting at the outermost.
+    // D5.4
     TEST_ASSERT_TRUE(assignable(&e, "node***", "node mut* mut* mut*"));
     TEST_ASSERT_FALSE(assignable(&e, "node* mut**", "node mut* mut* mut*"));
     TEST_ASSERT_FALSE(assignable(&e, "node** mut*", "node mut* mut* mut*"));
@@ -527,8 +544,9 @@ TEST(mutability_drops_along_a_three_level_chain, {
 TEST(conversions_through_a_fixed_array_follow_the_element, {
     tenv_t e;
     tenv_init(&e);
-    // A fixed array adds no level, so its elements convert under the rule
-    // that applies to the array itself (D5.2, D5.4).
+    // A fixed array adds no level, so its elements convert under the rule that
+    // applies to the array itself.
+    // D5.2, D5.4
     TEST_ASSERT_TRUE(assignable(&e, "node*[4]", "node mut*[4]"));
     TEST_ASSERT_TRUE(assignable(&e, "node*[4]", "node* own[4]"));
     TEST_ASSERT_FALSE(assignable(&e, "node* own[4]", "node*[4]"));
@@ -545,7 +563,8 @@ TEST(conversions_through_a_fixed_array_follow_the_element, {
 TEST(lending_combines_with_dropping_mutability, {
     tenv_t e;
     tenv_init(&e);
-    // The two drops are one conversion, in every order of marks (D17.4).
+    // The two drops are one conversion, in every order of marks.
+    // D17.4
     TEST_ASSERT_TRUE(assignable(&e, "u8@", "u8 mut@ own"));
     TEST_ASSERT_TRUE(assignable(&e, "u8 mut@", "u8 mut@ own"));
     TEST_ASSERT_TRUE(assignable(&e, "u8@ own", "u8 mut@ own"));
@@ -564,8 +583,8 @@ TEST(lending_combines_with_dropping_mutability, {
 TEST(casts_may_add_own_at_any_reference, {
     tenv_t e;
     tenv_init(&e);
-    // Adoption is a cast, at any level, where the implicit drop refuses
-    // (D3.14, D17.3).
+    // Adoption is a cast, at any level, where the implicit drop refuses.
+    // D3.14, D17.3
     TEST_ASSERT_TRUE(castable(&e, "u8 mut@ own", "u8@"));
     TEST_ASSERT_TRUE(castable(&e, "u8 mut@ own mut*", "u8@*"));
     TEST_ASSERT_TRUE(castable(&e, "node mut* own mut@ own", "node*@"));
@@ -605,9 +624,9 @@ TEST(every_scalar_pair_follows_the_d3_14_matrix, {
 TEST(every_implicit_conversion_is_also_a_cast, {
     tenv_t e;
     tenv_init(&e);
-    // D3.14: a cast that only drops mutability or ownership is a no-op the
-    // implicit conversions already cover, so `cast` is never the stricter of
-    // the two.
+    // A cast that only drops mutability or ownership is a no-op the implicit
+    // conversions already cover, so `cast` is never the stricter of the two.
+    // D3.14
     const type_t* types[SAMPLES_MAX];
     const uint32_t n = sample_types(&e, types);
     TEST_ASSERT_EQ_UINT64((uint64_t)n, (uint64_t)SAMPLES_MAX);
@@ -666,7 +685,8 @@ TEST(dropping_marks_never_changes_the_shape_or_the_size, {
             if (d == s || !type_assignable(types[d], types[s])) {
                 continue;
             }
-            // An implicit conversion is a no-op at run time (D5.4, D17.1).
+            // An implicit conversion is a no-op at run time.
+            // D5.4, D17.1
             TEST_ASSERT_TRUE(type_same_shape(types[d], types[s]));
             TEST_ASSERT_EQ_UINT64(type_sizeof(types[d]), type_sizeof(types[s]));
             TEST_ASSERT_EQ_UINT64(type_alignof(types[d]), type_alignof(types[s]));

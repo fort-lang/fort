@@ -1,8 +1,9 @@
 // Unit tests of the enum values the emitter writes (toolchain.md 6 items 19
-// and 21; D3.9, D19.2, D19.5): the `i32` representation and its scoped
-// members, the casts to and from an integer type, the zero value, and the
-// `%fort.enum_member` table a `print` of an enum reaches, which is named
-// after the module that declares the enum and emitted once for the program.
+// and 21): the `i32` representation and its scoped members, the casts to and
+// from an integer type, the zero value, and the `%fort.enum_member` table a
+// `print` of an enum reaches, which is named after the module that declares
+// the enum and emitted once for the program.
+// D3.9, D19.2, D19.5
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -17,7 +18,8 @@
 // fort programs and the IR text each one must produce.
 
 // An enum whose first member is negative, which is the class that tells a
-// signed representation from an unsigned one (D3.9).
+// signed representation from an unsigned one.
+// D3.9
 static const char SIGN_SOURCE[] = "enum sign { neg = -1, zero, pos }\n"
                                   "fn i32 main() {\n"
                                   "    sign s = sign.neg;\n"
@@ -38,15 +40,17 @@ static const char PALETTE_APP[] = "import palette;\n"
                                   "    println(c);\n"
                                   "    return 0;\n}\n";
 
-// ---- members and their values (D3.9) -----------------------------------------------
+// ---- members and their values ------------------------------------------------------
+// D3.9
 
 TEST(a_member_is_the_i32_its_declaration_order_gives, {
     TEST_ASSERT_TRUE(emit("enum color { red, green, blue }\n"
                           "fn i32 main() {\n    color a = color.red;\n"
                           "    color b = color.green;\n    color c = color.blue;\n"
                           "    return cast(a, i32) +% cast(b, i32) +% cast(c, i32);\n}\n"));
-    // Values start at 0 and increment (D3.9), and a member is a constant the
-    // checker folded, so it is stored as a literal (D4.6).
+    // Values start at 0 and increment, and a member is a constant the checker
+    // folded, so it is stored as a literal.
+    // D3.9, D4.6
     const char* want = "  store i32 0, ptr %a.0, align 4\n"
                        "  store i32 1, ptr %b.1, align 4\n"
                        "  store i32 2, ptr %c.2, align 4\n";
@@ -59,7 +63,8 @@ TEST(an_explicit_value_sets_the_members_after_it, {
                           "fn i32 main() {\n    color b = color.blue;\n"
                           "    return cast(b, i32);\n}\n"));
     // An explicit value is a constant expression and the next member follows
-    // it (D3.9).
+    // it.
+    // D3.9
     TEST_ASSERT_EQ_STR(found("  store i32 6, ptr %b.0, align 4\n"),
                        "  store i32 6, ptr %b.0, align 4\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
@@ -68,7 +73,8 @@ TEST(an_explicit_value_sets_the_members_after_it, {
 TEST(a_negative_member_prints_as_a_negative_i32, {
     TEST_ASSERT_TRUE(emit(SIGN_SOURCE));
     // A member's value may be negative, so the constant prints signed, the
-    // way the table below prints it (D3.9, D19.5).
+    // way the table below prints it.
+    // D3.9, D19.5
     TEST_ASSERT_EQ_STR(found("  store i32 -1, ptr %s.0, align 4\n"),
                        "  store i32 -1, ptr %s.0, align 4\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
@@ -77,7 +83,8 @@ TEST(a_negative_member_prints_as_a_negative_i32, {
 TEST(the_zero_value_of_an_enum_is_zero_whatever_its_members_are, {
     TEST_ASSERT_TRUE(emit(SIGN_SOURCE));
     // A zeroed enum holds 0 even if 0 is not a member; here it is `zero`, and
-    // `{}` is still one store of 0 and not a member lookup (D3.9, D6.5).
+    // `{}` is still one store of 0 and not a member lookup.
+    // D3.9, D6.5
     TEST_ASSERT_EQ_STR(found("  store i32 0, ptr %z.1, align 4\n"),
                        "  store i32 0, ptr %z.1, align 4\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
@@ -87,20 +94,23 @@ TEST(a_zero_enum_is_stored_and_never_memset, {
     TEST_ASSERT_TRUE(emit("enum level { low = 1, high = 2 }\n"
                           "fn i32 main() {\n    level l = {};\n    return cast(l, i32);\n}\n"));
     // An enum is a scalar, so its zero value is a store and not the
-    // `llvm.memset` an aggregate's `{}` is (D19.2, D19.3).
+    // `llvm.memset` an aggregate's `{}` is.
+    // D19.2, D19.3
     TEST_ASSERT_EQ_STR(found("  store i32 0, ptr %l.0, align 4\n"),
                        "  store i32 0, ptr %l.0, align 4\n");
     TEST_ASSERT_EQ_STR(absent("llvm.memset"), "absent");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
-// ---- casts (D3.9, item 12) ---------------------------------------------------------
+// ---- casts (item 12) ---------------------------------------------------------------
+// D3.9
 
 TEST(a_widening_cast_of_an_enum_is_a_sext, {
     TEST_ASSERT_TRUE(emit(SIGN_SOURCE));
     // The representation is signed, so a cast to a wider integer type
-    // sign-extends and `cast(sign.neg, i64)` is -1 and not 4294967295
-    // (D3.9, item 12).
+    // sign-extends and `cast(sign.neg, i64)` is -1 and not 4294967295 (item
+    // 12).
+    // D3.9
     TEST_ASSERT_EQ_STR(found("  %t1 = sext i32 %t0 to i64\n"), "  %t1 = sext i32 %t0 to i64\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
@@ -116,7 +126,8 @@ TEST(an_integer_cast_to_an_enum_is_unchecked, {
                           "fn i32 main() {\n    i64 v = 9;\n    color c = cast(v, color);\n"
                           "    return cast(c, i32);\n}\n"));
     // Int to enum is unchecked: the value is truncated to `i32` and stored,
-    // with no compare against the member list (D3.9).
+    // with no compare against the member list.
+    // D3.9
     TEST_ASSERT_EQ_STR(found("  %t1 = trunc i64 %t0 to i32\n  store i32 %t1, ptr %c.1, align 4\n"),
                        "  %t1 = trunc i64 %t0 to i32\n  store i32 %t1, ptr %c.1, align 4\n");
     TEST_ASSERT_EQ_STR(absent("fort_rt_fail"), "absent");
@@ -127,7 +138,8 @@ TEST(two_enums_compare_as_i32, {
     TEST_ASSERT_TRUE(emit("enum color { red, green }\n"
                           "fn i32 main() {\n    color a = color.red;\n    color b = color.green;\n"
                           "    return cast(a == b, i32) +% cast(a != b, i32);\n}\n"));
-    // Enums support `==` and `!=` alone, on the `i32` representation (D3.9).
+    // Enums support `==` and `!=` alone, on the `i32` representation.
+    // D3.9
     TEST_ASSERT_EQ_STR(found("icmp eq i32 %t0, %t1"), "icmp eq i32 %t0, %t1");
     TEST_ASSERT_EQ_STR(found("icmp ne i32 %t4, %t5"), "icmp ne i32 %t4, %t5");
     TEST_ASSERT_EQ_STR(verified(), "verified");
@@ -162,7 +174,8 @@ TEST(one_table_serves_every_print_of_its_enum, {
                           "fn i32 main() {\n    twice(color.red);\n    println(color.green);\n"
                           "    return 0;\n}\n"));
     // The table is assigned on first use and shared afterwards, so three
-    // prints in two definitions emit one table (item 21, D19.5).
+    // prints in two definitions emit one table (item 21).
+    // D19.5
     TEST_ASSERT_EQ_UINT64(occurrences("@.enum.main.color = "), (uint64_t)1);
     TEST_ASSERT_EQ_UINT64(occurrences("call void @\"std.rt.print_enum\""), (uint64_t)3);
     TEST_ASSERT_EQ_STR(verified(), "verified");
@@ -171,7 +184,8 @@ TEST(one_table_serves_every_print_of_its_enum, {
 TEST(an_imported_enums_table_is_named_after_the_module_that_declares_it, {
     TEST_ASSERT_TRUE(emit_two("app.ft", PALETTE_APP, "palette.ft", PALETTE_SOURCE));
     // A table is one per enum declaration, so its name is the declaring
-    // module's path and its name, whichever module prints it (item 21, D9.7).
+    // module's path and its name, whichever module prints it (item 21).
+    // D9.7
     TEST_ASSERT_EQ_UINT64(occurrences("@.enum.palette.color = "), (uint64_t)1);
     TEST_ASSERT_EQ_STR(absent("@.enum.app."), "absent");
     TEST_ASSERT_EQ_STR(verified(), "verified");

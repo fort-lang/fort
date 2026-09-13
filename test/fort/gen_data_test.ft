@@ -14,10 +14,10 @@ import std.str;
 import std.strbuf;
 
 // The data half of the emitter, src/fort/gen_data.ft, against toolchain.md 6
-// items 1, 5, 8 and 21: the module-level declarations of D7.10, the constant
-// initializers of D6.5 and D4.6, the private data the module refers to, the
-// declarations of the `extern` functions and the intrinsics, and the
-// attribute groups.
+// items 1, 5, 8 and 21: the module-level declarations, the constant
+// initializers, the private data the module refers to, the declarations of
+// the `extern` functions and the intrinsics, and the attribute groups.
+// D7.10, D6.5, D4.6
 //
 // Eight of the eleven cases here emit a module, and each one runs the
 // structural check of item 10 over it (gen_env.expect_blocks): four through
@@ -45,13 +45,15 @@ fn string globals_of(gen_env.env mut* e, strbuf.str_buf mut* b, string decls) {
     return gen_env.globals(e);
 }
 
-// ---- module-level data (item 5, D7.10) ---------------------------------------------
+// ---- module-level data (item 5) ----------------------------------------------------
+// D7.10
 
 // An immutable declaration lives in read-only memory and a `mut` one in
 // writable memory, and every global carries an explicit `align N` from the
-// compiler's own layout (D7.10, D3.1, item 5). A named fort constant is not
+// compiler's own layout (item 5). A named fort constant is not
 // `unnamed_addr`: its address is significant, because `&CONST` is
-// expressible (D6.7).
+// expressible.
+// D7.10, D3.1, D6.7
 fn void a_constant_and_a_mut_global_take_their_own_linkage() {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -68,12 +70,14 @@ fn void a_constant_and_a_mut_global_take_their_own_linkage() {
     gen_env.expect_text(got, gen_env.join_lines(&e, want[0..3]));
 }
 
-// ---- constant initializers (item 5, D6.5, D4.6) ------------------------------------
+// ---- constant initializers (item 5) ------------------------------------------------
+// D6.5, D4.6
 
 // A constant struct is its fields in declaration order, the order the named
-// type writes them in, with an omitted field of the designated form zeroed
-// (D6.5); an array is exactly its N elements; a `string` is its two header
-// fields, the bytes and the length the trailing NUL excludes (D3.7).
+// type writes them in, with an omitted field of the designated form zeroed;
+// an array is exactly its N elements; a `string` is its two header fields,
+// the bytes and the length the trailing NUL excludes.
+// D6.5, D3.7
 fn void a_constant_aggregate_is_written_member_by_member() {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -97,8 +101,9 @@ fn void a_constant_aggregate_is_written_member_by_member() {
 }
 
 // An all-zero aggregate is `zeroinitializer` whatever its shape, and `{}`
-// zeroes any aggregate, span or string (item 5, D6.5). A pointer's zero is
-// `null` and every other scalar's is `0`.
+// zeroes any aggregate, span or string (item 5). A pointer's zero is `null`
+// and every other scalar's is `0`.
+// D6.5
 fn void an_all_zero_value_is_zeroinitializer() {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -124,9 +129,11 @@ fn void an_all_zero_value_is_zeroinitializer() {
     gen_env.expect_text(got, gen_env.join_lines(&e, want[0..5]));
 }
 
-// The three forms D7.10 adds to the constant expressions of D4.6: the address
-// of a module-level declaration, a function's address, and the value of
-// another module-level constant, whose chain the checker resolved.
+// The three forms a module-level initializer adds to the constant
+// expressions: the address of a module-level declaration, a function's
+// address, and the value of another module-level constant, whose chain the
+// checker resolved.
+// D7.10, D4.6
 fn void the_three_module_level_initializer_forms() {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -149,12 +156,14 @@ fn void the_three_module_level_initializer_forms() {
     gen_env.expect_text(got, gen_env.join_lines(&e, want[0..5]));
 }
 
-// ---- private data (item 5, item 21, D19.5) -----------------------------------------
+// ---- private data (item 5, item 21) ------------------------------------------------
+// D19.5
 
-// `@.str.N` before `@.enum.*`, each numbered on first use
-// and a string constant never deduplicated by content; every byte outside the
-// printable range is a `\XX` hex pair and the trailing NUL that `len`
-// excludes is written (D3.7, item 5).
+// `@.str.N` before `@.enum.*`, each numbered on first use and a string
+// constant never deduplicated by content; every byte outside the printable
+// range is a `\XX` hex pair and the trailing NUL that `len` excludes is
+// written (item 5).
+// D3.7
 fn void the_private_data_is_the_three_lists_in_order() {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -170,7 +179,8 @@ fn void the_private_data_is_the_three_lists_in_order() {
     gen_env.expect_blocks(&e, got);
     string[7] mut want = {
         // The same text twice is two constants: private data is assigned on
-        // first use and never deduplicated by content (D19.5).
+        // first use and never deduplicated by content.
+        // D19.5
         "@.str.0 = private unnamed_addr constant [4 x i8] c\"a\\09b\\00\", align 1\n",
         "@.str.1 = private unnamed_addr constant [4 x i8] c\"a\\09b\\00\", align 1\n",
         "@.str.2 = private unnamed_addr constant [4 x i8] c\"red\\00\", align 1\n",
@@ -183,15 +193,17 @@ fn void the_private_data_is_the_three_lists_in_order() {
     };
     assert(str.find(got, gen_env.join_lines(&e, want[0..7])) >= 0);
     // A module that needs no failure position holds no file constant at all,
-    // since every record is made on first use (D19.5).
+    // since every record is made on first use.
+    // D19.5
     assert(e.g.files.len == 0);
 }
 
 // The file constant holds the path exactly as the compiler opened it, and one
-// record stands per file however many failures name it (D19.5).
-// An enum member's value is the constant the checker folded, printed as the
-// signed `i32` D3.9 gives every enum, so an explicit value stands in the
-// table where the ordinal would (item 21).
+// record stands per file however many failures name it. An enum member's
+// value is the constant the checker folded, printed as the signed `i32` every
+// enum has, so an explicit value stands in the table where the ordinal would
+// (item 21).
+// D19.5, D3.9
 fn void an_enum_table_holds_the_value_of_every_member() {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -227,7 +239,8 @@ fn void one_file_constant_stands_per_file() {
     gen_env.expect_blocks(&e, gen_env.module_text(&e));
     assert(e.g.files.len == 1);
     // The path exactly as the compiler opened it, which in the sandbox is the
-    // module's path under the temporary directory (D19.5).
+    // module's path under the temporary directory.
+    // D19.5
     assert(str.ends_with(gen.records_at(&e.g.files, 0).text, "main.ft"));
 }
 
@@ -235,10 +248,11 @@ fn void one_file_constant_stands_per_file() {
 
 // An `extern` function is declared with its C types, unmangled, and with a
 // variadic tail, which is what makes a fixed-prototype declaration of a
-// variadic C function safe (item 8, D9.8); its call site takes the
-// `nobuiltin` group. The runtime entry points follow in the order of
-// toolchain.md 5.1, then the intrinsics in their fixed table order, then the
-// attribute groups the module used, gaps in the numbering and all (D19.5).
+// variadic C function safe (item 8); its call site takes the `nobuiltin`
+// group. The runtime entry points follow in the order of toolchain.md 5.1,
+// then the intrinsics in their fixed table order, then the attribute groups
+// the module used, gaps in the numbering and all.
+// D9.8, D19.5
 fn void the_declaration_groups_stand_in_their_fixed_order() {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -253,7 +267,8 @@ fn void the_declaration_groups_stand_in_their_fixed_order() {
     string got = gen_env.module_text(&e);
     gen_env.expect_blocks(&e, got);
     // Two groups and no third: the runtime is defined in the module rather
-    // than declared (item 8, D13.1).
+    // than declared (item 8).
+    // D13.1
     string[5] mut want = {
         "declare void @swap(i8 zeroext, i16 signext, ...)\n",
         "declare i32 @puts(ptr, ...)\n",
@@ -270,8 +285,9 @@ fn void the_declaration_groups_stand_in_their_fixed_order() {
         "memory(none) }\n",
     };
     assert(str.find(got, gen_env.join_lines(&e, groups[0..4])) >= 0);
-    // The groups a module does not use leave no trace, so #1, #2 and #5 to
-    // #8 are absent here (D19.5); `#2` is never emitted at all (item 14).
+    // The groups a module does not use leave no trace, so #1, #2 and #5 to #8
+    // are absent here; `#2` is never emitted at all (item 14).
+    // D19.5
     assert(str.find(got, "attributes #1 =") < 0);
     assert(str.find(got, "attributes #2 =") < 0);
     assert(str.find(got, "attributes #5 =") < 0);
@@ -281,8 +297,8 @@ fn void the_declaration_groups_stand_in_their_fixed_order() {
 // The text of every attribute group, at its fixed index: the one place the
 // table is written down, and the one thing a `declare` line points at.
 // `mustprogress` is deliberately absent everywhere, since it would license
-// the optimizer to delete a `while (true) { }`, which fort keeps running
-// (D8.4).
+// the optimizer to delete a `while (true) { }`, which fort keeps running.
+// D8.4
 fn void every_attribute_group_has_its_text() {
     assert(gen_data.attr_text(gen.ATTR_FN) ==
            "nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"");
@@ -290,8 +306,9 @@ fn void every_attribute_group_has_its_text() {
            "noreturn nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"");
     // `#2` is never emitted: it held the C runtime's declarations, and its
     // index stays so that `#3` to `#7` keep the numbers item 14 fixes for
-    // them (D19.5). `#8` is `#1` plus `cold`, on the definitions of the
-    // `noreturn` entry points of 5.1.
+    // them. `#8` is `#1` plus `cold`, on the definitions of the `noreturn`
+    // entry points of 5.1.
+    // D19.5
     assert(gen_data.attr_text(gen.ATTR_UNUSED_2) == "cold noreturn nounwind");
     assert(gen_data.attr_text(gen.ATTR_RT_NORET) ==
            "cold noreturn nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"");

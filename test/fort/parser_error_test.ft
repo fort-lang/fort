@@ -6,8 +6,9 @@ import ast;
 import parse_env;
 import std.strbuf;
 
-// The diagnostics of src/fort/parser.ft and the recovery of D14.2: what is
-// reported, where, how often, and what the tree holds afterwards.
+// The diagnostics of src/fort/parser.ft and the recovery: what is reported,
+// where, how often, and what the tree holds afterwards.
+// D14.2
 //
 // tools/diff_ast.sh compares this parser's diagnostics with the C's over the
 // 69 .ft files of the repository that report one, so the messages themselves
@@ -56,8 +57,9 @@ fn void a_missing_identifier_is_reported_as_such() {
 // The separator a source spells wrongly is named where it stands, rather than
 // ending the path and being reported as the `;` that is then missing. `::` is
 // the one that matters: it separated a module path until the separator became
-// `.` (D9.1), so it is what every source written before that spells, and it
-// now lexes as two colons (D2.10).
+// `.`, so it is what every source written before that spells, and it now
+// lexes as two colons.
+// D9.1, D2.10
 fn void the_old_path_separator_names_the_mistake() {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
@@ -76,10 +78,11 @@ fn void the_old_path_separator_names_the_mistake() {
     assert(parse_env.diag_at(&e, 0) == "1:8: error: expected an identifier, found ':'");
 }
 
-// `..` is one token and longest match wins (D2.10), so the separator of a
-// path written with two dots is the range operator and never reaches the
-// parser as two separators; the diagnostic says so rather than reporting the
-// `;` the path's end would then be missing (D9.1).
+// `..` is one token and longest match wins, so the separator of a path
+// written with two dots is the range operator and never reaches the parser as
+// two separators; the diagnostic says so rather than reporting the `;` the
+// path's end would then be missing.
+// D2.10, D9.1
 fn void a_path_separator_written_twice_names_the_mistake() {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
@@ -98,8 +101,9 @@ fn void a_path_separator_written_twice_names_the_mistake() {
 fn void the_marker_placement_rules_are_reported_at_the_marker() {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
-    // Every one of these is decidable from the written form (D5.3, D17.2), so
-    // the parser and not the checker reports it.
+    // Every one of these is decidable from the written form, so the parser
+    // and not the checker reports it.
+    // D5.3, D17.2
     parse_env.parse(&e, "mut i32 x = 0;\n");
     string leading_mut = parse_env.diag_at(&e, 0);
     assert(leading_mut == parse_env.join2(&e, "1:1: error: a mut never precedes the base type:",
@@ -129,10 +133,11 @@ fn void the_constructs_the_bootstrap_lacks_are_parsed_here() {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
     // toolchain.md 7.3 lists the features the C bootstrap lacks, and this
-    // parser now implements every one of them: a second array or span level
-    // (T-043), `do`-`while` and `?:` (T-044) and a float literal (T-041). So
-    // each of these parses here and reports nothing, while stage1 keeps
-    // refusing all four, which is what tools/diff_ast.sh counts.
+    // parser now implements every one of them: a second array or span level,
+    // `do`-`while`, `?:` and a float literal. So each of these parses here
+    // and reports nothing, while stage1 keeps refusing all four, which is
+    // what tools/diff_ast.sh counts.
+    // T-041, T-043, T-044: the three tickets that added the four forms
     parse_env.parse(&e, "f64 x = 1.5;\n");
     assert(parse_env.diag_count(&e) == 0);
     parse_env.parse(&e, "fn void f() {\n    i32 x = a ? b : c;\n}\n");
@@ -153,7 +158,8 @@ fn void new_refuses_the_markers_it_does_not_take() {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
     // Inside `new` a `mut` never parses, an `own` follows only a `*`, and a
-    // span is asked for with a count (D10.2, D17.3).
+    // span is asked for with a count.
+    // D10.2, D17.3
     parse_env.parse(&e, "i32 x = new(i32 mut);\n");
     assert(parse_env.diag_at(&e, 0)
            == "1:17: error: a mut does not parse inside new: new allocates writable storage");
@@ -168,7 +174,8 @@ fn void new_refuses_the_markers_it_does_not_take() {
 fn void a_brace_list_may_not_mix_its_two_forms() {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
-    // Positional and designated initializers do not mix (D6.5).
+    // Positional and designated initializers do not mix.
+    // D6.5
     parse_env.parse(&e, "point p = {.x = 1, 2};\n");
     assert(parse_env.diag_at(&e, 0)
            == "1:20: error: positional and designated initializers do not mix");
@@ -183,7 +190,8 @@ fn void an_empty_struct_or_enum_body_is_reported() {
     assert(parse_env.diag_at(&e, 0) == "2:1: error: an enum has at least one member");
 }
 
-// ---- how often it is reported (D14.2) ------------------------------------------
+// ---- how often it is reported --------------------------------------------------
+// D14.2
 
 fn void one_mistake_costs_one_diagnostic() {
     parse_env.env mut e = parse_env.create();
@@ -200,7 +208,8 @@ fn void later_errors_are_reported_too() {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
     // A file reports one diagnostic for each construct that failed, not only
-    // for the first (D14.2).
+    // for the first.
+    // D14.2
     parse_env.parse(&e, "i32 a = ;\ni32 b = ;\ni32 c = ;\n");
     assert(parse_env.errors(&e) == 3);
     assert(parse_env.diag_at(&e, 0) == "1:9: error: expected an expression, found ';'");
@@ -212,8 +221,9 @@ fn void a_file_reports_at_most_twenty_diagnostics() {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
     // The cap is the file's and is checked before each report, exactly as
-    // src/bootstrap/parser.c checks it (D14.2); the parse goes on, so the
-    // tree still covers the file.
+    // src/bootstrap/parser.c checks it; the parse goes on, so the tree still
+    // covers the file.
+    // D14.2
     //
     // The source is built in a buffer of this suite's own rather than in the
     // environment's, since appending a view of a buffer into that same buffer
@@ -232,7 +242,8 @@ fn void a_file_reports_at_most_twenty_diagnostics() {
     // The parse goes on past the cap: the tree holds an error node for every
     // one of the twenty-five failed declarations, the five that were never
     // reported included, so a later pass still sees that those regions were
-    // skipped (D14.2).
+    // skipped.
+    // D14.2
     assert(ast.ast_len(mod) == 25);
     u64 mut n = 0;
     while (n < 25) {
@@ -247,15 +258,17 @@ fn void a_file_reports_at_most_twenty_diagnostics() {
 fn void two_errors_at_one_position_are_reported_once() {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
-    // An error that starts where the one before it started is dropped
-    // (D14.2), which is what keeps a half-typed construct from reporting
-    // twice about one token.
+    // An error that starts where the one before it started is dropped, which
+    // is what keeps a half-typed construct from reporting twice about one
+    // token.
+    // D14.2
     parse_env.parse(&e, "fn void f() {\n    x = ;;\n}\n");
     assert(parse_env.errors(&e) == 1);
     assert(parse_env.diag_at(&e, 0) == "2:9: error: expected an expression, found ';'");
 }
 
-// ---- what the tree holds afterwards (D14.2) ------------------------------------
+// ---- what the tree holds afterwards --------------------------------------------
+// D14.2
 
 fn void a_skipped_region_is_an_error_node() {
     parse_env.env mut e = parse_env.create();
@@ -272,7 +285,8 @@ fn void a_broken_field_leaves_the_struct_standing() {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
     // The fields are a recovery point of their own: a broken one is skipped
-    // to its `;` and the fields after it are read (D14.2).
+    // to its `;` and the fields after it are read.
+    // D14.2
     assert(parse_env.parse_dump(&e, "struct s {\n    i32 ;\n    i32 y;\n}\n")
            == "(module (struct s (error) (field-decl (type (prim i32)) y)))");
 }
@@ -295,7 +309,8 @@ fn void a_missing_closing_brace_is_reported_once() {
     defer parse_env.free(&e);
     // A block ends where a top-level declaration starts as well as at its
     // `}`, so a missing brace costs one diagnostic and not one per following
-    // declaration (D14.2).
+    // declaration.
+    // D14.2
     string src = "fn void f() {\n    g();\nfn void h() {\n    k();\n}\n";
     string dumped = parse_env.parse_dump(&e, src);
     string expected = parse_env.join4(&e, "(module (fn (type (void)) f (params)",
@@ -311,7 +326,8 @@ fn void a_missing_opening_brace_is_reported_once_too() {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
     // The mirror of the rule above: a declaration header is complete before
-    // its `{`, so the body is read as though the brace were there (D14.2).
+    // its `{`, so the body is read as though the brace were there.
+    // D14.2
     string dumped = parse_env.parse_dump(&e, "fn void f()\n    g();\n}\n");
     assert(dumped == "(module (fn (type (void)) f (params) (block (call-stmt (call (ident g))))))");
     assert(parse_env.errors(&e) == 1);
@@ -322,8 +338,9 @@ fn void a_lexical_error_leaves_the_parser_the_rest_of_the_file() {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
     // A lexical error costs the lexer its line and the parser recovers from
-    // whatever that missing line broke (D14.2); the budget is shared, so the
-    // count here is the lexer's error and no cascade.
+    // whatever that missing line broke; the budget is shared, so the count
+    // here is the lexer's error and no cascade.
+    // D14.2
     assert(parse_env.parse_dump(&e, "#\ni32 b = 1;\n")
            == "(module (var b (type (prim i32)) (int 1)))");
     assert(parse_env.errors(&e) == 1);

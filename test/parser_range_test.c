@@ -1,8 +1,9 @@
-// The tree invariants of a parsed range (D20.4), checked over a corpus that
-// covers every node kind the bootstrap builds: every node ends at or after it
+// The tree invariants of a parsed range, checked over a corpus that covers
+// every node kind the bootstrap builds: every node ends at or after it
 // starts, a name range sits inside the node that carries it, and a child's
 // range sits inside its parent's, the one exception being the left operand of
 // a node named after the operator that follows it (toolchain.md 4).
+// D20.4
 //
 // A missed end shows up here as a child that leaves its parent, which is what
 // makes this suite the safety net for the parser's `finish` calls.
@@ -185,8 +186,9 @@ static const char* const MODULES[] = {"",
                                       "node* root = null;\n"};
 
 // Modules the parser recovers in: every one reports at least one syntax error
-// and still yields a tree, whose error nodes cover the skipped regions
-// (D14.2), so the invariants below are checked on a recovered tree too.
+// and still yields a tree, whose error nodes cover the skipped regions, so
+// the invariants below are checked on a recovered tree too.
+// D14.2
 static const char* const RECOVERED[] = {"i32 a = ;\ni32 b = 1;\n",
                                         "fn i32 f() {\n    x = ;\n    return 0;\n}\n",
                                         "fn i32 f() {\n    if (c) {\n        x = ;\n    }\n"
@@ -263,7 +265,8 @@ static void check_node(const ast_node_t* n, const ast_node_t* parent) {
         note("ends before it starts", n, parent);
     }
     if (n->name_loc.line != 0) {
-        // A name range is a token inside the node that carries it (D20.4).
+        // A name range is a token inside the node that carries it.
+        // D20.4
         if (!loc_is_ordered(n->name_loc) || !loc_starts_at_or_before(n->loc, n->name_loc) ||
             !loc_ends_at_or_before(n->name_loc, n->loc)) {
             note("has a name range outside itself", n, parent);
@@ -283,7 +286,8 @@ static void check_node(const ast_node_t* n, const ast_node_t* parent) {
 // Parses `src` and reports every invariant it breaks, the empty string when
 // it breaks none; a source that yields no tree is reported as such, since the
 // parser returns one whatever it reported and a lexical error resynchronises
-// at the next line rather than stopping the file (D14.2).
+// at the next line rather than stopping the file.
+// D14.2
 static const char* violations(const char* src) {
     const ast_node_t* mod = parse_text(src);
     sb_clear(&report);
@@ -325,7 +329,8 @@ TEST(every_module_of_the_corpus_holds_the_invariants, {
 })
 
 // A recovered tree holds them too: an error node lies inside the block or the
-// module that holds it and ends at the last token the skip dropped (D14.2).
+// module that holds it and ends at the last token the skip dropped.
+// D14.2
 TEST(every_recovered_module_holds_the_invariants, {
     for (uint64_t i = 0; i < sizeof(RECOVERED) / sizeof(RECOVERED[0]); i++) {
         TEST_ASSERT_EQ_STR(violations(RECOVERED[i]), "");

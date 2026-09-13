@@ -1,15 +1,17 @@
-// The type builder and the canonical spelling: the reading rules of D3.6,
-// the placement rules of D5.3 and D17.2, and every row of the tables those
-// decisions carry. Each row is one assertion: the reader of types_helpers.h
-// turns the spelling into type_build arguments, and the type is checked by
-// the levels it marks mutable (`tenv_muts`, level 0 first), by the `own`
-// mark of each of its references (`tenv_owns`, outermost first) and by the
-// spelling type_to_str gives it back.
+// The type builder and the canonical spelling: the reading rules, the
+// placement rules, and every row of the tables those rules carry. Each row
+// is one assertion: the reader of types_helpers.h turns the spelling into
+// type_build arguments, and the type is checked by the levels it marks
+// mutable (`tenv_muts`, level 0 first), by the `own` mark of each of its
+// references (`tenv_owns`, outermost first) and by the spelling type_to_str
+// gives it back.
+// D3.6, D5.3, D17.2
 //
 // Every marker follows the type element whose storage it marks and the last
 // position is the binding, so a declaration's own `mut` is just the last one
-// written (D5.3). The tables of core-language.md and type-system.md are
-// being re-spelled, so decisions.md is the source here.
+// written. The tables of core-language.md and type-system.md are being
+// re-spelled, so decisions.md is the source here.
+// D5.3
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -21,7 +23,8 @@
 
 #include "test.h"
 
-// ---- reading suffixes (D3.6) ----------------------------------------------------
+// ---- reading suffixes -----------------------------------------------------------
+// D3.6
 
 TEST(the_d3_6_shapes_round_trip, {
     tenv_t e;
@@ -69,7 +72,8 @@ TEST(the_d3_6_shapes_are_the_ones_it_names, {
     const type_t* m = tenv_type(&e, "i32[3][4]");
     TEST_ASSERT_EQ_UINT64(m->len, (uint64_t)3);
     TEST_ASSERT_EQ_UINT64(m->elem->len, (uint64_t)4);
-    // `void*` is its own kind, with no pointee level (D3.11).
+    // `void*` is its own kind, with no pointee level.
+    // D3.11
     TEST_ASSERT_TRUE(tenv_type(&e, "void*")->kind == TYPE_VOIDPTR);
     TEST_ASSERT_TRUE(tenv_type(&e, "void**")->kind == TYPE_PTR);
     TEST_ASSERT_TRUE(tenv_type(&e, "void**")->elem->kind == TYPE_VOIDPTR);
@@ -79,7 +83,8 @@ TEST(the_d3_6_shapes_are_the_ones_it_names, {
 TEST(an_array_suffix_never_follows_a_reference_suffix, {
     tenv_t e;
     tenv_init(&e);
-    // `i32[4]*[2]` does not parse; wrap the pointer in a struct (D3.6).
+    // `i32[4]*[2]` does not parse; wrap the pointer in a struct.
+    // D3.6
     TEST_ASSERT_EQ_STR(tenv_spell(&e, "i32[4]*[2]"),
                        "error: no array suffix may follow a trailing reference suffix");
     TEST_ASSERT_EQ_STR(tenv_spell(&e, "i32[4]@[2]"),
@@ -93,7 +98,8 @@ TEST(a_marker_that_belongs_to_an_array_is_refused, {
     tenv_t e;
     tenv_init(&e);
     // The elements of a fixed array share its storage, so the marker goes
-    // after the length: `i32 mut[4]` is an error (D5.3).
+    // after the length: `i32 mut[4]` is an error.
+    // D5.3
     TEST_ASSERT_EQ_STR(tenv_spell(&e, "i32 mut[4]"), "error: mark the array after its length");
     TEST_ASSERT_EQ_STR(tenv_spell(&e, "i32[3] mut[4]"), "error: mark the array after its length");
     TEST_ASSERT_EQ_STR(tenv_spell(&e, "node* mut[4]"), "error: mark the array after its length");
@@ -114,8 +120,8 @@ TEST(an_own_marks_a_reference_and_nothing_else, {
     tenv_t e;
     tenv_init(&e);
     // `own` follows a `*` or an `@`, or `string`, the reference with no
-    // suffix; it never follows another base type or a fixed-array suffix
-    // (D17.2).
+    // suffix; it never follows another base type or a fixed-array suffix.
+    // D17.2
     TEST_ASSERT_EQ_STR(tenv_spell(&e, "node own*"),
                        "error: 'own' marks a reference: write it after a '*' or an '@'");
     TEST_ASSERT_EQ_STR(tenv_spell(&e, "i32 own"),
@@ -148,7 +154,8 @@ TEST(builder_errors_of_lengths_and_void, {
     TEST_ASSERT_EQ_STR(tenv_spell(&e, "void*@"), "void*@");
     TEST_ASSERT_EQ_STR(tenv_spell_decl(&e, "void* mut"), "void* mut");
     // `void` has no target level, so `void mut*` and `void own` are errors,
-    // and a span or an array of `void` does not exist (D3.11, D5.3).
+    // and a span or an array of `void` does not exist.
+    // D3.11, D5.3
     TEST_ASSERT_EQ_STR(tenv_spell(&e, "void mut*"),
                        "error: 'void' is only a return type or the base of 'void*'");
     TEST_ASSERT_EQ_STR(tenv_spell(&e, "void own"),
@@ -167,19 +174,22 @@ TEST(an_own_mark_on_a_function_type_is_refused, {
     tenv_init(&e);
     const type_t* i32 = type_prim(&e.tt, PRIM_I32);
     const type_t* f = tenv_fn(&e, i32, i32, NULL);
-    // A function pointer is not a reference that owns anything (D17.1).
+    // A function pointer is not a reference that owns anything.
+    // D17.1
     type_build_t r = type_build(&e.tt, true, false, f, NULL, 0);
     TEST_ASSERT_NULL(r.type);
     TEST_ASSERT_EQ_STR(r.error, "'own' marks a reference: write it after a '*' or an '@'");
     // A `mut` after a function type marks the storage holding the function
-    // pointer, which in the last position is the binding (D5.3).
+    // pointer, which in the last position is the binding.
+    // D5.3
     r = type_build(&e.tt, false, true, f, NULL, 0);
     TEST_ASSERT_TRUE(r.type == f);
     TEST_ASSERT_TRUE(r.mut0);
     tenv_free(&e);
 })
 
-// ---- the placement rule (D5.3) --------------------------------------------------
+// ---- the placement rule ---------------------------------------------------------
+// D5.3
 
 TEST(the_d5_3_table_marks_the_levels_it_names, {
     tenv_t e;
@@ -232,7 +242,8 @@ TEST(the_d5_3_table_spells_its_declarations_back, {
 TEST(the_placement_rule_on_further_shapes, {
     tenv_t e;
     tenv_init(&e);
-    // Chains of three, where each position marks one level (D5.3).
+    // Chains of three, where each position marks one level.
+    // D5.3
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "node**"), "nnn");
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "node** mut"), "ynn");
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "node mut* mut* mut"), "yyy");
@@ -240,7 +251,8 @@ TEST(the_placement_rule_on_further_shapes, {
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "i32@@ mut"), "ynn");
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "i32 mut@ mut@ mut"), "yyy");
     // A fixed array adds no level, so its elements and the array are one
-    // storage (D5.2).
+    // storage.
+    // D5.2
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "i32[4]@"), "nn");
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "i32[4] mut@"), "ny");
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "i32[4]@ mut"), "yn");
@@ -255,7 +267,8 @@ TEST(the_placement_rule_on_further_shapes, {
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "string@ mut"), "yn");
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "string mut@"), "ny");
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "void* mut"), "y");
-    // Out-parameters, the shape D3.6 names.
+    // Out-parameters, the shape the rule names.
+    // D3.6
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "u8@*"), "nnn");
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "u8@* mut"), "ynn");
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "u8 mut@ mut* mut"), "yyy");
@@ -315,7 +328,8 @@ TEST(the_last_position_is_the_binding, {
     tenv_free(&e);
 })
 
-// ---- ownership placement (D17.2) ------------------------------------------------
+// ---- ownership placement --------------------------------------------------------
+// D17.2
 
 TEST(the_d17_2_table_marks_the_references_it_names, {
     tenv_t e;
@@ -334,7 +348,8 @@ TEST(the_d17_2_table_marks_the_references_it_names, {
 TEST(the_d17_2_table_marks_the_levels_it_names, {
     tenv_t e;
     tenv_init(&e);
-    // `own` never changes which levels are mutable (D17.2).
+    // `own` never changes which levels are mutable.
+    // D17.2
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "u8 mut@ own"), "ny");
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "u8@ own"), "nn");
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "node mut* own"), "ny");
@@ -364,7 +379,8 @@ TEST(the_marks_inside_a_derived_type_survive, {
     tenv_t e;
     tenv_init(&e);
     // `kids[i]` of a `node mut* own mut@ own` is a `node mut* own`, and
-    // `*out` of a `u8 mut@ own mut*` a `u8 mut@ own` (D17.2).
+    // `*out` of a `u8 mut@ own mut*` a `u8 mut@ own`.
+    // D17.2
     const type_t* kids = tenv_type(&e, "node mut* own mut@ own");
     TEST_ASSERT_TRUE(kids->elem == tenv_type(&e, "node mut* own"));
     const type_t* out = tenv_type(&e, "u8 mut@ own mut*");
@@ -381,7 +397,8 @@ TEST(the_marks_inside_a_derived_type_survive, {
 TEST(each_own_marks_one_reference_only, {
     tenv_t e;
     tenv_init(&e);
-    // A reference is owning only where its own position says so (D17.2).
+    // A reference is owning only where its own position says so.
+    // D17.2
     TEST_ASSERT_EQ_STR(tenv_owns(&e, "node** own"), "yn");
     TEST_ASSERT_EQ_STR(tenv_owns(&e, "node* own* own"), "yy");
     TEST_ASSERT_EQ_STR(tenv_owns(&e, "node* own*"), "ny");
@@ -424,7 +441,8 @@ TEST(suffixes_after_a_function_type_apply_to_it, {
     tenv_init(&e);
     const type_t* i32 = type_prim(&e.tt, PRIM_I32);
     const type_t* f = tenv_fn(&e, i32, i32, NULL);
-    // `fn i32(i32)[4]`: an array of four function pointers (D3.6).
+    // `fn i32(i32)[4]`: an array of four function pointers.
+    // D3.6
     TEST_ASSERT_EQ_STR(tenv_str(&e, type_array(&e.tt, f, 4)), "fn i32(i32)[4]");
     // `fn i32[4](i32)`: a function returning an `i32[4]`.
     TEST_ASSERT_EQ_STR(tenv_str(&e, tenv_fn(&e, type_array(&e.tt, i32, 4), i32, NULL)),
@@ -443,12 +461,14 @@ TEST(every_combination_of_markers_has_a_spelling, {
     tenv_init(&e);
     // A mutable level behind an immutable one, which `&f` on an immutable
     // struct with a `node mut*` field yields, is written by marking each
-    // position on its own (D5.3).
+    // position on its own.
+    // D5.3
     const type_t* mut_node_ptr = tenv_type(&e, "node mut*");
     TEST_ASSERT_EQ_STR(tenv_str(&e, type_ptr(&e.tt, mut_node_ptr, false, false)), "node mut**");
     const type_t* mut_span = tenv_type(&e, "i32 mut@");
     TEST_ASSERT_EQ_STR(tenv_str(&e, type_span(&e.tt, mut_span, false, false)), "i32 mut@@");
-    // An owned string inside a type has its own position too (D3.7, D17.2).
+    // An owned string inside a type has its own position too.
+    // D3.7, D17.2
     const type_t* own_string = tenv_type(&e, "string own");
     TEST_ASSERT_EQ_STR(tenv_str(&e, type_ptr(&e.tt, own_string, false, false)), "string own*");
     TEST_ASSERT_EQ_STR(tenv_str(&e, type_span(&e.tt, own_string, false, false)), "string own@");
@@ -464,8 +484,9 @@ TEST(only_an_array_behind_a_reference_needs_parentheses, {
     tenv_t e;
     tenv_init(&e);
     // No array suffix may follow a trailing reference suffix, so a pointer
-    // to an array inside an array has no spelling (D3.6); diagnostics print
-    // the inner type in parentheses.
+    // to an array inside an array has no spelling; diagnostics print the
+    // inner type in parentheses.
+    // D3.6
     const type_t* arr_ptr = type_ptr(&e.tt, tenv_type(&e, "i32[4]"), false, false);
     TEST_ASSERT_EQ_STR(tenv_str(&e, type_array(&e.tt, arr_ptr, 2)), "(i32[4])*[2]");
     const type_t* arr_span = type_span(&e.tt, tenv_type(&e, "i32[4]"), false, true);
@@ -542,7 +563,8 @@ TEST(the_builder_reads_the_three_suffix_groups, {
     tenv_t e;
     tenv_init(&e);
     // `node*@*` is a pointer to a span of pointers: reference suffixes read
-    // inside-out (D3.6), and each position carries its own markers (D5.3).
+    // inside-out, and each position carries its own markers.
+    // D3.6, D5.3
     type_suffix_t suffixes[3];
     suffixes[0].kind = SUFFIX_PTR;
     suffixes[0].len = 0;
@@ -595,7 +617,8 @@ TEST(a_base_position_own_marks_a_string, {
     tenv_t e;
     tenv_init(&e);
     // `string` is the one base type that takes `own`, being a reference with
-    // no suffix (D3.7, D17.2).
+    // no suffix.
+    // D3.7, D17.2
     type_build_t r = type_build(&e.tt, true, false, tenv_type(&e, "string"), NULL, 0);
     TEST_ASSERT_NULL(r.error);
     TEST_ASSERT_TRUE(r.type == tenv_type(&e, "string own"));
@@ -696,14 +719,16 @@ TEST(the_binding_takes_the_last_position_of_every_shape, {
     tenv_t e;
     tenv_init(&e);
     // Whatever the type ends with, the marker before the name is the
-    // binding's (D5.3).
+    // binding's.
+    // D5.3
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "node* mut@ mut"), "yyn");
     TEST_ASSERT_EQ_STR(tenv_spell_decl(&e, "node* mut@ mut"), "node* mut@ mut");
     TEST_ASSERT_EQ_STR(tenv_spell(&e, "node* mut@ mut"), "node* mut@");
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "u8@ mut* mut"), "yyn");
     TEST_ASSERT_EQ_STR(tenv_spell_decl(&e, "u8@ mut* mut"), "u8@ mut* mut");
     // A fixed array holds its elements, so the array's own position is the
-    // last one and it is the binding's (D5.2, D5.3).
+    // last one and it is the binding's.
+    // D5.2, D5.3
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "node*[4] mut"), "yn");
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "node*[4][2] mut"), "yn");
     TEST_ASSERT_EQ_STR(tenv_spell_decl(&e, "node*[4][2] mut"), "node*[4][2] mut");
@@ -732,7 +757,8 @@ TEST(the_declaration_spelling_writes_the_last_marker_only, {
     tenv_t e;
     tenv_init(&e);
     // `type_to_str` leaves the binding's position empty and
-    // `type_to_str_decl` writes it; nothing else moves (D5.3).
+    // `type_to_str_decl` writes it; nothing else moves.
+    // D5.3
     const type_t* t = tenv_type(&e, "node mut*");
     sb_t out;
     sb_init(&out);

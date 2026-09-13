@@ -66,9 +66,10 @@ static const char* form_of(const type_t* t) {
 
 // The parameter text the emitter would write for `t` at an extern call site
 // and in an extern declaration: the value type of item 7 with the extension
-// attribute of D9.9 after it. The comparison below holds ir_form_of_type
-// against it, since a second mapping from a fort type to an IR type is what
-// would let the check of D9.8 pass a call the emitter writes differently.
+// attribute after it. The comparison below holds ir_form_of_type against it,
+// since a second mapping from a fort type to an IR type is what would let the
+// check pass a call the emitter writes differently.
+// D9.9, D9.8
 static const char* emitted_param(const type_t* t) {
     static char text[64];
     gen_options_t opts;
@@ -100,13 +101,15 @@ TEST(a_mangled_name_finds_its_entry_point_and_nothing_else_does, {
     TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("std.rt.print_enum")) == RT_PRINT_ENUM);
     TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("std.rt_float.print_f64")) == RT_PRINT_F64);
     // The short name alone is not an entry point: the emitter matches the
-    // mangled name of D9.7, so a function of another module named `alloc` or
-    // `exit` cannot take the attribute group of item 14.
+    // mangled name, so a function of another module named `alloc` or `exit`
+    // cannot take the attribute group of item 14.
+    // D9.7
     TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("alloc")) == RT_COUNT);
     TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("main.exit")) == RT_COUNT);
     TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("std.rt.print")) == RT_COUNT);
     TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("std.rt.allocs")) == RT_COUNT);
-    // The C names the runtime used to have are ordinary C names now (D9.8).
+    // The C names the runtime used to have are ordinary C names now.
+    // D9.8
     TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("fort_rt_new")) == RT_COUNT);
     TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("fort_entry")) == RT_COUNT);
     TEST_ASSERT_TRUE(rt_entry_of(str_from_cstr("write")) == RT_COUNT);
@@ -133,7 +136,8 @@ TEST(every_row_names_the_entry_point_its_enumerator_does, {
     TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_I64), "std.rt.print_i64");
     TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_U64), "std.rt.print_u64");
     // The two float printers stand in `std.rt_float`, because a compiler
-    // without floats cannot compile them (D18.1).
+    // without floats cannot compile them.
+    // D18.1
     TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_F32), "std.rt_float.print_f32");
     TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_F64), "std.rt_float.print_f64");
     TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_BOOL), "std.rt.print_bool");
@@ -150,8 +154,9 @@ TEST(every_row_names_the_entry_point_its_enumerator_does, {
 
 TEST(every_entry_point_is_a_mangled_fort_name_of_the_runtime, {
     // A call into the runtime is an ordinary fort-to-fort call by the mangled
-    // name of D9.7, so no row may hold a C name: an unmangled name would be a
-    // second declaration of an ELF symbol a program may declare itself (D9.8).
+    // name, so no row may hold a C name: an unmangled name would be a second
+    // declaration of an ELF symbol a program may declare itself.
+    // D9.7, D9.8
     for (uint64_t i = 0; i < (uint64_t)RT_COUNT; i++) {
         const char* name = rt_entry_name((rt_entry_t)i);
         const bool rt = strncmp(name, "std.rt.", strlen("std.rt.")) == 0;
@@ -174,9 +179,10 @@ TEST(the_two_entry_points_that_return_a_value_are_the_only_ones, {
     TEST_ASSERT_EQ_UINT64(returning, (uint64_t)2);
     TEST_ASSERT_EQ_STR(ir_result_text(rt_entry_result(RT_ALLOC)), "ptr");
     // A narrow result carries its extension attribute before the type, which
-    // is what licenses eliding the caller's re-narrowing (D9.9, item 7). A
-    // fort `bool` result is `i1` and not `i8`: `i8` is its memory type alone
-    // (item 2).
+    // is what licenses eliding the caller's re-narrowing (item 7). A fort
+    // `bool` result is `i1` and not `i8`: `i8` is its memory type alone (item
+    // 2).
+    // D9.9
     TEST_ASSERT_EQ_STR(ir_result_text(rt_entry_result(RT_STR_EQ)), "zeroext i1");
     TEST_ASSERT_EQ_STR(ir_result_text(rt_entry_result(RT_ARGS)), "void");
     TEST_ASSERT_EQ_STR(ir_result_text(rt_entry_result(RT_FREE)), "void");
@@ -218,16 +224,18 @@ TEST(the_parameter_list_of_a_row_is_the_fort_signature_of_section_5_1, {
     TEST_ASSERT_EQ_STR(ir_param_text(rt_entry_param(RT_ALLOC, 0)), "i64");
     TEST_ASSERT_EQ_STR(ir_param_text(rt_entry_param(RT_ALLOC, 2)), "ptr");
     TEST_ASSERT_EQ_STR(ir_param_text(rt_entry_param(RT_ALLOC, 4)), "i32");
-    // A fort `bool` parameter is `i1 zeroext` and a `char` parameter
-    // `i8 zeroext`: the two are different forms (item 2, D19.2).
+    // A fort `bool` parameter is `i1 zeroext` and a `char` parameter `i8
+    // zeroext`: the two are different forms (item 2).
+    // D19.2
     TEST_ASSERT_EQ_STR(ir_param_text(rt_entry_param(RT_PRINT_BOOL, 1)), "i1 zeroext");
     TEST_ASSERT_EQ_STR(ir_param_text(rt_entry_param(RT_PRINT_CHAR, 1)), "i8 zeroext");
     TEST_ASSERT_EQ_STR(ir_param_text(rt_entry_param(RT_PRINT_F32, 1)), "float");
     TEST_ASSERT_EQ_STR(ir_param_text(rt_entry_param(RT_PRINT_F64, 1)), "double");
 })
 
-// Every scalar an extern signature may use (D9.8), as a file-scope table: a
-// brace initializer inside a TEST body would split the one macro argument.
+// Every scalar an extern signature may use, as a file-scope table: a brace
+// initializer inside a TEST body would split the one macro argument.
+// D9.8
 static const prim_kind_t SCALARS[] = {PRIM_I8,
                                       PRIM_I16,
                                       PRIM_I32,
@@ -241,13 +249,14 @@ static const prim_kind_t SCALARS[] = {PRIM_I8,
                                       PRIM_F32,
                                       PRIM_F64};
 
-// ---- the fort signatures of std/rt.ft (D13.1) --------------------------------------
+// ---- the fort signatures of std/rt.ft ----------------------------------------------
+// D13.1
 
-// The runtime's module, parsed and checked by the compiler's own front end.
-// It is loaded as the entry file, so its module path is the base name `rt`
-// and the runtime root of D9.10 is not loaded beside it; what this suite
-// reads off it is the signature of each declaration, which the path does not
-// change.
+// The runtime's module, parsed and checked by the compiler's own front end. It
+// is loaded as the entry file, so its module path is the base name `rt` and
+// the runtime root is not loaded beside it; what this suite reads off it is
+// the signature of each declaration, which the path does not change.
+// D9.10
 static module_set_t rt_set;
 static check_t rt_check;
 static bool rt_live = false;
@@ -296,8 +305,9 @@ static const ast_node_t* rt_decl(const module_t* m, str_t name) {
     return NULL;
 }
 
-// The part of a mangled name after its last dot, which D9.7 makes the
+// The part of a mangled name after its last dot, which the mangling makes the
 // declaration name.
+// D9.7
 static str_t short_name(const char* mangled) {
     const char* last = strrchr(mangled, '.');
     return str_from_cstr(last != NULL ? last + 1 : mangled);
@@ -314,8 +324,9 @@ static bool in_module(const char* mangled, const char* path) {
 // std/rt.ft's i16 zeroext`.
 enum { RESULT_CAP = 64, REPORT_CAP = 160 };
 
-// The result text the emitter writes on the definition of `t`, which is what
-// a call site must state for the two to agree (item 7, D9.9).
+// The result text the emitter writes on the definition of `t`, which is what a
+// call site must state for the two to agree (item 7).
+// D9.9
 static const char* emitted_result(const type_t* t) {
     static char text[RESULT_CAP];
     gen_options_t opts;
@@ -409,24 +420,27 @@ TEST(every_row_is_the_fort_signature_of_std_rt, {
         TEST_ASSERT_EQ_STR(row_mismatch(e, name, decl->sym->type), "");
         // The call site states the result the definition states, attribute
         // included: `opt` accepts a disagreement and LLVM then falls back to
-        // the callee's, which is an assumption the caller never made (D9.9).
+        // the callee's, which is an assumption the caller never made.
+        // D9.9
         TEST_ASSERT_EQ_STR(ir_result_text(rt_entry_result(e)),
                            emitted_result(decl->sym->type->elem));
         // `noreturn` is part of the signature: it is what the attribute group
-        // of item 14 states of the definition (D8.5).
+        // of item 14 states of the definition.
+        // D8.5
         TEST_ASSERT_TRUE(decl->sym->type->noreturn == rt_entry_noreturn(e));
         checked++;
     }
-    // Every row but the two float printers, which stand in `std.rt_float`
-    // and arrive with the float work (D18.1).
+    // Every row but the two float printers, which stand in `std.rt_float` and
+    // arrive with the float work.
+    // D18.1
     TEST_ASSERT_EQ_UINT64(checked, (uint64_t)RT_COUNT - 2);
     rt_close();
 })
 
 TEST(std_rt_declares_no_runtime_c_symbol, {
-    // D13.2: `std.rt` is the runtime, so it declares no `fort_rt_` symbol.
-    // Its own `extern` declarations are `std.libc`'s and it has none of its
-    // own.
+    // `std.rt` is the runtime, so it declares no `fort_rt_` symbol. Its own
+    // `extern` declarations are `std.libc`'s and it has none of its own.
+    // D13.2
     const module_t* m = rt_open();
     TEST_ASSERT_NONNULL(m);
     uint64_t externs = 0;
@@ -444,7 +458,8 @@ TEST(std_rt_declares_no_runtime_c_symbol, {
 TEST(std_rt_defines_the_float_printers_nowhere, {
     // The two float rows name `std.rt_float`, and `std.rt` neither defines
     // them nor is loaded with them: a compiler that rejects floats cannot
-    // compile them (D18.1, D18.4).
+    // compile them.
+    // D18.1, D18.4
     const module_t* m = rt_open();
     TEST_ASSERT_NONNULL(m);
     TEST_ASSERT_TRUE(in_module(rt_entry_name(RT_PRINT_F32), "std.rt_float"));
@@ -454,27 +469,31 @@ TEST(std_rt_defines_the_float_printers_nowhere, {
     rt_close();
 })
 
-// ---- the form of a fort type at the boundary (D9.8, D9.9) --------------------------
+// ---- the form of a fort type at the boundary ---------------------------------------
+// D9.8, D9.9
 
 TEST(a_fort_type_takes_the_ir_form_of_its_c_counterpart, {
     types_begin();
-    // The mapping of D9.8: `int` is `i32`, `long` and `size_t` are 64-bit,
-    // and a narrow value carries an extension attribute on both sides.
+    // The mapping: `int` is `i32`, `long` and `size_t` are 64-bit, and a
+    // narrow value carries an extension attribute on both sides.
+    // D9.8
     TEST_ASSERT_EQ_STR(form_of(prim(PRIM_I32)), "i32");
     TEST_ASSERT_EQ_STR(form_of(prim(PRIM_U32)), "i32");
     TEST_ASSERT_EQ_STR(form_of(prim(PRIM_I64)), "i64");
     TEST_ASSERT_EQ_STR(form_of(prim(PRIM_U64)), "i64");
     TEST_ASSERT_EQ_STR(form_of(prim(PRIM_I8)), "i8 signext");
     TEST_ASSERT_EQ_STR(form_of(prim(PRIM_U8)), "i8 zeroext");
-    // Fort `char` is C's `unsigned char` at the boundary (D3.2), so it is the
-    // form a `uint8_t` parameter takes.
+    // Fort `char` is C's `unsigned char` at the boundary, so it is the form a
+    // `uint8_t` parameter takes.
+    // D3.2
     TEST_ASSERT_EQ_STR(form_of(prim(PRIM_CHAR)), "i8 zeroext");
     TEST_ASSERT_EQ_STR(form_of(prim(PRIM_I16)), "i16 signext");
     TEST_ASSERT_EQ_STR(form_of(prim(PRIM_U16)), "i16 zeroext");
     TEST_ASSERT_EQ_STR(form_of(prim(PRIM_F32)), "float");
     TEST_ASSERT_EQ_STR(form_of(prim(PRIM_F64)), "double");
-    // `bool` is `i1` as a value and `i8` in memory (D19.2), so it is a form
-    // of its own and not the form of a `uint8_t`.
+    // `bool` is `i1` as a value and `i8` in memory, so it is a form of its own
+    // and not the form of a `uint8_t`.
+    // D19.2
     TEST_ASSERT_EQ_STR(form_of(prim(PRIM_BOOL)), "i1 zeroext");
     TEST_ASSERT_EQ_STR(form_of(type_void(&types)), "void");
     types_end();
@@ -486,8 +505,8 @@ TEST(every_pointer_takes_the_opaque_ptr_form, {
     TEST_ASSERT_EQ_STR(form_of(type_ptr(&types, i32t, false, false)), "ptr");
     TEST_ASSERT_EQ_STR(form_of(type_ptr(&types, i32t, true, true)), "ptr");
     TEST_ASSERT_EQ_STR(form_of(type_voidptr(&types, false)), "ptr");
-    // A function pointer is a pointer (D3.10) and an enum crosses as `i32`
-    // (D9.8, D3.9).
+    // A function pointer is a pointer and an enum crosses as `i32`.
+    // D3.10, D9.8, D3.9
     TEST_ASSERT_EQ_STR(form_of(type_fn(&types, i32t, &i32t, 1, false)), "ptr");
     TEST_ASSERT_EQ_STR(form_of(type_enum(&types, str_from_cstr("color"), &types)), "i32");
     types_end();
@@ -496,10 +515,11 @@ TEST(every_pointer_takes_the_opaque_ptr_form, {
 TEST(a_type_no_extern_signature_may_use_has_no_form, {
     types_begin();
     const type_t* i32t = prim(PRIM_I32);
-    // Spans, strings, structs and fixed arrays are out of extern signatures
-    // (D9.8), and the checker refuses them before this is asked; a form of
-    // IR_NONE never matches a row, so a type that slipped through cannot
-    // silently agree with one.
+    // Spans, strings, structs and fixed arrays are out of extern signatures,
+    // and the checker refuses them before this is asked; a form of IR_NONE
+    // never matches a row, so a type that slipped through cannot silently
+    // agree with one.
+    // D9.8
     TEST_ASSERT_EQ_STR(form_of(type_span(&types, i32t, false, false)), "<none>");
     TEST_ASSERT_EQ_STR(form_of(type_string(&types, false)), "<none>");
     TEST_ASSERT_EQ_STR(form_of(type_array(&types, i32t, 2)), "<none>");
@@ -510,8 +530,9 @@ TEST(a_type_no_extern_signature_may_use_has_no_form, {
 
 TEST(the_form_of_a_type_is_the_text_the_emitter_writes_for_it, {
     types_begin();
-    // One map from a fort type to an IR type, or the check of D9.8 would
-    // compare a signature against a call the emitter writes differently.
+    // One map from a fort type to an IR type, or the check would compare a
+    // signature against a call the emitter writes differently.
+    // D9.8
     for (uint64_t i = 0; i < sizeof SCALARS / sizeof SCALARS[0]; i++) {
         const type_t* t = prim(SCALARS[i]);
         TEST_ASSERT_EQ_STR(form_of(t), emitted_param(t));

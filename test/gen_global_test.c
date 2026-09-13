@@ -1,9 +1,10 @@
-// Unit tests of the module-level data the emitter writes (D7.10, toolchain.md
-// 6 items 1, 4 and 5): `dso_local constant` for an immutable declaration and
+// Unit tests of the module-level data the emitter writes (toolchain.md 6
+// items 1, 4 and 5): `dso_local constant` for an immutable declaration and
 // `dso_local global` for a `mut` one, the initializer forms a constant
 // expression takes in IR, `zeroinitializer` for an all-zero value, the
 // explicit alignment, and the rule that no section is named, since LLVM picks
 // `.rodata`, `.data`, `.data.rel.ro` or `.bss` from the initializer itself.
+// D7.10
 //
 // None of this is observable from a program the compiler builds: a linkage or
 // an alignment both sides of the compilation agree on wrongly still runs. The
@@ -20,11 +21,13 @@
 
 // NOLINTBEGIN(readability-magic-numbers) the sources below are the test data.
 
-// ---- linkage and mutability (item 4, D7.10) ----------------------------------------
+// ---- linkage and mutability (item 4) -----------------------------------------------
+// D7.10
 
 TEST(an_immutable_declaration_is_a_dso_local_constant, {
-    // `Type NAME = init;` lives in read-only memory (D7.10) and carries the
-    // default external linkage with `dso_local` (D9.6, item 4).
+    // `Type NAME = init;` lives in read-only memory and carries the default
+    // external linkage with `dso_local` (item 4).
+    // D7.10, D9.6
     TEST_ASSERT_TRUE(emit("i32 LIMIT = 100;\nfn i32 main() { return LIMIT; }\n"));
     TEST_ASSERT_EQ_STR(found("@\"main.LIMIT\" = dso_local constant i32 100, align 4"),
                        "@\"main.LIMIT\" = dso_local constant i32 100, align 4");
@@ -32,7 +35,8 @@ TEST(an_immutable_declaration_is_a_dso_local_constant, {
 })
 
 TEST(a_mut_declaration_is_a_dso_local_global, {
-    // `Type mut g = init;` is a global in writable memory (D7.10).
+    // `Type mut g = init;` is a global in writable memory.
+    // D7.10
     TEST_ASSERT_TRUE(emit("i64 mut counter = 0;\n"
                           "fn i32 main() {\n    counter = 1;\n    return 0;\n}\n"));
     TEST_ASSERT_EQ_STR(found("@\"main.counter\" = dso_local global i64 0, align 8"),
@@ -42,7 +46,8 @@ TEST(a_mut_declaration_is_a_dso_local_global, {
 
 TEST(a_named_constant_is_not_unnamed_addr, {
     // `unnamed_addr` marks private data alone: a named constant keeps its
-    // address significant, because `&CONST` is expressible (item 5, D6.7).
+    // address significant, because `&CONST` is expressible (item 5).
+    // D6.7
     TEST_ASSERT_TRUE(emit("i32 LIMIT = 100;\n"
                           "i32* LP = &LIMIT;\n"
                           "fn i32 main() { return *LP; }\n"));
@@ -68,19 +73,22 @@ TEST(the_globals_stand_between_the_named_types_and_the_definitions, {
 
 TEST(the_globals_of_a_module_follow_source_order, {
     // Every list is appended to in emission order, so the text is a function
-    // of the program alone (D19.5).
+    // of the program alone.
+    // D19.5
     TEST_ASSERT_TRUE(emit("i32 FIRST = 1;\ni32 SECOND = 2;\ni32 mut third = 3;\n"
                           "fn i32 main() { return FIRST + SECOND + third; }\n"));
     TEST_ASSERT_TRUE(before("@\"main.FIRST\" =", "@\"main.SECOND\" ="));
     TEST_ASSERT_TRUE(before("@\"main.SECOND\" =", "@\"main.third\" ="));
 })
 
-// ---- the alignment of item 5 (D3.1, D3.8) ------------------------------------------
+// ---- the alignment of item 5 -------------------------------------------------------
+// D3.1, D3.8
 
 TEST(every_global_carries_the_alignment_of_its_type, {
     // Alignment equals size for a primitive, a pointer and a span align to 8,
-    // an array to its element and a struct to its most-aligned field (D3.1,
-    // D3.8), and the emitter writes what its own layout says.
+    // an array to its element and a struct to its most-aligned field, and the
+    // emitter writes what its own layout says.
+    // D3.1, D3.8
     TEST_ASSERT_TRUE(emit("struct pair { i8 tag; i64 value; }\n"
                           "u8 BYTE = 1;\ni16 SHORT = 2;\nchar LETTER = 'z';\nbool FLAG = true;\n"
                           "u8[3] BYTES = {1, 2, 3};\npair P = {1, 2};\nstring S = \"hi\";\n"
@@ -89,8 +97,8 @@ TEST(every_global_carries_the_alignment_of_its_type, {
                        "@\"main.BYTE\" = dso_local constant i8 1, align 1");
     TEST_ASSERT_EQ_STR(found("@\"main.SHORT\" = dso_local constant i16 2, align 2"),
                        "@\"main.SHORT\" = dso_local constant i16 2, align 2");
-    // A `char` is an unsigned byte and a `bool` is 0 or 1 in an `i8` (D3.2,
-    // D3.3, D19.2).
+    // A `char` is an unsigned byte and a `bool` is 0 or 1 in an `i8`.
+    // D3.2, D3.3, D19.2
     TEST_ASSERT_EQ_STR(found("@\"main.LETTER\" = dso_local constant i8 122, align 1"),
                        "@\"main.LETTER\" = dso_local constant i8 122, align 1");
     TEST_ASSERT_EQ_STR(found("@\"main.FLAG\" = dso_local constant i8 1, align 1"),
@@ -99,7 +107,8 @@ TEST(every_global_carries_the_alignment_of_its_type, {
                              "[i8 1, i8 2, i8 3], align 1"),
                        "@\"main.BYTES\" = dso_local constant [3 x i8] [i8 1, i8 2, i8 3], align 1");
     // The struct's alignment is its most-aligned field's, the one
-    // type_layout_struct computed (D3.8).
+    // type_layout_struct computed.
+    // D3.8
     TEST_ASSERT_EQ_STR(
         found("@\"main.P\" = dso_local constant %struct.main.pair "
               "{ i8 1, i64 2 }, align 8"),
@@ -111,11 +120,12 @@ TEST(every_global_carries_the_alignment_of_its_type, {
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
-// ---- the initializer forms (item 5, D4.6, D7.10) -----------------------------------
+// ---- the initializer forms (item 5) ------------------------------------------------
+// D4.6, D7.10
 
 TEST(a_negative_constant_prints_signed_and_an_unsigned_one_prints_unsigned, {
-    // An integer constant is printed with the signedness of its fort type
-    // (D19.5).
+    // An integer constant is printed with the signedness of its fort type.
+    // D19.5
     TEST_ASSERT_TRUE(emit("i8 LOW = -1;\nu8 HIGH = 255;\n"
                           "fn i32 main() { return cast(LOW, i32) + cast(HIGH, i32); }\n"));
     TEST_ASSERT_EQ_STR(found("@\"main.LOW\" = dso_local constant i8 -1, align 1"),
@@ -125,7 +135,8 @@ TEST(a_negative_constant_prints_signed_and_an_unsigned_one_prints_unsigned, {
 })
 
 TEST(an_enum_constant_holds_its_i32_value, {
-    // An enum is `i32` and its member prints signed (D3.9).
+    // An enum is `i32` and its member prints signed.
+    // D3.9
     TEST_ASSERT_TRUE(emit("enum color { red = -2, green }\n"
                           "color START = color.green;\n"
                           "color LOW = color.red;\n"
@@ -146,7 +157,8 @@ TEST(a_null_pointer_constant_is_null, {
 TEST(a_folded_constant_expression_is_the_value_it_folded_to, {
     // A module-level initializer is a constant expression, so `sizeof`, an
     // enum member and arithmetic over another constant are all folded before
-    // the emitter sees them (D4.6).
+    // the emitter sees them.
+    // D4.6
     TEST_ASSERT_TRUE(emit("i32 N = 4;\ni32 M = N * 2 + sizeof(i64);\n"
                           "fn i32 main() { return M; }\n"));
     TEST_ASSERT_EQ_STR(found("@\"main.M\" = dso_local constant i32 16, align 4"),
@@ -155,8 +167,8 @@ TEST(a_folded_constant_expression_is_the_value_it_folded_to, {
 
 TEST(a_constant_holding_a_function_address_names_the_function, {
     // A function name is a module-level initializer and its address is a
-    // relocation, which is what puts the table in .data.rel.ro (D7.10, item
-    // 5).
+    // relocation, which is what puts the table in .data.rel.ro (item 5).
+    // D7.10
     TEST_ASSERT_TRUE(emit("fn i32 f(i32 x) { return x; }\nfn i32 g(i32 x) { return x +% 1; }\n"
                           "fn i32(i32)[2] TABLE = {f, g};\n"
                           "fn i32 main() { return TABLE[0](1); }\n"));
@@ -168,8 +180,9 @@ TEST(a_constant_holding_a_function_address_names_the_function, {
 })
 
 TEST(a_constant_may_hold_the_address_of_a_mut_global, {
-    // `&` of a module-level declaration from any module is an initializer
-    // (D7.10), the `mut` ones included.
+    // `&` of a module-level declaration from any module is an initializer,
+    // the `mut` ones included.
+    // D7.10
     TEST_ASSERT_TRUE(emit("i32 mut counter = 0;\ni32* WATCH = &counter;\n"
                           "fn i32 main() { return *WATCH; }\n"));
     TEST_ASSERT_EQ_STR(found("@\"main.WATCH\" = dso_local constant ptr @\"main.counter\", align 8"),
@@ -177,8 +190,9 @@ TEST(a_constant_may_hold_the_address_of_a_mut_global, {
 })
 
 TEST(a_constant_that_names_another_one_copies_its_value, {
-    // Constant references are evaluated lazily (D4.6), so an aggregate
-    // constant named by another is that other's value.
+    // Constant references are evaluated lazily, so an aggregate constant
+    // named by another is that other's value.
+    // D4.6
     TEST_ASSERT_TRUE(emit("struct point { i32 x; i32 y; }\n"
                           "point ORIGIN = {1, 2};\npoint COPY = ORIGIN;\n"
                           "fn i32 main() { return COPY.x; }\n"));
@@ -190,7 +204,8 @@ TEST(a_constant_that_names_another_one_copies_its_value, {
 
 TEST(a_constant_may_hold_its_own_address, {
     // A self-pointing sentinel: the initializer names the global it
-    // initializes, which is one relocation into itself (D7.10, item 5).
+    // initializes, which is one relocation into itself (item 5).
+    // D7.10
     TEST_ASSERT_TRUE(emit("struct node { i32 v; node* next; }\n"
                           "node N = node{7, &N};\n"
                           "fn i32 main() { return N.next->v; }\n"));
@@ -206,7 +221,8 @@ TEST(a_struct_constant_writes_its_fields_in_declaration_order, {
                           "point P = point{.y = 7, .x = 3};\n"
                           "fn i32 main() { return P.x; }\n"));
     // The designated form may name the fields in any order; the initializer
-    // follows the declaration order the named type uses (D6.5, item 2).
+    // follows the declaration order the named type uses (item 2).
+    // D6.5
     TEST_ASSERT_EQ_STR(found("@\"main.P\" = dso_local constant %struct.main.point "
                              "{ i32 3, i32 7 }, align 4"),
                        "@\"main.P\" = dso_local constant %struct.main.point "
@@ -243,7 +259,8 @@ TEST(a_nested_aggregate_constant_writes_the_type_of_every_member, {
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
-// ---- nested aggregates (item 5, D6.5) ----------------------------------------------
+// ---- nested aggregates (item 5) ----------------------------------------------------
+// D6.5
 
 TEST(a_struct_inside_a_struct_is_written_with_its_own_type, {
     // Every member of a constant aggregate carries its memory type, so a
@@ -286,7 +303,8 @@ TEST(a_designated_literal_nested_in_an_array_keeps_the_field_order, {
 })
 
 TEST(a_typed_array_literal_is_the_same_constant_as_a_brace_list, {
-    // `i32[3]{1, 2, 3}` carries its brace list in `b` (D6.5).
+    // `i32[3]{1, 2, 3}` carries its brace list in `b`.
+    // D6.5
     TEST_ASSERT_TRUE(emit("i32[3] A = i32[3]{1, 2, 3};\n"
                           "fn i32 main() { return A[2]; }\n"));
     TEST_ASSERT_EQ_STR(found("@\"main.A\" = dso_local constant [3 x i32] "
@@ -297,8 +315,8 @@ TEST(a_typed_array_literal_is_the_same_constant_as_a_brace_list, {
 
 TEST(a_member_of_every_scalar_kind_keeps_its_memory_form, {
     // A `bool` member is `i8 0` or `i8 1` and never `i1 true`, a `char` is
-    // its byte, an enum is its `i32` and a pointer member is an address
-    // (D19.2, D3.9).
+    // its byte, an enum is its `i32` and a pointer member is an address.
+    // D19.2, D3.9
     TEST_ASSERT_TRUE(emit("enum color { red, green = 5 }\n"
                           "struct row { bool on; char tag; color hue; i32* link; string name; }\n"
                           "i32 TARGET = 1;\n"
@@ -326,18 +344,19 @@ TEST(an_enum_table_constant_holds_the_member_values, {
 TEST(a_string_a_global_holds_is_numbered_before_one_a_body_holds, {
     // The private data is numbered on first use and the globals are emitted
     // before the function definitions, so a global's string is `@.str.0`
-    // (item 1, D19.5).
+    // (item 1).
+    // D19.5
     TEST_ASSERT_TRUE(emit("string GREETING = \"hi\";\n"
                           "fn i32 main() {\n    println(GREETING, \" \", \"bye\");\n"
                           "    return 0;\n}\n"));
     TEST_ASSERT_EQ_STR(found("@.str.0 = private unnamed_addr constant [3 x i8] c\"hi\\00\""),
                        "@.str.0 = private unnamed_addr constant [3 x i8] c\"hi\\00\"");
     // A string constant is assigned on first use and never deduplicated by
-    // content (D19.5), so the `GREETING` the body prints is a second copy of
-    // the same bytes under a second name. Nothing in fort reads that as one
-    // address: strings compare by contents (D3.13), and whether the linker
-    // merges the two `.rodata` entries is its business and not the
-    // emitter's.
+    // content, so the `GREETING` the body prints is a second copy of the same
+    // bytes under a second name. Nothing in fort reads that as one address:
+    // strings compare by contents, and whether the linker merges the two
+    // `.rodata` entries is its business and not the emitter's.
+    // D19.5, D3.13
     TEST_ASSERT_EQ_STR(found("@.str.1 = private unnamed_addr constant [3 x i8] c\"hi\\00\""),
                        "@.str.1 = private unnamed_addr constant [3 x i8] c\"hi\\00\"");
     TEST_ASSERT_EQ_STR(found("@.str.3 = private unnamed_addr constant [4 x i8] c\"bye\\00\""),
@@ -376,8 +395,9 @@ TEST(an_all_zero_aggregate_is_a_zeroinitializer, {
 })
 
 TEST(a_zeroed_span_or_string_global_is_a_zeroinitializer, {
-    // `= {}` zero-initializes a span or a `string` too (D6.5), and its
-    // memory type is the one `%fort.span` of item 2.
+    // `= {}` zero-initializes a span or a `string` too, and its memory type
+    // is the one `%fort.span` of item 2.
+    // D6.5
     TEST_ASSERT_TRUE(emit("i32@ VIEW = {};\ni32 mut@ own mut pool = {};\nstring EMPTY = {};\n"
                           "fn i32 main() {\n    pool = new(i32, 1);\n    del(pool);\n"
                           "    return cast(VIEW.len + EMPTY.len, i32);\n}\n"));
@@ -417,7 +437,8 @@ TEST(a_partly_zero_aggregate_is_written_out, {
 
 TEST(a_zero_length_string_constant_is_not_all_zero, {
     // The header of a `string` holds the address of its bytes, which is a
-    // relocation and never zero (D3.7, item 5).
+    // relocation and never zero (item 5).
+    // D3.7
     TEST_ASSERT_TRUE(emit("string EMPTY = \"\";\n"
                           "fn i32 main() { return cast(EMPTY.len, i32); }\n"));
     TEST_ASSERT_EQ_STR(found("@\"main.EMPTY\" = dso_local constant %fort.span "
@@ -426,7 +447,8 @@ TEST(a_zero_length_string_constant_is_not_all_zero, {
                        "{ ptr @.str.0, i64 0 }, align 8");
 })
 
-// ---- reading and writing module-level data (D6.7, D7.10) ---------------------------
+// ---- reading and writing module-level data -----------------------------------------
+// D6.7, D7.10
 
 TEST(a_mut_global_is_read_and_written_through_its_symbol, {
     TEST_ASSERT_TRUE(emit("i32 mut counter = 0;\n"
@@ -441,7 +463,8 @@ TEST(a_mut_global_is_read_and_written_through_its_symbol, {
 
 TEST(a_scalar_constant_is_folded_into_its_uses, {
     // A constant expression has no side effects and is emitted as a literal,
-    // so a scalar constant's storage is never loaded (D4.6).
+    // so a scalar constant's storage is never loaded.
+    // D4.6
     TEST_ASSERT_TRUE(emit("i32 LIMIT = 10;\n"
                           "fn i32 main() {\n    i32 mut n = 0;\n    n +%= LIMIT;\n"
                           "    return n;\n}\n"));
@@ -466,12 +489,13 @@ TEST(the_address_of_a_constant_is_its_symbol, {
                        "store ptr @\"main.LIMIT\", ptr %p.0, align 8");
 })
 
-// ---- several modules (item 1, D9.10) -----------------------------------------------
+// ---- several modules (item 1) ------------------------------------------------------
+// D9.10
 
 TEST(each_module_emits_its_own_globals_once, {
     // Modules are emitted in dependency order, every module after the ones it
-    // imports, and a constant belongs to the module that declares it (D9.10,
-    // D19.5).
+    // imports, and a constant belongs to the module that declares it.
+    // D9.10, D19.5
     TEST_ASSERT_TRUE(emit_two("main.ft",
                               "import shapes;\n"
                               "i32 HERE = 1;\n"
@@ -529,8 +553,9 @@ TEST(a_constant_of_another_modules_struct_type_names_that_modules_type, {
 })
 
 TEST(a_global_declared_after_its_use_is_emitted_all_the_same, {
-    // Top-level declarations are order-independent within a module (D7.10),
-    // and a forward reference to a global is legal in `.ll` (item 1).
+    // Top-level declarations are order-independent within a module, and a
+    // forward reference to a global is legal in `.ll` (item 1).
+    // D7.10
     TEST_ASSERT_TRUE(emit("fn i32 main() { return B; }\ni32 B = A * 2;\ni32 A = 3;\n"));
     TEST_ASSERT_EQ_STR(found("@\"main.B\" = dso_local constant i32 6, align 4"),
                        "@\"main.B\" = dso_local constant i32 6, align 4");
@@ -540,8 +565,9 @@ TEST(a_global_declared_after_its_use_is_emitted_all_the_same, {
 })
 
 TEST(a_declaration_nothing_refers_to_is_emitted_all_the_same, {
-    // A fort constant or global has the default external linkage (D9.6), so
-    // it is a definition of the module whether or not this program reads it.
+    // A fort constant or global has the default external linkage, so it is a
+    // definition of the module whether or not this program reads it.
+    // D9.6
     TEST_ASSERT_TRUE(emit("i32 NEVER = 5;\ni32 mut nobody = 7;\n"
                           "fn i32 main() { return 0; }\n"));
     TEST_ASSERT_EQ_STR(found("@\"main.NEVER\" = dso_local constant i32 5, align 4"),
@@ -552,9 +578,9 @@ TEST(a_declaration_nothing_refers_to_is_emitted_all_the_same, {
 })
 
 TEST(a_declaration_that_failed_to_check_emits_no_global, {
-    // A module-level initializer must be a constant expression (D7.10); the
-    // checker reported it, so the emitter is silent and emits nothing for it
-    // (D14.2).
+    // A module-level initializer must be a constant expression; the checker
+    // reported it, so the emitter is silent and emits nothing for it.
+    // D7.10, D14.2
     TEST_ASSERT_FALSE(emit("fn i32 f() { return 1; }\ni32 BAD = f();\n"
                            "fn i32 main() { return BAD; }\n"));
     TEST_ASSERT_EQ_STR(absent("@\"main.BAD\""), "absent");

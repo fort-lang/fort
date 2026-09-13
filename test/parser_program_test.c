@@ -23,7 +23,8 @@ static const ast_node_t* body_stmt(const ast_node_t* mod, uint64_t d, uint64_t i
 // parse to are the test data.
 
 // A map over a span of buckets: `new(T, n)`, indexing, `->`, `del` and the
-// ownership markers of D17.2 in fields and locals.
+// ownership markers in fields and locals.
+// D17.2
 TEST(a_hash_map_module_parses, {
     const ast_node_t* mod = parse_text("struct entry {\n"
                                        "    string key;\n"
@@ -101,8 +102,9 @@ TEST(a_tokenizer_module_parses, {
                                        "    }\n"
                                        "    return token{kind.ident, src[*pos..i]};\n"
                                        "}\n");
-    // The parser recovers and returns the tree of what parsed (D14.2); the
-    // marker is what the module reports, once.
+    // The parser recovers and returns the tree of what parsed; the marker is
+    // what the module reports, once.
+    // D14.2
     TEST_ASSERT_NONNULL(mod);
     TEST_ASSERT_EQ_STR(parse_diags(),
                        "t.ft:13:5: error: a mut never precedes the base type: "
@@ -155,8 +157,8 @@ TEST(a_tokenizer_module_in_the_east_marker_spelling_parses, {
                        " (span (ident src) (ident i) (binary + (ident i) (int 1))))))))");
 })
 
-// An FFI module: externs, `void*`, casts and a `noreturn` function (D9.8,
-// D3.11, D8.5).
+// An FFI module: externs, `void*`, casts and a `noreturn` function.
+// D9.8, D3.11, D8.5
 TEST(an_ffi_module_parses, {
     const ast_node_t* mod = parse_text("extern fn void* malloc(u64 size);\n"
                                        "extern fn void free(void* p);\n"
@@ -185,8 +187,9 @@ TEST(an_ffi_module_parses, {
     TEST_ASSERT_EQ_STR(dumped(body_stmt(mod, 4, 3)), "(return (span (ident p) (int 0) (ident n)))");
 })
 
-// The two import forms the grammar has no production for (D9.3, grammar.md
-// section 2): a wildcard, and a path segment that is not an identifier.
+// The two import forms the grammar has no production for (grammar.md section
+// 2): a wildcard, and a path segment that is not an identifier.
+// D9.3
 TEST(a_wildcard_import_does_not_parse, {
     TEST_ASSERT_EQ_STR(parse_fails("import util.*;\nfn i32 main() { return 0; }\n"),
                        "t.ft:1:13: error: expected an identifier, found '*'\n");
@@ -195,8 +198,9 @@ TEST(a_wildcard_import_does_not_parse, {
 // The separator a source spells wrongly is named where it stands, rather than
 // ending the path and being reported as the `;` that is then missing. `::` is
 // the one that matters: it separated a module path until the separator became
-// `.` (D9.1), so it is what every source written before that spells, and it
-// now lexes as two colons (D2.10).
+// `.`, so it is what every source written before that spells, and it now
+// lexes as two colons.
+// D9.1, D2.10
 TEST(the_old_path_separator_names_the_mistake, {
     TEST_ASSERT_EQ_STR(parse_fails("import a::b;\nfn i32 main() { return 0; }\n"),
                        "t.ft:1:9: error: a module path is separated by '.', not '::'\n");
@@ -217,10 +221,11 @@ TEST(the_old_path_separator_names_the_mistake, {
                        "t.ft:1:8: error: expected an identifier, found ':'\n");
 })
 
-// `..` is one token and longest match wins (D2.10), so the separator of a
-// path written with two dots never reaches the parser as two separators: it
-// is the range operator, and the diagnostic says so rather than reporting the
-// `;` that the path's end would then be missing (D9.1).
+// `..` is one token and longest match wins, so the separator of a path
+// written with two dots never reaches the parser as two separators: it is the
+// range operator, and the diagnostic says so rather than reporting the `;`
+// that the path's end would then be missing.
+// D2.10, D9.1
 TEST(a_path_separator_written_twice_names_the_mistake, {
     TEST_ASSERT_EQ_STR(parse_fails("import a..b;\nfn i32 main() { return 0; }\n"),
                        "t.ft:1:9: error: a module path is separated by '.', not '..'\n");
@@ -238,8 +243,8 @@ TEST(a_path_separator_written_twice_names_the_mistake, {
                        "t.ft:1:8: error: expected an identifier, found '..'\n");
 })
 
-// A module that imports in every form and qualifies names across modules
-// (D9.3, D9.4).
+// A module that imports in every form and qualifies names across modules.
+// D9.3, D9.4
 TEST(an_importing_module_parses, {
     const ast_node_t* mod = parse_text("import std.io;\n"
                                        "import std.str as s;\n"
@@ -266,8 +271,8 @@ TEST(an_importing_module_parses, {
                        " (ident u) (int 4)))");
 })
 
-// A module of constants and globals: every literal form in an initializer
-// (D7.10, D6.5).
+// A module of constants and globals: every literal form in an initializer.
+// D7.10, D6.5
 TEST(a_module_of_constants_parses, {
     const ast_node_t* mod = parse_text("i32 LIMIT = 16;\n"
                                        "u64 MASK = 0xFF;\n"
@@ -367,8 +372,9 @@ TEST(parsing_is_repeatable, {
     sb_free(&held);
 })
 
-// A file that fails to parse leaves the next one unaffected: the parser
-// holds no state between calls (D14.2).
+// A file that fails to parse leaves the next one unaffected: the parser holds
+// no state between calls.
+// D14.2
 TEST(a_failed_parse_does_not_poison_the_next, {
     TEST_ASSERT_EQ_STR(parse_fails("i32 x = ;"),
                        "t.ft:1:9: error: expected an expression, found ';'\n");

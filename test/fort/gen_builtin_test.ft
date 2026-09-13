@@ -11,9 +11,10 @@ import runtime_sig;
 import std.strbuf;
 
 // The builtins and the calls of src/fort/gen_expr.ft: the print family, the
-// `assert` and `panic` of D12.2 and item 19, and the call shapes of item 7 --
-// a direct call, a call through a function pointer, an `extern` call with the
-// variadic tail of item 8, an aggregate argument and an aggregate result.
+// `assert` and `panic` of item 19, and the call shapes of item 7 -- a direct
+// call, a call through a function pointer, an `extern` call with the variadic
+// tail of item 8, an aggregate argument and an aggregate result.
+// D12.2
 //
 // Every expected block was read off `fort -S` run by stage1 over a program
 // whose body is the one the test writes, with the temporaries renumbered from
@@ -54,8 +55,9 @@ fn void a_bool_is_widened_to_a_byte_before_it_is_printed() {
     assert(open_prints(&e));
     gen_env.discard_at(&e, 6);
     // Item 2: a `bool` place holds `i8` and a `bool` value is `i1`, so the
-    // load is a `trunc` and the entry point, whose parameter is a fort
-    // `bool`, takes that `i1` as it stands; `print` writes to stdout (D11.5).
+    // load is a `trunc` and the entry point, whose parameter is a fort `bool`,
+    // takes that `i1` as it stands; `print` writes to stdout.
+    // D11.5
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join4(&e, "  %t0 = load i8, ptr %b.0, align 1\n",
                                       "  %t1 = trunc i8 %t0 to i1\n",
@@ -69,8 +71,9 @@ fn void a_char_goes_to_its_own_entry_point_unwidened() {
     defer gen_env.close(&e);
     assert(open_prints(&e));
     gen_env.discard_at(&e, 7);
-    // D3.2: `char` is an unsigned byte, so it is `i8 zeroext` and is never
-    // widened to an integer.
+    // `char` is an unsigned byte, so it is `i8 zeroext` and is never widened
+    // to an integer.
+    // D3.2
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join3(&e, "  %t0 = load i8, ptr %c.1, align 1\n",
                                       "  call void @\"std.rt.print_char\"(i32 1, ",
@@ -115,7 +118,8 @@ fn void an_integer_is_extended_to_64_bits_by_its_own_signedness() {
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join2(&e, "  %t0 = load i64, ptr %u.4, align 8\n",
                                       "  call void @\"std.rt.print_u64\"(i32 1, i64 %t0)\n"));
-    // `eprint` is the same call to descriptor 2 (D11.5).
+    // `eprint` is the same call to descriptor 2.
+    // D11.5
     gen_env.discard_at(&e, 11);
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join2(&e, "  %t0 = load i64, ptr %u.4, align 8\n",
@@ -144,8 +148,9 @@ fn void a_string_literal_prints_as_its_constant_and_its_length() {
     defer gen_env.close(&e);
     assert(open_prints(&e));
     gen_env.discard_at(&e, 13);
-    // Item 19: a literal is `@.str.N` and its length, with no header built
-    // for it at all (D3.7).
+    // Item 19: a literal is `@.str.N` and its length, with no header built for
+    // it at all.
+    // D3.7
     gen_env.expect_text(gen_env.body(&e),
                         "  call void @\"std.rt.print_str\"(i32 1, ptr @.str.0, i64 2)\n");
 }
@@ -156,14 +161,16 @@ fn void fprint_evaluates_its_descriptor_once_and_before_the_arguments() {
     defer gen_env.close(&e);
     assert(open_prints(&e));
     gen_env.discard_at(&e, 14);
-    // D6.3, D12.2: `fd` is an expression like any other and is evaluated
-    // before the arguments, left to right.
+    // `fd` is an expression like any other and is evaluated before the
+    // arguments, left to right.
+    // D6.3, D12.2
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join2(&e, "  %t0 = load i64, ptr %u.4, align 8\n",
                                       "  call void @\"std.rt.print_u64\"(i32 2, i64 %t0)\n"));
 }
 
-// ---- D12.2: assert and panic -------------------------------------------------------
+// ---- assert and panic --------------------------------------------------------------
+// D12.2
 
 fn void assert_quotes_its_argument_as_the_user_wrote_it() {
     gen_env.env mut e = gen_env.env{};
@@ -172,8 +179,9 @@ fn void assert_quotes_its_argument_as_the_user_wrote_it() {
     string[2] mut lines = {"    bool mut b = true;", "    assert(b == true);"};
     assert(gen_env.open_lines(&e, lines[..]));
     gen_env.discard_at(&e, 1);
-    // D11.4: the message is the source text between the call's parentheses,
-    // and the position is the builtin's own name.
+    // The message is the source text between the call's parentheses, and the
+    // position is the builtin's own name.
+    // D11.4
     gen_env.expect_text(
         gen_env.body(&e),
         gen_env.join4(&e, "  %t0 = load i8, ptr %b.0, align 1\n",
@@ -196,8 +204,9 @@ fn void panic_writes_its_message_and_ends_the_block() {
     string[2] mut lines = {"    i32 mut n = 3;", "    panic(\"bad\");"};
     assert(gen_env.open_lines(&e, lines[..]));
     gen_env.discard_at(&e, 1);
-    // D11.4: the callee aborts, so the call is followed by `unreachable` and
-    // the block is terminated.
+    // The callee aborts, so the call is followed by `unreachable` and the
+    // block is terminated.
+    // D11.4
     gen_env.expect_text(
         gen_env.body(&e),
         gen_env.join2(&e,
@@ -240,7 +249,8 @@ fn void a_direct_call_names_the_symbol_and_carries_no_function_type() {
     assert(open_calls(&e));
     gen_env.emit_value(&e, "q");
     // Item 7: a direct call site needs no function type, an opaque pointer
-    // carrying none only where the callee is a value (D3.10, D19.2).
+    // carrying none only where the callee is a value.
+    // D3.10, D19.2
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join3(&e, "  %t0 = load i32, ptr %n.0, align 4\n",
                                       "  %t1 = load i32, ptr %n.0, align 4\n",
@@ -253,8 +263,9 @@ fn void a_call_through_a_pointer_carries_the_function_type() {
     defer gen_env.close(&e);
     assert(open_calls(&e));
     gen_env.emit_value(&e, "r");
-    // D3.10, D19.2: an opaque pointer carries no signature, so the call site
-    // states it; the callee is evaluated before the arguments (D6.3).
+    // An opaque pointer carries no signature, so the call site states it; the
+    // callee is evaluated before the arguments.
+    // D3.10, D19.2, D6.3
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join4(&e, "  %t0 = load ptr, ptr %f.1, align 8\n",
                                       "  %t1 = load i32, ptr %n.0, align 4\n",
@@ -268,9 +279,10 @@ fn void an_extern_call_goes_through_the_variadic_call_type() {
     defer gen_env.close(&e);
     assert(open_calls(&e));
     gen_env.emit_value(&e, "c");
-    // Item 8, D9.8: the variadic tail is what makes the vector-register count
-    // right at a fixed-prototype declaration of a C function, and `#3` is
-    // `nobuiltin` on every extern call site.
+    // The variadic tail is what makes the vector-register count right at a
+    // fixed-prototype declaration of a C function, and `#3` is `nobuiltin` on
+    // every extern call site (item 8).
+    // D9.8
     string text = gen_env.body(&e);
     gen_env.expect_text(text[text.len - 62..],
                         "  %t5 = call i32 (ptr, i32, ...) @printf(ptr %t3, i32 %t4) #3\n");
@@ -314,9 +326,10 @@ fn void a_call_of_a_noreturn_function_ends_in_a_trap() {
     defer gen_env.close(&e);
     assert(open_calls(&e));
     gen_env.discard_at(&e, 8);
-    // D8.5, D19.7: the trap is what catches a `noreturn` function that
-    // returns anyway, which is why the declaration is unadorned and the
-    // optimizer cannot delete it.
+    // The trap is what catches a `noreturn` function that returns anyway,
+    // which is why the declaration is unadorned and the optimizer cannot
+    // delete it.
+    // D8.5, D19.7
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join3(&e, "  call void @\"main.stop\"()\n",
                                       "  call void @llvm.trap()\n", "  unreachable\n"));
@@ -345,8 +358,9 @@ fn void an_expression_that_designates_no_storage_is_a_diagnostic() {
     defer gen_env.close(&e);
     string[1] mut lines = {"    i32 mut a = 3;"};
     assert(gen_env.open_lines(&e, lines[..]));
-    // A literal is a value and has no place (D6.7); the emitter says so
-    // rather than inventing one.
+    // A literal is a value and has no place; the emitter says so rather than
+    // inventing one.
+    // D6.7
     gen_env.emit_place(&e, "a");
     assert(e.g.failed);
     assert(gen_env.said(&e, "cannot generate code yet for this expression as a place"));
@@ -396,8 +410,9 @@ fn void an_extern_call_carries_them_too_a_literal_argument_included() {
     assert(open_narrow(&e));
     gen_env.emit_value(&e, "s");
     // The attribute comes from the parameter's fort type and not from the
-    // operand, so a literal argument carries it as a loaded one does; the
-    // call type of item 8 states the types alone (D9.8).
+    // operand, so a literal argument carries it as a loaded one does; the call
+    // type of item 8 states the types alone.
+    // D9.8
     gen_env.join2(&e, "  %t0 = load i8, ptr %x.0, align 1\n",
                   "  %t1 = call zeroext i8 (i8, i16, ...) @cnarrow(i8 zeroext %t0, ");
     gen_env.expect_text(gen_env.body(&e), gen_env.join_more(&e, "i16 signext 3) #3\n"));

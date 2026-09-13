@@ -1,7 +1,8 @@
 // Unit tests of consts.h, part one: values, queries, ordering and equality,
 // the comparison and logical operators, and cv_to_str. The exact untyped
-// arithmetic (D4.4) is in consts_fold_test.c and the typed side (cv_fits,
+// arithmetic is in consts_fold_test.c and the typed side (cv_fits,
 // cv_default_kind, cv_cast, cv_typed_*, cv_wrap_*) in consts_typed_test.c.
+// D4.4
 #include "consts.h"
 
 #include <stdint.h>
@@ -369,8 +370,9 @@ static void compare_lt_of_bools(void) {
 }
 
 TEST(ordering_nulls_strings_and_bools_is_an_internal_error, {
-    // `< <= > >=` order integers and chars only (D6.2, D3.2): the checker has
-    // rejected the others before folding.
+    // `< <= > >=` order integers and chars only: the checker has rejected the
+    // others before folding.
+    // D6.2, D3.2
     char err[ERR_MAX];
     const int status = run_forked(compare_lt_of_nulls, err, sizeof err);
     TEST_ASSERT_EQ_INT32(status, FATAL_EXIT_STATUS);
@@ -447,9 +449,10 @@ TEST(to_str_writes_the_other_kinds, {
 
 TEST(to_str_escapes_a_string_as_a_literal_d2_8, {
     // A quote, a newline or a NUL byte in a string constant must not break the
-    // diagnostic line, so the bytes are written with the escapes of D2.8.
-    // The nine bytes a " \n NUL \\ \t \r ' 0xFF (a brace initializer would
-    // split the TEST body at its commas, so they come from a literal).
+    // diagnostic line, so the bytes are written with the escapes. The nine
+    // bytes a " \n NUL \\ \t \r ' 0xFF (a brace initializer would split the
+    // TEST body at its commas, so they come from a literal).
+    // D2.8
     const str_t s = str_from_range("a\"\n\0\\\t\r'\xFF", 9);
     TEST_ASSERT_EQ_STR(text_of(cv_from_str(s)), "\"a\\\"\\n\\0\\\\\\t\\r'\\xFF\"");
     TEST_ASSERT_EQ_STR(text_of(cv_from_str(str_from_range(NULL, 0))), "\"\"");

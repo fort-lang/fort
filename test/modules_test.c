@@ -1,8 +1,8 @@
-// Unit tests of module resolution (module-system.md 1, 2, 3, 13;
-// D9.1 to D9.4): the search roots, the two readings of an import path, the
-// standard library root, and the ambiguity and not-found rules. The closure,
-// its order, the namespaces and the extern declarations are the other half,
-// in modules_closure_test.c.
+// Unit tests of module resolution (module-system.md 1, 2, 3, 13): the search
+// roots, the two readings of an import path, the standard library root, and
+// the ambiguity and not-found rules. The closure, its order, the namespaces
+// and the extern declarations are the other half, in modules_closure_test.c.
+// D9.1 to D9.4
 #include "modules.h"
 
 #include <stdbool.h>
@@ -47,9 +47,10 @@ TEST(an_entry_base_name_that_is_no_identifier_is_taken_as_it_is, {
     begin();
     add("001_leading_zero.ft", src_main());
     // module-system.md 2 asks the entry base name to be a module path
-    // segment, which the test corpus D14.4 fixes (`NNN_name.ft`, compiled as
-    // the entry file) cannot satisfy; decisions.md wins (D1.2). Such a name
-    // only makes the module unreachable by an import, which cannot spell it.
+    // segment, which the test corpus naming (`NNN_name.ft`, compiled as the
+    // entry file) cannot satisfy; decisions.md wins. Such a name only makes
+    // the module unreachable by an import, which cannot spell it.
+    // D14.4, D1.2
     TEST_ASSERT_TRUE(load("001_leading_zero.ft"));
     TEST_ASSERT_EQ_STR(ordered(0), "001_leading_zero");
 })
@@ -58,7 +59,8 @@ TEST(a_dotted_entry_base_name_is_rejected, {
     begin();
     add("my.app.ft", src_main());
     // The entry base name may not contain a `.`, which would spell a module
-    // path and break the injectivity of the symbol names (D9.1, D9.7).
+    // path and break the injectivity of the symbol names.
+    // D9.1, D9.7
     TEST_ASSERT_FALSE(load("my.app.ft"));
     TEST_ASSERT_TRUE(said("entry file name 'my.app' cannot contain '.'"));
 })
@@ -69,8 +71,9 @@ TEST(a_dotted_entry_is_reported_at_the_start_of_the_file, {
     TEST_ASSERT_FALSE(load("my.app.ft"));
     TEST_ASSERT_EQ_UINT64(diag_record_count(), (uint64_t)1);
     const diag_record_t rec = diag_record_at(0);
-    // An error with no position in the file is reported at 1:1 (D14.2): it is
-    // the file's name that is wrong, not anything written inside it.
+    // An error with no position in the file is reported at 1:1: it is the
+    // file's name that is wrong, not anything written inside it.
+    // D14.2
     TEST_ASSERT_EQ_UINT64((uint64_t)rec.loc.line, (uint64_t)1);
     TEST_ASSERT_EQ_UINT64((uint64_t)rec.loc.col, (uint64_t)1);
     TEST_ASSERT_EQ_INT32((int32_t)rec.severity, (int32_t)DIAG_ERROR);
@@ -92,7 +95,8 @@ TEST(a_dotted_entry_is_rejected_beside_the_module_it_would_collide_with, {
     add("my.app.ft", "import my.app;\nfn i32 main() { return app.main(); }\n");
     add("my/app.ft", src_main());
     // `my.app.ft` is the module `my.app`, whose `main` is the `my.app.main`
-    // the module `my/app.ft` already emits (D9.1, module-system.md 7).
+    // the module `my/app.ft` already emits (module-system.md 7).
+    // D9.1
     TEST_ASSERT_FALSE(load("my.app.ft"));
     TEST_ASSERT_TRUE(said("cannot contain '.'"));
 })
@@ -100,9 +104,10 @@ TEST(a_dotted_entry_is_rejected_beside_the_module_it_would_collide_with, {
 TEST(a_colon_in_the_entry_base_name_is_accepted, {
     begin();
     add("my:app.ft", src_main());
-    // Only `.` is barred, since only `.` separates a module path (D9.1): the
-    // mangler copies the path across, so `my:app.ft` emits `my:app.main`,
-    // which no module path can spell because a segment is an identifier.
+    // Only `.` is barred, since only `.` separates a module path: the mangler
+    // copies the path across, so `my:app.ft` emits `my:app.main`, which no
+    // module path can spell because a segment is an identifier.
+    // D9.1
     TEST_ASSERT_TRUE(load("my:app.ft"));
     TEST_ASSERT_EQ_STR(ordered(0), "my:app");
 })
@@ -112,8 +117,8 @@ TEST(a_colon_entry_stands_beside_the_module_it_once_collided_with, {
     add("my:app.ft", "import myapp;\nfn i32 main() { return myapp.main(); }\n");
     add("myapp.ft", src_main());
     // The mangler used to drop a `:` it could not pair, so `my:app.main` was
-    // `myapp.main`; it translates nothing now, so the two modules coexist
-    // (D9.1 amended 2026-09-11, D9.7).
+    // `myapp.main`; it translates nothing now, so the two modules coexist.
+    // D9.1, D9.7
     TEST_ASSERT_TRUE(load("my:app.ft"));
     TEST_ASSERT_EQ_UINT64(module_set_count(&set), (uint64_t)2);
     TEST_ASSERT_EQ_STR(ordered(0), "myapp");
@@ -123,9 +128,10 @@ TEST(a_colon_entry_stands_beside_the_module_it_once_collided_with, {
 TEST(a_doubled_colon_entry_base_name_is_accepted_as_a_name, {
     begin();
     add("my::app.ft", src_main());
-    // A doubled colon spelled a module path until T-080 made the separator a
-    // `.`; it is not a token at all now (D2.10), so the base name is just a
-    // name and the loader's path map holds it beside no other (D9.1).
+    // A doubled colon spelled a module path until the separator became a `.`;
+    // it is not a token at all now, so the base name is just a name and the
+    // loader's path map holds it beside no other.
+    // T-080, D2.10, D9.1: the ticket that made the separator a `.`
     TEST_ASSERT_TRUE(load("my::app.ft"));
     TEST_ASSERT_EQ_STR(ordered(0), "my::app");
     TEST_ASSERT_FALSE(said("circular import"));
@@ -134,7 +140,8 @@ TEST(a_doubled_colon_entry_base_name_is_accepted_as_a_name, {
 TEST(a_dot_first_or_last_in_the_entry_base_name_is_rejected, {
     begin();
     add(".hidden.ft", src_main());
-    // The rule is about any position, not an interior one (D9.1).
+    // The rule is about any position, not an interior one.
+    // D9.1
     TEST_ASSERT_FALSE(load(".hidden.ft"));
     TEST_ASSERT_TRUE(said("entry file name '.hidden' cannot contain '.'"));
     begin();
@@ -148,7 +155,8 @@ TEST(an_entry_named_exactly_ft_keeps_its_whole_base_name, {
     add(".ft", src_main());
     // `.ft` is shorter than the suffix plus a name, so nothing is stripped
     // and the base name is `.ft` itself, which the dot rule then rejects
-    // (module-system.md 2, D9.1).
+    // (module-system.md 2).
+    // D9.1
     TEST_ASSERT_FALSE(load(".ft"));
     TEST_ASSERT_TRUE(said("entry file name '.ft' cannot contain '.'"));
 })
@@ -156,8 +164,9 @@ TEST(an_entry_named_exactly_ft_keeps_its_whole_base_name, {
 TEST(a_hyphenated_entry_base_name_is_accepted, {
     begin();
     add("my-app.ft", src_main());
-    // Only `.` is barred; every other base name is a legal entry, whatever
-    // it holds (D9.1).
+    // Only `.` is barred; every other base name is a legal entry, whatever it
+    // holds.
+    // D9.1
     TEST_ASSERT_TRUE(load("my-app.ft"));
     TEST_ASSERT_EQ_STR(ordered(0), "my-app");
 })
@@ -285,7 +294,8 @@ TEST(include_roots_are_searched_in_command_line_order, {
     TEST_ASSERT_NONNULL(strstr(util->file.ptr, "first/util.ft"));
 })
 
-// ---- the standard library root (D9.2) -----------------------------------------------
+// ---- the standard library root ------------------------------------------------------
+// D9.2
 
 TEST(a_std_path_is_looked_up_in_the_standard_library_directory, {
     begin();
@@ -294,13 +304,15 @@ TEST(a_std_path_is_looked_up_in_the_standard_library_directory, {
     std_dir("lib");
     TEST_ASSERT_TRUE(load("main.ft"));
     // `std.rt` is a root of every closure, so it is the first module of the
-    // dependency order and the imported one follows it (D9.10, D13.1).
+    // dependency order and the imported one follows it.
+    // D9.10, D13.1
     TEST_ASSERT_EQ_STR(ordered(0), "std.rt");
     TEST_ASSERT_EQ_STR(ordered(1), "std.io");
     TEST_ASSERT_NONNULL(bound("main", "io"));
 })
 
-// ---- the runtime root of every closure (D9.10, D13.1) -------------------------------
+// ---- the runtime root of every closure ----------------------------------------------
+// D9.10, D13.1
 
 TEST(every_closure_holds_the_runtime, {
     begin();
@@ -309,11 +321,13 @@ TEST(every_closure_holds_the_runtime, {
     TEST_ASSERT_TRUE(load("main.ft"));
     TEST_ASSERT_EQ_UINT64(module_set_count(&set), (uint64_t)2);
     // The compiler loads it as a root of its own beside the entry file, so it
-    // precedes the program in the dependency order (D9.10).
+    // precedes the program in the dependency order.
+    // D9.10
     TEST_ASSERT_EQ_STR(ordered(0), "std.rt");
     TEST_ASSERT_EQ_STR(ordered(1), "main");
     // Membership does not bind the name: a module that wants to call it
-    // writes `import std.rt;` like any other importer (D9.3, D9.10).
+    // writes `import std.rt;` like any other importer.
+    // D9.3, D9.10
     TEST_ASSERT_NULL(bound("main", "rt"));
     TEST_ASSERT_NULL(bound("main", "std"));
 })
@@ -339,8 +353,9 @@ TEST(a_standard_library_directory_with_no_runtime_is_an_error, {
 
 TEST(a_set_with_no_standard_library_directory_holds_no_runtime, {
     // Such a set cannot spell `std.rt` at all: `import std.rt;` there is
-    // already `module 'std.rt' not found` (D9.2). The driver always names a
+    // already `module 'std.rt' not found`. The driver always names a
     // directory (toolchain.md 1).
+    // D9.2
     begin();
     add("main.ft", src_main());
     TEST_ASSERT_TRUE(load("main.ft"));
@@ -349,12 +364,13 @@ TEST(a_set_with_no_standard_library_directory_holds_no_runtime, {
 })
 
 TEST(a_file_of_the_runtimes_closure_is_the_entry_and_not_a_second_module, {
-    // One file is one module (D9.2), so an entry file the runtime's closure
-    // already read is that module and not a second identity of it. Two files
-    // of the repository are such an entry, `std/rt.ft` and `std/libc.ft`, and
-    // `fort --check std/libc.ft` reported `module 'libc' is the same file as
-    // module 'std.libc'` until this was written. The module keeps the path
-    // its importer gave it.
+    // One file is one module, so an entry file the runtime's closure already
+    // read is that module and not a second identity of it. Two files of the
+    // repository are such an entry, `std/rt.ft` and `std/libc.ft`, and `fort
+    // --check std/libc.ft` reported `module 'libc' is the same file as module
+    // 'std.libc'` until this was written. The module keeps the path its
+    // importer gave it.
+    // D9.2
     begin();
     add("lib/rt.ft", "import std.helper;\nfn i32 one() { return helper.two(); }\n");
     add("lib/helper.ft", "fn i32 two() { return 2; }\n");
@@ -386,7 +402,8 @@ TEST(the_runtime_is_loaded_once_when_the_program_imports_it, {
     TEST_ASSERT_TRUE(load("main.ft"));
     TEST_ASSERT_EQ_UINT64(module_set_count(&set), (uint64_t)2);
     TEST_ASSERT_EQ_STR(ordered(0), "std.rt");
-    // The import binds the name the root alone does not (D9.3).
+    // The import binds the name the root alone does not.
+    // D9.3
     TEST_ASSERT_NONNULL(bound("main", "rt"));
 })
 
@@ -597,7 +614,8 @@ TEST(a_prefix_the_closure_already_holds_answers_from_its_namespace, {
     add("util.ft", src_add());
     add("util/add.ft", "fn i32 f() { return 0; }\n");
     // `util` is in the closure, so the symbol reading is answered from its
-    // namespace, and both readings succeeding is ambiguous (D9.3).
+    // namespace, and both readings succeeding is ambiguous.
+    // D9.3
     TEST_ASSERT_FALSE(load("main.ft"));
     TEST_ASSERT_TRUE(said("ambiguous import 'util.add'"));
 })
@@ -609,7 +627,8 @@ TEST(every_failing_import_of_one_module_is_reported, {
         "import alsomissing;\n"
         "fn i32 main() { return 0; }\n");
     // All the errors of the module that has them are reported, then
-    // processing stops at the module boundary (D14.2).
+    // processing stops at the module boundary.
+    // D14.2
     TEST_ASSERT_FALSE(load("main.ft"));
     TEST_ASSERT_TRUE(said("module 'nothere' not found"));
     TEST_ASSERT_TRUE(said("module 'alsomissing' not found"));
@@ -625,7 +644,8 @@ TEST(no_further_module_is_read_after_an_import_failed, {
     add("util.ft", "fn i32 broken(i32 a i32 b) { return a; }\n");
     TEST_ASSERT_FALSE(load("main.ft"));
     // The second import would have read a module with its own syntax error;
-    // one module's errors appear together (D14.2), so it is left alone.
+    // one module's errors appear together, so it is left alone.
+    // D14.2
     TEST_ASSERT_EQ_UINT64(diag_count(), (uint64_t)1);
     TEST_ASSERT_TRUE(said("module 'nothere' not found"));
 })

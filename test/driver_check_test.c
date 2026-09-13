@@ -1,12 +1,14 @@
-// Unit tests of the check mode: `--check`, which runs the front end and stops
-// (D20.1), and `--json`, whose one document on stdout is the compiler's whole
-// editor interface (D20.2, toolchain.md 4.1).
+// Unit tests of the check mode: `--check`, which runs the front end and stops,
+// and `--json`, whose one document on stdout is the compiler's whole editor
+// interface (toolchain.md 4.1).
+// D20.1, D20.2
 //
-// The suite asserts the shape of the document byte for byte, that it holds
-// what the text form of D14.2 holds, and the contract a client reads it by:
-// exit 0 or 1 with a complete document is a verdict, exit 2 with stdout empty
-// is a crash. The sandbox and the captured diagnostics are driver_helpers.h;
-// test/fake_cc.sh is the `--cc` a run under `--check` must never spawn.
+// The suite asserts the shape of the document byte for byte, that it holds what
+// the text form holds, and the contract a client reads it by: exit 0 or 1 with a
+// complete document is a verdict, exit 2 with stdout empty is a crash. The
+// sandbox and the captured diagnostics are driver_helpers.h; test/fake_cc.sh is
+// the `--cc` a run under `--check` must never spawn.
+// D14.2
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -28,14 +30,16 @@
 #include "test.h"
 
 // The document a clean module yields. Every closure holds `std.rt`, which the
-// compiler loads as a root of its own before the entry file (D9.10), so the
-// runtime's file stands first in the list and the entry file second. The
-// sandbox's runtime is empty, so it contributes no symbol of its own.
+// compiler loads as a root of its own before the entry file, so the runtime's
+// file stands first in the list and the entry file second. The sandbox's runtime
+// is empty, so it contributes no symbol of its own.
+// D9.10
 static const char CLEAN_DOCUMENT[] =
     "{\"version\":1,\"files\":[\"%s\",\"%s\"],\"diagnostics\":[],\"symbols\":[]}\n";
 
 // A module that declares no `main`: under --check the file is a module under
-// inspection and not a program, so D8.6 is not applied (D20.1).
+// inspection and not a program, so the `main` rule is not applied.
+// D8.6, D20.1
 static const char NO_MAIN_SOURCE[] = "fn i32 add(i32 a, i32 b) { return a + b; }\n";
 
 // A module whose import no root reaches: one diagnostic at the `import`
@@ -44,8 +48,8 @@ static const char BAD_IMPORT_SOURCE[] = "import nothere;\nfn i32 main() { return
 
 TEST(json_without_check_is_a_usage_error, {
     // Only the check mode can promise a complete document or nothing, since a
-    // build spawns a `--cc` that inherits stdout, so --json alone is rejected
-    // (D20.2).
+    // build spawns a `--cc` that inherits stdout, so --json alone is rejected.
+    // D20.2
     const run_t run = RUN("--json", "main.ft");
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_USAGE);
     TEST_ASSERT_EQ_STR(run.err,
@@ -57,8 +61,9 @@ TEST(json_without_check_is_a_usage_error, {
 TEST(check_runs_the_front_end_and_stops, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    // No IR, no temporary and no --cc: the run ends after the front end
-    // (D20.1), so -o and --cc are unused.
+    // No IR, no temporary and no --cc: the run ends after the front end, so -o
+    // and --cc are unused.
+    // D20.1
     const run_t run = RUN_CAPTURED("--check", "--cc", FORT_FAKE_CC, "-o", box.out, box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     TEST_ASSERT_EQ_STR(last_diags, "");
@@ -72,8 +77,9 @@ TEST(check_runs_the_front_end_and_stops, {
 TEST(check_beats_the_options_that_emit, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    // -S would write the module to -o; --check emits nothing at all (D20.1),
-    // so the options of a build are unused beside it.
+    // -S would write the module to -o; --check emits nothing at all, so the
+    // options of a build are unused beside it.
+    // D20.1
     const run_t run = RUN_CAPTURED("--check", "-S", "-c", "-o", box.out, "-lm", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     TEST_ASSERT_EQ_INT32(access(box.out, F_OK), -1);
@@ -85,7 +91,8 @@ TEST(check_accepts_a_module_that_defines_no_main, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
     TEST_ASSERT_TRUE(write_source(box.entry, NO_MAIN_SOURCE));
-    // D8.6 is not applied under --check (D20.1).
+    // The `main` rule is not applied under --check.
+    // D8.6, D20.1
     const run_t run = RUN_CAPTURED("--check", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     TEST_ASSERT_EQ_STR(last_diags, "");
@@ -96,8 +103,9 @@ TEST(check_reports_a_broken_module_as_a_compile_error, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
     TEST_ASSERT_TRUE(write_source(box.entry, BAD_IMPORT_SOURCE));
-    // Every rule but D8.6 holds under --check, the diagnostics of D14.2
-    // included (D20.1).
+    // Every rule but the `main` rule holds under --check, the diagnostics
+    // included.
+    // D8.6, D14.2, D20.1
     const run_t run = RUN_CAPTURED("--check", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
     TEST_ASSERT_NONNULL(strstr(last_diags, ":1:1: error: module 'nothere' not found"));
@@ -112,8 +120,9 @@ TEST(the_document_of_a_clean_module_is_one_line_with_four_keys, {
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     char want[CAPTURE_MAX];
     expect2(want, sizeof want, CLEAN_DOCUMENT, box.rt, box.entry);
-    // Version, files, diagnostics and symbols, in that order, on one line
-    // ended by a newline (D20.2, toolchain.md 4.1).
+    // Version, files, diagnostics and symbols, in that order, on one line ended
+    // by a newline (toolchain.md 4.1).
+    // D20.2
     TEST_ASSERT_EQ_STR(run.out, want);
     sandbox_close(&box);
 })
@@ -127,8 +136,8 @@ TEST(the_document_lists_every_file_the_compiler_read, {
     TEST_ASSERT_TRUE(write_source(util, "fn i32 add(i32 a, i32 b) { return a + b; }\n"));
     const run_t run = RUN_CAPTURED("--check", "--json", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
-    // Every file read, in read order, so a client can clear stale
-    // diagnostics (D20.2).
+    // Every file read, in read order, so a client can clear stale diagnostics.
+    // D20.2
     char want[CAPTURE_MAX];
     expect3(want, sizeof want, "\"files\":[\"%s\",\"%s\",\"%s\"]", box.rt, box.entry, util);
     TEST_ASSERT_NONNULL(strstr(run.out, want));
@@ -139,10 +148,11 @@ TEST(the_document_lists_every_file_the_compiler_read, {
 // relative to a directory of its own -- the VS Code extension names it relative
 // to the workspace folder -- resolves every file of the answer against that same
 // directory and needs no mapping of its own, which only holds while the compiler
-// echoes what it was given (toolchain.md 2, D14.2) rather than the absolute path
-// D9.2 could just as well print. The run is made from inside the sandbox, so the
-// argument is a bare file name; the working directory is restored before any
+// echoes what it was given (toolchain.md 2) rather than the absolute path the
+// loader could just as well print. The run is made from inside the sandbox, so
+// the argument is a bare file name; the working directory is restored before any
 // assertion, since a failing one returns from the body at once.
+// D14.2, D9.2
 TEST(a_relative_entry_is_named_in_the_document_exactly_as_it_was_given, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
@@ -212,8 +222,9 @@ TEST(the_document_holds_the_diagnostic_the_text_form_holds, {
     const run_t run = RUN_CAPTURED("--check", "--json", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, text.status);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
-    // The same file, position and message as the text form, with the end of
-    // the range the text form does not print (D20.2, D20.4).
+    // The same file, position and message as the text form, with the end of the
+    // range the text form does not print.
+    // D20.2, D20.4
     char want[CAPTURE_MAX];
     expect1(want,
             sizeof want,
@@ -231,8 +242,9 @@ TEST(the_document_nests_a_note_under_its_error, {
     TEST_ASSERT_TRUE(write_source(box.entry, BAD_IMPORT_SOURCE));
     const run_t run = RUN_CAPTURED("--check", "--json", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
-    // The `note:` lines of an error are nested in its "notes", each with its
-    // own range and no severity of its own (D20.2).
+    // The `note:` lines of an error are nested in its "notes", each with its own
+    // range and no severity of its own.
+    // D20.2
     char want[CAPTURE_MAX];
     expect2(want,
             sizeof want,
@@ -245,7 +257,8 @@ TEST(the_document_nests_a_note_under_its_error, {
 })
 
 // The whole document of a module with one error, note included: the shape a
-// client parses (D20.2, toolchain.md 4.1).
+// client parses (toolchain.md 4.1).
+// D20.2
 static const char BAD_IMPORT_DOCUMENT[] =
     "{\"version\":1,\"files\":[\"%s\",\"%s\"],\"diagnostics\":[{\"file\":\"%s\",\"line\":1,"
     "\"col\":1,\"end_line\":1,\"end_col\":16,\"severity\":\"error\",\"message\":"
@@ -266,8 +279,9 @@ TEST(the_document_of_a_failing_module_is_exact, {
     sandbox_close(&box);
 })
 
-// The whole document of the sandbox entry under --index: one record for the
-// one name the module declares (D20.3, toolchain.md 9.1).
+// The whole document of the sandbox entry under --index: one record for the one
+// name the module declares (toolchain.md 9.1).
+// D20.3
 static const char INDEXED_DOCUMENT[] =
     "{\"version\":1,\"files\":[\"%s\",\"%s\"],\"diagnostics\":[],\"symbols\":[{\"file\":\"%s\","
     "\"line\":1,\"col\":8,\"end_line\":1,\"end_col\":12,\"name\":\"main\",\"kind\":\"fn\","
@@ -275,10 +289,10 @@ static const char INDEXED_DOCUMENT[] =
     "\"end_line\":1,\"end_col\":12}}]}\n";
 
 // The whole document of a dotted entry name: the file is never read, so
-// `"files"` is empty and the one diagnostic stands at 1:1 (D9.1, D14.2).
-// A diagnostic naming a file `"files"` does not list is published all the
-// same: `"files"` is what a client may clear, not what it publishes
-// (toolchain.md 9.2).
+// `"files"` is empty and the one diagnostic stands at 1:1. A diagnostic naming a
+// file `"files"` does not list is published all the same: `"files"` is what a
+// client may clear, not what it publishes (toolchain.md 9.2).
+// D9.1, D14.2
 static const char DOTTED_ENTRY_DOCUMENT[] =
     "{\"version\":1,\"files\":[],\"diagnostics\":[{\"file\":\"%s\",\"line\":1,"
     "\"col\":1,\"end_line\":1,\"end_col\":1,\"severity\":\"error\",\"message\":"
@@ -290,8 +304,9 @@ TEST(a_dotted_entry_under_check_is_rejected_too, {
     char entry[PATH_CAP];
     join(entry, sizeof entry, box.dir, "my.app.ft");
     TEST_ASSERT_TRUE(write_source(entry, "fn i32 main() { return 0; }\n"));
-    // The rule is not D8.6's `main`, which --check skips: the name of the
-    // file is wrong whatever the file holds (D9.1, D20.1).
+    // The rule is not the one about `main`, which --check skips: the name of the
+    // file is wrong whatever the file holds.
+    // D8.6, D9.1, D20.1
     const run_t run = RUN_CAPTURED("--check", entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
     TEST_ASSERT_NONNULL(strstr(last_diags, "entry file name 'my.app' cannot contain '.'"));
@@ -304,7 +319,8 @@ TEST(the_document_of_a_dotted_entry_is_exact, {
     char entry[PATH_CAP];
     join(entry, sizeof entry, box.dir, "my.app.ft");
     TEST_ASSERT_TRUE(write_source(entry, "fn i32 main() { return 0; }\n"));
-    // Exit 1 with a complete document is a verdict a client reads (D20.2).
+    // Exit 1 with a complete document is a verdict a client reads.
+    // D20.2
     const run_t run = RUN_CAPTURED("--check", "--json", entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
     char want[CAPTURE_MAX];
@@ -316,8 +332,9 @@ TEST(the_document_of_a_dotted_entry_is_exact, {
 TEST(index_implies_check_and_json_and_fills_the_symbols, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    // --index is the whole command line an editor gives the compiler: it
-    // turns on --check and --json by itself (D20.3).
+    // --index is the whole command line an editor gives the compiler: it turns
+    // on --check and --json by itself.
+    // D20.3
     const run_t run = RUN_CAPTURED("--index", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     char want[CAPTURE_MAX];
@@ -330,8 +347,9 @@ TEST(index_implies_check_and_json_and_fills_the_symbols, {
 TEST(index_runs_the_front_end_alone, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    // The check mode emits nothing and spawns no `--cc` (D20.1), which
-    // --index does not change.
+    // The check mode emits nothing and spawns no `--cc`, which --index does not
+    // change.
+    // D20.1
     const run_t run = RUN_CAPTURED("--index", "--cc", FORT_FAKE_CC, "-o", box.out, box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     TEST_ASSERT_EQ_INT32(access(box.log, F_OK), -1);
@@ -349,8 +367,9 @@ TEST(an_indexed_use_points_at_the_declaration_in_the_other_file, {
     TEST_ASSERT_TRUE(write_source(util, "fn i32 add(i32 a, i32 b) { return a + b; }\n"));
     const run_t run = RUN_CAPTURED("--index", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
-    // The use of `add` in the entry carries the declaration's name range in
-    // the imported file, which is what go-to-definition follows (D20.3).
+    // The use of `add` in the entry carries the declaration's name range in the
+    // imported file, which is what go-to-definition follows.
+    // D20.3
     char want[CAPTURE_MAX];
     TEST_UNUSED(snprintf(want,
                          sizeof want,
@@ -370,8 +389,9 @@ TEST(an_indexed_run_with_an_error_still_indexes_what_resolved, {
     TEST_ASSERT_TRUE(box.ok);
     TEST_ASSERT_TRUE(write_source(box.entry, BAD_IMPORT_SOURCE));
     const run_t run = RUN_CAPTURED("--index", box.entry);
-    // A verdict is exit 0 or 1 with a document (D20.2), and a file with
-    // errors still indexes everything the checker resolved (D20.3).
+    // A verdict is exit 0 or 1 with a document, and a file with errors still
+    // indexes everything the checker resolved.
+    // D20.2, D20.3
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
     TEST_ASSERT_NONNULL(strstr(run.out, "\"message\":\"module 'nothere' not found\""));
     TEST_ASSERT_NONNULL(strstr(run.out, "\"name\":\"main\",\"kind\":\"fn\""));
@@ -383,8 +403,9 @@ TEST(an_indexed_run_that_cannot_read_the_entry_leaves_stdout_empty, {
     TEST_ASSERT_TRUE(box.ok);
     char missing[PATH_CAP];
     join(missing, sizeof missing, box.dir, "gone.ft");
-    // An unreadable entry is a usage error: exit 2 with stdout empty, which
-    // is how a client tells a crash from a verdict (D14.1, D20.2).
+    // An unreadable entry is a usage error: exit 2 with stdout empty, which is
+    // how a client tells a crash from a verdict.
+    // D14.1, D20.2
     const run_t run = RUN_CAPTURED("--index", missing);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_USAGE);
     TEST_ASSERT_EQ_SIZE(strlen(run.out), (size_t)0);
@@ -394,8 +415,8 @@ TEST(an_indexed_run_that_cannot_read_the_entry_leaves_stdout_empty, {
 TEST(index_after_check_and_json_is_the_same_run, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    // --index implies the two options, so spelling them as well changes
-    // nothing (D20.3).
+    // --index implies the two options, so spelling them as well changes nothing.
+    // D20.3
     const run_t implied = RUN_CAPTURED("--index", box.entry);
     char want[CAPTURE_MAX];
     TEST_UNUSED(snprintf(want, sizeof want, "%s", implied.out));
@@ -415,8 +436,9 @@ TEST(an_indexed_alias_declares_its_name_and_points_elsewhere, {
     TEST_ASSERT_TRUE(write_source(util, "fn i32 add(i32 a, i32 b) { return a + b; }\n"));
     const run_t run = RUN_CAPTURED("--index", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
-    // The alias declares `plus` in the entry and its declaration is the
-    // function in the imported file (D9.3, D20.3).
+    // The alias declares `plus` in the entry and its declaration is the function
+    // in the imported file.
+    // D9.3, D20.3
     char want[CAPTURE_MAX];
     TEST_UNUSED(snprintf(want,
                          sizeof want,
@@ -431,8 +453,8 @@ TEST(an_indexed_alias_declares_its_name_and_points_elsewhere, {
 TEST(a_document_without_index_has_an_empty_symbols_array, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    // The index is a member of every document and is filled by --index alone
-    // (D20.2, D20.3).
+    // The index is a member of every document and is filled by --index alone.
+    // D20.2, D20.3
     const run_t run = RUN_CAPTURED("--check", "--json", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     TEST_ASSERT_NONNULL(strstr(run.out, "\"symbols\":[]}"));
@@ -443,7 +465,8 @@ TEST(json_writes_no_text_diagnostic, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
     TEST_ASSERT_TRUE(write_source(box.entry, BAD_IMPORT_SOURCE));
-    // --json replaces the text form of D14.2 with the document (D20.2).
+    // --json replaces the text form with the document.
+    // D14.2, D20.2
     const run_t run = RUN_CAPTURED("--check", "--json", box.entry);
     TEST_ASSERT_EQ_STR(last_diags, "");
     TEST_ASSERT_NONNULL(strstr(run.out, "\"message\":\"module 'nothere' not found\""));
@@ -469,8 +492,9 @@ TEST(an_unreadable_entry_under_json_leaves_stdout_empty, {
     TEST_ASSERT_TRUE(box.ok);
     char missing[PATH_CAP];
     join(missing, sizeof missing, box.dir, "gone.ft");
-    // Exit 2 with stdout empty is the crash a client tells from a verdict
-    // (D20.2); the `fort: error:` line stays on stderr (D14.1).
+    // Exit 2 with stdout empty is the crash a client tells from a verdict; the
+    // `fort: error:` line stays on stderr.
+    // D20.2, D14.1
     const run_t run = RUN_CAPTURED("--check", "--json", missing);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_USAGE);
     TEST_ASSERT_EQ_SIZE(strlen(run.out), (size_t)0);
@@ -478,7 +502,8 @@ TEST(an_unreadable_entry_under_json_leaves_stdout_empty, {
     sandbox_close(&box);
 })
 
-// Two statements that fail in a row, so the parser reports both (D14.2).
+// Two statements that fail in a row, so the parser reports both.
+// D14.2
 static const char TWO_ERRORS_SOURCE[] = "fn i32 main() { i32 x = 1 }\nfn i32 g( { return 0; }\n";
 
 TEST(every_diagnostic_of_a_file_is_in_the_document_in_report_order, {
@@ -488,7 +513,8 @@ TEST(every_diagnostic_of_a_file_is_in_the_document_in_report_order, {
     const run_t run = RUN_CAPTURED("--check", "--json", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
     // The order of the array is the order the diagnostics were reported, the
-    // order of the text form (D20.2).
+    // order of the text form.
+    // D20.2
     char want[CAPTURE_MAX];
     expect2(want,
             sizeof want,
@@ -508,8 +534,9 @@ TEST(a_lexical_error_is_one_diagnostic_at_an_empty_range, {
     TEST_ASSERT_TRUE(write_source(box.entry, "fn i32 main() { return 'abc; }\n"));
     const run_t run = RUN_CAPTURED("--check", "--json", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
-    // A lexical error stops the file after one diagnostic (D14.2), and the
-    // lexer reports a position, which is the empty range there (D20.4).
+    // A lexical error stops the file after one diagnostic, and the lexer reports
+    // a position, which is the empty range there.
+    // D14.2, D20.4
     char want[CAPTURE_MAX];
     expect1(want,
             sizeof want,
@@ -530,7 +557,8 @@ TEST(a_diagnostic_of_an_imported_module_names_that_module, {
     const run_t run = RUN_CAPTURED("--check", "--json", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
     // Every module of the closure is read and reported on, each diagnostic
-    // naming its own file (D14.2, module-system.md 10).
+    // naming its own file (module-system.md 10).
+    // D14.2
     char want[CAPTURE_MAX];
     expect3(want, sizeof want, "\"files\":[\"%s\",\"%s\",\"%s\"]", box.rt, box.entry, util);
     TEST_ASSERT_NONNULL(strstr(run.out, want));
@@ -546,8 +574,9 @@ TEST(an_import_cycle_is_one_diagnostic_of_the_document, {
     char util[PATH_CAP];
     join(util, sizeof util, box.dir, "util.ft");
     TEST_ASSERT_TRUE(write_source(util, "import main;\nfn i32 add(i32 a) { return a; }\n"));
-    // A cycle is an error at the import that closes it (D9.5,
-    // module-system.md 13), reported like every other error under --check.
+    // A cycle is an error at the import that closes it (module-system.md 13),
+    // reported like every other error under --check.
+    // D9.5
     const run_t run = RUN_CAPTURED("--check", "--json", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
     TEST_ASSERT_NONNULL(strstr(run.out,
@@ -566,8 +595,9 @@ TEST(an_include_root_is_searched_under_check, {
     char util[PATH_CAP];
     join(util, sizeof util, lib, "util.ft");
     TEST_ASSERT_TRUE(write_source(util, "fn i32 add(i32 a, i32 b) { return a + b; }\n"));
-    // The search roots of D9.2 are the same under --check (D20.1), and the
-    // document names a file as the compiler opened it (D20.2).
+    // The search roots are the same under --check, and the document names a file
+    // as the compiler opened it.
+    // D9.2, D20.1, D20.2
     const run_t run = RUN_CAPTURED("--check", "--json", "-I", lib, box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     char want[CAPTURE_MAX];
@@ -582,8 +612,9 @@ TEST(a_quote_in_a_file_name_is_escaped_in_the_document, {
     char quoted[PATH_CAP];
     join(quoted, sizeof quoted, box.dir, "q\".ft");
     TEST_ASSERT_TRUE(write_source(quoted, NO_MAIN_SOURCE));
-    // The document is JSON, so a name is escaped rather than ending the
-    // string it is in (D20.2).
+    // The document is JSON, so a name is escaped rather than ending the string
+    // it is in.
+    // D20.2
     const run_t run = RUN_CAPTURED("--check", "--json", quoted);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     char want[CAPTURE_MAX];
@@ -598,7 +629,8 @@ TEST(a_non_ascii_file_name_passes_through_the_document, {
     char accented[PATH_CAP];
     join(accented, sizeof accented, box.dir, "h\xC3\xA9llo.ft");
     TEST_ASSERT_TRUE(write_source(accented, NO_MAIN_SOURCE));
-    // A well-formed UTF-8 sequence is written verbatim (D20.2, D2.1).
+    // A well-formed UTF-8 sequence is written verbatim.
+    // D20.2, D2.1
     const run_t run = RUN_CAPTURED("--check", "--json", accented);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     char want[CAPTURE_MAX];
@@ -626,12 +658,14 @@ TEST(the_front_end_hands_out_the_files_it_read, {
     sb_init(&sink);
     diag_capture(&sink);
     // The seam itself: no module is written when `ir_path` is NULL, and the
-    // files come back in read order (D20.1, D20.2).
+    // files come back in read order.
+    // D20.1, D20.2
     const int status = driver_front_end(&opts, "fort", NULL, &files, &an, stderr);
     diag_capture(NULL);
     sb_free(&sink);
     TEST_ASSERT_EQ_INT32(status, FORT_EXIT_OK);
-    // The runtime is read first, being a root of the closure (D9.10).
+    // The runtime is read first, being a root of the closure.
+    // D9.10
     TEST_ASSERT_EQ_UINT64(driver_files_count(&files), (uint64_t)3);
     TEST_ASSERT_EQ_STR(driver_files_at(&files, 0), box.rt);
     TEST_ASSERT_EQ_STR(driver_files_at(&files, 1), box.entry);
@@ -663,7 +697,8 @@ TEST(the_analysis_outlives_the_front_end, {
     sb_free(&sink);
     TEST_ASSERT_EQ_INT32(status, FORT_EXIT_OK);
     // The trees and every annotation on them are readable after the run: the
-    // symbols live until the caller frees the analysis (sym.h, D20.3).
+    // symbols live until the caller frees the analysis (sym.h).
+    // D20.3
     TEST_ASSERT_EQ_UINT64(module_set_count(&an.set), (uint64_t)3);
     const module_t* entry = module_set_entry(&an.set);
     TEST_ASSERT_NONNULL(entry);
@@ -688,8 +723,8 @@ TEST(a_front_end_that_wants_no_files_gets_none, {
     driver_options_init(&opts);
     opts.entry = box.entry;
     opts.check = true;
-    // A caller that writes no document passes NULL and nothing is collected
-    // (D20.2).
+    // A caller that writes no document passes NULL and nothing is collected.
+    // D20.2
     driver_analysis_t an;
     driver_analysis_init(&an);
     const int status = driver_front_end(&opts, "fort", NULL, NULL, &an, stderr);
@@ -714,10 +749,11 @@ TEST(the_files_of_a_run_are_forgotten_when_the_list_is_freed, {
 static char forked_entry[PATH_CAP];
 static char forked_stdout[PATH_CAP];
 
-// A child that dies as an internal error does, in the middle of a check run:
-// the front end runs, then the compiler exits 2 (D14.1) without the document
-// ever being built, which is what leaves stdout empty (D20.2). The locals
-// stay live across the call, so their blocks are reachable for LeakSanitizer.
+// A child that dies as an internal error does, in the middle of a check run: the
+// front end runs, then the compiler exits 2 without the document ever being
+// built, which is what leaves stdout empty. The locals stay live across the
+// call, so their blocks are reachable for LeakSanitizer.
+// D14.1, D20.2
 static void check_run_then_internal_error(void) {
     driver_options_t opts;
     driver_options_init(&opts);
@@ -733,9 +769,9 @@ static void check_run_then_internal_error(void) {
 }
 
 // Runs `fn` in a forked child whose stdout is the file at `path` and whose
-// stderr is dropped, and returns its exit status or FORKED_ABNORMAL.
-// test/fork.h captures a child's stderr; the contract of D20.2 is about its
-// stdout, hence this one.
+// stderr is dropped, and returns its exit status or FORKED_ABNORMAL. test/fork.h
+// captures a child's stderr; the contract is about its stdout, hence this one.
+// D20.2
 static int run_forked_stdout(void (*fn)(void), const char* path) {
     enum { FORKED_ABNORMAL = -1, FORKED_SETUP_FAILED = 127 };
     TEST_UNUSED(fflush(NULL));
@@ -748,7 +784,8 @@ static int run_forked_stdout(void (*fn)(void), const char* path) {
             _exit(FORKED_SETUP_FAILED);
         }
         // The `fort: error:` line of the internal error is the run's, not the
-        // suite's output (D14.1).
+        // suite's output.
+        // D14.1
         if (freopen("/dev/null", "wb", stderr) == NULL) {
             _exit(FORKED_SETUP_FAILED);
         }

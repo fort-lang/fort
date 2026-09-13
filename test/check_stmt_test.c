@@ -1,8 +1,9 @@
-// Unit tests of the checker's statements (core-language.md 6, 7.3; D7.1 to
-// D7.11, D8.4, D8.5): the scopes and the shadowing rules, the declarations
-// and the assignment forms, the control-flow statements, `switch`, `defer`,
-// `return` and the terminating-statement rule. The expressions are in
-// check_expr_test.c and check_const_test.c.
+// Unit tests of the checker's statements (core-language.md 6, 7.3): the
+// scopes and the shadowing rules, the declarations and the assignment forms,
+// the control-flow statements, `switch`, `defer`, `return` and the
+// terminating-statement rule. The expressions are in check_expr_test.c and
+// check_const_test.c.
+// D7.1 to D7.11, D8.4, D8.5
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -14,12 +15,14 @@
 
 // NOLINTBEGIN(readability-magic-numbers) the sources below are the test data.
 
-// ---- scopes and shadowing (D7.9) ----------------------------------------------------
+// ---- scopes and shadowing -----------------------------------------------------------
+// D7.9
 
 TEST(a_local_may_not_reuse_a_parameter_name, {
     TEST_ASSERT_FALSE(check_src("fn i32 twice(i32 n) {\n    i32 n = 2;\n    return n;\n}\n"
                                 "fn i32 main() {\n    return twice(1);\n}\n"));
-    // The diagnostic stands at the inner declaration (D7.9, D14.2).
+    // The diagnostic stands at the inner declaration.
+    // D7.9, D14.2
     TEST_ASSERT_TRUE(said("main.ft:2:9: error: 'n' shadows a parameter"));
 })
 
@@ -41,7 +44,8 @@ TEST(a_local_may_shadow_a_module_level_name, {
 
 TEST(a_local_is_visible_only_after_its_own_declaration, {
     TEST_ASSERT_FALSE(check_body("    i32 x = x;\n    println(x);"));
-    // A local's scope starts after its own declaration (D7.9).
+    // A local's scope starts after its own declaration.
+    // D7.9
     TEST_ASSERT_TRUE(said("unknown name 'x'"));
 })
 
@@ -56,7 +60,8 @@ TEST(a_duplicate_parameter_is_refused, {
     TEST_ASSERT_TRUE(said("duplicate parameter 'a'"));
 })
 
-// ---- declarations and initializers (D7.1, D6.5) -------------------------------------
+// ---- declarations and initializers --------------------------------------------------
+// D7.1, D6.5
 
 TEST(a_local_takes_its_declared_type, {
     TEST_ASSERT_TRUE(check_body("    i32 mut* mut p = null;\n    println(p);"));
@@ -65,7 +70,8 @@ TEST(a_local_takes_its_declared_type, {
 
 TEST(a_brace_initializer_needs_an_aggregate, {
     TEST_ASSERT_FALSE(check_body("    i32 h = {};\n    println(h);"));
-    // `= {}` zero-initializes any aggregate, span, string or enum (D6.5).
+    // `= {}` zero-initializes any aggregate, span, string or enum.
+    // D6.5
     TEST_ASSERT_TRUE(said("'{}' initializes an aggregate, span, string or enum, not i32"));
     TEST_ASSERT_FALSE(check_body("    i32* k = {};\n    println(k);"));
     TEST_ASSERT_TRUE(said("not i32*"));
@@ -113,7 +119,8 @@ TEST(a_nested_literal_checks_its_leaves, {
     TEST_ASSERT_TRUE(said("the field expects i32, not string"));
 })
 
-// ---- assignment (D7.2) --------------------------------------------------------------
+// ---- assignment ---------------------------------------------------------------------
+// D7.2
 
 TEST(assignment_needs_a_mutable_lvalue, {
     TEST_ASSERT_FALSE(check_body("    i32 x = 1;\n    x = 2;\n    println(x);"));
@@ -140,7 +147,8 @@ TEST(a_compound_assignment_has_the_rules_of_its_operator, {
     TEST_ASSERT_FALSE(check_body("    string mut s = \"a\";\n    s += \"b\";\n    println(s);"));
     TEST_ASSERT_TRUE(said("'+' takes numeric operands, not string"));
     // A target that failed says nothing about the operator as well: one
-    // construct, one diagnostic (D14.2).
+    // construct, one diagnostic.
+    // D14.2
     TEST_ASSERT_FALSE(check_body("    i32 x = 1;\n    x += \"s\";\n    println(x);"));
     TEST_ASSERT_TRUE(said("cannot assign to immutable 'x'"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
@@ -151,7 +159,8 @@ TEST(incdec_needs_an_integer_lvalue, {
     TEST_ASSERT_FALSE(check_body("    i32 x = 1;\n    x++;\n    println(x);"));
     TEST_ASSERT_TRUE(said("cannot modify immutable 'x'"));
     TEST_ASSERT_FALSE(check_body("    char mut c = 'a';\n    c++;\n    println(c);"));
-    // `++` and `--` are allowed on integer types only (D7.2).
+    // `++` and `--` are allowed on integer types only.
+    // D7.2
     TEST_ASSERT_TRUE(said("'++' takes an integer operand, not char"));
 })
 
@@ -162,11 +171,13 @@ TEST(a_call_statement_may_discard_its_result, {
 
 TEST(an_owning_result_may_not_be_discarded, {
     TEST_ASSERT_FALSE(check_body("    i32 mut* own p = new(i32);\n    move(p);\n    del(p);"));
-    // The value of `move` must land somewhere (D12.2, D17.8).
+    // The value of `move` must land somewhere.
+    // D12.2, D17.8
     TEST_ASSERT_TRUE(said("owning temporary would leak"));
 })
 
-// ---- control flow (D7.4, D7.5) ------------------------------------------------------
+// ---- control flow -------------------------------------------------------------------
+// D7.4, D7.5
 
 TEST(every_condition_must_be_bool, {
     TEST_ASSERT_FALSE(check_body("    i32 x = 1;\n    if (x) {\n        println(1);\n    }"));
@@ -196,7 +207,8 @@ TEST(a_for_init_variable_is_scoped_to_the_loop, {
 
 TEST(a_for_induction_variable_must_be_mut, {
     TEST_ASSERT_FALSE(check_body("    for (i32 i = 0; i < 3; i++) {\n        println(i);\n    }"));
-    // There is no exception for induction variables (D7.5).
+    // There is no exception for induction variables.
+    // D7.5
     TEST_ASSERT_TRUE(said("cannot modify immutable 'i'"));
 })
 
@@ -231,7 +243,8 @@ TEST(a_range_variable_cannot_be_own, {
     TEST_ASSERT_FALSE(check_body("    i32 mut* own mut@ own k = new(i32* own, 2);\n"
                                  "    for (i32 mut* own c : k) {\n        println(c);\n    }\n"
                                  "    del(k);"));
-    // The loop lends its collection (D17.10).
+    // The loop lends its collection.
+    // D17.10
     TEST_ASSERT_TRUE(said("a range variable cannot be own"));
 })
 
@@ -241,7 +254,8 @@ TEST(a_range_for_lends_an_owning_element, {
                                 "    del(k);"));
 })
 
-// ---- switch (D7.6, D7.7) ------------------------------------------------------------
+// ---- switch -------------------------------------------------------------------------
+// D7.6, D7.7
 
 TEST(a_switch_operand_is_an_integer_a_char_or_an_enum, {
     TEST_ASSERT_FALSE(check_body("    string s = \"a\";\n    switch (s) {\n    default:\n    }"));
@@ -259,7 +273,8 @@ TEST(duplicate_case_values_are_refused, {
                                 "    case 1:\n        println(1);\n    case 2, 3:\n"
                                 "        println(2);\n    case TWO:\n        println(3);\n"
                                 "    }\n    return 0;\n}\n"));
-    // No duplicates after evaluation (D7.6).
+    // No duplicates after evaluation.
+    // D7.6
     TEST_ASSERT_TRUE(said("duplicate case value 2"));
 })
 
@@ -278,7 +293,8 @@ TEST(a_case_label_must_be_a_constant_expression, {
 TEST(a_case_label_takes_the_operand_type, {
     TEST_ASSERT_FALSE(check_body("    char c = 'a';\n    switch (c) {\n    case 65:\n"
                                  "        println(1);\n    }"));
-    // An integer constant in a char context is an error (D4.3).
+    // An integer constant in a char context is an error.
+    // D4.3
     TEST_ASSERT_TRUE(said("an integer constant does not become char"));
 })
 
@@ -287,7 +303,8 @@ TEST(a_non_exhaustive_enum_switch_is_reported_at_the_closing_brace, {
                                 "fn i32 main() {\n    color c = color.red;\n    switch (c) {\n"
                                 "    case color.red:\n        println(1);\n    }\n"
                                 "    return 0;\n}\n"));
-    // Reported at the closing brace of the switch (D7.7, D14.2).
+    // Reported at the closing brace of the switch.
+    // D7.7, D14.2
     TEST_ASSERT_TRUE(said("main.ft:11:5: error: switch over color does not handle green, blue"));
 })
 
@@ -304,7 +321,8 @@ TEST(a_case_body_is_a_scope, {
                                 "        i32 k = 3;\n        println(k);\n    default:\n    }"));
 })
 
-// ---- break, continue and defer (D7.6, D7.8) -----------------------------------------
+// ---- break, continue and defer ------------------------------------------------------
+// D7.6, D7.8
 
 TEST(break_outside_a_loop_or_switch_is_refused, {
     TEST_ASSERT_FALSE(check_body("    break;"));
@@ -335,7 +353,8 @@ TEST(a_deferred_statement_is_checked, {
     TEST_ASSERT_TRUE(said("unknown name 'nope'"));
 })
 
-// ---- return and terminating statements (D7.11, D8.4, D8.5) --------------------------
+// ---- return and terminating statements ----------------------------------------------
+// D7.11, D8.4, D8.5
 
 TEST(a_return_with_a_value_in_a_void_function_is_refused, {
     TEST_ASSERT_FALSE(check_src("fn void nothing() {\n    return 1;\n}\n"
@@ -353,14 +372,16 @@ TEST(a_return_in_a_noreturn_function_is_refused, {
     TEST_ASSERT_FALSE(check_src("fn noreturn quit(i32 code) {\n    if (code == 0) {\n"
                                 "        return;\n    }\n    panic(\"quit\");\n}\n"
                                 "fn i32 main() {\n    quit(1);\n}\n"));
-    // A `noreturn` function may not contain `return` (D8.5).
+    // A `noreturn` function may not contain `return`.
+    // D8.5
     TEST_ASSERT_TRUE(said("'return' in a noreturn function"));
 })
 
 TEST(a_missing_return_is_reported_at_the_closing_brace, {
     TEST_ASSERT_FALSE(check_src("fn i32 pick(bool b) {\n    if (b) {\n        return 1;\n    }\n}\n"
                                 "fn i32 main() {\n    return pick(true);\n}\n"));
-    // Reported at the body's closing brace (D8.4, D14.2).
+    // Reported at the body's closing brace.
+    // D8.4, D14.2
     TEST_ASSERT_TRUE(said("main.ft:5:1: error: missing return"));
 })
 
@@ -380,14 +401,16 @@ TEST(a_while_true_with_no_break_terminates, {
                   "fn i32 main() {\n    return spin();\n}\n"));
     TEST_ASSERT_FALSE(check_src("fn i32 spin() {\n    while (true) {\n        break;\n    }\n}\n"
                                 "fn i32 main() {\n    return spin();\n}\n"));
-    // A `break` targeting the loop makes it fall through (D8.4).
+    // A `break` targeting the loop makes it fall through.
+    // D8.4
     TEST_ASSERT_TRUE(said("missing return"));
 })
 
 TEST(a_constant_true_condition_does_not_terminate, {
-    // D8.4 names `while (true)`, the literal: a condition that folds to true
-    // is not one, and the conservative reading reports the missing return
-    // rather than accepting a body that may fall through.
+    // The rule names `while (true)`, the literal: a condition that folds to
+    // true is not one, and the conservative reading reports the missing
+    // return rather than accepting a body that may fall through.
+    // D8.4
     TEST_ASSERT_FALSE(check_src("bool ALWAYS = true;\n"
                                 "fn i32 spin() {\n    while (ALWAYS) {\n        println(1);\n"
                                 "    }\n}\n"
@@ -397,7 +420,8 @@ TEST(a_constant_true_condition_does_not_terminate, {
 
 TEST(a_call_through_a_noreturn_pointer_terminates, {
     // A call statement to a `noreturn` function is terminating, through a
-    // function pointer as through a name (D8.4, D6.11).
+    // function pointer as through a name.
+    // D8.4, D6.11
     TEST_ASSERT_TRUE(check_src("fn i32 pick(bool b, fn noreturn(string) quit) {\n"
                                "    if (b) {\n        return 1;\n    }\n"
                                "    quit(\"no\");\n}\n"
@@ -412,8 +436,9 @@ TEST(a_call_through_a_noreturn_pointer_terminates, {
 })
 
 TEST(a_discarded_owning_aggregate_is_refused, {
-    // An owning result is an `own` reference or an owning aggregate (D17.7),
-    // and neither may be dropped (D17.8).
+    // An owning result is an `own` reference or an owning aggregate, and
+    // neither may be dropped.
+    // D17.7, D17.8
     TEST_ASSERT_FALSE(check_src("struct vec {\n    i32 mut@ own data;\n}\n"
                                 "fn vec make() {\n    return vec{.data = new(i32, 2)};\n}\n"
                                 "fn i32 main() {\n    make();\n    return 0;\n}\n"));
@@ -422,7 +447,8 @@ TEST(a_discarded_owning_aggregate_is_refused, {
                                 "fn i32 main() {\n    vec mut b = {};\n    move(b);\n"
                                 "    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("owning temporary would leak"));
-    // A result that owns nothing is discarded freely (D7.3).
+    // A result that owns nothing is discarded freely.
+    // D7.3
     TEST_ASSERT_TRUE(check_src("struct point {\n    i32 x;\n}\n"
                                "fn point make() {\n    return point{1};\n}\n"
                                "fn i32 main() {\n    make();\n    return 0;\n}\n"));
@@ -472,8 +498,9 @@ TEST(a_noreturn_function_must_end_in_a_terminating_statement, {
 
 TEST(a_body_with_an_error_node_never_reports_missing_return, {
     // An error node stands where a statement was expected, and a block that
-    // holds one is not judged (D14.2, rule 4 of the symbol contract).
-    // The checker adds nothing to the parser's diagnostic.
+    // holds one is not judged (rule 4 of the symbol contract). The checker
+    // adds nothing to the parser's diagnostic.
+    // D14.2
     TEST_ASSERT_TRUE(check_broken("fn i32 pick(bool b) {\n    i32 x = ;\n}\n"));
     TEST_ASSERT_FALSE(said("missing return"));
     TEST_ASSERT_TRUE(said("expected an expression"));

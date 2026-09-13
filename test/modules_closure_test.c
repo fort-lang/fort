@@ -1,9 +1,9 @@
-// Unit tests of the import closure (module-system.md 6, 10, 13;
-// D9.5, D9.6, D7.9): cycles, the identity of a module by the real path of its
-// file, the module namespaces the bindings land in, and the dependency order.
-// The roots and the import readings are the other half, in modules_test.c;
-// two declarations of one C symbol are compared where types exist, so they
-// are in check_extern_test.c (D9.8).
+// Unit tests of the import closure (module-system.md 6, 10, 13): cycles, the
+// identity of a module by the real path of its file, the module namespaces
+// the bindings land in, and the dependency order. The roots and the import
+// readings are the other half, in modules_test.c; two declarations of one C
+// symbol are compared where types exist, so they are in check_extern_test.c.
+// D9.5, D9.6, D7.9, D9.8
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -15,7 +15,8 @@
 
 #include "test.h"
 
-// ---- cycles (D9.5) ------------------------------------------------------------------
+// ---- cycles -------------------------------------------------------------------------
+// D9.5
 
 TEST(a_cycle_is_reported_at_the_import_that_closes_it, {
     begin();
@@ -59,7 +60,8 @@ TEST(a_diamond_is_not_a_cycle, {
     TEST_ASSERT_EQ_STR(ordered(3), "main");
 })
 
-// ---- identity by the real path (D9.2) -----------------------------------------------
+// ---- identity by the real path ------------------------------------------------------
+// D9.2
 
 TEST(one_file_reached_through_two_paths_is_an_error, {
     begin();
@@ -111,7 +113,8 @@ TEST(a_module_and_one_of_its_declarations_may_be_imported_together, {
     TEST_ASSERT_TRUE(bound("main", "add")->to == bound("util", "add"));
 })
 
-// ---- the module namespace (D7.9) ----------------------------------------------------
+// ---- the module namespace -----------------------------------------------------------
+// D7.9
 
 TEST(every_kind_of_declaration_enters_the_namespace, {
     begin();
@@ -216,8 +219,9 @@ TEST(the_pass_order_is_the_dependency_order_when_every_module_loaded, {
     add("main.ft", "import a;\nfn i32 main() { return 0; }\n");
     add("a.ft", "fn i32 f() { return 0; }\n");
     TEST_ASSERT_TRUE(load("main.ft"));
-    // A closure that resolved is ordered end to end, so the pass order of
-    // D9.10 is the dependency order and nothing more.
+    // A closure that resolved is ordered end to end, so the pass order is the
+    // dependency order and nothing more.
+    // D9.10
     TEST_ASSERT_EQ_UINT64(module_set_pass_count(&set), module_set_count(&set));
     TEST_ASSERT_EQ_STR(passed(0), "a");
     TEST_ASSERT_EQ_STR(passed(1), "main");
@@ -230,7 +234,8 @@ TEST(the_pass_order_ends_with_the_modules_the_loader_never_ordered, {
     TEST_ASSERT_FALSE(load("main.ft"));
     // `a` never resolved and `main` was never reached, so neither is in the
     // dependency order; both parsed, so a pass still visits them, the
-    // imported module first (D14.2, D20.1).
+    // imported module first.
+    // D14.2, D20.1
     TEST_ASSERT_EQ_UINT64(module_set_count(&set), (uint64_t)0);
     TEST_ASSERT_EQ_UINT64(module_set_pass_count(&set), (uint64_t)2);
     TEST_ASSERT_EQ_STR(passed(0), "a");
@@ -243,8 +248,9 @@ TEST(a_module_that_did_not_parse_is_not_in_the_pass_order, {
     add("main.ft", "import a;\nfn i32 main() { return 0; }\n");
     add("a.ft", "fn i32 f() { return 0\n");
     TEST_ASSERT_FALSE(load("main.ft"));
-    // A file with a syntax error is not checked, so no pass visits it
-    // (D14.2); the importer that parsed is visited.
+    // A file with a syntax error is not checked, so no pass visits it; the
+    // importer that parsed is visited.
+    // D14.2
     TEST_ASSERT_EQ_UINT64(module_set_pass_count(&set), (uint64_t)1);
     TEST_ASSERT_EQ_STR(passed(0), "main");
 })
@@ -277,7 +283,8 @@ TEST(a_root_spelled_with_dot_dot_reaches_the_same_module, {
         "fn i32 main() { return 0; }\n");
     add("sub/x.ft", "fn i32 f() { return 0; }\n");
     // <sandbox>/sub/../sub/x.ft and <sandbox>/sub/x.ft are one file, since a
-    // module's identity is the real path of its file, `..` resolved (D9.2).
+    // module's identity is the real path of its file, `..` resolved.
+    // D9.2
     root("sub/../sub");
     TEST_ASSERT_FALSE(load("main.ft"));
     TEST_ASSERT_TRUE(said("module 'x' is the same file as module 'sub.x'"));
@@ -288,8 +295,9 @@ TEST(the_notes_of_a_missing_module_name_every_root_and_reading, {
     add("main.ft", "import util.strings;\nfn i32 main() { return 0; }\n");
     root("lib");
     TEST_ASSERT_FALSE(load("main.ft"));
-    // One note per root and reading: two roots, two readings (D9.2,
-    // module-system.md 13).
+    // One note per root and reading: two roots, two readings
+    // (module-system.md 13).
+    // D9.2
     uint64_t notes = 0;
     for (const char* cursor = strstr(diags(), "note:"); cursor != NULL;
          cursor = strstr(cursor + 1, "note:")) {

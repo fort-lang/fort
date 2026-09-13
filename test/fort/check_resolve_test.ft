@@ -8,26 +8,29 @@ import check_env;
 import std.strbuf;
 import types;
 
-// The lazy resolution of D7.10 and the value containment of D3.8: which
-// declaration reaching which other one is a resolution edge, which is a cycle,
-// and which is ordinary recursion.
+// The lazy resolution and the value containment: which declaration reaching
+// which other one is a resolution edge, which is a cycle, and which is ordinary
+// recursion.
+// D7.10, D3.8
 //
-// The rule this suite exists for is the one T-082 fixed and this port carries
-// in its fixed form: the resolution edges are exactly the value-containment
-// edges, so a type name is resolved when the written type stores a value of it
-// and not otherwise. `named_type` takes that answer from `suffixes_store_base`,
-// which reads the written suffixes, and `check_type_at` threads it as
-// `in_storage`, false for a function type's own result and parameters. Forcing
-// the resolution of a struct a type does not store puts it on the resolution
-// path of a struct that does not contain it, and `check_layout` then reads the
-// unfinished layout as an infinite size.
+// The rule this suite exists for is the one an earlier ticket fixed and this
+// port carries in its fixed form: the resolution edges are exactly the
+// value-containment edges, so a type name is resolved when the written type
+// stores a value of it and not otherwise. `named_type` takes that answer from
+// `suffixes_store_base`, which reads the written suffixes, and `check_type_at`
+// threads it as `in_storage`, false for a function type's own result and
+// parameters. Forcing the resolution of a struct a type does not store puts it
+// on the resolution path of a struct that does not contain it, and
+// `check_layout` then reads the unfinished layout as an infinite size.
+// T-082: the ticket that fixed named_type
 //
 // The generality of that rule over a type whose base sits behind both an array
-// and a reference, `b[2][3]` or `b[3] mut@`, is asserted since T-043: this
+// and a reference, `b[2][3]` or `b[3] mut@`, is asserted since the port: this
 // compiler reads those two forms and the suite below writes them in both
-// declaration orders. This is the third spelling of "look behind fixed
-// arrays", beside `behind_arrays` in types.ft and `struct_of` in check.ft, and
-// the three are kept in step by reading them together as well.
+// declaration orders. This is the third spelling of "look behind fixed arrays",
+// beside `behind_arrays` in types.ft and `struct_of` in check.ft, and the three
+// are kept in step by reading them together as well.
+// T-043: the ticket that widened the rule to both forms
 
 fn bool decls(check_env.env mut* e, string one, string two, string three) {
     strbuf.str_buf mut b = strbuf.create();
@@ -38,15 +41,17 @@ fn bool decls(check_env.env mut* e, string one, string two, string three) {
     return check_env.check_decls(e, strbuf.view(&b));
 }
 
-// ---- value containment is the resolution edge (D3.8, D7.10) ------------------------
+// ---- value containment is the resolution edge --------------------------------------
+// D3.8, D7.10
 
 fn void a_struct_stored_by_value_is_resolved_before_its_holder() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // `inner` is declared after `outer` and `outer` stores one by value, so
-    // the resolution reaches it and the layout is exact whichever order the
-    // two are written in (D7.10).
+    // `inner` is declared after `outer` and `outer` stores one by value, so the
+    // resolution reaches it and the layout is exact whichever order the two are
+    // written in.
+    // D7.10
     assert(decls(&e, "struct outer {\n    i32 tag;\n    inner part;\n}\n",
                  "struct inner {\n    i64 a;\n}\n",
                  "outer o = {1, {2}};\n"));
@@ -59,7 +64,8 @@ fn void an_array_of_a_struct_carries_the_base_through() {
     check_env.open(&e);
     defer check_env.close(&e);
     // A fixed array is N of its element, so the array's holder stores the
-    // element by value and the element is a resolution edge (D3.4, D3.8).
+    // element by value and the element is a resolution edge.
+    // D3.4, D3.8
     assert(decls(&e, "struct outer {\n    inner[2] parts;\n}\n",
                  "struct inner {\n    i64 a;\n}\n", "outer o = {{{1}, {2}}};\n"));
     assert(check_env.sym_main(&e, "o") != null);
@@ -71,9 +77,10 @@ fn void a_struct_behind_a_reference_is_identity_only() {
     check_env.open(&e);
     defer check_env.close(&e);
     // `first` holds a pointer to `second` and `second` holds one by value to
-    // nothing: neither order is a cycle, because a pointer is one word
-    // whatever it points at (D3.11). Before T-082 the pointer was a
-    // resolution edge too and this pair reported an infinite size.
+    // nothing: neither order is a cycle, because a pointer is one word whatever
+    // it points at. Before the fix the pointer was a resolution edge too and
+    // this pair reported an infinite size.
+    // D3.11, T-082: the ticket that fixed named_type
     assert(decls(&e, "struct first {\n    second mut* link;\n    i32 v;\n}\n",
                  "struct second {\n    first mut* back;\n    i32 w;\n}\n",
                  "first f = {null, 1};\n"));
@@ -86,8 +93,9 @@ fn void a_span_of_a_struct_is_identity_only_as_well() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // A span is two words whatever it views (D3.5), so it stores no value of
-    // its element type either.
+    // A span is two words whatever it views, so it stores no value of its
+    // element type either.
+    // D3.5
     assert(decls(&e, "struct holder {\n    item@ items;\n}\n",
                  "struct item {\n    holder mut* owner;\n}\n", "holder h = {};\n"));
     assert(check_env.errors(&e) == 0);
@@ -100,10 +108,11 @@ fn void a_pair_that_reaches_through_a_span_checks_in_either_order() {
     defer check_env.close(&e);
     // `vec` holds a span of pointers to `node` and `node` holds a `vec` by
     // value: neither layout depends on the other, so the pair checks whichever
-    // order the file declares them in (D7.10, D3.5, D3.11, D3.8). Forcing the
-    // resolution of `node` from `vec`'s field -- which is what named_type did
-    // before T-082 -- puts `vec` on its own resolution path through `node`'s
-    // value field, and the layout then reads an infinite size.
+    // order the file declares them in. Forcing the resolution of `node` from
+    // `vec`'s field -- which is what named_type did before the fix -- puts
+    // `vec` on its own resolution path through `node`'s value field, and the
+    // layout then reads an infinite size.
+    // D7.10, D3.5, D3.11, D3.8, T-082: the ticket that fixed named_type
     assert(decls(&e, "struct vec {\n    node mut* mut@ own items;\n}\n",
                  "struct node {\n    vec kids;\n    i32 tag;\n}\n", "vec v = {};\n"));
     assert(check_env.errors(&e) == 0);
@@ -112,7 +121,8 @@ fn void a_pair_that_reaches_through_a_span_checks_in_either_order() {
     check_env.open(&f);
     defer check_env.close(&f);
     // The same pair with the declarations swapped, which is the other half of
-    // "the two declaration orders of a pair are one program" (D7.10).
+    // "the two declaration orders of a pair are one program".
+    // D7.10
     assert(decls(&f, "struct node {\n    vec kids;\n    i32 tag;\n}\n",
                  "struct vec {\n    node mut* mut@ own items;\n}\n", "vec v = {};\n"));
     assert(check_env.errors(&f) == 0);
@@ -126,8 +136,9 @@ fn void a_reference_behind_two_array_levels_is_identity_only() {
     defer check_env.close(&e);
     // `node*[2][3]` is six pointers: the array levels carry the base through
     // and the `*` ends the containment, so `vec` stores no `node` by value and
-    // the pair checks in this order (D3.4, D3.8, D3.11). This is the rank-two
-    // half of T-082, which stage1 cannot write at all.
+    // the pair checks in this order. This is the rank-two half of the rule,
+    // which stage1 cannot write at all.
+    // D3.4, D3.8, D3.11, T-082: the ticket that fixed named_type
     assert(decls(&e, "struct vec {\n    node mut*[2][3] rows;\n}\n",
                  "struct node {\n    vec kids;\n    i32 tag;\n}\n", "vec v = {};\n"));
     assert(check_env.errors(&e) == 0);
@@ -135,7 +146,8 @@ fn void a_reference_behind_two_array_levels_is_identity_only() {
     check_env.env mut f = check_env.env{};
     check_env.open(&f);
     defer check_env.close(&f);
-    // And in the other order, which is the same program (D7.10).
+    // And in the other order, which is the same program.
+    // D7.10
     assert(decls(&f, "struct node {\n    vec kids;\n    i32 tag;\n}\n",
                  "struct vec {\n    node mut*[2][3] rows;\n}\n", "vec v = {};\n"));
     assert(check_env.errors(&f) == 0);
@@ -147,9 +159,10 @@ fn void a_span_of_arrays_of_a_struct_is_identity_only_as_well() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // `node[3] mut@ own` is two words whatever it views, the array level
-    // inside it included (D3.5, D3.6), so it opens no resolution edge and the
-    // pair checks in both orders.
+    // `node[3] mut@ own` is two words whatever it views, the array level inside
+    // it included, so it opens no resolution edge and the pair checks in both
+    // orders.
+    // D3.5, D3.6
     assert(decls(&e, "struct vec {\n    node[3] mut@ own rows;\n}\n",
                  "struct node {\n    vec kids;\n    i32 tag;\n}\n", "vec v = {};\n"));
     assert(check_env.errors(&e) == 0);
@@ -168,10 +181,11 @@ fn void an_array_of_arrays_of_a_struct_contains_it_by_value() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // A fixed array of any rank over `node` contains `node` by value (D3.8),
-    // so this pair is a cycle and the error is the same in both orders. The
-    // two tests above and this one are the two answers the demand graph must
-    // tell apart at rank two.
+    // A fixed array of any rank over `node` contains `node` by value, so this
+    // pair is a cycle and the error is the same in both orders. The two tests
+    // above and this one are the two answers the demand graph must tell apart
+    // at rank two.
+    // D3.8
     assert(!decls(&e, "struct vec {\n    node[2][3] rows;\n}\n",
                   "struct node {\n    vec kids;\n}\n", "vec v = {};\n"));
     assert(check_env.said(&e, "has infinite size"));
@@ -187,9 +201,9 @@ fn void a_function_type_stores_neither_its_result_nor_its_parameters() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // A function pointer is one word and its signature is stored nowhere
-    // (D3.10), so a struct holding one that mentions the struct itself is not
-    // a cycle.
+    // A function pointer is one word and its signature is stored nowhere, so a
+    // struct holding one that mentions the struct itself is not a cycle.
+    // D3.10
     assert(decls(&e, "struct node {\n    fn void(node mut*) visit;\n    i32 v;\n}\n",
                  "node n = {null, 1};\n", ""));
     assert(check_env.errors(&e) == 0);
@@ -206,7 +220,8 @@ fn void two_structs_that_contain_each_other_by_value_have_infinite_size() {
     assert(check_env.said(&e, "has infinite size"));
 }
 
-// ---- the lazy resolution of constants (D7.10, D4.6) --------------------------------
+// ---- the lazy resolution of constants ----------------------------------------------
+// D7.10, D4.6
 
 fn void a_constant_reached_from_another_is_resolved_on_the_spot() {
     check_env.env mut e = check_env.env{};
@@ -225,7 +240,8 @@ fn void a_cycle_between_two_constants_is_reported_once() {
     defer check_env.close(&e);
     assert(!decls(&e, "i32 one = two;\n", "i32 two = one;\n", ""));
     assert(check_env.said(&e, "is defined in terms of itself"));
-    // One error and nothing more: both symbols are poisoned (D14.2).
+    // One error and nothing more: both symbols are poisoned.
+    // D14.2
     assert(check_env.errors(&e) == 1);
 }
 
@@ -233,9 +249,10 @@ fn void a_declaration_may_hold_its_own_address() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // `&N` inside N's own initializer asks for an address and not for a
-    // value, and D7.10 admits `&` of a module-level declaration from any
-    // module, this one included: a self-pointing sentinel is legal.
+    // `&N` inside N's own initializer asks for an address and not for a value,
+    // and a module-level initializer admits `&` of a module-level declaration
+    // from any module, this one included: a self-pointing sentinel is legal.
+    // D7.10
     assert(decls(&e, "struct node {\n    node* self;\n}\n", "node n = node{&n};\n", ""));
     assert(check_env.errors(&e) == 0);
     assert(check_env.sym_main(&e, "n")->kind == ast.sym_kind.s_const);
@@ -245,20 +262,23 @@ fn void an_enum_value_may_not_refer_to_its_own_enum() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // D3.9 forbids the cycle an enum member's value would close.
+    // An enum member's value may close no cycle.
+    // D3.9
     assert(!decls(&e, "enum color {\n    red = cast(color.green, i32),\n    green,\n}\n", "",
                   ""));
     assert(check_env.said(&e, "is defined in terms of itself"));
 }
 
-// ---- failure is local (D14.2) ------------------------------------------------------
+// ---- failure is local --------------------------------------------------------------
+// D14.2
 
 fn void a_declaration_that_failed_silences_everything_that_reads_it() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
     // The type is unknown, so the declaration fails; the two that read it say
-    // nothing further, because the error type poisons through (D14.2).
+    // nothing further, because the error type poisons through.
+    // D14.2
     assert(!decls(&e, "nosuch k = 1;\n", "i32 a = k;\n", "i32 b = k + 1;\n"));
     assert(check_env.errors(&e) == 1);
     assert(check_env.sym_main(&e, "k")->error);
@@ -277,7 +297,8 @@ fn void a_use_of_a_name_an_import_failed_to_bind_is_silent() {
     check_env.add(&e, "main.ft", strbuf.view(&b));
     assert(!check_env.check_entry(&e, "main.ft"));
     // The loader reported the import; the checker says nothing about the name
-    // it left unbound (D14.2).
+    // it left unbound.
+    // D14.2
     assert(check_env.said(&e, "module 'missing' not found"));
     assert(!check_env.said(&e, "unknown name 'missing'"));
 }

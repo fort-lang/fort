@@ -11,13 +11,13 @@ import gen_expr;
 import runtime_sig;
 import std.strbuf;
 
-// The scalar expressions of src/fort/gen_expr.ft: the checked arithmetic of
-// item 15, the division and shift checks of D6.13 and D11.1, the comparisons
-// of D6.2, the string comparison of D3.7, the short circuit of item 10 and
-// the casts of item 12. The conditional of D6.6 is here too: stage1 refuses
-// that form, so its two cases are the one block of expected text below that
-// was read off stage2 and reasoned about line by line, not read off stage1
-// (T-044).
+// The scalar expressions of src/fort/gen_expr.ft: the checked arithmetic of item
+// 15, the division and shift checks, the comparisons, the string comparison, the
+// short circuit of item 10 and the casts of item 12. The conditional is here
+// too: stage1 refuses that form, so its two cases are the one block of expected
+// text below that was read off stage2 and reasoned about line by line, not read
+// off stage1.
+// D6.13, D11.1, D6.2, D3.7, D6.6, T-044: the ticket that gave stage2 `?:`
 //
 // No case in this suite runs the structural check of item 10, and none can:
 // every one emits a single expression and not a definition, and
@@ -27,16 +27,16 @@ import std.strbuf;
 // whole definitions: the scalar shape in a `return` and the aggregate shape
 // that writes through gen_expr_into.
 //
-// Where the expected text comes from. Every block below was read off
-// `fort -S` run by stage1 -- the C emitter this module transliterates -- over
-// a program whose body is the one the test writes, and is therefore the C
-// compiler's own output and not a transcription of the fort code under test.
-// One mechanical change is made to it: this suite emits one expression at a
-// time, so the temporaries are renumbered from `%t0` and the labels from
-// `%L0`, which is what the emitter produces when the expression is the first
-// one of a function. The file, line and column of a failure call are the
-// ones stage1 wrote, so D11.4's position rule -- the operator's token -- is
-// asserted with them.
+// Where the expected text comes from. Every block below was read off `fort -S`
+// run by stage1 -- the C emitter this module transliterates -- over a program
+// whose body is the one the test writes, and is therefore the C compiler's own
+// output and not a transcription of the fort code under test. One mechanical
+// change is made to it: this suite emits one expression at a time, so the
+// temporaries are renumbered from `%t0` and the labels from `%L0`, which is what
+// the emitter produces when the expression is the first one of a function. The
+// file, line and column of a failure call are the ones stage1 wrote, so the
+// position rule -- the operator's token -- is asserted with them.
+// D11.4
 //
 // The other reason the text is asserted at all: no language run test can see
 // which overflow intrinsic was chosen, only that a program traps, and a
@@ -80,7 +80,8 @@ string B_U32 = "    u32 mut b = 4;";
 string LOAD_A = "  %t0 = load i32, ptr %a.0, align 4\n";
 string LOAD_B = "  %t1 = load i32, ptr %b.1, align 4\n";
 
-// ---- D4.6: a folded constant ----------------------------------------------------------
+// ---- a folded constant ----------------------------------------------------------------
+// D4.6
 
 fn void a_constant_expression_is_a_literal_and_emits_nothing() {
     gen_env.env mut e = gen_env.env{};
@@ -88,8 +89,9 @@ fn void a_constant_expression_is_a_literal_and_emits_nothing() {
     defer gen_env.close(&e);
     assert(open3(&e, A_I32, B_I32, "    i32 mut c = 2 + 3;"));
     gen.gen_val v = gen_env.emit_value(&e, "c");
-    // A constant expression has no side effects, so it is emitted as a
-    // literal and no instruction stands for it (D4.6).
+    // A constant expression has no side effects, so it is emitted as a literal
+    // and no instruction stands for it.
+    // D4.6
     gen_env.expect_text(gen_env.body(&e), "");
     gen_env.expect_text(v.ty, "i32");
     gen_env.expect_text(v.val, "5");
@@ -120,8 +122,9 @@ fn void a_checked_add_is_an_intrinsic_two_extracts_and_a_branch() {
                       "  %t3 = extractvalue { i32, i1 } %t2, 0\n",
                       "  %t4 = extractvalue { i32, i1 } %t2, 1\n",
                       "  br i1 %t4, label %L1, label %L0\n\nL0:\n"));
-    // D11.4: the failure is reported at the operator's token, which is line 4
-    // column 19 of the module check_body built.
+    // The failure is reported at the operator's token, which is line 4 column 19
+    // of the module check_body built.
+    // D11.4
     gen_env.expect_text(
         gen_env.fail(&e),
         gen_env.join3(&e, "\nL1:\n",
@@ -150,7 +153,8 @@ fn void an_unsigned_subtract_takes_the_unsigned_intrinsic_at_its_own_width() {
     // The `usub` family is the fourth of the six, so `u8` is slot
     // 2 + 4 * 4 + 0.
     assert(gen.gen_uses_intrinsic(&e.g, gen.IN_OVERFLOW_FIRST + gen.OVF_USUB * gen.OVF_WIDTHS));
-    // A wrapping operator is a plain instruction in both build modes (D11.2).
+    // A wrapping operator is a plain instruction in both build modes.
+    // D11.2
     gen_env.emit_value(&e, "c");
     gen_env.expect_text(
         gen_env.body(&e),
@@ -164,8 +168,9 @@ fn void release_mode_emits_the_plain_instruction() {
     defer gen_env.close(&e);
     assert(open3(&e, A_I32, B_I32, "    i32 mut c = a + b;"));
     gen_env.emit_value(&e, "c");
-    // D11.1, D16: wrapping is defined in release mode, so neither `nsw` nor
-    // `nuw` is ever emitted and no failure block stands beside it.
+    // Wrapping is defined in release mode, so neither `nsw` nor `nuw` is ever
+    // emitted and no failure block stands beside it.
+    // D11.1, D16
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join3(&e, LOAD_A, LOAD_B, "  %t2 = add i32 %t0, %t1\n"));
     gen_env.expect_text(gen_env.fail(&e), "");
@@ -178,8 +183,9 @@ fn void a_signed_division_checks_the_divisor_and_the_overflow() {
     defer gen_env.close(&e);
     assert(open3(&e, A_I32, B_I32, "    i32 mut c = a / b;"));
     gen_env.emit_value(&e, "c");
-    // D6.13: both checks hold in both build modes, and `MIN / -1` is one of
-    // them at every width.
+    // Both checks hold in both build modes, and `MIN / -1` is one of them at
+    // every width.
+    // D6.13
     gen_env.expect_text(
         gen_env.body(&e),
         gen_env.join8(&e, LOAD_A, LOAD_B, "  %t2 = icmp eq i32 %t1, 0\n",
@@ -203,8 +209,9 @@ fn void an_unsigned_remainder_checks_the_divisor_alone() {
     defer gen_env.close(&e);
     assert(open3(&e, A_U32, B_U32, "    u32 mut c = a % b;"));
     gen_env.emit_value(&e, "c");
-    // An unsigned type has no smallest value to overflow, so only the divisor
-    // is checked (D6.13).
+    // An unsigned type has no smallest value to overflow, so only the divisor is
+    // checked.
+    // D6.13
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join5(&e, LOAD_A, LOAD_B, "  %t2 = icmp eq i32 %t1, 0\n",
                                       "  br i1 %t2, label %L1, label %L0\n\nL0:\n",
@@ -223,9 +230,9 @@ fn void a_shift_count_is_checked_at_64_bits_and_truncated_back() {
     assert(open3(&e, A_U32, B_U32, "    u32 mut c = a >> b;"));
     gen_env.emit_value(&e, "c");
     // Item 15: the count is materialized at 64 bits so that a negative one is
-    // reported with its signed value, and truncated afterwards so that the
-    // shift never produces poison (D6.2, D11.1). `>>` is logical for an
-    // unsigned operand.
+    // reported with its signed value, and truncated afterwards so that the shift
+    // never produces poison. `>>` is logical for an unsigned operand.
+    // D6.2, D11.1
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join6(&e, LOAD_A, LOAD_B, "  %t2 = zext i32 %t1 to i64\n",
                                       "  %t3 = icmp uge i64 %t2, 32\n",
@@ -248,8 +255,9 @@ fn void release_mode_takes_the_shift_count_modulo_the_width() {
     defer gen_env.close(&e);
     assert(open3(&e, A_U32, B_U32, "    u32 mut c = a >> b;"));
     gen_env.emit_value(&e, "c");
-    // D11.1: release mode masks the count instead of checking it, and the
-    // shift still never produces poison.
+    // Release mode masks the count instead of checking it, and the shift still
+    // never produces poison.
+    // D11.1
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join6(&e, LOAD_A, LOAD_B, "  %t2 = zext i32 %t1 to i64\n",
                                       "  %t3 = and i64 %t2, 31\n",
@@ -258,7 +266,8 @@ fn void release_mode_takes_the_shift_count_modulo_the_width() {
     gen_env.expect_text(gen_env.fail(&e), "");
 }
 
-// ---- D6.2 and D3.7: comparisons ---------------------------------------------------------
+// ---- comparisons ------------------------------------------------------------------------
+// D6.2, D3.7
 
 fn void a_relational_operator_carries_the_signedness_in_the_instruction() {
     gen_env.env mut e = gen_env.env{};
@@ -266,7 +275,8 @@ fn void a_relational_operator_carries_the_signedness_in_the_instruction() {
     defer gen_env.close(&e);
     assert(open3(&e, A_I32, B_I32, "    bool mut c = a < b;"));
     gen.gen_val v = gen_env.emit_value(&e, "c");
-    // D3.1: signedness is in the instruction and never in the type.
+    // Signedness is in the instruction and never in the type.
+    // D3.1
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join3(&e, LOAD_A, LOAD_B, "  %t2 = icmp slt i32 %t0, %t1\n"));
     gen_env.expect_text(v.ty, "i1");
@@ -286,10 +296,11 @@ fn void two_strings_are_compared_by_the_runtime() {
     assert(open3(&e, "    string mut s = \"hi\";", "    i32 mut n = 0;",
                  "    bool mut c = s == \"hi\";"));
     gen_env.emit_value(&e, "c");
-    // D3.7, D9.8: the comparison is a runtime entry point, since the compiler
-    // emits no call to a C library symbol of its own accord. The entry point
-    // is `fn bool str_eq(...)`, so the result is `zeroext i1` and needs no
-    // narrowing (items 2, 7, D9.9).
+    // The comparison is a runtime entry point, since the compiler emits no call
+    // to a C library symbol of its own accord. The entry point is `fn bool
+    // str_eq(...)`, so the result is `zeroext i1` and needs no narrowing (items
+    // 2, 7).
+    // D3.7, D9.8, D9.9
     gen_env.expect_text(
         gen_env.body(&e),
         gen_env.join6(&e, "  %t0 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 0\n",
@@ -307,7 +318,8 @@ fn void an_unequal_string_comparison_inverts_the_answer() {
     assert(open3(&e, "    string mut s = \"hi\";", "    i32 mut n = 0;",
                  "    bool mut c = s != \"hi\";"));
     gen_env.emit_value(&e, "c");
-    // `!=` is the same call and one `xor` (D3.7).
+    // `!=` is the same call and one `xor`.
+    // D3.7
     string text = gen_env.body(&e);
     assert(text.len > 0);
     gen_env.expect_text(text[text.len - 25..], "  %t5 = xor i1 %t4, true\n");
@@ -319,8 +331,9 @@ fn void a_short_circuit_goes_through_a_slot_and_never_a_phi() {
     defer gen_env.close(&e);
     assert(open3(&e, A_I32, B_I32, "    bool mut c = a < b && b < a;"));
     gen_env.emit_value(&e, "c");
-    // Item 10, D19.4: the answer lands in a `%tmpK` slot, so the tree walk
-    // never has to know a block's predecessors.
+    // The answer lands in a `%tmpK` slot, so the tree walk never has to know a
+    // block's predecessors (item 10).
+    // D19.4
     gen_env.expect_text(gen_env.allocas(&e), "  %tmp0 = alloca i8, align 1\n");
     gen_env.join8(&e, LOAD_A, LOAD_B,
                   "  %t2 = icmp slt i32 %t0, %t1\n  %t3 = zext i1 %t2 to i8\n",
@@ -367,8 +380,8 @@ fn void a_pointer_cast_emits_nothing_and_a_mixed_one_converts() {
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join2(&e, "  %t0 = load ptr, ptr %p.1, align 8\n",
                                       "  %t1 = ptrtoint ptr %t0 to i64\n"));
-    // Nothing at all for pointer to pointer, which only drops marks
-    // (D5.4, D17.4).
+    // Nothing at all for pointer to pointer, which only drops marks.
+    // D5.4, D17.4
     gen_env.emit_value(&e, "v");
     gen_env.expect_text(gen_env.body(&e), "  %t0 = load ptr, ptr %p.1, align 8\n");
 }
@@ -388,11 +401,13 @@ fn void the_unary_operators_take_the_shapes_item_15_gives_them() {
                       "  %t2 = extractvalue { i32, i1 } %t1, 0\n",
                       "  %t3 = extractvalue { i32, i1 } %t1, 1\n",
                       "  br i1 %t3, label %L1, label %L0\n\nL0:\n"));
-    // `~x` is `x ^ -1` and never overflows (D6.2).
+    // `~x` is `x ^ -1` and never overflows.
+    // D6.2
     gen_env.emit_value(&e, "c");
     gen_env.expect_text(gen_env.body(&e), gen_env.join2(&e, LOAD_A, "  %t1 = xor i32 %t0, -1\n"));
-    // `&e` is the address of the place `e` designates, which for a local is
-    // its slot: no instruction stands for it (D6.7).
+    // `&e` is the address of the place `e` designates, which for a local is its
+    // slot: no instruction stands for it.
+    // D6.7
     gen.gen_val addr = gen_env.emit_value(&e, "p");
     gen_env.expect_text(gen_env.body(&e), "");
     gen_env.expect_text(addr.ty, "ptr");
@@ -405,7 +420,8 @@ fn void a_dereference_reads_the_storage_the_pointer_designates() {
     defer gen_env.close(&e);
     assert(open3(&e, A_I32, "    i32 mut* mut p = &a;", "    i32 mut c = *p;"));
     gen_env.emit_value(&e, "c");
-    // D6.7: the pointer is loaded and the storage it reaches is read.
+    // The pointer is loaded and the storage it reaches is read.
+    // D6.7
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join2(&e, "  %t0 = load ptr, ptr %p.1, align 8\n",
                                       "  %t1 = load i32, ptr %t0, align 4\n"));
@@ -417,7 +433,8 @@ fn void a_negation_of_a_bool_is_an_exclusive_or_with_true() {
     defer gen_env.close(&e);
     assert(open3(&e, "    bool mut t = true;", "    i32 mut n = 0;", "    bool mut c = !t;"));
     gen_env.emit_value(&e, "c");
-    // D19.2: the place holds an `i8` and the value is an `i1`.
+    // The place holds an `i8` and the value is an `i1`.
+    // D19.2
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join3(&e, "  %t0 = load i8, ptr %t.0, align 1\n",
                                       "  %t1 = trunc i8 %t0 to i1\n",
@@ -430,9 +447,10 @@ fn void the_two_short_circuit_operators_branch_the_other_way_round() {
     defer gen_env.close(&e);
     assert(open3(&e, A_I32, B_I32, "    bool mut c = a < b || b < a;"));
     gen_env.emit_value(&e, "c");
-    // The arm order is the whole of the rule: `&&` runs the right operand
-    // when the left is true and `||` when it is false, so the two labels are
-    // the same two in the other order (D6.2).
+    // The arm order is the whole of the rule: `&&` runs the right operand when
+    // the left is true and `||` when it is false, so the two labels are the same
+    // two in the other order.
+    // D6.2
     gen_env.join8(&e, LOAD_A, LOAD_B,
                   "  %t2 = icmp slt i32 %t0, %t1\n  %t3 = zext i1 %t2 to i8\n",
                   "  store i8 %t3, ptr %tmp0, align 1\n",
@@ -445,11 +463,12 @@ fn void the_two_short_circuit_operators_branch_the_other_way_round() {
                         gen_env.join_more(&e, "  %t9 = trunc i8 %t8 to i1\n"));
 }
 
-// `cond ? a : b` (D6.6): the condition branches to one arm or the other, each
-// arm writes into one slot and the continuation reads it back, so only the
-// arm the condition selects is evaluated. The slot is the same answer `&&`
-// and `||` give, and for the same reason: the tree walk never has to know a
-// block's predecessors (item 10, D19.4).
+// `cond ? a: b`: the condition branches to one arm or the other, each arm writes
+// into one slot and the continuation reads it back, so only the arm the
+// condition selects is evaluated. The slot is the same answer `&&` and `||`
+// give, and for the same reason: the tree walk never has to know a block's
+// predecessors (item 10).
+// D6.6, D19.4
 fn void a_conditional_evaluates_one_arm_into_a_slot() {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -467,9 +486,10 @@ fn void a_conditional_evaluates_one_arm_into_a_slot() {
                         gen_env.join_more(&e, "  %t5 = load i32, ptr %tmp0, align 4\n"));
 }
 
-// An aggregate arm writes into the destination place itself, so the
-// conditional asks for no temporary of its own: the two arms build the two
-// header fields of the `string` in the local's own slot (D19.3, D3.7).
+// An aggregate arm writes into the destination place itself, so the conditional
+// asks for no temporary of its own: the two arms build the two header fields of
+// the `string` in the local's own slot.
+// D19.3, D3.7
 fn void an_aggregate_conditional_writes_into_the_destination() {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -502,8 +522,9 @@ fn void a_bool_widens_to_an_integer_and_stays_itself_as_a_bool() {
                         gen_env.join3(&e, "  %t0 = load i8, ptr %t.0, align 1\n",
                                       "  %t1 = trunc i8 %t0 to i1\n",
                                       "  %t2 = zext i1 %t1 to i32\n"));
-    // And nothing at all for `cast(b, bool)`, the identity of D3.14, which
-    // would otherwise be a `zext i1` to `i1`.
+    // And nothing at all for `cast(b, bool)`, the identity, which would
+    // otherwise be a `zext i1` to `i1`.
+    // D3.14
     gen.gen_val v = gen_env.emit_value(&e, "v");
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join2(&e, "  %t0 = load i8, ptr %t.0, align 1\n",
@@ -524,14 +545,15 @@ fn void a_function_name_is_its_address_and_loads_from_nothing() {
     strbuf.append(&b, "enum color {\n    red,\n}\n");
     assert(gen_env.open_src(&e, strbuf.view(&b)));
     gen.gen_val f = gen_env.emit_value(&e, "f");
-    // D3.10: a function pointer is an ordinary `ptr` value and the name alone
-    // denotes it, so there is no storage to load from.
+    // A function pointer is an ordinary `ptr` value and the name alone denotes
+    // it, so there is no storage to load from.
+    // D3.10
     gen_env.expect_text(gen_env.body(&e), "");
     gen_env.expect_text(f.ty, "ptr");
     gen_env.expect_text(f.val, "@\"main.add\"");
-    // D3.9, D6.5: `{}` on a scalar is its zero value, which the checker
-    // allows for an enum alone -- a zeroed enum holds 0 even when 0 is not a
-    // member.
+    // `{}` on a scalar is its zero value, which the checker allows for an enum
+    // alone -- a zeroed enum holds 0 even when 0 is not a member.
+    // D3.9, D6.5
     gen.gen_val k = gen_env.emit_value(&e, "k");
     gen_env.expect_text(gen_env.body(&e), "");
     gen_env.expect_text(k.ty, "i32");
@@ -539,11 +561,12 @@ fn void a_function_name_is_its_address_and_loads_from_nothing() {
 }
 
 fn void a_source_offset_clamps_and_never_traps() {
-    // `assert` quotes its argument out of the module's source by position
-    // (D11.4), so the offset of a position is arithmetic on a one-based
-    // column. A zero column is possible in a range the parser did not fill,
-    // and the subtraction is the wrapping one C gets for free: a checked one
-    // would abort the compiler where the clamp absorbs it (D11.1, D11.2).
+    // `assert` quotes its argument out of the module's source by position, so
+    // the offset of a position is arithmetic on a one-based column. A zero
+    // column is possible in a range the parser did not fill, and the subtraction
+    // is the wrapping one C gets for free: a checked one would abort the
+    // compiler where the clamp absorbs it.
+    // D11.4, D11.1, D11.2
     assert(gen_expr.source_offset("ab\ncd", 1, 1) == 0);
     assert(gen_expr.source_offset("ab\ncd", 2, 1) == 3);
     assert(gen_expr.source_offset("ab\ncd", 2, 2) == 4);

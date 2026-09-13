@@ -16,16 +16,17 @@ import std.str;
 import std.strbuf;
 
 // The float half of the emitter: the constants of item 5, the arithmetic and
-// the comparisons of D6.12, the conversions of item 12 and the print family
-// of item 19.
+// the comparisons, the conversions of item 12 and the print family of item 19.
+// D6.12
 //
 // Where the expected text comes from, and why it is not stage1's. Every other
 // emitter suite reads its expectations off `fort -S` run by stage1, the C
 // emitter src/fort transliterates. stage1 rejects floats, so there is no such
 // output to read: the text below is what toolchain.md 6 states -- item 12's
-// cast table with the worked `llvm.fptosi.sat` line, item 15's ban on
-// fast-math flags, item 19's print routing and item 5's constant form -- and
-// D6.12's NaN rule, one assertion per rule.
+// cast table with the worked `llvm.fptosi.sat` line, item 15's ban on fast-math
+// flags, item 19's print routing and item 5's constant form -- and the NaN
+// rule, one assertion per rule.
+// D6.12
 //
 // Why the text is asserted at all. No run test can see which fcmp predicate
 // was chosen unless the program compares a NaN, no run test can see a
@@ -45,13 +46,15 @@ string LOAD_A32 = "  %t0 = load float, ptr %a.0, align 4\n";
 string LOAD_B32 = "  %t1 = load float, ptr %b.1, align 4\n";
 
 // The signature of the function the case below emits, on a line of its own
-// because a `.ft` line is 100 columns and fort joins no two literals (D2.9).
+// because a `.ft` line is 100 columns and fort joins no two literals.
+// D2.9
 string DEFINE_NARROW =
     "define dso_local float @\"main.narrow\"(double %a.in, float %b.in, i8 signext %c.in) #0 {\n";
 
-// The eight fast-math flags of LLVM, which no float instruction may carry
-// (D6.12, D16, item 15). `contract` and `afn` are among them, so a module
-// that holds none of these words holds no fast-math flag at all.
+// The eight fast-math flags of LLVM, which no float instruction may carry (item
+// 15). `contract` and `afn` are among them, so a module that holds none of
+// these words holds no fast-math flag at all.
+// D6.12, D16
 string[8] FAST_MATH = {"fast", "nnan", "ninf", "nsz", "arcp", "contract", "afn", "reassoc"};
 
 fn bool open3(gen_env.env mut* e, string one, string two, string three) {
@@ -129,9 +132,10 @@ fn void an_f32_constant_is_a_binary64_the_type_holds_exactly() {
 }
 
 // The same for a constant folded from an expression, and for an integer
-// constant the context gave a float type (D4.2, D4.4).
-// A constant value of the local `name`, asserted as a type and a text: the
-// sandbox is its own, as in the probes above.
+// constant the context gave a float type. A constant value of the local `name`,
+// asserted as a type and a text: the sandbox is its own, as in the probes
+// above.
+// D4.2, D4.4
 fn void want_const(string one, string two, string three, string name, string ty, string val) {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -146,8 +150,9 @@ fn void want_const(string one, string two, string three, string name, string ty,
 fn void a_folded_expression_and_an_integer_take_the_float_form() {
     want_const(A_F64, B_F64, "    f64 mut c = 1.0 / 3.0;", "c", "double",
                "0x3FD5555555555555");
-    // An untyped integer takes the float type of its context and is emitted
-    // in the float form (D4.2).
+    // An untyped integer takes the float type of its context and is emitted in
+    // the float form.
+    // D4.2
     want_const(A_F64, B_F64, "    f64 mut c = 7;", "c", "double", "0x401C000000000000");
     want_const(A_F32, B_F32, "    f32 mut c = 3;", "c", "float", "0x4008000000000000");
 }
@@ -159,11 +164,13 @@ fn void constants() {
     println("constants ok");
 }
 
-// ---- D6.12: the four operations --------------------------------------------------
+// ---- the four operations ---------------------------------------------------------
+// D6.12
 
-// `+ - * /` on floats are fadd, fsub, fmul and fdiv, with no check of any
-// kind: nothing traps, so the overflow intrinsics of item 15 and the division
-// check of D6.13 have no float form. No instruction carries a fast-math flag.
+// `+ - * /` on floats are fadd, fsub, fmul and fdiv, with no check of any kind:
+// nothing traps, so the overflow intrinsics of item 15 and the division check
+// have no float form. No instruction carries a fast-math flag.
+// D6.13
 fn void the_four_operations_are_the_f_instructions() {
     probe3(A_F64, B_F64, "    f64 mut c = a + b;", "c", LOAD_A, LOAD_B,
            "  %t2 = fadd double %t0, %t1\n");
@@ -175,9 +182,10 @@ fn void the_four_operations_are_the_f_instructions() {
            "  %t2 = fdiv double %t0, %t1\n");
 }
 
-// A division by zero emits the bare instruction: no comparison against zero
-// and no failure block, since the result is an infinity or a NaN and never a
-// trap (D6.12), where an integer division checks in both modes (D6.13).
+// A division by zero emits the bare instruction: no comparison against zero and
+// no failure block, since the result is an infinity or a NaN and never a trap,
+// where an integer division checks in both modes.
+// D6.12, D6.13
 fn void a_float_division_has_no_zero_check() {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -198,7 +206,8 @@ fn void the_same_four_in_binary32() {
 }
 
 // Unary minus is `fneg` and not a subtraction from zero: the two differ on a
-// zero and on the sign bit of a NaN (D6.12).
+// zero and on the sign bit of a NaN.
+// D6.12
 fn void unary_minus_is_fneg() {
     probe2(A_F64, B_F64, "    f64 mut c = -a;", "c", LOAD_A, "  %t1 = fneg double %t0\n");
     probe2(A_F32, B_F32, "    f32 mut c = -a;", "c", LOAD_A32, "  %t1 = fneg float %t0\n");
@@ -212,7 +221,8 @@ fn void arithmetic() {
     println("arithmetic ok");
 }
 
-// ---- D6.12: the comparisons ------------------------------------------------------
+// ---- the comparisons -------------------------------------------------------------
+// D6.12
 
 // `==` is `oeq` and `!=` is `une`, which is the pair that makes NaN != NaN
 // true and NaN == NaN false; `one` in place of `une` would answer false for
@@ -224,8 +234,9 @@ fn void equality_is_oeq_and_inequality_is_une() {
            "  %t2 = fcmp une double %t0, %t1\n");
 }
 
-// The four orderings are the ordered predicates, so every comparison with a
-// NaN is false whichever way it is written (D6.12).
+// The four orderings are the ordered predicates, so every comparison with a NaN
+// is false whichever way it is written.
+// D6.12
 fn void the_orderings_are_ordered_predicates() {
     probe3(A_F64, B_F64, "    bool mut c = a < b;", "c", LOAD_A, LOAD_B,
            "  %t2 = fcmp olt double %t0, %t1\n");
@@ -248,7 +259,8 @@ fn void comparisons() {
 // ---- item 12: the conversions ----------------------------------------------------
 
 // Between the two float types: `fptrunc` down and `fpext` up, and nothing at
-// all for the identity (D3.14).
+// all for the identity.
+// D3.14
 fn void the_float_types_convert_with_fptrunc_and_fpext() {
     probe2(A_F64, B_F64, "    f32 mut c = cast(a, f32);", "c", LOAD_A,
            "  %t1 = fptrunc double %t0 to float\n");
@@ -270,10 +282,10 @@ fn void an_integer_converts_with_sitofp_or_uitofp() {
                         "  %t1 = sitofp i16 %t0 to float\n");
 }
 
-// A float to an integer is the saturating intrinsic and never a plain
-// `fptosi`, which would be poison out of range where D3.14 asks for
-// truncation toward zero, saturation at the target's range, 0 for a NaN and
-// no trap (D19.2).
+// A float to an integer is the saturating intrinsic and never a plain `fptosi`,
+// which would be poison out of range where the cast rule asks for truncation
+// toward zero, saturation at the target's range, 0 for a NaN and no trap.
+// D3.14, D19.2
 fn void a_float_to_an_integer_is_the_saturating_intrinsic() {
     // The slot of each is the family of item 8's order at the target width,
     // counting from IN_FPCONV_FIRST: fptosi from f32, fptosi from f64, fptoui
@@ -302,7 +314,8 @@ fn void casts() {
 // ---- item 19: the print family ---------------------------------------------------
 
 // A float goes to the printer of its own type and is never widened first: the
-// digits printed depend on the type (D11.7, D18.1).
+// digits printed depend on the type.
+// D11.7, D18.1
 fn void want_print(string one, string two, string three, string x1, string x2) {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -319,7 +332,8 @@ fn void a_float_prints_through_the_entry_point_of_its_type() {
 }
 
 // A float constant argument prints as the literal itself, with no slot and no
-// load (D4.6).
+// load.
+// D4.6
 fn void a_constant_argument_prints_as_a_literal() {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -339,7 +353,8 @@ fn void printing() {
 
 // A float parameter and a float result carry no extension attribute: item 7
 // gives `zeroext` and `signext` to the narrow integers alone, and a float is
-// already the width its type says (D9.9, D19.2).
+// already the width its type says.
+// D9.9, D19.2
 fn void a_float_signature_carries_no_extension_attribute() {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -367,8 +382,9 @@ fn void a_float_signature_carries_no_extension_attribute() {
 
 // ---- the module ------------------------------------------------------------------
 
-// A float global is a `double` or a `float` with the alignment of its type
-// (D3.1), and its initializer is the constant's own form (item 5).
+// A float global is a `double` or a `float` with the alignment of its type, and
+// its initializer is the constant's own form (item 5).
+// D3.1
 fn void a_float_global_holds_its_constant() {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -385,7 +401,8 @@ fn void a_float_global_holds_its_constant() {
 
 // An aggregate of floats is written out element by element, and only an
 // aggregate of positive zeros is a `zeroinitializer`: -0.0 has its sign bit
-// set, so a zeroinitializer would lose it (item 5, D6.12).
+// set, so a zeroinitializer would lose it (item 5).
+// D6.12
 fn void a_float_aggregate_is_zeroinitializer_only_for_positive_zeros() {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -431,10 +448,11 @@ fn void the_conversion_intrinsics_are_declared_in_the_order_of_item_8() {
     assert(str.find(text, "attributes #4 = { nocallback") >= 0);
 }
 
-// No float instruction carries a fast-math flag, since floats are IEEE 754
-// and the optimizer may not reassociate them (D6.12, D16, item 15). The
-// module below holds every float instruction the emitter writes, and none of
-// the eight flag names appears anywhere in it.
+// No float instruction carries a fast-math flag, since floats are IEEE 754 and
+// the optimizer may not reassociate them (item 15). The module below holds
+// every float instruction the emitter writes, and none of the eight flag names
+// appears anywhere in it.
+// D6.12, D16
 fn void no_float_instruction_carries_a_fast_math_flag() {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);

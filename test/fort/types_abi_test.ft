@@ -9,10 +9,11 @@ import prim;
 import types;
 import types_env;
 
-// The one silent failure mode of D3.8: the compiler computes struct layout
-// itself and a disagreement neither fails to compile nor fails a language test
-// -- it reads the wrong bytes at the only boundary that can see it, which is
-// pointer-based C interop (D9.9).
+// The one silent failure mode: the compiler computes struct layout itself and
+// a disagreement neither fails to compile nor fails a language test -- it
+// reads the wrong bytes at the only boundary that can see it, which is
+// pointer-based C interop.
+// D3.8, D9.9
 //
 // test/types_abi_test.c writes every struct twice, once as the field list
 // `type_layout_struct` lays out and once as the C struct it must equal, and
@@ -21,17 +22,19 @@ import types_env;
 // believed. This port keeps that shape with the mirror written in fort, so the
 // oracle is the layout stage1 computed for a declared struct -- the C
 // bootstrap's own layout engine, which is the module under test's original --
-// read through `sizeof` (D3.15) and through the address of each field. Two
-// independent implementations of D3.8 therefore have to agree, and no offset
-// below is written by hand.
+// read through `sizeof` and through the address of each field. Two independent
+// implementations therefore have to agree, and no offset below is written by
+// hand.
+// D3.15, D3.8
 //
 // Two gaps this shape cannot close, both covered elsewhere. Floats have no
 // spelling in the bootstrap subset (test/lang/bootstrap-unsupported.txt), so
-// the `f64` field of `rec` is mirrored by an `i64`, which D3.1 gives the same
-// size and alignment, and the sizes of `f32` and `f64` themselves are held in
-// types_layout_test.ft. And fort has no `alignof` (D3.15), so an alignment is
-// read as the offset a leading `u8` pushes the value to, which is what the
-// alignment does.
+// the `f64` field of `rec` is mirrored by an `i64`, which has the same size
+// and alignment, and the sizes of `f32` and `f64` themselves are held in
+// types_layout_test.ft. And fort has no `alignof`, so an alignment is read as
+// the offset a leading `u8` pushes the value to, which is what the alignment
+// does.
+// D3.1, D3.15
 
 // struct rec { u8 tag; i32 n; u16 k; f64 x; } (type-system.md 4.1), with the
 // float mirrored by an i64.
@@ -65,8 +68,8 @@ struct grid_mirror {
     u8 tag;
 }
 
-// `bool` is `i1` in a value and `i8` in memory (D19.2), so in a struct it is a
-// byte.
+// `bool` is `i1` in a value and `i8` in memory, so in a struct it is a byte.
+// D19.2
 struct flags_mirror {
     bool on;
     i32 n;
@@ -90,7 +93,8 @@ struct refs_mirror {
     void* opaque;
 }
 
-// An enum's underlying type is `i32` and its size 4 (D3.9).
+// An enum's underlying type is `i32` and its size 4.
+// D3.9
 enum colour_mirror {
     red,
     green,
@@ -103,8 +107,9 @@ struct tagged_mirror {
     i64 big;
 }
 
-// `char` is an unsigned byte (D3.2); the `f32` of the C mirror is an `i32`
-// here, which D3.1 gives the same size and alignment.
+// `char` is an unsigned byte; the `f32` of the C mirror is an `i32` here,
+// which has the same size and alignment.
+// D3.2, D3.1
 struct narrow_mirror {
     char first;
     i32 weight;
@@ -157,7 +162,8 @@ struct align_narrow {
 }
 
 // The byte offset of a field, from the two addresses: a pointer casts to `u64`
-// and to no other integer type (D3.14).
+// and to no other integer type.
+// D3.14
 fn u64 offset_of(void* base, void* field) {
     return cast(field, u64) - cast(base, u64);
 }
@@ -204,8 +210,9 @@ fn void rec_has_the_offsets_and_sizeof_of_its_mirror() {
                    offset_of(cast(&probe, void*), cast(&probe.value, void*))));
 }
 
-// The size passes the last field, because C rounds it up to the alignment
-// (D3.8): a copy that stopped at the last byte written would lose it.
+// The size passes the last field, because C rounds it up to the alignment: a
+// copy that stopped at the last byte written would lose it.
+// D3.8
 fn void a_struct_whose_largest_member_is_first_keeps_its_trailing_padding() {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -223,7 +230,8 @@ fn void a_struct_whose_largest_member_is_first_keeps_its_trailing_padding() {
 }
 
 // The fields occupy five bytes and the element strides by eight, which is what
-// an array of the mirror does (D3.4, D3.8).
+// an array of the mirror does.
+// D3.4, D3.8
 fn void an_array_strides_by_the_padded_size_of_its_element_struct() {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -244,7 +252,8 @@ fn void an_array_strides_by_the_padded_size_of_its_element_struct() {
 }
 
 // The inner struct's alignment is the outer one's, so the field is pushed past
-// seven bytes of padding (D3.8).
+// seven bytes of padding.
+// D3.8
 fn void a_nested_struct_field_lands_where_the_mirror_puts_it() {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -288,8 +297,9 @@ fn void a_struct_holding_an_array_of_structs_matches_the_mirror() {
     assert(types.type_sizeof(s) == sizeof(grid_mirror));
 }
 
-// `bool` is `i1` in a value and one byte in memory (D19.2), so it pads like a
-// `u8` and never like an `i32`.
+// `bool` is `i1` in a value and one byte in memory, so it pads like a `u8` and
+// never like an `i32`.
+// D19.2
 fn void a_bool_field_occupies_the_byte_the_mirror_gives_it() {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -309,8 +319,9 @@ fn void a_bool_field_occupies_the_byte_the_mirror_gives_it() {
                    offset_of(cast(&probe, void*), cast(&probe.value, void*))));
 }
 
-// A span or `string` is one hidden pointer and is never split into two scalars
-// (D9.9), so each field is one two-word header.
+// A span or `string` is one hidden pointer and is never split into two
+// scalars, so each field is one two-word header.
+// D9.9
 fn void a_span_and_a_string_field_are_one_two_word_header_each() {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -350,9 +361,10 @@ fn void pointer_and_function_pointer_fields_match_the_mirror() {
     assert(types.type_sizeof(s) == sizeof(refs_mirror));
 }
 
-// An enum is `i32` and 4 bytes (D3.9), so a field of one pads like an `i32`:
-// laid out as anything wider it would move the field after it and the struct's
-// size with it.
+// An enum is `i32` and 4 bytes, so a field of one pads like an `i32`: laid out
+// as anything wider it would move the field after it and the struct's size
+// with it.
+// D3.9
 fn void an_enum_field_is_four_bytes_wide() {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -371,8 +383,9 @@ fn void an_enum_field_is_four_bytes_wide() {
     assert(sizeof(colour_mirror) == 4);
 }
 
-// `char` is an unsigned byte (D3.2), so the 4-byte field after it is aligned
-// and the byte after that one is not.
+// `char` is an unsigned byte, so the 4-byte field after it is aligned and the
+// byte after that one is not.
+// D3.2
 fn void char_fields_match_their_mirror() {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -408,7 +421,8 @@ fn void a_struct_of_one_field_is_that_field() {
 
 // The C divergence a layout written by hand falls into: the inner struct
 // occupies five bytes of fields and eight of storage, and the field after it
-// stands at 8, because a struct's size carries its padding with it (D3.8).
+// stands at 8, because a struct's size carries its padding with it.
+// D3.8
 fn void a_field_after_a_nested_struct_stands_past_its_trailing_padding() {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -430,8 +444,9 @@ fn void a_field_after_a_nested_struct_stands_past_its_trailing_padding() {
     assert(types.type_sizeof(s) == sizeof(after_mirror));
 }
 
-// `own` is a compile-time mark and no part of the representation (D17.1), so
-// the owning form of a struct has the layout of the plain one.
+// `own` is a compile-time mark and no part of the representation, so the
+// owning form of a struct has the layout of the plain one.
+// D17.1
 fn void an_owning_field_changes_no_offset() {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);

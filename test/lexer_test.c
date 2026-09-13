@@ -1,7 +1,7 @@
-// Unit tests of lexer.h: the file, positions and comments (D2.1, D2.2,
-// D14.2), identifiers, keywords and reserved words (D2.3, D2.4), operators
-// (D2.10), the kind names and the token vector. The literal forms are in
-// lexer_literals_test.c.
+// Unit tests of lexer.h: the file, positions and comments, identifiers,
+// keywords and reserved words, operators, the kind names and the token vector.
+// The literal forms are in lexer_literals_test.c.
+// D2.1, D2.2, D14.2, D2.3, D2.4, D2.10
 #include "lexer.h"
 
 #include <stdint.h>
@@ -15,7 +15,8 @@
 // expected texts.
 // NOLINTBEGIN(readability-magic-numbers)
 
-// ---- files, whitespace and positions (D2.1, D14.2) -------------------------
+// ---- files, whitespace and positions ---------------------------------------
+// D2.1, D14.2
 
 TEST(empty_file_is_only_eof, {
     ASSERT_LEX_OK("", 0);
@@ -113,20 +114,23 @@ TEST(unexpected_control_byte_is_an_error, {
 TEST(error_position_counts_lines_columns_and_tabs, {
     ASSERT_LEX_ERROR("a\n\n\t\tb #", "t.ft:3:5: error: unexpected character '#'\n");
     // The lines before the error keep their tokens, the line of the error
-    // loses them (D14.2).
+    // loses them.
+    // D14.2
     ASSERT_TOK_COUNT(1);
     ASSERT_TOK_TEXT(0, "a");
 })
 
 // An error drops the whole line it stands on, the tokens lexed before it
 // included, and the second error of that line is never reached, so one line
-// costs one diagnostic (D14.2).
+// costs one diagnostic.
+// D14.2
 TEST(an_error_drops_its_line_and_reports_once, {
     ASSERT_LEX_ERROR("a b # c #", "t.ft:1:5: error: unexpected character '#'\n");
     ASSERT_TOK_COUNT(0);
 })
 
-// ---- resynchronisation after a lexical error (D14.2) ----------------------
+// ---- resynchronisation after a lexical error ------------------------------
+// D14.2
 
 // The four tokens of `x = 1;` on line `l` are all the file lexed: the line
 // every resync test below resumes on.
@@ -140,8 +144,9 @@ TEST(an_error_drops_its_line_and_reports_once, {
         ASSERT_TOK_POS(0, (l), 1);                                                                 \
     } while (0)
 
-// Every kind of lexical error costs its line alone: the line after it is
-// lexed as though nothing had happened (D14.2).
+// Every kind of lexical error costs its line alone: the line after it is lexed
+// as though nothing had happened.
+// D14.2
 TEST(every_error_kind_resumes_at_the_next_line, {
     ASSERT_LEX_ERROR("#\nx = 1;\n", "t.ft:1:1: error: unexpected character '#'\n");
     ASSERT_RESUMED_LINE(2);
@@ -158,7 +163,8 @@ TEST(every_error_kind_resumes_at_the_next_line, {
 })
 
 // The same for the literal forms: a bad number, a bad escape and a literal
-// left open at the end of its line (D2.5, D2.8, D2.9).
+// left open at the end of its line.
+// D2.5, D2.8, D2.9
 TEST(a_broken_literal_resumes_at_the_next_line, {
     ASSERT_LEX_ERROR("i32 y = 08;\nx = 1;\n",
                      "t.ft:1:9: error: decimal literal may not start with '0'\n");
@@ -176,7 +182,8 @@ TEST(a_broken_literal_resumes_at_the_next_line, {
 })
 
 // The lines before and after a broken line keep their tokens, so the array
-// covers the file with one line missing (D14.2).
+// covers the file with one line missing.
+// D14.2
 TEST(an_error_line_stands_between_two_good_lines, {
     ASSERT_LEX_ERROR("a;\n#\nx = 1;\n", "t.ft:2:1: error: unexpected character '#'\n");
     ASSERT_TOK_COUNT(6);
@@ -187,7 +194,8 @@ TEST(an_error_line_stands_between_two_good_lines, {
 })
 
 // Two errors on two lines are both reported, and the lines between and after
-// them are lexed (D14.2).
+// them are lexed.
+// D14.2
 TEST(two_errors_on_two_lines_are_both_reported, {
     ASSERT_LEX_ERRORS("a #\nb;\nc `\nx = 1;\n",
                       2,
@@ -201,7 +209,8 @@ TEST(two_errors_on_two_lines_are_both_reported, {
 })
 
 // An error on the last line, with no newline to resume after, still ends the
-// array in a TOK_EOF at the end of the file (D14.2).
+// array in a TOK_EOF at the end of the file.
+// D14.2
 TEST(an_error_on_the_last_line_still_ends_in_eof, {
     ASSERT_LEX_ERROR("a;\nb #", "t.ft:2:3: error: unexpected character '#'\n");
     ASSERT_TOK_COUNT(2);
@@ -211,15 +220,17 @@ TEST(an_error_on_the_last_line_still_ends_in_eof, {
 })
 
 // A file that is one broken line is the TOK_EOF alone, which is what lets the
-// parser run on it (D14.2).
+// parser run on it.
+// D14.2
 TEST(a_file_of_one_broken_line_is_only_eof, {
     ASSERT_LEX_ERROR("#\n", "t.ft:1:1: error: unexpected character '#'\n");
     ASSERT_TOK_COUNT(0);
     ASSERT_TOK_POS(0, 2, 1);
 })
 
-// A string literal lexed after a resync is decoded like any other, so the
-// pool is unaffected by the dropped line (D2.9).
+// A string literal lexed after a resync is decoded like any other, so the pool
+// is unaffected by the dropped line.
+// D2.9
 TEST(a_literal_after_a_resync_is_decoded, {
     ASSERT_LEX_ERROR("s = \"ab;\nt = \"cd\";\n", "t.ft:1:5: error: unterminated string literal\n");
     ASSERT_TOK_COUNT(4);
@@ -228,8 +239,9 @@ TEST(a_literal_after_a_resync_is_decoded, {
     ASSERT_TOK_TEXT(2, "cd");
 })
 
-// A file reports at most twenty diagnostics (D14.2), and lexing goes on
-// silently past the cap, so the tokens of the lines after it are still there.
+// A file reports at most twenty diagnostics, and lexing goes on silently past
+// the cap, so the tokens of the lines after it are still there.
+// D14.2
 TEST(a_file_reports_at_most_twenty_diagnostics, {
     sb_t src;
     sb_init(&src);
@@ -243,8 +255,9 @@ TEST(a_file_reports_at_most_twenty_diagnostics, {
     sb_free(&src);
 })
 
-// A lone carriage return is whitespace (D2.1), so it ends a line for a resync
-// too: a file written with `\r` alone keeps the tokens after the bad line.
+// A lone carriage return is whitespace, so it ends a line for a resync too: a
+// file written with `\r` alone keeps the tokens after the bad line.
+// D2.1
 TEST(a_carriage_return_ends_a_resync, {
     ASSERT_LEX_ERROR("a #\rx = 1;\r", "t.ft:1:3: error: unexpected character '#'\n");
     ASSERT_TOK_COUNT(4);
@@ -253,7 +266,8 @@ TEST(a_carriage_return_ends_a_resync, {
     ASSERT_RESUMED_LINE(2);
 })
 
-// ---- comments (D2.2) -----------------------------------------------------------
+// ---- comments ------------------------------------------------------------------
+// D2.2
 
 TEST(line_comment_runs_to_the_end_of_the_line, {
     ASSERT_LEX_OK("a // b c \"d\" /* e\nf", 2);
@@ -316,7 +330,8 @@ TEST(comment_markers_inside_a_line_comment_are_text, {
     ASSERT_LEX_OK("x // //\n", 1);
 })
 
-// ---- identifiers, keywords and reserved words (D2.3, D2.4) -------------------
+// ---- identifiers, keywords and reserved words --------------------------------
+// D2.3, D2.4
 
 TEST(identifier_forms, {
     ASSERT_LEX_OK("_ a1 _x_ CamelCase __ a_b_c z9", 7);
@@ -433,7 +448,8 @@ TEST(a_word_extending_a_reserved_word_is_an_identifier, {
     }
 })
 
-// ---- operators and punctuation (D2.10) -----------------------------------------
+// ---- operators and punctuation -------------------------------------------------
+// D2.10
 
 TEST(every_operator_lexes_alone_as_its_kind, {
     for (int k = TOK_OP_FIRST; k <= TOK_OP_LAST; k++) {
@@ -496,8 +512,9 @@ TEST(longest_match_without_spaces, {
     ASSERT_TOK_KIND(1, TOK_DOT);
     ASSERT_LEX_OK("a..b", 3);
     ASSERT_TOK_KIND(1, TOK_DOT_DOT);
-    // The module path separator is `.` and `..` is the longer match (D2.10),
-    // so `a...b` is a range between `a.` and `b` and not three separators.
+    // The module path separator is `.` and `..` is the longer match, so
+    // `a...b` is a range between `a.` and `b` and not three separators.
+    // D2.10
     ASSERT_LEX_OK("a...b", 4);
     ASSERT_TOK_KIND(1, TOK_DOT_DOT);
     ASSERT_TOK_KIND(2, TOK_DOT);
@@ -525,7 +542,8 @@ TEST(runs_of_operator_characters_split_greedily, {
     ASSERT_LEX_OK("-->", 2);
     ASSERT_TOK_KIND(0, TOK_MINUS_MINUS);
     ASSERT_TOK_KIND(1, TOK_GT);
-    // `::` is not a token: the module path separator is `.` (D2.10, D9.1).
+    // `::` is not a token: the module path separator is `.`.
+    // D2.10, D9.1
     ASSERT_LEX_OK("::", 2);
     ASSERT_TOK_KIND(0, TOK_COLON);
     ASSERT_TOK_KIND(1, TOK_COLON);
@@ -555,7 +573,8 @@ TEST(slash_operators_beside_comments, {
 })
 
 TEST(at_lexes_as_the_span_suffix_token, {
-    // `@` is a one-byte operator token, the span suffix (D2.10, D3.5).
+    // `@` is a one-byte operator token, the span suffix.
+    // D2.10, D3.5
     ASSERT_LEX_OK("@", 1);
     ASSERT_TOK_KIND(0, TOK_AT);
     ASSERT_TOK_TEXT(0, "@");
@@ -568,7 +587,8 @@ TEST(at_lexes_as_the_span_suffix_token, {
 })
 
 TEST(at_in_a_type_lexes_beside_its_neighbours, {
-    // A span of writable bytes, `u8 mut@ mut s` (D3.5, D5.3).
+    // A span of writable bytes, `u8 mut@ mut s`.
+    // D3.5, D5.3
     ASSERT_LEX_OK("u8 mut@ mut s", 5);
     ASSERT_TOK_KIND(0, TOK_KW_U8);
     ASSERT_TOK_KIND(1, TOK_KW_MUT);
@@ -602,18 +622,21 @@ TEST(at_starts_no_longer_operator, {
 })
 
 TEST(at_inside_a_literal_or_a_comment_is_an_ordinary_byte, {
-    // A string keeps `@` as a byte of its text (D2.9).
+    // A string keeps `@` as a byte of its text.
+    // D2.9
     ASSERT_LEX_OK("\"a@b\"", 1);
     ASSERT_TOK_KIND(0, TOK_STRING);
     ASSERT_TOK_TEXT(0, "a@b");
     ASSERT_LEX_OK("\"@\"", 1);
     ASSERT_TOK_TEXT(0, "@");
-    // A char literal holds its byte value, 0x40 (D2.7).
+    // A char literal holds its byte value, 0x40.
+    // D2.7
     ASSERT_LEX_OK("'@'", 1);
     ASSERT_TOK_KIND(0, TOK_CHAR);
     TEST_ASSERT_EQ_UINT64(tok(0)->ival, (uint64_t)0x40);
     ASSERT_TOK_RANGE(0, 0, 3);
-    // A comment swallows it (D2.2).
+    // A comment swallows it.
+    // D2.2
     ASSERT_LEX_OK("a // @ @\n@", 2);
     ASSERT_TOK_KIND(0, TOK_IDENT);
     ASSERT_TOK_KIND(1, TOK_AT);
@@ -621,7 +644,8 @@ TEST(at_inside_a_literal_or_a_comment_is_an_ordinary_byte, {
 })
 
 TEST(a_statement_lexes_into_the_expected_sequence, {
-    // An owned span of writable bytes from new(T, n) (D5.3, D17.2, D10.2).
+    // An owned span of writable bytes from new(T, n).
+    // D5.3, D17.2, D10.2
     ASSERT_LEX_OK("u8 mut@ own mut s = new(u8, n +% 1);", 16);
     ASSERT_TOK_KIND(0, TOK_KW_U8);
     ASSERT_TOK_KIND(1, TOK_KW_MUT);

@@ -1,7 +1,8 @@
 // Unit tests of the `string` half of the emitter (toolchain.md 6 items 8, 16,
-// 17 and 19; D3.7): the header a literal writes, `==` and `!=` through the
-// runtime entry point of section 5.1, and the operations a `string` shares
-// with a span.
+// 17 and 19): the header a literal writes, `==` and `!=` through the runtime
+// entry point of section 5.1, and the operations a `string` shares with a
+// span.
+// D3.7
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -22,12 +23,14 @@ static const char EQ_LITERAL[] = "fn i32 main() {\n    string s = \"hello\";\n"
 static const char NE_LITERAL[] = "fn i32 main() {\n    string s = \"hello\";\n"
                                  "    println(s != \"hi\");\n    return 0;\n}\n";
 
-// ---- the header of a literal (item 17, D3.7) ---------------------------------------
+// ---- the header of a literal (item 17) ---------------------------------------------
+// D3.7
 
 TEST(a_string_literal_is_its_bytes_and_the_length_the_nul_excludes, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    string s = \"hello\";\n"
                           "    println(s.len);\n    return 0;\n}\n"));
-    // The bytes carry a trailing NUL that `len` does not count (D3.7).
+    // The bytes carry a trailing NUL that `len` does not count.
+    // D3.7
     TEST_ASSERT_EQ_STR(found("@.str.0 = private unnamed_addr constant [6 x i8] c\"hello\\00\""),
                        "@.str.0 = private unnamed_addr constant [6 x i8] c\"hello\\00\"");
     TEST_ASSERT_EQ_STR(found("  %t0 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 0\n"
@@ -53,14 +56,16 @@ TEST(an_empty_string_literal_is_one_nul_byte_and_a_zero_length, {
 TEST(the_zero_string_is_a_sixteen_byte_memset, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    string s = {};\n"
                           "    println(s.len);\n    return 0;\n}\n"));
-    // The zero value of a span or `string` is `{null, 0}` (D3.5, D3.7).
+    // The zero value of a span or `string` is `{null, 0}`.
+    // D3.5, D3.7
     TEST_ASSERT_EQ_STR(
         found("call void @llvm.memset.p0.i64(ptr align 8 %s.0, i8 0, i64 16, i1 false)"),
         "call void @llvm.memset.p0.i64(ptr align 8 %s.0, i8 0, i64 16, i1 false)");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
-// ---- equality (D3.7, D9.8) ---------------------------------------------------------
+// ---- equality ----------------------------------------------------------------------
+// D3.7, D9.8
 
 TEST(string_equality_is_one_call_to_the_runtime_entry_point, {
     TEST_ASSERT_TRUE(emit(EQ_LITERAL));
@@ -84,7 +89,8 @@ TEST(inequality_is_the_same_call_negated, {
     TEST_ASSERT_TRUE(emit(NE_LITERAL));
     TEST_ASSERT_EQ_STR(found("  %t7 = xor i1 %t6, true\n"), "  %t7 = xor i1 %t6, true\n");
     // One call either way: the negation is in the module and not in the
-    // runtime (D3.7).
+    // runtime.
+    // D3.7
     TEST_ASSERT_EQ_SIZE(occurrences("call zeroext i1 @\"std.rt.str_eq\"("), (size_t)1);
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
@@ -120,7 +126,8 @@ TEST(the_left_operand_is_evaluated_before_the_right, {
     TEST_ASSERT_TRUE(emit("fn string left() {\n    println(\"left\");\n    return \"a\";\n}\n"
                           "fn string right() {\n    println(\"right\");\n    return \"b\";\n}\n"
                           "fn i32 main() {\n    println(left() == right());\n    return 0;\n}\n"));
-    // Each argument is evaluated in turn, left to right (D6.3).
+    // Each argument is evaluated in turn, left to right.
+    // D6.3
     TEST_ASSERT_TRUE(before("call void @\"main.left\"", "call void @\"main.right\""));
     TEST_ASSERT_TRUE(before("call void @\"main.right\"", "@\"std.rt.str_eq\"("));
     TEST_ASSERT_EQ_STR(verified(), "verified");
@@ -145,15 +152,16 @@ TEST(the_entry_point_is_never_declared, {
 TEST(a_program_that_compares_no_string_declares_no_entry_point, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    string s = \"hi\";\n"
                           "    println(s.len);\n    return 0;\n}\n"));
-    // Only referenced declarations are emitted (item 8, D19.5).
+    // Only referenced declarations are emitted (item 8).
+    // D19.5
     TEST_ASSERT_EQ_STR(absent("std.rt.str_eq"), "absent");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
 TEST(release_mode_compares_strings_the_same_way, {
     TEST_ASSERT_TRUE(emit_release(EQ_LITERAL));
-    // The comparison is not a check, so neither build mode changes it
-    // (D11.1).
+    // The comparison is not a check, so neither build mode changes it.
+    // D11.1
     TEST_ASSERT_EQ_STR(found("@\"std.rt.str_eq\"(ptr %t3, i64 %t5, ptr @.str.1, i64 5)"),
                        "@\"std.rt.str_eq\"(ptr %t3, i64 %t5, ptr @.str.1, i64 5)");
     TEST_ASSERT_EQ_STR(verified(), "verified");
@@ -166,13 +174,15 @@ TEST(no_bounds_check_compares_strings_the_same_way, {
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
-// ---- indexing and the pseudo-fields (D3.7, D6.8) ------------------------------------
+// ---- indexing and the pseudo-fields -------------------------------------------------
+// D3.7, D6.8
 
 TEST(indexing_a_string_reaches_its_bytes_through_the_pointer_field, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    string s = \"hi\";\n    u64 i = 1;\n"
                           "    println(s[i]);\n    return 0;\n}\n"));
-    // A `string` has `char` elements, which are `i8` (D3.2, D19.2), reached
-    // through the header's pointer (item 3).
+    // A `string` has `char` elements, which are `i8`, reached through the
+    // header's pointer (item 3).
+    // D3.2, D19.2
     TEST_ASSERT_EQ_STR(found("getelementptr inbounds i8, ptr %t7, i64 %t2"),
                        "getelementptr inbounds i8, ptr %t7, i64 %t2");
     TEST_ASSERT_EQ_STR(found("@\"std.rt.print_char\""), "@\"std.rt.print_char\"");
@@ -182,8 +192,8 @@ TEST(indexing_a_string_reaches_its_bytes_through_the_pointer_field, {
 TEST(the_pseudo_fields_of_a_string_are_its_header_fields, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    string s = \"hi\";\n"
                           "    println(s.len, s.ptr != null);\n    return 0;\n}\n"));
-    // `.len` and `.ptr` are read-only pseudo-fields of the header (D3.5,
-    // D3.7).
+    // `.len` and `.ptr` are read-only pseudo-fields of the header.
+    // D3.5, D3.7
     TEST_ASSERT_EQ_STR(found("  %t2 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 1\n"
                              "  %t3 = load i64, ptr %t2, align 8\n"),
                        "  %t2 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 1\n"
@@ -199,7 +209,8 @@ TEST(a_string_is_passed_and_returned_through_a_hidden_pointer, {
     TEST_ASSERT_TRUE(emit("fn string pick(string a) {\n    return a;\n}\n"
                           "fn i32 main() {\n    println(pick(\"hi\"));\n    return 0;\n}\n"));
     // A span or `string` stays one hidden pointer and is never split into two
-    // scalars (D9.9, item 7).
+    // scalars (item 7).
+    // D9.9
     TEST_ASSERT_EQ_STR(found("define dso_local void @\"main.pick\"(ptr sret(%fort.span) "
                              "%ret.sret, ptr %a.in) #0"),
                        "define dso_local void @\"main.pick\"(ptr sret(%fort.span) "

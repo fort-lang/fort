@@ -7,10 +7,11 @@ import check;
 import check_env;
 import std.strbuf;
 
-// The rules an `extern fn` declaration meets (D9.7, D9.8, D9.9): the types an
-// extern signature may use, the agreement between two declarations of one C
-// symbol across the closure, the agreement with the runtime's own table
-// (toolchain.md 5.1) and the reserved entry point of D9.7.
+// The rules an `extern fn` declaration meets: the types an extern signature
+// may use, the agreement between two declarations of one C symbol across the
+// closure, the agreement with the runtime's own table (toolchain.md 5.1) and
+// the reserved entry point.
+// D9.7, D9.8, D9.9
 //
 // These are the checker's diagnostics that the language corpus reaches only
 // through fail/ffi and fail/modules; what stands here is the wording and the
@@ -19,8 +20,9 @@ import std.strbuf;
 // whether a struct or an enum stands at the difference.
 
 // A closure of two modules, `main` importing `other`, whose declarations are
-// given. fort does not join adjacent string literals (D2.9), so the source is
-// built in a buffer; the text reaches a file before the check runs.
+// given. fort does not join adjacent string literals, so the source is built
+// in a buffer; the text reaches a file before the check runs.
+// D2.9
 fn bool two_modules(check_env.env mut* e, string in_main, string in_other) {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
@@ -35,12 +37,14 @@ fn bool two_modules(check_env.env mut* e, string in_main, string in_other) {
     return check_env.check_entry(e, "main.ft");
 }
 
-// One module, `decls` and the `main` D8.6 asks for.
+// One module, `decls` and the `main` an entry module needs.
+// D8.6
 fn bool one_module(check_env.env mut* e, string decls) {
     return check_env.check_decls(e, decls);
 }
 
-// ---- the types an extern signature may use (D9.8) ----------------------------------
+// ---- the types an extern signature may use -----------------------------------------
+// D9.8
 
 fn void an_extern_signature_uses_scalars_and_pointers_only() {
     check_env.env mut e = check_env.env{};
@@ -63,7 +67,8 @@ fn void a_function_pointer_parameter_is_legal_when_its_own_signature_is() {
     check_env.open(&e);
     defer check_env.close(&e);
     // The C side calls through it with the same convention, so the rule
-    // applies to the signature behind the pointer as well (D9.9).
+    // applies to the signature behind the pointer as well.
+    // D9.9
     assert(one_module(&e, "extern fn void run(fn i32(i32) cb);\n"));
     assert(check_env.errors(&e) == 0);
     check_env.env mut f = check_env.env{};
@@ -78,7 +83,8 @@ fn void the_entry_point_symbol_is_reserved() {
     check_env.open(&e);
     defer check_env.close(&e);
     // The compiler emits `fort_entry` itself, so an extern declaring it is a
-    // signature nothing can be held against (D9.7).
+    // signature nothing can be held against.
+    // D9.7
     assert(!one_module(&e, "extern fn i32 fort_entry();\n"));
     assert(check_env.said(&e, "'fort_entry' is reserved: the compiler emits it"));
 }
@@ -91,7 +97,8 @@ fn void an_extern_function_is_not_a_value() {
     assert(check_env.said(&e, "'puts' is an extern function, which is not a value"));
 }
 
-// ---- two declarations of one C symbol (D9.8) ---------------------------------------
+// ---- two declarations of one C symbol ----------------------------------------------
+// D9.8
 
 fn void two_identical_declarations_agree() {
     check_env.env mut e = check_env.env{};
@@ -109,7 +116,8 @@ fn void a_parameter_that_differs_is_reported_at_the_later_declaration() {
     assert(check_env.said(&e, "conflicting declarations of extern 'write': parameter 1 differs"));
     // The note points at the first declaration, which is the imported
     // module's: every module is checked in the dependency order the loader
-    // left, so `other` came first (D9.10, module-system.md 13).
+    // left, so `other` came first (module-system.md 13).
+    // D9.10
     assert(check_env.said(&e, "previous declaration of 'write' here"));
 }
 
@@ -132,7 +140,8 @@ fn void char_and_u8_name_one_c_type() {
     check_env.open(&e);
     defer check_env.close(&e);
     // fort `char` is C's `unsigned char` at the boundary, so `char*` may be
-    // written `u8*` in the other module (D3.2, D9.8).
+    // written `u8*` in the other module.
+    // D3.2, D9.8
     assert(two_modules(&e, "extern fn i32 put(char* s);\n", "extern fn i32 put(u8* s);\n"));
     assert(check_env.errors(&e) == 0);
 }
@@ -141,10 +150,11 @@ fn void a_mark_below_the_binding_is_part_of_the_type() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // A level mark below the binding is part of a type (D3.12), so two
-    // declarations that differ in one do not agree. `own` is part of a type
-    // too (D17.1), and the case beside this one asserts that; this one asserts
-    // the `mut` mark and nothing else.
+    // A level mark below the binding is part of a type, so two declarations
+    // that differ in one do not agree. `own` is part of a type too, and the
+    // case beside this one asserts that; this one asserts the `mut` mark and
+    // nothing else.
+    // D3.12, D17.1
     assert(!two_modules(&e, "extern fn i32 put(char mut* s);\n",
                         "extern fn i32 put(char* s);\n"));
     assert(check_env.said(&e, "parameter 1 differs"));
@@ -155,13 +165,14 @@ fn void an_own_mark_on_a_typed_pointer_is_part_of_the_type() {
     check_env.open(&e);
     defer check_env.close(&e);
     // `own` is part of a pointer's type on a typed pointer exactly as it is on
-    // a `void*` (D17.1, D17.13). check.extern_type_agrees writes the two as
-    // separate branches, k_ptr and k_voidptr, so a case of one holds nothing
-    // of the other. The corpus reaches the `void*` branch through
+    // a `void*`. check.extern_type_agrees writes the two as separate branches,
+    // k_ptr and k_voidptr, so a case of one holds nothing of the other. The
+    // corpus reaches the `void*` branch through
     // fail/modules/004_extern_own_mismatch and this branch through
     // fail/modules/018_extern_own_pointer; src/bootstrap holds the same branch
     // through test/check_extern_test.c:408, which this module had no case for
-    // until T-077.
+    // until the audit.
+    // D17.1, D17.13, T-077: the audit that found the missing case
     assert(!two_modules(&e, "extern fn void take(i32 mut* own p);\n",
                         "extern fn void take(i32 mut* p);\n"));
     assert(check_env.said(&e, "parameter 1 differs"));
@@ -179,7 +190,8 @@ fn void a_difference_that_names_a_struct_carries_the_wrapper_note() {
     assert(check_env.said(&e, "parameter 1 differs"));
     // A struct is identified by its declaration and not its spelling, so no
     // rewording can make the two agree: the note offers the import or the
-    // wrapper (D3.8, module-system.md 8.1).
+    // wrapper (module-system.md 8.1).
+    // D3.8
     assert(check_env.said(&e, "a struct or an enum stands here"));
 }
 
@@ -191,15 +203,17 @@ fn void a_difference_between_two_scalars_carries_no_wrapper_note() {
     assert(!check_env.said(&e, "a struct or an enum stands here"));
 }
 
-// ---- the names the compiler emits (D9.7, D11.6) ------------------------------------
+// ---- the names the compiler emits --------------------------------------------------
+// D9.7, D11.6
 
 fn void a_fort_rt_name_is_an_ordinary_extern_declaration() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // The runtime is fort and occupies no C name (D13.1, D9.7), so the
-    // `fort_rt_` space is reserved for nothing and such a declaration answers
-    // to the rows above like any other (D9.8 as amended).
+    // The runtime is fort and occupies no C name, so the `fort_rt_` space is
+    // reserved for nothing and such a declaration answers to the rows above
+    // like any other.
+    // D13.1, D9.7, D9.8
     assert(one_module(&e, "extern fn void fort_rt_del(i32 wrong);\n"));
     assert(check_env.errors(&e) == 0);
 }
@@ -208,9 +222,10 @@ fn void the_main_symbol_is_reserved() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // The compiler emits `main(argc, argv)` in the entry module (D11.6), so
-    // an `extern` declaring the name is a signature nothing can check against
-    // that definition (D9.7 as amended).
+    // The compiler emits `main(argc, argv)` in the entry module, so an
+    // `extern` declaring the name is a signature nothing can check against
+    // that definition.
+    // D11.6, D9.7
     assert(!one_module(&e, "extern fn i32 main(i32 argc, char* mut* argv);\n"));
     assert(check_env.said(&e, "'main' is reserved: the compiler emits it"));
 }

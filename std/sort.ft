@@ -1,42 +1,45 @@
-// std.sort: an array sorted in place over libc.qsort (stdlib.md 2.10, D13.2).
+// std.sort: an array sorted in place over libc.qsort (stdlib.md 2.10).
+// D13.2
 //
 // The core entry takes what qsort takes, because fort has neither generics nor
-// overloading (D8.3, D15): an array of an arbitrary element type reaches a
-// shared body as an untyped address, a count and an element size. A span would
-// carry the count and the size (D3.5, D3.15), but only for one element type,
-// and a span cast never changes the element size (D3.14), so there is no byte
-// span that stands for every array. The three typed entries below are where a
-// span pays: each takes the count and the size off the type and each checks
-// the element mutability the core entry cannot see, since void* has no target
-// level (D3.11).
+// overloading: an array of an arbitrary element type reaches a shared body as
+// an untyped address, a count and an element size. A span would carry the count
+// and the size, but only for one element type, and a span cast never changes
+// the element size, so there is no byte span that stands for every array. The
+// three typed entries below are where a span pays: each takes the count and the
+// size off the type and each checks the element mutability the core entry
+// cannot see, since void* has no target level.
+// D8.3, D15, D3.5, D3.15, D3.14, D3.11
 //
 // The element type must own nothing. This body hands C an address and C
-// permutes the bytes behind it, which the ownership rules of D17 never see;
-// stdlib.md 2.10 states the rule and what to do instead. Nothing here can
-// check it.
+// permutes the bytes behind it, which the ownership rules never see;
+// stdlib.md 2.10 states the rule and what to do instead. Nothing here can check
+// it.
+// D17
 //
 // The module holds no float, no ?: and no do-while, so the C bootstrap
 // compiles it and every program that imports it (notes/compiler.md 7). That is
 // what std.math costs and this module does not.
 import std.libc;
 
-// Orders the n elements of elem_size bytes that start at base, in place, so
-// that cmp answers zero or less for every adjacent pair. The order is not
-// stable, because qsort's is not.
-//
-// The three tests are violated preconditions and panic (D13.3): a zero element
-// size would make qsort read the whole array as one element, a null comparator
-// is undefined to call (D3.10), and a null base with elements to order is a
-// caller that lost its storage.
-//
-// They come before the count on purpose, and stdlib.md 2.10 fixes that order:
-// a call that asks for nothing is still a call that must say what it is
-// sorting, so sort(base, 0, 0, cmp) panics rather than returning. Only a count
-// that passes all three returns early. That early return is what keeps a null
-// base out of C as well: the zero value of a span is {null, 0} (D3.5), so an
-// empty array is the ordinary way to reach this function with nothing to
-// order. Ownership: none; base is a view and no own crosses to C
-// (stdlib.md 1.4, D17.13).
+/// Orders the n elements of elem_size bytes that start at base, in place, so
+/// that cmp answers zero or less for every adjacent pair. The order is not
+/// stable, because qsort's is not.
+///
+/// The three tests are violated preconditions and panic: a zero element size
+/// would make qsort read the whole array as one element, a null comparator is
+/// undefined to call, and a null base with elements to order is a caller that
+/// lost its storage.
+/// D13.3, D3.10
+///
+/// They come before the count on purpose, and stdlib.md 2.10 fixes that order: a
+/// call that asks for nothing is still a call that must say what it is sorting,
+/// so sort(base, 0, 0, cmp) panics rather than returning. Only a count that
+/// passes all three returns early. That early return is what keeps a null base
+/// out of C as well: the zero value of a span is {null, 0}, so an empty array is
+/// the ordinary way to reach this function with nothing to order. Ownership:
+/// none; base is a view and no own crosses to C (stdlib.md 1.4).
+/// D3.5, D17.13
 fn void sort(void* base, u64 n, u64 elem_size, fn i32(void*, void*) cmp) {
     if (elem_size == 0) {
         panic("sort.sort: element size is zero");
@@ -53,29 +56,30 @@ fn void sort(void* base, u64 n, u64 elem_size, fn i32(void*, void*) cmp) {
     libc.qsort(base, n, elem_size, cmp);
 }
 
-// The i64 array. items is mut@, so the caller cannot order a span whose
-// elements it may not write. Ownership: none; an own span argument lends
-// (D17.4).
+/// The i64 array. items is mut@, so the caller cannot order a span whose
+/// elements it may not write. Ownership: none; an own span argument lends.
+/// D17.4
 fn void sort_i64(i64 mut@ items, fn i32(void*, void*) cmp) {
     sort(cast(items.ptr, void*), items.len, sizeof(i64), cmp);
 }
 
-// The u64 array.
+/// The u64 array.
 fn void sort_u64(u64 mut@ items, fn i32(void*, void*) cmp) {
     sort(cast(items.ptr, void*), items.len, sizeof(u64), cmp);
 }
 
-// The pointer array, which is the element type of vec.ptr_vec (stdlib.md 2.7).
-// The pointees are borrowed and the sort never reads one; a comparator that
-// orders by pointee reads them itself.
+/// The pointer array, which is the element type of vec.ptr_vec (stdlib.md 2.7).
+/// The pointees are borrowed and the sort never reads one; a comparator that
+/// orders by pointee reads them itself.
 fn void sort_ptr(void* mut@ items, fn i32(void*, void*) cmp) {
     sort(cast(items.ptr, void*), items.len, sizeof(void*), cmp);
 }
 
-// Ascending order over i64. A comparator receives a pointer to each of two
-// elements and reads them through a cast (D3.11); the subtraction a - b is not
-// written here, because it overflows for operands far apart and the result must
-// fit in an i32 anyway.
+/// Ascending order over i64. A comparator receives a pointer to each of two
+/// elements and reads them through a cast; the subtraction a - b is not written
+/// here, because it overflows for operands far apart and the result must fit in
+/// an i32 anyway.
+/// D3.11
 fn i32 cmp_i64(void* a, void* b) {
     i64 x = *cast(a, i64*);
     i64 y = *cast(b, i64*);
@@ -88,9 +92,9 @@ fn i32 cmp_i64(void* a, void* b) {
     return 0;
 }
 
-// Ascending order over u64. The comparison is unsigned, so this function
-// orders 0xFFFFFFFFFFFFFFFF last where cmp_i64 over the same bytes orders it
-// first.
+/// Ascending order over u64. The comparison is unsigned, so this function
+/// orders 0xFFFFFFFFFFFFFFFF last where cmp_i64 over the same bytes orders it
+/// first.
 fn i32 cmp_u64(void* a, void* b) {
     u64 x = *cast(a, u64*);
     u64 y = *cast(b, u64*);

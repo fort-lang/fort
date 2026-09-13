@@ -1,7 +1,8 @@
-// std.io: descriptors, whole files and streams (stdlib.md 2.4, D13.2).
+// std.io: descriptors, whole files and streams (stdlib.md 2.4).
 // Everything here goes straight to the descriptor; the print family writes
-// through the runtime's per-descriptor buffers (D11.5), so a program that
-// mixes print with io.write_all on one descriptor calls io.flush between them.
+// through the runtime's per-descriptor buffers, so a program that mixes print
+// with io.write_all on one descriptor calls io.flush between them.
+// D13.2, D11.5
 import std.libc;
 import std.mem;
 import std.rt;
@@ -9,57 +10,61 @@ import std.str;
 import std.strbuf;
 import std.sys;
 
-// The descriptor numbers every process starts with, which the operating
-// system fixes and stdlib.md 2.4 names here so that a program writes
-// io.STDOUT rather than 1.
+/// The descriptor numbers every process starts with, which the operating
+/// system fixes and stdlib.md 2.4 names here so that a program writes
+/// io.STDOUT rather than 1.
 i32 STDIN = 0;
 i32 STDOUT = 1;
 i32 STDERR = 2;
 
-// The size of one read_all chunk: the spare room it asks for before each
-// read(2), so that a file arrives in few calls and few growths.
+/// The size of one read_all chunk: the spare room it asks for before each
+/// read(2), so that a file arrives in few calls and few growths.
 u64 CHUNK = 4096;
 
-// Opens path for reading, or returns -1 with the reason in sys.errno(). The
-// path is copied into a NUL-terminated buffer for the call and released before
-// returning (D13.4); a path containing \0 names its prefix. Ownership: none in
-// the types; the caller releases the descriptor with close.
+/// Opens path for reading, or returns -1 with the reason in sys.errno(). The
+/// path is copied into a NUL-terminated buffer for the call and released before
+/// returning; a path containing \0 names its prefix. Ownership: none in the
+/// types; the caller releases the descriptor with close.
+/// D13.4
 fn i32 open_read(string path) {
     char mut@ own c_path = str.to_cstr(path);
     defer del(c_path);
     return libc.open(c_path.ptr, libc.O_RDONLY, 0);
 }
 
-// Opens path for writing, creating it with mode 0o644 or truncating what is
-// there. Same result and ownership as open_read.
+/// Opens path for writing, creating it with mode 0o644 or truncating what is
+/// there. Same result and ownership as open_read.
 fn i32 open_write(string path) {
     char mut@ own c_path = str.to_cstr(path);
     defer del(c_path);
     return libc.open(c_path.ptr, libc.O_WRONLY | libc.O_CREAT | libc.O_TRUNC, 0o644);
 }
 
-// Flushes the runtime's buffer for fd, if it has one, then closes it. The
-// result is that of close(2); the descriptor is invalid afterwards in either
-// case, so close consumes it.
+/// Flushes the runtime's buffer for fd, if it has one, then closes it. The
+/// result is that of close(2); the descriptor is invalid afterwards in either
+/// case, so close consumes it.
 fn bool close(i32 fd) {
     // What print left in the runtime's buffer for this descriptor goes out
     // first: after the close(2) below there is no descriptor to write it to,
-    // and the flush at exit would lose it (D11.5, stdlib.md 2.4).
+    // and the flush at exit would lose it (stdlib.md 2.4).
+    // D11.5
     rt.flush(fd);
     return libc.close(fd) == 0;
 }
 
-// Flushes the runtime's buffer for fd, if it has one, and does nothing
-// otherwise (D11.5). Ownership: none.
+/// Flushes the runtime's buffer for fd, if it has one, and does nothing
+/// otherwise. Ownership: none.
+/// D11.5
 fn void flush(i32 fd) {
     rt.flush(fd);
 }
 
-// One read(2) into buf: the number of bytes read, 0 at end of file, or -1 with
-// sys.errno() set. An empty buffer is answered with 0 and no system call, both
-// because there is nothing to ask for and because a zero span's .ptr may be
-// null. EINTR is retried here, so a caller never sees it. Ownership: none; an
-// own buffer lends (D17.4).
+/// One read(2) into buf: the number of bytes read, 0 at end of file, or -1 with
+/// sys.errno() set. An empty buffer is answered with 0 and no system call, both
+/// because there is nothing to ask for and because a zero span's .ptr may be
+/// null. EINTR is retried here, so a caller never sees it. Ownership: none; an
+/// own buffer lends.
+/// D17.4
 fn i64 read(i32 fd, u8 mut@ buf) {
     if (buf.len == 0) {
         return 0;
@@ -72,15 +77,16 @@ fn i64 read(i32 fd, u8 mut@ buf) {
     }
 }
 
-// Writes every byte of buf, looping over partial writes and retrying EINTR.
-// Returns false on the first error, by which time some bytes may have been
-// written. A string own s is written as write_all(fd, cast(s[..], u8@)), a
-// cast of a view (stdlib.md 1.3). Ownership: none.
+/// Writes every byte of buf, looping over partial writes and retrying EINTR.
+/// Returns false on the first error, by which time some bytes may have been
+/// written. A string own s is written as write_all(fd, cast(s[..], u8@)), a
+/// cast of a view (stdlib.md 1.3). Ownership: none.
 fn bool write_all(i32 fd, u8@ buf) {
     u64 mut done = 0;
     while (done < buf.len) {
-        // There is no pointer arithmetic (D10.4), so the rest of the buffer is
-        // named as a sub-span and its .ptr taken.
+        // There is no pointer arithmetic, so the rest of the buffer is named
+        // as a sub-span and its .ptr taken.
+        // D10.4
         u8@ rest = buf[done..];
         i64 n = libc.write(fd, cast(rest.ptr, void*), rest.len);
         if (n < 0) {
@@ -101,18 +107,19 @@ fn bool write_all(i32 fd, u8@ buf) {
     return true;
 }
 
-// Reads fd to end of file, adding the bytes after whatever *out already holds,
-// in chunks placed directly in the buffer's spare room. On a read error the
-// result is false and out->len is back at the value it had on entry, though
-// the storage may have grown. Ownership: the bytes land in storage *out owns,
-// and growth replaces that storage, so earlier view and bytes aliases of *out
-// die here (stdlib.md 2.4, 2.6).
+/// Reads fd to end of file, adding the bytes after whatever *out already holds,
+/// in chunks placed directly in the buffer's spare room. On a read error the
+/// result is false and out->len is back at the value it had on entry, though
+/// the storage may have grown. Ownership: the bytes land in storage *out owns,
+/// and growth replaces that storage, so earlier view and bytes aliases of *out
+/// die here (stdlib.md 2.4, 2.6).
 fn bool read_all(i32 fd, strbuf.str_buf mut* out) {
     u64 start = out->len;
     while (true) {
         strbuf.reserve(out, CHUNK);
-        // The spare room is a view of the buffer's own storage (D17.3); the
-        // read fills it in place, so nothing is copied afterwards.
+        // The spare room is a view of the buffer's own storage; the read fills
+        // it in place, so nothing is copied afterwards.
+        // D17.3
         u8 mut@ room = out->data[out->len..];
         i64 n = read(fd, room);
         if (n < 0) {
@@ -126,11 +133,11 @@ fn bool read_all(i32 fd, strbuf.str_buf mut* out) {
     }
 }
 
-// open_read, read_all, close. False when any step fails, with out->len
-// restored and sys.errno() describing the failing call: a close(2) that
-// succeeds leaves errno alone, so the errno of a failed read survives the
-// close that follows it (stdlib.md 2.4). On success the contents are
-// strbuf.bytes(out) and, as text, strbuf.view(out). Ownership: as read_all.
+/// open_read, read_all, close. False when any step fails, with out->len
+/// restored and sys.errno() describing the failing call: a close(2) that
+/// succeeds leaves errno alone, so the errno of a failed read survives the
+/// close that follows it (stdlib.md 2.4). On success the contents are
+/// strbuf.bytes(out) and, as text, strbuf.view(out). Ownership: as read_all.
 fn bool read_file(string path, strbuf.str_buf mut* out) {
     u64 start = out->len;
     i32 fd = open_read(path);
@@ -150,17 +157,17 @@ fn bool read_file(string path, strbuf.str_buf mut* out) {
     return true;
 }
 
-// The same as read_file, delivering a plain heap span of exactly the file's
-// length. Precondition: *out is empty ({}), because the store never frees what
-// the slot held -- a live slot is the overwriting owned value runtime error in
-// checked builds and a leak in release builds (D17.11), so a caller that
-// reuses a slot dels it first. On failure *out is untouched. An empty file
-// yields a zero-length, non-null allocation (D10.2). Ownership: *out is
-// u8 mut@ own and the caller releases it with del (D13.5, D17.2). It reads
-// through a str_buf and then copies, so it holds the file about three times
-// over at its peak (the buffer, its spare room and the exact-size copy); a
-// caller reading a file it will keep reading into passes read_file a buffer of
-// its own instead (stdlib.md 1.4).
+/// The same as read_file, delivering a plain heap span of exactly the file's
+/// length. Precondition: *out is empty ({}), because the store never frees what
+/// the slot held -- a live slot is the overwriting owned value runtime error in
+/// checked builds and a leak in release builds, so a caller that reuses a slot
+/// dels it first. On failure *out is untouched. An empty file yields a
+/// zero-length, non-null allocation. Ownership: *out is u8 mut@ own and the
+/// caller releases it with del. It reads through a str_buf and then copies, so
+/// it holds the file about three times over at its peak (the buffer, its spare
+/// room and the exact-size copy); a caller reading a file it will keep reading
+/// into passes read_file a buffer of its own instead (stdlib.md 1.4).
+/// D17.11, D10.2, D13.5, D17.2
 fn bool read_file_bytes(string path, u8 mut@ own mut* out) {
     strbuf.str_buf mut buf = strbuf.create();
     defer strbuf.free(&buf);
@@ -173,9 +180,9 @@ fn bool read_file_bytes(string path, u8 mut@ own mut* out) {
     return true;
 }
 
-// open_write, write_all, close; true only when all three succeed. The close
-// happens whatever the write did, which is why its result is taken second.
-// Ownership: none.
+/// open_write, write_all, close; true only when all three succeed. The close
+/// happens whatever the write did, which is why its result is taken second.
+/// Ownership: none.
 fn bool write_file(string path, u8@ data) {
     i32 fd = open_write(path);
     if (fd < 0) {

@@ -1,8 +1,9 @@
 // Every diagnostic the parser can write, at the position it writes it. The
 // parser's messages are the compiler's first contact with a mistyped program,
 // so each one is pinned here by its full line, and a source that reports more
-// than one after recovering (D14.2) pins them all, so that a cascade shows up
-// as a line no one expected.
+// than one after recovering pins them all, so that a cascade shows up as a
+// line no one expected.
+// D14.2
 #include <stdint.h>
 
 #include "ast.h"
@@ -46,8 +47,9 @@ TEST(a_missing_close_parenthesis, {
     TEST_ASSERT_EQ_STR(stmt_fails("for (;; i++ { }"),
                        "t.ft:2:13: error: expected ')', found '{'\n");
     // An identifier directly followed by `{` is a struct literal wherever an
-    // expression is expected (D6.5), so a `)` missing after one is reported
-    // at the end of the literal.
+    // expression is expected, so a `)` missing after one is reported at the
+    // end of the literal.
+    // D6.5
     TEST_ASSERT_EQ_STR(stmt_fails("for (i32 v : xs { }"),
                        "t.ft:3:1: error: expected ')', found '}'\n");
     TEST_ASSERT_EQ_STR(stmt_fails("while (c { }"), "t.ft:3:1: error: expected ')', found '}'\n");
@@ -69,7 +71,8 @@ TEST(a_missing_bracket_or_brace, {
                        "t.ft:1:8: error: expected '{', found identifier 'red'\n");
     // The `{` the switch never opened leaves its `}` to the function's block,
     // which therefore closes on line 2, so the `}` of line 3 is read where a
-    // declaration was due (D14.2).
+    // declaration was due.
+    // D14.2
     TEST_ASSERT_EQ_STR(stmt_fails("switch (c) case 1: }"),
                        "t.ft:2:12: error: expected '{', found 'case'\n"
                        "t.ft:3:1: error: expected a type, found '}'\n");
@@ -175,8 +178,9 @@ TEST(a_token_that_starts_no_expression, {
     TEST_ASSERT_EQ_STR(type_fails("i32[]"), "t.ft:1:5: error: expected an expression, found ']'\n");
 })
 
-// The reserved words of D2.4 are keywords the lexer knows and no production
-// takes, so they end whatever was being parsed.
+// The reserved words are keywords the lexer knows and no production takes, so
+// they end whatever was being parsed.
+// D2.4
 TEST(a_reserved_word_is_not_an_identifier, {
     TEST_ASSERT_EQ_STR(parse_fails("i32 const = 1;"),
                        "t.ft:1:5: error: 'const' is a reserved word\n");
@@ -184,7 +188,8 @@ TEST(a_reserved_word_is_not_an_identifier, {
                        "t.ft:1:8: error: 'type' is a reserved word\n");
 })
 
-// ---- one diagnostic per mistake, recovery in between (D14.2) -------------
+// ---- one diagnostic per mistake, recovery in between ---------------------
+// D14.2
 
 TEST(later_errors_are_reported_too, {
     TEST_ASSERT_EQ_STR(parse_fails("i32 a = ;\ni32 b = ;\ni32 c = ;\n"),

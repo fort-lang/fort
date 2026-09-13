@@ -1,5 +1,6 @@
-// Unit tests of diag.h: the diagnostic lines of toolchain.md 4 (D14.2), the
-// error count, capture, and the message builder.
+// Unit tests of diag.h: the diagnostic lines of toolchain.md 4, the error
+// count, capture, and the message builder.
+// D14.2
 #include "diag.h"
 
 #include <stdint.h>
@@ -44,7 +45,8 @@ TEST(loc_make_fills_every_field, {
     TEST_ASSERT_EQ_INT32((int32_t)loc.col, 5);
 })
 
-// A position with no extent yet is the empty range at that position (D20.4).
+// A position with no extent yet is the empty range at that position.
+// D20.4
 TEST(loc_make_is_the_empty_range_at_its_position, {
     const loc_t loc = loc_make("main.ft", 7, 5);
     TEST_ASSERT_EQ_INT32((int32_t)loc.end_line, 7);
@@ -68,8 +70,8 @@ TEST(loc_range_fills_every_field, {
     TEST_ASSERT_EQ_INT32((int32_t)loc.end_col, 12);
 })
 
-// The end is exclusive, so a token of n bytes ends n columns further on
-// (D20.4).
+// The end is exclusive, so a token of n bytes ends n columns further on.
+// D20.4
 TEST(a_token_range_ends_one_past_its_last_byte, {
     const loc_t loc = loc_range("t.ft", 1, 5, 1, 5 + 3);
     TEST_ASSERT_EQ_INT32((int32_t)(loc.end_col - loc.col), 3);
@@ -121,10 +123,11 @@ TEST(loc_extend_spans_lines, {
     TEST_ASSERT_EQ_INT32((int32_t)joined.end_col, 2);
 })
 
-// Joining never shrinks a range (D20.4), so a range already covering the
-// second one comes back unchanged.
-// Extending never moves the start, so a range that already covers the other
-// one comes back unchanged: a start further left is not adopted (D20.4).
+// Joining never shrinks a range, so a range already covering the second one
+// comes back unchanged. Extending never moves the start, so a range that
+// already covers the other one comes back unchanged: a start further left is
+// not adopted.
+// D20.4
 TEST(loc_extend_keeps_the_later_end_and_never_widens_leftwards, {
     const loc_t right = loc_range("a.ft", 1, 9, 1, 12);
     const loc_t extended = loc_extend(right, loc_range("a.ft", 1, 1, 1, 4));
@@ -140,7 +143,8 @@ TEST(loc_extend_keeps_the_later_end, {
 })
 
 // Extending again with a token the range already covers changes nothing, so a
-// node finished at several levels keeps one range (D20.4).
+// node finished at several levels keeps one range.
+// D20.4
 TEST(loc_extend_is_idempotent, {
     const loc_t a = loc_range("a.ft", 1, 1, 1, 8);
     const loc_t once = loc_extend(a, loc_range("a.ft", 1, 5, 1, 8));
@@ -210,8 +214,9 @@ TEST(errors_are_counted_and_notes_are_not, {
     end_capture();
 })
 
-// The per-file count is the budget the lexer and the parser share (D14.2):
-// it starts at each diag_begin_file and the global count keeps running.
+// The per-file count is the budget the lexer and the parser share: it starts
+// at each diag_begin_file and the global count keeps running.
+// D14.2
 TEST(the_file_count_starts_at_each_file, {
     begin_capture();
     TEST_ASSERT_EQ_UINT64(diag_file_count(), (uint64_t)0);
@@ -279,8 +284,9 @@ TEST(positionless_errors_use_line_one_column_one, {
     end_capture();
 })
 
-// The text form of D14.2 prints the start only, so a range prints exactly
-// what a bare position printed before ranges existed (D20.4).
+// The text form prints the start only, so a range prints exactly what a bare
+// position printed before ranges existed.
+// D14.2, D20.4
 TEST(a_range_prints_only_its_start, {
     begin_capture();
     diag_error(loc_range("main.ft", 7, 5, 7, 6), "cannot assign to immutable 'x'");

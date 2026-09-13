@@ -1,11 +1,12 @@
-// Unit tests of the declaration group the emitter writes above its
-// definitions (toolchain.md 6 item 8): the `extern` C functions of D9.8, each
-// declared and called through a variadic LLVM function type so that a fixed
-// prototype of a variadic C function is safe, the intrinsics, and the order
-// and spacing of the two groups. There are two groups and no third: the
-// runtime is `std.rt`, whose definitions the module holds, so nothing
-// declares it (D13.1). The rest of the emitter's module skeleton is in
-// gen_test.c, which shares gen_helpers.h with this suite.
+// Unit tests of the declaration group the emitter writes above its definitions
+// (toolchain.md 6 item 8): the `extern` C functions, each declared and called
+// through a variadic LLVM function type so that a fixed prototype of a
+// variadic C function is safe, the intrinsics, and the order and spacing of
+// the two groups. There are two groups and no third: the runtime is `std.rt`,
+// whose definitions the module holds, so nothing declares it. The rest of the
+// emitter's module skeleton is in gen_test.c, which shares gen_helpers.h with
+// this suite.
+// D9.8, D13.1
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -24,8 +25,9 @@ enum { DECL_NAME_CAP = 64 };
 // The name of the first `declare` in the emitted module that is not an
 // intrinsic, or "" when there is none. The compiler never emits a call to a C
 // library symbol of its own accord: that would be a second declaration of an
-// ELF symbol a program may also declare `extern`, against D9.7's one entity
-// per symbol (D9.8).
+// ELF symbol a program may also declare `extern`, against the rule of one
+// entity per symbol.
+// D9.7, D9.8
 static const char* first_foreign_declaration(void) {
     static char name[DECL_NAME_CAP];
     const char* line = ir();
@@ -81,7 +83,8 @@ TEST(the_compiler_declares_no_c_library_symbol_of_its_own_accord, {
     // copy between them reach every helper the emitter calls on its own; each
     // is a function of `std.rt`, reached by its mangled name, or an LLVM
     // intrinsic. A `@memcmp` here would be the library-call rewriting that
-    // `nobuiltin` exists to prevent, arriving from the other side (D9.8).
+    // `nobuiltin` exists to prevent, arriving from the other side.
+    // D9.8
     TEST_ASSERT_TRUE(emit("struct point {\n    i32 x;\n    i32 y;\n}\n"
                           "fn i32 main() {\n"
                           "    string a = \"ab\";\n"
@@ -130,8 +133,9 @@ TEST(an_extern_narrow_signature_carries_the_c_attributes, {
     TEST_ASSERT_TRUE(emit("extern fn i8 narrow(i8 a, u16 b, bool c, char d);\n"
                           "fn i32 main() { return cast(narrow(1, 2, true, \'x\'), i32); }\n"));
     // `bool`, `char`, `u8` and `u16` carry `zeroext` and `i8` and `i16`
-    // `signext` in an extern signature as in a fort one (D9.9, item 7), and
-    // `char` is C's `unsigned char`, so it is `i8 zeroext` (D9.8).
+    // `signext` in an extern signature as in a fort one (item 7), and `char`
+    // is C's `unsigned char`, so it is `i8 zeroext`.
+    // D9.9, D9.8
     const char* decl = "declare signext i8 @narrow(i8 signext, i16 zeroext, i1 zeroext,"
                        " i8 zeroext, ...)";
     TEST_ASSERT_EQ_STR(found(decl), decl);
@@ -145,9 +149,10 @@ TEST(an_extern_narrow_signature_carries_the_c_attributes, {
 })
 
 TEST(a_wide_extern_signature_carries_no_extension_attribute, {
-    // Nothing wider than 16 bits carries an extension attribute (D9.9), and an
-    // enum crosses as a plain `i32` (D9.8), so an attribute appearing there
-    // would be one LLVM applies to a value C never extends.
+    // Nothing wider than 16 bits carries an extension attribute, and an enum
+    // crosses as a plain `i32`, so an attribute appearing there would be one
+    // LLVM applies to a value C never extends.
+    // D9.9, D9.8
     TEST_ASSERT_TRUE(emit("enum color { red, green }\n"
                           "extern fn u64 wide(i32 a, u32 b, i64 c, color d, void* e);\n"
                           "fn i32 main() { return cast(wide(1, 2, 3, color.red, null), i32); }\n"));
@@ -160,10 +165,11 @@ TEST(a_wide_extern_signature_carries_no_extension_attribute, {
 })
 
 TEST(no_entry_point_of_section_5_1_is_ever_declared, {
-    // The module that holds a call into the runtime holds its definition, so
-    // a `declare` beside it would be the redefinition `opt` rejected in T-018
-    // (item 8, D9.10). The program below reaches printing, string equality,
-    // allocation, a bounds check and a failure path.
+    // The module that holds a call into the runtime holds its definition, so a
+    // `declare` beside it would be the redefinition `opt` rejected. The
+    // program below reaches printing, string equality, allocation, a bounds
+    // check and a failure path (item 8).
+    // T-018, D9.10: the ticket whose `opt` run rejected the redefinition
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n"
                           "    string a = \"ab\";\n"
                           "    println(a == \"cd\");\n"
@@ -191,8 +197,8 @@ TEST(a_fort_rt_name_is_an_ordinary_extern, {
     // The `fort_rt_` space is reserved for nothing now: the runtime is fort
     // and occupies no C name, so an `extern` naming what used to be an entry
     // point is an ordinary declaration of an ordinary C symbol, declared and
-    // called through the variadic type of item 8 with its `#3` (D9.8 as
-    // amended).
+    // called through the variadic type of item 8 with its `#3`.
+    // D9.8
     TEST_ASSERT_TRUE(emit("extern fn void fort_rt_del(void* p);\n"
                           "fn i32 main() { fort_rt_del(null); return 0; }\n"));
     TEST_ASSERT_EQ_STR(found("declare void @fort_rt_del(ptr, ...)"),

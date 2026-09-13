@@ -55,6 +55,19 @@ There are two, and the directives of 1.1 are the third kind outside this section
 - `//` inside a body, where the logic is not clear from the code: an order that matters, a case
   that looks impossible and is not, a workaround and the thing it works around.
 
+**The mark is placed by position.** In a fort module every top-level declaration takes `///`,
+because D9.6 exports everything at module level and a declaration is public whether or not a caller
+exists today. In a C header a declaration takes `///`, a struct field takes `///`, and a comment
+inside a function body takes `//`, whatever column it sits in. A `.c` and a test program keep `//`,
+because neither is a module interface: the declaration a caller reads is in the header, and a
+program is the end of the chain and not a face another file reads. The coordinator ratified this
+reading on 2026-09-13, over the narrower "a declaration another file calls", for two reasons: that
+reading makes the mark of one declaration change when an unrelated file adds or removes a call, and
+no lint can check it without a whole-program call graph, while a lint that reads one file can check
+this one (T-108). The column is not the rule. T-108 first wrote "a declaration at indentation 8 or
+less", and a statement inside a `static inline` function sits at indentation 4, so 37 lines in 12
+blocks of `test/*.h` took `///` inside a body before a review counted them.
+
 A comment that stands on a declaration or on a definition states its contract; only a comment
 inside a body may be a bare citation. T-101 first collapsed 583 doc comments to the tag they
 cited and had to put every one back: a tag says which rule the code follows and says nothing
@@ -79,6 +92,35 @@ own line costs the line the tag used to share with prose. Of the 9867 comment li
 3694 are `///` contracts and 2261 are the `//` prose inside bodies. A ticket that wants a smaller
 share has to shorten the contracts, which this section asks for, so the share is a consequence
 and not a target.
+
+T-108 swept the rest of what 1.1 governs, with the same lint and the same method, and deleted no
+comment as a restatement. It rewrote 207 paragraphs by hand, where the grammar of the sentence
+carried the tag rather than a parenthesis at its end. It deleted one comment for another reason:
+`std/math.ft` said it was the only fort source that carries `///` doc comments, and the sweep made
+that untrue. Comment lines are 34.7 % of `std` (917 of 2639), 13.6 % of `test/*.c` and `test/*.h`
+(5343 of 39235) and 19.7 % of `test/fort` (8299 of 42159, the harness directives included),
+against 31.3 %, 11.1 % and 17.4 % before. The command is the one above with the directory
+changed. The share rose for the reason it rose in `src/`: a citation on its own line costs the
+line the tag used to share with prose. The three corpora hold 1490 `///` lines after the sweep and
+held 22 before, all 22 in `std/math.ft`
+(`grep -h '^[[:space:]]*///' std/*.ft test/*.c test/*.h $(find test/fort -name '*.ft' | sort) |
+wc -l`, run here and over `git archive main std test`). 31 of the 1490 stand in `std/math.ft`
+(`grep -c '^[[:space:]]*///' std/math.ft`) and 1459 in files that held none. `math.ft` is not a
+file the sweep left alone: its 22 lines re-wrapped to 24, and the marker then gave the mark to 7
+more, above `i32 I32_MIN` and above `u64 F64_INF_BITS`. Of the 1490, 1466 took the mark from
+`build/sweep/marker.py`, which prints that number, and 24 are the lines the sweep carried over
+already marked.
+
+**A sweep that guesses at grammar writes a true-looking sentence that says a false thing, and no
+punctuation check sees it.** T-108 cut `of Dn.m` out of a noun phrase, and its rule fired on
+`X of Dn.m and Y` as well, where the `and` joins two whole phrases and not two objects of the one
+preposition. "the universe functions of D12.2 and the qualified names of D9.4" became "the
+universe functions of the qualified names" in 15 files, and every one of them reads as grammar and
+states a falsehood, so the lint of 1.4 reported 0 mangled lines over all 15. No rule tells that
+shape from "the `assert` and `panic` of D12.2 and item 19", where the preposition is shared, so
+the sweep now refuses the shape and reports it for the hand. The screen is a reader: list every
+paragraph of the old revision that writes `of D<n>.<m> and `, print the new text beside it, and
+read the 37 pairs (T-108).
 
 ### 1.4 Citations
 
@@ -125,6 +167,23 @@ hanging before `)`. The
 review of T-101 fed the first version of it ten cuts the sweep had not made and nine passed,
 the double space among them, which is why the list is this long: a check written from one
 sweep's residue sees that residue and little else.
+
+T-101's lint gives four wrong answers, which `src/` gave it no chance to show and T-108 met over
+`test/`. It reads `U+D800` as a citation of a decision D800, because it lets a tag follow a `+`.
+It reads a `//` inside a C string literal as a comment, because it counts the quotes of the line
+instead of scanning it, and `test/*.c` holds fort programs as C strings. It accepts a bare
+`// T-091`, because it carries the `decisions` production above and not the `tickets` one beside
+it. And it lets a list repeat a tag that a range of the same list already names, so
+`// D4.1 to D4.6, D3.14, D3.15, D4.4, D4.6` passed it. T-108 fixed all four in the copy it ran,
+seeded 23 probes, one of every shape the lint refuses, and watched each one fire; 10 control lines
+stayed clean. T-103 carries the four fixes into the lint it gives a home.
+
+Measured on 2026-09-13 with that lint. `std/*.ft`, `test/*.c`, `test/*.h` and `test/fort/**/*.ft`
+hold 2633 tagged comment lines and **0** outside the shape. `src/bootstrap` and `src/fort` hold
+2564 and **5** outside it: three are citations of a ticket with no clause, which T-101's own lint
+accepted, and two are prose written after T-101 landed. `src/lsp` holds 36 tagged lines and **36**
+outside the shape, because T-101's lint read `src/bootstrap` and `src/fort` and no other directory
+of `src/`. Neither is T-108's to fix: its deliverable names `std/` and `test/` (T-108).
 
 The reader who wants the rule opens `spec/decisions.md` at the tag, where the entry's `rule` field
 states it (T-100). That is what the log is for, and a copy of the rule in a comment is a copy that

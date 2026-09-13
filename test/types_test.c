@@ -1,5 +1,6 @@
-// The representation of a type: the table and its interning, identity
-// (D3.12, D17.1) and the level model (D5.2).
+// The representation of a type: the table and its interning, identity and
+// the level model.
+// D3.12, D17.1, D5.2
 //
 // The conversions are tested in types_convert_test.c, the sizes, the layout
 // and the internal errors in types_layout_test.c, the builder and the
@@ -76,7 +77,8 @@ TEST(a_nominal_type_is_one_node_per_declaration, {
     tenv_init(&e);
     // Two structs with the same name and different declarations are two
     // types; one declaration is one node, however often it is asked for, so
-    // no two nodes of a struct can split the types built from it (D3.12).
+    // no two nodes of a struct can split the types built from it.
+    // D3.12
     const type_t* a = type_struct(&e.tt, str_from_cstr("p1"), "p1");
     const type_t* b = type_struct(&e.tt, str_from_cstr("p1"), "p2");
     TEST_ASSERT_TRUE(a != b);
@@ -145,7 +147,8 @@ TEST(type_classes_answer_for_whole_types, {
     tenv_free(&e);
 })
 
-// ---- identity (D3.12, D17.1) -----------------------------------------------------
+// ---- identity --------------------------------------------------------------------
+// D3.12, D17.1
 
 TEST(identity_of_primitives_is_the_name, {
     tenv_t e;
@@ -205,7 +208,8 @@ TEST(identity_of_voidptr_and_string_is_the_own_mark, {
     TEST_ASSERT_TRUE(type_equal(tenv_type(&e, "void*"), tenv_type(&e, "void*")));
     TEST_ASSERT_FALSE(type_equal(tenv_type(&e, "void*"), tenv_type(&e, "void* own")));
     TEST_ASSERT_FALSE(type_equal(tenv_type(&e, "string"), tenv_type(&e, "string own")));
-    // `string` is distinct from `char@` and `u8@` (D3.7).
+    // `string` is distinct from `char@` and `u8@`.
+    // D3.7
     TEST_ASSERT_FALSE(type_equal(tenv_type(&e, "string"), tenv_type(&e, "char@")));
     TEST_ASSERT_FALSE(type_equal(tenv_type(&e, "string"), tenv_type(&e, "u8@")));
     TEST_ASSERT_FALSE(type_equal(tenv_type(&e, "void*"), tenv_type(&e, "i32*")));
@@ -225,7 +229,8 @@ TEST(identity_of_function_types_is_structural, {
     TEST_ASSERT_FALSE(type_equal(tenv_fn(&e, i32, i32, NULL), tenv_fn(&e, i32, i64, NULL)));
     TEST_ASSERT_FALSE(type_equal(tenv_fn(&e, i32, i32, NULL), tenv_fn(&e, i32, i32, i32)));
     TEST_ASSERT_FALSE(type_equal(tenv_fn(&e, v, NULL, NULL), tenv_fn(&e, i32, NULL, NULL)));
-    // Pointee mutability and `own` of a parameter (D3.10, D17.1).
+    // Pointee mutability and `own` of a parameter.
+    // D3.10, D17.1
     TEST_ASSERT_FALSE(type_equal(tenv_fn(&e, v, tenv_type(&e, "node*"), NULL),
                                  tenv_fn(&e, v, tenv_type(&e, "node mut*"), NULL)));
     TEST_ASSERT_FALSE(type_equal(tenv_fn(&e, v, tenv_type(&e, "node*"), NULL),
@@ -249,8 +254,9 @@ TEST(same_shape_ignores_mut_and_own, {
     TEST_ASSERT_FALSE(type_same_shape(tenv_type(&e, "i32[4]"), tenv_type(&e, "i32@")));
     TEST_ASSERT_FALSE(type_same_shape(tenv_type(&e, "string"), tenv_type(&e, "char@")));
     // A function type is compared whole: the marks of its parameters and
-    // result are part of its identity, not of the chain that reaches it
-    // (D3.10), so they survive `type_same_shape`.
+    // result are part of its identity, not of the chain that reaches it, so
+    // they survive `type_same_shape`.
+    // D3.10
     const type_t* v = type_void(&e.tt);
     const type_t* takes_node = tenv_fn(&e, v, tenv_type(&e, "node*"), NULL);
     const type_t* takes_mut = tenv_fn(&e, v, tenv_type(&e, "node mut*"), NULL);
@@ -267,7 +273,8 @@ TEST(same_shape_ignores_mut_and_own, {
     tenv_free(&e);
 })
 
-// ---- the level model (D5.2) ------------------------------------------------------
+// ---- the level model -------------------------------------------------------------
+// D5.2
 
 TEST(the_levels_of_a_chain_of_suffixes, {
     tenv_t e;
@@ -282,7 +289,8 @@ TEST(the_levels_of_a_chain_of_suffixes, {
     TEST_ASSERT_EQ_UINT64((uint64_t)type_levels(tenv_type(&e, "i32[4]*")), (uint64_t)1);
     TEST_ASSERT_EQ_UINT64((uint64_t)type_levels(tenv_type(&e, "i32[3][4]")), (uint64_t)0);
     TEST_ASSERT_EQ_UINT64((uint64_t)type_levels(tenv_type(&e, "point")), (uint64_t)0);
-    // `string` and `void*` have no level behind the binding (D5.2, D3.11).
+    // `string` and `void*` have no level behind the binding.
+    // D5.2, D3.11
     TEST_ASSERT_EQ_UINT64((uint64_t)type_levels(tenv_type(&e, "string")), (uint64_t)0);
     TEST_ASSERT_EQ_UINT64((uint64_t)type_levels(tenv_type(&e, "void*")), (uint64_t)0);
     TEST_ASSERT_EQ_UINT64((uint64_t)type_levels(tenv_type(&e, "i32[4]@")), (uint64_t)1);

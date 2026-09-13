@@ -1,8 +1,9 @@
-// The one silent failure mode of D3.8: fort computes struct layout itself and
-// the C ABI computes it independently, and a disagreement neither fails to
-// compile nor fails a language test -- it reads the wrong bytes at the only
-// boundary that can see it, which is pointer-based C interop (D9.9, "Struct
-// layout stays C-compatible, so pointer-based interop works").
+// The one silent failure mode: fort computes struct layout itself and the C
+// ABI computes it independently, and a disagreement neither fails to compile
+// nor fails a language test -- it reads the wrong bytes at the only boundary
+// that can see it, which is pointer-based C interop ("Struct layout stays
+// C-compatible, so pointer-based interop works").
+// D3.8, D9.9
 //
 // So every struct here is written twice: once as the field list
 // `type_layout_struct` lays out and once as the C struct it must equal, and
@@ -15,13 +16,14 @@
 // with natural alignment and fort has no type whose C alignment differs
 // between them: the widest are 8 bytes (`i64`, `f64`, every pointer, and the
 // two words of a span). `long double`, the one scalar C lays out differently
-// on the two, has no fort spelling (D3.1). test/lang/run/ffi/006 closes the
+// on the two, has no fort spelling. test/lang/run/ffi/006 closes the
 // remaining gap on the target itself, where a C helper compiled by the cross
 // clang reads fields of a struct fort allocated.
+// D3.1
 //
-// The layout algorithm's own rules -- the order, the ceiling of D3.4, the
-// cycles of D3.8 -- are tested in types_layout_test.c; this suite only holds
-// it against C.
+// The layout algorithm's own rules -- the order, the ceiling, the cycles --
+// are tested in types_layout_test.c; this suite only holds it against C.
+// D3.4, D3.8
 #include <stdalign.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -37,8 +39,9 @@
 // The most fields any mirror below has.
 enum { MAX_FIELDS = 4 };
 
-// A span and a `string` are one two-word header and are never split (D9.9),
-// so their mirror is the runtime's own `struct fort_span` (D3.5, D3.7).
+// A span and a `string` are one two-word header and are never split, so their
+// mirror is the runtime's own `struct fort_span`.
+// D9.9, D3.5, D3.7
 struct span_mirror {
     void* ptr;
     uint64_t len;
@@ -75,8 +78,9 @@ struct grid_mirror {
     uint8_t tag;
 };
 
-// `bool` is `i1` in a value and `i8` in memory (D19.2), so in a struct it is
-// C's `_Bool`.
+// `bool` is `i1` in a value and `i8` in memory, so in a struct it is C's
+// `_Bool`.
+// D19.2
 struct flags_mirror {
     bool on;
     int32_t n;
@@ -100,16 +104,18 @@ struct refs_mirror {
     void* opaque;
 };
 
-// An enum's underlying type is `i32` and its size 4 (D3.9), so its mirror is
+// An enum's underlying type is `i32` and its size 4, so its mirror is
 // `int32_t` and not a C `enum`, whose underlying type C leaves to the
 // implementation.
+// D3.9
 struct tagged_mirror {
     uint8_t tag;
     int32_t colour;
     int64_t big;
 };
 
-// `char` is an unsigned byte (D3.2) and `f32` is C's `float` (D3.1).
+// `char` is an unsigned byte and `f32` is C's `float`.
+// D3.2, D3.1
 struct narrow_mirror {
     char first;
     float weight;
@@ -187,8 +193,9 @@ TEST(a_struct_whose_largest_member_is_first_keeps_its_trailing_padding, {
     TEST_ASSERT_TRUE(laid_out(s));
     TEST_ASSERT_EQ_UINT64(offsets[0], (uint64_t)offsetof(struct tail_mirror, big));
     TEST_ASSERT_EQ_UINT64(offsets[1], (uint64_t)offsetof(struct tail_mirror, tag));
-    // The size passes the last field, because C rounds it up to the alignment
-    // (D3.8): a copy that stopped at the last byte written would lose it.
+    // The size passes the last field, because C rounds it up to the
+    // alignment: a copy that stopped at the last byte written would lose it.
+    // D3.8
     TEST_ASSERT_EQ_UINT64(type_sizeof(s), (uint64_t)sizeof(struct tail_mirror));
     TEST_ASSERT_EQ_UINT64(type_alignof(s), (uint64_t)alignof(struct tail_mirror));
     tenv_free(&e);
@@ -205,7 +212,8 @@ TEST(an_array_strides_by_the_padded_size_of_its_element_struct, {
     TEST_ASSERT_TRUE(laid_out(small));
     TEST_ASSERT_EQ_UINT64(type_sizeof(small), (uint64_t)sizeof(struct small_mirror));
     // The fields occupy five bytes and the element strides by eight, which is
-    // what an array of the mirror does (D3.4, D3.8).
+    // what an array of the mirror does.
+    // D3.4, D3.8
     const type_t* array = type_array(&e.tt, small, 3);
     TEST_ASSERT_EQ_UINT64(type_sizeof(array), (uint64_t)sizeof(struct small_mirror[3]));
     TEST_ASSERT_EQ_UINT64(type_alignof(array), (uint64_t)alignof(struct small_mirror[3]));
@@ -231,7 +239,8 @@ TEST(a_nested_struct_field_lands_where_c_puts_it, {
     TEST_ASSERT_TRUE(laid_out(s));
     TEST_ASSERT_EQ_UINT64(offsets[0], (uint64_t)offsetof(struct nest_mirror, tag));
     // The inner struct's alignment is the outer one's, so the field is pushed
-    // past seven bytes of padding (D3.8).
+    // past seven bytes of padding.
+    // D3.8
     TEST_ASSERT_EQ_UINT64(offsets[1], (uint64_t)offsetof(struct nest_mirror, inner));
     TEST_ASSERT_TRUE(
         matches(s, (uint64_t)sizeof(struct nest_mirror), (uint64_t)alignof(struct nest_mirror)));
@@ -270,8 +279,9 @@ TEST(a_bool_field_occupies_the_byte_c_gives_it, {
     fields[2] = tenv_type(&e, "bool");
     const type_t* s = lay_out(&e, "flags_abi", fields, 3, offsets);
     TEST_ASSERT_TRUE(laid_out(s));
-    // `bool` is `i1` in a value and one byte in memory, as C's `_Bool` is
-    // (D19.2), so it pads like a `u8` and never like an `i32`.
+    // `bool` is `i1` in a value and one byte in memory, as C's `_Bool` is, so
+    // it pads like a `u8` and never like an `i32`.
+    // D19.2
     TEST_ASSERT_EQ_UINT64(offsets[0], (uint64_t)offsetof(struct flags_mirror, on));
     TEST_ASSERT_EQ_UINT64(offsets[1], (uint64_t)offsetof(struct flags_mirror, n));
     TEST_ASSERT_EQ_UINT64(offsets[2], (uint64_t)offsetof(struct flags_mirror, off));
@@ -291,7 +301,8 @@ TEST(a_span_and_a_string_field_are_one_two_word_header_each, {
     const type_t* s = lay_out(&e, "spanful_abi", fields, 3, offsets);
     TEST_ASSERT_TRUE(laid_out(s));
     // A span or `string` is one hidden pointer and is never split into two
-    // scalars (D9.9), so each field is one `struct fort_span`.
+    // scalars, so each field is one `struct fort_span`.
+    // D9.9
     TEST_ASSERT_EQ_UINT64(offsets[0], (uint64_t)offsetof(struct spanful_mirror, tag));
     TEST_ASSERT_EQ_UINT64(offsets[1], (uint64_t)offsetof(struct spanful_mirror, name));
     TEST_ASSERT_EQ_UINT64(offsets[2], (uint64_t)offsetof(struct spanful_mirror, vals));
@@ -322,9 +333,10 @@ TEST(pointer_and_function_pointer_fields_match_c_pointers, {
 TEST(an_enum_field_is_four_bytes_wide, {
     tenv_t e;
     tenv_init(&e);
-    // An enum is `i32` and 4 bytes (D3.9), so a field of one pads like an
-    // `i32`: laid out as anything wider it would move the field after it and
-    // the struct's size with it.
+    // An enum is `i32` and 4 bytes, so a field of one pads like an `i32`:
+    // laid out as anything wider it would move the field after it and the
+    // struct's size with it.
+    // D3.9
     const type_t* fields[3];
     uint64_t offsets[3];
     fields[0] = tenv_type(&e, "u8");
@@ -343,8 +355,9 @@ TEST(an_enum_field_is_four_bytes_wide, {
 TEST(char_and_f32_fields_match_their_c_spellings, {
     tenv_t e;
     tenv_init(&e);
-    // `char` is an unsigned byte and `f32` is C's `float` (D3.1, D3.2), so
-    // the `f32` is 4-aligned and the byte after it is not.
+    // `char` is an unsigned byte and `f32` is C's `float`, so the `f32` is
+    // 4-aligned and the byte after it is not.
+    // D3.1, D3.2
     const type_t* fields[3];
     uint64_t offsets[3];
     fields[0] = tenv_type(&e, "char");
@@ -379,8 +392,8 @@ TEST(a_field_after_a_nested_struct_stands_past_its_trailing_padding, {
     tenv_init(&e);
     // The C divergence a layout written by hand falls into: the inner struct
     // occupies five bytes of fields and eight of storage, and the field after
-    // it stands at 8, because a struct's size carries its padding with it
-    // (D3.8).
+    // it stands at 8, because a struct's size carries its padding with it.
+    // D3.8
     const type_t* inner_fields[2];
     uint64_t inner_offsets[2];
     inner_fields[0] = tenv_type(&e, "i32");
@@ -403,8 +416,9 @@ TEST(a_field_after_a_nested_struct_stands_past_its_trailing_padding, {
 TEST(an_owning_field_changes_no_offset, {
     tenv_t e;
     tenv_init(&e);
-    // `own` is a compile-time mark and no part of the representation (D17.1),
-    // so the owning form of a struct has the layout of the plain one.
+    // `own` is a compile-time mark and no part of the representation, so the
+    // owning form of a struct has the layout of the plain one.
+    // D17.1
     const type_t* plain_fields[2];
     uint64_t plain_offsets[2];
     plain_fields[0] = tenv_type(&e, "u8");

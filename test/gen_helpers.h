@@ -1,12 +1,13 @@
-// The environment the emitter suites share (toolchain.md 6, D19): a sandbox
-// directory under /tmp that one test writes its module into, the front end
-// run over it, and the module text the emitter produced.
+// The environment the emitter suites share (toolchain.md 6): a sandbox
+// directory under /tmp that one test writes its module into, the front end run
+// over it, and the module text the emitter produced.
+// D19
 //
 // A test runs with the sandbox as its working directory, so the `@.file.N`
 // constants hold the file name the compiler opened and nothing in the text
-// depends on where the suite was built (D19.5). It emits before check_free,
-// because every annotation the emitter reads points into the checker
-// (check.h).
+// depends on where the suite was built. It emits before check_free, because
+// every annotation the emitter reads points into the checker (check.h).
+// D19.5
 //
 // The helpers are static inline and the state is per suite, so a suite that
 // uses only some of them still builds under -Werror.
@@ -36,27 +37,28 @@
 
 enum { GEN_PATH_CAP = 512 };
 
-// The verifier every emitted module must pass (D19.1); CMake passes its path,
-// and falls back to this name when it found none at configure time, so a
-// missing verifier surfaces here rather than at configure time.
+// The verifier every emitted module must pass; CMake passes its path, and
+// falls back to this name when it found none at configure time, so a missing
+// verifier surfaces here rather than at configure time.
+// D19.1
 #ifndef FORT_OPT
 #define FORT_OPT "opt-18"
 #endif
 
-// The status a shell and posix_spawn's child both use when exec fails: the
-// one exit status that means the tool is missing rather than unhappy.
+/// The status a shell and posix_spawn's child both use when exec fails: the
+/// one exit status that means the tool is missing rather than unhappy.
 enum { EXEC_FAILED_STATUS = 127 };
 
-// The environment of the spawned verifier. POSIX declares `environ` in
-// <unistd.h>, but glibc's is behind `#ifdef __USE_GNU`, which -std=c11 with
-// _POSIX_C_SOURCE does not set, so the suite declares it itself.
+/// The environment of the spawned verifier. POSIX declares `environ` in
+/// <unistd.h>, but glibc's is behind `#ifdef __USE_GNU`, which -std=c11 with
+/// _POSIX_C_SOURCE does not set, so the suite declares it itself.
 extern char** environ;
 
-// Stops the suite when a sandbox path did not fit its buffer, naming the path
-// that overflowed: a truncated path names a file other than the one the test
-// asked for, so writing it, reading it or removing it would answer about the
-// wrong module, or delete the wrong file. `written` is the snprintf result:
-// using it is also what keeps gcc from warning that the call may truncate.
+/// Stops the suite when a sandbox path did not fit its buffer, naming the path
+/// that overflowed: a truncated path names a file other than the one the test
+/// asked for, so writing it, reading it or removing it would answer about the
+/// wrong module, or delete the wrong file. `written` is the snprintf result:
+/// using it is also what keeps gcc from warning that the call may truncate.
 static inline void gen_path_fits(int written, size_t cap, const char* what) {
     if (written < 0 || (size_t)written >= cap) {
         TEST_UNUSED(fprintf(stderr, "gen: path too long for %zu bytes: %s\n", cap, what));
@@ -64,8 +66,8 @@ static inline void gen_path_fits(int written, size_t cap, const char* what) {
     }
 }
 
-// Writes `<dir>/<rel>` into `dst` under that rule, naming both halves, since
-// either of them may be the long one.
+/// Writes `<dir>/<rel>` into `dst` under that rule, naming both halves, since
+/// either of them may be the long one.
 static inline void gen_join_path(char* dst, size_t cap, const char* dir, const char* rel) {
     const int written = snprintf(dst, cap, "%s/%s", dir, rel);
     if (written < 0 || (size_t)written >= cap) {
@@ -74,8 +76,8 @@ static inline void gen_join_path(char* dst, size_t cap, const char* dir, const c
     }
 }
 
-// The block report just written, or a fixed message when it did not fit: a
-// truncated report would name a block the module does not hold.
+/// The block report just written, or a fixed message when it did not fit: a
+/// truncated report would name a block the module does not hold.
 static inline const char* gen_fitted(const char* report, int written, size_t cap) {
     if (written < 0 || (size_t)written >= cap) {
         return "the block report did not fit its buffer";
@@ -83,7 +85,7 @@ static inline const char* gen_fitted(const char* report, int written, size_t cap
     return report;
 }
 
-// Removes a directory and everything below it.
+/// Removes a directory and everything below it.
 static inline void gen_remove_tree(const char* path) {
     DIR* dir = opendir(path);
     if (dir == NULL) {
@@ -111,7 +113,7 @@ static sb_t gen_diags;
 static bool gen_open = false;
 static bool gen_ok = false;
 
-// Releases the module text, the capture and the tree of the previous test.
+/// Releases the module text, the capture and the tree of the previous test.
 static inline void gen_done(void) {
     if (!gen_open) {
         return;
@@ -125,9 +127,9 @@ static inline void gen_done(void) {
     gen_open = false;
 }
 
-// A broken environment, not a failing module: the suite says which tool is
-// missing and ends with the test framework's error status, the way gen_begin
-// does when it cannot make its sandbox.
+/// A broken environment, not a failing module: the suite says which tool is
+/// missing and ends with the test framework's error status, the way gen_begin
+/// does when it cannot make its sandbox.
 static inline void gen_no_verifier(const char* what) {
     TEST_UNUSED(fputs("gen: ", stderr));
     TEST_UNUSED(fputs(what, stderr));
@@ -157,8 +159,9 @@ static inline void gen_begin(void) {
     gen_ok = false;
 }
 
-// Writes `text` at `name` in the sandbox, making the one directory a nested
-// module path needs (`util/chars.ft` is the module `util.chars`, D9.1).
+/// Writes `text` at `name` in the sandbox, making the one directory a nested
+/// module path needs (`util/chars.ft` is the module `util.chars`).
+/// D9.1
 static inline void gen_write(const char* name, const char* text) {
     char path[GEN_PATH_CAP];
     const char* slash = strchr(name, '/');
@@ -178,9 +181,9 @@ static inline void gen_write(const char* name, const char* text) {
     TEST_UNUSED(fclose(file));
 }
 
-// Loads, checks and emits the module of the file `name` of the sandbox, with
-// the sandbox as the working directory. Returns whether every phase
-// succeeded; the module text is in `gen_module` either way.
+/// Loads, checks and emits the module of the file `name` of the sandbox, with
+/// the sandbox as the working directory. Returns whether every phase
+/// succeeded; the module text is in `gen_module` either way.
 static inline bool gen_emit_file(const char* name, gen_options_t opts) {
     if (getcwd(gen_home, sizeof gen_home) == NULL) {
         return false;
@@ -191,11 +194,12 @@ static inline bool gen_emit_file(const char* name, gen_options_t opts) {
     module_set_t set;
     module_set_init(&set);
     if (gen_std[0] != '\0') {
-        // A standard library directory makes the loader take `std.rt` into
-        // the closure as a root, which is what a build does (D9.10); without
-        // one the emitter's calls into the runtime reach a name the module
-        // neither defines nor declares, which is what gen_runtime_declarations
-        // answers for.
+        // A standard library directory makes the loader take `std.rt` into the
+        // closure as a root, which is what a build does; without one the
+        // emitter's calls into the runtime reach a name the module neither
+        // defines nor declares, which is what gen_runtime_declarations answers
+        // for.
+        // D9.10
         module_set_std_dir(&set, gen_std);
     }
     const bool loaded = module_set_load(&set, name);
@@ -218,7 +222,8 @@ static inline bool gen_emit_file(const char* name, gen_options_t opts) {
     return loaded && checked && emitted;
 }
 
-// The module of `text` as `main.ft`, in checked mode (D11.1).
+/// The module of `text` as `main.ft`, in checked mode.
+/// D11.1
 static inline bool emit(const char* text) {
     gen_begin();
     gen_write("main.ft", text);
@@ -229,7 +234,8 @@ static inline bool emit(const char* text) {
     return gen_ok;
 }
 
-// The module of `text` as `main.ft`, in release mode (D11.1).
+/// The module of `text` as `main.ft`, in release mode.
+/// D11.1
 static inline bool emit_release(const char* text) {
     gen_begin();
     gen_write("main.ft", text);
@@ -240,7 +246,8 @@ static inline bool emit_release(const char* text) {
     return gen_ok;
 }
 
-// The module of `text` as `main.ft`, with `--no-bounds-check` (D10.6).
+/// The module of `text` as `main.ft`, with `--no-bounds-check`.
+/// D10.6
 static inline bool emit_unchecked(const char* text) {
     gen_begin();
     gen_write("main.ft", text);
@@ -251,9 +258,10 @@ static inline bool emit_unchecked(const char* text) {
     return gen_ok;
 }
 
-// The module of a two-file program: `other` is written beside the entry file
-// and reached by an `import`, so the closure has two modules and the emitter
-// walks them in dependency order (D9.10, item 1).
+/// The module of a two-file program: `other` is written beside the entry file
+/// and reached by an `import`, so the closure has two modules and the emitter
+/// walks them in dependency order (item 1).
+/// D9.10
 static inline bool emit_two(const char* entry_name,
                             const char* entry_text,
                             const char* other_name,
@@ -268,9 +276,10 @@ static inline bool emit_two(const char* entry_name,
     return gen_ok;
 }
 
-// The module of a program of `count` files: `names[i]` holds `texts[i]` and
-// `names[0]` is the entry file, so a closure of any size is emitted from one
-// call (D9.10). A name holding a `/` is a nested module path (D9.1).
+/// The module of a program of `count` files: `names[i]` holds `texts[i]` and
+/// `names[0]` is the entry file, so a closure of any size is emitted from one
+/// call. A name holding a `/` is a nested module path.
+/// D9.10, D9.1
 static inline bool emit_files(const char* const* names, const char* const* texts, uint64_t count) {
     gen_begin();
     for (uint64_t i = count; i > 0; i--) {
@@ -283,11 +292,11 @@ static inline bool emit_files(const char* const* names, const char* const* texts
     return gen_ok;
 }
 
-// The module of `text` as `main.ft` with `runtime` as `std/rt.ft` beside it
-// and that directory named as the standard library: the closure then holds
-// `std.rt` like every program the compiler builds (D9.10, D13.1), so the
-// emitted module holds the runtime's own definitions and the attribute group
-// item 14 puts on them.
+/// The module of `text` as `main.ft` with `runtime` as `std/rt.ft` beside it
+/// and that directory named as the standard library: the closure then holds
+/// `std.rt` like every program the compiler builds, so the emitted module holds
+/// the runtime's own definitions and the attribute group item 14 puts on them.
+/// D9.10, D13.1
 static inline bool emit_with_runtime(const char* runtime, const char* text) {
     gen_begin();
     gen_write("std/rt.ft", runtime);
@@ -300,8 +309,9 @@ static inline bool emit_with_runtime(const char* runtime, const char* text) {
     return gen_ok;
 }
 
-// The module of `text` under the file name `name`, which the `@.file.N`
-// constants of its checks hold (D19.5).
+/// The module of `text` under the file name `name`, which the `@.file.N`
+/// constants of its checks hold.
+/// D19.5
 static inline bool emit_as(const char* name, const char* text) {
     gen_begin();
     gen_write(name, text);
@@ -312,18 +322,18 @@ static inline bool emit_as(const char* name, const char* text) {
     return gen_ok;
 }
 
-// The emitted module.
+/// The emitted module.
 static inline const char* ir(void) {
     return sb_cstr(&gen_module);
 }
 
-// The diagnostics the run reported, one line each.
+/// The diagnostics the run reported, one line each.
 static inline const char* gen_said(void) {
     return sb_cstr(&gen_diags);
 }
 
-// `fragment` when the module holds it, and the whole module otherwise, so a
-// failing assertion shows what was emitted instead.
+/// `fragment` when the module holds it, and the whole module otherwise, so a
+/// failing assertion shows what was emitted instead.
 static inline const char* found(const char* fragment) {
     if (strstr(ir(), fragment) != NULL) {
         return fragment;
@@ -331,8 +341,8 @@ static inline const char* found(const char* fragment) {
     return ir();
 }
 
-// "absent" when the module does not hold `fragment`, and the whole module
-// otherwise: the form a test asserting that nothing was emitted uses.
+/// "absent" when the module does not hold `fragment`, and the whole module
+/// otherwise: the form a test asserting that nothing was emitted uses.
 static inline const char* absent(const char* fragment) {
     if (strstr(ir(), fragment) == NULL) {
         return "absent";
@@ -340,8 +350,8 @@ static inline const char* absent(const char* fragment) {
     return ir();
 }
 
-// How many times `fragment` occurs in the module: what a test asking that one
-// definition, declaration or table was emitted once counts (item 8).
+/// How many times `fragment` occurs in the module: what a test asking that one
+/// definition, declaration or table was emitted once counts (item 8).
 static inline uint64_t occurrences(const char* fragment) {
     uint64_t n = 0;
     const char* p = strstr(ir(), fragment);
@@ -352,8 +362,8 @@ static inline uint64_t occurrences(const char* fragment) {
     return n;
 }
 
-// The offset of `fragment` in the module, or -1: two of them in order say
-// that one section precedes another (item 1).
+/// The offset of `fragment` in the module, or -1: two of them in order say
+/// that one section precedes another (item 1).
 static inline int64_t at(const char* fragment) {
     const char* hit = strstr(ir(), fragment);
     if (hit == NULL) {
@@ -362,44 +372,44 @@ static inline int64_t at(const char* fragment) {
     return (int64_t)(hit - ir());
 }
 
-// Whether `first` appears before `second`, both being present.
+/// Whether `first` appears before `second`, both being present.
 static inline bool before(const char* first, const char* second) {
     const int64_t a = at(first);
     const int64_t b = at(second);
     return a >= 0 && b >= 0 && a < b;
 }
 
-// Whether `text` begins with the literal `prefix`, whose length the literal
-// itself gives, so that no length is written twice.
+/// Whether `text` begins with the literal `prefix`, whose length the literal
+/// itself gives, so that no length is written twice.
 static inline bool gen_starts_with(const char* text, const char* prefix) {
     return strncmp(text, prefix, strlen(prefix)) == 0;
 }
 
-// Whether the line at `p` begins one of the four terminators the emitter
-// writes: `br`, `ret`, `unreachable` and the `switch` of a fort switch (item
-// 10).
+/// Whether the line at `p` begins one of the four terminators the emitter
+/// writes: `br`, `ret`, `unreachable` and the `switch` of a fort switch (item
+/// 10).
 static inline bool gen_is_terminator(const char* p) {
     return gen_starts_with(p, "  br ") || gen_starts_with(p, "  ret ") ||
            gen_starts_with(p, "  unreachable") || gen_starts_with(p, "  switch ");
 }
 
-// Whether the line at `p` begins an instruction rather than continuing the
-// one above. Every instruction is indented by exactly two spaces, so a line
-// indented further, or one holding the `]` that closes a `switch`, is a
-// continuation of the `switch` above it, which is the one terminator LLVM
-// prints over several lines (item 10).
+/// Whether the line at `p` begins an instruction rather than continuing the
+/// one above. Every instruction is indented by exactly two spaces, so a line
+/// indented further, or one holding the `]` that closes a `switch`, is a
+/// continuation of the `switch` above it, which is the one terminator LLVM
+/// prints over several lines (item 10).
 static inline bool gen_is_instruction(const char* p) {
     return gen_starts_with(p, "  ") && p[2] != ' ' && p[2] != ']';
 }
 
-// "one terminator per block" when every block of every definition in `text`
-// ends in exactly one terminator and holds no instruction after it, and the
-// offending block's label otherwise: the structural half of what
-// `opt -passes=verify` confirms (item 10), stated over the text so that a
-// failing assertion names the block.
-//
-// A block begins at a label line, which is the only unindented line inside a
-// definition, and ends at the next label or at the closing brace.
+/// "one terminator per block" when every block of every definition in `text`
+/// ends in exactly one terminator and holds no instruction after it, and the
+/// offending block's label otherwise: the structural half of what
+/// `opt -passes=verify` confirms (item 10), stated over the text so that a
+/// failing assertion names the block.
+///
+/// A block begins at a label line, which is the only unindented line inside a
+/// definition, and ends at the next label or at the closing brace.
 static inline const char* gen_block_terminators_of(const char* text) {
     static char report[GEN_PATH_CAP];
     const char* p = text;
@@ -462,31 +472,32 @@ static inline const char* gen_block_terminators_of(const char* text) {
     return "one terminator per block";
 }
 
-// The same over the module the last emission produced.
+/// The same over the module the last emission produced.
 static inline const char* gen_block_terminators(void) {
     return gen_block_terminators_of(ir());
 }
 
-// Runs the block scan and then the LLVM verifier over the emitted module:
-// every module the compiler emits must pass `opt -passes=verify` (D19.1).
-// Returns "verified", the scan's report, or the module when the verifier
-// rejects it, so a failing assertion shows what went wrong.
-//
-// The scan runs first and is not redundant: `opt` exits 0 on a block holding
-// two terminators, silently splitting it in two and printing
-// `; No predecessors!` on the second, so the verifier alone does not prove
-// item 10's "every block ends in exactly one terminator". Every caller of
-// `verified` therefore asserts both halves at once.
-// Appends a `declare` for every entry point of toolchain.md 5.1, rendered
-// from the one table the emitter calls them through (runtime_sig.h).
-//
-// These suites emit a module with no `std.rt` in its closure, so the calls the
-// emitter writes into the runtime reach a name the module neither defines nor
-// declares, which LLVM rejects as a forward reference to nothing. A program
-// the compiler builds defines them itself (item 8), so the declarations are
-// written only into the file the verifier reads and never into `ir()`: what
-// every assertion in these suites sees stays the emitter's own text. This is
-// what `test/ir/*.ll` does for the same reason.
+/// Runs the block scan and then the LLVM verifier over the emitted module:
+/// every module the compiler emits must pass `opt -passes=verify`. Returns
+/// "verified", the scan's report, or the module when the verifier rejects it,
+/// so a failing assertion shows what went wrong.
+/// D19.1
+///
+/// The scan runs first and is not redundant: `opt` exits 0 on a block holding
+/// two terminators, silently splitting it in two and printing
+/// `; No predecessors!` on the second, so the verifier alone does not prove
+/// item 10's "every block ends in exactly one terminator". Every caller of
+/// `verified` therefore asserts both halves at once.
+/// Appends a `declare` for every entry point of toolchain.md 5.1, rendered
+/// from the one table the emitter calls them through (runtime_sig.h).
+///
+/// These suites emit a module with no `std.rt` in its closure, so the calls the
+/// emitter writes into the runtime reach a name the module neither defines nor
+/// declares, which LLVM rejects as a forward reference to nothing. A program
+/// the compiler builds defines them itself (item 8), so the declarations are
+/// written only into the file the verifier reads and never into `ir()`: what
+/// every assertion in these suites sees stays the emitter's own text. This is
+/// what `test/ir/*.ll` does for the same reason.
 static inline bool gen_defines(const char* symbol) {
     const char* line = sb_cstr(&gen_module);
     while (line != NULL && *line != '\0') {
@@ -569,8 +580,8 @@ static inline const char* verified(void) {
     return "verified";
 }
 
-// A program whose body is `body` inside `fn i32 main()`, the shape most of
-// the tests need.
+/// A program whose body is `body` inside `fn i32 main()`, the shape most of
+/// the tests need.
 static char gen_program_text[4096];
 static inline const char* in_main(const char* body) {
     TEST_UNUSED(snprintf(

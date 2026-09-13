@@ -221,7 +221,8 @@ TEST(dump_of_null_is_nil, {
 })
 
 // The node that stands for a region the parser skipped after a syntax error
-// prints without children, whatever was left in it (D14.2).
+// prints without children, whatever was left in it.
+// D14.2
 TEST(dump_of_an_error_node_has_no_children, {
     reset();
     ast_node_t* err = node(AST_ERROR);
@@ -287,7 +288,8 @@ TEST(dump_of_operators_uses_the_token_spelling, {
 })
 
 // A type prints its base, then the marks of the base position, then its
-// suffixes in source order: `u8 mut@ own` (D5.3, D17.2).
+// suffixes in source order: `u8 mut@ own`.
+// D5.3, D17.2
 TEST(dump_of_a_type_with_marks_and_suffixes, {
     reset();
     ast_node_t* t = prim_type(PRIM_U8, AST_FLAG_MUT);

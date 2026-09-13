@@ -25,8 +25,9 @@ enum {
 
 // The JSON form of every byte from 0x00 to CONTROL_MAX, written out here so
 // that the table is a golden and not a second copy of the writer's rule: the
-// control bytes fort spells out (D2.8) are spelled out, every other one is
-// \u00XX with uppercase hex digits.
+// control bytes fort spells out are spelled out, every other one is \u00XX
+// with uppercase hex digits.
+// D2.8
 static const char* const CONTROL_FORMS[] = {
     "\\u0000", "\\u0001", "\\u0002", "\\u0003", "\\u0004", "\\u0005", "\\u0006", "\\u0007",
     "\\u0008", "\\t",     "\\n",     "\\u000B", "\\u000C", "\\r",     "\\u000E", "\\u000F",
@@ -414,7 +415,8 @@ TEST(the_quote_and_the_backslash_are_escaped, {
     end();
 })
 
-// The control bytes fort spells out are spelled out here too (D2.8).
+// The control bytes fort spells out are spelled out here too.
+// D2.8
 TEST(newline_tab_and_return_are_spelled_out, {
     begin();
     json_cstr(&w, "\n\t\r");
@@ -432,8 +434,9 @@ TEST(a_key_is_escaped_like_a_string, {
     end();
 })
 
-// Every byte of the control range, the NUL of D2.8's \0 included, has the
-// form the golden table gives.
+// Every byte of the control range, the NUL that the `\0` escape names
+// included, has the form the golden table gives.
+// D2.8
 TEST(every_control_byte_is_escaped, {
     for (int byte = 0; byte <= CONTROL_MAX; byte++) {
         write_one_byte(byte);
@@ -476,8 +479,9 @@ TEST(a_sequence_of_every_length_goes_through_verbatim, {
 })
 
 // The document is valid UTF-8 whatever the message held, so a byte that is
-// not part of a well-formed sequence becomes U+FFFD (D2.1 and D3.7 leave
-// fort source unvalidated, so a diagnostic can quote any bytes).
+// not part of a well-formed sequence becomes U+FFFD; fort source is
+// unvalidated, so a diagnostic can quote any bytes.
+// D2.1, D3.7
 TEST(a_byte_that_starts_no_sequence_becomes_the_replacement_character, {
     for (int byte = HIGH_MIN; byte <= BYTE_MAX; byte++) {
         write_one_byte(byte);

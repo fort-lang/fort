@@ -1,6 +1,7 @@
-// Unit tests of consts.h, part four: cv_cast (D3.14, D4.4), the typed folding
-// of D4.6 with the operand rules of D6.2 and D6.13, and the wrapping
-// operators of D11.2. cv_fits and cv_default_kind are in consts_fits_test.c.
+// Unit tests of consts.h, part four: cv_cast, the typed folding with the
+// operand rules, and the wrapping operators. cv_fits and cv_default_kind are in
+// consts_fits_test.c.
+// D3.14, D4.4, D4.6, D6.2, D6.13, D11.2
 #include <stdint.h>
 
 #include "consts.h"
@@ -43,7 +44,8 @@ static bool is_char(cval_t v, uint64_t code) {
     return v.kind == CV_CHAR && v.mag == code;
 }
 
-// ---- cv_cast (D3.14, D4.4, core-language.md 5.9) ------------------------------------
+// ---- cv_cast (core-language.md 5.9) -------------------------------------------------
+// D3.14, D4.4
 
 TEST(cast_0x80000000_to_i32_is_int32_min, {
     cval_t r = cv_none();
@@ -180,7 +182,8 @@ TEST(cast_to_floats_void_and_from_a_bool_to_char_are_unsupported, {
     TEST_ASSERT_FALSE(cv_cast(i(1), PRIM_F64, &r));
     TEST_ASSERT_FALSE(cv_cast(i(1), PRIM_VOID, &r));
     TEST_ASSERT_FALSE(cv_cast(cv_from_bool(true), PRIM_CHAR, &r));
-    // `char` to `bool`, a float or an enum is an error too (D3.14).
+    // `char` to `bool`, a float or an enum is an error too.
+    // D3.14
     TEST_ASSERT_FALSE(cv_cast(cv_from_char('a'), PRIM_F32, &r));
     TEST_ASSERT_FALSE(cv_cast(cv_from_char('a'), PRIM_F64, &r));
     TEST_ASSERT_FALSE(cv_cast(cv_from_char('a'), PRIM_VOID, &r));
@@ -189,17 +192,19 @@ TEST(cast_to_floats_void_and_from_a_bool_to_char_are_unsupported, {
 
 TEST(cast_of_null_strings_and_none_is_an_error, {
     cval_t r = i(1);
-    TEST_ASSERT_FALSE(cv_cast(cv_null(), PRIM_U64, &r)); // cast(null, ...) D10.5
+    // D10.5
+    TEST_ASSERT_FALSE(cv_cast(cv_null(), PRIM_U64, &r)); // cast(null, ...)
     TEST_ASSERT_TRUE(r.kind == CV_NONE);
     TEST_ASSERT_FALSE(cv_cast(cv_from_str(str_from_cstr("a")), PRIM_I32, &r));
     TEST_ASSERT_FALSE(cv_cast(cv_none(), PRIM_I32, &r));
 })
 
 TEST(the_default_type_step_of_d4_1_precedes_cv_cast, {
-    // `cast(c, T)` is not a context (D4.1): the checker gives the untyped `c`
-    // its default type (D4.5) and only then converts. The step rejects a value
-    // above i64, so cv_cast is never reached with one, and it cannot change a
-    // value that does fit i64, so cv_cast needs only the value.
+    // `cast(c, T)` is not a context: the checker gives the untyped `c` its
+    // default type and only then converts. The step rejects a value above i64,
+    // so cv_cast is never reached with one, and it cannot change a value that
+    // does fit i64, so cv_cast needs only the value.
+    // D4.1, D4.5
     cval_t r = cv_none();
     prim_kind_t k = PRIM_VOID;
     TEST_ASSERT_TRUE(cv_shl(i(1), i(63), &r)); // cast(1 << 63, i32)
@@ -219,7 +224,8 @@ TEST(the_default_type_step_of_d4_1_precedes_cv_cast, {
     TEST_ASSERT_TRUE(is_int(r, 'a'));
 })
 
-// ---- typed folding: the examples of type-system.md 10.6 (D4.6) ---------------------------
+// ---- typed folding: the examples of type-system.md 10.6 ----------------------------------
+// D4.6
 
 TEST(typed_i32_max_plus_one_is_an_error, {
     cval_t r = i(1);
@@ -300,7 +306,8 @@ TEST(typed_neg_of_min_is_an_error, {
     TEST_ASSERT_FALSE(cv_typed_neg(neg_two63(), PRIM_I64, &r));
 })
 
-// ---- typed div and rem (D6.13, D11.3) -----------------------------------------------
+// ---- typed div and rem --------------------------------------------------------------
+// D6.13, D11.3
 
 TEST(typed_div_truncates_and_rejects_min_over_minus_one, {
     cval_t r = cv_none();
@@ -393,7 +400,8 @@ TEST(typed_and_or_xor_never_leave_the_type, {
     TEST_ASSERT_TRUE(is_int(r, 0x00F0));
 })
 
-// ---- typed shifts (D6.2) -----------------------------------------------------------
+// ---- typed shifts ------------------------------------------------------------------
+// D6.2
 
 TEST(typed_shl_discards_the_bits_shifted_out, {
     cval_t r = cv_none();
@@ -456,7 +464,8 @@ TEST(typed_shr_is_arithmetic_for_signed_and_logical_for_unsigned, {
     TEST_ASSERT_TRUE(is_int(r, 8));
 })
 
-// ---- wrapping operators (D11.2) -----------------------------------------------------
+// ---- wrapping operators -------------------------------------------------------------
+// D11.2
 
 TEST(wrap_add_wraps_at_every_width, {
     TEST_ASSERT_TRUE(is_int(cv_wrap_add(i(127), i(1), PRIM_I8), -128));
@@ -524,8 +533,9 @@ static void typed_neg_on_u32(void) {
 }
 
 TEST(typed_neg_on_an_unsigned_type_is_an_internal_error, {
-    // Unary minus is signed and float only (D6.2), so the checker has already
-    // refused `-x` on an unsigned constant.
+    // Unary minus is signed and float only, so the checker has already refused
+    // `-x` on an unsigned constant.
+    // D6.2
     char err[ERR_MAX];
     const int status = run_forked(typed_neg_on_u32, err, sizeof err);
     TEST_ASSERT_EQ_INT32(status, FATAL_EXIT_STATUS);

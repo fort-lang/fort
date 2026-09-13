@@ -1,9 +1,10 @@
-// Unit tests of the deferred statements the emitter expands (toolchain.md 6
-// item 10; D7.8): a `defer` emits nothing where it stands and its statement
-// is copied into every exit that leaves its block -- falling off the end,
-// `return`, `break` and `continue` -- innermost block first and in reverse
-// textual order within a block, with the returned value read before any of it
-// runs.
+// Unit tests of the deferred statements the emitter expands
+// (toolchain.md 6 item 10): a `defer` emits nothing where it stands and its
+// statement is copied into every exit that leaves its block -- falling off
+// the end, `return`, `break` and `continue` -- innermost block first and in
+// reverse textual order within a block, with the returned value read before
+// any of it runs.
+// D7.8
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -49,7 +50,8 @@ static const char BUSY_SOURCE[] = "fn void note(i32 n) {\n}\n"
                                   "    return work(1);\n"
                                   "}\n";
 
-// ---- a defer emits nothing where it stands (D7.8) ----------------------------------
+// ---- a defer emits nothing where it stands -----------------------------------------
+// D7.8
 
 TEST(a_defer_emits_nothing_where_it_stands, {
     TEST_ASSERT_TRUE(emit("fn void note() {\n}\n"
@@ -57,7 +59,8 @@ TEST(a_defer_emits_nothing_where_it_stands, {
                           "fn i32 main() {\n    f();\n    return 0;\n}\n"));
     // The body holds the statement that stands below the `defer` first and
     // the deferred copy after it, so nothing was emitted at the `defer`
-    // itself (D7.8).
+    // itself.
+    // D7.8
     const char* want = "define dso_local void @\"main.f\"() #0 {\n"
                        "entry:\n"
                        "  call void @\"main.note\"()\n"
@@ -97,7 +100,8 @@ TEST(a_return_runs_the_innermost_block_first, {
                           "    {\n        defer note(3);\n        return 7;\n    }\n}\n"
                           "fn i32 main() {\n    return f();\n}\n"));
     // The inner block's statement, then the outer block's two in reverse
-    // order, then the `ret` (D7.8).
+    // order, then the `ret`.
+    // D7.8
     const char* want = "  call void @\"main.note\"(i32 3)\n"
                        "  call void @\"main.note\"(i32 2)\n"
                        "  call void @\"main.note\"(i32 1)\n"
@@ -127,12 +131,14 @@ TEST(each_exit_of_a_function_carries_its_own_copy, {
                           "    return 3;\n}\n"
                           "fn i32 main() {\n    return f(true);\n}\n"));
     // The set of deferred statements at an exit is static, so the code is
-    // copied into each of the two `return`s (D7.8).
+    // copied into each of the two `return`s.
+    // D7.8
     TEST_ASSERT_EQ_UINT64(occurrences("call void @\"main.note\"(i32 1)"), (uint64_t)2);
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
-// ---- the returned value is read first (D7.8, D17.5) -------------------------------
+// ---- the returned value is read first ---------------------------------------------
+// D7.8, D17.5
 
 TEST(the_returned_value_is_read_before_the_deferred_code_runs, {
     TEST_ASSERT_TRUE(emit("fn i32 f() {\n"
@@ -141,8 +147,8 @@ TEST(the_returned_value_is_read_before_the_deferred_code_runs, {
                           "    return x;\n}\n"
                           "fn i32 main() {\n    return f();\n}\n"));
     // The load of `x` stands above the deferred store, and the `ret` hands
-    // out the value that load produced, so deferred code cannot change it
-    // (D7.8).
+    // out the value that load produced, so deferred code cannot change it.
+    // D7.8
     const char* want = "  %t0 = load i32, ptr %x.0, align 4\n"
                        "  store i32 6, ptr %x.0, align 4\n"
                        "  ret i32 %t0\n";
@@ -161,7 +167,8 @@ TEST(an_aggregate_result_is_fixed_in_a_temporary_before_the_deferred_code, {
     // The `sret` block is the caller's and the caller may hold a pointer to
     // it as well, so the result lands in a temporary of the callee's own
     // first and is copied out after the deferred code has run: `return e`
-    // evaluates `e` before deferred code runs (D7.8, D8.2, item 7).
+    // evaluates `e` before deferred code runs (item 7).
+    // D7.8, D8.2
     const char* want = "  call void @llvm.memcpy.p0.p0.i64(ptr align 4 %tmp0, "
                        "ptr align 4 %p.0, i64 8, i1 false)\n"
                        "  call void @\"main.note\"()\n"
@@ -196,7 +203,8 @@ TEST(a_deferred_store_through_a_parameter_cannot_reach_the_result, {
     // The caller passes one block as the destination and as the argument, so
     // the deferred store reaches the `sret` block; the copy out of the
     // callee's temporary happens after it and overwrites what it wrote, which
-    // is what keeps the returned value the one `return` evaluated (D7.8).
+    // is what keeps the returned value the one `return` evaluated.
+    // D7.8
     TEST_ASSERT_EQ_STR(found("call void @\"main.copy_of\"(ptr %s.0, ptr %s.0)"),
                        "call void @\"main.copy_of\"(ptr %s.0, ptr %s.0)");
     const char* want = "  store i32 9, ptr %t2, align 4\n"
@@ -229,7 +237,8 @@ TEST(returning_an_own_local_empties_it_before_the_deferred_del_reads_it, {
                           "    i32 mut* own r = make();\n    del(r);\n    return 0;\n}\n"));
     // The implicit move of `return p` reads the pointer, stores null over the
     // local and only then runs `defer del(p)`, which therefore frees nothing
-    // on the returning path while the caller keeps the block (D7.8, D17.5).
+    // on the returning path while the caller keeps the block.
+    // D7.8, D17.5
     const char* want = "  %t3 = load ptr, ptr %p.0, align 8\n"
                        "  store ptr null, ptr %p.0, align 8\n"
                        "  %t4 = load ptr, ptr %p.0, align 8\n"
@@ -240,7 +249,8 @@ TEST(returning_an_own_local_empties_it_before_the_deferred_del_reads_it, {
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
-// ---- break and continue (D7.5, D7.6, D7.8) ----------------------------------------
+// ---- break and continue -----------------------------------------------------------
+// D7.5, D7.6, D7.8
 
 TEST(a_break_runs_the_deferred_code_of_the_loop_body_before_its_branch, {
     TEST_ASSERT_TRUE(emit("fn void note() {\n}\n"
@@ -260,7 +270,8 @@ TEST(a_continue_in_a_for_runs_the_deferred_code_before_the_step_block, {
                           "        defer note();\n        continue;\n    }\n"
                           "    return 0;\n}\n"));
     // `continue` branches to the step block, so the deferred statement stands
-    // before that branch and the step runs after it (D7.5, D7.8).
+    // before that branch and the step runs after it.
+    // D7.5, D7.8
     const char* want = "  call void @\"main.note\"()\n"
                        "  br label %L2\n";
     TEST_ASSERT_EQ_STR(found(want), want);
@@ -276,7 +287,8 @@ TEST(a_loop_body_with_three_exits_carries_three_copies, {
                           "        if (i == 2) { break; }\n    }\n"
                           "    return 0;\n}\n"));
     // The `continue`, the `break` and the end of the body each leave the body
-    // block, so each carries a copy (D7.8).
+    // block, so each carries a copy.
+    // D7.8
     TEST_ASSERT_EQ_UINT64(occurrences("call void @\"main.note\"()"), (uint64_t)3);
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
@@ -290,7 +302,8 @@ TEST(a_break_leaves_only_the_blocks_between_it_and_its_loop, {
                           "        { defer note(3); break; }\n    }\n"
                           "    return 0;\n}\n"));
     // The inner block and the loop body are left, the function block is not:
-    // the exit stops at the loop (D7.8).
+    // the exit stops at the loop.
+    // D7.8
     const char* want = "  call void @\"main.note\"(i32 3)\n"
                        "  call void @\"main.note\"(i32 2)\n"
                        "  br label %L2\n";
@@ -322,7 +335,8 @@ TEST(a_break_in_a_switch_in_a_loop_leaves_the_case_body_alone, {
                           "        default:\n            note(4);\n        }\n    }\n"
                           "    return 0;\n}\n"));
     // `break` inside a `switch` exits the switch, so the case body's
-    // statement runs and the loop body's does not (D7.6, D7.8).
+    // statement runs and the loop body's does not.
+    // D7.6, D7.8
     TEST_ASSERT_EQ_UINT64(occurrences("call void @\"main.note\"(i32 3)"), (uint64_t)1);
     TEST_ASSERT_TRUE(before("call void @\"main.note\"(i32 3)", "call void @\"main.note\"(i32 2)"));
     // The loop body has one exit of its own, the end of the iteration.
@@ -340,7 +354,8 @@ TEST(a_continue_in_a_case_body_leaves_the_case_body_and_the_loop_body, {
                           "        default:\n            note(4);\n        }\n    }\n"
                           "    return 0;\n}\n"));
     // `continue` passes through the case body and stops at the loop body, so
-    // both statements run, innermost first (D7.6, D7.8).
+    // both statements run, innermost first.
+    // D7.6, D7.8
     const char* want = "  call void @\"main.note\"(i32 3)\n"
                        "  call void @\"main.note\"(i32 2)\n";
     TEST_ASSERT_EQ_STR(found(want), want);
@@ -358,7 +373,8 @@ TEST(a_return_in_a_case_body_unwinds_through_it_to_the_function_block, {
                           "        default:\n            return 6;\n        }\n    }\n}\n"
                           "fn i32 main() {\n    return f(0);\n}\n"));
     // `return` stops at the function body alone, so it passes through the
-    // case body and the loop body it leaves on the way (D7.6, D7.8).
+    // case body and the loop body it leaves on the way.
+    // D7.6, D7.8
     const char* want = "  call void @\"main.note\"(i32 3)\n"
                        "  call void @\"main.note\"(i32 2)\n"
                        "  call void @\"main.note\"(i32 1)\n"
@@ -380,8 +396,9 @@ TEST(a_case_body_that_falls_off_its_end_runs_its_deferred_code_there, {
                           "    case 1:\n        defer note(3);\n        note(9);\n"
                           "    default:\n        note(4);\n    }\n"
                           "    return 0;\n}\n"));
-    // A case body is a block with an implicit `break` at its end (D7.6), so
-    // the deferred statement runs there and once only.
+    // A case body is a block with an implicit `break` at its end, so the
+    // deferred statement runs there and once only.
+    // D7.6
     const char* want = "  call void @\"main.note\"(i32 9)\n"
                        "  call void @\"main.note\"(i32 3)\n"
                        "  br label %L2\n";
@@ -390,7 +407,8 @@ TEST(a_case_body_that_falls_off_its_end_runs_its_deferred_code_there, {
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
-// ---- what runs nothing (D7.8, D8.5, D11.4) ----------------------------------------
+// ---- what runs nothing ------------------------------------------------------------
+// D7.8, D8.5, D11.4
 
 TEST(a_noreturn_call_runs_no_deferred_code_at_all, {
     TEST_ASSERT_TRUE(emit("fn noreturn stop() {\n    panic(\"x\");\n}\n"
@@ -398,7 +416,8 @@ TEST(a_noreturn_call_runs_no_deferred_code_at_all, {
                           "fn void note() {\n}\n"
                           "fn i32 main() {\n    f();\n    return 0;\n}\n"));
     // A `noreturn` call never exits the block, so nothing deferred runs: the
-    // block ends at the call and its trap (D7.8, D8.5).
+    // block ends at the call and its trap.
+    // D7.8, D8.5
     const char* want = "define dso_local void @\"main.f\"() #0 {\n"
                        "entry:\n"
                        "  call void @\"main.stop\"()\n"
@@ -416,8 +435,9 @@ TEST(a_deferred_noreturn_call_stops_the_expansion_at_itself, {
                           "    defer note();\n    defer stop();\n}\n"
                           "fn i32 main() {\n    f();\n    return 0;\n}\n"));
     // The deferred `stop()` ends the block, so the statement below it in the
-    // expansion is not reached and the block still holds one terminator
-    // (D7.8, D8.5, item 10).
+    // expansion is not reached and the block still holds one terminator (item
+    // 10).
+    // D7.8, D8.5
     const char* want = "define dso_local void @\"main.f\"() #0 {\n"
                        "entry:\n"
                        "  call void @\"main.stop\"()\n"
@@ -434,15 +454,17 @@ TEST(a_runtime_check_branches_to_its_failure_block_without_deferred_code, {
                           "fn i32 main() {\n"
                           "    i32[3] a = {1, 2, 3};\n    i32 mut i = 5;\n"
                           "    defer note();\n    return a[i];\n}\n"));
-    // A runtime error aborts without running deferred code (D7.8, D11.4), so
-    // the failure block holds the report and the trap alone.
+    // A runtime error aborts without running deferred code, so the failure
+    // block holds the report and the trap alone.
+    // D7.8, D11.4
     const char* want = "  call void @\"std.rt.fail_bounds\"(";
     TEST_ASSERT_EQ_STR(found(want), want);
     TEST_ASSERT_EQ_UINT64(occurrences("call void @\"main.note\"()"), (uint64_t)1);
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
-// ---- the scope stack is per function (D19.5) --------------------------------------
+// ---- the scope stack is per function ----------------------------------------------
+// D19.5
 
 TEST(the_deferred_statements_of_one_function_do_not_reach_the_next, {
     TEST_ASSERT_TRUE(emit("fn void note(i32 n) {\n}\n"

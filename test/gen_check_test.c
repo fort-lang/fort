@@ -1,7 +1,8 @@
 // Unit tests of the runtime checks the emitter writes (toolchain.md 6 items
-// 14, 15, 16 and 19; D11.1, D11.3, D19.6): the overflow intrinsics and their
-// release-mode counterparts, the shift, division, bounds and assert checks,
-// and the failure blocks they branch to.
+// 14, 15, 16 and 19): the overflow intrinsics and their release-mode
+// counterparts, the shift, division, bounds and assert checks, and the
+// failure blocks they branch to.
+// D11.1, D11.3, D19.6
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -36,7 +37,8 @@ TEST(a_checked_signed_addition_is_the_intrinsic_and_its_two_extractvalues, {
 
 TEST(the_failure_block_holds_one_call_and_unreachable, {
     TEST_ASSERT_TRUE(emit(ADD_I32));
-    // The column of a check is that of its operator token (D11.4).
+    // The column of a check is that of its operator token.
+    // D11.4
     TEST_ASSERT_EQ_STR(
         found("\nL1:\n  call void @\"std.rt.fail_overflow\"(ptr @.file.0, i32 4, i32 14)"
               "\n  unreachable\n}"),
@@ -50,7 +52,8 @@ TEST(a_failure_entry_point_is_neither_declared_nor_marked_at_the_call_site, {
     // definition and nothing declares it (item 8). The `cold noreturn
     // nounwind` of the old C declaration was `#2`, which is never emitted now
     // and whose index stays reserved so that `#3` to `#7` keep their numbers
-    // (item 14, D19.5). No attribute is put on a failure call site either.
+    // (item 14). No attribute is put on a failure call site either.
+    // D19.5
     TEST_ASSERT_EQ_STR(absent("declare void @\"std.rt.fail_overflow\""), "absent");
     TEST_ASSERT_EQ_STR(absent("attributes #2 ="), "absent");
     TEST_ASSERT_EQ_STR(absent("@\"std.rt.fail_overflow\"(ptr @.file.0, i32 4, i32 14) #"),
@@ -123,7 +126,8 @@ TEST(neither_mode_emits_nsw_nuw_or_exact, {
                           "    println(a + b, a - b, a * b, a / b, a % b, a << b, a >> b);\n"
                           "    return 0;\n}\n"));
     // Wrapping is defined behavior and the check has already proved the
-    // absence of overflow, so the flags are never emitted (D16).
+    // absence of overflow, so the flags are never emitted.
+    // D16
     TEST_ASSERT_EQ_STR(absent(" nsw "), "absent");
     TEST_ASSERT_EQ_STR(absent(" nuw "), "absent");
     TEST_ASSERT_EQ_STR(absent(" exact "), "absent");
@@ -175,7 +179,8 @@ TEST(a_bitwise_operator_never_checks, {
     TEST_ASSERT_EQ_STR(absent("with.overflow"), "absent");
 })
 
-// ---- shifts (item 15, D6.2) --------------------------------------------------------
+// ---- shifts (item 15) --------------------------------------------------------------
+// D6.2
 
 TEST(a_shift_count_is_materialized_at_64_bits_and_checked, {
     TEST_ASSERT_TRUE(emit(SHIFT_I32));
@@ -233,7 +238,8 @@ TEST(release_mode_masks_the_shift_count_instead_of_checking_it, {
     TEST_ASSERT_EQ_STR(absent("std.rt.fail_shift"), "absent");
 })
 
-// ---- division and remainder (item 15, D6.13) ---------------------------------------
+// ---- division and remainder (item 15) ----------------------------------------------
+// D6.13
 
 TEST(a_signed_division_checks_zero_then_the_overflow_of_min_by_minus_one, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 a = 7;\n    i32 b = 3;\n"
@@ -280,13 +286,14 @@ TEST(a_remainder_takes_the_same_two_checks, {
 TEST(release_mode_keeps_both_division_checks, {
     TEST_ASSERT_TRUE(emit_release("fn i32 main() {\n    i32 a = 7;\n    i32 b = 3;\n"
                                   "    return a / b;\n}\n"));
-    // Division by zero and MIN / -1 are runtime errors in every build mode
-    // (D11.3, D6.13).
+    // Division by zero and MIN / -1 are runtime errors in every build mode.
+    // D11.3, D6.13
     TEST_ASSERT_EQ_STR(found("@\"std.rt.fail_div_zero\""), "@\"std.rt.fail_div_zero\"");
     TEST_ASSERT_EQ_STR(found("@\"std.rt.fail_div_overflow\""), "@\"std.rt.fail_div_overflow\"");
 })
 
-// ---- bounds checks (item 16, D6.8) -------------------------------------------------
+// ---- bounds checks (item 16) -------------------------------------------------------
+// D6.8
 
 TEST(an_index_is_extended_to_64_bits_and_compared_unsigned, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32[3] a = {};\n    i64 mut i = 5;\n"
@@ -330,7 +337,8 @@ TEST(no_bounds_check_removes_the_branch_and_keeps_the_inbounds, {
     TEST_ASSERT_TRUE(emit_unchecked("fn i32 main() {\n    i32[3] a = {};\n    i64 mut i = 5;\n"
                                     "    return a[i];\n}\n"));
     // --no-bounds-check removes exactly the index branch, which is what makes
-    // it unsafe (D10.6).
+    // it unsafe.
+    // D10.6
     TEST_ASSERT_EQ_STR(absent("std.rt.fail_bounds"), "absent");
     TEST_ASSERT_EQ_STR(found("getelementptr inbounds [3 x i32], ptr %a.0, i64 0, i64 %t0"),
                        "getelementptr inbounds [3 x i32], ptr %a.0, i64 0, i64 %t0");
@@ -341,7 +349,8 @@ TEST(no_bounds_check_leaves_the_arithmetic_checks_alone, {
     TEST_ASSERT_EQ_STR(found("@llvm.sadd.with.overflow.i32"), "@llvm.sadd.with.overflow.i32");
 })
 
-// ---- failure blocks (item 14, D19.6) -----------------------------------------------
+// ---- failure blocks (item 14) ------------------------------------------------------
+// D19.6
 
 TEST(failure_blocks_are_emitted_after_every_normal_block_in_ascending_order, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 a = 7;\n    i32 b = 3;\n"
@@ -358,8 +367,8 @@ TEST(failure_blocks_are_emitted_after_every_normal_block_in_ascending_order, {
 
 TEST(the_continuation_label_is_allocated_before_the_failure_label, {
     TEST_ASSERT_TRUE(emit(ADD_I32));
-    // The branch names the failure block first and the continuation second
-    // (D19.6).
+    // The branch names the failure block first and the continuation second.
+    // D19.6
     TEST_ASSERT_EQ_STR(found("br i1 %t4, label %L1, label %L0"), "br i1 %t4, label %L1, label %L0");
 })
 
@@ -368,21 +377,25 @@ TEST(the_emitter_builds_no_phi, {
                           "    bool t = a > 0 && b > 0;\n    println(t, a + b);\n"
                           "    return 0;\n}\n"));
     // A temporary is used only in the block that defines it or in one it
-    // dominates; the optimizer builds the phis (D19.4).
+    // dominates; the optimizer builds the phis.
+    // D19.4
     TEST_ASSERT_EQ_STR(absent("phi "), "absent");
 })
 
-// ---- assert and panic (item 19, D12.2) ---------------------------------------------
+// ---- assert and panic (item 19) ----------------------------------------------------
+// D12.2
 
 TEST(assert_branches_to_the_continuation_first_and_quotes_its_argument, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 x = 0;\n    assert(x > 0);\n"
                           "    return 0;\n}\n"));
     // Its operand is already the success condition, which is the one
-    // exception to D19.6.
+    // exception to the shape a check takes.
+    // D19.6
     TEST_ASSERT_EQ_STR(found("  %t1 = icmp sgt i32 %t0, 0\n  br i1 %t1, label %L0, label %L1\n"),
                        "  %t1 = icmp sgt i32 %t0, 0\n  br i1 %t1, label %L0, label %L1\n");
     // The text is the source text of the expression, verbatim, and the column
-    // is the builtin's name (D11.4).
+    // is the builtin's name.
+    // D11.4
     TEST_ASSERT_EQ_STR(found("@.str.0 = private unnamed_addr constant [6 x i8] c\"x > 0\\00\""),
                        "@.str.0 = private unnamed_addr constant [6 x i8] c\"x > 0\\00\"");
     TEST_ASSERT_EQ_STR(found("@\"std.rt.assert_fail\"(ptr @.str.0, ptr @.file.0, i32 3, i32 5)"),
@@ -411,7 +424,8 @@ TEST(panic_calls_the_runtime_and_is_followed_by_unreachable, {
         "  unreachable\n");
 })
 
-// ---- comparisons (D6.2) ------------------------------------------------------------
+// ---- comparisons -------------------------------------------------------------------
+// D6.2
 
 TEST(a_signed_comparison_uses_the_signed_predicates, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 a = 3;\n    i32 b = 5;\n"
@@ -456,7 +470,8 @@ TEST(a_short_circuit_goes_through_a_compiler_made_slot, {
     TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 a = 1;\n    i32 b = 2;\n"
                           "    bool t = a > 0 && b > 0;\n    println(t);\n    return 0;\n}\n"));
     // The slot is an entry-block alloca whose name contains no dot, so it
-    // cannot collide with a local (D19.5).
+    // cannot collide with a local.
+    // D19.5
     TEST_ASSERT_EQ_STR(found("%tmp0 = alloca i8, align 1"), "%tmp0 = alloca i8, align 1");
     TEST_ASSERT_EQ_STR(found("br i1 %t1, label %L0, label %L1"), "br i1 %t1, label %L0, label %L1");
     TEST_ASSERT_EQ_STR(found("  br label %L1\n"), "  br label %L1\n");
@@ -490,7 +505,8 @@ TEST(an_integer_constant_is_printed_with_the_signedness_of_its_type, {
                           "    i16 f = -32768;\n    println(a, b, c, d, e, f);\n"
                           "    return 0;\n}\n"));
     // The decimal is printed without padding and with the signedness of the
-    // fort type (D19.5).
+    // fort type.
+    // D19.5
     TEST_ASSERT_EQ_STR(found("store i8 -1, ptr %a.0"), "store i8 -1, ptr %a.0");
     TEST_ASSERT_EQ_STR(found("store i8 255, ptr %b.1"), "store i8 255, ptr %b.1");
     TEST_ASSERT_EQ_STR(found("store i64 -9223372036854775808, ptr %c.2"),
@@ -508,9 +524,10 @@ TEST(every_failure_block_and_continuation_ends_in_one_terminator, {
                           "        s += a[i] / n;\n        s <<= 1;\n"
                           "        assert(s >= 0);\n    }\n    return s;\n}\n"));
     // A check's continuation and its failure block are each one block ending
-    // in one terminator (item 10, D19.6), the failure blocks standing after
-    // every normal block of the function; `verified` checks that before it
-    // runs `opt`, which exits 0 on a block that holds two.
+    // in one terminator (item 10), the failure blocks standing after every
+    // normal block of the function; `verified` checks that before it runs
+    // `opt`, which exits 0 on a block that holds two.
+    // D19.6
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 

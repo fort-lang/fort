@@ -18,7 +18,8 @@ import std.strbuf;
 // Each test below names the rule rather than the wording, and the wording is
 // the assertion. The expressions a module-level initializer cannot hold are
 // checked by hand through check_env.probe_stmt, since the statements of a
-// function body are check_stmt.ft's (T-036).
+// function body belong to check_stmt.ft.
+// T-036: the ticket that ports the statement checker
 
 // The module the probes are written against.
 fn bool open_probe(check_env.env mut* e, string body) {
@@ -52,13 +53,15 @@ fn check.expr probe_kind(check_env.env mut* e, u64 i, ast.ast_kind kind) {
     return check_env.probe_expr(e, n);
 }
 
-// ---- names and qualified names (D9.4, D3.9, D7.9) ----------------------------------
+// ---- names and qualified names -----------------------------------------------------
+// D9.4, D3.9, D7.9
 
 fn void a_qualified_type_name_needs_a_module_on_its_left() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // `k.thing` in type position: `k` is a constant, not a module (D9.4).
+    // `k.thing` in type position: `k` is a constant, not a module.
+    // D9.4
     assert(!check_env.check_decls(&e, "i32 k = 1;\nk.thing t = 2;\n"));
     assert(check_env.said(&e, "'k' is not a module"));
 }
@@ -75,7 +78,8 @@ fn void a_module_is_not_a_value() {
     strbuf.append(&b, "fn i32 main() {\n    return 0;\n}\n");
     check_env.add(&e, "main.ft", strbuf.view(&b));
     assert(!check_env.check_entry(&e, "main.ft"));
-    // A name that denotes a module denotes no value (D9.3, D9.4).
+    // A name that denotes a module denotes no value.
+    // D9.3, D9.4
     assert(check_env.said(&e, "'other' is a module, not a value"));
 }
 
@@ -83,7 +87,8 @@ fn void a_type_is_not_a_value() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // `point.x` reads a field of the type rather than of a value (D3.9).
+    // `point.x` reads a field of the type rather than of a value.
+    // D3.9
     assert(open_probe(&e, "fn void probe() {\n    s_i32(point.x);\n}\n"));
     check_env.probe_stmt(&e, "probe", 0);
     assert(check_env.said(&e, "'point' is a type, not a value"));
@@ -97,7 +102,8 @@ fn void an_enum_has_only_the_members_it_declares() {
     assert(check_env.said(&e, "enum color has no member 'blue'"));
 }
 
-// ---- values that are not values (D12.2, D7.11) -------------------------------------
+// ---- values that are not values ----------------------------------------------------
+// D12.2, D7.11
 
 fn void a_call_that_yields_nothing_is_not_a_value() {
     check_env.env mut e = check_env.env{};
@@ -105,17 +111,20 @@ fn void a_call_that_yields_nothing_is_not_a_value() {
     defer check_env.close(&e);
     assert(open_probe(&e, "fn void probe() {\n    s_i32(s_void());\n}\n"));
     check_env.probe_stmt(&e, "probe", 0);
-    // The diagnostic names the callee when it has one (D12.2).
+    // The diagnostic names the callee when it has one.
+    // D12.2
     assert(check_env.said(&e, "'s_void' has no value"));
 }
 
-// ---- constants out of range (D4.4, D4.5, D6.2) -------------------------------------
+// ---- constants out of range --------------------------------------------------------
+// D4.4, D4.5, D6.2
 
 fn void an_exact_result_outside_the_constant_range_is_an_error() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // Untyped integers are evaluated exactly in [-2^63, 2^64 - 1] (D4.4).
+    // Untyped integers are evaluated exactly in [-2^63, 2^64 - 1].
+    // D4.4
     assert(!check_env.check_init_of(&e, "u64", "18446744073709551615 + 1"));
     assert(check_env.said(&e, "constant expression out of range"));
 }
@@ -125,8 +134,9 @@ fn void an_untyped_constant_that_fits_no_default_type_has_none() {
     check_env.open(&e);
     defer check_env.close(&e);
     // With no context the constant takes its default type, and one that fits
-    // neither i32 nor i64 has none (D4.5). A case label of a switch would be
-    // the other site; an array length is this half's.
+    // neither i32 nor i64 has none. A case label of a switch would be the
+    // other site; an array length is this half's.
+    // D4.5
     assert(!check_env.check_decls(&e, "i32[18446744073709551615 + 1] a = {};\n"));
     assert(check_env.said(&e, "constant expression out of range"));
 }
@@ -136,7 +146,8 @@ fn void an_untyped_shift_count_is_checked_against_the_constant_range() {
     check_env.open(&e);
     defer check_env.close(&e);
     // The left operand has no width until its context fixes one, so the count
-    // is held against 0..63 whether or not the operand folded (D4.4).
+    // is held against 0..63 whether or not the operand folded.
+    // D4.4
     assert(!check_env.check_init_of(&e, "i64", "1 << 64"));
     assert(check_env.said(&e, "constant shift count must be in 0..63"));
 }
@@ -145,19 +156,22 @@ fn void two_nulls_do_not_compare() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // `null` has no type of its own, so a pair of them has nothing to compare
-    // (D10.5).
+    // `null` has no type of its own, so a pair of them has nothing to
+    // compare.
+    // D10.5
     assert(!check_env.check_init_of(&e, "bool", "null == null"));
     assert(check_env.said(&e, "'null' has no type of its own"));
 }
 
-// ---- the address and dereference operators (D5.8, D3.10, D3.11) --------------------
+// ---- the address and dereference operators -----------------------------------------
+// D5.8, D3.10, D3.11
 
 fn void the_address_of_a_function_is_not_written() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // A function name is already a value of function-pointer type (D3.10).
+    // A function name is already a value of function-pointer type.
+    // D3.10
     assert(!check_env.check_decls(&e, "fn void f() {\n    return;\n}\nvoid* p = &f;\n"));
     assert(check_env.said(&e, "'&' on a function: a function name is already a value"));
 }
@@ -175,13 +189,15 @@ fn void only_a_pointer_is_dereferenced() {
     check_env.open(&e);
     defer check_env.close(&e);
     // `void*` has no pointee level and a function pointer is called, not
-    // dereferenced (D3.11, D3.10).
+    // dereferenced.
+    // D3.11, D3.10
     assert(open_probe(&e, "fn void probe() {\n    s_i32(*k);\n}\n"));
     check_env.probe_stmt(&e, "probe", 0);
     assert(check_env.said(&e, "cannot dereference i32"));
 }
 
-// ---- fields, indices and spans (D6.8, D6.9, D6.10) ---------------------------------
+// ---- fields, indices and spans -----------------------------------------------------
+// D6.8, D6.9, D6.10
 
 fn void an_arrow_needs_a_pointer() {
     check_env.env mut e = check_env.env{};
@@ -226,13 +242,15 @@ fn void a_span_of_a_fixed_array_needs_an_lvalue() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // An rvalue array has no address to view (D6.9).
+    // An rvalue array has no address to view.
+    // D6.9
     assert(open_probe(&e, "fn void probe() {\n    s_span(i32[3]{1, 2, 3}[0..2]);\n}\n"));
     check_env.probe_stmt(&e, "probe", 0);
     assert(check_env.said(&e, "a span of a fixed array needs an lvalue"));
 }
 
-// ---- move, literals and brace initializers (D12.2, D6.5) ---------------------------
+// ---- move, literals and brace initializers -----------------------------------------
+// D12.2, D6.5
 
 fn void move_takes_an_lvalue() {
     check_env.env mut e = check_env.env{};
@@ -255,16 +273,18 @@ fn void a_brace_initializer_is_not_an_expression() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // Bare braces initialize a declaration (D6.5). The parser accepts them
-    // nowhere else, so the node is handed to check_expr directly, which is
-    // what a pass over a tree an editor is re-checking would do.
+    // Bare braces initialize a declaration. The parser accepts them nowhere
+    // else, so the node is handed to check_expr directly, which is what a
+    // pass over a tree an editor is re-checking would do.
+    // D6.5
     assert(check_env.check_decls(&e, "i32[2] nums = {1, 2};\n"));
     ast.node mut* d = check_env.node_in_main(&e, ast.ast_kind.k_var_decl, "nums");
     check_env.probe_expr(&e, d->b);
     assert(check_env.said(&e, "a brace initializer is not an expression"));
 }
 
-// ---- sizes and enum values (D3.4, D3.9) --------------------------------------------
+// ---- sizes and enum values ---------------------------------------------------------
+// D3.4, D3.9
 
 fn void a_struct_whose_fields_together_pass_the_ceiling_is_refused() {
     check_env.env mut e = check_env.env{};
@@ -273,7 +293,8 @@ fn void a_struct_whose_fields_together_pass_the_ceiling_is_refused() {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     // Each field fits under 2^63 - 1 bytes and the two together do not, so
-    // what is reported is the struct and not a field (D3.4, D3.8).
+    // what is reported is the struct and not a field.
+    // D3.4, D3.8
     strbuf.append(&b, "struct huge {\n");
     strbuf.append(&b, "    i64[1000000000000000000] a;\n");
     strbuf.append(&b, "    i64[1000000000000000000] b;\n");
@@ -286,7 +307,8 @@ fn void an_enum_value_is_a_constant_expression() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // A read of a `mut` global is not one (D3.9, D4.6, D7.10).
+    // A read of a `mut` global is not one.
+    // D3.9, D4.6, D7.10
     assert(!check_env.check_decls(&e, "i32 mut g = 1;\nenum color {\n    red = g,\n}\n"));
     assert(check_env.said(&e, "an enum value must be a constant expression"));
 }

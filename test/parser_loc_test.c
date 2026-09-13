@@ -1,7 +1,8 @@
 // The positions the parser records and the whole modules it accepts: every
-// later pass reports at a node's `loc` (D14.2), so each kind of node is
-// pinned to the token a diagnostic about it should point at, and the module
-// shapes the specification writes are parsed end to end.
+// later pass reports at a node's `loc`, so each kind of node is pinned to the
+// token a diagnostic about it should point at, and the module shapes the
+// specification writes are parsed end to end.
+// D14.2
 #include <stdint.h>
 
 #include "ast.h"
@@ -109,7 +110,8 @@ TEST(literal_and_keyword_expressions_are_at_their_first_token, {
 // ---- positions of types ---------------------------------------------------
 
 // A type starts at its base type and every suffix at its own token, so a
-// placement diagnostic points at the marker it is about (D5.3).
+// placement diagnostic points at the marker it is about.
+// D5.3
 TEST(a_type_and_its_suffixes_carry_their_own_positions, {
     const ast_node_t* mod = parse_text("node* mut@ own x = 0;\ni32[4] mut y = 0;\n");
     TEST_ASSERT_NONNULL(mod);
@@ -151,7 +153,8 @@ TEST(a_statement_starts_at_its_keyword_or_target, {
 // ---- ranges: the end of a node's range ------------------------------------
 
 // A node's range runs to one past the last byte of the construct's last
-// token (D20.4), which the helpers show as the source text it covers.
+// token, which the helpers show as the source text it covers.
+// D20.4
 TEST(a_declaration_covers_its_terminator, {
     const ast_node_t* mod = parse_text("i32 n = 4 + 1;\n"
                                        "fn i32 f(i32 a) {\n"
@@ -236,7 +239,8 @@ TEST(literal_and_keyword_expressions_cover_their_whole_form, {
 })
 
 // A type covers its base and every marker and suffix written after it, and
-// each suffix covers its own marker (D5.3, D17.2).
+// each suffix covers its own marker.
+// D5.3, D17.2
 TEST(a_type_covers_its_suffixes_and_markers, {
     const ast_node_t* mod = parse_text("node* mut@ own x = 0;\n"
                                        "i32[4] mut y = 0;\n"
@@ -295,7 +299,8 @@ TEST(every_if_of_a_chain_ends_at_the_end_of_the_chain, {
 })
 
 // An empty case body has no token of its own, so it is the empty range just
-// after the ':' and stays inside its clause (D20.4).
+// after the ':' and stays inside its clause.
+// D20.4
 TEST(an_empty_case_body_is_an_empty_range_after_the_colon, {
     const ast_node_t* mod = parse_text("fn void f() {\n"
                                        "    switch (c) { case 1: }\n"
@@ -357,7 +362,8 @@ TEST(break_and_continue_cover_their_semicolon, {
 // ---- name ranges ----------------------------------------------------------
 
 // A declaration carries the range of the name it introduces, so an editor
-// jumps to the name and not to the first token (D20.4).
+// jumps to the name and not to the first token.
+// D20.4
 TEST(declarations_carry_the_range_of_their_name, {
     const ast_node_t* mod = parse_text("struct point {\n"
                                        "    i32 x;\n"
@@ -422,7 +428,8 @@ TEST(mentions_of_a_name_carry_its_range, {
     TEST_ASSERT_EQ_STR(name_text_of(body_stmt(mod, 6, 0)), "v");
 })
 
-// A node no name declares or mentions carries the empty range (D20.4).
+// A node no name declares or mentions carries the empty range.
+// D20.4
 TEST(nodes_without_a_name_carry_an_empty_name_range, {
     const ast_node_t* mod = parse_text("i32 a = 1 + 2;\n"
                                        "string b = \"hi\";\n");
@@ -438,8 +445,8 @@ TEST(nodes_without_a_name_carry_an_empty_name_range, {
 
 // ---- whole modules --------------------------------------------------------
 
-// The out-parameter signature of D3.6 and D17.2, with every marker position
-// in one declaration.
+// The out-parameter signature, with every marker position in one declaration.
+// D3.6, D17.2
 TEST(the_out_parameter_signature_of_d17_2, {
     const ast_node_t* mod = parse_text("fn bool read_file(string path, u8 mut@ own mut* out) {\n"
                                        "    u8 mut@ own buf = new(u8, 16);\n"
@@ -482,8 +489,9 @@ TEST(a_whole_module_parses_end_to_end, {
                                        "    }\n"
                                        "    return total;\n"
                                        "}\n");
-    // The parser recovers and returns the tree of what parsed (D14.2); the
-    // marker is what the module reports, once.
+    // The parser recovers and returns the tree of what parsed; the marker is
+    // what the module reports, once.
+    // D14.2
     TEST_ASSERT_NONNULL(mod);
     TEST_ASSERT_EQ_STR(parse_diags(),
                        "t.ft:17:5: error: a mut never precedes the base type: "

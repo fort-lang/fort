@@ -40,7 +40,8 @@ static void end(void) {
     sb_free(&doc);
 }
 
-// The range of a one-byte token at `line`:`col` (D20.4).
+// The range of a one-byte token at `line`:`col`.
+// D20.4
 static loc_t one_byte(uint32_t line, uint32_t col) {
     return loc_range("main.ft", line, col, line, col + 1);
 }
@@ -113,8 +114,9 @@ TEST(the_message_is_copied_into_the_sink, {
 })
 
 // The record owns its file name as it owns its message: the front end
-// releases the names it read before the check mode writes the document
-// (D20.2), so a name the caller lent out would dangle.
+// releases the names it read before the check mode writes the document, so a
+// name the caller lent out would dangle.
+// D20.2
 TEST(the_file_name_is_copied_into_the_sink, {
     sb_t name;
     sb_init(&name);
@@ -146,7 +148,8 @@ TEST(every_record_keeps_its_own_file_name, {
 })
 
 // An error without a position in the file has no file name either; the copy
-// must not turn that into a name (D14.2).
+// must not turn that into a name.
+// D14.2
 TEST(a_record_without_a_file_keeps_none, {
     begin();
     diag_error(loc_make(NULL, 1, 1), "no file at all");
@@ -332,7 +335,8 @@ TEST(a_record_past_the_end_is_an_internal_error, {
 // ---- the text switch ---------------------------------------------------------------
 
 // Text output is on until it is turned off: every existing caller writes its
-// line as it always did (D14.2).
+// line as it always did.
+// D14.2
 TEST(the_text_line_is_written_by_default, {
     begin();
     diag_error(one_byte(USE_LINE, USE_COL), "to the sink");
@@ -390,8 +394,9 @@ TEST(an_error_is_one_object_with_an_empty_notes_array, {
     end();
 })
 
-// The golden document of D14.2's example: the two notes that follow the error
-// are nested under it.
+// The golden document of the worked example: the two notes that follow the
+// error are nested under it.
+// D14.2
 TEST(the_notes_that_follow_an_error_are_nested_under_it, {
     begin();
     diag_error(one_byte(USE_LINE, USE_COL), "cannot assign to immutable 'x'");
@@ -440,7 +445,8 @@ TEST(a_note_without_an_error_stands_alone, {
 })
 
 // The whole range is written, including one that spans lines, and a
-// positionless error is the empty range at 1:1 (D14.2, D20.4).
+// positionless error is the empty range at 1:1.
+// D14.2, D20.4
 TEST(the_document_holds_both_ends_of_the_range, {
     begin();
     diag_error(loc_range("util.ft", 12, 23, 14, 2), "infinite size");
@@ -542,8 +548,9 @@ TEST(the_document_is_empty_again_after_a_reset, {
 })
 
 // A message can quote any bytes of a source file, which is UTF-8 only by
-// convention (D2.1, D3.7), so the writer replaces what is not well-formed
-// and the document stays valid UTF-8.
+// convention, so the writer replaces what is not well-formed and the document
+// stays valid UTF-8.
+// D2.1, D3.7
 TEST(a_message_of_arbitrary_bytes_gives_a_valid_document, {
     sb_t m;
     sb_init(&m);

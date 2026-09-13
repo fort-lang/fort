@@ -1,7 +1,7 @@
 // Unit tests of consts.h, part three: giving a constant a type. The prim.h
-// queries (D3.1), cv_fits (D4.2, D4.3) and cv_default_kind (D4.5). The casts
-// and the typed folding are in consts_typed_test.c, the untyped folding in
-// consts_fold_test.c.
+// queries, cv_fits and cv_default_kind. The casts and the typed folding are
+// in consts_typed_test.c, the untyped folding in consts_fold_test.c.
+// D3.1, D4.2, D4.3, D4.5
 #include <stdint.h>
 
 #include "consts.h"
@@ -122,7 +122,8 @@ TEST(prim_name_spells_every_type, {
     TEST_ASSERT_EQ_INT32(PRIM_COUNT, 13);
 })
 
-// ---- cv_fits: every integer kind at both edges (D4.2) ------------------------------
+// ---- cv_fits: every integer kind at both edges -------------------------------------
+// D4.2
 
 TEST(fits_i8_at_its_edges, {
     TEST_ASSERT_TRUE(fits_exactly(i(-128), F_SIGNED | F_FLOATS));
@@ -200,13 +201,15 @@ TEST(fits_examples_of_type_system_10_4, {
     TEST_ASSERT_TRUE(cv_shl(i(1), i(40), &r));
     TEST_ASSERT_FALSE(cv_fits(r, PRIM_I32)); // i32 n = 1 << 40
     TEST_ASSERT_TRUE(cv_shl(i(1), i(31), &r));
-    TEST_ASSERT_FALSE(cv_fits(r, PRIM_I32)); // i32 x = 1 << 31 (D4.4)
+    // D4.4
+    TEST_ASSERT_FALSE(cv_fits(r, PRIM_I32)); // i32 x = 1 << 31
     TEST_ASSERT_TRUE(cv_fits(r, PRIM_U32));
     TEST_ASSERT_FALSE(cv_shl(i(1), i(64), &r)); // u64 big = 1 << 64
     TEST_ASSERT_FALSE(cv_div(i(1), i(0), &r));  // i32 z = 1 / 0
 })
 
-// ---- cv_fits: chars, bools and the rest (D4.3) ---------------------------------------
+// ---- cv_fits: chars, bools and the rest ----------------------------------------------
+// D4.3
 
 TEST(fits_char_literal_in_char_and_integer_contexts, {
     // u8 b = 'a' is 97; 'a' also fits i8 and every wider integer.
@@ -241,7 +244,8 @@ TEST(fits_nothing_for_null_strings_none_and_void, {
     TEST_ASSERT_FALSE(cv_fits(cv_from_char('a'), PRIM_VOID));
 })
 
-// ---- cv_default_kind (D4.5) -------------------------------------------------------
+// ---- cv_default_kind --------------------------------------------------------------
+// D4.5
 
 TEST(default_kind_of_a_small_integer_is_i32, {
     prim_kind_t k = PRIM_VOID;

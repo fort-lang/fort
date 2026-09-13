@@ -1,14 +1,16 @@
-// Unit tests of `--tokens` (D14.1, toolchain.md 1): the option that lexes the
-// entry file alone -- resolving no import, parsing nothing -- and writes one
-// line per token to stdout.
+// Unit tests of `--tokens` (toolchain.md 1): the option that lexes the entry
+// file alone -- resolving no import, parsing nothing -- and writes one line
+// per token to stdout.
+// D14.1
 //
 // It is the observation point the self-hosted lexer is verified at, so what
 // the suite asserts is the contract tools/diff_tokens.sh relies on: the dump
 // is the whole of stdout, a lexical error is reported on stderr and still
-// leaves the file dumped whole (D14.2), and nothing else of the pipeline runs
-// -- no `--cc` is spawned, no temporary is created, no import is opened. The
+// leaves the file dumped whole, and nothing else of the pipeline runs -- no
+// `--cc` is spawned, no temporary is created, no import is opened. The
 // sandbox is driver_helpers.h and test/fake_cc.sh is the `--cc` that must
 // never run.
+// D14.2
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -36,7 +38,8 @@ static const char SANDBOX_ENTRY_DUMP[] = "1:1-1:3 0 \"fn\" fn\n"
                                          "1:27-1:28 0 \"}\" }\n"
                                          "2:1-2:1 0 \"\" end of file\n";
 
-// ---- the command line (D14.1) -----------------------------------------------------
+// ---- the command line -------------------------------------------------------------
+// D14.1
 
 // `fort --tokens main.ft`, parsed without running anything. A brace
 // initializer inside a TEST body would split the body into two macro
@@ -45,7 +48,8 @@ static const char SANDBOX_ENTRY_DUMP[] = "1:1-1:3 0 \"fn\" fn\n"
 static char* tokens_argv[] = {"fort", "--tokens", "main.ft", NULL};
 
 // The options --tokens refuses to stand beside, and the line it refuses them
-// with (D14.1).
+// with.
+// D14.1
 static const char* const REJECTED_WITH_TOKENS[] = {"--check", "--json", "--index"};
 static const char TOKENS_CONFLICT[] =
     "fort: error: --tokens does not combine with --check, --json or --index\n"
@@ -64,7 +68,8 @@ TEST(tokens_is_parsed_as_a_flag, {
     TEST_ASSERT_NONNULL(err);
     TEST_ASSERT_EQ_INT32(driver_parse(&opts, argc, tokens_argv, out, err), DRIVER_PARSE_OK);
     TEST_ASSERT_TRUE(opts.tokens);
-    // It implies nothing: the front end is not run (D14.1).
+    // It implies nothing: the front end is not run.
+    // D14.1
     TEST_ASSERT_FALSE(opts.check);
     TEST_ASSERT_FALSE(opts.json);
     TEST_ASSERT_FALSE(opts.index);
@@ -82,7 +87,8 @@ TEST(tokens_is_off_by_default, {
 })
 
 // --tokens stops before the parser, so there is no front end for --check to
-// run and no document for --json to write (D14.1).
+// run and no document for --json to write.
+// D14.1
 TEST(tokens_with_check_json_or_index_is_a_usage_error, {
     for (size_t i = 0; i < sizeof REJECTED_WITH_TOKENS / sizeof REJECTED_WITH_TOKENS[0]; i++) {
         char* option = (char*)REJECTED_WITH_TOKENS[i];
@@ -136,9 +142,9 @@ TEST(an_empty_file_dumps_its_end_of_file_token, {
     sandbox_close(&box);
 })
 
-// A lexical error is reported and lexing resumes at the next line (D14.2), so
-// the dump still covers the file and the status is the compile error of
-// D14.1.
+// A lexical error is reported and lexing resumes at the next line, so the
+// dump still covers the file and the status is the compile error.
+// D14.2, D14.1
 TEST(a_lexical_error_is_reported_and_the_file_is_still_dumped, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
@@ -173,7 +179,8 @@ TEST(a_file_that_would_not_parse_still_dumps, {
 })
 
 // No import is resolved, so a module that no root reaches is not an error
-// here: the import is four tokens like any other (D14.1).
+// here: the import is four tokens like any other.
+// D14.1
 TEST(an_unresolvable_import_is_just_tokens, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
@@ -212,7 +219,8 @@ TEST(an_unreadable_entry_file_is_a_toolchain_error, {
 
 // It stops after the lexer: no `--cc` is spawned, no output file is written
 // and no temporary directory is created, so the options that name them are
-// unused, as they are under --check (D14.1, D20.1).
+// unused, as they are under --check.
+// D14.1, D20.1
 TEST(tokens_spawns_no_cc_and_leaves_no_file_behind, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);

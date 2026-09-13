@@ -14,13 +14,13 @@
 
 #include "common.h"
 
-// The result of a run that could not be started or was killed, and the exit
-// status of a child whose redirection failed.
+/// The result of a run that could not be started or was killed, and the exit
+/// status of a child whose redirection failed.
 enum { FORK_RUN_ABNORMAL = -1, FORK_RUN_SETUP_FAILED = 127 };
 
-// Runs fn in a child with stderr redirected to a pipe; stores the child's
-// stderr in err (NUL-terminated, truncated to err_size - 1 bytes) and returns
-// its exit status, or FORK_RUN_ABNORMAL. A fn that returns exits with 0.
+/// Runs fn in a child with stderr redirected to a pipe; stores the child's
+/// stderr in err (NUL-terminated, truncated to err_size - 1 bytes) and returns
+/// its exit status, or FORK_RUN_ABNORMAL. A fn that returns exits with 0.
 static int run_forked(void (*fn)(void), char* err, size_t err_size) {
     int fds[2];
     err[0] = '\0';

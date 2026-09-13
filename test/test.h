@@ -40,7 +40,7 @@ typedef enum {
         }                                                                                          \
     } while (0)
 
-// The process exit status of a suite result: 0 ok, 1 fail, 2 error.
+/// The process exit status of a suite result: 0 ok, 1 fail, 2 error.
 static inline int test_exit_status(test_result_t final_result) {
     switch (final_result) {
     case TEST_RESULT_OK:
@@ -59,7 +59,7 @@ static inline int test_exit_status(test_result_t final_result) {
 
 #define TEST_EXIT() TEST_EXIT_(TEST_FINAL_RESULT_)
 
-// The name of a test result as printed by TEST_RUN.
+/// The name of a test result as printed by TEST_RUN.
 static inline const char* test_result_name(test_result_t result) {
     switch (result) {
     case TEST_RESULT_OK:

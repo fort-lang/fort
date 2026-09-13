@@ -1,9 +1,10 @@
 // Unit tests of the agreement between two `extern fn` declarations of one C
-// symbol (D9.8, D17.13; module-system.md 8.1, 13). The comparison is of types
-// and runs in the checker, where types exist: two spellings of one imported
-// type agree, two local types of one spelling do not, and `char` and `u8` are
-// one C type. The extern declarations that are held against the runtime's own
-// prototypes are the other half, in check_conv_test.c.
+// symbol (module-system.md 8.1, 13). The comparison is of types and runs in
+// the checker, where types exist: two spellings of one imported type agree,
+// two local types of one spelling do not, and `char` and `u8` are one C type.
+// The extern declarations that are held against the runtime's own prototypes
+// are the other half, in check_conv_test.c.
+// D9.8, D17.13
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -33,7 +34,8 @@ static uint64_t errors_said(void) {
     return n;
 }
 
-// ---- declarations that agree (D9.8) -------------------------------------------------
+// ---- declarations that agree --------------------------------------------------------
+// D9.8
 
 TEST(two_declarations_of_one_extern_with_one_signature_agree, {
     begin();
@@ -56,8 +58,9 @@ TEST(a_binding_mut_is_not_part_of_a_signature, {
         "extern fn i64 write(i32 fd, void* buf, u64 n);\n"
         "fn i32 main() { return 0; }\n");
     // A binding-level `mut` makes the callee's copy assignable and is not
-    // part of a function type (D3.10, D5.6); an extern has no body for it to
-    // mean anything in, and the two declarations emit the same bytes.
+    // part of a function type; an extern has no body for it to mean anything
+    // in, and the two declarations emit the same bytes.
+    // D3.10, D5.6
     add("other.ft",
         "extern fn i64 write(i32 mut fd, void* buf, u64 n);\n"
         "fn i64 go() { return write(1, null, 0); }\n");
@@ -70,9 +73,10 @@ TEST(char_and_u8_are_one_c_type_at_the_boundary, {
         "import other;\n"
         "extern fn u64 hash(char* s, u8 seed);\n"
         "fn i32 main() { return 0; }\n");
-    // Fort `char` is C's `unsigned char` (D3.2) and D9.8 maps a C `char*` to
-    // `char*` or `u8*`, so the two declarations are one C prototype and emit
-    // byte-identical IR.
+    // Fort `char` is C's `unsigned char` and an extern declaration maps a C
+    // `char*` to `char*` or `u8*`, so the two declarations are one C
+    // prototype and emit byte-identical IR.
+    // D3.2, D9.8
     add("other.ft",
         "extern fn u64 hash(u8* s, char seed);\n"
         "fn u64 go(u8* s) { return hash(s, cast(0, char)); }\n");
@@ -93,10 +97,11 @@ TEST(a_char_result_agrees_with_a_u8_result, {
 
 TEST(one_imported_enum_spelled_two_ways_is_one_type, {
     begin();
-    // The program T-025 could not write: the module that declares the enum
-    // spells it `color` and cannot qualify its own name or import itself, so
-    // the importer's `shade.color` is the only other spelling there is. Both
-    // denote one declaration (D9.4), so the signatures are identical (D9.8).
+    // The program that could not be written before: the module that declares
+    // the enum spells it `color` and cannot qualify its own name or import
+    // itself, so the importer's `shade.color` is the only other spelling
+    // there is. Both denote one declaration, so the signatures are identical.
+    // T-025, D9.4, D9.8: the program the ticket could not write
     add("main.ft",
         "import shade;\n"
         "extern fn void paint(shade.color c);\n"
@@ -175,8 +180,9 @@ TEST(the_error_stands_on_the_parameter_of_the_later_declaration, {
         "fn void go() { put(1); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     // The imported module is checked first, so its declaration is the one the
-    // later one is held against (D9.10): the error is in `main.ft`, at the
-    // parameter, and the note in `other.ft`, at the name.
+    // later one is held against: the error is in `main.ft`, at the parameter,
+    // and the note in `other.ft`, at the name.
+    // D9.10
     TEST_ASSERT_TRUE(said("main.ft:2:20: error: conflicting declarations of extern 'put'"));
     TEST_ASSERT_TRUE(said("other.ft:1:16: note: previous declaration of 'put' here"));
 })
@@ -187,8 +193,9 @@ TEST(an_own_that_differs_conflicts, {
         "import alloc;\n"
         "extern fn void* own malloc(u64 n);\n"
         "fn i32 main() { return 0; }\n");
-    // `own` is part of type identity (D17.1) and of signature identity
-    // (D17.13), so the two declarations do not describe one C function.
+    // `own` is part of type identity and of signature identity, so the two
+    // declarations do not describe one C function.
+    // D17.1, D17.13
     add("alloc.ft",
         "extern fn void* malloc(u64 n);\n"
         "fn void* grab(u64 n) { return malloc(n); }\n");
@@ -216,9 +223,10 @@ TEST(pointee_mutability_that_differs_conflicts, {
         "import other;\n"
         "extern fn u64 strlen(char* s);\n"
         "fn i32 main() { return 0; }\n");
-    // Mutability at a level below the binding is part of type identity
-    // (D3.12), so `char mut*` is another signature and C is told the callee
-    // writes through the pointer.
+    // Mutability at a level below the binding is part of type identity, so
+    // `char mut*` is another signature and C is told the callee writes
+    // through the pointer.
+    // D3.12
     add("other.ft",
         "extern fn u64 strlen(char mut* s);\n"
         "fn u64 go(char mut* s) { return strlen(s); }\n");
@@ -232,9 +240,10 @@ TEST(noreturn_that_differs_conflicts, {
         "import other;\n"
         "extern fn noreturn quit(i32 code);\n"
         "fn i32 main() { return 0; }\n");
-    // `noreturn` is part of a function's identity (D3.10) and it is what puts
-    // the trap of D8.5 after the call site, so the two declarations do not
-    // describe one C function.
+    // `noreturn` is part of a function's identity and it is what puts the
+    // trap after the call site, so the two declarations do not describe one C
+    // function.
+    // D3.10, D8.5
     add("other.ft",
         "extern fn void quit(i32 code);\n"
         "fn void go() { quit(1); }\n");
@@ -265,9 +274,11 @@ TEST(two_integer_types_of_one_size_are_not_one_c_type, {
         "import other;\n"
         "extern fn void take(u32 n);\n"
         "fn i32 main() { return 0; }\n");
-    // `i32` and `u32` are both `i32` in IR, but D9.8 asks for identical
-    // signatures and both modules can write either, so the conservative
-    // reading refuses the pair: C's `int` and `unsigned int` are two types.
+    // `i32` and `u32` are both `i32` in IR, but an extern declaration asks
+    // for identical signatures and both modules can write either, so the
+    // conservative reading refuses the pair: C's `int` and `unsigned int` are
+    // two types.
+    // D9.8
     add("other.ft",
         "extern fn void take(i32 n);\n"
         "fn void go() { take(1); }\n");
@@ -283,7 +294,8 @@ TEST(a_function_pointer_parameter_is_compared_through_its_own_signature, {
         "fn i32 main() { return 0; }\n");
     // A `fn R(P...)` in an extern signature is extern-legal through its own
     // signature (module-system.md 8.1), and the marks of its parameters are
-    // part of its identity (D3.10), so the comparison reaches inside it.
+    // part of its identity, so the comparison reaches inside it.
+    // D3.10
     add("other.ft",
         "extern fn void each(fn void(i64) f);\n"
         "fn void go(fn void(i64) f) { each(f); }\n");
@@ -291,13 +303,15 @@ TEST(a_function_pointer_parameter_is_compared_through_its_own_signature, {
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'each': parameter 1 differs"));
 })
 
-// ---- types of one spelling that are two types (D3.8, D3.9) --------------------------
+// ---- types of one spelling that are two types ---------------------------------------
+// D3.8, D3.9
 
 TEST(two_local_enums_of_one_name_conflict, {
     begin();
     // Both modules write `paint(color c)` and the two `color`s are different
-    // enums: a nominal type is identified by the declaration it comes from
-    // (D3.9), so the program has no one signature for the C symbol.
+    // enums: a nominal type is identified by the declaration it comes from,
+    // so the program has no one signature for the C symbol.
+    // D3.9
     add("main.ft",
         "import other;\n"
         "enum color { red, green }\n"
@@ -317,8 +331,9 @@ TEST(two_local_enums_of_one_name_conflict, {
 TEST(two_local_structs_behind_a_pointer_conflict, {
     begin();
     // The same case one level down: `point mut*` in both modules, two
-    // different `point`s (D3.8). Every pointer is `ptr` in IR, so nothing
-    // below the compiler could ever notice.
+    // different `point`s. Every pointer is `ptr` in IR, so nothing below the
+    // compiler could ever notice.
+    // D3.8
     add("main.ft",
         "import other;\n"
         "struct point { i64 x; i64 y; }\n"
@@ -372,7 +387,8 @@ TEST(a_nominal_against_a_plain_type_offers_the_type_too, {
     // One side names the enum and the other writes the `i32` it crosses as:
     // the note fires although only one module named a type, because the fix
     // is the same one -- import the enum and write it -- and no rewording of
-    // `i32` reaches it (D3.9).
+    // `i32` reaches it.
+    // D3.9
     add("main.ft",
         "import shade;\n"
         "extern fn void paint(i32 c);\n"
@@ -408,12 +424,13 @@ TEST(the_note_fires_whichever_declaration_names_the_type, {
 TEST(two_runtime_declarations_may_agree_with_the_runtime_and_not_with_each_other, {
     begin();
     // The two comparisons are not the same comparison. `own` is erased at run
-    // time (D17.1) and the runtime's C prototype has no notion of it, so each
-    // of these declarations satisfies toolchain.md 5.1 on its own (D13.1);
-    // `own` is part of signature identity between two fort declarations of
-    // one C symbol (D17.13, D9.8), so together they conflict. The error is
-    // the extern-versus-extern one: it points at the other module and not at
-    // the compiler's own declaration (module-system.md 13).
+    // time and the runtime's C prototype has no notion of it, so each of
+    // these declarations satisfies toolchain.md 5.1 on its own; `own` is part
+    // of signature identity between two fort declarations of one C symbol, so
+    // together they conflict. The error is the extern-versus-extern one: it
+    // points at the other module and not at the compiler's own declaration
+    // (module-system.md 13).
+    // D17.1, D13.1, D17.13, D9.8
     add("main.ft",
         "import other;\n"
         "extern fn void fort_rt_del(u8 mut* own p);\n"
@@ -431,7 +448,8 @@ TEST(two_runtime_declarations_may_agree_with_the_runtime_and_not_with_each_other
 TEST(a_runtime_declaration_that_adds_own_is_accepted_alone, {
     // The other half of that asymmetry, so a change that made the runtime
     // comparison read `own` would fail here rather than silently refuse the
-    // standard library's own declarations (D13.1, D17.1).
+    // standard library's own declarations.
+    // D13.1, D17.1
     TEST_ASSERT_TRUE(check_src("extern fn void fort_rt_del(u8 mut* own p);\n"
                                "fn i32 main() { return 0; }\n"));
 })
@@ -439,9 +457,10 @@ TEST(a_runtime_declaration_that_adds_own_is_accepted_alone, {
 TEST(a_conflicting_declaration_is_poisoned_and_does_not_cascade, {
     begin();
     // The later declaration keeps no usable type: every call to it in its own
-    // module is silent, so one disagreement is one diagnostic (D14.2). The
-    // call below passes an integer constant where the enum stands, which is
-    // an error of its own the moment the symbol is not poisoned.
+    // module is silent, so one disagreement is one diagnostic. The call below
+    // passes an integer constant where the enum stands, which is an error of
+    // its own the moment the symbol is not poisoned.
+    // D14.2
     add("main.ft",
         "import other;\n"
         "enum color { red, green }\n"
@@ -458,9 +477,11 @@ TEST(a_conflicting_declaration_is_poisoned_and_does_not_cascade, {
 })
 
 TEST(a_pointer_that_erases_its_pointee_is_another_type, {
-    // `void*`, `u8*` and a function pointer are all `ptr` in IR (D3.11), and
-    // D9.8 blesses no spelling difference but `char*` for `u8*`, so each of
-    // these pairs is two types and every module can write either name.
+    // `void*`, `u8*` and a function pointer are all `ptr` in IR, and an
+    // extern declaration blesses no spelling difference but `char*` for
+    // `u8*`, so each of these pairs is two types and every module can write
+    // either name.
+    // D3.11, D9.8
     begin();
     add("main.ft",
         "import other;\n"
@@ -495,7 +516,8 @@ TEST(a_pointer_that_erases_its_pointee_is_another_type, {
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'take': parameter 1 differs"));
 })
 
-// ---- the closure (D9.10, D14.2) -----------------------------------------------------
+// ---- the closure --------------------------------------------------------------------
+// D9.10, D14.2
 
 TEST(every_later_declaration_is_held_against_the_first, {
     begin();
@@ -506,7 +528,8 @@ TEST(every_later_declaration_is_held_against_the_first, {
         "fn i32 main() { a.go(); b.go(); return 0; }\n");
     // Three modules, one C symbol: the first declaration of the dependency
     // order is the reference, so both disagreeing modules are reported and
-    // each note points at the same earlier declaration (D9.10).
+    // each note points at the same earlier declaration.
+    // D9.10
     add("a.ft",
         "extern fn void put(i32 n);\n"
         "fn void go() { put(1); }\n");
@@ -522,7 +545,8 @@ TEST(every_later_declaration_is_held_against_the_first, {
 TEST(a_conflict_in_an_imported_module_is_reported_from_any_entry, {
     begin();
     // Neither disagreeing declaration is in the entry module, and the closure
-    // is still checked end to end (D9.10), so the conflict is found.
+    // is still checked end to end, so the conflict is found.
+    // D9.10
     add("main.ft",
         "import a;\n"
         "fn i32 main() { a.go(); return 0; }\n");
@@ -540,8 +564,9 @@ TEST(a_conflict_in_an_imported_module_is_reported_from_any_entry, {
 TEST(a_declaration_that_failed_to_check_is_not_the_reference, {
     begin();
     // The first module's declaration is not extern-legal and reports its own
-    // error (D9.8), so it never becomes the signature the others are held
-    // against and the two well-formed declarations agree.
+    // error, so it never becomes the signature the others are held against
+    // and the two well-formed declarations agree.
+    // D9.8
     add("main.ft",
         "import a;\n"
         "import b;\n"
@@ -564,10 +589,11 @@ TEST(checking_one_module_twice_does_not_conflict_with_itself, {
         "extern fn void put(i32 n);\n"
         "fn i32 main() { put(1); return 0; }\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
-    // An editor mode checks one file again through the same checker (D20.2):
-    // the second pass makes new symbols for the same tree, and holding them
+    // An editor mode checks one file again through the same checker: the
+    // second pass makes new symbols for the same tree, and holding them
     // against the first pass's would report a module as conflicting with
     // itself.
+    // D20.2
     const module_t* m = module_at("main");
     TEST_ASSERT_NONNULL(m);
     TEST_ASSERT_TRUE(check_module(&checker, m));
@@ -586,7 +612,8 @@ TEST(a_muted_checker_counts_the_conflict_and_reports_nothing, {
     want_mute = true;
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     // A muted checker annotates the tree without reporting, so neither the
-    // error nor its notes reach the sink (D20.2).
+    // error nor its notes reach the sink.
+    // D20.2
     TEST_ASSERT_FALSE(said("conflicting declarations"));
     TEST_ASSERT_FALSE(said("previous declaration"));
 })

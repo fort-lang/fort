@@ -22,9 +22,9 @@
 
 #include "test.h"
 
-// The results of the last parse: the tokens and the pool they were lexed
-// with (both keep the names in the tree alive), the arena, the captured
-// diagnostics and the buffer the dumps are printed into.
+/// The results of the last parse: the tokens and the pool they were lexed
+/// with (both keep the names in the tree alive), the arena, the captured
+/// diagnostics and the buffer the dumps are printed into.
 static tokvec_t pt_toks;
 static str_pool_t pt_pool;
 static ast_arena_t pt_arena;
@@ -49,7 +49,7 @@ static inline void pt_init(void) {
     pt_ready = true;
 }
 
-// Releases the results of the last parse and restores stderr.
+/// Releases the results of the last parse and restores stderr.
 static inline void parse_done(void) {
     if (!pt_ready) {
         return;
@@ -65,10 +65,11 @@ static inline void parse_done(void) {
     pt_ready = false;
 }
 
-// Lexes and parses `src` as t.ft with the diagnostics captured; never NULL,
-// since a lexical error resynchronises at the next line and still leaves a
-// complete token array (D14.2). The previous parse's tokens, strings and
-// nodes are released first, so every tree lives until the next call.
+/// Lexes and parses `src` as t.ft with the diagnostics captured; never NULL,
+/// since a lexical error resynchronises at the next line and still leaves a
+/// complete token array. The previous parse's tokens, strings and nodes are
+/// released first, so every tree lives until the next call.
+/// D14.2
 static inline ast_node_t* parse_text(const char* src) {
     pt_init();
     sb_clear(&pt_diags);
@@ -79,24 +80,25 @@ static inline ast_node_t* parse_text(const char* src) {
     sb_clear(&pt_text);
     sb_append(&pt_text, src);
     // A lexical error is reported and lexing resumes at the next line, so the
-    // tokens cover the whole file and the parser runs on them (D14.2).
+    // tokens cover the whole file and the parser runs on them.
+    // D14.2
     (void)lex_file("t.ft", str_from_cstr(src), &pt_pool, &pt_toks);
     return parse_module("t.ft", pt_toks.items, pt_toks.len, &pt_arena);
 }
 
-// The captured diagnostics of the last parse, one line each.
+/// The captured diagnostics of the last parse, one line each.
 static inline const char* parse_diags(void) {
     return sb_cstr(&pt_diags);
 }
 
-// The S-expression of `n`, valid until the next dump.
+/// The S-expression of `n`, valid until the next dump.
 static inline const char* dumped(const ast_node_t* n) {
     sb_clear(&pt_out);
     ast_dump(n, &pt_out);
     return sb_cstr(&pt_out);
 }
 
-// The position of `n` as `line:col`, valid until the next dump.
+/// The position of `n` as `line:col`, valid until the next dump.
 static inline const char* loc_of(const ast_node_t* n) {
     sb_clear(&pt_out);
     if (n == NULL) {
@@ -109,8 +111,8 @@ static inline const char* loc_of(const ast_node_t* n) {
     return sb_cstr(&pt_out);
 }
 
-// The range of `n` as `line:col-end_line:end_col`, valid until the next dump
-// (D20.4: the start inclusive, the end exclusive).
+/// The range of `n` as `line:col-end_line:end_col`, valid until the next dump.
+/// D20.4: the start inclusive, the end exclusive
 static inline const char* range_of(const ast_node_t* n) {
     sb_clear(&pt_out);
     if (n == NULL) {
@@ -127,8 +129,9 @@ static inline const char* range_of(const ast_node_t* n) {
     return sb_cstr(&pt_out);
 }
 
-// The byte offset of `line`:`col` in the last parsed source, its length when
-// the position is past the end; a tab counts as one column (D14.2).
+/// The byte offset of `line`:`col` in the last parsed source, its length when
+/// the position is past the end; a tab counts as one column.
+/// D14.2
 static inline uint64_t pt_offset_of(uint32_t line, uint32_t col) {
     const char* s = sb_cstr(&pt_text);
     uint32_t at_line = 1;
@@ -149,8 +152,9 @@ static inline uint64_t pt_offset_of(uint32_t line, uint32_t col) {
     return i;
 }
 
-// The source text `loc` covers in the last parsed source, valid until the
-// next dump: what an editor would underline (D20.4).
+/// The source text `loc` covers in the last parsed source, valid until the next
+/// dump: what an editor would underline.
+/// D20.4
 static inline const char* pt_text_of(loc_t loc) {
     const uint64_t start = pt_offset_of(loc.line, loc.col);
     const uint64_t end = pt_offset_of(loc.end_line, loc.end_col);
@@ -161,8 +165,9 @@ static inline const char* pt_text_of(loc_t loc) {
     return sb_cstr(&pt_out);
 }
 
-// The source text of `n`'s own range, and of the name token it carries; the
-// empty string for a node without a name (D20.4).
+/// The source text of `n`'s own range, and of the name token it carries; the
+/// empty string for a node without a name.
+/// D20.4
 static inline const char* text_of(const ast_node_t* n) {
     if (n == NULL) {
         sb_clear(&pt_out);
@@ -181,8 +186,8 @@ static inline const char* name_text_of(const ast_node_t* n) {
     return pt_text_of(n->name_loc);
 }
 
-// The S-expression of the whole module, or the diagnostics when the parse
-// failed, so that a failing assertion shows why.
+/// The S-expression of the whole module, or the diagnostics when the parse
+/// failed, so that a failing assertion shows why.
 static inline const char* parse_dump(const char* src) {
     const ast_node_t* mod = parse_text(src);
     if (mod == NULL) {
@@ -191,8 +196,8 @@ static inline const char* parse_dump(const char* src) {
     return dumped(mod);
 }
 
-// The `i`-th declaration of the module, or NULL when the parse failed or the
-// module has no such declaration.
+/// The `i`-th declaration of the module, or NULL when the parse failed or the
+/// module has no such declaration.
 static inline ast_node_t* pt_decl(const ast_node_t* mod, uint64_t i) {
     if (mod == NULL || ast_len(mod) <= i) {
         return NULL;
@@ -200,7 +205,7 @@ static inline ast_node_t* pt_decl(const ast_node_t* mod, uint64_t i) {
     return ast_child(mod, i);
 }
 
-// The source `prefix<middle>suffix`, held until the next call.
+/// The source `prefix<middle>suffix`, held until the next call.
 static inline const char* pt_wrap(const char* prefix, const char* middle, const char* suffix) {
     pt_init();
     sb_clear(&pt_src);
@@ -210,7 +215,7 @@ static inline const char* pt_wrap(const char* prefix, const char* middle, const 
     return sb_cstr(&pt_src);
 }
 
-// The type of `<type> x = 0;`, as the parser reads it (grammar.md 4).
+/// The type of `<type> x = 0;`, as the parser reads it (grammar.md 4).
 static inline const char* dump_type(const char* type_src) {
     const ast_node_t* mod = parse_text(pt_wrap("", type_src, " x = 0;"));
     const ast_node_t* decl = pt_decl(mod, 0);
@@ -220,7 +225,7 @@ static inline const char* dump_type(const char* type_src) {
     return dumped(decl->a);
 }
 
-// The initializer of `i32 x = <expr>;` (grammar.md 6).
+/// The initializer of `i32 x = <expr>;` (grammar.md 6).
 static inline const char* dump_expr(const char* expr_src) {
     const ast_node_t* mod = parse_text(pt_wrap("i32 x = ", expr_src, ";"));
     const ast_node_t* decl = pt_decl(mod, 0);
@@ -230,7 +235,7 @@ static inline const char* dump_expr(const char* expr_src) {
     return dumped(decl->b);
 }
 
-// The first statement of `fn void f() { <stmt> }` (grammar.md 5).
+/// The first statement of `fn void f() { <stmt> }` (grammar.md 5).
 static inline const char* dump_stmt(const char* stmt_src) {
     const ast_node_t* mod = parse_text(pt_wrap("fn void f() {\n", stmt_src, "\n}"));
     const ast_node_t* fn = pt_decl(mod, 0);
@@ -240,11 +245,12 @@ static inline const char* dump_stmt(const char* stmt_src) {
     return dumped(ast_child(fn->b, 0));
 }
 
-// The diagnostics a source that must not parse produces, one per line, or the
-// tree when it parsed after all, so that a failing assertion shows what the
-// parser accepted. The parser recovers and returns a tree whatever it
-// reported (D14.2), so whether the source parsed is the number of diagnostics,
-// which parse_text resets before every parse, and never a NULL tree.
+/// The diagnostics a source that must not parse produces, one per line, or the
+/// tree when it parsed after all, so that a failing assertion shows what the
+/// parser accepted. The parser recovers and returns a tree whatever it
+/// reported, so whether the source parsed is the number of diagnostics, which
+/// parse_text resets before every parse, and never a NULL tree.
+/// D14.2
 static inline const char* parse_fails(const char* src) {
     const ast_node_t* mod = parse_text(src);
     if (diag_count() == 0) {
@@ -253,8 +259,8 @@ static inline const char* parse_fails(const char* src) {
     return parse_diags();
 }
 
-// The diagnostic of a type, an expression or a statement that must not
-// parse, in the same wrappers the dumps use.
+/// The diagnostic of a type, an expression or a statement that must not
+/// parse, in the same wrappers the dumps use.
 static inline const char* type_fails(const char* type_src) {
     return parse_fails(pt_wrap("", type_src, " x = 0;"));
 }

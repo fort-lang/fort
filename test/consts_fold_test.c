@@ -1,6 +1,8 @@
-// Unit tests of consts.h, part two: the exact untyped folding of D4.4 and
-// type-system.md 10.4 (`+ - * / % - ~ & | ^ << >>`) over the whole constant
-// range [-2^63, 2^64 - 1], with its boundaries and one past each.
+// Unit tests of consts.h, part two: the exact untyped folding of the
+// operators type-system.md 10.4 lists (`+ - * / % - ~ & | ^ << >>`) over
+// the whole constant range [-2^63, 2^64 - 1], with its boundaries and one
+// past each.
+// D4.4
 #include <stdint.h>
 
 #include "consts.h"
@@ -169,7 +171,8 @@ TEST(mul_outside_the_range_is_an_error, {
     TEST_ASSERT_FALSE(cv_mul(u(UINT64_C(0x100000000)), u(UINT64_C(0x100000000)), &r));
 })
 
-// ---- division and remainder (D6.13) ----------------------------------------------
+// ---- division and remainder ------------------------------------------------------
+// D6.13
 
 TEST(div_truncates_toward_zero, {
     cval_t r = cv_none();
