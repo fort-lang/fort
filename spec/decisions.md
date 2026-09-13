@@ -1223,8 +1223,8 @@ Sections:
   open-addressing table), `std.math` (float bit casts, abs/min/max per type), `std.sort` (an
   in-place sort of an array over libc `qsort`), `std.rt` (the runtime itself, D13.1: process start
   and exit, allocation, the failure paths and the print buffers, over `std.libc`) and
-  `std.rt_float` (the two float printers of D18.1, apart from `std.rt` because a compiler without
-  floats cannot compile them).
+  `std.rt_float` (the float text of D18.1, to a descriptor or to a `str_buf`, apart from `std.rt`
+  because a compiler without floats cannot compile it).
 - history: Amended 2026-09-11 (T-087): the five `fort_rt_*` declarations stood in `std.libc`, whose
   header had to describe itself as libc "plus" the runtime; they moved to `std.rt`, so "thin libc
   externs" is true of `std.libc` without qualification. Amended 2026-09-11 (T-088): `std.rt` held
@@ -1238,7 +1238,9 @@ Sections:
   (`test/runtime_sig_test.c`, `std_rt_declares_no_runtime_c_symbol`). Amended 2026-09-13 (T-045):
   `std.sort` joins the list. It is the first module this list gained after v1 was written, and
   `stdlib.md` 2.10 specifies it. Its element type must own nothing, because the sort permutes the
-  elements inside C, where the ownership rules of D17 see nothing.
+  elements inside C, where the ownership rules of D17 see nothing. Amended 2026-09-13 (T-107):
+  `std.rt_float` held the two printers alone; it also holds the two buffer formatters of D18.1 as
+  amended, and it imports `std.strbuf` for them.
 
 ### D13.3 The error-handling idiom
 - owner: `stdlib.md`.
@@ -1699,9 +1701,19 @@ Names the entry points that produce D11.7's float text and settles what D11.7 le
   so no program it builds can reach a float printer. This decision, and not D9.10, settles its
   membership: a compiler that accepts floats loads `std.rt_float` as a root of every closure exactly
   as D9.10 loads `std.rt`, and one that does not neither loads it nor needs it. It is a module of
-  the library like any other (D13.2).
+  the library like any other (D13.2), and it exports beside the two printers the two buffer
+  formatters `append_f32(strbuf.str_buf mut* b, f32 v)` and `append_f64(strbuf.str_buf mut* b, f64
+  v)`, which give the same bytes to a `str_buf` rather than to a descriptor. Those two are library
+  functions and not entry points: the compiler emits no call that names them, so the entry-point
+  list of `toolchain.md` 5.1 stays the two printers (D18.4). One formatter serves both forms, so
+  the two cannot disagree over a value. They stand in this module and not in `std.strbuf` for the
+  reason the printers stand here: a float in a `std.strbuf` signature would put the whole library
+  out of the C bootstrap's reach.
 - history: Amended 2026-09-11 (T-088): the two were C entry points named `fort_rt_print_f32` and
-  `fort_rt_print_f64`, back when the runtime was C (D13.1 as amended).
+  `fort_rt_print_f64`, back when the runtime was C (D13.1 as amended). Amended 2026-09-13 (T-107):
+  the module held the two printers alone, so a program could put a float on a descriptor and
+  nowhere else, and the JSON writer of `src/lsp/json.ft` had no `write_f64`; `stdlib.md` 2.12
+  specifies the two `append` functions and `std.rt_float` imports `std.strbuf` for them.
 
 ### D18.2 Shortest round-trip digits
 - owner: `toolchain.md` (5.1 entry points).
