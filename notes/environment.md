@@ -107,6 +107,35 @@ without a rewrite.
   (`pgrep -f "fort-t094.*tools/vm gate"`). A bare pattern makes every agent's waiter a dependency
   on every other agent's build, which looks exactly like contention and is not (T-094).
 
+- **Every `tools/vm` subcommand that drives `build/<preset>` holds its worktree, and a build is
+  stopped with TERM** (T-113). The perimeter is `configure`, `build`, `test`, `workflow`, `check`,
+  `check-lang`, `check-all`, `format`, `format-check`, `tidy`, `lines` and `gate`. **`run` and
+  `ssh` take no hold**: the first runs whatever it is given, and the second is an interactive
+  shell that may sit open for hours. So a build started through `run` is the one way round the
+  hold. One worktree
+  has one `build/<preset>`, so two gates in it make two ninja processes rewrite each other's
+  objects and the log names whichever test lost -- a collision that reads as a test failure
+  (T-087; again 2026-09-13, an orphan at ppid 1 driving `fort-t064` for 23 minutes beside the
+  live gate). The gate now writes its pid to `build/vm-hold.pid`, refuses to start while that pid is
+  alive, and takes a stale hold whose process is gone, so a killed build never wedges its
+  worktree. **Taking over a stale hold is not atomic.** Two builds started in one worktree within
+  milliseconds can both take it: the `rm` acts on a file the process verified a moment earlier.
+  Measured 2026-09-13: 1 double-take in 6 trials at a 1 ms skew, 0 in 60 at natural skew. POSIX
+  shell has no atomic create-or-break, and `/usr/bin/shlock` refuses a stale lock on this host
+  rather than breaking one -- exit 1 even for a lock it wrote itself whose pid had died -- so it
+  would wedge a worktree instead of freeing one. `gate_release` removes only a hold the process
+  still owns, so losing that race costs a refusal and not a deleted lock.
+  The orphan itself comes from three things that compound: a gate started with `&` outlives the
+  wrapper that started it and is reparented to init, so a kill aimed at the wrapper never reaches
+  it; `tools/vm` had no trap; and `ssh -T` allocates no pty, so the guest command gets no `SIGHUP`
+  when the connection drops. The hold makes a leftover harmless rather than preventing it. Two
+  facts about stopping one, both measured: a trap cannot run while a foreground child runs, so
+  the guest `ssh` is now a waited background job and TERM ends it within a second; and **INT
+  cannot be trapped at all in a gate an agent started**, because a script started with `&` from a
+  non-interactive shell has SIGINT ignored on entry (POSIX). Use `kill -TERM <pid>`. Find the pid
+  by matching the process whose command *is* the gate. Never use `pkill -f`: it also matches every
+  waiter that quotes the command.
+
 ## 2. The shared folder
 
 - Only the VM directory is shared: `/tmp` in the guest is not the host's `/tmp`. A scratch file

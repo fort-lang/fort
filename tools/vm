@@ -32,7 +32,9 @@ The cmake subcommands run at the top of the host git worktree; the preset
 defaults to debug. The VM directory is $FORT_VM_DIR, or else the main checkout
 of the current git repository; the host cwd must be inside it for ssh, run and
 the cmake subcommands. It appears as /vagrant in the guest. FORT_VM_CPUS and
-FORT_VM_MEMORY size the VM at `up`. A guest command that exits 255 is
+FORT_VM_MEMORY size the VM at `up`. Every subcommand that drives build/<preset>
+holds the worktree in build/vm-hold.pid and refuses to run beside another; stop
+a build with kill -TERM, never INT. A guest command that exits 255 is
 indistinguishable from a failed ssh connection and is re-run via vagrant ssh.
 EOF
 }
@@ -93,6 +95,7 @@ esac
 
 VM_DIR=$(find_vm_dir) || exit 1
 [ -f "$VM_DIR/Vagrantfile" ] || die "no Vagrantfile in $VM_DIR"
+
 SSH_CONFIG="$VM_DIR/.vagrant/ssh-config"
 
 vagrant_cmd() {
@@ -126,17 +129,40 @@ ssh_tty_flag() {
 # ssh exits 255 on a connection failure, so a guest command that itself exits
 # 255 is re-run through the fallback. The connect timeout keeps a paused or
 # stopped VM from hanging the wrapper before the fallback runs.
+GUEST_CHILD=""
 guest_run() {
     local script status
     script=$(guest_script "$2" "$3")
     if [ -f "$SSH_CONFIG" ]; then
         status=0
-        ssh "$1" -o ConnectTimeout=10 -F "$SSH_CONFIG" default -- "$script" || status=$?
+        if [ "$1" = -T ]; then
+            # A trap cannot run while a foreground child is running: bash
+            # defers it until the child returns, which for a gate step is
+            # minutes. `wait` is interruptible, so ssh runs as a waited job
+            # and the gate's trap can end it (measured 2026-09-13: INT sent
+            # to the script during a step left the gate alive 13 minutes).
+            ssh -T -o ConnectTimeout=10 -F "$SSH_CONFIG" default -- "$script" 0<&0 &
+            GUEST_CHILD=$!
+            wait "$GUEST_CHILD" || status=$?
+            GUEST_CHILD=""
+        else
+            ssh "$1" -o ConnectTimeout=10 -F "$SSH_CONFIG" default -- "$script" || status=$?
+        fi
         [ "$status" -ne 255 ] && return "$status"
         echo "tools/vm: cached ssh config failed; falling back to vagrant ssh" >&2
     fi
     cache_ssh_config || true
-    # vagrant ssh allocates a pty unless -T is passed through to ssh.
+    # vagrant ssh allocates a pty unless -T is passed through to ssh. The -T
+    # form is a waited job for the same reason as above: a trap must be able
+    # to end the step on this path too.
+    if [ "$1" = -T ]; then
+        status=0
+        vagrant_cmd ssh -c "$script" -- -T 0<&0 &
+        GUEST_CHILD=$!
+        wait "$GUEST_CHILD" || status=$?
+        GUEST_CHILD=""
+        return "$status"
+    fi
     vagrant_cmd ssh -c "$script" -- "$1"
 }
 
@@ -153,6 +179,7 @@ run_here() {
 # run_top <command>: run at the top of the current worktree.
 run_top() {
     local dir
+    gate_acquire
     dir=$(guest_path "$(worktree_top)") || exit 1
     guest_run "$(ssh_tty_flag)" "$dir" "$1"
 }
@@ -160,6 +187,116 @@ run_top() {
 cmake_target() {
     local target=$1 preset=${2:-debug}
     run_top "$(printf 'cmake --build --preset %q --target %q' "$preset" "$target")"
+}
+
+# The build hold: stop a second build driving a worktree one already holds.
+# Every subcommand that drives build/<preset> takes it (run_top, cmake_target);
+# `tools/vm run` does not, since it runs whatever it is given.
+#
+# One worktree has one build/<preset>, so two gates in it make two ninja
+# processes rewrite each other's objects, and the log then names whichever test
+# lost. The collision reads as a test failure and not as contention, which is
+# what makes it expensive (T-087, and again on 2026-09-13 in fort-t064, where an
+# orphan at ppid 1 drove the build for 23 minutes beside the live gate).
+#
+# An orphan appears because a gate is usually started in the background of a
+# wrapper shell; when that wrapper dies the gate is reparented to init and a
+# kill aimed at the wrapper never reaches it. This hold does not stop the
+# leftover -- it makes it harmless, by refusing the second gate rather than
+# letting the two share a directory. notes/environment.md 1 says how to find and
+# kill one.
+#
+# The file build/vm-hold.pid holds the pid and belongs to tools/vm; nothing
+# else writes it. A hold whose process is gone is stale and is taken, which is
+# what makes a killed build leave no wedged worktree behind. `tools/vm run` and
+# `tools/vm ssh` take no hold: the first runs whatever it is given, and the
+# second is an interactive shell that may sit open for hours.
+GATE_HOLD=""
+gate_release() {
+    # Only ever remove a hold this process still owns. After the race the
+    # comment in gate_acquire describes, or after a reader follows the "rm" the
+    # refusal message offers, the file may name another live build.
+    if [ -n "$GATE_HOLD" ]; then
+        if [ "$(cat "$GATE_HOLD" 2>/dev/null)" = "$$" ]; then
+            rm -f "$GATE_HOLD"
+        fi
+        GATE_HOLD=""
+    fi
+    return 0
+}
+
+# gate_interrupt <signal>: end the guest step, release the hold, and die by the
+# signal so the caller sees the status it expects (130 or 143).
+gate_interrupt() {
+    if [ -n "$GUEST_CHILD" ]; then
+        kill -TERM "$GUEST_CHILD" 2>/dev/null || true
+        wait "$GUEST_CHILD" 2>/dev/null || true
+        GUEST_CHILD=""
+    fi
+    gate_release
+    trap - "$1"
+    kill -s "$1" $$
+}
+
+# hold_alive <pid>: the pid is digits and a process with it is alive. `kill -0`
+# signals nothing; it only asks. A recycled pid (macOS wraps at 99999) can
+# answer yes for an unrelated process, which is why the message below looks at
+# the process before it tells anyone to kill it.
+hold_alive() {
+    case "$1" in '' | *[!0-9]*) return 1 ;; esac
+    kill -0 "$1" 2>/dev/null
+}
+
+gate_acquire() {
+    [ -n "$GATE_HOLD" ] && return 0
+    local top holder hold
+    top=$(worktree_top)
+    mkdir -p "$top/build"
+    hold="$top/build/vm-hold.pid"
+    # noclobber makes the test and the write one step, which is what stops two
+    # live builds sharing a worktree. **Taking over a stale hold is not atomic**
+    # and two commands can both take it: the `rm` below acts on a file this
+    # process verified a moment earlier, so a second process that removed it and
+    # created its own loses the file to this `rm`. Measured 2026-09-13: 1 double
+    # take in 6 trials at a 1 ms skew, 0 in 60 at natural skew. Closing it needs
+    # an atomic create-or-break, which POSIX shell has not got; /usr/bin/shlock
+    # is the obvious candidate and refuses a stale lock on this host rather than
+    # breaking it (exit 1 for a lock it wrote itself whose pid had died), which
+    # would wedge a worktree instead. The window needs two builds started in one
+    # worktree within milliseconds **and** a stale hold; the case this exists to
+    # stop -- an orphan left behind and a second build started minutes later --
+    # is not that case. T-113 records it as a ratified deviation.
+    while ! (set -o noclobber; echo $$ > "$hold") 2>/dev/null; do
+        holder=$(cat "$hold" 2>/dev/null || true)
+        if hold_alive "$holder"; then
+            echo "tools/vm: a build already holds this worktree (pid $holder)." >&2
+            echo "tools/vm: two builds in one worktree collide in build/<preset> and the" >&2
+            echo "tools/vm: failure reads as a test failure." >&2
+            if [ "$(lsof -a -p "$holder" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')" = "$top" ]; then
+                echo "tools/vm: wait for it; or if it is an orphan (ppid 1), stop it" >&2
+                echo "tools/vm: with: kill -TERM $holder" >&2
+            else
+                echo "tools/vm: that pid is not a build in this worktree, so the hold" >&2
+                echo "tools/vm: is stale (a recycled pid): rm $hold" >&2
+            fi
+            exit 1
+        fi
+        echo "tools/vm: taking a stale hold from pid ${holder:-unknown}" >&2
+        rm -f "$hold"
+    done
+    [ "$(cat "$hold" 2>/dev/null)" = "$$" ] || die "lost the race for $hold"
+    GATE_HOLD="$hold"
+    trap 'gate_release' EXIT
+    # TERM and HUP end the guest step, release the hold and re-raise. INT is
+    # listed for a command run from a terminal, and only there: a script
+    # started with `&` from a non-interactive shell -- which is how every agent
+    # starts a gate -- has SIGINT ignored on entry, and an ignored signal cannot
+    # be trapped (POSIX; measured 2026-09-13: INT to a backgrounded gate did
+    # nothing, TERM released the hold in under a second). Stop a build with
+    # TERM, never INT.
+    trap 'gate_interrupt INT' INT
+    trap 'gate_interrupt TERM' TERM
+    trap 'gate_interrupt HUP' HUP
 }
 
 # ---- subcommands ---------------------------------------------------------------
