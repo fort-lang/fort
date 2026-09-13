@@ -46,12 +46,15 @@ let output = null;
 // `runOf` is the run last started for each checked file. It drops a superseded
 // run whole, its failure included, so a dead run cannot report over a live one.
 //
-// `publishedAt` is what was last said about each file: `{at, by}`, the number of
-// the event and the checked file whose run painted it. `by` is null when the
-// last event painted nothing, which today is a close. `at` keeps an older run of
-// one file from repainting a newer answer about another file its closure also
-// names. `by` says whose paint is on the file, and only that run asks again
-// about it.
+// `publishedAt` is what was last said about each file: `{at, by, folder,
+// roots}`, the number of the event, the checked file whose run painted it, the
+// workspace folder that run worked in and the search roots a later check of the
+// file must carry. `by` is null when the last event painted nothing, which today
+// is a close. `at` keeps an older run of one file from repainting a newer answer
+// about another file its closure also names. `by` says whose paint is on the
+// file, and only that run asks again about it. `roots` is what the file needs to
+// be checked the way that closure checked it, and it outlives a close: the
+// paint goes, the root the closure searched is still the root it searched.
 //
 // `closureOf` is the set of files each check published about. Its difference
 // with the next check of that same file is the set of files that have left that
@@ -109,9 +112,15 @@ function forget(document) {
   if (!isFortFile(document)) return;
   const filePath = document.uri.fsPath;
   if (!publishedAt.has(filePath) && !runOf.has(filePath)) return;
+  const published = publishedAt.get(filePath);
   runOf.delete(filePath);
   events += 1;
-  publishedAt.set(filePath, { at: events, by: null });
+  publishedAt.set(filePath, {
+    at: events,
+    by: null,
+    folder: published === undefined ? null : published.folder,
+    roots: published === undefined ? [] : published.roots,
+  });
   collection.delete(vscode.Uri.file(filePath));
 }
 
@@ -149,9 +158,39 @@ function shellQuote(word) {
 // its own, and there is nothing to say about a file that has none.
 function run(document) {
   if (!isFortFile(document)) return;
+  const filePath = document.uri.fsPath;
   const folder = folderOf(document.uri);
   if (folder === null) return;
-  startCheck(document.uri.fsPath, folder, [], null);
+  startCheck(filePath, folder, knownRoots(filePath, folder), null);
+}
+
+// The `-I` directories an opened or saved file is checked with. A module is not
+// a file that checks the same way on its own: `util/strings.ft` imports its
+// sibling as `util.chars` and resolves that import only from the directory its
+// entry file sits in (D9.2). Opening or saving it therefore paints `module
+// 'util.chars' not found` on correct code, unless the run carries that
+// directory.
+//
+// The window knows that directory whenever a check has already painted the
+// file, which is what `roots` records, so an open and a save carry exactly what
+// a re-check of the same file carries. The file's own directory is dropped from
+// the list, since D9.2 puts it first in every case and no `-I` can add it or
+// remove it. A file this window has never published about carries nothing, as
+// before: no check has walked a closure that holds it, so nothing here knows
+// which directory is the root of its project. Inventing one is a project model,
+// which no decision states; D20.5 fixes only what the compiler's modules must be
+// for a language server to be possible and leaves the server's own structure
+// undecided (T-111).
+//
+// The roots are relative to the workspace folder the run worked in, so they are
+// used only for a run in that same folder. A folder added to the workspace
+// under another one takes the files below it, and a path relative to the old
+// folder names nothing from the new one.
+function knownRoots(filePath, folder) {
+  const published = publishedAt.get(filePath);
+  if (published === undefined || published.folder !== folder) return [];
+  const own = ownRoot(filePath, folder);
+  return published.roots.filter((root) => root !== own);
 }
 
 // One check of `filePath`, named relative to the workspace folder `folder`. The
@@ -203,9 +242,14 @@ function folderOf(uri) {
 // The old squiggles stand until the answer arrives, as they do after any save.
 function publish(entryPath, folder, generation, roots, document) {
   const byFile = check.diagnosticsByFile(document, folder, fileLines);
+  // What a later check of any file of this closure must carry to see what this
+  // check saw. It is recorded for every file the check publishes about, the
+  // entry file included, and read again by an open, by a save and by a
+  // re-check.
+  const childRoots = rootsFor(entryPath, folder, roots);
   for (const [file, items] of byFile) {
     if (!mayReplace(file, generation)) continue;
-    publishedAt.set(file, { at: generation, by: entryPath });
+    publishedAt.set(file, { at: generation, by: entryPath, folder, roots: childRoots });
     collection.set(vscode.Uri.file(file), items.map(toVsDiagnostic));
   }
   // The closure is what the compiler read and not what was published. A
@@ -215,30 +259,44 @@ function publish(entryPath, folder, generation, roots, document) {
   const departed = departedFrom(entryPath, closure);
   closureOf.set(entryPath, closure);
   if (departed.length === 0) return;
-  const childRoots = rootsFor(entryPath, folder, roots);
   for (const file of departed) queueRecheck(file, folder, childRoots, entryPath);
 }
 
-// The `-I` directories a file that leaves this closure is checked with. A
-// module is not a file that can be checked on its own. The first search root is
-// always the directory of the file the compiler was given (D9.2). A module in
-// `util/` that imports its sibling as `util.chars` therefore resolves that
-// import only from the directory the original entry file sits in. That
-// directory goes on the command line as `-I`, ahead of the roots this run
-// carried itself, which is the order D9.2 searches them in.
+// The `-I` directories a later check of any file of this closure is checked
+// with. A module is not a file that can be checked on its own. The first search
+// root is always the directory of the file the compiler was given (D9.2). A
+// module in `util/` that imports its sibling as `util.chars` therefore resolves
+// that import only from the directory the entry file of its closure sits in.
+// That directory goes on the command line as `-I`.
+//
+// The roots a run carries are the roots of that entry file, and a run hands
+// them on unchanged. A run that carries none is the entry file itself: nothing
+// has painted it, the reader pointed the editor at it, and its own directory is
+// the root of the closure it starts. Only such a run puts a directory into the
+// list.
+//
+// A run must not add its own directory to what it hands on. That directory is
+// the first root of that one run by D9.2 and of no other. Adding it would send
+// the root of `a/x.ft` to a check of `b/y.ft`, which no closure searched, and
+// `b.z` in `y.ft` would then read `a/b/z.ft` -- an answer from a root the
+// closure never had, which is the defect this whole record exists to stop
+// (T-111 finding 3). The list therefore holds one directory and does not grow.
 //
 // This is faithful wherever one directory is enough. It is not faithful in
 // general: the directory of the file being checked stays the first root, and no
 // option removes it. A layout that repeats a path prefix, `util/util/chars.ft`
 // beside `util/chars.ft`, makes this run read the nearer file. Only a project
-// model would settle that, and this extension has none (T-092).
+// model would settle that, and no decision states one (T-092, T-111).
 function rootsFor(entryPath, folder, roots) {
-  const own = path.relative(folder, path.dirname(entryPath));
-  const all = [own === '' ? '.' : own];
-  for (const root of roots) {
-    if (!all.includes(root)) all.push(root);
-  }
-  return all;
+  if (roots.length > 0) return roots;
+  return [ownRoot(entryPath, folder)];
+}
+
+// The directory of a file, named as a search root relative to the workspace
+// folder. The folder itself is `.`, since an empty word is no path.
+function ownRoot(filePath, folder) {
+  const own = path.relative(folder, path.dirname(filePath));
+  return own === '' ? '.' : own;
 }
 
 // Whether this run may write about `file`. A later event may have spoken about

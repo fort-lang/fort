@@ -43,6 +43,12 @@ class DiagnosticRelatedInformation {
   }
 }
 
+// The folders a window holds, from the one path or the several a test gives.
+function foldersOf(setting) {
+  if (setting === undefined || setting === null) return [];
+  return Array.isArray(setting) ? setting.slice() : [setting];
+}
+
 function createApi(state) {
   const uriFile = (fsPath) => ({ scheme: 'file', fsPath, toString: () => 'file://' + fsPath });
   return {
@@ -80,12 +86,18 @@ function createApi(state) {
     },
     workspace: {
       textDocuments: state.openDocuments,
-      // One folder, since what the extension asks is which folder a file
-      // belongs to and a file outside it belongs to none.
+      // What the extension asks is which folder a file belongs to, and a file
+      // outside every folder belongs to none. A workspace may hold several
+      // folders and one of them may lie inside another, in which case VS Code
+      // answers with the nearest, so the longest match wins. `state.folders` is
+      // an array a test may add to, the way a user adds a folder to a window.
       getWorkspaceFolder(uri) {
-        if (state.workspaceFolder === null) return undefined;
-        const inside = uri.fsPath.startsWith(state.workspaceFolder + path.sep);
-        return inside ? { uri: uriFile(state.workspaceFolder) } : undefined;
+        let best = null;
+        for (const folder of state.folders) {
+          if (!uri.fsPath.startsWith(folder + path.sep)) continue;
+          if (best === null || folder.length > best.length) best = folder;
+        }
+        return best === null ? undefined : { uri: uriFile(best) };
       },
       onDidOpenTextDocument(handler) {
         state.openHandlers.push(handler);
@@ -106,12 +118,13 @@ function createApi(state) {
 // Load a fresh copy of the extension with the editor and the spawn faked.
 // `options.documents` are the ones the editor already holds open when it
 // activates, which is how VS Code starts an extension that `onLanguage:fort`
-// woke, and `options.workspaceFolder` is the folder it opened, null for a file
+// woke, and `options.workspaceFolder` is the folder it opened -- one path, an
+// array of them for a window holding several, and nothing at all for a file
 // opened outside every folder.
 function install(options) {
   const settings = options === undefined ? {} : options;
   const state = {
-    workspaceFolder: settings.workspaceFolder === undefined ? null : settings.workspaceFolder,
+    folders: foldersOf(settings.workspaceFolder),
     diagnostics: new Map(),
     published: [],
     cleared: [],

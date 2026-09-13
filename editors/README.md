@@ -42,7 +42,7 @@ Nothing is built on the host, so the compiler that answers is the one in the dev
 save of a `.ft` file the extension runs, in a child process and never on the UI thread:
 
 ```sh
-<workspace>/tools/vm run '/vagrant/build/release/fort --check --json <path in the workspace>'
+<workspace>/tools/vm run '/vagrant/build/release/fort --check --json [-I <root>]... <path>'
 ```
 
 with the working directory set to the workspace folder the file belongs to. `tools/vm run` finds
@@ -58,11 +58,12 @@ the file the same way and it resolves against the same workspace folder on the h
 belongs to no workspace folder is not checked, since `tools/vm run` works in the directory matching
 its own and there is nothing to say about such a file.
 
-The compiler needs no other argument. It finds its standard library in the `std` directory beside
-the binary (D14.1), and `/vagrant/build/release/std` sits next to `/vagrant/build/release/fort`, so
-`--std-dir` is unnecessary; imports resolve from the importing file's directory (D9.2), so `-I` is
-too. The answers therefore come from the **release** build in the main checkout: run `tools/vm
-build release` after a merge to keep them current. A window opened on a worktree gets that same
+The compiler needs one other argument at most. It finds its standard library in the `std` directory
+beside the binary (D14.1), and `/vagrant/build/release/std` sits next to
+`/vagrant/build/release/fort`, so `--std-dir` is unnecessary. A `-I` is on the line only for a file
+the window has already seen inside another file's closure, which the section below explains. The
+answers therefore come from the **release** build in the main checkout: run `tools/vm build
+release` after a merge to keep them current. A window opened on a worktree gets that same
 compiler, since every worktree shares one VM and `/vagrant/build/release` is the main checkout's.
 
 The compiler answers with one JSON document (D20.2): the files it read and the diagnostics. A
@@ -100,11 +101,27 @@ connection to the guest. An open and a save still go out at once. The chain such
 is finite. Every answer rewrites the closure of the file that was checked and moves `by` to it. A
 hop therefore destroys the condition that let it happen.
 
-The run carries one thing the ordinary check does not. A module is not a file that checks the same
-way on its own. The first search root is always the directory of the file the compiler was given
-(D9.2). `util/strings.ft` imports its sibling as `util.chars`, and resolves that import only from
-the directory its entry file sits in. The re-check therefore passes that directory as `-I`.
-`by` records the entry, and the directory of the entry is the root its closure searched.
+Each run carries one thing beyond the file. A module is not a file that checks the same way on its
+own. The first search root is always the directory of the file the compiler was given (D9.2).
+`util/strings.ft` imports its sibling as `util.chars`, and resolves that import only from the
+directory its entry file sits in. A check therefore records, for every file of its closure, the
+root of that closure. An open, a save and a re-check of any of those files pass it on as `-I`. A
+module that a check of `main.ft` painted is checked the way that closure checked it, and not on its
+own, so it gets the squiggles that closure sees (T-111). The directory of the file being checked is
+never on the command line, since D9.2 puts it first in every case and no option adds it or removes
+it.
+
+That root is one directory and it does not grow. The run that records it is the one the reader
+pointed the editor at, the run nothing had painted, and the root is its directory. Every run after
+it hands the same root on. A run must not add its own directory, which is the first root of that
+one run by D9.2 and of no other: `a/x.ft` and `b/y.ft` of one closure would then be checked with
+each other's directory, and `b.z` in `y.ft` would read `a/b/z.ft`, an answer from a root the
+closure never searched.
+
+A file the window has published about carries that root whether it is open or not, and a close does
+not take it away: the closure that searched the directory searched it either way. A file the window
+has never published about carries no root, which is what an open and a save did before, and the
+limitation below says what that costs.
 
 The bookkeeping costs one entry per file the window has checked or published about. It never costs
 one entry per event. The keys are file paths. Closing a file writes the entry it already had, and a
@@ -145,21 +162,56 @@ painted it, and the first check of a file in a session asks about nothing else. 
 from disk keeps its last squiggles. The run that asks about it finds no file, so there is no
 answer to publish. The output channel carries the compiler's `cannot read` line.
 
-A re-check is faithful to the closure it came from wherever one directory is enough. It is not
-faithful in general. D9.2 puts the directory of the file being checked first, ahead of every `-I`,
-and no option removes it. Take a project that repeats a path prefix: `util/util/chars.ft` beside
-`util/chars.ft`. The re-check reads the nearer file there, and reports an error the closure never
-saw. No layout in this repository does that. 0 of the 876 `.ft` files it tracks repeat a directory
-segment in their path, counted with
+A module the window has never seen inside a closure is checked on its own, with its own directory
+as the only search root. Open `test/lang/run/modules/nested/util/strings.ft` in a fresh window and
+it paints `module 'util.chars' not found` on correct code, because nothing has told the extension
+that the root of that project is `nested/`. Check the entry file once -- open or save
+`nested/main.ft` -- and the module is checked that closure's way from then on. Only a project model
+would know the root of a project the window has not walked. No decision states one: D20.5 fixes
+what the compiler's modules must be for a language server to be possible and leaves the server's
+own structure undecided.
+This shape is rare in this repository and ordinary in a program laid out in directories. 191 of the
+887 `.ft` files tracked here paint a `module ... not found` when the compiler is pointed at them
+alone, and 1 of the 191 has this shape. Counted from the main checkout, with the release build
+current:
+
+```sh
+tools/vm run 'for f in $(git ls-files "*.ft"); do
+    out=$(/vagrant/build/release/fort --check --json "$f")
+    case "$out" in *"not found"*) echo "$f $out" ;; esac
+done' > /tmp/painted.txt
+wc -l < /tmp/painted.txt                                        # 191
+grep -c "^test/fort/" /tmp/painted.txt                          # 170
+grep -v "^test/fort/" /tmp/painted.txt | grep -c "module 'std\." # 16
+```
+
+170 of them are under `test/fort/`, whose imports need the `-I ../../src/fort` of their own test
+directive, which no search root taken from a closure recovers. 16 name a `std.` module and answer
+to `tools/vm build release` instead, the `std/` beside the release binary being older than the
+checkout. That leaves 5: `src/lsp/json.ft`, which imports `flt` from `src/fort`; two fail tests and
+one fixture that import a module which does not exist on purpose; and
+`test/lang/run/modules/nested/util/strings.ft`, the one file with this shape.
+
+A check of a module is faithful to the closure whose root it carries wherever one directory is
+enough. It is not faithful in general. D9.2 puts the directory of the file being checked first,
+ahead of every `-I`, and no option removes it. Take a project that repeats a path prefix:
+`util/util/chars.ft` beside `util/chars.ft`. The check reads the nearer file there, and reports an
+error the closure never saw. No layout in this repository does that. 0 of the 887 `.ft` files it
+tracks repeat a directory segment in their path, counted with
 
 ```sh
 git ls-files '*.ft' | awk -F/ '{for(i=1;i<NF;i++)for(j=i+1;j<NF;j++)if($i==$j){print;next}}'
 ```
 
-while 21 directories do hold a sub-directory of `.ft` files, so the multi-directory case itself is
-ordinary here and the repeating one does not occur. Saving such a module yourself has always read
-the nearer file too, for the same reason. Only a project model would fix either, and the extension
-has none.
+while 9 directories do hold both `.ft` files and a sub-directory of `.ft` files, so the
+multi-directory case itself is ordinary here and the repeating one does not occur:
+
+```sh
+dirs=$(git ls-files '*.ft' | xargs -n1 dirname | sort -u)
+for d in $dirs; do echo "$dirs" | grep -q "^$d/" && echo "$d"; done | wc -l
+```
+
+Only a project model would fix the repeating layout, and the extension has none.
 
 A diagnostic reported inside the standard library is dropped rather than shown, since its path is
 the guest's. Its notes go with it wherever they point. An error in the standard library that names
@@ -190,9 +242,13 @@ release` having built the compiler:
    `import util.strings;` and the two lines that use `strings`, and save. Read the Problems panel,
    which lists the files with diagnostics whether they are open or not: `util/strings.ft` is not
    there. A `module 'util.chars' not found` against it means the re-check lost the `-I` of D9.2.
-   Do not open `util/strings.ft` to look. An open is a check of that file on its own, with no
-   `-I`, and it paints that very message. The extension has no project model (T-111), so the
-   Problems panel is what answers this step. Undo and save.
+   Undo and save. Now open `util/strings.ft` itself: it has no squiggle either, because the check
+   of it carries the directory of `main.ft`, which the check of `main.ft` recorded. Close it,
+   re-open it: still none. Open it in a window where `nested/main.ft` has never been checked and
+   it does paint that message, which is the limitation above and not a fault of this step. This
+   step needs a human at a VS Code window and T-111 could not run it: the unit tests drive the
+   extension against the fake editor and say nothing about what VS Code itself does. Read it as a
+   step to perform, not as a check that has passed.
 6. Halt the VM (`tools/vm halt`), save again: the squiggles that were on screen stay, and the
    *fort* output channel holds the `tools/vm run` line and the failure. Bring it back up
    (`tools/vm up`) and save once more: the answers return.

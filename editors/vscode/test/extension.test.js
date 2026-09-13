@@ -783,11 +783,11 @@ test('a re-check carries the directory of the entry that painted the file', () =
   assert.deepEqual(state.diagnostics.get(NOTES), []);
 });
 
-// A re-check that asks about a file of its own closure keeps the roots it was
-// given and adds its own. The order is the one D9.2 searches: the directory of
-// the file being checked first, then the roots inherited from the run that
-// asked.
-test('a re-check hands its roots on to the next one', () => {
+// A re-check that asks about a file of its own closure hands on the root it was
+// given, and not its own directory. Its own directory is the first root of that
+// one run by D9.2 and of no other run, so handing it on would check the next
+// file with a root no closure ever searched (T-111 finding 3).
+test('a re-check hands on the root it was given and not its own', () => {
   const { state } = fake.install({ workspaceFolder: FIXTURES });
   const closure = (...files) =>
     JSON.stringify({ version: 1, files, diagnostics: [], symbols: [] });
@@ -802,12 +802,262 @@ test('a re-check hands its roots on to the next one', () => {
   fake.complete(state.calls[2], { stdout: closure('project/main.ft') });
   assert.equal(state.calls[3].args[1], COMPILER + " --check --json -I 'project' 'notes.ft'");
   // That answer drops lexical.ft, which notes.ft had painted. The run about it
-  // carries the directory of notes.ft and then the root notes.ft was given.
+  // carries the root notes.ft was given, which is the root of the closure both
+  // files came from, and nothing else.
   fake.complete(state.calls[3], { stdout: closure('notes.ft') });
+  assert.equal(state.calls[4].args[1], COMPILER + " --check --json -I 'project' 'lexical.ft'");
+});
+
+// ---- the root an open and a save carry (T-111) ------------------------------
+//
+// A module is not a file that checks the same way on its own. The first search
+// root is always the directory of the file the compiler was given (D9.2), so an
+// open or a save of `util/strings.ft` resolves `import util.chars;` from
+// `util/` and paints `module 'util.chars' not found` on correct code. Measured
+// with the release compiler on `test/lang/run/modules/nested`: without a root,
+// exit 1 and that message; with `-I` the directory of `main.ft`, exit 0 and a
+// closure of both files. The window knows that directory whenever a check has
+// painted the file, which is what these tests are about.
+
+// The fixture project of these tests: an entry file with a module in a
+// sub-directory of its own, which is the shape the root matters for. Only
+// `main.ft` is a file on disk. The others are names on a command line, as
+// `other.ft` is above: the compiler is faked, and a name is read from disk only
+// when a diagnostic must be converted against its text.
+const SUB_MAIN = path.join(PROJECT, 'main.ft');
+const SUB_STRINGS = path.join(PROJECT, 'util', 'strings.ft');
+const SUB_CHARS = path.join(PROJECT, 'util', 'chars.ft');
+// A check document that names the files it read and reports nothing.
+const readFiles = (...files) =>
+  JSON.stringify({ version: 1, files, diagnostics: [], symbols: [] });
+
+// A check of the entry file that painted the module, with the workspace folder
+// one directory above the entry so that the root is a path and not `.`.
+function painted() {
+  const { state } = fake.install({ workspaceFolder: FIXTURES });
+  fake.save(state, SUB_MAIN);
+  fake.complete(state.calls[0], {
+    stdout: readFiles('project/main.ft', 'project/util/strings.ft'),
+  });
+  return state;
+}
+
+test('an open of a module another check painted carries the root of that check', () => {
+  const state = painted();
+  fake.open(state, SUB_STRINGS);
   assert.equal(
-    state.calls[4].args[1],
-    COMPILER + " --check --json -I '.' -I 'project' 'lexical.ft'"
+    state.calls[1].args[1],
+    COMPILER + " --check --json -I 'project' 'project/util/strings.ft'"
   );
+  assert.equal(state.calls[1].options.cwd, FIXTURES);
+});
+
+test('a save of a module another check painted carries the root of that check', () => {
+  const state = painted();
+  fake.save(state, SUB_STRINGS);
+  assert.equal(
+    state.calls[1].args[1],
+    COMPILER + " --check --json -I 'project' 'project/util/strings.ft'"
+  );
+});
+
+// A module nothing has painted is checked as it always was. No closure that
+// holds it has been walked, so nothing here knows which directory is the root
+// of its project, and the extension does not invent one: a project model is
+// what that takes, and no decision states one (T-111).
+test('a module nothing has painted is checked with no root', () => {
+  const { state } = fake.install({ workspaceFolder: FIXTURES });
+  fake.open(state, SUB_STRINGS);
+  assert.equal(state.calls.length, 1);
+  assert.equal(state.calls[0].args[1], COMPILER + " --check --json 'project/util/strings.ft'");
+});
+
+// The root survives the module's own check: that check records what it was
+// given, plus its own directory, so the next save of the same file carries the
+// root again rather than losing it after one answer.
+test('the root stays on the module after its own check answers', () => {
+  const state = painted();
+  fake.open(state, SUB_STRINGS);
+  fake.complete(state.calls[1], {
+    stdout: readFiles('project/util/strings.ft', 'project/util/chars.ft'),
+  });
+  fake.save(state, SUB_STRINGS);
+  assert.equal(
+    state.calls[2].args[1],
+    COMPILER + " --check --json -I 'project' 'project/util/strings.ft'"
+  );
+  // And a file that only that check has painted carries it too.
+  fake.open(state, SUB_CHARS);
+  assert.equal(
+    state.calls[3].args[1],
+    COMPILER + " --check --json -I 'project' 'project/util/chars.ft'"
+  );
+});
+
+// The directory of the file being checked is the first root in every case and
+// no option adds it or removes it (D9.2), so it is not repeated on the command
+// line. An entry file therefore looks exactly as it did before this root
+// existed.
+test('the directory of the file itself is not repeated as a root', () => {
+  const { state } = open();
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: CLEAN });
+  fake.save(state, MAIN);
+  assert.equal(state.calls[1].args[1], GUEST);
+});
+
+// A close clears the paint and keeps the root. The closure that searched that
+// directory searched it whether the file is open or not, and re-opening the
+// module must not paint the message the closure never saw.
+test('a close keeps the root the closure searched', () => {
+  const state = painted();
+  fake.open(state, SUB_STRINGS);
+  fake.complete(state.calls[1], { stdout: readFiles('project/util/strings.ft') });
+  fake.close(state, SUB_STRINGS);
+  fake.open(state, SUB_STRINGS);
+  assert.equal(
+    state.calls[2].args[1],
+    COMPILER + " --check --json -I 'project' 'project/util/strings.ft'"
+  );
+});
+
+// The root follows the last check that painted the file, which is the same rule
+// `by` follows. A module read by two entry files in two directories is checked
+// the way the closure that painted it last was checked.
+test('the newest check decides the root of a module', () => {
+  const state = painted();
+  const OTHER_MAIN = path.join(FIXTURES, 'other.ft');
+  fake.save(state, OTHER_MAIN);
+  fake.complete(state.calls[1], {
+    stdout: readFiles('other.ft', 'project/util/strings.ft'),
+  });
+  fake.open(state, SUB_STRINGS);
+  assert.equal(
+    state.calls[2].args[1],
+    COMPILER + " --check --json -I '.' 'project/util/strings.ft'"
+  );
+});
+
+// An entry file that sits in the workspace folder itself gives `.` as its root,
+// an empty word being no path at all.
+test('an entry in the workspace folder itself gives the root a name', () => {
+  const { state } = fake.install({ workspaceFolder: FIXTURES });
+  fake.save(state, path.join(FIXTURES, 'notes.ft'));
+  fake.complete(state.calls[0], { stdout: readFiles('notes.ft', 'project/util/strings.ft') });
+  fake.open(state, SUB_STRINGS);
+  assert.equal(
+    state.calls[1].args[1],
+    COMPILER + " --check --json -I '.' 'project/util/strings.ft'"
+  );
+});
+
+// The roots of a file are a set and not a history. Saving one module again and
+// again must not lengthen its command line, or a session would pay for every
+// save it has ever made.
+test('saving a module again does not lengthen its roots', () => {
+  const state = painted();
+  for (let i = 0; i < 20; i += 1) {
+    fake.save(state, SUB_STRINGS);
+    fake.complete(state.calls[state.calls.length - 1], {
+      stdout: readFiles('project/util/strings.ft', 'project/util/chars.ft'),
+    });
+  }
+  assert.equal(
+    state.calls[state.calls.length - 1].args[1],
+    COMPILER + " --check --json -I 'project' 'project/util/strings.ft'"
+  );
+});
+
+// The root of a closure is one directory and it does not grow. A check of a
+// module records the root it was given, not its own directory: its own
+// directory is the first root of that one run by D9.2 and of no other. Two
+// modules in sibling directories therefore each get the root of the entry file
+// that read them, and never each other's.
+//
+// Without this, an open of `a/x.ft` and then of `b/y.ft` would put `-I 'a'` on
+// the second, and `b.z` in `y.ft` would read `a/b/z.ft`: an answer from a root
+// the closure never searched, which is the defect the record exists to stop
+// (T-111 finding 3).
+test('the root of a closure does not grow across sibling directories', () => {
+  const { state } = fake.install({ workspaceFolder: PROJECT });
+  const X = path.join(PROJECT, 'a', 'x.ft');
+  const Y = path.join(PROJECT, 'b', 'y.ft');
+  const ROOT_ONLY = COMPILER + ' --check --json -I ' + "'.'";
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: readFiles('main.ft', 'a/x.ft', 'b/y.ft') });
+  // Each module is checked with the directory of main.ft, the entry file that
+  // read it, and its answer names the other module of the same closure.
+  fake.open(state, X);
+  assert.equal(state.calls[1].args[1], ROOT_ONLY + " 'a/x.ft'");
+  fake.complete(state.calls[1], { stdout: readFiles('a/x.ft', 'b/y.ft') });
+  fake.open(state, Y);
+  assert.equal(state.calls[2].args[1], ROOT_ONLY + " 'b/y.ft'");
+  fake.complete(state.calls[2], { stdout: readFiles('b/y.ft', 'a/x.ft') });
+  // And back again: the list is the one root, however many checks have run.
+  fake.open(state, X);
+  assert.equal(state.calls[3].args[1], ROOT_ONLY + " 'a/x.ft'");
+});
+
+// The root and the publishing are one path, not two. A module checked with the
+// root of its closure answers about the whole closure, and each diagnostic must
+// land on the file it names, with the columns converted against that file's text
+// on disk (D20.2, D20.4). This is the boundary the command-line assertions above
+// stop at.
+test('a module checked with a root publishes onto the files it names', () => {
+  const { state } = fake.install({ workspaceFolder: FIXTURES });
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: readFiles('project/main.ft', 'notes.ft') });
+  fake.open(state, NOTES_FT);
+  assert.equal(state.calls[1].args[1], COMPILER + " --check --json -I 'project' 'notes.ft'");
+  // That run reads lexical.ft and reports the error of the fixture document in
+  // it: line 3 of a file whose third line is a tab and then `i32 x = 0755;`.
+  fake.complete(state.calls[1], {
+    code: 1,
+    stdout: JSON.stringify({
+      version: 1,
+      files: ['notes.ft', 'lexical.ft'],
+      diagnostics: [
+        {
+          file: 'lexical.ft',
+          line: 3,
+          col: 10,
+          end_line: 3,
+          end_col: 10,
+          severity: 'error',
+          message: "decimal literal may not start with '0'",
+          notes: [],
+        },
+      ],
+      symbols: [],
+    }),
+  });
+  const items = state.diagnostics.get(LEXICAL_FT);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].message, "decimal literal may not start with '0'");
+  assert.equal(items[0].severity, ERROR);
+  // 1-based byte column 10, a tab counting as one column, is character 9; the
+  // empty range is expanded to the word at that position.
+  assert.deepEqual(items[0].range.start, { line: 2, character: 9 });
+  assert.deepEqual(items[0].range.end, { line: 2, character: 13 });
+  // And the module the run was pointed at is cleared, not left painted.
+  assert.deepEqual(state.diagnostics.get(NOTES_FT), []);
+});
+
+// A root is a path relative to the workspace folder the run worked in. A folder
+// added under that one takes the files below it, and `project` names nothing
+// from inside `project`, so the root is dropped rather than carried into a run
+// of another folder.
+test('a root relative to another workspace folder is dropped', () => {
+  const { state } = fake.install({ workspaceFolder: [FIXTURES] });
+  fake.save(state, SUB_MAIN);
+  fake.complete(state.calls[0], {
+    stdout: readFiles('project/main.ft', 'project/util/strings.ft'),
+  });
+  // The user adds project/ to the window, and the module now belongs to it.
+  state.folders.push(PROJECT);
+  fake.open(state, SUB_STRINGS);
+  assert.equal(state.calls[1].options.cwd, PROJECT);
+  assert.equal(state.calls[1].args[1], COMPILER + " --check --json 'util/strings.ft'");
 });
 
 // The closure is what the compiler read, which is `"files"`, and not what was
