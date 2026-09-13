@@ -22,17 +22,17 @@ typedef struct {
     ir_form_t params[RT_MAX_PARAMS];
 } rt_sig_t;
 
-// The fort signatures of toolchain.md 5.1, in that section's order, mapped to
-// IR forms by item 7: `u64` and `i64` are both `i64`, `u32` is `i32`, `char`
-// is `i8 zeroext`, `bool` is `i1 zeroext`, every pointer is `ptr` and `loc`
-// is the three parameters `ptr, i32, i32`. `args` returns a `string@`, an
-// aggregate, so it is a `void` function with a leading `ptr` (item 7, D9.9).
-// Every `fail_*` function, `panic`, `assert_fail` and `exit` is `fn noreturn`
-// (section 5.1), which is stated per row rather than as a range over the
-// enum, so an entry point added in the middle of the order cannot inherit the
-// attribute by position. The two float printers stand in `std.rt_float` and
-// not in `std.rt`, because a compiler without floats cannot compile them
-// (D18.1).
+// The fort signatures of toolchain.md 5.1, in that section's order, mapped to IR
+// forms by item 7: `u64` and `i64` are both `i64`, `u32` is `i32`, `char` is `i8
+// zeroext`, `bool` is `i1 zeroext`, every pointer is `ptr` and `loc` is the three
+// parameters `ptr, i32, i32`. `args` returns a `string@`, an aggregate, so it is
+// a `void` function with a leading `ptr` (item 7). Every `fail_*` function,
+// `panic`, `assert_fail` and `exit` is `fn noreturn`, which is stated per row
+// rather than as a range over the enum, so an entry point added in the middle of
+// the order cannot inherit the attribute by position. The two float printers
+// stand in `std.rt_float` and not in `std.rt`, because a compiler without floats
+// cannot compile them.
+// D9.9, D18.1
 static const rt_sig_t RT_SIG[RT_COUNT] = {
     {"std.rt.alloc", IR_PTR, false, {IR_I64, IR_I64, IR_PTR, IR_I32, IR_I32, IR_NONE}},
     {"std.rt.free", IR_VOID, false, {IR_PTR, IR_NONE, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
@@ -160,7 +160,8 @@ const char* ir_result_text(ir_form_t t) {
 }
 
 // The IR form of a primitive: the value type of item 7 and the extension
-// attribute of D9.9, which `bool`, `char`, `u8`, `u16`, `i8` and `i16` carry.
+// attribute, which `bool`, `char`, `u8`, `u16`, `i8` and `i16` carry.
+// D9.9
 static ir_form_t ir_of_prim(prim_kind_t k) {
     switch (k) {
     case PRIM_BOOL:
@@ -202,17 +203,15 @@ ir_form_t ir_form_of_type(const type_t* t) {
     case TYPE_PTR:
     case TYPE_VOIDPTR:
     case TYPE_FN:
-        // Every pointer, `void*` and function pointer is the opaque `ptr`
-        // (D3.10, D3.11).
+        // D3.10, D3.11
         return IR_PTR;
     case TYPE_ENUM:
-        // An enum is passed as `i32` (D3.9, D9.8).
+        // D3.9, D9.8
         return IR_I32;
     default:
         break;
     }
-    // A struct, fixed array, span or `string` has no value form: it lives in
-    // memory and travels as a pointer (D19.3).
+    // D19.3: an aggregate lives in memory and travels as a pointer
     return IR_NONE;
 }
 

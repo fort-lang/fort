@@ -1,19 +1,23 @@
 // gen_expr: the expressions of the LLVM IR emitter (toolchain.md 6 items 3,
-// 12, 15, 16 and 19; D19.3, D19.4), the transliteration of
-// src/bootstrap/gen_expr.c; see gen.ft.
+// 12, 15, 16 and 19), the transliteration of src/bootstrap/gen_expr.c; see
+// gen.ft.
+// D19.3, D19.4
 //
-// Three entries, because aggregates live in memory (D19.3): gen_expr_value
-// for a scalar, gen_expr_place for an lvalue and gen_expr_into for a value
-// written into a destination place. A node the checker folded is emitted as a
-// literal, since a constant expression has no side effects (D4.6).
+// Three entries, because aggregates live in memory: gen_expr_value for a
+// scalar, gen_expr_place for an lvalue and gen_expr_into for a value written
+// into a destination place. A node the checker folded is emitted as a literal,
+// since a constant expression has no side effects.
+// D19.3, D4.6
 //
-// Re-entrancy (D20.5): every function here works on the emitter it is given
-// and allocates out of that emitter's pool, so nothing of one analysis
-// outlives it. Nothing ends the process.
+// Re-entrancy: every function here works on the emitter it is given and
+// allocates out of that emitter's pool, so nothing of one analysis outlives
+// it. Nothing ends the process.
+// D20.5
 //
 // Dispatch: none. The kind and operator analyses are the plain switches the C
-// wrote (D3.10); an operator switch reads the token kind back out of the
-// node's `op`, which is the `i32` the parser stored (ast.ft).
+// wrote; an operator switch reads the token kind back out of the node's `op`,
+// which is the `i32` the parser stored (ast.ft).
+// D3.10
 import ast;
 import check;
 import consts;
@@ -25,20 +29,21 @@ import runtime_sig;
 import std.strbuf;
 import types;
 
-// The descriptors the print family writes to (D11.5).
+/// The descriptors the print family writes to.
+/// D11.5
 u64 FD_STDOUT = 1;
 u64 FD_STDERR = 2;
 
-// The byte `println` and its relatives end with (item 19).
+/// The byte `println` and its relatives end with (item 19).
 u64 NEWLINE_BYTE = 10;
 
-// The widths an integer type has, for the overflow intrinsic table (item 15).
+/// The widths an integer type has, for the overflow intrinsic table (item 15).
 u32 BITS_8 = 8;
 u32 BITS_16 = 16;
 u32 BITS_32 = 32;
 u32 BITS_64 = 64;
 
-// A poisoned or missing type: the checker reported it and nothing is emitted.
+/// A poisoned or missing type: the checker reported it and nothing is emitted.
 fn bool bad_type(types.node* t) {
     return t == null || t->kind == types.type_kind.k_error;
 }
@@ -47,10 +52,11 @@ fn bool is_bool(types.node* t) {
     return t != null && t->kind == types.type_kind.k_prim && t->prim == prim.prim_kind.prim_bool;
 }
 
-// A zero value of the type: the operand an integer negation and an integer
-// division check need (item 15, D6.13). A float reaches neither -- `fneg`
-// takes one operand and a float division is checked by nothing -- and answers
-// here only where a caller asks for a zero of any scalar type.
+/// A zero value of the type: the operand an integer negation and an integer
+/// division check need (item 15). A float reaches neither -- `fneg` takes one
+/// operand and a float division is checked by nothing -- and answers here only
+/// where a caller asks for a zero of any scalar type.
+/// D6.13
 fn gen.gen_val zero_of(gen.emitter mut* g, types.node* t) {
     if (types.type_is_float(t)) {
         // A float literal in the IR is written with a point; `0.0` is exact in
@@ -60,18 +66,20 @@ fn gen.gen_val zero_of(gen.emitter mut* g, types.node* t) {
     return gen.gen_const_unsigned(g, gen.gen_value_type(g, t), 0);
 }
 
-// The token kind a node's `op` holds, which the parser stored as an `i32`
-// (ast.ft): an operator switch below reads it back rather than comparing the
-// raw number, so every arm names the token D2.10 names.
+/// The token kind a node's `op` holds, which the parser stored as an `i32`
+/// (ast.ft): an operator switch below reads it back rather than comparing the
+/// raw number, so every arm names the token itself.
+/// D2.10
 fn lexer.tok_kind op_of(ast.node* n) {
     return cast(n->op, lexer.tok_kind);
 }
 
 // ---- constants --------------------------------------------------------------------
 
-// Whether the checker folded the node and its value is a scalar the emitter
-// can write as a literal (D4.6). A string constant is an aggregate and has no
-// literal form.
+/// Whether the checker folded the node and its value is a scalar the emitter
+/// can write as a literal. A string constant is an aggregate and has no literal
+/// form.
+/// D4.6
 fn bool folded_scalar(gen.emitter* g, ast.node* n) {
     if ((n->ann & check.ANN_CONST) == 0 || gen.gen_is_aggregate(n->ty)) {
         return false;
@@ -79,10 +87,11 @@ fn bool folded_scalar(gen.emitter* g, ast.node* n) {
     return check.check_node_value(g->ck, n).kind != consts.cval_kind.cv_none;
 }
 
-// ---- the print family (item 19, D12.2) --------------------------------------------
+// ---- the print family (item 19) ---------------------------------------------------
+// D12.2
 
-// The bytes and length of a `string` operand: a literal is `@.str.N` and its
-// length, and every other string is its two header fields (item 19).
+/// The bytes and length of a `string` operand: a literal is `@.str.N` and its
+/// length, and every other string is its two header fields (item 19).
 fn void string_operand(gen.emitter mut* g, ast.node* n, gen.gen_val mut* ptr,
                        gen.gen_val mut* len) {
     if ((n->ann & check.ANN_CONST) != 0) {
@@ -104,16 +113,15 @@ fn void string_operand(gen.emitter mut* g, ast.node* n, gen.gen_val mut* ptr,
     *len = gen.gen_span_len(g, p.addr);
 }
 
-// One argument of the print family: one call per argument, per type (item
-// 19).
+/// One argument of the print family: one call per argument, per type (item
+/// 19).
 fn void gen_print_arg(gen.emitter mut* g, ast.node* n, gen.gen_val fd) {
     types.node* t = n->ty;
     if (bad_type(t)) {
         return;
     }
     gen.gen_args mut args = gen.gen_args_init();
-    // src/bootstrap/gen_expr.c frees the list at each of the seven returns
-    // below; a deferred free says the same thing once (D7.8).
+    // D7.8: the C frees at each of seven returns; one `defer` does it
     defer gen.gen_args_free(&args);
     gen.gen_args_add(&args, fd);
     if (t->kind == types.type_kind.k_string) {
@@ -161,12 +169,12 @@ fn void gen_print_arg(gen.emitter mut* g, ast.node* n, gen.gen_val fd) {
         return;
     }
     if (types.type_is_float(t)) {
-        // A float goes to the printer of its own type and is never widened
-        // first: the digits printed depend on the type (item 19, D18.1). The
-        // two entry points stand in std.rt_float, which the loader takes into
-        // the closure of a program that holds a float (modules.ft), so the
-        // module that holds this call holds their definitions too and needs
-        // no declaration (item 8).
+        // A float goes to the printer of its own type and is never widened first: the
+        // digits printed depend on the type (item 19). The two entry points stand in
+        // std.rt_float, which the loader takes into the closure of a program that holds a
+        // float (modules.ft), so the module that holds this call holds their definitions
+        // too and needs no declaration (item 8).
+        // D18.1
         gen.gen_args_add(&args, v);
         if (t->prim == prim.prim_kind.prim_f32) {
             gen.gen_call_rt(g, runtime_sig.rt_entry.rt_print_f32, &args);
@@ -186,8 +194,9 @@ fn void gen_print_arg(gen.emitter mut* g, ast.node* n, gen.gen_val fd) {
     gen.gen_call_rt(g, runtime_sig.rt_entry.rt_print_u64, &args);
 }
 
-// The print family: `fd` once, then each argument left to right, one call per
-// argument (D6.3, D12.2).
+/// The print family: `fd` once, then each argument left to right, one call per
+/// argument.
+/// D6.3, D12.2
 fn void gen_print(gen.emitter mut* g, ast.node* n, gen.gen_val fd, u64 first, bool newline) {
     u64 mut i = first;
     while (i < ast.ast_len(n)) {
@@ -208,8 +217,9 @@ fn void gen_print(gen.emitter mut* g, ast.node* n, gen.gen_val fd, u64 first, bo
     gen.gen_call_rt(g, runtime_sig.rt_entry.rt_print_char, &args);
 }
 
-// The byte offset of a position in the module's source, so that `assert` can
-// quote its argument verbatim (D11.4).
+/// The byte offset of a position in the module's source, so that `assert` can
+/// quote its argument verbatim.
+/// D11.4
 fn u64 source_offset(string src, u32 line, u32 col) {
     u64 mut at = 0;
     u32 mut here = 1;
@@ -219,11 +229,11 @@ fn u64 source_offset(string src, u32 line, u32 col) {
         }
         at += 1;
     }
-    // `col` is one-based, and a zero column is possible in a range the
-    // parser did not fill (check.ft guards for one), so the subtraction is
-    // the wrapping one src/bootstrap/gen_expr.c gets from C: checked
-    // arithmetic would trap here where the clamp below absorbs it (D11.1,
-    // D11.2).
+    // `col` is one-based, and a zero column is possible in a range the parser did
+    // not fill (check.ft guards for one), so the subtraction is the wrapping one
+    // src/bootstrap/gen_expr.c gets from C: checked arithmetic would trap here where
+    // the clamp below absorbs it.
+    // D11.1, D11.2
     at +%= cast(col, u64) -% 1;
     if (at < src.len) {
         return at;
@@ -231,9 +241,10 @@ fn u64 source_offset(string src, u32 line, u32 col) {
     return src.len;
 }
 
-// The source text of the one argument of `assert`: the call's range runs from
-// its `(` to one past its `)` (D20.4), so the text between them is the
-// argument as the user wrote it (D11.4).
+/// The source text of the one argument of `assert`: the call's range runs from
+/// its `(` to one past its `)`, so the text between them is the argument as the
+/// user wrote it.
+/// D20.4, D11.4
 fn string assert_text(gen.emitter* g, ast.node* call) {
     if (g->module == null) {
         return "";
@@ -247,9 +258,10 @@ fn string assert_text(gen.emitter* g, ast.node* call) {
     return src[open + 1..close - 1];
 }
 
-// `assert(cond)` is active in both build modes and branches to the
-// continuation first, since its operand is already the success condition
-// (D12.2, item 19).
+/// `assert(cond)` is active in both build modes and branches to the
+/// continuation first, since its operand is already the success condition (item
+/// 19).
+/// D12.2
 fn void gen_assert(gen.emitter mut* g, ast.node* n) {
     ast.node* arg = ast.ast_child(n, 0);
     gen.gen_val cond = gen_expr_value(g, arg);
@@ -260,12 +272,13 @@ fn void gen_assert(gen.emitter mut* g, ast.node* n) {
     defer gen.gen_args_free(&args);
     string text = gen.gen_str_ref(g, assert_text(g, n));
     gen.gen_args_add(&args, gen.gen_literal(g, "ptr", text));
-    // The column of `assert` is that of the builtin's name (D11.4).
+    // D11.4
     gen.gen_check(g, cond, false, runtime_sig.rt_entry.rt_assert_fail, &args, n->a->loc);
 }
 
-// `panic(msg)` writes the message and aborts, so the call is followed by
-// `unreachable` (D11.4, item 19).
+/// `panic(msg)` writes the message and aborts, so the call is followed by
+/// `unreachable` (item 19).
+/// D11.4
 fn void gen_panic(gen.emitter mut* g, ast.node* n) {
     gen.gen_val mut ptr = gen.gen_val{};
     gen.gen_val mut len = gen.gen_val{};
@@ -285,31 +298,33 @@ fn void gen_panic(gen.emitter mut* g, ast.node* n) {
     g->terminated = true;
 }
 
-// ---- new and del (item 17, D10.2, D10.3) -------------------------------------------
+// ---- new and del (item 17) ---------------------------------------------------------
+// D10.2, D10.3
 
-// Whether `n` designates storage, which is what decides whether `del` empties
-// its operand (D6.7, D17.9): an `own` rvalue -- `new(...)`, a call result, a
-// `cast` that adopts -- is freed and nothing is stored.
+/// Whether `n` designates storage, which is what decides whether `del` empties
+/// its operand: an `own` rvalue -- `new(...)`, a call result, a `cast` that
+/// adopts -- is freed and nothing is stored.
+/// D6.7, D17.9
 fn bool is_place_expr(ast.node* n) {
     switch (n->kind) {
     case ast.ast_kind.k_ident, ast.ast_kind.k_index, ast.ast_kind.k_field,
          ast.ast_kind.k_arrow:
         return true;
     case ast.ast_kind.k_unary:
-        // `*p` designates the storage the pointer reaches (D6.7).
+        // D6.7
         return op_of(n) == lexer.tok_kind.star;
     default:
         return false;
     }
 }
 
-// `del(x)` (item 17): the pointer is loaded (field 0 for a span or `string`),
-// `std.rt.free` frees it, and an lvalue operand is emptied -- `store ptr null`
-// for a pointer, a 16-byte `llvm.memset` for a span or `string` (D17.9). A
-// null operand is a no-op in the runtime, so `del(null)` and `del` of a zero
-// span need no test of their own (D17.9). The emptying is not an assignment
-// and never carries the overwrite check of D17.11, which is what makes
-// `del(v); v = new(...)` pass it (item 18).
+/// `del(x)` (item 17): the pointer is loaded (field 0 for a span or `string`),
+/// `std.rt.free` frees it, and an lvalue operand is emptied -- `store ptr null`
+/// for a pointer, a 16-byte `llvm.memset` for a span or `string`. A null operand
+/// is a no-op in the runtime, so `del(null)` and `del` of a zero span need no test
+/// of their own. The emptying is not an assignment and never carries the overwrite
+/// check, which is what makes `del(v); v = new(...)` pass it (item 18).
+/// D17.9, D17.11
 fn void gen_del(gen.emitter mut* g, ast.node* n) {
     if (ast.ast_len(n) != 1) {
         // The checker reported the arity and the module is not emitted.
@@ -321,8 +336,7 @@ fn void gen_del(gen.emitter mut* g, ast.node* n) {
         return;
     }
     bool lvalue = is_place_expr(arg);
-    // A span or `string` operand is an aggregate, so it always has a place:
-    // an rvalue one lands in a temporary the copy is made in (D19.3).
+    // D19.3
     bool header = gen.gen_is_aggregate(t);
     gen.gen_place mut place = gen.gen_place{};
     place.addr = gen.gen_literal(g, "ptr", "null");
@@ -359,10 +373,10 @@ fn void gen_del(gen.emitter mut* g, ast.node* n) {
     gen.gen_store_place(g, place, gen.gen_literal(g, "ptr", "null"));
 }
 
-// The count of `new(T, n)` as an `i64`, with the check of D10.2: a negative
-// count is a runtime error reported with its signed value at the builtin's
-// name (D11.4). It is not a bounds check, so neither `--release` nor
-// `--no-bounds-check` removes it (D10.6).
+/// The count of `new(T, n)` as an `i64`: a negative count is a runtime error
+/// reported with its signed value at the builtin's name. It is not a bounds check,
+/// so neither `--release` nor `--no-bounds-check` removes it.
+/// D10.2, D10.6, D11.4
 fn gen.gen_val alloc_count(gen.emitter mut* g, ast.node* n, ast.node* count) {
     gen.gen_val raw = gen_expr_value(g, count);
     if (g->failed) {
@@ -382,10 +396,11 @@ fn gen.gen_val alloc_count(gen.emitter mut* g, ast.node* n, ast.node* count) {
     return v;
 }
 
-// `std.rt.alloc(sizeof(T), count, loc)` (item 17): the runtime zeroes the
-// storage and never returns null, `n == 0` included (D10.2), and an
-// overflowing size or a failed allocation is its runtime error, so the module
-// emits no test of the result.
+/// `std.rt.alloc(sizeof(T), count, loc)` (item 17): the runtime zeroes the
+/// storage and never returns null, `n == 0` included, and an overflowing size or a
+/// failed allocation is its runtime error, so the module emits no test of the
+/// result.
+/// D10.2
 fn gen.gen_val alloc_call(gen.emitter mut* g, ast.node* n, types.node* elem,
                           gen.gen_val count) {
     gen.gen_args mut args = gen.gen_args_init();
@@ -396,8 +411,8 @@ fn gen.gen_val alloc_call(gen.emitter mut* g, ast.node* n, types.node* elem,
     return gen.gen_call_rt_value(g, runtime_sig.rt_entry.rt_alloc, "ptr", &args);
 }
 
-// `new(T)`: one zero-initialized `T`, whose address is an ordinary scalar
-// (D10.2, D17.3).
+/// `new(T)`: one zero-initialized `T`, whose address is an ordinary scalar.
+/// D10.2, D17.3
 fn gen.gen_val gen_new_object(gen.emitter mut* g, ast.node* n) {
     gen.gen_val null_val = gen.gen_literal(g, "ptr", "null");
     if (n->b != null || n->ty == null || n->ty->kind != types.type_kind.k_ptr) {
@@ -409,8 +424,9 @@ fn gen.gen_val gen_new_object(gen.emitter mut* g, ast.node* n) {
     return alloc_call(g, n, n->ty->elem, gen.gen_const_unsigned(g, "i64", 1));
 }
 
-// `new(T, n)`: `n` zero-initialized elements, whose header is written into the
-// destination place field by field (item 17, D10.2, D17.3).
+/// `new(T, n)`: `n` zero-initialized elements, whose header is written into the
+/// destination place field by field (item 17).
+/// D10.2, D17.3
 fn void gen_new_span(gen.emitter mut* g, ast.node* n, gen.gen_place dst) {
     if (n->b == null || n->ty == null || n->ty->kind != types.type_kind.k_span) {
         gen.gen_todo(g, n->loc, "this allocation");
@@ -424,8 +440,9 @@ fn void gen_new_span(gen.emitter mut* g, ast.node* n, gen.gen_place dst) {
     gen.gen_span_init(g, dst.addr, p, count);
 }
 
-// Whether `n` is a call of the `move` builtin, the one universe function with
-// a value, which every expression path lowers itself (D12.2, item 18).
+/// Whether `n` is a call of the `move` builtin, the one universe function with
+/// a value, which every expression path lowers itself (item 18).
+/// D12.2
 fn bool gen_is_move(ast.node* n) {
     ast.sym* mut s = null;
     if (n->kind == ast.ast_kind.k_call && n->a != null) {
@@ -434,18 +451,19 @@ fn bool gen_is_move(ast.node* n) {
     return s != null && s->kind == ast.sym_kind.s_builtin && s->name == "move";
 }
 
-// `move(lv)` (item 18, D17.6): the operand's value is read into a place of the
-// emitter's own, the operand is then left at its zero value, and only then is
-// the value handed on. `dst` is the place an aggregate result is written into
-// and is null for a scalar one and on the discard path.
-//
-// The intermediate is not an optimization to drop: `dst` may be the operand
-// itself, and nothing here can tell. `s = move(s)`, `*p = move(*q)` and
-// `v[i] = move(v[j])` all reach this with two places that may be one address,
-// and copying into `dst` first would let the zeroing that follows destroy the
-// value D17.6 says the move yields. A scalar's intermediate is the register
-// the `load` names; an aggregate's is a `%tmpK` slot (D19.5). The emptying is
-// not an assignment, so it carries no overwrite check (item 18, D17.11).
+/// `move(lv)` (item 18): the operand's value is read into a place of the
+/// emitter's own, the operand is then left at its zero value, and only then is the
+/// value handed on. `dst` is the place an aggregate result is written into and is
+/// null for a scalar one and on the discard path.
+///
+/// The intermediate is not an optimization to drop: `dst` may be the operand
+/// itself, and nothing here can tell. `s = move(s)`, `*p = move(*q)` and
+/// `v[i] = move(v[j])` all reach this with two places that may be one address, and
+/// copying into `dst` first would let the zeroing that follows destroy the value
+/// the move yields. A scalar's intermediate is the register the `load` names; an
+/// aggregate's is a `%tmpK` slot. The emptying is not an assignment, so it carries
+/// no overwrite check (item 18).
+/// D17.6, D17.11, D19.5
 fn gen.gen_val gen_move(gen.emitter mut* g, ast.node* n, gen.gen_place* dst) {
     gen.gen_val none = gen.gen_literal(g, "void", "");
     if (ast.ast_len(n) != 1 || bad_type(ast.ast_child(n, 0)->ty)) {
@@ -474,8 +492,9 @@ fn gen.gen_val gen_move(gen.emitter mut* g, ast.node* n, gen.gen_place* dst) {
     return v;
 }
 
-// The call of a builtin (D12.2, item 19): the print family, `assert` and
-// `panic`. Returns false when `n` is not a builtin call.
+/// The call of a builtin (item 19): the print family, `assert` and `panic`.
+/// Returns false when `n` is not a builtin call.
+/// D12.2
 fn bool gen_builtin_call(gen.emitter mut* g, ast.node* n) {
     ast.sym* mut s = null;
     if (n->a != null) {
@@ -490,8 +509,7 @@ fn bool gen_builtin_call(gen.emitter mut* g, ast.node* n) {
     bool err = name == "eprint";
     bool errln = name == "eprintln";
     if (out || outln || err || errln) {
-        // `print` and `println` write to stdout, `eprint` and `eprintln` to
-        // stderr (D11.5).
+        // D11.5: `print` to stdout, `eprint` to stderr
         u64 mut which = FD_STDERR;
         if (out || outln) {
             which = FD_STDOUT;
@@ -503,7 +521,7 @@ fn bool gen_builtin_call(gen.emitter mut* g, ast.node* n) {
     bool fout = name == "fprint";
     bool foutln = name == "fprintln";
     if (fout || foutln) {
-        // `fd` is evaluated once, before the arguments (D6.3, D12.2).
+        // D6.3, D12.2
         gen.gen_val fd = gen_expr_value(g, ast.ast_child(n, 0));
         if (!g->failed) {
             gen_print(g, n, fd, 1, foutln);
@@ -522,23 +540,21 @@ fn bool gen_builtin_call(gen.emitter mut* g, ast.node* n) {
         gen_del(g, n);
         return true;
     }
-    // The value of a discarded `move` has nowhere to go, which the checker
-    // refuses (D17.8), so the effect alone is emitted here.
+    // D17.8: the checker refuses a discarded `move`'s value
     gen_move(g, n, null);
     return true;
 }
 
 // ---- calls (item 7) ---------------------------------------------------------------
 
-// A function name used as a value is its address: a function pointer is an
-// ordinary `ptr` value, and `&f` and `*f` are errors, so the name alone
-// denotes it (D3.10). A qualified name `m.f` is the same value, since the
-// symbol a field node resolved to is the function itself (D9.4).
+/// A function name used as a value is its address: a function pointer is an
+/// ordinary `ptr` value, and `&f` and `*f` are errors, so the name alone denotes
+/// it. A qualified name `m.f` is the same value, since the symbol a field node
+/// resolved to is the function itself.
+/// D3.10, D9.4
 fn bool function_ref(gen.emitter mut* g, ast.node* n, gen.gen_val mut* out) {
     ast.sym* s = n->sym;
-    // Only a fort function: an `extern fn` in value position is a checker
-    // error, since an indirect call site cannot take the variadic form its
-    // declaration supplies (D3.10, D9.8).
+    // D3.10, D9.8: an `extern fn` in value position is a checker error
     if (s == null || s->kind != ast.sym_kind.s_fn) {
         return false;
     }
@@ -547,9 +563,9 @@ fn bool function_ref(gen.emitter mut* g, ast.node* n, gen.gen_val mut* out) {
     return true;
 }
 
-// One argument of a fort or `extern` call: a scalar is an ordinary parameter,
-// and an aggregate is a plain `ptr` to a copy the caller allocates in its
-// entry block and memcpys into (item 7).
+/// One argument of a fort or `extern` call: a scalar is an ordinary parameter,
+/// and an aggregate is a plain `ptr` to a copy the caller allocates in its
+/// entry block and memcpys into (item 7).
 fn void gen_call_arg(gen.emitter mut* g, gen.gen_args mut* args, ast.node* arg) {
     types.node* t = arg->ty;
     if (gen.gen_is_aggregate(t)) {
@@ -561,11 +577,12 @@ fn void gen_call_arg(gen.emitter mut* g, gen.gen_args mut* args, ast.node* arg) 
     gen.gen_args_add_ext(args, gen_expr_value(g, arg), gen.gen_ext_attr(t));
 }
 
-// The parameter types of a call-site function type, `(i32, ptr)`: an
-// aggregate parameter is a plain `ptr` and an aggregate result adds the
-// leading pointer of item 7. An extern call ends the list with the variadic
-// tail of item 8; a call through a function pointer never does, since D3.10
-// has no variadic function type.
+/// The parameter types of a call-site function type, `(i32, ptr)`: an aggregate
+/// parameter is a plain `ptr` and an aggregate result adds the leading pointer of
+/// item 7. An extern call ends the list with the variadic tail of item 8; a call
+/// through a function pointer never does, since there is no variadic function
+/// type.
+/// D3.10
 fn void gen_call_type(gen.emitter mut* g, types.node* sig, bool variadic) {
     gen.gen_text_append(g, "(");
     u64 mut written = 0;
@@ -599,18 +616,16 @@ fn void gen_call_type(gen.emitter mut* g, types.node* sig, bool variadic) {
     gen.gen_text_append(g, ") ");
 }
 
-// The call of a fort function, an `extern` function or a function pointer;
-// `dst` is the place an aggregate result is written into and is null for a
-// scalar or void result.
+/// The call of a fort function, an `extern` function or a function pointer;
+/// `dst` is the place an aggregate result is written into and is null for a
+/// scalar or void result.
 fn gen.gen_val gen_call(gen.emitter mut* g, ast.node* n, gen.gen_place* dst) {
     gen.gen_val none = gen.gen_literal(g, "void", "");
     ast.sym* mut s = null;
     if (n->a != null) {
         s = n->a->sym;
     }
-    // A function name, a qualified name and a function-pointer-typed
-    // expression are all callable (D6.11); only the first two name a symbol,
-    // and the third is an ordinary `ptr` value (D3.10).
+    // D6.11, D3.10: only a name or a qualified name denotes a symbol
     bool direct = s != null &&
                   (s->kind == ast.sym_kind.s_fn || s->kind == ast.sym_kind.s_extern_fn);
     types.node* mut sig = null;
@@ -627,9 +642,7 @@ fn gen.gen_val gen_call(gen.emitter mut* g, ast.node* n, gen.gen_place* dst) {
         return none;
     }
     bool is_extern = direct && s->kind == ast.sym_kind.s_extern_fn;
-    // Every extern is declared and called through a variadic function type,
-    // which is what makes a fixed-prototype declaration of a variadic C
-    // function safe (D9.8, item 8).
+    // D9.8: a variadic call type makes a fixed prototype safe (item 8)
     bool variadic = is_extern;
     if (is_extern) {
         gen.gen_use_extern(g, s);
@@ -645,8 +658,7 @@ fn gen.gen_val gen_call(gen.emitter mut* g, ast.node* n, gen.gen_place* dst) {
         callee.ty = "ptr";
         callee.val = gen.gen_symbol_ref(g, s);
     } else {
-        // The callee is evaluated before the arguments, which is the source
-        // order the walk keeps (D6.3).
+        // D6.3: the callee is evaluated before the arguments
         callee = gen_expr_value(g, n->a);
         if (g->failed) {
             return none;
@@ -684,10 +696,10 @@ fn gen.gen_val gen_call(gen.emitter mut* g, ast.node* n, gen.gen_place* dst) {
     gen.gen_text_append(g, ret);
     gen.gen_text_append(g, " ");
     if (variadic || !direct) {
-        // An extern call goes through the matching variadic call type, which
-        // is what makes the vector-register count right (item 8, D9.8), and a
-        // call through a function pointer carries the function type because
-        // an opaque pointer carries none (D3.10, D19.2).
+        // An extern call goes through the matching variadic call type, which is what
+        // makes the vector-register count right (item 8), and a call through a function
+        // pointer carries the function type because an opaque pointer carries none.
+        // D3.10, D9.8, D19.2
         gen_call_type(g, sig, variadic);
     }
     gen.gen_text_append(g, callee.val);
@@ -702,10 +714,10 @@ fn gen.gen_val gen_call(gen.emitter mut* g, ast.node* n, gen.gen_place* dst) {
     }
     gen.gen_ins_end(g);
     if (sig->is_noreturn) {
-        // Every call site of a `noreturn` function ends with the trap D8.5
-        // requires, an `extern` one included: its declaration is unadorned so
-        // that the optimizer cannot delete this trap, which is what catches an
-        // extern that returns anyway (item 20, D19.7).
+        // Every call site of a `noreturn` function ends with a trap, an `extern` one
+        // included: its declaration is unadorned so that the optimizer cannot delete this
+        // trap, which is what catches an extern that returns anyway (item 20).
+        // D8.5, D19.7
         gen.gen_use_intrinsic(g, gen.IN_TRAP);
         gen.gen_use_attr(g, gen.ATTR_TRAP);
         gen.gen_ins(g);
@@ -721,9 +733,9 @@ fn gen.gen_val gen_call(gen.emitter mut* g, ast.node* n, gen.gen_place* dst) {
 
 // ---- arithmetic and its checks (item 15) ------------------------------------------
 
-// The overflow intrinsic of an operation at a width: the family in the order
-// `sadd ssub smul uadd usub umul` and, within each, `i8 i16 i32 i64` (item
-// 15).
+/// The overflow intrinsic of an operation at a width: the family in the order
+/// `sadd ssub smul uadd usub umul` and, within each, `i8 i16 i32 i64` (item
+/// 15).
 fn u64 overflow_slot(u64 which, u32 bits) {
     u64 mut width = 0;
     if (bits == BITS_16) {
@@ -736,8 +748,8 @@ fn u64 overflow_slot(u64 which, u32 bits) {
     return gen.IN_OVERFLOW_FIRST + which * gen.OVF_WIDTHS + width;
 }
 
-// The slot of one saturating conversion: the family of item 8's order and the
-// index of the target width among `i8 i16 i32 i64`.
+/// The slot of one saturating conversion: the family of item 8's order and the
+/// index of the target width among `i8 i16 i32 i64`.
 fn u64 fpconv_slot(bool to_signed, bool from_f64, u32 bits) {
     u64 mut family = gen.FP_SI_F32;
     if (to_signed && from_f64) {
@@ -758,10 +770,11 @@ fn u64 fpconv_slot(bool to_signed, bool from_f64, u32 bits) {
     return gen.IN_FPCONV_FIRST + family * gen.FP_WIDTHS + width;
 }
 
-// The name of one overflow family. The C switches over its enum; these are
-// module constants, since the slot above is arithmetic on them and an enum
-// has none (D3.9), so the chain is the transliteration of that switch and its
-// order is the same.
+/// The name of one overflow family. The C switches over its enum; these are
+/// module constants, since the slot above is arithmetic on them and an enum has
+/// none, so the chain is the transliteration of that switch and its order is the
+/// same.
+/// D3.9
 fn string overflow_name(u64 which) {
     if (which == gen.OVF_SADD) {
         return "sadd";
@@ -777,9 +790,10 @@ fn string overflow_name(u64 which) {
     return "umul";
 }
 
-// One checked operation: the intrinsic, the two `extractvalue`s of the
-// `{iN, i1}` it returns, and the branch into a failure block that calls
-// std.rt.fail_overflow (item 15, D19.6).
+/// One checked operation: the intrinsic, the two `extractvalue`s of the `{iN,
+/// i1}` it returns, and the branch into a failure block that calls
+/// std.rt.fail_overflow (item 15).
+/// D19.6
 fn gen.gen_val gen_checked(gen.emitter mut* g, u64 which, gen.gen_val a, gen.gen_val b,
                            diag.loc at) {
     string pair = pair_type(g, a.ty);
@@ -820,9 +834,9 @@ fn gen.gen_val gen_checked(gen.emitter mut* g, u64 which, gen.gen_val a, gen.gen
     return value;
 }
 
-// `{ iN, i1 }`, the type an overflow intrinsic returns (item 15). It is built
-// before the instruction that names it is opened, since both write into the
-// emitter's one scratch buffer.
+/// `{ iN, i1 }`, the type an overflow intrinsic returns (item 15). It is built
+/// before the instruction that names it is opened, since both write into the
+/// emitter's one scratch buffer.
 fn string pair_type(gen.emitter mut* g, string ty) {
     strbuf.clear(&g->scratch);
     strbuf.append(&g->scratch, "{ ");
@@ -831,16 +845,16 @@ fn string pair_type(gen.emitter mut* g, string ty) {
     return gen.gen_take(g);
 }
 
-// The shift count of item 15: materialized at 64 bits so that a negative
-// count is reported with its signed value, checked against the operand's
-// width, then truncated to the operand's type, so a shift never produces
-// poison (D6.2, D11.1).
+/// The shift count of item 15: materialized at 64 bits so that a negative count
+/// is reported with its signed value, checked against the operand's width, then
+/// truncated to the operand's type, so a shift never produces poison.
+/// D6.2, D11.1
 fn gen.gen_val gen_shift_count(gen.emitter mut* g, diag.loc at, types.node* atype,
                                types.node* bt, gen.gen_val b, u32 bits) {
     gen.gen_val mut wide =
         gen.gen_resize(g, b, gen.gen_int_bits(bt), "i64", BITS_64, gen.gen_is_signed(bt));
     if (g->opts.release) {
-        // Release mode takes the count modulo the width (D11.1).
+        // D11.1
         gen.gen_val mask = gen.gen_const_unsigned(g, "i64", cast(bits, u64) - 1);
         wide = gen.gen_binary(g, "and", wide, mask);
     } else {
@@ -861,7 +875,8 @@ fn gen.gen_val gen_shift_count(gen.emitter mut* g, diag.loc at, types.node* atyp
     return gen.gen_resize(g, wide, BITS_64, gen.gen_value_type(g, atype), bits, false);
 }
 
-// Division and remainder, checked in both build modes (D6.13, D11.3).
+/// Division and remainder, checked in both build modes.
+/// D6.13, D11.3
 fn gen.gen_val gen_divide(gen.emitter mut* g, diag.loc at, i32 op, types.node* t, gen.gen_val a,
                           gen.gen_val b) {
     bool sign = gen.gen_is_signed(t);
@@ -872,7 +887,7 @@ fn gen.gen_val gen_divide(gen.emitter mut* g, diag.loc at, i32 op, types.node* t
     gen.gen_check(g, bad, true, runtime_sig.rt_entry.rt_fail_div_zero, &args, at);
     gen.gen_args_free(&args);
     if (sign) {
-        // `MIN / -1` and `MIN % -1` are runtime errors at every width (D6.13).
+        // D6.13
         gen.gen_val minus_one = gen.gen_const_signed(g, a.ty, -1);
         gen.gen_val smallest = gen.gen_const_min(g, a.ty, bits);
         gen.gen_val is_minus_one = gen.gen_icmp(g, "eq", b, minus_one);
@@ -894,13 +909,13 @@ fn gen.gen_val gen_divide(gen.emitter mut* g, diag.loc at, i32 op, types.node* t
     return gen.gen_binary(g, "udiv", a, b);
 }
 
-// `a op b` on two scalars, with the checks of item 15: the overflow
-// intrinsics for `+ - *`, unary `-`, `++` and `--` in checked mode, plain
-// `add`, `sub` and `mul` in release mode and for `+% -% *%`, the shift-count
-// check and the division checks, which hold in both modes (D6.13). `atype` is
-// the left operand's type and the result's, `bt` the right operand's, which
-// differs from it only for a shift count (D6.2); `at` is the operator's
-// token, where D11.4 reports the failure.
+/// `a op b` on two scalars, with the checks of item 15: the overflow intrinsics
+/// for `+ - *`, unary `-`, `++` and `--` in checked mode, plain `add`, `sub` and
+/// `mul` in release mode and for `+% -% *%`, the shift-count check and the
+/// division checks, which hold in both modes. `atype` is the left operand's type
+/// and the result's, `bt` the right operand's, which differs from it only for a
+/// shift count; `at` is the operator's token, where the failure is reported.
+/// D6.2, D6.13, D11.4
 fn gen.gen_val gen_arith(gen.emitter mut* g, diag.loc at, i32 op, types.node* atype,
                          gen.gen_val a, types.node* bt, gen.gen_val b) {
     if (types.type_is_float(atype)) {
@@ -912,7 +927,7 @@ fn gen.gen_val gen_arith(gen.emitter mut* g, diag.loc at, i32 op, types.node* at
     case lexer.tok_kind.plus, lexer.tok_kind.minus, lexer.tok_kind.star:
         return gen_add_sub_mul(g, at, op, sign, bits, a, b);
     case lexer.tok_kind.plus_wrap:
-        // `+% -% *%` wrap in both modes (D11.2).
+        // D11.2
         return gen.gen_binary(g, "add", a, b);
     case lexer.tok_kind.minus_wrap:
         return gen.gen_binary(g, "sub", a, b);
@@ -934,14 +949,14 @@ fn gen.gen_val gen_arith(gen.emitter mut* g, diag.loc at, i32 op, types.node* at
     }
 }
 
-// `a op b` on two floats: `fadd`, `fsub`, `fmul` and `fdiv`, in both build
-// modes and with no check of any kind. Nothing traps: a division by zero
-// yields an infinity or a NaN and an overflow an infinity (D6.12), so the
-// overflow intrinsics of item 15 and the division check of D6.13 have no
-// float form. No instruction here carries a fast-math flag, since floats are
-// IEEE 754 and the optimizer may not reassociate them (D6.12, D16, item 15).
-// `% & | ^ << >>` and the wrapping operators are checker errors on floats
-// (D6.12, D11.2), so the operator is one of these four.
+/// `a op b` on two floats: `fadd`, `fsub`, `fmul` and `fdiv`, in both build modes
+/// and with no check of any kind. Nothing traps: a division by zero yields an
+/// infinity or a NaN and an overflow an infinity, so the overflow intrinsics of
+/// item 15 and the division check have no float form. No instruction here carries
+/// a fast-math flag, since floats are IEEE 754 and the optimizer may not
+/// reassociate them. `% & | ^ << >>` and the wrapping operators are checker errors
+/// on floats, so the operator is one of these four.
+/// D6.12, D6.13, D11.2, D16
 fn gen.gen_val gen_float_arith(gen.emitter mut* g, diag.loc at, i32 op, gen.gen_val a,
                                gen.gen_val b) {
     switch (cast(op, lexer.tok_kind)) {
@@ -959,15 +974,14 @@ fn gen.gen_val gen_float_arith(gen.emitter mut* g, diag.loc at, i32 op, gen.gen_
     }
 }
 
-// `+`, `-` and `*`: the arm of the switch above, which stands on its own
-// because a fort case label carries no block of its own to declare in.
+/// `+`, `-` and `*`: the arm of the switch above, which stands on its own
+/// because a fort case label carries no block of its own to declare in.
 fn gen.gen_val gen_add_sub_mul(gen.emitter mut* g, diag.loc at, i32 op, bool sign, u32 bits,
                                gen.gen_val a, gen.gen_val b) {
     bool is_plus = op == cast(lexer.tok_kind.plus, i32);
     bool is_minus = op == cast(lexer.tok_kind.minus, i32);
     if (g->opts.release) {
-        // Release mode emits plain `add`, `sub` and `mul`; `nsw` and
-        // `nuw` are never emitted, since wrapping is defined (D11.1, D16).
+        // D11.1, D16: plain `add`; `nsw` and `nuw` are never emitted
         string mut plain = "mul";
         if (is_plus) {
             plain = "add";
@@ -1001,27 +1015,27 @@ fn gen.gen_val gen_add_sub_mul(gen.emitter mut* g, diag.loc at, i32 op, bool sig
     return gen_checked(g, which, a, b, at);
 }
 
-// `<<` and `>>`, the other arm with a body of its own.
+/// `<<` and `>>`, the other arm with a body of its own.
 fn gen.gen_val gen_shift(gen.emitter mut* g, diag.loc at, i32 op, types.node* atype,
                          types.node* bt, gen.gen_val a, gen.gen_val b, u32 bits, bool sign) {
     gen.gen_val count = gen_shift_count(g, at, atype, bt, b, bits);
     if (op == cast(lexer.tok_kind.shl, i32)) {
-        // `<<` discards the bits shifted out and never checks for
-        // overflow (D6.2).
+        // D6.2: `<<` discards the bits shifted out
         return gen.gen_binary(g, "shl", a, count);
     }
-    // `>>` is arithmetic for a signed operand and logical for an
-    // unsigned one (D6.2).
+    // D6.2: `>>` is arithmetic for signed, logical for unsigned
     if (sign) {
         return gen.gen_binary(g, "ashr", a, count);
     }
     return gen.gen_binary(g, "lshr", a, count);
 }
 
-// ---- comparisons (D6.2) -----------------------------------------------------------
+// ---- comparisons ------------------------------------------------------------------
+// D6.2
 
-// The `icmp` predicate of a relational operator on a type: signedness is in
-// the instruction and never in the type (D3.1).
+/// The `icmp` predicate of a relational operator on a type: signedness is in
+/// the instruction and never in the type.
+/// D3.1
 fn string compare_pred(i32 op, bool sign) {
     switch (cast(op, lexer.tok_kind)) {
     case lexer.tok_kind.eq:
@@ -1052,22 +1066,20 @@ fn string compare_pred(i32 op, bool sign) {
     return "uge";
 }
 
-// The `fcmp` predicate of a comparison on floats (D6.12). Every one of them
-// is NaN-aware, and the two families differ: an ordered predicate is false
-// when either operand is a NaN, an unordered one is true.
+/// The `fcmp` predicate of a comparison on floats. Every one of them is
+/// NaN-aware, and the two families differ: an ordered predicate is false when
+/// either operand is a NaN, an unordered one is true.
+/// D6.12
 fn string float_compare_pred(i32 op) {
     switch (cast(op, lexer.tok_kind)) {
     case lexer.tok_kind.eq:
-        // `oeq` is false when either operand is a NaN, which is what
-        // `NaN != NaN` demands of `==`; it is true for `-0.0 == 0.0` (D6.12).
+        // D6.12: `oeq` is false on a NaN and true for `-0.0 == 0.0`
         return "oeq";
     case lexer.tok_kind.ne:
-        // `une` is true when either operand is a NaN, so `NaN != NaN` is true;
-        // `one` would make it false and break that rule (D6.12).
+        // D6.12: `une` is true on a NaN, which `NaN != NaN` demands
         return "une";
     case lexer.tok_kind.lt:
-        // The four orderings are ordered predicates: a comparison with a NaN
-        // is false whichever way it is written (D6.12).
+        // D6.12: the four orderings are false on a NaN either way
         return "olt";
     case lexer.tok_kind.le:
         return "ole";
@@ -1078,10 +1090,11 @@ fn string float_compare_pred(i32 op) {
     }
 }
 
-// `==` and `!=` on strings (D3.7): the runtime compares the lengths and then
-// the bytes, so the zero string equals `""`. The comparison is a runtime entry
-// point because the compiler emits no call to a C library symbol of its own
-// accord, memcmp included (D9.8).
+/// `==` and `!=` on strings: the runtime compares the lengths and then the bytes,
+/// so the zero string equals `""`. The comparison is a runtime entry point because
+/// the compiler emits no call to a C library symbol of its own accord, memcmp
+/// included.
+/// D3.7, D9.8
 fn gen.gen_val gen_string_compare(gen.emitter mut* g, ast.node* n) {
     gen.gen_val mut aptr = gen.gen_val{};
     gen.gen_val mut alen = gen.gen_val{};
@@ -1097,19 +1110,18 @@ fn gen.gen_val gen_string_compare(gen.emitter mut* g, ast.node* n) {
     gen.gen_args_add(&args, alen);
     gen.gen_args_add(&args, bptr);
     gen.gen_args_add(&args, blen);
-    // The entry point is `fn bool str_eq(...)`, and a fort `bool` result is
-    // `zeroext i1` (items 2, 7), so the value needs no narrowing. The
-    // attribute is not decorative: a call site that states one the definition
-    // lacks changes what LLVM may assume of the result (D9.9).
+    // The entry point is `fn bool str_eq(...)`, and a fort `bool` result is `zeroext
+    // i1` (items 2, 7), so the value needs no narrowing. The attribute is not
+    // decorative: a call site that states one the definition lacks changes what LLVM
+    // may assume of the result.
+    // D9.9
     gen.gen_val eq = gen.gen_call_rt_value(g, runtime_sig.rt_entry.rt_str_eq, "i1", &args);
     gen.gen_args_free(&args);
     if (op_of(n) == lexer.tok_kind.eq) {
         return eq;
     }
     if (op_of(n) != lexer.tok_kind.ne) {
-        // Only `==` and `!=` compare strings; the checker rejects an ordering
-        // operator on them (D3.7), so this is unreachable and an unfinished
-        // path is a diagnostic rather than a wrong default.
+        // D3.7: the checker rejects an ordering operator on strings
         gen.gen_todo(g, n->loc, "this comparison of strings");
         return eq;
     }
@@ -1132,8 +1144,9 @@ fn gen.gen_val gen_compare(gen.emitter mut* g, ast.node* n) {
     return gen.gen_icmp(g, compare_pred(n->op, gen.gen_is_signed(t)), a, b);
 }
 
-// `&&` and `||` short-circuit through a stack slot rather than a `phi`, so
-// the tree walk never has to know its predecessors (item 10, D19.4).
+/// `&&` and `||` short-circuit through a stack slot rather than a `phi`, so the
+/// tree walk never has to know its predecessors (item 10).
+/// D19.4
 fn gen.gen_val gen_short_circuit(gen.emitter mut* g, ast.node* n) {
     gen.gen_place slot = gen.gen_temp_place(g, n->ty);
     gen.gen_val lhs = gen_expr_value(g, n->a);
@@ -1159,23 +1172,24 @@ fn gen.gen_val gen_short_circuit(gen.emitter mut* g, ast.node* n) {
     return gen.gen_load_place(g, slot);
 }
 
-// ---- the conditional operator (D6.6) -----------------------------------------------
+// ---- the conditional operator ------------------------------------------------------
+// D6.6
 
-// `cond ? a : b`: the condition branches to one arm or the other and only
-// that arm is evaluated (D6.6), so the two arms are two blocks that write
-// into one destination and meet at a continuation.
-//
-// Each arm ends in an unconditional `br` with no `g->terminated` guard, where
-// gen_if, gen_while and gen_do_while all have one, because no arm can end a
-// block: an expression writes a terminator only through a call that returns
-// nothing, and check.check_ternary refuses such an arm with "has no value"
-// (D8.5, D12.2). gen_short_circuit is written the same way for the same
-// reason. A ticket that lets an arm terminate adds the guard here, and
-// nothing else will report it: `opt -passes=verify` accepts an instruction
-// after a terminator (item 10, AGENTS.md). The destination is a stack
-// slot rather than a `phi`, as `&&` and `||` are, so the tree walk never has
-// to know its predecessors (item 10, D19.4). `dst` is the place the value
-// lands in, and it holds an aggregate arm as well (D19.3).
+/// `cond ? a : b`: the condition branches to one arm or the other and only that
+/// arm is evaluated, so the two arms are two blocks that write into one
+/// destination and meet at a continuation.
+///
+/// Each arm ends in an unconditional `br` with no `g->terminated` guard, where
+/// gen_if, gen_while and gen_do_while all have one, because no arm can end a
+/// block: an expression writes a terminator only through a call that returns
+/// nothing, and check.check_ternary refuses such an arm with "has no value".
+/// gen_short_circuit is written the same way for the same reason. A ticket that
+/// lets an arm terminate adds the guard here, and nothing else will report it:
+/// `opt -passes=verify` accepts an instruction after a terminator (item 10,
+/// notes/compiler.md 6). The destination is a stack slot rather than a `phi`, as `&&`
+/// and `||` are, so the tree walk never has to know its predecessors (item 10).
+/// `dst` is the place the value lands in, and it holds an aggregate arm as well.
+/// D6.6, D8.5, D12.2, D19.3, D19.4
 fn void gen_ternary(gen.emitter mut* g, ast.node* n, gen.gen_place dst) {
     gen.gen_val cond = gen_expr_value(g, n->a);
     if (g->failed) {
@@ -1200,15 +1214,16 @@ fn void gen_ternary(gen.emitter mut* g, ast.node* n, gen.gen_place dst) {
     gen.gen_block_begin(g, done);
 }
 
-// The same as a scalar value: the slot the two arms wrote into is read back
-// at the continuation.
+/// The same as a scalar value: the slot the two arms wrote into is read back
+/// at the continuation.
 fn gen.gen_val gen_ternary_value(gen.emitter mut* g, ast.node* n) {
     gen.gen_place slot = gen.gen_temp_place(g, n->ty);
     gen_ternary(g, n, slot);
     return gen.gen_load_place(g, slot);
 }
 
-// ---- casts (item 12, D3.14) -------------------------------------------------------
+// ---- casts (item 12) --------------------------------------------------------------
+// D3.14
 
 fn gen.gen_val gen_cast(gen.emitter mut* g, ast.node* n) {
     types.node* to = n->ty;
@@ -1223,8 +1238,7 @@ fn gen.gen_val gen_cast(gen.emitter mut* g, ast.node* n) {
                     from->kind == types.type_kind.k_voidptr ||
                     from->kind == types.type_kind.k_fn;
     if (to_ptr && from_ptr) {
-        // Nothing at all for pointer to pointer, and for casts that only drop
-        // mutability or ownership (item 12, D5.4, D17.4).
+        // D5.4, D17.4: nothing for pointer to pointer or a dropped mark
         return v;
     }
     if (to_ptr) {
@@ -1243,33 +1257,33 @@ fn gen.gen_val gen_cast(gen.emitter mut* g, ast.node* n) {
         return v;
     }
     if (is_bool(from)) {
-        // `zext i1` for `bool` to an integer, and nothing at all for
-        // `cast(b, bool)`, which is the identity of D3.14 and would otherwise
-        // be a `zext i1` to `i1` (item 12).
+        // D3.14: nothing for `cast(b, bool)`, which is the identity
         return gen.gen_resize(g, v, from_bits, gen.gen_value_type(g, to), to_bits, false);
     }
-    // No row of D3.14 converts anything but a `bool` to `bool`: an integer to
-    // `bool` is a checker error (D3.3) and so is every other source type, so
-    // a `bool` target is the identity above and nothing else.
-    // Integer to integer widens by the source's signedness (item 12).
+    // No row converts anything but a `bool` to `bool`: an integer to `bool` is a
+    // checker error and so is every other source type, so a `bool` target is the
+    // identity above and nothing else. Integer to integer widens by the source's
+    // signedness (item 12).
+    // D3.3, D3.14
     return gen.gen_resize(g, v, from_bits, gen.gen_value_type(g, to), to_bits,
                           gen.gen_is_signed(from));
 }
 
-// A cast with a float on one side or both (item 12, D3.14): `fptrunc` and
-// `fpext` between the two float types, `sitofp` and `uitofp` from an integer
-// by the source's signedness, and the saturating intrinsic from a float to an
-// integer by the target's. A plain `fptosi` would be poison out of range,
-// while D3.14 asks for truncation toward zero, saturation at the target's
-// range, 0 for a NaN and no trap, which is what the intrinsic computes
-// (D19.2). `char`, `bool` and an enum reach no float type and no float
-// reaches them (D3.14), so the checker has refused every other pairing.
+/// A cast with a float on one side or both (item 12): `fptrunc` and `fpext`
+/// between the two float types, `sitofp` and `uitofp` from an integer by the
+/// source's signedness, and the saturating intrinsic from a float to an integer by
+/// the target's. A plain `fptosi` would be poison out of range, while the cast
+/// rule asks for truncation toward zero, saturation at the target's range, 0 for a
+/// NaN and no trap, which is what the intrinsic computes. `char`, `bool` and an
+/// enum reach no float type and no float reaches them, so the checker has refused
+/// every other pairing.
+/// D3.14, D19.2
 fn gen.gen_val gen_float_cast(gen.emitter mut* g, ast.node* n, types.node* to, types.node* from,
                               gen.gen_val v) {
     string ty = gen.gen_value_type(g, to);
     if (types.type_is_float(to) && types.type_is_float(from)) {
         if (to->prim == from->prim) {
-            // The identity of D3.14 emits nothing at all.
+            // D3.14: the identity emits nothing at all
             return v;
         }
         if (to->prim == prim.prim_kind.prim_f32) {
@@ -1309,8 +1323,8 @@ fn gen.gen_val gen_float_cast(gen.emitter mut* g, ast.node* n, types.node* to, t
 
 // ---- places (item 3) --------------------------------------------------------------
 
-// The length of a fixed array, span or `string` place as an `i64`: a fixed
-// array's is a literal and a span's is its header field (item 16).
+/// The length of a fixed array, span or `string` place as an `i64`: a fixed
+/// array's is a literal and a span's is its header field (item 16).
 fn gen.gen_val gen_length_of(gen.emitter mut* g, types.node* t, gen.gen_val base) {
     if (t->kind == types.type_kind.k_array) {
         // A fixed array's length is an `i64` literal (item 16).
@@ -1319,24 +1333,24 @@ fn gen.gen_val gen_length_of(gen.emitter mut* g, types.node* t, gen.gen_val base
     return gen.gen_span_len(g, base);
 }
 
-// The element type of a fixed array, span or `string`: a `string`'s is
-// `char`, which its own type does not carry (D3.7), so the emitter holds one
-// and every element still reaches its IR type through gen_mem_type, leaving
-// exactly one map from a fort type to an IR type (item 2).
+/// The element type of a fixed array, span or `string`: a `string`'s is `char`,
+/// which its own type does not carry, so the emitter holds one and every element
+/// still reaches its IR type through gen_mem_type, leaving exactly one map from a
+/// fort type to an IR type (item 2).
+/// D3.7
 fn types.node* gen_element_type(gen.emitter* g, types.node* t) {
     if (t == null) {
         return null;
     }
     if (t->kind == types.type_kind.k_string) {
-        // A `string` is an immutable span of `char` whose type carries no
-        // element, so the emitter's own node stands for it (D3.7).
+        // D3.7: a `string`'s type carries no element, so this node stands
         return &g->char_type;
     }
     return t->elem;
 }
 
-// The address of element `index` of such a place, by the array shape or the
-// element shape of item 3.
+/// The address of element `index` of such a place, by the array shape or the
+/// element shape of item 3.
 fn gen.gen_val gen_element_addr(gen.emitter mut* g, types.node* t, gen.gen_val base,
                                 gen.gen_val index) {
     if (t->kind == types.type_kind.k_array) {
@@ -1347,9 +1361,10 @@ fn gen.gen_val gen_element_addr(gen.emitter mut* g, types.node* t, gen.gen_val b
     return gen.gen_gep_element(g, gen_element_type(g, t), ptr, index);
 }
 
-// `e[i]` (D6.8): the index is extended to `i64`, one `icmp uge` branches to
-// std.rt.fail_bounds, and the element is reached with the array or the
-// element shape of item 3.
+/// `e[i]`: the index is extended to `i64`, one `icmp uge` branches to
+/// std.rt.fail_bounds, and the element is reached with the array or the element
+/// shape of item 3.
+/// D6.8
 fn gen.gen_place gen_index_place(gen.emitter mut* g, ast.node* n) {
     gen.gen_place mut out = gen.gen_place{};
     out.addr = gen.gen_literal(g, "ptr", "null");
@@ -1383,31 +1398,29 @@ fn gen.gen_place gen_index_place(gen.emitter mut* g, ast.node* n) {
     return out;
 }
 
-// ---- span expressions (item 16, D6.9) -----------------------------------------------
+// ---- span expressions (item 16) -----------------------------------------------------
+// D6.9
 
-// One bound of a span expression as an `i64`, extended by its own signedness
-// so that a negative bound fails the unsigned compares below (item 16).
+/// One bound of a span expression as an `i64`, extended by its own signedness
+/// so that a negative bound fails the unsigned compares below (item 16).
 fn gen.gen_val span_bound(gen.emitter mut* g, ast.node* e) {
     gen.gen_val raw = gen_expr_value(g, e);
     return gen.gen_resize(g, raw, gen.gen_int_bits(e->ty), "i64", BITS_64,
                           gen.gen_is_signed(e->ty));
 }
 
-// `p[lo..hi]` on a raw pointer, which is the explicit unsafe escape and
-// checks nothing (D6.9, D10.4): the arm of gen_span_expr below that a pointer
-// operand takes.
+/// `p[lo..hi]` on a raw pointer, which is the explicit unsafe escape and checks
+/// nothing: the arm of gen_span_expr below that a pointer operand takes.
+/// D6.9, D10.4
 fn void gen_span_of_pointer(gen.emitter mut* g, ast.node* n, types.node* ot,
                             gen.gen_place dst) {
-    // A pointer has no length, so only the two-bound form exists and
-    // nothing is checked (D6.9, D10.4).
+    // D6.9, D10.4: a pointer has no length, so nothing is checked
     gen.gen_val base = gen_expr_value(g, n->a);
     if (g->failed) {
         return;
     }
     if (n->b == null || n->c == null) {
-        // `p[lo..]`, `p[..hi]` and `p[..]` are checker errors, a pointer
-        // having no length (D10.4), so this is unreachable; an
-        // unfinished path is a diagnostic and never wrong code.
+        // D10.4: `p[lo..]` and its kin are checker errors, so this is dead
         gen.gen_todo(g, n->loc, "this span expression");
         return;
     }
@@ -1416,15 +1429,16 @@ fn void gen_span_of_pointer(gen.emitter mut* g, ast.node* n, types.node* ot,
     if (g->failed) {
         return;
     }
-    // Two instructions, so two statements (D19.5), as below.
+    // D19.5: two instructions, so two statements, as below
     gen.gen_val at = gen.gen_gep_element(g, ot->elem, base, lo);
     gen.gen_val length = gen.gen_binary(g, "sub", hi, lo);
     gen.gen_span_init(g, dst.addr, at, length);
 }
 
-// `e[lo..hi]`, `e[lo..]`, `e[..hi]` and `e[..]` (D6.9): the result is a view
-// of the operand, whose two bounds are checked against the operand's own
-// length in one branch.
+/// `e[lo..hi]`, `e[lo..]`, `e[..hi]` and `e[..]`: the result is a view of the
+/// operand, whose two bounds are checked against the operand's own length in one
+/// branch.
+/// D6.9
 fn void gen_span_expr(gen.emitter mut* g, ast.node* n, gen.gen_place dst) {
     types.node* mut ot = null;
     if (n->a != null) {
@@ -1441,8 +1455,7 @@ fn void gen_span_expr(gen.emitter mut* g, ast.node* n, gen.gen_place dst) {
     if (g->failed) {
         return;
     }
-    // The operand and then the bounds, left to right (D6.3); an absent low
-    // bound is zero (D6.9).
+    // D6.3, D6.9: the operand then the bounds; an absent low bound is 0
     gen.gen_val mut lo = gen.gen_const_unsigned(g, "i64", 0);
     if (n->b != null) {
         lo = span_bound(g, n->b);
@@ -1454,24 +1467,23 @@ fn void gen_span_expr(gen.emitter mut* g, ast.node* n, gen.gen_place dst) {
     if (n->c != null) {
         hi = span_bound(g, n->c);
     } else {
-        // `e[lo..]` is `e[lo..len]` (D6.9).
+        // D6.9
         hi = gen_length_of(g, ot, operand.addr);
     }
     if (g->failed) {
         return;
     }
     if (!g->opts.no_bounds_check) {
-        // The length is read after the bounds the source writes, so the check
-        // holds against the length the operation sees (D6.3); an absent high
-        // bound is that length and was read above. With both bounds written
-        // and `--no-bounds-check` nothing reads it, so nothing loads it
-        // (D10.6).
+        // The length is read after the bounds the source writes, so the check holds
+        // against the length the operation sees; an absent high bound is that length and
+        // was read above. With both bounds written and `--no-bounds-check` nothing reads
+        // it, so nothing loads it.
+        // D6.3, D10.6
         gen.gen_val mut len = hi;
         if (n->c != null) {
             len = gen_length_of(g, ot, operand.addr);
         }
-        // `0 <= lo <= hi <= len` in one branch: the two compares are
-        // unsigned, so a negative bound fails them too (item 16, D6.9).
+        // D6.9: `0 <= lo <= hi <= len` in one branch, unsigned (item 16)
         gen.gen_val over = gen.gen_icmp(g, "ugt", hi, len);
         gen.gen_val inverted = gen.gen_icmp(g, "ugt", lo, hi);
         gen.gen_val bad = gen.gen_binary(g, "or", over, inverted);
@@ -1482,9 +1494,7 @@ fn void gen_span_expr(gen.emitter mut* g, ast.node* n, gen.gen_place dst) {
         gen.gen_check(g, bad, true, runtime_sig.rt_entry.rt_fail_span, &args, n->loc);
         gen.gen_args_free(&args);
     }
-    // Two instructions, so two statements: C leaves the order of two
-    // arguments unspecified and the text is a function of the program alone
-    // (D19.5).
+    // D19.5: two statements; C leaves two arguments' order unspecified
     gen.gen_val base = gen_element_addr(g, ot, operand.addr, lo);
     gen.gen_val length = gen.gen_binary(g, "sub", hi, lo);
     gen.gen_span_init(g, dst.addr, base, length);
@@ -1496,7 +1506,7 @@ fn gen.gen_place gen_field_place(gen.emitter mut* g, ast.node* n, bool arrow) {
     out.ty = n->ty;
     gen.gen_val mut base = gen.gen_val{};
     if (arrow) {
-        // `p->f` is `(*p).f` (D6.10).
+        // D6.10
         base = gen_expr_value(g, n->a);
     } else {
         base = gen_expr_place(g, n->a).addr;
@@ -1517,10 +1527,10 @@ fn gen.gen_place gen_field_place(gen.emitter mut* g, ast.node* n, bool arrow) {
     return out;
 }
 
-// The storage of a module-level constant or global, which is its symbol
-// itself: a constant is an immutable lvalue in read-only memory and a `mut`
-// global an assignable one (D6.7, D7.10). Returns false when `n` denotes
-// something else.
+/// The storage of a module-level constant or global, which is its symbol itself:
+/// a constant is an immutable lvalue in read-only memory and a `mut` global an
+/// assignable one. Returns false when `n` denotes something else.
+/// D6.7, D7.10
 fn bool global_place(gen.emitter mut* g, ast.node* n, gen.gen_place mut* out) {
     ast.sym* s = n->sym;
     if (s == null || (s->kind != ast.sym_kind.s_const && s->kind != ast.sym_kind.s_global) ||
@@ -1537,16 +1547,16 @@ fn bool global_place(gen.emitter mut* g, ast.node* n, gen.gen_place mut* out) {
     return true;
 }
 
-// The place of an rvalue: a field access or an index on an rvalue struct or
-// array is allowed and copies it through a temporary (D6.7), and a `string`
-// literal and an aggregate call result reach their place the same way (D19.3).
+/// The place of an rvalue: a field access or an index on an rvalue struct or
+/// array is allowed and copies it through a temporary, and a `string` literal and
+/// an aggregate call result reach their place the same way.
+/// D6.7, D19.3
 fn gen.gen_place rvalue_place(gen.emitter mut* g, ast.node* n) {
     gen.gen_place tmp = gen.gen_temp_place(g, n->ty);
     gen_expr_into(g, n, tmp);
     return tmp;
 }
 
-// An lvalue's place.
 fn gen.gen_place gen_expr_place(gen.emitter mut* g, ast.node* n) {
     gen.gen_place mut out = gen.gen_place{};
     out.addr = gen.gen_literal(g, "ptr", "null");
@@ -1568,8 +1578,7 @@ fn gen.gen_place gen_expr_place(gen.emitter mut* g, ast.node* n) {
     case ast.ast_kind.k_index:
         return gen_index_place(g, n);
     case ast.ast_kind.k_field:
-        // `m.NAME` across modules designates that module's storage, not a
-        // field of a value (D7.10, D9.4).
+        // D7.10, D9.4: `m.NAME` designates that module's storage
         if (global_place(g, n, &out)) {
             return out;
         }
@@ -1578,26 +1587,22 @@ fn gen.gen_place gen_expr_place(gen.emitter mut* g, ast.node* n) {
         return gen_field_place(g, n, true);
     case ast.ast_kind.k_unary:
         if (op_of(n) == lexer.tok_kind.star) {
-            // `*p` designates the storage the pointer reaches (D6.7).
+            // D6.7
             out.addr = gen_expr_value(g, n->a);
             return out;
         }
     case ast.ast_kind.k_span, ast.ast_kind.k_string, ast.ast_kind.k_struct_lit,
          ast.ast_kind.k_array_lit, ast.ast_kind.k_brace_init, ast.ast_kind.k_ternary:
-        // A span expression yields a view, which is a value and not storage
-        // (D6.9), so its header is built in a temporary, as a `string`
-        // literal's is (D3.7); `point{1, 2}.x` and `i32[3]{7, 8, 9}[1]` read
-        // a member out of the literal's own temporary (D6.5, D6.7). A
-        // conditional is an rvalue as well and is read out of its own slot
-        // (D6.6, D6.7).
+        // D6.9, D3.7: a view is a value, so its header is built in a temporary
+        // D6.5, D6.6, D6.7: a literal member and a conditional are read out too
         return rvalue_place(g, n);
     case ast.ast_kind.k_cast, ast.ast_kind.k_call, ast.ast_kind.k_new:
         if (gen.gen_is_aggregate(n->ty)) {
-            // A call result, a cast between aggregates, which only drops
-            // marks and emits nothing of its own, and the span `new(T, n)`
-            // returns are rvalues as well, so a member of either is read out
-            // of a copy and `del(new(T, n))`, which D17.8 admits, frees the
-            // copy's pointer (D3.14, D5.4, D6.7, D17.9).
+            // A call result, a cast between aggregates, which only drops marks and emits
+            // nothing of its own, and the span `new(T, n)` returns are rvalues as well, so a
+            // member of either is read out of a copy and `del(new(T, n))` frees the copy's
+            // pointer.
+            // D3.14, D5.4, D6.7, D17.8, D17.9
             return rvalue_place(g, n);
         }
     default:
@@ -1609,11 +1614,11 @@ fn gen.gen_place gen_expr_place(gen.emitter mut* g, ast.node* n) {
 
 // ---- values -----------------------------------------------------------------------
 
-// `.len` and `.ptr` of a span or `string` are its header fields; `.len` of a
-// fixed array is a constant the checker already folded (D3.4, D3.5).
+/// `.len` and `.ptr` of a span or `string` are its header fields; `.len` of a
+/// fixed array is a constant the checker already folded.
+/// D3.4, D3.5
 fn bool pseudo_field_value(gen.emitter mut* g, ast.node* n, gen.gen_val mut* out) {
-    // Through a pointer to a span or string, `->` reaches them too, since
-    // `p->f` is `(*p).f` (D6.10).
+    // D6.10: `->` reaches them too, since `p->f` is `(*p).f`
     bool arrow = n->kind == ast.ast_kind.k_arrow;
     types.node* mut ot = null;
     if (n->a != null) {
@@ -1635,8 +1640,7 @@ fn bool pseudo_field_value(gen.emitter mut* g, ast.node* n, gen.gen_val mut* out
     if (!len && !ptr) {
         return false;
     }
-    // The header is where the pointer reaches for `->` and where the operand
-    // stands for `.` (D6.7, D6.10).
+    // D6.7, D6.10: the pointer's target for `->`, the operand for `.`
     gen.gen_val mut base = gen.gen_val{};
     if (arrow) {
         base = gen_expr_value(g, n->a);
@@ -1657,7 +1661,7 @@ fn bool pseudo_field_value(gen.emitter mut* g, ast.node* n, gen.gen_val mut* out
 
 fn gen.gen_val gen_unary_value(gen.emitter mut* g, ast.node* n) {
     if (op_of(n) == lexer.tok_kind.amp) {
-        // `&e` is the address of the place `e` designates (D6.7).
+        // D6.7
         gen.gen_place mut p = gen_expr_place(g, n->a);
         p.addr.ty = "ptr";
         return p.addr;
@@ -1673,14 +1677,14 @@ fn gen.gen_val gen_unary_value(gen.emitter mut* g, ast.node* n) {
         return gen.gen_binary(g, "xor", v, gen.gen_literal(g, "i1", "true"));
     }
     if (op_of(n) == lexer.tok_kind.tilde) {
-        // `~x` is `x ^ -1` and never overflows (D6.2).
+        // D6.2: `~x` is `x ^ -1` and never overflows
         return gen.gen_binary(g, "xor", v, gen.gen_const_signed(g, v.ty, -1));
     }
     if (types.type_is_float(n->ty)) {
-        // Unary `-` on a float is `fneg` and not a subtraction from zero: the
-        // two differ on a zero, since `0.0 - 0.0` is +0.0 where `-(0.0)` is
-        // -0.0, and they differ on the sign bit of a NaN as well (D6.12). No
-        // fast-math flag (D16).
+        // Unary `-` on a float is `fneg` and not a subtraction from zero: the two differ
+        // on a zero, since `0.0 - 0.0` is +0.0 where `-(0.0)` is -0.0, and they differ on
+        // the sign bit of a NaN as well. No fast-math flag.
+        // D6.12, D16
         return gen.gen_unary_op(g, "fneg", v);
     }
     // Unary `-` is `0 - x` and uses the same intrinsics as `-` (item 15).
@@ -1706,21 +1710,18 @@ fn gen.gen_val gen_binary_value(gen.emitter mut* g, ast.node* n) {
     return gen_arith(g, n->loc, n->op, n->a->ty, a, n->b->ty, b);
 }
 
-// A scalar expression's value.
 fn gen.gen_val gen_expr_value(gen.emitter mut* g, ast.node* n) {
     if (g->failed || n == null || bad_type(n->ty)) {
         return gen.gen_literal(g, "i32", "0");
     }
     if (folded_scalar(g, n)) {
-        // A constant expression has no side effects, so it is emitted as a
-        // literal (D4.6).
+        // D4.6: a constant expression has no side effects
         return gen.gen_const_value(g, n->ty, check.check_node_value(g->ck, n));
     }
     switch (n->kind) {
     case ast.ast_kind.k_ident:
         gen.gen_val mut fn_val = gen.gen_val{};
-        // A function name is a value of its function type and has no storage
-        // to load from (D3.10).
+        // D3.10: a function name has no storage to load from
         if (function_ref(g, n, &fn_val)) {
             return fn_val;
         }
@@ -1729,16 +1730,14 @@ fn gen.gen_val gen_expr_value(gen.emitter mut* g, ast.node* n) {
         return gen.gen_load_place(g, gen_expr_place(g, n));
     case ast.ast_kind.k_arrow:
         gen.gen_val mut header = gen.gen_val{};
-        // `out->len` and `out->ptr` read the header the pointer reaches
-        // (D6.10).
+        // D6.10
         if (pseudo_field_value(g, n, &header)) {
             return header;
         }
         return gen.gen_load_place(g, gen_expr_place(g, n));
     case ast.ast_kind.k_field:
         gen.gen_val mut v = gen.gen_val{};
-        // A qualified name `m.f` of a function is that function's address,
-        // not a field of a value (D3.10, D9.4).
+        // D3.10, D9.4: `m.f` is the function's address, not a field
         if (function_ref(g, n, &v)) {
             return v;
         }
@@ -1755,7 +1754,7 @@ fn gen.gen_val gen_expr_value(gen.emitter mut* g, ast.node* n) {
     case ast.ast_kind.k_cast:
         return gen_cast(g, n);
     case ast.ast_kind.k_call:
-        // `move` is the one universe function with a value (D12.2, item 18).
+        // D12.2: the one universe function with a value (item 18)
         if (gen_is_move(n)) {
             return gen_move(g, n, null);
         }
@@ -1764,15 +1763,12 @@ fn gen.gen_val gen_expr_value(gen.emitter mut* g, ast.node* n) {
         }
         return gen_call(g, n, null);
     case ast.ast_kind.k_brace_init:
-        // `{}` on a scalar is the zero value, which the checker allows for an
-        // enum alone: a zeroed enum holds 0 even when 0 is not a member
-        // (D3.9, D6.5).
+        // D3.9, D6.5: a zeroed enum holds 0 even when 0 is not a member
         if (ast.ast_len(n) == 0) {
             return zero_of(g, n->ty);
         }
     case ast.ast_kind.k_new:
-        // `new(T)` yields the address of one object, which is a scalar;
-        // `new(T, n)` yields a span and is written into a place (D10.2).
+        // D10.2: `new(T)` is a scalar; `new(T, n)` is written into a place
         return gen_new_object(g, n);
     default:
         break;
@@ -1781,10 +1777,12 @@ fn gen.gen_val gen_expr_value(gen.emitter mut* g, ast.node* n) {
     return gen.gen_literal(g, "i32", "0");
 }
 
-// ---- values written into a place (D19.3) -------------------------------------------
+// ---- values written into a place ---------------------------------------------------
+// D19.3
 
-// The members of a positional struct literal, in the field order of the
-// declaration (D6.5): the arm of gen_brace_init an undesignated struct takes.
+/// The members of a positional struct literal, in the field order of the
+/// declaration: the arm of gen_brace_init an undesignated struct takes.
+/// D6.5
 fn void positional_struct(gen.emitter mut* g, ast.node* n, gen.gen_place dst) {
     types.node* t = dst.ty;
     ast.sym* s = check.nominal_sym(t);
@@ -1809,11 +1807,11 @@ fn void positional_struct(gen.emitter mut* g, ast.node* n, gen.gen_place dst) {
     }
 }
 
-// The `.field = value` members of a designated struct literal (D6.5).
+/// The `.field = value` members of a designated struct literal.
+/// D6.5
 fn void designated_struct(gen.emitter mut* g, ast.node* n, gen.gen_place dst) {
     types.node* t = dst.ty;
-    // The designated form zeroes the place first, since omitted fields
-    // are zeroed (D6.5).
+    // D6.5: the designated form zeroes first, omitted fields being zero
     gen.gen_memset_zero(g, dst.addr, types.type_alignof(t), types.type_sizeof(t));
     u64 mut i = 0;
     while (i < ast.ast_len(n)) {
@@ -1834,12 +1832,13 @@ fn void designated_struct(gen.emitter mut* g, ast.node* n, gen.gen_place dst) {
     }
 }
 
-// A `{ ... }` initializer (D6.5): `{}` zeroes the place with `llvm.memset`
-// and every other form writes member by member.
+/// A `{... }` initializer: `{}` zeroes the place with `llvm.memset` and every
+/// other form writes member by member.
+/// D6.5
 fn void gen_brace_init(gen.emitter mut* g, ast.node* n, gen.gen_place dst) {
     types.node* t = dst.ty;
     if (ast.ast_len(n) == 0) {
-        // `{}` is the zero value of the type (D6.5).
+        // D6.5
         gen.gen_memset_zero(g, dst.addr, types.type_alignof(t), types.type_sizeof(t));
         return;
     }
@@ -1868,8 +1867,9 @@ fn void gen_brace_init(gen.emitter mut* g, ast.node* n, gen.gen_place dst) {
     positional_struct(g, n, dst);
 }
 
-// An expression written into `dst`, which is how every aggregate is produced
-// (D19.3). A scalar expression stores its value.
+/// An expression written into `dst`, which is how every aggregate is produced.
+/// A scalar expression stores its value.
+/// D19.3
 fn void gen_expr_into(gen.emitter mut* g, ast.node* n, gen.gen_place dst) {
     if (g->failed || n == null || bad_type(n->ty)) {
         return;
@@ -1886,8 +1886,7 @@ fn void gen_expr_into(gen.emitter mut* g, ast.node* n, gen.gen_place dst) {
         gen_brace_init(g, n->b, dst);
         return;
     case ast.ast_kind.k_string:
-        // A string value is its two header fields: the bytes and the length
-        // the trailing NUL excludes (D3.7).
+        // D3.7: the bytes and the length the trailing NUL excludes
         gen.gen_val mut ptr = gen.gen_val{};
         gen.gen_val mut len = gen.gen_val{};
         string_operand(g, n, &ptr, &len);
@@ -1905,8 +1904,7 @@ fn void gen_expr_into(gen.emitter mut* g, ast.node* n, gen.gen_place dst) {
         }
         return;
     case ast.ast_kind.k_cast:
-        // A cast between aggregates only drops marks, so nothing is emitted
-        // for it (item 12, D5.4, D17.4).
+        // D5.4, D17.4: a cast between aggregates only drops marks
         gen_expr_into(g, n->a, dst);
         return;
     case ast.ast_kind.k_new:
@@ -1916,8 +1914,7 @@ fn void gen_expr_into(gen.emitter mut* g, ast.node* n, gen.gen_place dst) {
         gen_span_expr(g, n, dst);
         return;
     case ast.ast_kind.k_ternary:
-        // An aggregate arm is written into the destination by the arm itself,
-        // so the conditional needs no temporary of its own (D19.3).
+        // D19.3: an aggregate arm writes into the destination itself
         gen_ternary(g, n, dst);
         return;
     default:
@@ -1931,8 +1928,7 @@ fn void gen_expr_into(gen.emitter mut* g, ast.node* n, gen.gen_place dst) {
         gen.gen_span_init(g, dst.addr, ptr, len);
         return;
     }
-    // Every other aggregate is an lvalue, so the value is a copy of its
-    // storage (D19.3).
+    // D19.3: every other aggregate is an lvalue, so the value is a copy
     gen.gen_place src = gen_expr_place(g, n);
     if (g->failed) {
         return;
@@ -1941,7 +1937,7 @@ fn void gen_expr_into(gen.emitter mut* g, ast.node* n, gen.gen_place dst) {
     gen.gen_memcpy(g, dst.addr, align, src.addr, align, types.type_sizeof(dst.ty));
 }
 
-// An expression evaluated for its effects alone: a call statement.
+/// An expression evaluated for its effects alone: a call statement.
 fn void gen_expr_discard(gen.emitter mut* g, ast.node* n) {
     if (g->failed || n == null) {
         return;

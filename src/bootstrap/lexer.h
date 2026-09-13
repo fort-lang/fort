@@ -1,15 +1,16 @@
 // The lexer of the bootstrap compiler: a whole source file to a token array
-// (toolchain.md 8, lexer) applying the lexical structure of D2.
+// (toolchain.md 8, lexer) applying the lexical structure.
+// D2
 //
 // The file mirrors what the self-hosted compiler will do: no unions, no
-// function pointers, no macros beyond constants, a plain switch on the
-// current byte. Every token records its kind, its 1-based line and column
-// (a tab is one column, D14.2) and its byte range in the source; integer and
-// char literals carry their value, identifiers a view into the source and
-// string literals their decoded bytes interned in the caller's pool. A
-// lexical error is reported and lexing resumes at the start of the next
-// line, so the file is lexed whole and reports at most one lexical
-// diagnostic per line (D14.2).
+// function pointers, no macros beyond constants, a plain switch on the current
+// byte. Every token records its kind, its 1-based line and column (a tab is
+// one column) and its byte range in the source; integer and char literals
+// carry their value, identifiers a view into the source and string literals
+// their decoded bytes interned in the caller's pool. A lexical error is
+// reported and lexing resumes at the start of the next line, so the file is
+// lexed whole and reports at most one lexical diagnostic per line.
+// D14.2
 #ifndef FORT_LEXER_H
 #define FORT_LEXER_H
 
@@ -18,19 +19,21 @@
 
 #include "str.h"
 
-// Token kinds: the literal classes, one entry per keyword of D2.4, one per
-// operator or punctuation token of D2.10, and the end of the file. Keywords
-// are TOK_KW_<WORD>; operators are named after their glyphs, `_WRAP` for a
-// `%` wrapping variant and `_ASSIGN` for a compound assignment.
+/// Token kinds: the literal classes, one entry per keyword, one per operator or
+/// punctuation token, and the end of the file. Keywords are TOK_KW_<WORD>;
+/// operators are named after their glyphs, `_WRAP` for a `%` wrapping variant and
+/// `_ASSIGN` for a compound assignment.
+/// D2.4, D2.10
 typedef enum {
     TOK_EOF = 0,
     TOK_IDENT,  // text: the identifier, a view into the source
-    TOK_INT,    // ival: the magnitude (D2.5)
-    TOK_FLOAT,  // text: the literal (D2.6); unsupported by the bootstrap
-    TOK_CHAR,   // ival: the byte value (D2.7)
-    TOK_STRING, // text: the decoded bytes, interned (D2.9)
+    TOK_INT,    // D2.5: ival: the magnitude
+    TOK_FLOAT,  // D2.6: text: the literal; unsupported by the bootstrap
+    TOK_CHAR,   // D2.7: ival: the byte value
+    TOK_STRING, // D2.9: text: the decoded bytes, interned
 
-    // Keywords in the order of D2.4.
+    /// Keywords in the order the decision lists them.
+    /// D2.4
     TOK_KW_AS,
     TOK_KW_BOOL,
     TOK_KW_BREAK,
@@ -73,7 +76,8 @@ typedef enum {
     TOK_KW_VOID,
     TOK_KW_WHILE,
 
-    // Operators and punctuation in the order of D2.10.
+    /// Operators and punctuation in the order the decision lists them.
+    /// D2.10
     TOK_PLUS,              // +
     TOK_MINUS,             // -
     TOK_STAR,              // *
@@ -126,12 +130,12 @@ typedef enum {
     TOK_RBRACE,            // }
     TOK_COMMA,             // ,
     TOK_SEMI,              // ;
-    TOK_AT,                // @, the span suffix (D2.10, D3.5)
+    TOK_AT,                // D2.10, D3.5: @, the span suffix
 
     TOK_COUNT
 } tok_kind_t;
 
-// The keyword and operator ranges of tok_kind_t, both inclusive.
+/// The keyword and operator ranges of tok_kind_t, both inclusive.
 enum {
     TOK_KW_FIRST = TOK_KW_AS,
     TOK_KW_LAST = TOK_KW_WHILE,
@@ -139,9 +143,9 @@ enum {
     TOK_OP_LAST = TOK_AT
 };
 
-// The spelling of a keyword or operator kind, or a description of the other
-// kinds ("identifier", "integer literal", "float literal", "char literal",
-// "string literal", "end of file").
+/// The spelling of a keyword or operator kind, or a description of the other
+/// kinds ("identifier", "integer literal", "float literal", "char literal",
+/// "string literal", "end of file").
 const char* tok_kind_name(tok_kind_t kind);
 
 typedef struct {
@@ -156,8 +160,8 @@ typedef struct {
                    // into the source
 } token_t;
 
-// A growable array of tokens. Zero-initialized storage is a valid empty
-// vector.
+/// A growable array of tokens. Zero-initialized storage is a valid empty
+/// vector.
 typedef struct {
     token_t* items; // the slots, or NULL
     uint64_t len;   // slots in use
@@ -166,42 +170,42 @@ typedef struct {
 
 void tokvec_init(tokvec_t* v);
 
-// Releases the slots; the vector is empty and usable afterwards.
+/// Releases the slots; the vector is empty and usable afterwards.
 void tokvec_free(tokvec_t* v);
 
-// Ensures room for `extra` more tokens.
+/// Ensures room for `extra` more tokens.
 void tokvec_reserve(tokvec_t* v, uint64_t extra);
 
 void tokvec_push(tokvec_t* v, token_t t);
 
-// Drops every token after the first `len`; a `len` at or past the end leaves
-// the vector alone.
+/// Drops every token after the first `len`; a `len` at or past the end leaves
+/// the vector alone.
 void tokvec_truncate(tokvec_t* v, uint64_t len);
 
-// Lexes the whole of `source`, which the caller keeps alive and unchanged
-// for as long as the tokens are used, appending the tokens to `out` ending
-// in TOK_EOF; string literals are decoded into `pool`. `file` names the
-// source in diagnostics. Returns whether the file was clean. A lexical
-// error is reported and lexing resumes at the start of the next line
-// (D14.2), dropping the whole of that line and reporting at most one
-// diagnostic per line, so `out` covers the rest of the file and ends in
-// TOK_EOF either way and the tokens can be parsed. It opens the file's
-// budget of DIAG_MAX_PER_FILE diagnostics, which the parser then spends what
-// is left of.
+/// Lexes the whole of `source`, which the caller keeps alive and unchanged for as
+/// long as the tokens are used, appending the tokens to `out` ending in TOK_EOF;
+/// string literals are decoded into `pool`. `file` names the source in
+/// diagnostics. Returns whether the file was clean. A lexical error is reported
+/// and lexing resumes at the start of the next line, dropping the whole of that
+/// line and reporting at most one diagnostic per line, so `out` covers the rest of
+/// the file and ends in TOK_EOF either way and the tokens can be parsed. It opens
+/// the file's budget of DIAG_MAX_PER_FILE diagnostics, which the parser then
+/// spends what is left of.
+/// D14.2
 bool lex_file(const char* file, str_t source, str_pool_t* pool, tokvec_t* out);
 
-// The token dump of `--tokens` (D14.1), appended to `out`: one line per
-// token of `v`, in the form toolchain.md 1 documents,
-//
-//     <line>:<col>-<end_line>:<end_col> <ival> "<spelling>" <kind>
-//
-// with the spelling escaped so that a token holding a newline, a tab, a
-// quote or a byte outside printable ASCII still occupies one line. The
-// end of the range is the position after the token's last byte: no token
-// holds a line break (D2.9), so it is `<col> + <len>` on the token's own
-// line. src/fort/lexer.ft writes the same bytes, and tools/diff_tokens.sh
-// holds the two dumps against each other over every .ft file in the
-// repository.
+/// The token dump of `--tokens`, appended to `out`: one line per token of `v`, in
+/// the form toolchain.md 1 documents,
+///
+///     <line>:<col>-<end_line>:<end_col> <ival> "<spelling>" <kind>
+///
+/// with the spelling escaped so that a token holding a newline, a tab, a quote or
+/// a byte outside printable ASCII still occupies one line. The end of the range is
+/// the position after the token's last byte: no token holds a line break, so it is
+/// `<col> + <len>` on the token's own line. src/fort/lexer.ft writes the same
+/// bytes, and tools/diff_tokens.sh holds the two dumps against each other over
+/// every .ft file in the repository.
+/// D2.9, D14.1
 void tok_dump(const tokvec_t* v, sb_t* out);
 
 #endif

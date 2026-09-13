@@ -38,8 +38,6 @@ static void sexp_uint(sb_t* out, uint64_t v) {
     msg_uint(out, v);
 }
 
-// The bytes of a literal between double quotes, with `"`, `\` and every
-// non-printable byte escaped.
 static void sexp_quoted(sb_t* out, str_t s) {
     static const char* const HEX_DIGITS = "0123456789ABCDEF";
     sb_append(out, " \"");
@@ -64,15 +62,15 @@ static void sexp_child(const ast_node_t* n, sb_t* out) {
     ast_dump(n, out);
 }
 
-// Every child of the node's list, in order.
 static void sexp_list(const ast_node_t* n, sb_t* out) {
     for (uint64_t i = 0; i < ast_len(n); i++) {
         sexp_child(ast_child(n, i), out);
     }
 }
 
-// The `own` and `mut` of a type position, in the order the source writes
-// them (D17.2: an `own` precedes the `mut` in a position).
+// The `own` and `mut` of a type position, in the order the source writes them:
+// an `own` precedes the `mut` in a position.
+// D17.2
 static void sexp_marks(const ast_node_t* n, sb_t* out) {
     if (ast_is_own(n)) {
         sexp_word(out, "own");
@@ -259,7 +257,6 @@ static void dump_stmt(const ast_node_t* n, sb_t* out) {
         sexp_child(n->b, out);
         break;
     default:
-        // call-stmt, defer, return, break, continue: one child or none.
         sexp_open(out, ast_kind_name(n->kind));
         if (n->kind != AST_BREAK && n->kind != AST_CONTINUE) {
             sexp_child(n->a, out);
@@ -321,7 +318,6 @@ static void dump_expr(const ast_node_t* n, sb_t* out) {
         sexp_child(n->a, out);
         break;
     default:
-        // null, index, cast, new, struct-lit, array-lit: two children or none.
         sexp_open(out, ast_kind_name(n->kind));
         if (n->kind != AST_NULL) {
             sexp_child(n->a, out);
@@ -339,7 +335,7 @@ void ast_dump(const ast_node_t* n, sb_t* out) {
     }
     switch (n->kind) {
     case AST_ERROR:
-        // The skipped region of a syntax error has no children (D14.2).
+        // D14.2
         sb_append(out, "(error)");
         return;
     case AST_TYPE:

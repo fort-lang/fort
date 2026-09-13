@@ -147,12 +147,13 @@ static uint64_t utf8_sequence_len(str_t s, uint64_t i) {
     return len;
 }
 
-// The quoted form of `s`: the quote and the backslash escaped, a control
-// byte as \n, \t or \r, the control bytes fort itself spells out (D2.8), or
-// as the \u00XX JSON has in place of fort's \xHH. A multi-byte UTF-8
-// sequence goes through verbatim, and a byte that is not part of a
-// well-formed one is written as U+FFFD, so the document is valid UTF-8 even
-// though fort source never is validated (D2.1, D3.7).
+// The quoted form of `s`: the quote and the backslash escaped, a control byte as
+// \n, \t or \r, the control bytes fort itself spells out, or as the
+// \u00XX JSON has in place of fort's \xHH. A multi-byte UTF-8 sequence goes
+// through verbatim, and a byte that is not part of a well-formed one is written
+// as U+FFFD, so the document is valid UTF-8 even though fort source is never
+// validated.
+// D2.1, D2.8, D3.7
 static void json_quoted(json_t* j, str_t s) {
     sb_push(j->out, '"');
     uint64_t i = 0;

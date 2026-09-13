@@ -19,8 +19,7 @@ _Noreturn void fatal_internal(const char* what) {
 }
 
 void* mem_alloc(uint64_t size) {
-    // calloc(0) may legitimately return NULL; a one-byte block keeps every
-    // allocation distinct and non-null, as fort's `new` does (D10.2).
+    // D10.2: calloc(0) may return NULL; a one-byte block never does
     void* p = calloc(1, size == 0U ? 1U : (size_t)size);
     if (p == NULL) {
         fatal_oom();
@@ -112,7 +111,7 @@ uint64_t str_hash(str_t s) {
     uint64_t h = FNV_OFFSET_BASIS;
     for (uint64_t i = 0; i < s.len; i++) {
         h ^= (uint64_t)(unsigned char)s.ptr[i];
-        h *= FNV_PRIME; // unsigned: wraps, as `*%` does (D11.2)
+        h *= FNV_PRIME; // D11.2: unsigned: wraps, as `*%` does
     }
     return h;
 }

@@ -34,10 +34,12 @@ separated by a bare `//`, say why the file is the way it is: what it owns, what 
 decision it implements, cited as a tag in the shape of 1.4. A blank line may follow the block.
 
 There is no line limit, because the length follows the design the file carries. Measured over the
-72 files of `src/`, `std/` and `runtime/` on 2026-09-12: the median block is 14 lines, 37 blocks
-pass 12 lines, and the longest is 79 (`src/fort/parser.ft`, the parser's recovery model). No
-sweep shortens them. `src/bootstrap/check.c` is the one-line form and `src/bootstrap/sym.h`, at
-29 lines, is the long form.
+74 header blocks of `src/` and `std/` on 2026-09-12, after T-101 swept the 64 in `src/`: the
+median block is 15 lines, 40 blocks pass 12 lines, and the longest is 87 (`src/fort/parser.ft`,
+the parser's recovery model). No sweep shortens them. `src/bootstrap/check.c` is the one-line
+form and `src/bootstrap/sym.h` is the long form. A header block is prose and its tags are
+citation lines of their own, so T-101 took every tag the prose held inline and put it on a line
+**after** the paragraph it belongs to, never before it: the first line of a file names the file.
 
 The block does not list the functions of the file, because that list goes out of date and the
 file below it does not.
@@ -53,8 +55,30 @@ There are two, and the directives of 1.1 are the third kind outside this section
 - `//` inside a body, where the logic is not clear from the code: an order that matters, a case
   that looks impossible and is not, a workaround and the thing it works around.
 
+A comment that stands on a declaration or on a definition states its contract; only a comment
+inside a body may be a bare citation. T-101 first collapsed 583 doc comments to the tag they
+cited and had to put every one back: a tag says which rule the code follows and says nothing
+about what the caller must hold true, what the callee gives back or who owns the memory. The
+tags of such a comment stand on the line after its prose, between the prose and the declaration.
+
+A section banner, `// ---- names ----`, is the third shape a comment takes below the header. It
+is navigation, not a contract, and it keeps its text; the decisions the section implements stand
+on the line after it. Stripping the tag out of 114 banners and putting it nowhere else left 10
+files citing a decision they implement in no line at all, and left D10.3 cited nowhere in `src/`
+(T-101).
+
 Write nothing that restates the code. `// increment the index` above `i += 1;` is deleted, not
 reworded. A comment that repeats the name of the function it stands on is deleted with it.
+
+What that rule is worth, measured: T-101 read all 2261 distinct comments of `src/` and deleted 29
+of them as restatements. That is 1 in 78, because after the citations became tags what was left
+was contracts and knowledge. Comment lines are 19.8 % of `src/bootstrap` and 22.9 % of
+`src/fort`, against 19.2 % and 22.2 % before the sweep: the share rose, because a citation on its
+own line costs the line the tag used to share with prose. Of the 9867 comment lines the two hold,
+1414 are header blocks, 310 are section banners, 2188 are citation lines of the shape of 1.4,
+3694 are `///` contracts and 2261 are the `//` prose inside bodies. A ticket that wants a smaller
+share has to shorten the contracts, which this section asks for, so the share is a consequence
+and not a target.
 
 ### 1.4 Citations
 
@@ -66,27 +90,54 @@ full stop. A citation of more than one decision is a list: `// D11.5, D11.7`. A 
 a citation only with a clause, `// T-091: the runtime is a fort module`, because `.tickets/` is
 outside the repository and the number alone points at a file the reader cannot open.
 
-A citation stands on the line above the code it governs, or at the end of that line. T-103 lints
-the shape below. It reads the comment from the `//` to the end of the line, and the line is a
-citation when it matches `decisions` or `tickets`:
+A citation stands on the line above the code it governs, or at the end of that line. A file that
+implements a run of decisions writes the run as a range, which is one item of the list:
+`// D3 to D8, D12, D14.2`. A range runs over sections, `D3 to D8`, or over decisions,
+`D9.1 to D9.6`, and never mixes the two; both ends are decision tags, a ticket number opens none,
+and the second end stands above the first, so `D9.5 to D9.1` and `D3.1 to D3.1` are not ranges.
+Two citation lines stand together only when each carries its own clause and the two say different
+things; a citation of more than one decision with nothing to say about each is one list. A
+reference to a document is not a citation in this sense and takes no tag: it names the document
+and its section, `toolchain.md 6 item 8`, under the rule of 4, "Moving a document" (T-105).
+T-103 lints the shape below. It reads the comment from the `//` to the end of the line, and the
+line is a citation when it matches `decisions` or `tickets`:
 
     tag       = D[0-9]+(\.[0-9]+)?
+    section   = D[0-9]+
+    point     = D[0-9]+\.[0-9]+
     ticket    = T-[0-9]{3}
+    range     = <section> " to " <section> | <point> " to " <point>
+    item      = <range> | <tag>
     clause    = .{0,59}[^.]
-    decisions = //(/)? <tag>(, <tag>)*(: <clause>)?$
-    tickets   = //(/)? (<tag>|<ticket>)(, (<tag>|<ticket>))*: <clause>$
+    decisions = //(/)? <item>(, <item>)*(: <clause>)?$
+    tickets   = //(/)? (<item>|<ticket>)(, (<item>|<ticket>))*: <clause>$
 
-The reader who wants the rule opens `spec/decisions.md` at the tag. That is what the log is for,
-and a copy of the rule in a comment is a copy that drifts. The old rule asked for the copy:
-`src/` held 2962 tagged comment lines on 2026-09-12 and 0 of them match the two expressions
-above. T-101 rewrites them; until it lands, a file holds citations of both shapes.
+The lint refuses one more shape, which the ticket that wrote this section had to learn twice: a
+comment whose punctuation a sweep left dangling. Cutting a tag out of `(D4.6: text)` leaves
+`(: text)`, out of `(item 8, D9.9)` leaves `(item 8,)`, out of `x.h and .c` leaves `and.c`, and
+out of `(the note on D4.4)` leaves `(the note on)`. None of those holds a tag any more, so the
+citation rule above cannot see them. T-101 made 11 of them in 9 files. The lint reads each
+comment body with its code spans masked, and skips an indented example line and a code span
+wrapped across two lines. It refuses a double space, a parenthesis that opens or closes on a
+separator, an empty parenthesis or bracket, a one-word parenthesis that ends in a space, a
+separator with nothing before it, a possessive whose owner is gone, and a connective left
+hanging before `)`. The
+review of T-101 fed the first version of it ten cuts the sweep had not made and nine passed,
+the double space among them, which is why the list is this long: a check written from one
+sweep's residue sees that residue and little else.
+
+The reader who wants the rule opens `spec/decisions.md` at the tag, where the entry's `rule` field
+states it (T-100). That is what the log is for, and a copy of the rule in a comment is a copy that
+drifts. The old rule asked for the copy: `src/` held 2962 tagged comment lines on 2026-09-12 and 0
+of them matched the two expressions above. T-101 rewrote them; `src/` now holds 2562 tagged comment
+lines and every one matches.
 
 ### 1.5 The rule that this section replaced
 
 - **Citing decisions in code**: **superseded by `notes/style.md` 1, the comment policy (T-098).**
   The old rule asked for "a phrase stating the rule" (`// pointers print as 0x + lowercase hex,
   0x0 for null (D11.7)`) and refused a bare tag list; it produced 2962 tagged comment lines in
-  `src/`, of which 0 match the shape in force now. T-101 rewrites them. The rule in force: a
+  `src/`, of which 0 matched the shape in force now. T-101 rewrote them. The rule in force: a
   citation is a tag on the line or above the line it governs, `// D17.5`, and it takes one clause
   after a colon only where the tag alone leaves the rule unclear, `// D17.5: an own lvalue moves`.
   Write every new comment to `notes/style.md` 1.

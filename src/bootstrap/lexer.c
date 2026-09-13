@@ -1,5 +1,5 @@
-// The lexer; see lexer.h. Positions and byte ranges follow D14.2, the token
-// classes D2.1 to D2.10, the messages core-language.md 2.
+// The lexer; see lexer.h. The messages are core-language.md 2.
+// D2, D14.2
 #include "lexer.h"
 
 #include <stddef.h>
@@ -216,7 +216,8 @@ const char* tok_kind_name(tok_kind_t kind) {
     fatal_internal("tok_kind_name: bad kind");
 }
 
-// The keyword kind of `word`, or TOK_IDENT when it is none (D2.3, D2.4).
+// The keyword kind of `word`, or TOK_IDENT when it is none.
+// D2.3, D2.4
 static tok_kind_t keyword_kind(str_t word) {
     for (int k = TOK_KW_FIRST; k <= TOK_KW_LAST; k++) {
         if (str_eq(word, str_from_cstr(tok_kind_name((tok_kind_t)k)))) {
@@ -226,7 +227,8 @@ static tok_kind_t keyword_kind(str_t word) {
     return TOK_IDENT;
 }
 
-// The words reserved for future use, usable nowhere (D2.4).
+// The words reserved for future use, usable nowhere.
+// D2.4
 static const char* const RESERVED_WORDS[] = {
     "async",
     "await",
@@ -303,13 +305,16 @@ enum {
     BYTE_NON_ASCII = 0x80 // the first non-ASCII byte
 };
 
-// The bytes of the UTF-8 byte-order mark (D2.1).
+// The bytes of the UTF-8 byte-order mark.
+// D2.1
 enum { BOM_0 = 0xEF, BOM_1 = 0xBB, BOM_2 = 0xBF, BOM_LEN = 3 };
 
-// The radices of the integer literal forms (D2.5).
+// The radices of the integer literal forms.
+// D2.5
 enum { RADIX_BIN = 2, RADIX_OCT = 8, RADIX_DEC = 10, RADIX_HEX = 16 };
 
-// The hex digits an escape needs (D2.8).
+// The hex digits an escape needs.
+// D2.8
 enum { ESCAPE_HEX_DIGITS = 2 };
 
 static bool is_letter(int c) {
@@ -394,9 +399,10 @@ static void advance(lexer_t* lx) {
     } else {
         lx->col++;
     }
-    // Either line break ends the tokens a resync may drop: what stands before
-    // it was lexed on a line already past (D14.2). A lone `\r` is whitespace
-    // like any other (D2.1), so it ends a line here without numbering one.
+    // Either line break ends the tokens a resync may drop: what stands before it was
+    // lexed on a line already past. A lone `\r` is whitespace like any other, so
+    // it ends a line here without numbering one.
+    // D2.1, D14.2
     if (c == BYTE_LF || c == BYTE_CR) {
         lx->line_base = lx->out->len;
     }
@@ -407,11 +413,11 @@ static loc_t here(const lexer_t* lx) {
     return loc_make(lx->file, lx->line, lx->col);
 }
 
-// Reports the message built in lx->msg at `at`; always false so that a
-// lexing function can `return fail(lx, at)`. A file reports at most
-// DIAG_MAX_PER_FILE diagnostics, the parser's share of the budget included,
-// and lexing goes on silently past the cap so that the tokens still cover the
-// file (D14.2).
+// Reports the message built in lx->msg at `at`; always false so that a lexing
+// function can `return fail(lx, at)`. A file reports at most DIAG_MAX_PER_FILE
+// diagnostics, the parser's share of the budget included, and lexing goes on
+// silently past the cap so that the tokens still cover the file.
+// D14.2
 static bool fail(lexer_t* lx, loc_t at) {
     const char* text = msg_end(&lx->msg);
     if (diag_file_count() < DIAG_MAX_PER_FILE) {
@@ -452,12 +458,14 @@ static token_t make_token(const lexer_t* lx, tok_kind_t kind, uint64_t start, lo
     return t;
 }
 
-// ---- whitespace and comments (D2.1, D2.2) ----------------------------------
+// ---- whitespace and comments -----------------------------------------------
+// D2.1, D2.2
 
-// Skips whitespace and line comments, the only comment form (D2.2); false
-// on the adjacent pair `/*`, which is a lexical error rather than a division
-// by a dereference. `a / *p`, with the operators separated, is that
-// division and reaches lex_operator.
+// Skips whitespace and line comments, the only comment form; false on the
+// adjacent pair `/*`, which is a lexical error rather than a division by a
+// dereference. `a / *p`, with the operators separated, is that division and
+// reaches lex_operator.
+// D2.2
 static bool skip_blanks(lexer_t* lx) {
     for (;;) {
         const int c = peek(lx);
@@ -475,7 +483,8 @@ static bool skip_blanks(lexer_t* lx) {
     }
 }
 
-// ---- identifiers and keywords (D2.3, D2.4) ---------------------------------
+// ---- identifiers and keywords ----------------------------------------------
+// D2.3, D2.4
 
 static bool lex_ident(lexer_t* lx) {
     const loc_t at = here(lx);
@@ -495,15 +504,16 @@ static bool lex_ident(lexer_t* lx) {
     return true;
 }
 
-// ---- numbers (D2.5, D2.6) ---------------------------------------------------
+// ---- numbers ----------------------------------------------------------------
+// D2.5, D2.6
 
-// Consumes a run of digits of `radix` with `_` between two of them (D2.5),
-// counting the digits into `*count` and, when `value` is not NULL,
-// accumulating them into `*value` and setting `*overflow` once the
-// accumulation would pass 2^64 - 1; false only on a misplaced `_`. An
-// overflow is an error of integer literals alone, and whether the token is
-// one is known only after the float lookahead (D2.6), so the caller reports
-// it. Digits beyond the radix end the run silently.
+// Consumes a run of digits of `radix` with `_` between two of them, counting the
+// digits into `*count` and, when `value` is not NULL, accumulating them into
+// `*value` and setting `*overflow` once the accumulation would pass 2^64 - 1;
+// false only on a misplaced `_`. An overflow is an error of integer literals
+// alone, and whether the token is one is known only after the float lookahead, so
+// the caller reports it. Digits beyond the radix end the run silently.
+// D2.5, D2.6
 static bool lex_digits(lexer_t* lx, int radix, uint64_t* value, uint64_t* count, bool* overflow) {
     for (;;) {
         const int c = peek(lx);
@@ -546,7 +556,8 @@ static const char* radix_name(int radix) {
 }
 
 // Whether the next bytes are an exponent: `e` or `E`, an optional sign and a
-// digit (D2.6). A bare `e` is no exponent and is left for the suffix check.
+// digit. A bare `e` is no exponent and is left for the suffix check.
+// D2.6
 static bool exponent_follows(const lexer_t* lx) {
     const int c = peek(lx);
     if (c != 'e' && c != 'E') {
@@ -559,9 +570,10 @@ static bool exponent_follows(const lexer_t* lx) {
     return is_dec_digit(sign);
 }
 
-// The fraction and exponent of a float literal after its integer part
-// (D2.6): a `.` followed by a digit, an exponent, or both. The value is not
-// computed: the bootstrap rejects float literals in the parser.
+// The fraction and exponent of a float literal after its integer part: a `.`
+// followed by a digit, an exponent, or both. The value is not computed: the
+// bootstrap rejects float literals in the parser.
+// D2.6
 static bool lex_float_rest(lexer_t* lx, uint64_t start, loc_t at) {
     uint64_t count = 0;
     if (peek(lx) == '.') {
@@ -600,8 +612,7 @@ static bool lex_number(lexer_t* lx) {
         } else if (p == 'b') {
             radix = RADIX_BIN;
         } else if (is_dec_digit(p) || p == '_') {
-            // A decimal literal other than `0` may not start with `0`, and a
-            // float literal may not either (D2.5, D2.6): `09.5` is this error.
+            // D2.5, D2.6: `09.5` is this error, a float literal included
             return fail_text(lx, at, "decimal literal may not start with '0'");
         }
         if (radix != RADIX_DEC) {
@@ -617,8 +628,7 @@ static bool lex_number(lexer_t* lx) {
     }
     const int c = peek(lx);
     if (radix == RADIX_DEC) {
-        // The integer part of a float literal has no magnitude limit (D2.6),
-        // so the float lookahead comes before the overflow is reported.
+        // D2.6: no magnitude limit, so the lookahead precedes the overflow
         if ((c == '.' && is_dec_digit(peek_at(lx, 1))) || exponent_follows(lx)) {
             return lex_float_rest(lx, start, at);
         }
@@ -657,7 +667,8 @@ static bool lex_number(lexer_t* lx) {
     return true;
 }
 
-// ---- char and string literals (D2.7, D2.8, D2.9) ----------------------------
+// ---- char and string literals -----------------------------------------------
+// D2.7, D2.8, D2.9
 
 // Whether the byte after the next one, a backslash, ends the line or the
 // file: the literal is then unterminated, whatever the escape.
@@ -666,8 +677,9 @@ static bool escape_is_cut(const lexer_t* lx) {
     return c < 0 || c == BYTE_LF;
 }
 
-// Decodes the escape at the next byte, a backslash followed by a byte that
-// is neither a newline nor the end, into `*out` (D2.8).
+// Decodes the escape at the next byte, a backslash followed by a byte that is
+// neither a newline nor the end, into `*out`.
+// D2.8
 static bool lex_escape(lexer_t* lx, int* out) {
     const loc_t at = here(lx);
     advance(lx);
@@ -793,7 +805,8 @@ static bool lex_string(lexer_t* lx) {
     return true;
 }
 
-// ---- operators and punctuation (D2.10) ---------------------------------------
+// ---- operators and punctuation -----------------------------------------------
+// D2.10
 
 // The operator kind of the next `*len` bytes, longest match first; TOK_EOF
 // when the next byte starts no operator.
@@ -898,8 +911,7 @@ static tok_kind_t operator_kind(const lexer_t* lx, uint64_t* len) {
     case '?':
         one = TOK_QUESTION;
         break;
-    // `:` stands alone: the module path separator is `.` (D9.1), so `::`
-    // is not a token and a pair of them lexes as two colons (D2.10).
+    // D9.1, D2.10: `::` is not a token; it lexes as two colons
     case ':':
         one = TOK_COLON;
         break;
@@ -931,7 +943,7 @@ static tok_kind_t operator_kind(const lexer_t* lx, uint64_t* len) {
     case ';':
         one = TOK_SEMI;
         break;
-    // `@` is the span suffix, one byte, no longer match (D2.10, D3.5).
+    // D2.10, D3.5
     case '@':
         one = TOK_AT;
         break;
@@ -996,13 +1008,14 @@ static bool lex_token(lexer_t* lx) {
     return lex_operator(lx);
 }
 
-// Resumes at the start of the next line after a lexical error: the whole of
-// the line the error was reported on is dropped, the tokens already lexed on
-// it included, and lexing goes on at the next line, so a file reports at most
-// one lexical diagnostic per line and the parser is left to recover from a
-// missing line rather than from the half of a construct that stood before the
-// error (D14.2). No token spans lines (D2.9), so the tokens to drop are the
-// ones pushed since the line began.
+// Resumes at the start of the next line after a lexical error: the whole of the
+// line the error was reported on is dropped, the tokens already lexed on it
+// included, and lexing goes on at the next line, so a file reports at most one
+// lexical diagnostic per line and the parser is left to recover from a missing
+// line rather than from the half of a construct that stood before the error. No
+// token spans lines, so the tokens to drop are the ones pushed since the line
+// began.
+// D2.9, D14.2
 static void resync(lexer_t* lx) {
     tokvec_truncate(lx->out, lx->line_base);
     while (!at_end(lx) && peek(lx) != BYTE_LF && peek(lx) != BYTE_CR) {
@@ -1013,10 +1026,11 @@ static void resync(lexer_t* lx) {
     }
 }
 
-// Lexes every line of the file, returning whether it was clean: a lexical
-// error is reported and lexing resumes at the start of the next line
-// (D14.2), so the token array covers the whole file and ends in TOK_EOF
-// whether or not an error was reported.
+// Lexes every line of the file, returning whether it was clean: a lexical error
+// is reported and lexing resumes at the start of the next line, so the token
+// array covers the whole file and ends in TOK_EOF whether or not an error was
+// reported.
+// D14.2
 static bool lex_all(lexer_t* lx) {
     if (peek_at(lx, 0) == BOM_0 && peek_at(lx, 1) == BOM_1 && peek_at(lx, 2) == BOM_2) {
         lx->pos = BOM_LEN;
@@ -1051,8 +1065,7 @@ bool lex_file(const char* file, str_t source, str_pool_t* pool, tokvec_t* out) {
     lx.pool = pool;
     lx.out = out;
     lx.line_base = out->len;
-    // The file's budget of diagnostics opens here and the parser spends what
-    // the lexer leaves of it (D14.2).
+    // D14.2: the parser spends what the lexer leaves of the budget
     diag_begin_file();
     sb_init(&lx.buf);
     sb_init(&lx.msg);
@@ -1065,7 +1078,8 @@ bool lex_file(const char* file, str_t source, str_pool_t* pool, tokvec_t* out) {
 // ---- the token dump (--tokens, toolchain.md 1) ----------------------------------
 
 // One byte of a spelling, escaped so that a token keeps to one line of the
-// dump and cannot close the quoted field itself (D14.1).
+// dump and cannot close the quoted field itself.
+// D14.1
 static void dump_byte(sb_t* out, int c) {
     static const char* const HEX_DIGITS = "0123456789ABCDEF";
     if (c == '"' || c == '\\') {
@@ -1089,9 +1103,7 @@ static void dump_byte(sb_t* out, int c) {
 void tok_dump(const tokvec_t* v, sb_t* out) {
     for (uint64_t i = 0; i < v->len; i++) {
         const token_t t = v->items[i];
-        // The token's range (D20.4) in the <line>:<col> form of D14.2, its
-        // end exclusive. No token holds a line break (D2.9), so the end is
-        // on the token's own line, `len` columns further on.
+        // D20.4, D14.2, D2.9: the end is `len` columns on the same line
         sb_append_u64(out, t.line);
         sb_push(out, ':');
         sb_append_u64(out, t.col);
@@ -1100,9 +1112,7 @@ void tok_dump(const tokvec_t* v, sb_t* out) {
         sb_push(out, ':');
         sb_append_u64(out, (uint64_t)t.col + t.len);
         sb_push(out, ' ');
-        // The value of an integer or a char literal, 0 for every other kind:
-        // the spelling alone does not say what the lexer made of `0x10` or of
-        // '\n' (D2.5, D2.7).
+        // D2.5, D2.7: the spelling alone does not say what `0x10` became
         sb_append_u64(out, t.ival);
         sb_append(out, " \"");
         for (uint64_t b = 0; b < t.text.len; b++) {

@@ -1,25 +1,26 @@
 // The S-expression printer for the syntax tree: what `fort --ast` writes
-// (toolchain.md 1, D14.1) and what the parser suites assert against
-// (toolchain.md 7.5: unit tests cover what language tests cannot observe
-// directly). It is the oracle of the transliterated parser, so
-// src/fort/ast.ft writes these bytes too and tools/diff_ast.sh holds the two
-// against each other over every .ft file in the repository.
+// (toolchain.md 1) and what the parser suites assert against (toolchain.md
+// 7.5: unit tests cover what language tests cannot observe directly). It is
+// the oracle of the transliterated parser, so src/fort/ast.ft writes these
+// bytes too and tools/diff_ast.sh holds the two against each other over
+// every.ft file in the repository.
+// D14.1
 //
 // The form is one line per tree, `(kind field... child...)`, with `nil` for an
 // absent fixed child so that the position of every child is visible:
 //
-//   i32 mut x = 1 + 2;
-//   (var x (type (prim i32) mut) (binary + (int 1) (int 2)))
+// i32 mut x = 1 + 2; (var x (type (prim i32) mut) (binary + (int 1) (int 2)))
 //
 // Type positions print their marks as the words `own` and `mut` after what
-// they qualify, as the source writes them (D5.3, D17.2).
+// they qualify, as the source writes them.
+// D5.3, D17.2
 #ifndef FORT_AST_DUMP_H
 #define FORT_AST_DUMP_H
 
 #include "ast.h"
 #include "str.h"
 
-// Appends the S-expression of `n` to `out`; a NULL node prints as `nil`.
+/// Appends the S-expression of `n` to `out`; a NULL node prints as `nil`.
 void ast_dump(const ast_node_t* n, sb_t* out);
 
 #endif

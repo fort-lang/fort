@@ -1,49 +1,55 @@
 // lexer: a whole source file to a token vector (toolchain.md 8), applying the
-// lexical structure of D2.
+// lexical structure.
+// D2
 //
-// This is src/bootstrap/lexer.c transliterated: the same functions in the
-// same order, the same control flow and the same messages, so that the two
+// This is src/bootstrap/lexer.c transliterated: the same functions in the same
+// order, the same control flow and the same messages, so that the two
 // compilers lex one file into one token stream. `fort --tokens` writes that
-// stream (D14.1, toolchain.md 1) and tools/diff_tokens.sh holds the two dumps
-// against each other over every .ft file in the repository, which is the
-// oracle this module answers to.
+// stream (toolchain.md 1) and tools/diff_tokens.sh holds the two dumps against
+// each other over every.ft file in the repository, which is the oracle this
+// module answers to.
+// D14.1
 //
 // Every token records its kind, its 1-based line and column (a tab is one
-// column, D14.2) and its byte range in the source; integer and char literals
-// carry their value, identifiers a view into the source and string literals
-// their decoded bytes interned in the session's pool. A lexical error is
-// reported and lexing resumes at the start of the next line, dropping the
-// tokens already lexed on it, so the file is lexed whole and reports at most
-// one lexical diagnostic per line (D14.2).
+// column) and its byte range in the source; integer and char literals carry
+// their value, identifiers a view into the source and string literals their
+// decoded bytes interned in the session's pool. A lexical error is reported
+// and lexing resumes at the start of the next line, dropping the tokens
+// already lexed on it, so the file is lexed whole and reports at most one
+// lexical diagnostic per line.
+// D14.2
 //
-// Re-entrancy (D20.5): the lexer is a value the caller owns, the diagnostics
-// go to the session's sink and the decoded strings into the session's pool,
-// so two files lexed in one process share nothing. Nothing here ends the
-// process: a lexical error is a diagnostic and a violated precondition a
-// panic at the call that broke it (D13.3).
+// Re-entrancy: the lexer is a value the caller owns, the diagnostics go to the
+// session's sink and the decoded strings into the session's pool, so two files
+// lexed in one process share nothing. Nothing here ends the process: a lexical
+// error is a diagnostic and a violated precondition a panic at the call that
+// broke it.
+// D20.5, D13.3
 //
 // Dispatch: none. The case analysis is a switch on the token kind and chains
-// of comparisons on the current byte, as the C lexer writes them (D3.10).
+// of comparisons on the current byte, as the C lexer writes them.
+// D3.10
 import containers;
 import diag;
 import session;
 import std.strbuf;
 
-// Token kinds: the literal classes, one member per keyword of D2.4, one per
-// operator or punctuation token of D2.10, and the end of the file. Keywords
-// are kw_<word>; operators are named after their glyphs, `_wrap` for a `%`
-// wrapping variant and `_assign` for a compound assignment. The four literal
-// classes carry a `_lit` suffix that the C `TOK_CHAR` and `TOK_STRING` do
-// not need: `char` and `string` are keywords (D2.4) and cannot name a member.
+/// Token kinds: the literal classes, one member per keyword, one per operator or
+/// punctuation token, and the end of the file. Keywords are kw_<word>; operators
+/// are named after their glyphs, `_wrap` for a `%` wrapping variant and `_assign`
+/// for a compound assignment. The four literal classes carry a `_lit` suffix that
+/// the C `TOK_CHAR` and `TOK_STRING` do not need: `char` and `string` are keywords
+/// and cannot name a member.
+/// D2.4, D2.10
 enum tok_kind {
     eof,
     ident,      // text: the identifier, a view into the source
-    int_lit,    // ival: the magnitude (D2.5)
-    float_lit,  // text: the literal (D2.6)
-    char_lit,   // ival: the byte value (D2.7)
-    string_lit, // text: the decoded bytes, interned (D2.9)
+    int_lit, // D2.5: ival: the magnitude
+    float_lit, // D2.6: text: the literal
+    char_lit, // D2.7: ival: the byte value
+    string_lit, // D2.9: text: the decoded bytes, interned
 
-    // Keywords in the order of D2.4.
+    // D2.4: keywords in this order
     kw_as,
     kw_bool,
     kw_break,
@@ -86,7 +92,7 @@ enum tok_kind {
     kw_void,
     kw_while,
 
-    // Operators and punctuation in the order of D2.10.
+    // D2.10: operators and punctuation in this order
     plus,              // +
     minus,             // -
     star,              // *
@@ -139,12 +145,12 @@ enum tok_kind {
     rbrace,            // }
     comma,             // ,
     semi,              // ;
-    at,                // @, the span suffix (D2.10, D3.5)
+    at, // D2.10, D3.5: @, the span suffix
 }
 
-// The spelling of a keyword or operator kind, or a description of the other
-// kinds. It doubles as the keyword table, which keyword_kind walks, so the
-// text of a keyword member is the word itself.
+/// The spelling of a keyword or operator kind, or a description of the other
+/// kinds. It doubles as the keyword table, which keyword_kind walks, so the
+/// text of a keyword member is the word itself.
 fn string tok_kind_name(tok_kind kind) {
     switch (kind) {
     case tok_kind.eof:
@@ -350,9 +356,10 @@ fn string tok_kind_name(tok_kind kind) {
     }
 }
 
-// The keyword kind of `word`, or tok_kind.ident when it is none (D2.3, D2.4).
-// The keywords are a contiguous run of the enum, so the walk is over the
-// numbers between the first and the last of them (D3.9 casts both ways).
+/// The keyword kind of `word`, or tok_kind.ident when it is none. The keywords
+/// are a contiguous run of the enum, so the walk is over the numbers between the
+/// first and the last of them (a cast goes both ways).
+/// D2.3, D2.4, D3.9
 fn tok_kind keyword_kind(string word) {
     i64 mut k = cast(tok_kind.kw_as, i64);
     i64 last = cast(tok_kind.kw_while, i64);
@@ -365,10 +372,10 @@ fn tok_kind keyword_kind(string word) {
     return tok_kind.ident;
 }
 
-// The words reserved for future use, usable nowhere (D2.4). The C lexer holds
-// them in an array of C strings and walks it; a fort array of `string` would
-// say the same thing, and the chain below says it in the order that array
-// lists them.
+/// The words reserved for future use, usable nowhere. The C lexer holds them in
+/// an array of C strings and walks it; a fort array of `string` would say the same
+/// thing, and the chain below says it in the order that array lists them.
+/// D2.4
 fn bool is_reserved_word(string word) {
     return word == "async" || word == "await" || word == "const" || word == "match"
         || word == "pub" || word == "priv" || word == "trait" || word == "type"
@@ -377,9 +384,9 @@ fn bool is_reserved_word(string word) {
 
 // ---- tokens ----------------------------------------------------------------------
 
-// One token. `text` is the decoded bytes for a string literal, which the
-// session's pool owns, the zero-length view for the end of the file, and the
-// token's own bytes -- a view into the source -- for every other kind.
+/// One token. `text` is the decoded bytes for a string literal, which the
+/// session's pool owns, the zero-length view for the end of the file, and the
+/// token's own bytes -- a view into the source -- for every other kind.
 struct token {
     tok_kind kind;
     u32 line; // 1-based line of the first byte
@@ -390,33 +397,32 @@ struct token {
     string text;
 }
 
-// A growable vector of tokens. items.len is the capacity and len the slots in
-// use, as containers.str_vec is written; tok_vec{} is a valid empty vector.
+/// A growable vector of tokens. items.len is the capacity and len the slots in
+/// use, as containers.str_vec is written; tok_vec{} is a valid empty vector.
 struct tok_vec {
     token mut@ own items;
     u64 len;
 }
 
-// The first non-zero capacity of a token vector; growth doubles from there.
+/// The first non-zero capacity of a token vector; growth doubles from there.
 u64 TOK_MIN_CAP = 16;
 
-// The empty vector; allocates nothing.
+/// The empty vector; allocates nothing.
 fn tok_vec tokvec_create() {
     return tok_vec{};
 }
 
-// Releases the slots; the vector is empty and usable afterwards. The strings
-// the tokens hold belong to the source or to a pool and are left alone.
+/// Releases the slots; the vector is empty and usable afterwards. The strings
+/// the tokens hold belong to the source or to a pool and are left alone.
 fn void tokvec_free(tok_vec mut* v) {
     del(v->items);
     v->len = 0;
 }
 
-// Ensures items.len >= len + extra, growing to the largest of TOK_MIN_CAP,
-// twice the capacity and len + extra.
+/// Ensures items.len >= len + extra, growing to the largest of TOK_MIN_CAP,
+/// twice the capacity and len + extra.
 fn void tokvec_reserve(tok_vec mut* v, u64 extra) {
-    // The sum is tested before it is computed: detecting an overflow by
-    // performing it would trap in a checked build (D3.1, D11.1).
+    // D3.1, D11.1: detecting an overflow by performing it would trap
     if (extra > containers.U64_MAX - v->len) {
         panic("lexer.tokvec_reserve: capacity overflow");
     }
@@ -447,21 +453,22 @@ fn void tokvec_push(tok_vec mut* v, token t) {
     v->len += 1;
 }
 
-// Drops every token after the first `len`; a `len` at or past the end leaves
-// the vector alone.
+/// Drops every token after the first `len`; a `len` at or past the end leaves
+/// the vector alone.
 fn void tokvec_truncate(tok_vec mut* v, u64 len) {
     if (len < v->len) {
         v->len = len;
     }
 }
 
-// The tokens in the vector, which is what a caller walks.
+/// The tokens in the vector, which is what a caller walks.
 fn u64 tokvec_count(tok_vec* v) {
     return v->len;
 }
 
-// The token at `i`; an index at or past the count is a violated precondition
-// and panics (D13.3), since the slots beyond it hold stale tokens.
+/// The token at `i`; an index at or past the count is a violated precondition
+/// and panics, since the slots beyond it hold stale tokens.
+/// D13.3
 fn token tokvec_at(tok_vec* v, u64 i) {
     if (i >= v->len) {
         panic("lexer.tokvec_at: index out of range");
@@ -471,9 +478,10 @@ fn token tokvec_at(tok_vec* v, u64 i) {
 
 // ---- byte classes ------------------------------------------------------------------
 
-// Byte values the classification needs by name. A byte is carried as an i64
-// so that -1 can stand for the end of the file, as the C lexer's `int` does;
-// `char` has no arithmetic and no such value (D3.2).
+/// Byte values the classification needs by name. A byte is carried as an i64 so
+/// that -1 can stand for the end of the file, as the C lexer's `int` does; `char`
+/// has no arithmetic and no such value.
+/// D3.2
 i64 BYTE_NUL = 0;
 i64 BYTE_TAB = 9;
 i64 BYTE_LF = 10;
@@ -482,25 +490,29 @@ i64 BYTE_SPACE = 32;
 i64 BYTE_TILDE = 126;     // the last printable ASCII byte
 i64 BYTE_NON_ASCII = 128; // the first non-ASCII byte
 
-// The bytes of the UTF-8 byte-order mark (D2.1).
+/// The bytes of the UTF-8 byte-order mark.
+/// D2.1
 i64 BOM_0 = 239;
 i64 BOM_1 = 187;
 i64 BOM_2 = 191;
 u64 BOM_LEN = 3;
 
-// The radices of the integer literal forms (D2.5).
+/// The radices of the integer literal forms.
+/// D2.5
 i64 RADIX_BIN = 2;
 i64 RADIX_OCT = 8;
 i64 RADIX_DEC = 10;
 i64 RADIX_HEX = 16;
 
-// The hex digits an escape needs (D2.8), and the digits a hex byte is
-// written with in a message and in the token dump.
+/// The hex digits an escape needs, and the digits a hex byte is written with in
+/// a message and in the token dump.
+/// D2.8
 i64 ESCAPE_HEX_DIGITS = 2;
 string HEX_DIGITS = "0123456789ABCDEF";
 
-// The byte value of a character literal: `char` is a distinct type with no
-// arithmetic (D3.2), so every comparison against one goes through this.
+/// The byte value of a character literal: `char` is a distinct type with no
+/// arithmetic, so every comparison against one goes through this.
+/// D3.2
 fn i64 byte_of(char c) {
     return cast(c, i64);
 }
@@ -531,7 +543,7 @@ fn bool is_non_ascii(i64 c) {
     return c >= BYTE_NON_ASCII;
 }
 
-// The value of a digit in `radix`, or -1 when `c` is no such digit.
+/// The value of a digit in `radix`, or -1 when `c` is no such digit.
 fn i64 digit_value(i64 c, i64 radix) {
     i64 mut v = -1;
     if (is_dec_digit(c)) {
@@ -549,9 +561,10 @@ fn i64 digit_value(i64 c, i64 radix) {
 
 // ---- lexer state -------------------------------------------------------------------
 
-// What one run over one file needs. The session owns the sink the diagnostics
-// go to and the pool the decoded strings are interned in, so the lexer itself
-// owns only its two buffers (D20.5).
+/// What one run over one file needs. The session owns the sink the diagnostics
+/// go to and the pool the decoded strings are interned in, so the lexer itself
+/// owns only its two buffers.
+/// D20.5
 struct lexer {
     session.session mut* sess;
     string file;
@@ -565,7 +578,7 @@ struct lexer {
     u64 line_base;       // tokens `out` held when the current line began
 }
 
-// The byte `ahead` bytes after the next one, or -1 past the end.
+/// The byte `ahead` bytes after the next one, or -1 past the end.
 fn i64 peek_at(lexer* lx, u64 ahead) {
     u64 at = lx->pos + ahead;
     if (at >= lx->src.len) {
@@ -582,8 +595,8 @@ fn bool at_end(lexer* lx) {
     return lx->pos >= lx->src.len;
 }
 
-// Consumes the next byte, which exists, and tracks the position: a newline
-// starts the next line, every other byte (a tab too) is one column.
+/// Consumes the next byte, which exists, and tracks the position: a newline
+/// starts the next line, every other byte (a tab too) is one column.
 fn void advance(lexer mut* lx) {
     i64 c = peek(lx);
     if (c == BYTE_LF) {
@@ -592,9 +605,10 @@ fn void advance(lexer mut* lx) {
     } else {
         lx->col += 1;
     }
-    // Either line break ends the tokens a resync may drop: what stands before
-    // it was lexed on a line already past (D14.2). A lone `\r` is whitespace
-    // like any other (D2.1), so it ends a line here without numbering one.
+    // Either line break ends the tokens a resync may drop: what stands before it was
+    // lexed on a line already past. A lone `\r` is whitespace like any other, so
+    // it ends a line here without numbering one.
+    // D2.1, D14.2
     if (c == BYTE_LF || c == BYTE_CR) {
         lx->line_base = lx->out->len;
     }
@@ -607,8 +621,8 @@ fn diag.loc here(lexer* lx) {
 
 // ---- messages ----------------------------------------------------------------------
 
-// Empties the message buffer; the three below append to it, as the msg_*
-// family of src/bootstrap/diag.h does over an sb_t.
+/// Empties the message buffer; the three below append to it, as the msg_*
+/// family of src/bootstrap/diag.h does over an sb_t.
 fn void msg_begin(lexer mut* lx) {
     strbuf.clear(&lx->msg);
 }
@@ -617,26 +631,26 @@ fn void msg_str(lexer mut* lx, string text) {
     strbuf.append(&lx->msg, text);
 }
 
-// Appends a name between single quotes: 'name'.
+/// Appends a name between single quotes: 'name'.
 fn void msg_quote(lexer mut* lx, string name) {
     strbuf.push(&lx->msg, '\'');
     strbuf.append(&lx->msg, name);
     strbuf.push(&lx->msg, '\'');
 }
 
-// Appends a byte as 0xHH.
+/// Appends a byte as 0xHH.
 fn void msg_hex_byte(lexer mut* lx, i64 byte) {
     msg_str(lx, "0x");
     strbuf.push(&lx->msg, HEX_DIGITS[cast(byte / RADIX_HEX, u64)]);
     strbuf.push(&lx->msg, HEX_DIGITS[cast(byte % RADIX_HEX, u64)]);
 }
 
-// Reports the message built in lx->msg at `at`; always false so that a lexing
-// function can `return fail(lx, at)`. A file reports at most twenty
-// diagnostics, the parser's share of the budget included, and lexing goes on
-// silently past the cap so that the tokens still cover the file (D14.2). The
-// cap is checked here and not in the sink, exactly as src/bootstrap/lexer.c
-// checks it rather than diag.c.
+/// Reports the message built in lx->msg at `at`; always false so that a lexing
+/// function can `return fail(lx, at)`. A file reports at most twenty diagnostics,
+/// the parser's share of the budget included, and lexing goes on silently past the
+/// cap so that the tokens still cover the file. The cap is checked here and not in
+/// the sink, exactly as src/bootstrap/lexer.c checks it rather than diag.c.
+/// D14.2
 fn bool fail(lexer mut* lx, diag.loc at) {
     diag.sink mut* diags = session.diags(lx->sess);
     if (diag.budget_left(diags)) {
@@ -645,27 +659,29 @@ fn bool fail(lexer mut* lx, diag.loc at) {
     return false;
 }
 
-// Reports a fixed message at `at`.
+/// Reports a fixed message at `at`.
 fn bool fail_text(lexer mut* lx, diag.loc at, string text) {
     msg_begin(lx);
     msg_str(lx, text);
     return fail(lx, at);
 }
 
-// A token of `kind` starting at `start` (whose position is `at`) and ending at
-// the next byte, with the source bytes as text. An empty source has no bytes
-// to point at and gives the empty view, which is what the end-of-file token of
-// an empty file carries.
+/// A token of `kind` starting at `start` (whose position is `at`) and ending at
+/// the next byte, with the source bytes as text. An empty source has no bytes
+/// to point at and gives the empty view, which is what the end-of-file token of
+/// an empty file carries.
 fn token make_token(lexer* lx, tok_kind kind, u64 start, diag.loc at) {
     return token{kind, at.line, at.col, start, lx->pos - start, 0, lx->src[start..lx->pos]};
 }
 
-// ---- whitespace and comments (D2.1, D2.2) ------------------------------------------
+// ---- whitespace and comments -------------------------------------------------------
+// D2.1, D2.2
 
-// Skips whitespace and line comments, the only comment form (D2.2); false on
-// the adjacent pair `/*`, which is a lexical error rather than a division by a
-// dereference. `a / *p`, with the operators separated, is that division and
-// reaches lex_operator.
+/// Skips whitespace and line comments, the only comment form; false on the
+/// adjacent pair `/*`, which is a lexical error rather than a division by a
+/// dereference. `a / *p`, with the operators separated, is that division and
+/// reaches lex_operator.
+/// D2.2
 fn bool skip_blanks(lexer mut* lx) {
     while (true) {
         i64 c = peek(lx);
@@ -683,7 +699,8 @@ fn bool skip_blanks(lexer mut* lx) {
     }
 }
 
-// ---- identifiers and keywords (D2.3, D2.4) -----------------------------------------
+// ---- identifiers and keywords ------------------------------------------------------
+// D2.3, D2.4
 
 fn bool lex_ident(lexer mut* lx) {
     diag.loc at = here(lx);
@@ -703,19 +720,21 @@ fn bool lex_ident(lexer mut* lx) {
     return true;
 }
 
-// ---- numbers (D2.5, D2.6) -----------------------------------------------------------
+// ---- numbers ------------------------------------------------------------------------
+// D2.5, D2.6
 
-// Consumes a run of digits of `radix` with `_` between two of them (D2.5),
-// counting the digits into *count and accumulating them into *value, setting
-// *overflow once the accumulation would pass 2^64 - 1; false only on a
-// misplaced `_`. An overflow is an error of integer literals alone, and
-// whether the token is one is known only after the float lookahead (D2.6), so
-// the caller reports it. Digits beyond the radix end the run silently.
-//
-// The C lexer passes a null `value` from the float path, where the integer
-// part has no magnitude limit; here the accumulation always runs and that
-// caller ignores both results, which is the same behaviour without a
-// pointer that may be null.
+/// Consumes a run of digits of `radix` with `_` between two of them, counting the
+/// digits into *count and accumulating them into *value, setting *overflow once
+/// the accumulation would pass 2^64 - 1; false only on a misplaced `_`. An
+/// overflow is an error of integer literals alone, and whether the token is one is
+/// known only after the float lookahead, so the caller reports it. Digits beyond
+/// the radix end the run silently.
+///
+/// The C lexer passes a null `value` from the float path, where the integer part
+/// has no magnitude limit; here the accumulation always runs and that caller
+/// ignores both results, which is the same behaviour without a pointer that may be
+/// null.
+/// D2.5, D2.6
 fn bool lex_digits(lexer mut* lx, i64 radix, u64 mut* value, u64 mut* count, bool mut* overflow) {
     while (true) {
         i64 c = peek(lx);
@@ -731,8 +750,7 @@ fn bool lex_digits(lexer mut* lx, i64 radix, u64 mut* value, u64 mut* count, boo
         if (d < 0) {
             return true;
         }
-        // The limit is compared against before the product is formed: an
-        // overflow the checked build would trap on is never performed (D11.1).
+        // D11.1: the limit is compared against before the product is formed
         if (*value > (containers.U64_MAX - cast(d, u64)) / cast(radix, u64)) {
             *overflow = true;
         } else {
@@ -743,7 +761,7 @@ fn bool lex_digits(lexer mut* lx, i64 radix, u64 mut* value, u64 mut* count, boo
     }
 }
 
-// The name of a radix in a message.
+/// The name of a radix in a message.
 fn string radix_name(i64 radix) {
     if (radix == RADIX_BIN) {
         return "binary";
@@ -757,8 +775,9 @@ fn string radix_name(i64 radix) {
     return "decimal";
 }
 
-// Whether the next bytes are an exponent: `e` or `E`, an optional sign and a
-// digit (D2.6). A bare `e` is no exponent and is left for the suffix check.
+/// Whether the next bytes are an exponent: `e` or `E`, an optional sign and a
+/// digit. A bare `e` is no exponent and is left for the suffix check.
+/// D2.6
 fn bool exponent_follows(lexer* lx) {
     i64 c = peek(lx);
     if (c != byte_of('e') && c != byte_of('E')) {
@@ -771,9 +790,10 @@ fn bool exponent_follows(lexer* lx) {
     return is_dec_digit(sign);
 }
 
-// The fraction and exponent of a float literal after its integer part (D2.6):
-// a `.` followed by a digit, an exponent, or both. The value is not computed:
-// the bootstrap rejects float literals in the parser.
+/// The fraction and exponent of a float literal after its integer part: a `.`
+/// followed by a digit, an exponent, or both. The value is not computed: the
+/// bootstrap rejects float literals in the parser.
+/// D2.6
 fn bool lex_float_rest(lexer mut* lx, u64 start, diag.loc at) {
     u64 mut count = 0;
     u64 mut value = 0;
@@ -815,8 +835,7 @@ fn bool lex_number(lexer mut* lx) {
         } else if (p == byte_of('b')) {
             radix = RADIX_BIN;
         } else if (is_dec_digit(p) || p == byte_of('_')) {
-            // A decimal literal other than `0` may not start with `0`, and a
-            // float literal may not either (D2.5, D2.6): `09.5` is this error.
+            // D2.5, D2.6: `09.5` is this error, a float literal included
             return fail_text(lx, at, "decimal literal may not start with '0'");
         }
         if (radix != RADIX_DEC) {
@@ -832,8 +851,7 @@ fn bool lex_number(lexer mut* lx) {
     }
     i64 c = peek(lx);
     if (radix == RADIX_DEC) {
-        // The integer part of a float literal has no magnitude limit (D2.6),
-        // so the float lookahead comes before the overflow is reported.
+        // D2.6: no magnitude limit, so the lookahead precedes the overflow
         if ((c == byte_of('.') && is_dec_digit(peek_at(lx, 1))) || exponent_follows(lx)) {
             return lex_float_rest(lx, start, at);
         }
@@ -872,17 +890,19 @@ fn bool lex_number(lexer mut* lx) {
     return true;
 }
 
-// ---- char and string literals (D2.7, D2.8, D2.9) ------------------------------------
+// ---- char and string literals -------------------------------------------------------
+// D2.7, D2.8, D2.9
 
-// Whether the byte after the next one, a backslash, ends the line or the
-// file: the literal is then unterminated, whatever the escape.
+/// Whether the byte after the next one, a backslash, ends the line or the
+/// file: the literal is then unterminated, whatever the escape.
 fn bool escape_is_cut(lexer* lx) {
     i64 c = peek_at(lx, 1);
     return c < 0 || c == BYTE_LF;
 }
 
-// Decodes the escape at the next byte, a backslash followed by a byte that is
-// neither a newline nor the end, into *out (D2.8).
+/// Decodes the escape at the next byte, a backslash followed by a byte that is
+/// neither a newline nor the end, into *out.
+/// D2.8
 fn bool lex_escape(lexer mut* lx, i64 mut* out) {
     diag.loc at = here(lx);
     advance(lx);
@@ -996,19 +1016,19 @@ fn bool lex_string(lexer mut* lx) {
         strbuf.push_byte(&lx->buf, cast(byte, u8));
     }
     token mut t = make_token(lx, tok_kind.string_lit, start, at);
-    // The decoded bytes outlive the buffer, which the next literal clears, so
-    // they are interned in the session's pool (D20.5).
+    // D20.5: the decoded bytes outlive the buffer, so the pool holds them
     t.text = containers.pool_intern(session.pool(lx->sess), strbuf.view(&lx->buf));
     tokvec_push(lx->out, t);
     return true;
 }
 
-// ---- operators and punctuation (D2.10) ----------------------------------------------
+// ---- operators and punctuation ------------------------------------------------------
+// D2.10
 
-// The operator kind of the next *len bytes, longest match first; tok_kind.eof
-// when the next byte starts no operator. The C lexer switches on the first
-// byte; a fort `case` label is a constant expression and a byte carried as an
-// i64 has none to name, so the same analysis is a chain of comparisons.
+/// The operator kind of the next *len bytes, longest match first; tok_kind.eof
+/// when the next byte starts no operator. The C lexer switches on the first
+/// byte; a fort `case` label is a constant expression and a byte carried as an
+/// i64 has none to name, so the same analysis is a chain of comparisons.
 fn tok_kind operator_kind(lexer* lx, u64 mut* len) {
     i64 c0 = peek(lx);
     i64 c1 = peek_at(lx, 1);
@@ -1116,8 +1136,7 @@ fn tok_kind operator_kind(lexer* lx, u64 mut* len) {
     } else if (c0 == byte_of('?')) {
         one = tok_kind.question;
     } else if (c0 == byte_of(':')) {
-        // `:` stands alone: the module path separator is `.` (D9.1), so `::`
-        // is not a token and a pair of them lexes as two colons (D2.10).
+        // D9.1, D2.10: `::` is not a token; it lexes as two colons
         one = tok_kind.colon;
     } else if (c0 == byte_of('.')) {
         one = tok_kind.dot;
@@ -1141,7 +1160,7 @@ fn tok_kind operator_kind(lexer* lx, u64 mut* len) {
     } else if (c0 == byte_of(';')) {
         one = tok_kind.semi;
     } else if (c0 == byte_of('@')) {
-        // `@` is the span suffix, one byte, no longer match (D2.10, D3.5).
+        // D2.10, D3.5
         one = tok_kind.at;
     }
     if (three != tok_kind.eof) {
@@ -1186,7 +1205,7 @@ fn bool lex_operator(lexer mut* lx) {
 
 // ---- the file -------------------------------------------------------------------------
 
-// Lexes one token at the next byte, which is not blank.
+/// Lexes one token at the next byte, which is not blank.
 fn bool lex_token(lexer mut* lx) {
     i64 c = peek(lx);
     if (is_letter(c)) {
@@ -1204,13 +1223,14 @@ fn bool lex_token(lexer mut* lx) {
     return lex_operator(lx);
 }
 
-// Resumes at the start of the next line after a lexical error: the whole of
-// the line the error was reported on is dropped, the tokens already lexed on
-// it included, and lexing goes on at the next line, so a file reports at most
-// one lexical diagnostic per line and the parser is left to recover from a
-// missing line rather than from the half of a construct that stood before the
-// error (D14.2). No token spans lines (D2.9), so the tokens to drop are the
-// ones pushed since the line began.
+/// Resumes at the start of the next line after a lexical error: the whole of the
+/// line the error was reported on is dropped, the tokens already lexed on it
+/// included, and lexing goes on at the next line, so a file reports at most one
+/// lexical diagnostic per line and the parser is left to recover from a missing
+/// line rather than from the half of a construct that stood before the error. No
+/// token spans lines, so the tokens to drop are the ones pushed since the line
+/// began.
+/// D2.9, D14.2
 fn void resync(lexer mut* lx) {
     tokvec_truncate(lx->out, lx->line_base);
     while (!at_end(lx) && peek(lx) != BYTE_LF && peek(lx) != BYTE_CR) {
@@ -1221,10 +1241,11 @@ fn void resync(lexer mut* lx) {
     }
 }
 
-// Lexes every line of the file, returning whether it was clean: a lexical
-// error is reported and lexing resumes at the start of the next line (D14.2),
-// so the token vector covers the whole file and ends in the end-of-file token
-// whether or not an error was reported.
+/// Lexes every line of the file, returning whether it was clean: a lexical error
+/// is reported and lexing resumes at the start of the next line, so the token
+/// vector covers the whole file and ends in the end-of-file token whether or not
+/// an error was reported.
+/// D14.2
 fn bool lex_all(lexer mut* lx) {
     if (peek_at(lx, 0) == BOM_0 && peek_at(lx, 1) == BOM_1 && peek_at(lx, 2) == BOM_2) {
         lx->pos = BOM_LEN;
@@ -1249,31 +1270,31 @@ fn bool lex_all(lexer mut* lx) {
     }
 }
 
-// Lexes the whole of `source`, which the caller keeps alive and unchanged for
-// as long as the tokens are used, appending the tokens to `out` ending in the
-// end-of-file token; string literals are decoded into the session's pool.
-// `file` names the source in diagnostics. Returns whether the file was clean.
-// A lexical error is reported and lexing resumes at the start of the next line
-// (D14.2), dropping the whole of that line and reporting at most one
-// diagnostic per line, so `out` covers the rest of the file and ends in the
-// end-of-file token either way and the tokens can be parsed. It opens the
-// file's budget of twenty diagnostics, which the parser then spends what is
-// left of.
+/// Lexes the whole of `source`, which the caller keeps alive and unchanged for as
+/// long as the tokens are used, appending the tokens to `out` ending in the
+/// end-of-file token; string literals are decoded into the session's pool. `file`
+/// names the source in diagnostics. Returns whether the file was clean. A lexical
+/// error is reported and lexing resumes at the start of the next line, dropping
+/// the whole of that line and reporting at most one diagnostic per line, so `out`
+/// covers the rest of the file and ends in the end-of-file token either way and
+/// the tokens can be parsed. It opens the file's budget of twenty diagnostics,
+/// which the parser then spends what is left of.
+/// D14.2
 fn bool lex_file(session.session mut* sess, string file, string source, tok_vec mut* out) {
     lexer mut lx = lexer{sess,         file, source, 0, 1, 1, out, strbuf.create(),
                          strbuf.create(), out->len};
     defer strbuf.free(&lx.buf);
     defer strbuf.free(&lx.msg);
-    // The file's budget of diagnostics opens here and the parser spends what
-    // the lexer leaves of it (D14.2).
+    // D14.2: the parser spends what the lexer leaves of the budget
     diag.begin_file(session.diags(sess));
     return lex_all(&lx);
 }
 
 // ---- the token dump (--tokens, toolchain.md 1) -----------------------------------------
 
-// One byte of a spelling, escaped so that a token keeps to one line of the
-// dump and cannot close the quoted field itself (D14.1).
+/// One byte of a spelling, escaped so that a token keeps to one line of the
+/// dump and cannot close the quoted field itself.
+/// D14.1
 fn void dump_byte(strbuf.str_buf mut* out, char c) {
     i64 v = byte_of(c);
     if (v == byte_of('"') || v == byte_of('\\')) {
@@ -1294,20 +1315,19 @@ fn void dump_byte(strbuf.str_buf mut* out, char c) {
     }
 }
 
-// The token dump of `--tokens` (D14.1), appended to `out`: one line per token
-// of `v`, in the form toolchain.md 1 documents,
-//
-//     <line>:<col>-<end_line>:<end_col> <ival> "<spelling>" <kind>
-//
-// src/bootstrap/lexer.c writes the same bytes and tools/diff_tokens.sh holds
-// the two dumps against each other over every .ft file in the repository.
+/// The token dump of `--tokens`, appended to `out`: one line per token of `v`, in
+/// the form toolchain.md 1 documents,
+///
+///     <line>:<col>-<end_line>:<end_col> <ival> "<spelling>" <kind>
+///
+/// src/bootstrap/lexer.c writes the same bytes and tools/diff_tokens.sh holds the
+/// two dumps against each other over every .ft file in the repository.
+/// D14.1
 fn void tok_dump(tok_vec* v, strbuf.str_buf mut* out) {
     u64 mut i = 0;
     while (i < v->len) {
         token t = v->items[i];
-        // The token's range (D20.4) in the <line>:<col> form of D14.2, its end
-        // exclusive. No token holds a line break (D2.9), so the end is on the
-        // token's own line, `len` columns further on.
+        // D20.4, D14.2, D2.9: the end is `len` columns on the same line
         strbuf.append_u64(out, cast(t.line, u64));
         strbuf.push(out, ':');
         strbuf.append_u64(out, cast(t.col, u64));
@@ -1316,9 +1336,7 @@ fn void tok_dump(tok_vec* v, strbuf.str_buf mut* out) {
         strbuf.push(out, ':');
         strbuf.append_u64(out, cast(t.col, u64) + t.len);
         strbuf.push(out, ' ');
-        // The value of an integer or a char literal, 0 for every other kind:
-        // the spelling alone does not say what the lexer made of `0x10` or of
-        // '\n' (D2.5, D2.7).
+        // D2.5, D2.7: the spelling alone does not say what `0x10` became
         strbuf.append_u64(out, t.ival);
         strbuf.append(out, " \"");
         for (char c : t.text) {

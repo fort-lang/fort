@@ -9,7 +9,8 @@
 #include "diag.h"
 #include "str.h"
 
-// The universe of D12.2, in the order module-system.md 5 lists it.
+// The universe, in the order module-system.md 5 lists it.
+// D12.2
 static const char* const UNIVERSE_NAMES[UNIVERSE_COUNT] = {
     "del",
     "move",
@@ -40,8 +41,7 @@ void scope_free(scope_t* s) {
 
 binding_t* scope_declare(
     scope_t* s, str_t name, bind_kind_t kind, loc_t loc, const ast_node_t* node) {
-    // Any two entries of one namespace collide, whatever their kinds: a
-    // struct `node` and a function `node` cannot coexist (D7.9).
+    // D7.9: a struct `node` and a function `node` cannot coexist
     if (strmap_has(&s->index, name)) {
         return NULL;
     }
@@ -66,7 +66,8 @@ const binding_t* scope_find(const scope_t* s, str_t name) {
 }
 
 // Lookup goes from the innermost block outward, then the module namespace
-// (D7.9 steps 1 and 2); the universe of step 3 is the caller's.
+// (steps 1 and 2); the universe of step 3 is the caller's.
+// D7.9
 const binding_t* scope_lookup(const scope_t* s, str_t name) {
     const scope_t* cur = s;
     while (cur != NULL) {
@@ -81,7 +82,8 @@ const binding_t* scope_lookup(const scope_t* s, str_t name) {
 
 // A local or parameter may not reuse the name of an enclosing local or
 // parameter, but may shadow a module-level name, so the walk stops before the
-// module namespace (D7.9).
+// module namespace.
+// D7.9
 const binding_t* scope_find_in_blocks(const scope_t* s, str_t name) {
     const scope_t* cur = s;
     while (cur != NULL && cur->kind == SCOPE_BLOCK) {
@@ -106,7 +108,8 @@ const binding_t* scope_at(const scope_t* s, uint64_t i) {
 }
 
 // The import bindings of another module are not importable; there is no
-// re-export (D9.3).
+// re-export.
+// D9.3
 bool bind_is_declaration(const binding_t* b) {
     switch (b->kind) {
     case BIND_FN:

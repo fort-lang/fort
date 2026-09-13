@@ -4,13 +4,14 @@
 #include <stddef.h>
 #include <stdio.h>
 
-// One sink holds everything a run of diagnostics needs: the records and the
-// pool their messages are copied into, the error count, where the text lines
-// go and whether they are written at all, and the state of diag_mute. It is a
-// global because the compiler is a single-threaded batch job, and zeroed
-// storage is a valid empty sink, which is what a `mut` global with a `{}`
-// initializer gives the fort port (D7.10). Text output is on until it is
-// turned off, so the flag records its absence.
+// One sink holds everything a run of diagnostics needs: the records and the pool
+// their messages are copied into, the error count, where the text lines go and
+// whether they are written at all, and the state of diag_mute. It is a global
+// because the compiler is a single-threaded batch job, and zeroed storage is a
+// valid empty sink, which is what a `mut` global with a `{}` initializer gives
+// the fort port. Text output is on until it is turned off, so the flag records
+// its absence.
+// D7.10
 typedef struct {
     diag_record_t* records;    // the diagnostics reported so far, or NULL
     uint64_t len;              // records in use
@@ -27,7 +28,8 @@ typedef struct {
 
 static diag_sink_t sink;
 
-// A position with no extent yet: the end is the start (D20.4).
+// A position with no extent yet: the end is the start.
+// D20.4
 loc_t loc_make(const char* file, uint32_t line, uint32_t col) {
     return loc_range(file, line, col, line, col);
 }
@@ -43,7 +45,6 @@ loc_t loc_range(
     return loc;
 }
 
-// Whether the position `line_a`:`col_a` is at or before `line_b`:`col_b`.
 static bool pos_at_or_before(uint32_t line_a, uint32_t col_a, uint32_t line_b, uint32_t col_b) {
     if (line_a != line_b) {
         return line_a < line_b;
@@ -63,8 +64,9 @@ bool loc_is_ordered(loc_t loc) {
     return pos_at_or_before(loc.line, loc.col, loc.end_line, loc.end_col);
 }
 
-// The start of `a` and the later of the two ends, so extending never moves
-// the start and never shrinks the range (D20.4).
+// The start of `a` and the later of the two ends, so extending never moves the
+// start and never shrinks the range.
+// D20.4
 loc_t loc_extend(loc_t a, loc_t b) {
     if (loc_ends_at_or_before(a, b)) {
         return loc_range(a.file, a.line, a.col, b.end_line, b.end_col);
@@ -80,7 +82,8 @@ static bool diag_muted(void) {
 }
 
 // Writes one `<file>:<line>:<col>: <kind>: <msg>` line (toolchain.md 4), the
-// text form of D14.2, unless the text is muted or turned off.
+// text form of a diagnostic, unless the text is muted or turned off.
+// D14.2
 static void diag_write(loc_t loc, const char* kind, const char* msg) {
     if (diag_muted() || sink.text_off) {
         return;
@@ -121,13 +124,13 @@ static void records_reserve(void) {
     sink.cap = cap;
 }
 
-// Keeps the diagnostic, with its whole range (D20.4) and a copy of its
-// message, for the structured form; a muted diagnostic is not reported and so
-// is not recorded.
+// Keeps the diagnostic, with its whole range and a copy of its message, for the
+// structured form; a muted diagnostic is not reported and so is not recorded.
 //
 // The file name is copied too: the caller's own name dies with the module set
-// that read the file, while a record is read after the front end returned
-// (D20.2), so a record owns every byte it hands out.
+// that read the file, while a record is read after the front end returned, so a
+// record owns every byte it hands out.
+// D20.2, D20.4
 static void record_append(loc_t loc, diag_severity_t severity, const char* msg) {
     if (diag_muted()) {
         return;
@@ -144,8 +147,9 @@ static void record_append(loc_t loc, diag_severity_t severity, const char* msg) 
     sink.len++;
 }
 
-// A file's budget is spent by its lexer and by its parser alike (D14.2), so
-// the count they cap on is this one.
+// A file's budget is spent by its lexer and by its parser alike, so the count
+// they cap on is this one.
+// D14.2
 void diag_begin_file(void) {
     sink.file_errors = 0;
 }
@@ -161,7 +165,8 @@ void diag_error(loc_t loc, const char* msg) {
     sink.file_errors++;
 }
 
-// A note belongs to the error before it and is not counted (D14.2).
+// A note belongs to the error before it and is not counted.
+// D14.2
 void diag_note(loc_t loc, const char* msg) {
     diag_write(loc, "note", msg);
     record_append(loc, DIAG_NOTE, msg);
@@ -227,8 +232,9 @@ diag_record_t diag_record_at(uint64_t i) {
 
 // ---- the structured form -----------------------------------------------------------
 
-// The range of a diagnostic: the start D14.2 prints and the exclusive end an
-// editor underlines, both 1-based byte columns (D20.4).
+// The range of a diagnostic: the start the text form prints and the exclusive
+// end an editor underlines, both 1-based byte columns.
+// D14.2, D20.4
 static void write_range(json_t* j, loc_t loc) {
     json_key(j, "file");
     json_cstr(j, loc.file);
@@ -253,7 +259,8 @@ static const char* severity_name(diag_severity_t severity) {
 }
 
 // The record at `i` as one diagnostic, with the notes that follow it nested
-// under it: a note belongs to the error it follows (D14.2).
+// under it: a note belongs to the error it follows.
+// D14.2
 static void write_diagnostic(json_t* j, uint64_t i) {
     const diag_record_t* rec = &sink.records[i];
     json_object_begin(j);

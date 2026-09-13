@@ -1,30 +1,33 @@
-// driver: the compiler driver (toolchain.md 1 and 2, D14.1, D14.3): the
-// command line, the front end and the exit statuses.
+// driver: the compiler driver (toolchain.md 1 and 2): the command line, the
+// front end and the exit statuses.
+// D14.1, D14.3
 //
-// run parses the options of D14.1, answers `--help` and `--version`, reports
+// run parses the options, answers `--help` and `--version`, reports
 // the usage errors of toolchain.md 1 in the words src/bootstrap/driver.c
 // reports them, and dispatches: `--tokens` lexes the entry file alone and
 // writes its tokens, `--ast` parses it alone and writes its syntax tree, and
 // every other run goes through the front end, which reads the entry file and
-// walks the import closure (module-system.md 2, 10). A run that would need
-// the checker or the emitter -- the steps 3 and 4 of toolchain.md 2, which
-// T-035 and the tickets after it port -- is reported as an internal error
-// rather than pretending to build something, and exits 2 like every other
-// usage, toolchain or internal error (D14.1). A file whose lexer, parser or
-// loader reported anything exits 1 before that point, which is the compile
-// error of D14.1.
+// walks the import closure (module-system.md 2, 10). A run that would need the
+// checker or the emitter -- the steps 3 and 4 of toolchain.md 2 -- is
+// reported as an internal error rather
+// than pretending to build something, and exits 2 like every other usage,
+// toolchain or internal error. A file whose lexer, parser or loader reported
+// anything exits 1 before that point, which is a compile error.
+// D14.1
 //
 // Every pass takes a session (session.ft): it owns the pool they intern into,
 // the sink they report to and the source texts they read, and freeing it frees
 // the analysis. The driver creates one per run, which is also what makes a
-// second run in one process -- a language server re-analysing a document
-// (D20.5) -- independent of the first. Nothing here is module-level mutable
-// state and nothing below main.ft ends the process.
+// second run in one process -- a language server re-analysing a document --
+// independent of the first. Nothing here is module-level mutable state and
+// nothing below main.ft ends the process.
+// D20.5
 //
 // Dispatch: none. Option parsing is a chain of comparisons over the argument
 // list, in the order src/bootstrap/driver.c walks it, so the two compilers
-// answer one command line alike. The tables of function pointers belong to
-// the parser and the emitter (D3.10).
+// answer one command line alike. The tables of function pointers belong to the
+// parser and the emitter.
+// D3.10
 import ast;
 import check;
 import check_stmt;
@@ -52,50 +55,53 @@ import types;
 // what makes stage1 compile them into stage2 with every build rather than only
 // under the fort-modules ctest.
 
-// The usage line of toolchain.md 1, printed by --help and after every usage
-// error. A module constant is UPPER_CASE (D1.4).
+/// The usage line of toolchain.md 1, printed by --help and after every usage
+/// error.
+/// D1.4: a module constant is UPPER_CASE
 string USAGE = "usage: fort [options] entry.ft";
 
-// The version printed by --version, as src/bootstrap/driver.h spells it; the
-// `stage-usage` ctest holds the two against each other.
+/// The version printed by --version, as src/bootstrap/driver.h spells it; the
+/// `stage-usage` ctest holds the two against each other.
 string VERSION = "0.1.0";
 
-// The exit statuses of D14.1: usage, toolchain and internal errors share 2.
+/// The exit statuses: usage, toolchain and internal errors share 2.
+/// D14.1
 i32 EXIT_OK = 0;
 i32 EXIT_COMPILE_ERROR = 1;
 i32 EXIT_USAGE = 2;
 
-// The outcome of parse: the command line is in *opts, --help or --version was
-// printed, or a usage error was reported.
+/// The outcome of parse: the command line is in *opts, --help or --version was
+/// printed, or a usage error was reported.
 i32 PARSE_OK = 0;
 i32 PARSE_DONE = 1;
 i32 PARSE_ERROR = 2;
 
-// The system's text for the failing call, which is what a `cannot read` line
-// carries as its reason (toolchain.md 1), and the reader of the symbolic link
-// that names the running binary, which is where the standard library is
-// looked for (D14.1). Both are the C library's; the standard library has no
-// binding for either and this is their one caller (D9.8).
+/// The system's text for the failing call, which is what a `cannot read` line
+/// carries as its reason (toolchain.md 1), and the reader of the symbolic link
+/// that names the running binary, which is where the standard library is looked
+/// for. Both are the C library's; the standard library has no binding for either
+/// and this is their one caller.
+/// D9.8, D14.1
 extern fn char* strerror(i32 code);
 extern fn i64 readlink(char* path, char* buf, u64 size);
 
-// The temporary directory of toolchain.md 2 and the removal of what the
-// driver put in it; the standard library has no binding for any of them and
-// this is their one caller (D13.2, D9.8). `mkdtemp` replaces the six `X` at
-// the end of its argument in place, so the buffer it is given is the
-// compiler's own.
+/// The temporary directory of toolchain.md 2 and the removal of what the driver
+/// put in it; the standard library has no binding for any of them and this is
+/// their one caller. `mkdtemp` replaces the six `X` at the end of its argument in
+/// place, so the buffer it is given is the compiler's own.
+/// D9.8, D13.2
 extern fn char* mkdtemp(char mut* tmpl);
 extern fn i32 unlink(char* path);
 extern fn i32 rmdir(char* path);
 
-// Running --cc once over the module (D14.3). src/bootstrap/driver.c calls
-// posix_spawnp with `environ`, which fort cannot name: an `extern` declares a
-// function and never a variable (D9.8). `fork` and `execvp` say the same
-// thing -- `execvp` searches PATH and hands the child the caller's
-// environment, which is what posix_spawnp(..., environ) does -- and the pipe
-// below carries back the errno of a failed `execvp`, which is the value
-// posix_spawnp would have returned, so the two drivers report one command
-// line alike.
+/// Running --cc once over the module. src/bootstrap/driver.c calls posix_spawnp
+/// with `environ`, which fort cannot name: an `extern` declares a function and
+/// never a variable. `fork` and `execvp` say the same thing -- `execvp` searches
+/// PATH and hands the child the caller's environment, which is what
+/// posix_spawnp(..., environ) does -- and the pipe below carries back the errno of
+/// a failed `execvp`, which is the value posix_spawnp would have returned, so the
+/// two drivers report one command line alike.
+/// D9.8, D14.3
 extern fn i32 fork();
 extern fn i32 execvp(char* file, void* argv);
 extern fn i32 waitpid(i32 pid, i32 mut* status, i32 options);
@@ -103,9 +109,9 @@ extern fn i32 pipe(i32 mut* fds);
 extern fn i32 fcntl(i32 fd, i32 cmd, i32 arg);
 extern fn noreturn _exit(i32 status);
 
-// The command line after parsing (toolchain.md 1). Every string borrows an
-// argument; the three vectors hold them in command-line order and own only
-// their slots.
+/// The command line after parsing (toolchain.md 1). Every string borrows an
+/// argument; the three vectors hold them in command-line order and own only
+/// their slots.
 struct options {
     bool have_entry; // whether an entry file was seen; C compares against NULL
     string entry;
@@ -133,18 +139,19 @@ struct options {
     bool compile_only;    // -c
     bool release;         // --release
     bool no_bounds_check; // --no-bounds-check
-    bool check;           // --check: the front end alone (D20.1)
-    bool json;            // --json: the document of D20.2 on stdout
-    bool index;           // --index: the identifier index of D20.3 in it
-    bool tokens;          // --tokens: the entry file's tokens on stdout (D14.1)
-    bool ast;             // --ast: the entry file's syntax tree on stdout (D14.1)
-    containers.str_vec includes; // -I roots, searched in command-line order (D9.2)
+    bool check; // D20.1: --check: the front end alone
+    bool json; // D20.2: --json, the document on stdout
+    bool index; // D20.3: --index, the identifier index in it
+    bool tokens; // D14.1: --tokens: the entry file's tokens on stdout
+    bool ast; // D14.1: --ast: the entry file's syntax tree on stdout
+    containers.str_vec includes; // D9.2: -I roots, searched in command-line order
     containers.str_vec libs;     // -l<lib> as given, passed to the linker in order
     containers.str_vec cc_args;  // -Xcc arguments, passed verbatim after the rest
 }
 
-// The defaults of toolchain.md 1: `--cc` is a clang because nothing else
-// reads LLVM IR (D14.1, D19.1) and the target triple is x86_64-linux-gnu.
+/// The defaults of toolchain.md 1: `--cc` is a clang because nothing else reads
+/// LLVM IR and the target triple is x86_64-linux-gnu.
+/// D14.1, D19.1
 string DEFAULT_CC = "clang";
 string DEFAULT_TARGET = "x86_64-linux-gnu";
 
@@ -155,17 +162,17 @@ fn options options_create() {
     return opts;
 }
 
-// Releases the vectors' slots. The strings are borrowed and are untouched.
+/// Releases the vectors' slots. The strings are borrowed and are untouched.
 fn void options_free(options mut* opts) {
     containers.str_free(&opts->includes);
     containers.str_free(&opts->libs);
     containers.str_free(&opts->cc_args);
 }
 
-// What --help prints after the usage line: the option table of toolchain.md 1.
-// It is the table src/bootstrap/driver.c prints, line for line, and the ctest
-// `stage-usage` diffs the two binaries' --help and --version so that the two
-// copies cannot drift while both compilers exist.
+/// What --help prints after the usage line: the option table of toolchain.md 1.
+/// It is the table src/bootstrap/driver.c prints, line for line, and the ctest
+/// `stage-usage` diffs the two binaries' --help and --version so that the two
+/// copies cannot drift while both compilers exist.
 fn void help() {
     println(USAGE);
     println("options:");
@@ -189,46 +196,50 @@ fn void help() {
     println("  --version          print the compiler version and exit");
 }
 
-// `fort: error: <message>` on stderr, the form every usage, toolchain and
-// internal error takes (toolchain.md 1, D14.1).
+/// `fort: error: <message>` on stderr, the form every usage, toolchain and
+/// internal error takes (toolchain.md 1).
+/// D14.1
 fn void error(string message) {
     eprintln("fort: error: ", message);
 }
 
-// `fort: error: <what> '<path>': <reason>`, the form of
-// `cannot read 'x.ft': No such file or directory` (toolchain.md 1).
+/// `fort: error: <what> '<path>': <reason>`, the form of
+/// `cannot read 'x.ft': No such file or directory` (toolchain.md 1).
 fn void error_path(string what, string path, string reason) {
     eprintln("fort: error: ", what, " '", path, "': ", reason);
 }
 
-// A usage error, followed by the usage line (toolchain.md 1).
+/// A usage error, followed by the usage line (toolchain.md 1).
 fn void usage_error(string message) {
     error(message);
     eprintln(USAGE);
 }
 
-// The same with the offending argument quoted after the message.
+/// The same with the offending argument quoted after the message.
 fn void usage_error_arg(string message, string detail) {
     eprintln("fort: error: ", message, " '", detail, "'");
     eprintln(USAGE);
 }
 
-// Whether `arg` is an option rather than the entry file: the first argument
-// that does not start with '-' is the entry file (D14.1).
+/// Whether `arg` is an option rather than the entry file: the first argument
+/// that does not start with '-' is the entry file.
+/// D14.1
 fn bool is_option(string arg) {
     return arg.len > 0 && arg[0] == '-';
 }
 
-// Whether `arg` is `-l<lib>`: the library is part of the option, so it is one
-// argument, unlike every other option that carries a value (D14.1).
+/// Whether `arg` is `-l<lib>`: the library is part of the option, so it is one
+/// argument, unlike every other option that carries a value.
+/// D14.1
 fn bool is_link_option(string arg) {
     return arg.len > 2 && arg[0] == '-' && arg[1] == 'l';
 }
 
-// The argument of an option that takes the following one; false after
-// reporting the usage error. *i is left on the argument. -o, -I, --std-dir,
-// --cc, --target and -Xcc take the following argument, whatever it looks like
-// (D14.1).
+/// The argument of an option that takes the following one; false after
+/// reporting the usage error. *i is left on the argument. -o, -I, --std-dir,
+/// --cc, --target and -Xcc take the following argument, whatever it looks like
+/// (toolchain.md 1).
+/// D14.1
 fn bool take_argument(string@ args, u64 mut* i, string mut* out) {
     if (*i + 1 >= args.len) {
         usage_error_arg("missing argument for option", args[*i]);
@@ -239,9 +250,9 @@ fn bool take_argument(string@ args, u64 mut* i, string mut* out) {
     return true;
 }
 
-// The options that carry no value: -S, -c, --release, --no-bounds-check,
-// --check, --json, --index, --tokens and --ast, each of which sets one flag
-// (D14.1, D20.1, D20.2, D20.3).
+/// The options that carry no value: -S, -c, --release, --no-bounds-check,
+/// --check, --json, --index, --tokens and --ast, each of which sets one flag.
+/// D14.1, D20.1, D20.2, D20.3
 fn bool parse_flag(options mut* opts, string arg) {
     if (arg == "-S") {
         opts->emit_ir = true;
@@ -256,18 +267,15 @@ fn bool parse_flag(options mut* opts, string arg) {
     } else if (arg == "--json") {
         opts->json = true;
     } else if (arg == "--index") {
-        // --index implies --check and --json, so it is the whole command line
-        // an editor gives the compiler (D20.3).
+        // D20.3: --index implies --check and --json
         opts->index = true;
         opts->check = true;
         opts->json = true;
     } else if (arg == "--tokens") {
-        // --tokens lexes the entry file and stops there, so it implies
-        // nothing and combines with nothing (D14.1).
+        // D14.1: --tokens implies nothing and combines with nothing
         opts->tokens = true;
     } else if (arg == "--ast") {
-        // --ast parses the entry file and stops there, so it implies nothing
-        // and combines with nothing either (D14.1).
+        // D14.1: --ast implies nothing and combines with nothing either
         opts->ast = true;
     } else {
         return false;
@@ -275,10 +283,11 @@ fn bool parse_flag(options mut* opts, string arg) {
     return true;
 }
 
-// The options that take the following argument. Returns false when `arg` is
-// not one of them; *ok is false when the argument was missing. The last -o,
-// --std-dir, --cc and --target win, while -I, -l and -Xcc accumulate in
-// command-line order (D14.1, toolchain.md 1).
+/// The options that take the following argument. Returns false when `arg` is not
+/// one of them; *ok is false when the argument was missing. The last -o,
+/// --std-dir, --cc and --target win, while -I, -l and -Xcc accumulate in
+/// command-line order.
+/// D14.1
 fn bool parse_valued(options mut* opts, string@ args, u64 mut* i, bool mut* ok) {
     string arg = args[*i];
     bool is_output = arg == "-o";
@@ -313,16 +322,15 @@ fn bool parse_valued(options mut* opts, string@ args, u64 mut* i, bool mut* ok) 
     return true;
 }
 
-// Parses args[1..] into *opts, which options_create has prepared. --help and
-// --version print to stdout; a usage error prints `fort: error: <message>`
-// and the usage line to stderr (toolchain.md 1).
+/// Parses args[1..] into *opts, which options_create has prepared. --help and
+/// --version print to stdout; a usage error prints `fort: error: <message>`
+/// and the usage line to stderr (toolchain.md 1).
 fn i32 parse(options mut* opts, string@ args) {
     u64 mut i = 1;
     while (i < args.len) {
         string arg = args[i];
         if (!is_option(arg)) {
-            // The first argument that does not start with '-' is the entry
-            // file (D14.1); a second one is a usage error.
+            // D14.1: the first argument that does not start with '-'
             if (opts->have_entry) {
                 usage_error_arg("unexpected argument", arg);
                 return PARSE_ERROR;
@@ -354,35 +362,30 @@ fn i32 parse(options mut* opts, string@ args) {
         return PARSE_ERROR;
     }
     if (opts->tokens && (opts->check || opts->json || opts->index)) {
-        // --tokens stops before the parser, so there is no front end for
-        // --check to run and no document for --json to write (D14.1).
+        // D14.1: --tokens stops before the parser
         usage_error("--tokens does not combine with --check, --json or --index");
         return PARSE_ERROR;
     }
     if (opts->ast && (opts->tokens || opts->check || opts->json || opts->index)) {
-        // --ast stops before the checker and after the lexer, so there is no
-        // front end for --check and no dump for --tokens to write (D14.1).
+        // D14.1: --ast stops before the checker
         usage_error("--ast does not combine with --tokens, --check, --json or --index");
         return PARSE_ERROR;
     }
     if (opts->json && !opts->check) {
-        // A build spawns a `--cc` that inherits stdout, so only the check mode
-        // can promise a complete document or nothing (D20.2).
+        // D20.2: a build spawns a `--cc` that inherits stdout
         usage_error("--json requires --check");
         return PARSE_ERROR;
     }
     return PARSE_OK;
 }
 
-// --tokens lexes the entry file alone -- no import is resolved and nothing is
-// parsed -- and writes one line per token to stdout in the form of
-// toolchain.md 1. A lexical error is reported on stderr as usual and lexing
-// goes on (D14.2), so the dump covers the whole file either way; the status is
-// then the compile error of D14.1.
+/// --tokens lexes the entry file alone -- no import is resolved and nothing is
+/// parsed -- and writes one line per token to stdout in the form of toolchain.md
+/// 1. A lexical error is reported on stderr as usual and lexing goes on, so the
+/// dump covers the whole file either way; the status is then a compile error.
+/// D14.1, D14.2
 fn i32 tokens_entry(options* opts) {
-    // The session the lexer takes: it owns the sink the diagnostics go to and
-    // the pool the decoded strings are interned in, and freeing it frees them
-    // (D20.5).
+    // D20.5: the session owns the sink and the pool, and frees both
     session.session mut s = session.create();
     defer session.free(&s);
     string mut source = "";
@@ -390,8 +393,7 @@ fn i32 tokens_entry(options* opts) {
         error_path("cannot read", opts->entry, str.from_cstr(strerror(sys.errno())));
         return EXIT_USAGE;
     }
-    // A batch driver writes the text form of every diagnostic as it arrives,
-    // which the library leaves off (D14.2, D20.2).
+    // D14.2, D20.2: a batch driver writes the text form as it arrives
     diag.set_text(session.diags(&s), true);
     lexer.tok_vec mut toks = lexer.tokvec_create();
     defer lexer.tokvec_free(&toks);
@@ -406,16 +408,15 @@ fn i32 tokens_entry(options* opts) {
     return EXIT_COMPILE_ERROR;
 }
 
-// --ast lexes and parses the entry file alone -- no import is resolved and
-// nothing is checked -- and writes its syntax tree to stdout as one
-// S-expression followed by one newline, in the form of toolchain.md 1. A
-// lexical error costs the lexer its line and a syntax error costs the parser
-// its construct, and both go on (D14.2), so the tree covers the whole file
-// either way; the status is then the compile error of D14.1.
+/// --ast lexes and parses the entry file alone -- no import is resolved and
+/// nothing is checked -- and writes its syntax tree to stdout as one S-expression
+/// followed by one newline, in the form of toolchain.md 1. A lexical error costs
+/// the lexer its line and a syntax error costs the parser its construct, and both
+/// go on, so the tree covers the whole file either way; the status is then a
+/// compile error.
+/// D14.1, D14.2
 fn i32 ast_entry(options* opts) {
-    // The session the lexer and the parser take: it owns the sink the
-    // diagnostics go to and the pool the decoded strings are interned in, and
-    // freeing it frees them (D20.5).
+    // D20.5: the session owns the sink and the pool, and frees both
     session.session mut s = session.create();
     defer session.free(&s);
     string mut source = "";
@@ -423,14 +424,12 @@ fn i32 ast_entry(options* opts) {
         error_path("cannot read", opts->entry, str.from_cstr(strerror(sys.errno())));
         return EXIT_USAGE;
     }
-    // A batch driver writes the text form of every diagnostic as it arrives,
-    // which the library leaves off (D14.2, D20.2).
+    // D14.2, D20.2: a batch driver writes the text form as it arrives
     diag.set_text(session.diags(&s), true);
     lexer.tok_vec mut toks = lexer.tokvec_create();
     defer lexer.tokvec_free(&toks);
     lexer.lex_file(&s, opts->entry, source, &toks);
-    // The tokens cover the whole file whatever the lexer reported, so the
-    // parse runs either way (D14.2).
+    // D14.2: the tokens cover the whole file, so the parse runs
     ast.arena mut ar = ast.arena{};
     defer ast.ast_arena_free(&ar);
     ast.node mut* mod = parser.parse_module(&s, opts->entry, &toks, &ar);
@@ -447,20 +446,21 @@ fn i32 ast_entry(options* opts) {
 
 // ---- the standard library directory (toolchain.md 1) ------------------------------
 
-// The symbolic link naming the running binary, and the buffer sizes the
-// driver reads it with.
+/// The symbolic link naming the running binary, and the buffer sizes the
+/// driver reads it with.
 string PROC_SELF_EXE = "/proc/self/exe";
 u64 EXE_PATH_FIRST_CAP = 256;
 u64 EXE_PATH_MAX_CAP = 65536;
 
-// The standard library sits in `std` beside the binary when --std-dir and
-// $FORT_STD_DIR name nothing (D14.1).
+/// The standard library sits in `std` beside the binary when --std-dir and
+/// $FORT_STD_DIR name nothing.
+/// D14.1
 string STD_DIR_NAME = "std";
 
-// The path of the running binary, read from /proc/self/exe; false when it
-// cannot be read, with *out unchanged. readlink does not terminate the path
-// and reports truncation only by filling the buffer, so the buffer doubles
-// until the result fits. The result is interned in `p`.
+/// The path of the running binary, read from /proc/self/exe; false when it
+/// cannot be read, with *out unchanged. readlink does not terminate the path
+/// and reports truncation only by filling the buffer, so the buffer doubles
+/// until the result fits. The result is interned in `p`.
 fn bool exe_path(containers.pool mut* p, string mut* out) {
     char mut@ own c_path = str.to_cstr(PROC_SELF_EXE);
     defer del(c_path);
@@ -481,8 +481,9 @@ fn bool exe_path(containers.pool mut* p, string mut* out) {
     return false;
 }
 
-// `std` in the directory containing `program`, or `std` alone when `program`
-// has no directory part (D14.1). Interned in `p`.
+/// `std` in the directory containing `program`, or `std` alone when `program`
+/// has no directory part. Interned in `p`.
+/// D14.1
 fn string std_dir_beside(containers.pool mut* p, string program) {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
@@ -494,13 +495,12 @@ fn string std_dir_beside(containers.pool mut* p, string program) {
     return containers.pool_intern(p, strbuf.view(&b));
 }
 
-// The standard library directory (toolchain.md 1): --std-dir, else
-// $FORT_STD_DIR, else `std` beside the fort binary, which is /proc/self/exe
-// when it can be read and `program` otherwise. An empty environment value
-// names no directory, so it counts as unset. Interned in `p`.
+/// The standard library directory (toolchain.md 1): --std-dir, else
+/// $FORT_STD_DIR, else `std` beside the fort binary, which is /proc/self/exe
+/// when it can be read and `program` otherwise. An empty environment value
+/// names no directory, so it counts as unset. Interned in `p`.
 fn string std_dir(containers.pool mut* p, options* opts, string program) {
-    // The option as it was given, the empty one included: it was named, so
-    // nothing below it is consulted (D14.1).
+    // D14.1: the option as given, the empty one included
     if (opts->have_std_dir) {
         return containers.pool_intern(p, opts->std_dir);
     }
@@ -508,8 +508,7 @@ fn string std_dir(containers.pool mut* p, options* opts, string program) {
     if (sys.env("FORT_STD_DIR", &from_env) && from_env.len > 0) {
         return containers.pool_intern(p, from_env);
     }
-    // Else `std` in the directory containing the fort binary (D14.1), which
-    // is /proc/self/exe on the Linux the compiler runs on and targets.
+    // D14.1: else `std` beside the fort binary, read from /proc/self/exe
     string mut running = "";
     if (exe_path(p, &running)) {
         return std_dir_beside(p, running);
@@ -522,9 +521,9 @@ fn string std_dir(containers.pool mut* p, options* opts, string program) {
 
 // ---- paths (toolchain.md 1, 2) ------------------------------------------------------
 
-// The default output when -o is absent, and the two names the temporary
-// directory of toolchain.md 2 is built from. src/bootstrap/driver.h spells
-// the first two as macros and driver.c the rest as file-scope arrays.
+/// The default output when -o is absent, and the two names the temporary
+/// directory of toolchain.md 2 is built from. src/bootstrap/driver.h spells
+/// the first two as macros and driver.c the rest as file-scope arrays.
 string DEFAULT_OUTPUT = "a.out";
 string TMP_DIR_DEFAULT = "/tmp";
 string TMP_DIR_TEMPLATE = "/fort-XXXXXX";
@@ -532,12 +531,12 @@ string IR_SUFFIX = ".ll";
 string OBJECT_SUFFIX = ".o";
 string FT_SUFFIX = ".ft";
 
-// EINTR, the one errno the driver compares against: a signal caught while
-// --cc runs interrupts the wait and not the child (waitpid(2)).
+/// EINTR, the one errno the driver compares against: a signal caught while
+/// --cc runs interrupts the wait and not the child (waitpid(2)).
 i32 EINTR = 4;
 
-// The position after the last '/' of `path`, that is the start of its last
-// component.
+/// The position after the last '/' of `path`, that is the start of its last
+/// component.
 fn u64 last_component(string path) {
     u64 mut start = 0;
     u64 mut i = 0;
@@ -550,8 +549,9 @@ fn u64 last_component(string path) {
     return start;
 }
 
-// The entry file's last component with `.ft` removed, which names the IR
-// module and the default object (D9.1, toolchain.md 1).
+/// The entry file's last component with `.ft` removed, which names the IR
+/// module and the default object (toolchain.md 1).
+/// D9.1
 fn string entry_base(string entry) {
     string mut base = entry[last_component(entry)..];
     if (base.len > FT_SUFFIX.len && str.ends_with(base, FT_SUFFIX)) {
@@ -560,8 +560,8 @@ fn string entry_base(string entry) {
     return base;
 }
 
-// `<dir>/<name><suffix>`, interned in `p`; an empty directory or suffix is
-// left out, where src/bootstrap/driver.c passes NULL.
+/// `<dir>/<name><suffix>`, interned in `p`; an empty directory or suffix is
+/// left out, where src/bootstrap/driver.c passes NULL.
 fn string join_path(containers.pool mut* p, string dir, string name, string suffix) {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
@@ -588,10 +588,10 @@ fn string default_output(containers.pool mut* p, options* opts) {
 
 // ---- the temporary directory (toolchain.md 2) ------------------------------------
 
-// Creates the temporary directory with mkdtemp under $TMPDIR, `/tmp` by
-// default; the path is interned in `p` and the directory it was created in is
-// stored in *parent_out. Returns the empty string and the errno of the
-// failure in *error_out, captured before anything else can overwrite it.
+/// Creates the temporary directory with mkdtemp under $TMPDIR, `/tmp` by
+/// default; the path is interned in `p` and the directory it was created in is
+/// stored in *parent_out. Returns the empty string and the errno of the
+/// failure in *error_out, captured before anything else can overwrite it.
 fn string make_temp_dir(containers.pool mut* p, string mut* parent_out, i32 mut* error_out) {
     string mut parent = TMP_DIR_DEFAULT;
     string mut value = "";
@@ -604,8 +604,7 @@ fn string make_temp_dir(containers.pool mut* p, string mut* parent_out, i32 mut*
     defer strbuf.free(&b);
     strbuf.append(&b, parent);
     strbuf.append(&b, TMP_DIR_TEMPLATE);
-    // mkdtemp replaces the six X in place, so it is given storage of the
-    // compiler's own (D13.4).
+    // D13.4: mkdtemp replaces the six X in place, so this is our own
     char mut@ own tmpl = str.to_cstr(strbuf.view(&b));
     defer del(tmpl);
     *error_out = 0;
@@ -616,10 +615,11 @@ fn string make_temp_dir(containers.pool mut* p, string mut* parent_out, i32 mut*
     return containers.pool_intern(p, str.from_cstr(&tmpl[0]));
 }
 
-// Removes the temporary directory and the module in it, whether or not --cc
-// succeeded (toolchain.md 2). The compiler writes exactly one file there, the
-// `<entry>.ll` of D19.1, so no directory walk is needed; a file already gone
-// is not an error.
+/// Removes the temporary directory and the module in it, whether or not --cc
+/// succeeded (toolchain.md 2). The compiler writes exactly one file there, one
+/// `<entry>.ll`, so no directory walk is needed; a file already gone is not an
+/// error.
+/// D19.1
 fn void remove_temp_dir(string dir, string ir_path) {
     if (ir_path.len > 0) {
         char mut@ own path = str.to_cstr(ir_path);
@@ -631,17 +631,19 @@ fn void remove_temp_dir(string dir, string ir_path) {
     rmdir(&d[0]);
 }
 
-// ---- the clang invocation (D14.3) ------------------------------------------------
+// ---- the clang invocation --------------------------------------------------------
+// D14.3
 
-// The command line --cc is run with, in the order src/bootstrap/driver.c
-// builds it; every string is interned in `p` or borrowed from the options, so
-// the vector owns only its slots.
+/// The command line --cc is run with, in the order src/bootstrap/driver.c
+/// builds it; every string is interned in `p` or borrowed from the options, so
+/// the vector owns only its slots.
 fn void cc_argv(containers.pool mut* p, options* opts, string ir_path, string out_path,
                 containers.str_vec mut* argv) {
     containers.str_push(argv, opts->cc);
     containers.str_push(argv, join_path(p, "", "--target=", opts->target));
     // -O2 in place of -O1 under --release; the compiler itself optimizes
-    // nothing (D14.3, toolchain.md 3).
+    // nothing (toolchain.md 3).
+    // D14.3: -O2 under --release; the compiler optimizes nothing
     if (opts->release) {
         containers.str_push(argv, "-O2");
     } else {
@@ -662,8 +664,9 @@ fn void cc_argv(containers.pool mut* p, options* opts, string ir_path, string ou
     containers.str_push(argv, "-o");
     containers.str_push(argv, out_path);
     // The one input is the module, which holds the whole program, the runtime
-    // included (D9.10, D13.1). No -x ir: clang reads a `.ll` by its suffix and
-    // -x is sticky (toolchain.md 2).
+    // included. No -x ir: clang reads a `.ll` by its suffix and -x is sticky
+    // (toolchain.md 2).
+    // D9.10, D13.1
     containers.str_push(argv, ir_path);
     if (!opts->compile_only) {
         u64 mut i = 0;
@@ -672,7 +675,7 @@ fn void cc_argv(containers.pool mut* p, options* opts, string ir_path, string ou
             i += 1;
         }
     }
-    // -Xcc arguments come last, verbatim and in command-line order (D14.1).
+    // D14.1: -Xcc arguments come last, verbatim and in order
     u64 mut k = 0;
     while (k < opts->cc_args.len) {
         containers.str_push(argv, containers.str_at(&opts->cc_args, k));
@@ -680,11 +683,12 @@ fn void cc_argv(containers.pool mut* p, options* opts, string ir_path, string ou
     }
 }
 
-// The bytes of every argument, each NUL-terminated, and a NULL-terminated
-// array of pointers into them: what execvp takes. src/bootstrap/driver.c
-// pushes the arguments as C strings it already has; a fort `string` is a
-// pointer and a length and is not NUL-terminated (D3.7), so they are copied
-// here, once, into storage the caller releases.
+/// The bytes of every argument, each NUL-terminated, and a NULL-terminated array
+/// of pointers into them: what execvp takes. src/bootstrap/driver.c pushes the
+/// arguments as C strings it already has; a fort `string` is a pointer and a
+/// length and is not NUL-terminated, so they are copied here, once, into storage
+/// the caller releases.
+/// D3.7
 struct cc_command {
     char mut@ own bytes;      // every argument, each followed by its NUL
     char mut* mut@ own items; // one pointer per argument, then null
@@ -724,8 +728,8 @@ fn void cc_command_free(cc_command mut* c) {
     del(c->items);
 }
 
-// `cc failed with status N`, or `cc failed with signal N` for a --cc that
-// died by a signal, which toolchain.md 1 does not name.
+/// `cc failed with status N`, or `cc failed with signal N` for a --cc that
+/// died by a signal, which toolchain.md 1 does not name.
 fn void error_cc_status(string what, i64 value) {
     strbuf.str_buf mut m = strbuf.create();
     defer strbuf.free(&m);
@@ -736,9 +740,9 @@ fn void error_cc_status(string what, i64 value) {
     error(strbuf.view(&m));
 }
 
-// The three wait(2) macros, which have no fort spelling: a status byte of
-// 0x7F means stopped, 0 means exited, anything else is the terminating
-// signal, and an exit status is the second byte (waitpid(2)).
+/// The three wait(2) macros, which have no fort spelling: a status byte of
+/// 0x7F means stopped, 0 means exited, anything else is the terminating
+/// signal, and an exit status is the second byte (waitpid(2)).
 u32 WAIT_SIGNAL_MASK = 127;
 u32 WAIT_STATUS_SHIFT = 8;
 u32 WAIT_STATUS_MASK = 255;
@@ -756,26 +760,26 @@ fn i64 wait_status(i32 status) {
     return cast((cast(status, u32) >> WAIT_STATUS_SHIFT) & WAIT_STATUS_MASK, i64);
 }
 
-// The errno of a failed execvp, written by the child and read by the parent,
-// four bytes little end first. Nothing else is ever written to that pipe, so
-// a short read means the child reached execvp and a full one means it did
-// not.
+/// The errno of a failed execvp, written by the child and read by the parent,
+/// four bytes little end first. Nothing else is ever written to that pipe, so
+/// a short read means the child reached execvp and a full one means it did
+/// not.
 u64 ERRNO_BYTES = 4;
 u64 BYTE_BITS = 8;
 u64 BYTE_MASK = 255;
 
-// F_SETFD and FD_CLOEXEC of fcntl(2): the write end of the pipe closes at
-// execvp, which is what tells the parent the exec succeeded.
+/// F_SETFD and FD_CLOEXEC of fcntl(2): the write end of the pipe closes at
+/// execvp, which is what tells the parent the exec succeeded.
 i32 F_SETFD = 2;
 i32 FD_CLOEXEC = 1;
 
-// The status a child that could not exec leaves behind, which no --cc of
-// ours ever reports, since the parent reads the errno off the pipe first.
+/// The status a child that could not exec leaves behind, which no --cc of
+/// ours ever reports, since the parent reads the errno off the pipe first.
 i32 EXEC_FAILED_STATUS = 127;
 
-// Runs --cc once over the module: it compiles and links in one invocation
-// (D14.3). Returns EXIT_OK, or EXIT_USAGE after reporting the failure
-// (D14.1).
+/// Runs --cc once over the module: it compiles and links in one invocation.
+/// Returns EXIT_OK, or EXIT_USAGE after reporting the failure.
+/// D14.1, D14.3
 fn i32 run_cc(options* opts, string ir_path, string out_path) {
     containers.pool mut p = containers.pool_create();
     defer containers.pool_free(&p);
@@ -862,33 +866,34 @@ fn i32 run_cc(options* opts, string ir_path, string out_path) {
 
 // ---- the front end (toolchain.md 2, steps 1 and 2) ---------------------------------
 
-// What a front-end run leaves behind: the modules it read, which own every
-// syntax tree. The checker joins this value when T-035 lands, and the reason
-// it is a value of the caller's is the one src/bootstrap/driver.h gives: every
-// annotation on a tree points into the checker, so the caller releases the
-// analysis only after the last pass that reads a tree. The session that read
-// the sources outlives it, since a module's source and every name in its tree
-// point into the session's storage.
+/// What a front-end run leaves behind: the modules it read, which own every
+/// syntax tree, and the checker that annotates them. The reason it is a value of
+/// the caller's is the one src/bootstrap/driver.h gives: every annotation on a
+/// tree points into the checker, so the caller releases the analysis only after
+/// the last pass that reads a tree. The session that read the sources outlives it,
+/// since a module's source and every name in its tree point into the session's
+/// storage.
 struct analysis {
     modules.module_set set;
     check.checker ck;
 }
 
-// The analysis of one run: the modules it will read and the checker that will
-// annotate their trees. src/bootstrap/driver.c's driver_analysis_init does the
-// same two calls; the checker takes the session here because it reports
-// through it, where the C reports through a file-scope sink (D20.5).
+/// The analysis of one run: the modules it will read and the checker that will
+/// annotate their trees. src/bootstrap/driver.c's driver_analysis_init does the
+/// same two calls; the checker takes the session here because it reports through
+/// it, where the C reports through a file-scope sink.
+/// D20.5
 fn analysis analysis_create(session.session mut* s) {
     analysis mut an = analysis{};
     check.check_init(&an.ck, s);
     return an;
 }
 
-// Releases the analysis once, whichever of the two calls below reaches it
-// first: the build path releases it as soon as the emitter returns, and the
-// `defer` answers for the paths that return earlier. The flag is what makes
-// that safe, so that nothing rests on the nine releases of check.check_free
-// and modules.free each tolerating a second call.
+/// Releases the analysis once, whichever of the two calls below reaches it
+/// first: the build path releases it as soon as the emitter returns, and the
+/// `defer` answers for the paths that return earlier. The flag is what makes
+/// that safe, so that nothing rests on the nine releases of check.check_free
+/// and modules.free each tolerating a second call.
 fn void analysis_release(analysis mut* an, bool mut* live) {
     if (!*live) {
         return;
@@ -902,34 +907,32 @@ fn void analysis_free(analysis mut* an) {
     modules.free(&an->set);
 }
 
-// Steps 1 and 2 of toolchain.md 2: the entry file's module path and root,
-// then the import closure, with the search roots of D9.2 in order. Returns
-// false after the diagnostics of D14.2 were reported.
+/// Steps 1 and 2 of toolchain.md 2: the entry file's module path and root, then
+/// the import closure, with the search roots in order. Returns false after the
+/// diagnostics were reported.
+/// D9.2, D14.2
 fn bool load_closure(session.session mut* s, options* opts, string program, analysis mut* an) {
     u64 mut i = 0;
     while (i < opts->includes.len) {
-        // The `-I` roots come after the entry file's directory, in
-        // command-line order (D9.2).
+        // D9.2: the `-I` roots follow the entry file's directory
         modules.add_root(&an->set, containers.str_at(&opts->includes, i));
         i += 1;
     }
     containers.pool mut p = containers.pool_create();
     defer containers.pool_free(&p);
-    // A path beginning with `std` is looked up in the standard library
-    // directory alone (D9.2), which --std-dir, $FORT_STD_DIR or the binary's
-    // own directory names (D14.1).
+    // D9.2, D14.1: `std` is looked up in the standard library directory
     modules.set_std_dir(&an->set, std_dir(&p, opts, program));
     return modules.load(s, &an->set, opts->entry);
 }
 
-// Whether the entry file can be opened, which is step 1 of toolchain.md 2:
-// src/bootstrap/driver.c opens it with fopen and closes it again, and asks no
-// more than that, so an entry file that opens and does not read -- a
-// directory, whose read(2) is EISDIR -- passes here and is reported by the
-// loader as the compile error of D14.2 rather than as a usage error. Reading
-// the whole file here instead made stage2 answer `fort: error: cannot read
-// '<dir>': Is a directory` and exit 2 where stage1 answers
-// `<dir>:1:1: error: cannot read '<dir>'` and exits 1.
+/// Whether the entry file can be opened, which is step 1 of toolchain.md 2:
+/// src/bootstrap/driver.c opens it with fopen and closes it again, and asks no
+/// more than that, so an entry file that opens and does not read -- a directory,
+/// whose read(2) is EISDIR -- passes here and is reported by the loader as a
+/// compile error rather than as a usage error. Reading the whole file here instead
+/// made stage2 answer `fort: error: cannot read '<dir>': Is a directory` and exit
+/// 2 where stage1 answers `<dir>:1:1: error: cannot read '<dir>'` and exits 1.
+/// D14.2
 fn bool entry_opens(string path) {
     i32 fd = io.open_read(path);
     if (fd < 0) {
@@ -939,50 +942,49 @@ fn bool entry_opens(string path) {
     return true;
 }
 
-// The front end of toolchain.md 2 as far as this compiler goes: read the
-// entry file, then parse the import closure (module-system.md 10). An
-// entry file that cannot be opened is exit 2 and a diagnostic of D14.2 is
-// exit 1 (D14.1); a closure that loaded cleanly would be the checker's and
-// the emitter's turn, which is the internal error of `run` below.
+/// The front end of toolchain.md 2 as far as this compiler goes: read the entry
+/// file, then parse the import closure (module-system.md 10). An entry file that
+/// cannot be opened is exit 2 and a compile diagnostic is exit 1; a closure that
+/// loaded cleanly would be the checker's and the emitter's turn, which is the
+/// internal error of `run` below.
+/// D14.1, D14.2
 fn i32 front_end(session.session mut* s, options* opts, string program, analysis mut* an) {
-    // Step 1 of toolchain.md 2 (D14.1). The bytes are not read here: the
-    // loader reads every file through the session, so the closure below opens
-    // it once and a server's unsaved buffer is what the whole run sees
-    // (D20.5).
+    // Step 1 of toolchain.md 2. The bytes are not read here: the loader reads
+    // every file through the session, so the closure below opens it once and a
+    // server's unsaved buffer is what the whole run sees.
+    // D14.1, D20.5: the loader reads every file through the session
     if (!entry_opens(opts->entry)) {
         error_path("cannot read", opts->entry, str.from_cstr(strerror(sys.errno())));
         return EXIT_USAGE;
     }
-    // A batch driver writes the text form of every diagnostic as it arrives,
-    // which the library leaves off (D14.2). --json writes the records as the
-    // document instead and no text line at all (D20.2).
+    // D14.2, D20.2: --json writes the document and no text line
     diag.set_text(session.diags(s), !opts->json);
     bool loaded = load_closure(s, opts, program, an);
-    // Step 3: every module that parsed is checked, the dependency order
-    // first, so one file that did not parse never hides the errors of the
-    // others (D9.10, D14.2 as amended).
+    // Step 3: every module that parsed is checked, the dependency order first, so
+    // one file that did not parse never hides the errors of the others.
     //
-    // Neither the modules nor the checker is released here: the annotations
-    // they own live until the caller frees the analysis, which is what will
-    // let the emitter and an index walk read the trees afterwards (D20.3,
-    // ast.sym). A compilation builds a program, so the entry module defines
-    // main (D8.6); --check inspects one module instead, and the entry rule
-    // does not apply to it (D20.1).
+    // Neither the modules nor the checker is released here: the annotations they own
+    // live until the caller frees the analysis, which is what will let the emitter
+    // and an index walk read the trees afterwards (ast.sym). A compilation builds a
+    // program, so the entry module defines main; --check inspects one module instead,
+    // and the entry rule does not apply to it.
+    // D8.6, D9.10, D14.2, D20.1, D20.3
     an->ck.require_main = !opts->check;
     bool checked = check_stmt.check_program(&an->ck, &an->set);
     if (!loaded || !checked || session.error_count(s) > 0) {
-        // At least one compile error was reported, which is exit 1 (D14.1).
+        // D14.1
         return EXIT_COMPILE_ERROR;
     }
     return EXIT_OK;
 }
 
-// Step 4 of toolchain.md 2: the emitter writes one module for the whole
-// closure (D19.1, toolchain.md 6). An unwritable path is a toolchain error
-// (exit 2) and a construct the emitter cannot lower yet is a compile error
-// (exit 1), so a half-emitted module never reaches `--cc`. The emitter is
-// initialised at the address it is used at, since it stores the session it
-// reports through (gen.ft).
+/// Step 4 of toolchain.md 2: the emitter writes one module for the whole
+/// closure (toolchain.md 6). An unwritable path is a toolchain error (exit 2)
+/// and a construct the emitter cannot lower yet is a compile error (exit 1), so
+/// a half-emitted module never reaches `--cc`. The emitter is initialised at
+/// the address it is used at, since it stores the session it reports through
+/// (gen.ft).
+/// D19.1
 fn i32 emit_module(session.session mut* s, options* opts, analysis mut* an, string ir_path) {
     gen.gen_options mut gopts = gen.gen_options{};
     gopts.release = opts->release;
@@ -1000,15 +1002,18 @@ fn i32 emit_module(session.session mut* s, options* opts, analysis mut* an, stri
     return EXIT_OK;
 }
 
-// ---- the document of the check mode (D20.2, toolchain.md 4.1) ----------------------
+// ---- the document of the check mode (toolchain.md 4.1) -----------------------------
+// D20.2
 
-// "version" is 1 for this form of the document (D20.2).
+/// "version" is 1 for this form of the document.
+/// D20.2
 u64 JSON_VERSION = 1;
 
-// Copies the file of every module the loader read, in that order: the names
-// the module set hands out die with it, so the document is written from copies
-// of its own (D20.2). src/bootstrap/driver.c keeps the pair as a
-// driver_files_t; a pool and a vector of string say the same thing.
+/// Copies the file of every module the loader read, in that order: the names the
+/// module set hands out die with it, so the document is written from copies of its
+/// own. src/bootstrap/driver.c keeps the pair as a driver_files_t; a pool and a
+/// vector of string say the same thing.
+/// D20.2
 fn void collect_files(containers.pool mut* p, modules.module_set* set,
                       containers.str_vec mut* files) {
     u64 mut i = 0;
@@ -1018,8 +1023,9 @@ fn void collect_files(containers.pool mut* p, modules.module_set* set,
     }
 }
 
-// Builds the whole document into `out`: the version, the files of the closure,
-// the diagnostics of the run and the identifier index (D20.2).
+/// Builds the whole document into `out`: the version, the files of the closure,
+/// the diagnostics of the run and the identifier index.
+/// D20.2
 fn void build_document(strbuf.str_buf mut* out, session.session mut* s,
                        containers.str_vec* files, index.index* ix) {
     json.writer mut j = json.writer{};
@@ -1027,8 +1033,7 @@ fn void build_document(strbuf.str_buf mut* out, session.session mut* s,
     json.json_object_begin(&j);
     json.json_key(&j, "version");
     json.json_uint(&j, JSON_VERSION);
-    // Every file the compiler read, so a client can clear the stale
-    // diagnostics of one that no longer has any (D20.2).
+    // D20.2: a client clears the stale diagnostics of a file
     json.json_key(&j, "files");
     json.json_array_begin(&j);
     u64 mut i = 0;
@@ -1039,16 +1044,16 @@ fn void build_document(strbuf.str_buf mut* out, session.session mut* s,
     json.json_array_end(&j);
     json.json_key(&j, "diagnostics");
     diag.write_json(session.diags(s), &j);
-    // The identifier index of D20.3, which is the empty array without --index:
-    // a member of every document rather than one of two shapes (D20.2).
+    // D20.3, D20.2: the empty array without --index, always a member
     json.json_key(&j, "symbols");
     index.write_json(ix, &j);
     json.json_object_end(&j);
 }
 
-// Writes the document with one print, so stdout holds a complete document or
-// nothing and a client tells a crash from a verdict (D20.2). The document is
-// one line ended by a newline (toolchain.md 4.1).
+/// Writes the document with one print, so stdout holds a complete document or
+/// nothing and a client tells a crash from a verdict. The document is one line
+/// ended by a newline (toolchain.md 4.1).
+/// D20.2
 fn void write_document(session.session mut* s, containers.str_vec* files, index.index* ix) {
     strbuf.str_buf mut doc = strbuf.create();
     defer strbuf.free(&doc);
@@ -1057,12 +1062,13 @@ fn void write_document(session.session mut* s, containers.str_vec* files, index.
     print(strbuf.view(&doc));
 }
 
-// --check --json reports what the front end found as the document of D20.2 on
-// stdout instead of the text diagnostics of D14.2, and --index fills its
-// identifier index (D20.3). The document is written only for a verdict: a
-// usage, toolchain or internal error is exit 2 with stdout empty (D20.2,
-// D14.1). The analysis is still alive here and is released by the caller,
-// since every record of the index is read out of an annotation (ast.ft).
+/// --check --json reports what the front end found as the document on stdout
+/// instead of the text diagnostics, and --index fills its identifier index. The
+/// document is written only for a verdict: a usage, toolchain or internal error is
+/// exit 2 with stdout empty. The analysis is still alive here and is released by
+/// the caller, since every record of the index is read out of an annotation
+/// (ast.ft).
+/// D14.1, D14.2, D20.2, D20.3
 fn void check_document(session.session mut* s, options* opts, analysis mut* an,
                        containers.pool mut* p) {
     containers.str_vec mut files = containers.str_create();
@@ -1076,10 +1082,11 @@ fn void check_document(session.session mut* s, options* opts, analysis mut* an,
     write_document(s, &files, &ix);
 }
 
-// A build, or `--check`: the front end, and then the passes this compiler
-// does not carry yet. The session and the analysis die here, in that order of
-// declaration and the reverse order of release, since every name of a tree
-// points into the session (D20.5).
+/// A build, or `--check`: the front end, and then the passes this compiler does
+/// not carry yet. The session and the analysis die here, in that order of
+/// declaration and the reverse order of release, since every name of a tree points
+/// into the session.
+/// D20.5
 fn i32 compile_entry(options* opts, string program) {
     containers.pool mut p = containers.pool_create();
     defer containers.pool_free(&p);
@@ -1095,8 +1102,7 @@ fn i32 compile_entry(options* opts, string program) {
     defer analysis_release(&an, &analysis_live);
     i32 status = front_end(&s, opts, program, &an);
     if (opts->check && opts->json && (status == EXIT_OK || status == EXIT_COMPILE_ERROR)) {
-        // The document answers for both verdicts, so it is written before the
-        // compile error returns (D20.2).
+        // D20.2: the document answers for both verdicts, so it goes first
         check_document(&s, opts, &an, &p);
         return status;
     }
@@ -1104,8 +1110,7 @@ fn i32 compile_entry(options* opts, string program) {
         return status;
     }
     if (opts->check) {
-        // --check stops after the front end: no module is emitted, and the
-        // file was a module under inspection rather than a program (D20.1).
+        // D20.1: --check stops after the front end, no module emitted
         return EXIT_OK;
     }
     string mut out_path = opts->output;
@@ -1142,7 +1147,8 @@ fn i32 compile_entry(options* opts, string program) {
 
 // ---- the pipeline (toolchain.md 2) --------------------------------------------------
 
-// Runs the compiler with args[1..]; returns the process exit status (D14.1).
+/// Runs the compiler with args[1..]; returns the process exit status.
+/// D14.1
 fn i32 run(string@ args) {
     // fort with no arguments prints one usage line and exits with 2
     // (toolchain.md 1).
@@ -1160,7 +1166,8 @@ fn i32 run(string@ args) {
         return EXIT_OK;
     }
     // --tokens stops after the lexer and --ast after the parser; every other
-    // run goes through the front end (D14.1, D20.1).
+    // run goes through the front end of toolchain.md 2.
+    // D14.1, D20.1: --tokens stops after the lexer, --ast after the parser
     if (opts.tokens) {
         return tokens_entry(&opts);
     }

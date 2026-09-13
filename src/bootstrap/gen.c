@@ -1,6 +1,6 @@
-// The LLVM IR emitter: the module skeleton, type lowering, names, the
-// emission primitives and the function definitions (toolchain.md 6, D19); see
-// gen.h.
+// The LLVM IR emitter: the module skeleton, type lowering, names, the emission
+// primitives and the function definitions (toolchain.md 6); see gen.h.
+// D19
 #include "gen.h"
 
 #include <stdbool.h>
@@ -20,12 +20,13 @@
 
 // The two named types every module carries, used or not, so that the emitter
 // tracks nothing (item 2). `%fort.span` serves every span and `string`, since
-// with opaque pointers they have identical IR (D3.5, D3.7).
+// with opaque pointers they have identical IR.
+// D3.5, D3.7
 static const char SPAN_TYPE[] = "%fort.span";
 static const char ENUM_MEMBER_TYPE[] = "%fort.enum_member";
 
-// The bytes a span or `string` header occupies: a pointer and a 64-bit
-// length (D3.5).
+// The bytes a span or `string` header occupies: a pointer and a 64-bit length.
+// D3.5
 enum { SPAN_SIZE = 16, SPAN_ALIGN = 8 };
 
 // The width of the widest integer the emitter prints a constant of.
@@ -64,9 +65,10 @@ void gen_args_add(gen_args_t* a, gen_val_t v) {
 
 // ---- the emitter ------------------------------------------------------------------
 
-// The one type node the emitter builds itself: the `char` a `string`'s
-// elements are, which `string` does not carry (D3.7). Every field is written,
-// since a type node is compared and lowered by all of them (types.h).
+// The one type node the emitter builds itself: the `char` a `string`'s elements
+// are, which `string` does not carry. Every field is written, since a type node
+// is compared and lowered by all of them (types.h).
+// D3.7
 static void char_type_init(type_t* t) {
     t->kind = TYPE_PRIM;
     t->prim = PRIM_CHAR;
@@ -174,7 +176,7 @@ void gen_todo(gen_t* g, loc_t loc, const char* what) {
 // ---- types (item 2) ---------------------------------------------------------------
 
 bool gen_is_aggregate(const type_t* t) {
-    // Only scalars are SSA values; everything else occupies a place (D19.3).
+    // D19.3: only scalars are SSA values
     return t != NULL && (t->kind == TYPE_ARRAY || t->kind == TYPE_SPAN || t->kind == TYPE_STRING ||
                          t->kind == TYPE_STRUCT);
 }
@@ -184,14 +186,14 @@ uint32_t gen_int_bits(const type_t* t) {
         return 0;
     }
     if (t->kind == TYPE_ENUM) {
-        // An enum is `i32` (D3.9).
+        // D3.9
         return 4 * PRIM_BITS_PER_BYTE;
     }
     if (t->kind != TYPE_PRIM) {
         return 0;
     }
     if (t->prim == PRIM_BOOL) {
-        // `bool` is `i1` as a value (D3.3).
+        // D3.3
         return 1;
     }
     return prim_size(t->prim) * PRIM_BITS_PER_BYTE;
@@ -202,9 +204,7 @@ bool gen_is_signed(const type_t* t) {
         return false;
     }
     if (t->kind == TYPE_ENUM) {
-        // An enum's `i32` is the signed type of D3.1: a member may be
-        // negative, so its constants print signed and a widening cast of one
-        // sign-extends (D3.9).
+        // D3.1, D3.9: a member may be negative, so constants print signed
         return true;
     }
     return t->kind == TYPE_PRIM && prim_is_signed(t->prim);
@@ -216,8 +216,9 @@ bool gen_is_signed(const type_t* t) {
 // section 5.1).
 static const char ENUM_MEMBER_STRUCT[] = "std.rt.enum_member";
 
-// The dotted name of a nominal type's declaration, `%struct.main.point`
-// (item 2, D9.7).
+// The dotted name of a nominal type's declaration, `%struct.main.point` (item
+// 2).
+// D9.7
 static str_t nominal_type_name(gen_t* g, const type_t* t) {
     const sym_t* s = (const sym_t*)t->decl;
     // The dotted name is built first: gen_symbol builds its own text in the
@@ -245,7 +246,7 @@ str_t gen_mem_type(gen_t* g, const type_t* t) {
         case PRIM_U8:
         case PRIM_CHAR:
         case PRIM_BOOL:
-            // `bool` is `i8` in memory, with C's `_Bool` layout (D19.2).
+            // D19.2
             return str_from_cstr("i8");
         case PRIM_I16:
         case PRIM_U16:
@@ -267,12 +268,10 @@ str_t gen_mem_type(gen_t* g, const type_t* t) {
     case TYPE_PTR:
     case TYPE_VOIDPTR:
     case TYPE_FN:
-        // Every pointer, `void*` and function pointer is the opaque `ptr`
-        // (D3.10, D3.11).
+        // D3.10, D3.11
         return str_from_cstr("ptr");
     case TYPE_ARRAY: {
-        // An array type nests outside in, so `i32[3][4]` is
-        // `[3 x [4 x i32]]` (D3.6).
+        // D3.6: `i32[3][4]` is `[3 x [4 x i32]]`, nesting outside in
         const str_t elem = gen_mem_type(g, t->elem);
         sb_clear(&g->scratch);
         sb_push(&g->scratch, '[');
@@ -284,7 +283,7 @@ str_t gen_mem_type(gen_t* g, const type_t* t) {
     }
     case TYPE_SPAN:
     case TYPE_STRING:
-        // One `%fort.span` serves every span and `string` (D3.5, D3.7).
+        // D3.5, D3.7
         return str_from_cstr(SPAN_TYPE);
     case TYPE_STRUCT:
         return nominal_type_name(g, t);
@@ -300,7 +299,7 @@ str_t gen_mem_type(gen_t* g, const type_t* t) {
 
 str_t gen_value_type(gen_t* g, const type_t* t) {
     if (t != NULL && t->kind == TYPE_PRIM && t->prim == PRIM_BOOL) {
-        // `bool` is `i1` as a value and `i8` in memory (D19.2).
+        // D19.2
         return str_from_cstr("i1");
     }
     return gen_mem_type(g, t);
@@ -335,7 +334,8 @@ const char* gen_ext_attr(const type_t* t) {
     return NULL;
 }
 
-// ---- names (item 4, D9.7) ---------------------------------------------------------
+// ---- names (item 4) ---------------------------------------------------------------
+// D9.7
 
 bool gen_field_index(const sym_t* field, uint64_t* out) {
     const sym_t* owner = field != NULL ? field->owner : NULL;
@@ -362,14 +362,12 @@ str_t gen_symbol(gen_t* g, const sym_t* s) {
         return str_from_cstr("");
     }
     if (s->kind == SYM_EXTERN_FN) {
-        // `extern` names are unmangled (D9.7).
+        // D9.7
         return s->name;
     }
     sb_clear(&g->scratch);
     if (s->owner != NULL && s->owner->kind == SYM_MODULE) {
-        // The module path, a dot and the declaration name (D9.7): a path is
-        // dot-separated already (D9.1), so it is copied across unchanged and
-        // `std.io` gives `std.io.read_file`.
+        // D9.7, D9.1: the module path, a dot and the declaration name
         sb_append_str(&g->scratch, s->owner->name);
         sb_push(&g->scratch, '.');
     }
@@ -382,12 +380,11 @@ str_t gen_symbol_ref(gen_t* g, const sym_t* s) {
     sb_clear(&g->scratch);
     sb_push(&g->scratch, '@');
     if (s != NULL && s->kind == SYM_EXTERN_FN) {
-        // A C name is an identifier and stands unquoted (D9.7).
+        // D9.7
         gen_append_name(&g->scratch, "", name, false);
         return gen_take(g);
     }
-    // A dotted name is quoted, which is spelling only: the ELF symbol is
-    // unchanged (D9.7).
+    // D9.7: quoting is spelling only; the ELF symbol is unchanged
     gen_append_name(&g->scratch, "", name, true);
     return gen_take(g);
 }
@@ -419,8 +416,7 @@ void gen_ins_end(gen_t* g) {
 }
 
 gen_val_t gen_temp(gen_t* g, str_t ty) {
-    // Instruction results are `%t<N>` in emission order, per function
-    // (D19.5).
+    // D19.5: `%t<N>` in emission order, per function
     sb_clear(&g->scratch);
     sb_append(&g->scratch, "%t");
     sb_append_u64(&g->scratch, g->temps);
@@ -462,7 +458,8 @@ gen_val_t gen_const_unsigned(gen_t* g, str_t ty, uint64_t v) {
 }
 
 // A negative constant from its magnitude, so that a value whose magnitude is
-// 2^63 (`i64` MIN) never has to be negated in a signed type (D19.5).
+// 2^63 (`i64` MIN) never has to be negated in a signed type.
+// D19.5
 static gen_val_t const_negative(gen_t* g, str_t ty, uint64_t magnitude) {
     sb_clear(&g->scratch);
     sb_push(&g->scratch, '-');
@@ -473,24 +470,24 @@ static gen_val_t const_negative(gen_t* g, str_t ty, uint64_t magnitude) {
     return out;
 }
 
-// The low `bits` of `x` as the fort type reads them: sign-extended for a
-// signed type, zero-extended otherwise (D19.5). The magnitude of a negative
-// value is the two's complement of the pattern, computed in unsigned
-// arithmetic so that every width behaves alike.
+// The low `bits` of `x` as the fort type reads them: sign-extended for a signed
+// type, zero-extended otherwise. The magnitude of a negative value is the two's
+// complement of the pattern, computed in unsigned arithmetic so that every width
+// behaves alike.
+// D19.5
 static gen_val_t const_bits(gen_t* g, str_t ty, uint64_t x, uint32_t bits, bool sign) {
     const uint32_t width = bits == 0 || bits > BITS_PER_U64 ? BITS_PER_U64 : bits;
     const uint64_t mask = width == BITS_PER_U64 ? UINT64_MAX : ((uint64_t)1 << width) - 1U;
     const uint64_t low = x & mask;
     if (sign && (low & ((uint64_t)1 << (width - 1))) != 0) {
-        // A negative value of a signed type prints as `i8 -1` (D19.5).
+        // D19.5
         return const_negative(g, ty, (~low & mask) + 1U);
     }
     return gen_const_unsigned(g, ty, low);
 }
 
 gen_val_t gen_const_min(gen_t* g, str_t ty, uint32_t bits) {
-    // The pattern with the sign bit alone set, read as the signed type says
-    // (D19.5): `i8` MIN is -128 and `i64` MIN -9223372036854775808.
+    // D19.5: `i8` MIN is -128 and `i64` MIN -9223372036854775808
     return const_bits(g, ty, (uint64_t)1 << (bits - 1), bits, true);
 }
 
@@ -503,11 +500,10 @@ gen_val_t gen_const_value(gen_t* g, const type_t* t, cval_t v) {
         return gen_literal(g, ty, "null");
     }
     if (t != NULL && (t->kind == TYPE_PTR || t->kind == TYPE_VOIDPTR || t->kind == TYPE_FN)) {
-        // A pointer constant is `null`; no other address folds (D10.5).
+        // D10.5
         return gen_literal(g, ty, "null");
     }
-    // A char in an integer context is its code point, so the folder is asked
-    // for the integer of an integer-like value (D4.3).
+    // D4.3: a char in an integer context is its code point
     return const_bits(g, ty, cv_bits(cv_as_int(v)), gen_int_bits(t), gen_is_signed(t));
 }
 
@@ -516,8 +512,7 @@ gen_val_t gen_const_mem_value(gen_t* g, const type_t* t, cval_t v) {
     // text in the same scratch buffer.
     const str_t ty = gen_mem_type(g, t);
     if (v.kind == CV_BOOL) {
-        // A `bool` in memory is 0 or 1 in an `i8`, never the `i1 true` of a
-        // value (D19.2, D3.3).
+        // D19.2, D3.3: a `bool` in memory is 0 or 1 in an `i8`
         return gen_const_unsigned(g, ty, v.mag != 0 ? 1U : 0U);
     }
     gen_val_t out = gen_const_value(g, t, v);
@@ -607,7 +602,7 @@ gen_val_t gen_load_place(gen_t* g, gen_place_t p) {
     const uint64_t align = type_alignof(p.type);
     const gen_val_t raw = gen_load(g, gen_mem_type(g, p.type), p.addr, align);
     if (p.type != NULL && p.type->kind == TYPE_PRIM && p.type->prim == PRIM_BOOL) {
-        // Every load of a `bool` place is a `load i8` and a `trunc` (D19.2).
+        // D19.2
         return gen_cast_op(g, "trunc", raw, str_from_cstr("i1"));
     }
     return raw;
@@ -617,7 +612,7 @@ void gen_store_place(gen_t* g, gen_place_t p, gen_val_t v) {
     const uint64_t align = type_alignof(p.type);
     gen_val_t out = v;
     if (p.type != NULL && p.type->kind == TYPE_PRIM && p.type->prim == PRIM_BOOL) {
-        // Every store of a `bool` place is a `zext` and a `store i8` (D19.2).
+        // D19.2
         out = gen_cast_op(g, "zext", v, str_from_cstr("i8"));
     }
     gen_store(g, out, p.addr, align);
@@ -664,13 +659,13 @@ gen_val_t gen_gep_field(gen_t* g, str_t ty, gen_val_t base, uint64_t k) {
 // ---- the span header (item 17) -----------------------------------------------------
 
 gen_val_t gen_span_ptr(gen_t* g, gen_val_t base) {
-    // Field 0 of `%fort.span` is the pointer (D3.5, D19.2).
+    // D3.5, D19.2: field 0 is the pointer
     const gen_val_t field = gen_gep_field(g, str_from_cstr(SPAN_TYPE), base, SPAN_FIELD_PTR);
     return gen_load(g, str_from_cstr("ptr"), field, (uint64_t)sizeof(void*));
 }
 
 gen_val_t gen_span_len(gen_t* g, gen_val_t base) {
-    // Field 1 is the length, a `u64` (D3.5, D19.2).
+    // D3.5, D19.2: field 1 is the length, a `u64`
     const gen_val_t field = gen_gep_field(g, str_from_cstr(SPAN_TYPE), base, SPAN_FIELD_LEN);
     return gen_load(g, str_from_cstr("i64"), field, (uint64_t)sizeof(uint64_t));
 }
@@ -717,7 +712,7 @@ void gen_memset_zero(gen_t* g, gen_val_t dst, uint64_t align, uint64_t size) {
 // ---- blocks (item 10) -------------------------------------------------------------
 
 uint64_t gen_label(gen_t* g) {
-    // Blocks are `%L<N>` in creation order, the entry block excepted (D19.5).
+    // D19.5: `%L<N>` in creation order, the entry block excepted
     const uint64_t n = g->labels;
     g->labels++;
     return n;
@@ -778,11 +773,11 @@ void gen_switch_end(gen_t* g) {
     g->terminated = true;
 }
 
-// ---- checks and failure blocks (item 14, D19.6) -----------------------------------
+// ---- checks and failure blocks (item 14) ------------------------------------------
+// D19.6
 
 void gen_args_add_loc(gen_t* g, gen_args_t* args, loc_t loc) {
-    // Each failure call carries the file constant and the line and column of
-    // D11.4's position rule (item 14).
+    // D11.4: the file constant, the line and the column (item 14)
     gen_args_add(args, gen_literal(g, str_from_cstr("ptr"), gen_file_ref(g, loc).ptr));
     gen_args_add(args, gen_const_unsigned(g, str_from_cstr("i32"), loc.line));
     gen_args_add(args, gen_const_unsigned(g, str_from_cstr("i32"), loc.col));
@@ -805,22 +800,23 @@ static void fail_block(gen_t* g, uint64_t label, rt_entry_t rt, const gen_args_t
 
 void gen_zero_owner(gen_t* g, gen_place_t p) {
     if (gen_is_aggregate(p.type)) {
-        // A span, a `string` or an owning aggregate is zeroed whole (D17.6).
+        // D17.6
         gen_memset_zero(g, p.addr, type_alignof(p.type), type_sizeof(p.type));
         return;
     }
-    // The zero value of a pointer or a `void*` is `null` (D17.6).
+    // D17.6
     gen_store_place(g, p, gen_literal(g, str_from_cstr("ptr"), "null"));
 }
 
 void gen_check(
     gen_t* g, gen_val_t cond, bool fail_when, rt_entry_t rt, gen_args_t* args, loc_t loc) {
-    // The continuation label is allocated before the failure label (D19.6).
+    // D19.6: the continuation label comes before the failure label
     const uint64_t cont = gen_label(g);
     const uint64_t bad = gen_label(g);
-    // Every check computes one `i1` that is true on failure and branches with
-    // the failure label first; `assert` is the exception, since its operand is
-    // already the success condition (D19.6, D12.2).
+    // Every check computes one `i1` that is true on failure and branches with the
+    // failure label first; `assert` is the exception, since its operand is already
+    // the success condition.
+    // D12.2, D19.6
     if (fail_when) {
         gen_br_cond(g, cond, bad, cont);
     } else {
@@ -846,14 +842,15 @@ void gen_use_attr(gen_t* g, gen_attr_t which) {
 
 // ---- slots (item 10) --------------------------------------------------------------
 
-// Records the place of a local or parameter under the name D19.5 gives it.
+// Records the place of a local or parameter under the name the IR gives it.
+// D19.5
 static str_t slot_name(gen_t* g, const sym_t* s, uint64_t slot, bool incoming) {
     sb_clear(&g->scratch);
     sb_push(&g->scratch, '%');
     sb_append_str(&g->scratch, s->name);
     sb_push(&g->scratch, '.');
     if (incoming) {
-        // A parameter arrives as `%<ident>.in` (D19.5).
+        // D19.5: a parameter arrives as `%<ident>.in`
         sb_append(&g->scratch, "in");
     } else {
         sb_append_u64(&g->scratch, slot);
@@ -884,8 +881,7 @@ gen_place_t gen_slot_place(gen_t* g, const sym_t* s) {
 }
 
 gen_place_t gen_temp_place_raw(gen_t* g, str_t mem_type, uint64_t align) {
-    // A place the compiler invents is `%tmp<K>` from a third counter, and
-    // never contains a dot, so it cannot collide with a local (D19.5).
+    // D19.5: `%tmp<K>` has no dot, so it cannot collide with a local
     sb_clear(&g->scratch);
     sb_append(&g->scratch, "%tmp");
     sb_append_u64(&g->scratch, g->tmps);
@@ -894,7 +890,7 @@ gen_place_t gen_temp_place_raw(gen_t* g, str_t mem_type, uint64_t align) {
     p.addr.ty = str_from_cstr("ptr");
     p.addr.val = gen_take(g);
     p.type = NULL;
-    // Every compiler temporary is an alloca in the entry block (D19.4).
+    // D19.4
     sb_append(&g->allocas, "  ");
     sb_append_str(&g->allocas, p.addr.val);
     sb_append(&g->allocas, " = alloca ");
@@ -914,14 +910,14 @@ gen_place_t gen_temp_place(gen_t* g, const type_t* t) {
 // ---- function definitions (item 7) ------------------------------------------------
 
 // Every local of the body, in declaration order, which is the order their
-// allocas are emitted in (D19.4).
+// allocas are emitted in.
+// D19.4
 static void collect_locals(gen_t* g, ast_node_t* n, ptrvec_t* out) {
     if (n == NULL) {
         return;
     }
     if ((n->kind == AST_VAR_DECL || n->kind == AST_RANGE_FOR) && n->sym != NULL) {
-        // A range `for` declares its loop variable on the loop node itself,
-        // and that variable is a local like any other (D7.5).
+        // D7.5: a range `for` declares its variable on the loop node
         ptrvec_push(out, (void*)n);
     }
     collect_locals(g, n->a, out);
@@ -955,9 +951,10 @@ static void definition_begin(gen_t* g) {
 }
 
 static void emit_signature(gen_t* g, const ast_node_t* fn, const sym_t* s, const type_t* sig) {
-    // Whether this definition is a `noreturn` entry point of toolchain.md
-    // 5.1, read off the mangled name (D9.7), so that only the module the
-    // entry point lives in can carry the attribute group of item 14.
+    // Whether this definition is a `noreturn` entry point of toolchain.md 5.1,
+    // read off the mangled name, so that only the module the entry point lives
+    // in can carry the attribute group of item 14.
+    // D9.7: read off the mangled name, so only that module carries it
     const rt_entry_t rt = rt_entry_of(gen_symbol(g, s));
     const bool rt_noreturn = rt != RT_COUNT && rt_entry_noreturn(rt);
     definition_begin(g);
@@ -1023,7 +1020,8 @@ static void emit_signature(gen_t* g, const ast_node_t* fn, const sym_t* s, const
 }
 
 // Resets the per-function counters and buffers: every name is fixed per
-// function and reset at each definition (D19.5).
+// function and reset at each definition.
+// D19.5
 static void function_begin(gen_t* g) {
     g->temps = 0;
     g->labels = 0;
@@ -1034,8 +1032,7 @@ static void function_begin(gen_t* g) {
     g->has_continue = false;
     free_records(&g->slots);
     ptrvec_init(&g->slots);
-    // No scope of the previous definition stays open: a deferred statement is
-    // expanded inside the function that wrote it (D7.8).
+    // D7.8: a defer expands inside the function that wrote it
     g->defers.len = 0;
     g->scope_kinds.len = 0;
     g->scope_first.len = 0;
@@ -1046,8 +1043,9 @@ static void function_begin(gen_t* g) {
     g->terminated = false;
 }
 
-// Appends the entry block, the normal blocks and then the failure blocks
-// (D19.6), and closes the definition.
+// Appends the entry block, the normal blocks and then the failure blocks, and
+// closes the definition.
+// D19.6
 static void function_end(gen_t* g) {
     sb_append(&g->funcs, "entry:\n");
     sb_append_str(&g->funcs, sb_view(&g->allocas));
@@ -1065,7 +1063,7 @@ static void gen_function(gen_t* g, ast_node_t* fn) {
     function_begin(g);
     emit_signature(g, fn, s, sig);
     uint64_t slot = 0;
-    // The parameters first, then the locals in declaration order (D19.4).
+    // D19.4
     for (uint64_t i = 0; i < ast_len(fn); i++) {
         const ast_node_t* p = ast_child(fn, i);
         if (p->kind != AST_PARAM || p->sym == NULL) {
@@ -1104,11 +1102,11 @@ static void gen_function(gen_t* g, ast_node_t* fn) {
         in.val = slot_name(g, p->sym, 0, true);
         gen_store_place(g, gen_slot_place(g, p->sym), in);
     }
-    // The slot of an owning local is zeroed once here, so that the overwrite
-    // check its declaration carries reads the zero value the first time and
-    // whatever the slot still holds on a second execution -- a declaration in
-    // a loop whose body did not `del` (D17.11 as amended, D19.4). Without it
-    // the check would read an uninitialized `alloca`.
+    // The slot of an owning local is zeroed once here, so that the overwrite check
+    // its declaration carries reads the zero value the first time and whatever the
+    // slot still holds on a second execution -- a declaration in a loop whose body
+    // did not `del`. Without it the check would read an uninitialized `alloca`.
+    // D17.11, D19.4
     for (uint64_t i = 0; i < locals.len; i++) {
         const ast_node_t* d = (const ast_node_t*)locals.items[i];
         const type_t* t = d->sym->type;
@@ -1117,35 +1115,32 @@ static void gen_function(gen_t* g, ast_node_t* fn) {
         }
     }
     ptrvec_free(&locals);
-    // The body is the scope a `return` unwinds out to, and falling off its
-    // end runs its deferred statements before the terminator below (D7.8).
+    // D7.8: the body is the scope a `return` unwinds out to
     gen_block_scoped(g, fn->b, GEN_SCOPE_FN);
     if (!g->terminated) {
         if (sig->noreturn) {
-            // The block that would fall off the end of a `noreturn` body ends
-            // with a trap (D8.5, D19.7).
+            // D8.5, D19.7: a `noreturn` body ends with a trap
             gen_use_intrinsic(g, IN_TRAP);
             gen_use_attr(g, ATTR_TRAP);
             sb_append(&g->body, "  call void @llvm.trap()\n  unreachable\n");
         } else if (sig->elem != NULL && sig->elem->kind == TYPE_VOID) {
             sb_append(&g->body, "  ret void\n");
         } else {
-            // The checker proved that a non-void body ends in a terminating
-            // statement (D8.4), so this block is unreachable.
+            // D8.4: the checker proved the body terminates, so this is dead
             sb_append(&g->body, "  unreachable\n");
         }
     }
     function_end(g);
 }
 
-// ---- fort_entry (item 22, D11.6) --------------------------------------------------
+// ---- fort_entry (item 22) ---------------------------------------------------------
+// D11.6
 
 static void gen_fort_entry(gen_t* g, const sym_t* main_sym) {
     function_begin(g);
     gen_use_attr(g, ATTR_FN);
     definition_begin(g);
-    // `fort_entry` is a C name, so it is unquoted (D9.7), and it receives the
-    // argument span by hidden pointer (D11.6).
+    // D9.7, D11.6: a C name, unquoted; the span arrives by pointer
     sb_append(&g->funcs, "define dso_local i32 @fort_entry(ptr %args.in) #0 {\n");
     // The module defines the name from here on, so an `extern fn fort_entry`
     // is not declared beside it: two C declarations of one name are one ELF
@@ -1183,25 +1178,26 @@ static void gen_fort_entry(gen_t* g, const sym_t* main_sym) {
     function_end(g);
 }
 
-// ---- main (item 22, D11.6) --------------------------------------------------------
+// ---- main (item 22) ---------------------------------------------------------------
+// D11.6
 
-// The byte the process status keeps, which is D11.6's `status & 0xFF`.
+// The byte the process status keeps, which is `status & 0xFF`.
+// D11.6
 enum { STATUS_MASK = 255 };
 
-// `@main` is the C entry point the start-up code calls, so it takes C's
-// `argc` and `argv` and returns C's `int`. It is a definition of this module
-// like any other and carries `dso_local` and `#0` (items 4, 7, 22). It calls
+// `@main` is the C entry point the start-up code calls, so it takes C's `argc`
+// and `argv` and returns C's `int`. It is a definition of this module like any
+// other and carries `dso_local` and `#0` (items 4, 7, 22). It calls
 // `std.rt.args_init`, then `std.rt.args`, which builds the span it hands to
 // `fort_entry`, then `std.rt.flush_all`, and returns the status masked to one
-// byte (D11.6). `args_init` runs first, since `args` hands out what it built.
+// byte. `args_init` runs first, since `args` hands out what it built.
+// D11.6
 static void gen_main(gen_t* g) {
     function_begin(g);
     gen_use_attr(g, ATTR_FN);
     definition_begin(g);
     sb_append(&g->funcs, "define dso_local i32 @main(i32 %argc, ptr %argv) #0 {\n");
-    // The argument span is an entry-block alloca like every other place
-    // (item 10); its name embeds no fort identifier, `main` being the
-    // compiler's own definition and not a fort function (D19.5).
+    // D19.5: no fort identifier in the name, `main` being the compiler's
     gen_val_t span;
     span.ty = str_from_cstr("ptr");
     span.val = str_from_cstr("%args");
@@ -1216,8 +1212,7 @@ static void gen_main(gen_t* g) {
     gen_args_add(&args, gen_literal(g, str_from_cstr("ptr"), "%argv"));
     gen_call_rt(g, RT_ARGS_INIT, &args);
     gen_args_free(&args);
-    // `std.rt.args` returns an aggregate, so it takes the destination as the
-    // hidden result pointer of item 7, a plain `ptr` at the call site (D9.9).
+    // D9.9: the hidden result pointer is a plain `ptr` at the call site
     gen_args_init(&args);
     gen_args_add(&args, span);
     gen_call_rt(g, RT_ARGS, &args);
@@ -1277,7 +1272,7 @@ static void gen_struct_type(gen_t* g, const ast_node_t* decl) {
             sb_append(&g->named, ", ");
         }
         written++;
-        // Fields in declaration order and never `packed` (D3.8).
+        // D3.8
         sb_append_str(&g->named, gen_mem_type(g, f->type));
     }
     sb_append(&g->named, " }\n");
@@ -1294,11 +1289,11 @@ static void gen_module(gen_t* g, const module_t* m) {
     for (uint64_t i = 0; i < ast_len(m->ast); i++) {
         const ast_node_t* decl = ast_child(m->ast, i);
         if (decl->kind == AST_VAR_DECL) {
-            // The module-level data of D7.10, in source order, and before
-            // the functions of the same module: forward references to a
-            // global are legal in `.ll`, so either order would do, and this
-            // one numbers a global's string constants before its bodies'
-            // (item 1, D19.5).
+            // The module-level data, in source order, and before the functions of the same
+            // module: forward references to a global are legal in `.ll`, so either order
+            // would do, and this one numbers a global's string constants before its bodies'
+            // (item 1).
+            // D7.10, D19.5
             gen_global(g, decl);
         }
     }
@@ -1320,8 +1315,7 @@ bool gen_program(gen_t* g, const check_t* ck, const module_set_t* set) {
     sb_append(&g->named, " = type { ptr, i64 }\n");
     sb_append(&g->named, ENUM_MEMBER_TYPE);
     sb_append(&g->named, " = type { i32, ptr }\n");
-    // Modules in dependency order, every module after the ones it imports
-    // (D9.10, D19.5).
+    // D9.10, D19.5: every module after the ones it imports
     for (uint64_t i = 0; i < module_set_count(set); i++) {
         gen_module(g, module_set_at(set, i));
     }
@@ -1332,9 +1326,7 @@ bool gen_program(gen_t* g, const check_t* ck, const module_set_t* set) {
             if (decl->kind == AST_FN_DECL && decl->sym != NULL && !decl->sym->error &&
                 decl->sym->type != NULL && decl->sym->type->kind == TYPE_FN &&
                 str_eq(decl->sym->name, str_from_cstr("main"))) {
-                // `fort_entry` and `main` are emitted in the entry module
-                // and are the only unmangled definitions in it (D11.6,
-                // item 22).
+                // D11.6: the only unmangled definitions, in the entry module
                 gen_fort_entry(g, decl->sym);
                 gen_main(g);
             }

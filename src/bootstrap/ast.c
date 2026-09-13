@@ -126,7 +126,7 @@ const char* ast_kind_name(ast_kind_t kind) {
         return "struct-lit";
     case AST_ARRAY_LIT:
         return "array-lit";
-    // The region a syntax error made the parser skip (D14.2).
+    // D14.2
     case AST_ERROR:
         return "error";
     case AST_KIND_COUNT:
@@ -172,7 +172,6 @@ uint64_t ast_arena_count(const ast_arena_t* ar) {
     return mem_add(mem_mul(ar->block_len - 1, AST_ARENA_BLOCK_NODES), ar->used);
 }
 
-// Appends a fresh block of zeroed nodes and makes it the one nodes come from.
 static void arena_grow(ast_arena_t* ar) {
     if (ar->block_len == ar->block_cap) {
         const uint64_t cap = mem_grown_cap(ar->block_cap, mem_add(ar->block_len, 1));
@@ -221,8 +220,8 @@ ast_node_t* ast_child(const ast_node_t* n, uint64_t i) {
     return (ast_node_t*)n->list.items[i];
 }
 
-// The marks of a type position, each written once and after what it
-// qualifies (D5.3, D17.2).
+// The marks of a type position, each written once and after what it qualifies.
+// D5.3, D17.2
 bool ast_is_own(const ast_node_t* n) {
     return (n->flags & AST_FLAG_OWN) != 0;
 }

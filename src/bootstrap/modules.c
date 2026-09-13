@@ -17,30 +17,35 @@
 #include "scope.h"
 #include "str.h"
 
-// The real path of a file, which is a module's identity (D9.2). POSIX
-// declares realpath in <stdlib.h>, but glibc's is behind __USE_XOPEN_EXTENDED,
-// which -std=c11 with _POSIX_C_SOURCE does not set, so this file declares it
-// itself as driver.c declares `environ`.
+// The real path of a file, which is a module's identity. POSIX declares realpath
+// in <stdlib.h>, but glibc's is behind __USE_XOPEN_EXTENDED, which -std=c11 with
+// _POSIX_C_SOURCE does not set, so this file declares it itself as driver.c
+// declares `environ`.
+// D9.2
 extern char* realpath(const char* name, char* resolved);
 
-// The extension of a fort source file (D1.1); a file with any other extension
-// is never a module (module-system.md 1).
+// The extension of a fort source file; a file with any other extension is
+// never a module (module-system.md 1).
+// D1.1
 static const char MODULE_SUFFIX[] = ".ft";
 
-// The separator of module paths (D9.1) and the one of file paths.
+// The separator of module paths and the one of file paths.
+// D9.1
 enum { PATH_SEPARATOR = '.' };
 enum { DIRECTORY_SEPARATOR = '/' };
 
 // The first segment reserved for the standard library: a path beginning with
-// it is looked up only in the standard library directory, and no other path
-// is ever looked up there (D9.2).
+// it is looked up only in the standard library directory, and no other path is
+// ever looked up there.
+// D9.2
 static const char STD_SEGMENT[] = "std";
 
-// The runtime, which every closure holds: the compiler loads it as a root of
-// its own beside the entry file, in a build and under `--check` alike, so it
-// is parsed, checked and emitted like any other module (D9.10, D13.1).
-// Membership does not bind the name: a module that wants to call it writes
-// `import std.rt;` like any other importer (D9.3).
+// The runtime, which every closure holds: the compiler loads it as a root of its
+// own beside the entry file, in a build and under `--check` alike, so it is
+// parsed, checked and emitted like any other module. Membership does not bind the
+// name: a module that wants to call it writes `import std.rt;` like any other
+// importer.
+// D9.3, D9.10, D13.1
 static const char RUNTIME_PATH[] = "std.rt";
 static const char RUNTIME_FILE[] = "rt.ft";
 
@@ -61,7 +66,8 @@ static str_t take(module_set_t* set, sb_t* b) {
 
 // The directory part of a path, without the trailing separator: the entry
 // file's directory is the first search root, and is the zero-length view when
-// the path has no directory part (D9.2, toolchain.md 4).
+// the path has no directory part (toolchain.md 4).
+// D9.2
 static str_t directory_of(str_t path) {
     uint64_t len = 0;
     bool separated = false;
@@ -72,9 +78,7 @@ static str_t directory_of(str_t path) {
         }
     }
     if (separated && len == 0) {
-        // An entry at the file system root keeps the separator: an empty root
-        // would make every candidate relative to the current directory, which
-        // is never a search root (D9.2).
+        // D9.2: an empty root would mean the current directory, never a root
         return str_from_range(path.ptr, 1);
     }
     return str_from_range(path.ptr, len);
@@ -102,8 +106,9 @@ static str_t base_name(str_t path) {
 }
 
 // Whether `base` holds the one character a module path is spelled with, the
-// `.` that the symbol splitting of D9.7 reads; every other character reaches
-// the symbol verbatim and cannot spell a path (D9.1).
+// `.` that the symbol mangling reads; every other character reaches the symbol
+// verbatim and cannot spell a path.
+// D9.1, D9.7
 static bool holds_path_separator(str_t base) {
     for (uint64_t i = 0; i < base.len; i++) {
         if (base.ptr[i] == PATH_SEPARATOR) {
@@ -113,14 +118,16 @@ static bool holds_path_separator(str_t base) {
     return false;
 }
 
-// The `i`-th segment of an import path: the path node holds one identifier
-// per segment, in source order (D9.1).
+// The `i`-th segment of an import path: the path node holds one identifier per
+// segment, in source order.
+// D9.1
 static str_t segment_at(const ast_node_t* path, uint64_t i) {
     return ast_child(path, i)->name;
 }
 
 // The first `n` segments joined with `.`, the spelling of a module path in a
-// diagnostic (D9.1).
+// diagnostic.
+// D9.1
 static str_t path_text(module_set_t* set, const ast_node_t* path, uint64_t n) {
     sb_t* b = &set->msg;
     sb_clear(b);
@@ -133,12 +140,13 @@ static str_t path_text(module_set_t* set, const ast_node_t* path, uint64_t n) {
     return take(set, b);
 }
 
-// `<dir>/<segments from..n joined with '/'>.ft` in `out`: the file the
-// segments name under one root, `/` standing for the `.` of the module path
-// (D9.1). A root of zero length, which the entry file's directory is when the
-// entry names no directory, contributes no separator (toolchain.md 4). The
-// result is a NUL-terminated view of `out`, valid until the next call on it,
-// so a path the loader only probes is never interned.
+// `<dir>/<segments from..n joined with '/'>.ft` in `out`: the file the segments
+// name under one root, `/` standing for the `.` of the module path. A root of
+// zero length, which the entry file's directory is when the entry names no
+// directory, contributes no separator (toolchain.md 4). The result is a
+// NUL-terminated view of `out`, valid until the next call on it, so a path the
+// loader only probes is never interned.
+// D9.1
 static str_t file_of(sb_t* out, str_t dir, const ast_node_t* path, uint64_t from, uint64_t n) {
     sb_clear(out);
     if (dir.len > 0) {
@@ -157,16 +165,18 @@ static str_t file_of(sb_t* out, str_t dir, const ast_node_t* path, uint64_t from
     return str_from_range(sb_cstr(out), out->len);
 }
 
-// Whether the path begins with the reserved segment `std` (D9.2).
+// Whether the path begins with the reserved segment `std`.
+// D9.2
 static bool is_std_path(const ast_node_t* path, uint64_t n) {
     return n > 0 && str_eq(segment_at(path, 0), str_from_cstr(STD_SEGMENT));
 }
 
-// The number of files the first `n` segments may name, one per search root
-// (D9.2). A path beginning with `std` has the one candidate in the standard
-// library directory, `std` naming that directory itself, so `import std;`
-// names no file at all; every other path is looked up in the entry file's
-// directory and the `-I` roots and never in the standard library.
+// The number of files the first `n` segments may name, one per search root. A
+// path beginning with `std` has the one candidate in the standard library
+// directory, `std` naming that directory itself, so `import std;` names no file
+// at all; every other path is looked up in the entry file's directory and the
+// `-I` roots and never in the standard library.
+// D9.2
 static uint64_t candidate_count(const module_set_t* set, const ast_node_t* path, uint64_t n) {
     if (n == 0) {
         return 0;
@@ -177,13 +187,13 @@ static uint64_t candidate_count(const module_set_t* set, const ast_node_t* path,
     return mem_add(1U, set->roots.len);
 }
 
-// The `i`-th candidate file of the first `n` segments, the roots in order
-// (D9.2), built into `out`.
+// The `i`-th candidate file of the first `n` segments, the roots in order,
+// built into `out`.
+// D9.2
 static str_t candidate_at(
     const module_set_t* set, sb_t* out, const ast_node_t* path, uint64_t n, uint64_t i) {
     if (is_std_path(path, n)) {
-        // `std` maps to the standard library directory itself, so `std.io`
-        // is `<std>/io.ft` (D9.2).
+        // D9.2: `std.io` is `<std>/io.ft`
         return file_of(out, set->std_dir, path, 1, n);
     }
     if (i == 0) {
@@ -248,8 +258,9 @@ static str_t read_source(module_set_t* set, str_t path, bool* ok) {
 }
 
 // The real path of a file, symbolic links and `..` resolved: a module's
-// identity (D9.2). A path realpath cannot resolve stands for itself, so a
-// file that vanished between the probe and here is still one module.
+// identity. A path realpath cannot resolve stands for itself, so a file that
+// vanished between the probe and here is still one module.
+// D9.2
 static str_t real_path(module_set_t* set, str_t path) {
     char* resolved = realpath(path.ptr, NULL);
     if (resolved == NULL) {
@@ -262,7 +273,8 @@ static str_t real_path(module_set_t* set, str_t path) {
 
 // ---- diagnostics (module-system.md 13) ----------------------------------------------
 
-// The position of an error without one in the file: 1:1 (D14.2).
+// The position of an error without one in the file: 1:1.
+// D14.2
 static loc_t file_start(str_t file) {
     return loc_make(file.ptr, 1, 1);
 }
@@ -309,8 +321,9 @@ static void error_no_declaration(module_set_t* set, loc_t at, str_t module, str_
     diag_error(at, msg_end(&set->msg));
 }
 
-// `cannot import 'x': it is an import of module 'a.b'`: the import bindings
-// of another module are not importable, there is no re-export (D9.3).
+// `cannot import 'x': it is an import of module 'a.b'`: the import bindings of
+// another module are not importable, there is no re-export.
+// D9.3
 static void error_not_exported(module_set_t* set, loc_t at, str_t module, str_t name) {
     msg_begin(&set->msg);
     msg_str(&set->msg, "cannot import ");
@@ -342,7 +355,8 @@ static void error_ambiguous(module_set_t* set,
 
 // `entry file name 'my.app' cannot contain '.'`: the entry base name is the
 // entry module's path, and a `.` in it spells another module's symbol prefix,
-// which the injectivity of D9.7 rests on (D9.1, module-system.md 2 and 13).
+// which the injectivity of the mangling rests on (module-system.md 2 and 13).
+// D9.1, D9.7
 static void error_entry_name_separator(module_set_t* set, loc_t at, str_t base) {
     char text[2];
     text[0] = PATH_SEPARATOR;
@@ -357,8 +371,8 @@ static void error_entry_name_separator(module_set_t* set, loc_t at, str_t base) 
 }
 
 // `module 'util.x' is the same file as module 'x'`: one file reached through
-// two module paths, a module's identity being the real path of its file
-// (D9.2).
+// two module paths, a module's identity being the real path of its file.
+// D9.2
 static void error_same_file(module_set_t* set, loc_t at, str_t path, str_t other, str_t real) {
     msg_begin(&set->msg);
     msg_str(&set->msg, "module ");
@@ -373,8 +387,9 @@ static void error_same_file(module_set_t* set, loc_t at, str_t path, str_t other
 }
 
 // `circular import: 'main' imports 'util' imports 'main'`, reported at the
-// import that closes the cycle (D9.5): the modules of the walk from the one
-// reached again, then that module once more.
+// import that closes the cycle: the modules of the walk from the one reached
+// again, then that module once more.
+// D9.5
 static void error_cycle(module_set_t* set, loc_t at, const module_t* reached) {
     uint64_t from = 0;
     for (uint64_t i = 0; i < set->stack.len; i++) {
@@ -395,8 +410,9 @@ static void error_cycle(module_set_t* set, loc_t at, const module_t* reached) {
 }
 
 // `redeclaration of 'add'`, pointing at the later of the two positions with a
-// note on the earlier one (D7.9, D14.2), which is what lets the declarations
-// of a file be collected before its import bindings are bound.
+// note on the earlier one, which is what lets the declarations of a file be
+// collected before its import bindings are bound.
+// D7.9, D14.2
 static void error_redeclaration(module_set_t* set, loc_t first, loc_t second, str_t name) {
     loc_t earlier = first;
     loc_t later = second;
@@ -415,32 +431,32 @@ static void error_redeclaration(module_set_t* set, loc_t first, loc_t second, st
     diag_note(earlier, msg_end(&set->msg));
 }
 
-// ---- the module namespace (D7.9) ------------------------------------------------------
+// ---- the module namespace -------------------------------------------------------------
+// D7.9
 
 // The binding kind of a top-level declaration; BIND_NONE for a node that is
 // none, which is what an AST_ERROR of a file with syntax errors will be.
 static bind_kind_t decl_kind(const ast_node_t* decl) {
     switch (decl->kind) {
     case AST_FN_DECL:
-        // `extern fn` declares a C function and is importable like any other
-        // declaration (D9.8).
+        // D9.8: `extern fn` is importable like any other declaration
         return (decl->flags & AST_FLAG_EXTERN) != 0 ? BIND_EXTERN_FN : BIND_FN;
     case AST_STRUCT_DECL:
         return BIND_STRUCT;
     case AST_ENUM_DECL:
         return BIND_ENUM;
     case AST_VAR_DECL:
-        // A module-level `Type NAME = init;` is a constant and `mut Type g` a
-        // global; both occupy one name (D7.10).
+        // D7.10: a constant and a `mut` global both occupy one name
         return BIND_VAR;
     default:
         return BIND_NONE;
     }
 }
 
-// Binds a name in the module namespace, reporting the collision of D7.9 when
-// it is taken: any two entries collide whatever their kinds, import bindings
+// Binds a name in the module namespace, reporting a collision when it is
+// taken: any two entries collide whatever their kinds, import bindings
 // included.
+// D7.9
 static binding_t* bind_name(module_set_t* set,
                             module_t* m,
                             str_t name,
@@ -454,12 +470,13 @@ static binding_t* bind_name(module_set_t* set,
     return bound;
 }
 
-// Collects the module's declarations into its namespace before its imports
-// are resolved, so that another module's symbol reading can ask whether this
-// one declares a name (module-system.md 3). Enum members are not names
-// (D3.9), so only the top-level declarations enter. Returns false when a
-// collision was reported; every collision of the module is reported first, as
-// they are that module's own errors (D14.2).
+// Collects the module's declarations into its namespace before its imports are
+// resolved, so that another module's symbol reading can ask whether this one
+// declares a name (module-system.md 3). Enum members are not names, so only the
+// top-level declarations enter. Returns false when a collision was reported;
+// every collision of the module is reported first, as they are that module's own
+// errors.
+// D3.9, D14.2
 static bool collect_declarations(module_set_t* set, module_t* m) {
     if (m->ast == NULL) {
         return true;
@@ -482,10 +499,11 @@ static bool collect_declarations(module_set_t* set, module_t* m) {
 
 static bool resolve_imports(module_set_t* set, module_t* m);
 
-// The module at `file` under the module path `path`, read, parsed and walked
-// if it is new; NULL after a diagnostic was reported at `at`. A module
-// already on the walk closes a cycle (D9.5) and a file already read under
-// another path is one file with two identities (D9.2).
+// The module at `file` under the module path `path`, read, parsed and walked if
+// it is new; NULL after a diagnostic was reported at `at`. A module already on
+// the walk closes a cycle and a file already read under another path is one file
+// with two identities.
+// D9.2, D9.5
 static module_t* load_module(module_set_t* set, str_t path, str_t file, loc_t at, bool entry) {
     int64_t known = 0;
     if (strmap_get(&set->by_path, path, &known)) {
@@ -497,9 +515,7 @@ static module_t* load_module(module_set_t* set, str_t path, str_t file, loc_t at
         return found;
     }
     if (set->stopped) {
-        // A module of the closure already has errors, so no further file is
-        // read and this import is left without a diagnostic of its own
-        // (D14.2).
+        // D14.2: the closure already has errors, so no further file is read
         return NULL;
     }
     bool readable = false;
@@ -531,14 +547,11 @@ static module_t* load_module(module_set_t* set, str_t path, str_t file, loc_t at
     (void)strmap_put(&set->by_real, m->real, (int64_t)set->modules.len);
     ptrvec_push(&set->modules, m);
 
-    // The parser recovers from a syntax error and hands back the tree of what
-    // parsed (D14.2), so whether the file parsed is the number of diagnostics
-    // the lexer and the parser reported, never the tree being NULL.
+    // D14.2: the diagnostic count says whether the file parsed, not NULL
     const uint64_t before = diag_count();
     tokvec_t toks;
     tokvec_init(&toks);
-    // A lexical error costs its line and lexing resumes at the next one, so
-    // the tokens cover the whole file and the parser runs either way (D14.2).
+    // D14.2: the tokens cover the file, so the parser runs either way
     (void)lex_file(m->file.ptr, m->source, &set->pool, &toks);
     m->ast = parse_module(m->file.ptr, toks.items, toks.len, &set->arena);
     tokvec_free(&toks);
@@ -555,8 +568,7 @@ static module_t* load_module(module_set_t* set, str_t path, str_t file, loc_t at
     if (!resolved) {
         return NULL;
     }
-    // Post-order: the module joins the dependency order once every module it
-    // imports is in it (D9.10).
+    // D9.10: post-order, so every import is in the order first
     m->state = MODULE_READY;
     ptrvec_push(&set->order, m);
     return m;
@@ -565,8 +577,9 @@ static module_t* load_module(module_set_t* set, str_t path, str_t file, loc_t at
 // ---- resolving one import (module-system.md 3) -----------------------------------------
 
 // Binds one declaration of another module under `as` name or its own, the
-// symbol reading of D9.3. The import bindings of that module are not
+// symbol reading of an import. The import bindings of that module are not
 // importable, there is no re-export.
+// D9.3
 static bool bind_symbol(module_set_t* set,
                         module_t* m,
                         const module_t* from,
@@ -592,12 +605,13 @@ static bool bind_symbol(module_set_t* set,
 }
 
 // Whether the file of the prefix module declares `name`, which is what the
-// symbol reading of D9.3 asks. A module the closure already holds answers from
-// its namespace, whose declarations are collected before its imports are
-// walked; any other file is read and parsed here alone, reporting nothing and
-// joining nothing, since the module reading may still win and a module outside
-// the closure is never read (module-system.md 3 and 10). A file that does not
-// parse declares nothing: the error belongs to whoever imports it for real.
+// symbol reading asks. A module the closure already holds answers from its
+// namespace, whose declarations are collected before its imports are walked; any
+// other file is read and parsed here alone, reporting nothing and joining
+// nothing, since the module reading may still win and a module outside the
+// closure is never read (module-system.md 3 and 10). A file that does not parse
+// declares nothing: the error belongs to whoever imports it for real.
+// D9.3
 static bool prefix_declares(module_set_t* set, str_t path, str_t file, str_t name) {
     if (set->stopped) {
         return false;
@@ -619,8 +633,7 @@ static bool prefix_declares(module_set_t* set, str_t path, str_t file, str_t nam
     tokvec_init(&toks);
     diag_mute();
     const uint64_t before = diag_count();
-    // The lexer resynchronises at the next line (D14.2), so the probe parses
-    // the tokens either way; a file that reported anything declares nothing.
+    // D14.2: a file that reported anything declares nothing
     (void)lex_file(file.ptr, source, &set->pool, &toks);
     const ast_node_t* probed = parse_module(file.ptr, toks.items, toks.len, &arena);
     if (probed != NULL && diag_count() == before) {
@@ -636,8 +649,9 @@ static bool prefix_declares(module_set_t* set, str_t path, str_t file, str_t nam
 }
 
 // `import a.b.{s1, s2 as t};` is sugar for independent symbol imports from
-// `a.b`, with the symbol reading forced: the prefix must be a module file
-// and every item one of its declarations (D9.3).
+// `a.b`, with the symbol reading forced: the prefix must be a module file and
+// every item one of its declarations.
+// D9.3
 static bool resolve_items(module_set_t* set, module_t* m, const ast_node_t* imp) {
     const ast_node_t* path = imp->a;
     const uint64_t n = ast_len(path);
@@ -660,16 +674,17 @@ static bool resolve_items(module_set_t* set, module_t* m, const ast_node_t* imp)
     return true;
 }
 
-// The two readings of `import a.b.c;` (D9.3): the module reading when
-// `a/b/c.ft` exists under some root, the symbol reading when `a/b.ft` exists
-// and declares `c`. Exactly one must succeed; a one-segment path has only the
-// module reading, since at most one trailing segment names a declaration.
+// The two readings of `import a.b.c;`: the module reading when `a/b/c.ft` exists
+// under some root, the symbol reading when `a/b.ft` exists and declares `c`.
+// Exactly one must succeed; a one-segment path has only the module reading, since
+// at most one trailing segment names a declaration.
 //
 // Only the module the import resolves to is loaded. When both files exist the
-// prefix is probed for the name alone, without being read into the closure,
-// so that an import that resolves to `a/b/c.ft` never inherits the errors, the
+// prefix is probed for the name alone, without being read into the closure, so
+// that an import that resolves to `a/b/c.ft` never inherits the errors, the
 // imports or the extern declarations of the unrelated module `a/b.ft`
 // (module-system.md 10).
+// D9.3
 static bool resolve_path(module_set_t* set, module_t* m, const ast_node_t* imp) {
     const ast_node_t* path = imp->a;
     const uint64_t n = ast_len(path);
@@ -710,12 +725,12 @@ static bool resolve_path(module_set_t* set, module_t* m, const ast_node_t* imp) 
 }
 
 // Resolves every import of the module, in source order; imports appear before
-// every declaration, which the parser has already enforced (D9.3).
+// every declaration, which the parser has already enforced.
 //
 // Every failing import of the module is reported, so that its errors appear
 // together, and `stopped` then keeps the remaining imports from reading any
-// further file: processing stops at the module boundary, which is what D14.2
-// asks of a module that has errors.
+// further file: processing stops at the module boundary.
+// D9.3, D14.2
 static bool resolve_imports(module_set_t* set, module_t* m) {
     if (m->ast == NULL) {
         return true;
@@ -800,7 +815,8 @@ bool module_set_is_ordered(const module_set_t* set, const module_t* m) {
 }
 
 // Whether the module belongs to the second group of the pass order: it parsed
-// and the loader never ordered it (D14.2).
+// and the loader never ordered it.
+// D14.2
 static bool is_unordered_pass_module(const module_set_t* set, const module_t* m) {
     return m->parsed && m->ast != NULL && !module_set_is_ordered(set, m);
 }
@@ -819,8 +835,7 @@ const module_t* module_set_pass_at(const module_set_t* set, uint64_t i) {
     if (i < set->order.len) {
         return (const module_t*)set->order.items[i];
     }
-    // The second group is read depth first, so it is visited in the reverse of
-    // the read order (D9.10).
+    // D9.10: read depth first, so visited in the reverse of read order
     uint64_t seen = set->order.len;
     for (uint64_t k = set->modules.len; k > 0; k--) {
         const module_t* m = (const module_t*)set->modules.items[k - 1];
@@ -837,7 +852,8 @@ const module_t* module_set_pass_at(const module_set_t* set, uint64_t i) {
 }
 
 // Every file read, whether or not its module parsed: a module is recorded
-// before it is lexed, so a file with errors is listed too (D20.2).
+// before it is lexed, so a file with errors is listed too.
+// D20.2
 uint64_t module_set_file_count(const module_set_t* set) {
     return set->modules.len;
 }
@@ -868,8 +884,8 @@ const module_t* module_set_entry(const module_set_t* set) {
 }
 
 // `<std-dir>/rt.ft`, the file of the runtime, in `out`. The runtime is
-// searched under the standard library directory like any other `std` module
-// (D9.2).
+// searched under the standard library directory like any other `std` module.
+// D9.2
 static str_t runtime_file(const module_set_t* set, sb_t* out) {
     sb_clear(out);
     sb_append_str(out, set->std_dir);
@@ -881,11 +897,12 @@ static str_t runtime_file(const module_set_t* set, sb_t* out) {
 }
 
 // Loads `std.rt` as a root of the closure, before the entry file, so that its
-// modules stand before the program's in the dependency order and a
-// diagnostic about two declarations of one C symbol names the program's
-// (D9.8, D9.10). A set with no standard library directory has no runtime to
-// load and no way to spell one, `import std.rt;` failing there already; the
-// driver always names a directory (toolchain.md 1).
+// modules stand before the program's in the dependency order and a diagnostic
+// about two declarations of one C symbol names the program's. A set with no
+// standard library directory has no runtime to load and no way to spell one,
+// `import std.rt;` failing there already; the driver always names a directory
+// (toolchain.md 1).
+// D9.8, D9.10
 static bool load_runtime(module_set_t* set) {
     if (set->std_dir.len == 0) {
         return true;
@@ -898,12 +915,13 @@ static bool load_runtime(module_set_t* set) {
     return load_module(set, path, file, file_start(file), false) != NULL;
 }
 
-// The module the runtime's closure already read at `real`, or NULL: the
-// entry file may be a file of that closure, `std/rt.ft` and `std/libc.ft`
-// being the two the repository holds. One file is one module (D9.2), so that
-// module is the entry rather than a second identity of the same file, which
-// is what `error_same_file` would otherwise report. It keeps the path the
-// runtime's import gave it, since a module path is what its importer wrote.
+// The module the runtime's closure already read at `real`, or NULL: the entry
+// file may be a file of that closure, `std/rt.ft` and `std/libc.ft` being the two
+// the repository holds. One file is one module, so that module is the entry
+// rather than a second identity of the same file, which is what `error_same_file`
+// would otherwise report. It keeps the path the runtime's import gave it, since a
+// module path is what its importer wrote.
+// D9.2
 static module_t* entry_already_read(module_set_t* set, str_t real) {
     int64_t at = 0;
     if (!strmap_get(&set->by_real, real, &at)) {
@@ -915,21 +933,21 @@ static module_t* entry_already_read(module_set_t* set, str_t real) {
 bool module_set_load(module_set_t* set, const char* entry) {
     const uint64_t before = diag_count();
     const str_t file = str_pool_intern(&set->pool, str_from_cstr(entry));
-    // The entry file's directory is always a search root and the current
-    // directory never is (D9.2).
+    // D9.2: the entry file's directory is a root, the current one never
     set->entry_dir = str_pool_intern(&set->pool, directory_of(file));
-    // The entry file's module path is its base name: `src/app.ft` is the
-    // module `app`. The base name need not be a path segment, since the entry
-    // file is named on the command line rather than reached by an import
-    // (D9.1, module-system.md 2), so `007_case.ft` is the module `007_case`,
-    // which no import path can spell.
+    // The entry file's module path is its base name: `src/app.ft` is the module
+    // `app`. The base name need not be a path segment, since the entry file is named
+    // on the command line rather than reached by an import (module-system.md 2), so
+    // `007_case.ft` is the module `007_case`, which no import path can spell.
+    // D9.1
     const str_t base = str_pool_intern(&set->pool, base_name(file));
     // The base name may not contain a `.`, the one character a module path is
     // spelled with: `my.app.ft` is the module `my.app`, whose `main` is the
-    // `my.app.main` that the module `my/app.ft` already emits (D9.1, D9.7).
-    // Every other character reaches the symbol verbatim, `my:app.ft` emitting
-    // `my:app.main`, which no module path can spell. The error has no position
-    // in the file, so it is reported at 1:1 (D14.2).
+    // `my.app.main` that the module `my/app.ft` already emits. Every other character
+    // reaches the symbol verbatim, `my:app.ft` emitting `my:app.main`, which no
+    // module path can spell. The error has no position in the file, so it is reported
+    // at 1:1.
+    // D9.1, D9.7, D14.2
     if (holds_path_separator(base)) {
         error_entry_name_separator(set, file_start(file), base);
         return false;
