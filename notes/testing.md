@@ -18,9 +18,13 @@ bullet at a time and without a rewrite.
   `tools/vm run 'pkill -f ctest'` or `pkill -f run_tests.py` ends the runs of the other agents as
   well, and each of them reads the kill as a test failure in their own branch. T-043 did it to
   stop its own gate and had to report the damage it could not undo. To stop a run of your own,
-  kill the host process you started (`pkill -f 'tools/vm gate'` matches only host shells, and even
-  that matches another agent's monitor loop, so prefer the pid the shell gave you); a guest
-  command then dies with its ssh session.
+  send TERM to the pid the shell gave you (`tools/vm gate > build/gate.log 2>&1 & pid=$!`, then
+  `kill -TERM "$pid"`); never `pkill -f 'tools/vm gate'`, which also matches every waiter that
+  quotes the command, and never INT, which a backgrounded script cannot trap (T-113). Since T-113
+  the gate ends its guest step within a second of the TERM and releases its hold on the worktree.
+  What a kill does **not** do is stop a ninja already running in the guest: `ssh -T` allocates no
+  pty, so the guest command gets no `SIGHUP` when the connection drops. A leftover build is made
+  harmless by the hold rather than prevented; `notes/environment.md` 1 says how to find one.
   **One worktree has one `build/<preset>`, so two gates in it collide** and the collision reads as
   a test failure rather than as contention: two ninja processes drive the same directory, one
   rewrites an object the other is linking, and the tail of the log names whichever test lost. The
