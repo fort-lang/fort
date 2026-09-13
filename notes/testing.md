@@ -402,7 +402,11 @@ bullet at a time and without a rewrite.
   names: `git diff main...HEAD -U0 | grep -cE '^\+.*[A-Z_]+_FILES *='` prints one line for each,
   which is the number a ticket must move. Read each new value off the failure of the tool that
   owns it and never compute one: two branches that raise one constant by the same step merge with
-  no conflict and are then both wrong.
+  no conflict and are then both wrong. T-107 measured that case on a rebase over T-077: five
+  counters conflicted and `PROGRAM_FILES` did not, because both branches had written 502 over the
+  501 they shared, and the answer is 503. **The one that does not conflict is the dangerous one**,
+  since nothing in the rebase asks you to look at it. So after a rebase read every counter of the
+  six off its own tool, not only the ones git stopped on.
   **The command anchors on the assignment and not on the start of the line, because one of these
   constants is not at the start of a line.** `test/parser_recovery_test.c` declares its
   `CORPUS_FILES` inside an `enum` line, so the earlier command,
@@ -427,7 +431,12 @@ bullet at a time and without a rewrite.
   diagnostics so it moves all three. A `run` test moves the total alone. So ask which kind of test
   you added before you count, and read
   `test/lang/run_tests.py --check-json --list | wc -l` and `| grep -c '^fail/'` for the second
-  pair rather than adding one to the comment.
+  pair rather than adding one to the comment. **Take one off that `wc -l`**: the last line `--list`
+  prints is its own summary (`222 tests`) and not a test, so the pipe answers 223 where the comment
+  says 222. T-107 read 641 and 223 for a branch whose numbers are 640 and 222, and found the
+  off-by-one only because the two moves disagreed: its two `run` tests raised the total by two and
+  the selected count by none, while `wc -l` claimed both had risen by one from a base one too high.
+  `| grep -c '^fail/'` counts no summary line and needs no correction.
   T-045 is the worked example and moved **eight lines**, in six files, over five different
   constants. Ten `.ft` files that stage1 checks clean and one `fail` test that it refuses took
   `FT_FILES` 876 to 887 on four lines, `CLEAN_FILES` 472 to 482, `PROGRAM_FILES` 492 to 501 --

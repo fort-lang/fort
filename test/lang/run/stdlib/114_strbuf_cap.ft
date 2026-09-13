@@ -1,0 +1,118 @@
+//! run
+//! stdout:
+//| 0 0 true
+//| 0 0 true
+//| 1 16 true
+//| 16 16 true
+//| 17 32 true
+//| 117 117 true
+//| 117 117 true
+//| 0 117 true
+//| 0 0 true
+//| 10 true
+//| 3 10 true
+//| 0 10 true
+//| 0 10 true
+//| 0 0 true
+//| 4 growths
+//| 96 32
+import std.strbuf;
+
+// strbuf.cap against stdlib.md 2.6: it answers the bytes the storage holds,
+// so cap(b) - b->len is the room a further append uses without growing.
+//
+// Why the test also reads the field. cap exists so that a caller need not
+// reach into the type, and the one thing that could make it useless is an
+// answer that differs from the field it stands for. Every line below prints
+// cap(&b) beside the equality cap(&b) == b.data.len, so the accessor is held
+// against the field at every step of the growth policy and not only at the
+// end.
+
+// One step: the bytes in use, the cap, and whether the cap is the field.
+fn void step(strbuf.str_buf* b) {
+    println(b->len, " ", strbuf.cap(b), " ", strbuf.cap(b) == b->data.len);
+}
+
+// The growth policy of 2.6 read through cap alone: 16 is the floor, a cap
+// doubles while doubling is enough, and a request above twice the cap takes
+// exactly what it asks for.
+fn void growth() {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    step(&b);
+    // reserve(0) on an empty buffer allocates nothing.
+    strbuf.reserve(&b, 0);
+    step(&b);
+    // The first byte takes the floor of sixteen.
+    strbuf.push(&b, 'a');
+    step(&b);
+    // Fifteen more fill it without growing.
+    for (u64 mut i = 1; i < 16; i += 1) {
+        strbuf.push(&b, 'a');
+    }
+    step(&b);
+    // The seventeenth doubles it.
+    strbuf.push(&b, 'a');
+    step(&b);
+    // Room for a hundred more at once: doubling to 64 is not enough, so the
+    // cap is exactly what the request needs and the hundred bytes fill it.
+    strbuf.reserve(&b, 100);
+    for (u64 mut i = 0; i < 100; i += 1) {
+        strbuf.push_byte(&b, cast('b', u8));
+    }
+    step(&b);
+    // Neither truncate nor clear lowers it; the storage stays for reuse.
+    strbuf.truncate(&b, 117);
+    step(&b);
+    strbuf.clear(&b);
+    step(&b);
+    // free is the one call that lowers it, back to the empty buffer.
+    strbuf.free(&b);
+    step(&b);
+}
+
+// with_cap answers its own argument, and take keeps the storage.
+fn void kept() {
+    strbuf.str_buf mut b = strbuf.with_cap(10);
+    defer strbuf.free(&b);
+    println(strbuf.cap(&b), " ", strbuf.cap(&b) == b.data.len);
+    // Three bytes into ten need no growth.
+    strbuf.append(&b, "abc");
+    step(&b);
+    string own text = strbuf.take(&b);
+    del(text);
+    step(&b);
+    // A reserve inside the room already there changes nothing.
+    strbuf.reserve(&b, 10);
+    step(&b);
+    strbuf.free(&b);
+    step(&b);
+}
+
+// What a program measures allocation with (T-063's arena bound): the cap is
+// the byte count a caller adds up, and it rises only when a buffer grows.
+fn void measured() {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut growths = 0;
+    u64 mut last = strbuf.cap(&b);
+    for (u64 mut i = 0; i < 96; i += 1) {
+        strbuf.push(&b, 'x');
+        if (strbuf.cap(&b) != last) {
+            growths += 1;
+            last = strbuf.cap(&b);
+        }
+    }
+    // The floor and three doublings: 16, 32, 64, 128. One with_cap(96) up
+    // front would have been one growth and a cap of 96, which is the trade a
+    // caller that bounds its arena reads off this call.
+    println(growths, " growths");
+    println(b.len, " ", strbuf.cap(&b) - b.len);
+}
+
+fn i32 main() {
+    growth();
+    kept();
+    measured();
+    return 0;
+}
