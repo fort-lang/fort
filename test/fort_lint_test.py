@@ -29,6 +29,7 @@ ROOT = TEST_DIR.parent
 DECISIONS_PATH = ROOT / "spec" / "decisions.md"
 sys.path.insert(0, str(ROOT / "tools"))
 
+import check_decisions  # noqa: E402
 import fort_lint  # noqa: E402
 
 FIXTURE_DIR = TEST_DIR / "fort_lint"
@@ -364,11 +365,11 @@ class KindTables(unittest.TestCase):
 
     def decision_kinds(self):
         text = DECISIONS_PATH.read_text(encoding="utf-8")
-        start = text.index("- **D20.3**")
-        following = re.compile(r"^- \*\*D", re.MULTILINE).search(text, start + 1)
-        bullet = text[start : following.start() if following else len(text)]
+        # The rule wraps at 100 columns, so the sentence is read with its
+        # whitespace collapsed and the search never depends on a line break.
+        rule = " ".join(check_decisions.rule_of(text, "D20.3").split())
         sentence = re.search(
-            r'`"kind"` is the kind of what the name denotes[^:]*:(.*?)\(D', bullet, re.DOTALL
+            r'`"kind"` is the kind of what the name denotes[^:]*:(.*?)\(D', rule, re.DOTALL
         )
         self.assertIsNotNone(sentence, "D20.3 no longer spells its kind list the same way")
         return set(re.findall(r"`([^`]*)`", sentence.group(1)))

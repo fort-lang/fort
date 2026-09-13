@@ -2,7 +2,8 @@
 """Unit tests of the TextMate grammar in editors/vscode/syntaxes/fort.tmLanguage.json.
 
 Two things are checked. First, drift: the keyword and reserved lists of D2.4
-and the operator list of D2.10 are read out of spec/decisions.md and compared
+and the operator list of D2.10 are read out of the rule field of each entry
+of spec/decisions.md, through tools/check_decisions.py, and compared
 with the sets the grammar names, so an amendment to the decision log that the
 grammar does not follow fails the build. The grammar writes keywords as one
 word group, `\\b(?:a|b)\\b`, and operators as one alternation of literals,
@@ -28,11 +29,16 @@ library only; Python 3.12.
 import dataclasses
 import json
 import re
+import sys
 import unittest
 from pathlib import Path
 
 TEST_DIR = Path(__file__).resolve().parent
 ROOT = TEST_DIR.parent
+sys.path.insert(0, str(ROOT / "tools"))
+
+import check_decisions  # noqa: E402
+
 GRAMMAR_PATH = ROOT / "editors" / "vscode" / "syntaxes" / "fort.tmLanguage.json"
 DECISIONS_PATH = ROOT / "spec" / "decisions.md"
 FIXTURE_DIR = TEST_DIR / "highlight"
@@ -108,17 +114,10 @@ class Token:
     scopes: tuple
 
 
-def decision_bullet(text, tag):
-    """Return the text of the `- **Dn.m**` bullet named by tag."""
-    start = text.index(f"- **{tag}**")
-    following = re.compile(r"^- \*\*D", re.MULTILINE).search(text, start + 1)
-    return text[start : following.start() if following else len(text)]
-
-
 def decision_lexicon(text):
     """Read the D2.4 keyword and reserved lists and the D2.10 operator list."""
-    spans = re.findall(r"`([^`]*)`", decision_bullet(text, "D2.4"), re.DOTALL)
-    operators = re.search(r"`([^`]*)`", decision_bullet(text, "D2.10"), re.DOTALL)
+    spans = re.findall(r"`([^`]*)`", check_decisions.rule_of(text, "D2.4"), re.DOTALL)
+    operators = re.search(r"`([^`]*)`", check_decisions.rule_of(text, "D2.10"), re.DOTALL)
     return Lexicon(
         keywords=frozenset(spans[0].split()),
         reserved=frozenset(spans[1].split()),
@@ -307,7 +306,7 @@ def invalid_tokens(tokens):
 def marker_declarations(text, tag):
     """Return the declarations in the first column of a decision's marker table."""
     rows = []
-    for line in decision_bullet(text, tag).split("\n"):
+    for line in check_decisions.rule_of(text, tag).split("\n"):
         match = re.match(r"\s*\|\s*`([^`]+)`\s*\|", line)
         if match:
             rows.append(match.group(1))

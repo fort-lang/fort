@@ -162,6 +162,25 @@ above. T-101 rewrites them; until it lands, a file holds citations of both shape
   (new decision number or amended decision with a note), then in the specification document that
   owns the topic, then in the tests under `test/lang/`. Specification text never contains "TBD",
   "pending" or "not finalized"; deferred features live only in decision D15.
+- **The shape of a decision entry** (T-100): `### Dn.m Title`, then `- owner:` (the specification
+  document that carries the full prose), then `- rule:` (the rule itself), then the optional
+  `- rationale:` (why the rule is this one) and `- history:` (one dated note for each amendment,
+  oldest first, and for each reading of the rule that a ticket had to settle -- D4.4 carries such a
+  note from T-041, which changes no word of the rule and records how an `f32` context reads it).
+  An entry always has an owner and a rule. `tools/check_decisions.py` checks that
+  shape and the ctest `check_decisions` runs it over the log. An amendment rewrites the `rule` so
+  that it states the rule in force, and appends a note to `history` that says what the rule said
+  before: `Amended YYYY-MM-DD (T-nnn): <what changed>`. Never leave a stale sentence in the rule
+  for the history to correct, and never delete the note that records the old text.
+- **Moving text inside the decision log**: the risk of an edit to `spec/decisions.md` is a changed
+  meaning, which no build and no test can see. `tools/check_decisions.py --against <old file>`
+  compares the words of every entry between two revisions of the log. It fails on an entry whose
+  words changed, and on an entry whose words only moved, because a permutation keeps every word and
+  can still invert a rule: "widening extends, narrowing truncates" and "narrowing extends, widening
+  truncates" are one multiset and two rules. Run it over a copy of the file before the edit, and
+  name each entry the ticket edits on purpose: `--allow Dn.m` for a changed word and
+  `--allow-move Dn.m` for words that only move between the fields. The flags are the record of
+  what the ticket did, and the tool prints the difference each one excused.
 - **Renaming a term**: sweep the stem, not the word. `grep -rni slice` never matches "Slicing",
   so a rename of `slice` to `span` must sweep `slic` (and any other inflected stem) with
   `grep -rni` before the criterion is ticked; markdown width is not covered by the gate, so run the

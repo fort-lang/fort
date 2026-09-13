@@ -481,6 +481,26 @@ set_tests_properties(lines_selftest PROPERTIES
     LABELS unit
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+# The shape of the decision log (label unit): every entry is `### Dn.m Title`
+# with an owner field and a rule field, and no line is over 100 columns
+# (T-100). The log is normative, so a malformed entry is a defect the gate
+# must see; test/highlight_test.py and test/fort_lint_test.py read rules out
+# of it through the same parser.
+add_test(NAME check_decisions
+    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/check_decisions.py"
+            "${CMAKE_SOURCE_DIR}/spec/decisions.md" --expect 144
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(check_decisions PROPERTIES LABELS unit)
+
+# Its own unit tests (label unit): the two readers, every problem the lint
+# reports, and the before-and-after comparison that T-100 was accepted on.
+add_test(NAME check_decisions_selftest
+    COMMAND "${FORT_PYTHON3}" -m unittest check_decisions_test
+    WORKING_DIRECTORY "${FORT_TEST_DIR}")
+set_tests_properties(check_decisions_selftest PROPERTIES
+    LABELS unit
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 # The D1.4 identifier check over the project's own fort sources (label unit):
 # tools/fort_lint.py reads `fort --index` (D20.3) rather than tokenizing fort a
 # second time, so it needs the compiler this build made.

@@ -447,7 +447,12 @@ bullet at a time and without a rewrite.
 
 - The TextMate grammar is checked by `test/highlight_test.py` (ctest `highlight_selftest`, label
   `unit`, run from `test/`): it reads the D2.4 keyword lists and the D2.10 operator list out of
-  `spec/decisions.md` and the same sets out of the grammar, so the two cannot drift. That only
+  `spec/decisions.md` and the same sets out of the grammar, so the two cannot drift. It reads them
+  through `check_decisions.rule_of`, which returns the `rule` field of one entry, and
+  `test/fort_lint_test.py` reads the D20.3 kind list the same way (T-100): a test that opens the
+  decision log calls that one parser rather than matching the entry shape itself, and it collapses
+  the whitespace of the rule before it searches for a sentence, because the rule wraps at 100
+  columns and a line break must not decide whether a test passes. That only
   works while the rules keep their canonical shapes, `\b(?:a|b)\b` for keywords and `(?:\+|-)`
   for operators; a rule whose scope is in a keyword or operator family but whose pattern matches
   neither shape fails the test. Its other half is a small TextMate engine that asserts the scopes
