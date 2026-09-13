@@ -74,8 +74,23 @@ without a rewrite.
   against a normal 23, with parent PID 1. The two look the same from the outside as the failure
   they cause, which is a slow gate or a test that times out. The check is two commands:
 
-      ps -eo pid,ppid,etime,command | grep "tools/vm gate"
+      ps -eo pid,etime,command | awk '$3=="/bin/bash" && $4 ~ /tools\/vm$/ && $5=="gate"'
       lsof -a -p <pid> -d cwd        # names the worktree it belongs to
+
+  **Match the process whose command *is* the gate, not every line that mentions it.** A plain
+  `grep "tools/vm gate"` also matches every waiter, because a waiter's command line quotes the
+  gate command it waits for. On 2026-09-12 it reported three gates when one was running: four of
+  the five matches were `sleep` loops. This is the same failure as the bullet below -- a bare
+  pattern answering confidently about the wrong subject -- and here it misled the coordinator
+  rather than a waiter.
+
+  A third shape of the same failure, which cost a wrong number rather than a wrong wait: a `||`
+  path fallback reads the wrong tree. From inside `.worktrees/fort-<id>`, `../../test/foo.py`
+  **is** the main checkout, so `grep X ../../test/foo.py || grep X test/foo.py` never reaches the
+  fallback and answers about `main` while the reader believes it answered about the branch. It
+  reported `CORPUS_FILES = 604` off `main` for a branch whose value is 615. Nothing failed; the
+  number was simply wrong. Name the file you mean, and read one tree per command so the output
+  says which tree answered.
 
   A parent of 1 is an orphan. An elapsed time past 30 minutes on a gate is suspect, because a full
   gate takes about 23 minutes. The working directory in `lsof` says whether the process is yours
