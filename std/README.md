@@ -7,9 +7,13 @@ failure lines, and formats and buffers what the print family writes, all over `s
 `spec/toolchain.md` 5 owns its entry points and `spec/stdlib.md` 3 owns the four that the rest
 of the library calls),
 `std.mem`, `std.str`, `std.sys`, `std.strbuf` (the growable buffer), `std.vec` (`ptr_vec`,
-`int_vec` and the non-generic container pattern), `std.strmap` (the open-addressing table) and
-`std.io` (descriptors, whole files and streams) are written; `std.math` arrives with ticket
-T-042.
+`int_vec` and the non-generic container pattern), `std.strmap` (the open-addressing table),
+`std.io` (descriptors, whole files and streams) and `std.math` (the integer limits, the float
+bit casts and the per-type `abs`, `min` and `max`) are written.
+
+`std.math` holds f64 and f32 functions, so the C bootstrap refuses it as it refuses
+`std.rt_float` (D18.1): a program that imports `std.math` is one stage1 rejects whole, whatever
+part of the module it uses, and its tests are in `test/lang/bootstrap-unsupported.txt` (T-042).
 
 `std.rt` is the only runtime there is. A `print`, a `new` and a `panic` are calls to its entry
 points, which the compiler emits by their mangled names (D9.7, D12.2), and the module declares no

@@ -376,7 +376,16 @@ bullet at a time and without a rewrite.
   enough". All four carry the same `FT_FILES` equality, so a ticket that adds or removes a `.ft`
   file changes **four** lines in the same commit, and `diff_check.sh` and `diff_ir.sh` each carry
   a second equality, `CLEAN_FILES` and `PROGRAM_FILES`, because a comparison that shrank would
-  otherwise pass while seeing less.
+  otherwise pass while seeing less. `diff_ast.sh` carries three more, one for each construct
+  stage1 alone refuses: `NESTED_FILES`, `FORM_FILES` (a `do`-`while` or a `?:`) and
+  `FLOAT_FILES`. So a `.ft` that uses one of the three moves two constants and not one, and
+  T-042 moved **seven lines** for eleven files, four constants over five files: `FT_FILES` 842 to
+  853 on four lines, `FORM_FILES` 12 to 13 for `std/math.ft`, `FLOAT_FILES` 63 to 67 for four
+  tests, and `CORPUS_FILES` 604 to 615 in `test/highlight_test.py`. Count the lines and not the
+  names: `git diff main...HEAD -U0 | grep -E '^\+[A-Z_]*FILES'` prints one line for each, which
+  is the number a ticket must move. Read each new value off the failure of the tool that owns it and
+  never compute one: two branches that raise one constant by the same step merge with no
+  conflict and are then both wrong.
 - **A ported pass is judged on its diagnostics one by one, with a script and not a reading.**
   For every message the ported file builds -- each `check_error` text and each run of `msg_str`
   pieces between `check_msg_begin` and `check_msg_end` -- ask whether any suite under `test/fort`

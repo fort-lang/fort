@@ -356,6 +356,31 @@ compiler that has no floats never reads it and `tools/diff_ir.sh` keeps comparin
 both compilers build. What that costs is one ctest of its own, `fort_lint_float`, since the lint
 runs the compiler without floats over `std/*.ft` and cannot check that one.
 
+`std/math.ft` is the second such module (T-042) and it costs more, because an `import std.math`
+is an ordinary import and no closure rule hides it: stage1 parses the whole closure, so it
+refuses every program that imports the module, with
+`not supported by the bootstrap compiler: ?:` pointing into `std/math.ft`, even when the program
+names no float and calls `abs_i32` alone. Every test of the module is therefore in
+`test/lang/bootstrap-unsupported.txt` and stage2 alone runs them. A library module that holds a
+float and that programs import by name has this shape; one that only the compiler loads for a
+closure, as `std.rt_float` is, does not.
+
+**The consequence costs a build: no module of `src/fort/` may import `std.math`, and no std
+module in the closure of `src/fort` may either.** stage1 compiles `src/fort` into stage2, so such
+an import makes stage1 refuse the compiler itself and the bootstrap stops. `src/fort` imports
+`std.io`, `std.libc`, `std.mem`, `std.str`, `std.strbuf`, `std.strmap` and `std.sys`, and
+`std.rt` through them, so those seven and `std.rt` are closed against `std.math` as well.
+
+The rule is wider than the compiler: **a std module that a stage1-compiled program imports may
+not import `std.math` either**, or stage1 refuses that program. The worked example is in the
+tree. `std/vec.ft:10` declares a private `u64 U64_MAX = 18446744073709551615;`, which duplicates
+`math.U64_MAX` digit for digit, and **that duplicate must stay**: 16 files under `test/lang`
+import `std.vec` (`grep -rl 'import std.vec' test/lang`), none of them is in `xfail.txt` or in
+`bootstrap-unsupported.txt`, so stage1 compiles all 16 and an `import std.math` in `std/vec.ft`
+would refuse all 16 at once. The tidy-up that deletes the duplicate is the change to refuse.
+Copy the limit into the module that needs it, with a comment naming this rule, until stage1 is
+gone.
+
 ## 8. The port to fort
 
 - **`src/fort` is written re-entrant** (D20.5), because a language server is a planned consumer of

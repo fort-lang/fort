@@ -1,0 +1,55 @@
+//! run
+//! stdout:
+//| true true true true
+//| true true true
+//| 0.0 -0.0 true
+//| true true true true true true
+//| true true
+//| 4607182418800017408 9223372036854775808
+import std.math;
+
+// math.f64_bits and math.f64_from_bits (stdlib.md 2.9). They reinterpret the
+// bytes and convert nothing, which is what separates them from a cast (D3.14):
+// cast(1.0, u64) is 1 and f64_bits(1.0) is the IEEE 754 encoding of 1.0.
+//
+// Each encoding below is written as the hexadecimal the standard gives, and the
+// test holds the function against it in both directions. A test that only
+// round-tripped would pass with the two functions swapped, so the constants are
+// here.
+u64 ONE = 0x3FF0000000000000;
+u64 TWO = 0x4000000000000000;
+u64 HALF = 0x3FE0000000000000;
+u64 MINUS_ONE = 0xBFF0000000000000;
+u64 NEGATIVE_ZERO = 0x8000000000000000;
+u64 SMALLEST_SUBNORMAL = 0x0000000000000001;
+u64 LARGEST_FINITE = 0x7FEFFFFFFFFFFFFF;
+
+fn i32 main() {
+    // The encoding a value has.
+    println(math.f64_bits(1.0) == ONE, " ", math.f64_bits(2.0) == TWO, " ",
+            math.f64_bits(0.5) == HALF, " ", math.f64_bits(-1.0) == MINUS_ONE);
+
+    // The value an encoding has.
+    println(math.f64_from_bits(ONE) == 1.0, " ", math.f64_from_bits(TWO) == 2.0,
+            " ", math.f64_from_bits(MINUS_ONE) == -1.0);
+
+    // A zero and a negative zero are equal and their encodings are not, which
+    // is the one thing a comparison cannot see and these functions can.
+    f64 negative_zero = math.f64_from_bits(NEGATIVE_ZERO);
+    println(0.0, " ", negative_zero, " ", negative_zero == 0.0);
+    println(math.f64_bits(0.0) == 0, " ", math.f64_bits(negative_zero) == NEGATIVE_ZERO,
+            " ", math.f64_bits(-0.0) == NEGATIVE_ZERO, " ", math.f64_bits(0.0) != math.f64_bits(-0.0),
+            " ", math.f64_from_bits(0) == 0.0, " ", negative_zero < 1.0);
+
+    // The two ends of the finite range: the smallest subnormal above zero and
+    // the largest finite value. Both survive the trip through a u64.
+    f64 subnormal = math.f64_from_bits(SMALLEST_SUBNORMAL);
+    f64 largest = math.f64_from_bits(LARGEST_FINITE);
+    println(math.f64_bits(subnormal) == SMALLEST_SUBNORMAL && subnormal > 0.0, " ",
+            math.f64_bits(largest) == LARGEST_FINITE && largest > 0.0);
+
+    // The decimal of an encoding, so that one line of this test fails on a
+    // wrong value rather than on a wrong comparison.
+    println(math.f64_bits(1.0), " ", math.f64_bits(-0.0));
+    return 0;
+}

@@ -1,0 +1,81 @@
+//! run
+//! stdout:
+//| true true true true
+//| true true true
+//| 0.0 -0.0 true true
+//| true true
+//| true true
+//| 1065353216 2147483648
+//| inf -inf nan nan
+//| true true true true
+//| true true true true
+import std.math;
+
+// math.f32_bits and math.f32_from_bits (stdlib.md 2.9): the same pair as
+// run/stdlib/097 one width down, over a u32 rather than a u64.
+//
+// The f32 encodings are written as the hexadecimal the standard gives. A float
+// literal takes the type of its context (D6.12), so `f32 one = 1.0;` is the f32
+// nearest 1.0 and needs no cast.
+u32 ONE = 0x3F800000;
+u32 TWO = 0x40000000;
+u32 HALF = 0x3F000000;
+u32 MINUS_ONE = 0xBF800000;
+u32 NEGATIVE_ZERO = 0x80000000;
+u32 SMALLEST_SUBNORMAL = 0x00000001;
+u32 LARGEST_FINITE = 0x7F7FFFFF;
+u32 INF = 0x7F800000;
+u32 NEGATIVE_INF = 0xFF800000;
+u32 QUIET_NAN = 0x7FC00000;
+u32 SIGNALLING_NAN = 0x7FA00000;
+
+fn i32 main() {
+    f32 one = 1.0;
+    f32 two = 2.0;
+    f32 half = 0.5;
+    f32 minus_one = -1.0;
+    println(math.f32_bits(one) == ONE, " ", math.f32_bits(two) == TWO, " ",
+            math.f32_bits(half) == HALF, " ", math.f32_bits(minus_one) == MINUS_ONE);
+
+    println(math.f32_from_bits(ONE) == one, " ", math.f32_from_bits(TWO) == two,
+            " ", math.f32_from_bits(MINUS_ONE) == minus_one);
+
+    // The signed zeros of an f32, which compare equal and encode differently.
+    f32 zero = 0.0;
+    f32 negative_zero = math.f32_from_bits(NEGATIVE_ZERO);
+    println(zero, " ", negative_zero, " ", negative_zero == zero, " ",
+            math.f32_bits(zero) != math.f32_bits(negative_zero));
+
+    // The two ends of the finite range of an f32.
+    f32 subnormal = math.f32_from_bits(SMALLEST_SUBNORMAL);
+    f32 largest = math.f32_from_bits(LARGEST_FINITE);
+    println(math.f32_bits(subnormal) == SMALLEST_SUBNORMAL && subnormal > zero, " ",
+            math.f32_bits(largest) == LARGEST_FINITE && largest > zero);
+
+    // An f32 and an f64 of one value have different encodings, so the two pairs
+    // of functions are not interchangeable.
+    println(math.f32_bits(one) == ONE, " ", math.f64_bits(1.0) != cast(ONE, u64));
+
+    println(math.f32_bits(one), " ", math.f32_bits(negative_zero));
+
+    // The values outside the finite range. std.math names no f32 infinity and
+    // no f32 NaN, so f32_from_bits is the one way a program reaches them, and
+    // the pair must carry them unchanged. An f32 NaN is the width where a trip
+    // through an f64 shows: the conversion quietens a signalling NaN and moves
+    // its payload, so both NaNs are held against their own encoding here.
+    f32 inf = math.f32_from_bits(INF);
+    f32 negative_inf = math.f32_from_bits(NEGATIVE_INF);
+    f32 quiet_nan = math.f32_from_bits(QUIET_NAN);
+    f32 signalling_nan = math.f32_from_bits(SIGNALLING_NAN);
+    println(inf, " ", negative_inf, " ", quiet_nan, " ", signalling_nan);
+    println(math.f32_bits(inf) == INF, " ", math.f32_bits(negative_inf) == NEGATIVE_INF,
+            " ", math.f32_bits(quiet_nan) == QUIET_NAN, " ",
+            math.f32_bits(signalling_nan) == SIGNALLING_NAN);
+
+    // An infinity is above every finite f32 and a NaN is equal to nothing,
+    // itself included, which is what says these are the values the encodings
+    // name and not a large number.
+    println(inf > largest, " ", negative_inf < -largest, " ",
+            quiet_nan != quiet_nan, " ", signalling_nan != signalling_nan);
+    return 0;
+}

@@ -340,12 +340,13 @@ set_tests_properties(lang-stage2 PROPERTIES LABELS lang)
 # with a golden index.json beside it, held against that file byte for byte
 # (D20.2, D20.3). It is the oracle of the json and index ports (T-093).
 #
-# What it covers and what it does not. --check-json selects 200 of the 559
-# tests: the 198 `fail` tests, which have diagnostics, and the 2 tests with a
+# What it covers and what it does not. --check-json selects 221 of the 628
+# tests: the 219 `fail` tests, which have diagnostics, and the 2 tests with a
 # golden index beside them. So the document of a **clean** compile is
-# exercised here by two tests, and the diagnostics half by all 198. The three
+# exercised here by two tests, and the diagnostics half by all 219. The three
 # numbers are read off `run_tests.py --check-json --list`; the pair before
-# T-043 (194 of 538, 192 fail tests) counted the fail tests wrong as well.
+# T-043 (194 of 538, 192 fail tests) counted the fail tests wrong as well, and
+# T-042 re-measured all three after the corpus had grown past 200 of 559.
 # Against a
 # golden the comparison is stricter than a diff of two compilers for the value
 # and the order of every record, since it holds both compilers against a file
@@ -512,13 +513,14 @@ set_tests_properties(fort_lint PROPERTIES
     LABELS unit
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
 
-# The one source the ctest above leaves out: std/rt_float.ft holds floats and
-# the C bootstrap rejects them (D18.1), so stage2 lints it. It is label lang
-# rather than unit because it runs stage2, an x86-64 binary, under qemu, and it
-# names --std-dir because the library does not stand beside that binary.
+# The two sources the ctest above leaves out: std/math.ft and std/rt_float.ft
+# hold floats and the C bootstrap rejects them (D18.1, T-042), so stage2 lints
+# them. It is label lang rather than unit because it runs stage2, an x86-64
+# binary, under qemu, and it names --std-dir because the library does not stand
+# beside that binary.
 add_test(NAME fort_lint_float
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
-            --fort "${FORT_STAGE2_BINARY}" --std-dir "${FORT_STD_DIR}" std/rt_float.ft
+            --fort "${FORT_STAGE2_BINARY}" --std-dir "${FORT_STD_DIR}" std/math.ft std/rt_float.ft
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(fort_lint_float PROPERTIES LABELS lang)
 
@@ -561,7 +563,7 @@ add_custom_target(check-lang
     COMMAND ${FORT_LANG_STAGE2_COMMAND}
     COMMAND ${FORT_LANG_STAGE2_COMMAND} --check-json
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
-            --fort "${FORT_STAGE2_BINARY}" --std-dir "${FORT_STD_DIR}" std/rt_float.ft
+            --fort "${FORT_STAGE2_BINARY}" --std-dir "${FORT_STD_DIR}" std/math.ft std/rt_float.ft
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_tokens.sh" "${CMAKE_BINARY_DIR}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ast.sh" "${CMAKE_BINARY_DIR}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_check.sh" "${CMAKE_BINARY_DIR}"
@@ -630,7 +632,7 @@ add_custom_target(fort-lint
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
             --fort "$<TARGET_FILE:fort>"
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
-            --fort "${FORT_STAGE2_BINARY}" --std-dir "${FORT_STD_DIR}" std/rt_float.ft
+            --fort "${FORT_STAGE2_BINARY}" --std-dir "${FORT_STD_DIR}" std/math.ft std/rt_float.ft
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Checking the identifier conventions of D1.4 in the project's fort"
     VERBATIM

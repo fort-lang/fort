@@ -1,0 +1,71 @@
+//! run
+//! stdout:
+//| inf -inf nan
+//| true true true
+//| true true true true
+//| false false false false
+//| true false false false
+//| true true true
+//| true true true true
+//| nan nan
+//| inf -inf inf
+import std.math;
+
+// math.f64_inf, math.f64_nan and math.is_nan (stdlib.md 2.9). The two
+// producers are functions and not constants because a call is not a constant
+// expression (D4.6) and no float literal denotes either value (D6.12).
+u64 INF_BITS = 0x7FF0000000000000;
+u64 NAN_BITS = 0x7FF8000000000000;
+// A NaN with the sign bit set and a NaN with the quiet bit clear. Neither is
+// what f64_nan returns, and is_nan must answer true for both, since it is a
+// comparison and not a test of the pattern.
+u64 NEGATIVE_NAN_BITS = 0xFFF8000000000000;
+u64 SIGNALLING_NAN_BITS = 0x7FF4000000000000;
+
+fn i32 main() {
+    f64 inf = math.f64_inf();
+    f64 nan = math.f64_nan();
+    println(inf, " ", -inf, " ", nan);
+
+    // The encodings stdlib.md 2.9 names, so the two functions answer for their
+    // bytes and not only for the way the printer shows them (D11.7).
+    println(math.f64_bits(inf) == INF_BITS, " ", math.f64_bits(nan) == NAN_BITS,
+            " ", inf == math.f64_from_bits(INF_BITS));
+
+    // An infinity is ordered above every finite value and is its own square.
+    println(inf > 1.7976931348623157e308, " ", -inf < -1.7976931348623157e308,
+            " ", inf * inf == inf, " ", 1.0 / inf == 0.0);
+
+    // A NaN is not equal to anything, itself included, and it is not ordered.
+    println(nan == nan, " ", nan < nan, " ", nan > nan, " ", nan == 0.0);
+
+    // is_nan is `x != x`, so it is true for a NaN and false for everything
+    // else, an infinity included.
+    println(math.is_nan(nan), " ", math.is_nan(inf), " ", math.is_nan(0.0), " ",
+            math.is_nan(-1.5));
+
+    // A NaN made another way is a NaN to this function too: the arithmetic ones
+    // carry a different payload and the test is a comparison and not a
+    // pattern.
+    f64 zero = 0.0;
+    f64 largest = 1.7976931348623157e308;
+    println(math.is_nan(zero / zero), " ", math.is_nan(inf - inf), " ",
+            math.is_nan(inf * zero));
+
+    // The other NaNs: one with the sign bit set and one with the quiet bit
+    // clear. is_nan answers true for both, and f64_bits returns each encoding
+    // unchanged, so neither was quietened or normalised on the way.
+    f64 negative_nan = math.f64_from_bits(NEGATIVE_NAN_BITS);
+    f64 signalling_nan = math.f64_from_bits(SIGNALLING_NAN_BITS);
+    println(math.is_nan(negative_nan), " ", math.is_nan(signalling_nan), " ",
+            math.f64_bits(negative_nan) == NEGATIVE_NAN_BITS, " ",
+            math.f64_bits(signalling_nan) == SIGNALLING_NAN_BITS);
+
+    // Every NaN prints as `nan`, the sign bit included, since D11.7 lists
+    // `inf`, `-inf` and `nan` and no `-nan`.
+    println(negative_nan, " ", signalling_nan);
+
+    // An infinity survives arithmetic that a finite value does not.
+    println(inf + 1.0, " ", -inf - 1.0, " ", largest * 2.0);
+    return 0;
+}

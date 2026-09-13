@@ -71,12 +71,12 @@ SOURCE_SETS = (
 SOURCE_GLOBS = tuple(glob for glob, _ in SOURCE_SETS)
 
 # The sources the default set leaves out, with the reason. `std/rt_float.ft`
-# holds floats, which the C bootstrap rejects (D18.1), and the ctest `fort_lint`
-# runs this tool with that compiler; the ctest `fort_lint_float` runs it with
-# stage2 over exactly this file, so nothing goes unlinted. A file named on the
-# command line is linted whatever this tuple says, which is how that second
-# ctest reaches it.
-SKIPPED = ("std/rt_float.ft",)
+# and `std/math.ft` hold floats, which the C bootstrap rejects (D18.1, T-042),
+# and the ctest `fort_lint` runs this tool with that compiler; the ctest
+# `fort_lint_float` runs it with stage2 over exactly these files, so nothing
+# goes unlinted. A file named on the command line is linted whatever this tuple
+# says, which is how that second ctest reaches them.
+SKIPPED = ("std/math.ft", "std/rt_float.ft")
 MAX_COLUMNS = 100
 
 LOWER_CASE = re.compile(r"\A[a-z_][a-z0-9_]*\Z")

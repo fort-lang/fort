@@ -773,13 +773,13 @@ class IncludeRoots(unittest.TestCase):
             matched = {p for p in fort_lint.collect(ROOT, (glob,)) if p.resolve() not in skipped}
             self.assertTrue(matched <= set(paths), glob)
 
-    def test_the_float_runtime_is_left_to_the_compiler_that_has_floats(self):
-        """std/rt_float.ft holds floats and the C bootstrap rejects them
-        (D18.1), so the default set leaves it out and the ctest
-        fort_lint_float lints it with stage2. A skipped file that does not
-        exist would be a typo nothing reports, so it is checked as well."""
+    def test_the_float_modules_are_left_to_the_compiler_that_has_floats(self):
+        """std/math.ft and std/rt_float.ft hold floats and the C bootstrap
+        rejects them (D18.1, T-042), so the default set leaves them out and the
+        ctest fort_lint_float lints them with stage2. A skipped file that does
+        not exist would be a typo nothing reports, so it is checked as well."""
         files = {path.relative_to(ROOT).as_posix() for path, _ in fort_lint.default_file_set(ROOT)}
-        self.assertEqual(fort_lint.SKIPPED, ("std/rt_float.ft",))
+        self.assertEqual(fort_lint.SKIPPED, ("std/math.ft", "std/rt_float.ft"))
         for name in fort_lint.SKIPPED:
             self.assertNotIn(name, files)
             self.assertTrue((ROOT / name).is_file(), name)
