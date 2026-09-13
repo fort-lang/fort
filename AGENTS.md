@@ -187,6 +187,14 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
   into the repository root behind a green gate, and the review that called its scope clean had read
   the commit before the fix round that added them. `git diff --stat main...HEAD` before every
   merge, and look for what is new rather than what changed.
+  Two things the coordinator does before it removes the worktree. **Write the gate's numbers
+  into the ticket log, not the path of its log file.** The log lives under the worktree and dies
+  with it, so a criterion that cites `build/gate.log` cites nothing an hour later; write the exit
+  status, the `grep -c "self-hosted"` count and the ctest line instead. And **re-read every count
+  constant that two branches both moved.** A constant both branches raised by the same step merges
+  with no conflict and is then silently wrong: two branches each took `CLEAN_FILES` from 393 to
+  394, git saw one value, and the truth was 395. After the second merge of a branch that adds or
+  removes a `.ft` file, run the tool that owns each count and read the number off its failure.
 
 ### Self-Updating Context (the routing rule)
 
