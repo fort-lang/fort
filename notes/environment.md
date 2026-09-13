@@ -16,10 +16,12 @@ without a rewrite.
   `tools/vm`: `up` creates, provisions and starts the VM and caches its ssh config; `halt` stops
   it; `destroy [-f]` removes it (the box stays installed); `provision` re-runs
   `tools/provision.sh`; `status` and `ssh` do what they say.
-- The VM directory (whose `Vagrantfile` and `.vagrant/` are used) is `$FORT_VM_DIR` if set,
+- The VM directory (whose `Vagrantfile` and `.vagrant/`, or `.vagrant-<slot>/`, are used) is
+  `$FORT_VM_DIR` if set,
   otherwise the main checkout of the current repository, so every worktree shares one VM. It is
   `/vagrant` in the guest and worktrees are `/vagrant/.worktrees/<name>`. The VirtualBox machine
-  is named `fort-dev-<directory name>` (`fort-dev-fort` for the main checkout), so a VM brought
+  is named `fort-dev-<directory name>` (`fort-dev-fort` for the main checkout, `fort-dev-fort-2`
+  for slot 2), so a VM brought
   up from another directory does not collide with it; destroy one before bringing up the other
   if memory is tight. `FORT_VM_CPUS` (default 6) and `FORT_VM_MEMORY` (MiB, default 8192) size
   the VM at `up`.
@@ -29,23 +31,15 @@ without a rewrite.
   subcommands (`configure`, `build`, `test`, `workflow`, the targets below and `gate`) run at
   the top of the host git worktree containing the cwd and default to the `debug` preset. Every
   guest command sources `/etc/profile.d/fort.sh` and disables core dumps.
-- **Give a ticket its own VM.** `$FORT_VM_DIR` selects the VM directory and the VirtualBox machine
-  is named `fort-dev-<directory name>`, so a worktree that exports `FORT_VM_DIR="$PWD"` gets a
-  machine of its own that cannot collide with the main checkout's. Measured on 2026-09-12, on a
-  host with 10 CPUs and 32 GiB: `FORT_VM_DIR="$PWD" FORT_VM_CPUS=4 FORT_VM_MEMORY=8192
-  tools/vm up` creates, provisions and boots in **99 s**, and one preset from cold -- configure,
-  build and ctest -- takes **6 m 22 s** on 4 CPUs, so a three-preset gate is about 19 minutes.
-  A shared 6-CPU VM ran the same gate in 22 to 30 minutes **because four agents were queuing on
-  it**. So a dedicated smaller machine is both faster and predictable, and provisioning is cheap
-  enough to do per ticket.
-  Two VMs at 4 CPUs and 8 GiB leave the host 2 CPUs and 16 GiB. Three at 3 CPUs fit the arithmetic
-  and were the wrong shape while one qemu program took 63 s of a 60 s budget: the harness runs
-  `-j 6`, and a 3-CPU machine oversubscribes. T-094 split that program into six, the longest of
-  which runs 6.7 s, so the margin is now a factor of nine rather than a factor of 0.95.
-- **A worktree chooses its VM before it configures, and cannot change its mind cheaply.**
-  `/vagrant` is the main checkout on the shared machine and the worktree root on its own, so every
-  absolute path in the CMake cache is bound to that choice. Switching later means deleting
-  `build/` and rebuilding from scratch. Free for a new worktree; wasteful for one mid-ticket.
+- **A per-ticket VM (`FORT_VM_DIR="$PWD"` inside a worktree) is retired; use a slot instead**
+  (T-114, below). It is kept here as history because its measurements still hold: on 2026-09-12,
+  on a host with 10 CPUs and 32 GiB, `FORT_VM_DIR="$PWD" FORT_VM_CPUS=4 FORT_VM_MEMORY=8192
+  tools/vm up` created, provisioned and booted in **99 s**, and one preset from cold took
+  **6 m 22 s** on 4 CPUs, against 22 to 30 minutes for a three-preset gate on a shared 6-CPU VM
+  **because four agents were queuing on it**. What retired it: it mounted one worktree at
+  `/vagrant`, so `git` did not work in the guest and every absolute path in the CMake cache was
+  bound to that mapping -- switching later meant deleting `build/` -- and T-101's was left running
+  idle for hours after its ticket merged. A slot keeps the speed and loses all three costs.
 - **What one shared VM cost on 2026-09-12**, so the trade is on the record: four agents gating at
   once drove the load to 19 on 6 CPUs, produced two false red gates that each cost an hour of
   diagnosis, and made one agent run `pkill -f ctest` in a machine three other worktrees were
@@ -106,7 +100,31 @@ without a rewrite.
   log); or, where a pattern is unavoidable, put the worktree path in it
   (`pgrep -f "fort-t094.*tools/vm gate"`). A bare pattern makes every agent's waiter a dependency
   on every other agent's build, which looks exactly like contention and is not (T-094).
+  **Prefer the first shape** (T-113). The second failed four times on 2026-09-13: two waiters polled
+  `build/gate*.log` in worktrees deleted hours earlier (one for 11 h 12 m), one polled `gate.log`
+  for a line the run wrote to `gate2.log`, and one polled an abandoned run whose green line could
+  never appear -- and each looked exactly like a job still running. A marker waiter is the
+  fallback for a job you did not start, and it needs a second condition that ends it.
 
+- **Two VMs, both from the main checkout, selected by `FORT_VM_SLOT`** (T-114, set by the user
+  on 2026-09-13: two VMs at all times, both in use). The host has 10 physical cores and one
+  6-vCPU guest cannot reach the other four, so slot 2 is a second VM brought up from the **same**
+  directory: `FORT_VM_SLOT=2 tools/vm up`. Both mount the main checkout at `/vagrant`, so both
+  see every worktree and `git` works in both; a `build/` configured under one slot builds under
+  the other, because the mapping is identical. **One condition: both guests must carry the same
+  toolchain.** `Vagrantfile` pins the box as `>= 202510.26.0`, which is open-ended. CMake caches
+  `CMAKE_C_COMPILER_VERSION` and does not re-detect a changed compiler at the same path. So two
+  guests provisioned weeks apart could mix objects in one `build/`, and nothing would report it.
+  Bring both slots up from one box version, or delete `build/` when they differ. What differs
+  between slots is only vagrant's state directory
+  (`.vagrant-2/`, through `VAGRANT_DOTFILE_PATH`) and the machine name (`fort-dev-fort-2`). Slot
+  2 is sized 4 vCPUs and 8 GB, so 6 + 4 fits the cores exactly and 16 GB of 32 leaves room.
+  This replaces the per-ticket VM (`FORT_VM_DIR` inside a worktree, T-100 and T-101), which
+  mounted one worktree, had no working `git`, bound its build directory to that mapping, and was
+  left running idle for hours once. Two rules. **The coordinator tells each ticket its slot**, so
+  two long gates land on different slots. And the Vagrantfile vagrant reads is the **main
+  checkout's**, so a change to it is live only after it merges -- a slot-2 `up` run from a
+  branch that added the slot logic failed with "machine fort-dev-fort already exists".
 - **Every `tools/vm` subcommand that drives `build/<preset>` holds its worktree, and a build is
   stopped with TERM** (T-113). The perimeter is `configure`, `build`, `test`, `workflow`, `check`,
   `check-lang`, `check-all`, `format`, `format-check`, `tidy`, `lines` and `gate`. **`run` and

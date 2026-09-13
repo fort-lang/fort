@@ -32,9 +32,11 @@ The cmake subcommands run at the top of the host git worktree; the preset
 defaults to debug. The VM directory is $FORT_VM_DIR, or else the main checkout
 of the current git repository; the host cwd must be inside it for ssh, run and
 the cmake subcommands. It appears as /vagrant in the guest. FORT_VM_CPUS and
-FORT_VM_MEMORY size the VM at `up`. Every subcommand that drives build/<preset>
-holds the worktree in build/vm-hold.pid and refuses to run beside another; stop
-a build with kill -TERM, never INT. A guest command that exits 255 is
+FORT_VM_MEMORY size the VM at `up`; FORT_VM_SLOT=2 selects a second VM brought
+up from the same directory (default cpus 4), see notes/environment.md 1. Every
+subcommand that drives build/<preset> holds the worktree in build/vm-hold.pid
+and refuses to run beside another; stop a build with kill -TERM, never INT. A
+guest command that exits 255 is
 indistinguishable from a failed ssh connection and is re-run via vagrant ssh.
 EOF
 }
@@ -96,7 +98,30 @@ esac
 VM_DIR=$(find_vm_dir) || exit 1
 [ -f "$VM_DIR/Vagrantfile" ] || die "no Vagrantfile in $VM_DIR"
 
-SSH_CONFIG="$VM_DIR/.vagrant/ssh-config"
+# FORT_VM_SLOT selects one of several VMs brought up from the same directory.
+# Both mount the same directory at /vagrant, so each sees every worktree and
+# git works in each; what differs is only vagrant's state directory and the
+# VirtualBox machine name (fort-dev-<dir>-<slot>). Slot 1, the default, is the
+# original layout, so nothing changes for a caller that never sets it. A
+# second slot exists to use the host cores one 6-vCPU guest cannot reach, and
+# the gate hold below keeps two slots from ever driving one worktree at once.
+VM_SLOT=${FORT_VM_SLOT:-1}
+case "$VM_SLOT" in
+[1-9]) ;;
+*) die "FORT_VM_SLOT must be a single digit 1-9, not '$VM_SLOT'" ;;
+esac
+if [ "$VM_SLOT" = 1 ]; then
+    VM_STATE="$VM_DIR/.vagrant"
+    unset VAGRANT_DOTFILE_PATH FORT_VM_SLOT
+else
+    VM_STATE="$VM_DIR/.vagrant-$VM_SLOT"
+    export VAGRANT_DOTFILE_PATH="$VM_STATE"
+    export FORT_VM_SLOT="$VM_SLOT"
+    # 6 + 4 fits the host's 10 physical cores exactly; 6 + 6 oversubscribes by two
+    # and is the contention the second slot exists to remove.
+    export FORT_VM_CPUS="${FORT_VM_CPUS:-4}"
+fi
+SSH_CONFIG="$VM_STATE/ssh-config"
 
 vagrant_cmd() {
     VAGRANT_CWD="$VM_DIR" vagrant "$@"
@@ -104,7 +129,7 @@ vagrant_cmd() {
 
 cache_ssh_config() {
     local tmp
-    mkdir -p "$VM_DIR/.vagrant"
+    mkdir -p "$VM_STATE"
     tmp=$(mktemp "$SSH_CONFIG.XXXXXX") || return 1
     if vagrant_cmd ssh-config > "$tmp"; then
         mv "$tmp" "$SSH_CONFIG"
