@@ -5,8 +5,10 @@
 // One run of `fort --check --json <file>` answers a document opened and a
 // document saved (D20.1, D20.2), its diagnostics are published into one
 // collection, and a run that produces no document leaves the last ones standing
-// and says why in the output channel. There is no setting, no language server
-// and no state beyond the collection: the compiler is the whole interface.
+// and says why in the output channel. There is no setting and no language
+// server: the compiler is the whole interface. The only state beside the
+// collection is the ordering of the events, which is what keeps an older
+// answer from painting over a newer one.
 //
 // VS Code runs on the host and the compiler runs in the development VM, and the
 // repository already owns that crossing: `tools/vm run <command>` runs a command
@@ -37,16 +39,27 @@ const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 let collection = null;
 let output = null;
 
-// Every run takes a number, and two maps read it, because a check answers about
-// a whole closure and not only about the file it was given. `runOf` is the run
-// last started for each checked file, which drops a superseded run whole --
-// its failure included, so a dead run cannot report over a live one. And
-// `publishedAt` is the run each file's diagnostics were last published from,
-// which is what keeps an older run of one file from repainting a newer answer
-// about another file its closure also names.
+// Every event takes a number, and three maps read it. A check answers about a
+// whole closure and not only about the file it was given, so the ordering is
+// per published file.
+//
+// `runOf` is the run last started for each checked file. It drops a superseded
+// run whole, its failure included, so a dead run cannot report over a live one.
+//
+// `publishedAt` is what was last said about each file: `{at, by}`, the number of
+// the event and the checked file whose run painted it. `by` is null when the
+// last event painted nothing, which today is a close. `at` keeps an older run of
+// one file from repainting a newer answer about another file its closure also
+// names. `by` says whose paint is on the file, and only that run asks again
+// about it.
+//
+// `closureOf` is the set of files each check published about. Its difference
+// with the next check of that same file is the set of files that have left that
+// closure. Each of those is checked in its own right.
 const runOf = new Map();
 const publishedAt = new Map();
-let runs = 0;
+const closureOf = new Map();
+let events = 0;
 
 function activate(context) {
   collection = vscode.languages.createDiagnosticCollection('fort');
@@ -65,6 +78,9 @@ function activate(context) {
 function deactivate() {
   runOf.clear();
   publishedAt.clear();
+  closureOf.clear();
+  pending.length = 0;
+  recheckRunning = false;
 }
 
 // A fort file the editor holds as a file on disk, which is what the compiler
@@ -73,11 +89,30 @@ function isFortFile(document) {
   return document.languageId === 'fort' && document.uri.scheme === 'file';
 }
 
+// A close drops the file's squiggles and any run of it still in flight. It must
+// not drop the file's place in the ordering. Deleting the `publishedAt` entry
+// would let a run older than the close repaint the file the close has just
+// cleared. The close is therefore an event like a run, and the newest word about
+// that file, painted by nobody.
+//
+// A file this window knows nothing about is left alone. It was never checked
+// and never painted, so there is nothing to clear and nothing to order. A file
+// outside every workspace folder is exactly that file. The test is the
+// bookkeeping itself and not the folder. A file painted while its folder was
+// open is therefore still cleared if that folder has left the workspace.
+//
+// Each map then holds one entry per file this window has checked or published
+// about. None of them holds one entry per event. The keys are file paths, so a
+// file opened and closed a hundred times is the one entry it already had.
+// `deactivate` drops all three with the window.
 function forget(document) {
   if (!isFortFile(document)) return;
-  runOf.delete(document.uri.fsPath);
-  publishedAt.delete(document.uri.fsPath);
-  collection.delete(vscode.Uri.file(document.uri.fsPath));
+  const filePath = document.uri.fsPath;
+  if (!publishedAt.has(filePath) && !runOf.has(filePath)) return;
+  runOf.delete(filePath);
+  events += 1;
+  publishedAt.set(filePath, { at: events, by: null });
+  collection.delete(vscode.Uri.file(filePath));
 }
 
 // How the compiler is reached, which is the one thing about it that could be
@@ -89,11 +124,13 @@ function forget(document) {
 // `tools/vm run` hands to a shell, so the file is quoted for it.
 // `done` is given the command line as the reader could paste it, the spawn error
 // if there was one, and the two output streams.
-function spawnCheck(folder, relativePath, done) {
+function spawnCheck(folder, relativePath, roots, done) {
   // `tools/vm` of the workspace folder itself, which costs about a tenth of a
   // second per run and needs no configuration of its own.
   const tool = path.join(folder, 'tools', 'vm');
-  const guest = COMPILER + ' --check --json ' + shellQuote(relativePath);
+  let guest = COMPILER + ' --check --json';
+  for (const root of roots) guest += ' -I ' + shellQuote(root);
+  guest += ' ' + shellQuote(relativePath);
   const args = ['run', guest];
   const options = { cwd: folder, timeout: CHECK_TIMEOUT_MS, maxBuffer: MAX_OUTPUT_BYTES };
   childProcess.execFile(tool, args, options, (error, stdout, stderr) => {
@@ -107,28 +144,43 @@ function shellQuote(word) {
   return "'" + word.split("'").join("'\\''") + "'";
 }
 
-// One check of the document. The compiler runs in a child process and its answer
-// arrives in the callback, so nothing waits on the VM; the publishing that
-// follows does read each answered file from disk, which is the text the columns
-// of the document are counted in. A file outside every workspace folder is
-// skipped: `tools/vm run` works in the directory matching its own, and there is
-// nothing to say about a file that has none.
+// One check of the document the editor hands over. A file outside every
+// workspace folder is skipped. `tools/vm run` works in the directory matching
+// its own, and there is nothing to say about a file that has none.
 function run(document) {
   if (!isFortFile(document)) return;
-  const filePath = document.uri.fsPath;
   const folder = folderOf(document.uri);
   if (folder === null) return;
-  runs += 1;
-  const generation = runs;
+  startCheck(document.uri.fsPath, folder, [], null);
+}
+
+// One check of `filePath`, named relative to the workspace folder `folder`. The
+// compiler runs in a child process and its answer arrives in the callback, so
+// nothing waits on the VM. The publishing that follows does read each answered
+// file from disk, which is the text the columns of the document are counted in.
+//
+// An open and a save start a check here, and so does a file leaving a closure.
+// The three are the same event: a run of the compiler over one file, with a
+// number of its own. `roots` are the `-I` directories the run carries, which an
+// open and a save leave empty and a re-check fills (see `rootsFor`). `onDone`
+// is called when the answer has been dealt with, whatever it was, which is how
+// the queue of re-checks knows the slot is free.
+function startCheck(filePath, folder, roots, onDone) {
+  events += 1;
+  const generation = events;
   runOf.set(filePath, generation);
-  spawnCheck(folder, path.relative(folder, filePath), (result) => {
-    if (runOf.get(filePath) !== generation) return;
-    const answer = check.parseDocument(result.stdout);
-    if (answer === null) {
-      report(result);
-      return;
+  spawnCheck(folder, path.relative(folder, filePath), roots, (result) => {
+    try {
+      if (runOf.get(filePath) !== generation) return;
+      const answer = check.parseDocument(result.stdout);
+      if (answer === null) {
+        report(result);
+        return;
+      }
+      publish(filePath, folder, generation, roots, answer);
+    } finally {
+      if (onDone !== null) onDone();
     }
-    publish(folder, generation, answer);
   });
 }
 
@@ -139,20 +191,125 @@ function folderOf(uri) {
 }
 
 // The diagnostics of every file of the closure that lies in the workspace
-// folder, which clears the squiggles of a file that is now clean (D20.2). Their
-// columns are byte columns of the text the compiler read, which is the file on
-// disk and not a buffer edited since, so that is what they are converted
+// folder, which clears the squiggles of a file that is now clean (D20.2). The
+// columns are byte columns of the text the compiler read. That text is the file
+// on disk and not a buffer edited since, so that is what they are converted
 // against.
-function publish(folder, generation, document) {
+//
+// A file that has left this closure is checked in its own right after that. The
+// client publishes what a document says and decides nothing else
+// (`spec/toolchain.md` 9.2). It therefore neither clears such a file nor leaves
+// a guess on it. It asks the compiler about that file and publishes the answer.
+// The old squiggles stand until the answer arrives, as they do after any save.
+function publish(entryPath, folder, generation, roots, document) {
   const byFile = check.diagnosticsByFile(document, folder, fileLines);
   for (const [file, items] of byFile) {
-    // A later run may have answered about this file already -- a check of the
-    // file itself, or of another file whose closure holds it -- and that answer
-    // is the newer one and stands.
-    const published = publishedAt.get(file);
-    if (published !== undefined && published > generation) continue;
-    publishedAt.set(file, generation);
+    if (!mayReplace(file, generation)) continue;
+    publishedAt.set(file, { at: generation, by: entryPath });
     collection.set(vscode.Uri.file(file), items.map(toVsDiagnostic));
+  }
+  // The closure is what the compiler read and not what was published. A
+  // diagnostic may name a file the compiler never read (`spec/toolchain.md`
+  // 9.2). Such a file is in no closure, so it leaves none.
+  const closure = new Set(check.filesUnder(document, folder));
+  const departed = departedFrom(entryPath, closure);
+  closureOf.set(entryPath, closure);
+  if (departed.length === 0) return;
+  const childRoots = rootsFor(entryPath, folder, roots);
+  for (const file of departed) queueRecheck(file, folder, childRoots, entryPath);
+}
+
+// The `-I` directories a file that leaves this closure is checked with. A
+// module is not a file that can be checked on its own. The first search root is
+// always the directory of the file the compiler was given (D9.2). A module in
+// `util/` that imports its sibling as `util.chars` therefore resolves that
+// import only from the directory the original entry file sits in. That
+// directory goes on the command line as `-I`, ahead of the roots this run
+// carried itself, which is the order D9.2 searches them in.
+//
+// This is faithful wherever one directory is enough. It is not faithful in
+// general: the directory of the file being checked stays the first root, and no
+// option removes it. A layout that repeats a path prefix, `util/util/chars.ft`
+// beside `util/chars.ft`, makes this run read the nearer file. Only a project
+// model would settle that, and this extension has none (T-092).
+function rootsFor(entryPath, folder, roots) {
+  const own = path.relative(folder, path.dirname(entryPath));
+  const all = [own === '' ? '.' : own];
+  for (const root of roots) {
+    if (!all.includes(root)) all.push(root);
+  }
+  return all;
+}
+
+// Whether this run may write about `file`. A later event may have spoken about
+// it already. That word is the newer one and stands. It comes from a check of
+// the file itself, from a check of another file whose closure holds it, or from
+// a close of it.
+function mayReplace(file, generation) {
+  const published = publishedAt.get(file);
+  return published === undefined || published.at <= generation;
+}
+
+// The files this same check painted last time and does not name now, which is
+// what a removed `import` leaves behind. The squiggles of `mathx.ft` came from a
+// walk of `main.ft`'s closure, and that walk no longer reaches `mathx.ft`. Each
+// of them is checked in its own right, and `stillNamed` is the closure this run
+// did reach.
+//
+// Which of them is asked about is `drainRechecks`'s to say, and it says it in
+// one place. A run asks again about the paint it put there itself and about no
+// other paint. An error that a check of `mathx.ft` itself reported already has a
+// run behind it. A file the user has closed carries a `by` of null.
+//
+// The cost is one run for each file this entry painted and no longer names.
+// Each answer paints those files in the name of the file that was checked. This
+// entry therefore cannot name them again until an `import` brings them back.
+// The chain that a re-check starts is finite for the same reason. A run of
+// `mathx.ft` asks again only about what `mathx.ft` itself painted, and the
+// import relation is acyclic (D9.5).
+//
+// A close wants this same set with an empty `stillNamed`, which is T-106.
+function departedFrom(entryPath, stillNamed) {
+  const before = closureOf.get(entryPath);
+  const departed = [];
+  if (before === undefined) return departed;
+  for (const file of before) {
+    if (!stillNamed.has(file)) departed.push(file);
+  }
+  return departed;
+}
+
+// The re-checks a departure asks for, one at a time. A closure can be wide:
+// `src/fort/main.ft` reads 23 files of this repository, so deleting one
+// `import` departs 22 files at once. Each run opens its own ssh connection to
+// the guest, `tools/vm` multiplexing nothing. 22 at once on a six-CPU VM is a
+// storm the reader gains nothing from. The queue runs them one after another,
+// off the UI thread. An open and a save still go out at once, the reader being
+// the one waiting for those.
+//
+// A queued file takes its number when its run starts, like every other event.
+// The precondition is tested there and not when the file was queued. The one
+// rule is that a run asks again about its own paint: `by` must still name the
+// file whose departure queued this. Another run may have painted the file since,
+// or the user may have closed it, and in both cases nothing is asked.
+const pending = [];
+let recheckRunning = false;
+
+function queueRecheck(filePath, folder, roots, by) {
+  pending.push({ filePath, folder, roots, by });
+  drainRechecks();
+}
+
+function drainRechecks() {
+  while (!recheckRunning && pending.length > 0) {
+    const next = pending.shift();
+    const published = publishedAt.get(next.filePath);
+    if (published === undefined || published.by !== next.by) continue;
+    recheckRunning = true;
+    startCheck(next.filePath, next.folder, next.roots, () => {
+      recheckRunning = false;
+      drainRechecks();
+    });
   }
 }
 
@@ -219,4 +376,15 @@ function reason(error) {
   return error.message;
 }
 
-module.exports = { activate, deactivate };
+// The size of each map, for the test that measures the bookkeeping. VS Code
+// calls `activate` and `deactivate` and nothing else.
+function bookkeeping() {
+  return {
+    runOf: runOf.size,
+    publishedAt: publishedAt.size,
+    closureOf: closureOf.size,
+    pending: pending.length,
+  };
+}
+
+module.exports = { activate, bookkeeping, deactivate };

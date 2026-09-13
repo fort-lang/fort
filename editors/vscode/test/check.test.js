@@ -287,6 +287,94 @@ test('a note about a file outside the folder is dropped and its error kept', () 
   assert.deepEqual(byFile.get(MAIN)[0].notes, []);
 });
 
+// The other direction of the same document, and the asymmetry this pins. An
+// error the editor cannot show takes its notes with it. That holds for a note
+// that points at a file the reader has open. 9.2 licenses dropping the
+// diagnostics of a file the client cannot open, and nothing else. The severity
+// `note` belongs to a note that follows no error (D20.2), which this one does
+// not. Publishing it alone would show `previous declaration here` with its
+// error nowhere on the screen.
+test('a note in the folder is dropped with the outside error it followed', () => {
+  const document = {
+    version: 1,
+    files: ['main.ft'],
+    diagnostics: [
+      {
+        file: '/vagrant/build/release/std/io.ft',
+        line: 1,
+        col: 1,
+        end_line: 1,
+        end_col: 2,
+        severity: 'error',
+        message: 'conflicting declarations of print',
+        notes: [
+          {
+            file: 'main.ft',
+            line: 1,
+            col: 1,
+            end_line: 1,
+            end_col: 7,
+            message: 'previous declaration here',
+          },
+        ],
+      },
+    ],
+  };
+  const byFile = check.diagnosticsByFile(document, PROJECT, linesOnDisk);
+  // main.ft keeps the empty entry its place in `files` gives it, and nothing
+  // else: an empty entry clears, and clearing is what 9.2 licenses.
+  assert.deepEqual([...byFile.keys()], [MAIN]);
+  assert.deepEqual(byFile.get(MAIN), []);
+});
+
+// The error in the reader's own file keeps its place when the note is the one
+// outside. The error says what is wrong, and the note only says where else to
+// look. The compiler produces that direction today: it checks the standard
+// library before the module that imports it.
+test('an error in the folder outlives the outside note it carried', () => {
+  const document = {
+    version: 1,
+    files: ['main.ft'],
+    diagnostics: [
+      {
+        file: 'main.ft',
+        line: 1,
+        col: 1,
+        end_line: 1,
+        end_col: 7,
+        severity: 'error',
+        message: 'conflicting declarations of print',
+        notes: [
+          {
+            file: '/vagrant/build/release/std/io.ft',
+            line: 1,
+            col: 1,
+            end_line: 1,
+            end_col: 2,
+            message: 'previous declaration here',
+          },
+          {
+            file: 'mathx.ft',
+            line: 1,
+            col: 1,
+            end_line: 1,
+            end_col: 4,
+            message: 'and here',
+          },
+        ],
+      },
+    ],
+  };
+  const byFile = check.diagnosticsByFile(document, PROJECT, linesOnDisk);
+  const items = byFile.get(MAIN);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].severity, 'error');
+  // The note that points into the folder stays. The one that points out of it
+  // goes, and no entry is made for the file it named.
+  assert.deepEqual(items[0].notes.map((note) => note.message), ['and here']);
+  assert.equal(items[0].notes[0].file, MATHX);
+});
+
 // A path that climbs out of the folder is outside it however it is spelled, and
 // the folder itself is not a file.
 test('being under the folder is answered on the resolved path', () => {
@@ -303,6 +391,37 @@ test('a relative path is resolved against the directory of the checked file', ()
   assert.equal(check.resolveDocumentPath('mathx.ft', PROJECT), MATHX);
   assert.equal(check.resolveDocumentPath('./mathx.ft', PROJECT), MATHX);
   assert.equal(check.resolveDocumentPath(MAIN, PROJECT), MAIN);
+});
+
+// ---- the closure ------------------------------------------------------------
+
+// `"files"` is what the compiler read, and the client remembers it as the
+// closure. The standard library is in every closure and its paths name the
+// guest, so the folder is what decides.
+test('the closure holds the files of the document that lie in the folder', () => {
+  const document = check.parseDocument(DOCUMENT);
+  assert.ok(document.files.some((file) => file.startsWith('/vagrant/')));
+  assert.deepEqual(check.filesUnder(document, PROJECT), [MAIN, MATHX]);
+});
+
+test('a file of the closure outside the folder is left out', () => {
+  const document = {
+    version: 1,
+    files: ['main.ft', '/vagrant/build/release/std/io.ft', '../lexical.ft', 'mathx.ft'],
+    diagnostics: [],
+  };
+  assert.deepEqual(check.filesUnder(document, PROJECT), [MAIN, MATHX]);
+});
+
+// The order is the compiler's, which is an imported module before its importers
+// (D9.10), and a relative path resolves against the folder like any other.
+test('the closure keeps the order the compiler read the files in', () => {
+  const document = {
+    version: 1,
+    files: ['mathx.ft', './main.ft'],
+    diagnostics: [],
+  };
+  assert.deepEqual(check.filesUnder(document, PROJECT), [MATHX, MAIN]);
 });
 
 // ---- the grouping -----------------------------------------------------------

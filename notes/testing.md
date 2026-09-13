@@ -577,6 +577,17 @@ bullet at a time and without a rewrite.
   whose tests are still staged or untracked reads as the ratio of the commits before them. That
   number is smaller than the truth, and it sends an implementor off to write tests the branch
   already has. Commit first, then measure.
+- `tools/lines.py` does not see `editors/`. A branch that changes the VS Code extension alone
+  therefore has no figure from the tool, and the criterion is met by hand. Count with `git diff
+  --numstat main...HEAD` and the tool's own convention: net lines, raw `wc -l`, comments and blank
+  lines counted on both sides. T-092 measured 208 net source lines against 710 net test lines,
+  which is 3.41. Its first count reported 2.70, because it compared added lines with added lines
+  and dropped the deletions. State the two numbers and the command; do not report a figure per
+  non-comment line, which no tool here uses. Count the corpus figure on `main` and not on the
+  branch. The extension measured 496 source lines against 1154 test lines there, which is 2.33.
+  That figure lags for the same reason the repository figure does: the per-ticket rule is not
+  retroactive. The branch figure is the one the criterion asks for. T-089 and T-092 both
+  rediscovered this rule.
 - The ratio is a prompt, not a verdict: what a review asks is which rules of the decisions a ticket
   cites have no test at all, unit or language, and the answer decides the ticket. T-014 measured
   0.76 and merged, because the number could not see that it took 57 entries out of xfail.txt -- a

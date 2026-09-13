@@ -204,16 +204,40 @@ function resolveDocumentPath(file, baseDir) {
 
 // Whether an absolute path lies inside `baseDir`, which is the workspace folder.
 // The caller reads this as "the editor can open this file", and the two coincide
-// only because of how the closure is reached: a module is searched for in the
-// entry file's directory and in the standard library's, and nothing passes `-I`
-// (D9.2), so every file of the closure is either under the folder the entry file
-// was named from or in the compiler's own `std` directory -- which is the
-// machine the compiler ran on, not this one. A search root outside the folder,
-// were one ever passed, would start silently dropping files the editor could
-// have opened, and the reader of that day needs to know it was this predicate.
+// only because of how the closure is reached. A module is searched for in the
+// entry file's directory, in each `-I` directory and in the standard library's
+// (D9.2). The client does pass `-I` since T-092: a file that leaves a closure is
+// checked again with the directory of the entry that painted it. Every such root
+// is `path.relative(folder, path.dirname(file))` of a file already under the
+// folder, so the root is under the folder too. Every file of the closure is
+// therefore still either under the folder or in the compiler's own `std`
+// directory. That directory is the machine the compiler ran on, not this one.
+//
+// A search root outside the folder, were one ever passed, would start silently
+// dropping files the editor could have opened. The reader of that day needs to
+// know it was this predicate.
 function isUnder(absolute, baseDir) {
   const relative = path.relative(baseDir, absolute);
   return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+// The files of `document` that lie under `baseDir`, as absolute paths, in the
+// order the compiler read them and with whatever repetition the document holds.
+// `"files"` is the set a client may clear and not the set it publishes
+// (`spec/toolchain.md` 9.2). A caller that remembers a closure therefore
+// remembers this and not the keys of `diagnosticsByFile`. A diagnostic may name
+// a file the compiler never read, and such a file is in no closure.
+//
+// The one rule here is the folder: a path outside it names a file the editor
+// cannot open, the standard library above all. Repetition is the caller's to
+// deal with, and the caller builds a `Set`.
+function filesUnder(document, baseDir) {
+  const files = [];
+  for (const file of document.files) {
+    const absolute = resolveDocumentPath(file, baseDir);
+    if (isUnder(absolute, baseDir)) files.push(absolute);
+  }
+  return files;
 }
 
 // The diagnostics of `document`, keyed by absolute file path, with the 0-based
@@ -225,6 +249,21 @@ function isUnder(absolute, baseDir) {
 // and a note whose file is outside `baseDir` is dropped while its error stands.
 // `lineSource` answers a file path with the lines of its text, or null when the
 // text cannot be read.
+//
+// A dropped error takes its notes with it. That holds for a note that points
+// into `baseDir`, and it is not an oversight. `spec/toolchain.md` 9.2 licenses
+// a client that cannot open a file to drop that file's diagnostics. It licenses
+// nothing else. D20.2 gives the severity `note` to a note that follows no
+// error. A nested note carries no severity of its own.
+// Publishing it alone would invent a record the document does not hold. The
+// reader would see `previous declaration here`, with its error nowhere on the
+// screen.
+//
+// The asymmetry with the other direction is real. An error in `baseDir` keeps
+// its place when its note is dropped. The error says what is wrong, and the
+// note only says where else to look. The direction that loses everything is
+// the one where the compiler put the error in the standard library. That is the
+// compiler's to change, and not the editor's to paper over (T-092).
 function diagnosticsByFile(document, baseDir, lineSource) {
   const byFile = new Map();
   const texts = new Map();
@@ -266,6 +305,7 @@ function diagnosticsByFile(document, baseDir, lineSource) {
 module.exports = {
   DOCUMENT_VERSION,
   diagnosticsByFile,
+  filesUnder,
   isUnder,
   parseDocument,
   resolveDocumentPath,

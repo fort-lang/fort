@@ -28,6 +28,9 @@ const VM = path.join(PROJECT, 'tools', 'vm');
 // The guest command as `tools/vm run` receives it: one argument for a shell,
 // with the path relative to the workspace folder and quoted for it.
 const GUEST = COMPILER + " --check --json 'main.ft'";
+// The guest command of a re-check: the directory of the file whose check
+// painted the departed file goes on it as a search root (D9.2).
+const RECHECK_MATHX = COMPILER + " --check --json -I '.' 'mathx.ft'";
 // Severities as VS Code numbers them, which the fake copies.
 const ERROR = 0;
 const INFORMATION = 2;
@@ -70,6 +73,33 @@ const MAIN_WITH_STALE_MATHX = JSON.stringify({
 const MATHX_CLEAN = JSON.stringify({
   version: 1,
   files: ['mathx.ft'],
+  diagnostics: [],
+  symbols: [],
+});
+// A check of mathx.ft that finds the error in it, which is the newer answer the
+// two guards below must not overwrite.
+const MATHX_BROKEN = JSON.stringify({
+  version: 1,
+  files: ['mathx.ft'],
+  diagnostics: [
+    {
+      file: 'mathx.ft',
+      line: 5,
+      col: 8,
+      end_line: 5,
+      end_col: 11,
+      severity: 'error',
+      message: 'the error mathx.ft has of its own',
+      notes: [],
+    },
+  ],
+  symbols: [],
+});
+// main.ft after its `import mathx;` is deleted: the closure is one file, and
+// mathx.ft is no longer in it.
+const MAIN_ALONE = JSON.stringify({
+  version: 1,
+  files: ['main.ft'],
   diagnostics: [],
   symbols: [],
 });
@@ -243,6 +273,44 @@ test('a standalone note is published as information', () => {
   assert.deepEqual(items[0].relatedInformation, []);
 });
 
+// An error whose file is the standard library in the guest is dropped. Its note
+// is dropped with it, even when it points into the workspace folder. 9.2
+// licenses dropping the diagnostics of a file the editor cannot open, and
+// nothing else. A note that follows an error is not the standalone note of
+// D20.2. Nothing is painted, and nothing is invented.
+test('a note of a dropped error is dropped with it', () => {
+  const outside = JSON.stringify({
+    version: 1,
+    files: ['main.ft'],
+    diagnostics: [
+      {
+        file: '/vagrant/build/release/std/io.ft',
+        line: 1,
+        col: 1,
+        end_line: 1,
+        end_col: 2,
+        severity: 'error',
+        message: 'conflicting declarations of print',
+        notes: [
+          {
+            file: 'main.ft',
+            line: 1,
+            col: 1,
+            end_line: 1,
+            end_col: 7,
+            message: 'previous declaration here',
+          },
+        ],
+      },
+    ],
+    symbols: [],
+  });
+  const { state } = open();
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: outside, code: 1 });
+  assert.deepEqual(state.diagnostics.get(MAIN), []);
+});
+
 test('closing a file clears its diagnostics', () => {
   const state = checked();
   fake.close(state, MAIN);
@@ -394,6 +462,529 @@ test('a file checked, closed and opened again is published again', () => {
   fake.open(state, MAIN);
   fake.complete(state.calls[1], { stdout: DOCUMENT, code: 1 });
   assert.equal(state.diagnostics.get(MAIN).length, 1);
+});
+
+// The close resets nothing: a run older than the close must not repaint the
+// file the close has just cleared. The sequence is the one the per-file
+// ordering was written for, with a close where the second check was.
+test('a run older than a close does not repaint the closed file', () => {
+  const { state } = open();
+  fake.save(state, MAIN);
+  fake.save(state, MATHX);
+  fake.complete(state.calls[1], { stdout: MATHX_CLEAN });
+  fake.close(state, MATHX);
+  fake.complete(state.calls[0], { stdout: MAIN_WITH_STALE_MATHX, code: 1 });
+  assert.equal(state.diagnostics.has(MATHX), false);
+  // The older run is still the newest answer about its own file.
+  assert.equal(state.diagnostics.get(MAIN).length, 1);
+});
+
+// The close is the newest word about the file, not the last word. A check
+// started after it paints the file again, which is what reopening a file and
+// saving it must do.
+test('a check after a close paints the closed file again', () => {
+  const { state } = open();
+  fake.save(state, MATHX);
+  fake.complete(state.calls[0], { stdout: MATHX_CLEAN });
+  fake.close(state, MATHX);
+  fake.save(state, MAIN);
+  fake.complete(state.calls[1], { stdout: MAIN_WITH_STALE_MATHX, code: 1 });
+  assert.equal(state.diagnostics.get(MATHX).length, 1);
+});
+
+// A close drops the run of that file that is still in flight, whole. The user
+// has shut the file, and an answer about it reaches nobody.
+test('a close drops the run of its own file that is in flight', () => {
+  const { state } = open();
+  fake.save(state, MAIN);
+  fake.close(state, MAIN);
+  fake.complete(state.calls[0], { stdout: MAIN_WITH_STALE_MATHX, code: 1 });
+  assert.equal(state.diagnostics.has(MAIN), false);
+  assert.equal(state.diagnostics.has(MATHX), false);
+});
+
+// ---- a file that leaves the closure ------------------------------------------
+
+// The `import mathx;` of main.ft is deleted and main.ft is saved. The squiggle
+// in mathx.ft came from a walk of main.ft's closure, and that walk no longer
+// reaches mathx.ft. The extension asks the compiler about mathx.ft rather than
+// deciding for it, and the old squiggle stands until that answer arrives.
+test('a file that leaves the closure is checked in its own right', () => {
+  const { state } = open();
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: MAIN_WITH_STALE_MATHX, code: 1 });
+  assert.equal(state.diagnostics.get(MATHX).length, 1);
+  fake.save(state, MAIN);
+  fake.complete(state.calls[1], { stdout: MAIN_ALONE });
+  // A third run, which nobody asked for by opening or saving anything.
+  assert.equal(state.calls.length, 3);
+  assert.deepEqual(state.calls[2].args, ['run', RECHECK_MATHX]);
+  assert.equal(state.calls[2].options.cwd, PROJECT);
+  // Nothing is cleared and nothing is guessed while that run is in flight.
+  assert.equal(state.diagnostics.get(MATHX).length, 1);
+  assert.deepEqual(state.cleared, []);
+});
+
+// The answer of that run is published like any other. The file ends up showing
+// its own truth in either direction: clean here, broken in the test after this
+// one.
+test('the answer about a departed file is published like any other', () => {
+  const { state } = open();
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: MAIN_WITH_STALE_MATHX, code: 1 });
+  fake.save(state, MAIN);
+  fake.complete(state.calls[1], { stdout: MAIN_ALONE });
+  fake.complete(state.calls[2], { stdout: MATHX_CLEAN });
+  assert.deepEqual(state.diagnostics.get(MATHX), []);
+});
+
+test('a departed file that is broken keeps a squiggle of its own', () => {
+  const { state } = open();
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: MAIN_WITH_STALE_MATHX, code: 1 });
+  fake.save(state, MAIN);
+  fake.complete(state.calls[1], { stdout: MAIN_ALONE });
+  fake.complete(state.calls[2], { stdout: MATHX_BROKEN, code: 1 });
+  const items = state.diagnostics.get(MATHX);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].message, 'the error mathx.ft has of its own');
+});
+
+// A run that answers with no document is no answer here either (D20.1). The
+// squiggles stand and the output channel says why, which is what a deleted
+// module looks like: the compiler cannot read it.
+test('a departed file whose run fails keeps its last answer', () => {
+  const { state } = open();
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: MAIN_WITH_STALE_MATHX, code: 1 });
+  fake.save(state, MAIN);
+  fake.complete(state.calls[1], { stdout: MAIN_ALONE });
+  const failure = { stdout: '', stderr: "fort: error: cannot read 'mathx.ft'", code: 2 };
+  fake.complete(state.calls[2], failure);
+  assert.equal(state.diagnostics.get(MATHX).length, 1);
+  assert.match(state.output[1], /exited 2/);
+  assert.match(state.output[2], /cannot read/);
+});
+
+// The first check of a file has no closure to compare with, so it asks about
+// nothing. What another file's check painted is that check's to ask about.
+test('the first check of a file checks no other file', () => {
+  const { state } = open();
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: MAIN_WITH_STALE_MATHX, code: 1 });
+  fake.save(state, path.join(PROJECT, 'other.ft'));
+  fake.complete(state.calls[1], { stdout: JSON.stringify({
+    version: 1,
+    files: ['other.ft'],
+    diagnostics: [],
+    symbols: [],
+  }) });
+  assert.equal(state.calls.length, 2);
+  assert.equal(state.diagnostics.get(MATHX).length, 1);
+});
+
+// A check of mathx.ft itself painted that error, so mathx.ft already has a run
+// behind it. Asking again would cost a run and could only repeat it.
+test('a departure asks nothing about a file another check painted', () => {
+  const { state } = open();
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: MAIN_WITH_STALE_MATHX, code: 1 });
+  fake.save(state, MATHX);
+  fake.complete(state.calls[1], { stdout: MATHX_BROKEN, code: 1 });
+  fake.save(state, MAIN);
+  fake.complete(state.calls[2], { stdout: MAIN_ALONE });
+  assert.equal(state.calls.length, 3);
+  const items = state.diagnostics.get(MATHX);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].message, 'the error mathx.ft has of its own');
+});
+
+// The user has closed the file, so its `by` is null and its paint is gone.
+// There is nothing to ask about.
+test('a departure asks nothing about a file the user has closed', () => {
+  const { state } = open();
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: MAIN_WITH_STALE_MATHX, code: 1 });
+  fake.close(state, MATHX);
+  fake.save(state, MAIN);
+  fake.complete(state.calls[1], { stdout: MAIN_ALONE });
+  assert.equal(state.calls.length, 2);
+});
+
+// The re-check is an event like any other and takes the next number. A save of
+// that file made after it therefore supersedes it. The run started last is the
+// live one, and the dead one is dropped whole.
+test('a save of the departed file supersedes the run the departure started', () => {
+  const { state } = open();
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: MAIN_WITH_STALE_MATHX, code: 1 });
+  fake.save(state, MAIN);
+  fake.complete(state.calls[1], { stdout: MAIN_ALONE });
+  fake.save(state, MATHX);
+  assert.equal(state.calls.length, 4);
+  fake.complete(state.calls[3], { stdout: MATHX_CLEAN });
+  fake.complete(state.calls[2], { stdout: MATHX_BROKEN, code: 1 });
+  assert.deepEqual(state.diagnostics.get(MATHX), []);
+});
+
+// The other order of the same two runs. A check of mathx.ft was already in
+// flight when the departure asked again about it. The departure's run is the
+// live one, and the older answer is dropped whole. Neither run guesses, and
+// both read the same file.
+test('a check of the departed file in flight is superseded by the new run', () => {
+  const { state } = open();
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: MAIN_WITH_STALE_MATHX, code: 1 });
+  fake.save(state, MATHX);
+  fake.save(state, MAIN);
+  fake.complete(state.calls[2], { stdout: MAIN_ALONE });
+  assert.equal(state.calls.length, 4);
+  // The check of mathx.ft that the user's save started answers last and is
+  // dropped; the run the departure started answers for that file.
+  fake.complete(state.calls[3], { stdout: MATHX_BROKEN, code: 1 });
+  fake.complete(state.calls[1], { stdout: MATHX_CLEAN });
+  const items = state.diagnostics.get(MATHX);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].message, 'the error mathx.ft has of its own');
+});
+
+// Two files leave one closure and each is asked about once. The runs go out one
+// at a time: a closure can be wide, and every run is its own ssh connection.
+test('two files that leave one closure are asked about one run at a time', () => {
+  const { state } = open();
+  const OTHER = path.join(PROJECT, 'other.ft');
+  const two = JSON.stringify({
+    version: 1,
+    files: ['main.ft', 'mathx.ft', 'other.ft'],
+    diagnostics: [],
+    symbols: [],
+  });
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: two });
+  fake.save(state, MAIN);
+  fake.complete(state.calls[1], { stdout: MAIN_ALONE });
+  // One run, not two, and the second waits its turn.
+  assert.equal(state.calls.length, 3);
+  assert.equal(state.calls[2].args[1], RECHECK_MATHX);
+  fake.complete(state.calls[2], { stdout: MATHX_CLEAN });
+  assert.equal(state.calls.length, 4);
+  assert.equal(state.calls[3].args[1], COMPILER + " --check --json -I '.' 'other.ft'");
+  fake.complete(state.calls[3], { stdout: JSON.stringify({
+    version: 1,
+    files: ['other.ft'],
+    diagnostics: [],
+    symbols: [],
+  }) });
+  assert.equal(state.calls.length, 4);
+  assert.deepEqual(state.diagnostics.get(OTHER), []);
+});
+
+// A run that answers with nothing releases the queue as surely as one that
+// answers, or a wide departure would stop after its first failure.
+test('a re-check that fails lets the next one go', () => {
+  const { state } = open();
+  const two = JSON.stringify({
+    version: 1,
+    files: ['main.ft', 'mathx.ft', 'other.ft'],
+    diagnostics: [],
+    symbols: [],
+  });
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: two });
+  fake.save(state, MAIN);
+  fake.complete(state.calls[1], { stdout: MAIN_ALONE });
+  fake.complete(state.calls[2], { spawnFailure: 'ENOENT' });
+  assert.equal(state.calls.length, 4);
+  assert.equal(state.calls[3].args[1], COMPILER + " --check --json -I '.' 'other.ft'");
+});
+
+// A departure the queue is still holding is dropped when its reason goes. The
+// user closed the file, so there is nothing to ask about and nothing to paint.
+test('a queued re-check of a file the user closes is dropped', () => {
+  const harness = open();
+  const state = harness.state;
+  const two = JSON.stringify({
+    version: 1,
+    files: ['main.ft', 'mathx.ft', 'other.ft'],
+    diagnostics: [],
+    symbols: [],
+  });
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: two });
+  fake.save(state, MAIN);
+  fake.complete(state.calls[1], { stdout: MAIN_ALONE });
+  // other.ft is queued behind mathx.ft; the user closes it before its turn.
+  fake.close(state, path.join(PROJECT, 'other.ft'));
+  fake.complete(state.calls[2], { stdout: MATHX_CLEAN });
+  assert.equal(state.calls.length, 3);
+  assert.equal(harness.extension.bookkeeping().pending, 0);
+});
+
+// A run the queue started may be superseded before it answers, and that answer
+// is dropped whole. The slot must be released even so, or one save would stop
+// every departure that follows it.
+test('a superseded re-check releases the queue', () => {
+  const { state } = open();
+  const two = JSON.stringify({
+    version: 1,
+    files: ['main.ft', 'mathx.ft', 'other.ft'],
+    diagnostics: [],
+    symbols: [],
+  });
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: two });
+  fake.save(state, MAIN);
+  fake.complete(state.calls[1], { stdout: MAIN_ALONE });
+  // The user saves mathx.ft while the run the departure started is in flight,
+  // so that run is the superseded one.
+  fake.save(state, MATHX);
+  fake.complete(state.calls[2], { stdout: MATHX_BROKEN, code: 1 });
+  // other.ft was queued behind it and still goes out.
+  assert.equal(state.calls.length, 5);
+  assert.equal(state.calls[4].args[1], COMPILER + " --check --json -I '.' 'other.ft'");
+  // The superseded answer painted nothing.
+  assert.deepEqual(state.diagnostics.get(MATHX), []);
+});
+
+// A module is not a file that checks the same way on its own. The first search
+// root is always the directory of the file the compiler was given (D9.2). A
+// module in `util/` that imports its sibling as `util.chars` resolves that
+// import only from the directory its entry file sits in. The re-check therefore
+// carries that directory as `-I`, or it paints `module not found` on a file the
+// user never touched. Measured with the real compiler on
+// `test/lang/run/modules/nested`. Without the root: exit 1 and `not found`.
+// With `-I` the directory of `main.ft`: exit 0 and a closure of both files.
+test('a re-check carries the directory of the entry that painted the file', () => {
+  const { state } = fake.install({ workspaceFolder: FIXTURES });
+  const NOTES = path.join(FIXTURES, 'notes.ft');
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: JSON.stringify({
+    version: 1,
+    files: ['project/main.ft', 'notes.ft'],
+    diagnostics: [],
+    symbols: [],
+  }) });
+  fake.save(state, MAIN);
+  fake.complete(state.calls[1], { stdout: JSON.stringify({
+    version: 1,
+    files: ['project/main.ft'],
+    diagnostics: [],
+    symbols: [],
+  }) });
+  assert.equal(state.calls.length, 3);
+  assert.equal(state.calls[2].args[1], COMPILER + " --check --json -I 'project' 'notes.ft'");
+  assert.equal(state.calls[2].options.cwd, FIXTURES);
+  fake.complete(state.calls[2], { stdout: JSON.stringify({
+    version: 1,
+    files: ['notes.ft'],
+    diagnostics: [],
+    symbols: [],
+  }) });
+  assert.deepEqual(state.diagnostics.get(NOTES), []);
+});
+
+// A re-check that asks about a file of its own closure keeps the roots it was
+// given and adds its own. The order is the one D9.2 searches: the directory of
+// the file being checked first, then the roots inherited from the run that
+// asked.
+test('a re-check hands its roots on to the next one', () => {
+  const { state } = fake.install({ workspaceFolder: FIXTURES });
+  const closure = (...files) =>
+    JSON.stringify({ version: 1, files, diagnostics: [], symbols: [] });
+  // notes.ft is checked on its own and reads lexical.ft.
+  fake.save(state, NOTES_FT);
+  fake.complete(state.calls[0], { stdout: closure('notes.ft', 'lexical.ft') });
+  // project/main.ft reads notes.ft, and paints it in its own name.
+  fake.save(state, MAIN);
+  fake.complete(state.calls[1], { stdout: closure('project/main.ft', 'notes.ft') });
+  // It drops notes.ft, which is asked about with the directory of main.ft.
+  fake.save(state, MAIN);
+  fake.complete(state.calls[2], { stdout: closure('project/main.ft') });
+  assert.equal(state.calls[3].args[1], COMPILER + " --check --json -I 'project' 'notes.ft'");
+  // That answer drops lexical.ft, which notes.ft had painted. The run about it
+  // carries the directory of notes.ft and then the root notes.ft was given.
+  fake.complete(state.calls[3], { stdout: closure('notes.ft') });
+  assert.equal(
+    state.calls[4].args[1],
+    COMPILER + " --check --json -I '.' -I 'project' 'lexical.ft'"
+  );
+});
+
+// The closure is what the compiler read, which is `"files"`, and not what was
+// published. A diagnostic may name a file that is in no `"files"` array (9.2).
+// Such a file never entered a closure, so it never leaves one, and no run is
+// spent on it.
+test('a diagnostic about a file the compiler never read enters no closure', () => {
+  const { state } = open();
+  const outside = JSON.stringify({
+    version: 1,
+    files: ['main.ft'],
+    diagnostics: [
+      {
+        file: 'mathx.ft',
+        line: 5,
+        col: 8,
+        end_line: 5,
+        end_col: 11,
+        severity: 'error',
+        message: 'about a file that is in no files array',
+        notes: [],
+      },
+    ],
+    symbols: [],
+  });
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: outside, code: 1 });
+  assert.equal(state.diagnostics.get(MATHX).length, 1);
+  fake.save(state, MAIN);
+  fake.complete(state.calls[1], { stdout: MAIN_ALONE });
+  assert.equal(state.calls.length, 2);
+  // The paint stands: no run said anything new about that file.
+  assert.equal(state.diagnostics.get(MATHX).length, 1);
+});
+
+// A cyclic import is an error and not an impossibility (D9.5), and the compiler
+// still lists both files, so a cyclic closure reaches this code. It terminates
+// because a hop destroys its own precondition: the answer rewrites the closure
+// of the file that was checked and moves `by` to it.
+test('a closure that names its own importer stops after one hop', () => {
+  const { state } = open();
+  const closure = (...files) =>
+    JSON.stringify({ version: 1, files, diagnostics: [], symbols: [] });
+  fake.save(state, MATHX);
+  fake.complete(state.calls[0], { stdout: closure('mathx.ft', 'main.ft') });
+  fake.save(state, MAIN);
+  fake.complete(state.calls[1], { stdout: closure('main.ft', 'mathx.ft') });
+  // main.ft drops mathx.ft. mathx.ft is asked about, and its answer names
+  // main.ft, which it painted before; main.ft has since been painted by itself.
+  fake.save(state, MAIN);
+  fake.complete(state.calls[2], { stdout: closure('main.ft') });
+  assert.equal(state.calls.length, 4);
+  fake.complete(state.calls[3], { stdout: closure('mathx.ft') });
+  assert.equal(state.calls.length, 4);
+});
+
+// The user closes the departed file while the run about it is in flight. The
+// close drops that run whole, as it drops any run of the file it closes. The
+// answer therefore paints nothing into a file the reader has shut.
+test('a close drops the re-check of its own file that is in flight', () => {
+  const { state } = open();
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: MAIN_WITH_STALE_MATHX, code: 1 });
+  fake.save(state, MAIN);
+  fake.complete(state.calls[1], { stdout: MAIN_ALONE });
+  fake.close(state, MATHX);
+  fake.complete(state.calls[2], { stdout: MATHX_BROKEN, code: 1 });
+  assert.equal(state.diagnostics.has(MATHX), false);
+});
+
+// The chain a re-check starts is finite. mathx.ft is asked about, its own
+// closure no longer holds other.ft, so other.ft is asked about in turn. There
+// the chain stops: other.ft painted nobody.
+test('a re-check that finds its own departure asks once more and stops', () => {
+  const { state } = open();
+  const OTHER = path.join(PROJECT, 'other.ft');
+  // mathx.ft imported other.ft when it was last checked on its own.
+  fake.save(state, MATHX);
+  fake.complete(state.calls[0], { stdout: JSON.stringify({
+    version: 1,
+    files: ['mathx.ft', 'other.ft'],
+    diagnostics: [],
+    symbols: [],
+  }) });
+  // main.ft imports mathx.ft, whose import of other.ft is now deleted.
+  fake.save(state, MAIN);
+  fake.complete(state.calls[1], { stdout: JSON.stringify({
+    version: 1,
+    files: ['main.ft', 'mathx.ft'],
+    diagnostics: [],
+    symbols: [],
+  }) });
+  // The import of mathx.ft goes too, so mathx.ft is asked about.
+  fake.save(state, MAIN);
+  fake.complete(state.calls[2], { stdout: MAIN_ALONE });
+  assert.equal(state.calls.length, 4);
+  assert.equal(state.calls[3].args[1], RECHECK_MATHX);
+  // Its answer no longer names other.ft, which mathx.ft had painted, so
+  // other.ft is asked about in turn.
+  fake.complete(state.calls[3], { stdout: MATHX_CLEAN });
+  assert.equal(state.calls.length, 5);
+  assert.equal(state.calls[4].args[1], COMPILER + " --check --json -I '.' 'other.ft'");
+  fake.complete(state.calls[4], { stdout: JSON.stringify({
+    version: 1,
+    files: ['other.ft'],
+    diagnostics: [],
+    symbols: [],
+  }) });
+  // other.ft painted nobody, so nothing follows it.
+  assert.equal(state.calls.length, 5);
+  assert.deepEqual(state.diagnostics.get(OTHER), []);
+});
+
+// A newer answer about the departed file stands. That is the same rule as when
+// the file is still in the closure, and it holds for the answer the departure
+// itself asked for.
+test('a departure does not let an older answer beat a newer one', () => {
+  const { state } = open();
+  fake.save(state, MAIN);
+  fake.complete(state.calls[0], { stdout: MAIN_WITH_STALE_MATHX, code: 1 });
+  fake.save(state, MAIN);
+  fake.complete(state.calls[1], { stdout: MAIN_ALONE });
+  // The run the departure started answers, and a newer check of main.ft that
+  // names mathx.ft again answers after it.
+  fake.save(state, MAIN);
+  fake.complete(state.calls[3], { stdout: MAIN_WITH_STALE_MATHX, code: 1 });
+  fake.complete(state.calls[2], { stdout: MATHX_CLEAN });
+  assert.equal(state.diagnostics.get(MATHX).length, 1);
+});
+
+// ---- what the bookkeeping costs ---------------------------------------------
+
+// Every key of the three maps is a file path. The ordering therefore costs one
+// entry per file the session has checked or published about, and nothing per
+// event. Fifty opens and fifty closes of one file leave the two entries its one
+// closure has. `deactivate` drops all three with the window.
+test('opening and closing a file fifty times leaves three entries', () => {
+  const harness = open();
+  for (let i = 0; i < 50; i += 1) {
+    fake.open(harness.state, MAIN);
+    fake.complete(harness.state.calls[i], { stdout: DOCUMENT, code: 1 });
+    fake.close(harness.state, MAIN);
+  }
+  assert.equal(harness.state.calls.length, 50);
+  // main.ft and mathx.ft are published about; main.ft alone is checked, and its
+  // run is forgotten by the close.
+  assert.deepEqual(harness.extension.bookkeeping(), {
+    runOf: 0,
+    publishedAt: 2,
+    closureOf: 1,
+    pending: 0,
+  });
+  harness.extension.deactivate();
+  assert.deepEqual(harness.extension.bookkeeping(), {
+    runOf: 0,
+    publishedAt: 0,
+    closureOf: 0,
+    pending: 0,
+  });
+});
+
+// A file outside every workspace folder is never checked and never painted, so
+// its close has nothing to clear and nothing to order. It must leave no entry
+// behind: such a file is the one whose closes could pile up unseen.
+test('closing a file no workspace folder holds records nothing', () => {
+  const harness = open();
+  for (let i = 0; i < 50; i += 1) {
+    fake.open(harness.state, LEXICAL_FT);
+    fake.close(harness.state, LEXICAL_FT);
+  }
+  assert.equal(harness.state.calls.length, 0);
+  assert.deepEqual(harness.extension.bookkeeping(), {
+    runOf: 0,
+    publishedAt: 0,
+    closureOf: 0,
+    pending: 0,
+  });
 });
 
 test('deactivation forgets the files that were checked', () => {

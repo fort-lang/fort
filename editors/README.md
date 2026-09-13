@@ -72,8 +72,43 @@ information naming the second place it points at: the two often carry the same r
 squiggles over one span would say nothing about being one diagnostic. The extension publishes the
 diagnostics of every file of the closure that lies in the workspace folder, which clears the
 squiggles of a file that is now clean, and drops the rest: the closure includes the standard
-library, whose paths name files in the guest that the host cannot open (`spec/toolchain.md` 9.2). A
-note whose file is dropped that way goes with it, while its error stands.
+library, whose paths name files in the guest that the host cannot open (`spec/toolchain.md` 9.2).
+A dropped error takes its notes with it. That holds even for a note that points into the workspace
+folder. 9.2 licenses a client to drop the diagnostics of a file it cannot open, and it licenses
+nothing else. Publishing the note alone would show `previous declaration here` with its error
+nowhere on the screen.
+
+A check answers about a closure and not about one file, so the extension orders its events per
+file. A check publishes, and a close clears. Each takes a number, and only a newer event writes
+over an older one. A check still in flight therefore cannot repaint what a later check or a close
+has settled.
+
+A file may leave a closure: delete the `import mathx;` of `main.ft` and save. The squiggles of
+`mathx.ft` came from a walk of `main.ft`'s closure, and that walk no longer reaches them. The
+extension does not decide what those squiggles should become. It asks the compiler about
+`mathx.ft`, in a run like any other, and publishes the answer. Nothing is cleared and nothing is
+guessed in the meantime: the old squiggles stand until the answer arrives, as they do after any
+save.
+
+That costs one run for each file the check painted and no longer names, and `by` keeps the set
+small. A run asks again only about its own paint. An error that a check of `mathx.ft` itself
+reported already has a run behind it. A file you have closed carries no paint at all.
+
+The runs go out one at a time, because a closure can be wide. `src/fort/main.ft` reads 23 files of
+this repository. Deleting one `import` departs 22 at once, and each run opens its own ssh
+connection to the guest. An open and a save still go out at once. The chain such a run can start
+is finite. Every answer rewrites the closure of the file that was checked and moves `by` to it. A
+hop therefore destroys the condition that let it happen.
+
+The run carries one thing the ordinary check does not. A module is not a file that checks the same
+way on its own. The first search root is always the directory of the file the compiler was given
+(D9.2). `util/strings.ft` imports its sibling as `util.chars`, and resolves that import only from
+the directory its entry file sits in. The re-check therefore passes that directory as `-I`.
+`by` records the entry, and the directory of the entry is the root its closure searched.
+
+The bookkeeping costs one entry per file the window has checked or published about. It never costs
+one entry per event. The keys are file paths. Closing a file writes the entry it already had, and a
+file outside every workspace folder gets no entry at all.
 
 Two conversions matter and are what the unit tests are mostly about. The document counts 1-based
 byte columns with a tab as one column (D20.2, D20.4) while VS Code counts 0-based UTF-16 units, so
@@ -104,12 +139,32 @@ is no folder to run a check from.
 The answers are otherwise a batch answer about the file as it was saved, so between two saves the
 squiggles are stale by design and an unsaved buffer is never checked. The VM must be up (`tools/vm
 up`) and the release build must exist (`tools/vm build release`); neither is the extension's to
-arrange, and without them nothing is painted and the output channel says why. Diagnostics of a file
-that leaves the closure -- an import that was removed, say -- are left alone rather than cleared:
-the compiler said nothing about that file this run, and no information is not the same as no errors,
-so the last thing it did say stands until that file is itself checked again. Save it to clear it. A
-diagnostic reported inside the standard library is dropped rather than shown, since its path is the
-guest's.
+arrange, and without them nothing is painted and the output channel says why. A file that leaves a
+closure is checked again only by the check of the file that dropped it. That check must have
+painted it, and the first check of a file in a session asks about nothing else. A module you delete
+from disk keeps its last squiggles. The run that asks about it finds no file, so there is no
+answer to publish. The output channel carries the compiler's `cannot read` line.
+
+A re-check is faithful to the closure it came from wherever one directory is enough. It is not
+faithful in general. D9.2 puts the directory of the file being checked first, ahead of every `-I`,
+and no option removes it. Take a project that repeats a path prefix: `util/util/chars.ft` beside
+`util/chars.ft`. The re-check reads the nearer file there, and reports an error the closure never
+saw. No layout in this repository does that. 0 of the 876 `.ft` files it tracks repeat a directory
+segment in their path, counted with
+
+```sh
+git ls-files '*.ft' | awk -F/ '{for(i=1;i<NF;i++)for(j=i+1;j<NF;j++)if($i==$j){print;next}}'
+```
+
+while 21 directories do hold a sub-directory of `.ft` files, so the multi-directory case itself is
+ordinary here and the repeating one does not occur. Saving such a module yourself has always read
+the nearer file too, for the same reason. Only a project model would fix either, and the extension
+has none.
+
+A diagnostic reported inside the standard library is dropped rather than shown, since its path is
+the guest's. Its notes go with it wherever they point. An error in the standard library that names
+a line of your own file therefore paints nothing at all. The checker puts that error in your own
+file in every case it produces today.
 
 There is no hover, no go-to-definition, no rename, no completion, no semantic colouring and no
 workspace symbol search: those need the language server of D20.5, which lands after the self-hosted
@@ -119,14 +174,26 @@ compiler.
 
 `node --test` drives `extension.js` itself against a fake editor, but nothing can check that VS
 Code calls it the way its API is documented to, so after a change to `extension.js` open VS Code on
-the repository and check these four steps, with `tools/vm up` having run and `tools/vm build
+the repository and check these six steps, with `tools/vm up` having run and `tools/vm build
 release` having built the compiler:
 
 1. Open `test/lang/run/modules/twofile/main.ft`: no squiggle appears.
 2. Break it -- rename `mathx.add` to `mathx.addd` -- and save: the squiggle covers `addd` and
    nothing else, and the message is the compiler's `unknown name`.
 3. Undo and save: the squiggle disappears, in that file and in `mathx.ft`.
-4. Halt the VM (`tools/vm halt`), save again: the squiggles that were on screen stay, and the
+4. Break `mathx.ft`: delete the `;` after `i32 LIMIT = 5`. Save `main.ft`. The squiggle appears in
+   `mathx.ft`, the file you did not save. Now comment out every line of `main.ft` that names
+   `mathx`, the `import` included. Save `main.ft`. The squiggle stays, because `mathx.ft` is still
+   broken on disk and the run the departure asked for says so. Undo in `mathx.ft` and save it: the
+   squiggle goes. Undo in `main.ft` and save it.
+5. Open `test/lang/run/modules/nested/main.ft` and leave `util/strings.ft` shut. Comment out
+   `import util.strings;` and the two lines that use `strings`, and save. Read the Problems panel,
+   which lists the files with diagnostics whether they are open or not: `util/strings.ft` is not
+   there. A `module 'util.chars' not found` against it means the re-check lost the `-I` of D9.2.
+   Do not open `util/strings.ft` to look. An open is a check of that file on its own, with no
+   `-I`, and it paints that very message. The extension has no project model (T-111), so the
+   Problems panel is what answers this step. Undo and save.
+6. Halt the VM (`tools/vm halt`), save again: the squiggles that were on screen stay, and the
    *fort* output channel holds the `tools/vm run` line and the failure. Bring it back up
    (`tools/vm up`) and save once more: the answers return.
 
