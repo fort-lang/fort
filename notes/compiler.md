@@ -333,7 +333,12 @@ came here.
   a ticket meets before it meets anything else. A module set with a standard library directory
   loads `<std-dir>/rt.ft` as a root **before** the entry file, so `std.libc` rides in behind it
   and D9.8 holds a program's own `extern` declaration of a libc symbol against the library's,
-  `own` included: `run/ownership/015` and `019` gained the `own` `std.libc` carries. A set with no
+  `own` included: `run/ownership/015` and `019` gained the `own` `std.libc` carries. **So a
+  declaration added to `std.libc` binds every program in the repository**, and the cost of a wrong
+  signature is paid by all of them at once: T-045 added `qsort` there, and a program that
+  redeclares it must now write the same parameter types, `fn i32(void*, void*)` included.
+  `grep -rn 'extern fn void qsort' .` finds one declaration in `std/libc.ft` and one in
+  `spec/module-system.md` 8.5, which spells it out as its callback example. A set with no
   such directory loads no runtime, which is what every in-process unit suite is, so a suite that
   drives the whole driver writes an **empty** `std/rt.ft` in its sandbox (`test/driver_helpers.h`,
   `test/modules_helpers.h`, `test/fort/support/modules_env.ft` and the three `test/fort/driver*`
@@ -364,6 +369,15 @@ names no float and calls `abs_i32` alone. Every test of the module is therefore 
 `test/lang/bootstrap-unsupported.txt` and stage2 alone runs them. A library module that holds a
 float and that programs import by name has this shape; one that only the compiler loads for a
 closure, as `std.rt_float` is, does not.
+
+`std/sort.ft` is the counter-example and it is the cheaper shape (T-045). The module holds no
+float, no `?:` and no `do`-`while`, so stage1 parses its whole closure and accepts it: the module
+and the nine `run` tests T-045 added raised `CLEAN_FILES` from 472 to 482, which is every file
+that was meant to check clean, and `test/lang/bootstrap-unsupported.txt` gained no line. The
+eleventh file is a `fail` test, which stage1 refuses because that is what it is for. A library
+module written inside the bootstrap subset costs nothing at all, and one that leaves it refuses
+every importer, so read
+`bootstrap-unsupported.txt` before you spell a `?:` in `std/`.
 
 **The consequence costs a build: no module of `src/fort/` may import `std.math`, and no std
 module in the closure of `src/fort` may either.** stage1 compiles `src/fort` into stage2, so such

@@ -1,0 +1,90 @@
+//! run
+//! stdout:
+//| 1 2 3
+//| -3 -1 2 5
+//| 1:2 1:9 2:0 2:7 3:1
+//| 9 4 1 2 3
+//| 16
+import std.sort;
+
+// The core sort of stdlib.md 2.10 over a struct array, which is the case that
+// needs the untyped entry: there is no generic span type, so an arbitrary
+// element type reaches the sort as an address, a count and a size (D3.15).
+
+struct point {
+    i64 x;
+    i64 y;
+}
+
+// The worked example of stdlib.md 2.10, copied from the section so that the
+// specification's own sample code is held against the library it describes.
+fn i32 by_x(void* a, void* b) {
+    point* p = cast(a, point*);
+    point* q = cast(b, point*);
+    if (p->x < q->x) {
+        return -1;
+    }
+    if (p->x > q->x) {
+        return 1;
+    }
+    return 0;
+}
+
+fn void order(point mut@ ps, i64 mut@ xs) {
+    sort.sort(cast(ps.ptr, void*), ps.len, sizeof(point), by_x);
+    sort.sort_i64(xs, sort.cmp_i64);
+}
+
+// by_x alone ties two points with the same x, and a tie has no specified
+// order, so a test that prints both keys needs a total order: x first, then y.
+fn i32 by_x_then_y(void* a, void* b) {
+    point* p = cast(a, point*);
+    point* q = cast(b, point*);
+    i32 first = by_x(a, b);
+    if (first != 0) {
+        return first;
+    }
+    if (p->y < q->y) {
+        return -1;
+    }
+    if (p->y > q->y) {
+        return 1;
+    }
+    return 0;
+}
+
+fn void show(point@ ps) {
+    for (u64 mut i = 0; i < ps.len; i += 1) {
+        if (i > 0) {
+            print(" ");
+        }
+        print(ps[i].x, ":", ps[i].y);
+    }
+    println("");
+}
+
+fn i32 main() {
+    point[3] mut ps = {point{3, 0}, point{1, 0}, point{2, 0}};
+    i64[4] mut xs = {5, -1, 2, -3};
+    order(ps[..], xs[..]);
+    println(ps[0].x, " ", ps[1].x, " ", ps[2].x);
+    println(xs[0], " ", xs[1], " ", xs[2], " ", xs[3]);
+
+    point[5] mut qs = {point{2, 7}, point{1, 9}, point{3, 1}, point{1, 2}, point{2, 0}};
+    sort.sort(cast(qs[..].ptr, void*), qs.len, sizeof(point), by_x_then_y);
+    show(qs[..]);
+
+    // n is a count and not a length: a caller may order a prefix and leave the
+    // rest of the array where it is.
+    i64[5] mut head = {4, 9, 1, 2, 3};
+    sort.sort(cast(head[..].ptr, void*), 2, sizeof(i64), down_i64);
+    println(head[0], " ", head[1], " ", head[2], " ", head[3], " ", head[4]);
+
+    // The element size is the type's, and the struct is two i64 (D3.8).
+    println(sizeof(point));
+    return 0;
+}
+
+fn i32 down_i64(void* a, void* b) {
+    return sort.cmp_i64(b, a);
+}

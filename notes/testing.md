@@ -395,10 +395,18 @@ bullet at a time and without a rewrite.
   T-042 moved **seven lines** for eleven files, four constants over five files: `FT_FILES` 842 to
   853 on four lines, `FORM_FILES` 12 to 13 for `std/math.ft`, `FLOAT_FILES` 63 to 67 for four
   tests, and `CORPUS_FILES` 604 to 615 in `test/highlight_test.py`. Count the lines and not the
-  names: `git diff main...HEAD -U0 | grep -E '^\+[A-Z_]*FILES'` prints one line for each, which
-  is the number a ticket must move. Read each new value off the failure of the tool that owns it and
-  never compute one: two branches that raise one constant by the same step merge with no
-  conflict and are then both wrong.
+  names: `git diff main...HEAD -U0 | grep -cE '^\+.*[A-Z_]+_FILES *='` prints one line for each,
+  which is the number a ticket must move. Read each new value off the failure of the tool that
+  owns it and never compute one: two branches that raise one constant by the same step merge with
+  no conflict and are then both wrong.
+  **The command anchors on the assignment and not on the start of the line, because one of these
+  constants is not at the start of a line.** `test/parser_recovery_test.c` declares its
+  `CORPUS_FILES` inside an `enum` line, so the earlier command,
+  `grep -E '^\+[A-Z_]*FILES'`, could never see it: it printed 7 for T-045's diff where the answer
+  is 8. The thing that counts the count constants was itself miscounting. It entered this file
+  with T-042 (74dddb3) and stood until T-045 measured it, because it returned a number and a
+  number reads as an answer. Use the command above, and check what it prints against the
+  constants you know you touched.
   **A search root moves a second equality, and a new file may move none.** The two rules are the
   same rule read from each end. `-I src`, which T-063 added to `diff_check.sh` and to
   `diff_ir.sh` so that the language server resolves, took `CLEAN_FILES` from 458 to 472 and
@@ -408,6 +416,22 @@ bullet at a time and without a rewrite.
   equalities do not follow from the number of files a ticket adds in either direction, and two
   branches that both moved them cannot add their increments: **rebase, then read all seven
   numbers again, one command per file** (T-063, rebased onto T-042).
+  **A `fail` test moves two numbers a `run` test does not.** The first is
+  `test/parser_recovery_test.c`'s `CORPUS_FILES`, which counts the `fail` corpus alone; the second
+  is the comment on `lang_check_json-stage2` in `CMakeLists.txt`, whose three numbers are the
+  corpus total, the `fail` tests and the tests `--check-json` selects, and a `fail` test carries
+  diagnostics so it moves all three. A `run` test moves the total alone. So ask which kind of test
+  you added before you count, and read
+  `test/lang/run_tests.py --check-json --list | wc -l` and `| grep -c '^fail/'` for the second
+  pair rather than adding one to the comment.
+  T-045 is the worked example and moved **eight lines**, in six files, over five different
+  constants. Ten `.ft` files that stage1 checks clean and one `fail` test that it refuses took
+  `FT_FILES` 876 to 887 on four lines, `CLEAN_FILES` 472 to 482, `PROGRAM_FILES` 492 to 501 --
+  nine of the ten hold a `main`, and `std/sort.ft` does not -- `CORPUS_FILES` 638 to 648 in
+  `test/highlight_test.py`, which does not walk the `fail` directory, and `CORPUS_FILES` 233 to
+  234 in `test/parser_recovery_test.c`, which walks nothing else. The `CMakeLists.txt` comment
+  moved with them, 628 to 638 tests, 219 to 220 `fail` tests and 221 to 222 selected. So the
+  number of lines is not the number of constants, and neither is the number of files.
 - **A ported pass is judged on its diagnostics one by one, with a script and not a reading.**
   For every message the ported file builds -- each `check_error` text and each run of `msg_str`
   pieces between `check_msg_begin` and `check_msg_end` -- ask whether any suite under `test/fort`

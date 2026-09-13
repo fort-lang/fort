@@ -70,7 +70,7 @@ CORPUS_DIRS = (
 # that adds or removes a `.ft` under CORPUS_DIRS reads the new number off the
 # failure and writes it here, as it does for CORPUS_FILES in
 # test/parser_recovery_test.c and FT_FILES in tools/diff_tokens.sh.
-CORPUS_FILES = 638
+CORPUS_FILES = 648
 # The `.ft` of the repository that are deliberately outside the corpus, each
 # because it is meant to hold a lexical error: test/lang/fail is the corpus of
 # programs the compiler must reject, test/highlight/scopes.ft carries the

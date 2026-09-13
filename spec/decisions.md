@@ -1220,10 +1220,11 @@ Sections:
   `std.io` (descriptors, read/write whole files and streams, close), `std.str` (compare, search,
   classify, parse integers, duplicate, NUL-terminated copies for C), `std.strbuf` (growable byte
   buffer), `std.vec` (`ptr_vec`, `int_vec`, the non-generic pattern), `std.strmap` (string-keyed
-  open-addressing table), `std.math` (float bit casts, abs/min/max per type), `std.rt` (the runtime
-  itself, D13.1: process start and exit, allocation, the failure paths and the print buffers, over
-  `std.libc`) and `std.rt_float` (the two float printers of D18.1, apart from `std.rt` because a
-  compiler without floats cannot compile them).
+  open-addressing table), `std.math` (float bit casts, abs/min/max per type), `std.sort` (an
+  in-place sort of an array over libc `qsort`), `std.rt` (the runtime itself, D13.1: process start
+  and exit, allocation, the failure paths and the print buffers, over `std.libc`) and
+  `std.rt_float` (the two float printers of D18.1, apart from `std.rt` because a compiler without
+  floats cannot compile them).
 - history: Amended 2026-09-11 (T-087): the five `fort_rt_*` declarations stood in `std.libc`, whose
   header had to describe itself as libc "plus" the runtime; they moved to `std.rt`, so "thin libc
   externs" is true of `std.libc` without qualification. Amended 2026-09-11 (T-088): `std.rt` held
@@ -1234,7 +1235,10 @@ Sections:
   while the compiler still lowered every builtin to the C one, so `std.rt` held five `extern fn
   fort_rt_*` declarations for that window; T-091 retargeted the builtins, deleted the C runtime and
   those declarations, and "declares no `fort_rt_` symbol" is true of the module from that commit on
-  (`test/runtime_sig_test.c`, `std_rt_declares_no_runtime_c_symbol`).
+  (`test/runtime_sig_test.c`, `std_rt_declares_no_runtime_c_symbol`). Amended 2026-09-13 (T-045):
+  `std.sort` joins the list. It is the first module this list gained after v1 was written, and
+  `stdlib.md` 2.10 specifies it. Its element type must own nothing, because the sort permutes the
+  elements inside C, where the ownership rules of D17 see nothing.
 
 ### D13.3 The error-handling idiom
 - owner: `stdlib.md`.

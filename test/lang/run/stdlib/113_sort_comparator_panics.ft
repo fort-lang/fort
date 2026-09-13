@@ -1,0 +1,34 @@
+//! run
+//! abort
+//! stderr: panic: sort.cmp: the data is not ordered
+//! stdout:
+//| about to sort
+import std.sort;
+
+// A comparator may panic, and stdlib.md 2.10 says what that does: the failure
+// path flushes the print buffers and aborts (D11.4) from inside the C frame
+// that called back into fort. The line below reaches stdout because of that
+// flush, and no deferred code runs.
+//
+// A comparator that finds its input impossible is the ordinary reason. This
+// one refuses a negative element, which is a precondition of the order it
+// implements, so the panic is the idiom of stdlib.md 1.2 and not an accident.
+fn i32 by_size(void* a, void* b) {
+    i64 x = *cast(a, i64*);
+    i64 y = *cast(b, i64*);
+    if (x < 0 || y < 0) {
+        panic("sort.cmp: the data is not ordered");
+    }
+    return sort.cmp_i64(a, b);
+}
+
+fn i32 main() {
+    // The array is left half sorted when the comparator panics, so nothing
+    // below prints it: what is specified is the flush, the message and the
+    // abort.
+    i64[6] mut xs = {5, 2, 9, -1, 7, 3};
+    println("about to sort");
+    sort.sort_i64(xs[..], by_size);
+    println("not reached");
+    return 0;
+}

@@ -384,7 +384,9 @@ fn i32 by_value(void* a, void* b) {
 
 An `i32 mut@ xs` is sorted with `qsort(cast(xs.ptr, void*), xs.len, sizeof(i32), by_value);`. A
 function taking a span, string, struct or fixed array is not extern-legal and cannot be passed
-to C.
+to C. The library declares `qsort` in `std.libc` and wraps it in `std.sort`, which is what a
+program calls (`stdlib.md` 2.2, 2.10); the declaration above is the same one, written out here
+because a program may redeclare a C symbol with an identical signature (D9.8).
 
 ### 8.6 Spans and strings
 

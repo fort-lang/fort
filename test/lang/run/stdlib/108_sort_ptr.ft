@@ -1,0 +1,64 @@
+//! run
+//! stdout:
+//| 30 10 20
+//| 10 20 30
+//| 30 10 20
+//| fig apple pear
+//| apple fig pear
+import std.sort;
+import std.str;
+import std.vec;
+
+// sort_ptr orders an array of void*, the element type of vec.ptr_vec
+// (stdlib.md 2.7, 2.10). The pointees are borrowed: the sort moves the
+// pointers and never reads through one, and a comparator that orders by
+// pointee reads them itself. That is the second way stdlib.md 2.10 gives of
+// ordering data the sort may not move.
+
+fn i32 by_pointee(void* a, void* b) {
+    i64* p = *cast(a, i64**);
+    i64* q = *cast(b, i64**);
+    return sort.cmp_i64(cast(p, void*), cast(q, void*));
+}
+
+fn i32 by_pointed_text(void* a, void* b) {
+    string* p = *cast(a, string**);
+    string* q = *cast(b, string**);
+    return str.cmp(*p, *q);
+}
+
+fn i32 main() {
+    // The owner is one allocation and every pointer below borrows one of its
+    // elements. The order of the allocation never changes.
+    i64 mut@ own values = new(i64, 3);
+    defer del(values);
+    values[0] = 30;
+    values[1] = 10;
+    values[2] = 20;
+
+    void*[3] mut ps = {cast(&values[0], void*), cast(&values[1], void*),
+                       cast(&values[2], void*)};
+    println(*cast(ps[0], i64*), " ", *cast(ps[1], i64*), " ", *cast(ps[2], i64*));
+    sort.sort_ptr(ps[..], by_pointee);
+    println(*cast(ps[0], i64*), " ", *cast(ps[1], i64*), " ", *cast(ps[2], i64*));
+
+    // The elements themselves stayed where they were: only the three pointers
+    // moved.
+    println(values[0], " ", values[1], " ", values[2]);
+
+    // A ptr_vec holds the same element type, so its live prefix sorts with the
+    // same entry. The vector owns its slots and borrows every pointer in them
+    // (stdlib.md 1.3), which is exactly what this sort needs.
+    string[3] mut words = {"fig", "apple", "pear"};
+    vec.ptr_vec mut v = vec.ptr_create();
+    defer vec.ptr_free(&v);
+    vec.ptr_push(&v, cast(&words[0], void*));
+    vec.ptr_push(&v, cast(&words[1], void*));
+    vec.ptr_push(&v, cast(&words[2], void*));
+    println(*cast(v.items[0], string*), " ", *cast(v.items[1], string*), " ",
+            *cast(v.items[2], string*));
+    sort.sort_ptr(v.items[0..v.len], by_pointed_text);
+    println(*cast(v.items[0], string*), " ", *cast(v.items[1], string*), " ",
+            *cast(v.items[2], string*));
+    return 0;
+}

@@ -14,7 +14,7 @@ writable with nothing but this library and the builtins (D12).
 - Every module is one fort source file under the standard library directory (D9.1, D14.1):
   `std.io` is `<std>/io.ft`. The library is ordinary fort (D13.1); the compiler knows nothing
   about it beyond resolving the `std` search root, `std.rt` excepted, whose entry points a
-  builtin lowers to and which is in every import closure (D12.2, D9.10, 2.10).
+  builtin lowers to and which is in every import closure (D12.2, D9.10, 2.11).
 - Everything at module level is exported (D9.6). Names not documented here (helpers such as
   `strmap.find_slot`) are implementation details and may change; programs must not use them.
 - Foreign calls go through the `extern` declarations collected in `std.libc` (D9.8); a program
@@ -115,7 +115,8 @@ library follows:
 
 ### 1.5 Naming
 
-Module short names are the last path segment: `sys libc mem io str strbuf vec strmap math`.
+Module short names are the last path segment:
+`sys libc mem io str strbuf vec strmap math sort`.
 Functions, struct and enum types, enum members, fields and variables are `lower_case` with
 underscores (`str_buf`, `ptr_vec`, `str_map_entry`); module constants are `UPPER_CASE` (D1.4).
 When a module has several struct types, the functions carry the type as a prefix
@@ -138,6 +139,7 @@ import binding's name for a local even though D7.9 permits it.
 | `std.vec`       | none                                        | `ptr_vec`, `int_vec`, the pattern|
 | `std.strmap`    | `str`                                       | string-keyed open-addressing map |
 | `std.math`      | none                                        | float bit casts, abs, min, max   |
+| `std.sort`      | `libc`                                      | an array sorted in place         |
 
 The import graph is acyclic (D9.5). A program imports what it uses: `import std.io;` and then
 `io.read_file(...)` (D9.3, D9.4).
@@ -228,6 +230,7 @@ extern fn u64 strlen(char* s);
 extern fn char* getenv(char* name);
 extern fn noreturn exit(i32 code);
 extern fn noreturn abort();
+extern fn void qsort(void* base, u64 n, u64 size, fn i32(void*, void*) cmp);
 
 // <fcntl.h>, <unistd.h>
 extern fn i32 open(char* path, i32 flags, u32 mode);
@@ -261,7 +264,10 @@ would trap, D10.2), `p[0..n]` is a
 parameter (D6.11) and is left `null` (D17.6). `memcpy`, `memmove` and `memset` return their
 `dst` argument, a view, so their results stay `void*`. `libc.exit` does not flush the runtime's
 output buffers; programs call `sys.exit`. `libc.abort` is what the runtime calls after a
-runtime error (D11.4). Ownership: `malloc`, `calloc` and `free` carry it in their types, so a
+runtime error (D11.4). `qsort` orders `n` elements of `size` bytes in place and calls `cmp` with
+a pointer to each of two of them; `std.sort` wraps it and is what a caller uses (2.10), and
+`module-system.md` 8.5 gives the rule the `cmp` parameter obeys.
+Ownership: `malloc`, `calloc` and `free` carry it in their types, so a
 `calloc` result is released like a `malloc` one and not dropped; every other extern here takes
 and returns views, and the library wraps every ownership-bearing call below.
 Direct use looks like `libc.write(fd, cast(s.ptr, void*), s.len) == cast(s.len, i64)`, which
@@ -815,7 +821,118 @@ fn bool is_negative_zero(f64 x) {
 }
 ```
 
-### 2.10 `std.rt`
+### 2.10 `std.sort`
+
+An array sorted in place, over `libc.qsort` (D13.2, 2.2).
+
+```fort
+fn void sort(void* base, u64 n, u64 elem_size, fn i32(void*, void*) cmp)
+fn void sort_i64(i64 mut@ items, fn i32(void*, void*) cmp)
+fn void sort_u64(u64 mut@ items, fn i32(void*, void*) cmp)
+fn void sort_ptr(void* mut@ items, fn i32(void*, void*) cmp)
+fn i32 cmp_i64(void* a, void* b)
+fn i32 cmp_u64(void* a, void* b)
+```
+
+- `sort`: orders the `n` elements of `elem_size` bytes that start at `base`, in place, so that
+  `cmp` answers zero or less for every adjacent pair. The order is **not stable**: two elements
+  the comparator calls equal come out in an unspecified order, because `qsort` is what C
+  specifies. Panics with `"sort.sort: element size is zero"` when `elem_size` is 0, with
+  `"sort.sort: null comparator"` when `cmp` is `null`, since calling a null function pointer is
+  undefined (D3.10), and with `"sort.sort: null base"` when `base` is `null` and `n` is above 0.
+  **The three tests come before the count**, so `sort(base, 0, 0, cmp)` panics and
+  `sort(base, 1, elem_size, null)` panics: a call that asks for nothing is still a call that must
+  say what it is sorting. An `n` below 2 that passes the three tests returns at once and makes no
+  C call, which is how the null `.ptr` of a zero span (D3.5) stays out of C. The three typed
+  entries below delegate, so their panics name `sort.sort` as well. Ownership: none; `base` is a
+  view and no `own` crosses to C (1.4, D17.13).
+- `sort_i64`, `sort_u64`, `sort_ptr`: `sort(cast(items.ptr, void*), items.len, sizeof(T), cmp)`
+  for `T` equal to `i64`, `u64` and `void*`. A span carries its length (D3.5) and its element
+  type fixes `sizeof` (D3.15), so two of the four arguments disappear and the caller cannot pass
+  a count or an element size that disagrees with the storage. The parameter is `T mut@`, which is
+  the second thing these entries add: the elements must be mutable and the compiler checks it
+  here, whereas `void*` has no target level (D3.11) and `sort` can check nothing. `sort_ptr`
+  takes the element type of `vec.ptr_vec` (2.7). Ownership: none; an `own` span argument lends
+  (D17.4).
+- `cmp_i64`, `cmp_u64`: ready-made ascending comparators, `-1`, `0` or `1`. `cmp_u64` compares
+  unsigned, so it orders `0xFFFFFFFFFFFFFFFF` last where `cmp_i64` on the same bytes orders it
+  first. A qualified function name is a value (D3.10), so a call reads
+  `sort.sort_i64(xs, sort.cmp_i64)`. A descending order is a comparator of the caller's own with
+  the two arguments exchanged.
+
+**The comparator.** Its type is C's, `fn i32(void*, void*)`, because `qsort` is what calls it;
+fort has neither generics nor overloading (D8.3, D15), so there is no per-element comparator
+type and every comparator reads its two elements through `*cast(a, T*)` (D3.11). It answers a
+negative `i32` when the element at `a` sorts before the element at `b`, `0` when the two tie, and
+a positive one when it sorts after. It must be a total order and it must be consistent between
+calls; it must not change the elements, and it must not call `sort` on the same array. C leaves
+the result of the whole call undefined when it does. A comparator may `panic` (D12.2): the
+failure path flushes the print buffers and aborts (D11.4) from inside the C frame, the array is
+left half sorted, and no deferred code of the caller runs, which is what a panic does everywhere
+else. A fort function is usable as a callback
+exactly when its signature is extern-legal (D9.9), which this one is
+(`module-system.md` 8.5); an `extern` name cannot be a comparator, because an extern is not a
+value (D3.10).
+
+**What a caller may sort.** `n * elem_size` bytes must exist at `base` and must belong to one
+array of that element type. Nothing checks it: `base` is a `void*` and carries neither a length
+nor a type, so an `n` above the storage reads and writes past the end in silence, exactly as C
+does. The three typed entries take the count from the span and cannot get it wrong, which is the
+first reason to use one.
+
+The element type must own nothing (D17). `sort` permutes the
+elements byte by byte inside C: the compiler tracks ownership by variable and by field (D17.1,
+D17.7) and sees none of that permutation, and `qsort` may hold a copy of an element in a
+temporary of its own while it works, so an element carrying `own` exists twice for part of the
+call with nothing to end either copy. D17.14 already leaves a `cast`-made duplicate untracked,
+and this is the same hole one call deeper. So:
+
+- Sort arrays of integers, floats, `char`, `bool`, enums, pointers, `string` and structs whose
+  fields are all of those. `string` is a view (1.3) and `sizeof(string)` is 16 (D3.15), so an
+  array of strings sorts like any other struct.
+- Do not sort an array of `T@ own`, of `string own`, or of a struct with an `own` field. Nothing
+  rejects it, because ownership stops at the `void*`, and the result is a leak or a double free.
+  Order owned data by sorting views of it and leaving the owner where it is: an array of `string`
+  views into an owning buffer, an array of pointers, or an array of indices. The items of a
+  `ptr_vec` are borrowed for this reason (1.3, 2.7).
+- An element must hold no pointer into the array itself. The permutation moves every element and
+  leaves such a pointer at the wrong one.
+- The elements must be mutable. The three typed entries say so in their parameter types and the
+  compiler rejects an immutable span; `sort` cannot, because `void*` carries no target level
+  (D3.11). A caller that hands it the `.ptr` of a span of immutable elements compiles, runs and
+  sorts them: the cast to `void*` is the cast-away-const escape D3.14 allows, and the write is
+  defined. So the rule the typed entries enforce is one the core entry only states. It becomes
+  undefined in one case, and that case is not rare: writing into storage that is really
+  read-only, which is every module-level declaration without `mut` (D7.10) and every string
+  literal (D3.7), is undefined behavior (D10.7).
+
+```fort
+import std.sort;
+
+struct point {
+    i64 x;
+    i64 y;
+}
+
+fn i32 by_x(void* a, void* b) {
+    point* p = cast(a, point*);
+    point* q = cast(b, point*);
+    if (p->x < q->x) {
+        return -1;
+    }
+    if (p->x > q->x) {
+        return 1;
+    }
+    return 0;
+}
+
+fn void order(point mut@ ps, i64 mut@ xs) {
+    sort.sort(cast(ps.ptr, void*), ps.len, sizeof(point), by_x);
+    sort.sort_i64(xs, sort.cmp_i64);
+}
+```
+
+### 2.11 `std.rt`
 
 The runtime (D13.1, D13.2): process start and exit, allocation, the failure paths and the print
 buffers, written in fort over `std.libc`. `toolchain.md` 5 fixes what each entry point does and
@@ -827,7 +944,7 @@ a builtin lowers to a call of one (D12.2), and calls them like any other fort fu
 ## 3. The runtime surface the library relies on
 
 `toolchain.md` owns the runtime: the full entry-point list, the signatures, the print buffers and
-process start. `std.rt` is a library module like any other (D13.1, 2.10) and this section names
+process start. `std.rt` is a library module like any other (D13.1, 2.11) and this section names
 only what the rest of the library calls of it. The library uses the builtins `new`, `del`,
 `move`, `panic`, `assert` and the print family as any program does (D12); the runtime calls
 behind them, including the overwrite check of D17.11, are emitted by the compiler and never named
