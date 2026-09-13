@@ -37,6 +37,15 @@ bullet at a time and without a rewrite.
   Capture the whole output to a file under the worktree, wait for the process, and report the
   exit status the shell gives (`tools/vm gate > build/gate.log 2>&1; echo $?`).
 
+- **Quote a ctest label total with the tree it was measured on.** A label total is the volatile
+  number, because any ticket may register a suite: T-078 added `mutate_selftest`, so `ctest -L
+  unit` moved from 78 to 79 and every gate criterion of 2026-09-12 and 2026-09-13 that says "0
+  tests failed out of 78" now meets a reader who finds 79. Each of those lines was true of its own
+  tree, and none of them becomes false, but a reader comparing two tickets meets two numbers for
+  one label. Write "78 unit tests of that tree", or name the sha. A corpus count carries its own
+  guard and needs no qualifier, because it moves only when a `.ft` file is added or removed, and
+  the `*_FILES` equalities make that a counted edit that fails a test (T-078).
+
 ## 2. Unit tests in C
 
 - Unit tests: `test/<component>_test.c` with `test/test.h`; the suite name is the file stem and

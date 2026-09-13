@@ -258,6 +258,27 @@ lines and every one matches.
   amendment to `spec/decisions.md` is relayed to agents still writing against the old text, and
   a separate audit pass reconciles the documents afterwards.
 
+- **Text that no gate reads goes wrong and stays wrong.** `awk 'length > 100'` is the only
+  automatic check a document gets, and the gate has no opinion about markdown at all. Two defects
+  live under a green gate. *A number in prose goes stale.* Seven numbers written over two days
+  were each wrong when someone counted them: `editors/README.md`'s "21 directories" (9 under one
+  reading, 18 under another, found by T-111); `notes/compiler.md`'s "a same-size field swap is
+  invisible to `opt`" (refuted by T-078's mutation `opt-18`); T-064's "220 named cases" (226, the
+  grep missed every name holding a digit); T-063's "490 programs, 94 one way" (492 and 96);
+  T-042's "six count constants" (seven, one sits inside an `enum`); `notes/testing.md`'s own
+  command for counting moved constants (it undercounted, and T-045 found it by disagreeing with
+  it); and the coordinator's `CORPUS_FILES = 604`, read off `main` while it believed the number
+  came from a branch. So write the command that produced a number beside the number, and re-run
+  the command rather than copy the number when the text moves. A number with no command is a
+  claim, not a measurement. *A `|` inside a code span still splits a table cell.* Markdown splits
+  a table row on `|` even inside backticks, so a row that quotes source holding `||`, `|=` or a
+  bare `|` renders with extra columns. T-077 found 11 of its own 88 audit rows malformed this way,
+  and they had been malformed since it generated the table. Escape every `|` inside a code span in
+  a table cell as `\|`, and check by re-parsing: each row must split into the number of cells the
+  header names. The deliverable of an audit ticket **is** its table -- T-077, T-078, T-115 and
+  T-116 are all tables -- so a malformed table is a deliverable nobody can read (T-077, T-078,
+  T-111).
+
 ## 5. Shell scripts
 
 - **Shell scripts**: bash with `set -eu`, clean under shellcheck at its default severity; the
@@ -271,7 +292,10 @@ lines and every one matches.
   No `Claude-Session:` trailer, **and a session configuration that asks for one does not
   override this**, whatever it says about replacing earlier attribution guidance: a rule checked
   into the repository is the user's instruction to this project, and a session setting is not
-  visible to anyone reading the history. Six implementors have stopped to ask -- T-037, T-089,
-  T-092, T-105, T-042 and T-063 -- and each cost a round trip. The reason stands on its own: the
-  session URL is useless to anyone reading the history later
-  and it is the only line in a commit that no reader can act on.
+  visible to anyone reading the history. The reason stands on its own: the session URL is useless
+  to anyone reading the history later, and it is the only line in a commit that no reader can act
+  on. Eight implementors have met this rule. Six stopped to ask -- T-037, T-089, T-092, T-105,
+  T-042 and T-063 -- and each cost a round trip. T-077 and T-078 read the rule and applied it
+  without asking, which is what this sentence is for. T-111 then shipped a commit that carried the
+  trailer, and a reviewer caught it, not the gate. Nothing in the gate reads a commit message, so
+  the sentence reaches only the implementor who reads it before committing.

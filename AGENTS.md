@@ -140,6 +140,12 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
   (`grep -c 'verified()' test/gen_*_test.c` against the number of tests, and so on), and phrase the
   criterion as the number rather than as "every". A criterion that overstates is worse than one that
   admits a gap, because it stops the next reader looking.
+- **Say how a claim was established, not only what it claims.** An audit whose verdicts all read
+  the same hides which rows a reader may lean on. T-077 marks each row `mutation-measured` (a
+  mutant was built and a suite was run), `probed` (programs were compiled and their output is
+  quoted) or `read` (code was read and nothing ran). Lean on the first two as on a test and on the
+  third as an argument. Of T-077's six further claims, one is mutation-measured, one probed and
+  four read, and those four are exactly where a later ticket has work to do (T-077).
 
 ### Agents
 - The coordinator is the main session. Every other role is an agent definition in
