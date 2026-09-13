@@ -488,6 +488,20 @@ set_tests_properties(lines_selftest PROPERTIES
     LABELS unit
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+# The unit tests of tools/mutate.py (label unit): the parts of a mutation round
+# that fail silently -- the ctest failure parser, the anchor that must match
+# once, the stale-binary guard, the restore, the timeout verdict, the exit
+# status, the round loop and the guard that keeps this suite from judging a
+# round -- and the anchors of tools/mutations/emitter_bootstrap.json against the
+# sources they name, which is the one way a table of textual anchors rots
+# (T-078). It runs no round: a round rebuilds the compiler.
+add_test(NAME mutate_selftest
+    COMMAND "${FORT_PYTHON3}" -m unittest mutate_test
+    WORKING_DIRECTORY "${FORT_TEST_DIR}")
+set_tests_properties(mutate_selftest PROPERTIES
+    LABELS unit
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 # The shape of the decision log (label unit): every entry is `### Dn.m Title`
 # with an owner field and a rule field, and no line is over 100 columns
 # (T-100). The log is normative, so a malformed entry is a defect the gate

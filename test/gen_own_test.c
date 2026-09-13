@@ -8,6 +8,7 @@
 // in gen_alloc_test.c.
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "gen.h"
 #include "gen_helpers.h"
@@ -491,6 +492,29 @@ TEST(the_failure_blocks_of_several_checks_stay_in_ascending_label_order, {
 
 // NOLINTEND(readability-magic-numbers)
 
+// ---- what the emitter never sees (D17.8) -------------------------------------------
+
+// `move(x);` as a statement: gen_builtin_call carries a path for it, and no
+// program reaches that path. The checker leaves a `move` five ways before it
+// succeeds: the arity, an operand that is not an lvalue, one that is not owning
+// and one it cannot empty each report, and a poisoned operand was reported
+// where it went wrong. What is left is the success path, which types the call
+// as an owning rvalue, and a discarded owning rvalue is a leaking temporary.
+// The two below are the cases a well-formed `move` reaches; check_own_test.c
+// holds the others (D17.8).
+TEST(a_discarded_move_never_reaches_the_emitter, {
+    // The whole sentence and not its first clause: the conversion path of
+    // check.c reports the same prefix with another tail.
+    TEST_ASSERT_FALSE(emit("fn i32 main() {\n    i32 mut* own p = new(i32);\n"
+                           "    move(p);\n    del(p);\n    return 0;\n}\n"));
+    TEST_ASSERT_NONNULL(strstr(gen_said(),
+                               "owning temporary would leak: bind it to an 'own' place, "
+                               "pass it on or 'del' it"));
+    TEST_ASSERT_FALSE(emit("fn i32 main() {\n    i32 mut x = 1;\n"
+                           "    move(x);\n    return 0;\n}\n"));
+    TEST_ASSERT_NONNULL(strstr(gen_said(), "'move' needs an owning operand, not i32"));
+})
+
 int main(int argc, char** argv) {
     TEST_INIT("gen_own", argc, argv);
     TEST_RUN(move_of_a_pointer_loads_before_it_stores_null);
@@ -518,6 +542,7 @@ int main(int argc, char** argv) {
     TEST_RUN(a_move_into_its_own_operand_leaves_the_value_where_it_was);
     TEST_RUN(a_move_and_a_check_inside_a_loop_are_emitted_once);
     TEST_RUN(the_failure_blocks_of_several_checks_stay_in_ascending_label_order);
+    TEST_RUN(a_discarded_move_never_reaches_the_emitter);
     gen_done();
     TEST_EXIT();
 }

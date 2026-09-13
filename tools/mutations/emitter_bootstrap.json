@@ -1,0 +1,574 @@
+{
+  "comment": [
+    "T-078's table: one row for each of the 72 decisions src/bootstrap/gen.c,",
+    "gen_expr.c, gen_stmt.c and gen_data.c cite, and four second-facet probes whose",
+    "decision ends in a letter. A row names the line that implements the rule and the",
+    "text that breaks it. The stages run from the cheapest to the widest: the",
+    "emitted-text suites first, then every unit test, then the language corpora and",
+    "the differentials. 69 of the 72 were caught by the first stage.",
+    "The second stage excludes mutate_selftest, which reads this table against the",
+    "live sources: a round mutates one of them, so the test fails inside the round",
+    "and the row reads caught when no test of the compiler saw the mutation",
+    "(T-078, round 2, must-fix 1). test/mutate_test.py skips that class on a",
+    "mutated tree as well, so a table that forgets the -E is safe too. That skip",
+    "is measured over all 76 rows of this table, one at a time, and not over a",
+    "sample: three rows repeat their replacement text and the first version of",
+    "the guard was dead for them (T-078, round 3, must-fix 1)."
+  ],
+  "sources": [
+    "src/bootstrap/gen.c",
+    "src/bootstrap/gen_expr.c",
+    "src/bootstrap/gen_stmt.c",
+    "src/bootstrap/gen_data.c"
+  ],
+  "binary": "build/debug/fort",
+  "build": "ninja -C build/debug fort gen_test gen_aggregate_test gen_alloc_test gen_call_test gen_cast_test gen_check_test gen_control_test gen_decl_test gen_defer_test gen_enum_test gen_global_test gen_module_test gen_own_test gen_span_test gen_string_test gen_switch_test gen_symbols_test driver_test driver_check_test driver_conformance_test driver_ast_test driver_tokens_test selfcheck_test runtime_sig_test types_abi_test mem_test",
+  "stages": [
+    {
+      "name": "emitted-text suites",
+      "command": "cd build/debug && ctest -L unit -R \"^unit-(gen|driver|selfcheck|runtime_sig|types_abi|mem)\" -j 6 --output-on-failure"
+    },
+    {
+      "name": "every unit test",
+      "command": "ninja -C build/debug && cd build/debug && ctest -L unit -E mutate_selftest -j 6 --output-on-failure"
+    },
+    {
+      "name": "the language corpora and the differentials",
+      "command": "cd build/debug && ctest -L lang -j 2 --output-on-failure"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "D3.1",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "    case TOK_LT:\n        return sign ? \"slt\" : \"ult\";",
+      "new": "    case TOK_LT:\n        return sign ? \"ult\" : \"slt\";",
+      "what": "signedness of `<` inverted: an unsigned compare for a signed type"
+    },
+    {
+      "decision": "D3.3",
+      "file": "src/bootstrap/gen.c",
+      "old": "    if (t->prim == PRIM_BOOL) {\n        // D3.3\n        return 1;\n    }",
+      "new": "    if (t->prim == PRIM_BOOL) {\n        // D3.3\n        return 8;\n    }",
+      "what": "`bool` is 8 bits as a value instead of 1"
+    },
+    {
+      "decision": "D3.4",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "    *out = len ? gen_span_len(g, base) : gen_span_ptr(g, base);",
+      "new": "    *out = len ? gen_span_ptr(g, base) : gen_span_len(g, base);",
+      "what": "`.len` and `.ptr` pseudo-fields swapped"
+    },
+    {
+      "decision": "D3.5",
+      "file": "src/bootstrap/gen.c",
+      "old": "enum { SPAN_FIELD_PTR = 0, SPAN_FIELD_LEN = 1 };",
+      "new": "enum { SPAN_FIELD_PTR = 1, SPAN_FIELD_LEN = 0 };",
+      "what": "the span header's two fields swapped"
+    },
+    {
+      "decision": "D3.6",
+      "file": "src/bootstrap/gen.c",
+      "old": "        sb_push(&g->scratch, '[');\n        sb_append_u64(&g->scratch, t->len);",
+      "new": "        sb_push(&g->scratch, '[');\n        sb_append_u64(&g->scratch, t->len + 1);",
+      "what": "`[N x T]` printed as `[N+1 x T]`"
+    },
+    {
+      "decision": "D3.7",
+      "file": "src/bootstrap/gen.c",
+      "old": "    t->kind = TYPE_PRIM;\n    t->prim = PRIM_CHAR;",
+      "new": "    t->kind = TYPE_PRIM;\n    t->prim = PRIM_U8;",
+      "what": "a `string`'s element type is `u8` and not `char`"
+    },
+    {
+      "decision": "D3.8",
+      "file": "src/bootstrap/gen.c",
+      "old": "        // D3.8\n        sb_append_str(&g->named, gen_mem_type(g, f->type));",
+      "new": "        // D3.8\n        sb_append_str(&g->named,\n                      f->type->kind == TYPE_PTR ? str_from_cstr(\"i64\")\n                                                : gen_mem_type(g, f->type));",
+      "what": "a pointer field prints as `i64`: same size, same offsets, other text"
+    },
+    {
+      "decision": "D3.9",
+      "file": "src/bootstrap/gen.c",
+      "old": "        // D3.9\n        return 4 * PRIM_BITS_PER_BYTE;",
+      "new": "        // D3.9\n        return 8 * PRIM_BITS_PER_BYTE;",
+      "what": "an enum is 64 bits wide and not 32"
+    },
+    {
+      "decision": "D3.10",
+      "file": "src/bootstrap/gen.c",
+      "old": "    case TYPE_PTR:\n    case TYPE_VOIDPTR:\n    case TYPE_FN:\n        // D3.10, D3.11\n        return str_from_cstr(\"ptr\");",
+      "new": "    case TYPE_FN:\n        return str_from_cstr(\"i64\");\n    case TYPE_PTR:\n    case TYPE_VOIDPTR:\n        // D3.10, D3.11\n        return str_from_cstr(\"ptr\");",
+      "what": "a function pointer is `i64` and not `ptr`"
+    },
+    {
+      "decision": "D3.11",
+      "file": "src/bootstrap/gen.c",
+      "old": "    case TYPE_PTR:\n    case TYPE_VOIDPTR:\n    case TYPE_FN:\n        // D3.10, D3.11\n        return str_from_cstr(\"ptr\");",
+      "new": "    case TYPE_VOIDPTR:\n        return str_from_cstr(\"i64\");\n    case TYPE_PTR:\n    case TYPE_FN:\n        // D3.10, D3.11\n        return str_from_cstr(\"ptr\");",
+      "what": "`void*` is `i64` and not `ptr`"
+    },
+    {
+      "decision": "D3.14",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "    return gen_resize(g, v, from_bits, gen_value_type(g, to), to_bits, gen_is_signed(from));",
+      "new": "    return gen_resize(g, v, from_bits, gen_value_type(g, to), to_bits, false);",
+      "what": "a widening cast zero-extends a signed source"
+    },
+    {
+      "decision": "D4.3",
+      "file": "src/bootstrap/gen.c",
+      "old": "    return const_bits(g, ty, cv_bits(cv_as_int(v)), gen_int_bits(t), gen_is_signed(t));",
+      "new": "    return const_bits(\n        g, ty, v.kind == CV_CHAR ? 63U : cv_bits(cv_as_int(v)), gen_int_bits(t), gen_is_signed(t));",
+      "what": "a char constant emits 63 and not its code point"
+    },
+    {
+      "decision": "D4.6",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "static bool folded_scalar(const gen_t* g, const ast_node_t* n) {\n    if ((n->ann & CHECK_ANN_CONST) == 0",
+      "new": "static bool folded_scalar(const gen_t* g, const ast_node_t* n) {\n    return false;\n    if ((n->ann & CHECK_ANN_CONST) == 0",
+      "what": "a constant expression is emitted as code and not as its value"
+    },
+    {
+      "decision": "D5.4",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "        // D5.4, D17.4: nothing for pointer to pointer or a dropped mark\n        return v;",
+      "new": "        // D5.4, D17.4: nothing for pointer to pointer or a dropped mark\n        return gen_cast_op(\n            g, \"inttoptr\", gen_cast_op(g, \"ptrtoint\", v, str_from_cstr(\"i64\")), gen_value_type(g, to));",
+      "what": "a pointer-to-pointer cast emits two instructions instead of none"
+    },
+    {
+      "decision": "D6.2",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "        return gen_binary(g, sign ? \"ashr\" : \"lshr\", a, count);",
+      "new": "        return gen_binary(g, sign ? \"lshr\" : \"ashr\", a, count);",
+      "what": "`>>` is logical for a signed type and arithmetic for an unsigned one"
+    },
+    {
+      "decision": "D6.3",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "    for (uint64_t i = first; i < ast_len(n); i++) {\n        gen_print_arg(g, ast_child(n, i), fd);",
+      "new": "    for (uint64_t i = ast_len(n); i > first; i--) {\n        gen_print_arg(g, ast_child(n, i - 1), fd);",
+      "what": "`print` evaluates its arguments right to left"
+    },
+    {
+      "decision": "D6.5",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "        // D6.5: the designated form zeroes first, omitted fields being zero\n        gen_memset_zero(g, dst.addr, type_alignof(t), type_sizeof(t));",
+      "new": "        // D6.5: the designated form zeroes first, omitted fields being zero",
+      "what": "a designated literal does not zero the fields it omits"
+    },
+    {
+      "decision": "D6.7",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "        // D6.7\n        return n->op == TOK_STAR;",
+      "new": "        // D6.7\n        return false;",
+      "what": "`*p` does not designate storage"
+    },
+    {
+      "decision": "D6.8",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "        const gen_val_t bad = gen_icmp(g, \"uge\", index, len);",
+      "new": "        const gen_val_t bad = gen_icmp(g, \"ugt\", index, len);",
+      "what": "the index bound is off by one: `e[len]` passes"
+    },
+    {
+      "decision": "D6.9",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "        const gen_val_t over = gen_icmp(g, \"ugt\", hi, len);",
+      "new": "        const gen_val_t over = gen_icmp(g, \"uge\", hi, len);",
+      "what": "the span bound is off by one: `s[0..len]` fails"
+    },
+    {
+      "decision": "D6.10",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "    const gen_val_t base = arrow ? gen_expr_value(g, n->a) : gen_expr_place(g, n->a).addr;",
+      "new": "    const gen_val_t base = arrow ? gen_expr_place(g, n->a).addr : gen_expr_value(g, n->a);",
+      "what": "`->` takes the operand's address and `.` its value"
+    },
+    {
+      "decision": "D6.11",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "    const bool direct = s != NULL && (s->kind == SYM_FN || s->kind == SYM_EXTERN_FN);",
+      "new": "    const bool direct = s != NULL && s->kind == SYM_EXTERN_FN;",
+      "what": "a call of a fort function goes through a function value"
+    },
+    {
+      "decision": "D6.13",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "        const gen_val_t minus_one = gen_const_signed(g, a.ty, -1);",
+      "new": "        const gen_val_t minus_one = gen_const_signed(g, a.ty, -2);",
+      "what": "the MIN / -1 check compares against -2"
+    },
+    {
+      "decision": "D7.1",
+      "file": "src/bootstrap/gen_stmt.c",
+      "old": "    gen_expr_into(g, n->b, slot);\n}\n\nstatic void gen_assign",
+      "new": "    (void)slot;\n}\n\nstatic void gen_assign",
+      "what": "a declaration's initializer is not stored"
+    },
+    {
+      "decision": "D7.2",
+      "file": "src/bootstrap/gen_stmt.c",
+      "old": "    case TOK_PLUS_ASSIGN:\n        return TOK_PLUS;",
+      "new": "    case TOK_PLUS_ASSIGN:\n        return TOK_MINUS;",
+      "what": "`+=` subtracts"
+    },
+    {
+      "decision": "D7.3",
+      "file": "src/bootstrap/gen_stmt.c",
+      "old": "        // D7.3\n        gen_expr_discard(g, n->a);\n        return;",
+      "new": "        // D7.3\n        return;",
+      "what": "an expression statement emits nothing"
+    },
+    {
+      "decision": "D7.4",
+      "file": "src/bootstrap/gen_stmt.c",
+      "old": "        // D7.4\n        gen_stmt(g, n->c);",
+      "new": "        // D7.4",
+      "what": "an `else` branch emits nothing"
+    },
+    {
+      "decision": "D7.5",
+      "file": "src/bootstrap/gen_stmt.c",
+      "old": "        // D7.5: an empty condition is `true`\n        gen_br(g, body);",
+      "new": "        // D7.5: an empty condition is `true`\n        gen_br(g, done);",
+      "what": "`for (;;)` never enters its body"
+    },
+    {
+      "decision": "D7.6",
+      "file": "src/bootstrap/gen_stmt.c",
+      "old": "    return kind == GEN_SCOPE_LOOP || kind == GEN_SCOPE_CASE;\n}",
+      "new": "    return kind == GEN_SCOPE_LOOP;\n}",
+      "what": "`break` in a `switch` unwinds past the case body"
+    },
+    {
+      "decision": "D7.7",
+      "file": "src/bootstrap/gen_stmt.c",
+      "old": "    const bool generated_default =\n        fallback_clause == clauses && ot != NULL && ot->kind == TYPE_ENUM;",
+      "new": "    const bool generated_default = false;",
+      "what": "an exhaustive enum `switch` gets no generated default"
+    },
+    {
+      "decision": "D7.8",
+      "file": "src/bootstrap/gen_stmt.c",
+      "old": "    for (uint64_t i = end; i > first; i--) {\n        if (g->failed || g->terminated) {\n            break;\n        }\n        ast_node_t* deferred = (ast_node_t*)g->defers.items[i - 1];",
+      "new": "    for (uint64_t i = first + 1; i <= end; i++) {\n        if (g->failed || g->terminated) {\n            break;\n        }\n        ast_node_t* deferred = (ast_node_t*)g->defers.items[i - 1];",
+      "what": "deferred statements run in source order and not in reverse"
+    },
+    {
+      "decision": "D7.10",
+      "file": "src/bootstrap/gen_data.c",
+      "old": "              s->kind == SYM_GLOBAL ? \" = dso_local global \" : \" = dso_local constant \");",
+      "new": "              s->kind == SYM_GLOBAL ? \" = dso_local constant \" : \" = dso_local global \");",
+      "what": "a `mut` global is emitted `constant` and a constant `global`"
+    },
+    {
+      "decision": "D8.2",
+      "file": "src/bootstrap/gen_stmt.c",
+      "old": "        const bool through_temp = g->defers.len > 0;",
+      "new": "        const bool through_temp = false;",
+      "what": "an aggregate result is written into the `sret` block before the deferred code runs"
+    },
+    {
+      "decision": "D8.4",
+      "file": "src/bootstrap/gen.c",
+      "old": "            // D8.4: the checker proved the body terminates, so this is dead\n            sb_append(&g->body, \"  unreachable\\n\");",
+      "new": "            // D8.4: the checker proved the body terminates, so this is dead",
+      "what": "the last block of a fallen-through body has no terminator"
+    },
+    {
+      "decision": "D8.5",
+      "file": "src/bootstrap/gen.c",
+      "old": "            sb_append(&g->body, \"  call void @llvm.trap()\\n  unreachable\\n\");",
+      "new": "            sb_append(&g->body, \"  unreachable\\n\");",
+      "what": "a `noreturn` body ends without the trap"
+    },
+    {
+      "decision": "D9.1",
+      "file": "src/bootstrap/gen_data.c",
+      "old": "    if (byte == '-' || byte == '$' || byte == '.' || byte == '_') {",
+      "new": "    if (byte == '-' || byte == '$' || byte == '_') {",
+      "what": "a dotted name is quoted, so every `@` name changes spelling"
+    },
+    {
+      "decision": "D9.4",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "        // D3.10, D9.4: `m.f` is the function's address, not a field\n        if (function_ref(g, n, &v)) {\n            return v;\n        }",
+      "new": "        // D3.10, D9.4: `m.f` is the function's address, not a field\n        (void)function_ref(g, n, &v);",
+      "what": "`m.f` reads a field instead of the function's address"
+    },
+    {
+      "decision": "D9.7",
+      "file": "src/bootstrap/gen.c",
+      "old": "    // D9.7: quoting is spelling only; the ELF symbol is unchanged\n    gen_append_name(&g->scratch, \"\", name, true);",
+      "new": "    // D9.7: quoting is spelling only; the ELF symbol is unchanged\n    gen_append_name(&g->scratch, \"\", name, false);",
+      "what": "a mangled name is not quoted"
+    },
+    {
+      "decision": "D9.8",
+      "file": "src/bootstrap/gen_data.c",
+      "old": "    if (sig->nparams > 0) {\n        sb_append(out, \", \");\n    }\n    sb_append(out, \"...)\\n\");",
+      "new": "    sb_append(out, \")\\n\");",
+      "what": "an `extern` declaration has no variadic tail"
+    },
+    {
+      "decision": "D9.9",
+      "file": "src/bootstrap/gen.c",
+      "old": "    gen_val_t span;\n    span.ty = str_from_cstr(\"ptr\");\n    span.val = str_from_cstr(\"%args\");",
+      "new": "    gen_val_t span;\n    span.ty = str_from_cstr(\"i64\");\n    span.val = str_from_cstr(\"%args\");",
+      "what": "the hidden result pointer is passed as `i64` at the call site"
+    },
+    {
+      "decision": "D9.10",
+      "file": "src/bootstrap/gen.c",
+      "old": "    for (uint64_t i = 0; i < module_set_count(set); i++) {\n        gen_module(g, module_set_at(set, i));",
+      "new": "    for (uint64_t i = 0; i + 1 < module_set_count(set); i++) {\n        gen_module(g, module_set_at(set, i));",
+      "what": "the last module of the closure is not emitted"
+    },
+    {
+      "decision": "D10.2",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "    gen_args_add(&args, gen_const_unsigned(g, i64ty, type_sizeof(elem)));",
+      "new": "    gen_args_add(&args, gen_const_unsigned(g, i64ty, type_sizeof(elem) + 1));",
+      "what": "`alloc` is asked for one byte per element too many"
+    },
+    {
+      "decision": "D10.3",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "    gen_args_add(&args, p);\n    gen_call_rt(g, RT_FREE, &args);",
+      "new": "    gen_args_add(&args, p);",
+      "what": "`del` frees nothing"
+    },
+    {
+      "decision": "D10.4",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "        const gen_val_t at = gen_gep_element(g, ot->elem, base, lo);",
+      "new": "        const gen_val_t at = gen_gep_element(g, ot->elem, base, hi);",
+      "what": "a span of a pointer starts at its high bound"
+    },
+    {
+      "decision": "D10.5",
+      "file": "src/bootstrap/gen.c",
+      "old": "    if (v.kind == CV_NULL) {\n        // D10.5\n        return gen_literal(g, ty, \"null\");\n    }",
+      "new": "    if (v.kind == CV_NULL) {\n        // D10.5\n        return gen_literal(g, ty, \"inttoptr (i64 8 to ptr)\");\n    }",
+      "what": "the `null` literal is the address 8"
+    },
+    {
+      "decision": "D10.6",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "    if (!sign) {\n        // An unsigned count is never negative, so it takes no branch.\n        return v;\n    }",
+      "new": "    if (true) {\n        // An unsigned count is never negative, so it takes no branch.\n        return v;\n    }",
+      "what": "a negative allocation count is not checked"
+    },
+    {
+      "decision": "D10.7",
+      "file": "src/bootstrap/gen_stmt.c",
+      "old": "        gen_args_add(&args, reported);\n        gen_args_add(&args, gen_literal(g, str_from_cstr(\"ptr\"), gen_str_ref(g, ot->name).ptr));",
+      "new": "        gen_args_add(&args, gen_literal(g, str_from_cstr(\"ptr\"), gen_str_ref(g, ot->name).ptr));\n        gen_args_add(&args, reported);",
+      "what": "the enum failure reports its two arguments in the other order"
+    },
+    {
+      "decision": "D11.1",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "    gen_check(g, bad, true, RT_FAIL_OVERFLOW, &args, loc);",
+      "new": "    gen_check(g, bad, false, RT_FAIL_OVERFLOW, &args, loc);",
+      "what": "the overflow check fires when the operation did not overflow"
+    },
+    {
+      "decision": "D11.2",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "    case TOK_PLUS_WRAP:\n        // D11.2\n        return gen_binary(g, \"add\", a, b);",
+      "new": "    case TOK_PLUS_WRAP:\n        // D11.2\n        return gen_binary(g, \"sub\", a, b);",
+      "what": "`+%` subtracts"
+    },
+    {
+      "decision": "D11.3",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "    gen_val_t bad = gen_icmp(g, \"eq\", b, zero);",
+      "new": "    gen_val_t bad = gen_icmp(g, \"ne\", b, zero);",
+      "what": "the division-by-zero check is inverted"
+    },
+    {
+      "decision": "D11.4",
+      "file": "src/bootstrap/gen.c",
+      "old": "    gen_args_add(args, gen_const_unsigned(g, str_from_cstr(\"i32\"), loc.line));\n    gen_args_add(args, gen_const_unsigned(g, str_from_cstr(\"i32\"), loc.col));",
+      "new": "    gen_args_add(args, gen_const_unsigned(g, str_from_cstr(\"i32\"), loc.col));\n    gen_args_add(args, gen_const_unsigned(g, str_from_cstr(\"i32\"), loc.line));",
+      "what": "a runtime error reports the column as the line"
+    },
+    {
+      "decision": "D11.5",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "            g, str_from_cstr(\"i32\"), (uint64_t)(out || outln ? FD_STDOUT : FD_STDERR));",
+      "new": "            g, str_from_cstr(\"i32\"), (uint64_t)(out || outln ? FD_STDERR : FD_STDOUT));",
+      "what": "`print` writes to stderr and `eprint` to stdout"
+    },
+    {
+      "decision": "D11.6",
+      "file": "src/bootstrap/gen.c",
+      "old": "enum { STATUS_MASK = 255 };",
+      "new": "enum { STATUS_MASK = 65535 };",
+      "what": "`main` masks its status to two bytes"
+    },
+    {
+      "decision": "D12.2",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "    gen_check(g, cond, false, RT_ASSERT_FAIL, &args, n->a->loc);",
+      "new": "    gen_check(g, cond, true, RT_ASSERT_FAIL, &args, n->a->loc);",
+      "what": "`assert` fails when its condition holds"
+    },
+    {
+      "decision": "D14.2",
+      "file": "src/bootstrap/gen_stmt.c",
+      "old": "            // D14.2: a fresh block for the unreachable statements after an exit\n            gen_block_begin(g, gen_label(g));",
+      "new": "            // D14.2: a fresh block for the unreachable statements after an exit",
+      "what": "a statement after `return` lands in the terminated block"
+    },
+    {
+      "decision": "D17.3",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "    return alloc_call(g, n, n->type->elem, gen_const_unsigned(g, str_from_cstr(\"i64\"), 1));",
+      "new": "    return alloc_call(g, n, n->type->elem, gen_const_unsigned(g, str_from_cstr(\"i64\"), 2));",
+      "what": "`new(T)` allocates two elements"
+    },
+    {
+      "decision": "D17.4",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "        // D5.4, D17.4: a cast between aggregates only drops marks\n        gen_expr_into(g, n->a, dst);\n        return;",
+      "new": "        // D5.4, D17.4: a cast between aggregates only drops marks\n        return;",
+      "what": "a cast between aggregates writes nothing into its destination"
+    },
+    {
+      "decision": "D17.5",
+      "file": "src/bootstrap/gen_stmt.c",
+      "old": "        // D17.5: the operand is emptied before the deferred code too\n        gen_return_move(g, n);",
+      "new": "        // D17.5: the operand is emptied before the deferred code too",
+      "what": "an aggregate `return` of an `own` local does not empty it"
+    },
+    {
+      "decision": "D17.6",
+      "file": "src/bootstrap/gen.c",
+      "old": "        // D17.6\n        gen_memset_zero(g, p.addr, type_alignof(p.type), type_sizeof(p.type));\n        return;",
+      "new": "        // D17.6\n        return;",
+      "what": "emptying an owning aggregate writes nothing"
+    },
+    {
+      "decision": "D17.7",
+      "file": "src/bootstrap/gen_stmt.c",
+      "old": "    const gen_val_t v = gen_expr_value(g, n->a);\n    gen_return_move(g, n);",
+      "new": "    const gen_val_t v = gen_expr_value(g, n->a);",
+      "what": "a scalar `return` of an `own` local does not empty it"
+    },
+    {
+      "decision": "D17.8",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "    // D17.8: the checker refuses a discarded `move`'s value\n    (void)gen_move(g, n, NULL);",
+      "new": "    // D17.8: the checker refuses a discarded `move`'s value\n    if (g == NULL) {\n        (void)gen_move(g, n, NULL);\n    }",
+      "what": "a discarded `move` emits nothing"
+    },
+    {
+      "decision": "D17.9",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "    gen_store_place(g, place, gen_literal(g, str_from_cstr(\"ptr\"), \"null\"));\n}\n\n// The count of `new(T, n)`",
+      "new": "}\n\n// The count of `new(T, n)`",
+      "what": "`del` of a pointer lvalue does not empty it"
+    },
+    {
+      "decision": "D17.10",
+      "file": "src/bootstrap/gen_stmt.c",
+      "old": "    if (coll->type != NULL && (type_is_owning_aggregate(coll->type) ||\n                               (type_is_reference(coll->type) && coll->type->own))) {",
+      "new": "    if (false && (type_is_owning_aggregate(coll->type) ||\n                  (type_is_reference(coll->type) && coll->type->own))) {",
+      "what": "a range `for` copies an owning collection instead of lending it"
+    },
+    {
+      "decision": "D17.11",
+      "file": "src/bootstrap/gen_stmt.c",
+      "old": "    return !g->opts.release && type_is_reference(t) && t->own;",
+      "new": "    return g->opts.release && type_is_reference(t) && t->own;",
+      "what": "no assignment carries the overwrite check"
+    },
+    {
+      "decision": "D19.1",
+      "file": "src/bootstrap/gen_data.c",
+      "old": "static const char MODULE_HEADER[] = \"target triple = \\\"x86_64-unknown-linux-gnu\\\"\\n\";",
+      "new": "static const char MODULE_HEADER[] = \"target triple = \\\"aarch64-unknown-linux-gnu\\\"\\n\";",
+      "what": "the module header names the wrong target triple"
+    },
+    {
+      "decision": "D19.2",
+      "file": "src/bootstrap/gen.c",
+      "old": "        // D19.2\n        return str_from_cstr(\"i1\");",
+      "new": "        // D19.2\n        return str_from_cstr(\"i8\");",
+      "what": "a `bool` value is `i8` and not `i1`"
+    },
+    {
+      "decision": "D19.3",
+      "file": "src/bootstrap/gen.c",
+      "old": "    return t != NULL && (t->kind == TYPE_ARRAY || t->kind == TYPE_SPAN || t->kind == TYPE_STRING ||\n                         t->kind == TYPE_STRUCT);",
+      "new": "    return t != NULL && (t->kind == TYPE_SPAN || t->kind == TYPE_STRING ||\n                         t->kind == TYPE_STRUCT);",
+      "what": "a fixed array is an SSA value and not memory"
+    },
+    {
+      "decision": "D19.4",
+      "file": "src/bootstrap/gen.c",
+      "old": "            slot_add(g, p->sym, name);\n            emit_alloca(g, name, t);",
+      "new": "            slot_add(g, p->sym, name);",
+      "what": "a scalar parameter gets no slot in the entry block"
+    },
+    {
+      "decision": "D19.5",
+      "file": "src/bootstrap/gen.c",
+      "old": "    sb_clear(&g->scratch);\n    sb_append(&g->scratch, \"%t\");\n    sb_append_u64(&g->scratch, g->temps);",
+      "new": "    sb_clear(&g->scratch);\n    sb_append(&g->scratch, \"%v\");\n    sb_append_u64(&g->scratch, g->temps);",
+      "what": "a temporary is `%vN` and not `%tN`"
+    },
+    {
+      "decision": "D19.6",
+      "file": "src/bootstrap/gen.c",
+      "old": "    // D19.6: the continuation label comes before the failure label\n    const uint64_t cont = gen_label(g);\n    const uint64_t bad = gen_label(g);",
+      "new": "    // D19.6: the continuation label comes before the failure label\n    const uint64_t bad = gen_label(g);\n    const uint64_t cont = gen_label(g);",
+      "what": "the failure label is allocated before the continuation"
+    },
+    {
+      "decision": "D19.7",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "        gen_ins(g);\n        gen_text_append(g, \"call void @llvm.trap()\");\n        gen_ins_end(g);\n        gen_ins(g);\n        gen_text_append(g, \"unreachable\");\n        gen_ins_end(g);",
+      "new": "        gen_ins(g);\n        gen_text_append(g, \"call void @llvm.trap()\");\n        gen_ins_end(g);",
+      "what": "a call of a `noreturn` function is not followed by `unreachable`"
+    },
+    {
+      "decision": "D20.4",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "    return str_from_range(src.ptr + open + 1, close - open - 2);",
+      "new": "    return str_from_range(NULL, 0);",
+      "what": "`assert` quotes no source text"
+    },
+    {
+      "decision": "D3.7b",
+      "file": "src/bootstrap/gen_data.c",
+      "old": "    sb_append(out, \"\\\\00\\\"\");",
+      "new": "    sb_append(out, \"\\\"\");",
+      "what": "a string constant loses the trailing NUL that its length excludes"
+    },
+    {
+      "decision": "D10.5b",
+      "file": "src/bootstrap/gen.c",
+      "old": "    if (t != NULL && (t->kind == TYPE_PTR || t->kind == TYPE_VOIDPTR || t->kind == TYPE_FN)) {\n        return gen_literal(g, ty, \"null\");\n    }",
+      "new": "    if (t != NULL && (t->kind == TYPE_PTR || t->kind == TYPE_VOIDPTR || t->kind == TYPE_FN)) {\n        return gen_literal(g, ty, \"inttoptr (i64 8 to ptr)\");\n    }",
+      "what": "the guard below the citation answers the address 8"
+    },
+    {
+      "decision": "D10.5c",
+      "file": "src/bootstrap/gen.c",
+      "old": "    if (t != NULL && (t->kind == TYPE_PTR || t->kind == TYPE_VOIDPTR || t->kind == TYPE_FN)) {\n        return gen_literal(g, ty, \"null\");\n    }",
+      "new": "    if (t != NULL && (t->kind == TYPE_PTR || t->kind == TYPE_VOIDPTR || t->kind == TYPE_FN)) {\n        fatal_internal(\"gen: D10.5 reachability probe\");\n        return gen_literal(g, ty, \"null\");\n    }",
+      "what": "the guard aborts: a probe of whether any test reaches it"
+    },
+    {
+      "decision": "D17.8b",
+      "file": "src/bootstrap/gen_expr.c",
+      "old": "    // D17.8: the checker refuses a discarded `move`'s value\n    (void)gen_move(g, n, NULL);",
+      "new": "    // D17.8: the checker refuses a discarded `move`'s value\n    fatal_internal(\"gen: D17.8 reachability probe\");\n    (void)gen_move(g, n, NULL);",
+      "what": "the discarded-move path aborts: a probe of whether any test reaches it"
+    }
+  ]
+}

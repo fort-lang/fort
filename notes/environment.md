@@ -153,6 +153,13 @@ without a rewrite.
   non-interactive shell has SIGINT ignored on entry (POSIX). Use `kill -TERM <pid>`. Find the pid
   by matching the process whose command *is* the gate. Never use `pkill -f`: it also matches every
   waiter that quotes the command.
+  **A host-side timeout does not reach the guest.** `ssh -T` allocates no pty, so a command that
+  kills the host process leaves the guest command running. T-078 measured it on the new
+  `guest_run`: `subprocess.run(["tools/vm", "run", "sleep 40"], timeout=3)` raised its timeout,
+  and `tools/vm run 'pgrep -af sleep'` then showed the guest's `sleep 40` and its `bash -c`
+  alive. A host tool that gives a guest command a timeout therefore stops rather than starting
+  the next one, because a second runner in one build directory reads as a finding
+  (notes/testing.md 1). `tools/mutate.py` does exactly that and names the `pgrep` to run.
 
 ## 2. The shared folder
 

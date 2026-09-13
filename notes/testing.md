@@ -390,7 +390,21 @@ bullet at a time and without a rewrite.
   `run/structs/008_recursive_span_first.ft`. The unit suite the same ticket added
   (`check_resolve_test.ft`) catches it too, and that is the shape to aim for -- the differential
   finds the class, a named assertion pins it -- so do not read the story as "the differential is
-  enough". All four carry the same `FT_FILES` equality, so a ticket that adds or removes a `.ft`
+  enough".
+  **T-078 measured the same shape from the other side, in the emitter, and found one rule that
+  only `diff_ir.sh` held.** It broke, one at a time, the line implementing each of the 72
+  decisions `src/bootstrap/gen.c`, `gen_expr.c`, `gen_stmt.c` and `gen_data.c` cite. 69 of the 72
+  turned a test red, and 68 of those died in the emitted-text suites. The 69th is the one to
+  learn from. `gen_int_bits` answering 8 bits for a `bool` instead of 1 left all 78 unit tests of
+  that tree green. It left ten of the eleven tests of the `lang` label green. It turned only
+  `diff-ir` red, on 1 of 492 compared files. A pure differential says that stage1 and stage2
+  disagree. It never says which of them is wrong, so the same mistake ported into `src/fort`
+  takes the last witness away. The assertion that now states the rule is
+  `a_bool_widens_to_a_byte_because_its_value_is_one_bit` in `test/gen_cast_test.c`. It needs an
+  **8-bit** target: a `zext i1` to `i32` reads the same whether the source is called one bit wide
+  or eight. Read a differential's red as "the class is here", never as the rule's witness. The
+  method, the runner and the traps of that audit are in section 7, beside T-077's.
+  All four scripts carry the same `FT_FILES` equality, so a ticket that adds or removes a `.ft`
   file changes **four** lines in the same commit, and `diff_check.sh` and `diff_ir.sh` each carry
   a second equality, `CLEAN_FILES` and `PROGRAM_FILES`, because a comparison that shrank would
   otherwise pass while seeing less. `diff_ast.sh` carries three more, one for each construct
@@ -541,6 +555,44 @@ bullet at a time and without a rewrite.
   **Say how strong each verdict is.** A verdict a mutant measured, a claim probed by compiling a
   program, and a claim read off the source are three things, and an audit that gives them one word
   hides which rows a reader may rely on.
+  T-078 ran the same method over the C emitter and used those three words for its rows. Four
+  things it adds, for the audit after it.
+  **The runner is in the repository and the table is data**: `tools/mutate.py` and
+  `tools/mutations/emitter_bootstrap.json`, 76 rows of file, anchor text and replacement, so a
+  later audit writes a table and not a program. `tools/mutate.py <table> --only D3.8` re-runs one
+  row. `tools/mutate.py <table> --check` builds nothing and reports every anchor that no longer
+  matches its file, which is the one way a table of textual anchors rots.
+  `test/mutate_test.py` (ctest `mutate_selftest`, 43 tests) holds the parts that fail silently:
+  the ctest failure parser, the anchor that must match once, the stale-binary guard, the restore,
+  the timeout verdict, the exit status and the round loop.
+  **Order the stages by cost and stop at the first red one.** In the emitter that is one `ninja`
+  and `ctest -L unit -R '^unit-(gen|driver|selfcheck|runtime_sig|types_abi|mem)'`, a median of
+  6 s over a 3 s to 19 s range, against 320 s to 420 s for a round that goes on to `ctest -L unit`
+  and `ctest -L lang`. 69 of 72 rounds stopped at the cheap stage.
+  **A test that reads a source must not judge a round that rewrites it.** `mutate_selftest`
+  asserts the table's anchors against the live `src/bootstrap/gen*.c`. A round mutates one of
+  those files, so the suite went red inside the round, at the stage that runs every unit test,
+  and the row read `caught` when no test of the compiler had seen the mutation. All three
+  survivors reproduced wrongly. Three guards close it: the table's stage excludes the suite by
+  name (`ctest -L unit -E mutate_selftest`), the class that reads the sources skips when
+  `mutate.mutated_rows` finds a row the sources hold, and `--check` reads the text with the
+  applied row put back, so a second row on the same lines is not called stale.
+  **Measure a guard on every row, not on one.** The first version of the second and third guards
+  asked whether the replacement text occurred exactly once, and the test proved them on 2 of the
+  76 rows. They were dead for 3 rows whose replacement repeats text the file already had (D3.14,
+  D8.5, D20.4), so `--check` exited 1 on a table that had not rotted -- the failure the third
+  guard exists to stop. The test now applies **all 76** rows one at a time, in about 0.4 s, and
+  the rule reads "`old` is absent and `new` is present". Any test that asserts something about a
+  source file carries this trap; ask what it does while the file is broken on purpose, and ask it
+  for every row rather than for a representative one.
+  **Couple the row count to the sources on purpose.**
+  `test_the_audit_covers_the_72_decisions_the_four_files_cite` goes red when those files gain or
+  lose a `Dn.m` citation. A ticket that adds one has three ways out. It adds a row and runs it
+  (`python3 tools/mutate.py tools/mutations/emitter_bootstrap.json --only D6.14`). Or it adds a
+  row that records why the rule needs no mutation. Or, if the citation sits on a line that
+  implements no rule, it says so in the row and moves the citation. The coupling is what stops an
+  audit going stale. T-046 freezes `src/bootstrap` and is still in `todo/`, so the count can move
+  until it runs.
 
 ## 8. The grammar and the extension
 

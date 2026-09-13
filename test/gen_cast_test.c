@@ -69,6 +69,35 @@ TEST(a_bool_to_integer_cast_is_a_zext_of_i1, {
     TEST_ASSERT_EQ_STR(found("zext i1 %t2 to i32"), "zext i1 %t2 to i32");
 })
 
+TEST(a_bool_widens_to_a_byte_because_its_value_is_one_bit, {
+    // A `bool` is one bit as a value (D3.3, D19.2), so a cast of it to `u8` is
+    // a widening and emits a `zext`. The width comes from gen_int_bits, and an
+    // eight-bit answer there makes the cast the identity: the `i1` is then
+    // stored into the byte slot as it stands. Both modules run the same and
+    // `opt` accepts the `store i1`, so the difference is visible in the text
+    // alone -- the mutation that made gen_int_bits answer 8 left all 78 unit
+    // tests of that tree and ten of the eleven tests of the lang label green,
+    // and turned only `diff-ir` red, on one of 492 compared files (T-078). It
+    // is the one rule of the emitter that no named assertion held. Every other
+    // target width is blind to it, since a `zext i1` to `i32` reads the same
+    // whether the source is called one bit wide or eight.
+    TEST_ASSERT_TRUE(emit(in_main("    bool b = true;\n    u8 n = cast(b, u8);\n"
+                                  "    println(n);\n")));
+    TEST_ASSERT_EQ_STR(found("  %t2 = trunc i8 %t1 to i1\n"
+                             "  %t3 = zext i1 %t2 to i8\n"
+                             "  store i8 %t3, ptr %n.1, align 1\n"),
+                       "  %t2 = trunc i8 %t1 to i1\n"
+                       "  %t3 = zext i1 %t2 to i8\n"
+                       "  store i8 %t3, ptr %n.1, align 1\n");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+    // The same step on a `bool` constant, which the checker does not fold into
+    // the cast (D4.6): the `zext i1 true` is what says so.
+    TEST_ASSERT_TRUE(emit(in_main("    println(cast(true, u8));\n")));
+    TEST_ASSERT_EQ_STR(found("  %t0 = zext i1 true to i8\n  %t1 = zext i8 %t0 to i64\n"),
+                       "  %t0 = zext i1 true to i8\n  %t1 = zext i8 %t0 to i64\n");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
 TEST(a_bool_to_bool_cast_emits_nothing, {
     // The identity of D3.14: `zext i1 ... to i1` is not an instruction, so a
     // cast of a `bool` to `bool` must emit none.
@@ -237,6 +266,7 @@ int main(int argc, char** argv) {
     TEST_RUN(a_narrowing_cast_of_an_unsigned_source_is_a_trunc_too);
     TEST_RUN(a_same_width_sign_change_emits_nothing);
     TEST_RUN(a_bool_to_integer_cast_is_a_zext_of_i1);
+    TEST_RUN(a_bool_widens_to_a_byte_because_its_value_is_one_bit);
     TEST_RUN(a_bool_to_bool_cast_emits_nothing);
     TEST_RUN(a_char_to_integer_cast_zero_extends);
     TEST_RUN(an_integer_to_char_cast_truncates);

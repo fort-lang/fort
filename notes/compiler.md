@@ -264,6 +264,12 @@ came here.
   emitter suites are a weak oracle for a *call*: they check the text they assert and nothing
   more, so a call site no suite spells is unjudged. The runtime's signatures are pinned against
   `std/rt.ft`, which defines them, and not against the IR a tool accepts.
+  **`opt -passes=verify` accepts a store of a value narrower than the slot it goes into.**
+  `store i1 %t2, ptr %n.1, align 1` into an `i8` local verifies and runs. A width the emitter
+  computes wrongly therefore reaches the module and shows only in its text. T-078 made
+  `gen_int_bits` answer 8 bits for a `bool`, which turned `cast(b, u8)` into the identity. No unit
+  test and no program of the corpus saw it. The assertion that sees it now is
+  `a_bool_widens_to_a_byte_because_its_value_is_one_bit` in `test/gen_cast_test.c`.
   **`opt -passes=verify` does not reject an instruction after a terminator.** It splits the block,
   invents an unnamed successor which it prints as `0: ; No predecessors!`, and exits 0 -- so it
   quietly manufactures the implicit numbering D19.5 forbids rather than reporting the module that
@@ -298,13 +304,22 @@ came here.
   fort side: a mirror built at `-O0` silently answers a weaker question than the one it was
   written to ask. So the emitted text in `test/gen*_test.c` is where a convention rule is pinned
   *first*, and a `run/ffi` mirror is the second, independent witness -- not a blind one.
-  **Under opaque pointers a field's type in a named struct type is observable only through the
-  offsets it moves.** A substitution that leaves every later offset and the struct's size and
-  alignment unchanged is invisible to `opt`, to every run test and to C interop: same-size swaps
-  (`i32` for an enum, `i64` for a `ptr`), and any widening that fits in padding the field already
-  had (`u16` as `i32` or as `i64` in `{ u8; i32; u16; i64 }`). So exactly one assertion pins a
-  field's IR type, the string comparison on `%struct.<name> = type { ... }`, and a struct that
-  appears in no such assertion has its field types unchecked. The bootstrap cannot *produce* that
+  **Under opaque pointers a field's type in a named struct type is observable through the offsets
+  it moves and through one other window, a module-level constant initializer.** A substitution
+  that leaves every later offset unchanged is invisible to every run test and to C interop, when
+  it also keeps the struct's size and alignment. Two shapes do that. One is a same-size swap:
+  `i32` for an enum, `i64` for a `ptr`. The other is a widening that fits in padding the field
+  already had, such as `u16` written as `i32` or as `i64` in `{ u8; i32; u16; i64 }`.
+  It is **not** invisible to `opt` when the module
+  holds a constant or a global of that struct type. LLVM writes such an initializer with the named
+  type. It then checks each element against the type's element. T-078 printed a `ptr` field
+  as `i64`. `opt-18` answered `element 1 of struct initializer doesn't match struct element type` on
+  `@"main.N" = dso_local constant %struct.main.node { i32 7, ptr @"main.N" }`. Two tests of
+  `gen_global_test.c` went red through `verified()`, at `:201` and at `:313`. That window opens
+  only for a struct that D7.10 gives a module-level declaration. A struct that appears in no such
+  initializer keeps the weaker guarantee. So one assertion pins a field's IR type in every case:
+  the string comparison on `%struct.<name> = type { ... }`. A struct that appears neither in one
+  nor in a module-level constant has its field types unchecked. The bootstrap cannot *produce* that
   bug -- `gen_mem_type` is the single fort-type-to-memory-type map and a wrong mapping is wrong in
   the stores too, where it is observable -- but a second map (a packed path, an ABI-classification
   table) would break that argument, so the assertion stays and grows a field per type family.

@@ -497,10 +497,15 @@ gen_val_t gen_const_value(gen_t* g, const type_t* t, cval_t v) {
         return gen_literal(g, ty, v.mag != 0 ? "true" : "false");
     }
     if (v.kind == CV_NULL) {
+        // D10.5
         return gen_literal(g, ty, "null");
     }
+    // The guard that keeps a pointer type out of const_bits below, where
+    // gen_int_bits answers 0 and the constant would print at no width. It stands
+    // for a pointer-typed constant whose value is not `null`, which D4.6 gives
+    // the checker no way to fold today: a mutation of the line above turns six
+    // suites red and an abort planted here fired in no test (T-078).
     if (t != NULL && (t->kind == TYPE_PTR || t->kind == TYPE_VOIDPTR || t->kind == TYPE_FN)) {
-        // D10.5
         return gen_literal(g, ty, "null");
     }
     // D4.3: a char in an integer context is its code point
