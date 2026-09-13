@@ -119,6 +119,52 @@ add_custom_command(
 )
 add_custom_target(fort_stage2 ALL DEPENDS "${FORT_STAGE2_BINARY}")
 
+# ---- the language server -------------------------------------------------------
+# fort_lsp is src/lsp compiled by stage2, and it stands beside the compiler at
+# the root of the build directory, which is where `fort` itself is written.
+# stage2 and not stage1 compiles it: the server needs a compiler that
+# reproduces itself (the ctest `bootstrap`), not the frozen bootstrap
+# (notes/compiler.md 8). The binary is x86-64 like every program the compiler
+# builds, so it runs under qemu in the guest.
+#
+# The search roots are src, so that a server module is `lsp.<name>` and never
+# `<name>` (D9.1, D9.7, T-063), and src/fort, which is where `flt` stands.
+# The entry file's own directory is the first root (D9.2) and holds no module
+# any import names.
+set(FORT_LSP_SRC_DIR "${CMAKE_SOURCE_DIR}/src/lsp")
+file(GLOB FORT_LSP_SOURCES CONFIGURE_DEPENDS "${FORT_LSP_SRC_DIR}/*.ft")
+# The binary is `fort-lsp` and the target is `fort_lsp`: ninja refuses a target
+# whose name is also the path of an output in the same directory, and the
+# hyphen is the name a language server carries in every other toolchain.
+set(FORT_LSP_BINARY "${CMAKE_BINARY_DIR}/fort-lsp")
+add_custom_command(
+    OUTPUT "${FORT_LSP_BINARY}"
+    COMMAND "${FORT_STAGE2_BINARY}" --std-dir "${FORT_STD_DIR}"
+            --cc "${FORT_TARGET_CC_PATH}" --target "${FORT_TARGET_TRIPLE}"
+            -I "${CMAKE_SOURCE_DIR}/src" -I "${FORT_FORT_SRC_DIR}"
+            -o "${FORT_LSP_BINARY}" "${FORT_LSP_SRC_DIR}/main.ft"
+    # The file inputs and not the targets alone, as fort_stage2 above: a
+    # DEPENDS on a custom target is an order-only edge, so an edit to a module
+    # of src/lsp would otherwise leave this binary as it was.
+    DEPENDS fort_stage2 "${FORT_STAGE2_BINARY}" ${FORT_LSP_SOURCES} ${FORT_STD_OUTPUTS}
+    COMMENT "Compiling src/lsp with stage2 into fort-lsp"
+    VERBATIM
+)
+add_custom_target(fort_lsp ALL DEPENDS "${FORT_LSP_BINARY}")
+
+# The binary itself, driven by a recorded script on stdin: every other test of
+# src/lsp drives the modules inside one program, so without this one the entry
+# file src/lsp/main.ft and the wiring around it -- stdin and stdout as the
+# descriptors, the loop's status as the process status -- would be the one part
+# of the server no test executes. It is label lang rather than unit because it
+# runs an x86-64 binary under qemu, as lang-stage2 does. The label keeps it out
+# of `tools/vm check`, which runs `ctest -L unit`; `check-lang` runs it as a
+# command of its own as well, so the gate sees it twice.
+add_test(NAME lsp-binary
+    COMMAND bash "${FORT_TEST_DIR}/lsp_binary_test.sh" "${FORT_LSP_BINARY}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(lsp-binary PROPERTIES LABELS lang)
+
 # ---- unit tests ----------------------------------------------------------------
 # The test-only helpers that are compiled rather than included: every
 # test/*.c that is not a suite. They are linked into every suite so that
@@ -588,13 +634,14 @@ add_custom_target(check-lang
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ast.sh" "${CMAKE_BINARY_DIR}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_check.sh" "${CMAKE_BINARY_DIR}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ir.sh" "${CMAKE_BINARY_DIR}"
+    COMMAND bash "${CMAKE_SOURCE_DIR}/test/lsp_binary_test.sh" "${FORT_LSP_BINARY}"
     COMMAND ${FORT_FIXPOINT_COMMAND}
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Running the language tests"
     USES_TERMINAL
     VERBATIM
 )
-add_dependencies(check-lang fort fort_std fort_stage2)
+add_dependencies(check-lang fort fort_std fort_stage2 fort_lsp)
 
 add_custom_target(check-all COMMENT "Running every test")
 add_dependencies(check-all check check-lang)

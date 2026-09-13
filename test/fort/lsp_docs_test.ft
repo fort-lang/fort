@@ -1,0 +1,619 @@
+//! run
+//! flags: -I ../../src/fort -I support -I ../../src
+//! stdout:
+//| empty ok
+//| open ok
+//| change ok
+//| close ok
+//| growth ok
+//| boundaries ok
+//| sweep ok
+//| release ok
+//| ok
+import lsp.docs;
+import lsp_env;
+import std.strbuf;
+
+// The open documents of src/lsp/docs.ft: what the store answers, what it
+// refuses, the order it keeps, and the witness that a store gives back
+// everything it took.
+
+// The rounds of the release probe and the distance in bytes that fails it.
+// Each round opens twenty documents of about a kibibyte and closes them all,
+// so a round that kept one text pushes the break out by twenty kibibytes and
+// four hundred rounds push it far past the heap a process starts with.
+u64 ROUNDS = 400;
+u64 BOUND = 4096;
+
+// How many of the last rounds the probe holds against the early round. The
+// allocator does not hand a round the same block every time, so the probe
+// takes the smallest distance over a window that covers the cycle
+// (notes/testing.md 4).
+u64 LATE_SAMPLES = 16;
+
+// The documents of one round of the probe, and the bytes of each text.
+u64 ROUND_DOCS = 20;
+u64 TEXT_BYTES = 1024;
+
+// The current program break, which is the end of the heap. sbrk(0) moves
+// nothing and reports it. std has no binding for it and this test is its one
+// caller.
+// D9.8
+extern fn void* sbrk(i64 increment);
+
+fn u64 probe_address() {
+    return cast(sbrk(0), u64);
+}
+
+// The other view: the address a small fresh block gets. It moves when a round
+// kept a block the next round would have got. The probe releases the block at
+// once, so the probe itself leaks nothing.
+u64 PROBE_BLOCK = 32;
+
+fn u64 probe_block() {
+    u8 mut@ own block = new(u8, PROBE_BLOCK);
+    u64 at = cast(block.ptr, u64);
+    del(block);
+    return at;
+}
+
+// How far apart two addresses are, whichever way the heap moved.
+// D11.1
+fn u64 distance(u64 a, u64 b) {
+    if (a > b) {
+        return a - b;
+    }
+    return b - a;
+}
+
+// The smallest distance from the early sample to any of the late ones.
+fn u64 moved(u64 early, u64[16] late) {
+    u64 mut best = distance(late[0], early);
+    u64 mut i = 1;
+    while (i < LATE_SAMPLES) {
+        u64 one = distance(late[i], early);
+        if (one < best) {
+            best = one;
+        }
+        i += 1;
+    }
+    return best;
+}
+
+// The URI of the document numbered `i` of a round.
+fn string uri_into(strbuf.str_buf mut* b, u64 i) {
+    strbuf.clear(b);
+    strbuf.append(b, "file:///round/");
+    strbuf.append_u64(b, i);
+    strbuf.append(b, ".ft");
+    return strbuf.view(b);
+}
+
+// ---- the empty store -------------------------------------------------------------
+
+fn void an_empty_store_holds_nothing() {
+    docs.store mut s = docs.create();
+    defer docs.free(&s);
+    lsp_env.check_u64(docs.count(&s), 0, "the count of an empty store");
+    lsp_env.check_i64(docs.find(&s, "file:///a.ft"), -1, "find in an empty store");
+    assert(!docs.is_open(&s, "file:///a.ft"));
+    lsp_env.check(docs.text_of(&s, "file:///a.ft"), "", "the text of nothing");
+    lsp_env.check_i64(docs.version_of(&s, "file:///a.ft"), -1, "the version of nothing");
+}
+
+fn void an_empty_store_refuses_a_change_and_a_close() {
+    docs.store mut s = docs.create();
+    defer docs.free(&s);
+    assert(!docs.update(&s, "file:///a.ft", "x", 2));
+    assert(!docs.close(&s, "file:///a.ft"));
+    lsp_env.check_u64(docs.count(&s), 0, "the count after two refusals");
+}
+
+fn void a_store_may_be_freed_twice() {
+    docs.store mut s = docs.create();
+    docs.open(&s, "file:///a.ft", "x", 1);
+    docs.free(&s);
+    lsp_env.check_u64(docs.count(&s), 0, "the count after free");
+    docs.free(&s);
+    // And it is usable again.
+    docs.open(&s, "file:///b.ft", "y", 1);
+    lsp_env.check_u64(docs.count(&s), 1, "the count after free and open");
+    docs.free(&s);
+}
+
+// ---- opening ---------------------------------------------------------------------
+
+fn void an_opened_document_holds_its_text_and_its_version() {
+    docs.store mut s = docs.create();
+    defer docs.free(&s);
+    docs.open(&s, "file:///a.ft", "fn i32 main() { return 0; }", 1);
+    lsp_env.check_u64(docs.count(&s), 1, "one document");
+    assert(docs.is_open(&s, "file:///a.ft"));
+    lsp_env.check_i64(docs.find(&s, "file:///a.ft"), 0, "the index of the first document");
+    lsp_env.check(docs.text_of(&s, "file:///a.ft"), "fn i32 main() { return 0; }", "the text");
+    lsp_env.check_i64(docs.version_of(&s, "file:///a.ft"), 1, "the version");
+    docs.document* d = docs.at(&s, 0);
+    lsp_env.check(d->uri, "file:///a.ft", "the uri of the record");
+    lsp_env.check(d->text, "fn i32 main() { return 0; }", "the text of the record");
+    lsp_env.check_i64(d->version, 1, "the version of the record");
+}
+
+fn void the_store_copies_the_text_it_is_given() {
+    // The caller's buffer is the message it read, which the next message
+    // overwrites, so a store that kept a view would answer the wrong text.
+    docs.store mut s = docs.create();
+    defer docs.free(&s);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "first");
+    docs.open(&s, "file:///a.ft", strbuf.view(&b), 1);
+    strbuf.clear(&b);
+    strbuf.append(&b, "second and longer, which moves the storage");
+    lsp_env.check(docs.text_of(&s, "file:///a.ft"), "first", "the text after the buffer moved");
+    // The URI is copied as well.
+    strbuf.clear(&b);
+    strbuf.append(&b, "file:///a.ft");
+    assert(docs.is_open(&s, strbuf.view(&b)));
+}
+
+fn void two_documents_keep_the_order_they_were_opened_in() {
+    docs.store mut s = docs.create();
+    defer docs.free(&s);
+    docs.open(&s, "file:///a.ft", "a", 1);
+    docs.open(&s, "file:///b.ft", "b", 1);
+    docs.open(&s, "file:///c.ft", "c", 1);
+    lsp_env.check_u64(docs.count(&s), 3, "three documents");
+    lsp_env.check(docs.at(&s, 0)->uri, "file:///a.ft", "the first");
+    lsp_env.check(docs.at(&s, 1)->uri, "file:///b.ft", "the second");
+    lsp_env.check(docs.at(&s, 2)->uri, "file:///c.ft", "the third");
+}
+
+fn void a_second_open_of_one_uri_replaces_it() {
+    // A client that sends didOpen twice lost track of what it opened; the text
+    // it sent last is the text it believes the user sees.
+    docs.store mut s = docs.create();
+    defer docs.free(&s);
+    docs.open(&s, "file:///a.ft", "first", 1);
+    docs.open(&s, "file:///b.ft", "other", 1);
+    docs.open(&s, "file:///a.ft", "second", 5);
+    lsp_env.check_u64(docs.count(&s), 2, "the count after a second open");
+    lsp_env.check(docs.text_of(&s, "file:///a.ft"), "second", "the text after a second open");
+    lsp_env.check_i64(docs.version_of(&s, "file:///a.ft"), 5, "the version after a second open");
+    lsp_env.check(docs.text_of(&s, "file:///b.ft"), "other", "the other document");
+}
+
+fn void two_uris_that_differ_in_one_byte_are_two_documents() {
+    docs.store mut s = docs.create();
+    defer docs.free(&s);
+    docs.open(&s, "file:///a.ft", "a", 1);
+    docs.open(&s, "file:///A.ft", "A", 1);
+    lsp_env.check_u64(docs.count(&s), 2, "two documents");
+    lsp_env.check(docs.text_of(&s, "file:///a.ft"), "a", "the lowercase one");
+    lsp_env.check(docs.text_of(&s, "file:///A.ft"), "A", "the uppercase one");
+    // The key is the URI byte for byte: a path is never read through it.
+    assert(!docs.is_open(&s, "/a.ft"));
+    assert(!docs.is_open(&s, "file:///a.ft "));
+}
+
+// ---- changing --------------------------------------------------------------------
+
+fn void a_change_replaces_the_text_and_the_version() {
+    docs.store mut s = docs.create();
+    defer docs.free(&s);
+    docs.open(&s, "file:///a.ft", "one", 1);
+    assert(docs.update(&s, "file:///a.ft", "one two three", 2));
+    lsp_env.check(docs.text_of(&s, "file:///a.ft"), "one two three", "the text after a change");
+    lsp_env.check_i64(docs.version_of(&s, "file:///a.ft"), 2, "the version after a change");
+    // A shorter text as well, so the store holds the length it was given and
+    // not the longest it has held.
+    assert(docs.update(&s, "file:///a.ft", "x", 3));
+    lsp_env.check(docs.text_of(&s, "file:///a.ft"), "x", "the text after a shorter change");
+    lsp_env.check_u64(docs.count(&s), 1, "the count after two changes");
+}
+
+fn void a_change_of_a_document_that_is_not_open_is_refused() {
+    // The server has never seen its text, and inventing one would answer later
+    // requests from a document the client does not have.
+    docs.store mut s = docs.create();
+    defer docs.free(&s);
+    docs.open(&s, "file:///a.ft", "a", 1);
+    assert(!docs.update(&s, "file:///b.ft", "b", 1));
+    lsp_env.check_u64(docs.count(&s), 1, "the count after a refused change");
+    lsp_env.check(docs.text_of(&s, "file:///a.ft"), "a", "the other document is untouched");
+}
+
+fn void a_change_touches_one_document_alone() {
+    docs.store mut s = docs.create();
+    defer docs.free(&s);
+    docs.open(&s, "file:///a.ft", "a", 1);
+    docs.open(&s, "file:///b.ft", "b", 1);
+    docs.open(&s, "file:///c.ft", "c", 1);
+    assert(docs.update(&s, "file:///b.ft", "changed", 9));
+    lsp_env.check(docs.text_of(&s, "file:///a.ft"), "a", "the first after a change");
+    lsp_env.check(docs.text_of(&s, "file:///b.ft"), "changed", "the second after a change");
+    lsp_env.check(docs.text_of(&s, "file:///c.ft"), "c", "the third after a change");
+    lsp_env.check_i64(docs.version_of(&s, "file:///a.ft"), 1, "the first version");
+    lsp_env.check_i64(docs.version_of(&s, "file:///c.ft"), 1, "the third version");
+}
+
+// ---- closing ---------------------------------------------------------------------
+
+fn void a_closed_document_is_gone() {
+    docs.store mut s = docs.create();
+    defer docs.free(&s);
+    docs.open(&s, "file:///a.ft", "a", 1);
+    assert(docs.close(&s, "file:///a.ft"));
+    lsp_env.check_u64(docs.count(&s), 0, "the count after a close");
+    assert(!docs.is_open(&s, "file:///a.ft"));
+    assert(!docs.close(&s, "file:///a.ft"));
+    assert(!docs.update(&s, "file:///a.ft", "x", 2));
+}
+
+fn void the_first_the_middle_and_the_last_are_each_closed_in_place() {
+    docs.store mut s = docs.create();
+    defer docs.free(&s);
+    docs.open(&s, "file:///a.ft", "a", 1);
+    docs.open(&s, "file:///b.ft", "b", 2);
+    docs.open(&s, "file:///c.ft", "c", 3);
+    docs.open(&s, "file:///d.ft", "d", 4);
+    assert(docs.close(&s, "file:///a.ft"));
+    lsp_env.check(docs.at(&s, 0)->uri, "file:///b.ft", "the first after closing the first");
+    lsp_env.check(docs.at(&s, 2)->uri, "file:///d.ft", "the last after closing the first");
+    assert(docs.close(&s, "file:///c.ft"));
+    lsp_env.check_u64(docs.count(&s), 2, "the count after closing the middle");
+    lsp_env.check(docs.at(&s, 0)->uri, "file:///b.ft", "the first after closing the middle");
+    lsp_env.check(docs.at(&s, 1)->uri, "file:///d.ft", "the second after closing the middle");
+    assert(docs.close(&s, "file:///d.ft"));
+    lsp_env.check_u64(docs.count(&s), 1, "the count after closing the last");
+    lsp_env.check(docs.at(&s, 0)->text, "b", "the text that is left");
+    lsp_env.check_i64(docs.at(&s, 0)->version, 2, "the version that is left");
+}
+
+fn void a_document_may_be_opened_again_after_it_was_closed() {
+    docs.store mut s = docs.create();
+    defer docs.free(&s);
+    docs.open(&s, "file:///a.ft", "first", 1);
+    assert(docs.close(&s, "file:///a.ft"));
+    docs.open(&s, "file:///a.ft", "again", 7);
+    lsp_env.check_u64(docs.count(&s), 1, "the count after opening again");
+    lsp_env.check(docs.text_of(&s, "file:///a.ft"), "again", "the text after opening again");
+    lsp_env.check_i64(docs.version_of(&s, "file:///a.ft"), 7, "the version after opening again");
+}
+
+// ---- growth ----------------------------------------------------------------------
+
+fn void a_store_holds_every_document_across_its_growth() {
+    // Fifty documents take the record span through four growths, and every
+    // record owns two strings that the growth has to move rather than copy.
+    docs.store mut s = docs.create();
+    defer docs.free(&s);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut i = 0;
+    while (i < 50) {
+        strbuf.clear(&b);
+        strbuf.append(&b, "file:///");
+        strbuf.append_u64(&b, i);
+        strbuf.append(&b, ".ft");
+        docs.open(&s, strbuf.view(&b), strbuf.view(&b), cast(i, i64));
+        i += 1;
+    }
+    lsp_env.check_u64(docs.count(&s), 50, "fifty documents");
+    i = 0;
+    while (i < 50) {
+        strbuf.clear(&b);
+        strbuf.append(&b, "file:///");
+        strbuf.append_u64(&b, i);
+        strbuf.append(&b, ".ft");
+        lsp_env.check_i64(docs.find(&s, strbuf.view(&b)), cast(i, i64), "the index after growth");
+        lsp_env.check(docs.text_of(&s, strbuf.view(&b)), strbuf.view(&b), "the text after growth");
+        lsp_env.check_i64(docs.version_of(&s, strbuf.view(&b)), cast(i, i64),
+                          "the version after growth");
+        i += 1;
+    }
+}
+
+// ---- the boundaries --------------------------------------------------------------
+
+fn void a_document_may_hold_the_empty_text() {
+    // The empty text is what didOpen carries for a new file, and text_of
+    // answers the same for it as for a document that is not open, which is why
+    // a caller that must tell the two apart asks is_open.
+    docs.store mut s = docs.create();
+    defer docs.free(&s);
+    docs.open(&s, "file:///new.ft", "", 1);
+    assert(docs.is_open(&s, "file:///new.ft"));
+    lsp_env.check(docs.text_of(&s, "file:///new.ft"), "", "the empty text");
+    lsp_env.check_u64(docs.at(&s, 0)->text.len, 0, "the length of the empty text");
+    assert(docs.update(&s, "file:///new.ft", "", 2));
+    lsp_env.check_i64(docs.version_of(&s, "file:///new.ft"), 2, "the version of an empty text");
+}
+
+fn void the_empty_uri_is_a_key_like_any_other() {
+    docs.store mut s = docs.create();
+    defer docs.free(&s);
+    docs.open(&s, "", "text", 1);
+    assert(docs.is_open(&s, ""));
+    lsp_env.check(docs.text_of(&s, ""), "text", "the text of the empty key");
+    assert(docs.close(&s, ""));
+    assert(!docs.is_open(&s, ""));
+}
+
+fn void a_uri_of_any_bytes_is_a_key() {
+    // The store compares bytes, so a scheme it cannot read and a byte above
+    // ASCII are keys like any other.
+    docs.store mut s = docs.create();
+    defer docs.free(&s);
+    docs.open(&s, "untitled:1", "unsaved", 1);
+    docs.open(&s, "file:///\xC3\xA9.ft", "accented", 1);
+    lsp_env.check(docs.text_of(&s, "untitled:1"), "unsaved", "an untitled document");
+    lsp_env.check(docs.text_of(&s, "file:///\xC3\xA9.ft"), "accented", "an accented path");
+}
+
+fn void the_ends_of_the_version_range_are_versions() {
+    // The protocol makes a version an integer and gives it no other meaning,
+    // so the store records what it was sent.
+    docs.store mut s = docs.create();
+    defer docs.free(&s);
+    docs.open(&s, "file:///a.ft", "a", -9223372036854775808);
+    lsp_env.check_i64(docs.version_of(&s, "file:///a.ft"), -9223372036854775808,
+                      "the smallest version");
+    assert(docs.update(&s, "file:///a.ft", "a", 9223372036854775807));
+    lsp_env.check_i64(docs.version_of(&s, "file:///a.ft"), 9223372036854775807,
+                      "the largest version");
+    // -1 is the answer for a document that is not open, and it is also a
+    // version a client may send, so is_open is what tells them apart.
+    assert(docs.update(&s, "file:///a.ft", "a", -1));
+    lsp_env.check_i64(docs.version_of(&s, "file:///a.ft"), -1, "a version of -1");
+    assert(docs.is_open(&s, "file:///a.ft"));
+}
+
+fn void a_text_of_many_kilobytes_is_held_whole() {
+    docs.store mut s = docs.create();
+    defer docs.free(&s);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    while (b.len < 100000) {
+        strbuf.append(&b, "fn i32 main() { return 0; }\n");
+    }
+    docs.open(&s, "file:///big.ft", strbuf.view(&b), 1);
+    lsp_env.check_u64(docs.text_of(&s, "file:///big.ft").len, b.len, "the length of a big text");
+    lsp_env.check(docs.text_of(&s, "file:///big.ft"), strbuf.view(&b), "the bytes of a big text");
+}
+
+
+// ---- the sweep -------------------------------------------------------------------
+
+// The URI of the document numbered `i`, in `b`.
+fn string uri_of(strbuf.str_buf mut* b, u64 i) {
+    strbuf.clear(b);
+    strbuf.append(b, "file:///sweep/");
+    strbuf.append_u64(b, i);
+    strbuf.append(b, ".ft");
+    return strbuf.view(b);
+}
+
+// The text of the document numbered `i`, in `b`.
+fn string text_of(strbuf.str_buf mut* b, u64 i) {
+    strbuf.clear(b);
+    strbuf.append(b, "text ");
+    strbuf.append_u64(b, i);
+    return strbuf.view(b);
+}
+
+fn void a_store_of_four_documents_survives_every_order_of_closing() {
+    // The removal moves the records after the one it takes, so the order the
+    // documents are closed in is what that loop is held to. Four documents
+    // have 24 orders and every one of them must leave the store empty and
+    // leave every document that is still open holding its own text.
+    strbuf.str_buf mut uri = strbuf.create();
+    defer strbuf.free(&uri);
+    strbuf.str_buf mut body = strbuf.create();
+    defer strbuf.free(&body);
+    u64 mut a = 0;
+    while (a < 4) {
+        u64 mut b = 0;
+        while (b < 4) {
+            u64 mut c = 0;
+            while (c < 4) {
+                u64 mut d = 0;
+                while (d < 4) {
+                    if (a != b && a != c && a != d && b != c && b != d && c != d) {
+                        close_in_order(&uri, &body, a, b, c, d);
+                    }
+                    d += 1;
+                }
+                c += 1;
+            }
+            b += 1;
+        }
+        a += 1;
+    }
+}
+
+// Opens four documents and closes them in the order given, checking after each
+// close that every document still open holds its own text.
+fn void close_in_order(strbuf.str_buf mut* uri, strbuf.str_buf mut* body, u64 a, u64 b, u64 c,
+                       u64 d) {
+    docs.store mut s = docs.create();
+    defer docs.free(&s);
+    u64 mut i = 0;
+    while (i < 4) {
+        docs.open(&s, uri_of(uri, i), text_of(body, i), cast(i, i64));
+        i += 1;
+    }
+    u64[4] order = u64[4]{a, b, c, d};
+    u64 mut closed = 0;
+    while (closed < 4) {
+        assert(docs.close(&s, uri_of(uri, order[closed])));
+        closed += 1;
+        lsp_env.check_u64(docs.count(&s), 4 - closed, "the count after a close");
+        // Every document that was not closed yet still holds its own text.
+        u64 mut k = 0;
+        while (k < 4) {
+            bool still_open = is_after(order, closed, k);
+            if (still_open) {
+                lsp_env.check(docs.text_of(&s, uri_of(uri, k)), text_of(body, k),
+                              "the text of a document that is still open");
+                lsp_env.check_i64(docs.version_of(&s, uri_of(uri, k)), cast(k, i64),
+                                  "the version of a document that is still open");
+            } else {
+                assert(!docs.is_open(&s, uri_of(uri, k)));
+            }
+            k += 1;
+        }
+    }
+    lsp_env.check_u64(docs.count(&s), 0, "the count after every close");
+}
+
+// Whether `what` stands at or after `from` in the order.
+fn bool is_after(u64[4] order, u64 from, u64 what) {
+    u64 mut i = from;
+    while (i < 4) {
+        if (order[i] == what) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+fn void a_store_of_two_hundred_documents_answers_every_one() {
+    // The linear scan is the store's whole index, so this is what says it
+    // still answers when a session holds far more documents than an editor
+    // ever opens.
+    docs.store mut s = docs.create();
+    defer docs.free(&s);
+    strbuf.str_buf mut uri = strbuf.create();
+    defer strbuf.free(&uri);
+    strbuf.str_buf mut body = strbuf.create();
+    defer strbuf.free(&body);
+    u64 mut i = 0;
+    while (i < 200) {
+        docs.open(&s, uri_of(&uri, i), text_of(&body, i), cast(i, i64));
+        i += 1;
+    }
+    lsp_env.check_u64(docs.count(&s), 200, "two hundred documents");
+    i = 0;
+    while (i < 200) {
+        lsp_env.check_i64(docs.find(&s, uri_of(&uri, i)), cast(i, i64), "the index of a document");
+        lsp_env.check(docs.text_of(&s, uri_of(&uri, i)), text_of(&body, i), "the text");
+        i += 1;
+    }
+    // Every second document is closed, and the rest keep their order.
+    i = 0;
+    while (i < 200) {
+        assert(docs.close(&s, uri_of(&uri, i)));
+        i += 2;
+    }
+    lsp_env.check_u64(docs.count(&s), 100, "a hundred documents left");
+    i = 1;
+    u64 mut at = 0;
+    while (i < 200) {
+        lsp_env.check(docs.at(&s, at)->uri, uri_of(&uri, i), "the order of what is left");
+        i += 2;
+        at += 1;
+    }
+}
+
+// ---- the release -----------------------------------------------------------------
+
+// One round: twenty documents opened, changed and closed, and the store freed.
+fn void round() {
+    docs.store mut s = docs.create();
+    strbuf.str_buf mut uri = strbuf.create();
+    strbuf.str_buf mut text = strbuf.create();
+    while (text.len < TEXT_BYTES) {
+        strbuf.append(&text, "fn i32 main() { return 0; }\n");
+    }
+    u64 mut i = 0;
+    while (i < ROUND_DOCS) {
+        docs.open(&s, uri_into(&uri, i), strbuf.view(&text), 1);
+        i += 1;
+    }
+    i = 0;
+    while (i < ROUND_DOCS) {
+        assert(docs.update(&s, uri_into(&uri, i), strbuf.view(&text), 2));
+        i += 1;
+    }
+    // A second open of one URI, so that the round covers the path that
+    // replaces the text of a document that is already open.
+    docs.open(&s, uri_into(&uri, 0), strbuf.view(&text), 3);
+    // Half the documents are closed one at a time and the other half die with
+    // the store, so both paths give their memory back.
+    i = 0;
+    while (i < ROUND_DOCS / 2) {
+        assert(docs.close(&s, uri_into(&uri, i)));
+        i += 1;
+    }
+    docs.free(&s);
+    strbuf.free(&uri);
+    strbuf.free(&text);
+}
+
+fn void a_store_gives_back_everything_it_took() {
+    // Four hundred rounds against two views of the heap: the program break,
+    // which catches a leak the allocator serves from the operating system, and
+    // the address of a small fresh block, which catches one it serves from its
+    // own free chunks (notes/testing.md 4).
+    u64 mut early_break = 0;
+    u64 mut early_block = 0;
+    u64[16] mut late_break = u64[16]{};
+    u64[16] mut late_block = u64[16]{};
+    u64 mut i = 0;
+    while (i < ROUNDS) {
+        round();
+        if (i == 3) {
+            early_break = probe_address();
+            early_block = probe_block();
+        }
+        if (i + LATE_SAMPLES >= ROUNDS) {
+            late_break[i + LATE_SAMPLES - ROUNDS] = probe_address();
+            late_block[i + LATE_SAMPLES - ROUNDS] = probe_block();
+        }
+        i += 1;
+    }
+    u64 break_moved = moved(early_break, late_break);
+    u64 block_moved = moved(early_block, late_block);
+    if (break_moved >= BOUND || block_moved >= BOUND) {
+        println("the break moved ", break_moved, " and the block ", block_moved);
+    }
+    assert(break_moved < BOUND);
+    assert(block_moved < BOUND);
+}
+
+fn i32 main() {
+    an_empty_store_holds_nothing();
+    an_empty_store_refuses_a_change_and_a_close();
+    a_store_may_be_freed_twice();
+    println("empty ok");
+    an_opened_document_holds_its_text_and_its_version();
+    the_store_copies_the_text_it_is_given();
+    two_documents_keep_the_order_they_were_opened_in();
+    a_second_open_of_one_uri_replaces_it();
+    two_uris_that_differ_in_one_byte_are_two_documents();
+    println("open ok");
+    a_change_replaces_the_text_and_the_version();
+    a_change_of_a_document_that_is_not_open_is_refused();
+    a_change_touches_one_document_alone();
+    println("change ok");
+    a_closed_document_is_gone();
+    the_first_the_middle_and_the_last_are_each_closed_in_place();
+    a_document_may_be_opened_again_after_it_was_closed();
+    println("close ok");
+    a_store_holds_every_document_across_its_growth();
+    println("growth ok");
+    a_document_may_hold_the_empty_text();
+    the_empty_uri_is_a_key_like_any_other();
+    a_uri_of_any_bytes_is_a_key();
+    the_ends_of_the_version_range_are_versions();
+    a_text_of_many_kilobytes_is_held_whole();
+    println("boundaries ok");
+    a_store_of_four_documents_survives_every_order_of_closing();
+    a_store_of_two_hundred_documents_answers_every_one();
+    println("sweep ok");
+    a_store_gives_back_everything_it_took();
+    println("release ok");
+    println("ok");
+    return 0;
+}

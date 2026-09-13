@@ -331,6 +331,25 @@ bullet at a time and without a rewrite.
   usage line, which is what holds the option table `src/fort/main.ft` copies from
   `src/bootstrap/driver.c` to it.
 
+- **A test that drives a program over a pipe must size the script against the pipe, which holds
+  64 KiB.** Nothing drains the pipe while the program under test reads it, so a script above the
+  capacity blocks the writer -- the test itself -- and the run dies at `run_tests.py`'s 60 s
+  timeout with no output to read. `test/fort/lsp_protocol_test.ft` writes its whole script and
+  closes the writing end before the server starts, which is safe for the few hundred bytes of a
+  recorded exchange and for the answers, which are smaller. A script of two thousand messages
+  goes through a **file** instead (`io.write_file`, then `io.open_read`), which has no capacity:
+  `test/fort/lsp_server_lifetime_test.ft` does that, and the harness gives each test a directory
+  of its own, so the file is the test's alone (section 3). Two pipes and not one, when the
+  program answers: one for its input, one for its output, and the output is drained after the
+  loop ends (T-064).
+- **A binary a CMake target builds needs a test that executes the binary**, and a suite of the
+  modules inside it is not that test. Every `test/fort` suite of `src/lsp` drives the modules in
+  one program of its own, so `src/lsp/main.ft` and the wiring around it -- stdin and stdout as
+  the descriptors, the loop's status as the process status -- were covered by nothing until
+  `test/lsp_binary_test.sh` fed the binary a recorded script (ctest `lsp-binary`, label lang,
+  since it runs an x86-64 binary under qemu). Hold such a script against a wrong binary before
+  trusting it: this one exits 1 for `/bin/cat` and for `build/<preset>/fort` (T-064).
+
 ## 5. Differential oracles and the fixed point
 
 - **The fixed point is the ctest `bootstrap` (T-039) and the gate runs it.** `tools/fixpoint.sh
@@ -602,6 +621,24 @@ bullet at a time and without a rewrite.
   implements no rule, it says so in the row and moves the citation. The coupling is what stops an
   audit going stale. T-046 freezes `src/bootstrap` and is still in `todo/`, so the count can move
   until it runs.
+
+- **An oracle is only an oracle where it derives its answer differently, so say
+  for each half of one whether it is independent or shared.** T-064 swept every offset of a
+  document against a hand-written oracle and the sweep stayed green over a bug in the module's
+  line rule: `oracle_character` in `test/fort/lsp_text_test.ft` derived the end of a line with the
+  same expression as `line_end` in `src/lsp/text.ft`, so it tested that expression against itself.
+  The halves of it now read: `oracle_units` decodes RFC 3629 a second time (independent),
+  `oracle_span` splits the lines forward where the module walks back from the line feed
+  (independent), and the rule that an offset inside a terminator counts to the end of the line it
+  ends is **shared**, because it is the ticket's own ruling and both sides state it.
+  A shared rule is not an untested rule, and this is the second half of the lesson: a **round-trip
+  sweep constrains what the oracle sweep cannot judge.**
+  `every_offset_comes_back_from_its_position` asserts `back <= at` and that the position of the
+  offset it answered is the position it started from, and each alternative to the ruling breaks
+  one of those two -- rounding an offset inside a terminator forward to the next line moves `back`
+  past `at`, and counting the terminator as a character of its line breaks the reconvergence. So
+  an oracle sweep and a round-trip sweep answer different questions, and a rule the oracle shares
+  needs the second one (T-064).
 
 ## 8. The grammar and the extension
 

@@ -47,7 +47,15 @@ without a rewrite.
 - When the Mac sleeps, VirtualBox pauses the VM ("paused due to host power management") and
   `tools/vm status` shows `paused`; guest commands then fail after the 10 s ssh timeout and
   `tools/vm up` cannot resume it. Recover with `VBoxManage controlvm fort-dev-<name> savestate`
-  followed by `tools/vm up`.
+  followed by `tools/vm up`. **A gate that is already connected does not fail: it stops.** T-064
+  met it mid-gate on 2026-09-13. The log had not advanced for 42 minutes while `ps` showed
+  `/bin/bash tools/vm gate` alive at 46 minutes, which looks like a slow test and is not one.
+  `VBoxManage controlvm <name> resume` refuses such a VM with `VM is paused due to host power
+  management`, so savestate is the only way back. Order: `kill -TERM` the process whose command
+  *is* the gate (it exits 143 and releases its hold on the worktree), then savestate, then
+  `tools/vm up`, then start the gate again. A log that stops advancing is worth one
+  `tools/vm status` before any other diagnosis, and the other slot keeps running throughout,
+  since the pause is one machine's.
 
 - **A wall-clock measurement in the guest can hold a VirtualBox pause, and the pause reads as a
   slow test.** T-094 measured `test/fort/driver_lifetime_index_test.ft` at 1449.81 s and at
@@ -290,6 +298,16 @@ without a rewrite.
   `tools/bootstrap.sh [--preset <preset>] [--stage3]` builds stage1 and that stage2 by hand in the
   guest. With `--stage3` it builds stage1 and hands the fixed point to `tools/fixpoint.sh`, and it
   writes no stage2 of its own, since that script builds one per build mode.
+  `build/<preset>/fort-lsp` is the language server, which the `fort_lsp` target builds at every
+  build by compiling `src/lsp/main.ft` **with stage2**, so it stands beside a stage1 `fort` that
+  did not compile it (T-064). It is x86-64 and runs under qemu like stage2.
+- **A ninja target may not have the name of an output path in the same directory.** `fort_lsp`
+  writing `${CMAKE_BINARY_DIR}/fort_lsp` configures cleanly and then fails the build with
+  `ninja: error: build.ninja:2880: multiple rules generate fort_lsp`, preceded by
+  `phony target 'fort_lsp' names itself as an input`. CMake does not diagnose it, so the failure
+  arrives at the first build and looks like a rule conflict. Give the two different names: the
+  target is `fort_lsp` and the binary is `fort-lsp` (T-064). `fort_stage2` avoids the collision by
+  accident, since its binary is `stage2/fort`.
 
 ## 6. The host side
 

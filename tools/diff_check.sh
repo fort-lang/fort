@@ -57,27 +57,30 @@ done
 # comparison. A ticket that adds or removes a .ft file changes all four
 # lines in the same commit: diff_tokens.sh, diff_ast.sh, diff_check.sh and
 # diff_ir.sh.
-FT_FILES=893
+FT_FILES=912
 
 # The files of that corpus stage1 checks clean, which are the ones compared.
 # It is an equality for the reason FT_FILES is: a comparison that shrank would
 # otherwise pass while seeing less, and ctest reads the exit status and not the
 # counts printed below. A ticket that adds a clean .ft file, or that makes
 # stage1 accept or refuse one, changes this line with FT_FILES.
-# It is 19 below diff_ir.sh's PROGRAM_FILES for a reason and not by error, and
-# the two sets are not nested: they differ by 96 files one way and 77 the
+# It is 22 below diff_ir.sh's PROGRAM_FILES for a reason and not by error, and
+# the two sets are not nested: they differ by 106 files one way and 84 the
 # other, which is why the gap is not the number of files a ticket adds. That
-# script passes -I src -I src/fort -I test/fort/support, so it reaches the 96
+# script passes -I src -I src/fort -I test/fort/support, so it reaches the 106
 # test/fort tests that import a support module, which this one cannot resolve
-# and skips; this one compares every file that checks clean,
-# including the 76 that hold no `main` -- std, src/fort, src/lsp, the fixtures
-# under test/fort/support and the imported half of a multi-module test -- which
-# that script skips because they compile into no module. Move the two numbers
-# together only when both the roots and those two questions agree. T-063
-# measured the four numbers above with the roots this script passes now; T-045
-# added std/sort.ft, which checks clean and holds no main, so the second group
-# grew from 76 to 77 and the gap fell from 20 to 19.
-CLEAN_FILES=485
+# and skips; this one compares every file that checks clean, including the 84
+# that hold no `main` -- std, src/fort, src/lsp, the fixtures under
+# test/fort/support and the imported half of a multi-module test -- which that
+# script skips because they compile into no module. Move the two numbers
+# together only when both the roots and those two questions agree. A clean file
+# that holds no `main` joins the second group and narrows the gap by one, which
+# is what T-045's std/sort.ft did.
+# The two group sizes are measured and not derived: add `echo "$file"` beside
+# the `compared` counter of this script and of diff_ir.sh, sort the two lists,
+# and read them off `comm -13` and `comm -23`. T-064 ran that and found every
+# one of the 106 importing a support module.
+CLEAN_FILES=494
 
 # The search roots every run is given: the standard library the build copied,
 # src/fort, so that the compiler's own modules resolve their imports, and src,

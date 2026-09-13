@@ -1,0 +1,166 @@
+// lsp.uri: the file URIs of the protocol, in both directions.
+//
+// A client names a document by a URI and the compiler opens a path, so every
+// message that carries a file name goes through this module. The open
+// documents of lsp.docs are keyed by the URI the client spelled and never by
+// the path, so a document with no path -- `untitled:1`, a file the user has
+// not saved -- is synchronised like any other and only the passes that must
+// open a file ask for one.
+//
+// ---- what a file URI is ----
+//
+// `file://<authority>/<path>` and `file:/<path>` (RFC 8089). The scheme is
+// compared without case, as RFC 3986 3.1 requires. The authority must be empty
+// or `localhost`, also without case: any other authority names a host this
+// server cannot read a file from, and answering a path for it would open the
+// wrong file. A query or a fragment is refused for the same reason, since
+// neither has a meaning this module could carry into a path.
+//
+// Percent-encoding: `path_of` decodes `%XX` in either case; `of_path` encodes
+// every byte outside the unreserved set of RFC 3986 2.3 with the uppercase
+// hex that section prefers, and leaves `/` alone, since it separates the
+// segments. So a path this module writes comes back from this module
+// unchanged, which is the property the tests hold it to.
+//
+// `%00` is refused: a NUL byte ends a path at the C boundary (stdlib.md 2.2),
+// so a URI carrying one would name a shorter file than it spells.
+//
+// The decoded path must be absolute. A file URI has no other form, and a
+// relative path from a server that has no working directory of its own names
+// nothing.
+//
+// A Windows drive letter is no special case here: `file:///c%3A/x` decodes to
+// `/c:/x`, which this module answers as it stands. The server targets Linux
+// and no pass of it reads a drive letter.
+//
+// Re-entrancy: no module-level state; both directions write into a buffer the
+// caller owns and lends.
+// D20.5
+//
+// Dispatch: none. Both directions are a loop over bytes and no table of
+// function pointers.
+// D3.10
+import lsp.text;
+import std.str;
+import std.strbuf;
+
+/// The hex digits of a percent-escape, uppercase because RFC 3986 2.1 prefers
+/// them, with the shift and the mask that pick the two digits of one byte out.
+string HEX_DIGITS = "0123456789ABCDEF";
+u64 HEX_SHIFT = 4;
+u64 HEX_MASK = 15;
+
+/// The two hex digits an escape carries, and the base they are read in.
+u64 ESCAPE_DIGITS = 2;
+i64 HEX_BASE = 16;
+
+/// The scheme this module reads and writes, and the one authority it accepts
+/// beside the empty one.
+string FILE_SCHEME = "file";
+string LOCAL_HOST = "localhost";
+
+/// Whether the byte needs no escape: the unreserved set of RFC 3986 2.3.
+fn bool is_unreserved(char c) {
+    return str.is_alnum(c) || c == '-' || c == '.' || c == '_' || c == '~';
+}
+
+/// The value of the escape at `at`, which is the `%`, or -1 when the two bytes
+/// after it are not hex digits, or when they are the two of a NUL.
+fn i64 escape_value(string s, u64 at) {
+    if (s.len - at <= ESCAPE_DIGITS) {
+        return -1;
+    }
+    i64 high = str.digit_value(s[at + 1]);
+    i64 low = str.digit_value(s[at + 2]);
+    if (high < 0 || high >= HEX_BASE || low < 0 || low >= HEX_BASE) {
+        return -1;
+    }
+    i64 value = high * HEX_BASE + low;
+    if (value == 0) {
+        return -1;
+    }
+    return value;
+}
+
+/// The path a file URI names, written into `out`, which is emptied first.
+/// False when `uri` is no file URI this server can open a file for, and `out`
+/// is then empty. Ownership: `out` is borrowed for the call.
+fn bool path_of(string uri, strbuf.str_buf mut* out) {
+    strbuf.clear(out);
+    i64 colon = str.index_of(uri, ':');
+    if (colon < 0) {
+        return false;
+    }
+    u64 at = cast(colon, u64);
+    if (!text.equal_no_case(uri[0..at], FILE_SCHEME)) {
+        return false;
+    }
+    u64 mut from = at + 1;
+    if (uri.len - from >= 2 && uri[from] == '/' && uri[from + 1] == '/') {
+        // An authority follows, and it runs to the `/` that starts the path.
+        u64 mut host_end = from + 2;
+        while (host_end < uri.len && uri[host_end] != '/') {
+            host_end += 1;
+        }
+        string host = uri[from + 2..host_end];
+        if (host.len != 0 && !text.equal_no_case(host, LOCAL_HOST)) {
+            return false;
+        }
+        from = host_end;
+    }
+    if (from >= uri.len || uri[from] != '/') {
+        // A file URI names an absolute path and nothing else.
+        return false;
+    }
+    u64 mut i = from;
+    while (i < uri.len) {
+        char c = uri[i];
+        if (c == '?' || c == '#') {
+            // A query and a fragment have no reading this module could carry
+            // into a path, so the whole URI is refused rather than the tail
+            // being dropped.
+            strbuf.clear(out);
+            return false;
+        }
+        if (c == '%') {
+            i64 value = escape_value(uri, i);
+            if (value < 0) {
+                strbuf.clear(out);
+                return false;
+            }
+            strbuf.push_byte(out, cast(value, u8));
+            i += ESCAPE_DIGITS + 1;
+        } else {
+            strbuf.push(out, c);
+            i += 1;
+        }
+    }
+    return true;
+}
+
+/// The file URI of an absolute path, written into `out`, which is emptied
+/// first. False when `path` is not absolute, and `out` is then empty: a
+/// relative path names no file to a server that has no working directory of
+/// its own. Ownership: `out` is borrowed for the call.
+fn bool of_path(string path, strbuf.str_buf mut* out) {
+    strbuf.clear(out);
+    if (path.len == 0 || path[0] != '/') {
+        return false;
+    }
+    strbuf.append(out, FILE_SCHEME);
+    strbuf.append(out, "://");
+    u64 mut i = 0;
+    while (i < path.len) {
+        char c = path[i];
+        if (is_unreserved(c) || c == '/') {
+            strbuf.push(out, c);
+        } else {
+            u64 byte = cast(c, u64);
+            strbuf.push(out, '%');
+            strbuf.push(out, HEX_DIGITS[byte >> HEX_SHIFT]);
+            strbuf.push(out, HEX_DIGITS[byte & HEX_MASK]);
+        }
+        i += 1;
+    }
+    return true;
+}

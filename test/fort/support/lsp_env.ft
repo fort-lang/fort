@@ -1,0 +1,89 @@
+// lsp_env: what the tests of the language server's protocol layer share.
+//
+// Five test programs ask the same three questions -- are these two texts
+// equal, are these two numbers, is this answer the expected one -- over tables
+// of cases. A helper that fails prints the case before it asserts, so a
+// failure over a table names the case rather than the line of the assertion.
+// The root of test/fort holds tests and nothing else, so the fixture stands
+// here (notes/testing.md 4).
+//
+// D3.10: this module uses no function-pointer dispatch table.
+import std.io;
+import std.strbuf;
+
+/// Reports `what` when the two texts differ and then fails the test.
+fn void check(string got, string want, string what) {
+    if (got != want) {
+        println("case: ", what);
+        println("  want: ", want);
+        println("  got:  ", got);
+    }
+    assert(got == want);
+}
+
+/// The same over two unsigned numbers.
+fn void check_u64(u64 got, u64 want, string what) {
+    if (got != want) {
+        println("case: ", what);
+        println("  want: ", want);
+        println("  got:  ", got);
+    }
+    assert(got == want);
+}
+
+/// The same over two signed numbers.
+fn void check_i64(i64 got, i64 want, string what) {
+    if (got != want) {
+        println("case: ", what);
+        println("  want: ", want);
+        println("  got:  ", got);
+    }
+    assert(got == want);
+}
+
+/// The same over two truth values.
+fn void check_bool(bool got, bool want, string what) {
+    if (got != want) {
+        println("case: ", what);
+        println("  want: ", want);
+        println("  got:  ", got);
+    }
+    assert(got == want);
+}
+
+/// The two ends of a pipe, as pipe(2) fills them: `read_fd` is fds[0].
+struct pipe_ends {
+    i32 read_fd;
+    i32 write_fd;
+}
+
+/// A pipe, which is what drives the server in a test: the recorded bytes of a
+/// client go in one end and the loop reads them from the other, so the framing
+/// meets the read boundaries of a real stream. Neither std nor libc.ft binds
+/// pipe(2) and these tests are its one caller (D9.8).
+extern fn i32 pipe(i32 mut* fds);
+
+/// A pipe, or an assertion that fails. The caller closes both ends.
+fn pipe_ends open_pipe() {
+    i32 mut@ own fds = new(i32, 2);
+    defer del(fds);
+    assert(pipe(&fds[0]) == 0);
+    return pipe_ends{fds[0], fds[1]};
+}
+
+/// Writes `bytes` into the pipe and closes the writing end, so the reader sees
+/// the whole script and then the end of the stream. The script must be below
+/// the pipe's capacity, 64 KiB on Linux, since nothing drains it meanwhile.
+fn void feed(pipe_ends ends, string bytes) {
+    assert(io.write_all(ends.write_fd, cast(bytes, u8@)));
+    assert(io.close(ends.write_fd));
+}
+
+/// Everything written into the pipe, which the writing end must have closed.
+fn string own drain(pipe_ends ends) {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(io.read_all(ends.read_fd, &b));
+    assert(io.close(ends.read_fd));
+    return strbuf.take(&b);
+}

@@ -1,0 +1,29 @@
+//! run
+//! flags: -I ../../src/fort -I ../../src
+//! abort
+//! stderr: panic: rpc.set_chunk: above the ceiling
+//! stdout:
+//| the read sizes below the ceiling ok
+import lsp.rpc;
+
+// set_chunk takes a read size up to RPC_CHUNK_CEILING; one above it is a
+// violated precondition and panics (D13.3). One read reserves that many bytes
+// of spare room whatever the stream holds, and an allocation that fails ends
+// the program (D10.2), so the read size is bounded as the body is.
+//
+// The conn names stdin and stdout and never reads or writes them: set_chunk
+// touches no descriptor.
+fn i32 main() {
+    rpc.conn mut c = rpc.create(0, 1);
+    defer rpc.free(&c);
+    assert(rpc.chunk_of(&c) == rpc.RPC_CHUNK);
+    rpc.set_chunk(&c, 1);
+    assert(rpc.chunk_of(&c) == 1);
+    rpc.set_chunk(&c, rpc.RPC_CHUNK_CEILING);
+    assert(rpc.chunk_of(&c) == rpc.RPC_CHUNK_CEILING);
+    rpc.set_chunk(&c, 0);
+    assert(rpc.chunk_of(&c) == rpc.RPC_CHUNK);
+    println("the read sizes below the ceiling ok");
+    rpc.set_chunk(&c, rpc.RPC_CHUNK_CEILING + 1);
+    return 0;
+}

@@ -1,0 +1,317 @@
+//! run
+//! flags: -I ../../src/fort -I support -I ../../src
+//! stdout:
+//| prefixes ok
+//| boundaries ok
+//| suffixes ok
+//| bytes ok
+//| ok
+import lsp.rpc;
+import lsp_env;
+import std.io;
+import std.strbuf;
+
+// A sweep of src/lsp/rpc.ft over every prefix of a script: a stream that ends
+// anywhere must answer the frames that are whole and no more. A client dies
+// mid-write, a socket closes, a test writes half a message; the reader meets a
+// truncated stream in every one of those, and this file takes every place the
+// truncation can fall rather than the three a hand-written case would.
+//
+// Two properties, over all 108 prefixes of a script of four frames and 107
+// bytes:
+//
+//   * the frames a prefix answers are the first frames of the whole script,
+//     in order, and never a frame the script does not hold;
+//   * the stream ends cleanly if and only if the prefix ends where a frame
+//     ends. Anywhere else the reader answers an error record, and the loop
+//     above it ends the session rather than reading a frame that is not there.
+
+// The script every sweep below runs: four frames, of four shapes. The third
+// body holds the four bytes that end a header block, so a prefix that cuts it
+// cannot resynchronise by looking for them.
+fn void script_into(strbuf.str_buf mut* b) {
+    strbuf.clear(b);
+    frame_into(b, "{}");
+    frame_into(b, "");
+    frame_into(b, "{\"a\":\"\r\n\r\n\"}");
+    frame_into(b, "[1,2,3]");
+}
+
+// The bodies of those four frames, in order, joined by `|`.
+string WHOLE = "{}||{\"a\":\"\r\n\r\n\"}|[1,2,3]";
+
+// The frames of that script. The prefixes that end cleanly are one more: the
+// empty prefix and the end of each frame.
+u64 FRAMES = 4;
+
+// One frame around `body`, appended to `b`.
+fn void frame_into(strbuf.str_buf mut* b, string body) {
+    strbuf.append(b, "Content-Length: ");
+    strbuf.append_u64(b, body.len);
+    strbuf.append(b, "\r\n\r\n");
+    strbuf.append(b, body);
+}
+
+// The bodies `script` answers, joined by `|`, with `.` for a clean end of the
+// stream and `!` for an error record.
+fn string own frames_of(string script, u64 chunk) {
+    lsp_env.pipe_ends ends = lsp_env.open_pipe();
+    lsp_env.feed(ends, script);
+    rpc.conn mut c = rpc.create(ends.read_fd, ends.write_fd);
+    defer rpc.free(&c);
+    rpc.set_chunk(&c, chunk);
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    string mut body = "";
+    u64 mut seen = 0;
+    while (rpc.read_frame(&c, &body)) {
+        if (seen > 0) {
+            strbuf.append(&out, "|");
+        }
+        strbuf.append(&out, body);
+        seen += 1;
+    }
+    if (rpc.has_failed(&c)) {
+        strbuf.append(&out, "!");
+    } else {
+        assert(rpc.at_eof(&c));
+        strbuf.append(&out, ".");
+    }
+    assert(io.close(ends.read_fd));
+    return strbuf.take(&out);
+}
+
+// Whether `whole` begins with `part`.
+fn bool begins_with(string whole, string part) {
+    return part.len <= whole.len && whole[0..part.len] == part;
+}
+
+// The number of frames in a digest, which is the number of `|` plus one, and
+// zero for a digest that holds no body at all.
+fn u64 frames_in(string digest) {
+    // The last byte is `.` or `!`, so the bodies are everything before it.
+    string bodies = digest[0..digest.len - 1];
+    if (bodies.len == 0) {
+        // Either no frame at all, or one frame whose body is empty. The
+        // callers below tell the two apart by the script they sent.
+        return 0;
+    }
+    u64 mut count = 1;
+    u64 mut i = 0;
+    while (i < bodies.len) {
+        if (bodies[i] == '|') {
+            count += 1;
+        }
+        i += 1;
+    }
+    return count;
+}
+
+// ---- every prefix ----------------------------------------------------------------
+
+fn void a_prefix_answers_the_frames_that_are_whole() {
+    strbuf.str_buf mut script = strbuf.create();
+    defer strbuf.free(&script);
+    script_into(&script);
+    string whole = strbuf.view(&script);
+    u64 mut clean = 0;
+    u64 mut at = 0;
+    while (at <= whole.len) {
+        string own got = frames_of(whole[0..at], 0);
+        // The bodies are a prefix of the whole script's bodies.
+        string bodies = got[0..got.len - 1];
+        if (!begins_with(WHOLE, bodies)) {
+            println("prefix of ", at, " bytes answered ", got);
+        }
+        assert(begins_with(WHOLE, bodies));
+        if (got[got.len - 1] == '.') {
+            clean += 1;
+        }
+        del(got);
+        at += 1;
+    }
+    // The empty prefix and the end of each of the four frames.
+    lsp_env.check_u64(clean, FRAMES + 1, "the prefixes that end cleanly");
+}
+
+fn void a_prefix_answers_the_same_whatever_the_read_size() {
+    // A read size of one byte splits every frame at every byte, which is the
+    // other half of the same property: the frames are a function of the bytes.
+    strbuf.str_buf mut script = strbuf.create();
+    defer strbuf.free(&script);
+    script_into(&script);
+    string whole = strbuf.view(&script);
+    u64 mut at = 0;
+    while (at <= whole.len) {
+        string own one = frames_of(whole[0..at], 1);
+        string own few = frames_of(whole[0..at], 7);
+        string own all = frames_of(whole[0..at], 0);
+        if (one != few || one != all) {
+            println("prefix of ", at, " bytes: ", one, " ", few, " ", all);
+        }
+        assert(one == few);
+        assert(one == all);
+        del(one);
+        del(few);
+        del(all);
+        at += 1;
+    }
+}
+
+// ---- where the frames end --------------------------------------------------------
+
+fn void the_clean_ends_are_the_ends_of_the_frames() {
+    // The prefix that ends where frame k ends answers exactly k frames and
+    // ends cleanly; no other prefix does.
+    strbuf.str_buf mut script = strbuf.create();
+    defer strbuf.free(&script);
+    strbuf.str_buf mut so_far = strbuf.create();
+    defer strbuf.free(&so_far);
+    script_into(&script);
+    string whole = strbuf.view(&script);
+    frame_into(&so_far, "{}");
+    u64 first = so_far.len;
+    frame_into(&so_far, "");
+    u64 second = so_far.len;
+    frame_into(&so_far, "{\"a\":\"\r\n\r\n\"}");
+    u64 third = so_far.len;
+    // The last frame is `Content-Length: 7\r\n\r\n[1,2,3]`: sixteen bytes of
+    // the field name, one digit, the four of the empty line and seven of body.
+    lsp_env.check_u64(whole.len, third + 28, "the whole script");
+    ends_cleanly(whole[0..0], "the empty prefix");
+    ends_cleanly(whole[0..first], "one frame");
+    ends_cleanly(whole[0..second], "two frames");
+    ends_cleanly(whole[0..third], "three frames");
+    ends_cleanly(whole, "four frames");
+    // One byte before each of those is an error record.
+    fails(whole[0..first - 1], "one frame less a byte");
+    fails(whole[0..second - 1], "two frames less a byte");
+    fails(whole[0..third - 1], "three frames less a byte");
+    fails(whole[0..whole.len - 1], "four frames less a byte");
+    // And one byte after the first frame is an error record as well, since a
+    // header has begun.
+    fails(whole[0..first + 1], "one frame and a byte");
+}
+
+// The script ends cleanly.
+fn void ends_cleanly(string script, string what) {
+    string own got = frames_of(script, 1);
+    if (got[got.len - 1] != '.') {
+        println("case: ", what);
+        println("  answered ", got);
+    }
+    assert(got[got.len - 1] == '.');
+    del(got);
+}
+
+// The script ends with an error record.
+fn void fails(string script, string what) {
+    string own got = frames_of(script, 1);
+    if (got[got.len - 1] != '!') {
+        println("case: ", what);
+        println("  answered ", got);
+    }
+    assert(got[got.len - 1] == '!');
+    del(got);
+}
+
+fn void the_frames_of_a_prefix_are_counted() {
+    strbuf.str_buf mut script = strbuf.create();
+    defer strbuf.free(&script);
+    script_into(&script);
+    string whole = strbuf.view(&script);
+    string own got = frames_of(whole, 1);
+    lsp_env.check_u64(frames_in(got), FRAMES, "the frames of the whole script");
+    del(got);
+    string own none = frames_of("", 1);
+    lsp_env.check_u64(frames_in(none), 0, "the frames of the empty script");
+    del(none);
+}
+
+// ---- a suffix of the script ------------------------------------------------------
+
+fn void a_stream_that_begins_inside_a_frame_is_an_error() {
+    // The other end of the same question: a reader handed the tail of a script
+    // must not find a frame in it. Every suffix that does not begin at a frame
+    // is an error record or a frame the script does hold further on, and never
+    // a body the script does not hold.
+    strbuf.str_buf mut script = strbuf.create();
+    defer strbuf.free(&script);
+    script_into(&script);
+    string whole = strbuf.view(&script);
+    u64 mut at = 1;
+    while (at < whole.len) {
+        string own got = frames_of(whole[at..], 1);
+        string bodies = got[0..got.len - 1];
+        // Whatever it reads is a tail of the bodies of the script: a body it
+        // answers is one the script holds.
+        u64 mut i = 0;
+        bool mut found = false;
+        while (i <= WHOLE.len) {
+            if (WHOLE.len - i >= bodies.len && WHOLE[i..i + bodies.len] == bodies) {
+                found = true;
+            }
+            i += 1;
+        }
+        if (!found) {
+            println("suffix from ", at, " answered ", got);
+        }
+        assert(found);
+        del(got);
+        at += 1;
+    }
+}
+
+// ---- the bytes of a body ---------------------------------------------------------
+
+fn void every_byte_value_survives_a_body() {
+    // A body is bytes to the framing, so all 256 of them go through it
+    // unchanged; the reader above it is what refuses the ones JSON does not
+    // allow.
+    strbuf.str_buf mut body = strbuf.create();
+    defer strbuf.free(&body);
+    u64 mut i = 0;
+    while (i < 256) {
+        strbuf.push_byte(&body, cast(i, u8));
+        i += 1;
+    }
+    strbuf.str_buf mut script = strbuf.create();
+    defer strbuf.free(&script);
+    frame_into(&script, strbuf.view(&body));
+    frame_into(&script, "{}");
+    lsp_env.pipe_ends ends = lsp_env.open_pipe();
+    lsp_env.feed(ends, strbuf.view(&script));
+    rpc.conn mut c = rpc.create(ends.read_fd, ends.write_fd);
+    defer rpc.free(&c);
+    rpc.set_chunk(&c, 3);
+    string mut got = "";
+    assert(rpc.read_frame(&c, &got));
+    lsp_env.check_u64(got.len, 256, "the length of a body of every byte");
+    u64 mut k = 0;
+    while (k < 256) {
+        lsp_env.check_u64(cast(got[k], u64), k, "the byte of a body");
+        k += 1;
+    }
+    // The frame after it is read as well, so no byte of the first ended the
+    // frame early.
+    assert(rpc.read_frame(&c, &got));
+    lsp_env.check(got, "{}", "the frame after a body of every byte");
+    assert(!rpc.read_frame(&c, &got));
+    assert(rpc.at_eof(&c));
+    assert(io.close(ends.read_fd));
+}
+
+fn i32 main() {
+    a_prefix_answers_the_frames_that_are_whole();
+    a_prefix_answers_the_same_whatever_the_read_size();
+    println("prefixes ok");
+    the_clean_ends_are_the_ends_of_the_frames();
+    the_frames_of_a_prefix_are_counted();
+    println("boundaries ok");
+    a_stream_that_begins_inside_a_frame_is_an_error();
+    println("suffixes ok");
+    every_byte_value_survives_a_body();
+    println("bytes ok");
+    println("ok");
+    return 0;
+}

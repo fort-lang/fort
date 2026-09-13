@@ -1,0 +1,566 @@
+// lsp.server: the dispatch loop of the language server -- the lifecycle, the
+// document synchronisation and the capabilities the server advertises.
+//
+// One loop reads a frame, parses it, classifies it and answers it, in that
+// order, and then reads the next. Everything the server knows is a field of
+// one `server` value the caller owns, so a test drives the same loop over a
+// pipe that an editor drives over stdin and stdout.
+// D20.5
+//
+// ---- what the server advertises ----
+//
+// The capability object names what this server implements and nothing else: a
+// capability a server names and does not implement is a bug no client can see
+// until a user meets it. Today that is document synchronisation, full text at
+// a time, and the position encoding. No feature request is implemented yet, so
+// none is advertised. test/fort/lsp_protocol_test.ft asserts the object member
+// by member and counts the members, so a capability added without an
+// implementation fails that test.
+//
+// serverInfo carries the name and no version. The version is `VERSION` in
+// src/fort/driver.ft, and this closure holds no module that carries it: it
+// does hold one module of the compiler, `flt`, which lsp.json imports for its
+// numbers, and importing the driver for one string would pull the whole
+// compiler into fort-lsp behind it. A literal here would be a second copy that
+// drifts, and a version this server cannot derive is a version it must not
+// claim, so the member is absent until the ticket that gives the server an
+// analysis reaches driver.VERSION anyway.
+//
+// ---- the lifecycle ----
+//
+// A request before `initialize` is ServerNotInitialized and a notification
+// before it is dropped, `exit` excepted. A second `initialize` is
+// InvalidRequest. A request after `shutdown` is InvalidRequest and a
+// notification after it is dropped, `exit` excepted. An unknown method is
+// MethodNotFound for a request and a drop for a notification, because a
+// notification is never answered (JSON-RPC 2.0 4.1).
+//
+// `exit` ends the loop with status 0 when a `shutdown` came before it and with
+// status 1 when none did (LSP 3.17, exit). The end of the input stream takes
+// the same two statuses: the client is gone either way, and a status of 0 for
+// a stream that ended in the middle of a conversation would tell a supervisor
+// that the server finished its work. A frame the server could not read ends
+// the loop the same way, since the framing no longer knows where the next
+// message begins.
+//
+// ---- cancellation ----
+//
+// The loop reads one frame, handles it and writes the response before it reads
+// the next byte. "In flight" therefore means one thing here: a request whose
+// handler has not returned. `$/cancelRequest` has three cases and the server
+// writes nothing in any of them, a notification being unanswerable:
+//
+//   * The id names the request being handled. The handler is the one that can
+//     observe it, so the server records it and answers is_cancelled. Nothing
+//     in this ticket sets it through the loop, because no handler reads input
+//     while it works; the analysis of a later ticket is what will.
+//   * The id names a request the server has already answered. Dropped: the
+//     response has gone and the client takes it.
+//   * The id names a request the server has never seen, which includes a
+//     cancel that arrives before its request. Dropped as well, and the request
+//     that follows is answered normally: a cancel names a request in flight,
+//     and that one was not.
+//
+// The id of the request being handled is copied into the server's own buffer.
+// An id is a view into the document that carried it and the next parse reuses
+// that storage, so a server that kept the view would compare against bytes
+// that have been overwritten.
+//
+// ---- the documents ----
+//
+// TextDocumentSyncKind.Full: every didChange carries the whole text. The
+// server takes the text of the last change of the notification and holds it as
+// the document. A change that carries a `range` is a client using a sync kind
+// this server did not advertise, so the notification is dropped and the
+// document keeps the text it had: applying a range's text as the whole
+// document would replace the file with a fragment of it.
+//
+// A malformed notification is dropped whatever it names. The protocol gives a
+// server no way to answer one, and this server has no logging channel yet.
+//
+// Re-entrancy: no module-level state. Every buffer belongs to the server value
+// and dies with it.
+// D20.5
+//
+// Dispatch: none. The method is a chain of comparisons over a string, as the
+// fifteen methods a server ever implements deserve, and not a table of
+// function pointers.
+// D3.10
+import lsp.docs;
+import lsp.json;
+import lsp.rpc;
+import lsp.text;
+import std.strbuf;
+
+/// The name the server reports in `serverInfo`.
+string SERVER_NAME = "fort";
+
+/// TextDocumentSyncKind.Full (LSP 3.17): every change carries the whole text.
+u64 SYNC_FULL = 1;
+
+/// The exit status of an orderly shutdown and of every other end of the loop
+/// (LSP 3.17, exit).
+i32 STATUS_SHUTDOWN = 0;
+i32 STATUS_NO_SHUTDOWN = 1;
+
+/// Everything the server knows. create fills it; a server{} is not usable,
+/// since it names no descriptors.
+struct server {
+    rpc.conn conn;
+    json.doc doc;
+    docs.store open_docs;
+    /// The response being built, and the buffer a diagnostic message is built
+    /// in. They are two, because a message is a view while the response that
+    /// carries it is being written.
+    strbuf.str_buf body;
+    strbuf.str_buf msg;
+    /// The copy of the id of the request being handled. `current` points into
+    /// this buffer for a string id.
+    strbuf.str_buf id_text;
+    rpc.msg_id current;
+    bool handling;
+    bool cancelled;
+    bool initialize_seen;
+    bool ready;
+    bool shutdown_seen;
+    bool exit_seen;
+    text.position_encoding enc;
+}
+
+/// A server over the two descriptors, which it does not own and never closes.
+/// The reader's cap is the framing's cap, so a body that passed the framing is
+/// never refused for its size by the reader.
+fn server create(i32 in_fd, i32 out_fd) {
+    server mut s = server{};
+    s.conn = rpc.create(in_fd, out_fd);
+    s.enc = text.position_encoding.enc_utf16;
+    json.set_max_bytes(&s.doc, rpc.max_content(&s.conn));
+    return s;
+}
+
+/// Releases every buffer, the parsed document and every open document, and
+/// takes the lifecycle back to where create left it: a server that was freed
+/// is a server no client has spoken to, over the same two descriptors. A
+/// second call is a no-op.
+fn void free(server mut* s) {
+    rpc.free(&s->conn);
+    json.free(&s->doc);
+    docs.free(&s->open_docs);
+    strbuf.free(&s->body);
+    strbuf.free(&s->msg);
+    strbuf.free(&s->id_text);
+    s->current = rpc.msg_id{};
+    s->handling = false;
+    s->cancelled = false;
+    s->initialize_seen = false;
+    s->ready = false;
+    s->shutdown_seen = false;
+    s->exit_seen = false;
+    s->enc = text.position_encoding.enc_utf16;
+}
+
+/// Whether the client has sent `initialized`. LSP 3.17 binds the server until
+/// it answers `initialize` with an InitializeResult (LSP 3.17, initialize),
+/// and says of `initialized` only that the client sends it after it has that
+/// answer and before its next message. Waiting for it is therefore stricter
+/// than the specification asks and is the conservative gate: the ticket that
+/// publishes a diagnostic asks this before it writes one.
+fn bool is_ready(server* s) {
+    return s->ready;
+}
+
+/// The exit status the loop answers with.
+fn i32 exit_status(server* s) {
+    if (s->shutdown_seen) {
+        return STATUS_SHUTDOWN;
+    }
+    return STATUS_NO_SHUTDOWN;
+}
+
+/// The position encoding in force, which `initialize` negotiated.
+fn text.position_encoding encoding(server* s) {
+    return s->enc;
+}
+
+/// The connection, so that a caller may move the read size or the cap on a
+/// body before the loop runs. The reader's cap follows the conn's at every
+/// message, so the two cannot disagree about what is too large.
+fn rpc.conn mut* connection(server mut* s) {
+    return &s->conn;
+}
+
+/// The open documents, which the feature requests of the later tickets read.
+fn docs.store* documents(server* s) {
+    return &s->open_docs;
+}
+
+// ---- the request being handled ---------------------------------------------------
+
+/// Takes `id` as the id of the request being handled, copying the text of a
+/// string id: an id is a view into the document that carried it, and the next
+/// parse reuses that storage.
+fn void begin_request(server mut* s, rpc.msg_id id) {
+    strbuf.clear(&s->id_text);
+    s->current = id;
+    if (id.kind == rpc.id_kind.id_str) {
+        strbuf.append(&s->id_text, id.text);
+        s->current.text = strbuf.view(&s->id_text);
+    }
+    s->handling = true;
+    s->cancelled = false;
+}
+
+/// Ends the request being handled. No request is in flight afterwards, so a
+/// cancel that names it is dropped.
+fn void end_request(server mut* s) {
+    s->handling = false;
+    s->cancelled = false;
+    s->current = rpc.msg_id{};
+}
+
+/// Whether the client cancelled the request being handled. A handler that runs
+/// long asks this at a checkpoint and answers ERROR_REQUEST_CANCELLED.
+fn bool is_cancelled(server* s) {
+    return s->handling && s->cancelled;
+}
+
+/// The id of the request being handled; the absent id when none is.
+fn rpc.msg_id current_id(server* s) {
+    return s->current;
+}
+
+// ---- the answers -----------------------------------------------------------------
+
+/// Starts a response in the body buffer.
+fn void begin_body(server mut* s, json.writer mut* w) {
+    strbuf.clear(&s->body);
+    json.write_init(w, &s->body);
+}
+
+/// Sends the body that was built. False when the write failed, which the loop
+/// reads off the conn.
+fn bool send_body(server mut* s) {
+    return rpc.write_frame(&s->conn, strbuf.view(&s->body));
+}
+
+/// Answers a request with `null`, which is the result of `shutdown`.
+fn bool send_null(server mut* s, rpc.msg_id id) {
+    json.writer mut w = json.writer{};
+    begin_body(s, &w);
+    rpc.response_begin(&w, id);
+    json.write_null(&w);
+    rpc.response_end(&w);
+    return send_body(s);
+}
+
+/// Answers a request with an error.
+fn bool send_error(server mut* s, rpc.msg_id id, i64 code, string message) {
+    json.writer mut w = json.writer{};
+    begin_body(s, &w);
+    rpc.write_error(&w, id, code, message);
+    return send_body(s);
+}
+
+/// Answers `initialize` with the capabilities of this server.
+fn bool send_capabilities(server mut* s, rpc.msg_id id) {
+    json.writer mut w = json.writer{};
+    begin_body(s, &w);
+    rpc.response_begin(&w, id);
+    json.write_object_begin(&w);
+    json.write_key(&w, "capabilities");
+    json.write_object_begin(&w);
+    json.write_key(&w, "positionEncoding");
+    json.write_str(&w, text.encoding_name(s->enc));
+    json.write_key(&w, "textDocumentSync");
+    json.write_object_begin(&w);
+    json.write_key(&w, "openClose");
+    json.write_bool(&w, true);
+    json.write_key(&w, "change");
+    json.write_uint(&w, SYNC_FULL);
+    json.write_key(&w, "save");
+    json.write_object_begin(&w);
+    json.write_key(&w, "includeText");
+    json.write_bool(&w, false);
+    json.write_object_end(&w);
+    json.write_object_end(&w);
+    json.write_object_end(&w);
+    json.write_key(&w, "serverInfo");
+    json.write_object_begin(&w);
+    json.write_key(&w, "name");
+    json.write_str(&w, SERVER_NAME);
+    json.write_object_end(&w);
+    json.write_object_end(&w);
+    rpc.response_end(&w);
+    return send_body(s);
+}
+
+// ---- reading the parameters ------------------------------------------------------
+
+// Every function below takes the document the message was parsed from beside
+// the message, because a handle belongs to one document: json.member_of
+// panics on a handle another document handed out (D13.3). The loop passes its
+// own document, and nothing under dispatch parses again, so every view the
+// message carries is alive for the whole of it.
+
+/// The member `name` of `v`, and 0 when `v` is the absent handle, when it is
+/// no object, or when it has no such member. json.member_of takes a handle the
+/// document handed out, so the absent one is answered here (D13.3).
+fn u32 member(json.doc* d, u32 v, string name) {
+    if (v == 0) {
+        return 0;
+    }
+    return json.member_of(d, v, name);
+}
+
+/// Whether `v` is a string of that document.
+fn bool is_string(json.doc* d, u32 v) {
+    return v != 0 && json.kind_of(d, v) == json.value_kind.k_string;
+}
+
+/// The value of `v` when it is an integer, and `fallback` otherwise. A version
+/// the client left out, or wrote as a float, keeps the one the store holds.
+fn i64 int_or(json.doc* d, u32 v, i64 fallback) {
+    if (v == 0 || json.kind_of(d, v) != json.value_kind.k_int) {
+        return fallback;
+    }
+    return json.int_of(d, v);
+}
+
+// ---- initialize ------------------------------------------------------------------
+
+/// The encoding to negotiate from the client's capabilities: the first name of
+/// `general.positionEncodings` this server implements, since the client lists
+/// them in the order it prefers (LSP 3.17, general.positionEncodings). UTF-16
+/// when the client offers none of them, which every client supports.
+fn text.position_encoding negotiate(json.doc* d, u32 params) {
+    u32 general = member(d, member(d, params, "capabilities"), "general");
+    u32 list = member(d, general, "positionEncodings");
+    if (list == 0 || json.kind_of(d, list) != json.value_kind.k_array) {
+        return text.position_encoding.enc_utf16;
+    }
+    u32 mut child = json.first_of(d, list);
+    while (child != 0) {
+        text.position_encoding mut named = text.position_encoding.enc_utf16;
+        if (is_string(d, child) && text.encoding_of_name(json.text_of(d, child), &named)) {
+            return named;
+        }
+        child = json.next_of(d, child);
+    }
+    return text.position_encoding.enc_utf16;
+}
+
+// ---- the documents ---------------------------------------------------------------
+
+fn void did_open(server mut* s, json.doc* d, rpc.message* m) {
+    u32 document = member(d, m->params, "textDocument");
+    u32 uri = member(d, document, "uri");
+    u32 body = member(d, document, "text");
+    if (!is_string(d, uri) || !is_string(d, body)) {
+        return;
+    }
+    docs.open(&s->open_docs, json.text_of(d, uri), json.text_of(d, body),
+              int_or(d, member(d, document, "version"), 0));
+}
+
+fn void did_change(server mut* s, json.doc* d, rpc.message* m) {
+    u32 document = member(d, m->params, "textDocument");
+    u32 uri_node = member(d, document, "uri");
+    if (!is_string(d, uri_node)) {
+        return;
+    }
+    string uri = json.text_of(d, uri_node);
+    u32 changes = member(d, m->params, "contentChanges");
+    if (changes == 0 || json.kind_of(d, changes) != json.value_kind.k_array) {
+        return;
+    }
+    u64 count = json.count_of(d, changes);
+    if (count == 0) {
+        // A notification that changes nothing leaves the document alone,
+        // version and all: the client sent no text to hold.
+        return;
+    }
+    // Full sync: each change carries the whole text, so the last one is the
+    // document. An earlier one is the same document at an earlier keystroke.
+    u32 last = json.at_of(d, changes, count - 1);
+    if (member(d, last, "range") != 0) {
+        // Incremental sync, which this server did not advertise. Its text is a
+        // fragment, and holding a fragment as the document would lose the file.
+        return;
+    }
+    u32 body = member(d, last, "text");
+    if (!is_string(d, body)) {
+        return;
+    }
+    i64 version = int_or(d, member(d, document, "version"),
+                         docs.version_of(&s->open_docs, uri));
+    docs.update(&s->open_docs, uri, json.text_of(d, body), version);
+}
+
+fn void did_close(server mut* s, json.doc* d, rpc.message* m) {
+    u32 uri = member(d, member(d, m->params, "textDocument"), "uri");
+    if (!is_string(d, uri)) {
+        return;
+    }
+    docs.close(&s->open_docs, json.text_of(d, uri));
+}
+
+// ---- cancellation ----------------------------------------------------------------
+
+/// Reads `$/cancelRequest`. The three cases stand in the header of this file;
+/// every one of them writes nothing.
+fn void note_cancel(server mut* s, json.doc* d, rpc.message* m) {
+    u32 named = member(d, m->params, "id");
+    bool mut ok = true;
+    rpc.msg_id id = rpc.id_of(d, named, &ok);
+    if (!ok || id.kind == rpc.id_kind.id_absent) {
+        return;
+    }
+    if (s->handling && rpc.same_id(id, s->current)) {
+        s->cancelled = true;
+    }
+}
+
+// ---- the dispatch ----------------------------------------------------------------
+
+/// The message a request names, built in the server's own buffer so that it
+/// names the method the client sent.
+fn string about(server mut* s, string before, string method) {
+    strbuf.clear(&s->msg);
+    strbuf.append(&s->msg, before);
+    strbuf.append(&s->msg, method);
+    return strbuf.view(&s->msg);
+}
+
+fn void handle_request(server mut* s, json.doc* d, rpc.message* m) {
+    if (m->method == "initialize") {
+        if (s->initialize_seen) {
+            send_error(s, m->id, rpc.ERROR_INVALID_REQUEST, "the server is initialized already");
+            return;
+        }
+        s->initialize_seen = true;
+        s->enc = negotiate(d, m->params);
+        send_capabilities(s, m->id);
+        return;
+    }
+    if (!s->initialize_seen) {
+        send_error(s, m->id, rpc.ERROR_SERVER_NOT_INITIALIZED, "the server is not initialized");
+        return;
+    }
+    if (s->shutdown_seen) {
+        send_error(s, m->id, rpc.ERROR_INVALID_REQUEST, "the server is shutting down");
+        return;
+    }
+    if (m->method == "shutdown") {
+        s->shutdown_seen = true;
+        send_null(s, m->id);
+        return;
+    }
+    send_error(s, m->id, rpc.ERROR_METHOD_NOT_FOUND,
+               about(s, "the server does not implement the method ", m->method));
+}
+
+fn void handle_notification(server mut* s, json.doc* d, rpc.message* m) {
+    if (m->method == "exit") {
+        s->exit_seen = true;
+        return;
+    }
+    if (!s->initialize_seen || s->shutdown_seen) {
+        // Before `initialize` and after `shutdown` a notification is dropped,
+        // `exit` excepted (LSP 3.17, initialize and shutdown).
+        return;
+    }
+    if (m->method == "initialized") {
+        s->ready = true;
+        return;
+    }
+    if (m->method == "$/cancelRequest") {
+        note_cancel(s, d, m);
+        return;
+    }
+    if (m->method == "textDocument/didOpen") {
+        did_open(s, d, m);
+        return;
+    }
+    if (m->method == "textDocument/didChange") {
+        did_change(s, d, m);
+        return;
+    }
+    if (m->method == "textDocument/didClose") {
+        did_close(s, d, m);
+        return;
+    }
+    if (m->method == "textDocument/didSave") {
+        // Nothing to do, and the method is named so that it is one the server
+        // implements rather than an unknown one. The text the client is
+        // editing is the text the server holds, and `includeText` is false, so
+        // the notification carries none.
+        return;
+    }
+    // Every other notification is dropped, which is what the protocol asks of
+    // a server that does not implement one.
+}
+
+/// Answers one message, which must have been parsed from `d`. A response is
+/// dropped, since JSON-RPC forbids answering one and this server sends no
+/// request of its own; a message that is no JSON-RPC message at all is
+/// InvalidRequest, named by the id it carried when it carried one.
+fn void dispatch(server mut* s, json.doc* d, rpc.message* m) {
+    if (m->kind == rpc.msg_kind.m_response) {
+        return;
+    }
+    if (m->kind == rpc.msg_kind.m_invalid) {
+        send_error(s, m->id, rpc.ERROR_INVALID_REQUEST, m->error_msg);
+        return;
+    }
+    if (m->kind == rpc.msg_kind.m_notification) {
+        handle_notification(s, d, m);
+        return;
+    }
+    begin_request(s, m->id);
+    handle_request(s, d, m);
+    end_request(s);
+}
+
+/// Reads one frame and answers it. False when the loop must end: the stream
+/// ended, the framing broke, or `exit` arrived.
+fn bool step(server mut* s) {
+    string mut body = "";
+    if (!rpc.read_frame(&s->conn, &body)) {
+        return false;
+    }
+    // The reader's cap follows the framing's at every message, so a caller
+    // that moved the conn's cap cannot leave the two disagreeing about what is
+    // too large. The body in hand passed the framing's cap already.
+    json.set_max_bytes(&s->doc, rpc.max_content(&s->conn));
+    if (!json.parse(&s->doc, body)) {
+        // The framing said where the next frame begins, so the stream is still
+        // in step and the loop goes on. JSON-RPC 2.0 answers a document it
+        // could not read with a null id.
+        send_error(s, rpc.msg_id{}, rpc.ERROR_PARSE, json.error_message(&s->doc));
+        return !rpc.has_failed(&s->conn);
+    }
+    rpc.message mut m = rpc.message{};
+    rpc.classify(&s->doc, &m);
+    dispatch(s, &s->doc, &m);
+    if (s->exit_seen || rpc.has_failed(&s->conn)) {
+        return false;
+    }
+    return true;
+}
+
+/// Reads and answers messages until the client exits, closes the stream, or
+/// sends a frame the server cannot read. The status is 0 after an orderly
+/// shutdown and 1 otherwise.
+fn i32 run(server mut* s) {
+    while (step(s)) {
+    }
+    return exit_status(s);
+}
+
+/// The whole of a session over a pair of descriptors: the server, the loop and
+/// the release of everything it took.
+fn i32 serve(i32 in_fd, i32 out_fd) {
+    server mut s = create(in_fd, out_fd);
+    defer free(&s);
+    return run(&s);
+}

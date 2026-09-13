@@ -1,0 +1,241 @@
+// lsp.docs: the documents the client has open, with their text and their
+// version.
+//
+// The client owns the text of an open document and the server holds the copy
+// it was sent: every analysis reads the buffer the user is editing and not the
+// file on disk (D20.5). didOpen adds a document, didChange replaces its text,
+// didClose removes it, and nothing else touches the store.
+//
+// ---- the key ----
+//
+// A document is keyed by the URI the client spelled, byte for byte, and never
+// by a path. Two reasons. A client may open a document that has no path at all
+// -- `untitled:1` is a file the user has not saved -- and it must be
+// synchronised like any other. And the URI is what every later message names
+// it by, so a key that is the URI needs no conversion and cannot disagree with
+// one; lsp.uri answers the path for the passes that must open a file.
+//
+// Two URIs that name one file in two spellings are two documents here. A
+// client does not do that: it sends the URI it sent at didOpen. This module
+// makes no attempt to read through the spelling, because a rule that decided
+// two URIs were one file would have to resolve symbolic links and would then
+// hold text for a document the client believes is closed.
+//
+// ---- the storage ----
+//
+// One grown span of records, which each own their URI and their text, and a
+// linear scan for the key. A session holds tens of open documents and the
+// analysis behind one message costs more than a scan of them, so a map would
+// buy nothing and would hold a second copy of every key.
+//
+// Removing a document moves the records after it down, which keeps the order
+// the documents were opened in: `at` then answers the same document for the
+// same index until the store changes, and a test over the store is written
+// against a fixed order.
+//
+// Ownership: a document owns its URI and its text, and both die with the
+// document. The store owns its records. free releases all of it, so a store
+// that is freed leaves the heap where it found it (D20.5), which
+// test/fort/lsp_docs_test.ft measures against the program break.
+//
+// Re-entrancy: a store is a value the caller owns; no module-level state.
+// D20.5
+//
+// Dispatch: none. The scan is a loop and no table of function pointers.
+// D3.10
+import std.str;
+
+/// The first non-zero capacity of the record span; it doubles from there.
+u64 DOC_MIN_CAP = 4;
+
+/// The largest u64 there is, named once so that the capacity guard holds its
+/// arithmetic against one spelling of it (D1.4).
+u64 U64_MAX = 18446744073709551615;
+
+/// One open document. `version` is the number the client last sent; the
+/// protocol makes it an integer that rises and gives it no other meaning, so
+/// the store records it and compares it with nothing.
+struct document {
+    string own uri;
+    string own text;
+    i64 version;
+}
+
+/// The open documents. store{} is a valid empty store, so a struct holding one
+/// is initialized with {}.
+struct store {
+    document mut@ own items;
+    u64 count;
+}
+
+/// The empty store; allocates nothing.
+fn store create() {
+    return store{};
+}
+
+/// Releases every document, its URI and its text; the store is empty and
+/// usable afterwards. A second call is a no-op.
+fn void free(store mut* s) {
+    u64 mut i = 0;
+    while (i < s->count) {
+        del(s->items[i].uri);
+        del(s->items[i].text);
+        i += 1;
+    }
+    del(s->items);
+    s->count = 0;
+}
+
+/// The number of open documents.
+fn u64 count(store* s) {
+    return s->count;
+}
+
+/// The document at `i`; an index at or past the count is a violated
+/// precondition and panics (D13.3). Ownership: a pointer into the store's own
+/// storage, which the next open moves; a caller that keeps it past a change of
+/// the store copies what it needs.
+fn document* at(store* s, u64 i) {
+    if (i >= s->count) {
+        panic("docs.at: index out of range");
+    }
+    return &s->items[i];
+}
+
+/// The index of the document `uri` names, or -1 when the client has no such
+/// document open.
+fn i64 find(store* s, string uri) {
+    u64 mut i = 0;
+    while (i < s->count) {
+        if (s->items[i].uri == uri) {
+            return cast(i, i64);
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+/// Whether the client has that document open.
+fn bool is_open(store* s, string uri) {
+    return find(s, uri) >= 0;
+}
+
+/// Ensures room for one more document, growing to the largest of DOC_MIN_CAP
+/// and twice the capacity.
+fn void reserve(store mut* s) {
+    if (s->count < s->items.len) {
+        return;
+    }
+    u64 mut cap = DOC_MIN_CAP;
+    if (s->items.len >= cap) {
+        // D11.1: nothing here may detect an overflow by performing one
+        if (s->items.len > U64_MAX / 2) {
+            panic("docs.reserve: capacity overflow");
+        }
+        cap = s->items.len * 2;
+    }
+    document mut@ own bigger = new(document, cap);
+    u64 mut i = 0;
+    while (i < s->count) {
+        // The records own their strings, so they move; a copy would leave two
+        // owners of one allocation (D17.5).
+        bigger[i].uri = move(s->items[i].uri);
+        bigger[i].text = move(s->items[i].text);
+        bigger[i].version = s->items[i].version;
+        i += 1;
+    }
+    del(s->items);
+    s->items = move(bigger);
+}
+
+/// Opens a document, copying both the URI and the text. A URI that is already
+/// open is replaced rather than added twice: a second didOpen for one document
+/// is a client that lost track, and the text it sent last is the text it
+/// believes the user sees.
+///
+/// Precondition: neither `uri` nor `text` may alias the storage of a document
+/// this store holds, because the replacement releases the old text before it
+/// copies the new one, so `docs.open(s, uri, docs.text_of(s, uri), v)` reads
+/// freed bytes. std.strbuf.append states the same precondition for the same
+/// reason, and neither call detects it. A caller passes the message it read,
+/// which the store never owns.
+fn void open(store mut* s, string uri, string text, i64 version) {
+    i64 found = find(s, uri);
+    if (found >= 0) {
+        u64 i = cast(found, u64);
+        del(s->items[i].text);
+        s->items[i].text = str.dup(text);
+        s->items[i].version = version;
+        return;
+    }
+    reserve(s);
+    s->items[s->count].uri = str.dup(uri);
+    s->items[s->count].text = str.dup(text);
+    s->items[s->count].version = version;
+    s->count += 1;
+}
+
+/// Replaces the text of an open document. False when the client has no such
+/// document open, and the store is then unchanged: a didChange for a document
+/// that was never opened names text this server has never seen, and inventing
+/// one would answer later requests from a document the client does not have.
+///
+/// Precondition: `text` may not alias the storage of a document this store
+/// holds, as in open, since the old text is released before the new one is
+/// copied.
+fn bool update(store mut* s, string uri, string text, i64 version) {
+    i64 found = find(s, uri);
+    if (found < 0) {
+        return false;
+    }
+    u64 i = cast(found, u64);
+    // The old text is released before the new one is stored: storing over a
+    // live own value traps (D17.11).
+    del(s->items[i].text);
+    s->items[i].text = str.dup(text);
+    s->items[i].version = version;
+    return true;
+}
+
+/// Closes a document and releases its URI and its text. False when the client
+/// has no such document open. The documents after it keep their order.
+fn bool close(store mut* s, string uri) {
+    i64 found = find(s, uri);
+    if (found < 0) {
+        return false;
+    }
+    u64 mut i = cast(found, u64);
+    del(s->items[i].uri);
+    del(s->items[i].text);
+    while (i + 1 < s->count) {
+        s->items[i].uri = move(s->items[i + 1].uri);
+        s->items[i].text = move(s->items[i + 1].text);
+        s->items[i].version = s->items[i + 1].version;
+        i += 1;
+    }
+    s->count -= 1;
+    return true;
+}
+
+/// The text of an open document, and the empty text when the client has no
+/// such document open. A document may hold the empty text as well, so a caller
+/// that must tell the two apart asks is_open. Ownership: a view of the
+/// document's own text, which the next update or close ends.
+fn string text_of(store* s, string uri) {
+    i64 found = find(s, uri);
+    if (found < 0) {
+        return "";
+    }
+    return s->items[cast(found, u64)].text;
+}
+
+/// The version of an open document, and -1 when the client has no such
+/// document open. The protocol allows a negative version, so a caller that
+/// must tell the two apart asks is_open.
+fn i64 version_of(store* s, string uri) {
+    i64 found = find(s, uri);
+    if (found < 0) {
+        return -1;
+    }
+    return s->items[cast(found, u64)].version;
+}

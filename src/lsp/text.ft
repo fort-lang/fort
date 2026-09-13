@@ -1,0 +1,293 @@
+// lsp.text: a position in a document, and the two encodings the protocol may
+// count one in.
+//
+// The language server protocol addresses text by a line and a character, both
+// 0-based, where a character is a count of code units of the negotiated
+// encoding. The compiler addresses it by a 1-based line and a 1-based byte
+// column, with a tab counting as one column. This module is the only place the
+// two meet: every conversion in the server goes through offset_of,
+// position_of or of_line_col, so one reading of "character" is in force
+// everywhere.
+// D14.2, D20.4
+//
+// ---- the walk ----
+//
+// Both encodings are walked the same way, one UTF-8 sequence at a time. A
+// sequence contributes its own byte length in UTF-8 and one or two units in
+// UTF-16, since a four-byte sequence is a code point above U+FFFF and UTF-16
+// spells that as a surrogate pair. The UTF-8 rule itself is
+// json.utf8_sequence_len: RFC 3629 is written once in this program, and a
+// second copy of it here would be a copy that drifts.
+//
+// A character offset that falls inside a sequence rounds **down** to the first
+// byte of that sequence: the low half of a surrogate pair in UTF-16, a
+// continuation byte in UTF-8. LSP 3.17 settles the clamp for a character past
+// the end of a line and settles neither of these. Rounding down is the only
+// reading under which every byte offset this module answers is a code-point
+// boundary, so a caller that cuts the text at one never builds invalid UTF-8;
+// rounding up would move the position past text the client addressed.
+//
+// A byte that starts no well-formed sequence counts as one unit and advances
+// one byte, so the walk terminates and lands on a boundary whatever the bytes
+// are. A document an editor sent is valid UTF-8, because the reader refuses a
+// string that is not (lsp.json), but this module is not the one to decide that.
+//
+// ---- lines ----
+//
+// A line ends at a line feed, and a carriage return immediately before it
+// belongs to that terminator. A lone carriage return is an ordinary character
+// and not a line break, which is how the compiler's lexer counts lines as
+// well -- `advance` in src/fort/lexer.ft numbers a line at a line feed and at
+// nothing else -- and two modules that disagreed about where line 3 begins
+// would put a diagnostic on the wrong line.
+// D2.1, D14.2
+//
+// A character past the end of its line clamps to the end of that line, and a
+// line past the last line clamps to the last line (LSP 3.17, Position). A
+// document therefore answers every position, and no caller has to check one.
+// A byte offset inside a terminator clamps the same way, to the end of the
+// line it ends: the terminator is part of no line's text. That is what closes
+// the round trip -- every position this module answers is one that offset_of
+// maps back to the same position -- which
+// test/fort/lsp_text_test.ft holds over every offset of a document.
+//
+// The ASCII case fold of the protocol stands here as well: two names it
+// compares without case, a header field name and the scheme of a URI, are the
+// two texts of the server that no position ever addresses.
+//
+// Re-entrancy: no module-level state. Every function reads the text it is
+// given and answers a value.
+// D20.5
+//
+// Dispatch: none. The encoding is a switch of two comparisons and not a table
+// of function pointers.
+// D3.10
+import lsp.json;
+
+/// The distance from an uppercase ASCII letter to its lowercase one.
+u64 CASE_SHIFT = 32;
+
+/// How a client counts a character. UTF-16 is what every client supports and
+/// what the server uses unless the client offers UTF-8; UTF-32 is not
+/// advertised, so it is never negotiated.
+enum position_encoding {
+    enc_utf16,
+    enc_utf8,
+}
+
+/// A position in a document: both fields are 0-based, and `character` counts
+/// code units of the encoding in force.
+struct position {
+    u64 line;
+    u64 character;
+}
+
+/// Whether the two texts are equal without regard to the case of their ASCII
+/// letters. The protocol compares two names that way twice: a header field
+/// name, which follows the HTTP rule, and the scheme and host of a URI (RFC
+/// 3986 3.1 and 3.2.2). Both callers compare a name against a constant of
+/// this program, so a byte above ASCII decides the answer by its value and
+/// never by a case rule of some other alphabet.
+fn bool equal_no_case(string a, string b) {
+    if (a.len != b.len) {
+        return false;
+    }
+    u64 mut i = 0;
+    while (i < a.len) {
+        char mut x = a[i];
+        char mut y = b[i];
+        if (x >= 'A' && x <= 'Z') {
+            x = cast(cast(x, u64) + CASE_SHIFT, char);
+        }
+        if (y >= 'A' && y <= 'Z') {
+            y = cast(cast(y, u64) + CASE_SHIFT, char);
+        }
+        if (x != y) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+/// The name the protocol gives the encoding, which is what `initialize`
+/// negotiates and what the server answers as `positionEncoding`.
+fn string encoding_name(position_encoding enc) {
+    if (enc == position_encoding.enc_utf8) {
+        return "utf-8";
+    }
+    return "utf-16";
+}
+
+/// The encoding a client named, false when it is one this server does not
+/// implement. `utf-32` is a name the protocol has and this server has not.
+fn bool encoding_of_name(string name, position_encoding mut* out) {
+    if (name == "utf-16") {
+        *out = position_encoding.enc_utf16;
+        return true;
+    }
+    if (name == "utf-8") {
+        *out = position_encoding.enc_utf8;
+        return true;
+    }
+    return false;
+}
+
+/// The code units of the sequence at `i`, with its byte length in *step. `i`
+/// must be below bytes.len. A byte that starts no well-formed sequence is one
+/// unit of one byte, so the walk that calls this always advances.
+fn u64 sequence_units(u8@ bytes, u64 i, position_encoding enc, u64 mut* step) {
+    u64 len = json.utf8_sequence_len(bytes, i);
+    if (len == 0) {
+        *step = 1;
+        return 1;
+    }
+    *step = len;
+    if (enc == position_encoding.enc_utf8) {
+        return len;
+    }
+    // A four-byte sequence is a code point above U+FFFF, which UTF-16 spells
+    // as a surrogate pair; the header cites RFC 3629 for the lengths.
+    if (len == 4) {
+        return 2;
+    }
+    return 1;
+}
+
+/// The byte offset where `line` begins, 0-based. A line past the last one
+/// answers the start of the last line, which is the clamp of LSP 3.17.
+fn u64 line_start(string text, u64 line) {
+    u64 mut at = 0;
+    u64 mut seen = 0;
+    u64 mut start = 0;
+    while (seen < line && at < text.len) {
+        if (text[at] == '\n') {
+            seen += 1;
+            start = at + 1;
+        }
+        at += 1;
+    }
+    return start;
+}
+
+/// The byte offset where the line beginning at `start` ends: the offset of its
+/// terminator, or of the carriage return of a two-byte one, or the length of
+/// the text for the last line. `start` must be a line start.
+fn u64 line_end(string text, u64 start) {
+    u64 mut at = start;
+    while (at < text.len && text[at] != '\n') {
+        at += 1;
+    }
+    // A carriage return is part of the terminator only when a line feed
+    // follows it, which is what `at < text.len` says here: the loop stopped at
+    // a line feed rather than at the end of the text. Without that guard a
+    // document whose last byte is a carriage return loses its last byte -- the
+    // end of the line would be one before it, and no position would address
+    // it -- which contradicts the rule that a lone carriage return is an
+    // ordinary character.
+    if (at < text.len && at > start && text[at - 1] == '\r') {
+        return at - 1;
+    }
+    return at;
+}
+
+/// The byte offset a position addresses. Every offset it answers is a
+/// code-point boundary inside the line the position names: a character past
+/// the end of the line answers the end of the line, and a character inside a
+/// sequence answers the first byte of that sequence.
+fn u64 offset_of(string text, position_encoding enc, position p) {
+    u8@ bytes = cast(text, u8@);
+    u64 start = line_start(text, p.line);
+    u64 end = line_end(text, start);
+    u64 mut at = start;
+    u64 mut seen = 0;
+    while (at < end && seen < p.character) {
+        u64 mut step = 1;
+        u64 units = sequence_units(bytes, at, enc, &step);
+        // A line feed is ASCII, so no well-formed sequence holds one and no
+        // step of this walk crosses the end of the line. The guard states that
+        // rather than trusting it, since a step past `end` would answer an
+        // offset outside the line the position names.
+        if (at + step > end) {
+            return end;
+        }
+        if (seen + units > p.character) {
+            // The character addresses the inside of this sequence.
+            return at;
+        }
+        seen += units;
+        at += step;
+    }
+    return at;
+}
+
+/// The position of a byte offset. An offset past the end of the text answers
+/// the end of the text, and an offset inside a sequence answers the position
+/// of that sequence's first byte.
+fn position position_of(string text, position_encoding enc, u64 offset) {
+    u8@ bytes = cast(text, u8@);
+    u64 mut target = offset;
+    if (target > text.len) {
+        target = text.len;
+    }
+    u64 mut line = 0;
+    u64 mut start = 0;
+    u64 mut at = 0;
+    while (at < target) {
+        if (text[at] == '\n') {
+            line += 1;
+            start = at + 1;
+        }
+        at += 1;
+    }
+    // An offset inside a two-byte terminator -- the line feed of a `\r\n` --
+    // belongs to no line's text, so it answers the end of the line it ends.
+    // Without this the round trip would not close: offset_of clamps a
+    // character to the end of the line, and this would have counted the
+    // carriage return as one character more.
+    u64 end = line_end(text, start);
+    if (target > end) {
+        target = end;
+    }
+    u64 mut character = 0;
+    at = start;
+    while (at < target) {
+        u64 mut step = 1;
+        u64 units = sequence_units(bytes, at, enc, &step);
+        if (at + step > target) {
+            // The offset is inside this sequence, so the position is the one
+            // of its first byte and this sequence counts for nothing.
+            return position{line, character};
+        }
+        character += units;
+        at += step;
+    }
+    return position{line, character};
+}
+
+/// The position of a 1-based line and 1-based byte column, which is how the
+/// compiler names a place in a file. A column past the end of the line clamps
+/// with the rest, and a zero line or column reads as the first, since the
+/// compiler numbers both from one.
+/// D14.2, D20.4
+fn position of_line_col(string text, position_encoding enc, u64 line, u64 col) {
+    u64 mut line0 = 0;
+    if (line > 1) {
+        line0 = line - 1;
+    }
+    u64 mut col0 = 0;
+    if (col > 1) {
+        col0 = col - 1;
+    }
+    u64 start = line_start(text, line0);
+    u64 end = line_end(text, start);
+    // The column clamps inside its own line, as a character does: a column
+    // past the end of the line must not answer a position on the next one.
+    // D11.1: the column comes from a caller and may be any u64, so the sum is
+    // never performed where it could overflow
+    u64 mut at = end;
+    if (col0 <= end - start) {
+        at = start + col0;
+    }
+    return position_of(text, enc, at);
+}
