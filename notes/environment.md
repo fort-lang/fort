@@ -180,9 +180,13 @@ without a rewrite.
   from the host, `touch` the sources there, and prove the restore by comparing the rebuilt
   binary's `md5sum` with the baseline's: a green suite after the restore does not prove the
   restore was compiled, and an md5 that differs from the baseline says some earlier step built
-  nothing. That check is also how a build that silently skipped a source is caught, which is
-  worth one `md5sum` before any measurement that will be quoted as evidence. Undo the mutation
-  from a saved copy of the file, never with `git checkout <file>`: the file usually also holds the
+  nothing. The guard caught **1 of the 88** rebuilds of T-077's mutation audit. There
+  `tools/vm build debug` exited 0 and left the baseline binary in place, although the source held
+  a mutation that does not compile. Without the guard that row would have read as caught by
+  nothing. A re-run by hand of it gave the build error the batch had missed. That check is also how
+  a build that silently skipped a source is caught, which is worth one `md5sum` before any
+  measurement that will be quoted as evidence. Undo the mutation from a saved copy of the file,
+  never with `git checkout <file>`: the file usually also holds the
   ticket's own uncommitted work, which that command throws away silently, and the suite stays
   green afterwards because the deleted work was the part with no test of its own yet.
 

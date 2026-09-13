@@ -57,7 +57,7 @@ done
 # comparison. A ticket that adds or removes a .ft file changes all four
 # lines in the same commit: diff_tokens.sh, diff_ast.sh, diff_check.sh and
 # diff_ir.sh.
-FT_FILES=887
+FT_FILES=891
 
 # The files of that corpus stage1 checks clean, which are the ones compared.
 # It is an equality for the reason FT_FILES is: a comparison that shrank would
@@ -77,7 +77,7 @@ FT_FILES=887
 # measured the four numbers above with the roots this script passes now; T-045
 # added std/sort.ft, which checks clean and holds no main, so the second group
 # grew from 76 to 77 and the gap fell from 20 to 19.
-CLEAN_FILES=482
+CLEAN_FILES=484
 
 # The search roots every run is given: the standard library the build copied,
 # src/fort, so that the compiler's own modules resolve their imports, and src,

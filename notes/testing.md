@@ -501,6 +501,37 @@ bullet at a time and without a rewrite.
   name **both** branches when you record the gap. Assert that every byte arrives, which does catch
   a bypass path that drops bytes, and write in the test what it cannot see instead of claiming the
   loop.
+- **A mutation audit measures what the corpus holds, which the ratio cannot.** T-077 broke, one at
+  a time, one line of each of the 88 decisions `src/fort/check.ft` and `src/fort/check_stmt.ft`
+  cite. It ran five oracles against each mutant, in cost order: the 219 `fail` tests under stage2
+  (8 s), the 415 `run`, `programs` and `ffi` tests (35 s), the check documents (13 s), the
+  `test/fort` tests (13 s for the 15 the first run selected, 120 s for all 161) and
+  `tools/diff_check.sh` (39 s). A stage2 rebuild after one edit costs 5 s, so a mutant costs about
+  45 s when the first oracle catches it and about 115 s when none does. **79 of the 88 went red,
+  4 survived and 5 could not be broken by a mutation at all**; the five are the rows where a
+  citation names a rule another pass holds, and each is a build error or a lint failure rather
+  than a test.
+  Three of the four survivors had one shape, and the shape is the reason to run this on a
+  transliterated module: the C twin is pinned by a unit test in `test/*_test.c` that the fort port
+  never got, while the language corpus, which judges both compilers, held the rule for neither.
+  Mutating the three C lines names the three tests that hold them. The fourth survivor was held on
+  neither side, which the same method measured.
+  Four traps, each of which cost that ticket a wrong verdict or a wrong claim.
+  **Select the oracle by what a test imports, not by its name.** A filter of `check` over
+  `test/fort` ran 15 tests where 21 import the checker, so every "survived" verdict was a
+  survival against 15 of 21 until the four were re-run against all 161.
+  **Do not edit the test tree while a batch runs.** A harness that reads a file during the write
+  reports a failure that belongs to no mutation.
+  **Raise every file counter in the commit that adds the file.** A new `.ft` raises `FT_FILES` in
+  the four `tools/diff_*.sh`; `CLEAN_FILES` in `diff_check.sh` if stage1 checks it clean;
+  `PROGRAM_FILES` in `diff_ir.sh` if it compiles into a module; `CORPUS_FILES` in
+  `test/parser_recovery_test.c` if it is a `fail` test and in `test/highlight_test.py` if it is
+  not; and `NESTED_FILES`, `FORM_FILES` or `FLOAT_FILES` in `diff_ast.sh` if it uses a nested
+  array or span level, a `do`-`while` or a `?:`, or a float. A counter left behind fails
+  `diff_check.sh` for every later mutant, which then reads as caught when nothing caught it.
+  **Say how strong each verdict is.** A verdict a mutant measured, a claim probed by compiling a
+  program, and a claim read off the source are three things, and an audit that gives them one word
+  hides which rows a reader may rely on.
 
 ## 8. The grammar and the extension
 
