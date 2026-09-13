@@ -1,0 +1,343 @@
+//! run
+//! stdout:
+//| 0.0 -0.0 1.0 -1.0 0.1 0.30000000000000004 0.0001 1e-05
+//| 1000000000000000.0 10000000000000000.0 1e+17 1.7976931348623157e+308 5e-324
+//| inf -inf nan
+//| 0.1 0.33333334 16777216.0 3.4028235e+38 1e-45 -0.0 inf -inf nan
+//| 2917 values compared
+//| the buffer and the descriptor agree
+import std.io;
+import std.math;
+import std.rt;
+import std.rt_float;
+import std.strbuf;
+
+// std.rt_float.append_f64 and append_f32 against stdlib.md 2.12: the bytes a
+// program formats into a str_buf are the bytes the printers write to a
+// descriptor, for every value.
+//
+// How the agreement is measured, since nothing in the language reads a
+// descriptor's buffer back. Every value is written twice: once with
+// print_f64 to a file, once with append_f64 to a str_buf, each followed by a
+// newline. The file is closed, which flushes it (stdlib.md 2.4), and read
+// back whole; the two byte sequences are then compared byte for byte. A
+// difference at any value is a difference in the file, and the offset of the
+// first one names the line it stands on.
+//
+// The 2917 values and why they are these. 18 f64 and 12 f32 cases from
+// run/stdlib/094, which are the layout thresholds of D18.3 and the ends of
+// each encoding; every power of two of both types, 2098 of f64 and 277 of
+// f32, which are the values where the shortest-digit search is most delicate
+// (toolchain.md 5.1); and 256 pseudo-random bit patterns of each type, which
+// reach the ordinary values, the infinities and the NaNs in the proportion
+// the encoding holds them. The generator is run/stdlib/095's, so the two
+// tests walk the same patterns.
+//
+// What this test does not check is that either form is right: run/stdlib/094
+// holds 1110 values against their texts one by one, and run/stdlib/095 holds
+// the round trip over the same encodings. This one checks that the two forms
+// of one text cannot part company.
+string PATH = "t107-float-agreement.txt";
+
+// The number of values each family contributes, so that the total the test
+// prints is a sum of names rather than a constant.
+u64 SPECIALS_F64 = 18;
+u64 SPECIALS_F32 = 12;
+u64 PATTERNS = 256;
+
+// The powers of two of each type: 2^-1074 to 2^1023 and 2^-149 to 2^127.
+i64 MIN_EXP_F64 = -1074;
+i64 MAX_EXP_F64 = 1023;
+i64 MIN_EXP_F32 = -149;
+i64 MAX_EXP_F32 = 127;
+
+// The exponent of the least normal of each type, below which a power of two
+// is a subnormal and its bit stands in the significand.
+i64 MIN_NORMAL_EXP_F64 = -1022;
+i64 MIN_NORMAL_EXP_F32 = -126;
+
+// The bias and the significand width of each format, which turn an exponent
+// into an encoding (std.math holds the bit casts, T-042). The two biases are
+// i64, because the sum is taken in i64 and cast afterwards: casting a
+// negative exponent to u64 first would trap on the add in a checked build
+// (D11.1).
+i64 BIAS_F64 = 1023;
+i64 BIAS_F32 = 127;
+u64 SIGNIFICAND_F64 = 52;
+u64 SIGNIFICAND_F32 = 23;
+
+// The sign bit of each format, the one thing no comparison can see (D6.12).
+u64 NEGATIVE_ZERO_F64 = 0x8000000000000000;
+u32 NEGATIVE_ZERO_F32 = 0x80000000;
+
+// The infinity of each format; std.math names the f64 one and the f32 one is
+// its encoding (stdlib.md 2.9).
+u32 INFINITY_F32 = 0x7F800000;
+u32 NAN_F32 = 0x7FC00000;
+
+// The pseudo-random generator of run/stdlib/095: multiply and add modulo
+// 2^64, which fort spells with the wrapping operators (D11.2).
+fn u64 next_bits(u64 state) {
+    return state *% 6364136223846793005 +% 1442695040888963407;
+}
+
+// 2^e as an f64 and as an f32: a subnormal below the least normal exponent,
+// where the bit stands in the significand, and a normal above it.
+fn f64 power_of_two_f64(i64 e) {
+    if (e < MIN_NORMAL_EXP_F64) {
+        return math.f64_from_bits(1 << cast(e - MIN_EXP_F64, u64));
+    }
+    return math.f64_from_bits(cast(e + BIAS_F64, u64) << SIGNIFICAND_F64);
+}
+
+fn f32 power_of_two_f32(i64 e) {
+    if (e < MIN_NORMAL_EXP_F32) {
+        return math.f32_from_bits(cast(1 << cast(e - MIN_EXP_F32, u64), u32));
+    }
+    return math.f32_from_bits(cast(cast(e + BIAS_F32, u64) << SIGNIFICAND_F32, u32));
+}
+
+// ---- the two texts ----------------------------------------------------------------
+
+// One value on the descriptor and the same value in the buffer, each on its
+// own line, and one more value counted.
+fn void both_f64(i32 fd, strbuf.str_buf mut* want, u64 mut* n, f64 v) {
+    rt_float.print_f64(fd, v);
+    rt.emit_str(fd, "\n");
+    rt_float.append_f64(want, v);
+    strbuf.push(want, '\n');
+    *n += 1;
+}
+
+fn void both_f32(i32 fd, strbuf.str_buf mut* want, u64 mut* n, f32 v) {
+    rt_float.print_f32(fd, v);
+    rt.emit_str(fd, "\n");
+    rt_float.append_f32(want, v);
+    strbuf.push(want, '\n');
+    *n += 1;
+}
+
+// The thresholds of D18.3 and the ends of the f64 encoding, the values
+// run/stdlib/094 holds against their texts.
+fn void specials_f64(i32 fd, strbuf.str_buf mut* want, u64 mut* n) {
+    f64 tenth = 0.1;
+    f64 fifth = 0.2;
+    both_f64(fd, want, n, 0.0);
+    both_f64(fd, want, n, math.f64_from_bits(NEGATIVE_ZERO_F64));
+    both_f64(fd, want, n, 1.0);
+    both_f64(fd, want, n, -1.0);
+    both_f64(fd, want, n, tenth);
+    both_f64(fd, want, n, tenth + fifth);
+    both_f64(fd, want, n, 1.0 / 3.0);
+    both_f64(fd, want, n, 1e-4);
+    both_f64(fd, want, n, 1e-5);
+    both_f64(fd, want, n, 1e15);
+    both_f64(fd, want, n, 1e16);
+    both_f64(fd, want, n, 1e17);
+    both_f64(fd, want, n, 16777217.0);
+    both_f64(fd, want, n, 9007199254740992.0);
+    both_f64(fd, want, n, 123456789012345.67);
+    both_f64(fd, want, n, math.f64_inf());
+    both_f64(fd, want, n, -math.f64_inf());
+    both_f64(fd, want, n, math.f64_nan());
+}
+
+// The same for f32, whose digits are its own type's (D18.1).
+fn void specials_f32(i32 fd, strbuf.str_buf mut* want, u64 mut* n) {
+    f32 tenth = 0.1;
+    f32 third = 1.0 / 3.0;
+    f32 odd = 16777217.0;
+    f32 tie = 2971111.75;
+    f32 low = 1.2621775e-29;
+    f32 largest = 3.4028235e+38;
+    f32 smallest_normal = 1.1754944e-38;
+    f32 smallest = 1e-45;
+    both_f32(fd, want, n, 0.0);
+    both_f32(fd, want, n, math.f32_from_bits(NEGATIVE_ZERO_F32));
+    both_f32(fd, want, n, tenth);
+    both_f32(fd, want, n, third);
+    both_f32(fd, want, n, odd);
+    both_f32(fd, want, n, tie);
+    both_f32(fd, want, n, low);
+    both_f32(fd, want, n, largest);
+    both_f32(fd, want, n, smallest_normal);
+    both_f32(fd, want, n, smallest);
+    both_f32(fd, want, n, math.f32_from_bits(INFINITY_F32));
+    both_f32(fd, want, n, math.f32_from_bits(NAN_F32));
+}
+
+// Every power of two of each type.
+fn void powers(i32 fd, strbuf.str_buf mut* want, u64 mut* n) {
+    for (i64 mut e = MIN_EXP_F64; e <= MAX_EXP_F64; e += 1) {
+        both_f64(fd, want, n, power_of_two_f64(e));
+    }
+    for (i64 mut e = MIN_EXP_F32; e <= MAX_EXP_F32; e += 1) {
+        both_f32(fd, want, n, power_of_two_f32(e));
+    }
+}
+
+// The bit patterns, of each type, infinities and NaNs included: both forms
+// take the same path for those, and a test that filtered them would not say
+// so.
+fn void patterns(i32 fd, strbuf.str_buf mut* want, u64 mut* n) {
+    u64 mut state = 12345;
+    for (u64 mut i = 0; i < PATTERNS; i += 1) {
+        state = next_bits(state);
+        both_f64(fd, want, n, math.f64_from_bits(state));
+    }
+    state = 98765;
+    for (u64 mut i = 0; i < PATTERNS; i += 1) {
+        state = next_bits(state);
+        both_f32(fd, want, n, math.f32_from_bits(cast(state >> 32, u32)));
+    }
+}
+
+// ---- the two readings -------------------------------------------------------------
+
+// The line the byte at `at` stands on, 1-based, and the line itself, so that a
+// difference names a value and not only an offset.
+fn u64 line_at(string text, u64 at) {
+    u64 mut line = 1;
+    for (u64 mut i = 0; i < at && i < text.len; i += 1) {
+        if (text[i] == '\n') {
+            line += 1;
+        }
+    }
+    return line;
+}
+
+// The first byte at which the two texts differ, or their length when they are
+// equal; the shorter length when one is a prefix of the other.
+fn u64 first_difference(string a, string b) {
+    u64 mut i = 0;
+    while (i < a.len && i < b.len) {
+        if (a[i] != b[i]) {
+            return i;
+        }
+        i += 1;
+    }
+    return i;
+}
+
+fn bool agree(string got, string want) {
+    if (got == want) {
+        println("the buffer and the descriptor agree");
+        return true;
+    }
+    u64 at = first_difference(got, want);
+    println("the two texts differ at byte ", at, ", line ", line_at(want, at));
+    println("the descriptor has ", got.len, " bytes and the buffer ", want.len);
+    return false;
+}
+
+// ---- the text a program builds ----------------------------------------------------
+
+// The layout of D18.3 through append alone: the values of run/stdlib/094's
+// first lines, with the text between them appended the ordinary way. This is
+// what a program that builds a document with a float in it writes.
+fn void the_layout() {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    f64 tenth = 0.1;
+    f64 fifth = 0.2;
+    rt_float.append_f64(&b, 0.0);
+    strbuf.push(&b, ' ');
+    rt_float.append_f64(&b, math.f64_from_bits(NEGATIVE_ZERO_F64));
+    strbuf.push(&b, ' ');
+    rt_float.append_f64(&b, 1.0);
+    strbuf.push(&b, ' ');
+    rt_float.append_f64(&b, -1.0);
+    strbuf.push(&b, ' ');
+    rt_float.append_f64(&b, tenth);
+    strbuf.push(&b, ' ');
+    rt_float.append_f64(&b, tenth + fifth);
+    strbuf.push(&b, ' ');
+    rt_float.append_f64(&b, 1e-4);
+    strbuf.push(&b, ' ');
+    rt_float.append_f64(&b, 1e-5);
+    strbuf.append(&b, "\n");
+    rt_float.append_f64(&b, 1e15);
+    strbuf.push(&b, ' ');
+    rt_float.append_f64(&b, 1e16);
+    strbuf.push(&b, ' ');
+    rt_float.append_f64(&b, 1e17);
+    strbuf.push(&b, ' ');
+    rt_float.append_f64(&b, 1.7976931348623157e+308);
+    strbuf.push(&b, ' ');
+    rt_float.append_f64(&b, 5e-324);
+    strbuf.append(&b, "\n");
+    rt_float.append_f64(&b, math.f64_inf());
+    strbuf.push(&b, ' ');
+    rt_float.append_f64(&b, -math.f64_inf());
+    strbuf.push(&b, ' ');
+    rt_float.append_f64(&b, math.f64_nan());
+    println(strbuf.view(&b));
+}
+
+// The same for f32.
+fn void the_layout_f32() {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    f32 tenth = 0.1;
+    f32 third = 1.0 / 3.0;
+    f32 odd = 16777217.0;
+    f32 largest = 3.4028235e+38;
+    f32 smallest = 1e-45;
+    rt_float.append_f32(&b, tenth);
+    strbuf.push(&b, ' ');
+    rt_float.append_f32(&b, third);
+    strbuf.push(&b, ' ');
+    rt_float.append_f32(&b, odd);
+    strbuf.push(&b, ' ');
+    rt_float.append_f32(&b, largest);
+    strbuf.push(&b, ' ');
+    rt_float.append_f32(&b, smallest);
+    strbuf.push(&b, ' ');
+    rt_float.append_f32(&b, math.f32_from_bits(NEGATIVE_ZERO_F32));
+    strbuf.push(&b, ' ');
+    rt_float.append_f32(&b, math.f32_from_bits(INFINITY_F32));
+    strbuf.push(&b, ' ');
+    rt_float.append_f32(&b, math.f32_from_bits(INFINITY_F32 | NEGATIVE_ZERO_F32));
+    strbuf.push(&b, ' ');
+    rt_float.append_f32(&b, math.f32_from_bits(NAN_F32));
+    println(strbuf.view(&b));
+}
+
+fn i32 main() {
+    the_layout();
+    the_layout_f32();
+
+    i32 fd = io.open_write(PATH);
+    if (fd < 0) {
+        println("cannot write ", PATH);
+        return 1;
+    }
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    u64 mut n = 0;
+    specials_f64(fd, &want, &n);
+    specials_f32(fd, &want, &n);
+    powers(fd, &want, &n);
+    patterns(fd, &want, &n);
+    // close flushes the runtime's buffer for the descriptor (stdlib.md 2.4).
+    if (!io.close(fd)) {
+        println("cannot close ", PATH);
+        return 1;
+    }
+    u64 expected = SPECIALS_F64 + SPECIALS_F32
+        + cast(MAX_EXP_F64 - MIN_EXP_F64 + 1, u64) + cast(MAX_EXP_F32 - MIN_EXP_F32 + 1, u64)
+        + PATTERNS * 2;
+    assert(n == expected);
+    println(n, " values compared");
+
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    if (!io.read_file(PATH, &got)) {
+        println("cannot read ", PATH);
+        return 1;
+    }
+    if (!agree(strbuf.view(&got), strbuf.view(&want))) {
+        return 1;
+    }
+    return 0;
+}

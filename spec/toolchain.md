@@ -526,7 +526,10 @@ fn noreturn exit(i32 status);
 ```
 
 `std.rt` and `std.rt_float` are the only modules the compiler names, and the list above together
-with D18.1's two float printers is every name it knows (D11.6, D18.4). The module's buffers, its
+with D18.1's two float printers is every name it knows (D11.6, D18.4). `std.rt_float` exports two
+more functions, `append_f32` and `append_f64`, which give a `str_buf` the bytes the printers give a
+descriptor (`stdlib.md` 2.12); the compiler emits no call that names them, so they are not entry
+points and this list stays complete. The module's buffers, its
 helpers and everything else it needs are its own and are exported like any module's (D9.6), which
 makes them implementation details a program must not use (`stdlib.md` 1.1); `sys` and `io` import it
 for `exit`, `args`, `flush` and `flush_all` (`stdlib.md` 3) and the rest of the library leaves it

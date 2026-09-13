@@ -73,7 +73,7 @@ done
 # constant: a file must not be able to slip out of the comparison. A ticket
 # that adds or removes a .ft file changes all four lines in the same commit:
 # diff_tokens.sh, diff_ast.sh, diff_check.sh and diff_ir.sh.
-FT_FILES=891
+FT_FILES=893
 
 # The files of that corpus src/bootstrap refuses for a nested array or span
 # level, which src/fort reads (D3.6, T-043). They are skipped below, and this
@@ -99,7 +99,7 @@ FORM_MESSAGES='do-while|\?:'
 # src/bootstrap refuses one, so stage1 answers such a file with the refusal
 # and no tree to compare. A file that also holds one of the constructs above
 # is counted by the first test that matches it, not by this one.
-FLOAT_FILES=67
+FLOAT_FILES=68
 FLOAT_MESSAGES='float literals'
 
 files=$(find . -name '*.ft' -not -path './build/*' -not -path './.git/*' \

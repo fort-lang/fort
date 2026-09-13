@@ -8,9 +8,11 @@
 // std.rt, and emits a call here for each float the print family is given
 // (D12.2, toolchain.md 6 item 19).
 //
-// The module imports std.libc and std.rt and nothing else. It writes its
-// bytes through rt.emit, so a float shares the buffer of its descriptor with
-// every other value printed beside it (D11.5).
+// The module imports std.libc, std.rt and std.strbuf and nothing else. It
+// writes its bytes through rt.emit, so a float shares the buffer of its
+// descriptor with every other value printed beside it (D11.5); std.strbuf is
+// there for append_f64 and append_f32, which give the same bytes to a buffer
+// (stdlib.md 2.12).
 //
 // What it produces. The digits are the shortest decimal that reads back as
 // the value in the value's own type and, among the texts of that length that
@@ -51,6 +53,7 @@
 // at most three digits, since 308 and 324 are the widest an f64 reaches.
 import std.libc;
 import std.rt;
+import std.strbuf;
 
 // The significant digits an f64 and an f32 need at most: 17 and 9 always read
 // back, which is what ends the search (D18.2).
@@ -460,4 +463,22 @@ fn void print_f32(i32 fd, f32 v) {
     char[TEXT_MAX] mut out = {};
     u64 n = text_f32(v, out[..]);
     rt.emit(fd, cast(out[0..n], u8@));
+}
+
+// Appends the text of an f64 to `b` (stdlib.md 2.12). It is print_f64 with a
+// buffer in place of the descriptor: both take their bytes from text_f64, so
+// the two forms cannot disagree over a value. This is why the module imports
+// std.strbuf, and why the buffer form stands here and not in std.strbuf,
+// which no float may reach (D18.1).
+fn void append_f64(strbuf.str_buf mut* b, f64 v) {
+    char[TEXT_MAX] mut out = {};
+    u64 n = text_f64(v, out[..]);
+    strbuf.append_bytes(b, cast(out[0..n], u8@));
+}
+
+// The same for an f32, whose digits are its own type's (D18.1).
+fn void append_f32(strbuf.str_buf mut* b, f32 v) {
+    char[TEXT_MAX] mut out = {};
+    u64 n = text_f32(v, out[..]);
+    strbuf.append_bytes(b, cast(out[0..n], u8@));
 }

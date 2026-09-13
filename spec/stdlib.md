@@ -130,7 +130,7 @@ import binding's name for a local even though D7.9 permits it.
 |-----------------|---------------------------------------------|----------------------------------|
 | `std.libc`      | none                                        | libc `extern`s, flags, errno     |
 | `std.rt`        | `libc`                                      | the runtime itself (section 3)   |
-| `std.rt_float`  | `libc`                                      | the float printers (D18.1)       |
+| `std.rt_float`  | `libc`, `rt`, `strbuf`                      | float text to a fd or a buffer   |
 | `std.mem`       | `libc`                                      | copy, fill and compare bytes     |
 | `std.str`       | `libc`, `mem`                               | compare, search, classify, parse |
 | `std.sys`       | `libc`, `rt`, `str`                         | exit, args, errno, env           |
@@ -509,6 +509,7 @@ fn str_buf create()
 fn str_buf with_cap(u64 cap)
 fn void free(str_buf mut* b)
 fn void reserve(str_buf mut* b, u64 extra)
+fn u64 cap(str_buf* b)
 fn void push(str_buf mut* b, char ch)
 fn void push_byte(str_buf mut* b, u8 v)
 fn void append(str_buf mut* b, string s)
@@ -543,6 +544,10 @@ b->data = move(bigger);                 // the slot is zero, so the store passes
   `b->len` to 0, leaving `str_buf{}`; calling it twice, or on `str_buf{}`, is harmless because
   `del` of a zero span is a no-op.
 - `reserve`: ensures `data.len >= len + extra`, growing per the policy. Ownership: none.
+- `cap`: `b->data.len`, the bytes the storage holds, so `cap(b) - b->len` is the room a further
+  `append` uses without growing. It never shrinks except at `free`, and `create` answers 0. This
+  is the call a program that measures its own allocation uses, so that it reads no field of the
+  struct. Ownership: none.
 - `push`, `push_byte`: append one `char` or one `u8`.
 - `append`, `append_bytes`: append the bytes of `s` or `src`. Precondition: `src` must not
   alias `b`'s own storage, because growth frees that storage before copying (not detected).
@@ -941,6 +946,37 @@ importers inside the library, and everything else in it is an implementation det
 Its names are mangled like any module's (`std.rt.flush`, D9.7); the compiler knows them, because
 a builtin lowers to a call of one (D12.2), and calls them like any other fort function.
 
+### 2.12 `std.rt_float`
+
+The float text of D11.7, to a descriptor or to a `str_buf`.
+
+```fort
+fn void print_f32(i32 fd, f32 v)
+fn void print_f64(i32 fd, f64 v)
+fn void append_f32(strbuf.str_buf mut* b, f32 v)
+fn void append_f64(strbuf.str_buf mut* b, f64 v)
+```
+
+- `print_f32`, `print_f64`: append the text of `v` to the buffer of `fd` (D11.5, D11.7). They are
+  the two float entry points of D18.1: the print family calls one of them per float argument
+  (D12.2), and a program may call them itself.
+- `append_f32`, `append_f64`: append the same bytes to `b`. One formatter produces the text for
+  both forms, so the bytes `append_f64(&b, v)` adds are the bytes `print_f64(fd, v)` writes, for
+  every `v`, and the same holds of the `f32` pair. The text is D18.2's shortest decimal that
+  reads back in the argument's own type, laid out by D18.3. An `f32` is never widened to an `f64`
+  first, because the digits depend on the argument's own type (D18.1). Ownership: none; `b` keeps
+  its storage and grows by the policy of 2.6.
+- The two `append` functions are library functions and not entry points: no call the compiler
+  emits names them, so `toolchain.md` 5.1's list stays the two printers (D18.4).
+- The module holds them, rather than `std.strbuf` holding them, because a compiler that builds
+  the module must accept floats and the C bootstrap does not (D18.1); a float in a `std.strbuf`
+  signature would put the whole library out of the bootstrap's reach (D9.10). For the two
+  `append` functions the module imports `std.strbuf`, so a program that formats a float compiles
+  `std.strbuf` and `std.mem` as well; a program that names no float loads neither the module nor
+  its imports.
+- Everything else the module declares -- the decimal, the search of D18.2 and the layout of
+  D18.3, which `toolchain.md` 5.1 describes -- is an implementation detail (1.1).
+
 ## 3. The runtime surface the library relies on
 
 `toolchain.md` owns the runtime: the full entry-point list, the signatures, the print buffers and
@@ -1032,7 +1068,8 @@ so no second owner exists; the counters are `u64` because `.len` is (D16); and t
 Deliberately absent, with the idiom to use instead; the language-level list is D15.
 
 - Formatted output beyond the print family: build text in a `str_buf` with `append`,
-  `append_i64` and `append_u64`, then `io.write_all` or `print` the result.
+  `append_i64`, `append_u64` and `rt_float.append_f64` (2.12), then `io.write_all` or `print` the
+  result.
 - Generic containers: copy `std.vec` for each element type (2.7); use `str_map` with indices
   for pointer values (2.8).
 - Containers that own their elements: copy `std.vec` with a `node mut* own mut@ own` slot type
@@ -1040,7 +1077,9 @@ Deliberately absent, with the idiom to use instead; the language-level list is D
 - Compile-time leak and use-after-`move` detection (D15, D17.14): the idiom is `defer del`
   right after the declaration, and the zero value that `move` and `del` leave behind (1.3).
 - Unicode: strings are bytes (D3.7); the classification functions are ASCII-only.
-- Floating-point formatting and parsing beyond what the print family emits (D11.7): a program
-  that needs a float from text writes its own conversion or calls C through `std.libc`.
+- Floating-point formatting and parsing beyond what the print family emits (D11.7): the library
+  gives that one text and no other, to a descriptor or to a `str_buf` (2.12); a program that needs
+  a width, a precision or a float from text writes its own conversion or calls C through
+  `std.libc`.
 - Threads, signals, networking, directories, time, line-at-a-time input: call libc through your
   own `extern` declarations following the `std.libc` conventions, or `read_all` and scan.
