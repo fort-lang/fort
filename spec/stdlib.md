@@ -876,7 +876,7 @@ An array sorted in place, over `libc.qsort` (D13.2, 2.2).
 fn void sort(void mut* base, u64 n, u64 elem_size, fn i32(void*, void*) cmp)
 fn void sort_i64(i64 mut@ items, fn i32(void*, void*) cmp)
 fn void sort_u64(u64 mut@ items, fn i32(void*, void*) cmp)
-fn void sort_ptr(void mut* mut@ items, fn i32(void*, void*) cmp)
+fn void sort_ptr(void* mut@ items, fn i32(void*, void*) cmp)
 fn i32 cmp_i64(void* a, void* b)
 fn i32 cmp_u64(void* a, void* b)
 ```
@@ -894,14 +894,18 @@ fn i32 cmp_u64(void* a, void* b)
   entries below delegate, so their panics name `sort.sort` as well. Ownership: none; `base` is a
   view and no `own` crosses to C (1.4, D17.13).
 - `sort_i64`, `sort_u64`, `sort_ptr`: `sort(cast(items.ptr, void mut*), items.len, sizeof(T),
-  cmp)` for `T` equal to `i64`, `u64` and `void mut*`. A span carries its length (D3.5) and its
+  cmp)` for `T` equal to `i64`, `u64` and `void*`. A span carries its length (D3.5) and its
   element type fixes `sizeof` (D3.15), so two of the four arguments disappear and the caller
   cannot pass a count or an element size that disagrees with the storage. The parameter is
   `T mut@`, which is the second thing these entries add: the elements must be mutable and the
   compiler checks it here, whereas a `void mut*` says that the bytes may be written and nothing
-  about how many or how wide (D3.11), so `sort` can check nothing else. `sort_ptr` takes the
-  element type of `vec.ptr_vec` (2.7); a caller holding a span of `void*` slots casts it, because
-  the drop is monotone (D5.4). Ownership: none; an `own` span argument lends (D17.4).
+  about how many or how wide (D3.11), so `sort` can check nothing else. `sort_ptr` marks the slots
+  and not the pointees, because the sort permutes the slots and never writes through a pointee.
+  A caller holding `void mut* mut@`, which is what `vec.ptr_vec` holds (2.7), reaches it with a
+  cast that drops the mark at level 2: the implicit conversion refuses that drop behind a mutable
+  level 1 (D5.4) and the cast makes it (D3.14). The other direction is closed, since a cast never
+  adds `mut`, so a caller that holds immutable pointers keeps holding them. Ownership: none; an
+  `own` span argument lends (D17.4).
 - `cmp_i64`, `cmp_u64`: ready-made ascending comparators, `-1`, `0` or `1`. `cmp_u64` compares
   unsigned, so it orders `0xFFFFFFFFFFFFFFFF` last where `cmp_i64` on the same bytes orders it
   first. A qualified function name is a value (D3.10), so a call reads

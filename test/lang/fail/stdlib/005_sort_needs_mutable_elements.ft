@@ -5,7 +5,8 @@ import std.sort;
 // property they add over the core sort: a sort writes its elements, and the
 // core entry takes a void mut*, which says that the bytes may be written and
 // nothing about how many or how wide (D3.11). These are the diagnostics that
-// make the difference real.
+// make the difference real. The last one is the core entry, which took an
+// immutable span's .ptr until a cast stopped adding the mark (D3.14).
 fn i32 main() {
     // An array declared without mut yields an immutable span (D5.2).
     i64[3] fixed = {3, 1, 2};
@@ -17,14 +18,17 @@ fn i32 main() {
     u64@ view_u = us[..];
     sort.sort_u64(view_u, sort.cmp_u64);      //! error: the argument expects u64 mut@, not u64@
 
-    // The pointer entry is the same rule: the span's elements must be
-    // writable, whatever the pointees are.
+    // The pointer entry is the same rule at the slots: they must be writable,
+    // whatever the pointees are. Its element type is void*, so the span above
+    // is refused for its slots and not for its pointees.
     void mut*[2] mut ps = {null, null};
     void mut*@ view_p = ps[..];
-    sort.sort_ptr(view_p, sort.cmp_u64);   //! error: expects void mut* mut@, not void mut*@
+    sort.sort_ptr(view_p, sort.cmp_u64);   //! error: the argument expects void* mut@, not void mut*@
 
-    // The core entry takes the same three arrays through cast(.ptr, void mut*)
-    // and compiles, which is why stdlib.md 2.10 tells a caller to prefer the
-    // typed entries. There is no diagnostic to assert for it.
+    // The core entry took the same three arrays through cast(.ptr, void mut*)
+    // and compiled, which is why stdlib.md 2.10 told a caller to prefer the
+    // typed entries. The .ptr of an immutable span is an immutable pointer, and
+    // a cast never adds the mark, so the core entry now refuses them too.
+    sort.sort(cast(fixed[..].ptr, void mut*), fixed.len, sizeof(i64), sort.cmp_i64); //! error: cannot cast i64* to void mut*: a cast never adds 'mut'
     return 0;
 }
