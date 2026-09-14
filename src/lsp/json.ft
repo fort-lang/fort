@@ -1,5 +1,4 @@
-// lsp.json: the JSON reader and writer of the language server, stage 2 of
-// the approved editor-support plan.
+// lsp.json: the JSON reader and writer of the language server.
 // D20.5
 //
 // A reader parses a document into a tagged tree of nodes owned by one arena,
@@ -42,11 +41,15 @@
 //
 // A doc owns every node and every byte of text it hands out, and json.free
 // releases all of it. The nodes live in chunks of NODE_CHUNK that never move,
-// as the arena comment of src/fort/ast.ft describes: a handle is an index, a
-// chunk is never copied, and the arena therefore grows by exactly one chunk at
-// a time rather than doubling a vector and copying it. A doubling vector of
-// nodes would hold as much as twice the nodes it uses and, while it copies,
-// three times; a chunk list holds the nodes and the tail of one chunk.
+// which is the block arena of src/bootstrap/ast.h. A chunk is never copied,
+// so the arena grows by exactly one chunk at a time rather than doubling a
+// vector and copying it. A doubling vector of nodes would hold as much as
+// twice the nodes it uses and, while it copies, three times; a chunk list
+// holds the nodes and the tail of one chunk. A handle here is an index, where
+// the C arena hands out a pointer, so the chunk of a node is arithmetic on the
+// handle and is held nowhere. src/fort/ast.ft keeps neither shape: its arena
+// owns one pointer per node, and the comment above its `arena` says why the
+// block bookkeeping went and what deferring it costs.
 //
 // The text of every string and every number is copied into one buffer whose
 // capacity is reserved once, at the length of the source: decoding never makes
@@ -65,17 +68,17 @@
 //
 // A number is k_int when it is written without a fraction and without an
 // exponent and its value fits i64, and k_float otherwise. Both keep the source
-// text, which is what json.text answers and what write_value writes back: JSON
-// fixes no canonical spelling of a number, and the compiler's shortest
+// text, which is what json.text_of answers and what write_value writes back:
+// JSON fixes no canonical spelling of a number, and the compiler's shortest
 // round-trip text would rewrite 1.50 as 1.5, so the text is the only
 // byte-stable answer.
-// json.int_value reads the text with std.str.parse_i64 and json.float_bits
-// reads it with flt.flt_parse, the compiler's correctly rounded decimal to
-// binary64 conversion, which answers the bits of an f64 rather than an f64.
+// json.int_of reads the text with std.str.parse_i64 and json.float_of reads
+// it with flt.flt_parse, the compiler's correctly rounded decimal to binary64
+// conversion, which answers the bits of an f64 rather than an f64.
 // This module names no float type, so the C bootstrap compiles it and the
 // four differential oracles of notes/testing.md 5 cover it; a caller that
-// wants the value itself copies the bits into an f64 with libc.memcpy, as
-// std.rt_float does.
+// wants the value itself copies the bits into an f64 with libc.memcpy, the
+// bit cast std.rt_float makes in the other direction.
 // D11.7, D18.1
 //
 // ---- what the reader refuses ----
@@ -98,7 +101,7 @@
 // it is an error record before a byte of it is read, and a source at it asks
 // for at most JSON_ARENA_BOUND times its length (see the arena above). The
 // default is JSON_MAX_BYTES, sixteen mebibytes, which bounds one document at
-// about 320 MB; json.set_max_bytes moves it, and JSON_BYTES_CEILING is the
+// about 320 mebibytes; json.set_max_bytes moves it, and JSON_BYTES_CEILING is the
 // largest value it takes, since a node holds its text as a u32 offset. A
 // server that reads a Content-Length header knows the size before it parses
 // and can refuse a message earlier still.
@@ -167,9 +170,11 @@ u64 JSON_ARENA_BOUND = 20;
 
 /// The nodes of one chunk, and the shift and the mask that split a handle into
 /// a chunk index and a slot. A chunk is the floor of the arena, since a
-/// document of one value still takes one: 256 nodes of 36 bytes are 9216
-/// bytes, small enough for a server that parses a keystroke and large enough
-/// that a document of half a million values takes 2048 chunk pointers. A chunk
+/// document of one value still takes one: 256 nodes of 36 bytes and the
+/// 16-byte record that owns them are 9232 bytes, which is what arena_bytes
+/// counts for a chunk and what test/fort/lsp_json_arena_test.ft asserts. That
+/// is small enough for a server that parses a keystroke and large enough that
+/// a document of half a million values takes 2048 chunk pointers. A chunk
 /// stays below the 128 KB at which glibc serves an allocation by mmap, which is
 /// what keeps a leak of one visible to the probes of notes/testing.md 4.
 u64 NODE_CHUNK = 256;

@@ -409,7 +409,13 @@ every one matches.
   it); and the coordinator's `CORPUS_FILES = 604`, read off `main` while it believed the number
   came from a branch. So write the command that produced a number beside the number, and re-run
   the command rather than copy the number when the text moves. A number with no command is a
-  claim, not a measurement. *A `|` inside a code span still splits a table cell.* Markdown splits
+  claim, not a measurement. *A command written beside a number can count the comment that holds
+  it.* T-120 wrote `grep -c 'm->method == ' src/lsp/server.ft` beside the number 9, in a header
+  block of that same file, and the grep then read 10: the comment line carrying the command
+  matched the pattern. Write the pattern so that the line holding it cannot match, and run the
+  command after the edit rather than before it.
+  `grep -cE '^ +if \(m->method == ' src/lsp/server.ft` reads 9, because a comment line opens with
+  `//` and no `if` (T-120). *A `|` inside a code span still splits a table cell.* Markdown splits
   a table row on `|` even inside backticks, so a row that quotes source holding `||`, `|=` or a
   bare `|` renders with extra columns. T-077 found 11 of its own 88 audit rows malformed this way,
   and they had been malformed since it generated the table. Escape every `|` inside a code span in
