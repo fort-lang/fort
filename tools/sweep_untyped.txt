@@ -1,0 +1,238 @@
+# The program list of tools/sweep_untyped.sh. Read that script's header for the
+# four classes, the two command lines and the frame each body goes into.
+#
+# What the sweep covers.
+#
+# Section A reproduces T-128's sweep: the four routes of check_operands, one
+# program per branch and per operand order, both ends of [2^63, 2^64 - 1], the
+# char clause, the float clause, null, bool, a string, a typed operand, a
+# compound assignment and a `?:`.
+#
+# Section B widens it past the untyped-pair shapes, along the list D4.1 gives:
+# every context an untyped constant takes its type from, each one with an
+# untyped expression that folded to no value beside it. The columns of the
+# widening are the context (a declaration, an assignment, a compound
+# assignment, an argument, a return, a `case` operand, an index, a span bound,
+# a `new` count, a binary operand), the clause of D4.5 that answers with no
+# context (integer, char, float), the two expressions that fold to no value (a
+# shift with a variable count and a `?:` with a run-time condition), and the
+# operand order.
+#
+# Section C widens it along D6.2 instead: every operator family, with an
+# untyped operand that folded to no value on each side.
+#
+# What the sweep cannot reach.
+#
+# It builds one function and one frame, so it says nothing about a module
+# boundary, a generic, a struct field, ownership or a loop. It holds the
+# expression layer, which is where the defect of T-127 and T-128 lived, and it
+# holds it for the shapes below and for no others. The measurement that speaks
+# for the whole repository is a different one and it is in tools/verify_ir.sh.
+#
+# Section A. T-128's routes.
+#
+# A1. A comparison of two untyped operands, neither of which folded to a value.
+# This is the route that had no reporter until T-128.
+RAN:true RAN:true println(2147483648 > (1 << n));
+RAN:false RAN:false println((1 << n) > 2147483648);
+REPORTED REPORTED println(9223372036854775808 > (1 << n));
+REPORTED REPORTED println((1 << n) > 9223372036854775808);
+REPORTED REPORTED println(18446744073709551615 == (1 << n));
+REPORTED REPORTED println((1 << n) != 18446744073709551615);
+RAN:false RAN:false println(2 > (1 << n));
+RAN:false RAN:false println((1 << n) > 2);
+RAN:true RAN:true println((1 << n) > (1 << thirtyone));
+RAN:true RAN:true println('a' > (1 << n));
+RAN:true RAN:true println((1 << n) < 'a');
+REPORTED REPORTED println(0.5 > (1 << n));
+REPORTED REPORTED println((1 << n) > 0.5);
+RAN:true RAN:true println((1 << thirtyone) == 2147483648);
+RAN:true RAN:true println(2147483648 == (1 << thirtyone));
+RAN:true RAN:true println(-2147483649 < (1 << n));
+RAN:true RAN:true println((1 << n) != -2147483649);
+RAN:true RAN:true println((2147483648 << n) > 1);
+RAN:false RAN:false println(1 > (2147483648 << n));
+RAN:true RAN:true println((9223372036854775808 >> 1) > (1 << n));
+RAN:false RAN:false println((1 << n) == (18446744073709551615 >> 32));
+REPORTED REPORTED println((9223372036854775808 << n) > (18446744073709551615 << n));
+# A2. The same route with a `?:`, which stage1 refuses at the lexer. A `?:` is
+# the only expression that shows the char clause and the float clause of D4.5
+# at run time, because a shift takes an integer left operand.
+REPORTED RAN:false println((c ? 1 : 2) > (1 << n));
+REPORTED RAN:true println((1 << n) > (c ? 1 : 2));
+REPORTED REPORTED println((c ? 1.5 : 2.5) > (1 << n));
+REPORTED REPORTED println((1 << n) > (c ? 1.5 : 2.5));
+REPORTED REPORTED println((c ? 'a' : 'b') == 1.5);
+REPORTED REPORTED println(1.5 == (c ? 'a' : 'b'));
+REPORTED REPORTED println((n > 0 ? 'a' : 'b') == 1.5);
+REPORTED REPORTED println((1 << n) == 2.5);
+REPORTED REPORTED println((c ? null : null) == (c ? null : null));
+REPORTED RAN:true println((c ? 'a' : 'b') > (1 << n));
+# A3. A shift, whose context the constant is carried out to (T-117).
+RAN:8589934592 RAN:8589934592 i64 w = 4294967296 << n; println(w);
+REPORTED REPORTED i32 w = 4294967296 << n; println(w);
+RAN:8589934592 RAN:8589934592 println(4294967296 << n);
+REPORTED REPORTED println('a' << n);
+# A4. An untyped pair that folds, so D4.4 answers and no default type is
+# chosen for either operand.
+RAN:2147483647 RAN:2147483647 println(2147483648 - 1);
+RAN:2147483648 RAN:2147483648 println(2147483647 + 1);
+REPORTED REPORTED i32 v = 2147483647 + 1; println(v);
+# A5. An untyped pair with no value and no comparison, so a context above it
+# walks both operands (T-124).
+RAN:2147483650 RAN:2147483650 i64 s = (1 << n) + 2147483648; println(s);
+REPORTED REPORTED i32 s = (1 << n) + 2147483648; println(s);
+RAN:2147483650 RAN:2147483650 println((1 << n) + 2147483648);
+# A6. One typed operand, which gives the constant its type by D4.1.
+REPORTED REPORTED println(n > 2147483648);
+REPORTED REPORTED println(2147483648 > n);
+RAN:false RAN:false println(n > 2);
+RAN:false RAN:false i64 m = cast(n, i64); println(m > 2147483648);
+# A7. A unary operator is not part of the pair: it gives its operand the
+# default type at once and alone (the note of 2026-09-14 on D4.5).
+REPORTED REPORTED println(-(1 << n) > 2147483648);
+REPORTED REPORTED println(2147483648 > ~(1 << n));
+# A8. bool, null and a string beside an untyped operand that folded to no
+# value. Every one is a mixed-type comparison, which D6.2 refuses.
+REPORTED REPORTED println((1 << n) == true);
+REPORTED REPORTED println(true == (1 << n));
+REPORTED REPORTED println((1 << n) == null);
+REPORTED REPORTED println(null == (1 << n));
+REPORTED REPORTED println("abc" == (1 << n));
+REPORTED REPORTED println((1 << n) == "abc");
+# A9. A compound assignment, which is a context of its own (D6.3 computes the
+# target once).
+RAN:2 RAN:2 i32 mut acc = z(0); acc += (1 << n); println(acc);
+REPORTED REPORTED i32 mut acc = z(0); acc += (1 << n) + 2147483648; println(acc);
+#
+# Section B. Every context D4.1 names, and the two positions it says are not
+# contexts. One untyped expression that folded to no value stands in each, with
+# a type the context accepts and a type it refuses.
+#
+# B1. The declared type of the variable being initialized.
+RAN:2 RAN:2 i64 v = (1 << n); println(v);
+RAN:2147483646 RAN:2147483646 i64 v = 2147483648 - (1 << n); println(v);
+REPORTED REPORTED i32 v = 2147483648 - (1 << n); println(v);
+REPORTED REPORTED u8 v = (1 << n) + 300; println(v);
+RAN:18446744073709551615 RAN:18446744073709551615 u64 v = (1 << n) | 18446744073709551615; println(v);
+REPORTED REPORTED char v = 1 << n; println(v);
+# B2. Assignment.
+RAN:2147483650 RAN:2147483650 i64 mut v = zw(0); v = (1 << n) + 2147483648; println(v);
+REPORTED REPORTED i32 mut v = z(0); v = (1 << n) + 2147483648; println(v);
+REPORTED REPORTED u8 mut v = zb(0); v = (1 << n) + 300; println(v);
+# B3. Compound assignment, at a width the frame did not choose.
+RAN:3 RAN:3 u8 mut v = zb(1); v += (1 << n); println(v);
+REPORTED REPORTED u8 mut v = zb(1); v += (1 << n) + 300; println(v);
+# B4. The parameter type.
+RAN:2147483650 RAN:2147483650 println(zw((1 << n) + 2147483648));
+REPORTED REPORTED println(z((1 << n) + 2147483648));
+REPORTED REPORTED println(zc(1 << n));
+REPORTED REPORTED println(zb((1 << n) + 300));
+# B6. The `case` operand type. A case label is a constant expression, so no
+# expression that folded to no value can stand there; what this pair holds is
+# the context rule alone.
+RAN:0 RAN:0 switch (zw(2)) { case 2147483648: println(1); default: println(0); }
+REPORTED REPORTED switch (z(2)) { case 2147483648: println(1); default: println(0); }
+# B7. An index position: any integer type is fine, and a negative constant is a
+# compile error.
+RAN:0 RAN:0 println(a[1 << n]);
+TRAP:134 TRAP:134 println(a[(1 << n) + 2147483648]);
+REPORTED REPORTED println(a[-1]);
+TRAP:134 TRAP:134 println(a[1 << thirtyone]);
+# B8. A span bound.
+RAN:2 RAN:2 i32@ s = a[(1 << n)..]; println(s.len);
+REPORTED REPORTED i32@ s = a[-1..]; println(s.len);
+RAN:2 RAN:2 i32@ s = a[..(1 << n)]; println(s.len);
+# B9. A `new` count.
+RAN:2 RAN:2 i32 mut@ own p = new(i32, (1 << n)); println(p.len);
+REPORTED REPORTED i32 mut@ own p = new(i32, -1); println(p.len);
+# B10. A `cast` is not a context: the operand takes its default type first and
+# is then converted with runtime semantics (D4.1, D4.4).
+RAN:2 RAN:2 println(cast(1 << n, i64));
+RAN:-2147483648 RAN:-2147483648 println(cast(2147483648, i32));
+REPORTED REPORTED println(cast(9223372036854775808, i64));
+# B11. The count operand of a shift is not a context either.
+RAN:2 RAN:2 u64 m = 1 << n; println(m);
+RAN:4 RAN:4 println(1 << zw(2));
+REPORTED REPORTED println(1 << 64);
+RAN:-2147483648 RAN:-2147483648 println(1 << thirtyone);
+#
+# Section C. Every operator family of D6.2, with an untyped operand that folded
+# to no value on each side in turn.
+#
+RAN:4 RAN:4 println((1 << n) + 2);
+RAN:4 RAN:4 println(2 + (1 << n));
+RAN:0 RAN:0 println((1 << n) - 2);
+RAN:0 RAN:0 println(2 - (1 << n));
+RAN:4 RAN:4 println((1 << n) * 2);
+RAN:4 RAN:4 println(2 * (1 << n));
+RAN:1 RAN:1 println((1 << n) / 2);
+RAN:1 RAN:1 println(2 / (1 << n));
+RAN:0 RAN:0 println((1 << n) % 2);
+RAN:0 RAN:0 println(2 % (1 << n));
+RAN:-2147483647 RAN:-2147483647 println((1 << n) +% 2147483647);
+RAN:-2147483647 RAN:-2147483647 println(2147483647 +% (1 << n));
+RAN:0 RAN:0 println((1 << n) -% 2);
+RAN:-2 RAN:-2 println((1 << n) *% 2147483647);
+RAN:2 RAN:2 println((1 << n) & 3);
+RAN:2 RAN:2 println(3 & (1 << n));
+RAN:3 RAN:3 println((1 << n) | 1);
+RAN:3 RAN:3 println(1 | (1 << n));
+RAN:1 RAN:1 println((1 << n) ^ 3);
+RAN:1 RAN:1 println(3 ^ (1 << n));
+RAN:8 RAN:8 println((1 << n) << 2);
+RAN:8 RAN:8 println(2 << (1 << n));
+RAN:1 RAN:1 println((1 << n) >> 1);
+RAN:true RAN:true println((1 << n) <= 2);
+RAN:true RAN:true println((1 << n) >= 2);
+RAN:false RAN:false println((1 << n) < 2);
+RAN:true RAN:true println(2 <= (1 << n));
+RAN:true RAN:true println((1 << n) == (1 << n));
+RAN:-2 RAN:-2 println(-(1 << n));
+RAN:-3 RAN:-3 println(~(1 << n));
+REPORTED REPORTED println(!(1 << n));
+REPORTED REPORTED println((1 << n) && c);
+REPORTED REPORTED println(c && (1 << n));
+RAN:99 RAN:99 println((1 << n) + 'a');
+RAN:99 RAN:99 println('a' + (1 << n));
+RAN:95 RAN:95 println('a' - (1 << n));
+# A division by zero is a compile error only when the whole expression folds
+# (D4.4). One operand that folded to no value makes it the run-time check of
+# D6.13 instead, and the two rows below hold the pair apart.
+TRAP:134 TRAP:134 println((1 << n) / 0);
+TRAP:134 TRAP:134 println((1 << n) % 0);
+REPORTED REPORTED println(1 / 0);
+REPORTED REPORTED println(1 % 0);
+TRAP:134 TRAP:134 println(2147483647 + (1 << n));
+REPORTED REPORTED println((1 << n) >> 64);
+REPORTED REPORTED println((1 << n) >> -1);
+#
+# Section D. The return position, which needs its own frame.
+#
+!frame ret
+RAN:2147483650 RAN:2147483650 return (1 << n) + 2147483648;
+REPORTED REPORTED return (1 << n) + 18446744073709551615;
+RAN:2 RAN:2 return 1 << n;
+REPORTED REPORTED return (1 << n) + 2.5;
+#
+# Section E. The float clause of D4.5 and the float half of D4.2. stage1
+# supports no float at all, so it refuses this whole frame at the type `f64`
+# of `zf`, and REPORTED is the right answer for a compiler with no floats.
+#
+!frame float
+REPORTED REPORTED println(d > (1 << n));
+REPORTED REPORTED println((1 << n) > d);
+REPORTED RAN:2.5 f64 v = (c ? 1.5 : 2.5) + 1; println(v);
+REPORTED RAN:-0.5 f64 v = -(c ? 1.5 : 2.5) + 1; println(v);
+REPORTED RAN:-0.5 println(-(c ? 1.5 : 2.5) + 1);
+REPORTED REPORTED println((c ? 1.5 : 2.5) + 1);
+REPORTED REPORTED println(!(c ? 1.5 : 2.5));
+REPORTED REPORTED println((c ? 1.5 : 2.5) & (c ? 2.5 : 3.5));
+REPORTED RAN:false println(zg(0.5) > (c ? 1.5 : 2.5));
+REPORTED RAN:true println((c ? 1.5 : 2.5) == (c ? 1.5 : 2.5));
+REPORTED REPORTED println(zf(1.5) > (1 << n));
+REPORTED REPORTED f64 v = 1 << n; println(v);
+REPORTED REPORTED i32 v = 2.0; println(v);
+REPORTED RAN:3.5 println(1 + 2.5);
+REPORTED RAN:3.5 f32 v = zg(1.0) + 2.5; println(v);
+REPORTED RAN:1 println(cast((c ? 1.5 : 2.5), i32));
