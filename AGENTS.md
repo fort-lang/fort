@@ -41,19 +41,19 @@ A safe(r) C-like systems programming language.
 - `test/`: `test/test.h` is the C macro framework for the compiler's unit tests
   (`test/common.h` provides `TEST_UNUSED`); `test/lang/` holds language tests in the directive
   format defined in `spec/toolchain.md`.
-- `src/bootstrap/`: the C bootstrap compiler (stage1), frozen once the compiler is self-hosted.
-  `src/fort/`: the compiler written in fort (stage2 and stage3). `src/lsp/`: the language server
-  in fort, whose modules are reached through the search root `src` and are therefore `lsp.<name>`
-  and never `<name>`, since two files of one closure that share a module path emit one set of
-  symbols (T-063). `std/`: the standard library in fort, the runtime (`std/rt.ft`) among its
-  modules; there is no C runtime and no object linked beside the program (T-091). `tools/`:
-  `vm`, `provision.sh`, `lines.py`, `bootstrap.sh`.
+- `src/bootstrap/`: the C bootstrap compiler (stage1). **It is frozen (T-046): it accepts a bug
+  fix only, never a feature.** A new language feature goes to `src/fort` alone; `notes/compiler.md`
+  8 says what the freeze leaves open. `src/fort/`: the compiler written in fort (stage2 and
+  stage3). `src/lsp/`: the language server in fort, whose modules are reached through the search
+  root `src` and are therefore `lsp.<name>` and never `<name>` (T-063, `notes/compiler.md` 8).
+  `std/`: the standard library in fort, the runtime (`std/rt.ft`) among its modules; there is no C
+  runtime and no object linked beside the program (T-091). `tools/`: `vm`, `provision.sh`,
+  `lines.py`, `bootstrap.sh`.
 - `editors/`: `editors/vscode/` is the VS Code extension -- `package.json`,
   `language-configuration.json`, `syntaxes/fort.tmLanguage.json`, `extension.js`, and the one pure
   module it is tested through, `lib/check.js` -- and `editors/README.md` is its install guide, its
   manual smoke test and its list of limitations. It highlights fort and shows the compiler's
-  diagnostics, and that is all it does (T-089): no hover, no go-to-definition, no `--index`, no
-  cache, no settings. It is installed on the **host**, where VS Code runs.
+  diagnostics, and that is all it does (T-089). It is installed on the **host**, where VS Code runs.
 - `CMakeLists.txt`, `CMakePresets.json` and `cmake/sanitizers.cmake` are the build;
   `.clang-format` and `.clang-tidy` (clang 18) are the C11 lint configuration.
 - `.tickets/` (gitignored, main checkout only) is the ticket board; `.claude/agents/` holds the

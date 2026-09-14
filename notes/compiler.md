@@ -450,15 +450,26 @@ gone.
   pointers are inside the subset (D3.10), so a dispatch table is fine. These are the constructs a
   C file may hold that have no fort spelling, with what replaces each; the rules the bootstrap
   already follows so that it stays portable are the first four.
-  **`src/fort` stays inside that subset until T-046**, the ticket that freezes stage1. stage1
-  compiles stage2 at every build and the ctest `bootstrap` compiles it twice more, so a `src/fort`
-  file that uses a construct stage1 lacks breaks the build and the fixed point on the same
-  commit. A feature leaves `test/lang/bootstrap-unsupported.txt` when stage1 gains it, which it
-  never will now, and leaves `test/lang/unsupported-stage2.txt` when stage2 gains it. A compiler
-  that accepts a construct its own source may not hold is `notes/compiler.md` 8 (T-041, floats).
+  **`src/fort` stays inside that subset, and T-046 does not release it.** That ticket froze
+  stage1; it did not stop stage1 compiling stage2. The CMake target `fort_stage2` compiles
+  `src/fort` with stage1 at every build and the ctest `bootstrap` compiles it twice more, so a
+  `src/fort` file that uses a construct stage1 lacks breaks the build and the fixed point on the
+  same commit. **The freeze is this: `src/bootstrap` accepts a bug fix only, never a feature.** A
+  bug fix makes stage1 answer the way the specification already says it must, and the ticket that
+  writes one names the decision it restores. A new language feature goes to `src/fort` alone. A
+  feature therefore leaves `test/lang/unsupported-stage2.txt` when stage2 gains it, and leaves
+  `test/lang/bootstrap-unsupported.txt` never. The ctest `lang` holds that list: stage1 runs over
+  the whole corpus with it and with an empty `xfail.txt`, so a test the list names must be refused
+  with `not supported by the bootstrap compiler` and a test it does not name must pass. T-046
+  measured both directions on 47f98c2 and found the two sets equal: 111 of the 643 corpus tests
+  carry that diagnostic under stage1, 111 entries stand in the list, and neither side holds a test
+  the other lacks. A compiler that accepts a construct its own source may not hold is this
+  section (T-041, floats).
   **`src/lsp` is under no such rule**: stage2 compiles it, so it may use anything `src/fort`
-  implements (D20.5). T-039 and not T-046 is the gate for the language server, because the server
-  needs a self-hosted compiler that reproduces itself and not the frozen bootstrap. The ctest
+  implements (D20.5). A file of it is reached as `lsp.<name>` through the search root `src`,
+  because two files of one closure that share a module path emit one set of symbols (T-063).
+  T-039 and not T-046 is the gate for the language server, because the server needs a self-hosted
+  compiler that reproduces itself and not the frozen bootstrap. The ctest
   `bootstrap` is what says the compiler reproduces itself.
   **T-063 wrote the first module of `src/lsp` and stayed inside the subset anyway**, and the
   measurement says why. A file stage1 refuses is skipped by `diff_ast.sh`, by `diff_check.sh` and

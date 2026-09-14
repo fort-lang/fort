@@ -220,7 +220,7 @@ file in every case it produces today.
 
 There is no hover, no go-to-definition, no rename, no completion, no semantic colouring and no
 workspace symbol search: those need the language server of D20.5, which lands after the self-hosted
-compiler.
+compiler. The extension calls no `fort --index`, keeps no cache and reads no setting (T-089).
 
 ## The manual smoke test
 

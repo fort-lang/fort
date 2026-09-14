@@ -638,8 +638,8 @@ bullet at a time and without a rewrite.
   (`python3 tools/mutate.py tools/mutations/emitter_bootstrap.json --only D6.14`). Or it adds a
   row that records why the rule needs no mutation. Or, if the citation sits on a line that
   implements no rule, it says so in the row and moves the citation. The coupling is what stops an
-  audit going stale. T-046 freezes `src/bootstrap` and is still in `todo/`, so the count can move
-  until it runs.
+  audit going stale. T-046 froze `src/bootstrap` on 2026-09-14, so from that date the count moves
+  only when a bug fix adds or removes a `Dn.m` citation in one of the four files.
 
 - **An oracle is only an oracle where it derives its answer differently, so say
   for each half of one whether it is independent or shared.** T-064 swept every offset of a
@@ -773,6 +773,22 @@ bullet at a time and without a rewrite.
   That figure lags for the same reason the repository figure does: the per-ticket rule is not
   retroactive. The branch figure is the one the criterion asks for. T-089 and T-092 both
   rediscovered this rule.
+- **The corpus is smaller than the sizing table of `spec/toolchain.md` 7.6, and T-046 measured by
+  how much.** That table sizes the corpus at 565 `run` and 370 `fail` files, 935 together. On
+  47f98c2 the corpus holds 643 tests: 400 under `run`, 222 under `fail` and 21 under `programs`,
+  which the table counts on its `run` side. `python3 test/lang/run_tests.py --list | tail -1`
+  gives the total and
+  `for d in test/lang/{run,fail}/* test/lang/programs; do echo "$d $(ls "$d" | wc -l)"; done`
+  splits it by area, the three sums of its rows being the 400, the 222 and the 21. Seventeen of
+  the table's twenty rows are under their row and three are over: `stdlib` holds 115 `run` files
+  against 45, `ownership` 24 `run` and 38 `fail` against 15 and 20, and `programs` 21 against
+  20. The largest gaps are `strings` (5 of 30 `run`), `mutability` (5 of 20 and 10 of 40),
+  `lexical` (5 of 30 and 15 of 30) and `control` (14 of 45). Four directories have no row in the
+  table at all and hold 89 tests: `errors` (32), `modes` (30), `switch` (16) and `declarations`
+  (11). The corpus figure of `tools/lines.py` moves with the same shortfall: it read 2.17 on
+  47f98c2 (52163 source lines against 113082 test lines) against the 3.0 of D14.6. Whether the
+  project backfills the table is a decision of the user's, and T-046 did not take it; until it is
+  taken, a ticket answers for its own diff and this line says what the corpus is.
 - The ratio is a prompt, not a verdict: what a review asks is which rules of the decisions a ticket
   cites have no test at all, unit or language, and the answer decides the ticket. T-014 measured
   0.76 and merged, because the number could not see that it took 57 entries out of xfail.txt -- a
