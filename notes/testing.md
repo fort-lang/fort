@@ -47,6 +47,16 @@ bullet at a time and without a rewrite.
   guard and needs no qualifier, because it moves only when a `.ft` file is added or removed, and
   the `*_FILES` equalities make that a counted edit that fails a test (T-078).
 
+- **A measurement that several tests share is stated once, in the module they import.** T-094
+  measured 46 releases over the six `test/fort/driver_lifetime_*_test.ft` probes and wrote the
+  count into a sentence that five of the six files repeat. Its review then added three releases
+  and re-worded four of the five, and the fifth said 43 for two tickets, until T-118 re-ran all
+  47 deletion rounds to find out which number was the measured one. The count, the command that
+  produces it and the one release that no single test witnesses now stand in
+  `test/fort/support/lifetime.ft`, which all six probes import, and the six say only that the
+  measurement was made. A number that five files repeat needs five correct edits at the next
+  measurement; a number in the module they share needs one (T-118).
+
 ## 2. Unit tests in C
 
 - Unit tests: `test/<component>_test.c` with `test/test.h`; the suite name is the file stem and
