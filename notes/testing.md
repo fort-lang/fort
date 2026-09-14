@@ -553,6 +553,15 @@ bullet at a time and without a rewrite.
   234 in `test/parser_recovery_test.c`, which walks nothing else. The `CMakeLists.txt` comment
   moved with them, 628 to 638 tests, 219 to 220 `fail` tests and 221 to 222 selected. So the
   number of lines is not the number of constants, and neither is the number of files.
+  **The four oracles and the fixed point see nothing of `?:`, by construction** (T-126). stage1
+  refuses the construct and stage2 types it, so every file that spells `?:` leaves the compared
+  set: `diff_ast.sh` counts it in `FORM_FILES` and skips it, `diff_check.sh` and `diff_ir.sh` drop
+  it with the files stage1 refuses, and `tools/fixpoint.sh` compares two binaries and not an
+  answer. stage2's answer for a `?:` is therefore held by `test/fort/*_test.ft` and by the `run`
+  tests of `bootstrap-unsupported.txt`, and by nothing else. T-117 moved one such answer with
+  nothing red: `println(n > 0 ? 4294967296 : 1)` was refused before it and prints 4294967296
+  after it. A ticket that changes the default type, the operand rules or the arms of a conditional
+  writes the assertion itself, because no differential will.
 - **A ported pass is judged on its diagnostics one by one, with a script and not a reading.**
   For every message the ported file builds -- each `check_error` text and each run of `msg_str`
   pieces between `check_msg_begin` and `check_msg_end` -- ask whether any suite under `test/fort`

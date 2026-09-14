@@ -1,0 +1,54 @@
+//! run
+//! stdout:
+//| 4294967296 -4294967296
+//| -2147483648 4611686018427387904
+//| -2147483648 2147483648
+//| 0 -4611686020574871552
+//| 4294967297 4294967297
+//| -2147483648 4611686018427387904
+// The integer clause of D4.5 through a conditional: with no context an untyped
+// integer becomes i32 if it fits and otherwise i64. A conditional whose
+// condition is a run-time value folds to no value, so the constants in its arms
+// reach the rule with nothing else to say what they are, and one type covers
+// the whole expression (D6.2).
+//
+// This test stands beside run/constants/012, which reads the same rule off a
+// shift with a variable count. The conditional is the one expression the two
+// compilers cannot both answer: the bootstrap compiler refuses `?:` outright,
+// so tools/diff_ir.sh, tools/diff_check.sh and tools/fixpoint.sh compare
+// nothing here and this file stands in bootstrap-unsupported.txt. Line 1 was
+// refused with "constant 4294967296 does not fit i32" until 2026-09-14.
+//
+// The type is read off the width, as run/constants/012 reads it: `<<` wraps at
+// the width of its left operand (D6.2), so a count of 31 separates i32 from
+// i64 in the value that is printed, and no program here aborts.
+//
+// Line 1: the value itself, in either arm, where i32 would be an error.
+// Line 2: the boundary in the left arm. i32's maximum keeps i32 and one past it
+// takes i64.
+// Line 3: the boundary in the right arm, which the condition never chooses. The
+// type belongs to the whole expression, so the arm that is not evaluated still
+// decides it: the same `1` prints two values.
+// Line 4: the negative end of the boundary. i32's minimum keeps i32, and one
+// past it takes i64.
+// Line 5: a constant outside the conditional joins the same expression.
+// Line 6: an arm that folds. A node that folded stands for its whole subtree
+// (D4.4), so `2147483648 - 1` is the i32 constant 2147483647 and
+// `2147483647 + 1` is the i64 constant 2147483648.
+fn i32 z(i32 v) {
+    return v;
+}
+
+fn i32 main() {
+    i32 n = z(1);
+    i32 thirtyone = z(31);
+    println(n > 0 ? 4294967296 : 1, " ", n > 0 ? -4294967296 : 1);
+    println((n > 0 ? 2147483647 : 1) << thirtyone, " ", (n > 0 ? 2147483648 : 1) << thirtyone);
+    println((n > 0 ? 1 : 2147483647) << thirtyone, " ", (n > 0 ? 1 : 2147483648) << thirtyone);
+    println((n > 0 ? -2147483648 : 1) << thirtyone, " ", (n > 0 ? -2147483649 : 1) << thirtyone);
+    println(1 + (n > 0 ? 4294967296 : 1), " ", (n > 0 ? 4294967296 : 1) + 1);
+    println((n > 0 ? 2147483648 - 1 : 1) << thirtyone,
+            " ",
+            (n > 0 ? 2147483647 + 1 : 1) << thirtyone);
+    return 0;
+}

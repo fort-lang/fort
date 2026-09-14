@@ -749,6 +749,51 @@ fn void the_arms_of_a_conditional_take_one_default_type() {
     assert(check_env.type_text(&e, ast.ast_child(call, 2)->ty) == "i64");
 }
 
+fn void the_conditional_takes_its_default_type_at_the_edge_of_i32() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The boundary of the integer clause, read through the one expression the
+    // two compilers cannot both answer: stage1 refuses `?:`, so the fixed point
+    // compares nothing here and this assertion is the whole hold on it. The
+    // top of i32 keeps i32 and one past it takes i64. One type covers the whole
+    // expression, so either arm can decide it; the test below takes the other
+    // arm and the other end.
+    // D4.5, D6.2, D6.6
+    ast.node* call = probe_call(&e, "n > 0 ? 2147483647 : 1, n > 0 ? 2147483648 : 1", true);
+    assert(check_env.type_text(&e, ast.ast_child(call, 0)->ty) == "i32");
+    assert(check_env.type_text(&e, ast.ast_child(call, 1)->ty) == "i64");
+}
+
+fn void the_arm_a_conditional_never_takes_decides_its_type_too() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The other end of i32 and the other arm. `probe_call` makes `n` a
+    // parameter, so nothing here decides the condition and nothing runs; the
+    // type still comes from the arm below, because one type covers the whole
+    // expression and not the arm a program would take. run/constants/015 makes
+    // the condition true and reads the same two types off the values it prints.
+    // D4.5, D6.2, D6.6
+    ast.node* call = probe_call(&e, "n > 0 ? 1 : -2147483648, n > 0 ? 1 : -2147483649", true);
+    assert(check_env.type_text(&e, ast.ast_child(call, 0)->ty) == "i32");
+    assert(check_env.type_text(&e, ast.ast_child(call, 1)->ty) == "i64");
+}
+
+fn void a_conditional_arm_that_fits_no_type_of_the_rule_is_the_error() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The tail of the same rule through a conditional: neither type holds the
+    // constant, so the error names i64, the widest the clause offers. The count
+    // is the assertion beside the text, because the harness of the language
+    // corpus judges a line and not a count.
+    // D4.5, D6.6
+    assert(probe_call(&e, "n > 0 ? 9223372036854775808 : 1", false) != null);
+    assert(check_env.said(&e, "constant 9223372036854775808 does not fit i64"));
+    assert(check_env.errors(&e) == 1);
+}
+
 fn void a_constant_with_no_default_type_may_still_fold_back_into_range() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -1361,6 +1406,9 @@ fn i32 main() {
     a_context_that_takes_no_integer_constant_reports_the_constant();
     a_constant_that_asks_for_no_type_leaves_the_expression_at_i32();
     the_arms_of_a_conditional_take_one_default_type();
+    the_conditional_takes_its_default_type_at_the_edge_of_i32();
+    the_arm_a_conditional_never_takes_decides_its_type_too();
+    a_conditional_arm_that_fits_no_type_of_the_rule_is_the_error();
     a_constant_with_no_default_type_may_still_fold_back_into_range();
     a_char_constant_in_an_integer_context_is_its_code_point();
     null_needs_a_pointer_typed_context();
