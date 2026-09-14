@@ -240,6 +240,15 @@ bullet at a time and without a rewrite.
   read `citation: 407 files` against the 356 of a clean tree, with an empty `git status --short`.
   So compile with `-o` into `build/` and run from there, and read `ls -d test/fort/sandbox*`
   rather than `git status` when a count comes out wrong.
+  **The working directory is any directory, and the ignore line names one** (T-127). A hand run
+  from the **top of the worktree** writes `./sandbox<n>/`, which `test/fort/sandbox*/` does not
+  match. One run of `check_test.bin` from there left 196 `sandbox<n>/main.ft` files in the root,
+  and the next `tools/diff_ir.sh` read `found 1132 .ft files, expected exactly 936` and exited 1.
+  `git status --short` did show all 196, which is the one advantage of the root over
+  `test/fort/`, and it is why this line is a rule about the working directory and not a second
+  `.gitignore` entry. Remove them with `rm -rf sandbox[0-9]*` and read
+  `find . -name '*.ft' -not -path './build/*' | wc -l` against `FT_FILES` before you run any
+  oracle.
 - Two corpora beside `test/lang` run through the same `run_tests.py`, which takes the corpus root
   as `--root`: ctest `lang-stage2` (label `lang`) holds the language corpus against stage2 with
   `--xfail test/lang/xfail-stage2.txt`, which started as the whole corpus (`run/`, `fail/`,
@@ -554,14 +563,6 @@ bullet at a time and without a rewrite.
   not the source. Run the script twice as well: it reports one bucket at a time, `NESTED_FILES`
   first, then `FORM_FILES`, then `FLOAT_FILES`, so the second failure is invisible until the
   first is fixed.
-  **Run a `test/fort` binary from a scratch directory and never from the top of the worktree**
-  (T-127). `test/fort/support/check_env.ft` and `modules_env.ft` build their sandbox from a
-  relative path, `sandbox<n>`, so they create it in the current directory, and `close` deletes the
-  session and not the directory. One hand run of `check_test.bin` from the worktree root left 196
-  `sandbox<n>/main.ft` files behind, and the next `diff_ir.sh` read
-  `found 1132 .ft files, expected exactly 936` and exited 1. `run_tests.py` gives each test its own
-  directory, so the gate never sees this; a hand run is where it bites. `cd` to a directory under
-  `build/` first, and `git status --short` before you commit.
   **A search root moves a second equality, and a new file may move none.** The two rules are the
   same rule read from each end. `-I src`, which T-063 added to `diff_check.sh` and to
   `diff_ir.sh` so that the language server resolves, took `CLEAN_FILES` from 458 to 472 and
