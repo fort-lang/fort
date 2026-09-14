@@ -139,7 +139,7 @@ fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 entry=$tmp/entry.ft
-printf 'fn i32 main() { return 0; }\n' >"$entry"
+printf 'fn main() i32 { return 0; }\n' >"$entry"
 
 accepted_cases=(
     "--tokens $entry"

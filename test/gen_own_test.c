@@ -31,7 +31,7 @@
 // D17.6
 
 TEST(move_of_a_pointer_loads_before_it_stores_null, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut* own p = new(i32);\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut* own p = new(i32);\n"
                           "    i32 mut* own q = move(p);\n    del(q);\n    return 0;\n}\n"));
     // The value is read first, so the operand's own storage may be the
     // destination as well.
@@ -49,7 +49,7 @@ TEST(move_of_a_pointer_loads_before_it_stores_null, {
 })
 
 TEST(move_of_a_span_copies_the_header_and_zeroes_it, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut@ own s = new(i32, 2);\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut@ own s = new(i32, 2);\n"
                           "    i32 mut@ own t = move(s);\n    del(t);\n    return 0;\n}\n"));
     // Sixteen bytes copied, then sixteen zeroed: the span's whole header.
     // D3.5, D17.6
@@ -64,7 +64,7 @@ TEST(move_of_a_span_copies_the_header_and_zeroes_it, {
 })
 
 TEST(move_of_an_owning_aggregate_copies_the_whole_value, {
-    TEST_ASSERT_TRUE(emit(VEC "fn i32 main() {\n    vec mut a = {};\n"
+    TEST_ASSERT_TRUE(emit(VEC "fn main() i32 {\n    vec mut a = {};\n"
                               "    a.data = new(i32, 2);\n    vec b = move(a);\n"
                               "    del(b.data);\n    return 0;\n}\n"));
     // A `vec` is 24 bytes, so the move is 24 and not the 16 of its field.
@@ -84,7 +84,7 @@ TEST(move_of_an_owning_aggregate_copies_the_whole_value, {
 })
 
 TEST(move_out_of_a_field_empties_that_field_alone, {
-    TEST_ASSERT_TRUE(emit(VEC "fn i32 main() {\n    vec mut a = {};\n"
+    TEST_ASSERT_TRUE(emit(VEC "fn main() i32 {\n    vec mut a = {};\n"
                               "    a.data = new(i32, 2);\n"
                               "    i32 mut@ own d = move(a.data);\n"
                               "    del(d);\n    return 0;\n}\n"));
@@ -107,7 +107,7 @@ TEST(move_out_of_a_field_empties_that_field_alone, {
 })
 
 TEST(move_is_the_same_in_both_build_modes, {
-    static const char PROGRAM[] = "fn i32 main() {\n    i32 mut* own p = new(i32);\n"
+    static const char PROGRAM[] = "fn main() i32 {\n    i32 mut* own p = new(i32);\n"
                                   "    i32 mut* own q = move(p);\n    del(q);\n    return 0;\n}\n";
     // `move` zeroes its operand in both build modes (item 18).
     // D17.6
@@ -125,7 +125,7 @@ TEST(move_is_the_same_in_both_build_modes, {
 })
 
 TEST(del_of_a_moved_span_frees_the_copy_and_empties_the_source, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut@ own s = new(i32, 1);\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut@ own s = new(i32, 1);\n"
                           "    del(move(s));\n    return 0;\n}\n"));
     // The move lands in a temporary, whose pointer is freed; the operand is
     // emptied and nothing is stored back into the temporary.
@@ -154,9 +154,9 @@ TEST(del_of_a_moved_span_frees_the_copy_and_empties_the_source, {
 // D17.5
 
 TEST(returning_an_own_local_empties_it_after_reading_it, {
-    TEST_ASSERT_TRUE(emit("fn i32 mut* own make() {\n    i32 mut* own p = new(i32);\n"
+    TEST_ASSERT_TRUE(emit("fn make() i32 mut* own {\n    i32 mut* own p = new(i32);\n"
                           "    return p;\n}\n"
-                          "fn i32 main() {\n    i32 mut* own q = make();\n"
+                          "fn main() i32 {\n    i32 mut* own q = make();\n"
                           "    del(q);\n    return 0;\n}\n"));
     // The value is read, the local emptied, and only then does the function
     // return, which is what a `defer del(p)` above would see.
@@ -171,9 +171,9 @@ TEST(returning_an_own_local_empties_it_after_reading_it, {
 })
 
 TEST(returning_a_local_owning_aggregate_empties_it_after_the_sret_copy, {
-    TEST_ASSERT_TRUE(emit(VEC "fn vec make() {\n    vec mut v = {};\n"
+    TEST_ASSERT_TRUE(emit(VEC "fn make() vec {\n    vec mut v = {};\n"
                               "    v.data = new(i32, 2);\n    return v;\n}\n"
-                              "fn i32 main() {\n    vec a = make();\n"
+                              "fn main() i32 {\n    vec a = make();\n"
                               "    del(a.data);\n    return 0;\n}\n"));
     TEST_ASSERT_EQ_STR(
         found("  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %v.0, "
@@ -188,8 +188,8 @@ TEST(returning_a_local_owning_aggregate_empties_it_after_the_sret_copy, {
 })
 
 TEST(returning_a_local_that_owns_nothing_empties_nothing, {
-    TEST_ASSERT_TRUE(emit("fn i32 mut* pass(i32 mut* p) {\n    return p;\n}\n"
-                          "fn i32 main() {\n    i32 mut v = 1;\n"
+    TEST_ASSERT_TRUE(emit("fn pass(i32 mut* p) i32 mut* {\n    return p;\n}\n"
+                          "fn main() i32 {\n    i32 mut v = 1;\n"
                           "    println(*pass(&v));\n    return 0;\n}\n"));
     // A borrowed pointer is returned as it is: no zeroing.
     // D17.5
@@ -198,8 +198,8 @@ TEST(returning_a_local_that_owns_nothing_empties_nothing, {
 })
 
 TEST(a_returned_own_rvalue_empties_nothing, {
-    TEST_ASSERT_TRUE(emit("fn i32 mut@ own make(u64 n) {\n    return new(i32, n);\n}\n"
-                          "fn i32 main() {\n    i32 mut@ own s = make(2);\n"
+    TEST_ASSERT_TRUE(emit("fn make(u64 n) i32 mut@ own {\n    return new(i32, n);\n}\n"
+                          "fn main() i32 {\n    i32 mut@ own s = make(2);\n"
                           "    del(s);\n    return 0;\n}\n"));
     // There is no operand to empty, so the header is written into `sret` and
     // the function returns at once.
@@ -219,8 +219,8 @@ TEST(a_returned_own_rvalue_empties_nothing, {
 // D17.11
 
 TEST(an_assignment_to_an_own_pointer_loads_compares_and_branches, {
-    TEST_ASSERT_TRUE(emit("extern fn i32 mut* own grab();\n"
-                          "fn i32 main() {\n    i32 mut* own mut p = grab();\n"
+    TEST_ASSERT_TRUE(emit("extern fn grab() i32 mut* own;\n"
+                          "fn main() i32 {\n    i32 mut* own mut p = grab();\n"
                           "    p = grab();\n    del(p);\n    return 0;\n}\n"));
     // The right-hand side is evaluated first, then the check, then the store;
     // the continuation label is allocated before the failure one.
@@ -250,7 +250,7 @@ TEST(an_assignment_to_an_own_pointer_loads_compares_and_branches, {
 })
 
 TEST(an_assignment_to_an_own_span_checks_the_pointer_field, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut@ own mut s = {};\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut@ own mut s = {};\n"
                           "    s = new(i32, 2);\n    del(s);\n    return 0;\n}\n"));
     // A span is produced into a place, so the value lands in a temporary and
     // the check reads field 0 of the target's header before the copy (item
@@ -273,9 +273,9 @@ TEST(an_assignment_to_an_own_span_checks_the_pointer_field, {
 })
 
 TEST(an_assignment_through_an_indirection_checks_the_storage_it_reaches, {
-    TEST_ASSERT_TRUE(emit("fn void fill(i32 mut@ own mut* out, u64 n) {\n"
+    TEST_ASSERT_TRUE(emit("fn fill(i32 mut@ own mut* out, u64 n) void {\n"
                           "    *out = new(i32, n);\n}\n"
-                          "fn i32 main() {\n    i32 mut@ own mut s = {};\n"
+                          "fn main() i32 {\n    i32 mut@ own mut s = {};\n"
                           "    fill(&s, 2);\n    del(s);\n    return 0;\n}\n"));
     // The check reads the header the out-parameter points at, not the parameter
     // slot.
@@ -290,11 +290,11 @@ TEST(an_assignment_through_an_indirection_checks_the_storage_it_reaches, {
 })
 
 TEST(a_string_own_and_a_void_ptr_own_are_checked_by_their_own_shapes, {
-    TEST_ASSERT_TRUE(emit("extern fn void* own malloc(u64 n);\n"
-                          "extern fn void free(void* own p);\n"
-                          "fn string own dup() {\n    u8 mut@ own b = new(u8, 2);\n"
+    TEST_ASSERT_TRUE(emit("extern fn malloc(u64 n) void* own;\n"
+                          "extern fn free(void* own p) void;\n"
+                          "fn dup() string own {\n    u8 mut@ own b = new(u8, 2);\n"
                           "    return cast(move(b), string own);\n}\n"
-                          "fn i32 main() {\n    string own mut s = {};\n"
+                          "fn main() i32 {\n    string own mut s = {};\n"
                           "    s = dup();\n    del(s);\n"
                           "    void* own mut v = null;\n    v = malloc(4);\n"
                           "    free(move(v));\n    return 0;\n}\n"));
@@ -325,7 +325,7 @@ TEST(a_string_own_and_a_void_ptr_own_are_checked_by_their_own_shapes, {
 })
 
 TEST(an_owning_locals_slot_is_zeroed_once_and_its_declaration_is_checked, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n"
                           "    for (i32 mut i = 0; i < 3; i++) {\n"
                           "        i32 mut* own p = new(i32);\n        *p = i;\n    }\n"
                           "    return 0;\n}\n"));
@@ -352,7 +352,7 @@ TEST(an_owning_locals_slot_is_zeroed_once_and_its_declaration_is_checked, {
 })
 
 TEST(an_owning_aggregate_local_is_neither_zeroed_nor_checked, {
-    TEST_ASSERT_TRUE(emit(VEC "fn i32 main() {\n"
+    TEST_ASSERT_TRUE(emit(VEC "fn main() i32 {\n"
                               "    for (i32 mut i = 0; i < 3; i++) {\n"
                               "        vec mut v = {};\n        v.len = 1;\n    }\n"
                               "    return 0;\n}\n"));
@@ -365,7 +365,7 @@ TEST(an_owning_aggregate_local_is_neither_zeroed_nor_checked, {
 })
 
 TEST(an_owning_aggregate_assignment_is_not_checked_field_by_field, {
-    TEST_ASSERT_TRUE(emit(VEC "fn i32 main() {\n    vec mut a = {};\n"
+    TEST_ASSERT_TRUE(emit(VEC "fn main() i32 {\n    vec mut a = {};\n"
                               "    a.data = new(i32, 2);\n    vec mut b = {};\n"
                               "    b = move(a);\n    del(b.data);\n    return 0;\n}\n"));
     // The assignment of the whole struct emits no check; the one to `a.data`
@@ -376,7 +376,7 @@ TEST(an_owning_aggregate_assignment_is_not_checked_field_by_field, {
 })
 
 TEST(a_move_and_a_del_empty_their_operand_without_a_check, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut@ own mut s = new(i32, 2);\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut@ own mut s = new(i32, 2);\n"
                           "    del(s);\n    s = new(i32, 3);\n    del(s);\n"
                           "    return 0;\n}\n"));
     // Emptying is not an assignment: the `std.rt.free` is followed straight
@@ -397,8 +397,8 @@ TEST(a_move_and_a_del_empty_their_operand_without_a_check, {
 })
 
 TEST(release_mode_stores_over_an_owning_reference_without_a_check, {
-    TEST_ASSERT_TRUE(emit_release("extern fn i32 mut* own grab();\n"
-                                  "fn i32 main() {\n    i32 mut* own mut p = grab();\n"
+    TEST_ASSERT_TRUE(emit_release("extern fn grab() i32 mut* own;\n"
+                                  "fn main() i32 {\n    i32 mut* own mut p = grab();\n"
                                   "    p = null;\n    return 0;\n}\n"));
     // Release mode emits the plain store; the old allocation is leaked, which
     // is not tracked.
@@ -410,7 +410,7 @@ TEST(release_mode_stores_over_an_owning_reference_without_a_check, {
 })
 
 TEST(release_mode_stores_a_span_directly_with_no_temporary, {
-    TEST_ASSERT_TRUE(emit_release("fn i32 main() {\n    i32 mut@ own mut s = {};\n"
+    TEST_ASSERT_TRUE(emit_release("fn main() i32 {\n    i32 mut@ own mut s = {};\n"
                                   "    s = new(i32, 2);\n    del(s);\n    return 0;\n}\n"));
     // With no check to stand before, the header is written into the target
     // itself (item 18).
@@ -425,8 +425,8 @@ TEST(release_mode_stores_a_span_directly_with_no_temporary, {
 })
 
 TEST(no_bounds_check_keeps_the_overwrite_check, {
-    TEST_ASSERT_TRUE(emit_unchecked("extern fn i32 mut* own grab();\n"
-                                    "fn i32 main() {\n    i32 mut* own mut p = grab();\n"
+    TEST_ASSERT_TRUE(emit_unchecked("extern fn grab() i32 mut* own;\n"
+                                    "fn main() i32 {\n    i32 mut* own mut p = grab();\n"
                                     "    p = grab();\n    del(p);\n    return 0;\n}\n"));
     // `--no-bounds-check` removes the index and span branches and nothing else,
     // so the overwrite check stands.
@@ -438,7 +438,7 @@ TEST(no_bounds_check_keeps_the_overwrite_check, {
 
 TEST(an_assignment_to_an_owned_slot_checks_the_element_it_reaches, {
     TEST_ASSERT_TRUE(emit("struct node {\n    i32 value;\n}\n"
-                          "fn i32 main() {\n"
+                          "fn main() i32 {\n"
                           "    node mut* own mut@ own kids = new(node mut* own, 2);\n"
                           "    kids[0] = new(node);\n    del(kids[0]);\n    del(kids);\n"
                           "    return 0;\n}\n"));
@@ -466,7 +466,7 @@ TEST(an_assignment_to_an_owned_slot_checks_the_element_it_reaches, {
 })
 
 TEST(a_move_into_its_own_operand_leaves_the_value_where_it_was, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut* own mut p = new(i32);\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut* own mut p = new(i32);\n"
                           "    p = move(p);\n    del(p);\n    return 0;\n}\n"));
     // The move reads `p` and empties it, so the check that follows sees the
     // zero value and passes, and the store puts the value back.
@@ -490,7 +490,7 @@ TEST(a_move_into_its_own_operand_leaves_the_value_where_it_was, {
 
 TEST(a_move_and_a_check_inside_a_loop_are_emitted_once, {
     TEST_ASSERT_TRUE(emit("struct node {\n    i32 value;\n    node mut* own next;\n}\n"
-                          "fn i32 main() {\n    node mut* own mut head = null;\n"
+                          "fn main() i32 {\n    node mut* own mut head = null;\n"
                           "    for (i32 mut i = 0; i < 3; i++) {\n"
                           "        node mut* own n = new(node);\n"
                           "        n->next = move(head);\n        head = move(n);\n    }\n"
@@ -506,7 +506,7 @@ TEST(a_move_and_a_check_inside_a_loop_are_emitted_once, {
 })
 
 TEST(the_failure_blocks_of_several_checks_stay_in_ascending_label_order, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut@ own mut s = {};\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut@ own mut s = {};\n"
                           "    s = new(i32, 2);\n    del(s);\n"
                           "    s = new(i32, 3);\n    del(s);\n    return 0;\n}\n"));
     // The failure buffer is appended after every normal block, in the order the
@@ -534,12 +534,12 @@ TEST(the_failure_blocks_of_several_checks_stay_in_ascending_label_order, {
 TEST(a_discarded_move_never_reaches_the_emitter, {
     // The whole sentence and not its first clause: the conversion path of
     // check.c reports the same prefix with another tail.
-    TEST_ASSERT_FALSE(emit("fn i32 main() {\n    i32 mut* own p = new(i32);\n"
+    TEST_ASSERT_FALSE(emit("fn main() i32 {\n    i32 mut* own p = new(i32);\n"
                            "    move(p);\n    del(p);\n    return 0;\n}\n"));
     TEST_ASSERT_NONNULL(strstr(gen_said(),
                                "owning temporary would leak: bind it to an 'own' place, "
                                "pass it on or 'del' it"));
-    TEST_ASSERT_FALSE(emit("fn i32 main() {\n    i32 mut x = 1;\n"
+    TEST_ASSERT_FALSE(emit("fn main() i32 {\n    i32 mut x = 1;\n"
                            "    move(x);\n    return 0;\n}\n"));
     TEST_ASSERT_NONNULL(strstr(gen_said(), "'move' needs an owning operand, not i32"));
 })
@@ -549,21 +549,21 @@ TEST(a_discarded_move_never_reaches_the_emitter, {
 // releases it. The second source names `void mut*` where the first names
 // `void*`, and nothing else differs. The caller reads and does not write,
 // because a cast of the first block to a writable span would add the mark, and
-// the two texts must differ in the mark alone. Each declared name stands on a
+// the two texts must differ in the mark alone. Each declared local stands on a
 // line of its own, because the overwrite check of item 18 records the column of the
 // name it guards and `void mut*` is four characters wider; with a name on the
 // wider line the two texts would differ in two `fail_overwrite` columns and in
-// nothing else.
-// D3.11, D17.11
-static const char VOID_PTR_ALLOC[] = "extern fn void* own take(u64 n, u64 size);\n"
-                                     "extern fn void drop(void* own p);\n"
-                                     "fn void* own\n"
-                                     "grab(u64 n) {\n"
+// nothing else. A function name needs no such line, because the result comes
+// after the parameter list and cannot move the name.
+// D3.11, D8.1, D17.11
+static const char VOID_PTR_ALLOC[] = "extern fn take(u64 n, u64 size) void* own;\n"
+                                     "extern fn drop(void* own p) void;\n"
+                                     "fn grab(u64 n) void* own {\n"
                                      "    void* own\n"
                                      "        p = take(1, n);\n"
                                      "    return p;\n"
                                      "}\n"
-                                     "fn i32 main() {\n"
+                                     "fn main() i32 {\n"
                                      "    void* own\n"
                                      "        b = grab(8);\n"
                                      "    u8@ v = cast(b, u8*)[0..8];\n"
@@ -573,15 +573,14 @@ static const char VOID_PTR_ALLOC[] = "extern fn void* own take(u64 n, u64 size);
                                      "    return 0;\n"
                                      "}\n";
 
-static const char VOID_MUT_PTR_ALLOC[] = "extern fn void mut* own take(u64 n, u64 size);\n"
-                                         "extern fn void drop(void* own p);\n"
-                                         "fn void mut* own\n"
-                                         "grab(u64 n) {\n"
+static const char VOID_MUT_PTR_ALLOC[] = "extern fn take(u64 n, u64 size) void mut* own;\n"
+                                         "extern fn drop(void* own p) void;\n"
+                                         "fn grab(u64 n) void mut* own {\n"
                                          "    void mut* own\n"
                                          "        p = take(1, n);\n"
                                          "    return p;\n"
                                          "}\n"
-                                         "fn i32 main() {\n"
+                                         "fn main() i32 {\n"
                                          "    void mut* own\n"
                                          "        b = grab(8);\n"
                                          "    u8@ v = cast(b, u8*)[0..8];\n"
@@ -609,9 +608,9 @@ TEST(the_allocator_shape_emits_one_text_with_and_without_the_mark, {
     // the call it makes, and the overwrite check of each `own` binding.
     static const char TAKE_CALL[] = "  %t1 = call ptr (i64, i64, ...) @take(i64 1, i64 %t0) #3\n";
     static const char GRAB_CHECK[] =
-        "  call void @\"std.rt.fail_overwrite\"(ptr @.file.0, i32 6, i32 9)\n";
+        "  call void @\"std.rt.fail_overwrite\"(ptr @.file.0, i32 5, i32 9)\n";
     static const char MAIN_CHECK[] =
-        "  call void @\"std.rt.fail_overwrite\"(ptr @.file.0, i32 11, i32 9)\n";
+        "  call void @\"std.rt.fail_overwrite\"(ptr @.file.0, i32 10, i32 9)\n";
     TEST_ASSERT_EQ_STR(found(TAKE_CALL), TAKE_CALL);
     TEST_ASSERT_EQ_STR(found(GRAB_CHECK), GRAB_CHECK);
     TEST_ASSERT_EQ_STR(found(MAIN_CHECK), MAIN_CHECK);

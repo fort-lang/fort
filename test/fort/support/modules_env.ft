@@ -29,7 +29,7 @@ import std.str;
 import std.strbuf;
 
 /// Creates one directory, which may already exist; the tests never care which.
-extern fn i32 mkdir(char* path, u32 mode);
+extern fn mkdir(char* path, u32 mode) i32;
 
 /// The permissions a sandbox directory is created with: the owner's.
 u32 DIR_MODE = 0o700;
@@ -45,7 +45,7 @@ struct env {
 }
 
 /// A fresh sandbox with an empty session and an empty set.
-fn env open() {
+fn open() env {
     env mut e = env{};
     e.s = session.create();
     e.set = modules.create();
@@ -62,21 +62,21 @@ fn env open() {
 /// Releases the set and then the session: every name of a tree points into the
 /// session's storage, so the modules go first.
 /// D20.5
-fn void close(env mut* e) {
+fn close(env mut* e) void {
     modules.free(&e->set);
     session.free(&e->s);
     del(e->dir);
 }
 
 /// Creates one directory of the sandbox, ignoring a directory that is there.
-fn void make_dir(string path) {
+fn make_dir(string path) void {
     char mut@ own c_path = str.to_cstr(path);
     defer del(c_path);
     mkdir(c_path.ptr, DIR_MODE);
 }
 
 /// `<sandbox>/<rel>`, a fresh string the caller owns.
-fn string own in_sandbox(env* e, string rel) {
+fn in_sandbox(env* e, string rel) string own {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     strbuf.append(&b, e->dir);
@@ -87,7 +87,7 @@ fn string own in_sandbox(env* e, string rel) {
 
 /// Writes a module at `rel` under the sandbox, creating the directories its
 /// path names.
-fn void add(env mut* e, string rel, string text) {
+fn add(env mut* e, string rel, string text) void {
     string own path = in_sandbox(e, rel);
     defer del(path);
     u64 mut i = e->dir.len + 1;
@@ -105,7 +105,7 @@ fn void add(env mut* e, string rel, string text) {
 /// pieces is written with these rather than with a concatenation the caller
 /// would have to release.
 /// D2.9
-fn void add2(env mut* e, string rel, string first, string second) {
+fn add2(env mut* e, string rel, string first, string second) void {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     strbuf.append(&b, first);
@@ -113,7 +113,7 @@ fn void add2(env mut* e, string rel, string first, string second) {
     add(e, rel, strbuf.view(&b));
 }
 
-fn void add3(env mut* e, string rel, string first, string second, string third) {
+fn add3(env mut* e, string rel, string first, string second, string third) void {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     strbuf.append(&b, first);
@@ -124,7 +124,7 @@ fn void add3(env mut* e, string rel, string first, string second, string third) 
 
 /// Adds a search root of the sandbox, as `-I <dir>` does.
 /// D9.2
-fn void root(env mut* e, string rel) {
+fn root(env mut* e, string rel) void {
     string own path = in_sandbox(e, rel);
     defer del(path);
     modules.add_root(&e->set, path);
@@ -139,7 +139,7 @@ string SANDBOX_RUNTIME = "// The empty runtime of a loader test.\n";
 /// Names the standard library directory, as `--std-dir` does, and puts the
 /// runtime in it.
 /// D14.1
-fn void std_dir(env mut* e, string rel) {
+fn std_dir(env mut* e, string rel) void {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     strbuf.append(&b, rel);
@@ -151,14 +151,14 @@ fn void std_dir(env mut* e, string rel) {
 
 /// Names a standard library directory and puts no runtime in it, which is what
 /// a directory the compiler cannot read `std.rt` from is.
-fn void std_dir_without_runtime(env mut* e, string rel) {
+fn std_dir_without_runtime(env mut* e, string rel) void {
     string own path = in_sandbox(e, rel);
     defer del(path);
     modules.set_std_dir(&e->set, path);
 }
 
 /// Loads the closure of the entry module `rel` of the sandbox.
-fn bool load(env mut* e, string rel) {
+fn load(env mut* e, string rel) bool {
     string own path = in_sandbox(e, rel);
     defer del(path);
     return modules.load(&e->s, &e->set, path);
@@ -166,14 +166,14 @@ fn bool load(env mut* e, string rel) {
 
 /// The errors reported so far, notes excluded.
 /// D14.2
-fn u64 errors(env* e) {
+fn errors(env* e) u64 {
     return session.error_count(&e->s);
 }
 
 /// Whether any diagnostic reported so far holds `text`. The C suites look for
 /// a substring of the captured lines; a record holds the message alone, so a
 /// test that means the file or the position asserts on those fields instead.
-fn bool said(env mut* e, string text) {
+fn said(env mut* e, string text) bool {
     diag.sink mut* diags = session.diags(&e->s);
     u64 mut i = 0;
     while (i < diag.record_count(diags)) {
@@ -186,19 +186,19 @@ fn bool said(env mut* e, string text) {
 }
 
 /// The number of diagnostics reported, notes included.
-fn u64 reports(env mut* e) {
+fn reports(env mut* e) u64 {
     return diag.record_count(session.diags(&e->s));
 }
 
 /// The `i`-th diagnostic as it was reported, in order.
-fn diag.record report_at(env mut* e, u64 i) {
+fn report_at(env mut* e, u64 i) diag.record {
     return diag.record_at(session.diags(&e->s), i);
 }
 
 /// The module path of the `i`-th module of the dependency order, or the empty
 /// string when there is no such module, so that a failing assertion is about
 /// the path rather than a panic.
-fn string ordered(env* e, u64 i) {
+fn ordered(env* e, u64 i) string {
     if (i >= modules.count(&e->set)) {
         return "";
     }
@@ -208,7 +208,7 @@ fn string ordered(env* e, u64 i) {
 /// The module path of the `i`-th module of the pass order, or the empty string
 /// when there is no such module.
 /// D9.10, D14.2
-fn string passed(env* e, u64 i) {
+fn passed(env* e, u64 i) string {
     if (i >= modules.pass_count(&e->set)) {
         return "";
     }
@@ -216,7 +216,7 @@ fn string passed(env* e, u64 i) {
 }
 
 /// The binding of `name` in the namespace of the module `path`, or null.
-fn scope.binding* bound(env* e, string path, string name) {
+fn bound(env* e, string path, string name) scope.binding* {
     modules.module* m = modules.find(&e->set, path);
     if (m == null) {
         return null;
@@ -225,10 +225,10 @@ fn scope.binding* bound(env* e, string path, string name) {
 }
 
 /// The sources the tests reuse.
-fn string src_main() {
-    return "fn i32 main() {\n    return 0;\n}\n";
+fn src_main() string {
+    return "fn main() i32 {\n    return 0;\n}\n";
 }
 
-fn string src_add() {
-    return "fn i32 add(i32 a, i32 b) {\n    return a + b;\n}\n";
+fn src_add() string {
+    return "fn add(i32 a, i32 b) i32 {\n    return a + b;\n}\n";
 }

@@ -19,7 +19,7 @@ runtime is out of the closure and the calls into it stand alone.
 `hello.ll` is
 
 ```fort
-fn i32 main() { println("hello, world!"); return 0; }
+fn main() i32 { println("hello, world!"); return 0; }
 ```
 
 in `main.ft`: two calls into the runtime, `fort_entry`, which forwards the result of `main.main`,
@@ -29,7 +29,7 @@ and `std.rt.flush_all` and returns the status masked to one byte.
 `abort.ll` is
 
 ```fort
-fn i32 main() {
+fn main() i32 {
     println("before");
     i32[3] a = {};
     i64 mut i = 5;
@@ -55,7 +55,7 @@ nothing before the link checks.
 `colons.ll` is
 
 ```fort
-fn i32 main() { println("colon"); return 0; }
+fn main() i32 { println("colon"); return 0; }
 ```
 
 in `my:app.ft`, whose module path is therefore `my:app` and whose `main` is the symbol

@@ -34,7 +34,7 @@
 // ---- one diagnostic per mistake -------------------------------------------
 
 TEST(two_broken_statements_report_two_lines, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn void f() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn f() void {\n"
                                    "    i32 a = ;\n"
                                    "    i32 b = ;\n"
                                    "}\n"),
@@ -45,7 +45,7 @@ TEST(two_broken_statements_report_two_lines, {
 // The two markers of fail/mutability/004 and fail/ownership/009, which is why
 // the corpus needs recovery at all.
 TEST(two_broken_declarations_report_two_lines, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn i32 main() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn main() i32 {\n"
                                    "    i32 mut mut* p = &x;\n"
                                    "    i32 mut* mut mut q = &x;\n"
                                    "    return 0;\n"
@@ -57,12 +57,12 @@ TEST(two_broken_declarations_report_two_lines, {
 // A statement whose `;` is missing is skipped to the next boundary, and what
 // follows it parses: the statements after a mistake are read, not abandoned.
 TEST(a_missing_semicolon_does_not_cascade, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn i32 f() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn f() i32 {\n"
                                    "    i32 a = 1\n"
                                    "    return a;\n"
                                    "}\n"),
                        "t.ft:3:5: error: expected ';', found 'return'\n");
-    TEST_ASSERT_EQ_STR(parse_dump("fn i32 f() {\n"
+    TEST_ASSERT_EQ_STR(parse_dump("fn f() i32 {\n"
                                   "    i32 a = 1\n"
                                   "    return a;\n"
                                   "}\n"),
@@ -97,7 +97,7 @@ TEST(a_broken_field_does_not_cascade, {
 
 // The statements of a case clause recover like a block's.
 TEST(a_broken_statement_in_a_case_does_not_cascade, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn void f() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn f() void {\n"
                                    "    switch (c) {\n"
                                    "    case 1:\n"
                                    "        x = ;\n"
@@ -114,7 +114,7 @@ TEST(a_broken_statement_in_a_case_does_not_cascade, {
 // are read.
 // D14.2
 TEST(a_broken_case_clause_does_not_cascade, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn i32 main() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn main() i32 {\n"
                                    "    switch (c) {\n"
                                    "    case 1\n"
                                    "        return 1;\n"
@@ -123,7 +123,7 @@ TEST(a_broken_case_clause_does_not_cascade, {
                                    "    }\n"
                                    "}\n"),
                        "t.ft:4:9: error: expected ':', found 'return'\n");
-    TEST_ASSERT_EQ_STR(parse_dump("fn void f() {\n"
+    TEST_ASSERT_EQ_STR(parse_dump("fn f() void {\n"
                                   "    switch (c) {\n"
                                   "    case 1 2:\n"
                                   "        g();\n"
@@ -139,7 +139,7 @@ TEST(a_broken_case_clause_does_not_cascade, {
 // runs off the end of its clause costs that clause and not the one after it.
 // D14.2
 TEST(a_skip_inside_a_case_stops_before_the_next_clause, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn void f() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn f() void {\n"
                                    "    switch (c) {\n"
                                    "    case 1:\n"
                                    "        x = \n"
@@ -148,7 +148,7 @@ TEST(a_skip_inside_a_case_stops_before_the_next_clause, {
                                    "    }\n"
                                    "}\n"),
                        "t.ft:5:5: error: expected an expression, found 'case'\n");
-    TEST_ASSERT_EQ_STR(parse_dump("fn void f() {\n"
+    TEST_ASSERT_EQ_STR(parse_dump("fn f() void {\n"
                                   "    switch (c) {\n"
                                   "    case 1:\n"
                                   "        x = \n"
@@ -166,12 +166,12 @@ TEST(a_skip_inside_a_case_stops_before_the_next_clause, {
 // dropping and the statements after it are read.
 // D7.3, D14.2
 TEST(a_skip_ends_at_the_brace_and_semicolon_of_an_initializer, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn i32 main() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn main() i32 {\n"
                                    "    point p = {.x = 1, 2};\n"
                                    "    return 0;\n"
                                    "}\n"),
                        "t.ft:2:24: error: positional and designated initializers do not mix\n");
-    TEST_ASSERT_EQ_STR(parse_dump("fn i32 main() {\n"
+    TEST_ASSERT_EQ_STR(parse_dump("fn main() i32 {\n"
                                   "    point p = {.x = 1, 2};\n"
                                   "    return 0;\n"
                                   "}\n"),
@@ -186,7 +186,7 @@ TEST(a_skip_ends_at_the_brace_and_semicolon_of_an_initializer, {
 // the statements are read as statements.
 // D14.2
 TEST(a_body_without_its_opening_brace_is_read_as_a_body, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn i32 main()\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn main() i32\n"
                                    "    i32 mut n = 1;\n"
                                    "    n = n + 1;\n"
                                    "    return n;\n"
@@ -206,17 +206,17 @@ TEST(a_body_without_its_opening_brace_is_read_as_a_body, {
 // the declarations after it are parsed as declarations.
 // D14.2
 TEST(an_unclosed_block_reports_at_the_next_declaration, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn void f() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn f() void {\n"
                                    "    g();\n"
                                    "\n"
-                                   "fn void h() {\n"
+                                   "fn h() void {\n"
                                    "    i();\n"
                                    "}\n"),
                        "t.ft:4:1: error: expected '}', found 'fn'\n");
-    TEST_ASSERT_EQ_STR(parse_dump("fn void f() {\n"
+    TEST_ASSERT_EQ_STR(parse_dump("fn f() void {\n"
                                   "    g();\n"
                                   "\n"
-                                  "fn void h() {\n"
+                                  "fn h() void {\n"
                                   "    i();\n"
                                   "}\n"),
                        "(module (fn (type (void)) f (params) (block (call-stmt (call (ident g))))) "
@@ -227,8 +227,8 @@ TEST(an_unclosed_block_reports_at_the_next_declaration, {
 // block: the two are told apart by the speculative parse of grammar.md 7.
 // D3.10
 TEST(a_function_type_at_statement_level_is_not_a_declaration, {
-    TEST_ASSERT_EQ_STR(parse_dump("fn void f() {\n"
-                                  "    fn i32(i32) op = add;\n"
+    TEST_ASSERT_EQ_STR(parse_dump("fn f() void {\n"
+                                  "    fn (i32) i32 op = add;\n"
                                   "}\n"),
                        "(module (fn (type (void)) f (params) (block "
                        "(var op (type (fn-type (type (prim i32)) (type (prim i32)))) "
@@ -241,13 +241,13 @@ TEST(an_unclosed_struct_or_enum_reports_at_the_next_declaration, {
     TEST_ASSERT_EQ_STR(parse_fails("struct s {\n"
                                    "    i32 x;\n"
                                    "\n"
-                                   "fn i32 main() {\n"
+                                   "fn main() i32 {\n"
                                    "    return 0;\n"
                                    "}\n"),
                        "t.ft:4:1: error: expected '}', found 'fn'\n");
     TEST_ASSERT_EQ_STR(parse_fails("enum e { red, green\n"
                                    "\n"
-                                   "fn i32 main() {\n"
+                                   "fn main() i32 {\n"
                                    "    return 0;\n"
                                    "}\n"),
                        "t.ft:3:1: error: expected '}', found 'fn'\n");
@@ -258,7 +258,7 @@ TEST(an_unclosed_struct_or_enum_reports_at_the_next_declaration, {
 // same position, and only the first is written.
 // D14.2
 TEST(an_unclosed_block_at_the_end_of_the_file_reports_once, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn i32 main() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn main() i32 {\n"
                                    "    if (c) {\n"
                                    "        while (d) {\n"),
                        "t.ft:4:1: error: expected '}', found end of file\n");
@@ -271,24 +271,24 @@ TEST(an_unclosed_block_at_the_end_of_the_file_reports_once, {
 // D14.2
 TEST(a_declaration_that_follows_a_failed_one_is_still_a_declaration, {
     TEST_ASSERT_EQ_STR(parse_fails("i32 x =\n"
-                                   "fn void h() { g(); }\n"),
+                                   "fn h() void { g(); }\n"),
                        "t.ft:2:1: error: expected an expression, found 'fn'\n");
     TEST_ASSERT_EQ_STR(parse_dump("i32 x =\n"
-                                  "fn void h() { g(); }\n"),
+                                  "fn h() void { g(); }\n"),
                        "(module (error) (fn (type (void)) h (params) "
                        "(block (call-stmt (call (ident g))))))");
-    TEST_ASSERT_EQ_STR(parse_fails("fn void f()\n"
-                                   "fn void h() { }\n"),
+    TEST_ASSERT_EQ_STR(parse_fails("fn f() void\n"
+                                   "fn h() void { }\n"),
                        "t.ft:2:1: error: expected '{', found 'fn'\n");
-    TEST_ASSERT_EQ_STR(parse_dump("fn void f()\n"
-                                  "fn void h() { }\n"),
+    TEST_ASSERT_EQ_STR(parse_dump("fn f() void\n"
+                                  "fn h() void { }\n"),
                        "(module (fn (type (void)) f (params) (block)) "
                        "(fn (type (void)) h (params) (block)))");
     TEST_ASSERT_EQ_STR(parse_fails("enum e { red, green\n"
-                                   "fn i32 main() { return 0; }\n"),
+                                   "fn main() i32 { return 0; }\n"),
                        "t.ft:2:1: error: expected '}', found 'fn'\n");
     TEST_ASSERT_EQ_STR(parse_dump("enum e { red, green\n"
-                                  "fn i32 main() { return 0; }\n"),
+                                  "fn main() i32 { return 0; }\n"),
                        "(module (enum e (member red nil) (member green nil)) "
                        "(fn (type (prim i32)) main (params) (block (return (int 0)))))");
 })
@@ -298,14 +298,14 @@ TEST(a_declaration_that_follows_a_failed_one_is_still_a_declaration, {
 // initializer, a call with a `new`, an array literal (grammar.md 7). Losing
 // one of them would be silent, so the tree is what this test reads.
 TEST(a_body_without_its_brace_keeps_every_statement, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn i32 main()\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn main() i32\n"
                                    "    point p = {};\n"
                                    "    q = new(i32);\n"
                                    "    x = i32[2]{1, 2};\n"
                                    "    return 0;\n"
                                    "}\n"),
                        "t.ft:2:5: error: expected '{', found identifier 'point'\n");
-    TEST_ASSERT_EQ_STR(parse_dump("fn i32 main()\n"
+    TEST_ASSERT_EQ_STR(parse_dump("fn main() i32\n"
                                   "    point p = {};\n"
                                   "    q = new(i32);\n"
                                   "    x = i32[2]{1, 2};\n"
@@ -324,29 +324,29 @@ TEST(a_body_without_its_brace_keeps_every_statement, {
 // The shapes a buffer passes through while it is being typed: each costs one
 // diagnostic, at the token the parser stopped on.
 TEST(a_half_typed_construct_reports_once, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn i32 main() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn main() i32 {\n"
                                    "    if (\n"
                                    "    return 0;\n"
                                    "}\n"),
                        "t.ft:3:5: error: expected an expression, found 'return'\n");
-    TEST_ASSERT_EQ_STR(parse_fails("fn i32 main() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn main() i32 {\n"
                                    "    g(1,\n"
                                    "    return 0;\n"
                                    "}\n"),
                        "t.ft:3:5: error: expected an expression, found 'return'\n");
-    TEST_ASSERT_EQ_STR(parse_fails("fn i32 main() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn main() i32 {\n"
                                    "    f());\n"
                                    "    return 0;\n"
                                    "}\n"),
                        "t.ft:2:8: error: expected ';', found ')'\n");
-    TEST_ASSERT_EQ_STR(parse_fails("fn i32 main() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn main() i32 {\n"
                                    "    for (i32 mut i = 0 i < 3; i++) {\n"
                                    "        f();\n"
                                    "    }\n"
                                    "    return 0;\n"
                                    "}\n"),
                        "t.ft:2:24: error: expected ';', found identifier 'i'\n");
-    TEST_ASSERT_EQ_STR(parse_fails("fn i32 main() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn main() i32 {\n"
                                    "    switch (c) {\n"
                                    "    case 1 f();\n"
                                    "    }\n"
@@ -362,28 +362,28 @@ TEST(a_half_typed_construct_reports_once, {
 // an edit in progress looks like.
 // D14.2
 TEST(a_brace_inside_an_unclosed_call_goes_with_the_statement, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn void f() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn f() void {\n"
                                    "    g(});\n"
                                    "    h();\n"
                                    "    i();\n"
                                    "}\n"),
                        "t.ft:2:7: error: expected an expression, found '}'\n");
-    TEST_ASSERT_EQ_STR(parse_dump("fn void f() {\n"
+    TEST_ASSERT_EQ_STR(parse_dump("fn f() void {\n"
                                   "    g(});\n"
                                   "    h();\n"
                                   "    i();\n"
                                   "}\n"),
                        "(module (fn (type (void)) f (params) (block (error) "
                        "(call-stmt (call (ident h))) (call-stmt (call (ident i))))))");
-    TEST_ASSERT_EQ_STR(parse_fails("fn void f() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn f() void {\n"
                                    "    g(1,\n"
                                    "}\n"
-                                   "fn void h() { }\n"),
+                                   "fn h() void { }\n"),
                        "t.ft:3:1: error: expected an expression, found '}'\n");
-    TEST_ASSERT_EQ_STR(parse_dump("fn void f() {\n"
+    TEST_ASSERT_EQ_STR(parse_dump("fn f() void {\n"
                                   "    g(1,\n"
                                   "}\n"
-                                  "fn void h() { }\n"),
+                                  "fn h() void { }\n"),
                        "(module (fn (type (void)) f (params) (block (error))) "
                        "(fn (type (void)) h (params) (block)))");
 })
@@ -393,7 +393,7 @@ TEST(a_brace_inside_an_unclosed_call_goes_with_the_statement, {
 // which would read the clauses after it as statements.
 // D7.6, D14.2
 TEST(a_switch_body_holds_clauses_only, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn i32 main() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn main() i32 {\n"
                                    "    switch (n) {\n"
                                    "    cse 1:\n"
                                    "        return 1;\n"
@@ -405,7 +405,7 @@ TEST(a_switch_body_holds_clauses_only, {
                                    "}\n"),
                        "t.ft:3:5: error: expected 'case' or 'default', "
                        "found identifier 'cse'\n");
-    TEST_ASSERT_EQ_STR(parse_dump("fn void f() {\n"
+    TEST_ASSERT_EQ_STR(parse_dump("fn f() void {\n"
                                   "    switch (n) {\n"
                                   "    x = 1;\n"
                                   "    case 2:\n"
@@ -422,16 +422,16 @@ TEST(a_switch_body_holds_clauses_only, {
 // reports the mistake once (grammar.md 7.1), whether the speculation succeeded
 // or failed on a misplaced marker.
 TEST(an_error_under_a_speculation_is_reported_once, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn void f() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn f() void {\n"
                                    "    foo* p 1;\n"
                                    "}\n"),
                        "t.ft:2:12: error: expected '=', found integer literal\n");
-    TEST_ASSERT_EQ_STR(parse_fails("fn void f() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn f() void {\n"
                                    "    node* mut own p = null;\n"
                                    "}\n"),
                        "t.ft:2:15: error: an own precedes the mut of its position: "
                        "write 'node* own mut p'\n");
-    TEST_ASSERT_EQ_STR(parse_fails("fn void f() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn f() void {\n"
                                    "    for (node* mut own p = x; c; i++) { }\n"
                                    "}\n"),
                        "t.ft:2:20: error: an own precedes the mut of its position: "
@@ -441,7 +441,7 @@ TEST(an_error_under_a_speculation_is_reported_once, {
 // The statement after one that a speculation gave up on is parsed normally:
 // the rewind leaves no failure behind.
 TEST(a_speculation_during_an_unwind_leaves_no_trace, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn void f() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn f() void {\n"
                                    "    i32 a = ;\n"
                                    "    foo* p = null;\n"
                                    "}\n"),
@@ -485,7 +485,7 @@ TEST(the_twenty_first_error_is_not_reported, {
 // dropped; two that start at different tokens are both reported.
 // D14.2
 TEST(two_errors_at_one_position_are_reported_once, {
-    TEST_ASSERT_EQ_UINT64(diag_lines("fn i32 f() {\n    switch (c) {\n    case 1:\n"), (uint64_t)1);
+    TEST_ASSERT_EQ_UINT64(diag_lines("fn f() i32 {\n    switch (c) {\n    case 1:\n"), (uint64_t)1);
     TEST_ASSERT_EQ_UINT64(diag_lines("i32 a = ;\ni32 b = ;\n"), (uint64_t)2);
 })
 
@@ -497,7 +497,7 @@ TEST(two_errors_at_one_position_are_reported_once, {
 TEST(a_file_with_errors_still_yields_a_tree, {
     const ast_node_t* mod = parse_text("fn void f( {\n"
                                        "}\n"
-                                       "fn void g() {\n"
+                                       "fn g() void {\n"
                                        "    h();\n"
                                        "}\n");
     TEST_ASSERT_NONNULL(mod);
@@ -511,7 +511,7 @@ TEST(a_file_with_errors_still_yields_a_tree, {
 // later pass reads it as "nothing was understood here".
 // D14.2
 TEST(an_error_node_covers_the_skipped_region_and_has_no_children, {
-    const ast_node_t* mod = parse_text("fn void f() {\n"
+    const ast_node_t* mod = parse_text("fn f() void {\n"
                                        "    i32 a = ;\n"
                                        "    g();\n"
                                        "}\n");
@@ -536,7 +536,7 @@ TEST(an_error_node_covers_the_skipped_region_and_has_no_children, {
 // its tokens reached the parser.
 // D14.2
 TEST(a_lexical_error_costs_its_line_and_the_parser_sees_the_rest, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn i32 main() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn main() i32 {\n"
                                    "    i32 a = 0xZ;\n"
                                    "    i32 b = ;\n"
                                    "}\n"),
@@ -548,11 +548,11 @@ TEST(a_lexical_error_costs_its_line_and_the_parser_sees_the_rest, {
 // parsed: what an editor needs while a literal is half typed.
 // D14.2
 TEST(a_file_with_an_unclosed_string_still_parses_the_lines_after_it, {
-    const ast_node_t* mod = parse_text("fn i32 one() {\n"
+    const ast_node_t* mod = parse_text("fn one() i32 {\n"
                                        "    string s = \"abc;\n"
                                        "    return 1;\n"
                                        "}\n"
-                                       "fn i32 two() {\n"
+                                       "fn two() i32 {\n"
                                        "    return 2;\n"
                                        "}\n");
     TEST_ASSERT_EQ_UINT64(diag_count(), (uint64_t)1);
@@ -581,7 +581,7 @@ TEST(an_empty_file_and_a_one_token_file, {
 TEST(nesting_past_the_limit_is_reported_once, {
     sb_t src;
     sb_init(&src);
-    sb_append(&src, "fn void f() ");
+    sb_append(&src, "fn f() void ");
     for (uint64_t i = 0; i < 257; i++) {
         sb_push(&src, '{');
     }
@@ -653,13 +653,13 @@ TEST(a_declaration_after_the_cap_is_still_in_the_tree, {
 // The `}` of a block the failed construct opened is consumed with it, so the
 // statement after that block is read as a statement and not as a leftover.
 TEST(a_skip_consumes_the_block_of_the_failed_statement, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn i32 f() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn f() i32 {\n"
                                    "    if c) { g(); }\n"
                                    "    h();\n"
                                    "    return 0;\n"
                                    "}\n"),
                        "t.ft:2:8: error: expected '(', found identifier 'c'\n");
-    TEST_ASSERT_EQ_STR(parse_dump("fn i32 f() {\n"
+    TEST_ASSERT_EQ_STR(parse_dump("fn f() i32 {\n"
                                   "    if c) { g(); }\n"
                                   "    h();\n"
                                   "    return 0;\n"
@@ -674,11 +674,11 @@ TEST(a_skip_consumes_the_block_of_the_failed_statement, {
 TEST(a_broken_import_does_not_stop_the_imports, {
     TEST_ASSERT_EQ_STR(parse_fails("import ;\n"
                                    "import std.io;\n"
-                                   "fn i32 main() { return 0; }\n"),
+                                   "fn main() i32 { return 0; }\n"),
                        "t.ft:1:8: error: expected an identifier, found ';'\n");
     TEST_ASSERT_EQ_STR(parse_dump("import ;\n"
                                   "import std.io;\n"
-                                  "fn i32 main() { return 0; }\n"),
+                                  "fn main() i32 { return 0; }\n"),
                        "(module (error) (import (path std io) nil) "
                        "(fn (type (prim i32)) main (params) (block (return (int 0)))))");
 })
@@ -688,13 +688,13 @@ TEST(a_broken_import_does_not_stop_the_imports, {
 // that keeps parse_module from spinning.
 // D14.2
 TEST(a_late_import_is_reported_once_and_skipped, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn i32 main() { return 0; }\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn main() i32 { return 0; }\n"
                                    "import std.io;\n"
-                                   "fn i32 g() { return 1; }\n"),
+                                   "fn g() i32 { return 1; }\n"),
                        "t.ft:2:1: error: an import comes before every declaration\n");
-    TEST_ASSERT_EQ_STR(parse_dump("fn i32 main() { return 0; }\n"
+    TEST_ASSERT_EQ_STR(parse_dump("fn main() i32 { return 0; }\n"
                                   "import std.io;\n"
-                                  "fn i32 g() { return 1; }\n"),
+                                  "fn g() i32 { return 1; }\n"),
                        "(module (fn (type (prim i32)) main (params) (block (return (int 0)))) "
                        "(error) (fn (type (prim i32)) g (params) (block (return (int 1)))))");
 })
@@ -705,12 +705,12 @@ TEST(a_late_import_is_reported_once_and_skipped, {
 // the broken one are read.
 // D14.2
 TEST(an_unclosed_brace_initializer_costs_one_statement, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn i32 main() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn main() i32 {\n"
                                    "    point p = {1, ;\n"
                                    "    return 0;\n"
                                    "}\n"),
                        "t.ft:2:19: error: expected an expression, found ';'\n");
-    TEST_ASSERT_EQ_STR(parse_dump("fn i32 main() {\n"
+    TEST_ASSERT_EQ_STR(parse_dump("fn main() i32 {\n"
                                   "    point p = {1, ;\n"
                                   "    return 0;\n"
                                   "}\n"),
@@ -726,7 +726,7 @@ TEST(every_recovery_point_records_what_it_skipped, {
     mod = parse_text("struct s {\n    i32 ;\n    i32 y;\n}\n");
     TEST_ASSERT_NONNULL(mod);
     TEST_ASSERT_EQ_STR(text_of(ast_child(ast_child(mod, 0), 0)), "i32 ;");
-    mod = parse_text("fn void f() {\n    switch (c) {\n    case 1:\n        x = ;\n    }\n}\n");
+    mod = parse_text("fn f() void {\n    switch (c) {\n    case 1:\n        x = ;\n    }\n}\n");
     TEST_ASSERT_NONNULL(mod);
     const ast_node_t* clause = ast_child(ast_child(ast_child(mod, 0)->b, 0), 0);
     TEST_ASSERT_EQ_STR(text_of(ast_child(clause->a, 0)), "x = ;");
@@ -739,13 +739,13 @@ TEST(every_recovery_point_records_what_it_skipped, {
 // second file.
 // D14.2
 TEST(an_unclosed_bracket_costs_its_construct_and_no_more, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn i32 main() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn main() i32 {\n"
                                    "    g(1, 2;\n"
                                    "    h();\n"
                                    "    return 0;\n"
                                    "}\n"),
                        "t.ft:2:11: error: expected ')', found ';'\n");
-    TEST_ASSERT_EQ_STR(parse_dump("fn i32 main() {\n"
+    TEST_ASSERT_EQ_STR(parse_dump("fn main() i32 {\n"
                                   "    g(1, 2;\n"
                                   "    h();\n"
                                   "    return 0;\n"
@@ -753,22 +753,22 @@ TEST(an_unclosed_bracket_costs_its_construct_and_no_more, {
                        "(module (fn (type (prim i32)) main (params) (block "
                        "(error) (return (int 0)))))");
     TEST_ASSERT_EQ_STR(parse_fails("i32 a = {1, 2;\n"
-                                   "fn i32 main() {\n"
+                                   "fn main() i32 {\n"
                                    "    return 0;\n"
                                    "}\n"),
                        "t.ft:1:14: error: expected '}', found ';'\n");
-    TEST_ASSERT_EQ_STR(parse_fails("fn void f() {\n"
+    TEST_ASSERT_EQ_STR(parse_fails("fn f() void {\n"
                                    "    x = 1;\n"
                                    "}\n"
                                    "}\n"
-                                   "fn void g() { }\n"),
+                                   "fn g() void { }\n"),
                        "t.ft:4:1: error: expected a type, found '}'\n");
 })
 
 // ---- the fail corpus ------------------------------------------------------
 // D14.4
 
-enum { CORPUS_PATH_CAP = 512, CORPUS_CHUNK = 4096, CORPUS_FILES = 253 };
+enum { CORPUS_PATH_CAP = 512, CORPUS_CHUNK = 4096, CORPUS_FILES = 254 };
 
 // The files walked, the source of the one being read, and the lines that were
 // reported on without an annotation, one per line.

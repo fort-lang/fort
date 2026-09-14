@@ -63,7 +63,7 @@ Sections:
 - owner: this file; section D1 names no specification document.
 - rule: Identifier conventions (not enforced by the compiler): modules, functions, variables,
   fields, struct and enum type names, and enum members are lower_case with underscores (`struct
-  str_buf`, `enum color { red, green }`, `color.red`, `fn i32 parse_i64(...)`); module-level
+  str_buf`, `enum color { red, green }`, `color.red`, `fn parse_i64(...) i32`); module-level
   constants are UPPER_CASE (`i32 MAX = 64;`); a variable never takes its type's name (`point p`,
   never `point point`), because a local may shadow a module-level name (D7.9); a struct field may
   (`node* node;`), since fields live in no namespace a type could occupy.
@@ -199,11 +199,14 @@ Sections:
   follow it, making references to the whole array (`i32[4]*` points to an `i32[4]`, `i32[4]@` is a
   span of `i32[4]`, and `new(i32[4], n)` returns `i32[4] mut@ own`); no array suffix may follow a
   trailing reference suffix (`i32[4]*[2]` does not parse; wrap it in a struct). `u8@*` is the usual
-  shape of an out-parameter (`fn bool read_file(string path, u8 mut@ own mut* out)`, D17.2).
-  Suffixes after a function type apply to the function type: `fn i32(i32)[4]` is an array of four
-  function pointers, `fn i32[4](i32)` returns an `i32[4]`.
+  shape of an out-parameter (`fn read_file(string path, u8 mut@ own mut* out) bool`, D17.2).
+  A suffix after a function type belongs to that function type's return type, which is the last
+  element of it: `fn (i32) i32[4]` returns an `i32[4]` (D3.10).
 - history: Amended 2026-09-10: spans were called slices and spelled `T[]`, read with the array
-  group, so `i32[][4]` was the span of `i32[4]`.
+  group, so `i32[][4]` was the span of `i32[4]`. Amended 2026-09-14 (T-136): a suffix after a
+  function type applied to the function type, so `fn i32(i32)[4]` was an array of four function
+  pointers and `fn i32[4](i32)` a function returning an `i32[4]`; with the result last the two
+  spellings are one and only the second reading is available.
 
 ### D3.7 The string type
 - owner: `type-system.md`.
@@ -247,7 +250,13 @@ Sections:
 
 ### D3.10 Function types and function pointers
 - owner: `type-system.md`.
-- rule: Function types are written `fn R(P1, P2)` with parameter types only. Identity is structural
+- rule: Function types are written `fn (P1, P2) R` with parameter types only, the result last as in
+  a declaration (D8.1). A function type ends at its return type, so every marker and every suffix
+  written after it belongs to that return type and the function type carries none of its own:
+  `fn (i32) i32[4]` is a function returning `i32[4]` and `fn (i32) i32*` one returning `i32*`. To
+  mark or to suffix a function type -- an array of function pointers, a function-pointer binding
+  that is assigned to -- wrap it in a struct, the escape `grammar.md` 4 prescribes for
+  `i32[4]*[2]`. Identity is structural
   over parameter types (including pointee mutability), return type and `noreturn`; binding-level
   `mut` on parameters is ignored. A function name used as a value, including a qualified `m.f`, has
   its function type; `&f` and `*f` are errors. The name must be a fort function: an `extern fn` in
@@ -261,7 +270,12 @@ Sections:
   ordinary `call` in LLVM IR (D19.2), so the bootstrap implements them.
 - history: Amended 2026-09-10: an `extern` name was a value like any other, which emitted a
   non-variadic indirect call site against a symbol declared variadic -- no `al` set, no diagnostic,
-  and no test that could see it (T-017's review).
+  and no test that could see it (T-017's review). Amended 2026-09-14 (T-136): a function type was
+  written `fn R(P1, P2)` and took markers and suffixes of its own, so `fn i32(i32)[4]` was an array
+  of four function pointers and `fn i32(i32) mut f` a function-pointer binding that could be
+  assigned to. With the result last there is no token between the return type and the suffix, so
+  the suffix can only belong to the return type and both forms lose their spelling; the struct
+  wrapper replaces them.
 
 ### D3.11 The void pointer
 - owner: `type-system.md`.
@@ -589,8 +603,8 @@ Sections:
   (level 0 of the field is inherited from the access path), so the outermost position of a field
   type never carries `mut`: `i32 mut count` and `node* mut next` are errors ("a field's own storage
   follows its struct"), while `node mut* next` marks the node behind the field. A return type has no
-  binding, so its outermost position never carries `mut` either: `fn node mut* find()` is fine, `fn
-  node* mut find()` and `fn i32 mut f()` are errors.
+  binding, so its outermost position never carries `mut` either: `fn find() node mut*` is fine,
+  `fn find() node* mut` and `fn f() i32 mut` are errors.
 
 ### D5.6 Parameters
 - owner: `core-language.md` (Declarations and mutability), `type-system.md` (Mutability levels).
@@ -857,10 +871,17 @@ Sections:
 
 ### D8.1 Function declaration syntax
 - owner: `core-language.md` (Functions).
-- rule: Declaration syntax: `fn ReturnType name(Type p1, Type p2) { ... }`, with `void` for no
-  result: `fn void main() { }`. Function-pointer types read the same way: `fn i32(i32, i32)`.
-- rationale: user choice ("fn <ret> name(params)"); the keyword makes top-level and statement-level
-  parsing unambiguous while the declaration still reads like C.
+- rule: Declaration syntax: `fn name(Type p1, Type p2) ReturnType { ... }`, with `void` for no
+  result: `fn main() void { }`. The return type is never omitted. Function-pointer types read the
+  same way, with the result last: `fn (i32, i32) i32`. A parameter and a local keep `Type name`.
+- rationale: the name is the second token of every declaration, at a fixed column, so
+  `grep 'fn take('` finds the definition and nothing else; the keyword makes top-level and
+  statement-level parsing unambiguous.
+- history: Amended 2026-09-14 (T-136): the return type stood between `fn` and the name
+  (`fn ReturnType name(params)`, and `fn R(P)` for a function type), so the name began at a column
+  the return type's width decided and `fn strbuf.str_buf mut* own take(` buried it. The user
+  ratified the reversal on 2026-09-14. One commit moved both parsers, the corpus and this log, so
+  the old form parses nowhere after it.
 
 ### D8.2 Parameters and results pass by value
 - owner: `core-language.md` (Functions).
@@ -887,15 +908,15 @@ Sections:
 
 ### D8.5 The noreturn result type
 - owner: `core-language.md` (Functions).
-- rule: `noreturn` is a return type: `fn noreturn fatal(string msg) { ... }`. Such a function may
+- rule: `noreturn` is a return type: `fn fatal(string msg) noreturn { ... }`. Such a function may
   not contain `return` and must end in a terminating statement; the compiler emits a trap after its
   body and after every call to it. `panic` and `sys.exit` are `noreturn`.
 - rationale: without it every error-reporting helper forces a dead `return` after each call.
 
 ### D8.6 The entry point
 - owner: `core-language.md` (Functions).
-- rule: Entry point: the module given to `fort` must define `fn i32 main()` or `fn i32 main(string@
-  args)`. `args[0]` is the program name; each element is NUL-terminated because it comes from
+- rule: Entry point: the module given to `fort` must define `fn main() i32` or `fn main(string@
+  args) i32`. `args[0]` is the program name; each element is NUL-terminated because it comes from
   `argv`. The return value is the exit status. A `main` returning `void` is an error. A `main` in
   any other module is an ordinary function.
 - history: Amended 2026-09-10 with D20: `fort --check` inspects a module rather than building a
@@ -1008,7 +1029,7 @@ Sections:
 
 ### D9.8 Extern declarations
 - owner: `module-system.md`.
-- rule: `extern fn i64 write(i32 fd, u8* buf, u64 n);` declares a C function with the System V
+- rule: `extern fn write(i32 fd, u8* buf, u64 n) i64;` declares a C function with the System V
   x86-64 ABI. Extern signatures may use only integers, floats, `bool`, `char`, enums (passed as
   `i32`), pointers and function pointers: no spans, strings, structs or arrays, and no variadics.
   Every extern function is declared and called through a variadic LLVM function type (`declare i32
@@ -1039,7 +1060,9 @@ Sections:
   symbol are one ELF symbol reached through two types, which is the bug the identity rule exists to
   catch. A program that wants a different spelling of `write` or `free` imports `std.libc` and calls
   it rather than redeclaring it.
-- history: Amended 2026-09-14 (T-086): the example declared `write` with a `void* buf`, which
+- history: Amended 2026-09-14 (T-136): an extern was written `extern fn R name(P);`, with the
+  result before the name, and it now matches a definition's shape (D8.1).
+  Amended 2026-09-14 (T-086): the example declared `write` with a `void* buf`, which
   `std.libc` no longer spells that way, so a program that copied the line conflicted with the
   library's declaration by this decision's own identity rule. Amended 2026-09-10 with D19: the
   compiler itself set `al` to the vector-register count
@@ -1666,8 +1689,9 @@ says ownership is "by convention", this section supersedes it.
   states that the reference designates the start of a live allocation obtained from `new` (or
   adopted with `cast`, D17.3) and that `del` on it is meaningful. It is erased at run time (same
   bits, layout and ABI) and is part of type identity: `node* own` and `node*` are different types,
-  as are `fn void(node* own)` and `fn void(node*)`. `own` on a non-reference type (`i32 own`, `point
-  own`, `i32[4] own`) or on a function-pointer type is an error; an array or struct that *contains*
+  as are `fn (node* own) void` and `fn (node*) void`. `own` on a non-reference type (`i32 own`,
+  `point own`, `i32[4] own`) or on a function-pointer type is an error; an array or struct that
+  *contains*
   an `own` reference is an owning aggregate (D17.7).
 
 ### D17.2 Where an own marker goes
@@ -1871,8 +1895,8 @@ says ownership is "by convention", this section supersedes it.
   `del`, transfer, lending, the overwrite check), `core-language.md` (the `move` builtin,
   statements).
 - rule: `own` may appear in `extern` signatures. It is erased, and it documents the C side's
-  convention: `extern fn void mut* own malloc(u64 n);` (the storage malloc answers is storage the
-  caller may write, D3.11), `extern fn void free(void* own p);` (a caller drops the `mut` at the
+  convention: `extern fn malloc(u64 n) void mut* own;` (the storage malloc answers is storage the
+  caller may write, D3.11), `extern fn free(void* own p) void;` (a caller drops the `mut` at the
   call, D5.4). Signature identity includes `own` (D9.8).
 - history: Amended 2026-09-14 (T-086): `malloc` was declared `void* own`, because `void mut*` was
   not a type until D3.11 was amended.

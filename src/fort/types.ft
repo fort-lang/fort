@@ -186,7 +186,7 @@ struct table {
 /// leak the C has there too (the overwrite check does not look inside an owning
 /// aggregate).
 /// D17.11
-fn void type_table_init(table mut* tt) {
+fn type_table_init(table mut* tt) void {
     *tt = table{};
 }
 
@@ -194,7 +194,7 @@ fn void type_table_init(table mut* tt) {
 /// parameter list and its layout block, and `del` is shallow, so both go before
 /// the node does.
 /// D17.7
-fn void type_table_free(table mut* tt) {
+fn type_table_free(table mut* tt) void {
     u64 mut i = 0;
     while (i < tt->count) {
         node mut* own t = move(tt->nodes[i]);
@@ -217,7 +217,7 @@ fn void type_table_free(table mut* tt) {
 
 /// Ensures room for one more node, growing to the largest of NODE_MIN_CAP and
 /// twice the capacity.
-fn void reserve(table mut* tt) {
+fn reserve(table mut* tt) void {
     if (tt->count < tt->nodes.len) {
         return;
     }
@@ -240,7 +240,7 @@ fn void reserve(table mut* tt) {
 }
 
 /// A fresh node of `kind`, owned by the table and returned as a view of it.
-fn node mut* node_new(table mut* tt, type_kind kind) {
+fn node_new(table mut* tt, type_kind kind) node mut* {
     node mut* own fresh = new(node);
     fresh->kind = kind;
     reserve(tt);
@@ -252,7 +252,7 @@ fn node mut* node_new(table mut* tt, type_kind kind) {
 /// Structural equality of an interned node and a key by child identity:
 /// children are interned, so pointer equality of children is enough. Nominal
 /// nodes are never interned, so they never match.
-fn bool node_same(node* t, key* k) {
+fn node_same(node* t, key* k) bool {
     if (t->kind != k->kind) {
         return false;
     }
@@ -276,7 +276,7 @@ fn bool node_same(node* t, key* k) {
 }
 
 /// The interned node equal to `k`, or a fresh copy of it.
-fn node* intern(table mut* tt, key* k) {
+fn intern(table mut* tt, key* k) node* {
     u64 mut i = 0;
     while (i < tt->count) {
         node* t = tt->nodes[i];
@@ -306,7 +306,7 @@ fn node* intern(table mut* tt, key* k) {
 
 /// A zeroed key of `kind`: the fields a constructor does not set keep the values
 /// of a node that never carries them.
-fn key key_of(type_kind kind) {
+fn key_of(type_kind kind) key {
     key mut k = key{};
     k.kind = kind;
     k.prim = prim.prim_kind.prim_i8;
@@ -317,21 +317,21 @@ fn key key_of(type_kind kind) {
 // Every constructor interns: equal arguments give the same node. An elem or
 // parameter of kind k_error poisons the result, which is the error type.
 
-fn node* type_void(table mut* tt) {
+fn type_void(table mut* tt) node* {
     if (tt->void_type == null) {
         tt->void_type = node_new(tt, type_kind.k_void);
     }
     return tt->void_type;
 }
 
-fn node* type_null(table mut* tt) {
+fn type_null(table mut* tt) node* {
     if (tt->null_type == null) {
         tt->null_type = node_new(tt, type_kind.k_null);
     }
     return tt->null_type;
 }
 
-fn node* type_error(table mut* tt) {
+fn type_error(table mut* tt) node* {
     if (tt->error_type == null) {
         tt->error_type = node_new(tt, type_kind.k_error);
     }
@@ -339,7 +339,7 @@ fn node* type_error(table mut* tt) {
 }
 
 /// `k` must not be prim_void: `void` is a type kind of its own (type_void).
-fn node* type_prim(table mut* tt, prim.prim_kind k) {
+fn type_prim(table mut* tt, prim.prim_kind k) node* {
     if (k == prim.prim_kind.prim_void) {
         panic("types.type_prim: prim_void as a primitive type: use type_void");
     }
@@ -352,13 +352,13 @@ fn node* type_prim(table mut* tt, prim.prim_kind k) {
     return tt->prims[slot];
 }
 
-fn node* type_string(table mut* tt, bool is_own) {
+fn type_string(table mut* tt, bool is_own) node* {
     key mut k = key_of(type_kind.k_string);
     k.is_own = is_own;
     return intern(tt, &k);
 }
 
-fn node* type_voidptr(table mut* tt, bool is_own, bool is_mut) {
+fn type_voidptr(table mut* tt, bool is_own, bool is_mut) node* {
     key mut k = key_of(type_kind.k_voidptr);
     k.elem = type_void(tt);
     k.is_own = is_own;
@@ -371,7 +371,7 @@ fn node* type_voidptr(table mut* tt, bool is_own, bool is_mut) {
 
 /// The element checks shared by pointers, spans and arrays; true when the
 /// result is the poisoned error type.
-fn bool elem_poisons(node* elem) {
+fn elem_poisons(node* elem) bool {
     if (elem->kind == type_kind.k_void) {
         panic("types: void as an element type");
     }
@@ -382,7 +382,7 @@ fn bool elem_poisons(node* elem) {
 }
 
 /// `elem` must not be void (use type_voidptr) or the null type.
-fn node* type_ptr(table mut* tt, node* elem, bool is_own, bool is_mut) {
+fn type_ptr(table mut* tt, node* elem, bool is_own, bool is_mut) node* {
     if (elem_poisons(elem)) {
         return elem;
     }
@@ -393,7 +393,7 @@ fn node* type_ptr(table mut* tt, node* elem, bool is_own, bool is_mut) {
     return intern(tt, &k);
 }
 
-fn node* type_span(table mut* tt, node* elem, bool is_own, bool is_mut) {
+fn type_span(table mut* tt, node* elem, bool is_own, bool is_mut) node* {
     if (elem_poisons(elem)) {
         return elem;
     }
@@ -406,7 +406,7 @@ fn node* type_span(table mut* tt, node* elem, bool is_own, bool is_mut) {
 
 /// `len` must be greater than 0; `elem` must not be void or null.
 /// D3.4
-fn node* type_array(table mut* tt, node* elem, u64 len) {
+fn type_array(table mut* tt, node* elem, u64 len) node* {
     if (elem_poisons(elem)) {
         return elem;
     }
@@ -420,7 +420,7 @@ fn node* type_array(table mut* tt, node* elem, u64 len) {
 }
 
 /// `ret` is void for a `noreturn` function. The parameter list is copied.
-fn node* type_fn(table mut* tt, node* ret, node*@ params, bool is_noreturn) {
+fn type_fn(table mut* tt, node* ret, node*@ params, bool is_noreturn) node* {
     if (ret->kind == type_kind.k_null) {
         panic("types.type_fn: null as a return type");
     }
@@ -452,7 +452,7 @@ fn node* type_fn(table mut* tt, node* ret, node*@ params, bool is_noreturn) {
 /// made, so no two nodes of one struct can split the types built from it. A null
 /// `decl` is anonymous and always makes a node.
 /// D3.12
-fn node* nominal(table mut* tt, type_kind kind, string name, void mut* decl) {
+fn nominal(table mut* tt, type_kind kind, string name, void mut* decl) node* {
     if (decl != null) {
         u64 mut i = 0;
         while (i < tt->count) {
@@ -480,11 +480,11 @@ fn node* nominal(table mut* tt, type_kind kind, string name, void mut* decl) {
 /// Nominal types: every call makes a new node with an unresolved layout. `name`
 /// is borrowed for the life of the table; `decl` is stored and otherwise
 /// opaque.
-fn node* type_struct(table mut* tt, string name, void mut* decl) {
+fn type_struct(table mut* tt, string name, void mut* decl) node* {
     return nominal(tt, type_kind.k_struct, name, decl);
 }
 
-fn node* type_enum(table mut* tt, string name, void mut* decl) {
+fn type_enum(table mut* tt, string name, void mut* decl) node* {
     return nominal(tt, type_kind.k_enum, name, decl);
 }
 
@@ -492,28 +492,28 @@ fn node* type_enum(table mut* tt, string name, void mut* decl) {
 
 /// A pointer, `void*`, span or string: the kinds that may be `own`.
 /// D17.1
-fn bool type_is_reference(node* t) {
+fn type_is_reference(node* t) bool {
     return t->kind == type_kind.k_ptr || t->kind == type_kind.k_voidptr ||
            t->kind == type_kind.k_span || t->kind == type_kind.k_string;
 }
 
-fn bool type_is_int(node* t) {
+fn type_is_int(node* t) bool {
     return t->kind == type_kind.k_prim && prim.prim_is_integer(t->prim);
 }
 
-fn bool type_is_float(node* t) {
+fn type_is_float(node* t) bool {
     return t->kind == type_kind.k_prim && prim.prim_is_float(t->prim);
 }
 
 /// Integer, float, bool, char, enum.
-fn bool type_is_scalar(node* t) {
+fn type_is_scalar(node* t) bool {
     return t->kind == type_kind.k_prim || t->kind == type_kind.k_enum;
 }
 
 /// Skips the fixed arrays around a type: the node whose storage the arrays'
 /// elements share.
 /// D5.2
-fn node* behind_arrays(node* t) {
+fn behind_arrays(node* t) node* {
     node* mut cur = t;
     while (cur->kind == type_kind.k_array) {
         cur = cur->elem;
@@ -525,7 +525,7 @@ fn node* behind_arrays(node* t) {
 /// string, whose characters are never mutable and which has no target level. The
 /// level a `void*` reaches has no type, and `void mut*` marks it writable.
 /// D3.11, D5.2
-fn bool has_target_level(node* t) {
+fn has_target_level(node* t) bool {
     return t->kind == type_kind.k_ptr || t->kind == type_kind.k_voidptr ||
            t->kind == type_kind.k_span;
 }
@@ -535,7 +535,7 @@ fn bool has_target_level(node* t) {
 /// uint32_t; every count here is a u64, since a span's `.len` is one and fort
 /// promotes nothing.
 /// D5.2, D6.2
-fn u64 type_levels(node* t) {
+fn type_levels(node* t) u64 {
     u64 mut n = 0;
     node* mut cur = behind_arrays(t);
     while (has_target_level(cur)) {
@@ -551,7 +551,7 @@ fn u64 type_levels(node* t) {
 /// level k and its `is_own` the ownership mark of that reference. A `string` node
 /// is reported, since it carries an `own` mark, although it adds no level.
 /// D17.2
-fn node* type_ref_at(node* t, u64 k) {
+fn type_ref_at(node* t, u64 k) node* {
     if (k == 0) {
         panic("types.type_ref_at: level 0 is not a reference");
     }
@@ -574,7 +574,7 @@ fn node* type_ref_at(node* t, u64 k) {
 /// characters of a string. Level 1 of a `void*` is the storage it reaches,
 /// which `void mut*` marks writable.
 /// D3.11
-fn bool type_level_mut(node* t, u64 k) {
+fn type_level_mut(node* t, u64 k) bool {
     node* r = type_ref_at(t, k);
     return r != null && r->is_mut;
 }
@@ -583,7 +583,7 @@ fn bool type_level_mut(node* t, u64 k) {
 /// or through nested aggregates. A struct answers from its layout, so it must be
 /// resolved; a struct in error answers false.
 /// D17.7
-fn bool type_is_owning_aggregate(node* t) {
+fn type_is_owning_aggregate(node* t) bool {
     if (t->kind == type_kind.k_array) {
         node* e = t->elem;
         return (type_is_reference(e) && e->is_own) || type_is_owning_aggregate(e);
@@ -607,7 +607,7 @@ fn bool type_is_owning_aggregate(node* t) {
 /// whole either way: the marks of its parameters and result are part of its
 /// identity, not of the chain that reaches it.
 /// D3.10, D3.12
-fn bool same(node* a, node* b, bool bits) {
+fn same(node* a, node* b, bool bits) bool {
     if (a == b) {
         return true;
     }
@@ -654,13 +654,13 @@ fn bool same(node* a, node* b, bool bits) {
 /// Identity: nominal for struct and enum, structural otherwise, with the `mut`
 /// and `own` bits of every level.
 /// D3.12, D17.1
-fn bool type_equal(node* a, node* b) {
+fn type_equal(node* a, node* b) bool {
     return same(a, b, true);
 }
 
 /// Whether the equality of type_equal holds when the `mut` and `own` bits of
 /// the reference chain are ignored: the shape of the two types is the same.
-fn bool type_same_shape(node* a, node* b) {
+fn type_same_shape(node* a, node* b) bool {
     return same(a, b, false);
 }
 
@@ -671,7 +671,7 @@ fn bool type_same_shape(node* a, node* b) {
 /// between the binding and this reference is immutable in `dst` when
 /// `prefix_immutable`, and some reference outside it is `own` in `dst` when
 /// `outer_own`.
-fn bool convertible(node* dst, node* src, bool prefix_immutable, bool outer_own) {
+fn convertible(node* dst, node* src, bool prefix_immutable, bool outer_own) bool {
     if (dst == src) {
         return true;
     }
@@ -723,7 +723,7 @@ fn bool convertible(node* dst, node* src, bool prefix_immutable, bool outer_own)
 /// drops. An error type on either side is accepted; a `void` or `null` type as the
 /// destination, and `void` as the source, are refused (no value has those types).
 /// D5.4, D17.4
-fn bool type_assignable(node* dst, node* src) {
+fn type_assignable(node* dst, node* src) bool {
     if (dst->kind == type_kind.k_error || src->kind == type_kind.k_error) {
         // A poisoned type converts either way, so one error is reported once.
         return true;
@@ -749,7 +749,7 @@ fn bool type_assignable(node* dst, node* src) {
 /// Adding `mut` is refused here as everywhere, so `cast("abc", u8 mut@)` no
 /// longer aliases read-only bytes as writable ones.
 /// D3.14, D17.12
-fn bool string_family(node* t) {
+fn string_family(node* t) bool {
     if (t->kind == type_kind.k_string) {
         return true;
     }
@@ -757,20 +757,20 @@ fn bool string_family(node* t) {
            (t->elem->prim == prim.prim_kind.prim_char || t->elem->prim == prim.prim_kind.prim_u8);
 }
 
-fn bool is_u64(node* t) {
+fn is_u64(node* t) bool {
     return t->kind == type_kind.k_prim && t->prim == prim.prim_kind.prim_u64;
 }
 
-fn bool is_ptr_like(node* t) {
+fn is_ptr_like(node* t) bool {
     return t->kind == type_kind.k_ptr || t->kind == type_kind.k_voidptr;
 }
 
-fn bool is_prim(node* t, prim.prim_kind k) {
+fn is_prim(node* t, prim.prim_kind k) bool {
     return t->kind == type_kind.k_prim && t->prim == k;
 }
 
 /// The scalar rows of the matrix: integers, floats, bool, char and enums.
-fn bool scalar_cast_allowed(node* dst, node* src) {
+fn scalar_cast_allowed(node* dst, node* src) bool {
     bool src_int = type_is_int(src);
     bool dst_int = type_is_int(dst);
     bool src_num = src_int || type_is_float(src);
@@ -796,7 +796,7 @@ fn bool scalar_cast_allowed(node* dst, node* src) {
 /// depth: the inner objects would then be owned by nobody, which no cast
 /// licenses either.
 /// D17.4
-fn bool own_orphaned(node* dst, node* src, bool outer_own) {
+fn own_orphaned(node* dst, node* src, bool outer_own) bool {
     node* mut d = dst;
     node* mut s = src;
     bool mut outer = outer_own;
@@ -828,14 +828,14 @@ fn bool own_orphaned(node* dst, node* src, bool outer_own) {
 /// this row's work, because `type_cast_adds_mut` already refused every span
 /// whose marks add one.
 /// D3.10, D3.14
-fn bool span_cast_allowed(node* dst, node* src) {
+fn span_cast_allowed(node* dst, node* src) bool {
     return type_same_shape(dst, src) && !own_orphaned(dst, src, false);
 }
 
 /// Whether `t` marks any level `mut`, at this position or below it. A fixed
 /// array shares the storage of its elements and adds no level of its own.
 /// D3.14, D5.2
-fn bool marks_mut(node* t) {
+fn marks_mut(node* t) bool {
     if (t->kind == type_kind.k_array) {
         return marks_mut(t->elem);
     }
@@ -859,7 +859,7 @@ fn bool marks_mut(node* t) {
 /// `string`, or a pointee type the cast reinterprets -- `dst` may mark no level
 /// below that point, because `src` promises nothing about that storage.
 /// D3.14
-fn bool type_cast_adds_mut(node* dst, node* src) {
+fn type_cast_adds_mut(node* dst, node* src) bool {
     if (dst->kind == type_kind.k_array) {
         // D5.2: the array adds no level, so the two chains stay in step
         if (src->kind == type_kind.k_array) {
@@ -897,7 +897,7 @@ fn bool type_cast_adds_mut(node* dst, node* src) {
 /// would be allowed over this type, which is how it tells a cast refused for
 /// the mark from one refused for the element type as well.
 /// D3.10, D3.14
-fn node* type_without_mut(table mut* tt, node* t) {
+fn type_without_mut(table mut* tt, node* t) node* {
     if (t->kind == type_kind.k_ptr) {
         return type_ptr(tt, type_without_mut(tt, t->elem), t->is_own, false);
     }
@@ -918,7 +918,7 @@ fn node* type_without_mut(table mut* tt, node* t) {
 /// `move` rules are the checker's, and so is the refusal of a binding-level `mut`
 /// in a cast target.
 /// D3.14, D17.5, D17.8
-fn bool type_cast_allowed(node* dst, node* src) {
+fn type_cast_allowed(node* dst, node* src) bool {
     if (dst->kind == type_kind.k_error || src->kind == type_kind.k_error) {
         return true;
     }
@@ -973,7 +973,7 @@ fn bool type_cast_allowed(node* dst, node* src) {
 /// `v` rounded up to a multiple of `align` in `*out`; false when the result
 /// would exceed TYPE_MAX_SIZE.
 /// D3.4
-fn bool round_up(u64 v, u64 align, u64 mut* out) {
+fn round_up(u64 v, u64 align, u64 mut* out) bool {
     if (align == 0) {
         panic("types.round_up: alignment 0");
     }
@@ -989,7 +989,7 @@ fn bool round_up(u64 v, u64 align, u64 mut* out) {
     return true;
 }
 
-fn layout mut* layout_of(node* s) {
+fn layout_of(node* s) layout mut* {
     if (s->kind != type_kind.k_struct) {
         panic("types: layout of a non-struct");
     }
@@ -997,7 +997,7 @@ fn layout mut* layout_of(node* s) {
 }
 
 /// The layout of a struct for sizeof and alignof: resolved or in error.
-fn layout* laid_out(node* s) {
+fn laid_out(node* s) layout* {
     layout* l = layout_of(s);
     if (l->state != layout_state.l_resolved && l->state != layout_state.l_error) {
         panic("types: sizeof of a struct without layout");
@@ -1008,7 +1008,7 @@ fn layout* laid_out(node* s) {
 /// `len * sizeof(elem)` in `*out`; false when the product would exceed
 /// TYPE_MAX_SIZE.
 /// D3.4
-fn bool array_size(node* t, u64 mut* out) {
+fn array_size(node* t, u64 mut* out) bool {
     u64 mut elem = 0;
     if (!size_checked(t->elem, &elem)) {
         return false;
@@ -1023,7 +1023,7 @@ fn bool array_size(node* t, u64 mut* out) {
 /// The size of `t` in `*out`; false when it would exceed TYPE_MAX_SIZE. Every
 /// size the compiler computes goes through here, so no size arithmetic can wrap.
 /// D3.4
-fn bool size_checked(node* t, u64 mut* out) {
+fn size_checked(node* t, u64 mut* out) bool {
     switch (t->kind) {
     case type_kind.k_void, type_kind.k_null:
         panic("types: sizeof of void or null");
@@ -1059,7 +1059,7 @@ fn bool size_checked(node* t, u64 mut* out) {
 /// Whether the size of `t` fits the largest object the compiler admits, 2^63 -
 /// 1 bytes.
 /// D3.4
-fn bool type_size_fits(node* t) {
+fn type_size_fits(node* t) bool {
     u64 mut size = 0;
     return size_checked(t, &size);
 }
@@ -1069,7 +1069,7 @@ fn bool type_size_fits(node* t) {
 /// type type_size_fits refuses is a broken precondition too, so the caller asks
 /// first.
 /// D3.1, D3.15
-fn u64 type_sizeof(node* t) {
+fn type_sizeof(node* t) u64 {
     u64 mut size = 0;
     if (!size_checked(t, &size)) {
         panic("types.type_sizeof: sizeof of a type that is too large");
@@ -1079,7 +1079,7 @@ fn u64 type_sizeof(node* t) {
 
 /// Alignment in bytes; it equals the size for every primitive.
 /// D3.1, D3.15
-fn u64 type_alignof(node* t) {
+fn type_alignof(node* t) u64 {
     switch (t->kind) {
     case type_kind.k_void, type_kind.k_null:
         panic("types.type_alignof: alignof of void or null");
@@ -1107,13 +1107,13 @@ fn u64 type_alignof(node* t) {
 /// and `type_layout_fail` the structs on the path); then `type_layout_struct(S,
 /// ...)`.
 /// D3.8
-fn layout_state type_layout_state(node* s) {
+fn type_layout_state(node* s) layout_state {
     return layout_of(s)->state;
 }
 
 /// Unresolved to resolving: true. Resolving: false, a cycle. Resolved and in
 /// error are broken preconditions.
-fn bool type_layout_begin(node* s) {
+fn type_layout_begin(node* s) bool {
     layout mut* l = layout_of(s);
     if (l->state == layout_state.l_unresolved) {
         l->state = layout_state.l_resolving;
@@ -1126,7 +1126,7 @@ fn bool type_layout_begin(node* s) {
 }
 
 /// Marks a struct in error from any state.
-fn void type_layout_fail(node* s) {
+fn type_layout_fail(node* s) void {
     layout mut* l = layout_of(s);
     l->state = layout_state.l_error;
     l->size = 0;
@@ -1136,7 +1136,7 @@ fn void type_layout_fail(node* s) {
 
 /// The struct whose layout `sizeof(t)` needs and that is not resolved or in
 /// error yet: `t` itself, the element's for a fixed array, or null.
-fn node* type_layout_pending(node* t) {
+fn type_layout_pending(node* t) node* {
     node* cur = behind_arrays(t);
     if (cur->kind != type_kind.k_struct) {
         return null;
@@ -1160,7 +1160,7 @@ fn node* type_layout_pending(node* t) {
 /// type_layout_fail, the offsets are unspecified, and the caller reports "type is
 /// too large" the way it reports the infinite-size error of a cycle.
 /// D3.4, D3.8, D9.9
-fn bool type_layout_struct(node* s, node*@ fields, u64 mut@ offsets) {
+fn type_layout_struct(node* s, node*@ fields, u64 mut@ offsets) bool {
     layout mut* l = layout_of(s);
     if (l->state == layout_state.l_resolved || l->state == layout_state.l_error) {
         panic("types.type_layout_struct: layout of a struct twice");
@@ -1231,18 +1231,18 @@ struct spine {
     bool paren;
 }
 
-fn bool is_array_node(node* t) {
+fn is_array_node(node* t) bool {
     return t->kind == type_kind.k_array;
 }
 
 /// A `*` or `@` suffix: the two that introduce a reference.
 /// D3.6
-fn bool is_ref_node(node* t) {
+fn is_ref_node(node* t) bool {
     return t->kind == type_kind.k_ptr || t->kind == type_kind.k_voidptr ||
            t->kind == type_kind.k_span;
 }
 
-fn void spine_collect(spine mut* sp, node* t) {
+fn spine_collect(spine mut* sp, node* t) void {
     bool mut seen_array = false;
     bool mut seen_ref_after_array = false;
     node* mut cur = t;
@@ -1283,7 +1283,7 @@ fn void spine_collect(spine mut* sp, node* t) {
     }
 }
 
-fn void spell_base(node* t, strbuf.str_buf mut* out) {
+fn spell_base(node* t, strbuf.str_buf mut* out) void {
     switch (t->kind) {
     case type_kind.k_void:
         strbuf.append(out, "void");
@@ -1304,13 +1304,8 @@ fn void spell_base(node* t, strbuf.str_buf mut* out) {
         strbuf.append(out, "<error>");
         return;
     case type_kind.k_fn:
-        strbuf.append(out, "fn ");
-        if (t->is_noreturn) {
-            strbuf.append(out, "noreturn");
-        } else {
-            spell(t->elem, false, out);
-        }
-        strbuf.push(out, '(');
+        // D8.1: the result comes last, as it does in a declaration
+        strbuf.append(out, "fn (");
         u64 mut i = 0;
         while (i < t->params.len) {
             if (i > 0) {
@@ -1320,7 +1315,12 @@ fn void spell_base(node* t, strbuf.str_buf mut* out) {
             spell(p, false, out);
             i += 1;
         }
-        strbuf.push(out, ')');
+        strbuf.append(out, ") ");
+        if (t->is_noreturn) {
+            strbuf.append(out, "noreturn");
+        } else {
+            spell(t->elem, false, out);
+        }
         return;
     case type_kind.k_ptr, type_kind.k_voidptr, type_kind.k_array, type_kind.k_span:
         break;
@@ -1333,7 +1333,7 @@ fn void spell_base(node* t, strbuf.str_buf mut* out) {
 /// shares its storage with its elements, or level 0 when no reference is outside
 /// it.
 /// D5.2, D5.3
-fn bool holder_mut(spine* sp, u64 i, bool mut0) {
+fn holder_mut(spine* sp, u64 i, bool mut0) bool {
     u64 mut j = i;
     while (j > 0) {
         if (is_ref_node(sp->nodes[j - 1])) {
@@ -1350,7 +1350,7 @@ fn bool holder_mut(spine* sp, u64 i, bool mut0) {
 /// the last of its group: they share one storage, whose marker is written after
 /// the last length of the group.
 /// D5.3, D17.2
-fn void spell_suffix(spine* sp, u64 i, bool mut0, strbuf.str_buf mut* out) {
+fn spell_suffix(spine* sp, u64 i, bool mut0, strbuf.str_buf mut* out) void {
     node* t = sp->nodes[i];
     if (is_array_node(t)) {
         strbuf.push(out, '[');
@@ -1379,7 +1379,7 @@ fn void spell_suffix(spine* sp, u64 i, bool mut0, strbuf.str_buf mut* out) {
 /// innermost first, then the array group outermost first, then the trailing
 /// reference group, innermost first.
 /// D3.6
-fn void spell_suffixes(spine* sp, bool mut0, strbuf.str_buf mut* out) {
+fn spell_suffixes(spine* sp, bool mut0, strbuf.str_buf mut* out) void {
     u64 mut i = sp->n;
     while (i > sp->end_array) {
         spell_suffix(sp, i - 1, mut0, out);
@@ -1397,7 +1397,7 @@ fn void spell_suffixes(spine* sp, bool mut0, strbuf.str_buf mut* out) {
     }
 }
 
-fn void spell(node* t, bool mut0, strbuf.str_buf mut* out) {
+fn spell(node* t, bool mut0, strbuf.str_buf mut* out) void {
     spine mut sp = spine{};
     spine_collect(&sp, t);
     // The base position: the storage of the values of the base type, which is the
@@ -1432,7 +1432,7 @@ fn void spell(node* t, bool mut0, strbuf.str_buf mut* out) {
 /// suffix, which does not parse: `(i32[4])*[2]`. The null type is `null`, the
 /// error type `<error>`.
 /// D3.6, D5.3
-fn void type_to_str(node* t, strbuf.str_buf mut* out) {
+fn type_to_str(node* t, strbuf.str_buf mut* out) void {
     spell(t, false, out);
 }
 
@@ -1440,7 +1440,7 @@ fn void type_to_str(node* t, strbuf.str_buf mut* out) {
 /// last one: `node* mut`, `u8@* mut`, `i32[4] mut`, `string own mut`. Level 0 is a
 /// position like any other, so this is type_to_str with the last marker written.
 /// D5.3
-fn void type_to_str_decl(node* t, bool mut0, strbuf.str_buf mut* out) {
+fn type_to_str_decl(node* t, bool mut0, strbuf.str_buf mut* out) void {
     spell(t, mut0, out);
 }
 
@@ -1474,13 +1474,13 @@ struct build_result {
     string error;
 }
 
-fn build_result build_error(string msg) {
+fn build_error(string msg) build_result {
     return build_result{null, false, msg};
 }
 
 /// A `*` or `@` suffix, the two that introduce a reference.
 /// D3.6
-fn bool suffix_is_ref(suffix* s) {
+fn suffix_is_ref(suffix* s) bool {
     return s->kind == suffix_kind.s_ptr || s->kind == suffix_kind.s_span;
 }
 
@@ -1492,7 +1492,7 @@ struct groups {
     u64 n;
 }
 
-fn bool split_groups(suffix@ s, groups mut* g) {
+fn split_groups(suffix@ s, groups mut* g) bool {
     u64 mut i = 0;
     while (i < s.len && suffix_is_ref(&s[i])) {
         i += 1;
@@ -1513,7 +1513,7 @@ fn bool split_groups(suffix@ s, groups mut* g) {
 /// inside-out, so each group is applied in source order, and the array group reads
 /// outside-in, so it is applied in reverse.
 /// D3.6
-fn u64 apply_order(groups* g, u64 k) {
+fn apply_order(groups* g, u64 k) u64 {
     if (k >= g->e && k < g->a) {
         return g->a - 1 - (k - g->e);
     }
@@ -1525,7 +1525,7 @@ fn u64 apply_order(groups* g, u64 k) {
 /// storage with its elements, so a `mut` on the position an array suffix follows
 /// belongs after that array's length instead.
 /// D5.3
-fn string check_positions(node* base, bool base_own, bool base_mut, suffix@ s) {
+fn check_positions(node* base, bool base_own, bool base_mut, suffix@ s) string {
     // D3.11, D5.3: `void` is a return type or the base of a pointer, and the
     // only marker it takes is the `mut` of `void mut*`, which marks the storage
     // that pointer reaches. `void mut`, `void own`, `void@` and `void[4]` name
@@ -1586,8 +1586,8 @@ fn string check_positions(node* base, bool base_own, bool base_mut, suffix@ s) {
 /// or of a return type never carries `mut`, and neither does the outermost
 /// position of a cast target.
 /// D3.6, D3.14, D5.3, D5.5, D17.2
-fn build_result type_build(table mut* tt, bool base_own, bool base_mut, node* base,
-                           suffix@ suffixes) {
+fn type_build(table mut* tt, bool base_own, bool base_mut, node* base,
+                           suffix@ suffixes) build_result {
     if (base->kind == type_kind.k_error) {
         // The base already failed: poison the result rather than report a
         // second diagnostic about its markers.

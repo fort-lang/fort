@@ -106,7 +106,7 @@ struct probe {
 }
 
 /// What the caller gets back.
-fn u64 read(probe* p) {
+fn read(probe* p) u64 {
     // The order matters here.
     return p->value;
 }
@@ -114,15 +114,15 @@ fn u64 read(probe* p) {
 // A free note that stands alone and marks nothing.
 
 /// D9.6: a module exports every top-level declaration
-fn u64 twice(u64 n) {
+fn twice(u64 n) u64 {
     return n * 2;
 }
 
 /// The sum of two probes. The signature wraps, so a comment inside it stands
 /// in a parameter list and not on a declaration.
-fn u64 add(u64 a,
+fn add(u64 a,
            // the second operand, named here because the line ran out
-           u64 b) {
+           u64 b) u64 {
     return a + b;
 }
 """
@@ -138,7 +138,7 @@ import std.io;
 // D9.6
 
 // A program is the end of the chain, so nothing here is an interface.
-fn void probe() {
+fn probe() void {
     io.println("ok");
 }
 """
@@ -1065,15 +1065,15 @@ class HistoryRepositoryTest(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         problems, count = lint.rule_history(root)
         self.assertEqual(problems, [])
-        self.assertEqual(count, "history: 54 history fields, 4 with a dated note")
+        self.assertEqual(count, "history: 55 history fields, 4 with a dated note")
 
     def test_the_field_count_is_the_one_grep_counts(self):
-        # `grep -c '^- history:' spec/decisions.md` says 54 (notes/style.md 4)
+        # `grep -c '^- history:' spec/decisions.md` says 55 (notes/style.md 4)
         root = Path(__file__).resolve().parent.parent
         text = (root / "spec/decisions.md").read_text(encoding="utf-8")
-        self.assertEqual(len(lint.history_fields(text)), 54)
+        self.assertEqual(len(lint.history_fields(text)), 55)
         self.assertEqual(
-            sum(1 for line in text.split("\n") if line.startswith("- history:")), 54)
+            sum(1 for line in text.split("\n") if line.startswith("- history:")), 55)
 
 
 class BudgetTest(unittest.TestCase):

@@ -90,7 +90,7 @@ fi
 initialize='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
 initialized='{"jsonrpc":"2.0","method":"initialized","params":{}}'
 opened='{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":'
-opened=$opened'{"uri":"file:///a.ft","languageId":"fort","version":1,"text":"fn i32 main()"}}}'
+opened=$opened'{"uri":"file:///a.ft","languageId":"fort","version":1,"text":"fn main() i32"}}}'
 hover='{"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{}}'
 shutdown='{"jsonrpc":"2.0","id":3,"method":"shutdown","params":null}'
 exit_note='{"jsonrpc":"2.0","method":"exit","params":null}'
@@ -161,7 +161,7 @@ fi
 # block, which is the desynchronisation this session exists to catch.
 utf8_opened='{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":'
 utf8_opened=$utf8_opened'{"uri":"file:///caf%C3%A9.ft","languageId":"fort",'
-utf8_opened=$utf8_opened'"version":1,"text":"// caf'"$e_acute $clef"'\nfn i32 main()"}}}'
+utf8_opened=$utf8_opened'"version":1,"text":"// caf'"$e_acute $clef"'\nfn main() i32"}}}'
 {
     frame "$initialize"
     frame "$initialized"

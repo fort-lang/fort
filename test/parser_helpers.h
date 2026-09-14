@@ -5,7 +5,7 @@
 // A type, an expression and a statement are each tested through parse_module,
 // the parser's only entry point, by wrapping them in the smallest declaration
 // that carries them: `<type> x = 0;`, `i32 x = <expr>;` and
-// `fn void f() { <stmt> }`.
+// `fn f() void { <stmt> }`.
 #ifndef FORT_TEST_PARSER_HELPERS_H
 #define FORT_TEST_PARSER_HELPERS_H
 
@@ -235,9 +235,9 @@ static inline const char* dump_expr(const char* expr_src) {
     return dumped(decl->b);
 }
 
-/// The first statement of `fn void f() { <stmt> }` (grammar.md 5).
+/// The first statement of `fn f() void { <stmt> }` (grammar.md 5).
 static inline const char* dump_stmt(const char* stmt_src) {
-    const ast_node_t* mod = parse_text(pt_wrap("fn void f() {\n", stmt_src, "\n}"));
+    const ast_node_t* mod = parse_text(pt_wrap("fn f() void {\n", stmt_src, "\n}"));
     const ast_node_t* fn = pt_decl(mod, 0);
     if (fn == NULL || fn->b == NULL || ast_len(fn->b) == 0) {
         return parse_diags();
@@ -270,7 +270,7 @@ static inline const char* expr_fails(const char* expr_src) {
 }
 
 static inline const char* stmt_fails(const char* stmt_src) {
-    return parse_fails(pt_wrap("fn void f() {\n", stmt_src, "\n}"));
+    return parse_fails(pt_wrap("fn f() void {\n", stmt_src, "\n}"));
 }
 
 #endif

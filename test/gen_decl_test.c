@@ -86,7 +86,7 @@ TEST(the_compiler_declares_no_c_library_symbol_of_its_own_accord, {
     // `nobuiltin` exists to prevent, arriving from the other side.
     // D9.8
     TEST_ASSERT_TRUE(emit("struct point {\n    i32 x;\n    i32 y;\n}\n"
-                          "fn i32 main() {\n"
+                          "fn main() i32 {\n"
                           "    string a = \"ab\";\n"
                           "    println(a == \"cd\");\n"
                           "    point p = {1, 2};\n"
@@ -104,14 +104,14 @@ TEST(the_compiler_declares_no_c_library_symbol_of_its_own_accord, {
     TEST_ASSERT_EQ_STR(verified(), "verified");
     // The scanner finds a foreign declaration when there is one, so the empty
     // answer above is an answer and not an empty walk.
-    TEST_ASSERT_TRUE(emit("extern fn i32 puts(char* s);\n"
-                          "fn i32 main() { return puts(\"x\".ptr); }\n"));
+    TEST_ASSERT_TRUE(emit("extern fn puts(char* s) i32;\n"
+                          "fn main() i32 { return puts(\"x\".ptr); }\n"));
     TEST_ASSERT_EQ_STR(first_foreign_declaration(), "@puts");
 })
 
 TEST(an_extern_is_declared_and_called_through_a_variadic_type, {
-    TEST_ASSERT_TRUE(emit("extern fn i32 printf(char* fmt);\n"
-                          "fn i32 main() { string s = \"x\"; return printf(s.ptr); }\n"));
+    TEST_ASSERT_TRUE(emit("extern fn printf(char* fmt) i32;\n"
+                          "fn main() i32 { string s = \"x\"; return printf(s.ptr); }\n"));
     TEST_ASSERT_EQ_STR(found("declare i32 @printf(ptr, ...)"), "declare i32 @printf(ptr, ...)");
     TEST_ASSERT_EQ_STR(found("call i32 (ptr, ...) @printf(ptr %t"),
                        "call i32 (ptr, ...) @printf(ptr %t");
@@ -123,15 +123,15 @@ TEST(an_extern_is_declared_and_called_through_a_variadic_type, {
 })
 
 TEST(an_extern_with_no_parameter_is_still_variadic, {
-    TEST_ASSERT_TRUE(emit("extern fn i32 rand();\nfn i32 main() { return rand(); }\n"));
+    TEST_ASSERT_TRUE(emit("extern fn rand() i32;\nfn main() i32 { return rand(); }\n"));
     TEST_ASSERT_EQ_STR(found("declare i32 @rand(...)"), "declare i32 @rand(...)");
     TEST_ASSERT_EQ_STR(found("call i32 (...) @rand() #3"), "call i32 (...) @rand() #3");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
 TEST(an_extern_narrow_signature_carries_the_c_attributes, {
-    TEST_ASSERT_TRUE(emit("extern fn i8 narrow(i8 a, u16 b, bool c, char d);\n"
-                          "fn i32 main() { return cast(narrow(1, 2, true, \'x\'), i32); }\n"));
+    TEST_ASSERT_TRUE(emit("extern fn narrow(i8 a, u16 b, bool c, char d) i8;\n"
+                          "fn main() i32 { return cast(narrow(1, 2, true, \'x\'), i32); }\n"));
     // `bool`, `char`, `u8` and `u16` carry `zeroext` and `i8` and `i16`
     // `signext` in an extern signature as in a fort one (item 7), and `char`
     // is C's `unsigned char`, so it is `i8 zeroext`.
@@ -154,8 +154,8 @@ TEST(a_wide_extern_signature_carries_no_extension_attribute, {
     // LLVM applies to a value C never extends.
     // D9.9, D9.8
     TEST_ASSERT_TRUE(emit("enum color { red, green }\n"
-                          "extern fn u64 wide(i32 a, u32 b, i64 c, color d, void* e);\n"
-                          "fn i32 main() { return cast(wide(1, 2, 3, color.red, null), i32); }\n"));
+                          "extern fn wide(i32 a, u32 b, i64 c, color d, void* e) u64;\n"
+                          "fn main() i32 { return cast(wide(1, 2, 3, color.red, null), i32); }\n"));
     const char* decl = "declare i64 @wide(i32, i32, i64, i32, ptr, ...)";
     TEST_ASSERT_EQ_STR(found(decl), decl);
     const char* call = "call i64 (i32, i32, i64, i32, ptr, ...) @wide(i32 1, i32 2, i64 3,"
@@ -170,7 +170,7 @@ TEST(no_entry_point_of_section_5_1_is_ever_declared, {
     // program below reaches printing, string equality, allocation, a bounds
     // check and a failure path (item 8).
     // T-018, D9.10: the ticket whose `opt` run rejected the redefinition
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n"
                           "    string a = \"ab\";\n"
                           "    println(a == \"cd\");\n"
                           "    i32 mut@ own xs = new(i32, 3);\n"
@@ -199,8 +199,8 @@ TEST(a_fort_rt_name_is_an_ordinary_extern, {
     // point is an ordinary declaration of an ordinary C symbol, declared and
     // called through the variadic type of item 8 with its `#3`.
     // D9.8
-    TEST_ASSERT_TRUE(emit("extern fn void fort_rt_del(void* p);\n"
-                          "fn i32 main() { fort_rt_del(null); return 0; }\n"));
+    TEST_ASSERT_TRUE(emit("extern fn fort_rt_del(void* p) void;\n"
+                          "fn main() i32 { fort_rt_del(null); return 0; }\n"));
     TEST_ASSERT_EQ_STR(found("declare void @fort_rt_del(ptr, ...)"),
                        "declare void @fort_rt_del(ptr, ...)");
     TEST_ASSERT_EQ_STR(found("call void (ptr, ...) @fort_rt_del(ptr null) #3"),
@@ -210,7 +210,7 @@ TEST(a_fort_rt_name_is_an_ordinary_extern, {
 
 TEST(the_intrinsics_come_last_in_their_table_order, {
     TEST_ASSERT_TRUE(emit("struct point { i32 x; i32 y; }\n"
-                          "fn i32 main() {\n    point p = {};\n    point q = p;\n"
+                          "fn main() i32 {\n    point p = {};\n    point q = p;\n"
                           "    i32 mut a = 1;\n    a = a + 1;\n    return q.x;\n}\n"));
     TEST_ASSERT_TRUE(before("declare void @llvm.memcpy", "declare void @llvm.memset"));
     TEST_ASSERT_TRUE(before("declare void @llvm.memset", "declare { i32, i1 } @llvm.sadd"));
@@ -227,8 +227,8 @@ TEST(only_referenced_declarations_are_emitted, {
 })
 
 TEST(each_declaration_group_is_separated_by_a_blank_line, {
-    TEST_ASSERT_TRUE(emit("extern fn i32 rand();\n"
-                          "fn i32 main() {\n    i32[2] a = {};\n    i64 i = 0;\n"
+    TEST_ASSERT_TRUE(emit("extern fn rand() i32;\n"
+                          "fn main() i32 {\n    i32[2] a = {};\n    i64 i = 0;\n"
                           "    println(a[i], rand());\n    return 0;\n}\n"));
     // The two groups, in order and separated by one blank line (item 8).
     TEST_ASSERT_EQ_STR(found("declare i32 @rand(...)\n\ndeclare void @llvm.memset"),

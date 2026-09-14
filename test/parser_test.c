@@ -137,7 +137,7 @@ TEST(cast_takes_an_expression_and_a_type, {
 TEST(sizeof_takes_a_type_only, {
     TEST_ASSERT_EQ_STR(dump_expr("sizeof(i32)"), "(sizeof (type (prim i32)))");
     TEST_ASSERT_EQ_STR(dump_expr("sizeof(u8[4])"), "(sizeof (type (prim u8) (array (int 4))))");
-    TEST_ASSERT_EQ_STR(dump_expr("sizeof(fn i32(i32))"),
+    TEST_ASSERT_EQ_STR(dump_expr("sizeof(fn (i32) i32)"),
                        "(sizeof (type (fn-type (type (prim i32)) (type (prim i32)))))");
 })
 
@@ -338,7 +338,7 @@ TEST(arguments_and_members_are_full_expressions, {
 TEST(cast_and_sizeof_take_any_type, {
     TEST_ASSERT_EQ_STR(dump_expr("cast(p, void*)"), "(cast (ident p) (type (void) (ptr)))");
     TEST_ASSERT_EQ_STR(dump_expr("cast(s, u8@)"), "(cast (ident s) (type (prim u8) (span)))");
-    TEST_ASSERT_EQ_STR(dump_expr("cast(f, fn i32(i32))"),
+    TEST_ASSERT_EQ_STR(dump_expr("cast(f, fn (i32) i32)"),
                        "(cast (ident f) (type (fn-type (type (prim i32)) (type (prim i32)))))");
     TEST_ASSERT_EQ_STR(dump_expr("cast(x + 1, i64)"),
                        "(cast (binary + (ident x) (int 1)) (type (prim i64)))");

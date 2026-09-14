@@ -110,28 +110,31 @@ TEST(d17_2_own_on_string_and_before_an_array, {
 // D3.10
 
 TEST(function_types_read_as_a_base_type, {
-    TEST_ASSERT_EQ_STR(dump_type("fn void()"), "(type (fn-type (type (void))))");
-    TEST_ASSERT_EQ_STR(dump_type("fn i32(i32)"),
+    TEST_ASSERT_EQ_STR(dump_type("fn () void"), "(type (fn-type (type (void))))");
+    TEST_ASSERT_EQ_STR(dump_type("fn (i32) i32"),
                        "(type (fn-type (type (prim i32)) (type (prim i32))))");
-    TEST_ASSERT_EQ_STR(dump_type("fn i32(i32, i32)"),
+    TEST_ASSERT_EQ_STR(dump_type("fn (i32, i32) i32"),
                        "(type (fn-type (type (prim i32)) (type (prim i32)) (type (prim i32))))");
-    TEST_ASSERT_EQ_STR(dump_type("fn noreturn(string)"),
+    TEST_ASSERT_EQ_STR(dump_type("fn (string) noreturn"),
                        "(type (fn-type (type (noreturn)) (type (string))))");
 })
 
 // Suffixes after a function type apply to the function type.
 // D3.6
-TEST(function_types_take_suffixes_and_markers, {
-    TEST_ASSERT_EQ_STR(dump_type("fn i32(i32)[4]"),
-                       "(type (fn-type (type (prim i32)) (type (prim i32))) (array (int 4)))");
-    TEST_ASSERT_EQ_STR(dump_type("fn i32[4](i32)"),
+// A function type ends at its return type, so every suffix and every marker
+// written after it belongs to that return type and the function type carries
+// none of its own. To suffix or to mark one, wrap it in a struct, the escape
+// grammar.md 4 already prescribes for `i32[4]*[2]`.
+// D3.10, D8.1
+TEST(a_suffix_after_a_function_type_belongs_to_its_return_type, {
+    TEST_ASSERT_EQ_STR(dump_type("fn (i32) i32[4]"),
                        "(type (fn-type (type (prim i32) (array (int 4))) (type (prim i32))))");
-    TEST_ASSERT_EQ_STR(dump_type("fn i32(i32) mut"),
-                       "(type (fn-type (type (prim i32)) (type (prim i32))) mut)");
-    TEST_ASSERT_EQ_STR(dump_type("fn void(node mut*)"),
+    TEST_ASSERT_EQ_STR(dump_type("fn (i32) i32*"),
+                       "(type (fn-type (type (prim i32) (ptr)) (type (prim i32))))");
+    TEST_ASSERT_EQ_STR(dump_type("fn (i32) i32 mut"),
+                       "(type (fn-type (type (prim i32) mut) (type (prim i32))))");
+    TEST_ASSERT_EQ_STR(dump_type("fn (node mut*) void"),
                        "(type (fn-type (type (void)) (type (name node) mut (ptr))))");
-    TEST_ASSERT_EQ_STR(dump_type("fn i32(i32)*"),
-                       "(type (fn-type (type (prim i32)) (type (prim i32))) (ptr))");
 })
 
 // ---- the out-parameter shape ----------------------------------------------
@@ -191,8 +194,8 @@ TEST(an_own_on_something_that_is_not_a_reference_is_an_error, {
     TEST_ASSERT_EQ_STR(type_fails("i32 own"),
                        "t.ft:1:5: error: an own marks a reference: "
                        "write it after a '*' or an '@', or on a string\n");
-    TEST_ASSERT_EQ_STR(type_fails("fn i32(i32) own"),
-                       "t.ft:1:13: error: an own marks a reference: "
+    TEST_ASSERT_EQ_STR(type_fails("fn (i32) i32 own"),
+                       "t.ft:1:14: error: an own marks a reference: "
                        "write it after a '*' or an '@', or on a string\n");
     TEST_ASSERT_EQ_STR(type_fails("node*[4] own"),
                        "t.ft:1:10: error: an own never follows a fixed-array suffix: "
@@ -222,8 +225,8 @@ TEST(an_array_after_a_reference_suffix_is_an_error, {
 TEST(a_type_that_is_not_a_type, {
     TEST_ASSERT_EQ_STR(type_fails("noreturn"),
                        "t.ft:1:1: error: expected a type, found 'noreturn'\n");
-    TEST_ASSERT_EQ_STR(parse_fails("fn 1 f() {}"),
-                       "t.ft:1:4: error: expected a type, found integer literal\n");
+    TEST_ASSERT_EQ_STR(parse_fails("fn f() 1 {}"),
+                       "t.ft:1:8: error: expected a type, found integer literal\n");
     TEST_ASSERT_EQ_STR(type_fails("node[]"),
                        "t.ft:1:6: error: expected an expression, found ']'\n");
 })
@@ -256,12 +259,12 @@ TEST(one_array_or_span_level_with_pointers_is_supported, {
 // The bootstrap's limit is per written type: a function type's parameters
 // are types of their own.
 TEST(the_level_count_is_per_written_type, {
-    TEST_ASSERT_EQ_STR(dump_type("fn void(i32[4], u8@)"),
+    TEST_ASSERT_EQ_STR(dump_type("fn (i32[4], u8@) void"),
                        "(type (fn-type (type (void)) (type (prim i32) (array (int 4)))"
                        " (type (prim u8) (span))))");
     TEST_ASSERT_EQ_STR(
-        type_fails("fn void(u8@@)"),
-        "t.ft:1:12: error: not supported by the bootstrap compiler: spans of spans\n");
+        type_fails("fn (u8@@) void"),
+        "t.ft:1:8: error: not supported by the bootstrap compiler: spans of spans\n");
 })
 
 // ---- inside new -----------------------------------------------------------
@@ -396,15 +399,15 @@ TEST(an_array_length_is_any_expression_here, {
 // another function type.
 // D3.10
 TEST(function_types_nest, {
-    TEST_ASSERT_EQ_STR(dump_type("fn void(fn i32(i32))"),
+    TEST_ASSERT_EQ_STR(dump_type("fn (fn (i32) i32) void"),
                        "(type (fn-type (type (void))"
                        " (type (fn-type (type (prim i32)) (type (prim i32))))))");
-    TEST_ASSERT_EQ_STR(dump_type("fn fn void()()"),
+    TEST_ASSERT_EQ_STR(dump_type("fn () fn () void"),
                        "(type (fn-type (type (fn-type (type (void))))))");
-    TEST_ASSERT_EQ_STR(dump_type("fn u8@(string, i32 mut*)"),
+    TEST_ASSERT_EQ_STR(dump_type("fn (string, i32 mut*) u8@"),
                        "(type (fn-type (type (prim u8) (span)) (type (string))"
                        " (type (prim i32) mut (ptr))))");
-    TEST_ASSERT_EQ_STR(dump_type("fn noreturn()"), "(type (fn-type (type (noreturn))))");
+    TEST_ASSERT_EQ_STR(dump_type("fn () noreturn"), "(type (fn-type (type (noreturn))))");
 })
 
 // A `noreturn` is a return type only.
@@ -412,10 +415,10 @@ TEST(function_types_nest, {
 TEST(noreturn_is_only_a_return_type, {
     TEST_ASSERT_EQ_STR(type_fails("noreturn*"),
                        "t.ft:1:1: error: expected a type, found 'noreturn'\n");
-    TEST_ASSERT_EQ_STR(type_fails("fn void(noreturn)"),
-                       "t.ft:1:9: error: expected a type, found 'noreturn'\n");
-    TEST_ASSERT_EQ_STR(parse_fails("fn void f(noreturn n) { }"),
-                       "t.ft:1:11: error: expected a type, found 'noreturn'\n");
+    TEST_ASSERT_EQ_STR(type_fails("fn (noreturn) void"),
+                       "t.ft:1:5: error: expected a type, found 'noreturn'\n");
+    TEST_ASSERT_EQ_STR(parse_fails("fn f(noreturn n) void { }"),
+                       "t.ft:1:6: error: expected a type, found 'noreturn'\n");
     TEST_ASSERT_EQ_STR(expr_fails("sizeof(noreturn)"),
                        "t.ft:1:16: error: expected a type, found 'noreturn'\n");
 })
@@ -458,14 +461,14 @@ TEST(an_allocated_type_takes_pointers_and_dimensions, {
 // type.
 // D5.3, D17.2
 TEST(the_placement_rules_hold_in_every_type_position, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn void f(mut i32 a) { }"),
-                       "t.ft:1:11: error: a mut never precedes the base type: "
+    TEST_ASSERT_EQ_STR(parse_fails("fn f(mut i32 a) void { }"),
+                       "t.ft:1:6: error: a mut never precedes the base type: "
                        "write 'node mut* p' or 'node* mut p'\n");
     TEST_ASSERT_EQ_STR(parse_fails("struct s { own node* p; }"),
                        "t.ft:1:12: error: an own never precedes the base type: "
                        "write 'node* own p' or 'string own s'\n");
-    TEST_ASSERT_EQ_STR(parse_fails("fn mut i32 f() { }"),
-                       "t.ft:1:4: error: a mut never precedes the base type: "
+    TEST_ASSERT_EQ_STR(parse_fails("fn f() mut i32 { }"),
+                       "t.ft:1:8: error: a mut never precedes the base type: "
                        "write 'node mut* p' or 'node* mut p'\n");
     TEST_ASSERT_EQ_STR(expr_fails("cast(p, mut i32*)"),
                        "t.ft:1:17: error: a mut never precedes the base type: "
@@ -545,8 +548,8 @@ TEST(a_mut_before_a_length_in_every_group, {
     TEST_ASSERT_EQ_STR(type_fails("i32* own mut[4]"),
                        "t.ft:1:10: error: the elements share the array's storage: "
                        "write the mut after the length, as 'i32[4] mut'\n");
-    TEST_ASSERT_EQ_STR(parse_fails("fn void f(i32 mut[4] a) { }"),
-                       "t.ft:1:15: error: the elements share the array's storage: "
+    TEST_ASSERT_EQ_STR(parse_fails("fn f(i32 mut[4] a) void { }"),
+                       "t.ft:1:10: error: the elements share the array's storage: "
                        "write the mut after the length, as 'i32[4] mut'\n");
 })
 
@@ -580,7 +583,7 @@ int main(int argc, char** argv) {
     TEST_RUN(d17_2_table_owning_references);
     TEST_RUN(d17_2_own_on_string_and_before_an_array);
     TEST_RUN(function_types_read_as_a_base_type);
-    TEST_RUN(function_types_take_suffixes_and_markers);
+    TEST_RUN(a_suffix_after_a_function_type_belongs_to_its_return_type);
     TEST_RUN(the_out_parameter_shape_of_d3_6);
     TEST_RUN(a_marker_before_the_base_type_is_an_error);
     TEST_RUN(a_doubled_marker_is_an_error);

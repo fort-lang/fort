@@ -174,17 +174,17 @@ struct markers {
 
 // ---- the cursor ----------------------------------------------------------------
 
-fn lexer.token cur(parser* p) {
+fn cur(parser* p) lexer.token {
     return lexer.tokvec_at(p->toks, p->pos);
 }
 
-fn lexer.tok_kind kind(parser* p) {
+fn kind(parser* p) lexer.tok_kind {
     return lexer.tokvec_at(p->toks, p->pos).kind;
 }
 
 /// The kind `n` tokens ahead; the end of the file repeats, so a lookahead
 /// never leaves the vector.
-fn lexer.tok_kind peek_kind(parser* p, u64 n) {
+fn peek_kind(parser* p, u64 n) lexer.tok_kind {
     u64 i = p->pos + n;
     if (i >= p->ntoks) {
         return lexer.tok_kind.eof;
@@ -195,29 +195,29 @@ fn lexer.tok_kind peek_kind(parser* p, u64 n) {
 /// The range one token covers: no token spans lines, so it ends on its own
 /// line, one past its last byte.
 /// D2.9, D20.4
-fn diag.loc tok_loc(parser* p, lexer.token t) {
+fn tok_loc(parser* p, lexer.token t) diag.loc {
     return diag.loc_range(p->file, t.line, t.col, t.line, t.col + cast(t.len, u32));
 }
 
-fn diag.loc here(parser* p) {
+fn here(parser* p) diag.loc {
     return tok_loc(p, cur(p));
 }
 
 /// Consumes the current token; the end of the file is never consumed.
-fn void bump(parser mut* p) {
+fn bump(parser mut* p) void {
     if (kind(p) != lexer.tok_kind.eof) {
         p->pos += 1;
     }
 }
 
-fn bool at(parser* p, lexer.tok_kind k) {
+fn at(parser* p, lexer.tok_kind k) bool {
     return kind(p) == k;
 }
 
 /// The empty range just after the last consumed token, where a node with no
 /// token of its own begins: the implicit block of a case body.
 /// D20.4
-fn diag.loc here_implicit(parser* p) {
+fn here_implicit(parser* p) diag.loc {
     if (p->pos == 0) {
         return diag.loc_make(p->file, cur(p).line, cur(p).col);
     }
@@ -232,7 +232,7 @@ fn diag.loc here_implicit(parser* p) {
 /// never shrinks, so a node that grows as its construct grows keeps the widest
 /// end. A null node is a failed parse and passes through.
 /// D20.4
-fn ast.node mut* finish(parser* p, ast.node mut* n) {
+fn finish(parser* p, ast.node mut* n) ast.node mut* {
     if (n != null && p->pos > 0) {
         n->loc = diag.loc_extend(n->loc, tok_loc(p, lexer.tokvec_at(p->toks, p->pos - 1)));
     }
@@ -243,7 +243,7 @@ fn ast.node mut* finish(parser* p, ast.node mut* n) {
 
 /// Whether two ranges begin at the same place; one parse reports one file, so
 /// the file of every range it builds is the same.
-fn bool same_start(diag.loc a, diag.loc b) {
+fn same_start(diag.loc a, diag.loc b) bool {
     return a.line == b.line && a.col == b.col;
 }
 
@@ -255,7 +255,7 @@ fn bool same_start(diag.loc a, diag.loc b) {
 /// budget is one (diag.MAX_PER_FILE), though the parse goes on. A speculative
 /// parse reports nothing, so a rewind leaves the diagnostics untouched.
 /// D14.2
-fn void report(parser mut* p, diag.loc at_loc, string text) {
+fn report(parser mut* p, diag.loc at_loc, string text) void {
     diag.sink mut* diags = session.diags(p->sess);
     u64 reported = diag.file_count(diags);
     if (p->spec == 0 && !p->failed && reported < diag.MAX_PER_FILE
@@ -266,39 +266,39 @@ fn void report(parser mut* p, diag.loc at_loc, string text) {
     p->failed = true;
 }
 
-fn void error_at(parser mut* p, diag.loc at_loc, string text) {
+fn error_at(parser mut* p, diag.loc at_loc, string text) void {
     report(p, at_loc, text);
 }
 
-fn void error_here(parser mut* p, string text) {
+fn error_here(parser mut* p, string text) void {
     diag.loc at_loc = here(p);
     report(p, at_loc, text);
 }
 
 /// Empties the message buffer; the three below append to it, as the msg_*
 /// family of src/bootstrap/diag.h does over an sb_t.
-fn void msg_begin(parser mut* p) {
+fn msg_begin(parser mut* p) void {
     strbuf.clear(&p->msg);
 }
 
-fn void msg_str(parser mut* p, string text) {
+fn msg_str(parser mut* p, string text) void {
     strbuf.append(&p->msg, text);
 }
 
 /// Appends a name between single quotes: 'name'.
-fn void msg_quote(parser mut* p, string name) {
+fn msg_quote(parser mut* p, string name) void {
     strbuf.push(&p->msg, '\'');
     strbuf.append(&p->msg, name);
     strbuf.push(&p->msg, '\'');
 }
 
-fn string msg_end(parser* p) {
+fn msg_end(parser* p) string {
     return strbuf.view(&p->msg);
 }
 
 /// Appends the current token as a diagnostic names it: a literal or an
 /// identifier by class and by text, everything else by its spelling.
-fn void msg_found(parser mut* p) {
+fn msg_found(parser mut* p) void {
     lexer.token t = cur(p);
     msg_str(p, ", found ");
     if (t.kind == lexer.tok_kind.ident) {
@@ -314,7 +314,7 @@ fn void msg_found(parser mut* p) {
 }
 
 /// `expected <what>, found <token>` at the current token.
-fn void error_expected(parser mut* p, string what) {
+fn error_expected(parser mut* p, string what) void {
     msg_begin(p);
     msg_str(p, "expected ");
     msg_str(p, what);
@@ -324,7 +324,7 @@ fn void error_expected(parser mut* p, string what) {
 }
 
 /// Consumes a token of kind `k`, or reports `expected <what>`.
-fn bool expect(parser mut* p, lexer.tok_kind k, string what) {
+fn expect(parser mut* p, lexer.tok_kind k, string what) bool {
     if (!at(p, k)) {
         error_expected(p, what);
         return false;
@@ -336,7 +336,7 @@ fn bool expect(parser mut* p, lexer.tok_kind k, string what) {
 /// Records the current identifier as `n`'s name, with the range an editor jumps
 /// to for it, and consumes it.
 /// D20.4
-fn void take_name(parser mut* p, ast.node mut* n) {
+fn take_name(parser mut* p, ast.node mut* n) void {
     n->name = cur(p).text;
     n->name_loc = here(p);
     bump(p);
@@ -344,7 +344,7 @@ fn void take_name(parser mut* p, ast.node mut* n) {
 
 /// Consumes the identifier that names `n`, or reports `expected an
 /// identifier`.
-fn bool expect_name(parser mut* p, ast.node mut* n) {
+fn expect_name(parser mut* p, ast.node mut* n) bool {
     if (!at(p, lexer.tok_kind.ident)) {
         error_expected(p, "an identifier");
         return false;
@@ -357,7 +357,7 @@ fn bool expect_name(parser mut* p, ast.node mut* n) {
 /// speculative parse skips the check and returns false, so the construct still
 /// decides the shape and the committed parse reports it; true means the parse
 /// must stop.
-fn bool unsupported(parser mut* p, diag.loc at_loc, string feature) {
+fn unsupported(parser mut* p, diag.loc at_loc, string feature) bool {
     if (p->spec > 0) {
         return false;
     }
@@ -373,7 +373,7 @@ fn bool unsupported(parser mut* p, diag.loc at_loc, string feature) {
 /// Enters a nested construct, or reports the nesting limit. It does not count
 /// on failure, so a caller that returns at once leaves the depth balanced.
 /// D2.11
-fn bool enter(parser mut* p) {
+fn enter(parser mut* p) bool {
     if (p->depth >= PARSE_MAX_DEPTH) {
         msg_begin(p);
         msg_str(p, "nesting deeper than ");
@@ -386,7 +386,7 @@ fn bool enter(parser mut* p) {
     return true;
 }
 
-fn void leave(parser mut* p) {
+fn leave(parser mut* p) void {
     p->depth -= 1;
 }
 
@@ -398,7 +398,7 @@ fn void leave(parser mut* p) {
 /// instead. A recovery point speculates while `failed` is set, and so does the
 /// first statement of a body whose `{` was missing.
 /// D14.2
-fn spec_state spec_begin(parser mut* p) {
+fn spec_begin(parser mut* p) spec_state {
     spec_state s = spec_state{p->pos, p->depth, p->failed};
     p->failed = false;
     p->spec += 1;
@@ -415,7 +415,7 @@ fn spec_state spec_begin(parser mut* p) {
 /// array literal's length (grammar.md 6), so a marker inside a bracket may well
 /// belong to an expression and is not counted.
 /// D5.3, D17.2
-fn bool read_marker(parser* p, u64 start) {
+fn read_marker(parser* p, u64 start) bool {
     u32 mut depth = 0;
     u64 mut i = start;
     while (i <= p->pos && i < p->ntoks) {
@@ -439,7 +439,7 @@ fn bool read_marker(parser* p, u64 start) {
 /// Restores the cursor, the depth and the failure state the speculation
 /// started from. Every speculation of this parser rewinds and the chosen
 /// branch parses the same tokens again, reporting this time.
-fn void spec_rewind(parser mut* p, spec_state s) {
+fn spec_rewind(parser mut* p, spec_state s) void {
     p->pos = s.pos;
     p->depth = s.depth;
     p->failed = s.failed;
@@ -448,13 +448,13 @@ fn void spec_rewind(parser mut* p, spec_state s) {
 
 // ---- types (grammar.md 4) ------------------------------------------------------
 
-fn ast.node mut* node_at(parser mut* p, ast.ast_kind k, diag.loc at_loc) {
+fn node_at(parser mut* p, ast.ast_kind k, diag.loc at_loc) ast.node mut* {
     return ast.ast_new(p->arena, k, at_loc);
 }
 
 /// The primitive a keyword names; `void` is a type kind of its own.
 /// D3.1
-fn bool prim_of_token(lexer.tok_kind k, prim.prim_kind mut* out) {
+fn prim_of_token(lexer.tok_kind k, prim.prim_kind mut* out) bool {
     if (k == lexer.tok_kind.kw_i8) {
         *out = prim.prim_kind.prim_i8;
     } else if (k == lexer.tok_kind.kw_i16) {
@@ -487,7 +487,7 @@ fn bool prim_of_token(lexer.tok_kind k, prim.prim_kind mut* out) {
 
 /// Whether `k` can open a base_type: a primitive, `string`, `void`, `fn` or a
 /// qualified name (grammar.md 4).
-fn bool starts_base_type(lexer.tok_kind k) {
+fn starts_base_type(lexer.tok_kind k) bool {
     prim.prim_kind mut prim0 = prim.prim_kind.prim_void;
     return prim_of_token(k, &prim0) || k == lexer.tok_kind.kw_string
         || k == lexer.tok_kind.kw_void || k == lexer.tok_kind.kw_fn
@@ -497,7 +497,7 @@ fn bool starts_base_type(lexer.tok_kind k) {
 /// Nothing precedes the base type: every `mut` and `own` follows the type
 /// element it qualifies, so no type, declaration or statement begins with one.
 /// D5.3, D17.2
-fn bool check_no_leading_marker(parser mut* p) {
+fn check_no_leading_marker(parser mut* p) bool {
     if (at(p, lexer.tok_kind.kw_mut)) {
         error_here(p, "a mut never precedes the base type: write 'node mut* p' or 'node* mut p'");
         return false;
@@ -515,7 +515,7 @@ fn bool check_no_leading_marker(parser mut* p) {
 /// `own`, or the empty string where one is legal -- the C passes NULL there, and
 /// no message is empty.
 /// D5.3, D17.2
-fn bool parse_markers(parser mut* p, markers mut* m, string own_error) {
+fn parse_markers(parser mut* p, markers mut* m, string own_error) bool {
     m->flags = 0;
     m->mut_loc = here(p);
     while (true) {
@@ -556,7 +556,7 @@ fn bool parse_markers(parser mut* p, markers mut* m, string own_error) {
 /// fixed array share the array's own storage, so the position a `[N]` follows
 /// never carries one (`i32 mut[4]` is an error).
 /// D5.3
-fn bool check_mut_before_array(parser mut* p, markers* m) {
+fn check_mut_before_array(parser mut* p, markers* m) bool {
     if ((m->flags & ast.FLAG_MUT) != 0 && at(p, lexer.tok_kind.lbracket)) {
         error_at(p, m->mut_loc, MUT_BEFORE_ARRAY_ERROR);
         return false;
@@ -564,12 +564,11 @@ fn bool check_mut_before_array(parser mut* p, markers* m) {
     return true;
 }
 
-/// fn_type = "fn" return_type "(" [ type { "," type } ] ")", with the `fn` and
-/// the return type already parsed.
-/// D3.10
-fn ast.node mut* parse_fn_type_params(parser mut* p, diag.loc at_loc, ast.node mut* ret) {
+/// fn_type = "fn" "(" [ type { "," type } ] ")" return_type, with the `fn`
+/// already parsed: the result comes last, as it does in a declaration.
+/// D3.10, D8.1
+fn parse_fn_type_params(parser mut* p, diag.loc at_loc) ast.node mut* {
     ast.node mut* n = node_at(p, ast.ast_kind.k_type_fn, at_loc);
-    n->a = ret;
     if (!expect(p, lexer.tok_kind.lparen, "'('")) {
         return null;
     }
@@ -589,17 +588,21 @@ fn ast.node mut* parse_fn_type_params(parser mut* p, diag.loc at_loc, ast.node m
     if (!expect(p, lexer.tok_kind.rparen, "')'")) {
         return null;
     }
+    n->a = parse_return_type(p);
+    if (n->a == null) {
+        return null;
+    }
     return finish(p, n);
 }
 
 /// return_type = type | "void" | "noreturn"; `void` and `noreturn` are base
 /// types of their own.
 /// D8.5
-fn ast.node mut* parse_return_type(parser mut* p) {
+fn parse_return_type(parser mut* p) ast.node mut* {
     return parse_type(p, true);
 }
 
-fn ast.node mut* parse_base_type(parser mut* p, bool allow_noreturn) {
+fn parse_base_type(parser mut* p, bool allow_noreturn) ast.node mut* {
     diag.loc at_loc = here(p);
     prim.prim_kind mut prim0 = prim.prim_kind.prim_void;
     if (prim_of_token(kind(p), &prim0)) {
@@ -626,11 +629,7 @@ fn ast.node mut* parse_base_type(parser mut* p, bool allow_noreturn) {
     }
     if (at(p, lexer.tok_kind.kw_fn)) {
         bump(p);
-        ast.node mut* ret = parse_return_type(p);
-        if (ret == null) {
-            return null;
-        }
-        return parse_fn_type_params(p, at_loc, ret);
+        return parse_fn_type_params(p, at_loc);
     }
     if (at(p, lexer.tok_kind.ident)) {
         // D9.4: resolution decides whether the first part is a module
@@ -653,7 +652,7 @@ fn ast.node mut* parse_base_type(parser mut* p, bool allow_noreturn) {
 /// the reference with no suffix. The empty string is the C's NULL: this position
 /// takes an `own`.
 /// D3.7, D17.2
-fn string base_own_error(ast.node* base) {
+fn base_own_error(ast.node* base) string {
     if (base->kind == ast.ast_kind.k_type_string) {
         return "";
     }
@@ -663,7 +662,7 @@ fn string base_own_error(ast.node* base) {
 /// Adds one suffix to `t` and counts it against the nesting limit, which covers
 /// type suffixes.
 /// D2.11
-fn bool push_suffix(parser mut* p, ast.node mut* t, ast.node mut* suffix) {
+fn push_suffix(parser mut* p, ast.node mut* t, ast.node mut* suffix) bool {
     if (ast.ast_len(t) >= cast(PARSE_MAX_DEPTH, u64)) {
         msg_begin(p);
         msg_str(p, "nesting deeper than ");
@@ -680,7 +679,7 @@ fn bool push_suffix(parser mut* p, ast.node mut* t, ast.node mut* suffix) {
 /// true for the group before the fixed-array group, where a `mut` on the last
 /// position would mark the array's elements.
 /// D3.6
-fn bool parse_ref_suffixes(parser mut* p, ast.node mut* t, bool array_may_follow) {
+fn parse_ref_suffixes(parser mut* p, ast.node mut* t, bool array_may_follow) bool {
     while (at(p, lexer.tok_kind.star) || at(p, lexer.tok_kind.at)) {
         diag.loc at_loc = here(p);
         ast.node mut* s = node_at(p, ast.ast_kind.k_type_suffix, at_loc);
@@ -711,7 +710,7 @@ fn bool parse_ref_suffixes(parser mut* p, ast.node mut* t, bool array_may_follow
 /// literal's type and of an allocated type, which the grammar writes without any
 /// marker (grammar.md 6).
 /// D3.4, D3.6
-fn bool parse_array_suffixes(parser mut* p, ast.node mut* t, bool marked) {
+fn parse_array_suffixes(parser mut* p, ast.node mut* t, bool marked) bool {
     while (at(p, lexer.tok_kind.lbracket)) {
         diag.loc at_loc = here(p);
         bump(p);
@@ -746,7 +745,7 @@ fn bool parse_array_suffixes(parser mut* p, ast.node mut* t, bool marked) {
 
 /// type = base_type [own] [mut] { ref_suffix } { array_suffix } { ref_suffix }
 /// (grammar.md 4), with the base type already parsed.
-fn ast.node mut* parse_type_after_base(parser mut* p, diag.loc at_loc, ast.node mut* base) {
+fn parse_type_after_base(parser mut* p, diag.loc at_loc, ast.node mut* base) ast.node mut* {
     ast.node mut* t = node_at(p, ast.ast_kind.k_type, at_loc);
     t->a = base;
     markers mut m = markers{};
@@ -774,7 +773,7 @@ fn ast.node mut* parse_type_after_base(parser mut* p, diag.loc at_loc, ast.node 
     return finish(p, t);
 }
 
-fn ast.node mut* parse_type_inner(parser mut* p, bool allow_noreturn) {
+fn parse_type_inner(parser mut* p, bool allow_noreturn) ast.node mut* {
     if (!check_no_leading_marker(p)) {
         return null;
     }
@@ -786,7 +785,7 @@ fn ast.node mut* parse_type_inner(parser mut* p, bool allow_noreturn) {
     return parse_type_after_base(p, at_loc, base);
 }
 
-fn ast.node mut* parse_type(parser mut* p, bool allow_noreturn) {
+fn parse_type(parser mut* p, bool allow_noreturn) ast.node mut* {
     if (!enter(p)) {
         return null;
     }
@@ -799,7 +798,7 @@ fn ast.node mut* parse_type(parser mut* p, bool allow_noreturn) {
 /// } (grammar.md 6): the type of an array literal, which has no base marker, no
 /// marker on a dimension and no trailing reference suffix.
 /// D6.5
-fn ast.node mut* parse_array_type(parser mut* p) {
+fn parse_array_type(parser mut* p) ast.node mut* {
     if (!enter(p)) {
         return null;
     }
@@ -828,7 +827,7 @@ fn ast.node mut* parse_array_type(parser mut* p) {
 /// inside `new(...)` it follows a `*` alone, and a span is asked for with a
 /// count and not with an `@`.
 /// D5.8, D10.2, D17.3
-fn bool check_alloc_end(parser mut* p) {
+fn check_alloc_end(parser mut* p) bool {
     if (at(p, lexer.tok_kind.kw_mut)) {
         error_here(p, ALLOC_MUT_ERROR);
         return false;
@@ -848,7 +847,7 @@ fn bool check_alloc_end(parser mut* p) {
 /// every position of the element type but the outermost one, so a `*` must
 /// stand outside the `mut` that was just read.
 /// D5.8, D10.2
-fn bool check_alloc_mut(parser mut* p, markers* m) {
+fn check_alloc_mut(parser mut* p, markers* m) bool {
     if ((m->flags & ast.FLAG_MUT) != 0 && !at(p, lexer.tok_kind.star)) {
         error_at(p, m->mut_loc, ALLOC_MUT_ERROR);
         return false;
@@ -859,7 +858,7 @@ fn bool check_alloc_mut(parser mut* p, markers* m) {
 /// alloc_type = base_type [ "mut" ] { "*" [ "own" ] [ "mut" ] }
 /// { "[" const_expr "]" } (grammar.md 6), whose last `mut` position is empty.
 /// D5.8, D10.2
-fn ast.node mut* parse_alloc_type(parser mut* p) {
+fn parse_alloc_type(parser mut* p) ast.node mut* {
     if (!check_no_leading_marker(p)) {
         return null;
     }
@@ -908,7 +907,7 @@ fn ast.node mut* parse_alloc_type(parser mut* p) {
 /// The precedence of a binary operator, PREC_NONE when `k` is not one; higher
 /// binds tighter. All of them are left-associative.
 /// D6.1
-fn i32 binary_prec(lexer.tok_kind k) {
+fn binary_prec(lexer.tok_kind k) i32 {
     if (k == lexer.tok_kind.pipe_pipe) {
         return PREC_OR;
     }
@@ -945,7 +944,7 @@ fn i32 binary_prec(lexer.tok_kind k) {
     return PREC_NONE;
 }
 
-fn bool is_assign_op(lexer.tok_kind k) {
+fn is_assign_op(lexer.tok_kind k) bool {
     return k == lexer.tok_kind.assign || k == lexer.tok_kind.plus_assign
         || k == lexer.tok_kind.minus_assign || k == lexer.tok_kind.star_assign
         || k == lexer.tok_kind.slash_assign || k == lexer.tok_kind.percent_assign
@@ -956,7 +955,7 @@ fn bool is_assign_op(lexer.tok_kind k) {
 }
 
 /// A parenthesized expression: `(` expr `)`.
-fn ast.node mut* parse_paren_expr(parser mut* p) {
+fn parse_paren_expr(parser mut* p) ast.node mut* {
     if (!expect(p, lexer.tok_kind.lparen, "'('")) {
         return null;
     }
@@ -973,7 +972,7 @@ fn ast.node mut* parse_paren_expr(parser mut* p) {
 
 /// cast_expr = "cast" "(" expr "," type ")".
 /// D6.4
-fn ast.node mut* parse_cast(parser mut* p) {
+fn parse_cast(parser mut* p) ast.node mut* {
     diag.loc at_loc = here(p);
     bump(p);
     if (!expect(p, lexer.tok_kind.lparen, "'('") || !enter(p)) {
@@ -993,7 +992,7 @@ fn ast.node mut* parse_cast(parser mut* p) {
 
 /// sizeof_expr = "sizeof" "(" type ")".
 /// D3.15
-fn ast.node mut* parse_sizeof(parser mut* p) {
+fn parse_sizeof(parser mut* p) ast.node mut* {
     diag.loc at_loc = here(p);
     bump(p);
     if (!expect(p, lexer.tok_kind.lparen, "'('") || !enter(p)) {
@@ -1011,7 +1010,7 @@ fn ast.node mut* parse_sizeof(parser mut* p) {
 /// new_expr = "new" "(" alloc_type [ "," expr ] ")": one `T` without a count, a
 /// span of `n` elements with one.
 /// D10.2
-fn ast.node mut* parse_new(parser mut* p) {
+fn parse_new(parser mut* p) ast.node mut* {
     diag.loc at_loc = here(p);
     bump(p);
     if (!expect(p, lexer.tok_kind.lparen, "'('") || !enter(p)) {
@@ -1035,7 +1034,7 @@ fn ast.node mut* parse_new(parser mut* p) {
 /// struct_literal = qualified_name brace_init; grammar.md 7.2: an identifier,
 /// optionally `. identifier`, directly followed by `{`.
 /// D6.5
-fn bool starts_struct_literal(parser* p) {
+fn starts_struct_literal(parser* p) bool {
     if (peek_kind(p, 1) == lexer.tok_kind.lbrace) {
         return true;
     }
@@ -1043,7 +1042,7 @@ fn bool starts_struct_literal(parser* p) {
         && peek_kind(p, 3) == lexer.tok_kind.lbrace;
 }
 
-fn ast.node mut* parse_struct_literal(parser mut* p) {
+fn parse_struct_literal(parser mut* p) ast.node mut* {
     diag.loc at_loc = here(p);
     ast.node mut* name = parse_base_type(p, false);
     if (name == null) {
@@ -1061,7 +1060,7 @@ fn ast.node mut* parse_struct_literal(parser mut* p) {
 /// grammar.md 7.2: a successful speculative parse of an `array_type` directly
 /// followed by `{` is an array literal. The speculation only decides; the
 /// literal is parsed again, loudly, after the rewind.
-fn bool speculate_array_literal(parser mut* p) {
+fn speculate_array_literal(parser mut* p) bool {
     spec_state s = spec_begin(p);
     ast.node mut* t = parse_array_type(p);
     bool literal = t != null && !p->failed && at(p, lexer.tok_kind.lbrace);
@@ -1069,7 +1068,7 @@ fn bool speculate_array_literal(parser mut* p) {
     return literal;
 }
 
-fn ast.node mut* parse_array_literal(parser mut* p) {
+fn parse_array_literal(parser mut* p) ast.node mut* {
     diag.loc at_loc = here(p);
     ast.node mut* n = node_at(p, ast.ast_kind.k_array_lit, at_loc);
     n->a = parse_array_type(p);
@@ -1083,7 +1082,7 @@ fn ast.node mut* parse_array_literal(parser mut* p) {
     return finish(p, n);
 }
 
-fn ast.node mut* parse_primary(parser mut* p) {
+fn parse_primary(parser mut* p) ast.node mut* {
     diag.loc at_loc = here(p);
     ast.node mut* mut n = null;
     if (at(p, lexer.tok_kind.int_lit)) {
@@ -1155,7 +1154,7 @@ fn ast.node mut* parse_primary(parser mut* p) {
 }
 
 /// postfix = call | index | span | "." identifier | "->" identifier.
-fn ast.node mut* parse_call(parser mut* p, ast.node mut* callee) {
+fn parse_call(parser mut* p, ast.node mut* callee) ast.node mut* {
     diag.loc at_loc = here(p);
     ast.node mut* n = node_at(p, ast.ast_kind.k_call, at_loc);
     n->a = callee;
@@ -1187,7 +1186,7 @@ fn ast.node mut* parse_call(parser mut* p, ast.node mut* callee) {
 
 /// index and the four span forms, told apart by the `..`.
 /// D6.8, D6.9
-fn ast.node mut* parse_index_or_span(parser mut* p, ast.node mut* operand) {
+fn parse_index_or_span(parser mut* p, ast.node mut* operand) ast.node mut* {
     diag.loc at_loc = here(p);
     bump(p);
     if (!enter(p)) {
@@ -1223,7 +1222,7 @@ fn ast.node mut* parse_index_or_span(parser mut* p, ast.node mut* operand) {
 
 /// `.f` and `->f`, the second required through a pointer.
 /// D6.10
-fn ast.node mut* parse_member(parser mut* p, ast.node mut* operand) {
+fn parse_member(parser mut* p, ast.node mut* operand) ast.node mut* {
     diag.loc at_loc = here(p);
     bool arrow = at(p, lexer.tok_kind.arrow);
     bump(p);
@@ -1240,7 +1239,7 @@ fn ast.node mut* parse_member(parser mut* p, ast.node mut* operand) {
     return finish(p, n);
 }
 
-fn ast.node mut* parse_postfix(parser mut* p) {
+fn parse_postfix(parser mut* p) ast.node mut* {
     ast.node mut* mut e = parse_primary(p);
     while (e != null) {
         if (at(p, lexer.tok_kind.lparen)) {
@@ -1257,7 +1256,7 @@ fn ast.node mut* parse_postfix(parser mut* p) {
 }
 
 /// unary_expr = ( "!" | "~" | "-" | "*" | "&" ) unary_expr | postfix_expr.
-fn ast.node mut* parse_unary(parser mut* p) {
+fn parse_unary(parser mut* p) ast.node mut* {
     lexer.tok_kind k = kind(p);
     if (k != lexer.tok_kind.bang && k != lexer.tok_kind.tilde && k != lexer.tok_kind.minus
         && k != lexer.tok_kind.star && k != lexer.tok_kind.amp) {
@@ -1282,7 +1281,7 @@ fn ast.node mut* parse_unary(parser mut* p) {
 /// The binary levels, climbed by precedence; every level is left-associative,
 /// so the right operand starts one level up.
 /// D6.1
-fn ast.node mut* parse_binary(parser mut* p, i32 min_prec) {
+fn parse_binary(parser mut* p, i32 min_prec) ast.node mut* {
     ast.node mut* mut left = parse_unary(p);
     while (left != null) {
         lexer.tok_kind k = kind(p);
@@ -1310,7 +1309,7 @@ fn ast.node mut* parse_binary(parser mut* p, i32 min_prec) {
 /// `?:` is outside the C bootstrap's subset; the self-hosted compiler keeps the
 /// parser and drops that refusal (toolchain.md 7.3).
 /// D6.1
-fn ast.node mut* parse_ternary(parser mut* p) {
+fn parse_ternary(parser mut* p) ast.node mut* {
     ast.node mut* cond = parse_binary(p, PREC_OR);
     if (cond == null || !at(p, lexer.tok_kind.question)) {
         return cond;
@@ -1333,14 +1332,14 @@ fn ast.node mut* parse_ternary(parser mut* p) {
     return finish(p, n);
 }
 
-fn ast.node mut* parse_expr(parser mut* p) {
+fn parse_expr(parser mut* p) ast.node mut* {
     return parse_ternary(p);
 }
 
 /// brace_init = "{" [ init_list ] "}", positional or designated and never both,
 /// with a trailing comma allowed.
 /// D6.5
-fn ast.node mut* parse_brace_init(parser mut* p) {
+fn parse_brace_init(parser mut* p) ast.node mut* {
     diag.loc at_loc = here(p);
     if (!expect(p, lexer.tok_kind.lbrace, "'{'") || !enter(p)) {
         return null;
@@ -1396,7 +1395,7 @@ fn ast.node mut* parse_brace_init(parser mut* p) {
 }
 
 /// initializer = expr | brace_init (grammar.md 3).
-fn ast.node mut* parse_initializer(parser mut* p) {
+fn parse_initializer(parser mut* p) ast.node mut* {
     if (at(p, lexer.tok_kind.lbrace)) {
         return parse_brace_init(p);
     }
@@ -1409,7 +1408,7 @@ fn ast.node mut* parse_initializer(parser mut* p) {
 /// The keywords that begin a statement (grammar.md 5). A skip stops before one
 /// rather than swallowing it, since it is where the next statement starts
 /// (toolchain.md 4).
-fn bool starts_statement(lexer.tok_kind k) {
+fn starts_statement(lexer.tok_kind k) bool {
     return k == lexer.tok_kind.kw_if || k == lexer.tok_kind.kw_while
         || k == lexer.tok_kind.kw_for || k == lexer.tok_kind.kw_switch
         || k == lexer.tok_kind.kw_defer || k == lexer.tok_kind.kw_return
@@ -1421,19 +1420,19 @@ fn bool starts_statement(lexer.tok_kind k) {
 /// expression, so a skip inside a switch stops before one rather than
 /// swallowing the clause that follows the broken one (toolchain.md 4).
 /// D7.6
-fn bool starts_case(lexer.tok_kind k) {
+fn starts_case(lexer.tok_kind k) bool {
     return k == lexer.tok_kind.kw_case || k == lexer.tok_kind.kw_default;
 }
 
 /// Whether the current token starts a top-level declaration (grammar.md 7).
 /// `struct`, `enum`, `extern` and `import` always do; a `fn` does when a return
-/// type and an identifier follow it, since the `fn` of a statement or of a field
-/// is the base of a function type, whose return type is followed by `(`. A block,
+/// a `(` follow it, since the `fn` of a statement or of a field is the base of a
+/// function type, which is followed by `(` at once. A block,
 /// a case clause, a struct body and an enum body end here as well as at their `}`,
 /// so a file with a missing `}` costs one diagnostic rather than one per following
 /// declaration.
 /// D3.10, D14.2
-fn bool at_decl_start(parser mut* p) {
+fn at_decl_start(parser mut* p) bool {
     lexer.tok_kind k = kind(p);
     if (k == lexer.tok_kind.kw_struct || k == lexer.tok_kind.kw_enum
         || k == lexer.tok_kind.kw_extern || k == lexer.tok_kind.kw_import) {
@@ -1442,12 +1441,8 @@ fn bool at_decl_start(parser mut* p) {
     if (k != lexer.tok_kind.kw_fn) {
         return false;
     }
-    spec_state st = spec_begin(p);
-    bump(p);
-    ast.node* ret = parse_return_type(p);
-    bool decl = ret != null && !p->failed && at(p, lexer.tok_kind.ident);
-    spec_rewind(p, st);
-    return decl;
+    return peek_kind(p, 1) == lexer.tok_kind.ident
+        && peek_kind(p, 2) == lexer.tok_kind.lparen;
 }
 
 /// The `(` and `[` the failed construct left open, counted over the tokens it
@@ -1459,7 +1454,7 @@ fn bool at_decl_start(parser mut* p) {
 /// ends with the enclosing block's brace being eaten, so a skip counts only
 /// the braces it opens itself and leaves any other `}` to the body it belongs
 /// to.
-fn u32 count_open_groups(parser* p, u64 start) {
+fn count_open_groups(parser* p, u64 start) u32 {
     u32 mut groups = 0;
     u64 mut i = start;
     while (i < p->pos) {
@@ -1486,7 +1481,7 @@ fn u32 count_open_groups(parser* p, u64 start) {
 /// skipping. The first token is consumed when the construct consumed none, so a
 /// recovery always makes progress and the parse terminates.
 /// D14.2
-fn void skip_to_boundary(parser mut* p, u64 start, i32 level) {
+fn skip_to_boundary(parser mut* p, u64 start, i32 level) void {
     if (p->pos == start) {
         bump(p);
     }
@@ -1574,7 +1569,7 @@ fn void skip_to_boundary(parser mut* p, u64 start, i32 level) {
 /// cost a second diagnostic for one mistake. A token of the same kind that reaches
 /// a parse any other way is a stray one and is reported like any other.
 /// D14.2
-fn void drop_leftovers(parser mut* p, i32 level) {
+fn drop_leftovers(parser mut* p, i32 level) void {
     while (at(p, lexer.tok_kind.rparen) || at(p, lexer.tok_kind.rbracket)
            || at(p, lexer.tok_kind.semi)
            || (level == RECOVER_DECL && at(p, lexer.tok_kind.rbrace))) {
@@ -1588,7 +1583,7 @@ fn void drop_leftovers(parser mut* p, i32 level) {
 /// produced a node in spite of the error, the block of a missing `}`, has read
 /// them already and stands at the boundary itself.
 /// D14.2
-fn void recover(parser mut* p, ast.node mut* parent, u64 start, bool skipping, i32 level) {
+fn recover(parser mut* p, ast.node mut* parent, u64 start, bool skipping, i32 level) void {
     if (skipping) {
         skip_to_boundary(p, start, level);
         drop_leftovers(p, level);
@@ -1605,7 +1600,7 @@ fn void recover(parser mut* p, ast.node mut* parent, u64 start, bool skipping, i
 /// the statement began: the statement's node when it parsed, an error node over
 /// the skipped tokens when it did not.
 /// D14.2
-fn void parse_statement_into(parser mut* p, ast.node mut* parent) {
+fn parse_statement_into(parser mut* p, ast.node mut* parent) void {
     u64 start = p->pos;
     ast.node mut* s = parse_statement(p);
     if (s != null) {
@@ -1621,7 +1616,7 @@ fn void parse_statement_into(parser mut* p, ast.node mut* parent) {
 /// var_decl = type identifier "=" initializer ";": one declarator, the
 /// initializer mandatory.
 /// D7.1
-fn ast.node mut* parse_var_decl(parser mut* p, bool want_semi) {
+fn parse_var_decl(parser mut* p, bool want_semi) ast.node mut* {
     diag.loc at_loc = here(p);
     ast.node mut* n = node_at(p, ast.ast_kind.k_var_decl, at_loc);
     n->a = parse_type(p, false);
@@ -1643,7 +1638,7 @@ fn ast.node mut* parse_var_decl(parser mut* p, bool want_semi) {
 /// position, which is where the runtime reports the overwrite check and an
 /// overflow (toolchain.md 4); the target's own position is on the target node.
 /// D7.2, D7.3, D17.11
-fn ast.node mut* parse_simple_head(parser mut* p) {
+fn parse_simple_head(parser mut* p) ast.node mut* {
     diag.loc at_loc = here(p);
     ast.node mut* mut e = null;
     if (at(p, lexer.tok_kind.star)) {
@@ -1684,7 +1679,7 @@ fn ast.node mut* parse_simple_head(parser mut* p) {
     return null;
 }
 
-fn ast.node mut* parse_simple_statement(parser mut* p) {
+fn parse_simple_statement(parser mut* p) ast.node mut* {
     ast.node mut* n = parse_simple_head(p);
     if (n == null || !expect(p, lexer.tok_kind.semi, "';'")) {
         return null;
@@ -1694,14 +1689,14 @@ fn ast.node mut* parse_simple_statement(parser mut* p) {
 
 /// The condition of `if` and `while`, always parenthesized.
 /// D7.4
-fn ast.node mut* parse_condition(parser mut* p) {
+fn parse_condition(parser mut* p) ast.node mut* {
     return parse_paren_expr(p);
 }
 
 /// Ends the range of every `if` of an else-if chain: the chain nests at its
 /// tail, so each one runs to the end of the whole chain.
 /// D20.4
-fn ast.node mut* finish_if_chain(parser mut* p, ast.node mut* first) {
+fn finish_if_chain(parser mut* p, ast.node mut* first) ast.node mut* {
     ast.node mut* mut n = first;
     while (n != null && n->kind == ast.ast_kind.k_if) {
         n = finish(p, n)->c;
@@ -1713,7 +1708,7 @@ fn ast.node mut* finish_if_chain(parser mut* p, ast.node mut* first) {
 /// block ]: braces on every branch. The chain is built iteratively, so a long one
 /// does not recurse.
 /// D7.4
-fn ast.node mut* parse_if(parser mut* p) {
+fn parse_if(parser mut* p) ast.node mut* {
     ast.node mut* mut first = null;
     ast.node mut* mut prev = null;
     while (true) {
@@ -1751,7 +1746,7 @@ fn ast.node mut* parse_if(parser mut* p) {
     return null;
 }
 
-fn ast.node mut* parse_while(parser mut* p) {
+fn parse_while(parser mut* p) ast.node mut* {
     diag.loc at_loc = here(p);
     ast.node mut* n = node_at(p, ast.ast_kind.k_while, at_loc);
     bump(p);
@@ -1771,7 +1766,7 @@ fn ast.node mut* parse_while(parser mut* p) {
 /// the self-hosted compiler keeps the parser and drops that refusal, so this form
 /// is the one difference the two parsers have here (toolchain.md 7.3).
 /// D7.5
-fn ast.node mut* parse_do(parser mut* p) {
+fn parse_do(parser mut* p) ast.node mut* {
     diag.loc at_loc = here(p);
     ast.node mut* n = node_at(p, ast.ast_kind.k_do_while, at_loc);
     bump(p);
@@ -1788,7 +1783,7 @@ fn ast.node mut* parse_do(parser mut* p) {
 
 /// grammar.md 7.3: after `for (`, a speculative parse of `type identifier`
 /// decides between the range loop, a declaration init and everything else.
-fn i32 speculate_for_form(parser mut* p) {
+fn speculate_for_form(parser mut* p) i32 {
     if (at(p, lexer.tok_kind.semi)) {
         return FOR_PLAIN;
     }
@@ -1813,7 +1808,7 @@ fn i32 speculate_for_form(parser mut* p) {
 
 /// range_for_stmt = "for" "(" type identifier ":" expr ")" block.
 /// D7.5
-fn ast.node mut* parse_range_for(parser mut* p, diag.loc at_loc) {
+fn parse_range_for(parser mut* p, diag.loc at_loc) ast.node mut* {
     ast.node mut* n = node_at(p, ast.ast_kind.k_range_for, at_loc);
     n->a = parse_type(p, false);
     if (n->a == null || !expect_name(p, n) || !expect(p, lexer.tok_kind.colon, "':'")) {
@@ -1833,7 +1828,7 @@ fn ast.node mut* parse_range_for(parser mut* p, diag.loc at_loc) {
 /// for_stmt = "for" "(" [ for_init ] ";" [ expr ] ";" [ for_step ] ")" block:
 /// `for (;;)` is legal and every part may be empty.
 /// D7.5
-fn ast.node mut* parse_for_tail(parser mut* p, diag.loc at_loc, i32 form) {
+fn parse_for_tail(parser mut* p, diag.loc at_loc, i32 form) ast.node mut* {
     ast.node mut* n = node_at(p, ast.ast_kind.k_for, at_loc);
     if (form == FOR_DECL || !at(p, lexer.tok_kind.semi)) {
         if (form == FOR_DECL) {
@@ -1873,7 +1868,7 @@ fn ast.node mut* parse_for_tail(parser mut* p, diag.loc at_loc, i32 form) {
     return finish(p, n);
 }
 
-fn ast.node mut* parse_for(parser mut* p) {
+fn parse_for(parser mut* p) ast.node mut* {
     diag.loc at_loc = here(p);
     bump(p);
     if (!expect(p, lexer.tok_kind.lparen, "'('") || !enter(p)) {
@@ -1895,7 +1890,7 @@ fn ast.node mut* parse_for(parser mut* p) {
 /// Where the statements of a case body stop: the next clause or the end of the
 /// switch, and, since a missing `}` ends every body, a top-level declaration.
 /// D7.6, D14.2
-fn bool at_case_end(parser mut* p) {
+fn at_case_end(parser mut* p) bool {
     return at(p, lexer.tok_kind.kw_case) || at(p, lexer.tok_kind.kw_default)
         || at(p, lexer.tok_kind.rbrace) || at(p, lexer.tok_kind.eof) || at_decl_start(p);
 }
@@ -1903,7 +1898,7 @@ fn bool at_case_end(parser mut* p) {
 /// switch_stmt = "switch" "(" expr ")" "{" { case_clause } "}"; each case body
 /// is an implicit block scope.
 /// D7.6
-fn ast.node mut* parse_case(parser mut* p) {
+fn parse_case(parser mut* p) ast.node mut* {
     diag.loc at_loc = here(p);
     ast.node mut* n = node_at(p, ast.ast_kind.k_case, at_loc);
     if (at(p, lexer.tok_kind.kw_default)) {
@@ -1940,7 +1935,7 @@ fn ast.node mut* parse_case(parser mut* p) {
     return finish(p, n);
 }
 
-fn ast.node mut* parse_switch(parser mut* p) {
+fn parse_switch(parser mut* p) ast.node mut* {
     diag.loc at_loc = here(p);
     ast.node mut* n = node_at(p, ast.ast_kind.k_switch, at_loc);
     bump(p);
@@ -1977,7 +1972,7 @@ fn ast.node mut* parse_switch(parser mut* p) {
 
 /// defer_stmt = "defer" ( assign_stmt | incdec_stmt | call_stmt | block ).
 /// D7.8
-fn ast.node mut* parse_defer(parser mut* p) {
+fn parse_defer(parser mut* p) ast.node mut* {
     diag.loc at_loc = here(p);
     ast.node mut* n = node_at(p, ast.ast_kind.k_defer, at_loc);
     bump(p);
@@ -1994,7 +1989,7 @@ fn ast.node mut* parse_defer(parser mut* p) {
 
 /// return_stmt = "return" [ expr ] ";".
 /// D7.11
-fn ast.node mut* parse_return(parser mut* p) {
+fn parse_return(parser mut* p) ast.node mut* {
     diag.loc at_loc = here(p);
     ast.node mut* n = node_at(p, ast.ast_kind.k_return, at_loc);
     bump(p);
@@ -2010,7 +2005,7 @@ fn ast.node mut* parse_return(parser mut* p) {
     return finish(p, n);
 }
 
-fn ast.node mut* parse_break_or_continue(parser mut* p) {
+fn parse_break_or_continue(parser mut* p) ast.node mut* {
     diag.loc at_loc = here(p);
     ast.node mut* mut n = null;
     if (at(p, lexer.tok_kind.kw_break)) {
@@ -2027,7 +2022,7 @@ fn ast.node mut* parse_break_or_continue(parser mut* p) {
 
 /// grammar.md 7.1: a `prim_type`, `string` or `fn` starts a declaration, and
 /// so does `void`, which opens no expression either.
-fn bool starts_declaration(parser* p) {
+fn starts_declaration(parser* p) bool {
     prim.prim_kind mut prim0 = prim.prim_kind.prim_void;
     lexer.tok_kind k = kind(p);
     return prim_of_token(k, &prim0) || k == lexer.tok_kind.kw_string
@@ -2036,7 +2031,7 @@ fn bool starts_declaration(parser* p) {
 
 /// grammar.md 7.1: otherwise a speculative type parse decides, and the
 /// statement is a declaration when an identifier follows the type.
-fn bool speculate_declaration(parser mut* p) {
+fn speculate_declaration(parser mut* p) bool {
     spec_state s = spec_begin(p);
     ast.node* t = parse_type(p, false);
     // A type parse that died on a marker leaves no expression reading of the
@@ -2047,7 +2042,7 @@ fn bool speculate_declaration(parser mut* p) {
     return decl;
 }
 
-fn ast.node mut* parse_statement(parser mut* p) {
+fn parse_statement(parser mut* p) ast.node mut* {
     if (at(p, lexer.tok_kind.lbrace)) {
         return parse_block(p);
     }
@@ -2096,7 +2091,7 @@ fn ast.node mut* parse_statement(parser mut* p) {
 /// enclosing constructs unwind quietly to the next recovery point and the tree
 /// still covers the file.
 /// D14.2
-fn ast.node mut* parse_block_tail(parser mut* p, diag.loc at_loc) {
+fn parse_block_tail(parser mut* p, diag.loc at_loc) ast.node mut* {
     if (!enter(p)) {
         return null;
     }
@@ -2113,7 +2108,7 @@ fn ast.node mut* parse_block_tail(parser mut* p, diag.loc at_loc) {
 /// statement is expected needs its `{`: the statement forms are braced, so a
 /// missing one is a different mistake and the construct fails.
 /// D7.4
-fn ast.node mut* parse_block(parser mut* p) {
+fn parse_block(parser mut* p) ast.node mut* {
     diag.loc at_loc = here(p);
     if (!expect(p, lexer.tok_kind.lbrace, "'{'")) {
         return null;
@@ -2127,7 +2122,7 @@ fn ast.node mut* parse_block(parser mut* p) {
 /// is usually still in the file, so one missing brace costs one diagnostic instead
 /// of one per statement or field in the body.
 /// D14.2
-fn void open_body(parser mut* p) {
+fn open_body(parser mut* p) void {
     if (at(p, lexer.tok_kind.lbrace)) {
         bump(p);
     } else {
@@ -2137,7 +2132,7 @@ fn void open_body(parser mut* p) {
 
 /// The body of a function, whose `{` may be missing.
 /// D8.1
-fn ast.node mut* parse_body(parser mut* p) {
+fn parse_body(parser mut* p) ast.node mut* {
     diag.loc at_loc = here(p);
     open_body(p);
     return parse_block_tail(p, at_loc);
@@ -2148,7 +2143,7 @@ fn ast.node mut* parse_body(parser mut* p) {
 /// param_list = param { "," param } with param = type identifier; no trailing
 /// comma in a parameter list.
 /// D6.5
-fn bool parse_params(parser mut* p, ast.node mut* fn_node) {
+fn parse_params(parser mut* p, ast.node mut* fn_node) bool {
     if (!expect(p, lexer.tok_kind.lparen, "'('")) {
         return false;
     }
@@ -2170,13 +2165,16 @@ fn bool parse_params(parser mut* p, ast.node mut* fn_node) {
     return expect(p, lexer.tok_kind.rparen, "')'");
 }
 
-/// fn_decl = "fn" return_type identifier "(" [ param_list ] ")" block, with the
-/// `fn` and the return type already parsed.
+/// fn_decl = "fn" identifier "(" [ param_list ] ")" return_type block, with the
+/// `fn` already parsed: the name is the second token and the result comes last.
 /// D8.1
-fn ast.node mut* parse_fn_decl(parser mut* p, diag.loc at_loc, ast.node mut* ret) {
+fn parse_fn_decl(parser mut* p, diag.loc at_loc) ast.node mut* {
     ast.node mut* n = node_at(p, ast.ast_kind.k_fn_decl, at_loc);
-    n->a = ret;
     if (!expect_name(p, n) || !parse_params(p, n)) {
+        return null;
+    }
+    n->a = parse_return_type(p);
+    if (n->a == null) {
         return null;
     }
     n->b = parse_body(p);
@@ -2187,20 +2185,16 @@ fn ast.node mut* parse_fn_decl(parser mut* p, diag.loc at_loc, ast.node mut* ret
 }
 
 /// At the top level a `fn` opens a function definition (grammar.md 7). When the
-/// return type is followed by `(` rather than by a name, the `fn` is the base of a
-/// function type and the declaration is a global of that type.
+/// `fn` is followed by `(` rather than by a name, it is the base of a function
+/// type and the declaration is a global of that type.
 /// D3.10, D7.10
-fn ast.node mut* parse_fn_top_decl(parser mut* p) {
+fn parse_fn_top_decl(parser mut* p) ast.node mut* {
     diag.loc at_loc = here(p);
     bump(p);
-    ast.node mut* ret = parse_return_type(p);
-    if (ret == null) {
-        return null;
-    }
     if (at(p, lexer.tok_kind.ident)) {
-        return parse_fn_decl(p, at_loc, ret);
+        return parse_fn_decl(p, at_loc);
     }
-    ast.node mut* base = parse_fn_type_params(p, at_loc, ret);
+    ast.node mut* base = parse_fn_type_params(p, at_loc);
     if (base == null) {
         return null;
     }
@@ -2216,10 +2210,10 @@ fn ast.node mut* parse_fn_top_decl(parser mut* p) {
     return finish(p, n);
 }
 
-/// extern_decl = "extern" "fn" return_type identifier "(" [ param_list ] ")"
+/// extern_decl = "extern" "fn" identifier "(" [ param_list ] ")" return_type
 /// ";": a declaration with no body.
 /// D9.8
-fn ast.node mut* parse_extern_decl(parser mut* p) {
+fn parse_extern_decl(parser mut* p) ast.node mut* {
     diag.loc at_loc = here(p);
     bump(p);
     if (!expect(p, lexer.tok_kind.kw_fn, "'fn'")) {
@@ -2227,8 +2221,11 @@ fn ast.node mut* parse_extern_decl(parser mut* p) {
     }
     ast.node mut* n = node_at(p, ast.ast_kind.k_fn_decl, at_loc);
     n->flags = ast.FLAG_EXTERN;
+    if (!expect_name(p, n) || !parse_params(p, n)) {
+        return null;
+    }
     n->a = parse_return_type(p);
-    if (n->a == null || !expect_name(p, n) || !parse_params(p, n)) {
+    if (n->a == null) {
         return null;
     }
     if (!expect(p, lexer.tok_kind.semi, "';'")) {
@@ -2240,7 +2237,7 @@ fn ast.node mut* parse_extern_decl(parser mut* p) {
 /// struct_decl = "struct" identifier "{" field { field } "}": no trailing
 /// semicolon and at least one field.
 /// D3.8
-fn ast.node mut* parse_struct_decl(parser mut* p) {
+fn parse_struct_decl(parser mut* p) ast.node mut* {
     diag.loc at_loc = here(p);
     ast.node mut* n = node_at(p, ast.ast_kind.k_struct_decl, at_loc);
     bump(p);
@@ -2277,7 +2274,7 @@ fn ast.node mut* parse_struct_decl(parser mut* p) {
 /// enum_decl = "enum" identifier "{" enum_member { "," enum_member } [ "," ]
 /// "}".
 /// D3.9
-fn ast.node mut* parse_enum_decl(parser mut* p) {
+fn parse_enum_decl(parser mut* p) ast.node mut* {
     diag.loc at_loc = here(p);
     ast.node mut* n = node_at(p, ast.ast_kind.k_enum_decl, at_loc);
     bump(p);
@@ -2329,7 +2326,7 @@ fn ast.node mut* parse_enum_decl(parser mut* p) {
 
 /// D9.3: whether the last segment names a module or a symbol is
 /// resolution's business
-fn bool parse_import_items(parser mut* p, ast.node mut* n) {
+fn parse_import_items(parser mut* p, ast.node mut* n) bool {
     bump(p);
     while (true) {
         diag.loc at_item = here(p);
@@ -2365,7 +2362,7 @@ fn bool parse_import_items(parser mut* p, ast.node mut* n) {
 /// Either would otherwise end the path and be reported as the `;` that is then
 /// missing, which names the wrong mistake.
 /// D2.10, D9.1
-fn bool check_path_separator(parser mut* p) {
+fn check_path_separator(parser mut* p) bool {
     if (at(p, lexer.tok_kind.dot_dot)) {
         error_here(p, "a module path is separated by '.', not '..'");
         return false;
@@ -2381,7 +2378,7 @@ fn bool check_path_separator(parser mut* p) {
     return false;
 }
 
-fn ast.node mut* parse_import(parser mut* p) {
+fn parse_import(parser mut* p) ast.node mut* {
     diag.loc at_loc = here(p);
     ast.node mut* n = node_at(p, ast.ast_kind.k_import, at_loc);
     bump(p);
@@ -2430,7 +2427,7 @@ fn ast.node mut* parse_import(parser mut* p) {
 /// top_decl = fn_decl | extern_decl | struct_decl | enum_decl | global_decl
 /// (grammar.md 2); a global is a var_decl whose initializer is constant.
 /// D7.10
-fn ast.node mut* parse_top_decl(parser mut* p) {
+fn parse_top_decl(parser mut* p) ast.node mut* {
     if (at(p, lexer.tok_kind.kw_fn)) {
         return parse_fn_top_decl(p);
     }
@@ -2459,7 +2456,7 @@ fn ast.node mut* parse_top_decl(parser mut* p) {
 /// form, which comes first in a file; every declaration of a file is read,
 /// whatever the ones before it did.
 /// D9.3, D14.2
-fn void parse_decl_into(parser mut* p, ast.node mut* mod, bool import_form) {
+fn parse_decl_into(parser mut* p, ast.node mut* mod, bool import_form) void {
     u64 start = p->pos;
     ast.node mut* mut decl = null;
     if (import_form) {
@@ -2487,8 +2484,8 @@ fn void parse_decl_into(parser mut* p, ast.node mut* mod, bool import_form) {
 /// skipped region, so a caller asks whether the file parsed by comparing the
 /// session's error count before and after.
 /// D9.3, D14.2
-fn ast.node mut* parse_module(session.session mut* sess, string file, lexer.tok_vec* toks,
-                              ast.arena mut* ar) {
+fn parse_module(session.session mut* sess, string file, lexer.tok_vec* toks,
+                              ast.arena mut* ar) ast.node mut* {
     u64 ntoks = lexer.tokvec_count(toks);
     if (ntoks == 0 || lexer.tokvec_at(toks, ntoks - 1).kind != lexer.tok_kind.eof) {
         panic("parser.parse_module: the token vector does not end in end of file");

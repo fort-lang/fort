@@ -25,12 +25,12 @@
 #include "test.h"
 
 // The dump of the entry file the sandbox writes (driver_helpers.h):
-// `fn i32 main() { return 0; }`.
+// `fn main() i32 { return 0; }`.
 static const char SANDBOX_ENTRY_DUMP[] = "1:1-1:3 0 \"fn\" fn\n"
-                                         "1:4-1:7 0 \"i32\" i32\n"
-                                         "1:8-1:12 0 \"main\" identifier\n"
-                                         "1:12-1:13 0 \"(\" (\n"
-                                         "1:13-1:14 0 \")\" )\n"
+                                         "1:4-1:8 0 \"main\" identifier\n"
+                                         "1:8-1:9 0 \"(\" (\n"
+                                         "1:9-1:10 0 \")\" )\n"
+                                         "1:11-1:14 0 \"i32\" i32\n"
                                          "1:15-1:16 0 \"{\" {\n"
                                          "1:17-1:23 0 \"return\" return\n"
                                          "1:24-1:25 0 \"0\" integer literal\n"

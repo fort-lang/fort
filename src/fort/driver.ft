@@ -82,17 +82,17 @@ i32 PARSE_ERROR = 2;
 /// for. Both are the C library's; the standard library has no binding for either
 /// and this is their one caller.
 /// D9.8, D14.1
-extern fn char* strerror(i32 code);
-extern fn i64 readlink(char* path, char* buf, u64 size);
+extern fn strerror(i32 code) char*;
+extern fn readlink(char* path, char* buf, u64 size) i64;
 
 /// The temporary directory of toolchain.md 2 and the removal of what the driver
 /// put in it; the standard library has no binding for any of them and this is
 /// their one caller. `mkdtemp` replaces the six `X` at the end of its argument in
 /// place, so the buffer it is given is the compiler's own.
 /// D9.8, D13.2
-extern fn char* mkdtemp(char mut* tmpl);
-extern fn i32 unlink(char* path);
-extern fn i32 rmdir(char* path);
+extern fn mkdtemp(char mut* tmpl) char*;
+extern fn unlink(char* path) i32;
+extern fn rmdir(char* path) i32;
 
 /// Running --cc once over the module. src/bootstrap/driver.c calls posix_spawnp
 /// with `environ`, which fort cannot name: an `extern` declares a function and
@@ -102,12 +102,12 @@ extern fn i32 rmdir(char* path);
 /// a failed `execvp`, which is the value posix_spawnp would have returned, so the
 /// two drivers report one command line alike.
 /// D9.8, D14.3
-extern fn i32 fork();
-extern fn i32 execvp(char* file, void* argv);
-extern fn i32 waitpid(i32 pid, i32 mut* status, i32 options);
-extern fn i32 pipe(i32 mut* fds);
-extern fn i32 fcntl(i32 fd, i32 cmd, i32 arg);
-extern fn noreturn _exit(i32 status);
+extern fn fork() i32;
+extern fn execvp(char* file, void* argv) i32;
+extern fn waitpid(i32 pid, i32 mut* status, i32 options) i32;
+extern fn pipe(i32 mut* fds) i32;
+extern fn fcntl(i32 fd, i32 cmd, i32 arg) i32;
+extern fn _exit(i32 status) noreturn;
 
 /// The command line after parsing (toolchain.md 1). Every string borrows an
 /// argument; the three vectors hold them in command-line order and own only
@@ -155,7 +155,7 @@ struct options {
 string DEFAULT_CC = "clang";
 string DEFAULT_TARGET = "x86_64-linux-gnu";
 
-fn options options_create() {
+fn options_create() options {
     options mut opts = options{};
     opts.cc = DEFAULT_CC;
     opts.target = DEFAULT_TARGET;
@@ -163,7 +163,7 @@ fn options options_create() {
 }
 
 /// Releases the vectors' slots. The strings are borrowed and are untouched.
-fn void options_free(options mut* opts) {
+fn options_free(options mut* opts) void {
     containers.str_free(&opts->includes);
     containers.str_free(&opts->libs);
     containers.str_free(&opts->cc_args);
@@ -173,7 +173,7 @@ fn void options_free(options mut* opts) {
 /// It is the table src/bootstrap/driver.c prints, line for line, and the ctest
 /// `stage-usage` diffs the two binaries' --help and --version so that the two
 /// copies cannot drift while both compilers exist.
-fn void help() {
+fn help() void {
     println(USAGE);
     println("options:");
     println("  -o <file>          write the output to <file> (default a.out)");
@@ -199,24 +199,24 @@ fn void help() {
 /// `fort: error: <message>` on stderr, the form every usage, toolchain and
 /// internal error takes (toolchain.md 1).
 /// D14.1
-fn void error(string message) {
+fn error(string message) void {
     eprintln("fort: error: ", message);
 }
 
 /// `fort: error: <what> '<path>': <reason>`, the form of
 /// `cannot read 'x.ft': No such file or directory` (toolchain.md 1).
-fn void error_path(string what, string path, string reason) {
+fn error_path(string what, string path, string reason) void {
     eprintln("fort: error: ", what, " '", path, "': ", reason);
 }
 
 /// A usage error, followed by the usage line (toolchain.md 1).
-fn void usage_error(string message) {
+fn usage_error(string message) void {
     error(message);
     eprintln(USAGE);
 }
 
 /// The same with the offending argument quoted after the message.
-fn void usage_error_arg(string message, string detail) {
+fn usage_error_arg(string message, string detail) void {
     eprintln("fort: error: ", message, " '", detail, "'");
     eprintln(USAGE);
 }
@@ -224,14 +224,14 @@ fn void usage_error_arg(string message, string detail) {
 /// Whether `arg` is an option rather than the entry file: the first argument
 /// that does not start with '-' is the entry file.
 /// D14.1
-fn bool is_option(string arg) {
+fn is_option(string arg) bool {
     return arg.len > 0 && arg[0] == '-';
 }
 
 /// Whether `arg` is `-l<lib>`: the library is part of the option, so it is one
 /// argument, unlike every other option that carries a value.
 /// D14.1
-fn bool is_link_option(string arg) {
+fn is_link_option(string arg) bool {
     return arg.len > 2 && arg[0] == '-' && arg[1] == 'l';
 }
 
@@ -240,7 +240,7 @@ fn bool is_link_option(string arg) {
 /// --cc, --target and -Xcc take the following argument, whatever it looks like
 /// (toolchain.md 1).
 /// D14.1
-fn bool take_argument(string@ args, u64 mut* i, string mut* out) {
+fn take_argument(string@ args, u64 mut* i, string mut* out) bool {
     if (*i + 1 >= args.len) {
         usage_error_arg("missing argument for option", args[*i]);
         return false;
@@ -253,7 +253,7 @@ fn bool take_argument(string@ args, u64 mut* i, string mut* out) {
 /// The options that carry no value: -S, -c, --release, --no-bounds-check,
 /// --check, --json, --index, --tokens and --ast, each of which sets one flag.
 /// D14.1, D20.1, D20.2, D20.3
-fn bool parse_flag(options mut* opts, string arg) {
+fn parse_flag(options mut* opts, string arg) bool {
     if (arg == "-S") {
         opts->emit_ir = true;
     } else if (arg == "-c") {
@@ -288,7 +288,7 @@ fn bool parse_flag(options mut* opts, string arg) {
 /// --std-dir, --cc and --target win, while -I, -l and -Xcc accumulate in
 /// command-line order.
 /// D14.1
-fn bool parse_valued(options mut* opts, string@ args, u64 mut* i, bool mut* ok) {
+fn parse_valued(options mut* opts, string@ args, u64 mut* i, bool mut* ok) bool {
     string arg = args[*i];
     bool is_output = arg == "-o";
     bool is_include = arg == "-I";
@@ -325,7 +325,7 @@ fn bool parse_valued(options mut* opts, string@ args, u64 mut* i, bool mut* ok) 
 /// Parses args[1..] into *opts, which options_create has prepared. --help and
 /// --version print to stdout; a usage error prints `fort: error: <message>`
 /// and the usage line to stderr (toolchain.md 1).
-fn i32 parse(options mut* opts, string@ args) {
+fn parse(options mut* opts, string@ args) i32 {
     u64 mut i = 1;
     while (i < args.len) {
         string arg = args[i];
@@ -384,7 +384,7 @@ fn i32 parse(options mut* opts, string@ args) {
 /// 1. A lexical error is reported on stderr as usual and lexing goes on, so the
 /// dump covers the whole file either way; the status is then a compile error.
 /// D14.1, D14.2
-fn i32 tokens_entry(options* opts) {
+fn tokens_entry(options* opts) i32 {
     // D20.5: the session owns the sink and the pool, and frees both
     session.session mut s = session.create();
     defer session.free(&s);
@@ -415,7 +415,7 @@ fn i32 tokens_entry(options* opts) {
 /// go on, so the tree covers the whole file either way; the status is then a
 /// compile error.
 /// D14.1, D14.2
-fn i32 ast_entry(options* opts) {
+fn ast_entry(options* opts) i32 {
     // D20.5: the session owns the sink and the pool, and frees both
     session.session mut s = session.create();
     defer session.free(&s);
@@ -461,7 +461,7 @@ string STD_DIR_NAME = "std";
 /// cannot be read, with *out unchanged. readlink does not terminate the path
 /// and reports truncation only by filling the buffer, so the buffer doubles
 /// until the result fits. The result is interned in `p`.
-fn bool exe_path(containers.pool mut* p, string mut* out) {
+fn exe_path(containers.pool mut* p, string mut* out) bool {
     char mut@ own c_path = str.to_cstr(PROC_SELF_EXE);
     defer del(c_path);
     u64 mut cap = EXE_PATH_FIRST_CAP;
@@ -484,7 +484,7 @@ fn bool exe_path(containers.pool mut* p, string mut* out) {
 /// `std` in the directory containing `program`, or `std` alone when `program`
 /// has no directory part. Interned in `p`.
 /// D14.1
-fn string std_dir_beside(containers.pool mut* p, string program) {
+fn std_dir_beside(containers.pool mut* p, string program) string {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     i64 last = str.last_index_of(program, '/');
@@ -499,7 +499,7 @@ fn string std_dir_beside(containers.pool mut* p, string program) {
 /// $FORT_STD_DIR, else `std` beside the fort binary, which is /proc/self/exe
 /// when it can be read and `program` otherwise. An empty environment value
 /// names no directory, so it counts as unset. Interned in `p`.
-fn string std_dir(containers.pool mut* p, options* opts, string program) {
+fn std_dir(containers.pool mut* p, options* opts, string program) string {
     // D14.1: the option as given, the empty one included
     if (opts->have_std_dir) {
         return containers.pool_intern(p, opts->std_dir);
@@ -537,7 +537,7 @@ i32 EINTR = 4;
 
 /// The position after the last '/' of `path`, that is the start of its last
 /// component.
-fn u64 last_component(string path) {
+fn last_component(string path) u64 {
     u64 mut start = 0;
     u64 mut i = 0;
     while (i < path.len) {
@@ -552,7 +552,7 @@ fn u64 last_component(string path) {
 /// The entry file's last component with `.ft` removed, which names the IR
 /// module and the default object (toolchain.md 1).
 /// D9.1
-fn string entry_base(string entry) {
+fn entry_base(string entry) string {
     string mut base = entry[last_component(entry)..];
     if (base.len > FT_SUFFIX.len && str.ends_with(base, FT_SUFFIX)) {
         base = base[0..base.len - FT_SUFFIX.len];
@@ -562,7 +562,7 @@ fn string entry_base(string entry) {
 
 /// `<dir>/<name><suffix>`, interned in `p`; an empty directory or suffix is
 /// left out, where src/bootstrap/driver.c passes NULL.
-fn string join_path(containers.pool mut* p, string dir, string name, string suffix) {
+fn join_path(containers.pool mut* p, string dir, string name, string suffix) string {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     if (dir.len > 0) {
@@ -574,7 +574,7 @@ fn string join_path(containers.pool mut* p, string dir, string name, string suff
     return containers.pool_intern(p, strbuf.view(&b));
 }
 
-fn string default_output(containers.pool mut* p, options* opts) {
+fn default_output(containers.pool mut* p, options* opts) string {
     // -S and -c together stop at the IR, so -S decides the suffix
     // (toolchain.md 1).
     if (opts->emit_ir) {
@@ -592,7 +592,7 @@ fn string default_output(containers.pool mut* p, options* opts) {
 /// default; the path is interned in `p` and the directory it was created in is
 /// stored in *parent_out. Returns the empty string and the errno of the
 /// failure in *error_out, captured before anything else can overwrite it.
-fn string make_temp_dir(containers.pool mut* p, string mut* parent_out, i32 mut* error_out) {
+fn make_temp_dir(containers.pool mut* p, string mut* parent_out, i32 mut* error_out) string {
     string mut parent = TMP_DIR_DEFAULT;
     string mut value = "";
     // An empty value names no directory, so it counts as unset (toolchain.md 1).
@@ -620,7 +620,7 @@ fn string make_temp_dir(containers.pool mut* p, string mut* parent_out, i32 mut*
 /// `<entry>.ll`, so no directory walk is needed; a file already gone is not an
 /// error.
 /// D19.1
-fn void remove_temp_dir(string dir, string ir_path) {
+fn remove_temp_dir(string dir, string ir_path) void {
     if (ir_path.len > 0) {
         char mut@ own path = str.to_cstr(ir_path);
         defer del(path);
@@ -637,8 +637,8 @@ fn void remove_temp_dir(string dir, string ir_path) {
 /// The command line --cc is run with, in the order src/bootstrap/driver.c
 /// builds it; every string is interned in `p` or borrowed from the options, so
 /// the vector owns only its slots.
-fn void cc_argv(containers.pool mut* p, options* opts, string ir_path, string out_path,
-                containers.str_vec mut* argv) {
+fn cc_argv(containers.pool mut* p, options* opts, string ir_path, string out_path,
+                containers.str_vec mut* argv) void {
     containers.str_push(argv, opts->cc);
     containers.str_push(argv, join_path(p, "", "--target=", opts->target));
     // -O2 in place of -O1 under --release; the compiler itself optimizes
@@ -694,7 +694,7 @@ struct cc_command {
     char mut* mut@ own items; // one pointer per argument, then null
 }
 
-fn cc_command cc_command_build(containers.str_vec* argv) {
+fn cc_command_build(containers.str_vec* argv) cc_command {
     u64 mut total = 0;
     u64 mut i = 0;
     while (i < argv->len) {
@@ -723,14 +723,14 @@ fn cc_command cc_command_build(containers.str_vec* argv) {
     return c;
 }
 
-fn void cc_command_free(cc_command mut* c) {
+fn cc_command_free(cc_command mut* c) void {
     del(c->bytes);
     del(c->items);
 }
 
 /// `cc failed with status N`, or `cc failed with signal N` for a --cc that
 /// died by a signal, which toolchain.md 1 does not name.
-fn void error_cc_status(string what, i64 value) {
+fn error_cc_status(string what, i64 value) void {
     strbuf.str_buf mut m = strbuf.create();
     defer strbuf.free(&m);
     strbuf.append(&m, "cc failed with ");
@@ -747,16 +747,16 @@ u32 WAIT_SIGNAL_MASK = 127;
 u32 WAIT_STATUS_SHIFT = 8;
 u32 WAIT_STATUS_MASK = 255;
 
-fn bool wait_signaled(i32 status) {
+fn wait_signaled(i32 status) bool {
     u32 low = cast(status, u32) & WAIT_SIGNAL_MASK;
     return low != 0 && low != WAIT_SIGNAL_MASK;
 }
 
-fn i64 wait_signal(i32 status) {
+fn wait_signal(i32 status) i64 {
     return cast(cast(status, u32) & WAIT_SIGNAL_MASK, i64);
 }
 
-fn i64 wait_status(i32 status) {
+fn wait_status(i32 status) i64 {
     return cast((cast(status, u32) >> WAIT_STATUS_SHIFT) & WAIT_STATUS_MASK, i64);
 }
 
@@ -780,7 +780,7 @@ i32 EXEC_FAILED_STATUS = 127;
 /// Runs --cc once over the module: it compiles and links in one invocation.
 /// Returns EXIT_OK, or EXIT_USAGE after reporting the failure.
 /// D14.1, D14.3
-fn i32 run_cc(options* opts, string ir_path, string out_path) {
+fn run_cc(options* opts, string ir_path, string out_path) i32 {
     containers.pool mut p = containers.pool_create();
     defer containers.pool_free(&p);
     containers.str_vec mut argv = containers.str_create();
@@ -883,7 +883,7 @@ struct analysis {
 /// same two calls; the checker takes the session here because it reports through
 /// it, where the C reports through a file-scope sink.
 /// D20.5
-fn analysis analysis_create(session.session mut* s) {
+fn analysis_create(session.session mut* s) analysis {
     analysis mut an = analysis{};
     check.check_init(&an.ck, s);
     return an;
@@ -894,7 +894,7 @@ fn analysis analysis_create(session.session mut* s) {
 /// `defer` answers for the paths that return earlier. The flag is what makes
 /// that safe, so that nothing rests on the nine releases of check.check_free
 /// and modules.free each tolerating a second call.
-fn void analysis_release(analysis mut* an, bool mut* live) {
+fn analysis_release(analysis mut* an, bool mut* live) void {
     if (!*live) {
         return;
     }
@@ -902,7 +902,7 @@ fn void analysis_release(analysis mut* an, bool mut* live) {
     analysis_free(an);
 }
 
-fn void analysis_free(analysis mut* an) {
+fn analysis_free(analysis mut* an) void {
     check.check_free(&an->ck);
     modules.free(&an->set);
 }
@@ -911,7 +911,7 @@ fn void analysis_free(analysis mut* an) {
 /// the import closure, with the search roots in order. Returns false after the
 /// diagnostics were reported.
 /// D9.2, D14.2
-fn bool load_closure(session.session mut* s, options* opts, string program, analysis mut* an) {
+fn load_closure(session.session mut* s, options* opts, string program, analysis mut* an) bool {
     u64 mut i = 0;
     while (i < opts->includes.len) {
         // D9.2: the `-I` roots follow the entry file's directory
@@ -933,7 +933,7 @@ fn bool load_closure(session.session mut* s, options* opts, string program, anal
 /// made stage2 answer `fort: error: cannot read '<dir>': Is a directory` and exit
 /// 2 where stage1 answers `<dir>:1:1: error: cannot read '<dir>'` and exits 1.
 /// D14.2
-fn bool entry_opens(string path) {
+fn entry_opens(string path) bool {
     i32 fd = io.open_read(path);
     if (fd < 0) {
         return false;
@@ -948,7 +948,7 @@ fn bool entry_opens(string path) {
 /// loaded cleanly would be the checker's and the emitter's turn, which is the
 /// internal error of `run` below.
 /// D14.1, D14.2
-fn i32 front_end(session.session mut* s, options* opts, string program, analysis mut* an) {
+fn front_end(session.session mut* s, options* opts, string program, analysis mut* an) i32 {
     // Step 1 of toolchain.md 2. The bytes are not read here: the loader reads
     // every file through the session, so the closure below opens it once and a
     // server's unsaved buffer is what the whole run sees.
@@ -985,7 +985,7 @@ fn i32 front_end(session.session mut* s, options* opts, string program, analysis
 /// the address it is used at, since it stores the session it reports through
 /// (gen.ft).
 /// D19.1
-fn i32 emit_module(session.session mut* s, options* opts, analysis mut* an, string ir_path) {
+fn emit_module(session.session mut* s, options* opts, analysis mut* an, string ir_path) i32 {
     gen.gen_options mut gopts = gen.gen_options{};
     gopts.release = opts->release;
     gopts.no_bounds_check = opts->no_bounds_check;
@@ -1014,8 +1014,8 @@ u64 JSON_VERSION = 1;
 /// own. src/bootstrap/driver.c keeps the pair as a driver_files_t; a pool and a
 /// vector of string say the same thing.
 /// D20.2
-fn void collect_files(containers.pool mut* p, modules.module_set* set,
-                      containers.str_vec mut* files) {
+fn collect_files(containers.pool mut* p, modules.module_set* set,
+                      containers.str_vec mut* files) void {
     u64 mut i = 0;
     while (i < modules.file_count(set)) {
         containers.str_push(files, containers.pool_intern(p, modules.file_at(set, i)));
@@ -1026,8 +1026,8 @@ fn void collect_files(containers.pool mut* p, modules.module_set* set,
 /// Builds the whole document into `out`: the version, the files of the closure,
 /// the diagnostics of the run and the identifier index.
 /// D20.2
-fn void build_document(strbuf.str_buf mut* out, session.session mut* s,
-                       containers.str_vec* files, index.index* ix) {
+fn build_document(strbuf.str_buf mut* out, session.session mut* s,
+                       containers.str_vec* files, index.index* ix) void {
     json.writer mut j = json.writer{};
     json.json_init(&j, out);
     json.json_object_begin(&j);
@@ -1054,7 +1054,7 @@ fn void build_document(strbuf.str_buf mut* out, session.session mut* s,
 /// nothing and a client tells a crash from a verdict. The document is one line
 /// ended by a newline (toolchain.md 4.1).
 /// D20.2
-fn void write_document(session.session mut* s, containers.str_vec* files, index.index* ix) {
+fn write_document(session.session mut* s, containers.str_vec* files, index.index* ix) void {
     strbuf.str_buf mut doc = strbuf.create();
     defer strbuf.free(&doc);
     build_document(&doc, s, files, ix);
@@ -1069,8 +1069,8 @@ fn void write_document(session.session mut* s, containers.str_vec* files, index.
 /// the caller, since every record of the index is read out of an annotation
 /// (ast.ft).
 /// D14.1, D14.2, D20.2, D20.3
-fn void check_document(session.session mut* s, options* opts, analysis mut* an,
-                       containers.pool mut* p) {
+fn check_document(session.session mut* s, options* opts, analysis mut* an,
+                       containers.pool mut* p) void {
     containers.str_vec mut files = containers.str_create();
     defer containers.str_free(&files);
     collect_files(p, &an->set, &files);
@@ -1087,7 +1087,7 @@ fn void check_document(session.session mut* s, options* opts, analysis mut* an,
 /// declaration and the reverse order of release, since every name of a tree points
 /// into the session.
 /// D20.5
-fn i32 compile_entry(options* opts, string program) {
+fn compile_entry(options* opts, string program) i32 {
     containers.pool mut p = containers.pool_create();
     defer containers.pool_free(&p);
     session.session mut s = session.create();
@@ -1149,7 +1149,7 @@ fn i32 compile_entry(options* opts, string program) {
 
 /// Runs the compiler with args[1..]; returns the process exit status.
 /// D14.1
-fn i32 run(string@ args) {
+fn run(string@ args) i32 {
     // fort with no arguments prints one usage line and exits with 2
     // (toolchain.md 1).
     if (args.len < 2) {

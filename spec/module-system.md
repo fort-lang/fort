@@ -125,7 +125,7 @@ finding a module, looks the name up in that module's namespace.
 | type operand   | `sizeof(m.T)`, `cast(p, m.T*)`, `new(m.T)` |                                   |
 | struct literal | `m.T{...}`                                 | `math.vector{1.0, 2.0}`           |
 | enum member    | `m.E.Member`                               | `inp.key.left`, or a `case` label |
-| function value | `m.f`                                      | `fn i32(i32, i32) op = math.add;` |
+| function value | `m.f`                                      | `fn (i32, i32) i32 op = math.add;` |
 
 - A type position admits exactly one dot (`qualified_name`, `grammar.md` section 4). `m` alone
   is an error in both value and type positions.
@@ -152,7 +152,7 @@ Lookup of an unqualified name proceeds (D7.9):
   name; the shadowed name is inaccessible in that scope. After `import std.io;` a parameter
   named `io` is legal, and `io` in its scope names the parameter, not the module.
 - A module-level declaration or import binding may shadow a universe name: a module declaring
-  `fn void print(string s)` loses the builtin `print` throughout its body.
+  `fn print(string s) void` loses the builtin `print` throughout its body.
 - Enum members are not in the namespace (D3.9): `red` is not a name, `color.red` is.
 - Universe functions other than `move` yield no value (D12.2); none can be used as a value,
   imported or qualified.
@@ -215,11 +215,11 @@ the table (D9.7, `toolchain.md` 6 item 4).
 ### 8.1 Declaration and allowed types
 
 ```fort
-extern fn i64 write(i32 fd, u8* buf, u64 n);
-extern fn u64 strlen(char* s);
-extern fn noreturn exit(i32 status);
-extern fn void mut* own malloc(u64 n);
-extern fn void free(void* own p);
+extern fn write(i32 fd, u8* buf, u64 n) i64;
+extern fn strlen(char* s) u64;
+extern fn exit(i32 status) noreturn;
+extern fn malloc(u64 n) void mut* own;
+extern fn free(void* own p) void;
 ```
 
 `extern fn` declares a C function with the System V x86-64 ABI (D9.8; `grammar.md` section 3). It
@@ -279,20 +279,20 @@ enum being the same fix:
 ```fort
 // shade.ft
 enum color { red, green }
-extern fn void paint(color c);                  // the enum's own module spells it `color`
-fn void paint_red() { paint(color.red); }       // reachable from elsewhere through this
+extern fn paint(color c) void;                  // the enum's own module spells it `color`
+fn paint_red() void { paint(color.red); }       // reachable from elsewhere through this
 ```
 
 ```fort
 // main.ft
 import shade;
-extern fn void paint(shade.color c);            // the only other spelling there is; one type
+extern fn paint(shade.color c) void;            // the only other spelling there is; one type
 ```
 
 ```fort
-extern fn void mut* own malloc(u64 n);
-extern fn void free(void* own p);
-extern fn char mut* own strdup(char* s);        // C documents: the caller frees
+extern fn malloc(u64 n) void mut* own;
+extern fn free(void* own p) void;
+extern fn strdup(char* s) char mut* own;        // C documents: the caller frees
 
 char mut* own copy = strdup("abc".ptr);         // adopted through the declared own result
 char mut* alias = copy;                         // lends (D17.4)
@@ -321,7 +321,7 @@ free(cast(alias, void*));                       // error: a view cannot pass to 
 | `T*` result the caller must free | `T mut* own` (D17.13)                   |
 | `void*` from an allocator      | `void mut* own` (D3.11, D17.13)           |
 | `T*` parameter that C frees    | `T* own` or `void* own` (D17.13)          |
-| `R (*)(A, B)`                  | `fn R(A, B)`                              |
+| `R (*)(A, B)`                  | `fn (A, B) R`                              |
 | C `enum`                       | `i32`, or a fort enum (passed as `i32`)   |
 
 A C `const` on the pointee becomes the absence of `mut`, and a documented "caller frees" or
@@ -342,7 +342,7 @@ crosses as a single 0 or 1.
 
 Fort has no variadics (D8.3) and an extern signature cannot declare one. A variadic C function is
 declared with a fixed prototype for the arguments actually passed, such as
-`extern fn i32 printf(char* fmt, i64 n, f64 x);`. This is safe because System V passes fixed and
+`extern fn printf(char* fmt, i64 n, f64 x) i32;`. This is safe because System V passes fixed and
 variadic arguments identically and tells a variadic callee how many vector registers were used;
 the compiler declares and calls every extern function through a variadic LLVM function type, so
 that count is always passed (D9.8, `toolchain.md` 6 item 8).
@@ -373,9 +373,9 @@ A fort function is a valid C callback exactly when its signature is extern-legal
 symbol is dotted (`main.by_value`), which C cannot spell, but a callback is passed by value:
 
 ```fort
-extern fn void qsort(void* base, u64 n, u64 size, fn i32(void*, void*) cmp);
+extern fn qsort(void* base, u64 n, u64 size, fn (void*, void*) i32 cmp) void;
 
-fn i32 by_value(void* a, void* b) {
+fn by_value(void* a, void* b) i32 {
     i32 x = *cast(a, i32*);
     i32 y = *cast(b, i32*);
     return x < y ? -1 : (x > y ? 1 : 0);
@@ -408,9 +408,9 @@ an `own` slot (D3.6, D13.5, D17.2), and stores the adopted span through it, sinc
 passes the overwrite check (D17.11).
 
 ```fort
-extern fn u8 mut* c_read_all(u64 mut* n);       // C documents: the caller frees
+extern fn c_read_all(u64 mut* n) u8 mut*;       // C documents: the caller frees
 
-fn bool read_all(u8 mut@ own mut* out) {
+fn read_all(u8 mut@ own mut* out) bool {
     u64 mut n = 0;
     u8 mut* p = c_read_all(&n);
     if (p == null) { return false; }
@@ -418,7 +418,7 @@ fn bool read_all(u8 mut@ own mut* out) {
     return true;
 }
 
-fn void wrong(u8 mut@ own mut* out) {
+fn wrong(u8 mut@ own mut* out) void {
     u64 mut n = 0;
     u8 mut* p = c_read_all(&n);
     *out = p[0..n];                             // error: a view cannot be stored in an own slot
@@ -429,14 +429,14 @@ fn void wrong(u8 mut@ own mut* out) {
 
 ```fort
 // hello.ft
-extern fn i64 write(i32 fd, u8* buf, u64 n);
-extern fn u64 strlen(char* s);
+extern fn write(i32 fd, u8* buf, u64 n) i64;
+extern fn strlen(char* s) u64;
 
-fn void put(string s) {
+fn put(string s) void {
     write(1, cast(s.ptr, u8*), s.len);
 }
 
-fn i32 main(string@ args) {
+fn main(string@ args) i32 {
     string greeting = "hello from fort\n";
     put(greeting);
     put("program: ");
@@ -513,7 +513,7 @@ module cache, no incremental rebuild, no parallel compilation of modules and no 
 
 ## 11. Entry point and program start
 
-The entry module must define `fn i32 main()` or `fn i32 main(string@ args)` (D8.6). A `main`
+The entry module must define `fn main() i32` or `fn main(string@ args) i32` (D8.6). A `main`
 returning `void` or taking other parameters is an error. `main` in any other module is an ordinary
 function.
 
@@ -537,11 +537,11 @@ aborts (D11.4).
 // math.ft
 f64 PI = 3.141592653589793;
 
-fn i32 add(i32 a, i32 b) {
+fn add(i32 a, i32 b) i32 {
     return a + b;
 }
 
-fn i32 multiply(i32 a, i32 b) {
+fn multiply(i32 a, i32 b) i32 {
     return a * b;
 }
 
@@ -550,7 +550,7 @@ struct vector {
     f64 y;
 }
 
-fn f64 dot(vector a, vector b) {
+fn dot(vector a, vector b) f64 {
     return a.x * b.x + a.y * b.y;
 }
 ```
@@ -562,7 +562,7 @@ fn f64 dot(vector a, vector b) {
 import math;
 import math.{add, multiply as mul};
 
-fn i32 main() {
+fn main() i32 {
     i32 sum = add(5, 3);
     i32 product = mul(4, 7);
     math.vector v = math.vector{1.0, 2.0};
@@ -590,11 +590,11 @@ struct list {
     u64 size;
 }
 
-fn list list_create() {
+fn list_create() list {
     return list{};
 }
 
-fn void list_push(list mut* l, i32 value) {
+fn list_push(list mut* l, i32 value) void {
     node mut* own n = new(node);
     n->value = value;
     n->next = move(l->head);
@@ -602,7 +602,7 @@ fn void list_push(list mut* l, i32 value) {
     l->size += 1;
 }
 
-fn bool list_pop(list mut* l, i32 mut* out) {
+fn list_pop(list mut* l, i32 mut* out) bool {
     if (l->head == null) {
         return false;
     }
@@ -614,7 +614,7 @@ fn bool list_pop(list mut* l, i32 mut* out) {
     return true;
 }
 
-fn void list_free(list mut* l) {
+fn list_free(list mut* l) void {
     i32 mut unused = 0;
     while (list_pop(l, &unused)) {
     }
@@ -651,7 +651,7 @@ struct vec2 {
     f64 y;
 }
 
-fn vec2 vec_add(vec2 a, vec2 b) {
+fn vec_add(vec2 a, vec2 b) vec2 {
     return vec2{a.x + b.x, a.y + b.y};
 }
 ```
@@ -662,7 +662,7 @@ enum key { none, left, right, quit }
 
 i32 mut frame = 0;
 
-fn key poll() {
+fn poll() key {
     frame += 1;
     switch (frame) {
     case 1: return key.left;
@@ -683,7 +683,7 @@ struct window {
     vec2 origin;
 }
 
-fn void draw(window* win, vec2 pos) {
+fn draw(window* win, vec2 pos) void {
     vec2 p = vec.vec_add(win->origin, pos);
     println("draw at ", p.x, ",", p.y, " in ", win->width, "x", win->height);
 }
@@ -696,7 +696,7 @@ import render;
 import render.window;
 import input as inp;
 
-fn i32 main() {
+fn main() i32 {
     window w = {800, 600, {0.0, 0.0}};
     vec2 mut pos = {0.0, 0.0};
     bool mut running = true;
@@ -754,7 +754,7 @@ All diagnostics follow D14.2: `<file>:<line>:<col>: error: <message>`, optionall
 | path separator written `..`         | `a module path is separated by '.', not '..'`           |
 | module binding as a value or type   | `'io' is a module, not a value` (or `not a type`)       |
 | `m.x` with no such declaration      | `module 'std.io' has no declaration named 'x'`          |
-| entry module without a valid `main` | `entry module 'main' must define 'fn i32 main()'`       |
+| entry module without a valid `main` | `entry module 'main' must define 'fn main() i32'`       |
 | entry base name with a `.`          | `entry file name 'my.app' cannot contain '.'`           |
 | aggregate in an extern signature    | `extern signature cannot use type 'i32@'`               |
 
@@ -766,7 +766,7 @@ is reported the same way in both modes, and `--check --json` reports them as the
 Notes accompany some of these: "not found" lists `note: looked for <path>` once per root and
 reading; the ambiguous case gives the full paths in the message and the same-file case adds `note:
 both name <real path>`; a redeclaration points at the earlier one with `note: previous declaration
-of 'add' here`; the missing-`main` message continues `or 'fn i32 main(string@ args)'`. Every
+of 'add' here`; the missing-`main` message continues `or 'fn main(string@ args) i32'`. Every
 conflicting-extern row names the difference in the same words: `: the result type differs`, `: the
 number of parameters differs` or `: parameter N differs`. A conflict between two modules is reported
 at the later declaration of the dependency order, on the piece that carries the difference, with
@@ -775,7 +775,7 @@ a struct or an enum, a second note says that such a type is its declaration and 
 gives the two ways out, since no rewording reaches one (section 8.1). Either and not both: an enum
 against the `i32` it crosses as draws that note too. The runtime is fort and occupies no C name
 (D13.1, D9.7), so no `extern` declaration can conflict with it and there is no rule about one:
-`extern fn void fort_rt_del(void* p);` declares an ordinary C symbol and answers to the rows above
+`extern fn fort_rt_del(void* p) void;` declares an ordinary C symbol and answers to the rows above
 like any other. What the runtime does bring is `std.libc`, which is in every closure behind it
 (D9.10), so a program declaring a libc symbol itself is held against `std.libc`'s declaration of it
 whether or not it imports the library. The row it draws is the ordinary `conflicting declarations of

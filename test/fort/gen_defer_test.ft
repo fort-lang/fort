@@ -28,17 +28,17 @@ import std.strbuf;
 // the structural check of item 10 over it, so the check has one call site here
 // and covers all six.
 
-fn string emit(gen_env.env mut* e, string src, string name) {
+fn emit(gen_env.env mut* e, string src, string name) string {
     assert(gen_env.open_module(e, src));
     string got = gen_env.emit_function(e, name);
     gen_env.expect_blocks(e, got);
     return got;
 }
 
-fn string wrap(strbuf.str_buf mut* b, string decls) {
+fn wrap(strbuf.str_buf mut* b, string decls) string {
     strbuf.clear(b);
     strbuf.append(b, decls);
-    strbuf.append(b, "fn i32 main() {\n    return 0;\n}\n");
+    strbuf.append(b, "fn main() i32 {\n    return 0;\n}\n");
     return strbuf.view(b);
 }
 
@@ -50,7 +50,7 @@ fn string wrap(strbuf.str_buf mut* b, string decls) {
 // therefore c, b, a: the inner block's `c`, then its `defer`, then the
 // function's.
 // D7.8
-fn void a_block_runs_its_own_deferred_statements_when_it_ends() {
+fn a_block_runs_its_own_deferred_statements_when_it_ends() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
@@ -58,7 +58,7 @@ fn void a_block_runs_its_own_deferred_statements_when_it_ends() {
     defer strbuf.free(&b);
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
-    strbuf.append(&src, "fn i64 at_end(i64 n) {\n    defer eprintln(\"a\");\n    {\n");
+    strbuf.append(&src, "fn at_end(i64 n) i64 {\n    defer eprintln(\"a\");\n    {\n");
     strbuf.append(&src, "        defer eprintln(\"b\");\n        eprintln(\"c\");\n    }\n");
     strbuf.append(&src, "    return n;\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "at_end");
@@ -91,7 +91,7 @@ fn void a_block_runs_its_own_deferred_statements_when_it_ends() {
 // deferred statements run at either exit and at the end of every iteration. In
 // a `for`, `continue` runs them before `step`.
 // D7.8, D7.6
-fn void a_defer_in_a_loop_body_is_copied_into_every_exit() {
+fn a_defer_in_a_loop_body_is_copied_into_every_exit() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
@@ -99,7 +99,7 @@ fn void a_defer_in_a_loop_body_is_copied_into_every_exit() {
     defer strbuf.free(&b);
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
-    strbuf.append(&src, "fn void in_loop(bool go) {\n    for (;;) {\n");
+    strbuf.append(&src, "fn in_loop(bool go) void {\n    for (;;) {\n");
     strbuf.append(&src, "        defer eprintln(\"step\");\n        if (go) {\n");
     strbuf.append(&src, "            continue;\n        }\n        break;\n    }\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "in_loop");
@@ -132,7 +132,7 @@ fn void a_defer_in_a_loop_body_is_copied_into_every_exit() {
 // refuses `do`-`while`, so the expected text of this one case was read off
 // stage2 and its blocks are named here.
 // D7.5, D7.6, D7.8, T-044: the ticket that gave stage2 `do`-`while`
-fn void a_defer_in_a_do_while_body_is_copied_into_both_exits() {
+fn a_defer_in_a_do_while_body_is_copied_into_both_exits() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
@@ -140,7 +140,7 @@ fn void a_defer_in_a_do_while_body_is_copied_into_both_exits() {
     defer strbuf.free(&b);
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
-    strbuf.append(&src, "fn void in_do(bool go) {\n    do {\n");
+    strbuf.append(&src, "fn in_do(bool go) void {\n    do {\n");
     strbuf.append(&src, "        defer eprintln(\"step\");\n        if (go) {\n");
     strbuf.append(&src, "            continue;\n        }\n        break;\n");
     strbuf.append(&src, "    } while (go);\n}\n");
@@ -172,7 +172,7 @@ fn void a_defer_in_a_do_while_body_is_copied_into_both_exits() {
 // L5, `out` still runs, and the enclosing loop is left once, at the end of the
 // expansion. A branch to L2 there would put `out` after a terminator.
 // D7.5, D7.8
-fn void a_break_of_a_loop_inside_deferred_code_branches_to_that_loop() {
+fn a_break_of_a_loop_inside_deferred_code_branches_to_that_loop() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
@@ -180,7 +180,7 @@ fn void a_break_of_a_loop_inside_deferred_code_branches_to_that_loop() {
     defer strbuf.free(&b);
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
-    strbuf.append(&src, "fn void in_loop() {\n    while (true) {\n        defer {\n");
+    strbuf.append(&src, "fn in_loop() void {\n    while (true) {\n        defer {\n");
     strbuf.append(&src, "            while (true) {\n                eprintln(\"in\");\n");
     strbuf.append(&src, "                break;\n            }\n");
     strbuf.append(&src, "            eprintln(\"out\");\n        }\n        break;\n");
@@ -206,7 +206,7 @@ fn void a_break_of_a_loop_inside_deferred_code_branches_to_that_loop() {
 // `return e` evaluates `e` before the deferred code runs, which cannot then
 // change the value returned: the value is in a register first.
 // D7.8, D8.2
-fn void a_return_reads_its_value_before_the_deferred_code_runs() {
+fn a_return_reads_its_value_before_the_deferred_code_runs() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
@@ -214,7 +214,7 @@ fn void a_return_reads_its_value_before_the_deferred_code_runs() {
     defer strbuf.free(&b);
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
-    strbuf.append(&src, "fn i64 early(i64 n) {\n    defer eprintln(\"out\");\n");
+    strbuf.append(&src, "fn early(i64 n) i64 {\n    defer eprintln(\"out\");\n");
     strbuf.append(&src, "    return n;\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "early");
     string[4] mut want = {
@@ -233,7 +233,7 @@ fn void a_return_reads_its_value_before_the_deferred_code_runs() {
 // in a temporary of the callee's own and is copied out after the deferred code
 // has run (item 7).
 // D7.8, D8.2
-fn void an_aggregate_return_lands_in_a_temporary_when_anything_is_deferred() {
+fn an_aggregate_return_lands_in_a_temporary_when_anything_is_deferred() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
@@ -242,7 +242,7 @@ fn void an_aggregate_return_lands_in_a_temporary_when_anything_is_deferred() {
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
     strbuf.append(&src, "struct point {\n    i64 x;\n    i64 y;\n}\n");
-    strbuf.append(&src, "fn point aggregate(point p) {\n    defer eprintln(\"out\");\n");
+    strbuf.append(&src, "fn aggregate(point p) point {\n    defer eprintln(\"out\");\n");
     strbuf.append(&src, "    return p;\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "aggregate");
     string[9] mut want = {
@@ -262,7 +262,7 @@ fn void an_aggregate_return_lands_in_a_temporary_when_anything_is_deferred() {
 // A function with nothing deferred writes the caller's block directly and pays
 // for no temporary.
 // D7.8
-fn void an_aggregate_return_writes_the_sret_block_when_nothing_is_deferred() {
+fn an_aggregate_return_writes_the_sret_block_when_nothing_is_deferred() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
@@ -271,7 +271,7 @@ fn void an_aggregate_return_writes_the_sret_block_when_nothing_is_deferred() {
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
     strbuf.append(&src, "struct point {\n    i64 x;\n    i64 y;\n}\n");
-    strbuf.append(&src, "fn point plain(point p) {\n    return p;\n}\n");
+    strbuf.append(&src, "fn plain(point p) point {\n    return p;\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "plain");
     string[5] mut want = {
         "entry:\n",
@@ -284,7 +284,7 @@ fn void an_aggregate_return_writes_the_sret_block_when_nothing_is_deferred() {
     assert(str.find(got, "%tmp0") < 0);
 }
 
-fn i32 main() {
+fn main() i32 {
     a_block_runs_its_own_deferred_statements_when_it_ends();
     println("scopes ok");
     a_defer_in_a_loop_body_is_copied_into_every_exit();

@@ -32,7 +32,7 @@ import std.strbuf;
 // script of bodies that break a rule, the server answers and reads on.
 
 // One frame around `body`, appended to `b`.
-fn void frame_into(strbuf.str_buf mut* b, string body) {
+fn frame_into(strbuf.str_buf mut* b, string body) void {
     strbuf.append(b, "Content-Length: ");
     strbuf.append_u64(b, body.len);
     strbuf.append(b, "\r\n\r\n");
@@ -42,7 +42,7 @@ fn void frame_into(strbuf.str_buf mut* b, string body) {
 // The recorded session: initialize, the notification that follows it, a
 // document opened and changed twice, a request the server does not implement,
 // a cancel, didClose, shutdown and exit.
-fn void session_into(strbuf.str_buf mut* b) {
+fn session_into(strbuf.str_buf mut* b) void {
     strbuf.clear(b);
     frame_into(b, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}");
     frame_into(b, "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}");
@@ -50,12 +50,12 @@ fn void session_into(strbuf.str_buf mut* b) {
     defer strbuf.free(&note);
     strbuf.append(&note, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":");
     strbuf.append(&note, "{\"textDocument\":{\"uri\":\"file:///a.ft\",\"version\":1,");
-    strbuf.append(&note, "\"text\":\"fn i32 main()\"}}}");
+    strbuf.append(&note, "\"text\":\"fn main() i32\"}}}");
     frame_into(b, strbuf.view(&note));
     strbuf.clear(&note);
     strbuf.append(&note, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":");
     strbuf.append(&note, "{\"textDocument\":{\"uri\":\"file:///a.ft\",\"version\":2},");
-    strbuf.append(&note, "\"contentChanges\":[{\"text\":\"fn i32 main() {}\"}]}}");
+    strbuf.append(&note, "\"contentChanges\":[{\"text\":\"fn main() i32 {}\"}]}}");
     frame_into(b, strbuf.view(&note));
     frame_into(b, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/hover\",\"params\":{}}");
     strbuf.clear(&note);
@@ -72,7 +72,7 @@ fn void session_into(strbuf.str_buf mut* b) {
 
 // A hostile script: every body breaks a rule, and the server must answer each
 // and read the next.
-fn void hostile_into(strbuf.str_buf mut* b) {
+fn hostile_into(strbuf.str_buf mut* b) void {
     strbuf.clear(b);
     frame_into(b, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}");
     frame_into(b, "{");
@@ -84,7 +84,7 @@ fn void hostile_into(strbuf.str_buf mut* b) {
 }
 
 // What the server writes for `script`, with the status in *status.
-fn string own answers_of(string script, i32 mut* status) {
+fn answers_of(string script, i32 mut* status) string own {
     lsp_env.pipe_ends in_ends = lsp_env.open_pipe();
     lsp_env.pipe_ends out_ends = lsp_env.open_pipe();
     lsp_env.feed(in_ends, script);
@@ -97,12 +97,12 @@ fn string own answers_of(string script, i32 mut* status) {
 }
 
 // Whether `whole` begins with `part`.
-fn bool begins_with(string whole, string part) {
+fn begins_with(string whole, string part) bool {
     return part.len <= whole.len && whole[0..part.len] == part;
 }
 
 // The offset of `needle` in `s`, or -1.
-fn i64 find(string s, string needle) {
+fn find(string s, string needle) i64 {
     u64 mut i = 0;
     while (i + needle.len <= s.len) {
         if (s[i..i + needle.len] == needle) {
@@ -118,7 +118,7 @@ string SHUTDOWN_ANSWER = "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":null}";
 
 // ---- every prefix of a session ---------------------------------------------------
 
-fn void a_prefix_answers_a_prefix_of_the_session() {
+fn a_prefix_answers_a_prefix_of_the_session() void {
     strbuf.str_buf mut script = strbuf.create();
     defer strbuf.free(&script);
     session_into(&script);
@@ -156,7 +156,7 @@ fn void a_prefix_answers_a_prefix_of_the_session() {
     del(all);
 }
 
-fn void the_documents_of_a_prefix_follow_the_messages_it_holds() {
+fn the_documents_of_a_prefix_follow_the_messages_it_holds() void {
     // The store answers for the notifications that arrived whole: before the
     // didOpen there is no document, between it and the didClose there is one,
     // and the text is the last change the prefix carried.
@@ -173,16 +173,16 @@ fn void the_documents_of_a_prefix_follow_the_messages_it_holds() {
     documents_are(whole[0..cast(opened, u64)], "", 0, "inside the didOpen");
     // One that ends inside the didChange frame holds the text of the didOpen,
     // since that frame arrived whole and this one did not.
-    documents_are(whole[0..cast(changed, u64)], "fn i32 main()", 1, "inside the didChange");
+    documents_are(whole[0..cast(changed, u64)], "fn main() i32", 1, "inside the didChange");
     // One that ends inside the didClose frame holds the text of the change.
-    documents_are(whole[0..cast(closed, u64)], "fn i32 main() {}", 1, "inside the didClose");
+    documents_are(whole[0..cast(closed, u64)], "fn main() i32 {}", 1, "inside the didClose");
     // And the whole session holds nothing again.
     documents_are(whole, "", 0, "after the didClose");
 }
 
 // The store of a session over `script` holds `count` documents, and the text
 // of file:///a.ft is `want`.
-fn void documents_are(string script, string want, u64 count, string what) {
+fn documents_are(string script, string want, u64 count, string what) void {
     lsp_env.pipe_ends in_ends = lsp_env.open_pipe();
     lsp_env.pipe_ends out_ends = lsp_env.open_pipe();
     lsp_env.feed(in_ends, script);
@@ -199,17 +199,17 @@ fn void documents_are(string script, string want, u64 count, string what) {
 
 // The documents the server holds, through the accessor the later tickets read
 // them with.
-fn u64 documents_count(server.server* srv) {
+fn documents_count(server.server* srv) u64 {
     return docs.count(server.documents(srv));
 }
 
-fn string document_text(server.server* srv) {
+fn document_text(server.server* srv) string {
     return docs.text_of(server.documents(srv), "file:///a.ft");
 }
 
 // ---- the statuses ----------------------------------------------------------------
 
-fn void the_empty_prefix_answers_nothing() {
+fn the_empty_prefix_answers_nothing() void {
     i32 mut status = -1;
     string own got = answers_of("", &status);
     lsp_env.check(got, "", "the empty prefix");
@@ -217,7 +217,7 @@ fn void the_empty_prefix_answers_nothing() {
     del(got);
 }
 
-fn void a_session_without_exit_ends_at_the_stream() {
+fn a_session_without_exit_ends_at_the_stream() void {
     // The whole session but its last frame: the client shut the server down
     // and then died without sending `exit`. The status is the one an orderly
     // exit would have answered, since the shutdown is what it turns on.
@@ -238,7 +238,7 @@ fn void a_session_without_exit_ends_at_the_stream() {
 
 // ---- every prefix of a hostile stream --------------------------------------------
 
-fn void a_prefix_of_a_hostile_stream_is_answered_and_read_on() {
+fn a_prefix_of_a_hostile_stream_is_answered_and_read_on() void {
     strbuf.str_buf mut script = strbuf.create();
     defer strbuf.free(&script);
     hostile_into(&script);
@@ -261,7 +261,7 @@ fn void a_prefix_of_a_hostile_stream_is_answered_and_read_on() {
     del(all);
 }
 
-fn void every_answer_of_a_hostile_stream_is_a_message() {
+fn every_answer_of_a_hostile_stream_is_a_message() void {
     // Whatever the server answers is a JSON-RPC message: the bodies of a
     // hostile stream must not make it write a document a client cannot read.
     strbuf.str_buf mut script = strbuf.create();
@@ -299,7 +299,7 @@ fn void every_answer_of_a_hostile_stream_is_a_message() {
 }
 
 // The length a `Content-Length` header declares.
-fn bool parse_len(string header, u64 mut* out) {
+fn parse_len(string header, u64 mut* out) bool {
     if (header.len < 17 || header[0..16] != "Content-Length: ") {
         return false;
     }
@@ -316,7 +316,7 @@ fn bool parse_len(string header, u64 mut* out) {
     return true;
 }
 
-fn i32 main() {
+fn main() i32 {
     a_prefix_answers_a_prefix_of_the_session();
     the_documents_of_a_prefix_follow_the_messages_it_holds();
     println("prefixes ok");

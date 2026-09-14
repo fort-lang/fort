@@ -22,11 +22,11 @@ import std.strbuf;
 // T-036: the ticket that ports the statement checker
 
 // The module the probes are written against.
-fn bool open_probe(check_env.env mut* e, string body) {
+fn open_probe(check_env.env mut* e, string body) bool {
     return open_probe2(e, body, "");
 }
 
-fn bool open_probe2(check_env.env mut* e, string body, string extra) {
+fn open_probe2(check_env.env mut* e, string body, string extra) bool {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     strbuf.append(&b, "struct point {\n    i32 x;\n    i32 y;\n}\n");
@@ -35,17 +35,17 @@ fn bool open_probe2(check_env.env mut* e, string body, string extra) {
     strbuf.append(&b, "point mut p = {1, 2};\n");
     strbuf.append(&b, "string text = \"hello\";\n");
     strbuf.append(&b, "i32 k = 1;\n");
-    strbuf.append(&b, "fn void s_i32(i32 v) {\n    return;\n}\n");
-    strbuf.append(&b, "fn void s_span(i32@ v) {\n    return;\n}\n");
-    strbuf.append(&b, "fn void s_void() {\n    return;\n}\n");
+    strbuf.append(&b, "fn s_i32(i32 v) void {\n    return;\n}\n");
+    strbuf.append(&b, "fn s_span(i32@ v) void {\n    return;\n}\n");
+    strbuf.append(&b, "fn s_void() void {\n    return;\n}\n");
     strbuf.append(&b, body);
     strbuf.append(&b, extra);
-    strbuf.append(&b, "fn i32 main() {\n    return 0;\n}\n");
+    strbuf.append(&b, "fn main() i32 {\n    return 0;\n}\n");
     return check_env.open_module(e, strbuf.view(&b));
 }
 
 // The first node of `kind` in the `i`-th statement of `probe`, checked.
-fn check.expr probe_kind(check_env.env mut* e, u64 i, ast.ast_kind kind) {
+fn probe_kind(check_env.env mut* e, u64 i, ast.ast_kind kind) check.expr {
     ast.node mut* n = check_env.node_find(check_env.body_expr(e, "probe", i), kind, "");
     if (n == null) {
         panic("check_diags_test: no such expression");
@@ -56,7 +56,7 @@ fn check.expr probe_kind(check_env.env mut* e, u64 i, ast.ast_kind kind) {
 // ---- names and qualified names -----------------------------------------------------
 // D9.4, D3.9, D7.9
 
-fn void a_qualified_type_name_needs_a_module_on_its_left() {
+fn a_qualified_type_name_needs_a_module_on_its_left() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
@@ -66,7 +66,7 @@ fn void a_qualified_type_name_needs_a_module_on_its_left() {
     assert(check_env.said(&e, "'k' is not a module"));
 }
 
-fn void a_module_is_not_a_value() {
+fn a_module_is_not_a_value() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
@@ -75,7 +75,7 @@ fn void a_module_is_not_a_value() {
     defer strbuf.free(&b);
     strbuf.append(&b, "import other;\n");
     strbuf.append(&b, "i32 k = other;\n");
-    strbuf.append(&b, "fn i32 main() {\n    return 0;\n}\n");
+    strbuf.append(&b, "fn main() i32 {\n    return 0;\n}\n");
     check_env.add(&e, "main.ft", strbuf.view(&b));
     assert(!check_env.check_entry(&e, "main.ft"));
     // A name that denotes a module denotes no value.
@@ -83,18 +83,18 @@ fn void a_module_is_not_a_value() {
     assert(check_env.said(&e, "'other' is a module, not a value"));
 }
 
-fn void a_type_is_not_a_value() {
+fn a_type_is_not_a_value() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
     // `point.x` reads a field of the type rather than of a value.
     // D3.9
-    assert(open_probe(&e, "fn void probe() {\n    s_i32(point.x);\n}\n"));
+    assert(open_probe(&e, "fn probe() void {\n    s_i32(point.x);\n}\n"));
     check_env.probe_stmt(&e, "probe", 0);
     assert(check_env.said(&e, "'point' is a type, not a value"));
 }
 
-fn void an_enum_has_only_the_members_it_declares() {
+fn an_enum_has_only_the_members_it_declares() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
@@ -105,11 +105,11 @@ fn void an_enum_has_only_the_members_it_declares() {
 // ---- values that are not values ----------------------------------------------------
 // D12.2, D7.11
 
-fn void a_call_that_yields_nothing_is_not_a_value() {
+fn a_call_that_yields_nothing_is_not_a_value() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    assert(open_probe(&e, "fn void probe() {\n    s_i32(s_void());\n}\n"));
+    assert(open_probe(&e, "fn probe() void {\n    s_i32(s_void());\n}\n"));
     check_env.probe_stmt(&e, "probe", 0);
     // The diagnostic names the callee when it has one.
     // D12.2
@@ -119,7 +119,7 @@ fn void a_call_that_yields_nothing_is_not_a_value() {
 // ---- constants out of range --------------------------------------------------------
 // D4.4, D4.5, D6.2
 
-fn void an_exact_result_outside_the_constant_range_is_an_error() {
+fn an_exact_result_outside_the_constant_range_is_an_error() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
@@ -129,7 +129,7 @@ fn void an_exact_result_outside_the_constant_range_is_an_error() {
     assert(check_env.said(&e, "constant expression out of range"));
 }
 
-fn void an_untyped_constant_that_fits_no_default_type_has_none() {
+fn an_untyped_constant_that_fits_no_default_type_has_none() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
@@ -141,7 +141,7 @@ fn void an_untyped_constant_that_fits_no_default_type_has_none() {
     assert(check_env.said(&e, "constant expression out of range"));
 }
 
-fn void an_untyped_shift_count_is_checked_against_the_constant_range() {
+fn an_untyped_shift_count_is_checked_against_the_constant_range() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
@@ -152,7 +152,7 @@ fn void an_untyped_shift_count_is_checked_against_the_constant_range() {
     assert(check_env.said(&e, "constant shift count must be in 0..63"));
 }
 
-fn void two_nulls_do_not_compare() {
+fn two_nulls_do_not_compare() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
@@ -166,17 +166,17 @@ fn void two_nulls_do_not_compare() {
 // ---- the address and dereference operators -----------------------------------------
 // D5.8, D3.10, D3.11
 
-fn void the_address_of_a_function_is_not_written() {
+fn the_address_of_a_function_is_not_written() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
     // A function name is already a value of function-pointer type.
     // D3.10
-    assert(!check_env.check_decls(&e, "fn void f() {\n    return;\n}\nvoid* p = &f;\n"));
+    assert(!check_env.check_decls(&e, "fn f() void {\n    return;\n}\nvoid* p = &f;\n"));
     assert(check_env.said(&e, "'&' on a function: a function name is already a value"));
 }
 
-fn void the_address_operator_needs_an_lvalue() {
+fn the_address_operator_needs_an_lvalue() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
@@ -184,14 +184,14 @@ fn void the_address_operator_needs_an_lvalue() {
     assert(check_env.said(&e, "'&' requires an lvalue"));
 }
 
-fn void only_a_pointer_is_dereferenced() {
+fn only_a_pointer_is_dereferenced() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
     // `void*` has no pointee type and a function pointer is called, not
     // dereferenced.
     // D3.11, D3.10
-    assert(open_probe(&e, "fn void probe() {\n    s_i32(*k);\n}\n"));
+    assert(open_probe(&e, "fn probe() void {\n    s_i32(*k);\n}\n"));
     check_env.probe_stmt(&e, "probe", 0);
     assert(check_env.said(&e, "cannot dereference i32"));
 }
@@ -199,20 +199,20 @@ fn void only_a_pointer_is_dereferenced() {
 // ---- fields, indices and spans -----------------------------------------------------
 // D6.8, D6.9, D6.10
 
-fn void an_arrow_needs_a_pointer() {
+fn an_arrow_needs_a_pointer() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    assert(open_probe(&e, "fn void probe() {\n    s_i32(p->x);\n}\n"));
+    assert(open_probe(&e, "fn probe() void {\n    s_i32(p->x);\n}\n"));
     check_env.probe_stmt(&e, "probe", 0);
     assert(check_env.said(&e, "'->' needs a pointer, not point: use '.'"));
 }
 
-fn void a_value_that_is_not_a_struct_has_no_field() {
+fn a_value_that_is_not_a_struct_has_no_field() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    assert(open_probe(&e, "fn void probe() {\n    s_i32(k.other);\n}\n"));
+    assert(open_probe(&e, "fn probe() void {\n    s_i32(k.other);\n}\n"));
     check_env.probe_stmt(&e, "probe", 0);
     assert(check_env.said(&e, "i32 has no field 'other'"));
 }
@@ -220,31 +220,31 @@ fn void a_value_that_is_not_a_struct_has_no_field() {
 // The wording is the C's: `check_count` writes "a " and the caller's noun,
 // so an index reads "a index" (src/bootstrap/check.c). A port does not
 // improve the words it carries.
-fn void an_index_and_a_span_bound_are_integers() {
+fn an_index_and_a_span_bound_are_integers() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    assert(open_probe(&e, "fn void probe() {\n    s_i32(nums[text]);\n}\n"));
+    assert(open_probe(&e, "fn probe() void {\n    s_i32(nums[text]);\n}\n"));
     check_env.probe_stmt(&e, "probe", 0);
     assert(check_env.said(&e, "a index must be an integer, not string"));
 }
 
-fn void only_an_array_a_span_or_a_string_has_a_span() {
+fn only_an_array_a_span_or_a_string_has_a_span() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    assert(open_probe(&e, "fn void probe() {\n    s_span(p[0..1]);\n}\n"));
+    assert(open_probe(&e, "fn probe() void {\n    s_span(p[0..1]);\n}\n"));
     check_env.probe_stmt(&e, "probe", 0);
     assert(check_env.said(&e, "cannot take a span of point"));
 }
 
-fn void a_span_of_a_fixed_array_needs_an_lvalue() {
+fn a_span_of_a_fixed_array_needs_an_lvalue() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
     // An rvalue array has no address to view.
     // D6.9
-    assert(open_probe(&e, "fn void probe() {\n    s_span(i32[3]{1, 2, 3}[0..2]);\n}\n"));
+    assert(open_probe(&e, "fn probe() void {\n    s_span(i32[3]{1, 2, 3}[0..2]);\n}\n"));
     check_env.probe_stmt(&e, "probe", 0);
     assert(check_env.said(&e, "a span of a fixed array needs an lvalue"));
 }
@@ -252,16 +252,16 @@ fn void a_span_of_a_fixed_array_needs_an_lvalue() {
 // ---- move, literals and brace initializers -----------------------------------------
 // D12.2, D6.5
 
-fn void move_takes_an_lvalue() {
+fn move_takes_an_lvalue() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    assert(open_probe(&e, "fn void probe() {\n    s_i32(move(1));\n}\n"));
+    assert(open_probe(&e, "fn probe() void {\n    s_i32(move(1));\n}\n"));
     check_env.probe_stmt(&e, "probe", 0);
     assert(check_env.said(&e, "'move' takes an lvalue"));
 }
 
-fn void a_struct_literal_names_a_struct_type() {
+fn a_struct_literal_names_a_struct_type() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
@@ -269,7 +269,7 @@ fn void a_struct_literal_names_a_struct_type() {
     assert(check_env.said(&e, "color is not a struct type"));
 }
 
-fn void a_brace_initializer_is_not_an_expression() {
+fn a_brace_initializer_is_not_an_expression() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
@@ -286,7 +286,7 @@ fn void a_brace_initializer_is_not_an_expression() {
 // ---- sizes and enum values ---------------------------------------------------------
 // D3.4, D3.9
 
-fn void a_struct_whose_fields_together_pass_the_ceiling_is_refused() {
+fn a_struct_whose_fields_together_pass_the_ceiling_is_refused() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
@@ -303,7 +303,7 @@ fn void a_struct_whose_fields_together_pass_the_ceiling_is_refused() {
     assert(check_env.said(&e, "type is too large: struct huge"));
 }
 
-fn void an_enum_value_is_a_constant_expression() {
+fn an_enum_value_is_a_constant_expression() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
@@ -313,7 +313,7 @@ fn void an_enum_value_is_a_constant_expression() {
     assert(check_env.said(&e, "an enum value must be a constant expression"));
 }
 
-fn i32 main() {
+fn main() i32 {
     a_qualified_type_name_needs_a_module_on_its_left();
     a_module_is_not_a_value();
     a_type_is_not_a_value();

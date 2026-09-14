@@ -21,8 +21,8 @@
 // A program holding a deferred statement in every kind of block, used by the
 // structural tests that answer about the whole module rather than about one
 // snippet.
-static const char BUSY_SOURCE[] = "fn void note(i32 n) {\n}\n"
-                                  "fn i32 work(i32 n) {\n"
+static const char BUSY_SOURCE[] = "fn note(i32 n) void {\n}\n"
+                                  "fn work(i32 n) i32 {\n"
                                   "    defer note(0);\n"
                                   "    {\n"
                                   "        defer note(1);\n"
@@ -56,7 +56,7 @@ static const char BUSY_SOURCE[] = "fn void note(i32 n) {\n}\n"
                                   "    }\n"
                                   "    return 3;\n"
                                   "}\n"
-                                  "fn i32 main() {\n"
+                                  "fn main() i32 {\n"
                                   "    return work(1);\n"
                                   "}\n";
 
@@ -64,9 +64,9 @@ static const char BUSY_SOURCE[] = "fn void note(i32 n) {\n}\n"
 // D7.8
 
 TEST(a_defer_emits_nothing_where_it_stands, {
-    TEST_ASSERT_TRUE(emit("fn void note() {\n}\n"
-                          "fn void f() {\n    defer note();\n    note();\n}\n"
-                          "fn i32 main() {\n    f();\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(emit("fn note() void {\n}\n"
+                          "fn f() void {\n    defer note();\n    note();\n}\n"
+                          "fn main() i32 {\n    f();\n    return 0;\n}\n"));
     // The body holds the statement that stands below the `defer` first and
     // the deferred copy after it, so nothing was emitted at the `defer`
     // itself.
@@ -82,9 +82,9 @@ TEST(a_defer_emits_nothing_where_it_stands, {
 })
 
 TEST(a_deferred_statement_of_a_block_that_is_never_left_early_is_emitted_once, {
-    TEST_ASSERT_TRUE(emit("fn void note(i32 n) {\n}\n"
-                          "fn void f() {\n    defer note(1);\n}\n"
-                          "fn i32 main() {\n    f();\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(emit("fn note(i32 n) void {\n}\n"
+                          "fn f() void {\n    defer note(1);\n}\n"
+                          "fn main() i32 {\n    f();\n    return 0;\n}\n"));
     TEST_ASSERT_EQ_UINT64(occurrences("call void @\"main.note\"(i32 1)"), (uint64_t)1);
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
@@ -92,9 +92,9 @@ TEST(a_deferred_statement_of_a_block_that_is_never_left_early_is_emitted_once, {
 // ---- the order: innermost block first, reverse within a block ----------------------
 
 TEST(the_deferred_statements_of_one_block_run_in_reverse_textual_order, {
-    TEST_ASSERT_TRUE(emit("fn void note(i32 n) {\n}\n"
-                          "fn void f() {\n    defer note(1);\n    defer note(2);\n}\n"
-                          "fn i32 main() {\n    f();\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(emit("fn note(i32 n) void {\n}\n"
+                          "fn f() void {\n    defer note(1);\n    defer note(2);\n}\n"
+                          "fn main() i32 {\n    f();\n    return 0;\n}\n"));
     const char* want = "  call void @\"main.note\"(i32 2)\n"
                        "  call void @\"main.note\"(i32 1)\n"
                        "  ret void\n";
@@ -103,12 +103,12 @@ TEST(the_deferred_statements_of_one_block_run_in_reverse_textual_order, {
 })
 
 TEST(a_return_runs_the_innermost_block_first, {
-    TEST_ASSERT_TRUE(emit("fn void note(i32 n) {\n}\n"
-                          "fn i32 f() {\n"
+    TEST_ASSERT_TRUE(emit("fn note(i32 n) void {\n}\n"
+                          "fn f() i32 {\n"
                           "    defer note(1);\n"
                           "    defer note(2);\n"
                           "    {\n        defer note(3);\n        return 7;\n    }\n}\n"
-                          "fn i32 main() {\n    return f();\n}\n"));
+                          "fn main() i32 {\n    return f();\n}\n"));
     // The inner block's statement, then the outer block's two in reverse
     // order, then the `ret`.
     // D7.8
@@ -121,11 +121,11 @@ TEST(a_return_runs_the_innermost_block_first, {
 })
 
 TEST(a_deferred_statement_of_an_inner_block_is_not_run_by_an_outer_exit, {
-    TEST_ASSERT_TRUE(emit("fn void note(i32 n) {\n}\n"
-                          "fn void f() {\n"
+    TEST_ASSERT_TRUE(emit("fn note(i32 n) void {\n}\n"
+                          "fn f() void {\n"
                           "    {\n        defer note(3);\n    }\n"
                           "    note(9);\n}\n"
-                          "fn i32 main() {\n    f();\n    return 0;\n}\n"));
+                          "fn main() i32 {\n    f();\n    return 0;\n}\n"));
     // The inner block's statement runs where that block ends and nowhere
     // else: one copy, and it precedes the call below the block.
     TEST_ASSERT_EQ_UINT64(occurrences("call void @\"main.note\"(i32 3)"), (uint64_t)1);
@@ -134,12 +134,12 @@ TEST(a_deferred_statement_of_an_inner_block_is_not_run_by_an_outer_exit, {
 })
 
 TEST(each_exit_of_a_function_carries_its_own_copy, {
-    TEST_ASSERT_TRUE(emit("fn void note(i32 n) {\n}\n"
-                          "fn i32 f(bool b) {\n"
+    TEST_ASSERT_TRUE(emit("fn note(i32 n) void {\n}\n"
+                          "fn f(bool b) i32 {\n"
                           "    defer note(1);\n"
                           "    if (b) { return 2; }\n"
                           "    return 3;\n}\n"
-                          "fn i32 main() {\n    return f(true);\n}\n"));
+                          "fn main() i32 {\n    return f(true);\n}\n"));
     // The set of deferred statements at an exit is static, so the code is
     // copied into each of the two `return`s.
     // D7.8
@@ -151,11 +151,11 @@ TEST(each_exit_of_a_function_carries_its_own_copy, {
 // D7.8, D17.5
 
 TEST(the_returned_value_is_read_before_the_deferred_code_runs, {
-    TEST_ASSERT_TRUE(emit("fn i32 f() {\n"
+    TEST_ASSERT_TRUE(emit("fn f() i32 {\n"
                           "    i32 mut x = 5;\n"
                           "    defer x = 6;\n"
                           "    return x;\n}\n"
-                          "fn i32 main() {\n    return f();\n}\n"));
+                          "fn main() i32 {\n    return f();\n}\n"));
     // The load of `x` stands above the deferred store, and the `ret` hands
     // out the value that load produced, so deferred code cannot change it.
     // D7.8
@@ -168,12 +168,12 @@ TEST(the_returned_value_is_read_before_the_deferred_code_runs, {
 
 TEST(an_aggregate_result_is_fixed_in_a_temporary_before_the_deferred_code, {
     TEST_ASSERT_TRUE(emit("struct pair { i32 x; i32 y; }\n"
-                          "fn void note() {\n}\n"
-                          "fn pair f() {\n"
+                          "fn note() void {\n}\n"
+                          "fn f() pair {\n"
                           "    pair p = {1, 2};\n"
                           "    defer note();\n"
                           "    return p;\n}\n"
-                          "fn i32 main() {\n    pair q = f();\n    return q.x;\n}\n"));
+                          "fn main() i32 {\n    pair q = f();\n    return q.x;\n}\n"));
     // The `sret` block is the caller's and the caller may hold a pointer to
     // it as well, so the result lands in a temporary of the callee's own
     // first and is copied out after the deferred code has run: `return e`
@@ -191,8 +191,8 @@ TEST(an_aggregate_result_is_fixed_in_a_temporary_before_the_deferred_code, {
 
 TEST(an_aggregate_result_of_a_function_with_no_defer_is_written_straight_out, {
     TEST_ASSERT_TRUE(emit("struct pair { i32 x; i32 y; }\n"
-                          "fn pair f() {\n    pair p = {1, 2};\n    return p;\n}\n"
-                          "fn i32 main() {\n    pair q = f();\n    return q.x;\n}\n"));
+                          "fn f() pair {\n    pair p = {1, 2};\n    return p;\n}\n"
+                          "fn main() i32 {\n    pair q = f();\n    return q.x;\n}\n"));
     // The temporary is the price of a deferred statement and of nothing else,
     // so a function with none writes the caller's block directly (item 7).
     const char* want = "  call void @llvm.memcpy.p0.p0.i64(ptr align 4 %ret.sret, "
@@ -205,9 +205,9 @@ TEST(an_aggregate_result_of_a_function_with_no_defer_is_written_straight_out, {
 
 TEST(a_deferred_store_through_a_parameter_cannot_reach_the_result, {
     TEST_ASSERT_TRUE(emit("struct pair { i32 x; i32 y; }\n"
-                          "fn pair copy_of(pair mut* p) {\n"
+                          "fn copy_of(pair mut* p) pair {\n"
                           "    defer p->x = 9;\n    return *p;\n}\n"
-                          "fn i32 main() {\n"
+                          "fn main() i32 {\n"
                           "    pair mut s = {1, 2};\n    s = copy_of(&s);\n"
                           "    return s.x;\n}\n"));
     // The caller passes one block as the destination and as the argument, so
@@ -226,11 +226,11 @@ TEST(a_deferred_store_through_a_parameter_cannot_reach_the_result, {
 })
 
 TEST(a_bare_return_runs_the_deferred_code_before_its_terminator, {
-    TEST_ASSERT_TRUE(emit("fn void note() {\n}\n"
-                          "fn void f(bool b) {\n"
+    TEST_ASSERT_TRUE(emit("fn note() void {\n}\n"
+                          "fn f(bool b) void {\n"
                           "    defer note();\n"
                           "    if (b) { return; }\n}\n"
-                          "fn i32 main() {\n    f(true);\n    return 0;\n}\n"));
+                          "fn main() i32 {\n    f(true);\n    return 0;\n}\n"));
     const char* want = "  call void @\"main.note\"()\n"
                        "  ret void\n";
     TEST_ASSERT_EQ_STR(found(want), want);
@@ -239,11 +239,11 @@ TEST(a_bare_return_runs_the_deferred_code_before_its_terminator, {
 })
 
 TEST(returning_an_own_local_empties_it_before_the_deferred_del_reads_it, {
-    TEST_ASSERT_TRUE(emit("fn i32 mut* own make() {\n"
+    TEST_ASSERT_TRUE(emit("fn make() i32 mut* own {\n"
                           "    i32 mut* own p = new(i32);\n"
                           "    defer del(p);\n"
                           "    return p;\n}\n"
-                          "fn i32 main() {\n"
+                          "fn main() i32 {\n"
                           "    i32 mut* own r = make();\n    del(r);\n    return 0;\n}\n"));
     // The implicit move of `return p` reads the pointer, stores null over the
     // local and only then runs `defer del(p)`, which therefore frees nothing
@@ -263,8 +263,8 @@ TEST(returning_an_own_local_empties_it_before_the_deferred_del_reads_it, {
 // D7.5, D7.6, D7.8
 
 TEST(a_break_runs_the_deferred_code_of_the_loop_body_before_its_branch, {
-    TEST_ASSERT_TRUE(emit("fn void note() {\n}\n"
-                          "fn i32 main() {\n"
+    TEST_ASSERT_TRUE(emit("fn note() void {\n}\n"
+                          "fn main() i32 {\n"
                           "    while (true) {\n        defer note();\n        break;\n    }\n"
                           "    return 0;\n}\n"));
     const char* want = "  call void @\"main.note\"()\n"
@@ -274,8 +274,8 @@ TEST(a_break_runs_the_deferred_code_of_the_loop_body_before_its_branch, {
 })
 
 TEST(a_continue_in_a_for_runs_the_deferred_code_before_the_step_block, {
-    TEST_ASSERT_TRUE(emit("fn void note() {\n}\n"
-                          "fn i32 main() {\n"
+    TEST_ASSERT_TRUE(emit("fn note() void {\n}\n"
+                          "fn main() i32 {\n"
                           "    for (i32 mut i = 0; i < 3; i = i +% 1) {\n"
                           "        defer note();\n        continue;\n    }\n"
                           "    return 0;\n}\n"));
@@ -289,8 +289,8 @@ TEST(a_continue_in_a_for_runs_the_deferred_code_before_the_step_block, {
 })
 
 TEST(a_loop_body_with_three_exits_carries_three_copies, {
-    TEST_ASSERT_TRUE(emit("fn void note() {\n}\n"
-                          "fn i32 main() {\n"
+    TEST_ASSERT_TRUE(emit("fn note() void {\n}\n"
+                          "fn main() i32 {\n"
                           "    for (i32 mut i = 0; i < 3; i = i +% 1) {\n"
                           "        defer note();\n"
                           "        if (i == 1) { continue; }\n"
@@ -304,8 +304,8 @@ TEST(a_loop_body_with_three_exits_carries_three_copies, {
 })
 
 TEST(a_break_leaves_only_the_blocks_between_it_and_its_loop, {
-    TEST_ASSERT_TRUE(emit("fn void note(i32 n) {\n}\n"
-                          "fn i32 main() {\n"
+    TEST_ASSERT_TRUE(emit("fn note(i32 n) void {\n}\n"
+                          "fn main() i32 {\n"
                           "    defer note(1);\n"
                           "    while (true) {\n"
                           "        defer note(2);\n"
@@ -323,8 +323,8 @@ TEST(a_break_leaves_only_the_blocks_between_it_and_its_loop, {
 })
 
 TEST(a_return_out_of_a_loop_leaves_the_loop_body_and_the_function_block, {
-    TEST_ASSERT_TRUE(emit("fn void note(i32 n) {\n}\n"
-                          "fn i32 main() {\n"
+    TEST_ASSERT_TRUE(emit("fn note(i32 n) void {\n}\n"
+                          "fn main() i32 {\n"
                           "    defer note(1);\n"
                           "    while (true) {\n"
                           "        defer note(2);\n        return 0;\n    }\n}\n"));
@@ -336,8 +336,8 @@ TEST(a_return_out_of_a_loop_leaves_the_loop_body_and_the_function_block, {
 })
 
 TEST(a_break_in_a_switch_in_a_loop_leaves_the_case_body_alone, {
-    TEST_ASSERT_TRUE(emit("fn void note(i32 n) {\n}\n"
-                          "fn i32 main() {\n"
+    TEST_ASSERT_TRUE(emit("fn note(i32 n) void {\n}\n"
+                          "fn main() i32 {\n"
                           "    for (i32 mut i = 0; i < 2; i = i +% 1) {\n"
                           "        defer note(2);\n"
                           "        switch (i) {\n"
@@ -355,8 +355,8 @@ TEST(a_break_in_a_switch_in_a_loop_leaves_the_case_body_alone, {
 })
 
 TEST(a_continue_in_a_case_body_leaves_the_case_body_and_the_loop_body, {
-    TEST_ASSERT_TRUE(emit("fn void note(i32 n) {\n}\n"
-                          "fn i32 main() {\n"
+    TEST_ASSERT_TRUE(emit("fn note(i32 n) void {\n}\n"
+                          "fn main() i32 {\n"
                           "    for (i32 mut i = 0; i < 2; i = i +% 1) {\n"
                           "        defer note(2);\n"
                           "        switch (i) {\n"
@@ -373,15 +373,15 @@ TEST(a_continue_in_a_case_body_leaves_the_case_body_and_the_loop_body, {
 })
 
 TEST(a_return_in_a_case_body_unwinds_through_it_to_the_function_block, {
-    TEST_ASSERT_TRUE(emit("fn void note(i32 n) {\n}\n"
-                          "fn i32 f(i32 n) {\n"
+    TEST_ASSERT_TRUE(emit("fn note(i32 n) void {\n}\n"
+                          "fn f(i32 n) i32 {\n"
                           "    defer note(1);\n"
                           "    while (true) {\n"
                           "        defer note(2);\n"
                           "        switch (n) {\n"
                           "        case 0:\n            defer note(3);\n            return 5;\n"
                           "        default:\n            return 6;\n        }\n    }\n}\n"
-                          "fn i32 main() {\n    return f(0);\n}\n"));
+                          "fn main() i32 {\n    return f(0);\n}\n"));
     // `return` stops at the function body alone, so it passes through the
     // case body and the loop body it leaves on the way.
     // D7.6, D7.8
@@ -400,8 +400,8 @@ TEST(a_return_in_a_case_body_unwinds_through_it_to_the_function_block, {
 })
 
 TEST(a_case_body_that_falls_off_its_end_runs_its_deferred_code_there, {
-    TEST_ASSERT_TRUE(emit("fn void note(i32 n) {\n}\n"
-                          "fn i32 main() {\n"
+    TEST_ASSERT_TRUE(emit("fn note(i32 n) void {\n}\n"
+                          "fn main() i32 {\n"
                           "    switch (1) {\n"
                           "    case 1:\n        defer note(3);\n        note(9);\n"
                           "    default:\n        note(4);\n    }\n"
@@ -424,8 +424,8 @@ TEST(a_case_body_that_falls_off_its_end_runs_its_deferred_code_there, {
 // D7.8
 
 TEST(a_break_of_a_loop_inside_deferred_code_branches_to_that_loop, {
-    TEST_ASSERT_TRUE(emit("fn void note(i32 n) {\n}\n"
-                          "fn i32 main() {\n"
+    TEST_ASSERT_TRUE(emit("fn note(i32 n) void {\n}\n"
+                          "fn main() i32 {\n"
                           "    while (true) {\n"
                           "        defer {\n"
                           "            while (true) {\n                note(2);\n"
@@ -452,8 +452,8 @@ TEST(a_break_of_a_loop_inside_deferred_code_branches_to_that_loop, {
 })
 
 TEST(a_loop_inside_deferred_code_is_expanded_at_every_exit, {
-    TEST_ASSERT_TRUE(emit("fn void note(i32 n) {\n}\n"
-                          "fn i32 main() {\n"
+    TEST_ASSERT_TRUE(emit("fn note(i32 n) void {\n}\n"
+                          "fn main() i32 {\n"
                           "    for (i32 mut i = 0; i < 3; i = i +% 1) {\n"
                           "        defer {\n"
                           "            for (i32 mut k = 0; k < 2; k = k +% 1) {\n"
@@ -472,8 +472,8 @@ TEST(a_loop_inside_deferred_code_is_expanded_at_every_exit, {
 })
 
 TEST(a_break_in_a_switch_inside_deferred_code_leaves_that_case_body, {
-    TEST_ASSERT_TRUE(emit("fn void note(i32 n) {\n}\n"
-                          "fn i32 main() {\n"
+    TEST_ASSERT_TRUE(emit("fn note(i32 n) void {\n}\n"
+                          "fn main() i32 {\n"
                           "    i32 x = 1;\n"
                           "    while (true) {\n"
                           "        defer {\n"
@@ -495,10 +495,10 @@ TEST(a_break_in_a_switch_inside_deferred_code_leaves_that_case_body, {
 })
 
 TEST(a_noreturn_call_runs_no_deferred_code_at_all, {
-    TEST_ASSERT_TRUE(emit("fn noreturn stop() {\n    panic(\"x\");\n}\n"
-                          "fn void f() {\n    defer note();\n    stop();\n}\n"
-                          "fn void note() {\n}\n"
-                          "fn i32 main() {\n    f();\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(emit("fn stop() noreturn {\n    panic(\"x\");\n}\n"
+                          "fn f() void {\n    defer note();\n    stop();\n}\n"
+                          "fn note() void {\n}\n"
+                          "fn main() i32 {\n    f();\n    return 0;\n}\n"));
     // A `noreturn` call never exits the block, so nothing deferred runs: the
     // block ends at the call and its trap.
     // D7.8, D8.5
@@ -513,11 +513,11 @@ TEST(a_noreturn_call_runs_no_deferred_code_at_all, {
 })
 
 TEST(a_deferred_noreturn_call_stops_the_expansion_at_itself, {
-    TEST_ASSERT_TRUE(emit("fn noreturn stop() {\n    panic(\"x\");\n}\n"
-                          "fn void note() {\n}\n"
-                          "fn void f() {\n"
+    TEST_ASSERT_TRUE(emit("fn stop() noreturn {\n    panic(\"x\");\n}\n"
+                          "fn note() void {\n}\n"
+                          "fn f() void {\n"
                           "    defer note();\n    defer stop();\n}\n"
-                          "fn i32 main() {\n    f();\n    return 0;\n}\n"));
+                          "fn main() i32 {\n    f();\n    return 0;\n}\n"));
     // The deferred `stop()` ends the block, so the statement below it in the
     // expansion is not reached and the block still holds one terminator (item
     // 10).
@@ -534,8 +534,8 @@ TEST(a_deferred_noreturn_call_stops_the_expansion_at_itself, {
 })
 
 TEST(a_runtime_check_branches_to_its_failure_block_without_deferred_code, {
-    TEST_ASSERT_TRUE(emit("fn void note() {\n}\n"
-                          "fn i32 main() {\n"
+    TEST_ASSERT_TRUE(emit("fn note() void {\n}\n"
+                          "fn main() i32 {\n"
                           "    i32[3] a = {1, 2, 3};\n    i32 mut i = 5;\n"
                           "    defer note();\n    return a[i];\n}\n"));
     // A runtime error aborts without running deferred code, so the failure
@@ -551,10 +551,10 @@ TEST(a_runtime_check_branches_to_its_failure_block_without_deferred_code, {
 // D19.5
 
 TEST(the_deferred_statements_of_one_function_do_not_reach_the_next, {
-    TEST_ASSERT_TRUE(emit("fn void note(i32 n) {\n}\n"
-                          "fn void f() {\n    defer note(1);\n}\n"
-                          "fn void g() {\n    note(2);\n}\n"
-                          "fn i32 main() {\n    f();\n    g();\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(emit("fn note(i32 n) void {\n}\n"
+                          "fn f() void {\n    defer note(1);\n}\n"
+                          "fn g() void {\n    note(2);\n}\n"
+                          "fn main() i32 {\n    f();\n    g();\n    return 0;\n}\n"));
     const char* want = "define dso_local void @\"main.g\"() #0 {\n"
                        "entry:\n"
                        "  call void @\"main.note\"(i32 2)\n"

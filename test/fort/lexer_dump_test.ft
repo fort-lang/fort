@@ -36,11 +36,11 @@ struct fixture {
     lexer.tok_vec toks;
 }
 
-fn fixture open_fixture() {
+fn open_fixture() fixture {
     return fixture{session.create(), lexer.tokvec_create()};
 }
 
-fn void close_fixture(fixture mut* f) {
+fn close_fixture(fixture mut* f) void {
     lexer.tokvec_free(&f->toks);
     session.free(&f->sess);
 }
@@ -48,54 +48,54 @@ fn void close_fixture(fixture mut* f) {
 // Lexes `src` as t.ft, dropping the tokens and the diagnostics of the lex
 // before it; the pool keeps the strings of both, which no test reads across
 // a call. Returns whether the file was clean.
-fn bool lex(fixture mut* f, string src) {
+fn lex(fixture mut* f, string src) bool {
     lexer.tokvec_free(&f->toks);
     diag.reset(session.diags(&f->sess));
     return lexer.lex_file(&f->sess, "t.ft", src, &f->toks);
 }
 
 // The tokens of the last lex, the end-of-file token included.
-fn u64 count(fixture* f) {
+fn count(fixture* f) u64 {
     return lexer.tokvec_count(&f->toks);
 }
 
-fn lexer.token tok(fixture* f, u64 i) {
+fn tok(fixture* f, u64 i) lexer.token {
     return lexer.tokvec_at(&f->toks, i);
 }
 
 // The name of the kind of token `i`, which is what an assertion compares:
 // two kinds are equal when their names are (tok_kind_name is injective, as
 // kind_names_are_distinct asserts).
-fn string kind(fixture* f, u64 i) {
+fn kind(fixture* f, u64 i) string {
     return lexer.tok_kind_name(tok(f, i).kind);
 }
 
-fn string text(fixture* f, u64 i) {
+fn text(fixture* f, u64 i) string {
     return tok(f, i).text;
 }
 
 // Whether token `i` starts at line `line`, column `col`.
 // D14.2
-fn bool at(fixture* f, u64 i, u32 line, u32 col) {
+fn at(fixture* f, u64 i, u32 line, u32 col) bool {
     return tok(f, i).line == line && tok(f, i).col == col;
 }
 
 // Whether token `i` covers `len` bytes from offset `off`.
 // D20.4
-fn bool covers(fixture* f, u64 i, u64 off, u64 len) {
+fn covers(fixture* f, u64 i, u64 off, u64 len) bool {
     return tok(f, i).off == off && tok(f, i).len == len;
 }
 
 // The errors the last lex reported, notes excluded.
 // D14.2
-fn u64 errors(fixture mut* f) {
+fn errors(fixture mut* f) u64 {
     return session.error_count(&f->sess);
 }
 
 // Whether the diagnostic `i` is an error at `line`:`col` of t.ft saying
 // `msg`, which is everything its text line carries (toolchain.md 4).
 // D14.2
-fn bool error_is(fixture mut* f, u64 i, u32 line, u32 col, string msg) {
+fn error_is(fixture mut* f, u64 i, u32 line, u32 col, string msg) bool {
     diag.record r = diag.record_at(session.diags(&f->sess), i);
     return r.severity == diag.severity.error && r.loc.file == "t.ft" && r.loc.line == line
         && r.loc.col == col && r.msg == msg;
@@ -103,7 +103,7 @@ fn bool error_is(fixture mut* f, u64 i, u32 line, u32 col, string msg) {
 
 // The last lex succeeded with `n` tokens before the end-of-file token and
 // reported nothing.
-fn bool clean(fixture mut* f, string src, u64 n) {
+fn clean(fixture mut* f, string src, u64 n) bool {
     bool ok = lex(f, src);
     return ok && errors(f) == 0 && count(f) == n + 1
         && tok(f, n).kind == lexer.tok_kind.eof;
@@ -112,7 +112,7 @@ fn bool clean(fixture mut* f, string src, u64 n) {
 // The last lex failed with exactly the one diagnostic given, and still lexed
 // the file whole, so the tokens end in the end-of-file token.
 // D14.2
-fn bool one_error(fixture mut* f, string src, u32 line, u32 col, string msg) {
+fn one_error(fixture mut* f, string src, u32 line, u32 col, string msg) bool {
     bool ok = lex(f, src);
     if (ok || errors(f) != 1 || count(f) == 0) {
         return false;
@@ -125,7 +125,7 @@ fn bool one_error(fixture mut* f, string src, u32 line, u32 col, string msg) {
 
 // The dump of `src`, held against `lines` with a newline after each: the
 // whole of what --tokens writes for that file.
-fn bool dumps_as(fixture mut* f, string src, string@ lines) {
+fn dumps_as(fixture mut* f, string src, string@ lines) bool {
     lex(f, src);
     strbuf.str_buf mut got = strbuf.create();
     defer strbuf.free(&got);
@@ -152,7 +152,7 @@ fn bool dumps_as(fixture mut* f, string src, string@ lines) {
 // ---- the form of a line ---------------------------------------------------------
 
 // The worked example of toolchain.md 1, byte for byte.
-fn void the_worked_example_of_toolchain_md_1() {
+fn the_worked_example_of_toolchain_md_1() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     string[5] want = {
@@ -167,7 +167,7 @@ fn void the_worked_example_of_toolchain_md_1() {
 
 // An empty file is the end-of-file token alone, an empty range at 1:1 with an
 // empty spelling.
-fn void an_empty_file_dumps_one_line() {
+fn an_empty_file_dumps_one_line() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     string[1] want = {"1:1-1:1 0 \"\" end of file"};
@@ -175,7 +175,7 @@ fn void an_empty_file_dumps_one_line() {
 }
 
 // The range ends where the next token may begin: `col + len`, exclusive.
-fn void the_range_is_the_tokens_own() {
+fn the_range_is_the_tokens_own() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     string[4] want = {
@@ -189,7 +189,7 @@ fn void the_range_is_the_tokens_own() {
 
 // A tab is one column, so the range of the token after it moves by one.
 // D14.2
-fn void a_tab_moves_the_range_by_one_column() {
+fn a_tab_moves_the_range_by_one_column() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     string[2] want = {
@@ -204,7 +204,7 @@ fn void a_tab_moves_the_range_by_one_column() {
 
 // An integer literal carries its magnitude, whatever its radix, and the
 // spelling stays the source's.
-fn void an_integer_literal_dumps_its_magnitude() {
+fn an_integer_literal_dumps_its_magnitude() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     string[5] want = {
@@ -219,7 +219,7 @@ fn void an_integer_literal_dumps_its_magnitude() {
 
 // A char literal carries its byte value and keeps the source's spelling, so
 // the escape is visible beside the byte it decoded to.
-fn void a_char_literal_dumps_its_byte_and_its_spelling() {
+fn a_char_literal_dumps_its_byte_and_its_spelling() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     string[4] want = {
@@ -234,7 +234,7 @@ fn void a_char_literal_dumps_its_byte_and_its_spelling() {
 // Every other kind leaves the value at 0, a float literal included: the lexer
 // computes no float value.
 // D2.6
-fn void every_other_kind_dumps_a_zero_value() {
+fn every_other_kind_dumps_a_zero_value() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     string[4] want = {
@@ -251,7 +251,7 @@ fn void every_other_kind_dumps_a_zero_value() {
 // A string literal's spelling is its decoded bytes, so what the dump escapes
 // is what the literal means and not what was typed.
 // D2.9
-fn void a_decoded_newline_tab_and_return_are_escaped() {
+fn a_decoded_newline_tab_and_return_are_escaped() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     string[2] want = {
@@ -263,7 +263,7 @@ fn void a_decoded_newline_tab_and_return_are_escaped() {
 
 // The two bytes that would end the field, or start an escape of the dump's
 // own, are escaped: `"` and `\`.
-fn void a_quote_and_a_backslash_are_escaped() {
+fn a_quote_and_a_backslash_are_escaped() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     string[2] want = {
@@ -275,7 +275,7 @@ fn void a_quote_and_a_backslash_are_escaped() {
 
 // A byte outside printable ASCII is written 0xHH with uppercase digits, the
 // NUL and the high bytes of UTF-8 included.
-fn void a_byte_outside_printable_ascii_is_written_in_hex() {
+fn a_byte_outside_printable_ascii_is_written_in_hex() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     string[2] want = {
@@ -288,7 +288,7 @@ fn void a_byte_outside_printable_ascii_is_written_in_hex() {
 // A raw tab inside a string literal is a byte of it and is escaped like a
 // decoded one, so one token is still one line.
 // D2.9
-fn void a_raw_tab_inside_a_literal_is_escaped() {
+fn a_raw_tab_inside_a_literal_is_escaped() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     string[2] want = {
@@ -300,7 +300,7 @@ fn void a_raw_tab_inside_a_literal_is_escaped() {
 
 // A printable byte stands for itself, the space and the quote-adjacent ones
 // included, so a spelling is readable.
-fn void printable_bytes_stand_for_themselves() {
+fn printable_bytes_stand_for_themselves() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     string[2] want = {
@@ -315,7 +315,7 @@ fn void printable_bytes_stand_for_themselves() {
 // The dump covers the file whatever was reported: the broken line is dropped
 // and the lines around it are there.
 // D14.2
-fn void a_broken_line_is_missing_from_the_dump() {
+fn a_broken_line_is_missing_from_the_dump() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     string[3] want = {
@@ -327,7 +327,7 @@ fn void a_broken_line_is_missing_from_the_dump() {
     assert(errors(&f) == 1);
 }
 
-fn i32 main() {
+fn main() i32 {
     the_worked_example_of_toolchain_md_1();
     an_empty_file_dumps_one_line();
     the_range_is_the_tokens_own();

@@ -39,7 +39,7 @@ struct env {
     string src;
 }
 
-fn env create() {
+fn create() env {
     return env{session.create(), lexer.tokvec_create(), ast.arena{}, strbuf.create(),
                strbuf.create(), strbuf.create(), ""};
 }
@@ -47,7 +47,7 @@ fn env create() {
 /// Releases everything one parse allocated: the nodes, the tokens, the
 /// diagnostics and the interned strings.
 /// D20.5
-fn void free(env mut* e) {
+fn free(env mut* e) void {
     ast.ast_arena_free(&e->arena);
     lexer.tokvec_free(&e->toks);
     strbuf.free(&e->buf);
@@ -66,7 +66,7 @@ fn void free(env mut* e) {
 /// parse_module reads it from the first token, so a second lex into the same
 /// vector would parse the first source again. The nodes stay in the arena
 /// until free, since a caller may still hold the tree of an earlier parse.
-fn ast.node mut* parse(env mut* e, string src) {
+fn parse(env mut* e, string src) ast.node mut* {
     e->src = src;
     lexer.tokvec_truncate(&e->toks, 0);
     diag.reset(session.diags(&e->sess));
@@ -76,12 +76,12 @@ fn ast.node mut* parse(env mut* e, string src) {
 
 /// The errors reported by the parse, the lexer's included.
 /// D14.2
-fn u64 errors(env* e) {
+fn errors(env* e) u64 {
     return session.error_count(&e->sess);
 }
 
 /// The diagnostics recorded, errors and notes together.
-fn u64 diag_count(env mut* e) {
+fn diag_count(env mut* e) u64 {
     return diag.record_count(session.diags(&e->sess));
 }
 
@@ -89,7 +89,7 @@ fn u64 diag_count(env mut* e) {
 /// form of toolchain.md 4 without the file name every one of them shares; a
 /// note carries `note:` instead.
 /// D14.2
-fn string diag_at(env mut* e, u64 i) {
+fn diag_at(env mut* e, u64 i) string {
     diag.record r = diag.record_at(session.diags(&e->sess), i);
     strbuf.clear(&e->buf);
     strbuf.append_u64(&e->buf, cast(r.loc.line, u64));
@@ -105,14 +105,14 @@ fn string diag_at(env mut* e, u64 i) {
 }
 
 /// The S-expression of `n` (ast.ft), valid until the next query.
-fn string dump(env mut* e, ast.node* n) {
+fn dump(env mut* e, ast.node* n) string {
     strbuf.clear(&e->buf);
     ast.ast_dump(n, &e->buf);
     return strbuf.view(&e->buf);
 }
 
 /// Parses `src` and returns the S-expression of the module it yields.
-fn string parse_dump(env mut* e, string src) {
+fn parse_dump(env mut* e, string src) string {
     ast.node mut* mod = parse(e, src);
     return dump(e, mod);
 }
@@ -125,14 +125,14 @@ fn string parse_dump(env mut* e, string src) {
 /// result is valid until the next join and lives in a buffer neither parse nor
 /// dump touches, so it may stand on either side of a comparison.
 /// D2.9
-fn string join2(env mut* e, string a, string b) {
+fn join2(env mut* e, string a, string b) string {
     strbuf.clear(&e->join_buf);
     strbuf.append(&e->join_buf, a);
     strbuf.append(&e->join_buf, b);
     return strbuf.view(&e->join_buf);
 }
 
-fn string join3(env mut* e, string a, string b, string c) {
+fn join3(env mut* e, string a, string b, string c) string {
     strbuf.clear(&e->join_buf);
     strbuf.append(&e->join_buf, a);
     strbuf.append(&e->join_buf, b);
@@ -140,7 +140,7 @@ fn string join3(env mut* e, string a, string b, string c) {
     return strbuf.view(&e->join_buf);
 }
 
-fn string join4(env mut* e, string a, string b, string c, string d) {
+fn join4(env mut* e, string a, string b, string c, string d) string {
     strbuf.clear(&e->join_buf);
     strbuf.append(&e->join_buf, a);
     strbuf.append(&e->join_buf, b);
@@ -154,7 +154,7 @@ fn string join4(env mut* e, string a, string b, string c, string d) {
 /// Parses `before` + `src` + `after` as a module. The text is built in the
 /// environment's own buffer, since the tokens and the names in the tree are
 /// views into the source and must outlive the parse (parser.ft).
-fn ast.node mut* parse_wrapped(env mut* e, string before, string src, string after) {
+fn parse_wrapped(env mut* e, string before, string src, string after) ast.node mut* {
     strbuf.clear(&e->src_buf);
     strbuf.append(&e->src_buf, before);
     strbuf.append(&e->src_buf, src);
@@ -164,7 +164,7 @@ fn ast.node mut* parse_wrapped(env mut* e, string before, string src, string aft
 
 /// The S-expression of `src` read as an expression: the initializer of a
 /// global.
-fn string expr_dump(env mut* e, string src) {
+fn expr_dump(env mut* e, string src) string {
     ast.node mut* mod = parse_wrapped(e, "i32 N = ", src, ";\n");
     ast.node mut* d0 = decl(mod, 0);
     if (d0 == null) {
@@ -174,7 +174,7 @@ fn string expr_dump(env mut* e, string src) {
 }
 
 /// The S-expression of `src` read as a type: the type of a global.
-fn string type_dump(env mut* e, string src) {
+fn type_dump(env mut* e, string src) string {
     ast.node mut* mod = parse_wrapped(e, "", src, " x = 0;\n");
     ast.node mut* d0 = decl(mod, 0);
     if (d0 == null) {
@@ -184,15 +184,15 @@ fn string type_dump(env mut* e, string src) {
 }
 
 /// The S-expression of `src` read as the first statement of a function body.
-fn string stmt_dump(env mut* e, string src) {
-    ast.node mut* mod = parse_wrapped(e, "fn void f() {\n", src, "\n}\n");
+fn stmt_dump(env mut* e, string src) string {
+    ast.node mut* mod = parse_wrapped(e, "fn f() void {\n", src, "\n}\n");
     return dump(e, body_stmt(mod, 0, 0));
 }
 
 // ---- the tree the suites index into --------------------------------------------
 
 /// The `i`-th declaration of a module, or null.
-fn ast.node mut* decl(ast.node mut* mod, u64 i) {
+fn decl(ast.node mut* mod, u64 i) ast.node mut* {
     if (mod == null || i >= ast.ast_len(mod)) {
         return null;
     }
@@ -200,7 +200,7 @@ fn ast.node mut* decl(ast.node mut* mod, u64 i) {
 }
 
 /// The `i`-th statement of the body of the `d`-th declaration, or null.
-fn ast.node mut* body_stmt(ast.node mut* mod, u64 d, u64 i) {
+fn body_stmt(ast.node mut* mod, u64 d, u64 i) ast.node mut* {
     ast.node mut* d0 = decl(mod, d);
     if (d0 == null || d0->b == null || ast.ast_len(d0->b) <= i) {
         return null;
@@ -209,7 +209,7 @@ fn ast.node mut* body_stmt(ast.node mut* mod, u64 d, u64 i) {
 }
 
 /// The `i`-th child of a node's list, or null.
-fn ast.node mut* child(ast.node mut* n, u64 i) {
+fn child(ast.node mut* n, u64 i) ast.node mut* {
     if (n == null || i >= ast.ast_len(n)) {
         return null;
     }
@@ -218,7 +218,7 @@ fn ast.node mut* child(ast.node mut* n, u64 i) {
 
 /// The only statement of the only declaration's body, which is the shape most
 /// statement assertions parse.
-fn ast.node mut* only_stmt(env mut* e, string src) {
+fn only_stmt(env mut* e, string src) ast.node mut* {
     ast.node mut* mod = parse(e, src);
     return body_stmt(mod, 0, 0);
 }
@@ -228,7 +228,7 @@ fn ast.node mut* only_stmt(env mut* e, string src) {
 
 /// `<line>:<col>`, the start of a node's range, which is where a diagnostic
 /// about that node is reported (toolchain.md 4).
-fn string loc_of(env mut* e, ast.node* n) {
+fn loc_of(env mut* e, ast.node* n) string {
     strbuf.clear(&e->buf);
     if (n == null) {
         strbuf.append(&e->buf, "nil");
@@ -241,7 +241,7 @@ fn string loc_of(env mut* e, ast.node* n) {
 }
 
 /// `<line>:<col>-<end_line>:<end_col>`, the whole range, its end exclusive.
-fn string range_of(env mut* e, ast.node* n) {
+fn range_of(env mut* e, ast.node* n) string {
     strbuf.clear(&e->buf);
     if (n == null) {
         strbuf.append(&e->buf, "nil");
@@ -260,7 +260,7 @@ fn string range_of(env mut* e, ast.node* n) {
 /// `<line>:<col>-<end_line>:<end_col>` of the node's name range, which is the
 /// empty range on a node no name declares or mentions.
 /// D20.4
-fn string name_range_of(env mut* e, ast.node* n) {
+fn name_range_of(env mut* e, ast.node* n) string {
     strbuf.clear(&e->buf);
     if (n == null) {
         strbuf.append(&e->buf, "nil");
@@ -280,7 +280,7 @@ fn string name_range_of(env mut* e, ast.node* n) {
 /// source when the position is past it. A column is a byte column with a tab
 /// counting as one, so the offset is the line's start plus col - 1.
 /// D20.4
-fn u64 offset_of(env* e, u32 line, u32 col) {
+fn offset_of(env* e, u32 line, u32 col) u64 {
     // The empty range of a node no name declares is 0:0, which names no
     // position at all; it reads as the start of the source, so that the text
     // it covers is the empty string rather than a trap.
@@ -305,7 +305,7 @@ fn u64 offset_of(env* e, u32 line, u32 col) {
 
 /// The source text a range covers, which is what makes a range assertion
 /// readable: a node whose range is right spells the construct back.
-fn string text_of(env* e, diag.loc l) {
+fn text_of(env* e, diag.loc l) string {
     u64 from = offset_of(e, l.line, l.col);
     u64 to = offset_of(e, l.end_line, l.end_col);
     if (to < from) {
@@ -315,7 +315,7 @@ fn string text_of(env* e, diag.loc l) {
 }
 
 /// The source text a node's range covers.
-fn string node_text(env* e, ast.node* n) {
+fn node_text(env* e, ast.node* n) string {
     if (n == null) {
         return "";
     }
@@ -325,7 +325,7 @@ fn string node_text(env* e, ast.node* n) {
 /// The source text a node's name range covers, which is where an editor jumps
 /// for the name.
 /// D20.4
-fn string name_text(env* e, ast.node* n) {
+fn name_text(env* e, ast.node* n) string {
     if (n == null) {
         return "";
     }
@@ -338,7 +338,7 @@ fn string name_text(env* e, ast.node* n) {
 /// assignment, increment, call, index, span, field, arrow): the child starts
 /// before the operator the node is anchored at, so it is the one child that
 /// may begin before its parent (toolchain.md 4).
-fn bool is_infix_kind(ast.ast_kind k) {
+fn is_infix_kind(ast.ast_kind k) bool {
     return k == ast.ast_kind.k_binary || k == ast.ast_kind.k_assign
         || k == ast.ast_kind.k_incdec || k == ast.ast_kind.k_call
         || k == ast.ast_kind.k_index || k == ast.ast_kind.k_span
@@ -346,12 +346,12 @@ fn bool is_infix_kind(ast.ast_kind k) {
 }
 
 /// Whether `inner` begins at or after `outer` begins.
-fn bool starts_within(diag.loc inner, diag.loc outer) {
+fn starts_within(diag.loc inner, diag.loc outer) bool {
     return inner.line > outer.line || (inner.line == outer.line && inner.col >= outer.col);
 }
 
 /// Whether `inner` ends at or before `outer` ends.
-fn bool ends_within(diag.loc inner, diag.loc outer) {
+fn ends_within(diag.loc inner, diag.loc outer) bool {
     return inner.end_line < outer.end_line
         || (inner.end_line == outer.end_line && inner.end_col <= outer.end_col);
 }
@@ -369,22 +369,22 @@ strbuf.str_buf mut report = strbuf.str_buf{};
 u64 KIND_SLOTS = 128;
 bool[128] mut kind_seen = {};
 
-fn void walk_begin() {
+fn walk_begin() void {
     strbuf.clear(&report);
 }
 
-fn void walk_free() {
+fn walk_free() void {
     strbuf.free(&report);
 }
 
 /// The violations the walks since walk_begin found, empty when there were
 /// none.
-fn string violations() {
+fn violations() string {
     return strbuf.view(&report);
 }
 
 /// Whether a node of `kind` was reached by some walk.
-fn bool seen(ast.ast_kind kind) {
+fn seen(ast.ast_kind kind) bool {
     u64 slot = cast(cast(kind, i32), u64);
     if (slot >= KIND_SLOTS) {
         panic("parse_env.seen: the kind enum outgrew kind_seen");
@@ -393,7 +393,7 @@ fn bool seen(ast.ast_kind kind) {
 }
 
 /// `binary 1:11-1:18 leaves if 2:5-2:9`, or the same without a parent.
-fn void note(string what, ast.node* n, ast.node* parent) {
+fn note(string what, ast.node* n, ast.node* parent) void {
     strbuf.append(&report, ast.ast_kind_name(n->kind));
     strbuf.push(&report, ' ');
     strbuf.append_u64(&report, cast(n->loc.line, u64));
@@ -413,7 +413,7 @@ fn void note(string what, ast.node* n, ast.node* parent) {
 /// and a child's range sits inside its parent's, the left operand of an infix
 /// node excepted.
 /// D20.4
-fn void walk(ast.node* n, ast.node* parent) {
+fn walk(ast.node* n, ast.node* parent) void {
     if (n == null) {
         return;
     }

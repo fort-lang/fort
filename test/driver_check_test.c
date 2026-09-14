@@ -40,11 +40,11 @@ static const char CLEAN_DOCUMENT[] =
 // A module that declares no `main`: under --check the file is a module under
 // inspection and not a program, so the `main` rule is not applied.
 // D8.6, D20.1
-static const char NO_MAIN_SOURCE[] = "fn i32 add(i32 a, i32 b) { return a + b; }\n";
+static const char NO_MAIN_SOURCE[] = "fn add(i32 a, i32 b) i32 { return a + b; }\n";
 
 // A module whose import no root reaches: one diagnostic at the `import`
 // keyword, with the note of module-system.md 13.
-static const char BAD_IMPORT_SOURCE[] = "import nothere;\nfn i32 main() { return 0; }\n";
+static const char BAD_IMPORT_SOURCE[] = "import nothere;\nfn main() i32 { return 0; }\n";
 
 TEST(json_without_check_is_a_usage_error, {
     // Only the check mode can promise a complete document or nothing, since a
@@ -130,10 +130,10 @@ TEST(the_document_of_a_clean_module_is_one_line_with_four_keys, {
 TEST(the_document_lists_every_file_the_compiler_read, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    TEST_ASSERT_TRUE(write_source(box.entry, "import util;\nfn i32 main() { return 0; }\n"));
+    TEST_ASSERT_TRUE(write_source(box.entry, "import util;\nfn main() i32 { return 0; }\n"));
     char util[PATH_CAP];
     join(util, sizeof util, box.dir, "util.ft");
-    TEST_ASSERT_TRUE(write_source(util, "fn i32 add(i32 a, i32 b) { return a + b; }\n"));
+    TEST_ASSERT_TRUE(write_source(util, "fn add(i32 a, i32 b) i32 { return a + b; }\n"));
     const run_t run = RUN_CAPTURED("--check", "--json", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     // Every file read, in read order, so a client can clear stale diagnostics.
@@ -284,9 +284,9 @@ TEST(the_document_of_a_failing_module_is_exact, {
 // D20.3
 static const char INDEXED_DOCUMENT[] =
     "{\"version\":1,\"files\":[\"%s\",\"%s\"],\"diagnostics\":[],\"symbols\":[{\"file\":\"%s\","
-    "\"line\":1,\"col\":8,\"end_line\":1,\"end_col\":12,\"name\":\"main\",\"kind\":\"fn\","
-    "\"type\":\"fn i32()\",\"is_decl\":true,\"decl\":{\"file\":\"%s\",\"line\":1,\"col\":8,"
-    "\"end_line\":1,\"end_col\":12}}]}\n";
+    "\"line\":1,\"col\":4,\"end_line\":1,\"end_col\":8,\"name\":\"main\",\"kind\":\"fn\","
+    "\"type\":\"fn () i32\",\"is_decl\":true,\"decl\":{\"file\":\"%s\",\"line\":1,\"col\":4,"
+    "\"end_line\":1,\"end_col\":8}}]}\n";
 
 // The whole document of a dotted entry name: the file is never read, so
 // `"files"` is empty and the one diagnostic stands at 1:1. A diagnostic naming a
@@ -303,7 +303,7 @@ TEST(a_dotted_entry_under_check_is_rejected_too, {
     TEST_ASSERT_TRUE(box.ok);
     char entry[PATH_CAP];
     join(entry, sizeof entry, box.dir, "my.app.ft");
-    TEST_ASSERT_TRUE(write_source(entry, "fn i32 main() { return 0; }\n"));
+    TEST_ASSERT_TRUE(write_source(entry, "fn main() i32 { return 0; }\n"));
     // The rule is not the one about `main`, which --check skips: the name of the
     // file is wrong whatever the file holds.
     // D8.6, D9.1, D20.1
@@ -318,7 +318,7 @@ TEST(the_document_of_a_dotted_entry_is_exact, {
     TEST_ASSERT_TRUE(box.ok);
     char entry[PATH_CAP];
     join(entry, sizeof entry, box.dir, "my.app.ft");
-    TEST_ASSERT_TRUE(write_source(entry, "fn i32 main() { return 0; }\n"));
+    TEST_ASSERT_TRUE(write_source(entry, "fn main() i32 { return 0; }\n"));
     // Exit 1 with a complete document is a verdict a client reads.
     // D20.2
     const run_t run = RUN_CAPTURED("--check", "--json", entry);
@@ -361,10 +361,10 @@ TEST(an_indexed_use_points_at_the_declaration_in_the_other_file, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
     TEST_ASSERT_TRUE(
-        write_source(box.entry, "import util;\nfn i32 main() { return util.add(1, 2); }\n"));
+        write_source(box.entry, "import util;\nfn main() i32 { return util.add(1, 2); }\n"));
     char util[PATH_CAP];
     join(util, sizeof util, box.dir, "util.ft");
-    TEST_ASSERT_TRUE(write_source(util, "fn i32 add(i32 a, i32 b) { return a + b; }\n"));
+    TEST_ASSERT_TRUE(write_source(util, "fn add(i32 a, i32 b) i32 { return a + b; }\n"));
     const run_t run = RUN_CAPTURED("--index", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     // The use of `add` in the entry carries the declaration's name range in the
@@ -375,9 +375,9 @@ TEST(an_indexed_use_points_at_the_declaration_in_the_other_file, {
                          sizeof want,
                          "{\"file\":\"%s\",\"line\":2,\"col\":29,\"end_line\":2,"
                          "\"end_col\":32,\"name\":\"add\",\"kind\":\"fn\","
-                         "\"type\":\"fn i32(i32, i32)\",\"is_decl\":false,"
-                         "\"decl\":{\"file\":\"%s\",\"line\":1,\"col\":8,\"end_line\":1,"
-                         "\"end_col\":11}}",
+                         "\"type\":\"fn (i32, i32) i32\",\"is_decl\":false,"
+                         "\"decl\":{\"file\":\"%s\",\"line\":1,\"col\":4,\"end_line\":1,"
+                         "\"end_col\":7}}",
                          box.entry,
                          util));
     TEST_ASSERT_NONNULL(strstr(run.out, want));
@@ -430,10 +430,10 @@ TEST(an_indexed_alias_declares_its_name_and_points_elsewhere, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
     TEST_ASSERT_TRUE(write_source(
-        box.entry, "import util.add as plus;\nfn i32 main() { return plus(1, 2); }\n"));
+        box.entry, "import util.add as plus;\nfn main() i32 { return plus(1, 2); }\n"));
     char util[PATH_CAP];
     join(util, sizeof util, box.dir, "util.ft");
-    TEST_ASSERT_TRUE(write_source(util, "fn i32 add(i32 a, i32 b) { return a + b; }\n"));
+    TEST_ASSERT_TRUE(write_source(util, "fn add(i32 a, i32 b) i32 { return a + b; }\n"));
     const run_t run = RUN_CAPTURED("--index", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     // The alias declares `plus` in the entry and its declaration is the function
@@ -442,9 +442,9 @@ TEST(an_indexed_alias_declares_its_name_and_points_elsewhere, {
     char want[CAPTURE_MAX];
     TEST_UNUSED(snprintf(want,
                          sizeof want,
-                         "\"name\":\"plus\",\"kind\":\"fn\",\"type\":\"fn i32(i32, i32)\","
-                         "\"is_decl\":true,\"decl\":{\"file\":\"%s\",\"line\":1,\"col\":8,"
-                         "\"end_line\":1,\"end_col\":11}}",
+                         "\"name\":\"plus\",\"kind\":\"fn\",\"type\":\"fn (i32, i32) i32\","
+                         "\"is_decl\":true,\"decl\":{\"file\":\"%s\",\"line\":1,\"col\":4,"
+                         "\"end_line\":1,\"end_col\":7}}",
                          util));
     TEST_ASSERT_NONNULL(strstr(run.out, want));
     sandbox_close(&box);
@@ -504,7 +504,7 @@ TEST(an_unreadable_entry_under_json_leaves_stdout_empty, {
 
 // Two statements that fail in a row, so the parser reports both.
 // D14.2
-static const char TWO_ERRORS_SOURCE[] = "fn i32 main() { i32 x = 1 }\nfn i32 g( { return 0; }\n";
+static const char TWO_ERRORS_SOURCE[] = "fn main() i32 { i32 x = 1 }\nfn g( { return 0; }\n";
 
 TEST(every_diagnostic_of_a_file_is_in_the_document_in_report_order, {
     sandbox_t box = sandbox_open();
@@ -520,7 +520,7 @@ TEST(every_diagnostic_of_a_file_is_in_the_document_in_report_order, {
             sizeof want,
             "\"diagnostics\":[{\"file\":\"%s\",\"line\":1,\"col\":27,\"end_line\":1,"
             "\"end_col\":28,\"severity\":\"error\",\"message\":\"expected ';', found '}'\","
-            "\"notes\":[]},{\"file\":\"%s\",\"line\":2,\"col\":11,\"end_line\":2,\"end_col\":12,"
+            "\"notes\":[]},{\"file\":\"%s\",\"line\":2,\"col\":7,\"end_line\":2,\"end_col\":8,"
             "\"severity\":\"error\",\"message\":\"expected a type, found '{'\",\"notes\":[]}]",
             box.entry,
             box.entry);
@@ -531,7 +531,7 @@ TEST(every_diagnostic_of_a_file_is_in_the_document_in_report_order, {
 TEST(a_lexical_error_is_one_diagnostic_at_an_empty_range, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    TEST_ASSERT_TRUE(write_source(box.entry, "fn i32 main() { return 'abc; }\n"));
+    TEST_ASSERT_TRUE(write_source(box.entry, "fn main() i32 { return 'abc; }\n"));
     const run_t run = RUN_CAPTURED("--check", "--json", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
     // A lexical error stops the file after one diagnostic, and the lexer reports
@@ -550,10 +550,10 @@ TEST(a_lexical_error_is_one_diagnostic_at_an_empty_range, {
 TEST(a_diagnostic_of_an_imported_module_names_that_module, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    TEST_ASSERT_TRUE(write_source(box.entry, "import util;\nfn i32 main() { return 0; }\n"));
+    TEST_ASSERT_TRUE(write_source(box.entry, "import util;\nfn main() i32 { return 0; }\n"));
     char util[PATH_CAP];
     join(util, sizeof util, box.dir, "util.ft");
-    TEST_ASSERT_TRUE(write_source(util, "fn i32 add(i32 a { return a; }\n"));
+    TEST_ASSERT_TRUE(write_source(util, "fn add(i32 a { return a; }\n"));
     const run_t run = RUN_CAPTURED("--check", "--json", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
     // Every module of the closure is read and reported on, each diagnostic
@@ -562,7 +562,7 @@ TEST(a_diagnostic_of_an_imported_module_names_that_module, {
     char want[CAPTURE_MAX];
     expect3(want, sizeof want, "\"files\":[\"%s\",\"%s\",\"%s\"]", box.rt, box.entry, util);
     TEST_ASSERT_NONNULL(strstr(run.out, want));
-    expect1(want, sizeof want, "\"file\":\"%s\",\"line\":1,\"col\":18", util);
+    expect1(want, sizeof want, "\"file\":\"%s\",\"line\":1,\"col\":14", util);
     TEST_ASSERT_NONNULL(strstr(run.out, want));
     sandbox_close(&box);
 })
@@ -570,10 +570,10 @@ TEST(a_diagnostic_of_an_imported_module_names_that_module, {
 TEST(an_import_cycle_is_one_diagnostic_of_the_document, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    TEST_ASSERT_TRUE(write_source(box.entry, "import util;\nfn i32 main() { return 0; }\n"));
+    TEST_ASSERT_TRUE(write_source(box.entry, "import util;\nfn main() i32 { return 0; }\n"));
     char util[PATH_CAP];
     join(util, sizeof util, box.dir, "util.ft");
-    TEST_ASSERT_TRUE(write_source(util, "import main;\nfn i32 add(i32 a) { return a; }\n"));
+    TEST_ASSERT_TRUE(write_source(util, "import main;\nfn add(i32 a) i32 { return a; }\n"));
     // A cycle is an error at the import that closes it (module-system.md 13),
     // reported like every other error under --check.
     // D9.5
@@ -588,13 +588,13 @@ TEST(an_import_cycle_is_one_diagnostic_of_the_document, {
 TEST(an_include_root_is_searched_under_check, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    TEST_ASSERT_TRUE(write_source(box.entry, "import util;\nfn i32 main() { return 0; }\n"));
+    TEST_ASSERT_TRUE(write_source(box.entry, "import util;\nfn main() i32 { return 0; }\n"));
     char lib[PATH_CAP];
     join(lib, sizeof lib, box.dir, "lib");
     TEST_ASSERT_EQ_INT32(mkdir(lib, S_IRWXU), 0);
     char util[PATH_CAP];
     join(util, sizeof util, lib, "util.ft");
-    TEST_ASSERT_TRUE(write_source(util, "fn i32 add(i32 a, i32 b) { return a + b; }\n"));
+    TEST_ASSERT_TRUE(write_source(util, "fn add(i32 a, i32 b) i32 { return a + b; }\n"));
     // The search roots are the same under --check, and the document names a file
     // as the compiler opened it.
     // D9.2, D20.1, D20.2
@@ -642,10 +642,10 @@ TEST(a_non_ascii_file_name_passes_through_the_document, {
 TEST(the_front_end_hands_out_the_files_it_read, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    TEST_ASSERT_TRUE(write_source(box.entry, "import util;\nfn i32 main() { return 0; }\n"));
+    TEST_ASSERT_TRUE(write_source(box.entry, "import util;\nfn main() i32 { return 0; }\n"));
     char util[PATH_CAP];
     join(util, sizeof util, box.dir, "util.ft");
-    TEST_ASSERT_TRUE(write_source(util, "fn i32 add(i32 a, i32 b) { return a + b; }\n"));
+    TEST_ASSERT_TRUE(write_source(util, "fn add(i32 a, i32 b) i32 { return a + b; }\n"));
     driver_options_t opts;
     driver_options_init(&opts);
     opts.entry = box.entry;
@@ -679,10 +679,10 @@ TEST(the_front_end_hands_out_the_files_it_read, {
 TEST(the_analysis_outlives_the_front_end, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    TEST_ASSERT_TRUE(write_source(box.entry, "import util;\nfn i32 main() { return 0; }\n"));
+    TEST_ASSERT_TRUE(write_source(box.entry, "import util;\nfn main() i32 { return 0; }\n"));
     char util[PATH_CAP];
     join(util, sizeof util, box.dir, "util.ft");
-    TEST_ASSERT_TRUE(write_source(util, "fn i32 add(i32 a, i32 b) { return a + b; }\n"));
+    TEST_ASSERT_TRUE(write_source(util, "fn add(i32 a, i32 b) i32 { return a + b; }\n"));
     driver_options_t opts;
     driver_options_init(&opts);
     opts.entry = box.entry;
@@ -705,7 +705,7 @@ TEST(the_analysis_outlives_the_front_end, {
     TEST_ASSERT_NONNULL(entry->ast->sym);
     TEST_ASSERT_EQ_INT32((int32_t)entry->ast->sym->kind, (int32_t)SYM_MODULE);
     TEST_ASSERT_TRUE(str_eq(entry->ast->sym->name, str_from_cstr("main")));
-    // The module's one declaration is `fn i32 main()`, whose symbol the
+    // The module's one declaration is `fn main() i32`, whose symbol the
     // checker left on its node.
     const ast_node_t* decl = ast_child(entry->ast, ast_len(entry->ast) - 1);
     TEST_ASSERT_NONNULL(decl->sym);

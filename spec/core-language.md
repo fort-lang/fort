@@ -175,8 +175,8 @@ q = &m;                   // ok
 q->value = 1;             // error: cannot write through immutable pointer 'q'
 r->value = 1;             // ok; the common cursor 'node mut* mut cur' can do both
 mut node* bad = &m;       // error: nothing precedes the base type
-fn bool read_file(string path, u8 mut@ own mut* out) { ... }  // the own slot *out and its bytes
-fn bool peek(string path, u8@ mut* out) { ... }        // *out rebindable, bytes immutable
+fn read_file(string path, u8 mut@ own mut* out) bool { ... }  // the own slot *out and its bytes
+fn peek(string path, u8@ mut* out) bool { ... }        // *out rebindable, bytes immutable
 ```
 
 ### 3.4 Dropping mutability (D5.4, D3.14)
@@ -207,7 +207,7 @@ field's indirections. A return type has no binding either, so its outermost posi
 carries `mut` (D5.5). Parameters follow 3.3; in the outermost position `mut` makes the callee's
 local copy assignable and is not part of the function's type (7.2). A field or a return type may
 be an `own` reference, whose outermost position `own` may occupy even though `mut` may not
-(`u8 mut@ own data;`, `fn node mut* own alloc()`); a struct with such a field is an owning
+(`u8 mut@ own data;`, `fn alloc() node mut* own`); a struct with such a field is an owning
 aggregate (D17.7, 3.9).
 
 ```fort
@@ -217,11 +217,11 @@ struct node {
     node* mut prev;       // error: 'mut' on a field's own storage
     i32 mut count;        // error: 'mut' on a field's own storage
 }
-fn node mut* find() { ... }                 // ok: the caller may write through the result
-fn node* mut find2() { ... }                // error: 'mut' on a return type's own storage
-fn i32 mut f() { return 1; }                // error: 'mut' on a return type's own storage
-fn void h(node* p) { p = p->next; }         // error: cannot assign to immutable parameter 'p'
-fn void k(node* mut p) { p = p->next; }     // ok: level 0 of 'p' is mutable
+fn find() node mut* { ... }                 // ok: the caller may write through the result
+fn find2() node* mut { ... }                // error: 'mut' on a return type's own storage
+fn f() i32 mut { return 1; }                // error: 'mut' on a return type's own storage
+fn h(node* p) void { p = p->next; }         // error: cannot assign to immutable parameter 'p'
+fn k(node* mut p) void { p = p->next; }     // ok: level 0 of 'p' is mutable
 ```
 
 ### 3.6 Mutability of lvalues (D5.7, D6.7, D5.8, D5.9)
@@ -268,7 +268,7 @@ i32 B = A;
 i32* PTR = &MAX;                  // ok
 node* own ROOT = null;            // a constant: only the zero value is possible
 node mut* own mut head = null;    // a global
-fn void f() {
+fn f() void {
     i32 n = 3;
     i32[n] a = {};                // error: array length is not a constant expression
     del(ROOT);                    // error: cannot empty module-level constant 'ROOT'
@@ -289,8 +289,8 @@ namespace. Sibling scopes may reuse names.
 ```fort
 import std.io;
 struct point { i32 x; i32 y; }
-fn void point() { }               // error: 'point' is already declared in this module
-fn void f(i32 n) {
+fn point() void { }               // error: 'point' is already declared in this module
+fn f(i32 n) void {
     i32 n = 1;                    // error: 'n' shadows a parameter
     { i32 k = 1; }
     { i32 k = 2; }                // ok: sibling scopes
@@ -377,9 +377,9 @@ one that hands it to the caller.
 
 ```fort
 struct node { i32 value; node mut* next; }
-fn void take(node mut* own n) { del(n); }     // takes ownership
-fn void look(node* n) { println(n->value); }  // borrows
-fn node mut* own build() {                    // fn bool fill(node mut* n) borrows too
+fn take(node mut* own n) void { del(n); }     // takes ownership
+fn look(node* n) void { println(n->value); }  // borrows
+fn build() node mut* own {                    // fn fill(node mut* n) bool borrows too
     node mut* own n = new(node);
     defer del(n);                 // frees n on every path but the one that returns it
     if (!fill(n)) {
@@ -387,7 +387,7 @@ fn node mut* own build() {                    // fn bool fill(node mut* n) borro
     }
     return n;                     // implicit move: n is null when del(n) runs
 }
-fn void demo() {
+fn demo() void {
     node mut* own a = build();    // ok: an own rvalue lands in an own place
     node mut* own b = a;          // error: copying own lvalue 'a' needs move(a)
     node mut* own c = move(a);    // ok: 'a' is now null
@@ -402,7 +402,7 @@ fn void demo() {
     own node* f = null;           // error: nothing precedes the base type
     i32 own g = 1;                // error: 'own' on a non-reference type
     point own h = {};             // error: 'own' on a struct; qualify a field instead
-    fn void(node*) own i = look;  // error: 'own' on a function-pointer type
+    fn (node*) void own i = look;  // error: 'own' on a function-pointer type
 }
 ```
 
@@ -415,7 +415,7 @@ therefore take `vec*` or `vec mut*`, and a struct frees its own fields.
 
 ```fort
 struct vec { i32 mut@ own data; u64 len; }
-fn void steal(node* own@ view, node mut* own mut@ slots, vec* v, vec mut* w) {
+fn steal(node* own@ view, node mut* own mut@ slots, vec* v, vec mut* w) void {
     node* own a = move(view[0]);         // error: cannot move out of immutable slot 'view[0]'
     node mut* own b = move(slots[0]);    // ok: level 1 of 'slots' is mutable
     i32 mut@ own c = move(v->data);      // error: cannot move through immutable pointer 'v'
@@ -445,7 +445,7 @@ fn void steal(node* own@ view, node mut* own mut@ slots, vec* v, vec mut* w) {
 | struct      | `point`             | C layout | all zero    | no       | D3.8        |
 | enum        | `color`             | 4        | `0`         | yes      | D3.9        |
 | pointer     | `node*`, `void*`    | 8        | `null`      | identity | D3.11-D3.13 |
-| function    | `fn i32(i32, i32)`  | 8        | `null`      | identity | D3.10       |
+| function    | `fn (i32, i32) i32`  | 8        | `null`      | identity | D3.10       |
 
 Alignment equals size for primitives; pointers, function pointers, spans and strings align to
 8, arrays to their element and structs to their most-aligned field, with C/System V layout
@@ -602,7 +602,7 @@ diagnosed.
 ```fort
 i32* a = &(x + 1);        // error: '&' requires an lvalue
 i32* b = &point{1, 2}.x;  // error: '&' requires an lvalue
-fn i32(i32) c = &inc;     // error: '&' on a function; write 'inc'
+fn (i32) i32 c = &inc;     // error: '&' on a function; write 'inc'
 i32 d = *vp;              // error: cannot dereference 'void*'
 i32* e = p + 1;           // error: no pointer arithmetic
 bool f = s == null;       // error: 'null' compared with a span; use 's.ptr == null'
@@ -694,7 +694,7 @@ are passed by value (7.1).
 add(1);                   // error: 'add' takes 2 arguments, 1 given
 add(1, 2.0);              // error: untyped float for parameter 'b' of type i32
 i32 t = table[i](3);      // ok: index, then call
-// fn void take(node mut* own n); fn void look(node* n); node mut* own n
+// fn take(node mut* own n) void; fn look(node* n) void; node mut* own n
 take(n);                  // error: 'take' takes ownership of 'n'; write move(n)
 take(move(n));            // ok: 'n' is null afterwards
 take(new(node));          // ok: the temporary lands in the own parameter
@@ -1021,7 +1021,7 @@ switch (ch) {
 }
 switch (s) { }                      // error: cannot switch on string
 switch (flag) { }                   // error: cannot switch on bool
-fn void f() {
+fn f() void {
     break;                          // error: 'break' outside a loop or switch
 }
 ```
@@ -1050,7 +1050,7 @@ fn void f() {
   (D11.4). A `noreturn` call never exits the block, so nothing deferred runs.
 
 ```fort
-fn void demo() {
+fn demo() void {
     defer println("A");
     {
         defer println("B");
@@ -1075,17 +1075,17 @@ runs because the `defer` is textually before the `break`. Falling off the end of
 runs the function block's deferred statements in reverse order: `F`, then `A`.
 
 ```fort
-fn i32 g() {
+fn g() i32 {
     i32 mut x = 1;
     defer x = 2;
     return x;                 // returns 1: 'x' is read before the deferred assignment
 }
-fn void h(i32 mut* p) {
+fn h(i32 mut* p) void {
     defer return;             // error: 'return' inside deferred code
     defer i32 t = 1;          // error: 'defer' takes an assignment, ++/--, call or block
     defer { *p = 0; }         // ok
 }
-fn void k() {
+fn k() void {
     while (true) {
         defer { break; }      // error: 'break' outside a loop or switch
     }
@@ -1099,7 +1099,7 @@ fn void k() {
         }
     }
 }
-fn u8 mut@ own slurp(i32 fd) {
+fn slurp(i32 fd) u8 mut@ own {
     u8 mut@ own buf = new(u8, 4096);
     defer del(buf);           // a no-op on the returning path, a free on every other
     if (io.read(fd, buf) < 0) {
@@ -1122,12 +1122,12 @@ Because the implicit move yields an `own` rvalue, returning an `own` local from 
 return type is not `own` is refused as a leaking temporary (D17.8).
 
 ```fort
-fn void f() { return 1; }     // error: 'return' with a value in a void function
-fn i32 g() { return; }        // error: 'return' without a value in a function returning i32
-fn node mut* own pop(list mut* l) {
+fn f() void { return 1; }     // error: 'return' with a value in a void function
+fn g() i32 { return; }        // error: 'return' without a value in a function returning i32
+fn pop(list mut* l) node mut* own {
     return l->head;           // error: 'l->head' is not a local; write move(l->head)
 }
-fn node* leak() {
+fn leak() node* {
     node mut* own n = new(node);
     return n;                 // error: owning temporary would leak; return node mut* own
 }
@@ -1138,12 +1138,12 @@ fn node* leak() {
 ### 7.1 Declaration, parameters and results (D8.1, D8.2, D8.3, D5.6, D7.10, D17.5, D17.7)
 
 ```fort
-fn i32 add(i32 a, i32 b) {
+fn add(i32 a, i32 b) i32 {
     return a + b;
 }
 ```
 
-`fn ReturnType name(Type p1, Type p2) { ... }`, with `void` for no result: `fn void main() { }`.
+`fn name(Type p1, Type p2) ReturnType { ... }`, with `void` for no result: `fn main() void { }`.
 The keyword makes top-level and statement-level parsing unambiguous while the declaration still
 reads like C. Parameter names are required, also in `extern` declarations. Functions are
 declared at module level only, are visible throughout the module regardless of order, and enter
@@ -1160,53 +1160,56 @@ An `own` parameter takes ownership of its argument (D6.11, D17.5): the callee fr
 it in an `own` place, and since a parameter is a local, `del(p)` is allowed on an immutable `p`
 and `return p` is an implicit move (3.9). A parameter of owning aggregate type receives its
 argument only through `move`, which is why functions take `vec*` or `vec mut*` (D17.7). A
-return type may be `own` (`fn u8 mut@ own read_all(i32 fd)`), and its value must land in the
+return type may be `own` (`fn read_all(i32 fd) u8 mut@ own`), and its value must land in the
 caller (D17.8).
 
 ```fort
-fn i32 f(i32) { return 0; }             // error: parameter needs a name
-fn void g() {
-    fn void inner() { }                 // error: functions are top-level only
+fn f(i32) i32 { return 0; }             // error: parameter needs a name
+fn g() void {
+    fn inner() void { }                 // error: functions are top-level only
 }
-fn void bump(i32 n) { n += 1; }         // error: cannot assign to immutable parameter 'n'
-fn void bump2(i32 mut n) { n += 1; }    // ok: modifies the local copy
-fn i32[4] copy(i32[4] a) { return a; }  // the array is copied in and copied out
-fn void take(node mut* own n) { del(n); }         // ok: 'n' need not be mut
-fn void eat(vec v) { del(v.data); }               // callers must write eat(move(x))
-fn void reset(vec mut* v) { del(v->data); v->len = 0; }   // the usual shape
+fn bump(i32 n) void { n += 1; }         // error: cannot assign to immutable parameter 'n'
+fn bump2(i32 mut n) void { n += 1; }    // ok: modifies the local copy
+fn copy(i32[4] a) i32[4] { return a; }  // the array is copied in and copied out
+fn take(node mut* own n) void { del(n); }         // ok: 'n' need not be mut
+fn eat(vec v) void { del(v.data); }               // callers must write eat(move(x))
+fn reset(vec mut* v) void { del(v->data); v->len = 0; }   // the usual shape
 ```
 
 ### 7.2 Function types and values (D3.10, D3.6, D17.1)
 
-A function type is written `fn R(P1, P2)` with parameter types only. Identity is structural over
+A function type is written `fn (P1, P2) R` with parameter types only. Identity is structural over
 the parameter types (including pointee mutability), the return type and `noreturn`; level-0
 `mut` on parameters is ignored. `own` at any reference of a parameter or return type is part of
-the identity (D17.1): `fn void(node* own)` and `fn void(node*)` are different types, and so are
-`fn node mut* own()` and `fn node mut*()`. `own` on a function-pointer type itself is an error.
+the identity (D17.1): `fn (node* own) void` and `fn (node*) void` are different types, and so are
+`fn () node mut* own` and `fn () node mut*`. `own` on a function-pointer type itself is an error.
 A function name, or a qualified name `m.f`, used as a value has its function type; `&f` and `*f`
 are errors. `null` is a valid value, and calling it is undefined behavior. `==` and `!=` compare
-identity. Suffixes after a function type apply to the function type: `fn i32(i32)[4]` is an
-array of four function pointers, `fn i32[4](i32)` returns
-an `i32[4]`. At statement level `fn` always begins a declaration whose type is a function type.
+identity. A function type ends at its return type, so every marker and every suffix written after
+it belongs to that return type: `fn (i32) i32[4]` returns an `i32[4]` and `fn (i32) i32*` returns
+an `i32*`. To mark or to suffix a function type, wrap it in a struct. At statement level `fn`
+always begins a declaration whose type is a function type.
 
 ```fort
-fn i32 inc(i32 x) { return x + 1; }
-fn i32 dec(i32 mut x) { return x - 1; }
-fn i32(i32) op = inc;             // ok
+fn inc(i32 x) i32 { return x + 1; }
+fn dec(i32 mut x) i32 { return x - 1; }
+struct slot { fn (i32) i32 f; }   // the wrapper a marker or a suffix needs
+fn (i32) i32 op = inc;            // ok
 op = dec;                         // error: cannot assign to immutable 'op'
-fn i32(i32) mut op2 = inc;
-op2 = dec;                        // ok: the outermost 'mut' on dec's parameter is ignored
-fn i32(i32)[2] table = {inc, dec};
-i32 r = table[1](5);              // 4
-fn i32(i32) w = &inc;             // error: '&' on a function; write 'inc'
-fn i64(i32) v = inc;              // error: mismatched function types
-fn void(node*) t = take;          // error: fn void(node mut* own) is not fn void(node*)
-fn i32(i32) own o = inc;          // error: 'own' on a function-pointer type
+slot mut op2 = {inc};
+op2.f = dec;                      // ok: the field's storage is the struct's (D5.5)
+slot[2] table = {{inc}, {dec}};
+i32 r = table[1].f(5);            // 4
+fn (i32) i32 w = &inc;            // error: '&' on a function; write 'inc'
+fn (i32) i64 v = inc;             // error: mismatched function types
+fn (node*) void t = take;         // error: fn (node mut* own) void is not fn (node*) void
+fn (i32) i32 own o = inc;         // error: an own marks a reference
+fn (i32) i32 mut m = inc;         // error: a return type has no binding
 ```
 
 ### 7.3 `noreturn` and terminating statements (D8.5, D8.4, D6.11)
 
-`noreturn` is a return type: `fn noreturn fatal(string msg) { ... }`. Such a function may not
+`noreturn` is a return type: `fn fatal(string msg) noreturn { ... }`. Such a function may not
 contain `return` and must end in a terminating statement; the compiler emits a trap after its
 body and after every call to it. `panic` and `sys.exit` are `noreturn`. Without it, every
 error-reporting helper would force a dead `return` after each call.
@@ -1223,14 +1226,14 @@ terminate, however obvious its `return`. Catching this at compile time is a core
 C" promise.
 
 ```fort
-fn i32 sign(i32 x) {
+fn sign(i32 x) i32 {
     if (x < 0) {
         return -1;
     } else if (x > 0) {
         return 1;
     }
 }                                 // error: missing return (add an else branch)
-fn i32 code(color c) {
+fn code(color c) i32 {
     switch (c) {
         case color.red:
             return 1;
@@ -1238,11 +1241,11 @@ fn i32 code(color c) {
             return 2;
     }
 }                                 // ok: exhaustive enum switch, every case returns
-fn noreturn die(string msg) {
+fn die(string msg) noreturn {
     eprintln(msg);
     return;                       // error: 'return' in a noreturn function
 }
-fn i32 checked(i32 x) {
+fn checked(i32 x) i32 {
     if (x < 0) {
         panic("negative");        // terminating: no dead return needed
     } else {
@@ -1253,7 +1256,7 @@ fn i32 checked(i32 x) {
 
 ### 7.4 Entry point (D8.6, D11.6)
 
-The module given to `fort` must define `fn i32 main()` or `fn i32 main(string@ args)`.
+The module given to `fort` must define `fn main() i32` or `fn main(string@ args) i32`.
 `args[0]` is the program name, and every element is NUL-terminated because it comes from `argv`.
 The return value is the exit status; the process exits with `status & 0xFF`. A `main` returning
 `void` is an error. A `main` in any other module is an ordinary function. The compiler emits the
@@ -1261,14 +1264,14 @@ process entry: a `main(argc, argv)` that asks the runtime for `args`, calls the 
 output and returns the status (D11.6, D13.1).
 
 ```fort
-fn i32 main(string@ args) {
+fn main(string@ args) i32 {
     for (string a : args) {
         println(a);
     }
     del(args);                    // error: 'args' is a borrowed string@, not own (D17.3)
     return 0;
 }
-fn void main() { }                // error: 'main' must return i32
+fn main() void { }                // error: 'main' must return i32
 ```
 
 ## 8. Builtins
@@ -1329,7 +1332,7 @@ del(view[0]);                 // error: cannot empty immutable slot 'view[0]'
 del(new(node));               // ok: frees the temporary
 del(n); del(n);               // ok: the second call is del(null)
 i32 r = del(n);               // error: 'del' has no value
-fn void(node mut* own) f = del;   // error: 'del' cannot be used as a value
+fn (node mut* own) void f = del;   // error: 'del' cannot be used as a value
 move(n);                      // error: owning temporary would leak
 node mut* own m = move(k);    // error: 'move' needs an owning operand; 'k' is an i32
 node mut* own o = move(v);    // error: 'move' needs an owning operand; 'v' is a borrowed node*

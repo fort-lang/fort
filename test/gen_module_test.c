@@ -15,7 +15,7 @@
 #include "test.h"
 
 // The program of toolchain.md 6.1, whose module that section shows.
-static const char HELLO_SOURCE[] = "fn i32 main() { println(\"hello, world!\"); return 0; }\n";
+static const char HELLO_SOURCE[] = "fn main() i32 { println(\"hello, world!\"); return 0; }\n";
 
 // The program of toolchain.md 6.2, whose module that section shows. It fixes
 // the `[` of `a[i]` at line 12, column 13, so the seven comment lines put the
@@ -29,7 +29,7 @@ static const char ABORT_SOURCE[] = "// The program of toolchain.md 6.2, whose bo
                                    "// records in its call to std.rt.fail_bounds (D11.4).\n"
                                    "//\n"
                                    "//\n"
-                                   "fn i32 main() {\n"
+                                   "fn main() i32 {\n"
                                    "    println(\"before\");\n"
                                    "    i32[3] a = {};\n"
                                    "    i64 mut i = 5;\n"
@@ -138,7 +138,7 @@ TEST(the_program_of_section_6_2_is_emitted_as_that_section_shows, {
 })
 
 TEST(the_checked_fragment_of_item_15_is_emitted_as_the_section_shows, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 a = 7;\n    i32 b = 3;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 a = 7;\n    i32 b = 3;\n"
                           "    return a + b;\n}\n"));
     TEST_ASSERT_EQ_STR(
         ir(),
@@ -196,7 +196,7 @@ TEST(the_checked_fragment_of_item_15_is_emitted_as_the_section_shows, {
 })
 
 TEST(the_release_counterpart_of_that_fragment_is_a_plain_add, {
-    TEST_ASSERT_TRUE(emit_release("fn i32 main() {\n    i32 a = 7;\n    i32 b = 3;\n"
+    TEST_ASSERT_TRUE(emit_release("fn main() i32 {\n    i32 a = 7;\n    i32 b = 3;\n"
                                   "    return a + b;\n}\n"));
     TEST_ASSERT_EQ_STR(ir(),
                        "target triple = \"x86_64-unknown-linux-gnu\"\n"
@@ -247,9 +247,9 @@ TEST(the_release_counterpart_of_that_fragment_is_a_plain_add, {
 static const char BUSY_SOURCE[] =
     "enum color { red, green }\n"
     "struct point { i32 x; i32 y; }\n"
-    "fn u64 size(string s) { return s.len; }\n"
-    "fn point make(i32 v) { point p = {v, v}; return p; }\n"
-    "fn i32 main() {\n"
+    "fn size(string s) u64 { return s.len; }\n"
+    "fn make(i32 v) point { point p = {v, v}; return p; }\n"
+    "fn main() i32 {\n"
     "    i32 mut a = 7;\n"
     "    i32 b = 3;\n"
     "    a += b;\n"
@@ -292,9 +292,9 @@ TEST(the_two_build_modes_differ_only_where_the_checks_are, {
 })
 
 TEST(the_counters_are_reset_at_each_definition, {
-    TEST_ASSERT_TRUE(emit("fn i32 one() { i32 a = 1; return a; }\n"
-                          "fn i32 two() { i32 b = 2; return b; }\n"
-                          "fn i32 main() { return one() + two(); }\n"));
+    TEST_ASSERT_TRUE(emit("fn one() i32 { i32 a = 1; return a; }\n"
+                          "fn two() i32 { i32 b = 2; return b; }\n"
+                          "fn main() i32 { return one() + two(); }\n"));
     // Every counter is per function and reset at each definition.
     // D19.5
     TEST_ASSERT_EQ_STR(found("@\"main.one\"() #0 {\nentry:\n  %a.0 = alloca i32, align 4\n"
@@ -311,7 +311,7 @@ TEST(the_counters_are_reset_at_each_definition, {
 // D19.4
 
 TEST(every_local_is_an_entry_block_alloca_in_declaration_order, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 a = 1;\n    { i64 b = 2; }\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 a = 1;\n    { i64 b = 2; }\n"
                           "    i16 c = 3;\n    return a;\n}\n"));
     // A local of a nested block is an entry-block alloca too, because LLVM's
     // promotion passes look only there.
@@ -323,7 +323,7 @@ TEST(every_local_is_an_entry_block_alloca_in_declaration_order, {
 })
 
 TEST(a_local_named_tmp_cannot_collide_with_a_compiler_made_place, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 tmp = 1;\n    i32 b = 2;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 tmp = 1;\n    i32 b = 2;\n"
                           "    bool t = tmp > 0 && b > 0;\n    println(t);\n    return 0;\n}\n"));
     // A name that embeds a fort identifier always contains a dot and an
     // invented one never does.
@@ -333,15 +333,15 @@ TEST(a_local_named_tmp_cannot_collide_with_a_compiler_made_place, {
 })
 
 TEST(a_shadowing_local_gets_a_slot_of_its_own, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 a = 1;\n    { i64 b = 2; }\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 a = 1;\n    { i64 b = 2; }\n"
                           "    { i32 c = 3; }\n    return a;\n}\n"));
     TEST_ASSERT_EQ_STR(found("%b.1 = alloca i64"), "%b.1 = alloca i64");
     TEST_ASSERT_EQ_STR(found("%c.2 = alloca i32"), "%c.2 = alloca i32");
 })
 
 TEST(a_scalar_parameter_is_stored_into_its_slot_immediately, {
-    TEST_ASSERT_TRUE(emit("fn i32 twice(i64 v) { return cast(v *% 2, i32); }\n"
-                          "fn i32 main() { return twice(3); }\n"));
+    TEST_ASSERT_TRUE(emit("fn twice(i64 v) i32 { return cast(v *% 2, i32); }\n"
+                          "fn main() i32 { return twice(3); }\n"));
     TEST_ASSERT_EQ_STR(found("entry:\n  %v.0 = alloca i64, align 8\n"
                              "  store i64 %v.in, ptr %v.0, align 8\n"),
                        "entry:\n  %v.0 = alloca i64, align 8\n"
@@ -349,8 +349,8 @@ TEST(a_scalar_parameter_is_stored_into_its_slot_immediately, {
 })
 
 TEST(an_aggregate_parameter_is_not_copied_again, {
-    TEST_ASSERT_TRUE(emit("fn u64 size(string s) { return s.len; }\n"
-                          "fn i32 main() { string s = \"hi\"; println(size(s)); return 0; }\n"));
+    TEST_ASSERT_TRUE(emit("fn size(string s) u64 { return s.len; }\n"
+                          "fn main() i32 { string s = \"hi\"; println(size(s)); return 0; }\n"));
     // Its place is the caller-made copy the incoming pointer designates
     // (item 10).
     TEST_ASSERT_EQ_STR(
@@ -361,7 +361,7 @@ TEST(an_aggregate_parameter_is_not_copied_again, {
 })
 
 TEST(a_fresh_block_opens_after_a_terminating_statement, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    { return 1; println(\"after\"); }\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    { return 1; println(\"after\"); }\n"
                           "    return 0;\n}\n"));
     // The parser allows the statements after a terminating one, so the
     // emitter opens a block for them (item 10).
@@ -372,7 +372,7 @@ TEST(a_fresh_block_opens_after_a_terminating_statement, {
 })
 
 TEST(a_void_body_that_falls_off_the_end_returns_void, {
-    TEST_ASSERT_TRUE(emit("fn void noop() { }\nfn i32 main() { noop(); return 0; }\n"));
+    TEST_ASSERT_TRUE(emit("fn noop() void { }\nfn main() i32 { noop(); return 0; }\n"));
     TEST_ASSERT_EQ_STR(found("@\"main.noop\"() #0 {\nentry:\n  ret void\n}"),
                        "@\"main.noop\"() #0 {\nentry:\n  ret void\n}");
 })
@@ -395,7 +395,7 @@ TEST(fort_entry_calls_main_directly_when_it_takes_no_parameter, {
 })
 
 TEST(fort_entry_copies_the_argument_span_when_main_declares_it, {
-    TEST_ASSERT_TRUE(emit("fn i32 main(string@ args) { return cast(args.len, i32); }\n"));
+    TEST_ASSERT_TRUE(emit("fn main(string@ args) i32 { return cast(args.len, i32); }\n"));
     // Its caller is the `main` of item 22 rather than the body of a fort
     // function, so the span is copied into its own frame.
     TEST_ASSERT_EQ_STR(
@@ -419,7 +419,7 @@ TEST(fort_entry_copies_the_argument_span_when_main_declares_it, {
 })
 
 TEST(fort_entry_is_the_last_definition_of_the_module, {
-    TEST_ASSERT_TRUE(emit("fn i32 one() { return 1; }\nfn i32 main() { return one(); }\n"));
+    TEST_ASSERT_TRUE(emit("fn one() i32 { return 1; }\nfn main() i32 { return one(); }\n"));
     TEST_ASSERT_TRUE(before("@\"main.one\"", "@\"main.main\""));
     TEST_ASSERT_TRUE(before("@\"main.main\"() #0 {", "@fort_entry"));
 })
@@ -428,7 +428,7 @@ TEST(fort_entry_is_the_last_definition_of_the_module, {
 // D12.2
 
 TEST(each_integer_type_reaches_its_own_printer, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i8 a = 1;\n    u8 b = 2;\n    i64 c = 3;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i8 a = 1;\n    u8 b = 2;\n    i64 c = 3;\n"
                           "    u64 d = 4;\n    println(a, b, c, d);\n    return 0;\n}\n"));
     // i8 i16 i32 i64 are sign-extended to i64 and u8 u16 u32 u64
     // zero-extended to it (item 19).
@@ -445,7 +445,7 @@ TEST(each_integer_type_reaches_its_own_printer, {
 })
 
 TEST(a_bool_a_char_and_a_pointer_reach_their_printers, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    bool t = true;\n    char c = 'a';\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    bool t = true;\n    char c = 'a';\n"
                           "    void* p = null;\n    println(t, c, p);\n    return 0;\n}\n"));
     TEST_ASSERT_EQ_STR(found("@\"std.rt.print_bool\"(i32 1, i1 zeroext %t"),
                        "@\"std.rt.print_bool\"(i32 1, i1 zeroext %t");
@@ -456,7 +456,7 @@ TEST(a_bool_a_char_and_a_pointer_reach_their_printers, {
 })
 
 TEST(a_string_literal_prints_as_its_constant_and_length, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() { print(\"hi\"); return 0; }\n"));
+    TEST_ASSERT_TRUE(emit("fn main() i32 { print(\"hi\"); return 0; }\n"));
     TEST_ASSERT_EQ_STR(found("call void @\"std.rt.print_str\"(i32 1, ptr @.str.0, i64 2)"),
                        "call void @\"std.rt.print_str\"(i32 1, ptr @.str.0, i64 2)");
     // print writes no newline.
@@ -465,13 +465,13 @@ TEST(a_string_literal_prints_as_its_constant_and_length, {
 })
 
 TEST(println_ends_with_the_newline_byte, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() { println(); return 0; }\n"));
+    TEST_ASSERT_TRUE(emit("fn main() i32 { println(); return 0; }\n"));
     TEST_ASSERT_EQ_STR(found("call void @\"std.rt.print_char\"(i32 1, i8 zeroext 10)"),
                        "call void @\"std.rt.print_char\"(i32 1, i8 zeroext 10)");
 })
 
 TEST(eprint_writes_to_the_second_descriptor, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() { eprintln(\"warn\"); return 0; }\n"));
+    TEST_ASSERT_TRUE(emit("fn main() i32 { eprintln(\"warn\"); return 0; }\n"));
     TEST_ASSERT_EQ_STR(found("call void @\"std.rt.print_str\"(i32 2, ptr @.str.0, i64 4)"),
                        "call void @\"std.rt.print_str\"(i32 2, ptr @.str.0, i64 4)");
     TEST_ASSERT_EQ_STR(found("call void @\"std.rt.print_char\"(i32 2, i8 zeroext 10)"),
@@ -479,8 +479,8 @@ TEST(eprint_writes_to_the_second_descriptor, {
 })
 
 TEST(fprint_evaluates_its_descriptor_once, {
-    TEST_ASSERT_TRUE(emit("fn i32 fd() { return 1; }\n"
-                          "fn i32 main() { fprintln(fd(), \"a\", \"b\"); return 0; }\n"));
+    TEST_ASSERT_TRUE(emit("fn fd() i32 { return 1; }\n"
+                          "fn main() i32 { fprintln(fd(), \"a\", \"b\"); return 0; }\n"));
     // `fd` is evaluated once and then each argument left to right.
     // D6.3, D12.2
     TEST_ASSERT_EQ_STR(found("  %t0 = call i32 @\"main.fd\"()\n"
@@ -494,7 +494,7 @@ TEST(fprint_evaluates_its_descriptor_once, {
 })
 
 TEST(a_string_variable_prints_as_its_two_header_fields, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() { string s = \"hi\"; print(s); return 0; }\n"));
+    TEST_ASSERT_TRUE(emit("fn main() i32 { string s = \"hi\"; print(s); return 0; }\n"));
     TEST_ASSERT_EQ_STR(found("  %t2 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 0\n"
                              "  %t3 = load ptr, ptr %t2, align 8\n"
                              "  %t4 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 1\n"
@@ -509,7 +509,7 @@ TEST(a_string_variable_prints_as_its_two_header_fields, {
 
 TEST(an_enum_prints_with_its_table_and_member_count, {
     TEST_ASSERT_TRUE(emit("enum color { red, green }\n"
-                          "fn i32 main() { color g = color.green; print(g); return 0; }\n"));
+                          "fn main() i32 { color g = color.green; print(g); return 0; }\n"));
     TEST_ASSERT_EQ_STR(
         found("call void @\"std.rt.print_enum\"(i32 1, i32 %t0, ptr @.enum.main.color, i64 2)"),
         "call void @\"std.rt.print_enum\"(i32 1, i32 %t0, ptr @.enum.main.color, i64 2)");
@@ -521,39 +521,39 @@ TEST(an_enum_prints_with_its_table_and_member_count, {
 // One program per area the emitter covers; every module it produces must pass
 // opt -passes=verify, which is the one property the whole contract rests on.
 static const char* const CORPUS[] = {
-    "fn i32 main() { return 0; }\n",
-    "fn i32 main() { println(); return 0; }\n",
-    "fn i32 main() {\n    i8 a = -128;\n    u64 b = 18446744073709551615;\n"
+    "fn main() i32 { return 0; }\n",
+    "fn main() i32 { println(); return 0; }\n",
+    "fn main() i32 {\n    i8 a = -128;\n    u64 b = 18446744073709551615;\n"
     "    println(a, b, -a +% 1, b +% 1);\n    return 0;\n}\n",
-    "fn i32 main() {\n    i32 a = 7;\n    i32 b = 3;\n"
+    "fn main() i32 {\n    i32 a = 7;\n    i32 b = 3;\n"
     "    println(a + b, a - b, a * b, a / b, a % b, a << b, a >> b, a & b, a | b, a ^ b, ~a);\n"
     "    return 0;\n}\n",
-    "fn i32 main() {\n    u8 a = 7;\n    u8 b = 3;\n"
+    "fn main() i32 {\n    u8 a = 7;\n    u8 b = 3;\n"
     "    println(a + b, a - b, a * b, a / b, a % b, a << b, a >> b);\n    return 0;\n}\n",
-    "fn i32 main() {\n    i32 a = 1;\n    i32 b = 2;\n"
+    "fn main() i32 {\n    i32 a = 1;\n    i32 b = 2;\n"
     "    println(a > b && b > 0 || a == 1, !(a < b));\n    return 0;\n}\n",
     "struct point { i32 x; i32 y; }\n"
     "struct line { point a; point b; }\n"
-    "fn i32 main() {\n    line l = {};\n    line m = l;\n"
+    "fn main() i32 {\n    line l = {};\n    line m = l;\n"
     "    println(m.a.x, m.b.y);\n    return 0;\n}\n",
     "struct point { i32 x; i32 y; }\n"
-    "fn point make() { point p = {.y = 2}; return p; }\n"
-    "fn i32 main() { point q = make(); println(q.x, q.y); return 0; }\n",
-    "fn i32 main() {\n    i32[4] a = {1, 2, 3, 4};\n    i64 i = 3;\n"
+    "fn make() point { point p = {.y = 2}; return p; }\n"
+    "fn main() i32 { point q = make(); println(q.x, q.y); return 0; }\n",
+    "fn main() i32 {\n    i32[4] a = {1, 2, 3, 4};\n    i64 i = 3;\n"
     "    println(a[i], a.len);\n    return 0;\n}\n",
-    "fn i32 main() {\n    string s = \"hello\";\n    u64 i = 1;\n"
+    "fn main() i32 {\n    string s = \"hello\";\n    u64 i = 1;\n"
     "    println(s, s.len, s[i]);\n    return 0;\n}\n",
     "enum color { red, green = 5, blue }\n"
-    "fn i32 main() {\n    color g = color.blue;\n"
+    "fn main() i32 {\n    color g = color.blue;\n"
     "    println(g, cast(g, i32), cast(9, color));\n    return 0;\n}\n",
-    "fn i32 main() {\n    i32 v = 1;\n    i32* p = &v;\n    i32** q = &p;\n"
+    "fn main() i32 {\n    i32 v = 1;\n    i32* p = &v;\n    i32** q = &p;\n"
     "    println(*p, **q, p == null);\n    return 0;\n}\n",
-    "extern fn i32 puts(char* s);\n"
-    "fn i32 main() { string s = \"x\"; return puts(s.ptr); }\n",
-    "fn noreturn stop() { panic(\"stop\"); }\n"
-    "fn i32 main() { println(\"before\"); stop(); }\n",
-    "fn i32 main() { assert(1 == 1); assert(sizeof(i64) == 8); return 0; }\n",
-    "fn i32 main(string@ args) { println(args.len); return 0; }\n",
+    "extern fn puts(char* s) i32;\n"
+    "fn main() i32 { string s = \"x\"; return puts(s.ptr); }\n",
+    "fn stop() noreturn { panic(\"stop\"); }\n"
+    "fn main() i32 { println(\"before\"); stop(); }\n",
+    "fn main() i32 { assert(1 == 1); assert(sizeof(i64) == 8); return 0; }\n",
+    "fn main(string@ args) i32 { println(args.len); return 0; }\n",
 };
 
 TEST(every_module_of_the_corpus_verifies_in_the_checked_mode, {
@@ -594,13 +594,13 @@ TEST(every_module_of_the_corpus_is_reproduced_byte_for_byte, {
 
 // The imported module: a struct, a function and an `extern` the importer
 // declares as well.
-static const char UTIL_SOURCE[] = "extern fn i32 puts(char* s);\n"
+static const char UTIL_SOURCE[] = "extern fn puts(char* s) i32;\n"
                                   "struct point { i32 x; i32 y; }\n"
-                                  "fn i32 shout(char* s) { return puts(s); }\n";
+                                  "fn shout(char* s) i32 { return puts(s); }\n";
 
 static const char APP_SOURCE[] = "import util;\n"
-                                 "extern fn i32 puts(char* s);\n"
-                                 "fn i32 main() {\n"
+                                 "extern fn puts(char* s) i32;\n"
+                                 "fn main() i32 {\n"
                                  "    util.point p = {1, 2};\n"
                                  "    string s = \"hi\";\n"
                                  "    i32 a = puts(s.ptr);\n"
@@ -641,11 +641,11 @@ TEST(two_declarations_of_one_c_name_never_reach_the_emitter_disagreeing, {
     // (module-system.md 13); the emitter never chooses between them.
     TEST_ASSERT_FALSE(emit_two("app.ft",
                                "import util;\n"
-                               "extern fn i64 puts(i32 n);\n"
-                               "fn i32 main() { return cast(puts(7), i32); }\n",
+                               "extern fn puts(i32 n) i64;\n"
+                               "fn main() i32 { return cast(puts(7), i32); }\n",
                                "util.ft",
-                               "extern fn i32 puts(char* s);\n"
-                               "fn i32 shout(char* s) { return puts(s); }\n"));
+                               "extern fn puts(char* s) i32;\n"
+                               "fn shout(char* s) i32 { return puts(s); }\n"));
     TEST_ASSERT_NONNULL(strstr(gen_said(), "conflicting declarations of extern 'puts'"));
 })
 
@@ -659,19 +659,19 @@ TEST(two_declarations_of_one_c_name_never_reach_the_emitter_disagreeing, {
 static const char RUNTIME_SOURCE[] =
     "struct enum_member { i32 value; char* name; }\n"
     "string mut@ own mut args_store = {};\n"
-    "fn void args_init(i32 argc, char* mut* argv) { }\n"
-    "fn string@ args() { return args_store; }\n"
-    "fn void flush_all() { }\n"
-    "fn void print_i64(i32 fd, i64 v) { }\n"
-    "fn void print_str(i32 fd, char* ptr, u64 len) { }\n"
-    "fn void print_char(i32 fd, char c) { }\n"
-    "fn void print_enum(i32 fd, i32 v, enum_member* m, u64 n) { }\n"
-    "fn noreturn fail_div_zero(char* file, u32 line, u32 col) { while (true) { } }\n"
-    "fn noreturn fail_div_overflow(char* file, u32 line, u32 col) { while (true) { } }\n";
+    "fn args_init(i32 argc, char* mut* argv) void { }\n"
+    "fn args() string@ { return args_store; }\n"
+    "fn flush_all() void { }\n"
+    "fn print_i64(i32 fd, i64 v) void { }\n"
+    "fn print_str(i32 fd, char* ptr, u64 len) void { }\n"
+    "fn print_char(i32 fd, char c) void { }\n"
+    "fn print_enum(i32 fd, i32 v, enum_member* m, u64 n) void { }\n"
+    "fn fail_div_zero(char* file, u32 line, u32 col) noreturn { while (true) { } }\n"
+    "fn fail_div_overflow(char* file, u32 line, u32 col) noreturn { while (true) { } }\n";
 
 TEST(a_noreturn_entry_point_of_section_5_1_carries_the_attribute_group_8, {
     TEST_ASSERT_TRUE(emit_with_runtime(
-        RUNTIME_SOURCE, "fn i32 main() {\n    i32 a = 7;\n    i32 b = 0;\n    return a / b;\n}\n"));
+        RUNTIME_SOURCE, "fn main() i32 {\n    i32 a = 7;\n    i32 b = 0;\n    return a / b;\n}\n"));
     // `#8` is `#1` plus `cold`, on the definitions of the `noreturn` entry
     // points of section 5.1 and on no other fort function (item 14).
     TEST_ASSERT_EQ_STR(
@@ -720,8 +720,8 @@ TEST(a_noreturn_function_outside_the_runtime_keeps_the_group_of_item_20, {
     // D9.7
     TEST_ASSERT_TRUE(emit_with_runtime(
         RUNTIME_SOURCE,
-        "fn noreturn fail_div_zero(char* file, u32 line, u32 col) { while (true) { } }\n"
-        "fn i32 main() {\n    i32 a = 7;\n    i32 b = 0;\n    return a / b;\n}\n"));
+        "fn fail_div_zero(char* file, u32 line, u32 col) noreturn { while (true) { } }\n"
+        "fn main() i32 {\n    i32 a = 7;\n    i32 b = 0;\n    return a / b;\n}\n"));
     TEST_ASSERT_EQ_STR(found("define dso_local void @\"main.fail_div_zero\"(ptr %file.in,"
                              " i32 %line.in, i32 %col.in) #1 {"),
                        "define dso_local void @\"main.fail_div_zero\"(ptr %file.in,"
@@ -739,7 +739,7 @@ TEST(the_enum_member_of_std_rt_is_the_named_type_every_module_carries, {
     // one named type for one layout (item 2, item 21).
     TEST_ASSERT_TRUE(emit_with_runtime(RUNTIME_SOURCE,
                                        "enum color { red, green }\n"
-                                       "fn i32 main() { println(color.green); return 0; }\n"));
+                                       "fn main() i32 { println(color.green); return 0; }\n"));
     TEST_ASSERT_EQ_STR(absent("%struct.std.rt.enum_member"), "absent");
     TEST_ASSERT_EQ_SIZE(occurrences("%fort.enum_member = type { i32, ptr }"), (size_t)1);
     TEST_ASSERT_EQ_STR(found("[2 x %fort.enum_member]"), "[2 x %fort.enum_member]");
@@ -769,7 +769,7 @@ TEST(no_construct_the_front_end_admits_reaches_the_emitters_refusal, {
     // paths stand for is unchanged -- an unfinished path is a diagnostic and
     // never wrong code -- so a ticket that adds one puts its case here.
     // T-015, T-024: the tickets that emptied the `gen_todo` paths
-    TEST_ASSERT_TRUE(emit("i32 mut counter = 0;\nfn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(emit("i32 mut counter = 0;\nfn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_NULL(strstr(gen_said(), "cannot generate code yet"));
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })

@@ -153,7 +153,7 @@ TEST(a_widening_cast_of_an_enum_sign_extends, {
     // negative and a widening cast sign-extends.
     // D3.1, D3.9
     TEST_ASSERT_TRUE(emit("enum color { red = -1, green }\n"
-                          "fn i32 main() {\n    color k = color.green;\n"
+                          "fn main() i32 {\n    color k = color.green;\n"
                           "    i64 n = cast(k, i64);\n    println(n);\n    return 0;\n}\n"));
     TEST_ASSERT_EQ_STR(found("sext i32 %t0 to i64"), "sext i32 %t0 to i64");
     TEST_ASSERT_EQ_STR(verified(), "verified");
@@ -161,7 +161,7 @@ TEST(a_widening_cast_of_an_enum_sign_extends, {
 
 TEST(an_enum_to_i32_cast_emits_nothing, {
     TEST_ASSERT_TRUE(emit("enum color { red, green }\n"
-                          "fn i32 main() {\n    color k = color.green;\n"
+                          "fn main() i32 {\n    color k = color.green;\n"
                           "    return cast(k, i32);\n}\n"));
     TEST_ASSERT_EQ_STR(absent("to i32"), "absent");
 })
@@ -170,7 +170,7 @@ TEST(a_widening_cast_into_an_enum_reads_the_sources_signedness, {
     // The target being an enum changes nothing: the source decides.
     // D3.14
     TEST_ASSERT_TRUE(emit("enum color { red, green }\n"
-                          "fn i32 main() {\n    u8 b = 1;\n    color k = cast(b, color);\n"
+                          "fn main() i32 {\n    u8 b = 1;\n    color k = cast(b, color);\n"
                           "    i8 c = -1;\n    color j = cast(c, color);\n"
                           "    println(k == j);\n    return 0;\n}\n"));
     TEST_ASSERT_EQ_STR(found("zext i8 %t0 to i32"), "zext i8 %t0 to i32");
@@ -179,7 +179,7 @@ TEST(a_widening_cast_into_an_enum_reads_the_sources_signedness, {
 
 TEST(a_narrowing_cast_into_an_enum_truncates, {
     TEST_ASSERT_TRUE(emit("enum color { red, green }\n"
-                          "fn i32 main() {\n    i64 n = 1;\n    color k = cast(n, color);\n"
+                          "fn main() i32 {\n    i64 n = 1;\n    color k = cast(n, color);\n"
                           "    return cast(k, i32);\n}\n"));
     TEST_ASSERT_EQ_STR(found("trunc i64 %t0 to i32"), "trunc i64 %t0 to i32");
 })
@@ -213,10 +213,10 @@ TEST(a_pointer_to_pointer_cast_emits_nothing, {
 })
 
 TEST(a_function_pointer_and_void_pointer_cast_emits_nothing, {
-    TEST_ASSERT_TRUE(emit("fn i32 twice(i32 x) { return x +% x; }\n"
-                          "fn i32 main() {\n    fn i32(i32) f = twice;\n"
+    TEST_ASSERT_TRUE(emit("fn twice(i32 x) i32 { return x +% x; }\n"
+                          "fn main() i32 {\n    fn (i32) i32 f = twice;\n"
                           "    void* v = cast(f, void*);\n"
-                          "    fn i32(i32) g = cast(v, fn i32(i32));\n"
+                          "    fn (i32) i32 g = cast(v, fn (i32) i32);\n"
                           "    return g(1);\n}\n"));
     TEST_ASSERT_EQ_STR(absent("bitcast"), "absent");
     TEST_ASSERT_EQ_STR(absent("ptrtoint"), "absent");

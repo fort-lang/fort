@@ -115,9 +115,9 @@ string FORMAT = "%.*e";
 /// the one stage1 never loads. A program that declares strtod or strtof itself
 /// must spell it the same way.
 /// D9.10, D9.8
-extern fn i32 snprintf(char mut* buf, u64 size, char* fmt, i32 precision, f64 v);
-extern fn f64 strtod(char* s, void* end);
-extern fn f32 strtof(char* s, void* end);
+extern fn snprintf(char mut* buf, u64 size, char* fmt, i32 precision, f64 v) i32;
+extern fn strtod(char* s, void* end) f64;
+extern fn strtof(char* s, void* end) f32;
 
 /// One float as a decimal: the significant digits of the shortest text that
 /// reads back as the value, most significant first, and the power of ten the
@@ -131,15 +131,15 @@ struct decimal {
 
 // ---- reading snprintf's text ---------------------------------------------------------
 
-fn bool is_digit(char c) {
+fn is_digit(char c) bool {
     return c >= '0' && c <= '9';
 }
 
-fn u64 digit_of(char c) {
+fn digit_of(char c) u64 {
     return cast(c, u64) - cast('0', u64);
 }
 
-fn char char_of(u64 digit) {
+fn char_of(u64 digit) char {
     return cast(cast('0', u64) + digit, char);
 }
 
@@ -148,7 +148,7 @@ fn char char_of(u64 digit) {
 /// only the magnitude is printed. A text with no digit at all, which is what a
 /// failed printf leaves behind, scans as the decimal zero, so every caller gets
 /// a decimal it can lay out.
-fn void scan(char* s, decimal mut* d) {
+fn scan(char* s, decimal mut* d) void {
     char@ text = s[0..libc.strlen(s)];
     d->digit_count = 0;
     d->exponent = 0;
@@ -192,7 +192,7 @@ fn void scan(char* s, decimal mut* d) {
 /// all nines mean the value is within a hundredth of the power of ten above, so
 /// that power of ten was the nearest one-digit decimal and was tried, and
 /// rejected, at the very first length.
-fn void step_up(decimal mut* d) {
+fn step_up(decimal mut* d) void {
     u64 mut i = d->digit_count;
     while (i > 0) {
         i -= 1;
@@ -214,7 +214,7 @@ fn void step_up(decimal mut* d) {
 /// is at most three digits, so the buffer of EXPONENT_MAX bytes it builds them
 /// in has five to spare.
 /// D11.7
-fn u64 put_exponent(char mut@ out, u64 at, i32 exponent) {
+fn put_exponent(char mut@ out, u64 at, i32 exponent) u64 {
     u64 mut n = at;
     out[n] = 'e';
     n += 1;
@@ -254,7 +254,7 @@ fn u64 put_exponent(char mut@ out, u64 at, i32 exponent) {
 /// an exponent. `out` holds TEXT_MAX bytes; the result is how many were
 /// written.
 /// D18.3
-fn u64 layout(bool negative, decimal* d, char mut@ out) {
+fn layout(bool negative, decimal* d, char mut@ out) u64 {
     u64 mut n = 0;
     if (negative) {
         out[n] = '-';
@@ -319,7 +319,7 @@ fn u64 layout(bool negative, decimal* d, char mut@ out) {
 
 /// The decimal as a NUL-terminated text, laid out as it would print, which is
 /// the text the reader is given.
-fn void decimal_text(decimal* d, char mut@ buf) {
+fn decimal_text(decimal* d, char mut@ buf) void {
     u64 n = layout(false, d, buf);
     buf[n] = '\0';
 }
@@ -328,13 +328,13 @@ fn void decimal_text(decimal* d, char mut@ buf) {
 /// correctly rounded down to the subnormals, where they also report ERANGE;
 /// only the value matters here, so errno is left alone.
 /// D18.2
-fn bool reads_back_f64(decimal* d, f64 v) {
+fn reads_back_f64(decimal* d, f64 v) bool {
     char[TEXT_MAX_NUL] mut text = {};
     decimal_text(d, text[..]);
     return strtod(&text[0], null) == v;
 }
 
-fn bool reads_back_f32(decimal* d, f32 v) {
+fn reads_back_f32(decimal* d, f32 v) bool {
     char[TEXT_MAX_NUL] mut text = {};
     decimal_text(d, text[..]);
     return strtof(&text[0], null) == v;
@@ -345,7 +345,7 @@ fn bool reads_back_f32(decimal* d, f32 v) {
 /// the neighbour above is tried. `v` is a finite magnitude, never negative and
 /// never a NaN.
 /// D18.2
-fn void decimal_f64(f64 v, decimal mut* d) {
+fn decimal_f64(f64 v, decimal mut* d) void {
     char[SCRATCH_MAX] mut scratch = {};
     for (u64 mut precision = 0; precision < DIGITS_F64; precision += 1) {
         scratch[0] = '\0';
@@ -369,7 +369,7 @@ fn void decimal_f64(f64 v, decimal mut* d) {
 /// The same search in f32, where 9 digits always read back and strtof decides.
 /// The magnitude widens to f64 for snprintf without changing value.
 /// D18.2: the shortest decimal that reads back in its own type
-fn void decimal_f32(f32 v, decimal mut* d) {
+fn decimal_f32(f32 v, decimal mut* d) void {
     char[SCRATCH_MAX] mut scratch = {};
     for (u64 mut precision = 0; precision < DIGITS_F32; precision += 1) {
         scratch[0] = '\0';
@@ -398,14 +398,14 @@ fn void decimal_f32(f32 v, decimal mut* d) {
 /// (stdlib.md 4); until then it is a memcpy, which is what stdlib.md's own
 /// sketch of f64_bits does.
 /// D6.12
-fn bool negative_f64(f64 v) {
+fn negative_f64(f64 v) bool {
     u64 mut bits = 0;
     f64 mut source = v;
     libc.memcpy(cast(&bits, u8 mut*), cast(&source, u8*), F64_BYTES);
     return (bits >> F64_SIGN_SHIFT) != 0;
 }
 
-fn bool negative_f32(f32 v) {
+fn negative_f32(f32 v) bool {
     u32 mut bits = 0;
     f32 mut source = v;
     libc.memcpy(cast(&bits, u8 mut*), cast(&source, u8*), F32_BYTES);
@@ -416,7 +416,7 @@ fn bool negative_f32(f32 v) {
 /// print_f64 does but the writing. It stands apart from the entry point so
 /// that the bytes can be held against a table without a descriptor, which is
 /// what run/stdlib/094 does; `out` holds TEXT_MAX bytes.
-fn u64 text_f64(f64 v, char mut@ out) {
+fn text_f64(f64 v, char mut@ out) u64 {
     if (v != v) {
         // The print family lists inf, -inf and nan and no -nan, so a NaN
         // prints the same whatever its sign bit.
@@ -444,7 +444,7 @@ fn u64 text_f64(f64 v, char mut@ out) {
 /// The same for an f32. An f32 is never widened to an f64 first, because the
 /// digits printed depend on the argument's own type.
 /// D18.1
-fn u64 text_f32(f32 v, char mut@ out) {
+fn text_f32(f32 v, char mut@ out) u64 {
     if (v != v) {
         return fixed_text(out, "nan");
     }
@@ -467,7 +467,7 @@ fn u64 text_f32(f32 v, char mut@ out) {
 /// One of the three texts the print family fixes, copied into the caller's
 /// buffer.
 /// D11.7
-fn u64 fixed_text(char mut@ out, string text) {
+fn fixed_text(char mut@ out, string text) u64 {
     u64 mut i = 0;
     while (i < text.len) {
         out[i] = text[i];
@@ -478,14 +478,14 @@ fn u64 fixed_text(char mut@ out, string text) {
 
 /// Writes the text of an f64 to the buffer of `fd`.
 /// D11.7, D18.1
-fn void print_f64(i32 fd, f64 v) {
+fn print_f64(i32 fd, f64 v) void {
     char[TEXT_MAX] mut out = {};
     u64 n = text_f64(v, out[..]);
     rt.emit(fd, cast(out[0..n], u8@));
 }
 
 /// The same for an f32.
-fn void print_f32(i32 fd, f32 v) {
+fn print_f32(i32 fd, f32 v) void {
     char[TEXT_MAX] mut out = {};
     u64 n = text_f32(v, out[..]);
     rt.emit(fd, cast(out[0..n], u8@));
@@ -497,7 +497,7 @@ fn void print_f32(i32 fd, f32 v) {
 /// std.strbuf, and why the buffer form stands here and not in std.strbuf, which
 /// no float may reach.
 /// D18.1
-fn void append_f64(strbuf.str_buf mut* b, f64 v) {
+fn append_f64(strbuf.str_buf mut* b, f64 v) void {
     char[TEXT_MAX] mut out = {};
     u64 n = text_f64(v, out[..]);
     strbuf.append_bytes(b, cast(out[0..n], u8@));
@@ -505,7 +505,7 @@ fn void append_f64(strbuf.str_buf mut* b, f64 v) {
 
 /// The same for an f32, whose digits are its own type's.
 /// D18.1
-fn void append_f32(strbuf.str_buf mut* b, f32 v) {
+fn append_f32(strbuf.str_buf mut* b, f32 v) void {
     char[TEXT_MAX] mut out = {};
     u64 n = text_f32(v, out[..]);
     strbuf.append_bytes(b, cast(out[0..n], u8@));

@@ -800,7 +800,7 @@ TEST(an_entry_without_the_ft_suffix_keeps_its_whole_name, {
     join(entry, sizeof entry, box.dir, "prog");
     FILE* source = fopen(entry, "wb");
     TEST_ASSERT_NONNULL(source);
-    TEST_UNUSED(fputs("fn i32 main() { return 0; }\n", source));
+    TEST_UNUSED(fputs("fn main() i32 { return 0; }\n", source));
     TEST_UNUSED(fclose(source));
     // A base name with no suffix at all keeps its whole self
     // (toolchain.md 2); that only a `.ft` suffix is dropped is the test
@@ -834,7 +834,7 @@ TEST(only_the_ft_suffix_is_dropped_from_the_base_name, {
     TEST_ASSERT_TRUE(box.ok);
     char entry[PATH_CAP];
     join(entry, sizeof entry, box.dir, "prog.src");
-    TEST_ASSERT_TRUE(write_source(entry, "fn i32 main() { return 0; }\n"));
+    TEST_ASSERT_TRUE(write_source(entry, "fn main() i32 { return 0; }\n"));
     // A suffix other than `.ft` stays in the base name (toolchain.md 2), so
     // the name still holds the `.` an entry may not and the message quotes
     // the whole of it: a compiler that stripped `.src` would report `'prog'`
@@ -854,7 +854,7 @@ TEST(the_default_module_of_an_entry_without_a_suffix_keeps_its_whole_name, {
     join(entry, sizeof entry, box.dir, "prog");
     FILE* source = fopen(entry, "wb");
     TEST_ASSERT_NONNULL(source);
-    TEST_UNUSED(fputs("fn i32 main() { return 0; }\n", source));
+    TEST_UNUSED(fputs("fn main() i32 { return 0; }\n", source));
     TEST_UNUSED(fclose(source));
     char cwd[PATH_CAP];
     TEST_ASSERT_NONNULL(getcwd(cwd, sizeof cwd));
@@ -1018,7 +1018,7 @@ TEST(exit_status_constants_match_d14_1, {
 TEST(an_import_no_root_reaches_is_a_compile_error, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    TEST_ASSERT_TRUE(write_source(box.entry, "import nothere;\nfn i32 main() { return 0; }\n"));
+    TEST_ASSERT_TRUE(write_source(box.entry, "import nothere;\nfn main() i32 { return 0; }\n"));
     const run_t run = RUN_CAPTURED("--cc", FORT_FAKE_CC, "-o", box.out, box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
     TEST_ASSERT_NONNULL(strstr(last_diags, "module 'nothere' not found"));
@@ -1032,7 +1032,7 @@ TEST(a_dotted_entry_base_name_is_a_compile_error_with_no_output, {
     TEST_ASSERT_TRUE(box.ok);
     char entry[PATH_CAP];
     join(entry, sizeof entry, box.dir, "my.app.ft");
-    TEST_ASSERT_TRUE(write_source(entry, "fn i32 main() { return 0; }\n"));
+    TEST_ASSERT_TRUE(write_source(entry, "fn main() i32 { return 0; }\n"));
     // The entry base name may not contain a `.`: the compilation stops at
     // step 1 of toolchain.md 2, before any file is written.
     // D9.1
@@ -1048,10 +1048,10 @@ TEST(a_dotted_entry_base_name_is_a_compile_error_with_no_output, {
 TEST(a_module_beside_the_entry_file_is_reached_without_any_option, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    TEST_ASSERT_TRUE(write_source(box.entry, "import util;\nfn i32 main() { return 0; }\n"));
+    TEST_ASSERT_TRUE(write_source(box.entry, "import util;\nfn main() i32 { return 0; }\n"));
     char util[PATH_CAP];
     join(util, sizeof util, box.dir, "util.ft");
-    TEST_ASSERT_TRUE(write_source(util, "fn i32 add(i32 a, i32 b) { return a + b; }\n"));
+    TEST_ASSERT_TRUE(write_source(util, "fn add(i32 a, i32 b) i32 { return a + b; }\n"));
     // The entry file's directory is always a search root.
     // D9.2
     const run_t run = RUN_CAPTURED("--cc", FORT_FAKE_CC, "-o", box.out, box.entry);
@@ -1064,13 +1064,13 @@ TEST(a_module_beside_the_entry_file_is_reached_without_any_option, {
 TEST(an_include_root_reaches_a_module_the_entry_directory_lacks, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    TEST_ASSERT_TRUE(write_source(box.entry, "import util;\nfn i32 main() { return 0; }\n"));
+    TEST_ASSERT_TRUE(write_source(box.entry, "import util;\nfn main() i32 { return 0; }\n"));
     char lib[PATH_CAP];
     join(lib, sizeof lib, box.dir, "lib");
     TEST_ASSERT_EQ_INT32(mkdir(lib, S_IRWXU), 0);
     char util[PATH_CAP];
     join(util, sizeof util, lib, "util.ft");
-    TEST_ASSERT_TRUE(write_source(util, "fn i32 add(i32 a, i32 b) { return a + b; }\n"));
+    TEST_ASSERT_TRUE(write_source(util, "fn add(i32 a, i32 b) i32 { return a + b; }\n"));
     // A `-I` root is searched after the entry file's directory.
     // D9.2
     const run_t run = RUN_CAPTURED("--cc", FORT_FAKE_CC, "-I", lib, "-o", box.out, box.entry);

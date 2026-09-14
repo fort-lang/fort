@@ -461,13 +461,13 @@ static bool check_mut_before_array(parser_t* p, const markers_t* m) {
 }
 
 static ast_node_t* parse_base_type(parser_t* p, bool allow_noreturn);
+static ast_node_t* parse_return_type(parser_t* p);
 
-// fn_type = "fn" return_type "(" [ type { "," type } ] ")", with the `fn` and
-// the return type already parsed.
-// D3.10
-static ast_node_t* parse_fn_type_params(parser_t* p, loc_t loc, ast_node_t* ret) {
+// fn_type = "fn" "(" [ type { "," type } ] ")" return_type, with the `fn`
+// already parsed: the result comes last, as it does in a declaration.
+// D3.10, D8.1
+static ast_node_t* parse_fn_type_params(parser_t* p, loc_t loc) {
     ast_node_t* n = node_at(p, AST_TYPE_FN, loc);
-    n->a = ret;
     if (!expect(p, TOK_LPAREN, "'('")) {
         return NULL;
     }
@@ -485,6 +485,10 @@ static ast_node_t* parse_fn_type_params(parser_t* p, loc_t loc, ast_node_t* ret)
         }
     }
     if (!expect(p, TOK_RPAREN, "')'")) {
+        return NULL;
+    }
+    n->a = parse_return_type(p);
+    if (n->a == NULL) {
         return NULL;
     }
     return finish(p, n);
@@ -522,11 +526,7 @@ static ast_node_t* parse_base_type(parser_t* p, bool allow_noreturn) {
         return finish(p, node_at(p, AST_TYPE_NORETURN, loc));
     case TOK_KW_FN: {
         bump(p);
-        ast_node_t* ret = parse_return_type(p);
-        if (ret == NULL) {
-            return NULL;
-        }
-        return parse_fn_type_params(p, loc, ret);
+        return parse_fn_type_params(p, loc);
     }
     case TOK_IDENT: {
         // D9.4: resolution decides whether the first part is a module
@@ -1374,9 +1374,9 @@ static bool starts_case(tok_kind_t k) {
 }
 
 // Whether the current token starts a top-level declaration (grammar.md 7).
-// `struct`, `enum`, `extern` and `import` always do; a `fn` does when a return
-// type and an identifier follow it, since the `fn` of a statement or of a field
-// is the base of a function type, whose return type is followed by `(`. A block,
+// `struct`, `enum`, `extern` and `import` always do; a `fn` does when a name and
+// a `(` follow it, since the `fn` of a statement or of a field is the base of a
+// function type, which is followed by `(` at once. A block,
 // a case clause, a struct body and an enum body end here as well as at their `}`,
 // so a file with a missing `}` costs one diagnostic rather than one per following
 // declaration.
@@ -1393,12 +1393,7 @@ static bool at_decl_start(parser_t* p) {
     default:
         return false;
     }
-    const spec_state_t st = spec_begin(p);
-    bump(p);
-    const ast_node_t* ret = parse_return_type(p);
-    const bool decl = ret != NULL && !p->failed && at(p, TOK_IDENT);
-    spec_rewind(p, st);
-    return decl;
+    return peek_kind(p, 1) == TOK_IDENT && peek_kind(p, 2) == TOK_LPAREN;
 }
 
 // The `(` and `[` the failed construct left open, counted over the tokens it
@@ -2070,13 +2065,16 @@ static bool parse_params(parser_t* p, ast_node_t* fn) {
     return expect(p, TOK_RPAREN, "')'");
 }
 
-// fn_decl = "fn" return_type identifier "(" [ param_list ] ")" block, with the
-// `fn` and the return type already parsed.
+// fn_decl = "fn" identifier "(" [ param_list ] ")" return_type block, with the
+// `fn` already parsed: the name is the second token and the result comes last.
 // D8.1
-static ast_node_t* parse_fn_decl(parser_t* p, loc_t loc, ast_node_t* ret) {
+static ast_node_t* parse_fn_decl(parser_t* p, loc_t loc) {
     ast_node_t* n = node_at(p, AST_FN_DECL, loc);
-    n->a = ret;
     if (!expect_name(p, n) || !parse_params(p, n)) {
+        return NULL;
+    }
+    n->a = parse_return_type(p);
+    if (n->a == NULL) {
         return NULL;
     }
     n->b = parse_body(p);
@@ -2087,20 +2085,16 @@ static ast_node_t* parse_fn_decl(parser_t* p, loc_t loc, ast_node_t* ret) {
 }
 
 // At the top level a `fn` opens a function definition (grammar.md 7). When the
-// return type is followed by `(` rather than by a name, the `fn` is the base of a
-// function type and the declaration is a global of that type.
+// `fn` is followed by `(` rather than by a name, it is the base of a function
+// type and the declaration is a global of that type.
 // D3.10, D7.10
 static ast_node_t* parse_fn_top_decl(parser_t* p) {
     const loc_t loc = here(p);
     bump(p);
-    ast_node_t* ret = parse_return_type(p);
-    if (ret == NULL) {
-        return NULL;
-    }
     if (at(p, TOK_IDENT)) {
-        return parse_fn_decl(p, loc, ret);
+        return parse_fn_decl(p, loc);
     }
-    ast_node_t* base = parse_fn_type_params(p, loc, ret);
+    ast_node_t* base = parse_fn_type_params(p, loc);
     if (base == NULL) {
         return NULL;
     }
@@ -2116,7 +2110,7 @@ static ast_node_t* parse_fn_top_decl(parser_t* p) {
     return finish(p, n);
 }
 
-// extern_decl = "extern" "fn" return_type identifier "(" [ param_list ] ")"
+// extern_decl = "extern" "fn" identifier "(" [ param_list ] ")" return_type
 // ";": a declaration with no body.
 // D9.8
 static ast_node_t* parse_extern_decl(parser_t* p) {
@@ -2127,8 +2121,11 @@ static ast_node_t* parse_extern_decl(parser_t* p) {
     }
     ast_node_t* n = node_at(p, AST_FN_DECL, loc);
     n->flags = AST_FLAG_EXTERN;
+    if (!expect_name(p, n) || !parse_params(p, n)) {
+        return NULL;
+    }
     n->a = parse_return_type(p);
-    if (n->a == NULL || !expect_name(p, n) || !parse_params(p, n)) {
+    if (n->a == NULL) {
         return NULL;
     }
     if (!expect(p, TOK_SEMI, "';'")) {

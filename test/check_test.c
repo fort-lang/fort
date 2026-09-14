@@ -23,7 +23,7 @@
 // ---- one record per kind of sym_kind_t (sym.h) --------------------------------------
 
 TEST(a_module_carries_its_own_symbol, {
-    TEST_ASSERT_TRUE(check_src("fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(check_src("fn main() i32 {\n    return 0;\n}\n"));
     const module_t* m = module_at("main");
     TEST_ASSERT_NONNULL(m);
     const sym_t* s = m->ast->sym;
@@ -35,7 +35,7 @@ TEST(a_module_carries_its_own_symbol, {
 })
 
 TEST(a_function_declaration_is_its_own_symbol, {
-    TEST_ASSERT_TRUE(check_src("fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(check_src("fn main() i32 {\n    return 0;\n}\n"));
     const sym_t* s = sym_main("main");
     TEST_ASSERT_NONNULL(s);
     TEST_ASSERT_EQ_STR(sym_kind_name(s->kind), "fn");
@@ -45,22 +45,22 @@ TEST(a_function_declaration_is_its_own_symbol, {
     // The record is found at the name token, not at the `fn`.
     // D20.4
     TEST_ASSERT_EQ_UINT64((uint64_t)s->decl.line, (uint64_t)1);
-    TEST_ASSERT_EQ_UINT64((uint64_t)s->decl.col, (uint64_t)8);
-    TEST_ASSERT_EQ_STR(type_text(s->type), "fn i32()");
+    TEST_ASSERT_EQ_UINT64((uint64_t)s->decl.col, (uint64_t)4);
+    TEST_ASSERT_EQ_STR(type_text(s->type), "fn () i32");
     TEST_ASSERT_TRUE(s->owner == module_at("main")->ast->sym);
 })
 
 TEST(an_extern_declaration_has_its_own_kind, {
-    TEST_ASSERT_TRUE(check_src("extern fn i32 puts(char* s);\n"
-                               "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(check_src("extern fn puts(char* s) i32;\n"
+                               "fn main() i32 {\n    return 0;\n}\n"));
     const sym_t* s = sym_main("puts");
     TEST_ASSERT_EQ_STR(sym_kind_name(s->kind), "extern fn");
-    TEST_ASSERT_EQ_STR(type_text(s->type), "fn i32(char*)");
+    TEST_ASSERT_EQ_STR(type_text(s->type), "fn (char*) i32");
 })
 
 TEST(a_parameter_is_a_symbol_owned_by_its_function, {
-    TEST_ASSERT_TRUE(check_src("fn i32 twice(i32 mut n) {\n    n = n + n;\n    return n;\n}\n"
-                               "fn i32 main() {\n    return twice(2);\n}\n"));
+    TEST_ASSERT_TRUE(check_src("fn twice(i32 mut n) i32 {\n    n = n + n;\n    return n;\n}\n"
+                               "fn main() i32 {\n    return twice(2);\n}\n"));
     const ast_node_t* p = node_in_main(AST_PARAM, "n");
     TEST_ASSERT_NONNULL(p);
     const sym_t* s = p->sym;
@@ -75,7 +75,7 @@ TEST(a_parameter_is_a_symbol_owned_by_its_function, {
 
 TEST(a_struct_and_its_fields_are_symbols, {
     TEST_ASSERT_TRUE(check_src("struct point {\n    i32 x;\n    i32 y;\n}\n"
-                               "fn i32 main() {\n    point p = {1, 2};\n    return p.x;\n}\n"));
+                               "fn main() i32 {\n    point p = {1, 2};\n    return p.x;\n}\n"));
     const sym_t* s = sym_main("point");
     TEST_ASSERT_EQ_STR(sym_kind_name(s->kind), "struct");
     TEST_ASSERT_EQ_STR(type_text(s->type), "point");
@@ -90,7 +90,7 @@ TEST(a_struct_and_its_fields_are_symbols, {
 
 TEST(an_enum_and_its_members_are_symbols, {
     TEST_ASSERT_TRUE(check_src("enum color {\n    red,\n    green = 5,\n    blue,\n}\n"
-                               "fn i32 main() {\n    color c = color.blue;\n"
+                               "fn main() i32 {\n    color c = color.blue;\n"
                                "    return cast(c, i32);\n}\n"));
     const sym_t* s = sym_main("color");
     TEST_ASSERT_EQ_STR(sym_kind_name(s->kind), "enum");
@@ -107,7 +107,7 @@ TEST(an_enum_and_its_members_are_symbols, {
 
 TEST(a_module_declaration_is_a_constant_or_a_global, {
     TEST_ASSERT_TRUE(check_src("i32 MAX = 64;\ni32 mut counter = 0;\n"
-                               "fn i32 main() {\n    counter = MAX;\n    return counter;\n}\n"));
+                               "fn main() i32 {\n    counter = MAX;\n    return counter;\n}\n"));
     // `Type NAME = init;` is a compile-time constant, `mut Type g` a global.
     // D7.10
     TEST_ASSERT_EQ_STR(sym_kind_name(sym_main("MAX")->kind), "constant");
@@ -140,17 +140,17 @@ TEST(a_builtin_is_a_symbol_with_no_node, {
 
 TEST(every_symbol_kind_is_recorded, {
     begin();
-    add("util.ft", "fn i32 one() {\n    return 1;\n}\n");
+    add("util.ft", "fn one() i32 {\n    return 1;\n}\n");
     add("main.ft",
         "import util;\n"
         "struct point {\n    i32 x;\n}\n"
         "enum color {\n    red,\n}\n"
         "i32 MAX = 2;\n"
         "i32 mut hits = 0;\n"
-        "extern fn i32 puts(char* s);\n"
-        "fn i32 add(i32 a) {\n    i32 b = a;\n    println(b);\n"
+        "extern fn puts(char* s) i32;\n"
+        "fn add(i32 a) i32 {\n    i32 b = a;\n    println(b);\n"
         "    return b + MAX;\n}\n"
-        "fn i32 main() {\n    point p = {1};\n"
+        "fn main() i32 {\n    point p = {1};\n"
         "    color c = color.red;\n    hits = util.one();\n"
         "    return add(p.x) + cast(c, i32);\n}\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
@@ -169,14 +169,14 @@ TEST(every_symbol_kind_is_recorded, {
 
 TEST(every_expression_of_a_clean_module_carries_a_type, {
     begin();
-    add("util.ft", "fn i32 one() {\n    return 1;\n}\n");
+    add("util.ft", "fn one() i32 {\n    return 1;\n}\n");
     add("main.ft",
         "import util;\n"
         "struct point {\n    i32 x;\n    i32 y;\n}\n"
         "enum color {\n    red,\n    green = 4,\n}\n"
         "i32 MAX = 2 + 3;\n"
         "i32[MAX] mut table = {};\n"
-        "fn i32 sum(point p, color c, string s) {\n"
+        "fn sum(point p, color c, string s) i32 {\n"
         "    i32 mut total = p.x + p.y;\n"
         "    u8 mut@ own bytes = new(u8, 4);\n"
         "    for (u64 mut i = 0; i < bytes.len; i++) {\n"
@@ -190,20 +190,20 @@ TEST(every_expression_of_a_clean_module_carries_a_type, {
         "    }\n"
         "    table[0] = sizeof(point) > 0 ? 1 : 1;\n"
         "    return total + util.one() + MAX;\n}\n"
-        "fn i32 main() {\n    point p = point{.x = 1, .y = 2};\n"
+        "fn main() i32 {\n    point p = point{.x = 1, .y = 2};\n"
         "    return sum(p, color.green, \"ab\");\n}\n");
     // The ternary is outside the bootstrap's subset, so the source above uses
     // it nowhere else; drop it before checking.
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     begin();
-    add("util.ft", "fn i32 one() {\n    return 1;\n}\n");
+    add("util.ft", "fn one() i32 {\n    return 1;\n}\n");
     add("main.ft",
         "import util;\n"
         "struct point {\n    i32 x;\n    i32 y;\n}\n"
         "enum color {\n    red,\n    green = 4,\n}\n"
         "i32 MAX = 2 + 3;\n"
         "i32[MAX] mut table = {};\n"
-        "fn i32 sum(point p, color c, string s) {\n"
+        "fn sum(point p, color c, string s) i32 {\n"
         "    i32 mut total = p.x + p.y;\n"
         "    u8 mut@ own bytes = new(u8, 4);\n"
         "    defer del(bytes);\n"
@@ -217,7 +217,7 @@ TEST(every_expression_of_a_clean_module_carries_a_type, {
         "    }\n"
         "    table[0] = cast(sizeof(point), i32);\n"
         "    return total + util.one() + MAX;\n}\n"
-        "fn i32 main() {\n    point p = point{.x = 1, .y = 2};\n"
+        "fn main() i32 {\n    point p = point{.x = 1, .y = 2};\n"
         "    return sum(p, color.green, \"ab\");\n}\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
     const ast_node_t* missing = untyped_expr(module_at("main")->ast);
@@ -233,14 +233,14 @@ TEST(every_expression_of_a_clean_module_carries_a_type, {
 
 TEST(every_named_node_of_a_clean_module_carries_a_symbol, {
     begin();
-    add("util.ft", "i32 ONE = 1;\nfn i32 one() {\n    return ONE;\n}\n");
+    add("util.ft", "i32 ONE = 1;\nfn one() i32 {\n    return ONE;\n}\n");
     add("main.ft",
         "import util as u;\n"
         "import util.{one as first};\n"
         "struct point {\n    i32 x;\n    i32 y;\n}\n"
         "enum color {\n    red,\n    green,\n}\n"
         "i32 MAX = 3;\n"
-        "fn i32 pick(point mut p, color c) {\n"
+        "fn pick(point mut p, color c) i32 {\n"
         "    i32 mut total = p.x;\n"
         "    point mut* q = &p;\n"
         "    total = total + q->y;\n"
@@ -249,7 +249,7 @@ TEST(every_named_node_of_a_clean_module_carries_a_symbol, {
         "    i32[2] table = {1, 2};\n"
         "    for (i32 v : table) {\n        total = total + v;\n    }\n"
         "    return total + u.one() + first();\n}\n"
-        "fn i32 main() {\n    point p = point{.x = 1, .y = 2};\n"
+        "fn main() i32 {\n    point p = point{.x = 1, .y = 2};\n"
         "    return pick(p, color.green);\n}\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
     const ast_node_t* missing = unresolved_name(module_at("main")->ast);
@@ -285,7 +285,7 @@ TEST(an_unresolved_name_has_no_symbol_and_one_diagnostic, {
 
 TEST(an_unqualified_enum_member_says_how_it_is_written, {
     TEST_ASSERT_FALSE(check_src("enum color {\n    red,\n}\n"
-                                "fn i32 main() {\n    color c = red;\n    return 0;\n}\n"));
+                                "fn main() i32 {\n    color c = red;\n    return 0;\n}\n"));
     // An enum member is scoped to its enum.
     // D3.9
     TEST_ASSERT_TRUE(said("color.red"));
@@ -293,7 +293,7 @@ TEST(an_unqualified_enum_member_says_how_it_is_written, {
 
 TEST(a_field_access_carries_the_field, {
     TEST_ASSERT_TRUE(check_src("struct point {\n    i32 x;\n    i32 y;\n}\n"
-                               "fn i32 main() {\n    point p = {1, 2};\n    return p.y;\n}\n"));
+                               "fn main() i32 {\n    point p = {1, 2};\n    return p.y;\n}\n"));
     const ast_node_t* access = node_in_main(AST_FIELD, "y");
     TEST_ASSERT_NONNULL(access);
     TEST_ASSERT_TRUE(access->sym == node_in_main(AST_FIELD_DECL, "y")->sym);
@@ -301,7 +301,7 @@ TEST(a_field_access_carries_the_field, {
 
 TEST(an_enum_member_access_carries_the_member, {
     TEST_ASSERT_TRUE(check_src("enum color {\n    red,\n}\n"
-                               "fn i32 main() {\n    color c = color.red;\n    return 0;\n}\n"));
+                               "fn main() i32 {\n    color c = color.red;\n    return 0;\n}\n"));
     const ast_node_t* access = node_in_main(AST_FIELD, "red");
     TEST_ASSERT_TRUE(access->sym == node_in_main(AST_ENUM_MEMBER, "red")->sym);
     // The operand of the access denotes the enum itself.
@@ -310,7 +310,7 @@ TEST(an_enum_member_access_carries_the_member, {
 
 TEST(a_designator_carries_the_field, {
     TEST_ASSERT_TRUE(check_src("struct point {\n    i32 x;\n    i32 y;\n}\n"
-                               "fn i32 main() {\n    point p = point{.y = 2};\n"
+                               "fn main() i32 {\n    point p = point{.y = 2};\n"
                                "    return p.y;\n}\n"));
     const ast_node_t* d = node_in_main(AST_DESIGNATOR, "y");
     TEST_ASSERT_NONNULL(d);
@@ -319,7 +319,7 @@ TEST(a_designator_carries_the_field, {
 
 TEST(a_type_name_carries_the_declaration, {
     TEST_ASSERT_TRUE(check_src("struct point {\n    i32 x;\n}\n"
-                               "fn i32 main() {\n    point p = {1};\n    return p.x;\n}\n"));
+                               "fn main() i32 {\n    point p = {1};\n    return p.x;\n}\n"));
     const ast_node_t* t = node_in_main(AST_TYPE_NAME, "point");
     TEST_ASSERT_NONNULL(t);
     TEST_ASSERT_TRUE(t->sym == sym_main("point"));
@@ -327,7 +327,7 @@ TEST(a_type_name_carries_the_declaration, {
 
 TEST(the_declarations_after_a_failed_one_are_still_checked, {
     TEST_ASSERT_FALSE(check_src("i32 A = nope;\ni32 B = also_nope;\n"
-                                "fn i32 main() {\n    return third_nope;\n}\n"));
+                                "fn main() i32 {\n    return third_nope;\n}\n"));
     // Checking does not stop at the first error: a module reports every one
     // of its own.
     // D14.2
@@ -339,7 +339,7 @@ TEST(the_declarations_after_a_failed_one_are_still_checked, {
 
 TEST(a_module_may_be_checked_twice, {
     begin();
-    add("main.ft", "i32 MAX = 2;\nfn i32 main() {\n    i32[MAX] a = {};\n    return a[1];\n}\n");
+    add("main.ft", "i32 MAX = 2;\nfn main() i32 {\n    i32[MAX] a = {};\n    return a[1];\n}\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
     const module_t* m = module_at("main");
     // The pass clears the slots it owns, so a second check of one tree starts
@@ -352,9 +352,9 @@ TEST(a_module_may_be_checked_twice, {
 })
 
 TEST(a_function_may_call_itself_and_a_function_pointer, {
-    TEST_ASSERT_TRUE(check_src("fn i32 fact(i32 n) {\n    if (n < 2) {\n        return 1;\n"
+    TEST_ASSERT_TRUE(check_src("fn fact(i32 n) i32 {\n    if (n < 2) {\n        return 1;\n"
                                "    }\n    return n * fact(n - 1);\n}\n"
-                               "fn i32 main() {\n    fn i32(i32) f = fact;\n"
+                               "fn main() i32 {\n    fn (i32) i32 f = fact;\n"
                                "    return f(3) + fact(2);\n}\n"));
 })
 
@@ -370,8 +370,8 @@ TEST(a_chain_of_pointers_keeps_every_level, {
 
 TEST(an_import_carries_the_module_it_binds, {
     begin();
-    add("util.ft", "fn i32 one() {\n    return 1;\n}\n");
-    add("main.ft", "import util as u;\nfn i32 main() {\n    return u.one();\n}\n");
+    add("util.ft", "fn one() i32 {\n    return 1;\n}\n");
+    add("main.ft", "import util as u;\nfn main() i32 {\n    return u.one();\n}\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
     const sym_t* util = module_at("util")->ast->sym;
     const ast_node_t* imp = node_find(module_at("main")->ast, AST_IMPORT, NULL);
@@ -388,8 +388,8 @@ TEST(an_import_carries_the_module_it_binds, {
 
 TEST(an_import_item_carries_the_declaration, {
     begin();
-    add("util.ft", "fn i32 one() {\n    return 1;\n}\n");
-    add("main.ft", "import util.{one as first};\nfn i32 main() {\n    return first();\n}\n");
+    add("util.ft", "fn one() i32 {\n    return 1;\n}\n");
+    add("main.ft", "import util.{one as first};\nfn main() i32 {\n    return first();\n}\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
     const sym_t* one = sym_of("util", "one");
     const ast_node_t* item = node_find(module_at("main")->ast, AST_IMPORT_ITEM, "one");
@@ -401,7 +401,7 @@ TEST(an_import_item_carries_the_declaration, {
 TEST(a_qualified_type_name_carries_the_module_and_the_type, {
     begin();
     add("geom.ft", "struct point {\n    i32 x;\n}\n");
-    add("main.ft", "import geom;\nfn i32 main() {\n    geom.point p = {1};\n    return p.x;\n}\n");
+    add("main.ft", "import geom;\nfn main() i32 {\n    geom.point p = {1};\n    return p.x;\n}\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
     const ast_node_t* t = node_find(module_at("main")->ast, AST_TYPE_NAME, "geom");
     TEST_ASSERT_NONNULL(t);
@@ -416,16 +416,16 @@ TEST(a_qualified_type_name_carries_the_module_and_the_type, {
 // D7.10
 
 TEST(declarations_are_order_independent, {
-    TEST_ASSERT_TRUE(check_src("fn i32 main() {\n    point p = {SIZE};\n    return p.x;\n}\n"
+    TEST_ASSERT_TRUE(check_src("fn main() i32 {\n    point p = {SIZE};\n    return p.x;\n}\n"
                                "i32 SIZE = 7;\n"
                                "struct point {\n    i32 x;\n}\n"));
-    TEST_ASSERT_EQ_STR(type_text(sym_main("main")->type), "fn i32()");
+    TEST_ASSERT_EQ_STR(type_text(sym_main("main")->type), "fn () i32");
     TEST_ASSERT_EQ_UINT64(type_sizeof(sym_main("point")->type), (uint64_t)4);
 })
 
 TEST(a_constant_sizes_an_array_before_its_own_declaration, {
     TEST_ASSERT_TRUE(check_src("i32[MAX] table = {};\ni32 MAX = 4;\n"
-                               "fn i32 main() {\n    return table[3];\n}\n"));
+                               "fn main() i32 {\n    return table[3];\n}\n"));
     TEST_ASSERT_EQ_STR(sym_type_text(sym_main("table")), "i32[4]");
 })
 
@@ -434,7 +434,7 @@ TEST(a_constant_of_another_module_sizes_an_array, {
     add("limits.ft", "i32 MAX = 3;\n");
     add("main.ft",
         "import limits;\ni32[limits.MAX] table = {};\n"
-        "fn i32 main() {\n    return table[2];\n}\n");
+        "fn main() i32 {\n    return table[2];\n}\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
     TEST_ASSERT_EQ_STR(sym_type_text(sym_main("table")), "i32[3]");
 })
@@ -442,7 +442,7 @@ TEST(a_constant_of_another_module_sizes_an_array, {
 TEST(a_struct_may_contain_itself_through_a_pointer, {
     TEST_ASSERT_TRUE(
         check_src("struct node {\n    i32 value;\n    node mut* next;\n}\n"
-                  "fn i32 main() {\n    node n = {1, null};\n    return n.value;\n}\n"));
+                  "fn main() i32 {\n    node n = {1, null};\n    return n.value;\n}\n"));
     // A pointer field is one word, so the struct is 16 bytes with padding.
     // D3.8
     TEST_ASSERT_EQ_UINT64(type_sizeof(sym_main("node")->type), (uint64_t)16);
@@ -450,7 +450,7 @@ TEST(a_struct_may_contain_itself_through_a_pointer, {
 
 TEST(a_value_containment_cycle_is_an_infinite_size_error, {
     TEST_ASSERT_FALSE(check_src("struct loop {\n    i32 v;\n    loop next;\n}\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
+                                "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("struct loop has infinite size"));
     // Reported at the `struct` keyword, which is line 1 column 1.
     // D14.2
@@ -461,7 +461,7 @@ TEST(a_value_containment_cycle_is_an_infinite_size_error, {
 
 TEST(a_cycle_of_two_structs_is_reported_once, {
     TEST_ASSERT_FALSE(check_src("struct a {\n    b x;\n}\nstruct b {\n    a y;\n}\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
+                                "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
     TEST_ASSERT_TRUE(sym_main("a")->error);
     TEST_ASSERT_TRUE(sym_main("b")->error);
@@ -469,7 +469,7 @@ TEST(a_cycle_of_two_structs_is_reported_once, {
 
 TEST(a_constant_initializer_cycle_is_an_error, {
     TEST_ASSERT_FALSE(check_src("i32 A = B;\ni32 B = A;\n"
-                                "fn i32 main() {\n    return A;\n}\n"));
+                                "fn main() i32 {\n    return A;\n}\n"));
     // Constant references are evaluated lazily with cycle detection.
     // D4.6
     TEST_ASSERT_TRUE(said("is defined in terms of itself"));
@@ -484,7 +484,7 @@ TEST(a_declaration_may_hold_its_own_address, {
     // D7.10, D4.6
     TEST_ASSERT_TRUE(check_src("struct node {\n    i32 v;\n    node* next;\n}\n"
                                "node N = node{7, &N};\n"
-                               "fn i32 main() {\n    return N.next->v;\n}\n"));
+                               "fn main() i32 {\n    return N.next->v;\n}\n"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)0);
     TEST_ASSERT_FALSE(sym_main("N")->error);
 })
@@ -492,7 +492,7 @@ TEST(a_declaration_may_hold_its_own_address, {
 TEST(two_declarations_may_hold_each_others_addresses, {
     TEST_ASSERT_TRUE(check_src("struct node {\n    i32 v;\n    node* next;\n}\n"
                                "node A = node{1, &B};\nnode B = node{2, &A};\n"
-                               "fn i32 main() {\n    return A.next->v;\n}\n"));
+                               "fn main() i32 {\n    return A.next->v;\n}\n"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)0);
 })
 
@@ -503,13 +503,13 @@ TEST(a_declaration_that_needs_its_own_value_is_still_a_cycle, {
     // D4.6
     TEST_ASSERT_FALSE(check_src("struct node {\n    i32 v;\n    node* next;\n}\n"
                                 "node C = C;\n"
-                                "fn i32 main() {\n    return C.v;\n}\n"));
+                                "fn main() i32 {\n    return C.v;\n}\n"));
     TEST_ASSERT_TRUE(said("'C' is defined in terms of itself"));
 })
 
 TEST(an_enum_value_may_not_refer_to_its_own_enum, {
     TEST_ASSERT_FALSE(check_src("enum color {\n    red = 1,\n    green = cast(color.red, i32),\n}\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
+                                "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("'color' is defined in terms of itself"));
 })
 
@@ -517,7 +517,7 @@ TEST(an_enum_value_may_not_refer_to_its_own_enum, {
 // D14.2
 
 TEST(a_failed_declaration_gets_the_error_type, {
-    TEST_ASSERT_FALSE(check_src("i32 A = nope;\nfn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_FALSE(check_src("i32 A = nope;\nfn main() i32 {\n    return 0;\n}\n"));
     const sym_t* s = sym_main("A");
     TEST_ASSERT_TRUE(s->error);
     TEST_ASSERT_EQ_STR(type_text(s->type), "<error>");
@@ -525,7 +525,7 @@ TEST(a_failed_declaration_gets_the_error_type, {
 })
 
 TEST(a_failed_declaration_silences_its_uses, {
-    TEST_ASSERT_FALSE(check_src("i32 A = nope;\nfn i32 main() {\n    return A + 1;\n}\n"));
+    TEST_ASSERT_FALSE(check_src("i32 A = nope;\nfn main() i32 {\n    return A + 1;\n}\n"));
     // One unknown name is one diagnostic: the error type silences the uses.
     // D14.2
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
@@ -534,7 +534,7 @@ TEST(a_failed_declaration_silences_its_uses, {
 TEST(an_error_typed_declaration_silences_its_uses_in_an_importing_module, {
     begin();
     add("util.ft", "i32 A = nope;\n");
-    add("main.ft", "import util.A;\nfn i32 main() {\n    return A + 1;\n}\n");
+    add("main.ft", "import util.A;\nfn main() i32 {\n    return A + 1;\n}\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("util.ft:1:9: error: unknown name 'nope'"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
@@ -543,7 +543,7 @@ TEST(an_error_typed_declaration_silences_its_uses_in_an_importing_module, {
 TEST(an_importer_is_checked_in_full_after_its_import_failed, {
     begin();
     add("util.ft", "i32 A = nope;\n");
-    add("main.ft", "import util.A;\nfn i32 main() {\n    i32 x = \"s\";\n    return x + A;\n}\n");
+    add("main.ft", "import util.A;\nfn main() i32 {\n    i32 x = \"s\";\n    return x + A;\n}\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     // Every module of the closure is checked in dependency order, and the
     // importer sees its own errors and no cascade of the import's.
@@ -557,7 +557,7 @@ TEST(an_importer_is_checked_in_full_after_its_import_failed, {
 
 TEST(a_mut_on_a_field_is_refused, {
     TEST_ASSERT_FALSE(check_src("struct counter {\n    i32 mut hits;\n}\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
+                                "fn main() i32 {\n    return 0;\n}\n"));
     // A field's own storage follows its struct.
     // D5.5
     TEST_ASSERT_TRUE(said("a field's own storage follows its struct"));
@@ -565,8 +565,8 @@ TEST(a_mut_on_a_field_is_refused, {
 })
 
 TEST(a_mut_on_a_return_type_is_refused, {
-    TEST_ASSERT_FALSE(check_src("fn i32 mut f() {\n    return 1;\n}\n"
-                                "fn i32 main() {\n    return f();\n}\n"));
+    TEST_ASSERT_FALSE(check_src("fn f() i32 mut {\n    return 1;\n}\n"
+                                "fn main() i32 {\n    return f();\n}\n"));
     // A return type has no binding.
     // D5.5
     TEST_ASSERT_TRUE(said("a return type has no binding"));
@@ -582,9 +582,9 @@ TEST(a_mut_on_a_cast_target_is_refused, {
 
 TEST(a_mut_on_a_pointee_or_a_binding_is_kept, {
     TEST_ASSERT_TRUE(check_src("struct node {\n    node mut* next;\n}\n"
-                               "fn node mut* find(node mut* n) {\n    return n;\n}\n"
-                               "fn i32 main() {\n    return 0;\n}\n"));
-    TEST_ASSERT_EQ_STR(type_text(sym_main("find")->type), "fn node mut*(node mut*)");
+                               "fn find(node mut* n) node mut* {\n    return n;\n}\n"
+                               "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_EQ_STR(type_text(sym_main("find")->type), "fn (node mut*) node mut*");
 })
 
 // ---- sizes --------------------------------------------------------------------------
@@ -592,14 +592,14 @@ TEST(a_mut_on_a_pointee_or_a_binding_is_kept, {
 
 TEST(a_type_that_is_too_large_is_refused, {
     TEST_ASSERT_FALSE(check_src("i32[4611686018427387904] BIG = {};\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
+                                "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("type is too large"));
 })
 
 TEST(a_struct_that_is_too_large_is_reported_at_its_keyword, {
     TEST_ASSERT_FALSE(check_src("struct huge {\n    i8[4611686018427387904] a;\n"
                                 "    i8[4611686018427387904] b;\n}\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
+                                "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("main.ft:1:1: error: type is too large: struct huge"));
 })
 
@@ -614,7 +614,7 @@ TEST(an_array_length_must_be_greater_than_zero, {
 })
 
 TEST(sizeof_lays_out_a_struct_on_demand, {
-    TEST_ASSERT_TRUE(check_src("fn i32 main() {\n    return cast(sizeof(point), i32);\n}\n"
+    TEST_ASSERT_TRUE(check_src("fn main() i32 {\n    return cast(sizeof(point), i32);\n}\n"
                                "struct point {\n    i32 x;\n    i64 y;\n}\n"));
     const ast_node_t* n = node_in_main(AST_SIZEOF, NULL);
     int64_t v = 0;
@@ -629,19 +629,19 @@ TEST(sizeof_lays_out_a_struct_on_demand, {
 
 TEST(duplicate_enum_values_are_refused, {
     TEST_ASSERT_FALSE(check_src("enum color {\n    red = 1,\n    green = 1,\n}\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
+                                "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("duplicate enum value 1 for 'green'"));
 })
 
 TEST(an_enum_value_must_fit_i32, {
     TEST_ASSERT_FALSE(check_src("enum big {\n    x = 2147483648,\n}\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
+                                "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("does not fit i32"));
 })
 
 TEST(an_extern_signature_cannot_use_a_string, {
-    TEST_ASSERT_FALSE(check_src("extern fn i32 puts(string s);\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_FALSE(check_src("extern fn puts(string s) i32;\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
     // An extern signature may use only scalars, pointers and function
     // pointers. The diagnostic of module-system.md 13.
     // D9.8
@@ -656,22 +656,22 @@ TEST(an_entry_module_without_main_is_reported_at_one_one, {
     // The diagnostic of module-system.md 13, at 1:1 since it has no position
     // in the file.
     // D8.6, D14.2
-    TEST_ASSERT_TRUE(said("main.ft:1:1: error: entry module 'main' must define 'fn i32 main()' "
-                          "or 'fn i32 main(string@ args)'"));
+    TEST_ASSERT_TRUE(said("main.ft:1:1: error: entry module 'main' must define 'fn main() i32' "
+                          "or 'fn main(string@ args) i32'"));
 })
 
 TEST(a_main_returning_void_is_refused, {
-    TEST_ASSERT_FALSE(check_src("fn void main() {\n}\n"));
+    TEST_ASSERT_FALSE(check_src("fn main() void {\n}\n"));
     TEST_ASSERT_TRUE(said("must define"));
     // The diagnostic stands at the declaration when one is there.
     // D14.2
-    TEST_ASSERT_TRUE(said("main.ft:1:9:"));
+    TEST_ASSERT_TRUE(said("main.ft:1:4:"));
 })
 
 TEST(the_entry_rule_does_not_apply_to_a_module_checked_on_its_own, {
     // A file checked on its own is a module under inspection and not a
     // program, so the `main` rule is not applied to it at all: neither the
-    // missing `main` nor the `fn void main()` a library may legally declare
+    // missing `main` nor the `fn main() void` a library may legally declare
     // is an error there, and a compilation reports both.
     // D8.6, D20.1
     begin();
@@ -679,15 +679,15 @@ TEST(the_entry_rule_does_not_apply_to_a_module_checked_on_its_own, {
     want_main = false;
     TEST_ASSERT_TRUE(check_entry("main.ft"));
     begin();
-    add("main.ft", "fn void main() {\n}\n");
+    add("main.ft", "fn main() void {\n}\n");
     want_main = false;
     TEST_ASSERT_TRUE(check_entry("main.ft"));
     begin();
-    add("main.ft", "fn i32 main(i32 n) {\n    return n;\n}\n");
+    add("main.ft", "fn main(i32 n) i32 {\n    return n;\n}\n");
     want_main = false;
     TEST_ASSERT_TRUE(check_entry("main.ft"));
     begin();
-    add("main.ft", "fn i32 main(i32 n) {\n    return n;\n}\n");
+    add("main.ft", "fn main(i32 n) i32 {\n    return n;\n}\n");
     const bool compiled = check_entry("main.ft");
     TEST_ASSERT_FALSE(compiled);
     TEST_ASSERT_TRUE(said("entry module 'main' must define"));
@@ -695,20 +695,20 @@ TEST(the_entry_rule_does_not_apply_to_a_module_checked_on_its_own, {
 
 TEST(main_may_take_the_argument_span, {
     TEST_ASSERT_TRUE(
-        check_src("fn i32 main(string@ args) {\n    return cast(args.len, i32);\n}\n"));
-    TEST_ASSERT_EQ_STR(type_text(sym_main("main")->type), "fn i32(string@)");
+        check_src("fn main(string@ args) i32 {\n    return cast(args.len, i32);\n}\n"));
+    TEST_ASSERT_EQ_STR(type_text(sym_main("main")->type), "fn (string@) i32");
 })
 
 TEST(a_main_in_another_module_is_ordinary, {
     begin();
-    add("util.ft", "fn void main() {\n}\n");
-    add("main.ft", "import util;\nfn i32 main() {\n    util.main();\n    return 0;\n}\n");
+    add("util.ft", "fn main() void {\n}\n");
+    add("main.ft", "import util;\nfn main() i32 {\n    util.main();\n    return 0;\n}\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
 })
 
 TEST(the_mute_flag_counts_without_reporting, {
     begin();
-    add("main.ft", "fn i32 main() {\n    return nope;\n}\n");
+    add("main.ft", "fn main() i32 {\n    return nope;\n}\n");
     want_mute = true;
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     // A muted checker annotates the file without emitting semantic noise.

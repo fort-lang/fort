@@ -25,7 +25,7 @@ larger than one page are probed on entry, so a large local array combined with d
 faults on the guard page instead of skipping over it (D10.8):
 
 ```fort
-fn i32 deep(i32 n) {
+fn deep(i32 n) i32 {
     u8[65536] mut scratch = {};          // 64 KiB frame: probed page by page on entry
     if (n == 0) { return 0; }
     return deep(n - 1) + cast(scratch[0], i32);
@@ -162,7 +162,7 @@ Through an indirection, `del` needs the level it empties to be mutable, exactly 
 (D17.6, D17.9):
 
 ```fort
-fn void drop(node* own@ view, node* own mut@ slots, node mut* n) {
+fn drop(node* own@ view, node* own mut@ slots, node mut* n) void {
     del(view[0]);                    // error: element level of 'view' is immutable (D17.6)
     del(slots[0]);                   // fine: the slots are mutable; slots[0] == null afterwards
     del(n->next);                    // fine: level 1 of n is mutable; n->next == null afterwards
@@ -176,8 +176,8 @@ may be released with `del` once it is adopted, and memory from `new` may be rele
 `mut` (D17.3):
 
 ```fort
-extern fn void mut* own malloc(u64 n);   // storage of no type the caller may write (D17.13)
-extern fn void free(void* own p);
+extern fn malloc(u64 n) void mut* own;   // storage of no type the caller may write (D17.13)
+extern fn free(void* own p) void;
 
 i32 mut* own p = cast(malloc(sizeof(i32)), i32 mut* own);   // not zeroed: C did not clear it
 *p = 1;
@@ -224,8 +224,8 @@ struct node {
     node mut* own next;              // an owning field: node is an owning aggregate (D17.7)
 }
 
-fn i32 value_of(node* n) { return n->value; }   // borrows: any node* or node* own fits
-fn void adopt(node mut* own n) { del(n); }      // takes ownership: the caller must not del
+fn value_of(node* n) i32 { return n->value; }   // borrows: any node* or node* own fits
+fn adopt(node mut* own n) void { del(n); }      // takes ownership: the caller must not del
 
 node mut* own a = new(node);         // an own rvalue lands in an own place
 node* v = a;                         // lends: v is a view of the same node (D17.4)
@@ -244,7 +244,7 @@ Through an indirection the emptied level must be mutable, so nothing can be take
 was merely lent (D17.6):
 
 ```fort
-fn void take(node* own@ view, node* own mut@ slots, node mut* own mut@ all) {
+fn take(node* own@ view, node* own mut@ slots, node mut* own mut@ all) void {
     node* own p = move(view[0]);     // error: element level of 'view' is immutable (D17.6)
     node* own q = move(slots[0]);    // fine: the slot is mutable, the node is not
     node mut* own r = move(all[0]);  // fine: every level of 'all' is mutable
@@ -265,8 +265,8 @@ struct list {
     u64 size;
 }
 
-fn list make() { list l = {}; return l; }     // returning a local: implicit move (D17.7)
-fn void consume(list l) { del(l.head); }      // by value: the caller writes move
+fn make() list { list l = {}; return l; }     // returning a local: implicit move (D17.7)
+fn consume(list l) void { del(l.head); }      // by value: the caller writes move
 
 list mut l = make();
 list l2 = l;                         // error: copying an owning value requires move(l) (D17.7)
@@ -301,13 +301,13 @@ path except the one that hands it to the caller, where the deferred `del` sees `
 does nothing (D7.8, D17.5, D17.9):
 
 ```fort
-fn bool checksum_ok(u8@ data) {
+fn checksum_ok(u8@ data) bool {
     u32 mut sum = 0;
     for (u8 b : data) { sum = sum +% cast(b, u32); }
     return sum % 7 == 0;
 }
 
-fn u8 mut@ own pattern(u64 n) {
+fn pattern(u64 n) u8 mut@ own {
     u8 mut@ own buf = new(u8, n);
     defer del(buf);                      // runs at every exit below
     for (u64 mut i = 0; i < buf.len; i++) { buf[i] = cast(i, u8); }
@@ -325,13 +325,13 @@ new element in and popping moves it out, and every field it overwrites was empti
 the overwrite check of section 2.5 passes (D17.11):
 
 ```fort
-fn void push(list mut* l, node mut* own n) {
+fn push(list mut* l, node mut* own n) void {
     n->next = move(l->head);             // l->head is empty afterwards
     l->head = move(n);                   // stores into an emptied field
     l->size += 1;
 }
 
-fn node mut* own pop(list mut* l) {      // null when the list is empty
+fn pop(list mut* l) node mut* own {      // null when the list is empty
     node mut* own n = move(l->head);
     if (n != null) {
         l->head = move(n->next);
@@ -340,7 +340,7 @@ fn node mut* own pop(list mut* l) {      // null when the list is empty
     return n;
 }
 
-fn void free_list(list mut* l) {
+fn free_list(list mut* l) void {
     while (l->head != null) {
         del(pop(l));                     // an own rvalue: freed on the spot
     }
@@ -364,7 +364,7 @@ struct tree {
     tree mut* own mut@ own kids;         // owned slots holding owned subtrees (D17.2)
 }
 
-fn void free_tree(tree mut* own t) {
+fn free_tree(tree mut* own t) void {
     if (t == null) { return; }
     for (u64 mut i = 0; i < t->kids.len; i++) {
         free_tree(move(t->kids[i]));     // the slot is null afterwards
@@ -384,14 +384,14 @@ struct arena {
     u64 used;
 }
 
-fn u8 mut@ arena_alloc(arena mut* a, u64 n) {
+fn arena_alloc(arena mut* a, u64 n) u8 mut@ {
     if (n > a->block.len - a->used) { panic("arena exhausted"); }
     u8 mut@ chunk = a->block[a->used .. a->used + n];   // a view into the block
     a->used += n;
     return chunk;
 }
 
-fn void arena_free(arena mut* a) {
+fn arena_free(arena mut* a) void {
     del(a->block);                       // frees every chunk at once; block is {null, 0}
     a->used = 0;
 }
@@ -518,10 +518,10 @@ two-bound form exists for pointers, because a pointer has no length; `p[lo..]`, 
 `p[..]` are errors, as is any span expression on a `void*` (D6.9).
 
 ```fort
-extern fn u64 strlen(char* s);
-extern fn char* getenv(char* name);
+extern fn strlen(char* s) u64;
+extern fn getenv(char* name) char*;
 
-fn string env_value(string name) {   // name must be NUL-terminated, for example a literal
+fn env_value(string name) string {   // name must be NUL-terminated, for example a literal
     char* p = getenv(name.ptr);
     if (p == null) { return ""; }
     return cast(p[0..strlen(p)], string);
@@ -549,7 +549,7 @@ storage it gives back is storage the caller may write, and that mark drops to `v
 call to `free` (D3.11, D5.4).
 
 ```fort
-extern fn void mut* own malloc(u64 n);
+extern fn malloc(u64 n) void mut* own;
 void mut* own blob = malloc(16);
 point mut* own pt = cast(move(blob), point mut* own);   // blob == null afterwards
 point mut* own pt2 = cast(blob, point mut* own);        // error: copying own lvalue needs move
@@ -634,7 +634,7 @@ heap object, or keeping it past the block is undefined behavior, exactly as retu
 in C; the compiler does not diagnose it (D6.7, D10.7).
 
 ```fort
-fn i32@ window() {
+fn window() i32@ {
     i32[4] mut a = {1, 2, 3, 4};
     return a[1..3];                  // undefined: points into a frame that no longer exists
 }
@@ -657,7 +657,7 @@ cast to `u8 mut@` is undefined when the bytes are read-only (D10.7).
 ```fort
 string lit = "path";                 // bytes: p a t h NUL; lit.len == 4
 string sub = lit[0..2];              // "pa", no NUL after 'a'
-extern fn i32 open(char* path, i32 flags);
+extern fn open(char* path, i32 flags) i32;
 i32 fd = open(lit.ptr, 0);           // fine: a literal is NUL-terminated
 i32 fd2 = open(sub.ptr, 0);          // opens "path": C reads past sub.len to the NUL
 ```
@@ -687,16 +687,16 @@ Spans, strings, structs and fixed arrays never cross an `extern` boundary (D9.8,
 `.ptr` and `.len`, cast the pointer to the declared C type, and pass a struct by address.
 
 ```fort
-extern fn i64 write(i32 fd, u8* buf, u64 n);
-extern fn u8 mut* memset(u8 mut* p, i32 c, u64 n);
+extern fn write(i32 fd, u8* buf, u64 n) i64;
+extern fn memset(u8 mut* p, i32 c, u64 n) u8 mut*;
 
-fn void put(string s) {
+fn put(string s) void {
     write(1, cast(s.ptr, u8*), s.len);
 }
-fn void clear(u8 mut@ b) {
+fn clear(u8 mut@ b) void {
     memset(b.ptr, 0, b.len);
 }
-extern fn void sum(i32@ xs);        // error: spans cannot cross an extern boundary
+extern fn sum(i32@ xs) void;        // error: spans cannot cross an extern boundary
 ```
 
 `own` in an `extern` signature is erased and records who frees (D17.13): a result type
@@ -714,9 +714,9 @@ one `own` value exists per allocation (D17.14). `del` of adopted memory that doe
 allocation is undefined (D10.7).
 
 ```fort
-extern fn void mut* own malloc(u64 n);
-extern fn void free(void* own p);
-extern fn char mut* read_line(u64 mut* len);   // C documents: the caller frees with free()
+extern fn malloc(u64 n) void mut* own;
+extern fn free(void* own p) void;
+extern fn read_line(u64 mut* len) char mut*;   // C documents: the caller frees with free()
 
 u8 mut* own raw = cast(malloc(64), u8 mut* own);   // own rvalue to own type; not zeroed
 u8 mut@ bytes = raw[0..64];                    // a view for filling
@@ -748,9 +748,9 @@ plain `ptr` parameter and a leading `ptr sret(%T)` parameter (`toolchain.md` 6 i
 i32[4] a = {1, 2, 3, 4};
 i32[4] mut b = a;                    // 16 bytes copied
 b[0] = 9;                            // a[0] is still 1
-fn void zero(i32[4] mut arr) { arr[0] = 0; }
+fn zero(i32[4] mut arr) void { arr[0] = 0; }
 zero(a);                             // a is unchanged: arr was a copy
-fn void zero_in_place(i32 mut@ arr) { arr[0] = 0; }
+fn zero_in_place(i32 mut@ arr) void { arr[0] = 0; }
 i32[4] mut c = {1, 2, 3, 4};
 zero_in_place(c[..]);                // c[0] == 0: the span points into c
 ```
@@ -906,10 +906,10 @@ a diagnosed error (D10.7). None of these is detected.
 | a view or stale copy used after the free       | `i32@ v = a; del(a); i32 x = v[0];`       |
 | `del` of adopted memory not starting an allocation | `i32 x = 1; del(cast(&x, i32* own));`  |
 | dereferencing `null`                           | `node* q = null; i32 v = q->value;`        |
-| dereferencing a dangling pointer               | `fn i32* f() { i32 x = 1; return &x; }`    |
+| dereferencing a dangling pointer               | `fn f() i32* { i32 x = 1; return &x; }`    |
 | writing read-only memory through a cast that added `mut` | `cast("abc", u8 mut@)[0] = 'x';` |
 | `p[lo..hi]` beyond the object                  | `i32 one = 0; i32@ s = (&one)[0..4];`     |
-| calling a null function pointer                | `fn void() f = null; f();`                 |
+| calling a null function pointer                | `fn () void f = null; f();`                 |
 | data races                                     | two threads from `extern` writing one `g`  |
 
 Returning or storing a span of a local array is the span form of the dangling-pointer case
@@ -946,13 +946,13 @@ struct node {
     node mut* own next;
 }
 
-fn node mut* own make_node(i32 v) {
+fn make_node(i32 v) node mut* own {
     node mut* own n = new(node);     // zeroed: next == null
     n->value = v;
     return n;                        // implicit move: responsibility passes to the caller
 }
 
-fn void free_chain(node mut* own head) {
+fn free_chain(node mut* own head) void {
     while (head != null) {
         node mut* own next = move(head->next);   // level 1 of head is mutable (D17.6)
         del(head);                   // head == null afterwards
@@ -960,7 +960,7 @@ fn void free_chain(node mut* own head) {
     }
 }
 
-fn void demo() {
+fn demo() void {
     node mut* own a = make_node(1);
     a->next = make_node(2);          // an rvalue into a zeroed field
     node* second = a->next;          // lends
@@ -981,7 +981,7 @@ slot to `{}` so that the store passes the overwrite check (D17.11), owns the ele
 ```fort
 enum parse_error { none, empty, bad_digit, overflow }
 
-fn parse_error parse_u32(string s, u32 mut* out) {
+fn parse_u32(string s, u32 mut* out) parse_error {
     if (s.len == 0) { return parse_error.empty; }
     u32 mut acc = 0;
     for (char c : s) {
@@ -994,14 +994,14 @@ fn parse_error parse_u32(string s, u32 mut* out) {
     return parse_error.none;
 }
 
-fn bool find(i32@ xs, i32 key, u64 mut* index) {
+fn find(i32@ xs, i32 key, u64 mut* index) bool {
     for (u64 mut i = 0; i < xs.len; i++) {
         if (xs[i] == key) { *index = i; return true; }
     }
     return false;
 }
 
-fn bool read_all(i32 fd, u8 mut@ own mut* out) {
+fn read_all(i32 fd, u8 mut@ own mut* out) bool {
     u8 mut@ own buf = new(u8, 4096);
     defer del(buf);                  // frees buf on every failure path
     // ... fill buf, returning false on failure ...
@@ -1009,13 +1009,13 @@ fn bool read_all(i32 fd, u8 mut@ own mut* out) {
     return true;
 }
 
-fn bool read_wrong(i32 fd, u8 mut@ own mut* out) {
+fn read_wrong(i32 fd, u8 mut@ own mut* out) bool {
     u8 mut@ own buf = new(u8, 16);
     *out = buf;                      // error: copying an own lvalue requires move(buf) (D17.5)
     return true;
 }
 
-fn void use_both() {
+fn use_both() void {
     u32 mut v = 0;
     switch (parse_u32("42", &v)) {
     case parse_error.none: println(v);
@@ -1043,7 +1043,7 @@ struct int_buf {
     u64 count;                       // elements in use
 }
 
-fn void push(int_buf mut* b, i32 x) {
+fn push(int_buf mut* b, i32 x) void {
     if (b->count == b->items.len) {
         i32 mut@ own bigger = new(i32, b->items.len * 2 + 8);
         for (u64 mut i = 0; i < b->count; i++) { bigger[i] = b->items[i]; }
@@ -1054,16 +1054,16 @@ fn void push(int_buf mut* b, i32 x) {
     b->count++;
 }
 
-fn i32@ contents(int_buf* b) {
+fn contents(int_buf* b) i32@ {
     return b->items[..b->count];     // a view; del of it does not compile (D17.9)
 }
 
-fn void free_buf(int_buf mut* b) {
+fn free_buf(int_buf mut* b) void {
     del(b->items);                   // b->items is {null, 0} afterwards
     b->count = 0;
 }
 
-fn void misuse(int_buf mut* b) {
+fn misuse(int_buf mut* b) void {
     int_buf copy = *b;               // error: copying an owning value requires move (D17.7)
     del(*b);                         // error: del of an aggregate; del its fields instead (D17.7)
 }
@@ -1077,7 +1077,7 @@ resources are released in the opposite order of acquisition.
 ```fort
 import std.io;
 
-fn bool copy_file(string src, string dst) {
+fn copy_file(string src, string dst) bool {
     i32 mut in = io.open_read(src);
     if (in < 0) { return false; }
     defer io.close(in);
@@ -1101,13 +1101,13 @@ as `buf[..n]` is a view, and a view becomes a `string own` only through the adop
 which is meant for memory from C (D17.3).
 
 ```fort
-fn string own repeat(char c, u64 n) {
+fn repeat(char c, u64 n) string own {
     u8 mut@ own buf = new(u8, n);
     for (u64 mut i = 0; i < n; i++) { buf[i] = cast(c, u8); }
     return cast(move(buf), string own);   // the caller owns the characters
 }
 
-fn void demo() {
+fn demo() void {
     string own s = repeat('-', 10);
     defer del(s);                    // del(string own) is legal (D17.12)
     println(s);

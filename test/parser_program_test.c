@@ -37,14 +37,14 @@ TEST(a_hash_map_module_parses, {
                                        "    u64 count;\n"
                                        "}\n"
                                        "\n"
-                                       "fn map make_map(u64 n) {\n"
+                                       "fn make_map(u64 n) map {\n"
                                        "    map mut m = {};\n"
                                        "    m.buckets = new(entry* own, n);\n"
                                        "    m.count = 0;\n"
                                        "    return m;\n"
                                        "}\n"
                                        "\n"
-                                       "fn void put(map mut* m, string key, i32 value) {\n"
+                                       "fn put(map mut* m, string key, i32 value) void {\n"
                                        "    u64 h = hash(key) % m->buckets.len;\n"
                                        "    entry mut* own e = new(entry);\n"
                                        "    e->key = key;\n"
@@ -80,11 +80,11 @@ TEST(a_tokenizer_module_parses, {
                                        "    string text;\n"
                                        "}\n"
                                        "\n"
-                                       "fn bool is_digit(char c) {\n"
+                                       "fn is_digit(char c) bool {\n"
                                        "    return c >= '0' && c <= '9';\n"
                                        "}\n"
                                        "\n"
-                                       "fn token next(string src, u64 mut* pos) {\n"
+                                       "fn next(string src, u64 mut* pos) token {\n"
                                        "    mut u64 i = *pos;\n"
                                        "    while (i < src.len && src[i] == ' ') {\n"
                                        "        i += 1;\n"
@@ -119,11 +119,11 @@ TEST(a_tokenizer_module_in_the_east_marker_spelling_parses, {
                                        "    string text;\n"
                                        "}\n"
                                        "\n"
-                                       "fn bool is_digit(char c) {\n"
+                                       "fn is_digit(char c) bool {\n"
                                        "    return c >= '0' && c <= '9';\n"
                                        "}\n"
                                        "\n"
-                                       "fn token next(string src, u64 mut* pos) {\n"
+                                       "fn next(string src, u64 mut* pos) token {\n"
                                        "    u64 mut i = *pos;\n"
                                        "    while (i < src.len && src[i] == ' ') {\n"
                                        "        i += 1;\n"
@@ -160,12 +160,12 @@ TEST(a_tokenizer_module_in_the_east_marker_spelling_parses, {
 // An FFI module: externs, `void*`, casts and a `noreturn` function.
 // D9.8, D3.11, D8.5
 TEST(an_ffi_module_parses, {
-    const ast_node_t* mod = parse_text("extern fn void* malloc(u64 size);\n"
-                                       "extern fn void free(void* p);\n"
-                                       "extern fn i32 write(i32 fd, void* buf, u64 n);\n"
-                                       "extern fn noreturn exit(i32 status);\n"
+    const ast_node_t* mod = parse_text("extern fn malloc(u64 size) void*;\n"
+                                       "extern fn free(void* p) void;\n"
+                                       "extern fn write(i32 fd, void* buf, u64 n) i32;\n"
+                                       "extern fn exit(i32 status) noreturn;\n"
                                        "\n"
-                                       "fn u8 mut@ own take(u64 n) {\n"
+                                       "fn take(u64 n) u8 mut@ own {\n"
                                        "    void* raw = malloc(n);\n"
                                        "    if (raw == null) {\n"
                                        "        exit(1);\n"
@@ -191,7 +191,7 @@ TEST(an_ffi_module_parses, {
 // 2): a wildcard, and a path segment that is not an identifier.
 // D9.3
 TEST(a_wildcard_import_does_not_parse, {
-    TEST_ASSERT_EQ_STR(parse_fails("import util.*;\nfn i32 main() { return 0; }\n"),
+    TEST_ASSERT_EQ_STR(parse_fails("import util.*;\nfn main() i32 { return 0; }\n"),
                        "t.ft:1:13: error: expected an identifier, found '*'\n");
 })
 
@@ -202,22 +202,22 @@ TEST(a_wildcard_import_does_not_parse, {
 // lexes as two colons.
 // D9.1, D2.10
 TEST(the_old_path_separator_names_the_mistake, {
-    TEST_ASSERT_EQ_STR(parse_fails("import a::b;\nfn i32 main() { return 0; }\n"),
+    TEST_ASSERT_EQ_STR(parse_fails("import a::b;\nfn main() i32 { return 0; }\n"),
                        "t.ft:1:9: error: a module path is separated by '.', not '::'\n");
-    TEST_ASSERT_EQ_STR(parse_fails("import std::io;\nfn i32 main() { return 0; }\n"),
+    TEST_ASSERT_EQ_STR(parse_fails("import std::io;\nfn main() i32 { return 0; }\n"),
                        "t.ft:1:11: error: a module path is separated by '.', not '::'\n");
     // After a segment that is not the first, and before an item list: the
     // test is made once per segment, inside the loop that reads them.
-    TEST_ASSERT_EQ_STR(parse_fails("import a::b::c;\nfn i32 main() { return 0; }\n"),
+    TEST_ASSERT_EQ_STR(parse_fails("import a::b::c;\nfn main() i32 { return 0; }\n"),
                        "t.ft:1:9: error: a module path is separated by '.', not '::'\n");
-    TEST_ASSERT_EQ_STR(parse_fails("import a.b::{c};\nfn i32 main() { return 0; }\n"),
+    TEST_ASSERT_EQ_STR(parse_fails("import a.b::{c};\nfn main() i32 { return 0; }\n"),
                        "t.ft:1:11: error: a module path is separated by '.', not '::'\n");
     // One colon is not two, and the message says which one it found.
-    TEST_ASSERT_EQ_STR(parse_fails("import a:b;\nfn i32 main() { return 0; }\n"),
+    TEST_ASSERT_EQ_STR(parse_fails("import a:b;\nfn main() i32 { return 0; }\n"),
                        "t.ft:1:9: error: a module path is separated by '.', not ':'\n");
     // A colon before the first segment is not a separator at all, so it is
     // the ordinary "expected an identifier" of a path that does not start.
-    TEST_ASSERT_EQ_STR(parse_fails("import ::a;\nfn i32 main() { return 0; }\n"),
+    TEST_ASSERT_EQ_STR(parse_fails("import ::a;\nfn main() i32 { return 0; }\n"),
                        "t.ft:1:8: error: expected an identifier, found ':'\n");
 })
 
@@ -227,19 +227,19 @@ TEST(the_old_path_separator_names_the_mistake, {
 // that the path's end would then be missing.
 // D2.10, D9.1
 TEST(a_path_separator_written_twice_names_the_mistake, {
-    TEST_ASSERT_EQ_STR(parse_fails("import a..b;\nfn i32 main() { return 0; }\n"),
+    TEST_ASSERT_EQ_STR(parse_fails("import a..b;\nfn main() i32 { return 0; }\n"),
                        "t.ft:1:9: error: a module path is separated by '.', not '..'\n");
     // Three dots are the same token followed by a separator, so the report is
     // the same one and stands at the `..`.
-    TEST_ASSERT_EQ_STR(parse_fails("import a...b;\nfn i32 main() { return 0; }\n"),
+    TEST_ASSERT_EQ_STR(parse_fails("import a...b;\nfn main() i32 { return 0; }\n"),
                        "t.ft:1:9: error: a module path is separated by '.', not '..'\n");
     // After a segment that is not the first: the test is made once per
     // segment, inside the loop that reads them.
-    TEST_ASSERT_EQ_STR(parse_fails("import a.b..c;\nfn i32 main() { return 0; }\n"),
+    TEST_ASSERT_EQ_STR(parse_fails("import a.b..c;\nfn main() i32 { return 0; }\n"),
                        "t.ft:1:11: error: a module path is separated by '.', not '..'\n");
     // A `..` before the first segment is not a separator at all, so it is the
     // ordinary "expected an identifier" of a path that does not start.
-    TEST_ASSERT_EQ_STR(parse_fails("import ..a;\nfn i32 main() { return 0; }\n"),
+    TEST_ASSERT_EQ_STR(parse_fails("import ..a;\nfn main() i32 { return 0; }\n"),
                        "t.ft:1:8: error: expected an identifier, found '..'\n");
 })
 
@@ -251,7 +251,7 @@ TEST(an_importing_module_parses, {
                                        "import util.text.trim;\n"
                                        "import util.text.{pad, split as cut};\n"
                                        "\n"
-                                       "fn void main() {\n"
+                                       "fn main() void {\n"
                                        "    io.println(s.dup(\"x\"));\n"
                                        "    string t = trim(\"  y  \");\n"
                                        "    string u = cut(t, ' ');\n"
@@ -284,7 +284,7 @@ TEST(a_module_of_constants_parses, {
                                        "point CORNER = {.x = 1, .y = 2};\n"
                                        "color FIRST = color.red;\n"
                                        "node* NOTHING = null;\n"
-                                       "fn i32(i32) OP = twice;\n"
+                                       "fn (i32) i32 OP = twice;\n"
                                        "i32 mut counter = 0;\n"
                                        "i32 DERIVED = LIMIT * 2 + 1;\n");
     TEST_ASSERT_NONNULL(mod);
@@ -307,7 +307,7 @@ TEST(a_module_of_constants_parses, {
 
 // A function using every statement form of grammar.md 5 in one body.
 TEST(a_function_with_every_statement_form_parses, {
-    const ast_node_t* mod = parse_text("fn i32 all(i32@ xs) {\n"
+    const ast_node_t* mod = parse_text("fn all(i32@ xs) i32 {\n"
                                        "    i32 mut total = 0;\n"
                                        "    defer log();\n"
                                        "    {\n"
@@ -355,7 +355,7 @@ TEST(a_function_with_every_statement_form_parses, {
 
 // The same source parses to the same tree twice: no state survives a parse.
 TEST(parsing_is_repeatable, {
-    const char* src = "fn i32 f(i32@ xs) {\n"
+    const char* src = "fn f(i32@ xs) i32 {\n"
                       "    i32 mut t = 0;\n"
                       "    for (i32 v : xs) {\n"
                       "        t += v;\n"
@@ -380,9 +380,8 @@ TEST(a_failed_parse_does_not_poison_the_next, {
                        "t.ft:1:9: error: expected an expression, found ';'\n");
     TEST_ASSERT_EQ_STR(parse_dump("i32 x = 1;"), "(module (var x (type (prim i32)) (int 1)))");
     TEST_ASSERT_EQ_STR(parse_diags(), "");
-    TEST_ASSERT_EQ_STR(parse_fails("fn void f( { }"),
-                       "t.ft:1:12: error: expected a type, found '{'\n");
-    TEST_ASSERT_EQ_STR(parse_dump("fn void f() { }"),
+    TEST_ASSERT_EQ_STR(parse_fails("fn f( { }"), "t.ft:1:7: error: expected a type, found '{'\n");
+    TEST_ASSERT_EQ_STR(parse_dump("fn f() void { }"),
                        "(module (fn (type (void)) f (params) (block)))");
 })
 

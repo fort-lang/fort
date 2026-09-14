@@ -386,10 +386,10 @@ set_tests_properties(lang-stage2 PROPERTIES LABELS lang)
 # with a golden index.json beside it, held against that file byte for byte
 # (D20.2, D20.3). It is the oracle of the json and index ports (T-093).
 #
-# What it covers and what it does not. --check-json selects 240 of the 675
-# tests: the 238 `fail` tests, which have diagnostics, and the 2 tests with a
+# What it covers and what it does not. --check-json selects 241 of the 676
+# tests: the 239 `fail` tests, which have diagnostics, and the 2 tests with a
 # golden index beside them. So the document of a **clean** compile is
-# exercised here by two tests, and the diagnostics half by all 238. The three
+# exercised here by two tests, and the diagnostics half by all 239. The three
 # numbers are read off `run_tests.py --check-json --list`, whose last line is a
 # summary and not a test, so `wc -l` of it is one above the count; the pair
 # before T-043 (194 of 538, 192 fail tests) counted the fail tests wrong as
@@ -419,7 +419,9 @@ set_tests_properties(lang-stage2 PROPERTIES LABELS lang)
 # moved the total alone with one `run` test: 669 to 670, 234 and 236 unchanged.
 # T-085 rebased over that and moved all three with five tests, of which four are
 # `fail` tests, one for each shape a mut-adding cast has: 670 to 675, 234 to 238
-# and 236 to 240.
+# and 236 to 240. T-136 measured all three again and moved all three with one
+# `fail` test, which pins the refusal of the old signature form: 675 to 676,
+# 238 to 239 and 240 to 241.
 # Against a
 # golden the comparison is stricter than a diff of two compilers for the value
 # and the order of every record, since it holds both compilers against a file

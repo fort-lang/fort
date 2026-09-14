@@ -67,7 +67,7 @@ TEST(a_char_literal_defaults_to_char, {
 
 TEST(an_integer_constant_does_not_become_an_enum, {
     TEST_ASSERT_FALSE(check_src("enum color {\n    red,\n}\n"
-                                "fn i32 main() {\n    color c = 0;\n    return 0;\n}\n"));
+                                "fn main() i32 {\n    color c = 0;\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("an integer constant does not become an enum: use cast"));
 })
 
@@ -215,13 +215,13 @@ TEST(a_context_that_takes_no_integer_constant_reports_the_constant, {
     TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n    bool b = 1 << n;\n    println(b);"));
     TEST_ASSERT_TRUE(said("an integer constant does not become bool: write '!= 0'"));
     TEST_ASSERT_FALSE(check_src("enum color {\n    red,\n}\n"
-                                "fn i32 main() {\n    i32 n = 1;\n    color k = 1 << n;\n"
+                                "fn main() i32 {\n    i32 n = 1;\n    color k = 1 << n;\n"
                                 "    println(k);\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("an integer constant does not become an enum: use cast"));
     TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n    i32* p = 1 << n;\n    println(p);"));
     TEST_ASSERT_TRUE(said("the initializer expects i32*, not a constant"));
     TEST_ASSERT_FALSE(check_src("struct s {\n    i32 x;\n}\n"
-                                "fn i32 main() {\n    i32 n = 1;\n    s q = 1 << n;\n"
+                                "fn main() i32 {\n    i32 n = 1;\n    s q = 1 << n;\n"
                                 "    println(q.x);\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("the initializer expects s, not a constant"));
 })
@@ -305,7 +305,7 @@ TEST(null_outside_a_pointer_context_is_refused, {
     TEST_ASSERT_FALSE(check_body("    i32@ s = {};\n    bool b = s == null;\n    println(b);"));
     TEST_ASSERT_TRUE(said("'==' takes comparable operands, not i32@"));
     TEST_ASSERT_FALSE(check_src("struct point {\n    i32 x;\n}\n"
-                                "fn i32 main() {\n    point p = null;\n    return p.x;\n}\n"));
+                                "fn main() i32 {\n    point p = null;\n    return p.x;\n}\n"));
     TEST_ASSERT_TRUE(said("'null' needs a pointer type, not point"));
 })
 
@@ -321,20 +321,20 @@ TEST(a_shift_count_is_not_a_context_for_the_left_operand, {
 })
 
 TEST(a_constant_argument_takes_the_parameter_type, {
-    TEST_ASSERT_TRUE(check_src("fn i32 take(u8 b) {\n    return cast(b, i32);\n}\n"
-                               "fn i32 main() {\n    return take(7);\n}\n"));
+    TEST_ASSERT_TRUE(check_src("fn take(u8 b) i32 {\n    return cast(b, i32);\n}\n"
+                               "fn main() i32 {\n    return take(7);\n}\n"));
     const ast_node_t* call = node_find(node_in_main(AST_FN_DECL, "main"), AST_CALL, NULL);
     TEST_ASSERT_EQ_STR(type_text(ast_child(call, 0)->type), "u8");
-    TEST_ASSERT_FALSE(check_src("fn i32 take(u8 b) {\n    return cast(b, i32);\n}\n"
-                                "fn i32 main() {\n    return take(300);\n}\n"));
+    TEST_ASSERT_FALSE(check_src("fn take(u8 b) i32 {\n    return cast(b, i32);\n}\n"
+                                "fn main() i32 {\n    return take(300);\n}\n"));
     TEST_ASSERT_TRUE(said("constant 300 does not fit u8"));
 })
 
 TEST(a_returned_constant_takes_the_return_type, {
-    TEST_ASSERT_TRUE(check_src("fn u8 byte() {\n    return 7;\n}\n"
-                               "fn i32 main() {\n    return cast(byte(), i32);\n}\n"));
-    TEST_ASSERT_FALSE(check_src("fn u8 byte() {\n    return 300;\n}\n"
-                                "fn i32 main() {\n    return cast(byte(), i32);\n}\n"));
+    TEST_ASSERT_TRUE(check_src("fn byte() u8 {\n    return 7;\n}\n"
+                               "fn main() i32 {\n    return cast(byte(), i32);\n}\n"));
+    TEST_ASSERT_FALSE(check_src("fn byte() u8 {\n    return 300;\n}\n"
+                                "fn main() i32 {\n    return cast(byte(), i32);\n}\n"));
     TEST_ASSERT_TRUE(said("constant 300 does not fit u8"));
 })
 
@@ -488,7 +488,7 @@ TEST(untyped_wrapping_operators_fold_exactly, {
 
 TEST(a_typed_constant_expression_is_checked_at_compile_time, {
     TEST_ASSERT_FALSE(check_src("i32 A = 2147483647;\ni32 B = A + 1;\n"
-                                "fn i32 main() {\n    return B;\n}\n"));
+                                "fn main() i32 {\n    return B;\n}\n"));
     // `A + 1` is a compile error, not a runtime trap.
     // D4.6
     TEST_ASSERT_TRUE(said("constant expression overflows i32"));
@@ -496,7 +496,7 @@ TEST(a_typed_constant_expression_is_checked_at_compile_time, {
 
 TEST(a_typed_constant_folds_with_the_declared_type, {
     TEST_ASSERT_TRUE(check_src("u8 A = 200;\nu8 B = A / 3;\n"
-                               "fn i32 main() {\n    return cast(B, i32);\n}\n"));
+                               "fn main() i32 {\n    return cast(B, i32);\n}\n"));
     int64_t v = 0;
     TEST_ASSERT_TRUE(init_int("B", &v));
     TEST_ASSERT_EQ_INT64(v, (int64_t)66);
@@ -504,7 +504,7 @@ TEST(a_typed_constant_folds_with_the_declared_type, {
 
 TEST(the_wrapping_operators_fold_at_the_width, {
     TEST_ASSERT_TRUE(check_src("u8 A = 200;\nu8 B = A +% 100;\n"
-                               "fn i32 main() {\n    return cast(B, i32);\n}\n"));
+                               "fn main() i32 {\n    return cast(B, i32);\n}\n"));
     // `+%` wraps in two's complement in both build modes.
     // D11.2
     int64_t v = 0;
@@ -517,22 +517,22 @@ TEST(the_typed_division_traps_of_d6_13_are_compile_errors, {
     // build mode, so a typed constant that would trap is a compile error.
     // D4.6, D6.13, D11.3
     TEST_ASSERT_FALSE(check_src("i32 A = -2147483648;\ni32 B = A / -1;\n"
-                                "fn i32 main() {\n    return B;\n}\n"));
+                                "fn main() i32 {\n    return B;\n}\n"));
     TEST_ASSERT_TRUE(said("constant expression overflows i32"));
     TEST_ASSERT_FALSE(check_src("i32 A = -2147483648;\ni32 B = A % -1;\n"
-                                "fn i32 main() {\n    return B;\n}\n"));
+                                "fn main() i32 {\n    return B;\n}\n"));
     TEST_ASSERT_TRUE(said("constant expression overflows i32"));
     TEST_ASSERT_FALSE(check_src("i32 A = 1;\ni32 ZERO = 0;\ni32 B = A / ZERO;\n"
-                                "fn i32 main() {\n    return B;\n}\n"));
+                                "fn main() i32 {\n    return B;\n}\n"));
     TEST_ASSERT_TRUE(said("constant division by zero"));
     // The same operands one width up are ordinary arithmetic.
     TEST_ASSERT_TRUE(check_src("i64 A = -2147483648;\ni64 B = A / -1;\n"
-                               "fn i32 main() {\n    return cast(B, i32);\n}\n"));
+                               "fn main() i32 {\n    return cast(B, i32);\n}\n"));
 })
 
 TEST(a_typed_shift_count_is_below_the_width, {
     TEST_ASSERT_FALSE(check_src("i32 A = 1;\ni32 B = A << 32;\n"
-                                "fn i32 main() {\n    return B;\n}\n"));
+                                "fn main() i32 {\n    return B;\n}\n"));
     // A constant count at least the width of the left operand is a compile
     // error.
     // D6.2
@@ -541,7 +541,7 @@ TEST(a_typed_shift_count_is_below_the_width, {
 
 TEST(a_shift_discards_the_bits_it_pushes_out, {
     TEST_ASSERT_TRUE(check_src("i32 A = 1;\ni32 B = A << 31;\n"
-                               "fn i32 main() {\n    return B;\n}\n"));
+                               "fn main() i32 {\n    return B;\n}\n"));
     // `1 << 31` on i32 is -2147483648 in both build modes.
     // D6.2
     int64_t v = 0;
@@ -559,15 +559,15 @@ TEST(a_local_immutable_variable_is_not_a_constant, {
 
 TEST(a_mut_global_is_not_a_constant, {
     TEST_ASSERT_FALSE(check_src("i32 mut counter = 0;\ni32 START = counter;\n"
-                                "fn i32 main() {\n    return START;\n}\n"));
+                                "fn main() i32 {\n    return START;\n}\n"));
     // No reads of `mut` globals in a module-level initializer.
     // D7.10
     TEST_ASSERT_TRUE(said("a module-level initializer must be a constant expression"));
 })
 
 TEST(a_call_is_not_a_constant_initializer, {
-    TEST_ASSERT_FALSE(check_src("fn i32 four() {\n    return 4;\n}\ni32 SIZE = four();\n"
-                                "fn i32 main() {\n    return SIZE;\n}\n"));
+    TEST_ASSERT_FALSE(check_src("fn four() i32 {\n    return 4;\n}\ni32 SIZE = four();\n"
+                                "fn main() i32 {\n    return SIZE;\n}\n"));
     TEST_ASSERT_TRUE(said("a module-level initializer must be a constant expression"));
 })
 
@@ -576,12 +576,12 @@ TEST(a_module_level_initializer_takes_null_a_function_and_an_address, {
     // declaration.
     // D7.10
     TEST_ASSERT_TRUE(check_src("i32 MAX = 64;\ni32* PTR = &MAX;\nnode* ROOT = null;\n"
-                               "fn i32 id(i32 n) {\n    return n;\n}\n"
-                               "fn i32(i32) F = id;\n"
+                               "fn id(i32 n) i32 {\n    return n;\n}\n"
+                               "fn (i32) i32 F = id;\n"
                                "struct node {\n    i32 v;\n}\n"
-                               "fn i32 main() {\n    return F(MAX);\n}\n"));
+                               "fn main() i32 {\n    return F(MAX);\n}\n"));
     TEST_ASSERT_EQ_STR(decl_type("PTR"), "i32*");
-    TEST_ASSERT_EQ_STR(decl_type("F"), "fn i32(i32)");
+    TEST_ASSERT_EQ_STR(decl_type("F"), "fn (i32) i32");
 })
 
 // ---- sizeof, .len and cast ----------------------------------------------------------
@@ -653,7 +653,7 @@ TEST(a_cast_to_bool_is_refused, {
 TEST(a_cast_of_an_enum_to_an_integer_folds, {
     TEST_ASSERT_TRUE(check_src("enum color {\n    red,\n    green,\n    blue,\n}\n"
                                "i32[cast(color.blue, i32) + 1] table = {};\n"
-                               "fn i32 main() {\n    return table[2];\n}\n"));
+                               "fn main() i32 {\n    return table[2];\n}\n"));
     // `cast(color.blue, i32) + 1` may size an array.
     // D4.6
     TEST_ASSERT_EQ_STR(decl_type("table"), "i32[3]");

@@ -146,7 +146,7 @@ string mut@ own mut args_store = {};
 /// of its own, so this function saves errno and writes it back
 /// (toolchain.md 5.3). Without the restore, the first print after a failed
 /// open reports ENOTTY instead of the program's own error.
-fn bool is_interactive(i32 fd) {
+fn is_interactive(i32 fd) bool {
     i32 mut* slot = libc.__errno_location();
     i32 saved = *slot;
     bool interactive = libc.isatty(fd) == 1;
@@ -154,7 +154,7 @@ fn bool is_interactive(i32 fd) {
     return interactive;
 }
 
-fn void buffers_init() {
+fn buffers_init() void {
     if (buffers_ready) {
         return;
     }
@@ -183,7 +183,7 @@ fn void buffers_init() {
 /// EINTR branch needs a signal to arrive during the write, which no fort
 /// program can arrange either. Both branches stay because both cases are real
 /// outside this harness.
-fn void write_all(i32 fd, u8@ bytes) {
+fn write_all(i32 fd, u8@ bytes) void {
     u64 mut done = 0;
     while (done < bytes.len) {
         u8@ rest = bytes[done..];
@@ -198,7 +198,7 @@ fn void write_all(i32 fd, u8@ bytes) {
     }
 }
 
-fn void buffer_flush(buffer mut* b) {
+fn buffer_flush(buffer mut* b) void {
     if (b->len == 0) {
         return;
     }
@@ -212,7 +212,7 @@ fn void buffer_flush(buffer mut* b) {
 /// Answers whether the bytes hold a newline. A newline ends a line for a
 /// line-buffered descriptor.
 /// D11.5
-fn bool has_newline(u8@ bytes) {
+fn has_newline(u8@ bytes) bool {
     for (u64 mut i = 0; i < bytes.len; i++) {
         if (bytes[i] == cast('\n', u8)) {
             return true;
@@ -227,7 +227,7 @@ fn bool has_newline(u8@ bytes) {
 /// it flushes the whole buffer, which is what C does. Bytes that went straight
 /// to the descriptor are already out.
 /// D11.5
-fn void buffer_append(buffer mut* b, u8@ bytes) {
+fn buffer_append(buffer mut* b, u8@ bytes) void {
     u64 n = bytes.len;
     if (n == 0) {
         return;
@@ -252,7 +252,7 @@ fn void buffer_append(buffer mut* b, u8@ bytes) {
 /// Answers with the buffer of fd, and takes a slot for fd when it has none. It
 /// answers null for stderr, which the runtime does not buffer, and for a
 /// negative fd, whose writes fail and whose bytes the runtime drops.
-fn buffer mut* buffer_for(i32 fd) {
+fn buffer_for(i32 fd) buffer mut* {
     if (fd == STDERR_FD || fd < 0) {
         return null;
     }
@@ -281,7 +281,7 @@ fn buffer mut* buffer_for(i32 fd) {
 
 /// Sends the bytes to fd through its buffer. For stderr it writes them
 /// straight to the descriptor.
-fn void emit(i32 fd, u8@ bytes) {
+fn emit(i32 fd, u8@ bytes) void {
     buffer mut* b = buffer_for(fd);
     if (b == null) {
         write_all(fd, bytes);
@@ -293,21 +293,21 @@ fn void emit(i32 fd, u8@ bytes) {
 /// Writes the bytes of a fort string. This module writes the fixed texts of
 /// the print family and of the runtime error contract this way.
 /// D11.7, D11.4
-fn void emit_str(i32 fd, string s) {
+fn emit_str(i32 fd, string s) void {
     emit(fd, cast(s, u8@));
 }
 
 /// Writes the bytes of a NUL-terminated C string. An enum member name is such
 /// a string, and so is every file name the compiler passes
 /// (toolchain.md 5.1).
-fn void emit_cstr(i32 fd, char* s) {
+fn emit_cstr(i32 fd, char* s) void {
     emit(fd, cast(s[0..libc.strlen(s)], u8@));
 }
 
 /// Writes out the buffer of fd. It does nothing when fd has no buffer.
 /// io.flush and io.close call it (stdlib.md 3).
 /// D11.5
-fn void flush(i32 fd) {
+fn flush(i32 fd) void {
     buffers_init();
     for (u64 mut i = 0; i < BUFFER_COUNT; i++) {
         if (buffers[i].fd == fd) {
@@ -320,7 +320,7 @@ fn void flush(i32 fd) {
 /// Writes out every buffer. exit calls it, every failure path calls it, and a
 /// program calls it before it writes through libc.write (stdlib.md 3).
 /// D11.5
-fn void flush_all() {
+fn flush_all() void {
     buffers_init();
     for (u64 mut i = 0; i < BUFFER_COUNT; i++) {
         if (buffers[i].fd >= 0) {
@@ -335,7 +335,7 @@ fn void flush_all() {
 /// Writes the decimal digits of v at the end of out. It answers with the index
 /// of the first digit. out holds DECIMAL_MAX bytes, which is the longest u64.
 /// The loop writes one digit before it tests v, so 0 prints as one digit.
-fn u64 format_u64(u8 mut@ out, u64 v) {
+fn format_u64(u8 mut@ out, u64 v) u64 {
     u64 mut start = out.len;
     u64 mut rest = v;
     while (true) {
@@ -353,7 +353,7 @@ fn u64 format_u64(u8 mut@ out, u64 v) {
 /// below runs in u64 and wraps. A subtraction that must wrap is spelled -%.
 /// That magnitude is 19 digits, so out keeps one byte for the minus.
 /// D11.2
-fn u64 format_i64(u8 mut@ out, i64 v) {
+fn format_i64(u8 mut@ out, i64 v) u64 {
     if (v >= 0) {
         return format_u64(out, cast(v, u64));
     }
@@ -367,7 +367,7 @@ fn u64 format_i64(u8 mut@ out, i64 v) {
 /// leading zero. It writes 0x0 for 0. out holds HEX_MAX bytes. It answers with
 /// the index of the first byte of the text.
 /// D11.7
-fn u64 format_hex(u8 mut@ out, u64 v) {
+fn format_hex(u8 mut@ out, u64 v) u64 {
     u64 mut start = out.len;
     u64 mut rest = v;
     while (true) {
@@ -384,29 +384,29 @@ fn u64 format_hex(u8 mut@ out, u64 v) {
     }
 }
 
-fn void emit_u64(i32 fd, u64 v) {
+fn emit_u64(i32 fd, u64 v) void {
     u8[DECIMAL_MAX] mut out = {};
     u64 start = format_u64(out[..], v);
     emit(fd, out[start..]);
 }
 
-fn void emit_i64(i32 fd, i64 v) {
+fn emit_i64(i32 fd, i64 v) void {
     u8[DECIMAL_MAX] mut out = {};
     u64 start = format_i64(out[..], v);
     emit(fd, out[start..]);
 }
 
-fn void print_i64(i32 fd, i64 v) {
+fn print_i64(i32 fd, i64 v) void {
     emit_i64(fd, v);
 }
 
-fn void print_u64(i32 fd, u64 v) {
+fn print_u64(i32 fd, u64 v) void {
     emit_u64(fd, v);
 }
 
 /// Writes true or false. The print family fixes those two texts.
 /// D11.7
-fn void print_bool(i32 fd, bool v) {
+fn print_bool(i32 fd, bool v) void {
     if (v) {
         emit_str(fd, "true");
         return;
@@ -417,7 +417,7 @@ fn void print_bool(i32 fd, bool v) {
 /// Writes the byte of c. The print family writes a char as its byte, whatever
 /// that byte is.
 /// D11.7
-fn void print_char(i32 fd, char c) {
+fn print_char(i32 fd, char c) void {
     u8[1] mut one = {};
     one[0] = cast(c, u8);
     emit(fd, one[..]);
@@ -425,7 +425,7 @@ fn void print_char(i32 fd, char c) {
 
 /// Writes 0x and lowercase hex digits. It writes 0x0 for null.
 /// D11.7
-fn void print_ptr(i32 fd, void* p) {
+fn print_ptr(i32 fd, void* p) void {
     u8[HEX_MAX] mut out = {};
     u64 start = format_hex(out[..], cast(p, u64));
     emit(fd, out[start..]);
@@ -434,7 +434,7 @@ fn void print_ptr(i32 fd, void* p) {
 /// Writes the bytes of a string. len is the string's own length. It counts no
 /// terminator. The zero string has no byte to write.
 /// D11.7
-fn void print_str(i32 fd, char* ptr, u64 len) {
+fn print_str(i32 fd, char* ptr, u64 len) void {
     if (len == 0) {
         return;
     }
@@ -445,7 +445,7 @@ fn void print_str(i32 fd, char* ptr, u64 len) {
 /// when no member holds v. m points at the table the compiler emits and n
 /// counts its rows (toolchain.md 6 item 21).
 /// D11.7, D7.7
-fn void print_enum(i32 fd, i32 v, enum_member* m, u64 n) {
+fn print_enum(i32 fd, i32 v, enum_member* m, u64 n) void {
     enum_member@ table = m[0..n];
     for (u64 mut i = 0; i < n; i++) {
         if (table[i].value == v) {
@@ -459,21 +459,21 @@ fn void print_enum(i32 fd, i32 v, enum_member* m, u64 n) {
 // ---- failures (toolchain.md 5.2) --------------------------------------------
 // D11.4
 
-fn void message_str(string s) {
+fn message_str(string s) void {
     buffer_append(&message, cast(s, u8@));
 }
 
-fn void message_cstr(char* s) {
+fn message_cstr(char* s) void {
     buffer_append(&message, cast(s[0..libc.strlen(s)], u8@));
 }
 
-fn void message_u64(u64 v) {
+fn message_u64(u64 v) void {
     u8[DECIMAL_MAX] mut out = {};
     u64 start = format_u64(out[..], v);
     buffer_append(&message, out[start..]);
 }
 
-fn void message_i64(i64 v) {
+fn message_i64(i64 v) void {
     u8[DECIMAL_MAX] mut out = {};
     u64 start = format_i64(out[..], v);
     buffer_append(&message, out[start..]);
@@ -483,7 +483,7 @@ fn void message_i64(i64 v) {
 /// the kind. The kind is "runtime error", "panic" or "assertion failed". The
 /// runtime error contract fixes this shape for all three.
 /// D11.4
-fn void fail_begin(char* file, u32 line, u32 col, string kind) {
+fn fail_begin(char* file, u32 line, u32 col, string kind) void {
     flush_all();
     message.len = 0;
     message_cstr(file);
@@ -499,19 +499,19 @@ fn void fail_begin(char* file, u32 line, u32 col, string kind) {
 /// Ends the line, writes it, and calls abort. The process then ends with
 /// SIGABRT.
 /// D11.4
-fn noreturn fail_end() {
+fn fail_end() noreturn {
     message_str("\n");
     buffer_flush(&message);
     libc.abort();
 }
 
-fn noreturn fail_runtime(char* file, u32 line, u32 col, string what) {
+fn fail_runtime(char* file, u32 line, u32 col, string what) noreturn {
     fail_begin(file, line, col, "runtime error");
     message_str(what);
     fail_end();
 }
 
-fn noreturn fail_bounds(i64 index, u64 len, char* file, u32 line, u32 col) {
+fn fail_bounds(i64 index, u64 len, char* file, u32 line, u32 col) noreturn {
     fail_begin(file, line, col, "runtime error");
     message_str("index ");
     message_i64(index);
@@ -520,7 +520,7 @@ fn noreturn fail_bounds(i64 index, u64 len, char* file, u32 line, u32 col) {
     fail_end();
 }
 
-fn noreturn fail_span(i64 lo, i64 hi, u64 len, char* file, u32 line, u32 col) {
+fn fail_span(i64 lo, i64 hi, u64 len, char* file, u32 line, u32 col) noreturn {
     fail_begin(file, line, col, "runtime error");
     message_str("span bounds ");
     message_i64(lo);
@@ -531,11 +531,11 @@ fn noreturn fail_span(i64 lo, i64 hi, u64 len, char* file, u32 line, u32 col) {
     fail_end();
 }
 
-fn noreturn fail_overflow(char* file, u32 line, u32 col) {
+fn fail_overflow(char* file, u32 line, u32 col) noreturn {
     fail_runtime(file, line, col, "integer overflow");
 }
 
-fn noreturn fail_shift(i64 count, char* type_name, char* file, u32 line, u32 col) {
+fn fail_shift(i64 count, char* type_name, char* file, u32 line, u32 col) noreturn {
     fail_begin(file, line, col, "runtime error");
     message_str("shift count ");
     message_i64(count);
@@ -544,15 +544,15 @@ fn noreturn fail_shift(i64 count, char* type_name, char* file, u32 line, u32 col
     fail_end();
 }
 
-fn noreturn fail_div_zero(char* file, u32 line, u32 col) {
+fn fail_div_zero(char* file, u32 line, u32 col) noreturn {
     fail_runtime(file, line, col, "division by zero");
 }
 
-fn noreturn fail_div_overflow(char* file, u32 line, u32 col) {
+fn fail_div_overflow(char* file, u32 line, u32 col) noreturn {
     fail_runtime(file, line, col, "division overflow");
 }
 
-fn noreturn fail_alloc_count(i64 n, char* file, u32 line, u32 col) {
+fn fail_alloc_count(i64 n, char* file, u32 line, u32 col) noreturn {
     fail_begin(file, line, col, "runtime error");
     message_str("negative allocation count ");
     message_i64(n);
@@ -562,7 +562,7 @@ fn noreturn fail_alloc_count(i64 n, char* file, u32 line, u32 col) {
 /// Reports an assignment to an own reference-typed lvalue that is not zero.
 /// The compiler emits this call in checked builds only.
 /// D17.11
-fn noreturn fail_overwrite(char* file, u32 line, u32 col) {
+fn fail_overwrite(char* file, u32 line, u32 col) noreturn {
     fail_runtime(file, line, col, "overwriting owned value");
 }
 
@@ -571,7 +571,7 @@ fn noreturn fail_overwrite(char* file, u32 line, u32 col) {
 /// cast from an integer to an enum is unchecked. The case is not undefined
 /// behavior, so the runtime reports it and names both the enum and the value.
 /// D7.7, D3.9, D10.7
-fn noreturn fail_enum(i64 v, char* type_name, char* file, u32 line, u32 col) {
+fn fail_enum(i64 v, char* type_name, char* file, u32 line, u32 col) noreturn {
     fail_begin(file, line, col, "runtime error");
     message_str("enum value ");
     message_i64(v);
@@ -585,7 +585,7 @@ fn noreturn fail_enum(i64 v, char* type_name, char* file, u32 line, u32 col) {
 /// take the name panic because it implements that builtin and never calls it
 /// (toolchain.md 5.1).
 /// D12.2
-fn noreturn panic(char* ptr, u64 len, char* file, u32 line, u32 col) {
+fn panic(char* ptr, u64 len, char* file, u32 line, u32 col) noreturn {
     fail_begin(file, line, col, "panic");
     if (len > 0) {
         buffer_append(&message, cast(ptr[0..len], u8@));
@@ -596,7 +596,7 @@ fn noreturn panic(char* ptr, u64 len, char* file, u32 line, u32 col) {
 /// Reports a failed assert. text is the source text of the assert argument,
 /// byte for byte.
 /// D11.4
-fn noreturn assert_fail(char* text, char* file, u32 line, u32 col) {
+fn assert_fail(char* text, char* file, u32 line, u32 col) noreturn {
     fail_begin(file, line, col, "assertion failed");
     message_cstr(text);
     fail_end();
@@ -618,7 +618,7 @@ fn noreturn assert_fail(char* text, char* file, u32 line, u32 col) {
 /// write through it and that cast adds no mut. A caller that only reads drops
 /// the mark on the way.
 /// D2.4, D3.11, D5.4
-fn void mut* own alloc(u64 elem_size, u64 count, char* file, u32 line, u32 col) {
+fn alloc(u64 elem_size, u64 count, char* file, u32 line, u32 col) void mut* own {
     if (elem_size != 0 && count > U64_MAX / elem_size) {
         fail_runtime(file, line, col, "allocation size overflow");
     }
@@ -638,7 +638,7 @@ fn void mut* own alloc(u64 elem_size, u64 count, char* file, u32 line, u32 col) 
 /// declaration named del would shadow the universe function, and this module
 /// calls del on its own storage.
 /// D12.2, D7.9
-fn void free(void* own p) {
+fn free(void* own p) void {
     libc.free(move(p));
 }
 
@@ -650,7 +650,7 @@ fn void free(void* own p) {
 /// This function compares the bytes with libc.memcmp. It must not use ==,
 /// because == calls this function.
 /// D3.7
-fn bool str_eq(char* a, u64 a_len, char* b, u64 b_len) {
+fn str_eq(char* a, u64 a_len, char* b, u64 b_len) bool {
     if (a_len != b_len) {
         return false;
     }
@@ -686,7 +686,7 @@ fn bool str_eq(char* a, u64 a_len, char* b, u64 b_len) {
 ///
 /// The allocation is an ordinary new, so a failed allocation here names the
 /// line of std/rt.ft that made it. No decision states that position.
-fn void args_init(i32 argc, char* mut* argv) {
+fn args_init(i32 argc, char* mut* argv) void {
     del(args_store);
     if (argc <= 0) {
         return;
@@ -704,14 +704,14 @@ fn void args_init(i32 argc, char* mut* argv) {
 /// Answers with the span main received. sys.args() hands it on. The result is
 /// a view. The runtime keeps the storage (stdlib.md 3).
 /// D8.6, D11.6, D17.3
-fn string@ args() {
+fn args() string@ {
     return args_store;
 }
 
 /// Flushes every buffer and ends the process with status & 0xFF. sys.exit
 /// calls it.
 /// D11.6
-fn noreturn exit(i32 status) {
+fn exit(i32 status) noreturn {
     flush_all();
     libc.exit(status & EXIT_STATUS_MASK);
 }

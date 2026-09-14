@@ -50,12 +50,12 @@ BAD_NAMES_PROBLEMS = [
     "test/fort_lint/bad_names.ft:15:9: field 'X' is not lower_case (D1.4)",
     "test/fort_lint/bad_names.ft:18:6: enum 'Color' is not lower_case (D1.4)",
     "test/fort_lint/bad_names.ft:18:14: enum member 'Red' is not lower_case (D1.4)",
-    "test/fort_lint/bad_names.ft:20:8: fn 'addTwo' is not lower_case (D1.4)",
-    "test/fort_lint/bad_names.ft:20:19: parameter 'aValue' is not lower_case (D1.4)",
+    "test/fort_lint/bad_names.ft:20:4: fn 'addTwo' is not lower_case (D1.4)",
+    "test/fort_lint/bad_names.ft:20:15: parameter 'aValue' is not lower_case (D1.4)",
     "test/fort_lint/bad_names.ft:21:9: local 'Sum' is not lower_case (D1.4)",
     "test/fort_lint/bad_names.ft:27:11: local 'Point' is not lower_case (D1.4)",
     "test/fort_lint/bad_names.ft:27:11: local 'Point' takes the name of its type (D1.4)",
-    "test/fort_lint/bad_names.ft:42:22: parameter 'pair' takes the name of its type (D1.4)",
+    "test/fort_lint/bad_names.ft:42:18: parameter 'pair' takes the name of its type (D1.4)",
     "test/fort_lint/bad_names.ft:46:101: line is 125 columns, over the 100 of the house style",
 ]
 
@@ -67,7 +67,7 @@ BROKEN_PROBLEMS = [
     "test/fort_lint/broken.ft:1:1: fort could not check this closure: "
     "test/fort_lint/broken.ft:8:22: unknown name 'nowhere'",
     "test/fort_lint/broken.ft:7:9: local 'badName' is not lower_case (D1.4)",
-    "test/fort_lint/broken.ft:11:8: fn 'alsoBad' is not lower_case (D1.4)",
+    "test/fort_lint/broken.ft:11:4: fn 'alsoBad' is not lower_case (D1.4)",
 ]
 
 
@@ -146,8 +146,8 @@ class TypeBaseName(unittest.TestCase):
         self.assertEqual(fort_lint.type_base_name("strbuf.str_buf mut*"), "str_buf")
 
     def test_a_function_type_names_nothing(self):
-        self.assertIsNone(fort_lint.type_base_name("fn i32(i32)"))
-        self.assertIsNone(fort_lint.type_base_name("fn void()"))
+        self.assertIsNone(fort_lint.type_base_name("fn (i32) i32"))
+        self.assertIsNone(fort_lint.type_base_name("fn () void"))
 
     def test_no_type_at_all(self):
         self.assertIsNone(fort_lint.type_base_name(""))
@@ -183,7 +183,7 @@ class ShadowRule(unittest.TestCase):
         self.assertIsNone(fort_lint.shadow_problem("local", "strbuf", "strbuf.str_buf"))
 
     def test_a_variable_of_function_type_is_not_compared(self):
-        self.assertIsNone(fort_lint.shadow_problem("local", "fn", "fn i32(i32)"))
+        self.assertIsNone(fort_lint.shadow_problem("local", "fn", "fn (i32) i32"))
 
 
 class RecordProblems(unittest.TestCase):
@@ -303,7 +303,7 @@ class DocumentProblems(unittest.TestCase):
         """One broken module must not switch the lint off for its importers."""
         document = {
             "diagnostics": [{"file": "b.ft", "line": 1, "col": 1, "message": "bad"}],
-            "symbols": [record("fn", "alsoBad", "fn void()", line=3, col=8)],
+            "symbols": [record("fn", "alsoBad", "fn () void", line=3, col=8)],
         }
         self.assertIn("alsoBad", self.problems(document)[1][2])
 
@@ -436,7 +436,7 @@ class FakeCompiler(unittest.TestCase):
     def test_a_clean_document_passes(self):
         document = (
             '{"diagnostics":[],"symbols":[{"file":"a.ft","line":1,"col":1,"name":"ok",'
-            '"kind":"fn","type":"fn void()","is_decl":true}]}'
+            '"kind":"fn","type":"fn () void","is_decl":true}]}'
         )
         fort = self.fake_fort("print(%r)\n" % document)
         got = self.run_lint(fort, "a.ft")
@@ -446,7 +446,7 @@ class FakeCompiler(unittest.TestCase):
     def test_a_violation_fails_the_run(self):
         document = (
             '{"diagnostics":[],"symbols":[{"file":"a.ft","line":2,"col":3,"name":"Bad",'
-            '"kind":"fn","type":"fn void()","is_decl":true}]}'
+            '"kind":"fn","type":"fn () void","is_decl":true}]}'
         )
         fort = self.fake_fort("print(%r)\n" % document)
         got = self.run_lint(fort, "a.ft")
@@ -558,7 +558,7 @@ class RunPerClosure(unittest.TestCase):
     def declaration(self, file, name, line=1, col=1):
         return (
             '{"file":"%s","line":%d,"col":%d,"name":"%s",'
-            '"kind":"fn","type":"fn void()","is_decl":true}' % (file, line, col, name)
+            '"kind":"fn","type":"fn () void","is_decl":true}' % (file, line, col, name)
         )
 
     def test_one_run_judges_every_file_of_its_closure(self):
@@ -676,7 +676,7 @@ class RunPerClosure(unittest.TestCase):
 
     def test_the_checks_that_read_the_text_run_for_every_file_of_a_closure(self):
         """The width check is the file's own, so one run must not cost it."""
-        (self.root / "b.ft").write_text("// " + "x" * 120 + "\nfn void f() {}\n")
+        (self.root / "b.ft").write_text("// " + "x" * 120 + "\nfn f() void {}\n")
         document = self.document(
             self.declaration("a.ft", "ok"), self.declaration("b.ft", "ok", line=2)
         )
@@ -892,7 +892,7 @@ class RealCompiler(unittest.TestCase):
         scratch.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=str(scratch)) as tmp:
             path = Path(tmp) / "spare.ft"
-            path.write_text("fn i32 badOne() {\n    return 0;\n}\n")
+            path.write_text("fn badOne() i32 {\n    return 0;\n}\n")
             got = self.run_lint(str(path.relative_to(ROOT)))
             self.assertEqual(got.returncode, 1)
             self.assertIn("fn 'badOne' is not lower_case (D1.4)", got.stdout)

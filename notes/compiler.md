@@ -57,9 +57,11 @@ came here.
   pushes that node and clears `failed` without skipping, since the construct already stands at
   the boundary. `spec_begin` clears `failed` and `spec_rewind` restores it, because a speculation
   answers about the tokens ahead and every speculation reads `failed` afterwards to tell a type
-  that parsed from one that did not: a speculation made during an unwind, which is what a
-  recovery point and the first statement of a body with no `{` do, would otherwise read the
-  unwind and answer no. And every recovery must consume a token unless it is
+  that parsed from one that did not: a speculation made during an unwind, which is what the
+  first statement of a body with no `{` does, would otherwise read the unwind and answer no. A
+  recovery point did the same until T-136 gave `at_decl_start` two tokens of lookahead in place
+  of its speculation, so the rule still holds and one of its two examples is gone.
+  And every recovery must consume a token unless it is
   at the end of the file, or `parse_module` loops forever: `skip_to_boundary` bumps once when the
   construct consumed nothing. A skip counts the `(` and `[` the failed construct left open, from
   its first token, so the `;` of a `for` header or of an argument list is not mistaken for a
@@ -455,7 +457,7 @@ came here.
   `own` included: `run/ownership/015` and `019` gained the `own` `std.libc` carries. **So a
   declaration added to `std.libc` binds every program in the repository**, and the cost of a wrong
   signature is paid by all of them at once: T-045 added `qsort` there, and a program that
-  redeclares it must now write the same parameter types, `fn i32(void*, void*)` included.
+  redeclares it must now write the same parameter types, `fn (void*, void*) i32` included.
   `grep -rn 'extern fn void qsort' .` finds one declaration in `std/libc.ft` and one in
   `spec/module-system.md` 8.5, which spells it out as its callback example. **Retyping one costs
   the same**, and the bill is the programs that redeclare it, not the ones that call it: T-086
@@ -497,8 +499,8 @@ binary overstates that cost by that factor. The commands, run at the top of the 
 after `tools/vm build debug fort_stage2`:
 
 ```sh
-printf 'fn i32 main() {\n    println(1);\n    return 0;\n}\n' > /tmp/int.ft
-printf 'fn i32 main() {\n    println(1.5);\n    return 0;\n}\n' > /tmp/flt.ft
+printf 'fn main() i32 {\n    println(1);\n    return 0;\n}\n' > /tmp/int.ft
+printf 'fn main() i32 {\n    println(1.5);\n    return 0;\n}\n' > /tmp/flt.ft
 for p in int flt; do
     build/debug/stage2/fort -S --std-dir build/debug/std -o /tmp/$p.ll /tmp/$p.ft
     echo "$p $(wc -c < /tmp/$p.ll) $(grep -c '^define' /tmp/$p.ll)"
@@ -538,7 +540,7 @@ module, and `nm` finds all 14 in the binary:
 `load_runtime` (`src/bootstrap/modules.c:906`) puts the whole of `std.rt` into every closure stage1
 reads, and `base_type` (`src/bootstrap/check.c:476`) refuses `f64` on sight, so a declaration
 nothing names is enough. Measured on 2026-09-14: a copy of `std/rt.ft` carrying only
-`fn void probe_f64(f64 v) { return; }` -- no literal, no body, no arithmetic -- gives
+`fn probe_f64(f64 v) void { return; }` -- no literal, no body, no arithmetic -- gives
 `not supported by the bootstrap compiler: floats` and exit 1 for a program whose only call is
 `println(1)`. `src/fort` itself holds **no float value**: every `f64` in its seven mentioning files
 is a comment, a string literal or an enum member, which it must be, since stage1 builds stage2
@@ -659,8 +661,11 @@ gone.
   bootstrap itself accepts. `test/lang/bootstrap-unsupported.txt` is that list: no floats (`f32`,
   `f64`, float literals), no second array or span level in one written type (`i32[3][4]`,
   `i32[4]@`, `u8@@`, `node@[4]`, T-043), no `do { } while` and no `?:`. Function
-  pointers are inside the subset (D3.10), so a dispatch table is fine. These are the constructs a
-  C file may hold that have no fort spelling, with what replaces each; the rules the bootstrap
+  pointers are inside the subset (D3.10), and a dispatch table wraps them in a struct, because a
+  function type carries no suffix of its own (T-136: `fn (i32) i32[2]` returns an `i32[2]`, so an
+  array of function pointers is `struct slot { fn (i32) i32 f; }` and `slot[2]`). These are the
+  constructs a C file may hold that have no fort spelling, with what replaces each; the rules the
+  bootstrap
   already follows so that it stays portable are the first four.
   **`src/fort` stays inside that subset, and T-046 does not release it.** That ticket froze
   stage1; it did not stop stage1 compiling stage2. The CMake target `fort_stage2` compiles
@@ -690,7 +695,18 @@ gone.
   and list them, including the mechanical ones: the ticket's first inventory named six, and the
   two it missed were `type_build`'s call of `type_voidptr` and the `TYPE_POS_ALLOC` arm of
   `check_type_at`, which is the one site of the nine that changes what an existing program
-  means. A feature that
+  means.
+  **T-136 is the fourth, and it is neither of the two halves: it replaces a form rather than
+  widening one**, so stage1 stops parsing trees it parses today. The user ratified a Deviation for
+  it on 2026-09-14; the ticket records the reasoning. Nine code sites, all reached by the new
+  shape of a signature: in `parser.c` the forward declaration of `parse_return_type`,
+  `parse_fn_type_params`, the `TOK_KW_FN` arm of `parse_base_type`, `at_decl_start`,
+  `parse_fn_decl`, `parse_fn_top_decl` and `parse_extern_decl`; in `types.c` the `TYPE_FN` arm of
+  `spell_base`; and in `check.c` the text `check_main` prints, which quotes a signature. Three
+  more lines are comments that quote one. `at_decl_start` lost its speculative parse with the
+  change: `fn` followed by a name and then a `(` is a definition, and a `fn` followed by `(` at
+  once is a function type, so two tokens of lookahead decide what a return type used to.
+  A feature that
   `std/` does not spell still goes to `src/fort` alone. A feature therefore leaves
   `test/lang/unsupported-stage2.txt` when stage2 gains it, and leaves
   `test/lang/bootstrap-unsupported.txt` never. The ctest `lang` holds that list: stage1 runs over
@@ -776,11 +792,11 @@ gone.
     caller, so a pointer inside it that named the local -- or a sibling field of the local --
     dangles the moment it lands. Storing the *caller's* address is fine, which is why
     `driver.ft`'s `analysis_create(&s)` is correct: `s` is the caller's session and does not
-    move. What is not fine is the shape T-035's test environment had, `fn env open()` building an
+    move. What is not fine is the shape T-035's test environment had, `fn open() env` building an
     `env` in a local and calling `check.check_init(&e.ck, &e.m.s)` on a field of that local before
     returning it: every diagnostic then went to the dead local's session and the suite saw a check
     that reported *nothing at all*, which reads as a pass. The fix is to fill the caller's value
-    (`fn void open(env mut* e)`). `modules.ft` sidesteps the question entirely by taking the
+    (`fn open(env mut* e) void`). `modules.ft` sidesteps the question entirely by taking the
     session as a parameter of every call instead of holding it.
   - `_Static_assert` has no fort spelling. The invariant becomes a unit test, or a runtime
     `assert` at the one place that depends on it; `prim.h`'s assertion on the order of

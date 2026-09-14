@@ -25,7 +25,7 @@
 #include "test.h"
 
 // The tree of the entry file the sandbox writes (driver_helpers.h):
-// `fn i32 main() { return 0; }`.
+// `fn main() i32 { return 0; }`.
 static const char SANDBOX_ENTRY_TREE[] =
     "(module (fn (type (prim i32)) main (params) (block (return (int 0)))))\n";
 
@@ -143,7 +143,7 @@ TEST(an_empty_file_is_an_empty_module, {
 TEST(a_syntax_error_is_reported_and_the_file_is_still_dumped, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    TEST_ASSERT_TRUE(write_source(box.entry, "fn void f() { x = ; }\nfn void g() { }\n"));
+    TEST_ASSERT_TRUE(write_source(box.entry, "fn f() void { x = ; }\nfn g() void { }\n"));
     const run_t run = RUN_CAPTURED("--ast", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
     TEST_ASSERT_EQ_STR(run.out,
@@ -165,7 +165,7 @@ TEST(a_syntax_error_is_reported_and_the_file_is_still_dumped, {
 TEST(a_lexical_error_leaves_a_tree_of_the_rest, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    TEST_ASSERT_TRUE(write_source(box.entry, "#\nfn void g() { }\n"));
+    TEST_ASSERT_TRUE(write_source(box.entry, "#\nfn g() void { }\n"));
     const run_t run = RUN_CAPTURED("--ast", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
     TEST_ASSERT_EQ_STR(run.out, "(module (fn (type (void)) g (params) (block)))\n");
@@ -257,7 +257,7 @@ TEST(the_other_options_are_accepted_and_unused, {
 TEST(a_program_the_checker_would_refuse_still_dumps, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    TEST_ASSERT_TRUE(write_source(box.entry, "fn void f() { nosuch(1); }\n"));
+    TEST_ASSERT_TRUE(write_source(box.entry, "fn f() void { nosuch(1); }\n"));
     const run_t run = RUN_CAPTURED("--ast", box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     TEST_ASSERT_EQ_STR(run.out,
@@ -272,10 +272,10 @@ TEST(a_program_the_checker_would_refuse_still_dumps, {
 TEST(a_second_run_starts_from_an_empty_sink, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    TEST_ASSERT_TRUE(write_source(box.entry, "fn void f() { x = ; }\n"));
+    TEST_ASSERT_TRUE(write_source(box.entry, "fn f() void { x = ; }\n"));
     const run_t first = RUN_CAPTURED("--ast", box.entry);
     TEST_ASSERT_EQ_INT32(first.status, FORT_EXIT_COMPILE_ERROR);
-    TEST_ASSERT_TRUE(write_source(box.entry, "fn void f() { }\n"));
+    TEST_ASSERT_TRUE(write_source(box.entry, "fn f() void { }\n"));
     const run_t second = RUN_CAPTURED("--ast", box.entry);
     TEST_ASSERT_EQ_INT32(second.status, FORT_EXIT_OK);
     TEST_ASSERT_EQ_STR(second.out, "(module (fn (type (void)) f (params) (block)))\n");

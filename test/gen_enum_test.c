@@ -21,7 +21,7 @@
 // signed representation from an unsigned one.
 // D3.9
 static const char SIGN_SOURCE[] = "enum sign { neg = -1, zero, pos }\n"
-                                  "fn i32 main() {\n"
+                                  "fn main() i32 {\n"
                                   "    sign s = sign.neg;\n"
                                   "    sign z = {};\n"
                                   "    i64 wide = cast(s, i64);\n"
@@ -32,9 +32,9 @@ static const char SIGN_SOURCE[] = "enum sign { neg = -1, zero, pos }\n"
 // The enum of an imported module, printed on both sides of the boundary: one
 // declaration, one table (item 21).
 static const char PALETTE_SOURCE[] = "enum color { red, green }\n"
-                                     "fn void show(color c) { println(c); }\n";
+                                     "fn show(color c) void { println(c); }\n";
 static const char PALETTE_APP[] = "import palette;\n"
-                                  "fn i32 main() {\n"
+                                  "fn main() i32 {\n"
                                   "    palette.color c = palette.color.green;\n"
                                   "    palette.show(c);\n"
                                   "    println(c);\n"
@@ -45,7 +45,7 @@ static const char PALETTE_APP[] = "import palette;\n"
 
 TEST(a_member_is_the_i32_its_declaration_order_gives, {
     TEST_ASSERT_TRUE(emit("enum color { red, green, blue }\n"
-                          "fn i32 main() {\n    color a = color.red;\n"
+                          "fn main() i32 {\n    color a = color.red;\n"
                           "    color b = color.green;\n    color c = color.blue;\n"
                           "    return cast(a, i32) +% cast(b, i32) +% cast(c, i32);\n}\n"));
     // Values start at 0 and increment, and a member is a constant the checker
@@ -60,7 +60,7 @@ TEST(a_member_is_the_i32_its_declaration_order_gives, {
 
 TEST(an_explicit_value_sets_the_members_after_it, {
     TEST_ASSERT_TRUE(emit("enum color { red, green = 5, blue }\n"
-                          "fn i32 main() {\n    color b = color.blue;\n"
+                          "fn main() i32 {\n    color b = color.blue;\n"
                           "    return cast(b, i32);\n}\n"));
     // An explicit value is a constant expression and the next member follows
     // it.
@@ -92,7 +92,7 @@ TEST(the_zero_value_of_an_enum_is_zero_whatever_its_members_are, {
 
 TEST(a_zero_enum_is_stored_and_never_memset, {
     TEST_ASSERT_TRUE(emit("enum level { low = 1, high = 2 }\n"
-                          "fn i32 main() {\n    level l = {};\n    return cast(l, i32);\n}\n"));
+                          "fn main() i32 {\n    level l = {};\n    return cast(l, i32);\n}\n"));
     // An enum is a scalar, so its zero value is a store and not the
     // `llvm.memset` an aggregate's `{}` is.
     // D19.2, D19.3
@@ -123,7 +123,7 @@ TEST(a_narrowing_cast_of_an_enum_is_a_trunc, {
 
 TEST(an_integer_cast_to_an_enum_is_unchecked, {
     TEST_ASSERT_TRUE(emit("enum color { red, green }\n"
-                          "fn i32 main() {\n    i64 v = 9;\n    color c = cast(v, color);\n"
+                          "fn main() i32 {\n    i64 v = 9;\n    color c = cast(v, color);\n"
                           "    return cast(c, i32);\n}\n"));
     // Int to enum is unchecked: the value is truncated to `i32` and stored,
     // with no compare against the member list.
@@ -136,7 +136,7 @@ TEST(an_integer_cast_to_an_enum_is_unchecked, {
 
 TEST(two_enums_compare_as_i32, {
     TEST_ASSERT_TRUE(emit("enum color { red, green }\n"
-                          "fn i32 main() {\n    color a = color.red;\n    color b = color.green;\n"
+                          "fn main() i32 {\n    color a = color.red;\n    color b = color.green;\n"
                           "    return cast(a == b, i32) +% cast(a != b, i32);\n}\n"));
     // Enums support `==` and `!=` alone, on the `i32` representation.
     // D3.9
@@ -159,7 +159,7 @@ TEST(a_table_holds_a_negative_member_as_a_negative_i32, {
 
 TEST(a_member_name_is_a_string_constant_of_its_own, {
     TEST_ASSERT_TRUE(emit("enum color { red, green }\n"
-                          "fn i32 main() { println(color.red); return 0; }\n"));
+                          "fn main() i32 { println(color.red); return 0; }\n"));
     // The names the table points at are ordinary string constants, in
     // declaration order (item 21, item 5).
     const char* want = "@.str.0 = private unnamed_addr constant [4 x i8] c\"red\\00\", align 1\n"
@@ -170,8 +170,8 @@ TEST(a_member_name_is_a_string_constant_of_its_own, {
 
 TEST(one_table_serves_every_print_of_its_enum, {
     TEST_ASSERT_TRUE(emit("enum color { red, green }\n"
-                          "fn void twice(color c) { println(c); println(c); }\n"
-                          "fn i32 main() {\n    twice(color.red);\n    println(color.green);\n"
+                          "fn twice(color c) void { println(c); println(c); }\n"
+                          "fn main() i32 {\n    twice(color.red);\n    println(color.green);\n"
                           "    return 0;\n}\n"));
     // The table is assigned on first use and shared afterwards, so three
     // prints in two definitions emit one table (item 21).
@@ -202,7 +202,7 @@ TEST(two_modules_printing_one_enum_emit_one_table, {
 
 TEST(a_module_that_never_prints_an_enum_emits_no_table, {
     TEST_ASSERT_TRUE(emit("enum color { red, green }\n"
-                          "fn i32 main() {\n    color c = color.green;\n"
+                          "fn main() i32 {\n    color c = color.green;\n"
                           "    return cast(c, i32);\n}\n"));
     // A table is emitted only for an enum some `print` reaches (item 21).
     TEST_ASSERT_EQ_STR(absent("@.enum."), "absent");
@@ -211,7 +211,7 @@ TEST(a_module_that_never_prints_an_enum_emits_no_table, {
 })
 
 TEST(the_enum_member_type_is_always_named, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() { return 0; }\n"));
+    TEST_ASSERT_TRUE(emit("fn main() i32 { return 0; }\n"));
     // Both named types are emitted whether they are used or not (item 1), and
     // `%fort.enum_member` has C's 16-byte layout (item 21).
     TEST_ASSERT_EQ_STR(found("%fort.enum_member = type { i32, ptr }\n"),

@@ -1017,20 +1017,20 @@ static void spell_base(const type_t* t, sb_t* out) {
         sb_append(out, "<error>");
         return;
     case TYPE_FN:
-        sb_append(out, "fn ");
-        if (t->noreturn) {
-            sb_append(out, "noreturn");
-        } else {
-            spell(t->elem, false, out);
-        }
-        sb_push(out, '(');
+        // D8.1: the result comes last, as it does in a declaration
+        sb_append(out, "fn (");
         for (uint32_t i = 0; i < t->nparams; i++) {
             if (i > 0) {
                 sb_append(out, ", ");
             }
             spell(t->params[i], false, out);
         }
-        sb_push(out, ')');
+        sb_append(out, ") ");
+        if (t->noreturn) {
+            sb_append(out, "noreturn");
+        } else {
+            spell(t->elem, false, out);
+        }
         return;
     case TYPE_PTR:
     case TYPE_VOIDPTR:

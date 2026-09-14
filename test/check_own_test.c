@@ -52,38 +52,38 @@ TEST(copying_an_owning_lvalue_into_an_assignment_needs_move, {
 })
 
 TEST(passing_an_owning_lvalue_to_an_own_parameter_needs_move, {
-    TEST_ASSERT_FALSE(check_src("fn void eat(i32 mut@ own s) {\n    del(s);\n}\n"
-                                "fn i32 main() {\n    i32 mut@ own a = new(i32, 2);\n"
+    TEST_ASSERT_FALSE(check_src("fn eat(i32 mut@ own s) void {\n    del(s);\n}\n"
+                                "fn main() i32 {\n    i32 mut@ own a = new(i32, 2);\n"
                                 "    eat(a);\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("copying an owning value requires 'move': write move(a)"));
-    TEST_ASSERT_TRUE(check_src("fn void eat(i32 mut@ own s) {\n    del(s);\n}\n"
-                               "fn i32 main() {\n    i32 mut@ own a = new(i32, 2);\n"
+    TEST_ASSERT_TRUE(check_src("fn eat(i32 mut@ own s) void {\n    del(s);\n}\n"
+                               "fn main() i32 {\n    i32 mut@ own a = new(i32, 2);\n"
                                "    eat(move(a));\n    return 0;\n}\n"));
     // A borrowing parameter lends instead, and needs no `move`.
     // D17.4
-    TEST_ASSERT_TRUE(check_src("fn u64 look(i32@ s) {\n    return s.len;\n}\n"
-                               "fn i32 main() {\n    i32 mut@ own a = new(i32, 2);\n"
+    TEST_ASSERT_TRUE(check_src("fn look(i32@ s) u64 {\n    return s.len;\n}\n"
+                               "fn main() i32 {\n    i32 mut@ own a = new(i32, 2);\n"
                                "    println(look(a));\n    del(a);\n    return 0;\n}\n"));
 })
 
 TEST(an_own_field_of_a_literal_needs_move, {
-    TEST_ASSERT_FALSE(check_src(VEC "fn i32 main() {\n"
+    TEST_ASSERT_FALSE(check_src(VEC "fn main() i32 {\n"
                                     "    i32 mut@ own a = new(i32, 2);\n"
                                     "    vec v = vec{a, 2};\n    del(a);\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("copying an owning value requires 'move': write move(a)"));
-    TEST_ASSERT_TRUE(check_src(VEC "fn i32 main() {\n"
+    TEST_ASSERT_TRUE(check_src(VEC "fn main() i32 {\n"
                                    "    i32 mut@ own a = new(i32, 2);\n"
                                    "    vec v = vec{move(a), 2};\n    del(v.data);\n"
                                    "    return 0;\n}\n"));
 })
 
 TEST(an_own_element_of_an_array_literal_needs_move, {
-    TEST_ASSERT_FALSE(check_src(NODE "fn i32 main() {\n"
+    TEST_ASSERT_FALSE(check_src(NODE "fn main() i32 {\n"
                                      "    node mut* own a = new(node);\n"
                                      "    node mut* own[1] t = {a};\n    del(a);\n"
                                      "    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("copying an owning value requires 'move': write move(a)"));
-    TEST_ASSERT_TRUE(check_src(NODE "fn i32 main() {\n"
+    TEST_ASSERT_TRUE(check_src(NODE "fn main() i32 {\n"
                                     "    node mut* own a = new(node);\n"
                                     "    node mut* own[1] t = {move(a)};\n    del(t[0]);\n"
                                     "    return 0;\n}\n"));
@@ -93,9 +93,9 @@ TEST(an_own_rvalue_lands_in_an_own_place_as_it_is, {
     // `new`, a call result, `move` and a `cast` to an `own` type all flow into
     // an `own` place without a `move` of their own.
     // D17.5
-    TEST_ASSERT_TRUE(check_src("fn i32 mut@ own make(u64 n) {\n    return new(i32, n);\n}\n"
-                               "fn void eat(i32 mut@ own s) {\n    del(s);\n}\n"
-                               "fn i32 main() {\n    i32 mut@ own a = make(2);\n"
+    TEST_ASSERT_TRUE(check_src("fn make(u64 n) i32 mut@ own {\n    return new(i32, n);\n}\n"
+                               "fn eat(i32 mut@ own s) void {\n    del(s);\n}\n"
+                               "fn main() i32 {\n    i32 mut@ own a = make(2);\n"
                                "    eat(new(i32, 1));\n    eat(make(3));\n    eat(move(a));\n"
                                "    u8 mut@ own b = new(u8, 1);\n"
                                "    string own s = cast(move(b), string own);\n"
@@ -106,9 +106,9 @@ TEST(an_own_rvalue_lands_in_an_own_place_as_it_is, {
 // D17.5, D17.7
 
 TEST(returning_a_bare_own_local_is_an_implicit_move, {
-    TEST_ASSERT_TRUE(check_src("fn i32 mut@ own make() {\n"
+    TEST_ASSERT_TRUE(check_src("fn make() i32 mut@ own {\n"
                                "    i32 mut@ own buf = new(i32, 2);\n    return buf;\n}\n"
-                               "fn i32 main() {\n    i32 mut@ own b = make();\n"
+                               "fn main() i32 {\n    i32 mut@ own b = make();\n"
                                "    del(b);\n    return 0;\n}\n"));
     // The checker records the implicit move for the emitter.
     // D17.5
@@ -117,33 +117,33 @@ TEST(returning_a_bare_own_local_is_an_implicit_move, {
 })
 
 TEST(returning_an_own_parameter_is_an_implicit_move, {
-    TEST_ASSERT_TRUE(check_src("fn i32 mut@ own pass(i32 mut@ own s) {\n    return s;\n}\n"
-                               "fn i32 main() {\n    i32 mut@ own b = pass(new(i32, 2));\n"
+    TEST_ASSERT_TRUE(check_src("fn pass(i32 mut@ own s) i32 mut@ own {\n    return s;\n}\n"
+                               "fn main() i32 {\n    i32 mut@ own b = pass(new(i32, 2));\n"
                                "    del(b);\n    return 0;\n}\n"));
 })
 
 TEST(returning_a_local_owning_aggregate_is_an_implicit_move, {
-    TEST_ASSERT_TRUE(check_src(VEC "fn vec make() {\n    vec mut v = {};\n"
+    TEST_ASSERT_TRUE(check_src(VEC "fn make() vec {\n    vec mut v = {};\n"
                                    "    v.data = new(i32, 2);\n    return v;\n}\n"
-                                   "fn i32 main() {\n    vec v = make();\n"
+                                   "fn main() i32 {\n    vec v = make();\n"
                                    "    del(v.data);\n    return 0;\n}\n"));
 })
 
 TEST(returning_an_owning_lvalue_that_is_not_a_local_needs_move, {
     // A field is not a bare local, so the transfer is written.
     // D17.5
-    TEST_ASSERT_FALSE(check_src(VEC "fn i32 mut@ own take(vec mut* v) {\n"
+    TEST_ASSERT_FALSE(check_src(VEC "fn take(vec mut* v) i32 mut@ own {\n"
                                     "    return v->data;\n}\n"
-                                    "fn i32 main() {\n    return 0;\n}\n"));
+                                    "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("copying an owning value requires 'move'"));
-    TEST_ASSERT_TRUE(check_src(VEC "fn i32 mut@ own take(vec mut* v) {\n"
+    TEST_ASSERT_TRUE(check_src(VEC "fn take(vec mut* v) i32 mut@ own {\n"
                                    "    return move(v->data);\n}\n"
-                                   "fn i32 main() {\n    return 0;\n}\n"));
+                                   "fn main() i32 {\n    return 0;\n}\n"));
     // Neither is an element of a local array.
     // D17.5
-    TEST_ASSERT_FALSE(check_src(NODE "fn node mut* own first() {\n"
+    TEST_ASSERT_FALSE(check_src(NODE "fn first() node mut* own {\n"
                                      "    node mut* own[2] t = {};\n    return t[0];\n}\n"
-                                     "fn i32 main() {\n    return 0;\n}\n"));
+                                     "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("copying an owning value requires 'move'"));
 })
 
@@ -154,8 +154,8 @@ TEST(every_annotation_bit_is_cleared_before_a_second_check, {
     // re-check: the test sets every one of them on a `return` the checker
     // marks with none and asserts that the second check wipes them.
     // D20.2
-    TEST_ASSERT_TRUE(check_src("fn i32 pass(i32 n) {\n    return n;\n}\n"
-                               "fn i32 main() {\n    return pass(1);\n}\n"));
+    TEST_ASSERT_TRUE(check_src("fn pass(i32 n) i32 {\n    return n;\n}\n"
+                               "fn main() i32 {\n    return pass(1);\n}\n"));
     ast_node_t* ret = node_in_main(AST_RETURN, NULL);
     TEST_ASSERT_NONNULL(ret);
     TEST_ASSERT_EQ_UINT64((uint64_t)ret->ann, (uint64_t)0);
@@ -171,9 +171,9 @@ TEST(every_annotation_bit_is_cleared_before_a_second_check, {
 })
 
 TEST(the_implicit_move_mark_survives_a_second_check_of_the_same_tree, {
-    TEST_ASSERT_TRUE(check_src("fn i32 mut@ own make() {\n"
+    TEST_ASSERT_TRUE(check_src("fn make() i32 mut@ own {\n"
                                "    i32 mut@ own buf = new(i32, 2);\n    return buf;\n}\n"
-                               "fn i32 main() {\n    i32 mut@ own b = make();\n"
+                               "fn main() i32 {\n    i32 mut@ own b = make();\n"
                                "    del(b);\n    return 0;\n}\n"));
     const module_t* m = module_at("main");
     TEST_ASSERT_NONNULL(m);
@@ -186,8 +186,8 @@ TEST(the_implicit_move_mark_survives_a_second_check_of_the_same_tree, {
 })
 
 TEST(a_returned_local_that_owns_nothing_carries_no_move, {
-    TEST_ASSERT_TRUE(check_src("fn i32 mut* pass(i32 mut* p) {\n    return p;\n}\n"
-                               "fn i32 main() {\n    i32 mut v = 1;\n"
+    TEST_ASSERT_TRUE(check_src("fn pass(i32 mut* p) i32 mut* {\n    return p;\n}\n"
+                               "fn main() i32 {\n    i32 mut v = 1;\n"
                                "    println(*pass(&v));\n    return 0;\n}\n"));
     const ast_node_t* ret = node_in_main(AST_RETURN, NULL);
     TEST_ASSERT_TRUE(ret != NULL && (ret->ann & CHECK_ANN_MOVE) == 0);
@@ -204,50 +204,50 @@ TEST(move_needs_no_mut_on_the_binding, {
 })
 
 TEST(move_through_an_immutable_indirection_is_refused, {
-    TEST_ASSERT_FALSE(check_src(NODE "fn node mut* own take(node* n) {\n"
+    TEST_ASSERT_FALSE(check_src(NODE "fn take(node* n) node mut* own {\n"
                                      "    return move(n->next);\n}\n"
-                                     "fn i32 main() {\n    return 0;\n}\n"));
+                                     "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("'move' cannot empty an immutable indirection"));
     // Level 1 mutable: the same move is allowed.
     // D17.6
-    TEST_ASSERT_TRUE(check_src(NODE "fn node mut* own take(node mut* n) {\n"
+    TEST_ASSERT_TRUE(check_src(NODE "fn take(node mut* n) node mut* own {\n"
                                     "    return move(n->next);\n}\n"
-                                    "fn i32 main() {\n    return 0;\n}\n"));
+                                    "fn main() i32 {\n    return 0;\n}\n"));
 })
 
 TEST(move_out_of_an_immutable_span_slot_is_refused, {
-    TEST_ASSERT_FALSE(check_src(NODE "fn node mut* own take(node mut* own@ v) {\n"
+    TEST_ASSERT_FALSE(check_src(NODE "fn take(node mut* own@ v) node mut* own {\n"
                                      "    return move(v[0]);\n}\n"
-                                     "fn i32 main() {\n    return 0;\n}\n"));
+                                     "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("'move' cannot empty an immutable indirection"));
-    TEST_ASSERT_TRUE(check_src(NODE "fn node mut* own take(node mut* own mut@ v) {\n"
+    TEST_ASSERT_TRUE(check_src(NODE "fn take(node mut* own mut@ v) node mut* own {\n"
                                     "    return move(v[0]);\n}\n"
-                                    "fn i32 main() {\n    return 0;\n}\n"));
+                                    "fn main() i32 {\n    return 0;\n}\n"));
 })
 
 TEST(move_through_an_immutable_pointer_is_refused, {
-    TEST_ASSERT_FALSE(check_src(VEC "fn i32 mut@ own take(vec* v) {\n"
+    TEST_ASSERT_FALSE(check_src(VEC "fn take(vec* v) i32 mut@ own {\n"
                                     "    return move(v->data);\n}\n"
-                                    "fn i32 main() {\n    return 0;\n}\n"));
+                                    "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("'move' cannot empty an immutable indirection"));
-    TEST_ASSERT_TRUE(check_src(VEC "fn i32 mut@ own take(vec mut* v) {\n"
+    TEST_ASSERT_TRUE(check_src(VEC "fn take(vec mut* v) i32 mut@ own {\n"
                                    "    return move(v->data);\n}\n"
-                                   "fn i32 main() {\n    return 0;\n}\n"));
+                                   "fn main() i32 {\n    return 0;\n}\n"));
 })
 
 TEST(a_field_or_element_of_a_local_counts_as_the_local, {
     // The local itself need not be mut for its storage to be emptied.
     // D17.6
-    TEST_ASSERT_TRUE(check_src(VEC "fn i32 main() {\n    vec v = {};\n"
+    TEST_ASSERT_TRUE(check_src(VEC "fn main() i32 {\n    vec v = {};\n"
                                    "    i32 mut@ own d = move(v.data);\n"
                                    "    del(d);\n    return 0;\n}\n"));
-    TEST_ASSERT_TRUE(check_src(NODE "fn i32 main() {\n"
+    TEST_ASSERT_TRUE(check_src(NODE "fn main() i32 {\n"
                                     "    node mut* own[2] t = {};\n"
                                     "    node mut* own e = move(t[0]);\n    del(e);\n"
                                     "    return 0;\n}\n"));
     // A dereference of a mutable pointer to a local reaches it too.
     // D17.6
-    TEST_ASSERT_TRUE(check_src(VEC "fn i32 main() {\n    vec mut v = {};\n"
+    TEST_ASSERT_TRUE(check_src(VEC "fn main() i32 {\n    vec mut v = {};\n"
                                    "    vec mut* p = &v;\n"
                                    "    i32 mut@ own d = move(p->data);\n"
                                    "    del(d);\n    return 0;\n}\n"));
@@ -255,23 +255,23 @@ TEST(a_field_or_element_of_a_local_counts_as_the_local, {
 
 TEST(move_and_del_of_a_module_level_constant_are_errors, {
     TEST_ASSERT_FALSE(check_src("i32* own P = null;\n"
-                                "fn i32 main() {\n    i32* own q = move(P);\n"
+                                "fn main() i32 {\n    i32* own q = move(P);\n"
                                 "    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("'move' cannot empty a module-level constant"));
     TEST_ASSERT_FALSE(check_src("i32* own P = null;\n"
-                                "fn i32 main() {\n    del(P);\n    return 0;\n}\n"));
+                                "fn main() i32 {\n    del(P);\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("'del' cannot empty a module-level constant"));
     // A member of one is read-only memory too, and the reason it is refused
     // for is its own and not its field's.
     // D7.10, D17.6
     TEST_ASSERT_FALSE(check_src(VEC "vec C = {};\n"
-                                    "fn i32 main() {\n    del(C.data);\n    return 0;\n}\n"));
+                                    "fn main() i32 {\n    del(C.data);\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("'del' cannot empty a module-level constant"));
     // The read-only memory stops at the first indirection: what a pointer in a
     // constant reaches is not the constant's storage.
     // D17.6
     TEST_ASSERT_TRUE(check_src(VEC "vec mut G = {};\n"
-                                   "fn i32 main() {\n    G.data = new(i32, 2);\n"
+                                   "fn main() i32 {\n    G.data = new(i32, 2);\n"
                                    "    del(G.data);\n    return 0;\n}\n"));
 })
 
@@ -279,9 +279,9 @@ TEST(the_move_hint_is_offered_for_a_name_and_for_nothing_else, {
     // The hint spells a whole expression, so `move(data)` for `v->data` would
     // name nothing in scope.
     // D14.2
-    TEST_ASSERT_FALSE(check_src(VEC "fn i32 mut@ own steal(vec mut* v) {\n"
+    TEST_ASSERT_FALSE(check_src(VEC "fn steal(vec mut* v) i32 mut@ own {\n"
                                     "    return v->data;\n}\n"
-                                    "fn i32 main() {\n    return 0;\n}\n"));
+                                    "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("copying an owning value requires 'move'"));
     TEST_ASSERT_FALSE(said("write move("));
 })
@@ -311,21 +311,21 @@ TEST(move_needs_an_owning_lvalue, {
 // D17.9
 
 TEST(del_through_an_immutable_indirection_is_refused, {
-    TEST_ASSERT_FALSE(check_src(NODE "fn void drop(node* n) {\n    del(n->next);\n}\n"
-                                     "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_FALSE(check_src(NODE "fn drop(node* n) void {\n    del(n->next);\n}\n"
+                                     "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("'del' cannot empty an immutable indirection"));
-    TEST_ASSERT_TRUE(check_src(NODE "fn void drop(node mut* n) {\n    del(n->next);\n}\n"
-                                    "fn i32 main() {\n    return 0;\n}\n"));
-    TEST_ASSERT_FALSE(check_src(NODE "fn void drop(node mut* own@ v) {\n    del(v[0]);\n}\n"
-                                     "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(check_src(NODE "fn drop(node mut* n) void {\n    del(n->next);\n}\n"
+                                    "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_FALSE(check_src(NODE "fn drop(node mut* own@ v) void {\n    del(v[0]);\n}\n"
+                                     "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("'del' cannot empty an immutable indirection"));
 })
 
 TEST(del_of_an_rvalue_empties_nothing_and_is_never_refused, {
     // There is no storage to empty, so no level has to be mutable.
     // D17.9
-    TEST_ASSERT_TRUE(check_src(NODE "fn node mut* own make() {\n    return new(node);\n}\n"
-                                    "fn i32 main() {\n    del(make());\n"
+    TEST_ASSERT_TRUE(check_src(NODE "fn make() node mut* own {\n    return new(node);\n}\n"
+                                    "fn main() i32 {\n    del(make());\n"
                                     "    del(new(i32, 4));\n    return 0;\n}\n"));
 })
 
@@ -335,20 +335,20 @@ TEST(del_of_an_rvalue_empties_nothing_and_is_never_refused, {
 TEST(an_own_rvalue_may_not_be_lent, {
     TEST_ASSERT_FALSE(check_body("    i32 mut@ v = new(i32, 2);\n    println(v.len);"));
     TEST_ASSERT_TRUE(said("owning temporary would leak: the initializer expects i32 mut@"));
-    TEST_ASSERT_FALSE(check_src("fn u64 look(i32@ s) {\n    return s.len;\n}\n"
-                                "fn i32 main() {\n    println(look(new(i32, 2)));\n"
+    TEST_ASSERT_FALSE(check_src("fn look(i32@ s) u64 {\n    return s.len;\n}\n"
+                                "fn main() i32 {\n    println(look(new(i32, 2)));\n"
                                 "    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("owning temporary would leak: the argument expects i32@"));
 })
 
 TEST(an_own_rvalue_may_not_be_cast_to_a_type_that_does_not_own, {
-    TEST_ASSERT_FALSE(check_src(NODE "fn i32 main() {\n"
+    TEST_ASSERT_FALSE(check_src(NODE "fn main() i32 {\n"
                                      "    node* p = cast(new(node), node*);\n"
                                      "    println(p == null);\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("owning temporary would leak: the cast target does not own it"));
     // A cast to an `own` target keeps it owned, so it lands.
     // D3.14, D17.3
-    TEST_ASSERT_TRUE(check_src(NODE "fn i32 main() {\n"
+    TEST_ASSERT_TRUE(check_src(NODE "fn main() i32 {\n"
                                     "    void* own p = cast(new(node), void* own);\n"
                                     "    del(p);\n    return 0;\n}\n"));
 })
@@ -360,18 +360,18 @@ TEST(an_own_rvalue_may_not_be_indexed_spanned_or_read_through, {
     TEST_ASSERT_TRUE(said("owning temporary would leak: a span of it leaves no owner"));
     TEST_ASSERT_FALSE(check_body("    u8* q = new(u8, 8).ptr;\n    println(q == null);"));
     TEST_ASSERT_TRUE(said("owning temporary would leak: a field of it leaves no owner"));
-    TEST_ASSERT_FALSE(check_src(NODE "fn i32 main() {\n"
+    TEST_ASSERT_FALSE(check_src(NODE "fn main() i32 {\n"
                                      "    println(new(node)->value);\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("owning temporary would leak: a field of it leaves no owner"));
-    TEST_ASSERT_FALSE(check_src(NODE "fn i32 main() {\n"
+    TEST_ASSERT_FALSE(check_src(NODE "fn main() i32 {\n"
                                      "    println((*new(node)).value);\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("owning temporary would leak: dereferencing it leaves no owner"));
 })
 
 TEST(a_field_of_an_owning_aggregate_rvalue_is_refused, {
-    TEST_ASSERT_FALSE(check_src(VEC "fn vec make() {\n"
+    TEST_ASSERT_FALSE(check_src(VEC "fn make() vec {\n"
                                     "    return vec{new(i32, 4), 4};\n}\n"
-                                    "fn i32 main() {\n    println(make().len);\n"
+                                    "fn main() i32 {\n    println(make().len);\n"
                                     "    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("owning temporary would leak: a field of it leaves no owner"));
 })
@@ -381,13 +381,13 @@ TEST(an_own_rvalue_may_not_be_printed_or_compared, {
     // D4.5, D17.8
     TEST_ASSERT_FALSE(check_body("    println(new(i32, 2).len > 0);\n"));
     TEST_ASSERT_TRUE(said("owning temporary would leak"));
-    TEST_ASSERT_FALSE(check_src(NODE "fn node mut* own make() {\n    return new(node);\n}\n"
-                                     "fn i32 main() {\n    println(make() == null);\n"
+    TEST_ASSERT_FALSE(check_src(NODE "fn make() node mut* own {\n    return new(node);\n}\n"
+                                     "fn main() i32 {\n    println(make() == null);\n"
                                      "    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("owning temporary would leak: comparing it leaves no owner"));
     // An owning lvalue compares freely: the operands lend.
     // D6.2, D17.4
-    TEST_ASSERT_TRUE(check_src(NODE "fn i32 main() {\n"
+    TEST_ASSERT_TRUE(check_src(NODE "fn main() i32 {\n"
                                     "    node mut* own p = new(node);\n"
                                     "    println(p == null);\n    del(p);\n    return 0;\n}\n"));
 })
@@ -408,24 +408,24 @@ TEST(an_own_rvalue_lands_in_del_and_in_an_own_place, {
 // D17.7
 
 TEST(copying_an_owning_aggregate_needs_move, {
-    TEST_ASSERT_FALSE(check_src(VEC "fn i32 main() {\n    vec mut a = {};\n"
+    TEST_ASSERT_FALSE(check_src(VEC "fn main() i32 {\n    vec mut a = {};\n"
                                     "    a.data = new(i32, 2);\n    vec b = a;\n"
                                     "    del(a.data);\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("copying an owning value requires 'move': write move(a)"));
-    TEST_ASSERT_TRUE(check_src(VEC "fn i32 main() {\n    vec mut a = {};\n"
+    TEST_ASSERT_TRUE(check_src(VEC "fn main() i32 {\n    vec mut a = {};\n"
                                    "    a.data = new(i32, 2);\n    vec b = move(a);\n"
                                    "    del(b.data);\n    return 0;\n}\n"));
 })
 
 TEST(a_by_value_owning_parameter_needs_move, {
-    TEST_ASSERT_FALSE(check_src(VEC "fn void eat(vec v) {\n    del(v.data);\n}\n"
-                                    "fn i32 main() {\n    vec mut a = {};\n"
+    TEST_ASSERT_FALSE(check_src(VEC "fn eat(vec v) void {\n    del(v.data);\n}\n"
+                                    "fn main() i32 {\n    vec mut a = {};\n"
                                     "    a.data = new(i32, 2);\n    eat(a);\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("copying an owning value requires 'move': write move(a)"));
 })
 
 TEST(an_array_of_owning_elements_is_an_owning_aggregate, {
-    TEST_ASSERT_FALSE(check_src(NODE "fn i32 main() {\n"
+    TEST_ASSERT_FALSE(check_src(NODE "fn main() i32 {\n"
                                      "    node mut* own[2] mut a = {};\n"
                                      "    a[0] = new(node);\n"
                                      "    node mut* own[2] b = a;\n    del(a[0]);\n"
@@ -435,12 +435,12 @@ TEST(an_array_of_owning_elements_is_an_owning_aggregate, {
 
 TEST(a_struct_that_owns_nothing_copies_freely, {
     TEST_ASSERT_TRUE(check_src("struct point {\n    i32 x;\n    i32 y;\n}\n"
-                               "fn i32 main() {\n    point a = {1, 2};\n    point b = a;\n"
+                               "fn main() i32 {\n    point a = {1, 2};\n    point b = a;\n"
                                "    println(b.x);\n    return 0;\n}\n"));
 })
 
 TEST(del_of_an_aggregate_is_an_error, {
-    TEST_ASSERT_FALSE(check_src(VEC "fn i32 main() {\n    vec mut a = {};\n"
+    TEST_ASSERT_FALSE(check_src(VEC "fn main() i32 {\n    vec mut a = {};\n"
                                     "    a.data = new(i32, 2);\n    del(a);\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("'del' takes a reference, not vec"));
 })
@@ -448,45 +448,45 @@ TEST(del_of_an_aggregate_is_an_error, {
 TEST(a_nested_owning_aggregate_is_owning_too, {
     // A struct that holds an owning struct by value owns through it.
     // D17.7
-    TEST_ASSERT_FALSE(check_src(OUTER "fn i32 main() {\n    outer mut a = {};\n"
+    TEST_ASSERT_FALSE(check_src(OUTER "fn main() i32 {\n    outer mut a = {};\n"
                                       "    a.in.data = new(i32, 2);\n    outer b = a;\n"
                                       "    del(a.in.data);\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("copying an owning value requires 'move': write move(a)"));
-    TEST_ASSERT_TRUE(check_src(OUTER "fn i32 main() {\n    outer mut a = {};\n"
+    TEST_ASSERT_TRUE(check_src(OUTER "fn main() i32 {\n    outer mut a = {};\n"
                                      "    a.in.data = new(i32, 2);\n    outer b = move(a);\n"
                                      "    del(b.in.data);\n    return 0;\n}\n"));
     // A struct of the same shape with no `own` anywhere copies freely.
     // D17.7
     TEST_ASSERT_TRUE(check_src("struct inner {\n    i32 mut@ data;\n}\n"
                                "struct outer {\n    inner in;\n    u64 n;\n}\n"
-                               "fn i32 main() {\n    outer a = {};\n    outer b = a;\n"
+                               "fn main() i32 {\n    outer a = {};\n    outer b = a;\n"
                                "    println(b.n);\n    return 0;\n}\n"));
 })
 
 TEST(a_designated_field_is_an_own_place_like_a_positional_one, {
-    TEST_ASSERT_FALSE(check_src(VEC "fn i32 main() {\n"
+    TEST_ASSERT_FALSE(check_src(VEC "fn main() i32 {\n"
                                     "    i32 mut@ own a = new(i32, 2);\n"
                                     "    vec v = vec{.data = a};\n    del(a);\n"
                                     "    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("copying an owning value requires 'move': write move(a)"));
-    TEST_ASSERT_TRUE(check_src(VEC "fn i32 main() {\n"
+    TEST_ASSERT_TRUE(check_src(VEC "fn main() i32 {\n"
                                    "    i32 mut@ own a = new(i32, 2);\n"
                                    "    vec v = vec{.data = move(a)};\n    del(v.data);\n"
                                    "    return 0;\n}\n"));
     // An `own` rvalue enters a designated field as it is.
     // D17.5
-    TEST_ASSERT_TRUE(check_src(VEC "fn i32 main() {\n"
+    TEST_ASSERT_TRUE(check_src(VEC "fn main() i32 {\n"
                                    "    vec v = vec{.data = new(i32, 2)};\n"
                                    "    del(v.data);\n    return 0;\n}\n"));
 })
 
 TEST(a_whole_owning_aggregate_moves_through_a_mutable_pointer, {
-    TEST_ASSERT_TRUE(check_src(VEC "fn vec steal(vec mut* v) {\n    return move(*v);\n}\n"
-                                   "fn i32 main() {\n    vec mut a = {};\n"
+    TEST_ASSERT_TRUE(check_src(VEC "fn steal(vec mut* v) vec {\n    return move(*v);\n}\n"
+                                   "fn main() i32 {\n    vec mut a = {};\n"
                                    "    a.data = new(i32, 2);\n    vec b = steal(&a);\n"
                                    "    del(b.data);\n    return 0;\n}\n"));
-    TEST_ASSERT_FALSE(check_src(VEC "fn vec steal(vec* v) {\n    return move(*v);\n}\n"
-                                    "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_FALSE(check_src(VEC "fn steal(vec* v) vec {\n    return move(*v);\n}\n"
+                                    "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("'move' cannot empty an immutable indirection"));
 })
 
@@ -495,7 +495,7 @@ TEST(moving_a_zero_value_is_allowed, {
     // D17.6
     TEST_ASSERT_TRUE(check_body("    i32 mut@ own z = {};\n"
                                 "    i32 mut@ own y = move(z);\n    del(y);\n    del(z);"));
-    TEST_ASSERT_TRUE(check_src("fn i32 main() {\n    i32 mut* own p = null;\n"
+    TEST_ASSERT_TRUE(check_src("fn main() i32 {\n    i32 mut* own p = null;\n"
                                "    i32 mut* own q = move(p);\n    del(q);\n"
                                "    return 0;\n}\n"));
 })
@@ -504,12 +504,12 @@ TEST(moving_a_zero_value_is_allowed, {
 // D17.10
 
 TEST(a_range_loop_lends_its_owning_collection, {
-    TEST_ASSERT_TRUE(check_src(NODE "fn i32 main() {\n"
+    TEST_ASSERT_TRUE(check_src(NODE "fn main() i32 {\n"
                                     "    node mut* own[2] mut kids = {};\n"
                                     "    for (node mut* c : kids) {\n"
                                     "        println(c == null);\n    }\n"
                                     "    return 0;\n}\n"));
-    TEST_ASSERT_FALSE(check_src(NODE "fn i32 main() {\n"
+    TEST_ASSERT_FALSE(check_src(NODE "fn main() i32 {\n"
                                      "    node mut* own[2] mut kids = {};\n"
                                      "    for (node mut* own c : kids) {\n"
                                      "        println(c == null);\n    }\n"
@@ -518,7 +518,7 @@ TEST(a_range_loop_lends_its_owning_collection, {
 })
 
 TEST(a_range_loop_over_owning_aggregates_is_refused, {
-    TEST_ASSERT_FALSE(check_src(VEC "fn i32 main() {\n    vec[2] v = {};\n"
+    TEST_ASSERT_FALSE(check_src(VEC "fn main() i32 {\n    vec[2] v = {};\n"
                                     "    for (vec e : v) {\n        println(e.len);\n    }\n"
                                     "    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("the elements are owning: iterate by index"));
@@ -528,14 +528,14 @@ TEST(a_range_loop_over_owning_aggregates_is_refused, {
 // D17.12, D17.13
 
 TEST(a_string_own_is_built_by_casting_a_moved_buffer, {
-    TEST_ASSERT_TRUE(check_src("fn string own build() {\n"
+    TEST_ASSERT_TRUE(check_src("fn build() string own {\n"
                                "    u8 mut@ own buf = new(u8, 2);\n"
                                "    return cast(move(buf), string own);\n}\n"
-                               "fn i32 main() {\n    string own s = build();\n"
+                               "fn main() i32 {\n    string own s = build();\n"
                                "    del(s);\n    return 0;\n}\n"));
     // The target says `own`, so the source is moved, not lent.
     // D17.5, D17.12
-    TEST_ASSERT_FALSE(check_src("fn i32 main() {\n"
+    TEST_ASSERT_FALSE(check_src("fn main() i32 {\n"
                                 "    u8 mut@ own buf = new(u8, 2);\n"
                                 "    string own s = cast(buf, string own);\n"
                                 "    del(s);\n    return 0;\n}\n"));
@@ -543,7 +543,7 @@ TEST(a_string_own_is_built_by_casting_a_moved_buffer, {
                           "move(buf)"));
     // `cast(buf, string)` lends a view instead.
     // D17.12
-    TEST_ASSERT_TRUE(check_src("fn i32 main() {\n"
+    TEST_ASSERT_TRUE(check_src("fn main() i32 {\n"
                                "    u8 mut@ own buf = new(u8, 2);\n"
                                "    string v = cast(buf, string);\n"
                                "    println(v.len);\n    del(buf);\n    return 0;\n}\n"));
@@ -553,12 +553,12 @@ TEST(own_in_an_extern_signature_is_part_of_the_type, {
     // `own` documents the C side's convention and is erased, but it is part of
     // the parameter type, so a view does not pass.
     // D17.13, D9.8, D17.4
-    TEST_ASSERT_TRUE(check_src("extern fn void free(void* own p);\n"
-                               "fn i32 main() {\n"
+    TEST_ASSERT_TRUE(check_src("extern fn free(void* own p) void;\n"
+                               "fn main() i32 {\n"
                                "    i32 mut* own p = new(i32);\n"
                                "    free(cast(move(p), void* own));\n    return 0;\n}\n"));
-    TEST_ASSERT_FALSE(check_src("extern fn void free(void* own p);\n"
-                                "fn i32 main() {\n"
+    TEST_ASSERT_FALSE(check_src("extern fn free(void* own p) void;\n"
+                                "fn main() i32 {\n"
                                 "    i32 mut* own p = new(i32);\n"
                                 "    free(cast(p, void*));\n    del(p);\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("the argument expects void* own, not void*"));
@@ -568,19 +568,19 @@ TEST(an_extern_result_that_says_own_is_an_owning_rvalue, {
     // The declaration says `void mut*`, which is what `std.libc` writes, so the
     // cast adopts the block and adds no `mut` to it.
     // D3.14, D17.13
-    TEST_ASSERT_TRUE(check_src("extern fn void mut* own malloc(u64 n);\n"
-                               "fn i32 main() {\n"
+    TEST_ASSERT_TRUE(check_src("extern fn malloc(u64 n) void mut* own;\n"
+                               "fn main() i32 {\n"
                                "    u8 mut* own p = cast(malloc(1), u8 mut* own);\n"
                                "    del(p);\n    return 0;\n}\n"));
     // A declaration that says `void*` gives storage the program may not write,
     // and no cast turns that answer around.
-    TEST_ASSERT_FALSE(check_src("extern fn void* own malloc(u64 n);\n"
-                                "fn i32 main() {\n"
+    TEST_ASSERT_FALSE(check_src("extern fn malloc(u64 n) void* own;\n"
+                                "fn main() i32 {\n"
                                 "    u8 mut* own p = cast(malloc(1), u8 mut* own);\n"
                                 "    del(p);\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("cannot cast void* own to u8 mut* own: a cast never adds 'mut'"));
-    TEST_ASSERT_FALSE(check_src("extern fn void* own malloc(u64 n);\n"
-                                "fn i32 main() {\n    void* p = malloc(1);\n"
+    TEST_ASSERT_FALSE(check_src("extern fn malloc(u64 n) void* own;\n"
+                                "fn main() i32 {\n    void* p = malloc(1);\n"
                                 "    println(p == null);\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("owning temporary would leak: the initializer expects void*"));
 })

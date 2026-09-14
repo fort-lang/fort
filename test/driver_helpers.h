@@ -170,7 +170,7 @@ static inline sandbox_t sandbox_open(void) {
     if (entry == NULL) {
         return box;
     }
-    TEST_UNUSED(fputs("fn i32 main() { return 0; }\n", entry));
+    TEST_UNUSED(fputs("fn main() i32 { return 0; }\n", entry));
     TEST_UNUSED(fclose(entry));
     FILE* runtime = fopen(box.rt, "wb");
     if (runtime == NULL) {

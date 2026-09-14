@@ -132,7 +132,7 @@ struct server {
 /// A server over the two descriptors, which it does not own and never closes.
 /// The reader's cap is the framing's cap, so a body that passed the framing is
 /// never refused for its size by the reader.
-fn server create(i32 in_fd, i32 out_fd) {
+fn create(i32 in_fd, i32 out_fd) server {
     server mut s = server{};
     s.conn = rpc.create(in_fd, out_fd);
     s.enc = text.position_encoding.enc_utf16;
@@ -144,7 +144,7 @@ fn server create(i32 in_fd, i32 out_fd) {
 /// takes the lifecycle back to where create left it: a server that was freed
 /// is a server no client has spoken to, over the same two descriptors. A
 /// second call is a no-op.
-fn void free(server mut* s) {
+fn free(server mut* s) void {
     rpc.free(&s->conn);
     json.free(&s->doc);
     docs.free(&s->open_docs);
@@ -167,12 +167,12 @@ fn void free(server mut* s) {
 /// answer and before its next message. Waiting for it is therefore stricter
 /// than the specification asks and is the conservative gate: the ticket that
 /// publishes a diagnostic asks this before it writes one.
-fn bool is_ready(server* s) {
+fn is_ready(server* s) bool {
     return s->ready;
 }
 
 /// The exit status the loop answers with.
-fn i32 exit_status(server* s) {
+fn exit_status(server* s) i32 {
     if (s->shutdown_seen) {
         return STATUS_SHUTDOWN;
     }
@@ -180,19 +180,19 @@ fn i32 exit_status(server* s) {
 }
 
 /// The position encoding in force, which `initialize` negotiated.
-fn text.position_encoding encoding(server* s) {
+fn encoding(server* s) text.position_encoding {
     return s->enc;
 }
 
 /// The connection, so that a caller may move the read size or the cap on a
 /// body before the loop runs. The reader's cap follows the conn's at every
 /// message, so the two cannot disagree about what is too large.
-fn rpc.conn mut* connection(server mut* s) {
+fn connection(server mut* s) rpc.conn mut* {
     return &s->conn;
 }
 
 /// The open documents, which the feature requests of the later tickets read.
-fn docs.store* documents(server* s) {
+fn documents(server* s) docs.store* {
     return &s->open_docs;
 }
 
@@ -201,7 +201,7 @@ fn docs.store* documents(server* s) {
 /// Takes `id` as the id of the request being handled, copying the text of a
 /// string id: an id is a view into the document that carried it, and the next
 /// parse reuses that storage.
-fn void begin_request(server mut* s, rpc.msg_id id) {
+fn begin_request(server mut* s, rpc.msg_id id) void {
     strbuf.clear(&s->id_text);
     s->current = id;
     if (id.kind == rpc.id_kind.id_str) {
@@ -214,7 +214,7 @@ fn void begin_request(server mut* s, rpc.msg_id id) {
 
 /// Ends the request being handled. No request is in flight afterwards, so a
 /// cancel that names it is dropped.
-fn void end_request(server mut* s) {
+fn end_request(server mut* s) void {
     s->handling = false;
     s->cancelled = false;
     s->current = rpc.msg_id{};
@@ -222,31 +222,31 @@ fn void end_request(server mut* s) {
 
 /// Whether the client cancelled the request being handled. A handler that runs
 /// long asks this at a checkpoint and answers ERROR_REQUEST_CANCELLED.
-fn bool is_cancelled(server* s) {
+fn is_cancelled(server* s) bool {
     return s->handling && s->cancelled;
 }
 
 /// The id of the request being handled; the absent id when none is.
-fn rpc.msg_id current_id(server* s) {
+fn current_id(server* s) rpc.msg_id {
     return s->current;
 }
 
 // ---- the answers -----------------------------------------------------------------
 
 /// Starts a response in the body buffer.
-fn void begin_body(server mut* s, json.writer mut* w) {
+fn begin_body(server mut* s, json.writer mut* w) void {
     strbuf.clear(&s->body);
     json.write_init(w, &s->body);
 }
 
 /// Sends the body that was built. False when the write failed, which the loop
 /// reads off the conn.
-fn bool send_body(server mut* s) {
+fn send_body(server mut* s) bool {
     return rpc.write_frame(&s->conn, strbuf.view(&s->body));
 }
 
 /// Answers a request with `null`, which is the result of `shutdown`.
-fn bool send_null(server mut* s, rpc.msg_id id) {
+fn send_null(server mut* s, rpc.msg_id id) bool {
     json.writer mut w = json.writer{};
     begin_body(s, &w);
     rpc.response_begin(&w, id);
@@ -256,7 +256,7 @@ fn bool send_null(server mut* s, rpc.msg_id id) {
 }
 
 /// Answers a request with an error.
-fn bool send_error(server mut* s, rpc.msg_id id, i64 code, string message) {
+fn send_error(server mut* s, rpc.msg_id id, i64 code, string message) bool {
     json.writer mut w = json.writer{};
     begin_body(s, &w);
     rpc.write_error(&w, id, code, message);
@@ -264,7 +264,7 @@ fn bool send_error(server mut* s, rpc.msg_id id, i64 code, string message) {
 }
 
 /// Answers `initialize` with the capabilities of this server.
-fn bool send_capabilities(server mut* s, rpc.msg_id id) {
+fn send_capabilities(server mut* s, rpc.msg_id id) bool {
     json.writer mut w = json.writer{};
     begin_body(s, &w);
     rpc.response_begin(&w, id);
@@ -309,7 +309,7 @@ fn bool send_capabilities(server mut* s, rpc.msg_id id) {
 /// no object, or when it has no such member. json.member_of takes a handle the
 /// document handed out, so the absent one is answered here.
 /// D13.3
-fn u32 member(json.doc* d, u32 v, string name) {
+fn member(json.doc* d, u32 v, string name) u32 {
     if (v == 0) {
         return 0;
     }
@@ -317,13 +317,13 @@ fn u32 member(json.doc* d, u32 v, string name) {
 }
 
 /// Whether `v` is a string of that document.
-fn bool is_string(json.doc* d, u32 v) {
+fn is_string(json.doc* d, u32 v) bool {
     return v != 0 && json.kind_of(d, v) == json.value_kind.k_string;
 }
 
 /// The value of `v` when it is an integer, and `fallback` otherwise. A version
 /// the client left out, or wrote as a float, keeps the one the store holds.
-fn i64 int_or(json.doc* d, u32 v, i64 fallback) {
+fn int_or(json.doc* d, u32 v, i64 fallback) i64 {
     if (v == 0 || json.kind_of(d, v) != json.value_kind.k_int) {
         return fallback;
     }
@@ -336,7 +336,7 @@ fn i64 int_or(json.doc* d, u32 v, i64 fallback) {
 /// `general.positionEncodings` this server implements, since the client lists
 /// them in the order it prefers (LSP 3.17, general.positionEncodings). UTF-16
 /// when the client offers none of them, which every client supports.
-fn text.position_encoding negotiate(json.doc* d, u32 params) {
+fn negotiate(json.doc* d, u32 params) text.position_encoding {
     u32 general = member(d, member(d, params, "capabilities"), "general");
     u32 list = member(d, general, "positionEncodings");
     if (list == 0 || json.kind_of(d, list) != json.value_kind.k_array) {
@@ -355,7 +355,7 @@ fn text.position_encoding negotiate(json.doc* d, u32 params) {
 
 // ---- the documents ---------------------------------------------------------------
 
-fn void did_open(server mut* s, json.doc* d, rpc.message* m) {
+fn did_open(server mut* s, json.doc* d, rpc.message* m) void {
     u32 document = member(d, m->params, "textDocument");
     u32 uri = member(d, document, "uri");
     u32 body = member(d, document, "text");
@@ -366,7 +366,7 @@ fn void did_open(server mut* s, json.doc* d, rpc.message* m) {
               int_or(d, member(d, document, "version"), 0));
 }
 
-fn void did_change(server mut* s, json.doc* d, rpc.message* m) {
+fn did_change(server mut* s, json.doc* d, rpc.message* m) void {
     u32 document = member(d, m->params, "textDocument");
     u32 uri_node = member(d, document, "uri");
     if (!is_string(d, uri_node)) {
@@ -400,7 +400,7 @@ fn void did_change(server mut* s, json.doc* d, rpc.message* m) {
     docs.update(&s->open_docs, uri, json.text_of(d, body), version);
 }
 
-fn void did_close(server mut* s, json.doc* d, rpc.message* m) {
+fn did_close(server mut* s, json.doc* d, rpc.message* m) void {
     u32 uri = member(d, member(d, m->params, "textDocument"), "uri");
     if (!is_string(d, uri)) {
         return;
@@ -412,7 +412,7 @@ fn void did_close(server mut* s, json.doc* d, rpc.message* m) {
 
 /// Reads `$/cancelRequest`. The three cases stand in the header of this file;
 /// every one of them writes nothing.
-fn void note_cancel(server mut* s, json.doc* d, rpc.message* m) {
+fn note_cancel(server mut* s, json.doc* d, rpc.message* m) void {
     u32 named = member(d, m->params, "id");
     bool mut ok = true;
     rpc.msg_id id = rpc.id_of(d, named, &ok);
@@ -428,14 +428,14 @@ fn void note_cancel(server mut* s, json.doc* d, rpc.message* m) {
 
 /// The message a request names, built in the server's own buffer so that it
 /// names the method the client sent.
-fn string about(server mut* s, string before, string method) {
+fn about(server mut* s, string before, string method) string {
     strbuf.clear(&s->msg);
     strbuf.append(&s->msg, before);
     strbuf.append(&s->msg, method);
     return strbuf.view(&s->msg);
 }
 
-fn void handle_request(server mut* s, json.doc* d, rpc.message* m) {
+fn handle_request(server mut* s, json.doc* d, rpc.message* m) void {
     if (m->method == "initialize") {
         if (s->initialize_seen) {
             send_error(s, m->id, rpc.ERROR_INVALID_REQUEST, "the server is initialized already");
@@ -463,7 +463,7 @@ fn void handle_request(server mut* s, json.doc* d, rpc.message* m) {
                about(s, "the server does not implement the method ", m->method));
 }
 
-fn void handle_notification(server mut* s, json.doc* d, rpc.message* m) {
+fn handle_notification(server mut* s, json.doc* d, rpc.message* m) void {
     if (m->method == "exit") {
         s->exit_seen = true;
         return;
@@ -508,7 +508,7 @@ fn void handle_notification(server mut* s, json.doc* d, rpc.message* m) {
 /// dropped, since JSON-RPC forbids answering one and this server sends no
 /// request of its own; a message that is no JSON-RPC message at all is
 /// InvalidRequest, named by the id it carried when it carried one.
-fn void dispatch(server mut* s, json.doc* d, rpc.message* m) {
+fn dispatch(server mut* s, json.doc* d, rpc.message* m) void {
     if (m->kind == rpc.msg_kind.m_response) {
         return;
     }
@@ -527,7 +527,7 @@ fn void dispatch(server mut* s, json.doc* d, rpc.message* m) {
 
 /// Reads one frame and answers it. False when the loop must end: the stream
 /// ended, the framing broke, or `exit` arrived.
-fn bool step(server mut* s) {
+fn step(server mut* s) bool {
     string mut body = "";
     if (!rpc.read_frame(&s->conn, &body)) {
         return false;
@@ -555,7 +555,7 @@ fn bool step(server mut* s) {
 /// Reads and answers messages until the client exits, closes the stream, or
 /// sends a frame the server cannot read. The status is 0 after an orderly
 /// shutdown and 1 otherwise.
-fn i32 run(server mut* s) {
+fn run(server mut* s) i32 {
     while (step(s)) {
     }
     return exit_status(s);
@@ -563,7 +563,7 @@ fn i32 run(server mut* s) {
 
 /// The whole of a session over a pair of descriptors: the server, the loop and
 /// the release of everything it took.
-fn i32 serve(i32 in_fd, i32 out_fd) {
+fn serve(i32 in_fd, i32 out_fd) i32 {
     server mut s = create(in_fd, out_fd);
     defer free(&s);
     return run(&s);

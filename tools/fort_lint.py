@@ -165,7 +165,7 @@ def type_base_name(text):
 
     `str_buf mut*` is `str_buf` and `strbuf.str_buf` is `str_buf`, since what
     D1.4 forbids is the type's own name and the module qualifier is a binding
-    a local may shadow (D7.9). A function type (`fn i32(i32)`) names nothing,
+    a local may shadow (D7.9). A function type (`fn (i32) i32`) names nothing,
     and neither does the empty type of a module or a struct name.
     """
     if not text:

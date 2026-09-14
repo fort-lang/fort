@@ -30,11 +30,11 @@ struct fixture {
     lexer.tok_vec toks;
 }
 
-fn fixture open_fixture() {
+fn open_fixture() fixture {
     return fixture{session.create(), lexer.tokvec_create()};
 }
 
-fn void close_fixture(fixture mut* f) {
+fn close_fixture(fixture mut* f) void {
     lexer.tokvec_free(&f->toks);
     session.free(&f->sess);
 }
@@ -42,54 +42,54 @@ fn void close_fixture(fixture mut* f) {
 // Lexes `src` as t.ft, dropping the tokens and the diagnostics of the lex
 // before it; the pool keeps the strings of both, which no test reads across
 // a call. Returns whether the file was clean.
-fn bool lex(fixture mut* f, string src) {
+fn lex(fixture mut* f, string src) bool {
     lexer.tokvec_free(&f->toks);
     diag.reset(session.diags(&f->sess));
     return lexer.lex_file(&f->sess, "t.ft", src, &f->toks);
 }
 
 // The tokens of the last lex, the end-of-file token included.
-fn u64 count(fixture* f) {
+fn count(fixture* f) u64 {
     return lexer.tokvec_count(&f->toks);
 }
 
-fn lexer.token tok(fixture* f, u64 i) {
+fn tok(fixture* f, u64 i) lexer.token {
     return lexer.tokvec_at(&f->toks, i);
 }
 
 // The name of the kind of token `i`, which is what an assertion compares:
 // two kinds are equal when their names are (tok_kind_name is injective, as
 // kind_names_are_distinct asserts).
-fn string kind(fixture* f, u64 i) {
+fn kind(fixture* f, u64 i) string {
     return lexer.tok_kind_name(tok(f, i).kind);
 }
 
-fn string text(fixture* f, u64 i) {
+fn text(fixture* f, u64 i) string {
     return tok(f, i).text;
 }
 
 // Whether token `i` starts at line `line`, column `col`.
 // D14.2
-fn bool at(fixture* f, u64 i, u32 line, u32 col) {
+fn at(fixture* f, u64 i, u32 line, u32 col) bool {
     return tok(f, i).line == line && tok(f, i).col == col;
 }
 
 // Whether token `i` covers `len` bytes from offset `off`.
 // D20.4
-fn bool covers(fixture* f, u64 i, u64 off, u64 len) {
+fn covers(fixture* f, u64 i, u64 off, u64 len) bool {
     return tok(f, i).off == off && tok(f, i).len == len;
 }
 
 // The errors the last lex reported, notes excluded.
 // D14.2
-fn u64 errors(fixture mut* f) {
+fn errors(fixture mut* f) u64 {
     return session.error_count(&f->sess);
 }
 
 // Whether the diagnostic `i` is an error at `line`:`col` of t.ft saying `msg`,
 // which is everything its text line carries (toolchain.md 4).
 // D14.2
-fn bool error_is(fixture mut* f, u64 i, u32 line, u32 col, string msg) {
+fn error_is(fixture mut* f, u64 i, u32 line, u32 col, string msg) bool {
     diag.record r = diag.record_at(session.diags(&f->sess), i);
     return r.severity == diag.severity.error && r.loc.file == "t.ft" && r.loc.line == line
         && r.loc.col == col && r.msg == msg;
@@ -97,7 +97,7 @@ fn bool error_is(fixture mut* f, u64 i, u32 line, u32 col, string msg) {
 
 // The last lex succeeded with `n` tokens before the end-of-file token and
 // reported nothing.
-fn bool clean(fixture mut* f, string src, u64 n) {
+fn clean(fixture mut* f, string src, u64 n) bool {
     bool ok = lex(f, src);
     return ok && errors(f) == 0 && count(f) == n + 1
         && tok(f, n).kind == lexer.tok_kind.eof;
@@ -106,7 +106,7 @@ fn bool clean(fixture mut* f, string src, u64 n) {
 // The last lex failed with exactly the one diagnostic given, and still lexed
 // the file whole, so the tokens end in the end-of-file token.
 // D14.2
-fn bool one_error(fixture mut* f, string src, u32 line, u32 col, string msg) {
+fn one_error(fixture mut* f, string src, u32 line, u32 col, string msg) bool {
     bool ok = lex(f, src);
     if (ok || errors(f) != 1 || count(f) == 0) {
         return false;
@@ -120,7 +120,7 @@ fn bool one_error(fixture mut* f, string src, u32 line, u32 col, string msg) {
 // ---- files, whitespace and positions -------------------------------------------
 // D2.1, D14.2
 
-fn void empty_file_is_only_eof() {
+fn empty_file_is_only_eof() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "", 0));
@@ -130,7 +130,7 @@ fn void empty_file_is_only_eof() {
     assert(text(&f, 0).len == 0);
 }
 
-fn void whitespace_only_file_is_only_eof() {
+fn whitespace_only_file_is_only_eof() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, " \t\r\n \n", 0));
@@ -138,7 +138,7 @@ fn void whitespace_only_file_is_only_eof() {
     assert(covers(&f, 0, 6, 0));
 }
 
-fn void file_without_trailing_newline() {
+fn file_without_trailing_newline() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "x", 1));
@@ -147,7 +147,7 @@ fn void file_without_trailing_newline() {
     assert(covers(&f, 1, 1, 0));
 }
 
-fn void eof_sits_after_the_trailing_newline() {
+fn eof_sits_after_the_trailing_newline() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "x;\n", 2));
@@ -157,7 +157,7 @@ fn void eof_sits_after_the_trailing_newline() {
 
 // The byte-order mark is skipped and takes no column.
 // D2.1
-fn void bom_is_skipped_and_takes_no_column() {
+fn bom_is_skipped_and_takes_no_column() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "\xEF\xBB\xBFx", 1));
@@ -172,7 +172,7 @@ fn void bom_is_skipped_and_takes_no_column() {
 
 // A lone carriage return is whitespace and numbers no line.
 // D2.1
-fn void cr_is_whitespace() {
+fn cr_is_whitespace() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "a\r\nb\rc", 3));
@@ -183,7 +183,7 @@ fn void cr_is_whitespace() {
 
 // A tab is one column, not a stop.
 // D14.2
-fn void tab_counts_as_one_column() {
+fn tab_counts_as_one_column() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "\t\tx\ty", 2));
@@ -193,7 +193,7 @@ fn void tab_counts_as_one_column() {
     assert(covers(&f, 1, 4, 1));
 }
 
-fn void positions_advance_across_lines() {
+fn positions_advance_across_lines() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "fn main() {\n    return 0;\n}\n", 9));
@@ -214,7 +214,7 @@ fn void positions_advance_across_lines() {
 // ---- comments ------------------------------------------------------------------
 // D2.2
 
-fn void line_comment_runs_to_the_end_of_the_line() {
+fn line_comment_runs_to_the_end_of_the_line() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "a // b c \"d\" /* e\nf", 2));
@@ -223,7 +223,7 @@ fn void line_comment_runs_to_the_end_of_the_line() {
     assert(at(&f, 1, 2, 1));
 }
 
-fn void line_comment_at_the_end_of_the_file() {
+fn line_comment_at_the_end_of_the_file() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "a //", 1));
@@ -234,7 +234,7 @@ fn void line_comment_at_the_end_of_the_file() {
 
 // `/*` is a lexical error rather than a comment.
 // D2.2
-fn void block_comment_start_is_an_error() {
+fn block_comment_start_is_an_error() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(one_error(&f, "a /* stale */ + 1", 1, 3,
@@ -246,7 +246,7 @@ fn void block_comment_start_is_an_error() {
     assert(one_error(&f, "a/*=b", 1, 2, "block comments are not supported, use '//'"));
 }
 
-fn void block_comment_start_is_an_error_wherever_it_stands() {
+fn block_comment_start_is_an_error_wherever_it_stands() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(one_error(&f, "// fine\nx = /* y */ 1;\n", 2, 5,
@@ -261,7 +261,7 @@ fn void block_comment_start_is_an_error_wherever_it_stands() {
 // `a / *p`, with the operators separated, is a division by a dereference and
 // not a comment.
 // D2.2
-fn void a_slash_before_a_separated_star_is_a_division() {
+fn a_slash_before_a_separated_star_is_a_division() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "a / *p", 4));
@@ -280,7 +280,7 @@ fn void a_slash_before_a_separated_star_is_a_division() {
     assert(kind(&f, 3) == "(");
 }
 
-fn void line_comments_may_hold_non_ascii_bytes() {
+fn line_comments_may_hold_non_ascii_bytes() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "// caf\xC3\xA9\nx // na\xC3\xAFve", 1));
@@ -288,7 +288,7 @@ fn void line_comments_may_hold_non_ascii_bytes() {
     assert(at(&f, 0, 2, 1));
 }
 
-fn void comment_markers_inside_a_line_comment_are_text() {
+fn comment_markers_inside_a_line_comment_are_text() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "// /* still a line comment */\nx", 1));
@@ -299,7 +299,7 @@ fn void comment_markers_inside_a_line_comment_are_text() {
 // ---- identifiers, keywords and reserved words ----------------------------------
 // D2.3, D2.4
 
-fn void identifier_forms() {
+fn identifier_forms() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "_ a1 _x_ CamelCase __ a_b_c z9", 7));
@@ -325,7 +325,7 @@ fn void identifier_forms() {
 
 // An identifier's text is a view into the source, not a copy: it has the
 // bytes at its own offset and its own length.
-fn void identifier_text_is_a_view_into_the_source() {
+fn identifier_text_is_a_view_into_the_source() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "  hello  ", 1));
@@ -334,7 +334,7 @@ fn void identifier_text_is_a_view_into_the_source() {
     assert(covers(&f, 0, 2, 5));
 }
 
-fn void identifiers_have_no_length_limit() {
+fn identifiers_have_no_length_limit() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     // Ten thousand bytes of `a`, built here because adjacent literals do not
@@ -356,7 +356,7 @@ fn void identifiers_have_no_length_limit() {
 // Every keyword lexes as its own kind, and the kind's name is the word: the
 // table tok_kind_name holds is the table keyword_kind walks.
 // D2.4
-fn void every_keyword_lexes_as_its_kind() {
+fn every_keyword_lexes_as_its_kind() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     i64 mut k = cast(lexer.tok_kind.kw_as, i64);
@@ -376,7 +376,7 @@ fn void every_keyword_lexes_as_its_kind() {
     assert(seen == 41);
 }
 
-fn void the_keyword_list_of_d2_4() {
+fn the_keyword_list_of_d2_4() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     // The list, in its order, in five lines because adjacent literals do not
@@ -404,7 +404,7 @@ fn void the_keyword_list_of_d2_4() {
     assert(10 + 8 + 11 + 6 + 6 == 41);
 }
 
-fn void own_is_a_keyword() {
+fn own_is_a_keyword() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "own mut node* n", 5));
@@ -414,7 +414,7 @@ fn void own_is_a_keyword() {
     assert(kind(&f, 3) == "*");
 }
 
-fn void a_word_extending_a_keyword_is_an_identifier() {
+fn a_word_extending_a_keyword_is_an_identifier() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "iff i3 fnx structs _if if_ i32_t", 7));
@@ -425,7 +425,7 @@ fn void a_word_extending_a_keyword_is_an_identifier() {
     }
 }
 
-fn void keywords_are_case_sensitive() {
+fn keywords_are_case_sensitive() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "If TRUE Fn i32 I32", 5));
@@ -438,7 +438,7 @@ fn void keywords_are_case_sensitive() {
 
 // The universe functions are names, not keywords.
 // D2.4
-fn void universe_functions_are_not_keywords() {
+fn universe_functions_are_not_keywords() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "del move assert panic print", 5));
@@ -451,7 +451,7 @@ fn void universe_functions_are_not_keywords() {
 
 // The ten words reserved for future use are usable nowhere.
 // D2.4
-fn void reserved_words_are_errors() {
+fn reserved_words_are_errors() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(one_error(&f, "i32 const = 1;", 1, 5, "'const' is a reserved word"));
@@ -467,7 +467,7 @@ fn void reserved_words_are_errors() {
     assert(one_error(&f, "yield", 1, 1, "'yield' is a reserved word"));
 }
 
-fn void a_word_extending_a_reserved_word_is_an_identifier() {
+fn a_word_extending_a_reserved_word_is_an_identifier() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "constant types union_ _pub", 4));
@@ -483,7 +483,7 @@ fn void a_word_extending_a_reserved_word_is_an_identifier() {
 
 // Every operator lexes alone as its own kind, spelled as its name.
 // D2.10
-fn void every_operator_lexes_alone_as_its_kind() {
+fn every_operator_lexes_alone_as_its_kind() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     i64 mut k = cast(lexer.tok_kind.plus, i64);
@@ -504,7 +504,7 @@ fn void every_operator_lexes_alone_as_its_kind() {
     assert(seen == 53);
 }
 
-fn void the_operator_list_of_d2_10() {
+fn the_operator_list_of_d2_10() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     // The list, in its order, split across lines of a hundred columns; the
@@ -540,7 +540,7 @@ fn void the_operator_list_of_d2_10() {
 
 // The three-byte operators and the prefixes they extend.
 // D2.10
-fn void three_character_operators_and_their_prefixes() {
+fn three_character_operators_and_their_prefixes() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "+%= +% + -%= -% - *%= *% * <<= << < >>= >> >", 15));
@@ -566,7 +566,7 @@ fn void three_character_operators_and_their_prefixes() {
 
 // The longest match wins, with no space to separate the operands.
 // D2.10
-fn void longest_match_without_spaces() {
+fn longest_match_without_spaces() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "a+%=b", 3));
@@ -594,7 +594,7 @@ fn void longest_match_without_spaces() {
     assert(kind(&f, 2) == ".");
 }
 
-fn void runs_of_operator_characters_split_greedily() {
+fn runs_of_operator_characters_split_greedily() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "&&=", 2));
@@ -636,7 +636,7 @@ fn void runs_of_operator_characters_split_greedily() {
     assert(kind(&f, 1) == "%=");
 }
 
-fn void slash_operators_beside_comments() {
+fn slash_operators_beside_comments() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "a/=b//c\n/d", 5));
@@ -652,7 +652,7 @@ fn void slash_operators_beside_comments() {
 
 // `@` is a one-byte operator token, the span suffix.
 // D2.10, D3.5
-fn void at_lexes_as_the_span_suffix_token() {
+fn at_lexes_as_the_span_suffix_token() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "@", 1));
@@ -666,7 +666,7 @@ fn void at_lexes_as_the_span_suffix_token() {
     assert(covers(&f, 1, 4, 1));
 }
 
-fn void at_in_a_type_lexes_beside_its_neighbours() {
+fn at_in_a_type_lexes_beside_its_neighbours() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     // A span of writable bytes, `u8 mut@ mut s`.
@@ -689,7 +689,7 @@ fn void at_in_a_type_lexes_beside_its_neighbours() {
 }
 
 // No two-byte operator begins with `@`, so a run splits after each one.
-fn void at_starts_no_longer_operator() {
+fn at_starts_no_longer_operator() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "@=", 2));
@@ -705,7 +705,7 @@ fn void at_starts_no_longer_operator() {
     assert(kind(&f, 4) == "@");
 }
 
-fn void at_inside_a_literal_or_a_comment_is_an_ordinary_byte() {
+fn at_inside_a_literal_or_a_comment_is_an_ordinary_byte() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     // A string keeps `@` as a byte of its text.
@@ -729,7 +729,7 @@ fn void at_inside_a_literal_or_a_comment_is_an_ordinary_byte() {
     assert(at(&f, 1, 2, 1));
 }
 
-fn void a_statement_lexes_into_the_expected_sequence() {
+fn a_statement_lexes_into_the_expected_sequence() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     // An owned span of writable bytes from new(T, n).
@@ -753,7 +753,7 @@ fn void a_statement_lexes_into_the_expected_sequence() {
     assert(kind(&f, 15) == ";");
 }
 
-fn void every_kind_of_token_in_one_file() {
+fn every_kind_of_token_in_one_file() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     assert(clean(&f, "fn f(x) { s = \"a\"; c = 'b'; n = 1; y = 1.5; }", 23));
@@ -770,7 +770,7 @@ fn void every_kind_of_token_in_one_file() {
 
 // ---- kinds and the token vector ------------------------------------------------
 
-fn void kind_names_of_the_literal_classes() {
+fn kind_names_of_the_literal_classes() void {
     assert(lexer.tok_kind_name(lexer.tok_kind.eof) == "end of file");
     assert(lexer.tok_kind_name(lexer.tok_kind.ident) == "identifier");
     assert(lexer.tok_kind_name(lexer.tok_kind.int_lit) == "integer literal");
@@ -785,7 +785,7 @@ fn void kind_names_of_the_literal_classes() {
 
 // No two kinds share a name, which is what lets every assertion above compare
 // kinds by their names.
-fn void kind_names_are_distinct() {
+fn kind_names_are_distinct() void {
     i64 last = cast(lexer.tok_kind.at, i64);
     i64 mut a = 0;
     while (a <= last) {
@@ -801,7 +801,7 @@ fn void kind_names_are_distinct() {
 }
 
 // The vector grows and keeps every token, as containers.str_vec does.
-fn void tokvec_grows_and_keeps_its_tokens() {
+fn tokvec_grows_and_keeps_its_tokens() void {
     lexer.tok_vec mut v = lexer.tokvec_create();
     defer lexer.tokvec_free(&v);
     assert(lexer.tokvec_count(&v) == 0);
@@ -827,7 +827,7 @@ fn void tokvec_grows_and_keeps_its_tokens() {
 
 // A reserve large enough for everything that follows grows the vector once,
 // which a push into the reserved room must not undo.
-fn void tokvec_reserve_grows_once() {
+fn tokvec_reserve_grows_once() void {
     lexer.tok_vec mut v = lexer.tokvec_create();
     defer lexer.tokvec_free(&v);
     lexer.tokvec_reserve(&v, 1000);
@@ -846,7 +846,7 @@ fn void tokvec_reserve_grows_once() {
 // or past the end leaves the vector alone, which is what a resync on the first
 // line of a file relies on.
 // D14.2
-fn void tokvec_truncate_drops_the_tail() {
+fn tokvec_truncate_drops_the_tail() void {
     lexer.tok_vec mut v = lexer.tokvec_create();
     defer lexer.tokvec_free(&v);
     u64 mut i = 0;
@@ -868,7 +868,7 @@ fn void tokvec_truncate_drops_the_tail() {
 }
 
 // A long file grows the output vector many times and every token survives it.
-fn void lexing_a_long_file_grows_the_output() {
+fn lexing_a_long_file_grows_the_output() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
     strbuf.str_buf mut b = strbuf.create();
@@ -887,7 +887,7 @@ fn void lexing_a_long_file_grows_the_output() {
     assert(errors(&f) == 0);
 }
 
-fn i32 main() {
+fn main() i32 {
     empty_file_is_only_eof();
     whitespace_only_file_is_only_eof();
     file_without_trailing_newline();

@@ -18,7 +18,7 @@
 // ---- the bracket pairs ----------------------------------------------------
 
 TEST(a_missing_open_parenthesis, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn i32 f) { }"), "t.ft:1:9: error: expected '(', found ')'\n");
+    TEST_ASSERT_EQ_STR(parse_fails("fn f) { }"), "t.ft:1:5: error: expected '(', found ')'\n");
     TEST_ASSERT_EQ_STR(stmt_fails("if c) { }"),
                        "t.ft:2:4: error: expected '(', found identifier "
                        "'c'\n");
@@ -32,12 +32,12 @@ TEST(a_missing_open_parenthesis, {
                        "t.ft:1:14: error: expected '(', found identifier 'x'\n");
     TEST_ASSERT_EQ_STR(expr_fails("sizeof i32)"), "t.ft:1:16: error: expected '(', found 'i32'\n");
     TEST_ASSERT_EQ_STR(expr_fails("new i32)"), "t.ft:1:13: error: expected '(', found 'i32'\n");
-    TEST_ASSERT_EQ_STR(type_fails("fn i32 i32)"), "t.ft:1:8: error: expected '(', found 'i32'\n");
+    TEST_ASSERT_EQ_STR(type_fails("fn i32)"), "t.ft:1:4: error: expected '(', found 'i32'\n");
 })
 
 TEST(a_missing_close_parenthesis, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn i32 f(i32 a { }"),
-                       "t.ft:1:16: error: expected ')', found '{'\n");
+    TEST_ASSERT_EQ_STR(parse_fails("fn f(i32 a { }"),
+                       "t.ft:1:12: error: expected ')', found '{'\n");
     TEST_ASSERT_EQ_STR(stmt_fails("if (c) { "),
                        "t.ft:3:2: error: expected '}', found end of file\n");
     // The step of a `for` is optional, so a missing `)` is reported where the
@@ -64,7 +64,7 @@ TEST(a_missing_bracket_or_brace, {
     TEST_ASSERT_EQ_STR(expr_fails("s[0..1"), "t.ft:1:15: error: expected ']', found ';'\n");
     TEST_ASSERT_EQ_STR(type_fails("i32[4"),
                        "t.ft:1:7: error: expected ']', found identifier 'x'\n");
-    TEST_ASSERT_EQ_STR(parse_fails("fn void f() }"), "t.ft:1:13: error: expected '{', found '}'\n");
+    TEST_ASSERT_EQ_STR(parse_fails("fn f() void }"), "t.ft:1:13: error: expected '{', found '}'\n");
     TEST_ASSERT_EQ_STR(parse_fails("struct s i32 x; }"),
                        "t.ft:1:10: error: expected '{', found 'i32'\n");
     TEST_ASSERT_EQ_STR(parse_fails("enum e red }"),
@@ -88,7 +88,7 @@ TEST(a_missing_semicolon, {
     TEST_ASSERT_EQ_STR(stmt_fails("return 1"), "t.ft:3:1: error: expected ';', found '}'\n");
     TEST_ASSERT_EQ_STR(stmt_fails("break"), "t.ft:3:1: error: expected ';', found '}'\n");
     TEST_ASSERT_EQ_STR(stmt_fails("continue"), "t.ft:3:1: error: expected ';', found '}'\n");
-    TEST_ASSERT_EQ_STR(parse_fails("extern fn void f()"),
+    TEST_ASSERT_EQ_STR(parse_fails("extern fn f() void"),
                        "t.ft:1:19: error: expected ';', found end of file\n");
     TEST_ASSERT_EQ_STR(parse_fails("struct s { i32 x }"),
                        "t.ft:1:18: error: expected ';', found '}'\n");
@@ -111,10 +111,10 @@ TEST(a_missing_equals_colon_or_comma, {
 })
 
 TEST(a_missing_identifier, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn i32 f() { } "),
+    TEST_ASSERT_EQ_STR(parse_fails("fn f() i32 { } "),
                        "(module (fn (type (prim i32)) f (params) (block)))");
-    TEST_ASSERT_EQ_STR(parse_fails("fn void f(i32) { }"),
-                       "t.ft:1:14: error: expected an identifier, found ')'\n");
+    TEST_ASSERT_EQ_STR(parse_fails("fn f(i32) void { }"),
+                       "t.ft:1:9: error: expected an identifier, found ')'\n");
     TEST_ASSERT_EQ_STR(parse_fails("struct { i32 x; }"),
                        "t.ft:1:8: error: expected an identifier, found '{'\n");
     TEST_ASSERT_EQ_STR(parse_fails("enum { red }"),
@@ -149,8 +149,8 @@ TEST(the_keyword_forms_that_need_a_keyword, {
 TEST(a_token_that_starts_no_type, {
     TEST_ASSERT_EQ_STR(parse_fails("1 x = 0;"),
                        "t.ft:1:1: error: expected a type, found integer literal\n");
-    TEST_ASSERT_EQ_STR(parse_fails("fn void f(1 a) { }"),
-                       "t.ft:1:11: error: expected a type, found integer literal\n");
+    TEST_ASSERT_EQ_STR(parse_fails("fn f(1 a) void { }"),
+                       "t.ft:1:6: error: expected a type, found integer literal\n");
     TEST_ASSERT_EQ_STR(parse_fails("struct s { 1 x; }"),
                        "t.ft:1:12: error: expected a type, found integer literal\n");
     TEST_ASSERT_EQ_STR(expr_fails("sizeof(1)"),
@@ -159,8 +159,8 @@ TEST(a_token_that_starts_no_type, {
                        "t.ft:1:17: error: expected a type, found integer literal\n");
     TEST_ASSERT_EQ_STR(expr_fails("new(1)"),
                        "t.ft:1:13: error: expected a type, found integer literal\n");
-    TEST_ASSERT_EQ_STR(type_fails("fn void(1)"),
-                       "t.ft:1:9: error: expected a type, found integer literal\n");
+    TEST_ASSERT_EQ_STR(type_fails("fn (1) void"),
+                       "t.ft:1:5: error: expected a type, found integer literal\n");
 })
 
 TEST(a_token_that_starts_no_expression, {
@@ -198,12 +198,12 @@ TEST(later_errors_are_reported_too, {
                        "t.ft:3:9: error: expected an expression, found ';'\n");
     // The `}` of line 4 closes the `if`, so the function's block runs out of
     // tokens and says so at the end of the file.
-    TEST_ASSERT_EQ_STR(parse_fails("fn void f() {\n    if (c) {\n    x = ;\n}\n"),
+    TEST_ASSERT_EQ_STR(parse_fails("fn f() void {\n    if (c) {\n    x = ;\n}\n"),
                        "t.ft:3:9: error: expected an expression, found ';'\n"
                        "t.ft:5:1: error: expected '}', found end of file\n");
-    TEST_ASSERT_EQ_STR(parse_fails("struct s { i32 x }\nfn void f( { }\n"),
+    TEST_ASSERT_EQ_STR(parse_fails("struct s { i32 x }\nfn f( { }\n"),
                        "t.ft:1:18: error: expected ';', found '}'\n"
-                       "t.ft:2:12: error: expected a type, found '{'\n");
+                       "t.ft:2:7: error: expected a type, found '{'\n");
 })
 
 // A declaration that fails after the speculative parse chose it reports the

@@ -445,20 +445,20 @@ TEST(function_types_are_spelled_fn_return_parameters, {
     tenv_init(&e);
     const type_t* i32 = type_prim(&e.tt, PRIM_I32);
     const type_t* v = type_void(&e.tt);
-    TEST_ASSERT_EQ_STR(tenv_str(&e, tenv_fn(&e, i32, i32, i32)), "fn i32(i32, i32)");
-    TEST_ASSERT_EQ_STR(tenv_str(&e, tenv_fn(&e, i32, i32, NULL)), "fn i32(i32)");
-    TEST_ASSERT_EQ_STR(tenv_str(&e, tenv_fn(&e, v, NULL, NULL)), "fn void()");
-    TEST_ASSERT_EQ_STR(tenv_str(&e, type_fn(&e.tt, v, NULL, 0, true)), "fn noreturn()");
+    TEST_ASSERT_EQ_STR(tenv_str(&e, tenv_fn(&e, i32, i32, i32)), "fn (i32, i32) i32");
+    TEST_ASSERT_EQ_STR(tenv_str(&e, tenv_fn(&e, i32, i32, NULL)), "fn (i32) i32");
+    TEST_ASSERT_EQ_STR(tenv_str(&e, tenv_fn(&e, v, NULL, NULL)), "fn () void");
+    TEST_ASSERT_EQ_STR(tenv_str(&e, type_fn(&e.tt, v, NULL, 0, true)), "fn () noreturn");
     // Parameter and return types keep their own marks.
     TEST_ASSERT_EQ_STR(tenv_str(&e, tenv_fn(&e, v, tenv_type(&e, "node mut* own"), NULL)),
-                       "fn void(node mut* own)");
+                       "fn (node mut* own) void");
     TEST_ASSERT_EQ_STR(tenv_str(&e, tenv_fn(&e, tenv_type(&e, "string own"), NULL, NULL)),
-                       "fn string own()");
+                       "fn () string own");
     TEST_ASSERT_EQ_STR(tenv_str(&e, tenv_fn(&e, v, tenv_type(&e, "u8 mut@ own mut*"), NULL)),
-                       "fn void(u8 mut@ own mut*)");
+                       "fn (u8 mut@ own mut*) void");
     // A function type may be a parameter type itself.
     TEST_ASSERT_EQ_STR(tenv_str(&e, tenv_fn(&e, v, tenv_fn(&e, i32, i32, NULL), NULL)),
-                       "fn void(fn i32(i32))");
+                       "fn (fn (i32) i32) void");
     tenv_free(&e);
 })
 
@@ -469,14 +469,14 @@ TEST(suffixes_after_a_function_type_apply_to_it, {
     const type_t* f = tenv_fn(&e, i32, i32, NULL);
     // `fn i32(i32)[4]`: an array of four function pointers.
     // D3.6
-    TEST_ASSERT_EQ_STR(tenv_str(&e, type_array(&e.tt, f, 4)), "fn i32(i32)[4]");
+    TEST_ASSERT_EQ_STR(tenv_str(&e, type_array(&e.tt, f, 4)), "fn (i32) i32[4]");
     // `fn i32[4](i32)`: a function returning an `i32[4]`.
     TEST_ASSERT_EQ_STR(tenv_str(&e, tenv_fn(&e, type_array(&e.tt, i32, 4), i32, NULL)),
-                       "fn i32[4](i32)");
+                       "fn (i32) i32[4]");
     // `fn i32(i32)*`: a pointer to a slot holding a function pointer.
-    TEST_ASSERT_EQ_STR(tenv_str(&e, type_ptr(&e.tt, f, false, false)), "fn i32(i32)*");
-    TEST_ASSERT_EQ_STR(tenv_str(&e, type_ptr(&e.tt, f, false, true)), "fn i32(i32) mut*");
-    TEST_ASSERT_EQ_STR(tenv_str(&e, type_span(&e.tt, f, false, false)), "fn i32(i32)@");
+    TEST_ASSERT_EQ_STR(tenv_str(&e, type_ptr(&e.tt, f, false, false)), "fn (i32) i32*");
+    TEST_ASSERT_EQ_STR(tenv_str(&e, type_ptr(&e.tt, f, false, true)), "fn (i32) i32 mut*");
+    TEST_ASSERT_EQ_STR(tenv_str(&e, type_span(&e.tt, f, false, false)), "fn (i32) i32@");
     tenv_free(&e);
 })
 

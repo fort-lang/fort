@@ -914,7 +914,7 @@ static gen_val_t gen_string_compare(gen_t* g, ast_node_t* n) {
     gen_args_add(&args, alen);
     gen_args_add(&args, bptr);
     gen_args_add(&args, blen);
-    // The entry point is `fn bool str_eq(...)`, and a fort `bool` result is `zeroext
+    // The entry point is `fn str_eq(...) bool`, and a fort `bool` result is `zeroext
     // i1` (items 2, 7), so the value needs no narrowing. The attribute is not
     // decorative: a call site that states one the definition lacks changes what LLVM
     // may assume of the result.

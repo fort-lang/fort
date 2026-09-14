@@ -26,7 +26,7 @@ import std.strbuf;
 // One line of a source. A fort string literal holds the whole source on one
 // line at 100 columns, so each line is appended and the line numbers of the
 // assertions below are read off these calls.
-fn void line(strbuf.str_buf mut* b, string text) {
+fn line(strbuf.str_buf mut* b, string text) void {
     strbuf.append(b, text);
     strbuf.push(b, '\n');
 }
@@ -34,7 +34,7 @@ fn void line(strbuf.str_buf mut* b, string text) {
 // A module with one declaration of every kind a module can hold, imported by
 // the entry module below.
 // D20.3
-fn void util_source(strbuf.str_buf mut* b) {
+fn util_source(strbuf.str_buf mut* b) void {
     line(b, "i32 LIMIT = 4;");             // line 1
     line(b, "i32 mut seen = 0;");          // line 2
     line(b, "struct vec {");               // line 3
@@ -43,17 +43,17 @@ fn void util_source(strbuf.str_buf mut* b) {
     line(b, "enum color {");               // line 6
     line(b, "    red,");                   // line 7
     line(b, "}");                          // line 8
-    line(b, "extern fn i32 abs(i32 n);");  // line 9
-    line(b, "fn i32 twice(i32 n) {");      // line 10
+    line(b, "extern fn abs(i32 n) i32;");  // line 9
+    line(b, "fn twice(i32 n) i32 {");      // line 10
     line(b, "    return n + n;");          // line 11
     line(b, "}");                          // line 12
 }
 
 // The entry module: an import, a local, a parameter, a builtin and a use of
 // every declaration of `util`.
-fn void main_source(strbuf.str_buf mut* b) {
+fn main_source(strbuf.str_buf mut* b) void {
     line(b, "import util;");                            // line 1
-    line(b, "fn i32 main() {");                         // line 2
+    line(b, "fn main() i32 {");                         // line 2
     line(b, "    util.vec v = {util.LIMIT};");          // line 3
     line(b, "    println(util.twice(v.x));");           // line 4
     line(b, "    println(util.color.red, util.seen);"); // line 5
@@ -62,7 +62,7 @@ fn void main_source(strbuf.str_buf mut* b) {
 }
 
 // Loads and checks the two modules above, then indexes the closure.
-fn bool index_two_modules(index_env.env mut* e) {
+fn index_two_modules(index_env.env mut* e) bool {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     util_source(&b);
@@ -76,25 +76,25 @@ fn bool index_two_modules(index_env.env mut* e) {
 // ---- the record of one occurrence ----------------------------------------------
 // D20.3
 
-fn void a_declaration_is_recorded_at_its_own_name() {
+fn a_declaration_is_recorded_at_its_own_name() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
-    assert(index_env.index_src(&e, "fn i32 main() { return 0; }\n"));
+    assert(index_env.index_src(&e, "fn main() i32 { return 0; }\n"));
     // The name token alone, never the `fn` the construct starts at.
     // D20.4
-    assert(index_env.text_at(&e, 1, 8) ==
-           "main.ft:1:8-1:12 fn main 'fn i32()' decl main.ft:1:8");
+    assert(index_env.text_at(&e, 1, 4) ==
+           "main.ft:1:4-1:8 fn main 'fn () i32' decl main.ft:1:4");
     assert(index.count(&e.ix) == 1);
 }
 
-fn void a_use_carries_the_declarations_range() {
+fn a_use_carries_the_declarations_range() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
-    line(&b, "fn i32 add(i32 a) {");
+    line(&b, "fn add(i32 a) i32 {");
     line(&b, "    return a;");
     line(&b, "}");
     // A module under inspection need not define main, which is the mode the
@@ -102,22 +102,22 @@ fn void a_use_carries_the_declarations_range() {
     // D20.1
     e.c.want_main = false;
     assert(index_env.index_src(&e, strbuf.view(&b)));
-    assert(index_env.text_at(&e, 1, 16) ==
-           "main.ft:1:16-1:17 parameter a 'i32' decl main.ft:1:16");
+    assert(index_env.text_at(&e, 1, 12) ==
+           "main.ft:1:12-1:13 parameter a 'i32' decl main.ft:1:12");
     // The use says where the declaration is and repeats its type, so a client
     // answers hover and go-to-definition from the record alone.
     // D20.3
     assert(index_env.text_at(&e, 2, 12) ==
-           "main.ft:2:12-2:13 parameter a 'i32' use main.ft:1:16");
+           "main.ft:2:12-2:13 parameter a 'i32' use main.ft:1:12");
 }
 
-fn void a_local_is_a_local_and_a_parameter_a_parameter() {
+fn a_local_is_a_local_and_a_parameter_a_parameter() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
-    line(&b, "fn i32 main() {");
+    line(&b, "fn main() i32 {");
     line(&b, "    i32 n = 1;");
     line(&b, "    return n;");
     line(&b, "}");
@@ -126,13 +126,13 @@ fn void a_local_is_a_local_and_a_parameter_a_parameter() {
     assert(index_env.text_at(&e, 3, 12) == "main.ft:3:12-3:13 local n 'i32' use main.ft:2:9");
 }
 
-fn void a_locals_type_carries_its_level_0_mutability() {
+fn a_locals_type_carries_its_level_0_mutability() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
-    line(&b, "fn i32 main() {");
+    line(&b, "fn main() i32 {");
     line(&b, "    i32 mut n = 1;");
     line(&b, "    return n;");
     line(&b, "}");
@@ -143,13 +143,13 @@ fn void a_locals_type_carries_its_level_0_mutability() {
            "main.ft:2:13-2:14 local n 'i32 mut' decl main.ft:2:13");
 }
 
-fn void a_builtin_has_no_declaration_to_jump_to() {
+fn a_builtin_has_no_declaration_to_jump_to() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
-    line(&b, "fn i32 main() {");
+    line(&b, "fn main() i32 {");
     line(&b, "    println(1);");
     line(&b, "    return 0;");
     line(&b, "}");
@@ -163,7 +163,7 @@ fn void a_builtin_has_no_declaration_to_jump_to() {
     assert(!found.has_decl);
 }
 
-fn void a_struct_name_and_an_enum_name_have_no_type() {
+fn a_struct_name_and_an_enum_name_have_no_type() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
@@ -177,7 +177,7 @@ fn void a_struct_name_and_an_enum_name_have_no_type() {
            "util.ft:6:6-6:11 enum color '' decl util.ft:6:6");
 }
 
-fn void a_field_and_an_enum_member_carry_their_types() {
+fn a_field_and_an_enum_member_carry_their_types() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
@@ -190,7 +190,7 @@ fn void a_field_and_an_enum_member_carry_their_types() {
            "util.ft:7:5-7:8 enum member red 'color' decl util.ft:7:5");
 }
 
-fn void a_constant_and_a_global_are_told_apart() {
+fn a_constant_and_a_global_are_told_apart() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
@@ -203,16 +203,16 @@ fn void a_constant_and_a_global_are_told_apart() {
            "util.ft:2:9-2:13 global seen 'i32 mut' decl util.ft:2:9");
 }
 
-fn void an_extern_function_is_an_extern_fn() {
+fn an_extern_function_is_an_extern_fn() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
     assert(index_two_modules(&e));
-    assert(index_env.text_in(&e, "util.ft", 9, 15) ==
-           "util.ft:9:15-9:18 extern fn abs 'fn i32(i32)' decl util.ft:9:15");
+    assert(index_env.text_in(&e, "util.ft", 9, 11) ==
+           "util.ft:9:11-9:14 extern fn abs 'fn (i32) i32' decl util.ft:9:11");
 }
 
-fn void a_qualified_use_records_the_module_and_the_declaration() {
+fn a_qualified_use_records_the_module_and_the_declaration() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
@@ -223,10 +223,10 @@ fn void a_qualified_use_records_the_module_and_the_declaration() {
     assert(index_env.text_in(&e, "main.ft", 4, 13) ==
            "main.ft:4:13-4:17 module util '' use util.ft:1:1");
     assert(index_env.text_in(&e, "main.ft", 4, 18) ==
-           "main.ft:4:18-4:23 fn twice 'fn i32(i32)' use util.ft:10:8");
+           "main.ft:4:18-4:23 fn twice 'fn (i32) i32' use util.ft:10:4");
 }
 
-fn void the_last_segment_of_an_import_path_is_the_module() {
+fn the_last_segment_of_an_import_path_is_the_module() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
@@ -235,7 +235,7 @@ fn void the_last_segment_of_an_import_path_is_the_module() {
            "main.ft:1:8-1:12 module util '' use util.ft:1:1");
 }
 
-fn void a_field_access_records_the_field_of_the_struct() {
+fn a_field_access_records_the_field_of_the_struct() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
@@ -244,7 +244,7 @@ fn void a_field_access_records_the_field_of_the_struct() {
            "main.ft:4:26-4:27 field x 'i32' use util.ft:4:9");
 }
 
-fn void an_enum_member_is_reached_through_its_enum() {
+fn an_enum_member_is_reached_through_its_enum() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
@@ -258,7 +258,7 @@ fn void an_enum_member_is_reached_through_its_enum() {
 // ---- the order of the records --------------------------------------------------
 // D20.3
 
-fn void an_imported_module_comes_before_its_importer() {
+fn an_imported_module_comes_before_its_importer() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
@@ -269,21 +269,21 @@ fn void an_imported_module_comes_before_its_importer() {
     assert(index_env.file_of(&e, index.count(&e.ix) - 1) == "main.ft");
 }
 
-fn void the_records_of_a_file_are_in_position_order() {
+fn the_records_of_a_file_are_in_position_order() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
-    line(&b, "fn i32 main() {");
+    line(&b, "fn main() i32 {");
     line(&b, "    i32 n = 1;");
     line(&b, "    return n;");
     line(&b, "}");
     assert(index_env.index_src(&e, strbuf.view(&b)));
-    assert(index_env.file_text(&e, "main.ft") == "main@1:8\nn@2:9\nn@3:12");
+    assert(index_env.file_text(&e, "main.ft") == "main@1:4\nn@2:9\nn@3:12");
 }
 
-fn void an_operand_comes_before_the_field_it_is_read_through() {
+fn an_operand_comes_before_the_field_it_is_read_through() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
@@ -292,7 +292,7 @@ fn void an_operand_comes_before_the_field_it_is_read_through() {
     line(&b, "struct p {");
     line(&b, "    i32 x;");
     line(&b, "}");
-    line(&b, "fn i32 main() {");
+    line(&b, "fn main() i32 {");
     line(&b, "    p v = {1};");
     line(&b, "    return v.x;");
     line(&b, "}");
@@ -302,12 +302,12 @@ fn void an_operand_comes_before_the_field_it_is_read_through() {
     assert(index_env.index_src(&e, strbuf.view(&b)));
     strbuf.str_buf mut want = strbuf.create();
     defer strbuf.free(&want);
-    strbuf.append(&want, "p@1:8\nx@2:9\nmain@4:8\n");
+    strbuf.append(&want, "p@1:8\nx@2:9\nmain@4:4\n");
     strbuf.append(&want, "p@5:5\nv@5:7\nv@6:12\nx@6:14");
     assert(index_env.file_text(&e, "main.ft") == strbuf.view(&want));
 }
 
-fn void the_records_of_one_line_are_in_column_order() {
+fn the_records_of_one_line_are_in_column_order() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
@@ -340,15 +340,15 @@ fn void the_records_of_one_line_are_in_column_order() {
 // ---- what carries no record ----------------------------------------------------
 // D20.3
 
-fn void a_directory_segment_of_an_import_path_carries_no_record() {
+fn a_directory_segment_of_an_import_path_carries_no_record() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
-    check_env.add(&e.c, "sub/util.ft", "fn i32 twice(i32 n) { return n + n; }\n");
+    check_env.add(&e.c, "sub/util.ft", "fn twice(i32 n) i32 { return n + n; }\n");
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     line(&b, "import sub.util;");
-    line(&b, "fn i32 main() { return util.twice(1); }");
+    line(&b, "fn main() i32 { return util.twice(1); }");
     check_env.add(&e.c, "main.ft", strbuf.view(&b));
     assert(index_env.index_entry(&e, "main.ft"));
     // `sub` names a search directory and not a module, so only the last
@@ -359,26 +359,26 @@ fn void a_directory_segment_of_an_import_path_carries_no_record() {
            "main.ft:1:12-1:16 module util '' use sub/util.ft:1:1");
 }
 
-fn void an_alias_of_an_import_that_failed_carries_no_record() {
+fn an_alias_of_an_import_that_failed_carries_no_record() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     line(&b, "import nothere as n;");
-    line(&b, "fn i32 main() { return 0; }");
+    line(&b, "fn main() i32 { return 0; }");
     assert(!index_env.index_src(&e, strbuf.view(&b)));
     // The import bound nothing, so neither the path segment nor the alias
     // denotes anything and the file indexes only what resolved.
     // D20.3
-    assert(index_env.file_text(&e, "main.ft") == "main@2:8");
+    assert(index_env.file_text(&e, "main.ft") == "main@2:4");
 }
 
-fn void the_module_node_itself_is_not_an_occurrence() {
+fn the_module_node_itself_is_not_an_occurrence() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
-    assert(index_env.index_src(&e, "fn i32 main() { return 0; }\n"));
+    assert(index_env.index_src(&e, "fn main() i32 { return 0; }\n"));
     // The module's own record hangs on the module node, which has no name
     // token, so nothing is recorded for it.
     // D20.3
@@ -386,13 +386,13 @@ fn void the_module_node_itself_is_not_an_occurrence() {
     assert(index_env.text_at(&e, 1, 1) == "<none>");
 }
 
-fn void a_name_that_did_not_resolve_carries_no_record() {
+fn a_name_that_did_not_resolve_carries_no_record() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
-    line(&b, "fn i32 main() {");
+    line(&b, "fn main() i32 {");
     line(&b, "    return nope;");
     line(&b, "}");
     assert(!index_env.index_src(&e, strbuf.view(&b)));
@@ -401,17 +401,17 @@ fn void a_name_that_did_not_resolve_carries_no_record() {
     // and everything that did resolve is still there.
     // D20.3
     assert(index_env.text_at(&e, 2, 12) == "<none>");
-    assert(index_env.text_at(&e, 1, 8) ==
-           "main.ft:1:8-1:12 fn main 'fn i32()' decl main.ft:1:8");
+    assert(index_env.text_at(&e, 1, 4) ==
+           "main.ft:1:4-1:8 fn main 'fn () i32' decl main.ft:1:4");
 }
 
-fn void a_declaration_that_failed_to_check_has_no_type_to_show() {
+fn a_declaration_that_failed_to_check_has_no_type_to_show() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
-    line(&b, "fn i32 main() {");
+    line(&b, "fn main() i32 {");
     line(&b, "    nope n = 1;");
     line(&b, "    return 0;");
     line(&b, "}");
@@ -426,15 +426,15 @@ fn void a_declaration_that_failed_to_check_has_no_type_to_show() {
     assert(!found.has_type);
 }
 
-fn void a_module_that_did_not_parse_contributes_nothing() {
+fn a_module_that_did_not_parse_contributes_nothing() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
-    check_env.add(&e.c, "util.ft", "fn i32 twice(i32 n) { return n + n\n");
+    check_env.add(&e.c, "util.ft", "fn twice(i32 n) i32 { return n + n\n");
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     line(&b, "import util;");
-    line(&b, "fn i32 main() { return 0; }");
+    line(&b, "fn main() i32 { return 0; }");
     check_env.add(&e.c, "main.ft", strbuf.view(&b));
     assert(!index_env.index_entry(&e, "main.ft"));
     // It was never checked, so it has no annotation to read.
@@ -442,14 +442,14 @@ fn void a_module_that_did_not_parse_contributes_nothing() {
     assert(index_env.file_count(&e, "util.ft") == 0);
 }
 
-fn void a_module_whose_import_failed_is_indexed_all_the_same() {
+fn a_module_whose_import_failed_is_indexed_all_the_same() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     line(&b, "import nothere;");
-    line(&b, "fn i32 twice(i32 n) {");
+    line(&b, "fn twice(i32 n) i32 {");
     line(&b, "    return n + n;");
     line(&b, "}");
     e.c.want_main = false;
@@ -457,22 +457,22 @@ fn void a_module_whose_import_failed_is_indexed_all_the_same() {
     // The loader never ordered it, and the checker checked it, so the file a
     // reader is editing is indexed whatever its imports do.
     // D14.2, D20.1
-    assert(index_env.file_text(&e, "main.ft") == "twice@2:8\nn@2:18\nn@3:12\nn@3:16");
+    assert(index_env.file_text(&e, "main.ft") == "twice@2:4\nn@2:14\nn@3:12\nn@3:16");
 }
 
 // ---- the index itself ----------------------------------------------------------
 
-fn void an_empty_index_holds_nothing() {
+fn an_empty_index_holds_nothing() void {
     index.index mut ix = index.create();
     defer index.free(&ix);
     assert(index.count(&ix) == 0);
 }
 
-fn void freeing_an_index_leaves_it_usable() {
+fn freeing_an_index_leaves_it_usable() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
-    assert(index_env.index_src(&e, "fn i32 main() { return 0; }\n"));
+    assert(index_env.index_src(&e, "fn main() i32 { return 0; }\n"));
     assert(index.count(&e.ix) == 1);
     index.free(&e.ix);
     // Freeing empties it and leaves it usable, as every container does.
@@ -484,11 +484,11 @@ fn void freeing_an_index_leaves_it_usable() {
 // build appends to what the index already holds, which is what index.ft
 // promises: a second walk over the same closure doubles the records rather
 // than replacing them.
-fn void a_second_walk_appends_to_the_records() {
+fn a_second_walk_appends_to_the_records() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
-    assert(index_env.index_src(&e, "fn i32 main() { return 0; }\n"));
+    assert(index_env.index_src(&e, "fn main() i32 { return 0; }\n"));
     assert(index.count(&e.ix) == 1);
     index.build(&e.ix, &e.c.m.set);
     assert(index.count(&e.ix) == 2);
@@ -500,11 +500,11 @@ fn void a_second_walk_appends_to_the_records() {
 // owns and holds no module-level state, so a second analysis in one process
 // answers like the first.
 // D20.5
-fn void two_indexes_over_one_closure_hold_the_same_records() {
+fn two_indexes_over_one_closure_hold_the_same_records() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
-    assert(index_env.index_src(&e, "fn i32 main() { return 0; }\n"));
+    assert(index_env.index_src(&e, "fn main() i32 { return 0; }\n"));
     index.index mut other = index.create();
     defer index.free(&other);
     index.build(&other, &e.c.m.set);
@@ -516,7 +516,7 @@ fn void two_indexes_over_one_closure_hold_the_same_records() {
     assert(index.count(&e.ix) == 1);
 }
 
-fn i32 main() {
+fn main() i32 {
     a_declaration_is_recorded_at_its_own_name();
     a_use_carries_the_declarations_range();
     a_local_is_a_local_and_a_parameter_a_parameter();

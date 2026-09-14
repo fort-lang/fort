@@ -305,7 +305,7 @@ bullet at a time and without a rewrite.
   a 64-byte vector -- and misses a large one, because a small probe block still comes back at the
   same address while the heap has grown: with `defer analysis_free` deleted in the driver the
   address probe read 0 while the program break had climbed by megabytes, so the release it
-  claimed to witness was unwitnessed. The program break (`extern fn void* sbrk(i64)`, `sbrk(0)`)
+  claimed to witness was unwitnessed. The program break (`extern fn sbrk(i64) void*`, `sbrk(0)`)
   catches exactly the other half: it did not move at all when `del(set->modules.items)` was
   deleted. So watch both, and more than one address when a round allocates several blocks -- a
   dropped `del(set->order.items)` left the address of the module vector exactly where it was, so

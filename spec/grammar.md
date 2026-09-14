@@ -86,8 +86,8 @@ Whether the last segment of an `import_path` names a module or a symbol is decid
 ## 3. Declarations
 
 ```ebnf
-fn_decl      = "fn" return_type identifier "(" [ param_list ] ")" block ;    (* D8.1 *)
-extern_decl  = "extern" "fn" return_type identifier "(" [ param_list ] ")" ";" ;  (* D9.8 *)
+fn_decl      = "fn" identifier "(" [ param_list ] ")" return_type block ;   (* D8.1 *)
+extern_decl  = "extern" "fn" identifier "(" [ param_list ] ")" return_type ";" ;  (* D9.8 *)
 return_type  = type | "void" | "noreturn" ;                                 (* D8.5 *)
 param_list   = param { "," param } ;
 param        = type identifier ;
@@ -124,7 +124,7 @@ array_suffix = "[" const_expr "]" [ "mut" ] ;                   (* fixed array, 
 base_type    = prim_type | "string" | "void" | fn_type | qualified_name ;
 prim_type    = "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
              | "f32" | "f64" | "bool" | "char" ;
-fn_type      = "fn" return_type "(" [ type { "," type } ] ")" ;      (* D3.10 *)
+fn_type      = "fn" "(" [ type { "," type } ] ")" return_type ;      (* D3.10 *)
 qualified_name = identifier [ "." identifier ] ;                    (* D9.4 *)
 ```
 
@@ -137,7 +137,10 @@ Reading rules (D3.6, D5.2, D5.3):
   after it, references to the whole array (`i32[4]*`, `i32[4]@` is a span of `i32[4]`). No array
   suffix may follow a trailing reference suffix (`i32[4]*[2]` does not parse; wrap it in a struct).
 - `void` is legal as a `base_type` only when followed by at least one `*` (D3.11).
-- A `fn_type` used as `base_type` may take suffixes: `fn i32(i32)[4]` is four function pointers.
+- A `fn_type` ends at its return type, so every marker and every suffix written after it belongs
+  to that return type and the function type carries none of its own: `fn (i32) i32[4]` is a
+  function returning `i32[4]` and `fn (i32) i32*` one returning `i32*`. To mark or to suffix a
+  function type, wrap it in a struct, as `i32[4]*[2]` is wrapped above.
 - A `mut` marks the storage of what it follows: after the base type, values of that type; after
   a `*` or `@`, the pointer or span header that suffix introduces (the storage holding it); after
   `[N]`, the array, whose elements share its storage, so a `mut` between an element type and its
@@ -296,7 +299,7 @@ speculative parse over the token array (rewind on failure); none require symbol-
 
 At the top level the first token decides: `import`, `fn`, `extern`, `struct`, `enum`, or a type
 (a `global_decl`). A `fn` at statement level always begins a declaration whose type is a
-`fn_type` (`fn i32(i32) op = add;`); function definitions are top-level only (D8.3).
+`fn_type` (`fn (i32) i32 op = add;`); function definitions are top-level only (D8.3).
 
 A parse that fails does not stop the file: the parser reports the error, skips to the next
 statement, clause, field or declaration boundary and parses on, so a file reports one diagnostic
@@ -305,10 +308,9 @@ for each construct that failed (D14.2). The recovery points and what a skip cons
 `struct_decl` body and an `enum_decl` body also end where a top-level declaration starts, so
 that a missing `}` is reported once rather than once per following declaration, and the `{` of a
 `fn_decl` body, a `struct_decl` body or an `enum_decl` body may be missing without the body
-ceasing to be one. Which of the two a `fn` starts is the same speculative parse as case 1: a
-return type followed by an identifier is a `fn_decl`, a return type followed by `(` is a
-`fn_type` (D3.10). The skipped tokens are no production of this grammar; the tree holds them as
-an error node (D14.2).
+ceasing to be one. Which of the two a `fn` starts is decided by the two tokens after it, and no
+speculation: a name and then `(` is a `fn_decl`, a `(` at once is a `fn_type` (D3.10). The
+skipped tokens are no production of this grammar; the tree holds them as an error node (D14.2).
 
 ## 8. Grammar-to-decision index
 

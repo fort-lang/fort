@@ -3645,7 +3645,7 @@ static void collect_module(check_t* ck, const module_t* m) {
     }
 }
 
-// The entry module defines `fn i32 main()` or `fn i32 main(string@ args)`.
+// The entry module defines `fn main() i32` or `fn main(string@ args) i32`.
 // D8.6
 static void check_main(check_t* ck, const module_t* m) {
     const binding_t* b = scope_find(&m->names, str_from_cstr("main"));
@@ -3666,7 +3666,7 @@ static void check_main(check_t* ck, const module_t* m) {
     check_msg_begin(ck);
     msg_str(&ck->msg, "entry module ");
     msg_quote(&ck->msg, m->path);
-    msg_str(&ck->msg, " must define 'fn i32 main()' or 'fn i32 main(string@ args)'");
+    msg_str(&ck->msg, " must define 'fn main() i32' or 'fn main(string@ args) i32'");
     // D14.2
     check_msg_end(ck, s != NULL ? s->decl : loc_make(m->file.ptr, 1, 1));
 }

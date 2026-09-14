@@ -26,15 +26,15 @@ static const ast_node_t* body_stmt(const ast_node_t* mod, uint64_t d, uint64_t i
 // ---- positions of declarations --------------------------------------------
 
 TEST(a_declaration_starts_at_its_type, {
-    const ast_node_t* mod = parse_text("i32 N = 4;\nfn i32 f(i32 a) {\n    return a;\n}\n");
+    const ast_node_t* mod = parse_text("i32 N = 4;\nfn f(i32 a) i32 {\n    return a;\n}\n");
     TEST_ASSERT_NONNULL(mod);
     TEST_ASSERT_EQ_STR(loc_of(mod), "1:1");
     TEST_ASSERT_EQ_STR(loc_of(pt_decl(mod, 0)), "1:1");
     TEST_ASSERT_EQ_STR(loc_of(pt_decl(mod, 0)->a), "1:1");
     TEST_ASSERT_EQ_STR(loc_of(pt_decl(mod, 0)->b), "1:9");
     TEST_ASSERT_EQ_STR(loc_of(pt_decl(mod, 1)), "2:1");
-    TEST_ASSERT_EQ_STR(loc_of(pt_decl(mod, 1)->a), "2:4");
-    TEST_ASSERT_EQ_STR(loc_of(ast_child(pt_decl(mod, 1), 0)), "2:10");
+    TEST_ASSERT_EQ_STR(loc_of(pt_decl(mod, 1)->a), "2:13");
+    TEST_ASSERT_EQ_STR(loc_of(ast_child(pt_decl(mod, 1), 0)), "2:6");
     TEST_ASSERT_EQ_STR(loc_of(pt_decl(mod, 1)->b), "2:17");
     TEST_ASSERT_EQ_STR(loc_of(body_stmt(mod, 1, 0)), "3:5");
     TEST_ASSERT_EQ_STR(loc_of(body_stmt(mod, 1, 0)->a), "3:12");
@@ -128,7 +128,7 @@ TEST(a_type_and_its_suffixes_carry_their_own_positions, {
 // ---- positions of statements ----------------------------------------------
 
 TEST(a_statement_starts_at_its_keyword_or_target, {
-    const ast_node_t* mod = parse_text("fn void f() {\n"
+    const ast_node_t* mod = parse_text("fn f() void {\n"
                                        "    if (c) { }\n"
                                        "    while (c) { }\n"
                                        "    for (;;) { }\n"
@@ -157,13 +157,13 @@ TEST(a_statement_starts_at_its_keyword_or_target, {
 // D20.4
 TEST(a_declaration_covers_its_terminator, {
     const ast_node_t* mod = parse_text("i32 n = 4 + 1;\n"
-                                       "fn i32 f(i32 a) {\n"
+                                       "fn f(i32 a) i32 {\n"
                                        "    return a;\n"
                                        "}\n");
     TEST_ASSERT_NONNULL(mod);
     TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 0)), "i32 n = 4 + 1;");
     TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 0)->a), "i32");
-    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 1)), "fn i32 f(i32 a) {\n    return a;\n}");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 1)), "fn f(i32 a) i32 {\n    return a;\n}");
     TEST_ASSERT_EQ_STR(text_of(ast_child(pt_decl(mod, 1), 0)), "i32 a");
     TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 1)->b), "{\n    return a;\n}");
     TEST_ASSERT_EQ_STR(text_of(body_stmt(mod, 1, 0)), "return a;");
@@ -187,7 +187,7 @@ TEST(an_empty_file_is_the_empty_range_at_one_one, {
 // ends with its last operand, so its range is not the whole operation.
 TEST(an_operator_node_runs_from_its_operator_to_its_last_operand, {
     const ast_node_t* mod = parse_text("i32 x = a + b * c;\n"
-                                       "fn void f(i32 mut y) {\n"
+                                       "fn f(i32 mut y) void {\n"
                                        "    y += g(1, 2);\n"
                                        "    y++;\n"
                                        "}\n");
@@ -259,7 +259,7 @@ TEST(a_type_covers_its_suffixes_and_markers, {
 })
 
 TEST(a_statement_covers_its_block_or_semicolon, {
-    const ast_node_t* mod = parse_text("fn void f() {\n"
+    const ast_node_t* mod = parse_text("fn f() void {\n"
                                        "    if (c) { g(); } else { h(); }\n"
                                        "    while (c) { }\n"
                                        "    for (i32 mut i = 0; i < 4; i++) { }\n"
@@ -288,7 +288,7 @@ TEST(a_statement_covers_its_block_or_semicolon, {
 // An if-else-if chain nests at its tail, so every `if` of the chain ends at
 // the end of the chain.
 TEST(every_if_of_a_chain_ends_at_the_end_of_the_chain, {
-    const ast_node_t* mod = parse_text("fn void f() {\n"
+    const ast_node_t* mod = parse_text("fn f() void {\n"
                                        "    if (a) { } else if (b) { } else { }\n"
                                        "}\n");
     TEST_ASSERT_NONNULL(mod);
@@ -302,7 +302,7 @@ TEST(every_if_of_a_chain_ends_at_the_end_of_the_chain, {
 // after the ':' and stays inside its clause.
 // D20.4
 TEST(an_empty_case_body_is_an_empty_range_after_the_colon, {
-    const ast_node_t* mod = parse_text("fn void f() {\n"
+    const ast_node_t* mod = parse_text("fn f() void {\n"
                                        "    switch (c) { case 1: }\n"
                                        "}\n");
     TEST_ASSERT_NONNULL(mod);
@@ -336,18 +336,18 @@ TEST(a_struct_an_enum_and_an_extern_cover_their_whole_declaration, {
                                        "    red,\n"
                                        "    green = 5,\n"
                                        "}\n"
-                                       "extern fn void abort();\n");
+                                       "extern fn abort() void;\n");
     TEST_ASSERT_NONNULL(mod);
     TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 0)), "struct point {\n    i32 x;\n}");
     TEST_ASSERT_EQ_STR(text_of(ast_child(pt_decl(mod, 0), 0)), "i32 x;");
     TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 1)), "enum color {\n    red,\n    green = 5,\n}");
     TEST_ASSERT_EQ_STR(text_of(ast_child(pt_decl(mod, 1), 0)), "red");
     TEST_ASSERT_EQ_STR(text_of(ast_child(pt_decl(mod, 1), 1)), "green = 5");
-    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 2)), "extern fn void abort();");
+    TEST_ASSERT_EQ_STR(text_of(pt_decl(mod, 2)), "extern fn abort() void;");
 })
 
 TEST(break_and_continue_cover_their_semicolon, {
-    const ast_node_t* mod = parse_text("fn void f() {\n"
+    const ast_node_t* mod = parse_text("fn f() void {\n"
                                        "    while (c) {\n"
                                        "        break;\n"
                                        "        continue;\n"
@@ -370,7 +370,7 @@ TEST(declarations_carry_the_range_of_their_name, {
                                        "}\n"
                                        "enum color { red, green }\n"
                                        "i32 total = 0;\n"
-                                       "fn i32 sum(i32 a) {\n"
+                                       "fn sum(i32 a) i32 {\n"
                                        "    i32 local = a;\n"
                                        "    return local;\n"
                                        "}\n");
@@ -410,7 +410,7 @@ TEST(mentions_of_a_name_carry_its_range, {
                                        "i32 e = f.g;\n"
                                        "i32 h = p->q;\n"
                                        "io.writer w = 0;\n"
-                                       "fn void k(i32@ xs) {\n"
+                                       "fn k(i32@ xs) void {\n"
                                        "    for (i32 v : xs) { }\n"
                                        "}\n");
     TEST_ASSERT_NONNULL(mod);
@@ -448,7 +448,7 @@ TEST(nodes_without_a_name_carry_an_empty_name_range, {
 // The out-parameter signature, with every marker position in one declaration.
 // D3.6, D17.2
 TEST(the_out_parameter_signature_of_d17_2, {
-    const ast_node_t* mod = parse_text("fn bool read_file(string path, u8 mut@ own mut* out) {\n"
+    const ast_node_t* mod = parse_text("fn read_file(string path, u8 mut@ own mut* out) bool {\n"
                                        "    u8 mut@ own buf = new(u8, 16);\n"
                                        "    *out = move(buf);\n"
                                        "    return true;\n"
@@ -480,9 +480,9 @@ TEST(a_whole_module_parses_end_to_end, {
                                        "i32 LIMIT = 16;\n"
                                        "point[2] mut cells = {};\n"
                                        "\n"
-                                       "extern fn void abort();\n"
+                                       "extern fn abort() void;\n"
                                        "\n"
-                                       "fn i32 sum(i32@ xs) {\n"
+                                       "fn sum(i32@ xs) i32 {\n"
                                        "    mut i32 total = 0;\n"
                                        "    for (i32 v : xs) {\n"
                                        "        total += v;\n"
@@ -512,9 +512,9 @@ TEST(a_whole_module_in_the_east_marker_spelling, {
                                        "i32 LIMIT = 16;\n"
                                        "point[2] mut cells = {};\n"
                                        "\n"
-                                       "extern fn void abort();\n"
+                                       "extern fn abort() void;\n"
                                        "\n"
-                                       "fn i32 sum(i32@ xs) {\n"
+                                       "fn sum(i32@ xs) i32 {\n"
                                        "    i32 mut total = 0;\n"
                                        "    for (i32 v : xs) {\n"
                                        "        total += v;\n"
@@ -536,7 +536,7 @@ TEST(a_whole_module_in_the_east_marker_spelling, {
 // A linked-list walk with ownership markers, `defer`, `del` and `->`, the
 // shape memory-model.md writes.
 TEST(an_ownership_program_parses, {
-    const ast_node_t* mod = parse_text("fn void drop_list(node mut* own head) {\n"
+    const ast_node_t* mod = parse_text("fn drop_list(node mut* own head) void {\n"
                                        "    node mut* own mut cur = move(head);\n"
                                        "    while (cur != null) {\n"
                                        "        node mut* own next = move(cur->next);\n"
@@ -561,7 +561,7 @@ TEST(an_ownership_program_parses, {
 // A switch over an enum with a nested loop and a `defer`, the shape
 // core-language.md writes.
 TEST(a_control_flow_program_parses, {
-    const ast_node_t* mod = parse_text("fn i32 run(color c, i32@ xs) {\n"
+    const ast_node_t* mod = parse_text("fn run(color c, i32@ xs) i32 {\n"
                                        "    i32 mut total = 0;\n"
                                        "    defer io.flush();\n"
                                        "    switch (c) {\n"

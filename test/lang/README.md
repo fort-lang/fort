@@ -53,7 +53,7 @@ Example:
 //! args: x
 //! stdout:
 //| 2 x
-fn i32 main(string@ args) {
+fn main(string@ args) i32 {
     println(args.len, " ", args[1]);
     return 0;
 }

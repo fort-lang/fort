@@ -19,15 +19,15 @@
 
 // A span of a fixed array, whose length is a literal, and a span of a span,
 // whose length is a header field: the two operand classes of item 16.
-static const char ARRAY_SPAN[] = "fn i64 lo() {\n    return 1;\n}\n"
-                                 "fn i32 main() {\n    i32[5] a = {};\n    i64 i = lo();\n"
+static const char ARRAY_SPAN[] = "fn lo() i64 {\n    return 1;\n}\n"
+                                 "fn main() i32 {\n    i32[5] a = {};\n    i64 i = lo();\n"
                                  "    i32@ s = a[i..4];\n    println(s.len);\n    return 0;\n}\n";
 
 // ---- the header (item 17) ----------------------------------------------------------
 // D3.5, D19.2
 
 TEST(the_span_type_is_a_pointer_and_a_length, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32@ s = {};\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32@ s = {};\n"
                           "    println(s.len);\n    return 0;\n}\n"));
     // One `%fort.span` serves every span and `string`, with the pointer at 0
     // and the length at 8.
@@ -44,8 +44,8 @@ TEST(the_span_type_is_a_pointer_and_a_length, {
 })
 
 TEST(a_span_is_passed_by_hidden_pointer_and_never_split, {
-    TEST_ASSERT_TRUE(emit("fn u64 size(i32@ s) {\n    return s.len;\n}\n"
-                          "fn i32 main() {\n    i32@ s = {};\n"
+    TEST_ASSERT_TRUE(emit("fn size(i32@ s) u64 {\n    return s.len;\n}\n"
+                          "fn main() i32 {\n    i32@ s = {};\n"
                           "    println(size(s));\n    return 0;\n}\n"));
     // A span stays one hidden pointer and is never split into two scalars
     // (item 7).
@@ -64,8 +64,8 @@ TEST(a_span_is_passed_by_hidden_pointer_and_never_split, {
 })
 
 TEST(the_pseudo_fields_are_read_through_a_pointer_to_a_span, {
-    TEST_ASSERT_TRUE(emit("fn u64 size(i32@* p) {\n    return p->len;\n}\n"
-                          "fn i32 main() {\n    i32@ s = {};\n"
+    TEST_ASSERT_TRUE(emit("fn size(i32@* p) u64 {\n    return p->len;\n}\n"
+                          "fn main() i32 {\n    i32@ s = {};\n"
                           "    println(size(&s));\n    return 0;\n}\n"));
     // Through a pointer to a span, `->` reaches `.len` and `.ptr` too.
     // D6.10
@@ -82,7 +82,7 @@ TEST(the_pseudo_fields_are_read_through_a_pointer_to_a_span, {
 // D6.8
 
 TEST(indexing_a_span_checks_against_its_header_length, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    u64 n = 3;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    u64 n = 3;\n"
                           "    i32 mut@ own s = new(i32, n);\n    u64 i = 1;\n"
                           "    println(s[i]);\n    del(s);\n    return 0;\n}\n"));
     // One `icmp uge i64 %idx, %len` branches to std.rt.fail_bounds, and the
@@ -103,7 +103,7 @@ TEST(indexing_a_span_checks_against_its_header_length, {
 
 TEST(an_element_of_a_span_of_pointers_is_a_pointer_slot, {
     TEST_ASSERT_TRUE(emit("struct node {\n    i32 value;\n}\n"
-                          "fn i32 main() {\n    u64 n = 2;\n"
+                          "fn main() i32 {\n    u64 n = 2;\n"
                           "    node mut* mut@ own s = new(node mut*, n);\n    u64 i = 0;\n"
                           "    println(s[i] == null);\n    del(s);\n    return 0;\n}\n"));
     // A span of pointer slots holds one pointer per element, whatever the
@@ -165,7 +165,7 @@ TEST(the_result_is_the_element_at_lo_and_the_difference_of_the_bounds, {
 })
 
 TEST(an_absent_low_bound_is_zero, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32[5] a = {};\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32[5] a = {};\n"
                           "    i32@ s = a[..2];\n    println(s.len);\n    return 0;\n}\n"));
     // `e[..hi]` is `e[0..hi]`.
     // D6.9
@@ -179,7 +179,7 @@ TEST(an_absent_low_bound_is_zero, {
 })
 
 TEST(an_absent_high_bound_is_the_operands_length, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    u64 n = 4;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    u64 n = 4;\n"
                           "    i32 mut@ own s = new(i32, n);\n"
                           "    i32@ t = s[2..];\n    println(t.len);\n    del(s);\n"
                           "    return 0;\n}\n"));
@@ -199,7 +199,7 @@ TEST(an_absent_high_bound_is_the_operands_length, {
 })
 
 TEST(the_whole_span_form_still_branches, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32[3] a = {};\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32[3] a = {};\n"
                           "    i32@ s = a[..];\n    println(s.len);\n    return 0;\n}\n"));
     // Bounds checks are performed on every span operation, in every build
     // mode; the optimizer folds the one `e[..]` cannot fail.
@@ -210,8 +210,8 @@ TEST(the_whole_span_form_still_branches, {
 })
 
 TEST(a_negative_bound_fails_the_same_unsigned_compare, {
-    TEST_ASSERT_TRUE(emit("fn i32 lo() {\n    return -1;\n}\n"
-                          "fn i32 main() {\n    i32[3] a = {};\n    i32 i = lo();\n"
+    TEST_ASSERT_TRUE(emit("fn lo() i32 {\n    return -1;\n}\n"
+                          "fn main() i32 {\n    i32[3] a = {};\n    i32 i = lo();\n"
                           "    i32@ s = a[i..2];\n    println(s.len);\n    return 0;\n}\n"));
     // A signed bound is sign-extended, so a negative one is a huge unsigned
     // value and fails `icmp ugt` (item 16).
@@ -221,7 +221,7 @@ TEST(a_negative_bound_fails_the_same_unsigned_compare, {
 })
 
 TEST(a_span_of_a_string_walks_its_bytes, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    string s = \"hello\";\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    string s = \"hello\";\n"
                           "    string t = s[1..4];\n    println(t);\n    return 0;\n}\n"));
     // A span of a `string` is a `string` whose elements are `char`, which is
     // `i8`.
@@ -236,7 +236,7 @@ TEST(a_span_of_a_string_walks_its_bytes, {
 })
 
 TEST(a_span_of_a_pointer_is_unchecked, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32[4] mut a = {};\n    i32 mut* p = &a[0];\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32[4] mut a = {};\n    i32 mut* p = &a[0];\n"
                           "    i32 mut@ s = p[1..3];\n    println(s.len);\n    return 0;\n}\n"));
     // `p[lo..hi]` on a raw pointer is the explicit unsafe escape for foreign
     // memory and checks nothing.
@@ -256,7 +256,7 @@ TEST(a_span_of_a_pointer_is_unchecked, {
 })
 
 TEST(a_span_of_a_span_expression_lands_in_a_temporary, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32[5] a = {};\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32[5] a = {};\n"
                           "    println(a[1..4][1..2].len);\n    return 0;\n}\n"));
     // A span expression yields a view, which is a value, so the operand of the
     // second one is a temporary of its own.
@@ -270,9 +270,9 @@ TEST(a_span_of_a_span_expression_lands_in_a_temporary, {
 })
 
 TEST(the_operand_is_evaluated_before_the_bounds, {
-    TEST_ASSERT_TRUE(emit("fn i32 lo() {\n    println(\"lo\");\n    return 1;\n}\n"
-                          "fn i32 hi() {\n    println(\"hi\");\n    return 2;\n}\n"
-                          "fn i32 main() {\n    i32[5] a = {};\n"
+    TEST_ASSERT_TRUE(emit("fn lo() i32 {\n    println(\"lo\");\n    return 1;\n}\n"
+                          "fn hi() i32 {\n    println(\"hi\");\n    return 2;\n}\n"
+                          "fn main() i32 {\n    i32[5] a = {};\n"
                           "    println(a[lo()..hi()].len);\n    return 0;\n}\n"));
     // Left to right, and the operand's length is read after both bounds have
     // run.
@@ -299,7 +299,7 @@ TEST(no_bounds_check_removes_the_span_branch_and_keeps_the_inbounds, {
 })
 
 TEST(no_bounds_check_reads_no_length_when_both_bounds_are_written, {
-    static const char PROGRAM[] = "fn i32 main() {\n    string s = \"hello\";\n"
+    static const char PROGRAM[] = "fn main() i32 {\n    string s = \"hello\";\n"
                                   "    string t = s[1..4];\n    println(t);\n"
                                   "    return 0;\n}\n";
     TEST_ASSERT_TRUE(emit_unchecked(PROGRAM));
@@ -332,7 +332,7 @@ TEST(no_bounds_check_reads_no_length_when_both_bounds_are_written, {
 })
 
 TEST(no_bounds_check_still_reads_the_length_an_absent_bound_needs, {
-    TEST_ASSERT_TRUE(emit_unchecked("fn i32 main() {\n    string s = \"hello\";\n"
+    TEST_ASSERT_TRUE(emit_unchecked("fn main() i32 {\n    string s = \"hello\";\n"
                                     "    string t = s[2..];\n    println(t);\n"
                                     "    return 0;\n}\n"));
     // `e[lo..]` is `e[lo..len]`, so the length is the bound itself and is read
@@ -359,8 +359,8 @@ TEST(release_mode_keeps_the_span_branch, {
 
 TEST(no_bounds_check_leaves_the_allocation_and_enum_checks_alone, {
     TEST_ASSERT_TRUE(emit_unchecked("enum level {\n    low = 1,\n}\n"
-                                    "fn level pick() {\n    return level.low;\n}\n"
-                                    "fn i32 main() {\n    i32 n = 2;\n"
+                                    "fn pick() level {\n    return level.low;\n}\n"
+                                    "fn main() i32 {\n    i32 n = 2;\n"
                                     "    i32 mut@ own s = new(i32, n);\n"
                                     "    switch (pick()) {\n    case level.low:\n"
                                     "        println(s.len);\n    }\n"
@@ -376,7 +376,7 @@ TEST(no_bounds_check_leaves_the_allocation_and_enum_checks_alone, {
 // D3.14, D17.4
 
 TEST(a_cast_between_span_shapes_emits_nothing_of_its_own, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    string s = \"hi\";\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    string s = \"hi\";\n"
                           "    u8@ b = cast(s, u8@);\n"
                           "    println(b.len, b[0]);\n    return 0;\n}\n"));
     // A cast between aggregates only drops marks, so the value is the copy of
@@ -393,8 +393,8 @@ TEST(a_cast_between_span_shapes_emits_nothing_of_its_own, {
 })
 
 TEST(lending_an_owned_span_is_a_copy_of_its_header, {
-    TEST_ASSERT_TRUE(emit("fn u64 size(i32@ s) {\n    return s.len;\n}\n"
-                          "fn i32 main() {\n    u64 n = 2;\n"
+    TEST_ASSERT_TRUE(emit("fn size(i32@ s) u64 {\n    return s.len;\n}\n"
+                          "fn main() i32 {\n    u64 n = 2;\n"
                           "    i32 mut@ own s = new(i32, n);\n"
                           "    i32@ view = s;\n"
                           "    println(view.len, size(s));\n    del(s);\n    return 0;\n}\n"));
@@ -413,7 +413,7 @@ TEST(lending_an_owned_span_is_a_copy_of_its_header, {
 // D7.5, D17.10
 
 TEST(a_range_for_over_a_span_walks_it_by_index_with_no_check, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    u64 n = 3;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    u64 n = 3;\n"
                           "    i32 mut@ own s = new(i32, n);\n    i32 mut total = 0;\n"
                           "    for (i32 v : s) {\n        total += v;\n    }\n"
                           "    println(total);\n    del(s);\n    return 0;\n}\n"));
@@ -436,7 +436,7 @@ TEST(a_range_for_over_a_span_walks_it_by_index_with_no_check, {
 })
 
 TEST(a_range_for_over_a_span_expression_copies_it_once, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32[4] a = {};\n    i32 mut total = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32[4] a = {};\n    i32 mut total = 0;\n"
                           "    for (i32 v : a[1..3]) {\n        total += v;\n    }\n"
                           "    println(total);\n    return 0;\n}\n"));
     // A collection that owns nothing is evaluated once into a temporary before

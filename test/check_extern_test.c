@@ -41,13 +41,13 @@ TEST(two_declarations_of_one_extern_with_one_signature_agree, {
     begin();
     add("main.ft",
         "import other;\n"
-        "extern fn i64 write(i32 fd, void* buf, u64 n);\n"
-        "fn i32 main() { return cast(write(1, null, 0), i32); }\n");
+        "extern fn write(i32 fd, void* buf, u64 n) i64;\n"
+        "fn main() i32 { return cast(write(1, null, 0), i32); }\n");
     // Parameter names are required by the grammar and otherwise unused, so
     // they are not part of the signature (module-system.md 8.1).
     add("other.ft",
-        "extern fn i64 write(i32 d, void* b, u64 count);\n"
-        "fn i64 go() { return write(1, null, 0); }\n");
+        "extern fn write(i32 d, void* b, u64 count) i64;\n"
+        "fn go() i64 { return write(1, null, 0); }\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
 })
 
@@ -55,15 +55,15 @@ TEST(a_binding_mut_is_not_part_of_a_signature, {
     begin();
     add("main.ft",
         "import other;\n"
-        "extern fn i64 write(i32 fd, void* buf, u64 n);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn write(i32 fd, void* buf, u64 n) i64;\n"
+        "fn main() i32 { return 0; }\n");
     // A binding-level `mut` makes the callee's copy assignable and is not
     // part of a function type; an extern has no body for it to mean anything
     // in, and the two declarations emit the same bytes.
     // D3.10, D5.6
     add("other.ft",
-        "extern fn i64 write(i32 mut fd, void* buf, u64 n);\n"
-        "fn i64 go() { return write(1, null, 0); }\n");
+        "extern fn write(i32 mut fd, void* buf, u64 n) i64;\n"
+        "fn go() i64 { return write(1, null, 0); }\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
 })
 
@@ -71,15 +71,15 @@ TEST(char_and_u8_are_one_c_type_at_the_boundary, {
     begin();
     add("main.ft",
         "import other;\n"
-        "extern fn u64 hash(char* s, u8 seed);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn hash(char* s, u8 seed) u64;\n"
+        "fn main() i32 { return 0; }\n");
     // Fort `char` is C's `unsigned char` and an extern declaration maps a C
     // `char*` to `char*` or `u8*`, so the two declarations are one C
     // prototype and emit byte-identical IR.
     // D3.2, D9.8
     add("other.ft",
-        "extern fn u64 hash(u8* s, char seed);\n"
-        "fn u64 go(u8* s) { return hash(s, cast(0, char)); }\n");
+        "extern fn hash(u8* s, char seed) u64;\n"
+        "fn go(u8* s) u64 { return hash(s, cast(0, char)); }\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
 })
 
@@ -87,11 +87,11 @@ TEST(a_char_result_agrees_with_a_u8_result, {
     begin();
     add("main.ft",
         "import other;\n"
-        "extern fn char pick(i32 n);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn pick(i32 n) char;\n"
+        "fn main() i32 { return 0; }\n");
     add("other.ft",
-        "extern fn u8 pick(i32 n);\n"
-        "fn u8 go() { return pick(1); }\n");
+        "extern fn pick(i32 n) u8;\n"
+        "fn go() u8 { return pick(1); }\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
 })
 
@@ -104,12 +104,12 @@ TEST(one_imported_enum_spelled_two_ways_is_one_type, {
     // T-025, D9.4, D9.8: the program the ticket could not write
     add("main.ft",
         "import shade;\n"
-        "extern fn void paint(shade.color c);\n"
-        "fn i32 main() { shade.paint_red(); paint(shade.color.green); return 0; }\n");
+        "extern fn paint(shade.color c) void;\n"
+        "fn main() i32 { shade.paint_red(); paint(shade.color.green); return 0; }\n");
     add("shade.ft",
         "enum color { red, green }\n"
-        "extern fn void paint(color c);\n"
-        "fn void paint_red() { paint(color.red); }\n");
+        "extern fn paint(color c) void;\n"
+        "fn paint_red() void { paint(color.red); }\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
 })
 
@@ -117,12 +117,12 @@ TEST(one_imported_struct_behind_a_pointer_is_one_type, {
     begin();
     add("main.ft",
         "import geom;\n"
-        "extern fn void move_it(geom.point mut* p);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn move_it(geom.point mut* p) void;\n"
+        "fn main() i32 { return 0; }\n");
     add("geom.ft",
         "struct point { i64 x; i64 y; }\n"
-        "extern fn void move_it(point mut* p);\n"
-        "fn void shift(point mut* p) { move_it(p); }\n");
+        "extern fn move_it(point mut* p) void;\n"
+        "fn shift(point mut* p) void { move_it(p); }\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
 })
 
@@ -130,11 +130,11 @@ TEST(a_module_may_declare_an_extern_no_other_module_declares, {
     begin();
     add("main.ft",
         "import other;\n"
-        "extern fn u64 strlen(char* s);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn strlen(char* s) u64;\n"
+        "fn main() i32 { return 0; }\n");
     add("other.ft",
-        "extern fn void free(void* own p);\n"
-        "fn void go(void* own p) { free(cast(move(p), void* own)); }\n");
+        "extern fn free(void* own p) void;\n"
+        "fn go(void* own p) void { free(cast(move(p), void* own)); }\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
 })
 
@@ -144,11 +144,11 @@ TEST(a_parameter_type_that_differs_conflicts_and_names_the_parameter, {
     begin();
     add("main.ft",
         "import other;\n"
-        "extern fn i64 write(i32 fd, void* buf, u64 n);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn write(i32 fd, void* buf, u64 n) i64;\n"
+        "fn main() i32 { return 0; }\n");
     add("other.ft",
-        "extern fn i64 write(i64 fd, void* buf, u64 n);\n"
-        "fn i64 go() { return write(1, null, 0); }\n");
+        "extern fn write(i64 fd, void* buf, u64 n) i64;\n"
+        "fn go() i64 { return write(1, null, 0); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'write': parameter 1 differs"));
     TEST_ASSERT_TRUE(said("note: previous declaration of 'write' here"));
@@ -160,11 +160,11 @@ TEST(the_conflict_names_the_first_parameter_that_differs, {
     begin();
     add("main.ft",
         "import other;\n"
-        "extern fn void put(i32 fd, i64 a, i64 b);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn put(i32 fd, i64 a, i64 b) void;\n"
+        "fn main() i32 { return 0; }\n");
     add("other.ft",
-        "extern fn void put(i32 fd, i64 a, i32 b);\n"
-        "fn void go() { put(1, 2, 3); }\n");
+        "extern fn put(i32 fd, i64 a, i32 b) void;\n"
+        "fn go() void { put(1, 2, 3); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'put': parameter 3 differs"));
 })
@@ -173,32 +173,32 @@ TEST(the_error_stands_on_the_parameter_of_the_later_declaration, {
     begin();
     add("main.ft",
         "import other;\n"
-        "extern fn void put(i32 fd);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn put(i32 fd) void;\n"
+        "fn main() i32 { return 0; }\n");
     add("other.ft",
-        "extern fn void put(i64 fd);\n"
-        "fn void go() { put(1); }\n");
+        "extern fn put(i64 fd) void;\n"
+        "fn go() void { put(1); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     // The imported module is checked first, so its declaration is the one the
     // later one is held against: the error is in `main.ft`, at the parameter,
     // and the note in `other.ft`, at the name.
     // D9.10
-    TEST_ASSERT_TRUE(said("main.ft:2:20: error: conflicting declarations of extern 'put'"));
-    TEST_ASSERT_TRUE(said("other.ft:1:16: note: previous declaration of 'put' here"));
+    TEST_ASSERT_TRUE(said("main.ft:2:15: error: conflicting declarations of extern 'put'"));
+    TEST_ASSERT_TRUE(said("other.ft:1:11: note: previous declaration of 'put' here"));
 })
 
 TEST(an_own_that_differs_conflicts, {
     begin();
     add("main.ft",
         "import alloc;\n"
-        "extern fn void* own malloc(u64 n);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn malloc(u64 n) void* own;\n"
+        "fn main() i32 { return 0; }\n");
     // `own` is part of type identity and of signature identity, so the two
     // declarations do not describe one C function.
     // D17.1, D17.13
     add("alloc.ft",
-        "extern fn void* malloc(u64 n);\n"
-        "fn void* grab(u64 n) { return malloc(n); }\n");
+        "extern fn malloc(u64 n) void*;\n"
+        "fn grab(u64 n) void* { return malloc(n); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'malloc': the result type differs"));
     TEST_ASSERT_TRUE(said("note: previous declaration of 'malloc' here"));
@@ -208,8 +208,8 @@ TEST(a_mut_on_a_void_pointer_result_that_differs_conflicts, {
     begin();
     add("main.ft",
         "import alloc;\n"
-        "extern fn void mut* own malloc(u64 n);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn malloc(u64 n) void mut* own;\n"
+        "fn main() i32 { return 0; }\n");
     // The level a `void*` reaches is part of its type, so it is part of
     // signature identity as a typed pointer's `mut` is: the two declarations
     // below name one ELF symbol through two fort types, and this is the shape
@@ -217,8 +217,8 @@ TEST(a_mut_on_a_void_pointer_result_that_differs_conflicts, {
     // storage it may not write and call the library's.
     // D3.11, D3.12, D9.8
     add("alloc.ft",
-        "extern fn void* own malloc(u64 n);\n"
-        "fn void* grab(u64 n) { return malloc(n); }\n");
+        "extern fn malloc(u64 n) void* own;\n"
+        "fn grab(u64 n) void* { return malloc(n); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'malloc': the result type differs"));
     TEST_ASSERT_TRUE(said("note: previous declaration of 'malloc' here"));
@@ -228,15 +228,15 @@ TEST(a_mut_on_a_void_pointer_parameter_that_differs_conflicts, {
     begin();
     add("main.ft",
         "import sink;\n"
-        "extern fn void take(void mut* p);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn take(void mut* p) void;\n"
+        "fn main() i32 { return 0; }\n");
     // The same difference in a parameter. extern_type_agrees answers about a
     // `void*` in one branch of its own, so a case on the result holds nothing
     // about a parameter.
     // D3.11, D9.8
     add("sink.ft",
-        "extern fn void take(void* p);\n"
-        "fn void drop(void* p) { take(p); }\n");
+        "extern fn take(void* p) void;\n"
+        "fn drop(void* p) void { take(p); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'take': parameter 1 differs"));
     TEST_ASSERT_TRUE(said("note: previous declaration of 'take' here"));
@@ -246,11 +246,11 @@ TEST(an_own_parameter_that_differs_conflicts, {
     begin();
     add("main.ft",
         "import alloc;\n"
-        "extern fn void free(void* own p);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn free(void* own p) void;\n"
+        "fn main() i32 { return 0; }\n");
     add("alloc.ft",
-        "extern fn void free(void* p);\n"
-        "fn void drop(void* p) { free(p); }\n");
+        "extern fn free(void* p) void;\n"
+        "fn drop(void* p) void { free(p); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'free': parameter 1 differs"));
 })
@@ -259,15 +259,15 @@ TEST(pointee_mutability_that_differs_conflicts, {
     begin();
     add("main.ft",
         "import other;\n"
-        "extern fn u64 strlen(char* s);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn strlen(char* s) u64;\n"
+        "fn main() i32 { return 0; }\n");
     // Mutability at a level below the binding is part of type identity, so
     // `char mut*` is another signature and C is told the callee writes
     // through the pointer.
     // D3.12
     add("other.ft",
-        "extern fn u64 strlen(char mut* s);\n"
-        "fn u64 go(char mut* s) { return strlen(s); }\n");
+        "extern fn strlen(char mut* s) u64;\n"
+        "fn go(char mut* s) u64 { return strlen(s); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'strlen': parameter 1 differs"));
 })
@@ -276,15 +276,15 @@ TEST(noreturn_that_differs_conflicts, {
     begin();
     add("main.ft",
         "import other;\n"
-        "extern fn noreturn quit(i32 code);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn quit(i32 code) noreturn;\n"
+        "fn main() i32 { return 0; }\n");
     // `noreturn` is part of a function's identity and it is what puts the
     // trap after the call site, so the two declarations do not describe one C
     // function.
     // D3.10, D8.5
     add("other.ft",
-        "extern fn void quit(i32 code);\n"
-        "fn void go() { quit(1); }\n");
+        "extern fn quit(i32 code) void;\n"
+        "fn go() void { quit(1); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'quit': the result type differs"));
 })
@@ -293,33 +293,33 @@ TEST(a_parameter_count_that_differs_conflicts, {
     begin();
     add("main.ft",
         "import other;\n"
-        "extern fn i32 printf(char* fmt, i32 n);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn printf(char* fmt, i32 n) i32;\n"
+        "fn main() i32 { return 0; }\n");
     // Each argument shape of a variadic C function is its own prototype
     // (module-system.md 8.4), and one C symbol carries one of them.
     add("other.ft",
-        "extern fn i32 printf(char* fmt);\n"
-        "fn i32 go(char* f) { return printf(f); }\n");
+        "extern fn printf(char* fmt) i32;\n"
+        "fn go(char* f) i32 { return printf(f); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(
         said("conflicting declarations of extern 'printf': the number of parameters differs"));
-    TEST_ASSERT_TRUE(said("main.ft:2:15: error:"));
+    TEST_ASSERT_TRUE(said("main.ft:2:11: error:"));
 })
 
 TEST(two_integer_types_of_one_size_are_not_one_c_type, {
     begin();
     add("main.ft",
         "import other;\n"
-        "extern fn void take(u32 n);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn take(u32 n) void;\n"
+        "fn main() i32 { return 0; }\n");
     // `i32` and `u32` are both `i32` in IR, but an extern declaration asks
     // for identical signatures and both modules can write either, so the
     // conservative reading refuses the pair: C's `int` and `unsigned int` are
     // two types.
     // D9.8
     add("other.ft",
-        "extern fn void take(i32 n);\n"
-        "fn void go() { take(1); }\n");
+        "extern fn take(i32 n) void;\n"
+        "fn go() void { take(1); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'take': parameter 1 differs"));
 })
@@ -328,15 +328,15 @@ TEST(a_function_pointer_parameter_is_compared_through_its_own_signature, {
     begin();
     add("main.ft",
         "import other;\n"
-        "extern fn void each(fn void(i32) f);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn each(fn (i32) void f) void;\n"
+        "fn main() i32 { return 0; }\n");
     // A `fn R(P...)` in an extern signature is extern-legal through its own
     // signature (module-system.md 8.1), and the marks of its parameters are
     // part of its identity, so the comparison reaches inside it.
     // D3.10
     add("other.ft",
-        "extern fn void each(fn void(i64) f);\n"
-        "fn void go(fn void(i64) f) { each(f); }\n");
+        "extern fn each(fn (i64) void f) void;\n"
+        "fn go(fn (i64) void f) void { each(f); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'each': parameter 1 differs"));
 })
@@ -353,12 +353,12 @@ TEST(two_local_enums_of_one_name_conflict, {
     add("main.ft",
         "import other;\n"
         "enum color { red, green }\n"
-        "extern fn void paint(color c);\n"
-        "fn i32 main() { paint(color.red); return 0; }\n");
+        "extern fn paint(color c) void;\n"
+        "fn main() i32 { paint(color.red); return 0; }\n");
     add("other.ft",
         "enum color { blue, gold }\n"
-        "extern fn void paint(color c);\n"
-        "fn void go() { paint(color.blue); }\n");
+        "extern fn paint(color c) void;\n"
+        "fn go() void { paint(color.blue); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'paint': parameter 1 differs"));
     // No spelling makes these agree, so the note says what does.
@@ -375,12 +375,12 @@ TEST(two_local_structs_behind_a_pointer_conflict, {
     add("main.ft",
         "import other;\n"
         "struct point { i64 x; i64 y; }\n"
-        "extern fn void move_it(point mut* p);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn move_it(point mut* p) void;\n"
+        "fn main() i32 { return 0; }\n");
     add("other.ft",
         "struct point { i32 x; i32 y; }\n"
-        "extern fn void move_it(point mut* p);\n"
-        "fn void go(point mut* p) { move_it(p); }\n");
+        "extern fn move_it(point mut* p) void;\n"
+        "fn go(point mut* p) void { move_it(p); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'move_it': parameter 1 differs"));
     TEST_ASSERT_TRUE(said_wrapper());
@@ -391,12 +391,12 @@ TEST(two_local_enums_in_result_position_conflict, {
     add("main.ft",
         "import other;\n"
         "enum color { red, green }\n"
-        "extern fn color pick();\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn pick() color;\n"
+        "fn main() i32 { return 0; }\n");
     add("other.ft",
         "enum color { blue, gold }\n"
-        "extern fn color pick();\n"
-        "fn void go() { println(pick()); }\n");
+        "extern fn pick() color;\n"
+        "fn go() void { println(pick()); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'pick': the result type differs"));
     TEST_ASSERT_TRUE(said_wrapper());
@@ -409,12 +409,12 @@ TEST(a_local_enum_against_an_imported_one_conflicts, {
     add("main.ft",
         "import shade;\n"
         "enum color { red, green }\n"
-        "extern fn void paint(color c);\n"
-        "fn i32 main() { shade.paint_red(); return 0; }\n");
+        "extern fn paint(color c) void;\n"
+        "fn main() i32 { shade.paint_red(); return 0; }\n");
     add("shade.ft",
         "enum color { red, green }\n"
-        "extern fn void paint(color c);\n"
-        "fn void paint_red() { paint(color.red); }\n");
+        "extern fn paint(color c) void;\n"
+        "fn paint_red() void { paint(color.red); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'paint': parameter 1 differs"));
     TEST_ASSERT_TRUE(said_wrapper());
@@ -429,12 +429,12 @@ TEST(a_nominal_against_a_plain_type_offers_the_type_too, {
     // D3.9
     add("main.ft",
         "import shade;\n"
-        "extern fn void paint(i32 c);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn paint(i32 c) void;\n"
+        "fn main() i32 { return 0; }\n");
     add("shade.ft",
         "enum color { red, green }\n"
-        "extern fn void paint(color c);\n"
-        "fn void paint_red() { paint(color.red); }\n");
+        "extern fn paint(color c) void;\n"
+        "fn paint_red() void { paint(color.red); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'paint': parameter 1 differs"));
     TEST_ASSERT_TRUE(said("a struct or an enum stands here"));
@@ -449,11 +449,11 @@ TEST(the_note_fires_whichever_declaration_names_the_type, {
     add("main.ft",
         "import plain;\n"
         "enum color { red, green }\n"
-        "extern fn void paint(color c);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn paint(color c) void;\n"
+        "fn main() i32 { return 0; }\n");
     add("plain.ft",
-        "extern fn void paint(i32 c);\n"
-        "fn void go() { paint(1); }\n");
+        "extern fn paint(i32 c) void;\n"
+        "fn go() void { paint(1); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'paint': parameter 1 differs"));
     TEST_ASSERT_TRUE(said("a struct or an enum stands here"));
@@ -471,11 +471,11 @@ TEST(two_runtime_declarations_may_agree_with_the_runtime_and_not_with_each_other
     // D17.1, D13.1, D17.13, D9.8
     add("main.ft",
         "import other;\n"
-        "extern fn void fort_rt_del(u8 mut* own p);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn fort_rt_del(u8 mut* own p) void;\n"
+        "fn main() i32 { return 0; }\n");
     add("other.ft",
-        "extern fn void fort_rt_del(u8 mut* p);\n"
-        "fn void drop(u8 mut* p) { fort_rt_del(p); }\n");
+        "extern fn fort_rt_del(u8 mut* p) void;\n"
+        "fn drop(u8 mut* p) void { fort_rt_del(p); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'fort_rt_del': parameter 1 differs"));
     TEST_ASSERT_TRUE(said("note: previous declaration of 'fort_rt_del' here"));
@@ -488,8 +488,8 @@ TEST(a_runtime_declaration_that_adds_own_is_accepted_alone, {
     // comparison read `own` would fail here rather than silently refuse the
     // standard library's own declarations.
     // D13.1, D17.1
-    TEST_ASSERT_TRUE(check_src("extern fn void fort_rt_del(u8 mut* own p);\n"
-                               "fn i32 main() { return 0; }\n"));
+    TEST_ASSERT_TRUE(check_src("extern fn fort_rt_del(u8 mut* own p) void;\n"
+                               "fn main() i32 { return 0; }\n"));
 })
 
 TEST(a_conflicting_declaration_is_poisoned_and_does_not_cascade, {
@@ -502,12 +502,12 @@ TEST(a_conflicting_declaration_is_poisoned_and_does_not_cascade, {
     add("main.ft",
         "import other;\n"
         "enum color { red, green }\n"
-        "extern fn void paint(color c);\n"
-        "fn i32 main() { paint(1); return 0; }\n");
+        "extern fn paint(color c) void;\n"
+        "fn main() i32 { paint(1); return 0; }\n");
     add("other.ft",
         "enum color { blue, gold }\n"
-        "extern fn void paint(color c);\n"
-        "fn void go() { paint(color.blue); }\n");
+        "extern fn paint(color c) void;\n"
+        "fn go() void { paint(color.blue); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'paint': parameter 1 differs"));
     TEST_ASSERT_FALSE(said("an integer constant does not become an enum"));
@@ -523,11 +523,11 @@ TEST(a_pointer_that_erases_its_pointee_is_another_type, {
     begin();
     add("main.ft",
         "import other;\n"
-        "extern fn void take(void* p);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn take(void* p) void;\n"
+        "fn main() i32 { return 0; }\n");
     add("other.ft",
-        "extern fn void take(u8* p);\n"
-        "fn void go(u8* p) { take(p); }\n");
+        "extern fn take(u8* p) void;\n"
+        "fn go(u8* p) void { take(p); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'take': parameter 1 differs"));
     // A `void*` hides no struct or enum, so the note about one is absent.
@@ -535,21 +535,21 @@ TEST(a_pointer_that_erases_its_pointee_is_another_type, {
     begin();
     add("main.ft",
         "import other;\n"
-        "extern fn void take(char* p);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn take(char* p) void;\n"
+        "fn main() i32 { return 0; }\n");
     add("other.ft",
-        "extern fn void take(void* p);\n"
-        "fn void go(void* p) { take(p); }\n");
+        "extern fn take(void* p) void;\n"
+        "fn go(void* p) void { take(p); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'take': parameter 1 differs"));
     begin();
     add("main.ft",
         "import other;\n"
-        "extern fn void take(fn void(i32) f);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn take(fn (i32) void f) void;\n"
+        "fn main() i32 { return 0; }\n");
     add("other.ft",
-        "extern fn void take(void* f);\n"
-        "fn void go(void* f) { take(f); }\n");
+        "extern fn take(void* f) void;\n"
+        "fn go(void* f) void { take(f); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'take': parameter 1 differs"));
 })
@@ -562,21 +562,21 @@ TEST(every_later_declaration_is_held_against_the_first, {
     add("main.ft",
         "import a;\n"
         "import b;\n"
-        "extern fn void put(i32 n);\n"
-        "fn i32 main() { a.go(); b.go(); return 0; }\n");
+        "extern fn put(i32 n) void;\n"
+        "fn main() i32 { a.go(); b.go(); return 0; }\n");
     // Three modules, one C symbol: the first declaration of the dependency
     // order is the reference, so both disagreeing modules are reported and
     // each note points at the same earlier declaration.
     // D9.10
     add("a.ft",
-        "extern fn void put(i32 n);\n"
-        "fn void go() { put(1); }\n");
+        "extern fn put(i32 n) void;\n"
+        "fn go() void { put(1); }\n");
     add("b.ft",
-        "extern fn void put(i64 n);\n"
-        "fn void go() { put(1); }\n");
+        "extern fn put(i64 n) void;\n"
+        "fn go() void { put(1); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
-    TEST_ASSERT_TRUE(said("b.ft:1:20: error: conflicting declarations of extern 'put'"));
-    TEST_ASSERT_TRUE(said("a.ft:1:16: note: previous declaration of 'put' here"));
+    TEST_ASSERT_TRUE(said("b.ft:1:15: error: conflicting declarations of extern 'put'"));
+    TEST_ASSERT_TRUE(said("a.ft:1:11: note: previous declaration of 'put' here"));
     TEST_ASSERT_FALSE(said("main.ft:3:"));
 })
 
@@ -587,14 +587,14 @@ TEST(a_conflict_in_an_imported_module_is_reported_from_any_entry, {
     // D9.10
     add("main.ft",
         "import a;\n"
-        "fn i32 main() { a.go(); return 0; }\n");
+        "fn main() i32 { a.go(); return 0; }\n");
     add("a.ft",
         "import b;\n"
-        "extern fn void put(i32 n);\n"
-        "fn void go() { put(1); b.go(); }\n");
+        "extern fn put(i32 n) void;\n"
+        "fn go() void { put(1); b.go(); }\n");
     add("b.ft",
-        "extern fn void put(i64 n);\n"
-        "fn void go() { put(1); }\n");
+        "extern fn put(i64 n) void;\n"
+        "fn go() void { put(1); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'put': parameter 1 differs"));
 })
@@ -608,14 +608,14 @@ TEST(a_declaration_that_failed_to_check_is_not_the_reference, {
     add("main.ft",
         "import a;\n"
         "import b;\n"
-        "extern fn void put(i32 n);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn put(i32 n) void;\n"
+        "fn main() i32 { return 0; }\n");
     add("a.ft",
-        "extern fn void put(i32@ n);\n"
-        "fn void go() { }\n");
+        "extern fn put(i32@ n) void;\n"
+        "fn go() void { }\n");
     add("b.ft",
-        "extern fn void put(i32 n);\n"
-        "fn void go() { put(1); }\n");
+        "extern fn put(i32 n) void;\n"
+        "fn go() void { put(1); }\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("extern signature cannot use type 'i32@'"));
     TEST_ASSERT_FALSE(said("conflicting declarations"));
@@ -624,8 +624,8 @@ TEST(a_declaration_that_failed_to_check_is_not_the_reference, {
 TEST(checking_one_module_twice_does_not_conflict_with_itself, {
     begin();
     add("main.ft",
-        "extern fn void put(i32 n);\n"
-        "fn i32 main() { put(1); return 0; }\n");
+        "extern fn put(i32 n) void;\n"
+        "fn main() i32 { put(1); return 0; }\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
     // An editor mode checks one file again through the same checker: the
     // second pass makes new symbols for the same tree, and holding them
@@ -642,11 +642,11 @@ TEST(a_muted_checker_counts_the_conflict_and_reports_nothing, {
     begin();
     add("main.ft",
         "import other;\n"
-        "extern fn void put(i32 n);\n"
-        "fn i32 main() { return 0; }\n");
+        "extern fn put(i32 n) void;\n"
+        "fn main() i32 { return 0; }\n");
     add("other.ft",
-        "extern fn void put(i64 n);\n"
-        "fn void go() { put(1); }\n");
+        "extern fn put(i64 n) void;\n"
+        "fn go() void { put(1); }\n");
     want_mute = true;
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     // A muted checker annotates the tree without reporting, so neither the

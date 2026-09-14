@@ -46,13 +46,13 @@ struct env {
 /// Prepares a fresh sandbox and an emitter over it, in the default build mode:
 /// checked arithmetic and bounds checks on.
 /// D11.1, D10.6
-fn void open(env mut* e) {
+fn open(env mut* e) void {
     check_env.open(&e->c);
     gen.gen_init(&e->g, &e->c.m.s, gen.gen_options{});
 }
 
 /// The same with the options a `--release` or `--no-bounds-check` build has.
-fn void open_with(env mut* e, gen.gen_options opts) {
+fn open_with(env mut* e, gen.gen_options opts) void {
     check_env.open(&e->c);
     gen.gen_init(&e->g, &e->c.m.s, opts);
 }
@@ -60,7 +60,7 @@ fn void open_with(env mut* e, gen.gen_options opts) {
 /// Releases the emitter, then the checker and the sandbox: every text the
 /// emitter interned is its own, and every annotation it read is the checker's.
 /// D20.5
-fn void close(env mut* e) {
+fn close(env mut* e) void {
     gen.gen_free(&e->g);
     strbuf.free(&e->buf);
     check_env.close(&e->c);
@@ -68,11 +68,11 @@ fn void close(env mut* e) {
 
 // ---- driving one function ----------------------------------------------------------
 
-/// Checks `body` as the whole of the body of `fn i32 main()` and prepares the
+/// Checks `body` as the whole of the body of `fn main() i32` and prepares the
 /// emitter over it: the annotations the emitter reads, the module `assert`
 /// quotes its argument out of, and one slot per parameter and local. False
 /// when the source did not check clean, which is what an assertion asks first.
-fn bool open_body(env mut* e, string body) {
+fn open_body(env mut* e, string body) bool {
     if (!check_env.check_body(&e->c, body)) {
         return false;
     }
@@ -81,7 +81,7 @@ fn bool open_body(env mut* e, string body) {
 
 /// The same for a whole module source, which is how a test that needs a
 /// declaration beside `main` writes one.
-fn bool open_src(env mut* e, string src) {
+fn open_src(env mut* e, string src) bool {
     if (!check_env.check_src(&e->c, src)) {
         return false;
     }
@@ -90,7 +90,7 @@ fn bool open_src(env mut* e, string src) {
 
 /// Points the emitter at the checked entry module and binds the slots of
 /// `main`.
-fn bool open_main(env mut* e) {
+fn open_main(env mut* e) bool {
     e->g.ck = &e->c.ck;
     e->g.module = check_env.module_at(&e->c, "main");
     ast.node* fn_node = check_env.node_in_main(&e->c, ast.ast_kind.k_fn_decl, "main");
@@ -123,7 +123,7 @@ fn bool open_main(env mut* e) {
 /// gen_slot_place. It also clears `failed`, which function_begin does not, so
 /// that one case's gen_todo does not silence the next.
 /// T-037: the review that asked about the second copy
-fn void begin(env mut* e) {
+fn begin(env mut* e) void {
     e->g.temps = 0;
     e->g.labels = 0;
     e->g.tmps = 0;
@@ -137,12 +137,12 @@ fn void begin(env mut* e) {
 // ---- the nodes of the checked body -------------------------------------------------
 
 /// The declaration of the local named `name` in `main`.
-fn ast.node* decl_of(env* e, string name) {
+fn decl_of(env* e, string name) ast.node* {
     return check_env.node_in_main(&e->c, ast.ast_kind.k_var_decl, name);
 }
 
 /// Its initializer, which is the expression a test emits.
-fn ast.node* init_of(env* e, string name) {
+fn init_of(env* e, string name) ast.node* {
     ast.node* d = decl_of(e, name);
     if (d == null) {
         return null;
@@ -151,7 +151,7 @@ fn ast.node* init_of(env* e, string name) {
 }
 
 /// The place of that local, which is what an initializer is written into.
-fn gen.gen_place place_of(env mut* e, string name) {
+fn place_of(env mut* e, string name) gen.gen_place {
     return gen.gen_slot_place(&e->g, decl_of(e, name)->sym);
 }
 
@@ -159,13 +159,13 @@ fn gen.gen_place place_of(env mut* e, string name) {
 
 /// Emits the initializer of the local `name` as a scalar value and answers the
 /// operand it lands in; the text it produced is body(e).
-fn gen.gen_val emit_value(env mut* e, string name) {
+fn emit_value(env mut* e, string name) gen.gen_val {
     begin(e);
     return gen_expr.gen_expr_value(&e->g, init_of(e, name));
 }
 
 /// The same, answering the text of the blocks it produced.
-fn string value_text(env mut* e, string name) {
+fn value_text(env mut* e, string name) string {
     emit_value(e, name);
     return body(e);
 }
@@ -173,14 +173,14 @@ fn string value_text(env mut* e, string name) {
 /// The expression of the `i`-th statement of `main`, with the call statement
 /// unwrapped to the call it holds.
 /// D7.3
-fn ast.node* stmt_expr(env* e, u64 i) {
+fn stmt_expr(env* e, u64 i) ast.node* {
     return check_env.body_expr(&e->c, "main", i);
 }
 
 /// Emits that statement's expression for its effects alone, which is what a
 /// call statement is.
 /// D7.3
-fn string discard_at(env mut* e, u64 i) {
+fn discard_at(env mut* e, u64 i) string {
     begin(e);
     gen_expr.gen_expr_discard(&e->g, stmt_expr(e, i));
     return body(e);
@@ -189,33 +189,33 @@ fn string discard_at(env mut* e, u64 i) {
 /// Emits it into that local's own place, which is how every aggregate is
 /// produced.
 /// D19.3
-fn string into_text(env mut* e, string name) {
+fn into_text(env mut* e, string name) string {
     begin(e);
     gen_expr.gen_expr_into(&e->g, init_of(e, name), place_of(e, name));
     return body(e);
 }
 
 /// The normal blocks emitted so far, a view valid until the next emission.
-fn string body(env* e) {
+fn body(env* e) string {
     return strbuf.view(&e->g.body);
 }
 
 /// The failure blocks, which are held apart until the definition is assembled.
 /// D19.6
-fn string fail(env* e) {
+fn fail(env* e) string {
     return strbuf.view(&e->g.fail);
 }
 
 /// The entry-block allocas a temporary place asked for.
 /// D19.4
-fn string allocas(env* e) {
+fn allocas(env* e) string {
     return strbuf.view(&e->g.allocas);
 }
 
 /// The type of the local `name`, which is how a test over the type lowering
 /// names a fort type: it writes a declaration and reads the type the checker
 /// gave it.
-fn types.node* type_of(env* e, string name) {
+fn type_of(env* e, string name) types.node* {
     ast.node* d = decl_of(e, name);
     if (d == null || d->sym == null) {
         return null;
@@ -224,7 +224,7 @@ fn types.node* type_of(env* e, string name) {
 }
 
 /// The symbol of a top-level declaration of the entry module.
-fn ast.sym* sym_main(env* e, string name) {
+fn sym_main(env* e, string name) ast.sym* {
     return check_env.sym_main(&e->c, name);
 }
 
@@ -232,7 +232,7 @@ fn ast.sym* sym_main(env* e, string name) {
 /// differ: an assertion over a block of IR is unreadable without the two texts
 /// beside each other, and `assert` quotes its argument and not its value.
 /// D11.4
-fn void expect_text(string got, string expected) {
+fn expect_text(string got, string expected) void {
     if (got != expected) {
         eprint("got:      [");
         eprint(got);
@@ -251,39 +251,39 @@ fn void expect_text(string got, string expected) {
 /// view of the emitter's body) against a joined text and never a view of one
 /// buffer against another view of it.
 /// D2.9
-fn string join2(env mut* e, string a, string b) {
+fn join2(env mut* e, string a, string b) string {
     strbuf.clear(&e->buf);
     strbuf.append(&e->buf, a);
     strbuf.append(&e->buf, b);
     return strbuf.view(&e->buf);
 }
 
-fn string join3(env mut* e, string a, string b, string c) {
+fn join3(env mut* e, string a, string b, string c) string {
     join2(e, a, b);
     strbuf.append(&e->buf, c);
     return strbuf.view(&e->buf);
 }
 
-fn string join4(env mut* e, string a, string b, string c, string d) {
+fn join4(env mut* e, string a, string b, string c, string d) string {
     join3(e, a, b, c);
     strbuf.append(&e->buf, d);
     return strbuf.view(&e->buf);
 }
 
-fn string join5(env mut* e, string a, string b, string c, string d, string f) {
+fn join5(env mut* e, string a, string b, string c, string d, string f) string {
     join4(e, a, b, c, d);
     strbuf.append(&e->buf, f);
     return strbuf.view(&e->buf);
 }
 
-fn string join6(env mut* e, string a, string b, string c, string d, string f, string h) {
+fn join6(env mut* e, string a, string b, string c, string d, string f, string h) string {
     join5(e, a, b, c, d, f);
     strbuf.append(&e->buf, h);
     return strbuf.view(&e->buf);
 }
 
-fn string join8(env mut* e, string a, string b, string c, string d, string f, string h,
-                string i, string j) {
+fn join8(env mut* e, string a, string b, string c, string d, string f, string h,
+                string i, string j) string {
     join6(e, a, b, c, d, f, h);
     strbuf.append(&e->buf, i);
     strbuf.append(&e->buf, j);
@@ -295,19 +295,19 @@ fn string join8(env mut* e, string a, string b, string c, string d, string f, st
 /// Whether any diagnostic reported so far holds `text`: what gen_todo wrote is
 /// read back here, since an unfinished construct is a diagnostic and never
 /// wrong code.
-fn bool said(env mut* e, string text) {
+fn said(env mut* e, string text) bool {
     return check_env.said(&e->c, text);
 }
 
 /// The errors reported so far, notes excluded.
 /// D14.2
-fn u64 errors(env* e) {
+fn errors(env* e) u64 {
     return check_env.errors(&e->c);
 }
 
 /// One more piece appended to the text the last join built, for a block longer
 /// than eight lines.
-fn string join_more(env mut* e, string a) {
+fn join_more(env mut* e, string a) string {
     strbuf.append(&e->buf, a);
     return strbuf.view(&e->buf);
 }
@@ -318,7 +318,7 @@ fn string join_more(env mut* e, string a) {
 /// position a failure call carries is the position of the operator the test
 /// wrote.
 /// D11.4
-fn bool open_lines(env mut* e, string@ lines) {
+fn open_lines(env mut* e, string@ lines) bool {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     u64 mut i = 0;
@@ -335,14 +335,14 @@ fn bool open_lines(env mut* e, string@ lines) {
 /// The bytes of the `i`-th string constant the emitter made, which is how the
 /// text `assert` quoted out of the source is read back (item 5).
 /// D11.4
-fn string record_text(env* e, u64 i) {
+fn record_text(env* e, u64 i) string {
     return gen.records_at(&e->g.strs, i).text;
 }
 
 /// Emits the initializer of the local `name` as a place, which is what an
 /// lvalue has and a value does not.
 /// D6.7
-fn gen.gen_place emit_place(env mut* e, string name) {
+fn emit_place(env mut* e, string name) gen.gen_place {
     begin(e);
     return gen_expr.gen_expr_place(&e->g, init_of(e, name));
 }
@@ -355,7 +355,7 @@ string BLOCKS_OK = "one terminator per block";
 
 /// The four terminators the emitter writes: `br`, `ret`, `unreachable` and the
 /// `switch` of a fort switch (item 10).
-fn bool is_terminator(string line) {
+fn is_terminator(string line) bool {
     return str.starts_with(line, "  br ") || str.starts_with(line, "  ret ") ||
            str.starts_with(line, "  unreachable") || str.starts_with(line, "  switch ");
 }
@@ -365,19 +365,19 @@ fn bool is_terminator(string line) {
 /// further, or one holding the `]` that closes a `switch`, is a continuation of
 /// the `switch` above it, which is the one terminator LLVM prints over several
 /// lines (item 10).
-fn bool is_instruction(string line) {
+fn is_instruction(string line) bool {
     return line.len > 2 && str.starts_with(line, "  ") && line[2] != ' ' && line[2] != ']';
 }
 
 /// Whether the line is a block label, which is the only unindented line inside
 /// a definition.
-fn bool is_label(string line) {
+fn is_label(string line) bool {
     return line.len > 1 && line[0] != ' ' && line[line.len - 1] == ':';
 }
 
 /// The line beginning at `from`, and the offset of the one after it in *next;
 /// the last line of a text with no final newline is returned whole.
-fn string line_at(string text, u64 from, u64 mut* next) {
+fn line_at(string text, u64 from, u64 mut* next) string {
     u64 mut i = from;
     while (i < text.len && text[i] != '\n') {
         i += 1;
@@ -396,7 +396,7 @@ fn string line_at(string text, u64 from, u64 mut* next) {
 ///
 /// A block begins at a label line and ends at the next label or at the closing
 /// brace of the definition.
-fn string block_terminators(env mut* e, string text) {
+fn block_terminators(env mut* e, string text) string {
     bool mut in_function = false;
     bool mut open = false;
     bool mut seen = false;
@@ -441,7 +441,7 @@ fn string block_terminators(env mut* e, string text) {
 
 /// `<label> has N terminators`, the report of a block that ends in none or in
 /// more than one.
-fn string terminator_report(env mut* e, string label, u64 count) {
+fn terminator_report(env mut* e, string label, u64 count) string {
     strbuf.clear(&e->buf);
     strbuf.append(&e->buf, label);
     strbuf.append(&e->buf, " has ");
@@ -453,7 +453,7 @@ fn string terminator_report(env mut* e, string label, u64 count) {
 /// Asserts the structural rule over `text`, printing the report and the module
 /// when it fails: `assert` quotes its argument and not its value.
 /// D11.4
-fn void expect_blocks(env mut* e, string text) {
+fn expect_blocks(env mut* e, string text) void {
     string report = block_terminators(e, text);
     if (report != BLOCKS_OK) {
         eprint("blocks:   ");
@@ -469,27 +469,27 @@ fn void expect_blocks(env mut* e, string text) {
 
 /// The function definitions emitted so far, which is what an assertion about a
 /// whole definition reads (item 1).
-fn string funcs(env* e) {
+fn funcs(env* e) string {
     return strbuf.view(&e->g.funcs);
 }
 
 /// The named types, the module-level data and the assembled module.
-fn string named(env* e) {
+fn named(env* e) string {
     return strbuf.view(&e->g.named);
 }
 
-fn string globals(env* e) {
+fn globals(env* e) string {
     return strbuf.view(&e->g.globals);
 }
 
-fn string module_text(env* e) {
+fn module_text(env* e) string {
     return gen.gen_text(&e->g);
 }
 
 /// Emits the definition of the top-level function `name` of the entry module
 /// and answers its text, which is the whole of the funcs section when it is the
 /// first definition emitted.
-fn string emit_function(env mut* e, string name) {
+fn emit_function(env mut* e, string name) string {
     ast.node* fn_node = check_env.node_in_main(&e->c, ast.ast_kind.k_fn_decl, name);
     if (fn_node == null) {
         return "";
@@ -500,7 +500,7 @@ fn string emit_function(env mut* e, string name) {
 
 /// Checks `src` as a whole module and points the emitter at it without binding
 /// any slot: a definition suite lets gen_function do that itself.
-fn bool open_module(env mut* e, string src) {
+fn open_module(env mut* e, string src) bool {
     if (!check_env.check_src(&e->c, src)) {
         return false;
     }
@@ -515,7 +515,7 @@ fn bool open_module(env mut* e, string src) {
 /// passed here as a fixed array. It is the general form of join2 to join8
 /// above, which the expression suites use for a two- or three-line block.
 /// D2.9
-fn string join_lines(env mut* e, string@ lines) {
+fn join_lines(env mut* e, string@ lines) string {
     strbuf.clear(&e->buf);
     u64 mut i = 0;
     while (i < lines.len) {
@@ -529,7 +529,7 @@ fn string join_lines(env mut* e, string@ lines) {
 /// asks for a `--release` or a `--no-bounds-check` emitter without naming the
 /// option struct.
 /// D11.1, D10.6
-fn void gen_options_open(env mut* e, bool release, bool no_bounds_check) {
+fn gen_options_open(env mut* e, bool release, bool no_bounds_check) void {
     gen.gen_options mut opts = gen.gen_options{};
     opts.release = release;
     opts.no_bounds_check = no_bounds_check;

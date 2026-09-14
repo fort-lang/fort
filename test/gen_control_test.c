@@ -19,7 +19,7 @@
 // A program whose every statement form is a branch, used by the structural
 // tests that answer about the whole module rather than about one snippet.
 static const char BUSY_SOURCE[] = "struct pair { i32 x; i32 y; }\n"
-                                  "fn i32 main() {\n"
+                                  "fn main() i32 {\n"
                                   "    i32 mut s = 0;\n"
                                   "    if (s < 1) { s = 1; } else if (s < 2) { s = 2; }\n"
                                   "    while (s < 9) { s = s +% 1; if (s == 4) { continue; } }\n"
@@ -39,7 +39,7 @@ static const char BUSY_SOURCE[] = "struct pair { i32 x; i32 y; }\n"
 // D7.4
 
 TEST(an_if_without_an_else_branches_to_its_continuation, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut n = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut n = 0;\n"
                           "    if (n < 1) {\n        n = 2;\n    }\n    return n;\n}\n"));
     // The false edge of an `if` with no `else` is the continuation itself, and
     // the branch that falls off the end of the body is the only terminator of
@@ -54,7 +54,7 @@ TEST(an_if_without_an_else_branches_to_its_continuation, {
 })
 
 TEST(an_if_with_an_else_gives_each_branch_its_own_block, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut n = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut n = 0;\n"
                           "    if (n < 1) {\n        n = 2;\n    } else {\n        n = 3;\n    }\n"
                           "    return n;\n}\n"));
     // Labels are `%L<N>` in creation order, so the then block, the else block
@@ -72,7 +72,7 @@ TEST(an_if_with_an_else_gives_each_branch_its_own_block, {
 })
 
 TEST(an_else_if_chain_nests_in_the_else_block, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 n = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 n = 0;\n"
                           "    if (n < 1) {\n        return 1;\n"
                           "    } else if (n < 2) {\n        return 2;\n"
                           "    } else {\n        return 3;\n    }\n}\n"));
@@ -91,7 +91,7 @@ TEST(an_else_if_chain_nests_in_the_else_block, {
 })
 
 TEST(a_branch_that_terminates_does_not_branch_to_the_continuation, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 n = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 n = 0;\n"
                           "    if (n < 1) {\n        return 1;\n"
                           "    } else {\n        return 2;\n    }\n}\n"));
     // An `if` whose branches both terminate is itself terminating, so neither
@@ -102,7 +102,7 @@ TEST(a_branch_that_terminates_does_not_branch_to_the_continuation, {
 })
 
 TEST(the_statements_after_a_terminating_if_stand_in_a_fresh_block, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut n = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut n = 0;\n"
                           "    if (n < 1) {\n        return 1;\n        n = 2;\n    }\n"
                           "    return 0;\n}\n"));
     // After a terminating statement the emitter opens a fresh `%L<N>` block
@@ -116,7 +116,7 @@ TEST(the_statements_after_a_terminating_if_stand_in_a_fresh_block, {
 // D7.5
 
 TEST(a_while_has_a_head_a_body_and_a_continuation, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut n = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut n = 0;\n"
                           "    while (n < 3) {\n        n = n +% 1;\n    }\n    return n;\n}\n"));
     // The condition is re-evaluated in the head block, which the body
     // branches back to (item 10).
@@ -132,7 +132,7 @@ TEST(a_while_has_a_head_a_body_and_a_continuation, {
 })
 
 TEST(a_while_true_with_no_break_leaves_its_continuation_unreachable, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut n = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut n = 0;\n"
                           "    while (true) {\n        n = n +% 1;\n    }\n}\n"));
     // `while (true)` with no `break` targeting it is a terminating statement,
     // so nothing branches to the continuation and the body's back-edge is the
@@ -147,7 +147,7 @@ TEST(a_while_true_with_no_break_leaves_its_continuation_unreachable, {
 // D7.5
 
 TEST(a_for_puts_its_step_in_a_block_of_its_own, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut s = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut s = 0;\n"
                           "    for (i32 mut i = 0; i < 3; i = i +% 1) {\n"
                           "        s = s +% i;\n    }\n    return s;\n}\n"));
     // The init runs in the block the loop stands in and the step in a block of
@@ -170,7 +170,7 @@ TEST(a_for_puts_its_step_in_a_block_of_its_own, {
 })
 
 TEST(a_for_with_an_empty_condition_branches_straight_into_its_body, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut s = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut s = 0;\n"
                           "    for (s = 0; ; s = s +% 1) {\n        break;\n    }\n"
                           "    return s;\n}\n"));
     // An empty condition means `true`, so the head branches straight in.
@@ -179,7 +179,7 @@ TEST(a_for_with_an_empty_condition_branches_straight_into_its_body, {
 })
 
 TEST(a_for_with_no_init_and_no_step_still_has_all_four_blocks, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut s = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut s = 0;\n"
                           "    for (; s < 3;) {\n        s = s +% 1;\n    }\n    return s;\n}\n"));
     // An empty step leaves its block, which is what keeps `continue` one label
     // whatever the header holds.
@@ -188,7 +188,7 @@ TEST(a_for_with_no_init_and_no_step_still_has_all_four_blocks, {
 })
 
 TEST(for_ever_is_a_head_that_only_branches_in, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut s = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut s = 0;\n"
                           "    for (;;) {\n        s = s +% 1;\n        if (s > 2) { break; }\n"
                           "    }\n    return s;\n}\n"));
     // `for (;;)` is legal and is the loop with no header at all.
@@ -203,7 +203,7 @@ TEST(for_ever_is_a_head_that_only_branches_in, {
 // D7.5
 
 TEST(a_continue_in_a_while_branches_to_the_head, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut n = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut n = 0;\n"
                           "    while (n < 3) {\n        n = n +% 1;\n"
                           "        if (n == 1) { continue; }\n    }\n    return n;\n}\n"));
     // `continue` in a `while` re-tests the condition, so it targets the head.
@@ -212,7 +212,7 @@ TEST(a_continue_in_a_while_branches_to_the_head, {
 })
 
 TEST(a_continue_in_a_for_branches_to_the_step_block, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut s = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut s = 0;\n"
                           "    for (i32 mut i = 0; i < 3; i = i +% 1) {\n"
                           "        if (i == 1) { continue; }\n        s = s +% i;\n    }\n"
                           "    return s;\n}\n"));
@@ -223,14 +223,14 @@ TEST(a_continue_in_a_for_branches_to_the_step_block, {
 })
 
 TEST(a_break_branches_to_the_continuation_of_its_loop, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut n = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut n = 0;\n"
                           "    while (n < 3) {\n        if (n == 1) { break; }\n"
                           "        n = n +% 1;\n    }\n    return n;\n}\n"));
     TEST_ASSERT_EQ_STR(found("\nL3:\n  br label %L2\n"), "\nL3:\n  br label %L2\n");
 })
 
 TEST(break_and_continue_target_the_innermost_enclosing_loop, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut s = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut s = 0;\n"
                           "    for (i32 mut i = 0; i < 2; i = i +% 1) {\n"
                           "        for (i32 mut j = 0; j < 2; j = j +% 1) {\n"
                           "            if (j == 1) { break; }\n"
@@ -256,7 +256,7 @@ TEST(break_and_continue_target_the_innermost_enclosing_loop, {
 // D7.5, D17.10
 
 TEST(a_range_for_over_a_fixed_array_walks_an_invented_counter, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32[3] a = {1, 2, 3};\n    i32 mut s = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32[3] a = {1, 2, 3};\n    i32 mut s = 0;\n"
                           "    for (i32 v : a) {\n        s = s +% v;\n    }\n    return s;\n}\n"));
     // The counter is a place the compiler invents, `%tmp<K>` from its own
     // counter, and an entry-block alloca like every other.
@@ -285,7 +285,7 @@ TEST(a_range_for_over_a_fixed_array_walks_an_invented_counter, {
 })
 
 TEST(a_fixed_array_that_owns_nothing_is_iterated_over_a_copy, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32[3] a = {1, 2, 3};\n    i32 mut s = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32[3] a = {1, 2, 3};\n    i32 mut s = 0;\n"
                           "    for (i32 v : a) {\n        s = s +% v;\n    }\n    return s;\n}\n"));
     // The collection is evaluated once before the first iteration, and a fixed
     // array that owns nothing is evaluated as a value, so the loop iterates
@@ -299,7 +299,7 @@ TEST(a_fixed_array_that_owns_nothing_is_iterated_over_a_copy, {
 })
 
 TEST(an_owning_collection_is_iterated_in_place, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut* own[2] mut a = {};\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut* own[2] mut a = {};\n"
                           "    for (i32 mut* p : a) {\n        if (p != null) { return 1; }\n"
                           "    }\n    return 0;\n}\n"));
     // The loop lends its collection: an owning fixed array is iterated in
@@ -316,7 +316,7 @@ TEST(an_owning_collection_is_iterated_in_place, {
 })
 
 TEST(a_range_for_over_a_string_uses_the_element_gep_shape, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut n = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut n = 0;\n"
                           "    for (char c : \"hi\") {\n        n = n +% 1;\n    }\n"
                           "    return n;\n}\n"));
     // A span's length is its header field and its elements are reached through
@@ -337,7 +337,7 @@ TEST(a_range_for_over_a_string_uses_the_element_gep_shape, {
 
 TEST(an_aggregate_element_is_copied_into_the_loop_variable_with_a_memcpy, {
     TEST_ASSERT_TRUE(emit("struct pair { i32 x; i32 y; }\n"
-                          "fn i32 main() {\n    pair[2] a = {};\n    i32 mut s = 0;\n"
+                          "fn main() i32 {\n    pair[2] a = {};\n    i32 mut s = 0;\n"
                           "    for (pair p : a) {\n        s = s +% p.x;\n    }\n"
                           "    return s;\n}\n"));
     // `x` is a fresh copy of each element taken at the start of its iteration,
@@ -351,7 +351,7 @@ TEST(an_aggregate_element_is_copied_into_the_loop_variable_with_a_memcpy, {
 })
 
 TEST(the_loop_variable_of_a_range_for_is_an_entry_block_alloca, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32[2] a = {1, 2};\n    i32 mut s = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32[2] a = {1, 2};\n    i32 mut s = 0;\n"
                           "    for (i32 v : a) {\n        s = s +% v;\n    }\n    return s;\n}\n"));
     // A range `for` declares its loop variable on the loop itself, and that
     // variable is a local like any other: `%<ident>.<slot>` by its index in
@@ -365,7 +365,7 @@ TEST(the_loop_variable_of_a_range_for_is_an_entry_block_alloca, {
 })
 
 TEST(a_body_that_terminates_does_not_branch_to_the_step_block, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n"
                           "    for (i32 mut i = 0; i < 3; i = i +% 1) {\n"
                           "        return i;\n    }\n    return 0;\n}\n"));
     // The body already ended in a terminator, so no branch to the step block
@@ -376,7 +376,7 @@ TEST(a_body_that_terminates_does_not_branch_to_the_step_block, {
 })
 
 TEST(an_increment_step_uses_the_overflow_intrinsic_of_its_type, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut s = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut s = 0;\n"
                           "    for (i32 mut i = 0; i < 3; i++) {\n        s = s +% 1;\n    }\n"
                           "    return s;\n}\n"));
     // `++` is a step form of its own and uses the same intrinsics as `+` (item
@@ -388,8 +388,8 @@ TEST(an_increment_step_uses_the_overflow_intrinsic_of_its_type, {
 })
 
 TEST(a_call_is_a_legal_init_and_step, {
-    TEST_ASSERT_TRUE(emit("fn void bump(i32 mut* mut c) { *c = *c +% 1; }\n"
-                          "fn i32 main() {\n    i32 mut c = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn bump(i32 mut* mut c) void { *c = *c +% 1; }\n"
+                          "fn main() i32 {\n    i32 mut c = 0;\n"
                           "    for (bump(&c); c < 3; bump(&c)) {\n    }\n    return c;\n}\n"));
     // `init` and `step` may each be a call: the init's call stands before the
     // head and the step's inside the step block.
@@ -401,7 +401,7 @@ TEST(a_call_is_a_legal_init_and_step, {
 })
 
 TEST(break_and_continue_in_a_range_for_target_its_own_blocks, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32[3] a = {1, 2, 3};\n    i32 mut s = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32[3] a = {1, 2, 3};\n    i32 mut s = 0;\n"
                           "    for (i32 v : a) {\n        if (v == 1) { continue; }\n"
                           "        if (v == 3) { break; }\n        s = s +% v;\n    }\n"
                           "    return s;\n}\n"));
@@ -413,7 +413,7 @@ TEST(break_and_continue_in_a_range_for_target_its_own_blocks, {
 })
 
 TEST(a_range_for_emits_no_bounds_check_of_its_own, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32[3] a = {1, 2, 3};\n    i32 mut s = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32[3] a = {1, 2, 3};\n    i32 mut s = 0;\n"
                           "    for (i32 v : a) {\n        s = s +% v;\n    }\n    return s;\n}\n"));
     // The counter is bounded by the length the head compares against, so the
     // element address needs no `std.rt.fail_bounds` branch of its own (item
@@ -423,7 +423,7 @@ TEST(a_range_for_emits_no_bounds_check_of_its_own, {
 })
 
 TEST(the_no_bounds_check_mode_leaves_the_blocks_of_a_loop_alone, {
-    static const char SOURCE[] = "fn i32 main() {\n    i32[3] a = {1, 2, 3};\n    i32 mut s = 0;\n"
+    static const char SOURCE[] = "fn main() i32 {\n    i32[3] a = {1, 2, 3};\n    i32 mut s = 0;\n"
                                  "    for (i32 v : a) {\n        s = s +% v;\n    }\n"
                                  "    return s;\n}\n";
     TEST_ASSERT_TRUE(emit(SOURCE));
@@ -438,7 +438,7 @@ TEST(the_no_bounds_check_mode_leaves_the_blocks_of_a_loop_alone, {
 })
 
 TEST(a_nested_if_inside_a_loop_rejoins_before_the_back_edge, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut n = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut n = 0;\n"
                           "    while (n < 3) {\n        if (n == 1) { n = n +% 2; }\n"
                           "        n = n +% 1;\n    }\n    return n;\n}\n"));
     // The `if`'s continuation is where the body resumes, so the loop's
@@ -452,7 +452,7 @@ TEST(a_nested_if_inside_a_loop_rejoins_before_the_back_edge, {
 })
 
 TEST(a_loop_inside_a_loop_restores_the_enclosing_targets, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut s = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut s = 0;\n"
                           "    while (s < 9) {\n"
                           "        for (i32 mut i = 0; i < 2; i = i +% 1) { break; }\n"
                           "        if (s == 4) { break; }\n        s = s +% 1;\n    }\n"
@@ -466,8 +466,8 @@ TEST(a_loop_inside_a_loop_restores_the_enclosing_targets, {
 })
 
 TEST(a_noreturn_init_leaves_the_entry_edge_out, {
-    TEST_ASSERT_TRUE(emit("fn noreturn die() { panic(\"gone\"); }\n"
-                          "fn i32 main() {\n    i32 mut s = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn die() noreturn { panic(\"gone\"); }\n"
+                          "fn main() i32 {\n    i32 mut s = 0;\n"
                           "    for (die(); s < 3; s = s +% 1) {\n    }\n    return s;\n}\n"));
     // `init` may be a call and a call to a `noreturn` function is a
     // terminating statement that already ended the block with a trap (item
@@ -482,7 +482,7 @@ TEST(a_noreturn_init_leaves_the_entry_edge_out, {
 })
 
 TEST(a_noreturn_step_leaves_the_back_edge_out, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut s = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut s = 0;\n"
                           "    for (i32 mut i = 0; i < 3; panic(\"boom\")) {\n"
                           "        s = s +% 1;\n    }\n    return s;\n}\n"));
     // `step` may be a call too, and `panic` is `noreturn` (item 19), so the
@@ -495,7 +495,7 @@ TEST(a_noreturn_step_leaves_the_back_edge_out, {
 })
 
 TEST(a_check_inside_a_loop_puts_its_failure_block_after_every_normal_one, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32[3] a = {1, 2, 3};\n    i32 mut s = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32[3] a = {1, 2, 3};\n    i32 mut s = 0;\n"
                           "    for (i32 mut i = 0; i < 3; i = i +% 1) {\n"
                           "        s = s +% a[i];\n    }\n    return s;\n}\n"));
     // Failure blocks are emitted after every normal block of the function, so
@@ -507,7 +507,7 @@ TEST(a_check_inside_a_loop_puts_its_failure_block_after_every_normal_one, {
 })
 
 TEST(a_range_for_over_an_empty_collection_never_enters_its_body, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut n = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut n = 0;\n"
                           "    for (char c : \"\") {\n        n = n +% 1;\n    }\n"
                           "    return n;\n}\n"));
     // Nothing special is emitted for an empty collection: the head's `icmp
@@ -518,7 +518,7 @@ TEST(a_range_for_over_an_empty_collection_never_enters_its_body, {
 })
 
 TEST(a_range_for_over_a_single_element_array_compares_against_one, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32[1] a = {7};\n    i32 mut s = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32[1] a = {7};\n    i32 mut s = 0;\n"
                           "    for (i32 v : a) {\n        s = s +% v;\n    }\n    return s;\n}\n"));
     // A fixed array's length is an `i64` literal, whatever it is (item 16).
     TEST_ASSERT_EQ_STR(found("  %t2 = icmp ult i64 %t1, 1\n"), "  %t2 = icmp ult i64 %t1, 1\n");
@@ -526,7 +526,7 @@ TEST(a_range_for_over_a_single_element_array_compares_against_one, {
 })
 
 TEST(a_range_for_inside_a_range_for_keeps_two_counters, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32[2] a = {1, 2};\n    i32 mut s = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32[2] a = {1, 2};\n    i32 mut s = 0;\n"
                           "    for (i32 v : a) {\n"
                           "        for (i32 w : a) {\n"
                           "            if (w == 1) { continue; }\n"
@@ -608,7 +608,7 @@ TEST(control_flow_builds_no_phi_and_carries_no_value_across_a_merge, {
 })
 
 TEST(a_short_circuit_in_a_condition_keeps_its_own_blocks, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 a = 1;\n    i32 b = 2;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 a = 1;\n    i32 b = 2;\n"
                           "    if (a > 0 && b > 0) {\n        return 1;\n    }\n    return 0;\n}\n"
                           ""));
     // `&&` short-circuits through a stack slot rather than a `phi`, so the
@@ -643,8 +643,8 @@ TEST(two_runs_over_a_control_flow_program_produce_byte_identical_text, {
 })
 
 TEST(the_block_counter_is_reset_at_each_definition, {
-    TEST_ASSERT_TRUE(emit("fn i32 first(i32 n) {\n    if (n < 1) { return 1; }\n    return 0;\n}\n"
-                          "fn i32 main() {\n    if (first(1) < 1) { return 1; }\n"
+    TEST_ASSERT_TRUE(emit("fn first(i32 n) i32 {\n    if (n < 1) { return 1; }\n    return 0;\n}\n"
+                          "fn main() i32 {\n    if (first(1) < 1) { return 1; }\n"
                           "    return 0;\n}\n"));
     // Every counter is per function and reset at each definition, so both
     // definitions start their blocks at L0.

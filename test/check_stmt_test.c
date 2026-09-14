@@ -20,8 +20,8 @@
 // D7.9
 
 TEST(a_local_may_not_reuse_a_parameter_name, {
-    TEST_ASSERT_FALSE(check_src("fn i32 twice(i32 n) {\n    i32 n = 2;\n    return n;\n}\n"
-                                "fn i32 main() {\n    return twice(1);\n}\n"));
+    TEST_ASSERT_FALSE(check_src("fn twice(i32 n) i32 {\n    i32 n = 2;\n    return n;\n}\n"
+                                "fn main() i32 {\n    return twice(1);\n}\n"));
     // The diagnostic stands at the inner declaration.
     // D7.9, D14.2
     TEST_ASSERT_TRUE(said("main.ft:2:9: error: 'n' shadows a parameter"));
@@ -40,7 +40,7 @@ TEST(sibling_scopes_may_reuse_a_name, {
 
 TEST(a_local_may_shadow_a_module_level_name, {
     TEST_ASSERT_TRUE(check_src("i32 MAX = 1;\n"
-                               "fn i32 main() {\n    i32 MAX = 2;\n    return MAX;\n}\n"));
+                               "fn main() i32 {\n    i32 MAX = 2;\n    return MAX;\n}\n"));
 })
 
 TEST(a_local_is_visible_only_after_its_own_declaration, {
@@ -56,8 +56,8 @@ TEST(a_redeclaration_in_one_block_is_refused, {
 })
 
 TEST(a_duplicate_parameter_is_refused, {
-    TEST_ASSERT_FALSE(check_src("fn i32 add(i32 a, i32 a) {\n    return a;\n}\n"
-                                "fn i32 main() {\n    return add(1, 2);\n}\n"));
+    TEST_ASSERT_FALSE(check_src("fn add(i32 a, i32 a) i32 {\n    return a;\n}\n"
+                                "fn main() i32 {\n    return add(1, 2);\n}\n"));
     TEST_ASSERT_TRUE(said("duplicate parameter 'a'"));
 })
 
@@ -81,24 +81,24 @@ TEST(a_brace_initializer_needs_an_aggregate, {
 TEST(the_zero_initializer_works_for_every_aggregate, {
     TEST_ASSERT_TRUE(
         check_src("enum color {\n    red,\n}\nstruct point {\n    i32 x;\n}\n"
-                  "fn i32 main() {\n    point p = {};\n    i32[2] a = {};\n"
+                  "fn main() i32 {\n    point p = {};\n    i32[2] a = {};\n"
                   "    i32@ s = {};\n    string t = {};\n    color c = {};\n"
                   "    println(p.x, a[0], s.len, t, cast(c, i32));\n    return 0;\n}\n"));
 })
 
 TEST(a_positional_struct_literal_needs_every_field, {
     TEST_ASSERT_FALSE(check_src("struct point {\n    i32 x;\n    i32 y;\n}\n"
-                                "fn i32 main() {\n    point p = point{1};\n    return p.x;\n}\n"));
+                                "fn main() i32 {\n    point p = point{1};\n    return p.x;\n}\n"));
     TEST_ASSERT_TRUE(said("a positional literal of struct point needs its 2 fields, 1 given"));
 })
 
 TEST(a_designated_literal_refuses_duplicates_and_unknown_fields, {
     TEST_ASSERT_FALSE(check_src("struct point {\n    i32 x;\n    i32 y;\n}\n"
-                                "fn i32 main() {\n    point p = point{.x = 1, .x = 2};\n"
+                                "fn main() i32 {\n    point p = point{.x = 1, .x = 2};\n"
                                 "    return p.x;\n}\n"));
     TEST_ASSERT_TRUE(said("duplicate field 'x'"));
     TEST_ASSERT_FALSE(check_src("struct point {\n    i32 x;\n    i32 y;\n}\n"
-                                "fn i32 main() {\n    point p = point{.z = 1};\n"
+                                "fn main() i32 {\n    point p = point{.z = 1};\n"
                                 "    return p.x;\n}\n"));
     TEST_ASSERT_TRUE(said("struct point has no field 'z'"));
 })
@@ -111,11 +111,11 @@ TEST(an_array_literal_needs_exactly_its_length, {
 TEST(a_nested_literal_checks_its_leaves, {
     TEST_ASSERT_TRUE(check_src("struct point {\n    i32 x;\n    i32 y;\n}\n"
                                "struct line {\n    point a;\n    point b;\n}\n"
-                               "fn i32 main() {\n    line l = {{0, 0}, {1, 1}};\n"
+                               "fn main() i32 {\n    line l = {{0, 0}, {1, 1}};\n"
                                "    return l.b.x;\n}\n"));
     TEST_ASSERT_FALSE(check_src("struct point {\n    i32 x;\n    i32 y;\n}\n"
                                 "struct line {\n    point a;\n    point b;\n}\n"
-                                "fn i32 main() {\n    line l = {{0, 0}, {1, \"s\"}};\n"
+                                "fn main() i32 {\n    line l = {{0, 0}, {1, \"s\"}};\n"
                                 "    return l.b.x;\n}\n"));
     TEST_ASSERT_TRUE(said("the field expects i32, not string"));
 })
@@ -166,8 +166,8 @@ TEST(incdec_needs_an_integer_lvalue, {
 })
 
 TEST(a_call_statement_may_discard_its_result, {
-    TEST_ASSERT_TRUE(check_src("fn i32 compute() {\n    return 1;\n}\n"
-                               "fn i32 main() {\n    compute();\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(check_src("fn compute() i32 {\n    return 1;\n}\n"
+                               "fn main() i32 {\n    compute();\n    return 0;\n}\n"));
 })
 
 TEST(an_owning_result_may_not_be_discarded, {
@@ -270,7 +270,7 @@ TEST(a_switch_operand_is_an_integer_a_char_or_an_enum, {
 
 TEST(duplicate_case_values_are_refused, {
     TEST_ASSERT_FALSE(check_src("i32 TWO = 2;\n"
-                                "fn i32 main() {\n    i32 x = 1;\n    switch (x) {\n"
+                                "fn main() i32 {\n    i32 x = 1;\n    switch (x) {\n"
                                 "    case 1:\n        println(1);\n    case 2, 3:\n"
                                 "        println(2);\n    case TWO:\n        println(3);\n"
                                 "    }\n    return 0;\n}\n"));
@@ -301,7 +301,7 @@ TEST(a_case_label_takes_the_operand_type, {
 
 TEST(a_non_exhaustive_enum_switch_is_reported_at_the_closing_brace, {
     TEST_ASSERT_FALSE(check_src("enum color {\n    red,\n    green,\n    blue,\n}\n"
-                                "fn i32 main() {\n    color c = color.red;\n    switch (c) {\n"
+                                "fn main() i32 {\n    color c = color.red;\n    switch (c) {\n"
                                 "    case color.red:\n        println(1);\n    }\n"
                                 "    return 0;\n}\n"));
     // Reported at the closing brace of the switch.
@@ -311,7 +311,7 @@ TEST(a_non_exhaustive_enum_switch_is_reported_at_the_closing_brace, {
 
 TEST(a_default_completes_an_enum_switch, {
     TEST_ASSERT_TRUE(check_src("enum color {\n    red,\n    green,\n}\n"
-                               "fn i32 main() {\n    color c = color.red;\n    switch (c) {\n"
+                               "fn main() i32 {\n    color c = color.red;\n    switch (c) {\n"
                                "    case color.red:\n        println(1);\n    default:\n    }\n"
                                "    return 0;\n}\n"));
 })
@@ -411,7 +411,7 @@ TEST(a_break_inside_deferred_code_does_not_end_the_enclosing_loop, {
     // `break` there never targets the loop being walked: this `while (true)`
     // still terminates, so the one diagnostic is the `break` itself.
     // D7.8, D8.4
-    TEST_ASSERT_FALSE(check_src("fn i32 main() {\n    while (true) {\n        defer {\n"
+    TEST_ASSERT_FALSE(check_src("fn main() i32 {\n    while (true) {\n        defer {\n"
                                 "            break;\n        }\n    }\n}\n"));
     TEST_ASSERT_TRUE(said("'break' outside a loop or switch"));
     TEST_ASSERT_FALSE(said("missing return"));
@@ -429,50 +429,50 @@ TEST(a_deferred_statement_is_checked, {
 // D7.11, D8.4, D8.5
 
 TEST(a_return_with_a_value_in_a_void_function_is_refused, {
-    TEST_ASSERT_FALSE(check_src("fn void nothing() {\n    return 1;\n}\n"
-                                "fn i32 main() {\n    nothing();\n    return 0;\n}\n"));
+    TEST_ASSERT_FALSE(check_src("fn nothing() void {\n    return 1;\n}\n"
+                                "fn main() i32 {\n    nothing();\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("'return' with a value in a void function"));
 })
 
 TEST(a_return_without_a_value_in_a_non_void_function_is_refused, {
-    TEST_ASSERT_FALSE(check_src("fn i32 bare() {\n    return;\n}\n"
-                                "fn i32 main() {\n    return bare();\n}\n"));
+    TEST_ASSERT_FALSE(check_src("fn bare() i32 {\n    return;\n}\n"
+                                "fn main() i32 {\n    return bare();\n}\n"));
     TEST_ASSERT_TRUE(said("'return' without a value in a function returning i32"));
 })
 
 TEST(a_return_in_a_noreturn_function_is_refused, {
-    TEST_ASSERT_FALSE(check_src("fn noreturn quit(i32 code) {\n    if (code == 0) {\n"
+    TEST_ASSERT_FALSE(check_src("fn quit(i32 code) noreturn {\n    if (code == 0) {\n"
                                 "        return;\n    }\n    panic(\"quit\");\n}\n"
-                                "fn i32 main() {\n    quit(1);\n}\n"));
+                                "fn main() i32 {\n    quit(1);\n}\n"));
     // A `noreturn` function may not contain `return`.
     // D8.5
     TEST_ASSERT_TRUE(said("'return' in a noreturn function"));
 })
 
 TEST(a_missing_return_is_reported_at_the_closing_brace, {
-    TEST_ASSERT_FALSE(check_src("fn i32 pick(bool b) {\n    if (b) {\n        return 1;\n    }\n}\n"
-                                "fn i32 main() {\n    return pick(true);\n}\n"));
+    TEST_ASSERT_FALSE(check_src("fn pick(bool b) i32 {\n    if (b) {\n        return 1;\n    }\n}\n"
+                                "fn main() i32 {\n    return pick(true);\n}\n"));
     // Reported at the body's closing brace.
     // D8.4, D14.2
     TEST_ASSERT_TRUE(said("main.ft:5:1: error: missing return"));
 })
 
 TEST(an_if_with_an_else_terminates, {
-    TEST_ASSERT_TRUE(check_src("fn i32 sign(i32 x) {\n    if (x < 0) {\n        return -1;\n"
+    TEST_ASSERT_TRUE(check_src("fn sign(i32 x) i32 {\n    if (x < 0) {\n        return -1;\n"
                                "    } else {\n        return 1;\n    }\n}\n"
-                               "fn i32 main() {\n    return sign(1);\n}\n"));
-    TEST_ASSERT_FALSE(check_src("fn i32 sign(i32 x) {\n    if (x < 0) {\n        return -1;\n"
+                               "fn main() i32 {\n    return sign(1);\n}\n"));
+    TEST_ASSERT_FALSE(check_src("fn sign(i32 x) i32 {\n    if (x < 0) {\n        return -1;\n"
                                 "    } else if (x > 0) {\n        return 1;\n    }\n}\n"
-                                "fn i32 main() {\n    return sign(1);\n}\n"));
+                                "fn main() i32 {\n    return sign(1);\n}\n"));
     TEST_ASSERT_TRUE(said("missing return"));
 })
 
 TEST(a_while_true_with_no_break_terminates, {
     TEST_ASSERT_TRUE(
-        check_src("fn i32 spin() {\n    while (true) {\n        println(1);\n    }\n}\n"
-                  "fn i32 main() {\n    return spin();\n}\n"));
-    TEST_ASSERT_FALSE(check_src("fn i32 spin() {\n    while (true) {\n        break;\n    }\n}\n"
-                                "fn i32 main() {\n    return spin();\n}\n"));
+        check_src("fn spin() i32 {\n    while (true) {\n        println(1);\n    }\n}\n"
+                  "fn main() i32 {\n    return spin();\n}\n"));
+    TEST_ASSERT_FALSE(check_src("fn spin() i32 {\n    while (true) {\n        break;\n    }\n}\n"
+                                "fn main() i32 {\n    return spin();\n}\n"));
     // A `break` targeting the loop makes it fall through.
     // D8.4
     TEST_ASSERT_TRUE(said("missing return"));
@@ -484,9 +484,9 @@ TEST(a_constant_true_condition_does_not_terminate, {
     // return rather than accepting a body that may fall through.
     // D8.4
     TEST_ASSERT_FALSE(check_src("bool ALWAYS = true;\n"
-                                "fn i32 spin() {\n    while (ALWAYS) {\n        println(1);\n"
+                                "fn spin() i32 {\n    while (ALWAYS) {\n        println(1);\n"
                                 "    }\n}\n"
-                                "fn i32 main() {\n    return spin();\n}\n"));
+                                "fn main() i32 {\n    return spin();\n}\n"));
     TEST_ASSERT_TRUE(said("missing return"));
 })
 
@@ -494,16 +494,16 @@ TEST(a_call_through_a_noreturn_pointer_terminates, {
     // A call statement to a `noreturn` function is terminating, through a
     // function pointer as through a name.
     // D8.4, D6.11
-    TEST_ASSERT_TRUE(check_src("fn i32 pick(bool b, fn noreturn(string) quit) {\n"
+    TEST_ASSERT_TRUE(check_src("fn pick(bool b, fn (string) noreturn quit) i32 {\n"
                                "    if (b) {\n        return 1;\n    }\n"
                                "    quit(\"no\");\n}\n"
-                               "fn noreturn die(string msg) {\n    panic(msg);\n}\n"
-                               "fn i32 main() {\n    return pick(true, die);\n}\n"));
-    TEST_ASSERT_FALSE(check_src("fn i32 pick(bool b, fn void(string) quit) {\n"
+                               "fn die(string msg) noreturn {\n    panic(msg);\n}\n"
+                               "fn main() i32 {\n    return pick(true, die);\n}\n"));
+    TEST_ASSERT_FALSE(check_src("fn pick(bool b, fn (string) void quit) i32 {\n"
                                 "    if (b) {\n        return 1;\n    }\n"
                                 "    quit(\"no\");\n}\n"
-                                "fn void say(string msg) {\n    println(msg);\n}\n"
-                                "fn i32 main() {\n    return pick(true, say);\n}\n"));
+                                "fn say(string msg) void {\n    println(msg);\n}\n"
+                                "fn main() i32 {\n    return pick(true, say);\n}\n"));
     TEST_ASSERT_TRUE(said("missing return"));
 })
 
@@ -512,59 +512,59 @@ TEST(a_discarded_owning_aggregate_is_refused, {
     // neither may be dropped.
     // D17.7, D17.8
     TEST_ASSERT_FALSE(check_src("struct vec {\n    i32 mut@ own data;\n}\n"
-                                "fn vec make() {\n    return vec{.data = new(i32, 2)};\n}\n"
-                                "fn i32 main() {\n    make();\n    return 0;\n}\n"));
+                                "fn make() vec {\n    return vec{.data = new(i32, 2)};\n}\n"
+                                "fn main() i32 {\n    make();\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("owning temporary would leak"));
     TEST_ASSERT_FALSE(check_src("struct vec {\n    i32 mut@ own data;\n}\n"
-                                "fn i32 main() {\n    vec mut b = {};\n    move(b);\n"
+                                "fn main() i32 {\n    vec mut b = {};\n    move(b);\n"
                                 "    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("owning temporary would leak"));
     // A result that owns nothing is discarded freely.
     // D7.3
     TEST_ASSERT_TRUE(check_src("struct point {\n    i32 x;\n}\n"
-                               "fn point make() {\n    return point{1};\n}\n"
-                               "fn i32 main() {\n    make();\n    return 0;\n}\n"));
+                               "fn make() point {\n    return point{1};\n}\n"
+                               "fn main() i32 {\n    make();\n    return 0;\n}\n"));
 })
 
 TEST(a_break_in_an_inner_switch_does_not_target_the_loop, {
-    TEST_ASSERT_TRUE(check_src("fn i32 spin(i32 n) {\n    while (true) {\n        switch (n) {\n"
+    TEST_ASSERT_TRUE(check_src("fn spin(i32 n) i32 {\n    while (true) {\n        switch (n) {\n"
                                "        default:\n            break;\n        }\n    }\n}\n"
-                               "fn i32 main() {\n    return spin(1);\n}\n"));
+                               "fn main() i32 {\n    return spin(1);\n}\n"));
 })
 
 TEST(a_for_with_no_condition_terminates, {
-    TEST_ASSERT_TRUE(check_src("fn i32 spin() {\n    for (;;) {\n        println(1);\n    }\n}\n"
-                               "fn i32 main() {\n    return spin();\n}\n"));
+    TEST_ASSERT_TRUE(check_src("fn spin() i32 {\n    for (;;) {\n        println(1);\n    }\n}\n"
+                               "fn main() i32 {\n    return spin();\n}\n"));
 })
 
 TEST(an_exhaustive_enum_switch_terminates, {
     TEST_ASSERT_TRUE(check_src("enum color {\n    red,\n    green,\n}\n"
-                               "fn i32 code(color c) {\n    switch (c) {\n    case color.red:\n"
+                               "fn code(color c) i32 {\n    switch (c) {\n    case color.red:\n"
                                "        return 1;\n    case color.green:\n        return 2;\n"
                                "    }\n}\n"
-                               "fn i32 main() {\n    return code(color.red);\n}\n"));
+                               "fn main() i32 {\n    return code(color.red);\n}\n"));
     TEST_ASSERT_FALSE(check_src("enum color {\n    red,\n    green,\n}\n"
-                                "fn i32 code(color c) {\n    switch (c) {\n    case color.red:\n"
+                                "fn code(color c) i32 {\n    switch (c) {\n    case color.red:\n"
                                 "        return 1;\n    case color.green:\n        println(2);\n"
                                 "    }\n}\n"
-                                "fn i32 main() {\n    return code(color.red);\n}\n"));
+                                "fn main() i32 {\n    return code(color.red);\n}\n"));
     TEST_ASSERT_TRUE(said("missing return"));
 })
 
 TEST(a_panic_and_a_noreturn_call_terminate, {
-    TEST_ASSERT_TRUE(check_src("fn i32 checked(i32 x) {\n    if (x < 0) {\n"
+    TEST_ASSERT_TRUE(check_src("fn checked(i32 x) i32 {\n    if (x < 0) {\n"
                                "        panic(\"negative\");\n    } else {\n        return x;\n"
                                "    }\n}\n"
-                               "fn i32 main() {\n    return checked(1);\n}\n"));
-    TEST_ASSERT_TRUE(check_src("fn noreturn die() {\n    panic(\"stop\");\n}\n"
-                               "fn i32 pick(bool b) {\n    if (b) {\n        return 1;\n    }\n"
+                               "fn main() i32 {\n    return checked(1);\n}\n"));
+    TEST_ASSERT_TRUE(check_src("fn die() noreturn {\n    panic(\"stop\");\n}\n"
+                               "fn pick(bool b) i32 {\n    if (b) {\n        return 1;\n    }\n"
                                "    die();\n}\n"
-                               "fn i32 main() {\n    return pick(true);\n}\n"));
+                               "fn main() i32 {\n    return pick(true);\n}\n"));
 })
 
 TEST(a_noreturn_function_must_end_in_a_terminating_statement, {
-    TEST_ASSERT_FALSE(check_src("fn noreturn die() {\n    println(1);\n}\n"
-                                "fn i32 main() {\n    die();\n}\n"));
+    TEST_ASSERT_FALSE(check_src("fn die() noreturn {\n    println(1);\n}\n"
+                                "fn main() i32 {\n    die();\n}\n"));
     TEST_ASSERT_TRUE(said("a noreturn function must end in a terminating statement"));
 })
 
@@ -573,7 +573,7 @@ TEST(a_body_with_an_error_node_never_reports_missing_return, {
     // holds one is not judged (rule 4 of the symbol contract). The checker
     // adds nothing to the parser's diagnostic.
     // D14.2
-    TEST_ASSERT_TRUE(check_broken("fn i32 pick(bool b) {\n    i32 x = ;\n}\n"));
+    TEST_ASSERT_TRUE(check_broken("fn pick(bool b) i32 {\n    i32 x = ;\n}\n"));
     TEST_ASSERT_FALSE(said("missing return"));
     TEST_ASSERT_TRUE(said("expected an expression"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);

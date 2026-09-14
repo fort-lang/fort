@@ -45,11 +45,11 @@ static const char ARRAY_GEP[] = "getelementptr inbounds [3 x i32]";
 
 // A program that indexes an array three times with an index the checker
 // cannot fold, and adds to it, so its module holds both kinds of check.
-static const char INDEXED_SOURCE[] = "fn i64 first() {\n"
+static const char INDEXED_SOURCE[] = "fn first() i64 {\n"
                                      "    return 0;\n"
                                      "}\n"
                                      "\n"
-                                     "fn i32 main() {\n"
+                                     "fn main() i32 {\n"
                                      "    i32[3] a = {1, 3, 5};\n"
                                      "    i64 i = first();\n"
                                      "    println(a[i], \" \", a[i + 1], \" \", a[i + 2]);\n"
@@ -59,11 +59,11 @@ static const char INDEXED_SOURCE[] = "fn i64 first() {\n"
 // A program with a frame larger than a page: 64 KiB of locals, which is the case
 // the attribute is about.
 // D10.8
-static const char LARGE_FRAME_SOURCE[] = "fn i64 first() {\n"
+static const char LARGE_FRAME_SOURCE[] = "fn first() i64 {\n"
                                          "    return 0;\n"
                                          "}\n"
                                          "\n"
-                                         "fn i32 main() {\n"
+                                         "fn main() i32 {\n"
                                          "    u8[65536] mut room = {};\n"
                                          "    i64 i = first();\n"
                                          "    room[i + 65535] = 7;\n"
@@ -316,7 +316,7 @@ TEST(release_and_no_bounds_check_are_independent, {
 // it compiled.
 static void nested_source(char* buf, size_t size, int depth) {
     const size_t tail = strlen(";\n    return x;\n}\n");
-    size_t at = (size_t)snprintf(buf, size, "fn i32 main() {\n    i32 x = ");
+    size_t at = (size_t)snprintf(buf, size, "fn main() i32 {\n    i32 x = ");
     const size_t room = size - at - tail - 1;
     const size_t wanted = (size_t)depth * 2 + 1;
     const int levels = wanted <= room ? depth : (int)((room - 1) / 2);
@@ -369,7 +369,7 @@ TEST(nesting_past_the_limit_is_a_compile_error_and_runs_no_compiler, {
 TEST(a_syntax_error_is_exit_1_and_leaves_no_temporary, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    TEST_ASSERT_TRUE(write_source(box.entry, "fn i32 main() { return 0\n"));
+    TEST_ASSERT_TRUE(write_source(box.entry, "fn main() i32 { return 0\n"));
     // At least one compile error was reported, which is exit 1, and the
     // temporary directory is removed whether or not `--cc` ran (toolchain.md 2).
     // D14.1
@@ -384,7 +384,7 @@ TEST(a_syntax_error_is_exit_1_and_leaves_no_temporary, {
 TEST(a_module_without_main_is_a_compile_error_of_a_build, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    TEST_ASSERT_TRUE(write_source(box.entry, "fn i32 add(i32 a, i32 b) { return a + b; }\n"));
+    TEST_ASSERT_TRUE(write_source(box.entry, "fn add(i32 a, i32 b) i32 { return a + b; }\n"));
     // A compilation builds a program, so the entry module defines `main`; the
     // error has no position in the file and is reported at 1:1.
     // D8.6, D14.2
@@ -399,7 +399,7 @@ TEST(a_module_without_main_is_a_compile_error_of_a_build, {
 TEST(a_failed_emission_writes_no_module_at_all, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    TEST_ASSERT_TRUE(write_source(box.entry, "fn i32 main() { return 0\n"));
+    TEST_ASSERT_TRUE(write_source(box.entry, "fn main() i32 { return 0\n"));
     char module[PATH_CAP];
     join(module, sizeof module, box.dir, "out.ll");
     // A half-emitted module never reaches `--cc`: the front end stops at the
@@ -433,7 +433,7 @@ TEST(an_entry_whose_base_name_is_not_an_identifier_compiles, {
     TEST_ASSERT_TRUE(box.ok);
     char entry[PATH_CAP];
     join(entry, sizeof entry, box.dir, "007_case.ft");
-    TEST_ASSERT_TRUE(write_source(entry, "fn i32 main() { return 0; }\n"));
+    TEST_ASSERT_TRUE(write_source(entry, "fn main() i32 { return 0; }\n"));
     char module[PATH_CAP];
     join(module, sizeof module, box.dir, "out.ll");
     // The entry file is named on the command line rather than reached by an
@@ -452,7 +452,7 @@ TEST(the_first_include_root_that_holds_a_module_wins, {
     TEST_ASSERT_TRUE(box.ok);
     TEST_ASSERT_TRUE(write_source(box.entry,
                                   "import util;\n"
-                                  "fn i32 main() { return util.answer(); }\n"));
+                                  "fn main() i32 { return util.answer(); }\n"));
     char first[PATH_CAP];
     char second[PATH_CAP];
     join(first, sizeof first, box.dir, "first");
@@ -461,9 +461,9 @@ TEST(the_first_include_root_that_holds_a_module_wins, {
     TEST_ASSERT_EQ_INT32(mkdir(second, S_IRWXU), 0);
     char module[PATH_CAP];
     join(module, sizeof module, first, "util.ft");
-    TEST_ASSERT_TRUE(write_source(module, "fn i32 answer() { return 1; }\n"));
+    TEST_ASSERT_TRUE(write_source(module, "fn answer() i32 { return 1; }\n"));
     join(module, sizeof module, second, "util.ft");
-    TEST_ASSERT_TRUE(write_source(module, "fn i32 answer() { return 2; }\n"));
+    TEST_ASSERT_TRUE(write_source(module, "fn answer() i32 { return 2; }\n"));
     char out[PATH_CAP];
     join(out, sizeof out, box.dir, "out.ll");
     // `-I` roots are searched in command-line order, so the module of the first

@@ -160,10 +160,10 @@ semantics, preconditions, runtime errors and ownership, then a short example.
 Process-level services.
 
 ```fort
-fn noreturn exit(i32 code)
-fn string@ args()
-fn i32 errno()
-fn bool env(string name, string mut* out)
+fn exit(i32 code) noreturn
+fn args() string@
+fn errno() i32
+fn env(string name, string mut* out) bool
 ```
 
 - `exit`: flushes every runtime output buffer (D11.5) and terminates the process with status
@@ -186,7 +186,7 @@ fn bool env(string name, string mut* out)
 ```fort
 import std.sys;
 
-fn string std_dir() {
+fn std_dir() string {
     string mut dir = "../std";
     if (!sys.env("FORT_STD_DIR", &dir)) {
         eprintln("FORT_STD_DIR not set, using ", dir);
@@ -226,38 +226,38 @@ i32 EACCES = 13;
 i32 EINVAL = 22;
 
 // <stdlib.h>, <string.h>
-extern fn void mut* own malloc(u64 size);
-extern fn void mut* own calloc(u64 n, u64 size);
-extern fn void free(void* own p);
-extern fn u8 mut* memcpy(u8 mut* dst, u8* src, u64 n);
-extern fn u8 mut* memmove(u8 mut* dst, u8* src, u64 n);
-extern fn i32 memcmp(u8* a, u8* b, u64 n);
-extern fn u8 mut* memset(u8 mut* dst, i32 v, u64 n);
-extern fn u64 strlen(char* s);
-extern fn char* getenv(char* name);
-extern fn noreturn exit(i32 code);
-extern fn noreturn abort();
-extern fn void qsort(void mut* base, u64 n, u64 size, fn i32(void*, void*) cmp);
+extern fn malloc(u64 size) void mut* own;
+extern fn calloc(u64 n, u64 size) void mut* own;
+extern fn free(void* own p) void;
+extern fn memcpy(u8 mut* dst, u8* src, u64 n) u8 mut*;
+extern fn memmove(u8 mut* dst, u8* src, u64 n) u8 mut*;
+extern fn memcmp(u8* a, u8* b, u64 n) i32;
+extern fn memset(u8 mut* dst, i32 v, u64 n) u8 mut*;
+extern fn strlen(char* s) u64;
+extern fn getenv(char* name) char*;
+extern fn exit(i32 code) noreturn;
+extern fn abort() noreturn;
+extern fn qsort(void mut* base, u64 n, u64 size, fn (void*, void*) i32 cmp) void;
 
 // <fcntl.h>, <unistd.h>
-extern fn i32 open(char* path, i32 flags, u32 mode);
-extern fn i64 read(i32 fd, u8 mut* buf, u64 n);
-extern fn i64 write(i32 fd, u8* buf, u64 n);
-extern fn i32 close(i32 fd);
-extern fn i64 lseek(i32 fd, i64 offset, i32 whence);
-extern fn i32 isatty(i32 fd);
+extern fn open(char* path, i32 flags, u32 mode) i32;
+extern fn read(i32 fd, u8 mut* buf, u64 n) i64;
+extern fn write(i32 fd, u8* buf, u64 n) i64;
+extern fn close(i32 fd) i32;
+extern fn lseek(i32 fd, i64 offset, i32 whence) i64;
+extern fn isatty(i32 fd) i32;
 
 // <sys/socket.h>, <netinet/in.h>
-extern fn i32 socket(i32 domain, i32 kind, i32 protocol);
-extern fn i32 setsockopt(i32 fd, i32 level, i32 name, void* value, u32 len);
-extern fn i32 bind(i32 fd, void* addr, u32 len);
-extern fn i32 listen(i32 fd, i32 backlog);
-extern fn i32 accept(i32 fd, void mut* addr, u32 mut* len);
-extern fn i32 connect(i32 fd, void* addr, u32 len);
-extern fn i32 getsockname(i32 fd, void mut* addr, u32 mut* len);
+extern fn socket(i32 domain, i32 kind, i32 protocol) i32;
+extern fn setsockopt(i32 fd, i32 level, i32 name, void* value, u32 len) i32;
+extern fn bind(i32 fd, void* addr, u32 len) i32;
+extern fn listen(i32 fd, i32 backlog) i32;
+extern fn accept(i32 fd, void mut* addr, u32 mut* len) i32;
+extern fn connect(i32 fd, void* addr, u32 len) i32;
+extern fn getsockname(i32 fd, void mut* addr, u32 mut* len) i32;
 
 // <errno.h>: errno is a macro over this accessor in glibc and musl.
-extern fn i32 mut* __errno_location();
+extern fn __errno_location() i32 mut*;
 ```
 
 Semantics are those of the C functions. Each buffer parameter says what C means by it (1.4):
@@ -313,9 +313,9 @@ write the same signature, because `std.libc` is in every import closure (D9.8, D
 Byte-span primitives over `memmove`, `memset` and `memcmp`.
 
 ```fort
-fn void copy(u8 mut@ dst, u8@ src)
-fn void fill(u8 mut@ dst, u8 v)
-fn bool equal(u8@ a, u8@ b)
+fn copy(u8 mut@ dst, u8@ src) void
+fn fill(u8 mut@ dst, u8 v) void
+fn equal(u8@ a, u8@ b) bool
 ```
 
 - `copy`: copies `src.len` bytes to the start of `dst`; the ranges may overlap (`memmove`
@@ -332,7 +332,7 @@ with a byte count of `n * sizeof(T)`.
 ```fort
 import std.mem;
 
-fn void demo() {
+fn demo() void {
     u8[16] mut key = {};
     mem.copy(key[..], cast("abc", u8@));   // key[0..3] = "abc", rest zero
     mem.fill(key[3..], cast('.', u8));
@@ -351,16 +351,16 @@ i32 STDIN = 0;
 i32 STDOUT = 1;
 i32 STDERR = 2;
 
-fn i32 open_read(string path)
-fn i32 open_write(string path)
-fn bool close(i32 fd)
-fn void flush(i32 fd)
-fn i64 read(i32 fd, u8 mut@ buf)
-fn bool write_all(i32 fd, u8@ buf)
-fn bool read_all(i32 fd, strbuf.str_buf mut* out)
-fn bool read_file(string path, strbuf.str_buf mut* out)
-fn bool read_file_bytes(string path, u8 mut@ own mut* out)
-fn bool write_file(string path, u8@ data)
+fn open_read(string path) i32
+fn open_write(string path) i32
+fn close(i32 fd) bool
+fn flush(i32 fd) void
+fn read(i32 fd, u8 mut@ buf) i64
+fn write_all(i32 fd, u8@ buf) bool
+fn read_all(i32 fd, strbuf.str_buf mut* out) bool
+fn read_file(string path, strbuf.str_buf mut* out) bool
+fn read_file_bytes(string path, u8 mut@ own mut* out) bool
+fn write_file(string path, u8@ data) bool
 ```
 
 - `open_read`: opens `path` with `O_RDONLY`. Returns the descriptor, or `-1` with the reason in
@@ -409,7 +409,7 @@ import std.strbuf;
 import std.sys;
 
 // cat: copies one file to standard output.
-fn i32 main(string@ args) {
+fn main(string@ args) i32 {
     if (args.len != 2) {
         return 2;
     }
@@ -429,30 +429,30 @@ Operations on `string` (D3.7). None of them allocates unless the entry says so; 
 do return `own` values (D13.5).
 
 ```fort
-fn bool equal(string a, string b)
-fn i32 cmp(string a, string b)
-fn u64 hash(string s)
-fn bool starts_with(string s, string prefix)
-fn bool ends_with(string s, string suffix)
-fn i64 index_of(string s, char ch)
-fn i64 last_index_of(string s, char ch)
-fn i64 find(string s, string needle)
-fn string own dup(string s)
-fn string own concat(string a, string b)
-fn char mut@ own to_cstr(string s)
-fn string from_cstr(char* p)
-fn bool parse_i64(string s, i64 mut* out)
-fn bool parse_u64(string s, u64 base, u64 mut* out)
-fn i64 digit_value(char ch)
-fn bool is_digit(char ch)
-fn bool is_alpha(char ch)
-fn bool is_alnum(char ch)
-fn bool is_space(char ch)
-fn bool is_hex(char ch)
+fn equal(string a, string b) bool
+fn cmp(string a, string b) i32
+fn hash(string s) u64
+fn starts_with(string s, string prefix) bool
+fn ends_with(string s, string suffix) bool
+fn index_of(string s, char ch) i64
+fn last_index_of(string s, char ch) i64
+fn find(string s, string needle) i64
+fn dup(string s) string own
+fn concat(string a, string b) string own
+fn to_cstr(string s) char mut@ own
+fn from_cstr(char* p) string
+fn parse_i64(string s, i64 mut* out) bool
+fn parse_u64(string s, u64 base, u64 mut* out) bool
+fn digit_value(char ch) i64
+fn is_digit(char ch) bool
+fn is_alpha(char ch) bool
+fn is_alnum(char ch) bool
+fn is_space(char ch) bool
+fn is_hex(char ch) bool
 ```
 
 - `equal`: the same as `a == b` (D3.7); it exists so that equality can be a function value,
-  `fn bool(string, string) eq = str.equal;`. A `string own` operand lends (D17.4).
+  `fn (string, string) bool eq = str.equal;`. A `string own` operand lends (D17.4).
 - `cmp`: lexicographic order by unsigned byte value, the order `<` gives `char` (D3.2), with a
   proper prefix sorting first; returns `-1`, `0` or `1`.
 - `hash`: 64-bit FNV-1a over the bytes: start from `0xcbf29ce484222325`, and for each byte
@@ -501,7 +501,7 @@ fn bool is_hex(char ch)
 import std.str;
 
 // Splits "name=123"; false on malformed input, in which case *name and *value are unchanged.
-fn bool parse_binding(string line, string mut* name, i64 mut* value) {
+fn parse_binding(string line, string mut* name, i64 mut* value) bool {
     i64 eq = str.index_of(line, '=');
     if (eq < 0) {
         return false;
@@ -515,7 +515,7 @@ fn bool parse_binding(string line, string mut* name, i64 mut* value) {
 }
 
 // Keeps a copy of a name that outlives the buffer it was scanned from.
-fn string own keep(string name) {
+fn keep(string name) string own {
     string own copy = str.dup(name);
     return copy;   // implicit move of an own local (D17.5)
 }
@@ -540,22 +540,22 @@ buffer with no storage, so a struct containing a `str_buf` may be initialized wi
 bytes `data[len..]` are spare room whose contents are unspecified.
 
 ```fort
-fn str_buf create()
-fn str_buf with_cap(u64 cap)
-fn void free(str_buf mut* b)
-fn void reserve(str_buf mut* b, u64 extra)
-fn u64 cap(str_buf* b)
-fn void push(str_buf mut* b, char ch)
-fn void push_byte(str_buf mut* b, u8 v)
-fn void append(str_buf mut* b, string s)
-fn void append_bytes(str_buf mut* b, u8@ src)
-fn void append_i64(str_buf mut* b, i64 v)
-fn void append_u64(str_buf mut* b, u64 v)
-fn void clear(str_buf mut* b)
-fn void truncate(str_buf mut* b, u64 len)
-fn string view(str_buf* b)
-fn u8@ bytes(str_buf* b)
-fn string own take(str_buf mut* b)
+fn create() str_buf
+fn with_cap(u64 cap) str_buf
+fn free(str_buf mut* b) void
+fn reserve(str_buf mut* b, u64 extra) void
+fn cap(str_buf* b) u64
+fn push(str_buf mut* b, char ch) void
+fn push_byte(str_buf mut* b, u8 v) void
+fn append(str_buf mut* b, string s) void
+fn append_bytes(str_buf mut* b, u8@ src) void
+fn append_i64(str_buf mut* b, i64 v) void
+fn append_u64(str_buf mut* b, u64 v) void
+fn clear(str_buf mut* b) void
+fn truncate(str_buf mut* b, u64 len) void
+fn view(str_buf* b) string
+fn bytes(str_buf* b) u8@
+fn take(str_buf mut* b) string own
 ```
 
 Growth policy: when an operation needs `len + extra > data.len`, the new cap is the largest of
@@ -606,7 +606,7 @@ import std.io;
 import std.strbuf;
 
 // Formats "    mov <reg>, <imm>\n". Ownership: the caller dels the result.
-fn string own mov_imm(string reg, i64 imm) {
+fn mov_imm(string reg, i64 imm) string own {
     strbuf.str_buf mut b = strbuf.with_cap(32);
     defer strbuf.free(&b);
     strbuf.append(&b, "    mov ");
@@ -617,7 +617,7 @@ fn string own mov_imm(string reg, i64 imm) {
     return strbuf.take(&b);   // an own rvalue flows into the own return type (D17.5)
 }
 
-fn bool emit_mov(i32 fd) {
+fn emit_mov(i32 fd) bool {
     string own line = mov_imm("rax", 42);
     defer del(line);
     return io.write_all(fd, cast(line[..], u8@));   // a view of line is written (1.3)
@@ -652,19 +652,19 @@ holding an immutable pointer casts on the way in (D3.11). The live elements are
 error; it reads a zero or stale slot, so code that wants a bounds check indexes the live span.
 
 ```fort
-fn ptr_vec ptr_create()
-fn ptr_vec ptr_with_cap(u64 cap)
-fn void ptr_free(ptr_vec mut* v)
-fn void ptr_reserve(ptr_vec mut* v, u64 extra)
-fn void ptr_push(ptr_vec mut* v, void mut* p)
-fn void mut* ptr_pop(ptr_vec mut* v)
+fn ptr_create() ptr_vec
+fn ptr_with_cap(u64 cap) ptr_vec
+fn ptr_free(ptr_vec mut* v) void
+fn ptr_reserve(ptr_vec mut* v, u64 extra) void
+fn ptr_push(ptr_vec mut* v, void mut* p) void
+fn ptr_pop(ptr_vec mut* v) void mut*
 
-fn int_vec int_create()
-fn int_vec int_with_cap(u64 cap)
-fn void int_free(int_vec mut* v)
-fn void int_reserve(int_vec mut* v, u64 extra)
-fn void int_push(int_vec mut* v, i64 x)
-fn i64 int_pop(int_vec mut* v)
+fn int_create() int_vec
+fn int_with_cap(u64 cap) int_vec
+fn int_free(int_vec mut* v) void
+fn int_reserve(int_vec mut* v, u64 extra) void
+fn int_push(int_vec mut* v, i64 x) void
+fn int_pop(int_vec mut* v) i64
 ```
 
 - `*_create`, `*_with_cap`, `*_free`, `*_reserve`: exactly as their `strbuf` counterparts,
@@ -699,7 +699,7 @@ import std.vec;
 
 struct node { i64 value; }
 
-fn i64 demo() {
+fn demo() i64 {
     vec.ptr_vec mut stack = vec.ptr_create();
     defer vec.ptr_free(&stack);
     node mut* own n = new(node);              // new lands in an own place (D17.3, D17.8)
@@ -751,13 +751,13 @@ marks the slot `SLOT_DEAD` and decrements `live`; `used` is unchanged until the 
 Iteration is a walk over `entries` taking the slots whose `state == SLOT_FULL`, in table order.
 
 ```fort
-fn str_map create()
-fn void free(str_map mut* m)
-fn bool put(str_map mut* m, string key, i64 val)
-fn bool get(str_map* m, string key, i64 mut* out)
-fn bool has(str_map* m, string key)
-fn bool remove(str_map mut* m, string key)
-fn u64 count(str_map* m)
+fn create() str_map
+fn free(str_map mut* m) void
+fn put(str_map mut* m, string key, i64 val) bool
+fn get(str_map* m, string key, i64 mut* out) bool
+fn has(str_map* m, string key) bool
+fn remove(str_map mut* m, string key) bool
+fn count(str_map* m) u64
 ```
 
 - `create`: `str_map{}`; allocates nothing. `free`: `del(m->entries)`, which frees the table and
@@ -792,7 +792,7 @@ struct sym_tab {
     vec.ptr_vec syms;       // sym* in declaration order, owned by whoever declared them
 }
 
-fn bool declare(sym_tab mut* t, sym mut* s) {
+fn declare(sym_tab mut* t, sym mut* s) bool {
     if (strmap.has(&t->index, s->name)) {
         return false;
     }
@@ -801,7 +801,7 @@ fn bool declare(sym_tab mut* t, sym mut* s) {
     return true;
 }
 
-fn sym* lookup(sym_tab* t, string name) {
+fn lookup(sym_tab* t, string name) sym* {
     i64 mut i = 0;
     if (!strmap.get(&t->index, name, &i)) {
         return null;
@@ -809,7 +809,7 @@ fn sym* lookup(sym_tab* t, string name) {
     return cast(t->syms.items[cast(i, u64)], sym*);
 }
 
-fn void symtab_free(sym_tab mut* t) {
+fn symtab_free(sym_tab mut* t) void {
     strmap.free(&t->index);
     vec.ptr_free(&t->syms);   // the sym values are borrowed and stay alive
 }
@@ -828,23 +828,23 @@ i64 I64_MAX = 9223372036854775807;
 u32 U32_MAX = 0xFFFFFFFF;
 u64 U64_MAX = 0xFFFFFFFFFFFFFFFF;
 
-fn u64 f64_bits(f64 x)
-fn f64 f64_from_bits(u64 bits)
-fn u32 f32_bits(f32 x)
-fn f32 f32_from_bits(u32 bits)
-fn f64 f64_inf()
-fn f64 f64_nan()
-fn bool is_nan(f64 x)
-fn i32 abs_i32(i32 x)
-fn i64 abs_i64(i64 x)
-fn i32 min_i32(i32 a, i32 b)
-fn i32 max_i32(i32 a, i32 b)
-fn i64 min_i64(i64 a, i64 b)
-fn i64 max_i64(i64 a, i64 b)
-fn u64 min_u64(u64 a, u64 b)
-fn u64 max_u64(u64 a, u64 b)
-fn f64 min_f64(f64 a, f64 b)
-fn f64 max_f64(f64 a, f64 b)
+fn f64_bits(f64 x) u64
+fn f64_from_bits(u64 bits) f64
+fn f32_bits(f32 x) u32
+fn f32_from_bits(u32 bits) f32
+fn f64_inf() f64
+fn f64_nan() f64
+fn is_nan(f64 x) bool
+fn abs_i32(i32 x) i32
+fn abs_i64(i64 x) i64
+fn min_i32(i32 a, i32 b) i32
+fn max_i32(i32 a, i32 b) i32
+fn min_i64(i64 a, i64 b) i64
+fn max_i64(i64 a, i64 b) i64
+fn min_u64(u64 a, u64 b) u64
+fn max_u64(u64 a, u64 b) u64
+fn min_f64(f64 a, f64 b) f64
+fn max_f64(f64 a, f64 b) f64
 ```
 
 - The `*_MIN`/`*_MAX` constants are module-level constants (D7.10), usable in `case` labels and
@@ -863,7 +863,7 @@ fn f64 max_f64(f64 a, f64 b)
 ```fort
 import std.math;
 
-fn bool is_negative_zero(f64 x) {
+fn is_negative_zero(f64 x) bool {
     return math.f64_bits(x) == 0x8000000000000000;
 }
 ```
@@ -873,12 +873,12 @@ fn bool is_negative_zero(f64 x) {
 An array sorted in place, over `libc.qsort` (D13.2, 2.2).
 
 ```fort
-fn void sort(void mut* base, u64 n, u64 elem_size, fn i32(void*, void*) cmp)
-fn void sort_i64(i64 mut@ items, fn i32(void*, void*) cmp)
-fn void sort_u64(u64 mut@ items, fn i32(void*, void*) cmp)
-fn void sort_ptr(void* mut@ items, fn i32(void*, void*) cmp)
-fn i32 cmp_i64(void* a, void* b)
-fn i32 cmp_u64(void* a, void* b)
+fn sort(void mut* base, u64 n, u64 elem_size, fn (void*, void*) i32 cmp) void
+fn sort_i64(i64 mut@ items, fn (void*, void*) i32 cmp) void
+fn sort_u64(u64 mut@ items, fn (void*, void*) i32 cmp) void
+fn sort_ptr(void* mut@ items, fn (void*, void*) i32 cmp) void
+fn cmp_i64(void* a, void* b) i32
+fn cmp_u64(void* a, void* b) i32
 ```
 
 - `sort`: orders the `n` elements of `elem_size` bytes that start at `base`, in place, so that
@@ -912,7 +912,7 @@ fn i32 cmp_u64(void* a, void* b)
   `sort.sort_i64(xs, sort.cmp_i64)`. A descending order is a comparator of the caller's own with
   the two arguments exchanged.
 
-**The comparator.** Its type is C's, `fn i32(void*, void*)`, because `qsort` is what calls it;
+**The comparator.** Its type is C's, `fn (void*, void*) i32`, because `qsort` is what calls it;
 fort has neither generics nor overloading (D8.3, D15), so there is no per-element comparator
 type and every comparator reads its two elements through `*cast(a, T*)` (D3.11). It answers a
 negative `i32` when the element at `a` sorts before the element at `b`, `0` when the two tie, and
@@ -967,7 +967,7 @@ struct point {
     i64 y;
 }
 
-fn i32 by_x(void* a, void* b) {
+fn by_x(void* a, void* b) i32 {
     point* p = cast(a, point*);
     point* q = cast(b, point*);
     if (p->x < q->x) {
@@ -979,7 +979,7 @@ fn i32 by_x(void* a, void* b) {
     return 0;
 }
 
-fn void order(point mut@ ps, i64 mut@ xs) {
+fn order(point mut@ ps, i64 mut@ xs) void {
     sort.sort(cast(ps.ptr, void mut*), ps.len, sizeof(point), by_x);
     sort.sort_i64(xs, sort.cmp_i64);
 }
@@ -1006,10 +1006,10 @@ result reaches `free`, whose parameter is `void* own`.
 The float text of D11.7, to a descriptor or to a `str_buf`.
 
 ```fort
-fn void print_f32(i32 fd, f32 v)
-fn void print_f64(i32 fd, f64 v)
-fn void append_f32(strbuf.str_buf mut* b, f32 v)
-fn void append_f64(strbuf.str_buf mut* b, f64 v)
+fn print_f32(i32 fd, f32 v) void
+fn print_f64(i32 fd, f64 v) void
+fn append_f32(strbuf.str_buf mut* b, f32 v) void
+fn append_f64(strbuf.str_buf mut* b, f64 v) void
 ```
 
 - `print_f32`, `print_f64`: append the text of `v` to the buffer of `fd` (D11.5, D11.7). They are
@@ -1064,13 +1064,13 @@ struct sockaddr_in {
 ```
 
 ```fort
-fn u16 hton16(u16 v)
-fn u32 hton32(u32 v)
-fn bool parse_ipv4(string text, u32 mut* out)
-fn i32 listen(u16 port, i32 backlog)
-fn i32 accept(i32 fd)
-fn i32 connect(string host_ipv4, u16 port)
-fn bool local_port(i32 fd, u16 mut* out)
+fn hton16(u16 v) u16
+fn hton32(u32 v) u32
+fn parse_ipv4(string text, u32 mut* out) bool
+fn listen(u16 port, i32 backlog) i32
+fn accept(i32 fd) i32
+fn connect(string host_ipv4, u16 port) i32
+fn local_port(i32 fd, u16 mut* out) bool
 ```
 
 - `sockaddr_in`: the IPv4 socket address of `<netinet/in.h>`, which `bind(2)` and `connect(2)`
@@ -1110,7 +1110,7 @@ import std.io;
 import std.libc;
 import std.net;
 
-fn bool serve_one(u16 port) {
+fn serve_one(u16 port) bool {
     i32 server = net.listen(port, 16);
     if (server < 0) {
         return false;
@@ -1138,10 +1138,10 @@ in library source. Beyond that, `sys` and `io` import `std.rt` and call four of 
 whose signatures `toolchain.md` 5.1 fixes:
 
 ```fort
-fn string@ args();
-fn void flush(i32 fd);
-fn void flush_all();
-fn noreturn exit(i32 status);
+fn args() string@;
+fn flush(i32 fd) void;
+fn flush_all() void;
+fn exit(i32 status) noreturn;
 ```
 
 - `args`: the `string@` the runtime built from `argv` at process start (D11.6). It is the same
@@ -1171,7 +1171,7 @@ import std.io;
 import std.str;
 import std.sys;
 
-fn i32 main(string@ args) {
+fn main(string@ args) i32 {
     if (args.len != 2) {
         eprintln("usage: ", args[0], " <file>");
         return 2;

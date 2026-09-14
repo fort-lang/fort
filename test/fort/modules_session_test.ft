@@ -28,10 +28,10 @@ import std.str;
 
 // The entry file's bytes are the session's, so a load leaves them in it and a
 // second load of the same closure opens nothing.
-fn void a_load_leaves_every_source_in_the_session() {
+fn a_load_leaves_every_source_in_the_session() void {
     modules_env.env mut e = modules_env.open();
     defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import util;\nfn i32 main() { return util.add(1, 2); }\n");
+    modules_env.add(&e, "main.ft", "import util;\nfn main() i32 { return util.add(1, 2); }\n");
     modules_env.add(&e, "util.ft", modules_env.src_add());
     assert(session.source_count(&e.s) == 0);
     assert(modules_env.load(&e, "main.ft"));
@@ -46,7 +46,7 @@ fn void a_load_leaves_every_source_in_the_session() {
 // same closure through one session reads the same bytes at the same address:
 // the session remembers a file it has read.
 // D20.5
-fn void a_file_is_read_once_for_the_life_of_the_session() {
+fn a_file_is_read_once_for_the_life_of_the_session() void {
     modules_env.env mut e = modules_env.open();
     defer modules_env.close(&e);
     modules_env.add(&e, "main.ft", modules_env.src_main());
@@ -65,12 +65,12 @@ fn void a_file_is_read_once_for_the_life_of_the_session() {
 // The probe of the symbol reading reads through the session too, so a file it
 // looked at is remembered and the module reading that follows costs no second
 // read (module-system.md 3).
-fn void the_prefix_probe_reads_through_the_session() {
+fn the_prefix_probe_reads_through_the_session() void {
     modules_env.env mut e = modules_env.open();
     defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import a.b.c;\nfn i32 main() { return 0; }\n");
-    modules_env.add(&e, "a/b.ft", "fn i32 other() { return 0; }\n");
-    modules_env.add(&e, "a/b/c.ft", "fn i32 f() { return 0; }\n");
+    modules_env.add(&e, "main.ft", "import a.b.c;\nfn main() i32 { return 0; }\n");
+    modules_env.add(&e, "a/b.ft", "fn other() i32 { return 0; }\n");
+    modules_env.add(&e, "a/b/c.ft", "fn f() i32 { return 0; }\n");
     assert(modules_env.load(&e, "main.ft"));
     // main.ft, the probed a/b.ft and the module a/b/c.ft: three files read,
     // of which only two are modules of the closure.
@@ -83,27 +83,27 @@ fn void the_prefix_probe_reads_through_the_session() {
 
 // An entry file installed with set_source is what the analysis reads, and the
 // file on disk is not opened: the text the loader lexes is the buffer's.
-fn void an_entry_buffer_is_what_the_analysis_reads() {
+fn an_entry_buffer_is_what_the_analysis_reads() void {
     modules_env.env mut e = modules_env.open();
     defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "fn i32 main() {\n    return 0\n}\n");
+    modules_env.add(&e, "main.ft", "fn main() i32 {\n    return 0\n}\n");
     string own entry = modules_env.in_sandbox(&e, "main.ft");
     defer del(entry);
     // The file on disk has a syntax error; the buffer does not.
-    session.set_source(&e.s, entry, "fn i32 main() {\n    return 0;\n}\n");
+    session.set_source(&e.s, entry, "fn main() i32 {\n    return 0;\n}\n");
     assert(modules.load(&e.s, &e.set, entry));
     assert(modules_env.errors(&e) == 0);
 }
 
 // The other way round: a buffer with an error is reported although the file
 // on disk is clean, which is what says the buffer and not the file was read.
-fn void a_buffer_with_an_error_is_the_one_reported() {
+fn a_buffer_with_an_error_is_the_one_reported() void {
     modules_env.env mut e = modules_env.open();
     defer modules_env.close(&e);
     modules_env.add(&e, "main.ft", modules_env.src_main());
     string own entry = modules_env.in_sandbox(&e, "main.ft");
     defer del(entry);
-    session.set_source(&e.s, entry, "fn i32 main() {\n    return 0\n}\n");
+    session.set_source(&e.s, entry, "fn main() i32 {\n    return 0\n}\n");
     assert(!modules.load(&e.s, &e.set, entry));
     assert(modules_env.errors(&e) == 1);
     // Reported against the path the buffer was installed under.
@@ -114,11 +114,11 @@ fn void a_buffer_with_an_error_is_the_one_reported() {
 // exists: the loader looks the candidate up on disk and then reads through
 // the session (module-system.md 3).
 // D20.5
-fn void an_imported_buffer_is_read_when_the_file_exists() {
+fn an_imported_buffer_is_read_when_the_file_exists() void {
     modules_env.env mut e = modules_env.open();
     defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import util;\nfn i32 main() { return util.add(1, 2); }\n");
-    modules_env.add(&e, "util.ft", "fn i32 add(i32 a, i32 b) { return a + b\n}\n");
+    modules_env.add(&e, "main.ft", "import util;\nfn main() i32 { return util.add(1, 2); }\n");
+    modules_env.add(&e, "util.ft", "fn add(i32 a, i32 b) i32 { return a + b\n}\n");
     string own util = modules_env.in_sandbox(&e, "util.ft");
     defer del(util);
     session.set_source(&e.s, util, modules_env.src_add());
@@ -131,13 +131,13 @@ fn void an_imported_buffer_is_read_when_the_file_exists() {
 // until it is written (module-system.md 3). The limit is stated here so that
 // a server knows it, and so that a later ticket that lifts it fails this
 // test rather than changing behaviour unnoticed.
-fn void a_buffer_that_is_no_file_does_not_resolve_as_an_import() {
+fn a_buffer_that_is_no_file_does_not_resolve_as_an_import() void {
     modules_env.env mut e = modules_env.open();
     defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import ghost;\nfn i32 main() { return 0; }\n");
+    modules_env.add(&e, "main.ft", "import ghost;\nfn main() i32 { return 0; }\n");
     string own ghost = modules_env.in_sandbox(&e, "ghost.ft");
     defer del(ghost);
-    session.set_source(&e.s, ghost, "fn i32 boo() { return 0; }\n");
+    session.set_source(&e.s, ghost, "fn boo() i32 { return 0; }\n");
     assert(!modules_env.load(&e, "main.ft"));
     assert(modules_env.said(&e, "module 'ghost' not found"));
 }
@@ -147,11 +147,11 @@ fn void a_buffer_that_is_no_file_does_not_resolve_as_an_import() {
 // Two sets over one session share its sources and nothing else: each holds
 // its own modules, its own namespaces and its own diagnostic count of the
 // load it made.
-fn void two_sets_over_one_session_share_only_the_sources() {
+fn two_sets_over_one_session_share_only_the_sources() void {
     modules_env.env mut e = modules_env.open();
     defer modules_env.close(&e);
     modules_env.add(&e, "main.ft", modules_env.src_main());
-    modules_env.add(&e, "other.ft", "fn i32 one() { return 1; }\n");
+    modules_env.add(&e, "other.ft", "fn one() i32 { return 1; }\n");
     string own entry = modules_env.in_sandbox(&e, "main.ft");
     defer del(entry);
     string own other = modules_env.in_sandbox(&e, "other.ft");
@@ -173,7 +173,7 @@ fn void two_sets_over_one_session_share_only_the_sources() {
 // the session's and the modules that pointed into them are gone, which is the
 // order a driver releases them in.
 // D20.5
-fn void a_set_freed_before_its_session_leaves_the_sources() {
+fn a_set_freed_before_its_session_leaves_the_sources() void {
     modules_env.env mut e = modules_env.open();
     defer modules_env.close(&e);
     modules_env.add(&e, "main.ft", modules_env.src_main());
@@ -193,14 +193,14 @@ fn void a_set_freed_before_its_session_leaves_the_sources() {
 
 // Two sessions share nothing: the second reads the file itself and reports
 // its own diagnostics, whatever the first did with the same path.
-fn void two_sessions_share_nothing() {
+fn two_sessions_share_nothing() void {
     modules_env.env mut first = modules_env.open();
     defer modules_env.close(&first);
     modules_env.add(&first, "main.ft", modules_env.src_main());
     string own entry = modules_env.in_sandbox(&first, "main.ft");
     defer del(entry);
     // The first session analyses a buffer with an error under that path.
-    session.set_source(&first.s, entry, "fn i32 main() {\n    return 0\n}\n");
+    session.set_source(&first.s, entry, "fn main() i32 {\n    return 0\n}\n");
     assert(!modules.load(&first.s, &first.set, entry));
     assert(modules_env.errors(&first) == 1);
 
@@ -219,10 +219,10 @@ fn void two_sessions_share_nothing() {
 // D20.5
 u64 RELOADS = 100;
 
-fn void a_hundred_loads_through_one_session_answer_alike() {
+fn a_hundred_loads_through_one_session_answer_alike() void {
     modules_env.env mut e = modules_env.open();
     defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import util;\nfn i32 main() { return util.add(1, 2); }\n");
+    modules_env.add(&e, "main.ft", "import util;\nfn main() i32 { return util.add(1, 2); }\n");
     modules_env.add(&e, "util.ft", modules_env.src_add());
     string own entry = modules_env.in_sandbox(&e, "main.ft");
     defer del(entry);
@@ -240,7 +240,7 @@ fn void a_hundred_loads_through_one_session_answer_alike() {
     assert(session.error_count(&e.s) == 0);
 }
 
-fn i32 main() {
+fn main() i32 {
     a_load_leaves_every_source_in_the_session();
     a_file_is_read_once_for_the_life_of_the_session();
     the_prefix_probe_reads_through_the_session();

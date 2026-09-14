@@ -20,7 +20,7 @@ All types are resolved at compile time. There is no run-time type information, n
 | no value         | `void`            | none          | none          | none        | D3.1     |
 | pointer          | `T*`, `T* own`    | reference     | 8             | `null`      | D3.12    |
 | opaque pointer   | `void*`, `void mut*` | reference  | 8             | `null`      | D3.11    |
-| function pointer | `fn R(P1, P2)`    | reference     | 8             | `null`      | D3.10    |
+| function pointer | `fn (P1, P2) R`    | reference     | 8             | `null`      | D3.10    |
 | fixed array      | `T[N]`            | aggregate     | `N*sizeof(T)` | all zero    | D3.4     |
 | span             | `T@`, `T@ own`    | reference     | 16            | `{null, 0}` | D3.5     |
 | string           | `string`, `string own` | reference | 16           | `{null, 0}` | D3.7     |
@@ -122,7 +122,7 @@ bool d = b < true;                   // error: bool has no ordering
 base of `void*` (D3.1, D3.11).
 
 ```fort
-fn void log(string s) { }
+fn log(string s) void { }
 void v = log("x");                   // error: void is not a value type
 void[4] a = {};                      // error: void is not an element type
 u64 n = sizeof(void);                // error: sizeof(void) (D3.15)
@@ -183,7 +183,7 @@ it, and append `*`.
 | `i32@`          | `i32*`        | `node* mut@`             | `node* mut*`         |
 | `i32 mut@`      | `i32 mut*`    | `node mut*@`             | `node mut**`         |
 | `i32@ mut`      | `i32*`        | `string@`                | `string*`            |
-| `fn i32(i32)@`  | `fn i32(i32)*`| `i32[4]@`                | `i32[4]*`            |
+| `bool@`         | `bool*`       | `i32[4]@`                | `i32[4]*`            |
 | `i32@@`         | `i32@*`       | `i32@ mut@`              | `i32@ mut*`          |
 | `u8 mut@ own`   | `u8 mut*`     | `node mut* own mut@ own` | `node mut* own mut*` |
 | `u8@ own`       | `u8*`         | `node* own@`             | `node* own*`         |
@@ -225,9 +225,8 @@ position being the binding's (sections 7.3 and 8.2).
 | `u8@*`                   | pointer to a span header of `u8`                     | 8        |
 | `i32[4]*`                | pointer to a whole `i32[4]`                          | 8        |
 | `node*@*`                | pointer to a span of `node*`                         | 8        |
-| `fn i32(i32)[4]`         | array of 4 pointers to functions `fn i32(i32)`       | 32       |
-| `fn i32[4](i32)`         | pointer to a function taking `i32`, returning `i32[4]`| 8       |
-| `fn i32(i32)*`           | pointer to a slot holding a function pointer         | 8        |
+| `fn (i32) i32[4]`        | pointer to a function returning `i32[4]`             | 8        |
+| `fn (i32) i32*`          | pointer to a function returning `i32*`               | 8        |
 | `void*[2]`               | array of 2 opaque pointers                           | 16       |
 | `u8 mut@ own`            | owned span of writable bytes                         | 16       |
 | `node mut* own mut@ own` | owned span of owned pointers to mutable nodes        | 16       |
@@ -374,7 +373,7 @@ aborts (D7.7, D11.4).
 
 ### 5.1 Function types
 
-A function type is written `fn R(P1, P2)` with parameter types only (D3.10, D8.1). A function
+A function type is written `fn (P1, P2) R` with parameter types only (D3.10, D8.1). A function
 name, or a qualified name `m.f` naming a function in module `m`, used as a value has its function
 type. Identity is structural over the parameter types
 including the mutability levels behind their indirections and their `own` marks (D17.1), the
@@ -384,26 +383,26 @@ compare identity. A function-pointer type itself is never `own` (D17.1).
 
 | Types compared                          | Same? | Reason                                  |
 |-----------------------------------------|-------|-----------------------------------------|
-| `fn void(i32)` and `fn void(i32 mut)`   | yes   | the outermost position is ignored       |
-| `fn void(node*)` and `fn void(node* mut)`| yes  | level 0 of a parameter is ignored       |
-| `fn void(node*)` and `fn void(node mut*)`| no   | level 1 differs                         |
-| `fn void(node*)` and `fn void(node* own)`| no   | the parameter's ownership differs       |
-| `fn node mut*()` and `fn node mut* own()`| no   | the result's ownership differs          |
-| `fn i32()` and `fn void()`              | no    | return type differs                     |
-| `fn noreturn()` and `fn void()`         | no    | `noreturn` is part of the type          |
+| `fn (i32) void` and `fn (i32 mut) void`   | yes   | the outermost position is ignored       |
+| `fn (node*) void` and `fn (node* mut) void`| yes  | level 0 of a parameter is ignored       |
+| `fn (node*) void` and `fn (node mut*) void`| no   | level 1 differs                         |
+| `fn (node*) void` and `fn (node* own) void`| no   | the parameter's ownership differs       |
+| `fn () node mut*` and `fn () node mut* own`| no   | the result's ownership differs          |
+| `fn () i32` and `fn () void`              | no    | return type differs                     |
+| `fn () noreturn` and `fn () void`         | no    | `noreturn` is part of the type          |
 
 ```fort
-fn i32 add(i32 a, i32 b) { return a + b; }
-fn i32(i32, i32) op = add;
+fn add(i32 a, i32 b) i32 { return a + b; }
+fn (i32, i32) i32 op = add;
 i32 r = op(2, 3);                    // 5
 bool same = op == add;               // true
-fn i32(i32, i32) n = null;
-fn i32(i32, i32) p = &add;           // error: & on a function name (D3.10)
+fn (i32, i32) i32 n = null;
+fn (i32, i32) i32 p = &add;          // error: & on a function name (D3.10)
 i32 s = (*op)(1, 2);                 // error: function pointers cannot be dereferenced
-fn i64(i32, i32) q = add;            // error: fn i32(i32, i32) is not fn i64(i32, i32)
-fn void take(node mut* own n) { del(n); }
-fn void(node*) t = take;             // error: fn void(node mut* own) is not fn void(node*)
-fn i32(i32, i32) own u = add;        // error: own on a function-pointer type
+fn (i32, i32) i64 q = add;           // error: fn (i32, i32) i32 is not fn (i32, i32) i64
+fn take(node mut* own n) void { del(n); }
+fn (node*) void t = take;            // error: fn (node mut* own) void is not fn (node*) void
+fn (i32, i32) i32 own u = add;       // error: an own marks a reference (D17.2)
 ```
 
 ### 5.2 `void*`
@@ -593,7 +592,7 @@ In the table, "rebind" is `x = ...` on the binding itself; "level 1" covers writ
 | `i32[4] mut* pa`     | no                   | `(*pa)[i] = 1`: yes  |                    |
 | `void* mut vp`       | yes                  | no expression        |                    |
 | `void mut* vp`       | no                   | no expression        |                    |
-| `fn i32(i32) mut f`  | yes                  | not applicable       |                    |
+| `fn (i32) i32 f`     | no, and none is legal| not applicable       |                    |
 | `node mut* own mut@ own kids` | no          | slots: yes           | nodes: yes         |
 | `node* own@ view`    | no                   | slots: no            | nodes: no          |
 | `u8 mut@ own mut* out` | no                 | `*out = s`: yes      | bytes: yes         |
@@ -679,29 +678,29 @@ struct b3 { point mut p; }           // error: 'mut' on the field's own storage
 struct b4 { i32[4] mut a; }          // error: an array shares the storage of its field
 struct b5 { i32@ mut s; }            // error: 'mut' on the field's own storage
 
-fn node mut* head(list l) { return l.first; }   // ok: describes level 1
-fn i32 mut count(list l) { return 0; }          // error: 'mut' on a return type's own storage
-fn node* mut first(list l) { return l.first; }  // error: 'mut' on a return type's own storage
-fn node mut* own alloc() { return new(node); }  // ok: an owned result (section 8.3)
-fn i32 own bad() { return 0; }                  // error: own on a non-reference type
+fn head(list l) node mut* { return l.first; }   // ok: describes level 1
+fn count(list l) i32 mut { return 0; }          // error: 'mut' on a return type's own storage
+fn first(list l) node* mut { return l.first; }  // error: 'mut' on a return type's own storage
+fn alloc() node mut* own { return new(node); }  // ok: an owned result (section 8.3)
+fn bad() i32 own { return 0; }                  // error: own on a non-reference type
 ```
 
 ### 7.6 Parameters
 
 A parameter is a local copy of the argument (D8.2). `mut` on a parameter follows the placement
 rule; in the outermost position it makes the callee's copy assignable (D5.6). Function-type
-identity ignores that position on every parameter (D3.10), so `fn void(i32)` and
-`fn void(i32 mut)` are one type.
+identity ignores that position on every parameter (D3.10), so `fn (i32) void` and
+`fn (i32 mut) void` are one type.
 
 ```fort
-fn i32 total(i32@ xs, i32 mut acc) {
+fn total(i32@ xs, i32 mut acc) i32 {
     for (i32 x : xs) { acc += x; }
     return acc;
 }
-fn void bump(i32 n) { n += 1; }                  // error: n is immutable
-fn void step(node* mut cur) { cur = cur->next; } // ok: rebinds the local copy only
-fn void set(node mut* n) { n->value = 1; }       // ok: writes through the pointer
-fn void set2(node* n) { n->value = 1; }          // error: *n is immutable
+fn bump(i32 n) void { n += 1; }                  // error: n is immutable
+fn step(node* mut cur) void { cur = cur->next; } // ok: rebinds the local copy only
+fn set(node mut* n) void { n->value = 1; }       // ok: writes through the pointer
+fn set2(node* n) void { n->value = 1; }          // error: *n is immutable
 ```
 
 ### 7.7 Mutability of lvalues
@@ -804,8 +803,8 @@ start of a live allocation obtained from `new`, or adopted with `cast` (section 
 `del` on it is meaningful (`core-language.md` 8.2). It changes nothing at run time: an `own`
 type has the size, alignment, layout, zero value and calling convention of the unqualified type,
 and the mark is erased in generated code. It is part of type identity (section 6):
-`node* own` and `node*` are different types, and so are `fn void(node* own)` and
-`fn void(node*)`. `own` on a scalar, a struct, a fixed array or a function-pointer type is an
+`node* own` and `node*` are different types, and so are `fn (node* own) void` and
+`fn (node*) void`. `own` on a scalar, a struct, a fixed array or a function-pointer type is an
 error; a struct or array that contains an `own` reference is an owning aggregate instead
 (section 8.5). Ownership is a typing discipline, not a linear check: a use after `move`, two
 owners made with `cast`, and a leak are not diagnosed (D17.14, D15).
@@ -815,7 +814,7 @@ node mut* own n = new(node);         // an owned node
 i32 own a = 1;                       // error: own on a non-reference type
 point own p = {};                    // error: own on a struct; qualify a field instead
 i32[4] own arr = {};                 // error: own on a fixed array
-fn i32(i32) own f = inc;             // error: own on a function-pointer type
+fn (i32) i32 own f = inc;            // error: an own marks a reference (D17.2)
 node* b = n;                         // ok: lends (section 8.4)
 node* own c = b;                     // error: cannot add own implicitly; cast adopts
 ```
@@ -983,11 +982,11 @@ Assignment to an owning aggregate is not checked field by field for live values 
 ```fort
 struct vec { i32 mut@ own data; u64 len; }
 struct pair { vec a; vec b; }        // owning through nested aggregates
-fn vec vec_new(u64 cap) {
+fn vec_new(u64 cap) vec {
     vec v = vec{.data = new(i32, cap), .len = 0};
     return v;                        // implicit move of a local
 }
-fn void vec_free(vec mut* v) { del(v->data); v->len = 0; }
+fn vec_free(vec mut* v) void { del(v->data); v->len = 0; }
 vec x = vec_new(4);                  // ok: an owning rvalue lands
 vec y = x;                           // error: copying owning value 'x' needs move(x)
 vec mut z = move(x);                 // ok: x is now {{null, 0}, 0}
@@ -1371,7 +1370,7 @@ the compiler uses.
 | `i16`, `u16`               | 2                    | 2                |                          |
 | `i32`, `u32`, `f32`, enum  | 4                    | 4                | enums are `i32` (D3.9)   |
 | `i64`, `u64`, `f64`        | 8                    | 8                |                          |
-| `T*`, `void*`, `fn R(P)`   | 8                    | 8                |                          |
+| `T*`, `void*`, `fn (P) R`   | 8                    | 8                |                          |
 | `T[N]`                     | `N * sizeof(T)`      | that of `T`      | elements are contiguous  |
 | `T@`, `string`             | 16                   | 8                | `{ptr, len}` (D3.5, D3.7)|
 | struct                     | fields plus padding  | largest field    | rounded up; matches C    |
@@ -1381,7 +1380,7 @@ the compiler uses.
 u64 a = sizeof(i32[3][4]);           // 48
 u64 b = sizeof(node*[16]);           // 128
 u64 c = sizeof(string);              // 16
-u64 d = sizeof(fn i32(i32));         // 8
+u64 d = sizeof(fn (i32) i32);         // 8
 u64 e = sizeof(rec);                 // 24, from section 4.1
 u64 h = sizeof(u8 mut@ own);         // 16: own changes no size (D17.1)
 u64 f = sizeof(x);                   // error: sizeof takes a type, not an expression
@@ -1420,10 +1419,10 @@ reaches by dropping marks (D3.11, D5.4). Signature identity includes `own` and t
 mutability (D9.8): two modules declaring one C symbol with and without either conflict.
 
 ```fort
-extern fn i64 write(i32 fd, u8* buf, u64 n);       // C means bytes here, so fort says bytes
-extern fn void sort(i32@ xs);        // error: spans cannot cross an extern boundary
-extern fn void mut* own malloc(u64 n);
-extern fn void free(void* own p);
+extern fn write(i32 fd, u8* buf, u64 n) i64;       // C means bytes here, so fort says bytes
+extern fn sort(i32@ xs) void;        // error: spans cannot cross an extern boundary
+extern fn malloc(u64 n) void mut* own;
+extern fn free(void* own p) void;
 void mut* own raw = malloc(16);      // ok: the owned result lands
 free(raw);                           // error: 'raw' is an own lvalue; write move(raw)
 free(move(raw));                     // ok; del(raw) would have done the same (D10.3)

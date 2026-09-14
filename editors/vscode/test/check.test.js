@@ -158,9 +158,9 @@ test('a position is converted against its own file, not the checked one', () => 
       {
         file: 'mathx.ft',
         line: 5,
-        col: 8,
+        col: 4,
         end_line: 5,
-        end_col: 11,
+        end_col: 7,
         severity: 'error',
         message: 'unused',
         notes: [],
@@ -169,10 +169,10 @@ test('a position is converted against its own file, not the checked one', () => 
   };
   const items = check.diagnosticsByFile(document, PROJECT, linesOnDisk).get(MATHX);
   assert.deepEqual(items[0].range, {
-    start: { line: 4, character: 7 },
-    end: { line: 4, character: 10 },
+    start: { line: 4, character: 3 },
+    end: { line: 4, character: 6 },
   });
-  assert.equal(linesOnDisk(MATHX)[4].slice(7, 10), 'add');
+  assert.equal(linesOnDisk(MATHX)[4].slice(3, 6), 'add');
 });
 
 // A document from an editor session names lines a file rewritten since may not

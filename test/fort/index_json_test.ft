@@ -22,14 +22,14 @@ import std.strbuf;
 // file is built in a buffer with that path in it.
 
 // One line of a source, as index_test.ft writes it.
-fn void line(strbuf.str_buf mut* b, string text) {
+fn line(strbuf.str_buf mut* b, string text) void {
     strbuf.append(b, text);
     strbuf.push(b, '\n');
 }
 
 // The "symbols" array of the index the last walk left, as the document carries
 // it. The result is a view of `out`.
-fn string symbols_text(index_env.env mut* e, strbuf.str_buf mut* out) {
+fn symbols_text(index_env.env mut* e, strbuf.str_buf mut* out) string {
     strbuf.clear(out);
     json.writer mut j = json.writer{};
     json.json_init(&j, out);
@@ -38,21 +38,21 @@ fn string symbols_text(index_env.env mut* e, strbuf.str_buf mut* out) {
 }
 
 // `<sandbox>/<rel>`, which is the "file" of every record of that module.
-fn void append_file(index_env.env* e, strbuf.str_buf mut* b, string rel) {
+fn append_file(index_env.env* e, strbuf.str_buf mut* b, string rel) void {
     strbuf.append(b, e->c.m.dir);
     strbuf.push(b, '/');
     strbuf.append(b, rel);
 }
 
 // Whether `text` holds `needle`.
-fn bool holds(string text, string needle) {
+fn holds(string text, string needle) bool {
     return str.find(text, needle) >= 0;
 }
 
 // ---- the members of a record ---------------------------------------------------
 // D20.3
 
-fn void an_empty_index_writes_an_empty_array() {
+fn an_empty_index_writes_an_empty_array() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
@@ -63,11 +63,11 @@ fn void an_empty_index_writes_an_empty_array() {
     assert(symbols_text(&e, &out) == "[]");
 }
 
-fn void a_record_writes_every_member_in_order() {
+fn a_record_writes_every_member_in_order() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
-    assert(index_env.index_src(&e, "fn i32 main() { return 0; }\n"));
+    assert(index_env.index_src(&e, "fn main() i32 { return 0; }\n"));
     strbuf.str_buf mut want = strbuf.create();
     defer strbuf.free(&want);
     // The range, the name, the kind, the type, whether it is the declaration
@@ -75,22 +75,22 @@ fn void a_record_writes_every_member_in_order() {
     // D20.3
     strbuf.append(&want, "[{\"file\":\"");
     append_file(&e, &want, "main.ft");
-    strbuf.append(&want, "\",\"line\":1,\"col\":8,\"end_line\":1,\"end_col\":12,");
-    strbuf.append(&want, "\"name\":\"main\",\"kind\":\"fn\",\"type\":\"fn i32()\",");
+    strbuf.append(&want, "\",\"line\":1,\"col\":4,\"end_line\":1,\"end_col\":8,");
+    strbuf.append(&want, "\"name\":\"main\",\"kind\":\"fn\",\"type\":\"fn () i32\",");
     strbuf.append(&want, "\"is_decl\":true,\"decl\":{\"file\":\"");
     append_file(&e, &want, "main.ft");
-    strbuf.append(&want, "\",\"line\":1,\"col\":8,\"end_line\":1,\"end_col\":12}}]");
+    strbuf.append(&want, "\",\"line\":1,\"col\":4,\"end_line\":1,\"end_col\":8}}]");
     strbuf.str_buf mut out = strbuf.create();
     defer strbuf.free(&out);
     assert(symbols_text(&e, &out) == strbuf.view(&want));
 }
 
-fn void a_builtin_writes_a_null_declaration() {
+fn a_builtin_writes_a_null_declaration() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
     e.c.want_main = false;
-    assert(index_env.index_src(&e, "fn void say() { println(1); }\n"));
+    assert(index_env.index_src(&e, "fn say() void { println(1); }\n"));
     strbuf.str_buf mut want = strbuf.create();
     defer strbuf.free(&want);
     // No source declares a universe function, and a record with no type writes
@@ -103,7 +103,7 @@ fn void a_builtin_writes_a_null_declaration() {
     assert(holds(symbols_text(&e, &out), strbuf.view(&want)));
 }
 
-fn void a_module_writes_the_empty_range_of_its_file() {
+fn a_module_writes_the_empty_range_of_its_file() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
@@ -111,7 +111,7 @@ fn void a_module_writes_the_empty_range_of_its_file() {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     line(&b, "import util;");
-    line(&b, "fn i32 main() { return util.LIMIT; }");
+    line(&b, "fn main() i32 { return util.LIMIT; }");
     check_env.add(&e.c, "main.ft", strbuf.view(&b));
     assert(index_env.index_entry(&e, "main.ft"));
     // A module is declared by a file and has no name token, so a client that
@@ -128,12 +128,12 @@ fn void a_module_writes_the_empty_range_of_its_file() {
     assert(holds(symbols_text(&e, &out), strbuf.view(&want)));
 }
 
-fn void a_type_with_a_marker_is_written_as_a_declaration_spells_it() {
+fn a_type_with_a_marker_is_written_as_a_declaration_spells_it() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
     e.c.want_main = false;
-    assert(index_env.index_src(&e, "fn void f(i32 mut* own p) { del(p); }\n"));
+    assert(index_env.index_src(&e, "fn f(i32 mut* own p) void { del(p); }\n"));
     strbuf.str_buf mut out = strbuf.create();
     defer strbuf.free(&out);
     // The spelling is type_to_str_decl's, level-0 mutability included.
@@ -142,13 +142,13 @@ fn void a_type_with_a_marker_is_written_as_a_declaration_spells_it() {
                  "\"name\":\"p\",\"kind\":\"parameter\",\"type\":\"i32 mut* own\""));
 }
 
-fn void a_declaration_that_failed_to_check_writes_a_null_type() {
+fn a_declaration_that_failed_to_check_writes_a_null_type() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
-    line(&b, "fn i32 main() {");
+    line(&b, "fn main() i32 {");
     line(&b, "    nope n = 1;");
     line(&b, "    return 0;");
     line(&b, "}");
@@ -162,23 +162,23 @@ fn void a_declaration_that_failed_to_check_writes_a_null_type() {
     assert(!holds(symbols_text(&e, &out), "<error>"));
 }
 
-fn void an_alias_declares_a_name_here_for_a_declaration_elsewhere() {
+fn an_alias_declares_a_name_here_for_a_declaration_elsewhere() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
-    check_env.add(&e.c, "util.ft", "fn i32 twice(i32 n) { return n + n; }\n");
+    check_env.add(&e.c, "util.ft", "fn twice(i32 n) i32 { return n + n; }\n");
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     line(&b, "import util.twice as double;");
-    line(&b, "fn i32 main() { return double(2); }");
+    line(&b, "fn main() i32 { return double(2); }");
     check_env.add(&e.c, "main.ft", strbuf.view(&b));
     assert(index_env.index_entry(&e, "main.ft"));
     strbuf.str_buf mut want = strbuf.create();
     defer strbuf.free(&want);
-    strbuf.append(&want, "\"name\":\"double\",\"kind\":\"fn\",\"type\":\"fn i32(i32)\",");
+    strbuf.append(&want, "\"name\":\"double\",\"kind\":\"fn\",\"type\":\"fn (i32) i32\",");
     strbuf.append(&want, "\"is_decl\":true,\"decl\":{\"file\":\"");
     append_file(&e, &want, "util.ft");
-    strbuf.append(&want, "\",\"line\":1,\"col\":8,\"end_line\":1,\"end_col\":13}}");
+    strbuf.append(&want, "\",\"line\":1,\"col\":4,\"end_line\":1,\"end_col\":9}}");
     strbuf.str_buf mut out = strbuf.create();
     defer strbuf.free(&out);
     // The alias declares `double` in this module while the declaration it
@@ -188,11 +188,11 @@ fn void an_alias_declares_a_name_here_for_a_declaration_elsewhere() {
     assert(holds(symbols_text(&e, &out), strbuf.view(&want)));
 }
 
-fn void a_record_of_the_entry_names_the_file_the_compiler_opened() {
+fn a_record_of_the_entry_names_the_file_the_compiler_opened() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
-    assert(index_env.index_src(&e, "fn i32 main() { return 0; }\n"));
+    assert(index_env.index_src(&e, "fn main() i32 { return 0; }\n"));
     strbuf.str_buf mut want = strbuf.create();
     defer strbuf.free(&want);
     // The file is spelled as the `<file>` of a diagnostic is, so a client
@@ -209,13 +209,13 @@ fn void a_record_of_the_entry_names_the_file_the_compiler_opened() {
 // ---- the order of the array ----------------------------------------------------
 // D20.3
 
-fn void the_records_are_written_in_the_index_order() {
+fn the_records_are_written_in_the_index_order() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
-    line(&b, "fn i32 main() {");
+    line(&b, "fn main() i32 {");
     line(&b, "    i32 n = 1;");
     line(&b, "    return n;");
     line(&b, "}");
@@ -239,12 +239,12 @@ fn void the_records_are_written_in_the_index_order() {
     assert(second < third);
 }
 
-fn void one_record_per_occurrence_and_no_more() {
+fn one_record_per_occurrence_and_no_more() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
     e.c.want_main = false;
-    assert(index_env.index_src(&e, "fn i32 twice(i32 n) { return n + n; }\n"));
+    assert(index_env.index_src(&e, "fn twice(i32 n) i32 { return n + n; }\n"));
     strbuf.str_buf mut out = strbuf.create();
     defer strbuf.free(&out);
     string text = symbols_text(&e, &out);
@@ -268,7 +268,7 @@ fn void one_record_per_occurrence_and_no_more() {
     assert(index.count(&e.ix) == 4);
 }
 
-fn void the_array_carries_the_records_of_every_file_of_the_closure() {
+fn the_array_carries_the_records_of_every_file_of_the_closure() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
@@ -276,7 +276,7 @@ fn void the_array_carries_the_records_of_every_file_of_the_closure() {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     line(&b, "import util;");
-    line(&b, "fn i32 main() { return util.LIMIT; }");
+    line(&b, "fn main() i32 { return util.LIMIT; }");
     check_env.add(&e.c, "main.ft", strbuf.view(&b));
     assert(index_env.index_entry(&e, "main.ft"));
     strbuf.str_buf mut out = strbuf.create();
@@ -299,11 +299,11 @@ fn void the_array_carries_the_records_of_every_file_of_the_closure() {
 // ---- the document --------------------------------------------------------------
 // D20.2
 
-fn void the_array_nests_under_the_symbols_key_of_a_document() {
+fn the_array_nests_under_the_symbols_key_of_a_document() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
-    assert(index_env.index_src(&e, "fn i32 main() { return 0; }\n"));
+    assert(index_env.index_src(&e, "fn main() i32 { return 0; }\n"));
     strbuf.str_buf mut out = strbuf.create();
     defer strbuf.free(&out);
     json.writer mut j = json.writer{};
@@ -320,13 +320,13 @@ fn void the_array_nests_under_the_symbols_key_of_a_document() {
     assert(text[text.len - 3..] == "}]}");
 }
 
-fn void a_document_of_a_module_with_an_error_still_carries_what_resolved() {
+fn a_document_of_a_module_with_an_error_still_carries_what_resolved() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
     defer index_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
-    line(&b, "fn i32 main() {");
+    line(&b, "fn main() i32 {");
     line(&b, "    i32 n = nope;");
     line(&b, "    return n;");
     line(&b, "}");
@@ -342,7 +342,7 @@ fn void a_document_of_a_module_with_an_error_still_carries_what_resolved() {
     assert(!holds(text, "nope"));
 }
 
-fn i32 main() {
+fn main() i32 {
     an_empty_index_writes_an_empty_array();
     a_record_writes_every_member_in_order();
     a_builtin_writes_a_null_declaration();

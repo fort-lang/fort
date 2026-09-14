@@ -205,7 +205,7 @@ TEST(a_broken_line_is_missing_from_the_dump, {
 // Every kind of token dumps, and the dump has exactly one line per token:
 // the count of newlines is the count of tokens.
 TEST(the_dump_has_one_line_per_token, {
-    const char* text = dump_of("fn f(x) { s = \"a\\n\"; c = 'b'; n = 1; y = 1.5; }");
+    const char* text = dump_of("fn (x) f { s = \"a\\n\"; c = 'b'; n = 1; y = 1.5; }");
     uint64_t lines = 0;
     for (const char* p = text; *p != '\0'; p++) {
         if (*p == '\n') {

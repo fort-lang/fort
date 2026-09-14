@@ -36,8 +36,8 @@ static const char* const TYPES[] = {"i32",
                                     "i32[4]",
                                     "i32[4] mut",
                                     "u8 mut@ own mut*",
-                                    "fn i32(i32, bool)",
-                                    "fn void()"};
+                                    "fn (i32, bool) i32",
+                                    "fn () void"};
 
 static const char* const EXPRS[] = {"1",
                                     "'a'",
@@ -115,7 +115,7 @@ static const char* const MODULES[] = {"",
                                       "import util.text.trim;\n"
                                       "import util.text.{pad, split as cut};\n"
                                       "\n"
-                                      "fn void main() {\n"
+                                      "fn main() void {\n"
                                       "    io.println(s.dup(\"x\"));\n"
                                       "    util.text.pad(cut(trim(\"  y  \"), ' '), 4);\n"
                                       "}\n",
@@ -132,20 +132,20 @@ static const char* const MODULES[] = {"",
                                       "\n"
                                       "enum kind { ident, number = 7, symbol, end }\n"
                                       "\n"
-                                      "extern fn void* malloc(u64 size);\n"
+                                      "extern fn malloc(u64 size) void*;\n"
                                       "\n"
-                                      "fn void put(map mut* m, string key, i32 value) {\n"
+                                      "fn put(map mut* m, string key, i32 value) void {\n"
                                       "    u64 h = hash(key) % m->buckets.len;\n"
                                       "    entry mut* own e = new(entry);\n"
                                       "    e->next = move(m->buckets[h]);\n"
                                       "    m->buckets[h] = move(e);\n"
                                       "    m->count += 1;\n"
                                       "}\n",
-                                      "fn noreturn die(string msg) {\n"
+                                      "fn die(string msg) noreturn {\n"
                                       "    panic(msg);\n"
                                       "}\n"
                                       "\n"
-                                      "fn i32 all(i32@ xs) {\n"
+                                      "fn all(i32@ xs) i32 {\n"
                                       "    i32 mut total = 0;\n"
                                       "    defer log();\n"
                                       "    {\n"
@@ -178,7 +178,7 @@ static const char* const MODULES[] = {"",
                                       "    }\n"
                                       "    return total;\n"
                                       "}\n",
-                                      "fn i32(i32) chosen = pick;\n"
+                                      "fn (i32) i32 chosen = pick;\n"
                                       "i32[3] mut cells = {1, 2, 3};\n"
                                       "string greeting = \"hi\";\n"
                                       "char sep = ',';\n"
@@ -190,15 +190,15 @@ static const char* const MODULES[] = {"",
 // the invariants below are checked on a recovered tree too.
 // D14.2
 static const char* const RECOVERED[] = {"i32 a = ;\ni32 b = 1;\n",
-                                        "fn i32 f() {\n    x = ;\n    return 0;\n}\n",
-                                        "fn i32 f() {\n    if (c) {\n        x = ;\n    }\n"
+                                        "fn f() i32 {\n    x = ;\n    return 0;\n}\n",
+                                        "fn f() i32 {\n    if (c) {\n        x = ;\n    }\n"
                                         "    return 0;\n}\n",
-                                        "fn void f() {\n    switch (c) {\n    case 1:\n"
+                                        "fn f() void {\n    switch (c) {\n    case 1:\n"
                                         "        x = ;\n    }\n}\n",
                                         "struct s {\n    i32 ;\n    i32 y;\n}\n",
-                                        "fn void f() {\n    x = 1;\n"
-                                        "fn void g() {\n    y = 2;\n}\n",
-                                        "fn void f() {\n    if (c) {\n"};
+                                        "fn f() void {\n    x = 1;\n"
+                                        "fn g() void {\n    y = 2;\n}\n",
+                                        "fn f() void {\n    if (c) {\n"};
 
 // The violations found in the tree under test, one per line, and the kinds
 // the corpus has reached.
@@ -318,7 +318,7 @@ TEST(every_expression_of_the_corpus_holds_the_invariants, {
 
 TEST(every_statement_of_the_corpus_holds_the_invariants, {
     for (uint64_t i = 0; i < sizeof(STMTS) / sizeof(STMTS[0]); i++) {
-        TEST_ASSERT_EQ_STR(violations(pt_wrap("fn void f() {\n", STMTS[i], "\n}\n")), "");
+        TEST_ASSERT_EQ_STR(violations(pt_wrap("fn f() void {\n", STMTS[i], "\n}\n")), "");
     }
 })
 
@@ -340,7 +340,7 @@ TEST(every_recovered_module_holds_the_invariants, {
 // A statement nested in a switch in a loop in a function still lies inside
 // every one of them.
 TEST(a_deeply_nested_statement_lies_inside_every_ancestor, {
-    TEST_ASSERT_EQ_STR(violations("fn void f(i32@ xs) {\n"
+    TEST_ASSERT_EQ_STR(violations("fn f(i32@ xs) void {\n"
                                   "    for (i32 v : xs) {\n"
                                   "        switch (v) {\n"
                                   "        case 1:\n"
@@ -364,7 +364,7 @@ static void walk_corpus(void) {
         TEST_UNUSED(violations(pt_wrap("i32 x = ", EXPRS[i], ";")));
     }
     for (uint64_t i = 0; i < sizeof(STMTS) / sizeof(STMTS[0]); i++) {
-        TEST_UNUSED(violations(pt_wrap("fn void f() {\n", STMTS[i], "\n}\n")));
+        TEST_UNUSED(violations(pt_wrap("fn f() void {\n", STMTS[i], "\n}\n")));
     }
     for (uint64_t i = 0; i < sizeof(MODULES) / sizeof(MODULES[0]); i++) {
         TEST_UNUSED(violations(MODULES[i]));

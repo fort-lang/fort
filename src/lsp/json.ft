@@ -326,13 +326,13 @@ struct doc {
 
 /// The empty document; allocates nothing. A call result needs no move.
 /// D17.5
-fn doc create() {
+fn create() doc {
     return doc{};
 }
 
 /// The cap on the length of a source this document parses. json.create leaves
 /// the default, JSON_MAX_BYTES.
-fn u64 max_bytes(doc* d) {
+fn max_bytes(doc* d) u64 {
     if (d->limit == 0) {
         return JSON_MAX_BYTES;
     }
@@ -349,7 +349,7 @@ fn u64 max_bytes(doc* d) {
 /// `limit` bytes asks for at most JSON_ARENA_BOUND times that, and an
 /// allocation that fails ends the program, which no error record can answer.
 /// D10.2
-fn void set_max_bytes(doc mut* d, u64 limit) {
+fn set_max_bytes(doc mut* d, u64 limit) void {
     if (limit > JSON_BYTES_CEILING) {
         panic("json.set_max_bytes: above the ceiling");
     }
@@ -361,7 +361,7 @@ fn void set_max_bytes(doc mut* d, u64 limit) {
 /// and usable afterwards. del empties an operand, so a second call, or a call
 /// on doc{}, is a no-op.
 /// D17.9
-fn void free(doc mut* d) {
+fn free(doc mut* d) void {
     u64 mut i = 0;
     while (i < d->chunk_count) {
         // The chunk owns its slots and del is shallow, so the slots go before
@@ -382,13 +382,13 @@ fn void free(doc mut* d) {
 /// next parse reuses the storage of this one. The handles and the strings of
 /// the document that was there die here.
 /// D20.5
-fn void clear(doc mut* d) {
+fn clear(doc mut* d) void {
     strbuf.clear(&d->bytes);
     reset(d);
 }
 
 /// The state both free and clear leave: no nodes, no root, no error.
-fn void reset(doc mut* d) {
+fn reset(doc mut* d) void {
     d->count = 0;
     d->root_node = 0;
     d->failed = false;
@@ -397,7 +397,7 @@ fn void reset(doc mut* d) {
 }
 
 /// Ensures the chunk vector holds one more chunk, doubling from CHUNK_MIN_CAP.
-fn void chunks_reserve(doc mut* d) {
+fn chunks_reserve(doc mut* d) void {
     if (d->chunk_count < d->chunks.len) {
         return;
     }
@@ -419,7 +419,7 @@ fn void chunks_reserve(doc mut* d) {
 }
 
 /// Adds one chunk of NODE_CHUNK nodes at the end of the chunk vector.
-fn void add_chunk(doc mut* d) {
+fn add_chunk(doc mut* d) void {
     chunks_reserve(d);
     node_chunk mut* own chunk = new(node_chunk);
     chunk->slots = new(node, NODE_CHUNK);
@@ -429,7 +429,7 @@ fn void add_chunk(doc mut* d) {
 
 /// A zeroed node of `kind`, and its handle. Handle 0 is built first and is the
 /// absent node, which is why the reader's first value is handle 1.
-fn u32 new_node(doc mut* d, value_kind kind) {
+fn new_node(doc mut* d, value_kind kind) u32 {
     u64 chunk = d->count >> NODE_CHUNK_SHIFT;
     if (chunk >= d->chunk_count) {
         add_chunk(d);
@@ -445,13 +445,13 @@ fn u32 new_node(doc mut* d, value_kind kind) {
 /// The node at index `i` of the arena, a view of the chunk that owns
 /// it. The index must be below the nodes handed out.
 /// D17.3
-fn node mut* node_at(doc mut* d, u64 i) {
+fn node_at(doc mut* d, u64 i) node mut* {
     node_chunk mut* chunk = d->chunks[i >> NODE_CHUNK_SHIFT];
     return &chunk->slots[i & NODE_CHUNK_MASK];
 }
 
 /// The same over a document nothing is writing, which every query uses.
-fn node* node_of(doc* d, u32 v) {
+fn node_of(doc* d, u32 v) node* {
     if (v == 0 || cast(v, u64) >= d->count) {
         panic("json.node_of: not a handle of this document");
     }
@@ -462,36 +462,36 @@ fn node* node_of(doc* d, u32 v) {
 // ---- queries ---------------------------------------------------------------------
 
 /// The root value of the last parse, or 0 when no parse succeeded.
-fn u32 root(doc* d) {
+fn root(doc* d) u32 {
     return d->root_node;
 }
 
 /// Whether `v` names a value of this document. Handle 0 names none.
-fn bool has(doc* d, u32 v) {
+fn has(doc* d, u32 v) bool {
     return v != 0 && cast(v, u64) < d->count;
 }
 
 /// The kind of `v`; a handle this document did not hand out is a violated
 /// precondition and panics.
 /// D13.3
-fn value_kind kind_of(doc* d, u32 v) {
+fn kind_of(doc* d, u32 v) value_kind {
     return node_of(d, v)->kind;
 }
 
 /// The number of children of an array or an object; 0 for every other kind.
-fn u64 count_of(doc* d, u32 v) {
+fn count_of(doc* d, u32 v) u64 {
     return cast(node_of(d, v)->count, u64);
 }
 
 /// The first child of an array or an object, 0 when it is empty.
-fn u32 first_of(doc* d, u32 v) {
+fn first_of(doc* d, u32 v) u32 {
     return node_of(d, v)->first;
 }
 
 /// The sibling that follows `v` in its container, 0 when it is the last. The
 /// pair first_of and next_of walks a container in one pass; at_of walks the
 /// list again for each index, so a loop over a large array uses this pair.
-fn u32 next_of(doc* d, u32 v) {
+fn next_of(doc* d, u32 v) u32 {
     return node_of(d, v)->next;
 }
 
@@ -499,7 +499,7 @@ fn u32 next_of(doc* d, u32 v) {
 /// count is a violated precondition and panics. It costs one step per index,
 /// so it is the query of a small container.
 /// D13.3
-fn u32 at_of(doc* d, u32 v, u64 i) {
+fn at_of(doc* d, u32 v, u64 i) u32 {
     node* container = node_of(d, v);
     if (i >= cast(container->count, u64)) {
         panic("json.at_of: index out of range");
@@ -519,7 +519,7 @@ fn u32 at_of(doc* d, u32 v, u64 i) {
 /// query asks what is there, as count_of and first_of do, and only a query that
 /// names a child which must exist panics.
 /// A document may name one member twice; this answers the first of them.
-fn u32 member_of(doc* d, u32 v, string name) {
+fn member_of(doc* d, u32 v, string name) u32 {
     node* object = node_of(d, v);
     if (object->kind != value_kind.k_object) {
         return 0;
@@ -539,7 +539,7 @@ fn u32 member_of(doc* d, u32 v, string name) {
 /// not a member of an object. Ownership: a view of the document's own bytes,
 /// valid until the document is freed, cleared or parsed again.
 /// D17.3
-fn string key_of(doc* d, u32 v) {
+fn key_of(doc* d, u32 v) string {
     node* member = node_of(d, v);
     return slice(d, member->key_at, member->key_len);
 }
@@ -548,7 +548,7 @@ fn string key_of(doc* d, u32 v) {
 /// number, verbatim. Every other kind is a violated precondition and panics.
 /// Ownership: a view, as key_of.
 /// D13.3
-fn string text_of(doc* d, u32 v) {
+fn text_of(doc* d, u32 v) string {
     node* n = node_of(d, v);
     if (n->kind != value_kind.k_string && n->kind != value_kind.k_int
         && n->kind != value_kind.k_float) {
@@ -560,7 +560,7 @@ fn string text_of(doc* d, u32 v) {
 /// The value of a k_bool node; every other kind is a violated precondition and
 /// panics.
 /// D13.3
-fn bool bool_of(doc* d, u32 v) {
+fn bool_of(doc* d, u32 v) bool {
     node* n = node_of(d, v);
     if (n->kind != value_kind.k_bool) {
         panic("json.bool_of: not a boolean");
@@ -572,7 +572,7 @@ fn bool bool_of(doc* d, u32 v) {
 /// included, is a violated precondition and panics: a caller that will take a
 /// number of either kind asks for float_of first.
 /// D13.3
-fn i64 int_of(doc* d, u32 v) {
+fn int_of(doc* d, u32 v) i64 {
     node* n = node_of(d, v);
     if (n->kind != value_kind.k_int) {
         panic("json.int_of: not an integer");
@@ -592,7 +592,7 @@ fn i64 int_of(doc* d, u32 v) {
 /// smallest subnormal answers a zero, both with the sign of the text. Every
 /// kind that is not a number is a violated precondition and panics.
 /// D18.1, D13.3
-fn u64 float_of(doc* d, u32 v) {
+fn float_of(doc* d, u32 v) u64 {
     node* n = node_of(d, v);
     if (n->kind != value_kind.k_int && n->kind != value_kind.k_float) {
         panic("json.float_of: not a number");
@@ -619,13 +619,13 @@ u64 F64_SIGN = 0x8000000000000000;
 u64 F64_INFINITY = 0x7ff0000000000000;
 
 /// The bytes at `at` for `len` of the document's buffer.
-fn string slice(doc* d, u32 at, u32 len) {
+fn slice(doc* d, u32 at, u32 len) string {
     u64 from = cast(at, u64);
     return cast(strbuf.bytes(&d->bytes)[from..from + cast(len, u64)], string);
 }
 
 /// The nodes the document has handed out, handle 0 included.
-fn u64 node_count(doc* d) {
+fn node_count(doc* d) u64 {
     return d->count;
 }
 
@@ -637,19 +637,19 @@ fn u64 node_count(doc* d) {
 /// block carries a header of its own, which no fort program can see, so the
 /// heap is a little above this for each of the chunk_count * 2 + 2 blocks a
 /// document holds.
-fn u64 arena_bytes(doc* d) {
+fn arena_bytes(doc* d) u64 {
     return d->chunk_count * (NODE_CHUNK * sizeof(node) + sizeof(node_chunk))
         + d->chunks.len * sizeof(node_chunk*) + strbuf.cap(&d->bytes);
 }
 
 /// The offset of the byte the last parse failed at, 0-based; 0 when it did not
 /// fail.
-fn u64 error_offset(doc* d) {
+fn error_offset(doc* d) u64 {
     return d->error_at;
 }
 
 /// The rule the last parse broke, and the empty string when it broke none.
-fn string error_message(doc* d) {
+fn error_message(doc* d) string {
     return d->error_msg;
 }
 
@@ -675,7 +675,7 @@ struct reader {
 /// answered is not a source this doc may parse, although it is one another doc
 /// may. std.strbuf.append states the same precondition for the same reason, and
 /// neither call detects it.
-fn bool parse(doc mut* d, string source) {
+fn parse(doc mut* d, string source) bool {
     clear(d);
     // Handle 0, the absent node, so that a real handle is never 0.
     new_node(d, value_kind.k_none);
@@ -716,7 +716,7 @@ fn bool parse(doc mut* d, string source) {
 
 /// Records the first rule a parse broke and answers the absent handle, so that
 /// a parse function returns fail(...) and its caller stops at 0.
-fn u32 fail(reader mut* r, u64 at, string message) {
+fn fail(reader mut* r, u64 at, string message) u32 {
     if (!r->d->failed) {
         r->d->failed = true;
         r->d->error_at = at;
@@ -726,7 +726,7 @@ fn u32 fail(reader mut* r, u64 at, string message) {
 }
 
 /// The four bytes of JSON whitespace (RFC 8259 2).
-fn void skip_space(reader mut* r) {
+fn skip_space(reader mut* r) void {
     while (r->at < r->src.len) {
         char c = r->src[r->at];
         if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
@@ -737,7 +737,7 @@ fn void skip_space(reader mut* r) {
 }
 
 /// Whether the source holds `word` at the position the reader stands at.
-fn bool at_word(reader* r, string word) {
+fn at_word(reader* r, string word) bool {
     if (r->src.len - r->at < word.len) {
         return false;
     }
@@ -745,7 +745,7 @@ fn bool at_word(reader* r, string word) {
 }
 
 /// One value, whatever its kind, with the whitespace before it skipped.
-fn u32 parse_value(reader mut* r) {
+fn parse_value(reader mut* r) u32 {
     skip_space(r);
     if (r->at >= r->src.len) {
         return fail(r, r->at, "a value was expected");
@@ -782,7 +782,7 @@ fn u32 parse_value(reader mut* r) {
 }
 
 /// A string as a value of its own.
-fn u32 parse_string_value(reader mut* r) {
+fn parse_string_value(reader mut* r) u32 {
     u32 mut at = 0;
     u32 mut len = 0;
     if (!parse_string(r, &at, &len)) {
@@ -796,7 +796,7 @@ fn u32 parse_string_value(reader mut* r) {
 }
 
 /// An array, its elements threaded through `first` and `next`.
-fn u32 parse_array(reader mut* r) {
+fn parse_array(reader mut* r) u32 {
     if (r->depth >= JSON_MAX_DEPTH) {
         return fail(r, r->at, "the nesting is too deep");
     }
@@ -846,7 +846,7 @@ fn u32 parse_array(reader mut* r) {
 
 /// An object, its members threaded like the elements of an array and each one
 /// carrying its name.
-fn u32 parse_object(reader mut* r) {
+fn parse_object(reader mut* r) u32 {
     if (r->depth >= JSON_MAX_DEPTH) {
         return fail(r, r->at, "the nesting is too deep");
     }
@@ -913,7 +913,7 @@ fn u32 parse_object(reader mut* r) {
 /// no leading zero, at least one digit after a point and after an exponent, and
 /// no hexadecimal, no infinity and no NaN. The text is copied verbatim, and the
 /// kind says whether it is written as an integer whose value fits i64.
-fn u32 parse_number(reader mut* r) {
+fn parse_number(reader mut* r) u32 {
     u64 start = r->at;
     if (r->src[r->at] == '-') {
         r->at += 1;
@@ -964,14 +964,14 @@ fn u32 parse_number(reader mut* r) {
 }
 
 /// Every digit from where the reader stands.
-fn void skip_digits(reader mut* r) {
+fn skip_digits(reader mut* r) void {
     while (r->at < r->src.len && str.is_digit(r->src[r->at])) {
         r->at += 1;
     }
 }
 
 /// Appends `s` to the document's buffer and answers where it starts.
-fn u32 keep(doc mut* d, string s) {
+fn keep(doc mut* d, string s) u32 {
     u32 at = cast(d->bytes.len, u32);
     strbuf.append(&d->bytes, s);
     return at;
@@ -981,7 +981,7 @@ fn u32 keep(doc mut* d, string s) {
 /// *len describe the decoded bytes. False on a rule the string breaks, with the
 /// error recorded and *at and *len unchanged.
 /// D13.3
-fn bool parse_string(reader mut* r, u32 mut* at, u32 mut* len) {
+fn parse_string(reader mut* r, u32 mut* at, u32 mut* len) bool {
     u64 start = r->d->bytes.len;
     // Every byte of the value is copied, so the quote is stepped over first.
     r->at += 1;
@@ -1027,7 +1027,7 @@ fn bool parse_string(reader mut* r, u32 mut* at, u32 mut* len) {
 /// One escape, from its backslash: the eight one-byte escapes of RFC 8259 7 and
 /// \uXXXX, whose surrogate pair is decoded to one code point. The decoded bytes
 /// go into the document's buffer.
-fn bool parse_escape(reader mut* r) {
+fn parse_escape(reader mut* r) bool {
     u64 mark = r->at;
     r->at += 1;
     if (r->at >= r->src.len) {
@@ -1097,7 +1097,7 @@ fn bool parse_escape(reader mut* r) {
 /// The four hex digits of a \uXXXX escape, the reader standing on the first of
 /// them. `mark` is where the escape began, which is where the error is
 /// reported.
-fn bool parse_hex4(reader mut* r, u64 mark, u64 mut* out) {
+fn parse_hex4(reader mut* r, u64 mark, u64 mut* out) bool {
     if (r->src.len - r->at < ESCAPE_HEX_DIGITS) {
         fail(r, mark, "a \\u escape needs four hex digits");
         return false;
@@ -1120,7 +1120,7 @@ fn bool parse_hex4(reader mut* r, u64 mark, u64 mut* out) {
 
 /// The UTF-8 bytes of one code point (RFC 3629). A surrogate never reaches
 /// here: parse_escape refuses a lone one and joins a pair before it calls.
-fn void push_utf8(strbuf.str_buf mut* b, u64 cp) {
+fn push_utf8(strbuf.str_buf mut* b, u64 cp) void {
     if (cp <= UTF8_ONE_MAX) {
         strbuf.push_byte(b, cast(cp, u8));
         return;
@@ -1144,7 +1144,7 @@ fn void push_utf8(strbuf.str_buf mut* b, u64 cp) {
 
 /// The continuation byte holding the `which`-th six bits of `cp`, counting from
 /// the lowest.
-fn void push_cont(strbuf.str_buf mut* b, u64 cp, u64 which) {
+fn push_cont(strbuf.str_buf mut* b, u64 cp, u64 which) void {
     u64 bits = (cp >> (which * UTF8_CONT_BITS)) & UTF8_CONT_VALUE_MASK;
     strbuf.push_byte(b, cast(UTF8_CONT_LEAD | bits, u8));
 }
@@ -1165,7 +1165,7 @@ struct writer {
 /// emptied: a caller may write a document after other bytes. A writer with no
 /// buffer is a violated precondition and panics.
 /// D13.3
-fn void write_init(writer mut* w, strbuf.str_buf mut* out) {
+fn write_init(writer mut* w, strbuf.str_buf mut* out) void {
     if (out == null) {
         panic("json.write_init: no buffer");
     }
@@ -1181,7 +1181,7 @@ fn void write_init(writer mut* w, strbuf.str_buf mut* out) {
 /// Writes the comma that separates two members or elements of the container
 /// that is open now, and marks that container non-empty. At depth 0 the
 /// document is one value, so nothing separates it.
-fn void write_sep(writer mut* w) {
+fn write_sep(writer mut* w) void {
     if (w->depth == 0) {
         return;
     }
@@ -1194,7 +1194,7 @@ fn void write_sep(writer mut* w) {
 }
 
 /// Opens a container after its separator: the new level starts empty.
-fn void write_begin(writer mut* w, char open) {
+fn write_begin(writer mut* w, char open) void {
     if (w->depth >= JSON_MAX_DEPTH) {
         panic("json: nesting too deep");
     }
@@ -1204,7 +1204,7 @@ fn void write_begin(writer mut* w, char open) {
     w->depth += 1;
 }
 
-fn void write_end(writer mut* w, char close) {
+fn write_end(writer mut* w, char close) void {
     if (w->depth == 0) {
         panic("json: no container is open");
     }
@@ -1212,19 +1212,19 @@ fn void write_end(writer mut* w, char close) {
     strbuf.push(w->out, close);
 }
 
-fn void write_object_begin(writer mut* w) {
+fn write_object_begin(writer mut* w) void {
     write_begin(w, '{');
 }
 
-fn void write_object_end(writer mut* w) {
+fn write_object_end(writer mut* w) void {
     write_end(w, '}');
 }
 
-fn void write_array_begin(writer mut* w) {
+fn write_array_begin(writer mut* w) void {
     write_begin(w, '[');
 }
 
-fn void write_array_end(writer mut* w) {
+fn write_array_end(writer mut* w) void {
     write_end(w, ']');
 }
 
@@ -1233,7 +1233,7 @@ fn void write_array_end(writer mut* w) {
 /// continuation byte, an overlong form, a UTF-16 surrogate and a value past
 /// U+10FFFF are all refused (RFC 3629). The reader validates a string with it
 /// and the writer escapes one with it.
-fn u64 utf8_sequence_len(u8@ bytes, u64 i) {
+fn utf8_sequence_len(u8@ bytes, u64 i) u64 {
     u64 lead = cast(bytes[i], u64);
     u64 mut len = 0;
     u64 mut second_min = UTF8_CONT_MIN;
@@ -1283,7 +1283,7 @@ fn u64 utf8_sequence_len(u8@ bytes, u64 i) {
 /// no well-formed sequence is written as U+FFFD, so the document is valid UTF-8
 /// whatever the caller held. src/fort/json.ft's json_quoted is the same rule,
 /// and test/fort/lsp_json_agreement_test.ft holds the two against each other.
-fn void write_quoted(writer mut* w, string s) {
+fn write_quoted(writer mut* w, string s) void {
     u8@ bytes = cast(s, u8@);
     strbuf.push(w->out, '"');
     u64 mut i = 0;
@@ -1324,7 +1324,7 @@ fn void write_quoted(writer mut* w, string s) {
 /// writes no comma. A key outside an object is a violated precondition and
 /// panics.
 /// D13.3
-fn void write_key(writer mut* w, string name) {
+fn write_key(writer mut* w, string name) void {
     if (w->depth == 0) {
         panic("json.write_key: no object is open");
     }
@@ -1335,18 +1335,18 @@ fn void write_key(writer mut* w, string name) {
 }
 
 /// Writes a quoted string.
-fn void write_str(writer mut* w, string s) {
+fn write_str(writer mut* w, string s) void {
     write_sep(w);
     write_quoted(w, s);
 }
 
 /// Writes a number in decimal, `-` first for a negative one.
-fn void write_uint(writer mut* w, u64 v) {
+fn write_uint(writer mut* w, u64 v) void {
     write_sep(w);
     strbuf.append_u64(w->out, v);
 }
 
-fn void write_int(writer mut* w, i64 v) {
+fn write_int(writer mut* w, i64 v) void {
     write_sep(w);
     strbuf.append_i64(w->out, v);
 }
@@ -1354,13 +1354,13 @@ fn void write_int(writer mut* w, i64 v) {
 /// Writes a number from its text, which is what a number the reader read
 /// carries. The text must be a JSON number: this writes it verbatim and checks
 /// nothing, as a caller that built it from json.text_of needs no check.
-fn void write_number(writer mut* w, string written) {
+fn write_number(writer mut* w, string written) void {
     write_sep(w);
     strbuf.append(w->out, written);
 }
 
 /// Writes `true` or `false`.
-fn void write_bool(writer mut* w, bool v) {
+fn write_bool(writer mut* w, bool v) void {
     write_sep(w);
     if (v) {
         strbuf.append(w->out, "true");
@@ -1370,7 +1370,7 @@ fn void write_bool(writer mut* w, bool v) {
 }
 
 /// Writes `null`.
-fn void write_null(writer mut* w) {
+fn write_null(writer mut* w) void {
     write_sep(w);
     strbuf.append(w->out, "null");
 }
@@ -1380,7 +1380,7 @@ fn void write_null(writer mut* w) {
 /// no whitespace, a string escaped this way, and a number as it stands in the
 /// source. The reader's depth limit is the writer's, so a tree that parsed
 /// always writes.
-fn void write_value(writer mut* w, doc* d, u32 v) {
+fn write_value(writer mut* w, doc* d, u32 v) void {
     node* n = node_of(d, v);
     switch (n->kind) {
     case value_kind.k_null:
@@ -1417,7 +1417,7 @@ fn void write_value(writer mut* w, doc* d, u32 v) {
 /// Writes the whole document, root and all. A document that did not parse is a
 /// violated precondition and panics.
 /// D13.3
-fn void write_document(writer mut* w, doc* d) {
+fn write_document(writer mut* w, doc* d) void {
     if (d->root_node == 0) {
         panic("json.write_document: no document was parsed");
     }

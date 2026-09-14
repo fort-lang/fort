@@ -37,7 +37,7 @@ import std.strbuf;
 // the same function under two build modes.
 
 // One function of `src` emitted, with the structural check run over it.
-fn string emit(gen_env.env mut* e, string src, string name) {
+fn emit(gen_env.env mut* e, string src, string name) string {
     assert(gen_env.open_module(e, src));
     string got = gen_env.emit_function(e, name);
     gen_env.expect_blocks(e, got);
@@ -48,10 +48,10 @@ fn string emit(gen_env.env mut* e, string src, string name) {
 // the declarations come first so that a function under test is not the entry
 // module's `main`.
 // D8.6
-fn string wrap(strbuf.str_buf mut* b, string decls) {
+fn wrap(strbuf.str_buf mut* b, string decls) string {
     strbuf.clear(b);
     strbuf.append(b, decls);
-    strbuf.append(b, "fn i32 main() {\n    return 0;\n}\n");
+    strbuf.append(b, "fn main() i32 {\n    return 0;\n}\n");
     return strbuf.view(b);
 }
 
@@ -63,7 +63,7 @@ fn string wrap(strbuf.str_buf mut* b, string decls) {
 // terminated branches to the continuation. The labels are allocated then,
 // else, done, so an `else if` chain numbers its blocks in that order.
 // D19.5
-fn void an_if_else_chain_opens_its_blocks_in_allocation_order() {
+fn an_if_else_chain_opens_its_blocks_in_allocation_order() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
@@ -71,7 +71,7 @@ fn void an_if_else_chain_opens_its_blocks_in_allocation_order() {
     defer strbuf.free(&b);
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
-    strbuf.append(&src, "fn i64 branch(i64 n) {\n    if (n > 0) {\n        return 1;\n");
+    strbuf.append(&src, "fn branch(i64 n) i64 {\n    if (n > 0) {\n        return 1;\n");
     strbuf.append(&src, "    } else if (n < 0) {\n        return 2;\n    }\n    return 0;\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "branch");
     string[20] mut want = {
@@ -105,7 +105,7 @@ fn void an_if_else_chain_opens_its_blocks_in_allocation_order() {
 // `while (cond) { }`: a head block that re-evaluates the condition, a body
 // that branches back to it, and a continuation; `continue` targets the head
 // and `break` the continuation.
-fn void a_while_loop_is_a_head_a_body_and_a_continuation() {
+fn a_while_loop_is_a_head_a_body_and_a_continuation() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
@@ -113,7 +113,7 @@ fn void a_while_loop_is_a_head_a_body_and_a_continuation() {
     defer strbuf.free(&b);
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
-    strbuf.append(&src, "fn void spin(bool go) {\n    while (go) {\n        break;\n");
+    strbuf.append(&src, "fn spin(bool go) void {\n    while (go) {\n        break;\n");
     strbuf.append(&src, "    }\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "spin");
     string[11] mut want = {
@@ -139,7 +139,7 @@ fn void a_while_loop_is_a_head_a_body_and_a_continuation() {
 // the head tests the condition, the body branches to the step block and the
 // step branches back to the head, so `continue` runs `step`.
 // D7.5
-fn void a_for_loop_branches_through_its_step_block() {
+fn a_for_loop_branches_through_its_step_block() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
@@ -147,7 +147,7 @@ fn void a_for_loop_branches_through_its_step_block() {
     defer strbuf.free(&b);
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
-    strbuf.append(&src, "fn void walk(bool go) {\n    for (;;) {\n        if (go) {\n");
+    strbuf.append(&src, "fn walk(bool go) void {\n    for (;;) {\n        if (go) {\n");
     strbuf.append(&src, "            continue;\n        }\n        break;\n    }\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "walk");
     string[16] mut want = {
@@ -178,7 +178,7 @@ fn void a_for_loop_branches_through_its_step_block() {
 // entry edge goes to the body; `continue` branches to the test block and the
 // test branches back to the body. The labels are allocated body, test, done.
 // D7.5, D7.6, D19.5
-fn void a_do_while_tests_after_its_body() {
+fn a_do_while_tests_after_its_body() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
@@ -186,7 +186,7 @@ fn void a_do_while_tests_after_its_body() {
     defer strbuf.free(&b);
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
-    strbuf.append(&src, "fn void spin(bool go) {\n    do {\n        continue;\n");
+    strbuf.append(&src, "fn spin(bool go) void {\n    do {\n        continue;\n");
     strbuf.append(&src, "    } while (go);\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "spin");
     string[10] mut want = {
@@ -213,7 +213,7 @@ fn void a_do_while_tests_after_its_body() {
 // other exit: the body branches to the continuation and the test block keeps
 // its own back edge.
 // D7.6
-fn void a_break_in_a_do_while_skips_the_test() {
+fn a_break_in_a_do_while_skips_the_test() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
@@ -221,7 +221,7 @@ fn void a_break_in_a_do_while_skips_the_test() {
     defer strbuf.free(&b);
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
-    strbuf.append(&src, "fn void once(bool go) {\n    do {\n        break;\n");
+    strbuf.append(&src, "fn once(bool go) void {\n    do {\n        break;\n");
     strbuf.append(&src, "    } while (go);\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "once");
     string[10] mut want = {
@@ -246,7 +246,7 @@ fn void a_break_in_a_do_while_skips_the_test() {
 // collection and the loop variable is a fresh copy of each element taken at
 // the start of its iteration. The counter is bounded by the length, so the
 // compare is unsigned and its increment is a plain `add` (item 15, 16).
-fn void a_range_for_walks_an_invented_counter() {
+fn a_range_for_walks_an_invented_counter() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
@@ -254,7 +254,7 @@ fn void a_range_for_walks_an_invented_counter() {
     defer strbuf.free(&b);
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
-    strbuf.append(&src, "fn void sum(i64[3] xs) {\n    for (i64 x : xs) {\n");
+    strbuf.append(&src, "fn sum(i64[3] xs) void {\n    for (i64 x : xs) {\n");
     strbuf.append(&src, "        break;\n    }\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "sum");
     string[17] mut want = {
@@ -287,7 +287,7 @@ fn void a_range_for_walks_an_invented_counter() {
 // the `break` here leaves the switch and the `continue` still runs the loop's
 // step.
 // D7.5, D7.6
-fn void a_break_in_a_switch_in_a_loop_leaves_the_switch_alone() {
+fn a_break_in_a_switch_in_a_loop_leaves_the_switch_alone() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
@@ -295,7 +295,7 @@ fn void a_break_in_a_switch_in_a_loop_leaves_the_switch_alone() {
     defer strbuf.free(&b);
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
-    strbuf.append(&src, "fn void mixed(i64 n) {\n    for (;;) {\n        switch (n) {\n");
+    strbuf.append(&src, "fn mixed(i64 n) void {\n    for (;;) {\n        switch (n) {\n");
     strbuf.append(&src, "        case 0:\n            break;\n        default:\n");
     strbuf.append(&src, "            continue;\n        }\n    }\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "mixed");
@@ -327,7 +327,7 @@ fn void a_break_in_a_switch_in_a_loop_leaves_the_switch_alone() {
 // `emit` runs the structural check over the whole definition, which is what
 // sees an instruction written after a terminator.
 // D6.6
-fn void a_conditional_in_a_return_ends_every_block_it_opens() {
+fn a_conditional_in_a_return_ends_every_block_it_opens() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
@@ -335,7 +335,7 @@ fn void a_conditional_in_a_return_ends_every_block_it_opens() {
     defer strbuf.free(&b);
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
-    strbuf.append(&src, "fn i64 pick(bool go, i64 a, i64 b) {\n    return go ? a : b;\n}\n");
+    strbuf.append(&src, "fn pick(bool go, i64 a, i64 b) i64 {\n    return go ? a : b;\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "pick");
     string[13] mut want = {
         "  %t1 = load i8, ptr %go.0, align 1\n",
@@ -362,7 +362,7 @@ fn void a_conditional_in_a_return_ends_every_block_it_opens() {
 // check of item 10 runs over this definition as over every other here, since
 // the aggregate path duplicates a memcpy per arm.
 // D19.3
-fn void an_aggregate_conditional_writes_each_arm_into_the_destination() {
+fn an_aggregate_conditional_writes_each_arm_into_the_destination() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
@@ -371,7 +371,7 @@ fn void an_aggregate_conditional_writes_each_arm_into_the_destination() {
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
     strbuf.append(&src, "struct buf {\n    u8 mut@ own data;\n    u64 len;\n}\n");
-    strbuf.append(&src, "fn buf take(bool go, buf mut* a, buf mut* b) {\n");
+    strbuf.append(&src, "fn take(bool go, buf mut* a, buf mut* b) buf {\n");
     strbuf.append(&src, "    return go ? move(*a) : move(*b);\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "take");
     string[14] mut want = {
@@ -403,7 +403,7 @@ fn void an_aggregate_conditional_writes_each_arm_into_the_destination() {
 // block, which is the `default` clause wherever it stands and the
 // continuation when the switch has none; each case body ends in an implicit
 // `break` (item 10).
-fn void a_switch_lists_every_label_and_falls_into_no_clause() {
+fn a_switch_lists_every_label_and_falls_into_no_clause() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
@@ -411,7 +411,7 @@ fn void a_switch_lists_every_label_and_falls_into_no_clause() {
     defer strbuf.free(&b);
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
-    strbuf.append(&src, "fn i64 chosen(i64 n) {\n    switch (n) {\n    case 0, 1:\n");
+    strbuf.append(&src, "fn chosen(i64 n) i64 {\n    switch (n) {\n    case 0, 1:\n");
     strbuf.append(&src, "        return 5;\n    default:\n        break;\n    }\n");
     strbuf.append(&src, "    return 6;\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "chosen");
@@ -440,7 +440,7 @@ fn void a_switch_lists_every_label_and_falls_into_no_clause() {
 // switch stands in, which dominates the failure block, and the failure block
 // stands after every normal block of the definition.
 // D3.9, D7.7, D19.6
-fn void an_enum_switch_with_no_default_gets_a_failure_block() {
+fn an_enum_switch_with_no_default_gets_a_failure_block() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
@@ -449,7 +449,7 @@ fn void an_enum_switch_with_no_default_gets_a_failure_block() {
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
     strbuf.append(&src, "enum colour {\n    red,\n    green,\n}\n");
-    strbuf.append(&src, "fn i64 pick(colour c) {\n    switch (c) {\n    case colour.red:\n");
+    strbuf.append(&src, "fn pick(colour c) i64 {\n    switch (c) {\n    case colour.red:\n");
     strbuf.append(&src, "        return 1;\n    case colour.green:\n        return 2;\n    }\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "pick");
     string[16] mut want = {
@@ -482,7 +482,7 @@ fn void an_enum_switch_with_no_default_gets_a_failure_block() {
 // A compound assignment has the operand rules and the overflow behavior of the
 // operator it applies (item 15), and `++` uses the same intrinsic as `+`.
 // D7.2
-fn void a_compound_assignment_and_an_increment_use_the_operator_s_intrinsic() {
+fn a_compound_assignment_and_an_increment_use_the_operator_s_intrinsic() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
@@ -490,7 +490,7 @@ fn void a_compound_assignment_and_an_increment_use_the_operator_s_intrinsic() {
     defer strbuf.free(&b);
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
-    strbuf.append(&src, "fn void count() {\n    i64 mut n = 0;\n    n += 2;\n    n++;\n}\n");
+    strbuf.append(&src, "fn count() void {\n    i64 mut n = 0;\n    n += 2;\n    n++;\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "count");
     string[6] mut want = {
         "  %t0 = load i64, ptr %n.0, align 8\n",
@@ -518,7 +518,7 @@ fn void a_compound_assignment_and_an_increment_use_the_operator_s_intrinsic() {
 // previous allocation being lost: the right-hand side is fully evaluated, the
 // check runs, and only then does the store happen (item 18).
 // D11.1, D17.11
-fn void an_assignment_to_an_own_reference_checks_what_it_overwrites() {
+fn an_assignment_to_an_own_reference_checks_what_it_overwrites() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
@@ -526,7 +526,7 @@ fn void an_assignment_to_an_own_reference_checks_what_it_overwrites() {
     defer strbuf.free(&b);
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
-    strbuf.append(&src, "fn void hold() {\n    i64 mut* own mut p = new(i64);\n");
+    strbuf.append(&src, "fn hold() void {\n    i64 mut* own mut p = new(i64);\n");
     strbuf.append(&src, "    del(p);\n    p = new(i64);\n    del(p);\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "hold");
     // The new value is in a register before the check, and the store stands
@@ -554,7 +554,7 @@ fn void an_assignment_to_an_own_reference_checks_what_it_overwrites() {
 // word the check reads is field 0 of the header and not the value itself (item
 // 18, item 17).
 // D19.3
-fn void an_own_span_is_checked_through_its_header_and_copied_after() {
+fn an_own_span_is_checked_through_its_header_and_copied_after() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
@@ -562,7 +562,7 @@ fn void an_own_span_is_checked_through_its_header_and_copied_after() {
     defer strbuf.free(&b);
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
-    strbuf.append(&src, "fn void hold() {\n    i64 mut@ own mut xs = new(i64, 2);\n");
+    strbuf.append(&src, "fn hold() void {\n    i64 mut@ own mut xs = new(i64, 2);\n");
     strbuf.append(&src, "    del(xs);\n    xs = new(i64, 3);\n    del(xs);\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "hold");
     string[6] mut want = {
@@ -589,7 +589,7 @@ fn void an_own_span_is_checked_through_its_header_and_copied_after() {
 // arithmetic, and `--no-bounds-check` does not: it removes the index and span
 // branches alone (item 18).
 // D10.6, D11.1
-fn void the_overwrite_check_follows_release_and_not_no_bounds_check() {
+fn the_overwrite_check_follows_release_and_not_no_bounds_check() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.gen_options_open(&e, true, false);
     defer gen_env.close(&e);
@@ -597,7 +597,7 @@ fn void the_overwrite_check_follows_release_and_not_no_bounds_check() {
     defer strbuf.free(&b);
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
-    strbuf.append(&src, "fn void hold() {\n    i64 mut* own mut p = new(i64);\n");
+    strbuf.append(&src, "fn hold() void {\n    i64 mut* own mut p = new(i64);\n");
     strbuf.append(&src, "    del(p);\n    p = new(i64);\n    del(p);\n}\n");
     string released = emit(&e, wrap(&b, strbuf.view(&src)), "hold");
     assert(str.find(released, "std.rt.fail_overwrite") < 0);
@@ -610,7 +610,7 @@ fn void the_overwrite_check_follows_release_and_not_no_bounds_check() {
     assert(str.find(kept, "std.rt.fail_overwrite") >= 0);
 }
 
-fn i32 main() {
+fn main() i32 {
     an_if_else_chain_opens_its_blocks_in_allocation_order();
     println("branches ok");
     a_while_loop_is_a_head_a_body_and_a_continuation();

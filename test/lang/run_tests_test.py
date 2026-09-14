@@ -248,7 +248,7 @@ class ParseDirectives(TempRoot):
             //! exit: 3
             //! stderr: first
             //! stderr: second
-            fn i32 main() { return 3; }
+            fn main() i32 { return 3; }
             """,
         )
         self.assertEqual(test.problems, [])
@@ -279,7 +279,7 @@ class ParseDirectives(TempRoot):
             //! stderr: runtime error: index 5 out of range for length 3
             //! stdout:
             //| before
-            fn i32 main() { return 0; }
+            fn main() i32 { return 0; }
             """,
         )
         self.assertEqual(test.problems, [])
@@ -295,7 +295,7 @@ class ParseDirectives(TempRoot):
             //! signal: ILL
             //! stdout:
             //| before
-            fn i32 main() { return 0; }
+            fn main() i32 { return 0; }
             """,
         )
         self.assertEqual(test.problems, [])
@@ -315,7 +315,7 @@ class ParseDirectives(TempRoot):
             //! fail
             //! error-any: circular
             //! stderr: something
-            fn i32 main() {
+            fn main() i32 {
                 i32 x = 1;
                 x = 2; //! error: immutable
                 y = 3;//! error:   assign
@@ -353,7 +353,7 @@ class ParseDirectives(TempRoot):
 
     def test_first_line(self):
         self.assertEqual(
-            self.problems_of("fn i32 main() {}\n"),
+            self.problems_of("fn main() i32 {}\n"),
             ["run/control/001_x.ft:1: first line must be '//! run' or '//! fail'"],
         )
         self.assertEqual(
@@ -599,8 +599,8 @@ class Discovery(TempRoot):
         write(self.root, "run/arrays/001_a.ft", "//! run\n")
         write(self.root, "run/arrays/002_b.ft", "//! run\n")
         write(self.root, "run/modules/two/main.ft", "//! run\n")
-        write(self.root, "run/modules/two/util.ft", "fn f() {}\n")
-        write(self.root, "run/modules/two/sub/deep.ft", "fn g() {}\n")
+        write(self.root, "run/modules/two/util.ft", "fn f() void {}\n")
+        write(self.root, "run/modules/two/sub/deep.ft", "fn g() void {}\n")
         write(self.root, "fail/modules/001_c/main.ft", "//! fail\n")
         write(self.root, "programs/big.ft", "//! run\n")
         write(self.root, "README.md", "ignored\n")
@@ -638,7 +638,7 @@ class Discovery(TempRoot):
 
     def test_a_plain_ft_at_the_root_is_a_problem(self):
         """A `.ft` there that is not a test is a typo nothing would run, so it is reported."""
-        write(self.root, "helper.ft", "fn f() {}\n")
+        write(self.root, "helper.ft", "fn f() void {}\n")
         write(self.root, "containers_tets.ft", "//! run\n")
         write(self.root, "README.md", "ignored\n")
         tests, problems = run_tests.discover(self.root)
@@ -661,8 +661,8 @@ class Discovery(TempRoot):
     def test_shared_code_below_the_root_is_not_a_test(self):
         """The directory is there to hold exactly this, so it is no problem."""
         write(self.root, "containers_test.ft", "//! run\n")
-        write(self.root, "support/types_env.ft", "fn f() {}\n")
-        write(self.root, "support/capture.ft", "fn g() {}\n")
+        write(self.root, "support/types_env.ft", "fn f() void {}\n")
+        write(self.root, "support/capture.ft", "fn g() void {}\n")
         _, problems = run_tests.discover(self.root)
         self.assertEqual(problems, [])
 
@@ -676,7 +676,7 @@ class Discovery(TempRoot):
     def test_a_module_of_a_directory_test_is_not_reported(self):
         """`run`, `fail` and `programs` are walked by name and judged there."""
         write(self.root, "run/modules/two/main.ft", "//! run\n")
-        write(self.root, "run/modules/two/util_test.ft", "fn f() {}\n")
+        write(self.root, "run/modules/two/util_test.ft", "fn f() void {}\n")
         _, problems = run_tests.discover(self.root)
         self.assertEqual(problems, [])
 
@@ -1248,7 +1248,7 @@ class EndToEnd(TempRoot):
             import util;
             """,
         )
-        write(self.corpus, "run/modules/two/util.ft", "fn i32 f() { return 1; }\n")
+        write(self.corpus, "run/modules/two/util.ft", "fn f() i32 { return 1; }\n")
         write(
             self.corpus,
             "run/lexical/001_floats.ft",
@@ -1265,7 +1265,7 @@ class EndToEnd(TempRoot):
             "fail/mutability/001_annotated.ft",
             """\
             //! fail
-            fn i32 main() {
+            fn main() i32 {
                 i32 x = 1;
                 x = 2; //! error: immutable
                 return x;
@@ -1279,7 +1279,7 @@ class EndToEnd(TempRoot):
             "fail/mutability/002_unannotated.ft",
             """\
             //! fail
-            fn i32 main() {
+            fn main() i32 {
                 i32 x = 1;
                 x = 2; //! error: immutable
                 return x;
@@ -1307,7 +1307,7 @@ class EndToEnd(TempRoot):
             "fail/modules/001_multi/other.ft",
             """\
             import main;
-            fn i32 f() {
+            fn f() i32 {
                 return x; //! error: undeclared
             }
             """,
@@ -1569,7 +1569,7 @@ class EndToEnd(TempRoot):
             "fail/mutability/001_x.ft",
             """\
             //! fail
-            fn i32 main() {
+            fn main() i32 {
                 x = 2; //! error: immutable
             }
             //@ module invalid
@@ -2062,7 +2062,7 @@ class GoldenIndex(EndToEnd):
         return path, entry
 
     def record(self, entry, line=2, **rest):
-        args = dict(name="main", kind="fn", type_="fn i32()", is_decl=True)
+        args = dict(name="main", kind="fn", type_="fn () i32", is_decl=True)
         args.update(rest)
         rec = self.symbol(entry, line, 8, 12, **args)
         if rec["decl"] is None and rec["kind"] != "builtin":
@@ -2151,7 +2151,7 @@ class GoldenIndex(EndToEnd):
             "end_line": 1,
             "end_col": 1,
         }
-        write(self.corpus, "run/modules/indexed/other.ft", "fn i32 f() { return 0; }\n")
+        write(self.corpus, "run/modules/indexed/other.ft", "fn f() i32 { return 0; }\n")
         # An `as` alias is the one declaration whose "decl" is in another file
         # (D9.3, D20.3), so the harness accepts it and nothing else.
         status, lines, _ = self.run_indexed(
@@ -2229,7 +2229,7 @@ class GoldenIndexLint(unittest.TestCase):
             "end_col": 12,
             "name": "main",
             "kind": "fn",
-            "type": "fn i32()",
+            "type": "fn () i32",
             "is_decl": True,
             "decl": None,
         }

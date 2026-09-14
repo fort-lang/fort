@@ -127,7 +127,7 @@ file (D14.1). Options and the entry file may appear in any order.
   the text of a float literal print between double quotes with `"` and `\` escaped and **every**
   byte outside printable ASCII written as `\xHH` with uppercase hex digits -- `\x0A` for a
   newline and `\x09` for a tab, where the token dump above writes `\n` and `\t` -- so that a
-  tree is one line. So `fort --ast` on a file holding `fn void f() { i32 mut x = 1; }` writes
+  tree is one line. So `fort --ast` on a file holding `fn f() void { i32 mut x = 1; }` writes
 
   ```sh
   (module (fn (type (void)) f (params) (block (var x (type (prim i32) mut) (int 1)))))
@@ -325,9 +325,9 @@ Compile-time diagnostics (D14.2) are written to stderr, one per line:
   counted: which brace it was meant to be is not decidable from the tokens, so the skip leaves
   the next `}` to the body it belongs to and drops the unclosed construct instead.
 - A block, a `case` clause, a struct body and an enum body also end where a top-level declaration
-  starts: at `struct`, `enum`, `extern`, `import`, or a `fn` whose return type is followed by an
-  identifier (a `fn` at statement level is a function type, whose return type is followed by `(`,
-  D3.10). A file with a missing `}` therefore reports `expected '}', found 'fn'` once, at the
+  starts: at `struct`, `enum`, `extern`, `import`, or a `fn` followed by a name and then a `(`
+  (a `fn` at statement level is a function type, whose `(` comes at once, D3.10). A file with a
+  missing `}` therefore reports `expected '}', found 'fn'` once, at the
   declaration that follows it, instead of one diagnostic per following declaration (D14.2). The
   mirror holds for the `{` of a function body, a struct body or an enum body, which a complete
   declaration header precedes: a missing one is reported once and the body is read as though it
@@ -486,15 +486,15 @@ struct enum_member { i32 value; char* name; }
 // storage with `del`, that would cost the module the operation it needs. A name
 // is free to take when the module implements the builtin rather than using it,
 // which is why `panic` below is `panic`.
-fn void mut* own alloc(u64 elem_size, u64 count, char* file, u32 line, u32 col);
-fn void free(void* own p);
+fn alloc(u64 elem_size, u64 count, char* file, u32 line, u32 col) void mut* own;
+fn free(void* own p) void;
 
 // Strings (D3.7). `str_eq` is true when the two strings have the same length and
 // the same bytes, which is what `==` and `!=` on strings compare, so the zero
 // string equals `""`. The compiler emits no call to a C symbol of its own accord
 // (D9.8), so the byte comparison this needs is the runtime's, reached through
 // `std.libc` like every other call it makes.
-fn bool str_eq(char* a, u64 a_len, char* b, u64 b_len);
+fn str_eq(char* a, u64 a_len, char* b, u64 b_len) bool;
 
 // Failures (D11.4): flush every buffer, write one line to stderr, abort.
 // Values arrive sign-extended to 64 bits; `hi` is `len` for `e[lo..]`;
@@ -507,17 +507,17 @@ fn bool str_eq(char* a, u64 a_len, char* b, u64 b_len);
 // only; `fail_enum` is the default a switch over an enum with no `default`
 // clause is given (D7.7), where `type_name` is the enum's name, and it is
 // emitted in both build modes.
-fn noreturn fail_bounds(i64 index, u64 len, char* file, u32 line, u32 col);
-fn noreturn fail_span(i64 lo, i64 hi, u64 len, char* file, u32 line, u32 col);
-fn noreturn fail_overflow(char* file, u32 line, u32 col);
-fn noreturn fail_shift(i64 count, char* type_name, char* file, u32 line, u32 col);
-fn noreturn fail_div_zero(char* file, u32 line, u32 col);
-fn noreturn fail_div_overflow(char* file, u32 line, u32 col);
-fn noreturn fail_alloc_count(i64 n, char* file, u32 line, u32 col);
-fn noreturn fail_overwrite(char* file, u32 line, u32 col);
-fn noreturn fail_enum(i64 v, char* type_name, char* file, u32 line, u32 col);
-fn noreturn panic(char* ptr, u64 len, char* file, u32 line, u32 col);
-fn noreturn assert_fail(char* text, char* file, u32 line, u32 col);
+fn fail_bounds(i64 index, u64 len, char* file, u32 line, u32 col) noreturn;
+fn fail_span(i64 lo, i64 hi, u64 len, char* file, u32 line, u32 col) noreturn;
+fn fail_overflow(char* file, u32 line, u32 col) noreturn;
+fn fail_shift(i64 count, char* type_name, char* file, u32 line, u32 col) noreturn;
+fn fail_div_zero(char* file, u32 line, u32 col) noreturn;
+fn fail_div_overflow(char* file, u32 line, u32 col) noreturn;
+fn fail_alloc_count(i64 n, char* file, u32 line, u32 col) noreturn;
+fn fail_overwrite(char* file, u32 line, u32 col) noreturn;
+fn fail_enum(i64 v, char* type_name, char* file, u32 line, u32 col) noreturn;
+fn panic(char* ptr, u64 len, char* file, u32 line, u32 col) noreturn;
+fn assert_fail(char* text, char* file, u32 line, u32 col) noreturn;
 
 // Printing (D11.5, D11.7, D12.2): format one value per D11.7 and append it to the
 // buffer of `fd`. A float arrives in its own type and prints with the shortest
@@ -527,15 +527,15 @@ fn noreturn assert_fail(char* text, char* file, u32 line, u32 col);
 // `flush` writes out one buffer (`io.close` and `io.flush` call it); `flush_all`
 // writes out every buffer, at exit and before every failure. A buffer whose
 // descriptor is a terminal is written out at every newline too (D11.5, 5.3).
-fn void print_i64(i32 fd, i64 v);
-fn void print_u64(i32 fd, u64 v);
-fn void print_bool(i32 fd, bool v);
-fn void print_char(i32 fd, char c);
-fn void print_ptr(i32 fd, void* p);
-fn void print_str(i32 fd, char* ptr, u64 len);
-fn void print_enum(i32 fd, i32 v, enum_member* m, u64 n);
-fn void flush(i32 fd);
-fn void flush_all();
+fn print_i64(i32 fd, i64 v) void;
+fn print_u64(i32 fd, u64 v) void;
+fn print_bool(i32 fd, bool v) void;
+fn print_char(i32 fd, char c) void;
+fn print_ptr(i32 fd, void* p) void;
+fn print_str(i32 fd, char* ptr, u64 len) void;
+fn print_enum(i32 fd, i32 v, enum_member* m, u64 n) void;
+fn flush(i32 fd) void;
+fn flush_all() void;
 
 // Process (D11.6, D8.6). The compiler emits `main(argc, argv)` in the entry
 // module (section 6 item 22): it calls `args_init`, which builds the argument
@@ -544,9 +544,9 @@ fn void flush_all();
 // `flush_all`, and returns `status & 0xFF`. The span lives for the whole process
 // and `args()` hands it out for `sys.args()`. `exit` flushes every buffer and
 // ends the process with `status & 0xFF`; `sys.exit` is a call to it.
-fn void args_init(i32 argc, char* mut* argv);
-fn string@ args();
-fn noreturn exit(i32 status);
+fn args_init(i32 argc, char* mut* argv) void;
+fn args() string@;
+fn exit(i32 status) noreturn;
 ```
 
 `std.rt` and `std.rt_float` are the only modules the compiler names, and the list above together
@@ -684,7 +684,7 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
    | `bool`                   | `i1`              | `i8`            | 0 or 1 in memory (D3.3)      |
    | `char`                   | `i8`              | `i8`            | unsigned byte (D3.2)         |
    | `f32`, `f64`             | `float`, `double` | same            | D3.1                         |
-   | `T*`, `void*`, `fn R(P)` | `ptr`             | `ptr`           | opaque (D3.10, D3.11)        |
+   | `T*`, `void*`, `fn (P) R`| `ptr`             | `ptr`           | opaque (D3.10, D3.11)        |
    | `T[N]`                   | none              | `[N x T]`       | outside in (D3.6)            |
    | `T@`, `string`           | none              | `%fort.span`    | `type { ptr, i64 }`          |
    | `struct a.b.s`           | none              | `%struct.a.b.s` | fields in order, no `packed` |
@@ -1155,7 +1155,7 @@ D14.2 emits no warning about what follows it).
 ### 6.1 A program without checks
 
 ```fort
-fn i32 main() { println("hello, world!"); return 0; }
+fn main() i32 { println("hello, world!"); return 0; }
 ```
 
 in `main.ft` is `test/ir/hello.ll`:
@@ -1241,7 +1241,7 @@ quoted dotted names of item 4, the private data of item 5 and the attribute grou
 ### 6.2 A program with a check
 
 ```fort
-fn i32 main() {
+fn main() i32 {
     println("before");
     i32[3] a = {};
     i64 mut i = 5;
@@ -1527,7 +1527,7 @@ test under `test/lang/run/arrays/`:
 //! run
 //! stdout:
 //| 3 2
-fn i32 main() {
+fn main() i32 {
     i32[3] a = {1, 2, 3};
     println(a[2], " ", a[1]);
     return 0;
@@ -1538,7 +1538,7 @@ A fail test, `test/lang/fail/mutability/001_assign_immutable.ft`:
 
 ```fort
 //! fail
-fn i32 main() {
+fn main() i32 {
     i32 x = 1;
     x = 2;                       //! error: immutable
     return x;
@@ -1554,7 +1554,7 @@ path (D11.4):
 //! stderr: runtime error: index 5 out of range for length 3
 //! stdout:
 //| before
-fn i32 main() {
+fn main() i32 {
     i32 mut@ own xs = new(i32, 3);
     defer del(xs);
     println("before");
@@ -1570,7 +1570,7 @@ D17.8, D17.9):
 //! fail
 struct node { i32 v; }
 
-fn i32 main() {
+fn main() i32 {
     node mut* own a = new(node);
     node mut* own b = a;         //! error: move
     node mut* c = new(node);     //! error: would leak
@@ -1590,7 +1590,7 @@ A multi-file test, `test/lang/run/modules/<name>/main.ft` with `util.ft` beside 
 import util;
 import util.twice;
 
-fn i32 main() {
+fn main() i32 {
     println(util.inc(twice(3)));
     return 0;
 }
@@ -1598,11 +1598,11 @@ fn i32 main() {
 
 ```fort
 // util.ft
-fn i32 twice(i32 x) {
+fn twice(i32 x) i32 {
     return x * 2;
 }
 
-fn i32 inc(i32 x) {
+fn inc(i32 x) i32 {
     return x + 1;
 }
 ```
@@ -1615,7 +1615,7 @@ A release-mode test under `test/lang/run/modes/`, whose checked-mode twin uses `
 //! flags: --release
 //! stdout:
 //| -2147483648
-fn i32 main() {
+fn main() i32 {
     i32 mut x = 2147483647;
     x += 1;
     println(x);
@@ -1630,9 +1630,9 @@ An FFI test under `test/lang/run/ffi/`, with its helper in `test/lang/ffi/helper
 //! link: ffi/helpers.c
 //! stdout:
 //| 12
-extern fn i32 helper_add(i32 a, i32 b);
+extern fn helper_add(i32 a, i32 b) i32;
 
-fn i32 main() {
+fn main() i32 {
     println(helper_add(5, 7));
     return 0;
 }
@@ -1760,7 +1760,7 @@ editor needs; without it `"symbols"` is the empty array.
 
 ```json
 {"file": "main.ft", "line": 7, "col": 16, "end_line": 7, "end_col": 19,
- "name": "add", "kind": "fn", "type": "fn i32(i32, i32)", "is_decl": false,
+ "name": "add", "kind": "fn", "type": "fn (i32, i32) i32", "is_decl": false,
  "decl": {"file": "mathx.ft", "line": 12, "col": 8, "end_line": 12, "end_col": 11}}
 ```
 
@@ -1774,7 +1774,7 @@ editor needs; without it `"symbols"` is the empty array.
   `extern fn`, `struct`, `enum`, `enum member`, `field`, `constant`, `global`, `local`, `parameter`
   or `builtin` (D7.9, D7.10, D3.9, D12.2).
 - `"type"` is the declaration's type as a declaration spells it, the `mut` of level 0 included
-  (D5.2, D5.3): `i32`, `i32 mut* own`, `fn i32(i32, i32)`. It is the empty string for a name that
+  (D5.2, D5.3): `i32`, `i32 mut* own`, `fn (i32, i32) i32`. It is the empty string for a name that
   denotes no value type, which is a module, a struct name, an enum name and a builtin, and `null`
   when the declaration failed to check, which a client renders as unknown: the type it has is the
   poison of section 4 and says nothing a reader wants (D20.3).

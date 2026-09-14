@@ -213,11 +213,11 @@ static inline const binding_t* bound(const char* path, const char* name) {
 
 /// The sources the tests reuse.
 static inline const char* src_main(void) {
-    return "fn i32 main() {\n    return 0;\n}\n";
+    return "fn main() i32 {\n    return 0;\n}\n";
 }
 
 static inline const char* src_add(void) {
-    return "fn i32 add(i32 a, i32 b) {\n    return a + b;\n}\n";
+    return "fn add(i32 a, i32 b) i32 {\n    return a + b;\n}\n";
 }
 
 #endif

@@ -101,7 +101,7 @@ TEST(a_context_with_a_real_type_still_names_itself, {
     TEST_ASSERT_TRUE(said("the initializer expects i32*, not a constant"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
     TEST_ASSERT_FALSE(check_src("struct s {\n    i32 x;\n}\n"
-                                "fn i32 main() {\n    i32 n = 1;\n    s q = 1 << n;\n"
+                                "fn main() i32 {\n    i32 n = 1;\n    s q = 1 << n;\n"
                                 "    println(q.x);\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("the initializer expects s, not a constant"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);

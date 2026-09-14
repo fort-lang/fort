@@ -88,11 +88,11 @@ static inline bool check_src_with_library(const char* text) {
 }
 
 /// The same for a source that is a function body: the wrapper is
-/// `fn i32 main() {` on line 1, so a statement of `body` on its own line n is
+/// `fn main() i32 {` on line 1, so a statement of `body` on its own line n is
 /// on line n + 1 of the module.
 static inline bool check_body(const char* body) {
     char source[4096];
-    TEST_UNUSED(snprintf(source, sizeof source, "fn i32 main() {\n%s\n    return 0;\n}\n", body));
+    TEST_UNUSED(snprintf(source, sizeof source, "fn main() i32 {\n%s\n    return 0;\n}\n", body));
     return check_src(source);
 }
 
@@ -121,7 +121,7 @@ static inline bool check_node_body(const char* body) {
     TEST_UNUSED(snprintf(source,
                          sizeof source,
                          "struct node {\n    i32 value;\n}\n"
-                         "fn i32 main() {\n    node mut m = {};\n    node k = {};\n"
+                         "fn main() i32 {\n    node mut m = {};\n    node k = {};\n"
                          "    i32 mut w = 1;\n%s\n    return 0;\n}\n",
                          body));
     return check_src(source);

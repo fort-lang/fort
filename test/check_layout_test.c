@@ -29,7 +29,7 @@ static const char* two_structs(const char* first, const char* second) {
     TEST_UNUSED(snprintf(layout_source,
                          sizeof layout_source,
                          "%s\n%s\n"
-                         "fn i32 main() {\n"
+                         "fn main() i32 {\n"
                          "    return cast(sizeof(a) + sizeof(b), i32);\n"
                          "}\n",
                          first,
@@ -111,7 +111,7 @@ TEST(a_function_type_parameter_is_laid_out_in_either_order, {
     // A function pointer is a word and its signature stores nothing, so a
     // struct named in it is not contained by value.
     // D3.10
-    const char* holder = "struct a {\n    fn i32(b) apply;\n}";
+    const char* holder = "struct a {\n    fn (b) i32 apply;\n}";
     const char* node = "struct b {\n    a value;\n}";
     TEST_ASSERT_TRUE(check_src(two_structs(holder, node)));
     TEST_ASSERT_EQ_UINT64(struct_size("a"), (uint64_t)8);
@@ -120,7 +120,7 @@ TEST(a_function_type_parameter_is_laid_out_in_either_order, {
 })
 
 TEST(a_function_type_return_is_laid_out_in_either_order, {
-    const char* holder = "struct a {\n    fn b() make;\n}";
+    const char* holder = "struct a {\n    fn () b make;\n}";
     const char* node = "struct b {\n    a value;\n}";
     TEST_ASSERT_TRUE(check_src(two_structs(holder, node)));
     TEST_ASSERT_EQ_UINT64(struct_size("a"), (uint64_t)8);
@@ -135,11 +135,11 @@ TEST(a_chain_of_three_structs_is_laid_out_in_either_order, {
     const char* source = "struct a {\n    b middle;\n}\n"
                          "struct b {\n    c mut@ own edge;\n}\n"
                          "struct c {\n    a back;\n}\n"
-                         "fn i32 main() {\n    return cast(sizeof(a), i32);\n}\n";
+                         "fn main() i32 {\n    return cast(sizeof(a), i32);\n}\n";
     const char* reversed = "struct c {\n    a back;\n}\n"
                            "struct b {\n    c mut@ own edge;\n}\n"
                            "struct a {\n    b middle;\n}\n"
-                           "fn i32 main() {\n    return cast(sizeof(a), i32);\n}\n";
+                           "fn main() i32 {\n    return cast(sizeof(a), i32);\n}\n";
     TEST_ASSERT_TRUE(check_src(source));
     TEST_ASSERT_EQ_UINT64(struct_size("a"), (uint64_t)16);
     TEST_ASSERT_EQ_UINT64(struct_size("c"), (uint64_t)16);
@@ -155,7 +155,7 @@ TEST(a_struct_reached_only_through_a_pointer_still_gets_its_fields, {
     // D7.10
     TEST_ASSERT_TRUE(check_src("struct a {\n    b* link;\n}\n"
                                "struct b {\n    i32 tag;\n    i64 value;\n}\n"
-                               "fn i32 main() {\n"
+                               "fn main() i32 {\n"
                                "    b one = {1, 2};\n    a holder = {&one};\n"
                                "    return cast(holder.link->value, i32);\n}\n"));
     const ast_node_t* f = node_in_main(AST_FIELD_DECL, "value");
@@ -178,7 +178,7 @@ TEST(an_error_inside_a_struct_reached_only_through_a_pointer_is_still_reported, 
     // D7.10, D14.2
     TEST_ASSERT_FALSE(check_src("struct a {\n    b* link;\n}\n"
                                 "struct b {\n    nosuch x;\n}\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
+                                "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("unknown type 'nosuch'"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
     TEST_ASSERT_TRUE(sym_main("b")->error);
@@ -191,7 +191,7 @@ TEST(a_self_infinite_struct_reached_only_through_a_pointer_is_still_reported, {
     // D3.8, D7.10
     TEST_ASSERT_FALSE(check_src("struct a {\n    b* link;\n}\n"
                                 "struct b {\n    b inner;\n}\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
+                                "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("struct b has infinite size"));
     // At b's `struct` keyword, which is line 4 column 1.
     // D14.2
@@ -221,7 +221,7 @@ TEST(an_owning_aggregate_is_recognised_in_either_order, {
 
 TEST(a_struct_containing_itself_is_infinite, {
     TEST_ASSERT_FALSE(check_src("struct a {\n    i32 v;\n    a self;\n}\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
+                                "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("struct a has infinite size"));
     // At the `struct` keyword, line 1 column 1.
     // D14.2
@@ -248,7 +248,7 @@ TEST(a_cycle_of_three_structs_is_infinite, {
     TEST_ASSERT_FALSE(check_src("struct a {\n    b one;\n}\n"
                                 "struct b {\n    c two;\n}\n"
                                 "struct c {\n    a three;\n}\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
+                                "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("has infinite size"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
 })
@@ -273,7 +273,7 @@ TEST(a_forward_array_of_a_struct_is_still_laid_out, {
     // D3.4, D7.10
     TEST_ASSERT_TRUE(check_src("struct a {\n    b[3] row;\n}\n"
                                "struct b {\n    i32 x;\n    i32 y;\n}\n"
-                               "fn i32 main() {\n    return cast(sizeof(a), i32);\n}\n"));
+                               "fn main() i32 {\n    return cast(sizeof(a), i32);\n}\n"));
     TEST_ASSERT_EQ_UINT64(struct_size("a"), (uint64_t)24);
 })
 
@@ -283,7 +283,7 @@ TEST(a_forward_enum_field_is_still_resolved, {
     // D3.9
     TEST_ASSERT_TRUE(check_src("struct a {\n    color tint;\n}\n"
                                "enum color {\n    red,\n    green = 5,\n}\n"
-                               "fn i32 main() {\n    a v = {color.green};\n"
+                               "fn main() i32 {\n    a v = {color.green};\n"
                                "    return cast(v.tint, i32) - 5;\n}\n"));
     TEST_ASSERT_EQ_UINT64(struct_size("a"), (uint64_t)4);
 })

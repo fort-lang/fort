@@ -26,7 +26,7 @@ import std.strbuf;
 
 // Three sessions hold three versions of one document, at one time, and each
 // reads back its own.
-fn void three_sessions_hold_three_versions() {
+fn three_sessions_hold_three_versions() void {
     session.session mut a = session.create();
     defer session.free(&a);
     session.session mut b = session.create();
@@ -56,7 +56,7 @@ fn void three_sessions_hold_three_versions() {
 
 // Diagnostics reported to one session are not counted by another, however
 // they are interleaved.
-fn void interleaved_diagnostics_stay_apart() {
+fn interleaved_diagnostics_stay_apart() void {
     session.session mut a = session.create();
     defer session.free(&a);
     session.session mut b = session.create();
@@ -78,7 +78,7 @@ fn void interleaved_diagnostics_stay_apart() {
 // The budget is per sink, so one session spending its file's twenty leaves
 // another session's file free to report.
 // D14.2
-fn void one_spent_budget_does_not_spend_another() {
+fn one_spent_budget_does_not_spend_another() void {
     session.session mut a = session.create();
     defer session.free(&a);
     session.session mut b = session.create();
@@ -101,7 +101,7 @@ fn void one_spent_budget_does_not_spend_another() {
 // A session created inside another session's analysis, and freed inside it,
 // disturbs nothing of the outer one: no allocation of the inner session is
 // reachable from the outer, and none of the outer's views moves.
-fn void an_inner_session_disturbs_nothing() {
+fn an_inner_session_disturbs_nothing() void {
     session.session mut outer = session.create();
     defer session.free(&outer);
     session.set_source(&outer, "outer.ft", "the outer document");
@@ -135,11 +135,11 @@ fn void an_inner_session_disturbs_nothing() {
 // reading the same overlay text and reporting the same diagnostics, each
 // freeing everything it allocated. What the heap holds afterwards is what it
 // held before, which is the property the modules are written for.
-fn void a_document_analysed_a_thousand_times() {
+fn a_document_analysed_a_thousand_times() void {
     u64 mut round = 0;
     while (round < 1000) {
         session.session mut s = session.create();
-        session.set_source(&s, "doc.ft", "fn i32 main() { return 0; }");
+        session.set_source(&s, "doc.ft", "fn main() i32 { return 0; }");
         string mut text = "";
         assert(session.read_source(&s, "doc.ft", &text));
         assert(text.len == 27);
@@ -160,7 +160,7 @@ fn void a_document_analysed_a_thousand_times() {
 // One session re-used for a thousand documents: it is the storage that must
 // not grow without bound, so a server that keeps a session frees it between
 // analyses rather than trusting the counters to fall.
-fn void one_session_reused_for_a_thousand_documents() {
+fn one_session_reused_for_a_thousand_documents() void {
     session.session mut s = session.create();
     defer session.free(&s);
     strbuf.str_buf mut path = strbuf.create();
@@ -171,7 +171,7 @@ fn void one_session_reused_for_a_thousand_documents() {
         strbuf.append(&path, "doc_");
         strbuf.append_u64(&path, i);
         strbuf.append(&path, ".ft");
-        session.set_source(&s, strbuf.view(&path), "fn void f() {}");
+        session.set_source(&s, strbuf.view(&path), "fn f() void {}");
         i += 1;
     }
     assert(session.source_count(&s) == 1000);
@@ -185,7 +185,7 @@ fn void one_session_reused_for_a_thousand_documents() {
         assert(session.has_source(&s, strbuf.view(&path)));
         string mut text = "";
         assert(session.read_source(&s, strbuf.view(&path), &text));
-        assert(text == "fn void f() {}");
+        assert(text == "fn f() void {}");
         i += 1;
     }
     session.free(&s);
@@ -194,21 +194,21 @@ fn void one_session_reused_for_a_thousand_documents() {
 
 // The same file on disk read by a thousand sessions: each opens it once and
 // each frees its copy, so the reader has no state of its own either.
-fn void a_file_read_by_a_thousand_sessions() {
-    assert(io.write_file("shared.ft", cast("fn void shared() {}", u8@)));
+fn a_file_read_by_a_thousand_sessions() void {
+    assert(io.write_file("shared.ft", cast("fn shared() void {}", u8@)));
     u64 mut round = 0;
     while (round < 1000) {
         session.session mut s = session.create();
         string mut text = "";
         assert(session.read_source(&s, "shared.ft", &text));
-        assert(text == "fn void shared() {}");
+        assert(text == "fn shared() void {}");
         assert(session.source_count(&s) == 1);
         session.free(&s);
         round += 1;
     }
 }
 
-fn i32 main() {
+fn main() i32 {
     three_sessions_hold_three_versions();
     interleaved_diagnostics_stay_apart();
     one_spent_budget_does_not_spend_another();

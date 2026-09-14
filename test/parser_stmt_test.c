@@ -159,7 +159,7 @@ TEST(a_marked_type_at_statement_level_is_a_declaration, {
 TEST(a_qualified_type_and_a_function_type_at_statement_level, {
     TEST_ASSERT_EQ_STR(dump_stmt("math.vector w = {};"),
                        "(var w (type (name math vector)) (init))");
-    TEST_ASSERT_EQ_STR(dump_stmt("fn i32(i32) op = add;"),
+    TEST_ASSERT_EQ_STR(dump_stmt("fn (i32) i32 op = add;"),
                        "(var op (type (fn-type (type (prim i32)) (type (prim i32))))"
                        " (ident add))");
     TEST_ASSERT_EQ_STR(dump_stmt("string s = \"x\";"), "(var s (type (string)) (str \"x\"))");
@@ -216,7 +216,7 @@ TEST(do_while_is_not_supported, {
 // ---- a rewind leaves no diagnostics (grammar.md 7) ------------------------
 
 TEST(rewinds_leave_no_diagnostics, {
-    const char* src = "fn void f() {\n"
+    const char* src = "fn f() void {\n"
                       "    foo[3] = x;\n"
                       "    a[b] = c[d];\n"
                       "    p->next = null;\n"
@@ -268,20 +268,20 @@ TEST(literals_and_expressions_that_start_alike, {
 // ---- declarations and modules (grammar.md 2, 3) --------------------------
 
 TEST(function_declarations, {
-    TEST_ASSERT_EQ_STR(parse_dump("fn i32 main() { return 0; }"),
+    TEST_ASSERT_EQ_STR(parse_dump("fn main() i32 { return 0; }"),
                        "(module (fn (type (prim i32)) main (params) (block (return (int 0)))))");
-    TEST_ASSERT_EQ_STR(parse_dump("fn void f(i32 a, node mut* b) { }"),
+    TEST_ASSERT_EQ_STR(parse_dump("fn f(i32 a, node mut* b) void { }"),
                        "(module (fn (type (void)) f (params (param (type (prim i32)) a)"
                        " (param (type (name node) mut (ptr)) b)) (block)))");
-    TEST_ASSERT_EQ_STR(parse_dump("fn noreturn die() { }"),
+    TEST_ASSERT_EQ_STR(parse_dump("fn die() noreturn { }"),
                        "(module (fn (type (noreturn)) die (params) (block)))");
-    TEST_ASSERT_EQ_STR(parse_dump("fn fn i32(i32) choose(bool p) { }"),
+    TEST_ASSERT_EQ_STR(parse_dump("fn choose(bool p) fn (i32) i32 { }"),
                        "(module (fn (type (fn-type (type (prim i32)) (type (prim i32)))) choose"
                        " (params (param (type (prim bool)) p)) (block)))");
 })
 
 TEST(extern_struct_and_enum_declarations, {
-    TEST_ASSERT_EQ_STR(parse_dump("extern fn void puts(string s);"),
+    TEST_ASSERT_EQ_STR(parse_dump("extern fn puts(string s) void;"),
                        "(module (extern-fn (type (void)) puts"
                        " (params (param (type (string)) s)) nil))");
     TEST_ASSERT_EQ_STR(parse_dump("struct point { i32 x; i32 y; }"),
@@ -299,7 +299,7 @@ TEST(global_declarations, {
     TEST_ASSERT_EQ_STR(parse_dump("i32 N = 4;"), "(module (var N (type (prim i32)) (int 4)))");
     TEST_ASSERT_EQ_STR(parse_dump("point[2] mut cells = {};"),
                        "(module (var cells (type (name point) (array (int 2) mut)) (init)))");
-    TEST_ASSERT_EQ_STR(parse_dump("fn i32(i32) OP = add;"),
+    TEST_ASSERT_EQ_STR(parse_dump("fn (i32) i32 OP = add;"),
                        "(module (var OP (type (fn-type (type (prim i32)) (type (prim i32))))"
                        " (ident add)))");
 })
@@ -314,7 +314,7 @@ TEST(import_forms, {
 
 TEST(a_module_is_imports_then_declarations, {
     TEST_ASSERT_EQ_STR(parse_dump(""), "(module)");
-    TEST_ASSERT_EQ_STR(parse_dump("import std.io;\ni32 N = 1;\nfn void f() { }"),
+    TEST_ASSERT_EQ_STR(parse_dump("import std.io;\ni32 N = 1;\nfn f() void { }"),
                        "(module (import (path std io) nil) (var N (type (prim i32)) (int 1))"
                        " (fn (type (void)) f (params) (block)))");
     TEST_ASSERT_EQ_STR(parse_fails("i32 N = 4;\nimport a;"),
@@ -336,8 +336,8 @@ TEST(empty_aggregates_are_errors, {
 // A parameter list takes no trailing comma.
 // D6.5
 TEST(parameter_lists_take_no_trailing_comma, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn void f(i32 a,) { }"),
-                       "t.ft:1:17: error: expected a type, found ')'\n");
+    TEST_ASSERT_EQ_STR(parse_fails("fn f(i32 a,) void { }"),
+                       "t.ft:1:12: error: expected a type, found ')'\n");
 })
 
 // ---- the nesting limit ---------------------------------------------------
@@ -346,7 +346,7 @@ TEST(parameter_lists_take_no_trailing_comma, {
 TEST(nesting_of_256_is_accepted, {
     TEST_ASSERT_NONNULL(parse_text(nested("i32 x = ", '(', 256, "1", ')', ";")));
     TEST_ASSERT_EQ_STR(parse_diags(), "");
-    TEST_ASSERT_NONNULL(parse_text(nested("fn void f() ", '{', 256, "", '}', "")));
+    TEST_ASSERT_NONNULL(parse_text(nested("fn f() void ", '{', 256, "", '}', "")));
     TEST_ASSERT_EQ_STR(parse_diags(), "");
     TEST_ASSERT_NONNULL(parse_text(many_suffixes(256)));
     TEST_ASSERT_EQ_STR(parse_diags(), "");
@@ -355,7 +355,7 @@ TEST(nesting_of_256_is_accepted, {
 TEST(nesting_deeper_than_256_is_an_error, {
     TEST_ASSERT_NONNULL(strstr(parse_fails(nested("i32 x = ", '(', 257, "1", ')', ";")),
                                "error: nesting deeper than 256\n"));
-    TEST_ASSERT_NONNULL(strstr(parse_fails(nested("fn void f() ", '{', 257, "", '}', "")),
+    TEST_ASSERT_NONNULL(strstr(parse_fails(nested("fn f() void ", '{', 257, "", '}', "")),
                                "error: nesting deeper than 256\n"));
     TEST_ASSERT_NONNULL(strstr(parse_fails(nested("point x = ", '{', 257, "", '}', ";")),
                                "error: nesting deeper than 256\n"));
@@ -366,7 +366,7 @@ TEST(nesting_deeper_than_256_is_an_error, {
 // The end of the file closes nothing: every unterminated construct is
 // reported where it runs out of tokens, and no loop spins there.
 TEST(unterminated_constructs_end_at_the_end_of_the_file, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn i32 f() {"),
+    TEST_ASSERT_EQ_STR(parse_fails("fn f() i32 {"),
                        "t.ft:1:13: error: expected '}', found end of file\n");
     TEST_ASSERT_EQ_STR(parse_fails("struct s {"),
                        "t.ft:1:11: error: expected '}', found end of file\n");
@@ -385,7 +385,7 @@ TEST(unterminated_constructs_end_at_the_end_of_the_file, {
 // D7.4
 TEST(a_long_else_if_chain_is_not_nesting, {
     sb_clear(&deep);
-    sb_append(&deep, "fn void f() {\n    if (c) { }");
+    sb_append(&deep, "fn f() void {\n    if (c) { }");
     for (uint64_t i = 0; i < 300; i++) {
         sb_append(&deep, " else if (c) { }");
     }
@@ -406,7 +406,7 @@ TEST(a_long_else_if_chain_is_not_nesting, {
 // after it are parsed and reported too.
 // D14.2
 TEST(every_broken_statement_is_reported, {
-    TEST_ASSERT_EQ_STR(parse_fails("fn void f() {\n    x;\n    y;\n}\ni32 = 1;\n"),
+    TEST_ASSERT_EQ_STR(parse_fails("fn f() void {\n    x;\n    y;\n}\ni32 = 1;\n"),
                        "t.ft:2:6: error: expected an assignment, an increment or a call, "
                        "found ';'\n"
                        "t.ft:3:6: error: expected an assignment, an increment or a call, "
@@ -601,7 +601,7 @@ TEST(a_keyword_type_starts_a_declaration_at_once, {
     TEST_ASSERT_EQ_STR(dump_stmt("char c = 'x';"), "(var c (type (prim char)) (char 120))");
     TEST_ASSERT_EQ_STR(dump_stmt("string s = t;"), "(var s (type (string)) (ident t))");
     TEST_ASSERT_EQ_STR(dump_stmt("void* p = null;"), "(var p (type (void) (ptr)) (null))");
-    TEST_ASSERT_EQ_STR(dump_stmt("fn void() f = g;"),
+    TEST_ASSERT_EQ_STR(dump_stmt("fn () void f = g;"),
                        "(var f (type (fn-type (type (void)))) (ident g))");
     TEST_ASSERT_EQ_STR(dump_stmt("i32[2] mut a = {};"),
                        "(var a (type (prim i32) (array (int 2) mut)) (init))");

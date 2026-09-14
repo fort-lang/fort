@@ -18,16 +18,16 @@
 // numbers of the module each program emits.
 
 // The two programs the comparison tests share.
-static const char EQ_LITERAL[] = "fn i32 main() {\n    string s = \"hello\";\n"
+static const char EQ_LITERAL[] = "fn main() i32 {\n    string s = \"hello\";\n"
                                  "    println(s == \"hello\");\n    return 0;\n}\n";
-static const char NE_LITERAL[] = "fn i32 main() {\n    string s = \"hello\";\n"
+static const char NE_LITERAL[] = "fn main() i32 {\n    string s = \"hello\";\n"
                                  "    println(s != \"hi\");\n    return 0;\n}\n";
 
 // ---- the header of a literal (item 17) ---------------------------------------------
 // D3.7
 
 TEST(a_string_literal_is_its_bytes_and_the_length_the_nul_excludes, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    string s = \"hello\";\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    string s = \"hello\";\n"
                           "    println(s.len);\n    return 0;\n}\n"));
     // The bytes carry a trailing NUL that `len` does not count.
     // D3.7
@@ -45,7 +45,7 @@ TEST(a_string_literal_is_its_bytes_and_the_length_the_nul_excludes, {
 })
 
 TEST(an_empty_string_literal_is_one_nul_byte_and_a_zero_length, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    string s = \"\";\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    string s = \"\";\n"
                           "    println(s.len);\n    return 0;\n}\n"));
     TEST_ASSERT_EQ_STR(found("@.str.0 = private unnamed_addr constant [1 x i8] c\"\\00\""),
                        "@.str.0 = private unnamed_addr constant [1 x i8] c\"\\00\"");
@@ -54,7 +54,7 @@ TEST(an_empty_string_literal_is_one_nul_byte_and_a_zero_length, {
 })
 
 TEST(the_zero_string_is_a_sixteen_byte_memset, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    string s = {};\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    string s = {};\n"
                           "    println(s.len);\n    return 0;\n}\n"));
     // The zero value of a span or `string` is `{null, 0}`.
     // D3.5, D3.7
@@ -96,8 +96,8 @@ TEST(inequality_is_the_same_call_negated, {
 })
 
 TEST(comparing_two_places_reads_both_headers, {
-    TEST_ASSERT_TRUE(emit("fn bool same(string a, string b) {\n    return a == b;\n}\n"
-                          "fn i32 main() {\n    println(same(\"a\", \"a\"));\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(emit("fn same(string a, string b) bool {\n    return a == b;\n}\n"
+                          "fn main() i32 {\n    println(same(\"a\", \"a\"));\n    return 0;\n}\n"));
     // An aggregate parameter's place is the caller-made copy the incoming
     // pointer designates (item 10), so both operands are header reads.
     TEST_ASSERT_EQ_STR(
@@ -123,9 +123,9 @@ TEST(comparing_two_places_reads_both_headers, {
 })
 
 TEST(the_left_operand_is_evaluated_before_the_right, {
-    TEST_ASSERT_TRUE(emit("fn string left() {\n    println(\"left\");\n    return \"a\";\n}\n"
-                          "fn string right() {\n    println(\"right\");\n    return \"b\";\n}\n"
-                          "fn i32 main() {\n    println(left() == right());\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(emit("fn left() string {\n    println(\"left\");\n    return \"a\";\n}\n"
+                          "fn right() string {\n    println(\"right\");\n    return \"b\";\n}\n"
+                          "fn main() i32 {\n    println(left() == right());\n    return 0;\n}\n"));
     // Each argument is evaluated in turn, left to right.
     // D6.3
     TEST_ASSERT_TRUE(before("call void @\"main.left\"", "call void @\"main.right\""));
@@ -134,8 +134,8 @@ TEST(the_left_operand_is_evaluated_before_the_right, {
 })
 
 TEST(the_entry_point_is_never_declared, {
-    TEST_ASSERT_TRUE(emit("extern fn i32 puts(char* s);\n"
-                          "fn i32 main() {\n    string s = \"hi\";\n"
+    TEST_ASSERT_TRUE(emit("extern fn puts(char* s) i32;\n"
+                          "fn main() i32 {\n    string s = \"hi\";\n"
                           "    println(s == \"hi\", s == \"ho\");\n"
                           "    return puts(s.ptr);\n}\n"));
     // `std.rt` is in the closure, so the module that holds the call holds the
@@ -150,7 +150,7 @@ TEST(the_entry_point_is_never_declared, {
 })
 
 TEST(a_program_that_compares_no_string_declares_no_entry_point, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    string s = \"hi\";\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    string s = \"hi\";\n"
                           "    println(s.len);\n    return 0;\n}\n"));
     // Only referenced declarations are emitted (item 8).
     // D19.5
@@ -178,7 +178,7 @@ TEST(no_bounds_check_compares_strings_the_same_way, {
 // D3.7, D6.8
 
 TEST(indexing_a_string_reaches_its_bytes_through_the_pointer_field, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    string s = \"hi\";\n    u64 i = 1;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    string s = \"hi\";\n    u64 i = 1;\n"
                           "    println(s[i]);\n    return 0;\n}\n"));
     // A `string` has `char` elements, which are `i8`, reached through the
     // header's pointer (item 3).
@@ -190,7 +190,7 @@ TEST(indexing_a_string_reaches_its_bytes_through_the_pointer_field, {
 })
 
 TEST(the_pseudo_fields_of_a_string_are_its_header_fields, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    string s = \"hi\";\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    string s = \"hi\";\n"
                           "    println(s.len, s.ptr != null);\n    return 0;\n}\n"));
     // `.len` and `.ptr` are read-only pseudo-fields of the header.
     // D3.5, D3.7
@@ -206,8 +206,8 @@ TEST(the_pseudo_fields_of_a_string_are_its_header_fields, {
 })
 
 TEST(a_string_is_passed_and_returned_through_a_hidden_pointer, {
-    TEST_ASSERT_TRUE(emit("fn string pick(string a) {\n    return a;\n}\n"
-                          "fn i32 main() {\n    println(pick(\"hi\"));\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(emit("fn pick(string a) string {\n    return a;\n}\n"
+                          "fn main() i32 {\n    println(pick(\"hi\"));\n    return 0;\n}\n"));
     // A span or `string` stays one hidden pointer and is never split into two
     // scalars (item 7).
     // D9.9

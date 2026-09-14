@@ -62,13 +62,13 @@ struct loc {
 
 /// The empty range at `line`:`col`: a position with no extent yet.
 /// D20.4
-fn loc loc_make(string file, u32 line, u32 col) {
+fn loc_make(string file, u32 line, u32 col) loc {
     return loc{file, line, col, line, col};
 }
 
 /// The range from `line`:`col` to `end_line`:`end_col`, the end exclusive.
 /// D20.4
-fn loc loc_range(string file, u32 line, u32 col, u32 end_line, u32 end_col) {
+fn loc_range(string file, u32 line, u32 col, u32 end_line, u32 end_col) loc {
     return loc{file, line, col, end_line, end_col};
 }
 
@@ -77,7 +77,7 @@ fn loc loc_range(string file, u32 line, u32 col, u32 end_line, u32 end_col) {
 /// changes nothing. To widen leftwards, build the range from the leftmost start
 /// with loc_range.
 /// D20.4
-fn loc loc_extend(loc a, loc b) {
+fn loc_extend(loc a, loc b) loc {
     if (b.end_line > a.end_line || (b.end_line == a.end_line && b.end_col > a.end_col)) {
         return loc{a.file, a.line, a.col, b.end_line, b.end_col};
     }
@@ -86,7 +86,7 @@ fn loc loc_extend(loc a, loc b) {
 
 /// Whether `loc` ends at or after it starts, which every range does.
 /// D20.4
-fn bool loc_is_ordered(loc l) {
+fn loc_is_ordered(loc l) bool {
     return l.end_line > l.line || (l.end_line == l.line && l.end_col >= l.col);
 }
 
@@ -119,13 +119,13 @@ struct sink {
 }
 
 /// The empty sink; allocates nothing and writes nothing until set_text.
-fn sink create() {
+fn create() sink {
     return sink{};
 }
 
 /// Releases the records and every message and file name the sink copied; the
 /// sink is empty and usable afterwards.
-fn void free(sink mut* s) {
+fn free(sink mut* s) void {
     del(s->records);
     containers.pool_free(&s->pool);
     s->count = 0;
@@ -138,14 +138,14 @@ fn void free(sink mut* s) {
 /// released rather than kept, so a thousand analyses through one sink do not grow
 /// the heap.
 /// D20.5
-fn void reset(sink mut* s) {
+fn reset(sink mut* s) void {
     free(s);
 }
 
 /// Whether a diagnostic reported now is dropped: a muted one is counted by
 /// error and never written or recorded, so a probing parse costs nothing and
 /// count still says whether the file it read parsed.
-fn bool muted(sink* s) {
+fn muted(sink* s) bool {
     return s->mute_depth > 0;
 }
 
@@ -156,7 +156,7 @@ fn bool muted(sink* s) {
 /// outermost one restores the count. A note of a muted error is dropped with
 /// it, so a caller that annotates under a mute must put the note under the
 /// same guard as its error or the note stands alone.
-fn void mute(sink mut* s) {
+fn mute(sink mut* s) void {
     if (s->mute_depth == 0) {
         s->mute_errors = s->errors;
         s->mute_file_errors = s->file_errors;
@@ -170,7 +170,7 @@ fn void mute(sink mut* s) {
 /// the probe read spent no budget of the file that asked for it. An unmute with no
 /// mute open is a violated precondition and panics.
 /// D13.3
-fn u64 unmute(sink mut* s) {
+fn unmute(sink mut* s) u64 {
     if (s->mute_depth == 0) {
         panic("diag.unmute: no diag.mute is open");
     }
@@ -188,14 +188,14 @@ fn u64 unmute(sink mut* s) {
 /// Records are kept either way, and a mode that wants only the structured form
 /// leaves it off.
 /// D20.2
-fn void set_text(sink mut* s, bool on) {
+fn set_text(sink mut* s, bool on) void {
     s->text = on;
 }
 
 /// Starts the budget of the file about to be read: the lexer opens it and the
 /// parser goes on with what the lexer left of it, so the two share one counter.
 /// D14.2
-fn void begin_file(sink mut* s) {
+fn begin_file(sink mut* s) void {
     s->file_errors = 0;
 }
 
@@ -203,7 +203,7 @@ fn void begin_file(sink mut* s) {
 /// from; 0 when no file was begun. A note is not counted, here or in count, since
 /// it belongs to the error before it.
 /// D14.2
-fn u64 file_count(sink* s) {
+fn file_count(sink* s) u64 {
     return s->file_errors;
 }
 
@@ -211,24 +211,24 @@ fn u64 file_count(sink* s) {
 /// last. The lexer and the parser ask before they report; nothing here refuses a
 /// diagnostic on its own.
 /// D14.2
-fn bool budget_left(sink* s) {
+fn budget_left(sink* s) bool {
     return s->file_errors < MAX_PER_FILE;
 }
 
 /// The number of errors reported since the sink was created or last reset.
-fn u64 count(sink* s) {
+fn count(sink* s) u64 {
     return s->errors;
 }
 
 /// The diagnostics recorded since then, in the order they were reported.
-fn u64 record_count(sink* s) {
+fn record_count(sink* s) u64 {
     return s->count;
 }
 
 /// The record at `i`; an index at or past record_count is a violated
 /// precondition and panics.
 /// D13.3
-fn record record_at(sink* s, u64 i) {
+fn record_at(sink* s, u64 i) record {
     if (i >= s->count) {
         panic("diag.record_at: index out of range");
     }
@@ -237,7 +237,7 @@ fn record record_at(sink* s, u64 i) {
 
 /// Ensures room for one more record, growing to the largest of RECORD_MIN_CAP
 /// and twice the capacity.
-fn void reserve(sink mut* s) {
+fn reserve(sink mut* s) void {
     if (s->count < s->records.len) {
         return;
     }
@@ -267,7 +267,7 @@ fn void reserve(sink mut* s) {
 /// one here would make stage2 report fewer diagnostics than stage1 over the same
 /// file.
 /// D14.2, D20.2
-fn void report(sink mut* s, loc l, severity sev, string msg) {
+fn report(sink mut* s, loc l, severity sev, string msg) void {
     // A muted diagnostic is counted and nothing else: no record is kept and
     // no byte is interned, so a probe costs the sink nothing but the count
     // unmute takes back.
@@ -291,20 +291,20 @@ fn void report(sink mut* s, loc l, severity sev, string msg) {
 
 /// `<file>:<line>:<col>: error: <msg>`, counted as an error.
 /// D14.2
-fn void error(sink mut* s, loc l, string msg) {
+fn error(sink mut* s, loc l, string msg) void {
     report(s, l, severity.error, msg);
 }
 
 /// `<file>:<line>:<col>: note: <msg>`, which belongs to the error before it and
 /// is not counted.
 /// D14.2
-fn void note(sink mut* s, loc l, string msg) {
+fn note(sink mut* s, loc l, string msg) void {
     report(s, l, severity.note, msg);
 }
 
 /// The text form of one diagnostic on stderr; only the start of the range is
 /// printed (toolchain.md 4).
-fn void write_line(loc l, severity sev, string msg) {
+fn write_line(loc l, severity sev, string msg) void {
     if (sev == severity.error) {
         eprintln(l.file, ":", l.line, ":", l.col, ": error: ", msg);
     } else {
@@ -318,7 +318,7 @@ fn void write_line(loc l, severity sev, string msg) {
 /// The range of a diagnostic: the start the text form prints and the exclusive
 /// end an editor underlines, both 1-based byte columns.
 /// D14.2, D20.4
-fn void write_range(json.writer mut* j, loc l) {
+fn write_range(json.writer mut* j, loc l) void {
     json.json_key(j, "file");
     json.json_str(j, l.file);
     json.json_key(j, "line");
@@ -333,7 +333,7 @@ fn void write_range(json.writer mut* j, loc l) {
 
 /// The severity as the text form spells it.
 /// D14.2
-fn string severity_name(severity sev) {
+fn severity_name(severity sev) string {
     switch (sev) {
     case severity.error:
         return "error";
@@ -345,7 +345,7 @@ fn string severity_name(severity sev) {
 /// The record at `i` as one diagnostic, with the notes that follow it nested
 /// under it: a note belongs to the error it follows.
 /// D14.2
-fn void write_diagnostic(sink* s, json.writer mut* j, u64 i) {
+fn write_diagnostic(sink* s, json.writer mut* j, u64 i) void {
     record rec = s->records[i];
     json.json_object_begin(j);
     write_range(j, rec.loc);
@@ -375,7 +375,7 @@ fn void write_diagnostic(sink* s, json.writer mut* j, u64 i) {
 /// own copies, so the array is right after the module set that reported them was
 /// freed.
 /// D20.2
-fn void write_json(sink* s, json.writer mut* j) {
+fn write_json(sink* s, json.writer mut* j) void {
     json.json_array_begin(j);
     // A note is written under the error it follows; one that follows no error
     // stands alone rather than being dropped.

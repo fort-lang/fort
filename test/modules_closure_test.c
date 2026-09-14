@@ -20,8 +20,8 @@
 
 TEST(a_cycle_is_reported_at_the_import_that_closes_it, {
     begin();
-    add("main.ft", "import other;\nfn i32 main() { return other.value(); }\n");
-    add("other.ft", "import main;\nfn i32 value() { return 1; }\n");
+    add("main.ft", "import other;\nfn main() i32 { return other.value(); }\n");
+    add("other.ft", "import main;\nfn value() i32 { return 1; }\n");
     TEST_ASSERT_FALSE(load("main.ft"));
     TEST_ASSERT_TRUE(said("circular import: 'main' imports 'other' imports 'main'"));
     TEST_ASSERT_TRUE(said("other.ft:1:1: error:"));
@@ -29,16 +29,16 @@ TEST(a_cycle_is_reported_at_the_import_that_closes_it, {
 
 TEST(a_module_importing_itself_is_a_cycle_of_length_one, {
     begin();
-    add("main.ft", "import main;\nfn i32 main() { return 0; }\n");
+    add("main.ft", "import main;\nfn main() i32 { return 0; }\n");
     TEST_ASSERT_FALSE(load("main.ft"));
     TEST_ASSERT_TRUE(said("circular import: 'main' imports 'main'"));
 })
 
 TEST(a_longer_cycle_names_every_module_on_the_path, {
     begin();
-    add("main.ft", "import a;\nfn i32 main() { return 0; }\n");
-    add("a.ft", "import b;\nfn i32 f() { return 0; }\n");
-    add("b.ft", "import a;\nfn i32 g() { return 0; }\n");
+    add("main.ft", "import a;\nfn main() i32 { return 0; }\n");
+    add("a.ft", "import b;\nfn f() i32 { return 0; }\n");
+    add("b.ft", "import a;\nfn g() i32 { return 0; }\n");
     TEST_ASSERT_FALSE(load("main.ft"));
     TEST_ASSERT_TRUE(said("circular import: 'a' imports 'b' imports 'a'"));
 })
@@ -48,10 +48,10 @@ TEST(a_diamond_is_not_a_cycle, {
     add("main.ft",
         "import a;\n"
         "import b;\n"
-        "fn i32 main() { return 0; }\n");
-    add("a.ft", "import c;\nfn i32 f() { return 0; }\n");
-    add("b.ft", "import c;\nfn i32 g() { return 0; }\n");
-    add("c.ft", "fn i32 h() { return 0; }\n");
+        "fn main() i32 { return 0; }\n");
+    add("a.ft", "import c;\nfn f() i32 { return 0; }\n");
+    add("b.ft", "import c;\nfn g() i32 { return 0; }\n");
+    add("c.ft", "fn h() i32 { return 0; }\n");
     TEST_ASSERT_TRUE(load("main.ft"));
     TEST_ASSERT_EQ_UINT64(module_set_count(&set), (uint64_t)4);
     TEST_ASSERT_EQ_STR(ordered(0), "c");
@@ -68,8 +68,8 @@ TEST(one_file_reached_through_two_paths_is_an_error, {
     add("main.ft",
         "import sub.x;\n"
         "import x;\n"
-        "fn i32 main() { return 0; }\n");
-    add("sub/x.ft", "fn i32 f() { return 0; }\n");
+        "fn main() i32 { return 0; }\n");
+    add("sub/x.ft", "fn f() i32 { return 0; }\n");
     root("sub");
     TEST_ASSERT_FALSE(load("main.ft"));
     TEST_ASSERT_TRUE(said("module 'x' is the same file as module 'sub.x'"));
@@ -80,7 +80,7 @@ TEST(a_symbolic_link_reaches_the_same_module, {
     add("main.ft",
         "import util;\n"
         "import link;\n"
-        "fn i32 main() { return 0; }\n");
+        "fn main() i32 { return 0; }\n");
     add("util.ft", src_add());
     char target[PATH_CAP];
     join_sandbox_path(target, sizeof target, sandbox, "util.ft");
@@ -94,7 +94,7 @@ TEST(one_module_may_be_imported_under_several_names, {
     add("main.ft",
         "import util;\n"
         "import util as u;\n"
-        "fn i32 main() { return u.add(1, 2); }\n");
+        "fn main() i32 { return u.add(1, 2); }\n");
     add("util.ft", src_add());
     TEST_ASSERT_TRUE(load("main.ft"));
     TEST_ASSERT_EQ_UINT64(module_set_count(&set), (uint64_t)2);
@@ -106,7 +106,7 @@ TEST(a_module_and_one_of_its_declarations_may_be_imported_together, {
     add("main.ft",
         "import util;\n"
         "import util.add;\n"
-        "fn i32 main() { return add(1, 2); }\n");
+        "fn main() i32 { return add(1, 2); }\n");
     add("util.ft", src_add());
     TEST_ASSERT_TRUE(load("main.ft"));
     TEST_ASSERT_EQ_UINT64(module_set_count(&set), (uint64_t)2);
@@ -119,12 +119,12 @@ TEST(a_module_and_one_of_its_declarations_may_be_imported_together, {
 TEST(every_kind_of_declaration_enters_the_namespace, {
     begin();
     add("main.ft",
-        "extern fn i64 write(i32 fd, void* buf, u64 n);\n"
+        "extern fn write(i32 fd, void* buf, u64 n) i64;\n"
         "struct point { i32 x; i32 y; }\n"
         "enum color { red, green }\n"
         "i32 LIMIT = 4;\n"
         "i32 mut counter = 0;\n"
-        "fn i32 main() { return 0; }\n");
+        "fn main() i32 { return 0; }\n");
     TEST_ASSERT_TRUE(load("main.ft"));
     TEST_ASSERT_EQ_INT32((int32_t)bound("main", "write")->kind, (int32_t)BIND_EXTERN_FN);
     TEST_ASSERT_EQ_INT32((int32_t)bound("main", "point")->kind, (int32_t)BIND_STRUCT);
@@ -136,7 +136,7 @@ TEST(every_kind_of_declaration_enters_the_namespace, {
 
 TEST(enum_members_are_not_in_the_namespace, {
     begin();
-    add("main.ft", "enum color { red, green }\nfn i32 main() { return 0; }\n");
+    add("main.ft", "enum color { red, green }\nfn main() i32 { return 0; }\n");
     TEST_ASSERT_TRUE(load("main.ft"));
     TEST_ASSERT_NULL(bound("main", "red"));
 })
@@ -144,9 +144,9 @@ TEST(enum_members_are_not_in_the_namespace, {
 TEST(two_declarations_of_one_name_collide, {
     begin();
     add("main.ft",
-        "fn i32 add(i32 a) { return a; }\n"
+        "fn add(i32 a) i32 { return a; }\n"
         "struct add { i32 x; }\n"
-        "fn i32 main() { return 0; }\n");
+        "fn main() i32 { return 0; }\n");
     TEST_ASSERT_FALSE(load("main.ft"));
     TEST_ASSERT_TRUE(said("redeclaration of 'add'"));
     TEST_ASSERT_TRUE(said("note: previous declaration of 'add' here"));
@@ -156,8 +156,8 @@ TEST(a_declaration_colliding_with_an_import_is_reported_at_the_declaration, {
     begin();
     add("main.ft",
         "import util;\n"
-        "fn i32 util(i32 a) { return a; }\n"
-        "fn i32 main() { return 0; }\n");
+        "fn util(i32 a) i32 { return a; }\n"
+        "fn main() i32 { return 0; }\n");
     add("util.ft", src_add());
     TEST_ASSERT_FALSE(load("main.ft"));
     TEST_ASSERT_TRUE(said("main.ft:2:1: error: redeclaration of 'util'"));
@@ -169,9 +169,9 @@ TEST(two_imports_binding_one_name_collide, {
     add("main.ft",
         "import util;\n"
         "import other as util;\n"
-        "fn i32 main() { return 0; }\n");
+        "fn main() i32 { return 0; }\n");
     add("util.ft", src_add());
-    add("other.ft", "fn i32 one() { return 1; }\n");
+    add("other.ft", "fn one() i32 { return 1; }\n");
     TEST_ASSERT_FALSE(load("main.ft"));
     TEST_ASSERT_TRUE(said("main.ft:2:1: error: redeclaration of 'util'"));
 })
@@ -180,7 +180,7 @@ TEST(two_imports_binding_one_name_collide, {
 
 TEST(a_module_with_nothing_in_it_loads_with_an_empty_namespace, {
     begin();
-    add("main.ft", "import empty;\nfn i32 main() { return 0; }\n");
+    add("main.ft", "import empty;\nfn main() i32 { return 0; }\n");
     add("empty.ft", "");
     TEST_ASSERT_TRUE(load("main.ft"));
     const module_t* empty = module_set_find(&set, str_from_cstr("empty"));
@@ -193,8 +193,8 @@ TEST(a_module_is_read_once_however_many_modules_import_it, {
     add("main.ft",
         "import a;\n"
         "import util;\n"
-        "fn i32 main() { return 0; }\n");
-    add("a.ft", "import util;\nfn i32 f() { return util.add(1, 2); }\n");
+        "fn main() i32 { return 0; }\n");
+    add("a.ft", "import util;\nfn f() i32 { return util.add(1, 2); }\n");
     add("util.ft", src_add());
     TEST_ASSERT_TRUE(load("main.ft"));
     TEST_ASSERT_EQ_UINT64(module_set_count(&set), (uint64_t)3);
@@ -203,10 +203,10 @@ TEST(a_module_is_read_once_however_many_modules_import_it, {
 
 TEST(a_chain_is_ordered_from_the_deepest_module_up, {
     begin();
-    add("main.ft", "import a;\nfn i32 main() { return 0; }\n");
-    add("a.ft", "import b;\nfn i32 f() { return 0; }\n");
-    add("b.ft", "import c;\nfn i32 g() { return 0; }\n");
-    add("c.ft", "fn i32 h() { return 0; }\n");
+    add("main.ft", "import a;\nfn main() i32 { return 0; }\n");
+    add("a.ft", "import b;\nfn f() i32 { return 0; }\n");
+    add("b.ft", "import c;\nfn g() i32 { return 0; }\n");
+    add("c.ft", "fn h() i32 { return 0; }\n");
     TEST_ASSERT_TRUE(load("main.ft"));
     TEST_ASSERT_EQ_STR(ordered(0), "c");
     TEST_ASSERT_EQ_STR(ordered(1), "b");
@@ -216,8 +216,8 @@ TEST(a_chain_is_ordered_from_the_deepest_module_up, {
 
 TEST(the_pass_order_is_the_dependency_order_when_every_module_loaded, {
     begin();
-    add("main.ft", "import a;\nfn i32 main() { return 0; }\n");
-    add("a.ft", "fn i32 f() { return 0; }\n");
+    add("main.ft", "import a;\nfn main() i32 { return 0; }\n");
+    add("a.ft", "fn f() i32 { return 0; }\n");
     TEST_ASSERT_TRUE(load("main.ft"));
     // A closure that resolved is ordered end to end, so the pass order is the
     // dependency order and nothing more.
@@ -229,8 +229,8 @@ TEST(the_pass_order_is_the_dependency_order_when_every_module_loaded, {
 
 TEST(the_pass_order_ends_with_the_modules_the_loader_never_ordered, {
     begin();
-    add("main.ft", "import a;\nfn i32 main() { return 0; }\n");
-    add("a.ft", "import nothere;\nfn i32 f() { return 0; }\n");
+    add("main.ft", "import a;\nfn main() i32 { return 0; }\n");
+    add("a.ft", "import nothere;\nfn f() i32 { return 0; }\n");
     TEST_ASSERT_FALSE(load("main.ft"));
     // `a` never resolved and `main` was never reached, so neither is in the
     // dependency order; both parsed, so a pass still visits them, the
@@ -245,8 +245,8 @@ TEST(the_pass_order_ends_with_the_modules_the_loader_never_ordered, {
 
 TEST(a_module_that_did_not_parse_is_not_in_the_pass_order, {
     begin();
-    add("main.ft", "import a;\nfn i32 main() { return 0; }\n");
-    add("a.ft", "fn i32 f() { return 0\n");
+    add("main.ft", "import a;\nfn main() i32 { return 0; }\n");
+    add("a.ft", "fn f() i32 { return 0\n");
     TEST_ASSERT_FALSE(load("main.ft"));
     // A file with a syntax error is not checked, so no pass visits it; the
     // importer that parsed is visited.
@@ -257,8 +257,8 @@ TEST(a_module_that_did_not_parse_is_not_in_the_pass_order, {
 
 TEST(the_symbol_reading_works_at_any_depth, {
     begin();
-    add("main.ft", "import a.b.c.d;\nfn i32 main() { return d(1); }\n");
-    add("a/b/c.ft", "fn i32 d(i32 x) { return x; }\n");
+    add("main.ft", "import a.b.c.d;\nfn main() i32 { return d(1); }\n");
+    add("a/b/c.ft", "fn d(i32 x) i32 { return x; }\n");
     TEST_ASSERT_TRUE(load("main.ft"));
     TEST_ASSERT_EQ_STR(ordered(0), "a.b.c");
     TEST_ASSERT_EQ_INT32((int32_t)bound("main", "d")->kind, (int32_t)BIND_SYMBOL);
@@ -266,7 +266,7 @@ TEST(the_symbol_reading_works_at_any_depth, {
 
 TEST(the_file_of_a_module_is_its_root_joined_path, {
     begin();
-    add("src/main.ft", "import geom.vec;\nfn i32 main() { return 0; }\n");
+    add("src/main.ft", "import geom.vec;\nfn main() i32 { return 0; }\n");
     add("src/geom/vec.ft", "struct vec2 { i64 x; i64 y; }\n");
     TEST_ASSERT_TRUE(load("src/main.ft"));
     const module_t* vec = module_set_find(&set, str_from_cstr("geom.vec"));
@@ -280,8 +280,8 @@ TEST(a_root_spelled_with_dot_dot_reaches_the_same_module, {
     add("main.ft",
         "import sub.x;\n"
         "import x;\n"
-        "fn i32 main() { return 0; }\n");
-    add("sub/x.ft", "fn i32 f() { return 0; }\n");
+        "fn main() i32 { return 0; }\n");
+    add("sub/x.ft", "fn f() i32 { return 0; }\n");
     // <sandbox>/sub/../sub/x.ft and <sandbox>/sub/x.ft are one file, since a
     // module's identity is the real path of its file, `..` resolved.
     // D9.2
@@ -292,7 +292,7 @@ TEST(a_root_spelled_with_dot_dot_reaches_the_same_module, {
 
 TEST(the_notes_of_a_missing_module_name_every_root_and_reading, {
     begin();
-    add("main.ft", "import util.strings;\nfn i32 main() { return 0; }\n");
+    add("main.ft", "import util.strings;\nfn main() i32 { return 0; }\n");
     root("lib");
     TEST_ASSERT_FALSE(load("main.ft"));
     // One note per root and reading: two roots, two readings
@@ -311,7 +311,7 @@ TEST(a_namespace_holds_the_files_imports_and_its_declarations, {
     add("main.ft",
         "import util;\n"
         "import util.add as plus;\n"
-        "fn i32 main() { return plus(1, 2); }\n");
+        "fn main() i32 { return plus(1, 2); }\n");
     add("util.ft", src_add());
     TEST_ASSERT_TRUE(load("main.ft"));
     const module_t* m = module_set_find(&set, str_from_cstr("main"));

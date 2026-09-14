@@ -580,12 +580,12 @@ static inline const char* verified(void) {
     return "verified";
 }
 
-/// A program whose body is `body` inside `fn i32 main()`, the shape most of
+/// A program whose body is `body` inside `fn main() i32`, the shape most of
 /// the tests need.
 static char gen_program_text[4096];
 static inline const char* in_main(const char* body) {
     TEST_UNUSED(snprintf(
-        gen_program_text, sizeof gen_program_text, "fn i32 main() {\n%s    return 0;\n}\n", body));
+        gen_program_text, sizeof gen_program_text, "fn main() i32 {\n%s    return 0;\n}\n", body));
     return gen_program_text;
 }
 

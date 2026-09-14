@@ -81,11 +81,11 @@ TEST(a_name_escapes_what_a_quoted_name_cannot_hold, {
 // D9.1, D9.2
 static const char CHARS_SOURCE[] = "struct pair {\n    i32 x;\n    i32 y;\n}\n"
                                    "enum color {\n    red,\n    green,\n}\n"
-                                   "fn i32 twice(i32 n) { return n +% n; }\n"
-                                   "fn color pick() { return color.green; }\n";
+                                   "fn twice(i32 n) i32 { return n +% n; }\n"
+                                   "fn pick() color { return color.green; }\n";
 
 static const char CHARS_MAIN[] = "import util.chars;\n"
-                                 "fn i32 main() {\n"
+                                 "fn main() i32 {\n"
                                  "    chars.pair p = {1, 2};\n"
                                  "    println(chars.twice(p.x), chars.pick());\n"
                                  "    return 0;\n}\n";
@@ -112,7 +112,7 @@ TEST(a_nested_module_path_joins_every_segment_with_a_dot, {
 TEST(an_entry_base_name_that_is_no_identifier_reaches_its_symbols, {
     TEST_ASSERT_TRUE(emit_as("007_case.ft",
                              "struct point {\n    i32 x;\n}\n"
-                             "fn i32 main() {\n    point p = {7};\n"
+                             "fn main() i32 {\n    point p = {7};\n"
                              "    println(p.x);\n    return 0;\n}\n"));
     // The entry module's path is its base name, which need not be an
     // identifier; quoting the dotted symbol is what carries it.
@@ -130,7 +130,7 @@ TEST(a_byte_a_quoted_name_cannot_hold_is_written_as_a_hex_escape, {
     TEST_ASSERT_TRUE(emit_as("a\"b.ft",
                              "struct point {\n    i32 x;\n}\n"
                              "enum color {\n    red,\n}\n"
-                             "fn i32 main() {\n    point p = {7};\n"
+                             "fn main() i32 {\n    point p = {7};\n"
                              "    println(p.x, color.red);\n    return 0;\n}\n"));
     // An entry base name bars `.` and nothing else, so a `\"` reaches the
     // symbol; LLVM reads `\\22` back to that byte, so the ELF symbol is
@@ -151,7 +151,7 @@ TEST(a_colon_in_the_entry_base_name_reaches_the_symbol, {
     TEST_ASSERT_TRUE(emit_as("my:app.ft",
                              "struct point {\n    i32 x;\n}\n"
                              "enum color {\n    red,\n}\n"
-                             "fn i32 main() {\n    point p = {7};\n"
+                             "fn main() i32 {\n    point p = {7};\n"
                              "    println(p.x, color.red);\n    return 0;\n}\n"));
     // `:` was barred from an entry base name while the mangler wrote a `::` as
     // a `.` and dropped a `:` it could not pair, which made `my:app.main` the
@@ -172,7 +172,7 @@ TEST(a_colon_in_the_entry_base_name_reaches_the_symbol, {
 })
 
 TEST(a_backslash_reaches_the_symbol_through_its_own_escape, {
-    TEST_ASSERT_TRUE(emit_as("a\\b.ft", "fn i32 main() {\n    println(1);\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(emit_as("a\\b.ft", "fn main() i32 {\n    println(1);\n    return 0;\n}\n"));
     // The other byte a quoted name cannot hold.
     // D9.7
     TEST_ASSERT_EQ_STR(found("define dso_local i32 @\"a\\5Cb.main\"() #0 {"),
@@ -183,7 +183,7 @@ TEST(a_backslash_reaches_the_symbol_through_its_own_escape, {
 TEST(a_control_byte_in_the_entry_base_name_reaches_the_symbol, {
     TEST_ASSERT_TRUE(emit_as("a\x01"
                              "b.ft",
-                             "fn i32 main() {\n    println(1);\n    return 0;\n}\n"));
+                             "fn main() i32 {\n    println(1);\n    return 0;\n}\n"));
     // An entry base name bars `.` alone, so a control byte is a legal entry
     // base name and its module path holds it; `\\XX` is how a quoted name does
     // (item 5).
@@ -194,8 +194,8 @@ TEST(a_control_byte_in_the_entry_base_name_reaches_the_symbol, {
 })
 
 TEST(a_c_name_is_never_quoted, {
-    TEST_ASSERT_TRUE(emit("extern fn u64 strlen(char* s);\n"
-                          "fn i32 main() {\n    string s = \"ab\";\n"
+    TEST_ASSERT_TRUE(emit("extern fn strlen(char* s) u64;\n"
+                          "fn main() i32 {\n    string s = \"ab\";\n"
                           "    println(strlen(s.ptr));\n    return 0;\n}\n"));
     // An `extern` name is unmangled, and an identifier needs no quotes.
     // D9.7
@@ -207,8 +207,8 @@ TEST(a_c_name_is_never_quoted, {
 // ---- one ELF symbol, one definition (item 8) ---------------------------------------
 
 TEST(an_extern_declaring_the_program_entry_point_is_refused, {
-    TEST_ASSERT_FALSE(emit("extern fn void fort_entry(void* args);\n"
-                           "fn i32 main() {\n    fort_entry(null);\n    return 0;\n}\n"));
+    TEST_ASSERT_FALSE(emit("extern fn fort_entry(void* args) void;\n"
+                           "fn main() i32 {\n    fort_entry(null);\n    return 0;\n}\n"));
     // `fort_entry` is reserved: the compiler emits its definition, so a
     // declaration of that name never reaches the emitter, where it would be a
     // `declare` beside a `define` of one ELF symbol -- and, since nothing
@@ -219,7 +219,7 @@ TEST(an_extern_declaring_the_program_entry_point_is_refused, {
 })
 
 TEST(the_program_entry_point_is_one_entity_of_the_module, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    println(1);\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    println(1);\n    return 0;\n}\n"));
     // What the rule above protects: one ELF symbol is one IR entity (item 8),
     // and `fort_entry` is the one undotted name a fort program defines.
     // D9.7
@@ -234,13 +234,13 @@ TEST(the_program_entry_point_is_one_entity_of_the_module, {
 static const char TWICE_MAIN[] = "import util;\n"
                                  "import util as tools;\n"
                                  "import util.twice;\n"
-                                 "fn i32 main() {\n"
+                                 "fn main() i32 {\n"
                                  "    println(util.twice(1), tools.twice(2), twice(3));\n"
                                  "    return 0;\n}\n";
 
 TEST(a_module_imported_under_several_names_is_emitted_once, {
     TEST_ASSERT_TRUE(
-        emit_two("main.ft", TWICE_MAIN, "util.ft", "fn i32 twice(i32 n) { return n +% n; }\n"));
+        emit_two("main.ft", TWICE_MAIN, "util.ft", "fn twice(i32 n) i32 { return n +% n; }\n"));
     // One module is one set of definitions however many names reach it, and
     // every call names the one symbol.
     // D9.3, D9.7
@@ -254,14 +254,14 @@ TEST(a_module_imported_under_several_names_is_emitted_once, {
 // D9.10
 static const char* const DIAMOND_NAMES[] = {"main.ft", "left.ft", "right.ft", "leaf.ft"};
 static const char DIAMOND_ENTRY[] = "import left;\nimport right;\n"
-                                    "fn i32 main() {\n"
+                                    "fn main() i32 {\n"
                                     "    println(left.up() +% right.down());\n"
                                     "    return 0;\n}\n";
 static const char* const DIAMOND_TEXTS[] = {
     DIAMOND_ENTRY,
-    "import leaf;\nfn i32 up() { return leaf.value(); }\n",
-    "import leaf as base;\nfn i32 down() { return base.value(); }\n",
-    "fn i32 value() { return 5; }\n",
+    "import leaf;\nfn up() i32 { return leaf.value(); }\n",
+    "import leaf as base;\nfn down() i32 { return base.value(); }\n",
+    "fn value() i32 { return 5; }\n",
 };
 
 TEST(a_module_two_importers_share_is_emitted_once, {
@@ -280,9 +280,9 @@ TEST(a_module_two_importers_share_is_emitted_once, {
 TEST(main_in_another_module_is_an_ordinary_function, {
     TEST_ASSERT_TRUE(emit_two("main.ft",
                               "import other;\n"
-                              "fn i32 main() {\n    println(other.main());\n    return 0;\n}\n",
+                              "fn main() i32 {\n    println(other.main());\n    return 0;\n}\n",
                               "other.ft",
-                              "fn i32 main() { return 41; }\n"));
+                              "fn main() i32 { return 41; }\n"));
     // `main` in a module that is not the entry one is an ordinary function
     // (module-system.md 11), and its symbol is its own path plus the name, so
     // the two never collide.
@@ -299,11 +299,11 @@ TEST(main_in_another_module_is_an_ordinary_function, {
 TEST(an_enum_two_modules_print_has_one_table, {
     TEST_ASSERT_TRUE(emit_two("main.ft",
                               "import util;\n"
-                              "fn i32 main() {\n    println(util.color.red, util.show());\n"
+                              "fn main() i32 {\n    println(util.color.red, util.show());\n"
                               "    return 0;\n}\n",
                               "util.ft",
                               "enum color {\n    red,\n    green,\n}\n"
-                              "fn color show() { return color.green; }\n"));
+                              "fn show() color { return color.green; }\n"));
     // The table belongs to the declaration, not to the module that prints it
     // (item 21), so one enum is one `@.enum.<path.name>`.
     // D9.7
@@ -316,11 +316,11 @@ TEST(two_modules_declaring_one_name_keep_two_named_types, {
     TEST_ASSERT_TRUE(emit_two("main.ft",
                               "import util;\n"
                               "struct point {\n    i32 x;\n}\n"
-                              "fn i32 main() {\n    point p = {1};\n"
+                              "fn main() i32 {\n    point p = {1};\n"
                               "    println(p.x +% util.origin().x);\n    return 0;\n}\n",
                               "util.ft",
                               "struct point {\n    i32 x;\n}\n"
-                              "fn point origin() { return point{2}; }\n"));
+                              "fn origin() point { return point{2}; }\n"));
     // Structs are nominal and every symbol carries its module path, so two
     // declarations of one name are two named types.
     // D3.8, D9.7

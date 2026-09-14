@@ -84,17 +84,17 @@
 # A line `!frame <name>` selects the frame every row below it goes into, until
 # the next such line. There are three frames and `base` is the first:
 #
-#   base   fn i32 z(i32 v) { return v; }, and i64, char and u8 twins of it,
+#   base   fn z(i32 v) i32 { return v; }, and i64, char and u8 twins of it,
 #          with main declaring `i32 n`, `i32 thirtyone`, `bool c` and
 #          `i32[4] mut a`, each through a call so that it is a run-time value.
 #          The body is the statement list of main.
-#   float  base plus `fn f64 zf(f64 v)` and `fn f32 zg(f32 v)`, and main
+#   float  base plus `fn zf(f64 v) f64` and `fn zg(f32 v) f32`, and main
 #          declaring `f64 d = zf(0.5);` as well. stage1 parses the two types
 #          and refuses the literal `0.5` (D2.6), so it stops one line above
 #          every row of this frame and the stage1 column of them all is FRAME.
 #          That is the right answer for a compiler with no floats, and FRAME
 #          rather than REPORTED says the row itself went unread.
-#   ret    base plus `fn i64 r(i32 n)`, whose body is the row. main prints
+#   ret    base plus `fn r(i32 n) i64`, whose body is the row. main prints
 #          `r(z(1))`. This is the one frame that puts the row in a return
 #          position.
 #
@@ -224,39 +224,39 @@ while IFS= read -r line; do
 
     prog=$work/row.ft
     {
-        echo 'fn i32 z(i32 v) {'
+        echo 'fn z(i32 v) i32 {'
         echo '    return v;'
         echo '}'
         echo ''
-        echo 'fn i64 zw(i64 v) {'
+        echo 'fn zw(i64 v) i64 {'
         echo '    return v;'
         echo '}'
         echo ''
-        echo 'fn char zc(char v) {'
+        echo 'fn zc(char v) char {'
         echo '    return v;'
         echo '}'
         echo ''
-        echo 'fn u8 zb(u8 v) {'
+        echo 'fn zb(u8 v) u8 {'
         echo '    return v;'
         echo '}'
         echo ''
         if [ "$frame" = float ]; then
-            echo 'fn f64 zf(f64 v) {'
+            echo 'fn zf(f64 v) f64 {'
             echo '    return v;'
             echo '}'
             echo ''
-            echo 'fn f32 zg(f32 v) {'
+            echo 'fn zg(f32 v) f32 {'
             echo '    return v;'
             echo '}'
             echo ''
         fi
         if [ "$frame" = ret ]; then
-            echo 'fn i64 r(i32 n) {'
+            echo 'fn r(i32 n) i64 {'
             echo "    $body"
             echo '}'
             echo ''
         fi
-        echo 'fn i32 main() {'
+        echo 'fn main() i32 {'
         echo '    i32 n = z(1);'
         echo '    i32 thirtyone = z(31);'
         echo '    bool c = z(1) > 0;'

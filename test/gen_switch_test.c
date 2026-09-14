@@ -19,7 +19,7 @@
 
 // The switch the shape tests read: three clauses, the `default` between two
 // `case` clauses, two labels on the first and an empty body on the last.
-static const char THREE_CLAUSES[] = "fn i32 main() {\n"
+static const char THREE_CLAUSES[] = "fn main() i32 {\n"
                                     "    i32 n = 0;\n"
                                     "    i32 mut r = 0;\n"
                                     "    switch (n) {\n"
@@ -31,7 +31,7 @@ static const char THREE_CLAUSES[] = "fn i32 main() {\n"
 
 // A `switch` in a `for`, with a `break`, a `continue` and a `default` body, so
 // that the two targets of one statement can be told apart.
-static const char SWITCH_IN_LOOP[] = "fn i32 main() {\n"
+static const char SWITCH_IN_LOOP[] = "fn main() i32 {\n"
                                      "    i32 mut s = 0;\n"
                                      "    for (i32 mut i = 0; i < 4; i = i +% 1) {\n"
                                      "        switch (i) {\n"
@@ -44,7 +44,7 @@ static const char SWITCH_IN_LOOP[] = "fn i32 main() {\n"
                                      "    return s;\n}\n";
 
 // A `while` inside a case body: its `break` is the loop's, not the switch's.
-static const char LOOP_IN_SWITCH[] = "fn i32 main() {\n"
+static const char LOOP_IN_SWITCH[] = "fn main() i32 {\n"
                                      "    i32 n = 0;\n"
                                      "    i32 mut s = 0;\n"
                                      "    switch (n) {\n"
@@ -61,7 +61,7 @@ static const char LOOP_IN_SWITCH[] = "fn i32 main() {\n"
 // gives one of its own.
 // D7.7
 static const char EXHAUSTIVE_ENUM[] = "enum color { red, green }\n"
-                                      "fn i32 main() {\n    color c = color.red;\n"
+                                      "fn main() i32 {\n    color c = color.red;\n"
                                       "    i32 mut r = 0;\n"
                                       "    switch (c) {\n"
                                       "    case color.red:\n        r = 1;\n"
@@ -73,17 +73,17 @@ static const char EXHAUSTIVE_ENUM[] = "enum color { red, green }\n"
 // function a value no clause names.
 // T-020: the review that asked for this program
 static const char ENUM_NAME_FN[] = "enum level { low = 1, high = 2 }\n"
-                                   "fn string name(level l) {\n"
+                                   "fn name(level l) string {\n"
                                    "    switch (l) {\n"
                                    "    case level.low:\n        return \"low\";\n"
                                    "    case level.high:\n        return \"high\";\n"
                                    "    }\n}\n"
-                                   "fn i32 main() {\n    level z = {};\n"
+                                   "fn main() i32 {\n    level z = {};\n"
                                    "    println(name(z));\n    return 0;\n}\n";
 
 // A `switch` inside a case body of another: each `break` names its own
 // switch's continuation.
-static const char SWITCH_IN_SWITCH[] = "fn i32 main() {\n"
+static const char SWITCH_IN_SWITCH[] = "fn main() i32 {\n"
                                        "    i32 n = 0;\n"
                                        "    i32 mut s = 0;\n"
                                        "    switch (n) {\n"
@@ -154,7 +154,7 @@ TEST(an_empty_case_body_only_branches_to_the_continuation, {
 })
 
 TEST(a_switch_without_a_default_falls_to_its_continuation, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 n = 0;\n    i32 mut r = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 n = 0;\n    i32 mut r = 0;\n"
                           "    switch (n) {\n    case 1:\n        r = 1;\n    }\n"
                           "    return r;\n}\n"));
     // With no `default` clause the default block is the continuation itself
@@ -171,7 +171,7 @@ TEST(a_switch_without_a_default_falls_to_its_continuation, {
 })
 
 TEST(a_switch_with_no_clause_has_an_empty_case_list, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 n = 0;\n    switch (n) {\n    }\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 n = 0;\n    switch (n) {\n    }\n"
                           "    return n;\n}\n"));
     const char* want = "  switch i32 %t0, label %L0 [\n  ]\n\nL0:\n";
     TEST_ASSERT_EQ_STR(found(want), want);
@@ -179,12 +179,12 @@ TEST(a_switch_with_no_clause_has_an_empty_case_list, {
 })
 
 TEST(a_case_body_that_terminates_does_not_branch_to_the_continuation, {
-    TEST_ASSERT_TRUE(emit("fn i32 bucket(i32 n) {\n"
+    TEST_ASSERT_TRUE(emit("fn bucket(i32 n) i32 {\n"
                           "    switch (n) {\n"
                           "    case 1:\n        return 10;\n"
                           "    default:\n        return 20;\n"
                           "    }\n}\n"
-                          "fn i32 main() { return bucket(1); }\n"));
+                          "fn main() i32 { return bucket(1); }\n"));
     // A `return` already ended the block, so no `br` is added after it (item
     // 10), and the continuation of a switch every clause terminates is the
     // unreachable block the epilogue leaves at the end of the body.
@@ -200,7 +200,7 @@ TEST(a_case_body_that_terminates_does_not_branch_to_the_continuation, {
 })
 
 TEST(a_statement_after_a_switch_stands_in_its_continuation, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut n = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut n = 0;\n"
                           "    switch (n) {\n    default:\n        n = 1;\n    }\n"
                           "    n = n +% 2;\n    return n;\n}\n"));
     const char* want = "\nL1:\n"
@@ -214,7 +214,7 @@ TEST(a_statement_after_a_switch_stands_in_its_continuation, {
 // D7.5, D7.6
 
 TEST(a_break_inside_a_case_branches_to_the_switchs_continuation, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 n = 0;\n    i32 mut s = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 n = 0;\n    i32 mut s = 0;\n"
                           "    switch (n) {\n"
                           "    default:\n        if (n == 0) { break; }\n        s = 1;\n"
                           "    }\n    return s;\n}\n"));
@@ -247,7 +247,7 @@ TEST(a_continue_in_a_switch_targets_the_loop_around_it, {
 })
 
 TEST(a_case_body_never_falls_into_the_next_clause, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 n = 0;\n    i32 mut r = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 n = 0;\n    i32 mut r = 0;\n"
                           "    switch (n) {\n"
                           "    case 1:\n        r = 1;\n"
                           "    case 2:\n        r = 2;\n        break;\n"
@@ -304,7 +304,7 @@ TEST(the_enclosing_switch_is_the_target_again_after_a_nested_one, {
 })
 
 TEST(a_switch_inside_a_range_for_keeps_the_loops_continue_target, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32[3] a = {4, 5, 6};\n    i32 mut s = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32[3] a = {4, 5, 6};\n    i32 mut s = 0;\n"
                           "    for (i32 v : a) {\n"
                           "        switch (v) {\n"
                           "        case 5:\n            continue;\n"
@@ -318,7 +318,7 @@ TEST(a_switch_inside_a_range_for_keeps_the_loops_continue_target, {
 })
 
 TEST(a_loop_in_a_switch_in_a_loop_names_the_innermost_of_each, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut s = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut s = 0;\n"
                           "    while (s < 9) {\n"
                           "        switch (s) {\n"
                           "        default:\n"
@@ -341,7 +341,7 @@ TEST(a_loop_in_a_switch_in_a_loop_names_the_innermost_of_each, {
 // D7.6, D19.5
 
 TEST(a_char_operand_switches_on_i8_with_byte_values, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    char c = 'a';\n    i32 mut r = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    char c = 'a';\n    i32 mut r = 0;\n"
                           "    switch (c) {\n"
                           "    case 'a', '\\n':\n        r = 1;\n"
                           "    case '\\xff':\n        r = 2;\n"
@@ -360,7 +360,7 @@ TEST(a_char_operand_switches_on_i8_with_byte_values, {
 
 TEST(an_enum_operand_switches_on_i32_and_a_negative_member_prints_signed, {
     TEST_ASSERT_TRUE(emit("enum sign { neg = -1, zero, pos }\n"
-                          "fn i32 main() {\n    sign s = sign.zero;\n    i32 mut r = 0;\n"
+                          "fn main() i32 {\n    sign s = sign.zero;\n    i32 mut r = 0;\n"
                           "    switch (s) {\n"
                           "    case sign.neg:\n        r = 1;\n"
                           "    case sign.zero, sign.pos:\n        r = 2;\n"
@@ -436,7 +436,7 @@ TEST(the_generated_default_is_kept_in_both_build_modes, {
 
 TEST(an_enum_switch_with_a_default_clause_gets_no_failure_block, {
     TEST_ASSERT_TRUE(emit("enum color { red, green }\n"
-                          "fn i32 main() {\n    color c = color.red;\n    i32 mut r = 0;\n"
+                          "fn main() i32 {\n    color c = color.red;\n    i32 mut r = 0;\n"
                           "    switch (c) {\n"
                           "    case color.red:\n        r = 1;\n"
                           "    default:\n        r = 2;\n"
@@ -451,7 +451,7 @@ TEST(an_enum_switch_with_a_default_clause_gets_no_failure_block, {
 })
 
 TEST(a_switch_on_an_integer_with_no_default_gets_no_failure_block, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 n = 0;\n    i32 mut r = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 n = 0;\n    i32 mut r = 0;\n"
                           "    switch (n) {\n    case 1:\n        r = 1;\n    }\n"
                           "    return r;\n}\n"));
     // Every value of an integer type is a legal value of it, so a switch no
@@ -464,7 +464,7 @@ TEST(a_switch_on_an_integer_with_no_default_gets_no_failure_block, {
 
 TEST(the_generated_default_precedes_the_failure_blocks_of_the_bodies, {
     TEST_ASSERT_TRUE(emit("enum color { red, green }\n"
-                          "fn i32 main(string@ args) {\n    color c = color.red;\n"
+                          "fn main(string@ args) i32 {\n    color c = color.red;\n"
                           "    i32 mut r = 0;\n"
                           "    switch (c) {\n"
                           "    case color.red:\n        r = cast(args.len, i32) + 1;\n"
@@ -480,7 +480,7 @@ TEST(the_generated_default_precedes_the_failure_blocks_of_the_bodies, {
 })
 
 TEST(a_signed_label_of_a_narrow_type_prints_as_a_negative, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i8 v = -128;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i8 v = -128;\n"
                           "    switch (v) {\n    case -128:\n        return 1;\n"
                           "    default:\n        return 0;\n    }\n}\n"));
     TEST_ASSERT_EQ_STR(found("    i8 -128, label %L0\n"), "    i8 -128, label %L0\n");
@@ -488,7 +488,7 @@ TEST(a_signed_label_of_a_narrow_type_prints_as_a_negative, {
 })
 
 TEST(an_unsigned_label_prints_its_whole_range, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    u64 v = 18446744073709551615;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    u64 v = 18446744073709551615;\n"
                           "    switch (v) {\n    case 18446744073709551615:\n        return 1;\n"
                           "    default:\n        return 0;\n    }\n}\n"));
     // An unsigned label prints unsigned, so the greatest `u64` is not the
@@ -500,7 +500,7 @@ TEST(an_unsigned_label_prints_its_whole_range, {
 })
 
 TEST(an_untyped_constant_operand_takes_its_default_type, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut r = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut r = 0;\n"
                           "    switch (200) {\n    case 200:\n        r = 1;\n    }\n"
                           "    return r;\n}\n"));
     // The operand is `i32`, the default type of an untyped integer constant,
@@ -512,7 +512,7 @@ TEST(an_untyped_constant_operand_takes_its_default_type, {
 })
 
 TEST(a_label_that_is_a_constant_expression_prints_its_value, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 n = 5;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 n = 5;\n"
                           "    switch (n) {\n    case 2 + 3:\n        return 1;\n"
                           "    case sizeof(i64):\n        return 2;\n"
                           "    default:\n        return 0;\n    }\n}\n"));
@@ -524,8 +524,8 @@ TEST(a_label_that_is_a_constant_expression_prints_its_value, {
 })
 
 TEST(the_operand_is_evaluated_once, {
-    TEST_ASSERT_TRUE(emit("fn i32 count() { return 3; }\n"
-                          "fn i32 main() {\n    i32 mut r = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn count() i32 { return 3; }\n"
+                          "fn main() i32 {\n    i32 mut r = 0;\n"
                           "    switch (count()) {\n"
                           "    case 3:\n        r = 1;\n"
                           "    default:\n        r = 2;\n    }\n"
@@ -540,7 +540,7 @@ TEST(the_operand_is_evaluated_once, {
 })
 
 TEST(each_case_body_is_a_block_scope_with_slots_of_its_own, {
-    TEST_ASSERT_TRUE(emit("fn i32 main() {\n    i32 mut n = 0;\n"
+    TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 mut n = 0;\n"
                           "    switch (n) {\n"
                           "    case 1: {\n        i32 x = 1;\n        n = x;\n    }\n"
                           "    default: {\n        i64 x = 2;\n        n = cast(x, i32);\n    }\n"
@@ -562,20 +562,20 @@ static const char* const SWITCH_CORPUS[] = {
     SWITCH_IN_LOOP,
     LOOP_IN_SWITCH,
     SWITCH_IN_SWITCH,
-    "fn i32 main() {\n    i32 n = 0;\n    switch (n) {\n    }\n    return n;\n}\n",
+    "fn main() i32 {\n    i32 n = 0;\n    switch (n) {\n    }\n    return n;\n}\n",
     "enum color { red, green = 5, blue }\n"
-    "fn i32 main() {\n    color c = color.blue;\n"
+    "fn main() i32 {\n    color c = color.blue;\n"
     "    switch (c) {\n"
     "    case color.red, color.green:\n        println(c);\n"
     "    case color.blue:\n        println(\"blue\");\n"
     "    }\n    return 0;\n}\n",
     ENUM_NAME_FN,
-    "fn i32 kind(char c) {\n"
+    "fn kind(char c) i32 {\n"
     "    switch (c) {\n"
     "    case 'a', 'e':\n        return 1;\n"
     "    default:\n        return 0;\n    }\n}\n"
-    "fn i32 main() { return kind('e'); }\n",
-    "fn i32 main() {\n    i32[4] a = {1, 2, 3, 4};\n    i32 mut s = 0;\n"
+    "fn main() i32 { return kind('e'); }\n",
+    "fn main() i32 {\n    i32[4] a = {1, 2, 3, 4};\n    i32 mut s = 0;\n"
     "    for (i32 v : a) {\n"
     "        switch (v) {\n"
     "        case 1:\n            continue;\n"
@@ -624,13 +624,13 @@ TEST(two_runs_over_a_switch_program_produce_byte_identical_text, {
 })
 
 TEST(the_block_counter_is_reset_at_each_switch_bearing_definition, {
-    TEST_ASSERT_TRUE(emit("fn i32 first(i32 n) {\n"
+    TEST_ASSERT_TRUE(emit("fn first(i32 n) i32 {\n"
                           "    switch (n) {\n    case 1:\n        return 1;\n"
                           "    default:\n        return 0;\n    }\n}\n"
-                          "fn i32 second(i32 n) {\n"
+                          "fn second(i32 n) i32 {\n"
                           "    switch (n) {\n    case 2:\n        return 2;\n"
                           "    default:\n        return 0;\n    }\n}\n"
-                          "fn i32 main() { return first(1) +% second(2); }\n"));
+                          "fn main() i32 { return first(1) +% second(2); }\n"));
     // Every counter is per function and reset at each definition, so both
     // switches name L0, L1 and L2.
     // D19.5

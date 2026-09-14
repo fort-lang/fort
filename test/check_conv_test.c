@@ -32,12 +32,12 @@ TEST(mutability_is_never_added_implicitly, {
 
 TEST(a_drop_behind_a_mutable_level_is_refused, {
     TEST_ASSERT_TRUE(check_src("struct node {\n    i32 v;\n}\n"
-                               "fn i32 main() {\n"
+                               "fn main() i32 {\n"
                                "    node mut* mut@ own a = new(node mut*, 1);\n"
                                "    node*@ b = a;\n    println(b.len);\n    del(a);\n"
                                "    return 0;\n}\n"));
     TEST_ASSERT_FALSE(check_src("struct node {\n    i32 v;\n}\n"
-                                "fn i32 main() {\n"
+                                "fn main() i32 {\n"
                                 "    node mut* mut@ own a = new(node mut*, 1);\n"
                                 "    node* mut@ c = a;\n    println(c.len);\n    del(a);\n"
                                 "    return 0;\n}\n"));
@@ -48,12 +48,12 @@ TEST(a_drop_behind_a_mutable_level_is_refused, {
 })
 
 TEST(the_drop_rule_applies_to_arguments_and_returns, {
-    TEST_ASSERT_TRUE(check_src("fn void look(i32* p) {\n    println(p);\n}\n"
-                               "fn i32* view(i32 mut* p) {\n    return p;\n}\n"
-                               "fn i32 main() {\n    i32 mut v = 1;\n    look(&v);\n"
+    TEST_ASSERT_TRUE(check_src("fn look(i32* p) void {\n    println(p);\n}\n"
+                               "fn view(i32 mut* p) i32* {\n    return p;\n}\n"
+                               "fn main() i32 {\n    i32 mut v = 1;\n    look(&v);\n"
                                "    println(view(&v));\n    return 0;\n}\n"));
-    TEST_ASSERT_FALSE(check_src("fn void write(i32 mut* p) {\n    println(p);\n}\n"
-                                "fn i32 main() {\n    i32 v = 1;\n    write(&v);\n"
+    TEST_ASSERT_FALSE(check_src("fn write(i32 mut* p) void {\n    println(p);\n}\n"
+                                "fn main() i32 {\n    i32 v = 1;\n    write(&v);\n"
                                 "    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("the argument expects i32 mut*, not i32*"));
 })
@@ -231,14 +231,14 @@ TEST(a_cast_from_a_pointer_to_a_span_is_refused, {
 
 TEST(a_cast_to_a_struct_or_an_array_is_refused, {
     TEST_ASSERT_FALSE(check_src("struct point {\n    i32 x;\n}\n"
-                                "fn i32 main() {\n    i32 n = 1;\n    point p = cast(n, point);\n"
+                                "fn main() i32 {\n    i32 n = 1;\n    point p = cast(n, point);\n"
                                 "    return p.x;\n}\n"));
     TEST_ASSERT_TRUE(said("cannot cast i32 to point"));
 })
 
 TEST(a_cast_between_an_enum_and_an_integer_is_allowed, {
     TEST_ASSERT_TRUE(check_src("enum color {\n    red,\n    green,\n}\n"
-                               "fn i32 main() {\n    color c = cast(1, color);\n"
+                               "fn main() i32 {\n    color c = cast(1, color);\n"
                                "    return cast(c, i32);\n}\n"));
 })
 
@@ -260,31 +260,31 @@ TEST(a_cast_target_that_is_too_large_is_refused, {
 
 TEST(a_module_is_not_a_value_and_not_a_type, {
     begin();
-    add("util.ft", "fn i32 one() {\n    return 1;\n}\n");
-    add("main.ft", "import util;\nfn i32 main() {\n    i32 n = util;\n    return n;\n}\n");
+    add("util.ft", "fn one() i32 {\n    return 1;\n}\n");
+    add("main.ft", "import util;\nfn main() i32 {\n    i32 n = util;\n    return n;\n}\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     // The diagnostics of module-system.md 13.
     TEST_ASSERT_TRUE(said("'util' is a module, not a value"));
     begin();
-    add("util.ft", "fn i32 one() {\n    return 1;\n}\n");
-    add("main.ft", "import util;\nfn i32 main() {\n    util u = 1;\n    return 0;\n}\n");
+    add("util.ft", "fn one() i32 {\n    return 1;\n}\n");
+    add("main.ft", "import util;\nfn main() i32 {\n    util u = 1;\n    return 0;\n}\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("'util' is a module, not a type"));
 })
 
 TEST(a_module_without_the_declaration_is_reported, {
     begin();
-    add("util.ft", "fn i32 one() {\n    return 1;\n}\n");
-    add("main.ft", "import util;\nfn i32 main() {\n    return util.two();\n}\n");
+    add("util.ft", "fn one() i32 {\n    return 1;\n}\n");
+    add("main.ft", "import util;\nfn main() i32 {\n    return util.two();\n}\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("module 'util' has no declaration named 'two'"));
 })
 
 TEST(the_import_bindings_of_a_module_are_not_reachable_through_a_dot, {
     begin();
-    add("deep.ft", "enum tone {\n    low,\n    high,\n}\nfn i32 base() {\n    return 1;\n}\n");
-    add("mid.ft", "import deep;\nfn i32 step() {\n    return deep.base();\n}\n");
-    add("main.ft", "import mid;\nfn i32 main() {\n    return mid.deep.base();\n}\n");
+    add("deep.ft", "enum tone {\n    low,\n    high,\n}\nfn base() i32 {\n    return 1;\n}\n");
+    add("mid.ft", "import deep;\nfn step() i32 {\n    return deep.base();\n}\n");
+    add("main.ft", "import mid;\nfn main() i32 {\n    return mid.deep.base();\n}\n");
     // Qualified access sees the declarations of `mid`, not its imports: an
     // import binding is not re-exported (module-system.md 4).
     // D9.3
@@ -295,9 +295,9 @@ TEST(the_import_bindings_of_a_module_are_not_reachable_through_a_dot, {
 TEST(a_re_exported_enum_member_is_refused_at_the_module_binding, {
     begin();
     add("deep.ft", "enum tone {\n    low,\n    high,\n}\n");
-    add("mid.ft", "import deep;\nfn i32 step() {\n    return 1;\n}\n");
+    add("mid.ft", "import deep;\nfn step() i32 {\n    return 1;\n}\n");
     add("main.ft",
-        "import mid;\nfn i32 main() {\n"
+        "import mid;\nfn main() i32 {\n"
         "    return cast(mid.deep.tone.high, i32);\n}\n");
     // The leftmost dot fails first, so the member spelling never reaches an
     // enum of a module the file did not import.
@@ -308,9 +308,9 @@ TEST(a_re_exported_enum_member_is_refused_at_the_module_binding, {
 
 TEST(a_symbol_a_module_imported_is_not_one_of_its_declarations, {
     begin();
-    add("deep.ft", "fn i32 base() {\n    return 1;\n}\n");
-    add("mid.ft", "import deep.base;\nfn i32 step() {\n    return base();\n}\n");
-    add("main.ft", "import mid;\nfn i32 main() {\n    return mid.base();\n}\n");
+    add("deep.ft", "fn base() i32 {\n    return 1;\n}\n");
+    add("mid.ft", "import deep.base;\nfn step() i32 {\n    return base();\n}\n");
+    add("main.ft", "import mid;\nfn main() i32 {\n    return mid.base();\n}\n");
     // The other import binding, with the same answer.
     // D9.3
     TEST_ASSERT_FALSE(check_entry("main.ft"));
@@ -319,11 +319,11 @@ TEST(a_symbol_a_module_imported_is_not_one_of_its_declarations, {
 
 TEST(a_module_reaches_the_declarations_of_the_modules_it_imports_itself, {
     begin();
-    add("deep.ft", "fn i32 base() {\n    return 1;\n}\n");
-    add("mid.ft", "import deep;\nfn i32 step() {\n    return deep.base();\n}\n");
+    add("deep.ft", "fn base() i32 {\n    return 1;\n}\n");
+    add("mid.ft", "import deep;\nfn step() i32 {\n    return deep.base();\n}\n");
     add("main.ft",
         "import mid;\nimport deep;\n"
-        "fn i32 main() {\n    return mid.step() + deep.base();\n}\n");
+        "fn main() i32 {\n    return mid.step() + deep.base();\n}\n");
     // The rule bars the re-export, not the module: a file that imports `deep`
     // itself reaches it.
     // D9.3
@@ -335,7 +335,7 @@ TEST(an_imported_declaration_is_used_through_its_short_name, {
     add("util.ft", "i32 SIZE = 3;\nstruct pair {\n    i32 a;\n    i32 b;\n}\n");
     add("main.ft",
         "import util.{SIZE, pair};\n"
-        "fn i32 main() {\n    pair p = {1, 2};\n    i32[SIZE] t = {};\n"
+        "fn main() i32 {\n    pair p = {1, 2};\n    i32[SIZE] t = {};\n"
         "    return p.a + t[2];\n}\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
     TEST_ASSERT_EQ_STR(decl_type("t"), "i32[3]");
@@ -346,7 +346,7 @@ TEST(a_qualified_enum_member_crosses_modules, {
     add("palette.ft", "enum color {\n    red,\n    green,\n}\n");
     add("main.ft",
         "import palette;\n"
-        "fn i32 main() {\n    palette.color c = palette.color.green;\n"
+        "fn main() i32 {\n    palette.color c = palette.color.green;\n"
         "    return cast(c, i32);\n}\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
 })
@@ -356,7 +356,7 @@ TEST(an_imported_type_keeps_its_identity, {
     add("geom.ft", "struct point {\n    i32 x;\n}\n");
     add("main.ft",
         "import geom;\nstruct point {\n    i32 x;\n}\n"
-        "fn i32 main() {\n    geom.point a = {1};\n    point b = a;\n    return b.x;\n}\n");
+        "fn main() i32 {\n    geom.point a = {1};\n    point b = a;\n    return b.x;\n}\n");
     // Structs are nominal: two declarations are two types.
     // D3.8, D3.12
     TEST_ASSERT_FALSE(check_entry("main.ft"));
@@ -368,15 +368,15 @@ TEST(an_imported_type_keeps_its_identity, {
 
 TEST(an_aggregate_is_passed_and_returned_by_value, {
     TEST_ASSERT_TRUE(check_src("struct point {\n    i32 x;\n    i32 y;\n}\n"
-                               "fn point flip(point p) {\n    return point{p.y, p.x};\n}\n"
-                               "fn i32 main() {\n    point a = {1, 2};\n    point b = flip(a);\n"
+                               "fn flip(point p) point {\n    return point{p.y, p.x};\n}\n"
+                               "fn main() i32 {\n    point a = {1, 2};\n    point b = flip(a);\n"
                                "    return b.x;\n}\n"));
 })
 
 TEST(a_fixed_array_parameter_keeps_its_length, {
     TEST_ASSERT_FALSE(
-        check_src("fn i32 first(i32[3] a) {\n    return a[0];\n}\n"
-                  "fn i32 main() {\n    i32[2] t = {1, 2};\n    return first(t);\n}\n"));
+        check_src("fn first(i32[3] a) i32 {\n    return a[0];\n}\n"
+                  "fn main() i32 {\n    i32[2] t = {1, 2};\n    return first(t);\n}\n"));
     // Different `N` are different types.
     // D3.4
     TEST_ASSERT_TRUE(said("the argument expects i32[3], not i32[2]"));
@@ -384,24 +384,24 @@ TEST(a_fixed_array_parameter_keeps_its_length, {
 
 TEST(a_function_type_ignores_the_binding_mut_of_its_parameters, {
     TEST_ASSERT_TRUE(
-        check_src("fn i32 take(i32 mut n) {\n    n = n + 1;\n    return n;\n}\n"
-                  "fn i32 main() {\n    fn i32(i32) f = take;\n    return f(1);\n}\n"));
+        check_src("fn take(i32 mut n) i32 {\n    n = n + 1;\n    return n;\n}\n"
+                  "fn main() i32 {\n    fn (i32) i32 f = take;\n    return f(1);\n}\n"));
     // Binding-level `mut` on parameters is not part of the type.
     // D3.10
-    TEST_ASSERT_EQ_STR(type_text(sym_main("take")->type), "fn i32(i32)");
+    TEST_ASSERT_EQ_STR(type_text(sym_main("take")->type), "fn (i32) i32");
 })
 
 TEST(a_void_parameter_is_refused, {
-    TEST_ASSERT_FALSE(check_src("fn i32 f(void v) {\n    return 1;\n}\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_FALSE(check_src("fn f(void v) i32 {\n    return 1;\n}\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("'void' is only a return type or the base of 'void*'"));
 })
 
 TEST(an_extern_signature_takes_scalars_and_pointers, {
-    TEST_ASSERT_TRUE(check_src("extern fn i64 write(i32 fd, void* buf, u64 n);\n"
-                               "fn i32 main() {\n    return cast(write(1, null, 0), i32);\n}\n"));
-    TEST_ASSERT_FALSE(check_src("extern fn void take(i32[2] a);\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(check_src("extern fn write(i32 fd, void* buf, u64 n) i64;\n"
+                               "fn main() i32 {\n    return cast(write(1, null, 0), i32);\n}\n"));
+    TEST_ASSERT_FALSE(check_src("extern fn take(i32[2] a) void;\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("extern signature cannot use type 'i32[2]'"));
     // The rest of the "not allowed" column of module-system.md 8.1: a struct
     // by value, a span, and an owning span or string, each of which would have
@@ -409,20 +409,20 @@ TEST(an_extern_signature_takes_scalars_and_pointers, {
     // how a struct crosses.
     // D9.8
     TEST_ASSERT_FALSE(check_src("struct point {\n    i32 x;\n}\n"
-                                "extern fn void take(point p);\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
+                                "extern fn take(point p) void;\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("extern signature cannot use type 'point'"));
     TEST_ASSERT_TRUE(check_src("struct point {\n    i32 x;\n}\n"
-                               "extern fn void take(point mut* p);\n"
-                               "fn i32 main() {\n    return 0;\n}\n"));
-    TEST_ASSERT_FALSE(check_src("extern fn void take(i32@ xs);\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
+                               "extern fn take(point mut* p) void;\n"
+                               "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_FALSE(check_src("extern fn take(i32@ xs) void;\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("extern signature cannot use type 'i32@'"));
-    TEST_ASSERT_FALSE(check_src("extern fn void take(u8 mut@ own xs);\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_FALSE(check_src("extern fn take(u8 mut@ own xs) void;\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("extern signature cannot use type 'u8 mut@ own'"));
-    TEST_ASSERT_FALSE(check_src("extern fn string own grab();\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_FALSE(check_src("extern fn grab() string own;\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("extern signature cannot use type 'string own'"));
 })
 
@@ -432,12 +432,12 @@ TEST(an_extern_function_pointer_parameter_needs_an_extern_legal_signature, {
     // convention, so a struct or span in it would cross the boundary after
     // all.
     // D9.8, D9.9
-    TEST_ASSERT_TRUE(check_src("extern fn void sort(void* base, fn i32(void*, void*) cmp);\n"
-                               "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(check_src("extern fn sort(void* base, fn (void*, void*) i32 cmp) void;\n"
+                               "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_FALSE(check_src("struct point {\n    i32 x;\n}\n"
-                                "extern fn void each(fn void(point) cb);\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
-    TEST_ASSERT_TRUE(said("extern signature cannot use type 'fn void(point)'"));
+                                "extern fn each(fn (point) void cb) void;\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("extern signature cannot use type 'fn (point) void'"));
 })
 
 TEST(an_extern_function_pointer_result_and_nesting_are_checked_too, {
@@ -445,18 +445,18 @@ TEST(an_extern_function_pointer_result_and_nesting_are_checked_too, {
     // function pointers inside it, since each is one more signature C calls
     // through (module-system.md 8.1).
     // D9.8
-    TEST_ASSERT_FALSE(check_src("extern fn i32 make(fn string(i32) f);\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
-    TEST_ASSERT_TRUE(said("extern signature cannot use type 'fn string(i32)'"));
-    TEST_ASSERT_FALSE(check_src("extern fn void nest(fn void(fn i32(string)) h);\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
-    TEST_ASSERT_TRUE(said("extern signature cannot use type 'fn void(fn i32(string))'"));
+    TEST_ASSERT_FALSE(check_src("extern fn make(fn (i32) string f) i32;\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("extern signature cannot use type 'fn (i32) string'"));
+    TEST_ASSERT_FALSE(check_src("extern fn nest(fn (fn (string) i32) void h) void;\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("extern signature cannot use type 'fn (fn (string) i32) void'"));
     // A result position is an extern signature like any other, so a function
     // pointer returned to C is checked the same way.
     TEST_ASSERT_FALSE(check_src("struct point {\n    i32 x;\n}\n"
-                                "extern fn fn void(point) getter();\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
-    TEST_ASSERT_TRUE(said("extern signature cannot use type 'fn void(point)'"));
+                                "extern fn getter() fn (point) void;\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("extern signature cannot use type 'fn (point) void'"));
 })
 
 TEST(a_fort_signature_may_still_carry_an_aggregate_function_pointer, {
@@ -465,15 +465,15 @@ TEST(a_fort_signature_may_still_carry_an_aggregate_function_pointer, {
     // aggregate by a hidden pointer.
     // D9.9
     TEST_ASSERT_TRUE(check_src("struct point {\n    i32 x;\n}\n"
-                               "fn void one(point p) {\n    println(p.x);\n}\n"
-                               "fn void each(fn void(point) cb, point p) {\n    cb(p);\n}\n"
-                               "fn i32 main() {\n    point p = {2};\n"
+                               "fn one(point p) void {\n    println(p.x);\n}\n"
+                               "fn each(fn (point) void cb, point p) void {\n    cb(p);\n}\n"
+                               "fn main() i32 {\n    point p = {2};\n"
                                "    each(one, p);\n    return 0;\n}\n"));
 })
 
 TEST(an_extern_may_not_declare_the_program_entry_point, {
-    TEST_ASSERT_FALSE(check_src("extern fn i64 fort_entry(i32 a, i32 b);\n"
-                                "fn i32 main() {\n    return cast(fort_entry(1, 2), i32);\n}\n"));
+    TEST_ASSERT_FALSE(check_src("extern fn fort_entry(i32 a, i32 b) i64;\n"
+                                "fn main() i32 {\n    return cast(fort_entry(1, 2), i32);\n}\n"));
     // The compiler emits the definition of `fort_entry`, so an `extern`
     // declaring it is not a second declaration of one C function: nothing can
     // check the signature against that definition, and the call would go
@@ -483,8 +483,8 @@ TEST(an_extern_may_not_declare_the_program_entry_point, {
     // The name is reserved for `extern` alone: a fort function's symbol
     // carries its module path, so it never collides.
     // D9.7
-    TEST_ASSERT_TRUE(check_src("fn i32 fort_entry() {\n    return 1;\n}\n"
-                               "fn i32 main() {\n    return fort_entry();\n}\n"));
+    TEST_ASSERT_TRUE(check_src("fn fort_entry() i32 {\n    return 1;\n}\n"
+                               "fn main() i32 {\n    return fort_entry();\n}\n"));
 })
 
 TEST(a_fort_rt_name_is_an_ordinary_extern_declaration, {
@@ -493,19 +493,19 @@ TEST(a_fort_rt_name_is_an_ordinary_extern_declaration, {
     // point is an ordinary declaration of an ordinary C symbol, held against
     // the other declarations of that symbol and against nothing else.
     // D13.1, D9.7, D9.8
-    TEST_ASSERT_TRUE(check_src("extern fn void fort_rt_del(i32 wrong);\n"
-                               "fn i32 main() {\n    fort_rt_del(5);\n    return 0;\n}\n"));
-    TEST_ASSERT_TRUE(check_src("extern fn void fort_rt_flush(i32 fd, i32 extra);\n"
-                               "fn i32 main() {\n    return 0;\n}\n"));
-    TEST_ASSERT_TRUE(check_src("extern fn i32 fort_rt_flush(i32 fd);\n"
-                               "fn i32 main() {\n    return 0;\n}\n"));
-    TEST_ASSERT_TRUE(check_src("extern fn noreturn fort_rt_exit(i32 status);\n"
-                               "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(check_src("extern fn fort_rt_del(i32 wrong) void;\n"
+                               "fn main() i32 {\n    fort_rt_del(5);\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(check_src("extern fn fort_rt_flush(i32 fd, i32 extra) void;\n"
+                               "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(check_src("extern fn fort_rt_flush(i32 fd) i32;\n"
+                               "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(check_src("extern fn fort_rt_exit(i32 status) noreturn;\n"
+                               "fn main() i32 {\n    return 0;\n}\n"));
     // What is refused of such a declaration is what is refused of any other: a
     // type an extern signature may not use.
     // D9.8
-    TEST_ASSERT_FALSE(check_src("extern fn void fort_rt_print_str(i32 fd, string s);\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_FALSE(check_src("extern fn fort_rt_print_str(i32 fd, string s) void;\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("extern signature cannot use type 'string'"));
 })
 
@@ -514,13 +514,13 @@ TEST(main_is_reserved_like_fort_entry, {
     // `extern` declaring the name is not a second declaration of one C
     // function but a signature nothing can check against that definition.
     // D11.6, D9.7
-    TEST_ASSERT_FALSE(check_src("extern fn i32 main(i32 argc, char* mut* argv);\n"
-                                "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_FALSE(check_src("extern fn main(i32 argc, char* mut* argv) i32;\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("'main' is reserved: the compiler emits it"));
     // The name is reserved for `extern` alone: the entry module's own `fn i32
     // main` is the symbol `<entry>.main` and collides with nothing.
     // D8.6, D9.7
-    TEST_ASSERT_TRUE(check_src("fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(check_src("fn main() i32 {\n    return 0;\n}\n"));
 })
 
 TEST(a_declaration_of_a_libc_symbol_is_held_against_the_librarys, {
@@ -530,17 +530,17 @@ TEST(a_declaration_of_a_libc_symbol_is_held_against_the_librarys, {
     // read here rather than a copy of its text, so the assertion cannot agree
     // with a spelling the library no longer has.
     // D9.8, D9.10, D17.13
-    TEST_ASSERT_FALSE(check_src_with_library("extern fn void free(void* p);\n"
-                                             "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_FALSE(check_src_with_library("extern fn free(void* p) void;\n"
+                                             "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("conflicting declarations of extern 'free'"));
     TEST_ASSERT_TRUE(said("previous declaration of 'free' here"));
     // The identical declaration is accepted: what the rule refuses is a
     // disagreement and never the declaration itself.
-    TEST_ASSERT_TRUE(check_src_with_library("extern fn void free(void* own p);\n"
-                                            "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(check_src_with_library("extern fn free(void* own p) void;\n"
+                                            "fn main() i32 {\n    return 0;\n}\n"));
     // And a C symbol the library does not declare is held against nothing.
-    TEST_ASSERT_TRUE(check_src_with_library("extern fn i32 puts(char* s);\n"
-                                            "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(check_src_with_library("extern fn puts(char* s) i32;\n"
+                                            "fn main() i32 {\n    return 0;\n}\n"));
 })
 
 TEST(an_immutable_buffer_is_refused_at_every_libc_entry_that_writes, {
@@ -553,7 +553,7 @@ TEST(an_immutable_buffer_is_refused_at_every_libc_entry_that_writes, {
     // D3.11, D9.8
     TEST_ASSERT_FALSE(
         check_src_with_library("import std.libc;\n"
-                               "fn i32 main() {\n"
+                               "fn main() i32 {\n"
                                "    u8[8] frozen = {1, 2, 3, 4, 5, 6, 7, 8};\n"
                                "    u8@ view = frozen[..];\n"
                                "    i64 n = libc.read(0, view.ptr, view.len);\n"
@@ -570,7 +570,7 @@ TEST(an_immutable_buffer_is_refused_at_every_libc_entry_that_writes, {
     // reported.
     TEST_ASSERT_TRUE(
         check_src_with_library("import std.libc;\n"
-                               "fn i32 main() {\n"
+                               "fn main() i32 {\n"
                                "    u8[8] frozen = {1, 2, 3, 4, 5, 6, 7, 8};\n"
                                "    u8@ view = frozen[..];\n"
                                "    i64 w = libc.write(1, view.ptr, view.len);\n"
@@ -589,9 +589,9 @@ TEST(the_runtime_allocator_hands_the_caller_storage_it_may_write, {
     // D3.11, D5.4
     TEST_ASSERT_TRUE(
         check_src_with_library("import std.rt;\n"
-                               "fn void fill(void mut* p) { }\n"
-                               "fn void read_only(void* p) { }\n"
-                               "fn i32 main() {\n"
+                               "fn fill(void mut* p) void { }\n"
+                               "fn read_only(void* p) void { }\n"
+                               "fn main() i32 {\n"
                                "    void mut* own p = rt.alloc(1, 8, \"m\".ptr, 1, 1);\n"
                                "    fill(p);\n"
                                "    read_only(p);\n"
@@ -607,8 +607,8 @@ TEST(the_runtime_allocator_hands_the_caller_storage_it_may_write, {
     // (file, line).
     // D5.4
     TEST_ASSERT_FALSE(check_src_with_library("import std.rt;\n"
-                                             "fn void fill(void mut* p) { }\n"
-                                             "fn i32 main() {\n"
+                                             "fn fill(void mut* p) void { }\n"
+                                             "fn main() i32 {\n"
                                              "    void* own p = rt.alloc(1, 8, \"m\".ptr, 1, 1);\n"
                                              "    fill(p);\n"
                                              "    rt.free(move(p));\n"
@@ -622,25 +622,25 @@ TEST(a_fort_rt_name_keeps_its_own_signature, {
     // No table holds it: a C symbol of that name is an ordinary extern,
     // whatever it is called.
     // D9.8
-    TEST_ASSERT_TRUE(check_src("extern fn i32 fort_rt_helper(string* s);\n"
-                               "fn i32 main() {\n    return 0;\n}\n"));
-    TEST_ASSERT_TRUE(check_src("extern fn i64 write(i32 fd, void* buf, u64 n);\n"
-                               "fn i32 main() {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(check_src("extern fn fort_rt_helper(string* s) i32;\n"
+                               "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(check_src("extern fn write(i32 fd, void* buf, u64 n) i64;\n"
+                               "fn main() i32 {\n    return 0;\n}\n"));
 })
 
 TEST(a_noreturn_function_pointer_keeps_its_type, {
-    TEST_ASSERT_TRUE(check_src("fn noreturn die(string msg) {\n    panic(msg);\n}\n"
-                               "fn i32 main() {\n    fn noreturn(string) f = die;\n"
+    TEST_ASSERT_TRUE(check_src("fn die(string msg) noreturn {\n    panic(msg);\n}\n"
+                               "fn main() i32 {\n    fn (string) noreturn f = die;\n"
                                "    println(f);\n    return 0;\n}\n"));
     // `noreturn` is part of a function type's identity, so the written type of
     // the binding is the function's own.
     // D3.10, D8.5
-    TEST_ASSERT_EQ_STR(type_text(sym_main("die")->type), "fn noreturn(string)");
-    TEST_ASSERT_EQ_STR(decl_type("f"), "fn noreturn(string)");
-    TEST_ASSERT_FALSE(check_src("fn void die(string msg) {\n    println(msg);\n}\n"
-                                "fn i32 main() {\n    fn noreturn(string) f = die;\n"
+    TEST_ASSERT_EQ_STR(type_text(sym_main("die")->type), "fn (string) noreturn");
+    TEST_ASSERT_EQ_STR(decl_type("f"), "fn (string) noreturn");
+    TEST_ASSERT_FALSE(check_src("fn die(string msg) void {\n    println(msg);\n}\n"
+                                "fn main() i32 {\n    fn (string) noreturn f = die;\n"
                                 "    println(f);\n    return 0;\n}\n"));
-    TEST_ASSERT_TRUE(said("expects fn noreturn(string), not fn void(string)"));
+    TEST_ASSERT_TRUE(said("expects fn (string) noreturn, not fn (string) void"));
 })
 
 // ---- imports that failed -------------------------------------------------------------
@@ -648,8 +648,8 @@ TEST(a_noreturn_function_pointer_keeps_its_type, {
 
 TEST(an_importer_is_checked_although_its_import_did_not_parse, {
     begin();
-    add("util.ft", "fn i32 one( {\n    return 1;\n}\n");
-    add("main.ft", "import util;\nfn i32 main() {\n    bool z = 1;\n    return util.one();\n}\n");
+    add("util.ft", "fn one( {\n    return 1;\n}\n");
+    add("main.ft", "import util;\nfn main() i32 {\n    bool z = 1;\n    return util.one();\n}\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     // A file with a syntax error is not checked; every other module is, so the
     // importer reports its own error.
@@ -663,7 +663,7 @@ TEST(an_importer_is_checked_although_its_import_did_not_parse, {
 TEST(a_failed_import_silences_every_use_of_its_name, {
     begin();
     add("main.ft",
-        "import nothere;\nfn i32 main() {\n    nothere.point p = {1};\n"
+        "import nothere;\nfn main() i32 {\n    nothere.point p = {1};\n"
         "    return nothere.one() + p.x;\n}\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     TEST_ASSERT_TRUE(said("not found"));
@@ -673,10 +673,10 @@ TEST(a_failed_import_silences_every_use_of_its_name, {
 
 TEST(a_multi_segment_import_path_names_its_module, {
     begin();
-    add("util/strings.ft", "i32 LEN = 3;\nfn i32 helper() {\n    return LEN;\n}\n");
+    add("util/strings.ft", "i32 LEN = 3;\nfn helper() i32 {\n    return LEN;\n}\n");
     add("main.ft",
         "import util.strings;\nimport util.strings.helper;\n"
-        "fn i32 main() {\n    return strings.LEN + helper();\n}\n");
+        "fn main() i32 {\n    return strings.LEN + helper();\n}\n");
     TEST_ASSERT_TRUE(check_entry("main.ft"));
     const sym_t* module = module_at("util.strings")->ast->sym;
     ast_node_t* mod = module_at("main")->ast;
@@ -702,13 +702,13 @@ TEST(sizeof_gives_the_size_of_every_kind, {
                                "u64 BOOL_SIZE = sizeof(bool);\n"
                                "u64 CHAR_SIZE = sizeof(char);\n"
                                "u64 PTR_SIZE = sizeof(i32*);\n"
-                               "u64 FN_SIZE = sizeof(fn i32(i32));\n"
+                               "u64 FN_SIZE = sizeof(fn (i32) i32);\n"
                                "u64 SPAN_SIZE = sizeof(i32@);\n"
                                "u64 STRING_SIZE = sizeof(string);\n"
                                "u64 ENUM_SIZE = sizeof(color);\n"
                                "u64 ARRAY_SIZE = sizeof(i32[4]);\n"
                                "u64 STRUCT_SIZE = sizeof(pad);\n"
-                               "fn i32 main() {\n    return 0;\n}\n"));
+                               "fn main() i32 {\n    return 0;\n}\n"));
     int64_t v = 0;
     TEST_ASSERT_TRUE(init_int("BOOL_SIZE", &v));
     TEST_ASSERT_EQ_INT64(v, (int64_t)1);
@@ -737,7 +737,7 @@ TEST(sizeof_gives_the_size_of_every_kind, {
 
 TEST(a_field_offset_follows_the_c_layout, {
     TEST_ASSERT_TRUE(check_src("struct pad {\n    i8 a;\n    i64 b;\n    i8 c;\n}\n"
-                               "fn i32 main() {\n    pad p = {1, 2, 3};\n"
+                               "fn main() i32 {\n    pad p = {1, 2, 3};\n"
                                "    return cast(p.a, i32);\n}\n"));
     // Fields in order, each at the next multiple of its alignment.
     // D3.8
@@ -750,7 +750,7 @@ TEST(a_struct_of_a_struct_is_laid_out_once, {
     TEST_ASSERT_TRUE(check_src("struct point {\n    i32 x;\n    i32 y;\n}\n"
                                "struct line {\n    point a;\n    point b;\n}\n"
                                "u64 SIZE = sizeof(line);\n"
-                               "fn i32 main() {\n    line l = {{1, 2}, {3, 4}};\n"
+                               "fn main() i32 {\n    line l = {{1, 2}, {3, 4}};\n"
                                "    return l.b.y;\n}\n"));
     int64_t v = 0;
     TEST_ASSERT_TRUE(init_int("SIZE", &v));
@@ -764,8 +764,8 @@ TEST(a_struct_of_a_struct_is_laid_out_once, {
 TEST(every_printable_type_prints, {
     TEST_ASSERT_TRUE(
         check_src("enum color {\n    red,\n}\n"
-                  "fn i32 id(i32 n) {\n    return n;\n}\n"
-                  "fn i32 main() {\n    i32 mut v = 1;\n"
+                  "fn id(i32 n) i32 {\n    return n;\n}\n"
+                  "fn main() i32 {\n    i32 mut v = 1;\n"
                   "    println(1, 'a', true, \"s\", color.red, &v, id, cast(0, u64));\n"
                   "    void* o = null;\n    println(o);\n    return 0;\n}\n"));
 })
@@ -782,7 +782,7 @@ TEST(an_array_and_a_span_are_not_printable, {
 
 TEST(a_failed_type_silences_the_declarations_that_use_it, {
     TEST_ASSERT_FALSE(check_src("struct bad {\n    nope x;\n}\n"
-                                "fn i32 main() {\n    bad b = {1};\n    return b.x;\n}\n"));
+                                "fn main() i32 {\n    bad b = {1};\n    return b.x;\n}\n"));
     // The field failed, so the struct and every use of it are poisoned: one
     // diagnostic.
     // D14.2
@@ -791,8 +791,8 @@ TEST(a_failed_type_silences_the_declarations_that_use_it, {
 })
 
 TEST(a_failed_function_silences_its_calls, {
-    TEST_ASSERT_FALSE(check_src("fn nope f() {\n    return 1;\n}\n"
-                                "fn i32 main() {\n    return f() + 1;\n}\n"));
+    TEST_ASSERT_FALSE(check_src("fn f() nope {\n    return 1;\n}\n"
+                                "fn main() i32 {\n    return f() + 1;\n}\n"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
 })
 
@@ -805,7 +805,7 @@ TEST(each_module_reports_its_own_errors, {
     begin();
     add("a.ft", "i32 A = nope;\n");
     add("b.ft", "import a;\ni32 B = bad;\n");
-    add("main.ft", "import b;\nfn i32 main() {\n    return b.B;\n}\n");
+    add("main.ft", "import b;\nfn main() i32 {\n    return b.B;\n}\n");
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     // Every module of the closure is checked, in dependency order.
     // D9.10, D14.2

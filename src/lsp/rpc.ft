@@ -230,7 +230,7 @@ struct conn {
 }
 
 /// A conn over the two descriptors, with the default chunk and cap.
-fn conn create(i32 in_fd, i32 out_fd) {
+fn create(i32 in_fd, i32 out_fd) conn {
     conn mut c = conn{};
     c.in_fd = in_fd;
     c.out_fd = out_fd;
@@ -241,7 +241,7 @@ fn conn create(i32 in_fd, i32 out_fd) {
 /// usable afterwards. The descriptors, the read size and the cap are the
 /// caller's and stay as they were, as json.free leaves a document's cap.
 /// free of conn{} is a no-op.
-fn void free(conn mut* c) {
+fn free(conn mut* c) void {
     strbuf.free(&c->in_buf);
     strbuf.free(&c->out_buf);
     c->consumed = 0;
@@ -251,7 +251,7 @@ fn void free(conn mut* c) {
 }
 
 /// The bytes one read asks for.
-fn u64 chunk_of(conn* c) {
+fn chunk_of(conn* c) u64 {
     if (c->chunk == 0) {
         return RPC_CHUNK;
     }
@@ -259,7 +259,7 @@ fn u64 chunk_of(conn* c) {
 }
 
 /// The longest body this conn accepts.
-fn u64 max_content(conn* c) {
+fn max_content(conn* c) u64 {
     if (c->max_content == 0) {
         return RPC_MAX_CONTENT;
     }
@@ -272,7 +272,7 @@ fn u64 max_content(conn* c) {
 /// its own ceiling does: both numbers bound what one call asks the allocator
 /// for.
 /// D13.3
-fn void set_chunk(conn mut* c, u64 size) {
+fn set_chunk(conn mut* c, u64 size) void {
     if (size > RPC_CHUNK_CEILING) {
         panic("rpc.set_chunk: above the ceiling");
     }
@@ -285,7 +285,7 @@ fn void set_chunk(conn mut* c, u64 size) {
 /// and panics: the reader refuses it for the same reason, and the sum of a
 /// header and a body must stay inside a u64.
 /// D13.3
-fn void set_max_content(conn mut* c, u64 limit) {
+fn set_max_content(conn mut* c, u64 limit) void {
     if (limit > RPC_CONTENT_CEILING) {
         panic("rpc.set_max_content: above the ceiling");
     }
@@ -293,23 +293,23 @@ fn void set_max_content(conn mut* c, u64 limit) {
 }
 
 /// Whether the last read ended because the client closed the stream.
-fn bool at_eof(conn* c) {
+fn at_eof(conn* c) bool {
     return c->eof;
 }
 
 /// Whether the conn met an error, and which rule it broke; the message is
 /// empty when it met none.
-fn bool has_failed(conn* c) {
+fn has_failed(conn* c) bool {
     return c->failed;
 }
 
-fn string error_message(conn* c) {
+fn error_message(conn* c) string {
     return c->error_msg;
 }
 
 /// Records the first rule a conn broke. A conn that failed reads no further
 /// frame, since it no longer knows where one begins.
-fn void fail(conn mut* c, string message) {
+fn fail(conn mut* c, string message) void {
     if (!c->failed) {
         c->failed = true;
         c->error_msg = message;
@@ -317,7 +317,7 @@ fn void fail(conn mut* c, string message) {
 }
 
 /// The bytes read and not yet consumed.
-fn u64 buffered(conn* c) {
+fn buffered(conn* c) u64 {
     return c->in_buf.len;
 }
 
@@ -325,7 +325,7 @@ fn u64 buffered(conn* c) {
 /// the size of the frames in flight rather than of the session. The tail moves
 /// down one byte at a time: it is the bytes of the next frame that a read
 /// brought in early, and never a whole message.
-fn void drop_consumed(conn mut* c) {
+fn drop_consumed(conn mut* c) void {
     if (c->consumed == 0) {
         return;
     }
@@ -341,7 +341,7 @@ fn void drop_consumed(conn mut* c) {
 
 /// One read into the spare room of the read buffer. False at the end of the
 /// stream and on a read error, which has_failed tells apart.
-fn bool fill(conn mut* c) {
+fn fill(conn mut* c) bool {
     u64 size = chunk_of(c);
     strbuf.reserve(&c->in_buf, size);
     // The read lands in the buffer's own storage, so nothing is copied
@@ -364,7 +364,7 @@ fn bool fill(conn mut* c) {
 /// The offset just past the `\r\n\r\n` that ends the header block, or 0 when
 /// the buffer does not hold one yet. `from` is where to start looking, which
 /// the caller moves forward so that a header is scanned once.
-fn u64 header_end(conn* c, u64 mut* from) {
+fn header_end(conn* c, u64 mut* from) u64 {
     string buffered_text = strbuf.view(&c->in_buf);
     if (buffered_text.len >= LINE_END_LEN && buffered_text[0..LINE_END_LEN] == "\r\n") {
         // The block ends at its first empty line, so a block with no field at
@@ -392,7 +392,7 @@ fn u64 header_end(conn* c, u64 mut* from) {
 /// The value of a header field, without the spaces around it. The protocol
 /// writes one space after the colon; a client that writes none, or several, is
 /// read the same way.
-fn string trimmed(string s) {
+fn trimmed(string s) string {
     u64 mut from = 0;
     while (from < s.len && (s[from] == ' ' || s[from] == '\t')) {
         from += 1;
@@ -407,7 +407,7 @@ fn string trimmed(string s) {
 /// Whether `s` holds a byte at or below a space: the C0 controls, NUL and the
 /// tab among them, and the space itself. A field name may hold none of them.
 /// D3.2: char is ordered by unsigned byte value
-fn bool holds_space_or_control(string s) {
+fn holds_space_or_control(string s) bool {
     u64 mut i = 0;
     while (i < s.len) {
         if (s[i] <= ' ') {
@@ -423,7 +423,7 @@ fn bool holds_space_or_control(string s) {
 /// field holds a bare carriage return or a bare line feed, when a field name
 /// holds a byte at or below a space, when the block declares no length, or
 /// when it declares two that differ.
-fn bool content_length(conn mut* c, u64 end, u64 mut* out) {
+fn content_length(conn mut* c, u64 end, u64 mut* out) bool {
     string block = strbuf.view(&c->in_buf)[0..end];
     bool mut found = false;
     u64 mut at = 0;
@@ -502,7 +502,7 @@ fn bool content_length(conn mut* c, u64 end, u64 mut* out) {
 /// The body of the next frame, as a view into the conn's read buffer that
 /// lives until the next call. False at the end of the stream (at_eof) and on a
 /// malformed frame (has_failed); a conn that failed answers false ever after.
-fn bool read_frame(conn mut* c, string mut* out) {
+fn read_frame(conn mut* c, string mut* out) bool {
     *out = "";
     drop_consumed(c);
     if (c->failed || c->eof) {
@@ -568,7 +568,7 @@ fn bool read_frame(conn mut* c, string mut* out) {
 /// Writes one frame: the header, the empty line and the body, in one write, so
 /// that a client never reads a header without its body. False when the write
 /// failed, with the reason in the error record.
-fn bool write_frame(conn mut* c, string body) {
+fn write_frame(conn mut* c, string body) bool {
     strbuf.clear(&c->out_buf);
     strbuf.append(&c->out_buf, CONTENT_LENGTH);
     strbuf.append(&c->out_buf, ": ");
@@ -586,7 +586,7 @@ fn bool write_frame(conn mut* c, string body) {
 
 /// Whether the two ids name one request. Two absent ids name none, so they are
 /// never the same: a cancel that carries no id cancels nothing.
-fn bool same_id(msg_id a, msg_id b) {
+fn same_id(msg_id a, msg_id b) bool {
     if (a.kind != b.kind) {
         return false;
     }
@@ -602,7 +602,7 @@ fn bool same_id(msg_id a, msg_id b) {
 /// The id a message member carries, absent when the member is missing, null,
 /// or a value JSON-RPC does not allow there. `ok` is false in that last case,
 /// which is a message this module refuses.
-fn msg_id id_of(json.doc* d, u32 v, bool mut* ok) {
+fn id_of(json.doc* d, u32 v, bool mut* ok) msg_id {
     msg_id mut id = msg_id{};
     *ok = true;
     if (v == 0) {
@@ -632,7 +632,7 @@ fn msg_id id_of(json.doc* d, u32 v, bool mut* ok) {
 /// Reads the parsed document as a JSON-RPC message. The document must be one
 /// the caller parsed; a document that failed to parse has no root and is
 /// m_invalid. Every string of the record is a view into that document.
-fn void classify(json.doc* d, message mut* out) {
+fn classify(json.doc* d, message mut* out) void {
     *out = message{};
     u32 root = json.root(d);
     if (root == 0 || json.kind_of(d, root) != json.value_kind.k_object) {
@@ -683,7 +683,7 @@ fn void classify(json.doc* d, message mut* out) {
 /// Writes the id as the value of the `id` member: the number, the string, or
 /// null for an absent one, which is what JSON-RPC 2.0 5 answers a request it
 /// could not read with.
-fn void write_id(json.writer mut* w, msg_id id) {
+fn write_id(json.writer mut* w, msg_id id) void {
     if (id.kind == id_kind.id_int) {
         json.write_int(w, id.num);
         return;
@@ -697,7 +697,7 @@ fn void write_id(json.writer mut* w, msg_id id) {
 
 /// Opens a successful response and leaves the writer where the result value
 /// goes. The caller writes exactly one value and then calls response_end.
-fn void response_begin(json.writer mut* w, msg_id id) {
+fn response_begin(json.writer mut* w, msg_id id) void {
     json.write_object_begin(w);
     json.write_key(w, "jsonrpc");
     json.write_str(w, "2.0");
@@ -707,14 +707,14 @@ fn void response_begin(json.writer mut* w, msg_id id) {
 }
 
 /// Closes the object response_begin opened.
-fn void response_end(json.writer mut* w) {
+fn response_end(json.writer mut* w) void {
     json.write_object_end(w);
 }
 
 /// The whole of an error response. `message` is the sentence a client shows a
 /// user, so it names what the server could not do and not where in the code it
 /// gave up.
-fn void write_error(json.writer mut* w, msg_id id, i64 code, string message) {
+fn write_error(json.writer mut* w, msg_id id, i64 code, string message) void {
     json.write_object_begin(w);
     json.write_key(w, "jsonrpc");
     json.write_str(w, "2.0");

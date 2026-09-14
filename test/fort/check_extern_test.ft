@@ -24,96 +24,96 @@ import std.strbuf;
 // given. fort does not join adjacent string literals, so the source is built
 // in a buffer; the text reaches a file before the check runs.
 // D2.9
-fn bool two_modules(check_env.env mut* e, string in_main, string in_other) {
+fn two_modules(check_env.env mut* e, string in_main, string in_other) bool {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
-    strbuf.append(&b, "fn i32 one() {\n    return 1;\n}\n");
+    strbuf.append(&b, "fn one() i32 {\n    return 1;\n}\n");
     strbuf.append(&b, in_other);
     check_env.add(e, "other.ft", strbuf.view(&b));
     strbuf.clear(&b);
     strbuf.append(&b, "import other;\n");
     strbuf.append(&b, in_main);
-    strbuf.append(&b, "fn i32 main() {\n    return other.one();\n}\n");
+    strbuf.append(&b, "fn main() i32 {\n    return other.one();\n}\n");
     check_env.add(e, "main.ft", strbuf.view(&b));
     return check_env.check_entry(e, "main.ft");
 }
 
 // One module, `decls` and the `main` an entry module needs.
 // D8.6
-fn bool one_module(check_env.env mut* e, string decls) {
+fn one_module(check_env.env mut* e, string decls) bool {
     return check_env.check_decls(e, decls);
 }
 
 // ---- the types an extern signature may use -----------------------------------------
 // D9.8
 
-fn void an_extern_signature_uses_scalars_and_pointers_only() {
+fn an_extern_signature_uses_scalars_and_pointers_only() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    assert(!one_module(&e, "extern fn void take(string s);\n"));
+    assert(!one_module(&e, "extern fn take(string s) void;\n"));
     assert(check_env.said(&e, "extern signature cannot use type 'string'"));
 }
 
-fn void an_extern_result_is_held_to_the_same_rule() {
+fn an_extern_result_is_held_to_the_same_rule() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    assert(!one_module(&e, "extern fn string give();\n"));
+    assert(!one_module(&e, "extern fn give() string;\n"));
     assert(check_env.said(&e, "extern signature cannot use type 'string'"));
 }
 
-fn void a_function_pointer_parameter_is_legal_when_its_own_signature_is() {
+fn a_function_pointer_parameter_is_legal_when_its_own_signature_is() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
     // The C side calls through it with the same convention, so the rule
     // applies to the signature behind the pointer as well.
     // D9.9
-    assert(one_module(&e, "extern fn void run(fn i32(i32) cb);\n"));
+    assert(one_module(&e, "extern fn run(fn (i32) i32 cb) void;\n"));
     assert(check_env.errors(&e) == 0);
     check_env.env mut f = check_env.env{};
     check_env.open(&f);
     defer check_env.close(&f);
-    assert(!one_module(&f, "extern fn void run(fn i32(string) cb);\n"));
+    assert(!one_module(&f, "extern fn run(fn (string) i32 cb) void;\n"));
     assert(check_env.said(&f, "extern signature cannot use type"));
 }
 
-fn void the_entry_point_symbol_is_reserved() {
+fn the_entry_point_symbol_is_reserved() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
     // The compiler emits `fort_entry` itself, so an extern declaring it is a
     // signature nothing can be held against.
     // D9.7
-    assert(!one_module(&e, "extern fn i32 fort_entry();\n"));
+    assert(!one_module(&e, "extern fn fort_entry() i32;\n"));
     assert(check_env.said(&e, "'fort_entry' is reserved: the compiler emits it"));
 }
 
-fn void an_extern_function_is_not_a_value() {
+fn an_extern_function_is_not_a_value() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    assert(!one_module(&e, "extern fn i32 puts(char* s);\nfn i32(char*) p = puts;\n"));
+    assert(!one_module(&e, "extern fn puts(char* s) i32;\nfn (char*) i32 p = puts;\n"));
     assert(check_env.said(&e, "'puts' is an extern function, which is not a value"));
 }
 
 // ---- two declarations of one C symbol ----------------------------------------------
 // D9.8
 
-fn void two_identical_declarations_agree() {
+fn two_identical_declarations_agree() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    assert(two_modules(&e, "extern fn i32 write(i32 fd);\n", "extern fn i32 write(i32 fd);\n"));
+    assert(two_modules(&e, "extern fn write(i32 fd) i32;\n", "extern fn write(i32 fd) i32;\n"));
     assert(check_env.errors(&e) == 0);
 }
 
-fn void a_parameter_that_differs_is_reported_at_the_later_declaration() {
+fn a_parameter_that_differs_is_reported_at_the_later_declaration() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    assert(!two_modules(&e, "extern fn i32 write(i64 fd);\n", "extern fn i32 write(i32 fd);\n"));
+    assert(!two_modules(&e, "extern fn write(i64 fd) i32;\n", "extern fn write(i32 fd) i32;\n"));
     assert(check_env.said(&e, "conflicting declarations of extern 'write': parameter 1 differs"));
     // The note points at the first declaration, which is the imported
     // module's: every module is checked in the dependency order the loader
@@ -132,38 +132,38 @@ fn void a_parameter_that_differs_is_reported_at_the_later_declaration() {
     assert(str.find(check_env.report_file(&e, 0), "main.ft") >= 0);
     assert(check_env.report_severity(&e, 0) == "error");
     assert(check_env.report_text(&e, 0) ==
-           "2:21: conflicting declarations of extern 'write': parameter 1 differs");
+           "2:17: conflicting declarations of extern 'write': parameter 1 differs");
     assert(str.find(check_env.report_file(&e, 1), "other.ft") >= 0);
     assert(check_env.report_severity(&e, 1) == "note");
-    assert(check_env.report_text(&e, 1) == "4:15: previous declaration of 'write' here");
+    assert(check_env.report_text(&e, 1) == "4:11: previous declaration of 'write' here");
 }
 
-fn void a_result_that_differs_and_an_arity_that_differs_are_their_own_rows() {
+fn a_result_that_differs_and_an_arity_that_differs_are_their_own_rows() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    assert(!two_modules(&e, "extern fn i64 write(i32 fd);\n", "extern fn i32 write(i32 fd);\n"));
+    assert(!two_modules(&e, "extern fn write(i32 fd) i64;\n", "extern fn write(i32 fd) i32;\n"));
     assert(check_env.said(&e, "conflicting declarations of extern 'write': the result type "));
     check_env.env mut f = check_env.env{};
     check_env.open(&f);
     defer check_env.close(&f);
-    assert(!two_modules(&f, "extern fn i32 write(i32 fd, i32 n);\n",
-                        "extern fn i32 write(i32 fd);\n"));
+    assert(!two_modules(&f, "extern fn write(i32 fd, i32 n) i32;\n",
+                        "extern fn write(i32 fd) i32;\n"));
     assert(check_env.said(&f, "the number of parameters differs"));
 }
 
-fn void char_and_u8_name_one_c_type() {
+fn char_and_u8_name_one_c_type() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
     // fort `char` is C's `unsigned char` at the boundary, so `char*` may be
     // written `u8*` in the other module.
     // D3.2, D9.8
-    assert(two_modules(&e, "extern fn i32 put(char* s);\n", "extern fn i32 put(u8* s);\n"));
+    assert(two_modules(&e, "extern fn put(char* s) i32;\n", "extern fn put(u8* s) i32;\n"));
     assert(check_env.errors(&e) == 0);
 }
 
-fn void a_mark_below_the_binding_is_part_of_the_type() {
+fn a_mark_below_the_binding_is_part_of_the_type() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
@@ -172,12 +172,12 @@ fn void a_mark_below_the_binding_is_part_of_the_type() {
     // case beside this one asserts that; this one asserts the `mut` mark and
     // nothing else.
     // D3.12, D17.1
-    assert(!two_modules(&e, "extern fn i32 put(char mut* s);\n",
-                        "extern fn i32 put(char* s);\n"));
+    assert(!two_modules(&e, "extern fn put(char mut* s) i32;\n",
+                        "extern fn put(char* s) i32;\n"));
     assert(check_env.said(&e, "parameter 1 differs"));
 }
 
-fn void an_own_mark_on_a_typed_pointer_is_part_of_the_type() {
+fn an_own_mark_on_a_typed_pointer_is_part_of_the_type() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
@@ -190,12 +190,12 @@ fn void an_own_mark_on_a_typed_pointer_is_part_of_the_type() {
     // through test/check_extern_test.c:408, which this module had no case for
     // until the audit.
     // D17.1, D17.13, T-077: the audit that found the missing case
-    assert(!two_modules(&e, "extern fn void take(i32 mut* own p);\n",
-                        "extern fn void take(i32 mut* p);\n"));
+    assert(!two_modules(&e, "extern fn take(i32 mut* own p) void;\n",
+                        "extern fn take(i32 mut* p) void;\n"));
     assert(check_env.said(&e, "parameter 1 differs"));
 }
 
-fn void a_mut_mark_on_a_void_pointer_is_part_of_the_type() {
+fn a_mut_mark_on_a_void_pointer_is_part_of_the_type() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
@@ -206,21 +206,21 @@ fn void a_mut_mark_on_a_void_pointer_is_part_of_the_type() {
     // without this branch a program could declare `malloc` as storage it may
     // not write and call the library's.
     // D3.11, D3.12, D9.8, T-086: the branch and this case
-    assert(!two_modules(&e, "extern fn void take(void mut* p);\n",
-                        "extern fn void take(void* p);\n"));
+    assert(!two_modules(&e, "extern fn take(void mut* p) void;\n",
+                        "extern fn take(void* p) void;\n"));
     assert(check_env.said(&e, "parameter 1 differs"));
     assert(check_env.errors(&e) == 1);
 }
 
-fn void a_difference_that_names_a_struct_carries_the_wrapper_note() {
+fn a_difference_that_names_a_struct_carries_the_wrapper_note() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     strbuf.append(&b, "struct local {\n    i32 v;\n}\n");
-    strbuf.append(&b, "extern fn void take(local mut* p);\n");
-    assert(!two_modules(&e, strbuf.view(&b), "extern fn void take(i32 mut* p);\n"));
+    strbuf.append(&b, "extern fn take(local mut* p) void;\n");
+    assert(!two_modules(&e, strbuf.view(&b), "extern fn take(i32 mut* p) void;\n"));
     assert(check_env.said(&e, "parameter 1 differs"));
     // A struct is identified by its declaration and not its spelling, so no
     // rewording can make the two agree: the note offers the import or the
@@ -229,18 +229,18 @@ fn void a_difference_that_names_a_struct_carries_the_wrapper_note() {
     assert(check_env.said(&e, "a struct or an enum stands here"));
 }
 
-fn void a_difference_between_two_scalars_carries_no_wrapper_note() {
+fn a_difference_between_two_scalars_carries_no_wrapper_note() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    assert(!two_modules(&e, "extern fn i32 write(i64 fd);\n", "extern fn i32 write(i32 fd);\n"));
+    assert(!two_modules(&e, "extern fn write(i64 fd) i32;\n", "extern fn write(i32 fd) i32;\n"));
     assert(!check_env.said(&e, "a struct or an enum stands here"));
 }
 
 // ---- the names the compiler emits --------------------------------------------------
 // D9.7, D11.6
 
-fn void a_fort_rt_name_is_an_ordinary_extern_declaration() {
+fn a_fort_rt_name_is_an_ordinary_extern_declaration() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
@@ -248,11 +248,11 @@ fn void a_fort_rt_name_is_an_ordinary_extern_declaration() {
     // reserved for nothing and such a declaration answers to the rows above
     // like any other.
     // D13.1, D9.7, D9.8
-    assert(one_module(&e, "extern fn void fort_rt_del(i32 wrong);\n"));
+    assert(one_module(&e, "extern fn fort_rt_del(i32 wrong) void;\n"));
     assert(check_env.errors(&e) == 0);
 }
 
-fn void the_main_symbol_is_reserved() {
+fn the_main_symbol_is_reserved() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
@@ -260,11 +260,11 @@ fn void the_main_symbol_is_reserved() {
     // `extern` declaring the name is a signature nothing can check against
     // that definition.
     // D11.6, D9.7
-    assert(!one_module(&e, "extern fn i32 main(i32 argc, char* mut* argv);\n"));
+    assert(!one_module(&e, "extern fn main(i32 argc, char* mut* argv) i32;\n"));
     assert(check_env.said(&e, "'main' is reserved: the compiler emits it"));
 }
 
-fn i32 main() {
+fn main() i32 {
     an_extern_signature_uses_scalars_and_pointers_only();
     an_extern_result_is_held_to_the_same_rule();
     a_function_pointer_parameter_is_legal_when_its_own_signature_is();
