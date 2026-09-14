@@ -367,7 +367,8 @@ bullet at a time and without a rewrite.
   work is clang, which no preset instruments, and the two stage2 runs, which qemu runs and no
   preset instruments either. `tools/vm run 'ctest --preset debug -R bootstrap'` asks in one line.
   **Its binary comparison is the artefact check `tools/diff_ir.sh` cannot make.** That script
-  compares the two emitters' module for `src/fort/main.ft` among 446 other files, and it is the
+  compares the two emitters' module for `src/fort/main.ft` among the other files it walks --
+  `grep -n 'PROGRAM_FILES=' tools/diff_ir.sh` reads 516 on 2026-09-13 -- and it is the
   stronger oracle for the emitter, but the step from "the two modules agree" to "stage2 and stage3
   are the same bytes" needs two assumptions that nothing checked before T-039: `clang` must be
   deterministic over one input and one command line, and `diff_ir.sh` compiles `main.ft` from the
