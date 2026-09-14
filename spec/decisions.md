@@ -1404,18 +1404,23 @@ Sections:
   own errors. Positions of errors that concern a whole construct: "missing return" and a
   non-exhaustive enum `switch` are reported at the closing brace of the body or `switch`; an
   infinite-size struct at its `struct` keyword; a shadowing error at the inner declaration ("'n'
-  shadows a parameter", "'n' shadows an enclosing local"). A diagnostic about two declarations
-  stands at one of them and makes the other a note. The error stands at the declaration in the
-  module the compiler is checking, and the note stands at the other declaration. Every module of
-  the closure is checked in dependency order (D9.10), so the module being checked holds the later
-  of the two declarations. The note can therefore name a module the reader did not write, the
-  standard library above all. Two declarations of one module have no dependency order between
-  them, so the error stands at the later of the two by position. The reason is the drop rule of
-  D20.2: a client that cannot open a file may drop that file's diagnostics, and a nested note goes
-  with the error it follows. An error in a file the reader cannot open takes the note in the
-  reader's own file with it and leaves the reader nothing. An error in the file the reader wrote
-  survives the loss of its note, because the error says what is wrong. A diagnostic that has one
-  place stands at that place, in whatever file that is: it has no second place that says as much.
+  shadows a parameter", "'n' shadows an enclosing local"). Those two are one case of a wider rule.
+  A diagnostic about two declarations stands at the declaration in the module the compiler is
+  checking; within one module it stands at the later of the two by position. Most such diagnostics
+  report that one place and say nothing about the other: the two shadowing messages above do, and
+  so do "'n' is already declared in this block", "duplicate parameter 'n'", "duplicate field 'n'"
+  and "duplicate enum value N for 'n'". A diagnostic that reports the other declaration as well
+  makes that second report its note. Every module of the closure is checked in dependency order
+  (D9.10), which puts an imported module before its importer and leaves two modules that neither
+  imports unordered. The error stands in the module being checked and not in the later of the two,
+  so an unordered pair is settled as well: the module checked second carries the error. The note
+  can therefore name a module the reader did not write, the standard library above all. The
+  reason is the note's place. A nested note carries no severity of its own and goes with the
+  error it follows (D20.2), and a client that cannot open a file may drop that file's diagnostics
+  (`toolchain.md` 9.2). An error in a file the reader cannot open takes the note in the reader's
+  own file with it and leaves the reader nothing. An error in the file the reader wrote survives
+  the loss of its note, because the error says what is wrong. A diagnostic about anything but two
+  declarations stands where the construct it names stands, in whatever file that is.
   The compiler never emits warnings in v1.
 - history: Amended 2026-09-14 (T-112): which of two declarations carried the error and which
   carried the note was implemented and never decided, so no rule told a new diagnostic of that

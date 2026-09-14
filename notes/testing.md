@@ -181,6 +181,16 @@ bullet at a time and without a rewrite.
   line, the column and the text together. Reach for it when the **column** is the rule under
   test -- a diagnostic that must stand at an operand rather than at the operator around it -- and
   not otherwise, because each one names a line number and moves when the file above it grows.
+  **The file is the second thing it pins, and the first thing nothing else can see** (T-112). An
+  annotation lives in a file of the test, so a diagnostic that moves to another file leaves its
+  annotation unmatched and the run fails for the missing annotation rather than for the rule: the
+  test then reads as one that lost a diagnostic, and the reader learns nothing about where the
+  diagnostic went. A `//! stderr:` line that carries the path as the compiler spells it says the
+  rule instead. Measured on T-112: swapping the error and the note of `conflicting declarations
+  of extern` took `fail/modules/009_extern_local_types` red both ways, but only with the
+  directive did the run name `stderr lacks 'fail/modules/009_extern_local_types/main.ft:18:22:
+  error: conflicting'`. So reach for it when the **column** or the **file** is the rule under
+  test, and not otherwise.
   Measured on T-128: a mutant that reported the pair's constants at the operator moved the column
   from 13 to 33 and left the line and the text identical. With the two `stderr:` lines the corpus
   read `664 tests: 663 passed, 1 failed` and named only those two substrings; with them removed

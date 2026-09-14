@@ -222,15 +222,12 @@ came here.
   `module '<a>' is the same file as module '<b>'`, and the struct-or-enum note of the extern
   conflict. The 60 corpus diagnostics that stand in a file the reader did not write are all
   `not supported by the bootstrap compiler: ?:` inside `std/math.ft`, which has one place and is
-  not this shape. **The corpus catches a swap only by accident**, through the unannotated
-  diagnostic the swap leaves in the other file, since an `error` annotation pins the line alone;
-  `//! stderr:` pins the file and the column and is what states the rule (`fail/ffi/004`,
-  `fail/modules/009`, `fail/declarations/006`). Mutation-measured on 2026-09-14: swapping the two
+  not this shape. What holds the rule, and why a `fail` test alone does not, is
+  `notes/testing.md` 3. Mutation-measured on 2026-09-14: swapping the two
   places of the extern conflict takes `unit-check_extern` red and `lang` to 5 failed in stage1,
   and `fort-modules` red and `lang-stage2` to 5 failed in stage2; swapping them at the
   redeclaration takes `unit-modules_closure` and `lang` red in stage1 and `fort-modules` and
-  `lang-stage2` red in stage2. The fort twin of the extern conflict was blind to the swap until
-  T-112, because it asserted the two messages and neither position.
+  `lang-stage2` red in stage2.
 
 ## 6. The IR emitter
 
