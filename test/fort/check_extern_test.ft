@@ -5,6 +5,7 @@
 import ast;
 import check;
 import check_env;
+import std.str;
 import std.strbuf;
 
 // The rules an `extern fn` declaration meets: the types an extern signature
@@ -119,6 +120,22 @@ fn void a_parameter_that_differs_is_reported_at_the_later_declaration() {
     // left, so `other` came first (module-system.md 13).
     // D9.10
     assert(check_env.said(&e, "previous declaration of 'write' here"));
+    // The error stands in the module being checked and the note in the module
+    // checked before it, which is the whole of the rule: a reader who cannot
+    // open the other file keeps the error, and a swap would leave them nothing.
+    // The message assertions above pass either way round, so the two files and
+    // the two positions are asserted here. `main.ft` line 1 is the import and
+    // line 2 the declaration; `other.ft` lines 1 to 3 are a function and line 4
+    // the declaration.
+    // D14.2
+    assert(check_env.reports(&e) == 2);
+    assert(str.find(check_env.report_file(&e, 0), "main.ft") >= 0);
+    assert(!check_env.report_is_note(&e, 0));
+    assert(check_env.report_text(&e, 0) ==
+           "2:21: conflicting declarations of extern 'write': parameter 1 differs");
+    assert(str.find(check_env.report_file(&e, 1), "other.ft") >= 0);
+    assert(check_env.report_is_note(&e, 1));
+    assert(check_env.report_text(&e, 1) == "4:15: previous declaration of 'write' here");
 }
 
 fn void a_result_that_differs_and_an_arity_that_differs_are_their_own_rows() {
