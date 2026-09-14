@@ -348,7 +348,20 @@ every one matches.
   not. A note that reports another entry in the present tense goes stale the same way: two of the
   49 held one on 2026-09-13 (D19.5's and D20.5's, both about D19.5's rule). Append a dated note
   that says what has changed since, and leave the words of the old note alone, because the
-  sentence above forbids deleting them (T-109).
+  sentence above forbids deleting them (T-109). The `history` rule of `tools/knowledge_lint.py`
+  checks this one, and the ctest `knowledge_lint` runs it: it reports a sentence of a `history`
+  field whose subject names a rule (`the rule`, `its rule`, `this decision`, `D19.5's rule`) and
+  whose verb is a present-tense verb of saying. Two things silence it, and only the second is a
+  repair: a quotation of the old words, and the dated note this paragraph asks for, which the rule
+  reads as a sentence carrying a date and one of `as it stood` or `from this date`. Writing the
+  note in the past tense is not a third: `until then the rule read: this decision requires two
+  runs` is still red, because the clause after the colon is a sentence of its own and it is
+  present-tense. Quote the old words, and the rule reads them as the old rule. The rule states its
+  blind spots in its own docstring, `test/knowledge_lint_test.py` measures each of them and counts
+  them, and no number for them stands here, because a number in prose rots and this paragraph is
+  one file away from the check. The two widest gaps: a bare tag is not a subject (`D3.10 decides
+  function types`, in D17.4's note, is not reported, and T-122 repairs it), and one dated note
+  excuses its whole field wherever the report stands in it (T-121).
 - **Moving text inside the decision log**: the risk of an edit to `spec/decisions.md` is a changed
   meaning, which no build and no test can see. `tools/check_decisions.py --against <old file>`
   compares the words of every entry between two revisions of the log. It fails on an entry whose

@@ -16,6 +16,7 @@ Run with `python3 -m unittest knowledge_lint_test` from this directory.
 
 import contextlib
 import io
+import re
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+import check_decisions  # noqa: E402
 import knowledge_lint as lint  # noqa: E402
 
 # ---- the seeded sources -----------------------------------------------------
@@ -229,6 +231,123 @@ DECISIONS = """\
 - owner: spec/project-overview.md
 - rule: the fourth rule.
 """
+
+# The history field of spec/decisions.md, seeded one note for each verdict the
+# rule of notes/style.md 4 gives. HISTORY_VERDICT below says what the rule asks
+# of each entry and why, written from the rule and not from the tool.
+HISTORY_LOG = """\
+# The decisions
+
+## D1 Scope
+
+### D1.1 A note in the past tense
+- owner: spec/project-overview.md
+- rule: the first rule.
+- history: Amended 2026-09-13 (T-121): the citation was wrong. Until then the rule read
+  "the draft is the one in force".
+
+### D1.2 A note that says what the amendment made true
+- owner: spec/project-overview.md
+- rule: the second rule.
+- history: Amended 2026-09-13 (T-121): the rule cited `AGENTS.md`. The rule now names
+  `notes/style.md` 4.
+
+### D1.3 A note that reports another rule in the present tense
+- owner: spec/project-overview.md
+- rule: the third rule.
+- history: Amended 2026-09-13 (T-121): the citation was wrong. D1.1's rule still says the
+  draft is the one in force.
+
+### D1.4 A note that quotes the sentence it replaces
+- owner: spec/project-overview.md
+- rule: the fourth rule.
+- history: Amended 2026-09-13 (T-121): the citation was wrong. Until then the rule read
+  "this decision requires two runs".
+
+### D1.5 A note that reports its own rule in the present tense
+- owner: spec/project-overview.md
+- rule: the fifth rule.
+- history: Amended 2026-09-13 (T-121): the citation was wrong. This decision does not ask
+  for a second run.
+
+### D1.6 A report that a dated note corrects
+- owner: spec/project-overview.md
+- rule: the sixth rule.
+- history: Amended 2026-09-12 (T-120): the citation was wrong. This decision does not ask
+  for a second run. Amended 2026-09-13 (T-121): it does ask for one from this date, so the
+  sentence above describes the log as it stood on 2026-09-12.
+
+### D1.7 A note whose report wraps over two lines
+- owner: spec/project-overview.md
+- rule: the seventh rule.
+- history: Amended 2026-09-13 (T-121): the citation was wrong. D1.1's rule
+  still says the draft is the one in force.
+
+### D1.8 A note whose past tense does not silence the rule
+- owner: spec/project-overview.md
+- rule: the eighth rule.
+- history: Amended 2026-09-13 (T-121): the citation was wrong. Until then the rule read:
+  this decision requires two runs.
+"""
+
+# What the rule asks of each seeded entry: the line of the phrase it reports, or
+# None for an entry it lets through, and why. The lines are counted by hand off
+# the text above, where line 1 is `# The decisions`.
+HISTORY_VERDICT = {
+    "D1.1": (None, "the past tense carries the date of its note with it"),
+    "D1.2": (None, "`now` says the amendment itself made the rule read this way"),
+    "D1.3": (20, "a present-tense report of another entry's rule, with no date"),
+    "D1.4": (None, "the words stand inside a quotation, so they are the old rule"),
+    "D1.5": (32, "a present-tense report of this entry's own rule, with no date"),
+    "D1.6": (None, "a later note dates the report, the repair notes/style.md 4 asks for"),
+    "D1.7": (45, "the same report wrapped over two lines, reported at the first"),
+    "D1.8": (52, "the past tense of the note does not reach the clause after the colon"),
+}
+
+# The phrase the rule quotes back for each entry it reports.
+HISTORY_PHRASE = {
+    "D1.3": "D1.1's rule still says",
+    "D1.5": "This decision does not ask",
+    "D1.7": "D1.1's rule still says",
+    "D1.8": "this decision requires",
+}
+
+# The two notes the log really held, quoted from spec/decisions.md at 8a1eb48,
+# the revision before T-109 repaired them. A rule measured on seeded text alone
+# says nothing about the text it ships to read, so these two stay here as the
+# oracle: the rule must report them and must report nothing after the repair
+# T-109 made, which the tree itself is (T-121).
+REAL_LOG = """\
+# The decisions
+
+## D19 The IR contract
+
+### D19.5 A real note, as it stood before T-109
+- owner: `toolchain.md` (6, the IR contract).
+- rule: the rule of the real entry.
+- history: Amended 2026-09-10 with how the naming half is checked: `opt -passes=verify` cannot
+  enforce it, because an instruction after a terminator makes the verifier *create* an
+  implicit number rather than reject the module. `opt-18` exits 0 on a block whose
+  `unreachable` is followed by a `br`, splits it and prints the remainder as `0: ; No
+  predecessors!` -- an implicitly numbered block, which is the one thing this decision
+  forbids. Amended 2026-09-12 (T-039) with which comparison performs it. The module
+  comparison it does run is stage1's against stage2's, which this decision does not ask for
+  and which is stronger, since it holds the two compilers against each other rather than one
+  compiler against itself. It runs in both build modes, as this decision requires, and
+  `diff` is still the debugging output.
+
+## D20 The language server
+
+### D20.5 A real note, as it stood before T-109
+- owner: `lsp.md` (1, the milestones).
+- rule: the rule of the real entry.
+- history: Amended 2026-09-12 (T-105): two citations. The first said the protocol and the
+  server "land after the bootstrap fixpoint (D19.5)". D19.5 requires the emitted text to be
+  a function of the program and states the condition of the fixpoint, and it decides no
+  milestone. Its rule still says the bootstrap script compares the two stages with `cmp`
+  over `-S` output.
+"""
+
 
 OVERVIEW = "# fort\n\nThe map of the specification.\n"
 
@@ -591,6 +710,274 @@ class CitationTest(unittest.TestCase):
         self.assertEqual(problems, [])
 
 
+class HistoryTest(unittest.TestCase):
+    """The tense rule of notes/style.md 4 over seeded notes and over real ones."""
+
+    def problems_of(self, text):
+        """The problems of one seeded log, by the entry each names."""
+        problems, _, _ = lint.history_problems(text)
+        by_entry = {}
+        for problem in problems:
+            by_entry.setdefault(problem.split(": ")[1].split(" ")[0], []).append(problem)
+        return problems, by_entry
+
+    def test_every_seeded_note_gets_the_verdict_the_rule_asks_for(self):
+        _, by_entry = self.problems_of(HISTORY_LOG)
+        for tag, (line, why) in HISTORY_VERDICT.items():
+            with self.subTest(entry=tag, why=why):
+                if line is None:
+                    self.assertEqual(by_entry.get(tag, []), [])
+                    continue
+                self.assertEqual(len(by_entry.get(tag, [])), 1, by_entry.get(tag))
+                self.assertTrue(by_entry[tag][0].startswith(
+                    f"spec/decisions.md:{line}: {tag} "), by_entry[tag][0])
+                self.assertIn(f'"{HISTORY_PHRASE[tag]}"', by_entry[tag][0])
+
+    def test_the_verdict_table_covers_every_seeded_entry(self):
+        entries, _ = check_decisions.read_fielded(HISTORY_LOG)
+        self.assertEqual(sorted(entries), sorted(HISTORY_VERDICT))
+
+    def test_the_seeded_log_reports_exactly_four_notes(self):
+        problems, _ = self.problems_of(HISTORY_LOG)
+        self.assertEqual(len(problems), 4, problems)
+
+    def test_one_seeded_note_is_reported_as_this_exact_line(self):
+        _, by_entry = self.problems_of(HISTORY_LOG)
+        self.assertEqual(by_entry["D1.3"], [
+            "spec/decisions.md:20: D1.3 reports a rule of the log in the present "
+            'tense: "D1.1\'s rule still says"; write the past tense or append a '
+            "dated note (notes/style.md 4)"])
+
+    def test_the_count_line_names_the_fields_and_the_dated_ones(self):
+        _, fields, dated = lint.history_problems(HISTORY_LOG)
+        self.assertEqual((fields, dated), (8, 1))
+
+    def test_all_four_real_reports_the_log_held_are_reported(self):
+        # the whole reason the rule exists: these are the words of D19.5 and
+        # D20.5 at 8a1eb48, before T-109 repaired them. The revision yields 4
+        # problems, so REAL_LOG carries all 4 and not a sample (T-121, round 2)
+        problems, _, _ = lint.history_problems(REAL_LOG)
+        self.assertEqual(problems, [
+            "spec/decisions.md:12: D19.5 reports a rule of the log in the present "
+            'tense: "this decision forbids"; write the past tense or append a '
+            "dated note (notes/style.md 4)",
+            "spec/decisions.md:14: D19.5 reports a rule of the log in the present "
+            'tense: "this decision does not ask"; write the past tense or append a '
+            "dated note (notes/style.md 4)",
+            "spec/decisions.md:16: D19.5 reports a rule of the log in the present "
+            'tense: "this decision requires"; write the past tense or append a '
+            "dated note (notes/style.md 4)",
+            "spec/decisions.md:27: D20.5 reports a rule of the log in the present "
+            'tense: "Its rule still says"; write the past tense or append a '
+            "dated note (notes/style.md 4)"])
+
+    def test_a_field_joins_its_wrapped_lines_before_it_reads_them(self):
+        # the repair sentence of D19.5 wraps between "describe the log as" and
+        # "it stood on 2026-09-12", so a line-at-a-time reader sees neither half
+        text = HISTORY_LOG.replace("sentence above describes the log as it stood on",
+                                   "sentence above describes the log as\n  it stood on")
+        problems, _, dated = lint.history_problems(text)
+        self.assertEqual(dated, 1)
+        self.assertEqual(len(problems), 4, problems)
+
+    def test_the_past_tense_of_the_note_is_not_what_silences_the_rule(self):
+        # D1.8 is the seeded proof: `until then the rule read:` is past, and the
+        # clause after the colon is a sentence of its own and still present. So
+        # the quotation is the silencer and the note's own tense is not
+        # (T-121, round 2; the tool and notes/style.md 4 both say so now)
+        _, by_entry = self.problems_of(HISTORY_LOG)
+        self.assertEqual(len(by_entry["D1.8"]), 1)
+        self.assertEqual(by_entry.get("D1.4", []), [])
+
+    def test_a_report_inside_a_quotation_is_the_old_rule_and_not_a_claim(self):
+        text = " Until then the rule read \"this decision requires two runs\"."
+        self.assertTrue(lint.HISTORY_REPORT.search(text))
+        self.assertIsNone(lint.HISTORY_REPORT.search(lint.unquoted(text)))
+
+    def test_a_sentence_ends_at_a_stop_a_semicolon_or_a_colon(self):
+        found = lint.sentences_of("one. two; three: four")
+        self.assertEqual(found, [(0, "one."), (5, "two;"), (10, "three:"), (17, "four")])
+
+    def test_the_line_of_each_character_follows_the_wrapping(self):
+        _, body, at = lint.history_fields(HISTORY_LOG)[6]
+        self.assertEqual(body.split(". ")[-1], "D1.1's rule still says the draft "
+                                               "is the one in force.")
+        self.assertEqual(at[body.index("D1.1's")], 45)
+        self.assertEqual(at[body.index("still says")], 46)
+
+
+class HistoryLimitTest(unittest.TestCase):
+    """Each gap HISTORY_LIMITS states, measured rather than asserted.
+
+    A limit in prose rots. These four tests hold the numbers the docstring of
+    tools/knowledge_lint.py quotes, so a gap that closes fails a test and the
+    prose is rewritten with it (T-121).
+    """
+
+    def log(self):
+        """The decision log of this repository."""
+        root = Path(__file__).resolve().parent.parent
+        return (root / "spec/decisions.md").read_text(encoding="utf-8")
+
+    def with_bare_tag(self):
+        """HISTORY_REPORT widened to read a bare decision tag as the subject."""
+        return re.compile(
+            r"\b(" + lint.HISTORY_SUBJECT[:-1] + r"|D\d+(?:\.\d+)?)"
+            + lint.HISTORY_BETWEEN + r"(?:" + lint.HISTORY_VERBS + r"|"
+            + lint.HISTORY_NEGATED + r"))\b", re.IGNORECASE)
+
+    def sweep(self, pattern, field="history", dated=True, anchored=False, text=None):
+        """The sentences of a decision log this pattern reports.
+
+        `anchored=True` asks for the opposite set: the sentences the pattern
+        matches and HISTORY_ANCHOR then excuses. `text` defaults to the log of
+        this repository.
+        """
+        text = self.log() if text is None else text
+        entries, _ = check_decisions.read_fielded(text)
+        found = []
+        for tag in sorted(entries, key=check_decisions.key_of):
+            body = " ".join(entries[tag].get(field, "").split())
+            if not body:
+                continue
+            if dated and field == "history" and lint.field_is_dated(body):
+                continue
+            for _, sentence in lint.sentences_of(body):
+                clean = lint.unquoted(sentence)
+                if bool(lint.HISTORY_ANCHOR.search(clean)) != anchored:
+                    continue
+                found += [(tag, m.group(1)) for m in pattern.finditer(clean)]
+        return found
+
+    def test_the_rule_reports_seven_sentences_in_two_fields_without_the_escape(self):
+        found = self.sweep(lint.HISTORY_REPORT, dated=False)
+        self.assertEqual(len(found), 7)
+        self.assertEqual(sorted({tag for tag, _ in found}), ["D19.5", "D20.5"])
+        # the third limit: 2 of the 7 stand after the dated note that excuses
+        # them, so the escape is coarser than the reason it is right
+        after = [phrase for _, phrase in found
+                 if phrase in ("The rule names", "The rule also carries")]
+        self.assertEqual(len(after), 2)
+
+    def test_a_bare_decision_tag_as_subject_costs_two_false_positives(self):
+        # the first limit: D9.1's `every test file D14.4 names NNN_name.ft`
+        # reports nothing, and D17.4's `D3.10 decides` is the price of refusing
+        # it. T-122 repairs D17.4 and then widens this pattern, so this
+        # assertion is the one it starts from
+        found = self.sweep(self.with_bare_tag())
+        self.assertEqual(found, [("D9.1", "D14.4 names"), ("D17.4", "D3.10 decides")])
+
+    def test_the_bare_tag_gap_stood_inside_the_motivating_case_too(self):
+        # D20.5 before T-109 carried a bare-tag report of its own, so the gap is
+        # not only in the two entries that stand in it today (T-121, round 2)
+        old = subprocess.run(["git", "show", "8a1eb48:spec/decisions.md"],
+                             cwd=Path(__file__).resolve().parent.parent,
+                             capture_output=True, check=False)
+        if old.returncode != 0:
+            raise unittest.SkipTest("8a1eb48 is not in this checkout")
+        text = old.stdout.decode()
+        extra = [hit for hit in self.sweep(self.with_bare_tag(), text=text)
+                 if hit not in self.sweep(lint.HISTORY_REPORT, text=text)]
+        self.assertEqual(extra, [("D9.1", "D14.4 names"),
+                                 ("D17.4", "D3.10 decides"),
+                                 ("D20.5", "D19.5 requires")])
+
+    def test_the_same_signature_over_the_rule_fields_reports_two_sentences(self):
+        # the fourth limit: a rule states a requirement in the present tense by
+        # design, and both hits are D19.5's rule describing its own scope
+        found = self.sweep(lint.HISTORY_REPORT, field="rule")
+        self.assertEqual(found, [("D19.5", "this rule states"),
+                                 ("D19.5", "this rule requires holds")])
+
+    def test_the_same_signature_over_the_rationale_fields_reports_nothing(self):
+        # the other half of the fourth limit: 16 entries carry a rationale and
+        # the gap costs 0 today, which is what makes it a gap and not a defect
+        entries, _ = check_decisions.read_fielded(self.log())
+        carried = [t for t, f in entries.items() if f.get("rationale", "").strip()]
+        self.assertEqual(len(carried), 16)
+        self.assertEqual(self.sweep(lint.HISTORY_REPORT, field="rationale"), [])
+
+    def test_a_wider_subject_and_verb_list_reports_twenty_eight(self):
+        # the fifth limit: `it`, `nothing`, `the text` and `the log` as subjects
+        # and `is`, `has`, `stands` and `compares` as verbs take 7 to 28. The
+        # limit claims no split of the 28 into prose and report: which is which
+        # is a reading, and no test holds a reading (T-121, round 2)
+        wide = re.compile(
+            r"\b((?:" + lint.HISTORY_SUBJECT[3:-1] + r"|it|nothing|the (?:text|log))"
+            + lint.HISTORY_BETWEEN + r"(?:" + lint.HISTORY_VERBS
+            + r"|is|has|stands|compares|" + lint.HISTORY_NEGATED + r"))\b",
+            re.IGNORECASE)
+        found = self.sweep(wide, dated=False)
+        self.assertEqual(len(found), 28)
+        self.assertEqual(len({tag for tag, _ in found}), 9)
+
+    def test_the_anchor_excuses_six_sentences_the_pattern_would_report(self):
+        # the sixth limit, measured: `now` and a date in the same sentence as
+        # the report. Without this test the seeded D1.2 would pass vacuously
+        found = self.sweep(lint.HISTORY_REPORT, dated=False, anchored=True)
+        self.assertEqual([tag for tag, _ in found],
+                         ["D1.2", "D1.3", "D2.2", "D19.5", "D20.5", "D20.5"])
+
+    def test_the_run_between_subject_and_verb_costs_nothing_and_buys_four(self):
+        # the seventh limit: a report built only from words both lists hold used
+        # to escape, because the subject had to stand against the verb. Widening
+        # the run to HISTORY_RUN words reports 0 over the tree, adds 1 sentence
+        # to the sweep without the escape, and catches four paraphrases of
+        # D20.5's real defect (T-121, round 2)
+        tight = re.compile(
+            r"\b(" + lint.HISTORY_SUBJECT + lint.HISTORY_ADVERB + r"\s+(?:"
+            + lint.HISTORY_VERBS + r"|" + lint.HISTORY_NEGATED + r"))\b",
+            re.IGNORECASE)
+        self.assertEqual(self.sweep(lint.HISTORY_REPORT), [])
+        self.assertEqual(len(self.sweep(lint.HISTORY_REPORT, dated=False)), 7)
+        self.assertEqual(len(self.sweep(tight, dated=False)), 6)
+        for paraphrase in (
+                "the rule of D19.5 says the bootstrap compares with cmp",
+                "this decision, after T-109, says the two stages are compared",
+                "the rule still only says the bootstrap script compares them",
+                "D19.5's rule, which nobody amended, says the same thing"):
+            with self.subTest(paraphrase=paraphrase):
+                self.assertIsNone(tight.search(paraphrase))
+                self.assertIsNotNone(lint.HISTORY_REPORT.search(paraphrase))
+
+    def test_the_run_is_bounded_so_it_cannot_bridge_a_relative_clause(self):
+        # the other half of the seventh limit: past the bound a report is missed,
+        # and that is what stops the run reaching a verb of another subject
+        self.assertIsNone(lint.HISTORY_REPORT.search(
+            "the rule of the other entry, which nobody has touched since, "
+            "requires two runs"))
+
+    def test_every_limit_names_a_gap_and_says_what_stands_in_it(self):
+        self.assertEqual(len(lint.HISTORY_LIMITS), 7)
+        for gap, why in lint.HISTORY_LIMITS:
+            with self.subTest(gap=gap):
+                self.assertGreater(len(why), 80, gap)
+
+
+class HistoryRepositoryTest(unittest.TestCase):
+    def test_a_tree_with_no_decision_log_reports_nothing_rather_than_raising(self):
+        # `known_tags` guards the same read with `exists()`, and `--root` over a
+        # partial tree is the workflow that reaches both (T-121, round 2)
+        with tempfile.TemporaryDirectory() as name:
+            problems, count = lint.rule_history(Path(name))
+            self.assertEqual(problems, [])
+            self.assertEqual(count, "history: 0 history fields, 0 with a dated note")
+
+    def test_the_log_of_this_repository_reports_nothing(self):
+        root = Path(__file__).resolve().parent.parent
+        problems, count = lint.rule_history(root)
+        self.assertEqual(problems, [])
+        self.assertEqual(count, "history: 49 history fields, 2 with a dated note")
+
+    def test_the_field_count_is_the_one_grep_counts(self):
+        # `grep -c '^- history:' spec/decisions.md` says 49 (notes/style.md 4)
+        root = Path(__file__).resolve().parent.parent
+        text = (root / "spec/decisions.md").read_text(encoding="utf-8")
+        self.assertEqual(len(lint.history_fields(text)), 49)
+        self.assertEqual(
+            sum(1 for line in text.split("\n") if line.startswith("- history:")), 49)
+
+
 class BudgetTest(unittest.TestCase):
     def test_the_tree_of_this_repository_is_inside_the_budget(self):
         root = Path(__file__).resolve().parent.parent
@@ -776,6 +1163,20 @@ class CommandLineTest(unittest.TestCase):
             self.assertEqual(status, 1)
             self.assertEqual(printed,
                              ["spec/decisions.md:9: D1.2 has no owner field"])
+
+    def test_the_history_rule_goes_red_on_its_own_tree(self):
+        broken = DECISIONS.replace(
+            "- history: Amended 2026-09-13 (T-103): nothing changed.",
+            "- history: Amended 2026-09-13 (T-103): nothing changed. D1.1's rule"
+            " still says the first rule.")
+        with tempfile.TemporaryDirectory() as name:
+            root = clean_tree(Path(name), **{"spec/decisions.md": broken})
+            status, printed = run(root, "history")
+            self.assertEqual(status, 1)
+            self.assertEqual(printed, [
+                "spec/decisions.md:12: D1.2 reports a rule of the log in the present "
+                'tense: "D1.1\'s rule still says"; write the past tense or append a '
+                "dated note (notes/style.md 4)"])
 
     def test_the_paths_rule_goes_red_on_its_own_tree(self):
         broken = STYLE + "\nThe log is `notes/decisions.md`.\n"

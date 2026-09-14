@@ -6,7 +6,7 @@ count rule of AGENTS.md was written down three times and three tickets still
 claimed a universal they had not measured, and T-108 shipped 15 false sentences
 and 37 misplaced `///` marks past a check that reported zero.
 
-This tool holds four rules, one for each convention the ticket names. Each is a
+This tool holds five rules, one for each convention the ticket names. Each is a
 function that returns a list of `path:line: message` problems and a one-line
 count, and `--rule NAME` runs one of them alone.
 
@@ -19,6 +19,9 @@ count, and `--rule NAME` runs one of them alone.
   decisions every entry of spec/decisions.md has an owner and a rule field
             (notes/style.md 4), read through tools/check_decisions.py so that
             one parser answers for both tools.
+  history   no history note of spec/decisions.md reports a rule of the log in
+            the present tense with no date on the claim (notes/style.md 4,
+            T-109, T-121).
   paths     a document is cited by a path that exists and by its section, never
             by a line number (notes/style.md 4, T-105).
 
@@ -52,6 +55,12 @@ What this lint does not see, stated rather than left in a glob:
   * A ticket number is not checked against anything, because `.tickets/` is
     outside the repository. A decision tag is: it must name an entry or a
     section of spec/decisions.md.
+  * The `history` rule reads a subject that names a rule and never a bare
+    decision tag, it reads a closed list of verbs, one dated note excuses the
+    whole field, and it says nothing about the `rule` field or the `rationale`
+    field. HISTORY_LIMITS below states each gap with the entry that stands in
+    it, and `test_every_limit_names_a_gap_and_says_what_stands_in_it` counts
+    them, so no number for them stands in this prose.
   * EXCLUDED below names the code it does not read at all.
 """
 
@@ -641,6 +650,268 @@ def rule_decisions(root):
                      f"{' and '.join(check_decisions.REQUIRED)}"
 
 
+# ---- the tense of a history note (notes/style.md 4) -------------------------
+
+# What a history note may report and what it may not. A note is dated by its own
+# `Amended YYYY-MM-DD` marker; the statement it reports is not. So a note that
+# says what another statement *says*, in the present tense, makes a claim with no
+# date on it, and the claim goes false the next time that statement moves. Three
+# entries went wrong this way: D20.5's note said D19.5's rule "still says" a
+# sentence that T-109 then replaced; D19.5's note called the stage1-against-stage2
+# comparison one "which this decision does not ask for", which T-109's rewrite
+# made the rule ask for; and T-109's own round-2 fix wrote `nothing compares two
+# runs of one compiler`, a present-tense claim about the repository, into
+# D19.5's rule field, which no rule here reads. What silences the rule is the tense of the
+# *reported* verb, not the tense of the note around it: "the rule read X" is a
+# report in the past and no verb of HISTORY_VERBS stands in it, while "until
+# then the rule read: this decision requires two runs" is still red, because
+# SENTENCE_BREAK cuts at the colon and the clause after it is present-tense. A
+# note that reports an old rule quotes it, and unquoted() then hides the words
+# (notes/style.md 4, T-109, T-121 round 2).
+
+# The subject of a report: a phrase that names a rule of the log. A bare tag is
+# not one, for the reason HISTORY_LIMITS gives.
+HISTORY_SUBJECT = (r"(?:th(?:is|at|e) (?:decision|rule|rationale)|its rule"
+                   r"|D\d+(?:\.\d+)?'s (?:rule|note|clause|sentence)"
+                   r"|the (?:note|sentence|clause|entry) (?:above|below|here))")
+
+# An adverb may stand between the subject and the verb. "still" is the one that
+# made D20.5 wrong, because it claims the statement has not moved since; "now"
+# is the opposite and the house style of an amendment, and HISTORY_ANCHOR
+# excuses the sentence it stands in.
+HISTORY_ADVERB = (r"(?:\s+(?:still|now|also|already|only|therefore|again|then"
+                  r"|no longer))?")
+
+# Up to HISTORY_RUN words may stand between the subject and the verb, with an
+# optional comma against the subject, so that `the rule of D19.5 says` and `this
+# decision, after T-109, says` are reports and not prose. Without it a
+# paraphrase of D20.5's real defect, built only from words both closed lists
+# hold, went green (T-121, round 2). The bound is what stops the run bridging a
+# relative clause on to a later verb: at 3 words `the rule of the other entry,
+# which nobody has touched since, requires two runs` stays green. Widening the
+# run from 0 to 3 words costs 0 problems over the tree and adds 1 sentence to
+# the sweep that drops the dated-note escape, `the rule itself requires` in
+# D19.5's own T-109 note.
+HISTORY_RUN = 3
+HISTORY_BETWEEN = HISTORY_ADVERB + r"(?:,?(?:\s+\S+){0," + str(HISTORY_RUN) + r"})?\s+"
+
+# The verbs of saying, in the present tense. `read` and `said` are absent
+# because they are past-tense forms and a clause built on one reports nothing
+# that can go stale; that is a property of the reported clause and not of the
+# note around it, which the paragraph above states. `is`, `has` and `stands` are
+# absent too, because they report a property and not a statement, and every note
+# holds one.
+HISTORY_VERBS = ("says|states|reads|asks|requires|names|decides|lists|holds|carries"
+                 "|cites|records|forbids|contradicts|means|describes|covers"
+                 "|specifies|mentions|calls|allows|admits|bars")
+HISTORY_NEGATED = (r"(?:does not|cannot|can not)\s+"
+                   r"(?:ask|say|state|read|require|name|decide|list|hold|carry|cite"
+                   r"|record|forbid|contradict|mean|describe|cover|specify|mention"
+                   r"|call|allow|admit|bar)")
+HISTORY_REPORT = re.compile(
+    r"\b(" + HISTORY_SUBJECT + HISTORY_BETWEEN + r"(?:" + HISTORY_VERBS + r"|"
+    + HISTORY_NEGATED + r"))\b", re.IGNORECASE)
+
+# A claim the sentence dates itself: `now` says the amendment made it true, and
+# a date or one of the two dating phrases pins it to a day.
+HISTORY_ANCHOR = re.compile(r"\bnow\b|20\d\d-\d\d-\d\d|as it stood"
+                            r"|from th(?:is|at) date")
+
+# The repair notes/style.md 4 prescribes, which is to append a dated note rather
+# than to edit the words of the old one: a sentence that carries a date and says
+# what the note describes. T-109 wrote one into D19.5 and one into D20.5. A field
+# that holds one excuses every report in it.
+HISTORY_DATE = re.compile(r"20\d\d-\d\d-\d\d")
+HISTORY_DATING = re.compile(r"as it stood|from th(?:is|at) date")
+
+# A sentence ends at a full stop, a semicolon or a colon, all three of which the
+# log uses to join clauses. The rule reads one sentence at a time, so a date in
+# one sentence does not excuse the next.
+SENTENCE_BREAK = re.compile(r"(?<=[.;:])\s")
+
+# What this rule cannot see. Each line names the gap and the entry that stands in
+# it, so a reader of a green report knows what the green covers. Every number was
+# measured over the 49 history fields of the 144 entries on 2026-09-13, and each
+# is pinned by a test of HistoryLimitTest in test/knowledge_lint_test.py rather
+# than left in this prose, so a gap that closes fails a test.
+HISTORY_LIMITS = (
+    ("a bare decision tag is not a subject",
+     "`D3.10 decides function types and function pointers` (D17.4) reports "
+     "another entry and is not reported, because a tag as often stands in a "
+     "relative clause that reports nothing, as in D9.1's `every test file "
+     "D14.4 names NNN_name.ft`. 2 sentences of the 49 fields stand in this "
+     "gap, one of each kind, and T-122 repairs D17.4 and widens the subject "
+     "afterwards, which is the only order that works. The gap stood inside the "
+     "motivating case as well: D20.5 before T-109 also carried `D19.5 requires "
+     "the emitted text to be a function of the program`"),
+    ("a note that quotes nothing is invisible",
+     "T-039's note said the stage1 comparison is one `which this decision does "
+     "not ask for` and pointed at `the sentence above`. The rule catches the "
+     "first half. No rule can catch the second, because nothing in the text "
+     "says which sentence is meant (T-109's review)"),
+    ("one dated note excuses the whole field, and not positionally",
+     "the escape is the repair notes/style.md 4 prescribes, and it excuses "
+     "every report of the field wherever it stands. 2 fields of the 49 carry a "
+     "dated note and it excuses 7 reports, 2 of which stand after it. Those 2 "
+     "are T-109's own amendment describing the rule it wrote, so excusing them "
+     "is right, but it is right by accident of a coarse escape: a stale report "
+     "appended below the dated note rides out the same way"),
+    ("the rule field and the rationale field are not read",
+     "a rule states a requirement in the present tense by design. The same "
+     "signature over the 144 rule fields reports 2 sentences in 1 entry, both "
+     "D19.5's rule describing its own scope and both correct, and over the 16 "
+     "rationale fields it reports 0. Reading either would still not close the "
+     "class: the third instance of the defect was T-109's `nothing compares "
+     "two runs of one compiler`, written into D19.5's rule, and it is out of "
+     "reach twice over, once for the field and once for the subject `nothing`, "
+     "whose cost the limit below measures"),
+    ("a subject or a verb outside the two lists is not a report",
+     "both lists are closed, so `the rule bans X` reads as prose. A word added "
+     "to either must be measured over the log again: reading `it`, `nothing`, "
+     "`the text` and `the log` as subjects and `is`, `has`, `stands` and "
+     "`compares` as verbs takes the sweep from 7 sentences in 2 fields to 28 "
+     "in 9. The sentences it adds are of both kinds, `It is the observation "
+     "point` (D14.1) being prose and `it states` (D17.4) a report whose "
+     "subject is a pronoun, and no count of the two stands here, because which "
+     "is which is a reading and no test holds a reading"),
+    ("a sentence that dates itself is not read",
+     "`Amended YYYY-MM-DD (T-nnn)` dates the sentence it stands in and `now` "
+     "says the amendment made the rule read this way, so a report written "
+     "inside such a sentence is excused and `the rule now says` is outside the "
+     "rule even when the amendment changed no word. A stale report joined by a "
+     "comma to a clause that holds `now` rides out on it. 6 sentences of the "
+     "49 fields stand in this gap"),
+    ("a run of at most HISTORY_RUN words joins a subject to a verb",
+     "beyond that bound a report is not read: `the rule of the other entry, "
+     "which nobody has touched since, requires two runs` is green at 3 words. "
+     "The bound buys the other direction, that the run cannot bridge a "
+     "relative clause on to a later verb and report the wrong subject"),
+)
+
+
+HISTORY_LABEL = re.compile(r"^- history: ?(.*)$")
+
+
+def history_fields(text):
+    """Every history field of the decision log, as (tag, body, line of each character).
+
+    The body is the field with its line wrapping removed, because the sentence
+    that repairs D19.5 wraps between "describe the log as" and "it stood on
+    2026-09-12" and a line-at-a-time reader sees neither half (T-121).
+    """
+    found = []
+    tag, pieces = None, None
+    for number, line in enumerate(text.split("\n"), start=1):
+        head = check_decisions.ENTRY_HEAD.match(line)
+        if head:
+            tag, pieces = head.group(1), None
+            continue
+        if line.startswith("#"):
+            tag, pieces = None, None
+            continue
+        if tag is None:
+            continue
+        label = HISTORY_LABEL.match(line)
+        if label:
+            pieces = [(number, label.group(1))]
+            found.append((tag, pieces))
+            continue
+        if pieces is None:
+            continue
+        if check_decisions.FIELD.match(line):
+            pieces = None
+            continue
+        pieces.append((number, line))
+    return [(tag,) + joined_field(pieces) for tag, pieces in found]
+
+
+def joined_field(pieces):
+    """One field's words as one string, with the source line of each character."""
+    body, at = [], []
+    for number, piece in pieces:
+        for word in piece.split():
+            if body:
+                body.append(" ")
+                at.append(number)
+            body.append(word)
+            at.extend([number] * len(word))
+    return "".join(body), at
+
+
+def sentences_of(body):
+    """Each sentence of a field, as (offset in the body, text)."""
+    found = []
+    start = 0
+    for match in SENTENCE_BREAK.finditer(body):
+        found.append((start, body[start:match.start()]))
+        start = match.end()
+    found.append((start, body[start:]))
+    return found
+
+
+QUOTED = re.compile(r"\"[^\"]*\"|`[^`]*`")
+
+
+def unquoted(text):
+    """The text with every quotation and code span replaced by filler of the same length.
+
+    A note that quotes the sentence it replaces does the thing notes/style.md 4
+    asks for, so the words inside the quotation marks are the old statement and
+    not this note's claim about it.
+    """
+    return QUOTED.sub(lambda m: "x" * len(m.group(0)), text)
+
+
+def field_is_dated(body):
+    """Whether this history field carries the dated note notes/style.md 4 prescribes."""
+    for _, sentence in sentences_of(body):
+        text = unquoted(sentence)
+        if HISTORY_DATE.search(text) and HISTORY_DATING.search(text):
+            return True
+    return False
+
+
+def history_problems(text, path=DECISIONS_FILE):
+    """Every history note that reports a rule of the log in the present tense.
+
+    Returns (problems, fields, dated): the count of fields read and the count of
+    them that carry a dated note, so a green report says how much of it is the
+    escape rather than the rule.
+    """
+    problems, fields, dated = [], 0, 0
+    for tag, body, at in history_fields(text):
+        fields += 1
+        if field_is_dated(body):
+            dated += 1
+            continue
+        for start, sentence in sentences_of(body):
+            clean = unquoted(sentence)
+            if HISTORY_ANCHOR.search(clean):
+                continue
+            for match in HISTORY_REPORT.finditer(clean):
+                line = at[start + match.start()]
+                problems.append(
+                    f"{path}:{line}: {tag} reports a rule of the log in the present "
+                    f"tense: \"{match.group(1)}\"; write the past tense or append a "
+                    f"dated note (notes/style.md 4)")
+    return problems, fields, dated
+
+
+def rule_history(root):
+    """No history note reports a rule of the log in the present tense, undated.
+
+    A tree with no decision log holds no history note, which is what `known_tags`
+    answers for a missing log too, so `--root` over a partial tree reports
+    nothing rather than raising (T-121, round 2).
+    """
+    path = root / DECISIONS_FILE
+    if not path.exists():
+        return [], "history: 0 history fields, 0 with a dated note"
+    text = path.read_text(encoding="utf-8")
+    problems, fields, dated = history_problems(text)
+    return problems, f"history: {fields} history fields, {dated} with a dated note"
+
+
 # A reference to a document of the repository: a path with a directory, which is
 # what notes/style.md 4 asks a citation to carry after T-099 moved three sections
 # out of AGENTS.md.
@@ -709,6 +980,7 @@ RULES = {
     "budget": rule_budget,
     "citation": rule_citation,
     "decisions": rule_decisions,
+    "history": rule_history,
     "paths": rule_paths,
 }
 
