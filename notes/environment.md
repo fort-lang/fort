@@ -161,6 +161,17 @@ without a rewrite.
   non-interactive shell has SIGINT ignored on entry (POSIX). Use `kill -TERM <pid>`. Find the pid
   by matching the process whose command *is* the gate. Never use `pkill -f`: it also matches every
   waiter that quotes the command.
+  **`$!` names a subshell when `&` follows an AND-list**, so the pid a wrapper prints is often not
+  the gate. In `cd <worktree> && tools/vm gate > build/gate.log 2>&1 & pid=$!`, the `&` binds to
+  the whole `cd && tools/vm` list, so bash forks a subshell for the list and `$!` is that subshell;
+  the gate is its child. `kill -TERM "$pid"` then ends the subshell and reparents the gate to init,
+  where it holds the worktree and the next gate refuses to start. Measured 2026-09-13:
+  `bash -c 'cd /tmp && sleep 8 >/dev/null 2>&1 & pid=$!; echo $pid'` printed the subshell and
+  `ps -o ppid` showed `sleep` as its child; without the `cd &&` prefix, `$!` is the command itself.
+  So `cd` on its own line before the background job, or take the pid from the refusal message,
+  which reads the hold file and names the right process. The hold and this rule are both correct;
+  the wrapper form is what was wrong, and it was in the coordinator's own task prompts all day
+  (T-121).
   **A host-side timeout does not reach the guest.** `ssh -T` allocates no pty, so a command that
   kills the host process leaves the guest command running. T-078 measured it on the new
   `guest_run`: `subprocess.run(["tools/vm", "run", "sleep 40"], timeout=3)` raised its timeout,
