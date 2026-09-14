@@ -44,23 +44,26 @@ so no value ever starts undefined, and every result is an owning reference: the 
 type says that this value is the one responsible for freeing the allocation (D17.3; section
 2.3).
 
-| Form              | Result type           | Meaning                                      |
-|-------------------|-----------------------|----------------------------------------------|
-| `new(T)`          | `T mut* own`          | one zeroed `T`, for every `T` (D10.2)        |
-| `new(T[K])`       | `T[K] mut* own`       | one zeroed array object; `K` is a constant   |
-| `new(T, n)`       | `T mut@ own`          | `n` zeroed elements; `n` is any integer type |
-| `new(T[K], n)`    | `T[K] mut@ own`       | `n` zeroed rows of `T[K]`                    |
-| `new(T*)`         | `T mut* mut* own`     | one zeroed pointer slot (D10.2)              |
-| `new(T*, n)`      | `T mut* mut@ own`     | `n` zeroed slots, each a borrowed pointer    |
-| `new(T* own, n)`  | `T mut* own mut@ own` | `n` owned slots, all `null` (D17.3)          |
-| `new(void*)`      | `void mut* mut* own`  | one zeroed `void*` slot (D17.3)              |
-| `new(void*, n)`   | `void mut* mut@ own`  | `n` zeroed `void*` slots (`std.vec`)         |
-| `new(T{...})`     | error                 | allocate, then assign the fields             |
-| `new(T@)`         | error                 | a span header is not an object to allocate   |
-| `new(void)`       | error                 | `void` has no size                           |
-| `new(T mut)`      | error                 | `mut` never parses inside `new` (D10.2)      |
-| `new(string own)` | error                 | `own` parses only after a `*` (D10.2, D17.3) |
-| `new(own T)`      | error                 | nothing precedes the base type (D5.3)        |
+| Form                | Result type          | Meaning                                      |
+|---------------------|----------------------|----------------------------------------------|
+| `new(T)`            | `T mut* own`         | one zeroed `T`, for every `T` (D10.2)        |
+| `new(T[K])`         | `T[K] mut* own`      | one zeroed array object; `K` is a constant   |
+| `new(T, n)`         | `T mut@ own`         | `n` zeroed elements; `n` is any integer type |
+| `new(T[K], n)`      | `T[K] mut@ own`      | `n` zeroed rows of `T[K]`                    |
+| `new(T*)`           | `T* mut* own`        | one zeroed pointer slot (D10.2)              |
+| `new(T mut*)`       | `T mut* mut* own`    | one zeroed slot that reaches a writable `T`  |
+| `new(T*, n)`        | `T* mut@ own`        | `n` zeroed slots, each a borrowed pointer    |
+| `new(T mut*, n)`    | `T mut* mut@ own`    | `n` zeroed slots, each reaching a writable T |
+| `new(T* own, n)`    | `T* own mut@ own`    | `n` owned slots, all `null` (D17.3)          |
+| `new(void*, n)`     | `void* mut@ own`     | `n` zeroed `void*` slots                     |
+| `new(void mut*, n)` | `void mut* mut@ own` | `n` slots that reach writable storage        |
+| `new(T{...})`       | error                | allocate, then assign the fields             |
+| `new(T@)`           | error                | a span header is not an object to allocate   |
+| `new(void)`         | error                | `void` has no size                           |
+| `new(T mut)`        | error                | the outermost position is `new`'s (D10.2)    |
+| `new(T* mut)`       | error                | the outermost position is `new`'s (D10.2)    |
+| `new(string own)`   | error                | `own` parses only after a `*` (D10.2, D17.3) |
+| `new(own T)`        | error                | nothing precedes the base type (D5.3)        |
 
 The element count is the second argument, never part of the type (D10.2): `new(T)` allocates one
 `T` and `new(T, n)` allocates `n` of them as a span, so brackets inside `new(...)` are always
@@ -69,15 +72,16 @@ fixed-array dimensions of the element type (grammar section 6). `new(i32[4])` is
 take any integer type, and a negative constant count is a compile error (D4.1). A negative count
 at run time, a total size that overflows, and allocation failure are runtime errors (section 6);
 `n == 0` is allowed and yields a span of length 0 with a non-null `.ptr`, because the runtime
-allocates at least one byte (D10.2). `mut` does not parse inside `new(...)`, and `own` only after
-a `*` of the element type (grammar section 6): `new(node*)` allocates one pointer slot and yields
-a `node mut* mut* own`, `new(node*, n)` yields a `node mut* mut@ own`, a span of borrowed
-pointers, and `new(node* own, n)` yields a `node mut* own mut@ own`, a span of owned slots that
-are all `null` (D17.3). `void*` is an element type like any other, since a pointer to `void` has a
-size: `new(void*)` is one slot and `new(void*, n)` is the span `std.vec`'s `ptr_vec` allocates.
-The level a `void*` reaches is marked writable like every other level, so the slots hold
-`void mut*` (D3.11, D5.8). `void` itself names no storage, so `new(void)` stays the error above
-(D10.2, D17.3).
+allocates at least one byte (D10.2). An `own` parses only after a `*` of the element type (grammar
+section 6), and a `mut` parses in every position of the element type but the outermost one, which
+`new` fills: `new` marks the storage it allocates, and that storage is that one position (D5.8,
+D10.2). **So the element type of the result is the element type written.** `new(node*, n)` yields
+a `node* mut@ own`, a span of assignable slots that borrow nodes it cannot write, and
+`new(node mut*, n)` yields a `node mut* mut@ own`, the same span of slots reaching writable nodes;
+`new(node* own, n)` yields a `node* own mut@ own`, a span of owned slots that are all `null`
+(D17.3). `void*` is an element type like any other, since a pointer to `void` has a size
+(D3.11): `new(void*)` is one slot and `new(void*, n)` is a span of them. `void` itself names no
+storage, so `new(void)` stays the error above (D10.2, D17.3).
 
 The result is an rvalue that must land in an `own` place (D17.8): the initializer of an `own`
 declaration, an `own` parameter, an `own` field or element, or `del` itself. Binding it to a
@@ -90,8 +94,10 @@ u8[16] mut* own row = new(u8[16]);      // one zeroed row of sixteen bytes
 u8[16] mut@ own rows = new(u8[16], n);  // n rows of sixteen bytes
 i32 mut@ own none = new(i32, 0);        // none.len == 0, none.ptr != null; del it like any other
 i32@ own ro = new(i32, 4);              // owned, read-only through this binding (D5.4, D17.4)
-node mut* own mut@ own kids = new(node* own, 4);  // four null owned slots (D17.3)
+node mut* own mut@ own kids = new(node mut* own, 4);  // four null owned slots (D17.3)
+node* own mut@ own borrowed = new(node* own, 4);  // four null owned slots, read-only nodes
 node mut* own mut@ own k2 = new(own node*, 4);    // error: nothing precedes the base type (D5.3)
+node mut* mut@ own bad2 = new(node mut* mut, 4);  // error: the outermost position is new's
 del(new(point));                        // allocated and freed in one statement
 point mut* q = new(point);              // error: owning temporary would leak (D17.8)
 point mut* own q2 = new(point{1, 2});   // error: new takes a type, not a literal
@@ -266,7 +272,7 @@ list mut l = make();
 list l2 = l;                         // error: copying an owning value requires move(l) (D17.7)
 consume(move(l));                    // l is list{} afterwards
 del(l);                              // error: del of an aggregate; del its fields instead (D17.7)
-node mut* own mut@ own kids = new(node* own, 4);   // four null owned slots (D17.3)
+node mut* own mut@ own kids = new(node mut* own, 4);   // four null owned slots (D17.3)
 for (node mut* k : kids) { }         // each k lends one element; kids is iterated in place (D17.10)
 for (node mut* own k : kids) { }     // error: a loop variable cannot be own (D17.10)
 node mut* own first = move(kids[0]); // taking an element out is explicit
@@ -274,9 +280,10 @@ del(first);
 del(kids);                           // frees the slots; the remaining nodes must be freed first
 ```
 
-`new(node*, 4)` yields `node mut* mut@ own`, slots that borrow; `new(node* own, 4)` yields
-`node mut* own mut@ own`, slots that own what is later moved into them (D17.3). The `cast` that
-adds `own` is reserved for memory from C (section 4.5).
+`new(node mut*, 4)` yields `node mut* mut@ own`, slots that borrow; `new(node mut* own, 4)` yields
+`node mut* own mut@ own`, slots that own what is later moved into them (D17.3). Each spelling says
+what its slots reach, because `new` marks the storage it allocates and nothing below it (D10.2).
+The `cast` that adds `own` is reserved for memory from C (section 4.5).
 
 ### 2.4 Cleanup idioms
 

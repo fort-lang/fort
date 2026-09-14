@@ -652,9 +652,10 @@ i32 c = 5;
 **pp = 7;                            // writes c through pp's i32 mut* mut* type
 ```
 
-`new(node*, 3)` returns `node mut* mut@ own`, so binding it to `node* mut@ own t` is refused by
-the same rule; declare `node mut* mut@ own t` (D5.4). Binding it to `node*@ t` fails for another
-reason: the owning temporary would leak (D17.8, section 8.3).
+`new(node mut*, 3)` returns `node mut* mut@ own`, so binding it to `node* mut@ own t` is refused
+by the same rule; declare `node mut* mut@ own t`, or write `new(node*, 3)` and get the element type
+you asked for (D5.4, D10.2). Binding either to `node*@ t` fails for another reason: the owning
+temporary would leak (D17.8, section 8.3).
 
 ### 7.5 Struct fields and return types
 
@@ -887,9 +888,10 @@ rvalue (section 8.5), and discarding it as an expression statement.
 | `new(node)`                                    | `node mut* own`                        |
 | `new(u8, n)`                                   | `u8 mut@ own`                          |
 | `new(i32[4], n)`                               | `i32[4] mut@ own`                      |
-| `new(node*)`                                   | `node mut* mut* own`                   |
-| `new(node*, n)`                                | `node mut* mut@ own`                   |
-| `new(node* own, n)`                            | `node mut* own mut@ own`, slots `null` |
+| `new(node*)`                                   | `node* mut* own`                       |
+| `new(node*, n)`                                | `node* mut@ own`                       |
+| `new(node mut*, n)`                            | `node mut* mut@ own`                   |
+| `new(node mut* own, n)`                        | `node mut* own mut@ own`, slots `null` |
 | `buf[..]`, `buf[lo..hi]` for `u8 mut@ own buf` | `u8 mut@`                              |
 | `buf.ptr`                                      | `u8 mut*`                              |
 | `&buf` for `u8 mut@ own mut buf`               | `u8 mut@ own mut*`                     |
@@ -900,9 +902,10 @@ rvalue (section 8.5), and discarding it as an expression statement.
 | `str.dup(s)`, `strbuf.take(&b)`                | `string own`                           |
 
 `new` always marks the outermost reference; an `own` after a `*` of the element type marks the
-slots, so `new(node* own, n)` is an owned span of `n` owned slots, all `null` (D17.3), while a
+slots, so `new(node mut* own, n)` is an owned span of `n` owned slots, all `null` (D17.3), while a
 count-less `new(node*)` allocates one pointer slot (D10.2). Nothing precedes the base type inside
-`new(...)`, and `mut` never parses there (grammar section 6).
+`new(...)`, and a `mut` parses in every position of the element type but the outermost one, which
+`new` fills with the storage it allocates (grammar section 6, D10.2).
 
 ```fort
 u8 mut@ own mut buf = new(u8, 16);
@@ -914,7 +917,7 @@ u8 mut@ leak = new(u8, 8);           // error: owning temporary would leak
 u8@ tmp = str.dup("x");              // error: owning temporary would leak
 u8 mut@ head = new(u8, 8)[..4];      // error: owning temporary would leak
 u8 mut* first = new(u8, 8).ptr;      // error: owning temporary would leak
-node mut* own mut@ own kids = new(node* own, 2);   // ok: two null owned slots
+node mut* own mut@ own kids = new(node mut* own, 2);  // ok: two null owned slots
 node mut* own mut@ own bad2 = new(own node*, 2);   // error: nothing precedes the base type
 del(new(u8, 8));                     // ok: the temporary is freed
 ```
@@ -949,7 +952,7 @@ value could be stored, through the copy, into a slot the source still sees as ow
 | `string own` to `string`                          | ok     | drops the outer own             |
 
 ```fort
-node mut* own mut@ own kids = new(node* own, 2);
+node mut* own mut@ own kids = new(node mut* own, 2);
 node mut* mut@ w = kids;                // error: cannot drop own at level 1 behind a mutable slot
 // If the line above were accepted, the next two lines would both type-check and
 // together put a stack address where del(kids[0]) expects an allocation:
@@ -1137,7 +1140,7 @@ i32@ q = cast(p, i32@);                 // error: no cast from pointer to span
 point pt = cast(r, point);           // error: no struct casts
 u8 mut* own m = cast(libc.malloc(64), u8 mut* own);    // own rvalue to own type; del(m) frees it
 u8 mut@ own got = cast(p2[0..n], u8 mut@ own);         // adopts C memory at a u8 mut* p2
-node mut* own mut@ own kids = new(node* own, 8);       // owned slots (section 8.3)
+node mut* own mut@ own kids = new(node mut* own, 8);   // owned slots (section 8.3)
 node mut* mut@ esc = cast(kids, node mut* mut@);       // ok: drops own where 8.4 refuses
 string own t = cast(move(buf), string own);            // the target says own; buf is emptied
 string own t2 = cast(buf, string own);                 // error: copying own lvalue 'buf' needs move

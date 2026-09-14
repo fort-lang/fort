@@ -188,7 +188,7 @@ For a level `k >= 1`, mutability may be dropped only if every level from 1 to `k
 immutable in the target type. Adding mutability at any level requires `cast` (5.9).
 
 ```fort
-node mut* mut@ own a = new(node*, 1);   // slots (level 1) and pointees (level 2) mutable
+node mut* mut@ own a = new(node mut*, 1);   // slots (level 1) and pointees (level 2) mutable
 node*@ b = a;                       // ok: lends 'a', dropping own, level 1 and level 2
 node* mut@ c = a;                   // error: cannot drop level 2 behind mutable level 1
 ```
@@ -772,11 +772,14 @@ elements, where `n` is any integer type or an untyped constant, so the count is 
 never part of the type; the brackets inside `new(...)` are fixed-array dimensions of the element
 (`new(i32[4], n)` is an `i32[4] mut@ own` of `n` rows) (D10.2, D17.3). A negative constant `n` is
 a compile error (D4.1); a negative `n` at run time, a size that overflows, or allocation failure
-is a runtime error; `n == 0` is allowed and yields a span with a non-null pointer. `mut` is
-never written inside `new(...)`, and `own` only after a `*` of the element type: the result is
-fully mutable and owned at its outermost reference, `new(node*)` allocates one pointer slot and
-yields `node mut* mut* own`, and `new(node* own, n)` yields `node mut* own mut@ own`, an owned
-span of owned pointers whose slots are all `null` (D10.2, D17.3); nothing precedes the base type
+is a runtime error; `n == 0` is allowed and yields a span with a non-null pointer. An `own` is
+written inside `new(...)` only after a `*` of the element type, and a `mut` in every position of
+the element type but the outermost one, which `new` fills with the storage it allocates: the
+result is owned and writable there, and it is the written type below it, so the element type of
+the result is the element type written. `new(node*)` allocates one pointer slot and yields
+`node* mut* own`, `new(node mut*, n)` yields `node mut* mut@ own`, and `new(node mut* own, n)`
+yields `node mut* own mut@ own`, an owned span of owned pointers whose slots are all `null`
+(D10.2, D17.3); nothing precedes the base type
 there either (`grammar.md` section 6). `new(T{...})`, `new(T@)` and `new(void)` are errors. The
 result is an `own` rvalue and must land in an `own` place (3.9): `point* q = new(point);` is an
 error, not a conversion. Heap storage is freed only by `del` (8.2).
@@ -789,9 +792,10 @@ i32 mut@ own s = new(i32@, 4);         // error: a span header is not an element
 i32 mut@ own t = new(i32, n);          // ok; runtime error if n < 0
 i32 mut@ own u = new(i32, -1);         // error: negative constant count
 i32[4] mut* own r4 = new(i32[4]);      // ok: one array object, not a span
-node mut* mut* own pp = new(node*);     // ok: one zeroed pointer slot (D10.2)
-node mut* mut* own pm = new(node* mut);   // error: 'mut' inside 'new'
-node mut* own mut@ own k = new(node* own, 4);   // ok: four null slots, each an owned node*
+node* mut* own pp = new(node*);        // ok: one zeroed pointer slot (D10.2)
+node mut* mut* own pm = new(node mut*); // ok: the slot reaches a writable node
+node mut* mut* own pn = new(node* mut);   // error: the outermost position is 'new''s
+node mut* own mut@ own k = new(node mut* own, 4);  // ok: four null slots, each an owned node*
 node mut* own mut@ own k2 = new(own node*, 4);  // error: nothing precedes the base type
 point mut* own q = new(point);         // ok
 point* r = new(point);                 // error: owning temporary would leak; write point mut* own

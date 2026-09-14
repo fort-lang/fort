@@ -147,7 +147,8 @@ Reading rules (D3.6, D5.2, D5.3):
   target; after the base type it is legal only for `string`, the reference without a suffix
   (`string own s`). It precedes `mut` in a position (`node* own mut p`), never follows a
   fixed-array suffix, and inside `new(...)` parses only after a `*` of the element type (D17.2,
-  D17.3).
+  D17.3). A `mut` inside `new(...)` parses in every position but the outermost one, which `new`
+  fills (D10.2).
 - In a `fn_type`, a `mut` in the outermost position of a parameter type is ignored for type
   identity (D5.6).
 
@@ -243,7 +244,8 @@ array_type     = base_type { ref_suffix } "[" const_expr "]" { "[" const_expr "]
 cast_expr      = "cast" "(" expr "," type ")" ;                       (* D6.4 *)
 sizeof_expr    = "sizeof" "(" type ")" ;                              (* D3.15 *)
 new_expr       = "new" "(" alloc_type [ "," expr ] ")" ;              (* D10.2 *)
-alloc_type     = base_type { "*" [ "own" ] } { "[" const_expr "]" } ;
+alloc_type     = base_type [ "mut" ] { "*" [ "own" ] [ "mut" ] }
+                 { "[" const_expr "]" } ;                             (* D10.2 *)
 ```
 
 Notes:
@@ -254,8 +256,11 @@ Notes:
 - `-x` on an unsigned type, and `!`/`~` on the wrong types, are type errors, not parse errors.
 - `new(T)` allocates one `T` and `new(T, n)` allocates `n` of them as a span; the brackets in
   an `alloc_type` are fixed-array dimensions of `T` (`new(i32[4], n)` yields `i32[4] mut@ own`).
-  `mut` does not parse inside `new(...)`, and `own` only after a `*` of the element type
-  (`new(node* own, n)`, D17.3); the result is writable at every level and owned (D5.8, D17.3).
+  An `own` parses only after a `*` of the element type (`new(node* own, n)`, D17.3). The last
+  `mut` position of an `alloc_type` is empty, whatever the production allows: it is the outermost
+  position of `T`, which `new` fills with the storage it allocates, so `new(node* mut)` and
+  `new(i32 mut)` do not parse while `new(node mut*, n)` does. The result is owned and writable in
+  that one position, and it is the written type below it (D5.8, D10.2, D17.3).
 - An `array_literal` type has only fixed dimensions and no trailing reference suffix:
   `i32[3]@{...}` and `i32[3]*{...}` do not parse.
 
