@@ -202,6 +202,32 @@ without a rewrite.
   '\0' | wc -c` read the same 124493 bytes on both sides. `touch` in the guest did not clear it.
   Writing the identical bytes from the host did, at once. So a mutation experiment edits from the
   host, which is where the next bullet puts it for its own reason.
+  T-125 met the same crash 13 times with the same guest-side heredoc, and found a cheaper cure
+  than dropping the caches: **give the file a new inode**. `rm -f <file> && cp <copy> <file>`
+  cleared it every time, with no `sudo` and no cache drop, so a guest-side mutation loop that
+  must edit in the guest writes each variant that way. T-125 also measured the worse face of it.
+  An in-place restore inside the guest, followed by a rebuild, left a **compiler that linked and
+  ran and was wrong**: `check_conv_test`, `check_extern_test` and `check_const_test` went red on
+  diagnostics the restored source cannot produce, and `build/debug/fort --check` printed
+  `constant expression out of range` on a program with no constant in it. No build error said so.
+  `ninja -t clean` and a full rebuild cleared it, and the same three suites then passed.
+- **A mutation harness must restore on the path it does not plan to take, and must prove the
+  restore.** The stale page above was the face of T-125's incident that a cure exists for; the
+  face that caused the damage was different. `bash harness.sh | head -8` closed the pipe, SIGPIPE
+  killed the harness between a mutation and its restore, and the next iteration's backup then
+  copied the **mutant** and wrote it back as the "restore". 4 of 11 call sites were reverted into
+  a commit that way. `rm` and `cp` do not help a process that never reaches the restore. Three
+  lines do: put the restore in `trap 'restore' EXIT INT TERM` so it runs on a signal, compare
+  `md5sum` of the restored file with the pristine copy **before** the next iteration and stop on
+  a difference, and **never pipe a mutation harness into `head`** -- write the whole output to a
+  file and read the file. Editing from the host, as the bullet above asks, removes the stale page
+  but not this: a host-side loop that dies mid-iteration leaves the same mutant behind.
+  **Do not wait for a red suite to find it.** T-125's tree stayed **green** through the whole
+  incident, because the suite that covers the reverted sites is `test/fort` and only the C unit
+  tests had been run since. The check that sees it is a count of the thing the branch changed --
+  `grep -c 'check_operand(ck,' src/fort/check.ft` read 6 where it had read 8 -- so a branch whose
+  work is countable counts it again after any mutation experiment, before the commit and again
+  before the gate.
 - The same folder can hand ninja a stale mtime, so a rebuild after an edit prints "no work to do"
   and the suite keeps failing on text the file no longer holds; `md5sum` in the guest reads the
   new bytes and dropping the caches does not help, because it is the timestamp and not the

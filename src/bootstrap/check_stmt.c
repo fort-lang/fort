@@ -156,7 +156,7 @@ static bool check_target(check_t* ck, ast_node_t* n, expr_t* lv, const char* ver
 
 static void check_assign(check_t* ck, ast_node_t* n) {
     expr_t lv;
-    check_expr(ck, n->a, &lv);
+    check_operand(ck, n->a, &lv);
     const bool ok = check_target(ck, n->a, &lv, "assign to");
     if (n->op == TOK_ASSIGN) {
         expr_t e;
@@ -176,7 +176,7 @@ static void check_assign(check_t* ck, ast_node_t* n) {
 
 static void check_incdec(check_t* ck, ast_node_t* n) {
     expr_t lv;
-    check_expr(ck, n->a, &lv);
+    check_operand(ck, n->a, &lv);
     if (!check_target(ck, n->a, &lv, "modify")) {
         return;
     }
@@ -265,7 +265,7 @@ static void check_range_for(check_t* ck, ast_node_t* n) {
     scope_init(&header, SCOPE_BLOCK, ck->scope);
     ck->scope = &header;
     expr_t coll;
-    check_expr(ck, n->b, &coll);
+    check_operand(ck, n->b, &coll);
     // D17.8, D17.10
     if (check_owning_temporary(ck, n->b->loc, &coll, "the loop only lends its collection")) {
         coll.type = type_error(&ck->types);

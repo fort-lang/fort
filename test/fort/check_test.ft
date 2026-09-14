@@ -252,6 +252,203 @@ fn void a_poisoned_left_operand_that_is_no_constant_is_still_dropped() {
     assert(!check_env.said(&e, "'<<' takes an integer left operand"));
 }
 
+// Every operator that drops a poisoned operand, which is every position that is
+// no context at all. A constant with no default type is poisoned and reported
+// nowhere, so each of the thirteen accepted the program in silence until
+// 2026-09-14: the compiler exited 0 and the program printed nothing.
+//
+// The C twin is test/check_operand_test.c, a file of its own because
+// check_const_test.c's `main` was 6 statements under clang-tidy's cap of 800.
+// This suite has no such cap, so the twins stand here.
+// D4.1, D4.5
+
+// The thirteen positions, as the text before the operand and the text after it.
+// D4.1
+string[13] DROP_HEAD = string[13]{
+    "    println(*",
+    "    println((",
+    "    println((",
+    "    println((",
+    "    println(",
+    "    println((",
+    "    println(",
+    "    println(&",
+    "    del(",
+    "    println(move(",
+    "    ",
+    "    ",
+    "    for (i32 x : ",
+};
+
+string[13] DROP_TAIL = string[13]{
+    ");",
+    ").x);",
+    ")->x);",
+    ").len);",
+    "[0]);",
+    ")[0 .. 1]);",
+    "());",
+    ");",
+    ");",
+    "));",
+    " = 1;",
+    "++;",
+    ") {\n        println(x);\n    }",
+};
+
+// `DROP_HEAD[i]` with `operand` and `DROP_TAIL[i]` after it, as the body of
+// `main`. The buffer is the caller's, so the view outlives this call.
+fn string drop_site(strbuf.str_buf mut* b, u64 i, string operand) {
+    strbuf.append(b, DROP_HEAD[i]);
+    strbuf.append(b, operand);
+    strbuf.append(b, DROP_TAIL[i]);
+    return strbuf.view(b);
+}
+
+fn void every_operator_that_drops_its_operand_reports_a_constant_with_no_type() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    u64 mut i = 0;
+    while (i < DROP_HEAD.len) {
+        if (i > 0) {
+            check_env.reopen(&e);
+        }
+        strbuf.str_buf mut b = strbuf.create();
+        // `2^63` written out folds to a value that neither i32 nor i64 holds,
+        // so the rule's own tail reports it. The operand reaches the rule
+        // because none of these positions is a context.
+        // D4.1, D4.5
+        assert(!check_env.check_body(&e, drop_site(&b, i, "9223372036854775808")));
+        assert(check_env.said(&e, "constant expression out of range"));
+        strbuf.free(&b);
+        check_env.reopen(&e);
+        strbuf.str_buf mut u = strbuf.create();
+        // The other end of the range the rule has no type for, `2^64 - 1`.
+        // D4.5
+        assert(!check_env.check_body(&e, drop_site(&u, i, "18446744073709551615")));
+        assert(check_env.said(&e, "constant expression out of range"));
+        strbuf.free(&u);
+        i += 1;
+    }
+}
+
+fn void a_constant_that_folds_back_into_range_leaves_the_operator_its_own_rule() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The second outcome of the same call, and it is not an error path. The
+    // shift leaves `2^63 >> 1` poisoned and carrying the i64 2^62, and the
+    // default type accepts that value, so the operand reaches the operator
+    // typed and the operator answers by its own rule. Without the call the
+    // four programs below compiled, exited 0 and printed nothing.
+    // D4.4, D4.5
+    assert(!check_env.check_body(&e, "    println(*(9223372036854775808 >> 1));"));
+    assert(check_env.said(&e, "cannot dereference i64"));
+    assert(check_env.errors(&e) == 1);
+    check_env.reopen(&e);
+    assert(!check_env.check_body(&e, "    println((9223372036854775808 >> 1).x);"));
+    assert(check_env.said(&e, "i64 has no field 'x'"));
+    check_env.reopen(&e);
+    assert(!check_env.check_body(&e, "    println((9223372036854775808 >> 1)());"));
+    assert(check_env.said(&e, "cannot call a value of type i64"));
+    check_env.reopen(&e);
+    assert(!check_env.check_body(&e, "    del(9223372036854775808 >> 1);"));
+    assert(check_env.said(&e, "'del' takes a reference, not i64"));
+    check_env.reopen(&e);
+    // The value itself is the one the exact folding gives, and a context takes it.
+    // D4.4
+    assert(check_env.check_body(&e, "    i64 w = 9223372036854775808 >> 1;\n    println(w);"));
+    assert(check_env.init_type(&e, "w") == "i64");
+}
+
+fn void a_dropped_operand_with_a_type_keeps_the_message_of_its_operator() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The other half: an operand that is no untyped constant reaches the
+    // operator, which answers as it always did. No mutant of the guard turns
+    // this red, and that is the point of writing it down: the guard runs only
+    // for a poisoned operand, so a typed one never enters it. The test pins
+    // the seven messages, so a later change that widens the key is seen. Its
+    // C twin is test/check_operand_test.c.
+    // D14.2
+    assert(!check_env.check_body(&e, "    i32 v = 1;\n    println(*v);"));
+    assert(check_env.said(&e, "cannot dereference i32"));
+    check_env.reopen(&e);
+    assert(!check_env.check_body(&e, "    i32 v = 1;\n    println(v.x);"));
+    assert(check_env.said(&e, "i32 has no field 'x'"));
+    check_env.reopen(&e);
+    assert(!check_env.check_body(&e, "    i32 v = 1;\n    println(v[0]);"));
+    assert(check_env.said(&e, "i32 cannot be indexed"));
+    check_env.reopen(&e);
+    assert(!check_env.check_body(&e, "    i32 v = 1;\n    println(v());"));
+    assert(check_env.said(&e, "cannot call a value of type i32"));
+    check_env.reopen(&e);
+    assert(!check_env.check_body(&e, "    i32 v = 1;\n    del(v);"));
+    assert(check_env.said(&e, "'del' takes a reference, not i32"));
+    check_env.reopen(&e);
+    assert(!check_env.check_body(&e, "    i32 v = 1;\n    println(move(v));"));
+    assert(check_env.said(&e, "'move' needs an owning operand, not i32"));
+    check_env.reopen(&e);
+    assert(!check_env.check_body(&e,
+        "    i32 v = 1;\n    for (i32 x : v) {\n        println(x);\n    }"));
+    assert(check_env.said(&e, "cannot iterate i32"));
+}
+
+fn void every_operator_that_drops_its_operand_reports_a_constant_it_carries() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    u64 mut i = 0;
+    while (i < DROP_HEAD.len) {
+        if (i > 0) {
+            check_env.reopen(&e);
+        }
+        strbuf.str_buf mut b = strbuf.create();
+        strbuf.append(&b, "    i32 n = 1;\n");
+        // The same thirteen with an expression that folded to no value. The
+        // constant then meets i64, the widest the rule offers, and the message
+        // names it. `n` is a local variable, so the shift folds nothing.
+        // D4.5, D6.2
+        assert(!check_env.check_body(&e, drop_site(&b, i, "(9223372036854775808 << n)")));
+        assert(check_env.said(&e, "constant 9223372036854775808 does not fit i64"));
+        strbuf.free(&b);
+        i += 1;
+    }
+}
+
+fn void a_dropped_operand_that_is_no_constant_keeps_its_one_diagnostic() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    u64 mut i = 0;
+    while (i < DROP_HEAD.len) {
+        if (i > 0) {
+            check_env.reopen(&e);
+        }
+        strbuf.str_buf mut b = strbuf.create();
+        // The guard reads the operand and not the operator, so an operand that
+        // was reported where it arose stays reported once. The count is the
+        // assertion: a guard that reported for every poisoned operand would
+        // double each of them, and the corpus could not see it, because the
+        // harness judges a line and not a count.
+        // D14.2
+        assert(!check_env.check_body(&e, drop_site(&b, i, "nosuch")));
+        assert(check_env.said(&e, "unknown name 'nosuch'"));
+        // `move` adds "'move' has no value", which it added before this guard
+        // too: its early return leaves the result `void`.
+        // D12.2
+        u64 mut want = 1;
+        if (i == 9) {
+            want = 2;
+        }
+        assert(check_env.errors(&e) == want);
+        strbuf.free(&b);
+        i += 1;
+    }
+}
+
 fn void a_char_alone_in_such_an_expression_asks_for_char() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -783,6 +980,11 @@ fn i32 main() {
     one_wide_constant_widens_the_whole_untyped_expression();
     an_expression_with_no_value_beyond_i64_is_refused();
     a_poisoned_left_operand_that_is_no_constant_is_still_dropped();
+    every_operator_that_drops_its_operand_reports_a_constant_with_no_type();
+    every_operator_that_drops_its_operand_reports_a_constant_it_carries();
+    a_constant_that_folds_back_into_range_leaves_the_operator_its_own_rule();
+    a_dropped_operand_that_is_no_constant_keeps_its_one_diagnostic();
+    a_dropped_operand_with_a_type_keeps_the_message_of_its_operator();
     a_char_alone_in_such_an_expression_asks_for_char();
     a_declared_char_is_no_more_an_integer_than_the_default_char_is();
     a_char_beside_an_integer_takes_the_integer_type();

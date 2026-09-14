@@ -282,6 +282,16 @@ bool check_layout(check_t* ck, const type_t* t);
 /// Checks one expression and annotates its node.
 void check_expr(check_t* ck, ast_node_t* node, expr_t* out);
 
+/// Checks the operand of an operator that gives it no context and that drops a
+/// poisoned operand. The thirteen positions: `*e`, `e.f`, `e->f`, `e.len`,
+/// `e[i]`, `e[a .. b]`, `e()`, `&e`, `del(e)`, `move(e)`, an assignment target,
+/// the operand of `++` and a range `for` collection. An untyped constant with
+/// no default type is poisoned and unreported, so it takes its default type
+/// here, which reports it, or un-poisons it when the value fits after all;
+/// every other operand reaches the caller unchanged.
+/// D4.1, D4.5
+void check_operand(check_t* ck, ast_node_t* node, expr_t* out);
+
 /// Checks an expression that must produce a value of `target`: it finalizes an
 /// untyped constant against it and reports a type that does not convert. `what`
 /// names the context in the diagnostic. An owning target is an own place, so an

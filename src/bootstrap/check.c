@@ -919,6 +919,37 @@ static void value_of(check_t* ck, ast_node_t* n, expr_t* e) {
     }
 }
 
+// The operand of an operator that gives it no context: `*e`, `e.f`, `e->f`,
+// `e.len`, `e[i]`, `e[a .. b]`, `e()`, `&e`, `del(e)`, `move(e)`, the target of
+// an assignment or of `++`, and the collection of a range `for`. Each of those
+// drops a poisoned operand and says nothing more about it, which is right for
+// an operand that was reported where it arose.
+//
+// An untyped constant with no default type -- `2^63` written out, or a `2^63`
+// still inside an expression that folded to no value -- is poisoned and was
+// reported nowhere: `untyped()` gives it the error type, and the rule of the
+// default type leaves the report to the context. None of the positions above
+// is a context, so the constant takes its default type here, exactly as it
+// would with no operator around it at all.
+//
+// The rule has two outcomes here and the second is not an error path. It
+// usually reports the constant and leaves the error type, so the caller sees
+// the poison and returns. A constant that folds back into range leaves a
+// **typed** operand and no diagnostic: `2^63 >> 1` is the i64 2^62, which the
+// shift leaves poisoned and this call un-poisons, so the caller goes on and
+// the operator answers by its own rule, `cannot dereference i64`. Four
+// programs of that shape were accepted in silence as well.
+//
+// `default_type` returns at once for an operand that is no untyped constant, so
+// every diagnostic these operators give today stands unchanged.
+// D4.1, D4.5
+void check_operand(check_t* ck, ast_node_t* n, expr_t* out) {
+    check_expr(ck, n, out);
+    if (check_poisoned(out->type)) {
+        default_type(ck, n, out);
+    }
+}
+
 // The ownership rules a value meets when it reaches an expected type. An owning
 // target is an `own` place, which an owning lvalue enters only as `move(lv)` and
 // an owning rvalue enters as it is; a target that does not own takes the lend of
@@ -1298,11 +1329,12 @@ static void check_shift(
     // out, is poisoned and still carries its constant, so it goes on to the
     // context, which reports it against the type the default rule chose.
     // `untyped()` gives such a constant the error type and reports nothing, so
-    // an early return on a poisoned operand loses the diagnostic altogether.
-    // This return is the only one repaired. Four others have the same hole and
-    // accept `*2^63`, `(2^63).x`, `2^63[0]` and `2^63()` in silence.
+    // an early return on a poisoned operand would lose the diagnostic
+    // altogether. Every other early return that can see one calls
+    // `check_operand`, which gives the constant its default type and reports
+    // it; the shift keeps this shape instead, because a shift may fold back
+    // into range and `9223372036854775808 >> 1` is a legal 2^62.
     // D4.5: the wide half, which this return used to drop
-    // T-125: the four early returns with the same hole
     if ((check_poisoned(a->type) && !a->untyped) || check_poisoned(b->type)) {
         return;
     }
@@ -1805,7 +1837,7 @@ static void check_field(check_t* ck, ast_node_t* n, expr_t* out, bool arrow) {
         }
     }
     expr_t op;
-    check_expr(ck, n->a, &op);
+    check_operand(ck, n->a, &op);
     if (check_poisoned(op.type)) {
         return;
     }
@@ -1885,7 +1917,7 @@ static void check_unary(check_t* ck, ast_node_t* n, expr_t* out) {
         // D5.8, D17.3, D7.10
         const bool outer_addr_only = ck->addr_only;
         ck->addr_only = true;
-        check_expr(ck, n->a, &a);
+        check_operand(ck, n->a, &a);
         ck->addr_only = outer_addr_only;
         if (check_poisoned(a.type)) {
             return;
@@ -1904,7 +1936,7 @@ static void check_unary(check_t* ck, ast_node_t* n, expr_t* out) {
         return;
     }
     if (n->op == TOK_STAR) {
-        check_expr(ck, n->a, &a);
+        check_operand(ck, n->a, &a);
         if (check_poisoned(a.type)) {
             return;
         }
@@ -2029,7 +2061,7 @@ static const type_t* element_of(check_t* ck, const type_t* t) {
 
 static void check_index(check_t* ck, ast_node_t* n, expr_t* out) {
     expr_t a;
-    check_expr(ck, n->a, &a);
+    check_operand(ck, n->a, &a);
     cval_t index = cv_none();
     const bool ok = check_count(ck, n->b, "index", &index);
     if (check_poisoned(a.type)) {
@@ -2081,7 +2113,7 @@ static void check_index(check_t* ck, ast_node_t* n, expr_t* out) {
 
 static void check_span_expr(check_t* ck, ast_node_t* n, expr_t* out) {
     expr_t a;
-    check_expr(ck, n->a, &a);
+    check_operand(ck, n->a, &a);
     bool ok = true;
     cval_t bound = cv_none();
     if (n->b != NULL && !check_count(ck, n->b, "span bound", &bound)) {
@@ -2357,7 +2389,7 @@ static void check_builtin_call(check_t* ck, ast_node_t* n, const sym_t* s, expr_
         }
         ast_node_t* arg = ast_child(n, 0);
         expr_t e;
-        check_expr(ck, arg, &e);
+        check_operand(ck, arg, &e);
         if (e.untyped && e.value.kind == CV_NULL) {
             // D12.2: `del(null)` is a no-op
             convert(ck, arg, &e, type_voidptr(&ck->types, true), "'del'");
@@ -2389,7 +2421,7 @@ static void check_builtin_call(check_t* ck, ast_node_t* n, const sym_t* s, expr_
         }
         ast_node_t* arg = ast_child(n, 0);
         expr_t e;
-        check_expr(ck, arg, &e);
+        check_operand(ck, arg, &e);
         if (check_poisoned(e.type)) {
             return;
         }
@@ -2433,7 +2465,7 @@ static void check_call(check_t* ck, ast_node_t* n, expr_t* out) {
     // D3.10: the callee is the one position an `extern fn` may stand in
     const ast_node_t* outer_callee = ck->callee;
     ck->callee = callee;
-    check_expr(ck, callee, &f);
+    check_operand(ck, callee, &f);
     ck->callee = outer_callee;
     out->sym = f.sym;
     if (!check_poisoned(f.type) && f.type->kind != TYPE_FN) {

@@ -1403,6 +1403,37 @@ fn void value_of(checker mut* ck, ast.node mut* n, expr mut* e) {
     }
 }
 
+/// The operand of an operator that gives it no context: `*e`, `e.f`, `e->f`,
+/// `e.len`, `e[i]`, `e[a .. b]`, `e()`, `&e`, `del(e)`, `move(e)`, the target of
+/// an assignment or of `++`, and the collection of a range `for`. Each of those
+/// drops a poisoned operand and says nothing more about it, which is right for
+/// an operand that was reported where it arose.
+///
+/// An untyped constant with no default type -- `2^63` written out, or a `2^63`
+/// still inside an expression that folded to no value -- is poisoned and was
+/// reported nowhere: `untyped()` gives it the error type, and the rule of the
+/// default type leaves the report to the context. None of the positions above
+/// is a context, so the constant takes its default type here, exactly as it
+/// would with no operator around it at all.
+///
+/// The rule has two outcomes here and the second is not an error path. It
+/// usually reports the constant and leaves the error type, so the caller sees
+/// the poison and returns. A constant that folds back into range leaves a
+/// **typed** operand and no diagnostic: `2^63 >> 1` is the i64 2^62, which the
+/// shift leaves poisoned and this call un-poisons, so the caller goes on and
+/// the operator answers by its own rule, `cannot dereference i64`. Four
+/// programs of that shape were accepted in silence as well.
+///
+/// `default_type` returns at once for an operand that is no untyped constant, so
+/// every diagnostic these operators give today stands unchanged.
+/// D4.1, D4.5
+fn void check_operand(checker mut* ck, ast.node mut* n, expr mut* out) {
+    check_expr(ck, n, out);
+    if (check_poisoned(out->ty)) {
+        default_type(ck, n, out);
+    }
+}
+
 /// The ownership rules a value meets when it reaches an expected type. An owning
 /// target is an `own` place, which an owning lvalue enters only as `move(lv)` and
 /// an owning rvalue enters as it is; a target that does not own takes the lend of
@@ -1795,11 +1826,12 @@ fn void check_shift(checker mut* ck, diag.loc at, i32 op, expr mut* a, ast.node 
     // out, is poisoned and still carries its constant, so it goes on to the
     // context, which reports it against the type the default rule chose.
     // `untyped()` gives such a constant the error type and reports nothing, so
-    // an early return on a poisoned operand loses the diagnostic altogether.
-    // This return is the only one repaired. Four others have the same hole and
-    // accept `*2^63`, `(2^63).x`, `2^63[0]` and `2^63()` in silence.
+    // an early return on a poisoned operand would lose the diagnostic
+    // altogether. Every other early return that can see one calls
+    // `check_operand`, which gives the constant its default type and reports
+    // it; the shift keeps this shape instead, because a shift may fold back
+    // into range and `9223372036854775808 >> 1` is a legal 2^62.
     // D4.5: the wide half, which this return used to drop
-    // T-125: the four early returns with the same hole
     if ((check_poisoned(a->ty) && !a->untyped) || check_poisoned(b->ty)) {
         return;
     }
@@ -2447,7 +2479,7 @@ fn void check_field(checker mut* ck, ast.node mut* n, expr mut* out, bool arrow)
         }
     }
     expr mut op = expr{};
-    check_expr(ck, n->a, &op);
+    check_operand(ck, n->a, &op);
     if (check_poisoned(op.ty)) {
         return;
     }
@@ -2538,7 +2570,7 @@ fn void check_unary(checker mut* ck, ast.node mut* n, expr mut* out) {
         // D5.8, D17.3, D7.10
         bool outer_addr_only = ck->addr_only;
         ck->addr_only = true;
-        check_expr(ck, n->a, &a);
+        check_operand(ck, n->a, &a);
         ck->addr_only = outer_addr_only;
         if (check_poisoned(a.ty)) {
             return;
@@ -2559,7 +2591,7 @@ fn void check_unary(checker mut* ck, ast.node mut* n, expr mut* out) {
         return;
     }
     if (op_of(n->op) == lexer.tok_kind.star) {
-        check_expr(ck, n->a, &a);
+        check_operand(ck, n->a, &a);
         if (check_poisoned(a.ty)) {
             return;
         }
@@ -2711,7 +2743,7 @@ fn types.node* element_of(checker mut* ck, types.node* t) {
 
 fn void check_index(checker mut* ck, ast.node mut* n, expr mut* out) {
     expr mut a = expr{};
-    check_expr(ck, n->a, &a);
+    check_operand(ck, n->a, &a);
     consts.cval mut index = consts.cv_none();
     bool ok = check_count(ck, n->b, "index", &index);
     if (check_poisoned(a.ty)) {
@@ -2771,7 +2803,7 @@ fn void check_index(checker mut* ck, ast.node mut* n, expr mut* out) {
 
 fn void check_span_expr(checker mut* ck, ast.node mut* n, expr mut* out) {
     expr mut a = expr{};
-    check_expr(ck, n->a, &a);
+    check_operand(ck, n->a, &a);
     bool mut ok = true;
     consts.cval mut bound = consts.cv_none();
     if (n->b != null && !check_count(ck, n->b, "span bound", &bound)) {
@@ -3065,7 +3097,7 @@ fn void check_builtin_call(checker mut* ck, ast.node mut* n, ast.sym* s, expr mu
         }
         ast.node mut* arg = ast_child_mut(n, 0);
         expr mut e = expr{};
-        check_expr(ck, arg, &e);
+        check_operand(ck, arg, &e);
         if (e.untyped && e.value.kind == consts.cval_kind.cv_null) {
             // D12.2: `del(null)` is a no-op
             convert(ck, arg, &e, types.type_voidptr(&ck->types, true), "'del'");
@@ -3099,7 +3131,7 @@ fn void check_builtin_call(checker mut* ck, ast.node mut* n, ast.sym* s, expr mu
         }
         ast.node mut* arg = ast_child_mut(n, 0);
         expr mut e = expr{};
-        check_expr(ck, arg, &e);
+        check_operand(ck, arg, &e);
         if (check_poisoned(e.ty)) {
             return;
         }
@@ -3143,7 +3175,7 @@ fn void check_call(checker mut* ck, ast.node mut* n, expr mut* out) {
     // D3.10: the callee is the one position an `extern fn` may stand in
     ast.node* outer_callee = ck->callee;
     ck->callee = callee;
-    check_expr(ck, callee, &f);
+    check_operand(ck, callee, &f);
     ck->callee = outer_callee;
     out->sym = f.sym;
     if (!check_poisoned(f.ty) && f.ty->kind != types.type_kind.k_fn) {

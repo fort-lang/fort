@@ -132,6 +132,32 @@ came here.
   only, both declaration orders) beside `node[2][3]` (value containment, an infinite size in both
   orders), which are the two answers the demand graph must tell apart at rank two. A rule stated
   as untestable is worth re-reading whenever the subset grows.
+- **An untyped constant reports at the point a context fixes its type, so every position that is
+  no context must ask for its default type.** `untyped()` gives an untyped integer in
+  `[2^63, 2^64 - 1]` the error type and reports nothing, because D4.5 leaves that report to the
+  context and a fold may still bring the value back into range: `9223372036854775808 >> 1` is a
+  legal 2^62. A position that is no context (D4.1) therefore drops the constant with the poison
+  and nothing is ever said. Thirteen programs compiled, exited 0 and printed nothing in both
+  compilers until T-125: `*C`, `C.x`, `C->x`, `C.len`, `C[0]`, `C[0 .. 1]`, `C()`, `&C`,
+  `del(C)`, `move(C)`, `C = 1`, `C++` and `for (i32 x : C)`. `check_operand` is the one treatment:
+  it checks the operand and, when it comes back poisoned, calls `default_type`, which is a no-op
+  for an operand that is no untyped constant. The rule to keep: **a new operator that drops a
+  poisoned operand calls `check_operand` and not `check_expr`.** `grep -c 'check_operand(ck,'`
+  reads 8 in `check.c` and 3 in `check_stmt.c`, and the same two numbers in the fort twins. The
+  shift is the one exception and says so in its own comment: it carries the constant outward
+  instead, because its fold may still succeed. A constant that folds back into range leaves
+  `check_operand` **typed** rather than poisoned, so the operator answers by its own rule:
+  `*(2^63 >> 1)` reports `cannot dereference i64`, and that shape was silent too.
+  **The class is not closed, and the hole left prints a wrong answer.** Of the 11 raw `check_expr`
+  calls that remain, 9 hand the operand to a context and 2 do not: `check.c:2720` and `:2721`
+  (fort `check.ft:3611` and `:3612`) hand both operands to `check_operands`, and
+  `check_untyped_pair` at `check.c:1418` takes `out->type = a->type` when either operand carries
+  no value, which drops the **right** operand's poison and its constant. A comparison then yields
+  a plain `bool` that no context can report against, so
+  `println(9223372036854775808 > (1 << n))` with `n == 1` prints `false` where `true` is right,
+  in both compilers, exit 0. That is worse than the thirteen: a program that prints nothing tells
+  the author nothing, and this one tells them something false. T-128 owns it; it is untouched by
+  T-125, since `check_untyped_pair` is the same code it always was.
 - **Ownership in the checker** (D17): `check_owning(t)` is the one answer to "does a value of
   this type own an allocation" -- an `own` reference or an owning aggregate -- and it guards the
   layout, since `type_is_owning_aggregate` fatals on a struct that has none. Every own place is
