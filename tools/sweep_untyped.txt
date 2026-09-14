@@ -1,5 +1,10 @@
 # The program list of tools/sweep_untyped.sh. Read that script's header for the
-# four classes, the two command lines and the frame each body goes into.
+# six classes a row may expect, the two a row may not, the two command lines
+# and the frame each body goes into.
+#
+# The list declares its own length below, and the script holds it as an
+# equality, so a deleted row fails the run instead of passing in silence. A
+# ticket that adds or removes a row moves that number with it.
 #
 # What the sweep covers.
 #
@@ -27,7 +32,11 @@
 # boundary, a generic, a struct field, ownership or a loop. It holds the
 # expression layer, which is where the defect of T-127 and T-128 lived, and it
 # holds it for the shapes below and for no others. The measurement that speaks
-# for the whole repository is a different one and it is in tools/verify_ir.sh.
+# for the whole repository is a different one and it is tools/diff_ir.sh, which
+# reads every module of every program the repository holds with
+# `opt -passes=verify`.
+#
+!rows 163
 #
 # Section A. T-128's routes.
 #
@@ -128,6 +137,9 @@ RAN:2147483650 RAN:2147483650 println(zw((1 << n) + 2147483648));
 REPORTED REPORTED println(z((1 << n) + 2147483648));
 REPORTED REPORTED println(zc(1 << n));
 REPORTED REPORTED println(zb((1 << n) + 300));
+# B5 is the return position. It needs a frame of its own, so it stands apart
+# as section D and this list jumps from B4 to B6.
+#
 # B6. The `case` operand type. A case label is a constant expression, so no
 # expression that folded to no value can stand there; what this pair holds is
 # the context rule alone.
@@ -203,6 +215,26 @@ TRAP:134 TRAP:134 println((1 << n) / 0);
 TRAP:134 TRAP:134 println((1 << n) % 0);
 REPORTED REPORTED println(1 / 0);
 REPORTED REPORTED println(1 % 0);
+# D6.13 names three run-time errors and division by zero is one. `MIN / -1`
+# and `MIN % -1` are the other two, and the decision says they are checked at
+# every width, so each takes both widths. The divisor folds to no value, so
+# neither pair folds and both reach the run-time check.
+TRAP:134 TRAP:134 i32 mut v = z(0); v = -2147483648; println(v / (1 - (1 << n)));
+TRAP:134 TRAP:134 i32 mut v = z(0); v = -2147483648; println(v % (1 - (1 << n)));
+TRAP:134 TRAP:134 i64 mut v = zw(0); v = -9223372036854775808; println(v / (1 - (1 << n)));
+TRAP:134 TRAP:134 i64 mut v = zw(0); v = -9223372036854775808; println(v % (1 - (1 << n)));
+# Negating MIN overflows at both widths, and D11.1 checks it like every other
+# arithmetic operator.
+TRAP:134 TRAP:134 i32 mut v = z(0); v = -2147483648; println(-v);
+TRAP:134 TRAP:134 i64 mut v = zw(0); v = -9223372036854775808; println(-v);
+# The bottom of D4.4's exact range, [-2^63, 2^64 - 1]. -2^63 stands in it and
+# takes i64 as its default type; one step below it is outside the range and is
+# a compile error wherever it appears.
+RAN:-9223372036854775808 RAN:-9223372036854775808 i64 v = -9223372036854775808; println(v);
+REPORTED REPORTED i32 v = -9223372036854775808; println(v);
+RAN:-9223372036854775806 RAN:-9223372036854775806 println((1 << n) + -9223372036854775808);
+REPORTED REPORTED println(-9223372036854775809);
+REPORTED REPORTED println((1 << n) - 9223372036854775809);
 TRAP:134 TRAP:134 println(2147483647 + (1 << n));
 REPORTED REPORTED println((1 << n) >> 64);
 REPORTED REPORTED println((1 << n) >> -1);
@@ -216,23 +248,30 @@ RAN:2 RAN:2 return 1 << n;
 REPORTED REPORTED return (1 << n) + 2.5;
 #
 # Section E. The float clause of D4.5 and the float half of D4.2. stage1
-# supports no float at all, so it refuses this whole frame at the type `f64`
-# of `zf`, and REPORTED is the right answer for a compiler with no floats.
+# parses the type `f64` and refuses a float literal (D2.6), so it stops at
+# `f64 d = zf(0.5);`, the line this frame writes directly above the row:
+#
+#     row.ft:30:16: error: not supported by the bootstrap compiler: float literals
+#
+# The stage1 column of all 16 rows is therefore FRAME and not REPORTED. stage1
+# never reads the row, so its column says nothing about the row itself, and
+# the class says so rather than leaving a reader to count 16 refusals as 16
+# measurements.
 #
 !frame float
-REPORTED REPORTED println(d > (1 << n));
-REPORTED REPORTED println((1 << n) > d);
-REPORTED RAN:2.5 f64 v = (c ? 1.5 : 2.5) + 1; println(v);
-REPORTED RAN:-0.5 f64 v = -(c ? 1.5 : 2.5) + 1; println(v);
-REPORTED RAN:-0.5 println(-(c ? 1.5 : 2.5) + 1);
-REPORTED REPORTED println((c ? 1.5 : 2.5) + 1);
-REPORTED REPORTED println(!(c ? 1.5 : 2.5));
-REPORTED REPORTED println((c ? 1.5 : 2.5) & (c ? 2.5 : 3.5));
-REPORTED RAN:false println(zg(0.5) > (c ? 1.5 : 2.5));
-REPORTED RAN:true println((c ? 1.5 : 2.5) == (c ? 1.5 : 2.5));
-REPORTED REPORTED println(zf(1.5) > (1 << n));
-REPORTED REPORTED f64 v = 1 << n; println(v);
-REPORTED REPORTED i32 v = 2.0; println(v);
-REPORTED RAN:3.5 println(1 + 2.5);
-REPORTED RAN:3.5 f32 v = zg(1.0) + 2.5; println(v);
-REPORTED RAN:1 println(cast((c ? 1.5 : 2.5), i32));
+FRAME REPORTED println(d > (1 << n));
+FRAME REPORTED println((1 << n) > d);
+FRAME RAN:2.5 f64 v = (c ? 1.5 : 2.5) + 1; println(v);
+FRAME RAN:-0.5 f64 v = -(c ? 1.5 : 2.5) + 1; println(v);
+FRAME RAN:-0.5 println(-(c ? 1.5 : 2.5) + 1);
+FRAME REPORTED println((c ? 1.5 : 2.5) + 1);
+FRAME REPORTED println(!(c ? 1.5 : 2.5));
+FRAME REPORTED println((c ? 1.5 : 2.5) & (c ? 2.5 : 3.5));
+FRAME RAN:false println(zg(0.5) > (c ? 1.5 : 2.5));
+FRAME RAN:true println((c ? 1.5 : 2.5) == (c ? 1.5 : 2.5));
+FRAME REPORTED println(zf(1.5) > (1 << n));
+FRAME REPORTED f64 v = 1 << n; println(v);
+FRAME REPORTED i32 v = 2.0; println(v);
+FRAME RAN:3.5 println(1 + 2.5);
+FRAME RAN:3.5 f32 v = zg(1.0) + 2.5; println(v);
+FRAME RAN:1 println(cast((c ? 1.5 : 2.5), i32));

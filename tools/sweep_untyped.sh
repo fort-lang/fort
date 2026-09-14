@@ -3,10 +3,19 @@
 #
 # This is the sweep of T-127's third criterion. It compiles one program per
 # line of a program list, with one compiler, and puts each program in one of
-# four classes:
+# six classes. A row names the class it must reach, and these are the six a
+# row may name:
 #
-#   REPORTED  the checker refused it and named a reason. The author learns
-#             something, so this is a good outcome.
+#   REPORTED  the checker refused the row and named a reason: it exited 1 and
+#             wrote a diagnostic at the row's own line or below it. The author
+#             learns something, so this is a good outcome.
+#   FRAME     the checker refused before it reached the row: it exited 1 and
+#             its first diagnostic points at a line above the row's own. The
+#             row itself is then unmeasured, and the class says so. The stage1
+#             column of section E is this class and not REPORTED: stage1
+#             parses the type `f64` and refuses a float literal (D2.6), so it
+#             stops at `f64 d = zf(0.5);`, the last line the float frame
+#             writes before the row.
 #   RAN       the checker accepted it, clang built it and the program printed
 #             something. The answer is in the list beside the program, so a
 #             wrong answer is a failure here and not a pass.
@@ -20,6 +29,19 @@
 #             non-zero. Checked arithmetic traps at run time (D11.1), so this
 #             is a good outcome as well, and the sweep needs it to reach the
 #             overflow and bounds paths the emitter writes by width.
+#
+# Two more classes name a broken compiler and not a program. No row may expect
+# either, and each one fails the run:
+#
+#   BAD-STATUS:<n>  the checker exited <n>, which is neither 0 nor 1. D14.1
+#                   gives a compiler those two statuses and no others, while a
+#                   crash is 139 and a usage error is 2. Until 2026-09-14 this
+#                   script read every non-zero status as a diagnostic, so a
+#                   compiler that died on every row would have reported
+#                   `152 reported, 0 refused by clang, 0 silent` and exited 0.
+#                   tools/diff_ast.sh holds stage1 to the same two statuses.
+#   NO-DIAGNOSTIC   the checker exited 1 and wrote no `error:` line. A refusal
+#                   that names nothing teaches the author nothing.
 #
 # T-128 built the first version of this script under build/probe/, which is
 # gitignored, and the worktree took it at the merge. This one lives in tools/
@@ -44,11 +66,20 @@
 #   <stage1 class> <stage2 class> <body>
 #
 # `<body>` is the statement list that goes into main, and it may hold several
-# statements. A class is REPORTED, CC-FAIL, SILENT, RAN:<output> or
+# statements. A class is REPORTED, FRAME, CC-FAIL, SILENT, RAN:<output> or
 # TRAP:<status>, where <output> is what the program prints with every run of
-# whitespace replaced by `_` and <status> is the exit status. The two compilers differ on the rows that hold a float literal or a
-# `?:`, which stage1 refuses at the lexer, which is why each row carries two
-# classes and not one.
+# whitespace replaced by `_` and <status> is the exit status. The two compilers
+# differ on the rows that hold a float literal or a `?:`, which stage1 refuses
+# at the lexer, which is why each row carries two classes and not one.
+#
+# A row with fewer than three fields is a usage error and not a failing row.
+# A row cut down to its two classes would otherwise parse with `body=REPORTED`
+# and match its own expectation while testing nothing. A class the list
+# misspells is a usage error for the same reason.
+#
+# The list states its own length in a directive, `!rows <n>`, and the script
+# holds it as an equality. Without it a deleted row passes in silence: every
+# row that is left still matches, and only a reader compares the summary.
 #
 # A line `!frame <name>` selects the frame every row below it goes into, until
 # the next such line. There are three frames and `base` is the first:
@@ -58,9 +89,11 @@
 #          `i32[4] mut a`, each through a call so that it is a run-time value.
 #          The body is the statement list of main.
 #   float  base plus `fn f64 zf(f64 v)` and `fn f32 zg(f32 v)`, and main
-#          declaring `f64 d` as well. stage1 refuses the whole frame, because
-#          it supports no float at all, so every row here is REPORTED under
-#          stage1 and that is the right answer for a compiler with no floats.
+#          declaring `f64 d = zf(0.5);` as well. stage1 parses the two types
+#          and refuses the literal `0.5` (D2.6), so it stops one line above
+#          every row of this frame and the stage1 column of them all is FRAME.
+#          That is the right answer for a compiler with no floats, and FRAME
+#          rather than REPORTED says the row itself went unread.
 #   ret    base plus `fn i64 r(i32 n)`, whose body is the row. main prints
 #          `r(z(1))`. This is the one frame that puts the row in a return
 #          position.
@@ -105,12 +138,29 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 reported=0
+framed=0
 ran=0
 ccfail=0
 silent=0
 trapped=0
+badstatus=0
+nodiag=0
 rows=0
 wrong=0
+# The length the list declares in its `!rows` directive. -1 until it is read,
+# so a list without the directive is a usage error and not a silent pass.
+want_rows=-1
+
+# A class a row may expect. The list is checked against it so that a typo, or
+# a row cut down to its two classes, is a usage error rather than a row that
+# matches itself.
+valid_class() {
+    case $1 in
+        REPORTED|FRAME|CC-FAIL|SILENT) return 0 ;;
+        RAN:?*|TRAP:?*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 # The output of a program, with every run of whitespace replaced by `_`, so
 # that a class and its expected output are one field of the row.
@@ -122,6 +172,16 @@ frame=base
 while IFS= read -r line; do
     case $line in
         ''|'#'*) continue ;;
+        '!rows '*)
+            want_rows=${line#'!rows '}
+            case $want_rows in
+                ''|*[!0-9]*)
+                    echo "sweep_untyped.sh: !rows needs a number: $line" >&2
+                    exit 2
+                    ;;
+            esac
+            continue
+            ;;
         '!frame '*)
             frame=${line#'!frame '}
             case $frame in
@@ -130,11 +190,31 @@ while IFS= read -r line; do
             esac
             continue
             ;;
+        '!'*)
+            echo "sweep_untyped.sh: no such directive: $line" >&2
+            exit 2
+            ;;
+    esac
+    # Three fields and not two. A row cut down to its two classes leaves
+    # `body` holding the second class, which then matches itself.
+    case $line in
+        *' '*' '*) ;;
+        *)
+            echo "sweep_untyped.sh: a row needs three fields: $line" >&2
+            exit 2
+            ;;
     esac
     expect1=${line%% *}
     rest=${line#* }
     expect2=${rest%% *}
     body=${rest#* }
+    for class in "$expect1" "$expect2"; do
+        if ! valid_class "$class"; then
+            echo "sweep_untyped.sh: no such class: $class" >&2
+            echo "sweep_untyped.sh: row: $line" >&2
+            exit 2
+        fi
+    done
     if [ "$stage" -eq 1 ]; then
         expect=$expect1
     else
@@ -193,15 +273,47 @@ while IFS= read -r line; do
         echo '}'
     } >"$prog"
 
+    # The line the row itself stands on in the generated program. A refusal
+    # above it did not reach the row, which is the FRAME class. The body is
+    # written with `echo "    $body"`, so an exact whole-line match finds it,
+    # and the `ret` frame writes it inside `r()` before main calls it, so the
+    # first match is the row.
+    body_line=$(grep -n -F -x -m 1 "    $body" "$prog" | cut -d: -f1)
+    if [ -z "$body_line" ]; then
+        echo "sweep_untyped.sh: the row is not in the program it generated" >&2
+        echo "sweep_untyped.sh: row: $body" >&2
+        exit 2
+    fi
+
     set +e
     # shellcheck disable=SC2086
     "$compiler" $compiler_args --check "$prog" >"$work/check.out" 2>"$work/check.err"
     check_status=$?
     set -e
-    if [ "$check_status" -ne 0 ]; then
-        actual=REPORTED
+    if [ "$check_status" -gt 1 ]; then
+        # D14.1 gives a compiler two statuses, 0 and 1. Anything else is a
+        # crash or a usage error and not a diagnostic, and reading it as one
+        # would let a compiler that dies on every row pass the sweep.
+        actual=BAD-STATUS:$check_status
         detail=$(head -n 1 "$work/check.err")
-        reported=$((reported + 1))
+        badstatus=$((badstatus + 1))
+    elif [ "$check_status" -eq 1 ]; then
+        first=$(grep -m 1 -E '^[^ ]+:[0-9]+:[0-9]+: error: ' "$work/check.err" || true)
+        if [ -z "$first" ]; then
+            actual=NO-DIAGNOSTIC
+            detail=$(head -n 1 "$work/check.err")
+            nodiag=$((nodiag + 1))
+        else
+            detail=$first
+            diag_line=$(printf '%s\n' "$first" | sed -E 's/^[^:]*:([0-9]+):.*/\1/')
+            if [ "$diag_line" -lt "$body_line" ]; then
+                actual=FRAME
+                framed=$((framed + 1))
+            else
+                actual=REPORTED
+                reported=$((reported + 1))
+            fi
+        fi
     else
         rm -f "$work/row.bin"
         set +e
@@ -247,10 +359,27 @@ while IFS= read -r line; do
     fi
 done <"$list"
 
-echo "$rows rows under stage$stage: $reported reported, $ran ran," \
-     "$trapped trapped, $ccfail refused by clang, $silent silent"
+echo "$rows rows under stage$stage: $reported reported, $framed refused at the" \
+     "frame, $ran ran, $trapped trapped, $ccfail refused by clang," \
+     "$silent silent, $badstatus with a bad status, $nodiag with no diagnostic"
 
 status=0
+if [ "$want_rows" -lt 0 ]; then
+    echo "sweep_untyped.sh: the list declares no !rows directive" >&2
+    status=1
+elif [ "$rows" -ne "$want_rows" ]; then
+    echo "sweep_untyped.sh: read $rows rows, the list declares $want_rows" >&2
+    echo "sweep_untyped.sh: a ticket that adds or removes a row moves that number" >&2
+    status=1
+fi
+if [ "$badstatus" -ne 0 ]; then
+    echo "sweep_untyped.sh: $badstatus rows left the checker with a status D14.1 does not give it" >&2
+    status=1
+fi
+if [ "$nodiag" -ne 0 ]; then
+    echo "sweep_untyped.sh: $nodiag rows were refused with no diagnostic" >&2
+    status=1
+fi
 if [ "$ccfail" -ne 0 ]; then
     echo "sweep_untyped.sh: $ccfail programs passed the checker and died in LLVM" >&2
     status=1
