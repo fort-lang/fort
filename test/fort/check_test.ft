@@ -996,6 +996,49 @@ fn void a_pair_whose_sides_ask_for_no_type_at_all_keeps_i32() {
     assert(check_env.errors(&e) == 4);
 }
 
+fn void a_float_constant_across_a_comparison_is_one_error() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // T-127: the checker passed these two and LLVM refused the module
+    // The pair takes one type over both sides. The integer clause and the char
+    // clause each win over the float clause, so the float constant then meets
+    // a type it cannot take. Each program is one error and not two: the side
+    // that folded to no value holds no constant the type refuses, so only the
+    // float constant is reported. The language corpus cannot see that count,
+    // because `judge_fail` groups its diagnostics by file and by line. So the
+    // count is asserted here.
+    // Both programs emitted the float bit pattern into an integer comparison
+    // until 2026-09-14.
+    // D4.2, D4.5, D6.2
+    assert(!check_env.check_body(&e,
+        "    i32 n = 1;\n    println((1 << n) == 2.5);"));
+    assert(check_env.said(&e, "a float constant does not become i32"));
+    assert(check_env.errors(&e) == 1);
+    check_env.reopen(&e);
+    // The char clause of the same rule. Both arms are char literals, so the
+    // conditional is a `char` and the float constant meets `char`.
+    // D4.3, D4.5
+    assert(!check_env.check_body(&e,
+        "    i32 n = 1;\n    println((n > 0 ? 'a' : 'b') == 1.5);"));
+    assert(check_env.said(&e, "a float constant does not become char"));
+    assert(check_env.errors(&e) == 1);
+    check_env.reopen(&e);
+    // The operand order changes neither answer, so each of the two holds the
+    // message as well as the count. The count alone would pass on a single
+    // wrong diagnostic, which is the one thing an order swap could break.
+    // D6.2
+    assert(!check_env.check_body(&e,
+        "    i32 n = 1;\n    println(2.5 == (1 << n));"));
+    assert(check_env.said(&e, "a float constant does not become i32"));
+    assert(check_env.errors(&e) == 1);
+    check_env.reopen(&e);
+    assert(!check_env.check_body(&e,
+        "    i32 n = 1;\n    println(1.5 == (n > 0 ? 'a' : 'b'));"));
+    assert(check_env.said(&e, "a float constant does not become char"));
+    assert(check_env.errors(&e) == 1);
+}
+
 fn void a_unary_operand_leaves_the_pair_before_the_rule_sees_it() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -1417,6 +1460,7 @@ fn i32 main() {
     a_comparison_reports_a_bad_constant_on_each_side();
     a_comparison_takes_one_default_type_over_both_operands();
     a_pair_whose_sides_ask_for_no_type_at_all_keeps_i32();
+    a_float_constant_across_a_comparison_is_one_error();
     a_unary_operand_leaves_the_pair_before_the_rule_sees_it();
     a_comparison_that_folds_and_one_with_a_typed_operand_are_unchanged();
     an_untyped_pair_that_is_no_comparison_still_reaches_its_context();

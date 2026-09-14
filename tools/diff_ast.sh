@@ -92,14 +92,14 @@ NESTED_MESSAGES='multi-dimensional arrays|spans of arrays|arrays of spans|spans 
 # and no tree to compare. These files are not skipped in silence either: the
 # count is an equality, and stage2 must not report the refusal itself, which
 # is what says the divergence is the one intended.
-FORM_FILES=15
+FORM_FILES=16
 FORM_MESSAGES='do-while|\?:'
 
 # The same for the third: src/fort reads a float literal (D2.6, T-041) and
 # src/bootstrap refuses one, so stage1 answers such a file with the refusal
 # and no tree to compare. A file that also holds one of the constructs above
 # is counted by the first test that matches it, not by this one.
-FLOAT_FILES=68
+FLOAT_FILES=67
 FLOAT_MESSAGES='float literals'
 
 files=$(find . -name '*.ft' -not -path './build/*' -not -path './.git/*' \
