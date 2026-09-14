@@ -26,7 +26,6 @@ Run with `python3 -m unittest highlight_test` from this directory. Standard
 library only; Python 3.12.
 """
 
-import bisect
 import dataclasses
 import inspect
 import json
@@ -74,7 +73,9 @@ CORPUS_DIRS = (
 # test/parser_recovery_test.c and FT_FILES in tools/diff_tokens.sh.
 CORPUS_FILES = 685
 # The least number of `.ft` each of those directories holds. A directory grows,
-# so its own test asserts a floor and CORPUS_FILES asserts the exact total. The
+# so its own test asserts a floor and CORPUS_FILES asserts the exact total. A
+# floor of 1 says only that the directory exists, so each one here is near the
+# count of the day: 430, 22, 13, 23, 7, 184, 3 and 2 on 2026-09-14. The
 # table has one entry for each directory of CORPUS_DIRS, and
 # test_every_corpus_directory_is_checked_by_a_test holds the two against each
 # other, so a directory that no test checks is a red test (T-104).
@@ -82,8 +83,8 @@ CORPUS_MINIMUMS = {
     LANG_RUN_DIR: 200,
     LANG_PROGRAMS_DIR: 20,
     STD_DIR: 8,
-    FORT_SRC_DIR: 1,
-    LSP_SRC_DIR: 1,
+    FORT_SRC_DIR: 20,
+    LSP_SRC_DIR: 5,
     FORT_TESTS_DIR: 80,
     FORT_LINT_DIR: 3,
     TTY_DIR: 2,
@@ -192,6 +193,20 @@ def grammar_lexicon(grammar):
     )
 
 
+def grammar_patterns(grammar):
+    """Every `match`, `begin` and `end` pattern the grammar spells."""
+    found = []
+    stack = [grammar]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            found += [node[key] for key in ("match", "begin", "end") if key in node]
+            stack += list(node.values())
+        elif isinstance(node, list):
+            stack += node
+    return found
+
+
 def uncanonical_rules(grammar):
     """Return the rules whose scope promises tokens but whose shape names none."""
     offenders = []
@@ -210,6 +225,21 @@ def uncanonical_rules(grammar):
 NO_PATTERNS = ()
 
 
+# A backreference, a named backreference and a conditional group count their
+# group from the start of the pattern they stand in. The alternation of Scanner
+# puts a group in front of each rule, so a rule that spells one of the three
+# would count a group of another rule. The grammar spells none of them, and
+# test_every_rule_of_the_grammar_can_be_combined holds that over all 57
+# patterns (T-104).
+RENUMBERING = re.compile(r"\\[1-9]|\(\?P=|\(\?\(")
+
+
+def refuse_renumbering(pattern):
+    """Refuse a rule pattern whose meaning changes inside the alternation."""
+    if RENUMBERING.search(pattern):
+        raise ValueError(f"{pattern} counts a group, so it cannot be combined")
+
+
 class Scanner:
     """One search over a line for a whole rule list.
 
@@ -223,17 +253,23 @@ class Scanner:
     first, then rule order -- so the end pattern is the first alternative
     (T-104).
 
-    The group that wraps an alternative closes after the groups of the rule
-    inside it, so `lastindex` names that wrapper. The bisect answers the same
-    entry for an inner group, which is why it is a bisect and not a lookup.
+    `lastindex` names the group that closed last. The groups of a rule close
+    inside the group that wraps the rule, so that group is the wrapper, and
+    `by_group` turns it into the entry that won.
+
     The winner is then applied on its own at the position the alternation
-    found, because `emit` reads the captures of a rule by the rule's own
-    group numbers.
+    found, because `emit` reads the captures of a rule by the group numbers of
+    that rule. The precondition of the whole class is that a rule pattern
+    means the same thing inside the alternation as it does alone. A
+    backreference, a named backreference and a conditional group all count
+    from the start of the pattern they stand in, so `refuse_renumbering`
+    refuses them rather than let the alternation select the wrong rule. The
+    grammar spells none of the three today, over 57 patterns.
     """
 
     def __init__(self, engine, rules, end):
         self.entries = []  # (kind, rule, the compiled pattern of the rule)
-        self.groups = []  # the index of the group that wraps each entry
+        self.by_group = {}  # the index of the group that wraps an entry -> it
         alternatives = [] if end is None else [("end", None, end)]
         for rule in rules:
             pattern = rule.get("match") or rule["begin"]
@@ -241,9 +277,10 @@ class Scanner:
         parts = []
         index = 1
         for kind, rule, pattern in alternatives:
+            refuse_renumbering(pattern)
             compiled = engine.compiled(pattern)
             self.entries.append((kind, rule, compiled))
-            self.groups.append(index)
+            self.by_group[index] = self.entries[-1]
             parts.append(f"({pattern})")
             index += 1 + compiled.groups
         self.combined = engine.compiled("|".join(parts)) if parts else None
@@ -252,12 +289,14 @@ class Scanner:
         """The match that starts first; the end pattern and then rule order win ties."""
         if self.combined is None:
             return None
-        match = self.combined.search(line, pos)
-        if match is None:
+        found = self.combined.search(line, pos)
+        if found is None:
             return None
-        entry = bisect.bisect_right(self.groups, match.lastindex) - 1
-        kind, rule, compiled = self.entries[entry]
-        return kind, compiled.match(line, match.start()), rule
+        kind, rule, compiled = self.by_group[found.lastindex]
+        match = compiled.match(line, found.start())
+        if match is None:
+            raise ValueError(f"{compiled.pattern} matched inside the alternation and not alone")
+        return kind, match, rule
 
 
 class SlowScanner:
@@ -643,6 +682,49 @@ class ScannerTest(unittest.TestCase):
     def test_an_empty_rule_list_answers_nothing(self):
         self.assertIsNone(self.scan([], None, "abc"))
 
+    def test_a_rule_with_groups_does_not_shift_the_rule_after_it(self):
+        """The wrapper of an entry stands after the groups of the entry before
+        it, so a rule with groups may not move the rule that follows it."""
+        rules = [{"match": "(a)(b)"}, {"match": "z", "name": "z"}, {"match": "(c)"}]
+        _, _, rule = self.scan(rules, None, "z")
+        self.assertEqual(rule["name"], "z")
+
+    def test_the_group_that_closed_last_is_the_one_that_wraps_the_rule(self):
+        """search reads the winner off lastindex, which names the group that
+        closed last: the groups of a rule close inside the group that wraps
+        it, so the wrapper is the one that closes last."""
+        scanner = Scanner(self.engine, [{"match": "z"}, {"match": r"(a)(b)"}], None)
+        self.assertEqual(sorted(scanner.by_group), [1, 2])
+        self.assertEqual(scanner.combined.search("ab").lastindex, 2)
+
+    def test_a_rule_that_counts_a_group_is_refused(self):
+        """A backreference, a named backreference and a conditional group
+        count from the start of their own pattern, and the alternation moves
+        that start. Scanner refuses all three rather than pick the wrong
+        rule."""
+        for pattern in (r"(a)\1", r"(?P<x>a)(?P=x)", r"(a)?(?(1)b|c)"):
+            with self.subTest(pattern=pattern):
+                with self.assertRaisesRegex(ValueError, "counts a group"):
+                    Scanner(self.engine, [{"match": pattern}], None)
+
+    def test_every_rule_of_the_grammar_can_be_combined(self):
+        """The precondition above, over every pattern of the grammar."""
+        patterns = grammar_patterns(self.engine.grammar)
+        self.assertEqual(len(patterns), 57)
+        for pattern in patterns:
+            with self.subTest(pattern=pattern):
+                refuse_renumbering(pattern)
+
+    def test_a_pattern_that_matches_only_inside_the_alternation_is_named(self):
+        """search applies the winner alone at the position the alternation
+        found. That match cannot fail while the precondition holds, so the
+        error names the pattern rather than let tokenize meet a None."""
+        scanner = Scanner(self.engine, [{"match": "ab"}], None)
+        kind, rule, _ = scanner.entries[0]
+        scanner.by_group[1] = (kind, rule, self.engine.compiled("zz"))
+        with self.assertRaisesRegex(ValueError, "zz matched inside the alternation"):
+            scanner.search("ab", 0)
+
     def test_the_scanner_of_one_rule_list_is_built_once(self):
         """The alternation is compiled for each context and not for each
         position, which is what makes it cheaper than the search it replaces."""
@@ -672,10 +754,18 @@ class ScannerTest(unittest.TestCase):
 class CorpusTest(unittest.TestCase):
     """Real fort is covered by the grammar and holds no lexical error.
 
-    One test checks one directory of CORPUS_DIRS, and no file is tokenized
-    twice. test_the_corpus_is_the_size_it_says_it_is checked the whole walk a
-    second time until T-104, which took a run of this module to 1364
-    tokenizations of 684 files; it counts now and tokenizes nothing.
+    One test checks one directory of CORPUS_DIRS, so each of the 684 files is
+    tokenized once for its scope check. The test that counts the walk checked
+    every file of it a second time until T-104, which took a run of this
+    module to 1394 calls of Engine.tokenize over 7562338 bytes; it counts now
+    and tokenizes nothing.
+
+    A run makes 772 calls over 4077498 bytes: the 684 scope checks, 58 of
+    ScannerTest.test_the_engine_answers_what_one_search_for_each_rule_answers,
+    which tokenizes the fixture and every 25th file of the walk once with each
+    of the two engines, and 30 of the fixture and marker tables. So 28 corpus
+    files are tokenized three times, and that is the oracle and not a second
+    scope check.
     """
 
     def setUp(self):
@@ -691,16 +781,11 @@ class CorpusTest(unittest.TestCase):
         self.check(paths)
         return paths
 
-    def test_the_lexical_tests_are_in_the_language_corpus(self):
-        """The lexical tests are the hardest fort the grammar meets.
-
+    def test_the_language_corpus_holds_the_lexical_tests(self):
+        """The lexical tests are the hardest fort the grammar meets, and
         test_every_language_test_spells_correctly checks them with the rest of
-        test/lang/run. This test holds them inside that walk and tokenizes
-        nothing of its own.
-        """
-        paths = self.sources(LANG_RUN_DIR / "lexical")
-        self.assertGreaterEqual(len(paths), 4)
-        self.assertTrue(set(paths) <= set(self.sources(LANG_RUN_DIR)))
+        test/lang/run. This test holds their floor and tokenizes nothing."""
+        self.assertGreaterEqual(len(self.sources(LANG_RUN_DIR / "lexical")), 4)
 
     def test_every_language_test_spells_correctly(self):
         self.check_directory(LANG_RUN_DIR)
@@ -762,16 +847,33 @@ class CorpusTest(unittest.TestCase):
     def test_every_corpus_directory_is_checked_by_a_test(self):
         """A directory of CORPUS_DIRS that no test checks is caught here.
 
-        The second walk covered a new directory whatever else it did, and cost
-        one tokenization of the whole corpus. This test takes that duty and
-        costs nothing: it reads the source of this class and asks which names
-        the tests hand to check_directory (T-104).
+        The walk of test_the_corpus_is_the_size_it_says_it_is checked every
+        file, so it covered a new directory whatever else it did, and it cost
+        one tokenization of the whole corpus (T-104). This test takes that
+        duty and tokenizes nothing. It runs each test of this class with
+        check_directory recording its directory rather than checking it, so it
+        reads what the run does and not what the source says: a method renamed
+        out of the suite, a method the class skips and a call commented out
+        each leave a directory unrecorded. A sibling that fails for its own
+        reason fails here as well, which is the price of running them.
         """
-        name_of = {id(value): name for name, value in globals().items()}
-        want = {name_of[id(directory)] for directory in CORPUS_DIRS}
-        calls = re.findall(r"self\.check_directory\((\w+)\)", inspect.getsource(CorpusTest))
-        self.assertEqual(set(calls), want)
-        self.assertEqual(len(calls), len(want), "a directory is checked twice")
+        checked = []
+
+        def record(directory):
+            checked.append(directory)
+            return self.sources(directory)
+
+        for name in unittest.defaultTestLoader.getTestCaseNames(CorpusTest):
+            if name == self._testMethodName:
+                continue
+            case = CorpusTest(name)
+            case.setUp()
+            case.check_directory = record
+            try:
+                getattr(case, name)()
+            except unittest.SkipTest:
+                pass
+        self.assertEqual(sorted(checked, key=str), sorted(CORPUS_DIRS, key=str))
 
     def test_every_fort_source_in_the_repository_is_walked_or_excluded(self):
         """No directory of fort can be missed in silence.

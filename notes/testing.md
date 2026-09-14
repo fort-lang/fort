@@ -866,10 +866,10 @@ bullet at a time and without a rewrite.
   line above must produce), of the D5.3 and D17.2 marker tables, and of **every fort source the
   project writes**, which must tokenize with no `invalid.` scope and no unscoped character, so a
   new file the grammar mishandles fails here. `CORPUS_DIRS` is that list -- `test/lang/run`,
-  `test/lang/programs`, `std`, `src/fort`, `src/lsp`, `test/fort` (its `support/` included) and
-  `test/fort_lint` -- and `CORPUS_FILES` is the exact number of files in it, so a ticket that adds
-  or removes a `.ft` under any of them reads the new number off the failure and writes it there,
-  as it does for `CORPUS_FILES` in `test/parser_recovery_test.c` and `FT_FILES` in
+  `test/lang/programs`, `std`, `src/fort`, `src/lsp`, `test/fort` (its `support/` included),
+  `test/fort_lint` and `test/tty` -- and `CORPUS_FILES` is the exact number of files in it, so a
+  ticket that adds or removes a `.ft` under any of them reads the new number off the failure and
+  writes it there, as it does for `CORPUS_FILES` in `test/parser_recovery_test.c` and `FT_FILES` in
   `tools/diff_tokens.sh`. The other `.ft` of the repository are listed in `EXCLUDED_DIRS`, each
   because it is meant to hold a lexical error (`test/lang/fail`, `test/highlight/scopes.ft`,
   `editors/vscode/test/fixtures/lexical.ft`), and a test asserts that partition, so a new
@@ -897,7 +897,13 @@ bullet at a time and without a rewrite.
       cd test && python3 -c 'import highlight_test as h
       e = h.Engine(h.load_grammar())
       for p in sorted({p for d in h.CORPUS_DIRS for p in d.rglob("*.ft")}):
-       for t in e.tokenize(p.read_text()): print(p, t.line, t.start, t.end, repr(t.text), t.scopes)'
+       t = p.read_text(encoding="utf-8")
+       for k in e.tokenize(t):
+        print(p.relative_to(h.ROOT), k.line, k.start, k.end, repr(k.text), k.scopes)'
+
+  The path is relative to the top of the worktree, so two worktrees that hold the same scopes give
+  the same md5. An absolute path gives two md5s for one answer, and the second reader then builds
+  a dump of their own (T-104, its review).
   **Set `PYTHONDONTWRITEBYTECODE=1` for a hand run of a Python suite you are mutating.** T-104 ran
   two mutants of one file within a few seconds and read the same three failures for both, because
   the second run loaded the `__pycache__` of the first. CMake sets the variable for every Python
