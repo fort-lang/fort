@@ -31,6 +31,13 @@ enum scalar_class {
 u64 SCALARS_MAX = 14;
 u64 SAMPLES_MAX = 32;
 
+// The ordered pairs of that table whose cast would add a mark, read off the
+// failure of no_conversion_and_no_cast_adds_mut below. A ticket that adds a
+// spelling to the table reads the new number there and writes it here, as
+// test/types_convert_test.c's MUT_ADDING_PAIRS does.
+// D3.14
+u64 MUT_ADDING_PAIRS = 225;
+
 // Whether a value of the type spelled `src` may be used where the type spelled
 // `dst` is expected.
 // D5.4, D17.4
@@ -751,6 +758,41 @@ fn void every_implicit_conversion_is_also_a_cast() {
     }
 }
 
+// The rule is a universal one, so the test is a loop over the sample table and
+// not a list of cases: 32 spellings, 1024 ordered pairs, every one of them asked
+// whether it adds a mark and then whether the two answers that matter agree with
+// that. MUT_ADDING_PAIRS holds the table to the rule, because two implications
+// over a table that had stopped naming a mutable type would both hold and prove
+// nothing.
+// D3.14, D5.4
+fn void no_conversion_and_no_cast_adds_mut() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node*[32] mut list = {};
+    u64 n = sample_types(&e, list[..]);
+    assert(n == SAMPLES_MAX);
+    u64 mut adding = 0;
+    u64 mut d = 0;
+    while (d < n) {
+        u64 mut s = 0;
+        while (s < n) {
+            if (types.type_cast_adds_mut(list[d], list[s])) {
+                adding += 1;
+                if (types.type_cast_allowed(list[d], list[s])) {
+                    fail_pair(&e, list[s], " adds mutability and casts to ", list[d]);
+                }
+                if (types.type_assignable(list[d], list[s])) {
+                    fail_pair(&e, list[s], " adds mutability and converts to ", list[d]);
+                }
+            }
+            s += 1;
+        }
+        d += 1;
+    }
+    assert(adding == MUT_ADDING_PAIRS);
+}
+
 // Identity converts and casts; two types that convert both ways are identical,
 // since every drop is strict.
 fn void conversion_and_identity_agree_with_themselves() {
@@ -834,6 +876,7 @@ fn i32 main() {
     println("further ok");
     every_scalar_pair_follows_the_d3_14_matrix();
     every_implicit_conversion_is_also_a_cast();
+    no_conversion_and_no_cast_adds_mut();
     conversion_and_identity_agree_with_themselves();
     dropping_marks_never_changes_the_shape_or_the_size();
     println("matrix ok");

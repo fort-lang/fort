@@ -88,6 +88,17 @@ came here.
   asserts a re-check wipes them, and ties `CHECK_ANN_END` to the highest declared bit. Write that
   test shape for any "cleared before it is written" invariant: asserting that a bit *is* set
   after a second pass passes whether or not the clearing happens, so it proves nothing.
+- **`src/fort` carries the `mut` in the declaration, where the C casts a `const` away.** The
+  bootstrap holds a tree of `const ast_node_t*` and a record of `const sym_t*` and casts the
+  qualifier off at each of the ten places the resolution writes through one. T-085 made a
+  mut-adding cast an error (D3.14), so the fort compiler cannot copy that. Five fields carry the
+  mark instead -- `ast.node.sym`, `ast.sym.node`, `ast.sym.owner`, `scope.binding.node` and
+  `types.node.decl` -- and `ast.ast_child_mut` answers a child of a node the same way. The shallow
+  model is what makes this work: immutability of a path never propagates through a pointer the
+  path contains (D5.9), so `b->node->sym` reads a `sym mut*` through an immutable `binding*` and
+  no cast stands anywhere. Three comparisons pay for it, because `==` wants identical types
+  (D6.2): `check.ft`, `gen.ft` and `index.ft` each drop the mark with a cast on one side. A new
+  field that the checker writes through a read-only path takes the mark; a cast does not reach it.
 - **A rule about two modules belongs in the checker, not in the loader.** The loader builds the
   namespaces before any type exists, so a cross-module comparison written there can only compare
   syntax, and syntax is not the rule: T-074 moved D9.8's "two extern declarations of one C symbol
@@ -666,7 +677,11 @@ gone.
   T-086 gave `std.libc` a `void mut* own malloc` and paid the smaller of the two: nine code
   sites in `types.c`, `types.h` and `check.c`, no new diagnostic and no new code path.
   T-135 is the second such edit and paid less: two sites, `parse_alloc_type` in `parser.c` and
-  the `TYPE_POS_ALLOC` arm of `check_type_at` in `check.c`, both of which got shorter. The rule
+  the `TYPE_POS_ALLOC` arm of `check_type_at` in `check.c`, both of which got shorter.
+  T-085 is the third, and it is a bug fix rather than that second half: it narrows a rule both
+  compilers state, so stage1 must narrow with stage2 or `tools/diff_check.sh` reports a
+  divergence. Three sites: `type_cast_adds_mut` in `types.c`, the one call of it in
+  `type_cast_allowed`, and the clause of `check_cast` that names it in the diagnostic. The rule
   it carries is uniform over the positions of a type, so the smallest edit that reaches the
   forms `std/` spells is the whole rule; a stage1 that took `new(void mut*, n)` for `std/vec.ft`
   and refused `new(ast.sym*, cap)` for `src/fort/gen.ft` would need a condition that the rule

@@ -1,0 +1,86 @@
+//! run
+//! stdout:
+//| 7 7 7
+//| 9 9
+//| 1 2 3
+//| 2 3
+//| 30 10 20
+//| 10 20 30
+//| ab ab 2
+//| 5 5
+// What a cast still does with `mut` is drop it, at any level, which is the
+// direction the implicit conversion of D5.4 refuses behind a mutable level.
+// Every line below drops a mark or carries one through; no line adds one,
+// because nothing does (D3.14). The errors are in fail/casts/012 to 015.
+import std.sort;
+
+struct cell {
+    i32 v;
+}
+
+fn i32 by_pointee(void* a, void* b) {
+    i64* p = *cast(a, i64**);
+    i64* q = *cast(b, i64**);
+    return sort.cmp_i64(cast(p, void*), cast(q, void*));
+}
+
+fn i32 main() {
+    // A pointer drops the mark implicitly and by a cast, and the address is
+    // the same one all three times.
+    i32 mut v = 7;
+    i32 mut* w = &v;
+    i32* lent = w;
+    i32* named = cast(w, i32*);
+    println(*w, " ", *lent, " ", *named);
+
+    // The mark reaches the level a `void*` names, so a round trip that keeps
+    // it writes through and a round trip that drops it does not.
+    void mut* anon = cast(w, void mut*);
+    void* frozen = cast(w, void*);
+    i32 mut* back = cast(anon, i32 mut*);
+    *back = 9;
+    println(v, " ", *cast(frozen, i32*));
+
+    // A span drops the mark of its elements implicitly.
+    i32 mut@ own xs = new(i32, 3);
+    xs[0] = 1;
+    xs[1] = 2;
+    xs[2] = 3;
+    i32@ ro = xs;
+    println(ro[0], " ", ro[1], " ", ro[2]);
+    i32@ tail = cast(xs[1..3], i32@);
+    println(tail[0], " ", tail[1]);
+
+    // The drop at level 2 behind a mutable level 1 is the cast's own work, and
+    // it is how a caller of sort.sort_ptr reaches that entry (D5.4).
+    i64 mut@ own values = new(i64, 3);
+    values[0] = 30;
+    values[1] = 10;
+    values[2] = 20;
+    void mut*[3] mut slots = {cast(&values[0], void mut*), cast(&values[1], void mut*),
+                              cast(&values[2], void mut*)};
+    void* mut@ view = cast(slots[..], void* mut@);
+    println(*cast(view[0], i64*), " ", *cast(view[1], i64*), " ", *cast(view[2], i64*));
+    sort.sort_ptr(view, by_pointee);
+    println(*cast(view[0], i64*), " ", *cast(view[1], i64*), " ", *cast(view[2], i64*));
+
+    // The string family drops the mark among its five spellings.
+    char mut@ own text = new(char, 2);
+    text[0] = 'a';
+    text[1] = 'b';
+    string s = cast(text, string);
+    u8@ bytes = cast(text, u8@);
+    println(s, " ", cast(bytes, string), " ", bytes.len);
+
+    // The same drop one level down a pointer chain, where the implicit form is
+    // the C hole D5.4 closes: the cast is the only way to it.
+    cell mut c = cell{5};
+    cell mut* mut holder = &c;
+    cell* mut* deep = cast(&holder, cell* mut*);
+    println((*deep)->v, " ", c.v);
+
+    del(text);
+    del(values);
+    del(xs);
+    return 0;
+}

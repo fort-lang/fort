@@ -98,6 +98,11 @@ static uint32_t scalar_types(tenv_t* e, const type_t** types, scalar_class_t* cl
 // D3.10
 enum { SAMPLES_MAX = 32 };
 
+// The ordered pairs of that table whose cast would add a mark, read off the
+// failure of `no_conversion_and_no_cast_adds_mut` below. A ticket that adds a
+// spelling to the table reads the new number there and writes it here.
+enum { MUT_ADDING_PAIRS = 225 };
+
 static uint32_t sample_types(tenv_t* e, const type_t** types) {
     static const char* const SPELLINGS[] = {
         "i32",
@@ -754,6 +759,45 @@ TEST(every_implicit_conversion_is_also_a_cast, {
     tenv_free(&e);
 })
 
+TEST(no_conversion_and_no_cast_adds_mut, {
+    tenv_t e;
+    tenv_init(&e);
+    // The rule is a universal one, so the test is a loop over the sample table
+    // and not a list of cases: 32 spellings, 1024 ordered pairs, every one of
+    // them asked whether it adds a mark and then whether the two answers that
+    // matter agree with that.
+    // D3.14, D5.4
+    const type_t* types[SAMPLES_MAX];
+    const uint32_t n = sample_types(&e, types);
+    TEST_ASSERT_EQ_UINT64((uint64_t)n, (uint64_t)SAMPLES_MAX);
+    uint64_t adding = 0;
+    for (uint32_t d = 0; d < n; d++) {
+        for (uint32_t s = 0; s < n; s++) {
+            if (!type_cast_adds_mut(types[d], types[s])) {
+                continue;
+            }
+            adding++;
+            if (type_cast_allowed(types[d], types[s])) {
+                TEST_LOG_("cast %s -> %s adds mutability and is allowed",
+                          tenv_str(&e, types[s]),
+                          tenv_str(&e, types[d]));
+                TEST_FAIL();
+            }
+            if (type_assignable(types[d], types[s])) {
+                TEST_LOG_("%s converts to %s and adds mutability",
+                          tenv_str(&e, types[s]),
+                          tenv_str(&e, types[d]));
+                TEST_FAIL();
+            }
+        }
+    }
+    // The count holds the table to the rule. Two implications over a table that
+    // had stopped naming a mutable type would both hold and prove nothing, and
+    // the table above is shared with four other tests, so it moves.
+    TEST_ASSERT_EQ_UINT64(adding, (uint64_t)MUT_ADDING_PAIRS);
+    tenv_free(&e);
+})
+
 TEST(conversion_and_identity_agree_with_themselves, {
     tenv_t e;
     tenv_init(&e);
@@ -830,6 +874,7 @@ int main(int argc, char** argv) {
     TEST_RUN(casts_may_add_own_at_any_reference);
     TEST_RUN(every_scalar_pair_follows_the_d3_14_matrix);
     TEST_RUN(every_implicit_conversion_is_also_a_cast);
+    TEST_RUN(no_conversion_and_no_cast_adds_mut);
     TEST_RUN(conversion_and_identity_agree_with_themselves);
     TEST_RUN(dropping_marks_never_changes_the_shape_or_the_size);
     TEST_EXIT();
