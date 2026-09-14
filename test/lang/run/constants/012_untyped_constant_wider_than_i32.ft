@@ -1,0 +1,63 @@
+//! run
+//! stdout:
+//| -2147483648 4611686018427387904
+//| -2147483648 4611686018427387904
+//| 2147483647 2147483648 -2147483648 -2147483649
+//| 9223372036854775807 -9223372036854775808 4294967296
+//| 4294967297 4294967297
+//| 4611686018427387904 4294967295
+//| -2147483648 6442450944
+// The wide half of D4.5: an untyped integer with no context becomes i32 if it
+// fits and otherwise i64. A shift whose count is a variable folds to no value,
+// so the expression reaches its default type with a constant still inside it,
+// and the type is then the one every constant in the expression fits
+// (type-system.md 10.5, the note of 2026-09-13 on D4.5).
+//
+// run/errors/032_shift_of_a_default_typed_constant.ft pins the fitting half
+// through the type in a runtime message. This test reads the type off the
+// width instead: `<<` wraps at the width of its left operand (D6.2), so a
+// count of 31 separates i32 from i64 in the value that is printed, and no
+// program here aborts.
+//
+// Line 1: `1` fits i32, so `1 << 31` wraps to i32's minimum; `2147483648` does
+// not fit i32, so the same count multiplies it exactly in i64.
+// Line 2: the same pair reached by folding rather than written out. A node
+// that folded stands for its whole subtree, so `2147483648 - 1` is the i32
+// constant 2147483647 and `2147483647 + 1` is the i64 constant 2147483648.
+// Line 3: the boundary itself. i32's maximum and minimum keep i32; one past
+// each takes i64.
+// Line 4: the ends of i64, and `>>` beside `<<`.
+// Line 5: the type belongs to the whole untyped expression, so a constant that
+// fits i32 is carried to i64 by a sibling that does not.
+// Line 6: a constant with no default type of its own is legal where a fold
+// brings the result back into range: 2^63 and 2^64 - 1 are outside i64, and
+// both shifts yield a value that is not.
+// Line 7: the width at run time, which the lines above read only through `<<`
+// on a positive operand. `-4294967296 >> 1` is a signed shift of a negative
+// i64: an emitter that wrote `lshr` for it would print 9223372034707292160
+// (toolchain.md 6 item 15). `(1 << 31) + 4294967296` is 6442450944 because the
+// sibling widens the shift to 64 bits; with a count of 0 the two widths give
+// one value and the line witnesses nothing, which is why the count is 31.
+fn i32 z(i32 v) {
+    return v;
+}
+
+fn i32 main() {
+    i32 zero = z(0);
+    i32 one = z(1);
+    i32 thirtyone = z(31);
+    println(1 << thirtyone, " ", 2147483648 << thirtyone);
+    println((2147483648 - 1) << thirtyone, " ", (2147483647 + 1) << thirtyone);
+    println(2147483647 << zero,
+            " ",
+            2147483648 << zero,
+            " ",
+            -2147483648 << zero,
+            " ",
+            -2147483649 << zero);
+    println(9223372036854775807 << zero, " ", -9223372036854775808 << zero, " ", 4294967296 >> zero);
+    println(1 + (4294967296 << zero), " ", (4294967296 << zero) + 1);
+    println(9223372036854775808 >> 1, " ", 18446744073709551615 >> 32);
+    println(-4294967296 >> one, " ", (1 << thirtyone) + 4294967296);
+    return 0;
+}

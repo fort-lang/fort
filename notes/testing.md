@@ -176,6 +176,20 @@ bullet at a time and without a rewrite.
   diagnostics as well. `check_env.reopen` is `test/check_helpers.h`'s `begin()` and goes between
   the assertions about one source and the next check. The C helpers reset per check, so a
   translated suite that drops the reset is the failure mode to look for.
+- **Run a `test/fort` binary from a scratch directory, never from `test/fort`.**
+  `check_env.open` and `modules_env.open` create `sandbox<n>/` **relative to the working
+  directory** (`test/fort/support/modules_env.ft:56`) and `close` never removes it (`:64`), so a
+  suite run by hand from the corpus root writes its sandboxes into the source tree. T-117 ran
+  `check_test.ft` that way, `git add -A` swept 50 `test/fort/sandbox*/main.ft` into a commit, and
+  the four `.ft` count constants would have gone wrong at the next measurement. `run_tests.py`
+  gives each test a directory of its own under `build/`, so the harness never leaks one; only a
+  hand-run does. `.gitignore` now holds `test/fort/sandbox*/`, which closes the commit half of it
+  whatever anyone remembers. **The ignore line does not close the other half**: a tool that walks
+  the filesystem still counts the directories, and `git status` no longer shows them. Measured on
+  T-117's fix round, a second hand-run left 51 sandboxes and `python3 tools/knowledge_lint.py`
+  read `citation: 407 files` against the 356 of a clean tree, with an empty `git status --short`.
+  So compile with `-o` into `build/` and run from there, and read `ls -d test/fort/sandbox*`
+  rather than `git status` when a count comes out wrong.
 - Two corpora beside `test/lang` run through the same `run_tests.py`, which takes the corpus root
   as `--root`: ctest `lang-stage2` (label `lang`) holds the language corpus against stage2 with
   `--xfail test/lang/xfail-stage2.txt`, which started as the whole corpus (`run/`, `fail/`,
@@ -378,7 +392,7 @@ bullet at a time and without a rewrite.
   preset instruments either. `tools/vm run 'ctest --preset debug -R bootstrap'` asks in one line.
   **Its binary comparison is the artefact check `tools/diff_ir.sh` cannot make.** That script
   compares the two emitters' module for `src/fort/main.ft` among the other files it walks --
-  `grep -n 'PROGRAM_FILES=' tools/diff_ir.sh` reads 516 on 2026-09-13 -- and it is the
+  `grep -n 'PROGRAM_FILES=' tools/diff_ir.sh` reads 518 on 2026-09-14 -- and it is the
   stronger oracle for the emitter, but the step from "the two modules agree" to "stage2 and stage3
   are the same bytes" needs two assumptions that nothing checked before T-039: `clang` must be
   deterministic over one input and one command line, and `diff_ir.sh` compiles `main.ft` from the

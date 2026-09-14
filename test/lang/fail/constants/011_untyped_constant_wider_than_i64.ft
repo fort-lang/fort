@@ -1,0 +1,38 @@
+//! fail
+// The tail of D4.5: i32 if it fits, otherwise i64, otherwise an error. The
+// error half, for an untyped expression that folded to no value and for one
+// that folded. run/constants/012_untyped_constant_wider_than_i32.ft holds the
+// i64 half beside it.
+//
+// A shift whose count is a variable carries its constant to the default type
+// (type-system.md 10.5), so the first two lines are reported against i64 and
+// name the constant. Both were accepted in silence until 2026-09-13: the
+// constant has no default type, and the shift dropped the whole expression
+// before any context could read it.
+//
+// The last two lines never reach a type: `-9223372036854775809` leaves the
+// range untyped folding works in, `[-2^63, 2^64 - 1]` (D4.4), and
+// `9223372036854775808` is inside that range and outside i64. Each of them
+// also draws a second diagnostic on its line, "the expression expects <error>,
+// not a constant", which is noise this test does not pin; the harness judges a
+// line and not a count.
+fn i32 z(i32 v) {
+    return v;
+}
+
+fn i32 main() {
+    i32 n = z(0);
+    println(9223372036854775808 << n); //! error: constant 9223372036854775808 does not fit i64
+    println(18446744073709551615 << n); //! error: constant 18446744073709551615 does not fit i64
+    println(-9223372036854775809 << n); //! error: constant expression out of range
+    println(9223372036854775808); //! error: constant expression out of range
+    // The other half of the guard that lets the four lines above be reported:
+    // a poisoned operand that is no untyped constant still stops at the shift.
+    // This line holds the diagnostic and not the count. A shift that let the
+    // error type through adds "'<<' takes an integer left operand" on this same
+    // line, and the harness judges a line and not a count, so this file stays
+    // green under that mutation. The count is asserted where a test can read it,
+    // in check_const_test.c and in test/fort/check_test.ft.
+    println(nosuch << n); //! error: unknown name 'nosuch'
+    return 0;
+}

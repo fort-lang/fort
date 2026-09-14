@@ -1220,6 +1220,12 @@ fits, otherwise `i64`, otherwise it is an error; an untyped float becomes `f64`;
 literal becomes `char`. `null` has no default type: it takes the type of a pointer it is
 initialized into, assigned to, passed as, returned as, or compared with.
 
+An untyped expression that folded to no value takes a default type too, and "if it fits" then
+reads on every constant the type reaches (D4.5, the note of 2026-09-13). The expression becomes
+`i32` when all of them fit `i32`, and `i64` when one of them does not. A node that folded stands
+for its whole subtree, here as in section 10.4, so the value of that node decides and the
+constants below it are not read again.
+
 ```fort
 print(7);                            // i32
 print(3000000000);                   // i64
@@ -1228,6 +1234,10 @@ print(1.5);                          // f64
 print('a');                          // char: prints a
 print(null);                         // error: null has no type here
 switch (2) { case 2: }               // the operand is i32 (D7.6)
+print(1 << n);                       // i32: the count is a variable, and 1 fits i32
+print(4294967296 << n);              // i64: 4294967296 does not fit i32
+print((2147483648 - 1) << n);        // i32: the operand folded to 2147483647
+print(9223372036854775808 << n);     // error: 9223372036854775808 does not fit i64
 ```
 
 ### 10.6 Constant expressions (D4.6)

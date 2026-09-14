@@ -374,6 +374,27 @@ Sections:
 - rule: With no context at all (for example an argument to `print`), an untyped integer becomes
   `i32` if it fits, otherwise `i64`, otherwise it is an error; an untyped float becomes `f64`; a
   char literal becomes `char`.
+- history: Note 2026-09-13 (T-117): "if it fits" reads on an untyped expression that folded to no
+  value as well as on a folded constant. The authority is D4.1's last sentence, quoted here as it
+  stood on 2026-09-13: "The count operand of a shift is not a context either: in `u64 m = 1 << n;`
+  the untyped `1` takes `u64` from the declaration, whatever the type of `n`; with no enclosing
+  context it takes its default type." That sentence routes the shifted **constant** of
+  `4294967296 << n` to this rule, and the count of the shift changes nothing. So this rule answers
+  for a constant that stands inside an expression with no folded value.
+  The expression takes `i32` when every constant that meets the type fits `i32`, and `i64` when
+  one of them does not. A constant that fits neither is the error. The constants that meet the
+  type are the ones D4.1 sends the context to. One type covers the whole expression, which D6.2
+  settles and this rule does not: with no promotion between two integer types, two types inside
+  one untyped expression would make `1 + (4294967296 << n)` an error.
+  A node that folded stands for its whole subtree, because D4.4 folds exactly and `2147483648 - 1`
+  is the constant 2147483647: `(2147483648 - 1) << n` takes `i32` and `(2147483647 + 1) << n`
+  takes `i64`.
+  The other reading gives "otherwise `i64`" to a folded constant alone. D4.1's last sentence
+  refuses it: it sends the shifted constant of `3000000000 << n` to this rule exactly as
+  `print(3000000000)` reaches it, and no decision gives the two a different answer. Both compilers
+  refused the wide case until this note.
+  `run/constants/012_untyped_constant_wider_than_i32.ft` and
+  `run/errors/033_shift_of_a_wide_default_typed_constant.ft` hold the rule.
 
 ### D4.6 Constant expressions
 - owner: `type-system.md` (Constants), `core-language.md` (Literals).

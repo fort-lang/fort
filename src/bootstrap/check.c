@@ -764,6 +764,36 @@ static bool retype_untyped(
     return ok;
 }
 
+// Whether `i32` is wide enough for an untyped expression that did not fold,
+// `4294967296 << n` with a variable count. Such an expression has no value of
+// its own, so the width it needs is the width every constant in it needs, and
+// the walk is the one `retype_untyped` makes: a node that folded stands for its
+// whole subtree, so its value decides and the subtree below it is not read.
+// Only an integer asks for a wider default type. Any other kind keeps `i32`,
+// so `retype_untyped` reports it against `i32` as it did before this rule.
+// D4.5
+static bool untyped_fits_i32(const check_t* ck, const ast_node_t* n) {
+    if ((n->ann & CHECK_ANN_UNTYPED) == 0) {
+        return true;
+    }
+    const cval_t v = check_node_value(ck, n);
+    if (v.kind != CV_NONE) {
+        return v.kind != CV_INT || cv_fits(v, PRIM_I32);
+    }
+    const ast_node_t* const kids[] = {n->a, n->b, n->c, n->d};
+    for (uint64_t i = 0; i < sizeof kids / sizeof kids[0]; i++) {
+        if (kids[i] != NULL && !untyped_fits_i32(ck, kids[i])) {
+            return false;
+        }
+    }
+    for (uint64_t i = 0; i < ast_len(n); i++) {
+        if (!untyped_fits_i32(ck, ast_child(n, i))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // The default type of an untyped constant with no context.
 // D4.5
 static void default_type(check_t* ck, ast_node_t* n, expr_t* e) {
@@ -781,8 +811,11 @@ static void default_type(check_t* ck, ast_node_t* n, expr_t* e) {
         check_error(ck, n->loc, "constant expression out of range");
         e->type = type_error(&ck->types);
     } else if (e->value.kind == CV_NONE) {
-        // `1 << n` with no context: the left operand takes its default type.
-        k = PRIM_I32;
+        // `1 << n` with no context: the left operand takes its default type,
+        // which is i32 when every constant in the expression fits i32 and i64
+        // when one does not. A constant that fits neither is reported against
+        // i64 by the retype below.
+        k = untyped_fits_i32(ck, n) ? PRIM_I32 : PRIM_I64;
         e->type = type_prim(&ck->types, k);
     } else {
         e->type = type_prim(&ck->types, k);
@@ -1179,7 +1212,16 @@ static cv_rel_t relation_of(int32_t op) {
 static void check_shift(
     check_t* ck, loc_t loc, int32_t op, expr_t* a, ast_node_t* rhs, expr_t* b, expr_t* out) {
     default_type(ck, rhs, b);
-    if (check_poisoned(a->type) || check_poisoned(b->type)) {
+    // An untyped left operand whose value has no default type, `2^63` written
+    // out, is poisoned and still carries its constant, so it goes on to the
+    // context, which reports it against the type the default rule chose.
+    // `untyped()` gives such a constant the error type and reports nothing, so
+    // an early return on a poisoned operand loses the diagnostic altogether.
+    // This return is the only one repaired. Four others have the same hole and
+    // accept `*2^63`, `(2^63).x`, `2^63[0]` and `2^63()` in silence.
+    // D4.5: the wide half, which this return used to drop
+    // T-125: the four early returns with the same hole
+    if ((check_poisoned(a->type) && !a->untyped) || check_poisoned(b->type)) {
         return;
     }
     if (!type_is_integer_prim(b->type)) {

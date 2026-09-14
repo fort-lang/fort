@@ -87,6 +87,109 @@ TEST(with_no_context_a_constant_is_i32_then_i64, {
     TEST_ASSERT_EQ_STR(type_text(ast_child(call, 1)->type), "i64");
 })
 
+// The default type of an untyped expression that folded to no value: `1 << n`
+// with a variable count. The expression carries its constants to
+// `default_type`, which reads the width they need. The type is read off the
+// argument node, since nothing else in the program says it.
+// D4.5
+
+TEST(an_expression_with_no_value_takes_i32_when_every_constant_fits, {
+    TEST_ASSERT_TRUE(check_body("    i32 n = 1;\n"
+                                "    println(1 << n, 2147483647 << n, -2147483648 << n);"));
+    const ast_node_t* call = node_in_main(AST_CALL, NULL);
+    // The two ends of i32 are inside it, so the rule leaves them there.
+    // D4.5
+    TEST_ASSERT_EQ_STR(type_text(ast_child(call, 0)->type), "i32");
+    TEST_ASSERT_EQ_STR(type_text(ast_child(call, 1)->type), "i32");
+    TEST_ASSERT_EQ_STR(type_text(ast_child(call, 2)->type), "i32");
+})
+
+TEST(an_expression_with_no_value_takes_i64_when_a_constant_needs_it, {
+    TEST_ASSERT_TRUE(
+        check_body("    i32 n = 1;\n"
+                   "    println(2147483648 << n, -2147483649 << n, 9223372036854775807 >> n);"));
+    const ast_node_t* call = node_in_main(AST_CALL, NULL);
+    // One past each end of i32, and the far end of i64.
+    // D4.5
+    TEST_ASSERT_EQ_STR(type_text(ast_child(call, 0)->type), "i64");
+    TEST_ASSERT_EQ_STR(type_text(ast_child(call, 1)->type), "i64");
+    TEST_ASSERT_EQ_STR(type_text(ast_child(call, 2)->type), "i64");
+})
+
+TEST(a_node_that_folded_decides_for_the_subtree_below_it, {
+    TEST_ASSERT_TRUE(check_body("    i32 n = 1;\n"
+                                "    println((2147483648 - 1) << n, (2147483647 + 1) << n);"));
+    const ast_node_t* call = node_in_main(AST_CALL, NULL);
+    // The context stops at a node that folded, here as in retype_untyped, so
+    // the leaf 2147483648 does not widen an expression whose value is
+    // 2147483647.
+    // D4.4, D4.5
+    TEST_ASSERT_EQ_STR(type_text(ast_child(call, 0)->type), "i32");
+    TEST_ASSERT_EQ_STR(type_text(ast_child(call, 1)->type), "i64");
+})
+
+TEST(one_wide_constant_widens_the_whole_untyped_expression, {
+    TEST_ASSERT_TRUE(check_body("    i32 n = 1;\n    println(1 + (4294967296 << n));"));
+    const ast_node_t* call = node_in_main(AST_CALL, NULL);
+    const ast_node_t* sum = ast_child(call, 0);
+    // One type for the expression, so the `1` beside the wide constant is i64
+    // as well: there is no promotion inside it.
+    // D4.5, D6.2
+    TEST_ASSERT_EQ_STR(type_text(sum->type), "i64");
+    TEST_ASSERT_EQ_STR(type_text(sum->a->type), "i64");
+    TEST_ASSERT_EQ_STR(type_text(sum->b->type), "i64");
+})
+
+TEST(a_char_or_a_bool_in_such_an_expression_keeps_i32, {
+    TEST_ASSERT_TRUE(check_body("    i32 n = 1;\n    println('a' << n);"));
+    const ast_node_t* call = node_in_main(AST_CALL, NULL);
+    // Only an integer asks for a wider type. A char literal in an integer
+    // context is its code point, which fits i32.
+    // D4.3, D4.5
+    TEST_ASSERT_EQ_STR(type_text(ast_child(call, 0)->type), "i32");
+    TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n    println(true << n);"));
+    TEST_ASSERT_TRUE(said("'<<' takes an integer left operand, not bool"));
+})
+
+TEST(an_expression_with_no_value_beyond_i64_is_refused, {
+    // The tail of the rule: neither type holds the constant, so the error
+    // names i64, the widest the rule offers. Both programs compiled in silence
+    // until 2026-09-13, because a left operand with no default type left the
+    // shift before any context could read it.
+    // D4.5
+    TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n    println(9223372036854775808 << n);"));
+    TEST_ASSERT_TRUE(said("constant 9223372036854775808 does not fit i64"));
+    TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n    println(18446744073709551615 << n);"));
+    TEST_ASSERT_TRUE(said("constant 18446744073709551615 does not fit i64"));
+})
+
+TEST(a_poisoned_left_operand_that_is_no_constant_is_still_dropped, {
+    // The other half of the guard above it. An untyped constant with no default
+    // type goes on to the context, and every other poisoned operand stops at
+    // the shift, because whatever reported it has said all there is to say.
+    // The count is the assertion: `nosuch << n` draws one diagnostic, and a
+    // shift that let the error type through would add "'<<' takes an integer
+    // left operand, not <error>" on the same line, which a fail test of the
+    // corpus cannot see (the harness judges a line and not a count).
+    // D4.5, D14.2
+    TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n    println(nosuch << n);"));
+    TEST_ASSERT_TRUE(said("unknown name 'nosuch'"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+})
+
+TEST(a_constant_with_no_default_type_may_still_fold_back_into_range, {
+    // The same operand, shifted by a constant count. The fold happens before
+    // any type is chosen, so the value that meets the rule is 2^62 and not
+    // 2^63, and the expression is legal.
+    // D4.4, D4.5
+    TEST_ASSERT_TRUE(check_body("    println(9223372036854775808 >> 1);"));
+    const ast_node_t* call = node_in_main(AST_CALL, NULL);
+    TEST_ASSERT_EQ_STR(type_text(ast_child(call, 0)->type), "i64");
+    int64_t v = 0;
+    TEST_ASSERT_TRUE(cv_to_i64(check_node_value(&checker, ast_child(call, 0)), &v));
+    TEST_ASSERT_EQ_INT64(v, (int64_t)4611686018427387904);
+})
+
 TEST(a_constant_beyond_i64_needs_a_context, {
     TEST_ASSERT_TRUE(check_body("    u64 m = 18446744073709551615;\n    println(m);"));
     TEST_ASSERT_EQ_STR(init_type("m"), "u64");
@@ -486,6 +589,14 @@ int main(int argc, char** argv) {
     TEST_RUN(an_integer_constant_does_not_become_an_enum);
     TEST_RUN(an_integer_constant_does_not_become_a_bool);
     TEST_RUN(with_no_context_a_constant_is_i32_then_i64);
+    TEST_RUN(an_expression_with_no_value_takes_i32_when_every_constant_fits);
+    TEST_RUN(an_expression_with_no_value_takes_i64_when_a_constant_needs_it);
+    TEST_RUN(a_node_that_folded_decides_for_the_subtree_below_it);
+    TEST_RUN(one_wide_constant_widens_the_whole_untyped_expression);
+    TEST_RUN(a_char_or_a_bool_in_such_an_expression_keeps_i32);
+    TEST_RUN(an_expression_with_no_value_beyond_i64_is_refused);
+    TEST_RUN(a_poisoned_left_operand_that_is_no_constant_is_still_dropped);
+    TEST_RUN(a_constant_with_no_default_type_may_still_fold_back_into_range);
     TEST_RUN(a_constant_beyond_i64_needs_a_context);
     TEST_RUN(null_takes_a_pointer_type_from_its_context);
     TEST_RUN(null_outside_a_pointer_context_is_refused);

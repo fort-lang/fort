@@ -5,6 +5,7 @@
 import ast;
 import check;
 import check_env;
+import std.strbuf;
 import types;
 
 // The resolution and the expression typing of src/fort/check.ft, asserted
@@ -142,6 +143,108 @@ fn void an_untyped_constant_with_no_context_takes_its_default_type() {
     // D4.5, D3.4
     assert(check_env.check_init_of(&e, "i32[2]", "{1, 2}"));
     assert(check_env.decl_type(&e, "probe") == "i32[2]");
+}
+
+// ---- the default type of an expression that folded to no value ----------------------
+// D4.5
+
+// The `println` call of `fn void probe(i32 n) { println(<args>); }`, checked.
+// The count of a shift is a parameter, so nothing folds and each argument
+// carries the type default_type chose, which nothing else in the program says.
+// The text is built here because fort does not join adjacent string literals.
+// D2.9, D4.5
+fn ast.node* probe_call(check_env.env mut* e, string args, bool ok) {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "fn void probe(i32 n) {\n    println(");
+    strbuf.append(&b, args);
+    strbuf.append(&b, ");\n}\n");
+    assert(check_env.check_decls(e, strbuf.view(&b)) == ok);
+    return check_env.body_expr(e, "probe", 0);
+}
+
+fn void an_expression_with_no_value_takes_i32_when_every_constant_fits() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    ast.node* call = probe_call(&e, "1 << n, 2147483647 << n, -2147483648 << n", true);
+    // The two ends of i32 are inside it, so the rule leaves them there.
+    // D4.5
+    assert(check_env.type_text(&e, ast.ast_child(call, 0)->ty) == "i32");
+    assert(check_env.type_text(&e, ast.ast_child(call, 1)->ty) == "i32");
+    assert(check_env.type_text(&e, ast.ast_child(call, 2)->ty) == "i32");
+}
+
+fn void an_expression_with_no_value_takes_i64_when_a_constant_needs_it() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    ast.node* call = probe_call(&e,
+        "2147483648 << n, -2147483649 << n, 9223372036854775807 >> n", true);
+    // One past each end of i32, and the far end of i64.
+    // D4.5
+    assert(check_env.type_text(&e, ast.ast_child(call, 0)->ty) == "i64");
+    assert(check_env.type_text(&e, ast.ast_child(call, 1)->ty) == "i64");
+    assert(check_env.type_text(&e, ast.ast_child(call, 2)->ty) == "i64");
+}
+
+fn void a_node_that_folded_decides_for_the_subtree_below_it() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    ast.node* call = probe_call(&e, "(2147483648 - 1) << n, (2147483647 + 1) << n", true);
+    // The context stops at a node that folded, here as in retype_untyped, so
+    // the leaf 2147483648 does not widen an expression whose value is
+    // 2147483647.
+    // D4.4, D4.5
+    assert(check_env.type_text(&e, ast.ast_child(call, 0)->ty) == "i32");
+    assert(check_env.type_text(&e, ast.ast_child(call, 1)->ty) == "i64");
+}
+
+fn void one_wide_constant_widens_the_whole_untyped_expression() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    ast.node* call = probe_call(&e, "1 + (4294967296 << n)", true);
+    ast.node* sum = ast.ast_child(call, 0);
+    // One type for the expression, so the `1` beside the wide constant is i64
+    // as well: there is no promotion inside it.
+    // D4.5, D6.2
+    assert(check_env.type_text(&e, sum->ty) == "i64");
+    assert(check_env.type_text(&e, sum->a->ty) == "i64");
+    assert(check_env.type_text(&e, sum->b->ty) == "i64");
+}
+
+fn void an_expression_with_no_value_beyond_i64_is_refused() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The tail of the rule: neither type holds the constant, so the error names
+    // i64, the widest the rule offers. The program compiled in silence until
+    // 2026-09-13, because a left operand with no default type left the shift
+    // before any context could read it.
+    // D4.5
+    ast.node* call = probe_call(&e, "9223372036854775808 << n", false);
+    assert(call != null);
+    assert(check_env.errors(&e) == 1);
+    assert(check_env.said(&e, "constant 9223372036854775808 does not fit i64"));
+}
+
+fn void a_poisoned_left_operand_that_is_no_constant_is_still_dropped() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The other half of the guard above it. An untyped constant with no default
+    // type goes on to the context, and every other poisoned operand stops at the
+    // shift, because whatever reported it has said all there is to say. The count
+    // is the assertion: a shift that let the error type through would add
+    // "'<<' takes an integer left operand, not <error>" on the same line, which a
+    // fail test of the corpus cannot see (the harness judges a line, not a count).
+    // D4.5, D14.2
+    ast.node* call = probe_call(&e, "nosuch << n", false);
+    assert(call != null);
+    assert(check_env.errors(&e) == 1);
+    assert(check_env.said(&e, "unknown name 'nosuch'"));
 }
 
 fn void a_char_constant_in_an_integer_context_is_its_code_point() {
@@ -490,6 +593,12 @@ fn i32 main() {
     a_constant_that_does_not_fit_its_context_is_an_error();
     an_integer_constant_does_not_become_char_or_bool_or_an_enum();
     an_untyped_constant_with_no_context_takes_its_default_type();
+    an_expression_with_no_value_takes_i32_when_every_constant_fits();
+    an_expression_with_no_value_takes_i64_when_a_constant_needs_it();
+    a_node_that_folded_decides_for_the_subtree_below_it();
+    one_wide_constant_widens_the_whole_untyped_expression();
+    an_expression_with_no_value_beyond_i64_is_refused();
+    a_poisoned_left_operand_that_is_no_constant_is_still_dropped();
     a_char_constant_in_an_integer_context_is_its_code_point();
     null_needs_a_pointer_typed_context();
     a_comparison_yields_bool_and_folds();
