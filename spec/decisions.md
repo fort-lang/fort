@@ -1802,29 +1802,36 @@ assembly, survives only in the history of this file and of `toolchain.md`.
 - owner: `toolchain.md` (6, the IR contract).
 - rule: The emitted text is a function of the program alone, so that a self-hosted compiler reaches
   a fixpoint: stage2 and stage3 must emit byte-identical modules for the same sources in both build
-  modes, and the bootstrap script compares them with `cmp` over `-S` output, with `diff` as the
-  debugging output. Hence: every value, parameter and block is named, so LLVM never numbers anything
-  implicitly; per function and reset at each definition, instruction results are `%t<N>` in emission
-  order, blocks are `%L<N>` in creation order with the entry block always literally `entry`, locals
-  are `%<ident>.<slot>` by the local's index in the function, parameters arrive as `%<ident>.in`, an
-  aggregate result pointer is `%ret.sret` and compiler-made places are `%tmp<K>` from a third
-  per-function counter. A name that embeds a fort identifier always contains a dot and a name the
-  compiler invents never does, which is what makes collisions impossible: an identifier cannot
-  contain a dot (D2.3), so a local named `tmp` is `%tmp.0` and never `%tmp0`, and `%ret.sret` cannot
-  be a local named `ret`, whose names are `%ret.<slot>` and `%ret.in`. Module-level counters
-  (`@.str.<N>`, `@.file.<N>`) are assigned on first use and never deduplicated by content; enum
-  tables are keyed by the mangled name. Order is by construction and never by iteration over a hash
-  table: modules in dependency order, declarations in source order, runtime declarations in the
-  fixed order of `toolchain.md` 5.1, intrinsics in a fixed table order, `extern` declarations in
-  first-use order, attribute groups at fixed indices with unused indices simply absent. Nothing in
-  the text depends on the environment: no timestamps, no compiler version, no comments, no
-  `!llvm.ident`, and no path other than the ones D11.4 prints, which `@.file.<N>` holds exactly as
-  the compiler opened them, so comparing two stages means invoking them identically (same working
-  directory, same arguments) rather than expecting path-free text. An integer constant is printed in
-  decimal without padding and with the signedness of its fort type (`store i8 -1` for an `i8`,
-  `store i8 255` for a `u8`, and `i64` MIN as `-9223372036854775808`); a float constant is printed
-  as the LLVM hex literal of its `double` bit pattern, an `f32` constant converted to `double`
-  first, so no decimal rounding can differ between two stages.
+  modes. The toolchain must make two comparisons in each build mode. It must compare with `cmp` the
+  `-S` output that two distinct stages emit for one input, with `diff` as the debugging output, and
+  it must compare two stage binaries byte for byte. Equal binaries are one program, so by the first
+  sentence of this rule they emit one module for one input, and the toolchain must not add a third
+  `-S` run over stage3 to compare that text. That inference assumes the determinism this rule
+  states, so the binary comparison tests a consequence of this rule and not the rule itself. The
+  module comparison of two distinct stages narrows the gap, and no comparison this rule requires
+  holds two runs of one compiler against each other. Hence: every value, parameter and block is
+  named, so LLVM never numbers anything implicitly; per function and reset at each definition,
+  instruction results are `%t<N>` in emission order, blocks are `%L<N>` in creation order with the
+  entry block always literally `entry`, locals are `%<ident>.<slot>` by the local's index in the
+  function, parameters arrive as `%<ident>.in`, an aggregate result pointer is `%ret.sret` and
+  compiler-made places are `%tmp<K>` from a third per-function counter. A name that embeds a fort
+  identifier always contains a dot and a name the compiler invents never does, which is what makes
+  collisions impossible: an identifier cannot contain a dot (D2.3), so a local named `tmp` is
+  `%tmp.0` and never `%tmp0`, and `%ret.sret` cannot be a local named `ret`, whose names are
+  `%ret.<slot>` and `%ret.in`. Module-level counters (`@.str.<N>`, `@.file.<N>`) are assigned on
+  first use and never deduplicated by content; enum tables are keyed by the mangled name. Order is
+  by construction and never by iteration over a hash table: modules in dependency order,
+  declarations in source order, runtime declarations in the fixed order of `toolchain.md` 5.1,
+  intrinsics in a fixed table order, `extern` declarations in first-use order, attribute groups at
+  fixed indices with unused indices simply absent. Nothing in the text depends on the environment:
+  no timestamps, no compiler version, no comments, no `!llvm.ident`, and no path other than the ones
+  D11.4 prints, which `@.file.<N>` holds exactly as the compiler opened them, so comparing two
+  stages means invoking them identically (same working directory, same arguments) rather than
+  expecting path-free text. An integer constant is printed in decimal without padding and with the
+  signedness of its fort type (`store i8 -1` for an `i8`, `store i8 255` for a `u8`, and `i64` MIN
+  as `-9223372036854775808`); a float constant is printed as the LLVM hex literal of its `double`
+  bit pattern, an `f32` constant converted to `double` first, so no decimal rounding can differ
+  between two stages.
 - history: Amended 2026-09-10 with how the naming half is checked: `opt -passes=verify` cannot
   enforce it, because an instruction after a terminator makes the verifier *create* an implicit
   number rather than reject the module. `opt-18` exits 0 on a block whose `unreachable` is followed
@@ -1837,7 +1844,21 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   which is stronger, since it holds the two compilers against each other rather than one compiler
   against itself. It runs in both build modes, as this decision requires, and `diff` is still the
   debugging output. A ticket that reads the sentence above must not add a third `-S` run to perform
-  it literally.
+  it literally. Amended 2026-09-13 (T-109) to state the two comparisons this decision requires.
+  Until then the rule read "and the bootstrap script compares them with `cmp` over `-S` output,
+  with `diff` as the debugging output", where "them" is stage2 and stage3, so the note above
+  corrected the rule instead of the rule stating it. Two sentences of that note describe the log as
+  it stood on 2026-09-12. This decision does ask for the module comparison of two distinct stages
+  from this date, and "the sentence above" there means the sentence this note quotes. The rule
+  names no script and no test: it states the requirement, and `notes/testing.md` 5 records how
+  `tools/fixpoint.sh` and the ctest `bootstrap` meet it, so a rename of either amends no decision.
+  The rule also carries the condition of the inference in the note above: equal binaries prove
+  equal modules only under the determinism the rule itself requires, so that comparison tests a
+  consequence of the rule. Nothing in the repository compares two runs of one compiler on one
+  input. The module comparison of stage1 against stage2 on each run, and `tools/diff_ir.sh` over
+  the 516 `.ft` files of the repository that compile (the ctest `diff-ir`, measured 2026-09-13),
+  would both fail with high probability on a hash-seeded emitter; that is probability and not
+  proof. The gap is T-039's inference and this amendment leaves it where it was.
 
 ### D19.6 Checks and failure blocks
 - owner: `toolchain.md` (6, the IR contract).
@@ -1996,7 +2017,9 @@ language server to use them, while the server itself lands after the bootstrap f
   said "D14.6's freeze (T-046)". D14.6 is the test-to-source ratio and holds no freeze; that
   citation was wrong when this decision was written on 2026-09-11, since D14.6 said the same thing
   then. The freeze of the C bootstrap is `toolchain.md` 7.3 and `notes/compiler.md` 8, which the
-  sentence names now.
+  sentence names now. Amended 2026-09-13 (T-109): D19.5's rule states both comparisons itself from
+  that date, so the sentence above about what its rule "still says" describes the log as it stood
+  on 2026-09-12.
 
 ## Ready-to-implement checklist
 

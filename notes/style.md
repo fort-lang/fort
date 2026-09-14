@@ -337,7 +337,18 @@ every one matches.
   shape and the ctest `check_decisions` runs it over the log. An amendment rewrites the `rule` so
   that it states the rule in force, and appends a note to `history` that says what the rule said
   before: `Amended YYYY-MM-DD (T-nnn): <what changed>`. Never leave a stale sentence in the rule
-  for the history to correct, and never delete the note that records the old text.
+  for the history to correct, and never delete the note that records the old text. **One rule a
+  note of its own entry corrects** is the one property the `history` field decides, and the sweep
+  for it reads the entries that carry that field: `grep -c '^- history:' spec/decisions.md`
+  counted 49 of 144 on 2026-09-13, of which 48 hold the word "Amended" and D4.4 alone does not;
+  the command that counts them is in T-109's Notes, Design. One of the 49 was stale, D19.5, which
+  T-039 corrected in its note and T-109 rewrote. That sweep says nothing about the other 95
+  entries, and nothing about a rule that goes stale against the tree or against another entry;
+  those need their own reading, and reporting them as swept would say a thing was tested that was
+  not. A note that reports another entry in the present tense goes stale the same way: two of the
+  49 held one on 2026-09-13 (D19.5's and D20.5's, both about D19.5's rule). Append a dated note
+  that says what has changed since, and leave the words of the old note alone, because the
+  sentence above forbids deleting them (T-109).
 - **Moving text inside the decision log**: the risk of an edit to `spec/decisions.md` is a changed
   meaning, which no build and no test can see. `tools/check_decisions.py --against <old file>`
   compares the words of every entry between two revisions of the log. It fails on an entry whose
