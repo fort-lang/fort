@@ -506,9 +506,10 @@ bool type_assignable(const type_t* dst, const type_t* src) {
 // D3.14
 
 // Whether a type belongs to the string family: `string`, `char@` or `u8@` with
-// any marks. These spellings, and only these, cast among themselves in every
-// direction: the header is reinterpreted and `mut` and `own` may be added or
-// dropped.
+// any marks. These spellings, and only these, cast among themselves: the header
+// is reinterpreted, `own` may be added or dropped, and `mut` may be dropped.
+// Adding `mut` is refused here as everywhere, so `cast("abc", u8 mut@)` no
+// longer aliases read-only bytes as writable ones.
 // D3.14, D17.12
 static bool string_family(const type_t* t) {
     if (t->kind == TYPE_STRING) {
@@ -578,14 +579,68 @@ static bool own_orphaned(const type_t* dst, const type_t* src, bool outer_own) {
 }
 
 // The span row of the matrix: a span casts to a span of the same element type
-// whose marks differ only in mutability, added or dropped at any level, the
-// cast-away-const escape a pointer has, and whose `own` marks may be added or
-// dropped at any reference. The element type must be the same: the marks inside a
-// function type are part of its identity, so `fn void(node mut*)@` does not cast
-// to `fn void(node*)@`.
+// whose marks differ only in mutability, dropped at any level, and whose `own`
+// marks may be added or dropped at any reference. The element type must be the
+// same: the marks inside a function type are part of its identity, so
+// `fn void(node mut*)@` does not cast to `fn void(node*)@`. The drop alone is
+// this row's work, because `type_cast_adds_mut` already refused every span
+// whose marks add one.
 // D3.10, D3.14
 static bool span_cast_allowed(const type_t* dst, const type_t* src) {
     return type_same_shape(dst, src) && !own_orphaned(dst, src, false);
+}
+
+// Whether `t` marks any level `mut`, at this position or below it. A fixed
+// array shares the storage of its elements and adds no level of its own.
+// D3.14, D5.2
+static bool marks_mut(const type_t* t) {
+    if (t->kind == TYPE_ARRAY) {
+        return marks_mut(t->elem);
+    }
+    if (!type_is_reference(t)) {
+        return false;
+    }
+    if (t->mut) {
+        return true;
+    }
+    if (t->elem == NULL) {
+        // `string`: no level behind it, and none of its own
+        return false;
+    }
+    return marks_mut(t->elem);
+}
+
+// D3.14
+bool type_cast_adds_mut(const type_t* dst, const type_t* src) {
+    if (dst->kind == TYPE_ARRAY) {
+        // D5.2: the array adds no level, so the two chains stay in step
+        if (src->kind == TYPE_ARRAY) {
+            return type_cast_adds_mut(dst->elem, src->elem);
+        }
+        return marks_mut(dst);
+    }
+    if (!type_is_reference(dst)) {
+        // No level of the target stands here, so nothing can be added to it.
+        return false;
+    }
+    if (!type_is_reference(src)) {
+        // The source has no level at this depth: an integer, a `void`, a
+        // struct or a function pointer promises nothing about this storage.
+        return marks_mut(dst);
+    }
+    if (dst->mut && !src->mut) {
+        return true;
+    }
+    if (dst->elem == NULL) {
+        // The target is a `string`: no level behind it.
+        return false;
+    }
+    if (src->elem == NULL) {
+        // The source is a `string`, whose bytes are immutable and behind which
+        // no level stands.
+        return marks_mut(dst->elem);
+    }
+    return type_cast_adds_mut(dst->elem, src->elem);
 }
 
 bool type_cast_allowed(const type_t* dst, const type_t* src) {
@@ -605,6 +660,13 @@ bool type_cast_allowed(const type_t* dst, const type_t* src) {
     // D3.14
     if (type_assignable(dst, src)) {
         return true;
+    }
+    // One rule over every row below: a cast never adds `mut`, from any source.
+    // `void*`, `u64` and `string` are sources like the rest, so
+    // `cast(cast(p, void*), u8 mut*)` fails here at the second cast.
+    // D3.14
+    if (type_cast_adds_mut(dst, src)) {
+        return false;
     }
     if (type_is_scalar(src) && type_is_scalar(dst)) {
         return scalar_cast_allowed(dst, src);

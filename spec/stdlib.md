@@ -680,8 +680,11 @@ This module is the non-generic container pattern (D15). To hold `token` values, 
 and its six functions, replace `i64` with `token` and the prefix `int_` with `token_`: about
 forty lines, type-checked like any other code. `ptr_vec` is for elements that must not be
 copied and belong to someone else (an arena, a fixed array, an owner that outlives the vector):
-store `cast(p, void mut*)` and cast back on retrieval; a pointer cast may add mutability
-(D3.14), so a `node mut*` survives the round trip. When the vector is to own its elements, copy
+store `cast(p, void mut*)` and cast back on retrieval; the slots are `void mut*` and `ptr_pop`
+answers `void mut*`, so a `node mut*` survives the round trip with the mark it went in with. A
+`node*` does not go in at all, because `ptr_push` takes a `void mut*` and no cast adds the mark
+(D3.14). A container of immutable pointers is a different container, and this pattern makes one:
+copy the file with the slot type `void*`. When the vector is to own its elements, copy
 the file with the slot type `node mut* own mut@ own items;` instead, an owned span of owned nodes
 (D17.2):
 `node_push(node_vec mut* v, node mut* own n)` stores `v->items[v->len] = move(n);` (a parameter
@@ -945,14 +948,12 @@ and this is the same hole one call deeper. So:
 - An element must hold no pointer into the array itself. The permutation moves every element and
   leaves such a pointer at the wrong one.
 - The elements must be mutable. The three typed entries say so in their parameter types and the
-  compiler rejects an immutable span; `sort` cannot, because its `void mut*` says that the bytes
-  may be written and nothing about how many or how wide (D3.11). A caller that hands it the
-  `.ptr` of a span of immutable elements compiles, runs and sorts them: the cast to `void mut*`
-  is the cast-away-const escape D3.14 allows, and the write is defined. So the rule the typed
-  entries enforce is one the core entry only states. It becomes
-  undefined in one case, and that case is not rare: writing into storage that is really
-  read-only, which is every module-level declaration without `mut` (D7.10) and every string
-  literal (D3.7), is undefined behavior (D10.7).
+  compiler rejects an immutable span; `sort` says less, because its `void mut*` says that the
+  bytes may be written and nothing about how many or how wide (D3.11). A caller cannot reach it
+  with immutable elements either: `items.ptr` of an `i64@` is an `i64*`, and `cast(items.ptr,
+  void mut*)` adds the mark, which no cast does (D3.14). So the two entries agree on this one
+  rule, the typed entries by the element type and the core entry by the mark on its `base`. What
+  the core entry still cannot check is the count and the width.
 
 ```fort
 import std.sort;

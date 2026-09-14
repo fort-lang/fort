@@ -713,18 +713,19 @@ to guess whether a parenthesized name is a type, and it never traps. Allowed:
   target's range, NaN becomes 0; float to float;
 - `bool` to integer (0 or 1); `char` to and from any integer type; enum to and from any integer
   type (integer to enum is unchecked);
-- any pointer to any pointer or `void*`; mutability may be added, which is the cast-away-const
-  escape, and writing through it into read-only memory is undefined behavior; pointer to and
+- any pointer to any pointer or `void*`; a cast never adds `mut`, so the storage a pointer
+  reaches is writable through the result only where the source says so; pointer to and
   from `u64`; function pointer to and from `void*`;
 - among `string`, `char@`, `u8@`, `char mut@` and `u8 mut@`, and their `own` forms, where
   the result is `own` exactly when the target spells it: `cast(move(buf), string own)` for a
-  `u8 mut@ own buf`, and `cast(buf, string)` lends a view (D17.12); `T@` to `T mut@`;
-  identity. A `mut` in the outermost position of a cast target is an error, a cast result having
-  no binding (`cast(s, u8@ mut)`); the markers a target does carry name the levels behind its
-  indirections;
+  `u8 mut@ own buf`, and `cast(buf, string)` lends a view (D17.12); `T mut@` to `T@`;
+  identity. The bytes of a `string` are immutable, so `cast(s, u8 mut@)` is an error like every
+  other cast that adds `mut`. A `mut` in the outermost position of a cast target is an error, a
+  cast result having no binding (`cast(s, u8@ mut)`); the markers a target does carry name the
+  levels behind its indirections;
 - adding `own` to any reference of a pointer or span type: adoption of memory that came from C
   (`cast(p, u8 mut* own)` for a `u8 mut* p` returned by an extern that does not say `own`,
-  `cast(line[0..n], char mut@ own)`), the same unsafe escape as adding `mut`; a later `del` of
+  `cast(line[0..n], char mut@ own)`), which is the one unsafe mark a cast adds; a later `del` of
   adopted memory that is not the start of an allocation is undefined behavior (D10.7);
 - dropping `own` at any level: a no-op wherever 3.9 already converts, and the escape where the
   monotone rule of 3.9 refuses the implicit form (`node mut* own mut@ own` to `node mut* mut@`).
@@ -747,7 +748,7 @@ bool b = cast(1, bool);            // error: cannot cast integer to bool; write 
 u32@ u = cast(s, u32@);          // error: cannot cast i32@ to u32@
 i32@ v = cast(p, i32@);          // error: cannot cast pointer to span; use 'p[0..n]'
 point q = cast(r, point);          // error: cannot cast to struct type point
-i32 mut* w = cast(cp, i32 mut*);   // ok: adds mutability explicitly
+i32 mut* w = cast(cp, i32 mut*);   // error unless cp is a mut pointer: no cast adds mut
 i32 c = cast('a', i32) - '0';      // 49
 u8 t = cast(300, u8);              // 44: 300 is i32, then truncated
 u8 mut* own m = cast(libc.malloc(64), u8 mut* own);   // ok: own rvalue to own type; del(m) frees

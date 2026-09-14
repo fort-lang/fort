@@ -410,22 +410,25 @@ class RealLog(unittest.TestCase):
                    if not fields.get("owner", "").strip() or not fields.get("rule", "").strip()]
         self.assertEqual(without, [])
 
-    def test_the_one_dated_note_outside_a_history_field_is_the_one_in_d3_14(self):
-        """D3.14 carries `amended 2026-09-10 from the T-011 review` inside a
-        sentence of its own rule, so moving it would break the sentence. Every
-        other dated note stands in a history field. The assertion names D3.14
-        rather than an empty list, so deleting that note fails this test.
+    def test_no_dated_note_stands_outside_a_history_field(self):
+        """Every dated note stands in a history field and none in a rule.
+
+        D3.14 carried `amended 2026-09-10 from the T-011 review` inside a
+        sentence of its own rule until T-085, which removed the sentence: the
+        rule it described, a span cast that adds mutability, no longer exists,
+        and a history note whose subject is gone says nothing. So the list is
+        empty, and a note written into a rule fails this test.
 
         The pattern is case-insensitive and takes any whitespace between the
-        word and the date, because the rule wraps at 100 columns and D3.14's
-        note is lowercase; a stricter pattern misses both and passes for the
+        word and the date, because a rule wraps at 100 columns and such a note
+        is often lowercase; a stricter pattern misses both and passes for the
         wrong reason.
         """
         dated = re.compile(r"(?:amended|note|decided)\s+20\d\d-\d\d-\d\d", re.IGNORECASE)
         loose = sorted(name for name, fields in self.entries.items()
                        if dated.search(fields.get("rule", "")) or dated.search(
                            fields.get("rationale", "")))
-        self.assertEqual(loose, ["D3.14"])
+        self.assertEqual(loose, [])
 
     def test_the_guard_above_sees_a_note_the_wrap_splits_from_its_date(self):
         """The 100-column wrap may put the word and the date on two lines."""

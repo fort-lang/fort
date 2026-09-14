@@ -331,24 +331,25 @@ fn void casts_among_pointers_and_u64() {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
     defer types_env.free(&e);
-    assert(castable(&e, "point*", "node*"));        // any pointer to any pointer
-    assert(castable(&e, "node mut*", "node*"));     // adds mutability
-    // D17.3
-    assert(castable(&e, "node mut* own", "node*")); // adopts
-    assert(castable(&e, "node*", "node mut* own")); // lends
+    assert(castable(&e, "point*", "node*")); // any pointer to any pointer
+    // D17.3: the source already carries the `mut` the target keeps
+    assert(castable(&e, "node mut* own", "node mut*")); // adopts
+    assert(castable(&e, "node*", "node mut* own"));     // lends
     assert(castable(&e, "void*", "node*"));
     assert(castable(&e, "node*", "void*"));
     assert(castable(&e, "void* own", "void*"));
-    // The cast-away-const escape reaches the level a `void*` names too.
+    // A `mut` the source carries reaches the level a `void*` names, in both
+    // directions, and a cast that only drops it is allowed as well.
     // D3.14
-    assert(castable(&e, "void mut*", "void*"));
-    assert(castable(&e, "void mut*", "node*"));
-    assert(castable(&e, "node mut*", "void*"));
-    assert(castable(&e, "void mut* own", "u64"));
+    assert(castable(&e, "void mut*", "node mut*"));
+    assert(castable(&e, "node mut*", "void mut*"));
+    assert(castable(&e, "void*", "void mut*"));
+    assert(castable(&e, "node*", "node mut*"));
     assert(castable(&e, "u64", "node*"));
     assert(castable(&e, "node*", "u64"));
     assert(castable(&e, "u64", "void*"));
     assert(castable(&e, "void*", "u64"));
+    assert(castable(&e, "void* own", "u64"));
     assert(castable(&e, "node**", "node* mut*"));
     // Pointers cast to no other integer type, and never to a span.
     assert(!castable(&e, "i64", "node*"));
@@ -357,6 +358,16 @@ fn void casts_among_pointers_and_u64() {
     assert(!castable(&e, "i32@", "i32*"));
     assert(!castable(&e, "i32*", "i32@"));
     assert(!castable(&e, "i64", "i32@"));
+    // No pointer cast adds the `mut`, from a typed pointer, from a `void*` or
+    // from the address in a `u64`.
+    // D3.14
+    assert(!castable(&e, "node mut*", "node*"));
+    assert(!castable(&e, "node mut* own", "node*"));
+    assert(!castable(&e, "void mut*", "void*"));
+    assert(!castable(&e, "void mut*", "node*"));
+    assert(!castable(&e, "node mut*", "void*"));
+    assert(!castable(&e, "void mut* own", "u64"));
+    assert(!castable(&e, "node mut*", "u64"));
 }
 
 fn void casts_of_function_pointers_go_through_voidptr() {
@@ -384,15 +395,13 @@ fn void casts_within_the_string_family() {
     defer types_env.free(&e);
     assert(castable(&e, "char@", "string"));
     assert(castable(&e, "u8@", "string"));
-    assert(castable(&e, "char mut@", "string"));
-    assert(castable(&e, "u8 mut@", "string"));
     assert(castable(&e, "string", "char@"));
     assert(castable(&e, "string", "u8@"));
     assert(castable(&e, "u8@", "char@"));
     assert(castable(&e, "char@", "u8@"));
     assert(castable(&e, "string", "u8 mut@"));
     assert(castable(&e, "u8@", "u8 mut@"));
-    assert(castable(&e, "u8 mut@", "u8@"));
+    assert(castable(&e, "char mut@", "u8 mut@"));
     // Adoption and lending are both casts.
     // D17.3, D17.12
     assert(castable(&e, "string own", "u8 mut@ own"));
@@ -403,6 +412,15 @@ fn void casts_within_the_string_family() {
     assert(!castable(&e, "i8@", "u8@"));
     assert(!castable(&e, "string", "i8@"));
     assert(!castable(&e, "i32@", "u32@"));
+    // The bytes of a `string` are immutable, and no member of the family adds
+    // the `mut` back, so the two casts of `cast(cast(b, string), u8 mut@)`
+    // launder nothing.
+    // D3.7, D3.14
+    assert(!castable(&e, "char mut@", "string"));
+    assert(!castable(&e, "u8 mut@", "string"));
+    assert(!castable(&e, "u8 mut@", "u8@"));
+    assert(!castable(&e, "char mut@", "u8@"));
+    assert(!castable(&e, "u8 mut@ own", "string"));
 }
 
 fn void a_span_cast_never_launders_a_signature_or_an_owner() {
@@ -423,8 +441,12 @@ fn void a_span_cast_never_launders_a_signature_or_an_owner() {
     assert(!types.type_cast_allowed(takes_node, takes_mut));
     assert(!types.type_same_shape(of_node, of_mut));
     assert(types.type_cast_allowed(of_node, of_node));
-    // A span of function pointers still casts where its own marks differ.
-    assert(types.type_cast_allowed(types.type_span(&e.tt, takes_node, true, true), of_node));
+    // A span of function pointers still casts where its own marks differ, so
+    // long as the marks are not added: `own` may be, `mut` may not.
+    // D3.14
+    assert(types.type_cast_allowed(types.type_span(&e.tt, takes_node, true, false), of_node));
+    assert(!types.type_cast_allowed(types.type_span(&e.tt, takes_node, true, true), of_node));
+    assert(types.type_cast_allowed(of_node, types.type_span(&e.tt, takes_node, false, true)));
     // Dropping an `own` under a reference the target still owns would leave
     // its objects owned by nobody, which no cast licenses.
     // D17.4
@@ -443,23 +465,75 @@ fn void casts_of_spans_change_only_the_marks() {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
     defer types_env.free(&e);
-    // The element type never changes; mutability is added or dropped at any
-    // level, and `own` at any reference (amended 2026-09-10).
+    // The element type never changes; mutability is dropped at any level, and
+    // `own` is added or dropped at any reference.
     // D3.14
-    assert(castable(&e, "node* mut@", "node*@"));
     assert(castable(&e, "node*@", "node* mut@"));
-    assert(castable(&e, "node mut* mut@", "node* mut@"));
     assert(castable(&e, "i32@@ mut", "i32 mut@ mut@"));
-    assert(castable(&e, "i32 mut@ mut@", "i32@ mut@"));
     assert(castable(&e, "u8@", "u8@ own"));
-    assert(castable(&e, "i32 mut@", "i32@"));
     assert(castable(&e, "i32@", "i32 mut@"));
-    assert(castable(&e, "i32 mut@ own", "i32@"));
-    assert(castable(&e, "node mut* own mut@", "node*@"));
     assert(castable(&e, "node mut* mut@", "node mut* own mut@ own"));
+    // The route a caller of `std.sort_ptr` takes: the drop at level 2 behind a
+    // mutable level 1, which the implicit conversion refuses and the cast makes.
+    // D5.4, D3.14
     assert(castable(&e, "node* mut@", "node mut* mut@"));
+    assert(!assignable(&e, "node* mut@", "node mut* mut@"));
     assert(!castable(&e, "node*@", "point*@"));
     assert(!castable(&e, "i32@@", "i32@"));
+    // A span adds no `mut`, at the slots or at any level below them.
+    // D3.14
+    assert(!castable(&e, "node* mut@", "node*@"));
+    assert(!castable(&e, "node mut* mut@", "node* mut@"));
+    assert(!castable(&e, "i32 mut@ mut@", "i32@ mut@"));
+    assert(!castable(&e, "i32 mut@", "i32@"));
+    assert(!castable(&e, "i32 mut@ own", "i32@"));
+    assert(!castable(&e, "node mut* own mut@", "node*@"));
+}
+
+fn void a_cast_never_adds_mut() {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    // One rule over every row of the matrix: the target marks a level `mut`
+    // only where the source marks the level at the same depth `mut` too.
+    // D3.14
+    assert(types.type_cast_adds_mut(types_env.type_of(&e, "node mut*"),
+                                    types_env.type_of(&e, "node*")));
+    assert(!types.type_cast_adds_mut(types_env.type_of(&e, "node*"),
+                                     types_env.type_of(&e, "node mut*")));
+    assert(!types.type_cast_adds_mut(types_env.type_of(&e, "node mut*"),
+                                     types_env.type_of(&e, "node mut*")));
+    // A level below the outermost is a level like any other, and the drop at
+    // that level stays legal.
+    assert(!castable(&e, "node mut* mut*", "node* mut*"));
+    assert(castable(&e, "node* mut*", "node mut* mut*"));
+    assert(!castable(&e, "node mut* mut@", "node* mut@"));
+    assert(castable(&e, "node* mut@", "node mut* mut@"));
+    // `void*` is a source like any other, so the two casts of
+    // `cast(cast(p, void*), u8 mut*)` refuse the second one. A `void mut*`
+    // carries the mark and the same cast compiles.
+    // D3.11, D3.14
+    assert(!castable(&e, "u8 mut*", "void*"));
+    assert(castable(&e, "u8 mut*", "void mut*"));
+    assert(castable(&e, "u8*", "void*"));
+    // An integer, a `string` and a function pointer name no level at all, so a
+    // target that marks one adds it.
+    assert(!castable(&e, "u8 mut*", "u64"));
+    assert(castable(&e, "u8*", "u64"));
+    assert(!castable(&e, "u8 mut@", "string"));
+    assert(castable(&e, "u8@", "string"));
+    assert(types.type_cast_adds_mut(types_env.type_of(&e, "void mut*"),
+                                    types_env.fn1(&e, types.type_void(&e.tt),
+                                                  types_env.type_of(&e, "node*"))));
+    // Where the pointee type diverges, the source says nothing about the levels
+    // below the divergence, so the target marks none of them.
+    assert(!castable(&e, "node mut* mut*", "u8 mut*"));
+    assert(castable(&e, "node* mut*", "u8 mut*"));
+    assert(castable(&e, "u8 mut*", "node mut* mut*"));
+    // A fixed array adds no level of its own: the elements are compared.
+    // D5.2
+    assert(!castable(&e, "node mut*[2]", "node*[2]"));
+    assert(castable(&e, "node*[2]", "node mut*[2]"));
 }
 
 fn void casts_refused_for_structs_and_fixed_arrays() {
@@ -612,12 +686,19 @@ fn void casts_may_add_own_at_any_reference() {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
     defer types_env.free(&e);
-    assert(castable(&e, "u8 mut@ own", "u8@"));
-    assert(castable(&e, "u8 mut@ own mut*", "u8@*"));
-    assert(castable(&e, "node mut* own mut@ own", "node*@"));
+    // Adoption adds the `own` alone: every `mut` of the target stands in the
+    // source. `cast(libc.malloc(n), u8 mut* own)` compiles because `malloc`
+    // answers `void mut* own`.
+    // D3.14, D17.3, D17.13
+    assert(castable(&e, "u8 mut@ own", "u8 mut@"));
+    assert(castable(&e, "u8 mut@ own mut*", "u8 mut@ mut*"));
+    assert(castable(&e, "node mut* own mut@ own", "node mut* mut@"));
     assert(castable(&e, "node mut* mut@", "node mut* own mut@ own"));
     assert(castable(&e, "void* own", "u64"));
-    assert(castable(&e, "u8 mut* own", "void*"));
+    assert(castable(&e, "u8 mut* own", "void mut*"));
+    assert(castable(&e, "u8* own", "void*"));
+    assert(!castable(&e, "u8 mut@ own", "u8@"));
+    assert(!castable(&e, "u8 mut* own", "void*"));
 }
 
 // ---- the matrix and the invariants ---------------------------------------------
@@ -740,6 +821,7 @@ fn i32 main() {
     casts_within_the_string_family();
     a_span_cast_never_launders_a_signature_or_an_owner();
     casts_of_spans_change_only_the_marks();
+    a_cast_never_adds_mut();
     casts_refused_for_structs_and_fixed_arrays();
     casts_between_a_reference_and_a_fat_pointer_are_refused();
     casts_of_null_void_and_the_error_type();

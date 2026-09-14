@@ -298,13 +298,13 @@ Sections:
   the source's signedness, narrowing truncates, same-width sign change reinterprets); integer to
   float (round to nearest); float to integer (truncate toward zero, saturate at the target's range,
   NaN becomes 0); float to float; `bool` to integer; `char` to and from integer; enum to and from
-  integer; any pointer to any pointer or `void*` (mutability may be added, this is the cast-away-
-  const escape); pointer to and from `u64`; function pointer to and from `void*`; among `string`,
-  `char@`, `u8@`, `char mut@` and `u8 mut@` (a `mut` in the outermost position of a cast target is
-  an error: a cast result has no binding); a span to a span of the same element type whose marks
-  differ only in mutability, added or dropped at any level (the cast-away-const escape, as for
-  pointers; amended 2026-09-10 from the T-011 review, which found the earlier wording, which only
-  added writability to a span's elements, narrower than the rule); any cast that only drops
+  integer; any pointer to any pointer or `void*`; pointer to and from `u64`; function pointer to
+  and from `void*`; among `string`, `char@`, `u8@`, `char mut@` and `u8 mut@` (a `mut` in the
+  outermost position of a cast target is an error: a cast result has no binding); a span to a span
+  of the same element type whose marks differ only in mutability, dropped at any level (the drop
+  reaches every level, which the implicit conversion does not; adding is refused by the rule
+  below); any
+  cast that only drops
   mutability or ownership, at any level (**not** a no-op: D5.4 and D17.4 cover the drop at a level
   `k` only when every level between 1 and `k - 1` is immutable in the target, and the cast alone
   reaches the rest. `void mut* mut@` converts to `void*@` and to `void mut*@`, and a cast alone
@@ -317,7 +317,30 @@ Sections:
   `len` counts elements), pointer to span, struct or array casts. Casts never trap: float to integer
   is emitted as `llvm.fptosi.sat` or `llvm.fptoui.sat`, whose saturating result is this rule (plain
   `fptosi` would be poison out of range, D19.2).
-- history: Amended 2026-09-14 (T-135): the dropping-cast clause called such a cast "a no-op, since
+  **A cast never adds `mut`, from any source.** The target marks a level `mut` only where the
+  source marks the level at the same depth `mut` too. Where the source has no such level -- an
+  integer, the `void` behind a `void*`, a `string`, or a pointee type the cast reinterprets -- the
+  target marks no level below that point. So `cast(cast(p, void*), u8 mut*)` is an error at the
+  second cast, and so are `cast(bits, u8 mut*)` from a `u64` and `cast(s, u8 mut@)` from a
+  `string`. There is no cast-away-const escape. With `void mut*` in an `extern` (D17.13) this
+  leaves `mut` on a reference with no cast escape at all: the one way to a writable reference over
+  foreign storage is a declaration that says `void mut*`, which the fort programmer writes, and
+  `std.libc`'s `malloc` does. An `extern` that lies about a C function stays unsafe, and no rule
+  inside fort reaches it. The library follows the rule and does not bend it: `std.sort_ptr` takes
+  `void* mut@`, which a caller holding `void mut* mut@` reaches with a dropping cast, and
+  `std.ptr_vec` keeps `void mut*` slots, because `ptr_push` takes a pointer and `ptr_pop` gives one
+  back and a round trip through `void*` slots would lose the `mut` for good (`stdlib.md` 2.7,
+  2.10).
+- history: Amended 2026-09-14 (T-085): a cast could add `mut` -- to a pointer at any level, to a
+  span at any level, from a `void*`, from a `u64` and from a `string` -- which left `mut` on a
+  reference a suggestion. The user withdrew the escape on 2026-09-11, `void*` included. The cost,
+  measured on the branch: `test/lang/run/casts/005_span_mutability.ft` was rewritten, because its
+  subject was the escape; `run/casts/003_pointer_forms.ft` and
+  `run/pointers/012_void_mut_pointer.ft` route through `void mut*` instead; and 10 sites of
+  `src/fort/check.ft` cast a `const` away as the C bootstrap does, which five field declarations
+  now carry instead (`ast.node.sym`, `ast.sym.node`, `ast.sym.owner`, `scope.binding.node` and
+  `types.node.decl`).
+  Amended 2026-09-14 (T-135): the dropping-cast clause called such a cast "a no-op, since
   the implicit conversions of D5.4 and D17.4 cover it". They do not cover a drop at a level behind a
   mutable level, which is the drop D5.4's own example refuses; `test/fort/types_convert_test.ft:173`
   asserts that `void mut* mut@` does not convert to `void* mut@`, and until T-135 three sites of
@@ -552,12 +575,14 @@ Sections:
   `k - 1` is immutable in the target type. So `node mut* mut@` converts to `node*@` and to `node
   mut*@`, and converting it to `node* mut@` is refused (a mutable slot could then hold a pointer to
   what the source still sees as a mutable node). This closes the C `T** -> const T**` hole with a
-  short recursive check. Adding mutability requires `cast` (D3.14). Dropping `own` (D17.4) is the
+  short recursive check. Nothing adds mutability: no implicit conversion and no cast (D3.14).
+  Dropping `own` (D17.4) is the
   other implicit conversion and follows the same monotone shape. The drop applies to initialization,
   assignment, argument passing and `return` only: comparison and `?:` require identical types,
   mutability levels included (D6.2).
-- history: Amended 2026-09-11: the last sentence is a signpost added after T-027 read this decision
-  to ask whether `char*` compares with `char mut*` and found no answer here.
+- history: Amended 2026-09-14 (T-085): "adding mutability requires `cast`" named an escape the
+  cast no longer has. Amended 2026-09-11: the last sentence is a signpost added after T-027 read
+  this decision to ask whether `char*` compares with `char mut*` and found no answer here.
 
 ### D5.5 Struct fields and return types
 - owner: `core-language.md` (Declarations and mutability), `type-system.md` (Mutability levels).
@@ -1693,8 +1718,10 @@ says ownership is "by convention", this section supersedes it.
   `new(void)` that is not
   legal, and D10.2 rejects that one. Standard-library functions that allocate
   return `own` (D13.5). `cast` may add `own` to a pointer or span, adopting memory that came from C
-  (`cast(p, u8 mut* own)` for a `void*` from an extern that does not say `own`, the same unsafe
-  escape as adding `mut`), and may drop it; the target type of a cast decides (D3.14). Span
+  (`cast(p, u8 mut* own)` for a `void mut*` from an extern that does not say `own`), and may drop
+  it; the target type of a cast decides (D3.14). Adoption is the one unsafe mark a cast adds, since
+  T-085 took `mut` off that list: the source of the example says `void mut*`, and a source that
+  says `void*` reaches no `mut` target at all. Span
   expressions (`buf[..]`, `buf[lo..hi]`) and `.ptr` always yield views, as do `&`, literals and the
   runtime's `args`.
 - history: Amended 2026-09-14 (T-135): `new` marked every position of `T` writable, so `new(node*,

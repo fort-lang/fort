@@ -136,7 +136,11 @@ struct node {
     /// the C's `nparams` everywhere.
     node* mut@ own params;
     string name;            // k_struct, k_enum: the spelling in diagnostics
-    void* decl;             // k_struct, k_enum: the declaring symbol, opaque
+    /// k_struct, k_enum: the declaring symbol, opaque. It is `void mut*`
+    /// because the checker resolves a declaration it reached through the type,
+    /// which writes the record, and a cast adds no `mut`.
+    /// D3.14
+    void mut* decl;
     layout mut* own layout; // k_struct, owned by the node; null otherwise
 }
 
@@ -448,7 +452,7 @@ fn node* type_fn(table mut* tt, node* ret, node*@ params, bool is_noreturn) {
 /// made, so no two nodes of one struct can split the types built from it. A null
 /// `decl` is anonymous and always makes a node.
 /// D3.12
-fn node* nominal(table mut* tt, type_kind kind, string name, void* decl) {
+fn node* nominal(table mut* tt, type_kind kind, string name, void mut* decl) {
     if (decl != null) {
         u64 mut i = 0;
         while (i < tt->count) {
@@ -476,11 +480,11 @@ fn node* nominal(table mut* tt, type_kind kind, string name, void* decl) {
 /// Nominal types: every call makes a new node with an unresolved layout. `name`
 /// is borrowed for the life of the table; `decl` is stored and otherwise
 /// opaque.
-fn node* type_struct(table mut* tt, string name, void* decl) {
+fn node* type_struct(table mut* tt, string name, void mut* decl) {
     return nominal(tt, type_kind.k_struct, name, decl);
 }
 
-fn node* type_enum(table mut* tt, string name, void* decl) {
+fn node* type_enum(table mut* tt, string name, void mut* decl) {
     return nominal(tt, type_kind.k_enum, name, decl);
 }
 
@@ -740,9 +744,10 @@ fn bool type_assignable(node* dst, node* src) {
 // D3.14
 
 /// Whether a type belongs to the string family: `string`, `char@` or `u8@` with
-/// any marks. These spellings, and only these, cast among themselves in every
-/// direction: the header is reinterpreted and `mut` and `own` may be added or
-/// dropped.
+/// any marks. These spellings, and only these, cast among themselves: the header
+/// is reinterpreted, `own` may be added or dropped, and `mut` may be dropped.
+/// Adding `mut` is refused here as everywhere, so `cast("abc", u8 mut@)` no
+/// longer aliases read-only bytes as writable ones.
 /// D3.14, D17.12
 fn bool string_family(node* t) {
     if (t->kind == type_kind.k_string) {
@@ -816,14 +821,74 @@ fn bool own_orphaned(node* dst, node* src, bool outer_own) {
 }
 
 /// The span row of the matrix: a span casts to a span of the same element type
-/// whose marks differ only in mutability, added or dropped at any level, the
-/// cast-away-const escape a pointer has, and whose `own` marks may be added or
-/// dropped at any reference. The element type must be the same: the marks inside a
-/// function type are part of its identity, so `fn void(node mut*)@` does not cast
-/// to `fn void(node*)@`.
+/// whose marks differ only in mutability, dropped at any level, and whose `own`
+/// marks may be added or dropped at any reference. The element type must be the
+/// same: the marks inside a function type are part of its identity, so
+/// `fn void(node mut*)@` does not cast to `fn void(node*)@`. The drop alone is
+/// this row's work, because `type_cast_adds_mut` already refused every span
+/// whose marks add one.
 /// D3.10, D3.14
 fn bool span_cast_allowed(node* dst, node* src) {
     return type_same_shape(dst, src) && !own_orphaned(dst, src, false);
+}
+
+/// Whether `t` marks any level `mut`, at this position or below it. A fixed
+/// array shares the storage of its elements and adds no level of its own.
+/// D3.14, D5.2
+fn bool marks_mut(node* t) {
+    if (t->kind == type_kind.k_array) {
+        return marks_mut(t->elem);
+    }
+    if (!type_is_reference(t)) {
+        return false;
+    }
+    if (t->is_mut) {
+        return true;
+    }
+    if (t->elem == null) {
+        // `string`: no level behind it, and none of its own
+        return false;
+    }
+    return marks_mut(t->elem);
+}
+
+/// Whether a cast from `src` to `dst` would mark a level `mut` that `src` leaves
+/// immutable. A cast never adds `mut`, from any source: `dst` may mark a level
+/// `mut` only where `src` marks the level at the same depth `mut` too. Where
+/// `src` has no such level -- an integer, the `void` behind a `void*`, a
+/// `string`, or a pointee type the cast reinterprets -- `dst` may mark no level
+/// below that point, because `src` promises nothing about that storage.
+/// D3.14
+fn bool type_cast_adds_mut(node* dst, node* src) {
+    if (dst->kind == type_kind.k_array) {
+        // D5.2: the array adds no level, so the two chains stay in step
+        if (src->kind == type_kind.k_array) {
+            return type_cast_adds_mut(dst->elem, src->elem);
+        }
+        return marks_mut(dst);
+    }
+    if (!type_is_reference(dst)) {
+        // No level of the target stands here, so nothing can be added to it.
+        return false;
+    }
+    if (!type_is_reference(src)) {
+        // The source has no level at this depth: an integer, a `void`, a
+        // struct or a function pointer promises nothing about this storage.
+        return marks_mut(dst);
+    }
+    if (dst->is_mut && !src->is_mut) {
+        return true;
+    }
+    if (dst->elem == null) {
+        // The target is a `string`: no level behind it.
+        return false;
+    }
+    if (src->elem == null) {
+        // The source is a `string`, whose bytes are immutable and behind which
+        // no level stands.
+        return marks_mut(dst->elem);
+    }
+    return type_cast_adds_mut(dst->elem, src->elem);
 }
 
 /// The cast matrix (type-system.md 9.2) on types alone: the rvalue, lvalue and
@@ -847,6 +912,13 @@ fn bool type_cast_allowed(node* dst, node* src) {
     // D3.14
     if (type_assignable(dst, src)) {
         return true;
+    }
+    // One rule over every row below: a cast never adds `mut`, from any source.
+    // `void*`, `u64` and `string` are sources like the rest, so
+    // `cast(cast(p, void*), u8 mut*)` fails here at the second cast.
+    // D3.14
+    if (type_cast_adds_mut(dst, src)) {
+        return false;
     }
     if (type_is_scalar(src) && type_is_scalar(dst)) {
         return scalar_cast_allowed(dst, src);

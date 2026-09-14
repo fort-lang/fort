@@ -221,15 +221,15 @@ struct checker {
     strmap.str_map extern_first;
     ast.sym mut* mut@ own externs;
     u64 externs_len;
-    ast.sym*[scope.UNIVERSE_COUNT] builtins; // D12.2: the universe functions
+    ast.sym mut*[scope.UNIVERSE_COUNT] builtins; // D12.2: the universe functions
     bool mute; // D20.2: annotate without reporting, for an editor mode
     bool require_main; // D8.6: the entry module defines main; off for a check-only run
     u64 errors;        // checker diagnostics, muted ones included
 
     // ---- the module and the function being checked ----
     modules.module* module;
-    ast.sym* module_sym;
-    ast.sym* fn_sym; // the function whose body is being checked
+    ast.sym mut* module_sym;
+    ast.sym mut* fn_sym; // the function whose body is being checked
     /// D3.10: an `extern fn` name is a callee and nowhere a value
     ast.node* callee;
     /// Whether the operand of a `&` is being checked, which asks for an address and
@@ -503,7 +503,7 @@ fn diag.loc file_start(string file) {
 
 /// A new symbol, owned by the checker and recorded for the index walk.
 fn ast.sym mut* check_sym_new(checker mut* ck, ast.sym_kind kind, string name, ast.node mut* n,
-                              ast.sym* owner) {
+                              ast.sym mut* owner) {
     ast.sym mut* own s = new(ast.sym);
     s->kind = kind;
     s->name = name;
@@ -537,9 +537,12 @@ fn void sym_fail(checker mut* ck, ast.sym mut* s) {
 }
 
 /// The declaration a binding denotes: an import binding stands for the module
-/// or for the declaration it names, which is what its own name denotes.
-/// D9.3
-fn ast.sym* sym_of_binding(scope.binding* b) {
+/// or for the declaration it names, which is what its own name denotes. The
+/// record is mutable, because the resolution writes the type and the flags of
+/// the declaration it looked up. A binding holds an immutable view of the node,
+/// and `ast.node.sym` carries the `mut` through it, so no cast adds one.
+/// D3.14, D5.9, D9.3
+fn ast.sym mut* sym_of_binding(scope.binding* b) {
     if (b == null) {
         return null;
     }
@@ -560,13 +563,6 @@ fn ast.sym* sym_of_binding(scope.binding* b) {
         return b->node->sym;
     }
     return null;
-}
-
-/// The same, where the caller goes on to write through the record: `sym` is an
-/// immutable view on the node, and the resolution writes the symbol it reads
-/// there, exactly as the C casts its `const sym_t*` away.
-fn ast.sym mut* sym_mut(ast.sym* s) {
-    return cast(s, ast.sym mut*);
 }
 
 // ---- names -------------------------------------------------------------------------
@@ -591,7 +587,7 @@ fn scope.binding* lookup(checker* ck, string name) {
 /// The builtin of `name`, or null: the universe is searched after every scope,
 /// so a declaration of the same name shadows it.
 /// D7.9, D12.2
-fn ast.sym* check_builtin(checker* ck, string name) {
+fn ast.sym mut* check_builtin(checker* ck, string name) {
     u64 mut i = 0;
     while (i < scope.UNIVERSE_COUNT) {
         if (ck->builtins[i]->name == name) {
@@ -749,7 +745,7 @@ fn types.node* named_type(checker mut* ck, ast.node mut* n, bool stores_base) {
         }
         return types.type_error(&ck->types);
     }
-    ast.sym* mut s = sym_of_binding(b);
+    ast.sym mut* mut s = sym_of_binding(b);
     n->sym = s;
     ast.node mut* tail = n->a;
     if (tail != null) {
@@ -812,7 +808,7 @@ fn types.node* named_type(checker mut* ck, ast.node mut* n, bool stores_base) {
     // D3.8, D7.10
     bool identity_only = s->kind == ast.sym_kind.s_struct && !stores_base && s->ty != null;
     if (!identity_only) {
-        resolve_sym(ck, sym_mut(s));
+        resolve_sym(ck, s);
     }
     return s->ty;
 }
@@ -920,8 +916,10 @@ fn types.node* base_type(checker mut* ck, ast.node mut* n, bool allow_noreturn, 
 
 /// The `i`-th child of a node's list, mutable: the checker writes annotations
 /// on every child it reaches, where ast.ast_child hands out an immutable view.
+/// The vector holds the slot mutable, so this adds nothing a cast would have to.
+/// D3.14, D5.9
 fn ast.node mut* ast_child_mut(ast.node* n, u64 i) {
-    return cast(ast.ast_child(n, i), ast.node mut*);
+    return ast.ast_child_mut(n, i);
 }
 
 /// Whether the base of a written type ends up in the storage the type describes.
@@ -2327,8 +2325,8 @@ fn ast.node* struct_field(ast.sym* s, string name) {
 /// known: a constant carries its folded value, a variable is an lvalue with its
 /// level-0 mutability.
 /// D4.6, D5.7
-fn void value_of_sym(checker mut* ck, ast.node* n, ast.sym* s, expr mut* out) {
-    resolve_sym(ck, sym_mut(s));
+fn void value_of_sym(checker mut* ck, ast.node* n, ast.sym mut* s, expr mut* out) {
+    resolve_sym(ck, s);
     out->sym = s;
     if (s->ty != null) {
         out->ty = s->ty;
@@ -2391,7 +2389,7 @@ fn void value_of_sym(checker mut* ck, ast.node* n, ast.sym* s, expr mut* out) {
 fn void check_ident(checker mut* ck, ast.node mut* n, expr mut* out) {
     scope.binding* b = lookup(ck, n->name);
     if (b == null) {
-        ast.sym* builtin = check_builtin(ck, n->name);
+        ast.sym mut* builtin = check_builtin(ck, n->name);
         if (builtin != null) {
             // D12.2
             n->sym = builtin;
@@ -2404,7 +2402,7 @@ fn void check_ident(checker mut* ck, ast.node mut* n, expr mut* out) {
         error_unknown_name(ck, n->name, n->name_loc);
         return;
     }
-    ast.sym* s = sym_of_binding(b);
+    ast.sym mut* s = sym_of_binding(b);
     n->sym = s;
     if (s == null) {
         return;
@@ -2437,7 +2435,7 @@ fn scope.binding* names_module_or_type(checker mut* ck, ast.node mut* n) {
         // D9.3: `m.other.f()` is an error even when `m` imports `other`
         b = module_declaration(module_of(names_module_or_type(ck, n->a)), n->name);
     }
-    ast.sym* s = sym_of_binding(b);
+    ast.sym mut* s = sym_of_binding(b);
     if (s == null
         || (s->kind != ast.sym_kind.s_module && s->kind != ast.sym_kind.s_struct
             && s->kind != ast.sym_kind.s_enum)) {
@@ -2487,7 +2485,7 @@ fn bool pseudo_field(checker mut* ck, ast.node mut* n, types.node* t, expr mut* 
 fn void check_field(checker mut* ck, ast.node mut* n, expr mut* out, bool arrow) {
     if (!arrow) {
         scope.binding* qb = names_module_or_type(ck, n->a);
-        ast.sym* q = sym_of_binding(qb);
+        ast.sym mut* q = sym_of_binding(qb);
         modules.module* qm = module_of(qb);
         if (qm != null) {
             scope.binding* b = module_declaration(qm, n->name);
@@ -2500,7 +2498,7 @@ fn void check_field(checker mut* ck, ast.node mut* n, expr mut* out, bool arrow)
                 check_msg_end(ck, n->name_loc);
                 return;
             }
-            ast.sym* s = sym_of_binding(b);
+            ast.sym mut* s = sym_of_binding(b);
             n->sym = s;
             if (s != null) {
                 value_of_sym(ck, n, s, out);
@@ -2509,7 +2507,7 @@ fn void check_field(checker mut* ck, ast.node mut* n, expr mut* out, bool arrow)
         }
         if (q != null && q->kind == ast.sym_kind.s_enum) {
             // D3.9
-            resolve_sym(ck, sym_mut(q));
+            resolve_sym(ck, q);
             ast.node* m = enum_member(q, n->name);
             if (m == null) {
                 check_msg_begin(ck);
@@ -2937,6 +2935,12 @@ fn void check_cast(checker mut* ck, ast.node mut* n, expr mut* out) {
         check_msg_type(ck, a.ty);
         msg_str(ck, " to ");
         check_msg_type(ck, target.ty);
+        if (types.type_cast_adds_mut(target.ty, a.ty)) {
+            // The one row a reader is likeliest to expect: name it, because
+            // every other spelling of these two types casts.
+            // D3.14
+            msg_str(ck, ": a cast never adds 'mut'");
+        }
         check_msg_end(ck, n->loc);
         return;
     }
@@ -3219,7 +3223,7 @@ fn void check_builtin_call(checker mut* ck, ast.node mut* n, ast.sym* s, expr mu
 fn void check_call(checker mut* ck, ast.node mut* n, expr mut* out) {
     ast.node mut* callee = n->a;
     if (callee->kind == ast.ast_kind.k_ident && lookup(ck, callee->name) == null) {
-        ast.sym* b = check_builtin(ck, callee->name);
+        ast.sym mut* b = check_builtin(ck, callee->name);
         if (b != null) {
             // D7.9, D12.2
             callee->sym = b;
@@ -3746,12 +3750,12 @@ fn void resolve_sym(checker mut* ck, ast.sym mut* s) {
         msg_quote(ck, s->name);
         msg_str(ck, " is defined in terms of itself");
         check_msg_end(ck, s->decl);
-        ast.node mut* cyclic = cast(s->node, ast.node mut*);
+        ast.node mut* cyclic = s->node;
         cyclic->ann |= ANN_RESOLVED;
         sym_fail(ck, s);
         return;
     }
-    ast.node mut* n = cast(s->node, ast.node mut*);
+    ast.node mut* n = s->node;
     n->ann |= ANN_RESOLVING;
     switch (s->kind) {
     case ast.sym_kind.s_struct:
@@ -3773,7 +3777,7 @@ fn void resolve_sym(checker mut* ck, ast.sym mut* s) {
 }
 
 fn void resolve_struct(checker mut* ck, ast.sym mut* s) {
-    ast.node mut* decl = cast(s->node, ast.node mut*);
+    ast.node mut* decl = s->node;
     // D3.8: a field that fails poisons the type; still close the layout
     types.node* record = s->ty;
     if (!types.type_layout_begin(record)) {
@@ -3848,7 +3852,7 @@ fn void resolve_struct(checker mut* ck, ast.sym mut* s) {
 }
 
 fn void resolve_enum(checker mut* ck, ast.sym mut* s) {
-    ast.node mut* decl = cast(s->node, ast.node mut*);
+    ast.node mut* decl = s->node;
     prim.prim_kind underlying = enum_underlying();
     consts.cval mut next = consts.cv_from_i64(0);
     bool mut ok = true;
@@ -4156,7 +4160,7 @@ fn bool check_extern_agreement(checker mut* ck, ast.node* decl, ast.sym mut* s) 
     }
     u64 slot = cast(at, u64);
     ast.sym* first = ck->externs[slot];
-    if (first->node == decl) {
+    if (cast(first->node, ast.node*) == decl) {
         // The same declaration, checked a second time through one checker: its symbol
         // and the nominal types it names are new records of the old tree, so the entry is
         // replaced rather than compared against itself. Replacing assumes this second
@@ -4201,7 +4205,7 @@ fn bool check_extern_agreement(checker mut* ck, ast.node* decl, ast.sym mut* s) 
 }
 
 fn void resolve_fn(checker mut* ck, ast.sym mut* s) {
-    ast.node mut* decl = cast(s->node, ast.node mut*);
+    ast.node mut* decl = s->node;
     bool is_extern = s->kind == ast.sym_kind.s_extern_fn;
     if (is_extern && is_reserved_c_name(s->name)) {
         // D9.7, D11.6: the compiler emits these two definitions
@@ -4283,7 +4287,7 @@ fn void resolve_fn(checker mut* ck, ast.sym mut* s) {
 }
 
 fn void resolve_var(checker mut* ck, ast.sym mut* s) {
-    ast.node mut* decl = cast(s->node, ast.node mut*);
+    ast.node mut* decl = s->node;
     written_type t = check_type(ck, decl->a, type_pos.pos_binding);
     s->ty = t.ty;
     s->mut0 = t.mut0;
@@ -4355,8 +4359,8 @@ fn bool decl_sym_kind(ast.node* decl, ast.sym_kind mut* out) {
 /// of the path. The segments before it name search directories rather than
 /// modules, so they carry nothing.
 /// D9.3
-fn void annotate_path(ast.node* imp, ast.sym* last, ast.sym* module) {
-    ast.node mut* path = cast(imp->a, ast.node mut*);
+fn void annotate_path(ast.node* imp, ast.sym mut* last, ast.sym mut* module) {
+    ast.node mut* path = imp->a;
     if (path == null || ast.ast_len(path) == 0) {
         return;
     }
@@ -4369,7 +4373,7 @@ fn void annotate_path(ast.node* imp, ast.sym* last, ast.sym* module) {
 }
 
 /// The module a symbol was declared in, which is its owner (ast.sym).
-fn ast.sym* owning_module(ast.sym* s) {
+fn ast.sym mut* owning_module(ast.sym* s) {
     if (s != null && s->owner != null && s->owner->kind == ast.sym_kind.s_module) {
         return s->owner;
     }
@@ -4377,8 +4381,8 @@ fn ast.sym* owning_module(ast.sym* s) {
 }
 
 fn void annotate_import(scope.binding* b) {
-    ast.node mut* n = cast(b->node, ast.node mut*);
-    ast.sym* s = sym_of_binding(b);
+    ast.node mut* n = b->node;
+    ast.sym mut* s = sym_of_binding(b);
     if (n == null) {
         return;
     }
@@ -4407,7 +4411,7 @@ fn void annotate_item_path(ast.node* imp) {
     u64 mut i = 0;
     while (i < ast.ast_len(imp)) {
         ast.node* item = ast.ast_child(imp, i);
-        ast.sym* module = owning_module(item->sym);
+        ast.sym mut* module = owning_module(item->sym);
         if (module != null) {
             annotate_path(imp, module, module);
             return;
@@ -4510,9 +4514,9 @@ fn void collect_module(checker mut* ck, modules.module* m) {
         decl->sym = s;
         if (kind == ast.sym_kind.s_struct) {
             // D3.8: the type exists before the fields are read
-            s->ty = types.type_struct(&ck->types, decl->name, cast(s, void*));
+            s->ty = types.type_struct(&ck->types, decl->name, cast(s, void mut*));
         } else if (kind == ast.sym_kind.s_enum) {
-            s->ty = types.type_enum(&ck->types, decl->name, cast(s, void*));
+            s->ty = types.type_enum(&ck->types, decl->name, cast(s, void mut*));
         }
     }
     u64 mut k = 0;
@@ -4537,7 +4541,7 @@ fn void collect_module(checker mut* ck, modules.module* m) {
 /// D8.6
 fn void check_main(checker mut* ck, modules.module* m) {
     scope.binding* b = scope.find(&m->names, "main");
-    ast.sym* s = sym_of_binding(b);
+    ast.sym mut* s = sym_of_binding(b);
     bool mut ok = s != null && s->kind == ast.sym_kind.s_fn && !check_poisoned(s->ty)
         && s->ty->kind == types.type_kind.k_fn && !s->ty->is_noreturn
         && types.type_equal(s->ty->elem, types.type_prim(&ck->types, prim.prim_kind.prim_i32));
@@ -4585,7 +4589,7 @@ fn void check_module_decls(checker mut* ck, modules.module* m) {
         i += 1;
         ast.sym_kind mut kind = ast.sym_kind.s_const;
         if (decl_sym_kind(decl, &kind)) {
-            resolve_sym(ck, sym_mut(decl->sym));
+            resolve_sym(ck, decl->sym);
         }
     }
 }

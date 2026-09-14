@@ -208,6 +208,16 @@ bool type_assignable(const type_t* dst, const type_t* src);
 /// D3.14, D17.5, D17.8
 bool type_cast_allowed(const type_t* dst, const type_t* src);
 
+/// Whether a cast from `src` to `dst` would mark a level `mut` that `src` leaves
+/// immutable. A cast never adds `mut`, from any source: `dst` may mark a level
+/// `mut` only where `src` marks the level at the same depth `mut` too. Where
+/// `src` has no such level -- an integer, the `void` behind a `void*`, a
+/// `string`, or a pointee type the cast reinterprets -- `dst` may mark no level
+/// below that point. `type_cast_allowed` refuses every cast this accepts; the
+/// checker asks it again to name the reason in the diagnostic.
+/// D3.14
+bool type_cast_adds_mut(const type_t* dst, const type_t* src);
+
 // ---- sizes and layout ------------------------------------------------------------
 
 /// Whether the size of `t` fits the largest object the compiler admits, 2^63 - 1

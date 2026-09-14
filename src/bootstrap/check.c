@@ -2255,6 +2255,12 @@ static void check_cast(check_t* ck, ast_node_t* n, expr_t* out) {
         check_msg_type(ck, a.type);
         msg_str(&ck->msg, " to ");
         check_msg_type(ck, target.type);
+        if (type_cast_adds_mut(target.type, a.type)) {
+            // The one row a reader is likeliest to expect: name it, because
+            // every other spelling of these two types casts.
+            // D3.14
+            msg_str(&ck->msg, ": a cast never adds 'mut'");
+        }
         check_msg_end(ck, n->loc);
         return;
     }

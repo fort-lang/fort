@@ -195,17 +195,32 @@ fn modules.module* module_at(env* e, string path) {
     return modules.find(&e->m.set, path);
 }
 
+/// The same module as the set owns it. `modules.find` hands out an immutable
+/// view on purpose, and no cast turns one back into a mutable reference, so a
+/// test that writes through a module reads the owning slot instead.
+/// D3.14
+fn modules.module mut* module_mut(env mut* e, string path) {
+    u64 mut i = 0;
+    while (i < e->m.set.modules.len) {
+        if (e->m.set.modules.items[i]->path == path) {
+            return e->m.set.modules.items[i];
+        }
+        i += 1;
+    }
+    return null;
+}
+
 /// The syntax tree of the module at `path`, or null.
 fn ast.node mut* module_ast(env* e, string path) {
     modules.module* m = module_at(e, path);
     if (m == null) {
         return null;
     }
-    return cast(m->ast, ast.node mut*);
+    return m->ast;
 }
 
 /// The symbol of a top-level declaration of the module at `path`.
-fn ast.sym* sym_of(env* e, string path, string name) {
+fn ast.sym mut* sym_of(env* e, string path, string name) {
     scope.binding* b = modules_env.bound(&e->m, path, name);
     if (b == null || b->node == null) {
         return null;
@@ -214,7 +229,7 @@ fn ast.sym* sym_of(env* e, string path, string name) {
 }
 
 /// The symbol of a top-level declaration of the entry module `main`.
-fn ast.sym* sym_main(env* e, string name) {
+fn ast.sym mut* sym_main(env* e, string name) {
     return sym_of(e, "main", name);
 }
 
@@ -245,7 +260,7 @@ fn ast.node mut* node_find(ast.node mut* n, ast.ast_kind kind, string name) {
     }
     u64 mut i = 0;
     while (i < ast.ast_len(n)) {
-        hit = node_find(cast(ast.ast_child(n, i), ast.node mut*), kind, name);
+        hit = node_find(ast.ast_child_mut(n, i), kind, name);
         if (hit != null) {
             return hit;
         }
@@ -489,7 +504,7 @@ fn ast.node mut* body_expr(env* e, string fn_name, u64 i) {
     if (f == null || f->b == null || i >= ast.ast_len(f->b)) {
         panic("check_env.body_expr: no such statement");
     }
-    ast.node mut* s = cast(ast.ast_child(f->b, i), ast.node mut*);
+    ast.node mut* s = ast.ast_child_mut(f->b, i);
     if (s->kind == ast.ast_kind.k_call_stmt) {
         return s->a;
     }
@@ -517,7 +532,7 @@ fn void open_params(env mut* e, scope.scope mut* params, string fn_name) {
     scope.init(params, scope.scope_kind.s_block, null);
     u64 mut i = 0;
     while (i < ast.ast_len(f)) {
-        ast.node mut* p = cast(ast.ast_child(f, i), ast.node mut*);
+        ast.node mut* p = ast.ast_child_mut(f, i);
         if (p->kind == ast.ast_kind.k_param && p->sym != null) {
             scope.declare(params, p->name, scope.bind_kind.b_param, p->name_loc, p);
         }
