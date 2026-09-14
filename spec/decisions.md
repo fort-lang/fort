@@ -307,7 +307,7 @@ Sections:
   added writability to a span's elements, narrower than the rule); any cast that only drops
   mutability or ownership, at any level (**not** a no-op: D5.4 and D17.4 cover the drop at a level
   `k` only when every level between 1 and `k - 1` is immutable in the target, and the cast alone
-  reaches the rest. `void mut* mut@` converts to `void*@` and to `void mut* mut@`, and a cast alone
+  reaches the rest. `void mut* mut@` converts to `void*@` and to `void mut*@`, and a cast alone
   takes it to `void* mut@`); adding `own` to a pointer or span (adoption, D17.3); identity. The
   result of a cast is `own` exactly when its target type says `own`: an `own` source cast to a
   non-`own` target lends

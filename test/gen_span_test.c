@@ -106,8 +106,8 @@ TEST(an_element_of_a_span_of_pointers_is_a_pointer_slot, {
                           "fn i32 main() {\n    u64 n = 2;\n"
                           "    node mut* mut@ own s = new(node mut*, n);\n    u64 i = 0;\n"
                           "    println(s[i] == null);\n    del(s);\n    return 0;\n}\n"));
-    // `new(node* own, n)`-shaped spans hold pointer slots, so the element
-    // stride is a pointer.
+    // A span of pointer slots holds one pointer per element, whatever the
+    // element type marks, so the stride is a pointer.
     // D17.3
     TEST_ASSERT_EQ_STR(found("call ptr @\"std.rt.alloc\"(i64 8, i64 %t0, "),
                        "call ptr @\"std.rt.alloc\"(i64 8, i64 %t0, ");

@@ -305,6 +305,12 @@ TEST(new_takes_a_mut_below_the_outermost_position, {
                        "(new (type (name node) mut (ptr mut) (ptr)) nil)");
     TEST_ASSERT_EQ_STR(dump_expr("new(node* own mut*)"),
                        "(new (type (name node) (ptr own mut) (ptr)) nil)");
+    // The own-then-mut order in the outermost position is still the outermost
+    // position, and it is the spelling a group-B site migrates away from.
+    // D17.2
+    TEST_ASSERT_EQ_STR(expr_fails("new(node* own mut, n)"),
+                       "t.ft:1:23: error: new allocates writable storage: "
+                       "remove the outermost 'mut'\n");
     TEST_ASSERT_EQ_STR(dump_expr("new(node mut*[2])"),
                        "(new (type (name node) mut (ptr) (array (int 2))) nil)");
     // An `own` precedes the `mut` of its position, and each marker appears

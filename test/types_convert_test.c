@@ -174,6 +174,7 @@ TEST(the_d5_4_conversions_and_their_shape, {
     TEST_ASSERT_TRUE(assignable(&e, "void**", "void mut* mut*"));
     TEST_ASSERT_FALSE(assignable(&e, "void* mut*", "void mut* mut*"));
     TEST_ASSERT_TRUE(assignable(&e, "void*@", "void mut* mut@"));
+    TEST_ASSERT_TRUE(assignable(&e, "void mut*@", "void mut* mut@"));
     TEST_ASSERT_FALSE(assignable(&e, "void* mut@", "void mut* mut@"));
     tenv_free(&e);
 })

@@ -257,10 +257,15 @@ Notes:
 - `new(T)` allocates one `T` and `new(T, n)` allocates `n` of them as a span; the brackets in
   an `alloc_type` are fixed-array dimensions of `T` (`new(i32[4], n)` yields `i32[4] mut@ own`).
   An `own` parses only after a `*` of the element type (`new(node* own, n)`, D17.3). The last
-  `mut` position of an `alloc_type` is empty, whatever the production allows: it is the outermost
-  position of `T`, which `new` fills with the storage it allocates, so `new(node* mut)` and
-  `new(i32 mut)` do not parse while `new(node mut*, n)` does. The result is owned and writable in
-  that one position, and it is the written type below it (D5.8, D10.2, D17.3).
+  `mut` position the production allows is always empty, for one of two reasons. With no dimension
+  group it is the outermost position of `T`, which `new` fills with the storage it allocates, so
+  `new(node* mut)` and `new(i32 mut)` do not parse. With a dimension group it is the position a
+  `[N]` follows, which D5.3 refuses because the elements share the array's storage, so
+  `new(node* mut[2])` and `new(i32 mut[4])` do not parse; the outermost position of `T` is then
+  after the last `[N]`, and the dimensions carry no marker either, so `new(i32[4] mut)` does not
+  parse for the first reason. Every `mut` position below the last one does parse:
+  `new(node mut*, n)` and `new(node mut*[2])`. The result is owned and writable in the outermost
+  position of `T`, and it is the written type below it (D5.8, D10.2, D17.3).
 - An `array_literal` type has only fixed dimensions and no trailing reference suffix:
   `i32[3]@{...}` and `i32[3]*{...}` do not parse.
 
