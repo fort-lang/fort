@@ -755,16 +755,23 @@ static ast_node_t* parse_array_type(parser_t* p) {
     return finish(p, t);
 }
 
-// Inside `new(...)` a `mut` never parses, an `own` follows only a `*` of the
-// element type and a span is asked for with a count, not with an `@`.
-// D10.2, D17.3
-static bool check_alloc_marker(parser_t* p) {
+// The two diagnostics of an allocated type, which two sites each report.
+static const char ALLOC_MUT_ERROR[] = "new allocates writable storage: remove the outermost 'mut'";
+static const char ALLOC_OWN_ERROR[] = "inside new an own follows a '*' of the element type";
+
+// The outermost position of an allocated type is the one `new` fills, because
+// it is the storage `new` allocates: `new` marks it writable and owns it, so
+// neither marker of the program's parses there. An `own` marks a reference, so
+// inside `new(...)` it follows a `*` alone, and a span is asked for with a
+// count and not with an `@`.
+// D5.8, D10.2, D17.3
+static bool check_alloc_end(parser_t* p) {
     if (at(p, TOK_KW_MUT)) {
-        error_here(p, "a mut does not parse inside new: new allocates writable storage");
+        error_here(p, ALLOC_MUT_ERROR);
         return false;
     }
     if (at(p, TOK_KW_OWN)) {
-        error_here(p, "inside new an own follows a '*' of the element type");
+        error_here(p, ALLOC_OWN_ERROR);
         return false;
     }
     if (at(p, TOK_AT)) {
@@ -774,8 +781,21 @@ static bool check_alloc_marker(parser_t* p) {
     return true;
 }
 
-// alloc_type = base_type { "*" [ "own" ] } { "[" const_expr "]" }
-// (grammar.md 6).
+// A `mut` inside `new(...)` marks storage `new` does not allocate, which is
+// every position of the element type but the outermost one, so a `*` must
+// stand outside the `mut` that was just read.
+// D5.8, D10.2
+static bool check_alloc_mut(parser_t* p, const markers_t* m) {
+    if ((m->flags & AST_FLAG_MUT) != 0 && !at(p, TOK_STAR)) {
+        error_at(p, m->mut_loc, ALLOC_MUT_ERROR);
+        return false;
+    }
+    return true;
+}
+
+// alloc_type = base_type [ "mut" ] { "*" [ "own" ] [ "mut" ] }
+// { "[" const_expr "]" } (grammar.md 6), whose last `mut` position is empty.
+// D5.8, D10.2
 static ast_node_t* parse_alloc_type(parser_t* p) {
     if (!check_no_leading_marker(p)) {
         return NULL;
@@ -789,23 +809,29 @@ static ast_node_t* parse_alloc_type(parser_t* p) {
     if (base != NULL) {
         t = node_at(p, AST_TYPE, loc);
         t->a = base;
-        while (t != NULL && check_alloc_marker(p) && at(p, TOK_STAR)) {
+        markers_t m;
+        if (!parse_markers(p, &m, ALLOC_OWN_ERROR) || !check_mut_before_array(p, &m) ||
+            !check_alloc_mut(p, &m)) {
+            t = NULL;
+        } else {
+            t->flags = m.flags;
+        }
+        while (t != NULL && at(p, TOK_STAR)) {
             ast_node_t* s = node_at(p, AST_TYPE_SUFFIX, here(p));
             s->op = (int32_t)SUFFIX_PTR;
             bump(p);
-            if (at(p, TOK_KW_OWN)) {
-                s->flags = AST_FLAG_OWN;
-                bump(p);
+            if (!parse_markers(p, &m, NULL)) {
+                t = NULL;
+                break;
             }
+            s->flags = m.flags;
             (void)finish(p, s);
-            if (!push_suffix(p, t, s)) {
+            if (!check_mut_before_array(p, &m) || !check_alloc_mut(p, &m) ||
+                !push_suffix(p, t, s)) {
                 t = NULL;
             }
         }
-        if (p->failed) {
-            t = NULL;
-        }
-        if (t != NULL && (!parse_array_suffixes(p, t, false) || !check_alloc_marker(p) ||
+        if (t != NULL && (!parse_array_suffixes(p, t, false) || !check_alloc_end(p) ||
                           !check_one_aggregate_level(p, t))) {
             t = NULL;
         }

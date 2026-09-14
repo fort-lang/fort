@@ -267,8 +267,9 @@ fn void noreturn_parses_as_a_return_type_and_nowhere_else() {
 fn void an_allocated_type_takes_pointers_and_dimensions_only() {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
-    // alloc_type = base_type { "*" [ "own" ] } { "[" const_expr "]" }
-    // (grammar.md 6): no `mut`, no `@`, and an `own` only after a `*`.
+    // alloc_type = base_type [ "mut" ] { "*" [ "own" ] [ "mut" ] }
+    // { "[" const_expr "]" } (grammar.md 6): no `@`, an `own` only after a
+    // `*`, and no `mut` in the outermost position.
     assert(parse_env.expr_dump(&e, "new(node)") == "(new (type (name node)) nil)");
     assert(parse_env.expr_dump(&e, "new(node*)") == "(new (type (name node) (ptr)) nil)");
     assert(parse_env.expr_dump(&e, "new(node* own)")
@@ -285,10 +286,52 @@ fn void an_allocated_type_takes_pointers_and_dimensions_only() {
     assert(parse_env.expr_dump(&e, "new(i32[2][3], n)") == rank2);
     assert(parse_env.expr_dump(&e, "new(node*[2][3])")
            == "(new (type (name node) (ptr) (array (int 2)) (array (int 3))) nil)");
-    // A `mut` anywhere inside it does not parse, wherever it stands.
+    // A `mut` in the outermost position does not parse, whether a `*` or a
+    // dimension stands before it: that position is the storage `new`
+    // allocates and `new` marks it.
+    // D5.8, D10.2
     parse_env.parse(&e, "fn void f() {\n    g(new(node* mut));\n}\n");
     assert(parse_env.errors(&e) == 1);
     parse_env.parse(&e, "fn void f() {\n    g(new(node mut));\n}\n");
+    assert(parse_env.errors(&e) == 1);
+    parse_env.parse(&e, "fn void f() {\n    g(new(i32[4] mut));\n}\n");
+    assert(parse_env.errors(&e) == 1);
+}
+
+// A `mut` below the outermost position marks storage `new` does not
+// allocate: what the fresh pointer would reach, which is null until the
+// program stores something there. So it parses, and the element type of the
+// result is the element type written.
+// D5.8, D10.2
+fn void an_allocated_type_takes_a_mut_below_its_outermost_position() {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    assert(parse_env.expr_dump(&e, "new(node mut*)")
+           == "(new (type (name node) mut (ptr)) nil)");
+    assert(parse_env.expr_dump(&e, "new(node mut*, n)")
+           == "(new (type (name node) mut (ptr)) (ident n))");
+    assert(parse_env.expr_dump(&e, "new(void mut*, n)")
+           == "(new (type (void) mut (ptr)) (ident n))");
+    assert(parse_env.expr_dump(&e, "new(node mut* own, n)")
+           == "(new (type (name node) mut (ptr own)) (ident n))");
+    assert(parse_env.expr_dump(&e, "new(node mut* mut*)")
+           == "(new (type (name node) mut (ptr mut) (ptr)) nil)");
+    assert(parse_env.expr_dump(&e, "new(node* own mut*)")
+           == "(new (type (name node) (ptr own mut) (ptr)) nil)");
+    string marked2 = parse_env.join2(&e, "(new (type (name node) mut (ptr) (array (int 2))",
+                                     " (array (int 3))) nil)");
+    assert(parse_env.expr_dump(&e, "new(node mut*[2][3])") == marked2);
+    // An `own` precedes the `mut` of its position, and each marker appears
+    // once in a position.
+    // D17.2
+    parse_env.parse(&e, "fn void f() {\n    g(new(node* mut own*));\n}\n");
+    assert(parse_env.errors(&e) == 1);
+    parse_env.parse(&e, "fn void f() {\n    g(new(node mut mut*));\n}\n");
+    assert(parse_env.errors(&e) == 1);
+    // The elements of a fixed array share its storage, so the position a `[N]`
+    // follows carries no `mut` here either.
+    // D5.3
+    parse_env.parse(&e, "fn void f() {\n    g(new(i32 mut[4]));\n}\n");
     assert(parse_env.errors(&e) == 1);
 }
 
@@ -336,6 +379,7 @@ fn i32 main() {
     a_second_aggregate_level_parses_everywhere();
     noreturn_parses_as_a_return_type_and_nowhere_else();
     an_allocated_type_takes_pointers_and_dimensions_only();
+    an_allocated_type_takes_a_mut_below_its_outermost_position();
     an_array_literal_type_carries_no_marker();
     a_function_type_nests_and_takes_suffixes();
     println("ok");

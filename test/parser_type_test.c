@@ -267,10 +267,10 @@ TEST(the_level_count_is_per_written_type, {
 // ---- inside new -----------------------------------------------------------
 // D10.2, D17.3
 
-TEST(new_refuses_a_mut_a_span_and_a_misplaced_own, {
+TEST(new_refuses_a_mut_in_the_outermost_position_a_span_and_a_misplaced_own, {
     TEST_ASSERT_EQ_STR(expr_fails("new(i32 mut)"),
-                       "t.ft:1:17: error: a mut does not parse inside new: "
-                       "new allocates writable storage\n");
+                       "t.ft:1:17: error: new allocates writable storage: "
+                       "remove the outermost 'mut'\n");
     TEST_ASSERT_EQ_STR(expr_fails("new(i32@)"),
                        "t.ft:1:16: error: a span suffix does not parse inside new: "
                        "write new(T, n)\n");
@@ -280,8 +280,41 @@ TEST(new_refuses_a_mut_a_span_and_a_misplaced_own, {
                        "t.ft:1:13: error: an own never precedes the base type: "
                        "write 'node* own p' or 'string own s'\n");
     TEST_ASSERT_EQ_STR(expr_fails("new(i32[4] mut)"),
-                       "t.ft:1:20: error: a mut does not parse inside new: "
-                       "new allocates writable storage\n");
+                       "t.ft:1:20: error: new allocates writable storage: "
+                       "remove the outermost 'mut'\n");
+    // The elements of a fixed array share its storage, so the position a `[N]`
+    // follows carries no `mut` here either, and that rule is what says so.
+    // D5.3
+    TEST_ASSERT_EQ_STR(expr_fails("new(i32 mut[4], n)"),
+                       "t.ft:1:17: error: the elements share the array's storage: "
+                       "write the mut after the length, as 'i32[4] mut'\n");
+})
+
+// A `mut` below the outermost position marks storage `new` does not allocate:
+// what the fresh pointer would reach, which is null until the program stores
+// something there. So it parses, and it is the program's to write.
+// D5.8, D10.2
+TEST(new_takes_a_mut_below_the_outermost_position, {
+    TEST_ASSERT_EQ_STR(dump_expr("new(node mut*)"), "(new (type (name node) mut (ptr)) nil)");
+    TEST_ASSERT_EQ_STR(dump_expr("new(node mut*, n)"),
+                       "(new (type (name node) mut (ptr)) (ident n))");
+    TEST_ASSERT_EQ_STR(dump_expr("new(void mut*, n)"), "(new (type (void) mut (ptr)) (ident n))");
+    TEST_ASSERT_EQ_STR(dump_expr("new(node mut* own, n)"),
+                       "(new (type (name node) mut (ptr own)) (ident n))");
+    TEST_ASSERT_EQ_STR(dump_expr("new(node mut* mut*)"),
+                       "(new (type (name node) mut (ptr mut) (ptr)) nil)");
+    TEST_ASSERT_EQ_STR(dump_expr("new(node* own mut*)"),
+                       "(new (type (name node) (ptr own mut) (ptr)) nil)");
+    TEST_ASSERT_EQ_STR(dump_expr("new(node mut*[2])"),
+                       "(new (type (name node) mut (ptr) (array (int 2))) nil)");
+    // An `own` precedes the `mut` of its position, and each marker appears
+    // once.
+    // D17.2
+    TEST_ASSERT_EQ_STR(expr_fails("new(node* mut own*)"),
+                       "t.ft:1:23: error: an own precedes the mut of its position: "
+                       "write 'node* own mut p'\n");
+    TEST_ASSERT_EQ_STR(expr_fails("new(node mut mut*)"),
+                       "t.ft:1:22: error: a mut appears once in a type position\n");
 })
 
 // ---- the marker matrix ----------------------------------------------------
@@ -395,8 +428,8 @@ TEST(an_array_literal_type_carries_no_marker, {
                        "t.ft:1:9: error: expected an expression, found 'i32'\n");
 })
 
-// The allocated type of `new` has no `@`, no `mut` and an `own` only after a
-// `*`, and its dimensions carry no marker either.
+// The allocated type of `new` has no `@`, no `mut` in its outermost position
+// and an `own` only after a `*`, and its dimensions carry no marker either.
 // D10.2, D17.3
 TEST(an_allocated_type_takes_pointers_and_dimensions, {
     TEST_ASSERT_EQ_STR(dump_expr("new(node**)"), "(new (type (name node) (ptr) (ptr)) nil)");
@@ -406,8 +439,8 @@ TEST(an_allocated_type_takes_pointers_and_dimensions, {
                        "(new (type (prim u8) (array (int 16))) (ident n))");
     TEST_ASSERT_EQ_STR(dump_expr("new(string)"), "(new (type (string)) nil)");
     TEST_ASSERT_EQ_STR(expr_fails("new(node* mut)"),
-                       "t.ft:1:19: error: a mut does not parse inside new: "
-                       "new allocates writable storage\n");
+                       "t.ft:1:19: error: new allocates writable storage: "
+                       "remove the outermost 'mut'\n");
     TEST_ASSERT_EQ_STR(expr_fails("new(node own*)"),
                        "t.ft:1:18: error: inside new an own follows a '*' of the element type\n");
 })
@@ -553,7 +586,8 @@ int main(int argc, char** argv) {
     TEST_RUN(a_second_array_or_span_level_is_not_supported);
     TEST_RUN(one_array_or_span_level_with_pointers_is_supported);
     TEST_RUN(the_level_count_is_per_written_type);
-    TEST_RUN(new_refuses_a_mut_a_span_and_a_misplaced_own);
+    TEST_RUN(new_refuses_a_mut_in_the_outermost_position_a_span_and_a_misplaced_own);
+    TEST_RUN(new_takes_a_mut_below_the_outermost_position);
     TEST_RUN(every_marker_set_on_a_reference_suffix);
     TEST_RUN(every_marker_set_on_a_base_type);
     TEST_RUN(long_reference_chains_keep_their_markers);
