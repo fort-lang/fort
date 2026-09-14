@@ -21,9 +21,14 @@ u64 U64_MAX = 18446744073709551615;
 /// a view and ptr_free never touches a pointee. Indexing items[i] between len
 /// and the capacity is not a runtime error; it reads a zero or stale slot, so
 /// code that wants a bounds check indexes items[..len].
-/// D17.2, D17.4
+///
+/// The slots hold `void mut*`, which is what new answers with, so a caller
+/// pushes a pointer to storage it may write and gets one back. A caller that
+/// only reads what it pops drops the mark on the way out; a caller holding an
+/// immutable pointer casts on the way in.
+/// D3.11, D5.4, D5.8, D17.2, D17.4
 struct ptr_vec {
-    void* mut@ own items;
+    void mut* mut@ own items;
     u64 len;
 }
 
@@ -80,7 +85,7 @@ fn void ptr_reserve(ptr_vec mut* v, u64 extra) {
     if (v->items.len <= U64_MAX / 2 && v->items.len * 2 > cap) {
         cap = v->items.len * 2;
     }
-    void* mut@ own bigger = new(void*, cap);
+    void mut* mut@ own bigger = new(void*, cap);
     u64 mut i = 0;
     while (i < v->len) {
         bigger[i] = v->items[i];
@@ -93,7 +98,7 @@ fn void ptr_reserve(ptr_vec mut* v, u64 extra) {
 /// Appends one pointer, growing as needed. The argument is borrowed: the vector
 /// never frees what it points at.
 /// D17.4
-fn void ptr_push(ptr_vec mut* v, void* p) {
+fn void ptr_push(ptr_vec mut* v, void mut* p) {
     ptr_reserve(v, 1);
     v->items[v->len] = p;
     v->len += 1;
@@ -102,7 +107,7 @@ fn void ptr_push(ptr_vec mut* v, void* p) {
 /// Removes and returns the last pointer; an empty vector is a violated
 /// precondition and panics. Ownership: a view of whatever the caller stored.
 /// D13.3, D17.3
-fn void* ptr_pop(ptr_vec mut* v) {
+fn void mut* ptr_pop(ptr_vec mut* v) {
     if (v->len == 0) {
         panic("vec.ptr_pop: empty");
     }

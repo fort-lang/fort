@@ -8,9 +8,11 @@
 import std.libc;
 import std.mem;
 
-// libc.malloc returns void* own and libc.free takes void* own: the qualifiers
-// are erased at the boundary and state C's convention (D17.13), so the pair is
-// interchangeable with new and del (D10.3, stdlib.md 2.2).
+// libc.malloc returns void mut* own, storage of no type the caller may write,
+// and libc.free takes void* own, which the result reaches by dropping the mut
+// (D3.11, D5.4). The own is erased at the boundary and states C's convention
+// (D17.13), so the pair is interchangeable with new and del (D10.3,
+// stdlib.md 2.2).
 fn i32 main() {
     // A block sized in bytes, typed by the cast, whose target says own so the
     // result adopts (D3.14). p[0..n] is a view of it (D6.9).
@@ -35,12 +37,13 @@ fn i32 main() {
     libc.free(cast(move(slot), void* own));
     println(slot == null);
 
-    // memcpy returns its dst, a view, so the result stays void* and is
-    // discarded (stdlib.md 2.2).
+    // memcpy counts bytes, so it takes u8 mut* and u8* and a span's .ptr
+    // crosses with no cast. It returns its dst, a view, which is discarded
+    // (stdlib.md 2.2).
     u8[8] mut src = {};
     u8[8] mut dst = {};
     mem.copy(src[..], cast("abcdefgh", u8@));
-    libc.memcpy(cast(dst[..].ptr, void*), cast(src[..].ptr, void*), 8);
+    libc.memcpy(dst[..].ptr, src[..].ptr, 8);
     if (!mem.equal(dst[..], src[..])) {
         return 1;
     }

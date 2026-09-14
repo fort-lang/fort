@@ -153,10 +153,14 @@ const type_t* type_string(type_table_t* tt, bool own) {
     return intern(tt, &key);
 }
 
-const type_t* type_voidptr(type_table_t* tt, bool own) {
+const type_t* type_voidptr(type_table_t* tt, bool own, bool mut) {
     type_t key = key_of(TYPE_VOIDPTR);
     key.elem = type_void(tt);
     key.own = own;
+    // The storage behind a `void*` has no type, and `void mut*` says a caller
+    // may write it.
+    // D3.11
+    key.mut = mut;
     return intern(tt, &key);
 }
 
@@ -303,11 +307,12 @@ static const type_t* behind_arrays(const type_t* t) {
     return t;
 }
 
-// A reference that reaches a level: a pointer or a span, not `void*` or a
-// string, which have no target level.
-// D5.2
+// A reference that reaches a level: a pointer, a `void*` or a span, not a
+// string, whose characters are never mutable and which has no target level. The
+// level a `void*` reaches has no type, and `void mut*` marks it writable.
+// D3.11, D5.2
 static bool has_target_level(const type_t* t) {
-    return t->kind == TYPE_PTR || t->kind == TYPE_SPAN;
+    return t->kind == TYPE_PTR || t->kind == TYPE_VOIDPTR || t->kind == TYPE_SPAN;
 }
 
 uint32_t type_levels(const type_t* t) {
@@ -382,10 +387,13 @@ static bool same(const type_t* a, const type_t* b, bool bits) {
     case TYPE_PRIM:
         return a->prim == b->prim;
     case TYPE_STRING:
-    case TYPE_VOIDPTR:
         return !bits || a->own == b->own;
     case TYPE_PTR:
+    case TYPE_VOIDPTR:
     case TYPE_SPAN:
+        // The elem of a `void*` is always `void`, so the recursion ends there
+        // and only its marks decide.
+        // D3.11
         return (!bits || (a->own == b->own && a->mut == b->mut)) && same(a->elem, b->elem, bits);
     case TYPE_ARRAY:
         return a->len == b->len && same(a->elem, b->elem, bits);
@@ -1105,9 +1113,15 @@ static uint32_t apply_order(const groups_t* g, uint32_t k) {
 // D5.3
 static const char* check_positions(
     const type_t* base, bool base_own, bool base_mut, const type_suffix_t* s, uint32_t n) {
-    // D3.11, D5.3: `void` has no target level for a marker of its own
-    if (base->kind == TYPE_VOID && (base_own || base_mut || (n > 0 && s[0].kind != SUFFIX_PTR))) {
-        return "'void' is only a return type or the base of 'void*'";
+    // D3.11, D5.3: `void` is a return type or the base of a pointer, and the
+    // only marker it takes is the `mut` of `void mut*`, which marks the storage
+    // that pointer reaches. `void mut`, `void own`, `void@` and `void[4]` name
+    // no storage at all.
+    if (base->kind == TYPE_VOID) {
+        const bool base_of_ptr = n > 0 && s[0].kind == SUFFIX_PTR;
+        if (base_own || ((base_mut || n > 0) && !base_of_ptr)) {
+            return "'void' is only a return type or the base of 'void*'";
+        }
     }
     if (base_own && base->kind != TYPE_STRING) {
         return "'own' marks a reference: write it after a '*' or an '@'";
@@ -1175,7 +1189,7 @@ type_build_t type_build(type_table_t* tt,
         if (s->kind == SUFFIX_SPAN) {
             t = type_span(tt, t, s->own, pending_mut);
         } else if (t->kind == TYPE_VOID) {
-            t = type_voidptr(tt, s->own);
+            t = type_voidptr(tt, s->own, pending_mut);
         } else {
             t = type_ptr(tt, t, s->own, pending_mut);
         }

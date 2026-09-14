@@ -7,11 +7,12 @@
 //
 // Level model. A type is a chain of storage levels: level 0 is the binding's
 // own storage and lives outside the type (the `mut0` of the declaration, which
-// the caller holds); every pointer or span node carries the mutability of the
-// storage it reaches (`is_mut`, the next level) and whether the reference it
-// represents is owned (`is_own`). Fixed arrays add no level. `string` and
-// `void*` have no target level, so their `is_mut` is always false.
-// D5.2, D17.2
+// the caller holds); every pointer, `void*` or span node carries the mutability
+// of the storage it reaches (`is_mut`, the next level) and whether the reference
+// it represents is owned (`is_own`). Fixed arrays add no level. `string` has no
+// target level, so its `is_mut` is always false. A `void*` reaches a level whose
+// type cannot be written, and `void mut*` marks that level writable.
+// D3.11, D5.2, D17.2
 //
 // A written type marks each of those storages once, in the position that
 // follows the type element occupying it: after the base type for the values of
@@ -91,7 +92,7 @@ enum type_kind {
     k_void,    // `void`: a return type or the base of `void*`
     k_prim,    // a primitive (prim.ft)
     k_ptr,     // `T*`, `T* own`, `T mut*`
-    k_voidptr, // D3.11: `void*`, `void* own`
+    k_voidptr, // D3.11: `void*`, `void* own`, `void mut*`
     k_fn, // D3.10: `fn R(P1, P2)`
     k_array, // D3.4: `T[N]`
     k_span, // D3.5: `T@`, `T@ own`, `T mut@`
@@ -125,7 +126,7 @@ struct layout {
 struct node {
     type_kind kind;
     prim.prim_kind prim; // k_prim
-    bool is_mut;         // k_ptr, k_span: the storage reached is mutable
+    bool is_mut;         // k_ptr, k_voidptr, k_span: the storage reached is mutable
     bool is_own;         // k_ptr, k_voidptr, k_span, k_string
     bool is_noreturn;    // k_fn: `fn noreturn(...)`, with elem void
     node* elem;          // pointee, element or return type
@@ -358,10 +359,14 @@ fn node* type_string(table mut* tt, bool is_own) {
     return intern(tt, &k);
 }
 
-fn node* type_voidptr(table mut* tt, bool is_own) {
+fn node* type_voidptr(table mut* tt, bool is_own, bool is_mut) {
     key mut k = key_of(type_kind.k_voidptr);
     k.elem = type_void(tt);
     k.is_own = is_own;
+    // The storage behind a `void*` has no type, and `void mut*` says a caller
+    // may write it.
+    // D3.11
+    k.is_mut = is_mut;
     return intern(tt, &k);
 }
 
@@ -517,15 +522,17 @@ fn node* behind_arrays(node* t) {
     return cur;
 }
 
-/// A reference that reaches a level: a pointer or a span, not `void*` or a
-/// string, which have no target level.
-/// D5.2
+/// A reference that reaches a level: a pointer, a `void*` or a span, not a
+/// string, whose characters are never mutable and which has no target level. The
+/// level a `void*` reaches has no type, and `void mut*` marks it writable.
+/// D3.11, D5.2
 fn bool has_target_level(node* t) {
-    return t->kind == type_kind.k_ptr || t->kind == type_kind.k_span;
+    return t->kind == type_kind.k_ptr || t->kind == type_kind.k_voidptr ||
+           t->kind == type_kind.k_span;
 }
 
-/// The storage levels behind level 0: one per pointer or span node on the chain,
-/// fixed arrays adding none; `string` and `void*` add none. The C counts in a
+/// The storage levels behind level 0: one per pointer, `void*` or span node on the chain,
+/// fixed arrays adding none; `string` adds none. The C counts in a
 /// uint32_t; every count here is a u64, since a span's `.len` is one and fort
 /// promotes nothing.
 /// D5.2, D6.2
@@ -542,9 +549,8 @@ fn u64 type_levels(node* t) {
 /// The reference stored at level k - 1 and reaching level k, for k >= 1: the
 /// outermost pointer, `void*`, span or string of `t` (behind any fixed arrays) for
 /// k == 1, then inward; null beyond the chain. Its `is_mut` is the mutability of
-/// level k and its `is_own` the ownership mark of that reference. A `string` or
-/// `void*` node is reported, since it carries an `own` mark, although it adds no
-/// level.
+/// level k and its `is_own` the ownership mark of that reference. A `string` node
+/// is reported, since it carries an `own` mark, although it adds no level.
 /// D17.2
 fn node* type_ref_at(node* t, u64 k) {
     if (k == 0) {
@@ -566,7 +572,9 @@ fn node* type_ref_at(node* t, u64 k) {
 }
 
 /// The mutability of level k >= 1: false beyond the chain and for the
-/// characters of a string.
+/// characters of a string. Level 1 of a `void*` is the storage it reaches,
+/// which `void mut*` marks writable.
+/// D3.11
 fn bool type_level_mut(node* t, u64 k) {
     node* r = type_ref_at(t, k);
     return r != null && r->is_mut;
@@ -612,9 +620,12 @@ fn bool same(node* a, node* b, bool bits) {
         return true;
     case type_kind.k_prim:
         return a->prim == b->prim;
-    case type_kind.k_string, type_kind.k_voidptr:
+    case type_kind.k_string:
         return !bits || a->is_own == b->is_own;
-    case type_kind.k_ptr, type_kind.k_span:
+    case type_kind.k_ptr, type_kind.k_voidptr, type_kind.k_span:
+        // The elem of a `void*` is always `void`, so the recursion ends there
+        // and only its marks decide.
+        // D3.11
         return (!bits || (a->is_own == b->is_own && a->is_mut == b->is_mut)) &&
                same(a->elem, b->elem, bits);
     case type_kind.k_array:
@@ -1425,10 +1436,15 @@ fn u64 apply_order(groups* g, u64 k) {
 /// belongs after that array's length instead.
 /// D5.3
 fn string check_positions(node* base, bool base_own, bool base_mut, suffix@ s) {
-    // D3.11, D5.3: `void` has no target level for a marker of its own
-    if (base->kind == type_kind.k_void &&
-        (base_own || base_mut || (s.len > 0 && s[0].kind != suffix_kind.s_ptr))) {
-        return "'void' is only a return type or the base of 'void*'";
+    // D3.11, D5.3: `void` is a return type or the base of a pointer, and the
+    // only marker it takes is the `mut` of `void mut*`, which marks the storage
+    // that pointer reaches. `void mut`, `void own`, `void@` and `void[4]` name
+    // no storage at all.
+    if (base->kind == type_kind.k_void) {
+        bool base_of_ptr = s.len > 0 && s[0].kind == suffix_kind.s_ptr;
+        if (base_own || ((base_mut || s.len > 0) && !base_of_ptr)) {
+            return "'void' is only a return type or the base of 'void*'";
+        }
     }
     if (base_own && base->kind != type_kind.k_string) {
         return "'own' marks a reference: write it after a '*' or an '@'";
@@ -1521,7 +1537,7 @@ fn build_result type_build(table mut* tt, bool base_own, bool base_mut, node* ba
         if (suffixes[at].kind == suffix_kind.s_span) {
             t = type_span(tt, t, suffixes[at].is_own, pending_mut);
         } else if (t->kind == type_kind.k_void) {
-            t = type_voidptr(tt, suffixes[at].is_own);
+            t = type_voidptr(tt, suffixes[at].is_own, pending_mut);
         } else {
             t = type_ptr(tt, t, suffixes[at].is_own, pending_mut);
         }

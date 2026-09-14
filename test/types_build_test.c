@@ -72,9 +72,12 @@ TEST(the_d3_6_shapes_are_the_ones_it_names, {
     const type_t* m = tenv_type(&e, "i32[3][4]");
     TEST_ASSERT_EQ_UINT64(m->len, (uint64_t)3);
     TEST_ASSERT_EQ_UINT64(m->elem->len, (uint64_t)4);
-    // `void*` is its own kind, with no pointee level.
+    // `void*` is its own kind, with no pointee type.
     // D3.11
     TEST_ASSERT_TRUE(tenv_type(&e, "void*")->kind == TYPE_VOIDPTR);
+    TEST_ASSERT_TRUE(tenv_type(&e, "void mut*")->kind == TYPE_VOIDPTR);
+    TEST_ASSERT_TRUE(tenv_type(&e, "void mut*")->mut);
+    TEST_ASSERT_FALSE(tenv_type(&e, "void*")->mut);
     TEST_ASSERT_TRUE(tenv_type(&e, "void**")->kind == TYPE_PTR);
     TEST_ASSERT_TRUE(tenv_type(&e, "void**")->elem->kind == TYPE_VOIDPTR);
     tenv_free(&e);
@@ -153,10 +156,25 @@ TEST(builder_errors_of_lengths_and_void, {
     TEST_ASSERT_EQ_STR(tenv_spell(&e, "void**"), "void**");
     TEST_ASSERT_EQ_STR(tenv_spell(&e, "void*@"), "void*@");
     TEST_ASSERT_EQ_STR(tenv_spell_decl(&e, "void* mut"), "void* mut");
-    // `void` has no target level, so `void mut*` and `void own` are errors,
-    // and a span or an array of `void` does not exist.
+    // The storage a `void*` reaches has no type, and `void mut*` marks it
+    // writable; the two `mut` positions are distinct and both spell back.
     // D3.11, D5.3
-    TEST_ASSERT_EQ_STR(tenv_spell(&e, "void mut*"),
+    TEST_ASSERT_EQ_STR(tenv_spell(&e, "void mut*"), "void mut*");
+    TEST_ASSERT_EQ_STR(tenv_spell_decl(&e, "void mut* mut"), "void mut* mut");
+    TEST_ASSERT_EQ_STR(tenv_spell(&e, "void mut* own"), "void mut* own");
+    TEST_ASSERT_EQ_STR(tenv_spell_decl(&e, "void mut* own mut"), "void mut* own mut");
+    TEST_ASSERT_EQ_STR(tenv_spell(&e, "void mut**"), "void mut**");
+    TEST_ASSERT_EQ_STR(tenv_spell(&e, "void mut* mut*"), "void mut* mut*");
+    TEST_ASSERT_EQ_STR(tenv_spell(&e, "void mut*@"), "void mut*@");
+    TEST_ASSERT_EQ_STR(tenv_spell(&e, "void mut* mut@ own"), "void mut* mut@ own");
+    // `void` still names no storage of its own, so every other marker on it is
+    // an error, and a span or an array of `void` does not exist.
+    // D3.11, D5.3
+    TEST_ASSERT_EQ_STR(tenv_spell(&e, "void mut@"),
+                       "error: 'void' is only a return type or the base of 'void*'");
+    TEST_ASSERT_EQ_STR(tenv_spell(&e, "void mut[4]"),
+                       "error: 'void' is only a return type or the base of 'void*'");
+    TEST_ASSERT_EQ_STR(tenv_spell(&e, "void own*"),
                        "error: 'void' is only a return type or the base of 'void*'");
     TEST_ASSERT_EQ_STR(tenv_spell(&e, "void own"),
                        "error: 'void' is only a return type or the base of 'void*'");
@@ -266,7 +284,15 @@ TEST(the_placement_rule_on_further_shapes, {
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "point mut* mut"), "yy");
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "string@ mut"), "yn");
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "string mut@"), "ny");
-    TEST_ASSERT_EQ_STR(tenv_muts(&e, "void* mut"), "y");
+    // A `void*` reaches a level whose storage has no type, so it has two
+    // positions: the binding and the storage behind the pointer.
+    // D3.11, D5.2
+    TEST_ASSERT_EQ_STR(tenv_muts(&e, "void*"), "nn");
+    TEST_ASSERT_EQ_STR(tenv_muts(&e, "void* mut"), "yn");
+    TEST_ASSERT_EQ_STR(tenv_muts(&e, "void mut*"), "ny");
+    TEST_ASSERT_EQ_STR(tenv_muts(&e, "void mut* mut"), "yy");
+    TEST_ASSERT_EQ_STR(tenv_muts(&e, "void mut* mut*"), "nyy");
+    TEST_ASSERT_EQ_STR(tenv_muts(&e, "void mut* mut@ mut"), "yyy");
     // Out-parameters, the shape the rule names.
     // D3.6
     TEST_ASSERT_EQ_STR(tenv_muts(&e, "u8@*"), "nnn");
@@ -674,7 +700,8 @@ TEST(the_builder_interns_what_the_constructors_intern, {
     TEST_ASSERT_TRUE(tenv_type(&e, "i32 mut@") ==
                      type_span(&e.tt, type_prim(&e.tt, PRIM_I32), false, true));
     TEST_ASSERT_TRUE(tenv_type(&e, "string own") == type_string(&e.tt, true));
-    TEST_ASSERT_TRUE(tenv_type(&e, "void* own") == type_voidptr(&e.tt, true));
+    TEST_ASSERT_TRUE(tenv_type(&e, "void* own") == type_voidptr(&e.tt, true, false));
+    TEST_ASSERT_TRUE(tenv_type(&e, "void mut*") == type_voidptr(&e.tt, false, true));
     TEST_ASSERT_TRUE(tenv_type(&e, "i32[4]") == type_array(&e.tt, type_prim(&e.tt, PRIM_I32), 4));
     tenv_free(&e);
 })

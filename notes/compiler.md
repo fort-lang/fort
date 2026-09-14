@@ -379,7 +379,13 @@ came here.
   signature is paid by all of them at once: T-045 added `qsort` there, and a program that
   redeclares it must now write the same parameter types, `fn i32(void*, void*)` included.
   `grep -rn 'extern fn void qsort' .` finds one declaration in `std/libc.ft` and one in
-  `spec/module-system.md` 8.5, which spells it out as its callback example. A set with no
+  `spec/module-system.md` 8.5, which spells it out as its callback example. **Retyping one costs
+  the same**, and the bill is the programs that redeclare it, not the ones that call it: T-086
+  gave `read`, `write` and the four `<string.h>` byte functions `u8*` and `u8 mut*` and made
+  `malloc` return `void mut* own`, and 9 corpus tests had to redeclare their `extern` while 7
+  only dropped a cast. `spec/decisions.md` D9.8 carried a `void* buf` example of `write` that a
+  program could then no longer copy, so a signature in the specification is part of that bill.
+  A set with no
   such directory loads no runtime, which is what every in-process unit suite is, so a suite that
   drives the whole driver writes an **empty** `std/rt.ft` in its sandbox (`test/driver_helpers.h`,
   `test/modules_helpers.h`, `test/fort/support/modules_env.ft` and the three `test/fort/driver*`
@@ -393,7 +399,10 @@ came here.
   `cast(u8 mut@ own, void* own)` is rejected (D3.14 lists pointer-to-pointer, not span-to-pointer).
   The `libc.free(cast(move(p), void* own))` idiom of `stdlib.md` 2.2 therefore applies to a
   `T mut* own` from `new(T)` or `libc.malloc`; a `T mut@ own` from `new(T, n)` is released with
-  `del`, and what crosses to C is its `.ptr`, a view.
+  `del`, and what crosses to C is its `.ptr`, a view. A byte buffer crosses with no cast at all,
+  since T-086 gave the six byte functions `u8*` and `u8 mut*`: write
+  `libc.read(fd, buf.ptr, buf.len)` for a `u8 mut@ buf`, and keep the cast only where the types
+  really differ, as a `string`'s `char*` does.
 
 **The standard library may use such a feature before `src/fort` can.** `std/rt_float.ft` holds the
 float printers of D18.1 and is written with floats, because stage1 never loads it: the loader
@@ -480,10 +489,22 @@ gone.
   stage1; it did not stop stage1 compiling stage2. The CMake target `fort_stage2` compiles
   `src/fort` with stage1 at every build and the ctest `bootstrap` compiles it twice more, so a
   `src/fort` file that uses a construct stage1 lacks breaks the build and the fixed point on the
-  same commit. **The freeze is this: `src/bootstrap` accepts a bug fix only, never a feature.** A
-  bug fix makes stage1 answer the way the specification already says it must, and the ticket that
-  writes one names the decision it restores. A new language feature goes to `src/fort` alone. A
-  feature therefore leaves `test/lang/unsupported-stage2.txt` when stage2 gains it, and leaves
+  same commit. **The freeze is this: `src/bootstrap` accepts a bug fix, and the smallest
+  type-layer edit that lets it parse and check a form `std/` uses. Everything else is still
+  forbidden.** A bug fix makes stage1 answer the way the specification already says it must, and
+  the ticket that writes one names the decision it restores. The second half is T-086's, and the
+  reason is that stage1 checks every `.ft` file in the repository: it compiles `src/fort` and the
+  import closure of `std/` into stage2, so any form `std/` spells forces a stage1 change, and a
+  corpus test of a new feature must be **refused** with the exact words `not supported by the
+  bootstrap compiler` (`run_tests.py`'s `judge_unsupported`), which is a stage1 edit as well.
+  T-086 gave `std.libc` a `void mut* own malloc` and paid the smaller of the two: nine code
+  sites in `types.c`, `types.h` and `check.c`, no new diagnostic and no new code path. Count them
+  and list them, including the mechanical ones: the ticket's first inventory named six, and the
+  two it missed were `type_build`'s call of `type_voidptr` and the `TYPE_POS_ALLOC` arm of
+  `check_type_at`, which is the one site of the nine that changes what an existing program
+  means. A feature that
+  `std/` does not spell still goes to `src/fort` alone. A feature therefore leaves
+  `test/lang/unsupported-stage2.txt` when stage2 gains it, and leaves
   `test/lang/bootstrap-unsupported.txt` never. The ctest `lang` holds that list: stage1 runs over
   the whole corpus with it and with an empty `xfail.txt`, so a test the list names must be refused
   with `not supported by the bootstrap compiler` and a test it does not name must pass. T-046

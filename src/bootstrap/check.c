@@ -585,9 +585,13 @@ static check_type_t check_type_at(check_t* ck, ast_node_t* node, type_pos_t pos,
     bool base_own = wrapped && ast_is_own(node);
     bool base_mut = wrapped && ast_is_mut(node);
     if (pos == TYPE_POS_ALLOC) {
-        // D5.8: `new` gives storage writable at every level
-        // D3.11, D17.3: `void` has no level to mark and `new(void*)` is legal
-        base_mut = (count == 0 || suffixes[0].kind != SUFFIX_ARRAY) && b->kind != TYPE_VOID;
+        // `new` gives storage writable at every level, the level a `void*`
+        // reaches included. A bare `void` has no level and keeps no mark, so
+        // check_new reports it rather than the type builder.
+        // D3.11, D5.8, D17.3
+        const bool first_is_ptr = count > 0 && suffixes[0].kind == SUFFIX_PTR;
+        base_mut = (count == 0 || suffixes[0].kind != SUFFIX_ARRAY) &&
+                   (b->kind != TYPE_VOID || first_is_ptr);
         for (uint64_t i = 0; i < count; i++) {
             suffixes[i].mut = i + 1 == count || suffixes[i + 1].kind != SUFFIX_ARRAY;
         }
@@ -1132,7 +1136,9 @@ const type_t* check_lend(check_t* ck, const type_t* t) {
     case TYPE_STRING:
         return type_string(&ck->types, false);
     case TYPE_VOIDPTR:
-        return type_voidptr(&ck->types, false);
+        // Lending clears `own` and never the `mut` of `void mut*`.
+        // D3.11
+        return type_voidptr(&ck->types, false, t->mut);
     default:
         return t;
     }
@@ -2392,7 +2398,7 @@ static void check_builtin_call(check_t* ck, ast_node_t* n, const sym_t* s, expr_
         check_operand(ck, arg, &e);
         if (e.untyped && e.value.kind == CV_NULL) {
             // D12.2: `del(null)` is a no-op
-            convert(ck, arg, &e, type_voidptr(&ck->types, true), "'del'");
+            convert(ck, arg, &e, type_voidptr(&ck->types, true, false), "'del'");
             return;
         }
         if (check_poisoned(e.type)) {
@@ -3068,7 +3074,10 @@ static bool extern_type_agrees(const type_t* a, const type_t* b) {
     case TYPE_PTR:
         return a->mut == b->mut && a->own == b->own && extern_type_agrees(a->elem, b->elem);
     case TYPE_VOIDPTR:
-        return a->own == b->own;
+        // `void mut*` and `void*` are two signatures, as `node mut*` and
+        // `node*` are.
+        // D3.11, D9.8
+        return a->own == b->own && a->mut == b->mut;
     case TYPE_FN:
         if (a->noreturn != b->noreturn || a->nparams != b->nparams ||
             !extern_type_agrees(a->elem, b->elem)) {

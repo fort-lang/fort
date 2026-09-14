@@ -504,7 +504,12 @@ TEST(every_pointer_takes_the_opaque_ptr_form, {
     const type_t* i32t = prim(PRIM_I32);
     TEST_ASSERT_EQ_STR(form_of(type_ptr(&types, i32t, false, false)), "ptr");
     TEST_ASSERT_EQ_STR(form_of(type_ptr(&types, i32t, true, true)), "ptr");
-    TEST_ASSERT_EQ_STR(form_of(type_voidptr(&types, false)), "ptr");
+    TEST_ASSERT_EQ_STR(form_of(type_voidptr(&types, false, false)), "ptr");
+    // `void mut*` is one machine word like every other pointer, so it crosses
+    // an extern boundary in the same form.
+    // D3.11
+    TEST_ASSERT_EQ_STR(form_of(type_voidptr(&types, false, true)), "ptr");
+    TEST_ASSERT_EQ_STR(form_of(type_voidptr(&types, true, true)), "ptr");
     // A function pointer is a pointer and an enum crosses as `i32`.
     // D3.10, D9.8, D3.9
     TEST_ASSERT_EQ_STR(form_of(type_fn(&types, i32t, &i32t, 1, false)), "ptr");
@@ -540,8 +545,10 @@ TEST(the_form_of_a_type_is_the_text_the_emitter_writes_for_it, {
     const type_t* i32t = prim(PRIM_I32);
     TEST_ASSERT_EQ_STR(form_of(type_ptr(&types, i32t, false, false)),
                        emitted_param(type_ptr(&types, i32t, false, false)));
-    TEST_ASSERT_EQ_STR(form_of(type_voidptr(&types, false)),
-                       emitted_param(type_voidptr(&types, false)));
+    TEST_ASSERT_EQ_STR(form_of(type_voidptr(&types, false, false)),
+                       emitted_param(type_voidptr(&types, false, false)));
+    TEST_ASSERT_EQ_STR(form_of(type_voidptr(&types, false, true)),
+                       emitted_param(type_voidptr(&types, false, true)));
     TEST_ASSERT_EQ_STR(form_of(type_enum(&types, str_from_cstr("color"), &types)),
                        emitted_param(type_enum(&types, str_from_cstr("color"), &types)));
     types_end();

@@ -96,7 +96,7 @@ static uint32_t scalar_types(tenv_t* e, const type_t** types, scalar_class_t* cl
 // identity, so a property that never sees one cannot tell whether a conversion
 // respects them.
 // D3.10
-enum { SAMPLES_MAX = 30 };
+enum { SAMPLES_MAX = 32 };
 
 static uint32_t sample_types(tenv_t* e, const type_t** types) {
     static const char* const SPELLINGS[] = {
@@ -123,6 +123,8 @@ static uint32_t sample_types(tenv_t* e, const type_t** types) {
         "string own",
         "void*",
         "void* own",
+        "void mut*",
+        "void mut* own",
         "u8 mut@ own mut*",
     };
     uint32_t n = (uint32_t)(sizeof SPELLINGS / sizeof SPELLINGS[0]);
@@ -159,6 +161,20 @@ TEST(the_d5_4_conversions_and_their_shape, {
     TEST_ASSERT_FALSE(assignable(&e, "i32@ mut@", "i32 mut@ mut@"));
     TEST_ASSERT_TRUE(assignable(&e, "i32@", "i32 mut@"));
     TEST_ASSERT_FALSE(assignable(&e, "i32 mut@", "i32@"));
+    // The storage a `void*` reaches is a level like any other: dropping its
+    // `mut` is the one implicit conversion, and adding it needs a cast.
+    // D3.11, D5.4
+    TEST_ASSERT_TRUE(assignable(&e, "void*", "void mut*"));
+    TEST_ASSERT_FALSE(assignable(&e, "void mut*", "void*"));
+    TEST_ASSERT_TRUE(assignable(&e, "void* mut", "void mut*"));
+    TEST_ASSERT_TRUE(assignable(&e, "void mut* mut", "void mut*"));
+    // The C `T** -> const T**` hole is closed here too: level 1 of the target
+    // must be immutable before level 2 may be dropped.
+    // D5.4
+    TEST_ASSERT_TRUE(assignable(&e, "void**", "void mut* mut*"));
+    TEST_ASSERT_FALSE(assignable(&e, "void* mut*", "void mut* mut*"));
+    TEST_ASSERT_TRUE(assignable(&e, "void*@", "void mut* mut@"));
+    TEST_ASSERT_FALSE(assignable(&e, "void* mut@", "void mut* mut@"));
     tenv_free(&e);
 })
 
@@ -212,11 +228,16 @@ TEST(ownership_is_never_added_implicitly, {
     tenv_init(&e);
     TEST_ASSERT_FALSE(assignable(&e, "string own", "string"));
     TEST_ASSERT_FALSE(assignable(&e, "void* own", "void*"));
+    TEST_ASSERT_FALSE(assignable(&e, "void mut* own", "void mut*"));
     TEST_ASSERT_FALSE(assignable(&e, "u8@ own", "u8@"));
     TEST_ASSERT_FALSE(assignable(&e, "node* own@ own", "node mut* mut@ own"));
     TEST_ASSERT_FALSE(assignable(&e, "node* own@", "node*@"));
     // Dropping `own` and mutability together is one conversion.
     TEST_ASSERT_TRUE(assignable(&e, "void*", "void* own"));
+    // An owned writable allocation lends as a plain view; the reverse adds a
+    // mark in each direction.
+    TEST_ASSERT_TRUE(assignable(&e, "void*", "void mut* own"));
+    TEST_ASSERT_FALSE(assignable(&e, "void mut*", "void* own"));
     TEST_ASSERT_TRUE(assignable(&e, "node* own@", "node* own@ own"));
     TEST_ASSERT_TRUE(assignable(&e, "u8@", "u8@ own"));
     tenv_free(&e);
@@ -321,6 +342,12 @@ TEST(casts_among_pointers_and_u64, {
     TEST_ASSERT_TRUE(castable(&e, "void*", "node*"));
     TEST_ASSERT_TRUE(castable(&e, "node*", "void*"));
     TEST_ASSERT_TRUE(castable(&e, "void* own", "void*"));
+    // The cast-away-const escape reaches the level a `void*` names too.
+    // D3.14
+    TEST_ASSERT_TRUE(castable(&e, "void mut*", "void*"));
+    TEST_ASSERT_TRUE(castable(&e, "void mut*", "node*"));
+    TEST_ASSERT_TRUE(castable(&e, "node mut*", "void*"));
+    TEST_ASSERT_TRUE(castable(&e, "void mut* own", "u64"));
     TEST_ASSERT_TRUE(castable(&e, "u64", "node*"));
     TEST_ASSERT_TRUE(castable(&e, "node*", "u64"));
     TEST_ASSERT_TRUE(castable(&e, "u64", "void*"));
@@ -512,6 +539,8 @@ TEST(assignability_is_reflexive_for_every_kind, {
     TEST_ASSERT_TRUE(assignable(&e, "node mut* own", "node mut* own"));
     TEST_ASSERT_TRUE(assignable(&e, "void*", "void*"));
     TEST_ASSERT_TRUE(assignable(&e, "void* own", "void* own"));
+    TEST_ASSERT_TRUE(assignable(&e, "void mut*", "void mut*"));
+    TEST_ASSERT_TRUE(assignable(&e, "void mut* own", "void mut* own"));
     TEST_ASSERT_TRUE(assignable(&e, "i32[4]", "i32[4]"));
     TEST_ASSERT_TRUE(assignable(&e, "i32[3][4]", "i32[3][4]"));
     TEST_ASSERT_TRUE(assignable(&e, "string own", "string own"));
@@ -573,6 +602,7 @@ TEST(lending_combines_with_dropping_mutability, {
     TEST_ASSERT_TRUE(assignable(&e, "node mut*", "node mut* own"));
     TEST_ASSERT_TRUE(assignable(&e, "node* own", "node mut* own"));
     TEST_ASSERT_TRUE(assignable(&e, "void*", "void* own"));
+    TEST_ASSERT_TRUE(assignable(&e, "void mut*", "void mut* own"));
     TEST_ASSERT_TRUE(assignable(&e, "string", "string own"));
     // A span of owned strings lends its own mark under the same rule.
     TEST_ASSERT_TRUE(assignable(&e, "string@", "string@ own"));

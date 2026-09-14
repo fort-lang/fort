@@ -19,7 +19,7 @@ All types are resolved at compile time. There is no run-time type information, n
 | character        | `char`            | scalar        | 1             | `'\0'`      | D3.2     |
 | no value         | `void`            | none          | none          | none        | D3.1     |
 | pointer          | `T*`, `T* own`    | reference     | 8             | `null`      | D3.12    |
-| opaque pointer   | `void*`, `void* own` | reference  | 8             | `null`      | D3.11    |
+| opaque pointer   | `void*`, `void mut*` | reference  | 8             | `null`      | D3.11    |
 | function pointer | `fn R(P1, P2)`    | reference     | 8             | `null`      | D3.10    |
 | fixed array      | `T[N]`            | aggregate     | `N*sizeof(T)` | all zero    | D3.4     |
 | span             | `T@`, `T@ own`    | reference     | 16            | `{null, 0}` | D3.5     |
@@ -408,16 +408,25 @@ fn i32(i32, i32) own u = add;        // error: own on a function-pointer type
 
 ### 5.2 `void*`
 
-`void*` is an opaque pointer with a single storage level: it cannot be dereferenced, cannot reach
-fields, cannot be indexed and has no span expression (D3.11, D5.2). Every conversion to or from
-`void*` requires `cast` (D3.14); `== null` is allowed (D10.5). `void* own` is its owned form
-(D17.1): `del` accepts it, a `cast` between it and a typed pointer yields `own` exactly when the
-target says `own` (D3.14, section 9.2), and it is the type C's `malloc` and `free` are declared with
-(section 11.2).
+`void*` is an opaque pointer with no pointee type: it cannot be dereferenced, cannot reach
+fields, cannot be indexed and has no span expression (D3.11). It reaches one storage level all the
+same, the storage the address names, and `void mut*` marks that storage writable (D5.2, D5.3). No
+expression reaches it, so the mark states what a callee may do with the address: C writes the same
+distinction as `void*` against `const void*`. Every conversion to or from `void*` requires `cast`
+(D3.14); `== null` is allowed (D10.5). `void* own` is its owned form (D17.1): `del` accepts it, a
+`cast` between it and a typed pointer yields `own` exactly when the target says `own` (D3.14,
+section 9.2), and it is the type C's `malloc` and `free` are declared with (section 11.2).
+
+`void* mut p` and `void mut* p` are two types. The first is a rebindable binding whose target is
+read-only; the second is a fixed binding whose target a callee may write. `void mut*` converts to
+`void*` by the one implicit conversion of D5.4, and the reverse needs a `cast`.
 
 ```fort
 i32 mut x = 1;
 void* vp = cast(&x, void*);
+void mut* wp = cast(&x, void mut*);  // the bytes behind wp may be written
+void* back_off = wp;                 // ok: dropping mut is implicit (D5.4)
+void mut* up = vp;                   // error: adding mut needs a cast
 void* w = &x;                        // error: pointer to void* requires cast
 i32 v = *vp;                         // error: void* cannot be dereferenced
 i32 f = vp->x;                       // error: void* has no fields
@@ -443,7 +452,7 @@ Two types are identical when (D3.12):
 | fixed array      | identical element type and equal length                                |
 | span             | identical element type, element mutability (level 1) and `own` mark    |
 | pointer          | identical pointee type, level-1 mutability and `own` mark              |
-| `void*`          | same `own` mark                                                        |
+| `void*`          | same `own` mark and same level-1 mutability                            |
 | function type    | structurally, as in section 5.1, `own` marks included                  |
 | `string`         | same `own` mark; distinct from `char@` and `u8@`                     |
 
@@ -506,10 +515,11 @@ indirection. Levels are numbered from the binding inward, following the reading 
 section 3.3: because reference suffixes read inside-out, the last reference suffix of the type is
 level 1, the one before it level 2, and so on, whether it is a `*` or an `@`. Fixed arrays and
 structs add no level: their elements and fields live in the storage of the containing value.
-`string` has exactly one level (its characters are never mutable) and so does `void*` and every
-function type. Each `*` and `@` also introduces a reference, the pointer or span header stored
-at the level just outside the one it reaches; references, not levels, carry the `own` mark
-(section 8.2).
+`string` has exactly one level (its characters are never mutable) and so does every function
+type. A `void*` has two: the binding and the storage the address names, which no expression
+reaches and whose mutability `void mut*` marks (D3.11). Each `*` and `@` also introduces a
+reference, the pointer or span header stored at the level just outside the one it reaches;
+references, not levels, carry the `own` mark (section 8.2).
 
 | Declared type   | Level 0    | Level 1                     | Level 2                |
 |-----------------|------------|-----------------------------|------------------------|
@@ -524,6 +534,7 @@ at the level just outside the one it reaches; references, not levels, carry the 
 | `i32[3][4] m`   | `m`, `m[i][j]` |                         |                        |
 | `point q`       | `q`, `q.x` |                             |                        |
 | `string s`      | `s`        |                             |                        |
+| `void* vp`      | `vp`       | the bytes; no expression    |                        |
 
 ### 7.3 The placement rule
 
@@ -580,7 +591,8 @@ In the table, "rebind" is `x = ...` on the binding itself; "level 1" covers writ
 | `u8 mut@ mut* out`   | no                   | `*out = s`: yes      | `(*out)[i]`: yes   |
 | `i32[4]* pa`         | no                   | `(*pa)[i] = 1`: no   |                    |
 | `i32[4] mut* pa`     | no                   | `(*pa)[i] = 1`: yes  |                    |
-| `void* mut vp`       | yes                  | not applicable       |                    |
+| `void* mut vp`       | yes                  | no expression        |                    |
+| `void mut* vp`       | no                   | no expression        |                    |
 | `fn i32(i32) mut f`  | yes                  | not applicable       |                    |
 | `node mut* own mut@ own kids` | no          | slots: yes           | nodes: yes         |
 | `node* own@ view`    | no                   | slots: no            | nodes: no          |
@@ -1387,17 +1399,17 @@ or sign-extended on both sides of the boundary; C `char*` maps to `char*` or `u8
 to `u64` (D9.8). `own` may appear in
 an `extern` signature (D17.13): it is erased like everywhere else and documents the C side's
 convention, so a fort caller must `move` into an `own` parameter and must land an `own` result.
-A `void*` result is `void* own`, never `void mut* own`, because `void*` has no target level for
-the `mut` to describe (D3.11). Signature identity includes `own` (D9.8): two modules declaring one
-C symbol with and without it conflict.
+A `void*` result carries the marks the C function's contract states: `malloc` answers storage the
+caller may write, so it is `void mut* own`, and `free` takes `void* own`, which every caller
+reaches by dropping marks (D3.11, D5.4). Signature identity includes `own` and the level-1
+mutability (D9.8): two modules declaring one C symbol with and without either conflict.
 
 ```fort
-extern fn i64 write(i32 fd, void* buf, u64 n);
+extern fn i64 write(i32 fd, u8* buf, u64 n);       // C means bytes here, so fort says bytes
 extern fn void sort(i32@ xs);        // error: spans cannot cross an extern boundary
-extern fn void* own malloc(u64 n);
-extern fn void mut* own calloc(u64 n, u64 size);   // error: 'mut' on void*: no target level
+extern fn void mut* own malloc(u64 n);
 extern fn void free(void* own p);
-void* own raw = malloc(16);          // ok: the owned result lands
+void mut* own raw = malloc(16);      // ok: the owned result lands
 free(raw);                           // error: 'raw' is an own lvalue; write move(raw)
 free(move(raw));                     // ok; del(raw) would have done the same (D10.3)
 void* lost = malloc(16);             // error: owning temporary would leak

@@ -976,11 +976,11 @@ class HistoryLimitTest(unittest.TestCase):
                                  ("D19.5", "this rule requires holds")])
 
     def test_the_same_signature_over_the_rationale_fields_reports_nothing(self):
-        # the other half of the fourth limit: 16 entries carry a rationale and
+        # the other half of the fourth limit: 17 entries carry a rationale and
         # the gap costs 0 today, which is what makes it a gap and not a defect
         entries, _ = check_decisions.read_fielded(self.log())
         carried = [t for t, f in entries.items() if f.get("rationale", "").strip()]
-        self.assertEqual(len(carried), 16)
+        self.assertEqual(len(carried), 17)
         self.assertEqual(self.sweep(lint.HISTORY_REPORT, field="rationale"), [])
 
     def test_a_wider_subject_and_verb_list_reports_thirty_five(self):
@@ -1065,15 +1065,15 @@ class HistoryRepositoryTest(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         problems, count = lint.rule_history(root)
         self.assertEqual(problems, [])
-        self.assertEqual(count, "history: 50 history fields, 4 with a dated note")
+        self.assertEqual(count, "history: 52 history fields, 4 with a dated note")
 
     def test_the_field_count_is_the_one_grep_counts(self):
-        # `grep -c '^- history:' spec/decisions.md` says 50 (notes/style.md 4)
+        # `grep -c '^- history:' spec/decisions.md` says 52 (notes/style.md 4)
         root = Path(__file__).resolve().parent.parent
         text = (root / "spec/decisions.md").read_text(encoding="utf-8")
-        self.assertEqual(len(lint.history_fields(text)), 50)
+        self.assertEqual(len(lint.history_fields(text)), 52)
         self.assertEqual(
-            sum(1 for line in text.split("\n") if line.startswith("- history:")), 50)
+            sum(1 for line in text.split("\n") if line.startswith("- history:")), 52)
 
 
 class BudgetTest(unittest.TestCase):

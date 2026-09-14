@@ -215,10 +215,10 @@ the table (D9.7, `toolchain.md` 6 item 4).
 ### 8.1 Declaration and allowed types
 
 ```fort
-extern fn i64 write(i32 fd, void* buf, u64 n);
+extern fn i64 write(i32 fd, u8* buf, u64 n);
 extern fn u64 strlen(char* s);
 extern fn noreturn exit(i32 status);
-extern fn void* own malloc(u64 n);
+extern fn void mut* own malloc(u64 n);
 extern fn void free(void* own p);
 ```
 
@@ -248,8 +248,8 @@ a `stat mut* buf` parameter is exactly a C `struct stat *`.
 
 `own` may qualify a pointer or `void*` in an extern signature (D17.13). It is erased, so the
 declaration names the same C function with or without it, and it records the C side's
-convention on the fort side: `void* own malloc(u64 n)` says the caller must free the result
-(`void*` has no target level, so no `mut` after `void`, D3.11), so the cast in
+convention on the fort side: `void mut* own malloc(u64 n)` says the caller must free the result
+and may write the storage (D3.11), so the cast in
 `u8 mut* own p = cast(malloc(n), u8 mut* own);` types the owned block, its target saying `own`
 (D3.14), and a plain `u8 mut* p = malloc(n);` is refused as a leaking temporary (D17.8);
 `free(void* own p)` says the callee frees, so an `own` lvalue is passed as
@@ -290,7 +290,7 @@ extern fn void paint(shade.color c);            // the only other spelling there
 ```
 
 ```fort
-extern fn void* own malloc(u64 n);
+extern fn void mut* own malloc(u64 n);
 extern fn void free(void* own p);
 extern fn char mut* own strdup(char* s);        // C documents: the caller frees
 
@@ -429,11 +429,11 @@ fn void wrong(u8 mut@ own mut* out) {
 
 ```fort
 // hello.ft
-extern fn i64 write(i32 fd, void* buf, u64 n);
+extern fn i64 write(i32 fd, u8* buf, u64 n);
 extern fn u64 strlen(char* s);
 
 fn void put(string s) {
-    write(1, cast(s.ptr, void*), s.len);
+    write(1, cast(s.ptr, u8*), s.len);
 }
 
 fn i32 main(string@ args) {

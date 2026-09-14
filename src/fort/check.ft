@@ -994,10 +994,13 @@ fn written_type check_type_at(checker mut* ck, ast.node mut* n, type_pos pos, bo
     bool mut base_own = wrapped && ast.ast_is_own(n);
     bool mut base_mut = wrapped && ast.ast_is_mut(n);
     if (pos == type_pos.pos_alloc) {
-        // D5.8: `new` gives storage writable at every level
-        // D3.11, D17.3: `void` has no level to mark and `new(void*)` is legal
+        // `new` gives storage writable at every level, the level a `void*`
+        // reaches included. A bare `void` has no level and keeps no mark, so
+        // check_new reports it rather than the type builder.
+        // D3.11, D5.8, D17.3
+        bool first_is_ptr = count > 0 && suffixes[0].kind == types.suffix_kind.s_ptr;
         base_mut = (count == 0 || suffixes[0].kind != types.suffix_kind.s_array)
-            && b->kind != types.type_kind.k_void;
+            && (b->kind != types.type_kind.k_void || first_is_ptr);
         u64 mut k = 0;
         while (k < count) {
             suffixes[k].is_mut =
@@ -1093,7 +1096,9 @@ fn types.node* check_lend(checker mut* ck, types.node* t) {
     case types.type_kind.k_string:
         return types.type_string(&ck->types, false);
     case types.type_kind.k_voidptr:
-        return types.type_voidptr(&ck->types, false);
+        // Lending clears `own` and never the `mut` of `void mut*`.
+        // D3.11
+        return types.type_voidptr(&ck->types, false, t->is_mut);
     default:
         return t;
     }
@@ -3100,7 +3105,7 @@ fn void check_builtin_call(checker mut* ck, ast.node mut* n, ast.sym* s, expr mu
         check_operand(ck, arg, &e);
         if (e.untyped && e.value.kind == consts.cval_kind.cv_null) {
             // D12.2: `del(null)` is a no-op
-            convert(ck, arg, &e, types.type_voidptr(&ck->types, true), "'del'");
+            convert(ck, arg, &e, types.type_voidptr(&ck->types, true, false), "'del'");
             return;
         }
         if (check_poisoned(e.ty)) {
@@ -3954,7 +3959,10 @@ fn bool extern_type_agrees(types.node* a, types.node* b) {
         return a->is_mut == b->is_mut && a->is_own == b->is_own
             && extern_type_agrees(a->elem, b->elem);
     case types.type_kind.k_voidptr:
-        return a->is_own == b->is_own;
+        // `void mut*` and `void*` are two signatures, as `node mut*` and
+        // `node*` are.
+        // D3.11, D9.8
+        return a->is_own == b->is_own && a->is_mut == b->is_mut;
     case types.type_kind.k_fn:
         if (a->is_noreturn != b->is_noreturn || a->params.len != b->params.len
             || !extern_type_agrees(a->elem, b->elem)) {

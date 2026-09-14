@@ -265,8 +265,19 @@ Sections:
 
 ### D3.11 The void pointer
 - owner: `type-system.md`.
-- rule: `void*` is an opaque pointer with no pointee level: no `*`, `->`, indexing or span
-  expression. Conversion to and from any pointer, function pointer or `u64` requires `cast`.
+- rule: `void*` is an opaque pointer with no pointee type: no `*`, `->`, indexing or span
+  expression. It reaches one storage level all the same, which no expression names and which
+  `void mut*` marks writable; `void* mut p` marks the binding instead, so the two are distinct
+  and both legal (D5.2, D5.3). Conversion to and from any pointer, function pointer or `u64`
+  requires `cast`.
+- rationale: mutability is a property of storage, not of the type of that storage. A `void*`
+  reaches storage whose type is unknown, and whether a callee may write that storage is what a C
+  signature states with `const`: `fread(void*)` against `fwrite(const void*)`. Without
+  `void mut*` a program marks the pointer's own storage and not the storage behind it, and
+  `std.libc` cannot declare `malloc` as an allocation the caller may write.
+- history: Amended 2026-09-14 (T-086): until then `void*` had no pointee level at all and
+  `void mut*` was the error "'void' is only a return type or the base of 'void*'". The `mut`
+  costs no run-time representation, since every pointer is one machine word.
 
 ### D3.12 Type identity
 - owner: `type-system.md`.
@@ -470,9 +481,11 @@ Sections:
   `node`), of `node*@` the `@` (level 1 holds `node*` elements, level 2 the nodes), of `i32@@` the
   last `@`, and of `u8@*` the trailing `*` (level 1 holds the span header, level 2 the bytes). Fixed
   arrays and structs do not add a level: their elements and fields share the storage of the value
-  that contains them. `string` has a single level (its characters are never mutable). `void*` has a
-  single level (D3.11).
-- history: Amended 2026-09-10: spans were called slices (D3.5).
+  that contains them. `string` has a single level (its characters are never mutable). `void*` has
+  two: the binding and the storage it reaches, whose type is unknown and whose mutability
+  `void mut*` marks (D3.11).
+- history: Amended 2026-09-14 (T-086): a `void*` had a single level, like a `string`. Amended
+  2026-09-10: spans were called slices (D3.5).
 
 ### D5.3 Where a mut marker goes
 - owner: `core-language.md` (Declarations and mutability), `type-system.md` (Mutability levels).
@@ -486,7 +499,8 @@ Sections:
   every type has one spelling, and a doubled marker does not parse. The outermost position is the
   binding's own storage, so the `mut` immediately before the name says the binding is assignable,
   for `i32 mut x`, `node* mut p` and `u8@ mut s` alike; `string mut s` is rebindable and `string`
-  has no element position (D5.2); `void* mut p` is legal and `void mut*` is not (D3.11).
+  has no element position (D5.2); `void* mut p` marks the binding and `void mut* p` the storage
+  the pointer reaches, and both are legal (D3.11).
 
   | Declaration          | rebind `p = ...`  | write through `*p`, `p->f`, `p[i]` |
   |----------------------|-------------------|------------------------------------|
@@ -507,13 +521,17 @@ Sections:
   | `u8 mut@ mut* out`   | no                | `*out`: yes, bytes: yes            |
   | `u8@ mut* out`       | no                | `*out`: yes, bytes: no             |
   | `node*[4] mut t`     | yes (and slots)   | pointees: no                       |
+  | `void* mut vp`       | yes               | no expression reaches it           |
+  | `void mut* vp`       | no                | no expression reaches it           |
   | `string mut s`       | yes               | never                              |
 
 - rationale: one rule with no exceptions, C's east-const (`int const x`, `node const* p`, `node*
   const p`) with the default inverted, and the same rule places `own` (D17.2); because reference
   suffixes read inside-out (D3.6), the binding's marker sits next to the name in every declaration,
   and no combination is unspellable.
-- history: Amended 2026-09-10: until then a `mut` before the base type marked every level including
+- history: Amended 2026-09-14 (T-086): the rule said "`void* mut p` is legal and `void mut*` is
+  not", and the table held neither row. Amended 2026-09-10: until then a `mut` before the base type
+  marked every level including
   the binding and a postfix `mut` marked the storage holding that pointer or header, which made the
   front `mut` mean the variable for scalars and the data for pointers, swapped C's positions, and
   left "writable target, fixed binding" unspellable. Amended 2026-09-10: spans were called slices
@@ -943,7 +961,7 @@ Sections:
 
 ### D9.8 Extern declarations
 - owner: `module-system.md`.
-- rule: `extern fn i64 write(i32 fd, void* buf, u64 n);` declares a C function with the System V
+- rule: `extern fn i64 write(i32 fd, u8* buf, u64 n);` declares a C function with the System V
   x86-64 ABI. Extern signatures may use only integers, floats, `bool`, `char`, enums (passed as
   `i32`), pointers and function pointers: no spans, strings, structs or arrays, and no variadics.
   Every extern function is declared and called through a variadic LLVM function type (`declare i32
@@ -974,7 +992,10 @@ Sections:
   symbol are one ELF symbol reached through two types, which is the bug the identity rule exists to
   catch. A program that wants a different spelling of `write` or `free` imports `std.libc` and calls
   it rather than redeclaring it.
-- history: Amended 2026-09-10 with D19: the compiler itself set `al` to the vector-register count
+- history: Amended 2026-09-14 (T-086): the example declared `write` with a `void* buf`, which
+  `std.libc` no longer spells that way, so a program that copied the line conflicted with the
+  library's declaration by this decision's own identity rule. Amended 2026-09-10 with D19: the
+  compiler itself set `al` to the vector-register count
   before every extern call, and extended narrow values by hand. Amended 2026-09-11: T-015 found that
   `string ==` needed `memcmp` and stopped rather than invent a fourth declaration group for
   `toolchain.md` 6 item 8; there is no fourth group. Amended 2026-09-11: "identical" did not say
@@ -1598,14 +1619,17 @@ says ownership is "by convention", this section supersedes it.
   and `new(node* own, n)` is `node mut* own mut@ own` whose slots are null, the result being always
   `own` and writable at every level (D5.8) -- which is why `T` may not spell a `mut` of its own:
   `new` supplies every one of them, so there is one spelling for each type. `new(void*)` is legal
-  and yields `void* mut* own`, one pointer slot, since a pointer to `void` has a size; it is
-  `new(void)` that does not, and D10.2 rejects that one. Standard-library functions that allocate
+  and yields `void mut* mut* own`, one pointer slot, since a pointer to `void` has a size and the
+  level it reaches is marked writable like every other (D3.11); it is `new(void)` that is not
+  legal, and D10.2 rejects that one. Standard-library functions that allocate
   return `own` (D13.5). `cast` may add `own` to a pointer or span, adopting memory that came from C
   (`cast(p, u8 mut* own)` for a `void*` from an extern that does not say `own`, the same unsafe
   escape as adding `mut`), and may drop it; the target type of a cast decides (D3.14). Span
   expressions (`buf[..]`, `buf[lo..hi]`) and `.ptr` always yield views, as do `&`, literals and the
   runtime's `args`.
-- history: Amended 2026-09-10: the count moved out of the type, `new(T[n])` to `new(T, n)`. Amended
+- history: Amended 2026-09-14 (T-086): `new(void*)` yielded `void* mut* own`, because the `void`
+  base took no mark while `void mut*` was not a type. Amended 2026-09-10: the count moved out of
+  the type, `new(T[n])` to `new(T, n)`. Amended
   2026-09-10, separately: the restriction read "not itself `own`, `mut` or a reference to `void`",
   which contradicted the `new(node* own, n)` in its own next clause, D10.2's parse rule, and `void*
   own` (D17.1); it was a second statement of D10.2's rule that had drifted from it, so it now cites
@@ -1745,8 +1769,11 @@ says ownership is "by convention", this section supersedes it.
   `del`, transfer, lending, the overwrite check), `core-language.md` (the `move` builtin,
   statements).
 - rule: `own` may appear in `extern` signatures. It is erased, and it documents the C side's
-  convention: `extern fn void* own malloc(u64 n);` (`void*` has no target level, so no `mut` after
-  `void`, D3.11), `extern fn void free(void* own p);`. Signature identity includes `own` (D9.8).
+  convention: `extern fn void mut* own malloc(u64 n);` (the storage malloc answers is storage the
+  caller may write, D3.11), `extern fn void free(void* own p);` (a caller drops the `mut` at the
+  call, D5.4). Signature identity includes `own` (D9.8).
+- history: Amended 2026-09-14 (T-086): `malloc` was declared `void* own`, because `void mut*` was
+  not a type until D3.11 was amended.
 
 ### D17.14 What ownership does not track
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,

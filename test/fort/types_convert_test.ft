@@ -29,7 +29,7 @@ enum scalar_class {
 
 // The scalar types of the matrix, and the sample types the invariants walk.
 u64 SCALARS_MAX = 14;
-u64 SAMPLES_MAX = 30;
+u64 SAMPLES_MAX = 32;
 
 // Whether a value of the type spelled `src` may be used where the type spelled
 // `dst` is expected.
@@ -101,11 +101,11 @@ fn u64 scalar_types(types_env.env mut* e, types.node* mut@ list, scalar_class mu
 // conversion respects them.
 // D3.10
 fn u64 sample_types(types_env.env mut* e, types.node* mut@ list) {
-    string[24] spellings = {"i32", "u8", "bool", "char", "f64", "node*", "node mut*",
+    string[26] spellings = {"i32", "u8", "bool", "char", "f64", "node*", "node mut*",
                             "node mut* own", "node**", "node* mut*", "node*@", "node mut* mut@",
                             "node mut* own mut@ own", "node* own@", "node* own[4]", "i32@",
                             "i32 mut@", "i32[4]", "point", "string", "string own", "void*",
-                            "void* own", "u8 mut@ own mut*"};
+                            "void* own", "void mut*", "void mut* own", "u8 mut@ own mut*"};
     u64 mut n = 0;
     while (n < spellings.len) {
         list[n] = types_env.type_of(e, spellings[n]);
@@ -157,6 +157,20 @@ fn void the_d5_4_conversions_and_their_shape() {
     assert(!assignable(&e, "i32@ mut@", "i32 mut@ mut@"));
     assert(assignable(&e, "i32@", "i32 mut@"));
     assert(!assignable(&e, "i32 mut@", "i32@"));
+    // The storage a `void*` reaches is a level like any other: dropping its
+    // `mut` is the one implicit conversion, and adding it needs a cast.
+    // D3.11, D5.4
+    assert(assignable(&e, "void*", "void mut*"));
+    assert(!assignable(&e, "void mut*", "void*"));
+    assert(assignable(&e, "void* mut", "void mut*"));
+    assert(assignable(&e, "void mut* mut", "void mut*"));
+    // The C `T** -> const T**` hole is closed here too: level 1 of the target
+    // must be immutable before level 2 may be dropped.
+    // D5.4
+    assert(assignable(&e, "void**", "void mut* mut*"));
+    assert(!assignable(&e, "void* mut*", "void mut* mut*"));
+    assert(assignable(&e, "void*@", "void mut* mut@"));
+    assert(!assignable(&e, "void* mut@", "void mut* mut@"));
 }
 
 fn void mutability_drops_through_further_shapes() {
@@ -210,11 +224,16 @@ fn void ownership_is_never_added_implicitly() {
     defer types_env.free(&e);
     assert(!assignable(&e, "string own", "string"));
     assert(!assignable(&e, "void* own", "void*"));
+    assert(!assignable(&e, "void mut* own", "void mut*"));
     assert(!assignable(&e, "u8@ own", "u8@"));
     assert(!assignable(&e, "node* own@ own", "node mut* mut@ own"));
     assert(!assignable(&e, "node* own@", "node*@"));
     // Dropping `own` and mutability together is one conversion.
     assert(assignable(&e, "void*", "void* own"));
+    // An owned writable allocation lends as a plain view; the reverse adds a
+    // mark in each direction.
+    assert(assignable(&e, "void*", "void mut* own"));
+    assert(!assignable(&e, "void mut*", "void* own"));
     assert(assignable(&e, "node* own@", "node* own@ own"));
     assert(assignable(&e, "u8@", "u8@ own"));
 }
@@ -319,6 +338,12 @@ fn void casts_among_pointers_and_u64() {
     assert(castable(&e, "void*", "node*"));
     assert(castable(&e, "node*", "void*"));
     assert(castable(&e, "void* own", "void*"));
+    // The cast-away-const escape reaches the level a `void*` names too.
+    // D3.14
+    assert(castable(&e, "void mut*", "void*"));
+    assert(castable(&e, "void mut*", "node*"));
+    assert(castable(&e, "node mut*", "void*"));
+    assert(castable(&e, "void mut* own", "u64"));
     assert(castable(&e, "u64", "node*"));
     assert(castable(&e, "node*", "u64"));
     assert(castable(&e, "u64", "void*"));
@@ -510,6 +535,8 @@ fn void assignability_is_reflexive_for_every_kind() {
     assert(assignable(&e, "node mut* own", "node mut* own"));
     assert(assignable(&e, "void*", "void*"));
     assert(assignable(&e, "void* own", "void* own"));
+    assert(assignable(&e, "void mut*", "void mut*"));
+    assert(assignable(&e, "void mut* own", "void mut* own"));
     assert(assignable(&e, "i32[4]", "i32[4]"));
     assert(assignable(&e, "i32[3][4]", "i32[3][4]"));
     assert(assignable(&e, "string own", "string own"));
@@ -571,6 +598,7 @@ fn void lending_combines_with_dropping_mutability() {
     assert(assignable(&e, "node mut*", "node mut* own"));
     assert(assignable(&e, "node* own", "node mut* own"));
     assert(assignable(&e, "void*", "void* own"));
+    assert(assignable(&e, "void mut*", "void mut* own"));
     assert(assignable(&e, "string", "string own"));
     // A span of owned strings lends its own mark under the same rule.
     assert(assignable(&e, "string@", "string@ own"));
@@ -624,7 +652,7 @@ fn void every_implicit_conversion_is_also_a_cast() {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
     defer types_env.free(&e);
-    types.node*[30] mut list = {};
+    types.node*[32] mut list = {};
     u64 n = sample_types(&e, list[..]);
     assert(n == SAMPLES_MAX);
     u64 mut d = 0;
@@ -647,7 +675,7 @@ fn void conversion_and_identity_agree_with_themselves() {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
     defer types_env.free(&e);
-    types.node*[30] mut list = {};
+    types.node*[32] mut list = {};
     u64 n = sample_types(&e, list[..]);
     u64 mut i = 0;
     while (i < n) {
@@ -676,7 +704,7 @@ fn void dropping_marks_never_changes_the_shape_or_the_size() {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
     defer types_env.free(&e);
-    types.node*[30] mut list = {};
+    types.node*[32] mut list = {};
     u64 n = sample_types(&e, list[..]);
     u64 mut d = 0;
     while (d < n) {

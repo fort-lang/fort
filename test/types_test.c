@@ -27,6 +27,7 @@ TEST(intern_gives_one_node_per_type, {
     TEST_ASSERT_TRUE(tenv_type(&e, "i32[4]") == tenv_type(&e, "i32[4]"));
     TEST_ASSERT_TRUE(tenv_type(&e, "string") == tenv_type(&e, "string"));
     TEST_ASSERT_TRUE(tenv_type(&e, "void*") == tenv_type(&e, "void*"));
+    TEST_ASSERT_TRUE(tenv_type(&e, "void mut*") == tenv_type(&e, "void mut*"));
     TEST_ASSERT_TRUE(tenv_type(&e, "node mut* own mut@ own") ==
                      tenv_type(&e, "node mut* own mut@ own"));
     tenv_free(&e);
@@ -43,6 +44,13 @@ TEST(intern_separates_marks_and_shapes, {
     TEST_ASSERT_TRUE(tenv_type(&e, "i32*") != tenv_type(&e, "u32*"));
     TEST_ASSERT_TRUE(tenv_type(&e, "string") != tenv_type(&e, "string own"));
     TEST_ASSERT_TRUE(tenv_type(&e, "void*") != tenv_type(&e, "void* own"));
+    // The level a `void*` reaches is part of its identity too.
+    // D3.11
+    TEST_ASSERT_TRUE(tenv_type(&e, "void*") != tenv_type(&e, "void mut*"));
+    TEST_ASSERT_TRUE(tenv_type(&e, "void mut*") != tenv_type(&e, "void mut* own"));
+    // The `mut` of `void* mut` is the binding's, which no node holds.
+    // D5.3
+    TEST_ASSERT_TRUE(tenv_type(&e, "void* mut") == tenv_type(&e, "void*"));
     TEST_ASSERT_TRUE(tenv_type(&e, "node**") != tenv_type(&e, "node* mut*"));
     tenv_free(&e);
 })
@@ -289,10 +297,14 @@ TEST(the_levels_of_a_chain_of_suffixes, {
     TEST_ASSERT_EQ_UINT64((uint64_t)type_levels(tenv_type(&e, "i32[4]*")), (uint64_t)1);
     TEST_ASSERT_EQ_UINT64((uint64_t)type_levels(tenv_type(&e, "i32[3][4]")), (uint64_t)0);
     TEST_ASSERT_EQ_UINT64((uint64_t)type_levels(tenv_type(&e, "point")), (uint64_t)0);
-    // `string` and `void*` have no level behind the binding.
+    // `string` has no level behind the binding; a `void*` reaches one, whose
+    // storage has no type and which `void mut*` marks writable.
     // D5.2, D3.11
     TEST_ASSERT_EQ_UINT64((uint64_t)type_levels(tenv_type(&e, "string")), (uint64_t)0);
-    TEST_ASSERT_EQ_UINT64((uint64_t)type_levels(tenv_type(&e, "void*")), (uint64_t)0);
+    TEST_ASSERT_EQ_UINT64((uint64_t)type_levels(tenv_type(&e, "void*")), (uint64_t)1);
+    TEST_ASSERT_EQ_UINT64((uint64_t)type_levels(tenv_type(&e, "void mut*")), (uint64_t)1);
+    TEST_ASSERT_EQ_UINT64((uint64_t)type_levels(tenv_type(&e, "void**")), (uint64_t)2);
+    TEST_ASSERT_EQ_UINT64((uint64_t)type_levels(tenv_type(&e, "void*@")), (uint64_t)2);
     TEST_ASSERT_EQ_UINT64((uint64_t)type_levels(tenv_type(&e, "i32[4]@")), (uint64_t)1);
     TEST_ASSERT_EQ_UINT64((uint64_t)type_levels(tenv_type(&e, "i32@[4]")), (uint64_t)1);
     tenv_free(&e);
@@ -310,10 +322,15 @@ TEST(ref_at_walks_the_chain_outermost_first, {
     TEST_ASSERT_TRUE(type_ref_at(arr, 1) == arr->elem);
     TEST_ASSERT_TRUE(type_ref_at(arr, 1)->own);
     TEST_ASSERT_NULL(type_ref_at(arr, 2));
-    // `string` and `void*` carry an `own` mark but add no level.
+    // `string` carries an `own` mark but adds no level.
     TEST_ASSERT_TRUE(type_ref_at(tenv_type(&e, "string own"), 1)->own);
-    TEST_ASSERT_TRUE(type_ref_at(tenv_type(&e, "void* own"), 1)->own);
     TEST_ASSERT_NULL(type_ref_at(tenv_type(&e, "string own"), 2));
+    // A `void*` is the reference at level 1 and its target has no type, so the
+    // walk stops there.
+    // D3.11
+    TEST_ASSERT_TRUE(type_ref_at(tenv_type(&e, "void* own"), 1)->own);
+    TEST_ASSERT_TRUE(type_ref_at(tenv_type(&e, "void mut*"), 1)->mut);
+    TEST_ASSERT_NULL(type_ref_at(tenv_type(&e, "void mut*"), 2));
     TEST_ASSERT_NULL(type_ref_at(tenv_type(&e, "i32"), 1));
     TEST_ASSERT_NULL(type_ref_at(tenv_type(&e, "i32[3][4]"), 1));
     tenv_free(&e);
@@ -331,7 +348,14 @@ TEST(level_mut_reports_the_level_of_each_reference, {
     TEST_ASSERT_FALSE(type_level_mut(tenv_type(&e, "node*"), 2));
     TEST_ASSERT_FALSE(type_level_mut(tenv_type(&e, "string"), 1));
     TEST_ASSERT_FALSE(type_level_mut(tenv_type(&e, "string own"), 1));
+    // The `mut` of `void* mut` is level 0, the binding; the `mut` of `void mut*`
+    // is level 1, the storage the pointer reaches.
+    // D3.11, D5.3
     TEST_ASSERT_FALSE(type_level_mut(tenv_type(&e, "void* mut"), 1));
+    TEST_ASSERT_FALSE(type_level_mut(tenv_type(&e, "void*"), 1));
+    TEST_ASSERT_TRUE(type_level_mut(tenv_type(&e, "void mut*"), 1));
+    TEST_ASSERT_TRUE(type_level_mut(tenv_type(&e, "void mut* own mut"), 1));
+    TEST_ASSERT_FALSE(type_level_mut(tenv_type(&e, "void mut*"), 2));
     tenv_free(&e);
 })
 

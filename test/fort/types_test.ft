@@ -39,6 +39,7 @@ fn void intern_gives_one_node_per_type() {
     assert(types_env.type_of(&e, "i32[4]") == types_env.type_of(&e, "i32[4]"));
     assert(types_env.type_of(&e, "string") == types_env.type_of(&e, "string"));
     assert(types_env.type_of(&e, "void*") == types_env.type_of(&e, "void*"));
+    assert(types_env.type_of(&e, "void mut*") == types_env.type_of(&e, "void mut*"));
     assert(types_env.type_of(&e, "node mut* own mut@ own") ==
            types_env.type_of(&e, "node mut* own mut@ own"));
 }
@@ -55,6 +56,13 @@ fn void intern_separates_marks_and_shapes() {
     assert(types_env.type_of(&e, "i32*") != types_env.type_of(&e, "u32*"));
     assert(types_env.type_of(&e, "string") != types_env.type_of(&e, "string own"));
     assert(types_env.type_of(&e, "void*") != types_env.type_of(&e, "void* own"));
+    // The level a `void*` reaches is part of its identity too.
+    // D3.11
+    assert(types_env.type_of(&e, "void*") != types_env.type_of(&e, "void mut*"));
+    assert(types_env.type_of(&e, "void mut*") != types_env.type_of(&e, "void mut* own"));
+    // The `mut` of `void* mut` is the binding's, which no node holds.
+    // D5.3
+    assert(types_env.type_of(&e, "void* mut") == types_env.type_of(&e, "void*"));
     assert(types_env.type_of(&e, "node**") != types_env.type_of(&e, "node* mut*"));
 }
 
@@ -316,10 +324,14 @@ fn void the_levels_of_a_chain_of_suffixes() {
     assert(types.type_levels(types_env.type_of(&e, "i32[4]*")) == 1);
     assert(types.type_levels(types_env.type_of(&e, "i32[3][4]")) == 0);
     assert(types.type_levels(types_env.type_of(&e, "point")) == 0);
-    // `string` and `void*` have no level behind the binding.
+    // `string` has no level behind the binding; a `void*` reaches one, whose
+    // storage has no type and which `void mut*` marks writable.
     // D5.2, D3.11
     assert(types.type_levels(types_env.type_of(&e, "string")) == 0);
-    assert(types.type_levels(types_env.type_of(&e, "void*")) == 0);
+    assert(types.type_levels(types_env.type_of(&e, "void*")) == 1);
+    assert(types.type_levels(types_env.type_of(&e, "void mut*")) == 1);
+    assert(types.type_levels(types_env.type_of(&e, "void**")) == 2);
+    assert(types.type_levels(types_env.type_of(&e, "void*@")) == 2);
     assert(types.type_levels(types_env.type_of(&e, "i32[4]@")) == 1);
     assert(types.type_levels(types_env.type_of(&e, "i32@[4]")) == 1);
 }
@@ -337,10 +349,15 @@ fn void ref_at_walks_the_chain_outermost_first() {
     assert(types.type_ref_at(arr, 1) == arr->elem);
     assert(types.type_ref_at(arr, 1)->is_own);
     assert(types.type_ref_at(arr, 2) == null);
-    // `string` and `void*` carry an `own` mark but add no level.
+    // `string` carries an `own` mark but adds no level.
     assert(types.type_ref_at(types_env.type_of(&e, "string own"), 1)->is_own);
-    assert(types.type_ref_at(types_env.type_of(&e, "void* own"), 1)->is_own);
     assert(types.type_ref_at(types_env.type_of(&e, "string own"), 2) == null);
+    // A `void*` is the reference at level 1 and its target has no type, so the
+    // walk stops there.
+    // D3.11
+    assert(types.type_ref_at(types_env.type_of(&e, "void* own"), 1)->is_own);
+    assert(types.type_ref_at(types_env.type_of(&e, "void mut*"), 1)->is_mut);
+    assert(types.type_ref_at(types_env.type_of(&e, "void mut*"), 2) == null);
     assert(types.type_ref_at(types_env.type_of(&e, "i32"), 1) == null);
     assert(types.type_ref_at(types_env.type_of(&e, "i32[3][4]"), 1) == null);
 }
@@ -358,7 +375,14 @@ fn void level_mut_reports_the_level_of_each_reference() {
     assert(!types.type_level_mut(types_env.type_of(&e, "node*"), 2));
     assert(!types.type_level_mut(types_env.type_of(&e, "string"), 1));
     assert(!types.type_level_mut(types_env.type_of(&e, "string own"), 1));
+    // The `mut` of `void* mut` is level 0, the binding; the `mut` of `void mut*`
+    // is level 1, the storage the pointer reaches.
+    // D3.11, D5.3
     assert(!types.type_level_mut(types_env.type_of(&e, "void* mut"), 1));
+    assert(!types.type_level_mut(types_env.type_of(&e, "void*"), 1));
+    assert(types.type_level_mut(types_env.type_of(&e, "void mut*"), 1));
+    assert(types.type_level_mut(types_env.type_of(&e, "void mut* own mut"), 1));
+    assert(!types.type_level_mut(types_env.type_of(&e, "void mut*"), 2));
 }
 
 fn i32 main() {

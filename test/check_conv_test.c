@@ -499,6 +499,43 @@ TEST(a_declaration_of_a_libc_symbol_is_held_against_the_librarys, {
                                             "fn i32 main() {\n    return 0;\n}\n"));
 })
 
+TEST(an_immutable_buffer_is_refused_at_every_libc_entry_that_writes, {
+    // The library reaches the real `std/libc.ft`, so this is its signatures and
+    // not a copy of them: `read`, `memset` and `memcpy` take a `u8 mut*` and
+    // `write` and `memcmp` a `u8*`. The count is what the corpus cannot hold --
+    // `judge_fail` groups by (file, line), so
+    // `fail/ffi/007_immutable_buffer_destination.ft` keeps the text and the
+    // position of each message and this keeps the number.
+    // D3.11, D9.8
+    TEST_ASSERT_FALSE(
+        check_src_with_library("import std.libc;\n"
+                               "fn i32 main() {\n"
+                               "    u8[8] frozen = {1, 2, 3, 4, 5, 6, 7, 8};\n"
+                               "    u8@ view = frozen[..];\n"
+                               "    i64 n = libc.read(0, view.ptr, view.len);\n"
+                               "    libc.memset(view.ptr, 0, view.len);\n"
+                               "    libc.memcpy(view.ptr, view.ptr, view.len);\n"
+                               "    i64 w = libc.write(1, view.ptr, view.len);\n"
+                               "    i32 c = libc.memcmp(view.ptr, view.ptr, view.len);\n"
+                               "    return cast(n + w, i32) + c;\n"
+                               "}\n"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)3);
+    TEST_ASSERT_TRUE(said("the argument expects u8 mut*, not u8*"));
+    // The two that only read the buffer are what makes the other three a rule
+    // and not a blanket refusal: the same span reaches them and nothing is
+    // reported.
+    TEST_ASSERT_TRUE(
+        check_src_with_library("import std.libc;\n"
+                               "fn i32 main() {\n"
+                               "    u8[8] frozen = {1, 2, 3, 4, 5, 6, 7, 8};\n"
+                               "    u8@ view = frozen[..];\n"
+                               "    i64 w = libc.write(1, view.ptr, view.len);\n"
+                               "    i32 c = libc.memcmp(view.ptr, view.ptr, view.len);\n"
+                               "    return cast(w, i32) + c;\n"
+                               "}\n"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)0);
+})
+
 TEST(a_fort_rt_name_keeps_its_own_signature, {
     // No table holds it: a C symbol of that name is an ordinary extern,
     // whatever it is called.
@@ -739,6 +776,7 @@ int main(int argc, char** argv) {
     TEST_RUN(a_fort_rt_name_is_an_ordinary_extern_declaration);
     TEST_RUN(main_is_reserved_like_fort_entry);
     TEST_RUN(a_declaration_of_a_libc_symbol_is_held_against_the_librarys);
+    TEST_RUN(an_immutable_buffer_is_refused_at_every_libc_entry_that_writes);
     TEST_RUN(a_fort_rt_name_keeps_its_own_signature);
     TEST_RUN(a_noreturn_function_pointer_keeps_its_type);
     TEST_RUN(an_importer_is_checked_although_its_import_did_not_parse);

@@ -1,0 +1,34 @@
+//! fail
+import std.libc;
+import std.mem;
+
+// C fixes the element type of read, write, memcpy, memmove, memcmp and memset
+// as bytes, so std.libc declares them with u8* and u8 mut*, and the
+// destination carries the mut that C's prototype writes as the absence of
+// const (stdlib.md 2.2). An immutable buffer as a write destination is
+// therefore a compile error. Before `void mut*` the argument was
+// `cast(view.ptr, void*)` at every one of these calls, which the type system
+// could not tell from a writable one.
+// D3.11, D5.4, D9.8
+fn i32 nothing(void* a, void* b) {
+    return 0;
+}
+
+fn i32 main() {
+    u8[8] frozen = {1, 2, 3, 4, 5, 6, 7, 8};
+    u8@ view = frozen[..];
+
+    // The four byte functions that write their destination.
+    i64 n = libc.read(0, view.ptr, view.len); //! error: the argument expects u8 mut*, not u8*
+    libc.memset(view.ptr, 0, view.len); //! error: the argument expects u8 mut*, not u8*
+    libc.memcpy(view.ptr, view.ptr, view.len); //! error: the argument expects u8 mut*, not u8*
+    mem.copy(view, view); //! error: the argument expects u8 mut@, not u8@
+
+    // The two that only read it are legal, and so is a write of it.
+    i64 w = libc.write(1, view.ptr, view.len);
+    i32 c = libc.memcmp(view.ptr, view.ptr, view.len);
+
+    // The same rule at the level a `void*` reaches: qsort permutes the bytes.
+    libc.qsort(cast(view.ptr, void*), 2, 4, nothing); //! error: expects void mut*, not void*
+    return cast(n + w, i32) + c;
+}

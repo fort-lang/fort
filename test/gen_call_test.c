@@ -497,6 +497,74 @@ TEST(two_runs_over_a_call_module_produce_byte_identical_text, {
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
+// The same module twice, with `void mut*` in the place of every `void*`: an
+// extern declaration, a parameter, a result, a span element, a local and the
+// target of an out-parameter. The two sources differ in nothing else.
+// D3.11
+static const char VOID_PTR_SOURCE[] = "extern fn i64 blit(i32 fd, void* buf, u64 n);\n"
+                                      "fn void give(void* p) { }\n"
+                                      "fn void* pass(void* p, void*@ s, void* mut* out) {\n"
+                                      "    *out = p;\n"
+                                      "    give(s[0]);\n"
+                                      "    return p;\n"
+                                      "}\n"
+                                      "fn i32 main() {\n"
+                                      "    i32 mut x = 1;\n"
+                                      "    void* p = cast(&x, void*);\n"
+                                      "    void* mut slot = p;\n"
+                                      "    void*[2] mut many = {};\n"
+                                      "    void*@ mut all = {};\n"
+                                      "    many[0] = p;\n"
+                                      "    all = many[..];\n"
+                                      "    void* back = pass(p, all, &slot);\n"
+                                      "    i64 n = blit(1, back, 0);\n"
+                                      "    println(back == p, \" \", slot == p, \" \", n);\n"
+                                      "    return 0;\n"
+                                      "}\n";
+
+static const char VOID_MUT_PTR_SOURCE[] =
+    "extern fn i64 blit(i32 fd, void mut* buf, u64 n);\n"
+    "fn void give(void mut* p) { }\n"
+    "fn void mut* pass(void mut* p, void mut*@ s, void mut* mut* out) {\n"
+    "    *out = p;\n"
+    "    give(s[0]);\n"
+    "    return p;\n"
+    "}\n"
+    "fn i32 main() {\n"
+    "    i32 mut x = 1;\n"
+    "    void mut* p = cast(&x, void mut*);\n"
+    "    void mut* mut slot = p;\n"
+    "    void mut*[2] mut many = {};\n"
+    "    void mut*@ mut all = {};\n"
+    "    many[0] = p;\n"
+    "    all = many[..];\n"
+    "    void mut* back = pass(p, all, &slot);\n"
+    "    i64 n = blit(1, back, 0);\n"
+    "    println(back == p, \" \", slot == p, \" \", n);\n"
+    "    return 0;\n"
+    "}\n";
+
+TEST(a_void_mut_pointer_emits_the_text_a_void_pointer_emits, {
+    // Every pointer is one machine word, so the mark a `void*` carries is a
+    // rule of the type system and reaches no instruction, no signature and no
+    // size. The two modules are one text, byte for byte.
+    // D3.1, D3.11, D19.2
+    TEST_ASSERT_TRUE(strcmp(VOID_PTR_SOURCE, VOID_MUT_PTR_SOURCE) != 0);
+    TEST_ASSERT_TRUE(emit(VOID_PTR_SOURCE));
+    static char plain[32768];
+    TEST_ASSERT_TRUE(strlen(ir()) < sizeof plain);
+    TEST_UNUSED(snprintf(plain, sizeof plain, "%s", ir()));
+    TEST_ASSERT_EQ_STR(
+        found("define dso_local ptr @\"main.pass\"(ptr %p.in, ptr %s.in, ptr %out.in)"),
+        "define dso_local ptr @\"main.pass\"(ptr %p.in, ptr %s.in, ptr %out.in)");
+    TEST_ASSERT_EQ_STR(found("declare i64 @blit(i32, ptr, i64, ...)"),
+                       "declare i64 @blit(i32, ptr, i64, ...)");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+    TEST_ASSERT_TRUE(emit(VOID_MUT_PTR_SOURCE));
+    TEST_ASSERT_EQ_STR(ir(), plain);
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
 // NOLINTEND(readability-magic-numbers)
 
 int main(int argc, char** argv) {
@@ -536,6 +604,7 @@ int main(int argc, char** argv) {
     TEST_RUN(every_block_of_a_call_module_ends_in_exactly_one_terminator);
     TEST_RUN(a_call_module_verifies_in_release_mode_too);
     TEST_RUN(two_runs_over_a_call_module_produce_byte_identical_text);
+    TEST_RUN(a_void_mut_pointer_emits_the_text_a_void_pointer_emits);
     gen_done();
     TEST_EXIT();
 }

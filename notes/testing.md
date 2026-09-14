@@ -163,10 +163,15 @@ bullet at a time and without a rewrite.
   that adds, moves or removes a diagnostic asserts the count where a test can read it --
   `diag_lines()` in `test/*_test.c` or `check_env.errors(&e)` in `test/fort/*_test.ft` -- and
   uses the `fail` test for the text and the position.
-- **A `fail` test may not mix a lexical with a semantic diagnostic.** `lex_file` reports, and the
-  driver then stops before the checker runs (D14.2), so a file whose lexical error is annotated
-  alongside an expected type error never produces the second one and the run fails on the missing
-  annotation. Split them into two files. Found by T-029 while filling the `fail/lexer` gaps.
+- **A `fail` test may not mix a lexical or a syntax diagnostic with a semantic one.** `lex_file`
+  reports, and the driver then stops before the checker runs (D14.2), so a file whose lexical
+  error is annotated alongside an expected type error never produces the second one and the run
+  fails on the missing annotation. Split them into two files. Found by T-029 while filling the
+  `fail/lexer` gaps. A parser diagnostic does the same thing, and it is easier to write by
+  accident, because a marker the parser refuses reads like a marker the type builder refuses:
+  T-086 wrote five bad `void` declarations into one test and got three parser messages and
+  nothing at all for the two the checker owns, `void mut v` and `void mut@ s`. Check which pass
+  owns each message (`fort --check` prints them all) before annotating a second line.
 - **A whole directory in `xfail.txt` hides a class of programs from every pass behind it.** Both
   bugs the deep review of T-015 found were at a module boundary, because `run/modules/` is
   entirely expected to fail, so no program with two modules had ever reached the emitter: an

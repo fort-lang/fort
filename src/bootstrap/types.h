@@ -6,11 +6,12 @@
 //
 // Level model. A type is a chain of storage levels: level 0 is the binding's
 // own storage and lives outside the type (the `mut0` of the declaration, which
-// the caller holds); every pointer or span node carries the mutability of the
-// storage it reaches (`mut`, the next level) and whether the reference it
-// represents is owned (`own`). Fixed arrays add no level. `string` and `void*`
-// have no target level, so their `mut` is always false.
-// D5.2, D17.2
+// the caller holds); every pointer, `void*` or span node carries the mutability
+// of the storage it reaches (`mut`, the next level) and whether the reference it
+// represents is owned (`own`). Fixed arrays add no level. `string` has no target
+// level, so its `mut` is always false. A `void*` reaches a level whose type
+// cannot be written, and `void mut*` marks that level writable.
+// D3.11, D5.2, D17.2
 //
 // A written type marks each of those storages once, in the position that
 // follows the type element occupying it: after the base type for the values of
@@ -44,7 +45,7 @@ typedef enum {
     TYPE_VOID,    // `void`: a return type or the base of `void*`
     TYPE_PRIM,    // a primitive (prim.h)
     TYPE_PTR,     // `T*`, `T* own`, `T mut*`
-    TYPE_VOIDPTR, // D3.11: `void*`, `void* own`
+    TYPE_VOIDPTR, // D3.11: `void*`, `void* own`, `void mut*`
     TYPE_FN,      // D3.10: `fn R(P1, P2)`
     TYPE_ARRAY,   // D3.4: `T[N]`
     TYPE_SPAN,    // D3.5: `T@`, `T@ own`, `T mut@`
@@ -75,7 +76,8 @@ typedef struct type type_t;
 struct type {
     type_kind_t kind;
     prim_kind_t prim;            // TYPE_PRIM
-    bool mut;                    // TYPE_PTR, TYPE_SPAN: the storage reached is mutable
+    bool mut;                    // TYPE_PTR, TYPE_VOIDPTR, TYPE_SPAN: the storage reached is
+                                 // mutable
     bool own;                    // TYPE_PTR, TYPE_VOIDPTR, TYPE_SPAN, TYPE_STRING
     bool noreturn;               // TYPE_FN: `fn noreturn(...)`, with elem void
     const type_t* elem;          // pointee, element or return type
@@ -112,7 +114,7 @@ const type_t* type_error(type_table_t* tt);
 /// `k` must not be PRIM_VOID: `void` is a type kind of its own (type_void).
 const type_t* type_prim(type_table_t* tt, prim_kind_t k);
 const type_t* type_string(type_table_t* tt, bool own);
-const type_t* type_voidptr(type_table_t* tt, bool own);
+const type_t* type_voidptr(type_table_t* tt, bool own, bool mut);
 
 /// `elem` must not be void (use type_voidptr) or the null type.
 const type_t* type_ptr(type_table_t* tt, const type_t* elem, bool own, bool mut);
@@ -147,22 +149,23 @@ bool type_is_int(const type_t* t);
 bool type_is_float(const type_t* t);
 bool type_is_scalar(const type_t* t); // integer, float, bool, char, enum
 
-/// The storage levels behind level 0: one per pointer or span node on the
-/// chain, fixed arrays adding none; `string` and `void*` add none.
-/// D5.2
+/// The storage levels behind level 0: one per pointer, `void*` or span node on
+/// the chain, fixed arrays adding none; `string` adds none.
+/// D3.11, D5.2
 uint32_t type_levels(const type_t* t);
 
 /// The reference stored at level k - 1 and reaching level k, for k >= 1: the
 /// outermost pointer, `void*`, span or string of `t` (behind any fixed arrays) for
 /// k == 1, then inward; NULL beyond the chain. Its `mut` is the mutability of
-/// level k and its `own` the ownership mark of that reference. A `string` or
-/// `void*` node is reported, since it carries an `own` mark, although it adds no
-/// level.
+/// level k and its `own` the ownership mark of that reference. A `string` node is
+/// reported, since it carries an `own` mark, although it adds no level.
 /// D17.2
 const type_t* type_ref_at(const type_t* t, uint32_t k);
 
 /// The mutability of level k >= 1: false beyond the chain and for the
-/// characters of a string.
+/// characters of a string. Level 1 of a `void*` is the storage it reaches,
+/// which `void mut*` marks writable.
+/// D3.11
 bool type_level_mut(const type_t* t, uint32_t k);
 
 /// Whether a struct or fixed array contains an `own` reference by value, directly

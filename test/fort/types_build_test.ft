@@ -82,9 +82,12 @@ fn void the_d3_6_shapes_are_the_ones_it_names() {
     types.node* m = types_env.type_of(&e, "i32[3][4]");
     assert(m->len == 3);
     assert(m->elem->len == 4);
-    // `void*` is its own kind, with no pointee level.
+    // `void*` is its own kind, with no pointee type.
     // D3.11
     assert(types_env.type_of(&e, "void*")->kind == types.type_kind.k_voidptr);
+    assert(types_env.type_of(&e, "void mut*")->kind == types.type_kind.k_voidptr);
+    assert(types_env.type_of(&e, "void mut*")->is_mut);
+    assert(!types_env.type_of(&e, "void*")->is_mut);
     assert(types_env.type_of(&e, "void**")->kind == types.type_kind.k_ptr);
     assert(types_env.type_of(&e, "void**")->elem->kind == types.type_kind.k_voidptr);
 }
@@ -158,11 +161,24 @@ fn void builder_errors_of_lengths_and_void() {
     assert(types_env.spell(&e, "void**") == "void**");
     assert(types_env.spell(&e, "void*@") == "void*@");
     assert(types_env.spell_decl(&e, "void* mut") == "void* mut");
-    // `void` has no target level, so `void mut*` and `void own` are errors,
-    // and a span or an array of `void` does not exist.
+    // The storage a `void*` reaches has no type, and `void mut*` marks it
+    // writable; the two `mut` positions are distinct and both spell back.
+    // D3.11, D5.3
+    assert(types_env.spell(&e, "void mut*") == "void mut*");
+    assert(types_env.spell_decl(&e, "void mut* mut") == "void mut* mut");
+    assert(types_env.spell(&e, "void mut* own") == "void mut* own");
+    assert(types_env.spell_decl(&e, "void mut* own mut") == "void mut* own mut");
+    assert(types_env.spell(&e, "void mut**") == "void mut**");
+    assert(types_env.spell(&e, "void mut* mut*") == "void mut* mut*");
+    assert(types_env.spell(&e, "void mut*@") == "void mut*@");
+    assert(types_env.spell(&e, "void mut* mut@ own") == "void mut* mut@ own");
+    // `void` still names no storage of its own, so every other marker on it is
+    // an error, and a span or an array of `void` does not exist.
     // D3.11, D5.3
     string msg = "error: 'void' is only a return type or the base of 'void*'";
-    assert(types_env.spell(&e, "void mut*") == msg);
+    assert(types_env.spell(&e, "void mut@") == msg);
+    assert(types_env.spell(&e, "void mut[4]") == msg);
+    assert(types_env.spell(&e, "void own*") == msg);
     assert(types_env.spell(&e, "void own") == msg);
     assert(types_env.spell(&e, "void@") == msg);
     assert(types_env.spell(&e, "void[4]") == msg);
@@ -268,7 +284,15 @@ fn void the_placement_rule_on_further_shapes() {
     assert(types_env.muts(&e, "point mut* mut") == "yy");
     assert(types_env.muts(&e, "string@ mut") == "yn");
     assert(types_env.muts(&e, "string mut@") == "ny");
-    assert(types_env.muts(&e, "void* mut") == "y");
+    // A `void*` reaches a level whose storage has no type, so it has two
+    // positions: the binding and the storage behind the pointer.
+    // D3.11, D5.2
+    assert(types_env.muts(&e, "void*") == "nn");
+    assert(types_env.muts(&e, "void* mut") == "yn");
+    assert(types_env.muts(&e, "void mut*") == "ny");
+    assert(types_env.muts(&e, "void mut* mut") == "yy");
+    assert(types_env.muts(&e, "void mut* mut*") == "nyy");
+    assert(types_env.muts(&e, "void mut* mut@ mut") == "yyy");
     // Out-parameters, the shape the rule names.
     // D3.6
     assert(types_env.muts(&e, "u8@*") == "nnn");
@@ -694,7 +718,8 @@ fn void the_builder_interns_what_the_constructors_intern() {
     assert(types_env.type_of(&e, "node mut* own") == types.type_ptr(&e.tt, e.node, true, true));
     assert(types_env.type_of(&e, "i32 mut@") == types.type_span(&e.tt, i32t, false, true));
     assert(types_env.type_of(&e, "string own") == types.type_string(&e.tt, true));
-    assert(types_env.type_of(&e, "void* own") == types.type_voidptr(&e.tt, true));
+    assert(types_env.type_of(&e, "void* own") == types.type_voidptr(&e.tt, true, false));
+    assert(types_env.type_of(&e, "void mut*") == types.type_voidptr(&e.tt, false, true));
     assert(types_env.type_of(&e, "i32[4]") == types.type_array(&e.tt, i32t, 4));
 }
 

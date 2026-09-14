@@ -53,8 +53,8 @@ type says that this value is the one responsible for freeing the allocation (D17
 | `new(T*)`         | `T mut* mut* own`     | one zeroed pointer slot (D10.2)              |
 | `new(T*, n)`      | `T mut* mut@ own`     | `n` zeroed slots, each a borrowed pointer    |
 | `new(T* own, n)`  | `T mut* own mut@ own` | `n` owned slots, all `null` (D17.3)          |
-| `new(void*)`      | `void* mut* own`      | one zeroed `void*` slot (D17.3)              |
-| `new(void*, n)`   | `void* mut@ own`      | `n` zeroed `void*` slots (`std.vec`)         |
+| `new(void*)`      | `void mut* mut* own`  | one zeroed `void*` slot (D17.3)              |
+| `new(void*, n)`   | `void mut* mut@ own`  | `n` zeroed `void*` slots (`std.vec`)         |
 | `new(T{...})`     | error                 | allocate, then assign the fields             |
 | `new(T@)`         | error                 | a span header is not an object to allocate   |
 | `new(void)`       | error                 | `void` has no size                           |
@@ -75,8 +75,9 @@ a `node mut* mut* own`, `new(node*, n)` yields a `node mut* mut@ own`, a span of
 pointers, and `new(node* own, n)` yields a `node mut* own mut@ own`, a span of owned slots that
 are all `null` (D17.3). `void*` is an element type like any other, since a pointer to `void` has a
 size: `new(void*)` is one slot and `new(void*, n)` is the span `std.vec`'s `ptr_vec` allocates.
-`void` itself has no target level to mark writable, so no `mut` appears after it (D3.11) and
-`new(void)` stays the error above (D10.2, D17.3).
+The level a `void*` reaches is marked writable like every other level, so the slots hold
+`void mut*` (D3.11, D5.8). `void` itself names no storage, so `new(void)` stays the error above
+(D10.2, D17.3).
 
 The result is an rvalue that must land in an `own` place (D17.8): the initializer of an `own`
 declaration, an `own` parameter, an `own` field or element, or `del` itself. Binding it to a
@@ -169,7 +170,7 @@ may be released with `del` once it is adopted, and memory from `new` may be rele
 `mut` (D17.3):
 
 ```fort
-extern fn void* own malloc(u64 n);   // void* has no target level, so no mut (D17.13)
+extern fn void mut* own malloc(u64 n);   // storage of no type the caller may write (D17.13)
 extern fn void free(void* own p);
 
 i32 mut* own p = cast(malloc(sizeof(i32)), i32 mut* own);   // not zeroed: C did not clear it
@@ -533,15 +534,16 @@ del(raw);                            // frees the byte; one now dangles
 cannot be indexed and has no span expression; every conversion to and from it is a `cast` (D3.11).
 It exists for `extern` signatures and for storing an address whose type is recovered later with
 `cast`.
-`void* own` is its owning form (D17.1): what `malloc` returns and `free` takes (D17.13), a
-legal operand of `del`, and the type a container such as `ptr_vec` would use if it owned what it
-stores. A `cast` between `void* own` and a typed `own` pointer yields `own` because its target
-says so, and an `own` lvalue operand must therefore be moved (D3.14, D17.5). It is never
-`void mut* own`: `void*` has no target level for the `mut` to describe (D17.13).
+`void* own` is its owning form (D17.1): what `free` takes (D17.13), a legal operand of `del`, and
+the type a container such as `ptr_vec` would use if it owned what it stores. A `cast` between
+`void* own` and a typed `own` pointer yields `own` because its target says so, and an `own` lvalue
+operand must therefore be moved (D3.14, D17.5). `malloc` answers `void mut* own`, because the
+storage it gives back is storage the caller may write, and that mark drops to `void* own` at the
+call to `free` (D3.11, D5.4).
 
 ```fort
-extern fn void* own malloc(u64 n);
-void* own blob = malloc(16);
+extern fn void mut* own malloc(u64 n);
+void mut* own blob = malloc(16);
 point mut* own pt = cast(move(blob), point mut* own);   // blob == null afterwards
 point mut* own pt2 = cast(blob, point mut* own);        // error: copying own lvalue needs move
 del(pt);
@@ -678,21 +680,23 @@ Spans, strings, structs and fixed arrays never cross an `extern` boundary (D9.8,
 `.ptr` and `.len`, cast the pointer to the declared C type, and pass a struct by address.
 
 ```fort
-extern fn i64 write(i32 fd, void* buf, u64 n);
-extern fn void* memset(void* p, i32 c, u64 n);
+extern fn i64 write(i32 fd, u8* buf, u64 n);
+extern fn u8 mut* memset(u8 mut* p, i32 c, u64 n);
 
 fn void put(string s) {
-    write(1, cast(s.ptr, void*), s.len);
+    write(1, cast(s.ptr, u8*), s.len);
 }
 fn void clear(u8 mut@ b) {
-    memset(cast(b.ptr, void*), 0, b.len);
+    memset(b.ptr, 0, b.len);
 }
 extern fn void sum(i32@ xs);        // error: spans cannot cross an extern boundary
 ```
 
 `own` in an `extern` signature is erased and records who frees (D17.13): a result type
-`void* own` says the caller frees, a parameter type `void* own` says the callee does; `void*`
-takes no `mut`, having no target level (D17.13, D5.5).
+`void* own` says the caller frees, a parameter type `void* own` says the callee does. The
+`mut` of `void mut*` is separate and says whether C may write the storage the address names, so
+`libc.malloc` is `void mut* own` and `libc.free` takes `void* own` (D3.11, D5.4); the outermost
+position carries no `mut` on a result, which has no binding (D5.5).
 Memory received from C is used through `p[lo..hi]` (section 3.1) and released with `del` or the
 C library's own function, whichever the C side documents; `new`/`del` and `malloc`/`free` are
 interchangeable (D10.3). Adoption, a `cast` that adds `own` to a pointer or span, is how
@@ -703,7 +707,7 @@ one `own` value exists per allocation (D17.14). `del` of adopted memory that doe
 allocation is undefined (D10.7).
 
 ```fort
-extern fn void* own malloc(u64 n);
+extern fn void mut* own malloc(u64 n);
 extern fn void free(void* own p);
 extern fn char mut* read_line(u64 mut* len);   // C documents: the caller frees with free()
 

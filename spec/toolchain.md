@@ -454,8 +454,11 @@ struct enum_member { i32 value; char* name; }
 // at `loc`. `free` releases what `alloc` returned; a null `p` is a no-op.
 // Ownership (D17) is erased: the runtime sees plain pointers, and the compiler
 // zeroes a `del` or `move` operand itself (section 6, items 17 and 18). The
-// result is `void* own` and carries no `mut`, `void*` having no target level
-// (D17.13), which is `libc.malloc`'s type too (`stdlib.md` 2.2).
+// result is `void* own`, while `libc.malloc`, which `alloc` calls through
+// `calloc`, answers `void mut* own`: storage of no type the caller may write
+// (D3.11, D17.13, `stdlib.md` 2.2). `alloc` drops that mark, so a caller that
+// reaches this entry point directly holds a `void* own` and casts to a typed
+// pointer to write through it, which adoption does anyway (D3.14, D17.3).
 // The two are not called `new` and `del`: `new` is a keyword (D2.4), and `del`
 // is a universe function that a module-level declaration of that name shadows
 // (D12.2, D7.9) -- inside `std.rt`, which releases its own buffers and its argv

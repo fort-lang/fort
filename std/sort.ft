@@ -8,7 +8,8 @@
 // the element size, so there is no byte span that stands for every array. The
 // three typed entries below are where a span pays: each takes the count and the
 // size off the type and each checks the element mutability the core entry
-// cannot see, since void* has no target level.
+// cannot see, since a void mut* says that the bytes may be written and nothing
+// about their shape.
 // D8.3, D15, D3.5, D3.15, D3.14, D3.11
 //
 // The element type must own nothing. This body hands C an address and C
@@ -40,7 +41,7 @@ import std.libc;
 /// the ordinary way to reach this function with nothing to order. Ownership:
 /// none; base is a view and no own crosses to C (stdlib.md 1.4).
 /// D3.5, D17.13
-fn void sort(void* base, u64 n, u64 elem_size, fn i32(void*, void*) cmp) {
+fn void sort(void mut* base, u64 n, u64 elem_size, fn i32(void*, void*) cmp) {
     if (elem_size == 0) {
         panic("sort.sort: element size is zero");
     }
@@ -60,19 +61,25 @@ fn void sort(void* base, u64 n, u64 elem_size, fn i32(void*, void*) cmp) {
 /// elements it may not write. Ownership: none; an own span argument lends.
 /// D17.4
 fn void sort_i64(i64 mut@ items, fn i32(void*, void*) cmp) {
-    sort(cast(items.ptr, void*), items.len, sizeof(i64), cmp);
+    sort(cast(items.ptr, void mut*), items.len, sizeof(i64), cmp);
 }
 
 /// The u64 array.
 fn void sort_u64(u64 mut@ items, fn i32(void*, void*) cmp) {
-    sort(cast(items.ptr, void*), items.len, sizeof(u64), cmp);
+    sort(cast(items.ptr, void mut*), items.len, sizeof(u64), cmp);
 }
 
 /// The pointer array, which is the element type of vec.ptr_vec (stdlib.md 2.7).
 /// The pointees are borrowed and the sort never reads one; a comparator that
 /// orders by pointee reads them itself.
-fn void sort_ptr(void* mut@ items, fn i32(void*, void*) cmp) {
-    sort(cast(items.ptr, void*), items.len, sizeof(void*), cmp);
+///
+/// The elements are `void mut*`, which is what new answers with and what
+/// ptr_vec holds. A span of `void*` slots does not convert to one of
+/// `void mut*` slots, because the drop is monotone, so a caller holding
+/// immutable pointers casts its span.
+/// D3.11, D5.4, D5.8
+fn void sort_ptr(void mut* mut@ items, fn i32(void*, void*) cmp) {
+    sort(cast(items.ptr, void mut*), items.len, sizeof(void*), cmp);
 }
 
 /// Ascending order over i64. A comparator receives a pointer to each of two

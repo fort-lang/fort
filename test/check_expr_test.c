@@ -65,6 +65,30 @@ TEST(comparison_needs_identical_mutability, {
     TEST_ASSERT_TRUE(said("not i32 mut* and i32*"));
 })
 
+TEST(a_void_pointer_compares_only_with_its_own_mutability, {
+    // The level a `void*` reaches is part of its type, so `==` holds the two
+    // operands to it as it holds a typed pointer's. The implicit drop does not
+    // reach comparison, which is the last sentence of the decision that states
+    // the drop, so a program that holds both casts one of them. This refusal is
+    // new: before `void mut*` every `void*` compared with every other.
+    // D3.11, D5.4, D6.2
+    TEST_ASSERT_FALSE(check_body("    i32 mut x = 1;\n"
+                                 "    void mut* w = cast(&x, void mut*);\n"
+                                 "    void* r = cast(&x, void*);\n"
+                                 "    bool same = w == r;\n    println(same);"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_TRUE(said("not void mut* and void*"));
+    // Each compares with itself, with `null` and with a cast of the other.
+    // D10.5
+    TEST_ASSERT_TRUE(check_body("    i32 mut x = 1;\n"
+                                "    void mut* w = cast(&x, void mut*);\n"
+                                "    void* r = cast(&x, void*);\n"
+                                "    bool same = w == cast(r, void mut*);\n"
+                                "    bool lent = r == cast(w, void*);\n"
+                                "    println(same, lent, w == null, r == null);"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)0);
+})
+
 TEST(equality_lends_an_owning_operand, {
     TEST_ASSERT_TRUE(check_body("    i32 mut* own p = new(i32);\n    i32 mut* q = p;\n"
                                 "    bool same = p == q;\n    println(same);\n    del(p);"));
@@ -153,7 +177,8 @@ TEST(a_dereference_yields_the_pointee_and_its_mutability, {
 
 TEST(a_void_pointer_cannot_be_dereferenced, {
     TEST_ASSERT_FALSE(check_body("    void* v = null;\n    i32 d = *v;\n    println(d);"));
-    // `void*` has no pointee level.
+    // `void*` has no pointee type, and `void mut*` has none either: the mark
+    // says the storage may be written and no expression reaches it.
     // D3.11
     TEST_ASSERT_TRUE(said("cannot dereference void*"));
 })
@@ -452,14 +477,22 @@ TEST(new_of_an_own_element_owns_each_slot, {
 })
 
 TEST(new_of_a_void_pointer_allocates_a_slot, {
-    TEST_ASSERT_TRUE(check_body("    void* mut* own p = new(void*);\n"
-                                "    void* mut@ own s = new(void*, 4);\n"
+    TEST_ASSERT_TRUE(check_body("    void mut* mut* own p = new(void*);\n"
+                                "    void mut* mut@ own s = new(void*, 4);\n"
                                 "    println(s.len);\n    del(p);\n    del(s);"));
-    // `new(void*)` is legal, one pointer slot; `void` carries no marker of its
-    // own, so the allocated levels are the ones the suffixes introduce.
-    // D3.11, D17.3
-    TEST_ASSERT_EQ_STR(init_type("p"), "void* mut* own");
-    TEST_ASSERT_EQ_STR(init_type("s"), "void* mut@ own");
+    // `new(void*)` is legal, one pointer slot. Every level the allocation
+    // reaches is writable, and the level a `void*` reaches is one of them, so
+    // the slots hold `void mut*`.
+    // D3.11, D5.8, D17.3
+    TEST_ASSERT_EQ_STR(init_type("p"), "void mut* mut* own");
+    TEST_ASSERT_EQ_STR(init_type("s"), "void mut* mut@ own");
+    // The slot takes a writable pointer and refuses a read-only one, as a
+    // `node mut*` slot does.
+    // D5.4
+    TEST_ASSERT_FALSE(check_body("    i32 x = 1;\n"
+                                 "    void mut* mut@ own s = new(void*, 1);\n"
+                                 "    s[0] = cast(&x, void*);\n    del(s);"));
+    TEST_ASSERT_TRUE(said("expects void mut*, not void*"));
 })
 
 TEST(new_of_void_is_refused, {
@@ -499,6 +532,7 @@ int main(int argc, char** argv) {
     TEST_RUN(bool_has_no_ordering);
     TEST_RUN(equality_is_refused_on_aggregates);
     TEST_RUN(comparison_needs_identical_mutability);
+    TEST_RUN(a_void_pointer_compares_only_with_its_own_mutability);
     TEST_RUN(equality_lends_an_owning_operand);
     TEST_RUN(logical_operators_need_bool);
     TEST_RUN(unary_minus_needs_a_signed_operand);

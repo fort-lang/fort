@@ -1,0 +1,46 @@
+//! run
+//! stdout:
+//| 1 2
+//| 9 2
+//| 9 5
+//| true true
+// `void* mut p` marks the binding and `void mut* p` the storage the pointer
+// reaches, so the two are distinct types and both are legal (D3.11, D5.3).
+// No expression reaches that storage, so the mark states what the holder of
+// the address may do with it, and a cast recovers a typed pointer to write
+// through.
+fn void store(void mut* dst, i32 v) {
+    i32 mut* p = cast(dst, i32 mut*);
+    *p = v;
+}
+
+fn i32 load(void* src) {
+    i32* p = cast(src, i32*);
+    return *p;
+}
+
+fn i32 main() {
+    i32 mut x = 1;
+    i32 mut y = 2;
+    println(x, " ", y);
+
+    // A fixed binding whose target may be written.
+    void mut* w = cast(&x, void mut*);
+    store(w, 9);
+    println(x, " ", y);
+
+    // A rebindable binding whose target is read-only. The cast puts the mark
+    // back, which is the one way to add it (D3.14).
+    void* mut r = cast(&x, void*);
+    r = cast(&y, void*);
+    store(cast(r, void mut*), 5);
+    println(load(w), " ", load(r));
+
+    // Dropping the mark is implicit, and the two types are one machine word,
+    // so the address survives the conversion (D5.4, D3.1). The comparison below
+    // casts, because `==` requires identical types and the drop does not reach
+    // it: `lent == w` is an error (D6.2, fail/mutability/011).
+    void* lent = w;
+    println(load(lent) == 9, " ", lent == cast(w, void*));
+    return 0;
+}

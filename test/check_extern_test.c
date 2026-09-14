@@ -204,6 +204,44 @@ TEST(an_own_that_differs_conflicts, {
     TEST_ASSERT_TRUE(said("note: previous declaration of 'malloc' here"));
 })
 
+TEST(a_mut_on_a_void_pointer_result_that_differs_conflicts, {
+    begin();
+    add("main.ft",
+        "import alloc;\n"
+        "extern fn void mut* own malloc(u64 n);\n"
+        "fn i32 main() { return 0; }\n");
+    // The level a `void*` reaches is part of its type, so it is part of
+    // signature identity as a typed pointer's `mut` is: the two declarations
+    // below name one ELF symbol through two fort types, and this is the shape
+    // `std.libc` made real. Without it a program could declare `malloc` as
+    // storage it may not write and call the library's.
+    // D3.11, D3.12, D9.8
+    add("alloc.ft",
+        "extern fn void* own malloc(u64 n);\n"
+        "fn void* grab(u64 n) { return malloc(n); }\n");
+    TEST_ASSERT_FALSE(check_entry("main.ft"));
+    TEST_ASSERT_TRUE(said("conflicting declarations of extern 'malloc': the result type differs"));
+    TEST_ASSERT_TRUE(said("note: previous declaration of 'malloc' here"));
+})
+
+TEST(a_mut_on_a_void_pointer_parameter_that_differs_conflicts, {
+    begin();
+    add("main.ft",
+        "import sink;\n"
+        "extern fn void take(void mut* p);\n"
+        "fn i32 main() { return 0; }\n");
+    // The same difference in a parameter. extern_type_agrees answers about a
+    // `void*` in one branch of its own, so a case on the result holds nothing
+    // about a parameter.
+    // D3.11, D9.8
+    add("sink.ft",
+        "extern fn void take(void* p);\n"
+        "fn void drop(void* p) { take(p); }\n");
+    TEST_ASSERT_FALSE(check_entry("main.ft"));
+    TEST_ASSERT_TRUE(said("conflicting declarations of extern 'take': parameter 1 differs"));
+    TEST_ASSERT_TRUE(said("note: previous declaration of 'take' here"));
+})
+
 TEST(an_own_parameter_that_differs_conflicts, {
     begin();
     add("main.ft",
@@ -631,6 +669,8 @@ int main(int argc, char** argv) {
     TEST_RUN(the_conflict_names_the_first_parameter_that_differs);
     TEST_RUN(the_error_stands_on_the_parameter_of_the_later_declaration);
     TEST_RUN(an_own_that_differs_conflicts);
+    TEST_RUN(a_mut_on_a_void_pointer_result_that_differs_conflicts);
+    TEST_RUN(a_mut_on_a_void_pointer_parameter_that_differs_conflicts);
     TEST_RUN(an_own_parameter_that_differs_conflicts);
     TEST_RUN(pointee_mutability_that_differs_conflicts);
     TEST_RUN(noreturn_that_differs_conflicts);

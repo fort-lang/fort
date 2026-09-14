@@ -92,7 +92,7 @@ library follows:
 ### 1.4 Talking to C
 
 - Spans, strings and structs never cross an `extern` boundary (D13.4). A call unpacks `.ptr`
-  and `.len`: `libc.write(fd, cast(buf.ptr, void*), buf.len)`. A fixed array has no `.ptr`
+  and `.len`: `libc.write(fd, buf.ptr, buf.len)` for a `u8@ buf`. A fixed array has no `.ptr`
   (D3.4); span it first: `arr[..].ptr`. `.ptr` is a view (D17.3), so C never receives
   ownership this way; `own` in an `extern` signature is erased and documents C's convention
   (D17.13), as `libc.malloc` and `libc.free` show.
@@ -110,8 +110,12 @@ library follows:
   delivers a plain heap span through `u8 mut@ own mut* out` (level 0 is `out`, level 1 the `own`
   slot the callee fills, level 2 the bytes, D5.2, D17.2) for callers that want one allocation
   and one `del`.
-- Buffer parameters of externs are `void*`; reaching it takes a `cast` (D3.11), so the caller
-  decides what C may write into. Handing C a pointer into read-only memory is undefined (D10.7).
+- Buffer parameters of externs say what C means by them. A buffer C fixes as bytes is `u8*`,
+  or `u8 mut*` where C would drop the `const`, so a `u8` span's `.ptr` crosses with no cast and
+  the type system refuses a buffer the caller may not write (2.2). A buffer of no fixed type is
+  `void*`, or `void mut*` where C writes it (D3.11); reaching either takes a `cast`, so the
+  caller decides what C may write into. Handing C a pointer into read-only memory is undefined
+  (D10.7).
 
 ### 1.5 Naming
 
@@ -195,7 +199,8 @@ fn string std_dir() {
 
 Thin `extern` declarations for the libc calls the other modules need, with the C types mapped per
 D9.8: `int` is `i32`, `size_t` is `u64`, `ssize_t` and `off_t` are `i64`, `mode_t` is `u32`,
-`char*` is `char*`, and every `void*` buffer is `void*`. Names are unmangled (D9.7). `open` is
+`char*` is `char*`, a buffer C fixes as bytes is `u8*` or `u8 mut*`, and a buffer of no fixed
+type is `void*` or `void mut*` (1.4). Names are unmangled (D9.7). `open` is
 variadic in C; the fixed prototype is safe because every extern function is declared and called
 through a variadic LLVM function type, so a variadic callee always learns how many vector
 registers the call used (D9.8, `toolchain.md` 6 item 8).
@@ -221,23 +226,23 @@ i32 EACCES = 13;
 i32 EINVAL = 22;
 
 // <stdlib.h>, <string.h>
-extern fn void* own malloc(u64 size);
-extern fn void* own calloc(u64 n, u64 size);
+extern fn void mut* own malloc(u64 size);
+extern fn void mut* own calloc(u64 n, u64 size);
 extern fn void free(void* own p);
-extern fn void* memcpy(void* dst, void* src, u64 n);
-extern fn void* memmove(void* dst, void* src, u64 n);
-extern fn i32 memcmp(void* a, void* b, u64 n);
-extern fn void* memset(void* dst, i32 v, u64 n);
+extern fn u8 mut* memcpy(u8 mut* dst, u8* src, u64 n);
+extern fn u8 mut* memmove(u8 mut* dst, u8* src, u64 n);
+extern fn i32 memcmp(u8* a, u8* b, u64 n);
+extern fn u8 mut* memset(u8 mut* dst, i32 v, u64 n);
 extern fn u64 strlen(char* s);
 extern fn char* getenv(char* name);
 extern fn noreturn exit(i32 code);
 extern fn noreturn abort();
-extern fn void qsort(void* base, u64 n, u64 size, fn i32(void*, void*) cmp);
+extern fn void qsort(void mut* base, u64 n, u64 size, fn i32(void*, void*) cmp);
 
 // <fcntl.h>, <unistd.h>
 extern fn i32 open(char* path, i32 flags, u32 mode);
-extern fn i64 read(i32 fd, void* buf, u64 n);
-extern fn i64 write(i32 fd, void* buf, u64 n);
+extern fn i64 read(i32 fd, u8 mut* buf, u64 n);
+extern fn i64 write(i32 fd, u8* buf, u64 n);
 extern fn i32 close(i32 fd);
 extern fn i64 lseek(i32 fd, i64 offset, i32 whence);
 extern fn i32 isatty(i32 fd);
@@ -247,18 +252,25 @@ extern fn i32 socket(i32 domain, i32 kind, i32 protocol);
 extern fn i32 setsockopt(i32 fd, i32 level, i32 name, void* value, u32 len);
 extern fn i32 bind(i32 fd, void* addr, u32 len);
 extern fn i32 listen(i32 fd, i32 backlog);
-extern fn i32 accept(i32 fd, void* addr, u32 mut* len);
+extern fn i32 accept(i32 fd, void mut* addr, u32 mut* len);
 extern fn i32 connect(i32 fd, void* addr, u32 len);
-extern fn i32 getsockname(i32 fd, void* addr, u32 mut* len);
+extern fn i32 getsockname(i32 fd, void mut* addr, u32 mut* len);
 
 // <errno.h>: errno is a macro over this accessor in glibc and musl.
 extern fn i32 mut* __errno_location();
 ```
 
-Semantics are those of the C functions. `malloc` returns `void* own` (no `mut`: `void*` has no
-target level, D17.13) and `free` takes `void* own` (D17.13): the qualifiers are erased at the
-boundary and state C's convention, so the pair is interchangeable with `new` and `del` (D10.3)
-and exists for code that sizes an allocation in bytes.
+Semantics are those of the C functions. Each buffer parameter says what C means by it (1.4):
+`read`, `write` and the four `<string.h>` entries count bytes, so they take `u8*` and `u8 mut*`
+and a `u8` span's `.ptr` crosses with no cast; `malloc`, `calloc`, `qsort` and the socket
+addresses take storage of no fixed type, so they take `void*` and `void mut*`. The `mut` is
+there exactly where C's own prototype has no `const`, so the type system refuses a buffer the
+caller may not write: `libc.read(fd, view.ptr, view.len)` on a `u8@` is
+"the argument expects u8 mut*, not u8*".
+`malloc` and `calloc` return `void mut* own`, storage of no type that the caller may write, and
+`free` takes `void* own`, which every result reaches by dropping marks (D3.11, D5.4, D17.13):
+the `own` is erased at the boundary and states C's convention, so the pair is interchangeable
+with `new` and `del` (D10.3) and exists for code that sizes an allocation in bytes.
 `calloc` returns zeroed storage for `n` items of `size` bytes, or null, and is what `std.rt`
 allocates with, since `new` promises zeroed memory (D10.2, `toolchain.md` 5.1); `isatty` answers
 D11.5's question about a descriptor and is asked once per buffer (`toolchain.md` 5.3).
@@ -273,7 +285,7 @@ would trap, D10.2), `p[0..n]` is a
 `u8 mut@` view of it (D6.9), and `del(p)` releases it; so does
 `libc.free(cast(move(p), void* own))`, where the `own` lvalue must be moved into the `own`
 parameter (D6.11) and is left `null` (D17.6). `memcpy`, `memmove` and `memset` return their
-`dst` argument, a view, so their results stay `void*`. `libc.exit` does not flush the runtime's
+`dst` argument, a view, so each returns `u8 mut*`. `libc.exit` does not flush the runtime's
 output buffers; programs call `sys.exit`. `libc.abort` is what the runtime calls after a
 runtime error (D11.4). `qsort` orders `n` elements of `size` bytes in place and calls `cmp` with
 a pointer to each of two of them; `std.sort` wraps it and is what a caller uses (2.10), and
@@ -281,13 +293,16 @@ a pointer to each of two of them; `std.sort` wraps it and is what a caller uses 
 Ownership: `malloc`, `calloc` and `free` carry it in their types, so a
 `calloc` result is released like a `malloc` one and not dropped; every other extern here takes
 and returns views, and the library wraps every ownership-bearing call below.
-Direct use looks like `libc.write(fd, cast(s.ptr, void*), s.len) == cast(s.len, i64)`, which
-writes a string to a descriptor, bypassing the runtime's buffers.
+Direct use looks like `libc.write(fd, cast(s.ptr, u8*), s.len) == cast(s.len, i64)`, which
+writes a string to a descriptor, bypassing the runtime's buffers; the `cast` is there because a
+`string` carries `char*` and not `u8*`, and `libc.read(fd, buf.ptr, buf.len)` on a `u8 mut@`
+needs none.
 
 The seven socket calls come from `<sys/socket.h>` and `<netinet/in.h>`. `socklen_t` is
-`unsigned int`, so it is `u32`; an address is a buffer, so it crosses as `void*` (1.4); `accept`
-and `getsockname` take the address length through a pointer because they write it back, and a
-scalar out-parameter keeps its type rather than becoming a `void*` (1.4). `htons` and `htonl` are
+`unsigned int`, so it is `u32`; an address is a struct of no fixed type here, so it crosses as
+`void*`, or as `void mut*` where C writes it, which is `accept` and `getsockname` (1.4); those
+two take the address length through a pointer because they write it back as well, and a scalar
+out-parameter keeps its type rather than becoming a `void*` (1.4). `htons` and `htonl` are
 absent: glibc defines each as a macro as well as a function, and a macro has no symbol an `extern`
 declaration can name (D9.8), so `std.net` writes the two swaps in fort. `std.net` wraps all seven
 calls and is what a program uses (2.13). A program that declares one of these symbols itself must
@@ -615,8 +630,8 @@ Growable sequences of pointers and of `i64`, and the pattern for every other ele
 
 ```fort
 struct ptr_vec {
-    void* mut@ own items;   // slots the vector owns; items.len is the cap
-    u64 len;                // slots in use; len <= items.len
+    void mut* mut@ own items;   // slots the vector owns; items.len is the cap
+    u64 len;                    // slots in use; len <= items.len
 }
 
 struct int_vec {
@@ -629,7 +644,10 @@ Both structs are 24 bytes with `items` at offset 0 and `len` at offset 16 (`own`
 D17.1); `{}` is a valid empty vector. Both are owning aggregates (D17.7): functions take them by
 pointer and `*_free` releases them. Each `own` marks one reference (D17.2), so a `ptr_vec` owns its
 slots and borrows every pointer in them: `ptr_push` lends its argument (D17.4), `ptr_pop`
-returns a view, and `ptr_free` never touches a pointee. The live elements are
+returns a view, and `ptr_free` never touches a pointee. The slots hold `void mut*`, which is
+what `new` answers with (D5.8): a caller pushes a pointer to storage it may write and gets one
+back, a caller that only reads what it pops drops the mark on the way out (D5.4), and a caller
+holding an immutable pointer casts on the way in (D3.11). The live elements are
 `v.items[..v.len]`. Indexing `v.items[i]` with `v.len <= i < v.items.len` is not a runtime
 error; it reads a zero or stale slot, so code that wants a bounds check indexes the live span.
 
@@ -638,8 +656,8 @@ fn ptr_vec ptr_create()
 fn ptr_vec ptr_with_cap(u64 cap)
 fn void ptr_free(ptr_vec mut* v)
 fn void ptr_reserve(ptr_vec mut* v, u64 extra)
-fn void ptr_push(ptr_vec mut* v, void* p)
-fn void* ptr_pop(ptr_vec mut* v)
+fn void ptr_push(ptr_vec mut* v, void mut* p)
+fn void mut* ptr_pop(ptr_vec mut* v)
 
 fn int_vec int_create()
 fn int_vec int_with_cap(u64 cap)
@@ -662,9 +680,10 @@ This module is the non-generic container pattern (D15). To hold `token` values, 
 and its six functions, replace `i64` with `token` and the prefix `int_` with `token_`: about
 forty lines, type-checked like any other code. `ptr_vec` is for elements that must not be
 copied and belong to someone else (an arena, a fixed array, an owner that outlives the vector):
-store `cast(p, void*)` and cast back on retrieval; a pointer cast may add mutability (D3.14),
-so a `node mut*` survives the round trip. When the vector is to own its elements, copy the file
-with the slot type `node mut* own mut@ own items;` instead, an owned span of owned nodes (D17.2):
+store `cast(p, void mut*)` and cast back on retrieval; a pointer cast may add mutability
+(D3.14), so a `node mut*` survives the round trip. When the vector is to own its elements, copy
+the file with the slot type `node mut* own mut@ own items;` instead, an owned span of owned nodes
+(D17.2):
 `node_push(node_vec mut* v, node mut* own n)` stores `v->items[v->len] = move(n);` (a parameter
 is an `own` lvalue, D17.5, and a fresh slot is zero, D10.2, so the store passes D17.11);
 `node_pop` returns `node mut* own` with `return move(v->items[v->len]);` (the slot is reached
@@ -683,7 +702,7 @@ fn i64 demo() {
     node mut* own n = new(node);              // new lands in an own place (D17.3, D17.8)
     defer del(n);
     n->value = 7;
-    vec.ptr_push(&stack, cast(n, void*));     // lends n; the vector never frees it
+    vec.ptr_push(&stack, cast(n, void mut*)); // lends n; the vector never frees it
     node* top = cast(vec.ptr_pop(&stack), node*);
     return top->value;
 }
@@ -775,7 +794,7 @@ fn bool declare(sym_tab mut* t, sym mut* s) {
         return false;
     }
     strmap.put(&t->index, s->name, cast(t->syms.len, i64));
-    vec.ptr_push(&t->syms, cast(s, void*));
+    vec.ptr_push(&t->syms, cast(s, void mut*));
     return true;
 }
 
@@ -851,10 +870,10 @@ fn bool is_negative_zero(f64 x) {
 An array sorted in place, over `libc.qsort` (D13.2, 2.2).
 
 ```fort
-fn void sort(void* base, u64 n, u64 elem_size, fn i32(void*, void*) cmp)
+fn void sort(void mut* base, u64 n, u64 elem_size, fn i32(void*, void*) cmp)
 fn void sort_i64(i64 mut@ items, fn i32(void*, void*) cmp)
 fn void sort_u64(u64 mut@ items, fn i32(void*, void*) cmp)
-fn void sort_ptr(void* mut@ items, fn i32(void*, void*) cmp)
+fn void sort_ptr(void mut* mut@ items, fn i32(void*, void*) cmp)
 fn i32 cmp_i64(void* a, void* b)
 fn i32 cmp_u64(void* a, void* b)
 ```
@@ -871,14 +890,15 @@ fn i32 cmp_u64(void* a, void* b)
   C call, which is how the null `.ptr` of a zero span (D3.5) stays out of C. The three typed
   entries below delegate, so their panics name `sort.sort` as well. Ownership: none; `base` is a
   view and no `own` crosses to C (1.4, D17.13).
-- `sort_i64`, `sort_u64`, `sort_ptr`: `sort(cast(items.ptr, void*), items.len, sizeof(T), cmp)`
-  for `T` equal to `i64`, `u64` and `void*`. A span carries its length (D3.5) and its element
-  type fixes `sizeof` (D3.15), so two of the four arguments disappear and the caller cannot pass
-  a count or an element size that disagrees with the storage. The parameter is `T mut@`, which is
-  the second thing these entries add: the elements must be mutable and the compiler checks it
-  here, whereas `void*` has no target level (D3.11) and `sort` can check nothing. `sort_ptr`
-  takes the element type of `vec.ptr_vec` (2.7). Ownership: none; an `own` span argument lends
-  (D17.4).
+- `sort_i64`, `sort_u64`, `sort_ptr`: `sort(cast(items.ptr, void mut*), items.len, sizeof(T),
+  cmp)` for `T` equal to `i64`, `u64` and `void mut*`. A span carries its length (D3.5) and its
+  element type fixes `sizeof` (D3.15), so two of the four arguments disappear and the caller
+  cannot pass a count or an element size that disagrees with the storage. The parameter is
+  `T mut@`, which is the second thing these entries add: the elements must be mutable and the
+  compiler checks it here, whereas a `void mut*` says that the bytes may be written and nothing
+  about how many or how wide (D3.11), so `sort` can check nothing else. `sort_ptr` takes the
+  element type of `vec.ptr_vec` (2.7); a caller holding a span of `void*` slots casts it, because
+  the drop is monotone (D5.4). Ownership: none; an `own` span argument lends (D17.4).
 - `cmp_i64`, `cmp_u64`: ready-made ascending comparators, `-1`, `0` or `1`. `cmp_u64` compares
   unsigned, so it orders `0xFFFFFFFFFFFFFFFF` last where `cmp_i64` on the same bytes orders it
   first. A qualified function name is a value (D3.10), so a call reads
@@ -902,8 +922,9 @@ value (D3.10).
 **What a caller may sort.** `n * elem_size` bytes must exist at `base` and must belong to one
 array of that element type. Nothing checks it: `base` is a `void*` and carries neither a length
 nor a type, so an `n` above the storage reads and writes past the end in silence, exactly as C
-does. The three typed entries take the count from the span and cannot get it wrong, which is the
-first reason to use one.
+does. Its `mut` says that C writes those bytes and nothing about how many. The three typed
+entries take the count from the span and cannot get it wrong, which is the first reason to use
+one.
 
 The element type must own nothing (D17). `sort` permutes the
 elements byte by byte inside C: the compiler tracks ownership by variable and by field (D17.1,
@@ -916,17 +937,19 @@ and this is the same hole one call deeper. So:
   fields are all of those. `string` is a view (1.3) and `sizeof(string)` is 16 (D3.15), so an
   array of strings sorts like any other struct.
 - Do not sort an array of `T@ own`, of `string own`, or of a struct with an `own` field. Nothing
-  rejects it, because ownership stops at the `void*`, and the result is a leak or a double free.
+  rejects it, because ownership stops at the `void mut*`, and the result is a leak or a double
+  free.
   Order owned data by sorting views of it and leaving the owner where it is: an array of `string`
   views into an owning buffer, an array of pointers, or an array of indices. The items of a
   `ptr_vec` are borrowed for this reason (1.3, 2.7).
 - An element must hold no pointer into the array itself. The permutation moves every element and
   leaves such a pointer at the wrong one.
 - The elements must be mutable. The three typed entries say so in their parameter types and the
-  compiler rejects an immutable span; `sort` cannot, because `void*` carries no target level
-  (D3.11). A caller that hands it the `.ptr` of a span of immutable elements compiles, runs and
-  sorts them: the cast to `void*` is the cast-away-const escape D3.14 allows, and the write is
-  defined. So the rule the typed entries enforce is one the core entry only states. It becomes
+  compiler rejects an immutable span; `sort` cannot, because its `void mut*` says that the bytes
+  may be written and nothing about how many or how wide (D3.11). A caller that hands it the
+  `.ptr` of a span of immutable elements compiles, runs and sorts them: the cast to `void mut*`
+  is the cast-away-const escape D3.14 allows, and the write is defined. So the rule the typed
+  entries enforce is one the core entry only states. It becomes
   undefined in one case, and that case is not rare: writing into storage that is really
   read-only, which is every module-level declaration without `mut` (D7.10) and every string
   literal (D3.7), is undefined behavior (D10.7).
@@ -952,7 +975,7 @@ fn i32 by_x(void* a, void* b) {
 }
 
 fn void order(point mut@ ps, i64 mut@ xs) {
-    sort.sort(cast(ps.ptr, void*), ps.len, sizeof(point), by_x);
+    sort.sort(cast(ps.ptr, void mut*), ps.len, sizeof(point), by_x);
     sort.sort_i64(xs, sort.cmp_i64);
 }
 ```

@@ -1,9 +1,11 @@
 // std.libc: thin extern declarations for the libc calls the library needs
 // (stdlib.md 2.2). The runtime entry points are std.rt (stdlib.md 3). C types
 // map as follows: int is i32, size_t is u64, ssize_t and off_t are i64, mode_t
-// is u32, char* is char*, and every void* buffer is void*. Names are
-// unmangled.
-// D13.2, D9.8, D9.7
+// is u32 and char* is char*. A buffer C fixes as bytes is u8* or u8 mut*, and
+// a buffer of any type at all is void* or void mut*; the mut is there when C
+// writes through the pointer and absent when C's own prototype says const.
+// Names are unmangled.
+// D3.11, D9.7, D9.8, D13.2
 
 /// open(2) flags, Linux x86-64 values.
 i32 O_RDONLY = 0;
@@ -24,18 +26,26 @@ i32 EINTR = 4;
 i32 EACCES = 13;
 i32 EINVAL = 22;
 
-/// <stdlib.h>, <string.h>. malloc and calloc return void* own and free takes
-/// void* own. The boundary erases those qualifiers; they state C's convention.
-/// calloc answers with zeroed storage. std.rt allocates with it, because new
-/// promises zeroed storage (toolchain.md 5.1).
-/// D17.13, D10.2
-extern fn void* own malloc(u64 size);
-extern fn void* own calloc(u64 n, u64 size);
+/// <stdlib.h>, <string.h>. malloc and calloc return void mut* own, storage of
+/// no type that the caller may write, and free takes void* own, which every
+/// caller reaches by dropping marks. The boundary erases the own; it states
+/// C's convention. calloc answers with zeroed storage. std.rt allocates with
+/// it, because new promises zeroed storage (toolchain.md 5.1).
+/// D3.11, D5.4, D10.2, D17.13
+extern fn void mut* own malloc(u64 size);
+extern fn void mut* own calloc(u64 n, u64 size);
 extern fn void free(void* own p);
-extern fn void* memcpy(void* dst, void* src, u64 n);
-extern fn void* memmove(void* dst, void* src, u64 n);
-extern fn i32 memcmp(void* a, void* b, u64 n);
-extern fn void* memset(void* dst, i32 v, u64 n);
+
+/// The five byte functions of <string.h>. C fixes the element type here: each
+/// counts bytes, so each takes u8* or u8 mut*, and the destination carries the
+/// mut that C's prototype writes as the absence of const. A caller passes a
+/// u8 span's .ptr with no cast, and the type system refuses a buffer the caller
+/// may not write. Each of the three returns its dst, a view.
+/// D3.11, D9.8
+extern fn u8 mut* memcpy(u8 mut* dst, u8* src, u64 n);
+extern fn u8 mut* memmove(u8 mut* dst, u8* src, u64 n);
+extern fn i32 memcmp(u8* a, u8* b, u64 n);
+extern fn u8 mut* memset(u8 mut* dst, i32 v, u64 n);
 extern fn u64 strlen(char* s);
 extern fn char* getenv(char* name);
 extern fn noreturn exit(i32 code);
@@ -48,14 +58,14 @@ extern fn noreturn abort();
 /// closure holds std.rt: a program that redeclares qsort must write the same
 /// signature (notes/compiler.md 7).
 /// D9.10, D9.8
-extern fn void qsort(void* base, u64 n, u64 size, fn i32(void*, void*) cmp);
+extern fn void qsort(void mut* base, u64 n, u64 size, fn i32(void*, void*) cmp);
 
 /// <fcntl.h>, <unistd.h>. open is variadic in C; the fixed prototype is safe
 /// because every extern is called through a variadic LLVM function type.
 /// D9.8
 extern fn i32 open(char* path, i32 flags, u32 mode);
-extern fn i64 read(i32 fd, void* buf, u64 n);
-extern fn i64 write(i32 fd, void* buf, u64 n);
+extern fn i64 read(i32 fd, u8 mut* buf, u64 n);
+extern fn i64 write(i32 fd, u8* buf, u64 n);
 extern fn i32 close(i32 fd);
 extern fn i64 lseek(i32 fd, i64 offset, i32 whence);
 
@@ -73,15 +83,17 @@ extern fn i32 isatty(i32 fd);
 extern fn i32 mut* __errno_location();
 
 /// <sys/socket.h>, <netinet/in.h>. socklen_t is unsigned int, so it is u32, and
-/// the address is a buffer, so it crosses as void* (stdlib.md 1.4). accept and
-/// getsockname take the address length by pointer because they write it back;
-/// a scalar out-parameter keeps its type rather than becoming void* (1.4).
-/// std.net wraps all seven and is what a program calls (stdlib.md 2.13).
-/// D9.8, D13.4
+/// an address is a struct of no fixed type here, so it crosses as void* or
+/// void mut* (stdlib.md 1.4). accept and getsockname write the address and its
+/// length, so both carry mut; setsockopt, bind and connect read theirs, as
+/// C's const says. A scalar out-parameter keeps its type rather than becoming
+/// a void* (1.4). std.net wraps all seven and is what a program calls
+/// (stdlib.md 2.13).
+/// D3.11, D9.8, D13.4
 extern fn i32 socket(i32 domain, i32 kind, i32 protocol);
 extern fn i32 setsockopt(i32 fd, i32 level, i32 name, void* value, u32 len);
 extern fn i32 bind(i32 fd, void* addr, u32 len);
 extern fn i32 listen(i32 fd, i32 backlog);
-extern fn i32 accept(i32 fd, void* addr, u32 mut* len);
+extern fn i32 accept(i32 fd, void mut* addr, u32 mut* len);
 extern fn i32 connect(i32 fd, void* addr, u32 len);
-extern fn i32 getsockname(i32 fd, void* addr, u32 mut* len);
+extern fn i32 getsockname(i32 fd, void mut* addr, u32 mut* len);
