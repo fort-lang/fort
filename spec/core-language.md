@@ -1040,8 +1040,11 @@ fn void f() {
   value. `return x` of an `own` local or parameter is an implicit move that empties `x` first
   (6.7), so `defer del(x);` frees `x` on every path except the one that hands it to the caller
   (D17.5); the `build` function in 3.9 is the pattern.
-- `return`, `break` and `continue` may not appear inside deferred code, and `defer` may not
-  appear at module level.
+- `return` may not appear inside deferred code, and `defer` may not appear at module level.
+- `break` and `continue` may appear inside deferred code, and bind to the innermost loop or
+  `switch` written inside that deferred code (6.5): the loop or `switch` around the `defer`
+  is out of reach, since the deferred code is the expansion of an exit of it. With no such
+  construct inside it, a `break` or a `continue` there is the same error it is anywhere else.
 - Runtime errors, including `panic` and a failed `assert`, abort without running deferred code
   (D11.4). A `noreturn` call never exits the block, so nothing deferred runs.
 
@@ -1080,6 +1083,20 @@ fn void h(i32 mut* p) {
     defer return;             // error: 'return' inside deferred code
     defer i32 t = 1;          // error: 'defer' takes an assignment, ++/--, call or block
     defer { *p = 0; }         // ok
+}
+fn void k() {
+    while (true) {
+        defer { break; }      // error: 'break' outside a loop or switch
+    }
+    for (i32 mut i = 0; i < 2; i++) {
+        defer {
+            for (i32 mut n = 0; n < 3; n++) {
+                if (n == 1) {
+                    break;    // ok: leaves the `for` written inside the deferred block
+                }
+            }
+        }
+    }
 }
 fn u8 mut@ own slurp(i32 fd) {
     u8 mut@ own buf = new(u8, 4096);

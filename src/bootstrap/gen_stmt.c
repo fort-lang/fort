@@ -245,13 +245,15 @@ static void gen_unwind(gen_t* g, int32_t exit_kind) {
             return;
         }
     }
-    // The scope an exit stops at always exists: the checker refused `return`,
-    // `break` and `continue` inside deferred code and `break` and `continue` with no
-    // construct around them (check_stmt.c), so an exit that walks past the floor is a
-    // checker that let one through, not a program. Without the floor the walk would
+    // The scope an exit stops at always exists: the checker refused `return`
+    // inside deferred code, and a `break` or a `continue` with no loop or switch
+    // around it inside the deferred code it stands in (check_stmt.c), so an exit
+    // that walks past the floor is a checker that let one through, not a program.
+    // The floor is what stands between such an exit and a branch to the label of
+    // a loop the deferred code is not inside, and without it the walk would
     // re-enter the deferred statement that holds the exit, without end.
     // D7.8
-    fatal_internal("gen: return, break or continue inside deferred code");
+    fatal_internal("gen: an exit inside deferred code with no construct of it to leave");
 }
 
 // `return x` of a bare `own` local or parameter is an implicit `move`, which the

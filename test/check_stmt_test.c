@@ -10,6 +10,7 @@
 #include "ast.h"
 #include "check.h"
 #include "check_helpers.h"
+#include "diag.h"
 
 #include "test.h"
 
@@ -338,12 +339,83 @@ TEST(continue_outside_a_loop_is_refused, {
     TEST_ASSERT_TRUE(check_body("    while (true) {\n        continue;\n    }"));
 })
 
-TEST(return_break_and_continue_are_refused_inside_deferred_code, {
+TEST(return_is_refused_inside_deferred_code, {
     TEST_ASSERT_FALSE(check_body("    defer {\n        return 1;\n    }"));
     TEST_ASSERT_TRUE(said("'return' inside deferred code"));
+    TEST_ASSERT_EQ_UINT64(diag_count(), (uint64_t)1);
+    // A loop inside the deferred code catches `break` and `continue`, and it
+    // catches no `return`: that would leave the function mid-unwind.
+    // D7.8
+    TEST_ASSERT_FALSE(check_body("    defer {\n        while (true) {\n"
+                                 "            return 1;\n        }\n    }"));
+    TEST_ASSERT_TRUE(said("'return' inside deferred code"));
+    TEST_ASSERT_EQ_UINT64(diag_count(), (uint64_t)1);
+})
+
+TEST(break_and_continue_bind_to_a_loop_inside_deferred_code, {
+    // The `defer` stands in a loop body and the `break` in a loop of its own,
+    // so the `break` leaves that inner loop and the enclosing one still runs.
+    // D7.8
+    TEST_ASSERT_TRUE(check_body("    while (true) {\n        defer {\n"
+                                "            while (true) {\n                break;\n"
+                                "            }\n        }\n        break;\n    }"));
+    TEST_ASSERT_TRUE(check_body("    for (i32 mut i = 0; i < 2; i++) {\n        defer {\n"
+                                "            for (i32 mut k = 0; k < 2; k++) {\n"
+                                "                continue;\n            }\n        }\n    }"));
+    // A `switch` inside the deferred code catches `break` as a loop does.
+    // D7.6, D7.8
+    TEST_ASSERT_TRUE(check_body("    i32 x = 1;\n    defer {\n        switch (x) {\n"
+                                "        default:\n            break;\n        }\n    }"));
+})
+
+TEST(break_and_continue_with_no_loop_inside_deferred_code_are_refused, {
+    // The loop around the `defer` is out of reach, so the diagnostic is the one
+    // a `break` gets with no loop and no `switch` anywhere around it.
+    // D7.8
     TEST_ASSERT_FALSE(check_body("    while (true) {\n        defer {\n            break;\n"
-                                 "        }\n    }"));
-    TEST_ASSERT_TRUE(said("'break' inside deferred code"));
+                                 "        }\n        break;\n    }"));
+    TEST_ASSERT_TRUE(said("'break' outside a loop or switch"));
+    TEST_ASSERT_EQ_UINT64(diag_count(), (uint64_t)1);
+    TEST_ASSERT_FALSE(check_body("    while (true) {\n        defer {\n            continue;\n"
+                                 "        }\n        break;\n    }"));
+    TEST_ASSERT_TRUE(said("'continue' outside a loop"));
+    TEST_ASSERT_EQ_UINT64(diag_count(), (uint64_t)1);
+    // The `switch` around the `defer` is out of reach in the same way.
+    // D7.6, D7.8
+    TEST_ASSERT_FALSE(check_body("    i32 x = 1;\n    switch (x) {\n    default:\n"
+                                 "        defer {\n            break;\n        }\n    }"));
+    TEST_ASSERT_TRUE(said("'break' outside a loop or switch"));
+    TEST_ASSERT_EQ_UINT64(diag_count(), (uint64_t)1);
+    // A `switch` inside the deferred code catches `break` and not `continue`.
+    // D7.6, D7.8
+    TEST_ASSERT_FALSE(check_body("    i32 x = 1;\n    while (true) {\n        defer {\n"
+                                 "            switch (x) {\n            default:\n"
+                                 "                continue;\n            }\n        }\n"
+                                 "        break;\n    }"));
+    TEST_ASSERT_TRUE(said("'continue' outside a loop"));
+    TEST_ASSERT_EQ_UINT64(diag_count(), (uint64_t)1);
+})
+
+TEST(the_loops_around_a_defer_are_reachable_again_after_it, {
+    // The counters the deferred code hid are restored, so the `break` below the
+    // `defer` still binds to the loop the `defer` stands in.
+    // D7.8
+    TEST_ASSERT_TRUE(check_body("    i32 x = 1;\n    switch (x) {\n    default:\n"
+                                "        defer {\n            while (true) {\n"
+                                "                break;\n            }\n        }\n"
+                                "        break;\n    }"));
+})
+
+TEST(a_break_inside_deferred_code_does_not_end_the_enclosing_loop, {
+    // The terminating-statement walk does not enter deferred code, since a
+    // `break` there never targets the loop being walked: this `while (true)`
+    // still terminates, so the one diagnostic is the `break` itself.
+    // D7.8, D8.4
+    TEST_ASSERT_FALSE(check_src("fn i32 main() {\n    while (true) {\n        defer {\n"
+                                "            break;\n        }\n    }\n}\n"));
+    TEST_ASSERT_TRUE(said("'break' outside a loop or switch"));
+    TEST_ASSERT_FALSE(said("missing return"));
+    TEST_ASSERT_EQ_UINT64(diag_count(), (uint64_t)1);
 })
 
 TEST(a_deferred_statement_is_checked, {
@@ -509,6 +581,12 @@ TEST(a_body_with_an_error_node_never_reports_missing_return, {
 
 // NOLINTEND(readability-magic-numbers)
 
+// The runner is one TEST_RUN for each test of the suite and nothing else.
+// clang-tidy counts the thirteen statements TEST_RUN expands to for each of
+// them, so what it measures here is the macro and the size of the suite, not
+// the complexity of this function: the default threshold of 800 statements is
+// 61 tests, and this suite passed it.
+// NOLINTNEXTLINE(readability-function-size)
 int main(int argc, char** argv) {
     TEST_INIT("check_stmt", argc, argv);
     TEST_RUN(a_local_may_not_reuse_a_parameter_name);
@@ -553,7 +631,11 @@ int main(int argc, char** argv) {
     TEST_RUN(a_case_body_is_a_scope);
     TEST_RUN(break_outside_a_loop_or_switch_is_refused);
     TEST_RUN(continue_outside_a_loop_is_refused);
-    TEST_RUN(return_break_and_continue_are_refused_inside_deferred_code);
+    TEST_RUN(return_is_refused_inside_deferred_code);
+    TEST_RUN(break_and_continue_bind_to_a_loop_inside_deferred_code);
+    TEST_RUN(break_and_continue_with_no_loop_inside_deferred_code_are_refused);
+    TEST_RUN(the_loops_around_a_defer_are_reachable_again_after_it);
+    TEST_RUN(a_break_inside_deferred_code_does_not_end_the_enclosing_loop);
     TEST_RUN(a_deferred_statement_is_checked);
     TEST_RUN(a_return_with_a_value_in_a_void_function_is_refused);
     TEST_RUN(a_return_without_a_value_in_a_non_void_function_is_refused);

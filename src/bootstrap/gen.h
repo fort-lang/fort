@@ -194,10 +194,10 @@ struct gen {
     intvec_t scope_first; // the index into `defers` where each scope's own
                           // deferred statements begin
     /// The scope an exit inside deferred code may not unwind past: the scopes below it
-    /// are the ones the exit being expanded is already leaving, and `return`, `break`
-    /// and `continue` inside deferred code are errors the checker refused, so reaching
-    /// it is an internal error rather than an unbounded re-entry into the same
-    /// deferred statement.
+    /// are the ones the exit being expanded is already leaving. A `return` there, and
+    /// a `break` or a `continue` with no loop or switch around it inside the deferred
+    /// code, are errors the checker refused, so reaching the floor is an internal
+    /// error rather than an unbounded re-entry into the same deferred statement.
     /// D7.8
     uint64_t defer_floor;
 

@@ -889,7 +889,17 @@ bullet at a time and without a rewrite.
   line cost `positions x rules x length` and not its bytes. `Scanner` writes the rules as one
   alternation, each inside a group of its own, and `SlowScanner` keeps the old search as the
   oracle of `ScannerTest`. The two changes take the module from 31.55 s to 4.87 s, five runs each
-  under `debug`, and a run makes 773 calls of `Engine.tokenize` where it made 1396. **Hold a
+  under `debug`, and a run makes 773 calls of `Engine.tokenize` where it made 1396.
+  **`SlowEngine` inherits `tokenize` from `Engine`**, so an instrument that wraps the method on
+  both classes wraps the second one over the first and counts the 29 calls of the oracle sweep
+  twice: T-075 read 802 calls over 4204178 bytes on `main` that way, which is 773 + 29 and
+  4089469 + 114709. Wrap `Engine.tokenize` alone, and assert `"tokenize" not in
+  SlowEngine.__dict__` beside it so the next override is seen. Corrected, the instrument
+  reproduces T-104's figure exactly: 773 calls over 4089469 bytes on `main`, and 774 over 4096421
+  on a branch that adds one 4388-byte test file under `CORPUS_DIRS`. A ticket that adds such a
+  file raises both numbers in the docstring of `CorpusTest`, and measures them rather than
+  deriving them.
+  **Hold a
   rewrite of that engine to the dump and not to the assertions**: a
   scanner that reports other scopes passes the suite and silently changes what the grammar is held
   to. The dump is five lines of Python and prints 945748 lines for the 685 files of 2026-09-14;

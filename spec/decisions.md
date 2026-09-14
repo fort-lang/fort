@@ -783,13 +783,24 @@ Sections:
   in reverse order within a block. Nothing is captured at `defer` time; the statement is ordinary
   code executed at exit: after `defer del(p);`, a later `del(p); p = move(q);` makes the deferred
   statement free `q`. `return e` evaluates `e` before deferred code runs, so deferred code cannot
-  change the returned value. `return`, `break` and `continue` inside deferred code, and `defer` at
-  module level, are errors. Runtime errors (D11.4) do not run deferred code. Because `return x` of
+  change the returned value. `return` inside deferred code, and `defer` at module level, are
+  errors. `break` and `continue` inside deferred code bind to the innermost loop or `switch`
+  written inside that deferred code (D7.5, D7.6); the constructs around the `defer` are out of
+  reach. With no such construct inside it, a `break` or a `continue` there is an error, the same
+  error it is anywhere else. Runtime errors (D11.4) do not run deferred code. Because `return x` of
   an `own` local empties `x` before the deferred code runs (D17.5, D17.6), `defer del(buf);`
   followed later by `return buf;` frees `buf` on every path except the one that hands it to the
   caller.
 - rationale: fixes the multi-return cleanup pitfall from memory-model.md with a purely static
   expansion, no runtime list.
+- history: Amended 2026-09-14 by T-075: the rule banned `break` and `continue` inside deferred
+  code outright, which is broader than its own reason. The reason is that deferred code is the
+  expansion of an exit, so an exit that leaves the block the expansion unwinds has nowhere to go.
+  A `break` that leaves a loop written wholly inside the deferred code leaves nothing the unwind
+  expands, and `defer { while (true) { break; } }` was refused for no reason the decision
+  gave. The ban now covers `return` alone, which would leave the function in the middle of an
+  unwind. The user chose the narrow rule on uniformity: every other construct binds `break` to the
+  innermost enclosing loop, and a reader had to learn that deferred code alone did not.
 
 ### D7.9 Scoping and shadowing
 - owner: `core-language.md` (Statements).

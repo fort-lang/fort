@@ -40,6 +40,16 @@ static const char BUSY_SOURCE[] = "fn void note(i32 n) {\n}\n"
                                   "            defer note(4);\n"
                                   "        }\n"
                                   "    }\n"
+                                  "    {\n"
+                                  "        defer {\n"
+                                  "            for (i32 mut k = 0; k < 2; k = k +% 1) {\n"
+                                  "                defer note(6);\n"
+                                  "                if (k == 1) { break; }\n"
+                                  "                if (k == 0) { continue; }\n"
+                                  "            }\n"
+                                  "        }\n"
+                                  "        if (n == 3) { return 4; }\n"
+                                  "    }\n"
                                   "    while (n < 0) {\n"
                                   "        defer note(5);\n"
                                   "        return 2;\n"
@@ -410,6 +420,80 @@ TEST(a_case_body_that_falls_off_its_end_runs_its_deferred_code_there, {
 // ---- what runs nothing ------------------------------------------------------------
 // D7.8, D8.5, D11.4
 
+// ---- a loop inside deferred code ----------------------------------------------------
+// D7.8
+
+TEST(a_break_of_a_loop_inside_deferred_code_branches_to_that_loop, {
+    TEST_ASSERT_TRUE(emit("fn void note(i32 n) {\n}\n"
+                          "fn i32 main() {\n"
+                          "    while (true) {\n"
+                          "        defer {\n"
+                          "            while (true) {\n                note(2);\n"
+                          "                break;\n            }\n"
+                          "            note(3);\n        }\n"
+                          "        break;\n    }\n"
+                          "    return 0;\n}\n"));
+    // L2 is the enclosing loop's exit and L5 the exit of the loop inside the
+    // deferred code. The `break` of that inner loop branches to L5, so what the
+    // deferred code writes after it still runs and the enclosing loop is left
+    // once, at the end of the expansion. A branch to L2 here would put
+    // `note(3)` after a terminator, which `verified()` reports and `opt` alone
+    // does not (notes/compiler.md 6).
+    // D7.8
+    const char* want = "L4:\n"
+                       "  call void @\"main.note\"(i32 2)\n"
+                       "  br label %L5\n"
+                       "\n"
+                       "L5:\n"
+                       "  call void @\"main.note\"(i32 3)\n"
+                       "  br label %L2\n";
+    TEST_ASSERT_EQ_STR(found(want), want);
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+TEST(a_loop_inside_deferred_code_is_expanded_at_every_exit, {
+    TEST_ASSERT_TRUE(emit("fn void note(i32 n) {\n}\n"
+                          "fn i32 main() {\n"
+                          "    for (i32 mut i = 0; i < 3; i = i +% 1) {\n"
+                          "        defer {\n"
+                          "            for (i32 mut k = 0; k < 2; k = k +% 1) {\n"
+                          "                defer note(7);\n"
+                          "                if (k == 1) { break; }\n            }\n"
+                          "        }\n"
+                          "        if (i == 1) { continue; }\n"
+                          "        if (i == 2) { break; }\n    }\n"
+                          "    return 0;\n}\n"));
+    // Three exits leave the body block, and each carries the whole deferred
+    // block: the inner loop and the deferred statement of its own body, which
+    // the inner loop leaves at two exits of its own.
+    // D7.8
+    TEST_ASSERT_EQ_UINT64(occurrences("call void @\"main.note\"(i32 7)"), (uint64_t)6);
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+TEST(a_break_in_a_switch_inside_deferred_code_leaves_that_case_body, {
+    TEST_ASSERT_TRUE(emit("fn void note(i32 n) {\n}\n"
+                          "fn i32 main() {\n"
+                          "    i32 x = 1;\n"
+                          "    while (true) {\n"
+                          "        defer {\n"
+                          "            switch (x) {\n"
+                          "            default:\n                defer note(8);\n"
+                          "                break;\n            }\n"
+                          "            note(9);\n        }\n"
+                          "        break;\n    }\n"
+                          "    return 0;\n}\n"));
+    // The `break` leaves the case body of the `switch` written inside the
+    // deferred code, runs that case body's own deferred statement, and the
+    // deferred code goes on at `note(9)`.
+    // D7.6, D7.8
+    const char* want = "  call void @\"main.note\"(i32 8)\n";
+    TEST_ASSERT_EQ_STR(found(want), want);
+    TEST_ASSERT_EQ_UINT64(occurrences("call void @\"main.note\"(i32 8)"), (uint64_t)1);
+    TEST_ASSERT_EQ_UINT64(occurrences("call void @\"main.note\"(i32 9)"), (uint64_t)1);
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
 TEST(a_noreturn_call_runs_no_deferred_code_at_all, {
     TEST_ASSERT_TRUE(emit("fn noreturn stop() {\n    panic(\"x\");\n}\n"
                           "fn void f() {\n    defer note();\n    stop();\n}\n"
@@ -532,6 +616,9 @@ int main(int argc, char** argv) {
     TEST_RUN(a_continue_in_a_case_body_leaves_the_case_body_and_the_loop_body);
     TEST_RUN(a_case_body_that_falls_off_its_end_runs_its_deferred_code_there);
     TEST_RUN(a_return_in_a_case_body_unwinds_through_it_to_the_function_block);
+    TEST_RUN(a_break_of_a_loop_inside_deferred_code_branches_to_that_loop);
+    TEST_RUN(a_loop_inside_deferred_code_is_expanded_at_every_exit);
+    TEST_RUN(a_break_in_a_switch_inside_deferred_code_leaves_that_case_body);
     TEST_RUN(a_noreturn_call_runs_no_deferred_code_at_all);
     TEST_RUN(a_deferred_noreturn_call_stops_the_expansion_at_itself);
     TEST_RUN(a_runtime_check_branches_to_its_failure_block_without_deferred_code);

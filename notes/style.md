@@ -302,6 +302,12 @@ every one matches.
   location does. An experiment that renames an identifier *inside* a `TEST` body and sees no
   complaint has measured nothing; move the declaration out, or read the convention off a
   comparable one in a `main` (`SOURCE` in `test/gen_control_test.c`).
+  **A suite's `main` trips `readability-function-size` at 61 tests**, because `TEST_RUN` expands
+  to thirteen statements and the check's default threshold is 800. The number measures the macro
+  and the size of the suite, not the function, so the suite that passes it takes a
+  `// NOLINTNEXTLINE(readability-function-size)` on its `main` with that reason written above it;
+  `test/check_stmt_test.c` is the first, at 63 tests and 825 statements (T-075). Do not raise the
+  threshold in `.clang-tidy`: that check reads `src/` too, where the count means what it says.
   The bootstrap must also stay transliterable into fort: no unions, no macro tricks, and no
   compiler builtin fort lacks (function-pointer tables are fine, the bootstrap subset has
   function pointers). `__builtin_clzll` was removed for that reason: `mag > (UINT64_MAX >> n)`

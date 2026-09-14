@@ -267,6 +267,21 @@ came here.
   run at the wrong place; and because the expansion duplicates code at every exit, an emitter
   test that adds one asserts `verified()`, since a missed `g->terminated` check there writes an
   instruction after a terminator that `opt -passes=verify` alone accepts.
+  **`break` and `continue` inside deferred code bind to a loop or a `switch` written inside that
+  deferred code**, and the same scope stack expresses that (D7.8, narrowed by T-075). The checker
+  hides `ck->loops` and `ck->switches` while it checks a deferred statement and restores them
+  after, so the counters see only what stands inside the deferred block; the emitter needs no
+  matching state, because `run_scope_defers` already raises `defer_floor` to the current depth and
+  a loop inside the deferred code pushes its scope above that floor. So the walk of an exit
+  written there stops at that loop and branches to its label: for
+  `while (true) { defer { while (true) { note(2); break; } note(3); } break; }` the inner `break`
+  branches to the inner loop's exit block, which then calls `note(3)` and branches to the outer
+  loop's exit. **The floor alone holds the case the checker refuses**, and T-075 measured it: with
+  the checker's rule reverted so that `for (...) { defer { break; } }` type-checks, `gen_unwind`
+  starts at a depth equal to the floor, takes no step and reports an internal error, so no branch
+  to the enclosing loop's label is ever written. A second guard in `run_scope_defers` that cleared
+  `has_break` and `has_continue` was written and then removed for that reason: it changed the
+  message and nothing else.
   **A runtime entry point is described in two places, and one test holds them together**: the
   fort signature in `std/rt.ft`, which is what defines it, and one row per entry point in
   `src/bootstrap/runtime_sig.c` (`RT_SIG`, indexed by the `rt_entry_t` of `runtime_sig.h`), which

@@ -386,7 +386,7 @@ set_tests_properties(lang-stage2 PROPERTIES LABELS lang)
 # with a golden index.json beside it, held against that file byte for byte
 # (D20.2, D20.3). It is the oracle of the json and index ports (T-093).
 #
-# What it covers and what it does not. --check-json selects 236 of the 669
+# What it covers and what it does not. --check-json selects 236 of the 670
 # tests: the 234 `fail` tests, which have diagnostics, and the 2 tests with a
 # golden index beside them. So the document of a **clean** compile is
 # exercised here by two tests, and the diagnostics half by all 234. The three
@@ -414,7 +414,9 @@ set_tests_properties(lang-stage2 PROPERTIES LABELS lang)
 # 665, 232 and 234. Its own test is a `run` test, so it moves the total alone,
 # to 666. T-135 measured all three again and moved all three with three tests
 # of which two are `fail` tests: 666 to 669, 232 to 234 and 234 to 236, read
-# off `run_tests.py --list` and `run_tests.py --check-json --list`.
+# off `run_tests.py --list` and `run_tests.py --check-json --list`. T-075
+# measured all three on its base, found the comment where T-135 left it, and
+# moved the total alone with one `run` test: 669 to 670, 234 and 236 unchanged.
 # Against a
 # golden the comparison is stricter than a diff of two compilers for the value
 # and the order of every record, since it holds both compilers against a file

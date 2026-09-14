@@ -71,11 +71,11 @@ CORPUS_DIRS = (
 # that adds or removes a `.ft` under CORPUS_DIRS reads the new number off the
 # failure and writes it here, as it does for CORPUS_FILES in
 # test/parser_recovery_test.c and FT_FILES in tools/diff_tokens.sh.
-CORPUS_FILES = 685
+CORPUS_FILES = 686
 # The least number of `.ft` each of those directories holds. A directory grows,
 # so its own test asserts a floor and CORPUS_FILES asserts the exact total. A
 # floor of 1 says only that the directory exists, so each one here is near the
-# count of the day: 431, 22, 13, 23, 7, 184, 3 and 2 on 2026-09-14. The
+# count of the day: 432, 22, 13, 23, 7, 184, 3 and 2 on 2026-09-14. The
 # table has one entry for each directory of CORPUS_DIRS, and
 # test_every_corpus_directory_is_checked_by_a_test holds the two against each
 # other, so a directory that no test checks is a red test (T-104).
@@ -754,13 +754,13 @@ class ScannerTest(unittest.TestCase):
 class CorpusTest(unittest.TestCase):
     """Real fort is covered by the grammar and holds no lexical error.
 
-    One test checks one directory of CORPUS_DIRS, so each of the 685 files is
+    One test checks one directory of CORPUS_DIRS, so each of the 686 files is
     tokenized once for its scope check. The test that counts the walk checked
     every file of it a second time until T-104, which took a run of this
     module to 1396 calls of Engine.tokenize over 7575844 bytes; it counts now
     and tokenizes nothing.
 
-    A run makes 773 calls over 4089469 bytes: the 685 scope checks, 58 of
+    A run makes 774 calls over 4096421 bytes: the 686 scope checks, 58 of
     ScannerTest.test_the_engine_answers_what_one_search_for_each_rule_answers,
     which tokenizes the fixture and every 25th file of the walk once with each
     of the two engines, and 30 of the fixture and the marker tables. So 28

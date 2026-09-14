@@ -1,0 +1,154 @@
+//! run
+//! stdout:
+//| body 0
+//| end 0 n=2
+//| body 1
+//| end 1 n=2
+//| loop done
+//| iter 0
+//| d 0 k=0
+//| defer 0
+//| d 1 k=0
+//| defer 1
+//| after 1
+//| cont body 0
+//| cont defer 0 k=2
+//| cont defer 1 k=2
+//| cont body 2
+//| cont defer 2 k=2
+//| inner body 0
+//| inner defer 0
+//| inner defer 1
+//| outer defer
+//| loop defer 5
+//| case defer
+//| fn defer t=1
+//| 6
+//| loop defer 2
+//| fn defer t=2
+//| 3
+// `break` and `continue` inside deferred code bind to the innermost loop or `switch` written
+// inside that deferred code (D7.8), and the loop around the `defer` is out of reach. The
+// deferred code is copied into every exit of the block it stands in, so the loop it holds is
+// emitted inside that copy, and the exit's own branch stands after it.
+//
+// What the wrong place would print. If the `break` of the inner `while` of
+// `at_the_end_of_an_iteration` branched to the enclosing `for`'s exit label, every line the
+// deferred code prints after that inner loop would be skipped and the `for` would end at its
+// first iteration: the first five lines would read `body 0` and `loop done` alone, with no
+// `end 0 n=2`, no `body 1` and no `end 1 n=2`. The same jump in `at_a_break` drops `defer 0`
+// and `defer 1`, and in `at_a_return` the `break` of the `switch` inside the function block's
+// deferred code would leave through the `while` above it, dropping `case defer` and
+// `fn defer t=1`.
+
+// The expansion at the end of an iteration: `end` follows `body` on both iterations, and
+// `loop done` follows both, so the inner `break` left the `while` and not the `for`.
+fn void at_the_end_of_an_iteration() {
+    for (i32 mut i = 0; i < 2; i++) {
+        defer {
+            i32 mut n = 0;
+            while (true) {
+                n++;
+                if (n == 2) {
+                    break;
+                }
+            }
+            println("end ", i, " n=", n);
+        }
+        println("body ", i);
+    }
+    println("loop done");
+}
+
+// The expansion at a `break` of the enclosing loop: the deferred `for` runs its own `continue`
+// and its own `break`, and `defer 1` prints before the enclosing loop is left.
+fn void at_a_break(i32 stop) {
+    for (i32 mut i = 0; i < 3; i++) {
+        defer {
+            for (i32 mut k = 0; k < 3; k++) {
+                if (k == 1) {
+                    continue;
+                }
+                if (k == 2) {
+                    break;
+                }
+                println("d ", i, " k=", k);
+            }
+            println("defer ", i);
+        }
+        if (i == stop) {
+            break;
+        }
+        println("iter ", i);
+    }
+    println("after ", stop);
+}
+
+// The expansion at a `continue` of the enclosing loop.
+fn void at_a_continue() {
+    for (i32 mut i = 0; i < 3; i++) {
+        defer {
+            i32 mut k = 0;
+            while (k < 2) {
+                k++;
+                if (k == 2) {
+                    break;
+                }
+            }
+            println("cont defer ", i, " k=", k);
+        }
+        if (i == 1) {
+            continue;
+        }
+        println("cont body ", i);
+    }
+}
+
+// A `defer` inside the loop inside the deferred code: the loop body is a block of its own, so
+// its deferred statement runs at the end of each iteration and at the `break`.
+fn void a_defer_inside_the_deferred_loop() {
+    while (true) {
+        defer {
+            for (i32 mut k = 0; k < 2; k++) {
+                defer println("inner defer ", k);
+                if (k == 1) {
+                    break;
+                }
+                println("inner body ", k);
+            }
+            println("outer defer");
+        }
+        break;
+    }
+}
+
+// The expansion at a `return`, which unwinds the loop body and the function block: the `break`
+// of the `switch` inside the deferred code leaves that case body alone.
+fn i32 at_a_return(i32 n) {
+    defer {
+        i32 mut t = 0;
+        switch (n) {
+        case 5:
+            defer println("case defer");
+            t = 1;
+            break;
+        default:
+            t = 2;
+        }
+        println("fn defer t=", t);
+    }
+    while (true) {
+        defer println("loop defer ", n);
+        return n + 1;
+    }
+}
+
+fn i32 main() {
+    at_the_end_of_an_iteration();
+    at_a_break(1);
+    at_a_continue();
+    a_defer_inside_the_deferred_loop();
+    println(at_a_return(5));
+    println(at_a_return(2));
+    return 0;
+}

@@ -133,7 +133,7 @@ done
 # them: an equality and not a floor, so that a file cannot slip out of the
 # comparison. A ticket that adds or removes a .ft file changes all four lines
 # in the same commit.
-FT_FILES=939
+FT_FILES=940
 
 # The files of that corpus stage1 compiles into a module, which are the ones
 # compared. It is an equality for the reason FT_FILES is: a comparison that
@@ -146,7 +146,7 @@ FT_FILES=939
 # skips -- and its question is narrower, since the 84 files that check clean
 # and hold no `main` compile into no module and are skipped here. diff_check.sh
 # says beside its own constant how the two group sizes are measured.
-PROGRAM_FILES=528
+PROGRAM_FILES=529
 
 # The pass pipeline `opt` is given. `verify` alone parses the module and runs
 # the LLVM verifier over it, which is the check of D19.1, and it runs no

@@ -165,6 +165,44 @@ fn void a_defer_in_a_do_while_body_is_copied_into_both_exits() {
     assert(e.g.strs.len == 2);
 }
 
+// A `break` inside deferred code binds to a loop written inside that deferred
+// code, and the deferred code is expanded at the exit that runs it, so that
+// loop is emitted inside the expansion. L2 is the enclosing loop's exit and L5
+// the exit of the loop inside the deferred code: the inner `break` branches to
+// L5, `out` still runs, and the enclosing loop is left once, at the end of the
+// expansion. A branch to L2 there would put `out` after a terminator.
+// D7.5, D7.8
+fn void a_break_of_a_loop_inside_deferred_code_branches_to_that_loop() {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    strbuf.append(&src, "fn void in_loop() {\n    while (true) {\n        defer {\n");
+    strbuf.append(&src, "            while (true) {\n                eprintln(\"in\");\n");
+    strbuf.append(&src, "                break;\n            }\n");
+    strbuf.append(&src, "            eprintln(\"out\");\n        }\n        break;\n");
+    strbuf.append(&src, "    }\n}\n");
+    string got = emit(&e, wrap(&b, strbuf.view(&src)), "in_loop");
+    string[9] mut want = {
+        "\nL4:\n",
+        "  call void @\"std.rt.print_str\"(i32 2, ptr @.str.0, i64 2)\n",
+        "  call void @\"std.rt.print_char\"(i32 2, i8 zeroext 10)\n",
+        "  br label %L5\n",
+        "\nL5:\n",
+        "  call void @\"std.rt.print_str\"(i32 2, ptr @.str.1, i64 3)\n",
+        "  call void @\"std.rt.print_char\"(i32 2, i8 zeroext 10)\n",
+        "  br label %L2\n",
+        "\nL2:\n",
+    };
+    assert(str.find(got, gen_env.join_lines(&e, want[0..9])) >= 0);
+    assert(gen_env.record_text(&e, 0) == "in");
+    assert(gen_env.record_text(&e, 1) == "out");
+    assert(e.g.strs.len == 2);
+}
+
 // `return e` evaluates `e` before the deferred code runs, which cannot then
 // change the value returned: the value is in a register first.
 // D7.8, D8.2
@@ -251,6 +289,7 @@ fn i32 main() {
     println("scopes ok");
     a_defer_in_a_loop_body_is_copied_into_every_exit();
     a_defer_in_a_do_while_body_is_copied_into_both_exits();
+    a_break_of_a_loop_inside_deferred_code_branches_to_that_loop();
     a_return_reads_its_value_before_the_deferred_code_runs();
     println("exits ok");
     an_aggregate_return_lands_in_a_temporary_when_anything_is_deferred();

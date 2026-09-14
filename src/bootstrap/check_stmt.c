@@ -435,22 +435,20 @@ static void check_switch(check_t* ck, ast_node_t* n) {
 // ---- defer, return, break and continue ---------------------------------------------
 // D7.8, D7.11, D8.5
 
-// `return`, `break` and `continue` may not appear inside deferred code.
+// `return` may not appear inside deferred code: it would leave the function in
+// the middle of an unwind. `break` and `continue` may, and bind to a loop or a
+// switch written inside the deferred block.
 // D7.8
-static bool check_outside_defer(check_t* ck, ast_node_t* n, const char* what) {
+static bool check_return_outside_defer(check_t* ck, ast_node_t* n) {
     if (ck->defers == 0) {
         return true;
     }
-    check_msg_begin(ck);
-    msg_str(&ck->msg, "'");
-    msg_str(&ck->msg, what);
-    msg_str(&ck->msg, "' inside deferred code");
-    check_msg_end(ck, n->loc);
+    check_error(ck, n->loc, "'return' inside deferred code");
     return false;
 }
 
 static void check_return(check_t* ck, ast_node_t* n) {
-    if (!check_outside_defer(ck, n, "return")) {
+    if (!check_return_outside_defer(ck, n)) {
         return;
     }
     if (check_poisoned(ck->ret)) {
@@ -488,10 +486,11 @@ static void check_return(check_t* ck, ast_node_t* n) {
     check_return_value(ck, n, ck->ret, &e);
 }
 
+// The enclosing loops and switches are the ones `check_defer` left reachable, so
+// a `break` or a `continue` inside deferred code counts only what stands inside
+// the deferred block.
+// D7.5, D7.6, D7.8
 static void check_break(check_t* ck, ast_node_t* n, bool cont) {
-    if (!check_outside_defer(ck, n, cont ? "continue" : "break")) {
-        return;
-    }
     // D7.6
     if (cont ? ck->loops == 0 : ck->loops == 0 && ck->switches == 0) {
         check_error(
@@ -499,19 +498,32 @@ static void check_break(check_t* ck, ast_node_t* n, bool cont) {
     }
 }
 
+// `break` and `continue` in deferred code bind to the innermost loop or switch
+// inside the deferred block, so the constructs around the `defer` are out of
+// reach while it is checked. With none inside, they are errors, and the error is
+// the one a `break` outside every loop and switch gets anywhere else.
+// D7.8
 static void check_defer(check_t* ck, ast_node_t* n) {
     // D7.8: the parser has already enforced this
+    const uint64_t loops = ck->loops;
+    const uint64_t switches = ck->switches;
+    ck->loops = 0;
+    ck->switches = 0;
     ck->defers++;
     check_stmt(ck, n->a);
     ck->defers--;
+    ck->switches = switches;
+    ck->loops = loops;
 }
 
 // ---- terminating statements --------------------------------------------------------
 // D8.4
 
 // A `break` that targets the statement: the walk does not enter a nested loop
-// or switch, which a `break` inside would target instead.
-// D7.6
+// or switch, which a `break` inside would target instead, and it does not enter
+// deferred code, whose `break` targets a loop or a switch inside the deferred
+// block.
+// D7.6, D7.8
 static bool has_break(const ast_node_t* n) {
     if (n == NULL) {
         return false;
@@ -524,10 +536,10 @@ static bool has_break(const ast_node_t* n) {
     case AST_FOR:
     case AST_RANGE_FOR:
     case AST_SWITCH:
+    case AST_DEFER:
         return false;
     case AST_BLOCK:
     case AST_IF:
-    case AST_DEFER:
         break;
     default:
         return false;
