@@ -37,21 +37,26 @@ SOURCE_GLOBS = fort_lint.SOURCE_GLOBS
 
 # The whole verdict over test/fort_lint/bad_names.ft, in the order the tool
 # prints it. Every line is one rule of D1.4 (the last one is the width check).
+# Each line number is one higher than T-079 wrote it, and the wide line is one
+# column wider: T-103 gave the fixture's header its own citation line and its
+# declarations the `///` of notes/style.md 1.3, which a fixture of code carries
+# like any other source. Every position below was read against the fixture
+# after the sweep.
 BAD_NAMES_PROBLEMS = [
-    "test/fort_lint/bad_names.ft:5:19: module 'Mem' is not lower_case (D1.4)",
-    "test/fort_lint/bad_names.ft:8:5: constant 'max_nodes' is not UPPER_CASE (D1.4)",
-    "test/fort_lint/bad_names.ft:11:9: global 'Counter' is not lower_case (D1.4)",
-    "test/fort_lint/bad_names.ft:13:8: struct 'Point' is not lower_case (D1.4)",
-    "test/fort_lint/bad_names.ft:14:9: field 'X' is not lower_case (D1.4)",
-    "test/fort_lint/bad_names.ft:17:6: enum 'Color' is not lower_case (D1.4)",
-    "test/fort_lint/bad_names.ft:17:14: enum member 'Red' is not lower_case (D1.4)",
-    "test/fort_lint/bad_names.ft:19:8: fn 'addTwo' is not lower_case (D1.4)",
-    "test/fort_lint/bad_names.ft:19:19: parameter 'aValue' is not lower_case (D1.4)",
-    "test/fort_lint/bad_names.ft:20:9: local 'Sum' is not lower_case (D1.4)",
-    "test/fort_lint/bad_names.ft:26:11: local 'Point' is not lower_case (D1.4)",
-    "test/fort_lint/bad_names.ft:26:11: local 'Point' takes the name of its type (D1.4)",
-    "test/fort_lint/bad_names.ft:41:22: parameter 'pair' takes the name of its type (D1.4)",
-    "test/fort_lint/bad_names.ft:45:101: line is 124 columns, over the 100 of the house style",
+    "test/fort_lint/bad_names.ft:6:19: module 'Mem' is not lower_case (D1.4)",
+    "test/fort_lint/bad_names.ft:9:5: constant 'max_nodes' is not UPPER_CASE (D1.4)",
+    "test/fort_lint/bad_names.ft:12:9: global 'Counter' is not lower_case (D1.4)",
+    "test/fort_lint/bad_names.ft:14:8: struct 'Point' is not lower_case (D1.4)",
+    "test/fort_lint/bad_names.ft:15:9: field 'X' is not lower_case (D1.4)",
+    "test/fort_lint/bad_names.ft:18:6: enum 'Color' is not lower_case (D1.4)",
+    "test/fort_lint/bad_names.ft:18:14: enum member 'Red' is not lower_case (D1.4)",
+    "test/fort_lint/bad_names.ft:20:8: fn 'addTwo' is not lower_case (D1.4)",
+    "test/fort_lint/bad_names.ft:20:19: parameter 'aValue' is not lower_case (D1.4)",
+    "test/fort_lint/bad_names.ft:21:9: local 'Sum' is not lower_case (D1.4)",
+    "test/fort_lint/bad_names.ft:27:11: local 'Point' is not lower_case (D1.4)",
+    "test/fort_lint/bad_names.ft:27:11: local 'Point' takes the name of its type (D1.4)",
+    "test/fort_lint/bad_names.ft:42:22: parameter 'pair' takes the name of its type (D1.4)",
+    "test/fort_lint/bad_names.ft:46:101: line is 125 columns, over the 100 of the house style",
 ]
 
 
@@ -60,9 +65,9 @@ BAD_NAMES_PROBLEMS = [
 # diagnostic would never have judged.
 BROKEN_PROBLEMS = [
     "test/fort_lint/broken.ft:1:1: fort could not check this closure: "
-    "test/fort_lint/broken.ft:7:22: unknown name 'nowhere'",
-    "test/fort_lint/broken.ft:6:9: local 'badName' is not lower_case (D1.4)",
-    "test/fort_lint/broken.ft:10:8: fn 'alsoBad' is not lower_case (D1.4)",
+    "test/fort_lint/broken.ft:8:22: unknown name 'nowhere'",
+    "test/fort_lint/broken.ft:7:9: local 'badName' is not lower_case (D1.4)",
+    "test/fort_lint/broken.ft:11:8: fn 'alsoBad' is not lower_case (D1.4)",
 ]
 
 

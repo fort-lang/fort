@@ -620,7 +620,7 @@ static void collect_files(const module_set_t* set, driver_files_t* files) {
 }
 
 // ---- the front end ----------------------------------------------------------------
-// T-013, T-015
+// T-013, T-015: the front end is the seam of these two tickets
 
 // Steps 1 and 2 of toolchain.md 2: the entry file's module path and root, then
 // the import closure, with the search roots in order. Returns false after the

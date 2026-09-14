@@ -1,16 +1,19 @@
 // C11 helpers linked into test/lang/run/ffi/006_struct_layout.ft, which holds
-// fort's own struct layout (D3.8) against the C ABI's on the target itself.
+// fort's own struct layout against the C ABI's on the target itself.
+// D3.8
 //
 // fort computes the layout of a struct and the C compiler computes it again;
-// D9.9 says the two must agree ("Struct layout stays C-compatible, so
-// pointer-based interop works"), and nothing in a fort-only program can see a
+// the two must agree ("Struct layout stays C-compatible, so pointer-based
+// interop works"), and nothing in a fort-only program can see a
 // disagreement, because a wrong layout that is used consistently agrees with
 // itself. These helpers are the boundary that can see it: every struct below
 // is the C spelling of one the fort side declares, and each helper reads or
 // writes it through C's offsets while fort reads or writes it through its own.
+// D9.9
 //
 // The signatures take pointers and integers only, which is what an extern
-// signature may use (D9.8).
+// signature may use.
+// D9.8
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -36,15 +39,17 @@ struct interop {
 };
 
 // struct flagged { bool on; i32 n; bool off; }: fort's `bool` is C's `_Bool`,
-// one byte in memory (D19.2).
+// one byte in memory.
+// D19.2
 struct flagged {
     bool on;
     int32_t n;
     bool off;
 };
 
-// struct named { u8 tag; string name; }: a `string` is the two-word header of
-// D3.7 and is never split into two fields (D9.9).
+// struct named { u8 tag; string name; }: a `string` is a two-word header and
+// is never split into two fields.
+// D3.7, D9.9
 struct named {
     uint8_t tag;
     struct {
@@ -54,7 +59,8 @@ struct named {
 };
 
 // struct cell { i32 n; u8 tag; } and struct table { cell[3] rows; u8 tag; }:
-// the array strides by the element's padded size (D3.4, D3.8).
+// the array strides by the element's padded size.
+// D3.4, D3.8
 struct cell {
     int32_t n;
     uint8_t tag;
@@ -120,9 +126,10 @@ uint64_t layout_named_len(const struct named* s) {
 }
 
 // Its first byte, which proves the pointer half of the header is where C
-// expects it too. Fort `char` is C's `unsigned char` at the boundary
-// (`i8 zeroext`, D9.8, D3.2), and plain `char` is signed on x86-64, so the
-// return type is the unsigned one the fort declaration promises.
+// expects it too. Fort `char` is C's `unsigned char` at the boundary, an
+// `i8 zeroext`, and plain `char` is signed on x86-64, so the return type is
+// the unsigned one the fort declaration promises.
+// D9.8, D3.2
 unsigned char layout_named_first(const struct named* s) {
     return s->name.len == 0 ? (unsigned char)'?' : (unsigned char)s->name.ptr[0];
 }
@@ -133,10 +140,11 @@ uint64_t layout_sizeof_table(void) {
 
 // Every field of a `table` mixed into one decimal digit each, so that a wrong
 // offset, a wrong element stride or a lost `tag` cannot cancel out. Fort
-// passes a module-level constant here (D7.10): that table is laid out by the
+// passes a module-level constant here: that table is laid out by the
 // emitter's own initializer and by LLVM rather than field by field at run
 // time, so this is the boundary that can see a constant aggregate disagree
 // with the C ABI.
+// D7.10
 int64_t layout_table_digest(const struct table* t) {
     int64_t digest = 0;
     for (size_t i = 0; i < sizeof t->rows / sizeof t->rows[0]; i++) {

@@ -10,12 +10,14 @@
 // writes it through its GEPs.
 //
 // The signatures take pointers and integers only, which is what an extern
-// signature may use (D9.8).
+// signature may use.
+// D9.8
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-// The dimensions the fort side writes: i32[2][3] is two rows of three (D3.6).
+// The dimensions the fort side writes: i32[2][3] is two rows of three.
+// D3.6
 enum { ROWS = 2, COLS = 3, PLANES = 2 };
 
 // The base a digest mixes one element per digit in.
@@ -33,8 +35,9 @@ struct block {
     uint8_t tag;
 };
 
-// The fat pointer of D19.2: a span is { ptr, len } and an array of spans
-// strides by this struct's size.
+// The fat pointer: a span is { ptr, len } and an array of spans strides by
+// this struct's size.
+// D19.2
 struct span {
     void* ptr;
     uint64_t len;
@@ -105,7 +108,8 @@ int32_t multidim_at(const int32_t* grid, int32_t i, int32_t j) {
 }
 
 // The `n` field of one cell of a cell[2][3], which strides by the padded size
-// of the struct in both dimensions (D3.4, D3.8).
+// of the struct in both dimensions.
+// D3.4, D3.8
 int32_t multidim_cell_at(const struct cell* cells, int32_t i, int32_t j) {
     const struct cell(*rows)[COLS] = (const struct cell(*)[COLS])cells;
     return rows[i][j].n;

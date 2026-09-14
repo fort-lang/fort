@@ -568,6 +568,30 @@ set_tests_properties(check_decisions_selftest PROPERTIES
     LABELS unit
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+# The knowledge rules of notes/style.md and AGENTS.md (label unit): the line
+# budget of AGENTS.md, the citation shape of notes/style.md 1.4 and the `///`
+# of 1.3 over the sources 1.1 governs, an owner and a rule in every entry of
+# spec/decisions.md, and a document cited by a path that exists and by its
+# section rather than by a line number (T-103). It reads the tree and runs no
+# build, so it is the cheapest test in the suite.
+add_test(NAME knowledge_lint
+    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/knowledge_lint.py"
+            --root "${CMAKE_SOURCE_DIR}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(knowledge_lint PROPERTIES LABELS unit)
+
+# Its own unit tests (label unit): the comment scanner, the four fixtures the
+# `///` rule is measured against position by position, every citation shape the
+# lint refuses with a control beside it, and each of the four rules broken on a
+# seeded tree, where the lint must print the problem and exit 1. A check that
+# cannot fail is worse than no check.
+add_test(NAME knowledge_lint_selftest
+    COMMAND "${FORT_PYTHON3}" -m unittest knowledge_lint_test
+    WORKING_DIRECTORY "${FORT_TEST_DIR}")
+set_tests_properties(knowledge_lint_selftest PROPERTIES
+    LABELS unit
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 # The D1.4 identifier check over the project's own fort sources (label unit):
 # tools/fort_lint.py reads `fort --index` (D20.3) rather than tokenizing fort a
 # second time, so it needs the compiler this build made.

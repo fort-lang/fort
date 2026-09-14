@@ -2,7 +2,8 @@
 // independent witness to the 64-bit FNV-1a that stdlib.md 2.5 fixes for
 // str.hash, so that the fort side is held against something other than
 // itself. The signature takes a pointer and a length only, which is what an
-// extern signature may use (D9.8).
+// extern signature may use.
+// D9.8
 #include <stdint.h>
 
 static const uint64_t FNV_OFFSET_BASIS = 0xCBF29CE484222325ULL;

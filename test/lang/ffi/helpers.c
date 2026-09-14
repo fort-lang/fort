@@ -1,5 +1,6 @@
 // C11 helpers linked into the test/lang/run/ffi tests via `//! link: ffi/helpers.c`.
-// Every signature uses only scalar types so it is extern-legal in fort (D9.8).
+// Every signature uses only scalar types so it is extern-legal in fort.
+// D9.8
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -28,26 +29,30 @@ bool helper_is_even(int64_t n) {
     return n % 2 == 0;
 }
 
-// Calls back into a fort function whose signature is extern-legal (D9.9).
+// Calls back into a fort function whose signature is extern-legal.
+// D9.9
 int32_t helper_apply(int32_t (*cb)(int32_t), int32_t x) {
     return cb(x);
 }
 
 // Calls back into a fort function through a floating-point signature, so the
-// callback's argument and result travel in SSE registers (D9.9).
+// callback's argument and result travel in SSE registers.
+// D9.9
 double helper_apply_f64(double (*cb)(double), double x) {
     return cb(x);
 }
 
 // A binary32 argument and result, which travel in SSE registers of their own
 // width: a float passed as a double, or read back as one, gives the wrong
-// number rather than a wrong type, which no compiler diagnoses (D9.9).
+// number rather than a wrong type, which no compiler diagnoses.
+// D9.9
 float helper_half(float x) {
     return x / HALF_DIVISOR;
 }
 
 // Both float widths and an integer in one signature, so the two SSE classes
-// and the integer class are assigned together (D9.9).
+// and the integer class are assigned together.
+// D9.9
 double helper_mix(float a, double b, int32_t k) {
     return (double)a + b * (double)k;
 }
@@ -58,7 +63,8 @@ float helper_apply_f32(float (*cb)(float), float x) {
 }
 
 // Calls back with narrow arguments and a narrow result, which the extension
-// attributes of D9.9 normalize on both sides of the boundary.
+// attributes normalize on both sides of the boundary.
+// D9.9
 uint8_t helper_apply_narrow(uint8_t (*cb)(int8_t, uint16_t), int8_t a, uint16_t b) {
     return cb(a, b);
 }
@@ -72,15 +78,17 @@ int64_t helper_sum_to(int64_t n) {
 }
 
 // Narrow parameters and a narrow result travelling from fort into C, which is
-// the direction run/ffi/002 and 005 do not cover: the extension attributes of
-// D9.9 normalize both sides, and each value below is read here in a wider type
+// the direction run/ffi/002 and 005 do not cover: the extension attributes
+// normalize both sides, and each value below is read here in a wider type
 // so that a truncation or a wrong extension changes the answer.
+// D9.9
 int64_t helper_narrow_sum(int8_t a, uint8_t b, int16_t c, uint16_t d) {
     return (int64_t)a + (int64_t)b + (int64_t)c + (int64_t)d;
 }
 
-// fort `char` is C's `unsigned char` at the boundary (D9.8), so a byte above
-// 127 arrives unchanged rather than as a negative number.
+// fort `char` is C's `unsigned char` at the boundary, so a byte above 127
+// arrives unchanged rather than as a negative number.
+// D9.8
 uint8_t helper_char_code(unsigned char c) {
     return (uint8_t)c;
 }
@@ -90,8 +98,9 @@ bool helper_not(bool b) {
     return !b;
 }
 
-// A fort enum crosses as `i32` (D9.8), so C sees a plain integer and the
-// answer comes back as the enum it was declared with.
+// A fort enum crosses as `i32`, so C sees a plain integer and the answer
+// comes back as the enum it was declared with.
+// D9.8
 int32_t helper_enum_next(int32_t c) {
     return c + 1;
 }
@@ -99,13 +108,15 @@ int32_t helper_enum_next(int32_t c) {
 // The C side of run/modules/extern_enum: one symbol that two fort modules
 // declare, one spelling the enum parameter `color` and the other
 // `shade.color`. The two declarations are identical because they are compared
-// as types (D9.8, D9.4).
+// as types.
+// D9.8, D9.4
 int32_t helper_paint(int32_t color) {
     return color * PAINT_SCALE;
 }
 
 // Returns to its caller although the fort side declares it `noreturn`, which
 // is the one way a program can reach the trap the compiler emits after a call
-// to a `noreturn` function (D19.7). `llvm.trap` is `ud2` on x86-64, so control
-// arriving here dies by SIGILL with no message (D11.4).
+// to a `noreturn` function. `llvm.trap` is `ud2` on x86-64, so control
+// arriving here dies by SIGILL with no message.
+// D19.7, D11.4
 void helper_returns_anyway(void) {}

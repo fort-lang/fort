@@ -240,6 +240,8 @@ that move and 223 after it. The 73 lines above the budget have one candidate and
 `notes/style.md`. Everything else here is the layout, the process or this table, so a move that
 closes the last 46 lines would put process knowledge outside `AGENTS.md`. The user decides which
 of the two the budget means; until then the number stands as a target and not as a rule (T-099).
+The lint holds that number: `BUDGET_LIMIT` in `tools/knowledge_lint.py` is 252, the measured
+value, so any growth trips it; `BUDGET_TARGET` is 150 and no test reads it (T-103).
 
 Five rules for an entry:
 - Say what happened in one sentence, with a number, a command or a file path.

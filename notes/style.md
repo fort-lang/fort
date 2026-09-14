@@ -13,8 +13,15 @@ extension went to `editors/README.md`, as the routing table of `AGENTS.md` sends
 
 ### 1.1 What this section governs
 
-The rules below govern the comments of the compiled sources: `src/**`, `std/*.ft`, `runtime/*`,
-and the C and fort files of `test/` that are code (`test/*.c`, `test/*.h`, `test/fort/**/*.ft`).
+The rules below govern the comments of the compiled sources: `src/**`, `std/*.ft`, and the C and
+fort files of `test/` that are code. `SOURCE_GLOBS` in `tools/knowledge_lint.py` is that list,
+356 files today, and `EXCLUDED` beside it names the code the lint does not read with a reason for
+each: the language corpus of `test/lang`, whose files are fixtures of the harness, and the
+fixtures of the VS Code extension, whose line numbers stand in a `*-document.json` a test
+compares. A file that is in neither list fails `test_every_code_file_is_read_or_excluded`, and a
+prefix of `EXCLUDED` that names no file fails its mirror, so the hole this section had until
+T-103 cannot open again in silence. There is no `runtime/` directory: T-091 made the runtime a
+fort module, `std/rt.ft`.
 
 They do not govern a harness directive, which is the third kind of comment and has a format of
 its own: `spec/toolchain.md` 7 gives the `//!`, `//|` and `//<` of a language test, and
@@ -67,6 +74,35 @@ no lint can check it without a whole-program call graph, while a lint that reads
 this one (T-108). The column is not the rule. T-108 first wrote "a declaration at indentation 8 or
 less", and a statement inside a `static inline` function sits at indentation 4, so 37 lines in 12
 blocks of `test/*.h` took `///` inside a body before a review counted them.
+
+`tools/knowledge_lint.py` is that lint, and the ctest `knowledge_lint` runs it (T-103). It reads
+the brace structure of each file and never a column, and it settles the three questions the rule
+above left to a reader. **A field of a fort struct or enum takes `///`, as a field of a C struct
+does**: a fort struct is exported whole at module level, so its fields are as public as the type
+is, and `src/bootstrap/check.h` and `src/fort/check.ft` are twins that must not disagree about one
+field. T-103 gave the mark to 86 such fields and to 247 top-level declarations, 221 of them in
+`src/lsp/json.ft`, which T-101 and T-108 both left out of their globs. **A trailing comment keeps
+`//` whatever it trails.** A contract does not fit at the end of a line of code, 1.4 puts a
+citation at the end of a line on purpose, and the tree held 0 trailing `///` before the rule was
+written and 0 after it. The wrap of a trailing comment onto the next line is part of that comment
+and keeps `//` too. **A fort source that carries a harness directive is a test program; every
+other fort source is a module.** The 173 programs of `test/fort` all open on one, and the 11
+modules of `test/fort/support` carry none
+(`for f in $(find test/fort -name '*.ft'); do grep -q '^//!' $f || echo $f; done` lists exactly
+the 11). A section banner, a comment above an `import`, a comment above a preprocessor line and a
+comment inside a signature that wraps mark no declaration and keep `//`.
+
+Two things a reader of the lint's green report should know. **The rule is one-sided over most of
+the corpus.** In a `.c` and in a fort test program it can only refuse a `///` and never ask for
+one, and it asks for one on a declaration that already carries a comment, never for the comment
+itself: over the 26625 comments of the 356 files, it requires a mark at 6617 positions and refuses
+one at 20008 (the count line of `--rule citation` prints both). No rule anywhere asks that a
+declaration be documented; 1.3 says which mark a comment takes, not that a comment exists. **A
+fort program that carries no harness directive is read as a module**, which is the one place the
+discriminator above answers wrongly: `test/tty/print_then_wait.ft` is a program and holds no
+directive. The cost is bounded -- the lint would ask `///` on a comment standing on a top-level
+declaration of such a file -- and 0 files hold one today, so the rule stays the simple one a lint
+can check by reading one file (T-103).
 
 A comment that stands on a declaration or on a definition states its contract; only a comment
 inside a body may be a bare citation. T-101 first collapsed 583 doc comments to the tag they
@@ -185,11 +221,31 @@ accepted, and two are prose written after T-101 landed. `src/lsp` holds 36 tagge
 outside the shape, because T-101's lint read `src/bootstrap` and `src/fort` and no other directory
 of `src/`. Neither is T-108's to fix: its deliverable names `std/` and `test/` (T-108).
 
+T-103 fixed all of them and gave the shape a home, `tools/knowledge_lint.py`, with the four wrong
+answers above carried into it and a probe for each. The measurement now runs over every source 1.1
+governs at once. `python3 tools/knowledge_lint.py --rule citation` reports 0 problems and prints
+`citation: 356 files, 26625 comments, 5311 tagged; /// required at 6617 and refused at 20008`.
+**104 comment lines were outside the shape** when the lint first read the tree, measured with the
+shipped lint over `main`'s sources (`git archive main | tar -x -C build/main-tree`, then `--root
+build/main-tree`): 69 in the corpus T-108 had swept, of which **67** stand in the files of the
+language server, written after T-108 measured (53 in `src/lsp` and 14 in `test/fort`), and **2**
+in `src/bootstrap/gen.c`, which T-108 recorded and did not fix; and 35 in the 13 files
+`SOURCE_GLOBS` did not read until T-103 widened it. A tag that a sentence carries in its grammar
+is not cut by any rule: T-103 wrote 28 paragraphs by hand, where a rule would have cut a tag out
+of the grammar of a sentence or out of a parenthesis it shared with prose. The tag multiset of
+every changed file is compared with `main`'s afterwards, which is what says no citation was
+renumbered, dropped or invented.
+
 The reader who wants the rule opens `spec/decisions.md` at the tag, where the entry's `rule` field
-states it (T-100). That is what the log is for, and a copy of the rule in a comment is a copy that
-drifts. The old rule asked for the copy: `src/` held 2962 tagged comment lines on 2026-09-12 and 0
-of them matched the two expressions above. T-101 rewrote them; `src/` now holds 2562 tagged comment
-lines and every one matches.
+states it (T-100). The lint holds the tag to that promise: a `Dn.m` in a comment must name an
+entry of the log and a `Dn` must name a section of it, the 164 tags `tools/knowledge_lint.py
+--rule citation` reads out of `spec/decisions.md` (144 entries and 20 `## Dn` headings). `D15` and
+`D16` hold no entry and are cited as sections, so a section tag is a citation like any other. A
+ticket number is checked against nothing, because `.tickets/` is outside the repository (T-103).
+That is what the log is for, and a copy of the rule in a comment is a copy that drifts. The old
+rule asked for the copy: `src/` held 2962 tagged comment lines on 2026-09-12 and 0 of them matched
+the two expressions above. T-101 rewrote them; `src/` now holds 2562 tagged comment lines and
+every one matches.
 
 ### 1.5 The rule that this section replaced
 

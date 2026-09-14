@@ -40,7 +40,8 @@ bullet at a time and without a rewrite.
 - **Quote a ctest label total with the tree it was measured on.** A label total is the volatile
   number, because any ticket may register a suite: T-078 added `mutate_selftest`, so `ctest -L
   unit` moved from 78 to 79 and every gate criterion of 2026-09-12 and 2026-09-13 that says "0
-  tests failed out of 78" now meets a reader who finds 79. Each of those lines was true of its own
+  tests failed out of 78" now meets a reader who finds 79. T-103 then added `knowledge_lint` and
+  `knowledge_lint_selftest`, which take the label to 81. Each of those lines was true of its own
   tree, and none of them becomes false, but a reader comparing two tickets meets two numbers for
   one label. Write "78 unit tests of that tree", or name the sha. A corpus count carries its own
   guard and needs no qualifier, because it moves only when a `.ft` file is added or removed, and
@@ -578,8 +579,15 @@ bullet at a time and without a rewrite.
   `PROGRAM_FILES` in `diff_ir.sh` if it compiles into a module; `CORPUS_FILES` in
   `test/parser_recovery_test.c` if it is a `fail` test and in `test/highlight_test.py` if it is
   not; and `NESTED_FILES`, `FORM_FILES` or `FLOAT_FILES` in `diff_ast.sh` if it uses a nested
-  array or span level, a `do`-`while` or a `?:`, or a float. A counter left behind fails
-  `diff_check.sh` for every later mutant, which then reads as caught when nothing caught it.
+  array or span level, a `do`-`while` or a `?:`, or a float. A new `.c` or `.h` under `src/` or
+  `test/` raises no counter of that list, and one counter fires on all three extensions:
+  `test_the_corpus_the_lint_reads_is_the_measured_one` in `test/knowledge_lint_test.py`, which
+  holds the number of files `tools/knowledge_lint.py` reads at 356 (T-103). A counter left behind
+  fails `diff_check.sh` for every later mutant, which then reads as caught when nothing caught it.
+  **Two branches that each raise one counter by one merge with no conflict and leave it wrong**:
+  `CLEAN_FILES` went 393 to 394 twice and the truth was 395, which cost T-107 an hour. After the
+  second merge of a branch that adds or removes a source file, run the tool that owns each
+  counter and read the number off its failure rather than off the diff.
   **Say how strong each verdict is.** A verdict a mutant measured, a claim probed by compiling a
   program, and a claim read off the source are three things, and an audit that gives them one word
   hides which rows a reader may rely on.

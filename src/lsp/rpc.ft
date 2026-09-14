@@ -35,12 +35,13 @@
 //
 // ---- what bounds this module ----
 //
-// An allocation that fails is a runtime error and ends the program (D10.2), so
-// every buffer a client can grow needs a bound. There are two. A header block
-// above RPC_MAX_HEADER is refused before it is buffered, which stops a client
-// that never sends the empty line from growing the read buffer without limit.
-// A `Content-Length` above the conn's cap is refused before a byte of the body
+// An allocation that fails is a runtime error and ends the program, so every
+// buffer a client can grow needs a bound. There are two. A header block above
+// RPC_MAX_HEADER is refused before it is buffered, which stops a client that
+// never sends the empty line from growing the read buffer without limit. A
+// `Content-Length` above the conn's cap is refused before a byte of the body
 // is read.
+// D10.2
 //
 // The body cap is the reader's cap as well: the server calls
 // json.set_max_bytes with the number max_content answers, so no body that
@@ -57,12 +58,13 @@
 //
 // Everything a client can get wrong is an error record on the conn -- a flag
 // and a message -- and never a panic, as lsp.json answers a malformed document
-// with a record. A violated precondition of this module's own API is a panic
-// (D13.3), and this module states two: a cap above RPC_CONTENT_CEILING handed
-// to set_max_content, and a read size above RPC_CHUNK_CEILING handed to
-// set_chunk. Both bound what one call asks the allocator for, and
+// with a record. A violated precondition of this module's own API is a panic,
+// and this module states two: a cap above RPC_CONTENT_CEILING handed to
+// set_max_content, and a read size above RPC_CHUNK_CEILING handed to set_chunk.
+// Both bound what one call asks the allocator for, and
 // test/fort/lsp_rpc_cap_panic_test.ft and test/fort/lsp_rpc_chunk_panic_test.ft
 // break one each. `grep -c '^ *panic("' src/lsp/rpc.ft` reads 2.
+// D13.3
 //
 // The end of the stream is not an error. `eof` says the client closed the
 // pipe, which the server reads as `exit` reads it.
@@ -79,11 +81,12 @@
 // the loop ends before any write -- but it is not the only one.
 //
 // Nothing here installs a handler, and the language does not stand in the way
-// of one: D3.14 allows a cast between a pointer and a u64 and between a
-// function pointer and a void*, so `signal(SIGPIPE, SIG_IGN)` is expressible
-// and D9.8 allows the extern that declares it. A ticket that wants a failed
-// write to be an error record rather than a signal installs it in the entry
-// file, where a process-wide disposition belongs.
+// of one: a cast between a pointer and a u64 and between a function pointer
+// and a void* is allowed, so `signal(SIGPIPE, SIG_IGN)` is expressible, and
+// an extern may declare it. A ticket that wants a failed write to be an error
+// record rather than a signal installs it in the entry file, where a
+// process-wide disposition belongs.
+// D3.14, D9.8
 //
 // ---- what a view lives for ----
 //
@@ -122,22 +125,24 @@ u64 RPC_MAX_CONTENT = 16777216;
 
 /// The largest read size set_chunk takes. A read asks std.strbuf to reserve
 /// that many bytes of spare room whatever the stream holds, and an allocation
-/// that fails ends the program (D10.2), so the read size needs a bound as the
-/// body does. Sixteen mebibytes is the largest body a frame carries by
-/// default, and a read larger than the largest frame buys nothing.
-/// It bounds the setter and not the field: `chunk` is public and a caller
-/// could write it directly, outside this bound. No module of this program
-/// does, and set_chunk is the only door this module opens, which is what
-/// read_frame says of max_content where the two are summed.
+/// that fails ends the program, so the read size needs a bound as the body
+/// does. Sixteen mebibytes is the largest body a frame carries by default,
+/// and a read larger than the largest frame buys nothing. It bounds the
+/// setter and not the field: `chunk` is public and a caller could write it
+/// directly, outside this bound. No module of this program does, and
+/// set_chunk is the only door this module opens, which is what read_frame
+/// says of max_content where the two are summed.
+/// D10.2
 u64 RPC_CHUNK_CEILING = 16777216;
 
 /// The largest cap set_max_content takes, which is the reader's own ceiling:
 /// the server hands the reader the number this conn answers, and a document
 /// holds the offset of its text in a u32 (lsp.json). It is also what keeps the
 /// sum of a header and a body inside a u64 in read_frame, since a cap of the
-/// largest u64 would make that sum overflow and trap (D11.1).
-/// It bounds the setter and not the field, as RPC_CHUNK_CEILING does:
-/// `max_content` is public, and read_frame says the same where it sums.
+/// largest u64 would make that sum overflow and trap. It bounds the setter and
+/// not the field, as RPC_CHUNK_CEILING does: `max_content` is public, and
+/// read_frame says the same where it sums.
+/// D11.1
 u64 RPC_CONTENT_CEILING = 4294967295;
 
 /// The header field that gives the length of the body, and the one separator
@@ -263,9 +268,10 @@ fn u64 max_content(conn* c) {
 
 /// Moves the read size, 0 restoring RPC_CHUNK. A test sets it to 1 to split
 /// every frame across as many reads as it has bytes. A size above
-/// RPC_CHUNK_CEILING is a violated precondition and panics (D13.3), as a cap
-/// above its own ceiling does: both numbers bound what one call asks the
-/// allocator for.
+/// RPC_CHUNK_CEILING is a violated precondition and panics, as a cap above
+/// its own ceiling does: both numbers bound what one call asks the allocator
+/// for.
+/// D13.3
 fn void set_chunk(conn mut* c, u64 size) {
     if (size > RPC_CHUNK_CEILING) {
         panic("rpc.set_chunk: above the ceiling");
@@ -276,8 +282,9 @@ fn void set_chunk(conn mut* c, u64 size) {
 /// Moves the cap on a body, 0 restoring RPC_MAX_CONTENT. The server hands the
 /// reader the same number, so that the two layers cannot disagree about what
 /// is too large. A cap above RPC_CONTENT_CEILING is a violated precondition
-/// and panics (D13.3): the reader refuses it for the same reason, and the sum
-/// of a header and a body must stay inside a u64.
+/// and panics: the reader refuses it for the same reason, and the sum of a
+/// header and a body must stay inside a u64.
+/// D13.3
 fn void set_max_content(conn mut* c, u64 limit) {
     if (limit > RPC_CONTENT_CEILING) {
         panic("rpc.set_max_content: above the ceiling");
