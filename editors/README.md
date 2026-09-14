@@ -80,9 +80,9 @@ nothing else. Publishing the note alone would show `previous declaration here` w
 nowhere on the screen.
 
 A check answers about a closure and not about one file, so the extension orders its events per
-file. A check publishes, and a close clears. Each takes a number, and only a newer event writes
-over an older one. A check still in flight therefore cannot repaint what a later check or a close
-has settled.
+file. A check publishes, and a close clears the file and asks about the closure that file's check
+painted. Each takes a number, and only a newer event writes over an older one. A check still in
+flight therefore cannot repaint what a later check or a close has settled.
 
 A file may leave a closure: delete the `import mathx;` of `main.ft` and save. The squiggles of
 `mathx.ft` came from a walk of `main.ft`'s closure, and that walk no longer reaches them. The
@@ -91,9 +91,18 @@ extension does not decide what those squiggles should become. It asks the compil
 guessed in the meantime: the old squiggles stand until the answer arrives, as they do after any
 save.
 
-That costs one run for each file the check painted and no longer names, and `by` keeps the set
+Closing `main.ft` does the same thing to the whole of its closure. The walk that painted
+`mathx.ft` is over, the file that carried it is shut, and no run of it will speak again, so every
+file that closure painted is checked in its own right and publishes its own answer. The closed file
+itself is not asked about: the close takes its squiggles, and the reader has shut it. Opening it
+again drops whatever those runs have not yet started, since the check the open starts is the newer
+word about every file of that closure (T-106).
+
+That costs one run for each file the event painted and no longer names, and `by` keeps the set
 small. A run asks again only about its own paint. An error that a check of `mathx.ft` itself
-reported already has a run behind it. A file you have closed carries no paint at all.
+reported already has a run behind it. A file you have closed carries no paint at all. A close of
+`mathx.ft` asks nothing, because `mathx.ft` has walked no closure of its own and so has painted
+nobody.
 
 The runs go out one at a time, because a closure can be wide. `src/fort/main.ft` reads 23 files of
 this repository. Deleting one `import` departs 22 at once, and each run opens its own ssh
@@ -157,10 +166,10 @@ The answers are otherwise a batch answer about the file as it was saved, so betw
 squiggles are stale by design and an unsaved buffer is never checked. The VM must be up (`tools/vm
 up`) and the release build must exist (`tools/vm build release`); neither is the extension's to
 arrange, and without them nothing is painted and the output channel says why. A file that leaves a
-closure is checked again only by the check of the file that dropped it. That check must have
-painted it, and the first check of a file in a session asks about nothing else. A module you delete
-from disk keeps its last squiggles. The run that asks about it finds no file, so there is no
-answer to publish. The output channel carries the compiler's `cannot read` line.
+closure is checked again only by the check or the close of the file that dropped it. That event
+must have painted it, and the first check of a file in a session asks about nothing else. A module
+you delete from disk keeps its last squiggles. The run that asks about it finds no file, so there
+is no answer to publish. The output channel carries the compiler's `cannot read` line.
 
 A module the window has never seen inside a closure is checked on its own, with its own directory
 as the only search root. Open `test/lang/run/modules/nested/util/strings.ft` in a fresh window and

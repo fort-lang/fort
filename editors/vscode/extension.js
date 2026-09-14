@@ -98,6 +98,29 @@ function isFortFile(document) {
 // cleared. The close is therefore an event like a run, and the newest word about
 // that file, painted by nobody.
 //
+// A close also ends the closure that file's checks walked. The squiggles a
+// check of `main.ft` put on `mathx.ft` came from that walk, and after the close
+// nothing supports them: the file that carried them is shut and no run of it
+// will speak again. A close is therefore a check that names nothing, which is
+// `departedFrom` with an empty set, and every file of that closure leaves it at
+// once. Each is checked in its own right, exactly as a deleted `import` has it
+// checked. The extension decides nothing about such a file and the old
+// squiggles stand until the answer arrives (`spec/toolchain.md` 9.2).
+//
+// No new event orders those runs. A close takes its number here, before it
+// queues anything, and each run takes the next number when the queue starts it,
+// as every other run does. A run older than the close therefore cannot repaint
+// what the close settled, and the answers arrive under `mayReplace` like any
+// other (T-106).
+//
+// The file that was closed is not asked about. Its paint is gone and the reader
+// has shut it, so there is nothing to ask for. `by` alone would drop it in the
+// ordinary case, the close having set it to null. The `at` half of the
+// precondition in `drainRechecks` drops it in the other one, where the file is
+// opened again while its own re-check waits in the queue. This line says it
+// directly rather than leaving it to those two, and no test can tell it from
+// them (T-106).
+//
 // A file this window knows nothing about is left alone. It was never checked
 // and never painted, so there is nothing to clear and nothing to order. A file
 // outside every workspace folder is exactly that file. The test is the
@@ -106,8 +129,11 @@ function isFortFile(document) {
 //
 // Each map then holds one entry per file this window has checked or published
 // about. None of them holds one entry per event. The keys are file paths, so a
-// file opened and closed a hundred times is the one entry it already had.
-// `deactivate` drops all three with the window.
+// file opened and closed a hundred times is the one entry it already had. The
+// emptied `closureOf` entry is one this file already had, and a file that was
+// never checked as an entry gets none. Two closes in a row therefore ask once:
+// the second finds an empty closure. `deactivate` drops all three with the
+// window.
 function forget(document) {
   if (!isFortFile(document)) return;
   const filePath = document.uri.fsPath;
@@ -122,6 +148,14 @@ function forget(document) {
     roots: published === undefined ? [] : published.roots,
   });
   collection.delete(vscode.Uri.file(filePath));
+  const departed = departedFrom(filePath, new Set());
+  if (closureOf.has(filePath)) closureOf.set(filePath, new Set());
+  if (published === undefined || published.folder === null) return;
+  const closedAt = events;
+  for (const file of departed) {
+    if (file === filePath) continue;
+    queueRecheck(file, published.folder, published.roots, filePath, closedAt);
+  }
 }
 
 // How the compiler is reached, which is the one thing about it that could be
@@ -259,7 +293,7 @@ function publish(entryPath, folder, generation, roots, document) {
   const departed = departedFrom(entryPath, closure);
   closureOf.set(entryPath, closure);
   if (departed.length === 0) return;
-  for (const file of departed) queueRecheck(file, folder, childRoots, entryPath);
+  for (const file of departed) queueRecheck(file, folder, childRoots, entryPath, generation);
 }
 
 // The `-I` directories a later check of any file of this closure is checked
@@ -326,7 +360,8 @@ function mayReplace(file, generation) {
 // `mathx.ft` asks again only about what `mathx.ft` itself painted, and the
 // import relation is acyclic (D9.5).
 //
-// A close wants this same set with an empty `stillNamed`, which is T-106.
+// A close is this same set with an empty `stillNamed`: the closed file names
+// nothing any more, so every file of its closure has left it (`forget`, T-106).
 function departedFrom(entryPath, stillNamed) {
   const before = closureOf.get(entryPath);
   const departed = [];
@@ -346,15 +381,30 @@ function departedFrom(entryPath, stillNamed) {
 // the one waiting for those.
 //
 // A queued file takes its number when its run starts, like every other event.
-// The precondition is tested there and not when the file was queued. The one
-// rule is that a run asks again about its own paint: `by` must still name the
-// file whose departure queued this. Another run may have painted the file since,
-// or the user may have closed it, and in both cases nothing is asked.
+// The precondition is tested there and not when the file was queued, and it has
+// two halves.
+//
+// A run asks again about its own paint: `by` must still name the event that
+// queued this. Another check may have painted the file since, or the user may
+// have closed it, and in both cases nothing is asked.
+//
+// And the paint must still be the paint that was there when the file was
+// queued: `at` must be no newer than the number the queueing event had. `by`
+// alone does not say this. A close of `main.ft` queues the files its closure
+// painted, and re-opening `main.ft` checks it again and writes `by` back onto
+// exactly those files. That answer is the newest word about them, and the
+// queued run, which takes its number after it, would replace a live error with
+// its own older reading and lose it until the next save. The window is the
+// drain of the queue, which is 22 runs wide for `src/fort/main.ft` (T-106).
+//
+// The same half holds for a departure, where nothing has spoken about the file
+// since the check that queued it, so `at` is older than the queueing event's
+// number and the run goes out.
 const pending = [];
 let recheckRunning = false;
 
-function queueRecheck(filePath, folder, roots, by) {
-  pending.push({ filePath, folder, roots, by });
+function queueRecheck(filePath, folder, roots, by, at) {
+  pending.push({ filePath, folder, roots, by, at });
   drainRechecks();
 }
 
@@ -363,6 +413,7 @@ function drainRechecks() {
     const next = pending.shift();
     const published = publishedAt.get(next.filePath);
     if (published === undefined || published.by !== next.by) continue;
+    if (published.at > next.at) continue;
     recheckRunning = true;
     startCheck(next.filePath, next.folder, next.roots, () => {
       recheckRunning = false;

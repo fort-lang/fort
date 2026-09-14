@@ -726,27 +726,30 @@ bullet at a time and without a rewrite.
   `editors/vscode/test/fixtures/lexical.ft`), and a test asserts that partition, so a new
   directory of fort is a red test rather than a corpus nobody tokenizes -- which is what
   `test/fort` and `test/lang/programs` both were until T-079 measured it.
-- The VS Code extension is plain JavaScript on the VS Code API, with no npm dependency and no
-  build step. Its logic lives in `editors/vscode/lib/check.js`, which never `require('vscode')`, so
-  Node's built-in runner tests it: `tools/vm run 'cd editors/vscode && node --test'` (ctest
+- The VS Code extension is plain JavaScript on the VS Code API, with no npm dependency and no build
+  step. Its logic lives in `editors/vscode/lib/check.js`, which never `require('vscode')`, so Node's
+  built-in runner tests it: `tools/vm run 'cd editors/vscode && node --test'` (ctest
   `extension_selftest`, label `unit`, run from `editors/vscode`; `node --test` with no argument
   discovers `test/*.test.js` itself, and naming the directory fails on newer Node). `extension.js`
   is the only file that may touch the API, so keep it thin and move anything with a case analysis
-  into `lib/`; it is driven through `test/fake_vscode.js`, which answers its `require('vscode')`
-  and its `require('child_process')` by patching `Module._load` before loading a fresh copy of it,
-  so a save, a failed run, a close and two checks racing are all tested with no editor, no VM and
-  no compiler. **A check answers about a closure, not about one file**, so an ordering guard keyed
-  on the file that was checked is not enough: the first version dropped a superseded run of the
-  same file and still let an older run of `main.ft` repaint an error in `mathx.ft` that a newer
-  check of `mathx.ft` had just cleared. The generation is therefore recorded per *published* file
-  as well, and a test that means to see that has both files in **one** closure -- two disjoint
-  closures pass either way. What that cannot check is that VS Code calls the extension the way its
-  API is documented to, which is what the manual smoke test in `editors/README.md` is for, and a
-  change to `extension.js` is run through it by hand -- by the user, since VS Code runs on their
-  machine and an agent cannot reach it. Its fixtures are real compiler output: regenerate them with
-  `fort --check --json` over `editors/vscode/test/fixtures/` rather than by hand, and a helper that
-  is not a suite, such as `test/fake_vscode.js`, defines no test of its own, since Node 18 loads
-  every file under `test/`.
+  into `lib/`; it is driven through `test/fake_vscode.js`, which answers its `require('vscode')` and
+  its `require('child_process')` by patching `Module._load` before loading a fresh copy of it, so a
+  save, a failed run, a close and two checks racing are all tested with no editor, no VM and no
+  compiler. **A check answers about a closure, not about one file**, so an ordering guard keyed on
+  the file that was checked is not enough: the first version dropped a superseded run of the same
+  file and still let an older run of `main.ft` repaint an error in `mathx.ft` that a newer check of
+  `mathx.ft` had just cleared. The generation is therefore recorded per *published* file as well,
+  and a test that means to see that has both files in **one** closure -- two disjoint closures pass
+  either way. A test that means to see the ordering of a **close** needs a closure wider than one
+  departed file as well, because a queue of one drains before any later event can reach it: T-106's
+  first version had a duplicate re-check and a re-check that erased a live error, and both were
+  invisible to a two-file closure (T-106). What that cannot check is that VS Code calls the
+  extension the way its API is documented to, which is what the manual smoke test in
+  `editors/README.md` is for, and a change to `extension.js` is run through it by hand -- by the
+  user, since VS Code runs on their machine and an agent cannot reach it. Its fixtures are real
+  compiler output: regenerate them with `fort --check --json` over `editors/vscode/test/fixtures/`
+  rather than by hand, and a helper that is not a suite, such as `test/fake_vscode.js`, defines no
+  test of its own, since Node 18 loads every file under `test/`.
 - **What checks `.ft` source, and what does not** (T-076). Three things do. `tools/fort_lint.py`
   (ctest `fort_lint`, target `fort-lint`) holds `std/*.ft` and `src/fort/*.ft` to the identifier
   conventions of D1.4 and to 100 columns; it reads `fort --index` (D20.3) rather than tokenizing
