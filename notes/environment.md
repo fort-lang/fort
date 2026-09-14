@@ -183,6 +183,18 @@ without a rewrite.
   which reads the hold file and names the right process. The hold and this rule are both correct;
   the wrapper form is what was wrong, and it was in the coordinator's own task prompts all day
   (T-121).
+  **The same subshell, used on purpose, gives a gate that outlives the session.** A gate started
+  through an agent's background shell dies when that session ends: on 2026-09-14 four runs died
+  that way in one hour, two at 0 `self-hosted` and two about four minutes in, and each death cost
+  the whole run. Start the gate inside its own subshell instead:
+
+      cd <worktree> && ( FORT_VM_SLOT=<n> nohup tools/vm gate > build/gate.log 2>&1 & )
+
+  The parentheses bind the `&` to the one command and not to the AND-list, so the command returns
+  at once and the gate detaches to ppid 1. **A gate at ppid 1 is the normal state and not a
+  fault**, which is the one difference from the orphan above: that orphan ran beside a live gate,
+  and this one holds `build/vm-hold.pid` alone and releases the hold when it finishes. Poll the
+  hold file and `build/gate.log` for the result (T-134).
   **A host-side timeout does not reach the guest.** `ssh -T` allocates no pty, so a command that
   kills the host process leaves the guest command running. T-078 measured it on the new
   `guest_run`: `subprocess.run(["tools/vm", "run", "sleep 40"], timeout=3)` raised its timeout,

@@ -830,6 +830,34 @@ bullet at a time and without a rewrite.
   implements no rule, it says so in the row and moves the citation. The coupling is what stops an
   audit going stale. T-046 froze `src/bootstrap` on 2026-09-14, so from that date the count moves
   only when a bug fix adds or removes a `Dn.m` citation in one of the four files.
+  **Mutate through `tools/mutate.py`, and never leave a mutated source across a tool call.** The
+  runner restores in a `finally`, reads the copy it saved rather than `git checkout`, and ends a
+  run by rebuilding and comparing the md5 with the baseline, except after a timeout row, where it
+  restores the files, builds nothing and says it measured nothing. So a restore that did not
+  compile is visible at once. A mutation by hand has none of that: on 2026-09-14 two
+  implementors stopped at once on a spend limit, and T-127's worktree then held a mutation of
+  `src/bootstrap/check.c` and `src/fort/check.ft` that reverted T-128's fix. Nothing in the
+  repository said the tree was mutated. Three rules follow.
+  Run `tools/mutate.py <table> --check` before the round, not after it rots.
+  **One table exists today**, and it covers 4 files:
+  `ls tools/mutations/*.json | wc -l` prints 1, and
+  `grep -o 'src/bootstrap/[a-z_]*\.c' tools/mutations/emitter_bootstrap.json | sort -u` prints
+  the four files of the C emitter, which is the `"sources"` list the runner saves. T-126 mutated
+  `src/fort/check.ft` by hand and T-127 mutated both compilers by hand, because no table covers
+  either.
+  Where no table covers the file, apply and restore in **one** shell command, from a pristine copy
+  that same command made.
+  Prove the restore with `md5 -q <file>` against the value it read before the mutation, and with
+  `git status --short`. **Never restore with `git checkout <file>`**: it throws away uncommitted
+  work in the same file, which is `tools/mutate.py`'s own stated reason for saving a copy. That is
+  the one reason. Restore with `git show main:<path> > tmp && mv tmp <path>`, which touches no
+  other work; the coordinator restored T-127's two files that way and `md5 -q` then read
+  `bbde7b5ca321f3e1834837d6474ae5e0` and `9c18ea9291e8c35bb91cfcda822a6f8f`, which are main's
+  (T-134).
+  `--check` needs no step of its own in the gate: `mutate_selftest` already runs `check_table`
+  over the shipped table and the live sources in
+  `test_check_reports_no_stale_anchor_against_the_sources`, and asserts `76 rows, 0 stale`
+  (T-134).
 
 - **An oracle is only an oracle where it derives its answer differently, so say
   for each half of one whether it is independent or shared.** T-064 swept every offset of a
