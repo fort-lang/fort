@@ -75,7 +75,7 @@ CORPUS_FILES = 685
 # The least number of `.ft` each of those directories holds. A directory grows,
 # so its own test asserts a floor and CORPUS_FILES asserts the exact total. A
 # floor of 1 says only that the directory exists, so each one here is near the
-# count of the day: 430, 22, 13, 23, 7, 184, 3 and 2 on 2026-09-14. The
+# count of the day: 431, 22, 13, 23, 7, 184, 3 and 2 on 2026-09-14. The
 # table has one entry for each directory of CORPUS_DIRS, and
 # test_every_corpus_directory_is_checked_by_a_test holds the two against each
 # other, so a directory that no test checks is a red test (T-104).
@@ -738,7 +738,7 @@ class ScannerTest(unittest.TestCase):
 
         The sample is the fixture and every 25th file of the corpus walk, so a
         rule the fixture does not spell is still met. T-104 held the two
-        engines against all 684 files by hand and their token dumps were
+        engines against all 685 files by hand and their token dumps were
         byte-identical; this test keeps a sample of that in the gate.
         """
         walked = sorted({path for d in CORPUS_DIRS for path in d.rglob("*.ft")})
@@ -754,18 +754,18 @@ class ScannerTest(unittest.TestCase):
 class CorpusTest(unittest.TestCase):
     """Real fort is covered by the grammar and holds no lexical error.
 
-    One test checks one directory of CORPUS_DIRS, so each of the 684 files is
+    One test checks one directory of CORPUS_DIRS, so each of the 685 files is
     tokenized once for its scope check. The test that counts the walk checked
     every file of it a second time until T-104, which took a run of this
-    module to 1394 calls of Engine.tokenize over 7562338 bytes; it counts now
+    module to 1396 calls of Engine.tokenize over 7575844 bytes; it counts now
     and tokenizes nothing.
 
-    A run makes 772 calls over 4077498 bytes: the 684 scope checks, 58 of
+    A run makes 773 calls over 4089469 bytes: the 685 scope checks, 58 of
     ScannerTest.test_the_engine_answers_what_one_search_for_each_rule_answers,
     which tokenizes the fixture and every 25th file of the walk once with each
-    of the two engines, and 30 of the fixture and marker tables. So 28 corpus
-    files are tokenized three times, and that is the oracle and not a second
-    scope check.
+    of the two engines, and 30 of the fixture and the marker tables. So 28
+    corpus files are tokenized three times, and that is the oracle and not a
+    second scope check.
     """
 
     def setUp(self):

@@ -877,8 +877,8 @@ bullet at a time and without a rewrite.
   `test/fort` and `test/lang/programs` both were until T-079 measured it.
   **One test checks one directory of `CORPUS_DIRS`, and the corpus is tokenized once** (T-104).
   `test_the_corpus_is_the_size_it_says_it_is` walked the corpus to count it and then tokenized
-  every file a second time, which took one run of the module to 1394 calls of `Engine.tokenize`
-  over 7562338 bytes where the corpus is 684 files and 3837893 bytes. That second walk also gave
+  every file a second time, which took one run of the module to 1396 calls of `Engine.tokenize`
+  over 7575844 bytes where the corpus is 685 files and 3844648 bytes. That second walk also gave
   cover to `src/lsp` and `test/tty`, which stood in `CORPUS_DIRS` with no test of their own. Each
   directory now has one test, `CORPUS_MINIMUMS` gives each its floor, and
   `test_every_corpus_directory_is_checked_by_a_test` reads the source of the class and holds the
@@ -889,9 +889,10 @@ bullet at a time and without a rewrite.
   line cost `positions x rules x length` and not its bytes. `Scanner` writes the rules as one
   alternation, each inside a group of its own, and `SlowScanner` keeps the old search as the
   oracle of `ScannerTest`. The two changes take the module from 31.55 s to 4.87 s, five runs each
-  under `debug`. **Hold a rewrite of that engine to the dump and not to the assertions**: a
+  under `debug`, and a run makes 773 calls of `Engine.tokenize` where it made 1396. **Hold a
+  rewrite of that engine to the dump and not to the assertions**: a
   scanner that reports other scopes passes the suite and silently changes what the grammar is held
-  to. The dump is four lines of Python and prints 944368 lines for the 684 files of 2026-09-14;
+  to. The dump is five lines of Python and prints 945748 lines for the 685 files of 2026-09-14;
   take it before the change and after it, and `diff` the two:
 
       cd test && python3 -c 'import highlight_test as h
