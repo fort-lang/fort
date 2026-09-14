@@ -114,6 +114,17 @@ without a rewrite.
   never appear -- and each looked exactly like a job still running. A marker waiter is the
   fallback for a job you did not start, and it needs a second condition that ends it.
 
+- **Do not run a binary in the slot that did not build it.** The two slots share one build
+  directory through the VirtualBox shared folder, and the folder serves an executable's pages from
+  a cache that `md5sum` does not read. T-135 built `build/debug/fort` in slot 1 and ran it in slot
+  2: both slots reported the md5 `786cb6b9559f368f9399d2a52af43164`, slot 1 answered with the
+  compiler in that file and slot 2 answered with the compiler it had built there itself an hour
+  before. `ninja` said `no work to do`, because the file was current; only the mapping was stale.
+  The symptom is a test that fails in one slot and passes in the other with the same bytes, which
+  reads as a flaky test and is not one. Two cures: run the binary in the slot that built it, or
+  copy it into the guest first (`cp build/debug/fort /tmp/f && /tmp/f ...`), which T-135 used to
+  prove the diagnosis, since the copy answered correctly from the same md5. Use the second slot
+  for a build of its own, never for a run against the first slot's build directory.
 - **Two VMs, both from the main checkout, selected by `FORT_VM_SLOT`** (T-114, set by the user
   on 2026-09-13: two VMs at all times, both in use). The host has 10 physical cores and one
   6-vCPU guest cannot reach the other four, so slot 2 is a second VM brought up from the **same**

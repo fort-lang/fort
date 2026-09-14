@@ -4,15 +4,22 @@
 //| 1 2 true
 //| true 3
 //| 0
-// new(T* own, n) yields T mut* own mut@ own whose slots are null (D17.3, D10.2): the slots take
-// owned nodes, each node is freed on its own through the mutable slot, and the span last.
+//| 2 true true
+//| 5 6
+//| true 0
+// new(T mut* own, n) yields T mut* own mut@ own whose slots are null (D17.3, D10.2): the slots
+// take owned nodes, each node is freed on its own through the mutable slot, and the span last.
+// new(T* own, n) is the other half of the pair and yields T* own mut@ own, which this branch made
+// spellable: the slots own their nodes and cannot write them. A node reaches such a slot by
+// dropping its own level-1 mut, which D5.4 allows with no condition, and del(k[i]) empties the
+// slot because del asks for own and for a mutable indirection, which level 1 is (D17.6, D17.9).
 struct node {
     i32 value;
 }
 
 fn i32 main() {
     u64 n = 3;
-    node mut* own mut@ own kids = new(node* own, n);
+    node mut* own mut@ own kids = new(node mut* own, n);
     println(kids.len, " ", kids[0] == null, " ", kids[1] == null, " ", kids[2] == null);
     kids[0] = new(node);
     kids[1] = new(node);
@@ -26,5 +33,21 @@ fn i32 main() {
     println(kids[0] == null, " ", kids.len);
     del(kids);
     println(kids.len);
+
+    node* own mut@ own borrowed = new(node* own, 2);
+    println(borrowed.len, " ", borrowed[0] == null, " ", borrowed[1] == null);
+    // A slot reads its node and cannot write it (fail/mutability/012), so each
+    // value is set before the pointer lands in the slot.
+    node mut* own five = new(node);
+    five->value = 5;
+    node mut* own six = new(node);
+    six->value = 6;
+    borrowed[0] = move(five);
+    borrowed[1] = move(six);
+    println(borrowed[0]->value, " ", borrowed[1]->value);
+    del(borrowed[0]);
+    del(borrowed[1]);
+    del(borrowed);
+    println(five == null, " ", borrowed.len);
     return 0;
 }

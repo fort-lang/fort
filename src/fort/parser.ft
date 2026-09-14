@@ -128,6 +128,10 @@ string MUT_BEFORE_ARRAY_ERROR =
 string ARRAY_OWN_ERROR =
     "an own never follows a fixed-array suffix: write it after the '*' or '@' it marks";
 
+/// The two diagnostics of an allocated type, which two sites each report.
+string ALLOC_MUT_ERROR = "new allocates writable storage: remove the outermost 'mut'";
+string ALLOC_OWN_ERROR = "inside new an own follows a '*' of the element type";
+
 /// The recovery points, which differ in what ends a skip: the statements of a
 /// block or of a case clause, the clauses of a switch, the fields of a struct
 /// body, the declarations of the module (toolchain.md 4).
@@ -818,16 +822,19 @@ fn ast.node mut* parse_array_type(parser mut* p) {
     return finish(p, t);
 }
 
-/// Inside `new(...)` a `mut` never parses, an `own` follows only a `*` of the
-/// element type and a span is asked for with a count, not with an `@`.
-/// D10.2, D17.3
-fn bool check_alloc_marker(parser mut* p) {
+/// The outermost position of an allocated type is the one `new` fills, because
+/// it is the storage `new` allocates: `new` marks it writable and owns it, so
+/// neither marker of the program's parses there. An `own` marks a reference, so
+/// inside `new(...)` it follows a `*` alone, and a span is asked for with a
+/// count and not with an `@`.
+/// D5.8, D10.2, D17.3
+fn bool check_alloc_end(parser mut* p) {
     if (at(p, lexer.tok_kind.kw_mut)) {
-        error_here(p, "a mut does not parse inside new: new allocates writable storage");
+        error_here(p, ALLOC_MUT_ERROR);
         return false;
     }
     if (at(p, lexer.tok_kind.kw_own)) {
-        error_here(p, "inside new an own follows a '*' of the element type");
+        error_here(p, ALLOC_OWN_ERROR);
         return false;
     }
     if (at(p, lexer.tok_kind.at)) {
@@ -837,8 +844,21 @@ fn bool check_alloc_marker(parser mut* p) {
     return true;
 }
 
-/// alloc_type = base_type { "*" [ "own" ] } { "[" const_expr "]" }
-/// (grammar.md 6).
+/// A `mut` inside `new(...)` marks storage `new` does not allocate, which is
+/// every position of the element type but the outermost one, so a `*` must
+/// stand outside the `mut` that was just read.
+/// D5.8, D10.2
+fn bool check_alloc_mut(parser mut* p, markers* m) {
+    if ((m->flags & ast.FLAG_MUT) != 0 && !at(p, lexer.tok_kind.star)) {
+        error_at(p, m->mut_loc, ALLOC_MUT_ERROR);
+        return false;
+    }
+    return true;
+}
+
+/// alloc_type = base_type [ "mut" ] { "*" [ "own" ] [ "mut" ] }
+/// { "[" const_expr "]" } (grammar.md 6), whose last `mut` position is empty.
+/// D5.8, D10.2
 fn ast.node mut* parse_alloc_type(parser mut* p) {
     if (!check_no_leading_marker(p)) {
         return null;
@@ -852,24 +872,30 @@ fn ast.node mut* parse_alloc_type(parser mut* p) {
     if (base != null) {
         t = node_at(p, ast.ast_kind.k_type, at_loc);
         t->a = base;
-        while (t != null && check_alloc_marker(p) && at(p, lexer.tok_kind.star)) {
+        markers mut m = markers{};
+        if (!parse_markers(p, &m, ALLOC_OWN_ERROR) || !check_mut_before_array(p, &m)
+            || !check_alloc_mut(p, &m)) {
+            t = null;
+        } else {
+            t->flags = m.flags;
+        }
+        while (t != null && at(p, lexer.tok_kind.star)) {
             diag.loc star = here(p);
             ast.node mut* s = node_at(p, ast.ast_kind.k_type_suffix, star);
             s->op = cast(types.suffix_kind.s_ptr, i32);
             bump(p);
-            if (at(p, lexer.tok_kind.kw_own)) {
-                s->flags = ast.FLAG_OWN;
-                bump(p);
+            if (!parse_markers(p, &m, "")) {
+                t = null;
+                break;
             }
+            s->flags = m.flags;
             finish(p, s);
-            if (!push_suffix(p, t, s)) {
+            if (!check_mut_before_array(p, &m) || !check_alloc_mut(p, &m)
+                || !push_suffix(p, t, s)) {
                 t = null;
             }
         }
-        if (p->failed) {
-            t = null;
-        }
-        if (t != null && (!parse_array_suffixes(p, t, false) || !check_alloc_marker(p))) {
+        if (t != null && (!parse_array_suffixes(p, t, false) || !check_alloc_end(p))) {
             t = null;
         }
     }

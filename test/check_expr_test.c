@@ -458,39 +458,65 @@ TEST(new_yields_an_owning_pointer_or_span, {
     TEST_ASSERT_EQ_STR(init_type("s"), "i32 mut@ own");
 })
 
-TEST(new_allocates_writable_storage_at_every_level, {
-    TEST_ASSERT_TRUE(check_body("    i32 mut* mut* own pp = new(i32*);\n"
+TEST(new_marks_the_storage_it_allocates_and_no_position_below_it, {
+    TEST_ASSERT_TRUE(check_body("    i32* mut* own pp = new(i32*);\n"
+                                "    i32 mut* mut* own qq = new(i32 mut*);\n"
                                 "    i32[4] mut* own r = new(i32[4]);\n"
-                                "    println(pp, r);\n    del(pp);\n    del(r);"));
-    // The storage is writable at every level.
+                                "    println(pp, qq, r);\n"
+                                "    del(pp);\n    del(qq);\n    del(r);"));
+    // The slot `new` allocates is writable; what the slot reaches is the
+    // program's to write, and a fresh slot reaches nothing.
     // D5.8, D10.2
-    TEST_ASSERT_EQ_STR(init_type("pp"), "i32 mut* mut* own");
+    TEST_ASSERT_EQ_STR(init_type("pp"), "i32* mut* own");
+    TEST_ASSERT_EQ_STR(init_type("qq"), "i32 mut* mut* own");
+    // The elements of a fixed array share its storage, so one mark covers
+    // both and the array is the outermost position.
+    // D5.2, D5.3
     TEST_ASSERT_EQ_STR(init_type("r"), "i32[4] mut* own");
+})
+
+TEST(new_of_a_borrowed_element_needs_no_cast_to_reach_a_borrowed_span, {
+    // A span of slots that borrow, which `src/fort/gen.ft` reached with a cast
+    // until this rule changed. `new` answers it directly now, and each
+    // spelling refuses the conversion to the other.
+    // D5.4, D10.2
+    TEST_ASSERT_TRUE(check_body("    i32* mut@ own s = new(i32*, 2);\n"
+                                "    println(s.len);\n    del(s);"));
+    TEST_ASSERT_EQ_STR(init_type("s"), "i32* mut@ own");
+    TEST_ASSERT_FALSE(check_body("    i32 mut* mut@ own s = new(i32*, 2);\n"
+                                 "    println(s.len);\n    del(s);"));
+    TEST_ASSERT_TRUE(said("expects i32 mut* mut@ own, not i32* mut@ own"));
+    TEST_ASSERT_FALSE(check_body("    i32* mut@ own s = new(i32 mut*, 2);\n"
+                                 "    println(s.len);\n    del(s);"));
+    TEST_ASSERT_TRUE(said("expects i32* mut@ own, not i32 mut* mut@ own"));
 })
 
 TEST(new_of_an_own_element_owns_each_slot, {
     TEST_ASSERT_TRUE(
         check_src("struct node {\n    i32 v;\n}\n"
-                  "fn i32 main() {\n    node mut* own mut@ own k = new(node* own, 4);\n"
+                  "fn i32 main() {\n    node mut* own mut@ own k = new(node mut* own, 4);\n"
                   "    println(k.len);\n    del(k);\n    return 0;\n}\n"));
     TEST_ASSERT_EQ_STR(init_type("k"), "node mut* own mut@ own");
 })
 
 TEST(new_of_a_void_pointer_allocates_a_slot, {
-    TEST_ASSERT_TRUE(check_body("    void mut* mut* own p = new(void*);\n"
-                                "    void mut* mut@ own s = new(void*, 4);\n"
-                                "    println(s.len);\n    del(p);\n    del(s);"));
-    // `new(void*)` is legal, one pointer slot. Every level the allocation
-    // reaches is writable, and the level a `void*` reaches is one of them, so
-    // the slots hold `void mut*`.
-    // D3.11, D5.8, D17.3
+    TEST_ASSERT_TRUE(check_body("    void mut* mut* own p = new(void mut*);\n"
+                                "    void mut* mut@ own s = new(void mut*, 4);\n"
+                                "    void* mut@ own b = new(void*, 4);\n"
+                                "    println(s.len, b.len);\n"
+                                "    del(p);\n    del(s);\n    del(b);"));
+    // `new(void*)` is legal, one pointer slot. The slot is writable because
+    // `new` allocates it; the level a `void*` reaches is the program's to
+    // mark, and both spellings are types.
+    // D3.11, D5.8, D10.2, D17.3
     TEST_ASSERT_EQ_STR(init_type("p"), "void mut* mut* own");
     TEST_ASSERT_EQ_STR(init_type("s"), "void mut* mut@ own");
+    TEST_ASSERT_EQ_STR(init_type("b"), "void* mut@ own");
     // The slot takes a writable pointer and refuses a read-only one, as a
     // `node mut*` slot does.
     // D5.4
     TEST_ASSERT_FALSE(check_body("    i32 x = 1;\n"
-                                 "    void mut* mut@ own s = new(void*, 1);\n"
+                                 "    void mut* mut@ own s = new(void mut*, 1);\n"
                                  "    s[0] = cast(&x, void*);\n    del(s);"));
     TEST_ASSERT_TRUE(said("expects void mut*, not void*"));
 })
@@ -579,7 +605,8 @@ int main(int argc, char** argv) {
     TEST_RUN(fprint_takes_a_descriptor_first);
     TEST_RUN(assert_takes_a_bool_and_panic_a_string);
     TEST_RUN(new_yields_an_owning_pointer_or_span);
-    TEST_RUN(new_allocates_writable_storage_at_every_level);
+    TEST_RUN(new_marks_the_storage_it_allocates_and_no_position_below_it);
+    TEST_RUN(new_of_a_borrowed_element_needs_no_cast_to_reach_a_borrowed_span);
     TEST_RUN(new_of_an_own_element_owns_each_slot);
     TEST_RUN(new_of_a_void_pointer_allocates_a_slot);
     TEST_RUN(new_of_void_is_refused);

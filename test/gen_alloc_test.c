@@ -87,7 +87,7 @@ TEST(new_of_an_array_allocates_one_array_object, {
 
 TEST(new_of_a_pointer_allocates_one_slot, {
     TEST_ASSERT_TRUE(emit("struct node {\n    i32 value;\n}\n"
-                          "fn i32 main() {\n    node mut* mut* own pp = new(node*);\n"
+                          "fn i32 main() {\n    node mut* mut* own pp = new(node mut*);\n"
                           "    println(*pp == null);\n    del(pp);\n    return 0;\n}\n"));
     // `new(T*)` allocates one pointer slot and is legal.
     // D10.2, D17.3

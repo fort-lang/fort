@@ -240,7 +240,7 @@ TEST(a_range_for_over_a_string_yields_char,
      { TEST_ASSERT_TRUE(check_body("    for (char c : \"hi\") {\n        println(c);\n    }")); })
 
 TEST(a_range_variable_cannot_be_own, {
-    TEST_ASSERT_FALSE(check_body("    i32 mut* own mut@ own k = new(i32* own, 2);\n"
+    TEST_ASSERT_FALSE(check_body("    i32 mut* own mut@ own k = new(i32 mut* own, 2);\n"
                                  "    for (i32 mut* own c : k) {\n        println(c);\n    }\n"
                                  "    del(k);"));
     // The loop lends its collection.
@@ -249,7 +249,7 @@ TEST(a_range_variable_cannot_be_own, {
 })
 
 TEST(a_range_for_lends_an_owning_element, {
-    TEST_ASSERT_TRUE(check_body("    i32 mut* own mut@ own k = new(i32* own, 2);\n"
+    TEST_ASSERT_TRUE(check_body("    i32 mut* own mut@ own k = new(i32 mut* own, 2);\n"
                                 "    for (i32 mut* c : k) {\n        println(c);\n    }\n"
                                 "    del(k);"));
 })

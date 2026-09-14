@@ -305,16 +305,24 @@ Sections:
   differ only in mutability, added or dropped at any level (the cast-away-const escape, as for
   pointers; amended 2026-09-10 from the T-011 review, which found the earlier wording, which only
   added writability to a span's elements, narrower than the rule); any cast that only drops
-  mutability or ownership, at any level (a no-op, since the implicit conversions of D5.4 and D17.4
-  cover it); adding `own` to a pointer or span (adoption, D17.3); identity. The result of a cast is
-  `own` exactly when its target type says `own`: an `own` source cast to a non-`own` target lends
+  mutability or ownership, at any level (**not** a no-op: D5.4 and D17.4 cover the drop at a level
+  `k` only when every level between 1 and `k - 1` is immutable in the target, and the cast alone
+  reaches the rest. `void mut* mut@` converts to `void*@` and to `void mut*@`, and a cast alone
+  takes it to `void* mut@`); adding `own` to a pointer or span (adoption, D17.3); identity. The
+  result of a cast is `own` exactly when its target type says `own`: an `own` source cast to a
+  non-`own` target lends
   (the result is a view), a non-`own` source cast to an `own` target adopts, and an `own` lvalue
   cast to an `own` target is a copy that must be written `cast(move(x), ...)` (D17.5). Forbidden:
   integer to `bool`, any other span-to-span cast (the element type of a span never changes, because
   `len` counts elements), pointer to span, struct or array casts. Casts never trap: float to integer
   is emitted as `llvm.fptosi.sat` or `llvm.fptoui.sat`, whose saturating result is this rule (plain
   `fptosi` would be poison out of range, D19.2).
-- history: Amended 2026-09-10: spans were called slices (D3.5).
+- history: Amended 2026-09-14 (T-135): the dropping-cast clause called such a cast "a no-op, since
+  the implicit conversions of D5.4 and D17.4 cover it". They do not cover a drop at a level behind a
+  mutable level, which is the drop D5.4's own example refuses; `test/fort/types_convert_test.ft:173`
+  asserts that `void mut* mut@` does not convert to `void* mut@`, and until T-135 three sites of
+  `src/fort` (`gen.ft` twice and `types.ft` once) wrote that cast to perform exactly that drop on
+  the result of a `new`. Amended 2026-09-10: spans were called slices (D3.5).
 
 ### D3.15 sizeof
 - owner: `type-system.md`.
@@ -576,9 +584,13 @@ Sections:
 ### D5.8 The types of & and new
 - owner: `core-language.md` (Declarations and mutability), `type-system.md` (Mutability levels).
 - rule: `&e` has type `T*` where the level-1 bit is the mutability of `e` and deeper levels come
-  from `e`'s type. `new` returns the storage it allocates writable at every level and the reference
-  it creates `own`, with no outermost `mut` (an rvalue has no binding): `new(T)` returns `T mut*
-  own`, `new(T, n)` returns `T mut@ own` (D17.3).
+  from `e`'s type. `new` returns the storage it allocates writable and the reference it creates
+  `own`, with no outermost `mut` (an rvalue has no binding): `new(T)` returns `T mut* own`,
+  `new(T, n)` returns `T mut@ own` (D17.3). The `mut` that `new` supplies is the outermost position
+  of `T`, which is the storage it allocates; every position below it is the one the program wrote,
+  so the element type of the result is the element type written (D10.2).
+- history: Amended 2026-09-14 (T-135): `new` returned the storage writable "at every level", which
+  marked positions it does not allocate, and no `mut` parsed inside `new(...)` to say otherwise.
 
 ### D5.9 The shallow model
 - owner: `core-language.md` (Declarations and mutability), `type-system.md` (Mutability levels).
@@ -1082,13 +1094,27 @@ Sections:
   (`new(u8[4])` is a `u8[4] mut* own`); `new(T, n)` returns `T mut@ own` of `n` zero-initialized
   elements (D17.3), where `n` is any integer type; a negative `n`, a size that overflows, or
   allocation failure is a runtime error; `n == 0` is allowed and yields a non-null pointer (the
-  runtime allocates at least one byte). `new(T{...})`, `new(T@)` and `new(void)` are errors, and
-  inside `new(...)` a `mut` never parses while an `own` parses only after a `*` (D17.3), so `new(T
-  mut)` and `new(string own)` do not parse; `new(T*)` allocates one pointer slot and is legal.
+  runtime allocates at least one byte). `new(T{...})`, `new(T@)` and `new(void)` are errors. Inside
+  `new(...)` an `own` parses only after a `*` (D17.3), so `new(string own)` does not parse, and a
+  `mut` parses below the outermost position of `T` but never in it, so `new(T mut)` and `new(T*
+  mut)` do not parse while `new(T mut*, n)` does. **The element type of the result is the element
+  type written**: `new(void mut*, 16)` is a `void mut* mut@ own` and `new(void*, 16)` is a `void*
+  mut@ own`. A fixed array shares its storage with its elements (D5.2), so the position a `[N]`
+  follows takes no `mut` here either and D5.3 is the rule that refuses `new(i32 mut[4], n)`.
+  `new(T*)` allocates one pointer slot and is legal.
 - rationale: Rationale for zero-initialization: keeps "no undefined values" true at the cost of one
-  `calloc`; the earlier "uninitialized" text is withdrawn.
-- history: Amended 2026-09-10: the count was written inside the type (`new(T[n])`), which left no
-  spelling for one array object, and a span was called a slice (D3.5).
+  `calloc`; the earlier "uninitialized" text is withdrawn. Rationale for the outermost position:
+  `new` marks the storage it allocates (D5.8), and that storage is the outermost position of `T`
+  and nothing below it. A position below it describes storage `new` did not allocate -- what a
+  pointer in the fresh memory would reach, and that pointer is null -- so the program says what it
+  means there and `new` supplies the one mark that is its own.
+- history: Amended 2026-09-14 (T-135): a `mut` never parsed inside `new(...)` and the result was
+  writable at every level, so `new(node*, n)` answered `node mut* mut@ own` and the element type of
+  the result was not the element type written. Three sites of the self-hosted compiler
+  (`src/fort/gen.ft`, twice, and `src/fort/types.ft`) cast the result back down to the element type
+  they had asked for, and one of them carried a comment naming this rule as the cause. Amended
+  2026-09-10: the count was written inside the type (`new(T[n])`), which left no spelling for one
+  array object, and a span was called a slice (D3.5).
 
 ### D10.3 The del builtin
 - owner: `memory-model.md`.
@@ -1644,20 +1670,26 @@ says ownership is "by convention", this section supersedes it.
   `del`, transfer, lending, the overwrite check), `core-language.md` (the `move` builtin,
   statements).
 - rule: Producers. `new(T)` yields `T mut* own` and `new(T, n)` yields `T mut@ own`, for every `T`
-  that `new` accepts, which is D10.2's rule and not a second one: no `mut` anywhere in `T`, an `own`
-  only after a `*`, and `T` itself neither `void` nor a span. `new(u8[4], n)` is `u8[4] mut@ own`
-  and `new(node* own, n)` is `node mut* own mut@ own` whose slots are null, the result being always
-  `own` and writable at every level (D5.8) -- which is why `T` may not spell a `mut` of its own:
-  `new` supplies every one of them, so there is one spelling for each type. `new(void*)` is legal
-  and yields `void mut* mut* own`, one pointer slot, since a pointer to `void` has a size and the
-  level it reaches is marked writable like every other (D3.11); it is `new(void)` that is not
+  that `new` accepts, which is D10.2's rule and not a second one: no `mut` in the outermost position
+  of `T`, an `own` only after a `*`, and `T` itself neither `void` nor a span. `new(u8[4], n)` is
+  `u8[4] mut@ own` and `new(node mut* own, n)` is `node mut* own mut@ own` whose slots are null. The
+  result is always `own`, and `new` marks the storage it allocates writable (D5.8). That storage is
+  the outermost position of `T`, which is why `T` may not spell a `mut` there: `new` supplies it, so
+  there is one spelling for each type. Below it `T` says what it means, and the element type of the
+  result is the element type written -- `new(node* own, n)` is a `node* own mut@ own`, `n` owned
+  slots whose nodes this span cannot write. `new(void*)` is legal
+  and yields `void* mut* own`, one pointer slot, since a pointer to `void` has a size (D3.11); it is
+  `new(void)` that is not
   legal, and D10.2 rejects that one. Standard-library functions that allocate
   return `own` (D13.5). `cast` may add `own` to a pointer or span, adopting memory that came from C
   (`cast(p, u8 mut* own)` for a `void*` from an extern that does not say `own`, the same unsafe
   escape as adding `mut`), and may drop it; the target type of a cast decides (D3.14). Span
   expressions (`buf[..]`, `buf[lo..hi]`) and `.ptr` always yield views, as do `&`, literals and the
   runtime's `args`.
-- history: Amended 2026-09-14 (T-086): `new(void*)` yielded `void* mut* own`, because the `void`
+- history: Amended 2026-09-14 (T-135): `new` marked every position of `T` writable, so `new(node*,
+  n)` was a `node mut* mut@ own` and `T` could spell no `mut` at all. `new(void*)` reads `void*
+  mut* own` again, as it did before T-086, and the type T-086 gave it is now spelled `new(void
+  mut*)`. Amended 2026-09-14 (T-086): `new(void*)` yielded `void* mut* own`, because the `void`
   base took no mark while `void mut*` was not a type. Amended 2026-09-10: the count moved out of
   the type, `new(T[n])` to `new(T, n)`. Amended
   2026-09-10, separately: the restriction read "not itself `own`, `mut` or a reference to `void`",

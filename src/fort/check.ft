@@ -151,7 +151,7 @@ enum type_pos {
     pos_field, // D5.5: a struct field: no outermost `mut`
     pos_return, // D5.5: a return type: no outermost `mut`
     pos_cast, // D3.14: a cast target: a result has no binding
-    pos_alloc, // D5.8: inside `new`: every level is allocated writable
+    pos_alloc, // D5.8: inside `new`: the outermost position is allocated
 }
 
 /// Whether `move` and `del` may empty an lvalue, and why not when they may not.
@@ -317,7 +317,7 @@ fn void syms_reserve(checker mut* ck) {
         }
         cap = ck->syms.len * 2;
     }
-    ast.sym mut* own mut@ own bigger = new(ast.sym* own, cap);
+    ast.sym mut* own mut@ own bigger = new(ast.sym mut* own, cap);
     u64 mut i = 0;
     while (i < ck->syms_len) {
         bigger[i] = move(ck->syms[i]);
@@ -362,7 +362,7 @@ fn void externs_reserve(checker mut* ck) {
         }
         cap = ck->externs.len * 2;
     }
-    ast.sym mut* mut@ own bigger = new(ast.sym*, cap);
+    ast.sym mut* mut@ own bigger = new(ast.sym mut*, cap);
     u64 mut i = 0;
     while (i < ck->externs_len) {
         bigger[i] = ck->externs[i];
@@ -994,18 +994,17 @@ fn written_type check_type_at(checker mut* ck, ast.node mut* n, type_pos pos, bo
     bool mut base_own = wrapped && ast.ast_is_own(n);
     bool mut base_mut = wrapped && ast.ast_is_mut(n);
     if (pos == type_pos.pos_alloc) {
-        // `new` gives storage writable at every level, the level a `void*`
-        // reaches included. A bare `void` has no level and keeps no mark, so
-        // check_new reports it rather than the type builder.
-        // D3.11, D5.8, D17.3
-        bool first_is_ptr = count > 0 && suffixes[0].kind == types.suffix_kind.s_ptr;
-        base_mut = (count == 0 || suffixes[0].kind != types.suffix_kind.s_array)
-            && (b->kind != types.type_kind.k_void || first_is_ptr);
-        u64 mut k = 0;
-        while (k < count) {
-            suffixes[k].is_mut =
-                k + 1 == count || suffixes[k + 1].kind != types.suffix_kind.s_array;
-            k += 1;
+        // `new` fills the outermost position of the written type and no other,
+        // because that position is the storage it allocates: every position
+        // below it describes storage `new` did not allocate, so the element
+        // type of the result is the element type written. A bare `void` has no
+        // position and keeps no mark, so check_new reports it rather than the
+        // type builder.
+        // D3.11, D5.8, D10.2, D17.3
+        if (count == 0) {
+            base_mut = b->kind != types.type_kind.k_void;
+        } else {
+            suffixes[count - 1].is_mut = true;
         }
     }
     types.build_result built =
