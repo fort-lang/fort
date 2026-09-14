@@ -835,9 +835,11 @@ bullet at a time and without a rewrite.
   `lexical` (5 of 30 and 15 of 30) and `control` (14 of 45). Four directories have no row in the
   table at all and hold 89 tests: `errors` (32), `modes` (30), `switch` (16) and `declarations`
   (11). The corpus figure of `tools/lines.py` moves with the same shortfall: it read 2.17 on
-  47f98c2 (52163 source lines against 113082 test lines) against the 3.0 of D14.6. Whether the
-  project backfills the table is a decision of the user's, and T-046 did not take it; until it is
-  taken, a ticket answers for its own diff and this line says what the corpus is.
+  47f98c2 (52163 source lines against 113082 test lines) against the 3.0 D14.6 then set. **The
+  user took that decision on 2026-09-14: no backfill, and the target drops to above 2.0**, which
+  the corpus meets (2.19 on 865a15c, `python3 tools/lines.py`). The per-branch criterion stays at
+  `--min 3.0`, because a branch minimum above the corpus target is what holds the corpus above its
+  floor; a ticket still answers for its own diff.
 - The ratio is a prompt, not a verdict: what a review asks is which rules of the decisions a ticket
   cites have no test at all, unit or language, and the answer decides the ticket. T-014 measured
   0.76 and merged, because the number could not see that it took 57 entries out of xfail.txt -- a

@@ -32,7 +32,7 @@ SOURCE_GLOBS = (
     "std/*.ft",
 )
 TEST_GLOBS = ("test/*.c", "test/*.h", "test/**/*.ft", "test/lang/ffi/*.c")
-TARGET_RATIO = 3.0
+TARGET_RATIO = 2.0
 
 
 def count_lines(path):

@@ -1456,7 +1456,7 @@ Sections:
 
 ### D14.6 The test-to-source ratio
 - owner: `toolchain.md`.
-- rule: Coverage target from the prompt: about three lines of test for each line of source the
+- rule: Coverage target: **more than two lines of test for each line of source** the
   project writes and ships -- the compiler (`src/bootstrap/*.c`, `*.h`, `src/fort/*.ft`) and the
   standard library (`std/*.ft`), the runtime included, since it is `std.rt` -- measured against
   `test/*.c`, `test/*.h`, `test/**/*.ft` and `test/lang/ffi/*.c` by `tools/lines.py`. The
@@ -1566,6 +1566,13 @@ Findings from the design reviews that look like bugs but are deliberate.
 
 Added after the v1 design review at the user's request; wherever an earlier decision or document
 says ownership is "by convention", this section supersedes it.
+  Amended 2026-09-14 (T-123, the user): until then the target was "about three lines of test for
+  each line of source", and the corpus had never met it. Measured on 865a15c: 2.19, from 52963
+  source lines against 115824 test lines, so 3.0 needed about 43000 further test lines. The user
+  refused that backfill and set the target above 2.0, which the corpus meets today. The number
+  changed and the rule that a ticket's own diff carries its tests did not:
+  `tools/lines.py --since main --min 3.0` stays an acceptance criterion, because a per-branch
+  minimum above the corpus target is what holds the corpus above its floor.
 
 ### D17.1 The own qualifier
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
