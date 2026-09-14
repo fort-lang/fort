@@ -16,6 +16,33 @@
 # constant it folded differently or a symbol it resolved differently all reach
 # the text here.
 #
+# It asks a second question of each module, and the two are apart. The first is
+# differential: do the two emitters write the same bytes. The second is
+# absolute: does LLVM read what each of them wrote. `opt -passes=verify` parses
+# the module and runs the LLVM verifier over it, which is the check of D19.1.
+# Two modules that agree may both be wrong, and a module LLVM cannot parse is
+# the worst outcome a program has: a refusal tells the author something and a
+# wrong answer is visible, while a parse error inside LLVM tells them nothing
+# about their program. T-127 was filed for one of those, an i32 compared with a
+# 64-bit float bit pattern that the checker passed, and T-128 fixed it.
+#
+# What this line adds, measured and not argued. run_tests.py --verify-ir
+# already runs the same `opt` over every test that compiles, and CMake passes
+# it to `lang` and `fort-modules` under stage1 and to `lang-stage2` under
+# stage2. Of the PROGRAM_FILES programs below, 350 stand under test/lang and
+# are verified under both compilers there; the other 177 are 173 test/fort
+# module tests, 2 test/tty programs, src/lsp/main.ft and src/fort/main.ft.
+# `fort-modules` is the only run of test/fort and it uses stage1, and there is
+# no stage2 twin of it, so 176 of those 177 had their stage2 module verified by
+# nothing. The exception is src/fort/main.ft, which tools/fixpoint.sh verifies
+# under both compilers and in both build modes. From here on the property
+# follows the file rather than the directory: a program added anywhere in the
+# repository has both of its modules read by LLVM.
+#
+# What neither this line nor --verify-ir can do is see a shape the corpus does
+# not spell, which is how T-127 lived. tools/sweep_untyped.sh is the generated
+# corpus beside this measured one, and it is where a new shape goes.
+#
 # Why only the files stage1 compiles. `-S` builds a program, so it demands an
 # entry module that defines `main` (D8.6): a module of the compiler or of the
 # standard library is not one, and neither is a `fail` test. What is compared
@@ -47,6 +74,17 @@ build=$1
 stage1=$build/fort
 stage2=$build/stage2/fort
 
+# The LLVM that reads the modules. tools/fixpoint.sh names the same tool the
+# same way, so a hand run and the gate measure one toolchain.
+opt=${FORT_OPT:-opt-18}
+
+# A missing tool is a broken environment and not an emitter that disagreed with
+# itself, so it exits 2 as tools/fixpoint.sh does.
+command -v "$opt" >/dev/null || {
+    echo "diff_ir.sh: $opt not found (llvm-18, see tools/provision.sh)" >&2
+    exit 2
+}
+
 for binary in "$stage1" "$stage2"; do
     if [ ! -x "$binary" ]; then
         echo "diff_ir.sh: not built: $binary" >&2
@@ -73,6 +111,9 @@ FT_FILES=936
 # says beside its own constant how the two group sizes are measured.
 PROGRAM_FILES=527
 
+# The name of each check, used in the report and in the failure message.
+VERIFY_PASSES=verify
+
 # The search roots every run is given: the standard library the build copied,
 # src/fort so that the compiler's own modules resolve, test/fort/support so
 # that a module test's fixture does, and src so that a module of the language
@@ -98,6 +139,24 @@ status=0
 differing=0
 compared=0
 skipped=0
+verified=0
+
+# `opt -passes=verify` over one module. It parses the text and runs the LLVM
+# verifier, so it catches both a module LLVM cannot read and one it reads and
+# rejects. -disable-output keeps it from writing the bitcode back out.
+verify_module() {
+    local which=$1
+    local module=$2
+    local file=$3
+    if "$opt" "-passes=$VERIFY_PASSES" -disable-output "$module" \
+        >"$work/verify.out" 2>"$work/verify.err"; then
+        verified=$((verified + 1))
+        return 0
+    fi
+    echo "diff_ir.sh: $file: LLVM refused the module $which emitted:" >&2
+    head -n 20 "$work/verify.err" >&2
+    return 1
+}
 while IFS= read -r file; do
     # Neither module of the previous file may stand here: a compiler that
     # exits 0 and writes nothing would otherwise make the diff read the file
@@ -119,6 +178,11 @@ while IFS= read -r file; do
         continue
     fi
     compared=$((compared + 1))
+    if ! verify_module stage1 "$work/one.ll" "$file"; then
+        status=1
+        differing=$((differing + 1))
+        continue
+    fi
     set +e
     "$stage2" -S --std-dir "$STD_DIR" -I src -I src/fort -I test/fort/support \
         -o "$work/two.ll" "$file" >"$work/two.out" 2>"$work/two.err"
@@ -127,6 +191,11 @@ while IFS= read -r file; do
     if [ "$two_status" -ne 0 ]; then
         echo "diff_ir.sh: $file: stage1 emitted a module, stage2 exited $two_status" >&2
         head -n 20 "$work/two.err" >&2
+        status=1
+        differing=$((differing + 1))
+        continue
+    fi
+    if ! verify_module stage2 "$work/two.ll" "$file"; then
         status=1
         differing=$((differing + 1))
         continue
@@ -148,10 +217,17 @@ if [ "$compared" -ne "$PROGRAM_FILES" ]; then
     echo "diff_ir.sh: a count far below it means stage1 refused a corpus it used to pass" >&2
     exit 1
 fi
+# The verified count is twice the compared count, one module per compiler, and
+# it is an equality for the reason PROGRAM_FILES is: a run that verified fewer
+# modules than it compared would otherwise pass while seeing less.
+if [ "$status" -eq 0 ] && [ "$verified" -ne $((compared * 2)) ]; then
+    echo "diff_ir.sh: verified $verified modules, expected $((compared * 2))" >&2
+    exit 1
+fi
 if [ "$status" -eq 0 ]; then
     echo "stage1 and stage2 emit the same module for the $compared .ft files of the"
-    echo "repository that compile; $skipped of $count are not programs and are the"
-    echo "language corpus's to compare"
+    echo "repository that compile, and LLVM reads all $verified of those modules;"
+    echo "$skipped of $count are not programs and are the language corpus's to compare"
 else
     echo "diff_ir.sh: $differing of $compared compared .ft files differ" >&2
 fi
