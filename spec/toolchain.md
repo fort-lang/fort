@@ -344,6 +344,21 @@ Compile-time diagnostics (D14.2) are written to stderr, one per line:
 - Every module of the closure is checked in dependency order (D14.2); a file with a syntax error
   is parsed whole and not checked. A declaration whose check failed has the error type, which
   silences every later diagnostic involving it, so an importer sees only its own errors.
+- A diagnostic about two declarations stands at the declaration in the module the compiler is
+  checking; within one module it stands at the later of the two by position (D14.2). The
+  shadowing rule above is one case of it. Most such diagnostics report that one place alone:
+  `'n' is already declared in this block`, `'n' shadows a parameter`, `'n' shadows an enclosing
+  local`, `duplicate parameter 'n'`, `duplicate field 'n'` and `duplicate enum value N for 'n'`.
+  A diagnostic that reports the other declaration as well makes that second report its note, and
+  two do: `conflicting declarations of extern '<name>'` (`module-system.md` 13) and
+  `redeclaration of '<name>'` (D7.9). Dependency order puts an imported module before its
+  importer (D9.10) and leaves two modules that neither imports unordered. The error stands in the
+  module being checked, so the module checked second carries it either way, and the note can name
+  a module the reader did not write. The reason is section 9.2: a client that cannot
+  open a file may drop that file's diagnostics, and a nested note goes with the error it follows,
+  so an error placed in the file the reader cannot open leaves the reader nothing at all. A
+  diagnostic about anything but two declarations stands where the construct it names stands, in
+  whatever file that is, because it has no second place that says as much.
 - The compiler emits no warnings (D14.2): unused imports, unused variables and statements after
   a terminating statement are not diagnosed.
 

@@ -205,6 +205,30 @@ came here.
   checker and the index walk share it because the index's file order is documented as the
   checker's order (D20.3), and two copies of that loop would drift with no test able to see it.
 
+- **A diagnostic about two declarations stands at the one in the module being checked**, and the
+  other declaration is its note (D14.2, amended 2026-09-14 by T-112). The closure is checked in
+  dependency order (D9.10), so that declaration is the later of the two and the note can name a
+  module the reader did not write. Two declarations of one module have no dependency order between
+  them, so the error stands at the later of the two by position. The reason is D20.2's drop rule:
+  a client that cannot open a file may drop that file's diagnostics, and a nested note goes with
+  the error it follows, so an error in a file the reader cannot open takes the note in the
+  reader's own file with it and shows nothing. Two diagnostics have this shape and no more:
+  `conflicting declarations of extern '<name>'` (`error_extern_conflict` in `check.c` and
+  `check.ft`) and `redeclaration of '<name>'` (`error_redeclaration` in `modules.c` and
+  `modules.ft`). Measured over the whole corpus on 2026-09-14, both compilers: 666 tests, 994
+  diagnostics under stage1 and 545 under stage2, 9 notes each, of which 5 stand in another file
+  than their error and all 5 put the error in the module being checked. The three other
+  note-carrying diagnostics put their note where their error stands: `module '<p>' not found`,
+  `module '<a>' is the same file as module '<b>'`, and the struct-or-enum note of the extern
+  conflict. The 60 corpus diagnostics that stand in a file the reader did not write are all
+  `not supported by the bootstrap compiler: ?:` inside `std/math.ft`, which has one place and is
+  not this shape. What holds the rule, and why a `fail` test alone does not, is
+  `notes/testing.md` 3. Mutation-measured on 2026-09-14: swapping the two
+  places of the extern conflict takes `unit-check_extern` red and `lang` to 5 failed in stage1,
+  and `fort-modules` red and `lang-stage2` to 5 failed in stage2; swapping them at the
+  redeclaration takes `unit-modules_closure` and `lang` red in stage1 and `fort-modules` and
+  `lang-stage2` red in stage2.
+
 ## 6. The IR emitter
 
 - **An emitter that copies a value and then clears its source needs an intermediate.** `move(lv)`

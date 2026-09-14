@@ -3212,6 +3212,14 @@ static bool differs_by_nominal(const type_t* a, const type_t* b) {
 // at the earlier declaration. `param` is the 1-based parameter for the
 // difference that names one and 0 otherwise; `wrapper` asks for the note that
 // says what to do when no shared spelling exists.
+//
+// Which of the two places carries the error is a rule and not a preference:
+// `at` is in the module being checked, `first` in a module checked before it,
+// which the reader may not have written at all. A client that cannot open a
+// file may drop that file's diagnostics, and a nested note goes with the error
+// it follows (toolchain.md 9.2), so swapping the two would show a reader who
+// redeclares a libc symbol nothing at all.
+// D14.2, D20.2
 static void error_extern_conflict(check_t* ck,
                                   loc_t at,
                                   loc_t first,
