@@ -1307,7 +1307,8 @@ Sections:
   `std.libc`, IPv4 only and with no name resolution), `std.rt` (the runtime itself, D13.1: process
   start and exit, allocation, the failure paths and the print buffers, over `std.libc`) and
   `std.rt_float` (the float text of D18.1, to a descriptor or to a `str_buf`, apart from `std.rt`
-  because a compiler without floats cannot compile it).
+  because a compiler without floats cannot compile the module, and apart from `std.rt` for as long
+  as the C bootstrap builds the compiler, which is the condition D18.1 states).
 - history: Amended 2026-09-11 (T-087): the five `fort_rt_*` declarations stood in `std.libc`, whose
   header had to describe itself as libc "plus" the runtime; they moved to `std.rt`, so "thin libc
   externs" is true of `std.libc` without qualification. Amended 2026-09-11 (T-088): `std.rt` held
@@ -1329,6 +1330,9 @@ Sections:
   carry that ownership across the boundary (D17, D9.8). Its seven `extern` declarations stand in
   `std.libc` with every other one, so a program that declares `socket` or `bind` itself must now
   match those signatures (D9.8).
+  Amended 2026-09-14 (T-096): the entry for `std.rt_float` gave the reason for the split and no end
+  for it; T-096 added the pointer to D18.1, which now carries the one condition that ends the split
+  and the measurement of what the split costs today.
 
 ### D13.3 The error-handling idiom
 - owner: `stdlib.md`.
@@ -1804,21 +1808,45 @@ Names the entry points that produce D11.7's float text and settles what D11.7 le
   in `std.rt` because a compiler that builds the runtime must accept floats to compile them, and the
   C bootstrap does not: it rejects a float literal and a float type outright (`toolchain.md` 7.3),
   so no program it builds can reach a float printer. This decision, and not D9.10, settles its
-  membership: a compiler that accepts floats loads `std.rt_float` as a root of every closure exactly
-  as D9.10 loads `std.rt`, and one that does not neither loads it nor needs it. It is a module of
-  the library like any other (D13.2), and it exports beside the two printers the two buffer
-  formatters `append_f32(strbuf.str_buf mut* b, f32 v)` and `append_f64(strbuf.str_buf mut* b, f64
-  v)`, which give the same bytes to a `str_buf` rather than to a descriptor. Those two are library
-  functions and not entry points: the compiler emits no call that names them, so the entry-point
-  list of `toolchain.md` 5.1 stays the two printers (D18.4). One formatter serves both forms, so
-  the two cannot disagree over a value. They stand in this module and not in `std.strbuf` for the
-  reason the printers stand here: a float in a `std.strbuf` signature would put the whole library
-  out of the C bootstrap's reach.
+  membership: a compiler that accepts floats loads `std.rt_float` into a closure that holds a float
+  and into no other, and a compiler that does not accept floats neither loads the module nor needs
+  it. It is a module of the library like any other (D13.2), and it exports beside the two printers
+  the two buffer formatters `append_f32(strbuf.str_buf mut* b, f32 v)` and
+  `append_f64(strbuf.str_buf mut* b, f64 v)`, which give the same bytes to a `str_buf` rather than
+  to a descriptor. Those two are library functions and not entry points: the compiler emits no
+  call that names them, so the entry-point list of `toolchain.md` 5.1 stays the two printers
+  (D18.4). One formatter serves both forms, so the two cannot disagree over a value. They stand in
+  this module and not in `std.strbuf` for the reason the printers stand here: a float in a
+  `std.strbuf` signature would put the whole library out of the C bootstrap's reach.
+  The split stands while the C bootstrap builds the compiler, and one condition ends it: the
+  project builds the fort compiler with a released fort compiler rather than with the C bootstrap.
+  The build makes that condition checkable: the `fort_stage2` target takes a released fort compiler
+  as its input rather than the binary built from `src/bootstrap`. Nothing else ends it, the freeze
+  of `src/bootstrap` included. While the C bootstrap builds the compiler, `std/rt.ft` may hold no
+  float: the bootstrap loads that file into every closure it reads, it refuses a float type and a
+  float literal, and the build compiles `src/fort` with the bootstrap, so a float in `std/rt.ft`
+  stops the build. The two modules become one when that condition holds and not before. The
+  loading rule above costs a float-free program nothing and costs a float program `std.rt_float`,
+  `std.strbuf` and `std.mem`; `notes/compiler.md` 7 measures both, in emitted bytes and in `.text`
+  bytes, with the command for each number.
 - history: Amended 2026-09-11 (T-088): the two were C entry points named `fort_rt_print_f32` and
   `fort_rt_print_f64`, back when the runtime was C (D13.1 as amended). Amended 2026-09-13 (T-107):
   the module held the two printers alone, so a program could put a float on a descriptor and
   nowhere else, and the JSON writer of `src/lsp/json.ft` had no `write_f64`; `stdlib.md` 2.12
-  specifies the two `append` functions and `std.rt_float` imports `std.strbuf` for them.
+  specifies the two `append` functions and `std.rt_float` imports `std.strbuf` for them. Amended
+  2026-09-14 (T-096): the rule as it stood gave the C bootstrap's refusal of floats as the reason
+  for the split and put no end on it, which left the end of the split a hope; T-096 added the one
+  condition that ends it, named the `fort_stage2` input that makes the condition checkable, and
+  added the sentence that keeps the freeze of `src/bootstrap` out of that condition. T-096
+  measured the fold instead of making it, because the user kept the C bootstrap as the compiler
+  that builds the compiler on that date; the measurement and its commands are in
+  `notes/compiler.md` 7. The same amendment corrected the membership sentence, which until then
+  read "loads `std.rt_float` as a root of every closure exactly as D9.10 loads `std.rt`": T-041
+  had narrowed the loading rule to a closure that holds a float, and the narrowing reached
+  `src/fort/modules.ft` and `notes/compiler.md` and never this field. T-096's first commit left
+  the old sentence standing beside its own and so made one field state two loading rules; the
+  review of 2026-09-14 found it, since `tools/check_decisions.py` compares two revisions and
+  cannot see a field that contradicts itself.
 
 ### D18.2 Shortest round-trip digits
 - owner: `toolchain.md` (5.1 entry points).

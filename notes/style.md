@@ -378,7 +378,13 @@ every one matches.
   truncates" are one multiset and two rules. Run it over a copy of the file before the edit, and
   name each entry the ticket edits on purpose: `--allow Dn.m` for a changed word and
   `--allow-move Dn.m` for words that only move between the fields. The flags are the record of
-  what the ticket did, and the tool prints the difference each one excused.
+  what the ticket did, and the tool prints the difference each one excused. **The tool compares two
+  revisions and never a field against itself**, so it cannot see a `rule` that now states two
+  rules: T-096 added a sentence to D18.1 saying that a compiler loads `std.rt_float` into a closure
+  that holds a float, while the sentence three lines above it still said "as a root of every
+  closure", and the run exited 0 because `--allow D18.1` excused the whole entry. Read the whole
+  `rule` field after an edit, not the diff alone, and repair the sentence the new one contradicts
+  in the same commit (T-096).
 - **Renaming a term**: sweep the stem, not the word. `grep -rni slice` never matches "Slicing",
   so a rename of `slice` to `span` must sweep `slic` (and any other inflected stem) with
   `grep -rni` before the criterion is ticked; markdown width is not covered by the gate, so run the

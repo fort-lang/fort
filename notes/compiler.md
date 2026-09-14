@@ -411,6 +411,91 @@ compiler that has no floats never reads it and `tools/diff_ir.sh` keeps comparin
 both compilers build. What that costs is one ctest of its own, `fort_lint_float`, since the lint
 runs the compiler without floats over `std/*.ft` and cannot check that one.
 
+**What the split costs, measured on 2026-09-14 (T-096).** A program that prints no float pays
+nothing for it. A program that prints one pays 106,765 bytes of emitted IR, 8,565 bytes of `.text`
+in the linked binary, and about a quarter more emit time. **Name the unit**: the emitted IR of this
+module is about twelve times the `.text` it becomes, so an IR figure offered as the cost of a
+binary overstates that cost by that factor. The commands, run at the top of the worktree in the VM
+after `tools/vm build debug fort_stage2`:
+
+```sh
+printf 'fn i32 main() {\n    println(1);\n    return 0;\n}\n' > /tmp/int.ft
+printf 'fn i32 main() {\n    println(1.5);\n    return 0;\n}\n' > /tmp/flt.ft
+for p in int flt; do
+    build/debug/stage2/fort -S --std-dir build/debug/std -o /tmp/$p.ll /tmp/$p.ft
+    echo "$p $(wc -c < /tmp/$p.ll) $(grep -c '^define' /tmp/$p.ll)"
+    build/debug/stage2/fort --index --std-dir build/debug/std /tmp/$p.ft |
+        python3 -c 'import json, sys; print(len(json.load(sys.stdin)["files"]))'
+    build/debug/stage2/fort --std-dir build/debug/std --cc "$(command -v clang)" \
+        -o /tmp/$p /tmp/$p.ft
+    size /tmp/$p | tail -1
+    for i in $(seq 7); do
+        t=$(date +%s%N)
+        build/debug/stage2/fort -S --std-dir build/debug/std -o /tmp/$p.ll /tmp/$p.ft
+        echo $(( ($(date +%s%N) - t) / 1000000 ))
+    done | sort -n | sed -n 4p
+done
+awk '/^define /{c=""; if (match($0, /@"[^"]+"/)) {m=substr($0, RSTART+2, RLENGTH-3);
+     sub(/\.[^.]*$/, "", m); c=m}} c!=""{b[c]+=length($0)+1} /^}$/{c=""}
+     END {for (m in b) print b[m], m}' /tmp/flt.ll | sort -rn
+```
+
+The integer program's closure holds 3 files, `std/rt.ft` and `std/libc.ft` beside the program, and
+its module is 84,395 bytes and 51 definitions, 48 of them `std.rt`'s. Its binary holds 10,136 bytes
+of `.text`. The float program's closure holds 6 files, the three above plus `std/rt_float.ft`,
+`std/strbuf.ft` and `std/mem.ft`; its module is 191,160 bytes and 91 definitions, the 40 new ones
+being `std.rt_float` (76,889 bytes), `std.strbuf` (24,179) and `std.mem` (2,732); and its binary
+holds 18,701 bytes of `.text`. The integer program's module holds no byte of `std.rt_float`, because
+`load_float_runtime` in `src/fort/modules.ft` loads that module into a closure that holds a float
+and into no other. The emit takes 55 ms against 69 ms, each the median of seven runs of the loop
+above on an idle VM, and 72 ms against 94 ms in a later run that shared the machine with a second
+build: read the pair, never one number of it. **A fold of `std.rt_float` into `std.rt` would put
+those 106,765 bytes of IR and 8,565 bytes of `.text` into every program**, because a module emits
+every definition of every module in the closure, called or not, and external linkage carries each
+one past the linker. 14 of the 48 `std.rt` definitions in the integer program's module are named by
+no call in it. Each of the 14 stands on its own `define` line and appears nowhere else in the
+module, and `nm` finds all 14 in the binary:
+
+```sh
+grep -o '^define .*@"std\.rt\.[a-z_0-9]*"' /tmp/int.ll | sed 's/.*@//' | sort -u > /tmp/d.txt
+grep -o 'call [^@]*@"std\.rt\.[a-z_0-9]*"' /tmp/int.ll | sed 's/.*@//' | sort -u > /tmp/c.txt
+comm -23 /tmp/d.txt /tmp/c.txt > /tmp/u.txt; wc -l < /tmp/u.txt
+while read -r n; do printf '%s ' "$(grep -c -- "$n" /tmp/int.ll)"; done < /tmp/u.txt; echo
+nm /tmp/int | sed 's/.* //' | sort -u > /tmp/nm.txt
+comm -12 /tmp/nm.txt <(sed 's/"//g' /tmp/u.txt | sort -u) | wc -l
+```
+
+**The float-free half of `std.rt_float` can move into `std.rt` today, and it costs 3,004 bytes of
+`.text` on every binary to move** (T-096). 25 of the module's 42 top-level declarations hold no
+`f32`, no `f64` and no float literal: the `decimal` struct, fifteen constants, `scan`, `step_up`,
+`put_exponent`, `layout`, `decimal_text`, `fixed_text` and the three digit helpers `is_digit`,
+`digit_of` and `char_of`. The counts come from one command, which reads a declaration as a line
+that starts in column 1 and is neither an `import` nor a closing brace:
+
+```sh
+sed 's://.*::' std/rt_float.ft |
+awk '/^[^[:space:]}]/ && !/^import / && NF {d++; free[d]=1}
+     d && /(^|[^A-Za-z0-9_])(f32|f64)([^A-Za-z0-9_]|$)|[0-9]\.[0-9]|[0-9]e[-+]?[0-9]/ {free[d]=0}
+     END {n=0; for (i=1; i<=d; i++) n+=free[i]; print d, n}'
+free='is_digit|digit_of|char_of|scan|step_up|put_exponent|layout|decimal_text|fixed_text'
+awk -v re="^define .*@\"std[.]rt_float[.]($free)\"" \
+    '$0 ~ re {c=1; n++} /^define /{if ($0 !~ re) c=0} c {b+=length($0)+1} /^}$/{c=0}
+     END {print n, b}' /tmp/flt.ll
+```
+
+Copy those 25 declarations into a file that starts with `import std.libc;` and stage1 checks the
+file clean (`build/debug/fort --check --std-dir build/debug/std /tmp/free.ft`, exit 0), so
+`std/rt.ft` could hold them and the bootstrap would never meet a float. Their nine definitions emit
+50,958 bytes of IR, 60 percent of the whole module of a float-free program. The binary is the unit
+that decides: a copy of the standard library directory whose `rt.ft` carries the 24 declarations
+that `std.rt` does not already define (`DECIMAL_BASE` is there) links the integer program with
+13,140 bytes of `.text` against 10,136, and emits 136,174 bytes of IR against 84,395.
+
+T-096 left those declarations where they stand. The move puts 3,004 bytes of unreachable `.text`
+into every binary the project builds, and it ends no split: `std.rt_float` keeps the printers, the
+search and its `std.strbuf` import. D18.1 states the one condition that ends the split, which is a
+fort compiler built by a released fort compiler.
+
 `std/math.ft` is the second such module (T-042) and it costs more, because an `import std.math`
 is an ordinary import and no closure rule hides it: stage1 parses the whole closure, so it
 refuses every program that imports the module, with

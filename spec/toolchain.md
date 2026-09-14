@@ -538,6 +538,20 @@ makes them implementation details a program must not use (`stdlib.md` 1.1); `sys
 for `exit`, `args`, `flush` and `flush_all` (`stdlib.md` 3) and the rest of the library leaves it
 alone. `errno` is not its business either: `sys.errno()` reaches libc's `__errno_location` directly.
 
+A compiler that accepts floats loads `std.rt_float` into a closure that holds a float and into no
+other, and a compiler that does not accept floats neither loads the module nor needs it (D18.1).
+The split stands while the C bootstrap builds the compiler, and one condition ends it: the project
+builds the fort compiler with a released fort compiler rather than with the C bootstrap. The build
+makes that condition checkable: the `fort_stage2` target takes a released fort compiler as its
+input rather than the binary built from `src/bootstrap`. Nothing else ends it, the freeze of
+`src/bootstrap` included. While the C bootstrap builds the compiler, `std/rt.ft` may hold no float:
+the bootstrap loads that file into every closure it reads, it refuses a float type and a float
+literal, and the build compiles `src/fort` with the bootstrap, so a float in `std/rt.ft` stops the
+build. The two modules become one when that condition holds and not before. The loading rule above
+costs a float-free program nothing and costs a float program `std.rt_float`, `std.strbuf` and
+`std.mem`; `notes/compiler.md` 7 measures both, in emitted bytes and in `.text` bytes, with the
+command for each number.
+
 The float printers of `std.rt_float` are the one place where the runtime asks for a formatted value
 rather than laying the bytes out itself. What D18.2 fixes is the text, not the method; one method,
 and the one the C runtime used, is to ask `snprintf("%.*e", ...)` for one significant digit, then
