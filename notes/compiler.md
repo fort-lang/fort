@@ -649,7 +649,14 @@ gone.
   corpus test of a new feature must be **refused** with the exact words `not supported by the
   bootstrap compiler` (`run_tests.py`'s `judge_unsupported`), which is a stage1 edit as well.
   T-086 gave `std.libc` a `void mut* own malloc` and paid the smaller of the two: nine code
-  sites in `types.c`, `types.h` and `check.c`, no new diagnostic and no new code path. Count them
+  sites in `types.c`, `types.h` and `check.c`, no new diagnostic and no new code path.
+  T-135 is the second such edit and paid less: two sites, `parse_alloc_type` in `parser.c` and
+  the `TYPE_POS_ALLOC` arm of `check_type_at` in `check.c`, both of which got shorter. The rule
+  it carries is uniform over the positions of a type, so the smallest edit that reaches the
+  forms `std/` spells is the whole rule; a stage1 that took `new(void mut*, n)` for `std/vec.ft`
+  and refused `new(ast.sym*, cap)` for `src/fort/gen.ft` would need a condition that the rule
+  does not have, and more code than the rule. Measure both ways before you call an edit
+  the smallest. Count them
   and list them, including the mechanical ones: the ticket's first inventory named six, and the
   two it missed were `type_build`'s call of `type_voidptr` and the `TYPE_POS_ALLOC` arm of
   `check_type_at`, which is the one site of the nine that changes what an existing program
@@ -838,10 +845,16 @@ gone.
     own buffers -- so the entry points behind `new` and `del` are `alloc` and `free` while the one
     behind `panic` is `panic` (`toolchain.md` 5.1, T-088). A keyword, by contrast, is never
     available: `new` is one (D2.4), so no declaration of that name exists at all.
-  - **`new(T, n)` gives its result `mut` at every level** (D5.8), so `new(node*, n)` is
-    `node mut* mut@ own` and storing it in a `node* mut@ own` field is refused: dropping the
-    pointee's `mut` behind a mutable span is D5.4's `T** -> const T**` hole. A `cast` is the
-    sanctioned escape and the only one; write it once, at the allocation, with the reason.
+  - **`new(T, n)` marks the storage it allocates and no position below it** (D5.8, D10.2), so
+    the element type of the result is the element type written: `new(node mut*, n)` is a
+    `node mut* mut@ own` and `new(node*, n)` a `node* mut@ own`. Write the `mut` the field wants.
+    Until T-135 `new` marked every position and no `mut` parsed inside `new(...)`, so a field of
+    borrowed pointers took a `cast` at the allocation; `src/fort/gen.ft` held two of those and
+    `src/fort/types.ft` one, and all three are gone. The conversion between the two spellings is
+    still refused in both directions: adding a `mut` needs a `cast` (D3.14), and dropping the
+    pointee's `mut` behind a mutable span is D5.4's `T** -> const T**` hole, for which a `cast` is
+    the sanctioned escape and the only one. `test/lang/run/pointers/013` and
+    `test/lang/fail/mutability/012` are the pair that hold it.
   - **`==` does not drop `mut`.** Operands lend `own` (D17.4) and nothing else, so comparing a
     `node mut*` with a `node*` is a type error: give the test a `node*` binding rather than
     casting.

@@ -1,0 +1,58 @@
+//! run
+//! stdout:
+//| 2 2 2
+//| 7 11
+//| 7 11
+//| 11 7
+//| 11 3
+// `new` marks the storage it allocates, which is the outermost position of the
+// element type it is given, and marks nothing below it, so the element type of
+// the result is the element type written (D5.8, D10.2). The two spellings
+// allocate the same slots and differ in one thing: whether a write reaches a
+// node through a slot. fail/mutability/012 holds the two conversions that this
+// difference refuses.
+struct node {
+    i32 value;
+}
+
+fn i32 main() {
+    node mut a = {1};
+    node mut b = {2};
+
+    node mut* mut@ own writable = new(node mut*, 2);
+    writable[0] = &a;
+    writable[1] = &b;
+
+    node* mut@ own borrowed = new(node*, 2);
+    borrowed[0] = &a;
+    borrowed[1] = &b;
+    println(writable.len, " ", borrowed.len, " ", b.value);
+
+    // The `mut` after `node` is what lets the store reach the node.
+    writable[0]->value = 7;
+    writable[1]->value = 11;
+    println(writable[0]->value, " ", writable[1]->value);
+    // The borrowed span holds the same two nodes and may only read them.
+    println(borrowed[0]->value, " ", borrowed[1]->value);
+
+    // A slot is assignable in both spellings: the slots are the storage `new`
+    // allocated, and that is the position `new` marks.
+    borrowed[0] = &b;
+    writable[1] = &a;
+    println(borrowed[0]->value, " ", writable[1]->value);
+
+    // One slot and no count, by the same rule: `new(T*)` is a `T* mut* own`
+    // and `new(T mut*)` a `T mut* mut* own`.
+    node mut* mut* own slot = new(node mut*);
+    *slot = &a;
+    (*slot)->value = 3;
+    node* mut* own view = new(node*);
+    *view = &b;
+    println((*view)->value, " ", a.value);
+
+    del(view);
+    del(slot);
+    del(borrowed);
+    del(writable);
+    return 0;
+}

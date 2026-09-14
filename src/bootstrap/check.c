@@ -585,15 +585,17 @@ static check_type_t check_type_at(check_t* ck, ast_node_t* node, type_pos_t pos,
     bool base_own = wrapped && ast_is_own(node);
     bool base_mut = wrapped && ast_is_mut(node);
     if (pos == TYPE_POS_ALLOC) {
-        // `new` gives storage writable at every level, the level a `void*`
-        // reaches included. A bare `void` has no level and keeps no mark, so
-        // check_new reports it rather than the type builder.
-        // D3.11, D5.8, D17.3
-        const bool first_is_ptr = count > 0 && suffixes[0].kind == SUFFIX_PTR;
-        base_mut = (count == 0 || suffixes[0].kind != SUFFIX_ARRAY) &&
-                   (b->kind != TYPE_VOID || first_is_ptr);
-        for (uint64_t i = 0; i < count; i++) {
-            suffixes[i].mut = i + 1 == count || suffixes[i + 1].kind != SUFFIX_ARRAY;
+        // `new` fills the outermost position of the written type and no other,
+        // because that position is the storage it allocates: every position
+        // below it describes storage `new` did not allocate, so the element
+        // type of the result is the element type written. A bare `void` has no
+        // position and keeps no mark, so check_new reports it rather than the
+        // type builder.
+        // D3.11, D5.8, D10.2, D17.3
+        if (count == 0) {
+            base_mut = b->kind != TYPE_VOID;
+        } else {
+            suffixes[count - 1].mut = true;
         }
     }
     const type_build_t built =

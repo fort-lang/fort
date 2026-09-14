@@ -93,7 +93,7 @@ typedef enum {
     TYPE_POS_FIELD,   // D5.5: a struct field: no outermost `mut`
     TYPE_POS_RETURN,  // D5.5: a return type: no outermost `mut`
     TYPE_POS_CAST,    // D3.14: a cast target: a result has no binding
-    TYPE_POS_ALLOC,   // D5.8: inside `new`: every level is allocated writable
+    TYPE_POS_ALLOC,   // D5.8: inside `new`: the outermost position is allocated
 } type_pos_t;
 
 /// Whether `move` and `del` may empty an lvalue, and why not when they may not.
