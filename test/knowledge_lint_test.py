@@ -983,19 +983,22 @@ class HistoryLimitTest(unittest.TestCase):
         self.assertEqual(len(carried), 16)
         self.assertEqual(self.sweep(lint.HISTORY_REPORT, field="rationale"), [])
 
-    def test_a_wider_subject_and_verb_list_reports_thirty_one(self):
+    def test_a_wider_subject_and_verb_list_reports_thirty_five(self):
         # the fifth limit: `it`, `nothing`, `the text` and `the log` as subjects
-        # and `is`, `has`, `stands` and `compares` as verbs take 9 to 31. The
-        # limit claims no split of the 28 into prose and report: which is which
-        # is a reading, and no test holds a reading (T-121, round 2)
+        # and `is`, `has`, `stands` and `compares` as verbs take 9 to 35. The
+        # limit claims no split of the 32 into prose and report: which is which
+        # is a reading, and no test holds a reading (T-121, round 2). T-124's
+        # note on D4.5 took 31 to 35 and the tags from 9 to 10; all four of the
+        # sentences are prose about the ruling that note makes, and none of them
+        # is a report of what another decision says
         wide = re.compile(
             r"\b((?:" + lint.HISTORY_SUBJECT[3:-1] + r"|it|nothing|the (?:text|log))"
             + lint.HISTORY_BETWEEN + r"(?:" + lint.HISTORY_VERBS
             + r"|is|has|stands|compares|" + lint.HISTORY_NEGATED + r"))\b",
             re.IGNORECASE)
         found = self.sweep(wide, dated=False)
-        self.assertEqual(len(found), 31)
-        self.assertEqual(len({tag for tag, _ in found}), 9)
+        self.assertEqual(len(found), 35)
+        self.assertEqual(len({tag for tag, _ in found}), 10)
 
     def test_the_anchor_excuses_seven_sentences_the_pattern_would_report(self):
         # the sixth limit, measured: `now` and a date in the same sentence as

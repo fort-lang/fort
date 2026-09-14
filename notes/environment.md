@@ -195,6 +195,13 @@ without a rewrite.
   past the end, while `git diff` on the host shows a clean edit. Recover with
   `tools/vm run 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"'`, and delete that target's
   object as well, since ninja has already recorded the failed compile.
+  **Write the file from the host, never from a `tools/vm run` command.** T-124 rewrote one line
+  of `src/bootstrap/check.c` with a python heredoc inside the guest; clang then reported
+  `expected identifier or '('` in `<built-in>` and segfaulted, four rebuilds in a row, while
+  `clang -fsyntax-only` on a copy of the same file in the guest's own `/tmp` exited 0 and `tr -d
+  '\0' | wc -c` read the same 124493 bytes on both sides. `touch` in the guest did not clear it.
+  Writing the identical bytes from the host did, at once. So a mutation experiment edits from the
+  host, which is where the next bullet puts it for its own reason.
 - The same folder can hand ninja a stale mtime, so a rebuild after an edit prints "no work to do"
   and the suite keeps failing on text the file no longer holds; `md5sum` in the guest reads the
   new bytes and dropping the caches does not help, because it is the timestamp and not the

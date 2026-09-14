@@ -1226,6 +1226,27 @@ reads on every constant the type reaches (D4.5, the note of 2026-09-13). The exp
 for its whole subtree, here as in section 10.4, so the value of that node decides and the
 constants below it are not read again.
 
+The three clauses answer together, because one type covers the whole expression (D6.2). The clause
+that wins is the strongest any constant of the expression asks for, in this order: the float
+clause, then the character clause, then the integer clause (D4.5, the note of 2026-09-14). The
+integer clause wins over the character clause because a character literal takes an integer type in
+an integer context while an integer constant never becomes `char` (D4.3). Both win over the float
+clause, because D4.2 permits an untyped integer to take a float type in a float context and no
+decision requires it where there is no context at all.
+
+The type the clause chooses is not always a type every constant can take. D4.2 and D4.3 decide
+that one constant at a time, and a constant that cannot take it is the error: `c ? 1 : 2.5` is an
+`i32` whose float constant is refused, and `c ? 'a' : 1.5` is a `char` whose float constant is
+refused. Folding comes first and is not this rule: `1 + 2.5` is the untyped float 3.5 (D4.4).
+
+The rule chooses the type and the operand rules then hold against it, at the point a context fixes
+it (D6.2). The operands of an expression that folded to no value carry no value, so the operand
+rules cannot read their kind where the operator stands. A constant that does not fit the type is
+reported first, so `char c = 1 << n;` names the integer constant `1` and not the operand rule. Two
+expressions fold to no value: a shift whose count is a variable, and a `?:` whose condition is a
+run-time value. A shift takes an integer left operand, so the `char` and the `f64` of this section
+are errors inside one, and only a `?:` shows those two clauses at run time.
+
 ```fort
 print(7);                            // i32
 print(3000000000);                   // i64
@@ -1238,6 +1259,16 @@ print(1 << n);                       // i32: the count is a variable, and 1 fits
 print(4294967296 << n);              // i64: 4294967296 does not fit i32
 print((2147483648 - 1) << n);        // i32: the operand folded to 2147483647
 print(9223372036854775808 << n);     // error: 9223372036854775808 does not fit i64
+print(c ? 'a' : 'b');                // char: prints a
+print(c ? 1.5 : 2.5);                // f64
+print(c ? 'a' : 98);                 // i32: an integer constant never becomes char
+print(c ? 1 : 2.5);                  // error: a float constant does not become i32
+print(c ? 'a' : 1.5);                // error: a float constant does not become char
+print(1.5 + (1 << n));               // error: a float constant does not become i32
+print('a' << n);                     // error: '<<' takes an integer left operand, not char
+print((c ? 1.5 : 2.5) << 1);         // error: '<<' takes an integer left operand, not f64
+print((c ? 1.5 : 2.5) & (c ? 0.5 : 1.5)); // error: '&' takes integer operands, not f64
+char x = 1 << n;                     // error: an integer constant does not become char
 ```
 
 ### 10.6 Constant expressions (D4.6)

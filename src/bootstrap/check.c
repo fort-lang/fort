@@ -727,6 +727,12 @@ static bool check_no_value(check_t* ck, ast_node_t* n, expr_t* e) {
     return true;
 }
 
+// Defined with the operator rules below, which retype_untyped runs after them:
+// an operator whose operands carried no value meets its operand rule where a
+// context fixes its type.
+// D6.2
+static bool untyped_operand_ok(check_t* ck, const ast_node_t* n, const type_t* t);
+
 // Gives every node of an untyped constant expression the type its context fixed.
 // A node that folded stands for its whole subtree, so only its value meets the
 // context; a node that did not fold, `1 << n` with a variable count, passes the
@@ -761,37 +767,108 @@ static bool retype_untyped(
             ok = false;
         }
     }
+    if (ok && v.kind == CV_NONE && !untyped_operand_ok(ck, n, t)) {
+        // An operator that folded to no value reaches its operand rule here,
+        // because its operands carried no value for check_binary to read. The
+        // children go first, so a constant that does not fit `t` is reported
+        // where it stands and this rule stays quiet: in `char c = 1 << n;` the
+        // left operand is the integer `1`, and the message that helps names the
+        // constant.
+        // D4.3, D4.5, D6.2
+        ok = false;
+    }
     return ok;
 }
 
-// Whether `i32` is wide enough for an untyped expression that did not fold,
+// The order in which the clauses of the rule win, and not an order of width.
+// One type covers a whole untyped expression, because there is no promotion
+// inside one, so the constants of one expression settle on one clause.
+// PRIM_VOID ranks 0 and means "no constant here asks for a type"; so does any
+// kind the rule does not name. A fourth default type is one more case.
+//
+// `char` ranks below the integer types because a char literal takes an integer
+// type in an integer context while an integer constant never becomes `char`, so
+// the integer clause is the only one that holds both.
+//
+// The float clause of the rule is absent here and present in src/fort/check.ft,
+// where it ranks below `char`. This compiler folds no float constant at all:
+// `cval_kind` has no float member and the lexer refuses a float literal, so no
+// walk of this function can meet one.
+// D4.3, D4.5, D6.2
+static int32_t default_rank(prim_kind_t k) {
+    switch (k) {
+    case PRIM_CHAR:
+        return 1;
+    case PRIM_I32:
+        return 2;
+    case PRIM_I64:
+        return 3;
+    default:
+        return 0;
+    }
+}
+
+// The default type an untyped expression needs when it folded to no value,
 // `4294967296 << n` with a variable count. Such an expression has no value of
-// its own, so the width it needs is the width every constant in it needs, and
-// the walk is the one `retype_untyped` makes: a node that folded stands for its
-// whole subtree, so its value decides and the subtree below it is not read.
-// Only an integer asks for a wider default type. Any other kind keeps `i32`,
-// so `retype_untyped` reports it against `i32` as it did before this rule.
-// D4.5
-static bool untyped_fits_i32(const check_t* ck, const ast_node_t* n) {
+// its own, so the type it needs is the strongest of `default_rank` that any
+// constant in it asks for, and the walk is the one `retype_untyped` makes: a
+// node that folded stands for its whole subtree, so its value decides and the
+// subtree below it is not read. PRIM_VOID is the answer when no constant asks
+// for a type; `default_type` then keeps `i32`.
+//
+// The type this chooses is not a type every constant of the expression can
+// take. `retype_untyped` decides that, one constant at a time: an integer
+// constant never becomes `char`, so `c ? 'a' : 98` takes i32 here and the char
+// literal is its code point there.
+// D4.3, D4.5
+static prim_kind_t untyped_default_kind(const check_t* ck, const ast_node_t* n) {
     if ((n->ann & CHECK_ANN_UNTYPED) == 0) {
-        return true;
+        return PRIM_VOID;
     }
     const cval_t v = check_node_value(ck, n);
     if (v.kind != CV_NONE) {
-        return v.kind != CV_INT || cv_fits(v, PRIM_I32);
+        // The two clauses this compiler can meet, on the value this node folded
+        // to. An integer that fits neither type asks for i64, the widest the
+        // integer clause offers, so `retype_untyped` reports it against that.
+        // D4.5
+        switch (v.kind) {
+        case CV_INT:
+            return cv_fits(v, PRIM_I32) ? PRIM_I32 : PRIM_I64;
+        case CV_CHAR:
+            return PRIM_CHAR;
+        case CV_BOOL:
+        case CV_NONE:
+        case CV_NULL:
+        case CV_STR:
+            // The rule names no default type for these. `true` and a string
+            // literal are typed already, so only `null` arrives here, and the
+            // rule of the null literal reports it where it stands. CV_NONE
+            // cannot arrive at all: the branch above tests for it, and the case
+            // stands here so the switch names every kind and gains a warning
+            // when a kind is added.
+            // D10.5
+            return PRIM_VOID;
+        }
+        return PRIM_VOID;
     }
+    prim_kind_t k = PRIM_VOID;
     const ast_node_t* const kids[] = {n->a, n->b, n->c, n->d};
     for (uint64_t i = 0; i < sizeof kids / sizeof kids[0]; i++) {
-        if (kids[i] != NULL && !untyped_fits_i32(ck, kids[i])) {
-            return false;
+        if (kids[i] == NULL) {
+            continue;
+        }
+        const prim_kind_t child = untyped_default_kind(ck, kids[i]);
+        if (default_rank(child) > default_rank(k)) {
+            k = child;
         }
     }
     for (uint64_t i = 0; i < ast_len(n); i++) {
-        if (!untyped_fits_i32(ck, ast_child(n, i))) {
-            return false;
+        const prim_kind_t child = untyped_default_kind(ck, ast_child(n, i));
+        if (default_rank(child) > default_rank(k)) {
+            k = child;
         }
     }
-    return true;
+    return k;
 }
 
 // The default type of an untyped constant with no context.
@@ -811,11 +888,16 @@ static void default_type(check_t* ck, ast_node_t* n, expr_t* e) {
         check_error(ck, n->loc, "constant expression out of range");
         e->type = type_error(&ck->types);
     } else if (e->value.kind == CV_NONE) {
-        // `1 << n` with no context: the left operand takes its default type,
-        // which is i32 when every constant in the expression fits i32 and i64
-        // when one does not. A constant that fits neither is reported against
-        // i64 by the retype below.
-        k = untyped_fits_i32(ck, n) ? PRIM_I32 : PRIM_I64;
+        // `1 << n` with no context: the constants inside the expression take
+        // their default type, and one type covers them all. A constant that
+        // fits no type of the rule is reported by the retype below.
+        // D4.5, D6.2
+        k = untyped_default_kind(ck, n);
+        if (k == PRIM_VOID) {
+            // No constant in it asks for a type, so the expression keeps the
+            // i32 that `retype_untyped` reported against before this rule.
+            k = PRIM_I32;
+        }
         e->type = type_prim(&ck->types, k);
     } else {
         e->type = type_prim(&ck->types, k);
@@ -1358,6 +1440,27 @@ static bool operand_kind_ok(check_t* ck, loc_t loc, int32_t op, const type_t* t)
         return false;
     }
     return true;
+}
+
+// The operand rules on the type a context fixed for an operator that folded to
+// no value, `1 << n` with a variable count. The operands carry no value there,
+// so check_operands read no kind from them and left the rule to the point where
+// the type is known; retype_untyped is that point, and no context may change the
+// rule. A shift names its left operand, which is the operand the type belongs
+// to: the count has a type of its own and check_shift has already judged it.
+// D6.2
+static bool untyped_operand_ok(check_t* ck, const ast_node_t* n, const type_t* t) {
+    if (n->kind != AST_BINARY) {
+        return true;
+    }
+    if (op_is_shift(n->op)) {
+        if (check_poisoned(t) || type_is_integer_prim(t)) {
+            return true;
+        }
+        error_operand(ck, n->loc, n->op, "an integer left operand", t);
+        return false;
+    }
+    return operand_kind_ok(ck, n->loc, n->op, t);
 }
 
 void check_operands(check_t* ck,

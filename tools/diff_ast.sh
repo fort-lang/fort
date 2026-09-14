@@ -73,7 +73,7 @@ done
 # constant: a file must not be able to slip out of the comparison. A ticket
 # that adds or removes a .ft file changes all four lines in the same commit:
 # diff_tokens.sh, diff_ast.sh, diff_check.sh and diff_ir.sh.
-FT_FILES=923
+FT_FILES=925
 
 # The files of that corpus src/bootstrap refuses for a nested array or span
 # level, which src/fort reads (D3.6, T-043). They are skipped below, and this
@@ -92,7 +92,7 @@ NESTED_MESSAGES='multi-dimensional arrays|spans of arrays|arrays of spans|spans 
 # and no tree to compare. These files are not skipped in silence either: the
 # count is an equality, and stage2 must not report the refusal itself, which
 # is what says the divergence is the one intended.
-FORM_FILES=13
+FORM_FILES=14
 FORM_MESSAGES='do-while|\?:'
 
 # The same for the third: src/fort reads a float literal (D2.6, T-041) and

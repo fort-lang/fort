@@ -245,6 +245,190 @@ fn void a_poisoned_left_operand_that_is_no_constant_is_still_dropped() {
     assert(call != null);
     assert(check_env.errors(&e) == 1);
     assert(check_env.said(&e, "unknown name 'nosuch'"));
+    // The count holds the second guard as well: the error type is no integer
+    // type, so the shift guard in retype_untyped would report it here a second
+    // time if it read a poisoned type.
+    // D6.2, D14.2
+    assert(!check_env.said(&e, "'<<' takes an integer left operand"));
+}
+
+fn void a_char_alone_in_such_an_expression_asks_for_char() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The third clause of the rule. A char literal defaults to char, a shift
+    // takes an integer left operand, and char is not an integer, so the
+    // program is an error. It printed 97 until 2026-09-14.
+    // D3.3, D4.3, D4.5, D6.2
+    ast.node* call = probe_call(&e, "'a' << n", false);
+    assert(call != null);
+    assert(check_env.errors(&e) == 1);
+    assert(check_env.said(&e, "'<<' takes an integer left operand, not char"));
+    check_env.env mut f = check_env.env{};
+    check_env.open(&f);
+    defer check_env.close(&f);
+    assert(probe_call(&f, "'a' >> n", false) != null);
+    assert(check_env.said(&f, "'>>' takes an integer left operand, not char"));
+}
+
+fn void a_declared_char_is_no_more_an_integer_than_the_default_char_is() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The same guard where a context and not the rule chose char. Both reach
+    // retype_untyped, and the operand rule holds at that one point.
+    // D4.1, D6.2
+    string as_char = "fn void probe(i32 n) {\n    char c = 'a' << n;\n    println(c);\n}\n";
+    assert(!check_env.check_decls(&e, as_char));
+    assert(check_env.said(&e, "'<<' takes an integer left operand, not char"));
+    check_env.env mut f = check_env.env{};
+    check_env.open(&f);
+    defer check_env.close(&f);
+    // An integer context is legal and keeps the code point, so the guard
+    // refuses char and not every context of a char constant.
+    // D4.3
+    string as_u8 = "fn void probe(i32 n) {\n    u8 b = 'a' << n;\n    println(b);\n}\n";
+    assert(check_env.check_decls(&f, as_u8));
+    assert(check_env.errors(&f) == 0);
+}
+
+fn void a_char_beside_an_integer_takes_the_integer_type() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    ast.node* call = probe_call(&e, "'a' | (1 << n), 'a' + (4294967296 << n)", true);
+    // One type covers the expression, and an integer constant never becomes
+    // char, so the integer clause wins and the char is its code point.
+    // D4.3, D4.5, D6.2
+    assert(check_env.type_text(&e, ast.ast_child(call, 0)->ty) == "i32");
+    assert(check_env.type_text(&e, ast.ast_child(call, 1)->ty) == "i64");
+}
+
+fn void a_folded_char_stands_for_its_subtree_as_an_integer() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    ast.node* call = probe_call(&e, "('a' + 1) << n", true);
+    // The walk stops at a node that folded, so the left operand of the shift is
+    // the integer 98 and not the char below it: the shift is legal and the
+    // expression is i32.
+    // D4.3, D4.4, D4.5
+    assert(check_env.type_text(&e, ast.ast_child(call, 0)->ty) == "i32");
+    check_env.env mut f = check_env.env{};
+    check_env.open(&f);
+    defer check_env.close(&f);
+    assert(check_env.check_init_of(&f, "i32", "('a' + 1) << 1"));
+    i64 mut v = 0;
+    assert(check_env.init_int(&f, "probe", &v));
+    assert(v == 196);
+}
+
+fn void a_folded_constant_with_no_context_takes_its_clause() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The rule on a constant that folded, which is the clause `cv_default_kind`
+    // answers and the walk of an expression with no value never reaches. The
+    // twin of check_const_test.c with_no_context_a_constant_is_i32_then_i64 and
+    // with_no_context_a_char_literal_is_char.
+    // D4.5
+    ast.node* call = probe_call(&e, "1, 4294967296, 'a'", true);
+    assert(check_env.type_text(&e, ast.ast_child(call, 0)->ty) == "i32");
+    assert(check_env.type_text(&e, ast.ast_child(call, 1)->ty) == "i64");
+    assert(check_env.type_text(&e, ast.ast_child(call, 2)->ty) == "char");
+}
+
+fn void a_context_that_takes_no_integer_constant_reports_the_constant() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The operand rule of the shift reads the type the whole expression took,
+    // and the left operand there is the integer `1`, which no context of these
+    // five accepts. The constant is what the reader must change, so the message
+    // that names it comes first and the operand rule stays quiet. Each of these
+    // read "'<<' takes an integer left operand" on one branch of 2026-09-14 and
+    // on no other day.
+    // D3.3, D3.9, D4.1, D4.3, D6.2
+    string as_char = "fn void probe(i32 n) {\n    char c = 1 << n;\n    println(c);\n}\n";
+    assert(!check_env.check_decls(&e, as_char));
+    assert(check_env.said(&e, "an integer constant does not become char: use cast"));
+    assert(check_env.errors(&e) == 1);
+    check_env.env mut f = check_env.env{};
+    check_env.open(&f);
+    defer check_env.close(&f);
+    string as_bool = "fn void probe(i32 n) {\n    bool b = 1 << n;\n    println(b);\n}\n";
+    assert(!check_env.check_decls(&f, as_bool));
+    assert(check_env.said(&f, "an integer constant does not become bool: write '!= 0'"));
+    check_env.env mut g = check_env.env{};
+    check_env.open(&g);
+    defer check_env.close(&g);
+    strbuf.str_buf mut eb = strbuf.create();
+    defer strbuf.free(&eb);
+    strbuf.append(&eb, "enum color {\n    red,\n}\nfn void probe(i32 n) {\n");
+    strbuf.append(&eb, "    color k = 1 << n;\n    println(k);\n}\n");
+    assert(!check_env.check_decls(&g, strbuf.view(&eb)));
+    assert(check_env.said(&g, "an integer constant does not become an enum: use cast"));
+    check_env.env mut h = check_env.env{};
+    check_env.open(&h);
+    defer check_env.close(&h);
+    string as_ptr = "fn void probe(i32 n) {\n    i32* p = 1 << n;\n    println(p);\n}\n";
+    assert(!check_env.check_decls(&h, as_ptr));
+    assert(check_env.said(&h, "the initializer expects i32*, not a constant"));
+    check_env.env mut j = check_env.env{};
+    check_env.open(&j);
+    defer check_env.close(&j);
+    strbuf.str_buf mut sb = strbuf.create();
+    defer strbuf.free(&sb);
+    strbuf.append(&sb, "struct s {\n    i32 x;\n}\nfn void probe(i32 n) {\n");
+    strbuf.append(&sb, "    s q = 1 << n;\n    println(q.x);\n}\n");
+    assert(!check_env.check_decls(&j, strbuf.view(&sb)));
+    assert(check_env.said(&j, "the initializer expects s, not a constant"));
+}
+
+fn void a_constant_that_asks_for_no_type_leaves_the_expression_at_i32() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // `null` has no default type at all, so nothing in the expression asks for
+    // one and i32 stands. The message names the type the expression took.
+    // D4.5, D10.5
+    assert(probe_call(&e, "null << n", false) != null);
+    assert(check_env.said(&e, "'null' needs a pointer type, not i32"));
+}
+
+fn void the_arms_of_a_conditional_take_one_default_type() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // A conditional with a run-time condition is the second expression that
+    // folds to no value, and the one the bootstrap compiler does not have. Two
+    // char arms make it char, which is the clause a shift can never show.
+    // D4.5, D6.6
+    ast.node* call = probe_call(&e, "n > 0 ? 'a' : 'b', n > 0 ? 'a' : 98, n > 0 ? 1 : 4294967296",
+        true);
+    assert(check_env.type_text(&e, ast.ast_child(call, 0)->ty) == "char");
+    assert(check_env.type_text(&e, ast.ast_child(call, 1)->ty) == "i32");
+    assert(check_env.type_text(&e, ast.ast_child(call, 2)->ty) == "i64");
+}
+
+fn void a_constant_with_no_default_type_may_still_fold_back_into_range() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The same operand as the test above it, shifted by a constant count. The
+    // fold happens before any type is chosen, so the value that meets the rule
+    // is 2^62 and not 2^63, and the expression is legal.
+    // D4.4, D4.5
+    ast.node* call = probe_call(&e, "9223372036854775808 >> 1, 18446744073709551615 >> 32", true);
+    assert(check_env.type_text(&e, ast.ast_child(call, 0)->ty) == "i64");
+    assert(check_env.type_text(&e, ast.ast_child(call, 1)->ty) == "i64");
+    check_env.env mut f = check_env.env{};
+    check_env.open(&f);
+    defer check_env.close(&f);
+    assert(check_env.check_init_of(&f, "i64", "9223372036854775808 >> 1"));
+    i64 mut v = 0;
+    assert(check_env.init_int(&f, "probe", &v));
+    assert(v == 4611686018427387904);
 }
 
 fn void a_char_constant_in_an_integer_context_is_its_code_point() {
@@ -599,6 +783,15 @@ fn i32 main() {
     one_wide_constant_widens_the_whole_untyped_expression();
     an_expression_with_no_value_beyond_i64_is_refused();
     a_poisoned_left_operand_that_is_no_constant_is_still_dropped();
+    a_char_alone_in_such_an_expression_asks_for_char();
+    a_declared_char_is_no_more_an_integer_than_the_default_char_is();
+    a_char_beside_an_integer_takes_the_integer_type();
+    a_folded_char_stands_for_its_subtree_as_an_integer();
+    a_folded_constant_with_no_context_takes_its_clause();
+    a_context_that_takes_no_integer_constant_reports_the_constant();
+    a_constant_that_asks_for_no_type_leaves_the_expression_at_i32();
+    the_arms_of_a_conditional_take_one_default_type();
+    a_constant_with_no_default_type_may_still_fold_back_into_range();
     a_char_constant_in_an_integer_context_is_its_code_point();
     null_needs_a_pointer_typed_context();
     a_comparison_yields_bool_and_folds();

@@ -395,6 +395,46 @@ Sections:
   refused the wide case until this note.
   `run/constants/012_untyped_constant_wider_than_i32.ft` and
   `run/errors/033_shift_of_a_wide_default_typed_constant.ft` hold the rule.
+  Note 2026-09-14 (T-124): the note above answers for one clause of the three, and the same walk
+  answers for all three. One type covers an expression that folded to no value, which D6.2
+  forces, so its constants settle on one clause of this rule. **The clause that wins is the
+  strongest any constant of the expression asks for, in this order: the float clause, then the
+  char clause, then the integer clause.** A fold comes first and is not this rule: `print(1 +
+  2.5)` is the untyped float 3.5 by D4.4, so no default type is chosen for the `1` at all.
+  The integer clause wins over the char clause because a char literal takes an integer type in an
+  integer context while an integer constant never becomes `char` (D4.3), so `c ? 'a' : 98` is an
+  `i32` in which the char literal is its code point. The char clause and the integer clause win
+  over the float clause because no decision requires an untyped integer or a char literal to take
+  a float type. D4.2 permits an untyped integer to take one in a float **context**; with no
+  context this rule answers, and the answer it keeps for one untyped expression is the one the
+  integer clause gave.
+  Unary `-` and `~` are not one untyped expression with what stands beside them, and they answer
+  differently. Each gives an operand that folded to no value its default type at once and alone,
+  so `-(c ? 1.5 : 2.5)` is a **typed** `f64` by the float clause. A constant beside it then takes
+  `f64` from a typed operand, as it takes a type from any typed operand (D4.1), so
+  `-(c ? 1.5 : 2.5) + 1` is `-0.5` while `(c ? 1.5 : 2.5) + 1` is the error above. That is the
+  float clause working, followed by an ordinary context; it is not two clauses meeting inside one
+  expression. Unary `!` takes a `bool` operand and gives the constant that context instead, so
+  `!(c ? 1.5 : 2.5)` reports "a float constant does not become bool".
+  The type this rule chooses is not always a type every constant of the expression can take. D4.2
+  and D4.3 decide that, one constant at a time, and a constant that cannot take it is the error.
+  So `c ? 1 : 2.5` is an `i32` and reports "a float constant does not become i32", `c ? 'a' : 1.5`
+  is a `char` and reports "a float constant does not become char", and
+  `c ? 9223372036854775808 : 1.5` reports the integer against `i64`, which is this rule's own
+  tail. `c ? 1.5 : 2.5` is an `f64`, because every constant in it is a float.
+  The type this rule chooses then meets the operand rules of D6.2, at the point a context fixes
+  it. The operands of an expression that folded to no value carry no value, so the operand rules
+  cannot read their kind where the operator stands and are applied again where the type is known:
+  `'a' << n` and `(c ? 1.5 : 2.5) & (c ? 2.5 : 3.5)` are errors. A constant that does not fit the
+  type is reported first, so `char c = 1 << n;` names the integer constant and not the operand
+  rule: the left operand there is the `1`.
+  Two expressions fold to no value: a shift whose count is a variable, and a `?:` whose condition
+  is a run-time value. A shift takes an integer left operand, so a `?:` is the only expression
+  that shows the char clause or the float clause of this rule at run time. `'a' << n` printed 97
+  and exited 0 in both compilers until this note.
+  `run/constants/013_default_type_of_a_char_and_a_float.ft`,
+  `fail/operators/018_char_left_operand_of_a_shift.ft` and
+  `fail/constants/010_float_in_integer_context.ft` hold the three.
 
 ### D4.6 Constant expressions
 - owner: `type-system.md` (Constants), `core-language.md` (Literals).

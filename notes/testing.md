@@ -152,6 +152,17 @@ bullet at a time and without a rewrite.
   after code, so a comment inside a test that quotes a directive (`the //! stderr: lines`) fails
   the lint with `only '//! error:' may follow code on a line`. Say "the stderr directives in this
   test's header" instead.
+- **The harness judges a line, not a count, so a `fail` test cannot hold the number of
+  diagnostics.** `judge_fail` groups what the compiler reported by `(file, line)` and asks whether
+  each annotated line carries a message with the expected text. A diagnostic that is **added**
+  beside a right one on the same line, or **doubled**, leaves the whole corpus green. T-117
+  measured it on 2026-09-13: dropping a guard added `'<<' takes an integer left operand, not
+  <error>` at column 20 of line 3 and `646 tests: 646 passed` stayed green. T-124 measured it
+  again on 2026-09-14: a guard that reported where a child had already reported left
+  `648 tests: 648 passed`. Both times one unit test went red and nothing else did. So a ticket
+  that adds, moves or removes a diagnostic asserts the count where a test can read it --
+  `diag_lines()` in `test/*_test.c` or `check_env.errors(&e)` in `test/fort/*_test.ft` -- and
+  uses the `fail` test for the text and the position.
 - **A `fail` test may not mix a lexical with a semantic diagnostic.** `lex_file` reports, and the
   driver then stops before the checker runs (D14.2), so a file whose lexical error is annotated
   alongside an expected type error never produces the second one and the run fails on the missing

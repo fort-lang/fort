@@ -386,10 +386,10 @@ set_tests_properties(lang-stage2 PROPERTIES LABELS lang)
 # with a golden index.json beside it, held against that file byte for byte
 # (D20.2, D20.3). It is the oracle of the json and index ports (T-093).
 #
-# What it covers and what it does not. --check-json selects 225 of the 646
-# tests: the 223 `fail` tests, which have diagnostics, and the 2 tests with a
+# What it covers and what it does not. --check-json selects 227 of the 655
+# tests: the 225 `fail` tests, which have diagnostics, and the 2 tests with a
 # golden index beside them. So the document of a **clean** compile is
-# exercised here by two tests, and the diagnostics half by all 223. The three
+# exercised here by two tests, and the diagnostics half by all 225. The three
 # numbers are read off `run_tests.py --check-json --list`, whose last line is a
 # summary and not a test, so `wc -l` of it is one above the count; the pair
 # before T-043 (194 of 538, 192 fail tests) counted the fail tests wrong as
@@ -400,7 +400,11 @@ set_tests_properties(lang-stage2 PROPERTIES LABELS lang)
 # three tests of which two are `fail` tests: 638 to 643, 220 to 222 and 222 to
 # 224, measured on the branch that rebased over it, and T-117 moved all three
 # with three tests of which one is a `fail` test: 643 to 646, 222 to 223 and
-# 224 to 225.
+# 224 to 225. T-097 then moved all three with seven tests of which one is a
+# `fail` test, 646 to 653, 223 to 224 and 225 to 226, and left this comment
+# unchanged; no tool reads these three numbers, so nothing went red. T-124
+# measured them again after it rebased over that commit and moved them with two
+# tests of which one is a `fail` test: 653 to 655, 224 to 225 and 226 to 227.
 # Against a
 # golden the comparison is stricter than a diff of two compilers for the value
 # and the order of every record, since it holds both compilers against a file

@@ -87,6 +87,15 @@ TEST(with_no_context_a_constant_is_i32_then_i64, {
     TEST_ASSERT_EQ_STR(type_text(ast_child(call, 1)->type), "i64");
 })
 
+TEST(with_no_context_a_char_literal_is_char, {
+    TEST_ASSERT_TRUE(check_body("    println('a');"));
+    const ast_node_t* call = node_in_main(AST_CALL, NULL);
+    // The third clause of the rule on a constant that folded. `char c = 'a';`
+    // reads the same literal through a context; here it has none.
+    // D4.5
+    TEST_ASSERT_EQ_STR(type_text(ast_child(call, 0)->type), "char");
+})
+
 // The default type of an untyped expression that folded to no value: `1 << n`
 // with a variable count. The expression carries its constants to
 // `default_type`, which reads the width they need. The type is read off the
@@ -140,15 +149,89 @@ TEST(one_wide_constant_widens_the_whole_untyped_expression, {
     TEST_ASSERT_EQ_STR(type_text(sum->b->type), "i64");
 })
 
-TEST(a_char_or_a_bool_in_such_an_expression_keeps_i32, {
-    TEST_ASSERT_TRUE(check_body("    i32 n = 1;\n    println('a' << n);"));
-    const ast_node_t* call = node_in_main(AST_CALL, NULL);
-    // Only an integer asks for a wider type. A char literal in an integer
-    // context is its code point, which fits i32.
-    // D4.3, D4.5
-    TEST_ASSERT_EQ_STR(type_text(ast_child(call, 0)->type), "i32");
+TEST(a_char_alone_in_such_an_expression_asks_for_char_and_the_shift_refuses_it, {
+    // The third clause of the rule, reached through the one construct the
+    // bootstrap compiler has for an expression with no value. A char literal
+    // defaults to char, a shift takes an integer left operand, and char is not
+    // an integer, so the program is an error. It printed 97 until 2026-09-14.
+    // D3.3, D4.3, D4.5, D6.2
+    TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n    println('a' << n);"));
+    TEST_ASSERT_TRUE(said("'<<' takes an integer left operand, not char"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n    println('a' >> n);"));
+    TEST_ASSERT_TRUE(said("'>>' takes an integer left operand, not char"));
     TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n    println(true << n);"));
     TEST_ASSERT_TRUE(said("'<<' takes an integer left operand, not bool"));
+})
+
+TEST(a_declared_char_is_no_more_an_integer_than_the_default_char_is, {
+    // The same guard where a context and not the rule chose char. Both reach
+    // retype_untyped, and the operand rule holds at that one point.
+    // D4.1, D6.2
+    TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n    char c = 'a' << n;\n    println(c);"));
+    TEST_ASSERT_TRUE(said("'<<' takes an integer left operand, not char"));
+    // An integer context is legal and keeps the code point, so the guard
+    // refuses char and not every context of a char constant.
+    // D4.3
+    TEST_ASSERT_TRUE(check_body("    i32 n = 1;\n    u8 b = 'a' << n;\n    println(b);"));
+    TEST_ASSERT_EQ_STR(init_type("b"), "u8");
+})
+
+TEST(a_char_beside_an_integer_takes_the_integer_type, {
+    TEST_ASSERT_TRUE(check_body("    i32 n = 1;\n"
+                                "    println('a' | (1 << n), 'a' + (4294967296 << n));"));
+    const ast_node_t* call = node_in_main(AST_CALL, NULL);
+    // One type covers the expression, and an integer constant never becomes
+    // char, so the integer clause wins and the char is its code point.
+    // D4.3, D4.5, D6.2
+    TEST_ASSERT_EQ_STR(type_text(ast_child(call, 0)->type), "i32");
+    TEST_ASSERT_EQ_STR(type_text(ast_child(call, 1)->type), "i64");
+})
+
+TEST(a_folded_char_stands_for_its_subtree_as_an_integer, {
+    TEST_ASSERT_TRUE(check_body("    i32 n = 1;\n    println(('a' + 1) << n);"));
+    const ast_node_t* call = node_in_main(AST_CALL, NULL);
+    // The walk stops at a node that folded, so the left operand of the shift
+    // is the integer 98 and not the char below it: the shift is legal and the
+    // expression is i32.
+    // D4.3, D4.4, D4.5
+    TEST_ASSERT_EQ_STR(type_text(ast_child(call, 0)->type), "i32");
+    int64_t v = 0;
+    TEST_ASSERT_TRUE(cv_to_i64(check_node_value(&checker, ast_child(call, 0)->a), &v));
+    TEST_ASSERT_EQ_INT64(v, (int64_t)98);
+})
+
+TEST(a_context_that_takes_no_integer_constant_reports_the_constant, {
+    // The operand rule of the shift reads the type the whole expression took,
+    // and the left operand there is the integer `1`, which no context of these
+    // five accepts. The constant is what the reader must change, so the message
+    // that names it comes first and the operand rule stays quiet. Each of these
+    // read "'<<' takes an integer left operand" on one branch of 2026-09-14 and
+    // on no other day.
+    // D3.3, D3.9, D4.1, D4.3, D6.2
+    TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n    char c = 1 << n;\n    println(c);"));
+    TEST_ASSERT_TRUE(said("an integer constant does not become char: use cast"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n    bool b = 1 << n;\n    println(b);"));
+    TEST_ASSERT_TRUE(said("an integer constant does not become bool: write '!= 0'"));
+    TEST_ASSERT_FALSE(check_src("enum color {\n    red,\n}\n"
+                                "fn i32 main() {\n    i32 n = 1;\n    color k = 1 << n;\n"
+                                "    println(k);\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("an integer constant does not become an enum: use cast"));
+    TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n    i32* p = 1 << n;\n    println(p);"));
+    TEST_ASSERT_TRUE(said("the initializer expects i32*, not a constant"));
+    TEST_ASSERT_FALSE(check_src("struct s {\n    i32 x;\n}\n"
+                                "fn i32 main() {\n    i32 n = 1;\n    s q = 1 << n;\n"
+                                "    println(q.x);\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("the initializer expects s, not a constant"));
+})
+
+TEST(a_constant_that_asks_for_no_type_leaves_the_expression_at_i32, {
+    // `null` has no default type at all, so nothing in the expression asks for
+    // one and i32 stands. The message names the type the expression took.
+    // D4.5, D10.5
+    TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n    println(null << n);"));
+    TEST_ASSERT_TRUE(said("'null' needs a pointer type, not i32"));
 })
 
 TEST(an_expression_with_no_value_beyond_i64_is_refused, {
@@ -175,6 +258,11 @@ TEST(a_poisoned_left_operand_that_is_no_constant_is_still_dropped, {
     TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n    println(nosuch << n);"));
     TEST_ASSERT_TRUE(said("unknown name 'nosuch'"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    // The count holds the second guard as well: the error type is no integer
+    // type, so the shift guard in retype_untyped would report it here a second
+    // time if it read a poisoned type.
+    // D6.2, D14.2
+    TEST_ASSERT_FALSE(said("'<<' takes an integer left operand"));
 })
 
 TEST(a_constant_with_no_default_type_may_still_fold_back_into_range, {
@@ -589,11 +677,17 @@ int main(int argc, char** argv) {
     TEST_RUN(an_integer_constant_does_not_become_an_enum);
     TEST_RUN(an_integer_constant_does_not_become_a_bool);
     TEST_RUN(with_no_context_a_constant_is_i32_then_i64);
+    TEST_RUN(with_no_context_a_char_literal_is_char);
     TEST_RUN(an_expression_with_no_value_takes_i32_when_every_constant_fits);
     TEST_RUN(an_expression_with_no_value_takes_i64_when_a_constant_needs_it);
     TEST_RUN(a_node_that_folded_decides_for_the_subtree_below_it);
     TEST_RUN(one_wide_constant_widens_the_whole_untyped_expression);
-    TEST_RUN(a_char_or_a_bool_in_such_an_expression_keeps_i32);
+    TEST_RUN(a_char_alone_in_such_an_expression_asks_for_char_and_the_shift_refuses_it);
+    TEST_RUN(a_declared_char_is_no_more_an_integer_than_the_default_char_is);
+    TEST_RUN(a_char_beside_an_integer_takes_the_integer_type);
+    TEST_RUN(a_folded_char_stands_for_its_subtree_as_an_integer);
+    TEST_RUN(a_context_that_takes_no_integer_constant_reports_the_constant);
+    TEST_RUN(a_constant_that_asks_for_no_type_leaves_the_expression_at_i32);
     TEST_RUN(an_expression_with_no_value_beyond_i64_is_refused);
     TEST_RUN(a_poisoned_left_operand_that_is_no_constant_is_still_dropped);
     TEST_RUN(a_constant_with_no_default_type_may_still_fold_back_into_range);

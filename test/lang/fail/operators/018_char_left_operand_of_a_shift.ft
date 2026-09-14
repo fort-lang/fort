@@ -1,0 +1,49 @@
+//! fail
+// A char literal with no context takes `char`, which is not an integer type,
+// so a shift refuses it (D4.5, D3.3, D6.2). A shift whose count is a variable
+// folds to no value, so the rule reaches the shift itself and not a constant
+// below it (D4.1). Each of these printed 97 and exited 0 until 2026-09-14.
+//
+// fail/operators/012_float_shifts.ft holds the same guard for a float, which
+// the bootstrap compiler does not have; this one runs under both compilers.
+enum color {
+    red,
+}
+
+struct s {
+    i32 x;
+}
+
+fn i32 z(i32 v) {
+    return v;
+}
+
+fn i32 main() {
+    i32 n = z(0);
+    println('a' << n); //! error: '<<' takes an integer left operand, not char
+    println('a' >> n); //! error: '>>' takes an integer left operand, not char
+    println(-('a' << n)); //! error: '<<' takes an integer left operand, not char
+    char c = 'a' << n; //! error: '<<' takes an integer left operand, not char
+    // An integer context takes the char to its code point, so the guard
+    // refuses the type the rule chose and not every context of a char (D4.3).
+    u8 b = 'a' << n;
+    // One type covers the whole untyped expression, so an integer beside the
+    // char makes the shift an integer one and the char its code point (D6.2).
+    println('a' | (1 << n), " ", 'a' + (4294967296 << n));
+    // A shift that folded is an integer constant and takes `char` from no
+    // rule, so this one is legal (D4.4).
+    println(cast('a' << 1, i32));
+    // The guard reads the type the expression took and reports only where the
+    // constants of the expression fit it. Here the left operand is the integer
+    // `1` and the context is what refuses it, so the message names the constant
+    // and keeps the hint that says what to write instead (D4.1, D4.3, D3.3,
+    // D3.9). Each of these read "'<<' takes an integer left operand" on one
+    // branch of 2026-09-14 and on no other day.
+    char d = 1 << n; //! error: an integer constant does not become char: use cast
+    bool e = 1 << n; //! error: an integer constant does not become bool: write '!= 0'
+    color k = 1 << n; //! error: an integer constant does not become an enum: use cast
+    i32* p = 1 << n; //! error: the initializer expects i32*, not a constant
+    s q = 1 << n; //! error: the initializer expects s, not a constant
+    println(c, b, d, e, k, p, q.x);
+    return 0;
+}
