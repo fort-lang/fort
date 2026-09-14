@@ -195,27 +195,42 @@ without a rewrite.
   past the end, while `git diff` on the host shows a clean edit. Recover with
   `tools/vm run 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"'`, and delete that target's
   object as well, since ninja has already recorded the failed compile.
-  **Write the file from the host, never from a `tools/vm run` command.** T-124 rewrote one line
-  of `src/bootstrap/check.c` with a python heredoc inside the guest; clang then reported
-  `expected identifier or '('` in `<built-in>` and segfaulted, four rebuilds in a row, while
-  `clang -fsyntax-only` on a copy of the same file in the guest's own `/tmp` exited 0 and `tr -d
-  '\0' | wc -c` read the same 124493 bytes on both sides. `touch` in the guest did not clear it.
-  Writing the identical bytes from the host did, at once. So a mutation experiment edits from the
-  host, which is where the next bullet puts it for its own reason.
-  T-125 met the same crash 13 times with the same guest-side heredoc, and found a cheaper cure
-  than dropping the caches: **give the file a new inode**. `rm -f <file> && cp <copy> <file>`
-  cleared it every time, with no `sudo` and no cache drop, so a guest-side mutation loop that
-  must edit in the guest writes each variant that way.
-  **Writing from the host does not avoid it, so the new inode is the cure for both.** T-128 wrote
-  four mutants of `src/bootstrap/check.c` and `src/fort/check.ft` from the host, one at a time,
-  and the first two hit the stale mapping: the file grew by 9 bytes and clang read NUL bytes at
-  line 3693, past the old end, then the file shrank by 43 bytes and clang reported
-  `expected identifier or '('` in `<built-in>`. Both times the guest's own read was clean --
-  `python3` in the guest counted 130438 bytes and 0 NUL bytes, and `clang -fsyntax-only` on a
-  copy in the guest's `/tmp` exited 0 -- and both times `touch` in the guest and a second
-  `tools/vm build` changed nothing. `tools/vm run 'cp <file> /tmp/c && rm -f <file> && cp /tmp/c
-  <file>'` cleared both at once, so **run that one command in the guest after every host edit of
-  a source a build has already compiled**, whichever side wrote it.
+  **The rule is the inode, not the side that writes: rewrite the file so it gets a new one.**
+  `tools/vm run 'cp <file> /tmp/c && rm -f <file> && cp /tmp/c <file>'` in the guest, or
+  `cp <file> /tmp/x && mv /tmp/x <file>` on the host; either clears it at once, with no `sudo`
+  and no cache drop. Run one of them after every edit of a source a build has already compiled,
+  whichever side wrote it. A write that **truncates in place** and keeps the inode --
+  `open(p, 'w')` in python, `>` in the shell, an editor that does not write through a temporary
+  -- can leave the stale page on either side.
+  **The symptom to search for: clang reports `expected identifier or '('` in `<built-in>`, or
+  NUL bytes past the old end of the file, while both sides read the same bytes.** The two reads
+  agreeing while the compiler disagrees is what identifies this and rules out the source, so the
+  first suspicion for a `<built-in>` diagnostic is the shared folder and never the file. Four
+  measurements, in the order they were taken.
+  T-124 rewrote one line of `src/bootstrap/check.c` with a python heredoc **inside the guest**;
+  clang reported `expected identifier or '('` in `<built-in>` and segfaulted, four rebuilds in a
+  row, while `clang -fsyntax-only` on a copy in the guest's own `/tmp` exited 0 and
+  `tr -d '\0' | wc -c` read the same 124493 bytes on both sides. `touch` in the guest did not
+  clear it and a host-side rewrite of the identical bytes did, which T-124 read as "write from
+  the host".
+  T-125 met the same crash 13 times with the same guest-side heredoc and found the new-inode
+  cure, which is cheaper than dropping the caches.
+  T-128 wrote four mutants of `src/bootstrap/check.c` and `src/fort/check.ft` **from the host**,
+  one at a time, and the first two hit the stale mapping and show its two faces: the file grew by
+  9 bytes and clang read NUL bytes at line 3693, past the old end, and then the file shrank by 43
+  bytes and clang reported `expected identifier or '('` in `<built-in>`. Both times the guest's
+  own read was clean -- `python3` in the guest counted 130438 bytes and 0 NUL bytes, and
+  `clang -fsyntax-only` on a copy in the guest's `/tmp` exited 0 -- and both times `touch` in the
+  guest and a second `tools/vm build` changed nothing. The guest `cp`, `rm`, `cp` above cleared
+  both at once.
+  T-130 measured the case that fixes the axis. It rewrote `test/check_conv_test.c` **from the
+  host** with `open(p, 'w').write(...)`, which truncates in place, and clang crashed three times
+  all the same -- twice through ninja, once as a direct `CCACHE_DISABLE=1` command -- while both
+  sides read `md5sum 0591673e...`, 42878 bytes and valid UTF-8, and a `cp` of the file into the
+  guest's own `/tmp` compiled with exit 0. `cp f /tmp/x && mv /tmp/x f` on the host, identical
+  bytes and a new inode, cleared it. So writing from the host is not immunity; it helped T-124
+  because that rewrite replaced the file. A mutation experiment still edits from the host, for
+  the reason the next bullet gives, and it writes each variant through a new inode.
   T-125 also measured the worse face of it.
   An in-place restore inside the guest, followed by a rebuild, left a **compiler that linked and
   ran and was wrong**: `check_conv_test`, `check_extern_test` and `check_const_test` went red on
@@ -231,8 +246,9 @@ without a rewrite.
   lines do: put the restore in `trap 'restore' EXIT INT TERM` so it runs on a signal, compare
   `md5sum` of the restored file with the pristine copy **before** the next iteration and stop on
   a difference, and **never pipe a mutation harness into `head`** -- write the whole output to a
-  file and read the file. Editing from the host, as the bullet above asks, removes the stale page
-  but not this: a host-side loop that dies mid-iteration leaves the same mutant behind.
+  file and read the file. Writing each variant through a new inode, as the bullet above asks,
+  removes the stale page but not this: a loop that dies mid-iteration leaves the same mutant
+  behind, on either side.
   **Do not wait for a red suite to find it.** T-125's tree stayed **green** through the whole
   incident, because the suite that covers the reverted sites is `test/fort` and only the C unit
   tests had been run since. The check that sees it is a count of the thing the branch changed --

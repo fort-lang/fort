@@ -9,6 +9,7 @@
 // in gen_alloc_test.c.
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "gen.h"
@@ -543,6 +544,81 @@ TEST(a_discarded_move_never_reaches_the_emitter, {
     TEST_ASSERT_NONNULL(strstr(gen_said(), "'move' needs an owning operand, not i32"));
 })
 
+// `std.rt.alloc`'s shape, twice: an extern that answers a block, a function
+// that answers it `own`, and a caller that binds it, writes through it and
+// releases it. The second source names `void mut*` where the first names
+// `void*`, and nothing else differs. Each declared name stands on a line of
+// its own, because the overwrite check of item 18 records the column of the
+// name it guards and `void mut*` is four characters wider; with a name on the
+// wider line the two texts would differ in two `fail_overwrite` columns and in
+// nothing else.
+// D3.11, D17.11
+static const char VOID_PTR_ALLOC[] = "extern fn void* own take(u64 n, u64 size);\n"
+                                     "extern fn void drop(void* own p);\n"
+                                     "fn void* own\n"
+                                     "grab(u64 n) {\n"
+                                     "    void* own\n"
+                                     "        p = take(1, n);\n"
+                                     "    return p;\n"
+                                     "}\n"
+                                     "fn i32 main() {\n"
+                                     "    void* own\n"
+                                     "        b = grab(8);\n"
+                                     "    u8 mut@ v = cast(b, u8 mut*)[0..8];\n"
+                                     "    v[0] = 7;\n"
+                                     "    println(v[0]);\n"
+                                     "    drop(move(b));\n"
+                                     "    return 0;\n"
+                                     "}\n";
+
+static const char VOID_MUT_PTR_ALLOC[] = "extern fn void mut* own take(u64 n, u64 size);\n"
+                                         "extern fn void drop(void* own p);\n"
+                                         "fn void mut* own\n"
+                                         "grab(u64 n) {\n"
+                                         "    void mut* own\n"
+                                         "        p = take(1, n);\n"
+                                         "    return p;\n"
+                                         "}\n"
+                                         "fn i32 main() {\n"
+                                         "    void mut* own\n"
+                                         "        b = grab(8);\n"
+                                         "    u8 mut@ v = cast(b, u8 mut*)[0..8];\n"
+                                         "    v[0] = 7;\n"
+                                         "    println(v[0]);\n"
+                                         "    drop(move(b));\n"
+                                         "    return 0;\n"
+                                         "}\n";
+
+TEST(the_allocator_shape_emits_one_text_with_and_without_the_mark, {
+    // `std.rt.alloc` answers `void mut* own` and answered `void* own`. The
+    // retyping is a rule of the type system and reaches no instruction, no
+    // signature and no size, every pointer being one machine word, so the two
+    // modules are one text byte for byte. A stronger argument for it exists --
+    // `grep -- '->mut' src/bootstrap/gen*.c` returns one hit, the emitter's own
+    // synthetic node, so the mark structurally cannot reach the IR -- and an
+    // argument is not a test.
+    // D3.1, D3.11, D19.2
+    TEST_ASSERT_TRUE(strcmp(VOID_PTR_ALLOC, VOID_MUT_PTR_ALLOC) != 0);
+    TEST_ASSERT_TRUE(emit(VOID_PTR_ALLOC));
+    static char plain[32768];
+    TEST_ASSERT_TRUE(strlen(ir()) < sizeof plain);
+    TEST_UNUSED(snprintf(plain, sizeof plain, "%s", ir()));
+    // The three records that carry a type or a source column of the allocator:
+    // the call it makes, and the overwrite check of each `own` binding.
+    static const char TAKE_CALL[] = "  %t1 = call ptr (i64, i64, ...) @take(i64 1, i64 %t0) #3\n";
+    static const char GRAB_CHECK[] =
+        "  call void @\"std.rt.fail_overwrite\"(ptr @.file.0, i32 6, i32 9)\n";
+    static const char MAIN_CHECK[] =
+        "  call void @\"std.rt.fail_overwrite\"(ptr @.file.0, i32 11, i32 9)\n";
+    TEST_ASSERT_EQ_STR(found(TAKE_CALL), TAKE_CALL);
+    TEST_ASSERT_EQ_STR(found(GRAB_CHECK), GRAB_CHECK);
+    TEST_ASSERT_EQ_STR(found(MAIN_CHECK), MAIN_CHECK);
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+    TEST_ASSERT_TRUE(emit(VOID_MUT_PTR_ALLOC));
+    TEST_ASSERT_EQ_STR(ir(), plain);
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
 int main(int argc, char** argv) {
     TEST_INIT("gen_own", argc, argv);
     TEST_RUN(move_of_a_pointer_loads_before_it_stores_null);
@@ -571,6 +647,7 @@ int main(int argc, char** argv) {
     TEST_RUN(a_move_and_a_check_inside_a_loop_are_emitted_once);
     TEST_RUN(the_failure_blocks_of_several_checks_stay_in_ascending_label_order);
     TEST_RUN(a_discarded_move_never_reaches_the_emitter);
+    TEST_RUN(the_allocator_shape_emits_one_text_with_and_without_the_mark);
     gen_done();
     TEST_EXIT();
 }

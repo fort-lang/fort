@@ -1,0 +1,44 @@
+//! fail
+import std.rt;
+
+// std.rt.alloc answers void mut* own (toolchain.md 5.1): the storage is fresh,
+// so the caller owns it and may write it, which is what an allocation is for.
+// A caller that binds the result as void* own throws that mark away, and the
+// monotone drop of D5.4 runs one way, so nothing gets it back for that binding.
+// These are the diagnostics that make the signature real. The count of them is
+// in check_conv.the_runtime_allocator_hands_the_caller_storage_it_may_write,
+// because the harness groups what the compiler reported by (file, line) and a
+// fail test therefore holds the text and the position and never a number.
+// D3.11, D5.4
+string FILE = "006_rt_alloc_keeps_its_mark.ft";
+
+// Writes the whole block. The parameter is void mut*, which is what alloc
+// answers, so a caller that kept the mark writes no cast at the call.
+fn void fill(void mut* p, u64 n) {
+    u8 mut@ bytes = cast(p, u8 mut*)[0..n];
+    for (u64 mut i = 0; i < n; i++) {
+        bytes[i] = 1;
+    }
+}
+
+// A result is the same rule as an argument: the drop runs on the way in and
+// never on the way out.
+fn void mut* hand_back(void* p) {
+    return p;   //! error: the return value expects void mut*, not void*
+}
+
+fn i32 main() {
+    // The binding that keeps the mark reaches the writing callee with no cast
+    // and no diagnostic. It stands here so that the refusals below are about
+    // the mark and not about the call.
+    void mut* own writable = rt.alloc(1, 8, FILE.ptr, 1, 1);
+    fill(writable, 8);
+    rt.free(move(writable));
+
+    // The binding that drops the mark reaches nothing that writes.
+    void* own plain = rt.alloc(1, 8, FILE.ptr, 1, 1);
+    fill(plain, 8);   //! error: the argument expects void mut*, not void* own
+    void mut* back = plain;   //! error: the initializer expects void mut*, not void* own
+    rt.free(move(plain));
+    return 0;
+}

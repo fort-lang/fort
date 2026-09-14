@@ -536,6 +536,44 @@ TEST(an_immutable_buffer_is_refused_at_every_libc_entry_that_writes, {
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)0);
 })
 
+TEST(the_runtime_allocator_hands_the_caller_storage_it_may_write, {
+    // `std.rt.alloc` answers `void mut* own` (`toolchain.md` 5.1). The real
+    // `std/rt.ft` is read here rather than a copy of its text, so the
+    // assertion cannot agree with a signature the runtime no longer has. A
+    // callee that writes the block takes it as it comes: no cast, and in
+    // particular no cast that adds `mut`.
+    // D3.11, D5.4
+    TEST_ASSERT_TRUE(
+        check_src_with_library("import std.rt;\n"
+                               "fn void fill(void mut* p) { }\n"
+                               "fn void read_only(void* p) { }\n"
+                               "fn i32 main() {\n"
+                               "    void mut* own p = rt.alloc(1, 8, \"m\".ptr, 1, 1);\n"
+                               "    fill(p);\n"
+                               "    read_only(p);\n"
+                               "    rt.free(move(p));\n"
+                               "    return 0;\n"
+                               "}\n"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)0);
+    TEST_ASSERT_EQ_STR(decl_type("p"), "void mut* own");
+    // The monotone drop runs one way, so a caller that binds the result as
+    // `void* own` throws the mark away and cannot get it back. That is what
+    // the runtime did to `libc.calloc`'s result until this signature changed.
+    // The count is what the corpus cannot hold: `judge_fail` groups by
+    // (file, line).
+    // D5.4
+    TEST_ASSERT_FALSE(check_src_with_library("import std.rt;\n"
+                                             "fn void fill(void mut* p) { }\n"
+                                             "fn i32 main() {\n"
+                                             "    void* own p = rt.alloc(1, 8, \"m\".ptr, 1, 1);\n"
+                                             "    fill(p);\n"
+                                             "    rt.free(move(p));\n"
+                                             "    return 0;\n"
+                                             "}\n"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_TRUE(said("the argument expects void mut*, not void* own"));
+})
+
 TEST(a_fort_rt_name_keeps_its_own_signature, {
     // No table holds it: a C symbol of that name is an ordinary extern,
     // whatever it is called.
@@ -777,6 +815,7 @@ int main(int argc, char** argv) {
     TEST_RUN(main_is_reserved_like_fort_entry);
     TEST_RUN(a_declaration_of_a_libc_symbol_is_held_against_the_librarys);
     TEST_RUN(an_immutable_buffer_is_refused_at_every_libc_entry_that_writes);
+    TEST_RUN(the_runtime_allocator_hands_the_caller_storage_it_may_write);
     TEST_RUN(a_fort_rt_name_keeps_its_own_signature);
     TEST_RUN(a_noreturn_function_pointer_keeps_its_type);
     TEST_RUN(an_importer_is_checked_although_its_import_did_not_parse);

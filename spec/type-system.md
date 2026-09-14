@@ -435,8 +435,8 @@ i32@ h = vp[0..1];                   // error: cannot take a span of a void*
 i32 mut* back = cast(vp, i32 mut*);
 u64 addr = cast(vp, u64);
 bool isnull = vp == null;
-void* own raw = libc.malloc(16);     // an own rvalue lands (D17.13); del(raw) frees it
-void* peek = raw;                    // ok: lends
+void mut* own raw = libc.malloc(16); // an own rvalue lands; malloc answers a writable block
+void* peek = raw;                    // ok: lends, and drops the mut on the way (D5.4)
 u8 mut* own bytes = cast(move(raw), u8 mut* own);   // ok: the target says own, so raw is moved
 u8 mut* own twice = cast(raw, u8 mut* own);         // error: copying own lvalue 'raw' needs move
 ```

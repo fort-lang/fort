@@ -319,7 +319,7 @@ free(cast(alias, void*));                       // error: a view cannot pass to 
 | `const T*`                     | `T*`                                      |
 | `void*`, `const void*`         | `void*`                                   |
 | `T*` result the caller must free | `T mut* own` (D17.13)                   |
-| `void*` from an allocator      | `void* own`, never `mut` (D17.13)         |
+| `void*` from an allocator      | `void mut* own` (D3.11, D17.13)           |
 | `T*` parameter that C frees    | `T* own` or `void* own` (D17.13)          |
 | `R (*)(A, B)`                  | `fn R(A, B)`                              |
 | C `enum`                       | `i32`, or a fort enum (passed as `i32`)   |

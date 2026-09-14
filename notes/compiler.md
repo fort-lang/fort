@@ -374,6 +374,20 @@ came here.
   struct of 8 or 16 bytes until T-019, so a mutation that dropped `sret(%T)` or shortened a
   `memcpy` only for a struct wider than two words passed the entire gate. An assertion about an
   aggregate convention covers one size unless a second size is written down.
+- **A check record carries the source column of the name or token it guards, so widening a type
+  spelling changes the emitted IR.** The emitter writes the position into the `fail_*` call it
+  builds: `gen_var_decl` reports the overwrite check at the declaration's `name_loc`, and a
+  bounds or span record carries the column of the expression it guards. A declaration retyped
+  from `void*` to `void mut*` therefore moves its record four columns right, with no other
+  change anywhere in the module. T-086 met it on a `fail_span` record and T-130 on a
+  `fail_overwrite` one, and both worked around it in a test by putting the declared name on a
+  line of its own. Measured on T-130's tree: with the comments held equal, retyping
+  `std/rt.ft:629` alone makes one line of a 2629-line `.ll` differ,
+  `fail_overwrite(ptr @.file.0, i32 629, i32 15)` against `(... i32 629, i32 19)`. Two
+  consequences. A ticket that claims "no IR change" for a type-system edit must say "no
+  instruction, no signature and no size" and then count the column constants it moved, because
+  the unqualified claim is false. And a doc comment moves the **line** constant of every record
+  below it in the file: six comment lines added above `alloc` moved 9 records in `std.rt`.
 
 ## 7. The runtime and the standard library
 

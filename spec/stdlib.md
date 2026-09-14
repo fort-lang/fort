@@ -989,6 +989,13 @@ importers inside the library, and everything else in it is an implementation det
 Its names are mangled like any module's (`std.rt.flush`, D9.7); the compiler knows them, because
 a builtin lowers to a call of one (D12.2), and calls them like any other fort function.
 
+Its allocation entry point answers `void mut* own`. `toolchain.md` 5.1 is the list of entry
+points the compiler holds (D12.2) and it declares the signature; `alloc` carries out the mark
+`libc.calloc` gives it (2.2). A caller that calls `alloc` directly therefore owns storage it may
+write, and casts to a typed pointer to write through it, a cast that adds no `mut` (D3.11,
+D3.14). A caller that only reads drops the mark on the way (D5.4), which is also how every
+result reaches `free`, whose parameter is `void* own`.
+
 ### 2.12 `std.rt_float`
 
 The float text of D11.7, to a descriptor or to a `str_buf`.

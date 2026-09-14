@@ -398,6 +398,26 @@ static const char* row_mismatch(rt_entry_t e, const char* name, const type_t* si
     return "";
 }
 
+// The canonical spelling of `t`, valid until the next call. The rows above are
+// about IR forms; the two tests below are about what `std/rt.ft` declares, so
+// they read the fort type itself.
+// D5.3
+static const char* type_spelling(const type_t* t) {
+    static sb_t out;
+    static bool ready = false;
+    if (!ready) {
+        sb_init(&out);
+        ready = true;
+    }
+    sb_clear(&out);
+    if (t == NULL) {
+        sb_append(&out, "<null>");
+    } else {
+        type_to_str(t, &out);
+    }
+    return sb_cstr(&out);
+}
+
 TEST(every_row_is_the_fort_signature_of_std_rt, {
     // The one place the rows are held against the thing that defines them.
     // Nothing below the compiler does it: a call site's argument types are
@@ -435,6 +455,55 @@ TEST(every_row_is_the_fort_signature_of_std_rt, {
     // D18.1
     TEST_ASSERT_EQ_UINT64(checked, (uint64_t)RT_COUNT - 2);
     rt_close();
+})
+
+TEST(the_allocator_answers_storage_the_caller_owns_and_may_write, {
+    // `alloc` answers `void mut* own`. The storage is fresh, so the caller
+    // owns it and may write it, and that is what an allocation is for; the
+    // mark comes from `libc.calloc`, which says the same of what C returns,
+    // and `alloc` carries it out rather than dropping it. Without it a caller
+    // of this entry point allocates memory it may never write, and the only
+    // way back is a cast that adds a `mut`. `toolchain.md` 5.1 fixes the
+    // signature, that section being the list of entry points the compiler
+    // holds.
+    // D3.11, D5.4, D12.2
+    const module_t* m = rt_open();
+    TEST_ASSERT_NONNULL(m);
+    TEST_ASSERT_EQ_STR(sb_cstr(&rt_diags), "");
+    const ast_node_t* alloc = rt_decl(m, str_from_cstr("alloc"));
+    TEST_ASSERT_NONNULL(alloc);
+    TEST_ASSERT_NONNULL(alloc->sym);
+    TEST_ASSERT_EQ_STR(type_spelling(alloc->sym->type->elem), "void mut* own");
+    // `free` takes the `void* own` every result of `alloc` reaches by the
+    // monotone drop, so the pair still fits and the drop runs one way.
+    // D5.4
+    const ast_node_t* release = rt_decl(m, str_from_cstr("free"));
+    TEST_ASSERT_NONNULL(release);
+    TEST_ASSERT_NONNULL(release->sym);
+    TEST_ASSERT_EQ_UINT64((uint64_t)release->sym->type->nparams, (uint64_t)1);
+    TEST_ASSERT_EQ_STR(type_spelling(release->sym->type->params[0]), "void* own");
+    // The mark costs nothing at the boundary: the result the emitter writes on
+    // the call of item 17 is `ptr`, which is the row the table already holds.
+    // D9.9, D19.2
+    TEST_ASSERT_EQ_STR(emitted_result(alloc->sym->type->elem), "ptr");
+    TEST_ASSERT_EQ_STR(ir_result_text(rt_entry_result(RT_ALLOC)), "ptr");
+    rt_close();
+})
+
+TEST(a_void_pointer_takes_one_ir_form_whatever_it_is_marked, {
+    // Every pointer is one machine word, so `mut` and `own` on a `void*` are
+    // rules of the type system and reach no IR type. The four spellings the
+    // runtime boundary meets take the one form, which is why the retyping of
+    // `alloc` changed no emitted text.
+    // D3.11, D19.2
+    types_begin();
+    TEST_ASSERT_EQ_STR(form_of(type_voidptr(&types, false, false)), "ptr");
+    TEST_ASSERT_EQ_STR(form_of(type_voidptr(&types, false, true)), "ptr");
+    TEST_ASSERT_EQ_STR(form_of(type_voidptr(&types, true, false)), "ptr");
+    TEST_ASSERT_EQ_STR(form_of(type_voidptr(&types, true, true)), "ptr");
+    TEST_ASSERT_EQ_STR(emitted_param(type_voidptr(&types, true, true)), "ptr");
+    TEST_ASSERT_EQ_STR(emitted_result(type_voidptr(&types, true, true)), "ptr");
+    types_end();
 })
 
 TEST(std_rt_declares_no_runtime_c_symbol, {
@@ -563,6 +632,8 @@ int main(int argc, char** argv) {
     TEST_RUN(the_noreturn_entry_points_are_the_ones_section_5_1_names);
     TEST_RUN(the_parameter_list_of_a_row_is_the_fort_signature_of_section_5_1);
     TEST_RUN(every_row_is_the_fort_signature_of_std_rt);
+    TEST_RUN(the_allocator_answers_storage_the_caller_owns_and_may_write);
+    TEST_RUN(a_void_pointer_takes_one_ir_form_whatever_it_is_marked);
     TEST_RUN(std_rt_declares_no_runtime_c_symbol);
     TEST_RUN(std_rt_defines_the_float_printers_nowhere);
     TEST_RUN(a_fort_type_takes_the_ir_form_of_its_c_counterpart);

@@ -454,18 +454,24 @@ struct enum_member { i32 value; char* name; }
 // at `loc`. `free` releases what `alloc` returned; a null `p` is a no-op.
 // Ownership (D17) is erased: the runtime sees plain pointers, and the compiler
 // zeroes a `del` or `move` operand itself (section 6, items 17 and 18). The
-// result is `void* own`, while `libc.malloc`, which `alloc` calls through
-// `calloc`, answers `void mut* own`: storage of no type the caller may write
-// (D3.11, D17.13, `stdlib.md` 2.2). `alloc` drops that mark, so a caller that
-// reaches this entry point directly holds a `void* own` and casts to a typed
-// pointer to write through it, which adoption does anyway (D3.14, D17.3).
+// result is `void mut* own`, the type `libc.calloc` answers with: storage of no
+// type that the caller owns and may write (D3.11, `stdlib.md` 2.2). `alloc`
+// carries that mark out rather than dropping it, so a caller that reaches this
+// entry point directly casts to a typed pointer to write through it -- which
+// adoption does anyway (D3.14, D17.3) -- and the cast adds no `mut`. `free`
+// takes `void* own`, which every result of `alloc` reaches by the monotone drop
+// of D5.4. The mark reaches no instruction, no signature and no size: every
+// pointer is one machine word, so the IR form of item 7 is `ptr` either way
+// (D3.11). It does move one source column, the declaration of the local that
+// holds `calloc`'s result being four characters further right, which the
+// overwrite check of section 6 item 18 records.
 // The two are not called `new` and `del`: `new` is a keyword (D2.4), and `del`
 // is a universe function that a module-level declaration of that name shadows
 // (D12.2, D7.9) -- inside `std.rt`, which releases its own buffers and its argv
 // storage with `del`, that would cost the module the operation it needs. A name
 // is free to take when the module implements the builtin rather than using it,
 // which is why `panic` below is `panic`.
-fn void* own alloc(u64 elem_size, u64 count, char* file, u32 line, u32 col);
+fn void mut* own alloc(u64 elem_size, u64 count, char* file, u32 line, u32 col);
 fn void free(void* own p);
 
 // Strings (D3.7). `str_eq` is true when the two strings have the same length and

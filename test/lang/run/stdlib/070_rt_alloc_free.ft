@@ -22,6 +22,8 @@ import std.rt;
 string FILE = "070_rt_alloc_free.ft";
 
 // Answers whether all n bytes at p are zero. D10.2 promises that of both.
+// The parameter is void*, which alloc's void mut* own result reaches by the
+// monotone drop of D5.4, so a reader writes no cast.
 fn bool all_zero(void* p, u64 n) {
     u8@ bytes = cast(p, u8*)[0..n];
     for (u64 mut i = 0; i < n; i++) {
@@ -32,29 +34,41 @@ fn bool all_zero(void* p, u64 n) {
     return true;
 }
 
+// Writes one byte of a block alloc answered with. The parameter is void mut*,
+// which is what alloc answers: a callee that writes takes the result as it
+// comes. A caller that bound the result as void* own could not call this at
+// all, because the drop of D5.4 runs one way only (D3.11, toolchain.md 5.1).
+fn void poke(void mut* p, u64 i, u8 v) {
+    u8 mut@ bytes = cast(p, u8 mut*)[0..i + 1];
+    bytes[i] = v;
+}
+
 fn i32 main() {
     u64 n = 64;
     u8 mut@ own from_new = new(u8, n);
-    void* own from_alloc = rt.alloc(1, n, FILE.ptr, 1, 1);
+    void mut* own from_alloc = rt.alloc(1, n, FILE.ptr, 1, 1);
     println(from_new.ptr != null, " ", all_zero(cast(from_new.ptr, void*), n));
     println(from_alloc != null, " ", all_zero(from_alloc, n));
 
     // This writes the first and the last byte of each block. A count used as
     // a size, or a size used as a count, gives out a block that is too short,
-    // and the last byte is where that shows.
+    // and the last byte is where that shows. The two writes into the alloc
+    // block go through poke, so the write crosses a void mut* parameter, and
+    // the cast that makes a byte view of the block adds no mut: alloc answered
+    // with the mark already.
     u8 mut@ alloc_bytes = cast(from_alloc, u8 mut*)[0..n];
     from_new[0] = 7;
     from_new[n - 1] = 9;
-    alloc_bytes[0] = 7;
-    alloc_bytes[n - 1] = 9;
+    poke(from_alloc, 0, 7);
+    poke(from_alloc, n - 1, 9);
     println(from_new[0] == alloc_bytes[0], " ", from_new[n - 1] == alloc_bytes[n - 1]);
 
     // new(T, 0) allocates and does not answer null (D10.2). alloc gets there
     // by asking for one byte when the product is zero. An element size of zero
     // reaches the same line from the other side.
     i32@ own empty_new = new(i32, 0);
-    void* own empty_alloc = rt.alloc(4, 0, FILE.ptr, 1, 1);
-    void* own zero_elem = rt.alloc(0, 100, FILE.ptr, 1, 1);
+    void mut* own empty_alloc = rt.alloc(4, 0, FILE.ptr, 1, 1);
+    void mut* own zero_elem = rt.alloc(0, 100, FILE.ptr, 1, 1);
     println(empty_new.ptr != null, " ", empty_alloc != null, " ", empty_new.len);
     println(zero_elem != null, " ", all_zero(zero_elem, 1));
 
@@ -62,7 +76,7 @@ fn i32 main() {
     // large block by asking the kernel for fresh pages. That is a different
     // path in the C library from the small block above.
     u64 big = 1048576;
-    void* own large = rt.alloc(8, big / 8, FILE.ptr, 1, 1);
+    void mut* own large = rt.alloc(8, big / 8, FILE.ptr, 1, 1);
     println(large != null, " ", all_zero(large, big));
 
     // free releases what alloc answered with. A null p does nothing, and del
