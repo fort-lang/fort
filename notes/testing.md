@@ -534,15 +534,34 @@ bullet at a time and without a rewrite.
   number reads as an answer. Use the command above, and check what it prints against the
   constants you know you touched.
   **A line can move a file from one bucket of `diff_ast.sh` to another, and the two constants
-  then move in opposite directions** (T-127). The three buckets are read off the message stage1
-  prints, and stage1 stops at the first construct it refuses on a line. Every `?:` of
-  `test/lang/fail/constants/010` stood to the right of a float literal, so the lexer reported the
-  float and the parser never reached the `?`, and the file counted under `FLOAT_FILES`. One added
-  line, `println((n > 0 ? 'a' : 'b') == 1.5);`, puts the `?` at column 20 and the float at column
-  35. stage1 now prints `not supported by the bootstrap compiler: ?:` for the file, so
-  `FORM_FILES` went 15 to 16 and `FLOAT_FILES` 68 to 67, on one file and with no file added. Run
-  the script twice: it reports one bucket at a time, `NESTED_FILES` first, then `FORM_FILES`,
-  then `FLOAT_FILES`, so the second failure is invisible until the first is fixed.
+  then move in opposite directions** (T-127). The bucket is not the first construct stage1
+  refuses. stage1 reports every one of them, and `diff_ast.sh` greps the whole of stage1's
+  stderr in one fixed order -- `NESTED_MESSAGES`, then `FORM_MESSAGES`, then `FLOAT_MESSAGES` --
+  and the first grep that matches takes the file. So a file that draws two messages counts in the
+  higher bucket, wherever the two constructs stand in it.
+  **A `?:` with a float arm draws no `?:` message at all**, which is what moved
+  `test/lang/fail/constants/010`. `parse_ternary` (`src/bootstrap/parser.c:1250`) calls
+  `unsupported(p, loc, "?:")` only after both arms parse, and `parse_primary`
+  (`parser.c:1023`) returns `NULL` for a float literal, so the `n->b == NULL || n->c == NULL`
+  test above it returns first. Measured on `main`: that file held four `?:`, every one with a
+  float arm, and `build/debug/fort --ast` printed 12 `float literals` messages and no `?:`.
+  The column plays no part. `println(n > 0 ? 1 : 2.5);` stood in that file with the `?` at
+  column 19 and `2.5` at column 25, and stage1 still reported only the float, at `20:25`.
+  T-127 added `println((n > 0 ? 'a' : 'b') == 1.5);`, whose two arms are char literals and parse,
+  so stage1 reports `?:` at `48:20` beside 13 `float literals`, the `FORM_MESSAGES` grep matches
+  first, and `FORM_FILES` went 15 to 16 while `FLOAT_FILES` went 68 to 67, on one file and with
+  no file added. To predict the bucket, run `fort --ast <file>` and read every message it prints,
+  not the source. Run the script twice as well: it reports one bucket at a time, `NESTED_FILES`
+  first, then `FORM_FILES`, then `FLOAT_FILES`, so the second failure is invisible until the
+  first is fixed.
+  **Run a `test/fort` binary from a scratch directory and never from the top of the worktree**
+  (T-127). `test/fort/support/check_env.ft` and `modules_env.ft` build their sandbox from a
+  relative path, `sandbox<n>`, so they create it in the current directory, and `close` deletes the
+  session and not the directory. One hand run of `check_test.bin` from the worktree root left 196
+  `sandbox<n>/main.ft` files behind, and the next `diff_ir.sh` read
+  `found 1132 .ft files, expected exactly 936` and exited 1. `run_tests.py` gives each test its own
+  directory, so the gate never sees this; a hand run is where it bites. `cd` to a directory under
+  `build/` first, and `git status --short` before you commit.
   **A search root moves a second equality, and a new file may move none.** The two rules are the
   same rule read from each end. `-I src`, which T-063 added to `diff_check.sh` and to
   `diff_ir.sh` so that the language server resolves, took `CLEAN_FILES` from 458 to 472 and
@@ -582,6 +601,15 @@ bullet at a time and without a rewrite.
   nothing red: `println(n > 0 ? 4294967296 : 1)` was refused before it and prints 4294967296
   after it. A ticket that changes the default type, the operand rules or the arms of a conditional
   writes the assertion itself, because no differential will.
+  **The same holds for `diff_ir.sh`'s `opt -passes=verify`, which T-127 added below** (T-127).
+  The verify stands inside the loop that skips the files stage1 refuses, so neither module of such
+  a file reaches LLVM there. The family is the one this entry names, widened by the other two
+  buckets: a `?:`, a `do`-`while`, a float literal or a nested array or span level. Counted on
+  2026-09-14: 409 of the 936 `.ft` files are skipped, 84 of them are programs stage2 compiles into
+  a module, and all 84 stand under `test/lang`, where `lang-stage2` passes `--verify-ir` and reads
+  them. So the gap is empty today and it is not closed: the first such program under `test/fort`,
+  `test/tty` or `src/` would have its stage2 module verified by nothing. `CMakeLists.txt` says
+  this beside `lang-stage2`, which T-043 gave `--verify-ir` for exactly this reason.
 - **`diff_ir.sh` asks a second and absolute question of each module: does LLVM read it** (T-127).
   The differential half says the two emitters agree, and two modules that agree may both be
   wrong. So the script runs `opt -passes=verify` over each module before it compares them, and
@@ -595,21 +623,49 @@ bullet at a time and without a rewrite.
   `src/fort/main.ft`. `fort-modules` is the only run of `test/fort` and it uses stage1, and there
   is no stage2 twin of it, so 176 of those 177 had their stage2 module verified by nothing;
   `src/fort/main.ft` is the exception, which `tools/fixpoint.sh` verifies under both compilers in
-  both build modes. The property now follows the file and not the directory.
+  both build modes. What that buys is 176 files, and it is not "every program in the repository":
+  the script reads only the files stage1 compiles, and the bullet above gives the 409 it skips and
+  the 84 of those that `lang-stage2` alone verifies.
+  **Both guards of the verify were written wrong first, and both are now mutation-measured**
+  (T-127, the review round). The `verified` equality read `status -eq 0 && verified -ne
+  compared * 2`, and every path that skips a verify sets `status` to 1 on the way, so it could
+  never fire; it now holds `verified` against `PROGRAM_FILES * 2` whatever `status` is. A stage1
+  module the verifier refused used to `continue`, so stage2's module was never emitted and one
+  stage1 defect hid every stage2 defect on the same file. The A/B, with an `opt` wrapper that
+  refuses two calls in a row: the old script printed two refusals, both `stage1`, on two different
+  files and no `verified` line; the new one prints `stage1` and `stage2` for one file and
+  `verified 1052 modules, expected 1054`. **Write the equality against the constant, not against a
+  counter the same run computes.**
   The mutant is T-128's own defect: `git show c2ad3e4 -- src/` reverse applied to both compilers
   leaves the modules identical and turns `diff-ir` red on
   `test/lang/run/constants/014`, with `'%t8' defined with type 'i32' but expected 'i64'`.
 - **A verifier reads only the shapes the corpus spells, so a generated corpus stands beside the
   measured one** (T-127). T-127 lived because no program of its shape existed, not because no
   `opt` ran. `tools/sweep_untyped.sh` is that generated corpus: it builds one program per row of
-  `tools/sweep_untyped.txt` and puts each in one of five classes -- REPORTED, RAN with its
+  `tools/sweep_untyped.txt` and puts each in one of six classes -- REPORTED (the checker refused
+  the row and named a reason), FRAME (it refused above the row and never read it), RAN with its
   output, TRAP with its status, CC-FAIL (the checker passed it and clang refused the module) and
   SILENT (it ran and printed nothing). CC-FAIL and SILENT fail the run, and every row carries the
   class it must reach under stage1 and under stage2, so a row that changes class or answer fails
-  it as well. The 152 rows cover the four routes of `check_operands`, every context D4.1 names,
+  it as well. The 163 rows cover the four routes of `check_operands`, every context D4.1 names,
   the two positions it says are not contexts, every operator family of D6.2 with an untyped
-  operand on each side, the return position and the float clause of D4.5. Both compilers read
-  `0 refused by clang, 0 silent`. Nothing in the gate runs it, because a generated corpus is a
+  operand on each side, the three run-time errors of D6.13 at both widths, both ends of D4.4's
+  exact range, the return position and the float clause of D4.5. On 2026-09-14 stage1 reads
+  `59 reported, 16 refused at the frame, 77 ran, 11 trapped, 0 refused by clang, 0 silent` and
+  stage2 reads `64 reported, 0 refused at the frame, 88 ran, 11 trapped, 0 refused by clang,
+  0 silent`.
+  **A generated corpus needs three guards a hand-written test gets for free** (T-127, the review
+  round). Its first version had none of them. (a) **Hold the compiler to the two statuses of
+  D14.1**, 0 and 1, and require an `error:` line with a refusal: reading any non-zero status as a
+  diagnostic let a compiler that segfaults on every row pass 72 of 152 rows and print
+  `152 reported, 0 refused by clang, 0 silent`. The classes BAD-STATUS and NO-DIAGNOSTIC name the
+  two faults and no row may expect either. (b) **Make the list declare its own length**, here
+  `!rows 163`, and hold it as an equality, or a deleted row passes in silence. Check the row shape
+  too: a row cut down to its two class columns parsed with `body=REPORTED` and matched itself.
+  (c) **Give a refusal above the row its own class.** stage1 stops at `f64 d = zf(0.5);`, the line
+  the float frame writes above the row, so the 16 rows of section E read FRAME and a reader does
+  not count 16 refusals as 16 measurements.
+  Nothing in the gate runs it, because a generated corpus is a
   question a ticket asks and not a rule the project keeps: it costs 8.5 s under stage1 and
   21.2 s under stage2, and a ticket that touches constants, the default type or the operand
   rules runs it by hand.
