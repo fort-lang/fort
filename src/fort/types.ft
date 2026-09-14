@@ -891,6 +891,29 @@ fn bool type_cast_adds_mut(node* dst, node* src) {
     return type_cast_adds_mut(dst->elem, src->elem);
 }
 
+/// `t` with every `mut` cleared, at every level a mark stands on. A function
+/// type comes back as it is, because the marks of its parameters and of its
+/// result are part of its identity. The checker asks whether a refused cast
+/// would be allowed over this type, which is how it tells a cast refused for
+/// the mark from one refused for the element type as well.
+/// D3.10, D3.14
+fn node* type_without_mut(table mut* tt, node* t) {
+    if (t->kind == type_kind.k_ptr) {
+        return type_ptr(tt, type_without_mut(tt, t->elem), t->is_own, false);
+    }
+    if (t->kind == type_kind.k_voidptr) {
+        return type_voidptr(tt, t->is_own, false);
+    }
+    if (t->kind == type_kind.k_span) {
+        return type_span(tt, type_without_mut(tt, t->elem), t->is_own, false);
+    }
+    if (t->kind == type_kind.k_array) {
+        // D5.2: the array holds no mark of its own
+        return type_array(tt, type_without_mut(tt, t->elem), t->len);
+    }
+    return t;
+}
+
 /// The cast matrix (type-system.md 9.2) on types alone: the rvalue, lvalue and
 /// `move` rules are the checker's, and so is the refusal of a binding-level `mut`
 /// in a cast target.

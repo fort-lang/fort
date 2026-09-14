@@ -643,6 +643,23 @@ bool type_cast_adds_mut(const type_t* dst, const type_t* src) {
     return type_cast_adds_mut(dst->elem, src->elem);
 }
 
+// D3.10, D3.14
+const type_t* type_without_mut(type_table_t* tt, const type_t* t) {
+    switch (t->kind) {
+    case TYPE_PTR:
+        return type_ptr(tt, type_without_mut(tt, t->elem), t->own, false);
+    case TYPE_VOIDPTR:
+        return type_voidptr(tt, t->own, false);
+    case TYPE_SPAN:
+        return type_span(tt, type_without_mut(tt, t->elem), t->own, false);
+    case TYPE_ARRAY:
+        // D5.2: the array holds no mark of its own
+        return type_array(tt, type_without_mut(tt, t->elem), t->len);
+    default:
+        return t;
+    }
+}
+
 bool type_cast_allowed(const type_t* dst, const type_t* src) {
     if (dst->kind == TYPE_ERROR || src->kind == TYPE_ERROR) {
         return true;

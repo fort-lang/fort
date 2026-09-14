@@ -218,6 +218,14 @@ bool type_cast_allowed(const type_t* dst, const type_t* src);
 /// D3.14
 bool type_cast_adds_mut(const type_t* dst, const type_t* src);
 
+/// `t` with every `mut` cleared, at every level a mark stands on. A function
+/// type comes back as it is, because the marks of its parameters and of its
+/// result are part of its identity. The checker asks whether a refused cast
+/// would be allowed over this type, which is how it tells a cast refused for
+/// the mark from one refused for the element type as well.
+/// D3.10, D3.14
+const type_t* type_without_mut(type_table_t* tt, const type_t* t);
+
 // ---- sizes and layout ------------------------------------------------------------
 
 /// Whether the size of `t` fits the largest object the compiler admits, 2^63 - 1

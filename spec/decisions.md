@@ -303,9 +303,8 @@ Sections:
   outermost position of a cast target is an error: a cast result has no binding); a span to a span
   of the same element type whose marks differ only in mutability, dropped at any level (the drop
   reaches every level, which the implicit conversion does not; adding is refused by the rule
-  below); any
-  cast that only drops
-  mutability or ownership, at any level (**not** a no-op: D5.4 and D17.4 cover the drop at a level
+  below); any cast that only drops mutability or ownership, at any level (**not** a no-op: D5.4
+  and D17.4 cover the drop at a level
   `k` only when every level between 1 and `k - 1` is immutable in the target, and the cast alone
   reaches the rest. `void mut* mut@` converts to `void*@` and to `void mut*@`, and a cast alone
   takes it to `void* mut@`); adding `own` to a pointer or span (adoption, D17.3); identity. The
@@ -1719,12 +1718,15 @@ says ownership is "by convention", this section supersedes it.
   legal, and D10.2 rejects that one. Standard-library functions that allocate
   return `own` (D13.5). `cast` may add `own` to a pointer or span, adopting memory that came from C
   (`cast(p, u8 mut* own)` for a `void mut*` from an extern that does not say `own`), and may drop
-  it; the target type of a cast decides (D3.14). Adoption is the one unsafe mark a cast adds, since
-  T-085 took `mut` off that list: the source of the example says `void mut*`, and a source that
-  says `void*` reaches no `mut` target at all. Span
+  it; the target type of a cast decides (D3.14). Adoption is the one unsafe mark a cast adds: the
+  source of the example says `void mut*`, and a source that says `void*` reaches no `mut` target
+  at all, because a cast never adds `mut`. Span
   expressions (`buf[..]`, `buf[lo..hi]`) and `.ptr` always yield views, as do `&`, literals and the
   runtime's `args`.
-- history: Amended 2026-09-14 (T-135): `new` marked every position of `T` writable, so `new(node*,
+- history: Amended 2026-09-14 (T-085): the adoption clause called itself "the same unsafe escape
+  as adding `mut`" and gave a `void*` as the source of its example. D3.14 no longer lets a cast add
+  `mut`, so adoption is the only unsafe mark a cast adds and the example says `void mut*`.
+  Amended 2026-09-14 (T-135): `new` marked every position of `T` writable, so `new(node*,
   n)` was a `node mut* mut@ own` and `T` could spell no `mut` at all. `new(void*)` reads `void*
   mut* own` again, as it did before T-086, and the type T-086 gave it is now spelled `new(void
   mut*)`. Amended 2026-09-14 (T-086): `new(void*)` yielded `void* mut* own`, because the `void`

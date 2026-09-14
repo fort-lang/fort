@@ -96,12 +96,21 @@ static uint32_t scalar_types(tenv_t* e, const type_t** types, scalar_class_t* cl
 // identity, so a property that never sees one cannot tell whether a conversion
 // respects them.
 // D3.10
-enum { SAMPLES_MAX = 32 };
+enum { SAMPLES_MAX = 35 };
 
 // The ordered pairs of that table whose cast would add a mark, read off the
 // failure of `no_conversion_and_no_cast_adds_mut` below. A ticket that adds a
 // spelling to the table reads the new number there and writes it here.
-enum { MUT_ADDING_PAIRS = 225 };
+//
+// `u8 mut@`, `node mut*@` and `node mut*[2]` are in the table for the two arms
+// of the rule that the other 32 spellings never reached: a `string` source,
+// whose bytes carry no level behind them, and a `mut` inside a fixed array. The
+// review that asked for them measured both arms at 0 of the pairs the table
+// held before them, so a mutation in either left the count and the gate
+// untouched. The array arm holds 34 of the 336 today and the `string` arm 2.
+// `node mut*@` is the one that reaches the `string` arm, because a target whose
+// own level is mutable is answered by the level before it.
+enum { MUT_ADDING_PAIRS = 336 };
 
 static uint32_t sample_types(tenv_t* e, const type_t** types) {
     static const char* const SPELLINGS[] = {
@@ -122,6 +131,9 @@ static uint32_t sample_types(tenv_t* e, const type_t** types) {
         "node* own[4]",
         "i32@",
         "i32 mut@",
+        "u8 mut@",
+        "node mut*@",
+        "node mut*[2]",
         "i32[4]",
         "point",
         "string",
@@ -763,7 +775,7 @@ TEST(no_conversion_and_no_cast_adds_mut, {
     tenv_t e;
     tenv_init(&e);
     // The rule is a universal one, so the test is a loop over the sample table
-    // and not a list of cases: 32 spellings, 1024 ordered pairs, every one of
+    // and not a list of cases: 35 spellings, 1225 ordered pairs, every one of
     // them asked whether it adds a mark and then whether the two answers that
     // matter agree with that.
     // D3.14, D5.4
@@ -791,6 +803,15 @@ TEST(no_conversion_and_no_cast_adds_mut, {
             }
         }
     }
+    // What this proves and what it does not. The two implications are one
+    // direction: `adds mut` implies neither casts nor converts. An over-refusing
+    // rule satisfies them and bakes its own number into the count below, so
+    // neither says the rule refuses no more than it should. The converse over
+    // the same table is `every_implicit_conversion_is_also_a_cast`, which goes
+    // red the moment a pair that converts stops casting, and the pairs that cast
+    // without converting are named one by one in `a_cast_never_adds_mut` and in
+    // `casts_of_spans_change_only_the_marks`.
+    //
     // The count holds the table to the rule. Two implications over a table that
     // had stopped naming a mutable type would both hold and prove nothing, and
     // the table above is shared with four other tests, so it moves.

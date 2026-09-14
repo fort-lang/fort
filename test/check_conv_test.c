@@ -206,11 +206,20 @@ TEST(a_cast_never_changes_a_span_element_type, {
     // another reason carries no tail, so the tail says which rule refused.
     TEST_ASSERT_FALSE(said("a cast never adds 'mut'"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
-    // The same pair with the mark on the target is refused for both reasons and
-    // the mark is the one reported: the rows are asked in that order.
+    // The same pair with the mark on the target adds a mark and still carries
+    // no tail: the element type refuses it as well, so a reader who dropped the
+    // mark would meet a second error. The tail stands only where dropping the
+    // marks of the target makes the cast legal.
+    // D3.14
     TEST_ASSERT_FALSE(check_body("    i32@ s = {};\n    u32 mut@ u = cast(s, u32 mut@);\n"
                                  "    println(u.len);"));
-    TEST_ASSERT_TRUE(said("cannot cast i32@ to u32 mut@: a cast never adds 'mut'"));
+    TEST_ASSERT_TRUE(said("cannot cast i32@ to u32 mut@"));
+    TEST_ASSERT_FALSE(said("a cast never adds 'mut'"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    // The mark alone, over the same element type: the tail stands.
+    TEST_ASSERT_FALSE(check_body("    i32@ s = {};\n    i32 mut@ u = cast(s, i32 mut@);\n"
+                                 "    println(u.len);"));
+    TEST_ASSERT_TRUE(said("cannot cast i32@ to i32 mut@: a cast never adds 'mut'"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
 })
 
