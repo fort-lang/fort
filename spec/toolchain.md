@@ -344,6 +344,19 @@ Compile-time diagnostics (D14.2) are written to stderr, one per line:
 - Every module of the closure is checked in dependency order (D14.2); a file with a syntax error
   is parsed whole and not checked. A declaration whose check failed has the error type, which
   silences every later diagnostic involving it, so an importer sees only its own errors.
+- A diagnostic about two declarations stands at one of them and makes the other a note (D14.2).
+  The error stands at the declaration in the module the compiler is checking. The note stands at
+  the other declaration. That module holds the later of the two declarations, because the closure
+  is checked in dependency order (D9.10), so the note can name a module the reader did not write.
+  Two declarations of one module have no dependency order between them, so the error stands at
+  the later of the two by position. The two diagnostics of this shape are `conflicting
+  declarations of extern '<name>'` (`module-system.md` 13) and `redeclaration of '<name>'`
+  (D7.9). The reason is section 9.2: a client that cannot open a file may drop that file's
+  diagnostics, and a nested note goes with the error it follows, so an error placed in the file
+  the reader cannot open leaves the reader nothing at all. A diagnostic that has one place stands
+  at that place, in whatever file that is. `not supported by the bootstrap compiler: ?:` names
+  the `?:` inside `std/math.ft` for a program that only imports the module (section 7.3), because
+  it has no second place that says as much.
 - The compiler emits no warnings (D14.2): unused imports, unused variables and statements after
   a terminating statement are not diagnosed.
 

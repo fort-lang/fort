@@ -411,7 +411,9 @@ static void error_cycle(module_set_t* set, loc_t at, const module_t* reached) {
 
 // `redeclaration of 'add'`, pointing at the later of the two positions with a
 // note on the earlier one, which is what lets the declarations of a file be
-// collected before its import bindings are bound.
+// collected before its import bindings are bound. Both names are declared by
+// one module, so the two places have no dependency order between them and the
+// rule orders them by position.
 // D7.9, D14.2
 static void error_redeclaration(module_set_t* set, loc_t first, loc_t second, str_t name) {
     loc_t earlier = first;

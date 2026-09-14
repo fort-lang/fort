@@ -1404,11 +1404,25 @@ Sections:
   own errors. Positions of errors that concern a whole construct: "missing return" and a
   non-exhaustive enum `switch` are reported at the closing brace of the body or `switch`; an
   infinite-size struct at its `struct` keyword; a shadowing error at the inner declaration ("'n'
-  shadows a parameter", "'n' shadows an enclosing local"). The compiler never emits warnings in v1.
-- history: Amended 2026-09-10 with D20: a syntax error stopped the file after one diagnostic with no
-  recovery, and only the semantic errors of the first module that had any were reported. Amended
-  2026-09-10 with T-062: a lexical error stopped the compilation of the file after one diagnostic,
-  the file was never parsed, and the cap of 20 counted syntax errors alone.
+  shadows a parameter", "'n' shadows an enclosing local"). A diagnostic about two declarations
+  stands at one of them and makes the other a note. The error stands at the declaration in the
+  module the compiler is checking, and the note stands at the other declaration. Every module of
+  the closure is checked in dependency order (D9.10), so the module being checked holds the later
+  of the two declarations. The note can therefore name a module the reader did not write, the
+  standard library above all. Two declarations of one module have no dependency order between
+  them, so the error stands at the later of the two by position. The reason is the drop rule of
+  D20.2: a client that cannot open a file may drop that file's diagnostics, and a nested note goes
+  with the error it follows. An error in a file the reader cannot open takes the note in the
+  reader's own file with it and leaves the reader nothing. An error in the file the reader wrote
+  survives the loss of its note, because the error says what is wrong. A diagnostic that has one
+  place stands at that place, in whatever file that is: it has no second place that says as much.
+  The compiler never emits warnings in v1.
+- history: Amended 2026-09-14 (T-112): which of two declarations carried the error and which
+  carried the note was implemented and never decided, so no rule told a new diagnostic of that
+  shape where to stand. Amended 2026-09-10 with D20: a syntax error stopped the file after one
+  diagnostic with no recovery, and only the semantic errors of the first module that had any were
+  reported. Amended 2026-09-10 with T-062: a lexical error stopped the compilation of the file
+  after one diagnostic, the file was never parsed, and the cap of 20 counted syntax errors alone.
 
 ### D14.3 The --cc command line
 - owner: `toolchain.md`.
