@@ -336,9 +336,14 @@ every one matches.
   An entry always has an owner and a rule. `tools/check_decisions.py` checks that
   shape and the ctest `check_decisions` runs it over the log. An amendment rewrites the `rule` so
   that it states the rule in force, and appends a note to `history` that says what the rule said
-  before: `Amended YYYY-MM-DD (T-nnn): <what changed>`. Never leave a stale sentence in the rule
-  for the history to correct, and never delete the note that records the old text. **One rule a
-  note of its own entry corrects** is the one property the `history` field decides, and the sweep
+  before: `Amended YYYY-MM-DD (T-nnn): <what changed>`. A note that changes no word of the rule
+  carries `Note YYYY-MM-DD (T-nnn): <what the reading settles>` instead. Use that marker for a
+  reading a ticket had to settle, as D4.4 does for T-041, and for a date put on a sentence that
+  reports another entry, as D17.4 does for T-122. Do not invent a third word for either: the log
+  holds these two and no other, which `grep -cE 'Note 20..-..-.. \(T-' spec/decisions.md` counted
+  as 2 on 2026-09-13, against 80 for `Amended`. Never leave a stale sentence in the rule for the
+  history to correct, and never delete the note that records the old text. **One rule a note of
+  its own entry corrects** is the one property the `history` field decides, and the sweep
   for it reads the entries that carry that field: `grep -c '^- history:' spec/decisions.md`
   counted 49 of 144 on 2026-09-13, of which 48 hold the word "Amended" and D4.4 alone does not;
   the command that counts them is in T-109's Notes, Design. One of the 49 was stale, D19.5, which
@@ -350,18 +355,21 @@ every one matches.
   that says what has changed since, and leave the words of the old note alone, because the
   sentence above forbids deleting them (T-109). The `history` rule of `tools/knowledge_lint.py`
   checks this one, and the ctest `knowledge_lint` runs it: it reports a sentence of a `history`
-  field whose subject names a rule (`the rule`, `its rule`, `this decision`, `D19.5's rule`) and
-  whose verb is a present-tense verb of saying. Two things silence it, and only the second is a
-  repair: a quotation of the old words, and the dated note this paragraph asks for, which the rule
-  reads as a sentence carrying a date and one of `as it stood` or `from this date`. Writing the
-  note in the past tense is not a third: `until then the rule read: this decision requires two
-  runs` is still red, because the clause after the colon is a sentence of its own and it is
-  present-tense. Quote the old words, and the rule reads them as the old rule. The rule states its
-  blind spots in its own docstring, `test/knowledge_lint_test.py` measures each of them and counts
-  them, and no number for them stands here, because a number in prose rots and this paragraph is
-  one file away from the check. The two widest gaps: a bare tag is not a subject (`D3.10 decides
-  function types`, in D17.4's note, is not reported, and T-122 repairs it), and one dated note
-  excuses its whole field wherever the report stands in it (T-121).
+  field whose subject names a rule (`the rule`, `its rule`, `this decision`, `D19.5's rule`, or a
+  bare tag at the head of the sentence, as in `D3.10 decides`) and whose verb is a present-tense
+  verb of saying. Two things silence it, and only the second is a repair: a quotation of the old
+  words, and the dated note this paragraph asks for, which the rule reads as a sentence carrying a
+  date and one of `as it stood` or `from this date`. Writing the note in the past tense is not a
+  third: `until then the rule read: this decision requires two runs` is still red, because the
+  clause after the colon is a sentence of its own and it is present-tense. Quote the old words,
+  and the rule reads them as the old rule. The rule states its blind spots in its own docstring,
+  `test/knowledge_lint_test.py` measures each of them and counts them, and no number for them
+  stands here, because a number in prose rots and this paragraph is one file away from the check.
+  The two widest gaps: a bare tag is a subject only at the head of a sentence, because inside one
+  it is as often a relative clause that reports nothing (T-122 dated D17.4's `D3.10 decides
+  function types` on 2026-09-13 and then widened the subject, and the gap that is left holds
+  D9.1's `every test file D14.4 names NNN_name.ft` and a report one subordinator from the head),
+  and one dated note excuses its whole field wherever the report stands in it (T-121).
 - **Moving text inside the decision log**: the risk of an edit to `spec/decisions.md` is a changed
   meaning, which no build and no test can see. `tools/check_decisions.py --against <old file>`
   compares the words of every entry between two revisions of the log. It fails on an entry whose

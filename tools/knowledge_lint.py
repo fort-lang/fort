@@ -55,12 +55,14 @@ What this lint does not see, stated rather than left in a glob:
   * A ticket number is not checked against anything, because `.tickets/` is
     outside the repository. A decision tag is: it must name an entry or a
     section of spec/decisions.md.
-  * The `history` rule reads a subject that names a rule and never a bare
-    decision tag, it reads a closed list of verbs, one dated note excuses the
-    whole field, and it says nothing about the `rule` field or the `rationale`
-    field. HISTORY_LIMITS below states each gap with the entry that stands in
-    it, and `test_every_limit_names_a_gap_and_says_what_stands_in_it` counts
-    them, so no number for them stands in this prose.
+  * The `history` rule reads a subject that names a rule, and a bare decision
+    tag only at the head of a sentence, because inside one a tag is as often a
+    relative clause. It reads a closed list of verbs, one dated note excuses
+    the whole field, and it says nothing about the `rule` field or the
+    `rationale` field. HISTORY_LIMITS below states each gap with the entry
+    that stands in it, and it is counted by
+    `test_every_limit_names_a_gap_and_says_what_stands_in_it`, so no number
+    for a gap stands in this prose.
   * EXCLUDED below names the code it does not read at all.
 """
 
@@ -669,11 +671,23 @@ def rule_decisions(root):
 # note that reports an old rule quotes it, and unquoted() then hides the words
 # (notes/style.md 4, T-109, T-121 round 2).
 
-# The subject of a report: a phrase that names a rule of the log. A bare tag is
-# not one, for the reason HISTORY_LIMITS gives.
+# A bare decision tag is a subject at the head of a sentence and nowhere else.
+# At the head is where a note that reports another entry puts it: D17.4 carried
+# `D3.10 decides function types and function pointers` and D20.5 at 8a1eb48
+# carried `D19.5 requires the emitted text to be a function of the program`,
+# and both stand there. Inside a sentence a tag is as often a relative clause
+# that reports nothing, as in D9.1's `every test file D14.4 names NNN_name.ft`,
+# which names a file and not a rule. The lookbehind reads "no character stands
+# before this one", and it is the head of the *sentence* because
+# history_problems matches one sentence at a time.
+HISTORY_HEAD_TAG = r"(?<![\s\S])D\d+(?:\.\d+)?"
+
+# The subject of a report: a phrase that names a rule of the log, or a bare tag
+# at the head of a sentence.
 HISTORY_SUBJECT = (r"(?:th(?:is|at|e) (?:decision|rule|rationale)|its rule"
                    r"|D\d+(?:\.\d+)?'s (?:rule|note|clause|sentence)"
-                   r"|the (?:note|sentence|clause|entry) (?:above|below|here))")
+                   r"|the (?:note|sentence|clause|entry) (?:above|below|here)"
+                   r"|" + HISTORY_HEAD_TAG + r")")
 
 # An adverb may stand between the subject and the verb. "still" is the one that
 # made D20.5 wrong, because it claims the statement has not moved since; "now"
@@ -735,15 +749,21 @@ SENTENCE_BREAK = re.compile(r"(?<=[.;:])\s")
 # is pinned by a test of HistoryLimitTest in test/knowledge_lint_test.py rather
 # than left in this prose, so a gap that closes fails a test.
 HISTORY_LIMITS = (
-    ("a bare decision tag is not a subject",
-     "`D3.10 decides function types and function pointers` (D17.4) reports "
-     "another entry and is not reported, because a tag as often stands in a "
-     "relative clause that reports nothing, as in D9.1's `every test file "
-     "D14.4 names NNN_name.ft`. 2 sentences of the 49 fields stand in this "
-     "gap, one of each kind, and T-122 repairs D17.4 and widens the subject "
-     "afterwards, which is the only order that works. The gap stood inside the "
-     "motivating case as well: D20.5 before T-109 also carried `D19.5 requires "
-     "the emitted text to be a function of the program`"),
+    ("a bare decision tag is a subject only at the head of a sentence",
+     "the gap that refused a bare tag everywhere closed on 2026-09-13 (T-122), "
+     "which dated D17.4's `D3.10 decides function types and function pointers` "
+     "and then widened the subject. Over the log at 8a1eb48 the widened rule "
+     "reports 6 sentences where the old one reported 4, the 2 it adds being "
+     "that note of D17.4 and D20.5's `D19.5 requires the emitted text to be a "
+     "function of the program`, which stood inside the motivating case. What "
+     "is left is a tag inside a sentence: 1 sentence of the 49 fields stands "
+     "in that gap, D9.1's `every test file D14.4 names NNN_name.ft`, and it is "
+     "a relative clause, so reading it would be a false positive. The position "
+     "is a proxy for the reading and the two questions are not the same. A "
+     "report one subordinator from the head is missed as well: `the citation "
+     "was wrong, because D3.10 decides function types and function pointers` "
+     "reports D3.10 and is not read, while the same clause at the head of a "
+     "sentence is"),
     ("a note that quotes nothing is invisible",
      "T-039's note said the stage1 comparison is one `which this decision does "
      "not ask for` and pointed at `the sentence above`. The rule catches the "
@@ -751,8 +771,8 @@ HISTORY_LIMITS = (
      "says which sentence is meant (T-109's review)"),
     ("one dated note excuses the whole field, and not positionally",
      "the escape is the repair notes/style.md 4 prescribes, and it excuses "
-     "every report of the field wherever it stands. 2 fields of the 49 carry a "
-     "dated note and it excuses 7 reports, 2 of which stand after it. Those 2 "
+     "every report of the field wherever it stands. 3 fields of the 49 carry a "
+     "dated note and it excuses 9 reports, 2 of which stand after it. Those 2 "
      "are T-109's own amendment describing the rule it wrote, so excusing them "
      "is right, but it is right by accident of a coarse escape: a stale report "
      "appended below the dated note rides out the same way"),
@@ -769,7 +789,7 @@ HISTORY_LIMITS = (
      "both lists are closed, so `the rule bans X` reads as prose. A word added "
      "to either must be measured over the log again: reading `it`, `nothing`, "
      "`the text` and `the log` as subjects and `is`, `has`, `stands` and "
-     "`compares` as verbs takes the sweep from 7 sentences in 2 fields to 28 "
+     "`compares` as verbs takes the sweep from 9 sentences in 3 fields to 31 "
      "in 9. The sentences it adds are of both kinds, `It is the observation "
      "point` (D14.1) being prose and `it states` (D17.4) a report whose "
      "subject is a pronoun, and no count of the two stands here, because which "
@@ -779,13 +799,19 @@ HISTORY_LIMITS = (
      "says the amendment made the rule read this way, so a report written "
      "inside such a sentence is excused and `the rule now says` is outside the "
      "rule even when the amendment changed no word. A stale report joined by a "
-     "comma to a clause that holds `now` rides out on it. 6 sentences of the "
+     "comma to a clause that holds `now` rides out on it. 7 sentences of the "
      "49 fields stand in this gap"),
     ("a run of at most HISTORY_RUN words joins a subject to a verb",
      "beyond that bound a report is not read: `the rule of the other entry, "
      "which nobody has touched since, requires two runs` is green at 3 words. "
-     "The bound buys the other direction, that the run cannot bridge a "
-     "relative clause on to a later verb and report the wrong subject"),
+     "The bound stops a long subject bridging a relative clause on to a later "
+     "verb, and it stops nothing when the subject is one token, because the "
+     "whole run is then free to reach another subject's verb: `D9.1 aside, the "
+     "ticket names the file wrongly` is reported as `D9.1 aside, the ticket "
+     "names`, whose subject is `the ticket`. T-122 opened that case by reading "
+     "a bare tag as a subject, a tag being the only one-token subject either "
+     "list holds. 0 of the 9 sentences the sweep without the escape reports "
+     "stand in this gap"),
 )
 
 

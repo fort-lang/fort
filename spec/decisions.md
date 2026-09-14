@@ -1567,7 +1567,11 @@ says ownership is "by convention", this section supersedes it.
   for what stage1 does not implement. D3.10 decides function types and function pointers, and it
   states that function pointers are inside the bootstrap's subset; it lists nothing stage1 lacks.
   The list of the four families the C bootstrap lacks, `?:` among them, is `toolchain.md` 7.3, and
-  the clause names that section now.
+  the clause names that section now. Note 2026-09-13 (T-122): the sentence above about D3.10
+  describes the log as it stood on 2026-09-13. On that date D3.10 still carried the title
+  "Function types and function pointers". It still put function pointers inside the C bootstrap's
+  subset, and it still listed nothing stage1 lacks. So the note above needed a date and no
+  correction.
 
 ### D17.5 Transfer
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,

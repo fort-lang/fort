@@ -288,6 +288,18 @@ HISTORY_LOG = """\
 - rule: the eighth rule.
 - history: Amended 2026-09-13 (T-121): the citation was wrong. Until then the rule read:
   this decision requires two runs.
+
+### D1.9 A note whose subject is a bare decision tag
+- owner: spec/project-overview.md
+- rule: the ninth rule.
+- history: Amended 2026-09-13 (T-122): the citation was wrong. D1.1 requires two runs of
+  the compiler.
+
+### D1.10 A bare decision tag inside a relative clause
+- owner: spec/project-overview.md
+- rule: the tenth rule.
+- history: Amended 2026-09-13 (T-122): the rule rejected every test file D1.1 names
+  `NNN_name.ft`.
 """
 
 # What the rule asks of each seeded entry: the line of the phrase it reports, or
@@ -302,6 +314,9 @@ HISTORY_VERDICT = {
     "D1.6": (None, "a later note dates the report, the repair notes/style.md 4 asks for"),
     "D1.7": (45, "the same report wrapped over two lines, reported at the first"),
     "D1.8": (52, "the past tense of the note does not reach the clause after the colon"),
+    "D1.9": (57, "a bare tag at the head of a sentence is the subject of a report"),
+    "D1.10": (None, "a bare tag inside a sentence is a relative clause, which "
+                    "reports nothing"),
 }
 
 # The phrase the rule quotes back for each entry it reports.
@@ -310,6 +325,7 @@ HISTORY_PHRASE = {
     "D1.5": "This decision does not ask",
     "D1.7": "D1.1's rule still says",
     "D1.8": "this decision requires",
+    "D1.9": "D1.1 requires",
 }
 
 # The two notes the log really held, quoted from spec/decisions.md at 8a1eb48,
@@ -737,9 +753,9 @@ class HistoryTest(unittest.TestCase):
         entries, _ = check_decisions.read_fielded(HISTORY_LOG)
         self.assertEqual(sorted(entries), sorted(HISTORY_VERDICT))
 
-    def test_the_seeded_log_reports_exactly_four_notes(self):
+    def test_the_seeded_log_reports_exactly_five_notes(self):
         problems, _ = self.problems_of(HISTORY_LOG)
-        self.assertEqual(len(problems), 4, problems)
+        self.assertEqual(len(problems), 5, problems)
 
     def test_one_seeded_note_is_reported_as_this_exact_line(self):
         _, by_entry = self.problems_of(HISTORY_LOG)
@@ -748,14 +764,28 @@ class HistoryTest(unittest.TestCase):
             'tense: "D1.1\'s rule still says"; write the past tense or append a '
             "dated note (notes/style.md 4)"])
 
+    def test_a_bare_tag_at_the_head_of_a_sentence_is_reported_as_this_exact_line(self):
+        # the oracle of the widening T-122 made: D1.9 heads its sentence with a
+        # tag and is reported, D1.10 carries the same tag inside a relative
+        # clause and is not. The line is written out here by hand, as the
+        # D1.3 test above writes its own
+        _, by_entry = self.problems_of(HISTORY_LOG)
+        self.assertEqual(by_entry["D1.9"], [
+            "spec/decisions.md:57: D1.9 reports a rule of the log in the present "
+            'tense: "D1.1 requires"; write the past tense or append a '
+            "dated note (notes/style.md 4)"])
+        self.assertEqual(by_entry.get("D1.10", []), [])
+
     def test_the_count_line_names_the_fields_and_the_dated_ones(self):
         _, fields, dated = lint.history_problems(HISTORY_LOG)
-        self.assertEqual((fields, dated), (8, 1))
+        self.assertEqual((fields, dated), (10, 1))
 
-    def test_all_four_real_reports_the_log_held_are_reported(self):
+    def test_all_five_real_reports_the_log_held_are_reported(self):
         # the whole reason the rule exists: these are the words of D19.5 and
-        # D20.5 at 8a1eb48, before T-109 repaired them. The revision yields 4
-        # problems, so REAL_LOG carries all 4 and not a sample (T-121, round 2)
+        # D20.5 at 8a1eb48, before T-109 repaired them. The revision yields 5
+        # problems, so REAL_LOG carries all 5 and not a sample (T-121, round 2).
+        # The fourth is the bare tag T-122 widened the subject to read, and the
+        # words are the ones the log really held (T-122)
         problems, _, _ = lint.history_problems(REAL_LOG)
         self.assertEqual(problems, [
             "spec/decisions.md:12: D19.5 reports a rule of the log in the present "
@@ -766,6 +796,9 @@ class HistoryTest(unittest.TestCase):
             "dated note (notes/style.md 4)",
             "spec/decisions.md:16: D19.5 reports a rule of the log in the present "
             'tense: "this decision requires"; write the past tense or append a '
+            "dated note (notes/style.md 4)",
+            "spec/decisions.md:25: D20.5 reports a rule of the log in the present "
+            'tense: "D19.5 requires"; write the past tense or append a '
             "dated note (notes/style.md 4)",
             "spec/decisions.md:27: D20.5 reports a rule of the log in the present "
             'tense: "Its rule still says"; write the past tense or append a '
@@ -778,7 +811,7 @@ class HistoryTest(unittest.TestCase):
                                    "sentence above describes the log as\n  it stood on")
         problems, _, dated = lint.history_problems(text)
         self.assertEqual(dated, 1)
-        self.assertEqual(len(problems), 4, problems)
+        self.assertEqual(len(problems), 5, problems)
 
     def test_the_past_tense_of_the_note_is_not_what_silences_the_rule(self):
         # D1.8 is the seeded proof: `until then the rule read:` is past, and the
@@ -819,12 +852,18 @@ class HistoryLimitTest(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         return (root / "spec/decisions.md").read_text(encoding="utf-8")
 
-    def with_bare_tag(self):
-        """HISTORY_REPORT widened to read a bare decision tag as the subject."""
+    def with_a_tag_anywhere(self):
+        """HISTORY_REPORT with the head-of-sentence test dropped from the tag.
+
+        The shipped subject reads a bare tag only at the head of a sentence.
+        This pattern reads one anywhere, and the difference between the two is
+        what the first limit measures (T-122).
+        """
+        anywhere = lint.HISTORY_SUBJECT.replace(
+            lint.HISTORY_HEAD_TAG, r"D\d+(?:\.\d+)?")
         return re.compile(
-            r"\b(" + lint.HISTORY_SUBJECT[:-1] + r"|D\d+(?:\.\d+)?)"
-            + lint.HISTORY_BETWEEN + r"(?:" + lint.HISTORY_VERBS + r"|"
-            + lint.HISTORY_NEGATED + r"))\b", re.IGNORECASE)
+            r"\b(" + anywhere + lint.HISTORY_BETWEEN + r"(?:" + lint.HISTORY_VERBS
+            + r"|" + lint.HISTORY_NEGATED + r"))\b", re.IGNORECASE)
 
     def sweep(self, pattern, field="history", dated=True, anchored=False, text=None):
         """The sentences of a decision log this pattern reports.
@@ -849,38 +888,85 @@ class HistoryLimitTest(unittest.TestCase):
                 found += [(tag, m.group(1)) for m in pattern.finditer(clean)]
         return found
 
-    def test_the_rule_reports_seven_sentences_in_two_fields_without_the_escape(self):
+    def test_the_rule_reports_nine_sentences_in_three_fields_without_the_escape(self):
         found = self.sweep(lint.HISTORY_REPORT, dated=False)
-        self.assertEqual(len(found), 7)
-        self.assertEqual(sorted({tag for tag, _ in found}), ["D19.5", "D20.5"])
+        # each phrase is written out, so a run that bridged one subject on to
+        # another subject's verb would read wrongly here rather than pass a
+        # count (T-122, round 2, the seventh limit)
+        self.assertEqual(found, [
+            ("D17.4", "D3.10 decides"),
+            ("D19.5", "this decision forbids"),
+            ("D19.5", "this decision does not ask"),
+            ("D19.5", "this decision requires"),
+            ("D19.5", "The rule names"),
+            ("D19.5", "The rule also carries"),
+            ("D19.5", "the rule itself requires"),
+            ("D20.5", "D19.5 requires"),
+            ("D20.5", "Its rule still says")])
+        self.assertEqual(sorted({tag for tag, _ in found}),
+                         ["D17.4", "D19.5", "D20.5"])
         # the third limit: 2 of the 7 stand after the dated note that excuses
         # them, so the escape is coarser than the reason it is right
         after = [phrase for _, phrase in found
                  if phrase in ("The rule names", "The rule also carries")]
         self.assertEqual(len(after), 2)
 
-    def test_a_bare_decision_tag_as_subject_costs_two_false_positives(self):
-        # the first limit: D9.1's `every test file D14.4 names NNN_name.ft`
-        # reports nothing, and D17.4's `D3.10 decides` is the price of refusing
-        # it. T-122 repairs D17.4 and then widens this pattern, so this
-        # assertion is the one it starts from
-        found = self.sweep(self.with_bare_tag())
-        self.assertEqual(found, [("D9.1", "D14.4 names"), ("D17.4", "D3.10 decides")])
+    def test_a_bare_tag_inside_a_sentence_is_the_one_gap_that_is_left(self):
+        # the first limit: the shipped subject reads a bare tag at the head of a
+        # sentence, and dropping that test would add exactly one sentence over
+        # the log, D9.1's `every test file D14.4 names NNN_name.ft`. It is a
+        # relative clause and reports nothing, so the gap that is left holds no
+        # true report today (T-122)
+        for dated in (True, False):
+            with self.subTest(dated=dated):
+                shipped = self.sweep(lint.HISTORY_REPORT, dated=dated)
+                anywhere = self.sweep(self.with_a_tag_anywhere(), dated=dated)
+                self.assertEqual([hit for hit in anywhere if hit not in shipped],
+                                 [("D9.1", "D14.4 names")])
 
-    def test_the_bare_tag_gap_stood_inside_the_motivating_case_too(self):
-        # D20.5 before T-109 carried a bare-tag report of its own, so the gap is
-        # not only in the two entries that stand in it today (T-121, round 2)
+    def test_a_bare_tag_reports_only_where_it_heads_its_sentence(self):
+        # the same difference on two hand-written sentences rather than on the
+        # log, so the pattern is watched where a reader can read both halves
+        head = "D3.10 decides function types and function pointers"
+        clause = "every test file D14.4 names NNN_name.ft"
+        self.assertEqual(lint.HISTORY_REPORT.search(head).group(1), "D3.10 decides")
+        self.assertIsNone(lint.HISTORY_REPORT.search(clause))
+        self.assertEqual(self.with_a_tag_anywhere().search(clause).group(1),
+                         "D14.4 names")
+
+    def test_the_widened_subject_catches_the_motivating_case_it_used_to_miss(self):
+        # D20.5 before T-109 carried a bare-tag report of its own, inside the
+        # very case the rule was built for, and the old subject missed it
+        # (T-121, round 2). The widened subject reads the log at 8a1eb48 and
+        # reports 6 sentences where the old one reported 4 (T-122)
         old = subprocess.run(["git", "show", "8a1eb48:spec/decisions.md"],
                              cwd=Path(__file__).resolve().parent.parent,
                              capture_output=True, check=False)
         if old.returncode != 0:
             raise unittest.SkipTest("8a1eb48 is not in this checkout")
         text = old.stdout.decode()
-        extra = [hit for hit in self.sweep(self.with_bare_tag(), text=text)
-                 if hit not in self.sweep(lint.HISTORY_REPORT, text=text)]
-        self.assertEqual(extra, [("D9.1", "D14.4 names"),
-                                 ("D17.4", "D3.10 decides"),
-                                 ("D20.5", "D19.5 requires")])
+        found = self.sweep(lint.HISTORY_REPORT, text=text)
+        self.assertEqual(found, [("D17.4", "D3.10 decides"),
+                                 ("D19.5", "this decision forbids"),
+                                 ("D19.5", "this decision does not ask"),
+                                 ("D19.5", "this decision requires"),
+                                 ("D20.5", "D19.5 requires"),
+                                 ("D20.5", "Its rule still says")])
+        # the relative clause of D9.1 stood in that revision too, and the
+        # widened subject leaves it alone there as it does today
+        self.assertNotIn(("D9.1", "D14.4 names"), found)
+
+    def test_a_report_one_subordinator_from_the_head_is_missed(self):
+        # the first limit says the position test is a proxy for the reading,
+        # and this is the case that separates the two questions: one clause,
+        # read at the head of a sentence and not read behind `because`
+        # (T-122, round 2)
+        self.assertEqual(lint.HISTORY_REPORT.search(
+            "D3.10 decides function types and function pointers").group(1),
+            "D3.10 decides")
+        self.assertIsNone(lint.HISTORY_REPORT.search(
+            "the citation was wrong, because D3.10 decides function types and "
+            "function pointers"))
 
     def test_the_same_signature_over_the_rule_fields_reports_two_sentences(self):
         # the fourth limit: a rule states a requirement in the present tense by
@@ -897,9 +983,9 @@ class HistoryLimitTest(unittest.TestCase):
         self.assertEqual(len(carried), 16)
         self.assertEqual(self.sweep(lint.HISTORY_REPORT, field="rationale"), [])
 
-    def test_a_wider_subject_and_verb_list_reports_twenty_eight(self):
+    def test_a_wider_subject_and_verb_list_reports_thirty_one(self):
         # the fifth limit: `it`, `nothing`, `the text` and `the log` as subjects
-        # and `is`, `has`, `stands` and `compares` as verbs take 7 to 28. The
+        # and `is`, `has`, `stands` and `compares` as verbs take 9 to 31. The
         # limit claims no split of the 28 into prose and report: which is which
         # is a reading, and no test holds a reading (T-121, round 2)
         wide = re.compile(
@@ -908,15 +994,15 @@ class HistoryLimitTest(unittest.TestCase):
             + r"|is|has|stands|compares|" + lint.HISTORY_NEGATED + r"))\b",
             re.IGNORECASE)
         found = self.sweep(wide, dated=False)
-        self.assertEqual(len(found), 28)
+        self.assertEqual(len(found), 31)
         self.assertEqual(len({tag for tag, _ in found}), 9)
 
-    def test_the_anchor_excuses_six_sentences_the_pattern_would_report(self):
+    def test_the_anchor_excuses_seven_sentences_the_pattern_would_report(self):
         # the sixth limit, measured: `now` and a date in the same sentence as
         # the report. Without this test the seeded D1.2 would pass vacuously
         found = self.sweep(lint.HISTORY_REPORT, dated=False, anchored=True)
         self.assertEqual([tag for tag, _ in found],
-                         ["D1.2", "D1.3", "D2.2", "D19.5", "D20.5", "D20.5"])
+                         ["D1.2", "D1.3", "D2.2", "D17.4", "D19.5", "D20.5", "D20.5"])
 
     def test_the_run_between_subject_and_verb_costs_nothing_and_buys_four(self):
         # the seventh limit: a report built only from words both lists hold used
@@ -929,8 +1015,8 @@ class HistoryLimitTest(unittest.TestCase):
             + lint.HISTORY_VERBS + r"|" + lint.HISTORY_NEGATED + r"))\b",
             re.IGNORECASE)
         self.assertEqual(self.sweep(lint.HISTORY_REPORT), [])
-        self.assertEqual(len(self.sweep(lint.HISTORY_REPORT, dated=False)), 7)
-        self.assertEqual(len(self.sweep(tight, dated=False)), 6)
+        self.assertEqual(len(self.sweep(lint.HISTORY_REPORT, dated=False)), 9)
+        self.assertEqual(len(self.sweep(tight, dated=False)), 8)
         for paraphrase in (
                 "the rule of D19.5 says the bootstrap compares with cmp",
                 "this decision, after T-109, says the two stages are compared",
@@ -940,12 +1026,21 @@ class HistoryLimitTest(unittest.TestCase):
                 self.assertIsNone(tight.search(paraphrase))
                 self.assertIsNotNone(lint.HISTORY_REPORT.search(paraphrase))
 
-    def test_the_run_is_bounded_so_it_cannot_bridge_a_relative_clause(self):
-        # the other half of the seventh limit: past the bound a report is missed,
-        # and that is what stops the run reaching a verb of another subject
+    def test_the_bound_stops_a_long_subject_bridging_and_not_a_one_token_one(self):
+        # the other half of the seventh limit, narrowed by T-122: past the bound
+        # a report is missed, and that stops a long subject reaching a verb of
+        # another subject. A one-token subject leaves the whole run free, and a
+        # bare tag is the only one-token subject either list holds, so the
+        # widening opened this case: the match names `the ticket` as the real
+        # subject and reports the tag instead
         self.assertIsNone(lint.HISTORY_REPORT.search(
             "the rule of the other entry, which nobody has touched since, "
             "requires two runs"))
+        bridged = lint.HISTORY_REPORT.search(
+            "D9.1 aside, the ticket names the file wrongly")
+        self.assertEqual(bridged.group(1), "D9.1 aside, the ticket names")
+        # and 0 sentences of the log stand in the gap, which the nine phrases
+        # of test_the_rule_reports_nine_sentences_in_three_fields... pin
 
     def test_every_limit_names_a_gap_and_says_what_stands_in_it(self):
         self.assertEqual(len(lint.HISTORY_LIMITS), 7)
@@ -967,7 +1062,7 @@ class HistoryRepositoryTest(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         problems, count = lint.rule_history(root)
         self.assertEqual(problems, [])
-        self.assertEqual(count, "history: 49 history fields, 2 with a dated note")
+        self.assertEqual(count, "history: 49 history fields, 3 with a dated note")
 
     def test_the_field_count_is_the_one_grep_counts(self):
         # `grep -c '^- history:' spec/decisions.md` says 49 (notes/style.md 4)
