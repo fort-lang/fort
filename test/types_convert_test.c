@@ -112,6 +112,11 @@ enum { SAMPLES_MAX = 35 };
 // own level is mutable is answered by the level before it.
 enum { MUT_ADDING_PAIRS = 336 };
 
+// The spelling of `t` with every `mut` cleared, for the test below.
+static const char* stripped(tenv_t* e, const char* spelling) {
+    return tenv_str(e, type_without_mut(&e->tt, tenv_type(e, spelling)));
+}
+
 static uint32_t sample_types(tenv_t* e, const type_t** types) {
     static const char* const SPELLINGS[] = {
         "i32",
@@ -771,6 +776,44 @@ TEST(every_implicit_conversion_is_also_a_cast, {
     tenv_free(&e);
 })
 
+// `type_without_mut` answers the target a refused cast would have had without
+// its marks, which is how the checker tells a cast refused for the mark from one
+// refused for the element type as well. It is a query of the type table, so the
+// test spells the answer rather than asking the rule again.
+// D3.10, D3.14
+TEST(clearing_every_mark_of_a_type, {
+    tenv_t e;
+    tenv_init(&e);
+    TEST_ASSERT_EQ_STR(stripped(&e, "i32 mut*"), "i32*");
+    TEST_ASSERT_EQ_STR(stripped(&e, "i32*"), "i32*");
+    TEST_ASSERT_EQ_STR(stripped(&e, "node mut* mut*"), "node**");
+    TEST_ASSERT_EQ_STR(stripped(&e, "node mut* mut@"), "node*@");
+    TEST_ASSERT_EQ_STR(stripped(&e, "void mut*"), "void*");
+    TEST_ASSERT_EQ_STR(stripped(&e, "u8 mut@"), "u8@");
+    // `own` is another mark and this clears none of it, at any level.
+    // D17.2
+    TEST_ASSERT_EQ_STR(stripped(&e, "node mut* own mut@ own"), "node* own@ own");
+    TEST_ASSERT_EQ_STR(stripped(&e, "void mut* own"), "void* own");
+    // A fixed array holds no mark of its own and passes the clearing down.
+    // D5.2
+    TEST_ASSERT_EQ_STR(stripped(&e, "node mut*[2]"), "node*[2]");
+    // A `string`, a scalar and a struct carry no level, so each is itself.
+    TEST_ASSERT_EQ_STR(stripped(&e, "string"), "string");
+    TEST_ASSERT_EQ_STR(stripped(&e, "i32"), "i32");
+    TEST_ASSERT_EQ_STR(stripped(&e, "point"), "point");
+    // A function type is its own identity, marks of parameters included, so
+    // clearing them would answer another type and it answers itself.
+    // D3.10
+    const type_t* takes_mut = tenv_fn(&e, type_void(&e.tt), tenv_type(&e, "node mut*"), NULL);
+    TEST_ASSERT_TRUE(type_without_mut(&e.tt, takes_mut) == takes_mut);
+    // The result is interned like any other type, so clearing a type that
+    // carries no mark answers the very node it was given.
+    const type_t* plain = tenv_type(&e, "node*");
+    TEST_ASSERT_TRUE(type_without_mut(&e.tt, plain) == plain);
+    TEST_ASSERT_TRUE(type_without_mut(&e.tt, tenv_type(&e, "node mut*")) == plain);
+    tenv_free(&e);
+})
+
 TEST(no_conversion_and_no_cast_adds_mut, {
     tenv_t e;
     tenv_init(&e);
@@ -895,6 +938,7 @@ int main(int argc, char** argv) {
     TEST_RUN(casts_may_add_own_at_any_reference);
     TEST_RUN(every_scalar_pair_follows_the_d3_14_matrix);
     TEST_RUN(every_implicit_conversion_is_also_a_cast);
+    TEST_RUN(clearing_every_mark_of_a_type);
     TEST_RUN(no_conversion_and_no_cast_adds_mut);
     TEST_RUN(conversion_and_identity_agree_with_themselves);
     TEST_RUN(dropping_marks_never_changes_the_shape_or_the_size);
