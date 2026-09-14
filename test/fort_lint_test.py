@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests of tools/fort_lint.py, the D1.4 identifier check (AGENTS.md).
+"""Unit tests of tools/fort_lint.py, the D1.4 identifier check (notes/testing.md 8).
 
 Two halves. The rules themselves are pure functions over the index records of
 D20.3 and are tested here directly, one case per clause of the decision; the
@@ -882,7 +882,7 @@ class RealCompiler(unittest.TestCase):
         self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
 
     def test_a_file_outside_the_repository_is_linted_too(self):
-        """The scratch file goes under build/, which is gitignored (AGENTS.md, T-022)."""
+        """The scratch file goes under build/, gitignored (notes/environment.md 2, T-022)."""
         scratch = ROOT / "build"
         scratch.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=str(scratch)) as tmp:

@@ -1,4 +1,4 @@
-"""Unit tests for tools/lines.py (D14.6, AGENTS.md "Build and test").
+"""Unit tests for tools/lines.py (D14.6, notes/testing.md 9).
 
 The glob matcher is the part worth pinning: the guest runs Python 3.12, where
 pathlib.Path.full_match does not exist, so lines.py compiles the globs itself
