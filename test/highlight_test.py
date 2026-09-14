@@ -26,6 +26,7 @@ Run with `python3 -m unittest highlight_test` from this directory. Standard
 library only; Python 3.12.
 """
 
+import bisect
 import dataclasses
 import inspect
 import json
@@ -204,6 +205,90 @@ def uncanonical_rules(grammar):
     return sorted(offenders)
 
 
+# The pattern list of a rule that declares none. The scanner of a rule list is
+# cached on the identity of the list, so one object must answer for all of them.
+NO_PATTERNS = ()
+
+
+class Scanner:
+    """One search over a line for a whole rule list.
+
+    The engine searched for each rule of the list separately at each position,
+    and each search scans to the end of the line, so one line cost
+    `positions x rules x length`. One alternation of the same rules, each
+    inside a group of its own, answers the same question in one scan: the
+    regex engine finds the leftmost position at which an alternative matches,
+    and at that position it takes the first alternative in the order they are
+    written. That is the rule this engine already had -- the end pattern
+    first, then rule order -- so the end pattern is the first alternative
+    (T-104).
+
+    The group that wraps an alternative closes after the groups of the rule
+    inside it, so `lastindex` names that wrapper. The bisect answers the same
+    entry for an inner group, which is why it is a bisect and not a lookup.
+    The winner is then applied on its own at the position the alternation
+    found, because `emit` reads the captures of a rule by the rule's own
+    group numbers.
+    """
+
+    def __init__(self, engine, rules, end):
+        self.entries = []  # (kind, rule, the compiled pattern of the rule)
+        self.groups = []  # the index of the group that wraps each entry
+        alternatives = [] if end is None else [("end", None, end)]
+        for rule in rules:
+            pattern = rule.get("match") or rule["begin"]
+            alternatives.append(("begin" if "begin" in rule else "match", rule, pattern))
+        parts = []
+        index = 1
+        for kind, rule, pattern in alternatives:
+            compiled = engine.compiled(pattern)
+            self.entries.append((kind, rule, compiled))
+            self.groups.append(index)
+            parts.append(f"({pattern})")
+            index += 1 + compiled.groups
+        self.combined = engine.compiled("|".join(parts)) if parts else None
+
+    def search(self, line, pos):
+        """The match that starts first; the end pattern and then rule order win ties."""
+        if self.combined is None:
+            return None
+        match = self.combined.search(line, pos)
+        if match is None:
+            return None
+        entry = bisect.bisect_right(self.groups, match.lastindex) - 1
+        kind, rule, compiled = self.entries[entry]
+        return kind, compiled.match(line, match.start()), rule
+
+
+class SlowScanner:
+    """One search for each rule of the list, which is what Scanner replaces.
+
+    It is the oracle of ScannerTest and of
+    test_the_engine_answers_what_one_search_for_each_rule_answers. It states
+    the rule the alternation must keep -- the leftmost match wins, the end
+    pattern and then rule order win a tie -- in the shape that needs no
+    reasoning about a combined pattern (T-104).
+    """
+
+    def __init__(self, engine, rules, end):
+        self.engine = engine
+        self.ruleset = rules
+        self.end = end
+
+    def search(self, line, pos):
+        found = None
+        if self.end is not None:
+            match = self.engine.compiled(self.end).search(line, pos)
+            if match is not None:
+                found = ("end", match, None)
+        for rule in self.ruleset:
+            pattern = rule.get("match") or rule["begin"]
+            match = self.engine.compiled(pattern).search(line, pos)
+            if match is not None and (found is None or match.start() < found[1].start()):
+                found = ("begin" if "begin" in rule else "match", match, rule)
+        return found
+
+
 class Engine:
     """A line-oriented TextMate engine: enough of it to tokenize fort."""
 
@@ -212,6 +297,7 @@ class Engine:
         self.repository = grammar["repository"]
         self.root_scope = grammar["scopeName"]
         self.cache = {}
+        self.scanners = {}
 
     def rules(self, patterns):
         """Resolve the `include`s of a pattern list into repository rules."""
@@ -225,15 +311,28 @@ class Engine:
             self.cache[pattern] = re.compile(pattern)
         return self.cache[pattern]
 
+    def scanner(self, patterns, end):
+        """The scanner of one rule list and one end pattern, built once.
+
+        The key is the identity of the pattern list, because the grammar holds
+        every list for as long as this engine holds the grammar: no list is
+        freed and no id is reused. A list is built once for each context and
+        not once for each position, which is what makes the alternation cheap.
+        """
+        key = (id(patterns), end)
+        if key not in self.scanners:
+            self.scanners[key] = Scanner(self, self.rules(patterns), end)
+        return self.scanners[key]
+
     def tokenize(self, text):
         """Return the tokens of a whole source text, sorted by position."""
         tokens = []
-        stack = [((self.root_scope,), self.grammar["patterns"], None, None)]
+        stack = [((self.root_scope,), self.scanner(self.grammar["patterns"], None), None)]
         for lineno, line in enumerate(text.split("\n"), start=1):
             pos = 0
             while pos <= len(line):
-                scopes, patterns, end, owner = stack[-1]
-                found = self.leftmost(line, pos, patterns, end)
+                scopes, scanner, owner = stack[-1]
+                found = scanner.search(line, pos)
                 if found is None:
                     self.gap(tokens, lineno, line, pos, len(line), scopes)
                     break
@@ -246,31 +345,28 @@ class Engine:
                     name = rule.get("name")
                     inner = scopes + ((name,) if name else ())
                     emit(tokens, lineno, match, None, rule.get("beginCaptures"), inner)
-                    stack.append((inner, rule.get("patterns", []), rule["end"], rule))
+                    patterns = rule.get("patterns") or NO_PATTERNS
+                    stack.append((inner, self.scanner(patterns, rule["end"]), rule))
                 else:
                     emit(tokens, lineno, match, rule.get("name"), rule.get("captures"), scopes)
                 pos = match.end() if match.end() > match.start() else match.start() + 1
         tokens.sort(key=lambda t: (t.line, t.start, t.start - t.end))
         return tokens
 
-    def leftmost(self, line, pos, patterns, end):
-        """The match that starts first; the end pattern and then rule order win ties."""
-        found = None
-        if end is not None:
-            match = self.compiled(end).search(line, pos)
-            if match is not None:
-                found = ("end", match, None)
-        for rule in self.rules(patterns):
-            pattern = rule.get("match") or rule["begin"]
-            match = self.compiled(pattern).search(line, pos)
-            if match is not None and (found is None or match.start() < found[1].start()):
-                found = ("begin" if "begin" in rule else "match", match, rule)
-        return found
-
     def gap(self, tokens, lineno, line, start, end, scopes):
         """Text no rule matched carries the scopes of the enclosing context."""
         if end > start:
             tokens.append(Token(lineno, start, end, line[start:end], scopes))
+
+
+class SlowEngine(Engine):
+    """The engine with SlowScanner in place of Scanner: the oracle."""
+
+    def scanner(self, patterns, end):
+        key = (id(patterns), end)
+        if key not in self.scanners:
+            self.scanners[key] = SlowScanner(self, self.rules(patterns), end)
+        return self.scanners[key]
 
 
 def emit(tokens, lineno, match, name, captures, scopes):
@@ -485,6 +581,92 @@ class MarkerTableTest(unittest.TestCase):
             any(t.text == name and "variable.other.fort" in t.scopes for t in tokens),
             f"{declaration}: {name} is not a variable",
         )
+
+
+class ScannerTest(unittest.TestCase):
+    """Scanner answers what one search for each rule answered (T-104).
+
+    SlowScanner is that oracle. The cases below name each rule of the search
+    on a grammar of two or three patterns, because a case that names the rule
+    is the witness and a corpus that agrees is only the class.
+    """
+
+    def setUp(self):
+        self.engine = Engine(load_grammar())
+
+    def scan(self, rules, end, line, pos=0):
+        fast = Scanner(self.engine, rules, end).search(line, pos)
+        slow = SlowScanner(self.engine, rules, end).search(line, pos)
+        if fast is None:
+            self.assertIsNone(slow)
+            return None
+        self.assertEqual((fast[0], fast[1].span(), fast[2]), (slow[0], slow[1].span(), slow[2]))
+        return fast
+
+    def test_the_match_that_starts_first_wins(self):
+        rules = [{"match": "b", "name": "b"}, {"match": "a", "name": "a"}]
+        kind, match, rule = self.scan(rules, None, "xxab")
+        self.assertEqual((kind, match.start(), rule["name"]), ("match", 2, "a"))
+
+    def test_rule_order_wins_a_tie(self):
+        rules = [{"match": "a+", "name": "first"}, {"match": "a", "name": "second"}]
+        _, match, rule = self.scan(rules, None, "aa")
+        self.assertEqual((rule["name"], match.group(0)), ("first", "aa"))
+
+    def test_the_end_pattern_wins_a_tie_with_a_rule(self):
+        kind, match, rule = self.scan([{"match": "x", "name": "x"}], "x", "ax")
+        self.assertEqual((kind, rule, match.start()), ("end", None, 1))
+
+    def test_a_rule_beats_an_end_pattern_that_starts_later(self):
+        kind, match, rule = self.scan([{"match": "x", "name": "x"}], "y", "xy")
+        self.assertEqual((kind, rule["name"], match.start()), ("match", "x", 0))
+
+    def test_a_begin_rule_is_reported_as_a_begin(self):
+        rules = [{"begin": '"', "end": '"', "name": "string"}]
+        kind, match, rule = self.scan(rules, None, 'a"b')
+        self.assertEqual((kind, match.start(), rule["name"]), ("begin", 1, "string"))
+
+    def test_the_captures_keep_the_numbers_of_their_own_rule(self):
+        """emit reads a capture by the group number of the rule, so the
+        alternation may not shift it: group 1 of the winner is group 1."""
+        rules = [{"match": "z"}, {"match": r"(a)(b)"}, {"match": r"(c)"}]
+        _, match, _ = self.scan(rules, None, "qab")
+        self.assertEqual((match.group(1), match.group(2), match.re.groups), ("a", "b", 2))
+
+    def test_a_search_starts_at_the_position_it_is_given(self):
+        _, match, _ = self.scan([{"match": "a", "name": "a"}], None, "aXa", 1)
+        self.assertEqual(match.start(), 2)
+
+    def test_a_rule_list_that_matches_nothing_answers_nothing(self):
+        self.assertIsNone(self.scan([{"match": "q"}], None, "abc"))
+
+    def test_an_empty_rule_list_answers_nothing(self):
+        self.assertIsNone(self.scan([], None, "abc"))
+
+    def test_the_scanner_of_one_rule_list_is_built_once(self):
+        """The alternation is compiled for each context and not for each
+        position, which is what makes it cheaper than the search it replaces."""
+        patterns = self.engine.grammar["patterns"]
+        first = self.engine.scanner(patterns, None)
+        self.assertIs(self.engine.scanner(patterns, None), first)
+        self.assertIsNot(self.engine.scanner(patterns, '"'), first)
+
+    def test_the_engine_answers_what_one_search_for_each_rule_answers(self):
+        """The whole engine over real fort, against the oracle.
+
+        The sample is the fixture and every 25th file of the corpus walk, so a
+        rule the fixture does not spell is still met. T-104 held the two
+        engines against all 684 files by hand and their token dumps were
+        byte-identical; this test keeps a sample of that in the gate.
+        """
+        walked = sorted({path for d in CORPUS_DIRS for path in d.rglob("*.ft")})
+        paths = [FIXTURE_DIR / "scopes.ft"] + walked[::25]
+        self.assertGreaterEqual(len(paths), 20)
+        slow = SlowEngine(load_grammar())
+        for path in paths:
+            with self.subTest(path=str(path)):
+                text = path.read_text(encoding="utf-8")
+                self.assertEqual(self.engine.tokenize(text), slow.tokenize(text))
 
 
 class CorpusTest(unittest.TestCase):
