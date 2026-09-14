@@ -875,6 +875,33 @@ bullet at a time and without a rewrite.
   `editors/vscode/test/fixtures/lexical.ft`), and a test asserts that partition, so a new
   directory of fort is a red test rather than a corpus nobody tokenizes -- which is what
   `test/fort` and `test/lang/programs` both were until T-079 measured it.
+  **One test checks one directory of `CORPUS_DIRS`, and the corpus is tokenized once** (T-104).
+  `test_the_corpus_is_the_size_it_says_it_is` walked the corpus to count it and then tokenized
+  every file a second time, which took one run of the module to 1394 calls of `Engine.tokenize`
+  over 7562338 bytes where the corpus is 684 files and 3837893 bytes. That second walk also gave
+  cover to `src/lsp` and `test/tty`, which stood in `CORPUS_DIRS` with no test of their own. Each
+  directory now has one test, `CORPUS_MINIMUMS` gives each its floor, and
+  `test_every_corpus_directory_is_checked_by_a_test` reads the source of the class and holds the
+  calls to `check_directory` against `CORPUS_DIRS`. A ticket that adds a directory adds a test
+  with it, or that guard goes red.
+  **The engine finds the leftmost token of a line in one search.** It called `re.search` once for
+  each of the 53 top-level rules at each position, and a search scans to the end of the line, so a
+  line cost `positions x rules x length` and not its bytes. `Scanner` writes the rules as one
+  alternation, each inside a group of its own, and `SlowScanner` keeps the old search as the
+  oracle of `ScannerTest`. The two changes take the module from 31.55 s to 4.87 s, five runs each
+  under `debug`. **Hold a rewrite of that engine to the dump and not to the assertions**: a
+  scanner that reports other scopes passes the suite and silently changes what the grammar is held
+  to. The dump is four lines of Python and prints 944368 lines for the 684 files of 2026-09-14;
+  take it before the change and after it, and `diff` the two:
+
+      cd test && python3 -c 'import highlight_test as h
+      e = h.Engine(h.load_grammar())
+      for p in sorted({p for d in h.CORPUS_DIRS for p in d.rglob("*.ft")}):
+       for t in e.tokenize(p.read_text()): print(p, t.line, t.start, t.end, repr(t.text), t.scopes)'
+  **Set `PYTHONDONTWRITEBYTECODE=1` for a hand run of a Python suite you are mutating.** T-104 ran
+  two mutants of one file within a few seconds and read the same three failures for both, because
+  the second run loaded the `__pycache__` of the first. CMake sets the variable for every Python
+  ctest, so the gate never meets it; a hand run does.
 - The VS Code extension is plain JavaScript on the VS Code API, with no npm dependency and no build
   step. Its logic lives in `editors/vscode/lib/check.js`, which never `require('vscode')`, so Node's
   built-in runner tests it: `tools/vm run 'cd editors/vscode && node --test'` (ctest
