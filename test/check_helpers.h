@@ -8,6 +8,7 @@
 #define FORT_TEST_CHECK_HELPERS_H
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -309,6 +310,71 @@ static inline const char* init_type(const char* name) {
 static inline const char* decl_type(const char* name) {
     const ast_node_t* d = node_in_main(AST_VAR_DECL, name);
     return sym_type_text(d != NULL ? d->sym : NULL);
+}
+
+/// The thirteen positions that give their operand no context at all, and so
+/// drop it when it is poisoned: `*e`, `e.f`, `e->f`, `e.len`, `e[i]`,
+/// `e[a .. b]`, `e()`, `&e`, `del(e)`, `move(e)`, an assignment target, `++`
+/// and a range `for` collection. Each writes `C` where the operand goes. Two
+/// suites read the table -- check_operand_test.c for what each position
+/// reports and check_poison_test.c for how many -- so it stands here rather
+/// than in either of them. Index 9 is `move`, which reports twice.
+/// D4.1, D4.5
+enum { DROP_SITE_COUNT = 13, DROP_SITE_MOVE = 9 };
+
+static inline const char* drop_site_form(uint64_t i) {
+    static const char* const SITES[DROP_SITE_COUNT] = {
+        "    println(*C);",
+        "    println((C).x);",
+        "    println((C)->x);",
+        "    println((C).len);",
+        "    println(C[0]);",
+        "    println((C)[0 .. 1]);",
+        "    println(C());",
+        "    println(&C);",
+        "    del(C);",
+        "    println(move(C));",
+        "    C = 1;",
+        "    C++;",
+        "    for (i32 x : C) {\n        println(x);\n    }",
+    };
+    return i < DROP_SITE_COUNT ? SITES[i] : NULL;
+}
+
+/// `form` with every `C` replaced by `constant`, as the body of a main. It
+/// returns NULL rather than a shorter program when the buffer would overflow,
+/// because a template that silently loses its tail is a test that silently
+/// stops testing: check_body of half a statement is a syntax error, which is a
+/// `false` the assertions would read as a pass. The buffer is shared, so one
+/// call is live at a time.
+static inline const char* site_body(const char* form, const char* constant) {
+    static char body[256];
+    uint64_t w = 0;
+    if (form == NULL) {
+        return NULL;
+    }
+    for (uint64_t r = 0; form[r] != '\0'; r++) {
+        if (form[r] != 'C') {
+            if (w + 1 >= sizeof body) {
+                return NULL;
+            }
+            body[w++] = form[r];
+            continue;
+        }
+        for (uint64_t k = 0; constant[k] != '\0'; k++) {
+            if (w + 1 >= sizeof body) {
+                return NULL;
+            }
+            body[w++] = constant[k];
+        }
+    }
+    body[w] = '\0';
+    return body;
+}
+
+/// `drop_site_form(i)` with `C` replaced by `constant`.
+static inline const char* drop_site(uint64_t i, const char* constant) {
+    return site_body(drop_site_form(i), constant);
 }
 
 /// The number of diagnostic lines the compilation reported.

@@ -20,53 +20,10 @@
 // Every operator that drops a poisoned operand, which is every position that
 // is no context at all. A constant with no default type is poisoned and
 // unreported, so each of these accepted the program in silence until
-// 2026-09-14: the compiler exited 0 and the program printed nothing.
+// 2026-09-14: the compiler exited 0 and the program printed nothing. The
+// thirteen positions are the table of check_helpers.h, which check_poison_test.c
+// reads as well.
 // D4.1, D4.5
-
-// The thirteen positions, each written once. The body goes inside `main`.
-static const char* const DROP_SITES[] = {
-    "    println(*C);",
-    "    println((C).x);",
-    "    println((C)->x);",
-    "    println((C).len);",
-    "    println(C[0]);",
-    "    println((C)[0 .. 1]);",
-    "    println(C());",
-    "    println(&C);",
-    "    del(C);",
-    "    println(move(C));",
-    "    C = 1;",
-    "    C++;",
-    "    for (i32 x : C) {\n        println(x);\n    }",
-};
-
-// `DROP_SITES[i]` with `C` replaced by `constant`. It returns NULL rather than
-// a shorter program when the buffer would overflow, because a template that
-// silently loses its tail is a test that silently stops testing: `check_body`
-// of half a statement is a syntax error, which is a `false` the assertions
-// below would read as a pass.
-static const char* drop_site(uint64_t i, const char* constant) {
-    static char body[256];
-    uint64_t w = 0;
-    for (uint64_t r = 0; DROP_SITES[i][r] != '\0'; r++) {
-        const char* piece = DROP_SITES[i][r] == 'C' ? constant : NULL;
-        if (piece == NULL) {
-            if (w + 1 >= sizeof body) {
-                return NULL;
-            }
-            body[w++] = DROP_SITES[i][r];
-            continue;
-        }
-        for (uint64_t k = 0; piece[k] != '\0'; k++) {
-            if (w + 1 >= sizeof body) {
-                return NULL;
-            }
-            body[w++] = piece[k];
-        }
-    }
-    body[w] = '\0';
-    return body;
-}
 
 TEST(every_operator_that_drops_its_operand_reports_a_constant_with_no_type, {
     // `2^63` written out folds to a value that neither i32 nor i64 holds, so
@@ -74,7 +31,7 @@ TEST(every_operator_that_drops_its_operand_reports_a_constant_with_no_type, {
     // none of these positions is a context; without that it is dropped with
     // the error type and nothing is ever said.
     // D4.1, D4.5
-    for (uint64_t i = 0; i < sizeof DROP_SITES / sizeof DROP_SITES[0]; i++) {
+    for (uint64_t i = 0; i < (uint64_t)DROP_SITE_COUNT; i++) {
         const char* body = drop_site(i, "9223372036854775808");
         TEST_ASSERT_TRUE(body != NULL);
         TEST_ASSERT_FALSE(check_body(body));
@@ -94,7 +51,7 @@ TEST(every_operator_that_drops_its_operand_reports_a_constant_it_carries, {
     // message names it. `n` is a variable, so the shift folds nothing.
     // D4.5, D6.2
     char source[512];
-    for (uint64_t i = 0; i < sizeof DROP_SITES / sizeof DROP_SITES[0]; i++) {
+    for (uint64_t i = 0; i < (uint64_t)DROP_SITE_COUNT; i++) {
         const char* body = drop_site(i, "(9223372036854775808 << n)");
         TEST_ASSERT_TRUE(body != NULL);
         TEST_UNUSED(snprintf(source, sizeof source, "    i32 n = 1;\n%s", body));
@@ -134,7 +91,7 @@ TEST(a_dropped_operand_that_is_no_constant_keeps_its_one_diagnostic, {
     // each of them, and the corpus could not see it, because the harness
     // judges a line and not a count.
     // D14.2
-    for (uint64_t i = 0; i < sizeof DROP_SITES / sizeof DROP_SITES[0]; i++) {
+    for (uint64_t i = 0; i < (uint64_t)DROP_SITE_COUNT; i++) {
         const char* body = drop_site(i, "nosuch");
         TEST_ASSERT_TRUE(body != NULL);
         TEST_ASSERT_FALSE(check_body(body));
@@ -142,7 +99,7 @@ TEST(a_dropped_operand_that_is_no_constant_keeps_its_one_diagnostic, {
         // `move` adds "'move' has no value", which it added before this guard
         // too: its early return leaves the result `void`.
         // D12.2
-        TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)(i == 9 ? 2 : 1));
+        TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)(i == DROP_SITE_MOVE ? 2 : 1));
     }
 })
 

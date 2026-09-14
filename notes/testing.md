@@ -163,6 +163,16 @@ bullet at a time and without a rewrite.
   that adds, moves or removes a diagnostic asserts the count where a test can read it --
   `diag_lines()` in `test/*_test.c` or `check_env.errors(&e)` in `test/fort/*_test.ft` -- and
   uses the `fail` test for the text and the position.
+  **A diagnostic that is removed is as invisible as one that is added, and neither directive can
+  see it** (T-129, the first mutation measurement of a removal). `judge_fail` asks whether an
+  annotated line carries a message, so a line that loses one of two keeps its annotation; and
+  `_stderr_problems` (`run_tests.py:670`) reports only `stderr lacks '<s>'`, so `//! stderr:`
+  asserts presence and has no negative or counting form. Measured on T-129: the guard that
+  silences `the expression expects <error>, not a constant` took `fail/constants/012` from 27
+  diagnostics on 13 lines to 14 and the whole corpus from 14 such diagnostics to 0, and the
+  corpus read `665 tests: 665 passed` with the guard reverted in both compilers. Three of the
+  five tests of `test/check_poison_test.c` went red under that mutant and `test/fort/check_test.ft`
+  aborted. A removal therefore needs the count and nothing else will do.
   **The position a `//! error:` annotation pins is the line alone. `//! stderr:` pins the
   column** (T-128). The harness matches an annotation to a diagnostic by `(file, line)` and by
   substring, so a report that moves along its line changes nothing it can see; a `//! stderr:`

@@ -449,6 +449,147 @@ fn void a_dropped_operand_that_is_no_constant_keeps_its_one_diagnostic() {
     }
 }
 
+// ---- the error type silences the second diagnostic ---------------------------------
+// D14.2
+//
+// `constant_fits` drew "the expression expects <error>, not a constant"
+// whenever a constant with no default type met a context, after the diagnostic
+// that poisoned the type had already reported. It also showed the reader the
+// internal name `<error>`. The C twin is test/check_poison_test.c.
+// D4.5, D14.2
+
+// The eight contexts that fix the type of an untyped constant, as the text
+// before the constant and the text after it.
+// D4.1
+string[8] CONTEXT_HEAD = string[8]{
+    "    println(",
+    "    println(",
+    "    println(cast(",
+    "    if (",
+    "    while (",
+    "    switch (",
+    "    println(new(i32, ",
+    "    println(1, ",
+};
+
+string[8] CONTEXT_TAIL = string[8]{
+    ");",
+    " + 1);",
+    ", i32));",
+    ") {\n        println(1);\n    }",
+    ") {\n        println(1);\n    }",
+    ") {\n        case 1: {\n            println(1);\n        }\n    }",
+    "));",
+    ");",
+};
+
+// `CONTEXT_HEAD[i]` with `operand` and `CONTEXT_TAIL[i]` after it, as the body
+// of `main`. The buffer is the caller's, so the view outlives this call.
+fn string context_site(strbuf.str_buf mut* b, u64 i, string operand) {
+    strbuf.append(b, CONTEXT_HEAD[i]);
+    strbuf.append(b, operand);
+    strbuf.append(b, CONTEXT_TAIL[i]);
+    return strbuf.view(b);
+}
+
+fn void a_context_that_meets_a_poisoned_constant_says_nothing_more() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    u64 mut i = 0;
+    while (i < CONTEXT_HEAD.len) {
+        if (i > 0) {
+            check_env.reopen(&e);
+        }
+        strbuf.str_buf mut b = strbuf.create();
+        // The rule of the default type reports the constant and gives the
+        // expression the error type. The context then retypes the constant
+        // against that error type, which is the second visit, and the error
+        // type silences it. Each drew two diagnostics until 2026-09-14.
+        // D4.5, D14.2
+        assert(!check_env.check_body(&e, context_site(&b, i, "9223372036854775808")));
+        assert(check_env.said(&e, "constant expression out of range"));
+        assert(!check_env.said(&e, "not a constant"));
+        assert(check_env.errors(&e) == 1);
+        strbuf.free(&b);
+        check_env.reopen(&e);
+        strbuf.str_buf mut u = strbuf.create();
+        // The other end of the range the rule has no type for, `2^64 - 1`.
+        // D4.5
+        assert(!check_env.check_body(&e, context_site(&u, i, "18446744073709551615")));
+        assert(!check_env.said(&e, "not a constant"));
+        assert(check_env.errors(&e) == 1);
+        strbuf.free(&u);
+        i += 1;
+    }
+}
+
+fn void every_position_that_drops_its_operand_reports_once() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    u64 mut i = 0;
+    while (i < DROP_HEAD.len) {
+        if (i > 0) {
+            check_env.reopen(&e);
+        }
+        strbuf.str_buf mut b = strbuf.create();
+        // The thirteen positions that are no context at all reach the same
+        // rule through `check_operand`, so each of them drew the same second
+        // diagnostic. `move` keeps two, because its early return leaves the
+        // result `void`, and the rule of an expression with no value answers
+        // that.
+        // D4.1, D12.2, D14.2
+        assert(!check_env.check_body(&e, drop_site(&b, i, "9223372036854775808")));
+        assert(check_env.said(&e, "constant expression out of range"));
+        assert(!check_env.said(&e, "not a constant"));
+        u64 mut want = 1;
+        if (i == 9) {
+            want = 2;
+        }
+        assert(check_env.errors(&e) == want);
+        strbuf.free(&b);
+        i += 1;
+    }
+}
+
+fn void a_context_with_a_real_type_still_names_itself() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The other half, and the reason the guard reads the type and not the
+    // message: a context whose type is no error still tells the reader what it
+    // expected. fail/operators/018 annotates these two messages, and
+    // fail/arrays/009 annotates a third, which stage1 never reaches because it
+    // refuses a second array level.
+    // D4.1, D4.2
+    assert(!check_env.check_body(&e, "    i32 n = 1;\n    i32* p = 1 << n;\n    println(p);"));
+    assert(check_env.said(&e, "the initializer expects i32*, not a constant"));
+    assert(check_env.errors(&e) == 1);
+    check_env.reopen(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    strbuf.append(&b, "struct s {\n    i32 x;\n}\nfn i32 main() {\n    i32 n = 1;\n");
+    strbuf.append(&b, "    s q = 1 << n;\n    println(q.x);\n    return 0;\n}\n");
+    assert(!check_env.check_src(&e, strbuf.view(&b)));
+    strbuf.free(&b);
+    assert(check_env.said(&e, "the initializer expects s, not a constant"));
+    assert(check_env.errors(&e) == 1);
+}
+
+fn void a_poisoned_context_of_its_own_stays_silent() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The type comes from a declaration that failed rather than from the
+    // constant, so the constant meets the error type with nothing wrong with
+    // it. One diagnostic, the one that named the unknown type.
+    // D14.2
+    assert(!check_env.check_body(&e, "    nosuch v = 1;\n    println(v);"));
+    assert(check_env.said(&e, "unknown type 'nosuch'"));
+    assert(!check_env.said(&e, "not a constant"));
+    assert(check_env.errors(&e) == 1);
+}
+
 fn void a_char_alone_in_such_an_expression_asks_for_char() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -1208,6 +1349,10 @@ fn i32 main() {
     a_constant_that_folds_back_into_range_leaves_the_operator_its_own_rule();
     a_dropped_operand_that_is_no_constant_keeps_its_one_diagnostic();
     a_dropped_operand_with_a_type_keeps_the_message_of_its_operator();
+    a_context_that_meets_a_poisoned_constant_says_nothing_more();
+    every_position_that_drops_its_operand_reports_once();
+    a_context_with_a_real_type_still_names_itself();
+    a_poisoned_context_of_its_own_stays_silent();
     a_char_alone_in_such_an_expression_asks_for_char();
     a_declared_char_is_no_more_an_integer_than_the_default_char_is();
     a_char_beside_an_integer_takes_the_integer_type();

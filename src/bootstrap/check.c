@@ -669,9 +669,22 @@ static bool type_is_integer_prim(const type_t* t) {
 }
 
 // Whether the untyped constant `v` may take the type `t`, with the diagnostic
-// that names the reason.
-// D4.2, D4.3, D10.5
+// that names the reason. A poisoned `t` reports nothing: the diagnostic that
+// poisoned it has already reported, and the error type silences every later
+// one. That also keeps the internal name `<error>` out of the message, which
+// is what the reader saw after `println(2^63)`. `operand_kind_ok` returns
+// true on a poisoned type for the same reason.
+//
+// Both branches of `default_type` that report reach here poisoned: the
+// out-of-range constant and `'null' needs a pointer-typed context`. The second
+// said nothing extra before the guard either, because `type_assignable` takes
+// a poisoned type on either side as assignable, so the `null` arm below
+// returned true already.
+// D4.2, D4.3, D10.5, D14.2
 static bool constant_fits(check_t* ck, loc_t loc, cval_t v, const type_t* t, const char* what) {
+    if (check_poisoned(t)) {
+        return true;
+    }
     if (v.kind == CV_NULL) {
         // D10.5
         if (type_assignable(t, type_null(&ck->types))) {
