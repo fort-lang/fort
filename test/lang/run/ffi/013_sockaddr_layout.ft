@@ -1,0 +1,118 @@
+//! run
+//! link: ffi/sockaddr.c
+//! stdout:
+//| size 16 true
+//| align true
+//| offsets true true true true
+//| stride true
+//| socklen true
+//| c wrote 2 40000 2130706433 200 207
+//| fort wrote true
+//| constants true true true true true
+//| htons 256 16540 65535 13330
+//| htons agrees true
+//| htonl 16777216 16777343 4294967295 2018915346
+//| htonl agrees true
+import std.net;
+
+// std.net declares sockaddr_in itself (stdlib.md 2.13) and C declares it in
+// <netinet/in.h>. The two must be the same 16 bytes, because bind(2) reads
+// fort's through C's member names. Nothing inside fort can see a disagreement:
+// a wrong offset used consistently agrees with itself, so this test writes each
+// field on one side of the boundary and reads it on the other, and holds every
+// offset and the size against C's offsetof and sizeof.
+// D3.8, D9.9
+extern fn u64 net_sizeof_sockaddr_in();
+extern fn u64 net_alignof_sockaddr_in();
+extern fn u64 net_offsetof_sockaddr_in(i32 field);
+extern fn u64 net_sizeof_socklen();
+extern fn void net_fill_sockaddr_in(net.sockaddr_in mut* a);
+extern fn bool net_check_sockaddr_in(net.sockaddr_in* a);
+extern fn i32 net_af_inet();
+extern fn i32 net_sock_stream();
+extern fn i32 net_sol_socket();
+extern fn i32 net_so_reuseaddr();
+extern fn u32 net_inaddr_any();
+extern fn u16 net_htons(u16 v);
+extern fn u32 net_htonl(u32 v);
+
+// The values ffi/sockaddr.c writes and checks. The port is above 32767, where a
+// signed swap and an unsigned one differ.
+u16 FILL_PORT = 40000;
+u32 FILL_ADDR = 0x7F000001;
+u8 FILL_ZERO_BASE = 200;
+
+// The distance between two addresses, which is fort's own offset of a field
+// (D3.11: a pointer reaches u64 through cast).
+fn u64 off(void* base, void* field) {
+    return cast(field, u64) - cast(base, u64);
+}
+
+fn i32 main() {
+    net.sockaddr_in mut addr = {};
+    println("size ", sizeof(net.sockaddr_in), " ",
+            sizeof(net.sockaddr_in) == net_sizeof_sockaddr_in());
+    // C's own alignment for the struct, which is 4 because sin_zero is a
+    // character array. This line holds C against C: fort has no alignof
+    // (type-system.md 8), so nothing here measures the alignment std.net's
+    // declaration has, and writing zero as a u64 leaves this line, the size
+    // and all four offsets true. It is here because a platform whose
+    // sockaddr_in aligned to 8 would be one this test had not read.
+    println("align ", net_alignof_sockaddr_in() == 4);
+    println("offsets ",
+            off(cast(&addr, void*), cast(&addr.family, void*))
+                == net_offsetof_sockaddr_in(0), " ",
+            off(cast(&addr, void*), cast(&addr.port, void*))
+                == net_offsetof_sockaddr_in(1), " ",
+            off(cast(&addr, void*), cast(&addr.addr, void*))
+                == net_offsetof_sockaddr_in(2), " ",
+            off(cast(&addr, void*), cast(&addr.zero[0], void*))
+                == net_offsetof_sockaddr_in(3));
+    // The stride between two elements is the size LLVM gave the struct, so
+    // this holds the compiler's layout against LLVM's as well as against C's.
+    net.sockaddr_in[2] pair = {};
+    println("stride ",
+            off(cast(&pair[0], void*), cast(&pair[1], void*))
+                == net_sizeof_sockaddr_in());
+    // socklen_t is the type of every length argument std.libc declares u32.
+    println("socklen ", net_sizeof_socklen() == 4);
+    // C writes one distinct value into each field and fort reads them back,
+    // undoing the network byte order with std.net's own helpers.
+    net_fill_sockaddr_in(&addr);
+    println("c wrote ", addr.family, " ", net.hton16(addr.port), " ",
+            net.hton32(addr.addr), " ", addr.zero[0], " ", addr.zero[7]);
+    // And the other way round.
+    net.sockaddr_in mut mine = {};
+    mine.family = cast(net.AF_INET, u16);
+    mine.port = net.hton16(FILL_PORT);
+    mine.addr = net.hton32(FILL_ADDR);
+    u64 mut i = 0;
+    while (i < 8) {
+        mine.zero[i] = FILL_ZERO_BASE + cast(i, u8);
+        i += 1;
+    }
+    println("fort wrote ", net_check_sockaddr_in(&mine));
+    // The five constants std.net states, against the system headers.
+    println("constants ", net.AF_INET == net_af_inet(), " ",
+            net.SOCK_STREAM == net_sock_stream(), " ",
+            net.SOL_SOCKET == net_sol_socket(), " ",
+            net.SO_REUSEADDR == net_so_reuseaddr(), " ",
+            net.INADDR_ANY == net_inaddr_any());
+    // The byte-order helpers against known values and against the C macros,
+    // which no extern declaration can reach (D9.8).
+    println("htons ", net.hton16(1), " ", net.hton16(FILL_PORT), " ",
+            net.hton16(65535), " ", net.hton16(0x1234));
+    println("htons agrees ",
+            net.hton16(1) == net_htons(1)
+                && net.hton16(FILL_PORT) == net_htons(FILL_PORT)
+                && net.hton16(65535) == net_htons(65535)
+                && net.hton16(0x1234) == net_htons(0x1234));
+    println("htonl ", net.hton32(1), " ", net.hton32(FILL_ADDR), " ",
+            net.hton32(0xFFFFFFFF), " ", net.hton32(0x12345678));
+    println("htonl agrees ",
+            net.hton32(1) == net_htonl(1)
+                && net.hton32(FILL_ADDR) == net_htonl(FILL_ADDR)
+                && net.hton32(0xFFFFFFFF) == net_htonl(0xFFFFFFFF)
+                && net.hton32(0x12345678) == net_htonl(0x12345678));
+    return 0;
+}

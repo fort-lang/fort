@@ -1,0 +1,80 @@
+//! run
+//! stdout:
+//| hton16 0 256 13330 4660 16540 32768 65535
+//| hton16 back true
+//| hton32 0 16777216 67305985 305419896 16777343 4294967295
+//| hton32 back true
+//| parse 0 16777343 16777226 4294967295 67305985
+//| rejects true true true true true true true true true true true true
+//| rejects keep out true
+import std.net;
+
+// The byte-order helpers and the dotted-quad reader of std.net (stdlib.md
+// 2.13), against values written out here. No socket is opened: every answer
+// below is arithmetic. The ports include 40000 and 65535, above the 32767
+// where a swap done in a signed 16-bit type gives a different answer from one
+// done in an unsigned one, and 0x1234, below it, where the two agree.
+// D6.2, D11.1
+
+// Every text parse_ipv4 must refuse: too few fields, too many, an empty field
+// at each end and in the middle, a field above 255, a field of four digits, a
+// non-digit, a sign, a space and a hexadecimal spelling.
+string[12] BAD = {"", "1.2.3", "1.2.3.4.5", "1.2.3.", ".1.2.3", "1..2.3",
+                  "1.2.3.256", "1.2.3.0004", "1.2.3.x", "1.2.3.-1",
+                  "127.0.0.1 ", "0x7f.0.0.1"};
+
+// Reads text and answers with the address, or with 1 when parse_ipv4 refuses
+// it; every accepted address below differs from 1.
+fn u32 parse(string text) {
+    u32 mut out = 1;
+    if (!net.parse_ipv4(text, &out)) {
+        return 1;
+    }
+    return out;
+}
+
+// True when parse_ipv4 refuses text and leaves *out alone, which is what D13.3
+// asks of a failing out-parameter.
+fn bool rejects(string text) {
+    u32 mut out = 7;
+    if (net.parse_ipv4(text, &out)) {
+        return false;
+    }
+    return out == 7;
+}
+
+fn i32 main() {
+    println("hton16 ", net.hton16(0), " ", net.hton16(1), " ",
+            net.hton16(0x1234), " ", net.hton16(0x3412), " ",
+            net.hton16(40000), " ", net.hton16(128), " ", net.hton16(65535));
+    // The swap is its own inverse, so one function converts both ways.
+    println("hton16 back ",
+            net.hton16(net.hton16(40000)) == 40000
+                && net.hton16(net.hton16(65535)) == 65535
+                && net.hton16(net.hton16(0x1234)) == 0x1234);
+    println("hton32 ", net.hton32(0), " ", net.hton32(1), " ",
+            net.hton32(0x01020304), " ", net.hton32(0x78563412), " ",
+            net.hton32(0x7F000001), " ", net.hton32(0xFFFFFFFF));
+    println("hton32 back ",
+            net.hton32(net.hton32(0x7F000001)) == 0x7F000001
+                && net.hton32(net.hton32(0xFFFFFFFF)) == 0xFFFFFFFF
+                && net.hton32(net.hton32(0x12345678)) == 0x12345678);
+    // Each address is in network byte order, so 127.0.0.1 reads 0x0100007F as
+    // a little-endian u32 and 1.2.3.4 reads 0x04030201.
+    println("parse ", parse("0.0.0.0"), " ", parse("127.0.0.1"), " ",
+            parse("010.0.0.1"), " ", parse("255.255.255.255"), " ",
+            parse("1.2.3.4"));
+    print("rejects");
+    for (string text : BAD[..]) {
+        print(" ", rejects(text));
+    }
+    println();
+    // And the same claim once more, as one conjunction, so that the line above
+    // cannot be read as a list of texts nobody checked.
+    bool mut all = true;
+    for (string text : BAD[..]) {
+        all = all && rejects(text);
+    }
+    println("rejects keep out ", all);
+    return 0;
+}

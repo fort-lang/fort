@@ -1242,8 +1242,9 @@ Sections:
   classify, parse integers, duplicate, NUL-terminated copies for C), `std.strbuf` (growable byte
   buffer), `std.vec` (`ptr_vec`, `int_vec`, the non-generic pattern), `std.strmap` (string-keyed
   open-addressing table), `std.math` (float bit casts, abs/min/max per type), `std.sort` (an
-  in-place sort of an array over libc `qsort`), `std.rt` (the runtime itself, D13.1: process start
-  and exit, allocation, the failure paths and the print buffers, over `std.libc`) and
+  in-place sort of an array over libc `qsort`), `std.net` (a TCP listener and a TCP connection over
+  `std.libc`, IPv4 only and with no name resolution), `std.rt` (the runtime itself, D13.1: process
+  start and exit, allocation, the failure paths and the print buffers, over `std.libc`) and
   `std.rt_float` (the float text of D18.1, to a descriptor or to a `str_buf`, apart from `std.rt`
   because a compiler without floats cannot compile it).
 - history: Amended 2026-09-11 (T-087): the five `fort_rt_*` declarations stood in `std.libc`, whose
@@ -1261,7 +1262,12 @@ Sections:
   `stdlib.md` 2.10 specifies it. Its element type must own nothing, because the sort permutes the
   elements inside C, where the ownership rules of D17 see nothing. Amended 2026-09-13 (T-107):
   `std.rt_float` held the two printers alone; it also holds the two buffer formatters of D18.1 as
-  amended, and it imports `std.strbuf` for them.
+  amended, and it imports `std.strbuf` for them. Amended 2026-09-14 (T-097): `std.net` joins the
+  list and `stdlib.md` 2.13 specifies it. It resolves no name: `connect` reads a dotted quad,
+  because `getaddrinfo` answers with a list the caller must free and no `extern` signature can
+  carry that ownership across the boundary (D17, D9.8). Its seven `extern` declarations stand in
+  `std.libc` with every other one, so a program that declares `socket` or `bind` itself must now
+  match those signatures (D9.8).
 
 ### D13.3 The error-handling idiom
 - owner: `stdlib.md`.

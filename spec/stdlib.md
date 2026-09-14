@@ -116,7 +116,7 @@ library follows:
 ### 1.5 Naming
 
 Module short names are the last path segment:
-`sys libc mem io str strbuf vec strmap math sort`.
+`sys libc mem io str strbuf vec strmap math sort net`.
 Functions, struct and enum types, enum members, fields and variables are `lower_case` with
 underscores (`str_buf`, `ptr_vec`, `str_map_entry`); module constants are `UPPER_CASE` (D1.4).
 When a module has several struct types, the functions carry the type as a prefix
@@ -140,6 +140,7 @@ import binding's name for a local even though D7.9 permits it.
 | `std.strmap`    | `str`                                       | string-keyed open-addressing map |
 | `std.math`      | none                                        | float bit casts, abs, min, max   |
 | `std.sort`      | `libc`                                      | an array sorted in place         |
+| `std.net`       | `libc`, `str`, `sys`                        | a TCP listener and a connection  |
 
 The import graph is acyclic (D9.5). A program imports what it uses: `import std.io;` and then
 `io.read_file(...)` (D9.3, D9.4).
@@ -217,6 +218,7 @@ i32 SEEK_END = 2;
 i32 ENOENT = 2;
 i32 EINTR = 4;
 i32 EACCES = 13;
+i32 EINVAL = 22;
 
 // <stdlib.h>, <string.h>
 extern fn void* own malloc(u64 size);
@@ -239,6 +241,15 @@ extern fn i64 write(i32 fd, void* buf, u64 n);
 extern fn i32 close(i32 fd);
 extern fn i64 lseek(i32 fd, i64 offset, i32 whence);
 extern fn i32 isatty(i32 fd);
+
+// <sys/socket.h>, <netinet/in.h>
+extern fn i32 socket(i32 domain, i32 kind, i32 protocol);
+extern fn i32 setsockopt(i32 fd, i32 level, i32 name, void* value, u32 len);
+extern fn i32 bind(i32 fd, void* addr, u32 len);
+extern fn i32 listen(i32 fd, i32 backlog);
+extern fn i32 accept(i32 fd, void* addr, u32 mut* len);
+extern fn i32 connect(i32 fd, void* addr, u32 len);
+extern fn i32 getsockname(i32 fd, void* addr, u32 mut* len);
 
 // <errno.h>: errno is a macro over this accessor in glibc and musl.
 extern fn i32 mut* __errno_location();
@@ -272,6 +283,15 @@ Ownership: `malloc`, `calloc` and `free` carry it in their types, so a
 and returns views, and the library wraps every ownership-bearing call below.
 Direct use looks like `libc.write(fd, cast(s.ptr, void*), s.len) == cast(s.len, i64)`, which
 writes a string to a descriptor, bypassing the runtime's buffers.
+
+The seven socket calls come from `<sys/socket.h>` and `<netinet/in.h>`. `socklen_t` is
+`unsigned int`, so it is `u32`; an address is a buffer, so it crosses as `void*` (1.4); `accept`
+and `getsockname` take the address length through a pointer because they write it back, and a
+scalar out-parameter keeps its type rather than becoming a `void*` (1.4). `htons` and `htonl` are
+absent: glibc defines each as a macro as well as a function, and a macro has no symbol an `extern`
+declaration can name (D9.8), so `std.net` writes the two swaps in fort. `std.net` wraps all seven
+calls and is what a program uses (2.13). A program that declares one of these symbols itself must
+write the same signature, because `std.libc` is in every import closure (D9.8, D9.10).
 
 ### 2.3 `std.mem`
 
@@ -976,6 +996,101 @@ fn void append_f64(strbuf.str_buf mut* b, f64 v)
   its imports.
 - Everything else the module declares -- the decimal, the search of D18.2 and the layout of
   D18.3, which `toolchain.md` 5.1 describes -- is an implementation detail (1.1).
+
+### 2.13 `std.net`
+
+A TCP listener and a TCP connection over `std.libc` (D13.2). IPv4 only, and no name resolution:
+`connect` takes a dotted quad. `getaddrinfo` is absent because it answers with a list the caller
+must release with `freeaddrinfo`, and no `extern` signature can carry that ownership across the
+boundary (D17, D9.8).
+
+A descriptor is not an owning value. D17 has no rule that releases one, so **the caller closes
+every descriptor these functions answer with**, and the idiom is `defer libc.close(fd);` beside
+the call that opened it. `listen`, `accept` and `connect` answer with the descriptor, or with
+**`-1`** and the reason in `sys.errno()`, which is the sentinel 1.2 names for a descriptor that
+could not be opened and the form `io.open_read` already takes (D13.3). A call that fails after it
+opened a descriptor closes that descriptor before it answers, so a failure leaks nothing, and it
+writes `errno` back after that `close(2)`, so the value a caller reads is the failing call's.
+
+```fort
+// <sys/socket.h> and <netinet/in.h>, Linux x86-64 values.
+i32 AF_INET = 2;
+i32 SOCK_STREAM = 1;
+i32 SOL_SOCKET = 1;
+i32 SO_REUSEADDR = 2;
+u32 INADDR_ANY = 0;
+
+struct sockaddr_in {
+    u16 family;
+    u16 port;
+    u32 addr;
+    u8[8] zero;
+}
+```
+
+```fort
+fn u16 hton16(u16 v)
+fn u32 hton32(u32 v)
+fn bool parse_ipv4(string text, u32 mut* out)
+fn i32 listen(u16 port, i32 backlog)
+fn i32 accept(i32 fd)
+fn i32 connect(string host_ipv4, u16 port)
+fn bool local_port(i32 fd, u16 mut* out)
+```
+
+- `sockaddr_in`: the IPv4 socket address of `<netinet/in.h>`, which `bind(2)` and `connect(2)`
+  read through a pointer. Struct layout is the C ABI's (D3.8), so the four fields must land where
+  C puts them, and `sizeof` must be C's 16. `zero` is written `u8[8]` and not `u64` because C's
+  field is a character array of 8, which asks 1 byte of alignment where a `u64` asks 8. Nothing
+  holds that choice: fort has no `alignof` (`type-system.md` 8), so `run/ffi/013` holds C's
+  `_Alignof` against 4 and nothing against fort's, and a `u64` there leaves the size, all four
+  offsets and the C alignment true. `port` and `addr` hold network byte order.
+- `hton16`, `hton32`: host to network order for a 16-bit and a 32-bit value. Each is its own
+  inverse, so the same function reads a port or an address back. The bytes reverse, which is what
+  a little-endian target needs (D19.2). Each byte is masked to 8 bits and moved by a shift, and
+  `|` joins the parts, so no step traps in the checked mode (D11.1, D6.2). Ownership: none.
+- `parse_ipv4`: reads a dotted quad (`"127.0.0.1"`) and delivers the address in network byte
+  order, ready for a `sockaddr_in.addr` field. Exactly four fields, each one to three decimal
+  digits with a value of at most 255, no space, no sign and no text after the fourth field; a
+  leading zero is decimal and not octal. Returns `false` and leaves `*out` unchanged for anything
+  else (D13.3). Ownership: none.
+- `listen`: a listening TCP socket bound to `port` on every interface (`INADDR_ANY`), with the
+  backlog of `listen(2)`, or `-1`. `SO_REUSEADDR` is set before the bind, so a
+  restart inside the TIME_WAIT window still binds. Port 0 asks the kernel for a free port, which
+  `local_port` then reads back; it is what a test uses, so that two programs never choose one
+  number. Ownership: none in the types; the caller closes the descriptor.
+- `accept`: waits for the next connection on a listening descriptor and answers with a descriptor
+  for it, or with `-1`. The peer's address is not delivered. Ownership: none in the
+  types; the caller closes the descriptor.
+- `connect`: a TCP connection to `host_ipv4` on `port`, or `-1`. A `host_ipv4` that `parse_ipv4`
+  refuses makes no system call: `connect` sets `errno` to `EINVAL` itself, so that one test
+  answers every failure. Ownership: none in the types;
+  the caller closes the descriptor.
+- `local_port`: the port `fd` is bound to, in host order, through `getsockname(2)`. Returns
+  `false` and leaves `*out` unchanged on failure, with the reason in `sys.errno()`. Ownership:
+  none.
+
+```fort
+import std.io;
+import std.libc;
+import std.net;
+
+fn bool serve_one(u16 port) {
+    i32 server = net.listen(port, 16);
+    if (server < 0) {
+        return false;
+    }
+    defer libc.close(server);
+    i32 session = net.accept(server);
+    if (session < 0) {
+        return false;
+    }
+    defer libc.close(session);
+    u8[4096] mut buf = {};
+    i64 n = io.read(session, buf[..]);
+    return n > 0 && io.write_all(session, buf[0..cast(n, u64)]);
+}
+```
 
 ## 3. The runtime surface the library relies on
 

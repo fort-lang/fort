@@ -1,0 +1,101 @@
+//! run
+//! stdout:
+//| bad quad -1 22
+//| refused -1 111
+//| accept not a socket -1 88
+//| local_port bad fd true 7
+//| port in use true
+//| no descriptors leaked true
+//| listener still works true
+import std.io;
+import std.libc;
+import std.net;
+import std.sys;
+
+// The failure paths of std.net (stdlib.md 2.13): every one answers -1 with the
+// reason in sys.errno(), or false with an untouched out-parameter, and none of
+// them leaks the descriptor it opened. The errno numbers below are Linux's:
+// EINVAL is 22, ECONNREFUSED 111 and ENOTSOCK 88. The test names them rather
+// than testing that the answer is merely negative, because the value a caller
+// reads has to be the failing call's own and not close(2)'s.
+// D13.3
+
+fn i32 main() {
+    // A text parse_ipv4 refuses opens no socket at all: connect sets errno to
+    // EINVAL itself, so one test answers every failure.
+    i32 bad = net.connect("999.1.1.1", 80);
+    println("bad quad ", bad, " ", sys.errno());
+
+    // A port nobody listens on: bind one, learn its number, close it, and
+    // connect to it. Nothing else on the machine can hold the number in
+    // between, because the kernel chose it for this process.
+    u16 mut dead = 0;
+    i32 gone = net.listen(0, 1);
+    if (gone < 0 || !net.local_port(gone, &dead)) {
+        println("setup failed");
+        return 1;
+    }
+    libc.close(gone);
+    i32 refused = net.connect("127.0.0.1", dead);
+    // ECONNREFUSED, and not the EBADF that a close(2) of the already closed
+    // descriptor would leave behind: connect closes its socket on the failure
+    // path and writes errno back afterwards.
+    println("refused ", refused, " ", sys.errno());
+    if (refused >= 0) {
+        libc.close(refused);
+    }
+
+    // accept(2) on a descriptor that is not a socket. Standard input is one:
+    // the test harness gives the program a pipe or an empty file.
+    i32 not_a_socket = net.accept(io.STDIN);
+    println("accept not a socket ", not_a_socket, " ", sys.errno());
+
+    // A getsockname(2) that fails leaves the out-parameter alone.
+    u16 mut port = 7;
+    println("local_port bad fd ", !net.local_port(-1, &port), " ", port);
+
+    // A second listener on a port the first one holds fails to bind, even
+    // though both ask for SO_REUSEADDR: the option releases a port left in
+    // TIME_WAIT and not one a live socket is listening on.
+    i32 server = net.listen(0, 4);
+    u16 mut taken = 0;
+    if (server < 0 || !net.local_port(server, &taken)) {
+        println("setup failed");
+        return 1;
+    }
+    defer libc.close(server);
+    i32 second = net.listen(taken, 4);
+    println("port in use ", second == -1);
+    if (second >= 0) {
+        libc.close(second);
+    }
+
+    // A listen that fails closes the socket it opened before it answers, so a
+    // run of failures does not use the process's descriptors up. A leak would
+    // show as a descriptor number that climbs, because the kernel hands out
+    // the lowest free one; after 64 failed binds the next one is still small.
+    u64 mut tries = 0;
+    while (tries < 64) {
+        i32 leaked = net.listen(taken, 4);
+        if (leaked != -1) {
+            println("a second bind of the same port succeeded");
+            libc.close(leaked);
+            return 1;
+        }
+        tries += 1;
+    }
+    i32 after = net.listen(0, 4);
+    println("no descriptors leaked ", after >= 0 && after < 16);
+    if (after >= 0) {
+        libc.close(after);
+    }
+
+    // The failed binds above closed their own descriptors and left the first
+    // listener working, which a connection to it proves.
+    i32 client = net.connect("127.0.0.1", taken);
+    println("listener still works ", client >= 0);
+    if (client >= 0) {
+        libc.close(client);
+    }
+    return 0;
+}

@@ -571,13 +571,29 @@ bullet at a time and without a rewrite.
 - **A blocking write never returns short, so no test here witnesses a retry loop over `write(2)`.**
   POSIX makes a blocking write to a pipe or to a file return only after it has written every byte.
   `write_all` in `std/rt.ft` therefore runs its loop a second time only after `EINTR` or on a
-  non-blocking descriptor, and a fort program can arrange neither: `std/libc.ft` declares no
-  `pipe`, no `mkfifo` and no `socket`, and `O_NONBLOCK` does nothing on a regular file. A
+  non-blocking descriptor, and a fort program can arrange neither. A
   200000-byte write to the harness's pipe arrives whole, and cutting that loop to a single `write`
   left `run/stdlib/090` green. The `EINTR` branch beside it is uncovered for the same reason, so
   name **both** branches when you record the gap. Assert that every byte arrives, which does catch
   a bypass path that drops bytes, and write in the test what it cannot see instead of claiming the
-  loop.
+  loop. **The reason changed on 2026-09-14 and the gap did not** (T-097). Until then the reason
+  was that `std/libc.ft` declared no `pipe`, no `mkfifo` and no `socket`, so no short-writing
+  descriptor could be opened at all. `std.net` adds `socket`, `bind`, `listen`, `accept` and
+  `connect`, and six tests open a loopback connection, so the corpus now has such a descriptor.
+  It still cannot make one write short. A blocking socket write returns only when every byte is
+  in the send buffer, and the guest's loopback buffer measured **2612608** bytes against the
+  **12288** that `run/stdlib/119` sends, a margin of 212. Filling it would need a write larger
+  than the buffer, which in a one-process test deadlocks: nothing reads the other end while the
+  writer blocks. `O_NONBLOCK` is still out of reach, because `std/libc.ft` declares no `fcntl`
+  and `socket` takes no `SOCK_NONBLOCK` here.
+- **An errno that a later call could overwrite is not witnessed by a call that succeeds.**
+  `net.close_and_fail` in `std/net.ft` reads `errno`, closes the descriptor its failed call
+  opened and writes `errno` back, so that a caller of `net.listen` reads the `bind(2)` error and
+  not `close(2)`'s. Deleting the write-back leaves `run/stdlib/118` green, which names the exact
+  errno of three failures (22, 111, 88), because `close(2)` of a valid descriptor succeeds and
+  leaves `errno` alone. The branch that needs the write-back is a `close` interrupted by a
+  signal, which no test here can arrange. Keep the write-back, and say in the source that nothing
+  holds it (T-097).
 - **A mutation audit measures what the corpus holds, which the ratio cannot.** T-077 broke, one at
   a time, one line of each of the 88 decisions `src/fort/check.ft` and `src/fort/check_stmt.ft`
   cite. It ran five oracles against each mutant, in cost order: the 219 `fail` tests under stage2

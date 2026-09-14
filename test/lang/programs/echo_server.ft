@@ -1,0 +1,151 @@
+//! run
+//! stdout:
+//| listening true
+//| connection 1
+//| echo hello
+//| echo world
+//| end of stream 0
+//| connection 2
+//| echo again
+//| end of stream 0
+//| accepted 2 connections
+import std.io;
+import std.libc;
+import std.net;
+
+// A TCP echo server over std.net (stdlib.md 2.13): it accepts a connection,
+// reads bytes, writes them back, and takes the next connection when the peer
+// closes. std.net makes it a program about echoing rather than about socket
+// addresses: no extern declaration, no sockaddr_in, no byte order, no length
+// argument.
+//
+// This test is blind to the byte order of the port. It binds port 0, reads the
+// number back with net.local_port and hands it to net.connect, so both ends
+// swap the same way and a hton16 replaced by `return v;` leaves it green. What
+// holds the swap is run/ffi/013_sockaddr_layout.ft, against C's htons, and
+// run/stdlib/116_net_byte_order.ft, against written-out values. Do not delete
+// either and read this suite as cover for them.
+//
+// The program is its own client, because a language test runs one process and
+// may reach no network but the loopback interface. It listens on port 0, asks
+// the kernel which port it got, and then, for each connection, opens the client
+// end, sends its messages and reads each echo back before it closes. The
+// exchange is interleaved for a reason: one process cannot block in the server
+// loop and write from the client at the same time.
+//
+// A descriptor is not an owning value, so every one of them carries a
+// `defer libc.close(...)` beside the call that opened it, and `defer` is
+// block-scoped, so the client of each connection closes where its block ends.
+// D7.8, D13.3, D17
+
+u64 BUF_SIZE = 4096;
+i32 BACKLOG = 16;
+u64 CONNECTIONS = 2;
+
+// Reads one chunk from fd and writes it back. The result is the number of
+// bytes echoed, 0 when the peer has closed, and -1 on an error.
+fn i64 echo_once(i32 fd) {
+    u8 mut@ own buf = new(u8, BUF_SIZE);
+    defer del(buf);
+    i64 n = io.read(fd, buf[..]);
+    if (n <= 0) {
+        return n;
+    }
+    if (!io.write_all(fd, buf[0..cast(n, u64)])) {
+        return -1;
+    }
+    return n;
+}
+
+// The server loop for one connection: echo until the peer closes or an error
+// stops it, and answer with the number of bytes moved.
+fn i64 serve(i32 fd) {
+    i64 mut total = 0;
+    while (true) {
+        i64 n = echo_once(fd);
+        if (n <= 0) {
+            return total;
+        }
+        total += n;
+    }
+    return total;
+}
+
+// Sends text on fd, echoes it on peer, reads it back and prints what came
+// back. It is the client and the server of one message, in that order, so
+// neither end waits for the other.
+fn bool exchange(i32 fd, i32 peer, string text) {
+    if (!io.write_all(fd, cast(text, u8@))) {
+        return false;
+    }
+    if (echo_once(peer) <= 0) {
+        return false;
+    }
+    u8[4096] mut buf = {};
+    i64 n = io.read(fd, buf[..]);
+    if (n <= 0) {
+        return false;
+    }
+    println("echo ", cast(buf[0..cast(n, u64)], string));
+    return true;
+}
+
+fn i32 main() {
+    i32 server = net.listen(0, BACKLOG);
+    println("listening ", server >= 0);
+    if (server < 0) {
+        return 1;
+    }
+    defer libc.close(server);
+
+    u16 mut port = 0;
+    if (!net.local_port(server, &port)) {
+        println("local_port failed");
+        return 1;
+    }
+
+    u64 mut connections = 0;
+    while (connections < CONNECTIONS) {
+        connections += 1;
+        println("connection ", connections);
+        i32 mut session = -1;
+        {
+            i32 client = net.connect("127.0.0.1", port);
+            if (client < 0) {
+                println("connect failed ", client);
+                return 1;
+            }
+            defer libc.close(client);
+
+            session = net.accept(server);
+            if (session < 0) {
+                println("accept failed ", session);
+                return 1;
+            }
+
+            if (connections == 1) {
+                if (!exchange(client, session, "hello")) {
+                    println("exchange failed");
+                    return 1;
+                }
+                if (!exchange(client, session, "world")) {
+                    println("exchange failed");
+                    return 1;
+                }
+            } else if (!exchange(client, session, "again")) {
+                println("exchange failed");
+                return 1;
+            }
+        }
+        // The client closed where the block ended, so the server loop reads
+        // end of file and stops. It moves 0 bytes here because exchange has
+        // already echoed every one of them through echo_once, which is this
+        // loop's body: what the line holds is the way the loop ends, which is
+        // the only way a server gets to its next connection.
+        defer libc.close(session);
+        println("end of stream ", serve(session));
+    }
+
+    println("accepted ", connections, " connections");
+    return 0;
+}

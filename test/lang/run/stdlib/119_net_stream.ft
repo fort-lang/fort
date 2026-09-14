@@ -1,0 +1,140 @@
+//! run
+//! stdout:
+//| listen true
+//| sent 12288 true
+//| echoed 12288
+//| received 12288 true
+//| pattern true
+//| second message 5 hello
+//| closed 0
+import std.io;
+import std.libc;
+import std.net;
+
+// A stream longer than one read(2) over a loopback connection (stdlib.md
+// 2.13). One short message fits in one read and says nothing about the loop
+// that reads the rest, so this one sends 12288 bytes, which is three chunks of
+// the 4096 io.read is given here, and checks every byte of what comes back.
+//
+// This test is blind to the byte order of the port. It binds port 0, reads the
+// number back with net.local_port and hands it to net.connect, so both ends
+// swap the same way and a hton16 replaced by `return v;` leaves it green. What
+// holds the swap is run/ffi/013_sockaddr_layout.ft, against C's htons, and
+// run/stdlib/116_net_byte_order.ft, against written-out values. Do not delete
+// either and read this suite as cover for them.
+//
+// 12288 bytes fit in the socket buffers of both directions, so one program can
+// be both ends: the write completes before anything reads, and no step waits
+// for a step that has not run. The guest's loopback buffer measured 2612608
+// bytes, a margin of 212, so the size is not near the edge; a write above it
+// would deadlock here rather than fail (notes/testing.md 7).
+// D13.3
+
+u64 TOTAL = 12288;
+u64 CHUNK = 4096;
+
+// Byte i of the pattern, which changes with i so that a chunk delivered twice,
+// or in the wrong order, does not read as the right answer.
+fn u8 pattern_at(u64 i) {
+    return cast((i * 7 + i / 256) % 251, u8);
+}
+
+// Reads up to CHUNK bytes from src and writes them back to dst, and answers
+// with the number of bytes moved; 0 means the peer has closed.
+fn i64 echo_chunk(i32 src, i32 dst) {
+    u8[4096] mut buf = {};
+    i64 n = io.read(src, buf[..]);
+    if (n <= 0) {
+        return n;
+    }
+    if (!io.write_all(dst, buf[0..cast(n, u64)])) {
+        return -1;
+    }
+    return n;
+}
+
+fn i32 main() {
+    i32 server = net.listen(0, 4);
+    println("listen ", server >= 0);
+    if (server < 0) {
+        return 1;
+    }
+    defer libc.close(server);
+    u16 mut port = 0;
+    if (!net.local_port(server, &port)) {
+        println("local_port failed");
+        return 1;
+    }
+
+    i32 mut session = -1;
+    {
+        i32 client = net.connect("127.0.0.1", port);
+        if (client < 0) {
+            println("connect failed ", client);
+            return 1;
+        }
+        defer libc.close(client);
+        session = net.accept(server);
+        if (session < 0) {
+            println("accept failed ", session);
+            return 1;
+        }
+
+        u8 mut@ own out = new(u8, TOTAL);
+        defer del(out);
+        u64 mut i = 0;
+        while (i < TOTAL) {
+            out[i] = pattern_at(i);
+            i += 1;
+        }
+        println("sent ", TOTAL, " ", io.write_all(client, out[..]));
+
+        // The server half echoes chunk by chunk until it has seen everything
+        // the client sent, which takes more than one read.
+        i64 mut echoed = 0;
+        while (cast(echoed, u64) < TOTAL) {
+            i64 n = echo_chunk(session, session);
+            if (n <= 0) {
+                println("echo stopped at ", echoed);
+                return 1;
+            }
+            echoed += n;
+        }
+        println("echoed ", echoed);
+
+        // And the client reads its own bytes back, also in several reads.
+        u8 mut@ own back = new(u8, TOTAL);
+        defer del(back);
+        u64 mut done = 0;
+        while (done < TOTAL) {
+            i64 n = io.read(client, back[done..]);
+            if (n <= 0) {
+                println("read stopped at ", done);
+                return 1;
+            }
+            done += cast(n, u64);
+        }
+        println("received ", done, " ", done == TOTAL);
+
+        bool mut same = true;
+        u64 mut k = 0;
+        while (k < TOTAL) {
+            same = same && back[k] == pattern_at(k);
+            k += 1;
+        }
+        println("pattern ", same);
+
+        // The connection carries a second message after the first, so the
+        // stream is still in step: nothing was left unread in either buffer.
+        io.write_all(client, cast("hello", u8@));
+        u8[64] mut tail = {};
+        i64 m = io.read(session, tail[..]);
+        println("second message ", m, " ", cast(tail[0..cast(m, u64)], string));
+    }
+    defer libc.close(session);
+
+    // The block above closed the client, so the server side is at end of file.
+    u8[64] mut rest = {};
+    println("closed ", io.read(session, rest[..]));
+    return 0;
+}

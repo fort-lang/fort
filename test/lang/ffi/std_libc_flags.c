@@ -56,3 +56,7 @@ int32_t std_eintr(void) {
 int32_t std_eacces(void) {
     return EACCES;
 }
+
+int32_t std_einval(void) {
+    return EINVAL;
+}

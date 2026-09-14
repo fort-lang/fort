@@ -15,7 +15,7 @@ extension went to `editors/README.md`, as the routing table of `AGENTS.md` sends
 
 The rules below govern the comments of the compiled sources: `src/**`, `std/*.ft`, and the C and
 fort files of `test/` that are code. `SOURCE_GLOBS` in `tools/knowledge_lint.py` is that list,
-356 files today, and `EXCLUDED` beside it names the code the lint does not read with a reason for
+358 files today, and `EXCLUDED` beside it names the code the lint does not read with a reason for
 each: the language corpus of `test/lang`, whose files are fixtures of the harness, and the
 fixtures of the VS Code extension, whose line numbers stand in a `*-document.json` a test
 compares. A file that is in neither list fails `test_every_code_file_is_read_or_excluded`, and a

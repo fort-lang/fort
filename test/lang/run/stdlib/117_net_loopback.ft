@@ -1,0 +1,87 @@
+//! run
+//! stdout:
+//| listen true
+//| port true true
+//| connect true
+//| accept true
+//| client sent true
+//| server read 4 ping
+//| server sent true
+//| client read 5 pong!
+//| eof 0
+import std.io;
+import std.libc;
+import std.net;
+
+// One program is both ends of a TCP connection over the loopback interface
+// (stdlib.md 2.13): it listens on port 0, asks the kernel which port it got,
+// connects to itself, and moves bytes in both directions. Port 0 is what keeps
+// two tests of this corpus from ever choosing the same number.
+//
+// This test is blind to the byte order of the port. It binds port 0, reads the
+// number back with net.local_port and hands it to net.connect, so both ends
+// swap the same way and a hton16 replaced by `return v;` leaves it green. What
+// holds the swap is run/ffi/013_sockaddr_layout.ft, against C's htons, and
+// run/stdlib/116_net_byte_order.ft, against written-out values. Do not delete
+// either and read this suite as cover for them.
+//
+// A descriptor is not an owning value and D17 has no rule that closes one, so
+// every descriptor here carries `defer libc.close(...)` beside the call that
+// opened it.
+// D13.3, D17
+
+fn i32 main() {
+    i32 server = net.listen(0, 4);
+    println("listen ", server >= 0);
+    if (server < 0) {
+        return 1;
+    }
+    defer libc.close(server);
+
+    u16 mut port = 0;
+    bool got = net.local_port(server, &port);
+    println("port ", got, " ", port != 0);
+    if (!got) {
+        return 1;
+    }
+
+    // The client half lives in a block of its own, so its `defer` closes it
+    // where the block ends (D7.8) and the read after it meets end of file.
+    // connect(2) completes before accept(2) is called, because the kernel
+    // finishes the handshake into the listen backlog, so one thread does both.
+    i32 mut session = -1;
+    {
+        i32 client = net.connect("127.0.0.1", port);
+        println("connect ", client >= 0);
+        if (client < 0) {
+            return 1;
+        }
+        defer libc.close(client);
+
+        session = net.accept(server);
+        println("accept ", session >= 0);
+        if (session < 0) {
+            return 1;
+        }
+
+        // Client to server. Both messages are shorter than one socket buffer,
+        // so neither write blocks waiting for the other end to read.
+        println("client sent ", io.write_all(client, cast("ping", u8@)));
+        u8[64] mut buf = {};
+        i64 n = io.read(session, buf[..]);
+        println("server read ", n, " ", cast(buf[0..cast(n, u64)], string));
+
+        // And server to client.
+        println("server sent ", io.write_all(session, cast("pong!", u8@)));
+        u8[64] mut back = {};
+        i64 m = io.read(client, back[..]);
+        println("client read ", m, " ", cast(back[0..cast(m, u64)], string));
+    }
+    defer libc.close(session);
+
+    // The block above closed the client, and a closed peer reads as the 0 of
+    // read(2).
+    u8[64] mut rest = {};
+    println("eof ", io.read(session, rest[..]));
+    return 0;
+}

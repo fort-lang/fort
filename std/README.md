@@ -8,8 +8,9 @@ failure lines, and formats and buffers what the print family writes, all over `s
 of the library calls),
 `std.mem`, `std.str`, `std.sys`, `std.strbuf` (the growable buffer), `std.vec` (`ptr_vec`,
 `int_vec` and the non-generic container pattern), `std.strmap` (the open-addressing table),
-`std.io` (descriptors, whole files and streams) and `std.math` (the integer limits, the float
-bit casts and the per-type `abs`, `min` and `max`) are written.
+`std.io` (descriptors, whole files and streams), `std.math` (the integer limits, the float
+bit casts and the per-type `abs`, `min` and `max`) and `std.net` (a TCP listener and a TCP
+connection, IPv4 only) are written.
 
 `std.math` holds f64 and f32 functions, so the C bootstrap refuses it as it refuses
 `std.rt_float` (D18.1): a program that imports `std.math` is one stage1 rejects whole, whatever

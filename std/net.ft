@@ -1,0 +1,210 @@
+// std.net: a TCP listener and a TCP connection over std.libc (stdlib.md 2.13).
+// IPv4 only, and no name resolution: connect takes a dotted quad, because
+// getaddrinfo answers with a list the caller must release and no extern
+// signature can carry that ownership across the boundary.
+// D9.8, D17
+//
+// A descriptor is not an owning value. The ownership rules have no rule that
+// closes one, so the caller closes every descriptor these functions answer
+// with, and the idiom is `defer libc.close(fd);` beside the call that opened it.
+// D17
+//
+// listen, accept and connect answer with the descriptor, or with -1 and the
+// reason in sys.errno(), which is the sentinel stdlib.md 1.2 names for a
+// descriptor that could not be opened and the form std.io.open_read already
+// takes. The byte-order helpers assume the little-endian x86-64 the compiler
+// targets, so a swap is what puts a number into network order.
+// D13.2, D13.3, D13.4, D19.2
+import std.libc;
+import std.str;
+import std.sys;
+
+/// <sys/socket.h> and <netinet/in.h>, Linux x86-64 values. AF_INET is the IPv4
+/// address family, SOCK_STREAM the byte-stream socket that carries TCP,
+/// SOL_SOCKET the option level of the socket itself, SO_REUSEADDR the option
+/// that lets a listener bind a port still held by an earlier connection in
+/// TIME_WAIT, and INADDR_ANY the address that binds every interface.
+/// test/lang/run/ffi/013_sockaddr_layout.ft holds all five against the system
+/// headers.
+i32 AF_INET = 2;
+i32 SOCK_STREAM = 1;
+i32 SOL_SOCKET = 1;
+i32 SO_REUSEADDR = 2;
+u32 INADDR_ANY = 0;
+
+/// The IPv4 socket address of <netinet/in.h>: family, then port and address in
+/// network byte order, then eight bytes C names sin_zero and keeps at 0. Struct
+/// layout is the C ABI's, so a pointer to one is what bind(2) and connect(2)
+/// expect. zero is written u8[8] rather than u64 because C's field is a
+/// character array of 8, which asks 1 byte of alignment where a u64 asks 8. No
+/// test holds that choice: fort has no alignof (type-system.md 8), so
+/// run/ffi/013 can hold C's _Alignof against 4 and nothing against fort's, and
+/// a u64 there leaves the size, all four offsets and the C alignment true.
+/// D3.8
+struct sockaddr_in {
+    u16 family;
+    u16 port;
+    u32 addr;
+    u8[8] zero;
+}
+
+/// Host to network for a 16-bit value, and its own inverse, so the same
+/// function reads a port out of an address. The two bytes swap: each byte is
+/// masked to 8 bits and moved by a shift, << discards nothing here and never
+/// checks for overflow, and | joins the two, so no step of this can trap and no
+/// wrapping operator is needed.
+/// D6.2, D11.1
+fn u16 hton16(u16 v) {
+    return ((v & 0x00FF) << 8) | ((v >> 8) & 0x00FF);
+}
+
+/// Host to network for a 32-bit value, and its own inverse. The four bytes
+/// reverse, one mask and one shift each, and nothing can trap for the reason
+/// hton16 gives.
+fn u32 hton32(u32 v) {
+    return ((v & 0x000000FF) << 24) | ((v & 0x0000FF00) << 8)
+         | ((v >> 8) & 0x0000FF00) | ((v >> 24) & 0x000000FF);
+}
+
+/// Reads a dotted quad ("127.0.0.1") and delivers the address in network byte
+/// order, ready for a sockaddr_in.addr field. Exactly four fields, each one to
+/// three decimal digits with a value of at most 255, no space, no sign and no
+/// text after the fourth field; leading zeros are decimal, not octal. Returns
+/// false and leaves *out unchanged when the text is anything else. Ownership:
+/// none.
+/// D13.3
+fn bool parse_ipv4(string text, u32 mut* out) {
+    u32 mut host = 0;
+    u64 mut start = 0;
+    i32 mut field = 0;
+    while (field < 4) {
+        u64 mut stop = start;
+        while (stop < text.len && text[stop] != '.') {
+            stop += 1;
+        }
+        u64 width = stop - start;
+        if (width == 0 || width > 3) {
+            return false;
+        }
+        u64 mut value = 0;
+        if (!str.parse_u64(text[start..stop], 10, &value)) {
+            return false;
+        }
+        if (value > 255) {
+            return false;
+        }
+        // The first field is the most significant byte of the host-order
+        // value. The count is 24, 16, 8 or 0 of a 32-bit operand, so it is in
+        // range, and the byte is masked to 8 bits by the test above.
+        // D11.1
+        host = host | (cast(value, u32) << (24 - field * 8));
+        if (field < 3) {
+            if (stop >= text.len) {
+                return false;
+            }
+            start = stop + 1;
+        } else if (stop != text.len) {
+            return false;
+        }
+        field += 1;
+    }
+    *out = hton32(host);
+    return true;
+}
+
+/// Closes fd and answers -1, with the errno of the call that failed still in
+/// place. close(2) may set errno itself, so the value is read before the close
+/// and written back after it, which is what std.rt does around the isatty it
+/// calls for each buffer (toolchain.md 5.3). No test witnesses the write-back:
+/// a close(2) of a valid descriptor succeeds and leaves errno alone, and these
+/// are the only descriptors this module closes, so the branch that needs it is
+/// a close interrupted by a signal (notes/testing.md 7).
+fn i32 close_and_fail(i32 fd) {
+    i32 saved = sys.errno();
+    libc.close(fd);
+    *libc.__errno_location() = saved;
+    return -1;
+}
+
+/// A listening TCP socket bound to port on every interface, with the backlog of
+/// listen(2), or -1 with the reason in sys.errno(). Port 0 asks the kernel for
+/// a free port, which local_port then reads back. SO_REUSEADDR is set before
+/// the bind, so a restart inside the TIME_WAIT window still binds. Ownership:
+/// none in the types; the caller closes the descriptor (libc.close).
+/// D13.3, D13.4
+fn i32 listen(u16 port, i32 backlog) {
+    i32 fd = libc.socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    i32 mut on = 1;
+    u32 on_len = cast(sizeof(i32), u32);
+    if (libc.setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, cast(&on, void*), on_len) < 0) {
+        return close_and_fail(fd);
+    }
+    sockaddr_in mut addr = {};
+    addr.family = cast(AF_INET, u16);
+    addr.port = hton16(port);
+    addr.addr = hton32(INADDR_ANY);
+    if (libc.bind(fd, cast(&addr, void*), cast(sizeof(sockaddr_in), u32)) < 0) {
+        return close_and_fail(fd);
+    }
+    if (libc.listen(fd, backlog) < 0) {
+        return close_and_fail(fd);
+    }
+    return fd;
+}
+
+/// Waits for the next connection on a listening descriptor and answers with a
+/// descriptor for it, or with -1 and the reason in sys.errno(). The peer's
+/// address is not delivered, because a sockaddr_in out-parameter would be the
+/// only reason for this module to hand a struct back and nothing here needs
+/// one. Ownership: none in the types; the caller closes the descriptor.
+/// D13.3
+fn i32 accept(i32 fd) {
+    i32 client = libc.accept(fd, null, null);
+    if (client < 0) {
+        return -1;
+    }
+    return client;
+}
+
+/// A TCP connection to host_ipv4 (a dotted quad) on port, or -1 with the reason
+/// in sys.errno(). A host_ipv4 that parse_ipv4 refuses makes no system call: it
+/// sets errno to EINVAL itself, so that one test answers every failure.
+/// Ownership: none in the types; the caller closes the descriptor.
+/// D13.3, D13.4
+fn i32 connect(string host_ipv4, u16 port) {
+    u32 mut host = 0;
+    if (!parse_ipv4(host_ipv4, &host)) {
+        *libc.__errno_location() = libc.EINVAL;
+        return -1;
+    }
+    i32 fd = libc.socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    sockaddr_in mut addr = {};
+    addr.family = cast(AF_INET, u16);
+    addr.port = hton16(port);
+    addr.addr = host;
+    if (libc.connect(fd, cast(&addr, void*), cast(sizeof(sockaddr_in), u32)) < 0) {
+        return close_and_fail(fd);
+    }
+    return fd;
+}
+
+/// The port fd is bound to, in host order, through getsockname(2). It is how a
+/// caller that asked for port 0 learns which port the kernel gave. Returns
+/// false and leaves *out unchanged on failure, with the reason in sys.errno().
+/// Ownership: none.
+/// D13.3
+fn bool local_port(i32 fd, u16 mut* out) {
+    sockaddr_in mut addr = {};
+    u32 mut len = cast(sizeof(sockaddr_in), u32);
+    if (libc.getsockname(fd, cast(&addr, void*), &len) < 0) {
+        return false;
+    }
+    *out = hton16(addr.port);
+    return true;
+}
