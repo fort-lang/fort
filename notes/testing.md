@@ -866,15 +866,49 @@ bullet at a time and without a rewrite.
   line above must produce), of the D5.3 and D17.2 marker tables, and of **every fort source the
   project writes**, which must tokenize with no `invalid.` scope and no unscoped character, so a
   new file the grammar mishandles fails here. `CORPUS_DIRS` is that list -- `test/lang/run`,
-  `test/lang/programs`, `std`, `src/fort`, `src/lsp`, `test/fort` (its `support/` included) and
-  `test/fort_lint` -- and `CORPUS_FILES` is the exact number of files in it, so a ticket that adds
-  or removes a `.ft` under any of them reads the new number off the failure and writes it there,
-  as it does for `CORPUS_FILES` in `test/parser_recovery_test.c` and `FT_FILES` in
+  `test/lang/programs`, `std`, `src/fort`, `src/lsp`, `test/fort` (its `support/` included),
+  `test/fort_lint` and `test/tty` -- and `CORPUS_FILES` is the exact number of files in it, so a
+  ticket that adds or removes a `.ft` under any of them reads the new number off the failure and
+  writes it there, as it does for `CORPUS_FILES` in `test/parser_recovery_test.c` and `FT_FILES` in
   `tools/diff_tokens.sh`. The other `.ft` of the repository are listed in `EXCLUDED_DIRS`, each
   because it is meant to hold a lexical error (`test/lang/fail`, `test/highlight/scopes.ft`,
   `editors/vscode/test/fixtures/lexical.ft`), and a test asserts that partition, so a new
   directory of fort is a red test rather than a corpus nobody tokenizes -- which is what
   `test/fort` and `test/lang/programs` both were until T-079 measured it.
+  **One test checks one directory of `CORPUS_DIRS`, and the corpus is tokenized once** (T-104).
+  `test_the_corpus_is_the_size_it_says_it_is` walked the corpus to count it and then tokenized
+  every file a second time, which took one run of the module to 1396 calls of `Engine.tokenize`
+  over 7575844 bytes where the corpus is 685 files and 3844648 bytes. That second walk also gave
+  cover to `src/lsp` and `test/tty`, which stood in `CORPUS_DIRS` with no test of their own. Each
+  directory now has one test, `CORPUS_MINIMUMS` gives each its floor, and
+  `test_every_corpus_directory_is_checked_by_a_test` reads the source of the class and holds the
+  calls to `check_directory` against `CORPUS_DIRS`. A ticket that adds a directory adds a test
+  with it, or that guard goes red.
+  **The engine finds the leftmost token of a line in one search.** It called `re.search` once for
+  each of the 53 top-level rules at each position, and a search scans to the end of the line, so a
+  line cost `positions x rules x length` and not its bytes. `Scanner` writes the rules as one
+  alternation, each inside a group of its own, and `SlowScanner` keeps the old search as the
+  oracle of `ScannerTest`. The two changes take the module from 31.55 s to 4.87 s, five runs each
+  under `debug`, and a run makes 773 calls of `Engine.tokenize` where it made 1396. **Hold a
+  rewrite of that engine to the dump and not to the assertions**: a
+  scanner that reports other scopes passes the suite and silently changes what the grammar is held
+  to. The dump is five lines of Python and prints 945748 lines for the 685 files of 2026-09-14;
+  take it before the change and after it, and `diff` the two:
+
+      cd test && python3 -c 'import highlight_test as h
+      e = h.Engine(h.load_grammar())
+      for p in sorted({p for d in h.CORPUS_DIRS for p in d.rglob("*.ft")}):
+       t = p.read_text(encoding="utf-8")
+       for k in e.tokenize(t):
+        print(p.relative_to(h.ROOT), k.line, k.start, k.end, repr(k.text), k.scopes)'
+
+  The path is relative to the top of the worktree, so two worktrees that hold the same scopes give
+  the same md5. An absolute path gives two md5s for one answer, and the second reader then builds
+  a dump of their own (T-104, its review).
+  **Set `PYTHONDONTWRITEBYTECODE=1` for a hand run of a Python suite you are mutating.** T-104 ran
+  two mutants of one file within a few seconds and read the same three failures for both, because
+  the second run loaded the `__pycache__` of the first. CMake sets the variable for every Python
+  ctest, so the gate never meets it; a hand run does.
 - The VS Code extension is plain JavaScript on the VS Code API, with no npm dependency and no build
   step. Its logic lives in `editors/vscode/lib/check.js`, which never `require('vscode')`, so Node's
   built-in runner tests it: `tools/vm run 'cd editors/vscode && node --test'` (ctest
