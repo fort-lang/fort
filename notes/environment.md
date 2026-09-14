@@ -205,7 +205,18 @@ without a rewrite.
   T-125 met the same crash 13 times with the same guest-side heredoc, and found a cheaper cure
   than dropping the caches: **give the file a new inode**. `rm -f <file> && cp <copy> <file>`
   cleared it every time, with no `sudo` and no cache drop, so a guest-side mutation loop that
-  must edit in the guest writes each variant that way. T-125 also measured the worse face of it.
+  must edit in the guest writes each variant that way.
+  **Writing from the host does not avoid it, so the new inode is the cure for both.** T-128 wrote
+  four mutants of `src/bootstrap/check.c` and `src/fort/check.ft` from the host, one at a time,
+  and the first two hit the stale mapping: the file grew by 9 bytes and clang read NUL bytes at
+  line 3693, past the old end, then the file shrank by 43 bytes and clang reported
+  `expected identifier or '('` in `<built-in>`. Both times the guest's own read was clean --
+  `python3` in the guest counted 130438 bytes and 0 NUL bytes, and `clang -fsyntax-only` on a
+  copy in the guest's `/tmp` exited 0 -- and both times `touch` in the guest and a second
+  `tools/vm build` changed nothing. `tools/vm run 'cp <file> /tmp/c && rm -f <file> && cp /tmp/c
+  <file>'` cleared both at once, so **run that one command in the guest after every host edit of
+  a source a build has already compiled**, whichever side wrote it.
+  T-125 also measured the worse face of it.
   An in-place restore inside the guest, followed by a rebuild, left a **compiler that linked and
   ran and was wrong**: `check_conv_test`, `check_extern_test` and `check_const_test` went red on
   diagnostics the restored source cannot produce, and `build/debug/fort --check` printed

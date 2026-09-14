@@ -812,6 +812,15 @@ static int32_t default_rank(prim_kind_t k) {
     }
 }
 
+// The one of two default types whose clause wins, in default_rank's order.
+// D4.5
+static prim_kind_t stronger_default(prim_kind_t a, prim_kind_t b) {
+    if (default_rank(b) > default_rank(a)) {
+        return b;
+    }
+    return a;
+}
+
 // The default type an untyped expression needs when it folded to no value,
 // `4294967296 << n` with a variable count. Such an expression has no value of
 // its own, so the type it needs is the strongest of `default_rank` that any
@@ -861,16 +870,10 @@ static prim_kind_t untyped_default_kind(const check_t* ck, const ast_node_t* n) 
         if (kids[i] == NULL) {
             continue;
         }
-        const prim_kind_t child = untyped_default_kind(ck, kids[i]);
-        if (default_rank(child) > default_rank(k)) {
-            k = child;
-        }
+        k = stronger_default(k, untyped_default_kind(ck, kids[i]));
     }
     for (uint64_t i = 0; i < ast_len(n); i++) {
-        const prim_kind_t child = untyped_default_kind(ck, ast_child(n, i));
-        if (default_rank(child) > default_rank(k)) {
-            k = child;
-        }
+        k = stronger_default(k, untyped_default_kind(ck, ast_child(n, i)));
     }
     return k;
 }
@@ -1404,11 +1407,36 @@ static void check_shift(
     }
 }
 
+// The default type of two untyped operands taken together, when one of them
+// folded to no value. Neither operand is a context for the other, so the pair
+// has no context at all and the rule of the default type answers for it. One
+// type covers a whole untyped expression, so the clause that wins is the
+// strongest either side asks for, exactly as it is inside one operand.
+// D4.1, D4.5, D6.2
+static const type_t* untyped_pair_type(check_t* ck, const ast_node_t* lhs, const ast_node_t* rhs) {
+    prim_kind_t k = stronger_default(untyped_default_kind(ck, lhs), untyped_default_kind(ck, rhs));
+    if (k == PRIM_VOID) {
+        // No constant on either side asks for a type, so the pair keeps the i32
+        // `default_type` keeps in the same case. The one program that reaches
+        // this line is `(c ? null : null) == (c ? null : null)`, which this
+        // compiler refuses at the `?:`; the fort twin reaches it and names it.
+        // D4.5
+        k = PRIM_I32;
+    }
+    return type_prim(&ck->types, k);
+}
+
 // Two untyped constants: the arithmetic folds exactly and a comparison yields
 // a bool.
 // D4.4
-static void check_untyped_pair(
-    check_t* ck, loc_t loc, int32_t op, expr_t* a, expr_t* b, expr_t* out) {
+static void check_untyped_pair(check_t* ck,
+                               loc_t loc,
+                               int32_t op,
+                               ast_node_t* lhs,
+                               expr_t* a,
+                               ast_node_t* rhs,
+                               expr_t* b,
+                               expr_t* out) {
     const bool chars = a->value.kind == CV_CHAR && b->value.kind == CV_CHAR;
     if (a->value.kind == CV_NULL || b->value.kind == CV_NULL) {
         // D10.5
@@ -1420,11 +1448,30 @@ static void check_untyped_pair(
         return;
     }
     if (a->value.kind == CV_NONE || b->value.kind == CV_NONE) {
+        // One operand folded to no value, so nothing folds and both operands
+        // need a type from outside the pair. Neither gives one to the other.
         // D4.1
-        out->type = a->type;
-        out->untyped = !op_is_comparison(op);
-        if (op_is_comparison(op)) {
-            out->type = type_prim(&ck->types, PRIM_BOOL);
+        if (!op_is_comparison(op)) {
+            // The pair stays untyped, so the context that fixes its type walks
+            // both operands and reports every constant against it.
+            out->type = a->type;
+            out->untyped = true;
+            return;
+        }
+        // A comparison yields `bool`, so no context ever reaches the operands:
+        // this is the one point where their default type can be fixed, and the
+        // rule fixes one type over both sides. Taking the left operand's type
+        // here dropped the right operand's poison and its constant, which made
+        // `2^63 > (1 << m)` print `false` and `2147483648 > (1 << m)` emit two
+        // widths into one comparison.
+        // D4.5, D6.2
+        out->type = type_prim(&ck->types, PRIM_BOOL);
+        const type_t* const t = untyped_pair_type(ck, lhs, rhs);
+        const bool left_ok = retype_untyped(ck, lhs, t, true, NULL);
+        const bool right_ok = retype_untyped(ck, rhs, t, true, NULL);
+        if (!left_ok || !right_ok) {
+            // D14.2: the constant is reported, so the comparison says no more
+            out->type = type_error(&ck->types);
         }
         return;
     }
@@ -1521,7 +1568,7 @@ void check_operands(check_t* ck,
         return;
     }
     if (a->untyped && b->untyped) {
-        check_untyped_pair(ck, loc, op, a, b, out);
+        check_untyped_pair(ck, loc, op, lhs, a, rhs, b, out);
         return;
     }
     // D3.2: the typed operand decides before the untyped one adopts

@@ -1,0 +1,57 @@
+//! fail
+//! stderr: :39:13: error: constant 9223372036854775808 does not fit i64
+//! stderr: :40:24: error: constant 9223372036854775808 does not fit i64
+// A comparison of two untyped operands, one of which folded to no value. The
+// comparison yields bool, so no context reaches its operands: the rule of the
+// default type answers for them where the comparison is checked, over both
+// sides together (type-system.md 10.5, the notes of 2026-09-13 and 2026-09-14
+// on D4.5). A constant that fits neither i32 nor i64 is then the error, on
+// whichever side it stands.
+//
+// The pair took the left operand's type until 2026-09-14, and the right
+// operand's poison and its constant went with it. That made
+// `9223372036854775808 > (1 << n)` print `false` and
+// `(1 << n) > 9223372036854775808` print `true`, in both compilers, with exit
+// 0; the true answers are `true` and `false`.
+// run/constants/014_a_comparison_of_two_untyped_operands.ft holds the answers
+// that are values rather than errors, and fail/constants/010 holds the float
+// clause of the same rule, which stage1 cannot read at all.
+//
+// The two `stderr:` lines above pin the column as well, which an `error:`
+// annotation cannot: the report must stand at the constant and not at the
+// operator, and column 13 and column 24 are the two operands of the first
+// pair. The harness judges an `error:` annotation by its line alone.
+//
+// One diagnostic on each line here, except the last, which carries one for
+// each side. The harness groups diagnostics by line and cannot see a
+// diagnostic that is added or doubled, so the count is asserted where a test
+// can read it, in check_untyped_pair_test.c and in test/fort/check_test.ft.
+fn i32 z(i32 v) {
+    return v;
+}
+
+fn i32 main() {
+    i32 n = z(1);
+    // Both orderings and both equalities. `1 << n` folds to no value, because
+    // `n` is a variable, so the pair reaches the rule with a constant still
+    // inside it.
+    // D4.5
+    println(9223372036854775808 > (1 << n)); //! error: constant 9223372036854775808 does not fit i64
+    println((1 << n) > 9223372036854775808); //! error: constant 9223372036854775808 does not fit i64
+    println(18446744073709551615 == (1 << n)); //! error: constant 18446744073709551615 does not fit i64
+    println((1 << n) != 18446744073709551615); //! error: constant 18446744073709551615 does not fit i64
+    // Both sides are retyped, so a bad constant on each side is reported
+    // twice, on one line. Only the unit tests can see that count.
+    // D4.5
+    println((9223372036854775808 << n) > (18446744073709551615 << n)); //! error: constant 9223372036854775808 does not fit i64
+    // A unary operator is not part of the pair. `check_unary` gives an operand
+    // with no value its default type at once and alone (the note of 2026-09-14
+    // on D4.5), so `-(1 << n)` is a typed i32 and the constant beside it takes
+    // i32 from a typed operand (D4.1). The pair rule never runs, and the
+    // constant that is legal in `(1 << n) > 2147483648` -- line 4 of
+    // run/constants/014 prints its answer -- is an error one unary minus away
+    // from it. That is the ordinary context rule and not a hole.
+    println(-(1 << n) > 2147483648); //! error: constant 2147483648 does not fit i32
+    println(2147483648 > ~(1 << n)); //! error: constant 2147483648 does not fit i32
+    return 0;
+}

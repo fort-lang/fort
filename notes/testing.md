@@ -163,6 +163,20 @@ bullet at a time and without a rewrite.
   that adds, moves or removes a diagnostic asserts the count where a test can read it --
   `diag_lines()` in `test/*_test.c` or `check_env.errors(&e)` in `test/fort/*_test.ft` -- and
   uses the `fail` test for the text and the position.
+  **The position a `//! error:` annotation pins is the line alone. `//! stderr:` pins the
+  column** (T-128). The harness matches an annotation to a diagnostic by `(file, line)` and by
+  substring, so a report that moves along its line changes nothing it can see; a `//! stderr:`
+  line is a substring of the compiler's whole stderr, repeatable, and a `fail` test may carry
+  several, so `//! stderr: :39:13: error: constant 9223372036854775808 does not fit i64` pins the
+  line, the column and the text together. Reach for it when the **column** is the rule under
+  test -- a diagnostic that must stand at an operand rather than at the operator around it -- and
+  not otherwise, because each one names a line number and moves when the file above it grows.
+  Measured on T-128: a mutant that reported the pair's constants at the operator moved the column
+  from 13 to 33 and left the line and the text identical. With the two `stderr:` lines the corpus
+  read `664 tests: 663 passed, 1 failed` and named only those two substrings; with them removed
+  it read `664 tests: 664 passed`, the C suite exited 0 and `test/fort` read
+  `173 tests: 173 passed`. `fail/constants/014_a_comparison_of_two_untyped_operands.ft` was the
+  first of the 246 `fail` tests to use the directive.
 - **A `fail` test may not mix a lexical or a syntax diagnostic with a semantic one.** `lex_file`
   reports, and the driver then stops before the checker runs (D14.2), so a file whose lexical
   error is annotated alongside an expected type error never produces the second one and the run

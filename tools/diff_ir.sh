@@ -58,7 +58,7 @@ done
 # them: an equality and not a floor, so that a file cannot slip out of the
 # comparison. A ticket that adds or removes a .ft file changes all four lines
 # in the same commit.
-FT_FILES=932
+FT_FILES=934
 
 # The files of that corpus stage1 compiles into a module, which are the ones
 # compared. It is an equality for the reason FT_FILES is: a comparison that
@@ -71,7 +71,7 @@ FT_FILES=932
 # skips -- and its question is narrower, since the 84 files that check clean
 # and hold no `main` compile into no module and are skipped here. diff_check.sh
 # says beside its own constant how the two group sizes are measured.
-PROGRAM_FILES=526
+PROGRAM_FILES=527
 
 # The search roots every run is given: the standard library the build copied,
 # src/fort so that the compiler's own modules resolve, test/fort/support so

@@ -1349,7 +1349,7 @@ class RepositoryTest(unittest.TestCase):
 
     def test_the_corpus_the_lint_reads_is_the_measured_one(self):
         root = Path(__file__).resolve().parent.parent
-        self.assertEqual(len(lint.collect(root, lint.SOURCE_GLOBS)), 359)
+        self.assertEqual(len(lint.collect(root, lint.SOURCE_GLOBS)), 360)
 
 
 if __name__ == "__main__":

@@ -148,16 +148,30 @@ came here.
   instead, because its fold may still succeed. A constant that folds back into range leaves
   `check_operand` **typed** rather than poisoned, so the operator answers by its own rule:
   `*(2^63 >> 1)` reports `cannot dereference i64`, and that shape was silent too.
-  **The class is not closed, and the hole left prints a wrong answer.** Of the 11 raw `check_expr`
-  calls that remain, 9 hand the operand to a context and 2 do not: `check.c:2720` and `:2721`
-  (fort `check.ft:3611` and `:3612`) hand both operands to `check_operands`, and
-  `check_untyped_pair` at `check.c:1418` takes `out->type = a->type` when either operand carries
-  no value, which drops the **right** operand's poison and its constant. A comparison then yields
-  a plain `bool` that no context can report against, so
-  `println(9223372036854775808 > (1 << n))` with `n == 1` prints `false` where `true` is right,
-  in both compilers, exit 0. That is worse than the thirteen: a program that prints nothing tells
-  the author nothing, and this one tells them something false. T-128 owns it; it is untouched by
-  T-125, since `check_untyped_pair` is the same code it always was.
+  **The 11 raw `check_expr` calls that remain all reach a report, since T-128.** 9 of them hand
+  the operand to a context. The other 2 are `check.c:2773` and `:2774` (fort `check.ft:3656` and
+  `:3657`), which hand both operands to `check_operands`; that function has four routes and each
+  one reports. A shift carries the constant outward to the context (T-117). A pair of untyped
+  operands that folds is reported by the fold. A pair of which one operand carries no value stays
+  untyped for every operator but a comparison, so the context walks both operands and reports
+  there. **A comparison is the one route with no context above it**, because it yields a plain
+  `bool`: `check_untyped_pair` fixes the default type there, over **both** operands together, and
+  retypes each against it. It took `out->type = a->type` until T-128, which dropped the other
+  operand's poison and its constant, and that was worse than the thirteen above. A program that
+  prints nothing tells the author nothing; these printed something false.
+  `println(9223372036854775808 > (1 << n))` with `n == 1` printed `false` where the program is an
+  error, `println((1 << n) > 2147483648)` printed `true` where `false` is right, and
+  `println(2147483648 > (1 << n))` gave one comparison two widths and clang refused the module.
+  The rule to keep: **the type of an untyped pair comes from both sides, through
+  `untyped_pair_type`, and never from one side.** An untyped pair is two untyped sides, and a
+  unary operator ends one: `check_unary` gives an operand with no value its default type at once
+  and alone, so `-(1 << n)` is a **typed** i32 and the constant beside it takes i32 from a typed
+  operand (D4.1). `println((1 << n) > 2147483648)` therefore runs and prints `false`, while
+  `println(-(1 << n) > 2147483648)` and the `~` form report `constant 2147483648 does not fit
+  i32`, in both compilers. That is the mechanism D4.5's note of 2026-09-14 ratifies, whose only
+  worked example is the float case where the asymmetry helps; the integer case turns a legal
+  program into an error and is the one to expect a question about.
+  `fail/constants/014` and `run/constants/014` hold both halves.
 - **Ownership in the checker** (D17): `check_owning(t)` is the one answer to "does a value of
   this type own an allocation" -- an `own` reference or an owning aggregate -- and it guards the
   layout, since `type_is_owning_aggregate` fatals on a struct that has none. Every own place is

@@ -662,6 +662,229 @@ fn void a_comparison_yields_bool_and_folds() {
     assert(check_env.probe_type(&e) == "bool");
 }
 
+// ---- a comparison of two untyped operands -------------------------------------------
+// A comparison yields bool, so no context reaches its operands: the rule of the
+// default type answers for them where the comparison is checked, over both
+// sides together. The pair took the left operand's type until 2026-09-14, which
+// dropped the other operand's poison and its constant. The C twin is
+// test/check_untyped_pair_test.c.
+// D4.1, D4.5, D6.2
+
+// The four comparisons, two orderings and two equalities, as the text before
+// the constant and the text after it. The other operand is `1 << n`, which
+// folds to no value.
+// D4.5
+string[4] PAIR_HEAD = string[4]{
+    "    i32 n = 1;\n    println(",
+    "    i32 n = 1;\n    println((1 << n) > ",
+    "    i32 n = 1;\n    println(",
+    "    i32 n = 1;\n    println((1 << n) != ",
+};
+
+string[4] PAIR_TAIL = string[4]{
+    " > (1 << n));",
+    ");",
+    " == (1 << n));",
+    ");",
+};
+
+// The two ends of the range the rule has no type for, `[2^63, 2^64 - 1]`, and
+// the message each draws against i64, the widest type the rule offers.
+// D4.5
+string[2] PAIR_ENDS = string[2]{
+    "9223372036854775808",
+    "18446744073709551615",
+};
+
+string[2] PAIR_MESSAGES = string[2]{
+    "constant 9223372036854775808 does not fit i64",
+    "constant 18446744073709551615 does not fit i64",
+};
+
+fn void a_comparison_reports_the_constant_of_either_operand() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    u64 mut c = 0;
+    while (c < PAIR_ENDS.len) {
+        u64 mut i = 0;
+        while (i < PAIR_HEAD.len) {
+            if (c > 0 || i > 0) {
+                check_env.reopen(&e);
+            }
+            strbuf.str_buf mut b = strbuf.create();
+            strbuf.append(&b, PAIR_HEAD[i]);
+            strbuf.append(&b, PAIR_ENDS[c]);
+            strbuf.append(&b, PAIR_TAIL[i]);
+            // The constant has no default type, so the rule's own tail reports
+            // it against i64, on whichever side it stands. The right side
+            // printed a wrong answer until 2026-09-14 and the left side gave
+            // the two operands two widths.
+            // D4.5, D6.2
+            assert(!check_env.check_body(&e, strbuf.view(&b)));
+            assert(check_env.said(&e, PAIR_MESSAGES[c]));
+            // The count, because the harness of the language corpus groups
+            // diagnostics by line and cannot see one that is added or doubled.
+            // D14.2
+            assert(check_env.errors(&e) == 1);
+            strbuf.free(&b);
+            i += 1;
+        }
+        c += 1;
+    }
+}
+
+fn void a_comparison_reports_a_bad_constant_on_each_side() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // Both sides are retyped, so both are reported. A fix that retyped the left
+    // side alone leaves this at one diagnostic, and the corpus cannot see the
+    // difference, because both stand on one line.
+    // D4.5
+    assert(!check_env.check_body(&e,
+        "    i32 n = 1;\n    println((9223372036854775808 << n) > (18446744073709551615 << n));"));
+    assert(check_env.said(&e, "constant 9223372036854775808 does not fit i64"));
+    assert(check_env.said(&e, "constant 18446744073709551615 does not fit i64"));
+    assert(check_env.errors(&e) == 2);
+}
+
+fn void a_comparison_takes_one_default_type_over_both_operands() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // One type covers the whole untyped expression, and the clause that wins is
+    // the strongest either side asks for. The left operand alone decided it
+    // until 2026-09-14: `2147483648 > (1 << n)` gave the constant i64 and the
+    // shift i32, which clang refused as two widths in one comparison.
+    // D4.5, D6.2
+    ast.node* one = probe_call(&e, "2147483648 > (1 << n)", true);
+    assert(check_env.type_text(&e, ast.ast_child(one, 0)->a->ty) == "i64");
+    assert(check_env.type_text(&e, ast.ast_child(one, 0)->b->ty) == "i64");
+    check_env.reopen(&e);
+    ast.node* two = probe_call(&e, "(1 << n) > 2147483648", true);
+    assert(check_env.type_text(&e, ast.ast_child(two, 0)->a->ty) == "i64");
+    assert(check_env.type_text(&e, ast.ast_child(two, 0)->b->ty) == "i64");
+    check_env.reopen(&e);
+    // Neither side asks for more than i32, so the pair keeps i32.
+    // D4.5
+    ast.node* three = probe_call(&e, "2 > (1 << n)", true);
+    assert(check_env.type_text(&e, ast.ast_child(three, 0)->a->ty) == "i32");
+    assert(check_env.type_text(&e, ast.ast_child(three, 0)->b->ty) == "i32");
+    check_env.reopen(&e);
+    // The integer clause wins over the char clause, so the char literal is its
+    // code point and both operands are i32. It was i8 beside i32 before.
+    // D4.3, D4.5
+    ast.node* four = probe_call(&e, "'a' > (1 << n)", true);
+    assert(check_env.type_text(&e, ast.ast_child(four, 0)->a->ty) == "i32");
+    assert(check_env.type_text(&e, ast.ast_child(four, 0)->b->ty) == "i32");
+    check_env.reopen(&e);
+    // The float clause loses to the integer clause in the same way, and the
+    // float constant is then the error. Its twin for `?:` is in
+    // check_float_test.ft; stage1 has no float literal at all.
+    // D4.2, D4.5
+    assert(probe_call(&e, "0.5 > (1 << n)", false) != null);
+    assert(check_env.said(&e, "a float constant does not become i32: use cast"));
+    assert(check_env.errors(&e) == 1);
+}
+
+fn void a_pair_whose_sides_ask_for_no_type_at_all_keeps_i32() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The tail of `untyped_pair_type`. A `null` arm asks for no default type
+    // of its own, so the walk of both sides answers `prim_void` and the pair keeps
+    // the i32 that `default_type` keeps in the same case. The i32 is observable:
+    // it is the type each `null` is then reported against. Four diagnostics, one
+    // for each `null` leaf, which is both sides retyped.
+    // D4.5, D6.2, D10.5
+    assert(!check_env.check_body(&e,
+        "    bool c = true;\n    println((c ? null : null) == (c ? null : null));"));
+    assert(check_env.said(&e, "'null' needs a pointer type, not i32"));
+    assert(check_env.errors(&e) == 4);
+    check_env.reopen(&e);
+    // The same through an inequality, since the branch is every comparison.
+    // D6.2
+    assert(!check_env.check_body(&e,
+        "    bool c = true;\n    println((c ? null : null) != (c ? null : null));"));
+    assert(check_env.errors(&e) == 4);
+}
+
+fn void a_unary_operand_leaves_the_pair_before_the_rule_sees_it() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // `check_unary` gives an operand with no value its default type at once and
+    // alone, which the note of 2026-09-14 ratifies, so `-(1 << n)` is a typed
+    // i32 and the constant beside it takes i32 from a typed operand, as it takes
+    // a type from any typed operand. The pair rule never runs: an untyped pair is
+    // two untyped sides. So the constant that is legal in `(1 << n) > 2147483648`
+    // is an error one unary minus away from it, and that is the ordinary context
+    // rule and not a hole.
+    // D4.1, D4.5
+    assert(!check_env.check_body(&e, "    i32 n = 1;\n    println(-(1 << n) > 2147483648);"));
+    assert(check_env.said(&e, "constant 2147483648 does not fit i32"));
+    assert(check_env.errors(&e) == 1);
+    check_env.reopen(&e);
+    assert(!check_env.check_body(&e, "    i32 n = 1;\n    println(2147483648 > ~(1 << n));"));
+    assert(check_env.said(&e, "constant 2147483648 does not fit i32"));
+    check_env.reopen(&e);
+    // With no unary the same constant carries the pair to i64 and the program
+    // runs. run/constants/014 prints the answer.
+    // D4.5
+    assert(check_env.check_body(&e, "    i32 n = 1;\n    println((1 << n) > 2147483648);"));
+    assert(check_env.errors(&e) == 0);
+}
+
+fn void a_comparison_that_folds_and_one_with_a_typed_operand_are_unchanged() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The two neighbours of the rule, so that a change to it is seen here
+    // first. Both operands carry a value, so the comparison folds and no
+    // default type is chosen for it; and a typed operand is a context, which
+    // the untyped one takes its type from. The C twin asserts the folded value.
+    // D4.1, D4.4
+    assert(check_env.check_init_of(&e, "bool", "2147483648 > 1"));
+    assert(check_env.probe_type(&e) == "bool");
+    check_env.reopen(&e);
+    ast.node* call = probe_call(&e, "n > (1 << n)", true);
+    assert(check_env.type_text(&e, ast.ast_child(call, 0)->b->ty) == "i32");
+    check_env.reopen(&e);
+    // A constant that does not fit the typed operand is reported by the
+    // conversion, once, exactly as it was.
+    // D4.1
+    assert(!check_env.check_body(&e, "    i32 n = 1;\n    println(n > 9223372036854775808);"));
+    assert(check_env.said(&e, "constant 9223372036854775808 does not fit i32"));
+    assert(check_env.errors(&e) == 1);
+}
+
+fn void an_untyped_pair_that_is_no_comparison_still_reaches_its_context() {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The other half of the same branch, which is unchanged: an operator that
+    // is no comparison leaves the pair untyped, so the context walks both
+    // operands and reports there. The count is what this asserts, because the
+    // fix must not add a second report on the way.
+    // D4.1, D4.5
+    assert(!check_env.check_body(&e,
+        "    i32 n = 1;\n    println(9223372036854775808 + (1 << n));"));
+    assert(check_env.said(&e, "constant 9223372036854775808 does not fit i64"));
+    assert(check_env.errors(&e) == 1);
+    check_env.reopen(&e);
+    assert(!check_env.check_body(&e,
+        "    i32 n = 1;\n    println((1 << n) + 9223372036854775808);"));
+    assert(check_env.said(&e, "constant 9223372036854775808 does not fit i64"));
+    assert(check_env.errors(&e) == 1);
+    check_env.reopen(&e);
+    // A sibling that needs i64 carries the whole expression to i64, which is
+    // the same rule reached through the context.
+    // D4.5, D6.2
+    assert(check_env.check_body(&e, "    i32 n = 1;\n    i64 w = (1 << n) + 4294967296;"));
+    assert(check_env.init_type(&e, "w") == "i64");
+}
+
 fn void there_is_no_promotion_between_two_integer_types() {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -997,6 +1220,13 @@ fn i32 main() {
     a_char_constant_in_an_integer_context_is_its_code_point();
     null_needs_a_pointer_typed_context();
     a_comparison_yields_bool_and_folds();
+    a_comparison_reports_the_constant_of_either_operand();
+    a_comparison_reports_a_bad_constant_on_each_side();
+    a_comparison_takes_one_default_type_over_both_operands();
+    a_pair_whose_sides_ask_for_no_type_at_all_keeps_i32();
+    a_unary_operand_leaves_the_pair_before_the_rule_sees_it();
+    a_comparison_that_folds_and_one_with_a_typed_operand_are_unchanged();
+    an_untyped_pair_that_is_no_comparison_still_reaches_its_context();
     there_is_no_promotion_between_two_integer_types();
     char_has_no_arithmetic();
     there_is_no_pointer_arithmetic();

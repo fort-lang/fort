@@ -1,0 +1,72 @@
+//! run
+//! stdout:
+//| true false
+//| false false false
+//| true true
+//| true true
+//| true false
+//| true true
+//| true false
+//| false
+// A comparison of two untyped operands, one of which folded to no value. The
+// comparison yields bool, so no context reaches its operands: the rule of the
+// default type answers for them where the comparison is checked, and it
+// answers over both sides together, because one type covers one untyped
+// expression (D6.2, and the notes of 2026-09-13 and 2026-09-14 on D4.5).
+//
+// The pair took the left operand's type until 2026-09-14, and the other
+// operand kept the type it had provisionally. Every line below was a wrong
+// answer or a module clang refused, in both compilers.
+// fail/constants/014_a_comparison_of_two_untyped_operands.ft holds the half of
+// the rule that is an error.
+//
+// `one`, `two` and `thirtyone` come through a call, so `1 << one` folds to no
+// value and the comparison cannot fold either.
+//
+// Line 1: one side asks for i64 and the other does not, so the pair is i64.
+// `2147483648 > (1 << one)` gave the constant i64 and the shift i32 before,
+// which clang refused as two widths in one comparison; the reversed form
+// printed `true`, where 2 > 2147483648 is false.
+// Line 2: neither side asks for more than i32, so the pair stays i32 and the
+// answers are the ones it always gave.
+// Line 3: the integer clause wins over the char clause, so the char literal is
+// its code point and both operands are i32. The char on the left made an i8
+// meet an i32 before.
+// Line 4: the width the pair chose, read at run time. `<<` wraps at the width
+// of its left operand (D6.2), so `1 << thirtyone` is 2147483648 in i64 and
+// -2147483648 in i32: these two lines are `false` unless the constant on the
+// other side carried the shift to i64.
+// Line 5: the constant that needs i64 stands inside the expression that folded
+// to no value, on either side.
+// Line 6: the other end of i64, below i32's minimum.
+// Line 7: a constant with no default type of its own that folds back into
+// range. 2^63 is outside i64 and `2^63 >> 1` is not, and the value it carries
+// asks for i64.
+// Line 8: the width again, read through the shift count and not through the
+// value. A count of 40 is legal for i64 and out of range for i32, and the
+// count is checked at run time when it is a variable (D6.2), so the line
+// prints an answer here and would abort with `shift count 40 out of range for
+// i32` if the pair had left the shift at i32. The emitter writes the width
+// into that check and into the message, so this line covers the trapping path
+// that a count of 31 cannot reach.
+fn i32 z(i32 v) {
+    return v;
+}
+
+fn i32 main() {
+    i32 one = z(1);
+    i32 two = z(2);
+    i32 thirtyone = z(31);
+    i32 forty = z(40);
+    println(2147483648 > (1 << one), " ", (1 << one) > 2147483648);
+    println(2 > (1 << one), " ", (1 << one) > 2, " ", (1 << one) > (1 << two));
+    println('a' > (1 << one), " ", (1 << one) < 'a');
+    println((1 << thirtyone) == 2147483648, " ", 2147483648 == (1 << thirtyone));
+    println((2147483648 << one) > 1, " ", 1 > (2147483648 << one));
+    println(-2147483649 < (1 << one), " ", (1 << one) != -2147483649);
+    println((9223372036854775808 >> 1) > (1 << one),
+            " ",
+            (1 << one) == (18446744073709551615 >> 32));
+    println(2147483648 > (1 << forty));
+    return 0;
+}

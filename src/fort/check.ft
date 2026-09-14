@@ -1941,11 +1941,32 @@ fn bool chars_beside_a_float(checker mut* ck, diag.loc at, i32 op, expr mut* a, 
     return true;
 }
 
+/// The default type of two untyped operands taken together, when one of them
+/// folded to no value. Neither operand is a context for the other, so the pair
+/// has no context at all and the rule of the default type answers for it. One
+/// type covers a whole untyped expression, so the clause that wins is the
+/// strongest either side asks for, exactly as it is inside one operand.
+/// D4.1, D4.5, D6.2
+fn types.node* untyped_pair_type(checker mut* ck, ast.node* lhs, ast.node* rhs) {
+    prim.prim_kind mut k = stronger_default(untyped_default_kind(ck, lhs),
+                                            untyped_default_kind(ck, rhs));
+    if (k == prim.prim_kind.prim_void) {
+        // No constant on either side asks for a type, so the pair keeps the i32
+        // `default_type` keeps in the same case. A `null` arm asks for no type
+        // of its own, so `(c ? null : null) == (c ? null : null)` reaches this
+        // line, and the i32 it supplies is named in the four diagnostics that
+        // follow: "'null' needs a pointer type, not i32".
+        // D4.5, D10.5
+        k = prim.prim_kind.prim_i32;
+    }
+    return types.type_prim(&ck->types, k);
+}
+
 /// Two untyped constants: the arithmetic folds exactly and a comparison yields
 /// a bool.
 /// D4.4
-fn void check_untyped_pair(checker mut* ck, diag.loc at, i32 op, expr mut* a, expr mut* b,
-                           expr mut* out) {
+fn void check_untyped_pair(checker mut* ck, diag.loc at, i32 op, ast.node mut* lhs, expr mut* a,
+                           ast.node mut* rhs, expr mut* b, expr mut* out) {
     bool chars = a->value.kind == consts.cval_kind.cv_char
         && b->value.kind == consts.cval_kind.cv_char;
     if (a->value.kind == consts.cval_kind.cv_null
@@ -1973,35 +1994,54 @@ fn void check_untyped_pair(checker mut* ck, diag.loc at, i32 op, expr mut* a, ex
     }
     if (a->value.kind == consts.cval_kind.cv_none
         || b->value.kind == consts.cval_kind.cv_none) {
+        // One operand folded to no value, so nothing folds and both operands
+        // need a type from outside the pair. Neither gives one to the other.
         // D4.1
-        out->ty = a->ty;
-        out->untyped = !op_is_comparison(op);
-        if (op_is_comparison(op)) {
-            out->ty = types.type_prim(&ck->types, prim.prim_kind.prim_bool);
+        if (!op_is_comparison(op)) {
+            // The pair stays untyped, so the context that fixes its type walks
+            // both operands and reports every constant against it.
+            out->ty = a->ty;
+            out->untyped = true;
+            return;
+        }
+        // A comparison yields `bool`, so no context ever reaches the operands:
+        // this is the one point where their default type can be fixed, and the
+        // rule fixes one type over both sides. Taking the left operand's type
+        // here dropped the right operand's poison and its constant, which made
+        // `2^63 > (1 << m)` print `false` and `2147483648 > (1 << m)` emit two
+        // widths into one comparison.
+        // D4.5, D6.2
+        out->ty = types.type_prim(&ck->types, prim.prim_kind.prim_bool);
+        types.node* t = untyped_pair_type(ck, lhs, rhs);
+        bool left_ok = retype_untyped(ck, lhs, t, true, "");
+        bool right_ok = retype_untyped(ck, rhs, t, true, "");
+        if (!left_ok || !right_ok) {
+            // D14.2: the constant is reported, so the comparison says no more
+            out->ty = types.type_error(&ck->types);
         }
         return;
     }
     if (op_is_comparison(op)) {
         out->ty = types.type_prim(&ck->types, prim.prim_kind.prim_bool);
-        consts.cval mut lhs = a->value;
-        consts.cval mut rhs = b->value;
+        consts.cval mut lv = a->value;
+        consts.cval mut rv = b->value;
         if (floats) {
             // An integer beside a float compares as a float, and both are evaluated in
             // binary64. The conversion cannot fail here: a float constant is already binary64
             // and no integer of 64 bits leaves that format, so the branch is a defensive one
             // and the message is not reachable by any program.
             // D4.4
-            if (!consts.cv_to_float(a->value, prim.prim_kind.prim_f64, &lhs)
-                || !consts.cv_to_float(b->value, prim.prim_kind.prim_f64, &rhs)) {
+            if (!consts.cv_to_float(a->value, prim.prim_kind.prim_f64, &lv)
+                || !consts.cv_to_float(b->value, prim.prim_kind.prim_f64, &rv)) {
                 check_error(ck, at, "constant expression overflows f64");
                 out->ty = types.type_error(&ck->types);
                 return;
             }
         } else if (!chars) {
-            lhs = consts.cv_as_int(a->value);
-            rhs = consts.cv_as_int(b->value);
+            lv = consts.cv_as_int(a->value);
+            rv = consts.cv_as_int(b->value);
         }
-        out->value = consts.cv_compare(relation_of(op), lhs, rhs);
+        out->value = consts.cv_compare(relation_of(op), lv, rv);
         return;
     }
     consts.cval mut v = consts.cv_none();
@@ -2120,7 +2160,7 @@ fn void check_operands(checker mut* ck, diag.loc at, i32 op, ast.node mut* lhs, 
         return;
     }
     if (a->untyped && b->untyped) {
-        check_untyped_pair(ck, at, op, a, b, out);
+        check_untyped_pair(ck, at, op, lhs, a, rhs, b, out);
         return;
     }
     // D3.2: the typed operand decides before the untyped one adopts
