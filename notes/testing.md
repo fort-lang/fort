@@ -572,6 +572,40 @@ bullet at a time and without a rewrite.
   nothing red: `println(n > 0 ? 4294967296 : 1)` was refused before it and prints 4294967296
   after it. A ticket that changes the default type, the operand rules or the arms of a conditional
   writes the assertion itself, because no differential will.
+- **`diff_ir.sh` asks a second and absolute question of each module: does LLVM read it** (T-127).
+  The differential half says the two emitters agree, and two modules that agree may both be
+  wrong. So the script runs `opt -passes=verify` over each module before it compares them, and
+  the verified count is an equality, twice `PROGRAM_FILES`, so a run cannot pass while seeing
+  less. On 2026-09-14 that reads `527 programs` and `1054 modules`, and it costs 68.5 s to
+  84.6 s under `debug`.
+  **What it adds beyond `run_tests.py --verify-ir`, which runs the same `opt`.** CMake passes
+  that flag to `lang` and `fort-modules` under stage1 and to `lang-stage2` under stage2. 350 of
+  the 527 programs stand under `test/lang` and were already verified under both compilers. The
+  other 177 are 173 `test/fort` module tests, 2 `test/tty` programs, `src/lsp/main.ft` and
+  `src/fort/main.ft`. `fort-modules` is the only run of `test/fort` and it uses stage1, and there
+  is no stage2 twin of it, so 176 of those 177 had their stage2 module verified by nothing;
+  `src/fort/main.ft` is the exception, which `tools/fixpoint.sh` verifies under both compilers in
+  both build modes. The property now follows the file and not the directory.
+  The mutant is T-128's own defect: `git show c2ad3e4 -- src/` reverse applied to both compilers
+  leaves the modules identical and turns `diff-ir` red on
+  `test/lang/run/constants/014`, with `'%t8' defined with type 'i32' but expected 'i64'`.
+- **A verifier reads only the shapes the corpus spells, so a generated corpus stands beside the
+  measured one** (T-127). T-127 lived because no program of its shape existed, not because no
+  `opt` ran. `tools/sweep_untyped.sh` is that generated corpus: it builds one program per row of
+  `tools/sweep_untyped.txt` and puts each in one of five classes -- REPORTED, RAN with its
+  output, TRAP with its status, CC-FAIL (the checker passed it and clang refused the module) and
+  SILENT (it ran and printed nothing). CC-FAIL and SILENT fail the run, and every row carries the
+  class it must reach under stage1 and under stage2, so a row that changes class or answer fails
+  it as well. The 152 rows cover the four routes of `check_operands`, every context D4.1 names,
+  the two positions it says are not contexts, every operator family of D6.2 with an untyped
+  operand on each side, the return position and the float clause of D4.5. Both compilers read
+  `0 refused by clang, 0 silent`. Nothing in the gate runs it, because a generated corpus is a
+  question a ticket asks and not a rule the project keeps: it costs 8.5 s under stage1 and
+  21.2 s under stage2, and a ticket that touches constants, the default type or the operand
+  rules runs it by hand.
+  Its two command lines are in the script's header. It is not a substitute for a `run` or `fail`
+  test: a row that becomes a rule of the language moves into `test/lang`, as T-127's two programs
+  did.
 - **A ported pass is judged on its diagnostics one by one, with a script and not a reading.**
   For every message the ported file builds -- each `check_error` text and each run of `msg_str`
   pieces between `check_msg_begin` and `check_msg_end` -- ask whether any suite under `test/fort`
