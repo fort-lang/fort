@@ -27,6 +27,7 @@ library only; Python 3.12.
 """
 
 import dataclasses
+import inspect
 import json
 import re
 import sys
@@ -71,6 +72,21 @@ CORPUS_DIRS = (
 # failure and writes it here, as it does for CORPUS_FILES in
 # test/parser_recovery_test.c and FT_FILES in tools/diff_tokens.sh.
 CORPUS_FILES = 685
+# The least number of `.ft` each of those directories holds. A directory grows,
+# so its own test asserts a floor and CORPUS_FILES asserts the exact total. The
+# table has one entry for each directory of CORPUS_DIRS, and
+# test_every_corpus_directory_is_checked_by_a_test holds the two against each
+# other, so a directory that no test checks is a red test (T-104).
+CORPUS_MINIMUMS = {
+    LANG_RUN_DIR: 200,
+    LANG_PROGRAMS_DIR: 20,
+    STD_DIR: 8,
+    FORT_SRC_DIR: 1,
+    LSP_SRC_DIR: 1,
+    FORT_TESTS_DIR: 80,
+    FORT_LINT_DIR: 3,
+    TTY_DIR: 2,
+}
 # The `.ft` of the repository that are deliberately outside the corpus, each
 # because it is meant to hold a lexical error: test/lang/fail is the corpus of
 # programs the compiler must reject, test/highlight/scopes.ft carries the
@@ -472,7 +488,13 @@ class MarkerTableTest(unittest.TestCase):
 
 
 class CorpusTest(unittest.TestCase):
-    """Real fort is covered by the grammar and holds no lexical error."""
+    """Real fort is covered by the grammar and holds no lexical error.
+
+    One test checks one directory of CORPUS_DIRS, and no file is tokenized
+    twice. test_the_corpus_is_the_size_it_says_it_is checked the whole walk a
+    second time until T-104, which took a run of this module to 1364
+    tokenizations of 684 files; it counts now and tokenizes nothing.
+    """
 
     def setUp(self):
         self.engine = Engine(load_grammar())
@@ -480,62 +502,94 @@ class CorpusTest(unittest.TestCase):
     def sources(self, directory):
         return sorted(directory.rglob("*.ft"))
 
-    def test_the_lexical_tests_spell_correctly(self):
+    def check_directory(self, directory):
+        """Check every `.ft` of one directory of CORPUS_DIRS, against its floor."""
+        paths = self.sources(directory)
+        self.assertGreaterEqual(len(paths), CORPUS_MINIMUMS[directory], f"{directory} shrank")
+        self.check(paths)
+        return paths
+
+    def test_the_lexical_tests_are_in_the_language_corpus(self):
+        """The lexical tests are the hardest fort the grammar meets.
+
+        test_every_language_test_spells_correctly checks them with the rest of
+        test/lang/run. This test holds them inside that walk and tokenizes
+        nothing of its own.
+        """
         paths = self.sources(LANG_RUN_DIR / "lexical")
         self.assertGreaterEqual(len(paths), 4)
-        self.check(paths)
+        self.assertTrue(set(paths) <= set(self.sources(LANG_RUN_DIR)))
 
     def test_every_language_test_spells_correctly(self):
-        self.check(self.sources(LANG_RUN_DIR))
+        self.check_directory(LANG_RUN_DIR)
 
     def test_every_whole_program_spells_correctly(self):
         """test/lang/programs/*.ft, the corpus of whole programs (T-079)."""
-        paths = self.sources(LANG_PROGRAMS_DIR)
-        self.assertGreaterEqual(len(paths), 20)
-        self.check(paths)
+        self.check_directory(LANG_PROGRAMS_DIR)
 
     def test_every_standard_library_module_spells_correctly(self):
         """std/*.ft is real fort the grammar must cover too (T-076)."""
-        paths = self.sources(STD_DIR)
-        self.assertGreaterEqual(len(paths), 8)
-        self.check(paths)
+        self.check_directory(STD_DIR)
 
     def test_every_compiler_source_in_fort_spells_correctly(self):
-        """src/fort/*.ft, which Phase B fills.
+        """src/fort/*.ft, the self-hosted compiler.
 
-        The directory does not exist before the first ported module lands, and
-        rglob over a missing directory yields nothing without error, so the
-        test would pass over zero files and say so to nobody. It skips out
-        loud until the directory exists and asserts a file once it does.
+        The directory did not exist before the first ported module landed, and
+        rglob over a missing directory yields nothing without error, so this
+        test skipped out loud until Phase B created it. The floor of
+        CORPUS_MINIMUMS says the same thing now and needs no branch (T-104).
         """
-        if not FORT_SRC_DIR.is_dir():
-            self.skipTest("src/fort does not exist yet (Phase B creates it)")
-        paths = self.sources(FORT_SRC_DIR)
-        self.assertGreaterEqual(len(paths), 1, "src/fort exists but holds no .ft")
-        self.check(paths)
+        self.check_directory(FORT_SRC_DIR)
+
+    def test_every_language_server_source_spells_correctly(self):
+        """src/lsp/*.ft, the language server (T-063).
+
+        It stood in CORPUS_DIRS with no test of its own until T-104, so the
+        second walk of test_the_corpus_is_the_size_it_says_it_is was the only
+        thing that tokenized it.
+        """
+        self.check_directory(LSP_SRC_DIR)
 
     def test_every_module_test_of_the_compiler_spells_correctly(self):
         """test/fort/**/*.ft: the tests of the self-hosted modules and their
         shared fixtures under support/, which rglob reaches (T-079)."""
-        paths = self.sources(FORT_TESTS_DIR)
-        self.assertGreaterEqual(len(paths), 80)
+        paths = self.check_directory(FORT_TESTS_DIR)
         self.assertTrue(any(p.parent.name == "support" for p in paths), "support/ not walked")
-        self.check(paths)
 
     def test_every_fort_lint_fixture_spells_correctly(self):
         """test/fort_lint/*.ft is wrong semantically and clean lexically, which
         is the stress this test wants: bad_names.ft violates every rule of D1.4
         and broken.ft fails the checker, yet both must tokenize (T-079)."""
-        paths = self.sources(FORT_LINT_DIR)
-        self.assertGreaterEqual(len(paths), 3)
-        self.check(paths)
+        self.check_directory(FORT_LINT_DIR)
+
+    def test_every_terminal_program_spells_correctly(self):
+        """test/tty/*.ft, the two programs test/tty_test.py drives on a pseudo
+        terminal. They were in the same position as src/lsp before T-104."""
+        self.check_directory(TTY_DIR)
 
     def test_the_corpus_is_the_size_it_says_it_is(self):
-        """The count of files walked, so a glob that stopped matching is seen."""
+        """The count of files walked, so a glob that stopped matching is seen.
+
+        The walk holds no duplicate, which is what makes each file reach
+        exactly one of the tests above. This test tokenizes nothing.
+        """
         walked = [path for directory in CORPUS_DIRS for path in self.sources(directory)]
         self.assertEqual(len(walked), len(set(walked)))
         self.assertEqual(len(walked), CORPUS_FILES)
-        self.check(walked)
+
+    def test_every_corpus_directory_is_checked_by_a_test(self):
+        """A directory of CORPUS_DIRS that no test checks is caught here.
+
+        The second walk covered a new directory whatever else it did, and cost
+        one tokenization of the whole corpus. This test takes that duty and
+        costs nothing: it reads the source of this class and asks which names
+        the tests hand to check_directory (T-104).
+        """
+        name_of = {id(value): name for name, value in globals().items()}
+        want = {name_of[id(directory)] for directory in CORPUS_DIRS}
+        calls = re.findall(r"self\.check_directory\((\w+)\)", inspect.getsource(CorpusTest))
+        self.assertEqual(set(calls), want)
+        self.assertEqual(len(calls), len(want), "a directory is checked twice")
 
     def test_every_fort_source_in_the_repository_is_walked_or_excluded(self):
         """No directory of fort can be missed in silence.
