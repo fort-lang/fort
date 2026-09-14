@@ -439,7 +439,7 @@ TEST(no_bounds_check_keeps_the_overwrite_check, {
 TEST(an_assignment_to_an_owned_slot_checks_the_element_it_reaches, {
     TEST_ASSERT_TRUE(emit("struct node {\n    i32 value;\n}\n"
                           "fn i32 main() {\n"
-                          "    node mut* own mut@ own kids = new(node* own, 2);\n"
+                          "    node mut* own mut@ own kids = new(node mut* own, 2);\n"
                           "    kids[0] = new(node);\n    del(kids[0]);\n    del(kids);\n"
                           "    return 0;\n}\n"));
     // The element address is computed first, which is the source order, then

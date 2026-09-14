@@ -33,12 +33,12 @@ TEST(mutability_is_never_added_implicitly, {
 TEST(a_drop_behind_a_mutable_level_is_refused, {
     TEST_ASSERT_TRUE(check_src("struct node {\n    i32 v;\n}\n"
                                "fn i32 main() {\n"
-                               "    node mut* mut@ own a = new(node*, 1);\n"
+                               "    node mut* mut@ own a = new(node mut*, 1);\n"
                                "    node*@ b = a;\n    println(b.len);\n    del(a);\n"
                                "    return 0;\n}\n"));
     TEST_ASSERT_FALSE(check_src("struct node {\n    i32 v;\n}\n"
                                 "fn i32 main() {\n"
-                                "    node mut* mut@ own a = new(node*, 1);\n"
+                                "    node mut* mut@ own a = new(node mut*, 1);\n"
                                 "    node* mut@ c = a;\n    println(c.len);\n    del(a);\n"
                                 "    return 0;\n}\n"));
     // A mutable slot could then hold a pointer to what the source still sees

@@ -471,7 +471,7 @@ TEST(new_allocates_writable_storage_at_every_level, {
 TEST(new_of_an_own_element_owns_each_slot, {
     TEST_ASSERT_TRUE(
         check_src("struct node {\n    i32 v;\n}\n"
-                  "fn i32 main() {\n    node mut* own mut@ own k = new(node* own, 4);\n"
+                  "fn i32 main() {\n    node mut* own mut@ own k = new(node mut* own, 4);\n"
                   "    println(k.len);\n    del(k);\n    return 0;\n}\n"));
     TEST_ASSERT_EQ_STR(init_type("k"), "node mut* own mut@ own");
 })
