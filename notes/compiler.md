@@ -484,6 +484,20 @@ one past the linker. 14 of the 48 `std.rt` definitions in the integer program's 
 no call in it. Each of the 14 stands on its own `define` line and appears nowhere else in the
 module, and `nm` finds all 14 in the binary:
 
+**The checker does the same thing, and that is what blocks the fold rather than floats being hard.**
+`load_runtime` (`src/bootstrap/modules.c:906`) puts the whole of `std.rt` into every closure stage1
+reads, and `base_type` (`src/bootstrap/check.c:476`) refuses `f64` on sight, so a declaration
+nothing names is enough. Measured on 2026-09-14: a copy of `std/rt.ft` carrying only
+`fn void probe_f64(f64 v) { return; }` -- no literal, no body, no arithmetic -- gives
+`not supported by the bootstrap compiler: floats` and exit 1 for a program whose only call is
+`println(1)`. `src/fort` itself holds **no float value**: every `f64` in its seven mentioning files
+is a comment, a string literal or an enum member, which it must be, since stage1 builds stage2
+today. So the compiler never needs float arithmetic; a float **spelling** in a module it loads is
+what it refuses. The gate is one branch, and behind it there is nothing to reach:
+`grep -c 'f64\|f32'` over `src/bootstrap/types.c`, `gen_expr.c` and `consts.c` reads 0, 0, 0
+against 10 and 13 in `src/fort/gen_expr.ft` and `consts.ft` (T-096, and a user's question on
+2026-09-14 that found it).
+
 ```sh
 grep -o '^define .*@"std\.rt\.[a-z_0-9]*"' /tmp/int.ll | sed 's/.*@//' | sort -u > /tmp/d.txt
 grep -o 'call [^@]*@"std\.rt\.[a-z_0-9]*"' /tmp/int.ll | sed 's/.*@//' | sort -u > /tmp/c.txt
