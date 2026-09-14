@@ -476,6 +476,7 @@ set_tests_properties(diff-check PROPERTIES LABELS lang)
 # against, and it sees the whole front end with it.
 add_test(NAME diff-ir
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ir.sh" "${CMAKE_BINARY_DIR}"
+            --opt "${FORT_OPT_PATH}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(diff-ir PROPERTIES LABELS lang)
 
@@ -675,6 +676,7 @@ add_custom_target(check-lang
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ast.sh" "${CMAKE_BINARY_DIR}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_check.sh" "${CMAKE_BINARY_DIR}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ir.sh" "${CMAKE_BINARY_DIR}"
+            --opt "${FORT_OPT_PATH}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/test/lsp_binary_test.sh" "${FORT_LSP_BINARY}"
     COMMAND ${FORT_FIXPOINT_COMMAND}
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
