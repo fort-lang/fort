@@ -533,6 +533,16 @@ bullet at a time and without a rewrite.
   with T-042 (74dddb3) and stood until T-045 measured it, because it returned a number and a
   number reads as an answer. Use the command above, and check what it prints against the
   constants you know you touched.
+  **A line can move a file from one bucket of `diff_ast.sh` to another, and the two constants
+  then move in opposite directions** (T-127). The three buckets are read off the message stage1
+  prints, and stage1 stops at the first construct it refuses on a line. Every `?:` of
+  `test/lang/fail/constants/010` stood to the right of a float literal, so the lexer reported the
+  float and the parser never reached the `?`, and the file counted under `FLOAT_FILES`. One added
+  line, `println((n > 0 ? 'a' : 'b') == 1.5);`, puts the `?` at column 20 and the float at column
+  35. stage1 now prints `not supported by the bootstrap compiler: ?:` for the file, so
+  `FORM_FILES` went 15 to 16 and `FLOAT_FILES` 68 to 67, on one file and with no file added. Run
+  the script twice: it reports one bucket at a time, `NESTED_FILES` first, then `FORM_FILES`,
+  then `FLOAT_FILES`, so the second failure is invisible until the first is fixed.
   **A search root moves a second equality, and a new file may move none.** The two rules are the
   same rule read from each end. `-I src`, which T-063 added to `diff_check.sh` and to
   `diff_ir.sh` so that the language server resolves, took `CLEAN_FILES` from 458 to 472 and
