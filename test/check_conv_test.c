@@ -202,6 +202,16 @@ TEST(a_cast_never_changes_a_span_element_type, {
     // The element type of a span never changes, because `len` counts elements.
     // D3.14
     TEST_ASSERT_TRUE(said("cannot cast i32@ to u32@"));
+    // The refusal has one reason and the message names it. A cast refused for
+    // another reason carries no tail, so the tail says which rule refused.
+    TEST_ASSERT_FALSE(said("a cast never adds 'mut'"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    // The same pair with the mark on the target is refused for both reasons and
+    // the mark is the one reported: the rows are asked in that order.
+    TEST_ASSERT_FALSE(check_body("    i32@ s = {};\n    u32 mut@ u = cast(s, u32 mut@);\n"
+                                 "    println(u.len);"));
+    TEST_ASSERT_TRUE(said("cannot cast i32@ to u32 mut@: a cast never adds 'mut'"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
 })
 
 TEST(a_cast_from_a_pointer_to_a_span_is_refused, {
