@@ -545,10 +545,12 @@ TEST(a_discarded_move_never_reaches_the_emitter, {
 })
 
 // `std.rt.alloc`'s shape, twice: an extern that answers a block, a function
-// that answers it `own`, and a caller that binds it, writes through it and
+// that answers it `own`, and a caller that binds it, reads through it and
 // releases it. The second source names `void mut*` where the first names
-// `void*`, and nothing else differs. Each declared name stands on a line of
-// its own, because the overwrite check of item 18 records the column of the
+// `void*`, and nothing else differs. The caller reads and does not write,
+// because a cast of the first block to a writable span would add the mark, and
+// the two texts must differ in the mark alone. Each declared name stands on a
+// line of its own, because the overwrite check of item 18 records the column of the
 // name it guards and `void mut*` is four characters wider; with a name on the
 // wider line the two texts would differ in two `fail_overwrite` columns and in
 // nothing else.
@@ -564,8 +566,8 @@ static const char VOID_PTR_ALLOC[] = "extern fn void* own take(u64 n, u64 size);
                                      "fn i32 main() {\n"
                                      "    void* own\n"
                                      "        b = grab(8);\n"
-                                     "    u8 mut@ v = cast(b, u8 mut*)[0..8];\n"
-                                     "    v[0] = 7;\n"
+                                     "    u8@ v = cast(b, u8*)[0..8];\n"
+                                     "    println(v.len);\n"
                                      "    println(v[0]);\n"
                                      "    drop(move(b));\n"
                                      "    return 0;\n"
@@ -582,8 +584,8 @@ static const char VOID_MUT_PTR_ALLOC[] = "extern fn void mut* own take(u64 n, u6
                                          "fn i32 main() {\n"
                                          "    void mut* own\n"
                                          "        b = grab(8);\n"
-                                         "    u8 mut@ v = cast(b, u8 mut*)[0..8];\n"
-                                         "    v[0] = 7;\n"
+                                         "    u8@ v = cast(b, u8*)[0..8];\n"
+                                         "    println(v.len);\n"
                                          "    println(v[0]);\n"
                                          "    drop(move(b));\n"
                                          "    return 0;\n"

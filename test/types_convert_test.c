@@ -96,7 +96,26 @@ static uint32_t scalar_types(tenv_t* e, const type_t** types, scalar_class_t* cl
 // identity, so a property that never sees one cannot tell whether a conversion
 // respects them.
 // D3.10
-enum { SAMPLES_MAX = 32 };
+enum { SAMPLES_MAX = 35 };
+
+// The ordered pairs of that table whose cast would add a mark, read off the
+// failure of `no_conversion_and_no_cast_adds_mut` below. A ticket that adds a
+// spelling to the table reads the new number there and writes it here.
+//
+// `u8 mut@`, `node mut*@` and `node mut*[2]` are in the table for the two arms
+// of the rule that the other 32 spellings never reached: a `string` source,
+// whose bytes carry no level behind them, and a `mut` inside a fixed array. The
+// review that asked for them measured both arms at 0 of the pairs the table
+// held before them, so a mutation in either left the count and the gate
+// untouched. The array arm holds 34 of the 336 today and the `string` arm 2.
+// `node mut*@` is the one that reaches the `string` arm, because a target whose
+// own level is mutable is answered by the level before it.
+enum { MUT_ADDING_PAIRS = 336 };
+
+// The spelling of `t` with every `mut` cleared, for the test below.
+static const char* stripped(tenv_t* e, const char* spelling) {
+    return tenv_str(e, type_without_mut(&e->tt, tenv_type(e, spelling)));
+}
 
 static uint32_t sample_types(tenv_t* e, const type_t** types) {
     static const char* const SPELLINGS[] = {
@@ -117,6 +136,9 @@ static uint32_t sample_types(tenv_t* e, const type_t** types) {
         "node* own[4]",
         "i32@",
         "i32 mut@",
+        "u8 mut@",
+        "node mut*@",
+        "node mut*[2]",
         "i32[4]",
         "point",
         "string",
@@ -335,24 +357,25 @@ TEST(casts_refused_among_scalars, {
 TEST(casts_among_pointers_and_u64, {
     tenv_t e;
     tenv_init(&e);
-    TEST_ASSERT_TRUE(castable(&e, "point*", "node*"));    // any pointer to any pointer
-    TEST_ASSERT_TRUE(castable(&e, "node mut*", "node*")); // adds mutability
-    // D17.3
-    TEST_ASSERT_TRUE(castable(&e, "node mut* own", "node*")); // adopts
-    TEST_ASSERT_TRUE(castable(&e, "node*", "node mut* own")); // lends
+    TEST_ASSERT_TRUE(castable(&e, "point*", "node*")); // any pointer to any pointer
+    // D17.3: the source already carries the `mut` the target keeps
+    TEST_ASSERT_TRUE(castable(&e, "node mut* own", "node mut*")); // adopts
+    TEST_ASSERT_TRUE(castable(&e, "node*", "node mut* own"));     // lends
     TEST_ASSERT_TRUE(castable(&e, "void*", "node*"));
     TEST_ASSERT_TRUE(castable(&e, "node*", "void*"));
     TEST_ASSERT_TRUE(castable(&e, "void* own", "void*"));
-    // The cast-away-const escape reaches the level a `void*` names too.
+    // A `mut` the source carries reaches the level a `void*` names, in both
+    // directions, and a cast that only drops it is allowed as well.
     // D3.14
-    TEST_ASSERT_TRUE(castable(&e, "void mut*", "void*"));
-    TEST_ASSERT_TRUE(castable(&e, "void mut*", "node*"));
-    TEST_ASSERT_TRUE(castable(&e, "node mut*", "void*"));
-    TEST_ASSERT_TRUE(castable(&e, "void mut* own", "u64"));
+    TEST_ASSERT_TRUE(castable(&e, "void mut*", "node mut*"));
+    TEST_ASSERT_TRUE(castable(&e, "node mut*", "void mut*"));
+    TEST_ASSERT_TRUE(castable(&e, "void*", "void mut*"));
+    TEST_ASSERT_TRUE(castable(&e, "node*", "node mut*"));
     TEST_ASSERT_TRUE(castable(&e, "u64", "node*"));
     TEST_ASSERT_TRUE(castable(&e, "node*", "u64"));
     TEST_ASSERT_TRUE(castable(&e, "u64", "void*"));
     TEST_ASSERT_TRUE(castable(&e, "void*", "u64"));
+    TEST_ASSERT_TRUE(castable(&e, "void* own", "u64"));
     TEST_ASSERT_TRUE(castable(&e, "node**", "node* mut*"));
     // Pointers cast to no other integer type, and never to a span.
     TEST_ASSERT_FALSE(castable(&e, "i64", "node*"));
@@ -361,6 +384,16 @@ TEST(casts_among_pointers_and_u64, {
     TEST_ASSERT_FALSE(castable(&e, "i32@", "i32*"));
     TEST_ASSERT_FALSE(castable(&e, "i32*", "i32@"));
     TEST_ASSERT_FALSE(castable(&e, "i64", "i32@"));
+    // No pointer cast adds the `mut`, from a typed pointer, from a `void*` or
+    // from the address in a `u64`.
+    // D3.14
+    TEST_ASSERT_FALSE(castable(&e, "node mut*", "node*"));
+    TEST_ASSERT_FALSE(castable(&e, "node mut* own", "node*"));
+    TEST_ASSERT_FALSE(castable(&e, "void mut*", "void*"));
+    TEST_ASSERT_FALSE(castable(&e, "void mut*", "node*"));
+    TEST_ASSERT_FALSE(castable(&e, "node mut*", "void*"));
+    TEST_ASSERT_FALSE(castable(&e, "void mut* own", "u64"));
+    TEST_ASSERT_FALSE(castable(&e, "node mut*", "u64"));
     tenv_free(&e);
 })
 
@@ -388,15 +421,13 @@ TEST(casts_within_the_string_family, {
     tenv_init(&e);
     TEST_ASSERT_TRUE(castable(&e, "char@", "string"));
     TEST_ASSERT_TRUE(castable(&e, "u8@", "string"));
-    TEST_ASSERT_TRUE(castable(&e, "char mut@", "string"));
-    TEST_ASSERT_TRUE(castable(&e, "u8 mut@", "string"));
     TEST_ASSERT_TRUE(castable(&e, "string", "char@"));
     TEST_ASSERT_TRUE(castable(&e, "string", "u8@"));
     TEST_ASSERT_TRUE(castable(&e, "u8@", "char@"));
     TEST_ASSERT_TRUE(castable(&e, "char@", "u8@"));
     TEST_ASSERT_TRUE(castable(&e, "string", "u8 mut@"));
     TEST_ASSERT_TRUE(castable(&e, "u8@", "u8 mut@"));
-    TEST_ASSERT_TRUE(castable(&e, "u8 mut@", "u8@"));
+    TEST_ASSERT_TRUE(castable(&e, "char mut@", "u8 mut@"));
     // Adoption and lending are both casts.
     // D17.3, D17.12
     TEST_ASSERT_TRUE(castable(&e, "string own", "u8 mut@ own"));
@@ -407,6 +438,15 @@ TEST(casts_within_the_string_family, {
     TEST_ASSERT_FALSE(castable(&e, "i8@", "u8@"));
     TEST_ASSERT_FALSE(castable(&e, "string", "i8@"));
     TEST_ASSERT_FALSE(castable(&e, "i32@", "u32@"));
+    // The bytes of a `string` are immutable, and no member of the family adds
+    // the `mut` back, so the two casts of `cast(cast(b, string), u8 mut@)`
+    // launder nothing.
+    // D3.7, D3.14
+    TEST_ASSERT_FALSE(castable(&e, "char mut@", "string"));
+    TEST_ASSERT_FALSE(castable(&e, "u8 mut@", "string"));
+    TEST_ASSERT_FALSE(castable(&e, "u8 mut@", "u8@"));
+    TEST_ASSERT_FALSE(castable(&e, "char mut@", "u8@"));
+    TEST_ASSERT_FALSE(castable(&e, "u8 mut@ own", "string"));
     tenv_free(&e);
 })
 
@@ -427,8 +467,12 @@ TEST(a_span_cast_never_launders_a_signature_or_an_owner, {
     TEST_ASSERT_FALSE(type_cast_allowed(takes_node, takes_mut));
     TEST_ASSERT_FALSE(type_same_shape(of_node, of_mut));
     TEST_ASSERT_TRUE(type_cast_allowed(of_node, of_node));
-    // A span of function pointers still casts where its own marks differ.
-    TEST_ASSERT_TRUE(type_cast_allowed(type_span(&e.tt, takes_node, true, true), of_node));
+    // A span of function pointers still casts where its own marks differ, so
+    // long as the marks are not added: `own` may be, `mut` may not.
+    // D3.14
+    TEST_ASSERT_TRUE(type_cast_allowed(type_span(&e.tt, takes_node, true, false), of_node));
+    TEST_ASSERT_FALSE(type_cast_allowed(type_span(&e.tt, takes_node, true, true), of_node));
+    TEST_ASSERT_TRUE(type_cast_allowed(of_node, type_span(&e.tt, takes_node, false, true)));
     // Dropping an `own` under a reference the target still owns would leave its
     // objects owned by nobody, which no cast licenses.
     // D17.4
@@ -447,23 +491,71 @@ TEST(a_span_cast_never_launders_a_signature_or_an_owner, {
 TEST(casts_of_spans_change_only_the_marks, {
     tenv_t e;
     tenv_init(&e);
-    // The element type never changes; mutability is added or dropped at any
-    // level, and `own` at any reference (amended 2026-09-10).
+    // The element type never changes; mutability is dropped at any level, and
+    // `own` is added or dropped at any reference.
     // D3.14
-    TEST_ASSERT_TRUE(castable(&e, "node* mut@", "node*@"));
     TEST_ASSERT_TRUE(castable(&e, "node*@", "node* mut@"));
-    TEST_ASSERT_TRUE(castable(&e, "node mut* mut@", "node* mut@"));
     TEST_ASSERT_TRUE(castable(&e, "i32@@ mut", "i32 mut@ mut@"));
-    TEST_ASSERT_TRUE(castable(&e, "i32 mut@ mut@", "i32@ mut@"));
     TEST_ASSERT_TRUE(castable(&e, "u8@", "u8@ own"));
-    TEST_ASSERT_TRUE(castable(&e, "i32 mut@", "i32@"));
     TEST_ASSERT_TRUE(castable(&e, "i32@", "i32 mut@"));
-    TEST_ASSERT_TRUE(castable(&e, "i32 mut@ own", "i32@"));
-    TEST_ASSERT_TRUE(castable(&e, "node mut* own mut@", "node*@"));
     TEST_ASSERT_TRUE(castable(&e, "node mut* mut@", "node mut* own mut@ own"));
+    // The route a caller of `std.sort_ptr` takes: the drop at level 2 behind a
+    // mutable level 1, which the implicit conversion refuses and the cast makes.
+    // D5.4, D3.14
     TEST_ASSERT_TRUE(castable(&e, "node* mut@", "node mut* mut@"));
+    TEST_ASSERT_FALSE(assignable(&e, "node* mut@", "node mut* mut@"));
     TEST_ASSERT_FALSE(castable(&e, "node*@", "point*@"));
     TEST_ASSERT_FALSE(castable(&e, "i32@@", "i32@"));
+    // A span adds no `mut`, at the slots or at any level below them.
+    // D3.14
+    TEST_ASSERT_FALSE(castable(&e, "node* mut@", "node*@"));
+    TEST_ASSERT_FALSE(castable(&e, "node mut* mut@", "node* mut@"));
+    TEST_ASSERT_FALSE(castable(&e, "i32 mut@ mut@", "i32@ mut@"));
+    TEST_ASSERT_FALSE(castable(&e, "i32 mut@", "i32@"));
+    TEST_ASSERT_FALSE(castable(&e, "i32 mut@ own", "i32@"));
+    TEST_ASSERT_FALSE(castable(&e, "node mut* own mut@", "node*@"));
+    tenv_free(&e);
+})
+
+TEST(a_cast_never_adds_mut, {
+    tenv_t e;
+    tenv_init(&e);
+    // One rule over every row of the matrix: the target marks a level `mut`
+    // only where the source marks the level at the same depth `mut` too.
+    // D3.14
+    TEST_ASSERT_TRUE(type_cast_adds_mut(tenv_type(&e, "node mut*"), tenv_type(&e, "node*")));
+    TEST_ASSERT_FALSE(type_cast_adds_mut(tenv_type(&e, "node*"), tenv_type(&e, "node mut*")));
+    TEST_ASSERT_FALSE(type_cast_adds_mut(tenv_type(&e, "node mut*"), tenv_type(&e, "node mut*")));
+    // A level below the outermost is a level like any other, and the drop at
+    // that level stays legal.
+    TEST_ASSERT_FALSE(castable(&e, "node mut* mut*", "node* mut*"));
+    TEST_ASSERT_TRUE(castable(&e, "node* mut*", "node mut* mut*"));
+    TEST_ASSERT_FALSE(castable(&e, "node mut* mut@", "node* mut@"));
+    TEST_ASSERT_TRUE(castable(&e, "node* mut@", "node mut* mut@"));
+    // `void*` is a source like any other, so the two casts of
+    // `cast(cast(p, void*), u8 mut*)` refuse the second one. A `void mut*`
+    // carries the mark and the same cast compiles.
+    // D3.11, D3.14
+    TEST_ASSERT_FALSE(castable(&e, "u8 mut*", "void*"));
+    TEST_ASSERT_TRUE(castable(&e, "u8 mut*", "void mut*"));
+    TEST_ASSERT_TRUE(castable(&e, "u8*", "void*"));
+    // An integer, a `string` and a function pointer name no level at all, so a
+    // target that marks one adds it.
+    TEST_ASSERT_FALSE(castable(&e, "u8 mut*", "u64"));
+    TEST_ASSERT_TRUE(castable(&e, "u8*", "u64"));
+    TEST_ASSERT_FALSE(castable(&e, "u8 mut@", "string"));
+    TEST_ASSERT_TRUE(castable(&e, "u8@", "string"));
+    TEST_ASSERT_TRUE(
+        type_cast_adds_mut(tenv_type(&e, "void mut*"), tenv_fn(&e, type_void(&e.tt), NULL, NULL)));
+    // Where the pointee type diverges, the source says nothing about the levels
+    // below the divergence, so the target marks none of them.
+    TEST_ASSERT_FALSE(castable(&e, "node mut* mut*", "u8 mut*"));
+    TEST_ASSERT_TRUE(castable(&e, "node* mut*", "u8 mut*"));
+    TEST_ASSERT_TRUE(castable(&e, "u8 mut*", "node mut* mut*"));
+    // A fixed array adds no level of its own: the elements are compared.
+    // D5.2
+    TEST_ASSERT_FALSE(castable(&e, "node mut*[2]", "node*[2]"));
+    TEST_ASSERT_TRUE(castable(&e, "node*[2]", "node mut*[2]"));
     tenv_free(&e);
 })
 
@@ -614,14 +706,21 @@ TEST(lending_combines_with_dropping_mutability, {
 TEST(casts_may_add_own_at_any_reference, {
     tenv_t e;
     tenv_init(&e);
-    // Adoption is a cast, at any level, where the implicit drop refuses.
+    // Adoption is a cast, at any level, where the implicit drop refuses. It
+    // adds the `own` alone: every `mut` of the target stands in the source.
     // D3.14, D17.3
-    TEST_ASSERT_TRUE(castable(&e, "u8 mut@ own", "u8@"));
-    TEST_ASSERT_TRUE(castable(&e, "u8 mut@ own mut*", "u8@*"));
-    TEST_ASSERT_TRUE(castable(&e, "node mut* own mut@ own", "node*@"));
+    TEST_ASSERT_TRUE(castable(&e, "u8 mut@ own", "u8 mut@"));
+    TEST_ASSERT_TRUE(castable(&e, "u8 mut@ own mut*", "u8 mut@ mut*"));
+    TEST_ASSERT_TRUE(castable(&e, "node mut* own mut@ own", "node mut* mut@"));
     TEST_ASSERT_TRUE(castable(&e, "node mut* mut@", "node mut* own mut@ own"));
     TEST_ASSERT_TRUE(castable(&e, "void* own", "u64"));
-    TEST_ASSERT_TRUE(castable(&e, "u8 mut* own", "void*"));
+    TEST_ASSERT_TRUE(castable(&e, "u8 mut* own", "void mut*"));
+    TEST_ASSERT_TRUE(castable(&e, "u8* own", "void*"));
+    // Adoption adds no `mut` of its own. `cast(libc.malloc(n), u8 mut* own)`
+    // compiles because `malloc` answers `void mut* own`.
+    // D3.14, D17.13
+    TEST_ASSERT_FALSE(castable(&e, "u8 mut@ own", "u8@"));
+    TEST_ASSERT_FALSE(castable(&e, "u8 mut* own", "void*"));
     tenv_free(&e);
 })
 
@@ -674,6 +773,92 @@ TEST(every_implicit_conversion_is_also_a_cast, {
             }
         }
     }
+    tenv_free(&e);
+})
+
+// `type_without_mut` answers the target a refused cast would have had without
+// its marks, which is how the checker tells a cast refused for the mark from one
+// refused for the element type as well. It is a query of the type table, so the
+// test spells the answer rather than asking the rule again.
+// D3.10, D3.14
+TEST(clearing_every_mark_of_a_type, {
+    tenv_t e;
+    tenv_init(&e);
+    TEST_ASSERT_EQ_STR(stripped(&e, "i32 mut*"), "i32*");
+    TEST_ASSERT_EQ_STR(stripped(&e, "i32*"), "i32*");
+    TEST_ASSERT_EQ_STR(stripped(&e, "node mut* mut*"), "node**");
+    TEST_ASSERT_EQ_STR(stripped(&e, "node mut* mut@"), "node*@");
+    TEST_ASSERT_EQ_STR(stripped(&e, "void mut*"), "void*");
+    TEST_ASSERT_EQ_STR(stripped(&e, "u8 mut@"), "u8@");
+    // `own` is another mark and this clears none of it, at any level.
+    // D17.2
+    TEST_ASSERT_EQ_STR(stripped(&e, "node mut* own mut@ own"), "node* own@ own");
+    TEST_ASSERT_EQ_STR(stripped(&e, "void mut* own"), "void* own");
+    // A fixed array holds no mark of its own and passes the clearing down.
+    // D5.2
+    TEST_ASSERT_EQ_STR(stripped(&e, "node mut*[2]"), "node*[2]");
+    // A `string`, a scalar and a struct carry no level, so each is itself.
+    TEST_ASSERT_EQ_STR(stripped(&e, "string"), "string");
+    TEST_ASSERT_EQ_STR(stripped(&e, "i32"), "i32");
+    TEST_ASSERT_EQ_STR(stripped(&e, "point"), "point");
+    // A function type is its own identity, marks of parameters included, so
+    // clearing them would answer another type and it answers itself.
+    // D3.10
+    const type_t* takes_mut = tenv_fn(&e, type_void(&e.tt), tenv_type(&e, "node mut*"), NULL);
+    TEST_ASSERT_TRUE(type_without_mut(&e.tt, takes_mut) == takes_mut);
+    // The result is interned like any other type, so clearing a type that
+    // carries no mark answers the very node it was given.
+    const type_t* plain = tenv_type(&e, "node*");
+    TEST_ASSERT_TRUE(type_without_mut(&e.tt, plain) == plain);
+    TEST_ASSERT_TRUE(type_without_mut(&e.tt, tenv_type(&e, "node mut*")) == plain);
+    tenv_free(&e);
+})
+
+TEST(no_conversion_and_no_cast_adds_mut, {
+    tenv_t e;
+    tenv_init(&e);
+    // The rule is a universal one, so the test is a loop over the sample table
+    // and not a list of cases: 35 spellings, 1225 ordered pairs, every one of
+    // them asked whether it adds a mark and then whether the two answers that
+    // matter agree with that.
+    // D3.14, D5.4
+    const type_t* types[SAMPLES_MAX];
+    const uint32_t n = sample_types(&e, types);
+    TEST_ASSERT_EQ_UINT64((uint64_t)n, (uint64_t)SAMPLES_MAX);
+    uint64_t adding = 0;
+    for (uint32_t d = 0; d < n; d++) {
+        for (uint32_t s = 0; s < n; s++) {
+            if (!type_cast_adds_mut(types[d], types[s])) {
+                continue;
+            }
+            adding++;
+            if (type_cast_allowed(types[d], types[s])) {
+                TEST_LOG_("cast %s -> %s adds mutability and is allowed",
+                          tenv_str(&e, types[s]),
+                          tenv_str(&e, types[d]));
+                TEST_FAIL();
+            }
+            if (type_assignable(types[d], types[s])) {
+                TEST_LOG_("%s converts to %s and adds mutability",
+                          tenv_str(&e, types[s]),
+                          tenv_str(&e, types[d]));
+                TEST_FAIL();
+            }
+        }
+    }
+    // What this proves and what it does not. The two implications are one
+    // direction: `adds mut` implies neither casts nor converts. An over-refusing
+    // rule satisfies them and bakes its own number into the count below, so
+    // neither says the rule refuses no more than it should. The converse over
+    // the same table is `every_implicit_conversion_is_also_a_cast`, which goes
+    // red the moment a pair that converts stops casting, and the pairs that cast
+    // without converting are named one by one in `a_cast_never_adds_mut` and in
+    // `casts_of_spans_change_only_the_marks`.
+    //
+    // The count holds the table to the rule. Two implications over a table that
+    // had stopped naming a mutable type would both hold and prove nothing, and
+    // the table above is shared with four other tests, so it moves.
+    TEST_ASSERT_EQ_UINT64(adding, (uint64_t)MUT_ADDING_PAIRS);
     tenv_free(&e);
 })
 
@@ -742,6 +927,7 @@ int main(int argc, char** argv) {
     TEST_RUN(casts_within_the_string_family);
     TEST_RUN(a_span_cast_never_launders_a_signature_or_an_owner);
     TEST_RUN(casts_of_spans_change_only_the_marks);
+    TEST_RUN(a_cast_never_adds_mut);
     TEST_RUN(casts_refused_for_structs_and_fixed_arrays);
     TEST_RUN(casts_between_a_reference_and_a_fat_pointer_are_refused);
     TEST_RUN(casts_of_null_void_and_the_error_type);
@@ -752,6 +938,8 @@ int main(int argc, char** argv) {
     TEST_RUN(casts_may_add_own_at_any_reference);
     TEST_RUN(every_scalar_pair_follows_the_d3_14_matrix);
     TEST_RUN(every_implicit_conversion_is_also_a_cast);
+    TEST_RUN(clearing_every_mark_of_a_type);
+    TEST_RUN(no_conversion_and_no_cast_adds_mut);
     TEST_RUN(conversion_and_identity_agree_with_themselves);
     TEST_RUN(dropping_marks_never_changes_the_shape_or_the_size);
     TEST_EXIT();

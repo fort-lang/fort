@@ -159,11 +159,36 @@ TEST(a_cast_converts_between_pointers_and_integers, {
                                 "    void* o = cast(p, void*);\n    println(b, n, o);"));
 })
 
-TEST(a_cast_adds_mutability_and_ownership, {
-    TEST_ASSERT_TRUE(check_body("    i32 v = 1;\n    i32* p = &v;\n"
+TEST(a_cast_adds_ownership_and_never_mutability, {
+    // A cast never adds `mut`, so the writable pointer comes from a writable
+    // source and nowhere else. The cast-away-const escape this test asserted
+    // until 2026-09-14 is gone.
+    // D3.14
+    TEST_ASSERT_FALSE(check_body("    i32 v = 1;\n    i32* p = &v;\n"
+                                 "    i32 mut* w = cast(p, i32 mut*);\n    println(w);"));
+    TEST_ASSERT_TRUE(said("cannot cast i32* to i32 mut*: a cast never adds 'mut'"));
+    TEST_ASSERT_TRUE(check_body("    i32 mut v = 1;\n    i32 mut* p = &v;\n"
                                 "    i32 mut* w = cast(p, i32 mut*);\n    println(w);"));
+    // Adding `own` is the adoption escape and it stays.
+    // D17.3
     TEST_ASSERT_TRUE(check_body("    u8 mut* p = null;\n"
                                 "    u8 mut* own a = cast(p, u8 mut* own);\n    println(a);"));
+    // The laundering route: a `void*` is a source like any other, and the
+    // second cast is the one that fails.
+    // D3.14
+    TEST_ASSERT_FALSE(check_body("    i32 v = 1;\n    i32* p = &v;\n"
+                                 "    void* q = cast(p, void*);\n"
+                                 "    i32 mut* w = cast(q, i32 mut*);\n    println(w);"));
+    TEST_ASSERT_TRUE(said("cannot cast void* to i32 mut*: a cast never adds 'mut'"));
+    // A `string` is immutable bytes, so no member of the family adds the mark.
+    // D3.7
+    TEST_ASSERT_FALSE(check_body("    string s = \"ab\";\n"
+                                 "    u8 mut@ b = cast(s, u8 mut@);\n    println(b.len);"));
+    TEST_ASSERT_TRUE(said("cannot cast string to u8 mut@: a cast never adds 'mut'"));
+    // An address in a `u64` names no level at all.
+    TEST_ASSERT_FALSE(check_body("    u64 bits = 0;\n"
+                                 "    i32 mut* w = cast(bits, i32 mut*);\n    println(w);"));
+    TEST_ASSERT_TRUE(said("cannot cast u64 to i32 mut*: a cast never adds 'mut'"));
 })
 
 TEST(a_cast_converts_among_string_and_byte_spans, {
@@ -177,6 +202,25 @@ TEST(a_cast_never_changes_a_span_element_type, {
     // The element type of a span never changes, because `len` counts elements.
     // D3.14
     TEST_ASSERT_TRUE(said("cannot cast i32@ to u32@"));
+    // The refusal has one reason and the message names it. A cast refused for
+    // another reason carries no tail, so the tail says which rule refused.
+    TEST_ASSERT_FALSE(said("a cast never adds 'mut'"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    // The same pair with the mark on the target adds a mark and still carries
+    // no tail: the element type refuses it as well, so a reader who dropped the
+    // mark would meet a second error. The tail stands only where dropping the
+    // marks of the target makes the cast legal.
+    // D3.14
+    TEST_ASSERT_FALSE(check_body("    i32@ s = {};\n    u32 mut@ u = cast(s, u32 mut@);\n"
+                                 "    println(u.len);"));
+    TEST_ASSERT_TRUE(said("cannot cast i32@ to u32 mut@"));
+    TEST_ASSERT_FALSE(said("a cast never adds 'mut'"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    // The mark alone, over the same element type: the tail stands.
+    TEST_ASSERT_FALSE(check_body("    i32@ s = {};\n    i32 mut@ u = cast(s, i32 mut@);\n"
+                                 "    println(u.len);"));
+    TEST_ASSERT_TRUE(said("cannot cast i32@ to i32 mut@: a cast never adds 'mut'"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
 })
 
 TEST(a_cast_from_a_pointer_to_a_span_is_refused, {
@@ -785,7 +829,7 @@ int main(int argc, char** argv) {
     TEST_RUN(the_binding_marker_says_what_may_be_rebound);
     TEST_RUN(a_marker_behind_an_indirection_says_what_may_be_written);
     TEST_RUN(a_cast_converts_between_pointers_and_integers);
-    TEST_RUN(a_cast_adds_mutability_and_ownership);
+    TEST_RUN(a_cast_adds_ownership_and_never_mutability);
     TEST_RUN(a_cast_converts_among_string_and_byte_spans);
     TEST_RUN(a_cast_never_changes_a_span_element_type);
     TEST_RUN(a_cast_from_a_pointer_to_a_span_is_refused);

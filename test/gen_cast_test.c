@@ -197,11 +197,11 @@ TEST(a_pointer_and_u64_round_trip_uses_ptrtoint_and_inttoptr, {
 
 TEST(a_pointer_to_pointer_cast_emits_nothing, {
     // Every pointer is the opaque `ptr`, so a pointer cast is a no-op whatever
-    // it changes: the pointee type, `void*`, or mutability, which the
-    // cast-away-const escape may add.
+    // it changes: the pointee type, `void*`, or a mark the source carries and
+    // the target drops.
     // D3.14
-    TEST_ASSERT_TRUE(emit(in_main("    i32 mut v = 1;\n    i32* p = &v;\n"
-                                  "    void* q = cast(p, void*);\n"
+    TEST_ASSERT_TRUE(emit(in_main("    i32 mut v = 1;\n    i32 mut* p = &v;\n"
+                                  "    void mut* q = cast(p, void mut*);\n"
                                   "    i32 mut* w = cast(q, i32 mut*);\n"
                                   "    u8* r = cast(q, u8*);\n    *w = 2;\n"
                                   "    println(v, \" \", r == null);\n")));

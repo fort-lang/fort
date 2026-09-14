@@ -2255,6 +2255,15 @@ static void check_cast(check_t* ck, ast_node_t* n, expr_t* out) {
         check_msg_type(ck, a.type);
         msg_str(&ck->msg, " to ");
         check_msg_type(ck, target.type);
+        if (type_cast_adds_mut(target.type, a.type) &&
+            type_cast_allowed(type_without_mut(&ck->types, target.type), a.type)) {
+            // The mark is named when the mark is the reason: the same cast to
+            // the same target without its marks is allowed. A pair that another
+            // row refuses as well says nothing about the mark, since a reader
+            // who drops it meets the second refusal.
+            // D3.14
+            msg_str(&ck->msg, ": a cast never adds 'mut'");
+        }
         check_msg_end(ck, n->loc);
         return;
     }

@@ -194,8 +194,12 @@ struct node {
     // it; `type` is reserved, so the slot the C calls `type` is `ty`.
     // D2.4
     types.node* ty;
-    /// D20.3: null on every node without its own name token
-    sym* sym;
+    /// Null on every node without its own name token. The record is reached for
+    /// writing from an immutable view of the node, because the resolution writes
+    /// the type and the flags of a declaration it looked up. So the field carries
+    /// the `mut` that a cast may no longer add.
+    /// D3.14, D5.9, D20.3
+    sym mut* sym;
     /// The checker's bits, one mask it owns entirely (check.ft), and the slot whose
     /// meaning one of those bits gives: the index of a folded constant's value on an
     /// expression, the byte offset of a field on a field declaration, so it is never
@@ -293,8 +297,12 @@ struct sym {
     diag.loc decl; // D20.4: the declaring node's name_loc
     types.node* ty; // the error type when `error` is set
     bool mut0; // D5.2: level-0 mutability, as types.type_to_str_decl spells it
-    node* node;     // the declaring node; null for a builtin
-    sym* owner;     // the struct of a field, the enum of a member, the module
+    /// The declaring node; null for a builtin. The resolution writes the
+    /// annotations of that node through a record it reads from an immutable
+    /// view, so the field carries the `mut`, as `sym` of a node does.
+    /// D3.14, D5.9
+    node mut* node;
+    sym mut* owner; // the struct of a field, the enum of a member, the module
     bool error; // D14.2: the declaration failed to check
 }
 
@@ -432,14 +440,28 @@ fn u64 ast_len(node* n) {
     return n->list.len;
 }
 
-/// The child at `i`; an index at or past the count is a violated precondition
-/// and panics, since the slots beyond it hold stale pointers.
+/// The child at `i`, as the vector holds it: the slots are `node mut*`, so a
+/// caller that reached the parent through an immutable view still reaches a
+/// child it may annotate. The checker wants that, and a cast adds no `mut`.
+/// D3.14, D5.9
+///
+/// An index at or past the count is a violated precondition and panics, since
+/// the slots beyond it hold stale pointers. The two accessors share the one
+/// precondition and the one message, so a caller reads the same panic whichever
+/// of them it called.
 /// D13.3
-fn node* ast_child(node* n, u64 i) {
+fn node mut* ast_child_mut(node* n, u64 i) {
     if (i >= n->list.len) {
         panic("ast.ast_child: index out of range");
     }
     return n->list.items[i];
+}
+
+/// The child at `i` as a reader sees it: the same slot with the `mut` dropped,
+/// which is the one implicit conversion.
+/// D5.4, D13.3
+fn node* ast_child(node* n, u64 i) {
+    return ast_child_mut(n, i);
 }
 
 /// The marks of a type position, each written once and after what it qualifies.

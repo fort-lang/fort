@@ -565,10 +565,20 @@ TEST(own_in_an_extern_signature_is_part_of_the_type, {
 })
 
 TEST(an_extern_result_that_says_own_is_an_owning_rvalue, {
-    TEST_ASSERT_TRUE(check_src("extern fn void* own malloc(u64 n);\n"
+    // The declaration says `void mut*`, which is what `std.libc` writes, so the
+    // cast adopts the block and adds no `mut` to it.
+    // D3.14, D17.13
+    TEST_ASSERT_TRUE(check_src("extern fn void mut* own malloc(u64 n);\n"
                                "fn i32 main() {\n"
                                "    u8 mut* own p = cast(malloc(1), u8 mut* own);\n"
                                "    del(p);\n    return 0;\n}\n"));
+    // A declaration that says `void*` gives storage the program may not write,
+    // and no cast turns that answer around.
+    TEST_ASSERT_FALSE(check_src("extern fn void* own malloc(u64 n);\n"
+                                "fn i32 main() {\n"
+                                "    u8 mut* own p = cast(malloc(1), u8 mut* own);\n"
+                                "    del(p);\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("cannot cast void* own to u8 mut* own: a cast never adds 'mut'"));
     TEST_ASSERT_FALSE(check_src("extern fn void* own malloc(u64 n);\n"
                                 "fn i32 main() {\n    void* p = malloc(1);\n"
                                 "    println(p == null);\n    return 0;\n}\n"));

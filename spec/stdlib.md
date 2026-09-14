@@ -680,8 +680,11 @@ This module is the non-generic container pattern (D15). To hold `token` values, 
 and its six functions, replace `i64` with `token` and the prefix `int_` with `token_`: about
 forty lines, type-checked like any other code. `ptr_vec` is for elements that must not be
 copied and belong to someone else (an arena, a fixed array, an owner that outlives the vector):
-store `cast(p, void mut*)` and cast back on retrieval; a pointer cast may add mutability
-(D3.14), so a `node mut*` survives the round trip. When the vector is to own its elements, copy
+store `cast(p, void mut*)` and cast back on retrieval; the slots are `void mut*` and `ptr_pop`
+answers `void mut*`, so a `node mut*` survives the round trip with the mark it went in with. A
+`node*` does not go in at all, because `ptr_push` takes a `void mut*` and no cast adds the mark
+(D3.14). A container of immutable pointers is a different container, and this pattern makes one:
+copy the file with the slot type `void*`. When the vector is to own its elements, copy
 the file with the slot type `node mut* own mut@ own items;` instead, an owned span of owned nodes
 (D17.2):
 `node_push(node_vec mut* v, node mut* own n)` stores `v->items[v->len] = move(n);` (a parameter
@@ -873,7 +876,7 @@ An array sorted in place, over `libc.qsort` (D13.2, 2.2).
 fn void sort(void mut* base, u64 n, u64 elem_size, fn i32(void*, void*) cmp)
 fn void sort_i64(i64 mut@ items, fn i32(void*, void*) cmp)
 fn void sort_u64(u64 mut@ items, fn i32(void*, void*) cmp)
-fn void sort_ptr(void mut* mut@ items, fn i32(void*, void*) cmp)
+fn void sort_ptr(void* mut@ items, fn i32(void*, void*) cmp)
 fn i32 cmp_i64(void* a, void* b)
 fn i32 cmp_u64(void* a, void* b)
 ```
@@ -891,14 +894,18 @@ fn i32 cmp_u64(void* a, void* b)
   entries below delegate, so their panics name `sort.sort` as well. Ownership: none; `base` is a
   view and no `own` crosses to C (1.4, D17.13).
 - `sort_i64`, `sort_u64`, `sort_ptr`: `sort(cast(items.ptr, void mut*), items.len, sizeof(T),
-  cmp)` for `T` equal to `i64`, `u64` and `void mut*`. A span carries its length (D3.5) and its
+  cmp)` for `T` equal to `i64`, `u64` and `void*`. A span carries its length (D3.5) and its
   element type fixes `sizeof` (D3.15), so two of the four arguments disappear and the caller
   cannot pass a count or an element size that disagrees with the storage. The parameter is
   `T mut@`, which is the second thing these entries add: the elements must be mutable and the
   compiler checks it here, whereas a `void mut*` says that the bytes may be written and nothing
-  about how many or how wide (D3.11), so `sort` can check nothing else. `sort_ptr` takes the
-  element type of `vec.ptr_vec` (2.7); a caller holding a span of `void*` slots casts it, because
-  the drop is monotone (D5.4). Ownership: none; an `own` span argument lends (D17.4).
+  about how many or how wide (D3.11), so `sort` can check nothing else. `sort_ptr` marks the slots
+  and not the pointees, because the sort permutes the slots and never writes through a pointee.
+  A caller holding `void mut* mut@`, which is what `vec.ptr_vec` holds (2.7), reaches it with a
+  cast that drops the mark at level 2: the implicit conversion refuses that drop behind a mutable
+  level 1 (D5.4) and the cast makes it (D3.14). The other direction is closed, since a cast never
+  adds `mut`, so a caller that holds immutable pointers keeps holding them. Ownership: none; an
+  `own` span argument lends (D17.4).
 - `cmp_i64`, `cmp_u64`: ready-made ascending comparators, `-1`, `0` or `1`. `cmp_u64` compares
   unsigned, so it orders `0xFFFFFFFFFFFFFFFF` last where `cmp_i64` on the same bytes orders it
   first. A qualified function name is a value (D3.10), so a call reads
@@ -945,14 +952,12 @@ and this is the same hole one call deeper. So:
 - An element must hold no pointer into the array itself. The permutation moves every element and
   leaves such a pointer at the wrong one.
 - The elements must be mutable. The three typed entries say so in their parameter types and the
-  compiler rejects an immutable span; `sort` cannot, because its `void mut*` says that the bytes
-  may be written and nothing about how many or how wide (D3.11). A caller that hands it the
-  `.ptr` of a span of immutable elements compiles, runs and sorts them: the cast to `void mut*`
-  is the cast-away-const escape D3.14 allows, and the write is defined. So the rule the typed
-  entries enforce is one the core entry only states. It becomes
-  undefined in one case, and that case is not rare: writing into storage that is really
-  read-only, which is every module-level declaration without `mut` (D7.10) and every string
-  literal (D3.7), is undefined behavior (D10.7).
+  compiler rejects an immutable span; `sort` says less, because its `void mut*` says that the
+  bytes may be written and nothing about how many or how wide (D3.11). A caller cannot reach it
+  with immutable elements either: `items.ptr` of an `i64@` is an `i64*`, and `cast(items.ptr,
+  void mut*)` adds the mark, which no cast does (D3.14). So the two entries agree on this one
+  rule, the typed entries by the element type and the core entry by the mark on its `base`. What
+  the core entry still cannot check is the count and the width.
 
 ```fort
 import std.sort;

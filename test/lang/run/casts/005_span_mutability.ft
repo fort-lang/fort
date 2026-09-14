@@ -4,7 +4,7 @@
 //| 10 2 3
 //| 10 20 3
 //| 5 7
-//| 5 99
+//| 7 5
 //| true 3
 struct cell {
     i32 v;
@@ -29,32 +29,40 @@ fn i32 main() {
     i32@ ro = xs;
     println(ro[0], " ", ro[1], " ", ro[2]);
 
-    // Adding it back is the cast-away-const escape a span shares with a
-    // pointer: the marks may differ in mutability at any level (D3.14).
-    i32 mut@ rw = cast(ro, i32 mut@);
-    rw[0] = 10;
+    // Nothing adds it back. A cast never adds `mut`, from a span as from a
+    // pointer (D3.14), and fail/casts/013 is the diagnostic; the writable span
+    // is the one the allocation gave, which `xs` still holds.
+    xs[0] = 10;
     println(xs[0], " ", xs[1], " ", xs[2]);
 
     // The header itself is another level: `i32 mut@ mut` is an assignable
-    // binding over writable elements, and the cast target may not name the
-    // outermost `mut`, so the binding takes it.
-    i32 mut@ mut cursor = cast(ro, i32 mut@);
-    cursor = rw[1..3];
+    // binding over writable elements, and the drop of D5.4 is what makes the
+    // initializer legal.
+    i32 mut@ mut cursor = xs;
+    cursor = xs[1..3];
     cursor[0] = 20;
     println(xs[0], " ", xs[1], " ", xs[2]);
 
-    // A span of pointers has a mark for the slots and one for the pointees,
-    // and a cast may change either without changing the element type (D5.3).
+    // A span of pointers has a mark for the slots and one for the pointees.
+    // Dropping both is implicit, because the target is immutable at level 1
+    // (D5.4, D5.3).
     cell mut a = cell{5};
     cell mut b = cell{7};
     cell mut* mut@ own slots = new(cell mut*, 2);
     slots[0] = &a;
     slots[1] = &b;
-    cell*@ frozen = cast(slots, cell*@);
+    cell*@ frozen = slots;
     println(frozen[0]->v, " ", frozen[1]->v);
-    cell mut*@ thawed = cast(frozen, cell mut*@);
-    thawed[1]->v = 99;
-    println(a.v, " ", b.v);
+
+    // Dropping the pointee mark alone, with the slots left writable, is the
+    // drop D5.4 refuses at a level behind a mutable one, and the cast makes it
+    // (D3.14). `std.sort_ptr` takes such a span, and a caller reaches it this
+    // way. The slots are still writable, so the two pointers exchange.
+    cell* mut@ view = cast(slots, cell* mut@);
+    cell* first = view[0];
+    view[0] = view[1];
+    view[1] = first;
+    println(view[0]->v, " ", view[1]->v);
 
     println(sum(xs) == 33, " ", xs.len);
     del(slots);

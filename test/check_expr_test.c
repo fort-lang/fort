@@ -78,15 +78,23 @@ TEST(a_void_pointer_compares_only_with_its_own_mutability, {
                                  "    bool same = w == r;\n    println(same);"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
     TEST_ASSERT_TRUE(said("not void mut* and void*"));
-    // Each compares with itself, with `null` and with a cast of the other.
-    // D10.5
+    // Each compares with itself, with `null` and with the other one lent: the
+    // cast that drops the mark is the way across, and it is the only way,
+    // because no cast puts the mark back.
+    // D3.14, D10.5
     TEST_ASSERT_TRUE(check_body("    i32 mut x = 1;\n"
                                 "    void mut* w = cast(&x, void mut*);\n"
                                 "    void* r = cast(&x, void*);\n"
-                                "    bool same = w == cast(r, void mut*);\n"
                                 "    bool lent = r == cast(w, void*);\n"
-                                "    println(same, lent, w == null, r == null);"));
+                                "    println(lent, w == null, r == null);"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)0);
+    TEST_ASSERT_FALSE(check_body("    i32 mut x = 1;\n"
+                                 "    void mut* w = cast(&x, void mut*);\n"
+                                 "    void* r = cast(&x, void*);\n"
+                                 "    bool same = w == cast(r, void mut*);\n"
+                                 "    println(same);"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_TRUE(said("cannot cast void* to void mut*: a cast never adds 'mut'"));
 })
 
 TEST(equality_lends_an_owning_operand, {

@@ -620,8 +620,8 @@ Dropping mutability is one of the two implicit conversions (D3.14, D5.4); droppi
 declaration, on the right of an assignment, as an argument, and as a `return` operand; it does
 not apply to the operands of a comparison or of `?:`, which must have identical types (D6.2).
 Level 0 of the receiving binding is unconstrained. For a level `k >= 1`, mutability may be
-dropped only if every level from 1 to `k - 1` is immutable in the target type. Adding
-mutability at any level requires `cast` (D3.14).
+dropped only if every level from 1 to `k - 1` is immutable in the target type. Nothing adds
+mutability at any level: no implicit conversion and no `cast` (D3.14).
 
 | Conversion                                 | Result | Reason                                 |
 |--------------------------------------------|--------|----------------------------------------|
@@ -1070,20 +1070,24 @@ first takes its default type (D4.5) and is then converted with the runtime seman
 | enum                | enum, `bool`, float      | error (go through an integer)                 |
 | `bool`              | float, `char`, enum      | error                                         |
 | float               | `bool`, `char`, enum     | error                                         |
-| `T*`                | `U*`, any `mut`, any `own` | reinterpret the address; may add `mut`, `own` |
-| `T*`, `void*`       | `void*`, `U*`            | reinterpret the address; may add `mut`, `own` |
+| `T*`                | `U*`, any `own`          | reinterpret the address; may add `own`        |
+| `T*`, `void*`       | `void*`, `U*`            | reinterpret the address; may add `own`        |
+| `T mut*`            | any target above         | the same, and the `mut` may be dropped        |
+| any pointer         | a target that adds `mut` | error: a cast never adds `mut`                |
 | `T*`, `void*`       | `u64`                    | the address as an integer                     |
 | `u64`               | `T*`, `void*`            | the integer as an address                     |
+| `u64`               | `T mut*`, `void mut*`    | error: an integer marks no level `mut`        |
 | pointer             | other integer types      | error                                         |
 | function pointer    | `void*`                  | reinterpret                                   |
 | `void*`             | function pointer         | reinterpret                                   |
 | function pointer    | `u64`, other fn type     | error (go through `void*`)                    |
 | `string`            | `char@`, `u8@`           | reinterpret the header                        |
-| `string`            | `char mut@`, `u8 mut@`   | reinterpret; adds `mut` (cast-away-const)     |
+| `string`            | `char mut@`, `u8 mut@`   | error: the bytes of a `string` are immutable  |
 | `char@`, `u8@`      | `string`, each other     | reinterpret the header                        |
 | `char mut@`, `u8 mut@` | `string`, `char@`, `u8@`, each other | reinterpret; drops `mut`  |
-| `char@`, `u8@`      | `char mut@`, `u8 mut@`   | reinterpret; adds `mut` (cast-away-const)     |
-| `T@`                | `T mut@`                 | add mutability at every level                 |
+| `char@`, `u8@`      | `char mut@`, `u8 mut@`   | error: a cast never adds `mut`                |
+| `T mut@`            | `T@`                     | drop mutability at every level                |
+| `T@`                | `T mut@`                 | error: a cast never adds `mut`                |
 | `T@`, `T*`, string family | the same with `own` added at any reference | adoption; no check   |
 | `own` reference     | same, `own` dropped at any level | lends; refused on an `own` rvalue     |
 | `own` rvalue        | any `own` target above   | transfer: the result is `own`                 |
@@ -1097,6 +1101,14 @@ first takes its default type (D4.5) and is then converted with the runtime seman
 | anything            | fixed array, struct      | error                                         |
 | any `T`             | `T`                      | identity                                      |
 
+**A cast never adds `mut`, from any source.** The target marks a level `mut` only where the
+source marks the level at the same depth `mut` too. Where the source names no such level -- an
+integer, the `void` behind a `void*`, a `string`, or a pointee type the cast reinterprets -- the
+target marks no level below that point. So `cast(cast(p, void*), u8 mut*)` fails at the second
+cast, and the storage a C function gives is writable only where its `extern` says `void mut*`
+(D3.14, D17.13). What a cast still does with a mark is drop it, at any level, which the implicit
+conversion of 8.4 refuses behind a mutable level.
+
 A `mut` in the outermost position of a cast target is an error, a cast result having no binding,
 so `cast(s, u8@ mut)` does not compile; the markers a target does carry name the levels behind
 its indirections (D3.14). `null` is not a valid cast
@@ -1104,9 +1116,9 @@ operand, because it has no type of its own (D10.5).
 
 Ownership in casts (D3.14, D17.3, D17.12): the result of a cast is `own` exactly when its target
 type says `own`. A cast may add `own` to any reference of a pointer or span type, adopting
-memory that came from C, the same unsafe escape as adding `mut` (a later `del` of adopted memory
-that is not the start of an allocation is undefined behavior, D10.7); it may drop `own` at any
-level, including where the implicit drop of section 8.4 refuses, and then lends: the result is a
+memory that came from C, which is the one unsafe mark a cast adds (a later `del` of adopted
+memory that is not the start of an allocation is undefined behavior, D10.7); it may drop `own` at
+any level, including where the implicit drop of section 8.4 refuses, and then lends: the result is a
 view and the source keeps ownership. An `own` rvalue cast to an `own` target transfers. An `own`
 lvalue cast to an `own` target is a copy into an `own` place and must be written
 `cast(move(x), T)` (D17.5), which empties `x`. A `cast` to an `own` type yields an `own` rvalue,
@@ -1130,10 +1142,10 @@ i32 c = cast('A', i32);              // 65
 char d = cast(0x1F600, char);        // '\x00': low byte kept
 color e = cast(2, color);            // holds 2, no check
 shape g = cast(color.red, shape);    // error: no cast between enums
-i32 mut* p = cast(&k, i32 mut*);     // adds mutability; writing k is undefined if k is read-only
+i32 mut* p = cast(&k, i32 mut*);     // error unless k is mutable: a cast never adds mut
 u64 a = cast(p, u64);
 i32 n = cast(p, i32);                // error: pointer casts only to u64
-u8 mut@ bytes = cast("abc", u8 mut@);   // aliases read-only memory; writing it is undefined
+u8 mut@ bytes = cast("abc", u8 mut@);   // error: a literal is read-only and a cast adds no mut
 u8@ ro = cast("abc", u8@);              // ok
 i8@ sb = cast(ro, i8@);                 // error: element type of a span never changes
 i32@ q = cast(p, i32@);                 // error: no cast from pointer to span
