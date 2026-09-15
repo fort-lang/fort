@@ -228,8 +228,8 @@ add_custom_command(
     COMMENT "Generating the Mac compiler platform module"
     VERBATIM
 )
-add_custom_target(fort_mac_platform DEPENDS "${FORT_MAC_PLATFORM_DIR}/platform.ft"
-                                        "${FORT_MAC_PLATFORM_DIR}/main.ft")
+add_custom_target(fort_mac_platform ALL DEPENDS "${FORT_MAC_PLATFORM_DIR}/platform.ft"
+                                            "${FORT_MAC_PLATFORM_DIR}/main.ft")
 add_test(NAME mac-platform
     COMMAND bash "${FORT_TEST_DIR}/mac_platform_test.sh" "${FORT_STAGE2_BINARY}"
             "${FORT_MAC_PLATFORM_DIR}" "${FORT_FORT_SRC_DIR}" "${FORT_STD_DIR}"
