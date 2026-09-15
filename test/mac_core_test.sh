@@ -100,6 +100,7 @@ fi
     -o "$work/fort" "$work/fort.ll"
 mkdir "$work/alias"
 ln -s ../fort "$work/alias/fort"
+unset FORT_STD_DIR
 "$work/alias/fort" --check test/lang/run/stdlib/053_io_open_errors.ft
 "$work/alias/fort" --cc "$cc" -Xcc '-isysroot' -Xcc "$sdk" \
     -o "$work/cc_native" test/lang/run/stdlib/004_libc_alloc.ft
