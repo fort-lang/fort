@@ -156,6 +156,7 @@ FT_FILES=956
 # question is narrower, since the 85 files that check clean and hold no `main`
 # compile into no module and are skipped here. diff_check.sh says beside its
 # own constant how the two group sizes are measured.
+# T-144 remeasured 509 clean, 530 programs, 85 clean-only, and 106 program-only.
 PROGRAM_FILES=530
 
 # The pass pipeline `opt` is given. `verify` alone parses the module and runs
