@@ -372,6 +372,10 @@ without a rewrite.
   clang's arguments. It uses `NO_CACHE`; check for the same trap before adding a `find_program`
   or `find_file` whose `NAMES` come from a cache variable, or delete `build/<preset>` after such
   a change.
+- Put generated source that a CTest reads under an `ALL` target. `tools/vm workflow` builds
+  default targets before CTest starts (T-141). Ninja does not track a changed `sw_vers` result
+  through file dependencies. Run the Mac platform generator on each default build. Keep each
+  output file's time when its text stays equal. This stops rebuilds of targets that read it.
 - The `gcc` preset is the project's only cross-compiler check and it is **not** part of the gate,
   whose three presets are all clang, so nothing runs it unless someone does: run
   `tools/vm workflow gcc` by hand whenever compiler or test-helper code changes. It went unbuilt
