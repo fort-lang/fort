@@ -728,6 +728,14 @@ bullet at a time and without a rewrite.
 - The native Mac pipeline uses `test/mac/ir/mac.ll` as a host sample (T-143).
   This sample is outside the `test/ir/*.ll` compiler-form corpus.
   `tools/mac pipeline` verifies, links, and runs it, then checks Mach-O PIE and SIGTRAP.
+  `tools/mac core` runs ten core library programs on a Mac arm64 host (T-144).
+  It tests 004, 005, 019, 051, 053, 070, 071, 074, 094 and 095 in `test/lang/run/stdlib`.
+  It compiles one C open probe to check the Apple arm64 variable-tail stack slot.
+  It builds a native compiler and tests its standard root through an executable symlink.
+  Only 005 links `ffi/std_libc_flags.c` to compare 13 constants with C headers.
+  The other nine programs and the compiler link from LLVM IR alone.
+  The Linux VM gate excludes this host test because a Linux guest cannot run Mach-O programs.
+  `tools/mac core` configures debug and builds `fort_stage2` and `fort_mac_platform` itself.
 - **The gen suites emit with no runtime in the closure**, so the calls the emitter writes into it
   reach a name the module neither defines nor declares, which LLVM rejects as a forward reference
   to nothing. `verified()` appends a `declare` for every row of `runtime_sig.h` to the file the
@@ -811,8 +819,9 @@ bullet at a time and without a rewrite.
   array or span level, a `do`-`while` or a `?:`, or a float. A new `.c` or `.h` under `src/` or
   `test/` raises no counter of that list, and one counter fires on all three extensions:
   `test_the_corpus_the_lint_reads_is_the_measured_one` in `test/knowledge_lint_test.py`, which
-  holds the number of files `tools/knowledge_lint.py` reads at 356 (T-103). A counter left behind
+  holds the number of files `tools/knowledge_lint.py` reads at 366 (T-144). A counter left behind
   fails `diff_check.sh` for every later mutant, which then reads as caught when nothing caught it.
+  **A new target code directory needs a `SOURCE_GLOBS` route or an `EXCLUDED` reason** (T-144).
   **Two branches that each raise one counter by one merge with no conflict and leave it wrong**:
   `CLEAN_FILES` went 393 to 394 twice and the truth was 395, which cost T-107 an hour. After the
   second merge of a branch that adds or removes a source file, run the tool that owns each

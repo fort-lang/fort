@@ -13,15 +13,18 @@ extension went to `editors/README.md`, as the routing table of `AGENTS.md` sends
 
 ### 1.1 What this section governs
 
-The rules below govern the comments of the compiled sources: `src/**`, `std/*.ft`, and the C and
+The rules below govern the comments of the compiled sources: `src/**`, `std/**/*.ft`, and the C and
 fort files of `test/` that are code. `SOURCE_GLOBS` in `tools/knowledge_lint.py` is that list,
-358 files today, and `EXCLUDED` beside it names the code the lint does not read with a reason for
+366 files today, and `EXCLUDED` beside it names the code the lint does not read with a reason for
 each: the language corpus of `test/lang`, whose files are fixtures of the harness, and the
 fixtures of the VS Code extension, whose line numbers stand in a `*-document.json` a test
 compares. A file that is in neither list fails `test_every_code_file_is_read_or_excluded`, and a
 prefix of `EXCLUDED` that names no file fails its mirror, so the hole this section had until
 T-103 cannot open again in silence. There is no `runtime/` directory: T-091 made the runtime a
 fort module, `std/rt.ft`.
+
+T-144 adds `std/mac/*.ft` and `test/mac/*.c` to `SOURCE_GLOBS`.
+`python3 tools/knowledge_lint.py` now prints 366 files for the citation rule.
 
 They do not govern a harness directive, which is the third kind of comment and has a format of
 its own: `spec/toolchain.md` 7 gives the `//!`, `//|` and `//<` of a language test, and
