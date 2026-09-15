@@ -15,7 +15,8 @@ branch, the worktree and the ticket file.
 - Check each implemented rule against its decision (`Dn.m`) in normative `spec/decisions.md`.
 - Check that tests grow with code and cover boundaries.
 - Check that `test/lang/xfail.txt` shrinks for each test the change makes pass.
-- Confirm evidence for each pre-merge criterion, including a green branch gate.
+- Confirm completed pre-merge evidence. State gate pending if it still runs.
+- The coordinator checks final gate evidence after the gate ends.
 - Check that the agent routes each learning under AGENTS.md. Check that commits follow AGENTS.md.
 - Check that the diff stays inside the ticket scope.
 - Read the ticket's Notes: every conservative reading recorded there should be flagged in your

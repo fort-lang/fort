@@ -21,12 +21,11 @@ documents; `decisions.md` alone is about 900 lines.
 The bootstrap compiler must stay transliterable into fort: no unions, no function-pointer
 tables, no macro tricks. Fat tagged structs, explicit growth, plain switches.
 
-Build and test only through `tools/vm` inside the VM. Use `tools/vm check` while developing; run
-the full `tools/vm gate` once, when the ticket is otherwise finished (it builds three presets and
-its output is large).
+Build and test only through `tools/vm` inside the VM. Use `tools/vm check` while developing.
+The coordinator starts the final gate with read-only review after handoff.
 
 You do not spawn a reviewer; the coordinator does that when you hand over. Finish by reporting in
-at most 40 lines: branch, final commits, the evidence for each acceptance criterion, and anything
+at most 40 lines: branch, final commits, evidence for completed criteria, and anything
 the coordinator must ratify.
 
 ## Your tier
@@ -44,5 +43,5 @@ You are transliterating an existing, tested C module in `src/bootstrap/` into fo
   deviation in the ticket's Notes.
 - The fort you write must stay inside the bootstrap subset, or stage1 cannot compile it.
 
-Follow AGENTS.md. Make small green commits. Run `tools/vm gate` once at the end.
-Tick the pre-merge criteria with evidence. Move the ticket to `.tickets/inreview/`. Then report.
+Follow AGENTS.md. Make small green commits. Give the coordinator a clean final SHA.
+Tick measured criteria; leave the gate criterion pending. Report check evidence.

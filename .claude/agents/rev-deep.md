@@ -28,6 +28,7 @@ adversarially.
   - look for the case the implementor did not think of, and say what it is.
 - Also check the standard items: decision citations, the test ratio, `xfail.txt`, the ticket log
   and its evidence, commit hygiene, scope, AGENTS.md amendments.
+- State gate pending if it still runs. The coordinator checks final gate evidence after exit.
 
 Return a numbered list of findings, each with `file:line`, a severity (must-fix, should-fix,
 nit) and a one-line rationale. Say explicitly when there are no must-fix findings. Never edit a

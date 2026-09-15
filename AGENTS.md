@@ -176,20 +176,20 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
   ticket path and worktree. Do not select a named TOML role until Codex proves named loading.
 - Implementor: reads the ticket and only its cited specification sections; codes and tests in
   its worktree. Keep each commit green under `tools/vm check`. Squash a single-unit ticket first.
-  Record gate identity from `notes/environment.md` 1. Run `tools/vm gate` once at the end.
-  Log gate exit and counts. Tick pre-merge criteria with evidence. Move to `inreview/`.
-  Report in at most 40 lines. Do not spawn a reviewer.
-- Coordinator: runs `codex review` in the worktree. For `rev-std`, use this command:
+  Hand off a clean final SHA and `tools/vm check` evidence in at most 40 lines. Do not start the final gate or reviewer; the coordinator owns the gate.
+- Coordinator: records identity and starts one detached `tools/vm gate` under `notes/environment.md` 1.
+  Start read-only review on that SHA while the gate runs. Move the ticket to `inreview/`; for `rev-std`, use:
 
       codex review --strict-config -c 'sandbox_mode="read-only"' \
         -c 'model_reasoning_effort="high"' \
         -c 'developer_instructions="Read and follow .codex/agents/rev-std.toml."' --base main
   Add the absolute ticket path to `developer_instructions`. Use the selected tier's file and effort.
-  Do not pass `[PROMPT]` with `--base`. Keep the ticket in `inreview/` through fixes and review.
-  Relay findings. Review again if a fix changes behaviour.
+  Do not pass `[PROMPT]` with `--base`. Keep the ticket in `inreview/` through fixes. Relay findings.
+  For a source fix, stop the gate or discard its result. Run a gate on the fixed SHA; review again if behaviour changes.
 - Reviewer: follows tier TOML. Effort differs from depth. Check tests, citations, commits and scope.
-  Check `xfail.txt` and ticket knowledge. Route learning below; never edit, commit or merge.
-- Coordinator: after final review, measure a new gate identity under `notes/environment.md` 1.
+  Check `xfail.txt` and ticket knowledge. Route learning below. State pending for a live gate; never edit, commit or merge.
+- Coordinator: polls the gate to exit. Require `tools/vm gate: green`. Log counts, source SHA, log SHA, and freshness, even if review ends first.
+  After gate exit and final review, measure identity under `notes/environment.md` 1. Never count a live gate as green.
   Reuse a green gate only if identity and log SHA match and preset count is zero. Log reuse.
   If proof differs or is missing, rebase when `main` changed, then rerun the gate.
   Review again if rebase changes behavior. Read `git diff --stat main...HEAD` and new files.

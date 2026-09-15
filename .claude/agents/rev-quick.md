@@ -17,11 +17,12 @@ design review.
 - Then check, by reading the diff:
   - the tests grew with the code, and `tools/vm lines` did not fall below 3.0;
   - `test/lang/xfail.txt` shrank for every test the change makes pass;
-  - confirm evidence for each pre-merge acceptance criterion, including the branch gate;
+  - confirm completed pre-merge evidence; state gate pending if it still runs;
   - the commits follow AGENTS.md (title about 50 characters, body wrapped at 72, trailer);
   - nothing outside the ticket's scope changed;
   - AGENTS.md was amended if the change taught the project something.
 - For a port ticket, confirm the oracle the ticket names was actually run and passed.
+- The coordinator checks final gate evidence after the gate ends.
 
 Return a numbered list of findings, each with `file:line`, a severity (must-fix, should-fix,
 nit) and a one-line rationale. Say explicitly when there are no must-fix findings. Never edit a
