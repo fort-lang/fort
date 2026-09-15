@@ -108,10 +108,10 @@ plus its documentation) keeps its individual commits and is merged into `main` w
 plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitignored.
 
 ### Tickets
-- One markdown ticket per deliverable in `.tickets/` in the main checkout, never in a worktree;
-  state is the directory: `todo/`, `inprogress/`, `done/`. Template and numbering rule in
-  `.tickets/README.md`; fields: id, title, size, critical-path, depends-on, impl, review,
-  deliverable, spec, branch, worktree, assignee, acceptance criteria (checkboxes), notes, log.
+- Keep one markdown ticket per deliverable in `.tickets/` in the main checkout, not a worktree.
+  States: `todo/`, `inprogress/`, `inreview/`, `done/`. See `.tickets/README.md` for rules.
+  It gives the template and number rule. Fields: id, title, size, critical-path, depends-on, impl,
+  review, deliverable, spec, branch, worktree, assignee, acceptance criteria, notes, log.
   `Notes` holds four subsections in this order: `Design`, `Open questions`, `Deviations` and
   `Review findings`. An open question gives the question in one line, an `owner:` line and a
   `resolution:` block whose first line is the ruling and whose following lines give the reason; a
@@ -122,8 +122,8 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
   ruling, a measurement or a finding goes into the matching Notes subsection and the Log line
   points at it. **`.tickets/` is gitignored and `.tickets/README.md` is untracked**, so the
   template reaches no commit and a reader verifies it by reading the file in the main checkout.
-- A ticket is assigned only when every ticket in its `depends-on` is in `done/`. Independent
-  tickets are assigned concurrently, one implementor each.
+- Assign a ticket only when each dependency is in `done/` after its merge into `main`. Assign
+  independent tickets concurrently, one implementor each.
 - Acceptance criteria are verifiable inside the VM or on a named native host. The ticket log names
   that host and records each hand-off with
   evidence (commands run, results, review rounds, merge sha). Evidence must outlive the agent that
@@ -174,28 +174,28 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
   (`.worktrees/fort-<id>`, `feat/<id>-<slug>`), fills branch/worktree/assignee, moves the ticket
   to `inprogress/`, sends the selected TOML instructions and effort to a built-in worker, with the
   ticket path and worktree. Do not select a named TOML role until Codex proves named loading.
-- Implementor: reads the ticket and only the specification sections it cites; codes and tests in
-  the worktree with small commits, each green under `tools/vm check`; runs the full `tools/vm
-  gate` once, at the end; squashes if the ticket is a single unit of work; ticks every criterion
-  with its evidence; moves the ticket to `done/`; reports in at most 40 lines. It does not spawn
-  a reviewer.
+- Implementor: reads the ticket and only its cited specification sections; codes and tests in
+  its worktree. Keep each commit green under `tools/vm check`. Squash a single-unit ticket first.
+  Record gate identity from `notes/environment.md` 1. Run `tools/vm gate` once at the end.
+  Log gate exit and counts. Tick pre-merge criteria with evidence. Move to `inreview/`.
+  Report in at most 40 lines. Do not spawn a reviewer.
 - Coordinator: runs `codex review` in the worktree. For `rev-std`, use this command:
 
       codex review --strict-config -c 'sandbox_mode="read-only"' \
         -c 'model_reasoning_effort="high"' \
         -c 'developer_instructions="Read and follow .codex/agents/rev-std.toml."' --base main
   Add the absolute ticket path to `developer_instructions`. Use the selected tier's file and effort.
-  Do not pass `[PROMPT]` with `--base`. Relay findings; review again if a fix changes behaviour.
+  Do not pass `[PROMPT]` with `--base`. Keep the ticket in `inreview/` through fixes and review.
+  Relay findings. Review again if a fix changes behaviour.
 - Reviewer: follows tier TOML. Effort differs from depth. Check tests, citations, commits and scope.
   Check `xfail.txt` and ticket knowledge. Route learning below; never edit, commit or merge.
-- Coordinator: re-runs the gate on the branch, **reads the diff's file list**, merges per the
-  Change Implementation Loop (squash for a single unit, `--no-ff` for a multi-unit feature),
-  deletes the worktree and branch, appends the merge sha and the agents' token counts to the
-  ticket log, and assigns the tickets it unblocked. The file list is a separate job from the gate,
-  which has no opinion about a file that should not exist: T-022 merged five scratch `.ft` probes
-  into the repository root behind a green gate, and the review that called its scope clean had read
-  the commit before the fix round that added them. `git diff --stat main...HEAD` before every
-  merge, and look for what is new rather than what changed.
+- Coordinator: after final review, measure a new gate identity under `notes/environment.md` 1.
+  Reuse a green gate only if identity and log SHA match and preset count is zero. Log reuse.
+  If proof differs or is missing, rebase when `main` changed, then rerun the gate.
+  Review again if rebase changes behavior. Read `git diff --stat main...HEAD` and new files.
+  Merge per the Change Implementation Loop. Record the merge sha and agent tokens in the Log.
+  Tick merge-time criteria. Move the ticket to `done/`. Remove the worktree and branch.
+  Assign unblocked tickets. T-022 merged five scratch `.ft` files behind a green gate.
   Two things the coordinator does before it removes the worktree. **Write the gate's numbers
   into the ticket log, not the path of its log file.** The log lives under the worktree and dies
   with it, so a criterion that cites `build/gate.log` cites nothing an hour later; write the exit

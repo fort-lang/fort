@@ -46,6 +46,6 @@ later, in generated assembly, so front-load the thinking:
 - Test the boundaries, not the middle: minimum and maximum values, zero-length, the first and
   last element, the path that traps.
 
-Otherwise follow AGENTS.md as usual: small green commits, three lines of test per line of code,
-`xfail.txt` shrunk in the commit that earns it, `tools/vm gate` green, criteria ticked with
-evidence, ticket moved to `.tickets/done/`, then report.
+Follow AGENTS.md. Make small green commits. Write three test lines for each code line.
+Shrink `xfail.txt` in the commit that makes its test pass. Run `tools/vm gate`.
+Tick the pre-merge criteria with evidence. Move the ticket to `.tickets/inreview/`. Then report.

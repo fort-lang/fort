@@ -774,6 +774,11 @@ set_tests_properties(knowledge_lint_selftest PROPERTIES
     LABELS unit
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+# The VM gate manifest must detect ignored fort files and symlinks; skip build outputs (T-148).
+add_test(NAME gate_ft_manifest
+    COMMAND bash "${FORT_TEST_DIR}/gate_ft_manifest_test.sh")
+set_tests_properties(gate_ft_manifest PROPERTIES LABELS unit)
+
 # The D1.4 identifier check over the project's own fort sources: it reads
 # `fort --index` (D20.3) rather than tokenizing fort a second time, so it needs
 # a compiler.

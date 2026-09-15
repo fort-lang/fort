@@ -17,8 +17,7 @@ design review.
 - Then check, by reading the diff:
   - the tests grew with the code, and `tools/vm lines` did not fall below 3.0;
   - `test/lang/xfail.txt` shrank for every test the change makes pass;
-  - the ticket's acceptance criteria are ticked with evidence in its Log, including a `gate`
-    result;
+  - confirm evidence for each pre-merge acceptance criterion, including the branch gate;
   - the commits follow AGENTS.md (title about 50 characters, body wrapped at 72, trailer);
   - nothing outside the ticket's scope changed;
   - AGENTS.md was amended if the change taught the project something.

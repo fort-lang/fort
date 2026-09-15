@@ -37,8 +37,9 @@ the ticket log, the commit format, the merge gate. When the specification is sil
 most conservative reading, record it in the ticket's Notes, and flag it in your report for the
 coordinator to ratify: never invent syntax or semantics.
 
-Write the tests with the code (unit tests in `test/*_test.c` with `test/test.h`, language tests
-in `test/lang/`), aim at three lines of test per line of code, and shrink
-`test/lang/xfail.txt` in the same commit that makes a test pass. When every acceptance criterion
-holds and `tools/vm gate` is green, squash if the ticket is a single unit of work, tick each
-criterion with its evidence, move the ticket to `.tickets/done/` and report.
+Write tests with the code. Use `test/test.h` for unit tests in `test/*_test.c`.
+Use the directive format for language tests in `test/lang/`. Aim for three test lines per code line.
+Shrink `test/lang/xfail.txt` in the commit that makes a test pass.
+Squash a single-unit ticket before the final gate. Record gate identity.
+Run `tools/vm gate` after other pre-merge criteria hold. Tick each criterion with evidence.
+Move the ticket to `.tickets/inreview/`. Then report.

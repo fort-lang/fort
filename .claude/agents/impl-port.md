@@ -44,5 +44,5 @@ You are transliterating an existing, tested C module in `src/bootstrap/` into fo
   deviation in the ticket's Notes.
 - The fort you write must stay inside the bootstrap subset, or stage1 cannot compile it.
 
-Otherwise follow AGENTS.md: small green commits, `tools/vm gate` once at the end, criteria
-ticked with evidence, ticket moved to `.tickets/done/`, then report.
+Follow AGENTS.md. Make small green commits. Run `tools/vm gate` once at the end.
+Tick the pre-merge criteria with evidence. Move the ticket to `.tickets/inreview/`. Then report.

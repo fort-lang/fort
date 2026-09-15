@@ -144,6 +144,57 @@ without a rewrite.
   two long gates land on different slots. And the Vagrantfile vagrant reads is the **main
   checkout's**, so a change to it is live only after it merges -- a slot-2 `up` run from a
   branch that added the slot logic failed with "machine fort-dev-fort already exists".
+  **Gate input identity (T-148).** A reusable `tools/vm gate` reads the branch tree, the main VM
+  configuration, guest packages, the guest profile, kernel, QEMU registration, and build outputs.
+  Record `git rev-parse HEAD main` in the worktree before the gate and after final review.
+  Require empty `git status --porcelain --untracked-files=all` output at both times.
+  That status omits ignored `.ft` inputs. Record their path and content manifest too:
+
+  ```sh
+  FORT_VM_SLOT=<n> tools/vm run 'bash tools/gate_ft_manifest.sh'
+  ```
+
+  The manifest hashes `.ft` paths, symlink targets, and contents outside `build/`, `.git/`,
+  and `.worktrees/`.
+  Require the same manifest value after final review. A new ignored `.ft` file changes it.
+  The VM uses the main checkout's `Vagrantfile`, not the branch copy.
+  Record its content hash before the gate and after final review:
+
+  ```sh
+  FORT_VM_SLOT=<n> tools/vm run 'sha256sum /vagrant/Vagrantfile'
+  ```
+
+  A changed main `Vagrantfile` invalidates reuse even when the main SHA stays equal.
+  Record the physical VM directory, `FORT_VM_SLOT`, and the VM UUID.
+  Read the UUID from `.vagrant/machines/default/virtualbox/id` for slot 1.
+  Read it from `.vagrant-2/machines/default/virtualbox/id` for slot 2.
+  Record the guest values with these read-only commands in the same slot:
+
+  ```sh
+  FORT_VM_SLOT=<n> tools/vm run 'uname -rm'
+  FORT_VM_SLOT=<n> tools/vm run 'sha256sum /var/lib/dpkg/status /etc/profile.d/fort.sh'
+  FORT_VM_SLOT=<n> tools/vm run 'sha256sum /proc/sys/kernel/core_pattern'
+  FORT_VM_SLOT=<n> tools/vm run 'sha256sum /proc/sys/fs/binfmt_misc/qemu-x86_64'
+  ```
+
+  The package hash detects package version changes. The profile hash detects fort environment
+  changes. The kernel, core, and QEMU values detect changes to the test runtime.
+  The gate also uses `build/debug`, `build/asan`, and `build/ubsan` as cache inputs.
+  Capture the gate output in `build/gate.log`. Record its SHA256 value after the gate.
+  At final review, require the same log SHA256 value and this count to equal zero:
+
+  ```sh
+  test -f build/gate.log && test -d build/debug && test -d build/asan &&
+    test -d build/ubsan &&
+    bash -o pipefail -c 'find build/debug build/asan build/ubsan -newer build/gate.log | wc -l'
+  ```
+
+  Use the actual gate log path if it differs. A changed or missing log invalidates reuse.
+  A positive count means a preset file or directory changed after the gate.
+  A missing log, missing preset directory, or failed `find` command invalidates reuse.
+  A review log in `build/` does not change a preset input.
+  A manual guest edit outside this identity also invalidates reuse. Rerun if evidence is missing.
+  This identity applies to `tools/vm gate`, not native Mac tests. T-147 owns the Mac host identity.
 - **Every `tools/vm` subcommand that drives `build/<preset>` holds its worktree, and a build is
   stopped with TERM** (T-113). The perimeter is `configure`, `build`, `test`, `workflow`, `check`,
   `check-lang`, `check-all`, `format`, `format-check`, `tidy`, `lines` and `gate`. **`run` and

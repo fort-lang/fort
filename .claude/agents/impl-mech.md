@@ -45,8 +45,8 @@ does not settle, stop, write it in the ticket's Notes and report it rather than 
 4. Write the tests with the code: unit tests in `test/*_test.c` using `test/test.h`, language
    tests in `test/lang/` in the directive format. Three lines of test per line of code.
 5. Shrink `test/lang/xfail.txt` in the same commit that makes a test pass.
-6. When every acceptance criterion holds, run `tools/vm gate` once and paste the result into the
-   ticket's Log together with the commands you ran.
-7. Squash to one commit if the ticket is a single unit of work:
+6. Squash to one commit if the ticket is a single unit of work:
    `git reset --soft $(git merge-base main HEAD) && git commit`.
-8. Tick each criterion with its evidence, move the ticket file to `.tickets/done/`, and report.
+7. When other pre-merge criteria hold, record gate identity. Run `tools/vm gate` once.
+   Put the gate exit, counts, and commands in the ticket Log.
+8. Tick pre-merge criteria with evidence. Move the ticket to `.tickets/inreview/`. Report.
