@@ -1,0 +1,61 @@
+// Check Darwin socket errors and descriptor release.
+// The native test compares errno with test/mac/net_probe.c.
+// D13.2, D13.3
+import std.io;
+import std.libc;
+import std.net;
+import std.sys;
+
+fn main() i32 {
+    i32 bad = net.connect("999.1.1.1", 80);
+    println("bad ", bad, " ", sys.errno());
+
+    i32 gone = net.listen(0, 1);
+    u16 mut dead = 0;
+    if (gone < 0 || !net.local_port(gone, &dead)) {
+        return 1;
+    }
+    libc.close(gone);
+    i32 refused = net.connect("127.0.0.1", dead);
+    println("refused ", refused, " ", sys.errno());
+    if (refused >= 0) {
+        libc.close(refused);
+        return 1;
+    }
+
+    i32 invalid = net.accept(io.STDIN);
+    println("accept ", invalid, " ", sys.errno());
+
+    u16 mut port = 7;
+    println("local_port ", !net.local_port(-1, &port), " ", port);
+
+    i32 server = net.listen(0, 4);
+    u16 mut taken = 0;
+    if (server < 0 || !net.local_port(server, &taken)) {
+        return 1;
+    }
+    defer libc.close(server);
+    i32 second = net.listen(taken, 4);
+    println("bind ", second == -1);
+    if (second >= 0) {
+        libc.close(second);
+        return 1;
+    }
+
+    u64 mut tries = 0;
+    while (tries < 64) {
+        i32 duplicate = net.listen(taken, 4);
+        if (duplicate != -1) {
+            libc.close(duplicate);
+            return 1;
+        }
+        tries += 1;
+    }
+    i32 after = net.listen(0, 4);
+    println("release ", after >= 0 && after < 16);
+    if (after < 0) {
+        return 1;
+    }
+    libc.close(after);
+    return 0;
+}

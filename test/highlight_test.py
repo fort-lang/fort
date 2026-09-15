@@ -52,6 +52,7 @@ LSP_SRC_DIR = ROOT / "src" / "lsp"
 FORT_TESTS_DIR = ROOT / "test" / "fort"
 FORT_LINT_DIR = ROOT / "test" / "fort_lint"
 TTY_DIR = ROOT / "test" / "tty"
+MAC_TEST_DIR = ROOT / "test" / "mac"
 EDITOR_FIXTURE_DIR = ROOT / "editors" / "vscode" / "test" / "fixtures"
 
 # Every directory of fort the grammar is held over. `src/fort` is the only one
@@ -65,13 +66,14 @@ CORPUS_DIRS = (
     FORT_TESTS_DIR,
     FORT_LINT_DIR,
     TTY_DIR,
+    MAC_TEST_DIR,
 )
 # The number of files those directories hold. It is an equality and not a floor
 # because a floor cannot see a directory that stopped being walked: a ticket
 # that adds or removes a `.ft` under CORPUS_DIRS reads the new number off the
 # failure and writes it here, as it does for CORPUS_FILES in
 # test/parser_recovery_test.c and FT_FILES in tools/diff_tokens.sh.
-CORPUS_FILES = 692
+CORPUS_FILES = 695
 # The least number of `.ft` each of those directories holds. A directory grows,
 # so its own test asserts a floor and CORPUS_FILES asserts the exact total. A
 # floor of 1 says only that the directory exists, so each one here is near the
@@ -89,6 +91,7 @@ CORPUS_MINIMUMS = {
     FORT_TESTS_DIR: 80,
     FORT_LINT_DIR: 3,
     TTY_DIR: 2,
+    MAC_TEST_DIR: 2,
 }
 # The `.ft` of the repository that are deliberately outside the corpus, each
 # because it is meant to hold a lexical error: test/lang/fail is the corpus of
@@ -841,6 +844,10 @@ class CorpusTest(unittest.TestCase):
         """test/tty/*.ft, the two programs test/tty_test.py drives on a pseudo
         terminal. They were in the same position as src/lsp before T-104."""
         self.check_directory(TTY_DIR)
+
+    def test_every_mac_program_spells_correctly(self):
+        """Test the fort programs that the native Mac network gate uses."""
+        self.check_directory(MAC_TEST_DIR)
 
     def test_the_corpus_is_the_size_it_says_it_is(self):
         """The count of files walked, so a glob that stopped matching is seen.
