@@ -443,6 +443,14 @@ came here.
 
 ## 7. The runtime and the standard library
 
+- **Mac std.net uses Darwin's 16-byte IPv4 address** (T-145).
+  `test/mac/net_probe.c` measures length, family, port, and address offsets at 0, 1, 2, and 4.
+  Set the length byte to 16 before bind and connect.
+  Use Darwin SOL_SOCKET 65535 and SO_REUSEADDR 4.
+  Mac `std.libc` declares seven socket calls with a 4-byte `socklen_t`.
+  Mac `std.net` uses `libc.errno_slot()` for its two errno writes.
+  Linux `std/net.ft` and `std/libc.ft` keep their Linux layout and calls.
+
 - **A system call added to a print path must give errno back.** `sys.errno()` hands a program the
   errno of its own last library call (`stdlib.md` 2.4), and the print family runs between the two:
   the `isatty` of D11.5 fails with `ENOTTY` on every pipe, so the first `print` after a failed

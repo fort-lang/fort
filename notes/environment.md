@@ -430,6 +430,11 @@ without a rewrite.
   written or only staged counts as 0 lines and the ratio answers about the last commit: commit
   first, then measure (T-093); its own tests are the ctest `lines_selftest`).
   `tools/vm <target> [preset]` runs one.
+- **The native Mac build copies target library modules** (T-145).
+  `tools/mac fixpoint` runs the `mac-native` CMake workflow on Mac arm64.
+  `fort_std` copies `std/mac/libc.ft` and `std/mac/net.ft` to the standard root.
+  The root holds 12 fort files under `build/mac-native/std`.
+  `build/mac-native/fort` loads that root when a program imports `std.net`.
 - A CMake variable derived from a cache variable must not be cached itself: `find_program`
   caches by default, so `FORT_TARGET_CC_PATH` kept resolving to the old program after
   `FORT_TARGET_CC` changed in an existing build directory, and the build then ran gcc with
