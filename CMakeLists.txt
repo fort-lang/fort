@@ -99,6 +99,7 @@ if(FORT_NATIVE_MAC)
                 "${CMAKE_SOURCE_DIR}/tools/mac_native_seed.sh"
                 "${CMAKE_SOURCE_DIR}/tools/bootstrap.ref"
                 "${CMAKE_SOURCE_DIR}/tools/pin.sh"
+                "${CMAKE_SOURCE_DIR}/CMakeLists.txt"
         COMMENT "Building native Mac stage2 from the Linux VM seed"
         VERBATIM
     )
