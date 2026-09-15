@@ -56,8 +56,8 @@ A safe(r) C-like systems programming language.
   diagnostics, and that is all it does (T-089). It is installed on the **host**, where VS Code runs.
 - `CMakeLists.txt`, `CMakePresets.json` and `cmake/sanitizers.cmake` are the build;
   `.clang-format` and `.clang-tidy` (clang 18) are the C11 lint configuration.
-- `.tickets/` (gitignored, main checkout only) is the ticket board; `.claude/agents/` holds the
-  `implementor` and `reviewer` agent definitions.
+- `.tickets/` (gitignored, main checkout only) is the ticket board; `.codex/agents/` holds seven
+  project agent roles. `.codex/config.toml` limits Codex to three child threads (T-139).
 
 ## Where the rest of this knowledge lives
 
@@ -83,7 +83,7 @@ Each process/agent MUST explore the relevant portions of the codebase as indicat
 hand.
 
 #### Worktree Isolation
-Each Claude process/agent MUST work in a separate git worktree and associated branch. Create the
+Each Codex implementor MUST work in a separate git worktree and associated branch. Create the
 worktree as a directory (`fort-<name>`) in `.worktrees`, and prefix the branch name with `bug/`,
 `feat/`, etc. as you see appropriate. The coordinator deletes the worktree once the change is merged
 into the target branch.
@@ -124,7 +124,8 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
   template reaches no commit and a reader verifies it by reading the file in the main checkout.
 - A ticket is assigned only when every ticket in its `depends-on` is in `done/`. Independent
   tickets are assigned concurrently, one implementor each.
-- Acceptance criteria are verifiable inside the VM; the log records every hand-off with its
+- Acceptance criteria are verifiable on the host Mac or inside the VM. The log records each
+  hand-off with
   evidence (commands run, results, review rounds, merge sha). Evidence must outlive the agent that
   produced it: a command anyone can re-run, a commit sha, a file in the repository. A criterion
   ticked against "the report" is ticked against prose that exists nowhere once the agent returns,
@@ -148,17 +149,18 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
   four read, and those four are exactly where a later ticket has work to do (T-077).
 
 ### Agents
-- The coordinator is the main session. Every other role is an agent definition in
-  `.claude/agents/`, all on Opus and differing only in reasoning effort, because effort is fixed
-  per definition and cannot be overridden per call.
-- Implementors (full tools, no `Agent` tool): `impl-mech` (medium) for work the specification
+- The coordinator is the main Codex session. Seven TOML roles live in `.codex/agents/` (T-139).
+  Each role inherits the coordinator model and sets effort. Give its text and effort to a built-in
+  worker until named loading is proved. Restart Codex after a role changes.
+- Implementors use full tools: `impl-mech` (medium) for work the specification
   pins completely, transcription and coverage; `impl-std` (high) for ordinary tickets that need
   data-structure design; `impl-hard` (xhigh) for cross-cutting invariants, the calling
   convention, memory layout, ownership and codegen; `impl-port` (medium) for transliterating a
   tested C module into fort against an oracle.
-- Reviewers (read-only, the `code-review` skill): `rev-quick` (medium, skill at low) screens a
-  low-risk diff for conventions, tests and scope; `rev-std` (high, skill at high) reviews an
-  ordinary change; `rev-deep` (xhigh, skill at max) re-derives the invariants independently for
+- Reviewers run in a separate read-only Codex session; parent live settings can override a role's
+  sandbox (T-139). `rev-quick` (medium) screens a low-risk diff for conventions,
+  tests and scope; `rev-std` (high) reviews an
+  ordinary change; `rev-deep` (xhigh) re-derives the invariants independently for
   ABI, memory, ownership, exact arithmetic, unsafe casts and generated code.
 - Each ticket names its tiers in its `impl:` and `review:` fields. Review depth follows the risk
   of the change, not the effort it took to write: a ticket can be `impl-std` and `rev-deep`.
@@ -166,28 +168,26 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
   gate twice or comes back with a must-fix finding, the coordinator re-runs it one tier up and
   records the promotion in the ticket log; two promotions out of one tier means the mapping is
   wrong, so change the tickets' `impl:` field rather than promoting case by case.
-- Agent definitions in `.claude/agents/` are loaded when a session starts; restart the session
-  after adding or changing one.
 
 ### Review Workflow
 - Coordinator: picks a ticket whose dependencies are done, creates the worktree and branch
   (`.worktrees/fort-<id>`, `feat/<id>-<slug>`), fills branch/worktree/assignee, moves the ticket
-  to `inprogress/`, spawns the implementor tier the ticket's `impl:` field names, with the ticket
-  path and the worktree.
+  to `inprogress/`, sends the selected TOML instructions and effort to a built-in worker, with the
+  ticket path and worktree. Do not select a named TOML role until Codex proves named loading.
 - Implementor: reads the ticket and only the specification sections it cites; codes and tests in
   the worktree with small commits, each green under `tools/vm check`; runs the full `tools/vm
   gate` once, at the end; squashes if the ticket is a single unit of work; ticks every criterion
   with its evidence; moves the ticket to `done/`; reports in at most 40 lines. It does not spawn
   a reviewer.
-- Coordinator: spawns the reviewer tier the ticket's `review:` field names (raising it when the
-  diff turned out riskier than the ticket looked), and relays the findings to the implementor,
-  which fixes or explicitly declines each one in the ticket log. A second review round happens
-  only when the fixes changed behaviour.
-- Reviewer: read-only; runs the `code-review` skill on the branch against `main` at its tier's
-  effort; also checks spec citations, tests added, `xfail.txt` updates, commit hygiene, and the
-  knowledge the ticket wrote down: the routing rule at the end of this file says which file takes
-  it, so a learning lands in `notes/` or in `editors/README.md` more often than in `AGENTS.md`;
-  returns findings with file:line and severity; never edits, commits or merges.
+- Coordinator: runs `codex review` in the worktree. For `rev-std`, use this command:
+
+      codex review --strict-config -c 'sandbox_mode="read-only"' \
+        -c 'model_reasoning_effort="high"' \
+        -c 'developer_instructions="Read and follow .codex/agents/rev-std.toml."' --base main
+  Add the absolute ticket path to `developer_instructions`. Use the selected tier's file and effort.
+  Do not pass `[PROMPT]` with `--base`. Relay findings; review again if a fix changes behaviour.
+- Reviewer: follows tier TOML. Effort differs from depth. Check tests, citations, commits and scope.
+  Check `xfail.txt` and ticket knowledge. Route learning below; never edit, commit or merge.
 - Coordinator: re-runs the gate on the branch, **reads the diff's file list**, merges per the
   Change Implementation Loop (squash for a single unit, `--no-ff` for a multi-unit feature),
   deletes the worktree and branch, appends the merge sha and the agents' token counts to the
