@@ -246,6 +246,19 @@ without a rewrite.
   fault**, which is the one difference from the orphan above: that orphan ran beside a live gate,
   and this one holds `build/vm-hold.pid` alone and releases the hold when it finishes. Poll the
   hold file and `build/gate.log` for the result (T-134).
+  **Codex command calls require a supervised gate (T-146).** On 2026-09-15, a detached gate
+  printed pid 63084 and ended before debug configure finished. Its log had no result.
+  A 9-second `nohup sleep` probe with the documented subshell also vanished before the next `ps`.
+  This Codex command runner ends background children when its shell call returns.
+  For a branch gate, set the command session working directory to the ticket worktree.
+  Run a final main gate from main only after the ticket merges.
+  Start the gate as a supervised command session and keep its session handle:
+
+      FORT_VM_SLOT=<n> tools/vm gate > build/gate.log 2>&1
+
+  Poll that handle for exit 0. Require the final `tools/vm gate: green` log line.
+  Run read-only review in another session while the gate runs.
+  The detached form above remains for a host shell that keeps its child alive after handoff.
   **A host-side timeout does not reach the guest.** `ssh -T` allocates no pty, so a command that
   kills the host process leaves the guest command running. T-078 measured it on the new
   `guest_run`: `subprocess.run(["tools/vm", "run", "sleep 40"], timeout=3)` raised its timeout,

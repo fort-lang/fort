@@ -177,7 +177,7 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
 - Implementor: reads the ticket and only its cited specification sections; codes and tests in
   its worktree. Keep each commit green under `tools/vm check`. Squash a single-unit ticket first.
   Hand off a clean final SHA and `tools/vm check` evidence in at most 40 lines. Do not start the final gate or reviewer; the coordinator owns the gate.
-- Coordinator: records identity and starts one detached `tools/vm gate` under `notes/environment.md` 1.
+- Coordinator: records identity and starts one supervised `tools/vm gate` session in the ticket worktree under `notes/environment.md` 1.
   Start read-only review on that SHA while the gate runs. Move the ticket to `inreview/`; for `rev-std`, use:
 
       codex review --strict-config -c 'sandbox_mode="read-only"' \
@@ -188,7 +188,7 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
   For a source fix, stop the gate or discard its result. Run a gate on the fixed SHA; review again if behaviour changes.
 - Reviewer: follows tier TOML. Effort differs from depth. Check tests, citations, commits and scope.
   Check `xfail.txt` and ticket knowledge. Route learning below. State pending for a live gate; never edit, commit or merge.
-- Coordinator: polls the gate to exit. Require `tools/vm gate: green`. Log counts, source SHA, log SHA, and freshness, even if review ends first.
+- Coordinator: polls the gate session to exit 0. Require `tools/vm gate: green`. Log counts, source SHA, log SHA, and freshness, even if review ends first.
   After gate exit and final review, measure identity under `notes/environment.md` 1. Never count a live gate as green.
   Reuse a green gate only if identity and log SHA match and preset count is zero. Log reuse.
   If proof differs or is missing, rebase when `main` changed, then rerun the gate.
