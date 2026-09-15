@@ -50,12 +50,14 @@ if(FORT_NATIVE_MAC)
         message(FATAL_ERROR "FORT_NATIVE_MAC requires a Mac arm64 host")
     endif()
 
-    # The Mac core root replaces libc and omits net until its Mac calls exist.
+    # The Mac standard root replaces libc and net with target modules.
     file(GLOB FORT_ALL_STD_SOURCES CONFIGURE_DEPENDS "${FORT_STD_SRC_DIR}/*.ft")
     set(FORT_MAC_STD_SOURCES ${FORT_ALL_STD_SOURCES})
     list(REMOVE_ITEM FORT_MAC_STD_SOURCES
         "${FORT_STD_SRC_DIR}/libc.ft" "${FORT_STD_SRC_DIR}/net.ft")
-    list(APPEND FORT_MAC_STD_SOURCES "${FORT_STD_SRC_DIR}/mac/libc.ft")
+    list(APPEND FORT_MAC_STD_SOURCES
+        "${FORT_STD_SRC_DIR}/mac/libc.ft"
+        "${FORT_STD_SRC_DIR}/mac/net.ft")
     set(FORT_MAC_STD_OUTPUTS "")
     foreach(std_source IN LISTS FORT_MAC_STD_SOURCES)
         get_filename_component(std_name "${std_source}" NAME)
