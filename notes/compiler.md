@@ -710,6 +710,10 @@ gone.
      unit tests that read `std/` all name `build/<preset>/pin/0/std`. `std/rt.ft` is in every
      import closure (D9.10), so the moment HEAD's library leaves stage1's subset every stage1
      compile fails; pin 0's library is the one stage1 can always read.
+     T-144 uses `platform.ft` for compiler C calls whose declaration changes by target.
+     The Mac generator marks C `fcntl` variadic. The Linux platform uses a fixed extern.
+     A new `std.libc` wrapper made pin 0 refuse 3 clean files and 9 programs.
+     The platform wrapper preserved 509 clean files and 530 programs.
   **What the freeze of T-046 becomes.** It is invariant 1 and no more: `src/bootstrap` must keep
   building pin 0. Its second job stands and is the reason the directory stays -- it is the second
   independent implementation that `tools/diff_tokens.sh`, `diff_ast.sh`, `diff_check.sh` and

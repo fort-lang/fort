@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Generate the Mac build target module beside a copy of the compiler entry.
+# Generate the Mac build target and fcntl C ABI module beside the compiler entry.
 # The entry directory must be the first search root for platform.ft (D9.2).
 # D14.1, D14.3
 set -euo pipefail
@@ -50,7 +50,15 @@ printf '%s\n' \
     '' \
     '/// Whether this compiler uses the Mac link line.' \
     '/// D14.3' \
-    'bool IS_MAC = true;' >"$platform_tmp"
+    'bool IS_MAC = true;' \
+    '' \
+    '/// Sets a file-descriptor flag through the Mac C variable tail.' \
+    '/// D9.8, D14.3' \
+    'extern fn fcntl(i32 fd, i32 cmd, ...) i32;' \
+    '' \
+    'fn fcntl_setfd(i32 fd, i32 cmd, i32 arg) i32 {' \
+    '    return fcntl(fd, cmd, arg);' \
+    '}' >"$platform_tmp"
 if ! cmp -s "$platform_tmp" "$output_dir/platform.ft"; then
     chmod 644 "$platform_tmp"
     mv "$platform_tmp" "$output_dir/platform.ft"

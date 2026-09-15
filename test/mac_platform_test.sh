@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Check the generated Mac build target source and its entry search root.
+# Check the generated Mac target, fcntl call form, and entry search root.
 # This VM test checks source form. T-146 checks the native binary default.
 # D14.1
 set -euo pipefail
@@ -17,6 +17,7 @@ grep -E -x -q 'string BUILT_TARGET = "arm64-apple-macosx[0-9]+\.[0-9]+\.[0-9]+";
     "$generated/platform.ft"
 grep -F -x -q 'string DEFAULT_CC = "/usr/bin/clang";' "$generated/platform.ft"
 grep -F -x -q 'bool IS_MAC = true;' "$generated/platform.ft"
+grep -F -x -q 'extern fn fcntl(i32 fd, i32 cmd, ...) i32;' "$generated/platform.ft"
 cmp "$generated/main.ft" "$fort_src/main.ft"
 "$stage2" --check --std-dir "$std_dir" -I "$fort_src" "$generated/main.ft"
 document=$("$stage2" --check --json --std-dir "$std_dir" -I "$fort_src" \

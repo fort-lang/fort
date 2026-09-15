@@ -155,7 +155,7 @@ string mut@ own mut args_store = {};
 /// (toolchain.md 5.3). Without the restore, the first print after a failed
 /// open reports ENOTTY instead of the program's own error.
 fn is_interactive(i32 fd) bool {
-    i32 mut* slot = libc.__errno_location();
+    i32 mut* slot = libc.errno_slot();
     i32 saved = *slot;
     bool interactive = libc.isatty(fd) == 1;
     *slot = saved;
@@ -197,7 +197,7 @@ fn write_all(i32 fd, u8@ bytes) void {
         u8@ rest = bytes[done..];
         i64 n = libc.write(fd, rest.ptr, rest.len);
         if (n < 0) {
-            if (*libc.__errno_location() == libc.EINTR) {
+            if (*libc.errno_slot() == libc.EINTR) {
                 continue;
             }
             return;
@@ -556,13 +556,9 @@ u64 F32_BYTES = 4;
 /// one text serves every length.
 string FORMAT = "%.*e";
 
-/// The C library the search needs. They stand here and not in std.libc, which
-/// keeps to the thin externs the library shares; the search is their one
-/// caller. This module is in every closure, so a program that declares
-/// snprintf, strtod or strtof itself must now spell it the same way, as it
-/// must for every declaration std.libc carries.
+/// The C library the search needs. std.libc wraps snprintf for both target ABIs.
+/// The two parsers stand here because the search is their one caller.
 /// D9.10, D9.8, D13.2
-extern fn snprintf(char mut* buf, u64 size, char* fmt, i32 precision, f64 v) i32;
 extern fn strtod(char* s, void* end) f64;
 extern fn strtof(char* s, void* end) f32;
 
@@ -796,7 +792,8 @@ fn decimal_f64(f64 v, decimal mut* d) void {
     char[SCRATCH_MAX] mut scratch = {};
     for (u64 mut precision = 0; precision < DIGITS_F64; precision += 1) {
         scratch[0] = '\0';
-        if (snprintf(&scratch[0], SCRATCH_MAX, FORMAT.ptr, cast(precision, i32), v) < 0) {
+        if (libc.snprintf_float(&scratch[0], SCRATCH_MAX, FORMAT.ptr,
+                                cast(precision, i32), v) < 0) {
             // A printf that fails leaves the text empty, which scans as zero.
             scratch[0] = '\0';
         }
@@ -820,8 +817,8 @@ fn decimal_f32(f32 v, decimal mut* d) void {
     char[SCRATCH_MAX] mut scratch = {};
     for (u64 mut precision = 0; precision < DIGITS_F32; precision += 1) {
         scratch[0] = '\0';
-        if (snprintf(&scratch[0], SCRATCH_MAX, FORMAT.ptr, cast(precision, i32),
-                     cast(v, f64)) < 0) {
+        if (libc.snprintf_float(&scratch[0], SCRATCH_MAX, FORMAT.ptr,
+                                cast(precision, i32), cast(v, f64)) < 0) {
             scratch[0] = '\0';
         }
         scan(&scratch[0], d);

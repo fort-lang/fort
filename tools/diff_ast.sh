@@ -73,7 +73,7 @@ done
 # constant: a file must not be able to slip out of the comparison. A ticket
 # that adds or removes a .ft file changes all four lines in the same commit:
 # diff_tokens.sh, diff_ast.sh, diff_check.sh and diff_ir.sh.
-FT_FILES=955
+FT_FILES=956
 
 # The files of that corpus src/bootstrap refuses for a nested array or span
 # level, which src/fort reads (D3.6, T-043). They are skipped below, and this
@@ -112,7 +112,7 @@ FLOAT_MESSAGES='float literals'
 # Stage1 reads a C variable tail as `..` and `.`, then rejects the type.
 # Stage2 reads one `...` token. Invalid tails still yield a module tree.
 # D2.10, D9.8
-VARIADIC_FILES=8
+VARIADIC_FILES=9
 
 files=$(find . -name '*.ft' -not -path './build/*' -not -path './.git/*' \
     -not -path './.worktrees/*' | sort)
