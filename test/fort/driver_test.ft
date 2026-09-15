@@ -416,6 +416,85 @@ fn a_clean_program_is_emitted_and_handed_to_the_cc() void {
     assert(quiet == "");
 }
 
+fn target_error_is(string message) bool {
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, "fort: error: ");
+    strbuf.append(&want, message);
+    strbuf.append(&want, "\nusage: fort [options] entry.ft\n");
+    string own got = captured_err();
+    defer del(got);
+    return got == strbuf.view(&want);
+}
+
+// The four target errors of toolchain.md 1 stop before the front end opens
+// the entry. Each error uses the exact line and status the contract gives.
+// D14.1
+fn target_errors_stop_before_output() void {
+    string mac = "arm64-apple-macosx15.0.0";
+    strbuf.str_buf mut message = strbuf.create();
+    defer strbuf.free(&message);
+    string[7] mut unsupported = {"fort", "-S", "--target", "x86_64-linux-musl",
+                                 "-o", "unsupported.ll", "missing.ft"};
+    assert(run(unsupported[0..7]) == EXIT_USAGE);
+    assert(target_error_is("unsupported target 'x86_64-linux-musl'"));
+    string[7] mut no_root = {"fort", "-S", "--target", mac, "-o", "no-root.ll",
+                             "missing.ft"};
+    assert(run(no_root[0..7]) == EXIT_USAGE);
+    assert(target_error_is("--std-dir is required for cross-target -S"));
+    string[7] mut object = {"fort", "-c", "--target", mac, "-o", "foreign.o",
+                            "missing.ft"};
+    assert(run(object[0..7]) == EXIT_USAGE);
+    strbuf.append(&message, "cannot compile object for target '");
+    strbuf.append(&message, mac);
+    strbuf.append(&message, "' with a 'x86_64-linux-gnu' compiler");
+    assert(target_error_is(strbuf.view(&message)));
+    string[6] mut link = {"fort", "--target", mac, "-o", "foreign-bin", "missing.ft"};
+    assert(run(link[0..6]) == EXIT_USAGE);
+    strbuf.clear(&message);
+    strbuf.append(&message, "cannot link target '");
+    strbuf.append(&message, mac);
+    strbuf.append(&message, "' with a 'x86_64-linux-gnu' compiler");
+    assert(target_error_is(strbuf.view(&message)));
+    strbuf.str_buf mut file = strbuf.create();
+    defer strbuf.free(&file);
+    assert(!io.read_file("unsupported.ll", &file));
+    assert(!io.read_file("no-root.ll", &file));
+    assert(!io.read_file("foreign.o", &file));
+    assert(!io.read_file("foreign-bin", &file));
+}
+
+// The Mac form needs three numeric parts. The front-end modes leave a target
+// option unused, so an unsupported value does not block --check.
+// D14.1
+fn target_forms_and_front_end_modes() void {
+    assert(driver.target_form("x86_64-linux-gnu"));
+    assert(driver.target_form("arm64-apple-macosx15.0.0"));
+    assert(driver.target_form("arm64-apple-macosx26.6.2"));
+    assert(!driver.target_form("x86_64-linux-musl"));
+    assert(!driver.target_form("arm64-apple-macosx15.0"));
+    assert(!driver.target_form("arm64-apple-macosx15.a.0"));
+    assert(!driver.target_form("arm64-apple-macosx15.0.0.1"));
+    string[5] mut checked = {"fort", "--check", "--target", "t", "clean.ft"};
+    assert(run(checked[0..5]) == EXIT_OK);
+}
+
+// A caller root permits Mac IR from a Linux compiler. This test checks IR
+// form only. It does not check the Mac C ABI or Apple stack probes.
+// D14.1, D19.1
+fn mac_ir_uses_the_selected_triple() void {
+    write_file("mac-form.ft", "fn main() i32 {\n    return 0;\n}\n");
+    string[10] mut full = {"fort", "-S", "-c", "--target", "arm64-apple-macosx15.0.0",
+                          "--std-dir", "std", "-o", "mac-form.ll", "mac-form.ft"};
+    assert(run(full[0..10]) == EXIT_OK);
+    strbuf.str_buf mut module = strbuf.create();
+    defer strbuf.free(&module);
+    assert(io.read_file("mac-form.ll", &module));
+    string text = strbuf.view(&module);
+    assert(str.starts_with(text, "target triple = \"arm64-apple-macosx15.0.0\"\n"));
+    assert(str.find(text, "target datalayout") < 0);
+}
+
 // The default output path and the entry base of toolchain.md 1: -S names
 // `<entry>.ll`, -c names `<entry>.o` and a link names `a.out`, each in the
 // working directory and whatever directory the entry file stood in.
@@ -785,6 +864,9 @@ fn main() i32 {
     an_unreadable_entry_file_is_exit_two();
     an_entry_file_that_is_a_directory_is_the_loader_s_error();
     a_clean_program_is_emitted_and_handed_to_the_cc();
+    target_errors_stop_before_output();
+    target_forms_and_front_end_modes();
+    mac_ir_uses_the_selected_triple();
     the_default_output_follows_the_mode();
     a_syntax_error_is_exit_one();
     a_lexical_error_is_exit_one();
