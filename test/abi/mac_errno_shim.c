@@ -1,4 +1,4 @@
-// The direct Mac ABI probe uses the Linux standard sources before T-143.
+// The direct Mac ABI probe uses the Linux standard sources.
 // This test symbol maps their errno call to the Mac C library.
 // D9.8
 extern int* __error(void);
