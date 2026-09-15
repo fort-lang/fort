@@ -41,6 +41,7 @@ import json;
 import lexer;
 import modules;
 import parser;
+import platform;
 import prim;
 import session;
 import std.io;
@@ -149,16 +150,10 @@ struct options {
     containers.str_vec cc_args;  // -Xcc arguments, passed verbatim after the rest
 }
 
-/// The defaults of toolchain.md 1: `--cc` is a clang because nothing else reads
-/// LLVM IR and the target triple is x86_64-linux-gnu.
-/// D14.1, D19.1
-string DEFAULT_CC = "clang";
-string DEFAULT_TARGET = "x86_64-linux-gnu";
-
 fn options_create() options {
     options mut opts = options{};
-    opts.cc = DEFAULT_CC;
-    opts.target = DEFAULT_TARGET;
+    opts.cc = platform.DEFAULT_CC;
+    opts.target = platform.BUILT_TARGET;
     return opts;
 }
 
@@ -184,8 +179,10 @@ fn help() void {
     println("  --release          release mode");
     println("  --no-bounds-check  remove the index and span checks; unsafe");
     println("  -l<lib>            pass -l<lib> to the linker; repeatable, in order");
-    println("  --cc <path>        the clang that compiles and links the IR (default clang)");
-    println("  --target <triple>  pass --target=<triple> to --cc (default x86_64-linux-gnu)");
+    println("  --cc <path>        the clang that compiles and links the IR (default ",
+            platform.DEFAULT_CC, ")");
+    println("  --target <triple>  pass --target=<triple> to --cc (default ",
+            platform.BUILT_TARGET, ")");
     println("  -Xcc <arg>         pass <arg> to --cc verbatim; repeatable, in order");
     println("  --check            run the front end only and stop; emit nothing");
     println("  --json             write the check document to stdout; needs --check");
@@ -377,6 +374,61 @@ fn parse(options mut* opts, string@ args) i32 {
         return PARSE_ERROR;
     }
     return PARSE_OK;
+}
+
+/// Whether the target has one of the two forms in toolchain.md 1.
+/// D14.1
+fn target_form(string target) bool {
+    if (target == "x86_64-linux-gnu") {
+        return true;
+    }
+    string prefix = "arm64-apple-macosx";
+    if (!str.starts_with(target, prefix)) {
+        return false;
+    }
+    u64 mut i = prefix.len;
+    u64 mut digits = 0;
+    u64 mut dots = 0;
+    while (i < target.len) {
+        if (str.is_digit(target[i])) {
+            digits += 1;
+        } else if (target[i] == '.' && digits > 0 && dots < 2) {
+            dots += 1;
+            digits = 0;
+        } else {
+            return false;
+        }
+        i += 1;
+    }
+    return dots == 2 && digits > 0;
+}
+
+/// Rejects a target that this IR mode cannot use before it creates output.
+/// The front-end modes do not call this function.
+/// D14.1
+fn target_allowed(options* opts) bool {
+    if (!target_form(opts->target)) {
+        usage_error_arg("unsupported target", opts->target);
+        return false;
+    }
+    if (opts->target == platform.BUILT_TARGET) {
+        return true;
+    }
+    if (opts->emit_ir) {
+        if (opts->have_std_dir) {
+            return true;
+        }
+        usage_error("--std-dir is required for cross-target -S");
+    } else if (opts->compile_only) {
+        eprintln("fort: error: cannot compile object for target '", opts->target,
+                 "' with a '", platform.BUILT_TARGET, "' compiler");
+        eprintln(USAGE);
+    } else {
+        eprintln("fort: error: cannot link target '", opts->target,
+                 "' with a '", platform.BUILT_TARGET, "' compiler");
+        eprintln(USAGE);
+    }
+    return false;
 }
 
 /// --tokens lexes the entry file alone -- no import is resolved and nothing is
@@ -653,7 +705,11 @@ fn cc_argv(containers.pool mut* p, options* opts, string ir_path, string out_pat
     if (!opts->compile_only) {
         // The executable is position-independent; -c stops at the object, so
         // it takes no -pie and no -l (toolchain.md 2).
-        containers.str_push(argv, "-pie");
+        if (platform.IS_MAC) {
+            containers.str_push(argv, "-Wl,-pie");
+        } else {
+            containers.str_push(argv, "-pie");
+        }
     }
     // The module carries its own target triple, which clang would warn about
     // (toolchain.md 2).
@@ -989,6 +1045,7 @@ fn emit_module(session.session mut* s, options* opts, analysis mut* an, string i
     gen.gen_options mut gopts = gen.gen_options{};
     gopts.release = opts->release;
     gopts.no_bounds_check = opts->no_bounds_check;
+    gopts.target = opts->target;
     gen.emitter mut g = gen.emitter{};
     gen.gen_init(&g, s, gopts);
     defer gen.gen_free(&g);
@@ -1088,6 +1145,9 @@ fn check_document(session.session mut* s, options* opts, analysis mut* an,
 /// into the session.
 /// D20.5
 fn compile_entry(options* opts, string program) i32 {
+    if (!opts->check && !target_allowed(opts)) {
+        return EXIT_USAGE;
+    }
     containers.pool mut p = containers.pool_create();
     defer containers.pool_free(&p);
     session.session mut s = session.create();
