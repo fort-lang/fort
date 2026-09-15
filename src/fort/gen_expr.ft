@@ -641,8 +641,10 @@ fn gen_call(gen.emitter mut* g, ast.node* n, gen.gen_place* dst) gen.gen_val {
         return none;
     }
     bool is_extern = direct && s->kind == ast.sym_kind.s_extern_fn;
-    // D9.8: a variadic call type makes a fixed prototype safe (item 8)
-    bool variadic = is_extern;
+    // Linux fixed externs keep their old variadic IR form.
+    // D9.8, D19.2
+    bool variadic = is_extern && (!gen.gen_is_mac(g)
+                                  || (s->node->flags & ast.FLAG_VARIADIC) != 0);
     if (is_extern) {
         gen.gen_use_extern(g, s);
     }
@@ -668,7 +670,16 @@ fn gen_call(gen.emitter mut* g, ast.node* n, gen.gen_place* dst) gen.gen_val {
     if (dst != null) {
         // An aggregate result arrives through the leading `sret` pointer
         // (item 7).
-        gen.gen_args_add(&args, dst->addr);
+        if (gen.gen_is_mac(g)) {
+            strbuf.str_buf mut attr = strbuf.create();
+            defer strbuf.free(&attr);
+            strbuf.append(&attr, "sret(");
+            strbuf.append(&attr, gen.gen_mem_type(g, sig->elem));
+            strbuf.push(&attr, ')');
+            gen.gen_args_add_ext(&args, dst->addr, strbuf.view(&attr));
+        } else {
+            gen.gen_args_add(&args, dst->addr);
+        }
     }
     u64 mut i = 0;
     while (i < ast.ast_len(n)) {
@@ -705,7 +716,7 @@ fn gen_call(gen.emitter mut* g, ast.node* n, gen.gen_place* dst) gen.gen_val {
     gen.gen_text_append(g, "(");
     gen.gen_text_append(g, gen.gen_args_text(&args));
     gen.gen_text_append(g, ")");
-    if (variadic) {
+    if (is_extern) {
         // `#3 = { nobuiltin }` on every extern call site (item 8); a runtime
         // entry point is not one, and its group carries no attribute.
         gen.gen_use_attr(g, gen.ATTR_NOBUILTIN);
