@@ -51,7 +51,8 @@ if(FORT_NATIVE_MAC)
     endif()
 
     # The Mac core root replaces libc and omits net until its Mac calls exist.
-    file(GLOB FORT_MAC_STD_SOURCES CONFIGURE_DEPENDS "${FORT_STD_SRC_DIR}/*.ft")
+    file(GLOB FORT_ALL_STD_SOURCES CONFIGURE_DEPENDS "${FORT_STD_SRC_DIR}/*.ft")
+    set(FORT_MAC_STD_SOURCES ${FORT_ALL_STD_SOURCES})
     list(REMOVE_ITEM FORT_MAC_STD_SOURCES
         "${FORT_STD_SRC_DIR}/libc.ft" "${FORT_STD_SRC_DIR}/net.ft")
     list(APPEND FORT_MAC_STD_SOURCES "${FORT_STD_SRC_DIR}/mac/libc.ft")
@@ -84,15 +85,20 @@ if(FORT_NATIVE_MAC)
     )
 
     file(GLOB FORT_FORT_SOURCES CONFIGURE_DEPENDS "${FORT_FORT_SRC_DIR}/*.ft")
+    file(GLOB_RECURSE FORT_BOOTSTRAP_SOURCES CONFIGURE_DEPENDS
+        "${FORT_SRC_DIR}/*.c" "${FORT_SRC_DIR}/*.h")
     set(FORT_MAC_STAGE2_BINARY "${CMAKE_BINARY_DIR}/fort")
     add_custom_command(
         OUTPUT "${FORT_MAC_STAGE2_BINARY}"
         COMMAND bash "${CMAKE_SOURCE_DIR}/tools/mac_native_seed.sh" "${CMAKE_BINARY_DIR}"
         DEPENDS fort_std fort_mac_platform ${FORT_FORT_SOURCES}
+                ${FORT_BOOTSTRAP_SOURCES} ${FORT_ALL_STD_SOURCES}
                 ${FORT_MAC_STD_OUTPUTS}
                 "${FORT_MAC_PLATFORM_DIR}/platform.ft"
                 "${FORT_MAC_PLATFORM_DIR}/main.ft"
                 "${CMAKE_SOURCE_DIR}/tools/mac_native_seed.sh"
+                "${CMAKE_SOURCE_DIR}/tools/bootstrap.ref"
+                "${CMAKE_SOURCE_DIR}/tools/pin.sh"
         COMMENT "Building native Mac stage2 from the Linux VM seed"
         VERBATIM
     )
