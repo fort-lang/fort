@@ -1013,7 +1013,9 @@ bullet at a time and without a rewrite.
   (ctest `fort_lint`, target `fort-lint`) holds `std/*.ft` and `src/fort/*.ft` to the identifier
   conventions of D1.4 and to 100 columns; it reads `fort --index` (D20.3) rather than tokenizing
   fort a second time, so the kinds and types it reasons about are the checker's own answers, and a
-  second tokenizer cannot drift from the language. `test/highlight_test.py` tokenizes `std/`,
+  second tokenizer cannot drift from the language. `fort_lint_mac` uses a temporary Mac root to
+  lint `std/mac/*.ft` with stage2 (T-144). The Linux root conflicts with Mac C declarations.
+  `test/highlight_test.py` tokenizes `std/`,
   `src/fort/` and `test/lang/run` against the TextMate grammar, which is the only check that grammar
   has. `tools/lines.py` counts `std/*.ft` on the source side of the 3:1 ratio, with the compiler and
   the runtime (D14.6, amended). What still does not: **there is no formatter** -- indentation,

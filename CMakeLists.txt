@@ -797,6 +797,13 @@ add_test(NAME fort_lint
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(fort_lint PROPERTIES LABELS lang)
 
+# Mac declarations need a Mac standard root. The host does not run this lint.
+# Stage2 checks its names in the Linux VM (T-144).
+add_test(NAME fort_lint_mac
+    COMMAND bash "${FORT_TEST_DIR}/mac_fort_lint_test.sh" "${FORT_STAGE2_BINARY}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(fort_lint_mac PROPERTIES LABELS lang)
+
 # Its own unit tests (label unit): the rules over synthetic index records, the
 # plumbing against a fake compiler, and the fixtures in test/fort_lint through
 # the real one, which FORT_BINARY names.
@@ -837,6 +844,7 @@ add_custom_target(check-lang
     COMMAND ${FORT_LANG_STAGE2_COMMAND} --check-json
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
             --fort "${FORT_STAGE2_BINARY}" --std-dir "${FORT_STD_DIR}"
+    COMMAND bash "${FORT_TEST_DIR}/mac_fort_lint_test.sh" "${FORT_STAGE2_BINARY}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_tokens.sh" "${CMAKE_BINARY_DIR}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ast.sh" "${CMAKE_BINARY_DIR}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_check.sh" "${CMAKE_BINARY_DIR}"
@@ -906,6 +914,7 @@ endif()
 add_custom_target(fort-lint
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
             --fort "${FORT_STAGE2_BINARY}" --std-dir "${FORT_STD_DIR}"
+    COMMAND bash "${FORT_TEST_DIR}/mac_fort_lint_test.sh" "${FORT_STAGE2_BINARY}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Checking the identifier conventions of D1.4 in the project's fort"
     VERBATIM
