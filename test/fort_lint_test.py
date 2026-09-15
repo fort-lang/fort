@@ -791,15 +791,16 @@ class IncludeRoots(unittest.TestCase):
             matched = {p for p in fort_lint.collect(ROOT, (glob,)) if p.resolve() not in skipped}
             self.assertTrue(matched <= set(paths), glob)
 
-    def test_the_float_modules_are_left_to_the_compiler_that_has_floats(self):
-        """std/math.ft and std/rt_float.ft hold floats and the C bootstrap
-        rejects them (D18.1, T-042), so the default set leaves them out and the
-        ctest fort_lint_float lints them with stage2. A skipped file that does
-        not exist would be a typo nothing reports, so it is checked as well."""
+    def test_no_source_is_left_out_of_the_default_set(self):
+        """SKIPPED is empty since T-131. std/math.ft and std/rt_float.ft stood
+        there because they hold floats and the C bootstrap rejects them (D18.1,
+        T-042), and a second ctest linted them with stage2; the one ctest runs
+        stage2 now and reads every source. The two files are named here so that
+        a tuple that fills up again is seen."""
         files = {path.relative_to(ROOT).as_posix() for path, _ in fort_lint.default_file_set(ROOT)}
-        self.assertEqual(fort_lint.SKIPPED, ("std/math.ft", "std/rt_float.ft"))
-        for name in fort_lint.SKIPPED:
-            self.assertNotIn(name, files)
+        self.assertEqual(fort_lint.SKIPPED, ())
+        for name in ("std/math.ft", "std/rt_float.ft"):
+            self.assertIn(name, files)
             self.assertTrue((ROOT / name).is_file(), name)
 
     def test_the_set_is_the_five_corpora(self):
@@ -852,13 +853,44 @@ class RealCompiler(unittest.TestCase):
         self.assertEqual(got.returncode, 1)
         self.assertEqual(got.stdout.strip().split("\n"), BAD_NAMES_PROBLEMS)
 
-    def test_the_standard_library_conforms(self):
-        """Every module of std but the ones SKIPPED names, which the compiler
-        this test runs -- the C bootstrap -- cannot check (D18.1)."""
-        skipped = {(ROOT / name).resolve() for name in fort_lint.SKIPPED}
-        files = [p for p in sorted((ROOT / "std").glob("*.ft")) if p.resolve() not in skipped]
-        self.assertEqual(len(files) + len(skipped), len(list((ROOT / "std").glob("*.ft"))))
-        got = self.run_lint(*[str(p.relative_to(ROOT)) for p in files])
+    @unittest.skipUnless(os.environ.get("FORT_PIN0_DIR"), "FORT_PIN0_DIR is not set")
+    def test_pin_0s_standard_library_conforms(self):
+        """Every module of the library the compiler this test runs compiles.
+
+        That compiler is the C bootstrap, and from T-131 on it compiles pin 0's
+        library and no other (notes/compiler.md 8, invariant 5). So the tree
+        this lints is pin 0's, which the build extracted, and not HEAD's, which
+        may hold a form the C bootstrap cannot read. The ctest fort_lint holds
+        HEAD's library against D1.4 with stage2.
+
+        Two modules of any library stand outside: std/math.ft and
+        std/rt_float.ft hold floats and the C bootstrap rejects a float type
+        and a float literal (D18.1, toolchain.md 7.3). That is a property of
+        the C compiler and not of the pin, so it is named here and not in
+        fort_lint.SKIPPED, which is empty.
+        """
+        pin0 = Path(os.environ["FORT_PIN0_DIR"])
+        floatless = ("math.ft", "rt_float.ft")
+        every = sorted((pin0 / "std").glob("*.ft"))
+        files = [p for p in every if p.name not in floatless]
+        self.assertEqual(len(files) + len(floatless), len(every))
+        self.assertGreaterEqual(len(files), 10)
+        got = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "tools" / "fort_lint.py"),
+                "--fort",
+                os.environ["FORT_BINARY"],
+                "--root",
+                str(pin0),
+                "--std-dir",
+                str(pin0 / "std"),
+                *[str(p.relative_to(pin0)) for p in files],
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),
+        )
         self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
 
     def test_a_rejected_file_is_reported_and_still_judged(self):

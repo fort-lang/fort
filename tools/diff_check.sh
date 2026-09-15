@@ -52,6 +52,14 @@ for binary in "$stage1" "$stage2"; do
     fi
 done
 
+# The library both runs read. An unbuilt pin would otherwise reach the
+# compilers as a --std-dir that holds nothing, and two compilers that cannot
+# find std.rt agree about every file.
+if [ ! -f "$build/pin/0/std/rt.ft" ]; then
+    echo "diff_check.sh: not built: $build/pin/0/std (build the fort_stage2 target first)" >&2
+    exit 2
+fi
+
 # The number of .ft files the repository holds, as tools/diff_ast.sh counts
 # them: an equality and not a floor, so that a file cannot slip out of the
 # comparison. A ticket that adds or removes a .ft file changes all four
@@ -82,13 +90,20 @@ FT_FILES=946
 # one of the 106 importing a support module.
 CLEAN_FILES=509
 
-# The search roots every run is given: the standard library the build copied,
-# src/fort, so that the compiler's own modules resolve their imports, and src,
-# so that a module of the language server, whose module path is `lsp.<name>`,
-# resolves as well (T-063). A file that needs none of them is unaffected, since
-# a root that holds no module of the path is simply not the one that answers
-# (D9.2).
-STD_DIR=$build/std
+# The search roots every run is given: the standard library, src/fort, so that
+# the compiler's own modules resolve their imports, and src, so that a module of
+# the language server, whose module path is `lsp.<name>`, resolves as well
+# (T-063). A file that needs none of them is unaffected, since a root that holds
+# no module of the path is simply not the one that answers (D9.2).
+#
+# The library is pin 0's and not HEAD's, on both sides (T-131). std/rt.ft is in
+# every import closure (D9.10), so the moment HEAD's library leaves stage1's
+# subset every stage1 run here fails and the comparison is empty. Pin 0's copy
+# is the library stage1 compiles everywhere else too, and giving stage2 the
+# same directory is what keeps the two runs one comparison. HEAD's own std/*.ft
+# files are still in the file list below and are still compared one by one,
+# until one of them uses a form stage1 refuses.
+STD_DIR=$build/pin/0/std
 ROOT=src/fort
 LSP_ROOT=src
 

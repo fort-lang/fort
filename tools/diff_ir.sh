@@ -129,6 +129,14 @@ for binary in "$stage1" "$stage2"; do
     fi
 done
 
+# The library both runs read. An unbuilt pin would otherwise reach the
+# compilers as a --std-dir that holds nothing, and two compilers that cannot
+# find std.rt agree about every file.
+if [ ! -f "$build/pin/0/std/rt.ft" ]; then
+    echo "diff_ir.sh: not built: $build/pin/0/std (build the fort_stage2 target first)" >&2
+    exit 2
+fi
+
 # The number of .ft files the repository holds, as tools/diff_ast.sh counts
 # them: an equality and not a floor, so that a file cannot slip out of the
 # comparison. A ticket that adds or removes a .ft file changes all four lines
@@ -153,13 +161,19 @@ PROGRAM_FILES=530
 # transform. It is named here so that one line adds a second check.
 VERIFY_PASSES=verify
 
-# The search roots every run is given: the standard library the build copied,
-# src/fort so that the compiler's own modules resolve, test/fort/support so
-# that a module test's fixture does, and src so that a module of the language
-# server, whose module path is `lsp.<name>`, does as well (T-063). A file that
-# needs none of them is unaffected, since a root that holds no module of the
-# path is simply not the one that answers (D9.2).
-STD_DIR=$build/std
+# The search roots every run is given: the standard library, src/fort so that
+# the compiler's own modules resolve, test/fort/support so that a module test's
+# fixture does, and src so that a module of the language server, whose module
+# path is `lsp.<name>`, does as well (T-063). A file that needs none of them is
+# unaffected, since a root that holds no module of the path is simply not the
+# one that answers (D9.2).
+#
+# The library is pin 0's and not HEAD's, on both sides, for the reason
+# tools/diff_check.sh gives at its own copy of this line (T-131). It is also
+# what keeps the two modules comparable: a module holds the whole closure
+# (D9.10) and names each file by the path the compiler opened it by (D19.5), so
+# the two runs must be given one directory.
+STD_DIR=$build/pin/0/std
 
 files=$(find . -name '*.ft' -not -path './build/*' -not -path './.git/*' \
     -not -path './.worktrees/*' | sort)
