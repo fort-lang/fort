@@ -148,6 +148,9 @@ bullet at a time and without a rewrite.
   Python 3.12, standard library only, wrapped at 100 columns (the host's
   `ruff format --line-length 100` is the reference); `run_tests_test.py` scripts a fake `fort`
   with `//@` lines, extend it rather than calling the real compiler.
+  On voyager.local, `/bin/false` is absent. This made three inherited fixture tests error (T-143).
+  Use `shutil.which("false")` for a fixture that runs on Mac and Linux.
+  The host and slot-2 VM suites each pass 185 of 185 tests with this fixture.
 - A directive lint gotcha: `run_tests.py --lint` rejects any line of a test whose text holds `//!`
   after code, so a comment inside a test that quotes a directive (`the //! stderr: lines`) fails
   the lint with `only '//! error:' may follow code on a line`. Say "the stderr directives in this
@@ -719,8 +722,12 @@ bullet at a time and without a rewrite.
   Adding one means
   adding its name to the `for prog in` loop of that script and a block of expectations beside
   the others; the list is not globbed, since each module's output is its own. `*.ll` is
-  gitignored except `test/ir/*.ll`. `run_tests.py --verify-ir` runs the same verifier over the
+  gitignored except `test/ir/*.ll` and `test/mac/ir/*.ll`.
+  `run_tests.py --verify-ir` runs the same verifier over the
   `-S` output of every language test that compiles.
+- The native Mac pipeline uses `test/mac/ir/mac.ll` as a host sample (T-143).
+  This sample is outside the `test/ir/*.ll` compiler-form corpus.
+  `tools/mac pipeline` verifies, links, and runs it, then checks Mach-O PIE and SIGTRAP.
 - **The gen suites emit with no runtime in the closure**, so the calls the emitter writes into it
   reach a name the module neither defines nor declares, which LLVM rejects as a forward reference
   to nothing. `verified()` appends a `declare` for every row of `runtime_sig.h` to the file the
@@ -1099,4 +1106,3 @@ bullet at a time and without a rewrite.
   build modes disagree, and an index expression that handed out a pointer into a dead temporary).
   Ask a reviewer for the list of untested rules whenever a ticket misses the ratio, and merge or
   refuse on that list.
-

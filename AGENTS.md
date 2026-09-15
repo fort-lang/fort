@@ -124,8 +124,8 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
   template reaches no commit and a reader verifies it by reading the file in the main checkout.
 - A ticket is assigned only when every ticket in its `depends-on` is in `done/`. Independent
   tickets are assigned concurrently, one implementor each.
-- Acceptance criteria are verifiable on the host Mac or inside the VM. The log records each
-  hand-off with
+- Acceptance criteria are verifiable inside the VM or on a named native host. The ticket log names
+  that host and records each hand-off with
   evidence (commands run, results, review rounds, merge sha). Evidence must outlive the agent that
   produced it: a command anyone can re-run, a commit sha, a file in the repository. A criterion
   ticked against "the report" is ticked against prose that exists nowhere once the agent returns,

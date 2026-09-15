@@ -20,6 +20,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_tests  # noqa: E402
@@ -643,7 +644,9 @@ class Discovery(TempRoot):
         write(self.root, "README.md", "ignored\n")
         tests, problems = run_tests.discover(self.root)
         self.assertEqual(tests, [])
-        self.assertEqual(problems, ["containers_tets.ft: bad test name", "helper.ft: bad test name"])
+        self.assertEqual(
+            problems, ["containers_tets.ft: bad test name", "helper.ft: bad test name"]
+        )
 
     def test_a_test_below_the_root_is_reported(self):
         """A `*_test.ft` in a directory discovery does not walk (T-079).
@@ -1161,6 +1164,33 @@ class Judging(unittest.TestCase):
         )
 
 
+# ---- target child environment ----------------------------------------------------------
+
+
+class ChildEnvironment(unittest.TestCase):
+    def test_valid_mac_targets_remove_inherited_qemu_prefix(self):
+        targets = ("arm64-apple-macosx15.0.0", "arm64-apple-macosx26.6.2")
+        with mock.patch.dict(os.environ, {"QEMU_LD_PREFIX": "/inherited"}, clear=True):
+            for target in targets:
+                with self.subTest(target=target):
+                    self.assertNotIn("QEMU_LD_PREFIX", run_tests.child_env("/tmp", target))
+
+    def test_invalid_mac_targets_keep_inherited_qemu_prefix(self):
+        targets = (
+            "arm64-apple-macosx",
+            "arm64-apple-macosx26.6",
+            "arm64-apple-macosx26.6.2.1",
+            "arm64-apple-macosx26.6.x",
+            "arm64-apple-macosx26.6.2-extra",
+            "arm64-apple-macosx26.6.２",
+        )
+        with mock.patch.dict(os.environ, {"QEMU_LD_PREFIX": "/inherited"}, clear=True):
+            for target in targets:
+                with self.subTest(target=target):
+                    env = run_tests.child_env("/tmp", target)
+                    self.assertEqual(env["QEMU_LD_PREFIX"], "/inherited")
+
+
 # ---- end to end with a fake compiler ---------------------------------------------------
 
 
@@ -1455,7 +1485,9 @@ class EndToEnd(TempRoot):
 
     def test_false_compiler(self):
         self.write_corpus()
-        status, lines = self.run_main("--fort", "/bin/false", "--no-xfail")
+        false_compiler = shutil.which("false")
+        self.assertIsNotNone(false_compiler)
+        status, lines = self.run_main("--fort", false_compiler, "--no-xfail")
         self.assertEqual(status, 1)
         self.assertEqual(len(lines), 15)
         for line in lines[:-1]:
@@ -1733,6 +1765,36 @@ class EndToEnd(TempRoot):
         )
         status, lines = self.run_main("--runner", str(runner), "008_runner")
         self.assertEqual((status, lines[0]), (0, "PASS run/control/008_runner.ft"))
+
+    def test_mac_native_child_has_no_qemu_prefix(self):
+        write(
+            self.corpus,
+            "run/control/001_prefix.ft",
+            """\
+            //! run
+            //! stdout:
+            //| unset
+            //@ program echo "${QEMU_LD_PREFIX-unset}"
+            """,
+        )
+        with mock.patch.dict(os.environ, {"QEMU_LD_PREFIX": "/inherited"}):
+            status, lines = self.run_main("--target", "arm64-apple-macosx26.6.2")
+        self.assertEqual((status, lines[0]), (0, "PASS run/control/001_prefix.ft"))
+
+    def test_linux_child_keeps_qemu_prefix_without_runner(self):
+        write(
+            self.corpus,
+            "run/control/001_prefix.ft",
+            """\
+            //! run
+            //! stdout:
+            //| /usr/x86_64-linux-gnu
+            //@ program echo "${QEMU_LD_PREFIX-unset}"
+            """,
+        )
+        with mock.patch.dict(os.environ, {}, clear=True):
+            status, lines = self.run_main("--target", "x86_64-linux-gnu")
+        self.assertEqual((status, lines[0]), (0, "PASS run/control/001_prefix.ft"))
 
 
 # ---- the check document (D20.1, D20.2) -------------------------------------------------
