@@ -148,6 +148,9 @@ bullet at a time and without a rewrite.
   Python 3.12, standard library only, wrapped at 100 columns (the host's
   `ruff format --line-length 100` is the reference); `run_tests_test.py` scripts a fake `fort`
   with `//@` lines, extend it rather than calling the real compiler.
+  On voyager.local, `/bin/false` is absent. This made three inherited fixture tests error (T-143).
+  Use `shutil.which("false")` for a fixture that runs on Mac and Linux.
+  The host and slot-2 VM suites each pass 185 of 185 tests with this fixture.
 - A directive lint gotcha: `run_tests.py --lint` rejects any line of a test whose text holds `//!`
   after code, so a comment inside a test that quotes a directive (`the //! stderr: lines`) fails
   the lint with `only '//! error:' may follow code on a line`. Say "the stderr directives in this
@@ -1099,4 +1102,3 @@ bullet at a time and without a rewrite.
   build modes disagree, and an index expression that handed out a pointer into a dead temporary).
   Ask a reviewer for the list of untested rules whenever a ticket misses the ratio, and merge or
   refuse on that list.
-
