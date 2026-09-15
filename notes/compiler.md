@@ -492,15 +492,14 @@ read. T-131 ended that reason and T-132 made the two modules one. `std/rt.ft` is
 closure (D9.10), so every program now emits the float printers, the `std.strbuf` they import for
 `append_f64`, and the `std.mem` behind it.
 
-**The file `std/rt_float.ft` stays in the tree and declares nothing, and a pin is what deletes
-it** (T-132). The last pin's loader reads `<std-dir>/rt_float.ft` into any closure holding a
-float, and HEAD's `std/rt.ft` holds floats and stands in every closure, so the pinned compiler
-asks for that name on every build: deleting the file gives
-`std/rt_float.ft:1:1: error: cannot read` and stops the build, measured on 2026-09-14 at
-6c56459. Nothing about the language is in the way -- every pin implements floats -- so a pin
-moves here for a reason invariant 3 did not list, which is a compiler the pin runs rather than a
-form it cannot compile. The deletion is one commit of `std/`, one line of `tools/bootstrap.ref`
-and the count constants, on the day a pin moves past the fold.
+**Deleting `std/rt_float.ft` took a pin, and that is the second reason a pin moves** (T-132).
+Pin 0's loader reads `<std-dir>/rt_float.ft` into any closure holding a float, and the fold put
+floats into `std/rt.ft`, which stands in every closure, so pin 0 asked for that name on every
+build: with the file deleted the build gave `std/rt_float.ft:1:1: error: cannot read` and
+stopped, measured on 2026-09-14 at 6c56459. Nothing about the language was in the way -- every
+pin implements floats. So T-132 took `bootstrap-1`, the commit of the fold itself, whose
+`src/fort` names `rt_float` nowhere; the commit after it deleted the file and lowered `FT_FILES`
+from 946 to 945 and `CORPUS_FILES` from 687 to 686. Invariant 3 below lists both reasons now.
 
 **What the fold costs, measured on 2026-09-14 (T-132), against the split T-096 measured on the
 same day.** A program that prints no float paid nothing for the split. It pays 105,914 bytes of
@@ -680,22 +679,30 @@ gone.
   2. **HEAD's `src/fort` and `std` use only what the last pin implements.** A feature's first
      implementation is therefore written without the feature.
   3. **A pin moves only on need, as its own commit**: the ref line and a note naming the need,
-     and nothing else, so the gate proves the new chain before HEAD relies on the new form. The
-     need is invariant 2 read backwards: HEAD wants a form the last pin cannot compile. Two worked
-     examples. A pin **did not** move for T-132, which folded the float module into `std.rt` and
-     put an `f64` in `std/rt.ft`: fort has had floats since T-040 and every pin implements them,
-     and the split existed only because stage1 compiled the whole closure. The gate was green
-     with `tools/bootstrap.ref` unchanged, which is the measurement that says so. **That ticket
-     also found the second reason a pin moves, which this invariant did not state**: not a form
-     the last pin cannot compile, but a file the last pin's compiler *reads*. The pinned
-     loader takes `<std-dir>/rt_float.ft` into any closure holding a float, so HEAD cannot
-     delete that file while the pin stands, and T-132 left it in the tree declaring nothing
-     (section 7). Read the need as "the last pin cannot build HEAD", not as "the last pin
-     cannot compile a form". A pin **does**
-     move for the
-     ticket after the one that gives `src/fort` a new syntax, on the day `src/fort` or `std` wants
-     to spell that syntax itself; until that day the new syntax lives in the compiler and not in
-     its own source.
+     and nothing else, so the gate proves the new chain before HEAD relies on it. **The need is
+     one of two things, and T-132 found the second.** Read the need as "the last pin cannot
+     build HEAD", never as "the last pin cannot compile a form".
+     - *A form the last pin cannot compile*, which is invariant 2 read backwards. The worked
+       example: a pin moves for the ticket after the one that gives `src/fort` a new syntax, on
+       the day `src/fort` or `std` wants to spell that syntax itself. Until that day the new
+       syntax lives in the compiler and not in its own source. A pin did **not** move for the
+       fold of T-132 by this reason: fort has had floats since T-040 and every pin implements
+       them, so an `f64` in `std/rt.ft` needs nothing new.
+     - *A file the last pin's compiler demands by name.* The worked example is `bootstrap-1`,
+       which T-132 took. Pin 0's loader reads `<std-dir>/rt_float.ft` into any closure holding a
+       float; the fold put floats into `std/rt.ft`, which stands in every closure, so pin 0
+       asked HEAD for that file on every build and HEAD could not delete it
+       (`error: cannot read`, section 7). The pin is the commit of the fold itself, whose
+       `src/fort` names `rt_float` nowhere, and the commit after it deletes the file.
+     **A pin costs a hop on every cold build, for ever.** Measured on 2026-09-14 under the debug
+     preset, each the median of five runs: stage1 compiles pin 0 in 2.357 s checked and 2.807 s
+     release, pin 0 compiles pin 1 in 2.672 s and 3.155 s. Cold, the `fort_pin_0` target takes
+     2.568 s and `fort_pin_0 fort_pin_1` takes 5.600 s, so the second pin costs 3.0 s of every
+     cold build. Measure the chain when you take one and write the number into
+     `tools/bootstrap.ref` beside the last.
+     **A branch that adds a pin merges with `--no-ff`.** The pin names a commit of that branch,
+     and a squash merge leaves `main` without it, so `tools/pin.sh verify` then fails at
+     configure time for every clone (T-132).
   4. **Every pin is a commit in this repository's history.** A shallow clone cannot build.
      `tools/pin.sh verify` says so at configure time, by name.
   5. **HEAD's stage2 compiles pin 0's `std`**, because pin 0's `std` is the differential `std`:

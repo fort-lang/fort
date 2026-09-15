@@ -1005,9 +1005,9 @@ result reaches `free`, whose parameter is `void* own`.
 
 The float text of D11.7, to a descriptor or to a `str_buf`. These four functions stood in a
 module of their own, `std.rt_float`, until T-132 folded that module into `std.rt`; they are
-declarations of `std.rt` and this section is a part of 2.11. `std/rt_float.ft` stays in the tree
-and declares nothing, which its own header explains: the pinned compiler that builds HEAD reads
-that file name for any closure holding a float (D18.1, `notes/compiler.md` 8).
+declarations of `std.rt` and this section is a part of 2.11. Deleting `std/rt_float.ft` took a
+pin of its own, because the pinned compiler that built HEAD read that file name for any closure
+holding a float (D18.1, `notes/compiler.md` 8).
 
 ```fort
 fn print_f32(i32 fd, f32 v) void

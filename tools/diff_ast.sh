@@ -73,7 +73,7 @@ done
 # constant: a file must not be able to slip out of the comparison. A ticket
 # that adds or removes a .ft file changes all four lines in the same commit:
 # diff_tokens.sh, diff_ast.sh, diff_check.sh and diff_ir.sh.
-FT_FILES=946
+FT_FILES=945
 
 # The files of that corpus src/bootstrap refuses for a nested array or span
 # level, which src/fort reads (D3.6, T-043). They are skipped below, and this
@@ -104,7 +104,8 @@ FORM_MESSAGES='do-while|\?:'
 # is counted by the first test that matches it, not by this one. std/rt.ft is
 # such a file since T-132 folded the float printers into it: it holds a float
 # and a `?:`, and FORM_FILES counts it. std/rt_float.ft left this count on the
-# same commit, which is why it fell from 67 to 66.
+# same commit, which is why it fell from 67 to 66; the file itself went two
+# commits later and lowered FT_FILES rather than this one.
 FLOAT_FILES=66
 FLOAT_MESSAGES='float literals'
 

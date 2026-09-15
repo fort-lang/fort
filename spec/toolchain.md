@@ -566,9 +566,9 @@ apart because a compiler that builds the runtime must accept floats to compile t
 bootstrap does not, and the C bootstrap compiled `std/rt.ft` into every closure it read. T-131
 ended that: the C bootstrap builds pin 0's `src/fort` with pin 0's library and reads HEAD's
 library never (`notes/compiler.md` 8, invariant 5), so `std/rt.ft` may hold a float and T-132
-made the two modules one. `std/rt_float.ft` stays in the tree and declares nothing, because the
-last pin's loader reads that file name for any closure holding a float; its header says so.
-What the fold costs is measured: a program that prints no float paid
+made the two modules one. Deleting `std/rt_float.ft` took a pin of its own, because the last
+pin's loader read that file name for any closure holding a float (`notes/compiler.md` 8,
+invariant 3). What the fold costs is measured: a program that prints no float paid
 nothing for the split and now pays 8,549 bytes of `.text` and 105,914 bytes of emitted IR, because
 a module emits every definition of every module of its closure with no reachability filter;
 `notes/compiler.md` 7 holds the measurement and the command for each number.

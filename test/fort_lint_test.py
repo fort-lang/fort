@@ -796,13 +796,15 @@ class IncludeRoots(unittest.TestCase):
         there because they hold floats and the C bootstrap rejects them (D18.1,
         T-042), and a second ctest linted them with stage2; the one ctest runs
         stage2 now and reads every source. T-132 folded the float module into
-        std/rt.ft, so the two float-holding sources of the library are named
-        here and a tuple that fills up again is seen."""
+        std/rt.ft and deleted it, so the two float-holding sources of the
+        library are named here, and the deleted one is named too, so that a
+        tuple that fills up again is seen."""
         files = {path.relative_to(ROOT).as_posix() for path, _ in fort_lint.default_file_set(ROOT)}
         self.assertEqual(fort_lint.SKIPPED, ())
         for name in ("std/math.ft", "std/rt.ft"):
             self.assertIn(name, files)
             self.assertTrue((ROOT / name).is_file(), name)
+        self.assertFalse((ROOT / "std/rt_float.ft").exists())
 
     def test_the_set_is_the_five_corpora(self):
         """The count the ctest reports, so a glob that stops matching is seen."""
@@ -879,8 +881,8 @@ class RealCompiler(unittest.TestCase):
         std/rt_float.ft hold floats and the C bootstrap rejects a float type
         and a float literal (D18.1, toolchain.md 7.3). That is a property of
         the C compiler and not of the pin, so it is named here and not in
-        fort_lint.SKIPPED, which is empty. HEAD's rt_float.ft declares nothing:
-        T-132 folded it into std/rt.ft, which is the float-holding module of
+        fort_lint.SKIPPED, which is empty. HEAD's library has no rt_float.ft:
+        T-132 folded it into std/rt.ft, which is a float-holding module of
         HEAD's tree and holds no float in this one.
         """
         pin0 = Path(os.environ["FORT_PIN0_DIR"])

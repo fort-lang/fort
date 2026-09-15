@@ -121,6 +121,25 @@ expect_fail "a pin outside the history" "is not an ancestor of" \
 expect_fail "a chain that runs backwards" "does not follow bootstrap-0" \
     bash "$pin" verify --ref "$(ref backwards "bootstrap-0 $head_sha" "bootstrap-1 $root_commit")"
 
+# The chain of two pins, which T-132 made real and which every rule above was
+# written against a chain of one. The repository's own ref file is the positive
+# case from that ticket on, and this one is the positive case whatever the file
+# holds: the first commit, then HEAD, verified against HEAD.
+expect_ok "a chain of two pins" \
+    bash "$pin" verify --ref "$(ref two "bootstrap-0 $root_commit" "bootstrap-1 $head_sha")"
+
+# Each rule again, on the second pin, because a loop that checked the first
+# alone would pass every case above. The failure must name bootstrap-1 and not
+# bootstrap-0.
+expect_fail "a second pin outside the history" "bootstrap-1: $head_sha is not an ancestor of" \
+    bash "$pin" verify --ref "$(ref outside2 "bootstrap-0 $root_commit" "bootstrap-1 $head_sha")" \
+    --tip "$head_sha~1"
+expect_fail "a second pin that precedes the first" "bootstrap-1: $root_commit does not follow" \
+    bash "$pin" verify \
+    --ref "$(ref backwards2 "bootstrap-0 $head_sha" "bootstrap-1 $root_commit")"
+expect_fail "a second pin that is no commit" "bootstrap-1: $edited is no commit" \
+    bash "$pin" verify --ref "$(ref edited2 "bootstrap-0 $pin0" "bootstrap-1 $edited")"
+
 # extract writes the two trees and stamps them, and it stamps nothing else.
 tree=$work/tree
 expect_ok "extract" bash "$pin" extract "$pin0" "$tree"

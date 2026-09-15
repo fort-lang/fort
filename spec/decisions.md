@@ -1426,8 +1426,8 @@ Sections:
   Amended 2026-09-14 (T-132): the window closed on the same date. `std.rt_float` leaves this list
   and its four functions are declarations of `std.rt`, which now imports `std.strbuf` for the two
   `append` functions. The list is one module shorter and `stdlib.md` 2.12 is a section of 2.11.
-  The file `std/rt_float.ft` stays in the tree and declares nothing, for the reason D18.1's note
-  of the same date gives. What the fold costs every program is measured in `notes/compiler.md` 7.
+  The file `std/rt_float.ft` is gone, which took a pin of its own; D18.1's note of the same date
+  says why. What the fold costs every program is measured in `notes/compiler.md` 7.
 
 ### D13.3 The error-handling idiom
 - owner: `stdlib.md`.
@@ -1976,10 +1976,11 @@ Names the entry points that produce D11.7's float text and settles what D11.7 le
   loading rule that D9.10 does not have, and the one condition that ends it; all four are spent
   and the rule above replaces them with the fold and its measured cost. The fold moved no pin:
   fort has had floats since T-040, every pin implements them, and the split existed only because
-  the C bootstrap compiled the whole import closure (`notes/compiler.md` 8, invariant 3). The
-  file `std/rt_float.ft` stays in the tree, empty, and its own header says why: the last pin's
-  loader reads `<std-dir>/rt_float.ft` into any closure holding a float, and HEAD's `std/rt.ft`
-  holds floats, so deleting the file stops the build until a pin moves past this commit.
+  the C bootstrap compiled the whole import closure. The fold did move a **pin**, for the other
+  reason `notes/compiler.md` 8 invariant 3 now states: pin 0's loader reads
+  `<std-dir>/rt_float.ft` into any closure holding a float, and `std/rt.ft` holds floats after
+  the fold, so pin 0 demanded a file HEAD means to delete. `bootstrap-1` is the commit of the
+  fold, whose compiler asks for no such file, and `std/rt_float.ft` goes in the commit after it.
 
 ### D18.2 Shortest round-trip digits
 - owner: `toolchain.md` (5.1 entry points).
