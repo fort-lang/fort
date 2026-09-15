@@ -24,7 +24,7 @@ T-103 cannot open again in silence. There is no `runtime/` directory: T-091 made
 fort module, `std/rt.ft`.
 
 T-144 adds `std/mac/*.ft` and `test/mac/*.c` to `SOURCE_GLOBS`.
-`python3 tools/knowledge_lint.py` now prints 366 files for the citation rule.
+T-145 adds `test/mac/*.ft`. The lint now reads 370 code files.
 
 They do not govern a harness directive, which is the third kind of comment and has a format of
 its own: `spec/toolchain.md` 7 gives the `//!`, `//|` and `//<` of a language test, and

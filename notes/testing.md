@@ -820,9 +820,13 @@ bullet at a time and without a rewrite.
   array or span level, a `do`-`while` or a `?:`, or a float. A new `.c` or `.h` under `src/` or
   `test/` raises no counter of that list, and one counter fires on all three extensions:
   `test_the_corpus_the_lint_reads_is_the_measured_one` in `test/knowledge_lint_test.py`, which
-  holds the number of files `tools/knowledge_lint.py` reads at 366 (T-144). A counter left behind
+  holds the number of files `tools/knowledge_lint.py` reads at 370 (T-145). A counter left behind
   fails `diff_check.sh` for every later mutant, which then reads as caught when nothing caught it.
   **A new target code directory needs a `SOURCE_GLOBS` route or an `EXCLUDED` reason** (T-144).
+  T-145 adds two native test programs under `test/mac/` and routes them into the grammar corpus.
+  Run `tools/mac net` on the Mac arm64 host to compare C layout and four native programs.
+  The pin 0 library lacks `libc.errno_slot()` (T-145).
+  Stage1 refuses `std/mac/net.ft` under pin 0, so `CLEAN_FILES` grows by 2, not 3.
   **Two branches that each raise one counter by one merge with no conflict and leave it wrong**:
   `CLEAN_FILES` went 393 to 394 twice and the truth was 395, which cost T-107 an hour. After the
   second merge of a branch that adds or removes a source file, run the tool that owns each
