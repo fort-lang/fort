@@ -20,6 +20,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_tests  # noqa: E402
@@ -643,7 +644,9 @@ class Discovery(TempRoot):
         write(self.root, "README.md", "ignored\n")
         tests, problems = run_tests.discover(self.root)
         self.assertEqual(tests, [])
-        self.assertEqual(problems, ["containers_tets.ft: bad test name", "helper.ft: bad test name"])
+        self.assertEqual(
+            problems, ["containers_tets.ft: bad test name", "helper.ft: bad test name"]
+        )
 
     def test_a_test_below_the_root_is_reported(self):
         """A `*_test.ft` in a directory discovery does not walk (T-079).
@@ -1733,6 +1736,36 @@ class EndToEnd(TempRoot):
         )
         status, lines = self.run_main("--runner", str(runner), "008_runner")
         self.assertEqual((status, lines[0]), (0, "PASS run/control/008_runner.ft"))
+
+    def test_mac_native_child_has_no_qemu_prefix(self):
+        write(
+            self.corpus,
+            "run/control/001_prefix.ft",
+            """\
+            //! run
+            //! stdout:
+            //| unset
+            //@ program echo "${QEMU_LD_PREFIX-unset}"
+            """,
+        )
+        with mock.patch.dict(os.environ, {"QEMU_LD_PREFIX": "/inherited"}):
+            status, lines = self.run_main("--target", "arm64-apple-macosx26.6.2")
+        self.assertEqual((status, lines[0]), (0, "PASS run/control/001_prefix.ft"))
+
+    def test_linux_child_keeps_qemu_prefix_without_runner(self):
+        write(
+            self.corpus,
+            "run/control/001_prefix.ft",
+            """\
+            //! run
+            //! stdout:
+            //| /usr/x86_64-linux-gnu
+            //@ program echo "${QEMU_LD_PREFIX-unset}"
+            """,
+        )
+        with mock.patch.dict(os.environ, {}, clear=True):
+            status, lines = self.run_main("--target", "x86_64-linux-gnu")
+        self.assertEqual((status, lines[0]), (0, "PASS run/control/001_prefix.ft"))
 
 
 # ---- the check document (D20.1, D20.2) -------------------------------------------------

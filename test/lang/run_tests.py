@@ -1226,11 +1226,14 @@ class Config:
     verbose: bool = False
 
 
-def child_env(workdir):
+def child_env(workdir, target):
     env = dict(os.environ)
     env["TMPDIR"] = workdir
     env["LC_ALL"] = "C"
-    env.setdefault("QEMU_LD_PREFIX", DEFAULT_QEMU_LD_PREFIX)
+    if target.startswith("arm64-apple-macosx"):
+        env.pop("QEMU_LD_PREFIX", None)
+    else:
+        env.setdefault("QEMU_LD_PREFIX", DEFAULT_QEMU_LD_PREFIX)
     return env
 
 
@@ -1361,7 +1364,7 @@ def execute_check_json(config, test):
     if test.problems:
         return Result(test, "ERROR", "invalid directives: " + test.problems[0])
     workdir = tempfile.mkdtemp(prefix="fort-check-json-")
-    env = child_env(workdir)
+    env = child_env(workdir, config.target)
     procs = []
     try:
         text = run_process(check_command(config, test, False), config.root, env, config.timeout)
@@ -1387,7 +1390,7 @@ def execute(config, test, unsupported):
     if test.problems:
         return Result(test, "ERROR", "invalid directives: " + test.problems[0])
     workdir = tempfile.mkdtemp(prefix="fort-lang-")
-    env = child_env(workdir)
+    env = child_env(workdir, config.target)
     procs = []
     try:
         prog = os.path.join(workdir, "prog")
