@@ -72,12 +72,12 @@ FT_FILES=946
 # otherwise pass while seeing less, and ctest reads the exit status and not the
 # counts printed below. A ticket that adds a clean .ft file, or that makes
 # stage1 accept or refuse one, changes this line with FT_FILES.
-# It is 22 below diff_ir.sh's PROGRAM_FILES for a reason and not by error, and
-# the two sets are not nested: they differ by 106 files one way and 84 the
+# It is 21 below diff_ir.sh's PROGRAM_FILES for a reason and not by error, and
+# the two sets are not nested: they differ by 106 files one way and 85 the
 # other, which is why the gap is not the number of files a ticket adds. That
 # script passes -I src -I src/fort -I test/fort/support, so it reaches the 106
 # test/fort tests that import a support module, which this one cannot resolve
-# and skips; this one compares every file that checks clean, including the 84
+# and skips; this one compares every file that checks clean, including the 85
 # that hold no `main` -- std, src/fort, src/lsp, the fixtures under
 # test/fort/support and the imported half of a multi-module test -- which that
 # script skips because they compile into no module. Move the two numbers
@@ -87,11 +87,15 @@ FT_FILES=946
 # The two group sizes are measured and not derived: add `echo "$file"` beside
 # the `compared` counter of this script and of diff_ir.sh, sort the two lists,
 # and read them off `comm -13` and `comm -23`. T-064 ran that and found every
-# one of the 106 importing a support module. T-131 ran it again and read 508,
-# 530, 106 and 84, so 530 - 508 = 106 - 84 holds. The three numbers before it
-# were 509, 107 and 85: the ticket put a `?:` into std/rt.ft, which stage1
-# refuses, so that file left the first group.
-CLEAN_FILES=508
+# one of the 106 importing a support module. T-132 ran it again and read 509,
+# 530, 106 and 85, so 530 - 509 = 106 - 85 holds; T-131 read 508, 530, 106 and
+# 84 before it, and the three numbers before that were 509, 107 and 85. T-131
+# put a `?:` into std/rt.ft, which stage1 refuses, so that file left the first
+# group. T-132 raised the count to 509 again, by emptying std/rt_float.ft: it
+# held floats, which stage1 refuses, and it holds comments alone now, which
+# stage1 checks clean. The gap is 21, since that file holds no `main` and so
+# joins the second group.
+CLEAN_FILES=509
 
 # The search roots every run is given: the standard library, src/fort, so that
 # the compiler's own modules resolve their imports, and src, so that a module of

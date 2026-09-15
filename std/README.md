@@ -3,7 +3,8 @@
 The standard library modules of decision D13.2 live here as `.ft` sources; `spec/stdlib.md`
 specifies them. `std.libc` (thin libc `extern` declarations and the open, lseek and errno
 constants), `std.rt` (the runtime itself: it starts and ends the process, allocates, writes the
-failure lines, and formats and buffers what the print family writes, all over `std.libc`;
+failure lines, and formats and buffers what the print family writes, over `std.libc` and
+`std.strbuf`;
 `spec/toolchain.md` 5 owns its entry points and `spec/stdlib.md` 3 owns the four that the rest
 of the library calls),
 `std.mem`, `std.str`, `std.sys`, `std.strbuf` (the growable buffer), `std.vec` (`ptr_vec`,
@@ -12,9 +13,11 @@ of the library calls),
 bit casts and the per-type `abs`, `min` and `max`) and `std.net` (a TCP listener and a TCP
 connection, IPv4 only) are written.
 
-`std.math` holds f64 and f32 functions, so the C bootstrap refuses it as it refuses
-`std.rt_float` (D18.1): a program that imports `std.math` is one stage1 rejects whole, whatever
-part of the module it uses, and its tests are in `test/lang/bootstrap-unsupported.txt` (T-042).
+`std.math` holds f64 and f32 functions, so the C bootstrap refuses it: a program that imports
+`std.math` is one stage1 rejects whole, whatever part of the module it uses, and its tests are in
+`test/lang/bootstrap-unsupported.txt` (T-042). `std.rt` holds floats too since T-132 folded the
+float printers of D18.1 into it, and the C bootstrap never reads this tree's `std.rt`: it reads
+pin 0's library (`notes/compiler.md` 8, invariant 5).
 
 `std.rt` is the only runtime there is. A `print`, a `new` and a `panic` are calls to its entry
 points, which the compiler emits by their mangled names (D9.7, D12.2), and the module declares no

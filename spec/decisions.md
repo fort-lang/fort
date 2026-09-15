@@ -1137,7 +1137,11 @@ Sections:
   leaves it out is deferred (D15).
 - history: Amended 2026-09-10 with D19: the compiler emitted one assembly file that the system C
   compiler assembled and linked. Amended 2026-09-11 (T-088): the closure was the entry file's alone
-  and `--cc` linked the C runtime object into it (D13.1 as amended).
+  and `--cc` linked the C runtime object into it (D13.1 as amended). Note 2026-09-14 (T-132):
+  `std.rt` imported `std.libc` alone, so every closure held two library modules; the fold of the
+  float printers gave it `std.strbuf` as well, and `std.strbuf` imports `std.mem`, so every
+  closure holds four. The sentence above does not change and the count is not in it; the cost of
+  the three extra modules is measured in `notes/compiler.md` 7.
 
 ## D10 Memory and runtime checks
 
@@ -1388,11 +1392,9 @@ Sections:
   buffer), `std.vec` (`ptr_vec`, `int_vec`, the non-generic pattern), `std.strmap` (string-keyed
   open-addressing table), `std.math` (float bit casts, abs/min/max per type), `std.sort` (an
   in-place sort of an array over libc `qsort`), `std.net` (a TCP listener and a TCP connection over
-  `std.libc`, IPv4 only and with no name resolution), `std.rt` (the runtime itself, D13.1: process
-  start and exit, allocation, the failure paths and the print buffers, over `std.libc`) and
-  `std.rt_float` (the float text of D18.1, to a descriptor or to a `str_buf`, apart from `std.rt`
-  because a compiler without floats cannot compile the module, and apart from `std.rt` for as long
-  as the C bootstrap builds the compiler, which is the condition D18.1 states).
+  `std.libc`, IPv4 only and with no name resolution) and `std.rt` (the runtime itself, D13.1:
+  process start and exit, allocation, the failure paths, the print buffers and the float text of
+  D18.1 to a descriptor or to a `str_buf`, over `std.libc` and `std.strbuf`).
 - history: Amended 2026-09-11 (T-087): the five `fort_rt_*` declarations stood in `std.libc`, whose
   header had to describe itself as libc "plus" the runtime; they moved to `std.rt`, so "thin libc
   externs" is true of `std.libc` without qualification. Amended 2026-09-11 (T-088): `std.rt` held
@@ -1421,6 +1423,11 @@ Sections:
   as long as the C bootstrap builds the compiler" in the `std.rt_float` entry is spent. The entry
   stays as it reads until T-132 folds the module into `std.rt`; D18.1's history note of the same
   date records that window.
+  Amended 2026-09-14 (T-132): the window closed on the same date. `std.rt_float` leaves this list
+  and its four functions are declarations of `std.rt`, which now imports `std.strbuf` for the two
+  `append` functions. The list is one module shorter and `stdlib.md` 2.12 is a section of 2.11.
+  The file `std/rt_float.ft` stays in the tree and declares nothing, for the reason D18.1's note
+  of the same date gives. What the fold costs every program is measured in `notes/compiler.md` 7.
 
 ### D13.3 The error-handling idiom
 - owner: `stdlib.md`.
@@ -1920,34 +1927,22 @@ Names the entry points that produce D11.7's float text and settles what D11.7 le
 
 ### D18.1 The two float entry points
 - owner: `toolchain.md` (5.1 entry points).
-- rule: The runtime exports exactly two float entry points, `std.rt_float.print_f32(i32 fd, f32 v)`
-  and `std.rt_float.print_f64(i32 fd, f64 v)`. The print family (D12.2) calls one of them per float
+- rule: The runtime exports exactly two float entry points, `std.rt.print_f32(i32 fd, f32 v)` and
+  `std.rt.print_f64(i32 fd, f64 v)`. The print family (D12.2) calls one of them per float
   argument and passes the value in the argument's own type: an `f32` is never widened to `f64`
-  first, because the digits printed depend on the type (D11.7). They stand in `std.rt_float` and not
-  in `std.rt` because a compiler that builds the runtime must accept floats to compile them, and the
-  C bootstrap does not: it rejects a float literal and a float type outright (`toolchain.md` 7.3),
-  so no program it builds can reach a float printer. This decision, and not D9.10, settles its
-  membership: a compiler that accepts floats loads `std.rt_float` into a closure that holds a float
-  and into no other, and a compiler that does not accept floats neither loads the module nor needs
-  it. It is a module of the library like any other (D13.2), and it exports beside the two printers
-  the two buffer formatters `append_f32(strbuf.str_buf mut* b, f32 v)` and
+  first, because the digits printed depend on the type (D11.7). They stand in `std.rt` with every
+  other entry point, so D9.10 settles their membership like every other declaration of that
+  module: every closure holds them, whether or not a float stands in it. `std.rt` exports beside
+  the two printers the two buffer formatters `append_f32(strbuf.str_buf mut* b, f32 v)` and
   `append_f64(strbuf.str_buf mut* b, f64 v)`, which give the same bytes to a `str_buf` rather than
   to a descriptor. Those two are library functions and not entry points: the compiler emits no
   call that names them, so the entry-point list of `toolchain.md` 5.1 stays the two printers
-  (D18.4). One formatter serves both forms, so the two cannot disagree over a value. They stand in
-  this module and not in `std.strbuf` for the reason the printers stand here: a float in a
-  `std.strbuf` signature would put the whole library out of the C bootstrap's reach.
-  The split stands while the C bootstrap builds the compiler, and one condition ends it: the
-  project builds the fort compiler with a released fort compiler rather than with the C bootstrap.
-  The build makes that condition checkable: the `fort_stage2` target takes a released fort compiler
-  as its input rather than the binary built from `src/bootstrap`. Nothing else ends it, the freeze
-  of `src/bootstrap` included. While the C bootstrap builds the compiler, `std/rt.ft` may hold no
-  float: the bootstrap loads that file into every closure it reads, it refuses a float type and a
-  float literal, and the build compiles `src/fort` with the bootstrap, so a float in `std/rt.ft`
-  stops the build. The two modules become one when that condition holds and not before. The
-  loading rule above costs a float-free program nothing and costs a float program `std.rt_float`,
-  `std.strbuf` and `std.mem`; `notes/compiler.md` 7 measures both, in emitted bytes and in `.text`
-  bytes, with the command for each number.
+  (D18.4). One formatter serves both forms, so the two cannot disagree over a value, and that is
+  why they stand in `std.rt` and not in `std.strbuf`; `std.rt` imports `std.strbuf` for them, so
+  every closure holds `std.strbuf` and `std.mem` as well. What that costs a program that prints no
+  float is measured: 8,549 bytes of `.text` and 105,914 bytes of emitted IR on 2026-09-14, against
+  0 for the split this decision described before T-132. `notes/compiler.md` 7 holds the
+  measurement and the command for each number.
 - history: Amended 2026-09-11 (T-088): the two were C entry points named `fort_rt_print_f32` and
   `fort_rt_print_f64`, back when the runtime was C (D13.1 as amended). Amended 2026-09-13 (T-107):
   the module held the two printers alone, so a program could put a float on a descriptor and
@@ -1974,6 +1969,17 @@ Names the entry points that produce D11.7's float text and settles what D11.7 le
   carries it as a deviation. The sentences above that describe what the C bootstrap forces on
   `std/rt.ft` are the state before T-131 and hold no longer: the C bootstrap reads pin 0's
   library and never HEAD's (`notes/compiler.md` 8, invariant 5).
+  Amended 2026-09-14 (T-132): **the window closed on the same date.** `std.rt_float` declares
+  nothing and its four functions are declarations of `std.rt`, so the two entry points are
+  `std.rt.print_f32` and `std.rt.print_f64` and the compiler names one module and not two. The
+  paragraphs this rule carried until now stated the split, the reason for it, the on-demand
+  loading rule that D9.10 does not have, and the one condition that ends it; all four are spent
+  and the rule above replaces them with the fold and its measured cost. The fold moved no pin:
+  fort has had floats since T-040, every pin implements them, and the split existed only because
+  the C bootstrap compiled the whole import closure (`notes/compiler.md` 8, invariant 3). The
+  file `std/rt_float.ft` stays in the tree, empty, and its own header says why: the last pin's
+  loader reads `<std-dir>/rt_float.ft` into any closure holding a float, and HEAD's `std/rt.ft`
+  holds floats, so deleting the file stops the build until a pin moves past this commit.
 
 ### D18.2 Shortest round-trip digits
 - owner: `toolchain.md` (5.1 entry points).

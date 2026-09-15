@@ -77,12 +77,13 @@ SOURCE_SETS = (
 SOURCE_GLOBS = tuple(glob for glob, _ in SOURCE_SETS)
 
 # The sources the default set leaves out. It is empty, and T-131 emptied it.
-# Until then `std/math.ft` and `std/rt_float.ft` stood here because they hold
-# floats, which the C bootstrap rejects (D18.1, T-042), and the ctest
-# `fort_lint` ran this tool with that compiler; a second ctest, `fort_lint_float`,
-# ran stage2 over exactly those two files. stage2 runs the one ctest now and
-# reads every source, so nothing is left out and nothing needs a second
-# command. A file named on the command line is linted whatever this tuple says.
+# Until then `std/math.ft` and the float module of D18.1 stood here because they
+# hold floats, which the C bootstrap rejects (T-042), and the ctest `fort_lint`
+# ran this tool with that compiler; a second ctest, `fort_lint_float`, ran
+# stage2 over exactly those two files. stage2 runs the one ctest now and reads
+# every source, so nothing is left out and nothing needs a second command.
+# T-132 then folded the float module into `std/rt.ft`. A file named on the
+# command line is linted whatever this tuple says.
 SKIPPED = ()
 MAX_COLUMNS = 100
 

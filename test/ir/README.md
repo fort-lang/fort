@@ -64,5 +64,5 @@ nothing before the link can check that the byte survives: LLVM quotes a name its
 identifier syntax does not admit, the assembler quotes the label in turn, and the ELF symbol is
 the name itself. The pipeline test reads it back out of the symbol table with `nm`.
 
-There is no float module here. `std.rt_float` holds the two float printers, which a compiler
-without floats cannot compile (D18.1), so the module that exercised them returns with that work.
+There is no float module here. `std.rt` holds the two float printers of D18.1, folded in by
+T-132, and a hand-written module that exercised them returns with that work.

@@ -101,8 +101,11 @@ FORM_MESSAGES='do-while|\?:'
 # The same for the third: src/fort reads a float literal (D2.6, T-041) and
 # src/bootstrap refuses one, so stage1 answers such a file with the refusal
 # and no tree to compare. A file that also holds one of the constructs above
-# is counted by the first test that matches it, not by this one.
-FLOAT_FILES=67
+# is counted by the first test that matches it, not by this one. std/rt.ft is
+# such a file since T-132 folded the float printers into it: it holds a float
+# and a `?:`, and FORM_FILES counts it. std/rt_float.ft left this count on the
+# same commit, which is why it fell from 67 to 66.
+FLOAT_FILES=66
 FLOAT_MESSAGES='float literals'
 
 files=$(find . -name '*.ft' -not -path './build/*' -not -path './.git/*' \
