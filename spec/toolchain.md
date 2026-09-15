@@ -1520,9 +1520,10 @@ an `opt` that cannot be launched, times out or dies by a signal is an ERROR, lik
 2 (D14.1). `--runner` names a command that runs the programs when binfmt does not, `-j` the
 number of parallel tests, `--timeout` the seconds per step, `-v` prints the commands and outputs
 of failures and `--keep` keeps the temporary directories. The
-compiler runs with `test/lang` as its working directory (D14.4). For each test, in a fresh
-temporary directory that is also `TMPDIR`, with `LC_ALL=C`, `QEMU_LD_PREFIX` set unless
-inherited and core dumps disabled:
+compiler runs with `test/lang` as its working directory (D14.4). Each test uses a fresh
+temporary directory as `TMPDIR`, sets `LC_ALL=C`, and disables core dumps.
+The harness sets `QEMU_LD_PREFIX` for Linux unless it inherits a value.
+The harness removes this variable for Mac:
 
 | Directive    | Harness action                                                              |
 |--------------|-----------------------------------------------------------------------------|
