@@ -1017,8 +1017,9 @@ bullet at a time and without a rewrite.
   lint `std/mac/*.ft` with stage2 (T-144). The Linux root conflicts with Mac C declarations.
   `test/highlight_test.py` tokenizes `std/`,
   `src/fort/` and `test/lang/run` against the TextMate grammar, which is the only check that grammar
-  has. `tools/lines.py` counts `std/*.ft` on the source side of the 3:1 ratio, with the compiler and
-  the runtime (D14.6, amended). What still does not: **there is no formatter** -- indentation,
+  has. `tools/lines.py` counts `std/*.ft` and `std/mac/*.ft` as source for the 3:1 ratio (T-144).
+  It counts `test/mac/*.c` as test. The compiler and runtime are source too (D14.6).
+  What still does not: **there is no formatter** -- indentation,
   spacing, brace placement and blank lines in `.ft` are review's alone, since `.clang-format` has no
   fort equivalent; the lint sees only what the checker resolved, so an unresolved name is judged by
   nothing (D20.3 gives it no record), though the names around it in a file that fails to compile are
@@ -1079,9 +1080,10 @@ bullet at a time and without a rewrite.
   retroactive. The branch figure is the one the criterion asks for. T-089 and T-092 both
   rediscovered this rule.
 - **`tools/lines.py` does not see a test written in shell or in Python either** (T-131). Its
-  `TEST_GLOBS` are `test/*.c`, `test/*.h`, `test/**/*.ft` and `test/lang/ffi/*.c`, and its
-  `SOURCE_GLOBS` are the two compilers and `std/*.ft`. So a ticket whose deliverable is the build
-  or a tool gets no useful figure: T-131 changed `CMakeLists.txt`, six scripts under `tools/` and
+  `TEST_GLOBS` are `test/*.c`, `test/*.h`, `test/**/*.ft`, `test/lang/ffi/*.c` and `test/mac/*.c`.
+  Its `SOURCE_GLOBS` include the two compilers, `std/*.ft` and `std/mac/*.ft` (T-144).
+  So a ticket whose deliverable is the build or a tool gets no useful figure:
+  T-131 changed `CMakeLists.txt`, six scripts under `tools/` and
   the language harness, and the tool read `+2 source lines, +0 test lines, ratio 0.00`, the 2
   being its one edit to `std/rt.ft`. Measure such a branch by hand, as the `editors/` bullet
   above does, with `git diff --numstat main...HEAD` and the tool's convention: net lines, raw

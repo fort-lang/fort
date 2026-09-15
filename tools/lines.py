@@ -30,8 +30,9 @@ SOURCE_GLOBS = (
     "src/fort/*.ft",
     "src/lsp/*.ft",
     "std/*.ft",
+    "std/mac/*.ft",
 )
-TEST_GLOBS = ("test/*.c", "test/*.h", "test/**/*.ft", "test/lang/ffi/*.c")
+TEST_GLOBS = ("test/*.c", "test/*.h", "test/**/*.ft", "test/lang/ffi/*.c", "test/mac/*.c")
 TARGET_RATIO = 2.0
 
 
