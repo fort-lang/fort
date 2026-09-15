@@ -44,6 +44,73 @@ set(FORT_STD_DIR "${CMAKE_BINARY_DIR}/std")
 set(FORT_FORT_SRC_DIR "${CMAKE_SOURCE_DIR}/src/fort")
 set(FORT_STAGE2_DIR "${CMAKE_BINARY_DIR}/stage2")
 
+option(FORT_NATIVE_MAC "Build the native Mac compiler without C bootstrap targets" OFF)
+if(FORT_NATIVE_MAC)
+    if(NOT APPLE OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+        message(FATAL_ERROR "FORT_NATIVE_MAC requires a Mac arm64 host")
+    endif()
+
+    # The Mac core root replaces libc and omits net until its Mac calls exist.
+    file(GLOB FORT_ALL_STD_SOURCES CONFIGURE_DEPENDS "${FORT_STD_SRC_DIR}/*.ft")
+    set(FORT_MAC_STD_SOURCES ${FORT_ALL_STD_SOURCES})
+    list(REMOVE_ITEM FORT_MAC_STD_SOURCES
+        "${FORT_STD_SRC_DIR}/libc.ft" "${FORT_STD_SRC_DIR}/net.ft")
+    list(APPEND FORT_MAC_STD_SOURCES "${FORT_STD_SRC_DIR}/mac/libc.ft")
+    set(FORT_MAC_STD_OUTPUTS "")
+    foreach(std_source IN LISTS FORT_MAC_STD_SOURCES)
+        get_filename_component(std_name "${std_source}" NAME)
+        set(std_output "${FORT_STD_DIR}/${std_name}")
+        add_custom_command(
+            OUTPUT "${std_output}"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${std_source}" "${std_output}"
+            DEPENDS "${std_source}"
+            COMMENT "Copying Mac std/${std_name}"
+            VERBATIM
+        )
+        list(APPEND FORT_MAC_STD_OUTPUTS "${std_output}")
+    endforeach()
+    add_custom_target(fort_std ALL DEPENDS ${FORT_MAC_STD_OUTPUTS})
+
+    # The entry directory selects the generated Mac platform module first.
+    set(FORT_MAC_PLATFORM_DIR "${CMAKE_BINARY_DIR}/mac-platform")
+    add_custom_target(fort_mac_platform ALL
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tools/gen_mac_platform.sh"
+                "${FORT_MAC_PLATFORM_DIR}"
+        BYPRODUCTS "${FORT_MAC_PLATFORM_DIR}/platform.ft"
+                   "${FORT_MAC_PLATFORM_DIR}/main.ft"
+        DEPENDS "${CMAKE_SOURCE_DIR}/tools/gen_mac_platform.sh"
+                "${FORT_FORT_SRC_DIR}/main.ft"
+        COMMENT "Generating the native Mac compiler platform module"
+        VERBATIM
+    )
+
+    file(GLOB FORT_FORT_SOURCES CONFIGURE_DEPENDS "${FORT_FORT_SRC_DIR}/*.ft")
+    file(GLOB_RECURSE FORT_BOOTSTRAP_SOURCES CONFIGURE_DEPENDS
+        "${FORT_SRC_DIR}/*.c" "${FORT_SRC_DIR}/*.h")
+    set(FORT_MAC_STAGE2_BINARY "${CMAKE_BINARY_DIR}/fort")
+    add_custom_command(
+        OUTPUT "${FORT_MAC_STAGE2_BINARY}"
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tools/mac_native_seed.sh" "${CMAKE_BINARY_DIR}"
+        DEPENDS fort_std fort_mac_platform ${FORT_FORT_SOURCES}
+                ${FORT_BOOTSTRAP_SOURCES} ${FORT_ALL_STD_SOURCES}
+                ${FORT_MAC_STD_OUTPUTS}
+                "${FORT_MAC_PLATFORM_DIR}/platform.ft"
+                "${FORT_MAC_PLATFORM_DIR}/main.ft"
+                "${CMAKE_SOURCE_DIR}/tools/mac_native_seed.sh"
+                "${CMAKE_SOURCE_DIR}/tools/bootstrap.ref"
+                "${CMAKE_SOURCE_DIR}/tools/pin.sh"
+                "${CMAKE_SOURCE_DIR}/CMakeLists.txt"
+        COMMENT "Building native Mac stage2 from the Linux VM seed"
+        VERBATIM
+    )
+    add_custom_target(fort_stage2 ALL DEPENDS "${FORT_MAC_STAGE2_BINARY}")
+
+    add_test(NAME mac-fixpoint
+        COMMAND bash "${FORT_TEST_DIR}/mac_native_fixpoint_test.sh" "${CMAKE_BINARY_DIR}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    set_tests_properties(mac-fixpoint PROPERTIES LABELS lang)
+else()
+
 # ---- the bootstrap compiler ---------------------------------------------------
 file(GLOB FORT_CORE_SOURCES CONFIGURE_DEPENDS "${FORT_SRC_DIR}/*.c")
 list(REMOVE_ITEM FORT_CORE_SOURCES "${FORT_SRC_DIR}/main.c")
@@ -927,3 +994,4 @@ add_custom_target(lines
     COMMENT "Counting test lines per compiler line"
     VERBATIM
 )
+endif()
