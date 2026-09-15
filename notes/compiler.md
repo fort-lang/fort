@@ -484,16 +484,29 @@ came here.
   `libc.read(fd, buf.ptr, buf.len)` for a `u8 mut@ buf`, and keep the cast only where the types
   really differ, as a `string`'s `char*` does.
 
-**The standard library may use such a feature before `src/fort` can.** `std/rt_float.ft` holds the
-float printers of D18.1 and is written with floats, because stage1 never loads it: the loader
-takes it into a closure that holds a float and into no other (`src/fort/modules.ft`), so the
-compiler that has no floats never reads it and `tools/diff_ir.sh` keeps comparing every program
-both compilers build. What that costs is one ctest of its own, `fort_lint_float`, since the lint
-runs the compiler without floats over `std/*.ft` and cannot check that one.
+**The standard library holds a float, and every program pays for it** (T-132). `std/rt.ft` holds
+the two float printers of D18.1 and the search of D18.2. They stood in `std/rt_float.ft` until
+T-132, which the compiler loaded into a closure that held a float and into no other; the split
+existed because the C bootstrap refuses a float and compiled `std/rt.ft` into every closure it
+read. T-131 ended that reason and T-132 made the two modules one. `std/rt.ft` is in every import
+closure (D9.10), so every program now emits the float printers, the `std.strbuf` they import for
+`append_f64`, and the `std.mem` behind it.
 
-**What the split costs, measured on 2026-09-14 (T-096).** A program that prints no float pays
-nothing for it. A program that prints one pays 106,765 bytes of emitted IR, 8,565 bytes of `.text`
-in the linked binary, and about a quarter more emit time. **Name the unit**: the emitted IR of this
+**Deleting `std/rt_float.ft` took a pin, and that is the second reason a pin moves** (T-132).
+Pin 0's loader reads `<std-dir>/rt_float.ft` into any closure holding a float, and the fold put
+floats into `std/rt.ft`, which stands in every closure, so pin 0 asked for that name on every
+build: with the file deleted the build gave `std/rt_float.ft:1:1: error: cannot read` and
+stopped, measured on 2026-09-14 at 6c56459. Nothing about the language was in the way -- every
+pin implements floats. So T-132 took `bootstrap-1`, the commit of the fold itself, whose
+`src/fort` names `rt_float` nowhere; the commit after it deleted the file and lowered `FT_FILES`
+from 946 to 945 and `CORPUS_FILES` from 687 to 686. Invariant 3 below lists both reasons now.
+
+**What the fold costs, measured on 2026-09-14 (T-132), against the split T-096 measured on the
+same day.** A program that prints no float paid nothing for the split. It pays 105,914 bytes of
+emitted IR and 8,549 bytes of `.text` after the fold: 84,294 bytes of IR and 10,120 of `.text`
+before, 190,208 and 18,669 after, and its closure grows from 3 files to 5. A program that prints
+one pays nothing new; it is 36 bytes of `.text` smaller than before, because the fold dropped a
+duplicate constant and one module of the closure. **Name the unit**: the emitted IR of such a
 module is about twelve times the `.text` it becomes, so an IR figure offered as the cost of a
 binary overstates that cost by that factor. The commands, run at the top of the worktree in the VM
 after `tools/vm build debug fort_stage2`:
@@ -520,23 +533,29 @@ awk '/^define /{c=""; if (match($0, /@"[^"]+"/)) {m=substr($0, RSTART+2, RLENGTH
      END {for (m in b) print b[m], m}' /tmp/flt.ll | sort -rn
 ```
 
-The integer program's closure holds 3 files, `std/rt.ft` and `std/libc.ft` beside the program, and
-its module is 84,395 bytes and 51 definitions, 48 of them `std.rt`'s. Its binary holds 10,136 bytes
-of `.text`. The float program's closure holds 6 files, the three above plus `std/rt_float.ft`,
-`std/strbuf.ft` and `std/mem.ft`; its module is 191,160 bytes and 91 definitions, the 40 new ones
-being `std.rt_float` (76,889 bytes), `std.strbuf` (24,179) and `std.mem` (2,732); and its binary
-holds 18,701 bytes of `.text`. The integer program's module holds no byte of `std.rt_float`, because
-`load_float_runtime` in `src/fort/modules.ft` loads that module into a closure that holds a float
-and into no other. The emit takes 55 ms against 69 ms, each the median of seven runs of the loop
-above on an idle VM, and 72 ms against 94 ms in a later run that shared the machine with a second
-build: read the pair, never one number of it. **A fold of `std.rt_float` into `std.rt` would put
-those 106,765 bytes of IR and 8,565 bytes of `.text` into every program**, because a module emits
-every definition of every module in the closure, called or not, and external linkage carries each
-one past the linker. 14 of the 48 `std.rt` definitions in the integer program's module are named by
-no call in it. Each of the 14 stands on its own `define` line and appears nowhere else in the
-module, and `nm` finds all 14 in the binary:
+After the fold both programs read the same: 5 files in the closure, 91 definitions, 190,208 and
+190,200 bytes of module, 18,669 and 18,649 bytes of `.text`. The two differ by the program's own
+`main` and by nothing else.
 
-**The checker does the same thing, and that is what blocks the fold rather than floats being hard.**
+Before the fold the integer program's closure held 3 files, `std/rt.ft` and `std/libc.ft` beside
+the program, and its module was 84,395 bytes and 51 definitions, 48 of them `std.rt`'s, for
+10,136 bytes of `.text` (T-096; the same run on 2026-09-14 at 6c56459 read 84,294 and 10,120).
+The float program's closure held 6 files, the three above plus `std/rt_float.ft`, `std/strbuf.ft`
+and `std/mem.ft`; its module was 191,160 bytes and 91 definitions, the 40 new ones being
+`std.rt_float` (76,889 bytes), `std.strbuf` (24,179) and `std.mem` (2,732), for 18,701 bytes of
+`.text`. The integer program's module held no byte of `std.rt_float`, because `load_float_runtime`
+in `src/fort/modules.ft` loaded that module into a closure that held a float and into no other.
+The emit took 55 ms against 69 ms, each the median of seven runs of the loop above on an idle VM,
+and 72 ms against 94 ms in a later run that shared the machine with a second build: read the pair,
+never one number of it.
+
+**What makes the fold cost anything is that a module emits every definition of every module in
+the closure**, called or not, and external linkage carries each one past the linker. 14 of the 48
+`std.rt` definitions in the pre-fold integer program's module are named by no call in it. Each of
+the 14 stands on its own `define` line and appears nowhere else in the module, and `nm` finds all
+14 in the binary:
+
+**What blocked the fold until T-131 was the checker and not floats being hard.**
 `load_runtime` (`src/bootstrap/modules.c:906`) puts the whole of `std.rt` into every closure stage1
 reads, and `base_type` (`src/bootstrap/check.c:476`) refuses `f64` on sight, so a declaration
 nothing names is enough. Measured on 2026-09-14: a copy of `std/rt.ft` carrying only
@@ -559,45 +578,27 @@ nm /tmp/int | sed 's/.* //' | sort -u > /tmp/nm.txt
 comm -12 /tmp/nm.txt <(sed 's/"//g' /tmp/u.txt | sort -u) | wc -l
 ```
 
-**The float-free half of `std.rt_float` can move into `std.rt` today, and it costs 3,004 bytes of
-`.text` on every binary to move** (T-096). 25 of the module's 42 top-level declarations hold no
-`f32`, no `f64` and no float literal: the `decimal` struct, fifteen constants, `scan`, `step_up`,
-`put_exponent`, `layout`, `decimal_text`, `fixed_text` and the three digit helpers `is_digit`,
-`digit_of` and `char_of`. The counts come from one command, which reads a declaration as a line
-that starts in column 1 and is neither an `import` nor a closing brace:
-
-```sh
-sed 's://.*::' std/rt_float.ft |
-awk '/^[^[:space:]}]/ && !/^import / && NF {d++; free[d]=1}
-     d && /(^|[^A-Za-z0-9_])(f32|f64)([^A-Za-z0-9_]|$)|[0-9]\.[0-9]|[0-9]e[-+]?[0-9]/ {free[d]=0}
-     END {n=0; for (i=1; i<=d; i++) n+=free[i]; print d, n}'
-free='is_digit|digit_of|char_of|scan|step_up|put_exponent|layout|decimal_text|fixed_text'
-awk -v re="^define .*@\"std[.]rt_float[.]($free)\"" \
-    '$0 ~ re {c=1; n++} /^define /{if ($0 !~ re) c=0} c {b+=length($0)+1} /^}$/{c=0}
-     END {print n, b}' /tmp/flt.ll
-```
-
-Copy those 25 declarations into a file that starts with `import std.libc;` and stage1 checks the
-file clean (`build/debug/fort --check --std-dir build/debug/std /tmp/free.ft`, exit 0), so
-`std/rt.ft` could hold them and the bootstrap would never meet a float. Their nine definitions emit
-50,958 bytes of IR, 60 percent of the whole module of a float-free program. The binary is the unit
-that decides: a copy of the standard library directory whose `rt.ft` carries the 24 declarations
-that `std.rt` does not already define (`DECIMAL_BASE` is there) links the integer program with
-13,140 bytes of `.text` against 10,136, and emits 136,174 bytes of IR against 84,395.
-
-T-096 left those declarations where they stand. The move puts 3,004 bytes of unreachable `.text`
-into every binary the project builds, and it ends no split: `std.rt_float` keeps the printers, the
-search and its `std.strbuf` import. D18.1 states the one condition that ends the split, which is a
-fort compiler built by a released fort compiler.
+**The emitter cannot drop a definition nothing names, and that is why the fold costs anything**
+(T-132 read `src/fort/gen_stmt.ft`, `gen_module` and `gen_program`, and ran nothing). `gen_module`
+walks the declarations of one module three times -- structs, then globals, then every
+`k_fn_decl` with a body -- and writes each one out; `gen_program` calls it once for each module of
+the closure in dependency order. There is no call graph anywhere in the emitter, and there could
+not be one in this shape: the emitter is a single forward pass that appends text (D19.1), so a
+reachability filter needs a whole pass before it that walks every body of every module, starts
+from `main`, `fort_entry` and the entry points the compiler itself calls, and treats a function
+whose address is taken as reached (D3.10 makes that possible in any expression). Linkage does not
+substitute for it: clang runs no dead-code pass at the optimisation level the driver uses, and
+every definition carries external linkage today. So the drop is a pass of its own and a ticket of
+its own; T-096's `14 of 48` measurement is the evidence that it pays beyond this ticket.
 
 `std/math.ft` is the second such module (T-042) and it costs more, because an `import std.math`
 is an ordinary import and no closure rule hides it: stage1 parses the whole closure, so it
 refuses every program that imports the module, with
 `not supported by the bootstrap compiler: ?:` pointing into `std/math.ft`, even when the program
 names no float and calls `abs_i32` alone. Every test of the module is therefore in
-`test/lang/bootstrap-unsupported.txt` and stage2 alone runs them. A library module that holds a
-float and that programs import by name has this shape; one that only the compiler loads for a
-closure, as `std.rt_float` is, does not.
+`test/lang/bootstrap-unsupported.txt` and stage2 alone runs them. That shape is the general one
+since T-132: `std/rt.ft` holds a float as well, and the compiler no longer loads a library module
+for the closure of a program that holds one.
 
 `std/sort.ft` is the counter-example and it is the cheaper shape (T-045). The module holds no
 float, no `?:` and no `do`-`while`, so stage1 parses its whole closure and accepts it: the module
@@ -678,14 +679,30 @@ gone.
   2. **HEAD's `src/fort` and `std` use only what the last pin implements.** A feature's first
      implementation is therefore written without the feature.
   3. **A pin moves only on need, as its own commit**: the ref line and a note naming the need,
-     and nothing else, so the gate proves the new chain before HEAD relies on the new form. The
-     need is invariant 2 read backwards: HEAD wants a form the last pin cannot compile. Two worked
-     examples. A pin **does not** move for T-132, which folds `std.rt_float` into `std.rt` and puts
-     an `f64` in `std/rt.ft`: fort has had floats since T-040 and every pin implements them, and
-     the split existed only because stage1 compiled the whole closure. A pin **does** move for the
-     ticket after the one that gives `src/fort` a new syntax, on the day `src/fort` or `std` wants
-     to spell that syntax itself; until that day the new syntax lives in the compiler and not in
-     its own source.
+     and nothing else, so the gate proves the new chain before HEAD relies on it. **The need is
+     one of two things, and T-132 found the second.** Read the need as "the last pin cannot
+     build HEAD", never as "the last pin cannot compile a form".
+     - *A form the last pin cannot compile*, which is invariant 2 read backwards. The worked
+       example: a pin moves for the ticket after the one that gives `src/fort` a new syntax, on
+       the day `src/fort` or `std` wants to spell that syntax itself. Until that day the new
+       syntax lives in the compiler and not in its own source. A pin did **not** move for the
+       fold of T-132 by this reason: fort has had floats since T-040 and every pin implements
+       them, so an `f64` in `std/rt.ft` needs nothing new.
+     - *A file the last pin's compiler demands by name.* The worked example is `bootstrap-1`,
+       which T-132 took. Pin 0's loader reads `<std-dir>/rt_float.ft` into any closure holding a
+       float; the fold put floats into `std/rt.ft`, which stands in every closure, so pin 0
+       asked HEAD for that file on every build and HEAD could not delete it
+       (`error: cannot read`, section 7). The pin is the commit of the fold itself, whose
+       `src/fort` names `rt_float` nowhere, and the commit after it deletes the file.
+     **A pin costs a hop on every cold build, for ever.** Measured on 2026-09-14 under the debug
+     preset, each the median of five runs: stage1 compiles pin 0 in 2.357 s checked and 2.807 s
+     release, pin 0 compiles pin 1 in 2.672 s and 3.155 s. Cold, the `fort_pin_0` target takes
+     2.568 s and `fort_pin_0 fort_pin_1` takes 5.600 s, so the second pin costs 3.0 s of every
+     cold build. Measure the chain when you take one and write the number into
+     `tools/bootstrap.ref` beside the last.
+     **A branch that adds a pin merges with `--no-ff`.** The pin names a commit of that branch,
+     and a squash merge leaves `main` without it, so `tools/pin.sh verify` then fails at
+     configure time for every clone (T-132).
   4. **Every pin is a commit in this repository's history.** A shallow clone cannot build.
      `tools/pin.sh verify` says so at configure time, by name.
   5. **HEAD's stage2 compiles pin 0's `std`**, because pin 0's `std` is the differential `std`:
@@ -769,10 +786,11 @@ gone.
   measurement says why. A file stage1 refuses is skipped by `diff_ast.sh`, by `diff_check.sh` and
   by `diff_ir.sh`, so a module with a float in it leaves three of the four differential oracles.
   (The ctest `fort-modules` drove `test/fort` with stage1 until T-131 moved it to stage2, which is
-  the one part of that measurement the chain changed.) `src/lsp/json.ft` therefore names no float type: a JSON number answers the bits of its
-  binary64 value through `flt.flt_parse`, the compiler's own literal reader, and a caller that
-  wants the value copies the bits into an `f64` as `std/rt_float.ft` does. The choice is each
-  module's to make again, and the first one that needs a float pays for the corpus.
+  the one part of that measurement the chain changed.) `src/lsp/json.ft` therefore names no float
+  type: a JSON number answers the bits of its binary64 value through `flt.flt_parse`, the
+  compiler's own literal reader, and a caller that wants the value copies the bits into an `f64`
+  as the float search of `std/rt.ft` does. The choice is each module's to make again, and the
+  first one that needs a float pays for the corpus.
   - No unions, no bitfields, no anonymous struct or union members: a fat tagged struct with a
     kind enum and every field in the open, which is what `ast.h`, `types.h` and `sym.h` already
     are.

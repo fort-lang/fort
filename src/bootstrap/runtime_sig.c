@@ -33,6 +33,14 @@ typedef struct {
 // stand in `std.rt_float` and not in `std.rt`, because a compiler without floats
 // cannot compile them.
 // D9.9, D18.1
+//
+// That last sentence is true of the library this compiler reads and of no
+// other. The fold put the float module into `std.rt`, and the table of
+// `src/fort/runtime_sig.ft` names `std.rt.print_f32` and `std.rt.print_f64`
+// from that commit on. This compiler builds pin 0 alone, whose library still
+// holds the split (notes/compiler.md 8, invariant 5), so these two rows name
+// pin 0's modules and must keep the old names.
+// D18.1
 static const rt_sig_t RT_SIG[RT_COUNT] = {
     {"std.rt.alloc", IR_PTR, false, {IR_I64, IR_I64, IR_PTR, IR_I32, IR_I32, IR_NONE}},
     {"std.rt.free", IR_VOID, false, {IR_PTR, IR_NONE, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},

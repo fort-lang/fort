@@ -521,14 +521,16 @@ fn assert_fail(char* text, char* file, u32 line, u32 col) noreturn;
 
 // Printing (D11.5, D11.7, D12.2): format one value per D11.7 and append it to the
 // buffer of `fd`. A float arrives in its own type and prints with the shortest
-// digits that round-trip in that type (D18); its two entry points are
-// `std.rt_float.print_f32` and `std.rt_float.print_f64` (D18.1, D18.4), which are
-// not part of this module and arrive with the rest of the float work.
+// digits that round-trip in that type (D18); `print_f32` and `print_f64` are the
+// two float entry points of D18.1 and D18.4, and an `f32` is never widened to an
+// `f64` first, because the digits depend on the type.
 // `flush` writes out one buffer (`io.close` and `io.flush` call it); `flush_all`
 // writes out every buffer, at exit and before every failure. A buffer whose
 // descriptor is a terminal is written out at every newline too (D11.5, 5.3).
 fn print_i64(i32 fd, i64 v) void;
 fn print_u64(i32 fd, u64 v) void;
+fn print_f32(i32 fd, f32 v) void;
+fn print_f64(i32 fd, f64 v) void;
 fn print_bool(i32 fd, bool v) void;
 fn print_char(i32 fd, char c) void;
 fn print_ptr(i32 fd, void* p) void;
@@ -549,31 +551,29 @@ fn args() string@;
 fn exit(i32 status) noreturn;
 ```
 
-`std.rt` and `std.rt_float` are the only modules the compiler names, and the list above together
-with D18.1's two float printers is every name it knows (D11.6, D18.4). `std.rt_float` exports two
-more functions, `append_f32` and `append_f64`, which give a `str_buf` the bytes the printers give a
-descriptor (`stdlib.md` 2.12); the compiler emits no call that names them, so they are not entry
-points and this list stays complete. The module's buffers, its
-helpers and everything else it needs are its own and are exported like any module's (D9.6), which
-makes them implementation details a program must not use (`stdlib.md` 1.1); `sys` and `io` import it
-for `exit`, `args`, `flush` and `flush_all` (`stdlib.md` 3) and the rest of the library leaves it
-alone. `errno` is not its business either: `sys.errno()` reaches libc's `__errno_location` directly.
+`std.rt` is the only module the compiler names, and the list above is every name it knows
+(D11.6, D18.4). It exports two more float functions, `append_f32` and `append_f64`, which give a
+`str_buf` the bytes the printers give a descriptor (`stdlib.md` 2.12); the compiler emits no call
+that names them, so they are not entry points and this list stays complete. The module's buffers,
+its helpers and everything else it needs are its own and are exported like any module's (D9.6),
+which makes them implementation details a program must not use (`stdlib.md` 1.1); `sys` and `io`
+import it for `exit`, `args`, `flush` and `flush_all` (`stdlib.md` 3) and the rest of the library
+leaves it alone. `errno` is not its business either: `sys.errno()` reaches libc's
+`__errno_location` directly.
 
-A compiler that accepts floats loads `std.rt_float` into a closure that holds a float and into no
-other, and a compiler that does not accept floats neither loads the module nor needs it (D18.1).
-The split stands while the C bootstrap builds the compiler, and one condition ends it: the project
-builds the fort compiler with a released fort compiler rather than with the C bootstrap. The build
-makes that condition checkable: the `fort_stage2` target takes a released fort compiler as its
-input rather than the binary built from `src/bootstrap`. Nothing else ends it, the freeze of
-`src/bootstrap` included. While the C bootstrap builds the compiler, `std/rt.ft` may hold no float:
-the bootstrap loads that file into every closure it reads, it refuses a float type and a float
-literal, and the build compiles `src/fort` with the bootstrap, so a float in `std/rt.ft` stops the
-build. The two modules become one when that condition holds and not before. The loading rule above
-costs a float-free program nothing and costs a float program `std.rt_float`, `std.strbuf` and
-`std.mem`; `notes/compiler.md` 7 measures both, in emitted bytes and in `.text` bytes, with the
-command for each number.
+The two float printers stood in a module of their own, `std.rt_float`, until T-132. They stood
+apart because a compiler that builds the runtime must accept floats to compile them and the C
+bootstrap does not, and the C bootstrap compiled `std/rt.ft` into every closure it read. T-131
+ended that: the C bootstrap builds pin 0's `src/fort` with pin 0's library and reads HEAD's
+library never (`notes/compiler.md` 8, invariant 5), so `std/rt.ft` may hold a float and T-132
+made the two modules one. Deleting `std/rt_float.ft` took a pin of its own, because the last
+pin's loader read that file name for any closure holding a float (`notes/compiler.md` 8,
+invariant 3). What the fold costs is measured: a program that prints no float paid
+nothing for the split and now pays 8,549 bytes of `.text` and 105,914 bytes of emitted IR, because
+a module emits every definition of every module of its closure with no reachability filter;
+`notes/compiler.md` 7 holds the measurement and the command for each number.
 
-The float printers of `std.rt_float` are the one place where the runtime asks for a formatted value
+The float printers are the one place where the runtime asks for a formatted value
 rather than laying the bytes out itself. What D18.2 fixes is the text, not the method; one method,
 and the one the C runtime used, is to ask `snprintf("%.*e", ...)` for one significant digit, then
 two, and so on, and keep the first length whose text `strtod` reads back as the value, since 17
@@ -1036,7 +1036,7 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
 19. **Builtins** (D12.2). The print family evaluates `fd` once (`1`, `2`, or the first argument)
     and then each argument left to right, one call per argument (D11.5): `i8 i16 i32 i64`
     sign-extended to `i64` to `std.rt.print_i64`; `u8 u16 u32 u64` zero-extended to `i64` to
-    `print_u64`; `f32` and `f64` to `std.rt_float.print_f32` and `print_f64` (D18.1); `bool`
+    `print_u64`; `f32` and `f64` to `std.rt.print_f32` and `print_f64` (D18.1); `bool`
     passed as it stands to `print_bool`, whose parameter is a fort `bool`; `char` to
     `print_char`; an enum as
     `(i32 %v, ptr @.enum.<path.name>, i64 <count>)` to `print_enum`; a pointer, `void*` or

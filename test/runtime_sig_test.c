@@ -135,8 +135,10 @@ TEST(every_row_names_the_entry_point_its_enumerator_does, {
     TEST_ASSERT_EQ_STR(rt_entry_name(RT_ASSERT_FAIL), "std.rt.assert_fail");
     TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_I64), "std.rt.print_i64");
     TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_U64), "std.rt.print_u64");
-    // The two float printers stand in `std.rt_float`, because a compiler
-    // without floats cannot compile them.
+    // Pin 0's library, which is the library this suite reads: the two float
+    // printers stand in `std.rt_float` there, because a compiler without
+    // floats cannot compile them. HEAD's library holds them in `std.rt`
+    // since the fold, and `src/fort/runtime_sig.ft` names them there.
     // D18.1
     TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_F32), "std.rt_float.print_f32");
     TEST_ASSERT_EQ_STR(rt_entry_name(RT_PRINT_F64), "std.rt_float.print_f64");

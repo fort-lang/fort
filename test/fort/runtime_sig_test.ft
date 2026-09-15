@@ -20,12 +20,21 @@ import types_env;
 // wrong code that nothing else catches: `opt -passes=verify` accepts a call
 // whose arguments disagree with its callee's definition, and a fort program is
 // one module whose caller and callee agree with each other about a convention
-// both get wrong (notes/compiler.md 6). test/runtime_sig_test.c reads std/rt.ft with the
-// compiler's own front end and pins the C table to it; a `test/fort` program
-// runs in a temporary directory holding only itself (toolchain.md 7) and
-// cannot open that file, so what is pinned here is the other edge: every row
-// against the text of section 5.1, transcribed below, and the map from a fort
-// signature to a row that the C suite compares through.
+// both get wrong (notes/compiler.md 6). test/runtime_sig_test.c reads pin 0's
+// std/rt.ft with the C front end and pins the C table to it; it reads pin 0's
+// tree and not HEAD's, because the C front end compiles pin 0's library and no
+// other. A `test/fort` program runs in a temporary directory holding only
+// itself (toolchain.md 7) and cannot open either file, so what is pinned here
+// is the other edge: every row against the text of section 5.1, transcribed
+// below, and the map from a fort signature to a row that the C suite compares
+// through.
+//
+// The two float rows name std.rt since the fold, so every row of this table
+// names a function HEAD's std/rt.ft defines, and no suite reads that file.
+// What holds the pair is the corpus: a call comes from a row here and the
+// definition from the fort signature there, both into one module, so a row
+// that named a function std/rt.ft does not define makes a module clang refuses
+// to parse. run/builtins/010 and run/stdlib/094 print a float under stage2.
 //
 // The count is tied to the enum rather than kept beside it: `RT_ENTRY_COUNT`
 // is a module constant fort cannot read off `rt_none`, so the equality is
@@ -105,11 +114,11 @@ fn every_failure_entry_point_is_the_one_of_5_1() void {
 fn every_print_entry_point_is_the_one_of_5_1() void {
     want(runtime_sig.rt_entry.rt_print_i64, "void @\"std.rt.print_i64\"(i32, i64)");
     want(runtime_sig.rt_entry.rt_print_u64, "void @\"std.rt.print_u64\"(i32, i64)");
-    // The two float printers stand in `std.rt_float`, because a compiler
-    // without floats cannot compile them.
+    // The two float printers are rows of `std.rt` like every other one: the
+    // separate float module is folded into the runtime.
     // D18.1
-    want(runtime_sig.rt_entry.rt_print_f32, "void @\"std.rt_float.print_f32\"(i32, float)");
-    want(runtime_sig.rt_entry.rt_print_f64, "void @\"std.rt_float.print_f64\"(i32, double)");
+    want(runtime_sig.rt_entry.rt_print_f32, "void @\"std.rt.print_f32\"(i32, float)");
+    want(runtime_sig.rt_entry.rt_print_f64, "void @\"std.rt.print_f64\"(i32, double)");
     // A `bool` parameter is `i1 zeroext` and a `char` parameter `i8 zeroext`:
     // the two are different forms (item 2).
     // D19.2
@@ -131,15 +140,17 @@ fn the_startup_entry_points_are_the_ones_of_5_1() void {
     want(runtime_sig.rt_entry.rt_exit, "void @\"std.rt.exit\"(i32) noreturn");
 }
 
-fn no_row_names_a_c_symbol() void {
+fn every_row_names_a_function_of_std_rt() void {
     // A call into the runtime is a fort-to-fort call by the mangled name, so no
     // row may hold an unmangled name: that would be a second declaration of an
-    // ELF symbol a program may declare itself.
-    // D9.7, D9.8
+    // ELF symbol a program may declare itself. One module holds every entry
+    // point since the fold, so `std.rt.` is the whole of the prefix and a row
+    // that named a second module fails here.
+    // D9.7, D9.8, D18.1
     u64 mut i = 0;
     while (i < runtime_sig.RT_ENTRY_COUNT) {
         string name = runtime_sig.rt_entry_name(runtime_sig.rt_at(i));
-        assert(str_starts_with(name, "std.rt.") || str_starts_with(name, "std.rt_float."));
+        assert(str_starts_with(name, "std.rt."));
         i += 1;
     }
 }
@@ -317,7 +328,7 @@ fn main() i32 {
     every_failure_entry_point_is_the_one_of_5_1();
     every_print_entry_point_is_the_one_of_5_1();
     the_startup_entry_points_are_the_ones_of_5_1();
-    no_row_names_a_c_symbol();
+    every_row_names_a_function_of_std_rt();
     the_count_is_the_length_of_the_enum();
     every_entry_point_is_found_by_its_own_mangled_name();
     an_arity_is_read_off_the_row_and_the_row_ends_at_its_first_gap();

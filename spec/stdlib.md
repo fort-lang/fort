@@ -133,8 +133,7 @@ import binding's name for a local even though D7.9 permits it.
 | Module          | Imports                                     | Purpose                          |
 |-----------------|---------------------------------------------|----------------------------------|
 | `std.libc`      | none                                        | libc `extern`s, flags, errno     |
-| `std.rt`        | `libc`                                      | the runtime itself (section 3)   |
-| `std.rt_float`  | `libc`, `rt`, `strbuf`                      | float text to a fd or a buffer   |
+| `std.rt`        | `libc`, `strbuf`                            | the runtime itself (section 3)   |
 | `std.mem`       | `libc`                                      | copy, fill and compare bytes     |
 | `std.str`       | `libc`, `mem`                               | compare, search, classify, parse |
 | `std.sys`       | `libc`, `rt`, `str`                         | exit, args, errno, env           |
@@ -988,7 +987,8 @@ fn order(point mut@ ps, i64 mut@ xs) void {
 ### 2.11 `std.rt`
 
 The runtime (D13.1, D13.2): process start and exit, allocation, the failure paths and the print
-buffers, written in fort over `std.libc`. `toolchain.md` 5 fixes what each entry point does and
+buffers, the float text of 2.12 among them, written in fort over `std.libc` and `std.strbuf`.
+`toolchain.md` 5 fixes what each entry point does and
 section 3 below names the four the rest of the library calls; `sys` and `io` are its only
 importers inside the library, and everything else in it is an implementation detail (1.1).
 Its names are mangled like any module's (`std.rt.flush`, D9.7); the compiler knows them, because
@@ -1001,9 +1001,13 @@ write, and casts to a typed pointer to write through it, a cast that adds no `mu
 D3.14). A caller that only reads drops the mark on the way (D5.4), which is also how every
 result reaches `free`, whose parameter is `void* own`.
 
-### 2.12 `std.rt_float`
+### 2.12 The float text of `std.rt`
 
-The float text of D11.7, to a descriptor or to a `str_buf`.
+The float text of D11.7, to a descriptor or to a `str_buf`. These four functions stood in a
+module of their own, `std.rt_float`, until T-132 folded that module into `std.rt`; they are
+declarations of `std.rt` and this section is a part of 2.11. Deleting `std/rt_float.ft` took a
+pin of its own, because the pinned compiler that built HEAD read that file name for any closure
+holding a float (D18.1, `notes/compiler.md` 8).
 
 ```fort
 fn print_f32(i32 fd, f32 v) void
@@ -1023,13 +1027,12 @@ fn append_f64(strbuf.str_buf mut* b, f64 v) void
   its storage and grows by the policy of 2.6.
 - The two `append` functions are library functions and not entry points: no call the compiler
   emits names them, so `toolchain.md` 5.1's list stays the two printers (D18.4).
-- The module holds them, rather than `std.strbuf` holding them, because a compiler that builds
-  the module must accept floats and the C bootstrap does not (D18.1); a float in a `std.strbuf`
-  signature would put the whole library out of the bootstrap's reach (D9.10). For the two
-  `append` functions the module imports `std.strbuf`, so a program that formats a float compiles
-  `std.strbuf` and `std.mem` as well; a program that names no float loads neither the module nor
-  its imports.
-- Everything else the module declares -- the decimal, the search of D18.2 and the layout of
+- `std.rt` holds the two `append` functions, rather than `std.strbuf` holding them, so that one
+  formatter serves both forms and the two cannot disagree over a value (D18.1). `std.rt`
+  imports `std.strbuf` for them, and `std.rt` is in every import closure (D9.10), so every
+  program now compiles `std.strbuf` and `std.mem` as well, and every program carries the float
+  text whether it prints a float or not.
+- Everything else these declarations need -- the decimal, the search of D18.2 and the layout of
   D18.3, which `toolchain.md` 5.1 describes -- is an implementation detail (1.1).
 
 ### 2.13 `std.net`
@@ -1218,7 +1221,7 @@ so no second owner exists; the counters are `u64` because `.len` is (D16); and t
 Deliberately absent, with the idiom to use instead; the language-level list is D15.
 
 - Formatted output beyond the print family: build text in a `str_buf` with `append`,
-  `append_i64`, `append_u64` and `rt_float.append_f64` (2.12), then `io.write_all` or `print` the
+  `append_i64`, `append_u64` and `rt.append_f64` (2.12), then `io.write_all` or `print` the
   result.
 - Generic containers: copy `std.vec` for each element type (2.7); use `str_map` with indices
   for pointer values (2.8).

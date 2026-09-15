@@ -65,7 +65,7 @@ fi
 # comparison. A ticket that adds or removes a .ft file changes all four
 # lines in the same commit: diff_tokens.sh, diff_ast.sh, diff_check.sh and
 # diff_ir.sh.
-FT_FILES=946
+FT_FILES=945
 
 # The files of that corpus stage1 checks clean, which are the ones compared.
 # It is an equality for the reason FT_FILES is: a comparison that shrank would
@@ -88,9 +88,10 @@ FT_FILES=946
 # the `compared` counter of this script and of diff_ir.sh, sort the two lists,
 # and read them off `comm -13` and `comm -23`. T-064 ran that and found every
 # one of the 106 importing a support module. T-131 ran it again and read 508,
-# 530, 106 and 84, so 530 - 508 = 106 - 84 holds. The three numbers before it
-# were 509, 107 and 85: the ticket put a `?:` into std/rt.ft, which stage1
-# refuses, so that file left the first group.
+# 530, 106 and 84, so 530 - 508 = 106 - 84 holds. T-132 emptied
+# std/rt_float.ft and then deleted it: the file held floats, which stage1
+# refuses, so it raised this count to 509 for one commit and read 509, 530, 106
+# and 85 there; the deletion took it back to 508 and the gap back to 22.
 CLEAN_FILES=508
 
 # The search roots every run is given: the standard library, src/fort, so that

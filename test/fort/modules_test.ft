@@ -515,90 +515,55 @@ fn the_runtime_is_loaded_once_when_the_program_imports_it() void {
 // ---- the float printers ------------------------------------------------------------
 // D18.1
 
-// A closure that holds a float anywhere loads std.rt_float as a root of its
-// own, after the entry file, because the question is about every file the
-// closure holds. The C bootstrap has no floats and never loads it, which is
-// why the load is on demand and not into every closure (modules.ft).
-fn a_closure_that_holds_a_float_loads_the_float_printers() void {
+// The float printers stand in std.rt now, so the loader has one runtime root
+// and no second one. Until the fold a closure that held a float anywhere
+// loaded a float module beside it, and a float-free closure did not. These two
+// tests hold the difference: a closure that holds a float loads exactly what a
+// float-free closure loads, and a file named rt_float.ft in the standard
+// library directory is an ordinary module nothing reaches.
+fn a_closure_that_holds_a_float_loads_the_runtime_and_nothing_else() void {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "main.ft", "fn main() i32 {\n    f64 x = 1.5;\n    return 0;\n}\n");
+    modules_env.std_dir(&e, "lib");
+    assert(modules_env.load(&e, "main.ft"));
+    assert(modules.count(&e.set) == 2);
+    // D9.10: the runtime is the root, before the entry file
+    assert(modules_env.ordered(&e, 0) == "std.rt");
+    assert(modules_env.ordered(&e, 1) == "main");
+
+    // The same closure without the float reads the same two modules, which is
+    // what "one runtime module" means.
+    modules_env.env mut f = modules_env.open();
+    defer modules_env.close(&f);
+    modules_env.add(&f, "main.ft", "fn main() i32 {\n    i32 x = 1;\n    return x;\n}\n");
+    modules_env.std_dir(&f, "lib");
+    assert(modules_env.load(&f, "main.ft"));
+    assert(modules.count(&f.set) == 2);
+    assert(modules_env.ordered(&f, 0) == "std.rt");
+    assert(modules_env.ordered(&f, 1) == "main");
+}
+
+// A file called rt_float.ft in the standard library directory is a module like
+// any other: no rule of the loader names it, so a closure that holds a float
+// leaves it unread and an `import std.rt_float;` reaches it.
+// D9.2, D9.3
+fn a_float_module_in_the_library_directory_is_an_ordinary_module() void {
     modules_env.env mut e = modules_env.open();
     defer modules_env.close(&e);
     modules_env.add(&e, "main.ft", "fn main() i32 {\n    f64 x = 1.5;\n    return 0;\n}\n");
     modules_env.add(&e, "lib/rt_float.ft", "fn unused() i32 { return 0; }\n");
     modules_env.std_dir(&e, "lib");
     assert(modules_env.load(&e, "main.ft"));
-    assert(modules.find(&e.set, "std.rt_float") != null);
-    // It joins the dependency order after the entry module, having no
-    // importer to stand before; std.rt stands before both, as the root every
-    // closure holds.
-    // D9.10
-    assert(modules_env.ordered(&e, 0) == "std.rt");
-    assert(modules_env.ordered(&e, 1) == "main");
-    assert(modules_env.ordered(&e, 2) == "std.rt_float");
-}
-
-// A float type with no literal is a float too: the question is asked of the
-// tokens, and `f32` and `f64` are two of the three that answer it.
-// D2.6, D3.1
-fn a_float_type_alone_loads_them() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "fn zero() f32 { return 0; }\nfn main() i32 { return 0; }\n");
-    modules_env.add(&e, "lib/rt_float.ft", "fn unused() i32 { return 0; }\n");
-    modules_env.std_dir(&e, "lib");
-    assert(modules_env.load(&e, "main.ft"));
-    assert(modules.find(&e.set, "std.rt_float") != null);
-}
-
-// The float may stand in any file of the closure, and the entry file need not
-// mention one.
-fn a_float_in_an_imported_module_loads_them() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import lib;\nfn main() i32 { return 0; }\n");
-    modules_env.add(&e, "lib.ft", "fn half() f64 { return 0.5; }\n");
-    modules_env.add(&e, "lib/rt_float.ft", "fn unused() i32 { return 0; }\n");
-    modules_env.std_dir(&e, "lib");
-    assert(modules_env.load(&e, "main.ft"));
-    assert(modules.find(&e.set, "std.rt_float") != null);
-}
-
-// A closure with no float does not load them, though the file stands in the
-// standard library directory and would be read if it were asked for.
-fn a_closure_with_no_float_leaves_them_alone() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "fn main() i32 {\n    i32 x = 1;\n    return x;\n}\n");
-    modules_env.add(&e, "lib/rt_float.ft", "fn unused() i32 { return 0; }\n");
-    modules_env.std_dir(&e, "lib");
-    assert(modules_env.load(&e, "main.ft"));
     assert(modules.find(&e.set, "std.rt_float") == null);
-}
 
-// The text of a float in a comment or in a string is no token, so it answers
-// no.
-fn a_float_in_a_comment_or_a_string_is_no_float() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    string text = "// f64 1.5\nstring S = \"f32 2.5\";\nfn main() i32 { return 0; }\n";
-    modules_env.add(&e, "main.ft", text);
-    modules_env.add(&e, "lib/rt_float.ft", "fn unused() i32 { return 0; }\n");
-    modules_env.std_dir(&e, "lib");
-    assert(modules_env.load(&e, "main.ft"));
-    assert(modules.find(&e.set, "std.rt_float") == null);
-}
-
-// The module itself is the entry file of its own compilation, which loads it
-// once: one file cannot be two modules.
-// D9.2
-fn the_module_itself_is_loaded_once() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "lib/rt_float.ft", "fn half() f64 { return 0.5; }\n");
-    modules_env.std_dir(&e, "lib");
-    assert(modules_env.load(&e, "lib/rt_float.ft"));
-    assert(modules.find(&e.set, "std.rt_float") == null);
-    assert(modules_env.ordered(&e, 0) == "std.rt");
-    assert(modules_env.ordered(&e, 1) == "rt_float");
+    modules_env.env mut f = modules_env.open();
+    defer modules_env.close(&f);
+    modules_env.add(&f, "main.ft", "import std.rt_float;\nfn main() i32 { return 0; }\n");
+    modules_env.add(&f, "lib/rt_float.ft", "fn unused() i32 { return 0; }\n");
+    modules_env.std_dir(&f, "lib");
+    assert(modules_env.load(&f, "main.ft"));
+    assert(modules.find(&f.set, "std.rt_float") != null);
 }
 
 fn a_std_path_is_not_looked_up_under_any_other_root() void {
@@ -906,12 +871,8 @@ fn main() i32 {
     a_std_path_is_not_looked_up_under_any_other_root();
     a_path_that_does_not_begin_with_std_never_reaches_the_library();
     std_alone_is_a_directory_and_not_a_module();
-    a_closure_that_holds_a_float_loads_the_float_printers();
-    a_float_type_alone_loads_them();
-    a_float_in_an_imported_module_loads_them();
-    a_closure_with_no_float_leaves_them_alone();
-    a_float_in_a_comment_or_a_string_is_no_float();
-    the_module_itself_is_loaded_once();
+    a_closure_that_holds_a_float_loads_the_runtime_and_nothing_else();
+    a_float_module_in_the_library_directory_is_an_ordinary_module();
     println("std ok");
     a_trailing_declaration_is_bound_to_that_declaration();
     as_renames_an_imported_declaration();

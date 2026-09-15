@@ -792,16 +792,19 @@ class IncludeRoots(unittest.TestCase):
             self.assertTrue(matched <= set(paths), glob)
 
     def test_no_source_is_left_out_of_the_default_set(self):
-        """SKIPPED is empty since T-131. std/math.ft and std/rt_float.ft stood
+        """SKIPPED is empty since T-131. std/math.ft and the float module stood
         there because they hold floats and the C bootstrap rejects them (D18.1,
         T-042), and a second ctest linted them with stage2; the one ctest runs
-        stage2 now and reads every source. The two files are named here so that
-        a tuple that fills up again is seen."""
+        stage2 now and reads every source. T-132 folded the float module into
+        std/rt.ft and deleted it, so the two float-holding sources of the
+        library are named here, and the deleted one is named too, so that a
+        tuple that fills up again is seen."""
         files = {path.relative_to(ROOT).as_posix() for path, _ in fort_lint.default_file_set(ROOT)}
         self.assertEqual(fort_lint.SKIPPED, ())
-        for name in ("std/math.ft", "std/rt_float.ft"):
+        for name in ("std/math.ft", "std/rt.ft"):
             self.assertIn(name, files)
             self.assertTrue((ROOT / name).is_file(), name)
+        self.assertFalse((ROOT / "std/rt_float.ft").exists())
 
     def test_the_set_is_the_five_corpora(self):
         """The count the ctest reports, so a glob that stops matching is seen."""
@@ -874,11 +877,13 @@ class RealCompiler(unittest.TestCase):
         may hold a form the C bootstrap cannot read. The ctest fort_lint holds
         HEAD's library against D1.4 with stage2.
 
-        Two modules of any library stand outside: std/math.ft and
+        Two modules of pin 0's library stand outside: std/math.ft and
         std/rt_float.ft hold floats and the C bootstrap rejects a float type
         and a float literal (D18.1, toolchain.md 7.3). That is a property of
         the C compiler and not of the pin, so it is named here and not in
-        fort_lint.SKIPPED, which is empty.
+        fort_lint.SKIPPED, which is empty. HEAD's library has no rt_float.ft:
+        T-132 folded it into std/rt.ft, which is a float-holding module of
+        HEAD's tree and holds no float in this one.
         """
         pin0 = Path(os.environ["FORT_PIN0_DIR"])
         floatless = ("math.ft", "rt_float.ft")
