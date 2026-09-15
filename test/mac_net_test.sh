@@ -62,12 +62,19 @@ for name in "${tests[@]}"; do
     esac
     FORT_VM_SLOT=1 tools/vm run build/debug/stage2/fort -S --target "$target" \
         --std-dir "$guest_work/mac" -o "$guest_work/$name.ll" "$source"
-    "$cc" -isysroot "$sdk" -O1 -fPIE -Wl,-pie -Wno-override-module \
-        -o "$work/$name" "$work/$name.ll"
+    if [ "$name" = net_layout ]; then
+        "$cc" -isysroot "$sdk" -O1 -fPIE -Wl,-pie -Wno-override-module \
+            -DFORT_NET_LAYOUT_HELPER -o "$work/$name" "$work/$name.ll" \
+            test/mac/net_probe.c
+    else
+        "$cc" -isysroot "$sdk" -O1 -fPIE -Wl,-pie -Wno-override-module \
+            -o "$work/$name" "$work/$name.ll"
+    fi
     "$work/$name" < /dev/null > "$work/$name.actual"
     case "$name" in
     net_layout)
         sed -n '1,6p' "$work/probe.out" > "$work/$name.expected"
+        printf 'field_values true\n' >> "$work/$name.expected"
         ;;
     net_errors)
         invalid=$(sed -n 's/^EINVAL //p' "$work/probe.out")

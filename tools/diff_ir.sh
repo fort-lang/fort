@@ -157,7 +157,7 @@ FT_FILES=959
 # compile into no module and are skipped here. diff_check.sh says beside its
 # own constant how the two group sizes are measured.
 # T-144 remeasured 509 clean, 530 programs, 85 clean-only, and 106 program-only.
-PROGRAM_FILES=532
+PROGRAM_FILES=531
 
 # The pass pipeline `opt` is given. `verify` alone parses the module and runs
 # the LLVM verifier over it, which is the check of D19.1, and it runs no

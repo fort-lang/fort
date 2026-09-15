@@ -1,5 +1,6 @@
 // test/mac/net_probe.c measures Darwin IPv4 constants and address layout.
 // The native Mac network gate compares these results with std/mac/net.ft.
+// The gate also reads a fort address through Darwin C fields.
 // D3.8, D13.2
 #include <errno.h>
 #include <stddef.h>
@@ -9,6 +10,21 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
+#ifdef FORT_NET_LAYOUT_HELPER
+int mac_net_address_matches(const void* raw, unsigned int port, unsigned int addr) {
+    const struct sockaddr_in* socket_addr = raw;
+    if (socket_addr->sin_len != 16 || socket_addr->sin_family != AF_INET ||
+        socket_addr->sin_port != port || socket_addr->sin_addr.s_addr != addr) {
+        return 0;
+    }
+    for (size_t i = 0; i < sizeof socket_addr->sin_zero; i++) {
+        if (socket_addr->sin_zero[i] != 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+#else
 int main(void) {
     printf("AF_INET %d\n", AF_INET);
     printf("SOCK_STREAM %d\n", SOCK_STREAM);
@@ -25,3 +41,4 @@ int main(void) {
     printf("ECONNREFUSED %d\n", ECONNREFUSED);
     printf("ENOTSOCK %d\n", ENOTSOCK);
 }
+#endif

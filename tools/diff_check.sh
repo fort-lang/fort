@@ -93,7 +93,7 @@ FT_FILES=959
 # refuses, so it raised this count to 509 for one commit and read 509, 530, 106
 # and 85 there; the deletion took it back to 508 and the gap back to 22.
 # T-144 remeasured 509 clean, 530 programs, 85 clean-only, and 106 program-only.
-CLEAN_FILES=511
+CLEAN_FILES=510
 
 # The search roots every run is given: the standard library, src/fort, so that
 # the compiler's own modules resolve their imports, and src, so that a module of

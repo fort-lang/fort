@@ -826,7 +826,9 @@ bullet at a time and without a rewrite.
   T-145 adds two native test programs under `test/mac/` and routes them into the grammar corpus.
   Run `tools/mac net` on the Mac arm64 host to compare C layout and four native programs.
   The pin 0 library lacks `libc.errno_slot()` (T-145).
-  Stage1 refuses `std/mac/net.ft` under pin 0, so `CLEAN_FILES` grows by 2, not 3.
+  Stage1 refuses `std/mac/net.ft` under pin 0.
+  The pin 0 network address lacks the Mac length field, so stage1 refuses `test/mac/net_layout.ft`.
+  `CLEAN_FILES` and `PROGRAM_FILES` each grow by 1 for `test/mac/net_errors.ft`.
   **Two branches that each raise one counter by one merge with no conflict and leave it wrong**:
   `CLEAN_FILES` went 393 to 394 twice and the truth was 395, which cost T-107 an hour. After the
   second merge of a branch that adds or removes a source file, run the tool that owns each
