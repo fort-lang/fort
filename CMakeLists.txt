@@ -212,24 +212,23 @@ add_custom_target(fort_stage2 ALL DEPENDS "${FORT_STAGE2_BINARY}")
 
 # The Mac platform module sits beside a copy of main.ft. That directory is the
 # entry search root, so its platform.ft wins over src/fort/platform.ft (D9.2).
-# A Mac build reads sw_vers. The Linux VM uses 15.0 to test the two-part form.
+# Each Mac build reads sw_vers. The Linux VM uses 15.0 to test the two-part form.
 set(FORT_MAC_PLATFORM_DIR "${CMAKE_BINARY_DIR}/mac-platform")
 if(APPLE)
     set(FORT_MAC_PLATFORM_VERSION_ARGS "")
 else()
     set(FORT_MAC_PLATFORM_VERSION_ARGS "15.0")
 endif()
-add_custom_command(
-    OUTPUT "${FORT_MAC_PLATFORM_DIR}/platform.ft" "${FORT_MAC_PLATFORM_DIR}/main.ft"
+add_custom_target(fort_mac_platform ALL
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/gen_mac_platform.sh"
             "${FORT_MAC_PLATFORM_DIR}" ${FORT_MAC_PLATFORM_VERSION_ARGS}
+    BYPRODUCTS "${FORT_MAC_PLATFORM_DIR}/platform.ft"
+               "${FORT_MAC_PLATFORM_DIR}/main.ft"
     DEPENDS "${CMAKE_SOURCE_DIR}/tools/gen_mac_platform.sh"
             "${FORT_FORT_SRC_DIR}/main.ft"
     COMMENT "Generating the Mac compiler platform module"
     VERBATIM
 )
-add_custom_target(fort_mac_platform ALL DEPENDS "${FORT_MAC_PLATFORM_DIR}/platform.ft"
-                                            "${FORT_MAC_PLATFORM_DIR}/main.ft")
 add_test(NAME mac-platform
     COMMAND bash "${FORT_TEST_DIR}/mac_platform_test.sh" "${FORT_STAGE2_BINARY}"
             "${FORT_MAC_PLATFORM_DIR}" "${FORT_FORT_SRC_DIR}" "${FORT_STD_DIR}"

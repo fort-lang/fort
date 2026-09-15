@@ -11,7 +11,10 @@ fi
 
 source_dir=$(cd "$(dirname "$0")/.." && pwd)
 output_dir=$1
-if [ "$#" -eq 2 ]; then
+# The VM can replace its fixed version for a build-refresh probe.
+if [ "$#" -eq 2 ] && [ -n "${FORT_MAC_PLATFORM_TEST_VERSION:-}" ]; then
+    version=$FORT_MAC_PLATFORM_TEST_VERSION
+elif [ "$#" -eq 2 ]; then
     version=$2
 else
     version=$(sw_vers -productVersion)
@@ -25,7 +28,11 @@ elif [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 
 mkdir -p "$output_dir"
-cp "$source_dir/src/fort/main.ft" "$output_dir/main.ft"
+if ! cmp -s "$source_dir/src/fort/main.ft" "$output_dir/main.ft"; then
+    cp "$source_dir/src/fort/main.ft" "$output_dir/main.ft"
+fi
+platform_tmp=$(mktemp "$output_dir/platform.ft.XXXXXX")
+trap 'rm -f "$platform_tmp"' EXIT
 printf '%s\n' \
     '// platform: the Mac build target of the self-hosted compiler.' \
     '//' \
@@ -43,4 +50,8 @@ printf '%s\n' \
     '' \
     '/// Whether this compiler uses the Mac link line.' \
     '/// D14.3' \
-    'bool IS_MAC = true;' >"$output_dir/platform.ft"
+    'bool IS_MAC = true;' >"$platform_tmp"
+if ! cmp -s "$platform_tmp" "$output_dir/platform.ft"; then
+    chmod 644 "$platform_tmp"
+    mv "$platform_tmp" "$output_dir/platform.ft"
+fi
