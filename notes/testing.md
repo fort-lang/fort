@@ -437,21 +437,31 @@ bullet at a time and without a rewrite.
 ## 5. Differential oracles and the fixed point
 
 - **The fixed point is the ctest `bootstrap` (T-039) and the gate runs it.** `tools/fixpoint.sh
-  <build-dir>` compiles `src/fort` with stage1 into stage2 and `src/fort` with stage2 into stage3,
-  under `<build-dir>/fixpoint/<mode>/`, and it does that twice: once in checked mode and once with
+  <build-dir> --bootstrap <fort>` compiles `src/fort` three times, under
+  `<build-dir>/fixpoint/<mode>/`: with the last pin into stage2, with stage2 into stage3, with
+  stage3 into stage4. It does that twice: once in checked mode and once with
   `--release`. The two modes emit different code, because checked arithmetic traps and release
   arithmetic does not (D11.1), so a fixed point in one mode does not prove the other. In each mode
-  it holds stage1's module for `src/fort` against stage2's, runs `opt-18 -passes=verify` over both
-  (D19.1), and compares the stage2 and stage3 binaries byte for byte. The module comes first
+  it holds stage2's module for `src/fort` against stage3's, runs `opt-18 -passes=verify` over both
+  (D19.1), and compares the stage3 and stage4 binaries byte for byte. The module comes first
   because it names the guilty program: two identical modules that link to different bytes are
   clang or the linker. It is label `lang` and a command of `check-lang`, so `check-all` and the
   gate run it. It costs 12.2 s under `debug`, 12.7 s under `asan` and 14.4 s under `ubsan`
-  (measured 2026-09-12), against 259 s for the whole of `check-all` under `debug`: most of the
-  work is clang, which no preset instruments, and the two stage2 runs, which qemu runs and no
-  preset instruments either. `tools/vm run 'ctest --preset debug -R bootstrap'` asks in one line.
+  (measured 2026-09-12, before T-131 added the third compile), against 259 s for the whole of
+  `check-all` under `debug`: most of the
+  work is clang, which no preset instruments, and the stage2 and stage3 runs, which qemu runs and
+  no preset instruments either. `tools/vm run 'ctest --preset debug -R bootstrap'` asks in one line.
+  **Why the pair moved one hop along, and why D19.5 is unchanged** (T-131). The compiler that
+  builds HEAD is the last pin of `tools/bootstrap.ref`, and the last pin and HEAD are different
+  programs. Their `-S` texts differ on any commit that touches the emitter, so a comparison of the
+  pin's module with stage2's would go red on a change that is not a defect. Both members of the
+  pair D19.5 compares must embody HEAD's sources. stage2 and stage3 are the first such pair:
+  HEAD's sources through two different compilers. stage3 and stage4 are the second, and their
+  binaries are the artefact comparison. Two distinct stages, one input, two `-S` runs and no
+  third, which is what D19.5 asks for and what its last sentence forbids.
   **Its binary comparison is the artefact check `tools/diff_ir.sh` cannot make.** That script
   compares the two emitters' module for `src/fort/main.ft` among the other files it walks --
-  `grep -n 'PROGRAM_FILES=' tools/diff_ir.sh` reads 518 on 2026-09-14 -- and it is the
+  `grep -n 'PROGRAM_FILES=' tools/diff_ir.sh` reads 530 on 2026-09-14 -- and it is the
   stronger oracle for the emitter, but the step from "the two modules agree" to "stage2 and stage3
   are the same bytes" needs two assumptions that nothing checked before T-039: `clang` must be
   deterministic over one input and one command line, and `diff_ir.sh` compiles `main.ft` from the
@@ -517,6 +527,17 @@ bullet at a time and without a rewrite.
   **8-bit** target: a `zext i1` to `i32` reads the same whether the source is called one bit wide
   or eight. Read a differential's red as "the class is here", never as the rule's witness. The
   method, the runner and the traps of that audit are in section 7, beside T-077's.
+  **The library the differentials compare is pin 0's, not HEAD's** (T-131). `diff_check.sh` and
+  `diff_ir.sh` name `<build-dir>/pin/0/std` on both sides. `std/rt.ft` is in every import closure
+  (D9.10), so the moment HEAD's library leaves stage1's subset every stage1 run of those scripts
+  fails and the comparison is empty; pin 0's library is the one stage1 can always read, and giving
+  stage2 the same directory is what keeps the two runs one comparison. HEAD's own `std/*.ft` files
+  stay in the file list and are still compared one by one, until one of them uses a form stage1
+  refuses. One of them does: `std/rt.ft` spells a `?:` in `print_bool`, which is the demonstration
+  T-131 owes, so it left `CLEAN_FILES` (509 to 508) and joined `FORM_FILES` (16 to 17).
+  What the differentials therefore stop covering is HEAD's library, on the day it moves past pin
+  0's, and the compiler's own source, on the day it uses a post-pin form. The fixed point and
+  `fort-modules` under stage2 judge both then.
   All four scripts carry the same `FT_FILES` equality, so a ticket that adds or removes a `.ft`
   file changes **four** lines in the same commit, and `diff_check.sh` and `diff_ir.sh` each carry
   a second equality, `CLEAN_FILES` and `PROGRAM_FILES`, because a comparison that shrank would

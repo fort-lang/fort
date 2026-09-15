@@ -825,9 +825,19 @@ class IncludeRoots(unittest.TestCase):
         self.assertTrue(all(includes == ("first",) for _, includes in files))
 
 
-@unittest.skipUnless(os.environ.get("FORT_BINARY"), "FORT_BINARY is not set")
+@unittest.skipUnless(
+    os.environ.get("FORT_BINARY") and os.environ.get("FORT_PIN0_DIR"),
+    "FORT_BINARY or FORT_PIN0_DIR is not set",
+)
 class RealCompiler(unittest.TestCase):
-    """The whole tool over the fixtures, with the compiler the build made."""
+    """The whole tool over the fixtures, with the compiler the build made.
+
+    That compiler is the C bootstrap, which compiles pin 0's library and no
+    other (T-131), so every run here names pin 0's `std` with --std-dir. The
+    fallback of toolchain.md 1 would reach `<build>/std`, which is HEAD's
+    library, and HEAD's std/rt.ft spells a `?:` the C bootstrap refuses; every
+    test of this class then reports that one refusal and nothing else.
+    """
 
     def run_lint(self, *args):
         return subprocess.run(
@@ -836,6 +846,8 @@ class RealCompiler(unittest.TestCase):
                 str(ROOT / "tools" / "fort_lint.py"),
                 "--fort",
                 os.environ["FORT_BINARY"],
+                "--std-dir",
+                str(Path(os.environ["FORT_PIN0_DIR"]) / "std"),
                 *args,
             ],
             capture_output=True,
@@ -853,7 +865,6 @@ class RealCompiler(unittest.TestCase):
         self.assertEqual(got.returncode, 1)
         self.assertEqual(got.stdout.strip().split("\n"), BAD_NAMES_PROBLEMS)
 
-    @unittest.skipUnless(os.environ.get("FORT_PIN0_DIR"), "FORT_PIN0_DIR is not set")
     def test_pin_0s_standard_library_conforms(self):
         """Every module of the library the compiler this test runs compiles.
 
@@ -875,22 +886,9 @@ class RealCompiler(unittest.TestCase):
         files = [p for p in every if p.name not in floatless]
         self.assertEqual(len(files) + len(floatless), len(every))
         self.assertGreaterEqual(len(files), 10)
-        got = subprocess.run(
-            [
-                sys.executable,
-                str(ROOT / "tools" / "fort_lint.py"),
-                "--fort",
-                os.environ["FORT_BINARY"],
-                "--root",
-                str(pin0),
-                "--std-dir",
-                str(pin0 / "std"),
-                *[str(p.relative_to(pin0)) for p in files],
-            ],
-            capture_output=True,
-            text=True,
-            cwd=str(ROOT),
-        )
+        # The paths are absolute, because the tool resolves a path it is given
+        # against its own working directory and reports it relative to --root.
+        got = self.run_lint("--root", str(pin0), *[str(p) for p in files])
         self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
 
     def test_a_rejected_file_is_reported_and_still_judged(self):

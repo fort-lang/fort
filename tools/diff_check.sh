@@ -87,8 +87,11 @@ FT_FILES=946
 # The two group sizes are measured and not derived: add `echo "$file"` beside
 # the `compared` counter of this script and of diff_ir.sh, sort the two lists,
 # and read them off `comm -13` and `comm -23`. T-064 ran that and found every
-# one of the 106 importing a support module.
-CLEAN_FILES=509
+# one of the 106 importing a support module. T-131 ran it again and read 508,
+# 530, 106 and 84, so 530 - 508 = 106 - 84 holds. The three numbers before it
+# were 509, 107 and 85: the ticket put a `?:` into std/rt.ft, which stage1
+# refuses, so that file left the first group.
+CLEAN_FILES=508
 
 # The search roots every run is given: the standard library, src/fort, so that
 # the compiler's own modules resolve their imports, and src, so that a module of

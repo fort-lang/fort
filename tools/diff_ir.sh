@@ -148,7 +148,7 @@ FT_FILES=946
 # shrank would otherwise pass while seeing less, and ctest reads the exit
 # status and not the counts printed below.
 # It is 22 above diff_check.sh's CLEAN_FILES, and the two sets are not nested:
-# they differ by 106 files one way and 84 the other. This script's roots are
+# they differ by 106 files one way and 84 the other (measured by T-131). This script's roots are
 # wider -- -I src -I src/fort -I test/fort/support reaches the 106 test/fort
 # tests that import a support module, which that script cannot resolve and
 # skips -- and its question is narrower, since the 84 files that check clean

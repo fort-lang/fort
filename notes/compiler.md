@@ -667,18 +667,47 @@ gone.
   constructs a C file may hold that have no fort spelling, with what replaces each; the rules the
   bootstrap
   already follows so that it stays portable are the first four.
-  **`src/fort` stays inside that subset, and T-046 does not release it.** That ticket froze
-  stage1; it did not stop stage1 compiling stage2. The CMake target `fort_stage2` compiles
-  `src/fort` with stage1 at every build and the ctest `bootstrap` compiles it twice more, so a
-  `src/fort` file that uses a construct stage1 lacks breaks the build and the fixed point on the
-  same commit. **The freeze is this: `src/bootstrap` accepts a bug fix, and the smallest
-  type-layer edit that lets it parse and check a form `std/` uses. Everything else is still
-  forbidden.** A bug fix makes stage1 answer the way the specification already says it must, and
-  the ticket that writes one names the decision it restores. The second half is T-086's, and the
-  reason is that stage1 checks every `.ft` file in the repository: it compiles `src/fort` and the
-  import closure of `std/` into stage2, so any form `std/` spells forces a stage1 change, and a
-  corpus test of a new feature must be **refused** with the exact words `not supported by the
-  bootstrap compiler` (`run_tests.py`'s `judge_unsupported`), which is a stage1 edit as well.
+  **The chain of pinned commits, and the five invariants that hold it** (T-131). stage1 does not
+  compile `src/fort` any more. `tools/bootstrap.ref` names a chain of pinned commits of this
+  repository, oldest first: stage1 builds pin 0's `src/fort` with pin 0's `std`, pin k builds
+  pin k+1, and the last pin builds HEAD's `src/fort` with HEAD's `std` into
+  `build/<preset>/stage2/fort`. The five invariants:
+  1. **stage1 builds pin 0 and never stops.** `parser.c` and `lexer.c` never remove a form pin 0
+     uses. T-136 is why pin 0 is not `bootstrap-frozen`: it replaced the signature form, so the C
+     compiler at HEAD does not parse that older tree.
+  2. **HEAD's `src/fort` and `std` use only what the last pin implements.** A feature's first
+     implementation is therefore written without the feature.
+  3. **A pin moves only on need, as its own commit**: the ref line and a note naming the need,
+     and nothing else, so the gate proves the new chain before HEAD relies on the new form. The
+     need is invariant 2 read backwards: HEAD wants a form the last pin cannot compile. Two worked
+     examples. A pin **does not** move for T-132, which folds `std.rt_float` into `std.rt` and puts
+     an `f64` in `std/rt.ft`: fort has had floats since T-040 and every pin implements them, and
+     the split existed only because stage1 compiled the whole closure. A pin **does** move for the
+     ticket after the one that gives `src/fort` a new syntax, on the day `src/fort` or `std` wants
+     to spell that syntax itself; until that day the new syntax lives in the compiler and not in
+     its own source.
+  4. **Every pin is a commit in this repository's history.** A shallow clone cannot build.
+     `tools/pin.sh verify` says so at configure time, by name.
+  5. **HEAD's stage2 compiles pin 0's `std`**, because pin 0's `std` is the differential `std`:
+     `lang`, `lang_check_json`, `tty`, `tools/diff_check.sh`, `tools/diff_ir.sh` and the two C
+     unit tests that read `std/` all name `build/<preset>/pin/0/std`. `std/rt.ft` is in every
+     import closure (D9.10), so the moment HEAD's library leaves stage1's subset every stage1
+     compile fails; pin 0's library is the one stage1 can always read.
+  **What the freeze of T-046 becomes.** It is invariant 1 and no more: `src/bootstrap` must keep
+  building pin 0. Its second job stands and is the reason the directory stays -- it is the second
+  independent implementation that `tools/diff_tokens.sh`, `diff_ast.sh`, `diff_check.sh` and
+  `diff_ir.sh` compare against over 946 `.ft` files. So a change to `src/bootstrap` is a bug fix
+  or a differential fix, and the **carve-out is withdrawn**: no edit is needed any more to let it
+  parse a form `std/` uses, because it does not read HEAD's `std`. The four edits the carve-out
+  paid for are below, as the record of what the rule cost while it stood.
+  Until T-131 the rule read: `src/bootstrap` accepts a bug fix, and the smallest
+  type-layer edit that lets it parse and check a form `std/` uses. A bug fix makes stage1 answer
+  the way the specification already says it must, and the ticket that writes one names the
+  decision it restores. The second half was T-086's, and the
+  reason was that stage1 checked every `.ft` file in the repository: it compiled `src/fort` and the
+  import closure of `std/` into stage2, so any form `std/` spelled forced a stage1 change, and a
+  corpus test of a new feature had to be **refused** with the exact words `not supported by the
+  bootstrap compiler` (`run_tests.py`'s `judge_unsupported`), which was a stage1 edit as well.
   T-086 gave `std.libc` a `void mut* own malloc` and paid the smaller of the two: nine code
   sites in `types.c`, `types.h` and `check.c`, no new diagnostic and no new code path.
   T-135 is the second such edit and paid less: two sites, `parse_alloc_type` in `parser.c` and
@@ -706,16 +735,30 @@ gone.
   more lines are comments that quote one. `at_decl_start` lost its speculative parse with the
   change: `fn` followed by a name and then a `(` is a definition, and a `fn` followed by `(` at
   once is a function type, so two tokens of lookahead decide what a return type used to.
-  A feature that
-  `std/` does not spell still goes to `src/fort` alone. A feature therefore leaves
+  Every feature goes to `src/fort` alone from T-131 on. A feature leaves
   `test/lang/unsupported-stage2.txt` when stage2 gains it, and leaves
   `test/lang/bootstrap-unsupported.txt` never. The ctest `lang` holds that list: stage1 runs over
   the whole corpus with it and with an empty `xfail.txt`, so a test the list names must be refused
-  with `not supported by the bootstrap compiler` and a test it does not name must pass. T-046
+  and a test it does not name must pass. T-046
   measured both directions on 47f98c2 and found the two sets equal: 111 of the 643 corpus tests
   carry that diagnostic under stage1, 111 entries stand in the list, and neither side holds a test
-  the other lacks. A compiler that accepts a construct its own source may not hold is this
+  the other lacks. The list holds 113 entries on 2026-09-14, read off
+  `grep -vc "^#" test/lang/bootstrap-unsupported.txt`.
+  **"Refused" is two shapes and not one, since T-131.** A listed test must exit 1 with at least
+  one diagnostic, and at least one diagnostic must carry those words or must stand in a file of
+  the test itself (`spec/toolchain.md` 7.3). A feature added after the last pin reaches stage1 as
+  an ordinary syntax error, because stage1 never learned to name it, and that is the second shape.
+  The first shape is what a test refused inside the library's closure reports, where no diagnostic
+  names the test at all: 6 of the 113 are that case, measured on 2026-09-14 by deleting the
+  words clause and re-running the 113.
+  A compiler that accepts a construct its own source may not hold is this
   section (T-041, floats).
+  **The demonstration the chain owes, and where it stands.** `std/rt.ft` spells a `?:` in
+  `print_bool` (D7.5), which stage1 refuses and which is in every import closure. The build
+  succeeds, and `build/<preset>/fort --check std/rt.ft` prints
+  `std/rt.ft:417:20: error: not supported by the bootstrap compiler: ?:`. Do not remove it to
+  tidy the runtime: it is the one place the invariant is visible to a reader, and
+  `tools/diff_ast.sh`'s `FORM_FILES` counts it.
   **`src/lsp` is under no such rule**: stage2 compiles it, so it may use anything `src/fort`
   implements (D20.5). A file of it is reached as `lsp.<name>` through the search root `src`,
   because two files of one closure that share a module path emit one set of symbols (T-063).
@@ -724,9 +767,9 @@ gone.
   `bootstrap` is what says the compiler reproduces itself.
   **T-063 wrote the first module of `src/lsp` and stayed inside the subset anyway**, and the
   measurement says why. A file stage1 refuses is skipped by `diff_ast.sh`, by `diff_check.sh` and
-  by `diff_ir.sh`, and the ctest `fort-modules` drives `test/fort` with stage1, so a module with a
-  float in it leaves three of the four differential oracles and needs a corpus of its own under
-  qemu. `src/lsp/json.ft` therefore names no float type: a JSON number answers the bits of its
+  by `diff_ir.sh`, so a module with a float in it leaves three of the four differential oracles.
+  (The ctest `fort-modules` drove `test/fort` with stage1 until T-131 moved it to stage2, which is
+  the one part of that measurement the chain changed.) `src/lsp/json.ft` therefore names no float type: a JSON number answers the bits of its
   binary64 value through `flt.flt_parse`, the compiler's own literal reader, and a caller that
   wants the value copies the bits into an `f64` as `std/rt_float.ft` does. The choice is each
   module's to make again, and the first one that needs a float pays for the corpus.

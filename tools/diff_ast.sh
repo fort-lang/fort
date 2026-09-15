@@ -92,7 +92,10 @@ NESTED_MESSAGES='multi-dimensional arrays|spans of arrays|arrays of spans|spans 
 # and no tree to compare. These files are not skipped in silence either: the
 # count is an equality, and stage2 must not report the refusal itself, which
 # is what says the divergence is the one intended.
-FORM_FILES=16
+# One of them is std/rt.ft, which T-131 put a `?:` into on purpose: the file is
+# in every import closure (D9.10), so it is the demonstration that the library
+# is out of stage1's subset and that the build still works.
+FORM_FILES=17
 FORM_MESSAGES='do-while|\?:'
 
 # The same for the third: src/fort reads a float literal (D2.6, T-041) and
