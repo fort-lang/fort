@@ -150,3 +150,14 @@ int64_t helper_tail_defaults(int32_t fixed, ...) {
     va_end(args);
     return (int64_t)fixed + small + large + (int64_t)fraction;
 }
+
+// The nested callback type is extern-legal at each function-pointer level.
+// D9.8, D9.9
+int32_t helper_tail_nested_callback(int32_t fixed, ...) {
+    va_list args;
+    va_start(args, fixed);
+    int32_t (*direct)(int32_t) = va_arg(args, int32_t(*)(int32_t));
+    int32_t (*outer)(int32_t (*)(int32_t)) = va_arg(args, int32_t(*)(int32_t(*)(int32_t)));
+    va_end(args);
+    return fixed + direct(3) + outer(direct);
+}

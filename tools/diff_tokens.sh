@@ -39,11 +39,11 @@ done
 # comparison, and a floor only notices the walk losing all of them. A ticket
 # that adds or removes a .ft file changes all four lines in the same commit:
 # diff_tokens.sh, diff_ast.sh, diff_check.sh and diff_ir.sh.
-FT_FILES=953
+FT_FILES=955
 
 # The file count for `...` tokens that stage1 reads as two tokens.
 # D2.10
-ELLIPSIS_FILES=6
+ELLIPSIS_FILES=8
 
 files=$(find . -name '*.ft' -not -path './build/*' -not -path './.git/*' \
     -not -path './.worktrees/*' | sort)
