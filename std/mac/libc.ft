@@ -1,19 +1,19 @@
 // std.libc: thin extern declarations for the libc calls the library needs
 // (stdlib.md 2.2). The runtime entry points are std.rt (stdlib.md 3). C types
 // map as follows: int is i32, size_t is u64, ssize_t and off_t are i64, mode_t
-// is u32 and char* is char*. A buffer C fixes as bytes is u8* or u8 mut*, and
+// is u16 and char* is char*. A buffer C fixes as bytes is u8* or u8 mut*, and
 // a buffer of any type at all is void* or void mut*; the mut is there when C
 // writes through the pointer and absent when C's own prototype says const.
 // Names are unmangled.
 // D3.11, D9.7, D9.8, D13.2
 
-/// open(2) flags, Linux x86-64 values.
+/// open(2) flags, Mac arm64 values.
 i32 O_RDONLY = 0;
 i32 O_WRONLY = 1;
 i32 O_RDWR = 2;
-i32 O_CREAT = 0o100;
-i32 O_TRUNC = 0o1000;
-i32 O_APPEND = 0o2000;
+i32 O_CREAT = 0x200;
+i32 O_TRUNC = 0x400;
+i32 O_APPEND = 0x8;
 
 /// lseek(2) whence values.
 i32 SEEK_SET = 0;
@@ -60,10 +60,10 @@ extern fn abort() noreturn;
 /// D9.10, D9.8
 extern fn qsort(void mut* base, u64 n, u64 size, fn (void*, void*) i32 cmp) void;
 
-/// <fcntl.h>, <unistd.h>. open is variadic in C; the fixed prototype is safe
-/// because every extern is called through a variadic LLVM function type.
+/// <fcntl.h>, <unistd.h>. Mac C open uses a variable tail for its promoted mode.
+/// The tail uses an i32 stack slot on Apple arm64.
 /// D9.8
-extern fn open(char* path, i32 flags, u32 mode) i32;
+extern fn open(char* path, i32 flags, ...) i32;
 extern fn read(i32 fd, u8 mut* buf, u64 n) i64;
 extern fn write(i32 fd, u8* buf, u64 n) i64;
 extern fn close(i32 fd) i32;
@@ -74,40 +74,24 @@ extern fn lseek(i32 fd, i64 offset, i32 whence) i64;
 /// D11.5
 extern fn isatty(i32 fd) i32;
 
-/// <errno.h>: errno is a macro over this accessor in glibc and musl. C returns
+/// <errno.h>: errno is a macro over this accessor on Mac. C returns
 /// int*, which is mutable, so the target carries mut: std.rt writes errno back
 /// around the isatty call it makes for each buffer (toolchain.md 5.3). A reader
 /// that only reads it takes the same result and drops the mut, which
 /// sys.errno() does.
 /// D11.5, D5.4
-extern fn __errno_location() i32 mut*;
+extern fn __error() i32 mut*;
 
 /// Returns the errno slot for the calling thread. The caller may read or write it.
 /// D9.8, D13.2
 fn errno_slot() i32 mut* {
-    return __errno_location();
+    return __error();
 }
 
-/// Formats one float for std.rt. The fixed Linux extern keeps the pinned ABI form.
+/// Formats one float for std.rt. The Mac C extern uses a variable tail.
 /// D9.8, D18.1
-extern fn snprintf(char mut* buf, u64 size, char* fmt, i32 precision, f64 v) i32;
+extern fn snprintf(char mut* buf, u64 size, char* fmt, ...) i32;
 
 fn snprintf_float(char mut* buf, u64 size, char* fmt, i32 precision, f64 v) i32 {
     return snprintf(buf, size, fmt, precision, v);
 }
-
-/// <sys/socket.h>, <netinet/in.h>. socklen_t is unsigned int, so it is u32, and
-/// an address is a struct of no fixed type here, so it crosses as void* or
-/// void mut* (stdlib.md 1.4). accept and getsockname write the address and its
-/// length, so both carry mut; setsockopt, bind and connect read theirs, as
-/// C's const says. A scalar out-parameter keeps its type rather than becoming
-/// a void* (1.4). std.net wraps all seven and is what a program calls
-/// (stdlib.md 2.13).
-/// D3.11, D9.8, D13.4
-extern fn socket(i32 domain, i32 kind, i32 protocol) i32;
-extern fn setsockopt(i32 fd, i32 level, i32 name, void* value, u32 len) i32;
-extern fn bind(i32 fd, void* addr, u32 len) i32;
-extern fn listen(i32 fd, i32 backlog) i32;
-extern fn accept(i32 fd, void mut* addr, u32 mut* len) i32;
-extern fn connect(i32 fd, void* addr, u32 len) i32;
-extern fn getsockname(i32 fd, void mut* addr, u32 mut* len) i32;

@@ -76,13 +76,14 @@ import check_decisions  # noqa: E402
 
 # ---- the corpus -------------------------------------------------------------
 
-# The sources notes/style.md 1.1 governs: `src/**`, `std/*.ft` and the C and
+# The sources notes/style.md 1.1 governs: `src/**`, `std/**/*.ft` and the C and
 # fort files of `test/` that are code.
 SOURCE_GLOBS = (
     "src/**/*.c",
     "src/**/*.h",
     "src/**/*.ft",
     "std/*.ft",
+    "std/mac/*.ft",
     "test/*.c",
     "test/*.h",
     "test/abi/*.c",
