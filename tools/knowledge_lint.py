@@ -91,6 +91,7 @@ SOURCE_GLOBS = (
     "test/fort_lint/*.ft",
     "test/highlight/*.ft",
     "test/lang/ffi/*.c",
+    "test/mac/*.c",
     "test/tty/*.ft",
 )
 

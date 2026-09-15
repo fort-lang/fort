@@ -86,6 +86,12 @@ i32 PARSE_ERROR = 2;
 extern fn strerror(i32 code) char*;
 extern fn readlink(char* path, char* buf, u64 size) i64;
 
+/// Mac gives the binary path through this dyld function. realpath resolves it
+/// when the file still exists at that path.
+/// D9.8, D14.1
+extern fn _NSGetExecutablePath(char mut* buf, u32 mut* size) i32;
+extern fn realpath(char* path, char* resolved) char* own;
+
 /// The temporary directory of toolchain.md 2 and the removal of what the driver
 /// put in it; the standard library has no binding for any of them and this is
 /// their one caller. `mkdtemp` replaces the six `X` at the end of its argument in
@@ -509,11 +515,33 @@ u64 EXE_PATH_MAX_CAP = 65536;
 /// D14.1
 string STD_DIR_NAME = "std";
 
-/// The path of the running binary, read from /proc/self/exe; false when it
-/// cannot be read, with *out unchanged. readlink does not terminate the path
-/// and reports truncation only by filling the buffer, so the buffer doubles
-/// until the result fits. The result is interned in `p`.
+/// The path of the running binary; false when the OS cannot give it.
+/// Linux reads /proc/self/exe. Mac reads dyld's path and resolves it with
+/// realpath when possible. *out stays unchanged on failure. The path is
+/// interned in `p`.
 fn exe_path(containers.pool mut* p, string mut* out) bool {
+    if (platform.IS_MAC) {
+        u32 mut cap = cast(EXE_PATH_FIRST_CAP, u32);
+        while (cast(cap, u64) <= EXE_PATH_MAX_CAP) {
+            u32 allocated = cap;
+            char mut@ own buf = new(char, cast(cap, u64));
+            defer del(buf);
+            if (_NSGetExecutablePath(buf.ptr, &cap) == 0) {
+                char* own canonical = realpath(buf.ptr, null);
+                if (canonical != null) {
+                    *out = containers.pool_intern(p, str.from_cstr(canonical));
+                    libc.free(cast(move(canonical), void* own));
+                    return true;
+                }
+                *out = containers.pool_intern(p, str.from_cstr(buf.ptr));
+                return true;
+            }
+            if (cap <= allocated || cast(cap, u64) > EXE_PATH_MAX_CAP) {
+                return false;
+            }
+        }
+        return false;
+    }
     char mut@ own c_path = str.to_cstr(PROC_SELF_EXE);
     defer del(c_path);
     u64 mut cap = EXE_PATH_FIRST_CAP;
@@ -548,8 +576,8 @@ fn std_dir_beside(containers.pool mut* p, string program) string {
 }
 
 /// The standard library directory (toolchain.md 1): --std-dir, else
-/// $FORT_STD_DIR, else `std` beside the fort binary, which is /proc/self/exe
-/// when it can be read and `program` otherwise. An empty environment value
+/// $FORT_STD_DIR, else `std` beside the fort binary. Linux reads /proc/self/exe.
+/// Mac reads dyld's executable path. An empty environment value
 /// names no directory, so it counts as unset. Interned in `p`.
 fn std_dir(containers.pool mut* p, options* opts, string program) string {
     // D14.1: the option as given, the empty one included
