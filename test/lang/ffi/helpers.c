@@ -1,6 +1,7 @@
 // C11 helpers linked into the test/lang/run/ffi tests via `//! link: ffi/helpers.c`.
 // Every signature uses only scalar types so it is extern-legal in fort.
 // D9.8
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -120,3 +121,32 @@ int32_t helper_paint(int32_t color) {
 // arriving here dies by SIGILL with no message.
 // D19.7, D11.4
 void helper_returns_anyway(void) {}
+
+// The Mac test reads each C variable argument from its stack slot.
+// Linux reads the same types through the System V C ABI.
+// D9.8
+int64_t helper_tail_mix(int32_t fixed, ...) {
+    va_list args;
+    va_start(args, fixed);
+    int32_t signed_arg = va_arg(args, int32_t);
+    uint32_t unsigned_arg = va_arg(args, uint32_t);
+    uint64_t wide_arg = va_arg(args, uint64_t);
+    double float_arg = va_arg(args, double);
+    int32_t* pointer_arg = va_arg(args, int32_t*);
+    int32_t (*callback_arg)(int32_t) = va_arg(args, int32_t(*)(int32_t));
+    va_end(args);
+    return (int64_t)fixed + signed_arg + unsigned_arg + (int64_t)wide_arg + (int64_t)float_arg +
+           *pointer_arg + callback_arg(3);
+}
+
+// An untyped tail has no fixed parameter type. The caller gives its defaults.
+// D4.5, D9.8
+int64_t helper_tail_defaults(int32_t fixed, ...) {
+    va_list args;
+    va_start(args, fixed);
+    int32_t small = va_arg(args, int32_t);
+    int64_t large = va_arg(args, int64_t);
+    double fraction = va_arg(args, double);
+    va_end(args);
+    return (int64_t)fixed + small + large + (int64_t)fraction;
+}

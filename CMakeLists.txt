@@ -580,6 +580,11 @@ add_test(NAME stage-usage
     COMMAND bash "${FORT_TEST_DIR}/stage_usage_test.sh" "${CMAKE_BINARY_DIR}")
 set_tests_properties(stage-usage PROPERTIES LABELS unit)
 
+add_test(NAME stage2-ast-variadic
+    COMMAND bash "${FORT_TEST_DIR}/stage2_ast_variadic_test.sh" "${FORT_STAGE2_BINARY}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(stage2-ast-variadic PROPERTIES LABELS unit)
+
 # The two lexers over the whole repository: `fort --tokens` writes one line per
 # token (D14.1, toolchain.md 1) and tools/diff_tokens.sh compares stage1's dump
 # with stage2's, together with their diagnostics and their exit statuses, over

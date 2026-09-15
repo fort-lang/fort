@@ -2165,6 +2165,37 @@ fn parse_params(parser mut* p, ast.node mut* fn_node) bool {
     return expect(p, lexer.tok_kind.rparen, "')'");
 }
 
+/// An extern parameter list has one or more fixed parameters before `...`.
+/// The tail mark is a flag, not a parameter node.
+/// D9.8
+fn parse_extern_params(parser mut* p, ast.node mut* fn_node) bool {
+    if (!expect(p, lexer.tok_kind.lparen, "'('")) {
+        return false;
+    }
+    if (!at(p, lexer.tok_kind.rparen)) {
+        while (true) {
+            diag.loc at_loc = here(p);
+            ast.node mut* param = node_at(p, ast.ast_kind.k_param, at_loc);
+            param->a = parse_type(p, false);
+            if (param->a == null || !expect_name(p, param)) {
+                return false;
+            }
+            ast.ast_push(fn_node, finish(p, param));
+            if (!at(p, lexer.tok_kind.comma)) {
+                break;
+            }
+            bump(p);
+            if (at(p, lexer.tok_kind.ellipsis)) {
+                fn_node->tail_loc = here(p);
+                fn_node->flags |= ast.FLAG_VARIADIC;
+                bump(p);
+                break;
+            }
+        }
+    }
+    return expect(p, lexer.tok_kind.rparen, "')'");
+}
+
 /// fn_decl = "fn" identifier "(" [ param_list ] ")" return_type block, with the
 /// `fn` already parsed: the name is the second token and the result comes last.
 /// D8.1
@@ -2210,7 +2241,7 @@ fn parse_fn_top_decl(parser mut* p) ast.node mut* {
     return finish(p, n);
 }
 
-/// extern_decl = "extern" "fn" identifier "(" [ param_list ] ")" return_type
+/// extern_decl = "extern" "fn" identifier "(" [ extern_param_list ] ")" return_type
 /// ";": a declaration with no body.
 /// D9.8
 fn parse_extern_decl(parser mut* p) ast.node mut* {
@@ -2221,7 +2252,7 @@ fn parse_extern_decl(parser mut* p) ast.node mut* {
     }
     ast.node mut* n = node_at(p, ast.ast_kind.k_fn_decl, at_loc);
     n->flags = ast.FLAG_EXTERN;
-    if (!expect_name(p, n) || !parse_params(p, n)) {
+    if (!expect_name(p, n) || !parse_extern_params(p, n)) {
         return null;
     }
     n->a = parse_return_type(p);

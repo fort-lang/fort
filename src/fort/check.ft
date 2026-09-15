@@ -3072,6 +3072,47 @@ fn check_arity(checker mut* ck, ast.node* n, string name, u64 want) bool {
     return false;
 }
 
+/// A C variable tail accepts zero or more arguments after its fixed prefix.
+/// D9.8
+fn check_arity_at_least(checker mut* ck, ast.node* n, string name, u64 want) bool {
+    u64 got = ast.ast_len(n);
+    if (got >= want) {
+        return true;
+    }
+    check_msg_begin(ck);
+    msg_quote(ck, name);
+    msg_str(ck, " takes at least ");
+    msg_uint(ck, want);
+    if (want == 1) {
+        msg_str(ck, " argument, ");
+    } else {
+        msg_str(ck, " arguments, ");
+    }
+    msg_uint(ck, got);
+    msg_str(ck, " given");
+    check_msg_end(ck, n->loc);
+    return false;
+}
+
+/// C default promotions require explicit casts before a variable tail.
+/// D4.5, D9.8
+fn c_tail_legal(types.node* t) bool {
+    switch (t->kind) {
+    case types.type_kind.k_ptr, types.type_kind.k_voidptr, types.type_kind.k_fn:
+        return true;
+    case types.type_kind.k_prim:
+        switch (t->prim) {
+        case prim.prim_kind.prim_i32, prim.prim_kind.prim_u32, prim.prim_kind.prim_i64,
+             prim.prim_kind.prim_u64, prim.prim_kind.prim_f64:
+            return true;
+        default:
+            return false;
+        }
+    default:
+        return false;
+    }
+}
+
 /// The print family (8.3): zero or more printable arguments, each taking its
 /// default type, after the descriptor of the `fprint` forms.
 /// D12.2
@@ -3255,7 +3296,15 @@ fn check_call(checker mut* ck, ast.node mut* n, expr mut* out) void {
         if (f.sym != null) {
             name = f.sym->name;
         }
-        if (!check_arity(ck, n, name, f.ty->params.len)) {
+        bool variadic = f.sym != null && f.sym->kind == ast.sym_kind.s_extern_fn
+            && (f.sym->node->flags & ast.FLAG_VARIADIC) != 0;
+        bool mut arity_ok = false;
+        if (variadic) {
+            arity_ok = check_arity_at_least(ck, n, name, f.ty->params.len);
+        } else {
+            arity_ok = check_arity(ck, n, name, f.ty->params.len);
+        }
+        if (!arity_ok) {
             return;
         }
     }
@@ -3267,6 +3316,13 @@ fn check_call(checker mut* ck, ast.node mut* n, expr mut* out) void {
             check_expr_as(ck, ast_child_mut(n, i), f.ty->params[i], "the argument", &arg);
         } else {
             check_expr_default(ck, ast_child_mut(n, i), &arg);
+            if (known && !check_poisoned(arg.ty) && !c_tail_legal(arg.ty)) {
+                check_msg_begin(ck);
+                msg_str(ck, "C variable tail cannot use type '");
+                check_msg_type(ck, arg.ty);
+                msg_str(ck, "'");
+                check_msg_end(ck, ast.ast_child(n, i)->loc);
+            }
         }
         i += 1;
     }
@@ -4193,6 +4249,15 @@ fn check_extern_agreement(checker mut* ck, ast.node* decl, ast.sym mut* s) bool 
     if (a->params.len != b->params.len) {
         error_extern_conflict(ck, decl->name_loc, note, s->name,
                               ": the number of parameters differs", 0, false);
+        return false;
+    }
+    if ((first->node->flags & ast.FLAG_VARIADIC) != (decl->flags & ast.FLAG_VARIADIC)) {
+        diag.loc mut diff_loc = decl->name_loc;
+        if ((decl->flags & ast.FLAG_VARIADIC) != 0) {
+            diff_loc = decl->tail_loc;
+        }
+        error_extern_conflict(ck, diff_loc, note, s->name, ": the variable-tail mark differs", 0,
+                              false);
         return false;
     }
     u64 mut i = 0;
