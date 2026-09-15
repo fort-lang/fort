@@ -89,13 +89,27 @@ done
 FORT_VM_SLOT=2 tools/vm run build/debug/stage2/fort -S --target "$target" \
     --std-dir "$guest_work/std" -I src/fort -o "$guest_work/fort.ll" \
     build/debug/mac-platform/main.ft
+"$cc" -isysroot "$sdk" -S -O0 -o "$work/fort.s" "$work/fort.ll"
+if ! rg --pcre2 -U -q \
+    'mov[ \t]+x([0-9]+), sp\n[ \t]*str[ \t]+x[0-9]+, \[x\1\]\n[ \t]*bl[ \t]+_fcntl' \
+    "$work/fort.s"; then
+    echo "mac core: compiler fcntl tail has no stack store" >&2
+    exit 1
+fi
 "$cc" -isysroot "$sdk" -O1 -fPIE -Wl,-pie -Wno-override-module \
     -o "$work/fort" "$work/fort.ll"
 mkdir "$work/alias"
 ln -s ../fort "$work/alias/fort"
 "$work/alias/fort" --check test/lang/run/stdlib/053_io_open_errors.ft
+"$work/alias/fort" --cc "$cc" -Xcc '-isysroot' -Xcc "$sdk" \
+    -o "$work/cc_native" test/lang/run/stdlib/004_libc_alloc.ft
+"$work/cc_native" > "$work/cc_native.actual"
+if ! cmp -s "$work/004_libc_alloc.expected" "$work/cc_native.actual"; then
+    echo "mac core: native compiler --cc output differs" >&2
+    exit 1
+fi
 if [ "$("$work/alias/fort" --version)" != "fort 0.1.0" ]; then
     echo "mac core: native compiler version differs" >&2
     exit 1
 fi
-echo "mac core: $count programs pass; 13 C constants; open tail stack slot; native compiler path"
+echo "mac core: $count programs pass; 13 C constants; open and fcntl tail stack slots; native compiler path and --cc"

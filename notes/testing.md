@@ -732,6 +732,7 @@ bullet at a time and without a rewrite.
   It tests 004, 005, 019, 051, 053, 070, 071, 074, 094 and 095 in `test/lang/run/stdlib`.
   It compiles one C open probe to check the Apple arm64 variable-tail stack slot.
   It builds a native compiler and tests its standard root through an executable symlink.
+  It checks the compiler's fcntl stack slot and a native `--cc` build with the Mac default target.
   Only 005 links `ffi/std_libc_flags.c` to compare 13 constants with C headers.
   The other nine programs and the compiler link from LLVM IR alone.
   The Linux VM gate excludes this host test because a Linux guest cannot run Mach-O programs.
