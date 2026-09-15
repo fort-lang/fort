@@ -1164,6 +1164,33 @@ class Judging(unittest.TestCase):
         )
 
 
+# ---- target child environment ----------------------------------------------------------
+
+
+class ChildEnvironment(unittest.TestCase):
+    def test_valid_mac_targets_remove_inherited_qemu_prefix(self):
+        targets = ("arm64-apple-macosx15.0.0", "arm64-apple-macosx26.6.2")
+        with mock.patch.dict(os.environ, {"QEMU_LD_PREFIX": "/inherited"}, clear=True):
+            for target in targets:
+                with self.subTest(target=target):
+                    self.assertNotIn("QEMU_LD_PREFIX", run_tests.child_env("/tmp", target))
+
+    def test_invalid_mac_targets_keep_inherited_qemu_prefix(self):
+        targets = (
+            "arm64-apple-macosx",
+            "arm64-apple-macosx26.6",
+            "arm64-apple-macosx26.6.2.1",
+            "arm64-apple-macosx26.6.x",
+            "arm64-apple-macosx26.6.2-extra",
+            "arm64-apple-macosx26.6.２",
+        )
+        with mock.patch.dict(os.environ, {"QEMU_LD_PREFIX": "/inherited"}, clear=True):
+            for target in targets:
+                with self.subTest(target=target):
+                    env = run_tests.child_env("/tmp", target)
+                    self.assertEqual(env["QEMU_LD_PREFIX"], "/inherited")
+
+
 # ---- end to end with a fake compiler ---------------------------------------------------
 
 

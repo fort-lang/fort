@@ -1230,7 +1230,7 @@ def child_env(workdir, target):
     env = dict(os.environ)
     env["TMPDIR"] = workdir
     env["LC_ALL"] = "C"
-    if target.startswith("arm64-apple-macosx"):
+    if re.fullmatch(r"arm64-apple-macosx[0-9]+\.[0-9]+\.[0-9]+", target):
         env.pop("QEMU_LD_PREFIX", None)
     else:
         env.setdefault("QEMU_LD_PREFIX", DEFAULT_QEMU_LD_PREFIX)
