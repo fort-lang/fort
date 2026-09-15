@@ -93,7 +93,8 @@ Seed tests that exercise every feature live under `test/lang/` in the format def
 
 ## Deliberately not in v1
 
-Generics, unions, tagged unions, methods, closures, variadics, overloading, visibility modifiers,
+Generics, unions, tagged unions, methods, closures, variadic fort function definitions,
+variadic function-pointer types, overloading, visibility modifiers,
 type aliases, separate compilation, conditional compilation, labeled `break`. The full list with
 the idioms that replace each is decision D15.
 

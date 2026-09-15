@@ -196,13 +196,13 @@ fn std_dir() string {
 
 ### 2.2 `std.libc`
 
-Thin `extern` declarations for the libc calls the other modules need, with the C types mapped per
-D9.8: `int` is `i32`, `size_t` is `u64`, `ssize_t` and `off_t` are `i64`, `mode_t` is `u32`,
-`char*` is `char*`, a buffer C fixes as bytes is `u8*` or `u8 mut*`, and a buffer of no fixed
-type is `void*` or `void mut*` (1.4). Names are unmangled (D9.7). `open` is
-variadic in C; the fixed prototype is safe because every extern function is declared and called
-through a variadic LLVM function type, so a variadic callee always learns how many vector
-registers the call used (D9.8, `toolchain.md` 6 item 8).
+The target-specific `std.libc` module supplies C extern declarations and fixed fort wrappers.
+It maps C types per D9.8: `int` is `i32`, `size_t` is `u64`, `ssize_t` and `off_t` are `i64`.
+`mode_t` is `u32` on Linux and `u16` on Mac. `char*` is `char*`.
+A buffer C fixes as bytes is `u8*` or `u8 mut*`. A buffer of no fixed
+type is `void*` or `void mut*` (1.4). C extern names are unmangled (D9.7). `open` is
+variadic in C. The Linux fixed prototype keeps the old variadic LLVM call form (D9.8).
+The Mac library declares `open` with `...` so Apple arm64 places its mode tail on the stack.
 
 ```fort
 // open(2) flags, Linux x86-64 values.

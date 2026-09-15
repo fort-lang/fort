@@ -21,8 +21,9 @@ the end of the enclosing statement (D6.3). The heap is reached only through `new
 only through `del` (D10.1); `new` yields an `own` reference and `del` takes one, so the type of
 a value says whether freeing it is its holder's job (D17.1, section 2.3). String literals and
 module-level constants are placed in read-only memory and are addressable (D3.7, D7.10). Frames
-larger than one page are probed on entry, so a large local array combined with deep recursion
-faults on the guard page instead of skipping over it (D10.8):
+larger than one page are probed on entry. Linux uses `"probe-stack"="inline-asm"`.
+Mac uses `"probe-stack"="__chkstk_darwin"` (D10.8). A large local array with deep recursion
+then faults on the guard page instead of skipping over it:
 
 ```fort
 fn deep(i32 n) i32 {
@@ -828,8 +829,8 @@ Notes:
   section 2.5). A release build stores without looking, and the old allocation leaks.
 - The `noreturn` guard is `call void @llvm.trap()` followed by `unreachable`, emitted after the
   body of a `noreturn` function and after every call to one (D8.5, D19.7). It is reachable only
-  when an `extern` declared `noreturn` returns anyway; the process dies with SIGILL and nothing
-  is flushed.
+  when an `extern` declared `noreturn` returns anyway. Linux x86-64 raises SIGILL.
+  Mac arm64 raises SIGTRAP. Neither target flushes buffered output before that signal.
 - `--no-bounds-check` exists for benchmarking and is unsafe (D10.6).
 
 ```fort

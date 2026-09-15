@@ -53,7 +53,7 @@ line_comment  = "//" { any byte except newline } ;       (* the only comment for
 
 operator = "+%=" | "-%=" | "*%=" | "<<=" | ">>="
          | "+%" | "-%" | "*%" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^="
-         | "==" | "!=" | "<=" | ">=" | "&&" | "||" | "<<" | ">>" | "++" | "--" | "->" | ".."
+         | "==" | "!=" | "<=" | ">=" | "&&" | "||" | "<<" | ">>" | "++" | "--" | "->" | "..." | ".."
          | "+" | "-" | "*" | "/" | "%" | "=" | "<" | ">" | "!" | "&" | "|" | "^" | "~"
          | "?" | ":" | "." | "," | ";" | "(" | ")" | "[" | "]" | "{" | "}"
          | "@" ;                                    (* D2.10; "@" is the span suffix, D3.5 *)
@@ -65,6 +65,7 @@ Notes:
 - `/*` is not a comment introducer: the adjacent pair is a lexical error (D2.2). Separated, `/`
   and unary `*` are the ordinary operators.
 - `1.` and `.5` are not float literals; `1.0` and `0.5` are. `1..5` lexes as `1`, `..`, `5`.
+- `...` is one token. Only an `extern_decl` may use it after its fixed parameter list (D9.8).
 - Nesting depth of `( [ {` and of type suffixes is limited to 256 (D2.11).
 
 ## 2. Module structure
@@ -87,7 +88,8 @@ Whether the last segment of an `import_path` names a module or a symbol is decid
 
 ```ebnf
 fn_decl      = "fn" identifier "(" [ param_list ] ")" return_type block ;   (* D8.1 *)
-extern_decl  = "extern" "fn" identifier "(" [ param_list ] ")" return_type ";" ;  (* D9.8 *)
+extern_decl  = "extern" "fn" identifier "(" [ extern_param_list ] ")" return_type ";" ; (* D9.8 *)
+extern_param_list = param_list [ "," "..." ] ;            (* at least one fixed C parameter *)
 return_type  = type | "void" | "noreturn" ;                                 (* D8.5 *)
 param_list   = param { "," param } ;
 param        = type identifier ;

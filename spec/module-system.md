@@ -180,7 +180,7 @@ other (`stdlib.md` 3).
 
 ## 7. Symbol names
 
-| Entity                          | ELF symbol                   | Example                |
+| Entity                          | IR name                      | Example                |
 |---------------------------------|------------------------------|------------------------|
 | function in module `a.b`        | `a.b.name`                   | `std.io.close`         |
 | constant or global in `a.b`     | `a.b.NAME`                   | `main.TABLE`           |
@@ -191,7 +191,8 @@ other (`stdlib.md` 3).
 | struct, enum, import binding    | none                         |                        |
 
 The module path, a `.` and the declaration name is injective: a module path is already
-`.`-separated (D9.1), so the mangling copies it across unchanged, `.` is legal in ELF symbols and
+`.`-separated (D9.1), so the mangling copies it across unchanged.
+`.` is legal in ELF and Mach-O symbols and
 cannot occur in an identifier, and every segment is an identifier (D9.7). Splitting a symbol on
 its dots therefore recovers the segments it was built from, the last being the declaration name.
 The entry module is the one whose path need not be a segment (section 2, D9.1), and `.` is barred
@@ -207,8 +208,9 @@ is fort, so the compiler reaches it by the dotted names of this table (D13.1) an
 library reaches it with an `import` like any other module.
 In the generated LLVM IR a name is quoted when LLVM's unquoted identifier syntax does not admit
 it (`@"std.io.close"`), with a `"`, a `\` or a non-printable byte inside it written `\XX`, which
-changes the spelling only: LLVM reads the escape back to the byte, so the ELF symbol is the one in
-the table (D9.7, `toolchain.md` 6 item 4).
+changes the spelling only: LLVM reads the escape back to the byte.
+Mach-O adds a leading `_` to each external object symbol, outside the IR name.
+The names in the table stay injective on both targets (D9.7, `toolchain.md` 6 item 4).
 
 ## 8. C foreign function interface
 
@@ -222,15 +224,15 @@ extern fn malloc(u64 n) void mut* own;
 extern fn free(void* own p) void;
 ```
 
-`extern fn` declares a C function with the System V x86-64 ABI (D9.8; `grammar.md` section 3). It
+`extern fn` declares a C function with the selected target C ABI (D9.8; `grammar.md` section 3). It
 is top-level only, has no body, and its symbol is the declared name. Parameter names are required
 by the grammar and otherwise unused. An `extern` function is called like any function and may be
-`noreturn` (D8.5), but its name is not a value: every extern is called through a variadic LLVM
-function type, which an indirect call site cannot take from a callee it does not name (D3.10 as
-amended, D9.8). A fort function wrapping the call is how one reaches C as a pointer: that call is
-direct and keeps the variadic form (D3.10).
+`noreturn` (D8.5), but its name is not a value. Linux keeps the variadic LLVM call form for fixed
+externs. Mac fixed externs use a fixed LLVM call form. A C extern with `...` uses a variadic form
+on both targets (D9.8). An indirect call cannot take that form from an unnamed callee (D3.10).
+A fort function can wrap a direct C call and act as a function pointer.
 
-A `fn R(P...)` in an extern signature is allowed exactly when its own signature is extern-legal,
+A fixed `fn (P) R` in an extern signature is allowed when its own signature is extern-legal,
 result type included, since C calls through it with the same convention (D9.8, D9.9): the rule
 reaches a function pointer nested inside another and one in result position.
 
@@ -238,9 +240,9 @@ reaches a function pointer nested inside another and one in result position.
 |-------------------------------------------------|--------------------------------------|
 | `i8 i16 i32 i64 u8 u16 u32 u64`, `f32 f64`      | `T@` spans, `string`, fixed arrays   |
 | `bool`, `char`, enums (passed as `i32`)         | structs by value                     |
-| `T*`, `T mut*` for any `T`, `void*`             | variadic parameters                  |
+| `T*`, `T mut*` for any `T`, `void*`             | variable tails in function pointers |
 | `own` on any of those pointers (D17.13)         | `own` spans and strings (D9.8)       |
-| `fn R(P...)` whose signature is extern-legal    |                                      |
+| fixed `fn (P) R` whose signature is extern-legal |                                      |
 | return type `void` or `noreturn`                |                                      |
 
 Structs cross the boundary through pointers only. Because struct layout is C layout (D3.8, D9.9),
@@ -257,7 +259,8 @@ and may write the storage (D3.11), so the cast in
 frees nothing takes plain `T*`. Because `own` is part of type identity (D17.1), two modules that
 declare one C symbol with and without it have conflicting declarations (D9.8, section 13):
 
-Two declarations are compared as types, parameter names excepted (D9.8): the check runs in the
+Two declarations are compared as types and by their variable-tail marks (D9.8).
+Parameter names do not affect identity. The check runs in the
 checker, over the whole closure in the dependency order of D9.10, where the types exist. So two
 spellings of one type agree -- `color` in the module that declares the enum and `shade.color` in
 another are one type (D9.4) -- and so do `char` and `u8`, which are one C type at the boundary
@@ -311,7 +314,7 @@ free(cast(alias, void*));                       // error: a view cannot pass to 
 | `int`, `unsigned int`          | `i32`, `u32`                              |
 | `long`, `long long`, `ssize_t`, `off_t` | `i64`                            |
 | `unsigned long`, `size_t`      | `u64`                                     |
-| `mode_t`                       | `u32`                                     |
+| `mode_t`                       | `u32` on Linux; `u16` on Mac              |
 | `_Bool`                        | `bool`                                    |
 | `float`, `double`              | `f32`, `f64`                              |
 | `char*`, `const char*`         | `char*` (or `u8*` for binary data)        |
@@ -340,32 +343,34 @@ crosses as a single 0 or 1.
 
 ### 8.4 Variadic C functions
 
-Fort has no variadics (D8.3) and an extern signature cannot declare one. A variadic C function is
-declared with a fixed prototype for the arguments actually passed, such as
-`extern fn printf(char* fmt, i64 n, f64 x) i32;`. This is safe because System V passes fixed and
-variadic arguments identically and tells a variadic callee how many vector registers were used;
-the compiler declares and calls every extern function through a variadic LLVM function type, so
-that count is always passed (D9.8, `toolchain.md` 6 item 8).
+Fort definitions and function-pointer types have no variable tails (D8.3).
+A C extern may mark a final variable tail after at least one fixed parameter:
 
-One shape per symbol. An extern's symbol is the name it declares (section 8.1), so a second
-prototype under a second fort name is a second C symbol, and one module cannot declare a name
-twice (D7.9) while two modules declaring one symbol must agree (D9.8). Exactly one argument shape
-of a variadic C function is therefore reachable in a program: pick the one the program needs, or
-wrap the call in a fort function per shape *of that one prototype*. An extern link name, which
-would lift this, is deferred (D15).
+```fort
+extern fn printf(char* fmt, ...) i32;
+i32 n = printf("%d\n".ptr, cast(c, i32));
+```
 
-**The prototype must already be promoted, and nothing checks it.** A variadic callee reads its
-arguments with the default argument promotions applied: `float` arrives as `double`, and
-`_Bool`, `char`, `signed char`, `unsigned char`, `short` and `unsigned short` arrive as `int`.
-The declared parameters of a fort prototype are *fixed* LLVM parameters, so the compiler passes
-each exactly as written and cannot know which position is really variadic -- a genuinely fixed
-`f32` parameter and an `f32` standing in a variadic position are the same declaration. A
-variadic position may therefore spell only `i32`, `i64`, `f64`, a pointer or a function
-pointer. `f32` there is wrong: it is passed in the low half of the vector register and the
-callee's `va_arg(double)` reads the other half as well. A narrow integer there happens to
-survive, because the extension attributes of section 8.3 fill the 32-bit register the callee
-reads, but write the promotion anyway: `printf("%d\n".ptr, cast(c, i32))`. The obligation is the
-caller's and no rule enforces it (D15).
+The call must supply the fixed prefix. It can then supply zero or more variable arguments.
+If it supplies fewer fixed arguments, the diagnostic says
+`'printf' takes at least 1 argument, 0 given` for the declaration above.
+The compiler compares the fixed prefix and the `...` mark across declarations of one C symbol.
+Different calls to one declared C symbol may supply different variable-tail counts and types.
+An extern link name or alias remains deferred (D15).
+
+C promotes `float` to `double` and narrow integers to `int` for a variable argument.
+Fort never makes an implicit promotion. A caller casts `f32` to `f64` and narrow values to `i32`.
+An enum also needs `cast(value, i32)`. Direct variable-tail types may be `i32`, `u32`, `i64`,
+`u64`, `f64`, a pointer or a function pointer (D9.8).
+An owning pointer lvalue lends in a variable tail. An owning rvalue would leak and is an error.
+The compiler checks these types. It does not check a C format string's expected argument types.
+Section 13 gives the invalid-tail and owning-rvalue diagnostics.
+
+Linux fixed extern declarations keep the old variadic LLVM call form for compatibility.
+System V passes fixed and variable C arguments through the same registers or stack slots.
+Apple arm64 puts variable C arguments on the stack after the fixed prefix.
+A Mac declaration of a variadic C function must use `...`; a fixed LLVM call form is incorrect.
+`toolchain.md` 6 item 8 specifies both LLVM forms.
 
 ### 8.5 Fort functions as C callbacks
 
@@ -455,7 +460,8 @@ reorders output unless the buffer is flushed first.
 
 ## 9. Calling convention
 
-The internal convention (D9.9) is System V x86-64 for scalars and one rule for aggregates:
+The internal convention (D9.9) has target C scalar registers and one fort aggregate rule.
+Linux x86-64 uses these scalar registers:
 
 - Integers, `bool`, `char`, enums, pointers and function pointers: `rdi rsi rdx rcx r8 r9`, then
   the stack; returned in `rax`.
@@ -464,7 +470,7 @@ The internal convention (D9.9) is System V x86-64 for scalars and one rule for a
   occupying the next integer slot; returned into a caller-provided buffer whose address is passed
   in `rdi` ahead of every other argument and echoed in `rax`.
 
-Differences from System V for aggregates:
+Linux's fort aggregate rule differs from System V:
 
 | Case                         | System V                            | fort v1                  |
 |------------------------------|-------------------------------------|--------------------------|
@@ -478,11 +484,17 @@ In LLVM IR (`toolchain.md` 6 item 7) an aggregate argument is a plain `ptr` para
 `void`; a span or `string` is one pointer and is never split into two scalars. Scalar
 parameters and results carry `zeroext` or `signext` when they are narrower than 32 bits (D9.9).
 
+Mac arm64 passes scalar integers and pointers in `x0` to `x7` and scalar floats in `v0` to `v7`.
+Scalar results use `x0` or `v0`. A fort aggregate argument uses a pointer in the next `x` register.
+A fort aggregate result uses `sret(%T)` in `x8`. The call site must also mark `sret(%T)`.
+Mac C variadic tails use stack slots; fixed C extern calls use ordinary scalar registers (8.4).
+
 Because of these differences an aggregate never appears in an extern signature (D9.8), and the
-compiler never needs System V aggregate classification (D16). Layout is unaffected: structs,
+compiler never needs target C aggregate classification (D16). Layout is unaffected: structs,
 fixed arrays and span headers (`ptr` at offset 0, `len` at offset 8) have C layout, so any
 aggregate can be shared with C through a pointer. Callee-saved registers, stack alignment and the
-rest of the convention are System V; `toolchain.md` states the code generation contract.
+rest of the convention follow the selected C ABI.
+`toolchain.md` states the code generation contract.
 
 ## 10. Compilation model
 
@@ -746,6 +758,7 @@ All diagnostics follow D14.2: `<file>:<line>:<col>: error: <message>`, optionall
 | module-level name reused            | `redeclaration of 'add'`                                |
 | local reusing an enclosing local    | `'i' shadows an enclosing local` (or `a parameter`)     |
 | same extern, different signatures   | `conflicting declarations of extern 'write'`            |
+| same extern, variable mark differs   | `conflicting declarations of extern 'printf'`           |
 | `extern` declaring `fort_entry`     | `'fort_entry' is reserved: the compiler emits it`       |
 | `extern` declaring `main`           | `'main' is reserved: the compiler emits it`             |
 | same extern, `own` differs (D17.1)  | `conflicting declarations of extern 'free'`             |
@@ -757,6 +770,8 @@ All diagnostics follow D14.2: `<file>:<line>:<col>: error: <message>`, optionall
 | entry module without a valid `main` | `entry module 'main' must define 'fn main() i32'`       |
 | entry base name with a `.`          | `entry file name 'my.app' cannot contain '.'`           |
 | aggregate in an extern signature    | `extern signature cannot use type 'i32@'`               |
+| invalid C variable-tail type        | `C variable tail cannot use type 'f32'`                 |
+| owning C variable-tail rvalue       | `owning temporary would leak`                           |
 
 The missing-`main` row is the one diagnostic a build reports and `fort --check` does not: under
 `--check` the root is a module under inspection and D8.6 is not applied (D20.1). Every other row
@@ -767,8 +782,9 @@ Notes accompany some of these: "not found" lists `note: looked for <path>` once 
 reading; the ambiguous case gives the full paths in the message and the same-file case adds `note:
 both name <real path>`; a redeclaration points at the earlier one with `note: previous declaration
 of 'add' here`; the missing-`main` message continues `or 'fn main(string@ args) i32'`. Every
-conflicting-extern row names the difference in the same words: `: the result type differs`, `: the
-number of parameters differs` or `: parameter N differs`. A conflict between two modules is reported
+conflicting-extern row names the difference in the same words:
+`: the result type differs`, `: the number of parameters differs`, `: parameter N differs` or
+`: the variable-tail mark differs`. A conflict between two modules is reported
 at the later declaration of the dependency order, on the piece that carries the difference, with
 `note: previous declaration of 'write' here` at the earlier one; when either of the two types names
 a struct or an enum, a second note says that such a type is its declaration and not its spelling and

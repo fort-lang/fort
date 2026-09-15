@@ -281,8 +281,9 @@ lexical error (D2.2), integer literals in all four bases with `_` separators and
 rule (D2.5), float literals (D2.6), char and string literals with the D2.8 escapes (an unknown
 escape, a char literal that is neither one printable byte nor one escape, and a string that runs to
 the end of the line are painted invalid, D2.7 to D2.9), and every operator and punctuation mark of
-D2.10, including `@` and `..`, split into rules ordered longest-first so that `+%=` wins over `+%`
-and `+`. `mut` and `own` are keywords wherever they appear (D5.3, D17.2) and get their own scopes,
+D2.10, including `@`, `..`, and `...`. The rules put `...` before `..` before `.`.
+They put `+%=` before `+%` before `+`. `mut` and `own` are keywords wherever they appear
+(D5.3, D17.2) and get their own scopes,
 `storage.modifier.mut.fort` and `storage.modifier.own.fort`, so a theme can pick them out of a
 declaration such as `node mut* own mut@ own kids`.
 

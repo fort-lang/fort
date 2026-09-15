@@ -132,11 +132,12 @@ Sections:
 ### D2.10 Operators and punctuation
 - owner: `core-language.md` (Lexical structure), `grammar.md` (Lexical grammar).
 - rule: Operators and punctuation: `+ - * / % +% -% *% = += -= *= /= %= +%= -%= *%= &= |= ^= <<= >>=
-  == != < <= > >= && || ! & | ^ ~ << >> ++ -- ? : . -> .. ( ) [ ] { } , ; @`. Longest match wins
-  (`+%=` before `+%` before `+`). `%` is never a prefix operator, so `+%` is unambiguous. `>>` and
-  `<<` are single tokens.
+  == != < <= > >= && || ! & | ^ ~ << >> ++ -- ? : . -> .. ... ( ) [ ] { } , ; @`.
+  Longest match wins (`...` before `..` before `.`, and `+%=` before `+%` before `+`).
+  `%` is never a prefix operator, so `+%` is unambiguous. `>>` and `<<` are single tokens.
 - history: Amended 2026-09-11: the list held `::`, the module path separator of D9.1; that separator
   became `.`, so `::` is no longer a token and a source holding one lexes two colons.
+  Amended 2026-09-15 (T-140): `...` marks the variable tail of a C extern (D9.8).
 
 ### D2.11 The nesting limit
 - owner: `core-language.md` (Lexical structure), `grammar.md` (Lexical grammar).
@@ -221,8 +222,9 @@ Sections:
 ### D3.8 Structs and value containment
 - owner: `type-system.md`.
 - rule: Structs: `struct name { T1 f1; T2 f2; }` with no trailing semicolon, nominal typing,
-  C/System V layout (fields in order, natural alignment, size rounded to alignment). No methods, no
-  inheritance, no per-field `mut` at the field's own level (D5.5). An empty struct is an error. A
+  selected-target C layout (fields in order, natural alignment, size rounded to alignment).
+  No methods, no inheritance, no per-field `mut` at the field's own level (D5.5).
+  An empty struct is an error. A
   struct may contain itself only through a pointer or span; value-containment cycles are "infinite
   size" errors. A struct B is contained by value in a struct A when a field of A is written `B`, or
   a fixed array of any rank over it (D3.4), and in no other case: a `*` or `@` anywhere in the
@@ -236,6 +238,7 @@ Sections:
 - history: Amended 2026-09-11 (T-082): "value containment" is stated positively, because it decides
   which declarations a struct's layout may wait for and two declaration orders of one pair must be
   one program (D7.10).
+  Amended 2026-09-15 (T-140): layout now follows the selected C target.
 
 ### D3.9 Enums
 - owner: `type-system.md`.
@@ -259,12 +262,11 @@ Sections:
   `i32[4]*[2]`. Identity is structural
   over parameter types (including pointee mutability), return type and `noreturn`; binding-level
   `mut` on parameters is ignored. A function name used as a value, including a qualified `m.f`, has
-  its function type; `&f` and `*f` are errors. The name must be a fort function: an `extern fn` in
-  value position is an error, because every extern is declared and called through a variadic LLVM
-  function type so that a fixed prototype of a variadic C function is safe (D9.8), and an indirect
-  call site has no callee to take that form from, so the vector-register count the ABI requires of a
-  variadic caller would go unset. Wrap it in a fort function to take an address; that call is direct
-  and keeps the variadic form. `null` is a valid function-pointer value; calling it is undefined
+  its function type; `&f` and `*f` are errors. The name must be a fort function.
+  An `extern fn` in value position is an error: the direct call takes its target ABI form from
+  the extern declaration (D9.8), and a function-pointer type has no C variable tail (D8.3).
+  Wrap a C call in a fort function when C needs a function pointer.
+  `null` is a valid function-pointer value; calling it is undefined
   behavior. `==`/`!=` compare identity. Function pointers are in the C bootstrap's subset
   (`toolchain.md` 7.3): a function pointer is an ordinary `ptr` value and a call through one an
   ordinary `call` in LLVM IR (D19.2), so the bootstrap implements them.
@@ -276,6 +278,8 @@ Sections:
   assigned to. With the result last there is no token between the return type and the suffix, so
   the suffix can only belong to the return type and both forms lose their spelling; the struct
   wrapper replaces them.
+  Amended 2026-09-15 (T-140): direct C extern calls now use the selected target ABI form.
+  Function-pointer types stay fixed, and C extern names stay outside value position.
 
 ### D3.11 The void pointer
 - owner: `type-system.md`.
@@ -730,10 +734,13 @@ Sections:
 ### D6.11 Calls
 - owner: `core-language.md` (Expressions).
 - rule: Calls: arguments are matched by position; no defaults, no named arguments, no overloading,
-  no variadics. An `own` parameter takes ownership of its argument (D17.5): an `own` lvalue argument
+  and no variable tails in fort function definitions or function-pointer types.
+  A C extern with `...` accepts a variable tail under D9.8.
+  An `own` parameter takes ownership of its argument (D17.5): an `own` lvalue argument
   must be written `move(x)`, an `own` rvalue passes as it is. A function name, a
   function-pointer-typed expression and a qualified name `mod.f` are callable. A `noreturn` call is
   a terminating statement (D8.4).
+- history: Amended 2026-09-15 (T-140): C extern calls may supply a declared variable tail.
 
 ### D6.12 Float semantics
 - owner: `core-language.md` (Expressions).
@@ -891,8 +898,11 @@ Sections:
 
 ### D8.3 What functions do not have
 - owner: `core-language.md` (Functions).
-- rule: No nested functions, closures, overloading, default arguments, variadics or methods.
+- rule: Fort function definitions and function-pointer types have no variable tails.
+  Functions have no nested definitions, closures, overloading, default arguments or methods.
   Recursion is allowed; depth is bounded only by the OS stack.
+  A C extern declaration may mark a variable tail under D9.8.
+- history: Amended 2026-09-15 (T-140): C extern declarations may mark C variadics.
 
 ### D8.4 Terminating statements
 - owner: `core-language.md` (Functions).
@@ -995,7 +1005,7 @@ Sections:
 - owner: `module-system.md`.
 - rule: Symbol names in the generated code are the module path, a dot and the declaration name:
   `std.io.read_file`, `main.main`. The path is dot-separated already (D9.1), so the mangler is the
-  identity on it and copies it across. Dots are legal in ELF symbols and cannot appear in
+  identity on it and copies it across. Dots are legal in ELF and Mach-O symbols and cannot appear in
   identifiers, so splitting a symbol on its dots recovers the segments it was built from, the last
   being the declaration name and the rest the module path, and the scheme is injective. That
   argument needs every segment of a module path to hold no dot, which is why the entry file's base
@@ -1005,16 +1015,19 @@ Sections:
   (D11.6). `extern` names are unmangled. A name is quoted in LLVM IR when LLVM's unquoted identifier
   syntax does not admit it (`@"std.io.read_file"`), and a `"`, a `\` or any byte outside the
   printable range within it is written `\XX`; that is spelling only, since LLVM reads `\XX` back to
-  the byte, so the ELF symbol is the name of the first sentence unchanged. `fort_entry` and `main`
+  the byte, so the IR name keeps its identity unchanged.
+  Mach-O adds one leading `_` to each external object symbol; the IR name does not contain it.
+  `fort_entry` and `main`
   are reserved: the compiler emits their definitions (D11.6), so an `extern` declaring either name
   is an error and not a second declaration of it -- nothing can check a declared signature against a
   definition the compiler writes itself, and a mismatch is otherwise a silent call through the wrong
   type. The reserved `main` is the C entry point and not the entry module's `fn i32 main`, whose
   symbol is `<entry>.main` (D8.6) and which collides with nothing. Fort functions, constants and
   globals are `dso_local` with the default external linkage (D9.6), so fort-to-fort calls are direct
-  and fort data is addressed PC-relative; `extern` symbols are not `dso_local` and are reached
-  through the procedure linkage and global offset tables; the runtime is fort, so a call into it is
-  a direct fort-to-fort call like any other.
+  and fort data is addressed PC-relative; `extern` symbols are not `dso_local`.
+  Linux reaches them through procedure linkage and global offset tables.
+  Mac reaches them through Mach-O stubs and global offset tables.
+  The runtime is fort, so a call into it is a direct fort-to-fort call like any other.
 - history: Amended 2026-09-10 with D19: the assembler directives that spelled this became IR linkage
   words. Amended 2026-09-11: quoting was said to cover dotted names and to keep the emitter free of
   per-name analysis, which left a legal entry base name holding a `"` emitting invalid IR that clang
@@ -1026,30 +1039,48 @@ Sections:
   C names in a reserved `fort_rt_` space, that reservation is withdrawn with the C runtime (D13.1 as
   amended), and `main` joined `fort_entry` as a name the compiler emits and an `extern` may not
   declare (D11.6).
+  Amended 2026-09-15 (T-140): Mac uses Mach-O stubs and the same fort symbol names.
 
 ### D9.8 Extern declarations
 - owner: `module-system.md`.
-- rule: `extern fn write(i32 fd, u8* buf, u64 n) i64;` declares a C function with the System V
-  x86-64 ABI. Extern signatures may use only integers, floats, `bool`, `char`, enums (passed as
-  `i32`), pointers and function pointers: no spans, strings, structs or arrays, and no variadics.
-  Every extern function is declared and called through a variadic LLVM function type (`declare i32
-  @printf(ptr, ...)`, called as `call i32 (ptr, ...) @printf(...)`), which makes the caller pass the
-  vector-register count the ABI requires of callers of variadic functions, so a fixed-prototype
-  declaration of a variadic C function is safe; a non-variadic callee ignores that count, so the
-  same declaration is ABI-identical for it (D19.2). That argument covers direct calls only, since
-  the variadic form comes from the callee's declaration, which is why an `extern` name is not a
-  value (D3.10). Extern call sites are `nobuiltin`, so no library-call rewriting replaces a symbol
-  the program declared. Narrow integers and `bool` are normalized with zero- or sign-extension on
-  both sides of the boundary, expressed as the `zeroext` and `signext` parameter and result
-  attributes of D9.9, which normalize on both sides of the call by construction. C `char*` maps to
-  `char*` (or `u8*`); `size_t` to `u64`; `ssize_t` and `off_t` to `i64`; `mode_t` to `u32`; `int` to
-  `i32`; `long` to `i64`; `double` to `f64`. The same C symbol may be declared `extern` in several
-  modules provided the signatures are identical, parameter names excepted, `own` qualifiers included
-  (D17.13). Fort `char` is C's `unsigned char` at the boundary (`i8 zeroext`, D3.2). The compiler
+- rule: `extern fn write(i32 fd, u8* buf, u64 n) i64;` declares a C function.
+  Linux x86-64 uses the System V C ABI. Mac arm64 uses the Apple arm64 C ABI.
+  The signature may use integers, floats, `bool`, `char`, enums, pointers and function pointers.
+  The signature excludes spans, strings, structs and arrays by value.
+  `extern fn printf(char* fmt, ...) i32;` declares a C variable tail.
+  It follows one or more fixed parameters.
+  Only an extern declaration may write `...`. A fort definition or function-pointer type cannot.
+  A call supplies at least the fixed parameter count and may supply more arguments only for `...`.
+  A variable tail accepts `i32`, `u32`, `i64`, `u64`, `f64`, pointers and function pointers.
+  It rejects narrow integers, `bool`, `char`, enums, `f32` and aggregates as direct tail arguments.
+  The caller casts narrow integers, `bool`, `char` and enums to `i32` for C default promotions.
+  It casts `f32` to `f64`. A variable tail does not transfer ownership.
+  An owning pointer lvalue lends through the tail; an owning rvalue is an error (D17.8).
+  The compiler checks tail types, not C format strings or a C callee's expected tail types.
+  For Linux, a fixed extern keeps the old variadic LLVM declaration and call form (D19.2).
+  Linux passes fixed and variable C arguments by the same System V registers or stack slots.
+  For Mac, a fixed extern uses a fixed LLVM declaration and call form.
+  A Mac extern with `...` uses a variadic LLVM form with its fixed prefix.
+  Apple arm64 puts fixed C arguments in their normal registers.
+  It puts the variable tail on the stack.
+  A Mac fixed declaration of a variadic C function is an incorrect C prototype.
+  The variable tail must appear in that function's Mac extern declaration.
+  An extern name is not a value; its ABI form comes from its declaration (D3.10).
+  Extern call sites are `nobuiltin`, so rewriting cannot replace a declared C symbol.
+  Narrow fixed parameters and results use D9.9's `zeroext` and `signext` attributes.
+  C `char*` maps to `char*` or `u8*`; `size_t` to `u64`; `ssize_t` and `off_t` to `i64`.
+  C `mode_t` maps to `u32` on Linux and `u16` on Mac; C `int` maps to `i32`.
+  C `long` maps to `i64`; C `double` maps to `f64`.
+  A variable mode argument to C `open` uses promoted `i32` or `u32`, not Mac's fixed `u16`.
+  The same C symbol may be declared in several modules when the signatures are identical.
+  Identity includes the variable-tail mark, fixed parameter types, result type and `own` (D17.13).
+  Parameter names do not affect identity. Fort `char` is C's `unsigned char` (`i8 zeroext`, D3.2).
+  The compiler
   never emits a call to a C symbol of its own accord: anything it needs at run time is a call to a
   function of `std.rt` (D13.1), whose symbols are mangled fort names (D9.7) and so cannot be the
   name of any C library function. A compiler-emitted `@memcmp` would be a second declaration of an
-  ELF symbol a program may also declare `extern`, against D9.7's one entity per symbol, and it is
+  target C symbol a program may also declare `extern`.
+  This breaks D9.7's one entity per symbol, and it is
   the library-call rewriting `nobuiltin` exists two sentences above to prevent. `std.rt` reaches the
   C library through `std.libc`, with `extern` declarations that answer to this decision like every
   other module's. The runtime occupies no C name of its own, so nothing a program declares `extern`
@@ -1057,7 +1088,8 @@ Sections:
   transitive, so `std.libc`'s declarations are in every closure too, and a program that declares one
   of those C symbols itself must now agree with `std.libc`'s signature, `own` included (D17.13).
   That is a real tightening and it is this decision working: two disagreeing declarations of one C
-  symbol are one ELF symbol reached through two types, which is the bug the identity rule exists to
+  symbol are one target C symbol reached through two types.
+  This is the bug the identity rule exists to
   catch. A program that wants a different spelling of `write` or `free` imports `std.libc` and calls
   it rather than redeclaring it.
 - history: Amended 2026-09-14 (T-136): an extern was written `extern fn R name(P);`, with the
@@ -1094,33 +1126,35 @@ Sections:
   every closure behind `std.rt` (D9.10), so a program's own declaration of a libc symbol is now held
   against `std.libc`'s, where before it was held against nothing unless the program imported the
   library.
+  Amended 2026-09-15 (T-140): C externs gained an explicit variable tail for both targets.
+  Mac fixed externs gained fixed LLVM calls. Linux fixed extern IR keeps its old form.
 
 ### D9.9 The internal calling convention
 - owner: `module-system.md`.
 - rule: Internal calling convention (v1 simplification): integers, pointers, `bool`, `char`, enums,
-  function pointers and floats are passed and returned in registers per System V; every aggregate
+  function pointers and floats use the selected target's scalar C registers; every aggregate
   (struct, fixed array, span, `string`) is passed by a hidden pointer to a caller-made copy and
   returned through a hidden result pointer. Struct layout stays C-compatible, so pointer-based
-  interop works. A fort function is usable as a C callback exactly when its signature is
-  extern-legal, function-pointer parameters included (D3.10). In LLVM IR an aggregate argument is a
+  interop works. A fort function is usable as a C callback exactly when its signature is fixed
+  and extern-legal, function-pointer parameters included (D3.10).
+  In LLVM IR an aggregate argument is a
   plain `ptr` parameter, never `byval`, and an aggregate result is a leading `ptr sret(%T)`
   parameter on a function returning `void`; a span or `string` stays one hidden pointer and is never
   split into two scalars, so `fort_entry` takes the argument span as one `ptr` (D11.6) by this rule
   and by no exception to it. `bool`, `char`, `u8` and `u16` parameters and results carry `zeroext`,
   `i8` and `i16` carry `signext`, and nothing wider carries an extension attribute, in fort and
-  extern signatures alike (D9.8). `sret(%T)` is written on the definition's parameter and not at the
-  call site, which passes the destination as a plain `ptr`: on x86-64 the two are identical, since
-  the pointer takes the first integer register either way and the `rax` echo is driven by the
-  callee's attribute, so the only consumer of a call-site `sret` is tail-call eligibility, which can
-  suppress an optimization but never change meaning. That holds while every aggregate-returning
-  callee is one the compiler also defines; an aggregate-returning `declare` would make the call site
-  the only description and the question would have to be asked again, which D9.8 forbids by keeping
-  aggregates out of extern signatures.
+  extern signatures alike (D9.8).
+  The definition marks its result pointer `sret(%T)` on both targets.
+  Linux calls pass that pointer as a plain `ptr`; it takes the first integer register.
+  Mac calls also mark that pointer `sret(%T)`; Apple arm64 puts it in `x8`.
+  A plain Mac call pointer would take `x0` and would break a return with scalar parameters.
+  Extern signatures exclude aggregate results, so these result rules govern fort-to-fort calls.
 - history: Amended 2026-09-10 with D19: the register-level spelling of the same convention is now
   LLVM's job, and the prototype read `const struct fort_slice*` while spans were called slices
   (D3.5). Amended 2026-09-11 (T-088): `fort_entry` was called from the C runtime, so this decision
   stated its C prototype; with `main` emitted by the compiler (D11.6 as amended) its span parameter
   is an ordinary aggregate parameter of this convention.
+  Amended 2026-09-15 (T-140): Apple arm64 calls need call-site `sret` to use `x8`.
 
 ### D9.10 Whole-program compilation
 - owner: `module-system.md`.
@@ -1222,10 +1256,11 @@ Sections:
 ### D10.8 Stack probes
 - owner: `memory-model.md`.
 - rule: Frames larger than one page are probed so that a large local array plus recursion faults
-  instead of skipping the guard page. The probing is requested with the `"probe-stack"="inline-asm"`
-  attribute on every fort definition, so a module produced by `-S` carries the guarantee whatever
-  the driver line is (D19.1).
+  instead of skipping the guard page. Linux requests `"probe-stack"="inline-asm"`.
+  Mac requests `"probe-stack"="__chkstk_darwin"` on every fort definition.
+  A module produced by `-S` carries the guarantee whatever the driver line is (D19.1).
 - history: Amended 2026-09-10 with D19: the compiler emitted the page touches itself.
+  Amended 2026-09-15 (T-140): Apple clang's C IR uses `__chkstk_darwin`.
 
 ## D11 Build modes and the runtime contract
 
@@ -1272,13 +1307,15 @@ Sections:
   | overwriting a live `own` value (D17.11) | `overwriting owned value`                     |
   | an enum value no clause names (D7.7) | `enum value 0 is not a member of level`          |
 
-  The end of a `noreturn` function is guarded by a trap (SIGILL, no message, D19.7), since a
-  conforming body never reaches it. `<file>` is the path the compiler opened (search root as given
+  The end of a `noreturn` function has a trap (D19.7). Linux x86-64 raises SIGILL.
+  Mac arm64 raises SIGTRAP. Neither target writes a message for this trap.
+  A conforming body never reaches it. `<file>` is the path the compiler opened (search root as given
   plus the relative module path); the column of a check is that of its operator token, or of the
   builtin's name for `new`, `assert` and `panic`, or of the `switch` keyword for the default of
   D7.7; the `assert` text is the source text of the expression, verbatim.
 - history: Amended 2026-09-10: the bounds message read `slice bounds ...` while spans were called
   slices (D3.5). Amended 2026-09-11 (T-020): the enum `switch` default of D7.7 was added.
+  Amended 2026-09-15 (T-140): the `noreturn` trap now names both target signals.
 
 ### D11.5 Output buffering
 - owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime).
@@ -1459,8 +1496,9 @@ Sections:
 - rule: `fort [options] entry.ft`. Options: `-o <file>` (default `a.out`), `-S` (stop after emitting
   `<entry>.ll`, D19.1), `-c` (stop after the object file), `-I <dir>` (repeatable), `--std-dir
   <dir>` (default `$FORT_STD_DIR`, else `std` beside the binary), `--release` (D11.1),
-  `--no-bounds-check` (D10.6), `-l<lib>` (passed to the linker), `--cc <path>` (default `clang`; it
-  must be a clang, since it compiles LLVM IR), `--target <triple>` (default `x86_64-linux-gnu`,
+  `--no-bounds-check` (D10.6), `-l<lib>` (passed to the linker), `--cc <path>` (default `clang`
+  on Linux and `/usr/bin/clang` on Mac; it must be a clang that compiles LLVM IR),
+  `--target <triple>` (default built target,
   passed to `--cc` as `--target=<triple>`), `-Xcc <arg>` (repeatable, passed to `--cc` verbatim
   after the compiler's own arguments), `--check` (D20.1), `--json` (D20.2, only with `--check`),
   `--index` (D20.3, which implies `--check --json`), `--tokens` (lex the entry file alone and write
@@ -1470,6 +1508,25 @@ Sections:
   it with `--tokens`, `--check`, `--json` or `--index` is a usage error), `--help`, `--version`.
   Exit status: 0 success, 1 compile error, 2 usage, toolchain (`--cc` failed) or internal error;
   usage and toolchain errors are printed as `fort: error: <message>`.
+  A Linux x86-64 compiler stores `x86_64-linux-gnu` as its built target.
+  A Mac arm64 compiler stores `arm64-apple-macosxM.m.p` as its built target.
+  Its build reads `sw_vers -productVersion` for the host version.
+  A numeric `M.m` result becomes `M.m.0`; a numeric `M.m.p` result stays unchanged.
+  The build rejects any other version shape instead of guessing a target triple.
+  The driver uses the stored built target when `--target` is absent.
+  The compiler accepts `x86_64-linux-gnu` and `arm64-apple-macosxM.m.p` target forms.
+  In IR modes, it rejects any other target form as a usage error with status 2.
+  `-S --target` may select the other target and must emit IR for that selected target.
+  A non-built target with `-S` requires an explicit `--std-dir` option before IR emission.
+  When `-S` and `-c` occur together, `-S` wins and permits that cross-target IR output.
+  The caller must supply standard sources that match the selected target's C ABI and constants.
+  The compiler checks that the option is present; it does not verify the sources' C ABI.
+  Without `-S`, `-c` and linking require the selected target to equal the built target.
+  They reject a different target with usage status 2 before IR or object output.
+  The Mac compiler gets its running binary path from `_NSGetExecutablePath`.
+  It uses `realpath` when that call succeeds. It uses the returned path if `realpath` fails.
+  It then looks for `std` beside the binary. Linux uses `/proc/self/exe` for that lookup.
+  `FORT_STD_DIR` and an explicit `--std-dir` keep their existing precedence.
 - history: Amended 2026-09-10 with D19: `-S` emitted `<entry>.s`, `--cc` defaulted to `cc`, and
   `--target` and `-Xcc` did not exist. Amended 2026-09-10 with D20: `--check`, `--json` and
   `--index` did not exist. Amended 2026-09-11: `--tokens` did not exist. It is the observation point
@@ -1478,6 +1535,10 @@ Sections:
   `--ast` did not exist. It is the same observation point one pass later, the two compilers' syntax
   trees being compared file by file over the whole repository, and it is what a compiler with a
   parser and no checker can do.
+  Amended 2026-09-15 (T-140): defaults now follow the binary's built target.
+  Cross-target `-S` now uses a caller-selected standard root. Mac finds its binary through
+  `_NSGetExecutablePath`.
+  Amended 2026-09-15 (T-140): a two-component host version now gets a zero patch part.
 
 ### D14.2 Diagnostics and recovery
 - owner: `toolchain.md`.
@@ -1532,9 +1593,16 @@ Sections:
   at the object; the executable is position-independent. The module holds the whole program, the
   runtime included (D9.10, D13.1), so the only inputs the line names are that module and the
   libraries the program asked for.
+  The Linux x86-64 `--cc` line keeps its existing arguments and order.
+  Mac arm64 links with `<cc> --target=<built target> -O1 -fPIE -Wl,-pie
+  -Wno-override-module -o <out> <entry>.ll [-l<lib>...] [<-Xcc args>...]`.
+  Mac uses `-O2` under `--release`. `-c` removes `-Wl,-pie` and link libraries.
+  The Mac default `--cc` is `/usr/bin/clang`; the Linux default stays `clang`.
+  Neither target links an object from a fort C runtime (D13.1).
 - history: Amended 2026-09-10 with D19: generated code was GNU assembly, assembled and linked by the
   system C compiler. Amended 2026-09-11 (T-088): the line also named `<std-dir>/fort_rt.o`, the C
   runtime object (D13.1 as amended).
+  Amended 2026-09-15 (T-140): Mac uses Apple clang and the Mach-O PIE linker flag.
 
 ### D14.4 Where the language tests live
 - owner: `toolchain.md`.
@@ -1596,7 +1664,8 @@ Sections:
 Deferred deliberately. The specification lists each with the idiom to use instead.
 
 Generics; untagged unions (idiom: a fat struct with a kind field); tagged unions and `Result`
-(idiom: D13.3); methods; closures and nested functions; variadic functions; overloading; default
+(idiom: D13.3); methods; closures and nested functions; variadic fort function definitions;
+variadic function-pointer types; overloading; default
 and named arguments; visibility modifiers; type aliases; integer-range `for`; struct, array and
 span equality; definite-assignment analysis (idiom: initialize with `{}` or a sentinel);
 alignment and packed attributes (idiom: an opaque `u8[N]` field and a C shim); separate
@@ -1607,16 +1676,13 @@ string `switch`; linear ownership, that is compile-time detection of leaks and o
 `move` (idiom: `defer del`, and the zeroing that `move` and `del` leave behind, D17); `goto`
 (never). Amended 2026-09-10: spans were called slices (D3.5).
 
-Deferred at the C boundary (2026-09-11, T-025). An `extern` has no link name of its own: its
-symbol is the name it declares (D9.8), so two prototypes for two argument shapes of one variadic
-C function cannot coexist, since a second fort name is a second C symbol and one module may not
-declare a name twice (D7.9). Exactly one shape of any variadic C symbol is therefore reachable in
-a program; the idiom is to pick the shape the program needs, and an extern link name or alias is
-the capability that would lift it. Nor can the compiler check the default argument promotions a
-variadic callee applies: a fixed prototype makes every declared parameter a fixed LLVM parameter,
-and nothing distinguishes a genuinely fixed `f32` parameter from one standing in a variadic
-position, so `module-system.md` 8.4 states the promotions as the caller's obligation and no rule
-enforces them.
+Deferred at the C boundary (2026-09-11, T-025): an extern link name or alias.
+An extern still has no link name of its own; its declared name is its C symbol (D9.8).
+Two declarations of one symbol must agree on their fixed prefix and variable-tail mark.
+Amended 2026-09-15 (T-140): a C extern may now declare `...` after its fixed prefix.
+Calls to that declaration may use different tail counts and types.
+The compiler rejects tail types that require C default promotions.
+The caller writes the explicit promotion cast. The compiler does not check C format strings.
 
 Deferred in the runtime (2026-09-11, T-088): a flag that leaves `std.rt` out of the import
 closure, for a program that carries a runtime of its own or targets an environment with none.
@@ -1658,9 +1724,9 @@ Findings from the design reviews that look like bugs but are deliberate.
   named where it stands rather than reported as the `;` that ending the path early leaves missing
   (module-system.md 13). Weighed and rejected with it on 2026-09-11: dropping the separator before
   the brace of the grouped form, and leaving that one form on `::`.
-- `extern` signatures exclude aggregates so the compiler does not need System V aggregate
+- `extern` signatures exclude aggregates so the compiler does not need target C aggregate
   classification in v1.
-- Generated code must be position-independent: `--cc` is invoked with `-fPIE -pie` (D14.3) and
+- Generated code must be position-independent: `--cc` uses target PIE flags (D14.3) and
   the module names no absolute address; do not rely on `-no-pie`.
 - The emitter appends LLVM IR text and never links or calls libLLVM (D19.1); the C API is
   deferred (D15), so no build of the compiler ever needs LLVM's headers or libraries.
@@ -2015,11 +2081,14 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   the whole program (D9.10), built by string appending in one forward pass, and hands it to clang
   (D14.3). The compiler never links libLLVM or calls its C or C++ API: the bootstrap stays a
   dependency-free C11 program and the self-hosted compiler needs no foreign bindings. The module
-  carries `target triple = "x86_64-unknown-linux-gnu"` and no datalayout, module flags, comments or
-  `source_filename`. Every emitted module must pass `opt -passes=verify`; the language-test harness
+  carries `target triple = "x86_64-unknown-linux-gnu"` for Linux or the selected
+  `arm64-apple-macosxM.m.p` for Mac. It carries no datalayout, module flags, comments or
+  `source_filename`. Clang derives the target layout from the selected triple.
+  Every emitted module must pass `opt -passes=verify`; the language-test harness
   checks that (`run_tests.py --verify-ir`) and the pipeline test checks its hand-written samples
   under `test/ir/`, which are the reference for the form of a module until the contract below says
   otherwise.
+- history: Amended 2026-09-15 (T-140): Mac IR uses the selected Apple triple without a datalayout.
 
 ### D19.2 Type mapping
 - owner: `toolchain.md` (6, the IR contract).
@@ -2065,14 +2134,22 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   (D7.7); a fresh block for the statements D14.2 allows after a terminating one. Together with D19.3
   this is what keeps the module verifier-clean without any analysis in the emitter.
 
-### D19.5 The emitted text is a function of the program
+### D19.5 The emitted text is a function of the program and target
 - owner: `toolchain.md` (6, the IR contract).
-- rule: The emitted text is a function of the program alone, so that a self-hosted compiler reaches
-  a fixpoint: stage2 and stage3 must emit byte-identical modules for the same sources in both build
-  modes. The toolchain must make two comparisons in each build mode. It must compare with `cmp` the
+- rule: The emitted text is a function of the program, selected target and invocation inputs
+  other than the `-o` output path.
+  Two `-S` runs use identical arguments except the `-o` output path.
+  That path does not enter the emitted IR text.
+  A self-hosted compiler reaches a fixpoint when stage2 and stage3 emit byte-identical modules
+  for the same sources and selected target in both build modes.
+  The toolchain must make two comparisons in each build mode. It must compare with `cmp` the
   `-S` output that two distinct stages emit for one input, with `diff` as the debugging output, and
-  it must compare two stage binaries byte for byte. Equal binaries are one program, so by the first
-  sentence of this rule they emit one module for one input, and the toolchain must not add a third
+  it must compare two stage binaries byte for byte.
+  On Mac, both links use one output pathname.
+  The toolchain copies the first binary before relinking.
+  Equal binaries are one program, so by the first
+  sentence of this rule they emit one module for one input and selected target.
+  The toolchain must not add a third
   `-S` run over stage3 to compare that text. That inference assumes the determinism this rule
   states, so the binary comparison tests a consequence of this rule and not the rule itself. The
   module comparison of two distinct stages narrows the gap, and no comparison this rule requires
@@ -2090,11 +2167,13 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   by construction and never by iteration over a hash table: modules in dependency order,
   declarations in source order, runtime declarations in the fixed order of `toolchain.md` 5.1,
   intrinsics in a fixed table order, `extern` declarations in first-use order, attribute groups at
-  fixed indices with unused indices simply absent. Nothing in the text depends on the environment:
+  fixed indices with unused indices simply absent.
+  Apart from the selected target, nothing in the text depends on the environment:
   no timestamps, no compiler version, no comments, no `!llvm.ident`, and no path other than the ones
   D11.4 prints, which `@.file.<N>` holds exactly as the compiler opened them, so comparing two
-  stages means invoking them identically (same working directory, same arguments) rather than
-  expecting path-free text. An integer constant is printed in decimal without padding and with the
+  stages means using the same working directory and arguments except `-o`.
+  Source roots, build mode and selected target still match; the IR is not path-free.
+  An integer constant is printed in decimal without padding and with the
   signedness of its fort type (`store i8 -1` for an `i8`, `store i8 255` for a `u8`, and `i64` MIN
   as `-9223372036854775808`); a float constant is printed as the LLVM hex literal of its `double`
   bit pattern, an `f32` constant converted to `double` first, so no decimal rounding can differ
@@ -2139,6 +2218,11 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   is met word for word. T-131 weakened nothing. The module comparison the script ran before was
   wider than the requirement above, because it held two compilers against each other; the
   comparison from this date is the one the two sentences above describe.
+  Amended 2026-09-15 (T-140): the selected target now determines the IR header.
+  Mac binary comparisons use an identical linker output path for both stages.
+  Apple code signatures can differ when only the output path differs.
+  The toolchain snapshots the first binary before it links the second at that path.
+  Amended 2026-09-15 (T-140): two `-S` runs may use different `-o` paths without changing IR.
 
 ### D19.6 Checks and failure blocks
 - owner: `toolchain.md` (6, the IR contract).
@@ -2162,9 +2246,12 @@ assembly, survives only in the history of this file and of `toolchain.md`.
 ### D19.7 The trap after a noreturn body
 - owner: `toolchain.md` (6, the IR contract).
 - rule: The trap D8.5 requires after the body of a `noreturn` function and after every call to one
-  is `call void @llvm.trap()` followed by `unreachable`. `llvm.trap` is `ud2` on x86-64, so D11.4's
-  SIGILL with no message is unchanged; `unreachable` alone is not a trap, since LLVM is free to let
-  control fall through it, which is why the call is emitted and not just the terminator.
+  is `call void @llvm.trap()` followed by `unreachable`.
+  Linux x86-64 lowers `llvm.trap` to `ud2` and raises SIGILL.
+  Mac arm64 lowers it to `brk` and raises SIGTRAP. Neither target writes a message.
+  `unreachable` alone is not a trap; LLVM can let control fall through it.
+  The compiler therefore emits the call and not only the terminator (D11.4).
+- history: Amended 2026-09-15 (T-140): the trap signal now follows the selected target.
 
 ## D20 Editor support
 

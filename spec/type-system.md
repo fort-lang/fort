@@ -275,8 +275,9 @@ del(s);                              // error: 's' is a string, not a string own
 
 `struct name { T1 f1; T2 f2; }` declares a nominal type with no trailing semicolon (D3.8). Fields
 are laid out in declaration order with natural alignment and the size is rounded up to the
-struct's alignment (the largest field alignment), exactly as the System V C ABI lays out the same
-C struct. A struct has no methods and no inheritance. An empty struct is an error. A struct may
+struct's alignment (the largest field alignment), exactly as the selected target C ABI lays out
+the same C struct. A struct has no methods and no inheritance.
+An empty struct is an error. A struct may
 contain itself only through a pointer or a span; containment by value is an "infinite size"
 error (D3.8, D7.10). Structs are values (section 1) and support neither `==` nor `!=` (D3.13).
 
@@ -375,8 +376,10 @@ aborts (D7.7, D11.4).
 
 A function type is written `fn (P1, P2) R` with parameter types only (D3.10, D8.1). A function
 name, or a qualified name `m.f` naming a function in module `m`, used as a value has its function
-type. Identity is structural over the parameter types
-including the mutability levels behind their indirections and their `own` marks (D17.1), the
+type. Function-pointer types have no variable tail (D8.3).
+A C extern with `...` is not a pointer value (D3.10).
+Identity is structural over the parameter types, including the mutability levels behind their
+indirections and their `own` marks (D17.1), the
 return type, and whether the function is `noreturn`; `mut` at level 0 of a parameter is ignored
 (D3.10, D5.6). `null` is a valid value; calling it is undefined behavior (D10.7). `==` and `!=`
 compare identity. A function-pointer type itself is never `own` (D17.1).
@@ -1391,7 +1394,7 @@ u64 g = sizeof(void);                // error
 
 Semantically every parameter and result is passed by value (D8.2): scalars and reference values
 copy the scalar or the fat pointer; structs and fixed arrays copy the whole value. The internal
-calling convention realizes this as follows (D9.9):
+calling convention realizes this as follows (D9.9). This table shows Linux x86-64 registers:
 
 | Value kind                                    | Passed                        | Returned        |
 |-----------------------------------------------|-------------------------------|-----------------|
@@ -1399,9 +1402,13 @@ calling convention realizes this as follows (D9.9):
 | `f32`, `f64`                                  | SSE registers (System V)      | `xmm0`          |
 | struct, fixed array, span, `string`           | pointer to a caller-made copy | hidden pointer  |
 
-The registers are what System V assigns; the compiler expresses the convention in LLVM IR as
+Mac arm64 uses `x0` to `x7` for scalar integers and pointers, and `v0` to `v7` for floats.
+It returns scalars in `x0` or `v0`. It uses `x8` for a fort aggregate result pointer.
+The call site marks that pointer `sret(%T)` on Mac (D9.9).
+
+The Linux registers are what System V assigns; the compiler expresses the convention in LLVM IR as
 ordinary scalar parameters, a plain `ptr` parameter for an aggregate argument and a leading
-`ptr sret(%T)` parameter for an aggregate result, and LLVM assigns the registers
+`ptr sret(%T)` parameter for an aggregate result. LLVM assigns the target registers
 (`toolchain.md` 6 item 7).
 
 Struct layout is identical to the C layout of the same declaration, so passing `&s` to C works.

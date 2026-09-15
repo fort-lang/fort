@@ -82,8 +82,9 @@ string s = "a" "b";       // error: expected ';' (literals do not concatenate)
 ### 2.5 Operators, punctuation and nesting (D2.10, D2.11)
 
 The tokens are `+ - * / % +% -% *% = += -= *= /= %= +%= -%= *%= &= |= ^= <<= >>= == != < <= > >=
-&& || ! & | ^ ~ << >> ++ -- ? : . -> .. ( ) [ ] { } , ; @`, the last of them the span suffix
+&& || ! & | ^ ~ << >> ++ -- ? : . -> .. ... ( ) [ ] { } , ; @`, the last of them the span suffix
 of a type (D3.5, section 4). The lexer takes the longest match (`+%=` before `+%` before `+`).
+It takes `...` before `..` before `.`. Only a C extern declaration uses `...` (D9.8).
 `%` is never a prefix operator, so `a+%b` is unambiguously `a +% b`. `<<` and `>>` are single
 tokens. Nesting of blocks, parentheses, brackets, braces and type suffixes deeper than 256 is a
 compile error, so a recursive-descent compiler written in fort never needs an unbounded stack.
@@ -448,7 +449,7 @@ fn steal(node* own@ view, node mut* own mut@ slots, vec* v, vec mut* w) void {
 | function    | `fn (i32, i32) i32`  | 8        | `null`      | identity | D3.10       |
 
 Alignment equals size for primitives; pointers, function pointers, spans and strings align to
-8, arrays to their element and structs to their most-aligned field, with C/System V layout
+8, arrays to their element and structs to their most-aligned field, with selected-target C layout
 (D3.1, D3.8). `void` is not a value type (`void v = f();` is an error). Type suffixes (D3.6)
 read as follows: a reference suffix, `*` or `@`, applies to everything to its left, so a sequence
 of them reads inside-out (`node*@` is a span of pointers, `u8@*` a pointer to a span); fixed-
@@ -684,8 +685,9 @@ Arguments are matched by position and must convert to the parameter types (only 
 3.4 and 3.9 and the untyped-constant conversion of 5.3 apply). An `own` parameter takes
 ownership of its argument (D6.11, D17.5): an `own` lvalue argument is written `move(x)` and an
 `own` rvalue passes as it is; an `own` argument to a non-`own` parameter is lent, unless it is
-an rvalue, which would leak (D17.8). There are no defaults, named arguments, overloading or
-variadics. A function name, a function-pointer-typed expression and a
+an rvalue, which would leak (D17.8). Fort functions have no defaults, named arguments,
+overloading or variable tails. A C extern with `...` accepts arguments after its fixed prefix
+(D9.8). A function name, a function-pointer-typed expression and a
 qualified name `mod.f` are callable; calling a null function pointer is undefined behavior. A
 call statement to a `noreturn` function is a terminating statement (7.3). Arguments and results
 are passed by value (7.1).
@@ -1148,7 +1150,8 @@ The keyword makes top-level and statement-level parsing unambiguous while the de
 reads like C. Parameter names are required, also in `extern` declarations. Functions are
 declared at module level only, are visible throughout the module regardless of order, and enter
 the module namespace (3.8); recursion is allowed and its depth is bounded only by the OS stack.
-There are no nested functions, closures, overloading, default arguments, variadics or methods.
+Fort definitions have no nested functions, closures, overloading, default arguments, variable
+tails or methods. A C extern declaration may mark a variable tail (D9.8).
 Parameters and results are passed by value: primitives, pointers, spans and strings by copying
 the scalar or the fat pointer; structs and fixed arrays by copying the whole value. There are no
 reference parameters; pass a `T mut*` (or `T mut@ mut*`) to let the callee write the caller's
@@ -1390,7 +1393,8 @@ println(str.dup("x"));                      // error: owning temporary would lea
 ## 9. Not in v1
 
 A number of familiar features are deliberately absent from v1: generics, unions, methods,
-closures, variadics, overloading, visibility modifiers, type aliases, labeled `break`, string
+closures, variadic fort function definitions, variadic function-pointer types, overloading,
+visibility modifiers, type aliases, labeled `break`, string
 `switch`, linear ownership (compile-time detection of leaks and of use after `move`, D17.14) and
 others. D15 in `decisions.md` is the authoritative list; it names each feature with
 the idiom to use instead, and this document does not repeat it.

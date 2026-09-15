@@ -27,8 +27,8 @@ file (D14.1). Options and the entry file may appear in any order.
 | `--release`         | release mode (section 3, D11.1)                            | checked    |
 | `--no-bounds-check` | remove index and span checks (D10.6); unsafe               | checks on  |
 | `-l<lib>`           | passed to the linker as given; repeatable, in order        | none       |
-| `--cc <path>`       | the clang that compiles and links the IR (D14.3)           | `clang`    |
-| `--target <triple>` | passed to `--cc` as `--target=<triple>` (D14.1)            | see below  |
+| `--cc <path>`       | the clang that compiles and links the IR (D14.3)           | see below  |
+| `--target <triple>` | select the IR target; pass it to `--cc` (D14.1)              | see below  |
 | `-Xcc <arg>`        | passed to `--cc` verbatim, after the arguments below       | none       |
 | `--check`           | run the front end only and stop (D20.1)                    | off        |
 | `--json`            | write the check document to stdout (D20.2), needs `--check`| off        |
@@ -41,15 +41,31 @@ file (D14.1). Options and the entry file may appear in any order.
 - `-o`, `-I`, `--std-dir`, `--cc`, `--target` and `-Xcc` take the following argument; `-l<lib>`
   is one argument. `-I` roots are searched in command-line order (D9.2) and `-Xcc` arguments are
   passed in command-line order. The last `-o`, `--std-dir`, `--cc` and `--target` win.
-- `--cc` must name a clang, since nothing else reads LLVM IR (D14.1, D19.1). The
-  default target triple is `x86_64-linux-gnu` (D14.1).
+- `--cc` must name a clang, since nothing else reads LLVM IR (D14.1, D19.1).
+  The Linux x86-64 compiler defaults to `clang`; the Mac arm64 compiler defaults to
+  `/usr/bin/clang` (D14.3).
+- The default target is the compiler binary's built target (D14.1).
+  Linux x86-64 stores `x86_64-linux-gnu`. A Mac arm64 build reads `sw_vers -productVersion`.
+  It stores `arm64-apple-macosxM.m.p` with the numeric host version in the compiler.
+  For a two-part `M.m` result, it appends `.0`. Thus `15.0` gives
+  `arm64-apple-macosx15.0.0`. For a three-part `M.m.p` result, it keeps all three parts.
+  It rejects any other version shape instead of guessing a target triple.
+  An IR mode may select either target form with `--target`.
+  An unsupported form exits 2 before the compiler creates output.
 - The default output is `a.out`; with `-c` it is `<entry>.o` and with `-S` `<entry>.ll` (D14.1),
   where `<entry>` is the entry file's base name without `.ft`, placed in the current directory as
   `cc` does.
-- The default standard library directory is `$FORT_STD_DIR` when set, else `std` relative to
-  the directory containing the `fort` binary.
-- `-S` and `-c` together stop at the IR. With `-S`, `-l`, `--cc`, `--target` and `-Xcc` are
-  unused.
+- The default standard library directory is `$FORT_STD_DIR` when set, else `std` beside
+  the running `fort` binary. Linux reads its binary path from `/proc/self/exe`.
+  Mac reads it from `_NSGetExecutablePath`, then uses `realpath` when it succeeds.
+  If `realpath` fails, Mac uses the path `_NSGetExecutablePath` returned.
+- `-S` and `-c` together stop at the IR. With `-S`, `-l`, `--cc` and `-Xcc` are unused.
+  `--target` remains active and selects the IR triple, ABI and target standard root.
+  A target other than the built target requires an explicit `--std-dir` option with `-S`.
+  This rule also applies when `-c` appears with `-S`.
+  The caller must select sources that match that target. The compiler checks option presence.
+  It does not inspect the sources for C ABI agreement.
+- `-c` and linking accept only the built target. A different target exits 2 before output.
 - `--release` and `--no-bounds-check` are independent and may be combined.
 - `--check` runs steps 1 to 3 of section 2 and stops there: no IR, no `--cc`, no temporary, and
   the entry module need not define `main`, since it is a module under inspection and not a
@@ -137,6 +153,16 @@ file (D14.1). Options and the entry file may appear in any order.
   together with their diagnostics and their exit statuses, over every `.ft` file in the
   repository, and that is how the self-hosted parser is held against the bootstrap's (the ctest
   `diff-ast`).
+- In the fort compiler's `--ast` form, a C extern with `...` prints a bare `...` last in its
+  `(params ...)` group. The mark is not a `(param ...)` child.
+  A fixed extern prints no mark, and a fort definition cannot print this mark (D8.3, D9.8).
+  Thus `extern fn c(i32 x, ...) void;` prints
+
+  ```sh
+  (module (extern-fn (type (void)) c (params (param (type (prim i32)) x) ...) nil))
+  ```
+
+  Stage1 need not parse or print this new C extern form.
 - The entry file's directory is always a root and the current directory never is (D9.2).
 
 Exit status (D14.1):
@@ -152,11 +178,18 @@ on stderr, for example `fort: error: cannot read 'x.ft': No such file or directo
 `fort: error: cc failed with status 1`. `fort` with no arguments prints one usage line and exits
 with 2; `--help` prints that line and then the table above, and exits 0.
 
-These are all the `fort: error: <message>` texts, each of them exit status 2 (D14.1). Six report a
-command line the compiler cannot use and are followed by the usage line: `missing argument for
-option '<opt>'`, `unexpected argument '<arg>'` (a second entry file), `unknown option '<opt>'`, `no
-entry file`, `--json requires --check` (D20.2) and `--tokens does not combine with --check, --json
-or --index`. Four report an operation of section 2 that
+These are all the `fort: error: <message>` texts. Each exits with status 2 (D14.1).
+Eleven report a command line the compiler cannot use and then print the usage line:
+`missing argument for option '<opt>'`, `unexpected argument '<arg>'` (a second entry file),
+`unknown option '<opt>'`, `no entry file`, `--json requires --check` (D20.2),
+`--tokens does not combine with --check, --json or --index`,
+`--ast does not combine with --tokens, --check, --json or --index`,
+`unsupported target '<triple>'`, `--std-dir is required for cross-target -S`,
+`cannot compile object for target '<triple>' with a '<built target>' compiler`, and
+`cannot link target '<triple>' with a '<built target>' compiler`.
+The last four target errors stop before output. `<triple>` shows the selected target.
+`<built target>` shows the binary's built target.
+Four report an operation of section 2 that
 failed, with the system's error text as `<reason>`: `cannot read '<file>': <reason>` (the entry
 file), `cannot write '<file>': <reason>` (the LLVM IR module), `cannot create a temporary directory
 in '<dir>': <reason>` (`mkdtemp` under `$TMPDIR`) and `cannot run '<cc>': <reason>` (`--cc` could
@@ -173,6 +206,7 @@ fort --release -o main main.ft                # release mode
 fort --release --no-bounds-check -o bench main.ft
 fort -I lib -I vendor -lm main.ft             # extra roots, link libm
 fort --cc clang-18 --target x86_64-linux-gnu -Xcc -fuse-ld=lld main.ft
+fort -S --target arm64-apple-macosx26.6.2 --std-dir mac-std main.ft
 fort --check lib/util.ft                      # check that module and its imports, print nothing
 fort --check --json main.ft                   # one JSON document on stdout, for an editor
 fort --index main.ft                          # the same document with the identifier index
@@ -187,6 +221,10 @@ temporary directory for the intermediate IR file (D19.1).
 
 Compilation is whole-program (D9.10):
 
+0. In an IR mode, select the built target or the explicit `--target` (D14.1).
+   Reject an unsupported target form with status 2 before step 4.
+   A non-built `-S` target requires an explicit `--std-dir` before step 4.
+   A non-built `-c` or link target exits 2 before step 4 unless `-S` also appears.
 1. Read the entry file and derive its module path and root (exit 2 if unreadable, 1 if the base
    name contains a `.` or a `:`, the two characters a module path is spelled with, which would
    let it collide with that module's symbols). The base name need not otherwise be an identifier:
@@ -208,13 +246,21 @@ Compilation is whole-program (D9.10):
        -o <out> <tmp>/<entry>.ll <-l options> <-Xcc args>
    ```
 
-   with `-O2` in place of `-O1` under `--release` (D14.3), and `-c` before `-o`, no `-pie` and
-   no `-l` for `-c`. The module is the only input the compiler names: it holds the whole program,
-   the runtime included (D9.10, D13.1). That clang finds the cross sysroot, its `Scrt1.o`,
-   `crti.o` and `crtn.o` and `x86_64-linux-gnu-ld` by itself, so no `--sysroot`,
-   `--gcc-toolchain` or `-fuse-ld` is needed; `-Wno-override-module` silences the warning about
-   the module's own target triple, and the `.ll` suffix is what tells clang the input is IR, so
-   `-x ir` is not passed.
+   This line is the Linux x86-64 form. Mac arm64 uses the following form:
+
+   ```sh
+   <cc> --target=arm64-apple-macosxM.m.p -O1 -fPIE -Wl,-pie \
+       -Wno-override-module -o <out> <tmp>/<entry>.ll <-l options> <-Xcc args>
+   ```
+
+   Both forms use `-O2` in place of `-O1` under `--release` (D14.3).
+   Both forms add `-c` before `-o` and omit their PIE link flag and `-l` options for `-c`.
+   The module is the only compiler-produced input: it holds the runtime (D9.10, D13.1).
+   Linux clang finds the cross sysroot, `Scrt1.o`, `crti.o`, `crtn.o` and linker itself.
+   Mac Apple clang finds its active SDK and Mach-O linker through the host toolchain.
+   The Mac default `<cc>` is `/usr/bin/clang`; an explicit `--cc` overrides it.
+   `-Wno-override-module` silences a triple warning; `.ll` tells clang the input is IR.
+   Neither form passes `-x ir` or links an object from a fort C runtime.
 6. Remove the temporary directory.
 
 `--check` stops after step 3 (D20.1): it emits no module, creates no temporary directory, runs no
@@ -223,9 +269,8 @@ under inspection rather than a program.
 
 - The temporary directory comes from `mkdtemp` under `$TMPDIR` (default `/tmp`) and is removed
   whether or not `--cc` succeeded.
-- `--cc` is invoked with exactly the arguments shown, in that order; `-fPIE -pie` and the
-  position-independent code the IR compiles to make the output a position-independent executable
-  (D14.3, D16).
+- `--cc` uses the selected built-target line above, in that order.
+  `-fPIE` and the target's PIE link flag make a position-independent executable (D14.3, D16).
 - Every emitted module passes `opt -passes=verify` (D19.1). `test/ir/*.ll` are hand-written
   modules in the form the compiler emits and `test/pipeline_test.sh` runs this pipeline over
   them; the language-test harness verifies the module of every test that compiles
@@ -611,8 +656,8 @@ are those of 5.1, in `std.rt`:
 
 `<file>` is as in section 4. Numbers in messages are decimal; the index, the span bounds and
 the allocation count are printed as signed values. Falling off the end of a `noreturn` function
-executes the trap of section 6 item 20 (D8.5, D19.7): the process dies with SIGILL and no
-message.
+executes the trap of section 6 item 20 (D8.5, D19.7). Linux x86-64 raises SIGILL with no message.
+Mac arm64 raises SIGTRAP with no message.
 
 ### 5.3 Buffering
 
@@ -665,14 +710,19 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
    target triple = "x86_64-unknown-linux-gnu"
    ```
 
-   in clang's normalized spelling, and carries no `target datalayout`, no `!llvm.module.flags`,
+   for Linux x86-64. Mac arm64 begins with the selected
+   `target triple = "arm64-apple-macosxM.m.p"` (D14.1, D19.1).
+   Linux keeps its normalized header bytes. Neither target emits `target datalayout`.
+   Apple clang derives the Mac layout from its triple. The module carries no `!llvm.module.flags`,
    no `!llvm.ident`, no `source_filename` and no comments (D19.1): clang derives the layout from
    the triple, and position independence comes from the `--cc` line (section 2), not from module
    flags. Sections appear in this order and nowhere else: the triple, the named types, the
    module-level globals and constants (D7.10), the function definitions, the private data, the
    declarations, the attribute groups. Forward references to globals are legal in `.ll`, which
    is what lets one pass emit a function before the data it names. Naming and ordering inside
-   each section follow D19.5, so the text is a function of the program alone.
+   each section follow D19.5. Two `-S` runs keep equal source text, source roots, working
+   directory, build mode, and selected target. Their arguments differ only in the `-o` path.
+   That different output path does not change IR bytes.
 
 2. **Type mapping** (D19.2). The value type is what a temporary holds; the memory type is what
    an `alloca`, a global or a field holds.
@@ -717,7 +767,8 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
 
 4. **Symbols, linkage, visibility** (D9.7). The dotted names of D9.7 are quoted:
    `@"main.add"`, `@"std.io.read_file"`, `@"main.LIMIT"`; quoting is uniform and does not change
-   the ELF symbol, which is `main.add`. C names (`extern` declarations, and the `fort_entry` and
+   the fort symbol name, which is `main.add`.
+   C names (`extern` declarations, and the `fort_entry` and
    `main` the compiler emits) are unquoted; the runtime is fort, so `@"std.rt.print_i64"` is
    quoted like every other dotted name (D9.7). Fort functions, constants and globals are
    `dso_local` with the default external linkage (D9.6), so fort-to-fort calls are direct, a call
@@ -730,8 +781,9 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
    joined with dots (D9.1): `%"struct.a\22b.point"` and `@".enum.a\22b.color"` for an entry
    file `a"b.ft`. Inside the quotes, the two bytes a quoted name cannot hold, `"` and `\`, and
    every byte outside the printable range are written as the `\XX` hex pair of item 5, which
-   LLVM reads back to the byte: the ELF symbol is the name itself, so this stays spelling only
-   like the quoting of every dotted name (D9.7). One ELF symbol is one IR entity: `fort_entry` and
+   LLVM reads back to the byte. Mach-O adds a leading `_` to the external object symbol.
+   That prefix stays outside the IR name and keeps the name mapping injective (D9.7).
+   One target symbol is one IR entity: `fort_entry` and
    `main` are reserved, so the checker refuses an `extern` that declares either (D9.7,
    module-system.md 13) and the emitter declares no name it defines, which leaves the two
    definitions of item 22 alone. A runtime entry point is a fort definition in the module like any
@@ -764,42 +816,49 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
      compiled (item 21).
 
 6. **Position independence** (D14.3, D16). Nothing in the IR expresses it: `dso_local` (item 4)
-   and the `-fPIE -pie` of section 2 give RIP-relative data, direct fort-to-fort calls and
-   linkage-table calls to `extern` symbols. The one requirement the module carries
+   and section 2's `-fPIE` and target PIE link flag give PC-relative data.
+   Fort-to-fort calls stay direct; C externs use the target's linker stubs or linkage tables.
+   The one requirement the module carries
    is that an address is never an integer constant derived from a symbol; addresses appear only
    as `ptr` values and as `ptr` constants in initializers.
 
 7. **Calling convention, fort to fort** (D9.9). Scalars (integers, `bool`, `char`, enums,
-   pointers, function pointers, floats) are ordinary parameters and results and LLVM applies
-   System V. A struct, fixed array, span or `string` argument is a plain `ptr` parameter: the
+   pointers, function pointers, floats) are ordinary parameters and results.
+   LLVM applies System V on Linux and Apple arm64 on Mac.
+   A struct, fixed array, span or `string` argument is a plain `ptr` parameter: the
    caller allocates a copy in its entry block, `llvm.memcpy`s into it and passes its address,
    and `byval` is never used, since it would mean a callee-visible copy on the stack rather than
    the pointer in the integer slot D9.9 requires. An aggregate result is a leading
    `ptr sret(%T) %ret.sret` parameter on a function whose result type is `void`; the pointer
-   arrives in `rdi` and is echoed in `rax`, which is D9.9's ABI. The attribute is written on the
-   definition and not at the call site, which passes the destination as a plain `ptr`: on
-   x86-64 the two are identical and only tail-call eligibility can tell them apart (D9.9).
+   arrives in `rdi` on Linux; the callee echoes it in `rax`.
+   Linux marks `sret` only on the definition; its call passes the destination as a plain `ptr`.
+   Mac marks `sret(%T)` on the definition and at the call site.
+   Apple arm64 then puts the result destination in `x8`, not `x0` (D9.9).
    A span or `string` is one hidden pointer and is never split into two scalars, so
    `fort_entry`'s C prototype stays literally true (D11.6). `bool`, `char`, `u8` and `u16`
    parameters and results carry `zeroext` and `i8` and `i16` carry `signext`, in fort and extern
    signatures alike, so an extern-legal signature is a valid C callback by construction (D9.9).
    Every fort definition is `define dso_local <ret> @"m.f"(...) #0`, where `#0` is
-   `{ nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }`: `nounwind` because fort has
+   `{ nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }` on Linux.
+   Mac uses `"probe-stack"="__chkstk_darwin"` in the same group (D10.8).
+   `nounwind` stands because fort has
    no exceptions, the frame pointer because it is what a debugger gets without DWARF (section
    9), and `probe-stack` for item 13.
 
    A call through a function pointer is an ordinary `call` whose callee is the `ptr` value and
    whose function type is written out, because an opaque pointer carries none (D19.2):
-   `call i32 (i32, i32) %t0(i32 %t1, i32 %t2)`, and `call void (ptr, i32) %t0(ptr %r.0, i32 3)`
-   for an aggregate result. The callee is evaluated before the arguments (D6.3) and every rule
+   `call i32 (i32, i32) %t0(i32 %t1, i32 %t2)`.
+   Linux uses `call void (ptr, i32) %t0(ptr %r.0, i32 3)` for an aggregate result.
+   Mac uses `call void (ptr, i32) %t0(ptr sret(%T) %r.0, i32 3)`.
+   `opt -passes=verify` accepts the Mac call-site attribute.
+   The callee is evaluated before the arguments (D6.3) and every rule
    above holds at that call site unchanged, aggregate arguments and the extension attributes
    included, so it differs from the call of a name only in the callee and that type (D3.10). The
-   callee is always a fort function, since an `extern fn` in value position is an error (D3.10):
-   an extern is called through the variadic type of item 8, which only its declaration can
-   supply.
+   callee is always a fort function, since an `extern fn` in value position is an error (D3.10).
+   An extern direct call takes its target ABI form from its declaration (item 8).
 
-8. **Extern declarations** (D9.8). An `extern` function is declared with its C types,
-   unmangled, and with a variadic tail, and is called through the matching variadic call type:
+8. **Extern declarations** (D9.8). An extern function uses unmangled C types.
+   Linux fixed externs keep their old variadic LLVM declaration and call form:
 
    ```llvm
    declare i32 @printf(ptr, ...)
@@ -811,16 +870,29 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
      %t11 = call signext i8 (i8, i16, ...) @c_narrow(i8 signext %t8, i16 zeroext %t9) #3
    ```
 
-   LLVM passes the vector-register count a variadic callee reads exactly when the call-site type
-   is variadic, so declaring every extern variadic is what makes a fixed-prototype declaration
-   of a variadic C function safe (D9.8); a non-variadic callee ignores that count, so the
-   declaration is ABI-identical for it. `#3 = { nobuiltin }` on every extern call site that goes
-   through that variadic type keeps LLVM from rewriting a declared symbol into another library
-   call, and is preferred to a driver-wide `-fno-builtin`, which would also change how our
-   `llvm.memcpy` and `llvm.memset` are lowered. A call through a function pointer is not variadic
-   (D3.10 has no variadic function type) and needs no such declaration; it is also never a call of
-   an extern, whose name is not a value, so every extern call of a C library symbol in the module
-   carries the variadic type above (D3.10).
+   This Linux form also applies to an extern declaration that writes `...`.
+   Linux's variadic LLVM call form sets the System V vector-register count.
+   Mac fixed externs use fixed LLVM forms instead:
+
+   ```llvm
+   declare i64 @write(i32, ptr, i64)
+     %t12 = call i64 @write(i32 %t8, ptr %t9, i64 %t10) #3
+   ```
+
+   A Mac C extern that writes `...` keeps its fixed prefix in a variadic LLVM type:
+
+   ```llvm
+   declare i32 @printf(ptr, ...)
+     %t13 = call i32 (ptr, ...) @printf(ptr %t9, i32 %t11, double %t12) #3
+   ```
+
+   Apple arm64 puts the variable `i32` and `double` arguments on the stack.
+   A Mac fixed declaration of C `printf` would use the wrong register form.
+   Only `i32`, `u32`, `i64`, `u64`, `f64`, pointers and function pointers can appear in that tail.
+   The call site writes their actual LLVM types; unsigned integers use the same IR widths.
+   `#3 = { nobuiltin }` stays on each extern call site on both targets.
+   It prevents rewriting a C symbol without changing intrinsic lowering driver-wide.
+   A function-pointer call is fixed (D3.10); an extern name is not a pointer value.
 
    The runtime needs no declaration at all: `std.rt` is in the closure (D9.10), so the module
    that holds a call to `@"std.rt.print_i64"` holds its definition, emitted from fort source like
@@ -851,7 +923,7 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
    first-use order, then the intrinsics in the order of the table above, the two groups separated
    by a blank line. There are two groups and no third: a symbol is declared exactly once, and
    every fort function the module calls, the runtime's included, is defined in it. Two modules
-   that declare one C symbol are two fort declarations of one ELF symbol and yield one `declare`,
+   that declare one C symbol are two fort declarations of one target symbol and yield one `declare`,
    which is why the extern group is keyed by the C name and not by the declaration (D9.7, D9.8).
 
 9. **Normalization** (D9.8, D19.2). A narrow value is not widened to 32 bits: an `i8` value has
@@ -908,10 +980,10 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
       %t3 = call i32 @llvm.fptosi.sat.i32.f64(double %t2)
     ```
 
-13. **Stack probing** (D10.8). The `"probe-stack"="inline-asm"` attribute on every fort
-    definition (item 7) makes the backend establish a frame larger than a page one page at a
-    time. It is in the IR rather than on the `--cc` line so that a module written by `-S`
-    carries the guarantee by itself.
+13. **Stack probing** (D10.8). Linux writes `"probe-stack"="inline-asm"` on every fort
+    definition. Mac writes `"probe-stack"="__chkstk_darwin"` instead.
+    The backend establishes a frame larger than a page one page at a time.
+    The attribute stays in `-S` IR, so the driver line cannot remove the guarantee.
 
 14. **Checks and failure blocks** (D19.6). Every runtime check computes one `i1` that is true on
     failure and branches with the failure label first:
@@ -932,8 +1004,10 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
     emitter's own code and not a call the program wrote, so the call-site trap of D8.5 and D19.7
     does not stand in it; a program that calls an entry point of section 5.1 itself gets that
     trap like any other call to a `noreturn` function (item 20).
-    Every `noreturn` entry point of section 5.1 carries `#8 = { cold noreturn nounwind
-    "frame-pointer"="all" "probe-stack"="inline-asm" }` on its definition: the `std.rt.fail_*`
+    Every Linux `noreturn` entry point of section 5.1 carries
+    `#8 = { cold noreturn nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }`.
+    Mac substitutes `"probe-stack"="__chkstk_darwin"` in `#8`.
+    The entry points are the `std.rt.fail_*`
     family, `std.rt.panic` and `std.rt.assert_fail`, which the failure blocks call, and
     `std.rt.exit`, which only `std.rt` reaches. `noreturn` is truthful,
     since each is `fn noreturn` in fort and aborts (D8.5), and `cold` lays the block out of line,
@@ -1050,8 +1124,10 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
     followed by `unreachable` (D11.4).
 
 20. **`noreturn`** (D8.5, D19.7). A `noreturn` fort function is
-    `define dso_local void @"m.f"(...) #1` with `#1 = { noreturn nounwind "frame-pointer"="all"
-    "probe-stack"="inline-asm" }`, and the block that would fall off the end of its body ends
+    `define dso_local void @"m.f"(...) #1` with Linux
+    `#1 = { noreturn nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }`.
+    Mac uses `"probe-stack"="__chkstk_darwin"` in `#1`.
+    The block that would fall off the end of its body ends
     with
 
     ```llvm
@@ -1061,8 +1137,8 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
 
     as does every call site of such a function (D8.5 requires the trap in both places).
     `llvm.trap` is the trap instruction D8.5 asks for, and `unreachable` alone would not be one,
-    since LLVM may let control fall through it. Reaching either raises SIGILL with no message
-    (D11.4).
+    since LLVM may let control fall through it. Linux x86-64 raises SIGILL with no message.
+    Mac arm64 raises SIGTRAP with no message (D11.4).
 
     `noreturn` is emitted on a fort definition, as `#1` above and as the `#8` of item 14 on the
     runtime's, and never on a declaration of a C function the program wrote with `extern fn`,
@@ -1090,7 +1166,7 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
 22. **`fort_entry` and `main`** (D11.6, D8.6). Both are emitted in the entry module and are the
     only unmangled definitions in it (D9.7). `fort_entry` receives the argument span
     by hidden pointer, copies it into its own frame when `main` declares the parameter, and
-    returns what `main` returns:
+    returns what `main` returns. The examples below show Linux IR:
 
     ```llvm
     define dso_local i32 @fort_entry(ptr %args.in) #0 {
@@ -1121,7 +1197,9 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
     ```
 
     `std.rt.args` returns an aggregate, so it takes the destination as the hidden result pointer
-    of item 7, written `sret(%fort.span)` on its own definition and a plain `ptr` here (D9.9);
+    of item 7, written `sret(%fort.span)` on its own definition.
+    Linux passes a plain `ptr` here; Mac writes
+    `call void @"std.rt.args"(ptr sret(%fort.span) %args)` (D9.9).
     `args_init` runs first, since `args` hands out what it built. The `and` is D11.6's
     `status & 0xFF`.
 
@@ -1134,7 +1212,8 @@ The attribute groups have fixed indices, and only the used ones are emitted, so 
 numbering are normal (D19.5):
 
 - `#0 = { nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }` on every fort definition
-  (item 7), and `#1`, the same set plus `noreturn`, on a `noreturn` definition (item 20).
+  on Linux (item 7), and `#1`, the same set plus `noreturn`, on a `noreturn` definition (item 20).
+  Mac writes `"probe-stack"="__chkstk_darwin"` in those two groups.
 - `#2` is not emitted: it held `{ cold noreturn nounwind }` on the runtime's `_Noreturn` C
   declarations, which item 8 no longer produces. The hand-written modules of 6.1 and 6.2 declare
   what they call and number their own groups (preamble), which is why one of them still shows it.
@@ -1145,7 +1224,8 @@ numbering are normal (D19.5):
   and `#6 = { nocallback nofree nounwind willreturn memory(argmem: write) }` on `llvm.memset`.
 - `#7 = { cold noreturn nounwind memory(inaccessiblemem: write) }` on `llvm.trap` (item 20).
 - `#8 = { cold noreturn nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }`, `#1` plus
-  `cold`, on the definitions of the `noreturn` entry points of section 5.1 (item 14).
+  `cold`, on Linux definitions of the `noreturn` entry points of section 5.1 (item 14).
+  Mac substitutes `"probe-stack"="__chkstk_darwin"` in `#8`.
 
 `mustprogress` is deliberately absent everywhere, from `#4`, `#5` and `#6`, where clang would
 print it, and from fort definitions: it licenses the optimizer to delete a loop with no side
@@ -1841,6 +1921,7 @@ frame pointer of section 6 item 7 and the symbol names are what a debugger gets)
 of the compiler's own and `-O` options on `fort`'s command line (`--cc` optimizes the module at
 `-O1`, or `-O2` under `--release`, D14.3), building the module through the LLVM C API in process
 (D15), warnings, separate compilation and incremental builds, a package manager, documentation
-generation, cross-compilation and any target other than x86-64 Linux, `--help` text beyond the
+generation, cross-target objects and links, any target beyond Linux x86-64 and Mac arm64,
+`--help` text beyond the
 usage line, and conditional compilation. The idioms that replace the deferred language features
 are listed with each item in D15.

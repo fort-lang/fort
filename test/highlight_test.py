@@ -496,7 +496,14 @@ class LexiconTest(unittest.TestCase):
         self.assertIn("yield", self.decisions.reserved)
         self.assertIn("+%=", self.decisions.operators)
         self.assertIn("@", self.decisions.operators)
+        self.assertIn("...", self.decisions.operators)
         self.assertNotIn("", self.decisions.operators)
+
+    def test_c_extern_tail_has_one_variadic_token(self):
+        tokens = Engine(self.grammar).tokenize("extern fn c_var(i32 n, ...) i32;")
+        tail = [token for token in tokens if token.text == "..."]
+        self.assertEqual(len(tail), 1)
+        self.assertIn("keyword.operator.variadic.fort", tail[0].scopes)
 
 
 class DriftTest(unittest.TestCase):
@@ -711,7 +718,7 @@ class ScannerTest(unittest.TestCase):
     def test_every_rule_of_the_grammar_can_be_combined(self):
         """The precondition above, over every pattern of the grammar."""
         patterns = grammar_patterns(self.engine.grammar)
-        self.assertEqual(len(patterns), 57)
+        self.assertEqual(len(patterns), 58)
         for pattern in patterns:
             with self.subTest(pattern=pattern):
                 refuse_renumbering(pattern)
