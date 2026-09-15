@@ -1059,6 +1059,19 @@ bullet at a time and without a rewrite.
   That figure lags for the same reason the repository figure does: the per-ticket rule is not
   retroactive. The branch figure is the one the criterion asks for. T-089 and T-092 both
   rediscovered this rule.
+- **`tools/lines.py` does not see a test written in shell or in Python either** (T-131). Its
+  `TEST_GLOBS` are `test/*.c`, `test/*.h`, `test/**/*.ft` and `test/lang/ffi/*.c`, and its
+  `SOURCE_GLOBS` are the two compilers and `std/*.ft`. So a ticket whose deliverable is the build
+  or a tool gets no useful figure: T-131 changed `CMakeLists.txt`, six scripts under `tools/` and
+  the language harness, and the tool read `+2 source lines, +0 test lines, ratio 0.00`, the 2
+  being its one edit to `std/rt.ft`. Measure such a branch by hand, as the `editors/` bullet
+  above does, with `git diff --numstat main...HEAD` and the tool's convention: net lines, raw
+  `wc -l`, comments and blank lines on both sides. T-131 measured 469 net lines of build, tool and
+  harness against 258 net lines of test, which is 0.55, and its log says why it cannot reach 3:1:
+  the part of it that a line-counted test could hold is `tools/pin.sh`, which
+  `test/pin_test.sh` holds with 21 checks that break every rule of it on purpose, and the rest is
+  a CMake graph that only a build can exercise. The ctest `bootstrap`, the ctest `pin-verify` and
+  a cold `rm -rf build/<preset> && tools/vm workflow debug` are what hold that part.
 - **The corpus is smaller than the sizing table of `spec/toolchain.md` 7.6, and T-046 measured by
   how much.** That table sizes the corpus at 565 `run` and 370 `fail` files, 935 together. On
   47f98c2 the corpus holds 643 tests: 400 under `run`, 222 under `fail` and 21 under `programs`,
