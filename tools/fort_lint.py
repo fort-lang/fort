@@ -76,13 +76,14 @@ SOURCE_SETS = (
 )
 SOURCE_GLOBS = tuple(glob for glob, _ in SOURCE_SETS)
 
-# The sources the default set leaves out, with the reason. `std/rt_float.ft`
-# and `std/math.ft` hold floats, which the C bootstrap rejects (D18.1, T-042),
-# and the ctest `fort_lint` runs this tool with that compiler; the ctest
-# `fort_lint_float` runs it with stage2 over exactly these files, so nothing
-# goes unlinted. A file named on the command line is linted whatever this tuple
-# says, which is how that second ctest reaches them.
-SKIPPED = ("std/math.ft", "std/rt_float.ft")
+# The sources the default set leaves out. It is empty, and T-131 emptied it.
+# Until then `std/math.ft` and `std/rt_float.ft` stood here because they hold
+# floats, which the C bootstrap rejects (D18.1, T-042), and the ctest
+# `fort_lint` ran this tool with that compiler; a second ctest, `fort_lint_float`,
+# ran stage2 over exactly those two files. stage2 runs the one ctest now and
+# reads every source, so nothing is left out and nothing needs a second
+# command. A file named on the command line is linted whatever this tuple says.
+SKIPPED = ()
 MAX_COLUMNS = 100
 
 LOWER_CASE = re.compile(r"\A[a-z_][a-z0-9_]*\Z")

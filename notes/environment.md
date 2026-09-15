@@ -384,14 +384,29 @@ without a rewrite.
   (`join_sandbox_path`, `gen_join_path`), never widen the buffer or cast the result away. A guard
   only gcc enforces is a guard no test holds, so assert each one -- the call sites too, not only
   the helper -- as `test/modules_test.c` and `test/gen_test.c` do.
-- Binaries: `build/<preset>/fort` is stage1 (the C compiler); `build/<preset>/stage2/fort` is the
-  self-hosted compiler, which stage1 builds from `src/fort`. The `fort_stage2` target builds it at
-  every build (stage1 over `src/fort/main.ft`, whose imports pull the rest of `src/fort` in), so a
-  module stage1 rejects fails the build rather than the test run; stage2 is an x86-64 binary and
-  runs under qemu like every program the compiler builds.
-  `tools/bootstrap.sh [--preset <preset>] [--stage3]` builds stage1 and that stage2 by hand in the
-  guest. With `--stage3` it builds stage1 and hands the fixed point to `tools/fixpoint.sh`, and it
-  writes no stage2 of its own, since that script builds one per build mode.
+- Binaries: `build/<preset>/fort` is stage1 (the C compiler); `build/<preset>/pin/<n>/fort` is the
+  compiler of pin `n` of `tools/bootstrap.ref`; `build/<preset>/stage2/fort` is the self-hosted
+  compiler, which the **last pin** builds from HEAD's `src/fort` (T-131, `notes/compiler.md` 8).
+  The `fort_stage2` target builds the whole chain at every build, so a module the last pin rejects
+  fails the build rather than the test run; stage2 is an x86-64 binary and runs under qemu like
+  every program the compiler builds. Each pin's tree is `git archive`d into `build/<preset>/pin/<n>`
+  and stamped `.tree-<sha>`, so it is extracted once per sha and per build directory, and a pin
+  rebuilds only when its sha moves or the compiler before it changes. Measured under `debug` on
+  2026-09-14: an edit to `src/fort` rebuilds `stage2` and `fort-lsp` alone in 3.3 s, an edit to
+  `src/bootstrap` cascades stage1, pin 0, stage2 and `fort-lsp` in 11.4 s, one hop costs 2.6 s
+  checked and 3.1 s release, and an extraction 0.03 s. `rm -rf build/<preset>` pays the chain once.
+  `tools/bootstrap.sh [--preset <preset>] [--stage3]` builds the chain and that stage2 by hand in
+  the guest, through the CMake target rather than by spelling a hop. With `--stage3` it hands the
+  fixed point to `tools/fixpoint.sh`, and it writes no stage2 of its own, since that script builds
+  one per build mode.
+- **A full clone is a build requirement, and a shallow one cannot build** (T-131). Every pin of
+  `tools/bootstrap.ref` is a commit of this repository, and `tools/pin.sh` reaches it with
+  `git cat-file`, `git merge-base` and `git archive`. `tools/pin.sh verify` runs at configure time,
+  so a missing pin stops the configure and names the pin rather than failing a compile later. It
+  works from a worktree and in the guest: a worktree shares the object store of the checkout that
+  made it, and the guest reaches that store through the symlink provisioning makes (see the git
+  entry below). It therefore does **not** work in the guest of a VM a worktree owns, for the reason
+  that entry gives.
   `build/<preset>/fort-lsp` is the language server, which the `fort_lsp` target builds at every
   build by compiling `src/lsp/main.ft` **with stage2**, so it stands beside a stage1 `fort` that
   did not compile it (T-064). It is x86-64 and runs under qemu like stage2.

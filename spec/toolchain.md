@@ -1484,9 +1484,17 @@ Two expectation files beside the harness list path prefixes of tests (relative t
 that fails or errors is `XFAIL`, a listed test that passes is `XPASS` and fails the run, so the
 list shrinks in the commit that makes tests pass. `bootstrap-unsupported.txt` names the tests
 that use features the C bootstrap deliberately lacks (floats, the nested array and span levels
-of D3.6, `do`-`while` and `?:`; function pointers are in its subset, D3.10); each is judged as a
-`fail` test whose only expectation is a diagnostic containing `not supported by the bootstrap
-compiler`, whatever its own kind.
+of D3.6, `do`-`while` and `?:`; function pointers are in its subset, D3.10). Each is judged as a
+`fail` test, whatever its own kind. The compiler must exit 1 and must report at least one
+diagnostic. At least one of those diagnostics must contain `not supported by the bootstrap
+compiler`, or must stand in a file of the test itself. The two shapes answer two cases and
+neither one covers both. A test refused inside the library's import closure gets no diagnostic
+that names the test: `run/stdlib/096_math_limits.ft` imports `std.math`, whose `?:` the C
+bootstrap refuses, and all nine of its diagnostics name `std/math.ft`. A test that spells a form
+added after the pinned tree the C bootstrap compiles (`notes/compiler.md` 8) gets an ordinary
+syntax error in its own file, with none of those words, because that compiler never learned to
+name the form. Amended 2026-09-14 (T-131), which added the second shape; until then the words
+were the only expectation.
 `--xfail` and `--unsupported` name other lists; `--no-xfail` and `--no-unsupported` ignore
 them. Each compiler has one list of each kind: `xfail-stage2.txt` and `unsupported-stage2.txt`
 are stage2's, and the CMake test `lang-stage2` names both, because stage2 reads the nested
@@ -1725,6 +1733,13 @@ implementable; the design is to be planned in the implementation phase.
   repository holds `src/` (compiler), `std/*.ft` (standard library, the runtime `std.rt`
   included), `test/` (section 7) and a build script producing `build/fort` and `build/std/` with
   the library sources.
+- **The chain that builds the compiler** (T-131). The C compiler in `src/bootstrap` does not
+  compile `src/fort`. `tools/bootstrap.ref` names a chain of pinned commits of this repository,
+  oldest first. The C compiler builds pin 0's `src/fort` with pin 0's `std`, each pin builds the
+  next, and the last pin builds HEAD's `src/fort` with HEAD's `std`. So `src/fort` and `std` may
+  use any form the last pin implements, and a cold machine still builds everything from the C
+  sources and the git history. A shallow clone holds no pin and cannot build. `notes/compiler.md`
+  8 states the five invariants of the chain and says when a pin moves.
 - **Driver.** Parses options (section 1), owns the module table keyed by real path, runs the
   passes below, invokes `--cc` over the emitted module (D14.3) and maps failures to exit
   statuses.

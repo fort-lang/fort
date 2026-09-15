@@ -2,10 +2,21 @@
 # tools/fixpoint.sh <build-dir>: the compiler must reproduce itself, in both
 # build modes (D19.5).
 #
-# stage1 is <build-dir>/fort, the compiler in C. stage2 is src/fort compiled
-# by stage1. stage3 is src/fort compiled by stage2. stage2 and stage3 come
-# from the same sources and from two different compilers, so they must be the
-# same program. That is the fixed point.
+# The chain has one hop more than it used to (T-131). The compiler that builds
+# HEAD is the last pin of tools/bootstrap.ref, which stage1 reached through
+# every pin before it; --bootstrap names its binary. stage2 is HEAD's src/fort
+# compiled by that pin, stage3 is HEAD's src/fort compiled by stage2, stage4 is
+# HEAD's src/fort compiled by stage3.
+#
+# Which pair D19.5 compares, and why it is not the pair it used to be. The last
+# pin and HEAD are different programs, so their `-S` texts differ on any commit
+# that touches the emitter, and a comparison of the pin's module with stage2's
+# would go red on every such commit. The two comparisons D19.5 asks for must
+# both hold two things that embody HEAD's sources. stage2 and stage3 are the
+# first such pair: HEAD's sources through two different compilers. stage3 and
+# stage4 are the second. So this script compares the module stage2 and stage3
+# emit, and the stage3 and stage4 binaries, and it runs `-S` twice and not
+# three times, which is what D19.5's last sentence forbids.
 #
 # The check runs twice, once in each build mode. Checked mode traps on an
 # overflow and release mode does not (D11.1), so the two modes emit different
@@ -13,13 +24,13 @@
 #
 # Each mode compares two things, in this order.
 #
-# 1. The LLVM IR module. stage1 emits the module of src/fort, and stage2
+# 1. The LLVM IR module. stage2 emits the module of src/fort, and stage3
 #    emits it again. D19.5 makes that text a function of the program alone,
-#    so the two texts must be the same bytes. Both modules pass
-#    `opt -passes=verify` first (D19.1): a module that the verifier refuses
-#    is a broken compiler even when the two texts agree.
-# 2. The two binaries. stage2 is clang over stage1's module and stage3 is
-#    clang over stage2's module, so equal modules give equal binaries while
+#    and stage2 and stage3 are one program, so the two texts must be the same
+#    bytes. Both modules pass `opt -passes=verify` first (D19.1): a module that
+#    the verifier refuses is a broken compiler even when the two texts agree.
+# 2. The two binaries. stage3 is clang over stage2's module and stage4 is
+#    clang over stage3's module, so equal modules give equal binaries while
 #    clang is deterministic. The binary comparison is what removes that
 #    assumption: it compares the artefacts and not a reading of them.
 #
@@ -27,8 +38,8 @@
 # Two identical modules that link to different bytes are clang or the linker
 # and not the compiler, and the two failures have different causes.
 #
-# It builds all four binaries itself, under <build-dir>/fixpoint/<mode>, and
-# stage2 and stage3 of a mode differ in nothing that reaches the module: the
+# It builds all six binaries itself, under <build-dir>/fixpoint/<mode>, and
+# the three stages of a mode differ in nothing that reaches the module: the
 # compiler, and the `-o` path, which no module holds. Two reasons.
 #
 # Everything that does reach the module must be spelled the same way for the
@@ -43,13 +54,15 @@
 #
 # It also writes no file that another test reads. <build-dir>/stage2/fort
 # belongs to the CMake target fort_stage2, and lang-stage2, diff-ir and
-# stage-usage judge it while this test runs.
+# stage-usage judge it while this test runs, and <build-dir>/pin/<n>/fort
+# belongs to the target fort_pin_<n>.
 #
 # ctest runs it as the test `bootstrap`, label lang.
 set -eu
 
 usage() {
-    echo "usage: fixpoint.sh <build-dir> [--cc <clang>] [--target <triple>] [--opt <opt>]" >&2
+    echo "usage: fixpoint.sh <build-dir> [--bootstrap <fort>] [--cc <clang>]" >&2
+    echo "                   [--target <triple>] [--opt <opt>]" >&2
 }
 
 # The compiler drives a clang over the LLVM IR it emits (D14.3), and the guest
@@ -60,6 +73,9 @@ usage() {
 cc=${FORT_TARGET_CC:-clang}
 opt=${FORT_OPT:-opt-18}
 target=${FORT_TARGET_TRIPLE:-x86_64-linux-gnu}
+# The compiler that builds HEAD. CMake passes it, and a hand run reads the last
+# pin off tools/bootstrap.ref, so the two measure one chain.
+bootstrap=
 
 if [ "$#" -lt 1 ]; then
     usage
@@ -74,6 +90,7 @@ while [ "$#" -gt 0 ]; do
         exit 2
     fi
     case "$1" in
+        --bootstrap) bootstrap=$2 ;;
         --cc) cc=$2 ;;
         --target) target=$2 ;;
         --opt) opt=$2 ;;
@@ -87,12 +104,14 @@ while [ "$#" -gt 0 ]; do
 done
 root=$(cd "$(dirname "$0")/.." && pwd)
 entry=$root/src/fort/main.ft
-stage1=$build/fort
 std=$build/std
+if [ -z "$bootstrap" ]; then
+    bootstrap=$build/pin/$(bash "$root/tools/pin.sh" last)/fort
+fi
 export QEMU_LD_PREFIX=${QEMU_LD_PREFIX:-/usr/x86_64-linux-gnu}
 
-if [ ! -x "$stage1" ]; then
-    echo "fixpoint.sh: not built: $stage1 (build the fort target first)" >&2
+if [ ! -x "$bootstrap" ]; then
+    echo "fixpoint.sh: not built: $bootstrap (build the fort_stage2 target first)" >&2
     exit 2
 fi
 
@@ -165,33 +184,41 @@ check_mode() {
     local flags=$2
     local two=$work/$mode/stage2/fort
     local three=$work/$mode/stage3/fort
-    local one_ll=$work/$mode/stage1.ll
+    local four=$work/$mode/stage4/fort
     local two_ll=$work/$mode/stage2.ll
+    local three_ll=$work/$mode/stage3.ll
 
-    echo "== $mode: compiling src/fort with stage1"
+    echo "== $mode: compiling src/fort with the last pin"
     mkdir -p "$work/$mode"
-    if ! compile "$stage1" "$flags" "$two"; then
-        echo "fixpoint.sh: $mode: stage1 could not compile src/fort" >&2
+    if ! compile "$bootstrap" "$flags" "$two"; then
+        echo "fixpoint.sh: $mode: the last pin could not compile src/fort" >&2
         status=1
         return
     fi
 
-    echo "== $mode: the modules stage1 and stage2 emit"
+    echo "== $mode: stage3"
+    if ! compile "$two" "$flags" "$three"; then
+        echo "fixpoint.sh: $mode: stage2 could not compile src/fort" >&2
+        status=1
+        return
+    fi
+
+    echo "== $mode: the modules stage2 and stage3 emit"
     # Neither module of the other mode may stand here, for the reason the
     # binaries above are removed: a compiler that exits 0 and writes nothing
     # would otherwise make cmp read the previous file and report agreement.
-    rm -f "$one_ll" "$two_ll"
-    if ! emit "$stage1" "$flags" "$one_ll"; then
-        echo "fixpoint.sh: $mode: stage1 emitted no module for src/fort" >&2
-        status=1
-        return
-    fi
+    rm -f "$two_ll" "$three_ll"
     if ! emit "$two" "$flags" "$two_ll"; then
         echo "fixpoint.sh: $mode: stage2 emitted no module for src/fort" >&2
         status=1
         return
     fi
-    for module in "$one_ll" "$two_ll"; do
+    if ! emit "$three" "$flags" "$three_ll"; then
+        echo "fixpoint.sh: $mode: stage3 emitted no module for src/fort" >&2
+        status=1
+        return
+    fi
+    for module in "$two_ll" "$three_ll"; do
         if ! is_module "$module"; then
             echo "fixpoint.sh: $mode: $module is no module to compare" >&2
             status=1
@@ -203,27 +230,27 @@ check_mode() {
             return
         fi
     done
-    if cmp -s "$one_ll" "$two_ll"; then
+    if cmp -s "$two_ll" "$three_ll"; then
         echo "$mode: the emitted modules are identical and both verify"
     else
         # D19.5 asks for cmp with diff as the debugging output. The module is
         # about 3 MB, so the first 40 lines of the diff stand for it.
-        echo "fixpoint.sh: $mode: the modules stage1 and stage2 emit differ" >&2
-        echo "fixpoint.sh:   diff $one_ll $two_ll" >&2
-        diff -u "$one_ll" "$two_ll" >"$work/$mode/module.diff" || true
+        echo "fixpoint.sh: $mode: the modules stage2 and stage3 emit differ" >&2
+        echo "fixpoint.sh:   diff $two_ll $three_ll" >&2
+        diff -u "$two_ll" "$three_ll" >"$work/$mode/module.diff" || true
         head -n 40 "$work/$mode/module.diff" >&2
         status=1
         return
     fi
 
-    echo "== $mode: stage3"
-    if ! compile "$two" "$flags" "$three"; then
-        echo "fixpoint.sh: $mode: stage2 could not compile src/fort" >&2
+    echo "== $mode: stage4"
+    if ! compile "$three" "$flags" "$four"; then
+        echo "fixpoint.sh: $mode: stage3 could not compile src/fort" >&2
         status=1
         return
     fi
-    if cmp -s "$two" "$three"; then
-        echo "$mode: stage2 and stage3 are identical: the compiler is self-hosted"
+    if cmp -s "$three" "$four"; then
+        echo "$mode: stage3 and stage4 are identical: the compiler is self-hosted"
     else
         echo "fixpoint.sh: $mode: the emitted modules agree but the binaries differ;" >&2
         echo "fixpoint.sh: $mode: that is clang or the linker, not the compiler" >&2

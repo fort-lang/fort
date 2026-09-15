@@ -771,17 +771,50 @@ def judge_run(test, compile_proc, link_proc, run_proc):
     return "PASS", ""
 
 
-def judge_unsupported(compile_proc, root=ROOT):
-    """A bootstrap-unsupported test must be rejected with the bootstrap diagnostic."""
+def owns_file(test, file):
+    """The file belongs to the test: the test itself, or one of its directory."""
+    if file in (test.entry, test.path):
+        return True
+    return test.multi and file.startswith(test.path + "/")
+
+
+def judge_unsupported(test, compile_proc, root=ROOT):
+    """A test the compiler's list names must be refused, and refused by it.
+
+    Refused: exit 1 with at least one diagnostic, never exit 0 (toolchain.md
+    7.3). By it: at least one of those diagnostics must stand in a file of the
+    test itself, or must carry UNSUPPORTED_MESSAGE.
+
+    Why two shapes and not one (T-131). Until T-131 the C bootstrap grew a
+    `not supported by the bootstrap compiler` diagnostic for each feature it
+    lacks, because it compiled the whole repository and a listed test had to
+    say why it was refused. It compiles pin 0's tree now, so a feature added
+    after pin 0 reaches it as a plain syntax error from its lexer or its
+    parser, with no such words. The test's own file is what says the refusal
+    is about the test: a compiler that reports nothing, or that reports only
+    about a module of the library, passes neither shape and fails.
+
+    The second shape is not the first with more words. A listed test that
+    spells no unsupported form of its own is refused inside the library's
+    closure -- run/stdlib/096_math_limits.ft imports std.math, whose `?:` the
+    C bootstrap refuses -- so its diagnostics name `std/math.ft` and never the
+    test. Nine such diagnostics, measured on 2026-09-14, and no diagnostic in
+    the test. The first shape alone would fail it.
+    """
     verdict, reason = judge_compile(compile_proc, False)
     if verdict:
         return verdict, reason
     diagnostics = parse_diagnostics(compile_proc.stderr, root)
     if not diagnostics:
         return "FAIL", "compiler exited 1 without diagnostics"
-    if not any(UNSUPPORTED_MESSAGE in d.message for d in diagnostics):
-        return "FAIL", "no diagnostic containing '%s'" % UNSUPPORTED_MESSAGE
-    return "PASS", ""
+    if any(UNSUPPORTED_MESSAGE in d.message for d in diagnostics):
+        return "PASS", ""
+    if any(owns_file(test, d.file) for d in diagnostics):
+        return "PASS", ""
+    return "FAIL", "no diagnostic in %s and none containing '%s'" % (
+        test.path,
+        UNSUPPORTED_MESSAGE,
+    )
 
 
 # ---- the check document (D20.2) -------------------------------------------------------
@@ -1364,7 +1397,7 @@ def execute(config, test, unsupported):
             )
             procs.append(proc)
             if unsupported:
-                verdict, reason = judge_unsupported(proc, config.root)
+                verdict, reason = judge_unsupported(test, proc, config.root)
             else:
                 verdict, reason = judge_fail(test, proc, config.root)
             return Result(test, verdict, reason, procs, workdir)

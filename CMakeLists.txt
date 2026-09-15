@@ -94,27 +94,118 @@ endforeach()
 
 add_custom_target(fort_std ALL DEPENDS ${FORT_STD_OUTPUTS})
 
+# ---- the chain of pinned compilers ---------------------------------------------
+# The C bootstrap does not build the compiler any more. tools/bootstrap.ref
+# names a chain of pinned commits of this repository (notes/compiler.md 8):
+# stage1 builds pin 0's src/fort with pin 0's std, pin k builds pin k+1, and
+# the last pin builds HEAD. So src/fort and std may use any form the last pin
+# implements, and the cold start from C stays.
+#
+# tools/pin.sh verify runs here, at configure time, because a pin that names
+# no commit is a broken tree and not a build that failed: it must be reported
+# before anything is compiled, with the name of the pin that is wrong.
+set(FORT_BOOTSTRAP_REF "${CMAKE_SOURCE_DIR}/tools/bootstrap.ref")
+set(FORT_PIN_SH "${CMAKE_SOURCE_DIR}/tools/pin.sh")
+set(FORT_PIN_DIR "${CMAKE_BINARY_DIR}/pin")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${FORT_BOOTSTRAP_REF}")
+execute_process(
+    COMMAND bash "${FORT_PIN_SH}" verify --ref "${FORT_BOOTSTRAP_REF}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    RESULT_VARIABLE FORT_PIN_VERIFY_STATUS
+    OUTPUT_VARIABLE FORT_PIN_VERIFY_OUT
+    ERROR_VARIABLE FORT_PIN_VERIFY_ERR
+)
+if(NOT FORT_PIN_VERIFY_STATUS EQUAL 0)
+    message(FATAL_ERROR "tools/bootstrap.ref is not a chain this repository can build:\n"
+                        "${FORT_PIN_VERIFY_ERR}")
+endif()
+
+file(STRINGS "${FORT_BOOTSTRAP_REF}" FORT_PIN_LINES REGEX "^bootstrap-")
+if(NOT FORT_PIN_LINES)
+    message(FATAL_ERROR "tools/bootstrap.ref names no pin")
+endif()
+
+# Each pin costs two custom commands.
+#
+# The extraction is stamped pin/<n>/.tree-<sha> and has no DEPENDS at all. The
+# tree of a commit never changes, so the sha in the stamp's name is the whole
+# cache key: the command runs once per sha per build directory, and an edit to
+# the ref file that leaves pin <n> alone re-extracts nothing. A pin move gives
+# the stamp a new name, so the tree is extracted again and every later pin
+# rebuilds behind it.
+#
+# The build depends on the stamp and on the previous compiler's binary, and on
+# nothing of HEAD. So a day-to-day edit to src/fort or std rebuilds stage2
+# alone, exactly as it did when stage1 built it; only a change to
+# src/bootstrap, which the freeze limits to bug fixes, cascades the chain.
+set(FORT_PIN_PREV_BINARY "$<TARGET_FILE:fort>")
+set(FORT_PIN_PREV_TARGET fort)
+set(FORT_PIN_PREV_NAME "stage1")
+set(FORT_PIN_TREE_TARGETS "")
+foreach(pin_line IN LISTS FORT_PIN_LINES)
+    if(NOT pin_line MATCHES "^bootstrap-([0-9]+)[ \t]+([0-9a-f]+)$")
+        message(FATAL_ERROR "tools/bootstrap.ref: malformed line: ${pin_line}")
+    endif()
+    set(pin_number "${CMAKE_MATCH_1}")
+    set(pin_sha "${CMAKE_MATCH_2}")
+    set(pin_tree "${FORT_PIN_DIR}/${pin_number}")
+    set(pin_stamp "${pin_tree}/.tree-${pin_sha}")
+    set(pin_binary "${pin_tree}/fort")
+    add_custom_command(
+        OUTPUT "${pin_stamp}"
+        COMMAND bash "${FORT_PIN_SH}" extract "${pin_sha}" "${pin_tree}"
+                --ref "${FORT_BOOTSTRAP_REF}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Extracting bootstrap-${pin_number} into pin/${pin_number}"
+        VERBATIM
+    )
+    add_custom_target(fort_pin_${pin_number}_tree DEPENDS "${pin_stamp}")
+    list(APPEND FORT_PIN_TREE_TARGETS fort_pin_${pin_number}_tree)
+    add_custom_command(
+        OUTPUT "${pin_binary}"
+        COMMAND "${FORT_PIN_PREV_BINARY}" --std-dir "${pin_tree}/std"
+                --cc "${FORT_TARGET_CC_PATH}" --target "${FORT_TARGET_TRIPLE}"
+                -o "${pin_binary}" "${pin_tree}/src/fort/main.ft"
+        DEPENDS "${pin_stamp}" ${FORT_PIN_PREV_TARGET} "${FORT_PIN_PREV_BINARY}"
+        COMMENT "Compiling bootstrap-${pin_number}'s src/fort with ${FORT_PIN_PREV_NAME}"
+        VERBATIM
+    )
+    add_custom_target(fort_pin_${pin_number} ALL DEPENDS "${pin_binary}")
+    set(FORT_PIN_PREV_BINARY "${pin_binary}")
+    set(FORT_PIN_PREV_TARGET fort_pin_${pin_number})
+    set(FORT_PIN_PREV_NAME "bootstrap-${pin_number}")
+endforeach()
+
+# The last pin is the compiler that builds HEAD, and pin 0's std is the
+# library stage1 compiles from here on (notes/compiler.md 8, invariant 5).
+set(FORT_BOOTSTRAP_BINARY "${FORT_PIN_PREV_BINARY}")
+set(FORT_BOOTSTRAP_TARGET "${FORT_PIN_PREV_TARGET}")
+set(FORT_BOOTSTRAP_NAME "${FORT_PIN_PREV_NAME}")
+set(FORT_PIN0_DIR "${FORT_PIN_DIR}/0")
+set(FORT_PIN0_STD_DIR "${FORT_PIN0_DIR}/std")
+
 # ---- the self-hosted compiler --------------------------------------------------
-# stage2 is src/fort compiled by stage1 (toolchain.md 8): the binary is
+# stage2 is src/fort compiled by the last pin (toolchain.md 8): the binary is
 # x86-64 like every program the compiler builds, so it runs under qemu. It is
-# built by every build so that a module of src/fort that stage1 rejects fails
+# built by every build so that a module of src/fort the last pin rejects fails
 # here rather than in the language run below; tools/bootstrap.sh drives the
-# same command by hand and goes on to stage3.
+# same target by hand and goes on to stage3 and stage4.
 file(GLOB FORT_FORT_SOURCES CONFIGURE_DEPENDS "${FORT_FORT_SRC_DIR}/*.ft")
 set(FORT_STAGE2_BINARY "${FORT_STAGE2_DIR}/fort")
 add_custom_command(
     OUTPUT "${FORT_STAGE2_BINARY}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${FORT_STAGE2_DIR}"
-    COMMAND "$<TARGET_FILE:fort>" --std-dir "${FORT_STD_DIR}" --cc "${FORT_TARGET_CC_PATH}"
+    COMMAND "${FORT_BOOTSTRAP_BINARY}" --std-dir "${FORT_STD_DIR}" --cc "${FORT_TARGET_CC_PATH}"
             --target "${FORT_TARGET_TRIPLE}" -o "${FORT_STAGE2_BINARY}"
             "${FORT_FORT_SRC_DIR}/main.ft"
     # The file inputs, not just the targets: a DEPENDS on the custom target
     # fort_std is an order-only edge, so with fort_std alone an edit to
     # std/strmap.ft -- which session.ft imports -- left stage2/fort untouched
     # and lang-stage2 and stage-usage then judged the previous build's binary.
-    # The copies in <build>/std are what stage1 actually reads.
-    DEPENDS fort fort_std ${FORT_FORT_SOURCES} ${FORT_STD_OUTPUTS}
-    COMMENT "Compiling src/fort with stage1 into stage2/fort"
+    # The copies in <build>/std are what the last pin actually reads.
+    DEPENDS ${FORT_BOOTSTRAP_TARGET} "${FORT_BOOTSTRAP_BINARY}" fort_std
+            ${FORT_FORT_SOURCES} ${FORT_STD_OUTPUTS}
+    COMMENT "Compiling src/fort with ${FORT_BOOTSTRAP_NAME} into stage2/fort"
     VERBATIM
 )
 add_custom_target(fort_stage2 ALL DEPENDS "${FORT_STAGE2_BINARY}")
@@ -235,10 +326,15 @@ endforeach()
 # holds every row of the entry-point table against the fort signature that
 # defines it (toolchain.md 5.1), the second holds D9.8's closure-wide rule
 # against the library's own declarations (D9.10). Both need the sources.
+#
+# They read pin 0's copy and not HEAD's. Both suites parse the file with the C
+# front end, and the C front end compiles pin 0's library and no other, so pin
+# 0's is the library its own tables must agree with. HEAD's std/rt.ft is held
+# against src/fort's table by every program stage2 builds.
 foreach(std_reader runtime_sig_test check_conv_test)
     if(TARGET "${std_reader}")
         target_compile_definitions("${std_reader}"
-            PRIVATE FORT_STD_SOURCE_DIR="${FORT_STD_SRC_DIR}")
+            PRIVATE FORT_STD_SOURCE_DIR="${FORT_PIN0_STD_DIR}")
     endif()
 endforeach()
 
@@ -269,7 +365,7 @@ add_custom_target(check
     COMMENT "Running the unit tests"
     USES_TERMINAL
 )
-add_dependencies(check fort fort_std fort_stage2)
+add_dependencies(check fort fort_std fort_stage2 ${FORT_PIN_TREE_TARGETS})
 if(FORT_UNIT_TEST_TARGETS)
     add_dependencies(check ${FORT_UNIT_TEST_TARGETS})
 endif()
@@ -296,10 +392,15 @@ endif()
 # --verify-ir runs opt -passes=verify over the `-S` output of every test that
 # compiles, so every module the emitter writes is verified from here on
 # (D19.1, toolchain.md 6).
+#
+# --std-dir is pin 0's library and not HEAD's. std/rt.ft is in every import
+# closure (D9.10), so the moment HEAD's library leaves stage1's subset every
+# stage1 compile fails; pin 0's library is the one stage1 compiles from T-131
+# on (notes/compiler.md 8, invariant 5). lang-stage2 below keeps HEAD's.
 set(FORT_LANG_COMMAND
     "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}"
     --fort "$<TARGET_FILE:fort>"
-    --std-dir "${FORT_STD_DIR}"
+    --std-dir "${FORT_PIN0_STD_DIR}"
     --cc "${FORT_TARGET_CC_PATH}"
     --opt "${FORT_OPT_PATH}"
     --verify-ir
@@ -319,13 +420,18 @@ set_tests_properties(lang_check_json PROPERTIES
 
 # The compiler's own modules: test/fort/<x>_test.ft is a run test in the
 # directives of D14.5 that imports a module of src/fort with `-I` and asserts
-# what its comments promise, compiled by stage1 like any other program. The
-# harness takes the corpus root, so the same run_tests.py judges both.
+# what its comments promise. The harness takes the corpus root, so the same
+# run_tests.py judges both.
+#
+# stage2 compiles them and not stage1 (T-131). They import HEAD's src/fort,
+# which may use any form the last pin implements, so stage1 is the wrong
+# compiler for them from here on. That makes this test label lang: it runs an
+# x86-64 binary under qemu.
 set(FORT_MODULE_TEST_DIR "${FORT_TEST_DIR}/fort")
 set(FORT_MODULE_TEST_COMMAND
     "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}"
     --root "${FORT_MODULE_TEST_DIR}"
-    --fort "$<TARGET_FILE:fort>"
+    --fort "${FORT_STAGE2_BINARY}"
     --std-dir "${FORT_STD_DIR}"
     --cc "${FORT_TARGET_CC_PATH}"
     --opt "${FORT_OPT_PATH}"
@@ -506,6 +612,7 @@ set_tests_properties(diff-ir PROPERTIES LABELS lang)
 # the check-lang command below measure the toolchain the build configured.
 set(FORT_FIXPOINT_COMMAND
     bash "${CMAKE_SOURCE_DIR}/tools/fixpoint.sh" "${CMAKE_BINARY_DIR}"
+    --bootstrap "${FORT_BOOTSTRAP_BINARY}"
     --cc "${FORT_TARGET_CC_PATH}"
     --target "${FORT_TARGET_TRIPLE}"
     --opt "${FORT_OPT_PATH}")
@@ -523,7 +630,7 @@ set_tests_properties(bootstrap PROPERTIES LABELS lang)
 add_test(NAME tty
     COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/tty_test.py"
             --fort "$<TARGET_FILE:fort>"
-            --std-dir "${FORT_STD_DIR}"
+            --std-dir "${FORT_PIN0_STD_DIR}"
             --cc "${FORT_TARGET_CC_PATH}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(tty PROPERTIES
@@ -547,6 +654,16 @@ add_test(NAME check_comments_selftest
 set_tests_properties(check_comments_selftest PROPERTIES
     LABELS unit
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
+# The chain of pinned commits (label unit): tools/pin.sh verify over
+# tools/bootstrap.ref, and every rule it states broken on purpose on a ref file
+# of the test's own. Configure runs the same `verify`, so a hand-edited sha
+# fails the configure step as well; this test is what proves the rules fire.
+# It reads git and runs no build.
+add_test(NAME pin-verify
+    COMMAND bash "${FORT_TEST_DIR}/pin_test.sh"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(pin-verify PROPERTIES LABELS unit)
 
 # The unit tests of tools/lines.py (label unit): the glob matcher, which the
 # guest's Python 3.12 cannot delegate to pathlib, and the --since mode that
@@ -619,27 +736,23 @@ set_tests_properties(knowledge_lint_selftest PROPERTIES
     LABELS unit
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
-# The D1.4 identifier check over the project's own fort sources (label unit):
-# tools/fort_lint.py reads `fort --index` (D20.3) rather than tokenizing fort a
-# second time, so it needs the compiler this build made.
+# The D1.4 identifier check over the project's own fort sources: it reads
+# `fort --index` (D20.3) rather than tokenizing fort a second time, so it needs
+# a compiler.
+#
+# stage2 is that compiler and stage1 is not (T-131). The lint must read every
+# fort source of the repository, HEAD's src/fort and HEAD's std included, and
+# those may use any form the last pin implements. Until T-131 stage1 ran it and
+# a second ctest, fort_lint_float, ran stage2 over the two sources stage1
+# cannot read; one compiler that reads them all replaces the pair, and
+# `SKIPPED` in tools/fort_lint.py is empty. It is label lang rather than unit
+# because it runs an x86-64 binary under qemu, and it names --std-dir because
+# the library does not stand beside that binary.
 add_test(NAME fort_lint
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
-            --fort "$<TARGET_FILE:fort>"
+            --fort "${FORT_STAGE2_BINARY}" --std-dir "${FORT_STD_DIR}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(fort_lint PROPERTIES
-    LABELS unit
-    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
-
-# The two sources the ctest above leaves out: std/math.ft and std/rt_float.ft
-# hold floats and the C bootstrap rejects them (D18.1, T-042), so stage2 lints
-# them. It is label lang rather than unit because it runs stage2, an x86-64
-# binary, under qemu, and it names --std-dir because the library does not stand
-# beside that binary.
-add_test(NAME fort_lint_float
-    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
-            --fort "${FORT_STAGE2_BINARY}" --std-dir "${FORT_STD_DIR}" std/math.ft std/rt_float.ft
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(fort_lint_float PROPERTIES LABELS lang)
+set_tests_properties(fort_lint PROPERTIES LABELS lang)
 
 # Its own unit tests (label unit): the rules over synthetic index records, the
 # plumbing against a fake compiler, and the fixtures in test/fort_lint through
@@ -649,7 +762,7 @@ add_test(NAME fort_lint_selftest
     WORKING_DIRECTORY "${FORT_TEST_DIR}")
 set_tests_properties(fort_lint_selftest PROPERTIES
     LABELS unit
-    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1;FORT_BINARY=$<TARGET_FILE:fort>")
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1;FORT_BINARY=$<TARGET_FILE:fort>;FORT_PIN0_DIR=${FORT_PIN0_DIR}")
 
 # The unit tests of the TextMate grammar in editors/vscode (label unit): they
 # compare its keyword and operator lists with D2.4 and D2.10 and assert the
@@ -680,7 +793,7 @@ add_custom_target(check-lang
     COMMAND ${FORT_LANG_STAGE2_COMMAND}
     COMMAND ${FORT_LANG_STAGE2_COMMAND} --check-json
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
-            --fort "${FORT_STAGE2_BINARY}" --std-dir "${FORT_STD_DIR}" std/math.ft std/rt_float.ft
+            --fort "${FORT_STAGE2_BINARY}" --std-dir "${FORT_STD_DIR}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_tokens.sh" "${CMAKE_BINARY_DIR}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ast.sh" "${CMAKE_BINARY_DIR}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_check.sh" "${CMAKE_BINARY_DIR}"
@@ -749,9 +862,7 @@ endif()
 # The same check as the ctest fort_lint, for running by hand over a file.
 add_custom_target(fort-lint
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
-            --fort "$<TARGET_FILE:fort>"
-    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
-            --fort "${FORT_STAGE2_BINARY}" --std-dir "${FORT_STD_DIR}" std/math.ft std/rt_float.ft
+            --fort "${FORT_STAGE2_BINARY}" --std-dir "${FORT_STD_DIR}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Checking the identifier conventions of D1.4 in the project's fort"
     VERBATIM

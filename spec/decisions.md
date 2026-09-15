@@ -1417,6 +1417,10 @@ Sections:
   Amended 2026-09-14 (T-096): the entry for `std.rt_float` gave the reason for the split and no end
   for it; T-096 added the pointer to D18.1, which now carries the one condition that ends the split
   and the measurement of what the split costs today.
+  Amended 2026-09-14 (T-131): the condition named in D18.1 arrived on that date, so the clause "for
+  as long as the C bootstrap builds the compiler" in the `std.rt_float` entry is spent. The entry
+  stays as it reads until T-132 folds the module into `std.rt`; D18.1's history note of the same
+  date records that window.
 
 ### D13.3 The error-handling idiom
 - owner: `stdlib.md`.
@@ -1961,7 +1965,15 @@ Names the entry points that produce D11.7's float text and settles what D11.7 le
   `src/fort/modules.ft` and `notes/compiler.md` and never this field. T-096's first commit left
   the old sentence standing beside its own and so made one field state two loading rules; the
   review of 2026-09-14 found it, since `tools/check_decisions.py` compares two revisions and
-  cannot see a field that contradicts itself.
+  cannot see a field that contradicts itself. Amended 2026-09-14 (T-131): **the condition named
+  above arrived on this date.** The `fort_stage2` target takes the last pin of `tools/bootstrap.ref`
+  as its input and not the binary built from `src/bootstrap`, so a fort compiler builds the fort
+  compiler and `std/rt.ft` may hold a float. The fold of the two modules is T-132's and did not
+  land with the condition. So between T-131 and T-132 the split stands although the condition
+  that ends it holds; this note records that window rather than hiding it, and T-131's log
+  carries it as a deviation. The sentences above that describe what the C bootstrap forces on
+  `std/rt.ft` are the state before T-131 and hold no longer: the C bootstrap reads pin 0's
+  library and never HEAD's (`notes/compiler.md` 8, invariant 5).
 
 ### D18.2 Shortest round-trip digits
 - owner: `toolchain.md` (5.1 entry points).
@@ -2107,6 +2119,19 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   the 516 `.ft` files of the repository that compile (the ctest `diff-ir`, measured 2026-09-13),
   would both fail with high probability on a hash-seeded emitter; that is probability and not
   proof. The gap is T-039's inference and this amendment leaves it where it was.
+  Amended 2026-09-14 (T-131): the pair the toolchain compares changed and this rule did not. The
+  bootstrap became a chain of pinned commits of this repository (`notes/compiler.md` 8): the C
+  compiler builds pin 0, each pin builds the next, and the last pin builds HEAD. The last pin and
+  HEAD are different programs, so the module the last pin emits for `src/fort` differs from
+  HEAD's on any commit that touches the emitter, and the comparison of stage1's module against
+  stage2's would then report a difference that is not a defect. Both members of the pair must
+  embody HEAD's sources. `tools/fixpoint.sh` therefore compares the module **stage2 and stage3**
+  emit, where stage2 is HEAD's sources through the last pin and stage3 is HEAD's sources through
+  stage2, and it compares the **stage3 and stage4** binaries with `cmp`. That is two distinct
+  stages over one input, two stage binaries, two `-S` runs and no third, so the requirement above
+  is met word for word. T-131 weakened nothing. The module comparison the script ran before was
+  wider than the requirement above, because it held two compilers against each other; the
+  comparison from this date is the one the two sentences above describe.
 
 ### D19.6 Checks and failure blocks
 - owner: `toolchain.md` (6, the IR contract).

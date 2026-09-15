@@ -41,14 +41,14 @@ A safe(r) C-like systems programming language.
 - `test/`: `test/test.h` is the C macro framework for the compiler's unit tests
   (`test/common.h` provides `TEST_UNUSED`); `test/lang/` holds language tests in the directive
   format defined in `spec/toolchain.md`.
-- `src/bootstrap/`: the C bootstrap compiler (stage1). **It is frozen (T-046): it accepts a bug
-  fix only, never a feature.** A new language feature goes to `src/fort` alone; `notes/compiler.md`
-  8 says what the freeze leaves open. `src/fort/`: the compiler written in fort (stage2 and
-  stage3). `src/lsp/`: the language server in fort, whose modules are reached through the search
-  root `src` and are therefore `lsp.<name>` and never `<name>` (T-063, `notes/compiler.md` 8).
-  `std/`: the standard library in fort, the runtime (`std/rt.ft`) among its modules; there is no C
-  runtime and no object linked beside the program (T-091). `tools/`: `vm`, `provision.sh`,
-  `lines.py`, `bootstrap.sh`.
+- `src/bootstrap/`: the C bootstrap compiler (stage1). **It does not build the compiler (T-131):
+  `tools/bootstrap.ref` pins the chain that does, and stage1 need only build pin 0 and stay the
+  second implementation.** `notes/compiler.md` 8 holds the five invariants. `src/fort/`: the
+  compiler in fort (stage2 and stage3). `src/lsp/`: the language server in fort, whose modules
+  are reached as `lsp.<name>` and never `<name>` through the search root `src` (T-063,
+  `notes/compiler.md` 8). `std/`: the standard library in fort, the runtime (`std/rt.ft`) among
+  its modules; there is no C runtime and no object linked beside the program (T-091). `tools/`:
+  `vm`, `provision.sh`, `lines.py`, `bootstrap.sh`, `pin.sh`.
 - `editors/`: `editors/vscode/` is the VS Code extension -- `package.json`,
   `language-configuration.json`, `syntaxes/fort.tmLanguage.json`, `extension.js`, and the one pure
   module it is tested through, `lib/check.js` -- and `editors/README.md` is its install guide, its
