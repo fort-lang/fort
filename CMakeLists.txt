@@ -210,6 +210,32 @@ add_custom_command(
 )
 add_custom_target(fort_stage2 ALL DEPENDS "${FORT_STAGE2_BINARY}")
 
+# The Mac platform module sits beside a copy of main.ft. That directory is the
+# entry search root, so its platform.ft wins over src/fort/platform.ft (D9.2).
+# A Mac build reads sw_vers. The Linux VM uses 15.0 to test the two-part form.
+set(FORT_MAC_PLATFORM_DIR "${CMAKE_BINARY_DIR}/mac-platform")
+if(APPLE)
+    set(FORT_MAC_PLATFORM_VERSION_ARGS "")
+else()
+    set(FORT_MAC_PLATFORM_VERSION_ARGS "15.0")
+endif()
+add_custom_command(
+    OUTPUT "${FORT_MAC_PLATFORM_DIR}/platform.ft" "${FORT_MAC_PLATFORM_DIR}/main.ft"
+    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/gen_mac_platform.sh"
+            "${FORT_MAC_PLATFORM_DIR}" ${FORT_MAC_PLATFORM_VERSION_ARGS}
+    DEPENDS "${CMAKE_SOURCE_DIR}/tools/gen_mac_platform.sh"
+            "${FORT_FORT_SRC_DIR}/main.ft"
+    COMMENT "Generating the Mac compiler platform module"
+    VERBATIM
+)
+add_custom_target(fort_mac_platform DEPENDS "${FORT_MAC_PLATFORM_DIR}/platform.ft"
+                                        "${FORT_MAC_PLATFORM_DIR}/main.ft")
+add_test(NAME mac-platform
+    COMMAND bash "${FORT_TEST_DIR}/mac_platform_test.sh" "${FORT_STAGE2_BINARY}"
+            "${FORT_MAC_PLATFORM_DIR}" "${FORT_FORT_SRC_DIR}" "${FORT_STD_DIR}"
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
+set_tests_properties(mac-platform PROPERTIES LABELS unit)
+
 # ---- the language server -------------------------------------------------------
 # fort_lsp is src/lsp compiled by stage2, and it stands beside the compiler at
 # the root of the build directory, which is where `fort` itself is written.
@@ -351,6 +377,14 @@ set_tests_properties(pipeline PROPERTIES
     LABELS unit
     ENVIRONMENT "FORT_TARGET_CC=${FORT_TARGET_CC_PATH};FORT_TARGET_TRIPLE=${FORT_TARGET_TRIPLE}")
 
+# The VM compiler emits Mac IR with a caller-selected standard root. opt checks
+# its form. T-142 owns Mac ABI and stack probes, and T-146 owns the native build.
+add_test(NAME target-ir
+    COMMAND bash "${FORT_TEST_DIR}/target_ir_test.sh" "${FORT_STAGE2_BINARY}"
+            "${FORT_STD_DIR}" "${FORT_OPT_PATH}"
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
+set_tests_properties(target-ir PROPERTIES LABELS unit)
+
 # The C helpers of the language tests are cross-compiled by the harness; they
 # are also built natively here so that -Werror and clang-tidy cover them. They
 # are FFI entry points declared by the tests, hence no prototypes.
@@ -365,7 +399,7 @@ add_custom_target(check
     COMMENT "Running the unit tests"
     USES_TERMINAL
 )
-add_dependencies(check fort fort_std fort_stage2 ${FORT_PIN_TREE_TARGETS})
+add_dependencies(check fort fort_std fort_stage2 fort_mac_platform ${FORT_PIN_TREE_TARGETS})
 if(FORT_UNIT_TEST_TARGETS)
     add_dependencies(check ${FORT_UNIT_TEST_TARGETS})
 endif()
