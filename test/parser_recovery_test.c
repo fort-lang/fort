@@ -768,7 +768,7 @@ TEST(an_unclosed_bracket_costs_its_construct_and_no_more, {
 // ---- the fail corpus ------------------------------------------------------
 // D14.4
 
-enum { CORPUS_PATH_CAP = 512, CORPUS_CHUNK = 4096, CORPUS_FILES = 254 };
+enum { CORPUS_PATH_CAP = 512, CORPUS_CHUNK = 4096, CORPUS_FILES = 259 };
 
 // The files walked, the source of the one being read, and the lines that were
 // reported on without an annotation, one per line.

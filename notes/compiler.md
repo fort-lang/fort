@@ -825,11 +825,15 @@ gone.
   - A fixed array is a value: `T[N]` copies on assignment, on argument passing and on return
     (D3.4), where C decays it to a pointer. A parameter that means "the caller's array" is a span
     `T@`, and `T[N]` has no `.ptr`.
-  - No variadics in either direction. An extern signature may not declare one (D9.8); a C
-    variadic is declared with a fixed prototype for the arguments actually passed, and only
-    `i32`, `i64`, `f64` or a pointer may stand in a variadic position (module-system.md 8.4).
-    The print family is a builtin (D11.7), so `printf`, `fprintf` and `snprintf` inside the
-    compiler become `print`/`println`/`eprintln` or an explicit string buffer.
+  - A fort definition and a function type have no variable tail (D9.8). Stage2 lets an
+    `extern fn` declare `...` after at least one fixed parameter (D19.1). The checker accepts
+    only `i32`, `u32`, `i64`, `u64`, `f64`, pointers, and function pointers in the tail (D19.2).
+    It lends an owning lvalue and rejects an owning rvalue. Linux still emits the old variadic
+    LLVM form for a fixed extern declaration. That form keeps the pinned chain byte-identical.
+    Mac emits a fixed LLVM form for a fixed extern declaration. A marked extern uses the
+    variadic LLVM form on both targets. Mac puts its C tail arguments in stack slots.
+    The print family is a builtin (D11.7). The compiler uses `print`, `println`,
+    `eprintln`, or an explicit string buffer instead of C print calls.
   - No function-scope `static`: a module-level `mut` global replaces it, and it is visible to the
     whole module rather than to one function.
   - No forward declaration: top-level declarations are order-independent within a module (D7.10),

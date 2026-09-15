@@ -525,12 +525,12 @@ set_tests_properties(lang-stage2 PROPERTIES LABELS lang)
 # with a golden index.json beside it, held against that file byte for byte
 # (D20.2, D20.3). It is the oracle of the json and index ports (T-093).
 #
-# What it covers and what it does not. --check-json selects 241 of the 676
-# tests: the 239 `fail` tests, which have diagnostics, and the 2 tests with a
-# golden index beside them. So the document of a **clean** compile is
-# exercised here by two tests, and the diagnostics half by all 239. The three
-# numbers are read off `run_tests.py --check-json --list`, whose last line is a
-# summary and not a test, so `wc -l` of it is one above the count; the pair
+# --check-json selects 245 of 682 tests. It selects 243 fail tests with
+# diagnostics and two tests with a golden index. The golden tests check the
+# clean compile document. The fail tests check diagnostic documents.
+# `run_tests.py --list` reports 682 tests. `--check-json --list` reports 245.
+# The second list ends with one summary line. That line makes `wc -l` report 246.
+# The pair
 # before T-043 (194 of 538, 192 fail tests) counted the fail tests wrong as
 # well, T-042 re-measured all three after the corpus had grown past 200 of 559,
 # T-045 moved the total by nine `run` tests, which carry no diagnostic, and by
@@ -579,6 +579,11 @@ set_tests_properties(lang_check_json-stage2 PROPERTIES LABELS lang)
 add_test(NAME stage-usage
     COMMAND bash "${FORT_TEST_DIR}/stage_usage_test.sh" "${CMAKE_BINARY_DIR}")
 set_tests_properties(stage-usage PROPERTIES LABELS unit)
+
+add_test(NAME stage2-ast-variadic
+    COMMAND bash "${FORT_TEST_DIR}/stage2_ast_variadic_test.sh" "${FORT_STAGE2_BINARY}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(stage2-ast-variadic PROPERTIES LABELS unit)
 
 # The two lexers over the whole repository: `fort --tokens` writes one line per
 # token (D14.1, toolchain.md 1) and tools/diff_tokens.sh compares stage1's dump

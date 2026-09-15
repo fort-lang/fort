@@ -1,6 +1,6 @@
 #!/bin/bash
 # stage1 and stage2 must lex every .ft file in the repository into the same
-# tokens.
+# tokens, except that stage1 reads `...` as adjacent `..` and `.` tokens.
 #
 # `fort --tokens <file>` lexes that one file and writes one line per token in
 # the form of spec/toolchain.md 1 (D14.1). Both compilers implement it --
@@ -39,7 +39,11 @@ done
 # comparison, and a floor only notices the walk losing all of them. A ticket
 # that adds or removes a .ft file changes all four lines in the same commit:
 # diff_tokens.sh, diff_ast.sh, diff_check.sh and diff_ir.sh.
-FT_FILES=946
+FT_FILES=955
+
+# The file count for `...` tokens that stage1 reads as two tokens.
+# D2.10
+ELLIPSIS_FILES=8
 
 files=$(find . -name '*.ft' -not -path './build/*' -not -path './.git/*' \
     -not -path './.worktrees/*' | sort)
@@ -56,6 +60,39 @@ trap 'rm -rf "$work"' EXIT
 
 status=0
 differing=0
+ellipsis_files=0
+
+# Join only adjacent `..` and `.` tokens. A space leaves two tokens.
+# The join keeps the token range, so the rest of each dump stays comparable.
+# D2.10
+normalize_stage1() {
+    local line pending='' range next_range start finish
+    normalized=0
+    while IFS= read -r line; do
+        if [ -n "$pending" ]; then
+            range=${pending%% *}
+            next_range=${line%% *}
+            if [[ "$line" == *' 0 "." .' && "${range#*-}" == "${next_range%%-*}" ]]; then
+                start=${range%%-*}
+                finish=${next_range#*-}
+                printf '%s-%s 0 "..." ...\n' "$start" "$finish"
+                pending=''
+                normalized=$((normalized + 1))
+                continue
+            fi
+            printf '%s\n' "$pending"
+            pending=''
+        fi
+        if [[ "$line" == *' 0 ".." ..' ]]; then
+            pending=$line
+        else
+            printf '%s\n' "$line"
+        fi
+    done
+    if [ -n "$pending" ]; then
+        printf '%s\n' "$pending"
+    fi
+}
 # The list is read line by line rather than word by word: a path holding a
 # space would otherwise be split into two paths neither compiler can open,
 # and two compilers failing alike is what this script would call agreement.
@@ -95,7 +132,11 @@ while IFS= read -r file; do
         differing=$((differing + 1))
         continue
     fi
-    if ! diff -u "$work/one.out" "$work/two.out" >"$work/tokens.diff"; then
+    normalize_stage1 <"$work/one.out" >"$work/one.norm"
+    if [ "$normalized" -gt 0 ]; then
+        ellipsis_files=$((ellipsis_files + 1))
+    fi
+    if ! diff -u "$work/one.norm" "$work/two.out" >"$work/tokens.diff"; then
         echo "diff_tokens.sh: $file: the token dumps differ:" >&2
         head -n 40 "$work/tokens.diff" >&2
         status=1
@@ -112,9 +153,14 @@ done <<EOF
 $files
 EOF
 
+if [ "$ellipsis_files" -ne "$ELLIPSIS_FILES" ]; then
+    echo "diff_tokens.sh: joined '...' in $ellipsis_files files, expected $ELLIPSIS_FILES" >&2
+    status=1
+fi
+
 if [ "$status" -eq 0 ]; then
-    echo "stage1 and stage2 agree about the tokens, the diagnostics and the exit"
-    echo "status of all $count .ft files in the repository"
+    echo "stage1 and stage2 agree about the tokens after $ellipsis_files '...' joins,"
+    echo "the diagnostics and the exit status of all $count .ft files"
 else
     echo "diff_tokens.sh: $differing of $count .ft files differ" >&2
 fi
