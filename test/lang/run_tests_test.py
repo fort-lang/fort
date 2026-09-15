@@ -1458,7 +1458,9 @@ class EndToEnd(TempRoot):
 
     def test_false_compiler(self):
         self.write_corpus()
-        status, lines = self.run_main("--fort", "/bin/false", "--no-xfail")
+        false_compiler = shutil.which("false")
+        self.assertIsNotNone(false_compiler)
+        status, lines = self.run_main("--fort", false_compiler, "--no-xfail")
         self.assertEqual(status, 1)
         self.assertEqual(len(lines), 15)
         for line in lines[:-1]:
