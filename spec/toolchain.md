@@ -275,6 +275,9 @@ under inspection rather than a program.
   modules in the form the compiler emits and `test/pipeline_test.sh` runs this pipeline over
   them; the language-test harness verifies the module of every test that compiles
   (`run_tests.py --verify-ir`, section 7.3).
+- The native Mac hand IR sample is `test/mac/ir/mac.ll`.
+  `tools/mac pipeline` verifies, links, and runs it on a Mac arm64 host.
+  This host sample checks Mach-O PIE and SIGTRAP. It does not stand for full compiler output.
 - An object from `-c` contains the whole program, the runtime included, so linking it needs no
   input the compiler produced beyond the object itself (D9.10, D13.1).
 
@@ -1523,7 +1526,8 @@ of failures and `--keep` keeps the temporary directories. The
 compiler runs with `test/lang` as its working directory (D14.4). Each test uses a fresh
 temporary directory as `TMPDIR`, sets `LC_ALL=C`, and disables core dumps.
 The harness sets `QEMU_LD_PREFIX` for Linux unless it inherits a value.
-The harness removes this variable for Mac:
+The harness removes this variable only for `arm64-apple-macosxM.m.p` with three ASCII numeric parts.
+For all other target strings, it keeps an inherited value or sets the Linux default:
 
 | Directive    | Harness action                                                              |
 |--------------|-----------------------------------------------------------------------------|

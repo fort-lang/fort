@@ -38,7 +38,7 @@ fi
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 ulimit -c 0
-sed "s/arm64-apple-macosx15.0.0/$target/" "$root/test/ir/mac.ll" >"$work/mac.ll"
+sed "s/arm64-apple-macosx15.0.0/$target/" "$root/test/mac/ir/mac.ll" >"$work/mac.ll"
 
 "$opt" -passes=verify -disable-output "$work/mac.ll"
 "$cc" --target="$target" -isysroot "$sdk" -O1 -fPIE -Wl,-pie \

@@ -722,8 +722,12 @@ bullet at a time and without a rewrite.
   Adding one means
   adding its name to the `for prog in` loop of that script and a block of expectations beside
   the others; the list is not globbed, since each module's output is its own. `*.ll` is
-  gitignored except `test/ir/*.ll`. `run_tests.py --verify-ir` runs the same verifier over the
+  gitignored except `test/ir/*.ll` and `test/mac/ir/*.ll`.
+  `run_tests.py --verify-ir` runs the same verifier over the
   `-S` output of every language test that compiles.
+- The native Mac pipeline uses `test/mac/ir/mac.ll` as a host sample (T-143).
+  This sample is outside the `test/ir/*.ll` compiler-form corpus.
+  `tools/mac pipeline` verifies, links, and runs it, then checks Mach-O PIE and SIGTRAP.
 - **The gen suites emit with no runtime in the closure**, so the calls the emitter writes into it
   reach a name the module neither defines nor declares, which LLVM rejects as a forward reference
   to nothing. `verified()` appends a `declare` for every row of `runtime_sig.h` to the file the
