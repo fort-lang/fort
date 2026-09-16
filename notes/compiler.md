@@ -671,9 +671,9 @@ gone.
   reports differently from stage1 is what the fixpoint work has to not fight. So when a ported
   module can enforce a rule in a place the C does not, read the C: the oracle is where the rule
   lives, and a difference is a bug even when the new place looks tidier.
-- **Transliterating the bootstrap into fort.** Phase B rewrites `src/bootstrap/*.c` as
-  `src/fort/*.ft`, and stage2 is compiled by stage1, so a compiler source may use only what the
-  bootstrap itself accepts. `test/lang/bootstrap-unsupported.txt` is that list: no floats (`f32`,
+- **The completed translation from the bootstrap into fort.** During Phase B, stage1 compiled
+  stage2. A compiler source could use only what the bootstrap accepted.
+  `test/lang/bootstrap-unsupported.txt` records that list: no floats (`f32`,
   `f64`, float literals), no second array or span level in one written type (`i32[3][4]`,
   `i32[4]@`, `u8@@`, `node@[4]`, T-043), no `do { } while` and no `?:`. Function
   pointers are inside the subset (D3.10), and a dispatch table wraps them in a struct, because a
@@ -682,54 +682,38 @@ gone.
   constructs a C file may hold that have no fort spelling, with what replaces each; the rules the
   bootstrap
   already follows so that it stays portable are the first four.
-  **The chain of pinned commits, and the five invariants that hold it** (T-131). stage1 does not
-  compile `src/fort` any more. `tools/bootstrap.ref` names a chain of pinned commits of this
-  repository, oldest first: stage1 builds pin 0's `src/fort` with pin 0's `std`, pin k builds
-  pin k+1, and the last pin builds HEAD's `src/fort` with HEAD's `std` into
-  `build/<preset>/stage2/fort`. The five invariants:
-  1. **stage1 builds pin 0 and never stops.** `parser.c` and `lexer.c` never remove a form pin 0
-     uses. T-136 is why pin 0 is not `bootstrap-frozen`: it replaced the signature form, so the C
-     compiler at HEAD does not parse that older tree.
-  2. **HEAD's `src/fort` and `std` use only what the last pin implements.** A feature's first
-     implementation is therefore written without the feature.
-  3. **A pin moves only on need, as its own commit**: the ref line and a note naming the need,
-     and nothing else, so the gate proves the new chain before HEAD relies on it. **The need is
-     one of two things, and T-132 found the second.** Read the need as "the last pin cannot
-     build HEAD", never as "the last pin cannot compile a form".
-     - *A form the last pin cannot compile*, which is invariant 2 read backwards. The worked
-       example: a pin moves for the ticket after the one that gives `src/fort` a new syntax, on
-       the day `src/fort` or `std` wants to spell that syntax itself. Until that day the new
-       syntax lives in the compiler and not in its own source. A pin did **not** move for the
-       fold of T-132 by this reason: fort has had floats since T-040 and every pin implements
-       them, so an `f64` in `std/rt.ft` needs nothing new.
-     - *A file the last pin's compiler demands by name.* The worked example is `bootstrap-1`,
-       which T-132 took. Pin 0's loader reads `<std-dir>/rt_float.ft` into any closure holding a
-       float; the fold put floats into `std/rt.ft`, which stands in every closure, so pin 0
-       asked HEAD for that file on every build and HEAD could not delete it
-       (`error: cannot read`, section 7). The pin is the commit of the fold itself, whose
-       `src/fort` names `rt_float` nowhere, and the commit after it deletes the file.
-     **A pin costs a hop on every cold build, for ever.** Measured on 2026-09-14 under the debug
-     preset, each the median of five runs: stage1 compiles pin 0 in 2.357 s checked and 2.807 s
-     release, pin 0 compiles pin 1 in 2.672 s and 3.155 s. Cold, the `fort_pin_0` target takes
-     2.568 s and `fort_pin_0 fort_pin_1` takes 5.600 s, so the second pin costs 3.0 s of every
-     cold build. Measure the chain when you take one and write the number into
-     `tools/bootstrap.ref` beside the last.
-     **A branch that adds a pin merges with `--no-ff`.** The pin names a commit of that branch,
-     and a squash merge leaves `main` without it, so `tools/pin.sh verify` then fails at
-     configure time for every clone (T-132).
-  4. **Every pin is a commit in this repository's history.** A shallow clone cannot build.
-     `tools/pin.sh verify` says so at configure time, by name.
-  5. **HEAD's stage2 compiles pin 0's `std`**, because pin 0's `std` is the differential `std`:
-     `lang`, `lang_check_json`, `tty`, `tools/diff_check.sh`, `tools/diff_ir.sh` and the two C
-     unit tests that read `std/` all name `build/<preset>/pin/0/std`. `std/rt.ft` is in every
-     import closure (D9.10), so the moment HEAD's library leaves stage1's subset every stage1
-     compile fails; pin 0's library is the one stage1 can always read.
-     T-144 uses `platform.ft` for compiler C calls whose declaration changes by target.
-     The Mac generator marks C `fcntl` variadic. The Linux platform uses a fixed extern.
-     A new `std.libc` wrapper made pin 0 refuse 3 clean files and 9 programs.
-     The platform wrapper preserved 509 clean files and 530 programs.
-  **What the freeze of T-046 becomes.** It is invariant 1 and no more: `src/bootstrap` must keep
-  building pin 0. Its second job stands and is the reason the directory stays -- it is the second
+  **The target bootstrap chain and its invariants** (T-150, D14.7). The user supplies one
+  executable seed for `linux` or `darwin`. `tools/bootstrap.seed` names the source baseline that
+  produced both seeds. The seed first rebuilds that baseline for the selected target. The baseline
+  then builds each later source pin. The last source pin builds HEAD. Five invariants hold the
+  chain:
+  1. **Both seed kinds use one source baseline.** A baseline change requires new Linux and Darwin
+     seeds from the same commit. The baseline file names that full commit SHA.
+  2. **The verifier reads the seed's stored target.** `tools/verify_seed.py` runs `-S` without
+     `--target`. It accepts only the exact Linux triple or a versioned Darwin arm64 triple. Its
+     identity record gives the canonical path, SHA-256 value, source baseline SHA, and triple.
+     The record identifies the supplied executable. It does not prove its source history.
+  3. **One selected target flows through the complete chain.** The baseline, each later source pin,
+     and HEAD use the seed's target. No compiler stage crosses between Linux and Darwin.
+  4. **A source pin moves only when the previous source stage cannot build the next source.** The
+     cause is an unsupported form or a required file that the next tree lacks. The ref change and
+     its reason form one commit. The baseline and each pin are full commit SHAs in HEAD's history.
+     A shallow clone that lacks one of these commits cannot bootstrap.
+  5. **The C bootstrap is not a production stage.** It remains the second implementation for the
+     differential tests. Those tests use sources that the C bootstrap accepts.
+
+  The verifier takes the target name, seed path, and assembled standard root:
+
+  ```sh
+  python3 tools/verify_seed.py linux /path/to/fort /path/to/linux/std
+  python3 tools/verify_seed.py darwin /path/to/fort /path/to/darwin/std
+  ```
+
+  **The C-started chain before D14.7** (T-131). From T-131 through T-150, stage1 built two
+  Linux-only source pins before the last pin built HEAD. Five invariants kept that chain valid.
+  D14.7 replaces those invariants. Git history keeps their exact rules and measurements.
+  **What the freeze of T-046 becomes.** It is invariant 5 and no more. Its second job stands and
+  is the reason the directory stays -- it is the second
   independent implementation that `tools/diff_tokens.sh`, `diff_ast.sh`, `diff_check.sh` and
   `diff_ir.sh` compare against over 946 `.ft` files. So a change to `src/bootstrap` is a bug fix
   or a differential fix, and the **carve-out is withdrawn**: no edit is needed any more to let it

@@ -1663,6 +1663,28 @@ Sections:
   and `tools/lines.py` globs them no longer, so the source side is the compiler and the standard
   library and nothing else.
 
+### D14.7 The bootstrap seed and target chain
+- owner: `toolchain.md` (8).
+- rule: The production bootstrap accepts exactly two bootstrap target names: `linux` and `darwin`.
+  The `linux` seed is one executable Linux x86-64 fort compiler. The `darwin` seed is one
+  executable Darwin arm64 fort compiler. The user supplies the seed for the selected target.
+  Both seeds come from the source baseline that `tools/bootstrap.seed` records.
+  The seed is an input and not a source-built compiler stage.
+  The verifier accepts only `linux` and `darwin`. It runs the seed with `-S` and no `--target`.
+  Linux seed IR must name `x86_64-unknown-linux-gnu` as its target triple. Darwin seed IR must name
+  `arm64-apple-macosxM.m.p`, with three numeric version parts. The verifier records the canonical
+  seed path, its SHA-256 value, the source baseline SHA, and the emitted default target triple.
+  The seed builds the source baseline for the selected target. Each later source-built stage uses
+  the same selected target. No source-built stage crosses from Linux to Darwin or from Darwin to
+  Linux. The baseline and each later source pin are full commit SHAs in the history of the revision
+  being built. A shallow clone that lacks one of these commits cannot bootstrap. The C bootstrap is
+  not in the production compiler chain. It remains an independent implementation for differential
+  tests.
+- rationale: A self-hosted compiler needs one executable compiler before it can compile source.
+  One shared source baseline gives both targets the same first source-built compiler.
+- history: Decided 2026-09-16 (T-150). The earlier production chain started with the C bootstrap
+  and built two Linux-only source pins before it built HEAD.
+
 ## D15 Not in v1
 
 Deferred deliberately. The specification lists each with the idiom to use instead.

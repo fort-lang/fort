@@ -402,8 +402,8 @@ class RealLog(unittest.TestCase):
     def test_the_lint_is_clean(self):
         self.assertEqual(check_decisions.lint(str(DECISIONS_PATH), self.text), [])
 
-    def test_it_holds_a_hundred_and_forty_four_entries(self):
-        self.assertEqual(len(self.entries), 144)
+    def test_it_holds_a_hundred_and_forty_five_entries(self):
+        self.assertEqual(len(self.entries), 145)
 
     def test_every_entry_carries_an_owner_and_a_rule(self):
         without = [name for name, fields in self.entries.items()

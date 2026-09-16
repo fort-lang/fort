@@ -686,7 +686,7 @@ class CitationTest(unittest.TestCase):
     def test_the_log_of_this_repository_names_every_tag_its_sources_cite(self):
         root = Path(__file__).resolve().parent.parent
         known = lint.known_tags(root)
-        self.assertEqual(len(known), 164)
+        self.assertEqual(len(known), 165)
         self.assertIn("D15", known)
         self.assertIn("D16", known)
         self.assertNotIn("D99.9", known)
@@ -976,11 +976,11 @@ class HistoryLimitTest(unittest.TestCase):
                                  ("D19.5", "this rule requires holds")])
 
     def test_the_same_signature_over_the_rationale_fields_reports_nothing(self):
-        # the other half of the fourth limit: 17 entries carry a rationale and
+        # the other half of the fourth limit: 18 entries carry a rationale and
         # the gap costs 0 today, which is what makes it a gap and not a defect
         entries, _ = check_decisions.read_fielded(self.log())
         carried = [t for t, f in entries.items() if f.get("rationale", "").strip()]
-        self.assertEqual(len(carried), 17)
+        self.assertEqual(len(carried), 18)
         self.assertEqual(self.sweep(lint.HISTORY_REPORT, field="rationale"), [])
 
     def test_a_wider_subject_and_verb_list_reports_thirty_nine(self):
@@ -1068,15 +1068,15 @@ class HistoryRepositoryTest(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         problems, count = lint.rule_history(root)
         self.assertEqual(problems, [])
-        self.assertEqual(count, "history: 59 history fields, 4 with a dated note")
+        self.assertEqual(count, "history: 60 history fields, 4 with a dated note")
 
     def test_the_field_count_is_the_one_grep_counts(self):
-        # `grep -c '^- history:' spec/decisions.md` says 59 (notes/style.md 4)
+        # `grep -c '^- history:' spec/decisions.md` says 60 (notes/style.md 4)
         root = Path(__file__).resolve().parent.parent
         text = (root / "spec/decisions.md").read_text(encoding="utf-8")
-        self.assertEqual(len(lint.history_fields(text)), 59)
+        self.assertEqual(len(lint.history_fields(text)), 60)
         self.assertEqual(
-            sum(1 for line in text.split("\n") if line.startswith("- history:")), 59)
+            sum(1 for line in text.split("\n") if line.startswith("- history:")), 60)
 
 
 class BudgetTest(unittest.TestCase):
@@ -1117,7 +1117,7 @@ class DecisionsTest(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         problems, count = lint.rule_decisions(root)
         self.assertEqual(problems, [])
-        self.assertIn("144 entries", count)
+        self.assertIn("145 entries", count)
 
     def test_a_seeded_log_passes(self):
         with tempfile.TemporaryDirectory() as name:

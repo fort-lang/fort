@@ -1824,13 +1824,12 @@ implementable; the design is to be planned in the implementation phase.
   repository holds `src/` (compiler), `std/*.ft` (standard library, the runtime `std.rt`
   included), `test/` (section 7) and a build script producing `build/fort` and `build/std/` with
   the library sources.
-- **The chain that builds the compiler** (T-131). The C compiler in `src/bootstrap` does not
-  compile `src/fort`. `tools/bootstrap.ref` names a chain of pinned commits of this repository,
-  oldest first. The C compiler builds pin 0's `src/fort` with pin 0's `std`, each pin builds the
-  next, and the last pin builds HEAD's `src/fort` with HEAD's `std`. So `src/fort` and `std` may
-  use any form the last pin implements, and a cold machine still builds everything from the C
-  sources and the git history. A shallow clone holds no pin and cannot build. `notes/compiler.md`
-  8 states the five invariants of the chain and says when a pin moves.
+- **The chain that builds the compiler** (D14.7). The user supplies one executable seed for the
+  selected `linux` or `darwin` target. `tools/bootstrap.seed` names the shared source baseline.
+  The verified seed builds that baseline for its own target. The baseline and each later pin build
+  the next source stage for the same target. The last source stage builds HEAD. The C bootstrap is
+  not in this chain. It remains the second implementation for differential tests. The baseline and
+  pins are full commits in HEAD's history. A shallow clone that lacks one cannot bootstrap.
 - **Driver.** Parses options (section 1), owns the module table keyed by real path, runs the
   passes below, invokes `--cc` over the emitted module (D14.3) and maps failures to exit
   statuses.

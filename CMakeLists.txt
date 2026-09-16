@@ -36,6 +36,17 @@ include(cmake/sanitizers.cmake)
 
 enable_testing()
 
+find_program(FORT_PYTHON3 NAMES python3 REQUIRED)
+
+# The seed contract has two target names. This test breaks each input and
+# output rule with local executable fixtures. It does not need a compiler.
+add_test(NAME verify_seed_selftest
+    COMMAND "${FORT_PYTHON3}" -m unittest verify_seed_test
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/test")
+set_tests_properties(verify_seed_selftest PROPERTIES
+    LABELS unit
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 set(FORT_SRC_DIR "${CMAKE_SOURCE_DIR}/src/bootstrap")
 set(FORT_TEST_DIR "${CMAKE_SOURCE_DIR}/test")
 set(FORT_STD_SRC_DIR "${CMAKE_SOURCE_DIR}/std")
@@ -497,7 +508,6 @@ endif()
 # check-lang target run the same command, and `lang_check_json` the cross-check
 # of the check mode (D20.2); `lang_lint` validates the directives and
 # `lang_selftest` runs the harness's own unit tests (both label unit).
-find_program(FORT_PYTHON3 NAMES python3 REQUIRED)
 set(FORT_LANG_DIR "${FORT_TEST_DIR}/lang")
 
 # The parser's recovery suite walks the fail corpus (D14.4) and asserts that
@@ -823,7 +833,7 @@ set_tests_properties(mutate_selftest PROPERTIES
 # of it through the same parser.
 add_test(NAME check_decisions
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/check_decisions.py"
-            "${CMAKE_SOURCE_DIR}/spec/decisions.md" --expect 144
+            "${CMAKE_SOURCE_DIR}/spec/decisions.md" --expect 145
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(check_decisions PROPERTIES LABELS unit)
 
