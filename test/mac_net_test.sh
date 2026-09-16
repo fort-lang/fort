@@ -10,6 +10,7 @@ fi
 
 root=$(cd "$(dirname "$0")/.." && pwd -P)
 cd "$root"
+vm_slot=${FORT_VM_SLOT:-2}
 version=$(sw_vers -productVersion)
 if [[ "$version" =~ ^[0-9]+\.[0-9]+$ ]]; then
     version="$version.0"
@@ -46,12 +47,12 @@ printf '%s\n' 'AF_INET 2' 'SOCK_STREAM 1' 'SOL_SOCKET 65535' \
 sed -n '1,11p' "$work/probe.out" > "$work/layout.actual"
 cmp "$work/layout.expected" "$work/layout.actual"
 
-FORT_VM_SLOT=1 tools/vm configure debug
-FORT_VM_SLOT=1 tools/vm build debug fort_stage2
-FORT_VM_SLOT=1 tools/vm run python3 tools/fort_lint.py \
+FORT_VM_SLOT="$vm_slot" tools/vm configure debug
+FORT_VM_SLOT="$vm_slot" tools/vm build debug fort_stage2
+FORT_VM_SLOT="$vm_slot" tools/vm run python3 tools/fort_lint.py \
     --fort build/debug/stage2/fort --std-dir "$guest_work/mac" \
     std/mac/net.ft test/mac/net_layout.ft test/mac/net_errors.ft
-FORT_VM_SLOT=1 tools/vm run build/debug/stage2/fort --check \
+FORT_VM_SLOT="$vm_slot" tools/vm run build/debug/stage2/fort --check \
     --std-dir "$guest_work/linux" test/lang/run/stdlib/117_net_loopback.ft
 tests=(net_layout net_errors 117_net_loopback 119_net_stream)
 count=0
@@ -60,7 +61,7 @@ for name in "${tests[@]}"; do
     net_*) source="test/mac/$name.ft" ;;
     *) source="test/lang/run/stdlib/$name.ft" ;;
     esac
-    FORT_VM_SLOT=1 tools/vm run build/debug/stage2/fort -S --target "$target" \
+    FORT_VM_SLOT="$vm_slot" tools/vm run build/debug/stage2/fort -S --target "$target" \
         --std-dir "$guest_work/mac" -o "$guest_work/$name.ll" "$source"
     if [ "$name" = net_layout ]; then
         "$cc" -isysroot "$sdk" -O1 -fPIE -Wl,-pie -Wno-override-module \

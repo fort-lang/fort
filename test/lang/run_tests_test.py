@@ -764,6 +764,11 @@ class Discovery(TempRoot):
             [t.path for t in run_tests.select(tests, ["001_a", "programs/"])],
             ["run/arrays/001_a.ft", "run/spans/001_a.ft", "programs/p.ft"],
         )
+        self.assertEqual(
+            [t.path for t in run_tests.exclude_exact(tests, ["run/arrays/001_a.ft"])],
+            ["run/spans/001_a.ft", "programs/p.ft"],
+        )
+        self.assertEqual(run_tests.exclude_exact(tests, ["run/arrays/001_a"]), tests)
 
 
 # ---- judging ------------------------------------------------------------------------
@@ -1504,6 +1509,19 @@ class EndToEnd(TempRoot):
         self.assertEqual(lines, ["fail/modules/001_multi", "run/modules/two", "2 tests"])
         status, lines = self.run_main("--lint")
         self.assertEqual((status, lines), (0, ["run_tests.py: 14 tests, no problems"]))
+
+    def test_exact_exclusion(self):
+        self.write_corpus()
+        path = "run/control/001_echo.ft"
+        status, lines = self.run_main("--list", "--exclude-exact", path)
+        self.assertEqual(status, 0)
+        self.assertNotIn(path, lines)
+        self.assertEqual(lines[-1], "13 tests")
+        status, lines = self.run_main("--lint", "--exclude-exact", "run/control/001_echo")
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "lint: --exclude-exact: 'run/control/001_echo' matches no selected test", lines
+        )
 
     def test_lint_failure_blocks_the_run(self):
         self.write_corpus()
