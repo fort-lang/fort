@@ -443,6 +443,12 @@ came here.
 
 ## 7. The runtime and the standard library
 
+- **Mac extern declarations keep allocator failure calls** (T-149).
+  Apple clang `-O1` removes a `calloc` and matching `free` when the caller reads
+  no storage, even with `#3 nobuiltin` at the call site. The Mac emitter adds
+  `nobuiltin` to each extern declaration. The Linux emitter keeps its IR bytes.
+  Check the optimized entry function for `call ptr @calloc` in the OOM fixtures.
+
 - **Mac std.net uses Darwin's 16-byte IPv4 address** (T-145).
   `test/mac/net_probe.c` measures length, family, port, and address offsets at 0, 1, 2, and 4.
   Set the length byte to 16 before bind and connect.

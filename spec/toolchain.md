@@ -875,17 +875,18 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
 
    This Linux form also applies to an extern declaration that writes `...`.
    Linux's variadic LLVM call form sets the System V vector-register count.
-   Mac fixed externs use fixed LLVM forms instead:
+   Mac fixed externs use fixed LLVM forms instead. The declaration carries
+   `nobuiltin`:
 
    ```llvm
-   declare i64 @write(i32, ptr, i64)
+   declare i64 @write(i32, ptr, i64) nobuiltin
      %t12 = call i64 @write(i32 %t8, ptr %t9, i64 %t10) #3
    ```
 
    A Mac C extern that writes `...` keeps its fixed prefix in a variadic LLVM type:
 
    ```llvm
-   declare i32 @printf(ptr, ...)
+   declare i32 @printf(ptr, ...) nobuiltin
      %t13 = call i32 (ptr, ...) @printf(ptr %t9, i32 %t11, double %t12) #3
    ```
 
@@ -894,7 +895,12 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
    Only `i32`, `u32`, `i64`, `u64`, `f64`, pointers and function pointers can appear in that tail.
    The call site writes their actual LLVM types; unsigned integers use the same IR widths.
    `#3 = { nobuiltin }` stays on each extern call site on both targets.
-   It prevents rewriting a C symbol without changing intrinsic lowering driver-wide.
+   Mac also writes `nobuiltin` on each extern declaration. Apple clang can
+   otherwise mark `calloc` as an allocator whose call and matching `free`
+   have no observable effect. This can remove an allocation failure when
+   the caller reads no storage (D10.2, D11.4). Linux keeps its declaration
+   bytes. The attributes prevent rewriting C calls without changing
+   intrinsic lowering driver-wide.
    A function-pointer call is fixed (D3.10); an extern name is not a pointer value.
 
    The runtime needs no declaration at all: `std.rt` is in the closure (D9.10), so the module

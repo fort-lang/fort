@@ -19,12 +19,12 @@ import std.strbuf;
 // the `extern` functions and the intrinsics, and the attribute groups.
 // D7.10, D6.5, D4.6
 //
-// Eight of the eleven cases here emit a module, and each one runs the
+// Nine of the twelve cases here emit a module, and each one runs the
 // structural check of item 10 over it (gen_env.expect_blocks): four through
-// `globals_of` below and four in the case itself. The other three call
+// `globals_of` below and five in the case itself. The other three call
 // `attr_text`, `emit_intrinsic` and `section` and emit no definition at all,
-// so `grep -c '^ *gen_env.expect_blocks('` is 5 call sites covering 8 cases,
-// and not 11.
+// so `grep -c '^ *gen_env.expect_blocks('` is 6 call sites covering 9 cases,
+// and not 12.
 //
 // This is the fort half of test/gen_data_test.c and test/gen_global_test.c.
 // The expected text of each case was read off stage1's own `fort -S` over the
@@ -294,6 +294,28 @@ fn the_declaration_groups_stand_in_their_fixed_order() void {
     assert(str.find(got, "attributes #8 =") < 0);
 }
 
+// Mac marks each extern declaration `nobuiltin`. This test checks two
+// declarations. The call-site group remains in the output. Linux keeps the
+// declaration bytes tested above.
+// D10.2, D19.1
+fn mac_extern_declarations_protect_allocator_effects() void {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open_with(&e, gen.gen_options{false, false, "arm64-apple-macosx15.0.0"});
+    defer gen_env.close(&e);
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.append(&source, "extern fn calloc(u64 n, u64 size) void*;\n");
+    strbuf.append(&source, "extern fn free(void* p) void;\n");
+    strbuf.append(&source, "fn main() i32 {\n    free(calloc(1, 16));\n    return 0;\n}\n");
+    assert(gen_env.open_module(&e, strbuf.view(&source)));
+    assert(gen_stmt.gen_program(&e.g, &e.c.ck, &e.c.m.set));
+    string got = gen_env.module_text(&e);
+    gen_env.expect_blocks(&e, got);
+    assert(str.find(got, "declare ptr @calloc(i64, i64) nobuiltin\n") >= 0);
+    assert(str.find(got, "declare void @free(ptr) nobuiltin\n") >= 0);
+    assert(str.find(got, ") #3\n") >= 0);
+}
+
 // The text of every attribute group, at its fixed index: the one place the
 // table is written down, and the one thing a `declare` line points at.
 // `mustprogress` is deliberately absent everywhere, since it would license
@@ -381,6 +403,7 @@ fn main() i32 {
     one_file_constant_stands_per_file();
     println("private ok");
     the_declaration_groups_stand_in_their_fixed_order();
+    mac_extern_declarations_protect_allocator_effects();
     every_attribute_group_has_its_text();
     the_intrinsic_table_is_in_the_order_item_eight_gives();
     an_empty_section_is_left_out_entirely();

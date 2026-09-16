@@ -1067,6 +1067,7 @@ Sections:
   The variable tail must appear in that function's Mac extern declaration.
   An extern name is not a value; its ABI form comes from its declaration (D3.10).
   Extern call sites are `nobuiltin`, so rewriting cannot replace a declared C symbol.
+  Mac extern declarations also use `nobuiltin`.
   Narrow fixed parameters and results use D9.9's `zeroext` and `signext` attributes.
   C `char*` maps to `char*` or `u8*`; `size_t` to `u64`; `ssize_t` and `off_t` to `i64`.
   C `mode_t` maps to `u32` on Linux and `u16` on Mac; C `int` maps to `i32`.
@@ -1128,6 +1129,9 @@ Sections:
   library.
   Amended 2026-09-15 (T-140): C externs gained an explicit variable tail for both targets.
   Mac fixed externs gained fixed LLVM calls. Linux fixed extern IR keeps its old form.
+  Amended 2026-09-15 (T-149): Mac extern declarations gained `nobuiltin`.
+  Apple clang removed a failed `calloc` and matching `free` when the caller read no storage.
+  The existing call-site `nobuiltin` did not keep that allocation failure observable.
 
 ### D9.9 The internal calling convention
 - owner: `module-system.md`.

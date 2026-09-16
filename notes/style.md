@@ -24,7 +24,8 @@ T-103 cannot open again in silence. There is no `runtime/` directory: T-091 made
 fort module, `std/rt.ft`.
 
 T-144 adds `std/mac/*.ft` and `test/mac/*.c` to `SOURCE_GLOBS`.
-T-145 adds `test/mac/*.ft`. The lint now reads 370 code files.
+T-145 adds `test/mac/*.ft`. T-149 adds one Mac allocation fixture.
+The lint now reads 371 code files.
 
 They do not govern a harness directive, which is the third kind of comment and has a format of
 its own: `spec/toolchain.md` 7 gives the `//!`, `//|` and `//<` of a language test, and

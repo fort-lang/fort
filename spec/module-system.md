@@ -231,6 +231,8 @@ by the grammar and otherwise unused. An `extern` function is called like any fun
 externs. Mac fixed externs use a fixed LLVM call form. A C extern with `...` uses a variadic form
 on both targets (D9.8). An indirect call cannot take that form from an unnamed callee (D3.10).
 A fort function can wrap a direct C call and act as a function pointer.
+Both targets mark extern call sites `nobuiltin`. Mac also marks extern declarations `nobuiltin`.
+The declaration mark keeps a failed allocation observable when the caller reads no storage.
 
 A fixed `fn (P) R` in an extern signature is allowed when its own signature is extern-legal,
 result type included, since C calls through it with the same convention (D9.8, D9.9): the rule
