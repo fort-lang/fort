@@ -11,8 +11,9 @@ without a rewrite.
 
 ## 1. The VM
 
-- Everything builds and runs inside the Ubuntu 24.04 arm64 Vagrant VM defined by `Vagrantfile`
-  (VirtualBox, `bento/ubuntu-24.04`); nothing is built on the host. Run vagrant only through
+- The Linux target builds and runs inside the Ubuntu 24.04 arm64 Vagrant VM defined by `Vagrantfile`
+  (VirtualBox, `bento/ubuntu-24.04`). The Mac target builds and runs on the Mac host.
+  Run vagrant only through
   `tools/vm`: `up` creates, provisions and starts the VM and caches its ssh config; `halt` stops
   it; `destroy [-f]` removes it (the box stays installed); `provision` re-runs
   `tools/provision.sh`; `status` and `ssh` do what they say.
@@ -492,6 +493,71 @@ without a rewrite.
   accident, since its binary is `stage2/fort`.
 
 ## 6. The host side
+
+- **The native Mac gate uses the Mac arm64 host and VM slot 2** (T-147).
+  Check the host tools before the build:
+
+  ```sh
+  xcode-select -p
+  xcrun --sdk macosx --show-sdk-path
+  xcrun --sdk macosx --show-sdk-version
+  xcrun --sdk macosx --find clang
+  xcrun clang --version
+  /opt/homebrew/bin/opt --version
+  cmake --version
+  node --version
+  ```
+
+  Set `FORT_MAC_OPT` to a different `opt` path only when that tool verifies LLVM IR.
+  Configure and build the native compiler and language server on the Mac host:
+
+  ```sh
+  FORT_VM_SLOT=2 tools/vm configure debug
+  cmake --preset mac-native
+  FORT_VM_SLOT=2 cmake --build --preset mac-native
+  ```
+
+  `build/mac-native/fort` is the native compiler.
+  `build/mac-native/fort-lsp` is the native language server.
+  The build uses `build/debug/stage2/fort` as its Linux seed.
+  Run the counted native gate on a clean source tree:
+
+  ```sh
+  tools/mac gate > build/mac-gate.log 2>&1
+  ```
+
+  The gate runs the pipeline, native CMake tests, corpus, trap, lint, core, and network tests.
+  It names each Linux-only corpus exclusion and gives the selected corpus count.
+  `tools/mac identity` records the source and main SHAs and requires empty git status.
+  It records host CPU, OS, SDK, Xcode, clang, verifier, CMake, Node, and tool hashes.
+  It records the slot-2 VM UUID, guest tool hashes, package hash, profile hash, and QEMU interpreter.
+  It records the Linux seed hash and a counted path, symlink, and content manifest for `.ft` inputs.
+  The manifest includes ignored `.ft` files, `build/debug`, and `build/mac-native`.
+  Capture identity before the gate and after final review:
+
+  ```sh
+  tools/mac identity > build/mac-identity-before.log
+  tools/mac gate > build/mac-gate.log 2>&1
+  tools/mac identity > build/mac-identity-after.log
+  cmp build/mac-identity-before.log build/mac-identity-after.log
+  shasum -a 256 build/mac-gate.log
+  ```
+
+  Record the gate log SHA256 again after final review.
+  Require the same gate log hash and identity record before gate reuse.
+  A changed SHA, status, tool, SDK, VM, seed, or `.ft` manifest invalidates reuse.
+  A changed or missing build output invalidates reuse.
+  Require each native output directory before a freshness count:
+
+  ```sh
+  test -f build/mac-gate.log && test -d build/debug &&
+    test -d build/mac-native && test -d build/mac-native/std &&
+    test -d build/mac-native/mac-platform && test -d build/mac-native/fixpoint &&
+    bash -o pipefail -c 'find build/debug build/mac-native -newer build/mac-gate.log | wc -l'
+  ```
+
+  The freshness command must exit 0 and print 0.
+  A missing value requires a new `tools/mac gate` run.
 
 - An ssh `ControlPath` under `os.tmpdir()` does not work on macOS: the host's temporary directory
   is `/var/folders/<...>/T`, ssh binds the socket under a temporary name of its own, and the total
