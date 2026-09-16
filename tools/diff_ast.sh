@@ -73,7 +73,7 @@ done
 # constant: a file must not be able to slip out of the comparison. A ticket
 # that adds or removes a .ft file changes all four lines in the same commit:
 # diff_tokens.sh, diff_ast.sh, diff_check.sh and diff_ir.sh.
-FT_FILES=960
+FT_FILES=961
 
 # The files of that corpus src/bootstrap refuses for a nested array or span
 # level, which src/fort reads (D3.6, T-043). They are skipped below, and this

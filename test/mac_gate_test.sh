@@ -28,6 +28,7 @@ python3 tools/fort_lint.py --fort build/mac-native/fort \
     --std-dir build/mac-native/std std/mac/libc.ft std/mac/net.ft
 test/mac_noreturn_trap_test.sh build/mac-native/fort
 test/mac_printf_test.sh build/mac-native/fort
+bash test/mac_allocation_failure_test.sh build/mac-native/fort build/mac-native/std
 
 trap_fixture=run/ffi/009_noreturn_returns_anyway.ft
 errno_fixture=run/stdlib/118_net_errors.ft
