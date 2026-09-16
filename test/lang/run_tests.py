@@ -576,6 +576,11 @@ def select(tests, filters):
     return [t for t in tests if any(f in t.path for f in filters)]
 
 
+def exclude_exact(tests, paths):
+    """Remove only tests whose complete corpus path occurs in `paths`."""
+    return [test for test in tests if test.path not in paths]
+
+
 # ---- judging --------------------------------------------------------------------------
 
 
@@ -1510,6 +1515,13 @@ def parse_args(argv):
         "--no-unsupported", action="store_true", help="ignore the bootstrap-unsupported list"
     )
     parser.add_argument(
+        "--exclude-exact",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="exclude one complete corpus path (repeatable)",
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="show the commands and outputs of failures"
     )
     parser.add_argument("--keep", action="store_true", help="keep the temporary directories")
@@ -1556,6 +1568,10 @@ def main(argv=None):
     # The name an XPASS tells the reader to edit: the list actually in use.
     xfail_label = os.path.basename(args.xfail) if args.xfail else XFAIL_NAME
     selected = select(tests, args.filters)
+    for path in args.exclude_exact:
+        if not any(test.path == path for test in selected):
+            problems.append("--exclude-exact: '%s' matches no selected test" % path)
+    selected = exclude_exact(selected, args.exclude_exact)
     if args.check_json:
         # The document is compared on the tests that have something to compare:
         # every fail test, which has diagnostics (D20.2), and every test with a
