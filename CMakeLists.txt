@@ -13,7 +13,7 @@ if(FORT_CCACHE)
     set(CMAKE_C_COMPILER_LAUNCHER "${FORT_CCACHE}")
 endif()
 
-# The warnings every C compilation gets, native and cross.
+# The warnings every host C compilation gets.
 set(FORT_C_WARNINGS
     -Wall
     -Wextra
@@ -29,7 +29,7 @@ set(FORT_C_WARNINGS
 add_compile_definitions(_POSIX_C_SOURCE=200809L)
 add_compile_options(${FORT_C_WARNINGS})
 
-# FORT_SANITIZER instruments every native target: the compiler and the unit
+# FORT_SANITIZER instruments each host C target: the compiler and the unit
 # tests. The programs the compiler builds are cross-compiled and are never
 # instrumented.
 include(cmake/sanitizers.cmake)
@@ -56,101 +56,38 @@ set(FORT_FORT_SRC_DIR "${CMAKE_SOURCE_DIR}/src/fort")
 set(FORT_STAGE2_DIR "${CMAKE_BINARY_DIR}/stage2")
 set(FORT_BOOTSTRAP_SEED "$ENV{FORT_BOOTSTRAP_SEED}" CACHE FILEPATH
     "User-supplied fort seed from tools/bootstrap.seed")
+set(FORT_TARGET "linux" CACHE STRING "Production bootstrap target: linux or darwin")
+set_property(CACHE FORT_TARGET PROPERTY STRINGS linux darwin)
 
-option(FORT_NATIVE_MAC "Build the native Mac compiler without C bootstrap targets" OFF)
-if(FORT_NATIVE_MAC)
-    if(NOT APPLE OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
-        message(FATAL_ERROR "FORT_NATIVE_MAC requires a Mac arm64 host")
+if(FORT_TARGET STREQUAL "linux")
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR "the linux target requires a linux host")
     endif()
-
-    # The Mac standard root replaces libc and net with target modules.
-    file(GLOB FORT_ALL_STD_SOURCES CONFIGURE_DEPENDS "${FORT_STD_SRC_DIR}/*.ft")
-    set(FORT_MAC_STD_SOURCES ${FORT_ALL_STD_SOURCES})
-    list(REMOVE_ITEM FORT_MAC_STD_SOURCES
-        "${FORT_STD_SRC_DIR}/libc.ft" "${FORT_STD_SRC_DIR}/net.ft")
-    list(APPEND FORT_MAC_STD_SOURCES
-        "${FORT_STD_SRC_DIR}/mac/libc.ft"
-        "${FORT_STD_SRC_DIR}/mac/net.ft")
-    set(FORT_MAC_STD_OUTPUTS "")
-    foreach(std_source IN LISTS FORT_MAC_STD_SOURCES)
-        get_filename_component(std_name "${std_source}" NAME)
-        set(std_output "${FORT_STD_DIR}/${std_name}")
-        add_custom_command(
-            OUTPUT "${std_output}"
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${std_source}" "${std_output}"
-            DEPENDS "${std_source}"
-            COMMENT "Copying Mac std/${std_name}"
-            VERBATIM
-        )
-        list(APPEND FORT_MAC_STD_OUTPUTS "${std_output}")
-    endforeach()
-    add_custom_target(fort_std ALL DEPENDS ${FORT_MAC_STD_OUTPUTS})
-
-    # The entry directory selects the generated Mac platform module first.
-    set(FORT_MAC_PLATFORM_DIR "${CMAKE_BINARY_DIR}/mac-platform")
-    add_custom_target(fort_mac_platform ALL
-        COMMAND bash "${CMAKE_SOURCE_DIR}/tools/gen_mac_platform.sh"
-                "${FORT_MAC_PLATFORM_DIR}"
-        BYPRODUCTS "${FORT_MAC_PLATFORM_DIR}/platform.ft"
-                   "${FORT_MAC_PLATFORM_DIR}/main.ft"
-        DEPENDS "${CMAKE_SOURCE_DIR}/tools/gen_mac_platform.sh"
-                "${FORT_FORT_SRC_DIR}/main.ft"
-        COMMENT "Generating the native Mac compiler platform module"
-        VERBATIM
-    )
-
-    file(GLOB FORT_FORT_SOURCES CONFIGURE_DEPENDS "${FORT_FORT_SRC_DIR}/*.ft")
-    set(FORT_MAC_STAGE2_BINARY "${CMAKE_BINARY_DIR}/fort")
-    add_custom_command(
-        OUTPUT "${FORT_MAC_STAGE2_BINARY}"
-        COMMAND "${CMAKE_COMMAND}" -E env
-                "FORT_BOOTSTRAP_SEED=${FORT_BOOTSTRAP_SEED}"
-                bash "${CMAKE_SOURCE_DIR}/tools/mac_native_seed.sh" "${CMAKE_BINARY_DIR}"
-        DEPENDS fort_std fort_mac_platform ${FORT_FORT_SOURCES}
-                ${FORT_ALL_STD_SOURCES} ${FORT_MAC_STD_OUTPUTS}
-                "${FORT_MAC_PLATFORM_DIR}/platform.ft"
-                "${FORT_MAC_PLATFORM_DIR}/main.ft"
-                "${CMAKE_SOURCE_DIR}/tools/mac_native_seed.sh"
-                "${CMAKE_SOURCE_DIR}/tools/bootstrap_chain.sh"
-                "${CMAKE_SOURCE_DIR}/tools/bootstrap.seed"
-                "${CMAKE_SOURCE_DIR}/tools/bootstrap.ref"
-                "${CMAKE_SOURCE_DIR}/tools/pin.sh"
-                "${CMAKE_SOURCE_DIR}/tools/verify_seed.py"
-                "${CMAKE_SOURCE_DIR}/tools/gen_mac_platform.sh"
-                "${FORT_BOOTSTRAP_SEED}"
-                "${CMAKE_SOURCE_DIR}/CMakeLists.txt"
-        COMMENT "Building darwin stage2 through the source chain"
-        VERBATIM
-    )
-    add_custom_target(fort_stage2 ALL DEPENDS "${FORT_MAC_STAGE2_BINARY}")
-
-    add_test(NAME mac-fixpoint
-        COMMAND bash "${FORT_TEST_DIR}/mac_native_fixpoint_test.sh" "${CMAKE_BINARY_DIR}"
-        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-    set_tests_properties(mac-fixpoint PROPERTIES LABELS lang)
-
-    # T-147: the native server uses the Mac stage2 and the Mac standard root.
-    set(FORT_LSP_SRC_DIR "${CMAKE_SOURCE_DIR}/src/lsp")
-    file(GLOB FORT_LSP_SOURCES CONFIGURE_DEPENDS "${FORT_LSP_SRC_DIR}/*.ft")
-    set(FORT_LSP_BINARY "${CMAKE_BINARY_DIR}/fort-lsp")
-    add_custom_command(
-        OUTPUT "${FORT_LSP_BINARY}"
-        COMMAND "${FORT_MAC_STAGE2_BINARY}" --std-dir "${FORT_STD_DIR}"
-                -I "${CMAKE_SOURCE_DIR}/src" -I "${FORT_FORT_SRC_DIR}"
-                -o "${FORT_LSP_BINARY}" "${FORT_LSP_SRC_DIR}/main.ft"
-        DEPENDS fort_stage2 "${FORT_MAC_STAGE2_BINARY}" ${FORT_LSP_SOURCES}
-                ${FORT_MAC_STD_OUTPUTS}
-        COMMENT "Compiling native Mac fort-lsp with stage2"
-        VERBATIM
-    )
-    add_custom_target(fort_lsp ALL DEPENDS "${FORT_LSP_BINARY}")
-    add_test(NAME mac-lsp-binary
-        COMMAND bash "${FORT_TEST_DIR}/lsp_binary_test.sh" "${FORT_LSP_BINARY}"
-        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-    set_tests_properties(mac-lsp-binary PROPERTIES LABELS lang)
+    set(FORT_TARGET_TRIPLE "x86_64-linux-gnu")
+    set(FORT_DEFAULT_TARGET_CC "clang")
+    set(FORT_DEFAULT_OPT "opt-18")
+elseif(FORT_TARGET STREQUAL "darwin")
+    if(NOT APPLE OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+        message(FATAL_ERROR "the darwin target requires a darwin arm64 host")
+    endif()
+    set(FORT_DEFAULT_TARGET_CC "/usr/bin/clang")
+    set(FORT_DEFAULT_OPT "/opt/homebrew/bin/opt")
 else()
+    message(FATAL_ERROR "FORT_TARGET must be linux or darwin")
+endif()
+
+set(FORT_TARGET_CC "${FORT_DEFAULT_TARGET_CC}" CACHE STRING
+    "clang that compiles and links the selected target")
+set(FORT_OPT "${FORT_DEFAULT_OPT}" CACHE FILEPATH
+    "LLVM opt that verifies the selected target")
+find_program(FORT_TARGET_CC_PATH NAMES "${FORT_TARGET_CC}" NO_CACHE REQUIRED)
+find_program(FORT_OPT_PATH NAMES "${FORT_OPT}" NO_CACHE)
+if(NOT FORT_OPT_PATH)
+    message(FATAL_ERROR "FORT_OPT: verifier not found: ${FORT_OPT}")
+endif()
 
 # ---- the bootstrap compiler ---------------------------------------------------
+if(FORT_TARGET STREQUAL "linux")
 file(GLOB FORT_CORE_SOURCES CONFIGURE_DEPENDS "${FORT_SRC_DIR}/*.c")
 list(REMOVE_ITEM FORT_CORE_SOURCES "${FORT_SRC_DIR}/main.c")
 
@@ -164,30 +101,20 @@ target_include_directories(fort_core PUBLIC "${FORT_SRC_DIR}")
 add_executable(fort "${FORT_SRC_DIR}/main.c")
 target_link_libraries(fort PRIVATE fort_core)
 set_target_properties(fort PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+endif()
 
 # ---- the standard library ------------------------------------------------------
-# The compiler reads `std/*.ft` from <std-dir> and emits every module of the
-# closure into the program (D9.10, D13.1), so a build copies the sources next
-# to the binary and links no object beside the module. FORT_TARGET_CC must
-# name a clang, since the compiler drives the same program over the LLVM IR it
-# emits, with --target=${FORT_TARGET_TRIPLE} (D14.1, D14.3).
-set(FORT_TARGET_CC "clang" CACHE STRING
-    "clang that compiles and links the LLVM IR the compiler emits")
-set(FORT_TARGET_TRIPLE "x86_64-linux-gnu" CACHE STRING
-    "target of FORT_TARGET_CC, passed as --target=")
-# NO_CACHE: the path must follow FORT_TARGET_CC. A cached result would survive
-# a change of FORT_TARGET_CC in an existing build directory and keep running
-# the previous program, which then receives arguments meant for the new one.
-find_program(FORT_TARGET_CC_PATH NAMES "${FORT_TARGET_CC}" NO_CACHE)
-if(NOT FORT_TARGET_CC_PATH)
-    message(FATAL_ERROR "FORT_TARGET_CC: clang not found: ${FORT_TARGET_CC}")
+# The target root is flat. The darwin root replaces two common modules with
+# declarations that match the darwin C ABI.
+file(GLOB FORT_ALL_STD_SOURCES CONFIGURE_DEPENDS "${FORT_STD_SRC_DIR}/*.ft")
+set(FORT_STD_SOURCES ${FORT_ALL_STD_SOURCES})
+if(FORT_TARGET STREQUAL "darwin")
+    list(REMOVE_ITEM FORT_STD_SOURCES
+        "${FORT_STD_SRC_DIR}/libc.ft" "${FORT_STD_SRC_DIR}/net.ft")
+    list(APPEND FORT_STD_SOURCES
+        "${FORT_STD_SRC_DIR}/darwin/libc.ft"
+        "${FORT_STD_SRC_DIR}/darwin/net.ft")
 endif()
-find_program(FORT_OPT_PATH NAMES opt-18 opt)
-if(NOT FORT_OPT_PATH)
-    set(FORT_OPT_PATH "opt-18")
-endif()
-
-file(GLOB FORT_STD_SOURCES CONFIGURE_DEPENDS "${FORT_STD_SRC_DIR}/*.ft")
 set(FORT_STD_OUTPUTS "")
 foreach(std_source IN LISTS FORT_STD_SOURCES)
     get_filename_component(std_name "${std_source}" NAME)
@@ -206,8 +133,8 @@ add_custom_target(fort_std ALL DEPENDS ${FORT_STD_OUTPUTS})
 
 # ---- the chain of source compilers ---------------------------------------------
 # The verified user seed builds pin 0. Each pin builds the next pin, and the
-# last pin builds HEAD. The selected target stays linux through this graph.
-# The C compiler above remains a differential oracle and is not a chain input.
+# last pin builds HEAD. The selected target stays equal through this graph.
+# The C compiler is a linux differential oracle. It is not a chain input.
 #
 # tools/pin.sh verify runs here, at configure time, because a pin that names
 # no commit is a broken tree and not a build that failed: it must be reported
@@ -233,8 +160,9 @@ if(NOT FORT_PIN_LINES)
     message(FATAL_ERROR "tools/bootstrap.ref names no pin")
 endif()
 
-# The frozen C compiler uses its own historical standard root for differential
-# tests. It does not build a production compiler stage (D14.7).
+# The frozen C compiler is only a linux differential oracle. It does not build
+# a production compiler stage (D14.7).
+if(FORT_TARGET STREQUAL "linux")
 set(FORT_ORACLE_REF "${CMAKE_SOURCE_DIR}/tools/bootstrap-oracle.ref")
 file(STRINGS "${FORT_ORACLE_REF}" FORT_ORACLE_LINES REGEX "^bootstrap-0 ")
 list(LENGTH FORT_ORACLE_LINES FORT_ORACLE_LINE_COUNT)
@@ -266,6 +194,8 @@ add_custom_command(
     VERBATIM
 )
 add_custom_target(fort_oracle_tree ALL DEPENDS "${FORT_ORACLE_STAMP}")
+set(FORT_ORACLE_STD_DIR "${FORT_ORACLE_DIR}/std")
+endif()
 
 foreach(pin_line IN LISTS FORT_PIN_LINES)
     if(NOT pin_line MATCHES "^bootstrap-([0-9]+)[ \t]+([0-9a-f]+)$")
@@ -278,7 +208,6 @@ endforeach()
 # The source-chain script writes these paths. The fixed-point test starts with
 # the last source pin.
 set(FORT_BOOTSTRAP_BINARY "${FORT_PIN_DIR}/${FORT_LAST_PIN_NUMBER}/fort")
-set(FORT_ORACLE_STD_DIR "${FORT_ORACLE_DIR}/std")
 
 # ---- the self-hosted compiler --------------------------------------------------
 # The one source-chain command verifies and snapshots the seed. It builds each
@@ -291,7 +220,8 @@ if(FORT_BOOTSTRAP_SEED)
 endif()
 add_custom_command(
     OUTPUT "${FORT_STAGE2_BINARY}"
-    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/bootstrap_chain.sh" linux
+    BYPRODUCTS "${CMAKE_BINARY_DIR}/seed.identity"
+    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/bootstrap_chain.sh" "${FORT_TARGET}"
             "${FORT_BOOTSTRAP_SEED}" "${CMAKE_BINARY_DIR}"
             --cc "${FORT_TARGET_CC_PATH}" --opt "${FORT_OPT_PATH}"
     DEPENDS fort_std ${FORT_FORT_SOURCES} ${FORT_STD_SOURCES}
@@ -301,44 +231,69 @@ add_custom_command(
             "${CMAKE_SOURCE_DIR}/tools/bootstrap.ref"
             "${CMAKE_SOURCE_DIR}/tools/pin.sh"
             "${CMAKE_SOURCE_DIR}/tools/verify_seed.py"
-            "${CMAKE_SOURCE_DIR}/tools/gen_mac_platform.sh"
-    COMMENT "Building linux stage2 through the source chain"
+            "${CMAKE_SOURCE_DIR}/tools/gen_darwin_platform.sh"
+    COMMENT "Building ${FORT_TARGET} stage2 through the source chain"
     VERBATIM
 )
 add_custom_target(fort_stage2 ALL DEPENDS "${FORT_STAGE2_BINARY}")
 
-# The Mac platform module sits beside a copy of main.ft. That directory is the
+# The darwin platform module sits beside a copy of main.ft. That directory is the
 # entry search root, so its platform.ft wins over src/fort/platform.ft (D9.2).
-# Each Mac build reads sw_vers. The Linux VM uses 15.0 to test the two-part form.
-set(FORT_MAC_PLATFORM_DIR "${CMAKE_BINARY_DIR}/mac-platform")
+# Each darwin build reads sw_vers. The linux VM uses 15.0 for this source test.
+set(FORT_DARWIN_PLATFORM_DIR "${CMAKE_BINARY_DIR}/darwin-platform")
 if(APPLE)
-    set(FORT_MAC_PLATFORM_VERSION_ARGS "")
+    set(FORT_DARWIN_PLATFORM_VERSION_ARGS "")
 else()
-    set(FORT_MAC_PLATFORM_VERSION_ARGS "15.0")
+    set(FORT_DARWIN_PLATFORM_VERSION_ARGS "15.0")
 endif()
-add_custom_target(fort_mac_platform ALL
-    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/gen_mac_platform.sh"
-            "${FORT_MAC_PLATFORM_DIR}" ${FORT_MAC_PLATFORM_VERSION_ARGS}
-    BYPRODUCTS "${FORT_MAC_PLATFORM_DIR}/platform.ft"
-               "${FORT_MAC_PLATFORM_DIR}/main.ft"
-    DEPENDS "${CMAKE_SOURCE_DIR}/tools/gen_mac_platform.sh"
+add_custom_target(fort_darwin_platform ALL
+    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/gen_darwin_platform.sh"
+            "${FORT_DARWIN_PLATFORM_DIR}" ${FORT_DARWIN_PLATFORM_VERSION_ARGS}
+    BYPRODUCTS "${FORT_DARWIN_PLATFORM_DIR}/platform.ft"
+               "${FORT_DARWIN_PLATFORM_DIR}/main.ft"
+    DEPENDS "${CMAKE_SOURCE_DIR}/tools/gen_darwin_platform.sh"
             "${FORT_FORT_SRC_DIR}/main.ft"
-    COMMENT "Generating the Mac compiler platform module"
+    COMMENT "Generating the darwin compiler platform module"
     VERBATIM
 )
-add_test(NAME mac-platform
-    COMMAND bash "${FORT_TEST_DIR}/mac_platform_test.sh" "${FORT_STAGE2_BINARY}"
-            "${FORT_MAC_PLATFORM_DIR}" "${FORT_FORT_SRC_DIR}" "${FORT_STD_DIR}"
+add_test(NAME darwin-platform
+    COMMAND bash "${FORT_TEST_DIR}/darwin_platform_test.sh" "${FORT_STAGE2_BINARY}"
+            "${FORT_DARWIN_PLATFORM_DIR}" "${FORT_FORT_SRC_DIR}" "${FORT_STD_DIR}"
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
-set_tests_properties(mac-platform PROPERTIES LABELS unit)
+set_tests_properties(darwin-platform PROPERTIES LABELS unit)
+
+add_test(NAME target-host
+    COMMAND bash "${FORT_TEST_DIR}/target_host_test.sh" "${FORT_TARGET}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(target-host PROPERTIES LABELS unit)
+
+add_test(NAME target-workflow
+    COMMAND bash "${FORT_TEST_DIR}/target_workflow_test.sh")
+set_tests_properties(target-workflow PROPERTIES LABELS unit)
+
+add_test(NAME lsp-target
+    COMMAND bash "${FORT_TEST_DIR}/lsp_target_test.sh")
+set_tests_properties(lsp-target PROPERTIES LABELS unit)
+
+add_test(NAME seed-target
+    COMMAND bash "${FORT_TEST_DIR}/seed_target_test.sh")
+set_tests_properties(seed-target PROPERTIES LABELS unit)
+
+add_test(NAME darwin-probe-target
+    COMMAND bash "${FORT_TEST_DIR}/abi/darwin_probe_target_test.sh"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(darwin-probe-target PROPERTIES LABELS unit)
+
+add_test(NAME linux-gate-seed
+    COMMAND bash "${FORT_TEST_DIR}/linux_gate_seed_test.sh"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(linux-gate-seed PROPERTIES LABELS unit)
 
 # ---- the language server -------------------------------------------------------
-# fort_lsp is src/lsp compiled by stage2, and it stands beside the compiler at
-# the root of the build directory, which is where `fort` itself is written.
-# stage2 and not stage1 compiles it: the server needs a compiler that
-# reproduces itself (the ctest `bootstrap`), not the frozen bootstrap
-# (notes/compiler.md 8). The binary is x86-64 like every program the compiler
-# builds, so it runs under qemu in the guest.
+# fort_lsp is src/lsp compiled by stage2. It stands at the build root.
+# The production compiler is `stage2/fort`. Linux also has a root C oracle.
+# Stage2 compiles it. The verified source chain builds stage2 for the selected
+# target. The linux binary is x86-64 ELF. The darwin binary is arm64 Mach-O.
 #
 # The search roots are src, so that a server module is `lsp.<name>` and never
 # `<name>` (D9.1, D9.7, T-063), and src/fort, which is where `flt` stands.
@@ -352,31 +307,41 @@ file(GLOB FORT_LSP_SOURCES CONFIGURE_DEPENDS "${FORT_LSP_SRC_DIR}/*.ft")
 set(FORT_LSP_BINARY "${CMAKE_BINARY_DIR}/fort-lsp")
 add_custom_command(
     OUTPUT "${FORT_LSP_BINARY}"
-    COMMAND "${FORT_STAGE2_BINARY}" --std-dir "${FORT_STD_DIR}"
-            --cc "${FORT_TARGET_CC_PATH}" --target "${FORT_TARGET_TRIPLE}"
-            -I "${CMAKE_SOURCE_DIR}/src" -I "${FORT_FORT_SRC_DIR}"
-            -o "${FORT_LSP_BINARY}" "${FORT_LSP_SRC_DIR}/main.ft"
+    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/build_lsp.sh"
+            "${FORT_STAGE2_BINARY}" "${CMAKE_BINARY_DIR}/seed.identity"
+            "${FORT_STD_DIR}" "${FORT_TARGET_CC_PATH}" "${FORT_LSP_BINARY}"
+            "${FORT_LSP_SRC_DIR}/main.ft"
+            "${CMAKE_SOURCE_DIR}/src" "${FORT_FORT_SRC_DIR}"
     # The file inputs and not the targets alone, as fort_stage2 above: a
     # DEPENDS on a custom target is an order-only edge, so an edit to a module
     # of src/lsp would otherwise leave this binary as it was.
-    DEPENDS fort_stage2 "${FORT_STAGE2_BINARY}" ${FORT_LSP_SOURCES} ${FORT_STD_OUTPUTS}
+    DEPENDS fort_stage2 "${FORT_STAGE2_BINARY}"
+            "${CMAKE_SOURCE_DIR}/tools/build_lsp.sh"
+            "${CMAKE_SOURCE_DIR}/tools/seed_target.sh"
+            ${FORT_LSP_SOURCES} ${FORT_STD_OUTPUTS}
     COMMENT "Compiling src/lsp with stage2 into fort-lsp"
     VERBATIM
 )
 add_custom_target(fort_lsp ALL DEPENDS "${FORT_LSP_BINARY}")
 
-# The binary itself, driven by a recorded script on stdin: every other test of
-# src/lsp drives the modules inside one program, so without this one the entry
-# file src/lsp/main.ft and the wiring around it -- stdin and stdout as the
-# descriptors, the loop's status as the process status -- would be the one part
-# of the server no test executes. It is label lang rather than unit because it
-# runs an x86-64 binary under qemu, as lang-stage2 does. The label keeps it out
-# of `tools/vm check`, which runs `ctest -L unit`; `check-lang` runs it as a
-# command of its own as well, so the gate sees it twice.
+# The binary itself uses one recorded script on stdin. Other tests drive the
+# server modules inside one program. This test also checks the entry file and
+# its standard input and output wiring.
 add_test(NAME lsp-binary
     COMMAND bash "${FORT_TEST_DIR}/lsp_binary_test.sh" "${FORT_LSP_BINARY}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(lsp-binary PROPERTIES LABELS lang)
+
+if(FORT_TARGET STREQUAL "darwin")
+    add_test(NAME darwin-fixpoint
+        COMMAND bash "${FORT_TEST_DIR}/darwin_fixpoint_test.sh" "${CMAKE_BINARY_DIR}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    set_tests_properties(darwin-fixpoint PROPERTIES LABELS lang)
+
+    # The remaining targets build the C compiler and its linux differential
+    # tests. They do not belong to the darwin graph.
+    return()
+endif()
 
 # ---- unit tests ----------------------------------------------------------------
 # The test-only helpers that are compiled rather than included: every
@@ -468,8 +433,8 @@ set_tests_properties(pipeline PROPERTIES
     LABELS unit
     ENVIRONMENT "FORT_TARGET_CC=${FORT_TARGET_CC_PATH};FORT_TARGET_TRIPLE=${FORT_TARGET_TRIPLE}")
 
-# The VM compiler emits Mac IR with a caller-selected standard root. opt checks
-# its form. T-142 owns Mac ABI and stack probes, and T-146 owns the native build.
+# The linux compiler emits darwin IR with a caller-selected standard root.
+# The verifier checks its form. T-142 owns darwin ABI and stack probes.
 add_test(NAME target-ir
     COMMAND bash "${FORT_TEST_DIR}/target_ir_test.sh" "${FORT_STAGE2_BINARY}"
             "${FORT_STD_DIR}" "${FORT_OPT_PATH}"
@@ -477,7 +442,7 @@ add_test(NAME target-ir
 set_tests_properties(target-ir PROPERTIES LABELS unit)
 
 # The C helpers of the language tests are cross-compiled by the harness; they
-# are also built natively here so that -Werror and clang-tidy cover them. They
+# also build on the host so that -Werror and clang-tidy cover them. They
 # are FFI entry points declared by the tests, hence no prototypes.
 file(GLOB FORT_LANG_FFI_SOURCES CONFIGURE_DEPENDS "${FORT_TEST_DIR}/lang/ffi/*.c")
 add_library(lang_ffi_helpers OBJECT ${FORT_LANG_FFI_SOURCES})
@@ -490,7 +455,7 @@ add_custom_target(check
     COMMENT "Running the unit tests"
     USES_TERMINAL
 )
-add_dependencies(check fort fort_std fort_stage2 fort_mac_platform fort_oracle_tree)
+add_dependencies(check fort fort_std fort_stage2 fort_darwin_platform fort_oracle_tree)
 if(FORT_UNIT_TEST_TARGETS)
     add_dependencies(check ${FORT_UNIT_TEST_TARGETS})
 endif()
@@ -892,12 +857,12 @@ add_test(NAME fort_lint
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(fort_lint PROPERTIES LABELS lang)
 
-# Mac declarations need a Mac standard root. The host does not run this lint.
-# Stage2 checks its names in the Linux VM (T-144).
-add_test(NAME fort_lint_mac
-    COMMAND bash "${FORT_TEST_DIR}/mac_fort_lint_test.sh" "${FORT_STAGE2_BINARY}"
+# darwin declarations need a darwin standard root. The linux compiler checks
+# their names (T-144).
+add_test(NAME fort_lint_darwin
+    COMMAND bash "${FORT_TEST_DIR}/darwin_fort_lint_test.sh" "${FORT_STAGE2_BINARY}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(fort_lint_mac PROPERTIES LABELS lang)
+set_tests_properties(fort_lint_darwin PROPERTIES LABELS lang)
 
 # Its own unit tests (label unit): the rules over synthetic index records, the
 # plumbing against a fake compiler, and the fixtures in test/fort_lint through
@@ -939,7 +904,7 @@ add_custom_target(check-lang
     COMMAND ${FORT_LANG_STAGE2_COMMAND} --check-json
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
             --fort "${FORT_STAGE2_BINARY}" --std-dir "${FORT_STD_DIR}"
-    COMMAND bash "${FORT_TEST_DIR}/mac_fort_lint_test.sh" "${FORT_STAGE2_BINARY}"
+    COMMAND bash "${FORT_TEST_DIR}/darwin_fort_lint_test.sh" "${FORT_STAGE2_BINARY}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_tokens.sh" "${CMAKE_BINARY_DIR}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ast.sh" "${CMAKE_BINARY_DIR}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_check.sh" "${CMAKE_BINARY_DIR}"
@@ -1009,7 +974,7 @@ endif()
 add_custom_target(fort-lint
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
             --fort "${FORT_STAGE2_BINARY}" --std-dir "${FORT_STD_DIR}"
-    COMMAND bash "${FORT_TEST_DIR}/mac_fort_lint_test.sh" "${FORT_STAGE2_BINARY}"
+    COMMAND bash "${FORT_TEST_DIR}/darwin_fort_lint_test.sh" "${FORT_STAGE2_BINARY}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Checking the identifier conventions of D1.4 in the project's fort"
     VERBATIM
@@ -1022,4 +987,3 @@ add_custom_target(lines
     COMMENT "Counting test lines per compiler line"
     VERBATIM
 )
-endif()

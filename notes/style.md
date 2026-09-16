@@ -23,8 +23,8 @@ prefix of `EXCLUDED` that names no file fails its mirror, so the hole this secti
 T-103 cannot open again in silence. There is no `runtime/` directory: T-091 made the runtime a
 fort module, `std/rt.ft`.
 
-T-144 adds `std/mac/*.ft` and `test/mac/*.c` to `SOURCE_GLOBS`.
-T-145 adds `test/mac/*.ft`. T-149 adds one Mac allocation fixture.
+T-144 adds `std/darwin/*.ft` and `test/darwin/*.c` to `SOURCE_GLOBS`.
+T-145 adds `test/darwin/*.ft`. T-149 adds one darwin allocation fixture.
 The lint now reads 371 code files.
 
 They do not govern a harness directive, which is the third kind of comment and has a format of

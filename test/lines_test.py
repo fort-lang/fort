@@ -41,12 +41,12 @@ class GlobMatching(unittest.TestCase):
         source = [lines.glob_to_regex(g) for g in lines.SOURCE_GLOBS]
         tests = [lines.glob_to_regex(g) for g in lines.TEST_GLOBS]
         for path in ("src/bootstrap/diag.c", "src/bootstrap/diag.h", "src/fort/lexer.ft",
-                     "std/mac/libc.ft"):
+                     "std/darwin/libc.ft"):
             self.assertTrue(lines.path_matches(path, source), path)
             self.assertFalse(lines.path_matches(path, tests), path)
         for path in ("test/diag_test.c", "test/types_helpers.h",
                      "test/lang/run/arrays/001_x.ft", "test/lang/ffi/helpers.c",
-                     "test/fort/containers_test.ft", "test/mac/open_tail_probe.c"):
+                     "test/fort/containers_test.ft", "test/darwin/open_tail_probe.c"):
             self.assertTrue(lines.path_matches(path, tests), path)
             self.assertFalse(lines.path_matches(path, source), path)
         for path in ("tools/lines.py", "spec/decisions.md", "editors/vscode/extension.js"):
@@ -66,10 +66,10 @@ class GlobMatching(unittest.TestCase):
             self.assertFalse(lines.path_matches(path, tests), path)
 
     def test_the_standard_library_is_source_and_not_test(self):
-        """The project ships common and Mac standard files as source (D14.6)."""
+        """The project ships common and darwin standard files as source (D14.6)."""
         source = [lines.glob_to_regex(g) for g in lines.SOURCE_GLOBS]
         tests = [lines.glob_to_regex(g) for g in lines.TEST_GLOBS]
-        for path in ("std/io.ft", "std/strbuf.ft", "std/mac/libc.ft"):
+        for path in ("std/io.ft", "std/strbuf.ft", "std/darwin/libc.ft"):
             self.assertTrue(lines.path_matches(path, source), path)
             self.assertFalse(lines.path_matches(path, tests), path)
         self.assertFalse(lines.path_matches("std/README.md", source))
@@ -88,11 +88,11 @@ class GlobMatching(unittest.TestCase):
         self.assertIn("io.ft", names)
         self.assertGreaterEqual(len(names), 8)
         self.assertIn("rt.ft", names)
-        self.assertIn(ROOT / "std/mac/libc.ft", counted)
+        self.assertIn(ROOT / "std/darwin/libc.ft", counted)
 
-    def test_the_real_mac_c_probe_is_counted(self):
+    def test_the_real_darwin_c_probe_is_counted(self):
         counted = lines.collect(ROOT, lines.TEST_GLOBS)
-        self.assertIn(ROOT / "test/mac/open_tail_probe.c", counted)
+        self.assertIn(ROOT / "test/darwin/open_tail_probe.c", counted)
 
 
 class Ratio(unittest.TestCase):

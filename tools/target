@@ -1,0 +1,59 @@
+#!/bin/bash
+# Run one build workflow or gate for the selected production target.
+set -eu
+
+usage() {
+    echo "usage: tools/target linux|darwin workflow|gate" >&2
+}
+
+if [ "$#" -ne 2 ]; then
+    usage
+    exit 2
+fi
+
+target=$1
+action=$2
+root=$(cd "$(dirname "$0")/.." && pwd -P)
+cd "$root"
+
+run_workflow() {
+    local selected_target=$1
+    local seed_arg=""
+    local opt_arg=""
+    if [ -n "${FORT_BOOTSTRAP_SEED:-}" ]; then
+        seed_arg="-DFORT_BOOTSTRAP_SEED:FILEPATH=$FORT_BOOTSTRAP_SEED"
+    fi
+    if [ "$selected_target" = darwin ] && [ -n "${FORT_DARWIN_OPT:-}" ]; then
+        opt_arg="-DFORT_OPT:FILEPATH=$FORT_DARWIN_OPT"
+    fi
+    if [ -n "$seed_arg" ] && [ -n "$opt_arg" ]; then
+        cmake --preset "$selected_target" "$seed_arg" "$opt_arg"
+    elif [ -n "$seed_arg" ]; then
+        cmake --preset "$selected_target" "$seed_arg"
+    elif [ -n "$opt_arg" ]; then
+        cmake --preset "$selected_target" "$opt_arg"
+    else
+        cmake --preset "$selected_target"
+    fi
+    cmake --build --preset "$selected_target"
+    ctest --preset "$selected_target"
+}
+
+case "$target:$action" in
+linux:workflow)
+    run_workflow linux
+    ;;
+darwin:workflow)
+    run_workflow darwin
+    ;;
+linux:gate)
+    exec bash test/linux_gate_test.sh
+    ;;
+darwin:gate)
+    exec tools/darwin gate
+    ;;
+*)
+    usage
+    exit 2
+    ;;
+esac

@@ -450,7 +450,7 @@ came here.
   Check the optimized entry function for `call ptr @calloc` in the OOM fixtures.
 
 - **Mac std.net uses Darwin's 16-byte IPv4 address** (T-145).
-  `test/mac/net_probe.c` measures length, family, port, and address offsets at 0, 1, 2, and 4.
+  `test/darwin/net_probe.c` measures length, family, port, and address offsets at 0, 1, 2, and 4.
   Set the length byte to 16 before bind and connect.
   Use Darwin SOL_SOCKET 65535 and SO_REUSEADDR 4.
   Mac `std.libc` declares seven socket calls with a 4-byte `socklen_t`.

@@ -83,7 +83,7 @@ SOURCE_GLOBS = (
     "src/**/*.h",
     "src/**/*.ft",
     "std/*.ft",
-    "std/mac/*.ft",
+    "std/darwin/*.ft",
     "test/*.c",
     "test/*.h",
     "test/abi/*.c",
@@ -91,8 +91,8 @@ SOURCE_GLOBS = (
     "test/fort_lint/*.ft",
     "test/highlight/*.ft",
     "test/lang/ffi/*.c",
-    "test/mac/*.c",
-    "test/mac/*.ft",
+    "test/darwin/*.c",
+    "test/darwin/*.ft",
     "test/tty/*.ft",
 )
 

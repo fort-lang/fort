@@ -190,8 +190,9 @@ if [ "$status" -ne 1 ] ||
 fi
 
 checks=$((checks + 1))
-if grep -n 'tools/vm' "$chain" "$root/tools/mac_native_seed.sh" \
-    "$root/test/mac_native_fixpoint_test.sh" \
+if grep -n 'tools/vm' "$chain" "$root/tools/darwin" \
+    "$root/test/darwin_fixpoint_test.sh" "$root/test/darwin_gate_test.sh" \
+    "$root/test/darwin_core_test.sh" "$root/test/darwin_net_test.sh" \
     >"$work/vm-lines"; then
     echo "bootstrap_chain_test.sh: a darwin chain path calls tools/vm" >&2
     cat "$work/vm-lines" >&2

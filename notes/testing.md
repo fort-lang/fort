@@ -718,21 +718,21 @@ bullet at a time and without a rewrite.
   Adding one means
   adding its name to the `for prog in` loop of that script and a block of expectations beside
   the others; the list is not globbed, since each module's output is its own. `*.ll` is
-  gitignored except `test/ir/*.ll` and `test/mac/ir/*.ll`.
+  gitignored except `test/ir/*.ll` and `test/darwin/ir/*.ll`.
   `run_tests.py --verify-ir` runs the same verifier over the
   `-S` output of every language test that compiles.
-- The native Mac pipeline uses `test/mac/ir/mac.ll` as a host sample (T-143).
+- The darwin pipeline uses `test/darwin/ir/darwin.ll` as a host sample (T-143, T-152).
   This sample is outside the `test/ir/*.ll` compiler-form corpus.
-  `tools/mac pipeline` verifies, links, and runs it, then checks Mach-O PIE and SIGTRAP.
-  `tools/mac core` runs ten core library programs on a Mac arm64 host (T-144).
+  `tools/darwin pipeline` verifies, links, and runs it, then checks Mach-O PIE and SIGTRAP.
+  `tools/darwin core` runs ten core library programs on a darwin arm64 host (T-144).
   It tests 004, 005, 019, 051, 053, 070, 071, 074, 094 and 095 in `test/lang/run/stdlib`.
   It compiles one C open probe to check the Apple arm64 variable-tail stack slot.
-  It builds a native compiler and tests its standard root through an executable symlink.
-  It checks the compiler's fcntl stack slot and a native `--cc` build with the Mac default target.
+  It uses the darwin compiler and tests its standard root through an executable symlink.
+  It checks the compiler's fcntl stack slot and a `--cc` build with the darwin default target.
   Only 005 links `ffi/std_libc_flags.c` to compare 13 constants with C headers.
   The other nine programs and the compiler link from LLVM IR alone.
-  The Linux VM gate excludes this host test because a Linux guest cannot run Mach-O programs.
-  `tools/mac core` configures debug and builds `fort_stage2` and `fort_mac_platform` itself.
+  The linux gate excludes this host test because a linux host cannot run Mach-O programs.
+  The darwin gate builds `build/darwin/stage2/fort` before this host test.
 - **The gen suites emit with no runtime in the closure**, so the calls the emitter writes into it
   reach a name the module neither defines nor declares, which LLVM rejects as a forward reference
   to nothing. `verified()` appends a `declare` for every row of `runtime_sig.h` to the file the
@@ -819,12 +819,13 @@ bullet at a time and without a rewrite.
   holds the number of files `tools/knowledge_lint.py` reads at 370 (T-145). A counter left behind
   fails `diff_check.sh` for every later mutant, which then reads as caught when nothing caught it.
   **A new target code directory needs a `SOURCE_GLOBS` route or an `EXCLUDED` reason** (T-144).
-  T-145 adds two native test programs under `test/mac/` and routes them into the grammar corpus.
-  Run `tools/mac net` on the Mac arm64 host to compare C layout and four native programs.
+  T-145 adds two darwin test programs under `test/darwin/` and routes them into the grammar corpus.
+  Run `tools/darwin net` on the darwin arm64 host to compare C layout and four darwin programs.
   The pin 0 library lacks `libc.errno_slot()` (T-145).
-  Stage1 refuses `std/mac/net.ft` under pin 0.
-  The pin 0 network address lacks the Mac length field, so stage1 refuses `test/mac/net_layout.ft`.
-  `CLEAN_FILES` and `PROGRAM_FILES` each grow by 1 for `test/mac/net_errors.ft`.
+  Stage1 refuses `std/darwin/net.ft` under pin 0.
+  The pin 0 network address lacks the darwin length field, so stage1 refuses
+  `test/darwin/net_layout.ft`.
+  `CLEAN_FILES` and `PROGRAM_FILES` each grow by 1 for `test/darwin/net_errors.ft`.
   **Two branches that each raise one counter by one merge with no conflict and leave it wrong**:
   `CLEAN_FILES` went 393 to 394 twice and the truth was 395, which cost T-107 an hour. After the
   second merge of a branch that adds or removes a source file, run the tool that owns each
@@ -1015,12 +1016,12 @@ bullet at a time and without a rewrite.
   (ctest `fort_lint`, target `fort-lint`) holds `std/*.ft` and `src/fort/*.ft` to the identifier
   conventions of D1.4 and to 100 columns; it reads `fort --index` (D20.3) rather than tokenizing
   fort a second time, so the kinds and types it reasons about are the checker's own answers, and a
-  second tokenizer cannot drift from the language. `fort_lint_mac` uses a temporary Mac root to
-  lint `std/mac/*.ft` with stage2 (T-144). The Linux root conflicts with Mac C declarations.
+  second tokenizer cannot drift from the language. `fort_lint_darwin` uses a temporary darwin root
+  to lint `std/darwin/*.ft` with stage2 (T-144). The linux root conflicts with darwin declarations.
   `test/highlight_test.py` tokenizes `std/`,
   `src/fort/` and `test/lang/run` against the TextMate grammar, which is the only check that grammar
-  has. `tools/lines.py` counts `std/*.ft` and `std/mac/*.ft` as source for the 3:1 ratio (T-144).
-  It counts `test/mac/*.c` as test. The compiler and runtime are source too (D14.6).
+  has. `tools/lines.py` counts `std/*.ft` and `std/darwin/*.ft` as source for the 3:1 ratio (T-144).
+  It counts `test/darwin/*.c` as test. The compiler and runtime are source too (D14.6).
   What still does not: **there is no formatter** -- indentation,
   spacing, brace placement and blank lines in `.ft` are review's alone, since `.clang-format` has no
   fort equivalent; the lint sees only what the checker resolved, so an unresolved name is judged by
@@ -1082,8 +1083,8 @@ bullet at a time and without a rewrite.
   retroactive. The branch figure is the one the criterion asks for. T-089 and T-092 both
   rediscovered this rule.
 - **`tools/lines.py` does not see a test written in shell or in Python either** (T-131). Its
-  `TEST_GLOBS` are `test/*.c`, `test/*.h`, `test/**/*.ft`, `test/lang/ffi/*.c` and `test/mac/*.c`.
-  Its `SOURCE_GLOBS` include the two compilers, `std/*.ft` and `std/mac/*.ft` (T-144).
+  `TEST_GLOBS` are `test/*.c`, `test/*.h`, `test/**/*.ft`, `test/lang/ffi/*.c` and `test/darwin/*.c`.
+  Its `SOURCE_GLOBS` include the two compilers, `std/*.ft` and `std/darwin/*.ft` (T-144).
   So a ticket whose deliverable is the build or a tool gets no useful figure:
   T-131 changed `CMakeLists.txt`, six scripts under `tools/` and
   the language harness, and the tool read `+2 source lines, +0 test lines, ratio 0.00`, the 2
