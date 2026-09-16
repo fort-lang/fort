@@ -111,6 +111,26 @@ if(FORT_NATIVE_MAC)
         COMMAND bash "${FORT_TEST_DIR}/mac_native_fixpoint_test.sh" "${CMAKE_BINARY_DIR}"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
     set_tests_properties(mac-fixpoint PROPERTIES LABELS lang)
+
+    # T-147: the native server uses the Mac stage2 and the Mac standard root.
+    set(FORT_LSP_SRC_DIR "${CMAKE_SOURCE_DIR}/src/lsp")
+    file(GLOB FORT_LSP_SOURCES CONFIGURE_DEPENDS "${FORT_LSP_SRC_DIR}/*.ft")
+    set(FORT_LSP_BINARY "${CMAKE_BINARY_DIR}/fort-lsp")
+    add_custom_command(
+        OUTPUT "${FORT_LSP_BINARY}"
+        COMMAND "${FORT_MAC_STAGE2_BINARY}" --std-dir "${FORT_STD_DIR}"
+                -I "${CMAKE_SOURCE_DIR}/src" -I "${FORT_FORT_SRC_DIR}"
+                -o "${FORT_LSP_BINARY}" "${FORT_LSP_SRC_DIR}/main.ft"
+        DEPENDS fort_stage2 "${FORT_MAC_STAGE2_BINARY}" ${FORT_LSP_SOURCES}
+                ${FORT_MAC_STD_OUTPUTS}
+        COMMENT "Compiling native Mac fort-lsp with stage2"
+        VERBATIM
+    )
+    add_custom_target(fort_lsp ALL DEPENDS "${FORT_LSP_BINARY}")
+    add_test(NAME mac-lsp-binary
+        COMMAND bash "${FORT_TEST_DIR}/lsp_binary_test.sh" "${FORT_LSP_BINARY}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    set_tests_properties(mac-lsp-binary PROPERTIES LABELS lang)
 else()
 
 # ---- the bootstrap compiler ---------------------------------------------------
