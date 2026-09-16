@@ -532,7 +532,8 @@ without a rewrite.
   It names each Linux-only corpus exclusion and gives the selected corpus count.
   `tools/mac identity` records the source and main SHAs and requires empty git status.
   It records host CPU, OS, SDK, Xcode, clang, verifier, CMake, Node, and tool hashes.
-  It records the slot-2 VM UUID, guest tool hashes, package hash, profile hash, and QEMU interpreter.
+  It records the slot-2 VM UUID, guest tool hashes, package hash, and profile hash.
+  It also records the QEMU interpreter.
   It records the Linux seed hash and a counted path, symlink, and content manifest for `.ft` inputs.
   The manifest includes ignored `.ft` files, `build/debug`, and `build/mac-native`.
   Capture identity before the gate and after final review:

@@ -34,8 +34,8 @@ echo "Xcode: $(xcodebuild -version | tr '\n' ' ')"
 
 opt=${FORT_MAC_OPT:-/opt/homebrew/bin/opt}
 cc=$(xcrun --sdk macosx --find clang)
-tools=(bash sh awk basename cat cmp cmake ctest cp cut diff dirname file find git grep \
-       head ln mkdir mktemp nm node od otool python3 rg rm sed shasum sort tail \
+tools=(bash sh awk basename cat chmod cmp cmake ctest cp cut diff dirname file find git grep \
+       head ln mkdir mktemp mv nm node od otool python3 rg rm sed shasum sort tail \
        tr uname wc xcrun xcode-select xcodebuild sw_vers ninja vagrant \
        VBoxManage ssh)
 tools+=("$opt" "$cc")
