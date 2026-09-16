@@ -12,6 +12,8 @@ cd "$root"
 export FORT_VM_SLOT=2
 opt=${FORT_MAC_OPT:-/opt/homebrew/bin/opt}
 cc=$(xcrun --sdk macosx --find clang)
+SDKROOT=$(xcrun --sdk macosx --show-sdk-path)
+export SDKROOT
 target="arm64-apple-macosx$(sw_vers -productVersion)"
 if [[ "$target" =~ ^arm64-apple-macosx[0-9]+\.[0-9]+$ ]]; then
     target="$target.0"

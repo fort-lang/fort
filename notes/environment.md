@@ -520,6 +520,8 @@ without a rewrite.
   `build/mac-native/fort` is the native compiler.
   `build/mac-native/fort-lsp` is the native language server.
   The build uses `build/debug/stage2/fort` as its Linux seed.
+  The Mac gate exports `SDKROOT` from `xcrun --sdk macosx --show-sdk-path`.
+  The compiler and corpus C helpers use that SDK path for native links.
   Run the counted native gate on a clean source tree:
 
   ```sh
