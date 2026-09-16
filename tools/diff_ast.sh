@@ -112,7 +112,7 @@ FLOAT_MESSAGES='float literals'
 # Stage1 reads a C variable tail as `..` and `.`, then rejects the type.
 # Stage2 reads one `...` token. Invalid tails still yield a module tree.
 # D2.10, D9.8
-VARIADIC_FILES=9
+VARIADIC_FILES=10
 
 files=$(find . -name '*.ft' -not -path './build/*' -not -path './.git/*' \
     -not -path './.worktrees/*' | sort)

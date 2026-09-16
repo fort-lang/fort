@@ -43,7 +43,7 @@ FT_FILES=960
 
 # The file count for `...` tokens that stage1 reads as two tokens.
 # D2.10
-ELLIPSIS_FILES=9
+ELLIPSIS_FILES=10
 
 files=$(find . -name '*.ft' -not -path './build/*' -not -path './.git/*' \
     -not -path './.worktrees/*' | sort)

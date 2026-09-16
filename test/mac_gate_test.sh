@@ -48,7 +48,7 @@ if [ "$full" -ne $((selected + 4)) ]; then
 fi
 echo "mac gate: $selected corpus tests selected; 4 Linux-only fixtures excluded"
 echo "mac gate exclusion: $trap_fixture expects SIGILL; Mac llvm.trap raises SIGTRAP"
-echo "mac gate exclusion: $errno_fixture expects Linux ECONNREFUSED 111; Mac returns 61"
+echo "mac gate exclusion: $errno_fixture expects Linux ECONNREFUSED 111 and ENOTSOCK 88; Mac returns 61 and 38"
 echo "mac gate exclusion: $printf_fixture uses a fixed extern for Linux System V; Mac printf needs an explicit variadic tail"
 echo "mac gate exclusion: $sockaddr_fixture uses a Linux u16 family field; Mac sockaddr_in starts with u8 length and family"
 python3 test/lang/run_tests.py --verify-ir "${args[@]}"

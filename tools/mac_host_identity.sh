@@ -34,7 +34,7 @@ echo "Xcode: $(xcodebuild -version | tr '\n' ' ')"
 
 opt=${FORT_MAC_OPT:-/opt/homebrew/bin/opt}
 cc=$(xcrun --sdk macosx --find clang)
-tools=(bash sh awk basename cat cmp cmake cp cut diff dirname file find git grep \
+tools=(bash sh awk basename cat cmp cmake ctest cp cut diff dirname file find git grep \
        head ln mkdir mktemp nm node od otool python3 rg rm sed shasum sort tail \
        tr uname wc xcrun xcode-select xcodebuild sw_vers ninja vagrant \
        VBoxManage ssh)
@@ -47,7 +47,7 @@ for tool in "${tools[@]}"; do
     resolved=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$path")
     version="no independent version command; binary hash identifies this tool"
     case "$tool" in
-    bash|cmake|git|node|python3|rg|xcrun|ninja|file|VBoxManage|nm|otool)
+    bash|cmake|ctest|git|node|python3|rg|xcrun|ninja|file|VBoxManage|nm|otool)
         output=$("$path" --version 2>&1)
         version=${output%%$'\n'*} ;;
     vagrant)
