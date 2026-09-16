@@ -41,6 +41,15 @@ grep -F -x -q 'string BUILT_TARGET = "arm64-apple-macosx26.6.2";' \
    "$scratch/three/platform.ft"
 "$stage2" --check --std-dir "$std_dir" -I "$fort_src" "$scratch/three/main.ft"
 
+# A source-chain pin supplies its archived entry as the third argument. The
+# explicit version must still win over the host version in this form.
+printf 'import driver;\nimport std.sys;\nfn main(string@ args) i32 { return driver.run(args); }\n' \
+    >"$scratch/pin-main.ft"
+bash "$generator" "$scratch/pin" 15.2.7 "$scratch/pin-main.ft"
+cmp "$scratch/pin-main.ft" "$scratch/pin/main.ft"
+grep -F -x -q 'string BUILT_TARGET = "arm64-apple-macosx15.2.7";' \
+    "$scratch/pin/platform.ft"
+
 for version in 15 15.a 15.0.1.2; do
     if bash "$generator" "$scratch/invalid-$version" "$version" \
         >"$scratch/invalid.out" 2>"$scratch/invalid.err"; then
@@ -53,4 +62,4 @@ for version in 15 15.a 15.0.1.2; do
     fi
 done
 
-echo 'mac platform source: 2 versions stored, 3 forms rejected'
+echo 'mac platform source: 3 versions stored, 1 archived entry copied, 3 forms rejected'

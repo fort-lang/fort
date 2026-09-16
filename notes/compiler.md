@@ -709,6 +709,17 @@ gone.
   python3 tools/verify_seed.py darwin /path/to/fort /path/to/darwin/std
   ```
 
+  `tools/bootstrap_chain.sh` implements the source chain (T-151). It verifies and snapshots the
+  seed. It extracts each SHA from `tools/bootstrap.ref`, assembles that target's standard root and
+  platform entry, and builds the stages in order. `build/<preset>/bootstrap-stages.tsv` records the
+  source SHA, default IR triple, and executable file format of each source-built compiler. The
+  `linux` and `darwin` chains use the same ref file. The active first pin is the baseline SHA in
+  `tools/bootstrap.seed`.
+
+  The C differential oracle reads `build/<preset>/oracle/std`. The build extracts that source from
+  `tools/bootstrap-oracle.ref`. This ref is not a production compiler pin. It lets the frozen C
+  compiler keep reading a standard root inside its language subset.
+
   **The C-started chain before D14.7** (T-131). From T-131 through T-150, stage1 built two
   Linux-only source pins before the last pin built HEAD. Five invariants kept that chain valid.
   D14.7 replaces those invariants. Git history keeps their exact rules and measurements.

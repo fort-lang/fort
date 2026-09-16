@@ -132,8 +132,8 @@ done
 # The library both runs read. An unbuilt pin would otherwise reach the
 # compilers as a --std-dir that holds nothing, and two compilers that cannot
 # find std.rt agree about every file.
-if [ ! -f "$build/pin/0/std/rt.ft" ]; then
-    echo "diff_ir.sh: not built: $build/pin/0/std (build the fort_stage2 target first)" >&2
+if [ ! -f "$build/oracle/std/rt.ft" ]; then
+    echo "diff_ir.sh: not built: $build/oracle/std (build fort_oracle_tree first)" >&2
     exit 2
 fi
 
@@ -171,12 +171,11 @@ VERIFY_PASSES=verify
 # unaffected, since a root that holds no module of the path is simply not the
 # one that answers (D9.2).
 #
-# The library is pin 0's and not HEAD's, on both sides, for the reason
-# tools/diff_check.sh gives at its own copy of this line (T-131). It is also
+# The C oracle library, and not a production pin, is on both sides. It is also
 # what keeps the two modules comparable: a module holds the whole closure
 # (D9.10) and names each file by the path the compiler opened it by (D19.5), so
 # the two runs must be given one directory.
-STD_DIR=$build/pin/0/std
+STD_DIR=$build/oracle/std
 
 files=$(find . -name '*.ft' -not -path './build/*' -not -path './.git/*' \
     -not -path './.worktrees/*' | sort)

@@ -4,17 +4,21 @@
 # D14.1, D14.3
 set -euo pipefail
 
-if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
-    echo "usage: gen_mac_platform.sh <build-dir> [host-version]" >&2
+if [ "$#" -lt 1 ] || [ "$#" -gt 3 ]; then
+    echo "usage: gen_mac_platform.sh <build-dir> [host-version] [entry-file]" >&2
     exit 2
 fi
 
 source_dir=$(cd "$(dirname "$0")/.." && pwd)
 output_dir=$1
+entry_file=$source_dir/src/fort/main.ft
+if [ "$#" -eq 3 ]; then
+    entry_file=$3
+fi
 # The VM can replace its fixed version for a build-refresh probe.
-if [ "$#" -eq 2 ] && [ -n "${FORT_MAC_PLATFORM_TEST_VERSION:-}" ]; then
+if [ "$#" -ge 2 ] && [ -n "${FORT_MAC_PLATFORM_TEST_VERSION:-}" ]; then
     version=$FORT_MAC_PLATFORM_TEST_VERSION
-elif [ "$#" -eq 2 ]; then
+elif [ "$#" -ge 2 ]; then
     version=$2
 else
     version=$(sw_vers -productVersion)
@@ -27,9 +31,14 @@ elif [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     exit 2
 fi
 
+if [ ! -f "$entry_file" ]; then
+    echo "gen_mac_platform.sh: entry file is missing: $entry_file" >&2
+    exit 2
+fi
+
 mkdir -p "$output_dir"
-if ! cmp -s "$source_dir/src/fort/main.ft" "$output_dir/main.ft"; then
-    cp "$source_dir/src/fort/main.ft" "$output_dir/main.ft"
+if ! cmp -s "$entry_file" "$output_dir/main.ft"; then
+    cp "$entry_file" "$output_dir/main.ft"
 fi
 platform_tmp=$(mktemp "$output_dir/platform.ft.XXXXXX")
 trap 'rm -f "$platform_tmp"' EXIT

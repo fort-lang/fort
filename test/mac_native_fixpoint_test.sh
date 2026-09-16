@@ -1,8 +1,8 @@
 #!/bin/bash
-# mac_native_fixpoint_test.sh: prove the native Mac compiler fixed point.
+# mac_native_fixpoint_test.sh: prove the darwin compiler fixed point.
 #
 # Each mode compares stage2 and stage3 IR, then stage3 and stage4 binaries.
-# Both native links use one output path. The test copies stage3 before stage4.
+# Both darwin links use one output path. The test copies stage3 before stage4.
 # D19.1, D19.5
 set -eu
 
@@ -21,25 +21,27 @@ relative=${build#"$root"/}
 cd "$root"
 
 stage2="$relative/fort"
-entry="$relative/mac-platform/main.ft"
-std="$relative/std"
-target=$(sed -n 's/^string BUILT_TARGET = "\(.*\)";$/\1/p' \
-    "$relative/mac-platform/platform.ft")
+entry="$relative/bootstrap-head/entry/main.ft"
+std="$relative/bootstrap-head/std"
+target=$(sed -n 's/^default triple: //p' "$relative/seed.identity")
 if ! [[ "$target" =~ ^arm64-apple-macosx[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
    [ ! -x "$stage2" ]; then
     echo "mac_native_fixpoint_test.sh: Mac stage2 or target is missing" >&2
     exit 2
 fi
-vm_slot=${FORT_VM_SLOT:-2}
+opt=${FORT_MAC_OPT:-/opt/homebrew/bin/opt}
+if ! command -v "$opt" >/dev/null; then
+    echo "mac_native_fixpoint_test.sh: verifier not found: $opt" >&2
+    exit 2
+fi
 
 verify_module() {
     local module=$1
     if [ ! -s "$module" ] || ! rg -q "^target triple = \"$target\"$" "$module"; then
-        echo "mac native fixpoint: $module is no Apple target module" >&2
+        echo "darwin fixed point: $module is not a darwin target module" >&2
         return 1
     fi
-    FORT_VM_SLOT="$vm_slot" tools/vm run opt-18 -passes=verify -disable-output \
-        "$module"
+    "$opt" -passes=verify -disable-output "$module"
 }
 
 check_mode() {
@@ -55,7 +57,7 @@ check_mode() {
 
     "$stage2" "$@" --std-dir "$std" -I src/fort -o "$link" "$entry"
     if [ ! -x "$link" ]; then
-        echo "mac native fixpoint: $mode stage3 is missing" >&2
+        echo "darwin fixed point: $mode stage3 is missing" >&2
         return 1
     fi
 
@@ -66,7 +68,7 @@ check_mode() {
     verify_module "$stage2_ll"
     verify_module "$stage3_ll"
     if ! cmp -s "$stage2_ll" "$stage3_ll"; then
-        echo "mac native fixpoint: $mode stage2 and stage3 IR differ" >&2
+        echo "darwin fixed point: $mode stage2 and stage3 IR differ" >&2
         diff -u "$stage2_ll" "$stage3_ll" > "$work/module.diff" || true
         head -n 40 "$work/module.diff" >&2
         return 1
@@ -76,7 +78,7 @@ check_mode() {
     rm -f -- "$link"
     "$copy" "$@" --std-dir "$std" -I src/fort -o "$link" "$entry"
     if [ ! -x "$link" ] || ! cmp -s "$copy" "$link"; then
-        echo "mac native fixpoint: $mode stage3 and stage4 binaries differ" >&2
+        echo "darwin fixed point: $mode stage3 and stage4 binaries differ" >&2
         return 1
     fi
     echo "$mode: two Apple IR modules verify and match; two Mach-O binaries match"

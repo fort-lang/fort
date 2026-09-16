@@ -431,7 +431,7 @@ without a rewrite.
   written or only staged counts as 0 lines and the ratio answers about the last commit: commit
   first, then measure (T-093); its own tests are the ctest `lines_selftest`).
   `tools/vm <target> [preset]` runs one.
-- **The native Mac build copies target library modules** (T-145).
+- **The `darwin` build copies target library modules** (T-145).
   `tools/mac fixpoint` runs the `mac-native` CMake workflow on Mac arm64.
   `fort_std` copies `std/mac/libc.ft` and `std/mac/net.ft` to the standard root.
   The root holds 12 fort files under `build/mac-native/std`.
@@ -458,21 +458,18 @@ without a rewrite.
   (`join_sandbox_path`, `gen_join_path`), never widen the buffer or cast the result away. A guard
   only gcc enforces is a guard no test holds, so assert each one -- the call sites too, not only
   the helper -- as `test/modules_test.c` and `test/gen_test.c` do.
-- Binaries: `build/<preset>/fort` is stage1 (the C compiler); `build/<preset>/pin/<n>/fort` is the
-  compiler of pin `n` of `tools/bootstrap.ref`; `build/<preset>/stage2/fort` is the self-hosted
-  compiler, which the **last pin** builds from HEAD's `src/fort` (T-131, `notes/compiler.md` 8).
-  The `fort_stage2` target builds the whole chain at every build, so a module the last pin rejects
-  fails the build rather than the test run; stage2 is an x86-64 binary and runs under qemu like
-  every program the compiler builds. Each pin's tree is `git archive`d into `build/<preset>/pin/<n>`
-  and stamped `.tree-<sha>`, so it is extracted once per sha and per build directory, and a pin
-  rebuilds only when its sha moves or the compiler before it changes. Measured under `debug` on
-  2026-09-14: an edit to `src/fort` rebuilds `stage2` and `fort-lsp` alone in 3.3 s, an edit to
-  `src/bootstrap` cascades stage1, pin 0, stage2 and `fort-lsp` in 11.4 s, one hop costs 2.6 s
-  checked and 3.1 s release, and an extraction 0.03 s. `rm -rf build/<preset>` pays the chain once.
-  `tools/bootstrap.sh [--preset <preset>] [--stage3]` builds the chain and that stage2 by hand in
-  the guest, through the CMake target rather than by spelling a hop. With `--stage3` it hands the
-  fixed point to `tools/fixpoint.sh`, and it writes no stage2 of its own, since that script builds
-  one per build mode.
+- Binaries: `build/<preset>/fort` is the C differential oracle.
+  `build/<preset>/pin/<n>/fort` is source pin N from `tools/bootstrap.ref`.
+  `build/<preset>/stage2/fort` is HEAD built by the last source pin (T-151).
+  Set the CMake cache variable `FORT_BOOTSTRAP_SEED` to the user-supplied seed path.
+  `tools/vm` forwards the environment variable of the same name as a guest path.
+  The `fort_stage2` target runs `tools/bootstrap_chain.sh` for `linux`.
+  The script verifies and snapshots the seed, builds each pin, builds HEAD, and writes
+  `build/<preset>/bootstrap-stages.tsv`. Each record gives the source SHA, default triple, and file
+  format. `build/<preset>/oracle/std` comes from `tools/bootstrap-oracle.ref`. Only the C
+  differential tests use it. The production chain has no dependency on the C compiler.
+  `tools/bootstrap.sh --target linux|darwin --seed <fort> [--preset <preset>] [--stage3]` runs the
+  same source chain by hand. `--stage3` also tests the checked and release fixed points.
 - **A full clone is a build requirement, and a shallow one cannot build** (T-131). Every pin of
   `tools/bootstrap.ref` is a commit of this repository, and `tools/pin.sh` reaches it with
   `git cat-file`, `git merge-base` and `git archive`. `tools/pin.sh verify` runs at configure time,
@@ -494,7 +491,7 @@ without a rewrite.
 
 ## 6. The host side
 
-- **The native Mac gate uses the Mac arm64 host and VM slot 2** (T-147).
+- **The `darwin` gate uses the darwin arm64 host and VM slot 2** (T-147).
   Check the host tools before the build:
 
   ```sh
@@ -509,26 +506,26 @@ without a rewrite.
   ```
 
   Set `FORT_MAC_OPT` to a different `opt` path only when that tool verifies LLVM IR.
-  Configure and build the native compiler and language server on the Mac host:
+  Configure and build the `darwin` compiler and language server on the darwin host:
 
   ```sh
-  FORT_VM_SLOT=2 tools/vm configure debug
-  cmake --preset mac-native
-  FORT_VM_SLOT=2 cmake --build --preset mac-native
+  cmake --preset mac-native -DFORT_BOOTSTRAP_SEED=/path/to/darwin/fort
+  cmake --build --preset mac-native
   ```
 
-  `build/mac-native/fort` is the native compiler.
-  `build/mac-native/fort-lsp` is the native language server.
-  The build uses `build/debug/stage2/fort` as its Linux seed.
+  `build/mac-native/fort` is the `darwin` compiler.
+  `build/mac-native/fort-lsp` is the `darwin` language server.
+  The build verifies the supplied `darwin` seed. It calls `tools/vm` zero times while it builds the
+  source chain and tests the fixed point.
   The Mac gate exports `SDKROOT` from `xcrun --sdk macosx --show-sdk-path`.
   The compiler and corpus C helpers use that SDK path for native links.
-  Run the counted native gate on a clean source tree:
+  Run the counted `darwin` gate on a clean source tree:
 
   ```sh
   tools/mac gate > build/mac-gate.log 2>&1
   ```
 
-  The gate runs the pipeline, native CMake tests, corpus, trap, lint, core, and network tests.
+  The gate runs the pipeline, `darwin` CMake tests, corpus, trap, lint, core, and network tests.
   It names each Linux-only corpus exclusion and gives the selected corpus count.
   `tools/mac identity` records the source and main SHAs and requires empty git status.
   It records host CPU, OS, SDK, Xcode, clang, verifier, CMake, Node, and tool hashes.

@@ -2,11 +2,10 @@
 # tools/fixpoint.sh <build-dir>: the compiler must reproduce itself, in both
 # build modes (D19.5).
 #
-# The chain has one hop more than it used to (T-131). The compiler that builds
-# HEAD is the last pin of tools/bootstrap.ref, which stage1 reached through
-# every pin before it; --bootstrap names its binary. stage2 is HEAD's src/fort
-# compiled by that pin, stage3 is HEAD's src/fort compiled by stage2, stage4 is
-# HEAD's src/fort compiled by stage3.
+# The compiler that builds HEAD is the last pin of tools/bootstrap.ref.
+# The verified seed reached it through each prior source pin (D14.7).
+# --bootstrap names that last pin. Stage2 is HEAD's src/fort compiled by the
+# pin. Stage3 uses stage2, and stage4 uses stage3.
 #
 # Which pair D19.5 compares, and why it is not the pair it used to be. The last
 # pin and HEAD are different programs, so their `-S` texts differ on any commit
@@ -39,8 +38,9 @@
 # and not the compiler, and the two failures have different causes.
 #
 # It builds all six binaries itself, under <build-dir>/fixpoint/<mode>, and
-# the three stages of a mode differ in nothing that reaches the module: the
-# compiler, and the `-o` path, which no module holds. Two reasons.
+# the three stages of a mode differ in nothing that reaches the module except
+# the compiler and the `-o` path. The module does not hold the output path.
+# The darwin target uses one link path for stage3 and stage4, as D19.5 requires.
 #
 # Everything that does reach the module must be spelled the same way for the
 # two stages, and the file paths are what reach it. The compiler names
@@ -54,15 +54,16 @@
 #
 # It also writes no file that another test reads. <build-dir>/stage2/fort
 # belongs to the CMake target fort_stage2, and lang-stage2, diff-ir and
-# stage-usage judge it while this test runs, and <build-dir>/pin/<n>/fort
-# belongs to the target fort_pin_<n>.
+# stage-usage judge it while this test runs. The source chain owns each
+# <build-dir>/pin/<n>/fort.
 #
 # ctest runs it as the test `bootstrap`, label lang.
 set -eu
 
 usage() {
     echo "usage: fixpoint.sh <build-dir> [--bootstrap <fort>] [--cc <clang>]" >&2
-    echo "                   [--target <triple>] [--opt <opt>]" >&2
+    echo "                   [--target <triple>] [--opt <opt>] [--entry <file>]" >&2
+    echo "                   [--std <dir>] [--source-root <dir>]" >&2
 }
 
 # The compiler drives a clang over the LLVM IR it emits (D14.3), and the guest
@@ -76,6 +77,9 @@ target=${FORT_TARGET_TRIPLE:-x86_64-linux-gnu}
 # The compiler that builds HEAD. CMake passes it, and a hand run reads the last
 # pin off tools/bootstrap.ref, so the two measure one chain.
 bootstrap=
+entry=
+std=
+source_root=
 
 if [ "$#" -lt 1 ]; then
     usage
@@ -94,6 +98,9 @@ while [ "$#" -gt 0 ]; do
         --cc) cc=$2 ;;
         --target) target=$2 ;;
         --opt) opt=$2 ;;
+        --entry) entry=$2 ;;
+        --std) std=$2 ;;
+        --source-root) source_root=$2 ;;
         *)
             echo "fixpoint.sh: unknown argument '$1'" >&2
             usage
@@ -103,15 +110,39 @@ while [ "$#" -gt 0 ]; do
     shift 2
 done
 root=$(cd "$(dirname "$0")/.." && pwd)
-entry=$root/src/fort/main.ft
-std=$build/std
+entry=${entry:-$root/src/fort/main.ft}
+std=${std:-$build/std}
+source_root=${source_root:-$(dirname "$entry")}
 if [ -z "$bootstrap" ]; then
     bootstrap=$build/pin/$(bash "$root/tools/pin.sh" last)/fort
 fi
 export QEMU_LD_PREFIX=${QEMU_LD_PREFIX:-/usr/x86_64-linux-gnu}
 
+case "$target" in
+x86_64-linux-gnu)
+    expected_triple=x86_64-unknown-linux-gnu
+    target_name=linux
+    ;;
+arm64-apple-macosx[0-9]*.[0-9]*.[0-9]*)
+    if ! [[ "$target" =~ ^arm64-apple-macosx[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "fixpoint.sh: unsupported target '$target'" >&2
+        exit 2
+    fi
+    expected_triple=$target
+    target_name=darwin
+    ;;
+*)
+    echo "fixpoint.sh: unsupported target '$target'" >&2
+    exit 2
+    ;;
+esac
+
 if [ ! -x "$bootstrap" ]; then
     echo "fixpoint.sh: not built: $bootstrap (build the fort_stage2 target first)" >&2
+    exit 2
+fi
+if [ ! -f "$entry" ] || [ ! -d "$std" ] || [ ! -d "$source_root" ]; then
+    echo "fixpoint.sh: target entry, source root, or standard root is missing" >&2
     exit 2
 fi
 
@@ -143,7 +174,8 @@ compile() {
     # one option and not a path, so the split of an empty $flags into no
     # argument is what is wanted here.
     # shellcheck disable=SC2086
-    "$compiler" $flags --std-dir "$std" --cc "$cc" --target "$target" \
+    "$compiler" $flags --std-dir "$std" -I "$source_root" \
+        --cc "$cc" --target "$target" \
         -o "$output" "$entry"
     if [ ! -x "$output" ]; then
         echo "fixpoint.sh: $compiler exited 0 and wrote no $output" >&2
@@ -160,7 +192,7 @@ is_module() {
         echo "fixpoint.sh: $1 is empty" >&2
         return 1
     fi
-    if ! grep -q '^target triple = "x86_64-unknown-linux-gnu"$' "$1"; then
+    if ! grep -q "^target triple = \"$expected_triple\"$" "$1"; then
         echo "fixpoint.sh: $1 is not a module of D19.1" >&2
         return 1
     fi
@@ -174,7 +206,7 @@ emit() {
     # `-S` stops before --cc (toolchain.md 2), so it names no target compiler.
     # It keeps --target, which names the triple the module carries (D14.1).
     # shellcheck disable=SC2086
-    "$compiler" $flags -S --std-dir "$std" --target "$target" \
+    "$compiler" $flags -S --std-dir "$std" -I "$source_root" --target "$target" \
         -o "$output" "$entry"
 }
 
@@ -197,7 +229,16 @@ check_mode() {
     fi
 
     echo "== $mode: stage3"
-    if ! compile "$two" "$flags" "$three"; then
+    if [ "$target_name" = darwin ]; then
+        three=$work/$mode/stage3.copy
+        four=$work/$mode/fort
+        if ! compile "$two" "$flags" "$four"; then
+            echo "fixpoint.sh: $mode: stage2 could not compile src/fort" >&2
+            status=1
+            return
+        fi
+        cp "$four" "$three"
+    elif ! compile "$two" "$flags" "$three"; then
         echo "fixpoint.sh: $mode: stage2 could not compile src/fort" >&2
         status=1
         return
@@ -244,6 +285,9 @@ check_mode() {
     fi
 
     echo "== $mode: stage4"
+    if [ "$target_name" = darwin ]; then
+        rm -f "$four"
+    fi
     if ! compile "$three" "$flags" "$four"; then
         echo "fixpoint.sh: $mode: stage3 could not compile src/fort" >&2
         status=1

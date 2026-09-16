@@ -21,6 +21,7 @@ checks=0
 
 head_sha=$(git -C "$root" rev-parse HEAD)
 pin0=$(grep -E '^bootstrap-0 ' "$root/tools/bootstrap.ref" | awk '{print $2}')
+baseline=$(grep -E '^baseline ' "$root/tools/bootstrap.seed" | awk '{print $2}')
 # The repository's first commit: a commit that exists, that is an ancestor of
 # everything, and that is never a pin. It stands for "some other commit" in the
 # cases below, so they hold whatever HEAD is when the suite runs.
@@ -77,6 +78,8 @@ ref() {
 
 # The repository's own chain, against HEAD.
 expect_ok "the repository's ref file" bash "$pin" verify
+expect_ok "the C oracle ref file" bash "$pin" verify \
+    --ref "$root/tools/bootstrap-oracle.ref"
 
 # The shape of a line.
 expect_fail "a malformed line" "malformed line" \
@@ -85,6 +88,13 @@ expect_fail "a sha that is not 40 hex" "malformed line" \
     bash "$pin" verify --ref "$(ref short "bootstrap-0 d132989")"
 expect_fail "an upper-case sha" "malformed line" \
     bash "$pin" verify --ref "$(ref upper "bootstrap-0 $(echo "$pin0" | tr 'a-f' 'A-F')")"
+
+# The active source chain starts at the shared source baseline.
+checks=$((checks + 1))
+if [ "$pin0" != "$baseline" ]; then
+    echo "pin_test.sh: bootstrap-0 differs from tools/bootstrap.seed" >&2
+    failures=$((failures + 1))
+fi
 
 # An empty chain.
 expect_fail "a ref file with no pin" "names no pin" \

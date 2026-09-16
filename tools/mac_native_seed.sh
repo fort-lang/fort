@@ -1,13 +1,16 @@
 #!/bin/bash
-# mac_native_seed.sh: build native Mac stage2 from the Linux VM seed.
+# Build the darwin compiler through the source chain (D14.7).
 #
-# The Linux pinned chain builds the seed in slot 2. The seed emits Mac IR with
-# the explicit Mac standard root and target. Apple clang links that IR.
-# D14.1, D14.3, D19.1
+# T-152 removes this transitional wrapper and its old file name. The wrapper
+# keeps the current darwin CMake graph while bootstrap_chain.sh owns the chain.
 set -eu
 
 if [ "$#" -ne 1 ] || [ "$(uname -sm)" != "Darwin arm64" ]; then
-    echo "usage: mac_native_seed.sh <Mac-build-dir> on a Mac arm64 host" >&2
+    echo "usage: mac_native_seed.sh <darwin-build-dir> on darwin arm64" >&2
+    exit 2
+fi
+if [ -z "${FORT_BOOTSTRAP_SEED:-}" ]; then
+    echo "mac_native_seed.sh: FORT_BOOTSTRAP_SEED must name the darwin seed" >&2
     exit 2
 fi
 
@@ -17,47 +20,17 @@ case "$build" in
 "$root"/*) ;;
 *) echo "mac_native_seed.sh: build directory is outside $root" >&2; exit 2 ;;
 esac
-relative=${build#"$root"/}
-cd "$root"
-
-platform="$build/mac-platform/platform.ft"
-target=$(sed -n 's/^string BUILT_TARGET = "\(.*\)";$/\1/p' "$platform")
-if ! [[ "$target" =~ ^arm64-apple-macosx[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "mac_native_seed.sh: invalid Mac target '$target'" >&2
-    exit 2
-fi
-
-seed=build/debug/stage2/fort
-module="$build/stage2.ll"
-binary="$build/fort"
-vm_slot=${FORT_VM_SLOT:-2}
-if [ ! -f build/debug/CMakeCache.txt ]; then
-    FORT_VM_SLOT="$vm_slot" tools/vm configure debug
-fi
-FORT_VM_SLOT="$vm_slot" tools/vm build debug fort_stage2
-if [ ! -s "$seed" ]; then
-    echo "mac_native_seed.sh: the VM wrote no Linux stage2 seed" >&2
-    exit 1
-fi
-
-rm -f -- "$module" "$binary"
-FORT_VM_SLOT="$vm_slot" tools/vm run "$seed" -S --target "$target" \
-    --std-dir "$relative/std" -I src/fort -o "$relative/stage2.ll" \
-    "$relative/mac-platform/main.ft"
-if [ ! -s "$module" ] || ! rg -q "^target triple = \"$target\"$" "$module"; then
-    echo "mac_native_seed.sh: the seed wrote no Apple target module" >&2
-    exit 1
-fi
-FORT_VM_SLOT="$vm_slot" tools/vm run opt-18 -passes=verify -disable-output \
-    "$relative/stage2.ll"
 
 cc=$(xcrun --sdk macosx --find clang)
-sdk=$(xcrun --sdk macosx --show-sdk-path)
-"$cc" -isysroot "$sdk" --target="$target" -O1 -fPIE -Wl,-pie \
-    -Wno-override-module \
-    -o "$binary" "$module"
-if [ ! -x "$binary" ]; then
-    echo "mac_native_seed.sh: Apple clang wrote no Mac stage2 binary" >&2
-    exit 1
-fi
-echo "Mac stage2: Linux seed built; Apple IR verified; native binary linked"
+SDKROOT=$(xcrun --sdk macosx --show-sdk-path)
+export SDKROOT
+opt=${FORT_MAC_OPT:-/opt/homebrew/bin/opt}
+
+bash "$root/tools/bootstrap_chain.sh" darwin "$FORT_BOOTSTRAP_SEED" "$build" \
+    --cc "$cc" --opt "$opt"
+
+# T-152 moves the CMake output to stage2/fort. Keep the current path until
+# that ticket changes all darwin consumers together.
+cp "$build/stage2/fort" "$build/fort"
+chmod 755 "$build/fort"
+echo "darwin stage2: the verified seed built the source chain and HEAD"

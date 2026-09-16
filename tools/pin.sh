@@ -1,10 +1,10 @@
 #!/bin/bash
 # tools/pin.sh: the pinned commits that build the compiler (notes/compiler.md 8).
 #
-# The compiler is not built by the C bootstrap any more. `tools/bootstrap.ref`
-# names a chain of commits of this repository, oldest first; stage1 (C) builds
-# pin 0's `src/fort` with pin 0's `std`, pin k builds pin k+1, and the last pin
-# builds HEAD. This script reads that file. It has three jobs:
+# The compiler is not built by the C bootstrap. `tools/bootstrap.ref` names a
+# chain of commits of this repository, oldest first. The verified seed builds
+# pin 0 for one selected target. Pin k builds pin k+1, and the last pin builds
+# HEAD for that target. This script reads that file. It has three jobs:
 #
 #   verify   every pin exists, is written in full and stands in the history
 #   extract  one pin's `src/fort` and `std` into a directory of the build

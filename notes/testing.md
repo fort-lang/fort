@@ -530,17 +530,13 @@ bullet at a time and without a rewrite.
   **8-bit** target: a `zext i1` to `i32` reads the same whether the source is called one bit wide
   or eight. Read a differential's red as "the class is here", never as the rule's witness. The
   method, the runner and the traps of that audit are in section 7, beside T-077's.
-  **The library the differentials compare is pin 0's, not HEAD's** (T-131). `diff_check.sh` and
-  `diff_ir.sh` name `<build-dir>/pin/0/std` on both sides. `std/rt.ft` is in every import closure
-  (D9.10), so the moment HEAD's library leaves stage1's subset every stage1 run of those scripts
-  fails and the comparison is empty; pin 0's library is the one stage1 can always read, and giving
-  stage2 the same directory is what keeps the two runs one comparison. HEAD's own `std/*.ft` files
-  stay in the file list and are still compared one by one, until one of them uses a form stage1
-  refuses. One of them does: `std/rt.ft` spells a `?:` in `print_bool`, which is the demonstration
-  T-131 owes, so it left `CLEAN_FILES` (509 to 508) and joined `FORM_FILES` (16 to 17).
-  What the differentials therefore stop covering is HEAD's library, on the day it moves past pin
-  0's, and the compiler's own source, on the day it uses a post-pin form. The fixed point and
-  `fort-modules` under stage2 judge both then.
+  **The differentials use the C oracle library, not a production pin** (T-151). `diff_check.sh`
+  and `diff_ir.sh` name `<build-dir>/oracle/std` on both sides. The build extracts it from
+  `tools/bootstrap-oracle.ref`. This keeps the frozen C language subset independent from the
+  source pins in `tools/bootstrap.ref`. Giving both compilers one directory also keeps their
+  emitted paths equal. HEAD's `std/*.ft` files stay in the file list and are compared one by one
+  until one uses a form the C compiler refuses. The fixed point and `fort-modules` judge HEAD's
+  complete standard root and compiler sources.
   All four scripts carry the same `FT_FILES` equality, so a ticket that adds or removes a `.ft`
   file changes **four** lines in the same commit, and `diff_check.sh` and `diff_ir.sh` each carry
   a second equality, `CLEAN_FILES` and `PROGRAM_FILES`, because a comparison that shrank would

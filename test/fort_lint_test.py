@@ -829,17 +829,15 @@ class IncludeRoots(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    os.environ.get("FORT_BINARY") and os.environ.get("FORT_PIN0_DIR"),
-    "FORT_BINARY or FORT_PIN0_DIR is not set",
+    os.environ.get("FORT_BINARY") and os.environ.get("FORT_ORACLE_DIR"),
+    "FORT_BINARY or FORT_ORACLE_DIR is not set",
 )
 class RealCompiler(unittest.TestCase):
     """The whole tool over the fixtures, with the compiler the build made.
 
-    That compiler is the C bootstrap, which compiles pin 0's library and no
-    other (T-131), so every run here names pin 0's `std` with --std-dir. The
-    fallback of toolchain.md 1 would reach `<build>/std`, which is HEAD's
-    library, and HEAD's std/rt.ft spells a `?:` the C bootstrap refuses; every
-    test of this class then reports that one refusal and nothing else.
+    That compiler is the C differential oracle. Each run names its historical
+    standard root. The production pins can use forms the frozen C compiler
+    does not accept.
     """
 
     def run_lint(self, *args):
@@ -850,7 +848,7 @@ class RealCompiler(unittest.TestCase):
                 "--fort",
                 os.environ["FORT_BINARY"],
                 "--std-dir",
-                str(Path(os.environ["FORT_PIN0_DIR"]) / "std"),
+                str(Path(os.environ["FORT_ORACLE_DIR"]) / "std"),
                 *args,
             ],
             capture_output=True,
@@ -868,16 +866,13 @@ class RealCompiler(unittest.TestCase):
         self.assertEqual(got.returncode, 1)
         self.assertEqual(got.stdout.strip().split("\n"), BAD_NAMES_PROBLEMS)
 
-    def test_pin_0s_standard_library_conforms(self):
+    def test_the_c_oracle_standard_library_conforms(self):
         """Every module of the library the compiler this test runs compiles.
 
-        That compiler is the C bootstrap, and from T-131 on it compiles pin 0's
-        library and no other (notes/compiler.md 8, invariant 5). So the tree
-        this lints is pin 0's, which the build extracted, and not HEAD's, which
-        may hold a form the C bootstrap cannot read. The ctest fort_lint holds
+        This tree is the separate C oracle input. The ctest fort_lint holds
         HEAD's library against D1.4 with stage2.
 
-        Two modules of pin 0's library stand outside: std/math.ft and
+        Two modules of the oracle library stand outside: std/math.ft and
         std/rt_float.ft hold floats and the C bootstrap rejects a float type
         and a float literal (D18.1, toolchain.md 7.3). That is a property of
         the C compiler and not of the pin, so it is named here and not in
@@ -885,15 +880,15 @@ class RealCompiler(unittest.TestCase):
         T-132 folded it into std/rt.ft, which is a float-holding module of
         HEAD's tree and holds no float in this one.
         """
-        pin0 = Path(os.environ["FORT_PIN0_DIR"])
+        oracle = Path(os.environ["FORT_ORACLE_DIR"])
         floatless = ("math.ft", "rt_float.ft")
-        every = sorted((pin0 / "std").glob("*.ft"))
+        every = sorted((oracle / "std").glob("*.ft"))
         files = [p for p in every if p.name not in floatless]
         self.assertEqual(len(files) + len(floatless), len(every))
         self.assertGreaterEqual(len(files), 10)
         # The paths are absolute, because the tool resolves a path it is given
         # against its own working directory and reports it relative to --root.
-        got = self.run_lint("--root", str(pin0), *[str(p) for p in files])
+        got = self.run_lint("--root", str(oracle), *[str(p) for p in files])
         self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
 
     def test_a_rejected_file_is_reported_and_still_judged(self):

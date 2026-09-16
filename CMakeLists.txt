@@ -54,6 +54,8 @@ set(FORT_EDITORS_DIR "${CMAKE_SOURCE_DIR}/editors")
 set(FORT_STD_DIR "${CMAKE_BINARY_DIR}/std")
 set(FORT_FORT_SRC_DIR "${CMAKE_SOURCE_DIR}/src/fort")
 set(FORT_STAGE2_DIR "${CMAKE_BINARY_DIR}/stage2")
+set(FORT_BOOTSTRAP_SEED "$ENV{FORT_BOOTSTRAP_SEED}" CACHE FILEPATH
+    "User-supplied fort seed from tools/bootstrap.seed")
 
 option(FORT_NATIVE_MAC "Build the native Mac compiler without C bootstrap targets" OFF)
 if(FORT_NATIVE_MAC)
@@ -98,22 +100,26 @@ if(FORT_NATIVE_MAC)
     )
 
     file(GLOB FORT_FORT_SOURCES CONFIGURE_DEPENDS "${FORT_FORT_SRC_DIR}/*.ft")
-    file(GLOB_RECURSE FORT_BOOTSTRAP_SOURCES CONFIGURE_DEPENDS
-        "${FORT_SRC_DIR}/*.c" "${FORT_SRC_DIR}/*.h")
     set(FORT_MAC_STAGE2_BINARY "${CMAKE_BINARY_DIR}/fort")
     add_custom_command(
         OUTPUT "${FORT_MAC_STAGE2_BINARY}"
-        COMMAND bash "${CMAKE_SOURCE_DIR}/tools/mac_native_seed.sh" "${CMAKE_BINARY_DIR}"
+        COMMAND "${CMAKE_COMMAND}" -E env
+                "FORT_BOOTSTRAP_SEED=${FORT_BOOTSTRAP_SEED}"
+                bash "${CMAKE_SOURCE_DIR}/tools/mac_native_seed.sh" "${CMAKE_BINARY_DIR}"
         DEPENDS fort_std fort_mac_platform ${FORT_FORT_SOURCES}
-                ${FORT_BOOTSTRAP_SOURCES} ${FORT_ALL_STD_SOURCES}
-                ${FORT_MAC_STD_OUTPUTS}
+                ${FORT_ALL_STD_SOURCES} ${FORT_MAC_STD_OUTPUTS}
                 "${FORT_MAC_PLATFORM_DIR}/platform.ft"
                 "${FORT_MAC_PLATFORM_DIR}/main.ft"
                 "${CMAKE_SOURCE_DIR}/tools/mac_native_seed.sh"
+                "${CMAKE_SOURCE_DIR}/tools/bootstrap_chain.sh"
+                "${CMAKE_SOURCE_DIR}/tools/bootstrap.seed"
                 "${CMAKE_SOURCE_DIR}/tools/bootstrap.ref"
                 "${CMAKE_SOURCE_DIR}/tools/pin.sh"
+                "${CMAKE_SOURCE_DIR}/tools/verify_seed.py"
+                "${CMAKE_SOURCE_DIR}/tools/gen_mac_platform.sh"
+                "${FORT_BOOTSTRAP_SEED}"
                 "${CMAKE_SOURCE_DIR}/CMakeLists.txt"
-        COMMENT "Building native Mac stage2 from the Linux VM seed"
+        COMMENT "Building darwin stage2 through the source chain"
         VERBATIM
     )
     add_custom_target(fort_stage2 ALL DEPENDS "${FORT_MAC_STAGE2_BINARY}")
@@ -176,6 +182,10 @@ find_program(FORT_TARGET_CC_PATH NAMES "${FORT_TARGET_CC}" NO_CACHE)
 if(NOT FORT_TARGET_CC_PATH)
     message(FATAL_ERROR "FORT_TARGET_CC: clang not found: ${FORT_TARGET_CC}")
 endif()
+find_program(FORT_OPT_PATH NAMES opt-18 opt)
+if(NOT FORT_OPT_PATH)
+    set(FORT_OPT_PATH "opt-18")
+endif()
 
 file(GLOB FORT_STD_SOURCES CONFIGURE_DEPENDS "${FORT_STD_SRC_DIR}/*.ft")
 set(FORT_STD_OUTPUTS "")
@@ -194,12 +204,10 @@ endforeach()
 
 add_custom_target(fort_std ALL DEPENDS ${FORT_STD_OUTPUTS})
 
-# ---- the chain of pinned compilers ---------------------------------------------
-# The C bootstrap does not build the compiler any more. tools/bootstrap.ref
-# names a chain of pinned commits of this repository (notes/compiler.md 8):
-# stage1 builds pin 0's src/fort with pin 0's std, pin k builds pin k+1, and
-# the last pin builds HEAD. So src/fort and std may use any form the last pin
-# implements, and the cold start from C stays.
+# ---- the chain of source compilers ---------------------------------------------
+# The verified user seed builds pin 0. Each pin builds the next pin, and the
+# last pin builds HEAD. The selected target stays linux through this graph.
+# The C compiler above remains a differential oracle and is not a chain input.
 #
 # tools/pin.sh verify runs here, at configure time, because a pin that names
 # no commit is a broken tree and not a build that failed: it must be reported
@@ -225,87 +233,76 @@ if(NOT FORT_PIN_LINES)
     message(FATAL_ERROR "tools/bootstrap.ref names no pin")
 endif()
 
-# Each pin costs two custom commands.
-#
-# The extraction is stamped pin/<n>/.tree-<sha> and has no DEPENDS at all. The
-# tree of a commit never changes, so the sha in the stamp's name is the whole
-# cache key: the command runs once per sha per build directory, and an edit to
-# the ref file that leaves pin <n> alone re-extracts nothing. A pin move gives
-# the stamp a new name, so the tree is extracted again and every later pin
-# rebuilds behind it.
-#
-# The build depends on the stamp and on the previous compiler's binary, and on
-# nothing of HEAD. So a day-to-day edit to src/fort or std rebuilds stage2
-# alone, exactly as it did when stage1 built it; only a change to
-# src/bootstrap, which the freeze limits to bug fixes, cascades the chain.
-set(FORT_PIN_PREV_BINARY "$<TARGET_FILE:fort>")
-set(FORT_PIN_PREV_TARGET fort)
-set(FORT_PIN_PREV_NAME "stage1")
-set(FORT_PIN_TREE_TARGETS "")
+# The frozen C compiler uses its own historical standard root for differential
+# tests. It does not build a production compiler stage (D14.7).
+set(FORT_ORACLE_REF "${CMAKE_SOURCE_DIR}/tools/bootstrap-oracle.ref")
+file(STRINGS "${FORT_ORACLE_REF}" FORT_ORACLE_LINES REGEX "^bootstrap-0 ")
+list(LENGTH FORT_ORACLE_LINES FORT_ORACLE_LINE_COUNT)
+if(NOT FORT_ORACLE_LINE_COUNT EQUAL 1 OR
+   NOT FORT_ORACLE_LINES MATCHES "^bootstrap-0[ \t]+([0-9a-f]+)$")
+    message(FATAL_ERROR "tools/bootstrap-oracle.ref must name one bootstrap-0 SHA")
+endif()
+set(FORT_ORACLE_SHA "${CMAKE_MATCH_1}")
+set(FORT_ORACLE_DIR "${CMAKE_BINARY_DIR}/oracle")
+set(FORT_ORACLE_STAMP "${FORT_ORACLE_DIR}/.tree-${FORT_ORACLE_SHA}")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${FORT_ORACLE_REF}")
+execute_process(
+    COMMAND bash "${FORT_PIN_SH}" verify --ref "${FORT_ORACLE_REF}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    RESULT_VARIABLE FORT_ORACLE_VERIFY_STATUS
+    ERROR_VARIABLE FORT_ORACLE_VERIFY_ERR
+)
+if(NOT FORT_ORACLE_VERIFY_STATUS EQUAL 0)
+    message(FATAL_ERROR "tools/bootstrap-oracle.ref is not usable:\n"
+                        "${FORT_ORACLE_VERIFY_ERR}")
+endif()
+add_custom_command(
+    OUTPUT "${FORT_ORACLE_STAMP}"
+    COMMAND bash "${FORT_PIN_SH}" extract "${FORT_ORACLE_SHA}" "${FORT_ORACLE_DIR}"
+            --ref "${FORT_ORACLE_REF}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    DEPENDS "${FORT_ORACLE_REF}" "${FORT_PIN_SH}"
+    COMMENT "Extracting the C differential-oracle standard root"
+    VERBATIM
+)
+add_custom_target(fort_oracle_tree ALL DEPENDS "${FORT_ORACLE_STAMP}")
+
 foreach(pin_line IN LISTS FORT_PIN_LINES)
     if(NOT pin_line MATCHES "^bootstrap-([0-9]+)[ \t]+([0-9a-f]+)$")
         message(FATAL_ERROR "tools/bootstrap.ref: malformed line: ${pin_line}")
     endif()
     set(pin_number "${CMAKE_MATCH_1}")
-    set(pin_sha "${CMAKE_MATCH_2}")
-    set(pin_tree "${FORT_PIN_DIR}/${pin_number}")
-    set(pin_stamp "${pin_tree}/.tree-${pin_sha}")
-    set(pin_binary "${pin_tree}/fort")
-    add_custom_command(
-        OUTPUT "${pin_stamp}"
-        COMMAND bash "${FORT_PIN_SH}" extract "${pin_sha}" "${pin_tree}"
-                --ref "${FORT_BOOTSTRAP_REF}"
-        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-        COMMENT "Extracting bootstrap-${pin_number} into pin/${pin_number}"
-        VERBATIM
-    )
-    add_custom_target(fort_pin_${pin_number}_tree DEPENDS "${pin_stamp}")
-    list(APPEND FORT_PIN_TREE_TARGETS fort_pin_${pin_number}_tree)
-    add_custom_command(
-        OUTPUT "${pin_binary}"
-        COMMAND "${FORT_PIN_PREV_BINARY}" --std-dir "${pin_tree}/std"
-                --cc "${FORT_TARGET_CC_PATH}" --target "${FORT_TARGET_TRIPLE}"
-                -o "${pin_binary}" "${pin_tree}/src/fort/main.ft"
-        DEPENDS "${pin_stamp}" ${FORT_PIN_PREV_TARGET} "${FORT_PIN_PREV_BINARY}"
-        COMMENT "Compiling bootstrap-${pin_number}'s src/fort with ${FORT_PIN_PREV_NAME}"
-        VERBATIM
-    )
-    add_custom_target(fort_pin_${pin_number} ALL DEPENDS "${pin_binary}")
-    set(FORT_PIN_PREV_BINARY "${pin_binary}")
-    set(FORT_PIN_PREV_TARGET fort_pin_${pin_number})
-    set(FORT_PIN_PREV_NAME "bootstrap-${pin_number}")
+    set(FORT_LAST_PIN_NUMBER "${pin_number}")
 endforeach()
 
-# The last pin is the compiler that builds HEAD, and pin 0's std is the
-# library stage1 compiles from here on (notes/compiler.md 8, invariant 5).
-set(FORT_BOOTSTRAP_BINARY "${FORT_PIN_PREV_BINARY}")
-set(FORT_BOOTSTRAP_TARGET "${FORT_PIN_PREV_TARGET}")
-set(FORT_BOOTSTRAP_NAME "${FORT_PIN_PREV_NAME}")
-set(FORT_PIN0_DIR "${FORT_PIN_DIR}/0")
-set(FORT_PIN0_STD_DIR "${FORT_PIN0_DIR}/std")
+# The source-chain script writes these paths. The fixed-point test starts with
+# the last source pin.
+set(FORT_BOOTSTRAP_BINARY "${FORT_PIN_DIR}/${FORT_LAST_PIN_NUMBER}/fort")
+set(FORT_ORACLE_STD_DIR "${FORT_ORACLE_DIR}/std")
 
 # ---- the self-hosted compiler --------------------------------------------------
-# stage2 is src/fort compiled by the last pin (toolchain.md 8): the binary is
-# x86-64 like every program the compiler builds, so it runs under qemu. It is
-# built by every build so that a module of src/fort the last pin rejects fails
-# here rather than in the language run below; tools/bootstrap.sh drives the
-# same target by hand and goes on to stage3 and stage4.
+# The one source-chain command verifies and snapshots the seed. It builds each
+# source pin and HEAD. It also records each compiler's triple and file format.
 file(GLOB FORT_FORT_SOURCES CONFIGURE_DEPENDS "${FORT_FORT_SRC_DIR}/*.ft")
 set(FORT_STAGE2_BINARY "${FORT_STAGE2_DIR}/fort")
+set(FORT_SEED_DEPENDENCY "")
+if(FORT_BOOTSTRAP_SEED)
+    set(FORT_SEED_DEPENDENCY "${FORT_BOOTSTRAP_SEED}")
+endif()
 add_custom_command(
     OUTPUT "${FORT_STAGE2_BINARY}"
-    COMMAND "${CMAKE_COMMAND}" -E make_directory "${FORT_STAGE2_DIR}"
-    COMMAND "${FORT_BOOTSTRAP_BINARY}" --std-dir "${FORT_STD_DIR}" --cc "${FORT_TARGET_CC_PATH}"
-            --target "${FORT_TARGET_TRIPLE}" -o "${FORT_STAGE2_BINARY}"
-            "${FORT_FORT_SRC_DIR}/main.ft"
-    # The file inputs, not just the targets: a DEPENDS on the custom target
-    # fort_std is an order-only edge, so with fort_std alone an edit to
-    # std/strmap.ft -- which session.ft imports -- left stage2/fort untouched
-    # and lang-stage2 and stage-usage then judged the previous build's binary.
-    # The copies in <build>/std are what the last pin actually reads.
-    DEPENDS ${FORT_BOOTSTRAP_TARGET} "${FORT_BOOTSTRAP_BINARY}" fort_std
-            ${FORT_FORT_SOURCES} ${FORT_STD_OUTPUTS}
-    COMMENT "Compiling src/fort with ${FORT_BOOTSTRAP_NAME} into stage2/fort"
+    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/bootstrap_chain.sh" linux
+            "${FORT_BOOTSTRAP_SEED}" "${CMAKE_BINARY_DIR}"
+            --cc "${FORT_TARGET_CC_PATH}" --opt "${FORT_OPT_PATH}"
+    DEPENDS fort_std ${FORT_FORT_SOURCES} ${FORT_STD_SOURCES}
+            ${FORT_SEED_DEPENDENCY}
+            "${CMAKE_SOURCE_DIR}/tools/bootstrap_chain.sh"
+            "${CMAKE_SOURCE_DIR}/tools/bootstrap.seed"
+            "${CMAKE_SOURCE_DIR}/tools/bootstrap.ref"
+            "${CMAKE_SOURCE_DIR}/tools/pin.sh"
+            "${CMAKE_SOURCE_DIR}/tools/verify_seed.py"
+            "${CMAKE_SOURCE_DIR}/tools/gen_mac_platform.sh"
+    COMMENT "Building linux stage2 through the source chain"
     VERBATIM
 )
 add_custom_target(fort_stage2 ALL DEPENDS "${FORT_STAGE2_BINARY}")
@@ -436,10 +433,6 @@ endforeach()
 # suite is covered by adding the file, and `opt` is a default rather than a
 # configure-time requirement of every preset, as it is for the pipeline test
 # and for the language harness.
-find_program(FORT_OPT_PATH NAMES opt-18 opt)
-if(NOT FORT_OPT_PATH)
-    set(FORT_OPT_PATH "opt-18")
-endif()
 foreach(gen_suite IN LISTS FORT_UNIT_TEST_TARGETS)
     if(gen_suite MATCHES "^gen")
         target_compile_definitions("${gen_suite}"
@@ -452,14 +445,13 @@ endforeach()
 # defines it (toolchain.md 5.1), the second holds D9.8's closure-wide rule
 # against the library's own declarations (D9.10). Both need the sources.
 #
-# They read pin 0's copy and not HEAD's. Both suites parse the file with the C
-# front end, and the C front end compiles pin 0's library and no other, so pin
-# 0's is the library its own tables must agree with. HEAD's std/rt.ft is held
-# against src/fort's table by every program stage2 builds.
+# They read the C oracle root and not HEAD's. Both suites parse the file with
+# the C front end. HEAD's std/rt.ft is held against the fort table by each
+# program that stage2 builds.
 foreach(std_reader runtime_sig_test check_conv_test)
     if(TARGET "${std_reader}")
         target_compile_definitions("${std_reader}"
-            PRIVATE FORT_STD_SOURCE_DIR="${FORT_PIN0_STD_DIR}")
+            PRIVATE FORT_STD_SOURCE_DIR="${FORT_ORACLE_STD_DIR}")
     endif()
 endforeach()
 
@@ -498,7 +490,7 @@ add_custom_target(check
     COMMENT "Running the unit tests"
     USES_TERMINAL
 )
-add_dependencies(check fort fort_std fort_stage2 fort_mac_platform ${FORT_PIN_TREE_TARGETS})
+add_dependencies(check fort fort_std fort_stage2 fort_mac_platform fort_oracle_tree)
 if(FORT_UNIT_TEST_TARGETS)
     add_dependencies(check ${FORT_UNIT_TEST_TARGETS})
 endif()
@@ -525,14 +517,12 @@ endif()
 # compiles, so every module the emitter writes is verified from here on
 # (D19.1, toolchain.md 6).
 #
-# --std-dir is pin 0's library and not HEAD's. std/rt.ft is in every import
-# closure (D9.10), so the moment HEAD's library leaves stage1's subset every
-# stage1 compile fails; pin 0's library is the one stage1 compiles from T-131
-# on (notes/compiler.md 8, invariant 5). lang-stage2 below keeps HEAD's.
+# --std-dir is the C oracle library and not HEAD's. This keeps the frozen C
+# language subset independent from the production source pins.
 set(FORT_LANG_COMMAND
     "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}"
     --fort "$<TARGET_FILE:fort>"
-    --std-dir "${FORT_PIN0_STD_DIR}"
+    --std-dir "${FORT_ORACLE_STD_DIR}"
     --cc "${FORT_TARGET_CC_PATH}"
     --opt "${FORT_OPT_PATH}"
     --verify-ir
@@ -732,13 +722,12 @@ add_test(NAME diff-ir
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(diff-ir PROPERTIES LABELS lang)
 
-# The fixed point of the bootstrap (D19.5): stage2 is src/fort
-# compiled by stage1, stage3 is src/fort compiled by stage2, and the two must
-# be the same program. tools/fixpoint.sh compares the module stage1 and stage2
-# emit for src/fort, runs the IR verifier over both (D19.1), and compares the
-# stage2 and stage3 binaries byte for byte. It does that twice, once in
-# checked mode and once in release mode, because the two modes emit different
-# code (D11.1) and a fixed point in one mode does not prove the other.
+# The fixed point of the bootstrap (D19.5) starts with the last source pin.
+# That pin builds stage2 from HEAD. Stage2 builds stage3, and stage3 builds
+# stage4. The script compares the modules that stage2 and stage3 emit. It
+# verifies both modules (D19.1), then compares the stage3 and stage4 binaries.
+# It does this in checked and release modes. The modes emit different code
+# (D11.1), so one fixed point does not prove the other.
 #
 # It is a test and not a hand-run script because a change that breaks
 # self-hosting must go red by itself. It is label lang because it runs stage2
@@ -767,7 +756,7 @@ set_tests_properties(bootstrap PROPERTIES LABELS lang)
 add_test(NAME tty
     COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/tty_test.py"
             --fort "$<TARGET_FILE:fort>"
-            --std-dir "${FORT_PIN0_STD_DIR}"
+            --std-dir "${FORT_ORACLE_STD_DIR}"
             --cc "${FORT_TARGET_CC_PATH}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(tty PROPERTIES
@@ -801,6 +790,13 @@ add_test(NAME pin-verify
     COMMAND bash "${FORT_TEST_DIR}/pin_test.sh"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(pin-verify PROPERTIES LABELS unit)
+
+# The source chain runs through two fake target compilers. The test checks two
+# stages for each target, target records, wrong formats, and the third name.
+add_test(NAME bootstrap-chain
+    COMMAND bash "${FORT_TEST_DIR}/bootstrap_chain_test.sh"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(bootstrap-chain PROPERTIES LABELS unit)
 
 # The unit tests of tools/lines.py (label unit): the glob matcher, which the
 # guest's Python 3.12 cannot delegate to pathlib, and the --since mode that
@@ -911,7 +907,7 @@ add_test(NAME fort_lint_selftest
     WORKING_DIRECTORY "${FORT_TEST_DIR}")
 set_tests_properties(fort_lint_selftest PROPERTIES
     LABELS unit
-    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1;FORT_BINARY=$<TARGET_FILE:fort>;FORT_PIN0_DIR=${FORT_PIN0_DIR}")
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1;FORT_BINARY=$<TARGET_FILE:fort>;FORT_ORACLE_DIR=${FORT_ORACLE_DIR}")
 
 # The unit tests of the TextMate grammar in editors/vscode (label unit): they
 # compare its keyword and operator lists with D2.4 and D2.10 and assert the
@@ -956,7 +952,7 @@ add_custom_target(check-lang
     USES_TERMINAL
     VERBATIM
 )
-add_dependencies(check-lang fort fort_std fort_stage2 fort_lsp)
+add_dependencies(check-lang fort fort_std fort_stage2 fort_lsp fort_oracle_tree)
 
 add_custom_target(check-all COMMENT "Running every test")
 add_dependencies(check-all check check-lang)
