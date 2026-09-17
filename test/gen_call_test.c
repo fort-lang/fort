@@ -285,6 +285,17 @@ TEST(an_indirect_call_writes_an_aggregate_result_through_the_leading_pointer, {
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
+TEST(a_darwin_indirect_call_marks_its_aggregate_result_pointer, {
+    TEST_ASSERT_TRUE(emit_target("struct point { i32 x; i32 y; }\n"
+                                 "fn make(i32 v) point { point q = {v, v}; return q; }\n"
+                                 "fn main() i32 { fn (i32) point f = make; point r = f(3);\n"
+                                 "    return r.x; }\n",
+                                 "arm64-apple-macosx26.6.2"));
+    TEST_ASSERT_EQ_STR(found("call void (ptr, i32) %t0(ptr sret(%struct.main.point) %r.1, i32 3)"),
+                       "call void (ptr, i32) %t0(ptr sret(%struct.main.point) %r.1, i32 3)");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
 TEST(a_callee_may_write_to_the_aggregate_parameter_the_caller_copied, {
     TEST_ASSERT_TRUE(emit("struct point { i32 x; i32 y; }\n"
                           "fn clobber(point mut p) i32 { p.x = 100; return p.x; }\n"
@@ -596,6 +607,7 @@ int main(int argc, char** argv) {
     TEST_RUN(an_indirect_call_is_not_variadic_and_carries_no_nobuiltin);
     TEST_RUN(an_indirect_call_passes_an_aggregate_as_a_pointer_to_a_copy);
     TEST_RUN(an_indirect_call_writes_an_aggregate_result_through_the_leading_pointer);
+    TEST_RUN(a_darwin_indirect_call_marks_its_aggregate_result_pointer);
     TEST_RUN(a_callee_may_write_to_the_aggregate_parameter_the_caller_copied);
     TEST_RUN(nine_arguments_are_written_in_source_order);
     TEST_RUN(nine_arguments_go_through_a_function_pointer_the_same_way);

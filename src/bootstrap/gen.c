@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "ast.h"
 #include "check.h"
@@ -17,6 +18,8 @@
 #include "str.h"
 #include "sym.h"
 #include "types.h"
+
+static const char MAC_TARGET_PREFIX[] = "arm64-apple-macosx";
 
 // The two named types every module carries, used or not, so that the emitter
 // tracks nothing (item 2). `%fort.span` serves every span and `string`, since
@@ -124,6 +127,11 @@ void gen_init(gen_t* g, gen_options_t opts) {
     g->module = NULL;
     g->entry_defined = false;
     g->failed = false;
+}
+
+bool gen_is_mac(const gen_t* g) {
+    return g->opts.target != NULL &&
+           strncmp(g->opts.target, MAC_TARGET_PREFIX, sizeof MAC_TARGET_PREFIX - 1U) == 0;
 }
 
 static void free_records(ptrvec_t* v) {
@@ -1218,9 +1226,14 @@ static void gen_main(gen_t* g) {
     gen_args_add(&args, gen_literal(g, str_from_cstr("ptr"), "%argv"));
     gen_call_rt(g, RT_ARGS_INIT, &args);
     gen_args_free(&args);
-    // D9.9: the hidden result pointer is a plain `ptr` at the call site
+    // Linux passes a plain pointer. Darwin marks the hidden result pointer.
+    // D9.9
     gen_args_init(&args);
-    gen_args_add(&args, span);
+    if (gen_is_mac(g)) {
+        gen_args_add_ext(&args, span, "sret(%fort.span)");
+    } else {
+        gen_args_add(&args, span);
+    }
     gen_call_rt(g, RT_ARGS, &args);
     gen_args_free(&args);
     const gen_val_t status = gen_temp(g, str_from_cstr("i32"));

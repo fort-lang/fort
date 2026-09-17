@@ -589,6 +589,18 @@ TEST(every_module_of_the_corpus_is_reproduced_byte_for_byte, {
     sb_free(&first);
 })
 
+TEST(all_16_linux_target_modules_keep_the_default_bytes, {
+    static sb_t default_ir;
+    for (uint64_t i = 0; i < sizeof CORPUS / sizeof CORPUS[0]; i++) {
+        TEST_ASSERT_TRUE(emit(CORPUS[i]));
+        sb_clear(&default_ir);
+        sb_append(&default_ir, ir());
+        TEST_ASSERT_TRUE(emit_target(CORPUS[i], "x86_64-linux-gnu"));
+        TEST_ASSERT_EQ_STR(ir(), sb_cstr(&default_ir));
+    }
+    sb_free(&default_ir);
+})
+
 // ---- several modules in one program (item 1) ---------------------------------------
 // D9.10
 
@@ -714,6 +726,18 @@ TEST(an_entry_point_that_returns_carries_the_ordinary_group, {
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
+TEST(darwin_main_and_runtime_definitions_use_the_darwin_aggregate_abi, {
+    TEST_ASSERT_TRUE(
+        emit_with_runtime_target(RUNTIME_SOURCE, HELLO_SOURCE, "arm64-apple-macosx26.6.2"));
+    TEST_ASSERT_EQ_STR(found("call void @\"std.rt.args\"(ptr sret(%fort.span) %args)"),
+                       "call void @\"std.rt.args\"(ptr sret(%fort.span) %args)");
+    TEST_ASSERT_EQ_STR(found("attributes #8 = { cold noreturn nounwind \"frame-pointer\"=\"all\" "
+                             "\"probe-stack\"=\"__chkstk_darwin\" }"),
+                       "attributes #8 = { cold noreturn nounwind \"frame-pointer\"=\"all\" "
+                       "\"probe-stack\"=\"__chkstk_darwin\" }");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
 TEST(a_noreturn_function_outside_the_runtime_keeps_the_group_of_item_20, {
     // The emitter matches the mangled name, so a function of another module
     // whose short name is an entry point's takes `#1` and not `#8`.
@@ -805,11 +829,13 @@ int main(int argc, char** argv) {
     TEST_RUN(every_module_of_the_corpus_verifies_in_release_mode);
     TEST_RUN(every_module_of_the_corpus_verifies_without_bounds_checks);
     TEST_RUN(every_module_of_the_corpus_is_reproduced_byte_for_byte);
+    TEST_RUN(all_16_linux_target_modules_keep_the_default_bytes);
     TEST_RUN(the_modules_of_a_closure_are_emitted_in_dependency_order);
     TEST_RUN(a_c_function_two_modules_declare_is_declared_once);
     TEST_RUN(two_declarations_of_one_c_name_never_reach_the_emitter_disagreeing);
     TEST_RUN(a_noreturn_entry_point_of_section_5_1_carries_the_attribute_group_8);
     TEST_RUN(an_entry_point_that_returns_carries_the_ordinary_group);
+    TEST_RUN(darwin_main_and_runtime_definitions_use_the_darwin_aggregate_abi);
     TEST_RUN(a_noreturn_function_outside_the_runtime_keeps_the_group_of_item_20);
     TEST_RUN(the_enum_member_of_std_rt_is_the_named_type_every_module_carries);
     TEST_RUN(the_runtime_stands_before_the_program_in_the_module);

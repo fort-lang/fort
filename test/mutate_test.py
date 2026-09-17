@@ -574,24 +574,23 @@ class TestTheRealTable(unittest.TestCase):
         names = [row["decision"] for row in self.table["mutations"]]
         self.assertEqual(len(names), len(set(names)))
 
-    def test_the_audit_covers_the_72_decisions_the_four_files_cite(self):
-        # T-078's count: 72 distinct `Dn.m` citations, and 76 rows, because
-        # four decisions carry a second facet named `D3.7b` and so on.
+    def test_the_audit_covers_the_73_decisions_the_four_files_cite(self):
+        # T-078 found 72 distinct `Dn.m` citations and added 76 rows. T-154
+        # adds 12 Darwin output-branch rows and the D10.8 source citation.
         cited = set()
         for name in self.table["sources"]:
             text = (ROOT / name).read_text()
             cited.update(re.findall(r"D[0-9]+\.[0-9]+", text))
-        mutated = {row["decision"].rstrip("abc")
-                   for row in self.table["mutations"]}
-        self.assertEqual(len(cited), 72)
+        mutated = {re.sub(r"[a-z]+$", "", row["decision"]) for row in self.table["mutations"]}
+        self.assertEqual(len(cited), 73)
         self.assertEqual(sorted(cited), sorted(mutated))
-        self.assertEqual(len(self.table["mutations"]), 76)
+        self.assertEqual(len(self.table["mutations"]), 88)
 
     def test_every_row_of_the_table_leaves_no_row_stale_and_names_itself(self):
         """Every row, one at a time, applied the way a round applies it.
 
-        Two rows are not a measurement of 76. Round 3 of this ticket's review
-        applied all of them and found the guard dead for D3.14, D8.5 and D20.4,
+        Two rows are not a measurement of 88. T-078 review round 3 applied its
+        76 rows and found the guard dead for D3.14, D8.5 and D20.4,
         whose replacement text already stood in the file, so `mutated_rows`
         counted two or three and reported no round at all. The whole sweep runs
         in about a second, which is the price of a universal that is measured.
@@ -618,14 +617,14 @@ class TestTheRealTable(unittest.TestCase):
                           out.getvalue())
             (Path(root) / row["file"]).write_bytes(pristine[row["file"]])
             swept += 1
-        self.assertEqual(swept, 76)
+        self.assertEqual(swept, 88)
 
     def test_check_reports_no_stale_anchor_against_the_sources(self):
         out = io.StringIO()
         with redirect_stdout(out):
             status = mutate.check_table(self.table, str(ROOT))
         self.assertEqual(status, 0, out.getvalue())
-        self.assertIn("76 rows, 0 stale", out.getvalue())
+        self.assertIn("88 rows, 0 stale", out.getvalue())
 
 
 if __name__ == "__main__":

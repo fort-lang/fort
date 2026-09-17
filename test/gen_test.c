@@ -24,6 +24,23 @@ TEST(the_module_begins_with_the_normalized_triple, {
     TEST_ASSERT_EQ_INT64(at("target triple = \"x86_64-unknown-linux-gnu\"\n"), (int64_t)0);
 })
 
+TEST(a_darwin_module_begins_with_the_selected_versioned_triple, {
+    TEST_ASSERT_TRUE(emit_target(in_main(""), "arm64-apple-macosx26.6.2"));
+    TEST_ASSERT_EQ_INT64(at("target triple = \"arm64-apple-macosx26.6.2\"\n"), (int64_t)0);
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
+TEST(the_explicit_linux_target_keeps_the_default_module_bytes, {
+    TEST_ASSERT_TRUE(emit(in_main("    println(1);\n")));
+    sb_t default_ir;
+    sb_init(&default_ir);
+    sb_append(&default_ir, ir());
+    TEST_ASSERT_TRUE(emit_target(in_main("    println(1);\n"), "x86_64-linux-gnu"));
+    TEST_ASSERT_EQ_STR(ir(), sb_cstr(&default_ir));
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+    sb_free(&default_ir);
+})
+
 TEST(the_module_carries_no_datalayout_or_module_flags, {
     TEST_ASSERT_TRUE(emit(in_main("")));
     // No datalayout, module flags, ident or source_filename.
@@ -380,6 +397,16 @@ TEST(an_aggregate_result_is_a_leading_sret_pointer_on_a_void_function, {
                        "call void @\"main.make\"(ptr %q.0)");
 })
 
+TEST(a_darwin_direct_call_marks_its_aggregate_result_pointer, {
+    TEST_ASSERT_TRUE(emit_target("struct point { i32 x; i32 y; }\n"
+                                 "fn make() point { point p = {1, 2}; return p; }\n"
+                                 "fn main() i32 { point q = make(); return q.x; }\n",
+                                 "arm64-apple-macosx26.6.2"));
+    TEST_ASSERT_EQ_STR(found("call void @\"main.make\"(ptr sret(%struct.main.point) %q.0)"),
+                       "call void @\"main.make\"(ptr sret(%struct.main.point) %q.0)");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
 TEST(every_fort_definition_carries_the_attribute_group_of_item_7, {
     TEST_ASSERT_TRUE(emit(in_main("")));
     TEST_ASSERT_EQ_STR(
@@ -406,6 +433,22 @@ TEST(a_noreturn_definition_carries_its_own_group_and_ends_in_a_trap, {
     TEST_ASSERT_EQ_STR(
         found("attributes #7 = { cold noreturn nounwind memory(inaccessiblemem: write) }"),
         "attributes #7 = { cold noreturn nounwind memory(inaccessiblemem: write) }");
+})
+
+TEST(darwin_fort_definitions_use_the_darwin_stack_probe, {
+    TEST_ASSERT_TRUE(emit_target("fn stop() noreturn { while (true) { } }\n"
+                                 "fn main() i32 { return 0; }\n",
+                                 "arm64-apple-macosx26.6.2"));
+    TEST_ASSERT_EQ_STR(found("attributes #0 = { nounwind \"frame-pointer\"=\"all\" "
+                             "\"probe-stack\"=\"__chkstk_darwin\" }"),
+                       "attributes #0 = { nounwind \"frame-pointer\"=\"all\" "
+                       "\"probe-stack\"=\"__chkstk_darwin\" }");
+    TEST_ASSERT_EQ_STR(found("attributes #1 = { noreturn nounwind \"frame-pointer\"=\"all\" "
+                             "\"probe-stack\"=\"__chkstk_darwin\" }"),
+                       "attributes #1 = { noreturn nounwind \"frame-pointer\"=\"all\" "
+                       "\"probe-stack\"=\"__chkstk_darwin\" }");
+    TEST_ASSERT_EQ_STR(absent("\"probe-stack\"=\"inline-asm\""), "absent");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
 // ---- normalization (item 9) ---------------------------------------------------------
@@ -491,6 +534,8 @@ int main(int argc, char** argv) {
     TEST_RUN(a_block_report_that_does_not_fit_says_so_instead_of_naming_a_block);
     TEST_RUN(a_block_report_too_long_to_write_is_reported_where_it_is_written);
     TEST_RUN(the_module_begins_with_the_normalized_triple);
+    TEST_RUN(a_darwin_module_begins_with_the_selected_versioned_triple);
+    TEST_RUN(the_explicit_linux_target_keeps_the_default_module_bytes);
     TEST_RUN(the_module_carries_no_datalayout_or_module_flags);
     TEST_RUN(the_module_carries_no_comment);
     TEST_RUN(both_named_types_are_emitted_used_or_not);
@@ -531,8 +576,10 @@ int main(int argc, char** argv) {
     TEST_RUN(an_i32_parameter_carries_no_extension_attribute);
     TEST_RUN(an_aggregate_argument_is_a_pointer_to_a_caller_made_copy);
     TEST_RUN(an_aggregate_result_is_a_leading_sret_pointer_on_a_void_function);
+    TEST_RUN(a_darwin_direct_call_marks_its_aggregate_result_pointer);
     TEST_RUN(every_fort_definition_carries_the_attribute_group_of_item_7);
     TEST_RUN(a_noreturn_definition_carries_its_own_group_and_ends_in_a_trap);
+    TEST_RUN(darwin_fort_definitions_use_the_darwin_stack_probe);
     TEST_RUN(a_narrow_value_keeps_its_own_width);
     TEST_RUN(the_blocks_of_a_short_circuit_and_a_check_each_end_in_one_terminator);
     gen_done();

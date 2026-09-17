@@ -122,11 +122,13 @@ void gen_args_free(gen_args_t* a);
 void gen_args_add(gen_args_t* a, gen_val_t v);
 void gen_args_add_ext(gen_args_t* a, gen_val_t v, const char* attr);
 
-/// The build mode the module is emitted in.
-/// D11.1, D10.6
+/// The build mode and selected target of the emitted module. A NULL target is
+/// the Linux target for unit tests that do not select one.
+/// D11.1, D10.6, D19.1
 typedef struct {
     bool release;         // --release: wrapping arithmetic, no overwrite check
     bool no_bounds_check; // --no-bounds-check: no index or span branch
+    const char* target;   // x86_64-linux-gnu or a versioned Darwin target
 } gen_options_t;
 
 /// One local or parameter place: the symbol it belongs to and the name of its
@@ -226,6 +228,10 @@ struct gen {
 };
 
 void gen_init(gen_t* g, gen_options_t opts);
+
+/// Whether the selected target uses the Apple arm64 ABI. The driver validates
+/// the full target form before the emitter starts.
+bool gen_is_mac(const gen_t* g);
 
 /// Releases every buffer and every record; the emitter is empty afterwards.
 void gen_free(gen_t* g);

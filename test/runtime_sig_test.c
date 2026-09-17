@@ -75,6 +75,7 @@ static const char* emitted_param(const type_t* t) {
     gen_options_t opts;
     opts.release = false;
     opts.no_bounds_check = false;
+    opts.target = NULL;
     gen_t g;
     gen_init(&g, opts);
     const str_t ty = gen_value_type(&g, t);
@@ -334,6 +335,7 @@ static const char* emitted_result(const type_t* t) {
     gen_options_t opts;
     opts.release = false;
     opts.no_bounds_check = false;
+    opts.target = NULL;
     gen_t g;
     gen_init(&g, opts);
     const char* attr = gen_ext_attr(t);

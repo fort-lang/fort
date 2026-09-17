@@ -842,8 +842,10 @@ bullet at a time and without a rewrite.
   things it adds, for the audit after it.
   **The runner is in the repository and the table is data**: `tools/mutate.py` and
   `tools/mutations/emitter_bootstrap.json`, 76 rows of file, anchor text and replacement, so a
-  later audit writes a table and not a program. `tools/mutate.py <table> --only D3.8` re-runs one
-  row. `tools/mutate.py <table> --check` builds nothing and reports every anchor that no longer
+  later audit writes a table and not a program. T-154 adds 12 Darwin output-branch rows and 1
+  cited decision, for 88 rows over 73 decisions now. `tools/mutate.py <table> --only D3.8` re-runs
+  one row. The `--check` option builds
+  nothing and reports every anchor that no longer
   matches its file, which is the one way a table of textual anchors rots.
   `test/mutate_test.py` (ctest `mutate_selftest`, 43 tests) holds the parts that fail silently:
   the ctest failure parser, the anchor that must match once, the stale-binary guard, the restore,
@@ -864,7 +866,7 @@ bullet at a time and without a rewrite.
   asked whether the replacement text occurred exactly once, and the test proved them on 2 of the
   76 rows. They were dead for 3 rows whose replacement repeats text the file already had (D3.14,
   D8.5, D20.4), so `--check` exited 1 on a table that had not rotted -- the failure the third
-  guard exists to stop. The test now applies **all 76** rows one at a time, in about 0.4 s, and
+  guard exists to stop. The test now applies **all 88** rows one at a time, in about 0.4 s, and
   the rule reads "`old` is absent and `new` is present". Any test that asserts something about a
   source file carries this trap; ask what it does while the file is broken on purpose, and ask it
   for every row rather than for a representative one.
@@ -902,7 +904,7 @@ bullet at a time and without a rewrite.
   (T-134).
   `--check` needs no step of its own in the gate: `mutate_selftest` already runs `check_table`
   over the shipped table and the live sources in
-  `test_check_reports_no_stale_anchor_against_the_sources`, and asserts `76 rows, 0 stale`
+  `test_check_reports_no_stale_anchor_against_the_sources`, and asserts `88 rows, 0 stale`
   (T-134).
 
 - **An oracle is only an oracle where it derives its answer differently, so say

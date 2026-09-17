@@ -230,6 +230,20 @@ static inline bool emit(const char* text) {
     gen_options_t opts;
     opts.release = false;
     opts.no_bounds_check = false;
+    opts.target = NULL;
+    gen_ok = gen_emit_file("main.ft", opts);
+    return gen_ok;
+}
+
+/// The module of `text` for one selected target, in checked mode.
+/// D19.1, D19.5
+static inline bool emit_target(const char* text, const char* target) {
+    gen_begin();
+    gen_write("main.ft", text);
+    gen_options_t opts;
+    opts.release = false;
+    opts.no_bounds_check = false;
+    opts.target = target;
     gen_ok = gen_emit_file("main.ft", opts);
     return gen_ok;
 }
@@ -242,6 +256,7 @@ static inline bool emit_release(const char* text) {
     gen_options_t opts;
     opts.release = true;
     opts.no_bounds_check = false;
+    opts.target = NULL;
     gen_ok = gen_emit_file("main.ft", opts);
     return gen_ok;
 }
@@ -254,6 +269,7 @@ static inline bool emit_unchecked(const char* text) {
     gen_options_t opts;
     opts.release = false;
     opts.no_bounds_check = true;
+    opts.target = NULL;
     gen_ok = gen_emit_file("main.ft", opts);
     return gen_ok;
 }
@@ -272,6 +288,7 @@ static inline bool emit_two(const char* entry_name,
     gen_options_t opts;
     opts.release = false;
     opts.no_bounds_check = false;
+    opts.target = NULL;
     gen_ok = gen_emit_file(entry_name, opts);
     return gen_ok;
 }
@@ -288,6 +305,7 @@ static inline bool emit_files(const char* const* names, const char* const* texts
     gen_options_t opts;
     opts.release = false;
     opts.no_bounds_check = false;
+    opts.target = NULL;
     gen_ok = count > 0 && gen_emit_file(names[0], opts);
     return gen_ok;
 }
@@ -305,6 +323,24 @@ static inline bool emit_with_runtime(const char* runtime, const char* text) {
     gen_options_t opts;
     opts.release = false;
     opts.no_bounds_check = false;
+    opts.target = NULL;
+    gen_ok = gen_emit_file("main.ft", opts);
+    return gen_ok;
+}
+
+/// The module of `text` and its test runtime for one selected target.
+/// D9.10, D19.1
+static inline bool emit_with_runtime_target(const char* runtime,
+                                            const char* text,
+                                            const char* target) {
+    gen_begin();
+    gen_write("std/rt.ft", runtime);
+    gen_write("main.ft", text);
+    gen_join_path(gen_std, sizeof gen_std, gen_sandbox, "std");
+    gen_options_t opts;
+    opts.release = false;
+    opts.no_bounds_check = false;
+    opts.target = target;
     gen_ok = gen_emit_file("main.ft", opts);
     return gen_ok;
 }
@@ -318,6 +354,7 @@ static inline bool emit_as(const char* name, const char* text) {
     gen_options_t opts;
     opts.release = false;
     opts.no_bounds_check = false;
+    opts.target = NULL;
     gen_ok = gen_emit_file(name, opts);
     return gen_ok;
 }

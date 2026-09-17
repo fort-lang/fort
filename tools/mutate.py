@@ -162,7 +162,7 @@ def mutated_rows(table, root):
 
     The test is "`old` is absent and `new` is present", and **not** "`new` occurs
     once": a replacement often repeats text the file already had, so `new` occurs
-    twice or three times after the substitution. 3 of the 76 rows of the emitter
+    twice or three times after the substitution. 3 of the 88 rows of the emitter
     table do that -- D3.14, D8.5 and D20.4, whose replacements are `, false);`,
     an `unreachable` line and `str_from_range(NULL, 0)` -- and a count of 1 made
     this guard and `undo_applied` dead for them (T-078, round 3).
@@ -193,8 +193,8 @@ def undo_applied(table, root, applied):
     site. Two things make that safe, and a table that breaks them is loud rather
     than quiet.
     - Measured, not argued: `test_every_row_of_the_table_leaves_no_row_stale_and
-      _names_itself` applies all 76 rows one at a time, and every other anchor
-      survives the reconstruction in every one of the 76.
+      _names_itself` applies all 88 rows one at a time, and every other anchor
+      survives the reconstruction in every one of the 88.
     - A wrong site can only **destroy** an anchor, never invent one, because the
       text it writes is one row's `old` and a second row with that same anchor in
       the same file would already fail `--check` on a clean tree with `2

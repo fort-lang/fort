@@ -52,13 +52,15 @@ enum {
     FORT_EXIT_USAGE = FATAL_EXIT_STATUS,
 };
 
-// Defaults of toolchain.md 1: `--cc` is a clang because nothing else reads LLVM
-// IR, the target triple is x86_64-linux-gnu, the output of a full build is a.out
-// and the standard library sits in `std` beside the binary when $FORT_STD_DIR is
-// unset.
+// CMake sets the host defaults for production. The fallback values keep a
+// direct Linux C build usable.
 // D14.1, D19.1
+#ifndef FORT_DEFAULT_CC
 #define FORT_DEFAULT_CC "clang"
+#endif
+#ifndef FORT_DEFAULT_TARGET
 #define FORT_DEFAULT_TARGET "x86_64-linux-gnu"
+#endif
 #define FORT_DEFAULT_OUTPUT "a.out"
 #define FORT_STD_DIR_NAME "std"
 

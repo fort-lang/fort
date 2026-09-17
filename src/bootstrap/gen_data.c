@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "ast.h"
 #include "check.h"
@@ -21,6 +22,13 @@
 // no datalayout, module flags, comments or source_filename.
 // D19.1
 static const char MODULE_HEADER[] = "target triple = \"x86_64-unknown-linux-gnu\"\n";
+
+static const char MAC_FN_ATTR[] =
+    "nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"__chkstk_darwin\"";
+static const char MAC_NORET_ATTR[] =
+    "noreturn nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"__chkstk_darwin\"";
+static const char MAC_RT_NORET_ATTR[] = "cold noreturn nounwind \"frame-pointer\"=\"all\" "
+                                        "\"probe-stack\"=\"__chkstk_darwin\"";
 
 // The program entry point the compiler emits in the entry module: the one C
 // name a fort program's own definitions occupy.
@@ -58,6 +66,24 @@ static const char* const ATTR_TEXT[ATTR_COUNT] = {
     "cold noreturn nounwind memory(inaccessiblemem: write)",
     "cold noreturn nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"",
 };
+
+// This function selects the target stack probe for each fort function attribute group.
+// D10.8
+static const char* attr_text(gen_attr_t which, bool mac) {
+    if (!mac) {
+        return ATTR_TEXT[which];
+    }
+    if (which == ATTR_FN) {
+        return MAC_FN_ATTR;
+    }
+    if (which == ATTR_FN_NORET) {
+        return MAC_NORET_ATTR;
+    }
+    if (which == ATTR_RT_NORET) {
+        return MAC_RT_NORET_ATTR;
+    }
+    return ATTR_TEXT[which];
+}
 
 // The first byte that needs no `\XX` escape and the last: a string constant
 // writes every other byte as a hex pair (item 5).
@@ -562,9 +588,8 @@ void gen_use_extern(gen_t* g, const sym_t* s) {
     ptrvec_push(&g->externs, (void*)s);
 }
 
-// `declare <ret> @name(<params>, ...)`: an `extern` function is declared with
-// its C types, unmangled, and with a variadic tail, which is what makes a
-// fixed-prototype declaration of a variadic C function safe (item 8).
+// Linux keeps its old variadic form. Darwin fixes an extern without `...`.
+// Darwin also marks each declaration `nobuiltin`.
 // D9.8
 static void emit_extern(gen_t* g, sb_t* out, const sym_t* s) {
     const type_t* sig = s->type;
@@ -590,10 +615,18 @@ static void emit_extern(gen_t* g, sb_t* out, const sym_t* s) {
             sb_append(out, attr);
         }
     }
-    if (sig->nparams > 0) {
-        sb_append(out, ", ");
+    const bool variadic = !gen_is_mac(g) || (s->node->flags & AST_FLAG_VARIADIC) != 0;
+    if (variadic) {
+        if (sig->nparams > 0) {
+            sb_append(out, ", ");
+        }
+        sb_append(out, "...");
     }
-    sb_append(out, "...)\n");
+    sb_push(out, ')');
+    if (gen_is_mac(g)) {
+        sb_append(out, " nobuiltin");
+    }
+    sb_push(out, '\n');
 }
 
 // The intrinsics, with the spellings LLVM 18 prints, in the fixed order of
@@ -714,11 +747,22 @@ void gen_finish(gen_t* g) {
         sb_append(&attributes, "attributes #");
         sb_append_u64(&attributes, i);
         sb_append(&attributes, " = { ");
-        sb_append(&attributes, ATTR_TEXT[i]);
+        sb_append(&attributes, attr_text((gen_attr_t)i, gen_is_mac(g)));
         sb_append(&attributes, " }\n");
     }
     sb_clear(&g->out);
-    section(&g->out, str_from_cstr(MODULE_HEADER));
+    if (g->opts.target == NULL || g->opts.target[0] == '\0' ||
+        strcmp(g->opts.target, "x86_64-linux-gnu") == 0) {
+        section(&g->out, str_from_cstr(MODULE_HEADER));
+    } else {
+        sb_t header;
+        sb_init(&header);
+        sb_append(&header, "target triple = \"");
+        sb_append(&header, g->opts.target);
+        sb_append(&header, "\"\n");
+        section(&g->out, sb_view(&header));
+        sb_free(&header);
+    }
     section(&g->out, sb_view(&g->named));
     section(&g->out, sb_view(&g->globals));
     section(&g->out, sb_view(&g->funcs));

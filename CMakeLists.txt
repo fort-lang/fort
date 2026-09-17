@@ -70,6 +70,22 @@ elseif(FORT_TARGET STREQUAL "darwin")
     if(NOT APPLE OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
         message(FATAL_ERROR "the darwin target requires a darwin arm64 host")
     endif()
+    execute_process(
+        COMMAND sw_vers -productVersion
+        RESULT_VARIABLE FORT_DARWIN_VERSION_STATUS
+        OUTPUT_VARIABLE FORT_DARWIN_VERSION
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(NOT FORT_DARWIN_VERSION_STATUS EQUAL 0)
+        message(FATAL_ERROR "sw_vers could not read the darwin host version")
+    endif()
+    if(FORT_DARWIN_VERSION MATCHES "^[0-9]+\\.[0-9]+$")
+        string(APPEND FORT_DARWIN_VERSION ".0")
+    elseif(NOT FORT_DARWIN_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+        message(FATAL_ERROR
+            "unsupported darwin host version: ${FORT_DARWIN_VERSION}")
+    endif()
+    set(FORT_TARGET_TRIPLE "arm64-apple-macosx${FORT_DARWIN_VERSION}")
     set(FORT_DEFAULT_TARGET_CC "/usr/bin/clang")
     set(FORT_DEFAULT_OPT "/opt/homebrew/bin/opt")
 else()
@@ -87,12 +103,19 @@ if(NOT FORT_OPT_PATH)
 endif()
 
 # ---- the bootstrap compiler ---------------------------------------------------
-if(FORT_TARGET STREQUAL "linux")
 file(GLOB FORT_CORE_SOURCES CONFIGURE_DEPENDS "${FORT_SRC_DIR}/*.c")
 list(REMOVE_ITEM FORT_CORE_SOURCES "${FORT_SRC_DIR}/main.c")
 
 add_library(fort_core STATIC ${FORT_CORE_SOURCES})
 target_include_directories(fort_core PUBLIC "${FORT_SRC_DIR}")
+target_compile_definitions(fort_core PUBLIC
+    FORT_DEFAULT_CC="${FORT_DEFAULT_TARGET_CC}"
+    FORT_DEFAULT_TARGET="${FORT_TARGET_TRIPLE}"
+)
+if(APPLE)
+    # Darwin hides mkdtemp under its source feature macro in C11 mode.
+    target_compile_definitions(fort_core PUBLIC _DARWIN_C_SOURCE)
+endif()
 
 # The compiler binary sits at the root of the build directory and the
 # standard library directory is <build>/std. The fallback --std-dir of
@@ -101,7 +124,6 @@ target_include_directories(fort_core PUBLIC "${FORT_SRC_DIR}")
 add_executable(fort "${FORT_SRC_DIR}/main.c")
 target_link_libraries(fort PRIVATE fort_core)
 set_target_properties(fort PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
-endif()
 
 # ---- the standard library ------------------------------------------------------
 # The target root is flat. The darwin root replaces two common modules with
@@ -160,9 +182,7 @@ if(NOT FORT_PIN_LINES)
     message(FATAL_ERROR "tools/bootstrap.ref names no pin")
 endif()
 
-# The frozen C compiler is only a linux differential oracle. It does not build
-# a production compiler stage (D14.7).
-if(FORT_TARGET STREQUAL "linux")
+# The C bootstrap uses this frozen root. It does not read HEAD's runtime.
 set(FORT_ORACLE_REF "${CMAKE_SOURCE_DIR}/tools/bootstrap-oracle.ref")
 file(STRINGS "${FORT_ORACLE_REF}" FORT_ORACLE_LINES REGEX "^bootstrap-0 ")
 list(LENGTH FORT_ORACLE_LINES FORT_ORACLE_LINE_COUNT)
@@ -195,7 +215,12 @@ add_custom_command(
 )
 add_custom_target(fort_oracle_tree ALL DEPENDS "${FORT_ORACLE_STAMP}")
 set(FORT_ORACLE_STD_DIR "${FORT_ORACLE_DIR}/std")
-endif()
+
+add_test(NAME c-bootstrap
+    COMMAND bash "${FORT_TEST_DIR}/c_bootstrap_test.sh" "${FORT_TARGET}"
+            "$<TARGET_FILE:fort>" "${CMAKE_BINARY_DIR}/c-bootstrap"
+            "${FORT_ORACLE_DIR}" "${FORT_TARGET_CC_PATH}" "${FORT_OPT_PATH}")
+set_tests_properties(c-bootstrap PROPERTIES LABELS lang)
 
 foreach(pin_line IN LISTS FORT_PIN_LINES)
     if(NOT pin_line MATCHES "^bootstrap-([0-9]+)[ \t]+([0-9a-f]+)$")

@@ -644,7 +644,7 @@ TEST(a_release_build_passes_o2_the_target_the_libraries_and_the_cc_arguments, {
                           "--cc",
                           FORT_FAKE_CC,
                           "--target",
-                          "x86_64-linux-musl",
+                          "x86_64-linux-gnu",
                           "-lm",
                           "-Xcc",
                           "-fuse-ld=lld",
@@ -658,7 +658,7 @@ TEST(a_release_build_passes_o2_the_target_the_libraries_and_the_cc_arguments, {
     expect2(expected,
             sizeof expected,
             "%s\n"
-            "--target=x86_64-linux-musl\n"
+            "--target=x86_64-linux-gnu\n"
             "-O2\n"
             "-fPIE\n"
             "-pie\n"
@@ -727,6 +727,104 @@ TEST(emitting_the_module_stops_before_the_compiler, {
     TEST_ASSERT_EQ_INT32(access(module, F_OK), 0);
     // -S needs no temporary and runs no compiler (toolchain.md 2).
     TEST_ASSERT_EQ_INT32(access(box.log, F_OK), -1);
+    TEST_ASSERT_EQ_INT32(count_entries(box.tmp), 0);
+    sandbox_close(&box);
+})
+
+TEST(an_unsupported_ir_target_stops_before_output, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    char module[PATH_CAP];
+    join(module, sizeof module, box.dir, "out.ll");
+    const run_t run = RUN("-S", "--target", "arm64-apple-macosx26.6", "-o", module, box.entry);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_USAGE);
+    TEST_ASSERT_EQ_STR(run.err,
+                       "fort: error: unsupported target 'arm64-apple-macosx26.6'\n"
+                       "usage: fort [options] entry.ft\n");
+    TEST_ASSERT_EQ_INT32(access(module, F_OK), -1);
+    TEST_ASSERT_EQ_INT32(count_entries(box.tmp), 0);
+    sandbox_close(&box);
+})
+
+TEST(an_unsupported_check_target_stops_before_the_front_end, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    const run_t run = RUN("--check", "--target", "aarch64-linux-gnu", box.entry);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_USAGE);
+    TEST_ASSERT_EQ_STR(run.err,
+                       "fort: error: unsupported target 'aarch64-linux-gnu'\n"
+                       "usage: fort [options] entry.ft\n");
+    TEST_ASSERT_EQ_INT32(count_entries(box.tmp), 0);
+    sandbox_close(&box);
+})
+
+TEST(cross_target_ir_requires_an_explicit_standard_root, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    char module[PATH_CAP];
+    join(module, sizeof module, box.dir, "out.ll");
+    const run_t run = RUN("-S", "--target", "arm64-apple-macosx26.6.2", "-o", module, box.entry);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_USAGE);
+    TEST_ASSERT_EQ_STR(run.err,
+                       "fort: error: --std-dir is required for cross-target -S\n"
+                       "usage: fort [options] entry.ft\n");
+    TEST_ASSERT_EQ_INT32(access(module, F_OK), -1);
+    sandbox_close(&box);
+})
+
+TEST(cross_target_s_wins_over_c_and_emits_the_selected_target, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    char module[PATH_CAP];
+    join(module, sizeof module, box.dir, "out.ll");
+    const run_t run = RUN("-S",
+                          "-c",
+                          "--target",
+                          "arm64-apple-macosx26.6.2",
+                          "--std-dir",
+                          box.std,
+                          "-o",
+                          module,
+                          box.entry);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
+    FILE* file = fopen(module, "rb");
+    TEST_ASSERT_NONNULL(file);
+    char text[CAPTURE_MAX];
+    slurp(file, text, sizeof text);
+    TEST_UNUSED(fclose(file));
+    TEST_ASSERT_TRUE(strncmp(text,
+                             "target triple = \"arm64-apple-macosx26.6.2\"\n",
+                             strlen("target triple = \"arm64-apple-macosx26.6.2\"\n")) == 0);
+    TEST_ASSERT_EQ_INT32(access(box.log, F_OK), -1);
+    sandbox_close(&box);
+})
+
+TEST(a_cross_target_object_stops_before_output, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    const run_t run = RUN("-c",
+                          "--target",
+                          "arm64-apple-macosx26.6.2",
+                          "--std-dir",
+                          box.std,
+                          "-o",
+                          box.out,
+                          box.entry);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_USAGE);
+    TEST_ASSERT_NONNULL(strstr(run.err, "cannot compile object for target"));
+    TEST_ASSERT_EQ_INT32(access(box.out, F_OK), -1);
+    TEST_ASSERT_EQ_INT32(count_entries(box.tmp), 0);
+    sandbox_close(&box);
+})
+
+TEST(a_cross_target_link_stops_before_output, {
+    sandbox_t box = sandbox_open();
+    TEST_ASSERT_TRUE(box.ok);
+    const run_t run =
+        RUN("--target", "arm64-apple-macosx26.6.2", "--std-dir", box.std, "-o", box.out, box.entry);
+    TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_USAGE);
+    TEST_ASSERT_NONNULL(strstr(run.err, "cannot link target"));
+    TEST_ASSERT_EQ_INT32(access(box.out, F_OK), -1);
     TEST_ASSERT_EQ_INT32(count_entries(box.tmp), 0);
     sandbox_close(&box);
 })
@@ -1079,6 +1177,7 @@ TEST(an_include_root_reaches_a_module_the_entry_directory_lacks, {
     sandbox_close(&box);
 })
 
+// NOLINTNEXTLINE(readability-function-size) The runner lists each test.
 int main(int argc, char** argv) {
     TEST_INIT("driver", argc, argv);
     TEST_RUN(usage_line_is_the_one_of_toolchain_section_1);
@@ -1117,6 +1216,12 @@ int main(int argc, char** argv) {
     TEST_RUN(compile_only_stops_at_the_object_and_names_it_after_the_entry);
     TEST_RUN(the_std_dir_environment_variable_locates_the_runtime_source);
     TEST_RUN(emitting_the_module_stops_before_the_compiler);
+    TEST_RUN(an_unsupported_ir_target_stops_before_output);
+    TEST_RUN(an_unsupported_check_target_stops_before_the_front_end);
+    TEST_RUN(cross_target_ir_requires_an_explicit_standard_root);
+    TEST_RUN(cross_target_s_wins_over_c_and_emits_the_selected_target);
+    TEST_RUN(a_cross_target_object_stops_before_output);
+    TEST_RUN(a_cross_target_link_stops_before_output);
     TEST_RUN(the_default_module_is_named_after_the_entry_in_the_current_directory);
     TEST_RUN(a_failing_compiler_is_exit_2_and_still_removes_the_temporary);
     TEST_RUN(a_compiler_killed_by_a_signal_is_exit_2_and_says_so);

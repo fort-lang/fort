@@ -122,6 +122,26 @@ TEST(an_extern_is_declared_and_called_through_a_variadic_type, {
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
+TEST(darwin_fixed_and_variable_tail_externs_use_their_target_forms, {
+    TEST_ASSERT_TRUE(emit_target("extern fn write(i32 fd, u8* buf, u64 n) i64;\n"
+                                 "extern fn tail(i32 fixed, ...) i64;\n"
+                                 "fn main() i32 {\n"
+                                 "    u8 v = 0;\n"
+                                 "    return cast(write(1, &v, 1) +% tail(2, 3), i32);\n"
+                                 "}\n",
+                                 "arm64-apple-macosx26.6.2"));
+    TEST_ASSERT_EQ_STR(found("declare i64 @write(i32, ptr, i64) nobuiltin"),
+                       "declare i64 @write(i32, ptr, i64) nobuiltin");
+    TEST_ASSERT_EQ_STR(found("call i64 @write(i32 1, ptr %v.0, i64 1) #3"),
+                       "call i64 @write(i32 1, ptr %v.0, i64 1) #3");
+    TEST_ASSERT_EQ_STR(found("declare i64 @tail(i32, ...) nobuiltin"),
+                       "declare i64 @tail(i32, ...) nobuiltin");
+    TEST_ASSERT_EQ_STR(found("call i64 (i32, ...) @tail(i32 2, i32 3) #3"),
+                       "call i64 (i32, ...) @tail(i32 2, i32 3) #3");
+    TEST_ASSERT_EQ_STR(found("attributes #3 = { nobuiltin }"), "attributes #3 = { nobuiltin }");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
 TEST(an_explicit_tail_keeps_fixed_extern_llvm_bytes, {
     const char* fixed = "extern fn printf(char* fmt) i32;\n"
                         "fn main() i32 { return printf(\"x\".ptr); }\n";
@@ -270,6 +290,7 @@ TEST(each_declaration_group_is_separated_by_a_blank_line, {
 int main(int argc, char** argv) {
     TEST_INIT("gen_decl", argc, argv);
     TEST_RUN(an_extern_is_declared_and_called_through_a_variadic_type);
+    TEST_RUN(darwin_fixed_and_variable_tail_externs_use_their_target_forms);
     TEST_RUN(an_explicit_tail_keeps_fixed_extern_llvm_bytes);
     TEST_RUN(an_explicit_tail_emits_its_integer_and_pointer_arguments);
     TEST_RUN(an_extern_with_no_parameter_is_still_variadic);

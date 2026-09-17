@@ -12,6 +12,10 @@
 
 #include <sys/wait.h>
 
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+
 #include "ast.h"
 #include "ast_dump.h"
 #include "check.h"
@@ -43,8 +47,10 @@ static const char* const HELP_LINES[] = {
     "  --release          release mode",
     "  --no-bounds-check  remove the index and span checks; unsafe",
     "  -l<lib>            pass -l<lib> to the linker; repeatable, in order",
-    "  --cc <path>        the clang that compiles and links the IR (default clang)",
-    "  --target <triple>  pass --target=<triple> to --cc (default x86_64-linux-gnu)",
+    // NOLINTNEXTLINE(bugprone-suspicious-missing-comma) CMake sets the adjacent target text.
+    "  --cc <path>        the clang that compiles and links the IR (default " FORT_DEFAULT_CC ")",
+    // NOLINTNEXTLINE(bugprone-suspicious-missing-comma) CMake sets the adjacent target text.
+    "  --target <triple>  pass --target=<triple> to --cc (default " FORT_DEFAULT_TARGET ")",
     "  -Xcc <arg>         pass <arg> to --cc verbatim; repeatable, in order",
     "  --check            run the front end only and stop; emit nothing",
     "  --json             write the check document to stdout; needs --check",
@@ -64,9 +70,13 @@ static const char TMP_DIR_TEMPLATE[] = "/fort-XXXXXX";
 // module.
 enum { ENTRY_READ_CHUNK = 4096 };
 
+static const char MAC_TARGET_PREFIX[] = "arm64-apple-macosx";
+
 // The symbolic link naming the running binary, and the buffer sizes the
 // driver reads it with.
+#if !defined(__APPLE__)
 static const char PROC_SELF_EXE[] = "/proc/self/exe";
+#endif
 enum { EXE_PATH_FIRST_CAP = 256, EXE_PATH_MAX_CAP = 1 << 16 };
 
 // ---- messages ------------------------------------------------------------------
@@ -140,6 +150,67 @@ void driver_options_free(driver_options_t* opts) {
     ptrvec_free(&opts->includes);
     ptrvec_free(&opts->libs);
     ptrvec_free(&opts->cc_args);
+}
+
+static bool target_is_mac(const char* target) {
+    return strncmp(target, MAC_TARGET_PREFIX, sizeof MAC_TARGET_PREFIX - 1U) == 0;
+}
+
+// Whether the target has one of the two forms in toolchain.md 1.
+// D14.1
+static bool target_form(const char* target) {
+    if (strcmp(target, "x86_64-linux-gnu") == 0) {
+        return true;
+    }
+    if (!target_is_mac(target)) {
+        return false;
+    }
+    uint64_t digits = 0;
+    uint64_t dots = 0;
+    for (uint64_t i = sizeof MAC_TARGET_PREFIX - 1U; target[i] != '\0'; i++) {
+        const char c = target[i];
+        if (c >= '0' && c <= '9') {
+            digits++;
+        } else if (c == '.' && digits > 0 && dots < 2) {
+            dots++;
+            digits = 0;
+        } else {
+            return false;
+        }
+    }
+    return dots == 2 && digits > 0;
+}
+
+// Rejects a target that this IR mode cannot use before it creates output.
+// The token and AST modes do not call this function.
+// D14.1
+static bool target_allowed(const driver_options_t* opts, FILE* err) {
+    if (!target_form(opts->target)) {
+        usage_error(err, "unsupported target", opts->target);
+        return false;
+    }
+    if (strcmp(opts->target, FORT_DEFAULT_TARGET) == 0) {
+        return true;
+    }
+    if (opts->emit_ir) {
+        if (opts->std_dir != NULL) {
+            return true;
+        }
+        usage_error(err, "--std-dir is required for cross-target -S", NULL);
+    } else {
+        sb_t message;
+        sb_init(&message);
+        sb_append(&message,
+                  opts->compile_only ? "cannot compile object for target" : "cannot link target");
+        sb_append(&message, " '");
+        sb_append(&message, opts->target);
+        sb_append(&message, "' with a '");
+        sb_append(&message, FORT_DEFAULT_TARGET);
+        sb_append(&message, "' compiler");
+        usage_error(err, sb_cstr(&message), NULL);
+        sb_free(&message);
+    }
+    return false;
 }
 
 // Appends an argument the driver borrows: an argv string, a literal of this
@@ -387,11 +458,31 @@ str_t driver_std_dir_beside(const char* program, str_pool_t* pool) {
     return dir;
 }
 
-// The path of the running binary, read from /proc/self/exe; the zero view
-// when it cannot be read. readlink does not terminate the path and reports
-// truncation only by filling the buffer, so the buffer doubles until the
-// result fits.
+// The path of the running binary. Linux reads /proc/self/exe. Darwin reads
+// dyld's path and resolves it with realpath when possible.
 static str_t exe_path(str_pool_t* pool) {
+#if defined(__APPLE__)
+    uint32_t cap = EXE_PATH_FIRST_CAP;
+    while ((uint64_t)cap <= EXE_PATH_MAX_CAP) {
+        const uint32_t allocated = cap;
+        sb_t b;
+        sb_init(&b);
+        sb_reserve(&b, (uint64_t)cap);
+        if (_NSGetExecutablePath(b.data, &cap) == 0) {
+            char* canonical = realpath(b.data, NULL);
+            const char* selected = canonical != NULL ? canonical : b.data;
+            const str_t path = str_pool_intern(pool, str_from_cstr(selected));
+            free(canonical);
+            sb_free(&b);
+            return path;
+        }
+        sb_free(&b);
+        if (cap <= allocated || (uint64_t)cap > EXE_PATH_MAX_CAP) {
+            return str_from_range(NULL, 0);
+        }
+    }
+    return str_from_range(NULL, 0);
+#else
     uint64_t cap = EXE_PATH_FIRST_CAP;
     while (cap <= EXE_PATH_MAX_CAP) {
         sb_t b;
@@ -411,6 +502,7 @@ static str_t exe_path(str_pool_t* pool) {
         cap = mem_mul(cap, 2U);
     }
     return str_from_range(NULL, 0);
+#endif
 }
 
 str_t driver_std_dir(const driver_options_t* opts, const char* argv0, str_pool_t* pool) {
@@ -421,7 +513,7 @@ str_t driver_std_dir(const driver_options_t* opts, const char* argv0, str_pool_t
     if (from_env != NULL) {
         return str_pool_intern(pool, str_from_cstr(from_env));
     }
-    // D14.1: else `std` beside the fort binary, read from /proc/self/exe
+    // D14.1: else `std` beside the running fort binary
     const str_t running = exe_path(pool);
     if (running.ptr != NULL) {
         return driver_std_dir_beside(running.ptr, pool);
@@ -501,7 +593,7 @@ void driver_cc_argv(const driver_options_t* opts,
     if (!opts->compile_only) {
         // The executable is position-independent; -c stops at the object, so
         // it takes no -pie and no -l (toolchain.md 2).
-        push_arg(argv, "-pie");
+        push_arg(argv, target_is_mac(FORT_DEFAULT_TARGET) ? "-Wl,-pie" : "-pie");
     }
     // The module carries its own target triple, which clang would warn about
     // (toolchain.md 2).
@@ -665,6 +757,7 @@ static int emit_module(const driver_options_t* opts,
     gen_options_t gopts;
     gopts.release = opts->release;
     gopts.no_bounds_check = opts->no_bounds_check;
+    gopts.target = opts->target;
     gen_t g;
     gen_init(&g, gopts);
     const bool ok = gen_program(&g, ck, set);
@@ -889,6 +982,9 @@ static int ast_entry(const driver_options_t* opts, FILE* out, FILE* err) {
 // Emits the module and, unless -S stops there, compiles and links it,
 // removing the temporary directory on every path out.
 static int compile_entry(const driver_options_t* opts, const char* argv0, FILE* err) {
+    if (!target_allowed(opts, err)) {
+        return FORT_EXIT_USAGE;
+    }
     str_pool_t pool;
     str_pool_init(&pool);
     // A build reads no tree after the front end returned, so its analysis is
@@ -932,6 +1028,10 @@ static int compile_entry(const driver_options_t* opts, const char* argv0, FILE* 
 // diagnostics.
 // D14.2, D20.1, D20.2
 static int check_entry(const driver_options_t* opts, const char* argv0, FILE* out, FILE* err) {
+    if (!target_form(opts->target)) {
+        usage_error(err, "unsupported target", opts->target);
+        return FORT_EXIT_USAGE;
+    }
     driver_files_t files;
     driver_files_init(&files);
     // D20.3: freed only after the last byte of the document (sym.h)
