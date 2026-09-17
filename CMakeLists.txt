@@ -579,11 +579,11 @@ set_tests_properties(lang-stage2 PROPERTIES LABELS lang)
 # with a golden index.json beside it, held against that file byte for byte
 # (D20.2, D20.3). It is the oracle of the json and index ports (T-093).
 #
-# --check-json selects 247 of 686 tests. It selects 245 fail tests with
+# --check-json selects 248 of 688 tests. It selects 246 fail tests with
 # diagnostics and two tests with a golden index. The golden tests check the
 # clean compile document. The fail tests check diagnostic documents.
-# `run_tests.py --list` reports 686 tests. `--check-json --list` reports 247.
-# The second list ends with one summary line. That line makes `wc -l` report 248.
+# `run_tests.py --list` reports 688 tests. `--check-json --list` reports 248.
+# The second list ends with one summary line. That line makes `wc -l` report 249.
 # The pair
 # before T-043 (194 of 538, 192 fail tests) counted the fail tests wrong as
 # well, T-042 re-measured all three after the corpus had grown past 200 of 559,
@@ -617,6 +617,7 @@ set_tests_properties(lang-stage2 PROPERTIES LABELS lang)
 # 238 to 239 and 240 to 241.
 # T-157 remeasured the three totals and added one run test and one fail test:
 # 684 to 686, 246 to 247, and 247 output lines to 248.
+# T-158 adds one run test and one fail test: 688, 248, and 249 output lines.
 # Against a
 # golden the comparison is stricter than a diff of two compilers for the value
 # and the order of every record, since it holds both compilers against a file
@@ -653,10 +654,16 @@ add_test(NAME stage2-if
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(stage2-if PROPERTIES LABELS unit)
 
+add_test(NAME stage2-import-if
+    COMMAND bash "${FORT_TEST_DIR}/stage2_import_if_test.sh" "${FORT_STAGE2_BINARY}"
+            "${FORT_STD_DIR}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(stage2-import-if PROPERTIES LABELS unit)
+
 # The two lexers over the whole repository: `fort --tokens` writes one line per
 # token (D14.1, toolchain.md 1). tools/diff_tokens.sh compares dumps,
-# diagnostics and exit statuses for 962 of 967 files. It separately measures
-# three `$cfg` files and two `$if` files that the frozen C compiler cannot lex.
+# diagnostics and exit statuses for 964 of 971 files. It separately measures
+# three `$cfg` files and four `$if` files that the frozen C compiler cannot lex.
 # It is the oracle for the common subset. It has label lang because it runs the
 # x86-64 stage2 binary under qemu once per file.
 add_test(NAME diff-tokens
@@ -808,7 +815,7 @@ set_tests_properties(mutate_selftest PROPERTIES
 # of it through the same parser.
 add_test(NAME check_decisions
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/check_decisions.py"
-            "${CMAKE_SOURCE_DIR}/spec/decisions.md" --expect 147
+            "${CMAKE_SOURCE_DIR}/spec/decisions.md" --expect 148
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(check_decisions PROPERTIES LABELS unit)
 

@@ -65,7 +65,7 @@ fi
 # comparison. A ticket that adds or removes a .ft file changes all four
 # lines in the same commit: diff_tokens.sh, diff_ast.sh, diff_check.sh and
 # diff_ir.sh.
-FT_FILES=967
+FT_FILES=971
 
 # The files of that corpus stage1 checks clean, which are the ones compared.
 # It is an equality for the reason FT_FILES is: a comparison that shrank would
@@ -95,7 +95,8 @@ FT_FILES=967
 # T-144 remeasured 509 clean, 530 programs, 85 clean-only, and 106 program-only.
 # T-153 measured 514 clean, 534 programs, 86 clean-only, and 106 program-only.
 # T-157 measured 515 clean, 534 programs, 87 clean-only, and 106 program-only.
-CLEAN_FILES=515
+# T-158 adds two dependency files that the C compiler checks without an entry point.
+CLEAN_FILES=517
 
 # The search roots every run is given: the standard library, src/fort, so that
 # the compiler's own modules resolve their imports, and src, so that a module of

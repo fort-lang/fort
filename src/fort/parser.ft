@@ -1786,7 +1786,12 @@ fn parse_compile_decl_branch(parser mut* p) ast.node mut* {
     ast.node mut* branch = node_at(p, ast.ast_kind.k_block, at_loc);
     while (!at(p, lexer.tok_kind.rbrace) && !at(p, lexer.tok_kind.eof)) {
         u64 start = p->pos;
-        ast.node mut* decl = parse_top_decl(p);
+        ast.node mut* mut decl = null;
+        if (at(p, lexer.tok_kind.kw_import)) {
+            decl = parse_import(p);
+        } else {
+            decl = parse_top_decl(p);
+        }
         if (decl != null) {
             ast.ast_push(branch, decl);
         }
@@ -1797,6 +1802,71 @@ fn parse_compile_decl_branch(parser mut* p) ast.node mut* {
     leave(p);
     expect(p, lexer.tok_kind.rbrace, "'}'");
     return finish(p, branch);
+}
+
+i32 MODULE_IF_EMPTY = 0;
+i32 MODULE_IF_IMPORT = 1;
+i32 MODULE_IF_DECL = 2;
+i32 MODULE_IF_INVALID = 4;
+
+fn classify_module_branch(parser mut* p, ast.node mut* branch) i32 {
+    i32 mut result = MODULE_IF_EMPTY;
+    u64 mut i = 0;
+    while (branch != null && i < ast.ast_len(branch)) {
+        ast.node mut* child = ast.ast_child_mut(branch, i);
+        if (child->kind == ast.ast_kind.k_import) {
+            result |= MODULE_IF_IMPORT;
+        } else if (child->kind == ast.ast_kind.k_compile_if) {
+            result |= classify_module_compile_if(p, child);
+        } else if (child->kind == ast.ast_kind.k_error) {
+            result |= MODULE_IF_INVALID;
+        } else {
+            result |= MODULE_IF_DECL;
+        }
+        i += 1;
+    }
+    return result;
+}
+
+fn mark_import_selector(ast.node mut* first) void {
+    ast.node mut* mut current = first;
+    while (current != null && current->kind == ast.ast_kind.k_compile_if) {
+        current->flags |= ast.FLAG_IMPORT_SELECTOR;
+        if (current->c == null || current->c->kind != ast.ast_kind.k_compile_if) {
+            return;
+        }
+        current = current->c;
+    }
+}
+
+/// Classifies one complete module chain after all branches parse. An invalid
+/// nested chain owns its diagnostic, so its parent does not report again.
+/// D21.3
+fn classify_module_compile_if(parser mut* p, ast.node mut* first) i32 {
+    i32 mut result = MODULE_IF_EMPTY;
+    ast.node mut* mut current = first;
+    while (current != null && current->kind == ast.ast_kind.k_compile_if) {
+        result |= classify_module_branch(p, current->b);
+        if (current->c == null) {
+            break;
+        }
+        if (current->c->kind != ast.ast_kind.k_compile_if) {
+            result |= classify_module_branch(p, current->c);
+            break;
+        }
+        current = current->c;
+    }
+    if ((result & MODULE_IF_INVALID) != 0) {
+        return MODULE_IF_INVALID;
+    }
+    if ((result & MODULE_IF_IMPORT) != 0 && (result & MODULE_IF_DECL) != 0) {
+        error_at(p, first->loc, "a module $if cannot contain both imports and declarations");
+        return MODULE_IF_INVALID;
+    }
+    if ((result & MODULE_IF_IMPORT) != 0) {
+        mark_import_selector(first);
+    }
+    return result;
 }
 
 fn parse_compile_branch(parser mut* p, bool declarations) ast.node mut* {
@@ -2625,6 +2695,28 @@ fn parse_decl_into(parser mut* p, ast.node mut* mod, bool import_form) void {
     }
 }
 
+/// Parses and classifies one top-level `$if`. The import loop accepts an import
+/// selector. The declaration loop reports the ordinary imports-first error.
+/// D9.3, D21.3
+fn parse_module_compile_if_into(parser mut* p, ast.node mut* mod,
+                                     bool imports_allowed) bool {
+    u64 start = p->pos;
+    ast.node mut* n = parse_compile_if(p, true);
+    bool mut imports = false;
+    if (n != null) {
+        i32 category = classify_module_compile_if(p, n);
+        imports = category == MODULE_IF_IMPORT;
+        if (imports && !imports_allowed && !p->failed) {
+            error_at(p, n->loc, "an import comes before every declaration");
+        }
+        ast.ast_push(mod, n);
+    }
+    if (p->failed) {
+        recover(p, mod, start, n == null, RECOVER_DECL);
+    }
+    return imports;
+}
+
 /// Parses the tokens of one file into a k_module node whose list holds the
 /// imports then the declarations in source order. The tokens are the ones lex_file
 /// produced: they end in the end-of-file token, and the file's budget of
@@ -2649,11 +2741,23 @@ fn parse_module(session.session mut* sess, string file, lexer.tok_vec* toks,
 
     ast.node mut* mod = ast.ast_new(ar, ast.ast_kind.k_module, diag.loc_make(file, 1, 1));
     // D9.3, D14.2: both loops are recovery points, so one error costs one
-    while (at(&p, lexer.tok_kind.kw_import)) {
-        parse_decl_into(&p, mod, true);
+    while (true) {
+        if (at(&p, lexer.tok_kind.kw_import)) {
+            parse_decl_into(&p, mod, true);
+        } else if (at(&p, lexer.tok_kind.dollar_if)) {
+            if (!parse_module_compile_if_into(&p, mod, true)) {
+                break;
+            }
+        } else {
+            break;
+        }
     }
     while (!at(&p, lexer.tok_kind.eof)) {
-        parse_decl_into(&p, mod, false);
+        if (at(&p, lexer.tok_kind.dollar_if)) {
+            parse_module_compile_if_into(&p, mod, false);
+        } else {
+            parse_decl_into(&p, mod, false);
+        }
     }
     return finish(&p, mod);
 }

@@ -71,7 +71,7 @@ done
 # constant: a file must not be able to slip out of the comparison. A ticket
 # that adds or removes a .ft file changes all four lines in the same commit:
 # diff_tokens.sh, diff_ast.sh, diff_check.sh and diff_ir.sh.
-FT_FILES=967
+FT_FILES=971
 
 # The files of that corpus src/bootstrap refuses for a nested array or span
 # level, which src/fort reads (D3.6, T-043). They are skipped below, and this
@@ -111,7 +111,7 @@ FLOAT_MESSAGES='float literals'
 CFG_FILES=3
 
 # The source parser reads `$if`; the frozen C bootstrap reports `$`.
-IF_FILES=2
+IF_FILES=4
 
 files=$(find . -name '*.ft' -not -path './build/*' -not -path './.git/*' \
     -not -path './.worktrees/*' | sort)

@@ -69,7 +69,12 @@ file `std/x.ft` under any other root is unreachable.
 ## 3. Import forms and resolution
 
 Imports appear at the top of a file, before any declaration (D9.3; `grammar.md` section 2). An
-`import` after a declaration is a parse error. The order of imports is irrelevant.
+`import` after a declaration is a parse error. The order of imports is irrelevant. An import can
+also occur in a module-level import selector (D21.3). The parser classifies the complete `$if`
+chain after it parses both branches. A chain with at least one recursive import leaf contains only
+imports, nested import selectors, or empty branches. It occurs in the import section. A chain with
+no import leaf is a declaration selector and occurs in the declaration section. A mixed chain is a
+syntax error at its opening `$if`.
 
 | Form                                     | Binds                           | Use               |
 |------------------------------------------|---------------------------------|-------------------|
@@ -163,6 +168,9 @@ The import relation must be acyclic (D9.5). The loader detects a cycle while wal
 from the entry module and reports it at the import that closes it. A module importing itself is a
 cycle of length one. Whole-program compilation could tolerate cycles; the rule stays because it
 keeps dependencies one-directional and module order a topological order.
+
+Only a selected import adds an edge to this graph (D21.3). An inactive import causes no file probe,
+source read, module identity, binding, duplicate-binding, or cycle operation.
 
 - Two struct types that refer to each other, through pointers or spans (D3.8), must be declared
   in the same module.
@@ -502,8 +510,9 @@ rest of the convention follow the selected C ABI.
 
 Fort v1 compiles a whole program at once (D9.10):
 
-1. The entry file is parsed and its imports are resolved (sections 2 and 3).
-2. Every imported module is parsed in turn until the import closure is complete; cycles and
+1. The entry file is parsed. Its import selectors are evaluated before an import path is resolved.
+   The parser retains each branch. Only selected imports are resolved (sections 2 and 3; D21.3).
+2. Every selected imported module is parsed in turn until the import closure is complete; cycles and
    duplicate identities are errors here. `std.rt` is a root of the closure beside the entry file
    and is loaded whether or not anything imports it (D9.10, D13.1); being in the closure does not
    bind its name, so a module that wants to call it writes `import std.rt;` like any other
@@ -765,6 +774,7 @@ All diagnostics follow D14.2: `<file>:<line>:<col>: error: <message>`, optionall
 | `extern` declaring `main`           | `'main' is reserved: the compiler emits it`             |
 | same extern, `own` differs (D17.1)  | `conflicting declarations of extern 'free'`             |
 | import after a declaration          | `an import comes before every declaration`              |
+| mixed `$if`                         | see below                                               |
 | path separator written `::`         | `a module path is separated by '.', not '::'`           |
 | path separator written `..`         | `a module path is separated by '.', not '..'`           |
 | module binding as a value or type   | `'io' is a module, not a value` (or `not a type`)       |
@@ -779,6 +789,9 @@ The missing-`main` row is the one diagnostic a build reports and `fort --check` 
 `--check` the root is a module under inspection and D8.6 is not applied (D20.1). Every other row
 is reported the same way in both modes, and `--check --json` reports them as the document of
 `toolchain.md` 4.1, with the same positions.
+
+The mixed `$if` message is `a module $if cannot contain both imports and declarations`. It stands
+at the opening `$if` (D21.3).
 
 Notes accompany some of these: "not found" lists `note: looked for <path>` once per root and
 reading; the ambiguous case gives the full paths in the message and the same-file case adds `note:

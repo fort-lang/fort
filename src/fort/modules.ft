@@ -643,6 +643,9 @@ fn collect_declaration(session.session mut* s, module_set mut* set, module mut* 
                             ast.node mut* decl) bool {
     ast.node mut* mut current = decl;
     while (current->kind == ast.ast_kind.k_compile_if) {
+        if ((current->flags & ast.FLAG_IMPORT_SELECTOR) != 0) {
+            return true;
+        }
         if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {
             return collect_declaration_list(s, set, m, current->b);
         }
@@ -849,6 +852,9 @@ fn selected_declares(ast.node* list, string name) bool {
 fn selected_node_declares(ast.node* decl, string name) bool {
     ast.node* mut current = decl;
     while (current->kind == ast.ast_kind.k_compile_if) {
+        if ((current->flags & ast.FLAG_IMPORT_SELECTOR) != 0) {
+            return false;
+        }
         if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {
             return selected_declares(current->b, name);
         }
@@ -958,22 +964,35 @@ fn resolve_path(session.session mut* s, module_set mut* set, module mut* m,
     return false;
 }
 
-/// Resolves every import of the module, in source order; imports appear before
-/// every declaration, which the parser has already enforced.
-///
-/// Every failing import of the module is reported, so that its errors appear
-/// together, and `stopped` then keeps the remaining imports from reading any
-/// further file: processing stops at the module boundary.
-/// D9.3, D14.2
-fn resolve_imports(session.session mut* s, module_set mut* set, module mut* m) bool {
-    if (m->ast == null) {
-        return true;
-    }
+fn resolve_import_list(session.session mut* s, module_set mut* set, module mut* m,
+                            ast.node mut* list) bool {
     bool mut ok = true;
     u64 mut i = 0;
-    while (i < ast.ast_len(m->ast)) {
-        ast.node mut* imp = ast.ast_child_mut(m->ast, i);
-        if (imp->kind == ast.ast_kind.k_import) {
+    while (list != null && i < ast.ast_len(list)) {
+        ast.node mut* imp = ast.ast_child_mut(list, i);
+        i += 1;
+        if (imp->kind == ast.ast_kind.k_compile_if
+            && (imp->flags & ast.FLAG_IMPORT_SELECTOR) != 0) {
+            ast.node mut* mut current = imp;
+            while (current != null && current->kind == ast.ast_kind.k_compile_if) {
+                if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {
+                    if (!resolve_import_list(s, set, m, current->b)) {
+                        ok = false;
+                    }
+                    break;
+                }
+                if (current->c == null) {
+                    break;
+                }
+                if (current->c->kind != ast.ast_kind.k_compile_if) {
+                    if (!resolve_import_list(s, set, m, current->c)) {
+                        ok = false;
+                    }
+                    break;
+                }
+                current = current->c;
+            }
+        } else if (imp->kind == ast.ast_kind.k_import) {
             bool mut resolved = false;
             if (ast.ast_len(imp) > 0) {
                 resolved = resolve_items(s, set, m, imp);
@@ -985,9 +1004,22 @@ fn resolve_imports(session.session mut* s, module_set mut* set, module mut* m) b
                 set->stopped = true;
             }
         }
-        i += 1;
     }
     return ok;
+}
+
+/// Resolves every selected import of the module, in source order. The parser
+/// has enforced that direct imports and import selectors precede declarations.
+///
+/// Every failing import of the module is reported, so that its errors appear
+/// together, and `stopped` then keeps the remaining imports from reading any
+/// further file: processing stops at the module boundary.
+/// D9.3, D14.2, D21.3
+fn resolve_imports(session.session mut* s, module_set mut* set, module mut* m) bool {
+    if (m->ast == null) {
+        return true;
+    }
+    return resolve_import_list(s, set, m, m->ast);
 }
 
 // ---- the set --------------------------------------------------------------------------

@@ -4587,11 +4587,30 @@ fn bound_name(ast.node* imp, ast.node* item) string {
 /// The names the module's imports did not bind, which is what an import the
 /// loader reported leaves behind: a use of one says nothing further.
 /// D14.2
-fn collect_failed_imports(checker mut* ck, modules.module* m) void {
+fn collect_failed_import_list(checker mut* ck, modules.module* m, ast.node* list) void {
     u64 mut i = 0;
-    while (i < ast.ast_len(m->ast)) {
-        ast.node* imp = ast.ast_child(m->ast, i);
+    while (list != null && i < ast.ast_len(list)) {
+        ast.node* imp = ast.ast_child(list, i);
         i += 1;
+        if (imp->kind == ast.ast_kind.k_compile_if
+            && (imp->flags & ast.FLAG_IMPORT_SELECTOR) != 0) {
+            ast.node* mut current = imp;
+            while (current != null && current->kind == ast.ast_kind.k_compile_if) {
+                if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {
+                    collect_failed_import_list(ck, m, current->b);
+                    break;
+                }
+                if (current->c == null) {
+                    break;
+                }
+                if (current->c->kind != ast.ast_kind.k_compile_if) {
+                    collect_failed_import_list(ck, m, current->c);
+                    break;
+                }
+                current = current->c;
+            }
+            continue;
+        }
         if (imp->kind != ast.ast_kind.k_import) {
             continue;
         }
@@ -4607,6 +4626,38 @@ fn collect_failed_imports(checker mut* ck, modules.module* m) void {
                 strmap.put(&ck->bad_imports, name, 1);
             }
             k += 1;
+        }
+    }
+}
+
+fn collect_failed_imports(checker mut* ck, modules.module* m) void {
+    collect_failed_import_list(ck, m, m->ast);
+}
+
+fn annotate_import_paths(ast.node* list) void {
+    u64 mut i = 0;
+    while (list != null && i < ast.ast_len(list)) {
+        ast.node* imp = ast.ast_child(list, i);
+        i += 1;
+        if (imp->kind == ast.ast_kind.k_compile_if
+            && (imp->flags & ast.FLAG_IMPORT_SELECTOR) != 0) {
+            ast.node* mut current = imp;
+            while (current != null && current->kind == ast.ast_kind.k_compile_if) {
+                if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {
+                    annotate_import_paths(current->b);
+                    break;
+                }
+                if (current->c == null) {
+                    break;
+                }
+                if (current->c->kind != ast.ast_kind.k_compile_if) {
+                    annotate_import_paths(current->c);
+                    break;
+                }
+                current = current->c;
+            }
+        } else if (imp->kind == ast.ast_kind.k_import && ast.ast_len(imp) > 0) {
+            annotate_item_path(imp);
         }
     }
 }
@@ -4629,19 +4680,15 @@ fn collect_module(checker mut* ck, modules.module* m) void {
         }
         k += 1;
     }
-    u64 mut j = 0;
-    while (j < ast.ast_len(m->ast)) {
-        ast.node* imp = ast.ast_child(m->ast, j);
-        if (imp->kind == ast.ast_kind.k_import && ast.ast_len(imp) > 0) {
-            annotate_item_path(imp);
-        }
-        j += 1;
-    }
+    annotate_import_paths(m->ast);
 }
 
 fn collect_declaration(checker mut* ck, ast.node mut* decl, ast.sym mut* owner) void {
     ast.node mut* mut current = decl;
     while (current->kind == ast.ast_kind.k_compile_if) {
+        if ((current->flags & ast.FLAG_IMPORT_SELECTOR) != 0) {
+            return;
+        }
         if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {
             collect_declarations(ck, current->b, owner);
             return;
@@ -4680,6 +4727,9 @@ fn collect_declarations(checker mut* ck, ast.node mut* list, ast.sym mut* owner)
 fn resolve_declaration(checker mut* ck, ast.node* decl) void {
     ast.node* mut current = decl;
     while (current->kind == ast.ast_kind.k_compile_if) {
+        if ((current->flags & ast.FLAG_IMPORT_SELECTOR) != 0) {
+            return;
+        }
         if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {
             resolve_declarations(ck, current->b);
             return;

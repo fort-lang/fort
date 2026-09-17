@@ -78,6 +78,24 @@ fn the_prefix_probe_reads_through_the_session() void {
     assert(modules.file_count(&e.set) == 2);
 }
 
+// An inactive import performs no source read. The file can exist, but only the
+// entry source reaches the session table and the module closure.
+// D21.3
+fn an_inactive_import_does_not_read_its_source() void {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(
+        &e, "main.ft", "$if (false) {\n    import inactive;\n}\nfn main() i32 { return 0; }\n");
+    modules_env.add(&e, "inactive.ft", "fn unused() i32 { return 1; }\n");
+    assert(session.source_count(&e.s) == 0);
+    assert(modules_env.load(&e, "main.ft"));
+    assert(session.source_count(&e.s) == 1);
+    assert(modules.file_count(&e.set) == 1);
+    string own inactive = modules_env.in_sandbox(&e, "inactive.ft");
+    defer del(inactive);
+    assert(!session.has_source(&e.s, inactive));
+}
+
 // ---- editor buffers -------------------------------------------------------------
 // D20.5
 
@@ -244,6 +262,7 @@ fn main() i32 {
     a_load_leaves_every_source_in_the_session();
     a_file_is_read_once_for_the_life_of_the_session();
     the_prefix_probe_reads_through_the_session();
+    an_inactive_import_does_not_read_its_source();
     println("session ok");
     an_entry_buffer_is_what_the_analysis_reads();
     a_buffer_with_an_error_is_the_one_reported();

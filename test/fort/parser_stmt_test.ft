@@ -2,6 +2,7 @@
 //! flags: -I ../../src/fort -I support
 //! stdout:
 //| ok
+import ast;
 import parse_env;
 
 // The statements of grammar.md 5 and the declarations of grammar.md 2 and 3
@@ -151,6 +152,52 @@ fn compile_time_conditions_keep_declaration_and_statement_branches() void {
         &e, "(module (compile-if (bool true) (block (var A (type (prim i32)) (int 1)))",
         " (block (var A (type (prim i32)) (int 2)))))");
     assert(declarations == declaration_want);
+}
+
+// A module chain is an import selector when one recursive leaf is an import.
+// Empty leaves do not change its kind. A statement or a declaration beside an
+// import makes the form invalid, but the parser keeps the complete tree.
+// D21.3
+fn module_conditions_classify_imports_after_the_complete_parse() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+
+    ast.node mut* mut mod = parse_env.parse(&e, "$if (true) { import a; } else { }\n");
+    ast.node mut* mut selector = ast.ast_child_mut(mod, 0);
+    assert((selector->flags & ast.FLAG_IMPORT_SELECTOR) != 0);
+    assert(parse_env.errors(&e) == 0);
+
+    mod = parse_env.parse(&e, "$if (true) { i32 A = 1; } else { }\n");
+    selector = ast.ast_child_mut(mod, 0);
+    assert((selector->flags & ast.FLAG_IMPORT_SELECTOR) == 0);
+    assert(parse_env.errors(&e) == 0);
+
+    mod = parse_env.parse(&e, "$if (true) { $if (false) { import a; } } else { }\n");
+    selector = ast.ast_child_mut(mod, 0);
+    assert((selector->flags & ast.FLAG_IMPORT_SELECTOR) != 0);
+    ast.node mut* nested = ast.ast_child_mut(selector->b, 0);
+    assert((nested->flags & ast.FLAG_IMPORT_SELECTOR) != 0);
+    assert(parse_env.errors(&e) == 0);
+
+    mod = parse_env.parse(&e, "$if (true) { } else $if (false) { } else { }\n");
+    selector = ast.ast_child_mut(mod, 0);
+    assert((selector->flags & ast.FLAG_IMPORT_SELECTOR) == 0);
+    assert(parse_env.errors(&e) == 0);
+
+    parse_env.parse(&e, "$if (true) { f(); }\n");
+    assert(parse_env.errors(&e) == 1);
+
+    mod = parse_env.parse(&e, "$if (true) { import a; i32 A = 1; }\n");
+    assert(parse_env.errors(&e) == 1);
+    assert(parse_env.diag_at(&e, 0)
+           == "1:1: error: a module $if cannot contain both imports and declarations");
+    assert(ast.ast_len(ast.ast_child(mod, 0)->b) == 2);
+
+    mod = parse_env.parse(&e, "$if (true) { import a; } else { i32 A = 1; }\n");
+    assert(parse_env.errors(&e) == 1);
+    assert(parse_env.diag_at(&e, 0)
+           == "1:1: error: a module $if cannot contain both imports and declarations");
+    assert(ast.ast_child(mod, 0)->c != null);
 }
 
 fn while_and_do_while_carry_body_and_condition() void {
@@ -370,6 +417,7 @@ fn main() i32 {
     if_carries_its_condition_and_both_branches();
     an_else_if_chain_nests_at_its_tail();
     compile_time_conditions_keep_declaration_and_statement_branches();
+    module_conditions_classify_imports_after_the_complete_parse();
     while_and_do_while_carry_body_and_condition();
     the_three_for_forms();
     switch_clauses_carry_their_labels_and_an_implicit_block();

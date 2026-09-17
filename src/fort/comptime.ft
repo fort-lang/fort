@@ -58,6 +58,7 @@ struct selector {
     u64 len;
     strbuf.str_buf msg;
     bool ok;
+    bool imports;
 }
 
 fn reserve(selector mut* s) void {
@@ -1190,7 +1191,7 @@ fn eval_fixed_array_len(selector mut* s, ast.node mut* n, value mut* out) bool {
 /// Whether `name` is an unconditional type of this module. Conditional and
 /// qualified names need ordinary name collection and remain unavailable.
 fn has_same_module_type(selector* s, ast.node* name) bool {
-    if (name->a != null) {
+    if (s->imports || name->a != null) {
         return false;
     }
     u64 mut i = 0;
@@ -1417,7 +1418,13 @@ fn select_tree(selector mut* s, ast.node mut* n) void {
         return;
     }
     if (n->kind == ast.ast_kind.k_compile_if) {
-        select_compile_if(s, n);
+        bool import_selector = (n->flags & ast.FLAG_IMPORT_SELECTOR) != 0;
+        // The import pass starts only at an import selector. Its selected
+        // branch can contain an all-empty declaration selector, which is also
+        // reached before declaration collection.
+        if (s->imports || !import_selector) {
+            select_compile_if(s, n);
+        }
         return;
     }
     select_tree(s, n->a);
@@ -1431,15 +1438,29 @@ fn select_tree(selector mut* s, ast.node mut* n) void {
     }
 }
 
-/// Selects all `$if` nodes in one parsed module. The caller stops before it
-/// constructs a module namespace when this reports an error.
-/// D21.2
+/// Selects each import `$if` before declaration names exist, then selects the
+/// declaration and statement forms. The caller stops before it constructs a
+/// module namespace when this reports an error.
+/// D21.2, D21.3
 fn select_module(session.session mut* sess, ast.node mut* module) bool {
-    selector mut s = selector{sess, module, {}, 0, strbuf.create(), true};
+    selector mut s = selector{sess, module, {}, 0, strbuf.create(), true, true};
     defer del(s.entries);
     defer strbuf.free(&s.msg);
     clear_selection(module);
     u64 mut i = 0;
+    while (i < ast.ast_len(module)) {
+        ast.node mut* child = ast.ast_child_mut(module, i);
+        if (child->kind == ast.ast_kind.k_compile_if
+            && (child->flags & ast.FLAG_IMPORT_SELECTOR) != 0) {
+            select_tree(&s, child);
+        }
+        i += 1;
+    }
+    if (!s.ok) {
+        return false;
+    }
+    s.imports = false;
+    i = 0;
     while (i < ast.ast_len(module)) {
         add_constant(&s, ast.ast_child_mut(module, i));
         i += 1;

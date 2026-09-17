@@ -2473,6 +2473,28 @@ language server to use them, while the server itself lands after the bootstrap f
   branch contains statements or nested statement `$if` forms. `$if` is not a field, enum member,
   parameter, type, or expression form.
 
+### D21.3 Conditional imports
+- owner: `module-system.md` (Import forms and resolution), `grammar.md` (Module structure),
+  `toolchain.md` (2, 4, 9.1).
+- rule: A module-level `$if` chain is an import selector when at least one recursive branch leaf
+  is an `import`. Each other leaf must be an `import`, a nested import selector, or empty. A chain
+  with no import leaf is a declaration selector under D21.2. This includes an all-empty chain. A
+  chain with an import leaf and a declaration leaf reports one syntax diagnostic at its opening
+  `$if`. A module-level statement remains a syntax error.
+
+  An import selector occurs before each declaration and declaration selector. Parsed forms set
+  this order. An inactive import selector after a declaration is still an import-after-declaration
+  error. Each condition follows D21.2. A reached ordinary name is unavailable because the compiler
+  has not collected declarations. `$cfg` remains available. Short-circuit evaluation does not
+  resolve an unselected name or evaluate an unselected trap.
+
+  The compiler selects the branch before it resolves an import path. An inactive import causes no
+  file probe, source read, module identity, binding, duplicate-binding, or cycle operation. A
+  selected import has the ordinary D9.3 semantics. It alone contributes its module and binding to
+  the closure, later passes, generated LLVM IR, and identifier index. The AST retains both
+  branches. Lexical and syntax diagnostics still report from both branches. The D21.2 limit of 256
+  conditions applies without change.
+
 ## Ready-to-implement checklist
 
 - [x] Every TBD in the original notes has a decision above.

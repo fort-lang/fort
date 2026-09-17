@@ -4,9 +4,9 @@
 # `fort --tokens <file>` lexes that one file and writes one line per token in
 # the form of spec/toolchain.md 1 (D14.1). Both compilers implement it --
 # src/bootstrap/lexer.c and src/fort/lexer.ft -- and this script is what holds
-# the second against the first while Phase B is written. It compares 962 token
+# the second against the first while Phase B is written. It compares 964 token
 # dumps, diagnostics and exit statuses byte for byte. It separately measures
-# three `$cfg` files and two `$if` files that only the source compiler accepts.
+# three `$cfg` files and four `$if` files that only the source compiler accepts.
 # A common-subset file that deliberately fails to lex is compared like any
 # other (D14.2).
 #
@@ -38,13 +38,13 @@ done
 # comparison, and a floor only notices the walk losing all of them. A ticket
 # that adds or removes a .ft file changes all four lines in the same commit:
 # diff_tokens.sh, diff_ast.sh, diff_check.sh and diff_ir.sh.
-FT_FILES=967
+FT_FILES=971
 
 # The source compiler reads `$cfg`; the frozen C bootstrap reports `$`.
 CFG_FILES=3
 
 # The source compiler reads `$if`; the frozen C bootstrap reports `$`.
-IF_FILES=2
+IF_FILES=4
 
 files=$(find . -name '*.ft' -not -path './build/*' -not -path './.git/*' \
     -not -path './.worktrees/*' | sort)

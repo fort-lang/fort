@@ -73,7 +73,7 @@ Notes:
 ## 2. Module structure
 
 ```ebnf
-module      = { import_decl } { top_decl } ;               (* D9.3: imports first *)
+module      = { import_decl | compile_module_if } { top_decl } ; (* D9.3, D21.3 *)
 
 import_decl = "import" import_path [ "as" identifier ] ";"
             | "import" import_path "." "{" import_item { "," import_item } [ "," ] "}" ";" ;
@@ -82,13 +82,26 @@ import_item = identifier [ "as" identifier ] ;
 
 top_decl    = fn_decl | extern_decl | struct_decl | enum_decl | global_decl | compile_decl_if ;
 
+compile_module_if = "$if" "(" expr ")" module_branch
+                    { "else" "$if" "(" expr ")" module_branch }
+                    [ "else" module_branch ] ;                       (* D21.3 *)
+module_branch = "{" { import_decl | top_decl } "}" ;
+
 compile_decl_if = "$if" "(" expr ")" decl_branch
                   { "else" "$if" "(" expr ")" decl_branch }
                   [ "else" decl_branch ] ;                           (* D21.2 *)
 decl_branch = "{" { top_decl } "}" ;
 ```
 
-A `compile_decl_if` or `compile_stmt_if` chain can contain at most 256 conditions (D21.2).
+A module `$if` chain is parsed as a `compile_module_if`. The parser classifies the complete chain
+after it parses both branches. A chain with at least one recursive import leaf is an import
+selector. Its other leaves contain only imports, nested import selectors, or no item. A chain with
+no import leaf is a `compile_decl_if`. Import selectors occur in the import section. Declaration
+selectors occur in the declaration section. A chain that mixes an import leaf and a declaration
+leaf is a syntax error at the opening `$if` (D21.3).
+
+A `compile_module_if`, `compile_decl_if`, or `compile_stmt_if` chain can contain at most 256
+conditions (D21.2, D21.3).
 
 Whether the last segment of an `import_path` names a module or a symbol is decided by resolution
 (D9.3), not by the grammar.
@@ -317,7 +330,8 @@ speculative parse over the token array (rewind on failure); none require symbol-
    is a declaration; otherwise rewind and parse `for_init` as an assignment, a call, or empty.
 
 At the top level the first token decides: `import`, `fn`, `extern`, `struct`, `enum`, `$if`, or a
-type (a `global_decl`). A `fn` at statement level always begins a declaration whose type is a
+type (a `global_decl`). The parser classifies a complete module-level `$if` chain after it parses
+both branches (D21.3). A `fn` at statement level always begins a declaration whose type is a
 `fn_type` (`fn (i32) i32 op = add;`); function definitions are top-level only (D8.3).
 
 A parse that fails does not stop the file: the parser reports the error, skips to the next

@@ -239,11 +239,13 @@ Compilation is whole-program (D9.10):
    the entry file is named on the command line rather than reached by an import path, so
    `007_case.ft` is the module `007_case` and nothing can import it, and `my-app.ft` is legal too
    (D9.1 as amended).
-2. Parse each root and each newly reached module. Select its `$if` branches before name collection
-   and import resolution. Collect its selected declarations, then resolve its imports
-   (module-system.md 2 and 3). Continue until the closure is complete. Reject cycles and duplicate
-   identities (exit 1). `std.rt` is a root of the closure beside the entry file. The compiler loads
-   it whether or not anything imports it (D9.10, D21.2, section 5).
+2. Parse each root and each newly reached module. Select its import `$if` branches before any
+   inactive path probe, source read, module identity, binding, duplicate-binding, or cycle
+   operation. Resolve only its selected imports. Select its declaration `$if` branches before name
+   collection. Collect its selected declarations (module-system.md 2 and 3). Continue until the
+   closure is complete. Reject cycles and duplicate identities (exit 1). `std.rt` is a root of the
+   closure beside the entry file. The compiler loads it whether or not anything imports it (D9.10,
+   D21.2, D21.3, section 5).
 3. Check every module in dependency order, imported modules first (exit 1).
 4. Emit one LLVM IR module for the closure to `<tmp>/<entry>.ll` (D19.1), or to the `-S` output
    and stop.
@@ -421,6 +423,10 @@ Compile-time diagnostics (D14.2) are written to stderr, one per line:
   so an error placed in the file the reader cannot open leaves the reader nothing at all. A
   diagnostic about anything but two declarations stands where the construct it names stands, in
   whatever file that is, because it has no second place that says as much.
+- A module-level `$if` with both an import leaf and a declaration leaf reports
+  `a module $if cannot contain both imports and declarations` at its opening `$if`. An import
+  selector after a declaration reports `an import comes before every declaration` at its opening
+  `$if`, even when its selected branch is empty (D21.3).
 - The compiler emits no warnings (D14.2): unused imports, unused variables and statements after
   a terminating statement are not diagnosed.
 
@@ -1928,6 +1934,9 @@ editor needs; without it `"symbols"` is the empty array.
   module (D3.4, D3.5, D3.7).
 - Every record repeats the type and the declaration range of the name it resolves, so a client
   answers hover and go-to-definition from the record under the cursor alone.
+- A conditional import contributes records only from its selected branch. An inactive import adds
+  no module record, binding record, declaration record, or use record. Both branches remain in the
+  syntax tree (D21.3).
 
 ### 9.2 What an editor does with it
 

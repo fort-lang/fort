@@ -686,7 +686,7 @@ class CitationTest(unittest.TestCase):
     def test_the_log_of_this_repository_names_every_tag_its_sources_cite(self):
         root = Path(__file__).resolve().parent.parent
         known = lint.known_tags(root)
-        self.assertEqual(len(known), 168)
+        self.assertEqual(len(known), 169)
         self.assertIn("D15", known)
         self.assertIn("D16", known)
         self.assertNotIn("D99.9", known)
@@ -1117,7 +1117,7 @@ class DecisionsTest(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         problems, count = lint.rule_decisions(root)
         self.assertEqual(problems, [])
-        self.assertIn("147 entries", count)
+        self.assertIn("148 entries", count)
 
     def test_a_seeded_log_passes(self):
         with tempfile.TemporaryDirectory() as name:
