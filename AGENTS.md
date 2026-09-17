@@ -170,40 +170,40 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
   wrong, so change the tickets' `impl:` field rather than promoting case by case.
 
 ### Review Workflow
-- Coordinator: picks a ticket whose dependencies are done, creates the worktree and branch
-  (`.worktrees/fort-<id>`, `feat/<id>-<slug>`), fills branch/worktree/assignee, moves the ticket
-  to `inprogress/`, sends the selected TOML instructions and effort to a built-in worker, with the
-  ticket path and worktree. Do not select a named TOML role until Codex proves named loading.
-- Implementor: reads the ticket and only its cited specification sections; codes and tests in
-  its worktree. Keep each commit green under `tools/vm check`. Squash a single-unit ticket first.
-  Hand off a clean final SHA and `tools/vm check` evidence in at most 40 lines. Do not start the final gate or reviewer; the coordinator owns the gate.
-- Coordinator: records identity and starts one supervised `tools/vm gate` session in the ticket worktree under `notes/environment.md` 1.
-  Start read-only review on that SHA while the gate runs. Move the ticket to `inreview/`; for `rev-std`, use:
+- Coordinator: picks an unblocked ticket. Create `.worktrees/fort-<id>` and branch
+  `feat/<id>-<slug>`. Fill its branch, worktree, and assignee; move it to `inprogress/`.
+  Give a worker role text, effort, ticket path, and worktree.
+  Use named roles after Codex proves that it loads them.
+- Implementor: reads only the ticket and its cited specification sections; codes and tests there.
+  Keep each commit green under `tools/vm check`. Squash a single-unit ticket first.
+  Hand off a clean SHA and `tools/vm check` evidence in 40 lines. Do not start the gate or review.
+- Coordinator: records identity. A worker starts one ticket-worktree `tools/vm gate` and waits.
+  The worker messages at exit or for help. Start read-only review on that SHA; move the ticket to
+  `inreview/`. For `rev-std`, use:
 
       codex review --strict-config -c 'sandbox_mode="read-only"' \
         -c 'model_reasoning_effort="high"' \
         -c 'developer_instructions="Read and follow .codex/agents/rev-std.toml."' --base main
-  Add the absolute ticket path to `developer_instructions`. Use the selected tier's file and effort.
-  Do not pass `[PROMPT]` with `--base`. Keep the ticket in `inreview/` through fixes. Relay findings.
-  For a source fix, stop the gate or discard its result. Run a gate on the fixed SHA; review again if behaviour changes.
-- Reviewer: follows tier TOML. Effort differs from depth. Check tests, citations, commits and scope.
-  Check `xfail.txt` and ticket knowledge. Route learning below. State pending for a live gate; never edit, commit or merge.
-- Coordinator: polls the gate session to exit 0. Require `tools/vm gate: green`. Log counts, source SHA, log SHA, and freshness, even if review ends first.
-  After gate exit and final review, measure identity under `notes/environment.md` 1. Never count a live gate as green.
+  Add the ticket's absolute path to `developer_instructions`. Use the selected tier and effort.
+  Never pass `[PROMPT]` with `--base`. Keep the ticket in `inreview/` through fixes. Relay findings.
+  After a source fix, discard its gate. Gate the fixed SHA; review if behavior changes.
+- Reviewer: follows its TOML. Effort differs from depth. Check tests, citations, commits, and scope.
+  Check xfail and the ticket. Route learning below. A live gate is pending; never edit or merge.
+- Coordinator: uses gate-worker messages for live state. Do not poll a responsive worker.
+  Make at most one fallback poll per 20 message-free minutes, only when the worker appears stuck.
+  Require `tools/vm gate: green`. Log counts, source SHA, log SHA, and freshness.
+  After gate exit and final review, measure identity under `notes/environment.md` 1.
   Reuse a green gate only if identity and log SHA match and preset count is zero. Log reuse.
   If proof differs or is missing, rebase when `main` changed, then rerun the gate.
   Review again if rebase changes behavior. Read `git diff --stat main...HEAD` and new files.
   Merge per the Change Implementation Loop. Record the merge sha and agent tokens in the Log.
-  Tick merge-time criteria. Move the ticket to `done/`. Remove the worktree and branch.
-  Assign unblocked tickets. T-022 merged five scratch `.ft` files behind a green gate.
-  Two things the coordinator does before it removes the worktree. **Write the gate's numbers
-  into the ticket log, not the path of its log file.** The log lives under the worktree and dies
-  with it, so a criterion that cites `build/gate.log` cites nothing an hour later; write the exit
-  status, the `grep -c "self-hosted"` count and the ctest line instead. And **re-read every count
-  constant that two branches both moved, after a rebase as after a merge.** A constant both raised
-  by one step merges silently and is then wrong: two branches took `CLEAN_FILES` from 393 to 394
-  and the truth was 395; T-097's rebase conflicted on four counts and merged two in silence,
-  leaving `CORPUS_FILES` at 238 where it was 239. Run the tool that owns each and read its failure.
+  Tick merge criteria. Move the ticket to `done/`. Remove its worktree and branch. Assign tickets.
+  Before worktree removal, write gate numbers into the ticket log, not the gate-log path.
+  The log dies with the worktree. Record exit status, the self-hosted count, and the ctest line.
+  Re-read each count constant that two branches changed after a rebase or merge.
+  Equal increments can merge silently and leave a wrong total. T-097 found two such increments:
+  `CLEAN_FILES` was 394 instead of 395; `CORPUS_FILES` was 238 instead of 239.
+  Run the tool that owns each count and read its failure.
 
 ### Self-Updating Context (the routing rule)
 
