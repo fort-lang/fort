@@ -98,8 +98,9 @@ file (D14.1). Options and the entry file may appear in any order.
   byte outside printable ASCII written as `\"`, `\\`, `\n`, `\t`, `\r` and `\xHH` with
   uppercase hex digits, so that one token is one line; and `<kind>` is the token kind as a
   diagnostic names it -- the word for a keyword, the glyph for an operator, and one of
-  `identifier`, `integer literal`, `float literal`, `char literal`, `string literal`, `$cfg` and
-  `end of file` -- which stands last because it is the only field that may hold a space. So
+  `identifier`, `integer literal`, `float literal`, `char literal`, `string literal`, `$cfg`,
+  `$if` and `end of file` -- which stands last because it is the only field that may hold a space.
+  So
   `fort --tokens` on a file holding `x = 0x10;` writes
 
   ```sh
@@ -126,7 +127,7 @@ file (D14.1). Options and the entry file may appear in any order.
   position of every child is visible. A kind is one of
 
   ```sh
-  module import path item fn extern-fn param struct field-decl enum member var
+  module import path item fn extern-fn param struct field-decl enum member var compile-if
   type prim string void noreturn name fn-type ptr span array
   block assign incdec call-stmt if while do for range-for switch case defer return
   break continue init designator
@@ -238,10 +239,11 @@ Compilation is whole-program (D9.10):
    the entry file is named on the command line rather than reached by an import path, so
    `007_case.ft` is the module `007_case` and nothing can import it, and `my-app.ft` is legal too
    (D9.1 as amended).
-2. Parse it; resolve each import (module-system.md 2 and 3); parse each newly reached module
-   until the closure is complete; reject cycles and duplicate identities (exit 1). `std.rt` is a
-   root of the closure beside the entry file and is loaded whether or not anything imports it
-   (D9.10, section 5).
+2. Parse each root and each newly reached module. Select its `$if` branches before name collection
+   and import resolution. Collect its selected declarations, then resolve its imports
+   (module-system.md 2 and 3). Continue until the closure is complete. Reject cycles and duplicate
+   identities (exit 1). `std.rt` is a root of the closure beside the entry file. The compiler loads
+   it whether or not anything imports it (D9.10, D21.2, section 5).
 3. Check every module in dependency order, imported modules first (exit 1).
 4. Emit one LLVM IR module for the closure to `<tmp>/<entry>.ll` (D19.1), or to the `-S` output
    and stop.
@@ -367,12 +369,15 @@ Compile-time diagnostics (D14.2) are written to stderr, one per line:
 - A skip runs to the end of the failed construct. It consumes at least one token, so it always
   makes progress, and then, outside the `(` and `[` the construct left open, consumes a `;`, and
   consumes the `}` that closes a brace it saw opened; it stops before a `}` it did not see opened
-  and before a token that starts a top-level declaration, the end of the file ending every skip.
+  and before a token that starts an ordinary top-level declaration, the end of the file ending
+  every skip.
   Which other tokens stop it depends on the recovery point: a skip that stands where a statement
   or a clause would stops before `case` and `default`, since a switch body holds nothing else,
   and one that stands where a statement would also stops before a statement keyword (`if while
-  for switch defer return break continue do`); a struct field is skipped to its `;` or to the `}`
-  of the body, and a skip at the top level, where a `}` closes nothing, consumes one. Two
+  for switch defer return break continue do $if`). A skip at the top level also stops before
+  `$if`, which starts the next conditional declaration. A struct field is skipped to its `;` or
+  to the `}` of the body, and a skip at the top level, where a `}` closes nothing, consumes one.
+  Two
   lookaheads settle the braces a skip did not see opened: a `}` that a `;` follows closes a brace
   initializer or a struct literal the construct opened, since no block is followed by a `;`
   (D7.3), and a `}` that a `)` or a `]` follows stands inside a bracket the construct left open,
@@ -387,6 +392,8 @@ Compile-time diagnostics (D14.2) are written to stderr, one per line:
   mirror holds for the `{` of a function body, a struct body or an enum body, which a complete
   declaration header precedes: a missing one is reported once and the body is read as though it
   were there, instead of the body being read as declarations.
+  This missing-`}` boundary does not include `$if`. A `$if` form is valid inside a block and a
+  `case` clause, so those bodies parse it as the next statement.
 - A file reports at most 20 diagnostics, its lexical and its syntax errors counted against one
   budget, and the parser drops an error that starts where the one reported before it started; the
   lexer and the parser go on silently after either, so the tokens and the tree cover the whole
@@ -1582,8 +1589,8 @@ Two expectation files beside the harness list path prefixes of tests (relative t
 that fails or errors is `XFAIL`, a listed test that passes is `XPASS` and fails the run, so the
 list shrinks in the commit that makes tests pass. `bootstrap-unsupported.txt` names the tests
 that use features the C bootstrap deliberately lacks (floats, the nested array and span levels
-of D3.6, `do`-`while` and `?:`; function pointers are in its subset, D3.10). Each is judged as a
-`fail` test, whatever its own kind. The compiler must exit 1 and must report at least one
+of D3.6, `do`-`while`, `?:`, `$cfg`, and `$if`; function pointers are in its subset, D3.10).
+Each is judged as a `fail` test, whatever its own kind. The compiler must exit 1 and report one
 diagnostic. At least one of those diagnostics must contain `not supported by the bootstrap
 compiler`, or must stand in a file of the test itself. The two shapes answer two cases and
 neither one covers both. A test refused inside the library's import closure gets no diagnostic
@@ -1601,11 +1608,10 @@ accepts the floats stage1 refuses (D2.6, D3.1), and must be judged for all of th
 other test.
 
 Each compiler answers for its own list. `unsupported-stage2.txt` is the list the self-hosted
-compiler is run with, and it is empty: the four families the C bootstrap lacks are the nested
-array and span levels of D3.6, `do`-`while`, `?:` and floats, and stage2 implements all four, so
-it refuses nothing the corpus holds and answers for every test as for any other. Entries for
-those four families stay in `bootstrap-unsupported.txt`. The C bootstrap is frozen against
-general feature work.
+compiler is run with, and it is empty. The six families are nested array and span levels,
+`do`-`while` and `?:`, floats, `$cfg`, and `$if`. Stage2 implements all six families. It refuses
+nothing that the corpus holds and answers for each test. Entries for those families stay in
+`bootstrap-unsupported.txt`. The C bootstrap is frozen against general feature work.
 
 T-153 is one bounded exception. The C bootstrap reads and checks explicit C variable tails for
 the Darwin bootstrap platform (D9.8). Linux fixed extern declarations keep their LLVM bytes.
@@ -1613,9 +1619,11 @@ Four non-float variable-tail tests therefore leave `bootstrap-unsupported.txt`. 
 variable-tail tests stay because the C bootstrap still rejects floats. This exception does not
 add general stage1 parity and does not permit another language feature.
 
-An entry arrives in stage2's list the day stage2 refuses a test stage1's list also holds, and
+An entry arrives in stage2's list when stage2 refuses a test that stage1's list also holds, and
 leaves it the day stage2 implements the feature. Neither run passes `--no-unsupported`, so neither
 compiler is excused any test of the corpus. Amended 2026-09-16 (T-153).
+Amended 2026-09-16 (T-156): the source compiler adds `$cfg` to the source-only families.
+Amended 2026-09-16 (T-157): the source compiler adds `$if` to the source-only families.
 
 The harness prints one `PASS`, `FAIL`, `XFAIL`, `XPASS` or `ERROR` line per test with the
 reason where there is one, then a summary, and exits with 1 if any test is `FAIL`, `XPASS` or

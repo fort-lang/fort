@@ -38,10 +38,10 @@
 # stage2 must not report the refusal stage1 reports.
 #
 # A float literal is the third (D2.6, T-041), skipped the same way again.
-# `$cfg` is the fourth (D21.1, T-156). The four counts are order-dependent:
-# a file holding a `?:` and a float literal is counted once, by the first test
-# that matches it. Each count is an equality, so no file leaves the comparison
-# quietly whichever reason takes it.
+# `$cfg` is the fourth (D21.1, T-156). `$if` is the fifth (D21.2, T-157).
+# The five counts are order-dependent. A file that holds two families counts
+# once, under the first test that matches. Each count is an equality, so no
+# file leaves the comparison quietly.
 #
 # The corpus is every .ft file the repository holds, not only test/lang:
 # std/*.ft, src/fort/*.ft, test/fort/*.ft and test/fort_lint/*.ft hold
@@ -71,7 +71,7 @@ done
 # constant: a file must not be able to slip out of the comparison. A ticket
 # that adds or removes a .ft file changes all four lines in the same commit:
 # diff_tokens.sh, diff_ast.sh, diff_check.sh and diff_ir.sh.
-FT_FILES=964
+FT_FILES=967
 
 # The files of that corpus src/bootstrap refuses for a nested array or span
 # level, which src/fort reads (D3.6, T-043). They are skipped below, and this
@@ -110,6 +110,9 @@ FLOAT_MESSAGES='float literals'
 # The source parser reads `$cfg`; the frozen C bootstrap reports `$`.
 CFG_FILES=3
 
+# The source parser reads `$if`; the frozen C bootstrap reports `$`.
+IF_FILES=2
+
 files=$(find . -name '*.ft' -not -path './build/*' -not -path './.git/*' \
     -not -path './.worktrees/*' | sort)
 count=$(printf '%s\n' "$files" | grep -c .)
@@ -132,6 +135,7 @@ nested=0
 forms=0
 floats=0
 cfgs=0
+ifs=0
 # The list is read line by line rather than word by word: a path holding a
 # space would otherwise be split into two paths neither compiler can open,
 # and two compilers failing alike is what this script would call agreement.
@@ -142,6 +146,43 @@ while IFS= read -r file; do
     "$stage2" --ast "$file" >"$work/two.out" 2>"$work/two.err"
     two_status=$?
     set -e
+    if grep -Fq "unexpected character '$'" "$work/one.err" &&
+        grep -Fq '(compile-if ' "$work/two.out"; then
+        ifs=$((ifs + 1))
+        if_bad=0
+        if [ "$one_status" -ne 1 ]; then
+            echo "diff_ast.sh: $file: stage1 exited $one_status, expected 1" >&2
+            status=1
+            if_bad=1
+        fi
+        if [ "$two_status" -ne 0 ]; then
+            echo "diff_ast.sh: $file: stage2 exited $two_status, expected 0" >&2
+            status=1
+            if_bad=1
+        fi
+        if [ -s "$work/two.err" ]; then
+            echo "diff_ast.sh: $file: stage2 reports a compile-time condition diagnostic" >&2
+            head -n 5 "$work/two.err" >&2
+            status=1
+            if_bad=1
+        fi
+        for dump in one two; do
+            case $(cat "$work/$dump.out") in
+            "(module"*")") ;;
+            *)
+                echo "diff_ast.sh: $file: $dump dump is not a module node" >&2
+                head -c 200 "$work/$dump.out" >&2
+                echo >&2
+                status=1
+                if_bad=1
+                ;;
+            esac
+        done
+        if [ "$if_bad" -ne 0 ]; then
+            differing=$((differing + 1))
+        fi
+        continue
+    fi
     if grep -Fq "unexpected character '$'" "$work/one.err" &&
         grep -Fq '(cfg ' "$work/two.out"; then
         cfgs=$((cfgs + 1))
@@ -364,11 +405,18 @@ if [ "$cfgs" -ne "$CFG_FILES" ]; then
     echo "diff_ast.sh: parsed configuration syntax in $cfgs files, expected $CFG_FILES" >&2
     status=1
 fi
+if [ "$ifs" -ne "$IF_FILES" ]; then
+    echo "diff_ast.sh: parsed compile-time conditions in $ifs files," >&2
+    echo "diff_ast.sh: expected exactly $IF_FILES" >&2
+    status=1
+fi
 if [ "$status" -eq 0 ]; then
     echo "stage1 and stage2 agree about the syntax tree, the diagnostics and the exit"
-    echo "status of $((count - nested - forms - floats - cfgs)) of the $count .ft files in the"
+    common=$((count - nested - forms - floats - cfgs - ifs))
+    echo "status of $common of the $count .ft files in the"
     echo "repository; $nested use a nested array or span level, $forms a do-while or a"
-    echo "'?:', $floats a float literal and $cfgs a configuration expression"
+    echo "'?:', $floats a float literal, $cfgs a configuration expression and $ifs a"
+    echo "compile-time condition"
 else
     echo "diff_ast.sh: $differing of $count .ft files differ" >&2
 fi

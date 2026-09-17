@@ -605,6 +605,49 @@ fn from_a_failed_import(checker* ck, string name) bool {
     return strmap.has(&ck->bad_imports, name);
 }
 
+fn selected_enum_with_member(ast.node* list, string name) ast.node* {
+    u64 mut i = 0;
+    while (list != null && i < ast.ast_len(list)) {
+        ast.node* decl = ast.ast_child(list, i);
+        i += 1;
+        ast.node* mut current = decl;
+        while (current->kind == ast.ast_kind.k_compile_if) {
+            if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {
+                ast.node* found = selected_enum_with_member(current->b, name);
+                if (found != null) {
+                    return found;
+                }
+                current = null;
+                break;
+            }
+            if (current->c == null) {
+                current = null;
+                break;
+            }
+            if (current->c->kind != ast.ast_kind.k_compile_if) {
+                ast.node* found = selected_enum_with_member(current->c, name);
+                if (found != null) {
+                    return found;
+                }
+                current = null;
+                break;
+            }
+            current = current->c;
+        }
+        if (current == null || current->kind != ast.ast_kind.k_enum_decl) {
+            continue;
+        }
+        u64 mut k = 0;
+        while (k < ast.ast_len(current)) {
+            if (ast.ast_child(current, k)->name == name) {
+                return current;
+            }
+            k += 1;
+        }
+    }
+    return null;
+}
+
 /// "unknown name 'x'", with the hint for a name that is an enum member, which
 /// is written `color.red` and lives in no namespace.
 /// D3.9
@@ -616,25 +659,17 @@ fn error_unknown_name(checker mut* ck, string name, diag.loc at) void {
     msg_str(ck, "unknown name ");
     msg_quote(ck, name);
     modules.module* m = ck->module;
-    u64 mut i = 0;
-    while (m != null && m->ast != null && i < ast.ast_len(m->ast)) {
-        ast.node* decl = ast.ast_child(m->ast, i);
-        if (decl->kind == ast.ast_kind.k_enum_decl) {
-            u64 mut k = 0;
-            while (k < ast.ast_len(decl)) {
-                if (ast.ast_child(decl, k)->name == name) {
-                    // D3.9
-                    msg_str(ck, ": an enum member is written ");
-                    msg_str(ck, decl->name);
-                    msg_str(ck, ".");
-                    msg_str(ck, name);
-                    check_msg_end(ck, at);
-                    return;
-                }
-                k += 1;
-            }
+    if (m != null && m->ast != null) {
+        ast.node* decl = selected_enum_with_member(m->ast, name);
+        if (decl != null) {
+            // D3.9
+            msg_str(ck, ": an enum member is written ");
+            msg_str(ck, decl->name);
+            msg_str(ck, ".");
+            msg_str(ck, name);
+            check_msg_end(ck, at);
+            return;
         }
-        i += 1;
     }
     check_msg_end(ck, at);
 }
@@ -4585,24 +4620,7 @@ fn collect_module(checker mut* ck, modules.module* m) void {
     // binding reaches it (ast.sym).
     m->ast->sym = ms;
     ck->module_sym = ms;
-    u64 mut i = 0;
-    while (i < ast.ast_len(m->ast)) {
-        ast.node mut* decl = ast_child_mut(m->ast, i);
-        i += 1;
-        ast.sym_kind mut kind = ast.sym_kind.s_const;
-        // D14.2
-        if (!decl_sym_kind(decl, &kind)) {
-            continue;
-        }
-        ast.sym mut* s = check_sym_new(ck, kind, decl->name, decl, ms);
-        decl->sym = s;
-        if (kind == ast.sym_kind.s_struct) {
-            // D3.8: the type exists before the fields are read
-            s->ty = types.type_struct(&ck->types, decl->name, cast(s, void mut*));
-        } else if (kind == ast.sym_kind.s_enum) {
-            s->ty = types.type_enum(&ck->types, decl->name, cast(s, void mut*));
-        }
-    }
+    collect_declarations(ck, m->ast, ms);
     u64 mut k = 0;
     while (k < scope.count(&m->names)) {
         scope.binding* b = scope.at(&m->names, k);
@@ -4618,6 +4636,74 @@ fn collect_module(checker mut* ck, modules.module* m) void {
             annotate_item_path(imp);
         }
         j += 1;
+    }
+}
+
+fn collect_declaration(checker mut* ck, ast.node mut* decl, ast.sym mut* owner) void {
+    ast.node mut* mut current = decl;
+    while (current->kind == ast.ast_kind.k_compile_if) {
+        if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {
+            collect_declarations(ck, current->b, owner);
+            return;
+        }
+        if (current->c == null) {
+            return;
+        }
+        if (current->c->kind != ast.ast_kind.k_compile_if) {
+            collect_declarations(ck, current->c, owner);
+            return;
+        }
+        current = current->c;
+    }
+    ast.sym_kind mut kind = ast.sym_kind.s_const;
+    if (!decl_sym_kind(current, &kind)) {
+        return;
+    }
+    ast.sym mut* s = check_sym_new(ck, kind, current->name, current, owner);
+    current->sym = s;
+    if (kind == ast.sym_kind.s_struct) {
+        // D3.8: the type exists before the fields are read
+        s->ty = types.type_struct(&ck->types, current->name, cast(s, void mut*));
+    } else if (kind == ast.sym_kind.s_enum) {
+        s->ty = types.type_enum(&ck->types, current->name, cast(s, void mut*));
+    }
+}
+
+fn collect_declarations(checker mut* ck, ast.node mut* list, ast.sym mut* owner) void {
+    u64 mut i = 0;
+    while (list != null && i < ast.ast_len(list)) {
+        collect_declaration(ck, ast_child_mut(list, i), owner);
+        i += 1;
+    }
+}
+
+fn resolve_declaration(checker mut* ck, ast.node* decl) void {
+    ast.node* mut current = decl;
+    while (current->kind == ast.ast_kind.k_compile_if) {
+        if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {
+            resolve_declarations(ck, current->b);
+            return;
+        }
+        if (current->c == null) {
+            return;
+        }
+        if (current->c->kind != ast.ast_kind.k_compile_if) {
+            resolve_declarations(ck, current->c);
+            return;
+        }
+        current = current->c;
+    }
+    ast.sym_kind mut kind = ast.sym_kind.s_const;
+    if (decl_sym_kind(current, &kind)) {
+        resolve_sym(ck, current->sym);
+    }
+}
+
+fn resolve_declarations(checker mut* ck, ast.node* list) void {
+    u64 mut i = 0;
+    while (list != null && i < ast.ast_len(list)) {
+        resolve_declaration(ck, ast.ast_child(list, i));
+        i += 1;
     }
 }
 
@@ -4667,15 +4753,7 @@ fn check_module_decls(checker mut* ck, modules.module* m) void {
     strmap.free(&ck->bad_imports);
     collect_failed_imports(ck, m);
     collect_module(ck, m);
-    u64 mut i = 0;
-    while (i < ast.ast_len(m->ast)) {
-        ast.node* decl = ast.ast_child(m->ast, i);
-        i += 1;
-        ast.sym_kind mut kind = ast.sym_kind.s_const;
-        if (decl_sym_kind(decl, &kind)) {
-            resolve_sym(ck, decl->sym);
-        }
-    }
+    resolve_declarations(ck, m->ast);
 }
 
 /// The rule the whole module has to be checked for, and the end of the pass

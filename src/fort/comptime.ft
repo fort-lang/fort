@@ -1,0 +1,1453 @@
+// comptime: select `$if` branches before module closure construction and name
+// collection.
+// D21.2
+//
+// A condition can use literals, `$cfg`, and unconditional immutable
+// declarations in its own module. The declaration table is built before any
+// condition is evaluated, so those constants are order-independent. A
+// condition cannot use an import, a conditional declaration, or a run-time
+// value. Constant dependencies are lazy and carry four states, which reports
+// a cycle at the reference that closes it.
+//
+// Selection writes two flags on each k_compile_if node. The tree keeps both
+// branches for `--ast`. Later passes read only the selected branch. The walk
+// enters both branches of run-time control flow, but only one branch of a
+// compile-time condition. Thus, it does not evaluate a nested condition in an
+// inactive branch.
+//
+// Re-entrancy: one selector value owns its table and message buffer. It writes
+// only the tree passed to select_module and releases all temporary storage
+// before it returns.
+// D20.5
+import ast;
+import consts;
+import containers;
+import diag;
+import lexer;
+import prim;
+import session;
+import std.strbuf;
+import types;
+
+u64 ENTRY_MIN_CAP = 16;
+
+enum entry_state {
+    state_ready,
+    state_resolving,
+    state_done,
+    state_failed,
+}
+
+struct value {
+    consts.cval constant;
+    prim.prim_kind primitive;
+    bool typed;
+}
+
+struct entry {
+    string name;
+    ast.node mut* decl;
+    value val;
+    entry_state state;
+}
+
+struct selector {
+    session.session mut* sess;
+    ast.node* module;
+    entry mut@ own entries;
+    u64 len;
+    strbuf.str_buf msg;
+    bool ok;
+}
+
+fn reserve(selector mut* s) void {
+    if (s->len < s->entries.len) {
+        return;
+    }
+    u64 mut cap = ENTRY_MIN_CAP;
+    if (s->entries.len >= cap) {
+        if (s->entries.len > containers.U64_MAX / 2) {
+            panic("comptime.reserve: capacity overflow");
+        }
+        cap = s->entries.len * 2;
+    }
+    entry mut@ own bigger = new(entry, cap);
+    u64 mut i = 0;
+    while (i < s->len) {
+        bigger[i] = s->entries[i];
+        i += 1;
+    }
+    del(s->entries);
+    s->entries = move(bigger);
+}
+
+fn error(selector mut* s, diag.loc at, string text) void {
+    diag.error(session.diags(s->sess), at, text);
+    s->ok = false;
+}
+
+fn message_begin(selector mut* s) void {
+    strbuf.clear(&s->msg);
+}
+
+fn message_text(selector mut* s, string text) void {
+    strbuf.append(&s->msg, text);
+}
+
+fn message_name(selector mut* s, string name) void {
+    strbuf.push(&s->msg, '\'');
+    strbuf.append(&s->msg, name);
+    strbuf.push(&s->msg, '\'');
+}
+
+fn message_end(selector mut* s, diag.loc at) void {
+    error(s, at, strbuf.view(&s->msg));
+}
+
+fn value_none() value {
+    return value{consts.cv_none(), prim.prim_kind.prim_void, false};
+}
+
+fn value_of(consts.cval v) value {
+    return value{v, prim.prim_kind.prim_void, false};
+}
+
+fn find(selector mut* s, string name) entry mut* {
+    u64 mut i = 0;
+    while (i < s->len) {
+        if (s->entries[i].name == name) {
+            return &s->entries[i];
+        }
+        i += 1;
+    }
+    return null;
+}
+
+/// Adds one unconditional immutable declaration. A duplicate is left for the
+/// ordinary namespace pass, which gives the full redeclaration diagnostic.
+fn add_constant(selector mut* s, ast.node mut* decl) void {
+    if (decl->kind != ast.ast_kind.k_var_decl || decl->a == null
+        || (decl->a->flags & ast.FLAG_MUT) != 0 || find(s, decl->name) != null) {
+        return;
+    }
+    reserve(s);
+    s->entries[s->len] = entry{decl->name, decl, value_none(), entry_state.state_ready};
+    s->len += 1;
+}
+
+fn value_name(value v) string {
+    switch (v.constant.kind) {
+    case consts.cval_kind.cv_int:
+        return "integer";
+    case consts.cval_kind.cv_bool:
+        return "bool";
+    case consts.cval_kind.cv_char:
+        return "char";
+    case consts.cval_kind.cv_null:
+        return "null";
+    case consts.cval_kind.cv_str:
+        return "string";
+    case consts.cval_kind.cv_float:
+        return "float";
+    case consts.cval_kind.cv_none:
+        return "non-constant value";
+    }
+    return "non-constant value";
+}
+
+fn expression_error(selector mut* s, ast.node* n, string text) bool {
+    error(s, n->loc, text);
+    return false;
+}
+
+fn target_primitive(ast.node* t, prim.prim_kind mut* out) bool {
+    if (t == null || t->kind != ast.ast_kind.k_type || t->a == null
+        || ast.ast_len(t) != 0 || t->flags != 0
+        || t->a->kind != ast.ast_kind.k_type_prim) {
+        return false;
+    }
+    *out = cast(t->a->op, prim.prim_kind);
+    return true;
+}
+
+fn target_string(ast.node* t) bool {
+    return t != null && t->kind == ast.ast_kind.k_type && t->a != null
+        && ast.ast_len(t) == 0 && t->flags == 0
+        && t->a->kind == ast.ast_kind.k_type_string;
+}
+
+fn convert_value(value in, prim.prim_kind target, value mut* out) bool {
+    if (!consts.cv_fits(in.constant, target)) {
+        return false;
+    }
+    consts.cval mut converted = in.constant;
+    if (prim.prim_is_float(target)) {
+        if (!consts.cv_to_float(in.constant, target, &converted)) {
+            return false;
+        }
+    } else if (prim.prim_is_integer(target)
+               && in.constant.kind == consts.cval_kind.cv_char) {
+        converted = consts.cv_as_int(in.constant);
+    }
+    *out = value{converted, target, true};
+    return true;
+}
+
+/// Gives an untyped constant its type when no context supplies one.
+/// D4.1, D4.5
+fn default_value(selector mut* s, ast.node* n, value in, value mut* out) bool {
+    if (in.typed) {
+        *out = in;
+        return true;
+    }
+    prim.prim_kind mut target = prim.prim_kind.prim_void;
+    if (!consts.cv_default_kind(in.constant, &target)) {
+        return expression_error(s, n, "constant expression out of range");
+    }
+    if (!convert_value(in, target, out)) {
+        return expression_error(s, n, "constant cannot take its default type");
+    }
+    return true;
+}
+
+fn eval_entry(selector mut* s, entry mut* e, diag.loc at, value mut* out) bool {
+    if (e->state == entry_state.state_done) {
+        *out = e->val;
+        return true;
+    }
+    if (e->state == entry_state.state_failed) {
+        return false;
+    }
+    if (e->state == entry_state.state_resolving) {
+        message_begin(s);
+        message_name(s, e->name);
+        message_text(s, " is defined in terms of itself");
+        message_end(s, at);
+        e->state = entry_state.state_failed;
+        return false;
+    }
+    e->state = entry_state.state_resolving;
+    ast.node* t = e->decl->a;
+    prim.prim_kind mut target = prim.prim_kind.prim_void;
+    bool primitive = target_primitive(t, &target);
+    bool plain_string = target_string(t);
+    if (!primitive && !plain_string) {
+        e->state = entry_state.state_failed;
+        return expression_error(
+            s, e->decl->a,
+            "a $if constant must have an unqualified primitive or plain string type");
+    }
+    value mut v = value_none();
+    if (plain_string && e->decl->b != null
+        && e->decl->b->kind == ast.ast_kind.k_brace_init
+        && ast.ast_len(e->decl->b) == 0) {
+        v = value_of(consts.cv_from_str(""));
+    } else if (e->decl->b == null || !eval_expr(s, e->decl->b, &v)) {
+        e->state = entry_state.state_failed;
+        return false;
+    }
+    if (primitive) {
+        value mut converted = value_none();
+        if (!convert_value(v, target, &converted)) {
+            e->state = entry_state.state_failed;
+            return expression_error(s, e->decl->b, "constant value does not fit its declared type");
+        }
+        v = converted;
+    } else if (plain_string) {
+        if (v.constant.kind != consts.cval_kind.cv_str) {
+            e->state = entry_state.state_failed;
+            return expression_error(s, e->decl->b, "constant value does not fit string");
+        }
+    }
+    e->val = v;
+    e->state = entry_state.state_done;
+    *out = v;
+    return true;
+}
+
+fn eval_ident(selector mut* s, ast.node mut* n, value mut* out) bool {
+    entry mut* e = find(s, n->name);
+    if (e == null) {
+        message_begin(s);
+        message_name(s, n->name);
+        message_text(s, " is not available to a $if condition");
+        message_end(s, n->name_loc);
+        return false;
+    }
+    n->flags |= ast.FLAG_SELECT_REF;
+    return eval_entry(s, e, n->name_loc, out);
+}
+
+fn eval_cfg(selector mut* s, ast.node* n, value mut* out) bool {
+    string mut configured = "";
+    if (!session.config_get(s->sess, n->name, &configured)) {
+        message_begin(s);
+        message_text(s, "configuration key ");
+        message_name(s, n->name);
+        message_text(s, " is not set");
+        message_end(s, n->loc);
+        return false;
+    }
+    *out = value_of(consts.cv_from_str(configured));
+    return true;
+}
+
+fn eval_unary(selector mut* s, ast.node mut* n, value mut* out) bool {
+    value mut a = value_none();
+    if (!eval_expr(s, n->a, &a)) {
+        return false;
+    }
+    lexer.tok_kind op = cast(n->op, lexer.tok_kind);
+    if (op == lexer.tok_kind.bang && a.constant.kind == consts.cval_kind.cv_bool) {
+        *out = value{consts.cv_lnot(a.constant), prim.prim_kind.prim_bool, true};
+        return true;
+    }
+    if (op == lexer.tok_kind.minus && a.constant.kind == consts.cval_kind.cv_float) {
+        *out = a;
+        out->constant = consts.cv_float_neg(a.constant);
+        return true;
+    }
+    if ((op == lexer.tok_kind.minus || op == lexer.tok_kind.tilde)
+        && consts.cv_is_int_like(a.constant)) {
+        if (a.typed && !prim.prim_is_integer(a.primitive)) {
+            return expression_error(s, n, "invalid operator in a $if condition");
+        }
+        consts.cval mut folded = consts.cv_none();
+        consts.cval input = consts.cv_as_int(a.constant);
+        bool mut ok = false;
+        if (a.typed && prim.prim_is_integer(a.primitive)) {
+            if (op == lexer.tok_kind.minus) {
+                if (!prim.prim_is_signed(a.primitive)) {
+                    return expression_error(s, n,
+                                            "unary '-' in a $if condition requires a signed type");
+                }
+                ok = consts.cv_typed_neg(input, a.primitive, &folded);
+            } else {
+                ok = consts.cv_typed_not(input, a.primitive, &folded);
+            }
+        } else if (op == lexer.tok_kind.minus) {
+            ok = consts.cv_neg(input, &folded);
+        } else {
+            ok = consts.cv_not(input, &folded);
+        }
+        if (ok) {
+            *out = value{folded, a.primitive, a.typed};
+            return true;
+        }
+    }
+    return expression_error(s, n, "invalid operator in a $if condition");
+}
+
+fn numeric_pair(value mut* a, value mut* b) bool {
+    if (a->typed && b->typed) {
+        return a->primitive == b->primitive;
+    }
+    if (a->typed) {
+        value mut converted = value_none();
+        if (!convert_value(*b, a->primitive, &converted)) {
+            return false;
+        }
+        *b = converted;
+        return true;
+    }
+    if (b->typed) {
+        value mut converted = value_none();
+        if (!convert_value(*a, b->primitive, &converted)) {
+            return false;
+        }
+        *a = converted;
+        return true;
+    }
+    if (consts.cv_is_int_like(a->constant) && consts.cv_is_int_like(b->constant)) {
+        return true;
+    }
+    if (a->constant.kind == consts.cval_kind.cv_float
+        && b->constant.kind == consts.cval_kind.cv_float) {
+        return true;
+    }
+    if (a->constant.kind == consts.cval_kind.cv_int
+        && b->constant.kind == consts.cval_kind.cv_float) {
+        return consts.cv_to_float(a->constant, prim.prim_kind.prim_f64, &a->constant);
+    }
+    if (a->constant.kind == consts.cval_kind.cv_float
+        && b->constant.kind == consts.cval_kind.cv_int) {
+        return consts.cv_to_float(b->constant, prim.prim_kind.prim_f64, &b->constant);
+    }
+    return false;
+}
+
+enum local_kind {
+    local_unknown,
+    local_bool,
+    local_integer,
+    local_float,
+    local_char,
+    local_string,
+    local_null,
+}
+
+struct local_type {
+    local_kind kind;
+    prim.prim_kind primitive;
+    bool exact;
+}
+
+fn local_unknown_type() local_type {
+    return local_type{local_kind.local_unknown, prim.prim_kind.prim_void, false};
+}
+
+fn local_untyped(local_kind kind) local_type {
+    return local_type{kind, prim.prim_kind.prim_void, false};
+}
+
+fn local_primitive_type(prim.prim_kind primitive) local_type {
+    local_kind mut kind = local_kind.local_unknown;
+    if (primitive == prim.prim_kind.prim_bool) {
+        kind = local_kind.local_bool;
+    } else if (primitive == prim.prim_kind.prim_char) {
+        kind = local_kind.local_char;
+    } else if (prim.prim_is_integer(primitive)) {
+        kind = local_kind.local_integer;
+    } else if (prim.prim_is_float(primitive)) {
+        kind = local_kind.local_float;
+    }
+    return local_type{kind, primitive, true};
+}
+
+fn local_is_unknown(local_type t) bool {
+    return t.kind == local_kind.local_unknown;
+}
+
+fn local_can_take_primitive(local_type t, prim.prim_kind target) bool {
+    if (local_is_unknown(t)) {
+        return true;
+    }
+    if (t.exact) {
+        return t.primitive == target;
+    }
+    if (prim.prim_is_integer(target)) {
+        return t.kind == local_kind.local_integer || t.kind == local_kind.local_char;
+    }
+    if (prim.prim_is_float(target)) {
+        return t.kind == local_kind.local_integer || t.kind == local_kind.local_float;
+    }
+    if (target == prim.prim_kind.prim_char) {
+        return t.kind == local_kind.local_char;
+    }
+    if (target == prim.prim_kind.prim_bool) {
+        return t.kind == local_kind.local_bool;
+    }
+    return false;
+}
+
+fn local_numeric_result(local_type a, local_type b, bool integer_only,
+                        local_type mut* out) bool {
+    if (local_is_unknown(a) || local_is_unknown(b)) {
+        *out = local_unknown_type();
+        return true;
+    }
+    if (a.exact) {
+        if ((!prim.prim_is_integer(a.primitive) && !prim.prim_is_float(a.primitive))
+            || (integer_only && !prim.prim_is_integer(a.primitive))
+            || !local_can_take_primitive(b, a.primitive)) {
+            return false;
+        }
+        *out = a;
+        return true;
+    }
+    if (b.exact) {
+        if ((!prim.prim_is_integer(b.primitive) && !prim.prim_is_float(b.primitive))
+            || (integer_only && !prim.prim_is_integer(b.primitive))
+            || !local_can_take_primitive(a, b.primitive)) {
+            return false;
+        }
+        *out = b;
+        return true;
+    }
+    bool a_int = a.kind == local_kind.local_integer || a.kind == local_kind.local_char;
+    bool b_int = b.kind == local_kind.local_integer || b.kind == local_kind.local_char;
+    if (a_int && b_int) {
+        *out = local_untyped(local_kind.local_integer);
+        return true;
+    }
+    if (!integer_only
+        && (a.kind == local_kind.local_integer || a.kind == local_kind.local_float)
+        && (b.kind == local_kind.local_integer || b.kind == local_kind.local_float)) {
+        *out = local_untyped(local_kind.local_float);
+        return true;
+    }
+    return false;
+}
+
+fn local_shift_result(local_type left, local_type count, local_type mut* out) bool {
+    bool left_ok = local_is_unknown(left)
+        || (left.exact && prim.prim_is_integer(left.primitive))
+        || (!left.exact && (left.kind == local_kind.local_integer
+                            || left.kind == local_kind.local_char));
+    bool count_ok = local_is_unknown(count)
+        || (count.exact && prim.prim_is_integer(count.primitive))
+        || (!count.exact && count.kind == local_kind.local_integer);
+    if (!left_ok || !count_ok) {
+        return false;
+    }
+    if (local_is_unknown(left)) {
+        *out = local_unknown_type();
+    } else if (left.exact) {
+        *out = left;
+    } else {
+        *out = local_untyped(local_kind.local_integer);
+    }
+    return true;
+}
+
+fn local_match_type(local_type a, local_type b, local_type mut* out) bool {
+    if (local_is_unknown(a) || local_is_unknown(b)) {
+        *out = local_unknown_type();
+        return true;
+    }
+    if (a.exact) {
+        if (!local_can_take_primitive(b, a.primitive)) {
+            return false;
+        }
+        *out = a;
+        return true;
+    }
+    if (b.exact) {
+        if (!local_can_take_primitive(a, b.primitive)) {
+            return false;
+        }
+        *out = b;
+        return true;
+    }
+    if (a.kind == b.kind) {
+        *out = a;
+        return true;
+    }
+    if ((a.kind == local_kind.local_integer && b.kind == local_kind.local_char)
+        || (a.kind == local_kind.local_char && b.kind == local_kind.local_integer)) {
+        *out = local_untyped(local_kind.local_integer);
+        return true;
+    }
+    if ((a.kind == local_kind.local_integer && b.kind == local_kind.local_float)
+        || (a.kind == local_kind.local_float && b.kind == local_kind.local_integer)) {
+        *out = local_untyped(local_kind.local_float);
+        return true;
+    }
+    return false;
+}
+
+fn local_comparison_pair(local_type a, local_type b, bool ordering) bool {
+    local_type mut matched = local_unknown_type();
+    if (!local_match_type(a, b, &matched)) {
+        return false;
+    }
+    if (local_is_unknown(matched)) {
+        return true;
+    }
+    if (matched.kind == local_kind.local_integer
+        || matched.kind == local_kind.local_float
+        || matched.kind == local_kind.local_char) {
+        return true;
+    }
+    return !ordering
+        && (matched.kind == local_kind.local_bool
+            || matched.kind == local_kind.local_string);
+}
+
+fn local_unary_result(lexer.tok_kind op, local_type operand, local_type mut* out) bool {
+    if (local_is_unknown(operand)) {
+        *out = local_unknown_type();
+        return true;
+    }
+    if (op == lexer.tok_kind.bang) {
+        if (operand.kind != local_kind.local_bool) {
+            return false;
+        }
+        *out = local_primitive_type(prim.prim_kind.prim_bool);
+        return true;
+    }
+    if (op == lexer.tok_kind.minus) {
+        if (operand.exact) {
+            if ((!prim.prim_is_signed(operand.primitive)
+                 && !prim.prim_is_float(operand.primitive))
+                || operand.primitive == prim.prim_kind.prim_bool
+                || operand.primitive == prim.prim_kind.prim_char) {
+                return false;
+            }
+            *out = operand;
+            return true;
+        }
+        if (operand.kind == local_kind.local_integer
+            || operand.kind == local_kind.local_char) {
+            *out = local_untyped(local_kind.local_integer);
+            return true;
+        }
+        if (operand.kind == local_kind.local_float) {
+            *out = operand;
+            return true;
+        }
+        return false;
+    }
+    if (op == lexer.tok_kind.tilde) {
+        if (operand.exact && prim.prim_is_integer(operand.primitive)) {
+            *out = operand;
+            return true;
+        }
+        if (!operand.exact && (operand.kind == local_kind.local_integer
+                               || operand.kind == local_kind.local_char)) {
+            *out = local_untyped(local_kind.local_integer);
+            return true;
+        }
+        return false;
+    }
+    *out = local_unknown_type();
+    return true;
+}
+
+fn local_type_of(ast.node* n) local_type {
+    if (n == null) {
+        return local_unknown_type();
+    }
+    switch (n->kind) {
+    case ast.ast_kind.k_bool:
+        return local_primitive_type(prim.prim_kind.prim_bool);
+    case ast.ast_kind.k_int, ast.ast_kind.k_sizeof:
+        return local_untyped(local_kind.local_integer);
+    case ast.ast_kind.k_float:
+        return local_untyped(local_kind.local_float);
+    case ast.ast_kind.k_char:
+        return local_untyped(local_kind.local_char);
+    case ast.ast_kind.k_string, ast.ast_kind.k_cfg:
+        return local_untyped(local_kind.local_string);
+    case ast.ast_kind.k_null:
+        return local_untyped(local_kind.local_null);
+    case ast.ast_kind.k_unary:
+        local_type mut unary = local_unknown_type();
+        if (local_unary_result(cast(n->op, lexer.tok_kind), local_type_of(n->a), &unary)) {
+            return unary;
+        }
+        return local_unknown_type();
+    case ast.ast_kind.k_binary:
+        lexer.tok_kind op = cast(n->op, lexer.tok_kind);
+        if (op == lexer.tok_kind.eq || op == lexer.tok_kind.ne
+            || op == lexer.tok_kind.lt || op == lexer.tok_kind.le
+            || op == lexer.tok_kind.gt || op == lexer.tok_kind.ge
+            || op == lexer.tok_kind.and_and || op == lexer.tok_kind.pipe_pipe) {
+            return local_primitive_type(prim.prim_kind.prim_bool);
+        }
+        local_type mut result = local_unknown_type();
+        if (op == lexer.tok_kind.shl || op == lexer.tok_kind.shr) {
+            if (local_shift_result(local_type_of(n->a), local_type_of(n->b), &result)) {
+                return result;
+            }
+        } else {
+            bool integer_only = op == lexer.tok_kind.percent
+                || op == lexer.tok_kind.plus_wrap || op == lexer.tok_kind.minus_wrap
+                || op == lexer.tok_kind.star_wrap || op == lexer.tok_kind.amp
+                || op == lexer.tok_kind.pipe || op == lexer.tok_kind.caret;
+            if (local_numeric_result(local_type_of(n->a), local_type_of(n->b), integer_only,
+                                     &result)) {
+                return result;
+            }
+        }
+        return local_unknown_type();
+    case ast.ast_kind.k_cast:
+        prim.prim_kind mut target = prim.prim_kind.prim_void;
+        if (!target_primitive(n->b, &target)) {
+            return local_unknown_type();
+        }
+        return local_primitive_type(target);
+    case ast.ast_kind.k_ternary:
+        local_type yes = local_type_of(n->b);
+        local_type no = local_type_of(n->c);
+        local_type mut result = local_unknown_type();
+        if (local_match_type(yes, no, &result)) {
+            return result;
+        }
+        return local_unknown_type();
+    default:
+        return local_unknown_type();
+    }
+}
+
+fn value_local_type(value v) local_type {
+    if (v.typed) {
+        return local_primitive_type(v.primitive);
+    }
+    switch (v.constant.kind) {
+    case consts.cval_kind.cv_bool:
+        return local_primitive_type(prim.prim_kind.prim_bool);
+    case consts.cval_kind.cv_int:
+        return local_untyped(local_kind.local_integer);
+    case consts.cval_kind.cv_float:
+        return local_untyped(local_kind.local_float);
+    case consts.cval_kind.cv_char:
+        return local_untyped(local_kind.local_char);
+    case consts.cval_kind.cv_str:
+        return local_untyped(local_kind.local_string);
+    case consts.cval_kind.cv_null:
+        return local_untyped(local_kind.local_null);
+    case consts.cval_kind.cv_none:
+        return local_unknown_type();
+    }
+    return local_unknown_type();
+}
+
+fn local_types_can_match(local_type a, local_type b) bool {
+    local_type mut matched = local_unknown_type();
+    return local_match_type(a, b, &matched);
+}
+
+/// Checks type rules that syntax proves without resolving a name or folding a
+/// value. It does not evaluate the skipped expression.
+/// D6.2, D6.6, D21.2
+fn validate_unselected(selector mut* s, ast.node mut* n) bool {
+    if (n == null) {
+        return true;
+    }
+    bool mut ok = true;
+    if (n->kind == ast.ast_kind.k_unary) {
+        lexer.tok_kind op = cast(n->op, lexer.tok_kind);
+        local_type operand = local_type_of(n->a);
+        local_type mut result = local_unknown_type();
+        if (!local_unary_result(op, operand, &result)) {
+            if (op == lexer.tok_kind.minus && operand.exact
+                && prim.prim_is_integer(operand.primitive)
+                && !prim.prim_is_signed(operand.primitive)) {
+                expression_error(s, n,
+                                 "unary '-' in a $if condition requires a signed type");
+            } else {
+                expression_error(s, n, "invalid operator in a $if condition");
+            }
+            ok = false;
+        }
+    } else if (n->kind == ast.ast_kind.k_binary) {
+        lexer.tok_kind op = cast(n->op, lexer.tok_kind);
+        if (op == lexer.tok_kind.and_and || op == lexer.tok_kind.pipe_pipe) {
+            local_type a = local_type_of(n->a);
+            local_type b = local_type_of(n->b);
+            if (!local_is_unknown(a) && a.kind != local_kind.local_bool) {
+                expression_error(s, n->a, "logical operands in a $if condition must be bool");
+                ok = false;
+            }
+            if (!local_is_unknown(b) && b.kind != local_kind.local_bool) {
+                expression_error(s, n->b, "logical operands in a $if condition must be bool");
+                ok = false;
+            }
+        } else {
+            local_type a = local_type_of(n->a);
+            local_type b = local_type_of(n->b);
+            bool mut valid = true;
+            string mut message = "operator operands in a $if condition must be numeric";
+            local_type mut result = local_unknown_type();
+            if (op == lexer.tok_kind.shl || op == lexer.tok_kind.shr) {
+                valid = local_shift_result(a, b, &result);
+                message = "shift operands in a $if condition must be integers";
+            } else if (op == lexer.tok_kind.amp || op == lexer.tok_kind.pipe
+                       || op == lexer.tok_kind.caret) {
+                valid = local_numeric_result(a, b, true, &result);
+            } else if (op == lexer.tok_kind.eq || op == lexer.tok_kind.ne) {
+                valid = local_comparison_pair(a, b, false);
+                message = "comparison operands in a $if condition must agree";
+            } else if (op == lexer.tok_kind.lt || op == lexer.tok_kind.le
+                       || op == lexer.tok_kind.gt || op == lexer.tok_kind.ge) {
+                valid = local_comparison_pair(a, b, true);
+                message = "ordering operands in a $if condition must be ordered";
+            } else {
+                bool integer_only = op == lexer.tok_kind.percent
+                    || op == lexer.tok_kind.plus_wrap || op == lexer.tok_kind.minus_wrap
+                    || op == lexer.tok_kind.star_wrap;
+                valid = local_numeric_result(a, b, integer_only, &result);
+            }
+            if (!valid) {
+                expression_error(s, n, message);
+                ok = false;
+            }
+        }
+    } else if (n->kind == ast.ast_kind.k_ternary) {
+        local_type condition = local_type_of(n->a);
+        if (!local_is_unknown(condition) && condition.kind != local_kind.local_bool) {
+            expression_error(s, n->a, "the condition of '?:' must be bool");
+            ok = false;
+        }
+        if (!local_types_can_match(local_type_of(n->b), local_type_of(n->c))) {
+            expression_error(s, n, "the operands of '?:' in a $if condition must agree");
+            ok = false;
+        }
+    }
+    if (!validate_unselected(s, n->a) || !validate_unselected(s, n->b)
+        || !validate_unselected(s, n->c) || !validate_unselected(s, n->d)) {
+        ok = false;
+    }
+    u64 mut i = 0;
+    while (i < ast.ast_len(n)) {
+        if (!validate_unselected(s, ast.ast_child_mut(n, i))) {
+            ok = false;
+        }
+        i += 1;
+    }
+    return ok;
+}
+
+fn relation(lexer.tok_kind op) consts.cv_rel {
+    switch (op) {
+    case lexer.tok_kind.eq:
+        return consts.cv_rel.cv_rel_eq;
+    case lexer.tok_kind.ne:
+        return consts.cv_rel.cv_rel_ne;
+    case lexer.tok_kind.lt:
+        return consts.cv_rel.cv_rel_lt;
+    case lexer.tok_kind.le:
+        return consts.cv_rel.cv_rel_le;
+    case lexer.tok_kind.gt:
+        return consts.cv_rel.cv_rel_gt;
+    case lexer.tok_kind.ge:
+        return consts.cv_rel.cv_rel_ge;
+    default:
+        panic("comptime.relation: not a comparison");
+    }
+}
+
+fn fold_integer(lexer.tok_kind op, value a, value b, consts.cval mut* out) bool {
+    consts.cval av = consts.cv_as_int(a.constant);
+    consts.cval bv = consts.cv_as_int(b.constant);
+    if (a.typed && prim.prim_is_integer(a.primitive)) {
+        switch (op) {
+        case lexer.tok_kind.plus:
+            return consts.cv_typed_add(av, bv, a.primitive, out);
+        case lexer.tok_kind.minus:
+            return consts.cv_typed_sub(av, bv, a.primitive, out);
+        case lexer.tok_kind.star:
+            return consts.cv_typed_mul(av, bv, a.primitive, out);
+        case lexer.tok_kind.slash:
+            return consts.cv_typed_div(av, bv, a.primitive, out);
+        case lexer.tok_kind.percent:
+            return consts.cv_typed_rem(av, bv, a.primitive, out);
+        case lexer.tok_kind.amp:
+            return consts.cv_typed_and(av, bv, a.primitive, out);
+        case lexer.tok_kind.pipe:
+            return consts.cv_typed_or(av, bv, a.primitive, out);
+        case lexer.tok_kind.caret:
+            return consts.cv_typed_xor(av, bv, a.primitive, out);
+        case lexer.tok_kind.shl:
+            return consts.cv_typed_shl(av, bv, a.primitive, out);
+        case lexer.tok_kind.shr:
+            return consts.cv_typed_shr(av, bv, a.primitive, out);
+        case lexer.tok_kind.plus_wrap:
+            *out = consts.cv_wrap_add(av, bv, a.primitive);
+            return true;
+        case lexer.tok_kind.minus_wrap:
+            *out = consts.cv_wrap_sub(av, bv, a.primitive);
+            return true;
+        case lexer.tok_kind.star_wrap:
+            *out = consts.cv_wrap_mul(av, bv, a.primitive);
+            return true;
+        default:
+            return false;
+        }
+    }
+    switch (op) {
+    case lexer.tok_kind.plus:
+        return consts.cv_add(av, bv, out);
+    case lexer.tok_kind.minus:
+        return consts.cv_sub(av, bv, out);
+    case lexer.tok_kind.star:
+        return consts.cv_mul(av, bv, out);
+    case lexer.tok_kind.slash:
+        return consts.cv_div(av, bv, out);
+    case lexer.tok_kind.percent:
+        return consts.cv_rem(av, bv, out);
+    case lexer.tok_kind.amp:
+        return consts.cv_and(av, bv, out);
+    case lexer.tok_kind.pipe:
+        return consts.cv_or(av, bv, out);
+    case lexer.tok_kind.caret:
+        return consts.cv_xor(av, bv, out);
+    case lexer.tok_kind.plus_wrap:
+        return consts.cv_add(av, bv, out);
+    case lexer.tok_kind.minus_wrap:
+        return consts.cv_sub(av, bv, out);
+    case lexer.tok_kind.star_wrap:
+        return consts.cv_mul(av, bv, out);
+    case lexer.tok_kind.shl:
+        return consts.cv_shl(av, bv, out);
+    case lexer.tok_kind.shr:
+        return consts.cv_shr(av, bv, out);
+    default:
+        return false;
+    }
+}
+
+fn integer_operand(value v) bool {
+    return consts.cv_is_int_like(v.constant)
+        && (!v.typed || prim.prim_is_integer(v.primitive));
+}
+
+/// A shift takes no common operand type. The count does not change the left
+/// operand, and its range comes from the left operand's width.
+/// D6.2
+fn eval_shift(selector mut* s, ast.node mut* n, lexer.tok_kind op, value a, value b,
+                  value mut* out) bool {
+    if (!integer_operand(a)) {
+        return expression_error(s, n->a,
+                                "a shift left operand in a $if condition must be an integer");
+    }
+    value mut count_value = value_none();
+    if (!default_value(s, n->b, b, &count_value)) {
+        return false;
+    }
+    if (!integer_operand(count_value)) {
+        return expression_error(s, n->b,
+                                "a shift count in a $if condition must be an integer");
+    }
+    u64 mut width = consts.CV_SHIFT_MAX + 1;
+    if (a.typed) {
+        width = cast(prim.prim_size(a.primitive), u64) * prim.PRIM_BITS_PER_BYTE;
+    }
+    consts.cval count = consts.cv_as_int(count_value.constant);
+    i64 mut ncount = 0;
+    if (!consts.cv_to_i64(count, &ncount) || ncount < 0 || cast(ncount, u64) >= width) {
+        return expression_error(
+            s, n->b, "a shift count in a $if condition is outside the left operand width");
+    }
+    consts.cval mut folded = consts.cv_none();
+    if (!fold_integer(op, a, count_value, &folded)) {
+        return expression_error(s, n, "a shift result in a $if condition is out of range");
+    }
+    *out = value{folded, a.primitive, a.typed};
+    return true;
+}
+
+fn eval_binary(selector mut* s, ast.node mut* n, value mut* out) bool {
+    value mut a = value_none();
+    if (!eval_expr(s, n->a, &a)) {
+        return false;
+    }
+    lexer.tok_kind op = cast(n->op, lexer.tok_kind);
+    if (op == lexer.tok_kind.and_and || op == lexer.tok_kind.pipe_pipe) {
+        if (a.constant.kind != consts.cval_kind.cv_bool) {
+            return expression_error(s, n->a, "logical operands in a $if condition must be bool");
+        }
+        bool left = a.constant.mag != 0;
+        if ((op == lexer.tok_kind.and_and && !left)
+            || (op == lexer.tok_kind.pipe_pipe && left)) {
+            if (!validate_unselected(s, n->b)) {
+                return false;
+            }
+            local_type skipped = local_type_of(n->b);
+            if (!local_is_unknown(skipped) && skipped.kind != local_kind.local_bool) {
+                return expression_error(s, n->b,
+                                        "logical operands in a $if condition must be bool");
+            }
+            *out = value{consts.cv_from_bool(left), prim.prim_kind.prim_bool, true};
+            return true;
+        }
+        value mut b = value_none();
+        if (!eval_expr(s, n->b, &b)) {
+            return false;
+        }
+        if (b.constant.kind != consts.cval_kind.cv_bool) {
+            return expression_error(s, n->b, "logical operands in a $if condition must be bool");
+        }
+        consts.cval mut folded = consts.cv_land(a.constant, b.constant);
+        if (op == lexer.tok_kind.pipe_pipe) {
+            folded = consts.cv_lor(a.constant, b.constant);
+        }
+        *out = value{folded, prim.prim_kind.prim_bool, true};
+        return true;
+    }
+
+    value mut b = value_none();
+    if (!eval_expr(s, n->b, &b)) {
+        return false;
+    }
+    if (op == lexer.tok_kind.shl || op == lexer.tok_kind.shr) {
+        return eval_shift(s, n, op, a, b, out);
+    }
+    bool comparison = op == lexer.tok_kind.eq || op == lexer.tok_kind.ne
+        || op == lexer.tok_kind.lt || op == lexer.tok_kind.le
+        || op == lexer.tok_kind.gt || op == lexer.tok_kind.ge;
+    if (comparison) {
+        if (a.constant.kind == b.constant.kind
+            && (op == lexer.tok_kind.eq || op == lexer.tok_kind.ne)
+            && (a.constant.kind == consts.cval_kind.cv_bool
+                || a.constant.kind == consts.cval_kind.cv_str)) {
+            *out = value{consts.cv_compare(relation(op), a.constant, b.constant),
+                         prim.prim_kind.prim_bool, true};
+            return true;
+        }
+        if (!numeric_pair(&a, &b)) {
+            return expression_error(s, n, "comparison operands in a $if condition must agree");
+        }
+        if (a.typed && a.primitive == prim.prim_kind.prim_bool) {
+            return expression_error(s, n, "ordering operands in a $if condition must be ordered");
+        }
+        consts.cval mut av = a.constant;
+        consts.cval mut bv = b.constant;
+        if (consts.cv_is_int_like(av)) {
+            av = consts.cv_as_int(av);
+            bv = consts.cv_as_int(bv);
+        }
+        *out = value{consts.cv_compare(relation(op), av, bv),
+                     prim.prim_kind.prim_bool, true};
+        return true;
+    }
+    if (!numeric_pair(&a, &b)) {
+        return expression_error(s, n, "operator operands in a $if condition must be numeric");
+    }
+    if (a.typed && !prim.prim_is_integer(a.primitive)
+        && !prim.prim_is_float(a.primitive)) {
+        return expression_error(s, n, "operator operands in a $if condition must be numeric");
+    }
+    consts.cval mut folded = consts.cv_none();
+    if (consts.cv_is_int_like(a.constant)) {
+        if (!fold_integer(op, a, b, &folded)) {
+            return expression_error(s, n, "integer operation in a $if condition is invalid");
+        }
+    } else if (a.constant.kind == consts.cval_kind.cv_float) {
+        prim.prim_kind mut format = prim.prim_kind.prim_f64;
+        if (a.typed) {
+            format = a.primitive;
+        }
+        bool mut ok = false;
+        if (op == lexer.tok_kind.plus) {
+            ok = consts.cv_float_add(a.constant, b.constant, format, &folded);
+        } else if (op == lexer.tok_kind.minus) {
+            ok = consts.cv_float_sub(a.constant, b.constant, format, &folded);
+        } else if (op == lexer.tok_kind.star) {
+            ok = consts.cv_float_mul(a.constant, b.constant, format, &folded);
+        } else if (op == lexer.tok_kind.slash) {
+            ok = consts.cv_float_div(a.constant, b.constant, format, &folded);
+        }
+        if (!ok) {
+            return expression_error(s, n, "float operation in a $if condition is invalid");
+        }
+    } else {
+        return expression_error(s, n, "operator is not available in a $if condition");
+    }
+    *out = value{folded, a.primitive, a.typed};
+    return true;
+}
+
+fn eval_ternary(selector mut* s, ast.node mut* n, value mut* out) bool {
+    value mut condition = value_none();
+    if (!eval_expr(s, n->a, &condition)) {
+        return false;
+    }
+    if (condition.constant.kind != consts.cval_kind.cv_bool) {
+        return expression_error(s, n->a, "the condition of '?:' must be bool");
+    }
+    ast.node mut* mut selected = n->c;
+    ast.node mut* mut skipped = n->b;
+    if (condition.constant.mag != 0) {
+        selected = n->b;
+        skipped = n->c;
+    }
+    value mut result = value_none();
+    if (!eval_expr(s, selected, &result) || !validate_unselected(s, skipped)) {
+        return false;
+    }
+    if (!local_types_can_match(value_local_type(result), local_type_of(skipped))) {
+        return expression_error(s, n, "the operands of '?:' in a $if condition must agree");
+    }
+    *out = result;
+    return true;
+}
+
+fn sizeof_base(selector mut* s, ast.node* n, u64 mut* out, bool mut* sized) bool {
+    switch (n->kind) {
+    case ast.ast_kind.k_type_prim:
+        *out = cast(prim.prim_size(cast(n->op, prim.prim_kind)), u64);
+        *sized = true;
+        return true;
+    case ast.ast_kind.k_type_string:
+        *out = types.SPAN_SIZE;
+        *sized = true;
+        return true;
+    case ast.ast_kind.k_type_fn:
+        *out = types.PTR_SIZE;
+        *sized = true;
+        return true;
+    case ast.ast_kind.k_type_name, ast.ast_kind.k_type_void, ast.ast_kind.k_type_noreturn:
+        *out = 0;
+        *sized = false;
+        return true;
+    default:
+        return expression_error(s, n, "invalid type in a $if sizeof expression");
+    }
+}
+
+fn eval_array_length(selector mut* s, ast.node* suffix, u64 mut* out) bool {
+    value mut length = value_none();
+    if (!eval_expr(s, suffix->a, &length)) {
+        return false;
+    }
+    if (!integer_operand(length)) {
+        return expression_error(s, suffix,
+                                "an array length in a $if condition must be an integer");
+    }
+    consts.cval len_value = consts.cv_as_int(length.constant);
+    if (consts.cv_is_neg(len_value) || consts.cv_is_zero(len_value)
+        || !consts.cv_to_u64(len_value, out)) {
+        return expression_error(s, suffix,
+                                "an array length in a $if condition must be positive");
+    }
+    return true;
+}
+
+fn fixed_array_suffix(ast.node* t) ast.node* {
+    if (t == null || t->kind != ast.ast_kind.k_type) {
+        return null;
+    }
+    ast.node* mut first = null;
+    bool mut saw_array = false;
+    u64 mut i = 0;
+    while (i < ast.ast_len(t)) {
+        ast.node* suffix = ast.ast_child(t, i);
+        types.suffix_kind kind = cast(suffix->op, types.suffix_kind);
+        if (kind == types.suffix_kind.s_array) {
+            if (first == null) {
+                first = suffix;
+            }
+            saw_array = true;
+        } else if (saw_array) {
+            return null;
+        }
+        i += 1;
+    }
+    return first;
+}
+
+/// Reads the outer length from a fixed-array name or array literal. The
+/// operand is not evaluated.
+/// D3.4, D4.6, D21.2
+fn eval_fixed_array_len(selector mut* s, ast.node mut* n, value mut* out) bool {
+    if (n->name != "len" || n->a == null) {
+        return expression_error(s, n, "only fixed-array '.len' is available in a $if condition");
+    }
+    ast.node* mut t = null;
+    entry mut* mut guarded = null;
+    if (n->a->kind == ast.ast_kind.k_ident) {
+        entry mut* e = find(s, n->a->name);
+        if (e == null) {
+            return expression_error(s, n->a, "a fixed-array '.len' name is not available");
+        }
+        n->a->flags |= ast.FLAG_SELECT_REF;
+        if (e->state == entry_state.state_failed) {
+            return false;
+        }
+        if (e->state == entry_state.state_resolving) {
+            message_begin(s);
+            message_name(s, e->name);
+            message_text(s, " is defined in terms of itself");
+            message_end(s, n->a->name_loc);
+            e->state = entry_state.state_failed;
+            return false;
+        }
+        if (e->state == entry_state.state_ready) {
+            e->state = entry_state.state_resolving;
+            guarded = e;
+        }
+        t = e->decl->a;
+    } else if (n->a->kind == ast.ast_kind.k_array_lit) {
+        t = n->a->a;
+    }
+    if (type_has_unresolved_name(s, t)) {
+        if (guarded != null) {
+            guarded->state = entry_state.state_failed;
+        }
+        return expression_error(
+            s, n, "a fixed-array '.len' cannot use an unresolved named element type");
+    }
+    ast.node* suffix = fixed_array_suffix(t);
+    if (suffix == null) {
+        if (guarded != null) {
+            guarded->state = entry_state.state_failed;
+        }
+        return expression_error(s, n, "only fixed-array '.len' is available in a $if condition");
+    }
+    if (t->a->kind == ast.ast_kind.k_type_void
+        && suffix == ast.ast_child(t, 0)) {
+        if (guarded != null) {
+            guarded->state = entry_state.state_failed;
+        }
+        return expression_error(s, n, "a fixed-array '.len' cannot use void elements");
+    }
+    u64 mut length = 0;
+    if (!eval_array_length(s, suffix, &length)) {
+        if (guarded != null) {
+            guarded->state = entry_state.state_failed;
+        }
+        return false;
+    }
+    if (guarded != null) {
+        guarded->state = entry_state.state_ready;
+    }
+    *out = value_of(consts.cv_from_u64(length));
+    return true;
+}
+
+/// Whether `name` is an unconditional type of this module. Conditional and
+/// qualified names need ordinary name collection and remain unavailable.
+fn has_same_module_type(selector* s, ast.node* name) bool {
+    if (name->a != null) {
+        return false;
+    }
+    u64 mut i = 0;
+    while (i < ast.ast_len(s->module)) {
+        ast.node* decl = ast.ast_child(s->module, i);
+        if ((decl->kind == ast.ast_kind.k_struct_decl
+             || decl->kind == ast.ast_kind.k_enum_decl)
+            && decl->name == name->name) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+/// Whether a selection type contains a name that this module does not declare.
+/// Array lengths are expressions, so this walk does not inspect them.
+fn type_has_unresolved_name(selector* s, ast.node* t) bool {
+    if (t == null) {
+        return false;
+    }
+    if (t->kind == ast.ast_kind.k_type_name) {
+        return !has_same_module_type(s, t);
+    }
+    if (t->kind == ast.ast_kind.k_type) {
+        return type_has_unresolved_name(s, t->a);
+    }
+    if (t->kind != ast.ast_kind.k_type_fn) {
+        return false;
+    }
+    if (type_has_unresolved_name(s, t->a)) {
+        return true;
+    }
+    u64 mut i = 0;
+    while (i < ast.ast_len(t)) {
+        if (type_has_unresolved_name(s, ast.ast_child(t, i))) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+/// Computes a type size without ordinary name collection. Selection resolves
+/// an unconditional same-module name. Only an indirection can use that name,
+/// because selection does not compute a named value layout.
+/// D3.15, D4.6, D21.2
+fn eval_sizeof(selector mut* s, ast.node mut* n, value mut* out) bool {
+    ast.node* t = n->a;
+    if (t == null || t->kind != ast.ast_kind.k_type || t->a == null) {
+        return expression_error(s, n, "invalid type in a $if sizeof expression");
+    }
+    if (type_has_unresolved_name(s, t)) {
+        return expression_error(s, n, "'sizeof' cannot use an unresolved named type");
+    }
+    u64 mut size = 0;
+    bool mut sized = false;
+    if (!sizeof_base(s, t->a, &size, &sized)) {
+        return false;
+    }
+    u64 mut i = 0;
+    while (i < ast.ast_len(t)) {
+        ast.node* suffix = ast.ast_child(t, i);
+        types.suffix_kind kind = cast(suffix->op, types.suffix_kind);
+        if (kind == types.suffix_kind.s_ptr) {
+            size = types.PTR_SIZE;
+            sized = true;
+        } else if (kind == types.suffix_kind.s_span) {
+            if (t->a->kind == ast.ast_kind.k_type_void && i == 0) {
+                return expression_error(s, suffix, "a span cannot have void elements");
+            }
+            size = types.SPAN_SIZE;
+            sized = true;
+        } else {
+            if (t->a->kind == ast.ast_kind.k_type_void && !sized) {
+                return expression_error(s, suffix, "an array cannot have void elements");
+            }
+            u64 mut len = 0;
+            if (!eval_array_length(s, suffix, &len)) {
+                return false;
+            }
+            if (sized && size > types.TYPE_MAX_SIZE / len) {
+                return expression_error(s, n, "type is too large");
+            }
+            if (sized) {
+                size *= len;
+            }
+        }
+        i += 1;
+    }
+    if (!sized) {
+        return expression_error(s, n, "'sizeof' needs a sized selection type");
+    }
+    *out = value_of(consts.cv_from_u64(size));
+    return true;
+}
+
+fn eval_cast(selector mut* s, ast.node mut* n, value mut* out) bool {
+    value mut in = value_none();
+    prim.prim_kind mut target = prim.prim_kind.prim_void;
+    if (!eval_expr(s, n->a, &in)) {
+        return false;
+    }
+    if (!target_primitive(n->b, &target)) {
+        return expression_error(s, n, "invalid cast in a $if condition");
+    }
+    value mut typed = value_none();
+    if (!default_value(s, n->a, in, &typed)) {
+        return false;
+    }
+    if (typed.constant.kind == consts.cval_kind.cv_bool
+        || target == prim.prim_kind.prim_bool) {
+        return expression_error(s, n, "a cast in a $if condition cannot use bool");
+    }
+    consts.cval mut converted = consts.cv_none();
+    if (!consts.cv_cast(typed.constant, target, &converted)) {
+        return expression_error(s, n, "invalid cast in a $if condition");
+    }
+    *out = value{converted, target, true};
+    return true;
+}
+
+fn eval_expr(selector mut* s, ast.node mut* n, value mut* out) bool {
+    switch (n->kind) {
+    case ast.ast_kind.k_int:
+        *out = value_of(consts.cv_from_u64(n->ival));
+        return true;
+    case ast.ast_kind.k_float:
+        consts.cval mut v = consts.cv_none();
+        if (!consts.cv_from_float_text(n->name, &v)) {
+            return expression_error(s, n, "float literal out of range for f64");
+        }
+        *out = value_of(v);
+        return true;
+    case ast.ast_kind.k_char:
+        *out = value_of(consts.cv_from_char(n->ival));
+        return true;
+    case ast.ast_kind.k_string:
+        *out = value_of(consts.cv_from_str(n->name));
+        return true;
+    case ast.ast_kind.k_bool:
+        *out = value{consts.cv_from_bool(n->ival != 0), prim.prim_kind.prim_bool, true};
+        return true;
+    case ast.ast_kind.k_null:
+        *out = value_of(consts.cv_null());
+        return true;
+    case ast.ast_kind.k_cfg:
+        return eval_cfg(s, n, out);
+    case ast.ast_kind.k_ident:
+        return eval_ident(s, n, out);
+    case ast.ast_kind.k_unary:
+        return eval_unary(s, n, out);
+    case ast.ast_kind.k_binary:
+        return eval_binary(s, n, out);
+    case ast.ast_kind.k_ternary:
+        return eval_ternary(s, n, out);
+    case ast.ast_kind.k_cast:
+        return eval_cast(s, n, out);
+    case ast.ast_kind.k_sizeof:
+        return eval_sizeof(s, n, out);
+    case ast.ast_kind.k_field:
+        return eval_fixed_array_len(s, n, out);
+    default:
+        return expression_error(s, n, "expression is not available in a $if condition");
+    }
+}
+
+fn clear_selection(ast.node mut* n) void {
+    ast.node mut* mut current = n;
+    while (current != null) {
+        current->flags &= ~(ast.FLAG_SELECT_DONE | ast.FLAG_SELECT_THEN | ast.FLAG_SELECT_REF);
+        clear_selection(current->a);
+        clear_selection(current->b);
+        clear_selection(current->d);
+        u64 mut i = 0;
+        while (i < ast.ast_len(current)) {
+            clear_selection(ast.ast_child_mut(current, i));
+            i += 1;
+        }
+        if (current->kind == ast.ast_kind.k_compile_if
+            && current->c != null
+            && current->c->kind == ast.ast_kind.k_compile_if) {
+            current = current->c;
+        } else {
+            clear_selection(current->c);
+            return;
+        }
+    }
+}
+
+fn select_compile_if(selector mut* s, ast.node mut* n) void {
+    ast.node mut* mut current = n;
+    while (current != null && current->kind == ast.ast_kind.k_compile_if) {
+        value mut condition = value_none();
+        if (!eval_expr(s, current->a, &condition)) {
+            return;
+        }
+        if (condition.constant.kind != consts.cval_kind.cv_bool) {
+            message_begin(s);
+            message_text(s, "a $if condition must be bool, not ");
+            message_text(s, value_name(condition));
+            message_end(s, current->a->loc);
+            return;
+        }
+        current->flags |= ast.FLAG_SELECT_DONE;
+        if (condition.constant.mag != 0) {
+            current->flags |= ast.FLAG_SELECT_THEN;
+            select_tree(s, current->b);
+            return;
+        }
+        if (current->c == null) {
+            return;
+        }
+        if (current->c->kind != ast.ast_kind.k_compile_if) {
+            select_tree(s, current->c);
+            return;
+        }
+        current = current->c;
+    }
+}
+
+fn select_tree(selector mut* s, ast.node mut* n) void {
+    if (n == null) {
+        return;
+    }
+    if (n->kind == ast.ast_kind.k_compile_if) {
+        select_compile_if(s, n);
+        return;
+    }
+    select_tree(s, n->a);
+    select_tree(s, n->b);
+    select_tree(s, n->c);
+    select_tree(s, n->d);
+    u64 mut i = 0;
+    while (i < ast.ast_len(n)) {
+        select_tree(s, ast.ast_child_mut(n, i));
+        i += 1;
+    }
+}
+
+/// Selects all `$if` nodes in one parsed module. The caller stops before it
+/// constructs a module namespace when this reports an error.
+/// D21.2
+fn select_module(session.session mut* sess, ast.node mut* module) bool {
+    selector mut s = selector{sess, module, {}, 0, strbuf.create(), true};
+    defer del(s.entries);
+    defer strbuf.free(&s.msg);
+    clear_selection(module);
+    u64 mut i = 0;
+    while (i < ast.ast_len(module)) {
+        add_constant(&s, ast.ast_child_mut(module, i));
+        i += 1;
+    }
+    i = 0;
+    while (i < ast.ast_len(module)) {
+        select_tree(&s, ast.ast_child_mut(module, i));
+        i += 1;
+    }
+    return s.ok;
+}

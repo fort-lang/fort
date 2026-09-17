@@ -58,7 +58,7 @@ operator = "+%=" | "-%=" | "*%=" | "<<=" | ">>="
          | "?" | ":" | "." | "," | ";" | "(" | ")" | "[" | "]" | "{" | "}"
          | "@" ;                                    (* D2.10; "@" is the span suffix, D3.5 *)
 
-compiler_form = "$cfg" ;                             (* D21.1 *)
+compiler_form = "$cfg" | "$if" ;                     (* D21.1, D21.2 *)
 ```
 
 Notes:
@@ -80,8 +80,15 @@ import_decl = "import" import_path [ "as" identifier ] ";"
 import_path = identifier { "." identifier } ;
 import_item = identifier [ "as" identifier ] ;
 
-top_decl    = fn_decl | extern_decl | struct_decl | enum_decl | global_decl ;
+top_decl    = fn_decl | extern_decl | struct_decl | enum_decl | global_decl | compile_decl_if ;
+
+compile_decl_if = "$if" "(" expr ")" decl_branch
+                  { "else" "$if" "(" expr ")" decl_branch }
+                  [ "else" decl_branch ] ;                           (* D21.2 *)
+decl_branch = "{" { top_decl } "}" ;
 ```
+
+A `compile_decl_if` or `compile_stmt_if` chain can contain at most 256 conditions (D21.2).
 
 Whether the last segment of an `import_path` names a module or a symbol is decided by resolution
 (D9.3), not by the grammar.
@@ -178,7 +185,12 @@ statement    = var_decl
              | return_stmt
              | "break" ";"
              | "continue" ";"
-             | block ;
+             | block
+             | compile_stmt_if ;
+
+compile_stmt_if = "$if" "(" expr ")" block
+                  { "else" "$if" "(" expr ")" block }
+                  [ "else" block ] ;                                (* D21.2 *)
 
 assign_stmt  = assign_head ";" ;                                     (* D7.2 *)
 assign_head  = lvalue_expr assign_op expr ;
@@ -285,8 +297,8 @@ The grammar has three places where a lookahead of one token is not enough. All a
 speculative parse over the token array (rewind on failure); none require symbol-table knowledge.
 
 1. **Declaration versus statement** (D7.1). At the start of a statement:
-   - a keyword among `if while do for switch defer return break continue` or `{` starts that
-     statement;
+   - a keyword among `if while do for switch defer return break continue`, `$if`, or `{` starts
+     that statement;
    - a `prim_type`, `string`, or `fn` starts a declaration;
    - otherwise, speculatively parse a `type`; if the next token is then an identifier, the
      statement is a `var_decl`; else rewind and parse `assign_stmt | incdec_stmt | call_stmt`.
@@ -304,8 +316,8 @@ speculative parse over the token array (rewind on failure); none require symbol-
    is `:` the loop is a `range_for_stmt`; if it is `=` the loop is a `for_stmt` whose `for_init`
    is a declaration; otherwise rewind and parse `for_init` as an assignment, a call, or empty.
 
-At the top level the first token decides: `import`, `fn`, `extern`, `struct`, `enum`, or a type
-(a `global_decl`). A `fn` at statement level always begins a declaration whose type is a
+At the top level the first token decides: `import`, `fn`, `extern`, `struct`, `enum`, `$if`, or a
+type (a `global_decl`). A `fn` at statement level always begins a declaration whose type is a
 `fn_type` (`fn (i32) i32 op = add;`); function definitions are top-level only (D8.3).
 
 A parse that fails does not stop the file: the parser reports the error, skips to the next
@@ -318,6 +330,8 @@ that a missing `}` is reported once rather than once per following declaration, 
 ceasing to be one. Which of the two a `fn` starts is decided by the two tokens after it, and no
 speculation: a name and then `(` is a `fn_decl`, a `(` at once is a `fn_type` (D3.10). The
 skipped tokens are no production of this grammar; the tree holds them as an error node (D14.2).
+A statement or declaration recovery skip stops before `$if`. A block does not use `$if` as a
+top-level boundary because `$if` is also a valid statement there (D21.2).
 
 ## 8. Grammar-to-decision index
 
@@ -332,3 +346,4 @@ skipped tokens are no production of this grammar; the tree holds them as an erro
 | Statements             | D7.2 to D7.8, D7.11               |
 | Expressions            | D6.1 to D6.13, D3.14, D3.15, D10.2 |
 | Configuration values   | D21.1                             |
+| Compile-time conditions| D21.2                             |

@@ -34,6 +34,7 @@ import containers;
 import diag;
 import json;
 import modules;
+import scope;
 import std.strbuf;
 import types;
 
@@ -197,8 +198,7 @@ fn is_import_alias(ast.node* parent, ast.node* n) bool {
     return false;
 }
 
-fn record(index mut* ix, ast.node* n, ast.node* parent) void {
-    ast.sym* s = n->sym;
+fn record(index mut* ix, ast.node* n, ast.node* parent, ast.sym* s) void {
     reserve(ix);
     entry mut e = entry{};
     // D20.4: the name token, never the construct's first one
@@ -226,8 +226,30 @@ fn record(index mut* ix, ast.node* n, ast.node* parent) void {
 /// `parent` is the node this one hangs on, which is what tells an `as` alias
 /// from an ordinary occurrence; it is null at the module node.
 /// D9.3
-fn walk(index mut* ix, ast.node* n, ast.node* parent) void {
+fn walk(index mut* ix, ast.node* n, ast.node* parent, modules.module* m) void {
     if (n == null) {
+        return;
+    }
+    if (n->kind == ast.ast_kind.k_compile_if) {
+        // The selector resolved the reached condition names.
+        // An inactive branch contributes no occurrence.
+        // D20.3, D21.2
+        ast.node* mut current = n;
+        while (current != null && current->kind == ast.ast_kind.k_compile_if) {
+            walk(ix, current->a, current, m);
+            if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {
+                walk(ix, current->b, current, m);
+                return;
+            }
+            if (current->c == null) {
+                return;
+            }
+            if (current->c->kind != ast.ast_kind.k_compile_if) {
+                walk(ix, current->c, current, m);
+                return;
+            }
+            current = current->c;
+        }
         return;
     }
     // A node with a symbol but no name token of its own is not an occurrence of
@@ -235,16 +257,24 @@ fn walk(index mut* ix, ast.node* n, ast.node* parent) void {
     // binding's, while the name a reader sees is on the path segment or on the alias
     // beside them (ast.ft).
     // D20.3
-    if (n->sym != null && n->name_loc.file.len > 0) {
-        record(ix, n, parent);
+    ast.sym* mut resolved = n->sym;
+    if (resolved == null && n->kind == ast.ast_kind.k_ident
+        && (n->flags & ast.FLAG_SELECT_REF) != 0) {
+        scope.binding* b = scope.find(&m->names, n->name);
+        if (b != null && b->node != null) {
+            resolved = b->node->sym;
+        }
     }
-    walk(ix, n->a, n);
-    walk(ix, n->b, n);
-    walk(ix, n->c, n);
-    walk(ix, n->d, n);
+    if (resolved != null && n->name_loc.file.len > 0) {
+        record(ix, n, parent, resolved);
+    }
+    walk(ix, n->a, n, m);
+    walk(ix, n->b, n, m);
+    walk(ix, n->c, n, m);
+    walk(ix, n->d, n, m);
     u64 mut i = 0;
     while (i < ast.ast_len(n)) {
-        walk(ix, ast.ast_child(n, i), n);
+        walk(ix, ast.ast_child(n, i), n, m);
         i += 1;
     }
 }
@@ -280,7 +310,7 @@ fn index_module(index mut* ix, modules.module* m) void {
         return;
     }
     u64 start = ix->count;
-    walk(ix, m->ast, null);
+    walk(ix, m->ast, null, m);
     sort_from(ix, start);
 }
 

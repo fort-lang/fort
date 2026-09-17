@@ -3,7 +3,7 @@
 // D2
 //
 // This module started as a transliteration of src/bootstrap/lexer.c. The
-// source compiler adds `$cfg`; tools/diff_tokens.sh counts that intentional
+// source compiler adds `$cfg` and `$if`; tools/diff_tokens.sh counts that intentional
 // difference and compares both lexers over the remaining corpus.
 // D14.1
 //
@@ -46,6 +46,7 @@ enum tok_kind {
     char_lit, // D2.7: ival: the byte value
     string_lit, // D2.9: text: the decoded bytes, interned
     dollar_cfg, // D21.1: $cfg
+    dollar_if, // D21.2: $if
 
     /// D2.4: keywords in this order
     kw_as,
@@ -166,6 +167,8 @@ fn tok_kind_name(tok_kind kind) string {
         return "string literal";
     case tok_kind.dollar_cfg:
         return "$cfg";
+    case tok_kind.dollar_if:
+        return "$if";
     case tok_kind.kw_as:
         return "as";
     case tok_kind.kw_bool:
@@ -723,23 +726,32 @@ fn lex_ident(lexer mut* lx) bool {
     return true;
 }
 
-/// Reads the compiler form `$cfg`. No other word can follow `$`.
+/// Reads `$cfg` or `$if`. No other word can follow `$`.
 fn lex_dollar(lexer mut* lx) bool {
     diag.loc at = here(lx);
     u64 start = lx->pos;
-    if (peek_at(lx, 0) != byte_of('$') || peek_at(lx, 1) != byte_of('c')
-        || peek_at(lx, 2) != byte_of('f') || peek_at(lx, 3) != byte_of('g')
-        || is_ident_byte(peek_at(lx, 4))) {
+    tok_kind mut kind = tok_kind.eof;
+    u64 mut len = 0;
+    if (peek_at(lx, 0) == byte_of('$') && peek_at(lx, 1) == byte_of('c')
+        && peek_at(lx, 2) == byte_of('f') && peek_at(lx, 3) == byte_of('g')
+        && !is_ident_byte(peek_at(lx, 4))) {
+        kind = tok_kind.dollar_cfg;
+        len = 4;
+    } else if (peek_at(lx, 0) == byte_of('$') && peek_at(lx, 1) == byte_of('i')
+               && peek_at(lx, 2) == byte_of('f') && !is_ident_byte(peek_at(lx, 3))) {
+        kind = tok_kind.dollar_if;
+        len = 3;
+    } else {
         msg_begin(lx);
         msg_str(lx, "unexpected character '$'");
         return fail(lx, at);
     }
     u64 mut i = 0;
-    while (i < 4) {
+    while (i < len) {
         advance(lx);
         i += 1;
     }
-    tokvec_push(lx->out, make_token(lx, tok_kind.dollar_cfg, start, at));
+    tokvec_push(lx->out, make_token(lx, kind, start, at));
     return true;
 }
 

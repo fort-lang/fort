@@ -122,10 +122,10 @@ bullet at a time and without a rewrite.
   pass yet; a listed test that passes fails the run, so shrink the list in the same commit that
   makes tests pass. `test/lang/bootstrap-unsupported.txt` lists tests that use features the C
   bootstrap deliberately lacks (floats, the nested array and span levels of D3.6, do-while,
-  `?:` and `$cfg`; function pointers are in its subset, D3.10), and
-  `test/lang/unsupported-stage2.txt` is the same list for stage2. Stage2 implements all five
-  families, so its list is empty (T-043, T-044, T-041, T-156). Keep such features out of core
-  tests, or
+  `?:`, `$cfg`, and `$if`; function pointers are in its subset, D3.10), and
+  `test/lang/unsupported-stage2.txt` is the same list for stage2. Stage2 implements all six
+  families, so its list is empty (T-043, T-044, T-041, T-156, T-157). Keep these features out
+  of core tests, or
   split them into their own test, so the core tests exercise stage1. `run_tests.py --lint`
   validates directives without a compiler and runs before every test run;
   `run_tests.py --check-json` is a mode of its own (ctest `lang_check_json`, also run by
@@ -399,8 +399,9 @@ bullet at a time and without a rewrite.
   and `bootstrap-unsupported.txt` stays stage1's; `lang-stage2` names the first with
   `--unsupported`. Neither run excuses a test. A ticket that gives stage2 a feature stage1 lacks
   takes the entry out of stage2's list alone. It also raises `NESTED_FILES`, `FORM_FILES`,
-  `FLOAT_FILES` or `CFG_FILES` in `tools/diff_ast.sh`. The script skips exactly the files that
-  stage1 refuses for a nested level, a `do`-`while`, a `?:`, a float literal or `$cfg`. It holds
+  `FLOAT_FILES`, `CFG_FILES`, or `IF_FILES` in `tools/diff_ast.sh`. The script skips exactly the
+  files that stage1 refuses for a nested level, a `do`-`while`, a `?:`, a float literal, `$cfg`,
+  or `$if`. It holds
   each number as an equality: the differential compares two
   trees, and a file only one compiler parses has no second tree. The second family carries one
   guard more, since its two forms are whole constructs and not a type suffix: stage2 must not
@@ -410,9 +411,10 @@ bullet at a time and without a rewrite.
   asserts that the two arms of a `?:` must have one type -- leaves stage2's list like any `run`
   test, because stage2 now reports the error the test annotates. And a **new** test of such a
   feature is added to stage1's list, never to stage2's, since stage1 must still reject it.
-  T-041 is the third. Floats emptied stage2's list. T-156 adds `$cfg` as the fifth family and
-  keeps that list empty. Four counters now share one loop in `diff_ast.sh`. A file that holds two
-  constructs is counted by the first matching test. Read the four numbers from the script's own
+  T-041 is the third. Floats emptied stage2's list. T-156 adds `$cfg` as the fifth family.
+  T-157 adds `$if` as the sixth family. Both keep that list empty. Five counters now share one
+  loop in `diff_ast.sh`. A file that holds two
+  constructs is counted by the first matching test. Read the five numbers from the script's own
   failures. Do not compute them.
   ctest `stage-usage` (label `unit`) diffs stage1's and stage2's `--help`, `--version` and
   usage line, which is what holds the option table `src/fort/main.ft` copies from
@@ -542,7 +544,8 @@ bullet at a time and without a rewrite.
   a second equality, `CLEAN_FILES` and `PROGRAM_FILES`, because a comparison that shrank would
   otherwise pass while seeing less. `diff_ast.sh` carries four more, one for each syntax family
   stage1 alone refuses: `NESTED_FILES`, `FORM_FILES` (a `do`-`while` or a `?:`), `FLOAT_FILES`
-  and `CFG_FILES` (`$cfg`). So a `.ft` that uses one family moves two constants and not one, and
+  `CFG_FILES` (`$cfg`) and `IF_FILES` (`$if`). So a `.ft` that uses one family moves two
+  constants and not one, and
   T-042 moved **seven lines** for eleven files, four constants over five files: `FT_FILES` 842 to
   853 on four lines, `FORM_FILES` 12 to 13 for `std/math.ft`, `FLOAT_FILES` 63 to 67 for four
   tests, and `CORPUS_FILES` 604 to 615 in `test/highlight_test.py`. Count the lines and not the
@@ -812,8 +815,9 @@ bullet at a time and without a rewrite.
   the four `tools/diff_*.sh`; `CLEAN_FILES` in `diff_check.sh` if stage1 checks it clean;
   `PROGRAM_FILES` in `diff_ir.sh` if it compiles into a module; `CORPUS_FILES` in
   `test/parser_recovery_test.c` if it is a `fail` test and in `test/highlight_test.py` if it is
-  not; and `NESTED_FILES`, `FORM_FILES`, `FLOAT_FILES` or `CFG_FILES` in `diff_ast.sh` if it uses
-  a nested array or span level, a `do`-`while` or a `?:`, a float or `$cfg`. A new `.c` or `.h`
+  not; and `NESTED_FILES`, `FORM_FILES`, `FLOAT_FILES`, `CFG_FILES` or `IF_FILES` in
+  `diff_ast.sh` if it uses a nested array or span level, a `do`-`while` or a `?:`, a float,
+  `$cfg`, or `$if`. A new `.c` or `.h`
   under `src/` or
   `test/` raises no counter of that list, and one counter fires on all three extensions:
   `test_the_corpus_the_lint_reads_is_the_measured_one` in `test/knowledge_lint_test.py`, which

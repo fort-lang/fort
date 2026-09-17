@@ -882,6 +882,36 @@ string TARGET_OS = $cfg(target_os);
 string MODE = $cfg(mode);
 ```
 
+### 5.14 Compile-time selection (D21.2)
+
+`$if` selects declarations at module level and statements inside a function. Its condition uses
+the ordinary expression grammar. The condition must be a selection constant expression of type
+`bool`. `else $if` selects the first true branch. A final `else` supplies the last branch.
+One chain can contain at most 256 conditions. The compiler reports the 257th `$if`.
+
+A condition can use literals, `$cfg`, `sizeof(T)`, fixed-array `.len`, and unconditional immutable
+declarations from the same module. Such a declaration must have an unqualified primitive type or
+plain `string`. It can depend only on the same inputs and on other such declarations. Operators
+use their ordinary constant rules. Pointer, reference, array, and enum values are not available.
+Imported declarations, conditional declarations, and run-time values are also not available. The
+selector resolves only declarations that a condition reaches. It resolves them lazily and does not
+use source order. A reached cycle reports once, at the reference that closes the cycle. `&&`, `||`,
+and `?:` do not evaluate an operand that the result does not select.
+
+```fort
+string OS = $cfg(target_os);
+
+$if (OS == "macos") {
+    fn platform_value() i32 { return 1; }
+} else {
+    fn platform_value() i32 { return 2; }
+}
+```
+
+The parser reads all branches. Later passes inspect only the selected branch. The selector does
+not evaluate a nested `$if` in an inactive branch. An inactive branch adds no name, semantic
+diagnostic, index item, data, function, or instruction.
+
 ## 6. Statements
 
 A block is `{ statement* }`; every `if`, loop and `switch` body is a block.

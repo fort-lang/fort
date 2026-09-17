@@ -1318,6 +1318,16 @@ expressions. A constant expression is one of:
 - a parenthesized constant expression;
 - a struct or array literal whose leaves are constant expressions.
 
+The selection constant expressions of D21.2 use the ordinary expression grammar. The first version
+accepts literals, `$cfg`, `sizeof(T)`, fixed-array `.len`, and unconditional immutable declarations
+from the same module. Such a declaration must have an unqualified primitive type or plain
+`string`. Operators combine these values under the ordinary constant rules. Pointer, reference,
+array, enum, imported, conditional, and run-time values are not available. This limit lets
+selection finish before the compiler constructs the module closure and collects ordinary names.
+Selection does not compute a named value type's layout, so `sizeof(node)` is not available. It can
+use an unconditional same-module struct or enum name behind a pointer or in a function signature.
+Those forms do not require the named value type's layout.
+
 Not constant: calls, `&` (except `&` of a module-level declaration inside a module-level
 initializer, D7.10), indexing, span expressions, field access, `.len` of a span or string, reads of
 `mut` globals, `cast` involving `bool`, pointers or spans (`cast` of `null` is an error

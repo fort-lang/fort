@@ -249,6 +249,27 @@ fn check_if(check.checker mut* ck, ast.node mut* n) void {
     }
 }
 
+/// Checks only the branch the early selector chose. Each branch is a block and
+/// keeps its ordinary local scope.
+/// D21.2
+fn check_compile_if(check.checker mut* ck, ast.node mut* n) void {
+    ast.node mut* mut current = n;
+    while (current != null && current->kind == ast.ast_kind.k_compile_if) {
+        if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {
+            check_block(ck, current->b);
+            return;
+        }
+        if (current->c == null) {
+            return;
+        }
+        if (current->c->kind != ast.ast_kind.k_compile_if) {
+            check_block(ck, current->c);
+            return;
+        }
+        current = current->c;
+    }
+}
+
 fn check_while(check.checker mut* ck, ast.node mut* n, bool tail) void {
     ck->loops += 1;
     // D7.5: the separate scopes give this for free
@@ -580,6 +601,11 @@ fn has_break(ast.node* n) bool {
         // can stand in.
     default:
         return false;
+    case ast.ast_kind.k_compile_if:
+        if ((n->flags & ast.FLAG_SELECT_THEN) != 0) {
+            return has_break(n->b);
+        }
+        return has_break(n->c);
     }
     if (has_break(n->a) || has_break(n->b) || has_break(n->c) || has_break(n->d)) {
         return true;
@@ -616,6 +642,11 @@ fn check_terminates(ast.node* n) bool {
     case ast.ast_kind.k_if:
         // D8.4
         return n->c != null && check_terminates(n->b) && check_terminates(n->c);
+    case ast.ast_kind.k_compile_if:
+        if ((n->flags & ast.FLAG_SELECT_THEN) != 0) {
+            return check_terminates(n->b);
+        }
+        return check_terminates(n->c);
     case ast.ast_kind.k_while:
         return is_true_literal(n->a) && !has_break(n->b);
     case ast.ast_kind.k_for:
@@ -673,6 +704,8 @@ fn check_stmt(check.checker mut* ck, ast.node mut* n) void {
         check_call_stmt(ck, n);
     case ast.ast_kind.k_if:
         check_if(ck, n);
+    case ast.ast_kind.k_compile_if:
+        check_compile_if(ck, n);
     case ast.ast_kind.k_while:
         check_while(ck, n, false);
     case ast.ast_kind.k_do_while:
@@ -783,13 +816,35 @@ fn check_module_bodies(check.checker mut* ck, modules.module* m) void {
         // D14.2, D13.3: check_module stops before this call
         panic("check_stmt.check_module_bodies: the module did not parse");
     }
-    u64 mut i = 0;
-    while (i < ast.ast_len(m->ast)) {
-        ast.node mut* decl = check.ast_child_mut(m->ast, i);
-        i += 1;
-        if (decl->kind == ast.ast_kind.k_fn_decl && decl->b != null && decl->sym != null) {
-            check_function_body(ck, decl, decl->sym);
+    check_declaration_bodies(ck, m->ast);
+}
+
+fn check_declaration_body(check.checker mut* ck, ast.node mut* decl) void {
+    ast.node mut* mut current = decl;
+    while (current->kind == ast.ast_kind.k_compile_if) {
+        if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {
+            check_declaration_bodies(ck, current->b);
+            return;
         }
+        if (current->c == null) {
+            return;
+        }
+        if (current->c->kind != ast.ast_kind.k_compile_if) {
+            check_declaration_bodies(ck, current->c);
+            return;
+        }
+        current = current->c;
+    }
+    if (current->kind == ast.ast_kind.k_fn_decl && current->b != null && current->sym != null) {
+        check_function_body(ck, current, current->sym);
+    }
+}
+
+fn check_declaration_bodies(check.checker mut* ck, ast.node mut* list) void {
+    u64 mut i = 0;
+    while (list != null && i < ast.ast_len(list)) {
+        check_declaration_body(ck, check.ast_child_mut(list, i));
+        i += 1;
     }
 }
 

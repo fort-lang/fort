@@ -92,6 +92,7 @@ enum ast_kind {
     k_enum_decl,   // name; list: members
     k_enum_member, // name; a: the explicit value or null
     k_var_decl,    // a: type; name; b: initializer (a global or a local)
+    k_compile_if,  // D21.2: a: condition; b: then block; c: else block or k_compile_if
 
     // ---- types (grammar.md 4) ----
     k_type,          // a: base type; flags: the base position's own and mut;
@@ -162,6 +163,9 @@ u32 FLAG_EXTERN = 4; // D9.8: k_fn_decl: an `extern fn` declaration
 u32 FLAG_DEFAULT = 8; // D7.6: k_case: the `default` clause
 u32 FLAG_DESIGNATED = 16; // D6.5: k_brace_init: `.field = value` members
 u32 FLAG_VARIADIC = 32; // D9.8: k_fn_decl: an extern C variable tail
+u32 FLAG_SELECT_DONE = 64; // D21.2: k_compile_if: the selector evaluated the condition
+u32 FLAG_SELECT_THEN = 128; // D21.2: k_compile_if: the selector chose the then branch
+u32 FLAG_SELECT_REF = 256; // D20.3: k_ident: the selector resolved this condition reference
 
 /// The first non-zero capacity of a child list and of the arena's node vector;
 /// growth doubles from there.
@@ -505,6 +509,8 @@ fn ast_kind_name(ast_kind kind) string {
         return "member";
     case ast_kind.k_var_decl:
         return "var";
+    case ast_kind.k_compile_if:
+        return "compile-if";
     case ast_kind.k_type:
         return "type";
     case ast_kind.k_type_prim:
@@ -719,6 +725,29 @@ fn dump_type(node* n, strbuf.str_buf mut* out) void {
     sexp_close(out);
 }
 
+/// Prints one compile-time chain without recursive calls along its `else $if`
+/// links. Branch contents still use the ordinary source-order tree walk.
+fn dump_compile_if(node* n, strbuf.str_buf mut* out) void {
+    node* mut current = n;
+    u64 mut opened = 0;
+    while (current != null && current->kind == ast_kind.k_compile_if) {
+        sexp_open(out, "compile-if");
+        opened += 1;
+        sexp_child(current->a, out);
+        sexp_child(current->b, out);
+        if (current->c == null || current->c->kind != ast_kind.k_compile_if) {
+            sexp_child(current->c, out);
+            break;
+        }
+        strbuf.push(out, ' ');
+        current = current->c;
+    }
+    while (opened > 0) {
+        sexp_close(out);
+        opened -= 1;
+    }
+}
+
 fn dump_decl(node* n, strbuf.str_buf mut* out) void {
     if (n->kind == ast_kind.k_import) {
         sexp_open(out, "import");
@@ -769,6 +798,9 @@ fn dump_decl(node* n, strbuf.str_buf mut* out) void {
         sexp_open(out, ast_kind_name(n->kind));
         sexp_name(out, n->name);
         sexp_list(n, out);
+    } else if (n->kind == ast_kind.k_compile_if) {
+        dump_compile_if(n, out);
+        return;
     } else {
         sexp_open(out, ast_kind_name(n->kind));
         sexp_list(n, out);
@@ -907,7 +939,8 @@ fn is_decl_kind(ast_kind kind) bool {
         || kind == ast_kind.k_import_item || kind == ast_kind.k_fn_decl
         || kind == ast_kind.k_param || kind == ast_kind.k_struct_decl
         || kind == ast_kind.k_field_decl || kind == ast_kind.k_enum_decl
-        || kind == ast_kind.k_enum_member || kind == ast_kind.k_var_decl;
+        || kind == ast_kind.k_enum_member || kind == ast_kind.k_var_decl
+        || kind == ast_kind.k_compile_if;
 }
 
 /// Whether the kind is a statement, which dump_stmt prints.

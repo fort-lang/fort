@@ -2442,6 +2442,37 @@ language server to use them, while the server itself lands after the bootstrap f
   these values during a build and during `--check`. `--tokens` and `--ast` parse `$cfg` without
   evaluating it.
 
+### D21.2 Compile-time conditions
+- owner: `core-language.md` (Compile-time selection), `grammar.md` (Declarations, Statements),
+  `type-system.md` (Selection constant expressions), `toolchain.md` (1, 2, 4, 9.1).
+- rule: `$if (condition) { ... } else $if (condition) { ... } else { ... }` selects declarations
+  at module level and statements inside a function. Each branch holds constructs of its context.
+  An `else $if` chain selects its first true branch. A chain with no true condition and no `else`
+  selects nothing. One chain can contain at most 256 conditions. The compiler reports the 257th
+  `$if` as a compile error.
+
+  A condition must have type `bool` and must be a selection constant expression. Selection
+  constant expressions use the ordinary expression grammar and the precedence of D6.1. The first
+  version accepts literals, `$cfg`, `sizeof(T)`, fixed-array `.len`, and unconditional immutable
+  declarations from the same module. Such a declaration must have an unqualified primitive type
+  or plain `string`. It can depend only on the same inputs and on other such declarations.
+  Operators combine these values under the ordinary constant rules. The selector rejects pointer,
+  reference, array, and enum values. Imported declarations, declarations inside a `$if`, and
+  run-time values are not available to a condition. The selector resolves only declarations that
+  a condition reaches. It resolves them lazily and does not use source order. A reached cycle
+  reports once, at the reference that closes the cycle. `&&`, `||`, and `?:` do not evaluate an
+  operand that the result does not select.
+
+  The lexer and parser read all branches. They report lexical and syntax errors in any branch.
+  The compiler selects branches before module closure construction and ordinary name collection.
+  Later passes inspect only selected branches. The selector does not evaluate a nested `$if` in
+  an inactive branch. An inactive branch adds no name, semantic diagnostic, index item, data,
+  function, or instruction. `--ast` prints all branches.
+
+  A declaration branch contains declarations or nested declaration `$if` forms. A statement
+  branch contains statements or nested statement `$if` forms. `$if` is not a field, enum member,
+  parameter, type, or expression form.
+
 ## Ready-to-implement checklist
 
 - [x] Every TBD in the original notes has a decision above.

@@ -415,6 +415,27 @@ fn gen_if(gen.emitter mut* g, ast.node* n) void {
     gen.gen_block_begin(g, done);
 }
 
+/// Emits only the selected statement branch. Selection adds no run-time branch
+/// and the branch block keeps its source scope.
+/// D21.2
+fn gen_compile_if(gen.emitter mut* g, ast.node* n) void {
+    ast.node* mut current = n;
+    while (current != null && current->kind == ast.ast_kind.k_compile_if) {
+        if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {
+            gen_block(g, current->b);
+            return;
+        }
+        if (current->c == null) {
+            return;
+        }
+        if (current->c->kind != ast.ast_kind.k_compile_if) {
+            gen_block(g, current->c);
+            return;
+        }
+        current = current->c;
+    }
+}
+
 /// The body of a loop, with `break` and `continue` targeting it: they target
 /// the innermost enclosing loop, so the enclosing targets are saved and
 /// restored around it.
@@ -791,6 +812,9 @@ fn gen_stmt(gen.emitter mut* g, ast.node* n) void {
     case ast.ast_kind.k_if:
         gen_if(g, n);
         return;
+    case ast.ast_kind.k_compile_if:
+        gen_compile_if(g, n);
+        return;
     case ast.ast_kind.k_while:
         gen_while(g, n);
         return;
@@ -863,6 +887,24 @@ fn gen_block_scoped(gen.emitter mut* g, ast.node* n, gen.scope_kind kind) void {
 /// D19.4
 fn collect_locals(ast.node* n, gen.node_ref_vec mut* out) void {
     if (n == null) {
+        return;
+    }
+    if (n->kind == ast.ast_kind.k_compile_if) {
+        ast.node* mut current = n;
+        while (current != null && current->kind == ast.ast_kind.k_compile_if) {
+            if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {
+                collect_locals(current->b, out);
+                return;
+            }
+            if (current->c == null) {
+                return;
+            }
+            if (current->c->kind != ast.ast_kind.k_compile_if) {
+                collect_locals(current->c, out);
+                return;
+            }
+            current = current->c;
+        }
         return;
     }
     if ((n->kind == ast.ast_kind.k_var_decl || n->kind == ast.ast_kind.k_range_for) &&
@@ -1254,36 +1296,83 @@ fn gen_struct_type(gen.emitter mut* g, ast.node* decl) void {
 
 fn gen_module(gen.emitter mut* g, modules.module* m) void {
     g->module = m;
-    u64 mut i = 0;
-    while (i < ast.ast_len(m->ast)) {
-        ast.node* decl = ast.ast_child(m->ast, i);
-        if (decl->kind == ast.ast_kind.k_struct_decl) {
-            gen_struct_type(g, decl);
-        }
-        i += 1;
-    }
-    i = 0;
-    while (i < ast.ast_len(m->ast)) {
-        ast.node* decl = ast.ast_child(m->ast, i);
-        if (decl->kind == ast.ast_kind.k_var_decl) {
-            // The module-level data, in source order, and before the functions of the same
-            // module: forward references to a global are legal in `.ll`, so either order
-            // would do, and this one numbers a global's string constants before its bodies'
-            // (item 1).
-            // D7.10, D19.5
-            gen_data.gen_global(g, decl);
-        }
-        i += 1;
-    }
-    i = 0;
-    while (i < ast.ast_len(m->ast)) {
-        ast.node* decl = ast.ast_child(m->ast, i);
-        if (decl->kind == ast.ast_kind.k_fn_decl && decl->b != null) {
-            gen_function(g, decl);
-        }
-        i += 1;
-    }
+    gen_declarations(g, m->ast, 1);
+    // Module-level data precedes functions. Forward references are legal in
+    // LLVM IR, and this order fixes private-data numbering.
+    // D7.10, D19.5
+    gen_declarations(g, m->ast, 2);
+    gen_declarations(g, m->ast, 3);
     g->module = null;
+}
+
+fn gen_declaration(gen.emitter mut* g, ast.node* decl, i32 section) void {
+    ast.node* mut current = decl;
+    while (current->kind == ast.ast_kind.k_compile_if) {
+        if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {
+            gen_declarations(g, current->b, section);
+            return;
+        }
+        if (current->c == null) {
+            return;
+        }
+        if (current->c->kind != ast.ast_kind.k_compile_if) {
+            gen_declarations(g, current->c, section);
+            return;
+        }
+        current = current->c;
+    }
+    if (section == 1 && current->kind == ast.ast_kind.k_struct_decl) {
+        gen_struct_type(g, current);
+    } else if (section == 2 && current->kind == ast.ast_kind.k_var_decl) {
+        gen_data.gen_global(g, current);
+    } else if (section == 3 && current->kind == ast.ast_kind.k_fn_decl && current->b != null) {
+        gen_function(g, current);
+    }
+}
+
+fn gen_declarations(gen.emitter mut* g, ast.node* list, i32 section) void {
+    u64 mut i = 0;
+    while (list != null && i < ast.ast_len(list)) {
+        gen_declaration(g, ast.ast_child(list, i), section);
+        i += 1;
+    }
+}
+
+fn find_main(ast.node* list) ast.node* {
+    u64 mut i = 0;
+    while (list != null && i < ast.ast_len(list)) {
+        ast.node* decl = ast.ast_child(list, i);
+        i += 1;
+        if (decl->kind == ast.ast_kind.k_compile_if) {
+            ast.node* found = find_main_node(decl);
+            if (found != null) {
+                return found;
+            }
+        } else if (decl->kind == ast.ast_kind.k_fn_decl && decl->sym != null
+                   && !decl->sym->error && decl->sym->ty != null
+                   && decl->sym->ty->kind == types.type_kind.k_fn
+                   && decl->sym->name == "main") {
+            return decl;
+        }
+    }
+    return null;
+}
+
+fn find_main_node(ast.node* decl) ast.node* {
+    ast.node* mut current = decl;
+    while (current != null && current->kind == ast.ast_kind.k_compile_if) {
+        if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {
+            return find_main(current->b);
+        }
+        if (current->c == null) {
+            return null;
+        }
+        if (current->c->kind != ast.ast_kind.k_compile_if) {
+            return find_main(current->c);
+        }
+        current = current->c;
+    }
+    return null;
 }
 
 /// Emits the whole program into `g`: every module of the closure in dependency
@@ -1310,17 +1399,11 @@ fn gen_program(gen.emitter mut* g, check.checker* ck, modules.module_set* set) b
     }
     modules.module* entry = modules.entry(set);
     if (entry != null && entry->ast != null) {
-        i = 0;
-        while (i < ast.ast_len(entry->ast)) {
-            ast.node* decl = ast.ast_child(entry->ast, i);
-            if (decl->kind == ast.ast_kind.k_fn_decl && decl->sym != null && !decl->sym->error &&
-                decl->sym->ty != null && decl->sym->ty->kind == types.type_kind.k_fn &&
-                decl->sym->name == "main") {
-                // D11.6: the only unmangled definitions, in the entry module
-                gen_fort_entry(g, decl->sym);
-                gen_main(g);
-            }
-            i += 1;
+        ast.node* main_decl = find_main(entry->ast);
+        if (main_decl != null) {
+            // D11.6: the only unmangled definitions, in the entry module
+            gen_fort_entry(g, main_decl->sym);
+            gen_main(g);
         }
     }
     gen_data.gen_finish(g);

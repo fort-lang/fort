@@ -39,6 +39,7 @@
 // not by a table of function pointers.
 // D3.10
 import ast;
+import comptime;
 import containers;
 import diag;
 import lexer;
@@ -107,6 +108,7 @@ struct module {
     ast.node mut* ast; // the module node, complete only when `parsed`
     scope.scope names; // D7.9: the module namespace
     bool parsed;       // no diagnostic was reported while lexing and parsing it
+    bool selected;     // compile-time selection completed without a diagnostic
     bool entry; // D14.1: the module named on the command line
     module_state state;
 }
@@ -637,6 +639,41 @@ fn bind_name(session.session mut* s, module_set mut* set, module mut* m,
     return bound;
 }
 
+fn collect_declaration(session.session mut* s, module_set mut* set, module mut* m,
+                            ast.node mut* decl) bool {
+    ast.node mut* mut current = decl;
+    while (current->kind == ast.ast_kind.k_compile_if) {
+        if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {
+            return collect_declaration_list(s, set, m, current->b);
+        }
+        if (current->c == null) {
+            return true;
+        }
+        if (current->c->kind != ast.ast_kind.k_compile_if) {
+            return collect_declaration_list(s, set, m, current->c);
+        }
+        current = current->c;
+    }
+    scope.bind_kind kind = decl_kind(current);
+    if (kind == scope.bind_kind.b_none) {
+        return true;
+    }
+    return bind_name(s, set, m, current->name, kind, current->loc, current) != null;
+}
+
+fn collect_declaration_list(session.session mut* s, module_set mut* set, module mut* m,
+                                 ast.node mut* list) bool {
+    bool mut ok = true;
+    u64 mut i = 0;
+    while (list != null && i < ast.ast_len(list)) {
+        if (!collect_declaration(s, set, m, ast.ast_child_mut(list, i))) {
+            ok = false;
+        }
+        i += 1;
+    }
+    return ok;
+}
+
 /// Collects the module's declarations into its namespace before its imports are
 /// resolved, so that another module's symbol reading can ask whether this one
 /// declares a name (module-system.md 3). Enum members are not names, so only the
@@ -648,19 +685,7 @@ fn collect_declarations(session.session mut* s, module_set mut* set, module mut*
     if (m->ast == null) {
         return true;
     }
-    bool mut ok = true;
-    u64 mut i = 0;
-    while (i < ast.ast_len(m->ast)) {
-        ast.node mut* decl = ast.ast_child_mut(m->ast, i);
-        scope.bind_kind kind = decl_kind(decl);
-        if (kind != scope.bind_kind.b_none) {
-            if (bind_name(s, set, m, decl->name, kind, decl->loc, decl) == null) {
-                ok = false;
-            }
-        }
-        i += 1;
-    }
-    return ok;
+    return collect_declaration_list(s, set, m, m->ast);
 }
 
 // ---- loading a module (module-system.md 10) ------------------------------------------
@@ -723,6 +748,10 @@ fn load_module(session.session mut* s, module_set mut* set, string path, string 
     lexer.tokvec_free(&toks);
     m->parsed = session.error_count(s) == before;
     if (!m->parsed) {
+        return null;
+    }
+    m->selected = comptime.select_module(s, m->ast);
+    if (!m->selected) {
         return null;
     }
     if (!collect_declarations(s, set, m)) {
@@ -796,17 +825,42 @@ fn prefix_declares(session.session mut* s, module_set mut* set, string path, str
     u64 before = session.error_count(s);
     // D14.2: a file that reported anything declares nothing
     lexer.lex_file(s, file, source, &toks);
-    ast.node* probed = parser.parse_module(s, file, &toks, &ar);
-    if (probed != null && session.error_count(s) == before) {
-        u64 mut i = 0;
-        while (i < ast.ast_len(probed) && !declares) {
-            ast.node* decl = ast.ast_child(probed, i);
-            declares = decl_kind(decl) != scope.bind_kind.b_none && decl->name == name;
-            i += 1;
-        }
+    ast.node mut* probed = parser.parse_module(s, file, &toks, &ar);
+    if (probed != null && session.error_count(s) == before
+        && comptime.select_module(s, probed)) {
+        declares = selected_declares(probed, name);
     }
     diag.unmute(session.diags(s));
     return declares;
+}
+
+fn selected_declares(ast.node* list, string name) bool {
+    u64 mut i = 0;
+    while (list != null && i < ast.ast_len(list)) {
+        ast.node* decl = ast.ast_child(list, i);
+        i += 1;
+        if (selected_node_declares(decl, name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn selected_node_declares(ast.node* decl, string name) bool {
+    ast.node* mut current = decl;
+    while (current->kind == ast.ast_kind.k_compile_if) {
+        if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {
+            return selected_declares(current->b, name);
+        }
+        if (current->c == null) {
+            return false;
+        }
+        if (current->c->kind != ast.ast_kind.k_compile_if) {
+            return selected_declares(current->c, name);
+        }
+        current = current->c;
+    }
+    return decl_kind(current) != scope.bind_kind.b_none && current->name == name;
 }
 
 /// `import a.b.{s1, s2 as t};` is sugar for independent symbol imports from
@@ -1021,16 +1075,15 @@ fn is_ordered(module_set* set, module* m) bool {
 /// and the loader never ordered it.
 /// D14.2
 fn is_unordered_pass_module(module_set* set, module* m) bool {
-    return m->parsed && m->ast != null && !is_ordered(set, m);
+    return m->parsed && m->selected && m->ast != null && !is_ordered(set, m);
 }
 
 /// The modules a whole-closure pass visits, in the order it must visit them: the
-/// dependency order first, then every other module the loader read that parsed --
-/// one whose own import failed, or an importer of a file that did not parse -- in
-/// the reverse of the read order, which is depth first, so an imported module
-/// comes before its importer in that group too. The checker walks this order and
-/// so does the index walk, which is what makes the file order of the index the
-/// documented one; the two may not drift, so neither builds an order of its own.
+/// dependency order first, then every other module whose parse and selection
+/// completed -- one whose own import failed, or an importer of a file that did
+/// not parse -- in reverse read order. The read order is depth first, so an
+/// imported module comes before its importer in that group too. The checker and
+/// index walk use this order. Neither builds an order of its own.
 /// D9.10, D14.2, D20.3
 fn pass_count(module_set* set) u64 {
     u64 mut n = set->order.len;

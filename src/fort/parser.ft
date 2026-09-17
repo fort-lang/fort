@@ -56,13 +56,14 @@
 // compiler reports these two too, since stage2 must answer for a program the
 // way stage1 does while both exist.
 //
-// Three items of that list are gone from this parser and stay in the C one. A
+// Four items of that list are gone from this parser and stay in the C one. A
 // written type here may hold any number of array and span levels (`i32[3][4]`,
 // `i32[4]@`, `u8@@`, `node@[4]`), which the suffix rules spell and the C
 // refuses; a float literal parses here and nowhere in src/bootstrap; and the
-// source parser reads `$cfg` configuration expressions. So stage2 accepts a
-// program stage1 rejects. tools/diff_ast.sh counts the three syntax families.
-// T-043, D2.6, T-041, D21.1, T-156: the three items this parser gained over C
+// source parser reads `$cfg` configuration expressions and `$if` forms. So
+// stage2 accepts a program stage1 rejects. tools/diff_ast.sh counts the four
+// syntax families.
+// T-043, D2.6, T-041, D21.1, T-156, D21.2, T-157: four additions over C
 //
 // Deviations from the C, all of them forced by the language rather than
 // chosen. A `const char*` that is NULL to mean "this position takes an own" is
@@ -97,6 +98,11 @@ import std.strbuf;
 /// branches and types nest at most this deep.
 /// D2.11
 u32 PARSE_MAX_DEPTH = 256;
+
+/// One `$if` chain has a bounded number of condition nodes. The bound keeps
+/// selection and every later tree walk within a fixed stack depth.
+/// D21.2
+u32 COMPILE_IF_MAX_CONDITIONS = 256;
 
 /// The `for` forms grammar.md 7.3 distinguishes after `for (`.
 i32 FOR_PLAIN = 0;
@@ -134,11 +140,13 @@ string ALLOC_OWN_ERROR = "inside new an own follows a '*' of the element type";
 
 /// The recovery points, which differ in what ends a skip: the statements of a
 /// block or of a case clause, the clauses of a switch, the fields of a struct
-/// body, the declarations of the module (toolchain.md 4).
+/// body, and the declarations of a module or compile-time branch
+/// (toolchain.md 4).
 i32 RECOVER_STMT = 0;
 i32 RECOVER_CASE = 1;
 i32 RECOVER_FIELD = 2;
 i32 RECOVER_DECL = 3;
+i32 RECOVER_COMPILE_DECL = 4;
 
 /// What one parse of one file needs. The session owns the sink the diagnostics
 /// go to, so the parser itself owns only its message buffer.
@@ -1431,7 +1439,7 @@ fn starts_statement(lexer.tok_kind k) bool {
         || k == lexer.tok_kind.kw_for || k == lexer.tok_kind.kw_switch
         || k == lexer.tok_kind.kw_defer || k == lexer.tok_kind.kw_return
         || k == lexer.tok_kind.kw_break || k == lexer.tok_kind.kw_continue
-        || k == lexer.tok_kind.kw_do;
+        || k == lexer.tok_kind.kw_do || k == lexer.tok_kind.dollar_if;
 }
 
 /// The keywords that begin a case clause. Neither appears in a statement or an
@@ -1493,11 +1501,12 @@ fn count_open_groups(parser* p, u64 start) u32 {
 /// it did not see opened, a case keyword, a statement keyword and a token that
 /// starts a top-level declaration are left where the next construct reads them;
 /// the end of the file ends every skip. `level` is the recovery point: a struct
-/// field and a declaration run over the statement keywords, which start no field
-/// and no declaration, a declaration also drops a `}`, which closes nothing at the
-/// top level, and a case clause runs over the statement keywords of the body it is
-/// skipping. The first token is consumed when the construct consumed none, so a
-/// recovery always makes progress and the parse terminates.
+/// field and a declaration run over statement keywords. These keywords start no
+/// field or declaration. A module declaration also drops a `}`, which closes
+/// nothing at the top level. A compile-time declaration leaves that `}` for its
+/// branch. A case clause runs over the statement keywords of the body it skips.
+/// The first token is consumed when the construct consumed none. Thus, recovery
+/// always makes progress and the parse terminates.
 /// D14.2
 fn skip_to_boundary(parser mut* p, u64 start, i32 level) void {
     if (p->pos == start) {
@@ -1557,7 +1566,9 @@ fn skip_to_boundary(parser mut* p, u64 start, i32 level) void {
         // is a typo of the construct; a `;` inside one is part of it.
         if (braces == 0) {
             bool in_body = level == RECOVER_STMT || level == RECOVER_CASE;
-            if (at_decl_start(p) || (in_body && starts_case(k))
+            bool at_compile_decl = level == RECOVER_DECL || level == RECOVER_COMPILE_DECL;
+            if (at_decl_start(p) || (at_compile_decl && k == lexer.tok_kind.dollar_if)
+                || (in_body && starts_case(k))
                 || (level == RECOVER_STMT && starts_statement(k))) {
                 return;
             }
@@ -1760,6 +1771,93 @@ fn parse_if(parser mut* p) ast.node mut* {
             return null;
         }
         return finish_if_chain(p, first);
+    }
+    return null;
+}
+
+/// A declaration branch of `$if`. The braces hold declarations instead of
+/// statements. Each declaration remains in the branch node for `--ast`.
+/// D21.2
+fn parse_compile_decl_branch(parser mut* p) ast.node mut* {
+    diag.loc at_loc = here(p);
+    if (!expect(p, lexer.tok_kind.lbrace, "'{'") || !enter(p)) {
+        return null;
+    }
+    ast.node mut* branch = node_at(p, ast.ast_kind.k_block, at_loc);
+    while (!at(p, lexer.tok_kind.rbrace) && !at(p, lexer.tok_kind.eof)) {
+        u64 start = p->pos;
+        ast.node mut* decl = parse_top_decl(p);
+        if (decl != null) {
+            ast.ast_push(branch, decl);
+        }
+        if (p->failed) {
+            recover(p, branch, start, decl == null, RECOVER_COMPILE_DECL);
+        }
+    }
+    leave(p);
+    expect(p, lexer.tok_kind.rbrace, "'}'");
+    return finish(p, branch);
+}
+
+fn parse_compile_branch(parser mut* p, bool declarations) ast.node mut* {
+    if (declarations) {
+        return parse_compile_decl_branch(p);
+    }
+    return parse_block(p);
+}
+
+/// Ends each node range in an `else $if` chain.
+fn finish_compile_if_chain(parser mut* p, ast.node mut* first) ast.node mut* {
+    ast.node mut* mut n = first;
+    while (n != null && n->kind == ast.ast_kind.k_compile_if) {
+        n = finish(p, n)->c;
+    }
+    return first;
+}
+
+/// `$if` has one grammar at declaration position and one at statement position.
+/// Both forms keep all branches. Selection occurs after parsing.
+/// D21.2
+fn parse_compile_if(parser mut* p, bool declarations) ast.node mut* {
+    ast.node mut* mut first = null;
+    ast.node mut* mut prev = null;
+    u32 mut conditions = 0;
+    while (true) {
+        if (conditions == COMPILE_IF_MAX_CONDITIONS) {
+            error_here(p, "a $if chain can have at most 256 conditions");
+            return null;
+        }
+        conditions += 1;
+        diag.loc at_loc = here(p);
+        ast.node mut* n = node_at(p, ast.ast_kind.k_compile_if, at_loc);
+        bump(p);
+        n->a = parse_condition(p);
+        if (n->a == null) {
+            return null;
+        }
+        n->b = parse_compile_branch(p, declarations);
+        if (n->b == null) {
+            return null;
+        }
+        if (prev != null) {
+            prev->c = n;
+        }
+        if (first == null) {
+            first = n;
+        }
+        prev = n;
+        if (!at(p, lexer.tok_kind.kw_else)) {
+            return finish_compile_if_chain(p, first);
+        }
+        bump(p);
+        if (at(p, lexer.tok_kind.dollar_if)) {
+            continue;
+        }
+        prev->c = parse_compile_branch(p, declarations);
+        if (prev->c == null) {
+            return null;
+        }
+        return finish_compile_if_chain(p, first);
     }
     return null;
 }
@@ -2066,6 +2164,9 @@ fn parse_statement(parser mut* p) ast.node mut* {
     }
     if (at(p, lexer.tok_kind.kw_if)) {
         return parse_if(p);
+    }
+    if (at(p, lexer.tok_kind.dollar_if)) {
+        return parse_compile_if(p, false);
     }
     if (at(p, lexer.tok_kind.kw_while)) {
         return parse_while(p);
@@ -2477,6 +2578,9 @@ fn parse_import(parser mut* p) ast.node mut* {
 /// (grammar.md 2); a global is a var_decl whose initializer is constant.
 /// D7.10
 fn parse_top_decl(parser mut* p) ast.node mut* {
+    if (at(p, lexer.tok_kind.dollar_if)) {
+        return parse_compile_if(p, true);
+    }
     if (at(p, lexer.tok_kind.kw_fn)) {
         return parse_fn_top_decl(p);
     }

@@ -141,23 +141,24 @@ fi
 # them: an equality and not a floor, so that a file cannot slip out of the
 # comparison. A ticket that adds or removes a .ft file changes all four lines
 # in the same commit.
-FT_FILES=964
+FT_FILES=967
 
 # The files of that corpus stage1 compiles into a module, which are the ones
 # compared. It is an equality for the reason FT_FILES is: a comparison that
 # shrank would otherwise pass while seeing less, and ctest reads the exit
 # status and not the counts printed below.
-# It is 20 above diff_check.sh's CLEAN_FILES, and the two sets are not nested:
-# they differ by 106 files one way and 86 the other. T-131 and T-132 measured
+# It is 19 above diff_check.sh's CLEAN_FILES, and the two sets are not nested:
+# they differ by 106 files one way and 87 the other. T-131 and T-132 measured
 # earlier values; T-132's intermediate commit read 106 and 85 while
 # std/rt_float.ft stood empty. This script's roots are wider -- -I src
 # -I src/fort -I test/fort/support reaches the 106 test/fort tests that import
 # a support module, which that script cannot resolve and skips -- and its
-# question is narrower, since the 86 files that check clean and hold no `main`
+# question is narrower, since the 87 files that check clean and hold no `main`
 # compile into no module and are skipped here. diff_check.sh says beside its
 # own constant how the two group sizes are measured.
 # T-144 remeasured 509 clean, 530 programs, 85 clean-only, and 106 program-only.
 # T-153 measured 514 clean, 534 programs, 86 clean-only, and 106 program-only.
+# T-157 measured 515 clean, 534 programs, 87 clean-only, and 106 program-only.
 PROGRAM_FILES=534
 
 # The pass pipeline `opt` is given. `verify` alone parses the module and runs
