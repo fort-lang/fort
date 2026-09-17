@@ -2065,6 +2065,36 @@ static bool parse_params(parser_t* p, ast_node_t* fn) {
     return expect(p, TOK_RPAREN, "')'");
 }
 
+// An extern parameter list has one or more fixed parameters before `...`.
+// The tail mark is a flag, not a parameter node.
+// D9.8
+static bool parse_extern_params(parser_t* p, ast_node_t* fn) {
+    if (!expect(p, TOK_LPAREN, "'('")) {
+        return false;
+    }
+    if (!at(p, TOK_RPAREN)) {
+        for (;;) {
+            ast_node_t* param = node_at(p, AST_PARAM, here(p));
+            param->a = parse_type(p, false);
+            if (param->a == NULL || !expect_name(p, param)) {
+                return false;
+            }
+            ast_push(fn, finish(p, param));
+            if (!at(p, TOK_COMMA)) {
+                break;
+            }
+            bump(p);
+            if (at(p, TOK_ELLIPSIS)) {
+                fn->tail_loc = here(p);
+                fn->flags |= AST_FLAG_VARIADIC;
+                bump(p);
+                break;
+            }
+        }
+    }
+    return expect(p, TOK_RPAREN, "')'");
+}
+
 // fn_decl = "fn" identifier "(" [ param_list ] ")" return_type block, with the
 // `fn` already parsed: the name is the second token and the result comes last.
 // D8.1
@@ -2110,8 +2140,9 @@ static ast_node_t* parse_fn_top_decl(parser_t* p) {
     return finish(p, n);
 }
 
-// extern_decl = "extern" "fn" identifier "(" [ param_list ] ")" return_type
-// ";": a declaration with no body.
+// extern_decl = "extern" "fn" identifier "(" extern_params ")" return_type
+// ";": a declaration with no body. An extern variable tail follows one or
+// more fixed parameters.
 // D9.8
 static ast_node_t* parse_extern_decl(parser_t* p) {
     const loc_t loc = here(p);
@@ -2121,7 +2152,7 @@ static ast_node_t* parse_extern_decl(parser_t* p) {
     }
     ast_node_t* n = node_at(p, AST_FN_DECL, loc);
     n->flags = AST_FLAG_EXTERN;
-    if (!expect_name(p, n) || !parse_params(p, n)) {
+    if (!expect_name(p, n) || !parse_extern_params(p, n)) {
         return NULL;
     }
     n->a = parse_return_type(p);

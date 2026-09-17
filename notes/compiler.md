@@ -678,9 +678,10 @@ gone.
   `i32[4]@`, `u8@@`, `node@[4]`, T-043), no `do { } while` and no `?:`. Function
   pointers are inside the subset (D3.10), and a dispatch table wraps them in a struct, because a
   function type carries no suffix of its own (T-136: `fn (i32) i32[2]` returns an `i32[2]`, so an
-  array of function pointers is `struct slot { fn (i32) i32 f; }` and `slot[2]`). These are the
-  constructs a C file may hold that have no fort spelling, with what replaces each; the rules the
-  bootstrap
+  array of function pointers is `struct slot { fn (i32) i32 f; }` and `slot[2]`). T-153 puts an
+  explicit C variable tail inside the subset when its types use no other unsupported form. These
+  are the constructs a C file may hold that have no fort spelling, with what replaces each; the
+  rules the bootstrap
   already follows so that it stays portable are the first four.
   **The target bootstrap chain and its invariants** (T-150, D14.7). The user supplies one
   executable seed for `linux` or `darwin`. `tools/bootstrap.seed` names the source baseline that
@@ -717,8 +718,8 @@ gone.
   `tools/bootstrap.seed`.
 
   The C differential oracle reads `build/<preset>/oracle/std`. The build extracts that source from
-  `tools/bootstrap-oracle.ref`. This ref is not a production compiler pin. It lets the frozen C
-  compiler keep reading a standard root inside its language subset.
+  `tools/bootstrap-oracle.ref`. This ref is not a production compiler pin. It lets the C differential
+  compiler read a standard root inside its language subset.
 
   **The C-started chain before D14.7** (T-131). From T-131 through T-150, stage1 built two
   Linux-only source pins before the last pin built HEAD. Five invariants kept that chain valid.
@@ -727,9 +728,12 @@ gone.
   is the reason the directory stays -- it is the second
   independent implementation that `tools/diff_tokens.sh`, `diff_ast.sh`, `diff_check.sh` and
   `diff_ir.sh` compare against over 946 `.ft` files. So a change to `src/bootstrap` is a bug fix
-  or a differential fix, and the **carve-out is withdrawn**: no edit is needed any more to let it
-  parse a form `std/` uses, because it does not read HEAD's `std`. The four edits the carve-out
-  paid for are below, as the record of what the rule cost while it stood.
+  or a differential fix. T-153 adds one bounded target-bootstrap exception: explicit C variable
+  tails required by the Darwin bootstrap platform. It keeps Linux fixed-extern IR unchanged and
+  moves only the four non-float tests. The two float tests stay unsupported. This exception
+  does not restore the old carve-out or general stage1 parity. No other edit is needed to let the
+  C bootstrap parse a form in HEAD's `std`, because it reads the oracle root. The four edits the
+  old carve-out paid for are below, as the record of what the rule cost while it stood.
   Until T-131 the rule read: `src/bootstrap` accepts a bug fix, and the smallest
   type-layer edit that lets it parse and check a form `std/` uses. A bug fix makes stage1 answer
   the way the specification already says it must, and the ticket that writes one names the
@@ -765,11 +769,11 @@ gone.
   more lines are comments that quote one. `at_decl_start` lost its speculative parse with the
   change: `fn` followed by a name and then a `(` is a definition, and a `fn` followed by `(` at
   once is a function type, so two tokens of lookahead decide what a return type used to.
-  Every feature goes to `src/fort` alone from T-131 on. A feature leaves
-  `test/lang/unsupported-stage2.txt` when stage2 gains it, and leaves
-  `test/lang/bootstrap-unsupported.txt` never. The ctest `lang` holds that list: stage1 runs over
-  the whole corpus with it and with an empty `xfail.txt`, so a test the list names must be refused
-  and a test it does not name must pass. T-046
+  Except for the bounded T-153 variable-tail extension, every feature goes to `src/fort` alone
+  from T-131 on. A feature leaves `test/lang/unsupported-stage2.txt` when stage2 gains it. An entry
+  stays in `test/lang/bootstrap-unsupported.txt` unless this section names a bounded exception.
+  The ctest `lang` holds that list: stage1 runs over the whole corpus with it and with an empty
+  `xfail.txt`, so a test the list names must be refused and a test it does not name must pass. T-046
   measured both directions on 47f98c2 and found the two sets equal: 111 of the 643 corpus tests
   carry that diagnostic under stage1, 111 entries stand in the list, and neither side holds a test
   the other lacks. The list holds 113 entries on 2026-09-14, read off

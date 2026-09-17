@@ -123,11 +123,12 @@ typedef enum {
 
 /// The bits of `flags`.
 enum {
-    AST_FLAG_OWN = 1U,        // D17.2: AST_TYPE, AST_TYPE_SUFFIX: an `own` in the position
-    AST_FLAG_MUT = 2U,        // D5.3: AST_TYPE, AST_TYPE_SUFFIX: a `mut` in the position
-    AST_FLAG_EXTERN = 4U,     // D9.8: AST_FN_DECL: an `extern fn` declaration
-    AST_FLAG_DEFAULT = 8U,    // D7.6: AST_CASE: the `default` clause
-    AST_FLAG_DESIGNATED = 16U // D6.5: AST_BRACE_INIT: `.field = value` members
+    AST_FLAG_OWN = 1U,         // D17.2: AST_TYPE, AST_TYPE_SUFFIX: an `own` in the position
+    AST_FLAG_MUT = 2U,         // D5.3: AST_TYPE, AST_TYPE_SUFFIX: a `mut` in the position
+    AST_FLAG_EXTERN = 4U,      // D9.8: AST_FN_DECL: an `extern fn` declaration
+    AST_FLAG_DEFAULT = 8U,     // D7.6: AST_CASE: the `default` clause
+    AST_FLAG_DESIGNATED = 16U, // D6.5: AST_BRACE_INIT: `.field = value` members
+    AST_FLAG_VARIADIC = 32U    // D9.8: AST_FN_DECL: an extern C variable tail
 };
 
 typedef struct ast_node ast_node_t;
@@ -140,8 +141,9 @@ struct ast_node {
     /// a name range is passed to diag_error and printed like any other range.
     /// D20.4
     loc_t name_loc;
-    int32_t op;    // a tok_kind_t, a suffix_kind_t or a prim_kind_t; 0 otherwise
-    ast_node_t* a; // the fixed children, in the order the comments above give
+    loc_t tail_loc; // D9.8: location of `...` on an extern declaration
+    int32_t op;     // a tok_kind_t, a suffix_kind_t or a prim_kind_t; 0 otherwise
+    ast_node_t* a;  // the fixed children, in the order the comments above give
     ast_node_t* b;
     ast_node_t* c;
     ast_node_t* d;

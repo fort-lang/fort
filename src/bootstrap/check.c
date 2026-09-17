@@ -2379,6 +2379,51 @@ static bool check_arity(check_t* ck, ast_node_t* n, str_t name, uint64_t want) {
     return false;
 }
 
+// A C variable tail accepts zero or more arguments after its fixed prefix.
+// D9.8
+static bool check_arity_at_least(check_t* ck, ast_node_t* n, str_t name, uint64_t want) {
+    const uint64_t got = ast_len(n);
+    if (got >= want) {
+        return true;
+    }
+    check_msg_begin(ck);
+    msg_quote(&ck->msg, name);
+    msg_str(&ck->msg, " takes at least ");
+    msg_uint(&ck->msg, want);
+    msg_str(&ck->msg, want == 1 ? " argument, " : " arguments, ");
+    msg_uint(&ck->msg, got);
+    msg_str(&ck->msg, " given");
+    check_msg_end(ck, n->loc);
+    return false;
+}
+
+static bool extern_legal(const type_t* t);
+
+// C default promotions require explicit casts before a variable tail.
+// D4.5, D9.8
+static bool c_tail_legal(const type_t* t) {
+    switch (t->kind) {
+    case TYPE_PTR:
+    case TYPE_VOIDPTR:
+        return true;
+    case TYPE_FN:
+        return extern_legal(t);
+    case TYPE_PRIM:
+        switch (t->prim) {
+        case PRIM_I32:
+        case PRIM_U32:
+        case PRIM_I64:
+        case PRIM_U64:
+        case PRIM_F64:
+            return true;
+        default:
+            return false;
+        }
+    default:
+        return false;
+    }
+}
+
 // The print family (8.3): zero or more printable arguments, each taking its
 // default type, after the descriptor of the `fprint` forms.
 // D12.2
@@ -2553,10 +2598,15 @@ static void check_call(check_t* ck, ast_node_t* n, expr_t* out) {
         f.type = type_error(&ck->types);
     }
     const bool known = !check_poisoned(f.type);
-    if (known &&
-        !check_arity(
-            ck, n, f.sym != NULL ? f.sym->name : str_from_cstr("the callee"), f.type->nparams)) {
-        return;
+    if (known) {
+        const str_t name = f.sym != NULL ? f.sym->name : str_from_cstr("the callee");
+        const bool variadic = f.sym != NULL && f.sym->kind == SYM_EXTERN_FN &&
+                              (f.sym->node->flags & AST_FLAG_VARIADIC) != 0;
+        const bool arity_ok = variadic ? check_arity_at_least(ck, n, name, f.type->nparams)
+                                       : check_arity(ck, n, name, f.type->nparams);
+        if (!arity_ok) {
+            return;
+        }
     }
     for (uint64_t i = 0; i < ast_len(n); i++) {
         expr_t arg;
@@ -2565,6 +2615,13 @@ static void check_call(check_t* ck, ast_node_t* n, expr_t* out) {
             check_expr_as(ck, ast_child(n, i), f.type->params[i], "the argument", &arg);
         } else {
             check_expr_default(ck, ast_child(n, i), &arg);
+            if (known && !check_poisoned(arg.type) && !c_tail_legal(arg.type)) {
+                check_msg_begin(ck);
+                msg_str(&ck->msg, "C variable tail cannot use type '");
+                check_msg_type(ck, arg.type);
+                msg_str(&ck->msg, "'");
+                check_msg_end(ck, ast_child(n, i)->loc);
+            }
         }
     }
     if (!known) {
@@ -3323,6 +3380,15 @@ static bool check_extern_agreement(check_t* ck, const ast_node_t* decl, const sy
     if (a->nparams != b->nparams) {
         error_extern_conflict(
             ck, decl->name_loc, note, s->name, ": the number of parameters differs", 0, false);
+        return false;
+    }
+    if ((first->node->flags & AST_FLAG_VARIADIC) != (decl->flags & AST_FLAG_VARIADIC)) {
+        loc_t diff_loc = decl->name_loc;
+        if ((decl->flags & AST_FLAG_VARIADIC) != 0) {
+            diff_loc = decl->tail_loc;
+        }
+        error_extern_conflict(
+            ck, diff_loc, note, s->name, ": the variable-tail mark differs", 0, false);
         return false;
     }
     for (uint32_t i = 0; i < a->nparams; i++) {

@@ -154,6 +154,9 @@ static void dump_decl(const ast_node_t* n, sb_t* out) {
         sexp_name(out, n->name);
         sb_append(out, " (params");
         sexp_list(n, out);
+        if ((n->flags & AST_FLAG_VARIADIC) != 0) {
+            sb_append(out, " ...");
+        }
         sexp_close(out);
         sexp_child(n->b, out);
         break;

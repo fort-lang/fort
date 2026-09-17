@@ -122,6 +122,7 @@ typedef enum {
     TOK_DOT,               // .
     TOK_ARROW,             // ->
     TOK_DOT_DOT,           // ..
+    TOK_ELLIPSIS,          // ...
     TOK_LPAREN,            // (
     TOK_RPAREN,            // )
     TOK_LBRACKET,          // [

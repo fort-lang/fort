@@ -192,6 +192,8 @@ const char* tok_kind_name(tok_kind_t kind) {
         return "->";
     case TOK_DOT_DOT:
         return "..";
+    case TOK_ELLIPSIS:
+        return "...";
     case TOK_LPAREN:
         return "(";
     case TOK_RPAREN:
@@ -917,7 +919,10 @@ static tok_kind_t operator_kind(const lexer_t* lx, uint64_t* len) {
         break;
     case '.':
         one = TOK_DOT;
-        two = c1 == '.' ? TOK_DOT_DOT : TOK_EOF;
+        if (c1 == '.') {
+            two = TOK_DOT_DOT;
+            three = c2 == '.' ? TOK_ELLIPSIS : TOK_EOF;
+        }
         break;
     case '(':
         one = TOK_LPAREN;

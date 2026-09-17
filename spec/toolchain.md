@@ -1596,11 +1596,19 @@ other test.
 Each compiler answers for its own list. `unsupported-stage2.txt` is the list the self-hosted
 compiler is run with, and it is empty: the four families the C bootstrap lacks are the nested
 array and span levels of D3.6, `do`-`while`, `?:` and floats, and stage2 implements all four, so
-it refuses nothing the corpus holds and answers for every test as for any other. Every one of
-those entries stays in `bootstrap-unsupported.txt`, which is stage1's and which nothing empties,
-since the C bootstrap is frozen. An entry arrives in stage2's list the day stage2 refuses a test
-stage1's list also holds, and leaves it the day stage2 implements the feature. Neither run passes
-`--no-unsupported`, so neither compiler is excused any test of the corpus.
+it refuses nothing the corpus holds and answers for every test as for any other. Entries for
+those four families stay in `bootstrap-unsupported.txt`. The C bootstrap is frozen against
+general feature work.
+
+T-153 is one bounded exception. The C bootstrap reads and checks explicit C variable tails for
+the Darwin bootstrap platform (D9.8). Linux fixed extern declarations keep their LLVM bytes.
+Four non-float variable-tail tests therefore leave `bootstrap-unsupported.txt`. The two float
+variable-tail tests stay because the C bootstrap still rejects floats. This exception does not
+add general stage1 parity and does not permit another language feature.
+
+An entry arrives in stage2's list the day stage2 refuses a test stage1's list also holds, and
+leaves it the day stage2 implements the feature. Neither run passes `--no-unsupported`, so neither
+compiler is excused any test of the corpus. Amended 2026-09-16 (T-153).
 
 The harness prints one `PASS`, `FAIL`, `XFAIL`, `XPASS` or `ERROR` line per test with the
 reason where there is one, then a summary, and exits with 1 if any test is `FAIL`, `XPASS` or

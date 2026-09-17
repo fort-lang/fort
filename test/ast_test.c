@@ -83,6 +83,8 @@ TEST(arena_hands_out_zeroed_nodes, {
     TEST_ASSERT_EQ_UINT64(n->ival, (uint64_t)0);
     TEST_ASSERT_EQ_UINT64(n->list.len, (uint64_t)0);
     TEST_ASSERT_EQ_INT64((int64_t)n->flags, (int64_t)0);
+    TEST_ASSERT_EQ_INT64((int64_t)n->name_loc.line, (int64_t)0);
+    TEST_ASSERT_EQ_INT64((int64_t)n->tail_loc.line, (int64_t)0);
     TEST_ASSERT_NULL(n->type);
     TEST_ASSERT_NULL(n->sym);
     TEST_ASSERT_EQ_UINT64(n->aux, (uint64_t)0);
@@ -406,6 +408,23 @@ TEST(dump_of_an_extern_declaration_and_parameters, {
                        "(extern-fn (type (void)) puts (params (param (type (string)) s)) nil)");
 })
 
+TEST(dump_of_an_extern_variable_tail, {
+    reset();
+    ast_node_t* fn = node(AST_FN_DECL);
+    fn->flags = AST_FLAG_EXTERN | AST_FLAG_VARIADIC;
+    fn->a = node(AST_TYPE);
+    fn->a->a = node(AST_TYPE_VOID);
+    fn->name = str_from_cstr("printf");
+    fn->tail_loc = at(1, 28);
+    ast_node_t* param = node(AST_PARAM);
+    param->a = node(AST_TYPE);
+    param->a->a = node(AST_TYPE_STRING);
+    param->name = str_from_cstr("fmt");
+    ast_push(fn, param);
+    TEST_ASSERT_EQ_STR(
+        dump(fn), "(extern-fn (type (void)) printf (params (param (type (string)) fmt) ...) nil)");
+})
+
 TEST(dump_of_struct_enum_and_import_items, {
     reset();
     ast_node_t* st = node(AST_STRUCT_DECL);
@@ -560,6 +579,7 @@ int main(int argc, char** argv) {
     TEST_RUN(dump_keeps_the_position_of_absent_children);
     TEST_RUN(dump_of_a_module_with_declarations);
     TEST_RUN(dump_of_an_extern_declaration_and_parameters);
+    TEST_RUN(dump_of_an_extern_variable_tail);
     TEST_RUN(dump_of_struct_enum_and_import_items);
     TEST_RUN(dump_of_statements);
     TEST_RUN(dump_of_postfix_and_literal_expressions);

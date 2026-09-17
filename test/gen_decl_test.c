@@ -122,6 +122,35 @@ TEST(an_extern_is_declared_and_called_through_a_variadic_type, {
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
+TEST(an_explicit_tail_keeps_fixed_extern_llvm_bytes, {
+    const char* fixed = "extern fn printf(char* fmt) i32;\n"
+                        "fn main() i32 { return printf(\"x\".ptr); }\n";
+    const char* explicit_tail = "extern fn printf(char* fmt, ...) i32;\n"
+                                "fn main() i32 { return printf(\"x\".ptr); }\n";
+    TEST_ASSERT_TRUE(emit(fixed));
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+    sb_t fixed_ir;
+    sb_init(&fixed_ir);
+    sb_append(&fixed_ir, ir());
+    TEST_ASSERT_TRUE(emit(explicit_tail));
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+    TEST_ASSERT_EQ_STR(ir(), sb_cstr(&fixed_ir));
+    sb_free(&fixed_ir);
+})
+
+TEST(an_explicit_tail_emits_its_integer_and_pointer_arguments, {
+    TEST_ASSERT_TRUE(emit("extern fn tail(i32 fixed, ...) i64;\n"
+                          "fn callback(i32 n) i32 { return n; }\n"
+                          "fn main() i32 {\n"
+                          "    return cast(tail(1, cast(2, u32), 3, callback), i32);\n"
+                          "}\n"));
+    TEST_ASSERT_EQ_STR(found("declare i64 @tail(i32, ...)"), "declare i64 @tail(i32, ...)");
+    TEST_ASSERT_EQ_STR(
+        found("call i64 (i32, ...) @tail(i32 1, i32 2, i32 3, ptr @\"main.callback\") #3"),
+        "call i64 (i32, ...) @tail(i32 1, i32 2, i32 3, ptr @\"main.callback\") #3");
+    TEST_ASSERT_EQ_STR(verified(), "verified");
+})
+
 TEST(an_extern_with_no_parameter_is_still_variadic, {
     TEST_ASSERT_TRUE(emit("extern fn rand() i32;\nfn main() i32 { return rand(); }\n"));
     TEST_ASSERT_EQ_STR(found("declare i32 @rand(...)"), "declare i32 @rand(...)");
@@ -241,6 +270,8 @@ TEST(each_declaration_group_is_separated_by_a_blank_line, {
 int main(int argc, char** argv) {
     TEST_INIT("gen_decl", argc, argv);
     TEST_RUN(an_extern_is_declared_and_called_through_a_variadic_type);
+    TEST_RUN(an_explicit_tail_keeps_fixed_extern_llvm_bytes);
+    TEST_RUN(an_explicit_tail_emits_its_integer_and_pointer_arguments);
     TEST_RUN(an_extern_with_no_parameter_is_still_variadic);
     TEST_RUN(an_extern_narrow_signature_carries_the_c_attributes);
     TEST_RUN(a_wide_extern_signature_carries_no_extension_attribute);

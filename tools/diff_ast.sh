@@ -106,13 +106,8 @@ FORM_MESSAGES='do-while|\?:'
 # and a `?:`, and FORM_FILES counts it. std/rt_float.ft left this count on the
 # same commit, which is why it fell from 67 to 66; the file itself went two
 # commits later and lowered FT_FILES rather than this one.
-FLOAT_FILES=66
+FLOAT_FILES=68
 FLOAT_MESSAGES='float literals'
-
-# Stage1 reads a C variable tail as `..` and `.`, then rejects the type.
-# Stage2 reads one `...` token. Invalid tails still yield a module tree.
-# D2.10, D9.8
-VARIADIC_FILES=10
 
 files=$(find . -name '*.ft' -not -path './build/*' -not -path './.git/*' \
     -not -path './.worktrees/*' | sort)
@@ -135,7 +130,6 @@ differing=0
 nested=0
 forms=0
 floats=0
-variadics=0
 # The list is read line by line rather than word by word: a path holding a
 # space would otherwise be split into two paths neither compiler can open,
 # and two compilers failing alike is what this script would call agreement.
@@ -146,26 +140,6 @@ while IFS= read -r file; do
     "$stage2" --ast "$file" >"$work/two.out" 2>"$work/two.err"
     two_status=$?
     set -e
-    if grep -q "expected a type, found '..'" "$work/one.err" &&
-        { grep -Eq '\(extern-fn.*\(params.* \.\.\.\) nil' "$work/two.out" ||
-          grep -q "expected a type, found '...'" "$work/two.err"; }; then
-        variadics=$((variadics + 1))
-        if [ "$one_status" -gt 1 ] || [ "$two_status" -gt 1 ]; then
-            echo "diff_ast.sh: $file: an ellipsis parser exited above 1" >&2
-            status=1
-            differing=$((differing + 1))
-            continue
-        fi
-        case $(cat "$work/two.out") in
-        "(module"*")") ;;
-        *)
-            echo "diff_ast.sh: $file: stage2's dump is not a module node" >&2
-            status=1
-            differing=$((differing + 1))
-            ;;
-        esac
-        continue
-    fi
     # stage1 refuses `do`-`while` and `?:` and stage2 reads both, so there is
     # nothing to compare. The file is counted, and stage2 is held to the other
     # half of the divergence: it must not report that refusal. Its status and
@@ -347,15 +321,11 @@ if [ "$floats" -ne "$FLOAT_FILES" ]; then
     echo "diff_ast.sh: holding one raises or lowers FLOAT_FILES beside FT_FILES" >&2
     exit 1
 fi
-if [ "$variadics" -ne "$VARIADIC_FILES" ]; then
-    echo "diff_ast.sh: skipped $variadics ellipsis files, expected $VARIADIC_FILES" >&2
-    exit 1
-fi
 if [ "$status" -eq 0 ]; then
     echo "stage1 and stage2 agree about the syntax tree, the diagnostics and the exit"
-    echo "status of $((count - nested - forms - floats - variadics)) of the $count .ft files in the"
+    echo "status of $((count - nested - forms - floats)) of the $count .ft files in the"
     echo "repository; $nested use a nested array or span level, $forms a do-while or a"
-    echo "'?:', $floats a float literal and $variadics an ellipsis"
+    echo "'?:', and $floats a float literal"
 else
     echo "diff_ast.sh: $differing of $count .ft files differ" >&2
 fi

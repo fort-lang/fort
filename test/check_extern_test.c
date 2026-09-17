@@ -138,6 +138,94 @@ TEST(a_module_may_declare_an_extern_no_other_module_declares, {
     TEST_ASSERT_TRUE(check_entry("main.ft"));
 })
 
+TEST(a_variable_tail_accepts_its_fixed_prefix_and_c_types, {
+    TEST_ASSERT_TRUE(check_src("extern fn tail(i32 fixed, ...) i32;\n"
+                               "fn callback(i32 n) i32 { return n; }\n"
+                               "fn pass(i32 a, u32 b, i64 c, u64 d, i32* p, void* q) void {\n"
+                               "    tail(1, a, b, c, d, p, q, callback);\n"
+                               "}\n"
+                               "fn main() i32 { return 0; }\n"));
+})
+
+TEST(a_variable_tail_checks_its_fixed_prefix, {
+    TEST_ASSERT_FALSE(check_src("extern fn tail(i32 fixed, ...) i32;\n"
+                                "fn main() i32 {\n"
+                                "    tail();\n"
+                                "    tail(\"wrong\".ptr);\n"
+                                "    return 0;\n"
+                                "}\n"));
+    TEST_ASSERT_TRUE(said("'tail' takes at least 1 argument, 0 given"));
+    TEST_ASSERT_TRUE(said("the argument expects i32"));
+})
+
+TEST(a_variable_tail_rejects_types_without_c_default_promotions, {
+    TEST_ASSERT_FALSE(check_src("extern fn tail(i32 fixed, ...) i32;\n"
+                                "enum color { red }\n"
+                                "struct pair { i32 n; }\n"
+                                "fn pass(i8 a, u16 b, bool c, char d, pair e) void {\n"
+                                "    tail(1, a);\n"
+                                "    tail(1, b);\n"
+                                "    tail(1, c);\n"
+                                "    tail(1, d);\n"
+                                "    tail(1, color.red);\n"
+                                "    tail(1, e);\n"
+                                "}\n"
+                                "fn main() i32 { return 0; }\n"));
+    TEST_ASSERT_TRUE(said("C variable tail cannot use type 'i8'"));
+    TEST_ASSERT_TRUE(said("C variable tail cannot use type 'u16'"));
+    TEST_ASSERT_TRUE(said("C variable tail cannot use type 'bool'"));
+    TEST_ASSERT_TRUE(said("C variable tail cannot use type 'char'"));
+    TEST_ASSERT_TRUE(said("C variable tail cannot use type 'color'"));
+    TEST_ASSERT_TRUE(said("C variable tail cannot use type 'pair'"));
+})
+
+TEST(a_variable_tail_lends_an_owning_lvalue_and_rejects_an_owning_rvalue, {
+    TEST_ASSERT_FALSE(check_src("extern fn tail(i32 fixed, ...) i32;\n"
+                                "fn make() i32 mut* own { return new(i32); }\n"
+                                "fn pass(i32 mut* own p) void {\n"
+                                "    tail(1, p);\n"
+                                "    tail(1, make());\n"
+                                "    del(p);\n"
+                                "}\n"
+                                "fn main() i32 { return 0; }\n"));
+    TEST_ASSERT_TRUE(said("owning temporary would leak: nothing here could free it"));
+    TEST_ASSERT_FALSE(said("copying an owning value requires 'move'"));
+})
+
+TEST(variable_tail_marks_and_fixed_types_agree_across_modules, {
+    begin();
+    add("main.ft",
+        "import other;\n"
+        "extern fn tail(i32 n, ...) i32;\n"
+        "fn main() i32 { return tail(1, 2); }\n");
+    add("other.ft",
+        "extern fn tail(i32 n, ...) i32;\n"
+        "fn go() i32 { return tail(1); }\n");
+    TEST_ASSERT_TRUE(check_entry("main.ft"));
+
+    begin();
+    add("main.ft",
+        "import other;\n"
+        "extern fn tail(i64 n, ...) i32;\n"
+        "fn main() i32 { return 0; }\n");
+    add("other.ft",
+        "extern fn tail(i32 n, ...) i32;\n"
+        "fn go() i32 { return tail(1); }\n");
+    TEST_ASSERT_FALSE(check_entry("main.ft"));
+    TEST_ASSERT_TRUE(said("parameter 1 differs"));
+
+    begin();
+    add("main.ft",
+        "import other;\n"
+        "extern fn tail(i32 n, ...) i32;\n"
+        "fn main() i32 { return 0; }\n");
+    add("other.ft",
+        "extern fn tail(i32 n) i32;\n"
+        "fn go() i32 { return tail(1); }\n");
+    TEST_ASSERT_FALSE(check_entry("main.ft"));
+    TEST_ASSERT_TRUE(said("the variable-tail mark differs"));
+})
+
 // ---- declarations that conflict (module-system.md 13) -------------------------------
 
 TEST(a_parameter_type_that_differs_conflicts_and_names_the_parameter, {
@@ -665,6 +753,11 @@ int main(int argc, char** argv) {
     TEST_RUN(one_imported_enum_spelled_two_ways_is_one_type);
     TEST_RUN(one_imported_struct_behind_a_pointer_is_one_type);
     TEST_RUN(a_module_may_declare_an_extern_no_other_module_declares);
+    TEST_RUN(a_variable_tail_accepts_its_fixed_prefix_and_c_types);
+    TEST_RUN(a_variable_tail_checks_its_fixed_prefix);
+    TEST_RUN(a_variable_tail_rejects_types_without_c_default_promotions);
+    TEST_RUN(a_variable_tail_lends_an_owning_lvalue_and_rejects_an_owning_rvalue);
+    TEST_RUN(variable_tail_marks_and_fixed_types_agree_across_modules);
     TEST_RUN(a_parameter_type_that_differs_conflicts_and_names_the_parameter);
     TEST_RUN(the_conflict_names_the_first_parameter_that_differs);
     TEST_RUN(the_error_stands_on_the_parameter_of_the_later_declaration);

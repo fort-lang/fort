@@ -187,6 +187,25 @@ TEST(an_ffi_module_parses, {
     TEST_ASSERT_EQ_STR(dumped(body_stmt(mod, 4, 3)), "(return (span (ident p) (int 0) (ident n)))");
 })
 
+// Only an extern declaration can mark a C variable tail. It needs one fixed
+// parameter before the mark.
+// D3.10, D9.8
+TEST(only_an_extern_marks_a_variable_tail, {
+    TEST_ASSERT_EQ_STR(
+        parse_dump("extern fn c(i32 x) void;\nextern fn d(i32 x, ...) void;\n"),
+        "(module (extern-fn (type (void)) c (params (param (type (prim i32)) x)) nil)"
+        " (extern-fn (type (void)) d (params (param (type (prim i32)) x) ...) nil))");
+    TEST_ASSERT_EQ_STR(parse_diags(), "");
+    TEST_ASSERT_EQ_STR(parse_fails("extern fn c(...) void;\n"),
+                       "t.ft:1:13: error: expected a type, found '...'\n");
+    TEST_ASSERT_EQ_STR(parse_fails("fn c(i32 x, ...) void { }\n"),
+                       "t.ft:1:13: error: expected a type, found '...'\n");
+    TEST_ASSERT_EQ_STR(parse_fails("fn (i32, ...) void p = null;\n"),
+                       "t.ft:1:10: error: expected a type, found '...'\n");
+    TEST_ASSERT_EQ_STR(parse_fails("extern fn c(i32 x, .. .) void;\n"),
+                       "t.ft:1:20: error: expected a type, found '..'\n");
+})
+
 // The two import forms the grammar has no production for (grammar.md section
 // 2): a wildcard, and a path segment that is not an identifier.
 // D9.3
@@ -229,10 +248,9 @@ TEST(the_old_path_separator_names_the_mistake, {
 TEST(a_path_separator_written_twice_names_the_mistake, {
     TEST_ASSERT_EQ_STR(parse_fails("import a..b;\nfn main() i32 { return 0; }\n"),
                        "t.ft:1:9: error: a module path is separated by '.', not '..'\n");
-    // Three dots are the same token followed by a separator, so the report is
-    // the same one and stands at the `..`.
+    // Three dots are one ellipsis token. It cannot separate a module path.
     TEST_ASSERT_EQ_STR(parse_fails("import a...b;\nfn main() i32 { return 0; }\n"),
-                       "t.ft:1:9: error: a module path is separated by '.', not '..'\n");
+                       "t.ft:1:9: error: expected ';', found '...'\n");
     // After a segment that is not the first: the test is made once per
     // segment, inside the loop that reads them.
     TEST_ASSERT_EQ_STR(parse_fails("import a.b..c;\nfn main() i32 { return 0; }\n"),
@@ -393,6 +411,7 @@ int main(int argc, char** argv) {
     TEST_RUN(a_tokenizer_module_parses);
     TEST_RUN(a_tokenizer_module_in_the_east_marker_spelling_parses);
     TEST_RUN(an_ffi_module_parses);
+    TEST_RUN(only_an_extern_marks_a_variable_tail);
     TEST_RUN(a_wildcard_import_does_not_parse);
     TEST_RUN(the_old_path_separator_names_the_mistake);
     TEST_RUN(a_path_separator_written_twice_names_the_mistake);
