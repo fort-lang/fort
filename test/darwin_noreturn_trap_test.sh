@@ -2,8 +2,8 @@
 # D11.4, D19.7: a returning noreturn extern reaches llvm.trap on darwin.
 set -eu
 
-if [ "$#" -ne 1 ] || [ "$(uname -sm)" != "Darwin arm64" ]; then
-    echo "usage: darwin_noreturn_trap_test.sh <darwin fort> on darwin arm64" >&2
+if [ "$#" -ne 1 ] || [ "$(uname -s)" != "Darwin" ]; then
+    echo "usage: darwin_noreturn_trap_test.sh <darwin fort> on Darwin" >&2
     exit 2
 fi
 

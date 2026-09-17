@@ -2,9 +2,8 @@
 # Run the counted merge gate on a linux host.
 set -euo pipefail
 
-if [ "$#" -ne 0 ] || [ "$(uname -s)" != Linux ] ||
-   [ -z "${FORT_BOOTSTRAP_SEED:-}" ]; then
-    echo "linux gate: requires a linux host, FORT_BOOTSTRAP_SEED, and no arguments" >&2
+if [ "$#" -ne 0 ] || [ "$(uname -s)" != Linux ]; then
+    echo "linux gate: requires a linux host and no arguments" >&2
     exit 2
 fi
 
@@ -13,8 +12,7 @@ cd "$root"
 echo "selected target: linux"
 
 configure_preset() {
-    cmake --preset "$1" \
-        "-DFORT_BOOTSTRAP_SEED:FILEPATH=$FORT_BOOTSTRAP_SEED"
+    cmake --preset "$1"
 }
 
 echo "linux gate: configure debug"
@@ -30,10 +28,6 @@ for preset in debug asan ubsan; do
     fi
     echo "linux gate: build $preset"
     cmake --build --preset "$preset"
-    if [ "$preset" = debug ]; then
-        test -f build/debug/seed.identity
-        cat build/debug/seed.identity
-    fi
     echo "linux gate: check-all $preset"
     cmake --build --preset "$preset" --target check-all
 done

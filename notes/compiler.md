@@ -523,22 +523,22 @@ one pays nothing new; it is 36 bytes of `.text` smaller than before, because the
 duplicate constant and one module of the closure. **Name the unit**: the emitted IR of such a
 module is about twelve times the `.text` it becomes, so an IR figure offered as the cost of a
 binary overstates that cost by that factor. The commands, run at the top of the worktree in the VM
-after `tools/vm build debug fort_stage2`:
+after `tools/vm build debug fort`:
 
 ```sh
 printf 'fn main() i32 {\n    println(1);\n    return 0;\n}\n' > /tmp/int.ft
 printf 'fn main() i32 {\n    println(1.5);\n    return 0;\n}\n' > /tmp/flt.ft
 for p in int flt; do
-    build/debug/stage2/fort -S --std-dir build/debug/std -o /tmp/$p.ll /tmp/$p.ft
+    build/debug/fort -S --std-dir build/debug/std -o /tmp/$p.ll /tmp/$p.ft
     echo "$p $(wc -c < /tmp/$p.ll) $(grep -c '^define' /tmp/$p.ll)"
-    build/debug/stage2/fort --index --std-dir build/debug/std /tmp/$p.ft |
+    build/debug/fort --index --std-dir build/debug/std /tmp/$p.ft |
         python3 -c 'import json, sys; print(len(json.load(sys.stdin)["files"]))'
-    build/debug/stage2/fort --std-dir build/debug/std --cc "$(command -v clang)" \
+    build/debug/fort --std-dir build/debug/std --cc "$(command -v clang)" \
         -o /tmp/$p /tmp/$p.ft
     size /tmp/$p | tail -1
     for i in $(seq 7); do
         t=$(date +%s%N)
-        build/debug/stage2/fort -S --std-dir build/debug/std -o /tmp/$p.ll /tmp/$p.ft
+        build/debug/fort -S --std-dir build/debug/std -o /tmp/$p.ll /tmp/$p.ft
         echo $(( ($(date +%s%N) - t) / 1000000 ))
     done | sort -n | sed -n 4p
 done
@@ -684,48 +684,38 @@ gone.
   are the constructs a C file may hold that have no fort spelling, with what replaces each; the
   rules the bootstrap
   already follows so that it stays portable are the first four.
-  **The target bootstrap chain and its invariants** (T-150, D14.7). The user supplies one
-  executable seed for `linux` or `darwin`. `tools/bootstrap.seed` names the source baseline that
-  produced both seeds. The seed first rebuilds that baseline for the selected target. The baseline
-  then builds each later source pin. The last source pin builds HEAD. Five invariants hold the
-  chain:
-  1. **Both seed kinds use one source baseline.** A baseline change requires new Linux and Darwin
-     seeds from the same commit. The baseline file names that full commit SHA.
-  2. **The verifier reads the seed's stored target.** `tools/verify_seed.py` runs `-S` without
-     `--target`. It accepts only the exact Linux triple or a versioned Darwin arm64 triple. Its
-     identity record gives the canonical path, SHA-256 value, source baseline SHA, and triple.
-     The record identifies the supplied executable. It does not prove its source history.
-  3. **One selected target flows through the complete chain.** The baseline, each later source pin,
-     and HEAD use the seed's target. No compiler stage crosses between Linux and Darwin.
-  4. **A source pin moves only when the previous source stage cannot build the next source.** The
-     cause is an unsupported form or a required file that the next tree lacks. The ref change and
-     its reason form one commit. The baseline and each pin are full commit SHAs in HEAD's history.
-     A shallow clone that lacks one of these commits cannot bootstrap.
-  5. **The C bootstrap is not a production stage.** It remains the second implementation for the
-     differential tests. Those tests use sources that the C bootstrap accepts.
+  **The target bootstrap chain and its invariants** (T-155, D14.7). CMake detects Linux or Darwin
+  from the host operating system. The C compiler builds only `bootstrap-0`. Each source compiler
+  builds the next listed revision. The last listed compiler builds working-tree HEAD. Five
+  invariants hold the chain:
+  1. **One list serves both hosts.** `tools/bootstrap.ref` contains the same full commit SHAs for
+     Linux and Darwin. Each listed tree contains the compiler and standard sources for both hosts.
+  2. **The host operating system selects the target.** Linux selects `x86_64-linux-gnu`. Darwin
+     selects the fixed `arm64-apple-macosx11.0.0`. The build rejects cross compilation and other
+     systems. No stage crosses between targets.
+  3. **CMake owns the new graph.** CMake reads and validates the gap-free list. It creates each
+     extraction and compiler edge. The graph does not call a shell script to read the list or select
+     a predecessor.
+  4. **A source pin moves only when the previous source stage cannot build a required later tree.**
+     A new pin must build with its predecessor and build its successor. Both builds must pass on both
+     supported hosts. Each pin is an ancestor of HEAD. A shallow clone that lacks one pin cannot
+     bootstrap.
+  5. **The C compiler has two bounded jobs.** It builds `bootstrap-0` in production. It also remains
+     the second implementation for differential tests against the frozen oracle standard root.
 
-  The verifier takes the target name, seed path, and assembled standard root:
-
-  ```sh
-  python3 tools/verify_seed.py linux /path/to/fort /path/to/linux/std
-  python3 tools/verify_seed.py darwin /path/to/fort /path/to/darwin/std
-  ```
-
-  `tools/bootstrap_chain.sh` implements the source chain (T-151). It verifies and snapshots the
-  seed. It extracts each SHA from `tools/bootstrap.ref`, assembles that target's standard root and
-  platform entry, and builds the stages in order. `build/<preset>/bootstrap-stages.tsv` records the
-  source SHA, default IR triple, and executable file format of each source-built compiler. The
-  `linux` and `darwin` chains use the same ref file. The active first pin is the baseline SHA in
-  `tools/bootstrap.seed`.
+  Set `FORT_STAGE1_COMPILER` to build HEAD with an external compiler and no listed revision.
+  `FORT_ENABLE_BOOTSTRAP=OFF` requires this setting.
 
   The C differential oracle reads `build/<preset>/oracle/std`. The build extracts that source from
   `tools/bootstrap-oracle.ref`. This ref is not a production compiler pin. It lets the C differential
   compiler read a standard root inside its language subset.
 
-  **The C-started chain before D14.7** (T-131). From T-131 through T-150, stage1 built two
+  **The C-started chain before the supplied-seed amendment** (T-131). From T-131 through T-150,
+  stage1 built two
   Linux-only source pins before the last pin built HEAD. Five invariants kept that chain valid.
   D14.7 replaces those invariants. Git history keeps their exact rules and measurements.
-  **What the freeze of T-046 becomes.** It is invariant 5 and no more. Its second job stands and
+  **What the freeze of T-046 becomes.** The C compiler has the two jobs in invariant 5. Its second
+  job stands and
   is the reason the directory stays -- it is the second
   independent implementation that `tools/diff_tokens.sh`, `diff_ast.sh`, `diff_check.sh` and
   `diff_ir.sh` compare against over 946 `.ft` files. So a change to `src/bootstrap` is a bug fix

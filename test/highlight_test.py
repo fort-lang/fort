@@ -73,13 +73,13 @@ CORPUS_DIRS = (
 # that adds or removes a `.ft` under CORPUS_DIRS reads the new number off the
 # failure and writes it here, as it does for CORPUS_FILES in
 # test/parser_recovery_test.c and FT_FILES in tools/diff_tokens.sh.
-CORPUS_FILES = 706
+CORPUS_FILES = 705
 # The least number of `.ft` each of those directories holds. A directory grows,
 # so its own test asserts a floor and CORPUS_FILES asserts the exact total. A
 # floor of 1 says only that the directory exists, so each one here is near the
 # count of the day: 432, 22, 12, 23, 7, 184, 3 and 2 on 2026-09-14, `std` being
-# one file larger while T-155 restores std/rt_float.ft for bridge commit B.
-# The table has one entry for each directory of CORPUS_DIRS, and
+# one file smaller since T-132 deleted std/rt_float.ft. The
+# table has one entry for each directory of CORPUS_DIRS, and
 # test_every_corpus_directory_is_checked_by_a_test holds the two against each
 # other, so a directory that no test checks is a red test (T-104).
 CORPUS_MINIMUMS = {

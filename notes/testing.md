@@ -441,10 +441,10 @@ bullet at a time and without a rewrite.
 
 ## 5. Differential oracles and the fixed point
 
-- **The fixed point is the ctest `bootstrap` (T-039) and the gate runs it.** `tools/fixpoint.sh
-  <build-dir> --bootstrap <fort>` compiles `src/fort` three times, under
-  `<build-dir>/fixpoint/<mode>/`: with the last pin into stage2, with stage2 into stage3, with
-  stage3 into stage4. It does that twice: once in checked mode and once with
+- **The fixed point is the ctest `bootstrap` (T-039) and the gate runs it.** CMake gives
+  `tools/fixpoint.sh` the last bootstrap compiler and `build/fort`. The script uses `build/fort`
+  as stage2. It builds stage3 and stage4 under `<build-dir>/fixpoint/<mode>/`. It does that twice:
+  once in checked mode and once with
   `--release`. The two modes emit different code, because checked arithmetic traps and release
   arithmetic does not (D11.1), so a fixed point in one mode does not prove the other. In each mode
   it holds stage2's module for `src/fort` against stage3's, runs `opt-18 -passes=verify` over both
@@ -486,11 +486,9 @@ bullet at a time and without a rewrite.
   file the path it opened it by (D14.2) and writes that path into the module as a `@.file.N`
   string (D19.6). Compiling `src/fort/main.ft` by its absolute path and by its relative path from
   the top of the worktree gives two binaries that differ in 27233 of 480088 bytes, and both run.
-  `tools/fixpoint.sh` builds its own stage2 for that reason. Reusing `<build-dir>/stage2/fort`,
-  which the CMake target compiles by absolute path, compared two different programs and reported
-  `the emitted modules agree but the binaries differ` on a compiler that is a fixed point. It is
-  also why the script writes no file another test reads: `<build-dir>/stage2/fort` belongs to
-  `fort_stage2`, and `lang-stage2`, `diff-ir` and `stage-usage` judge it.
+  CMake builds `build/fort` with the same absolute entry and source-root paths that the script
+  uses. The script writes no file another test reads. The `lang-stage2`, `diff-ir`, and
+  `stage-usage` tests judge `build/fort`.
   **A comparison needs the guard that its inputs exist.** The script removes each binary and each
   module before it writes it, checks that the compiler wrote the binary, and holds each module
   against the first line of D19.1 before it compares the two: two empty files compare equal and
@@ -576,7 +574,8 @@ bullet at a time and without a rewrite.
   `unsupported(p, loc, "?:")` only after both arms parse, and `parse_primary`
   (`parser.c:1023`) returns `NULL` for a float literal, so the `n->b == NULL || n->c == NULL`
   test above it returns first. Measured on `main`: that file held four `?:`, every one with a
-  float arm, and `build/debug/fort --ast` printed 12 `float literals` messages and no `?:`.
+  float arm, and `build/debug/bootstrap/stage1/fort --ast` printed 12 `float literals` messages
+  and no `?:`.
   The column plays no part. `println(n > 0 ? 1 : 2.5);` stood in that file with the `?` at
   column 19 and `2.5` at column 25, and stage1 still reported only the float, at `20:25`.
   T-127 added `println((n > 0 ? 'a' : 'b') == 1.5);`, whose two arms are char literals and parse,
@@ -735,7 +734,7 @@ bullet at a time and without a rewrite.
   Only 005 links `ffi/std_libc_flags.c` to compare 13 constants with C headers.
   The other nine programs and the compiler link from LLVM IR alone.
   The linux gate excludes this host test because a linux host cannot run Mach-O programs.
-  The darwin gate builds `build/darwin/stage2/fort` before this host test.
+  The darwin gate builds `build/darwin/fort` before this host test.
 - **The gen suites emit with no runtime in the closure**, so the calls the emitter writes into it
   reach a name the module neither defines nor declares, which LLVM rejects as a forward reference
   to nothing. `verified()` appends a `declare` for every row of `runtime_sig.h` to the file the
@@ -1101,11 +1100,9 @@ bullet at a time and without a rewrite.
   being its one edit to `std/rt.ft`. Measure such a branch by hand, as the `editors/` bullet
   above does, with `git diff --numstat main...HEAD` and the tool's convention: net lines, raw
   `wc -l`, comments and blank lines on both sides. T-131 measured 469 net lines of build, tool and
-  harness against 258 net lines of test, which is 0.55, and its log says why it cannot reach 3:1:
-  the part of it that a line-counted test could hold is `tools/pin.sh`, which
-  `test/pin_test.sh` holds with 21 checks that break every rule of it on purpose, and the rest is
-  a CMake graph that only a build can exercise. The ctest `bootstrap`, the ctest `pin-verify` and
-  a cold `rm -rf build/<preset> && tools/vm workflow debug` are what hold that part.
+  harness against 258 net lines of test, which is 0.55. Its log says why it cannot reach 3:1.
+  A CMake graph needs a real build. The ctests `cmake-bootstrap` and `bootstrap`, with a cold
+  `tools/vm workflow debug`, hold that graph.
 - **The corpus is smaller than the sizing table of `spec/toolchain.md` 7.6, and T-046 measured by
   how much.** That table sizes the corpus at 565 `run` and 370 `fail` files, 935 together. On
   47f98c2 the corpus holds 643 tests: 400 under `run`, 222 under `fail` and 21 under `programs`,

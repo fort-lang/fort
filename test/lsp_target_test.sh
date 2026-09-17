@@ -1,5 +1,5 @@
 #!/bin/bash
-# Check that the LSP build uses the verified seed target.
+# Check that the LSP build uses the selected target.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd -P)
@@ -28,22 +28,20 @@ EOF
 chmod 700 "$compiler"
 
 target=arm64-apple-macosx15.0.0
-printf 'default triple: %s\n' "$target" >"$work/seed.identity"
 TRACE=$trace EXPECT_TARGET=$target bash "$root/tools/build_lsp.sh" \
-    "$compiler" "$work/seed.identity" "$work/std root" "$work/clang" \
+    "$compiler" "$target" "$work/std root" "$work/clang" \
     "$work/fort-lsp" "$work/main.ft" "$work/src" "$work/src/fort"
 if [ ! -x "$work/fort-lsp" ] ||
    [ "$(grep -A1 -x -- '--target' "$trace" | tail -n 1)" != "$target" ]; then
-    echo "lsp_target_test.sh: LSP build did not use the seed target" >&2
+    echo "lsp_target_test.sh: LSP build did not use the selected target" >&2
     exit 1
 fi
 
-printf 'seed target: darwin\n' >"$work/seed.identity"
 if TRACE=$trace EXPECT_TARGET=$target bash "$root/tools/build_lsp.sh" \
-    "$compiler" "$work/seed.identity" "$work/std" "$work/clang" \
+    "$compiler" "darwin" "$work/std" "$work/clang" \
     "$work/bad-lsp" "$work/main.ft" "$work/src" 2>"$work/error"; then
     echo "lsp_target_test.sh: missing target was accepted" >&2
     exit 1
 fi
-grep -q 'must contain one default triple' "$work/error"
-echo "LSP target: 1 alternate seed target passed; 1 missing target was rejected"
+grep -q 'unsupported target' "$work/error"
+echo "LSP target: 1 selected target passed; 1 unsupported target was rejected"

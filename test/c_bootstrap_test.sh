@@ -44,9 +44,9 @@ fi
 rm -rf -- "$build"
 mkdir -p "$build/source" "$build/target/std" "$build/target/entry"
 
-baseline=$(sed -n 's/^baseline \([0-9a-f]\{40\}\)$/\1/p' "$root/tools/bootstrap.seed")
+baseline=$(awk '$1 == "bootstrap-0" { print $2 }' "$root/tools/bootstrap.ref")
 if [ -z "$baseline" ]; then
-    echo "c bootstrap: tools/bootstrap.seed has no baseline" >&2
+    echo "c bootstrap: tools/bootstrap.ref has no bootstrap-0" >&2
     exit 2
 fi
 git -C "$root" archive "$baseline" src/fort | tar -xf - -C "$build/source"
@@ -129,11 +129,6 @@ if ! file -b "$baseline_fort" | grep -F -q "$expected_format"; then
     echo "c bootstrap: the source baseline has the wrong format" >&2
     exit 1
 fi
-
-python3 "$root/tools/verify_seed.py" "$target_name" "$baseline_fort" \
-    "$build/target/std" --ref "$root/tools/bootstrap.seed" >"$build/baseline.identity"
-grep -F -x -q "source baseline SHA: $baseline" "$build/baseline.identity"
-grep -F -x -q "default triple: $expected_triple" "$build/baseline.identity"
 
 "$baseline_fort" -S --std-dir "$build/target/std" \
     -o "$build/baseline.ll" "$build/main.ft"

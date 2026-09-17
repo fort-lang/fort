@@ -3,8 +3,8 @@
 # D9.7, D14.3, D19.1, D19.7
 set -eu
 
-if [ "$#" -ne 0 ] || [ "$(uname -sm)" != "Darwin arm64" ]; then
-    echo "darwin pipeline: requires a darwin arm64 host and no arguments" >&2
+if [ "$#" -ne 0 ] || [ "$(uname -s)" != "Darwin" ]; then
+    echo "darwin pipeline: requires a Darwin host and no arguments" >&2
     exit 2
 fi
 

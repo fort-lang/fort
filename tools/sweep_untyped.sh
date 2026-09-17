@@ -52,14 +52,12 @@
 #
 # Usage, from the top of the worktree, after `tools/vm build <preset>`:
 #
-#   COMPILER=build/debug/fort bash tools/sweep_untyped.sh tools/sweep_untyped.txt
-#   COMPILER=build/debug/stage2/fort \
+#   COMPILER=build/debug/fort \
 #       COMPILER_ARGS="--std-dir build/debug/std --cc clang" \
 #       bash tools/sweep_untyped.sh tools/sweep_untyped.txt
 #
-# stage2 needs the two extra arguments because it is not the binary CMake
-# configured: it reads no default standard library directory and no default
-# clang path from the build (notes/environment.md 5).
+# The compiler needs the explicit standard root because the root is beside it.
+# Its executable-relative fallback selects `build/std` instead.
 #
 # The list format is one row per line:
 #
@@ -127,10 +125,11 @@ if [ ! -f "$list" ]; then
     exit 2
 fi
 
-# Which column of the list this run reads. stage2 is the binary under
-# <build-dir>/stage2/, and every other path is stage1.
+# Which column of the list this run reads. The public build/fort path and the
+# old stage2 path select stage2. The C bootstrap path selects stage1.
 case $compiler in
-    *stage2*) stage=2 ;;
+    */bootstrap/stage1/fort) stage=1 ;;
+    build/*/fort|*/build/*/fort|*stage2*) stage=2 ;;
     *) stage=1 ;;
 esac
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Check the accepted target and the rejected target for this host.
+# Check native host detection and rejected host forms.
 set -euo pipefail
 
 if [ "$#" -ne 1 ]; then
@@ -8,8 +8,8 @@ if [ "$#" -ne 1 ]; then
 fi
 selected=$1
 case "$(uname -s):$selected" in
-Linux:linux) rejected=darwin ;;
-Darwin:darwin) rejected=linux ;;
+Linux:linux) triple=x86_64-linux-gnu ;;
+Darwin:darwin) triple=arm64-apple-macosx ;;
 *) echo "target host: selected target does not match this host" >&2; exit 1 ;;
 esac
 
@@ -17,14 +17,15 @@ root=$(cd "$(dirname "$0")/.." && pwd -P)
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
 
-cmake -S "$root" -B "$work/accepted" -G Ninja \
-    -DFORT_TARGET="$selected" >"$work/accepted.out" 2>&1
-grep -F -q "FORT_TARGET:STRING=$selected" "$work/accepted/CMakeCache.txt"
+cmake -S "$root" -B "$work/accepted" -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+    >"$work/accepted.out" 2>&1
+grep -F -q "$triple" "$work/accepted/build.ninja"
 
-if cmake -S "$root" -B "$work/rejected" -G Ninja \
-    -DFORT_TARGET="$rejected" >"$work/rejected.out" 2>&1; then
-    echo "target host: accepted the $rejected target" >&2
+if cmake -S "$root" -B "$work/cross" -G Ninja \
+    -DCMAKE_BUILD_TYPE=Debug -DCMAKE_SYSTEM_NAME=Generic \
+    >"$work/cross.out" 2>&1; then
+    echo "target host: accepted a cross build" >&2
     exit 1
 fi
-grep -F -q "the $rejected target requires a $rejected" "$work/rejected.out"
-echo "target host: accepted $selected and rejected $rejected"
+grep -F -q "requires a native build" "$work/cross.out"
+echo "target host: accepted $selected and rejected cross compilation"

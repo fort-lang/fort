@@ -137,17 +137,22 @@ fn main(string@ argv) i32 {
     println(block != null, " ", zeroed, " ", bytes[n - 1] == 5);
     rt.free(move(block));
 
-    // args_init and args answer with the span main was given. The second call
-    // is the one the overwrite check refuses in the other mode, unless
-    // args_init releases what the first call allocated (D17.11).
+    // args_init and args answer with the span main was given. The first manual
+    // call releases the runtime storage behind argv. Save the values that the
+    // test needs later. The saved string header still points at process bytes,
+    // which args_init does not own. The second call is the one the overwrite
+    // check refuses in the other mode, unless args_init releases what the first
+    // call allocated (D17.11).
+    u64 saved_argc = argv.len;
+    string saved_arg = argv[1];
     char*[2] mut raw = {};
-    for (u64 mut i = 0; i < argv.len; i++) {
+    for (u64 mut i = 0; i < saved_argc; i++) {
         raw[i] = argv[i].ptr;
     }
-    rt.args_init(cast(argv.len, i32), &raw[0]);
-    rt.args_init(cast(argv.len, i32), &raw[0]);
+    rt.args_init(cast(saved_argc, i32), &raw[0]);
+    rt.args_init(cast(saved_argc, i32), &raw[0]);
     string@ mine = rt.args();
-    println(mine.len, " ", mine.len == argv.len, " ", mine[1] == argv[1]);
+    println(mine.len, " ", mine.len == saved_argc, " ", mine[1] == saved_arg);
 
     // The buffer still holds bytes back until something flushes it, and
     // print_str of nothing still writes nothing. Both the builtin above and

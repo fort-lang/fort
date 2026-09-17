@@ -1,10 +1,10 @@
 #!/bin/bash
-# Test core fort library programs on the darwin arm64 host.
+# Test core fort library programs on the Darwin host.
 # T-144: std/darwin/libc.ft supplies the target C calls and constants.
 set -eu
 
-if [ "$#" -ne 0 ] || [ "$(uname -sm)" != "Darwin arm64" ]; then
-    echo "darwin core: requires a darwin arm64 host and no arguments" >&2
+if [ "$#" -ne 0 ] || [ "$(uname -s)" != "Darwin" ]; then
+    echo "darwin core: requires a Darwin host and no arguments" >&2
     exit 2
 fi
 
@@ -13,7 +13,7 @@ cd "$root"
 mkdir -p "$root/build"
 work=$(mktemp -d "$root/build/darwin-core.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT
-compiler=build/darwin/stage2/fort
+compiler=build/darwin/fort
 std=build/darwin/std
 if [ ! -x "$compiler" ] || [ ! -f "$std/libc.ft" ]; then
     echo "darwin core: darwin compiler or standard root is missing" >&2
@@ -71,7 +71,7 @@ for name in "${tests[@]}"; do
 done
 
 "$compiler" -S --std-dir "$std" -I src/fort -o "$work/fort.ll" \
-    build/darwin/bootstrap-head/entry/main.ft
+    src/fort/main.ft
 "$cc" -isysroot "$sdk" -S -O0 -o "$work/fort.s" "$work/fort.ll"
 if ! rg --pcre2 -U -q \
     'mov[ \t]+x([0-9]+), sp\n(?:[^\n]*\n){0,4}?[ \t]*str[ \t]+x[0-9]+, \[x\1\]\n(?:[^\n]*\n){0,4}?[ \t]*bl[ \t]+_fcntl' \

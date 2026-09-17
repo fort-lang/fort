@@ -796,14 +796,15 @@ class IncludeRoots(unittest.TestCase):
         there because they hold floats and the C bootstrap rejects them (D18.1,
         T-042), and a second ctest linted them with stage2; the one ctest runs
         stage2 now and reads every source. T-132 folded the float module into
-        std/rt.ft and deleted it. T-155 restores the split for bridge commit B.
-        This test names both float-holding sources."""
+        std/rt.ft and deleted it, so the two float-holding sources of the
+        library are named here, and the deleted one is named too, so that a
+        tuple that fills up again is seen."""
         files = {path.relative_to(ROOT).as_posix() for path, _ in fort_lint.default_file_set(ROOT)}
         self.assertEqual(fort_lint.SKIPPED, ())
-        for name in ("std/math.ft", "std/rt_float.ft"):
+        for name in ("std/math.ft", "std/rt.ft"):
             self.assertIn(name, files)
             self.assertTrue((ROOT / name).is_file(), name)
-        self.assertIn("std/rt.ft", files)
+        self.assertFalse((ROOT / "std/rt_float.ft").exists())
 
     def test_the_set_is_the_five_corpora(self):
         """The count the ctest reports, so a glob that stops matching is seen."""

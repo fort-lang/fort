@@ -240,8 +240,7 @@ without a rewrite.
   that way in one hour, two at 0 `self-hosted` and two about four minutes in, and each death cost
   the whole run. Start the gate inside its own subshell instead:
 
-      cd <worktree> && FORT_VM_SLOT=<n> tools/vm run 'install -m 700 build/debug/stage2/fort /tmp/fort-gate-seed && python3 tools/verify_seed.py linux /tmp/fort-gate-seed build/debug/std >/dev/null'
-      cd <worktree> && ( FORT_VM_SLOT=<n> FORT_BOOTSTRAP_SEED=/tmp/fort-gate-seed nohup tools/vm gate > build/gate.log 2>&1 & )
+      cd <worktree> && ( FORT_VM_SLOT=<n> nohup tools/vm gate > build/gate.log 2>&1 & )
 
   The parentheses bind the `&` to the one command and not to the AND-list, so the command returns
   at once and the gate detaches to ppid 1. **A gate at ppid 1 is the normal state and not a
@@ -254,15 +253,9 @@ without a rewrite.
   This Codex command runner ends background children when its shell call returns.
   For a branch gate, set the command session working directory to the ticket worktree.
   Run a final main gate from main only after the ticket merges.
-  First, snapshot and verify a linux compiler outside all `build/<preset>` directories.
-  A build output cannot be its own seed dependency. Ninja reports a dependency cycle when the
-  seed path and `build/<preset>/stage2/fort` are the same path.
-  `FORT_BOOTSTRAP_SEED` must name the executable snapshot by its guest path.
-  The gate exits 2 when this variable is absent.
   Start the gate as a supervised command session and keep its session handle:
 
-      FORT_VM_SLOT=<n> tools/vm run 'install -m 700 build/debug/stage2/fort /tmp/fort-gate-seed && python3 tools/verify_seed.py linux /tmp/fort-gate-seed build/debug/std >/dev/null'
-      FORT_VM_SLOT=<n> FORT_BOOTSTRAP_SEED=/tmp/fort-gate-seed tools/vm gate > build/gate.log 2>&1
+      FORT_VM_SLOT=<n> tools/vm gate > build/gate.log 2>&1
 
   Poll that handle for exit 0. Require the final `tools/vm gate: green` log line.
   Run read-only review in another session while the gate runs.
@@ -418,9 +411,9 @@ without a rewrite.
   runtime object). `tools/vm workflow <preset>` configures, builds and runs ctest; build
   directories are `build/<preset>` inside the worktree. `-Wall -Wextra -Wpedantic -Werror
   -Wshadow -Wvla -Wstrict-prototypes -Wmissing-prototypes -Wundef` apply to every C target.
-- Targets: `fort_core` (static library, `src/bootstrap/*.c` except `main.c`, globbed), `fort`
-  (`build/<preset>/fort`), `fort_std` (a copy of `std/*.ft` and
-  `std/<target>/*.ft` in `build/<preset>/std`, which is
+- Targets: `fort_core` (static library, `src/bootstrap/*.c` except `main.c`, globbed), `fort_stage1`
+  (the C compiler), `fort` (`build/<preset>/fort`, the source compiler), `fort_std` (a copy of
+  `std/*.ft` and `std/<target>/*.ft` in `build/<preset>/std`, which is
   what the compiler reads as `--std-dir`; `FORT_TARGET_CC`, a clang (default `clang`) with
   `--target=${FORT_TARGET_TRIPLE}` (default `x86_64-linux-gnu`), is what the driver runs over the
   emitted module), `lang_ffi_helpers` (`test/lang/ffi/*.c` built natively so `-Werror` and
@@ -439,14 +432,14 @@ without a rewrite.
   already there; **`--since` reads the commits, not the working tree**, so a file that is only
   written or only staged counts as 0 lines and the ratio answers about the last commit: commit
   first, then measure (T-093); its own tests are the ctest `lines_selftest`).
-  `tools/vm <target> [preset]` runs one. The `linux` and `darwin` presets inherit the hidden
-  `target` preset. They differ only by `FORT_TARGET` and their build directory (T-152).
+  `tools/vm <target> [preset]` runs one. CMake detects Linux or Darwin from the host system.
+  The `linux` and `darwin` presets set no `FORT_TARGET` cache value.
 - **The `darwin` build copies target library modules** (T-145, T-152).
-  `tools/target darwin workflow` runs the `darwin` CMake workflow on a darwin arm64 host.
+  `tools/target darwin workflow` runs the `darwin` CMake workflow on a Darwin host.
   `fort_std` copies `std/*.ft` and `std/darwin/*.ft` to the standard root: the target's
   `libc.ft`, `net.ft` and `os.ft` stand only in `std/linux/` and `std/darwin/`.
-  The root holds 14 fort files under `build/darwin/std`.
-  `build/darwin/stage2/fort` loads that root when a program imports `std.net`.
+  The root holds 13 fort files under `build/darwin/std`.
+  `build/darwin/fort` loads that root when a program imports `std.net`.
 - A CMake variable derived from a cache variable must not be cached itself: `find_program`
   caches by default, so `FORT_TARGET_CC_PATH` kept resolving to the old program after
   `FORT_TARGET_CC` changed in an existing build directory, and the build then ran gcc with
@@ -467,45 +460,36 @@ without a rewrite.
   (`join_sandbox_path`, `gen_join_path`), never widen the buffer or cast the result away. A guard
   only gcc enforces is a guard no test holds, so assert each one -- the call sites too, not only
   the helper -- as `test/modules_test.c` and `test/gen_test.c` do.
-- Binaries: `build/<preset>/fort` is the C differential oracle.
-  `build/<preset>/pin/<n>/fort` is source pin N from `tools/bootstrap.ref`.
-  `build/<preset>/stage2/fort` is HEAD built by the last source pin (T-151).
-  Set `FORT_BOOTSTRAP_SEED` to the user-supplied seed path.
-  Each `tools/target workflow` call writes this path to the CMake cache.
-  `tools/vm` forwards the environment variable of the same name as a guest path.
-  The `fort_stage2` target runs `tools/bootstrap_chain.sh` for `linux`.
-  The script verifies and snapshots the seed, builds each pin, builds HEAD, and writes
-  `build/<preset>/bootstrap-stages.tsv`. Each record gives the source SHA, default triple, and file
-  format. `build/<preset>/oracle/std` comes from `tools/bootstrap-oracle.ref`. Only the C
-  differential tests use it. The production chain has no dependency on the C compiler.
-  `tools/bootstrap.sh --target linux|darwin --seed <fort> [--preset <preset>] [--stage3]` runs the
-  same source chain by hand. `--stage3` also tests the checked and release fixed points.
+- Binaries: `build/<preset>/bootstrap/stage1/fort` is the C compiler.
+  `build/<preset>/bootstrap/bootstrap-N/fort` is source pin N from `tools/bootstrap.ref`.
+  `build/<preset>/fort` is HEAD built by the last source pin (T-155).
+  CMake validates the list and owns all extraction and build edges. `FORT_STAGE1_COMPILER` names an
+  external compiler and skips the list. `FORT_ENABLE_BOOTSTRAP=OFF` requires that external path.
+  `build/<preset>/oracle/std` comes from `tools/bootstrap-oracle.ref`. Only the C differential tests
+  use it.
   `tools/target linux|darwin workflow|gate` is the common host interface (T-152).
   The workflow runs CMake directly on the selected host. `tools/vm gate` enters the linux VM once,
   then runs `tools/target linux gate` there.
 - **A full clone is a build requirement, and a shallow one cannot build** (T-131). Every pin of
-  `tools/bootstrap.ref` is a commit of this repository, and `tools/pin.sh` reaches it with
-  `git cat-file`, `git merge-base` and `git archive`. `tools/pin.sh verify` runs at configure time,
-  so a missing pin stops the configure and names the pin rather than failing a compile later. It
+  `tools/bootstrap.ref` is a commit of this repository. CMake reaches it with `git cat-file`,
+  `git merge-base`, and `git archive`. Validation runs at configure time. A missing pin stops the
+  configure and names the pin instead of failing a compile later. It
   works from a worktree and in the guest: a worktree shares the object store of the checkout that
   made it, and the guest reaches that store through the symlink provisioning makes (see the git
   entry below). It therefore does **not** work in the guest of a VM a worktree owns, for the reason
   that entry gives.
-  `build/<preset>/fort-lsp` is the language server, which the `fort_lsp` target builds at every
-  build by compiling `src/lsp/main.ft` **with stage2**. It uses the target in
-  `build/<preset>/seed.identity`. The linux binary is x86-64 ELF. The darwin binary is arm64
-  Mach-O.
+  `build/<preset>/fort-lsp` is the language server. The `fort_lsp` target builds it from
+  `src/lsp/main.ft` with `build/<preset>/fort`.
 - **A ninja target may not have the name of an output path in the same directory.** `fort_lsp`
   writing `${CMAKE_BINARY_DIR}/fort_lsp` configures cleanly and then fails the build with
   `ninja: error: build.ninja:2880: multiple rules generate fort_lsp`, preceded by
   `phony target 'fort_lsp' names itself as an input`. CMake does not diagnose it, so the failure
   arrives at the first build and looks like a rule conflict. Give the two different names: the
-  target is `fort_lsp` and the binary is `fort-lsp` (T-064). `fort_stage2` avoids the collision by
-  accident, since its binary is `stage2/fort`.
+  target is `fort_lsp` and the binary is `fort-lsp` (T-064).
 
 ## 6. The host side
 
-- **The `darwin` gate uses the darwin arm64 host** (T-147, T-152).
+- **The `darwin` gate uses the Darwin host** (T-147, T-152).
   Check the host tools before the build:
 
   ```sh
@@ -524,14 +508,13 @@ without a rewrite.
   Configure and build the `darwin` compiler and language server on the darwin host:
 
   ```sh
-  FORT_BOOTSTRAP_SEED=/path/to/darwin/fort tools/target darwin workflow
+  tools/target darwin workflow
   ```
 
-  `build/darwin/stage2/fort` is the `darwin` compiler.
+  `build/darwin/fort` is the compiler from the CMake graph.
   `build/darwin/fort-lsp` is the `darwin` language server.
-  Both use the verified seed target. The host OS version does not replace that target.
-  The build verifies the supplied `darwin` seed. It calls `tools/vm` zero times while it builds the
-  source chain and tests the fixed point.
+  The compiler and language server use the target that CMake selects. The build calls `tools/vm`
+  zero times while it builds the source chain and tests the fixed point.
   The darwin gate exports `SDKROOT` from `xcrun --sdk macosx --show-sdk-path`.
   The compiler and corpus C helpers use that SDK path for darwin links.
   Run the counted `darwin` gate on a clean source tree:
@@ -543,8 +526,8 @@ without a rewrite.
   The gate runs the pipeline, `darwin` CMake tests, corpus, trap, lint, core, and network tests.
   It names each Linux-only corpus exclusion and gives the selected corpus count.
   `tools/darwin identity` records the source and main SHAs and requires empty git status.
-  It records host CPU, OS, SDK, Xcode, clang, verifier, CMake, Node, and tool hashes.
-  It records the selected target, seed identity, compiler hash, and language-server hash.
+  It records the host OS, SDK, Xcode, clang, verifier, CMake, Node, and tool hashes.
+  It records the selected target, compiler hash, and language-server hash.
   It records a counted path, symlink, and content manifest for `.ft` inputs.
   The manifest includes ignored `.ft` files and `build/darwin`.
   Capture identity before the gate and after final review:
@@ -559,13 +542,13 @@ without a rewrite.
 
   Record the gate log SHA256 again after final review.
   Require the same gate log hash and identity record before gate reuse.
-  A changed SHA, status, tool, SDK, VM, seed, or `.ft` manifest invalidates reuse.
+  A changed SHA, status, tool, SDK, VM, or `.ft` manifest invalidates reuse.
   A changed or missing build output invalidates reuse.
   Require each native output directory before a freshness count:
 
   ```sh
   test -f build/darwin-gate.log && test -d build/darwin && test -d build/darwin/std &&
-    test -d build/darwin/fixpoint &&
+    test -d build/darwin/cmake-fixpoint/fixpoint &&
     bash -o pipefail -c 'find build/darwin -newer build/darwin-gate.log | wc -l'
   ```
 

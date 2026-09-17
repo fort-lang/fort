@@ -3,8 +3,8 @@
 # D3.8, D9.8, D13.2
 set -eu
 
-if [ "$#" -ne 0 ] || [ "$(uname -sm)" != "Darwin arm64" ]; then
-    echo "darwin net: requires a darwin arm64 host and no arguments" >&2
+if [ "$#" -ne 0 ] || [ "$(uname -s)" != "Darwin" ]; then
+    echo "darwin net: requires a Darwin host and no arguments" >&2
     exit 2
 fi
 
@@ -13,7 +13,7 @@ cd "$root"
 mkdir -p build
 work=$(mktemp -d "$root/build/darwin-net.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT
-compiler=build/darwin/stage2/fort
+compiler=build/darwin/fort
 if [ ! -x "$compiler" ]; then
     echo "darwin net: darwin compiler is missing" >&2
     exit 2

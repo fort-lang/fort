@@ -112,8 +112,8 @@ while [ "$#" -gt 0 ]; do
     esac
     shift 2
 done
-stage1=$build/fort
-stage2=$build/stage2/fort
+stage1=$build/bootstrap/stage1/fort
+stage2=$build/fort
 
 # A missing tool is a broken environment and not an emitter that disagreed with
 # itself, so it exits 2 as tools/fixpoint.sh does.
@@ -141,7 +141,7 @@ fi
 # them: an equality and not a floor, so that a file cannot slip out of the
 # comparison. A ticket that adds or removes a .ft file changes all four lines
 # in the same commit.
-FT_FILES=973
+FT_FILES=972
 
 # The files of that corpus stage1 compiles into a module, which are the ones
 # compared. It is an equality for the reason FT_FILES is: a comparison that

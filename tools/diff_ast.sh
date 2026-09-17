@@ -56,8 +56,8 @@ if [ "$#" -ne 1 ]; then
     exit 2
 fi
 build=$1
-stage1=$build/fort
-stage2=$build/stage2/fort
+stage1=$build/bootstrap/stage1/fort
+stage2=$build/fort
 
 for binary in "$stage1" "$stage2"; do
     if [ ! -x "$binary" ]; then
@@ -71,7 +71,7 @@ done
 # constant: a file must not be able to slip out of the comparison. A ticket
 # that adds or removes a .ft file changes all four lines in the same commit:
 # diff_tokens.sh, diff_ast.sh, diff_check.sh and diff_ir.sh.
-FT_FILES=973
+FT_FILES=972
 
 # The files of that corpus src/bootstrap refuses for a nested array or span
 # level, which src/fort reads (D3.6, T-043). They are skipped below, and this
@@ -104,7 +104,7 @@ FORM_MESSAGES='do-while|\?:'
 # and a `?:`, and FORM_FILES counts it. std/rt_float.ft left this count on the
 # same commit, which is why it fell from 67 to 66; the file itself went two
 # commits later and lowered FT_FILES rather than this one.
-FLOAT_FILES=69
+FLOAT_FILES=68
 FLOAT_MESSAGES='float literals'
 
 # The source parser reads `$cfg`; the frozen C bootstrap reports `$`.

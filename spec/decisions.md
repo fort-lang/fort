@@ -1687,27 +1687,32 @@ Sections:
   and `tools/lines.py` globs them no longer, so the source side is the compiler and the standard
   library and nothing else.
 
-### D14.7 The bootstrap seed and target chain
+### D14.7 The C-started target bootstrap chain
 - owner: `toolchain.md` (8).
-- rule: The production bootstrap accepts exactly two bootstrap target names: `linux` and `darwin`.
-  The `linux` seed is one executable Linux x86-64 fort compiler. The `darwin` seed is one
-  executable Darwin arm64 fort compiler. The user supplies the seed for the selected target.
-  Both seeds come from the source baseline that `tools/bootstrap.seed` records.
-  The seed is an input and not a source-built compiler stage.
-  The verifier accepts only `linux` and `darwin`. It runs the seed with `-S` and no `--target`.
-  Linux seed IR must name `x86_64-unknown-linux-gnu` as its target triple. Darwin seed IR must name
-  `arm64-apple-macosxM.m.p`, with three numeric version parts. The verifier records the canonical
-  seed path, its SHA-256 value, the source baseline SHA, and the emitted default target triple.
-  The seed builds the source baseline for the selected target. Each later source-built stage uses
-  the same selected target. No source-built stage crosses from Linux to Darwin or from Darwin to
-  Linux. The baseline and each later source pin are full commit SHAs in the history of the revision
-  being built. A shallow clone that lacks one of these commits cannot bootstrap. The C bootstrap is
-  not in the production compiler chain. It remains an independent implementation for differential
-  tests.
-- rationale: A self-hosted compiler needs one executable compiler before it can compile source.
-  One shared source baseline gives both targets the same first source-built compiler.
-- history: Decided 2026-09-16 (T-150). The earlier production chain started with the C bootstrap
-  and built two Linux-only source pins before it built HEAD.
+- rule: The production bootstrap detects and accepts exactly two host operating systems. Linux
+  selects `linux` and `x86_64-linux-gnu`. Darwin selects `darwin` and
+  `arm64-apple-macosx11.0.0`. The build rejects cross compilation and all other hosts.
+  CMake reads `tools/bootstrap.ref` and owns the complete build graph. The file contains an ordered,
+  gap-free list from `bootstrap-0`. Each row names one lowercase, full commit SHA. Each commit is in
+  HEAD's history and contains the compiler and standard sources for both supported hosts. A shallow
+  clone that lacks one listed commit cannot bootstrap. The C compiler builds only `bootstrap-0` for
+  the detected host. Each listed source compiler builds the next listed revision for that host. The
+  last listed compiler builds working-tree HEAD. The graph does not call a shell script to read the
+  list or select a predecessor. CMake applies the configured checked or release mode to each source
+  stage.
+  `FORT_STAGE1_COMPILER` can name an external compiler. This mode skips the list and builds HEAD
+  directly. `FORT_ENABLE_BOOTSTRAP=OFF` requires that external compiler.
+  Add a pin only when the current last pin cannot build a required later revision. A new pin must
+  build with its predecessor and build its successor. Both builds must pass on both supported host
+  systems before the pin enters the list.
+  The C compiler remains the independent implementation for differential tests.
+- rationale: One C compiler can start the same source chain on both supported systems. CMake records
+  all dependencies and rebuilds only the affected stages.
+- history: Amended 2026-09-17 (T-159). Removed the supplied-seed workflow after CMake took control
+  of the complete graph. Amended 2026-09-17 (T-155). The C compiler replaces the user-supplied
+  executable seed.
+  Decided 2026-09-16 (T-150). The earlier chain used a supplied target seed from one source
+  baseline.
 
 ## D15 Not in v1
 

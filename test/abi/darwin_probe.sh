@@ -1,14 +1,14 @@
 #!/bin/bash
-# Run the stage2 Apple arm64 ABI probes on the darwin host.
+# Run the Apple ABI probes on the Darwin host.
 # T-144 owns the darwin library update. This probe uses a local errno bridge.
 set -eu
 
 probe_root=$(git rev-parse --show-toplevel)
 cd "$probe_root"
-probe_identity=${FORT_DARWIN_PROBE_IDENTITY:-build/darwin/seed.identity}
-probe_target=$(bash tools/seed_target.sh "$probe_identity")
+probe_target_file=${FORT_DARWIN_PROBE_TARGET_FILE:-build/darwin/bootstrap/target}
+probe_target=$(cat "$probe_target_file")
 if ! [[ "$probe_target" =~ ^arm64-apple-macosx[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    printf 'darwin_probe: seed target is not darwin: %s\n' "$probe_target" >&2
+    printf 'darwin_probe: selected target is not darwin: %s\n' "$probe_target" >&2
     exit 1
 fi
 if [ "${1:-}" = --print-target ]; then
@@ -19,9 +19,9 @@ if [ "$#" -ne 0 ]; then
     printf 'usage: darwin_probe.sh [--print-target]\n' >&2
     exit 2
 fi
-compiler=build/darwin/stage2/fort
-if [ "$(uname -sm)" != "Darwin arm64" ] || [ ! -x "$compiler" ]; then
-    printf 'darwin_probe: requires the darwin compiler on a darwin arm64 host\n' >&2
+compiler=build/darwin/fort
+if [ "$(uname -s)" != "Darwin" ] || [ ! -x "$compiler" ]; then
+    printf 'darwin_probe: requires the darwin compiler on a Darwin host\n' >&2
     exit 2
 fi
 probe_dir=$(mktemp -d build/darwin/darwin-probe.XXXXXX)

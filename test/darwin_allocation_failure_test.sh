@@ -6,7 +6,7 @@
 # D10.2, D11.4, D19.1
 set -eu
 
-if [ "$#" -ne 3 ] || [ "$(uname -sm)" != "Darwin arm64" ]; then
+if [ "$#" -ne 3 ] || [ "$(uname -s)" != "Darwin" ]; then
     echo "usage: darwin_allocation_failure_test.sh <compiler> <std-root> <target>" >&2
     exit 2
 fi

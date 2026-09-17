@@ -1,9 +1,9 @@
 #!/bin/bash
-# T-147: record the darwin host, seed, tools, and fort input paths.
+# T-147: record the Darwin host, tools, target, and fort input paths.
 set -euo pipefail
 
-if [ "$#" -ne 0 ] || [ "$(uname -sm)" != "Darwin arm64" ]; then
-    echo "darwin identity: requires a darwin arm64 host and no arguments" >&2
+if [ "$#" -ne 0 ] || [ "$(uname -s)" != "Darwin" ]; then
+    echo "darwin identity: requires a Darwin host and no arguments" >&2
     exit 2
 fi
 
@@ -13,8 +13,7 @@ if [ -n "$(git status --porcelain --untracked-files=all)" ]; then
     echo "darwin identity: source tree is not clean" >&2
     exit 1
 fi
-for input in build/darwin/stage2/fort build/darwin/seed.identity \
-             build/darwin/bootstrap-stages.tsv \
+for input in build/darwin/fort build/darwin/bootstrap/target \
              build/darwin/fort-lsp build/darwin/std/libc.ft \
              build/darwin/std/net.ft; do
     if [ ! -f "$input" ]; then
@@ -27,8 +26,7 @@ echo "source SHA: $(git rev-parse HEAD)"
 echo "main SHA: $(git rev-parse main)"
 echo "git status: empty"
 echo "selected target: darwin"
-cat build/darwin/seed.identity
-echo "host CPU: $(uname -m)"
+echo "target triple: $(cat build/darwin/bootstrap/target)"
 echo "host OS: $(sw_vers -productVersion)"
 echo "host kernel: $(uname -r)"
 echo "SDK path: $(xcrun --sdk macosx --show-sdk-path)"
@@ -63,6 +61,6 @@ for tool in "${tools[@]}"; do
     echo "tool $tool: $resolved; $version; $(shasum -a 256 "$resolved" | awk '{print $1}')"
 done
 
-echo "darwin compiler: build/darwin/stage2/fort; $(shasum -a 256 build/darwin/stage2/fort | awk '{print $1}')"
+echo "darwin compiler: build/darwin/fort; $(shasum -a 256 build/darwin/fort | awk '{print $1}')"
 echo "darwin LSP: build/darwin/fort-lsp; $(shasum -a 256 build/darwin/fort-lsp | awk '{print $1}')"
 python3 tools/darwin_input_manifest.py

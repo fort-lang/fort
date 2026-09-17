@@ -2,10 +2,8 @@
 # tools/fixpoint.sh <build-dir>: the compiler must reproduce itself, in both
 # build modes (D19.5).
 #
-# The compiler that builds HEAD is the last pin of tools/bootstrap.ref.
-# The verified seed reached it through each prior source pin (D14.7).
-# --bootstrap names that last pin. Stage2 is HEAD's src/fort compiled by the
-# pin. Stage3 uses stage2, and stage4 uses stage3.
+# CMake supplies the last bootstrap compiler and build/fort. The graph builds
+# build/fort with that compiler. Stage3 uses build/fort, and stage4 uses stage3.
 #
 # Which pair D19.5 compares, and why it is not the pair it used to be. The last
 # pin and HEAD are different programs, so their `-S` texts differ on any commit
@@ -37,31 +35,31 @@
 # Two identical modules that link to different bytes are clang or the linker
 # and not the compiler, and the two failures have different causes.
 #
-# It builds all six binaries itself, under <build-dir>/fixpoint/<mode>, and
-# the three stages of a mode differ in nothing that reaches the module except
-# the compiler and the `-o` path. The module does not hold the output path.
-# The darwin target uses one link path for stage3 and stage4, as D19.5 requires.
+# CMake supplies build/fort. This script builds stage3 and stage4 under
+# <build-dir>/fixpoint/<mode>. The three stages of a mode differ in nothing
+# that reaches the module except the compiler and the `-o` path. The module
+# does not hold the output path. The darwin target uses one link path for
+# stage3 and stage4, as D19.5 requires.
 #
 # Everything that does reach the module must be spelled the same way for the
 # two stages, and the file paths are what reach it. The compiler names
 # each file the path it opened it by (D14.2) and writes that path into the
 # module as the file constant of a failure block (D19.6, D11.4). So
 # `--std-dir build/debug/std` and `--std-dir /vagrant/build/debug/std` give
-# two different programs. The measurement: the CMake target fort_stage2
+# two different programs. The measurement: the CMake target fort
 # compiles `src/fort/main.ft` by its absolute path, the same compile from the
 # top of the worktree gives it a relative path, and the two binaries differ in
 # 27233 of 480088 bytes. Both binaries run.
 #
-# It also writes no file that another test reads. <build-dir>/stage2/fort
-# belongs to the CMake target fort_stage2, and lang-stage2, diff-ir and
-# stage-usage judge it while this test runs. The source chain owns each
-# <build-dir>/pin/<n>/fort.
+# It also writes no file that another test reads. <build-dir>/fort belongs to
+# CMake. The lang-stage2, diff-ir, and stage-usage tests judge that binary.
 #
 # ctest runs it as the test `bootstrap`, label lang.
 set -eu
 
 usage() {
-    echo "usage: fixpoint.sh <build-dir> [--bootstrap <fort>] [--cc <clang>]" >&2
+    echo "usage: fixpoint.sh <build-dir> --bootstrap <fort> --compiler <fort>" >&2
+    echo "                   [--cc <clang>]" >&2
     echo "                   [--target <triple>] [--opt <opt>] [--entry <file>]" >&2
     echo "                   [--std <dir>] [--source-root <dir>]" >&2
 }
@@ -74,9 +72,9 @@ usage() {
 cc=${FORT_TARGET_CC:-clang}
 opt=${FORT_OPT:-opt-18}
 target=${FORT_TARGET_TRIPLE:-x86_64-linux-gnu}
-# The compiler that builds HEAD. CMake passes it, and a hand run reads the last
-# pin off tools/bootstrap.ref, so the two measure one chain.
+# The compiler that builds HEAD. CMake passes it from the graph.
 bootstrap=
+compiler=
 entry=
 std=
 source_root=
@@ -95,6 +93,7 @@ while [ "$#" -gt 0 ]; do
     fi
     case "$1" in
         --bootstrap) bootstrap=$2 ;;
+        --compiler) compiler=$2 ;;
         --cc) cc=$2 ;;
         --target) target=$2 ;;
         --opt) opt=$2 ;;
@@ -114,7 +113,12 @@ entry=${entry:-$root/src/fort/main.ft}
 std=${std:-$build/std}
 source_root=${source_root:-$(dirname "$entry")}
 if [ -z "$bootstrap" ]; then
-    bootstrap=$build/pin/$(bash "$root/tools/pin.sh" last)/fort
+    echo "fixpoint.sh: --bootstrap is required" >&2
+    exit 2
+fi
+if [ -z "$compiler" ]; then
+    echo "fixpoint.sh: --compiler is required" >&2
+    exit 2
 fi
 export QEMU_LD_PREFIX=${QEMU_LD_PREFIX:-/usr/x86_64-linux-gnu}
 
@@ -137,14 +141,18 @@ arm64-apple-macosx[0-9]*.[0-9]*.[0-9]*)
     ;;
 esac
 
-if [ ! -x "$bootstrap" ]; then
-    echo "fixpoint.sh: not built: $bootstrap (build the fort_stage2 target first)" >&2
+if [ ! -x "$bootstrap" ] || [ ! -x "$compiler" ]; then
+    echo "fixpoint.sh: the bootstrap compiler or build/fort is not built" >&2
     exit 2
 fi
 if [ ! -f "$entry" ] || [ ! -d "$std" ] || [ ! -d "$source_root" ]; then
     echo "fixpoint.sh: target entry, source root, or standard root is missing" >&2
     exit 2
 fi
+
+echo "== checking HEAD with the last CMake bootstrap compiler"
+"$bootstrap" --check --std-dir "$std" -I "$source_root" \
+    --target "$target" "$entry"
 
 # A missing tool is a broken environment and not a compiler that failed to
 # reproduce itself, so it exits 2 as test/pipeline_test.sh does.
@@ -214,19 +222,14 @@ emit() {
 check_mode() {
     local mode=$1
     local flags=$2
-    local two=$work/$mode/stage2/fort
+    local two=$compiler
     local three=$work/$mode/stage3/fort
     local four=$work/$mode/stage4/fort
     local two_ll=$work/$mode/stage2.ll
     local three_ll=$work/$mode/stage3.ll
 
-    echo "== $mode: compiling src/fort with the last pin"
+    echo "== $mode: using build/fort from the CMake bootstrap graph"
     mkdir -p "$work/$mode"
-    if ! compile "$bootstrap" "$flags" "$two"; then
-        echo "fixpoint.sh: $mode: the last pin could not compile src/fort" >&2
-        status=1
-        return
-    fi
 
     echo "== $mode: stage3"
     if [ "$target_name" = darwin ]; then

@@ -13,8 +13,8 @@ if [ "$#" -ne 1 ]; then
     exit 2
 fi
 build=$1
-stage1=$build/fort
-stage2=$build/stage2/fort
+stage1=$build/bootstrap/stage1/fort
+stage2=$build/fort
 
 for binary in "$stage1" "$stage2"; do
     if [ ! -x "$binary" ]; then

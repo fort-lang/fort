@@ -1,5 +1,5 @@
 #!/bin/bash
-# Check that each workflow passes its environment inputs to CMake.
+# Check host selection and the Darwin verifier input of each workflow.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd -P)
@@ -10,48 +10,44 @@ trace=$work/trace
 export TRACE=$trace
 
 for tool in cmake ctest; do
-    cat >"$work/bin/$tool" <<'EOF'
-#!/bin/bash
-printf '%s' "$(basename "$0")" >>"$TRACE"
-printf '\t%s' "$@" >>"$TRACE"
-printf '\n' >>"$TRACE"
-EOF
+    printf '#!/bin/bash\nprintf "%%s" "$(basename "$0")" >>"$TRACE"\nprintf "\\t%%s" "$@" >>"$TRACE"\nprintf "\\n" >>"$TRACE"\n' \
+        >"$work/bin/$tool"
     chmod 700 "$work/bin/$tool"
 done
+cat >"$work/bin/uname" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$FAKE_HOST"
+EOF
+chmod 700 "$work/bin/uname"
 
-PATH="$work/bin:$PATH" \
-FORT_BOOTSTRAP_SEED="$work/seed one" FORT_DARWIN_OPT="$work/opt one" \
+FAKE_HOST=Darwin FORT_DARWIN_OPT="$work/opt one" \
+    PATH="$work/bin:$PATH" "$root/tools/target" darwin workflow
+FAKE_HOST=Darwin PATH="$work/bin:$PATH" \
     "$root/tools/target" darwin workflow
-PATH="$work/bin:$PATH" \
-FORT_BOOTSTRAP_SEED="$work/seed two" FORT_DARWIN_OPT="$work/opt two" \
-    "$root/tools/target" darwin workflow
-PATH="$work/bin:$PATH" \
-FORT_BOOTSTRAP_SEED="$work/linux seed" FORT_DARWIN_OPT="$work/not-linux" \
+FAKE_HOST=Linux PATH="$work/bin:$PATH" \
     "$root/tools/target" linux workflow
-env -u FORT_BOOTSTRAP_SEED -u FORT_DARWIN_OPT PATH="$work/bin:$PATH" \
-    "$root/tools/target" linux workflow
-PATH="$work/bin:$PATH" \
-FORT_BOOTSTRAP_SEED="$work/gate seed" FORT_DARWIN_OPT="$work/gate opt" \
-    "$root/tools/darwin" fixpoint
+if FAKE_HOST=Darwin PATH="$work/bin:$PATH" \
+    "$root/tools/target" linux workflow >/dev/null 2>&1; then
+    echo "target workflow: accepted linux on Darwin" >&2
+    exit 1
+fi
+if FAKE_HOST=Linux PATH="$work/bin:$PATH" \
+    "$root/tools/target" darwin workflow >/dev/null 2>&1; then
+    echo "target workflow: accepted Darwin on Linux" >&2
+    exit 1
+fi
 
 {
-    printf 'cmake\t--preset\tdarwin\t-DFORT_BOOTSTRAP_SEED:FILEPATH=%s/seed one\t' "$work"
-    printf '%s\n' "-DFORT_OPT:FILEPATH=$work/opt one"
+    printf 'cmake\t--preset\tdarwin\t%s\n' "-DFORT_OPT:FILEPATH=$work/opt one"
     printf 'cmake\t--build\t--preset\tdarwin\nctest\t--preset\tdarwin\n'
-    printf 'cmake\t--preset\tdarwin\t-DFORT_BOOTSTRAP_SEED:FILEPATH=%s/seed two\t' "$work"
-    printf '%s\n' "-DFORT_OPT:FILEPATH=$work/opt two"
+    printf 'cmake\t--preset\tdarwin\n'
     printf 'cmake\t--build\t--preset\tdarwin\nctest\t--preset\tdarwin\n'
-    printf 'cmake\t--preset\tlinux\t-DFORT_BOOTSTRAP_SEED:FILEPATH=%s/linux seed\n' "$work"
-    printf 'cmake\t--build\t--preset\tlinux\nctest\t--preset\tlinux\n'
     printf 'cmake\t--preset\tlinux\n'
     printf 'cmake\t--build\t--preset\tlinux\nctest\t--preset\tlinux\n'
-    printf 'cmake\t--preset\tdarwin\t-DFORT_BOOTSTRAP_SEED:FILEPATH=%s/gate seed\t' "$work"
-    printf '%s\n' "-DFORT_OPT:FILEPATH=$work/gate opt"
-    printf 'cmake\t--build\t--preset\tdarwin\nctest\t--preset\tdarwin\n'
 } >"$work/want"
 if ! cmp -s "$work/want" "$trace"; then
     echo "target_workflow_test.sh: workflow inputs differ" >&2
     diff -u "$work/want" "$trace" >&2 || true
     exit 1
 fi
-echo "target workflow: 5 calls refresh 4 seed values and 3 darwin verifier values"
+echo "target workflow: 3 native calls passed; 2 non-native calls failed"

@@ -1830,12 +1830,18 @@ implementable; the design is to be planned in the implementation phase.
   repository holds `src/` (compiler), `std/*.ft` (standard library, the runtime `std.rt`
   included), `test/` (section 7) and a build script producing `build/fort` and `build/std/` with
   the library sources.
-- **The chain that builds the compiler** (D14.7). The user supplies one executable seed for the
-  selected `linux` or `darwin` target. `tools/bootstrap.seed` names the shared source baseline.
-  The verified seed builds that baseline for its own target. The baseline and each later pin build
-  the next source stage for the same target. The last source stage builds HEAD. The C bootstrap is
-  not in this chain. It remains the second implementation for differential tests. The baseline and
-  pins are full commits in HEAD's history. A shallow clone that lacks one cannot bootstrap.
+- **The chain that builds the compiler** (D14.7). CMake detects Linux or Darwin from the host
+  operating system. It rejects cross compilation and all other systems. The C compiler builds
+  `bootstrap-0` for that host. Each source pin builds the next pin. The last pin builds HEAD.
+  `tools/bootstrap.ref`
+  holds the ordered, gap-free list of full commit SHAs. CMake validates and owns this graph. A
+  graph does not call a shell script to read the list or select a predecessor. A shallow clone that
+  lacks
+  a listed commit cannot bootstrap. `FORT_STAGE1_COMPILER` skips the list and builds HEAD directly.
+  `FORT_ENABLE_BOOTSTRAP=OFF` requires this external compiler. Add a pin only when the current last
+  pin cannot build a required later revision. A new pin must build with its predecessor and build
+  its successor. Both builds must pass on both supported host systems before the pin enters the list.
+  The C compiler remains the second implementation for differential tests.
 - **Driver.** Parses options (section 1), owns the module table keyed by real path, runs the
   passes below, invokes `--cc` over the emitted module (D14.3) and maps failures to exit
   statuses.
