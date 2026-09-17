@@ -27,6 +27,7 @@ from pathlib import Path
 TEST_DIR = Path(__file__).resolve().parent
 ROOT = TEST_DIR.parent
 DECISIONS_PATH = ROOT / "spec" / "decisions.md"
+TOOLCHAIN_PATH = ROOT / "spec" / "toolchain.md"
 sys.path.insert(0, str(ROOT / "tools"))
 
 import check_decisions  # noqa: E402
@@ -402,13 +403,22 @@ class RealLog(unittest.TestCase):
     def test_the_lint_is_clean(self):
         self.assertEqual(check_decisions.lint(str(DECISIONS_PATH), self.text), [])
 
-    def test_it_holds_a_hundred_and_forty_five_entries(self):
-        self.assertEqual(len(self.entries), 145)
+    def test_it_holds_a_hundred_and_forty_six_entries(self):
+        self.assertEqual(len(self.entries), 146)
 
     def test_every_entry_carries_an_owner_and_a_rule(self):
         without = [name for name, fields in self.entries.items()
                    if not fields.get("owner", "").strip() or not fields.get("rule", "").strip()]
         self.assertEqual(without, [])
+
+    def test_check_mode_selects_and_validates_the_configuration_target(self):
+        rule = check_decisions.rule_of(self.text, "D20.1")
+        pipeline = TOOLCHAIN_PATH.read_text(encoding="utf-8")
+        self.assertIn("`--target` selects the\n  three configuration values of D21.1", rule)
+        self.assertNotIn("`--target` and `-Xcc` are unused", rule)
+        self.assertIn("In an IR mode or under `--check`, select", pipeline)
+        self.assertIn("Reject an unsupported target form with status 2 before step 1", pipeline)
+        self.assertNotIn("every other option is unused, as under `--check`", pipeline)
 
     def test_no_dated_note_stands_outside_a_history_field(self):
         """Every dated note stands in a history field and none in a rule.

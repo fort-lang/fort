@@ -1,16 +1,14 @@
 #!/bin/bash
-# stage1 and stage2 must parse every .ft file in the repository into the same
-# syntax tree.
+# Stage1 and stage2 must parse the common subset into the same syntax tree.
 #
 # `fort --ast <file>` lexes and parses that one file and writes its tree as
 # one S-expression in the form of spec/toolchain.md 1 (D14.1). Both compilers
 # implement it -- src/bootstrap/ast_dump.c and src/fort/ast.ft -- and this
-# script is what holds the second against the first while Phase B is written:
-# for every .ft file it compares the two trees, the two sets of diagnostics
-# and the two exit statuses, byte for byte. A file that deliberately fails to
-# parse is compared like any other, since the two compilers must agree about
-# its diagnostics and about the error nodes their recovery leaves as well
-# (D14.2).
+# script holds the second against the first while Phase B is written. It
+# compares trees, diagnostics and exit statuses byte for byte for their common
+# subset. It measures files that use source-only syntax separately. A
+# common-subset file that deliberately fails to parse is compared like any
+# other (D14.2).
 #
 # It is the parser's analogue of tools/diff_tokens.sh and is written the same
 # way, including the two guards that script learned the hard way: stage1's own
@@ -23,8 +21,8 @@
 # name ranges, nor anything the checker would say. Ranges are pinned by the
 # assertions in test/parser_loc_test.c and test/fort/parser_range_test.ft.
 #
-# The one construct the two parsers read differently is skipped here, and it
-# is skipped by name rather than by silence (T-043): src/fort reads the nested
+# The first construct the two parsers read differently is skipped here. It is
+# skipped by name rather than by silence (T-043): src/fort reads the nested
 # array and span levels of D3.6 (`i32[3][4]`, `i32[4]@`, `u8@@`, `node@[4]`)
 # and src/bootstrap refuses them, so stage1 answers such a file with `not
 # supported by the bootstrap compiler: <one of four features>` and no tree the
@@ -39,8 +37,8 @@
 # way (D6.6, D7.5, T-044), with a count of their own and one guard more:
 # stage2 must not report the refusal stage1 reports.
 #
-# A float literal is the third (D2.6, T-041), skipped the same way again. The
-# three counts are order-dependent and the order is the one the loop runs in:
+# A float literal is the third (D2.6, T-041), skipped the same way again.
+# `$cfg` is the fourth (D21.1, T-156). The four counts are order-dependent:
 # a file holding a `?:` and a float literal is counted once, by the first test
 # that matches it. Each count is an equality, so no file leaves the comparison
 # quietly whichever reason takes it.
@@ -73,7 +71,7 @@ done
 # constant: a file must not be able to slip out of the comparison. A ticket
 # that adds or removes a .ft file changes all four lines in the same commit:
 # diff_tokens.sh, diff_ast.sh, diff_check.sh and diff_ir.sh.
-FT_FILES=961
+FT_FILES=964
 
 # The files of that corpus src/bootstrap refuses for a nested array or span
 # level, which src/fort reads (D3.6, T-043). They are skipped below, and this
@@ -109,6 +107,9 @@ FORM_MESSAGES='do-while|\?:'
 FLOAT_FILES=68
 FLOAT_MESSAGES='float literals'
 
+# The source parser reads `$cfg`; the frozen C bootstrap reports `$`.
+CFG_FILES=3
+
 files=$(find . -name '*.ft' -not -path './build/*' -not -path './.git/*' \
     -not -path './.worktrees/*' | sort)
 count=$(printf '%s\n' "$files" | grep -c .)
@@ -130,6 +131,7 @@ differing=0
 nested=0
 forms=0
 floats=0
+cfgs=0
 # The list is read line by line rather than word by word: a path holding a
 # space would otherwise be split into two paths neither compiler can open,
 # and two compilers failing alike is what this script would call agreement.
@@ -140,6 +142,43 @@ while IFS= read -r file; do
     "$stage2" --ast "$file" >"$work/two.out" 2>"$work/two.err"
     two_status=$?
     set -e
+    if grep -Fq "unexpected character '$'" "$work/one.err" &&
+        grep -Fq '(cfg ' "$work/two.out"; then
+        cfgs=$((cfgs + 1))
+        cfg_bad=0
+        if [ "$one_status" -ne 1 ]; then
+            echo "diff_ast.sh: $file: stage1 exited $one_status, expected 1" >&2
+            status=1
+            cfg_bad=1
+        fi
+        if [ "$two_status" -ne 0 ]; then
+            echo "diff_ast.sh: $file: stage2 exited $two_status, expected 0" >&2
+            status=1
+            cfg_bad=1
+        fi
+        if [ -s "$work/two.err" ]; then
+            echo "diff_ast.sh: $file: stage2 reports a configuration diagnostic" >&2
+            head -n 5 "$work/two.err" >&2
+            status=1
+            cfg_bad=1
+        fi
+        for dump in one two; do
+            case $(cat "$work/$dump.out") in
+            "(module"*")") ;;
+            *)
+                echo "diff_ast.sh: $file: $dump dump is not a module node" >&2
+                head -c 200 "$work/$dump.out" >&2
+                echo >&2
+                status=1
+                cfg_bad=1
+                ;;
+            esac
+        done
+        if [ "$cfg_bad" -ne 0 ]; then
+            differing=$((differing + 1))
+        fi
+        continue
+    fi
     # stage1 refuses `do`-`while` and `?:` and stage2 reads both, so there is
     # nothing to compare. The file is counted, and stage2 is held to the other
     # half of the divergence: it must not report that refusal. Its status and
@@ -321,11 +360,15 @@ if [ "$floats" -ne "$FLOAT_FILES" ]; then
     echo "diff_ast.sh: holding one raises or lowers FLOAT_FILES beside FT_FILES" >&2
     exit 1
 fi
+if [ "$cfgs" -ne "$CFG_FILES" ]; then
+    echo "diff_ast.sh: parsed configuration syntax in $cfgs files, expected $CFG_FILES" >&2
+    status=1
+fi
 if [ "$status" -eq 0 ]; then
     echo "stage1 and stage2 agree about the syntax tree, the diagnostics and the exit"
-    echo "status of $((count - nested - forms - floats)) of the $count .ft files in the"
+    echo "status of $((count - nested - forms - floats - cfgs)) of the $count .ft files in the"
     echo "repository; $nested use a nested array or span level, $forms a do-while or a"
-    echo "'?:', and $floats a float literal"
+    echo "'?:', $floats a float literal and $cfgs a configuration expression"
 else
     echo "diff_ast.sh: $differing of $count .ft files differ" >&2
 fi

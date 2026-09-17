@@ -3,10 +3,10 @@
 //
 // A language server is a planned consumer of these modules, so the compiler
 // keeps no module-level mutable state: the pool the analysis interns into, the
-// diagnostic sink and the source table are fields of this value, which the
-// driver creates, passes down and frees. Two analyses in one process are two
-// sessions, and freeing a session frees everything it allocated, so a document
-// analysed a thousand times does not grow the heap.
+// diagnostic sink, the source table and the configuration table are fields of
+// this value. The driver creates, passes down and frees it. Two analyses in one
+// process are two sessions. Freeing a session frees all its allocations, so a
+// document analysed a thousand times does not grow the heap.
 // D20.5
 //
 // read_source is the only function that reads a source file. A server hands
@@ -35,6 +35,10 @@ struct session {
     /// pool lives exactly as long as the map does.
     strmap.str_map sources;
     containers.str_vec texts;
+    /// One map applies to the complete module closure. The map stores each
+    /// key's position in `config_values`. Both strings live in the pool.
+    strmap.str_map config;
+    containers.str_vec config_values;
 }
 
 /// The empty session; allocates nothing. A call result needs no move.
@@ -43,15 +47,39 @@ fn create() session {
     return session{};
 }
 
-/// Releases the pool, the sink, the source table and every source text: every
-/// allocation the analysis made through this value dies here, and every string
-/// it handed out becomes dangling, which is why an analysis outlives nothing of
-/// its session.
+/// Releases the pool, sink, both tables, source texts and configuration value
+/// slots. All session allocations die here. All returned strings become
+/// dangling, so an analysis outlives nothing of its session.
 fn free(session mut* s) void {
     diag.free(&s->diags);
     strmap.free(&s->sources);
+    strmap.free(&s->config);
     containers.str_free(&s->texts);
+    containers.str_free(&s->config_values);
     containers.pool_free(&s->pool);
+}
+
+/// Adds one configuration pair. The caller must not add the same key twice.
+/// The session copies both strings because command arguments need not outlive it.
+fn config_set(session mut* s, string key, string value) void {
+    if (strmap.has(&s->config, key)) {
+        panic("session.config_set: duplicate key");
+    }
+    string kept_key = containers.pool_intern(&s->pool, key);
+    string kept_value = containers.pool_intern(&s->pool, value);
+    containers.str_push(&s->config_values, kept_value);
+    strmap.put(&s->config, kept_key, cast(s->config_values.len - 1, i64));
+}
+
+/// Returns one configured value. False distinguishes an absent key from an
+/// empty configured value and leaves *out unchanged.
+fn config_get(session* s, string key, string mut* out) bool {
+    i64 mut at = 0;
+    if (!strmap.get(&s->config, key, &at)) {
+        return false;
+    }
+    *out = containers.str_at(&s->config_values, cast(at, u64));
+    return true;
 }
 
 /// The pool an analysis interns names into, whose storage dies with the

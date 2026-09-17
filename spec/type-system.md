@@ -1306,6 +1306,7 @@ Array lengths, `case` labels, enum values and module-level initializers (D7.10) 
 expressions. A constant expression is one of:
 
 - a literal, `true`, `false`, `null`;
+- a `$cfg` value (D21.1);
 - a module-level immutable declaration with a constant initializer, from any module;
 - an enum member;
 - `sizeof(T)`;

@@ -469,7 +469,7 @@ constant rules are in `type-system.md`.
 
 | Level | Operators                                                            | Assoc |
 |-------|----------------------------------------------------------------------|-------|
-| 1     | primary: `()` `[]` `.` `->` call, span, `cast`, `sizeof`, `new`, literals | -  |
+| 1     | primary: `()` `[]` `.` `->` call, span, `cast`, `sizeof`, `new`, `$cfg`, literals | -  |
 | 2     | unary `! ~ - * &`                                                    | right |
 | 3     | `* / % *%`                                                           | left  |
 | 4     | `+ - +% -%`                                                          | left  |
@@ -870,6 +870,16 @@ node mut* own m = flag ? new(node) : a;      // error: owning temporary would le
 u32 mut h = 2166136261;
 h = h *% 16777619;                // ok in both modes
 u32 t = h *% 1.5;                 // error: wrapping operators are integer-only
+```
+
+### 5.13 Compile-time configuration (D21.1)
+
+`$cfg(name)` returns the string value for one configuration key. The key is not a declaration.
+An absent key is a compile error. An empty configured value returns `""`.
+
+```fort
+string TARGET_OS = $cfg(target_os);
+string MODE = $cfg(mode);
 ```
 
 ## 6. Statements

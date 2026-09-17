@@ -226,6 +226,40 @@ fn nesting_deeper_than_the_limit_is_an_error() void {
     assert(parse_env.errors(&e) == 1);
 }
 
+// One source with `outer` parentheses around the parenthesized `$cfg` form.
+fn nested_cfg(strbuf.str_buf mut* out, u64 outer) string {
+    strbuf.clear(out);
+    strbuf.append(out, "string x = ");
+    u64 mut i = 0;
+    while (i < outer) {
+        strbuf.push(out, '(');
+        i += 1;
+    }
+    strbuf.append(out, "$cfg(target_os)");
+    i = 0;
+    while (i < outer) {
+        strbuf.push(out, ')');
+        i += 1;
+    }
+    strbuf.append(out, ";\n");
+    return strbuf.view(out);
+}
+
+fn configuration_parentheses_count_towards_the_limit() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    // The configuration form adds one pair to the 255 outer pairs. One more
+    // outer pair makes its identifier the first token past the limit.
+    // D2.11, D21.1
+    parse_env.parse(&e, nested_cfg(&src, 255));
+    assert(parse_env.errors(&e) == 0);
+    parse_env.parse(&e, nested_cfg(&src, 256));
+    assert(parse_env.errors(&e) == 1);
+    assert(parse_env.diag_at(&e, 0) == "1:273: error: nesting deeper than 256");
+}
+
 // One source whose type carries `count` pointer suffixes, which is the limit
 // push_suffix counts and not the one `enter` counts.
 fn suffixed(strbuf.str_buf mut* out, u64 count) string {
@@ -297,6 +331,7 @@ fn main() i32 {
     a_file_that_is_nothing_but_errors_still_yields_a_module();
     a_recovery_always_consumes_a_token();
     nesting_deeper_than_the_limit_is_an_error();
+    configuration_parentheses_count_towards_the_limit();
     the_suffixes_of_one_type_have_their_own_arm_of_the_limit();
     deep_blocks_count_towards_the_same_limit();
     println("ok");

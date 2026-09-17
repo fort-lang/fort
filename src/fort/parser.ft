@@ -1,5 +1,5 @@
-// parser: the parser of the self-hosted compiler (toolchain.md 8, parser), the
-// transliteration of src/bootstrap/parser.h and parser.c: recursive descent
+// parser: the parser of the self-hosted compiler (toolchain.md 8, parser),
+// based on src/bootstrap/parser.h and parser.c: recursive descent
 // over the token vector of one file, producing one k_module node in the
 // caller's arena. The grammar is grammar.md and the three speculative
 // points are grammar.md 7.
@@ -56,13 +56,13 @@
 // compiler reports these two too, since stage2 must answer for a program the
 // way stage1 does while both exist.
 //
-// Two items of that list are gone from this parser and stay in the C one. A
+// Three items of that list are gone from this parser and stay in the C one. A
 // written type here may hold any number of array and span levels (`i32[3][4]`,
 // `i32[4]@`, `u8@@`, `node@[4]`), which the suffix rules spell and the C
-// refuses; and a float literal parses here and nowhere in src/bootstrap. So
-// stage2 accepts a program stage1 rejects, and the two diverge on exactly the
-// files tools/diff_ast.sh counts.
-// T-043, D2.6, T-041: the two items this parser gained over the C
+// refuses; a float literal parses here and nowhere in src/bootstrap; and the
+// source parser reads `$cfg` configuration expressions. So stage2 accepts a
+// program stage1 rejects. tools/diff_ast.sh counts the three syntax families.
+// T-043, D2.6, T-041, D21.1, T-156: the three items this parser gained over C
 //
 // Deviations from the C, all of them forced by the language rather than
 // chosen. A `const char*` that is NULL to mean "this position takes an own" is
@@ -1107,6 +1107,24 @@ fn parse_primary(parser mut* p) ast.node mut* {
         n = node_at(p, ast.ast_kind.k_string, at_loc);
         n->name = cur(p).text;
         bump(p);
+        return finish(p, n);
+    }
+    if (at(p, lexer.tok_kind.dollar_cfg)) {
+        n = node_at(p, ast.ast_kind.k_cfg, at_loc);
+        bump(p);
+        if (!expect(p, lexer.tok_kind.lparen, "'('") || !enter(p)) {
+            return null;
+        }
+        if (!at(p, lexer.tok_kind.ident)) {
+            error_expected(p, "a configuration key");
+            leave(p);
+            return null;
+        }
+        take_name(p, n);
+        leave(p);
+        if (!expect(p, lexer.tok_kind.rparen, "')'")) {
+            return null;
+        }
         return finish(p, n);
     }
     if (at(p, lexer.tok_kind.kw_true) || at(p, lexer.tok_kind.kw_false)) {

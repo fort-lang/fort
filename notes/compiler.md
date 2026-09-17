@@ -675,8 +675,9 @@ gone.
   stage2. A compiler source could use only what the bootstrap accepted.
   `test/lang/bootstrap-unsupported.txt` records that list: no floats (`f32`,
   `f64`, float literals), no second array or span level in one written type (`i32[3][4]`,
-  `i32[4]@`, `u8@@`, `node@[4]`, T-043), no `do { } while` and no `?:`. Function
-  pointers are inside the subset (D3.10), and a dispatch table wraps them in a struct, because a
+  `i32[4]@`, `u8@@`, `node@[4]`, T-043), no `do { } while`, no `?:` and no `$cfg` (T-156).
+  The source compiler alone supports configuration expressions. Function pointers are inside
+  the subset (D3.10), and a dispatch table wraps them in a struct, because a
   function type carries no suffix of its own (T-136: `fn (i32) i32[2]` returns an `i32[2]`, so an
   array of function pointers is `struct slot { fn (i32) i32 f; }` and `slot[2]`). T-153 puts an
   explicit C variable tail inside the subset when its types use no other unsupported form. These

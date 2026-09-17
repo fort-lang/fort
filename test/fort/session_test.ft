@@ -2,6 +2,7 @@
 //! flags: -I ../../src/fort
 //! stdout:
 //| sources ok
+//| config ok
 //| files ok
 //| ok
 import containers;
@@ -111,6 +112,7 @@ fn a_thousand_sessions_free_what_they_allocate() void {
     while (i < 1000) {
         session.session mut s = session.create();
         session.set_source(&s, "doc.ft", "fn main() i32 { return 0; }");
+        session.config_set(&s, "mode", "test");
         string mut text = "";
         assert(session.read_source(&s, "doc.ft", &text));
         assert(text.len == 27);
@@ -119,6 +121,25 @@ fn a_thousand_sessions_free_what_they_allocate() void {
         session.free(&s);
         i += 1;
     }
+}
+
+// The map distinguishes an absent key from an empty value. It copies each
+// pair into the session and shares nothing with another session.
+fn configuration_belongs_to_one_session() void {
+    session.session mut a = session.create();
+    defer session.free(&a);
+    session.session mut b = session.create();
+    defer session.free(&b);
+    string mut value = "unchanged";
+    assert(!session.config_get(&a, "missing", &value));
+    assert(value == "unchanged");
+    session.config_set(&a, "empty", "");
+    session.config_set(&a, "mode", "fast");
+    assert(session.config_get(&a, "empty", &value));
+    assert(value == "");
+    assert(session.config_get(&a, "mode", &value));
+    assert(value == "fast");
+    assert(!session.config_get(&b, "mode", &value));
 }
 
 // ---- the overlay ----------------------------------------------------------------
@@ -376,6 +397,8 @@ fn main() i32 {
     several_documents_live_side_by_side();
     an_empty_document_is_held();
     println("sources ok");
+    configuration_belongs_to_one_session();
+    println("config ok");
     a_file_is_read_once_and_remembered();
     the_bytes_read_belong_to_the_session();
     an_unreadable_file_is_false_and_silent();

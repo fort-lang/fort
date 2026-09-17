@@ -29,6 +29,7 @@ file (D14.1). Options and the entry file may appear in any order.
 | `-l<lib>`           | passed to the linker as given; repeatable, in order        | none       |
 | `--cc <path>`       | the clang that compiles and links the IR (D14.3)           | see below  |
 | `--target <triple>` | select the IR target; pass it to `--cc` (D14.1)              | see below  |
+| `--cfg <list>`      | add compile-time `key=value` pairs; repeatable (D21.1)      | none       |
 | `-Xcc <arg>`        | passed to `--cc` verbatim, after the arguments below       | none       |
 | `--check`           | run the front end only and stop (D20.1)                    | off        |
 | `--json`            | write the check document to stdout (D20.2), needs `--check`| off        |
@@ -38,7 +39,7 @@ file (D14.1). Options and the entry file may appear in any order.
 | `--help`            | print the usage line and exit 0                            |            |
 | `--version`         | print the compiler version and exit 0                      |            |
 
-- `-o`, `-I`, `--std-dir`, `--cc`, `--target` and `-Xcc` take the following argument; `-l<lib>`
+- `-o`, `-I`, `--std-dir`, `--cc`, `--target`, `--cfg` and `-Xcc` take the following argument; `-l<lib>`
   is one argument. `-I` roots are searched in command-line order (D9.2) and `-Xcc` arguments are
   passed in command-line order. The last `-o`, `--std-dir`, `--cc` and `--target` win.
 - `--cc` must name a clang, since nothing else reads LLVM IR (D14.1, D19.1).
@@ -52,6 +53,8 @@ file (D14.1). Options and the entry file may appear in any order.
   It rejects any other version shape instead of guessing a target triple.
   An IR mode may select either target form with `--target`.
   An unsupported form exits 2 before the compiler creates output.
+- The selected target supplies the three configuration values of D21.1. `--target` therefore
+  remains active under `--check`. `--tokens` and `--ast` do not evaluate configuration values.
 - The default output is `a.out`; with `-c` it is `<entry>.o` and with `-S` `<entry>.ll` (D14.1),
   where `<entry>` is the entry file's base name without `.ft`, placed in the current directory as
   `cc` does.
@@ -69,9 +72,10 @@ file (D14.1). Options and the entry file may appear in any order.
 - `--release` and `--no-bounds-check` are independent and may be combined.
 - `--check` runs steps 1 to 3 of section 2 and stops there: no IR, no `--cc`, no temporary, and
   the entry module need not define `main`, since it is a module under inspection and not a
-  program (D20.1, D8.6). With it, `-o`, `-S`, `-c`, `-l`, `--cc`, `--target` and `-Xcc` are
-  unused. `--json` replaces the text diagnostics of section 4 with the document of section 4.1 on
-  stdout and is a usage error without `--check`, since a build spawns a `--cc` that inherits
+  program (D20.1, D8.6). With it, `-o`, `-S`, `-c`, `-l`, `--cc` and `-Xcc` are unused.
+  `--target` and `--cfg` supply configuration values. `--json` replaces the text diagnostics with
+  the document of section 4.1 on stdout. It is a usage error without `--check`, since a build spawns
+  a `--cc` that inherits
   stdout and could not promise a complete document or nothing (D20.2). `--index` fills the
   document's `"symbols"` array with the identifier index of section 9.1 and implies `--check` and
   `--json`, so `fort --index main.ft` is the whole of what an editor runs (D20.3).
@@ -79,9 +83,9 @@ file (D14.1). Options and the entry file may appear in any order.
   nothing and needs no standard library, so it is the one thing a compiler with a lexer and no
   parser can do (D14.1). It writes one line per token to stdout, ending with the `end of file`
   token, and is a usage error together with `--check`, `--json` or `--index`, which all need a
-  front end; every other option is unused, as under `--check`. A lexical error is reported on
-  stderr in the form of section 4 and lexing resumes at the next line (D14.2), so the dump covers
-  the whole file either way and the status is then 1. A line is
+  front end; every other option is unused. A lexical error is reported on stderr in the form of
+  section 4 and lexing resumes at the next line (D14.2), so the dump covers the whole file either
+  way and the status is then 1. A line is
 
   ```sh
   <line>:<col>-<end_line>:<end_col> <value> "<spelling>" <kind>
@@ -94,7 +98,7 @@ file (D14.1). Options and the entry file may appear in any order.
   byte outside printable ASCII written as `\"`, `\\`, `\n`, `\t`, `\r` and `\xHH` with
   uppercase hex digits, so that one token is one line; and `<kind>` is the token kind as a
   diagnostic names it -- the word for a keyword, the glyph for an operator, and one of
-  `identifier`, `integer literal`, `float literal`, `char literal`, `string literal` and
+  `identifier`, `integer literal`, `float literal`, `char literal`, `string literal`, `$cfg` and
   `end of file` -- which stands last because it is the only field that may hold a space. So
   `fort --tokens` on a file holding `x = 0x10;` writes
 
@@ -126,7 +130,7 @@ file (D14.1). Options and the entry file may appear in any order.
   type prim string void noreturn name fn-type ptr span array
   block assign incdec call-stmt if while do for range-for switch case defer return
   break continue init designator
-  int float char str bool null ident unary binary ternary call index span field arrow
+  int float char str bool null cfg ident unary binary ternary call index span field arrow
   cast sizeof new struct-lit array-lit error
   ```
 
@@ -179,11 +183,13 @@ on stderr, for example `fort: error: cannot read 'x.ft': No such file or directo
 with 2; `--help` prints that line and then the table above, and exits 0.
 
 These are all the `fort: error: <message>` texts. Each exits with status 2 (D14.1).
-Eleven report a command line the compiler cannot use and then print the usage line:
+Sixteen report a command line the compiler cannot use and then print the usage line:
 `missing argument for option '<opt>'`, `unexpected argument '<arg>'` (a second entry file),
 `unknown option '<opt>'`, `no entry file`, `--json requires --check` (D20.2),
 `--tokens does not combine with --check, --json or --index`,
 `--ast does not combine with --tokens, --check, --json or --index`,
+`invalid --cfg assignment '<entry>'`, `invalid --cfg key '<key>'`, `empty --cfg list entry`,
+`duplicate --cfg key '<key>'`, and `cannot override compiler configuration key '<key>'`,
 `unsupported target '<triple>'`, `--std-dir is required for cross-target -S`,
 `cannot compile object for target '<triple>' with a '<built target>' compiler`, and
 `cannot link target '<triple>' with a '<built target>' compiler`.
@@ -221,8 +227,9 @@ temporary directory for the intermediate IR file (D19.1).
 
 Compilation is whole-program (D9.10):
 
-0. In an IR mode, select the built target or the explicit `--target` (D14.1).
-   Reject an unsupported target form with status 2 before step 4.
+0. In an IR mode or under `--check`, select the built target or the explicit `--target` (D14.1).
+   Reject an unsupported target form with status 2 before step 1.
+   Under `--check`, the selected target supplies the configuration values of D21.1.
    A non-built `-S` target requires an explicit `--std-dir` before step 4.
    A non-built `-c` or link target exits 2 before step 4 unless `-S` also appears.
 1. Read the entry file and derive its module path and root (exit 2 if unreadable, 1 if the base

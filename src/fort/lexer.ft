@@ -2,12 +2,9 @@
 // lexical structure.
 // D2
 //
-// This is src/bootstrap/lexer.c transliterated: the same functions in the same
-// order, the same control flow and the same messages, so that the two
-// compilers lex one file into one token stream. `fort --tokens` writes that
-// stream (toolchain.md 1) and tools/diff_tokens.sh holds the two dumps against
-// each other over every.ft file in the repository, which is the oracle this
-// module answers to.
+// This module started as a transliteration of src/bootstrap/lexer.c. The
+// source compiler adds `$cfg`; tools/diff_tokens.sh counts that intentional
+// difference and compares both lexers over the remaining corpus.
 // D14.1
 //
 // Every token records its kind, its 1-based line and column (a tab is one
@@ -48,6 +45,7 @@ enum tok_kind {
     float_lit, // D2.6: text: the literal
     char_lit, // D2.7: ival: the byte value
     string_lit, // D2.9: text: the decoded bytes, interned
+    dollar_cfg, // D21.1: $cfg
 
     /// D2.4: keywords in this order
     kw_as,
@@ -166,6 +164,8 @@ fn tok_kind_name(tok_kind kind) string {
         return "char literal";
     case tok_kind.string_lit:
         return "string literal";
+    case tok_kind.dollar_cfg:
+        return "$cfg";
     case tok_kind.kw_as:
         return "as";
     case tok_kind.kw_bool:
@@ -723,6 +723,26 @@ fn lex_ident(lexer mut* lx) bool {
     return true;
 }
 
+/// Reads the compiler form `$cfg`. No other word can follow `$`.
+fn lex_dollar(lexer mut* lx) bool {
+    diag.loc at = here(lx);
+    u64 start = lx->pos;
+    if (peek_at(lx, 0) != byte_of('$') || peek_at(lx, 1) != byte_of('c')
+        || peek_at(lx, 2) != byte_of('f') || peek_at(lx, 3) != byte_of('g')
+        || is_ident_byte(peek_at(lx, 4))) {
+        msg_begin(lx);
+        msg_str(lx, "unexpected character '$'");
+        return fail(lx, at);
+    }
+    u64 mut i = 0;
+    while (i < 4) {
+        advance(lx);
+        i += 1;
+    }
+    tokvec_push(lx->out, make_token(lx, tok_kind.dollar_cfg, start, at));
+    return true;
+}
+
 // ---- numbers ------------------------------------------------------------------------
 // D2.5, D2.6
 
@@ -1214,6 +1234,9 @@ fn lex_operator(lexer mut* lx) bool {
 /// Lexes one token at the next byte, which is not blank.
 fn lex_token(lexer mut* lx) bool {
     i64 c = peek(lx);
+    if (c == byte_of('$')) {
+        return lex_dollar(lx);
+    }
     if (is_letter(c)) {
         return lex_ident(lx);
     }

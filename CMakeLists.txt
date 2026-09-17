@@ -545,8 +545,8 @@ set_tests_properties(fort-modules PROPERTIES
 # It passes --verify-ir for a reason T-043 created (the other two commands
 # always did). Until that ticket, every module stage2 emitted was emitted by
 # stage1 as well and read by `opt` on the stage1 command; now the tests that
-# use a nested array or span level, a `?:`, a `do`-`while` or a float compile
-# under stage2 alone, diff_ir.sh skips them because stage1 refuses them, and
+# use a nested array or span level, a `?:`, a `do`-`while`, a float or `$cfg`
+# compile under stage2 alone. diff_ir.sh skips them because stage1 refuses them, and
 # test/fort/support/gen_env.ft runs no `opt` by design. Without the flag no
 # verifier would read that IR at all.
 #
@@ -555,11 +555,11 @@ set_tests_properties(fort-modules PROPERTIES
 # and src/bootstrap does not, so the tests that use them must be rejected
 # under stage1 and must compile and run under stage2. One list per compiler
 # says exactly that, and each name is judged by one rule or the other and
-# never excused. T-044 is the second ticket of that shape and T-041 the third:
+# never excused. T-044 is the second ticket of that shape, T-041 is the third,
+# and T-156 is the fourth:
 # stage2 implements `do`-`while` and `?:` (D6.6, D7.5) and floats (D2.6, D3.1,
-# D18), and stage1 refuses all of them. With the last of those four families
-# stage2's list is empty: it refuses nothing the corpus holds, and every entry
-# of them stays in stage1's, which is frozen.
+# D18). It also implements `$cfg` (D21.1). Stage1 refuses all five families.
+# Stage2's list is empty. Every entry stays in stage1's list, which is frozen.
 set(FORT_LANG_STAGE2_COMMAND
     "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}"
     --fort "${FORT_STAGE2_BINARY}"
@@ -579,11 +579,11 @@ set_tests_properties(lang-stage2 PROPERTIES LABELS lang)
 # with a golden index.json beside it, held against that file byte for byte
 # (D20.2, D20.3). It is the oracle of the json and index ports (T-093).
 #
-# --check-json selects 245 of 682 tests. It selects 243 fail tests with
+# --check-json selects 246 of 684 tests. It selects 244 fail tests with
 # diagnostics and two tests with a golden index. The golden tests check the
 # clean compile document. The fail tests check diagnostic documents.
-# `run_tests.py --list` reports 682 tests. `--check-json --list` reports 245.
-# The second list ends with one summary line. That line makes `wc -l` report 246.
+# `run_tests.py --list` reports 684 tests. `--check-json --list` reports 246.
+# The second list ends with one summary line. That line makes `wc -l` report 247.
 # The pair
 # before T-043 (194 of 538, 192 fail tests) counted the fail tests wrong as
 # well, T-042 re-measured all three after the corpus had grown past 200 of 559,
@@ -639,12 +639,18 @@ add_test(NAME stage2-ast-variadic
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(stage2-ast-variadic PROPERTIES LABELS unit)
 
+add_test(NAME stage2-cfg
+    COMMAND bash "${FORT_TEST_DIR}/stage2_cfg_test.sh" "${FORT_STAGE2_BINARY}"
+            "${FORT_STD_DIR}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(stage2-cfg PROPERTIES LABELS unit)
+
 # The two lexers over the whole repository: `fort --tokens` writes one line per
-# token (D14.1, toolchain.md 1) and tools/diff_tokens.sh compares stage1's dump
-# with stage2's, together with their diagnostics and their exit statuses, over
-# every .ft file there is. It is the oracle the transliteration of src/fort is
-# judged against; it is label lang rather than unit because it runs stage2 --
-# an x86-64 binary under qemu -- once per file.
+# token (D14.1, toolchain.md 1). tools/diff_tokens.sh compares dumps,
+# diagnostics and exit statuses for 961 of 964 files. It separately measures
+# three `$cfg` files that the frozen C compiler cannot lex. It is the oracle
+# for the common subset. It has label lang because it runs the x86-64 stage2
+# binary under qemu once per file.
 add_test(NAME diff-tokens
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_tokens.sh" "${CMAKE_BINARY_DIR}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
@@ -653,9 +659,9 @@ set_tests_properties(diff-tokens PROPERTIES LABELS lang)
 # The two parsers over the whole repository, the same comparison one pass
 # later: `fort --ast` writes the file's syntax tree as one S-expression
 # (D14.1, toolchain.md 1) and tools/diff_ast.sh compares stage1's with
-# stage2's, together with their diagnostics and their exit statuses, over
-# every .ft file there is. It is the oracle the transliterated parser is
-# judged against.
+# stage2's, together with their diagnostics and their exit statuses. It skips
+# measured families for nested types, forms, floats and `$cfg`. It is the
+# oracle for syntax that both parsers accept.
 add_test(NAME diff-ast
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ast.sh" "${CMAKE_BINARY_DIR}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
@@ -794,7 +800,7 @@ set_tests_properties(mutate_selftest PROPERTIES
 # of it through the same parser.
 add_test(NAME check_decisions
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/check_decisions.py"
-            "${CMAKE_SOURCE_DIR}/spec/decisions.md" --expect 145
+            "${CMAKE_SOURCE_DIR}/spec/decisions.md" --expect 146
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(check_decisions PROPERTIES LABELS unit)
 

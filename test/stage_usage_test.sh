@@ -1,11 +1,9 @@
 #!/bin/bash
-# stage1 and stage2 must answer --help and --version with the same bytes.
+# Stage1 and stage2 share their version, usage, and common help lines. Stage2
+# adds the source-only --cfg line.
 #
-# src/fort/main.ft carries the option table of toolchain.md 1 and the version
-# string of src/bootstrap/driver.h as a second copy of what driver.c prints,
-# and nothing else holds the two together. Both binaries exist at build time,
-# so the cheap witness is to run them and diff. stage2 is an x86-64 binary and
-# runs under qemu, like every program the compiler builds.
+# Both binaries exist at build time, so this test runs and compares them.
+# Stage2 is an x86-64 binary and runs under qemu.
 #
 # Usage: stage_usage_test.sh <build-dir>
 set -eu
@@ -43,6 +41,16 @@ for option in --help --version; do
     capture "$stage2" "$option"
     two=$answer
     two_status=$answer_status
+    two_compared=$two
+    if [ "$option" = --help ]; then
+        if [[ "$two" != *"  --cfg <list>"* ]]; then
+            echo "stage_usage_test.sh: stage2 help omits --cfg" >&2
+            status=1
+        fi
+        # The source compiler owns this option. Remove its one extra line before
+        # the frozen bootstrap's remaining help is compared.
+        two_compared=$(printf '%s\n' "$two" | sed '/^  --cfg <list>/d')
+    fi
     if [ -z "$one" ]; then
         echo "stage_usage_test.sh: stage1 printed nothing for $option" >&2
         status=1
@@ -53,9 +61,9 @@ for option in --help --version; do
             "$two_status (stage2), expected 0" >&2
         status=1
     fi
-    if [ "$one" != "$two" ]; then
+    if [ "$one" != "$two_compared" ]; then
         echo "stage_usage_test.sh: stage1 and stage2 disagree about $option" >&2
-        diff -u <(printf '%s\n' "$one") <(printf '%s\n' "$two") >&2 || true
+        diff -u <(printf '%s\n' "$one") <(printf '%s\n' "$two_compared") >&2 || true
         status=1
     fi
 done
@@ -156,6 +164,10 @@ for line in "${accepted_cases[@]}"; do
     read -r -a args <<<"$line"
     one=$("$stage1" "${args[@]}" 2>"$tmp/one.err") && one_status=0 || one_status=$?
     two=$("$stage2" "${args[@]}" 2>"$tmp/two.err") && two_status=0 || two_status=$?
+    two_compared=$two
+    if [[ "$line" == *"--help"* ]]; then
+        two_compared=$(printf '%s\n' "$two" | sed '/^  --cfg <list>/d')
+    fi
     if [ "$one_status" -ne 0 ] || [ "$two_status" -ne 0 ]; then
         echo "stage_usage_test.sh: 'fort $line' exited $one_status (stage1) and" \
             "$two_status (stage2), expected 0" >&2
@@ -166,9 +178,9 @@ for line in "${accepted_cases[@]}"; do
         echo "stage_usage_test.sh: 'fort $line' printed nothing" >&2
         status=1
     fi
-    if [ "$one" != "$two" ]; then
+    if [ "$one" != "$two_compared" ]; then
         echo "stage_usage_test.sh: 'fort $line' answers differently:" >&2
-        diff -u <(printf '%s\n' "$one") <(printf '%s\n' "$two") >&2 || true
+        diff -u <(printf '%s\n' "$one") <(printf '%s\n' "$two_compared") >&2 || true
         status=1
     fi
     if ! diff -u "$tmp/one.err" "$tmp/two.err" >"$tmp/err.diff"; then
@@ -197,8 +209,8 @@ if [ "$one" != "(module (fn (type (prim i32)) main (params) (block (return (int 
 fi
 
 if [ "$status" -eq 0 ]; then
-    echo "stage1 and stage2 agree about --help, --version, the usage line and the"
+    echo "stage1 and stage2 agree about --version, the common help, the usage line and the"
     echo "${#usage_cases[@]} usage errors of toolchain.md 1, each with the exit status it gives"
-    echo "it, and answer the ${#accepted_cases[@]} accepted command lines with the same bytes"
+    echo "it, and answer the ${#accepted_cases[@]} accepted lines with the same common bytes"
 fi
 exit "$status"

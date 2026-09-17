@@ -686,7 +686,7 @@ class CitationTest(unittest.TestCase):
     def test_the_log_of_this_repository_names_every_tag_its_sources_cite(self):
         root = Path(__file__).resolve().parent.parent
         known = lint.known_tags(root)
-        self.assertEqual(len(known), 165)
+        self.assertEqual(len(known), 167)
         self.assertIn("D15", known)
         self.assertIn("D16", known)
         self.assertNotIn("D99.9", known)
@@ -1068,15 +1068,15 @@ class HistoryRepositoryTest(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         problems, count = lint.rule_history(root)
         self.assertEqual(problems, [])
-        self.assertEqual(count, "history: 60 history fields, 4 with a dated note")
+        self.assertEqual(count, "history: 62 history fields, 4 with a dated note")
 
     def test_the_field_count_is_the_one_grep_counts(self):
-        # `grep -c '^- history:' spec/decisions.md` says 60 (notes/style.md 4)
+        # `grep -c '^- history:' spec/decisions.md` says 62 (notes/style.md 4)
         root = Path(__file__).resolve().parent.parent
         text = (root / "spec/decisions.md").read_text(encoding="utf-8")
-        self.assertEqual(len(lint.history_fields(text)), 60)
+        self.assertEqual(len(lint.history_fields(text)), 62)
         self.assertEqual(
-            sum(1 for line in text.split("\n") if line.startswith("- history:")), 60)
+            sum(1 for line in text.split("\n") if line.startswith("- history:")), 62)
 
 
 class BudgetTest(unittest.TestCase):
@@ -1117,7 +1117,7 @@ class DecisionsTest(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         problems, count = lint.rule_decisions(root)
         self.assertEqual(problems, [])
-        self.assertIn("145 entries", count)
+        self.assertIn("146 entries", count)
 
     def test_a_seeded_log_passes(self):
         with tempfile.TemporaryDirectory() as name:

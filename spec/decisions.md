@@ -28,6 +28,7 @@ Sections:
 - D18 Float printing in the runtime
 - D19 Target: LLVM IR
 - D20 Editor support
+- D21 Compile-time selection
 - Ready-to-implement checklist
 
 ## D1 Naming and files
@@ -501,7 +502,8 @@ Sections:
   module-level initializers): literals, `true`, `false`, `null`, module-level immutable declarations
   with constant initializers (from any module), enum members, `sizeof`, `.len` of any expression of
   fixed-array type (the operand is not evaluated, so `m[i].len` is constant for `i32[3][4] m`),
-  unary `- ! ~`, the binary arithmetic, wrapping, bitwise, shift, comparison and logical operators,
+  `$cfg` values (D21.1), unary `- ! ~`, the binary arithmetic, wrapping, bitwise, shift,
+  comparison and logical operators,
   `?:`, `cast` among numeric types, `char` and enums (so `cast(color.blue, i32) + 1` may size an
   array), parentheses, and struct or array literals whose leaves are constant expressions. Not
   constant: calls, `&` (except `&global` in module-level initializers, D7.10), field access,
@@ -511,6 +513,7 @@ Sections:
   errors in a typed constant): `i32 A = 2147483647;` then `A + 1` is a compile error, not a runtime
   trap. Constant references are evaluated lazily with cycle detection; `i32 A = B; i32 B = A;` is an
   error.
+- history: Amended 2026-09-16 (T-156): `$cfg` values were not constant expressions.
 
 ## D5 Mutability
 
@@ -1504,7 +1507,8 @@ Sections:
   on Linux and `/usr/bin/clang` on Mac; it must be a clang that compiles LLVM IR),
   `--target <triple>` (default built target,
   passed to `--cc` as `--target=<triple>`), `-Xcc <arg>` (repeatable, passed to `--cc` verbatim
-  after the compiler's own arguments), `--check` (D20.1), `--json` (D20.2, only with `--check`),
+  after the compiler's own arguments), `--cfg <list>` (D21.1, repeatable), `--check` (D20.1),
+  `--json` (D20.2, only with `--check`),
   `--index` (D20.3, which implies `--check --json`), `--tokens` (lex the entry file alone and write
   its tokens to stdout; it resolves no import and parses nothing, and combining it with `--check`,
   `--json` or `--index` is a usage error), `--ast` (lex and parse the entry file alone and write its
@@ -1543,6 +1547,7 @@ Sections:
   Cross-target `-S` now uses a caller-selected standard root. Mac finds its binary through
   `_NSGetExecutablePath`.
   Amended 2026-09-15 (T-140): a two-component host version now gets a zero patch part.
+  Amended 2026-09-16 (T-156): `--cfg` did not exist.
 
 ### D14.2 Diagnostics and recovery
 - owner: `toolchain.md`.
@@ -2291,10 +2296,13 @@ language server to use them, while the server itself lands after the bootstrap f
 - owner: `toolchain.md` (1, 4).
 - rule: `fort --check entry.ft` runs the front end only (lex, parse, resolve the import closure,
   check every module of it) and stops: no IR, no `--cc`, no temporary directory, so `-o`, `-S`,
-  `-c`, `-l`, `--cc`, `--target` and `-Xcc` are unused as they already are under `-S`. Exit 0 when
-  nothing was reported, 1 when anything was, 2 for a usage, toolchain or internal error (D14.1). The
-  entry module need not define `main`: under `--check` it is a module under inspection and not a
-  program, so D8.6 is not applied. Every other rule holds, the diagnostics of D14.2 included.
+  `-c`, `-l`, `--cc` and `-Xcc` are unused as they already are under `-S`. `--target` selects the
+  three configuration values of D21.1. An unsupported target is a usage error. Exit 0 when nothing
+  was reported, 1 when anything was, 2 for a usage, toolchain or internal error (D14.1). The entry
+  module need not define `main`: under `--check` it is a module under inspection and not a program,
+  so D8.6 is not applied. Every other rule holds, the diagnostics of D14.2 included.
+- history: Amended 2026-09-16 (T-156): `--target` now selects the D21.1 configuration values under
+  `--check`. The earlier rule named `--target` as unused in this mode.
 
 ### D20.2 The JSON document
 - owner: `toolchain.md` (1, 4).
@@ -2413,6 +2421,26 @@ language server to use them, while the server itself lands after the bootstrap f
   sentence names now. Amended 2026-09-13 (T-109): D19.5's rule states both comparisons itself from
   that date, so the sentence above about what its rule "still says" describes the log as it stood
   on 2026-09-12.
+
+## D21 Compile-time selection
+
+### D21.1 Configuration values
+- owner: `core-language.md` (Expressions), `toolchain.md` (1), `grammar.md` (Expressions).
+- rule: `$cfg(name)` is a constant expression of type `string`. The `name` uses the identifier
+  syntax but is not a name lookup. One configuration map applies to the complete module closure.
+  The expression returns the configured bytes. It reports a compile error when the key is absent.
+  An empty configured value is present and returns the empty string.
+
+  `--cfg key=value[,key=value]*` adds user pairs. The option is repeatable. A value ends at a comma,
+  can contain `=`, and can be empty. An empty list entry, an assignment without `=`, an invalid key,
+  or a duplicate key is a usage error. The compiler rejects a duplicate even when both values are
+  equal.
+
+  The selected target always supplies `target_os`, `target_arch`, and `target_abi`. Users cannot
+  override these keys. `x86_64-linux-gnu` supplies `linux`, `x86_64`, and the empty string.
+  `arm64-apple-macosxM.m.p` supplies `macos`, `aarch64`, and the empty string. `--target` selects
+  these values during a build and during `--check`. `--tokens` and `--ast` parse `$cfg` without
+  evaluating it.
 
 ## Ready-to-implement checklist
 

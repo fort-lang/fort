@@ -2,17 +2,16 @@
 // front end and the exit statuses.
 // D14.1, D14.3
 //
-// run parses the options, answers `--help` and `--version`, reports
-// the usage errors of toolchain.md 1 in the words src/bootstrap/driver.c
-// reports them, and dispatches: `--tokens` lexes the entry file alone and
-// writes its tokens, `--ast` parses it alone and writes its syntax tree, and
-// every other run goes through the front end, which reads the entry file and
-// walks the import closure (module-system.md 2, 10). A run that would need the
-// checker or the emitter -- the steps 3 and 4 of toolchain.md 2 -- is
-// reported as an internal error rather
-// than pretending to build something, and exits 2 like every other usage,
-// toolchain or internal error. A file whose lexer, parser or loader reported
-// anything exits 1 before that point, which is a compile error.
+// run parses the options and answers `--help` and `--version`. It reports the
+// common usage errors of toolchain.md 1 in the words src/bootstrap/driver.c
+// uses, and reports source-only configuration errors. `--tokens` lexes the
+// entry file alone and writes its tokens. `--ast` parses it alone and writes
+// its syntax tree. Every other run goes through the front end, which reads the
+// entry file and walks the import closure (module-system.md 2, 10). A run that
+// would need the checker or the emitter -- steps 3 and 4 of toolchain.md 2 --
+// reports an internal error instead of pretending to build something. It
+// exits 2 like each usage, toolchain or internal error. A file whose lexer,
+// parser or loader reports anything exits 1 before that point.
 // D14.1
 //
 // Every pass takes a session (session.ft): it owns the pool they intern into,
@@ -23,10 +22,10 @@
 // nothing below main.ft ends the process.
 // D20.5
 //
-// Dispatch: none. Option parsing is a chain of comparisons over the argument
-// list, in the order src/bootstrap/driver.c walks it, so the two compilers
-// answer one command line alike. The tables of function pointers belong to the
-// parser and the emitter.
+// Dispatch: none. Common options follow the order src/bootstrap/driver.c uses,
+// so both compilers answer the common command interface alike. `--cfg` and its
+// errors belong to the source compiler. The parser and emitter own the tables
+// of function pointers.
 // D3.10
 import ast;
 import check;
@@ -116,7 +115,7 @@ extern fn pipe(i32 mut* fds) i32;
 extern fn _exit(i32 status) noreturn;
 
 /// The command line after parsing (toolchain.md 1). Every string borrows an
-/// argument; the three vectors hold them in command-line order and own only
+/// argument; the five vectors hold them in command-line order and own only
 /// their slots.
 struct options {
     bool have_entry; // whether an entry file was seen; C compares against NULL
@@ -153,6 +152,8 @@ struct options {
     containers.str_vec includes; // D9.2: -I roots, searched in command-line order
     containers.str_vec libs;     // -l<lib> as given, passed to the linker in order
     containers.str_vec cc_args;  // -Xcc arguments, passed verbatim after the rest
+    containers.str_vec cfg_keys; // --cfg keys, unique and in command-line order
+    containers.str_vec cfg_values; // values at the matching positions
 }
 
 fn options_create() options {
@@ -167,12 +168,13 @@ fn options_free(options mut* opts) void {
     containers.str_free(&opts->includes);
     containers.str_free(&opts->libs);
     containers.str_free(&opts->cc_args);
+    containers.str_free(&opts->cfg_keys);
+    containers.str_free(&opts->cfg_values);
 }
 
 /// What --help prints after the usage line: the option table of toolchain.md 1.
-/// It is the table src/bootstrap/driver.c prints, line for line, and the ctest
-/// `stage-usage` diffs the two binaries' --help and --version so that the two
-/// copies cannot drift while both compilers exist.
+/// `stage-usage` compares the common lines with src/bootstrap/driver.c. It
+/// verifies this source-only option separately.
 fn help() void {
     println(USAGE);
     println("options:");
@@ -188,6 +190,7 @@ fn help() void {
             platform.DEFAULT_CC, ")");
     println("  --target <triple>  pass --target=<triple> to --cc (default ",
             platform.BUILT_TARGET, ")");
+    println("  --cfg <list>       set key=value pairs; repeatable");
     println("  -Xcc <arg>         pass <arg> to --cc verbatim; repeatable, in order");
     println("  --check            run the front end only and stop; emit nothing");
     println("  --json             write the check document to stdout; needs --check");
@@ -239,8 +242,8 @@ fn is_link_option(string arg) bool {
 
 /// The argument of an option that takes the following one; false after
 /// reporting the usage error. *i is left on the argument. -o, -I, --std-dir,
-/// --cc, --target and -Xcc take the following argument, whatever it looks like
-/// (toolchain.md 1).
+/// --cc, --target, --cfg and -Xcc take the following argument, whatever it
+/// looks like (toolchain.md 1).
 /// D14.1
 fn take_argument(string@ args, u64 mut* i, string mut* out) bool {
     if (*i + 1 >= args.len) {
@@ -249,6 +252,78 @@ fn take_argument(string@ args, u64 mut* i, string mut* out) bool {
     }
     *i += 1;
     *out = args[*i];
+    return true;
+}
+
+fn reserved_cfg(string key) bool {
+    return key == "target_os" || key == "target_arch" || key == "target_abi";
+}
+
+fn valid_cfg_key(string key) bool {
+    if (key.len == 0 || !(str.is_alpha(key[0]) || key[0] == '_')) {
+        return false;
+    }
+    u64 mut i = 1;
+    while (i < key.len) {
+        if (!(str.is_alpha(key[i]) || str.is_digit(key[i]) || key[i] == '_')) {
+            return false;
+        }
+        i += 1;
+    }
+    return lexer.keyword_kind(key) == lexer.tok_kind.ident && !lexer.is_reserved_word(key);
+}
+
+fn has_cfg(options* opts, string key) bool {
+    u64 mut i = 0;
+    while (i < opts->cfg_keys.len) {
+        if (containers.str_at(&opts->cfg_keys, i) == key) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+/// Parses one comma-separated `--cfg` value. A value can hold `=` and can be
+/// empty. A comma always starts a new assignment.
+fn parse_cfg(options mut* opts, string list) bool {
+    u64 mut start = 0;
+    while (start <= list.len) {
+        u64 mut end = start;
+        while (end < list.len && list[end] != ',') {
+            end += 1;
+        }
+        if (end == start) {
+            usage_error("empty --cfg list entry");
+            return false;
+        }
+        string item = list[start..end];
+        i64 equal = str.index_of(item, '=');
+        if (equal < 0) {
+            usage_error_arg("invalid --cfg assignment", item);
+            return false;
+        }
+        string key = item[..cast(equal, u64)];
+        string value = item[cast(equal, u64) + 1..];
+        if (!valid_cfg_key(key)) {
+            usage_error_arg("invalid --cfg key", key);
+            return false;
+        }
+        if (reserved_cfg(key)) {
+            usage_error_arg("cannot override compiler configuration key", key);
+            return false;
+        }
+        if (has_cfg(opts, key)) {
+            usage_error_arg("duplicate --cfg key", key);
+            return false;
+        }
+        containers.str_push(&opts->cfg_keys, key);
+        containers.str_push(&opts->cfg_values, value);
+        if (end == list.len) {
+            return true;
+        }
+        start = end + 1;
+    }
     return true;
 }
 
@@ -287,8 +362,8 @@ fn parse_flag(options mut* opts, string arg) bool {
 
 /// The options that take the following argument. Returns false when `arg` is not
 /// one of them; *ok is false when the argument was missing. The last -o,
-/// --std-dir, --cc and --target win, while -I, -l and -Xcc accumulate in
-/// command-line order.
+/// --std-dir, --cc and --target win, while -I, --cfg, -l and -Xcc accumulate
+/// in command-line order. A duplicate configuration key is an error.
 /// D14.1
 fn parse_valued(options mut* opts, string@ args, u64 mut* i, bool mut* ok) bool {
     string arg = args[*i];
@@ -297,8 +372,10 @@ fn parse_valued(options mut* opts, string@ args, u64 mut* i, bool mut* ok) bool 
     bool is_std_dir = arg == "--std-dir";
     bool is_cc = arg == "--cc";
     bool is_target = arg == "--target";
+    bool is_cfg = arg == "--cfg";
     bool is_cc_arg = arg == "-Xcc";
-    if (!is_output && !is_include && !is_std_dir && !is_cc && !is_target && !is_cc_arg) {
+    if (!is_output && !is_include && !is_std_dir && !is_cc && !is_target && !is_cfg
+        && !is_cc_arg) {
         return false;
     }
     string mut value = "";
@@ -318,6 +395,10 @@ fn parse_valued(options mut* opts, string@ args, u64 mut* i, bool mut* ok) bool 
         opts->cc = value;
     } else if (is_target) {
         opts->target = value;
+    } else if (is_cfg) {
+        if (!parse_cfg(opts, value)) {
+            *ok = false;
+        }
     } else {
         containers.str_push(&opts->cc_args, value);
     }
@@ -406,6 +487,24 @@ fn target_form(string target) bool {
         i += 1;
     }
     return dots == 2 && digits > 0;
+}
+
+/// Adds the compiler keys and the user keys to the one analysis session.
+fn configure(session.session mut* s, options* opts) void {
+    if (opts->target == "x86_64-linux-gnu") {
+        session.config_set(s, "target_os", "linux");
+        session.config_set(s, "target_arch", "x86_64");
+    } else {
+        session.config_set(s, "target_os", "macos");
+        session.config_set(s, "target_arch", "aarch64");
+    }
+    session.config_set(s, "target_abi", "");
+    u64 mut i = 0;
+    while (i < opts->cfg_keys.len) {
+        session.config_set(s, containers.str_at(&opts->cfg_keys, i),
+                           containers.str_at(&opts->cfg_values, i));
+        i += 1;
+    }
 }
 
 /// Rejects a target that this IR mode cannot use before it creates output.
@@ -1172,6 +1271,10 @@ fn check_document(session.session mut* s, options* opts, analysis mut* an,
 /// into the session.
 /// D20.5
 fn compile_entry(options* opts, string program) i32 {
+    if (opts->check && !target_form(opts->target)) {
+        usage_error_arg("unsupported target", opts->target);
+        return EXIT_USAGE;
+    }
     if (!opts->check && !target_allowed(opts)) {
         return EXIT_USAGE;
     }
@@ -1179,6 +1282,7 @@ fn compile_entry(options* opts, string program) i32 {
     defer containers.pool_free(&p);
     session.session mut s = session.create();
     defer session.free(&s);
+    configure(&s, opts);
     // A build reads no tree after the emitter has run, so its analysis is
     // released on every path out of this function (ast.sym). The build path
     // below releases it as soon as the emitter returns and before --cc is

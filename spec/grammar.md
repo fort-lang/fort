@@ -57,6 +57,8 @@ operator = "+%=" | "-%=" | "*%=" | "<<=" | ">>="
          | "+" | "-" | "*" | "/" | "%" | "=" | "<" | ">" | "!" | "&" | "|" | "^" | "~"
          | "?" | ":" | "." | "," | ";" | "(" | ")" | "[" | "]" | "{" | "}"
          | "@" ;                                    (* D2.10; "@" is the span suffix, D3.5 *)
+
+compiler_form = "$cfg" ;                             (* D21.1 *)
 ```
 
 Notes:
@@ -235,6 +237,7 @@ arg_list     = expr { "," expr } ;
 
 primary_expr = int_literal | float_literal | char_literal | string_literal
              | "true" | "false" | "null"
+             | cfg_expr
              | identifier
              | "(" expr ")"
              | struct_literal
@@ -242,6 +245,8 @@ primary_expr = int_literal | float_literal | char_literal | string_literal
              | cast_expr
              | sizeof_expr
              | new_expr ;
+
+cfg_expr        = "$cfg" "(" identifier ")" ;                       (* D21.1 *)
 
 struct_literal = qualified_name brace_init ;                          (* D6.5 *)
 array_literal  = array_type brace_init ;                              (* D6.5 *)
@@ -326,3 +331,4 @@ skipped tokens are no production of this grammar; the tree holds them as an erro
 | Types                  | D3.1 to D3.12, D5.2, D5.3, D17.2  |
 | Statements             | D7.2 to D7.8, D7.11               |
 | Expressions            | D6.1 to D6.13, D3.14, D3.15, D10.2 |
+| Configuration values   | D21.1                             |
