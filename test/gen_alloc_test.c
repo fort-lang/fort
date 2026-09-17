@@ -275,11 +275,11 @@ TEST(del_of_a_span_rvalue_frees_the_pointer_of_its_temporary, {
     // An aggregate result arrives in a place the caller makes (item 7), so
     // `del` of one reads field 0 of that temporary and empties nothing.
     // D17.9
-    TEST_ASSERT_EQ_STR(found("  call void @\"main.make\"(ptr %tmp0, i64 3)\n"
+    TEST_ASSERT_EQ_STR(found("  call void @\"main.make\"(ptr sret(%fort.span) %tmp0, i64 3)\n"
                              "  %t0 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0\n"
                              "  %t1 = load ptr, ptr %t0, align 8\n"
                              "  call void @\"std.rt.free\"(ptr %t1)\n  ret i32 0\n"),
-                       "  call void @\"main.make\"(ptr %tmp0, i64 3)\n"
+                       "  call void @\"main.make\"(ptr sret(%fort.span) %tmp0, i64 3)\n"
                        "  %t0 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0\n"
                        "  %t1 = load ptr, ptr %t0, align 8\n"
                        "  call void @\"std.rt.free\"(ptr %t1)\n  ret i32 0\n");

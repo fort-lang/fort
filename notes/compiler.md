@@ -443,10 +443,10 @@ came here.
 
 ## 7. The runtime and the standard library
 
-- **Mac extern declarations keep allocator failure calls** (T-149).
+- **Extern declarations keep allocator failure calls** (T-149).
   Apple clang `-O1` removes a `calloc` and matching `free` when the caller reads
-  no storage, even with `#3 nobuiltin` at the call site. The Mac emitter adds
-  `nobuiltin` to each extern declaration. The Linux emitter keeps its IR bytes.
+  no storage, even with `#3 nobuiltin` at the call site. The emitter adds
+  `nobuiltin` to each extern declaration on both targets.
   Check the optimized entry function for `call ptr @calloc` in the OOM fixtures.
 
 - **Mac std.net uses Darwin's 16-byte IPv4 address** (T-145).
@@ -455,7 +455,7 @@ came here.
   Use Darwin SOL_SOCKET 65535 and SO_REUSEADDR 4.
   Mac `std.libc` declares seven socket calls with a 4-byte `socklen_t`.
   Mac `std.net` uses `libc.errno_slot()` for its two errno writes.
-  Linux `std/net.ft` and `std/libc.ft` keep their Linux layout and calls.
+  Linux `std/linux/net.ft` and `std/linux/libc.ft` keep their Linux layout and calls.
 
 - **A system call added to a print path must give errno back.** `sys.errno()` hands a program the
   errno of its own last library call (`stdlib.md` 2.4), and the print family runs between the two:
@@ -472,7 +472,7 @@ came here.
   declaration added to `std.libc` binds every program in the repository**, and the cost of a wrong
   signature is paid by all of them at once: T-045 added `qsort` there, and a program that
   redeclares it must now write the same parameter types, `fn (void*, void*) i32` included.
-  `grep -rn 'extern fn void qsort' .` finds one declaration in `std/libc.ft` and one in
+  `grep -rn 'extern fn void qsort' .` finds one in each `std/<target>/libc.ft` and one in
   `spec/module-system.md` 8.5, which spells it out as its callback example. **Retyping one costs
   the same**, and the bill is the programs that redeclare it, not the ones that call it: T-086
   gave `read`, `write` and the four `<string.h>` byte functions `u8*` and `u8 mut*` and made
@@ -846,10 +846,9 @@ gone.
   - A fort definition and a function type have no variable tail (D9.8). Stage2 lets an
     `extern fn` declare `...` after at least one fixed parameter (D19.1). The checker accepts
     only `i32`, `u32`, `i64`, `u64`, `f64`, pointers, and function pointers in the tail (D19.2).
-    It lends an owning lvalue and rejects an owning rvalue. Linux still emits the old variadic
-    LLVM form for a fixed extern declaration. That form keeps the pinned chain byte-identical.
-    Mac emits a fixed LLVM form for a fixed extern declaration. A marked extern uses the
-    variadic LLVM form on both targets. Mac puts its C tail arguments in stack slots.
+    It lends an owning lvalue and rejects an owning rvalue. A fixed extern declaration uses the
+    fixed LLVM form and a marked extern the variadic LLVM form, on both targets. Mac puts its C
+    tail arguments in stack slots.
     The print family is a builtin (D11.7). The compiler uses `print`, `println`,
     `eprintln`, or an explicit string buffer instead of C print calls.
   - No function-scope `static`: a module-level `mut` global replaces it, and it is visible to the

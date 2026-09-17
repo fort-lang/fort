@@ -41,7 +41,7 @@ ulimit -c 0
 sed "s/arm64-apple-macosx15.0.0/$target/" "$root/test/darwin/ir/darwin.ll" >"$work/darwin.ll"
 
 "$opt" -passes=verify -disable-output "$work/darwin.ll"
-"$cc" --target="$target" -isysroot "$sdk" -O1 -fPIE -Wl,-pie \
+"$cc" --target="$target" -isysroot "$sdk" -O1 -fPIE \
     -Wno-override-module -o "$work/darwin" "$work/darwin.ll"
 
 if ! file "$work/darwin" | grep -Eq 'Mach-O 64-bit executable arm64'; then

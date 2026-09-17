@@ -103,10 +103,10 @@ rg -q 'call i32 \(i32, \.\.\.\) @helper_tail_nested_callback\(' \
     "$probe_dir/nested_callbacks.ll"
 rg -q 'call void @"005_aggregate_abi.make"\(ptr sret\(' "$probe_dir/aggregate.ll"
 rg -q 'call void @"std.rt.args"\(ptr sret\(%fort.span\) %args\)' "$probe_dir/args.ll"
-rg -q 'attributes #8 = .*__chkstk_darwin' "$probe_dir/large_frames.ll"
+rg -q 'attributes #8 = .*"probe-stack"="inline-asm"' "$probe_dir/large_frames.ll"
 probe_clang -O1 -S -x ir -Wno-override-module \
     -o "$probe_dir/large_frames.s" "$probe_dir/large_frames.ll"
-probe_stack_count=$(rg -c '___chkstk_darwin@GOTPAGE$' "$probe_dir/large_frames.s")
+probe_stack_count=$(rg -c '^\s+str\s+xzr, \[sp\]$' "$probe_dir/large_frames.s")
 [ "$probe_stack_count" -gt 0 ]
 printf 'darwin_probe: %s programs pass; %s Darwin stack probe sites\n' \
     "$probe_count" "$probe_stack_count"

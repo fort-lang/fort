@@ -48,10 +48,10 @@ for name in "${tests[@]}"; do
     "$compiler" -S --std-dir "$std" -o "$work/$name.ll" "$source"
     link=$(sed -n 's@^//! link: @@p' "$source")
     if [ -n "$link" ]; then
-        "$cc" -isysroot "$sdk" -O1 -fPIE -Wl,-pie -Wno-override-module \
+        "$cc" -isysroot "$sdk" -O1 -fPIE -Wno-override-module \
             -o "$work/$name" "$work/$name.ll" "test/lang/$link"
     else
-        "$cc" -isysroot "$sdk" -O1 -fPIE -Wl,-pie -Wno-override-module \
+        "$cc" -isysroot "$sdk" -O1 -fPIE -Wno-override-module \
             -o "$work/$name" "$work/$name.ll"
     fi
     sed -n 's@^//| @@p' "$source" > "$work/$name.expected"
@@ -74,12 +74,12 @@ done
     build/darwin/bootstrap-head/entry/main.ft
 "$cc" -isysroot "$sdk" -S -O0 -o "$work/fort.s" "$work/fort.ll"
 if ! rg --pcre2 -U -q \
-    'mov[ \t]+x([0-9]+), sp\n[ \t]*str[ \t]+x[0-9]+, \[x\1\]\n[ \t]*bl[ \t]+_fcntl' \
+    'mov[ \t]+x([0-9]+), sp\n(?:[^\n]*\n){0,4}?[ \t]*str[ \t]+x[0-9]+, \[x\1\]\n(?:[^\n]*\n){0,4}?[ \t]*bl[ \t]+_fcntl' \
     "$work/fort.s"; then
     echo "darwin core: compiler fcntl tail has no stack store" >&2
     exit 1
 fi
-"$cc" -isysroot "$sdk" -O1 -fPIE -Wl,-pie -Wno-override-module \
+"$cc" -isysroot "$sdk" -O1 -fPIE -Wno-override-module \
     -o "$work/fort" "$work/fort.ll"
 mkdir "$work/alias"
 ln -s ../fort "$work/alias/fort"

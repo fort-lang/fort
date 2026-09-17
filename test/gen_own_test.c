@@ -225,13 +225,13 @@ TEST(an_assignment_to_an_own_pointer_loads_compares_and_branches, {
     // The right-hand side is evaluated first, then the check, then the store;
     // the continuation label is allocated before the failure one.
     // D19.6
-    TEST_ASSERT_EQ_STR(found("  %t3 = call ptr (...) @grab() #3\n"
+    TEST_ASSERT_EQ_STR(found("  %t3 = call ptr @grab() #3\n"
                              "  %t4 = load ptr, ptr %p.0, align 8\n"
                              "  %t5 = icmp ne ptr %t4, null\n"
                              "  br i1 %t5, label %L3, label %L2\n"
                              "\nL2:\n"
                              "  store ptr %t3, ptr %p.0, align 8\n"),
-                       "  %t3 = call ptr (...) @grab() #3\n"
+                       "  %t3 = call ptr @grab() #3\n"
                        "  %t4 = load ptr, ptr %p.0, align 8\n"
                        "  %t5 = icmp ne ptr %t4, null\n"
                        "  br i1 %t5, label %L3, label %L2\n"
@@ -606,7 +606,7 @@ TEST(the_allocator_shape_emits_one_text_with_and_without_the_mark, {
     TEST_UNUSED(snprintf(plain, sizeof plain, "%s", ir()));
     // The three records that carry a type or a source column of the allocator:
     // the call it makes, and the overwrite check of each `own` binding.
-    static const char TAKE_CALL[] = "  %t1 = call ptr (i64, i64, ...) @take(i64 1, i64 %t0) #3\n";
+    static const char TAKE_CALL[] = "  %t1 = call ptr @take(i64 1, i64 %t0) #3\n";
     static const char GRAB_CHECK[] =
         "  call void @\"std.rt.fail_overwrite\"(ptr @.file.0, i32 5, i32 9)\n";
     static const char MAIN_CHECK[] =

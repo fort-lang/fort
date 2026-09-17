@@ -1,0 +1,38 @@
+// os: the target of this standard library and the path of the running binary on Linux x86-64.
+
+import std.libc;
+import std.str;
+import std.strbuf;
+
+/// The target triple of this standard library. A compiler built with it uses this target when
+/// --target is absent.
+/// D14.1
+string TARGET = "x86_64-linux-gnu";
+
+/// The symbolic link that names the running binary, and the buffer sizes it is read with.
+string PROC_SELF_EXE = "/proc/self/exe";
+u64 EXE_PATH_FIRST_CAP = 256;
+u64 EXE_PATH_MAX_CAP = 65536;
+
+/// Appends the path of the running binary to `out` and returns true. Returns false and leaves
+/// `out` unchanged when the system cannot give the path.
+/// D14.1
+fn exe_path(strbuf.str_buf mut* out) bool {
+    char mut@ own c_path = str.to_cstr(PROC_SELF_EXE);
+    defer del(c_path);
+    u64 mut cap = EXE_PATH_FIRST_CAP;
+    while (cap <= EXE_PATH_MAX_CAP) {
+        char mut@ own buf = new(char, cap);
+        defer del(buf);
+        i64 len = libc.readlink(c_path.ptr, buf.ptr, cap);
+        if (len < 0) {
+            return false;
+        }
+        if (cast(len, u64) < cap) {
+            strbuf.append(out, cast(buf[0..cast(len, u64)], string));
+            return true;
+        }
+        cap = cap * 2;
+    }
+    return false;
+}

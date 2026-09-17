@@ -89,7 +89,7 @@ entry:
 }
 LL
 opt-18 -passes=verify -disable-output "$tmp/ir.ll"
-clang --target=x86_64-linux-gnu -O1 -fPIE -pie -Wno-override-module -o "$tmp/ir" "$tmp/ir.ll"
+clang --target=x86_64-linux-gnu -O1 -fPIE -Wno-override-module -o "$tmp/ir" "$tmp/ir.ll"
 status=0
 "$tmp/ir" || status=$?
 test "$status" = 42

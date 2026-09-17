@@ -84,6 +84,7 @@ SOURCE_GLOBS = (
     "src/**/*.ft",
     "std/*.ft",
     "std/darwin/*.ft",
+    "std/linux/*.ft",
     "test/*.c",
     "test/*.h",
     "test/abi/*.c",

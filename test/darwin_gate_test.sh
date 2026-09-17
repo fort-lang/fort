@@ -28,28 +28,26 @@ bash test/darwin_allocation_failure_test.sh \
 
 trap_fixture=run/ffi/009_noreturn_returns_anyway.ft
 errno_fixture=run/stdlib/118_net_errors.ft
-printf_fixture=run/ffi/008_printf_variadic.ft
 sockaddr_fixture=run/ffi/013_sockaddr_layout.ft
 args=(--fort build/darwin/stage2/fort --std-dir build/darwin/std \
       --cc "$cc" --target "$target" --opt "$opt" \
       --xfail test/lang/xfail-stage2.txt \
       --unsupported test/lang/unsupported-stage2.txt \
       --exclude-exact "$trap_fixture" --exclude-exact "$errno_fixture" \
-      --exclude-exact "$printf_fixture" --exclude-exact "$sockaddr_fixture")
+      --exclude-exact "$sockaddr_fixture")
 python3 test/lang/run_tests.py --lint "${args[@]}"
 full=$(python3 test/lang/run_tests.py --list | tail -n 1 | awk '{print $1}')
 selected=$(python3 test/lang/run_tests.py --list "${args[@]}" | tail -n 1 | awk '{print $1}')
-if [ "$full" -ne $((selected + 4)) ]; then
+if [ "$full" -ne $((selected + 3)) ]; then
     echo "darwin gate: exact linux exclusion count differs" >&2
     exit 1
 fi
-echo "darwin gate: $selected corpus tests selected; 4 linux-only fixtures excluded"
+echo "darwin gate: $selected corpus tests selected; 3 linux-only fixtures excluded"
 echo "darwin gate exclusion: $trap_fixture expects SIGILL; darwin llvm.trap raises SIGTRAP"
 echo "darwin gate exclusion: $errno_fixture expects linux ECONNREFUSED 111 and ENOTSOCK 88; darwin returns 61 and 38"
-echo "darwin gate exclusion: $printf_fixture uses a fixed extern for linux System V; darwin printf needs an explicit variadic tail"
 echo "darwin gate exclusion: $sockaddr_fixture uses a linux u16 family field; darwin sockaddr_in starts with u8 length and family"
 python3 test/lang/run_tests.py --verify-ir "${args[@]}"
 python3 test/lang/run_tests.py --check-json "${args[@]}"
 tools/darwin core
 tools/darwin net
-echo "tools/target darwin gate: green; $selected corpus tests; 4 named linux-only exclusions; darwin LSP, fixpoint, lint, runtime, and network pass"
+echo "tools/target darwin gate: green; $selected corpus tests; 3 named linux-only exclusions; darwin LSP, fixpoint, lint, runtime, and network pass"

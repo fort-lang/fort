@@ -1060,17 +1060,15 @@ Sections:
   It casts `f32` to `f64`. A variable tail does not transfer ownership.
   An owning pointer lvalue lends through the tail; an owning rvalue is an error (D17.8).
   The compiler checks tail types, not C format strings or a C callee's expected tail types.
-  For Linux, a fixed extern keeps the old variadic LLVM declaration and call form (D19.2).
-  Linux passes fixed and variable C arguments by the same System V registers or stack slots.
-  For Mac, a fixed extern uses a fixed LLVM declaration and call form.
-  A Mac extern with `...` uses a variadic LLVM form with its fixed prefix.
-  Apple arm64 puts fixed C arguments in their normal registers.
-  It puts the variable tail on the stack.
-  A Mac fixed declaration of a variadic C function is an incorrect C prototype.
-  The variable tail must appear in that function's Mac extern declaration.
+  A fixed extern uses a fixed LLVM declaration and call form on both targets.
+  An extern with `...` uses a variadic LLVM form with its fixed prefix.
+  On Linux the variadic call sets the System V vector-register count in `al`.
+  Apple arm64 puts fixed C arguments in their normal registers and the variable tail on the stack.
+  A fixed declaration of a variadic C function is an incorrect C prototype on both targets.
+  The variable tail must appear in that function's extern declaration.
   An extern name is not a value; its ABI form comes from its declaration (D3.10).
-  Extern call sites are `nobuiltin`, so rewriting cannot replace a declared C symbol.
-  Mac extern declarations also use `nobuiltin`.
+  Extern call sites and extern declarations are `nobuiltin`, so rewriting cannot replace a
+  declared C symbol.
   Narrow fixed parameters and results use D9.9's `zeroext` and `signext` attributes.
   C `char*` maps to `char*` or `u8*`; `size_t` to `u64`; `ssize_t` and `off_t` to `i64`.
   C `mode_t` maps to `u32` on Linux and `u16` on Mac; C `int` maps to `i32`.
@@ -1135,6 +1133,11 @@ Sections:
   Amended 2026-09-15 (T-149): Mac extern declarations gained `nobuiltin`.
   Apple clang removed a failed `calloc` and matching `free` when the caller read no storage.
   The existing call-site `nobuiltin` did not keep that allocation failure observable.
+  Amended 2026-09-17: before this date a Linux fixed extern kept a variadic LLVM declaration and
+  call form, and only Mac extern declarations carried `nobuiltin`. From that date both targets
+  used the fixed form for a fixed extern and `nobuiltin` on every extern declaration. A Linux
+  fixed declaration of a variadic C function became an incorrect C prototype, so `std.libc`
+  declared `open` and `snprintf` with `...` on Linux as it did on Mac.
 
 ### D9.9 The internal calling convention
 - owner: `module-system.md`.
@@ -1151,9 +1154,8 @@ Sections:
   and by no exception to it. `bool`, `char`, `u8` and `u16` parameters and results carry `zeroext`,
   `i8` and `i16` carry `signext`, and nothing wider carries an extension attribute, in fort and
   extern signatures alike (D9.8).
-  The definition marks its result pointer `sret(%T)` on both targets.
-  Linux calls pass that pointer as a plain `ptr`; it takes the first integer register.
-  Mac calls also mark that pointer `sret(%T)`; Apple arm64 puts it in `x8`.
+  The definition and every call mark the result pointer `sret(%T)` on both targets.
+  System V passes it in the first integer register; Apple arm64 puts it in `x8`.
   A plain Mac call pointer would take `x0` and would break a return with scalar parameters.
   Extern signatures exclude aggregate results, so these result rules govern fort-to-fort calls.
 - history: Amended 2026-09-10 with D19: the register-level spelling of the same convention is now
@@ -1162,6 +1164,8 @@ Sections:
   stated its C prototype; with `main` emitted by the compiler (D11.6 as amended) its span parameter
   is an ordinary aggregate parameter of this convention.
   Amended 2026-09-15 (T-140): Apple arm64 calls need call-site `sret` to use `x8`.
+  Amended 2026-09-17: before this date a Linux call passed the result pointer as a plain `ptr`.
+  From that date the call marked it `sret(%T)` on both targets, as the definition did.
 
 ### D9.10 Whole-program compilation
 - owner: `module-system.md`.
@@ -1263,11 +1267,15 @@ Sections:
 ### D10.8 Stack probes
 - owner: `memory-model.md`.
 - rule: Frames larger than one page are probed so that a large local array plus recursion faults
-  instead of skipping the guard page. Linux requests `"probe-stack"="inline-asm"`.
-  Mac requests `"probe-stack"="__chkstk_darwin"` on every fort definition.
+  instead of skipping the guard page. Linux and Mac request `"probe-stack"="inline-asm"` on every
+  fort definition.
   A module produced by `-S` carries the guarantee whatever the driver line is (D19.1).
 - history: Amended 2026-09-10 with D19: the compiler emitted the page touches itself.
   Amended 2026-09-15 (T-140): Apple clang's C IR uses `__chkstk_darwin`.
+  Amended 2026-09-17: Mac requested `"probe-stack"="__chkstk_darwin"` before this date. Only
+  Apple's LLVM implements that probe on arm64: Homebrew clang 19.1.7 rejected it with
+  `Unsupported stack probing method`. Apple clang 21 and clang 19.1.7 both accept `inline-asm` and
+  emit the probes, so the default `--cc` of D14.3 can be any clang.
 
 ## D11 Build modes and the runtime contract
 
@@ -1436,7 +1444,8 @@ Sections:
   buffer), `std.vec` (`ptr_vec`, `int_vec`, the non-generic pattern), `std.strmap` (string-keyed
   open-addressing table), `std.math` (float bit casts, abs/min/max per type), `std.sort` (an
   in-place sort of an array over libc `qsort`), `std.net` (a TCP listener and a TCP connection over
-  `std.libc`, IPv4 only and with no name resolution) and `std.rt` (the runtime itself, D13.1:
+  `std.libc`, IPv4 only and with no name resolution), `std.os` (the target triple and the path of
+  the running binary) and `std.rt` (the runtime itself, D13.1:
   process start and exit, allocation, the failure paths, the print buffers and the float text of
   D18.1 to a descriptor or to a `str_buf`, over `std.libc` and `std.strbuf`).
 - history: Amended 2026-09-11 (T-087): the five `fort_rt_*` declarations stood in `std.libc`, whose
@@ -1472,6 +1481,10 @@ Sections:
   `append` functions. The list is one module shorter and `stdlib.md` 2.12 is a section of 2.11.
   The file `std/rt_float.ft` is gone, which took a pin of its own; D18.1's note of the same date
   says why. What the fold costs every program is measured in `notes/compiler.md` 7.
+  Amended 2026-09-17: `std.os` joined the list and `stdlib.md` 2.14 specified it. Before this
+  date the Linux sources of `std.libc` and `std.net` stood in `std/` and the Mac sources in
+  `std/darwin/`. From that date `std.libc`, `std.net` and `std.os` had one source for each target,
+  in `std/linux/` and `std/darwin/`.
 
 ### D13.3 The error-handling idiom
 - owner: `stdlib.md`.
@@ -1504,7 +1517,7 @@ Sections:
   `<entry>.ll`, D19.1), `-c` (stop after the object file), `-I <dir>` (repeatable), `--std-dir
   <dir>` (default `$FORT_STD_DIR`, else `std` beside the binary), `--release` (D11.1),
   `--no-bounds-check` (D10.6), `-l<lib>` (passed to the linker), `--cc <path>` (default `clang`
-  on Linux and `/usr/bin/clang` on Mac; it must be a clang that compiles LLVM IR),
+  on both targets; it must be a clang that compiles LLVM IR),
   `--target <triple>` (default built target,
   passed to `--cc` as `--target=<triple>`), `-Xcc <arg>` (repeatable, passed to `--cc` verbatim
   after the compiler's own arguments), `--cfg <list>` (D21.1, repeatable), `--check` (D20.1),
@@ -1517,10 +1530,9 @@ Sections:
   Exit status: 0 success, 1 compile error, 2 usage, toolchain (`--cc` failed) or internal error;
   usage and toolchain errors are printed as `fort: error: <message>`.
   A Linux x86-64 compiler stores `x86_64-linux-gnu` as its built target.
-  A Mac arm64 compiler stores `arm64-apple-macosxM.m.p` as its built target.
-  Its build reads `sw_vers -productVersion` for the host version.
-  A numeric `M.m` result becomes `M.m.0`; a numeric `M.m.p` result stays unchanged.
-  The build rejects any other version shape instead of guessing a target triple.
+  A Mac arm64 compiler stores `arm64-apple-macosx11.0.0` as its built target. macOS 11.0 is the
+  first macOS for Apple Silicon, and the build does not read the host version.
+  The built target is `std.os.TARGET` of the standard root that the compiler is built with.
   The driver uses the stored built target when `--target` is absent.
   The compiler accepts `x86_64-linux-gnu` and `arm64-apple-macosxM.m.p` target forms.
   In IR modes, it rejects any other target form as a usage error with status 2.
@@ -1548,6 +1560,10 @@ Sections:
   `_NSGetExecutablePath`.
   Amended 2026-09-15 (T-140): a two-component host version now gets a zero patch part.
   Amended 2026-09-16 (T-156): `--cfg` did not exist.
+  Amended 2026-09-17: the Mac built target became the fixed `arm64-apple-macosx11.0.0`. Before
+  this date the build read the host version with `sw_vers -productVersion`. On the same date the
+  built target moved from the compiler's `platform` module to `std.os.TARGET` (D13.2), and the
+  default `--cc` became `clang` on both targets (D14.3).
 
 ### D14.2 Diagnostics and recovery
 - owner: `toolchain.md`.
@@ -1597,21 +1613,24 @@ Sections:
 ### D14.3 The --cc command line
 - owner: `toolchain.md`.
 - rule: Generated code is LLVM IR (D19.1), compiled and linked by `--cc` in one invocation, `<cc>
-  --target=<triple> -O1 -fPIE -pie -Wno-override-module -o <out> <entry>.ll [-l<lib>...] [<-Xcc
+  --target=<triple> -O1 -fPIE -Wno-override-module -o <out> <entry>.ll [-l<lib>...] [<-Xcc
   args>...]`, `-O2` in place of `-O1` under `--release` and `-c` before `-o` when the compiler stops
   at the object; the executable is position-independent. The module holds the whole program, the
   runtime included (D9.10, D13.1), so the only inputs the line names are that module and the
   libraries the program asked for.
-  The Linux x86-64 `--cc` line keeps its existing arguments and order.
-  Mac arm64 links with `<cc> --target=<built target> -O1 -fPIE -Wl,-pie
-  -Wno-override-module -o <out> <entry>.ll [-l<lib>...] [<-Xcc args>...]`.
-  Mac uses `-O2` under `--release`. `-c` removes `-Wl,-pie` and link libraries.
-  The Mac default `--cc` is `/usr/bin/clang`; the Linux default stays `clang`.
+  Linux x86-64 and Mac arm64 use the same line, each with its own triple.
+  `-c` removes the link libraries. The line passes no `-pie` and no `-Wl,-pie`: clang links a
+  position-independent executable by default on both targets.
+  The default `--cc` is `clang` on both targets.
   Neither target links an object from a fort C runtime (D13.1).
 - history: Amended 2026-09-10 with D19: generated code was GNU assembly, assembled and linked by the
   system C compiler. Amended 2026-09-11 (T-088): the line also named `<std-dir>/fort_rt.o`, the C
   runtime object (D13.1 as amended).
   Amended 2026-09-15 (T-140): Mac uses Apple clang and the Mach-O PIE linker flag.
+  Amended 2026-09-17: the line dropped `-pie` and `-Wl,-pie`, because clang 18.1.3 for
+  `x86_64-linux-gnu` and Apple clang 21 for arm64 both link a position-independent executable
+  without them. The default `--cc` became `clang` on both targets. Before this date the Mac
+  default was `/usr/bin/clang`. From that date the driver had no branch on the target.
 
 ### D14.4 Where the language tests live
 - owner: `toolchain.md`.

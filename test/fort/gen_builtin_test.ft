@@ -227,7 +227,7 @@ fn open_calls(gen_env.env mut* e) bool {
     strbuf.append(&b, "fn make() point {\n    return point{1, 2};\n}\n");
     strbuf.append(&b, "fn take(point p) i32 {\n    return p.x;\n}\n");
     strbuf.append(&b, "fn stop() noreturn {\n    panic(\"stop\");\n}\n");
-    strbuf.append(&b, "extern fn printf(char* fmt, i32 v) i32;\n");
+    strbuf.append(&b, "extern fn printf(char* fmt, ...) i32;\n");
     strbuf.append(&b, "fn main() i32 {\n");
     strbuf.append(&b, "    i32 mut n = 3;\n");
     strbuf.append(&b, "    fn (i32, i32) i32 f = add;\n");
@@ -279,13 +279,12 @@ fn an_extern_call_goes_through_the_variadic_call_type() void {
     defer gen_env.close(&e);
     assert(open_calls(&e));
     gen_env.emit_value(&e, "c");
-    // The variadic tail is what makes the vector-register count right at a
-    // fixed-prototype declaration of a C function, and `#3` is `nobuiltin` on
-    // every extern call site (item 8).
+    // A declared variable tail gives the call the variadic function type, so the caller passes
+    // the vector-register count, and `#3` is `nobuiltin` on every extern call site (item 8).
     // D9.8
     string text = gen_env.body(&e);
-    gen_env.expect_text(text[text.len - 62..],
-                        "  %t5 = call i32 (ptr, i32, ...) @printf(ptr %t3, i32 %t4) #3\n");
+    gen_env.expect_text(text[text.len - 57..],
+                        "  %t5 = call i32 (ptr, ...) @printf(ptr %t3, i32 %t4) #3\n");
     assert(gen.gen_uses_attr(&e.g, gen.ATTR_NOBUILTIN));
     // It is declared in the extern group, with its own C name (item 8).
     assert(e.g.externs.len == 1);
@@ -299,7 +298,8 @@ fn an_aggregate_result_arrives_through_the_sret_pointer() void {
     gen_env.into_text(&e, "z");
     // Item 7: the result place leads the argument list and the call itself is
     // `void`.
-    gen_env.expect_text(gen_env.body(&e), "  call void @\"main.make\"(ptr %z.4)\n");
+    gen_env.expect_text(gen_env.body(&e),
+                        "  call void @\"main.make\"(ptr sret(%struct.main.point) %z.4)\n");
 }
 
 fn an_aggregate_argument_is_a_pointer_to_a_copy_the_caller_made() void {
@@ -414,7 +414,7 @@ fn an_extern_call_carries_them_too_a_literal_argument_included() void {
     // type of item 8 states the types alone.
     // D9.8
     gen_env.join2(&e, "  %t0 = load i8, ptr %x.0, align 1\n",
-                  "  %t1 = call zeroext i8 (i8, i16, ...) @cnarrow(i8 zeroext %t0, ");
+                  "  %t1 = call zeroext i8 @cnarrow(i8 zeroext %t0, ");
     gen_env.expect_text(gen_env.body(&e), gen_env.join_more(&e, "i16 signext 3) #3\n"));
 }
 
@@ -427,7 +427,8 @@ fn a_discarded_aggregate_result_still_gets_a_place() void {
     // throws the result away still allocates the place nothing reads.
     gen_env.discard_at(&e, 7);
     gen_env.expect_text(gen_env.allocas(&e), "  %tmp0 = alloca %struct.main.point, align 4\n");
-    gen_env.expect_text(gen_env.body(&e), "  call void @\"main.make\"(ptr %tmp0)\n");
+    gen_env.expect_text(gen_env.body(&e),
+                        "  call void @\"main.make\"(ptr sret(%struct.main.point) %tmp0)\n");
 }
 
 fn main() i32 {

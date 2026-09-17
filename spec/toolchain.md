@@ -43,14 +43,12 @@ file (D14.1). Options and the entry file may appear in any order.
   is one argument. `-I` roots are searched in command-line order (D9.2) and `-Xcc` arguments are
   passed in command-line order. The last `-o`, `--std-dir`, `--cc` and `--target` win.
 - `--cc` must name a clang, since nothing else reads LLVM IR (D14.1, D19.1).
-  The Linux x86-64 compiler defaults to `clang`; the Mac arm64 compiler defaults to
-  `/usr/bin/clang` (D14.3).
+  The compiler defaults to `clang` on both targets (D14.3).
 - The default target is the compiler binary's built target (D14.1).
-  Linux x86-64 stores `x86_64-linux-gnu`. A Mac arm64 build reads `sw_vers -productVersion`.
-  It stores `arm64-apple-macosxM.m.p` with the numeric host version in the compiler.
-  For a two-part `M.m` result, it appends `.0`. Thus `15.0` gives
-  `arm64-apple-macosx15.0.0`. For a three-part `M.m.p` result, it keeps all three parts.
-  It rejects any other version shape instead of guessing a target triple.
+  Linux x86-64 stores `x86_64-linux-gnu`. Mac arm64 stores the fixed `arm64-apple-macosx11.0.0`.
+  The value is `std.os.TARGET` of the standard root that the compiler is built with
+  (`std/linux/os.ft` or `std/darwin/os.ft`). The build passes no `--target` to a compiler that
+  it builds.
   An IR mode may select either target form with `--target`.
   An unsupported form exits 2 before the compiler creates output.
 - The selected target supplies the three configuration values of D21.1. `--target` therefore
@@ -253,25 +251,22 @@ Compilation is whole-program (D9.10):
    failure. The line is
 
    ```sh
-   clang --target=x86_64-linux-gnu -O1 -fPIE -pie -Wno-override-module \
+   clang --target=x86_64-linux-gnu -O1 -fPIE -Wno-override-module \
        -o <out> <tmp>/<entry>.ll <-l options> <-Xcc args>
    ```
 
-   This line is the Linux x86-64 form. Mac arm64 uses the following form:
-
-   ```sh
-   <cc> --target=arm64-apple-macosxM.m.p -O1 -fPIE -Wl,-pie \
-       -Wno-override-module -o <out> <tmp>/<entry>.ll <-l options> <-Xcc args>
-   ```
-
-   Both forms use `-O2` in place of `-O1` under `--release` (D14.3).
-   Both forms add `-c` before `-o` and omit their PIE link flag and `-l` options for `-c`.
+   This line is the Linux x86-64 form. Mac arm64 uses the same line with
+   `--target=arm64-apple-macosxM.m.p`.
+   Both targets use `-O2` in place of `-O1` under `--release` (D14.3).
+   Both add `-c` before `-o` and omit the `-l` options for `-c`.
+   The line passes no `-pie`: clang links a position-independent executable by default on
+   both targets.
    The module is the only compiler-produced input: it holds the runtime (D9.10, D13.1).
    Linux clang finds the cross sysroot, `Scrt1.o`, `crti.o`, `crtn.o` and linker itself.
    Mac Apple clang finds its active SDK and Mach-O linker through the host toolchain.
-   The Mac default `<cc>` is `/usr/bin/clang`; an explicit `--cc` overrides it.
+   The default `<cc>` is `clang` on both targets; an explicit `--cc` overrides it.
    `-Wno-override-module` silences a triple warning; `.ll` tells clang the input is IR.
-   Neither form passes `-x ir` or links an object from a fort C runtime.
+   The line passes no `-x ir` and links no object from a fort C runtime.
 6. Remove the temporary directory.
 
 `--check` stops after step 3 (D20.1): it emits no module, creates no temporary directory, runs no
@@ -854,16 +849,14 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
    the pointer in the integer slot D9.9 requires. An aggregate result is a leading
    `ptr sret(%T) %ret.sret` parameter on a function whose result type is `void`; the pointer
    arrives in `rdi` on Linux; the callee echoes it in `rax`.
-   Linux marks `sret` only on the definition; its call passes the destination as a plain `ptr`.
-   Mac marks `sret(%T)` on the definition and at the call site.
+   Both targets mark `sret(%T)` on the definition and at the call site.
    Apple arm64 then puts the result destination in `x8`, not `x0` (D9.9).
    A span or `string` is one hidden pointer and is never split into two scalars, so
    `fort_entry`'s C prototype stays literally true (D11.6). `bool`, `char`, `u8` and `u16`
    parameters and results carry `zeroext` and `i8` and `i16` carry `signext`, in fort and extern
    signatures alike, so an extern-legal signature is a valid C callback by construction (D9.9).
    Every fort definition is `define dso_local <ret> @"m.f"(...) #0`, where `#0` is
-   `{ nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }` on Linux.
-   Mac uses `"probe-stack"="__chkstk_darwin"` in the same group (D10.8).
+   `{ nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }` on both targets (D10.8).
    `nounwind` stands because fort has
    no exceptions, the frame pointer because it is what a debugger gets without DWARF (section
    9), and `probe-stack` for item 13.
@@ -871,9 +864,8 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
    A call through a function pointer is an ordinary `call` whose callee is the `ptr` value and
    whose function type is written out, because an opaque pointer carries none (D19.2):
    `call i32 (i32, i32) %t0(i32 %t1, i32 %t2)`.
-   Linux uses `call void (ptr, i32) %t0(ptr %r.0, i32 3)` for an aggregate result.
-   Mac uses `call void (ptr, i32) %t0(ptr sret(%T) %r.0, i32 3)`.
-   `opt -passes=verify` accepts the Mac call-site attribute.
+   An aggregate result is `call void (ptr, i32) %t0(ptr sret(%T) %r.0, i32 3)` on both targets.
+   `opt -passes=verify` accepts the call-site attribute.
    The callee is evaluated before the arguments (D6.3) and every rule
    above holds at that call site unchanged, aggregate arguments and the extension attributes
    included, so it differs from the call of a name only in the callee and that type (D3.10). The
@@ -881,46 +873,34 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
    An extern direct call takes its target ABI form from its declaration (item 8).
 
 8. **Extern declarations** (D9.8). An extern function uses unmangled C types.
-   Linux fixed externs keep their old variadic LLVM declaration and call form:
-
-   ```llvm
-   declare i32 @printf(ptr, ...)
-   declare signext i8 @c_narrow(i8 signext, i16 zeroext, ...)
-   ```
-
-   ```llvm
-     %t10 = call i32 (ptr, ...) @printf(ptr @.str.0) #3
-     %t11 = call signext i8 (i8, i16, ...) @c_narrow(i8 signext %t8, i16 zeroext %t9) #3
-   ```
-
-   This Linux form also applies to an extern declaration that writes `...`.
-   Linux's variadic LLVM call form sets the System V vector-register count.
-   Mac fixed externs use fixed LLVM forms instead. The declaration carries
-   `nobuiltin`:
+   A fixed extern uses a fixed LLVM declaration and call form on both targets. The declaration
+   carries `nobuiltin`:
 
    ```llvm
    declare i64 @write(i32, ptr, i64) nobuiltin
+   declare signext i8 @c_narrow(i8 signext, i16 zeroext) nobuiltin
      %t12 = call i64 @write(i32 %t8, ptr %t9, i64 %t10) #3
+     %t11 = call signext i8 @c_narrow(i8 signext %t8, i16 zeroext %t9) #3
    ```
 
-   A Mac C extern that writes `...` keeps its fixed prefix in a variadic LLVM type:
+   A C extern that writes `...` keeps its fixed prefix in a variadic LLVM type:
 
    ```llvm
    declare i32 @printf(ptr, ...) nobuiltin
      %t13 = call i32 (ptr, ...) @printf(ptr %t9, i32 %t11, double %t12) #3
    ```
 
+   On Linux the variadic call type sets the System V vector-register count in `al`.
    Apple arm64 puts the variable `i32` and `double` arguments on the stack.
-   A Mac fixed declaration of C `printf` would use the wrong register form.
+   A fixed declaration of C `printf` would use the wrong form on both targets.
    Only `i32`, `u32`, `i64`, `u64`, `f64`, pointers and function pointers can appear in that tail.
    The call site writes their actual LLVM types; unsigned integers use the same IR widths.
    `#3 = { nobuiltin }` stays on each extern call site on both targets.
-   Mac also writes `nobuiltin` on each extern declaration. Apple clang can
+   Each extern declaration also carries `nobuiltin`. Apple clang can
    otherwise mark `calloc` as an allocator whose call and matching `free`
    have no observable effect. This can remove an allocation failure when
-   the caller reads no storage (D10.2, D11.4). Linux keeps its declaration
-   bytes. The attributes prevent rewriting C calls without changing
-   intrinsic lowering driver-wide.
+   the caller reads no storage (D10.2, D11.4). The attributes prevent rewriting C calls
+   without changing intrinsic lowering driver-wide.
    A function-pointer call is fixed (D3.10); an extern name is not a pointer value.
 
    The runtime needs no declaration at all: `std.rt` is in the closure (D9.10), so the module
@@ -1009,8 +989,8 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
       %t3 = call i32 @llvm.fptosi.sat.i32.f64(double %t2)
     ```
 
-13. **Stack probing** (D10.8). Linux writes `"probe-stack"="inline-asm"` on every fort
-    definition. Mac writes `"probe-stack"="__chkstk_darwin"` instead.
+13. **Stack probing** (D10.8). Both targets write `"probe-stack"="inline-asm"` on every fort
+    definition.
     The backend establishes a frame larger than a page one page at a time.
     The attribute stays in `-S` IR, so the driver line cannot remove the guarantee.
 
@@ -1033,9 +1013,8 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
     emitter's own code and not a call the program wrote, so the call-site trap of D8.5 and D19.7
     does not stand in it; a program that calls an entry point of section 5.1 itself gets that
     trap like any other call to a `noreturn` function (item 20).
-    Every Linux `noreturn` entry point of section 5.1 carries
+    Every `noreturn` entry point of section 5.1 carries
     `#8 = { cold noreturn nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }`.
-    Mac substitutes `"probe-stack"="__chkstk_darwin"` in `#8`.
     The entry points are the `std.rt.fail_*`
     family, `std.rt.panic` and `std.rt.assert_fail`, which the failure blocks call, and
     `std.rt.exit`, which only `std.rt` reaches. `noreturn` is truthful,
@@ -1153,9 +1132,8 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
     followed by `unreachable` (D11.4).
 
 20. **`noreturn`** (D8.5, D19.7). A `noreturn` fort function is
-    `define dso_local void @"m.f"(...) #1` with Linux
+    `define dso_local void @"m.f"(...) #1` with
     `#1 = { noreturn nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }`.
-    Mac uses `"probe-stack"="__chkstk_darwin"` in `#1`.
     The block that would fall off the end of its body ends
     with
 
@@ -1217,7 +1195,7 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
     entry:
       %args = alloca %fort.span, align 8
       call void @"std.rt.args_init"(i32 %argc, ptr %argv)
-      call void @"std.rt.args"(ptr %args)
+      call void @"std.rt.args"(ptr sret(%fort.span) %args)
       %t0 = call i32 @fort_entry(ptr %args)
       call void @"std.rt.flush_all"()
       %t1 = and i32 %t0, 255
@@ -1227,8 +1205,8 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
 
     `std.rt.args` returns an aggregate, so it takes the destination as the hidden result pointer
     of item 7, written `sret(%fort.span)` on its own definition.
-    Linux passes a plain `ptr` here; Mac writes
-    `call void @"std.rt.args"(ptr sret(%fort.span) %args)` (D9.9).
+    The call writes `call void @"std.rt.args"(ptr sret(%fort.span) %args)` on both targets
+    (D9.9).
     `args_init` runs first, since `args` hands out what it built. The `and` is D11.6's
     `status & 0xFF`.
 
@@ -1241,8 +1219,8 @@ The attribute groups have fixed indices, and only the used ones are emitted, so 
 numbering are normal (D19.5):
 
 - `#0 = { nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }` on every fort definition
-  on Linux (item 7), and `#1`, the same set plus `noreturn`, on a `noreturn` definition (item 20).
-  Mac writes `"probe-stack"="__chkstk_darwin"` in those two groups.
+  on both targets (item 7), and `#1`, the same set plus `noreturn`, on a `noreturn`
+  definition (item 20).
 - `#2` is not emitted: it held `{ cold noreturn nounwind }` on the runtime's `_Noreturn` C
   declarations, which item 8 no longer produces. The hand-written modules of 6.1 and 6.2 declare
   what they call and number their own groups (preamble), which is why one of them still shows it.
@@ -1253,8 +1231,7 @@ numbering are normal (D19.5):
   and `#6 = { nocallback nofree nounwind willreturn memory(argmem: write) }` on `llvm.memset`.
 - `#7 = { cold noreturn nounwind memory(inaccessiblemem: write) }` on `llvm.trap` (item 20).
 - `#8 = { cold noreturn nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }`, `#1` plus
-  `cold`, on Linux definitions of the `noreturn` entry points of section 5.1 (item 14).
-  Mac substitutes `"probe-stack"="__chkstk_darwin"` in `#8`.
+  `cold`, on the definitions of the `noreturn` entry points of section 5.1 (item 14).
 
 `mustprogress` is deliberately absent everywhere, from `#4`, `#5` and `#6`, where clang would
 print it, and from fort definitions: it licenses the optimizer to delete a loop with no side
@@ -1277,7 +1254,7 @@ target triple = "x86_64-unknown-linux-gnu"
 
 define dso_local void @"std.rt.print_str"(i32 %fd, ptr %ptr, i64 %len) #0 {
 entry:
-  %t0 = call i64 (i32, ptr, i64, ...) @write(i32 %fd, ptr %ptr, i64 %len) #3
+  %t0 = call i64 @write(i32 %fd, ptr %ptr, i64 %len) #3
   ret void
 }
 
@@ -1285,7 +1262,7 @@ define dso_local void @"std.rt.print_char"(i32 %fd, i8 zeroext %c) #0 {
 entry:
   %byte.0 = alloca i8, align 1
   store i8 %c, ptr %byte.0, align 1
-  %t0 = call i64 (i32, ptr, i64, ...) @write(i32 %fd, ptr %byte.0, i64 1) #3
+  %t0 = call i64 @write(i32 %fd, ptr %byte.0, i64 1) #3
   ret void
 }
 
@@ -1325,7 +1302,7 @@ define dso_local i32 @main(i32 %argc, ptr %argv) #0 {
 entry:
   %args = alloca %fort.span, align 8
   call void @"std.rt.args_init"(i32 %argc, ptr %argv)
-  call void @"std.rt.args"(ptr %args)
+  call void @"std.rt.args"(ptr sret(%fort.span) %args)
   %t0 = call i32 @fort_entry(ptr %args)
   call void @"std.rt.flush_all"()
   %t1 = and i32 %t0, 255
@@ -1334,7 +1311,7 @@ entry:
 
 @.str.0 = private unnamed_addr constant [14 x i8] c"hello, world!\00", align 1
 
-declare i64 @write(i32, ptr, i64, ...)
+declare i64 @write(i32, ptr, i64) nobuiltin
 
 attributes #0 = { nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }
 attributes #3 = { nobuiltin }
@@ -1370,7 +1347,7 @@ target triple = "x86_64-unknown-linux-gnu"
 
 define dso_local void @"std.rt.print_str"(i32 %fd, ptr %ptr, i64 %len) #0 {
 entry:
-  %t0 = call i64 (i32, ptr, i64, ...) @write(i32 %fd, ptr %ptr, i64 %len) #3
+  %t0 = call i64 @write(i32 %fd, ptr %ptr, i64 %len) #3
   ret void
 }
 
@@ -1378,7 +1355,7 @@ define dso_local void @"std.rt.print_char"(i32 %fd, i8 zeroext %c) #0 {
 entry:
   %byte.0 = alloca i8, align 1
   store i8 %c, ptr %byte.0, align 1
-  %t0 = call i64 (i32, ptr, i64, ...) @write(i32 %fd, ptr %byte.0, i64 1) #3
+  %t0 = call i64 @write(i32 %fd, ptr %byte.0, i64 1) #3
   ret void
 }
 
@@ -1403,8 +1380,8 @@ entry:
 
 define dso_local void @"std.rt.fail_bounds"(i64 %i, i64 %n, ptr %f, i32 %l, i32 %c) #8 {
 entry:
-  %t0 = call i64 (i32, ptr, i64, ...) @write(i32 2, ptr @.str.1, i64 65) #3
-  call void (...) @abort() #3
+  %t0 = call i64 @write(i32 2, ptr @.str.1, i64 65) #3
+  call void @abort() #3
   call void @llvm.trap()
   unreachable
 }
@@ -1441,7 +1418,7 @@ define dso_local i32 @main(i32 %argc, ptr %argv) #0 {
 entry:
   %args = alloca %fort.span, align 8
   call void @"std.rt.args_init"(i32 %argc, ptr %argv)
-  call void @"std.rt.args"(ptr %args)
+  call void @"std.rt.args"(ptr sret(%fort.span) %args)
   %t0 = call i32 @fort_entry(ptr %args)
   call void @"std.rt.flush_all"()
   %t1 = and i32 %t0, 255
@@ -1453,8 +1430,8 @@ entry:
 @.str.1 = private unnamed_addr constant [66 x i8]
     c"abort.ft:12:13: runtime error: index 5 out of range for length 3\0A\00", align 1
 
-declare void @abort(...)
-declare i64 @write(i32, ptr, i64, ...)
+declare void @abort() nobuiltin
+declare i64 @write(i32, ptr, i64) nobuiltin
 
 declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg) #6
 declare void @llvm.trap() #7

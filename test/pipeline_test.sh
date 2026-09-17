@@ -55,7 +55,7 @@ done
 for prog in hello abort colons; do
     "$opt" -passes=verify -disable-output "$ir/$prog.ll" ||
         fail "$prog: the IR verifier rejected the module"
-    "$cc" --target="$target" -O1 -fPIE -pie -Wno-override-module \
+    "$cc" --target="$target" -O1 -fPIE -Wno-override-module \
         -o "$work/$prog" "$ir/$prog.ll" ||
         fail "$prog: compiling and linking failed"
     if ! readelf -h "$work/$prog" | grep -q 'Type: *DYN'; then

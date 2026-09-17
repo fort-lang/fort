@@ -780,10 +780,10 @@ bullet at a time and without a rewrite.
   in the send buffer, and the guest's loopback buffer measured **2612608** bytes against the
   **12288** that `run/stdlib/119` sends, a margin of 212. Filling it would need a write larger
   than the buffer, which in a one-process test deadlocks: nothing reads the other end while the
-  writer blocks. `O_NONBLOCK` is still out of reach, because `std/libc.ft` declares no `fcntl`
-  and `socket` takes no `SOCK_NONBLOCK` here.
+  writer blocks. `O_NONBLOCK` is still out of reach, because `std.libc` declares `fcntl` but no
+  `F_SETFL` or `O_NONBLOCK`, and `socket` takes no `SOCK_NONBLOCK` here.
 - **An errno that a later call could overwrite is not witnessed by a call that succeeds.**
-  `net.close_and_fail` in `std/net.ft` reads `errno`, closes the descriptor its failed call
+  `net.close_and_fail` in `std/linux/net.ft` reads `errno`, closes the descriptor its failed call
   opened and writes `errno` back, so that a caller of `net.listen` reads the `bind(2)` error and
   not `close(2)`'s. Deleting the write-back leaves `run/stdlib/118` green, which names the exact
   errno of three failures (22, 111, 88), because `close(2)` of a valid descriptor succeeds and
@@ -842,7 +842,7 @@ bullet at a time and without a rewrite.
   things it adds, for the audit after it.
   **The runner is in the repository and the table is data**: `tools/mutate.py` and
   `tools/mutations/emitter_bootstrap.json`, 76 rows of file, anchor text and replacement, so a
-  later audit writes a table and not a program. T-154 adds 12 Darwin output-branch rows and 1
+  later audit writes a table and not a program. T-154 adds 12 output-branch rows and 1
   cited decision, for 88 rows over 73 decisions now. `tools/mutate.py <table> --only D3.8` re-runs
   one row. The `--check` option builds
   nothing and reports every anchor that no longer
@@ -1020,14 +1020,16 @@ bullet at a time and without a rewrite.
   rather than by hand, and a helper that is not a suite, such as `test/fake_vscode.js`, defines no
   test of its own, since Node 18 loads every file under `test/`.
 - **What checks `.ft` source, and what does not** (T-076). Three things do. `tools/fort_lint.py`
-  (ctest `fort_lint`, target `fort-lint`) holds `std/*.ft` and `src/fort/*.ft` to the identifier
-  conventions of D1.4 and to 100 columns; it reads `fort --index` (D20.3) rather than tokenizing
+  (ctest `fort_lint`, target `fort-lint`) holds `std/*.ft`, `std/linux/*.ft` and
+  `src/fort/*.ft` to the identifier conventions of D1.4 and to 100 columns;
+  it reads `fort --index` (D20.3) rather than tokenizing
   fort a second time, so the kinds and types it reasons about are the checker's own answers, and a
   second tokenizer cannot drift from the language. `fort_lint_darwin` uses a temporary darwin root
   to lint `std/darwin/*.ft` with stage2 (T-144). The linux root conflicts with darwin declarations.
   `test/highlight_test.py` tokenizes `std/`,
   `src/fort/` and `test/lang/run` against the TextMate grammar, which is the only check that grammar
-  has. `tools/lines.py` counts `std/*.ft` and `std/darwin/*.ft` as source for the 3:1 ratio (T-144).
+  has. `tools/lines.py` counts `std/*.ft`, `std/linux/*.ft` and `std/darwin/*.ft` as source
+  for the 3:1 ratio (T-144).
   It counts `test/darwin/*.c` as test. The compiler and runtime are source too (D14.6).
   What still does not: **there is no formatter** -- indentation,
   spacing, brace placement and blank lines in `.ft` are review's alone, since `.clang-format` has no
@@ -1091,7 +1093,8 @@ bullet at a time and without a rewrite.
   rediscovered this rule.
 - **`tools/lines.py` does not see a test written in shell or in Python either** (T-131). Its
   `TEST_GLOBS` are `test/*.c`, `test/*.h`, `test/**/*.ft`, `test/lang/ffi/*.c` and `test/darwin/*.c`.
-  Its `SOURCE_GLOBS` include the two compilers, `std/*.ft` and `std/darwin/*.ft` (T-144).
+  Its `SOURCE_GLOBS` include the two compilers, `std/*.ft`, `std/linux/*.ft` and
+  `std/darwin/*.ft` (T-144).
   So a ticket whose deliverable is the build or a tool gets no useful figure:
   T-131 changed `CMakeLists.txt`, six scripts under `tools/` and
   the language harness, and the tool read `+2 source lines, +0 test lines, ratio 0.00`, the 2

@@ -10,8 +10,12 @@ of the library calls),
 `std.mem`, `std.str`, `std.sys`, `std.strbuf` (the growable buffer), `std.vec` (`ptr_vec`,
 `int_vec` and the non-generic container pattern), `std.strmap` (the open-addressing table),
 `std.io` (descriptors, whole files and streams), `std.math` (the integer limits, the float
-bit casts and the per-type `abs`, `min` and `max`) and `std.net` (a TCP listener and a TCP
-connection, IPv4 only) are written.
+bit casts and the per-type `abs`, `min` and `max`), `std.net` (a TCP listener and a TCP
+connection, IPv4 only) and `std.os` (the target triple and the path of the running binary) are
+written.
+
+`std.libc`, `std.net` and `std.os` have one source for each target, in `std/linux/` and
+`std/darwin/`. The other modules stand in `std/` and serve both targets.
 
 `std.math` holds f64 and f32 functions, so the C bootstrap refuses it: a program that imports
 `std.math` is one stage1 rejects whole, whatever part of the module it uses, and its tests are in
@@ -26,7 +30,7 @@ import closure holds it, so every program carries it (D9.10). The tests under
 `test/lang/run/stdlib` call an entry point directly beside the builtin the compiler lowers to it,
 which is what holds the lowering to the text D11.7 and D11.4 fix.
 
-The build copies `std/*.ft` into `build/<preset>/std/`, which the
+The build copies `std/*.ft` and `std/<target>/*.ft` into `build/<preset>/std/`, which the
 compiler uses as its fallback `--std-dir` (`spec/toolchain.md` sections 1 and 2), so a new module
 is visible to `test/lang/run_tests.py` only after `tools/vm build <preset>` has copied it. The
 language tests of the library are `test/lang/run/stdlib/`.

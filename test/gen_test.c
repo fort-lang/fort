@@ -77,8 +77,8 @@ TEST(the_sections_appear_in_the_order_of_item_1, {
     TEST_ASSERT_TRUE(before("%fort.span", "%struct.main.point"));
     TEST_ASSERT_TRUE(before("%struct.main.point", "define dso_local"));
     TEST_ASSERT_TRUE(before("define dso_local", "@.str.0"));
-    TEST_ASSERT_TRUE(before("@.str.0", "declare i32 @puts(ptr, ...)"));
-    TEST_ASSERT_TRUE(before("declare i32 @puts(ptr, ...)", "attributes #0"));
+    TEST_ASSERT_TRUE(before("@.str.0", "declare i32 @puts(ptr) nobuiltin"));
+    TEST_ASSERT_TRUE(before("declare i32 @puts(ptr) nobuiltin", "attributes #0"));
 })
 
 TEST(a_blank_line_stands_between_two_definitions, {
@@ -258,7 +258,8 @@ TEST(a_fort_function_is_a_quoted_dotted_name, {
 TEST(an_extern_name_is_unmangled_and_not_dso_local, {
     TEST_ASSERT_TRUE(emit("extern fn puts(char* s) i32;\n"
                           "fn main() i32 { string s = \"x\"; return puts(s.ptr); }\n"));
-    TEST_ASSERT_EQ_STR(found("declare i32 @puts(ptr, ...)"), "declare i32 @puts(ptr, ...)");
+    TEST_ASSERT_EQ_STR(found("declare i32 @puts(ptr) nobuiltin"),
+                       "declare i32 @puts(ptr) nobuiltin");
     TEST_ASSERT_EQ_STR(absent("dso_local i32 @puts"), "absent");
 })
 
@@ -393,8 +394,8 @@ TEST(an_aggregate_result_is_a_leading_sret_pointer_on_a_void_function, {
     TEST_ASSERT_EQ_STR(
         found("define dso_local void @\"main.make\"(ptr sret(%struct.main.point) %ret.sret) #0"),
         "define dso_local void @\"main.make\"(ptr sret(%struct.main.point) %ret.sret) #0");
-    TEST_ASSERT_EQ_STR(found("call void @\"main.make\"(ptr %q.0)"),
-                       "call void @\"main.make\"(ptr %q.0)");
+    TEST_ASSERT_EQ_STR(found("call void @\"main.make\"(ptr sret(%struct.main.point) %q.0)"),
+                       "call void @\"main.make\"(ptr sret(%struct.main.point) %q.0)");
 })
 
 TEST(a_darwin_direct_call_marks_its_aggregate_result_pointer, {
@@ -435,19 +436,20 @@ TEST(a_noreturn_definition_carries_its_own_group_and_ends_in_a_trap, {
         "attributes #7 = { cold noreturn nounwind memory(inaccessiblemem: write) }");
 })
 
-TEST(darwin_fort_definitions_use_the_darwin_stack_probe, {
+TEST(darwin_fort_definitions_use_the_inline_stack_probe_of_linux, {
+    // Both targets use the inline stack probe. No definition names `__chkstk_darwin`.
     TEST_ASSERT_TRUE(emit_target("fn stop() noreturn { while (true) { } }\n"
                                  "fn main() i32 { return 0; }\n",
                                  "arm64-apple-macosx26.6.2"));
     TEST_ASSERT_EQ_STR(found("attributes #0 = { nounwind \"frame-pointer\"=\"all\" "
-                             "\"probe-stack\"=\"__chkstk_darwin\" }"),
+                             "\"probe-stack\"=\"inline-asm\" }"),
                        "attributes #0 = { nounwind \"frame-pointer\"=\"all\" "
-                       "\"probe-stack\"=\"__chkstk_darwin\" }");
+                       "\"probe-stack\"=\"inline-asm\" }");
     TEST_ASSERT_EQ_STR(found("attributes #1 = { noreturn nounwind \"frame-pointer\"=\"all\" "
-                             "\"probe-stack\"=\"__chkstk_darwin\" }"),
+                             "\"probe-stack\"=\"inline-asm\" }"),
                        "attributes #1 = { noreturn nounwind \"frame-pointer\"=\"all\" "
-                       "\"probe-stack\"=\"__chkstk_darwin\" }");
-    TEST_ASSERT_EQ_STR(absent("\"probe-stack\"=\"inline-asm\""), "absent");
+                       "\"probe-stack\"=\"inline-asm\" }");
+    TEST_ASSERT_EQ_STR(absent("__chkstk_darwin"), "absent");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -579,7 +581,7 @@ int main(int argc, char** argv) {
     TEST_RUN(a_darwin_direct_call_marks_its_aggregate_result_pointer);
     TEST_RUN(every_fort_definition_carries_the_attribute_group_of_item_7);
     TEST_RUN(a_noreturn_definition_carries_its_own_group_and_ends_in_a_trap);
-    TEST_RUN(darwin_fort_definitions_use_the_darwin_stack_probe);
+    TEST_RUN(darwin_fort_definitions_use_the_inline_stack_probe_of_linux);
     TEST_RUN(a_narrow_value_keeps_its_own_width);
     TEST_RUN(the_blocks_of_a_short_circuit_and_a_check_each_end_in_one_terminator);
     gen_done();

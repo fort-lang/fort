@@ -572,11 +572,7 @@ static gen_val_t gen_call(gen_t* g, ast_node_t* n, const gen_place_t* dst) {
         return none;
     }
     const bool is_extern = direct && s->kind == SYM_EXTERN_FN;
-    // Linux keeps its old variadic IR form. Darwin uses a fixed form unless
-    // the fort declaration marks a variable tail.
-    // D9.8
-    const bool variadic =
-        is_extern && (!gen_is_mac(g) || (s->node->flags & AST_FLAG_VARIADIC) != 0);
+    const bool variadic = is_extern && (s->node->flags & AST_FLAG_VARIADIC) != 0;
     if (is_extern) {
         gen_use_extern(g, s);
     }
@@ -602,17 +598,13 @@ static gen_val_t gen_call(gen_t* g, ast_node_t* n, const gen_place_t* dst) {
     if (dst != NULL) {
         // An aggregate result arrives through the leading `sret` pointer
         // (item 7).
-        if (gen_is_mac(g)) {
-            sb_t attr;
-            sb_init(&attr);
-            sb_append(&attr, "sret(");
-            sb_append_str(&attr, gen_mem_type(g, sig->elem));
-            sb_push(&attr, ')');
-            gen_args_add_ext(&args, dst->addr, sb_cstr(&attr));
-            sb_free(&attr);
-        } else {
-            gen_args_add(&args, dst->addr);
-        }
+        sb_t attr;
+        sb_init(&attr);
+        sb_append(&attr, "sret(");
+        sb_append_str(&attr, gen_mem_type(g, sig->elem));
+        sb_push(&attr, ')');
+        gen_args_add_ext(&args, dst->addr, sb_cstr(&attr));
+        sb_free(&attr);
     }
     for (uint64_t i = 0; i < ast_len(n); i++) {
         gen_call_arg(g, &args, ast_child(n, i));

@@ -19,14 +19,8 @@ if [ ! -x "$compiler" ]; then
     exit 2
 fi
 mkdir "$work/linux" "$work/darwin"
-cp std/*.ft "$work/linux/"
-cp std/*.ft "$work/darwin/"
-cp std/darwin/libc.ft "$work/darwin/libc.ft"
-cp std/darwin/net.ft "$work/darwin/net.ft"
-cmp std/libc.ft "$work/linux/libc.ft"
-cmp std/net.ft "$work/linux/net.ft"
-cmp std/darwin/libc.ft "$work/darwin/libc.ft"
-cmp std/darwin/net.ft "$work/darwin/net.ft"
+bash tools/assemble_std.sh linux std "$work/linux"
+bash tools/assemble_std.sh darwin std "$work/darwin"
 
 cc=$(xcrun --sdk macosx --find clang)
 sdk=$(xcrun --sdk macosx --show-sdk-path)
@@ -53,11 +47,11 @@ for name in "${tests[@]}"; do
     esac
     "$compiler" -S --std-dir "$work/darwin" -o "$work/$name.ll" "$source"
     if [ "$name" = net_layout ]; then
-        "$cc" -isysroot "$sdk" -O1 -fPIE -Wl,-pie -Wno-override-module \
+        "$cc" -isysroot "$sdk" -O1 -fPIE -Wno-override-module \
             -DFORT_NET_LAYOUT_HELPER -o "$work/$name" "$work/$name.ll" \
             test/darwin/net_probe.c
     else
-        "$cc" -isysroot "$sdk" -O1 -fPIE -Wl,-pie -Wno-override-module \
+        "$cc" -isysroot "$sdk" -O1 -fPIE -Wno-override-module \
             -o "$work/$name" "$work/$name.ll"
     fi
     "$work/$name" < /dev/null > "$work/$name.actual"

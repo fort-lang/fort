@@ -109,12 +109,14 @@ TEST(the_compiler_declares_no_c_library_symbol_of_its_own_accord, {
     TEST_ASSERT_EQ_STR(first_foreign_declaration(), "@puts");
 })
 
-TEST(an_extern_is_declared_and_called_through_a_variadic_type, {
+TEST(a_fixed_extern_is_declared_and_called_through_a_fixed_type, {
+    // An extern without `...` has a fixed LLVM function type. Its declaration ends in `nobuiltin`.
     TEST_ASSERT_TRUE(emit("extern fn printf(char* fmt) i32;\n"
                           "fn main() i32 { string s = \"x\"; return printf(s.ptr); }\n"));
-    TEST_ASSERT_EQ_STR(found("declare i32 @printf(ptr, ...)"), "declare i32 @printf(ptr, ...)");
-    TEST_ASSERT_EQ_STR(found("call i32 (ptr, ...) @printf(ptr %t"),
-                       "call i32 (ptr, ...) @printf(ptr %t");
+    TEST_ASSERT_EQ_STR(found("declare i32 @printf(ptr) nobuiltin\n"),
+                       "declare i32 @printf(ptr) nobuiltin\n");
+    TEST_ASSERT_EQ_STR(found("call i32 @printf(ptr %t"), "call i32 @printf(ptr %t");
+    TEST_ASSERT_EQ_STR(absent("(ptr, ...)"), "absent");
     // nobuiltin on every extern call site keeps LLVM from rewriting the call
     // (item 8).
     TEST_ASSERT_EQ_STR(found(") #3\n"), ") #3\n");
@@ -122,7 +124,8 @@ TEST(an_extern_is_declared_and_called_through_a_variadic_type, {
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
-TEST(darwin_fixed_and_variable_tail_externs_use_their_target_forms, {
+TEST(darwin_fixed_and_variable_tail_externs_use_the_linux_forms, {
+    // Darwin emits the same extern text as Linux. Only the tail decides the LLVM function type.
     TEST_ASSERT_TRUE(emit_target("extern fn write(i32 fd, u8* buf, u64 n) i64;\n"
                                  "extern fn tail(i32 fixed, ...) i64;\n"
                                  "fn main() i32 {\n"
@@ -142,19 +145,27 @@ TEST(darwin_fixed_and_variable_tail_externs_use_their_target_forms, {
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
-TEST(an_explicit_tail_keeps_fixed_extern_llvm_bytes, {
+TEST(an_explicit_tail_changes_the_llvm_type_of_an_extern, {
+    // The same call gets the fixed type without `...` and the variadic type with it.
     const char* fixed = "extern fn printf(char* fmt) i32;\n"
                         "fn main() i32 { return printf(\"x\".ptr); }\n";
     const char* explicit_tail = "extern fn printf(char* fmt, ...) i32;\n"
                                 "fn main() i32 { return printf(\"x\".ptr); }\n";
     TEST_ASSERT_TRUE(emit(fixed));
     TEST_ASSERT_EQ_STR(verified(), "verified");
+    TEST_ASSERT_EQ_STR(found("declare i32 @printf(ptr) nobuiltin\n"),
+                       "declare i32 @printf(ptr) nobuiltin\n");
+    TEST_ASSERT_EQ_STR(found("call i32 @printf(ptr %t3) #3\n"), "call i32 @printf(ptr %t3) #3\n");
     sb_t fixed_ir;
     sb_init(&fixed_ir);
     sb_append(&fixed_ir, ir());
     TEST_ASSERT_TRUE(emit(explicit_tail));
     TEST_ASSERT_EQ_STR(verified(), "verified");
-    TEST_ASSERT_EQ_STR(ir(), sb_cstr(&fixed_ir));
+    TEST_ASSERT_EQ_STR(found("declare i32 @printf(ptr, ...) nobuiltin\n"),
+                       "declare i32 @printf(ptr, ...) nobuiltin\n");
+    TEST_ASSERT_EQ_STR(found("call i32 (ptr, ...) @printf(ptr %t3) #3\n"),
+                       "call i32 (ptr, ...) @printf(ptr %t3) #3\n");
+    TEST_ASSERT_TRUE(strcmp(ir(), sb_cstr(&fixed_ir)) != 0);
     sb_free(&fixed_ir);
 })
 
@@ -164,17 +175,20 @@ TEST(an_explicit_tail_emits_its_integer_and_pointer_arguments, {
                           "fn main() i32 {\n"
                           "    return cast(tail(1, cast(2, u32), 3, callback), i32);\n"
                           "}\n"));
-    TEST_ASSERT_EQ_STR(found("declare i64 @tail(i32, ...)"), "declare i64 @tail(i32, ...)");
+    TEST_ASSERT_EQ_STR(found("declare i64 @tail(i32, ...) nobuiltin\n"),
+                       "declare i64 @tail(i32, ...) nobuiltin\n");
     TEST_ASSERT_EQ_STR(
         found("call i64 (i32, ...) @tail(i32 1, i32 2, i32 3, ptr @\"main.callback\") #3"),
         "call i64 (i32, ...) @tail(i32 1, i32 2, i32 3, ptr @\"main.callback\") #3");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
-TEST(an_extern_with_no_parameter_is_still_variadic, {
+TEST(an_extern_with_no_parameter_has_a_fixed_empty_type, {
+    // An extern with no parameter and no `...` takes no argument. Its LLVM type is fixed.
     TEST_ASSERT_TRUE(emit("extern fn rand() i32;\nfn main() i32 { return rand(); }\n"));
-    TEST_ASSERT_EQ_STR(found("declare i32 @rand(...)"), "declare i32 @rand(...)");
-    TEST_ASSERT_EQ_STR(found("call i32 (...) @rand() #3"), "call i32 (...) @rand() #3");
+    TEST_ASSERT_EQ_STR(found("declare i32 @rand() nobuiltin\n"), "declare i32 @rand() nobuiltin\n");
+    TEST_ASSERT_EQ_STR(found("call i32 @rand() #3"), "call i32 @rand() #3");
+    TEST_ASSERT_EQ_STR(absent("(...)"), "absent");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -186,12 +200,12 @@ TEST(an_extern_narrow_signature_carries_the_c_attributes, {
     // is C's `unsigned char`, so it is `i8 zeroext`.
     // D9.9, D9.8
     const char* decl = "declare signext i8 @narrow(i8 signext, i16 zeroext, i1 zeroext,"
-                       " i8 zeroext, ...)";
+                       " i8 zeroext) nobuiltin\n";
     TEST_ASSERT_EQ_STR(found(decl), decl);
     // The call site carries them too, which is the half that extends the
     // argument the callee then trusts (module-system.md 8.3): the declaration
     // alone would leave the caller free to pass unnormalized bits.
-    const char* call = "call signext i8 (i8, i16, i1, i8, ...) @narrow"
+    const char* call = "call signext i8 @narrow"
                        "(i8 signext 1, i16 zeroext 2, i1 zeroext true, i8 zeroext 120) #3";
     TEST_ASSERT_EQ_STR(found(call), call);
     TEST_ASSERT_EQ_STR(verified(), "verified");
@@ -205,9 +219,9 @@ TEST(a_wide_extern_signature_carries_no_extension_attribute, {
     TEST_ASSERT_TRUE(emit("enum color { red, green }\n"
                           "extern fn wide(i32 a, u32 b, i64 c, color d, void* e) u64;\n"
                           "fn main() i32 { return cast(wide(1, 2, 3, color.red, null), i32); }\n"));
-    const char* decl = "declare i64 @wide(i32, i32, i64, i32, ptr, ...)";
+    const char* decl = "declare i64 @wide(i32, i32, i64, i32, ptr) nobuiltin\n";
     TEST_ASSERT_EQ_STR(found(decl), decl);
-    const char* call = "call i64 (i32, i32, i64, i32, ptr, ...) @wide(i32 1, i32 2, i64 3,"
+    const char* call = "call i64 @wide(i32 1, i32 2, i64 3,"
                        " i32 0, ptr null) #3";
     TEST_ASSERT_EQ_STR(found(call), call);
     TEST_ASSERT_EQ_STR(verified(), "verified");
@@ -246,14 +260,14 @@ TEST(a_fort_rt_name_is_an_ordinary_extern, {
     // The `fort_rt_` space is reserved for nothing now: the runtime is fort
     // and occupies no C name, so an `extern` naming what used to be an entry
     // point is an ordinary declaration of an ordinary C symbol, declared and
-    // called through the variadic type of item 8 with its `#3`.
+    // called through the fixed type of item 8 with its `#3`.
     // D9.8
     TEST_ASSERT_TRUE(emit("extern fn fort_rt_del(void* p) void;\n"
                           "fn main() i32 { fort_rt_del(null); return 0; }\n"));
-    TEST_ASSERT_EQ_STR(found("declare void @fort_rt_del(ptr, ...)"),
-                       "declare void @fort_rt_del(ptr, ...)");
-    TEST_ASSERT_EQ_STR(found("call void (ptr, ...) @fort_rt_del(ptr null) #3"),
-                       "call void (ptr, ...) @fort_rt_del(ptr null) #3");
+    TEST_ASSERT_EQ_STR(found("declare void @fort_rt_del(ptr) nobuiltin\n"),
+                       "declare void @fort_rt_del(ptr) nobuiltin\n");
+    TEST_ASSERT_EQ_STR(found("call void @fort_rt_del(ptr null) #3"),
+                       "call void @fort_rt_del(ptr null) #3");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -280,8 +294,8 @@ TEST(each_declaration_group_is_separated_by_a_blank_line, {
                           "fn main() i32 {\n    i32[2] a = {};\n    i64 i = 0;\n"
                           "    println(a[i], rand());\n    return 0;\n}\n"));
     // The two groups, in order and separated by one blank line (item 8).
-    TEST_ASSERT_EQ_STR(found("declare i32 @rand(...)\n\ndeclare void @llvm.memset"),
-                       "declare i32 @rand(...)\n\ndeclare void @llvm.memset");
+    TEST_ASSERT_EQ_STR(found("declare i32 @rand() nobuiltin\n\ndeclare void @llvm.memset"),
+                       "declare i32 @rand() nobuiltin\n\ndeclare void @llvm.memset");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -289,11 +303,11 @@ TEST(each_declaration_group_is_separated_by_a_blank_line, {
 
 int main(int argc, char** argv) {
     TEST_INIT("gen_decl", argc, argv);
-    TEST_RUN(an_extern_is_declared_and_called_through_a_variadic_type);
-    TEST_RUN(darwin_fixed_and_variable_tail_externs_use_their_target_forms);
-    TEST_RUN(an_explicit_tail_keeps_fixed_extern_llvm_bytes);
+    TEST_RUN(a_fixed_extern_is_declared_and_called_through_a_fixed_type);
+    TEST_RUN(darwin_fixed_and_variable_tail_externs_use_the_linux_forms);
+    TEST_RUN(an_explicit_tail_changes_the_llvm_type_of_an_extern);
     TEST_RUN(an_explicit_tail_emits_its_integer_and_pointer_arguments);
-    TEST_RUN(an_extern_with_no_parameter_is_still_variadic);
+    TEST_RUN(an_extern_with_no_parameter_has_a_fixed_empty_type);
     TEST_RUN(an_extern_narrow_signature_carries_the_c_attributes);
     TEST_RUN(a_wide_extern_signature_carries_no_extension_attribute);
     TEST_RUN(no_entry_point_of_section_5_1_is_ever_declared);

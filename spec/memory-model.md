@@ -21,8 +21,8 @@ the end of the enclosing statement (D6.3). The heap is reached only through `new
 only through `del` (D10.1); `new` yields an `own` reference and `del` takes one, so the type of
 a value says whether freeing it is its holder's job (D17.1, section 2.3). String literals and
 module-level constants are placed in read-only memory and are addressable (D3.7, D7.10). Frames
-larger than one page are probed on entry. Linux uses `"probe-stack"="inline-asm"`.
-Mac uses `"probe-stack"="__chkstk_darwin"` (D10.8). A large local array with deep recursion
+larger than one page are probed on entry. Both targets use `"probe-stack"="inline-asm"`
+(D10.8). A large local array with deep recursion
 then faults on the guard page instead of skipping over it:
 
 ```fort
@@ -658,7 +658,7 @@ cast to `u8 mut@` is undefined when the bytes are read-only (D10.7).
 ```fort
 string lit = "path";                 // bytes: p a t h NUL; lit.len == 4
 string sub = lit[0..2];              // "pa", no NUL after 'a'
-extern fn open(char* path, i32 flags) i32;
+extern fn open(char* path, i32 flags, ...) i32;
 i32 fd = open(lit.ptr, 0);           // fine: a literal is NUL-terminated
 i32 fd2 = open(sub.ptr, 0);          // opens "path": C reads past sub.len to the NUL
 ```

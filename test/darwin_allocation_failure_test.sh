@@ -65,7 +65,7 @@ for source in "${fixtures[@]}"; do
         "$compiler" -S --target "$target" --std-dir "$std" \
             -o "$work/$name.ll" "$source"
     fi
-    "$cc" --target="$target" -isysroot "$sdk" -O1 -fPIE -Wl,-pie \
+    "$cc" --target="$target" -isysroot "$sdk" -O1 -fPIE \
         -Wno-override-module -o "$work/$name" "$work/$name.ll"
     status=0
     bash -c '"$1" > "$2" 2> "$3"' bash "$work/$name" \
@@ -139,7 +139,7 @@ if [ "$foreign_count" -ne "$protected_count" ]; then
     exit 1
 fi
 foreign_total=$((foreign_total + foreign_count))
-"$cc" --target="$target" -isysroot "$sdk" -O1 -fPIE -Wl,-pie \
+"$cc" --target="$target" -isysroot "$sdk" -O1 -fPIE \
     -Wno-override-module -o "$work/$name" "$work/$name.ll"
 "$work/$name" > "$work/$name.out" 2> "$work/$name.err"
 sed -n 's@^//| @@p' "$source" > "$work/$name.expected"

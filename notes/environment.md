@@ -419,7 +419,8 @@ without a rewrite.
   directories are `build/<preset>` inside the worktree. `-Wall -Wextra -Wpedantic -Werror
   -Wshadow -Wvla -Wstrict-prototypes -Wmissing-prototypes -Wundef` apply to every C target.
 - Targets: `fort_core` (static library, `src/bootstrap/*.c` except `main.c`, globbed), `fort`
-  (`build/<preset>/fort`), `fort_std` (a copy of `std/*.ft` in `build/<preset>/std`, which is
+  (`build/<preset>/fort`), `fort_std` (a copy of `std/*.ft` and
+  `std/<target>/*.ft` in `build/<preset>/std`, which is
   what the compiler reads as `--std-dir`; `FORT_TARGET_CC`, a clang (default `clang`) with
   `--target=${FORT_TARGET_TRIPLE}` (default `x86_64-linux-gnu`), is what the driver runs over the
   emitted module), `lang_ffi_helpers` (`test/lang/ffi/*.c` built natively so `-Werror` and
@@ -442,8 +443,9 @@ without a rewrite.
   `target` preset. They differ only by `FORT_TARGET` and their build directory (T-152).
 - **The `darwin` build copies target library modules** (T-145, T-152).
   `tools/target darwin workflow` runs the `darwin` CMake workflow on a darwin arm64 host.
-  `fort_std` copies `std/darwin/libc.ft` and `std/darwin/net.ft` to the standard root.
-  The root holds 12 fort files under `build/darwin/std`.
+  `fort_std` copies `std/*.ft` and `std/darwin/*.ft` to the standard root: the target's
+  `libc.ft`, `net.ft` and `os.ft` stand only in `std/linux/` and `std/darwin/`.
+  The root holds 14 fort files under `build/darwin/std`.
   `build/darwin/stage2/fort` loads that root when a program imports `std.net`.
 - A CMake variable derived from a cache variable must not be cached itself: `find_program`
   caches by default, so `FORT_TARGET_CC_PATH` kept resolving to the old program after
@@ -452,9 +454,7 @@ without a rewrite.
   or `find_file` whose `NAMES` come from a cache variable, or delete `build/<preset>` after such
   a change.
 - Put generated source that a CTest reads under an `ALL` target. `tools/vm workflow` builds
-  default targets before CTest starts (T-141). Ninja does not track a changed `sw_vers` result
-  through file dependencies. Run the Mac platform generator on each default build. Keep each
-  output file's time when its text stays equal. This stops rebuilds of targets that read it.
+  default targets before CTest starts (T-141).
 - The `gcc` preset is the project's only cross-compiler check and it is **not** part of the gate,
   whose three presets are all clang, so nothing runs it unless someone does: run
   `tools/vm workflow gcc` by hand whenever compiler or test-helper code changes. It went unbuilt
@@ -565,7 +565,7 @@ without a rewrite.
 
   ```sh
   test -f build/darwin-gate.log && test -d build/darwin && test -d build/darwin/std &&
-    test -d build/darwin/darwin-platform && test -d build/darwin/fixpoint &&
+    test -d build/darwin/fixpoint &&
     bash -o pipefail -c 'find build/darwin -newer build/darwin-gate.log | wc -l'
   ```
 

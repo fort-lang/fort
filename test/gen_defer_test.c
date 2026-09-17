@@ -215,8 +215,8 @@ TEST(a_deferred_store_through_a_parameter_cannot_reach_the_result, {
     // callee's temporary happens after it and overwrites what it wrote, which
     // is what keeps the returned value the one `return` evaluated.
     // D7.8
-    TEST_ASSERT_EQ_STR(found("call void @\"main.copy_of\"(ptr %s.0, ptr %s.0)"),
-                       "call void @\"main.copy_of\"(ptr %s.0, ptr %s.0)");
+    const char* call = "call void @\"main.copy_of\"(ptr sret(%struct.main.pair) %s.0, ptr %s.0)";
+    TEST_ASSERT_EQ_STR(found(call), call);
     const char* want = "  store i32 9, ptr %t2, align 4\n"
                        "  call void @llvm.memcpy.p0.p0.i64(ptr align 4 %ret.sret, "
                        "ptr align 4 %tmp0, i64 8, i1 false)\n"

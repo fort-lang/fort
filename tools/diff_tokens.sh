@@ -38,7 +38,7 @@ done
 # comparison, and a floor only notices the walk losing all of them. A ticket
 # that adds or removes a .ft file changes all four lines in the same commit:
 # diff_tokens.sh, diff_ast.sh, diff_check.sh and diff_ir.sh.
-FT_FILES=971
+FT_FILES=973
 
 # The source compiler reads `$cfg`; the frozen C bootstrap reports `$`.
 CFG_FILES=3

@@ -145,7 +145,8 @@ TEST(the_entry_point_is_never_declared, {
     TEST_ASSERT_EQ_SIZE(occurrences("call zeroext i1 @\"std.rt.str_eq\"("), (size_t)2);
     TEST_ASSERT_EQ_STR(absent("declare zeroext i1 @\"std.rt.str_eq\""), "absent");
     TEST_ASSERT_EQ_STR(absent("declare void @\"std.rt."), "absent");
-    TEST_ASSERT_EQ_STR(found("declare i32 @puts(ptr, ...)"), "declare i32 @puts(ptr, ...)");
+    TEST_ASSERT_EQ_STR(found("declare i32 @puts(ptr) nobuiltin"),
+                       "declare i32 @puts(ptr) nobuiltin");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -216,8 +217,8 @@ TEST(a_string_is_passed_and_returned_through_a_hidden_pointer, {
                        "define dso_local void @\"main.pick\"(ptr sret(%fort.span) "
                        "%ret.sret, ptr %a.in) #0");
     // The result place comes first and the argument copy second (item 7).
-    TEST_ASSERT_EQ_STR(found("call void @\"main.pick\"(ptr %tmp0, ptr %tmp1)"),
-                       "call void @\"main.pick\"(ptr %tmp0, ptr %tmp1)");
+    TEST_ASSERT_EQ_STR(found("call void @\"main.pick\"(ptr sret(%fort.span) %tmp0, ptr %tmp1)"),
+                       "call void @\"main.pick\"(ptr sret(%fort.span) %tmp0, ptr %tmp1)");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 

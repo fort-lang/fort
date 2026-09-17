@@ -235,11 +235,11 @@ extern fn free(void* own p) void;
 `extern fn` declares a C function with the selected target C ABI (D9.8; `grammar.md` section 3). It
 is top-level only, has no body, and its symbol is the declared name. Parameter names are required
 by the grammar and otherwise unused. An `extern` function is called like any function and may be
-`noreturn` (D8.5), but its name is not a value. Linux keeps the variadic LLVM call form for fixed
-externs. Mac fixed externs use a fixed LLVM call form. A C extern with `...` uses a variadic form
-on both targets (D9.8). An indirect call cannot take that form from an unnamed callee (D3.10).
+`noreturn` (D8.5), but its name is not a value. A fixed extern uses a fixed LLVM call form, and a C
+extern with `...` uses a variadic form, on both targets (D9.8). An indirect call cannot take that
+form from an unnamed callee (D3.10).
 A fort function can wrap a direct C call and act as a function pointer.
-Both targets mark extern call sites `nobuiltin`. Mac also marks extern declarations `nobuiltin`.
+Both targets mark extern call sites and extern declarations `nobuiltin`.
 The declaration mark keeps a failed allocation observable when the caller reads no storage.
 
 A fixed `fn (P) R` in an extern signature is allowed when its own signature is extern-legal,
@@ -376,10 +376,10 @@ An owning pointer lvalue lends in a variable tail. An owning rvalue would leak a
 The compiler checks these types. It does not check a C format string's expected argument types.
 Section 13 gives the invalid-tail and owning-rvalue diagnostics.
 
-Linux fixed extern declarations keep the old variadic LLVM call form for compatibility.
-System V passes fixed and variable C arguments through the same registers or stack slots.
+A fixed extern declaration uses a fixed LLVM call form on both targets.
+A variadic call on Linux sets the System V vector-register count in `al`.
 Apple arm64 puts variable C arguments on the stack after the fixed prefix.
-A Mac declaration of a variadic C function must use `...`; a fixed LLVM call form is incorrect.
+A declaration of a variadic C function must use `...` on both targets; a fixed form is incorrect.
 `toolchain.md` 6 item 8 specifies both LLVM forms.
 
 ### 8.5 Fort functions as C callbacks

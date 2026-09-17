@@ -490,11 +490,12 @@ TEST(a_call_to_a_noreturn_extern_still_traps, {
                           "fn main() i32 { println(\"bye\"); exit(0); }\n"));
     // The declaration carries no noreturn, so the optimizer cannot delete the
     // trap; an extern that returns anyway must still hit it (item 20).
-    TEST_ASSERT_EQ_STR(found("declare void @exit(i32, ...)\n"), "declare void @exit(i32, ...)\n");
+    TEST_ASSERT_EQ_STR(found("declare void @exit(i32) nobuiltin\n"),
+                       "declare void @exit(i32) nobuiltin\n");
     TEST_ASSERT_EQ_STR(absent("noreturn void @exit"), "absent");
-    TEST_ASSERT_EQ_STR(found("  call void (i32, ...) @exit(i32 0) #3\n"
+    TEST_ASSERT_EQ_STR(found("  call void @exit(i32 0) #3\n"
                              "  call void @llvm.trap()\n  unreachable\n"),
-                       "  call void (i32, ...) @exit(i32 0) #3\n"
+                       "  call void @exit(i32 0) #3\n"
                        "  call void @llvm.trap()\n  unreachable\n");
 })
 

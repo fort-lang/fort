@@ -40,11 +40,11 @@ import json;
 import lexer;
 import modules;
 import parser;
-import platform;
 import prim;
 import session;
 import std.io;
 import std.libc;
+import std.os;
 import std.str;
 import std.strbuf;
 import std.sys;
@@ -77,19 +77,11 @@ i32 PARSE_DONE = 1;
 i32 PARSE_ERROR = 2;
 
 /// The system's text for the failing call, which is what a `cannot read` line
-/// carries as its reason (toolchain.md 1), and the reader of the symbolic link
-/// that names the running binary, which is where the standard library is looked
-/// for. Both are the C library's; the standard library has no binding for either
-/// and this is their one caller.
+/// carries as its reason (toolchain.md 1). It is the C library's; the standard
+/// library has no binding for it and this is its one caller.
 /// D9.8, D14.1
 extern fn strerror(i32 code) char*;
-extern fn readlink(char* path, char* buf, u64 size) i64;
 
-/// Mac gives the binary path through this dyld function. realpath resolves it
-/// when the file still exists at that path.
-/// D9.8, D14.1
-extern fn _NSGetExecutablePath(char mut* buf, u32 mut* size) i32;
-extern fn realpath(char* path, char* resolved) char* own;
 
 /// The temporary directory of toolchain.md 2 and the removal of what the driver
 /// put in it; the standard library has no binding for any of them and this is
@@ -158,8 +150,8 @@ struct options {
 
 fn options_create() options {
     options mut opts = options{};
-    opts.cc = platform.DEFAULT_CC;
-    opts.target = platform.BUILT_TARGET;
+    opts.cc = DEFAULT_CC;
+    opts.target = os.TARGET;
     return opts;
 }
 
@@ -187,9 +179,9 @@ fn help() void {
     println("  --no-bounds-check  remove the index and span checks; unsafe");
     println("  -l<lib>            pass -l<lib> to the linker; repeatable, in order");
     println("  --cc <path>        the clang that compiles and links the IR (default ",
-            platform.DEFAULT_CC, ")");
+            DEFAULT_CC, ")");
     println("  --target <triple>  pass --target=<triple> to --cc (default ",
-            platform.BUILT_TARGET, ")");
+            os.TARGET, ")");
     println("  --cfg <list>       set key=value pairs; repeatable");
     println("  -Xcc <arg>         pass <arg> to --cc verbatim; repeatable, in order");
     println("  --check            run the front end only and stop; emit nothing");
@@ -507,6 +499,10 @@ fn configure(session.session mut* s, options* opts) void {
     }
 }
 
+/// The default --cc on both targets: the clang that PATH finds.
+/// D14.1, D14.3
+string DEFAULT_CC = "clang";
+
 /// Rejects a target that this IR mode cannot use before it creates output.
 /// The front-end modes do not call this function.
 /// D14.1
@@ -515,7 +511,7 @@ fn target_allowed(options* opts) bool {
         usage_error_arg("unsupported target", opts->target);
         return false;
     }
-    if (opts->target == platform.BUILT_TARGET) {
+    if (opts->target == os.TARGET) {
         return true;
     }
     if (opts->emit_ir) {
@@ -525,11 +521,11 @@ fn target_allowed(options* opts) bool {
         usage_error("--std-dir is required for cross-target -S");
     } else if (opts->compile_only) {
         eprintln("fort: error: cannot compile object for target '", opts->target,
-                 "' with a '", platform.BUILT_TARGET, "' compiler");
+                 "' with a '", os.TARGET, "' compiler");
         eprintln(USAGE);
     } else {
         eprintln("fort: error: cannot link target '", opts->target,
-                 "' with a '", platform.BUILT_TARGET, "' compiler");
+                 "' with a '", os.TARGET, "' compiler");
         eprintln(USAGE);
     }
     return false;
@@ -602,12 +598,6 @@ fn ast_entry(options* opts) i32 {
 
 // ---- the standard library directory (toolchain.md 1) ------------------------------
 
-/// The symbolic link naming the running binary, and the buffer sizes the
-/// driver reads it with.
-string PROC_SELF_EXE = "/proc/self/exe";
-u64 EXE_PATH_FIRST_CAP = 256;
-u64 EXE_PATH_MAX_CAP = 65536;
-
 /// The standard library sits in `std` beside the binary when --std-dir and
 /// $FORT_STD_DIR name nothing.
 /// D14.1
@@ -618,45 +608,13 @@ string STD_DIR_NAME = "std";
 /// realpath when possible. *out stays unchanged on failure. The path is
 /// interned in `p`.
 fn exe_path(containers.pool mut* p, string mut* out) bool {
-    if (platform.IS_MAC) {
-        u32 mut cap = cast(EXE_PATH_FIRST_CAP, u32);
-        while (cast(cap, u64) <= EXE_PATH_MAX_CAP) {
-            u32 allocated = cap;
-            char mut@ own buf = new(char, cast(cap, u64));
-            defer del(buf);
-            if (_NSGetExecutablePath(buf.ptr, &cap) == 0) {
-                char* own canonical = realpath(buf.ptr, null);
-                if (canonical != null) {
-                    *out = containers.pool_intern(p, str.from_cstr(canonical));
-                    libc.free(cast(move(canonical), void* own));
-                    return true;
-                }
-                *out = containers.pool_intern(p, str.from_cstr(buf.ptr));
-                return true;
-            }
-            if (cap <= allocated || cast(cap, u64) > EXE_PATH_MAX_CAP) {
-                return false;
-            }
-        }
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    if (!os.exe_path(&b)) {
         return false;
     }
-    char mut@ own c_path = str.to_cstr(PROC_SELF_EXE);
-    defer del(c_path);
-    u64 mut cap = EXE_PATH_FIRST_CAP;
-    while (cap <= EXE_PATH_MAX_CAP) {
-        char mut@ own buf = new(char, cap);
-        defer del(buf);
-        i64 len = readlink(c_path.ptr, buf.ptr, cap);
-        if (len < 0) {
-            return false;
-        }
-        if (cast(len, u64) < cap) {
-            *out = containers.pool_intern(p, cast(buf[0..cast(len, u64)], string));
-            return true;
-        }
-        cap = cap * 2;
-    }
-    return false;
+    *out = containers.pool_intern(p, strbuf.view(&b));
+    return true;
 }
 
 /// `std` in the directory containing `program`, or `std` alone when `program`
@@ -828,15 +786,6 @@ fn cc_argv(containers.pool mut* p, options* opts, string ir_path, string out_pat
         containers.str_push(argv, "-O1");
     }
     containers.str_push(argv, "-fPIE");
-    if (!opts->compile_only) {
-        // The executable is position-independent; -c stops at the object, so
-        // it takes no -pie and no -l (toolchain.md 2).
-        if (platform.IS_MAC) {
-            containers.str_push(argv, "-Wl,-pie");
-        } else {
-            containers.str_push(argv, "-pie");
-        }
-    }
     // The module carries its own target triple, which clang would warn about
     // (toolchain.md 2).
     containers.str_push(argv, "-Wno-override-module");
@@ -975,7 +924,7 @@ fn run_cc(options* opts, string ir_path, string out_path) i32 {
         error_path("cannot run", opts->cc, str.from_cstr(strerror(sys.errno())));
         return EXIT_USAGE;
     }
-    if (platform.fcntl_setfd(fds[1], F_SETFD, FD_CLOEXEC) != 0) {
+    if (libc.fcntl(fds[1], F_SETFD, FD_CLOEXEC) != 0) {
         // The write end has to close at execvp: that is what tells the parent
         // the exec succeeded. A write end left open in --cc and in every
         // process it starts would keep the read below blocked until the last

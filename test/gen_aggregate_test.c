@@ -282,8 +282,8 @@ TEST(an_aggregate_result_is_written_straight_into_its_destination, {
     TEST_ASSERT_TRUE(emit("struct point { i32 x; i32 y; }\n"
                           "fn make() point { point p = {1, 2}; return p; }\n"
                           "fn main() i32 { point q = make(); return q.x; }\n"));
-    TEST_ASSERT_EQ_STR(found("call void @\"main.make\"(ptr %q.0)"),
-                       "call void @\"main.make\"(ptr %q.0)");
+    TEST_ASSERT_EQ_STR(found("call void @\"main.make\"(ptr sret(%struct.main.point) %q.0)"),
+                       "call void @\"main.make\"(ptr sret(%struct.main.point) %q.0)");
     TEST_ASSERT_EQ_STR(absent("%tmp"), "absent");
 })
 
@@ -293,8 +293,8 @@ TEST(an_aggregate_result_read_for_one_field_gets_a_temporary, {
                           "fn main() i32 { return make().y; }\n"));
     TEST_ASSERT_EQ_STR(found("%tmp0 = alloca %struct.main.point, align 4"),
                        "%tmp0 = alloca %struct.main.point, align 4");
-    TEST_ASSERT_EQ_STR(found("call void @\"main.make\"(ptr %tmp0)"),
-                       "call void @\"main.make\"(ptr %tmp0)");
+    TEST_ASSERT_EQ_STR(found("call void @\"main.make\"(ptr sret(%struct.main.point) %tmp0)"),
+                       "call void @\"main.make\"(ptr sret(%struct.main.point) %tmp0)");
 })
 
 TEST(returning_an_aggregate_copies_it_through_the_sret_pointer, {
@@ -331,8 +331,8 @@ TEST(a_discarded_aggregate_call_gets_a_place_nothing_reads, {
                           "fn main() i32 { make(); return 0; }\n"));
     TEST_ASSERT_EQ_STR(found("%tmp0 = alloca %struct.main.point, align 4"),
                        "%tmp0 = alloca %struct.main.point, align 4");
-    TEST_ASSERT_EQ_STR(found("call void @\"main.make\"(ptr %tmp0)"),
-                       "call void @\"main.make\"(ptr %tmp0)");
+    TEST_ASSERT_EQ_STR(found("call void @\"main.make\"(ptr sret(%struct.main.point) %tmp0)"),
+                       "call void @\"main.make\"(ptr sret(%struct.main.point) %tmp0)");
 })
 
 TEST(an_aggregate_never_becomes_an_ssa_value, {
@@ -566,13 +566,13 @@ TEST(a_struct_wider_than_two_words_is_returned_and_copied_whole, {
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %b.0, "
         "i64 32, i1 false)\n");
     TEST_ASSERT_EQ_STR(
-        found("  call void @\"main.make\"(ptr %x.0)\n"
+        found("  call void @\"main.make\"(ptr sret(%struct.main.big) %x.0)\n"
               "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %y.1, ptr align 8 %x.0, i64 32, "
               "i1 false)\n"
               "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %y.1, i64 32, "
               "i1 false)\n"
               "  %t0 = call i64 @\"main.last\"(ptr %tmp0)\n"),
-        "  call void @\"main.make\"(ptr %x.0)\n"
+        "  call void @\"main.make\"(ptr sret(%struct.main.big) %x.0)\n"
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %y.1, ptr align 8 %x.0, i64 32, "
         "i1 false)\n"
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %y.1, i64 32, "

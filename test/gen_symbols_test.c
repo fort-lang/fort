@@ -199,7 +199,8 @@ TEST(a_c_name_is_never_quoted, {
                           "    println(strlen(s.ptr));\n    return 0;\n}\n"));
     // An `extern` name is unmangled, and an identifier needs no quotes.
     // D9.7
-    TEST_ASSERT_EQ_STR(found("declare i64 @strlen(ptr, ...)\n"), "declare i64 @strlen(ptr, ...)\n");
+    TEST_ASSERT_EQ_STR(found("declare i64 @strlen(ptr) nobuiltin\n"),
+                       "declare i64 @strlen(ptr) nobuiltin\n");
     TEST_ASSERT_EQ_STR(absent("@\"strlen\""), "absent");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })

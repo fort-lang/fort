@@ -31,6 +31,7 @@ SOURCE_GLOBS = (
     "src/lsp/*.ft",
     "std/*.ft",
     "std/darwin/*.ft",
+    "std/linux/*.ft",
 )
 TEST_GLOBS = ("test/*.c", "test/*.h", "test/**/*.ft", "test/lang/ffi/*.c", "test/darwin/*.c")
 TARGET_RATIO = 2.0

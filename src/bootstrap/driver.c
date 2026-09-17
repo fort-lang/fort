@@ -152,17 +152,13 @@ void driver_options_free(driver_options_t* opts) {
     ptrvec_free(&opts->cc_args);
 }
 
-static bool target_is_mac(const char* target) {
-    return strncmp(target, MAC_TARGET_PREFIX, sizeof MAC_TARGET_PREFIX - 1U) == 0;
-}
-
 // Whether the target has one of the two forms in toolchain.md 1.
 // D14.1
 static bool target_form(const char* target) {
     if (strcmp(target, "x86_64-linux-gnu") == 0) {
         return true;
     }
-    if (!target_is_mac(target)) {
+    if (strncmp(target, MAC_TARGET_PREFIX, sizeof MAC_TARGET_PREFIX - 1U) != 0) {
         return false;
     }
     uint64_t digits = 0;
@@ -590,11 +586,6 @@ void driver_cc_argv(const driver_options_t* opts,
     // D14.3: -O2 under --release; the compiler optimizes nothing
     push_arg(argv, opts->release ? "-O2" : "-O1");
     push_arg(argv, "-fPIE");
-    if (!opts->compile_only) {
-        // The executable is position-independent; -c stops at the object, so
-        // it takes no -pie and no -l (toolchain.md 2).
-        push_arg(argv, target_is_mac(FORT_DEFAULT_TARGET) ? "-Wl,-pie" : "-pie");
-    }
     // The module carries its own target triple, which clang would warn about
     // (toolchain.md 2).
     push_arg(argv, "-Wno-override-module");

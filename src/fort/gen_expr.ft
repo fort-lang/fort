@@ -171,9 +171,10 @@ fn gen_print_arg(gen.emitter mut* g, ast.node* n, gen.gen_val fd) void {
     if (types.type_is_float(t)) {
         // A float goes to the printer of its own type and is never widened first: the
         // digits printed depend on the type (item 19). The two entry points stand in
-        // std.rt, which every closure holds, so the module that holds this call holds
-        // their definitions too and needs no declaration (item 8).
-        // D18.1, D9.10
+        // std.rt_float, which the loader takes into the closure of a program that holds a
+        // float (modules.ft), so the module that holds this call holds their definitions
+        // too and needs no declaration (item 8).
+        // D18.1
         gen.gen_args_add(&args, v);
         if (t->prim == prim.prim_kind.prim_f32) {
             gen.gen_call_rt(g, runtime_sig.rt_entry.rt_print_f32, &args);
@@ -642,9 +643,7 @@ fn gen_call(gen.emitter mut* g, ast.node* n, gen.gen_place* dst) gen.gen_val {
     }
     bool is_extern = direct && s->kind == ast.sym_kind.s_extern_fn;
     // Linux fixed externs keep their old variadic IR form.
-    // D9.8, D19.2
-    bool variadic = is_extern && (!gen.gen_is_mac(g)
-                                  || (s->node->flags & ast.FLAG_VARIADIC) != 0);
+    bool variadic = is_extern && (s->node->flags & ast.FLAG_VARIADIC) != 0;
     if (is_extern) {
         gen.gen_use_extern(g, s);
     }
@@ -670,16 +669,12 @@ fn gen_call(gen.emitter mut* g, ast.node* n, gen.gen_place* dst) gen.gen_val {
     if (dst != null) {
         // An aggregate result arrives through the leading `sret` pointer
         // (item 7).
-        if (gen.gen_is_mac(g)) {
-            strbuf.str_buf mut attr = strbuf.create();
-            defer strbuf.free(&attr);
-            strbuf.append(&attr, "sret(");
-            strbuf.append(&attr, gen.gen_mem_type(g, sig->elem));
-            strbuf.push(&attr, ')');
-            gen.gen_args_add_ext(&args, dst->addr, strbuf.view(&attr));
-        } else {
-            gen.gen_args_add(&args, dst->addr);
-        }
+        strbuf.str_buf mut attr = strbuf.create();
+        defer strbuf.free(&attr);
+        strbuf.append(&attr, "sret(");
+        strbuf.append(&attr, gen.gen_mem_type(g, sig->elem));
+        strbuf.push(&attr, ')');
+        gen.gen_args_add_ext(&args, dst->addr, strbuf.view(&attr));
     }
     u64 mut i = 0;
     while (i < ast.ast_len(n)) {

@@ -64,7 +64,7 @@ TEST(the_program_of_section_6_1_is_emitted_as_that_section_shows, {
         "entry:\n"
         "  %args = alloca %fort.span, align 8\n"
         "  call void @\"std.rt.args_init\"(i32 %argc, ptr %argv)\n"
-        "  call void @\"std.rt.args\"(ptr %args)\n"
+        "  call void @\"std.rt.args\"(ptr sret(%fort.span) %args)\n"
         "  %t0 = call i32 @fort_entry(ptr %args)\n"
         "  call void @\"std.rt.flush_all\"()\n"
         "  %t1 = and i32 %t0, 255\n"
@@ -120,7 +120,7 @@ TEST(the_program_of_section_6_2_is_emitted_as_that_section_shows, {
         "entry:\n"
         "  %args = alloca %fort.span, align 8\n"
         "  call void @\"std.rt.args_init\"(i32 %argc, ptr %argv)\n"
-        "  call void @\"std.rt.args\"(ptr %args)\n"
+        "  call void @\"std.rt.args\"(ptr sret(%fort.span) %args)\n"
         "  %t0 = call i32 @fort_entry(ptr %args)\n"
         "  call void @\"std.rt.flush_all\"()\n"
         "  %t1 = and i32 %t0, 255\n"
@@ -178,7 +178,7 @@ TEST(the_checked_fragment_of_item_15_is_emitted_as_the_section_shows, {
         "entry:\n"
         "  %args = alloca %fort.span, align 8\n"
         "  call void @\"std.rt.args_init\"(i32 %argc, ptr %argv)\n"
-        "  call void @\"std.rt.args\"(ptr %args)\n"
+        "  call void @\"std.rt.args\"(ptr sret(%fort.span) %args)\n"
         "  %t0 = call i32 @fort_entry(ptr %args)\n"
         "  call void @\"std.rt.flush_all\"()\n"
         "  %t1 = and i32 %t0, 255\n"
@@ -226,7 +226,7 @@ TEST(the_release_counterpart_of_that_fragment_is_a_plain_add, {
                        "entry:\n"
                        "  %args = alloca %fort.span, align 8\n"
                        "  call void @\"std.rt.args_init\"(i32 %argc, ptr %argv)\n"
-                       "  call void @\"std.rt.args\"(ptr %args)\n"
+                       "  call void @\"std.rt.args\"(ptr sret(%fort.span) %args)\n"
                        "  %t0 = call i32 @fort_entry(ptr %args)\n"
                        "  call void @\"std.rt.flush_all\"()\n"
                        "  %t1 = and i32 %t0, 255\n"
@@ -641,9 +641,9 @@ TEST(a_c_function_two_modules_declare_is_declared_once, {
     // A symbol is declared exactly once (item 8): the two `extern fn puts`
     // are two symbols and one ELF symbol, and a second declaration is a
     // redefinition the verifier rejects.
-    TEST_ASSERT_EQ_STR(found("declare i32 @puts(ptr, ...)\n"), "declare i32 @puts(ptr, ...)\n");
-    TEST_ASSERT_NULL(
-        strstr(strstr(ir(), "declare i32 @puts(ptr, ...)") + 1, "declare i32 @puts(ptr, ...)"));
+    const char* decl = "declare i32 @puts(ptr) nobuiltin\n";
+    TEST_ASSERT_EQ_STR(found(decl), decl);
+    TEST_ASSERT_NULL(strstr(strstr(ir(), decl) + 1, decl));
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -726,15 +726,17 @@ TEST(an_entry_point_that_returns_carries_the_ordinary_group, {
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
-TEST(darwin_main_and_runtime_definitions_use_the_darwin_aggregate_abi, {
+TEST(darwin_main_and_runtime_definitions_use_the_linux_form, {
+    // `main` and the runtime entry points emit the Linux text on Darwin too.
     TEST_ASSERT_TRUE(
         emit_with_runtime_target(RUNTIME_SOURCE, HELLO_SOURCE, "arm64-apple-macosx26.6.2"));
     TEST_ASSERT_EQ_STR(found("call void @\"std.rt.args\"(ptr sret(%fort.span) %args)"),
                        "call void @\"std.rt.args\"(ptr sret(%fort.span) %args)");
     TEST_ASSERT_EQ_STR(found("attributes #8 = { cold noreturn nounwind \"frame-pointer\"=\"all\" "
-                             "\"probe-stack\"=\"__chkstk_darwin\" }"),
+                             "\"probe-stack\"=\"inline-asm\" }"),
                        "attributes #8 = { cold noreturn nounwind \"frame-pointer\"=\"all\" "
-                       "\"probe-stack\"=\"__chkstk_darwin\" }");
+                       "\"probe-stack\"=\"inline-asm\" }");
+    TEST_ASSERT_EQ_STR(absent("__chkstk_darwin"), "absent");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -835,7 +837,7 @@ int main(int argc, char** argv) {
     TEST_RUN(two_declarations_of_one_c_name_never_reach_the_emitter_disagreeing);
     TEST_RUN(a_noreturn_entry_point_of_section_5_1_carries_the_attribute_group_8);
     TEST_RUN(an_entry_point_that_returns_carries_the_ordinary_group);
-    TEST_RUN(darwin_main_and_runtime_definitions_use_the_darwin_aggregate_abi);
+    TEST_RUN(darwin_main_and_runtime_definitions_use_the_linux_form);
     TEST_RUN(a_noreturn_function_outside_the_runtime_keeps_the_group_of_item_20);
     TEST_RUN(the_enum_member_of_std_rt_is_the_named_type_every_module_carries);
     TEST_RUN(the_runtime_stands_before_the_program_in_the_module);

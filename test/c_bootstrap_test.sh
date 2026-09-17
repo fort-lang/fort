@@ -22,16 +22,9 @@ linux)
     expected_cc=clang
     ;;
 darwin)
-    version=$(sw_vers -productVersion)
-    if [[ "$version" =~ ^[0-9]+\.[0-9]+$ ]]; then
-        version=$version.0
-    elif [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        echo "c bootstrap: unsupported darwin host version '$version'" >&2
-        exit 2
-    fi
-    expected_triple=arm64-apple-macosx$version
+    expected_triple=arm64-apple-macosx11.0.0
     expected_format='Mach-O 64-bit executable arm64'
-    expected_cc=/usr/bin/clang
+    expected_cc=clang
     ;;
 *)
     echo "c bootstrap: target must be linux or darwin" >&2
@@ -79,19 +72,15 @@ if [ "$target_name" = darwin ]; then
     # fort wrapper around Darwin's accessor.
     printf '\nfn __errno_location() i32 mut* {\n    return __error();\n}\n' \
         >>"$build/target/std/libc.ft"
-    bash "$root/tools/gen_darwin_platform.sh" "$build/target/entry" \
-        "${expected_triple#arm64-apple-macosx}" "$build/source/src/fort/main.ft"
-else
-    cp "$build/source/src/fort/main.ft" "$build/target/entry/main.ft"
-    cp "$build/source/src/fort/platform.ft" "$build/target/entry/platform.ft"
 fi
+cp "$build/source/src/fort/main.ft" "$build/target/entry/main.ft"
 
 # Count unsupported tokens in the compiler source and its standard closure.
 # The remaining standard modules are outside this build's import closure.
 tokens=$build/unsupported.tokens
 : >"$tokens"
 for source in "$build/source/src/fort"/*.ft \
-    "$build/target/std"/{io,libc,mem,rt,str,strbuf,strmap,sys}.ft; do
+    "$build/target/std"/{io,libc,mem,os,rt,str,strbuf,strmap,sys}.ft; do
     "$compiler" --tokens "$source" >>"$tokens"
 done
 unsupported=$(rg -n \

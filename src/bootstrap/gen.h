@@ -229,10 +229,6 @@ struct gen {
 
 void gen_init(gen_t* g, gen_options_t opts);
 
-/// Whether the selected target uses the Apple arm64 ABI. The driver validates
-/// the full target form before the emitter starts.
-bool gen_is_mac(const gen_t* g);
-
 /// Releases every buffer and every record; the emitter is empty afterwards.
 void gen_free(gen_t* g);
 

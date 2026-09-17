@@ -69,6 +69,7 @@ from pathlib import Path
 # a file importing one therefore carries `src` beside `src/fort`.
 SOURCE_SETS = (
     ("std/*.ft", ()),
+    ("std/linux/*.ft", ()),
     ("src/fort/*.ft", ()),
     ("src/lsp/*.ft", ("src", "src/fort")),
     ("test/fort/*.ft", ("src", "src/fort", "test/fort/support")),

@@ -41,13 +41,6 @@ string MODULE_HEADER = "target triple = \"x86_64-unknown-linux-gnu\"\n";
 /// D11.6
 string ENTRY_NAME = "fort_entry";
 
-string MAC_FN_ATTR =
-    "nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"__chkstk_darwin\"";
-string MAC_NORET_ATTR =
-    "noreturn nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"__chkstk_darwin\"";
-string MAC_RT_NORET_ATTR =
-    "cold noreturn nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"__chkstk_darwin\"";
-
 /// The text of one attribute group of toolchain.md 6, at the fixed index gen.ft's
 /// ATTR_* constants give; only the used ones are emitted. `mustprogress` is
 /// deliberately absent everywhere: it would license the optimizer to delete a
@@ -55,16 +48,10 @@ string MAC_RT_NORET_ATTR =
 /// an array of these; a chain says the same thing and keeps the order, which is
 /// the group numbering itself.
 /// D8.4, D19.5
-fn attr_text(u64 which, bool mac) string {
+fn attr_text(u64 which) string {
     if (which == gen.ATTR_FN) {
-        if (mac) {
-            return MAC_FN_ATTR;
-        }
         return "nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"";
     } else if (which == gen.ATTR_FN_NORET) {
-        if (mac) {
-            return MAC_NORET_ATTR;
-        }
         return "noreturn nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"";
     } else if (which == gen.ATTR_UNUSED_2) {
         // `#2` is never emitted: it held `cold noreturn nounwind` on the C runtime's
@@ -82,8 +69,6 @@ fn attr_text(u64 which, bool mac) string {
         return "nocallback nofree nounwind willreturn memory(argmem: write)";
     } else if (which == gen.ATTR_TRAP) {
         return "cold noreturn nounwind memory(inaccessiblemem: write)";
-    } else if (which == gen.ATTR_RT_NORET && mac) {
-        return MAC_RT_NORET_ATTR;
     }
     return "cold noreturn nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"";
 }
@@ -508,7 +493,7 @@ fn emit_extern(gen.emitter mut* g, strbuf.str_buf mut* out, ast.sym* s) void {
         }
         i += 1;
     }
-    bool variadic = !gen.gen_is_mac(g) || (s->node->flags & ast.FLAG_VARIADIC) != 0;
+    bool variadic = (s->node->flags & ast.FLAG_VARIADIC) != 0;
     if (variadic) {
         if (sig->params.len > 0) {
             strbuf.append(out, ", ");
@@ -516,9 +501,7 @@ fn emit_extern(gen.emitter mut* g, strbuf.str_buf mut* out, ast.sym* s) void {
         strbuf.append(out, "...");
     }
     strbuf.push(out, ')');
-    if (gen.gen_is_mac(g)) {
-        strbuf.append(out, " nobuiltin");
-    }
+    strbuf.append(out, " nobuiltin");
     strbuf.push(out, '\n');
 }
 
@@ -621,7 +604,7 @@ fn gen_finish(gen.emitter mut* g) void {
             strbuf.append(&attributes, "attributes #");
             strbuf.append_u64(&attributes, i);
             strbuf.append(&attributes, " = { ");
-            strbuf.append(&attributes, attr_text(i, gen.gen_is_mac(g)));
+            strbuf.append(&attributes, attr_text(i));
             strbuf.append(&attributes, " }\n");
         }
         i += 1;

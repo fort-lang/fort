@@ -92,7 +92,6 @@ ref=${ref_override:-$root/tools/bootstrap.ref}
 seed_ref=${seed_ref_override:-$root/tools/bootstrap.seed}
 pin=$root/tools/pin.sh
 verify_seed=$root/tools/verify_seed.py
-generator=$root/tools/gen_darwin_platform.sh
 
 bash "$pin" verify --ref "$ref" >/dev/null
 baseline=$(sed -n 's/^baseline \([0-9a-f]\{40\}\)$/\1/p' "$seed_ref")
@@ -101,49 +100,17 @@ if [ -z "$baseline" ] || [ "$first_pin" != "$baseline" ]; then
     die "bootstrap-0 must equal the source baseline in tools/bootstrap.seed"
 fi
 
-# Copy top-level standard modules into one flat target root. The darwin target
-# replaces libc.ft and net.ft with its target sources.
+# Write the flat target root of one standard tree.
 prepare_std() {
-    local source=$1
-    local output=$2
-    local source_file name target_source
-    rm -rf "$output"
-    mkdir -p "$output"
-    for source_file in "$source"/*.ft; do
-        name=${source_file##*/}
-        if [ "$target_name" = darwin ] && { [ "$name" = libc.ft ] || [ "$name" = net.ft ]; }; then
-            continue
-        fi
-        cp "$source_file" "$output/$name"
-    done
-    if [ "$target_name" = darwin ]; then
-        target_source=$source/darwin
-        if [ ! -d "$target_source" ] && [ -d "$source/mac" ]; then
-            # Pin 0 predates the public darwin directory name. Normalize only
-            # the extracted archive. HEAD must use std/darwin.
-            target_source=$source/mac
-        fi
-        for source_file in "$target_source"/*.ft; do
-            [ -f "$source_file" ] ||
-                die "darwin standard source is missing: $source/darwin"
-            cp "$source_file" "$output/${source_file##*/}"
-        done
-    fi
+    rm -rf "$2"
+    bash "$root/tools/assemble_std.sh" "$target_name" "$1" "$2"
 }
 
-# The entry directory selects the target platform module before src/fort.
+# The entry directory holds a copy of main.ft.
 prepare_entry() {
-    local source=$1
-    local output=$2
-    rm -rf "$output"
-    mkdir -p "$output"
-    if [ "$target_name" = linux ]; then
-        cp "$source/main.ft" "$output/main.ft"
-        cp "$source/platform.ft" "$output/platform.ft"
-    else
-        bash "$generator" "$output" "${target#arm64-apple-macosx}" \
-            "$source/main.ft"
-    fi
+    rm -rf "$2"
+    mkdir -p "$2"
+    cp "$1/main.ft" "$2/main.ft"
 }
 
 # First extract the baseline. Its standard root lets the verifier exercise the

@@ -365,7 +365,7 @@ TEST(a_function_name_is_a_value_of_its_type, {
 
 TEST(an_extern_function_is_callable_and_not_a_value, {
     // An `extern fn` in value position is an error: an extern is called
-    // through the variadic LLVM type its declaration supplies, which an
+    // through the LLVM type its declaration supplies, which an
     // indirect call site has no callee to take.
     // D3.10, D9.8
     TEST_ASSERT_TRUE(check_src("extern fn abs(i32 n) i32;\n"

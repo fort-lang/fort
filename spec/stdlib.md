@@ -144,6 +144,11 @@ import binding's name for a local even though D7.9 permits it.
 | `std.math`      | none                                        | float bit casts, abs, min, max   |
 | `std.sort`      | `libc`                                      | an array sorted in place         |
 | `std.net`       | `libc`, `str`, `sys`                        | a TCP listener and a connection  |
+| `std.os`        | `libc`, `str`, `strbuf`                     | target triple, running binary    |
+
+`std.libc`, `std.net` and `std.os` have one source for each target: `std/linux/` and
+`std/darwin/`. The other modules are the same on both targets and stand in `std/`.
+`tools/assemble_std.sh <linux|darwin> std <dir>` writes the flat standard root of one target.
 
 The import graph is acyclic (D9.5). A program imports what it uses: `import std.io;` and then
 `io.read_file(...)` (D9.3, D9.4).
@@ -201,8 +206,8 @@ It maps C types per D9.8: `int` is `i32`, `size_t` is `u64`, `ssize_t` and `off_
 `mode_t` is `u32` on Linux and `u16` on Mac. `char*` is `char*`.
 A buffer C fixes as bytes is `u8*` or `u8 mut*`. A buffer of no fixed
 type is `void*` or `void mut*` (1.4). C extern names are unmangled (D9.7). `open` is
-variadic in C. The Linux fixed prototype keeps the old variadic LLVM call form (D9.8).
-The Mac library declares `open` with `...` so Apple arm64 places its mode tail on the stack.
+variadic in C, so both targets declare `open` with `...` (D9.8). Apple arm64 then places its
+mode tail on the stack, and a Linux call sets the vector-register count.
 
 ```fort
 // open(2) flags, Linux x86-64 values.
@@ -239,7 +244,7 @@ extern fn abort() noreturn;
 extern fn qsort(void mut* base, u64 n, u64 size, fn (void*, void*) i32 cmp) void;
 
 // <fcntl.h>, <unistd.h>
-extern fn open(char* path, i32 flags, u32 mode) i32;
+extern fn open(char* path, i32 flags, ...) i32;
 extern fn read(i32 fd, u8 mut* buf, u64 n) i64;
 extern fn write(i32 fd, u8* buf, u64 n) i64;
 extern fn close(i32 fd) i32;
@@ -257,6 +262,12 @@ extern fn getsockname(i32 fd, void mut* addr, u32 mut* len) i32;
 
 // <errno.h>: errno is a macro over this accessor in glibc and musl.
 extern fn __errno_location() i32 mut*;
+
+// fcntl(2), readlink(2) and realpath(3). fcntl takes a variable tail in C, and this declaration
+// keeps it on both targets (D9.8).
+extern fn fcntl(i32 fd, i32 cmd, ...) i32;
+extern fn readlink(char* path, char* buf, u64 size) i64;
+extern fn realpath(char* path, char* resolved) char* own;
 ```
 
 Semantics are those of the C functions. Each buffer parameter says what C means by it (1.4):
@@ -1129,6 +1140,26 @@ fn serve_one(u16 port) bool {
     return n > 0 && io.write_all(session, buf[0..cast(n, u64)]);
 }
 ```
+
+### 2.14 `std.os`
+
+The per-target facts of the standard library (D13.2). Each target has its own source, and both
+sources declare the same names. `TARGET` is the target triple of the standard root. A compiler
+built with that root stores it as its built target (D14.1). `exe_path` gives the path of the
+running binary: Linux reads the symbolic link `/proc/self/exe` with `libc.readlink`. Mac calls
+dyld's `_NSGetExecutablePath` and resolves the answer with `libc.realpath` when the file still
+exists at that path. `_NSGetExecutablePath` is not a C library function, so `std/darwin/os.ft`
+declares it, and `std.libc` does not.
+
+```fort
+string TARGET = "x86_64-linux-gnu";          // std/linux/os.ft
+string TARGET = "arm64-apple-macosx11.0.0";  // std/darwin/os.ft
+
+fn exe_path(strbuf.str_buf mut* out) bool;
+```
+
+`exe_path` appends the path to `out` and returns true. It returns false and leaves `out`
+unchanged when the system cannot give the path. The caller owns `out`.
 
 ## 3. The runtime surface the library relies on
 

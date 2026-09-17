@@ -23,13 +23,6 @@
 // D19.1
 static const char MODULE_HEADER[] = "target triple = \"x86_64-unknown-linux-gnu\"\n";
 
-static const char MAC_FN_ATTR[] =
-    "nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"__chkstk_darwin\"";
-static const char MAC_NORET_ATTR[] =
-    "noreturn nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"__chkstk_darwin\"";
-static const char MAC_RT_NORET_ATTR[] = "cold noreturn nounwind \"frame-pointer\"=\"all\" "
-                                        "\"probe-stack\"=\"__chkstk_darwin\"";
-
 // The program entry point the compiler emits in the entry module: the one C
 // name a fort program's own definitions occupy.
 // D11.6
@@ -50,7 +43,7 @@ static const char* const OVERFLOW_WIDTH[GEN_OVF_WIDTHS] = {"i8", "i16", "i32", "
 // The attribute groups of toolchain.md 6, at their fixed indices; only the used
 // ones are emitted. `mustprogress` is deliberately absent everywhere: it would
 // license the optimizer to delete a `while (true) { }`, which fort keeps running.
-// D8.4, D19.5
+// D8.4, D10.8, D19.5
 static const char* const ATTR_TEXT[ATTR_COUNT] = {
     "nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"",
     "noreturn nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"",
@@ -66,24 +59,6 @@ static const char* const ATTR_TEXT[ATTR_COUNT] = {
     "cold noreturn nounwind memory(inaccessiblemem: write)",
     "cold noreturn nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"",
 };
-
-// This function selects the target stack probe for each fort function attribute group.
-// D10.8
-static const char* attr_text(gen_attr_t which, bool mac) {
-    if (!mac) {
-        return ATTR_TEXT[which];
-    }
-    if (which == ATTR_FN) {
-        return MAC_FN_ATTR;
-    }
-    if (which == ATTR_FN_NORET) {
-        return MAC_NORET_ATTR;
-    }
-    if (which == ATTR_RT_NORET) {
-        return MAC_RT_NORET_ATTR;
-    }
-    return ATTR_TEXT[which];
-}
 
 // The first byte that needs no `\XX` escape and the last: a string constant
 // writes every other byte as a hex pair (item 5).
@@ -615,7 +590,7 @@ static void emit_extern(gen_t* g, sb_t* out, const sym_t* s) {
             sb_append(out, attr);
         }
     }
-    const bool variadic = !gen_is_mac(g) || (s->node->flags & AST_FLAG_VARIADIC) != 0;
+    const bool variadic = (s->node->flags & AST_FLAG_VARIADIC) != 0;
     if (variadic) {
         if (sig->nparams > 0) {
             sb_append(out, ", ");
@@ -623,9 +598,7 @@ static void emit_extern(gen_t* g, sb_t* out, const sym_t* s) {
         sb_append(out, "...");
     }
     sb_push(out, ')');
-    if (gen_is_mac(g)) {
-        sb_append(out, " nobuiltin");
-    }
+    sb_append(out, " nobuiltin");
     sb_push(out, '\n');
 }
 
@@ -747,7 +720,7 @@ void gen_finish(gen_t* g) {
         sb_append(&attributes, "attributes #");
         sb_append_u64(&attributes, i);
         sb_append(&attributes, " = { ");
-        sb_append(&attributes, attr_text((gen_attr_t)i, gen_is_mac(g)));
+        sb_append(&attributes, ATTR_TEXT[i]);
         sb_append(&attributes, " }\n");
     }
     sb_clear(&g->out);

@@ -99,13 +99,13 @@ TEST(an_extern_reaches_a_function_pointer_through_a_fort_wrapper, {
                           "fn magnitude(i32 n) i32 { return abs(n); }\n"
                           "fn main() i32 { fn (i32) i32 f = magnitude; return f(-1); }\n"));
     // An `extern fn` in value position is a checker error, so the pointer is
-    // the wrapper's and the extern is still called through the variadic type
+    // the wrapper's and the extern is still called through the fixed type
     // its declaration supplies (item 8).
     // D3.10, D9.8
-    TEST_ASSERT_EQ_STR(found("declare i32 @abs(i32, ...)"), "declare i32 @abs(i32, ...)");
+    TEST_ASSERT_EQ_STR(found("declare i32 @abs(i32) nobuiltin\n"),
+                       "declare i32 @abs(i32) nobuiltin\n");
     TEST_ASSERT_EQ_STR(absent("ptr @abs"), "absent");
-    TEST_ASSERT_EQ_STR(found("call i32 (i32, ...) @abs(i32 %t0) #3"),
-                       "call i32 (i32, ...) @abs(i32 %t0) #3");
+    TEST_ASSERT_EQ_STR(found("call i32 @abs(i32 %t0) #3"), "call i32 @abs(i32 %t0) #3");
     TEST_ASSERT_EQ_STR(found("store ptr @\"main.magnitude\", ptr %f.0, align 8"),
                        "store ptr @\"main.magnitude\", ptr %f.0, align 8");
     TEST_ASSERT_EQ_STR(verified(), "verified");
@@ -280,8 +280,9 @@ TEST(an_indirect_call_writes_an_aggregate_result_through_the_leading_pointer, {
                              "%ret.sret, i32 %v.in) #0"),
                        "define dso_local void @\"main.make\"(ptr sret(%struct.main.point) "
                        "%ret.sret, i32 %v.in) #0");
-    TEST_ASSERT_EQ_STR(found("call void (ptr, i32) %t0(ptr %r.1, i32 3)"),
-                       "call void (ptr, i32) %t0(ptr %r.1, i32 3)");
+    // The leading pointer carries `sret` at the call site too.
+    const char* call = "call void (ptr, i32) %t0(ptr sret(%struct.main.point) %r.1, i32 3)";
+    TEST_ASSERT_EQ_STR(found(call), call);
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -291,8 +292,8 @@ TEST(a_darwin_indirect_call_marks_its_aggregate_result_pointer, {
                                  "fn main() i32 { fn (i32) point f = make; point r = f(3);\n"
                                  "    return r.x; }\n",
                                  "arm64-apple-macosx26.6.2"));
-    TEST_ASSERT_EQ_STR(found("call void (ptr, i32) %t0(ptr sret(%struct.main.point) %r.1, i32 3)"),
-                       "call void (ptr, i32) %t0(ptr sret(%struct.main.point) %r.1, i32 3)");
+    const char* call = "call void (ptr, i32) %t0(ptr sret(%struct.main.point) %r.1, i32 3)";
+    TEST_ASSERT_EQ_STR(found(call), call);
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -483,9 +484,10 @@ TEST(an_extern_noreturn_declaration_stays_unadorned, {
                           "fn main() i32 { die(1); }\n"));
     // `noreturn` is never put on the declaration of a C function, so the
     // optimizer cannot delete the trap that catches an extern returning
-    // anyway (item 20).
-    TEST_ASSERT_EQ_STR(found("declare void @die(i32, ...)"), "declare void @die(i32, ...)");
-    const char* want = "  call void (i32, ...) @die(i32 1) #3\n"
+    // anyway (item 20). The declaration carries `nobuiltin` alone.
+    TEST_ASSERT_EQ_STR(found("declare void @die(i32) nobuiltin\n"),
+                       "declare void @die(i32) nobuiltin\n");
+    const char* want = "  call void @die(i32 1) #3\n"
                        "  call void @llvm.trap()\n"
                        "  unreachable\n";
     TEST_ASSERT_EQ_STR(found(want), want);
@@ -577,8 +579,8 @@ TEST(a_void_mut_pointer_emits_the_text_a_void_pointer_emits, {
     TEST_ASSERT_EQ_STR(
         found("define dso_local ptr @\"main.pass\"(ptr %p.in, ptr %s.in, ptr %out.in)"),
         "define dso_local ptr @\"main.pass\"(ptr %p.in, ptr %s.in, ptr %out.in)");
-    TEST_ASSERT_EQ_STR(found("declare i64 @blit(i32, ptr, i64, ...)"),
-                       "declare i64 @blit(i32, ptr, i64, ...)");
+    TEST_ASSERT_EQ_STR(found("declare i64 @blit(i32, ptr, i64) nobuiltin\n"),
+                       "declare i64 @blit(i32, ptr, i64) nobuiltin\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
     TEST_ASSERT_TRUE(emit(VOID_MUT_PTR_SOURCE));
     TEST_ASSERT_EQ_STR(ir(), plain);
