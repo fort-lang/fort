@@ -732,25 +732,17 @@ set_tests_properties(check_decisions_selftest PROPERTIES
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
 # The knowledge rules of notes/style.md and AGENTS.md (label unit): the line
-# budget of AGENTS.md, the citation shape of notes/style.md 1.4 and the `///`
-# of 1.3 over the sources 1.1 governs, an owner and a rule in every entry of
-# spec/decisions.md, no history note of the log that reports a rule in the
-# present tense with no date on the claim (T-121), and a document cited by a
-# path that exists and by its section rather than by a line number (T-103). It
-# reads the tree and runs no build, so it is the cheapest test in the suite.
+# budget of AGENTS.md, an owner and a rule in each decision, no history note
+# that reports a rule in the present tense without a date, and valid document
+# paths. The test reads documentation and runs no build.
 add_test(NAME knowledge_lint
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/knowledge_lint.py"
             --root "${CMAKE_SOURCE_DIR}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(knowledge_lint PROPERTIES LABELS unit)
 
-# Its own unit tests (label unit): the comment scanner, the four fixtures the
-# `///` rule is measured against position by position, every citation shape the
-# lint refuses with a control beside it, the seeded history notes the tense rule
-# judges, the four real reports of the log before T-109 repaired them, the
-# measurement behind each limit that rule states, and each of the five rules
-# broken on a seeded tree, where the lint must print the problem and exit 1. A
-# check that cannot fail is worse than no check.
+# Its own unit tests (label unit): seeded history notes, the measured limits of
+# the history rule, and each remaining rule on clean and broken seeded trees.
 add_test(NAME knowledge_lint_selftest
     COMMAND "${FORT_PYTHON3}" -m unittest knowledge_lint_test
     WORKING_DIRECTORY "${FORT_TEST_DIR}")

@@ -4,262 +4,78 @@ This document holds the conventions for the text the project writes: comments in
 the naming and formatting rules of each language, markdown, and commit messages. It is not
 normative about the language; `spec/decisions.md` and `spec/grammar.md` win over it (D1.2).
 
-Section 1 holds the comment policy, which is in force now (T-098). T-099 moved the convention
+Section 1 holds the comment policy. T-099 moved the convention
 bullets of the `## Technical Standards` section of `AGENTS.md` into the headings after it. The
 test bullets of that section went to `notes/testing.md` and the JavaScript conventions of the
 extension went to `editors/README.md`, as the routing table of `AGENTS.md` sends them.
 
-## 1. Comments
+## 1. Comments and documentation
 
-### 1.1 What this section governs
+### 1.1 Content
 
-The rules below govern the comments of the compiled sources: `src/**`, `std/**/*.ft`, and the C and
-fort files of `test/` that are code. `SOURCE_GLOBS` in `tools/knowledge_lint.py` is that list,
-366 files today, and `EXCLUDED` beside it names the code the lint does not read with a reason for
-each: the language corpus of `test/lang`, whose files are fixtures of the harness, and the
-fixtures of the VS Code extension, whose line numbers stand in a `*-document.json` a test
-compares. A file that is in neither list fails `test_every_code_file_is_read_or_excluded`, and a
-prefix of `EXCLUDED` that names no file fails its mirror, so the hole this section had until
-T-103 cannot open again in silence. There is no `runtime/` directory: T-091 made the runtime a
-fort module, `std/rt.ft`.
+Document the module purpose. Add a module guarantee only when readers need it.
+Do not list the declarations in a module comment.
 
-T-144 adds `std/darwin/*.ft` and `test/darwin/*.c` to `SOURCE_GLOBS`.
-T-145 adds `test/darwin/*.ft`. T-149 adds one darwin allocation fixture.
-The lint now reads 371 code files.
+Document an API only when its contract is not clear from its name and types. State non-obvious
+behavior, preconditions, side effects, and failures. Do not document self-explanatory code.
 
-They do not govern a harness directive, which is the third kind of comment and has a format of
-its own: `spec/toolchain.md` 7 gives the `//!`, `//|` and `//<` of a language test, and
-`test/lang/run_tests_test.py`, `test/highlight_test.py` and the corpora under `test/` give the
-`//@` and the `//^`. Measured on 2026-09-12, 4581 lines in 701 files under `test/` hold one:
-2247 `//!`, 2088 `//|`, 122 `//@`, 90 `//^` and 34 `//<`. T-103 skips a comment that opens with
-any of those five markers, wherever the file stands.
+Use comments inside a function only when the code does not make the logic clear. A comment can
+explain an order, an invariant, a special case, or a required workaround. Delete a comment that
+only restates the code.
 
-Block comments do not exist in either language: a comment is `//` and nothing else (D2.2), and
-`tools/check_comments.py` rejects a `/* */` in the C sources.
+Use ASD-STE100 as practical writing guidance. Write concise, direct, and natural sentences. Use
+the exact technical term when it is the clearest term. Do not remove a necessary condition to
+make a sentence shorter.
 
-### 1.2 The header block
+Code documentation explains the code. It does not record project history. Remove decision tags,
+ticket tags, numbered specification items, and similar provenance. Keep useful references to code
+symbols, source files, platform APIs, and technical standards.
 
-Each file starts with one header block, in the shape clang uses: `//` lines at line 1 and no
-decoration. The first line names the file and says what it holds in one sentence. Lines after it,
-separated by a bare `//`, say why the file is the way it is: what it owns, what reads it, and the
-decision it implements, cited as a tag in the shape of 1.4. A blank line may follow the block.
+Harness directives are not documentation. Keep their required syntax and position. Do not change
+fixed-position fixtures during a documentation sweep. These fixtures include `test/lang/**/*.ft`,
+`editors/vscode/test/fixtures/**`, `test/fort_lint/*.ft`, `test/highlight/scopes.ft`, and generated
+fixtures.
 
-There is no line limit, because the length follows the design the file carries. Measured over the
-74 header blocks of `src/` and `std/` on 2026-09-12, after T-101 swept the 64 in `src/`: the
-median block is 15 lines, 40 blocks pass 12 lines, and the longest is 87 (`src/fort/parser.ft`,
-the parser's recovery model). No sweep shortens them. `src/bootstrap/check.c` is the one-line
-form and `src/bootstrap/sym.h` is the long form. A header block is prose and its tags are
-citation lines of their own, so T-101 took every tag the prose held inline and put it on a line
-**after** the paragraph it belongs to, never before it: the first line of a file names the file.
+### 1.2 fort
 
-The block does not list the functions of the file, because that list goes out of date and the
-file below it does not.
+Use `///` only for text intended for future published documentation. The project does not publish
+documentation yet.
 
-### 1.3 The two kinds of comment below the header
+Use `///` for module documentation. Also use it for needed documentation on intended public
+functions, types, constants, and fields. A technical export does not make a declaration an
+intended public API.
 
-There are two, and the directives of 1.1 are the third kind outside this section.
+Use `//` for repository-only details about a documented API. Put `///` text first and `//` text
+below it. Use `//` for internal declarations, implementation invariants, function-body comments,
+trailing comments, and section banners.
 
-- `///` on a declaration that other code calls: a function in a header, a public function or type
-  of a fort module, a struct field whose meaning is not in its name. It states the contract: what
-  the caller must hold true, what the callee gives back, and who owns the memory. Write it on the
-  declaration, not on the definition, when the two are apart.
-- `//` inside a body, where the logic is not clear from the code: an order that matters, a case
-  that looks impossible and is not, a workaround and the thing it works around.
+Do not state ownership or lifetime in fort API comments. The type system states this information.
+An implementation comment can explain how the compiler applies an ownership rule.
 
-**The mark is placed by position.** In a fort module every top-level declaration takes `///`,
-because D9.6 exports everything at module level and a declaration is public whether or not a caller
-exists today. In a C header a declaration takes `///`, a struct field takes `///`, and a comment
-inside a function body takes `//`, whatever column it sits in. A `.c` and a test program keep `//`,
-because neither is a module interface: the declaration a caller reads is in the header, and a
-program is the end of the chain and not a face another file reads. The coordinator ratified this
-reading on 2026-09-13, over the narrower "a declaration another file calls", for two reasons: that
-reading makes the mark of one declaration change when an unrelated file adds or removes a call, and
-no lint can check it without a whole-program call graph, while a lint that reads one file can check
-this one (T-108). The column is not the rule. T-108 first wrote "a declaration at indentation 8 or
-less", and a statement inside a `static inline` function sits at indentation 4, so 37 lines in 12
-blocks of `test/*.h` took `///` inside a body before a review counted them.
+Put harness directives before module documentation. Fort uses no block comments.
 
-`tools/knowledge_lint.py` is that lint, and the ctest `knowledge_lint` runs it (T-103). It reads
-the brace structure of each file and never a column, and it settles the three questions the rule
-above left to a reader. **A field of a fort struct or enum takes `///`, as a field of a C struct
-does**: a fort struct is exported whole at module level, so its fields are as public as the type
-is, and `src/bootstrap/check.h` and `src/fort/check.ft` are twins that must not disagree about one
-field. T-103 gave the mark to 86 such fields and to 247 top-level declarations, 221 of them in
-`src/lsp/json.ft`, which T-101 and T-108 both left out of their globs. **A trailing comment keeps
-`//` whatever it trails.** A contract does not fit at the end of a line of code, 1.4 puts a
-citation at the end of a line on purpose, and the tree held 0 trailing `///` before the rule was
-written and 0 after it. The wrap of a trailing comment onto the next line is part of that comment
-and keeps `//` too. **A fort source that carries a harness directive is a test program; every
-other fort source is a module.** The 173 programs of `test/fort` all open on one, and the 11
-modules of `test/fort/support` carry none
-(`for f in $(find test/fort -name '*.ft'); do grep -q '^//!' $f || echo $f; done` lists exactly
-the 11). A section banner, a comment above an `import`, a comment above a preprocessor line and a
-comment inside a signature that wraps mark no declaration and keep `//`.
+### 1.3 C
 
-Two things a reader of the lint's green report should know. **The rule is one-sided over most of
-the corpus.** In a `.c` and in a fort test program it can only refuse a `///` and never ask for
-one, and it asks for one on a declaration that already carries a comment, never for the comment
-itself: over the 26625 comments of the 356 files, it requires a mark at 6617 positions and refuses
-one at 20008 (the count line of `--rule citation` prints both). No rule anywhere asks that a
-declaration be documented; 1.3 says which mark a comment takes, not that a comment exists. **A
-fort program that carries no harness directive is read as a module**, which is the one place the
-discriminator above answers wrongly: `test/tty/print_then_wait.ft` is a program and holds no
-directive. The cost is bounded -- the lint would ask `///` on a comment standing on a top-level
-declaration of such a file -- and 0 files hold one today, so the rule stays the simple one a lint
-can check by reading one file (T-103).
+Use `//` for all C comments. This rule applies to module, API, internal, and function-body
+comments. Put needed API documentation on the header declaration. Do not repeat it on the
+definition.
 
-A comment that stands on a declaration or on a definition states its contract; only a comment
-inside a body may be a bare citation. T-101 first collapsed 583 doc comments to the tag they
-cited and had to put every one back: a tag says which rule the code follows and says nothing
-about what the caller must hold true, what the callee gives back or who owns the memory. The
-tags of such a comment stand on the line after its prose, between the prose and the declaration.
+State ownership or lifetime only when the C type cannot express it. `tools/check_comments.py`
+rejects C block comments.
 
-A section banner, `// ---- names ----`, is the third shape a comment takes below the header. It
-is navigation, not a contract, and it keeps its text; the decisions the section implements stand
-on the line after it. Stripping the tag out of 114 banners and putting it nowhere else left 10
-files citing a decision they implement in no line at all, and left D10.3 cited nowhere in `src/`
-(T-101).
+### 1.4 JavaScript
 
-Write nothing that restates the code. `// increment the index` above `i += 1;` is deleted, not
-reworded. A comment that repeats the name of the function it stands on is deleted with it.
+Use JSDoc `/** ... */` for module documentation and needed public API documentation. Use `//` for
+internal details and function-body comments. Use a JSDoc tag only when it adds contract
+information.
 
-What that rule is worth, measured: T-101 read all 2261 distinct comments of `src/` and deleted 29
-of them as restatements. That is 1 in 78, because after the citations became tags what was left
-was contracts and knowledge. Comment lines are 19.8 % of `src/bootstrap` and 22.9 % of
-`src/fort`, against 19.2 % and 22.2 % before the sweep: the share rose, because a citation on its
-own line costs the line the tag used to share with prose. Of the 9867 comment lines the two hold,
-1414 are header blocks, 310 are section banners, 2188 are citation lines of the shape of 1.4,
-3694 are `///` contracts and 2261 are the `//` prose inside bodies. A ticket that wants a smaller
-share has to shorten the contracts, which this section asks for, so the share is a consequence
-and not a target.
+### 1.5 Other languages
 
-T-108 swept the rest of what 1.1 governs, with the same lint and the same method, and deleted no
-comment as a restatement. It rewrote 207 paragraphs by hand, where the grammar of the sentence
-carried the tag rather than a parenthesis at its end. It deleted one comment for another reason:
-`std/math.ft` said it was the only fort source that carries `///` doc comments, and the sweep made
-that untrue. Comment lines are 34.7 % of `std` (917 of 2639), 13.6 % of `test/*.c` and `test/*.h`
-(5343 of 39235) and 19.7 % of `test/fort` (8299 of 42159, the harness directives included),
-against 31.3 %, 11.1 % and 17.4 % before. The command is the one above with the directory
-changed. The share rose for the reason it rose in `src/`: a citation on its own line costs the
-line the tag used to share with prose. The three corpora hold 1490 `///` lines after the sweep and
-held 22 before, all 22 in `std/math.ft`
-(`grep -h '^[[:space:]]*///' std/*.ft test/*.c test/*.h $(find test/fort -name '*.ft' | sort) |
-wc -l`, run here and over `git archive main std test`). 31 of the 1490 stand in `std/math.ft`
-(`grep -c '^[[:space:]]*///' std/math.ft`) and 1459 in files that held none. `math.ft` is not a
-file the sweep left alone: its 22 lines re-wrapped to 24, and the marker then gave the mark to 7
-more, above `i32 I32_MIN` and above `u64 F64_INF_BITS`. Of the 1490, 1466 took the mark from
-`build/sweep/marker.py`, which prints that number, and 24 are the lines the sweep carried over
-already marked.
+Use docstrings for Python module documentation and needed public API documentation. Use `#` for
+internal details and function-body comments.
 
-**A sweep that guesses at grammar writes a true-looking sentence that says a false thing, and no
-punctuation check sees it.** T-108 cut `of Dn.m` out of a noun phrase, and its rule fired on
-`X of Dn.m and Y` as well, where the `and` joins two whole phrases and not two objects of the one
-preposition. "the universe functions of D12.2 and the qualified names of D9.4" became "the
-universe functions of the qualified names" in 15 files, and every one of them reads as grammar and
-states a falsehood, so the lint of 1.4 reported 0 mangled lines over all 15. No rule tells that
-shape from "the `assert` and `panic` of D12.2 and item 19", where the preposition is shared, so
-the sweep now refuses the shape and reports it for the hand. The screen is a reader: list every
-paragraph of the old revision that writes `of D<n>.<m> and `, print the new text beside it, and
-read the 37 pairs (T-108).
-
-### 1.4 Citations
-
-A citation is a tag. Write `// D17.5`. Do not write a sentence.
-
-Add one clause after a colon only where the tag alone leaves the rule unclear:
-`// D17.5: an own lvalue moves`. The clause is 60 characters at most and it does not end in a
-full stop. A citation of more than one decision is a list: `// D11.5, D11.7`. A ticket number is
-a citation only with a clause, `// T-091: the runtime is a fort module`, because `.tickets/` is
-outside the repository and the number alone points at a file the reader cannot open.
-
-A citation stands on the line above the code it governs, or at the end of that line. A file that
-implements a run of decisions writes the run as a range, which is one item of the list:
-`// D3 to D8, D12, D14.2`. A range runs over sections, `D3 to D8`, or over decisions,
-`D9.1 to D9.6`, and never mixes the two; both ends are decision tags, a ticket number opens none,
-and the second end stands above the first, so `D9.5 to D9.1` and `D3.1 to D3.1` are not ranges.
-Two citation lines stand together only when each carries its own clause and the two say different
-things; a citation of more than one decision with nothing to say about each is one list. A
-reference to a document is not a citation in this sense and takes no tag: it names the document
-and its section, `toolchain.md 6 item 8`, under the rule of 4, "Moving a document" (T-105).
-T-103 lints the shape below. It reads the comment from the `//` to the end of the line, and the
-line is a citation when it matches `decisions` or `tickets`:
-
-    tag       = D[0-9]+(\.[0-9]+)?
-    section   = D[0-9]+
-    point     = D[0-9]+\.[0-9]+
-    ticket    = T-[0-9]{3}
-    range     = <section> " to " <section> | <point> " to " <point>
-    item      = <range> | <tag>
-    clause    = .{0,59}[^.]
-    decisions = //(/)? <item>(, <item>)*(: <clause>)?$
-    tickets   = //(/)? (<item>|<ticket>)(, (<item>|<ticket>))*: <clause>$
-
-The lint refuses one more shape, which the ticket that wrote this section had to learn twice: a
-comment whose punctuation a sweep left dangling. Cutting a tag out of `(D4.6: text)` leaves
-`(: text)`, out of `(item 8, D9.9)` leaves `(item 8,)`, out of `x.h and .c` leaves `and.c`, and
-out of `(the note on D4.4)` leaves `(the note on)`. None of those holds a tag any more, so the
-citation rule above cannot see them. T-101 made 11 of them in 9 files. The lint reads each
-comment body with its code spans masked, and skips an indented example line and a code span
-wrapped across two lines. It refuses a double space, a parenthesis that opens or closes on a
-separator, an empty parenthesis or bracket, a one-word parenthesis that ends in a space, a
-separator with nothing before it, a possessive whose owner is gone, and a connective left
-hanging before `)`. The
-review of T-101 fed the first version of it ten cuts the sweep had not made and nine passed,
-the double space among them, which is why the list is this long: a check written from one
-sweep's residue sees that residue and little else.
-
-T-101's lint gives four wrong answers, which `src/` gave it no chance to show and T-108 met over
-`test/`. It reads `U+D800` as a citation of a decision D800, because it lets a tag follow a `+`.
-It reads a `//` inside a C string literal as a comment, because it counts the quotes of the line
-instead of scanning it, and `test/*.c` holds fort programs as C strings. It accepts a bare
-`// T-091`, because it carries the `decisions` production above and not the `tickets` one beside
-it. And it lets a list repeat a tag that a range of the same list already names, so
-`// D4.1 to D4.6, D3.14, D3.15, D4.4, D4.6` passed it. T-108 fixed all four in the copy it ran,
-seeded 23 probes, one of every shape the lint refuses, and watched each one fire; 10 control lines
-stayed clean. T-103 carries the four fixes into the lint it gives a home.
-
-Measured on 2026-09-13 with that lint. `std/*.ft`, `test/*.c`, `test/*.h` and `test/fort/**/*.ft`
-hold 2633 tagged comment lines and **0** outside the shape. `src/bootstrap` and `src/fort` hold
-2564 and **5** outside it: three are citations of a ticket with no clause, which T-101's own lint
-accepted, and two are prose written after T-101 landed. `src/lsp` holds 36 tagged lines and **36**
-outside the shape, because T-101's lint read `src/bootstrap` and `src/fort` and no other directory
-of `src/`. Neither is T-108's to fix: its deliverable names `std/` and `test/` (T-108).
-
-T-103 fixed all of them and gave the shape a home, `tools/knowledge_lint.py`, with the four wrong
-answers above carried into it and a probe for each. The measurement now runs over every source 1.1
-governs at once. `python3 tools/knowledge_lint.py --rule citation` reports 0 problems and prints
-`citation: 356 files, 26625 comments, 5311 tagged; /// required at 6617 and refused at 20008`.
-**104 comment lines were outside the shape** when the lint first read the tree, measured with the
-shipped lint over `main`'s sources (`git archive main | tar -x -C build/main-tree`, then `--root
-build/main-tree`): 69 in the corpus T-108 had swept, of which **67** stand in the files of the
-language server, written after T-108 measured (53 in `src/lsp` and 14 in `test/fort`), and **2**
-in `src/bootstrap/gen.c`, which T-108 recorded and did not fix; and 35 in the 13 files
-`SOURCE_GLOBS` did not read until T-103 widened it. A tag that a sentence carries in its grammar
-is not cut by any rule: T-103 wrote 28 paragraphs by hand, where a rule would have cut a tag out
-of the grammar of a sentence or out of a parenthesis it shared with prose. The tag multiset of
-every changed file is compared with `main`'s afterwards, which is what says no citation was
-renumbered, dropped or invented.
-
-The reader who wants the rule opens `spec/decisions.md` at the tag, where the entry's `rule` field
-states it (T-100). The lint holds the tag to that promise: a `Dn.m` in a comment must name an
-entry of the log and a `Dn` must name a section of it, the 164 tags `tools/knowledge_lint.py
---rule citation` reads out of `spec/decisions.md` (144 entries and 20 `## Dn` headings). `D15` and
-`D16` hold no entry and are cited as sections, so a section tag is a citation like any other. A
-ticket number is checked against nothing, because `.tickets/` is outside the repository (T-103).
-That is what the log is for, and a copy of the rule in a comment is a copy that drifts. The old
-rule asked for the copy: `src/` held 2962 tagged comment lines on 2026-09-12 and 0 of them matched
-the two expressions above. T-101 rewrote them; `src/` now holds 2562 tagged comment lines and
-every one matches.
-
-### 1.5 The rule that this section replaced
-
-- **Citing decisions in code**: **superseded by `notes/style.md` 1, the comment policy (T-098).**
-  The old rule asked for "a phrase stating the rule" (`// pointers print as 0x + lowercase hex,
-  0x0 for null (D11.7)`) and refused a bare tag list; it produced 2962 tagged comment lines in
-  `src/`, of which 0 matched the shape in force now. T-101 rewrote them. The rule in force: a
-  citation is a tag on the line or above the line it governs, `// D17.5`, and it takes one clause
-  after a colon only where the tag alone leaves the rule unclear, `// D17.5: an own lvalue moves`.
-  Write every new comment to `notes/style.md` 1.
+Use `#` for shell, CMake, and configuration comments. Put script documentation after the
+shebang.
 
 ## 2. C sources
 

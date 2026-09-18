@@ -320,9 +320,11 @@ and uses no back-reference, no `\G` and no variable-width lookbehind.
 
 - The VS Code extension's sources are plain JavaScript wrapped at 100 columns, and no gate target
   lints them, so the conventions are here: `'use strict'` at the top of every file, CommonJS
-  (`require`/`module.exports`, no ESM and no bundler), `//` comments only as in C and fort (D2.2),
-  two-space indentation, single quotes, semicolons, `const` unless a binding is reassigned, no npm
-  dependency and no devDependency, and no API beyond Node's standard library and `vscode` (which
-  only `extension.js` may require). A file is tested by `node --test` or it is `extension.js`.
+  (`require`/`module.exports`, no ESM and no bundler), two-space indentation, single quotes,
+  semicolons, `const` unless a binding is reassigned, no npm dependency and no devDependency, and
+  no API beyond Node's standard library and `vscode` (which only `extension.js` may require).
+  Use JSDoc `/** ... */` for module documentation and needed public API documentation. Use `//`
+  for internal details and function-body comments. Use a JSDoc tag only when it adds contract
+  information. A file is tested by `node --test` or it is `extension.js`.
   `test/package.test.js` asserts the last two by reading the sources, so a second
   `require('vscode')` or a second module under `lib/` is a red test.

@@ -241,10 +241,9 @@ bullet at a time and without a rewrite.
   hand-run does. `.gitignore` now holds `test/fort/sandbox*/`, which closes the commit half of it
   whatever anyone remembers. **The ignore line does not close the other half**: a tool that walks
   the filesystem still counts the directories, and `git status` no longer shows them. Measured on
-  T-117's fix round, a second hand-run left 51 sandboxes and `python3 tools/knowledge_lint.py`
-  read `citation: 407 files` against the 356 of a clean tree, with an empty `git status --short`.
-  So compile with `-o` into `build/` and run from there, and read `ls -d test/fort/sandbox*`
-  rather than `git status` when a count comes out wrong.
+  T-117's fix round, a second hand-run left 51 sandboxes with an empty `git status --short`.
+  Compile with `-o` into `build/` and run from there. Read `ls -d test/fort/sandbox*` rather than
+  `git status` when a source count is wrong.
   **The working directory is any directory, and the ignore line names one** (T-127). A hand run
   from the **top of the worktree** writes `./sandbox<n>/`, which `test/fort/sandbox*/` does not
   match. One run of `check_test.bin` from there left 196 `sandbox<n>/main.ft` files in the root,
@@ -513,8 +512,7 @@ bullet at a time and without a rewrite.
   reports a failure that belongs to no mutation.
   **Raise each active file counter in the commit that adds the file.** `CORPUS_FILES` in
   `test/parser_recovery_test.c` counts fail tests. The same name in `test/highlight_test.py`
-  counts its source corpus. The knowledge lint also holds its measured source count.
-  **A new target code directory needs a `SOURCE_GLOBS` route or an `EXCLUDED` reason** (T-144).
+  counts its source corpus.
   T-145 adds two darwin test programs under `test/darwin/` and routes them into the grammar corpus.
   Run `tools/darwin net` on the darwin arm64 host to compare C layout and four darwin programs.
   **Say how strong each verdict is.** A verdict a mutant measured, a claim probed by compiling a
