@@ -1,21 +1,20 @@
-// darwin std.net uses the Darwin IPv4 socket layout (stdlib.md 2.13).
-// The exported functions match the linux std.net functions.
-// D3.8, D9.8, D13.2, D13.4
+/// Provides IPv4 TCP listeners and connections on Darwin.
+/// Network failures return false or -1 and set sys.errno().
+/// connect accepts a dotted IPv4 address and does not resolve names.
 import std.libc;
 import std.str;
 import std.sys;
 
-/// Darwin socket and IPv4 constants. test/darwin/net_probe.c measures them.
+// Darwin socket and IPv4 constants. test/darwin/net_probe.c measures them.
 i32 AF_INET = 2;
 i32 SOCK_STREAM = 1;
 i32 SOL_SOCKET = 0xFFFF;
 i32 SO_REUSEADDR = 0x0004;
 u32 INADDR_ANY = 0;
 
-/// Darwin sockaddr_in has a length byte before its family byte.
-/// C places len, family, port, and addr at 0, 1, 2, and 4.
-/// The struct has 16 bytes. test/darwin/net_probe.c measures the layout.
-/// D3.8
+/// Stores an IPv4 family, port, and address in the platform socket layout.
+// Darwin places len, family, port, and addr at offsets 0, 1, 2, and 4.
+// test/darwin/net_probe.c verifies the 16-byte layout.
 struct sockaddr_in {
     u8 len;
     u8 family;
@@ -24,24 +23,20 @@ struct sockaddr_in {
     u8[8] zero;
 }
 
-/// This function reverses two bytes for network byte order.
-/// The masks keep each shift in the u16 range.
-/// D6.2, D11.1
+// Reverses two bytes for network byte order.
 fn hton16(u16 v) u16 {
     return ((v & 0x00FF) << 8) | ((v >> 8) & 0x00FF);
 }
 
-/// This function reverses four bytes for network byte order.
-/// The masks keep each shift in the u32 range.
+// Reverses four bytes for network byte order.
 fn hton32(u32 v) u32 {
     return ((v & 0x000000FF) << 24) | ((v & 0x0000FF00) << 8)
          | ((v >> 8) & 0x0000FF00) | ((v >> 24) & 0x000000FF);
 }
 
-/// This function reads four decimal IPv4 fields and writes network byte order.
-/// Each field has one to three digits and a value from 0 to 255.
-/// An invalid field returns false and leaves *out unchanged.
-/// D13.3
+/// Parses exactly four decimal IPv4 fields and writes network byte order.
+/// Each field has 1 to 3 digits and a value from 0 through 255.
+/// Returns false and leaves *out unchanged for other text.
 fn parse_ipv4(string text, u32 mut* out) bool {
     u32 mut host = 0;
     u64 mut start = 0;
@@ -63,8 +58,6 @@ fn parse_ipv4(string text, u32 mut* out) bool {
             return false;
         }
         // The first field takes the most significant byte.
-        // The shift is 24, 16, 8, or 0. The value is at most 255.
-        // D11.1
         host = host | (cast(value, u32) << (24 - field * 8));
         if (field < 3) {
             if (stop >= text.len) {
@@ -80,9 +73,7 @@ fn parse_ipv4(string text, u32 mut* out) bool {
     return true;
 }
 
-/// This function closes fd and restores the errno from the failed call.
-/// close(2) can change errno. The caller must read the failed call's errno.
-/// A signal can interrupt close(2) (notes/testing.md 7).
+// Closes fd and restores errno from the failed call.
 fn close_and_fail(i32 fd) i32 {
     i32 saved = sys.errno();
     libc.close(fd);
@@ -90,10 +81,8 @@ fn close_and_fail(i32 fd) i32 {
     return -1;
 }
 
-/// This function listens on every interface.
-/// Port 0 asks the kernel for a free port. The caller closes the descriptor.
-/// The function sets SO_REUSEADDR before bind(2).
-/// D13.3, D13.4
+/// Opens a TCP listener on every interface and sets SO_REUSEADDR.
+/// Port 0 asks the kernel for an available port. The caller must close the descriptor.
 fn listen(u16 port, i32 backlog) i32 {
     i32 fd = libc.socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -118,9 +107,8 @@ fn listen(u16 port, i32 backlog) i32 {
     return fd;
 }
 
-/// This function accepts one connection and returns its descriptor.
-/// The caller closes the descriptor. The function does not return the peer address.
-/// D13.3
+/// Accepts one connection without returning its peer address.
+/// The caller must close the returned descriptor.
 fn accept(i32 fd) i32 {
     i32 client = libc.accept(fd, null, null);
     if (client < 0) {
@@ -129,10 +117,8 @@ fn accept(i32 fd) i32 {
     return client;
 }
 
-/// This function connects to a dotted IPv4 address and port.
-/// Invalid address text sets EINVAL without a system call.
-/// The caller closes the returned descriptor.
-/// D13.3, D13.4
+/// Connects to a dotted IPv4 address and port.
+/// Invalid address text sets EINVAL without a system call. The caller must close the descriptor.
 fn connect(string host_ipv4, u16 port) i32 {
     u32 mut host = 0;
     if (!parse_ipv4(host_ipv4, &host)) {
@@ -154,9 +140,8 @@ fn connect(string host_ipv4, u16 port) i32 {
     return fd;
 }
 
-/// This function reads the bound port with getsockname(2).
+/// Reports the bound port in host byte order.
 /// A failure returns false and leaves *out unchanged.
-/// D13.3
 fn local_port(i32 fd, u16 mut* out) bool {
     sockaddr_in mut addr = {};
     u32 mut len = cast(sizeof(sockaddr_in), u32);

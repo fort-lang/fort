@@ -1,13 +1,7 @@
-// std.libc: thin extern declarations for the libc calls the library needs
-// (stdlib.md 2.2). The runtime entry points are std.rt (stdlib.md 3). C types
-// map as follows: int is i32, size_t is u64, ssize_t and off_t are i64, mode_t
-// is u16 and char* is char*. A buffer C fixes as bytes is u8* or u8 mut*, and
-// a buffer of any type at all is void* or void mut*; the mut is there when C
-// writes through the pointer and absent when C's own prototype says const.
-// Names are unmangled.
-// D3.11, D9.7, D9.8, D13.2
+/// Declares the libc functions that the standard library uses on Darwin arm64.
+/// Names use C linkage.
 
-/// open(2) flags, darwin arm64 values.
+// open(2) flags, Darwin arm64 values.
 i32 O_RDONLY = 0;
 i32 O_WRONLY = 1;
 i32 O_RDWR = 2;
@@ -15,33 +9,22 @@ i32 O_CREAT = 0x200;
 i32 O_TRUNC = 0x400;
 i32 O_APPEND = 0x8;
 
-/// lseek(2) whence values.
+// lseek(2) whence values.
 i32 SEEK_SET = 0;
 i32 SEEK_CUR = 1;
 i32 SEEK_END = 2;
 
-/// errno values the library tests for.
+// errno values the library tests for.
 i32 ENOENT = 2;
 i32 EINTR = 4;
 i32 EACCES = 13;
 i32 EINVAL = 22;
 
-/// <stdlib.h>, <string.h>. malloc and calloc return void mut* own, storage of
-/// no type that the caller may write, and free takes void* own, which every
-/// caller reaches by dropping marks. The boundary erases the own; it states
-/// C's convention. calloc answers with zeroed storage. std.rt allocates with
-/// it, because new promises zeroed storage (toolchain.md 5.1).
-/// D3.11, D5.4, D10.2, D17.13
 extern fn malloc(u64 size) void mut* own;
+/// Allocates zeroed storage for n elements of size bytes.
 extern fn calloc(u64 n, u64 size) void mut* own;
 extern fn free(void* own p) void;
 
-/// The five byte functions of <string.h>. C fixes the element type here: each
-/// counts bytes, so each takes u8* or u8 mut*, and the destination carries the
-/// mut that C's prototype writes as the absence of const. A caller passes a
-/// u8 span's .ptr with no cast, and the type system refuses a buffer the caller
-/// may not write. Each of the three returns its dst, a view.
-/// D3.11, D9.8
 extern fn memcpy(u8 mut* dst, u8* src, u64 n) u8 mut*;
 extern fn memmove(u8 mut* dst, u8* src, u64 n) u8 mut*;
 extern fn memcmp(u8* a, u8* b, u64 n) i32;
@@ -51,55 +34,34 @@ extern fn getenv(char* name) char*;
 extern fn exit(i32 code) noreturn;
 extern fn abort() noreturn;
 
-/// qsort orders n elements of size bytes in place and calls cmp with a pointer
-/// to each of two of them. std.sort wraps it and states what a caller may sort
-/// (stdlib.md 2.10); no other module calls it. Like every declaration in this
-/// module it binds every program, because std.rt imports std.libc and every
-/// closure holds std.rt: a program that redeclares qsort must write the same
-/// signature (notes/compiler.md 7).
-/// D9.10, D9.8
+/// Orders n elements of size bytes in place.
+/// qsort calls cmp with pointers to two elements.
 extern fn qsort(void mut* base, u64 n, u64 size, fn (void*, void*) i32 cmp) void;
 
-/// <fcntl.h>, <unistd.h>. darwin C open uses a variable tail for its promoted mode.
-/// The tail uses an i32 stack slot on Apple arm64.
-/// D9.8
+// The promoted open mode passes through an i32 variadic argument.
 extern fn open(char* path, i32 flags, ...) i32;
 extern fn read(i32 fd, u8 mut* buf, u64 n) i64;
 extern fn write(i32 fd, u8* buf, u64 n) i64;
 extern fn close(i32 fd) i32;
 extern fn lseek(i32 fd, i64 offset, i32 whence) i64;
-
-
-/// Answers the question the buffering rule asks about a descriptor. std.rt asks
-/// it once for each buffer. No other module calls it (toolchain.md 5.3).
-/// D11.5
 extern fn isatty(i32 fd) i32;
 
-/// <errno.h>: errno is a macro over this accessor on darwin. C returns
-/// int*, which is mutable, so the target carries mut: std.rt writes errno back
-/// around the isatty call it makes for each buffer (toolchain.md 5.3). A reader
-/// that only reads it takes the same result and drops the mut, which
-/// sys.errno() does.
-/// D11.5, D5.4
+// Darwin implements errno through this accessor.
 extern fn __error() i32 mut*;
 
-/// Returns the errno slot for the calling thread. The caller may read or write it.
-/// D9.8, D13.2
+// Returns the errno slot for internal standard-library calls.
 fn errno_slot() i32 mut* {
     return __error();
 }
 
-/// Formats one float for std.rt. The darwin C extern uses a variable tail.
-/// D9.8, D18.1
+// The float formatting arguments pass through a variadic call.
 extern fn snprintf(char mut* buf, u64 size, char* fmt, ...) i32;
 
 fn snprintf_float(char mut* buf, u64 size, char* fmt, i32 precision, f64 v) i32 {
     return snprintf(buf, size, fmt, precision, v);
 }
 
-/// Darwin uses u32 for socklen_t. An address crosses C as a pointer.
-/// std.net wraps these seven socket calls.
-/// D9.8, D13.4
+// Darwin uses u32 for socklen_t. Socket addresses cross C as pointers.
 extern fn socket(i32 domain, i32 kind, i32 protocol) i32;
 extern fn setsockopt(i32 fd, i32 level, i32 name, void* value, u32 len) i32;
 extern fn bind(i32 fd, void* addr, u32 len) i32;

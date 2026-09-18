@@ -1,74 +1,42 @@
-// std.vec: growable sequences of pointers and of i64, and the pattern every
-// other element type is copied from (stdlib.md 2.7). The two halves of this
-// file are the same twelve lines with the element type and the function prefix
-// changed, which is what makes it a template rather than a generic: there is
-// nothing here a copy of the file cannot repeat.
-// D13.2, D15
+/// Provides growable vectors of pointers and i64 values.
+// Copy one implementation and change its element type to add another vector type.
 
-/// The largest u64 there is, named once so that the twenty digits both capacity
-/// guards hold their arithmetic against are written in one place.
-/// D1.4: a module constant is UPPER_CASE
-///
-/// It duplicates math.U64_MAX and the duplicate stays. std.math holds f64
-/// functions, so stage1 refuses every program that imports it, and stage1
-/// compiles the 16 files of test/lang that import this module.
-/// T-042: notes/compiler.md 7 gives the rule
+// Maximum capacity value used by both reserve functions.
 u64 U64_MAX = 18446744073709551615;
 
-/// items.len is the capacity and len the slots in use, so the live elements are
-/// items[..len]. Each own marks one reference, so the vector owns its slots and
-/// borrows every pointer in them: ptr_push lends its argument, ptr_pop returns
-/// a view and ptr_free never touches a pointee. Indexing items[i] between len
-/// and the capacity is not a runtime error; it reads a zero or stale slot, so
-/// code that wants a bounds check indexes items[..len].
-///
-/// The slots hold `void mut*`, which is what new answers with, so a caller
-/// pushes a pointer to storage it may write and gets one back. A caller that
-/// only reads what it pops drops the mark on the way out; a caller holding an
-/// immutable pointer casts on the way in.
-/// D3.11, D5.4, D5.8, D17.2, D17.4
+/// items.len is the capacity, and len is the slot count in use.
 struct ptr_vec {
     void mut* mut@ own items;
     u64 len;
 }
 
-/// The i64 vector holds its elements by value, so nothing outside it is
-/// borrowed and int_free releases everything the vector holds.
+/// items.len is the capacity, and len is the element count in use.
 struct int_vec {
     i64 mut@ own items;
     u64 len;
 }
 
-/// The empty vector; allocates nothing. A call result needs no move.
-/// D17.5
+/// Creates an empty pointer vector without allocating.
 fn ptr_create() ptr_vec {
     return ptr_vec{};
 }
 
-/// cap slots up front; ptr_with_cap(0) is ptr_create(). The new rvalue lands
-/// directly in the own field of the literal.
-/// D17.5, D17.8
+/// Creates an empty pointer vector with cap slots.
 fn ptr_with_cap(u64 cap) ptr_vec {
     return ptr_vec{new(void mut*, cap), 0};
 }
 
-/// Releases the slots and leaves ptr_vec{}; the pointers they held belong to
-/// someone else and are left alone. del empties the field, so a second call, or
-/// a call on ptr_vec{}, is a no-op.
-/// D13.5, D17.9
+/// Frees the slot storage and leaves ptr_vec{}.
+/// Repeated calls and calls on an empty vector do nothing.
 fn ptr_free(ptr_vec mut* v) void {
     del(v->items);
     v->len = 0;
 }
 
-/// Ensures items.len >= len + extra, growing to the largest of 16, twice the
-/// capacity and len + extra (stdlib.md 2.7). The elements move to fresh storage
-/// and the old span is deleted, so every earlier alias of items dies here.
+/// Ensures capacity for extra pointers after the current elements.
+/// Panics when len + extra cannot fit in u64.
 fn ptr_reserve(ptr_vec mut* v, u64 extra) void {
-    // The sum is tested before it is computed: detecting the overflow by
-    // performing it would trap in a checked build and wrap to a capacity below
-    // the length in a release build.
-    // D3.1, D11.1
+    // Test the sum before computing it.
     if (extra > U64_MAX - v->len) {
         panic("vec.ptr_reserve: capacity overflow");
     }
@@ -80,8 +48,7 @@ fn ptr_reserve(ptr_vec mut* v, u64 extra) void {
     if (need > cap) {
         cap = need;
     }
-    // Doubling is skipped when it cannot be represented; the allocation below
-    // is then already past what any machine can give.
+    // Skip doubling when the result cannot fit in u64.
     if (v->items.len <= U64_MAX / 2 && v->items.len * 2 > cap) {
         cap = v->items.len * 2;
     }
@@ -95,18 +62,14 @@ fn ptr_reserve(ptr_vec mut* v, u64 extra) void {
     v->items = move(bigger);
 }
 
-/// Appends one pointer, growing as needed. The argument is borrowed: the vector
-/// never frees what it points at.
-/// D17.4
+/// Appends one pointer and grows the vector as needed.
 fn ptr_push(ptr_vec mut* v, void mut* p) void {
     ptr_reserve(v, 1);
     v->items[v->len] = p;
     v->len += 1;
 }
 
-/// Removes and returns the last pointer; an empty vector is a violated
-/// precondition and panics. Ownership: a view of whatever the caller stored.
-/// D13.3, D17.3
+/// Removes and returns the last pointer. Panics when the vector is empty.
 fn ptr_pop(ptr_vec mut* v) void mut* {
     if (v->len == 0) {
         panic("vec.ptr_pop: empty");
@@ -115,22 +78,25 @@ fn ptr_pop(ptr_vec mut* v) void mut* {
     return v->items[v->len];
 }
 
-/// The i64 half is the same six functions with the element type changed; to
-/// hold token values, copy them once more and replace i64 by token and the
-/// prefix int_ by token_ (stdlib.md 2.7).
+/// Creates an empty i64 vector without allocating.
 fn int_create() int_vec {
     return int_vec{};
 }
 
+/// Creates an empty i64 vector with cap elements.
 fn int_with_cap(u64 cap) int_vec {
     return int_vec{new(i64, cap), 0};
 }
 
+/// Frees the elements and leaves int_vec{}.
+/// Repeated calls and calls on an empty vector do nothing.
 fn int_free(int_vec mut* v) void {
     del(v->items);
     v->len = 0;
 }
 
+/// Ensures capacity for extra values after the current elements.
+/// Panics when len + extra cannot fit in u64.
 fn int_reserve(int_vec mut* v, u64 extra) void {
     if (extra > U64_MAX - v->len) {
         panic("vec.int_reserve: capacity overflow");
@@ -156,12 +122,14 @@ fn int_reserve(int_vec mut* v, u64 extra) void {
     v->items = move(bigger);
 }
 
+/// Appends one i64 value and grows the vector as needed.
 fn int_push(int_vec mut* v, i64 x) void {
     int_reserve(v, 1);
     v->items[v->len] = x;
     v->len += 1;
 }
 
+/// Removes and returns the last value. Panics when the vector is empty.
 fn int_pop(int_vec mut* v) i64 {
     if (v->len == 0) {
         panic("vec.int_pop: empty");

@@ -1,57 +1,37 @@
-// std.strbuf: a growable buffer for building text and byte sequences
-// (stdlib.md 2.6). The buffer owns its storage and nothing else; every view it
-// hands out dies at the next growth.
-// D13.2, D17.3, D17.14
+/// Provides a growable buffer for text and byte sequences.
 import std.mem;
 
-/// The largest u64 there is, named once so that the twenty digits the capacity
-/// guard holds its arithmetic against are written in one place.
-/// D1.4: a module constant is UPPER_CASE
+// Maximum capacity value used by reserve.
 u64 U64_MAX = 18446744073709551615;
 
-/// data.len is the capacity and len the bytes in use, so len <= data.len and
-/// data[len..] is spare room whose contents are unspecified. The own field
-/// makes this an owning aggregate: it is passed by pointer, copied with move,
-/// and released by free rather than del. str_buf{} is a valid empty buffer,
-/// which is why a struct holding one may be initialized with {}.
-/// D17.7
+/// data.len is the capacity, and len is the byte count in use.
+/// str_buf{} is a valid empty buffer.
 struct str_buf {
     u8 mut@ own data;
     u64 len;
 }
 
-/// The empty buffer; allocates nothing. A call result needs no move, so
-/// strbuf.str_buf mut b = strbuf.create(); is the idiom.
-/// D17.5
+/// Creates an empty buffer without allocating.
 fn create() str_buf {
     return str_buf{};
 }
 
-/// cap bytes of storage up front; with_cap(0) is create(). The new rvalue lands
-/// directly in the own field of the literal.
-/// D17.5, D17.8
+/// Creates an empty buffer with cap bytes of capacity.
 fn with_cap(u64 cap) str_buf {
     return str_buf{new(u8, cap), 0};
 }
 
-/// Releases the storage and leaves str_buf{}: del frees the field and empties
-/// it, so a second call, or a call on str_buf{}, is a no-op and defer
-/// strbuf.free(&b); right after the declaration is always safe.
-/// D17.9
+/// Frees the buffer data and leaves str_buf{}.
+/// Repeated calls and calls on an empty buffer do nothing.
 fn free(str_buf mut* b) void {
     del(b->data);
     b->len = 0;
 }
 
-/// Ensures data.len >= len + extra. The new capacity is the largest of 16,
-/// twice the old capacity and len + extra; the contents move to fresh storage
-/// and the old storage is deleted, so every earlier view or bytes alias of *b
-/// dies here (stdlib.md 2.6). Ownership: none; the storage stays the buffer's.
+/// Ensures capacity for extra bytes after the current contents.
+/// Panics when len + extra cannot fit in u64.
 fn reserve(str_buf mut* b, u64 extra) void {
-    // len + extra is computed only once it is known to fit: detecting the
-    // overflow by performing it would trap in a checked build and wrap to a
-    // too-small capacity in a release build.
-    // D3.1, D11.1
+    // Test the sum before computing it.
     if (extra > U64_MAX - b->len) {
         panic("strbuf.reserve: capacity overflow");
     }
@@ -63,8 +43,7 @@ fn reserve(str_buf mut* b, u64 extra) void {
     if (need > cap) {
         cap = need;
     }
-    // Doubling is skipped when it cannot be represented; need is then above
-    // half the address space already, so new is about to fail in any case.
+    // Skip doubling when the result cannot fit in u64.
     if (b->data.len <= U64_MAX / 2 && b->data.len * 2 > cap) {
         cap = b->data.len * 2;
     }
@@ -74,20 +53,12 @@ fn reserve(str_buf mut* b, u64 extra) void {
     b->data = move(bigger);
 }
 
-/// The bytes the storage holds, so cap(b) - b->len is the room a further append
-/// uses without growing; create() answers 0 and only free() lowers it
-/// (stdlib.md 2.6). A program that measures its own allocation calls this
-/// rather than reading the field. The name is the one with_cap already uses,
-/// and the parameter of with_cap shadows it inside that function, which the
-/// shadowing rule permits.
-/// D7.9
+/// Returns the current capacity in bytes.
 fn cap(str_buf* b) u64 {
     return b->data.len;
 }
 
-/// Appends one character. char has no arithmetic, so it is cast to its byte
-/// first.
-/// D3.2
+/// Appends one character byte.
 fn push(str_buf mut* b, char ch) void {
     push_byte(b, cast(ch, u8));
 }
@@ -99,35 +70,28 @@ fn push_byte(str_buf mut* b, u8 v) void {
     b->len += 1;
 }
 
-/// Appends the bytes of s. Precondition: s must not alias b's own storage,
-/// because growth frees that storage before copying (not detected).
+/// Appends the bytes of s.
+/// s must not alias b->data because growth can replace the data before copying.
 fn append(str_buf mut* b, string s) void {
     append_bytes(b, cast(s, u8@));
 }
 
-/// The same for a byte span, with the same aliasing precondition.
+/// Appends src. src must not alias b->data.
 fn append_bytes(str_buf mut* b, u8@ src) void {
     reserve(b, src.len);
-    // reserve has proved that len + src.len fits, so the sum below cannot
-    // overflow whatever the build mode.
-    // D11.1
+    // reserve proves that the new length fits in u64.
     mem.copy(b->data[b->len..b->len + src.len], src);
     b->len += src.len;
 }
 
-/// Appends the decimal text of v, with a leading - for negatives; the digits
-/// are the ones print would produce.
-/// D11.7
+/// Appends the decimal text of v.
 fn append_i64(str_buf mut* b, i64 v) void {
     if (v >= 0) {
         append_u64(b, cast(v, u64));
         return;
     }
     push(b, '-');
-    // The magnitude of the i64 minimum has no i64 negation, so every negative
-    // magnitude is taken in u64 with the wrapping subtract: both build modes
-    // then agree.
-    // D11.1, D11.2
+    // Compute negative magnitudes in u64 to support I64_MIN.
     append_u64(b, 0 -% cast(v, u64));
 }
 
@@ -137,7 +101,7 @@ fn append_u64(str_buf mut* b, u64 v) void {
         push(b, '0');
         return;
     }
-    // 18446744073709551615 is twenty digits, the widest u64 there is.
+    // A u64 has at most 20 decimal digits.
     u8[20] mut digits = {};
     u64 mut n = 0;
     u64 mut rest = v;
@@ -157,9 +121,7 @@ fn clear(str_buf mut* b) void {
     b->len = 0;
 }
 
-/// Shortens the buffer to len bytes; a length above the current one is a
-/// violated precondition and panics.
-/// D13.3
+/// Shortens the buffer to len bytes. Panics when len exceeds the current length.
 fn truncate(str_buf mut* b, u64 len) void {
     if (len > b->len) {
         panic("strbuf.truncate: beyond len");
@@ -167,23 +129,18 @@ fn truncate(str_buf mut* b, u64 len) void {
     b->len = len;
 }
 
-/// The contents as text: an alias, not NUL-terminated. Ownership: a view, valid
-/// until the next mutating call on *b; del on it does not compile.
-/// D17.3, D17.9
+/// Returns the contents as text without a NUL terminator.
 fn view(str_buf* b) string {
     return cast(b->data[..b->len], string);
 }
 
-/// The same span as bytes, with the same lifetime.
+/// Returns the contents as bytes.
 fn bytes(str_buf* b) u8@ {
     return b->data[..b->len];
 }
 
-/// An exact-size heap copy of the contents, not NUL-terminated; the buffer is
-/// left empty and keeps its storage for reuse. An empty buffer yields a
-/// zero-length, non-null allocation. Ownership: returns string own, so the
-/// caller binds it, passes it on or dels it.
-/// D10.2, D17.12
+/// Copies the contents without a NUL terminator, then empties the buffer.
+/// An empty buffer returns a zero-length, non-null allocation.
 fn take(str_buf mut* b) string own {
     u8 mut@ own copy = new(u8, b->len);
     mem.copy(copy, b->data[..b->len]);

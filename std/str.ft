@@ -1,19 +1,14 @@
-// std.str: operations on string (stdlib.md 2.5). None of them allocates unless
-// its comment says so; the three that do return own values.
-// D3.7, D13.2, D13.5
+/// Provides string comparison, search, conversion, parsing, and ASCII classification.
 import std.libc;
 import std.mem;
 
-/// The same as a == b; it exists so that equality can be a function value. A
-/// string own operand lends. Ownership: none.
-/// D3.7, D17.4
+/// Performs string equality as a function value.
 fn equal(string a, string b) bool {
     return a == b;
 }
 
-/// Lexicographic order by unsigned byte value, the order < gives char, with a
-/// proper prefix sorting first; returns -1, 0 or 1. Ownership: none.
-/// D3.2
+/// Compares unsigned bytes lexicographically and sorts a proper prefix first.
+/// Returns -1, 0, or 1.
 fn cmp(string a, string b) i32 {
     u64 mut n = a.len;
     if (b.len < n) {
@@ -38,11 +33,7 @@ fn cmp(string a, string b) i32 {
     return 0;
 }
 
-/// 64-bit FNV-1a: start from the offset basis and, for each byte, xor it in and
-/// multiply by the prime. The wrapping multiply makes the value identical in
-/// both build modes; the empty string hashes to the offset basis. Fixed by
-/// stdlib.md 2.5 because strmap and on-disk formats depend on it.
-/// D11.2
+/// Returns the 64-bit FNV-1a hash. The empty string returns the offset basis.
 fn hash(string s) u64 {
     u64 mut h = 0xcbf29ce484222325;
     for (char ch : s) {
@@ -52,8 +43,7 @@ fn hash(string s) u64 {
     return h;
 }
 
-/// prefix.len <= s.len && s[..prefix.len] == prefix. An empty prefix always
-/// matches. Ownership: none.
+/// Reports whether s starts with prefix. An empty prefix matches.
 fn starts_with(string s, string prefix) bool {
     if (prefix.len > s.len) {
         return false;
@@ -61,7 +51,7 @@ fn starts_with(string s, string prefix) bool {
     return s[..prefix.len] == prefix;
 }
 
-/// The mirror image for suffixes; an empty suffix always matches.
+/// Reports whether s ends with suffix. An empty suffix matches.
 fn ends_with(string s, string suffix) bool {
     if (suffix.len > s.len) {
         return false;
@@ -69,7 +59,7 @@ fn ends_with(string s, string suffix) bool {
     return s[s.len - suffix.len..] == suffix;
 }
 
-/// Position of the first ch in s, or -1. Ownership: none.
+/// Returns the first position of ch, or -1 when absent.
 fn index_of(string s, char ch) i64 {
     u64 mut i = 0;
     while (i < s.len) {
@@ -81,7 +71,7 @@ fn index_of(string s, char ch) i64 {
     return -1;
 }
 
-/// Position of the last ch in s, or -1. Ownership: none.
+/// Returns the last position of ch, or -1 when absent.
 fn last_index_of(string s, char ch) i64 {
     u64 mut i = s.len;
     while (i > 0) {
@@ -93,8 +83,8 @@ fn last_index_of(string s, char ch) i64 {
     return -1;
 }
 
-/// Position of the first occurrence of needle in s, or -1; an empty needle is
-/// found at 0. Simple quadratic search, adequate for source-sized inputs.
+/// Returns the first position of needle, or -1 when absent.
+/// An empty needle returns 0.
 fn find(string s, string needle) i64 {
     if (needle.len > s.len) {
         return -1;
@@ -109,19 +99,15 @@ fn find(string s, string needle) i64 {
     return -1;
 }
 
-/// Heap copy of s with result.len == s.len, not NUL-terminated. dup("") is a
-/// zero-length, non-null allocation. The move empties buf, so no second owning
-/// copy survives. Ownership: returns string own; the caller binds it, passes it
-/// on or dels it.
-/// D10.2, D17.14, D17.12
+/// Copies s without a NUL terminator.
+/// An empty string produces a zero-length, non-null allocation.
 fn dup(string s) string own {
     u8 mut@ own buf = new(u8, s.len);
     mem.copy(buf, cast(s, u8@));
     return cast(move(buf), string own);
 }
 
-/// Heap copy of a followed by b, not NUL-terminated; result.len is
-/// a.len + b.len, which is also the allocation size. Ownership: as dup.
+/// Copies a followed by b without a NUL terminator.
 fn concat(string a, string b) string own {
     u8 mut@ own buf = new(u8, a.len + b.len);
     mem.copy(buf[..a.len], cast(a, u8@));
@@ -129,22 +115,15 @@ fn concat(string a, string b) string own {
     return cast(move(buf), string own);
 }
 
-/// The one sanctioned way to hand a string to C: a heap copy with a trailing
-/// '\0', of length s.len + 1, whose .ptr is the C string and whose [..s.len] is
-/// the text. new(char, n) is already zeroed, so the last byte is the
-/// terminator. If s contains \0, C sees the prefix. Ownership: returns char
-/// mut@ own; the caller releases it with del.
-/// D13.4, D10.2
+/// Copies s and adds a trailing NUL for C.
+/// If s contains a NUL, C reads only the prefix.
 fn to_cstr(string s) char mut@ own {
     char mut@ own buf = new(char, s.len + 1);
     mem.copy(cast(buf[..s.len], u8 mut@), cast(s, u8@));
     return buf;
 }
 
-/// Wraps the C string at p without copying, so the result aliases p and stays
-/// valid as long as p does; from_cstr(null) is the zero string. Ownership: a
-/// view of whatever owns p; del on it does not compile.
-/// D17.3
+/// Wraps a C string without copying. A null pointer returns an empty string.
 fn from_cstr(char* p) string {
     if (p == null) {
         string zero = {};
@@ -153,12 +132,8 @@ fn from_cstr(char* p) string {
     return cast(p[0..libc.strlen(p)], string);
 }
 
-/// Decimal with an optional leading -, at least one digit and nothing else: no
-/// +, no whitespace, no _. Returns false on a syntax error or when the value
-/// does not fit i64; -9223372036854775808 is accepted. Overflow is detected
-/// arithmetically, before the multiply, so neither build mode's behavior is
-/// relied on. On failure *out is unchanged.
-/// D11.1, D13.3
+/// Parses decimal digits with an optional leading minus sign.
+/// Returns false for other syntax or overflow and leaves *out unchanged.
 fn parse_i64(string s, i64 mut* out) bool {
     u64 mut i = 0;
     bool mut negative = false;
@@ -169,10 +144,7 @@ fn parse_i64(string s, i64 mut* out) bool {
     if (i >= s.len) {
         return false;
     }
-    // The largest magnitude each sign admits: i64 MAX, and MIN's magnitude.
-    // Both bounds are named, as parse_u64 names its own, so that the value
-    // the negation below depends on cannot drift away from the one the loop
-    // enforces.
+    // Keep both sign limits beside the arithmetic that enforces them.
     u64 i64_max = 9223372036854775807;
     u64 i64_min_magnitude = 9223372036854775808;
     u64 mut limit = i64_max;
@@ -185,7 +157,7 @@ fn parse_i64(string s, i64 mut* out) bool {
             return false;
         }
         u64 value = cast(digit_value(s[i]), u64);
-        // magnitude * 10 + value <= limit, without performing the multiply.
+        // Test the next value without overflowing the multiplication.
         if (magnitude > (limit - value) / 10) {
             return false;
         }
@@ -197,10 +169,7 @@ fn parse_i64(string s, i64 mut* out) bool {
         return true;
     }
     if (magnitude == i64_min_magnitude) {
-        // MIN's magnitude is 2^63, whose bits are MIN itself, and a same-width
-        // sign change reinterprets. So the one magnitude with no i64 negation
-        // is delivered by the cast alone and -MIN is never computed.
-        // D3.14
+        // A cast produces I64_MIN without computing its invalid negation.
         *out = cast(i64_min_magnitude, i64);
         return true;
     }
@@ -208,11 +177,9 @@ fn parse_i64(string s, i64 mut* out) bool {
     return true;
 }
 
-/// Digits of base (2 to 36) using 0-9, a-z and A-Z, no sign, no 0x prefix, no _
-/// (stripping prefixes and separators is the lexer's job). Returns false when s
-/// is empty, base is out of range, a character is not a digit below base, or
-/// the value overflows u64. On failure *out is unchanged.
-/// D13.3
+/// Parses digits for a base from 2 through 36.
+/// Returns false for empty input, invalid digits, invalid bases, or overflow.
+/// A failure leaves *out unchanged. The function accepts no sign, prefix, or separator.
 fn parse_u64(string s, u64 base, u64 mut* out) bool {
     if (base < 2 || base > 36) {
         return false;
@@ -231,7 +198,7 @@ fn parse_u64(string s, u64 base, u64 mut* out) bool {
         if (value >= base) {
             return false;
         }
-        // result * base + value <= u64_max, without performing the multiply.
+        // Test the next value without overflowing the multiplication.
         if (result > (u64_max - value) / base) {
             return false;
         }
@@ -241,9 +208,7 @@ fn parse_u64(string s, u64 base, u64 mut* out) bool {
     return true;
 }
 
-/// The value of ch as a digit in bases up to 36 ('7' is 7, 'b' and 'B' are 11),
-/// or -1. char has no arithmetic, so the byte is cast first.
-/// D3.2
+/// Returns the base-36 digit value of ch, or -1 for a non-digit.
 fn digit_value(char ch) i64 {
     i64 byte = cast(ch, i64);
     if (ch >= '0' && ch <= '9') {
@@ -258,14 +223,12 @@ fn digit_value(char ch) i64 {
     return -1;
 }
 
-/// ASCII classification: every byte at or above 0x80 classifies as false, which
-/// the unsigned byte order of char gives for free.
-/// D3.2
+/// Reports whether ch is an ASCII decimal digit.
 fn is_digit(char ch) bool {
     return ch >= '0' && ch <= '9';
 }
 
-/// A-Z and a-z, not _.
+/// Reports whether ch is an ASCII letter.
 fn is_alpha(char ch) bool {
     return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
 }
@@ -274,7 +237,7 @@ fn is_alnum(char ch) bool {
     return is_digit(ch) || is_alpha(ch);
 }
 
-/// Space, \t, \n, \x0b, \x0c, \r.
+/// Reports whether ch is an ASCII whitespace byte.
 fn is_space(char ch) bool {
     return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\x0b' || ch == '\x0c' || ch == '\r';
 }
