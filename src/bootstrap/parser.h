@@ -1,64 +1,11 @@
-// The parser of the bootstrap compiler (toolchain.md 8, parser): recursive
-// descent over the token array of one file, producing one AST_MODULE node in
-// the caller's arena.
+// Parses one token array into a syntax tree.
 //
-// The file mirrors what the self-hosted compiler will do: no unions, no
-// function pointers, no macros beyond constants, plain switches on the current
-// token.
+// The parser recovers at statement, case, field, and declaration boundaries.
+// It keeps skipped regions as AST_ERROR nodes and continues through the file.
+// Speculative parses never report diagnostics and always rewind.
+// The parser limits nested constructs to 256 levels.
 //
-// Diagnostics. A syntax error is reported and recovered from, so a file
-// reports one diagnostic for each construct that failed. The first report
-// starts an unwind: every parse function returns NULL from there on, reporting
-// nothing, until one of the recovery points of toolchain.md 4 -- the
-// statements of a block or of a case clause, the clauses of a switch, the
-// fields of a struct, the declarations of the module -- skips what is left of
-// the failed construct, keeps it as an AST_ERROR node and parses on. The
-// parser reports at most twenty errors per file and never two in a row that
-// start at the same place, and it parses on after either, so the tree always
-// covers the whole file.
-// D14.2
-//
-// Two rules are not skips, for the braces an edit in progress is missing. A
-// block, a case clause, a struct body and an enum body also end where a
-// top-level declaration starts, which is `struct`, `enum`, `extern`, `import`
-// or a `fn` whose return type is followed by an identifier; without it every
-// following function would cost one cascaded diagnostic. And the `{` of a
-// function, struct or enum body may be missing: the header before it is
-// complete, so the brace is reported once and the body is read as though it
-// were there, rather than one statement at a time as declarations.
-//
-// Speculation. The grammar is LL(1) but for the three points of grammar.md 7:
-// the declaration-versus-statement choice, the array literal in an expression
-// and the two `for` forms. Each is decided by a speculative parse over the
-// token array that reports nothing and always rewinds, after which the
-// committed parse re-parses the same tokens loudly. A rewind therefore leaves
-// no diagnostics, and an error inside a speculation is reported once, by
-// whichever branch the decision committed to.
-//
-// Nesting. Blocks, brace initializers, bracketed groups, unary operands,
-// conditional branches and types count towards one depth limit of 256, so the
-// parser's recursion is bounded and the self-hosted compiler needs no
-// unbounded stack.
-// D2.11
-//
-// Type placement rules. The parser refuses the spellings the marker rules make
-// unwritable, since all of them are decidable from the written form: a `mut`
-// or `own` before the base type, a marker written twice in one position, a
-// `mut` before the `own` of its position, a `mut` on the position a
-// fixed-array suffix follows, an `own` after a fixed-array suffix or after a
-// base type other than `string`, and an array suffix after a trailing
-// reference suffix. What needs the resolved type stays with the type builder
-// and the checker: whether a named base is a reference, `void` outside
-// `void*`, an array length that is not a positive constant, and a `mut` in the
-// outermost position of a field, a return type or a cast target.
-// D3.6, D5.3, D17.2
-//
-// Features the C bootstrap deliberately lacks are reported here as `not
-// supported by the bootstrap compiler: <feature>` (toolchain.md 7.3): float
-// literals, a second array or span level in one type (`i32[3][4]`, `i32[4]@`,
-// `u8@@`, `node@[4]`), `do`-`while` and `?:`. A speculative parse skips the
-// check, so the construct still decides the shape and the committed parse
-// reports it.
+// The bootstrap rejects float literals, nested aggregate types, `do`-`while`, and `?:`.
 #ifndef FORT_PARSER_H
 #define FORT_PARSER_H
 
@@ -67,18 +14,11 @@
 #include "ast.h"
 #include "lexer.h"
 
-/// Parses the tokens of one file into an AST_MODULE whose list holds the imports
-/// then the declarations in source order. The tokens are the ones lex_file
-/// produced: they end in TOK_EOF, and the file's budget of diagnostics
-/// (DIAG_MAX_PER_FILE) is the one lex_file opened, so the syntax errors reported
-/// here are capped together with the lexical ones. `file` names the source in
-/// diagnostics. The nodes come from `arena` and the names in them are views into
-/// the source and into the pool the tokens were lexed with, so both must outlive
-/// the tree. The result is never NULL: a file with syntax errors yields the tree
-/// of everything that parsed, with an AST_ERROR node over each skipped region, so
-/// a caller asks whether the file parsed by comparing diag_count() before and
-/// after.
-/// D9.3, D14.2
+// Parses one file into an AST_MODULE node. Imports precede declarations in source order.
+// `toks` must end in TOK_EOF. The source and string pool must outlive the tree.
+// `arena` owns the result nodes.
+// Syntax errors use the budget that lex_file started.
+// The result is never NULL. Syntax errors produce a partial tree with AST_ERROR nodes.
 ast_node_t* parse_module(const char* file, const token_t* toks, uint64_t ntoks, ast_arena_t* arena);
 
 #endif

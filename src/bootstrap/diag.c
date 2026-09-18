@@ -4,14 +4,10 @@
 #include <stddef.h>
 #include <stdio.h>
 
-// One sink holds everything a run of diagnostics needs: the records and the pool
-// their messages are copied into, the error count, where the text lines go and
-// whether they are written at all, and the state of diag_mute. It is a global
-// because the compiler is a single-threaded batch job, and zeroed storage is a
-// valid empty sink, which is what a `mut` global with a `{}` initializer gives
-// the fort port. Text output is on until it is turned off, so the flag records
-// its absence.
-// D7.10
+// State for the global diagnostic sink.
+// The compiler uses one sink because it is a single-threaded batch job.
+// Zeroed storage is a valid empty sink.
+// Text output starts on, so the flag records its absence.
 typedef struct {
     diag_record_t* records;    // the diagnostics reported so far, or NULL
     uint64_t len;              // records in use
@@ -29,7 +25,6 @@ typedef struct {
 static diag_sink_t sink;
 
 // A position with no extent yet: the end is the start.
-// D20.4
 loc_t loc_make(const char* file, uint32_t line, uint32_t col) {
     return loc_range(file, line, col, line, col);
 }
@@ -66,7 +61,6 @@ bool loc_is_ordered(loc_t loc) {
 
 // The start of `a` and the later of the two ends, so extending never moves the
 // start and never shrinks the range.
-// D20.4
 loc_t loc_extend(loc_t a, loc_t b) {
     if (loc_ends_at_or_before(a, b)) {
         return loc_range(a.file, a.line, a.col, b.end_line, b.end_col);
@@ -74,16 +68,14 @@ loc_t loc_extend(loc_t a, loc_t b) {
     return a;
 }
 
-// Whether a diagnostic reported now is dropped: a muted one is counted by
-// diag_error and never written or recorded, so a probing parse costs nothing
-// and diag_count still says whether the file it read parsed.
+// Returns true while a mute is open.
+// A muted error changes the count until the outermost diag_unmute restores it.
 static bool diag_muted(void) {
     return sink.mute_depth > 0;
 }
 
-// Writes one `<file>:<line>:<col>: <kind>: <msg>` line (toolchain.md 4), the
+// Writes one `<file>:<line>:<col>: <kind>: <msg>` line, the
 // text form of a diagnostic, unless the text is muted or turned off.
-// D14.2
 static void diag_write(loc_t loc, const char* kind, const char* msg) {
     if (diag_muted() || sink.text_off) {
         return;
@@ -124,13 +116,8 @@ static void records_reserve(void) {
     sink.cap = cap;
 }
 
-// Keeps the diagnostic, with its whole range and a copy of its message, for the
-// structured form; a muted diagnostic is not reported and so is not recorded.
-//
-// The file name is copied too: the caller's own name dies with the module set
-// that read the file, while a record is read after the front end returned, so a
-// record owns every byte it hands out.
-// D20.2, D20.4
+// Stores a diagnostic for structured output. A muted diagnostic is not stored.
+// Copies the message and file name because callers can release their source data.
 static void record_append(loc_t loc, diag_severity_t severity, const char* msg) {
     if (diag_muted()) {
         return;
@@ -149,7 +136,6 @@ static void record_append(loc_t loc, diag_severity_t severity, const char* msg) 
 
 // A file's budget is spent by its lexer and by its parser alike, so the count
 // they cap on is this one.
-// D14.2
 void diag_begin_file(void) {
     sink.file_errors = 0;
 }
@@ -166,7 +152,6 @@ void diag_error(loc_t loc, const char* msg) {
 }
 
 // A note belongs to the error before it and is not counted.
-// D14.2
 void diag_note(loc_t loc, const char* msg) {
     diag_write(loc, "note", msg);
     record_append(loc, DIAG_NOTE, msg);
@@ -234,7 +219,6 @@ diag_record_t diag_record_at(uint64_t i) {
 
 // The range of a diagnostic: the start the text form prints and the exclusive
 // end an editor underlines, both 1-based byte columns.
-// D14.2, D20.4
 static void write_range(json_t* j, loc_t loc) {
     json_key(j, "file");
     json_cstr(j, loc.file);
@@ -260,7 +244,6 @@ static const char* severity_name(diag_severity_t severity) {
 
 // The record at `i` as one diagnostic, with the notes that follow it nested
 // under it: a note belongs to the error it follows.
-// D14.2
 static void write_diagnostic(json_t* j, uint64_t i) {
     const diag_record_t* rec = &sink.records[i];
     json_object_begin(j);
@@ -288,8 +271,7 @@ static void write_diagnostic(json_t* j, uint64_t i) {
 
 void diag_write_json(json_t* j) {
     json_array_begin(j);
-    // A note is written under the error it follows; one that follows no error
-    // stands alone rather than being dropped.
+    // A note is nested under its error. A note without an error stands alone.
     bool after_error = false;
     for (uint64_t i = 0; i < sink.len; i++) {
         const diag_severity_t severity = sink.records[i].severity;

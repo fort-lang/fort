@@ -1,72 +1,7 @@
-// ast: the syntax tree of the self-hosted compiler (toolchain.md 8, parser),
-// based on src/bootstrap/ast.h, ast.c and ast_dump.c: one fat
-// tagged node for every production of grammar.md, an arena that owns the
-// nodes, the small queries the later passes need, and the S-expression printer
-// `fort --ast` writes.
-// D14.1
-//
-// One node type carries every construct, so this file is what its C original
-// already was: no unions, no anonymous members, every field in the open.
-// `kind` names the production; `loc` is the range of the construct: it starts
-// at the construct's first token, except on the nodes named after an operator
-// or a punctuation mark (unary, binary, assignment, increment, call, index,
-// span, field, arrow, type suffix), which start at that token, since a runtime
-// error is reported at the operator of the failing operation and the overwrite
-// check at the `=` of an assignment (toolchain.md 4), and ends one past the
-// last byte of the construct's last token; `name_loc` is the range of the name
-// token on a node a name declares or mentions; `op` is the small kind code the
-// construct needs (a token kind for an operator, a suffix kind for a type
-// suffix, a primitive kind for a primitive type); `a` to `d` are the fixed
-// children, absent ones null; `list` holds the children of variable arity
-// (statements of a block, arguments of a call, suffixes of a type); `name` is
-// an identifier or the bytes of a literal; `ival` is a literal's value;
-// `flags` holds the marks (`own`, `mut`, `extern`, designated, `default`).
-// D20.4, D17.11
-//
-// A node is never freed on its own: the arena owns every node and its list,
-// and frees them together (toolchain.md 8, memory). Names and literal bytes
-// are views into the source or into the session's pool, so the session must
-// outlive the tree.
-//
-// The annotation slots src/bootstrap/ast.h ends with are here: `ty` is the
-// checked type of an expression or of a written type, `sym` the declaration
-// the node's own name token denotes, `ann` the checker's bits and `aux` the
-// index or the byte offset one of those bits gives a meaning to (check.ft).
-// The parser writes none of them and the checker clears them before it writes
-// them, so a tree checked twice starts from what the parser left. They are
-// spelled `ty` and not `type` because `type` is reserved, as types.ft's
-// `build_result.built` is.
-// D20.2, D2.4
-//
-// The symbol record of src/bootstrap/sym.h stands in this module rather than
-// in one of its own, which is the one structural difference from the C: a node
-// points at the symbol its name denotes and a symbol points back at the node
-// that declares it, and fort has no forward declaration across modules, so two
-// modules holding those two types would import each other. The C header spells
-// the same cycle `struct ast_node` and gets away with it because a C header
-// may name an incomplete type. Everything else about the record is what sym.h
-// says it is.
-// D9.5
-//
-// Names: the kind enum members carry a `k_` prefix, as types.ft's do, because
-// two thirds of the C constants' bare names are keywords (`if`, `while`,
-// `struct`, `char`, `null`, `cast`, `new`) and cannot be members; the
-// functions keep their C names, so a reader holds the two files against each
-// other name by name.
-// D2.4
-//
-// Re-entrancy: the arena is a value the caller owns and frees, not a
-// module-level pool, so two analyses in one process are two arenas and share
-// nothing, and every node of an analysis dies with its arena. Nothing here
-// ends the process: an index past the end of a list is a violated precondition
-// and panics at the call that broke it, where src/bootstrap/ast.c calls
-// fatal_internal. A panic aborts like any other failure, so what it buys is a
-// documented boundary, not in-process recovery.
-// D20.5, D13.3, D11.4
-//
-// Dispatch: none. The case analysis is the switches the C wrote, over the kind
-// enum, and no table of function pointers.
-// D3.10
+/// Defines syntax-tree nodes, semantic annotations, arena operations, and S-expression output.
+///
+/// A node location covers its construct. Operator nodes start at the operator token.
+/// The parser leaves annotation fields clear. Later passes fill them.
 import containers;
 import diag;
 import lexer;
@@ -74,16 +9,14 @@ import prim;
 import types;
 import std.strbuf;
 
-/// The productions of grammar.md, in its order: declarations, types,
-/// statements, expressions, then the region no production accepted.
-/// D14.2
+/// Syntax-tree node kinds in declaration, type, statement, and expression groups.
 enum ast_kind {
     k_none, // never produced by the parser; the zero of a fresh node
 
-    // ---- module and declarations (grammar.md 2, 3) ----
+    // ---- module and declarations ----
     k_module,      // list: imports then declarations, in source order
     k_import,      // a: path; b: `as` alias or null; list: brace items
-    k_path, // D9.1: list: the identifiers of an import path
+    k_path, // list: the identifiers of an import path
     k_import_item, // name: the symbol; a: `as` alias or null
     k_fn_decl,     // a: return type; list: params; b: body, null when extern
     k_param,       // a: type; name: the parameter
@@ -92,25 +25,25 @@ enum ast_kind {
     k_enum_decl,   // name; list: members
     k_enum_member, // name; a: the explicit value or null
     k_var_decl,    // a: type; name; b: initializer (a global or a local)
-    k_compile_if,  // D21.2: a: condition; b: then block; c: else block or k_compile_if
+    k_compile_if,  // a: condition; b: then block; c: else block or k_compile_if
 
-    // ---- types (grammar.md 4) ----
+    // ---- types ----
     k_type,          // a: base type; flags: the base position's own and mut;
                      // list: the suffixes in source order
     k_type_prim,     // op: the prim_kind of prim.ft
     k_type_string,   // `string`
     k_type_void,     // `void`
-    k_type_noreturn, // D8.5: `noreturn`, a return type only
-    k_type_name, // D9.4: name: the first identifier; a: the second or null
-    k_type_fn, // D3.10: a: return type; list: parameter types
+    k_type_noreturn, // `noreturn`, a return type only
+    k_type_name, // name: the first identifier; a: the second or null
+    k_type_fn, // a: return type; list: parameter types
     k_type_suffix,   // op: a suffix_kind of types.ft; flags: own and mut;
                      // a: the length of an array suffix
 
-    // ---- statements (grammar.md 5) ----
+    // ---- statements ----
     k_block,      // list: the statements
     k_assign,     // op: the assignment token; a: target; b: value
     k_incdec,     // op: plus_plus or minus_minus; a: target
-    k_call_stmt, // D7.3: a: the call expression
+    k_call_stmt, // a: the call expression
     k_if,         // a: condition; b: then block; c: else block or k_if
     k_while,      // a: condition; b: body
     k_do_while,   // a: body; b: condition
@@ -118,81 +51,75 @@ enum ast_kind {
     k_range_for,  // a: element type; name: the element; b: collection; c: body
     k_switch,     // a: the operand; list: the case clauses
     k_case,       // list: the labels, empty with FLAG_DEFAULT; a: body block
-    k_defer, // D7.8: a: the deferred statement
+    k_defer, // a: the deferred statement
     k_return,     // a: the value or null
     k_break,      //
     k_continue,   //
     k_brace_init, // list: the initializers; FLAG_DESIGNATED for `.f = v`
     k_designator, // name: the field; a: its initializer
 
-    // ---- expressions (grammar.md 6) ----
-    k_int, // D2.5: ival: the magnitude
-    k_float, // D2.6: name: the literal
-    k_char, // D2.7: ival: the byte value
-    k_string, // D2.9: name: the decoded bytes
-    k_cfg, // D21.1: name: the configuration key
+    // ---- expressions ----
+    k_int, // ival: the magnitude
+    k_float, // name: the literal
+    k_char, // ival: the byte value
+    k_string, // name: the decoded bytes
+    k_cfg, // name: the configuration key
     k_bool,       // ival: 1 for `true`, 0 for `false`
-    k_null, // D10.5: `null`
+    k_null, // `null`
     k_ident,      // name: the identifier
     k_unary,      // op: the operator token; a: the operand
     k_binary,     // op: the operator token; a, b: the operands
-    k_ternary, // D6.6: a: condition; b: then; c: else
+    k_ternary, // a: condition; b: then; c: else
     k_call,       // a: the callee; list: the arguments
-    k_index, // D6.8: a: the operand; b: the index
-    k_span, // D6.9: a: the operand; b: low or null; c: high or null
+    k_index, // a: the operand; b: the index
+    k_span, // a: the operand; b: low or null; c: high or null
     k_field,      // a: the operand; name: the field (`.`)
-    k_arrow, // D6.10: a: the operand; name: the field (`->`)
-    k_cast, // D6.4: a: the expression; b: the target type
-    k_sizeof, // D3.15: a: the type
-    k_new, // D10.2: a: the allocated type; b: the count or null
-    k_struct_lit, // D6.5: a: the qualified name; b: the brace initializer
-    k_array_lit, // D6.5: a: the array type; b: the brace initializer
+    k_arrow, // a: the operand; name: the field (`->`)
+    k_cast, // a: the expression; b: the target type
+    k_sizeof, // a: the type
+    k_new, // a: the allocated type; b: the count or null
+    k_struct_lit, // a: the qualified name; b: the brace initializer
+    k_array_lit, // a: the array type; b: the brace initializer
 
     /// The tokens a syntax error made the parser skip; never has children. It stands
     /// wherever a list holds children of that level, so every pass that walks such a
     /// list skips a node of this kind.
-    /// D14.2
     k_error,
 }
 
 /// The bits of `flags`.
-/// D1.4
-u32 FLAG_OWN = 1; // D17.2: k_type, k_type_suffix: an `own` in the position
-u32 FLAG_MUT = 2; // D5.3: k_type, k_type_suffix: a `mut` in the position
-u32 FLAG_EXTERN = 4; // D9.8: k_fn_decl: an `extern fn` declaration
-u32 FLAG_DEFAULT = 8; // D7.6: k_case: the `default` clause
-u32 FLAG_DESIGNATED = 16; // D6.5: k_brace_init: `.field = value` members
-u32 FLAG_VARIADIC = 32; // D9.8: k_fn_decl: an extern C variable tail
-u32 FLAG_SELECT_DONE = 64; // D21.2: k_compile_if: the selector evaluated the condition
-u32 FLAG_SELECT_THEN = 128; // D21.2: k_compile_if: the selector chose the then branch
-u32 FLAG_SELECT_REF = 256; // D20.3: k_ident: the selector resolved this condition reference
-u32 FLAG_IMPORT_SELECTOR = 512; // D21.3: k_compile_if: branches select imports
+u32 FLAG_OWN = 1; // k_type, k_type_suffix: an `own` in the position
+u32 FLAG_MUT = 2; // k_type, k_type_suffix: a `mut` in the position
+u32 FLAG_EXTERN = 4; // k_fn_decl: an `extern fn` declaration
+u32 FLAG_DEFAULT = 8; // k_case: the `default` clause
+u32 FLAG_DESIGNATED = 16; // k_brace_init: `.field = value` members
+u32 FLAG_VARIADIC = 32; // k_fn_decl: an extern C variable tail
+u32 FLAG_SELECT_DONE = 64; // k_compile_if: the selector evaluated the condition
+u32 FLAG_SELECT_THEN = 128; // k_compile_if: the selector chose the then branch
+u32 FLAG_SELECT_REF = 256; // k_ident: the selector resolved this condition reference
+u32 FLAG_IMPORT_SELECTOR = 512; // k_compile_if: branches select imports
 
-/// The first non-zero capacity of a child list and of the arena's node vector;
-/// growth doubles from there.
+// The first non-zero capacity of a child list and of the arena's node vector;
+// growth doubles from there.
 u64 LIST_MIN_CAP = 4;
 u64 ARENA_MIN_CAP = 64;
 
 // ---- the node and its child list -----------------------------------------------
 
-/// One node. Every field a kind does not use holds its zero value, as the C's
-/// fat struct does.
+/// One syntax-tree node. Fields that do not apply to its kind have zero values.
 struct node {
     ast_kind kind;
     diag.loc loc;
-    /// The range of the name token of a node a name declares or mentions, and the
-    /// empty range on every other node. It is a whole loc, repeating `loc`'s file on a
-    /// node that has a name, so a name range is passed to diag.error and printed like
-    /// any other range.
-    /// D20.4
+    /// The range of a name that this node declares or mentions. Other nodes use an empty range.
+    /// The range repeats `loc.file`, so callers can pass it directly to `diag.error`.
     diag.loc name_loc;
-    diag.loc tail_loc; // D9.8: location of `...` on an extern declaration
+    diag.loc tail_loc; // location of `...` on an extern declaration
     i32 op;      // a tok_kind, a suffix_kind or a prim_kind; 0 otherwise
     node mut* a; // the fixed children, in the order the comments above give
     node mut* b;
     node mut* c;
     node mut* d;
-    node_vec list; // the children of variable arity, owned by the arena
+    node_vec list; // variable-arity children
     string name;   // an identifier or the bytes of a literal
     u64 ival;      // an integer or char literal, 0 or 1 for a bool
     u32 flags;
@@ -200,51 +127,36 @@ struct node {
     // ---- the checker's annotations (check.ft) ----
     // The type of an expression or of a written type, null until the checker writes
     // it; `type` is reserved, so the slot the C calls `type` is `ty`.
-    // D2.4
     types.node* ty;
-    /// Null on every node without its own name token. The record is reached for
-    /// writing from an immutable view of the node, because the resolution writes
-    /// the type and the flags of a declaration it looked up. So the field carries
-    /// the `mut` that a cast may no longer add.
-    /// D3.14, D5.9, D20.3
+    /// The resolved symbol for this name, or null when the node has no name.
     sym mut* sym;
-    /// The checker's bits, one mask it owns entirely (check.ft), and the slot whose
-    /// meaning one of those bits gives: the index of a folded constant's value on an
-    /// expression, the byte offset of a field on a field declaration, so it is never
-    /// read without the bit that says which.
-    /// D3.8
+    /// Pass annotations. A bit in `ann` defines the meaning of `aux`.
     u32 ann;
     u64 aux;
 }
 
-/// The children of variable arity of one node. src/bootstrap/ast.h uses the
-/// ptrvec_t of containers.h, a vector of `void*`; a typed vector says the same
-/// thing without a cast at every read. `items.len` is the capacity and `len` the
-/// slots in use, as containers.str_vec is written. The vector owns its slots and
-/// borrows every node in them: the arena owns the nodes.
-/// D17.3
+// The variable-length children of one node. `items.len` is the capacity.
+// `len` is the number of used slots.
 struct node_vec {
     node mut* mut@ own items;
     u64 len;
 }
 
-/// Releases the slots of one list; the nodes they held belong to the arena and
-/// are left alone.
-/// D13.5
+// Clears one child list.
 fn list_free(node_vec mut* v) void {
     del(v->items);
     v->len = 0;
 }
 
-/// Ensures room for one more child, growing to the largest of LIST_MIN_CAP and
-/// twice the capacity.
+// Ensures room for one more child, growing to the largest of LIST_MIN_CAP and
+// twice the capacity.
 fn list_reserve(node_vec mut* v) void {
     if (v->len < v->items.len) {
         return;
     }
     u64 mut cap = LIST_MIN_CAP;
     if (v->items.len >= cap) {
-        // D11.1: nothing here may detect an overflow by performing one
+        // Check the limit before multiplication because fort traps on overflow.
         if (v->items.len > containers.U64_MAX / 2) {
             panic("ast.list_reserve: capacity overflow");
         }
@@ -261,14 +173,9 @@ fn list_reserve(node_vec mut* v) void {
 }
 
 // ---- symbols --------------------------------------------------------------------
-// D7.9, D20.3
 
-/// What a name denotes. The module-level kinds are the importable declarations of
-/// module-system.md 3; s_field and s_enum_member are reached through a type rather
-/// than through a scope; s_builtin is a universe function. The C's SYM_KIND_COUNT,
-/// one past the last kind for a table, is gone: a fort switch over an enum names
-/// every member and needs no sentinel.
-/// D3.9, D7.6, D12.2
+/// The declaration category that a name denotes.
+/// Fields and enum members resolve through a type. Builtins resolve from the universe scope.
 enum sym_kind {
     s_module,
     s_fn,
@@ -277,41 +184,26 @@ enum sym_kind {
     s_enum,
     s_enum_member,
     s_field,
-    s_const, // D7.10: a module-level immutable declaration
-    s_global, // D7.10: a module-level `mut` declaration
+    s_const, // a module-level immutable declaration
+    s_global, // a module-level `mut` declaration
     s_local,
     s_param,
     s_builtin,
 }
 
-/// One declaration, enum member, field or builtin. The checker writes these; the
-/// index walk, the symbol list of the structured output and a language server read
-/// them, so a record holds what a reader needs and nothing about checking
-/// (sym.h).
-///
-/// `node` is the declaring node, so `s->node->sym == s` for every record but a
-/// builtin's, which no source declares. `ty` is null for the two kinds that have
-/// no fort type, s_module and s_builtin, and is the error type of the table
-/// whenever `error` is set, so that every later diagnostic about the declaration
-/// is silenced by the poison the type table already carries.
-///
-/// A record lives as long as the checker that made it: every `sym` and `ty` slot
-/// of a tree dangles once check.free has run, so a pass that reads the annotations
-/// runs before it.
-/// D14.2
+/// One declaration, enum member, field, or builtin.
+/// `node` identifies its declaration. Modules and builtins have no fort type.
+/// A failed declaration uses the error type to prevent later duplicate diagnostics.
 struct sym {
     sym_kind kind;
     string name;
-    diag.loc decl; // D20.4: the declaring node's name_loc
+    diag.loc decl; // the declaring node's name_loc
     types.node* ty; // the error type when `error` is set
-    bool mut0; // D5.2: level-0 mutability, as types.type_to_str_decl spells it
-    /// The declaring node; null for a builtin. The resolution writes the
-    /// annotations of that node through a record it reads from an immutable
-    /// view, so the field carries the `mut`, as `sym` of a node does.
-    /// D3.14, D5.9
+    bool mut0; // level-0 mutability, as types.type_to_str_decl spells it
+    /// The declaration node, or null for a builtin.
     node mut* node;
     sym mut* owner; // the struct of a field, the enum of a member, the module
-    bool error; // D14.2: the declaration failed to check
+    bool error; // the declaration failed to check
 }
 
 /// The kind as a reader spells it: "module", "extern fn", "enum member",
@@ -347,39 +239,18 @@ fn sym_kind_name(sym_kind kind) string {
 
 // ---- the arena -----------------------------------------------------------------
 
-/// Owns every node it hands out. arena{} is a valid empty arena, so a struct
-/// holding one is initialized with {}.
-///
-/// src/bootstrap/ast.c hands nodes out of blocks of 256, because a C vector
-/// grows with realloc and would move the nodes a parse already points at. Here
-/// the vector holds an owned pointer per node, as types.ft's table does, so the
-/// nodes never move and the block bookkeeping disappears; ast_arena_count still
-/// answers the nodes handed out, which is what its callers ask.
-///
-/// That is a choice and not a limit of the language: a block is
-/// `struct block { node mut@ own nodes; }` and the arena a
-/// `block mut* mut@ own`, which is one wrapper struct away and would restore
-/// the C's 256 nodes per allocation. It is deferred, and the cost of deferring
-/// it is one allocation per node instead of one per 256 -- about 256 times the
-/// allocator traffic in the parser's hot path, which stage3 pays in full when
-/// it compiles the compiler. Whoever profiles the fixpoint should start
-/// here.
+/// Stores the nodes of one syntax tree. `arena{}` is an empty arena.
 struct arena {
     node mut* own mut@ own nodes;
     u64 count;
 }
 
-/// Zeroes the arena, as src/bootstrap/ast.c's init does over raw storage.
-/// `arena{}` is the same value, so a caller that declares its arena needs no
-/// call at all.
+/// Resets the arena to `arena{}`.
 fn ast_arena_init(arena mut* ar) void {
     *ar = arena{};
 }
 
-/// Releases every node and every node's list; the arena is empty and usable
-/// afterwards. A node owns its list and `del` is shallow, so the list goes before
-/// the node does.
-/// D17.7
+/// Removes all nodes and makes the arena empty.
 fn ast_arena_free(arena mut* ar) void {
     u64 mut i = 0;
     while (i < ar->count) {
@@ -396,8 +267,8 @@ fn ast_arena_count(arena* ar) u64 {
     return ar->count;
 }
 
-/// Ensures room for one more node, growing to the largest of ARENA_MIN_CAP and
-/// twice the capacity.
+// Ensures room for one more node, growing to the largest of ARENA_MIN_CAP and
+// twice the capacity.
 fn arena_reserve(arena mut* ar) void {
     if (ar->count < ar->nodes.len) {
         return;
@@ -419,9 +290,7 @@ fn arena_reserve(arena mut* ar) void {
     ar->nodes = move(bigger);
 }
 
-/// A zeroed node of `kind` at `loc`, owned by the arena and returned as a view
-/// of it.
-/// D17.3
+/// Adds a zeroed node of `kind` at `at_loc`.
 fn ast_new(arena mut* ar, ast_kind kind, diag.loc at_loc) node mut* {
     node mut* own fresh = new(node);
     fresh->kind = kind;
@@ -448,16 +317,7 @@ fn ast_len(node* n) u64 {
     return n->list.len;
 }
 
-/// The child at `i`, as the vector holds it: the slots are `node mut*`, so a
-/// caller that reached the parent through an immutable view still reaches a
-/// child it may annotate. The checker wants that, and a cast adds no `mut`.
-/// D3.14, D5.9
-///
-/// An index at or past the count is a violated precondition and panics, since
-/// the slots beyond it hold stale pointers. The two accessors share the one
-/// precondition and the one message, so a caller reads the same panic whichever
-/// of them it called.
-/// D13.3
+/// Returns child `i`. The function panics when `i` is outside the child list.
 fn ast_child_mut(node* n, u64 i) node mut* {
     if (i >= n->list.len) {
         panic("ast.ast_child: index out of range");
@@ -465,15 +325,12 @@ fn ast_child_mut(node* n, u64 i) node mut* {
     return n->list.items[i];
 }
 
-/// The child at `i` as a reader sees it: the same slot with the `mut` dropped,
-/// which is the one implicit conversion.
-/// D5.4, D13.3
+/// Returns child `i`. The function panics when `i` is outside the child list.
 fn ast_child(node* n, u64 i) node* {
     return ast_child_mut(n, i);
 }
 
 /// The marks of a type position, each written once and after what it qualifies.
-/// D5.3, D17.2
 fn ast_is_own(node* n) bool {
     return (n->flags & FLAG_OWN) != 0;
 }
@@ -604,16 +461,15 @@ fn ast_kind_name(ast_kind kind) string {
         return "struct-lit";
     case ast_kind.k_array_lit:
         return "array-lit";
-    // D14.2
     case ast_kind.k_error:
         return "error";
     }
     return "?";
 }
 
-// ---- the tree dump (--ast, toolchain.md 1) -------------------------------------
+// ---- the tree dump (--ast) ----------------------------------------
 
-/// Bytes outside this range print as \xHH inside a string literal.
+// Bytes outside this range print as \xHH inside a string literal.
 i64 PRINTABLE_LOW = 32;
 i64 PRINTABLE_HIGH = 126;
 u64 HEX_RADIX = 16;
@@ -674,9 +530,8 @@ fn sexp_list(node* n, strbuf.str_buf mut* out) void {
     }
 }
 
-/// The `own` and `mut` of a type position, in the order the source writes them:
-/// an `own` precedes the `mut` in a position.
-/// D17.2
+// The `own` and `mut` of a type position, in the order the source writes them:
+// an `own` precedes the `mut` in a position.
 fn sexp_marks(node* n, strbuf.str_buf mut* out) void {
     if (ast_is_own(n)) {
         sexp_word(out, "own");
@@ -726,8 +581,8 @@ fn dump_type(node* n, strbuf.str_buf mut* out) void {
     sexp_close(out);
 }
 
-/// Prints one compile-time chain without recursive calls along its `else $if`
-/// links. Branch contents still use the ordinary source-order tree walk.
+// Prints one compile-time chain without recursive calls along its `else $if`
+// links. Branch contents still use the ordinary source-order tree walk.
 fn dump_compile_if(node* n, strbuf.str_buf mut* out) void {
     node* mut current = n;
     u64 mut opened = 0;
@@ -926,7 +781,7 @@ fn dump_expr(node* n, strbuf.str_buf mut* out) void {
     sexp_close(out);
 }
 
-/// Whether the kind is one of the type productions, which dump_type prints.
+// Whether the kind is one of the type productions, which dump_type prints.
 fn is_type_kind(ast_kind kind) bool {
     return kind == ast_kind.k_type || kind == ast_kind.k_type_prim
         || kind == ast_kind.k_type_string || kind == ast_kind.k_type_void
@@ -934,7 +789,7 @@ fn is_type_kind(ast_kind kind) bool {
         || kind == ast_kind.k_type_fn;
 }
 
-/// Whether the kind is a declaration or the module, which dump_decl prints.
+// Whether the kind is a declaration or the module, which dump_decl prints.
 fn is_decl_kind(ast_kind kind) bool {
     return kind == ast_kind.k_module || kind == ast_kind.k_import || kind == ast_kind.k_path
         || kind == ast_kind.k_import_item || kind == ast_kind.k_fn_decl
@@ -944,7 +799,7 @@ fn is_decl_kind(ast_kind kind) bool {
         || kind == ast_kind.k_compile_if;
 }
 
-/// Whether the kind is a statement, which dump_stmt prints.
+// Whether the kind is a statement, which dump_stmt prints.
 fn is_stmt_kind(ast_kind kind) bool {
     return kind == ast_kind.k_block || kind == ast_kind.k_assign || kind == ast_kind.k_incdec
         || kind == ast_kind.k_call_stmt || kind == ast_kind.k_if || kind == ast_kind.k_while
@@ -955,15 +810,14 @@ fn is_stmt_kind(ast_kind kind) bool {
         || kind == ast_kind.k_brace_init || kind == ast_kind.k_designator;
 }
 
-/// Appends the S-expression of `n` to `out`; a null node prints as `nil`. It
-/// is what `fort --ast` writes and what the parser suites assert against.
+/// Appends the S-expression of `n` to `out`. A null node prints as `nil`.
+/// This format is the output of `fort --ast`.
 fn ast_dump(node* n, strbuf.str_buf mut* out) void {
     if (n == null) {
         strbuf.append(out, "nil");
         return;
     }
     if (n->kind == ast_kind.k_error) {
-        // D14.2
         strbuf.append(out, "(error)");
         return;
     }

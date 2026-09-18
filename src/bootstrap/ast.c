@@ -1,6 +1,5 @@
-// The syntax tree; see ast.h. The arena hands out nodes from blocks of
-// AST_ARENA_BLOCK_NODES and frees them, with each node's list, all at once
-// (toolchain.md 8, memory).
+// The syntax tree; see ast.h. The arena uses blocks of AST_ARENA_BLOCK_NODES.
+// It frees the blocks and all child lists together.
 #include "ast.h"
 
 #include <stdbool.h>
@@ -126,7 +125,6 @@ const char* ast_kind_name(ast_kind_t kind) {
         return "struct-lit";
     case AST_ARRAY_LIT:
         return "array-lit";
-    // D14.2
     case AST_ERROR:
         return "error";
     case AST_KIND_COUNT:
@@ -221,7 +219,6 @@ ast_node_t* ast_child(const ast_node_t* n, uint64_t i) {
 }
 
 // The marks of a type position, each written once and after what it qualifies.
-// D5.3, D17.2
 bool ast_is_own(const ast_node_t* n) {
     return (n->flags & AST_FLAG_OWN) != 0;
 }

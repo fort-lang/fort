@@ -70,7 +70,6 @@ static void sexp_list(const ast_node_t* n, sb_t* out) {
 
 // The `own` and `mut` of a type position, in the order the source writes them:
 // an `own` precedes the `mut` in a position.
-// D17.2
 static void sexp_marks(const ast_node_t* n, sb_t* out) {
     if (ast_is_own(n)) {
         sexp_word(out, "own");
@@ -338,7 +337,6 @@ void ast_dump(const ast_node_t* n, sb_t* out) {
     }
     switch (n->kind) {
     case AST_ERROR:
-        // D14.2
         sb_append(out, "(error)");
         return;
     case AST_TYPE:
