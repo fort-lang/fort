@@ -25,7 +25,6 @@ Standard library only; Python 3.12.
 import io
 import json
 import os
-import re
 import shutil
 import sys
 import tempfile
@@ -573,18 +572,6 @@ class TestTheRealTable(unittest.TestCase):
     def test_no_decision_is_named_twice(self):
         names = [row["decision"] for row in self.table["mutations"]]
         self.assertEqual(len(names), len(set(names)))
-
-    def test_the_audit_covers_the_73_decisions_the_four_files_cite(self):
-        # T-078 found 72 distinct `Dn.m` citations and added 76 rows. T-154
-        # adds 12 Darwin output-branch rows and the D10.8 source citation.
-        cited = set()
-        for name in self.table["sources"]:
-            text = (ROOT / name).read_text()
-            cited.update(re.findall(r"D[0-9]+\.[0-9]+", text))
-        mutated = {re.sub(r"[a-z]+$", "", row["decision"]) for row in self.table["mutations"]}
-        self.assertEqual(len(cited), 73)
-        self.assertEqual(sorted(cited), sorted(mutated))
-        self.assertEqual(len(self.table["mutations"]), 88)
 
     def test_every_row_of_the_table_leaves_no_row_stale_and_names_itself(self):
         """Every row, one at a time, applied the way a round applies it.

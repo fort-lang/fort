@@ -1,5 +1,4 @@
-// The compiler driver (toolchain.md 1 and 2); see driver.h.
-// D14.1, D14.3
+// Implements compiler modes and the C compiler invocation.
 #include "driver.h"
 
 #include <errno.h>
@@ -29,14 +28,13 @@
 #include "parser.h"
 #include "str.h"
 
-// The environment handed to the spawned `--cc`. POSIX declares it in
-// <unistd.h>, but glibc's is behind `#ifdef __USE_GNU`, which -std=c11 with
-// _POSIX_C_SOURCE does not set, so the driver declares it itself.
+// The environment handed to the spawned `--cc`. POSIX declares it in <unistd.h>. Glibc hides it
+// behind `#ifdef __USE_GNU`, which this C11 build does not set. The driver declares it here.
 extern char** environ;
 
 static const char USAGE_LINE[] = "usage: fort [options] entry.ft";
 
-// The option table of toolchain.md 1, printed by --help after the usage line.
+// The option table, printed by --help after the usage line.
 static const char* const HELP_LINES[] = {
     "options:",
     "  -o <file>          write the output to <file> (default a.out)",
@@ -61,8 +59,7 @@ static const char* const HELP_LINES[] = {
     "  --version          print the compiler version and exit",
 };
 
-// The directory the temporary of toolchain.md 2 is created in when TMPDIR is
-// not set, and the template mkdtemp fills in.
+// The driver uses `/tmp` when TMPDIR is unset. mkdtemp fills in the template.
 static const char TMP_DIR_DEFAULT[] = "/tmp";
 static const char TMP_DIR_TEMPLATE[] = "/fort-XXXXXX";
 
@@ -82,8 +79,7 @@ enum { EXE_PATH_FIRST_CAP = 256, EXE_PATH_MAX_CAP = 1 << 16 };
 // ---- messages ------------------------------------------------------------------
 
 // One `fort: error: <message>` line: usage errors, toolchain errors and internal
-// errors are reported that way and exit with 2 (toolchain.md 1).
-// D14.1
+// errors are reported that way and exit with 2.
 static void error_line(FILE* err, const char* message) {
     (void)fputs("fort: error: ", err);
     (void)fputs(message, err);
@@ -91,7 +87,7 @@ static void error_line(FILE* err, const char* message) {
 }
 
 // `fort: error: <what> '<path>': <reason>`, the form of
-// `cannot read 'x.ft': No such file or directory` (toolchain.md 1).
+// `cannot read 'x.ft': No such file or directory`.
 static void error_path(FILE* err, const char* what, const char* path, const char* reason) {
     sb_t m;
     sb_init(&m);
@@ -104,7 +100,7 @@ static void error_path(FILE* err, const char* what, const char* path, const char
     sb_free(&m);
 }
 
-// A usage error, followed by the usage line (toolchain.md 1).
+// A usage error, followed by the usage line.
 static void usage_error(FILE* err, const char* message, const char* detail) {
     sb_t m;
     sb_init(&m);
@@ -152,8 +148,7 @@ void driver_options_free(driver_options_t* opts) {
     ptrvec_free(&opts->cc_args);
 }
 
-// Whether the target has one of the two forms in toolchain.md 1.
-// D14.1
+// Whether the target has one of the two forms.
 static bool target_form(const char* target) {
     if (strcmp(target, "x86_64-linux-gnu") == 0) {
         return true;
@@ -179,7 +174,6 @@ static bool target_form(const char* target) {
 
 // Rejects a target that this IR mode cannot use before it creates output.
 // The token and AST modes do not call this function.
-// D14.1
 static bool target_allowed(const driver_options_t* opts, FILE* err) {
     if (!target_form(opts->target)) {
         usage_error(err, "unsupported target", opts->target);
@@ -224,7 +218,6 @@ static char* arg_at(const ptrvec_t* v, uint64_t i) {
 // The argument of an option that takes the following one, or NULL after
 // reporting the usage error; *i is left on the argument. -o, -I, --std-dir,
 // --cc, --target and -Xcc take the following argument, whatever it looks like.
-// D14.1
 static const char* take_argument(int argc, char** argv, int* i, FILE* err) {
     if (*i + 1 >= argc) {
         usage_error(err, "missing argument for option", argv[*i]);
@@ -234,16 +227,14 @@ static const char* take_argument(int argc, char** argv, int* i, FILE* err) {
     return argv[*i];
 }
 
-// Whether `arg` is `-l<lib>`: the library is part of the option, so it is one
-// argument, unlike every other option that carries a value.
-// D14.1
+// Returns whether `arg` is `-l<lib>`. The library is part of this single argument. Other options
+// take their values in separate arguments.
 static bool is_link_option(const char* arg) {
     return arg[0] == '-' && arg[1] == 'l' && arg[2] != '\0';
 }
 
 // The options that carry no value: -S, -c, --release, --no-bounds-check,
 // --check, --json, --index, --tokens and --ast, each of which sets one flag.
-// D14.1, D20.1, D20.2, D20.3
 static bool parse_flag(driver_options_t* opts, const char* arg) {
     if (strcmp(arg, "-S") == 0) {
         opts->emit_ir = true;
@@ -258,15 +249,15 @@ static bool parse_flag(driver_options_t* opts, const char* arg) {
     } else if (strcmp(arg, "--json") == 0) {
         opts->json = true;
     } else if (strcmp(arg, "--index") == 0) {
-        // D20.3: --index implies --check and --json
+        // --index implies --check and --json
         opts->index = true;
         opts->check = true;
         opts->json = true;
     } else if (strcmp(arg, "--tokens") == 0) {
-        // D14.1: --tokens implies nothing and combines with nothing
+        // --tokens implies nothing and combines with nothing
         opts->tokens = true;
     } else if (strcmp(arg, "--ast") == 0) {
-        // D14.1: --ast implies nothing and combines with nothing either
+        // --ast implies nothing and combines with nothing either
         opts->ast = true;
     } else {
         return false;
@@ -277,8 +268,7 @@ static bool parse_flag(driver_options_t* opts, const char* arg) {
 // The options that take the following argument. Returns false when `arg` is
 // not one of them; *ok is false when the argument was missing. The last -o,
 // --std-dir, --cc and --target win, while -I, -l and -Xcc accumulate in
-// command-line order (toolchain.md 1).
-// D14.1
+// command-line order.
 static bool parse_valued(
     driver_options_t* opts, int argc, char** argv, int* i, FILE* err, bool* ok) {
     const char* arg = argv[*i];
@@ -316,7 +306,7 @@ int driver_parse(driver_options_t* opts, int argc, char** argv, FILE* out, FILE*
     for (int i = 1; i < argc; i++) {
         const char* arg = argv[i];
         if (arg[0] != '-') {
-            // D14.1: the first argument that does not start with '-'
+            // the first argument that does not start with '-'
             if (opts->entry != NULL) {
                 usage_error(err, "unexpected argument", arg);
                 return DRIVER_PARSE_ERROR;
@@ -349,17 +339,17 @@ int driver_parse(driver_options_t* opts, int argc, char** argv, FILE* out, FILE*
         return DRIVER_PARSE_ERROR;
     }
     if (opts->tokens && (opts->check || opts->json || opts->index)) {
-        // D14.1: --tokens stops before the parser
+        // --tokens stops before the parser
         usage_error(err, "--tokens does not combine with --check, --json or --index", NULL);
         return DRIVER_PARSE_ERROR;
     }
     if (opts->ast && (opts->tokens || opts->check || opts->json || opts->index)) {
-        // D14.1: --ast stops before the checker
+        // --ast stops before the checker
         usage_error(err, "--ast does not combine with --tokens, --check, --json or --index", NULL);
         return DRIVER_PARSE_ERROR;
     }
     if (opts->json && !opts->check) {
-        // D20.2: a build spawns a `--cc` that inherits stdout
+        // a build spawns a `--cc` that inherits stdout
         usage_error(err, "--json requires --check", NULL);
         return DRIVER_PARSE_ERROR;
     }
@@ -394,7 +384,7 @@ str_t driver_entry_base(const char* entry) {
     return base;
 }
 
-// The buffer's contents, interned in `pool` and NUL-terminated; the buffer
+// The buffer's contents, interned in `pool` and NUL-terminated. The buffer
 // is empty afterwards.
 static str_t pool_take(str_pool_t* pool, sb_t* b) {
     const str_t s = str_pool_intern(pool, sb_view(b));
@@ -421,7 +411,6 @@ static str_t join_path(str_pool_t* pool, const char* dir, str_t name, const char
 
 str_t driver_default_output(const driver_options_t* opts, str_pool_t* pool) {
     // -S and -c together stop at the IR, so -S decides the suffix
-    // (toolchain.md 1).
     if (opts->emit_ir) {
         return join_path(pool, NULL, driver_entry_base(opts->entry), ".ll");
     }
@@ -432,8 +421,7 @@ str_t driver_default_output(const driver_options_t* opts, str_pool_t* pool) {
 }
 
 // The value of `name` in the environment, or NULL when it is unset or empty.
-// The only variables the compiler reads are FORT_STD_DIR and TMPDIR
-// (toolchain.md 1); an empty value names no directory, so it counts as unset.
+// The compiler reads only FORT_STD_DIR and TMPDIR. An empty value is unset.
 static const char* env_dir(const char* name) {
     const char* value = getenv(name);
     if (value == NULL || value[0] == '\0') {
@@ -509,21 +497,21 @@ str_t driver_std_dir(const driver_options_t* opts, const char* argv0, str_pool_t
     if (from_env != NULL) {
         return str_pool_intern(pool, str_from_cstr(from_env));
     }
-    // D14.1: else `std` beside the running fort binary
+    // else `std` beside the running fort binary
     const str_t running = exe_path(pool);
     if (running.ptr != NULL) {
         return driver_std_dir_beside(running.ptr, pool);
     }
-    // Without /proc, argv[0] names the binary; one without a slash was found
+    // Without /proc, argv[0] names the binary. One without a slash was found
     // through PATH, whose directory the driver cannot know, so `std` in the
     // current directory is the last resort.
     return driver_std_dir_beside(argv0, pool);
 }
 
-// ---- the temporary directory (toolchain.md 2) ------------------------------------
+// ---- the temporary directory ------------------------------------
 
 // Creates the temporary directory with mkdtemp under $TMPDIR, `/tmp` by
-// default; the path is interned in `pool` and the directory it was created
+// default. The path is interned in `pool` and the directory it was created
 // in is stored in *parent_out. Returns the zero view and the errno of the
 // failure in *error_out, captured before anything else can overwrite it.
 static str_t make_temp_dir(str_pool_t* pool, const char** parent_out, int* error_out) {
@@ -551,12 +539,10 @@ static str_t make_temp_dir(str_pool_t* pool, const char** parent_out, int* error
 }
 
 // Removes the temporary directory and the module in it, whether or not --cc
-// succeeded (toolchain.md 2). The compiler writes exactly one file there, one
-// `<entry>.ll`, so no directory walk is needed; a file already gone is not an
-// error. A later ticket that writes a second temporary must remove it here too,
-// and a signal that kills the compiler while clang runs still leaves the
-// directory behind.
-// D19.1
+// succeeded. The compiler writes exactly one file there, one
+// `<entry>.ll`, so no directory walk is needed. A file already gone is not an
+// error. If the driver writes another temporary, this function must remove it too.
+// A signal that kills the compiler while clang runs can leave the directory behind.
 static void remove_temp_dir(const char* dir, const char* ir_path) {
     if (ir_path != NULL) {
         (void)unlink(ir_path);
@@ -565,7 +551,6 @@ static void remove_temp_dir(const char* dir, const char* ir_path) {
 }
 
 // ---- the clang invocation --------------------------------------------------------
-// D14.3
 
 void driver_cc_argv(const driver_options_t* opts,
                     const char* ir_path,
@@ -581,13 +566,10 @@ void driver_cc_argv(const driver_options_t* opts,
 
     push_arg(argv, opts->cc);
     push_arg(argv, target.ptr);
-    // -O2 in place of -O1 under --release; the compiler itself optimizes
-    // nothing (toolchain.md 3).
-    // D14.3: -O2 under --release; the compiler optimizes nothing
+    // Use -O2 under --release and -O1 otherwise. The compiler does not optimize the IR.
     push_arg(argv, opts->release ? "-O2" : "-O1");
     push_arg(argv, "-fPIE");
     // The module carries its own target triple, which clang would warn about
-    // (toolchain.md 2).
     push_arg(argv, "-Wno-override-module");
     if (opts->compile_only) {
         push_arg(argv, "-c");
@@ -596,23 +578,20 @@ void driver_cc_argv(const driver_options_t* opts,
     push_arg(argv, out_path);
     // The one input is the module, which holds the whole program, the runtime
     // included. No -x ir: clang reads a `.ll` by its suffix and -x is sticky
-    // (toolchain.md 2).
-    // D9.10, D13.1
     push_arg(argv, ir_path);
     if (!opts->compile_only) {
         for (uint64_t i = 0; i < opts->libs.len; i++) {
             push_arg(argv, arg_at(&opts->libs, i));
         }
     }
-    // D14.1: -Xcc arguments come last, verbatim and in order
+    // -Xcc arguments come last, verbatim and in order
     for (uint64_t i = 0; i < opts->cc_args.len; i++) {
         push_arg(argv, arg_at(&opts->cc_args, i));
     }
     ptrvec_push(argv, NULL);
 }
 
-// `cc failed with status N`, or `cc failed with signal N` for a --cc that
-// died by a signal, which toolchain.md 1 does not name.
+// Reports either `cc failed with status N` or `cc failed with signal N`.
 static void error_cc_status(FILE* err, const char* what, int64_t value) {
     sb_t m;
     sb_init(&m);
@@ -626,7 +605,6 @@ static void error_cc_status(FILE* err, const char* what, int64_t value) {
 
 // Runs --cc once over the module: it compiles and links in one invocation.
 // Returns FORT_EXIT_OK, or FORT_EXIT_USAGE after reporting the failure.
-// D14.1, D14.3
 static int run_cc(const driver_options_t* opts,
                   const char* ir_path,
                   const char* out_path,
@@ -668,7 +646,6 @@ static int run_cc(const driver_options_t* opts,
 }
 
 // ---- the closure's files ----------------------------------------------------------
-// D20.2
 
 void driver_files_init(driver_files_t* files) {
     str_pool_init(&files->pool);
@@ -691,10 +668,8 @@ const char* driver_files_at(const driver_files_t* files, uint64_t i) {
     return (const char*)files->names.items[i];
 }
 
-// Copies the file of every module the loader read, in that order: the names
-// the module set hands out die with it, and the document is written after it
-// is released.
-// D20.2
+// Copies each loaded module file in load order. The module set owns its names, but the document is
+// written after the set is released.
 static void collect_files(const module_set_t* set, driver_files_t* files) {
     for (uint64_t i = 0; i < module_set_file_count(set); i++) {
         const str_t file = str_pool_intern(&files->pool, module_set_file_at(set, i));
@@ -703,20 +678,16 @@ static void collect_files(const module_set_t* set, driver_files_t* files) {
 }
 
 // ---- the front end ----------------------------------------------------------------
-// T-013, T-015: the front end is the seam of these two tickets
-
-// Steps 1 and 2 of toolchain.md 2: the entry file's module path and root, then
-// the import closure, with the search roots in order. Returns false after the
-// diagnostics were reported.
-// D9.2, D14.2
+// Loads the entry file and its import closure with the search roots in order.
+// Returns false after reporting diagnostics.
 static bool load_closure(const driver_options_t* opts, const char* argv0, module_set_t* set) {
     str_pool_t pool;
     str_pool_init(&pool);
     for (uint64_t i = 0; i < opts->includes.len; i++) {
-        // D9.2: the `-I` roots follow the entry file's directory
+        // the `-I` roots follow the entry file's directory
         module_set_add_root(set, arg_at(&opts->includes, i));
     }
-    // D9.2, D14.1: `std` is looked up in the standard library directory
+    // `std` is looked up in the standard library directory
     const str_t std_dir = driver_std_dir(opts, argv0, &pool);
     module_set_std_dir(set, std_dir.ptr);
     str_pool_free(&pool);
@@ -735,11 +706,9 @@ void driver_analysis_free(driver_analysis_t* an) {
     module_set_free(&an->set);
 }
 
-// Step 4 of toolchain.md 2: the emitter writes one module for the whole
-// closure (toolchain.md 6). An unwritable path is a toolchain error (exit 2)
-// and a construct the emitter cannot lower yet is a compile error (exit 1), so
-// a half-emitted module never reaches `--cc`.
-// D19.1
+// The emitter writes one module for the complete closure. An unwritable path is a toolchain error
+// with exit 2. An unsupported construct is a compile error with exit 1. Neither case sends partial
+// IR to `--cc`.
 static int emit_module(const driver_options_t* opts,
                        const check_t* ck,
                        const module_set_t* set,
@@ -779,62 +748,50 @@ int driver_front_end(const driver_options_t* opts,
                      driver_files_t* files,
                      driver_analysis_t* an,
                      FILE* err) {
-    // Step 1 of toolchain.md 2: an unreadable entry file is exit 2.
-    // D14.1: an unreadable entry file is exit 2
+    // An unreadable entry file causes exit 2.
     FILE* entry = fopen(opts->entry, "rb");
     if (entry == NULL) {
         error_path(err, "cannot read", opts->entry, strerror(errno));
         return FORT_EXIT_USAGE;
     }
     (void)fclose(entry);
-    // Each run starts from an empty sink; the records of this one outlive it on
-    // purpose, so that a caller can write them after the front end returns, and the
-    // next diag_reset releases them.
-    // D14.2
+    // Each run starts from an empty sink. The records remain valid after the front end returns.
+    // This lets a caller write them. The next diag_reset releases them.
     diag_reset();
     const bool loaded = load_closure(opts, argv0, &an->set);
     if (files != NULL) {
         collect_files(&an->set, files);
     }
-    // Step 3: every module that parsed is checked, the dependency order first, so
-    // one file that did not parse never hides the errors of the others.
-    //
-    // Neither the modules nor the checker is released here: the annotations they own
-    // live until the caller frees the analysis, which is what lets the index walk
-    // read the trees afterwards (sym.h). A compilation builds a program, so the entry
-    // module defines main; --check inspects one module instead, and the entry rule
-    // does not apply to it.
-    // D8.6, D9.10, D14.2, D20.1, D20.3
+    // Check parsed modules in dependency order, so one file that did not parse never hides the
+    // errors of the others. This function does not release the modules or checker. Their
+    // annotations remain valid until the caller releases the analysis. The later index walk reads
+    // them (sym.h). A compilation builds a program, so the entry module defines main; --check
+    // inspects one module instead, and the entry rule does not apply to it.
     an->ck.require_main = ir_path != NULL;
     const bool checked = check_program(&an->ck, &an->set);
     if (!loaded || !checked) {
-        // D14.1
         return FORT_EXIT_COMPILE_ERROR;
     }
     if (ir_path == NULL) {
-        // D20.1: --check stops after the front end, no module emitted
+        // --check stops after the front end, no module emitted
         return FORT_EXIT_OK;
     }
-    // Step 4: the program's LLVM IR module. It is emitted while the analysis is
+    // Emit the program's LLVM IR module while the analysis is
     // alive, since every annotation the emitter reads points into it (check.h).
-    // D19.1
     return emit_module(opts, &an->ck, &an->set, ir_path, err);
 }
 
-// ---- the document of the check mode (toolchain.md 4.1) ----------------------------
-// D20.2
+// ---- the document of the check mode ----------------------------
 
 // Builds the whole document into `doc`: the version, the files of the closure,
 // the diagnostics of the run and the identifier index.
-// D20.2
 static void build_document(sb_t* doc, const driver_files_t* files, const index_t* ix) {
     json_t j;
     json_init(&j, doc);
     json_object_begin(&j);
-    // D20.2
     json_key(&j, "version");
     json_uint(&j, FORT_JSON_VERSION);
-    // D20.2: a client clears the stale diagnostics of a file
+    // a client clears the stale diagnostics of a file
     json_key(&j, "files");
     json_array_begin(&j);
     for (uint64_t i = 0; i < driver_files_count(files); i++) {
@@ -843,7 +800,7 @@ static void build_document(sb_t* doc, const driver_files_t* files, const index_t
     json_array_end(&j);
     json_key(&j, "diagnostics");
     diag_write_json(&j);
-    // D20.3, D20.2: the empty array without --index, always a member
+    // the empty array without --index, always a member
     json_key(&j, "symbols");
     index_write_json(ix, &j);
     json_object_end(&j);
@@ -851,8 +808,7 @@ static void build_document(sb_t* doc, const driver_files_t* files, const index_t
 
 // Writes the document with one fwrite, so stdout holds a complete document or
 // nothing and a client tells a crash from a verdict. The document is one line
-// ended by a newline (toolchain.md 4.1).
-// D20.2
+// ended by a newline.
 static void write_document(FILE* out, const driver_files_t* files, const index_t* ix) {
     sb_t doc;
     sb_init(&doc);
@@ -865,11 +821,9 @@ static void write_document(FILE* out, const driver_files_t* files, const index_t
 }
 
 // ---- the token dump --------------------------------------------------------------
-// D14.1
 
-// The whole of `path` into `b`; false when it could not be opened or read,
-// with the failure reported as `cannot read '<path>': <reason>`, the same
-// line an unreadable entry file gets from the pipeline (toolchain.md 1).
+// Reads all of `path` into `b`. Returns false when open or read fails. It reports `cannot read
+// '<path>': <reason>`, as the main pipeline does.
 static bool read_entry(const char* path, sb_t* b, FILE* err) {
     FILE* file = fopen(path, "rb");
     if (file == NULL) {
@@ -892,11 +846,9 @@ static bool read_entry(const char* path, sb_t* b, FILE* err) {
     return ok;
 }
 
-// --tokens lexes the entry file alone -- no import is resolved and nothing is
-// parsed -- and writes one line per token to `out` in the form of toolchain.md 1.
+// --tokens lexes only the entry file and writes one line per token to `out`.
 // A lexical error is reported as usual and lexing goes on, so the dump covers the
-// whole file either way; the status is then a compile error.
-// D14.1, D14.2
+// whole file either way. The status is then a compile error.
 static int tokens_entry(const driver_options_t* opts, FILE* out, FILE* err) {
     sb_t source;
     sb_init(&source);
@@ -927,14 +879,11 @@ static int tokens_entry(const driver_options_t* opts, FILE* out, FILE* err) {
 }
 
 // ---- the syntax tree dump --------------------------------------------------------
-// D14.1
 
-// --ast lexes and parses the entry file alone -- no import is resolved and
-// nothing is checked -- and writes the S-expression of ast_dump.h to `out`,
-// followed by one newline. The parser recovers from a syntax error and the lexer
-// from a lexical one, so a tree covering the whole file is dumped either way and
-// the status is then a compile error.
-// D14.1, D14.2
+// --ast lexes and parses only the entry file. It does not resolve imports or check code. It writes
+// the ast_dump.h S-expression and one newline to `out`. The parser recovers from syntax errors, and
+// the lexer recovers from lexical errors. The command dumps the complete tree, then returns a
+// compile error.
 static int ast_entry(const driver_options_t* opts, FILE* out, FILE* err) {
     sb_t source;
     sb_init(&source);
@@ -949,7 +898,7 @@ static int ast_entry(const driver_options_t* opts, FILE* out, FILE* err) {
     tokvec_t toks;
     tokvec_init(&toks);
     (void)lex_file(opts->entry, sb_view(&source), &pool, &toks);
-    // D14.2: the tokens cover the whole file, so the parse runs
+    // the tokens cover the whole file, so the parse runs
     ast_arena_t arena;
     ast_arena_init(&arena);
     const ast_node_t* mod = parse_module(opts->entry, toks.items, toks.len, &arena);
@@ -968,7 +917,7 @@ static int ast_entry(const driver_options_t* opts, FILE* out, FILE* err) {
     return diag_count() == 0 ? FORT_EXIT_OK : FORT_EXIT_COMPILE_ERROR;
 }
 
-// ---- the pipeline (toolchain.md 2) ------------------------------------------------
+// ---- the pipeline ------------------------------------------------
 
 // Emits the module and, unless -S stops there, compiles and links it,
 // removing the temporary directory on every path out.
@@ -988,7 +937,7 @@ static int compile_entry(const driver_options_t* opts, const char* argv0, FILE* 
     }
     if (opts->emit_ir) {
         // -S writes the module to the output and stops, so it needs no
-        // temporary (toolchain.md 2).
+        // temporary.
         const int status = driver_front_end(opts, argv0, out_path, NULL, &an, err);
         driver_analysis_free(&an);
         str_pool_free(&pool);
@@ -1014,10 +963,8 @@ static int compile_entry(const driver_options_t* opts, const char* argv0, FILE* 
     return status;
 }
 
-// --check runs the front end and stops: no IR, no temporary, no `--cc`, and
-// --json reports what it found as the document on `out` instead of the text
-// diagnostics.
-// D14.2, D20.1, D20.2
+// --check runs only the front end. It creates no IR or temporary, and does not run `--cc`. --json
+// writes the result document instead of text diagnostics.
 static int check_entry(const driver_options_t* opts, const char* argv0, FILE* out, FILE* err) {
     if (!target_form(opts->target)) {
         usage_error(err, "unsupported target", opts->target);
@@ -1025,21 +972,21 @@ static int check_entry(const driver_options_t* opts, const char* argv0, FILE* ou
     }
     driver_files_t files;
     driver_files_init(&files);
-    // D20.3: freed only after the last byte of the document (sym.h)
+    // freed only after the last byte of the document (sym.h)
     driver_analysis_t an;
     driver_analysis_init(&an);
     if (opts->json) {
-        // D20.2: the records stay in the sink, where the document reads them
+        // the records stay in the sink, where the document reads them
         diag_set_text(false);
     }
     const int status = driver_front_end(opts, argv0, NULL, &files, &an, err);
     if (opts->json) {
-        // D20.2, D14.1: a usage or internal error is exit 2, stdout empty
+        // a usage or internal error is exit 2, stdout empty
         if (status == FORT_EXIT_OK || status == FORT_EXIT_COMPILE_ERROR) {
             index_t ix;
             index_init(&ix);
             if (opts->index) {
-                // D20.3: the analysis is freed below, after the document (sym.h)
+                // the analysis is freed below, after the document (sym.h)
                 index_build(&ix, &an.set);
             }
             write_document(out, &files, &ix);
@@ -1066,10 +1013,7 @@ int driver_main(int argc, char** argv, FILE* out, FILE* err) {
     if (parsed == DRIVER_PARSE_ERROR) {
         status = FORT_EXIT_USAGE;
     } else if (parsed == DRIVER_PARSE_OK) {
-        // --tokens stops after the lexer, --ast after the parser and --check
-        // after the front end; every other run goes through the whole pipeline
-        // of toolchain.md 2.
-        // D14.1, D20.1: --tokens, --ast and --check each stop earlier
+        // --tokens stops after lexing, --ast after parsing, and --check after analysis.
         if (opts.tokens) {
             status = tokens_entry(&opts, out, err);
         } else if (opts.ast) {

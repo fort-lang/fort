@@ -1,4 +1,4 @@
-// Vectors and the string map; see containers.h.
+// Implements the compiler vectors and string map.
 #include "containers.h"
 
 #include <stddef.h>
@@ -99,9 +99,8 @@ void strmap_free(strmap_t* m) {
     strmap_init(m);
 }
 
-// The slot holding `key`, or `cap` when absent: the probe starts at
-// hash & (cap - 1), steps by one, wraps, and stops at the first empty slot
-// (stdlib.md 2.8).
+// Returns the slot that holds `key`, or `cap` when absent. The probe starts at hash & (cap - 1). It
+// advances by one, wraps, and stops at the first empty slot.
 static uint64_t strmap_find(const strmap_t* m, str_t key, uint64_t hash) {
     if (m->cap == 0) {
         return m->cap;
@@ -120,8 +119,8 @@ static uint64_t strmap_find(const strmap_t* m, str_t key, uint64_t hash) {
     }
 }
 
-// Stores an entry known to be absent into a table with an empty slot, at
-// the first tombstone of its probe or else at the empty slot ending it.
+// Stores an entry that is absent from a table with an empty slot. It uses the first probe
+// tombstone, or the final empty slot.
 static void strmap_place(strmap_t* m, str_t key, int64_t val, uint64_t hash) {
     const uint64_t mask = m->cap - 1U;
     uint64_t i = hash & mask;
@@ -147,7 +146,7 @@ static void strmap_place(strmap_t* m, str_t key, int64_t val, uint64_t hash) {
 
 // Moves the live entries into a fresh table whose capacity starts at
 // STRMAP_MIN_CAP and doubles until (live + 1) * 2 <= cap; tombstones
-// disappear (stdlib.md 2.8).
+// disappear.
 static void strmap_rebuild(strmap_t* m) {
     uint64_t cap = STRMAP_MIN_CAP;
     while (mem_mul(mem_add(m->live, 1U), 2U) > cap) {

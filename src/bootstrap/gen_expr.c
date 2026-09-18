@@ -1,12 +1,4 @@
-// The expressions of the LLVM IR emitter (toolchain.md 6 items 3, 12, 15, 16
-// and 19); see gen.h.
-// D19.3, D19.4
-//
-// Three entries, because aggregates live in memory: gen_expr_value for a
-// scalar, gen_expr_place for an lvalue and gen_expr_into for a value written
-// into a destination place. A node the checker folded is emitted as a literal,
-// since a constant expression has no side effects.
-// D19.3, D4.6
+// Lowers checked expressions to LLVM IR.
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -23,13 +15,12 @@
 #include "types.h"
 
 // The descriptors the print family writes to.
-// D11.5
 enum { FD_STDOUT = 1, FD_STDERR = 2 };
 
-// The byte `println` and its relatives end with (item 19).
+// The byte `println` and its relatives end with.
 enum { NEWLINE_BYTE = 10 };
 
-// The widths an integer type has, for the overflow intrinsic table (item 15).
+// The widths an integer type has, for the overflow intrinsic table.
 enum { BITS_8 = 8, BITS_16 = 16, BITS_32 = 32, BITS_64 = 64 };
 
 // A poisoned or missing type: the checker reported it and nothing is emitted.
@@ -51,7 +42,6 @@ static gen_val_t zero_of(gen_t* g, const type_t* t) {
 // Whether the checker folded the node and its value is a scalar the emitter
 // can write as a literal. A string constant is an aggregate and has no literal
 // form.
-// D4.6
 static bool folded_scalar(const gen_t* g, const ast_node_t* n) {
     if ((n->ann & CHECK_ANN_CONST) == 0 || gen_is_aggregate(n->type)) {
         return false;
@@ -59,11 +49,10 @@ static bool folded_scalar(const gen_t* g, const ast_node_t* n) {
     return check_node_value(g->ck, n).kind != CV_NONE;
 }
 
-// ---- the print family (item 19) ---------------------------------------------------
-// D12.2
+// ---- the print family ---------------------------------------------------
 
-// The bytes and length of a `string` operand: a literal is `@.str.N` and its
-// length, and every other string is its two header fields (item 19).
+// Returns a `string` operand's bytes and length. A literal uses `@.str.N` and its constant length.
+// Other strings use their two header fields.
 static void string_operand(gen_t* g, ast_node_t* n, gen_val_t* ptr, gen_val_t* len) {
     if ((n->ann & CHECK_ANN_CONST) != 0) {
         const cval_t v = check_node_value(g->ck, n);
@@ -83,8 +72,7 @@ static void string_operand(gen_t* g, ast_node_t* n, gen_val_t* ptr, gen_val_t* l
     *len = gen_span_len(g, p.addr);
 }
 
-// One argument of the print family: one call per argument, per type (item
-// 19).
+// Emits one call for one print argument, based on its type.
 static void gen_print_arg(gen_t* g, ast_node_t* n, gen_val_t fd) {
     const type_t* t = n->type;
     if (bad_type(t)) {
@@ -110,7 +98,6 @@ static void gen_print_arg(gen_t* g, ast_node_t* n, gen_val_t fd) {
     }
     if (t->kind == TYPE_ENUM) {
         // An enum prints as `(i32 %v, ptr @.enum.<path.name>, i64 <count>)`
-        // (item 19, item 21).
         const sym_t* e = (const sym_t*)t->decl;
         gen_args_add(&args, v);
         gen_args_add(&args, gen_literal(g, str_from_cstr("ptr"), gen_enum_ref(g, e).ptr));
@@ -120,16 +107,15 @@ static void gen_print_arg(gen_t* g, ast_node_t* n, gen_val_t fd) {
         return;
     }
     if (t->kind == TYPE_PTR || t->kind == TYPE_VOIDPTR || t->kind == TYPE_FN) {
-        // A pointer, `void*` or function pointer goes to `_ptr` (item 19).
+        // A pointer, `void*` or function pointer goes to `_ptr`.
         gen_args_add(&args, v);
         gen_call_rt(g, RT_PRINT_PTR, &args);
         gen_args_free(&args);
         return;
     }
     if (is_bool(t)) {
-        // `std.rt.print_bool` takes a fort `bool`, which is `i1 zeroext` at a
-        // call and `i8` only in memory, so the value passes as it stands
-        // (items 2, 7, 19).
+        // `std.rt.print_bool` takes a fort `bool`. A call uses `i1 zeroext`; only memory uses `i8`.
+        // Pass the value unchanged.
         gen_args_add_ext(&args, v, "zeroext");
         gen_call_rt(g, RT_PRINT_BOOL, &args);
         gen_args_free(&args);
@@ -142,7 +128,7 @@ static void gen_print_arg(gen_t* g, ast_node_t* n, gen_val_t fd) {
         return;
     }
     // `i8 i16 i32 i64` are sign-extended to `i64` and `u8 u16 u32 u64`
-    // zero-extended to it (item 19).
+    // zero-extended to it.
     const bool sign = gen_is_signed(t);
     gen_args_add(&args,
                  gen_resize(g, v, gen_int_bits(t), str_from_cstr("i64"), (uint32_t)BITS_64, sign));
@@ -152,7 +138,6 @@ static void gen_print_arg(gen_t* g, ast_node_t* n, gen_val_t fd) {
 
 // The print family: `fd` once, then each argument left to right, one call per
 // argument.
-// D6.3, D12.2
 static void gen_print(gen_t* g, ast_node_t* n, gen_val_t fd, uint64_t first, bool newline) {
     for (uint64_t i = first; i < ast_len(n); i++) {
         gen_print_arg(g, ast_child(n, i), fd);
@@ -163,7 +148,7 @@ static void gen_print(gen_t* g, ast_node_t* n, gen_val_t fd, uint64_t first, boo
     if (!newline) {
         return;
     }
-    // `println` and its relatives end with a newline byte (item 19).
+    // `println` and its relatives end with a newline byte.
     gen_args_t args;
     gen_args_init(&args);
     gen_args_add(&args, fd);
@@ -175,7 +160,6 @@ static void gen_print(gen_t* g, ast_node_t* n, gen_val_t fd, uint64_t first, boo
 
 // The byte offset of a position in the module's source, so that `assert` can
 // quote its argument verbatim.
-// D11.4
 static uint64_t source_offset(str_t src, uint32_t line, uint32_t col) {
     uint64_t at = 0;
     uint32_t here = 1;
@@ -189,10 +173,8 @@ static uint64_t source_offset(str_t src, uint32_t line, uint32_t col) {
     return at < src.len ? at : src.len;
 }
 
-// The source text of the one argument of `assert`: the call's range runs from
-// its `(` to one past its `)`, so the text between them is the argument as the
-// user wrote it.
-// D20.4, D11.4
+// Returns the source text of an `assert` argument. The call range starts at `(` and ends after `)`.
+// The text between them preserves the user's argument.
 static str_t assert_text(gen_t* g, const ast_node_t* call) {
     if (g->module == NULL) {
         return str_from_range(NULL, 0);
@@ -207,9 +189,7 @@ static str_t assert_text(gen_t* g, const ast_node_t* call) {
 }
 
 // `assert(cond)` is active in both build modes and branches to the
-// continuation first, since its operand is already the success condition (item
-// 19).
-// D12.2
+// continuation first because its operand is already the success condition.
 static void gen_assert(gen_t* g, ast_node_t* n) {
     ast_node_t* arg = ast_child(n, 0);
     const gen_val_t cond = gen_expr_value(g, arg);
@@ -220,14 +200,12 @@ static void gen_assert(gen_t* g, ast_node_t* n) {
     gen_args_init(&args);
     gen_args_add(&args,
                  gen_literal(g, str_from_cstr("ptr"), gen_str_ref(g, assert_text(g, n)).ptr));
-    // D11.4
     gen_check(g, cond, false, RT_ASSERT_FAIL, &args, n->a->loc);
     gen_args_free(&args);
 }
 
 // `panic(msg)` writes the message and aborts, so the call is followed by
-// `unreachable` (item 19).
-// D11.4
+// `unreachable`.
 static void gen_panic(gen_t* g, ast_node_t* n) {
     gen_val_t ptr;
     gen_val_t len;
@@ -248,13 +226,10 @@ static void gen_panic(gen_t* g, ast_node_t* n) {
     g->terminated = true;
 }
 
-// ---- new and del (item 17) ---------------------------------------------------------
-// D10.2, D10.3
+// ---- new and del ---------------------------------------------------------
 
-// Whether `n` designates storage, which is what decides whether `del` empties
-// its operand: an `own` rvalue -- `new(...)`, a call result, a `cast` that
-// adopts -- is freed and nothing is stored.
-// D6.7, D17.9
+// Returns whether `n` designates storage, which controls whether `del` empties it. An `own` rvalue
+// has no storage to clear. Examples include `new(...)`, call results, and adopting casts.
 static bool is_place_expr(const ast_node_t* n) {
     switch (n->kind) {
     case AST_IDENT:
@@ -263,7 +238,6 @@ static bool is_place_expr(const ast_node_t* n) {
     case AST_ARROW:
         return true;
     case AST_UNARY:
-        // D6.7
         return n->op == TOK_STAR;
     default:
         break;
@@ -271,13 +245,11 @@ static bool is_place_expr(const ast_node_t* n) {
     return false;
 }
 
-// `del(x)` (item 17): the pointer is loaded (field 0 for a span or `string`),
-// `std.rt.free` frees it, and an lvalue operand is emptied -- `store ptr null`
-// for a pointer, a 16-byte `llvm.memset` for a span or `string`. A null operand
-// is a no-op in the runtime, so `del(null)` and `del` of a zero span need no test
-// of their own. The emptying is not an assignment and never carries the overwrite
-// check, which is what makes `del(v); v = new(...)` pass it (item 18).
-// D17.9, D17.11
+// Emits `del(x)`. It loads the pointer, using field 0 for a span or string, then calls
+// `std.rt.free`. It clears lvalues with a null store or 16-byte `llvm.memset`. A null operand is a
+// no-op in the runtime, so `del(null)` and `del` of a zero span need no test of their own. The
+// emptying is not an assignment and never carries the overwrite check, which is what makes `del(v);
+// v = new(...)` pass it.
 static void gen_del(gen_t* g, ast_node_t* n) {
     if (ast_len(n) != 1) {
         // The checker reported the arity and the module is not emitted.
@@ -289,7 +261,6 @@ static void gen_del(gen_t* g, ast_node_t* n) {
         return;
     }
     const bool lvalue = is_place_expr(arg);
-    // D19.3
     const bool header = gen_is_aggregate(t);
     gen_place_t place;
     place.addr = gen_literal(g, str_from_cstr("ptr"), "null");
@@ -313,7 +284,7 @@ static void gen_del(gen_t* g, ast_node_t* n) {
     gen_call_rt(g, RT_FREE, &args);
     gen_args_free(&args);
     if (!lvalue) {
-        // On an rvalue nothing is stored (item 17).
+        // On an rvalue nothing is stored.
         return;
     }
     if (header) {
@@ -323,10 +294,9 @@ static void gen_del(gen_t* g, ast_node_t* n) {
     gen_store_place(g, place, gen_literal(g, str_from_cstr("ptr"), "null"));
 }
 
-// The count of `new(T, n)` as an `i64`: a negative count is a runtime error
-// reported with its signed value at the builtin's name. It is not a bounds check,
-// so neither `--release` nor `--no-bounds-check` removes it.
-// D10.2, D10.6, D11.4
+// Returns the `new(T, n)` count as `i64`. A negative count causes a runtime error with its signed
+// value at the builtin name. It is not a bounds check, so neither `--release` nor
+// `--no-bounds-check` removes it.
 static gen_val_t alloc_count(gen_t* g, ast_node_t* n, ast_node_t* count) {
     const str_t i64ty = str_from_cstr("i64");
     const gen_val_t raw = gen_expr_value(g, count);
@@ -349,11 +319,9 @@ static gen_val_t alloc_count(gen_t* g, ast_node_t* n, ast_node_t* count) {
     return v;
 }
 
-// `std.rt.alloc(sizeof(T), count, loc)` (item 17): the runtime zeroes the
-// storage and never returns null, `n == 0` included, and an overflowing size or a
-// failed allocation is its runtime error, so the module emits no test of the
-// result.
-// D10.2
+// Calls `std.rt.alloc(sizeof(T), count, loc)`. The runtime returns zeroed, nonnull storage,
+// including when `n == 0`. It reports size overflow and allocation failure. The caller needs no
+// result check.
 static gen_val_t alloc_call(gen_t* g, ast_node_t* n, const type_t* elem, gen_val_t count) {
     const str_t i64ty = str_from_cstr("i64");
     gen_args_t args;
@@ -367,7 +335,6 @@ static gen_val_t alloc_call(gen_t* g, ast_node_t* n, const type_t* elem, gen_val
 }
 
 // `new(T)`: one zero-initialized `T`, whose address is an ordinary scalar.
-// D10.2, D17.3
 static gen_val_t gen_new_object(gen_t* g, ast_node_t* n) {
     const gen_val_t null = gen_literal(g, str_from_cstr("ptr"), "null");
     if (n->b != NULL || n->type == NULL || n->type->kind != TYPE_PTR) {
@@ -380,8 +347,7 @@ static gen_val_t gen_new_object(gen_t* g, ast_node_t* n) {
 }
 
 // `new(T, n)`: `n` zero-initialized elements, whose header is written into the
-// destination place field by field (item 17).
-// D10.2, D17.3
+// destination place field by field.
 static void gen_new_span(gen_t* g, ast_node_t* n, gen_place_t dst) {
     if (n->b == NULL || n->type == NULL || n->type->kind != TYPE_SPAN) {
         gen_todo(g, n->loc, "this allocation");
@@ -400,19 +366,14 @@ bool gen_is_move(const ast_node_t* n) {
     return s != NULL && s->kind == SYM_BUILTIN && str_eq(s->name, str_from_cstr("move"));
 }
 
-// `move(lv)` (item 18): the operand's value is read into a place of the
-// emitter's own, the operand is then left at its zero value, and only then is the
-// value handed on. `dst` is the place an aggregate result is written into and is
-// NULL for a scalar one and on the discard path.
-//
-// The intermediate is not an optimization to drop: `dst` may be the operand
-// itself, and nothing here can tell. `s = move(s)`, `*p = move(*q)` and
-// `v[i] = move(v[j])` all reach this with two places that may be one address, and
-// copying into `dst` first would let the zeroing that follows destroy the value
-// the move yields. A scalar's intermediate is the register the `load` names; an
-// aggregate's is a `%tmpK` slot. The emptying is not an assignment, so it carries
-// no overwrite check (item 18).
-// D17.6, D17.11, D19.5
+// Emits `move(lv)`. It first reads the operand into an emitter temporary. It then zeros the operand
+// and returns the saved value. `dst` is the place an aggregate result is written into and is NULL
+// for a scalar one and on the discard path. The intermediate is not an optimization to drop: `dst`
+// may be the operand itself, and nothing here can tell. The source and destination can alias in
+// self-moves, pointer moves, and indexed moves. Copying to `dst` first would let source clearing
+// destroy the result. The temporary prevents this. A scalar's intermediate is the register the
+// `load` names; an aggregate's is a `%tmpK` slot. The emptying is not an assignment, so it carries
+// no overwrite check.
 static gen_val_t gen_move(gen_t* g, ast_node_t* n, const gen_place_t* dst) {
     const gen_val_t none = gen_literal(g, str_from_cstr("void"), "");
     if (ast_len(n) != 1 || bad_type(ast_child(n, 0)->type)) {
@@ -452,7 +413,7 @@ bool gen_builtin_call(gen_t* g, ast_node_t* n) {
     const bool err = str_eq(name, str_from_cstr("eprint"));
     const bool errln = str_eq(name, str_from_cstr("eprintln"));
     if (out || outln || err || errln) {
-        // D11.5: `print` to stdout, `eprint` to stderr
+        // `print` to stdout, `eprint` to stderr
         const gen_val_t fd = gen_const_unsigned(
             g, str_from_cstr("i32"), (uint64_t)(out || outln ? FD_STDOUT : FD_STDERR));
         gen_print(g, n, fd, 0, outln || errln);
@@ -461,7 +422,6 @@ bool gen_builtin_call(gen_t* g, ast_node_t* n) {
     const bool fout = str_eq(name, str_from_cstr("fprint"));
     const bool foutln = str_eq(name, str_from_cstr("fprintln"));
     if (fout || foutln) {
-        // D6.3, D12.2
         const gen_val_t fd = gen_expr_value(g, ast_child(n, 0));
         if (!g->failed) {
             gen_print(g, n, fd, 1, foutln);
@@ -480,21 +440,19 @@ bool gen_builtin_call(gen_t* g, ast_node_t* n) {
         gen_del(g, n);
         return true;
     }
-    // D17.8: the checker refuses a discarded `move`'s value
+    // the checker refuses a discarded `move`'s value
     (void)gen_move(g, n, NULL);
     return true;
 }
 
-// ---- calls (item 7) ---------------------------------------------------------------
+// ---- calls ---------------------------------------------------------------
 
-// A function name used as a value is its address: a function pointer is an
-// ordinary `ptr` value, and `&f` and `*f` are errors, so the name alone denotes
-// it. A qualified name `m.f` is the same value, since the symbol a field node
-// resolved to is the function itself.
-// D3.10, D9.4
+// A function name used as a value denotes its address. A function pointer is an ordinary `ptr`. The
+// forms `&f` and `*f` are errors. A qualified name `m.f` is the same value, since the symbol a
+// field node resolved to is the function itself.
 static bool function_ref(gen_t* g, ast_node_t* n, gen_val_t* out) {
     const sym_t* s = n->sym;
-    // D3.10, D9.8: an `extern fn` in value position is a checker error
+    // an `extern fn` in value position is a checker error
     if (s == NULL || s->kind != SYM_FN) {
         return false;
     }
@@ -503,9 +461,8 @@ static bool function_ref(gen_t* g, ast_node_t* n, gen_val_t* out) {
     return true;
 }
 
-// One argument of a fort or `extern` call: a scalar is an ordinary parameter,
-// and an aggregate is a plain `ptr` to a copy the caller allocates in its
-// entry block and memcpys into (item 7).
+// Emits one fort or `extern` call argument. A scalar is an ordinary parameter. An aggregate is a
+// plain `ptr` to a caller-allocated copy.
 static void gen_call_arg(gen_t* g, gen_args_t* args, ast_node_t* arg) {
     const type_t* t = arg->type;
     if (gen_is_aggregate(t)) {
@@ -517,17 +474,14 @@ static void gen_call_arg(gen_t* g, gen_args_t* args, ast_node_t* arg) {
     gen_args_add_ext(args, gen_expr_value(g, arg), gen_ext_attr(t));
 }
 
-// The parameter types of a call-site function type, `(i32, ptr)`: an aggregate
-// parameter is a plain `ptr` and an aggregate result adds the leading pointer of
-// item 7. An extern call ends the list with the variadic tail of item 8; a call
-// through a function pointer never does, since there is no variadic function
-// type.
-// D3.10
+// Writes call-site parameter types, such as `(i32, ptr)`. Aggregate parameters use plain `ptr`. An
+// aggregate result adds the leading result pointer. An extern call ends the list with the variadic
+// tail. A call through a function pointer never does, since there is no variadic function type.
 static void gen_call_type(gen_t* g, const type_t* sig, bool variadic) {
     gen_text_append(g, "(");
     uint64_t written = 0;
     if (gen_is_aggregate(sig->elem)) {
-        // An aggregate result is a leading `ptr` parameter (item 7).
+        // An aggregate result is a leading `ptr` parameter.
         gen_text_append(g, "ptr");
         written++;
     }
@@ -538,7 +492,6 @@ static void gen_call_type(gen_t* g, const type_t* sig, bool variadic) {
         written++;
         const type_t* pt = sig->params[i];
         // A struct, fixed array, span or `string` parameter is a plain `ptr`
-        // (item 7).
         gen_text_append_str(g, gen_is_aggregate(pt) ? str_from_cstr("ptr") : gen_value_type(g, pt));
     }
     if (variadic) {
@@ -550,13 +503,12 @@ static void gen_call_type(gen_t* g, const type_t* sig, bool variadic) {
     gen_text_append(g, ") ");
 }
 
-// The call of a fort function, an `extern` function or a function pointer;
-// `dst` is the place an aggregate result is written into and is NULL for a
-// scalar or void result.
+// Emits a call to a fort function, `extern` function, or function pointer. `dst` receives an
+// aggregate result. It is NULL for scalar or void results.
 static gen_val_t gen_call(gen_t* g, ast_node_t* n, const gen_place_t* dst) {
     gen_val_t none = gen_literal(g, str_from_cstr("void"), "");
     const sym_t* s = n->a != NULL ? n->a->sym : NULL;
-    // D6.11, D3.10: only a name or a qualified name denotes a symbol
+    // only a name or a qualified name denotes a symbol
     const bool direct = s != NULL && (s->kind == SYM_FN || s->kind == SYM_EXTERN_FN);
     const type_t* sig = NULL;
     if (direct) {
@@ -566,7 +518,7 @@ static gen_val_t gen_call(gen_t* g, ast_node_t* n, const gen_place_t* dst) {
     }
     if (sig == NULL || sig->kind != TYPE_FN) {
         // Only the checker can produce a callee that is not a function, and
-        // it reports one, so this is unreachable; an unfinished path is a
+        // it reports one, so this is unreachable. An unfinished path is a
         // diagnostic and never wrong code.
         gen_todo(g, n->loc, "this callee");
         return none;
@@ -577,7 +529,7 @@ static gen_val_t gen_call(gen_t* g, ast_node_t* n, const gen_place_t* dst) {
         gen_use_extern(g, s);
     }
     if (gen_is_aggregate(sig->elem) && dst == NULL) {
-        // An aggregate result needs the place it is written into (item 7);
+        // An aggregate result needs the place it is written into;
         // reaching this without one would drop the `sret` argument.
         gen_todo(g, n->loc, "an aggregate result read without a destination");
         return none;
@@ -587,7 +539,7 @@ static gen_val_t gen_call(gen_t* g, ast_node_t* n, const gen_place_t* dst) {
         callee.ty = str_from_cstr("ptr");
         callee.val = gen_symbol_ref(g, s);
     } else {
-        // D6.3: the callee is evaluated before the arguments
+        // the callee is evaluated before the arguments
         callee = gen_expr_value(g, n->a);
         if (g->failed) {
             return none;
@@ -597,7 +549,6 @@ static gen_val_t gen_call(gen_t* g, ast_node_t* n, const gen_place_t* dst) {
     gen_args_init(&args);
     if (dst != NULL) {
         // An aggregate result arrives through the leading `sret` pointer
-        // (item 7).
         sb_t attr;
         sb_init(&attr);
         sb_append(&attr, "sret(");
@@ -630,10 +581,8 @@ static gen_val_t gen_call(gen_t* g, ast_node_t* n, const gen_place_t* dst) {
     gen_text_append_str(g, ret);
     gen_text_append(g, " ");
     if (variadic || !direct) {
-        // An extern call goes through the matching variadic call type, which is what
-        // makes the vector-register count right (item 8), and a call through a function
-        // pointer carries the function type because an opaque pointer carries none.
-        // D3.10, D9.8, D19.2
+        // An extern call uses the matching variadic call type to set the vector-register count. A
+        // function-pointer call includes its function type because an opaque pointer carries none.
         gen_call_type(g, sig, variadic);
     }
     gen_text_append_str(g, callee.val);
@@ -641,7 +590,7 @@ static gen_val_t gen_call(gen_t* g, ast_node_t* n, const gen_place_t* dst) {
     gen_text_append_str(g, sb_view(&args.text));
     gen_text_append(g, ")");
     if (is_extern) {
-        // `#3 = { nobuiltin }` on every extern call site (item 8); a runtime
+        // `#3 = { nobuiltin }` on every extern call site. A runtime
         // entry point is not one, and its group carries no attribute.
         gen_use_attr(g, ATTR_NOBUILTIN);
         gen_text_append(g, " #3");
@@ -649,10 +598,8 @@ static gen_val_t gen_call(gen_t* g, ast_node_t* n, const gen_place_t* dst) {
     gen_ins_end(g);
     gen_args_free(&args);
     if (sig->noreturn) {
-        // Every call site of a `noreturn` function ends with a trap, an `extern` one
-        // included: its declaration is unadorned so that the optimizer cannot delete this
-        // trap, which is what catches an extern that returns anyway (item 20).
-        // D8.5, D19.7
+        // Every `noreturn` call site ends with a trap, including `extern` calls. The unadorned
+        // declaration prevents optimizer removal. The trap catches an `extern` that returns.
         gen_use_intrinsic(g, IN_TRAP);
         gen_use_attr(g, ATTR_TRAP);
         gen_ins(g);
@@ -666,11 +613,10 @@ static gen_val_t gen_call(gen_t* g, ast_node_t* n, const gen_place_t* dst) {
     return r;
 }
 
-// ---- arithmetic and its checks (item 15) ------------------------------------------
+// ---- arithmetic and its checks ------------------------------------------
 
-// The overflow intrinsic of an operation at a width: the family in the order
-// `sadd ssub smul uadd usub umul` and, within each, `i8 i16 i32 i64` (item
-// 15).
+// Returns the overflow intrinsic for an operation and width. Families use `sadd ssub smul uadd usub
+// umul` order. Each uses `i8 i16 i32 i64` order.
 static uint64_t overflow_slot(gen_overflow_t which, uint32_t bits) {
     uint64_t width = 0;
     if (bits == (uint32_t)BITS_16) {
@@ -702,10 +648,8 @@ static const char* overflow_name(gen_overflow_t which) {
     return "umul";
 }
 
-// One checked operation: the intrinsic, the two `extractvalue`s of the `{iN,
-// i1}` it returns, and the branch into a failure block that calls
-// std.rt.fail_overflow (item 15).
-// D19.6
+// Emits one checked operation. It calls the intrinsic, extracts the `{iN, i1}` values, and branches
+// to std.rt.fail_overflow on failure.
 static gen_val_t gen_checked(gen_t* g, gen_overflow_t which, gen_val_t a, gen_val_t b, loc_t loc) {
     sb_clear(&g->scratch);
     sb_append(&g->scratch, "{ ");
@@ -750,17 +694,14 @@ static gen_val_t gen_checked(gen_t* g, gen_overflow_t which, gen_val_t a, gen_va
     return value;
 }
 
-// The shift count of item 15: materialized at 64 bits so that a negative count
-// is reported with its signed value, checked against the operand's width, then
-// truncated to the operand's type, so a shift never produces poison.
-// D6.2, D11.1
+// Materializes a shift count at 64 bits to report negative values correctly. It checks the operand
+// width, then truncates to the operand type. Thus, shifts do not produce poison.
 static gen_val_t gen_shift_count(
     gen_t* g, loc_t loc, const type_t* at, const type_t* bt, gen_val_t b, uint32_t bits) {
     const str_t i64ty = str_from_cstr("i64");
     gen_val_t wide =
         gen_resize(g, b, gen_int_bits(bt), i64ty, (uint32_t)BITS_64, gen_is_signed(bt));
     if (g->opts.release) {
-        // D11.1
         const gen_val_t mask = gen_const_unsigned(g, i64ty, (uint64_t)bits - 1U);
         wide = gen_binary(g, "and", wide, mask);
     } else {
@@ -769,7 +710,7 @@ static gen_val_t gen_shift_count(
         gen_args_t args;
         gen_args_init(&args);
         gen_args_add(&args, wide);
-        // `@.str.T` is the shifted operand's type name (item 15).
+        // `@.str.T` is the shifted operand's type name.
         const char* type_name = at->kind == TYPE_PRIM ? prim_name(at->prim) : "integer";
         gen_args_add(
             &args,
@@ -781,7 +722,6 @@ static gen_val_t gen_shift_count(
 }
 
 // Division and remainder, checked in both build modes.
-// D6.13, D11.3
 static gen_val_t gen_divide(
     gen_t* g, loc_t loc, int32_t op, const type_t* t, gen_val_t a, gen_val_t b) {
     const bool sign = gen_is_signed(t);
@@ -793,7 +733,6 @@ static gen_val_t gen_divide(
     gen_check(g, bad, true, RT_FAIL_DIV_ZERO, &args, loc);
     gen_args_free(&args);
     if (sign) {
-        // D6.13
         const gen_val_t minus_one = gen_const_signed(g, a.ty, -1);
         const gen_val_t smallest = gen_const_min(g, a.ty, bits);
         const gen_val_t is_minus_one = gen_icmp(g, "eq", b, minus_one);
@@ -819,7 +758,7 @@ gen_val_t gen_arith(
     case TOK_MINUS:
     case TOK_STAR: {
         if (g->opts.release) {
-            // D11.1, D16: plain `add`; `nsw` and `nuw` are never emitted
+            // plain `add`; `nsw` and `nuw` are never emitted
             const char* plain = "mul";
             if (op == TOK_PLUS) {
                 plain = "add";
@@ -841,7 +780,6 @@ gen_val_t gen_arith(
         return gen_checked(g, which, a, b, loc);
     }
     case TOK_PLUS_WRAP:
-        // D11.2
         return gen_binary(g, "add", a, b);
     case TOK_MINUS_WRAP:
         return gen_binary(g, "sub", a, b);
@@ -860,10 +798,10 @@ gen_val_t gen_arith(
     case TOK_SHR: {
         const gen_val_t count = gen_shift_count(g, loc, at, bt, b, bits);
         if (op == TOK_SHL) {
-            // D6.2: `<<` discards the bits shifted out
+            // `<<` discards the bits shifted out
             return gen_binary(g, "shl", a, count);
         }
-        // D6.2: `>>` is arithmetic for signed, logical for unsigned
+        // `>>` is arithmetic for signed, logical for unsigned
         return gen_binary(g, sign ? "ashr" : "lshr", a, count);
     }
     default:
@@ -874,11 +812,9 @@ gen_val_t gen_arith(
 }
 
 // ---- comparisons ------------------------------------------------------------------
-// D6.2
 
 // The `icmp` predicate of a relational operator on a type: signedness is in
 // the instruction and never in the type.
-// D3.1
 static const char* compare_pred(int32_t op, bool sign) {
     switch (op) {
     case TOK_EQ:
@@ -902,7 +838,6 @@ static const char* compare_pred(int32_t op, bool sign) {
 // so the zero string equals `""`. The comparison is a runtime entry point because
 // the compiler emits no call to a C library symbol of its own accord, memcmp
 // included.
-// D3.7, D9.8
 static gen_val_t gen_string_compare(gen_t* g, ast_node_t* n) {
     gen_val_t aptr;
     gen_val_t alen;
@@ -920,17 +855,16 @@ static gen_val_t gen_string_compare(gen_t* g, ast_node_t* n) {
     gen_args_add(&args, bptr);
     gen_args_add(&args, blen);
     // The entry point is `fn str_eq(...) bool`, and a fort `bool` result is `zeroext
-    // i1` (items 2, 7), so the value needs no narrowing. The attribute is not
+    // i1`, so the value needs no narrowing. The attribute is not
     // decorative: a call site that states one the definition lacks changes what LLVM
     // may assume of the result.
-    // D9.9
     const gen_val_t eq = gen_call_rt_value(g, RT_STR_EQ, str_from_cstr("i1"), &args);
     gen_args_free(&args);
     if (n->op == TOK_EQ) {
         return eq;
     }
     if (n->op != TOK_NE) {
-        // D3.7: the checker rejects an ordering operator on strings
+        // the checker rejects an ordering operator on strings
         gen_todo(g, n->loc, "this comparison of strings");
         return eq;
     }
@@ -951,8 +885,7 @@ static gen_val_t gen_compare(gen_t* g, ast_node_t* n) {
 }
 
 // `&&` and `||` short-circuit through a stack slot rather than a `phi`, so the
-// tree walk never has to know its predecessors (item 10).
-// D19.4
+// tree walk never has to know its predecessors.
 static gen_val_t gen_short_circuit(gen_t* g, ast_node_t* n) {
     const gen_place_t slot = gen_temp_place(g, n->type);
     const gen_val_t lhs = gen_expr_value(g, n->a);
@@ -978,8 +911,7 @@ static gen_val_t gen_short_circuit(gen_t* g, ast_node_t* n) {
     return gen_load_place(g, slot);
 }
 
-// ---- casts (item 12) --------------------------------------------------------------
-// D3.14
+// ---- casts --------------------------------------------------------------
 
 static gen_val_t gen_cast(gen_t* g, ast_node_t* n) {
     const type_t* to = n->type;
@@ -992,7 +924,7 @@ static gen_val_t gen_cast(gen_t* g, ast_node_t* n) {
     const bool from_ptr =
         from->kind == TYPE_PTR || from->kind == TYPE_VOIDPTR || from->kind == TYPE_FN;
     if (to_ptr && from_ptr) {
-        // D5.4, D17.4: nothing for pointer to pointer or a dropped mark
+        // nothing for pointer to pointer or a dropped mark
         return v;
     }
     if (to_ptr) {
@@ -1008,22 +940,20 @@ static gen_val_t gen_cast(gen_t* g, ast_node_t* n) {
         return v;
     }
     if (is_bool(from)) {
-        // D3.14: nothing for `cast(b, bool)`, which is the identity
+        // nothing for `cast(b, bool)`, which is the identity
         return gen_resize(g, v, from_bits, gen_value_type(g, to), to_bits, false);
     }
-    // No row converts anything but a `bool` to `bool`: an integer to `bool` is a
-    // checker error and so is every other source type, so a `bool` target is the
-    // identity above and nothing else. Integer to integer widens by the source's
-    // signedness (item 12).
-    // D3.3, D3.14
+    // Only `bool` converts to `bool`. The checker rejects integers and all other source types.
+    // Thus, a `bool` target uses only the identity case above. Integer to integer widens by the
+    // source's signedness.
     return gen_resize(g, v, from_bits, gen_value_type(g, to), to_bits, gen_is_signed(from));
 }
 
-// ---- places (item 3) --------------------------------------------------------------
+// ---- places --------------------------------------------------------------
 
 gen_val_t gen_length_of(gen_t* g, const type_t* t, gen_val_t base) {
     if (t->kind == TYPE_ARRAY) {
-        // A fixed array's length is an `i64` literal (item 16).
+        // A fixed array's length is an `i64` literal.
         return gen_const_unsigned(g, str_from_cstr("i64"), t->len);
     }
     return gen_span_len(g, base);
@@ -1034,7 +964,7 @@ const type_t* gen_element_type(gen_t* g, const type_t* t) {
         return NULL;
     }
     if (t->kind == TYPE_STRING) {
-        // D3.7: a `string`'s type carries no element, so this node stands
+        // a `string`'s type carries no element, so this node stands
         return &g->char_type;
     }
     return t->elem;
@@ -1044,15 +974,13 @@ gen_val_t gen_element_addr(gen_t* g, const type_t* t, gen_val_t base, gen_val_t 
     if (t->kind == TYPE_ARRAY) {
         return gen_gep_array(g, t, base, index);
     }
-    // A span's elements are reached through its `.ptr` (item 3).
+    // A span's elements are reached through its `.ptr`.
     const gen_val_t ptr = gen_span_ptr(g, base);
     return gen_gep_element(g, gen_element_type(g, t), ptr, index);
 }
 
-// `e[i]`: the index is extended to `i64`, one `icmp uge` branches to
-// std.rt.fail_bounds, and the element is reached with the array or the element
-// shape of item 3.
-// D6.8
+// Emits `e[i]`. It extends the index to `i64` and uses one `icmp uge` bounds check. It then
+// addresses the element with the array or element shape.
 static gen_place_t gen_index_place(gen_t* g, ast_node_t* n) {
     gen_place_t out;
     out.addr = gen_literal(g, str_from_cstr("ptr"), "null");
@@ -1070,7 +998,7 @@ static gen_place_t gen_index_place(gen_t* g, ast_node_t* n) {
         return out;
     }
     // A negative index fails the same compare, since it is extended by its
-    // own signedness (item 16).
+    // own signedness.
     const gen_val_t index = gen_resize(g,
                                        raw,
                                        gen_int_bits(n->b->type),
@@ -1091,11 +1019,10 @@ static gen_place_t gen_index_place(gen_t* g, ast_node_t* n) {
     return out;
 }
 
-// ---- span expressions (item 16) -----------------------------------------------------
-// D6.9
+// ---- span expressions -----------------------------------------------------
 
 // One bound of a span expression as an `i64`, extended by its own signedness
-// so that a negative bound fails the unsigned compares below (item 16).
+// so that a negative bound fails the unsigned compares below.
 static gen_val_t span_bound(gen_t* g, ast_node_t* e) {
     const gen_val_t raw = gen_expr_value(g, e);
     return gen_resize(g,
@@ -1106,11 +1033,8 @@ static gen_val_t span_bound(gen_t* g, ast_node_t* e) {
                       gen_is_signed(e->type));
 }
 
-// `e[lo..hi]`, `e[lo..]`, `e[..hi]` and `e[..]`: the result is a view of the
-// operand, whose two bounds are checked against the operand's own length in one
-// branch, and `p[lo..hi]` on a raw pointer is the explicit unsafe escape that
-// checks nothing.
-// D6.9, D10.4
+// Emits each bounded slice form as an operand view. One branch checks both bounds against the
+// operand length. A raw-pointer slice is the explicit unsafe form and performs no check.
 static void gen_span_expr(gen_t* g, ast_node_t* n, gen_place_t dst) {
     const type_t* ot = n->a != NULL ? n->a->type : NULL;
     if (ot == NULL || bad_type(ot)) {
@@ -1118,13 +1042,13 @@ static void gen_span_expr(gen_t* g, ast_node_t* n, gen_place_t dst) {
     }
     const str_t i64ty = str_from_cstr("i64");
     if (ot->kind == TYPE_PTR) {
-        // D6.9, D10.4: a pointer has no length, so nothing is checked
+        // a pointer has no length, so nothing is checked
         const gen_val_t base = gen_expr_value(g, n->a);
         if (g->failed) {
             return;
         }
         if (n->b == NULL || n->c == NULL) {
-            // D10.4: `p[lo..]` and its kin are checker errors, so this is dead
+            // `p[lo..]` and its kin are checker errors, so this is dead
             gen_todo(g, n->loc, "this span expression");
             return;
         }
@@ -1133,7 +1057,7 @@ static void gen_span_expr(gen_t* g, ast_node_t* n, gen_place_t dst) {
         if (g->failed) {
             return;
         }
-        // D19.5: two instructions, so two statements, as below
+        // two instructions, so two statements, as below
         const gen_val_t at = gen_gep_element(g, ot->elem, base, lo);
         const gen_val_t length = gen_binary(g, "sub", hi, lo);
         gen_span_init(g, dst.addr, at, length);
@@ -1143,7 +1067,7 @@ static void gen_span_expr(gen_t* g, ast_node_t* n, gen_place_t dst) {
     if (g->failed) {
         return;
     }
-    // D6.3, D6.9: the operand then the bounds; an absent low bound is 0
+    // the operand then the bounds. An absent low bound is 0
     const gen_val_t lo = n->b != NULL ? span_bound(g, n->b) : gen_const_unsigned(g, i64ty, 0);
     if (g->failed) {
         return;
@@ -1152,7 +1076,6 @@ static void gen_span_expr(gen_t* g, ast_node_t* n, gen_place_t dst) {
     if (n->c != NULL) {
         hi = span_bound(g, n->c);
     } else {
-        // D6.9
         hi = gen_length_of(g, ot, operand.addr);
     }
     if (g->failed) {
@@ -1160,12 +1083,11 @@ static void gen_span_expr(gen_t* g, ast_node_t* n, gen_place_t dst) {
     }
     if (!g->opts.no_bounds_check) {
         // The length is read after the bounds the source writes, so the check holds
-        // against the length the operation sees; an absent high bound is that length and
+        // against the length the operation sees. An absent high bound is that length and
         // was read above. With both bounds written and `--no-bounds-check` nothing reads
         // it, so nothing loads it.
-        // D6.3, D10.6
         const gen_val_t len = n->c != NULL ? gen_length_of(g, ot, operand.addr) : hi;
-        // D6.9: `0 <= lo <= hi <= len` in one branch, unsigned (item 16)
+        // `0 <= lo <= hi <= len` in one branch, unsigned
         const gen_val_t over = gen_icmp(g, "ugt", hi, len);
         const gen_val_t inverted = gen_icmp(g, "ugt", lo, hi);
         const gen_val_t bad = gen_binary(g, "or", over, inverted);
@@ -1177,7 +1099,7 @@ static void gen_span_expr(gen_t* g, ast_node_t* n, gen_place_t dst) {
         gen_check(g, bad, true, RT_FAIL_SPAN, &args, n->loc);
         gen_args_free(&args);
     }
-    // D19.5: two statements; C leaves two arguments' order unspecified
+    // two statements; C leaves two arguments' order unspecified
     const gen_val_t base = gen_element_addr(g, ot, operand.addr, lo);
     const gen_val_t length = gen_binary(g, "sub", hi, lo);
     gen_span_init(g, dst.addr, base, length);
@@ -1189,7 +1111,6 @@ static gen_place_t gen_field_place(gen_t* g, ast_node_t* n, bool arrow) {
     out.type = n->type;
     gen_val_t base;
     if (arrow) {
-        // D6.10
         base = gen_expr_value(g, n->a);
     } else {
         base = gen_expr_place(g, n->a).addr;
@@ -1207,10 +1128,9 @@ static gen_place_t gen_field_place(gen_t* g, ast_node_t* n, bool arrow) {
     return out;
 }
 
-// The storage of a module-level constant or global, which is its symbol itself:
-// a constant is an immutable lvalue in read-only memory and a `mut` global an
-// assignable one. Returns false when `n` denotes something else.
-// D6.7, D7.10
+// Returns the symbol that stores a module-level constant or global. A constant is an immutable
+// lvalue in read-only memory. A `mut` global is assignable. Returns false when `n` denotes
+// something else.
 static bool global_place(gen_t* g, const ast_node_t* n, gen_place_t* out) {
     const sym_t* s = n->sym;
     if (s == NULL || (s->kind != SYM_CONST && s->kind != SYM_GLOBAL) || bad_type(s->type)) {
@@ -1226,10 +1146,8 @@ static bool global_place(gen_t* g, const ast_node_t* n, gen_place_t* out) {
     return true;
 }
 
-// The place of an rvalue: a field access or an index on an rvalue struct or
-// array is allowed and copies it through a temporary, and a `string` literal and
-// an aggregate call result reach their place the same way.
-// D6.7, D19.3
+// Returns the place of an rvalue. A field or index on an rvalue aggregate uses a temporary copy.
+// String literals and aggregate call results use the same path.
 static gen_place_t rvalue_place(gen_t* g, ast_node_t* n) {
     const gen_place_t tmp = gen_temp_place(g, n->type);
     gen_expr_into(g, n, tmp);
@@ -1258,7 +1176,7 @@ gen_place_t gen_expr_place(gen_t* g, ast_node_t* n) {
     case AST_INDEX:
         return gen_index_place(g, n);
     case AST_FIELD:
-        // D7.10, D9.4: `m.NAME` designates that module's storage
+        // `m.NAME` designates that module's storage
         if (global_place(g, n, &out)) {
             return out;
         }
@@ -1267,7 +1185,6 @@ gen_place_t gen_expr_place(gen_t* g, ast_node_t* n) {
         return gen_field_place(g, n, true);
     case AST_UNARY:
         if (n->op == TOK_STAR) {
-            // D6.7
             out.addr = gen_expr_value(g, n->a);
             return out;
         }
@@ -1277,18 +1194,16 @@ gen_place_t gen_expr_place(gen_t* g, ast_node_t* n) {
     case AST_STRUCT_LIT:
     case AST_ARRAY_LIT:
     case AST_BRACE_INIT:
-        // D6.9, D3.7: a view is a value, so its header is built in a temporary
-        // D6.5, D6.7: `point{1, 2}.x` reads out of the literal's own temporary
+        // a view is a value, so its header is built in a temporary
+        // `point{1, 2}.x` reads out of the literal's own temporary
         return rvalue_place(g, n);
     case AST_CAST:
     case AST_CALL:
     case AST_NEW:
         if (gen_is_aggregate(n->type)) {
-            // A call result, a cast between aggregates, which only drops marks and emits
-            // nothing of its own, and the span `new(T, n)` returns are rvalues as well, so a
-            // member of either is read out of a copy and `del(new(T, n))` frees the copy's
-            // pointer.
-            // D3.14, D5.4, D6.7, D17.8, D17.9
+            // Call results, aggregate casts, and spans from `new(T, n)` are also rvalues. Aggregate
+            // casts only drop marks. Member access uses a copy, and `del(new(T, n))` frees the
+            // copied pointer.
             return rvalue_place(g, n);
         }
         break;
@@ -1301,11 +1216,10 @@ gen_place_t gen_expr_place(gen_t* g, ast_node_t* n) {
 
 // ---- values -----------------------------------------------------------------------
 
-// `.len` and `.ptr` of a span or `string` are its header fields; `.len` of a
-// fixed array is a constant the checker already folded.
-// D3.4, D3.5
+// A span or string stores `.len` and `.ptr` in header fields. For a fixed array, `.len` is a
+// constant that the checker already folded.
 static bool pseudo_field_value(gen_t* g, ast_node_t* n, gen_val_t* out) {
-    // D6.10: `->` reaches them too, since `p->f` is `(*p).f`
+    // `->` reaches them too, since `p->f` is `(*p).f`
     const bool arrow = n->kind == AST_ARROW;
     const type_t* ot = n->a != NULL ? n->a->type : NULL;
     if (arrow) {
@@ -1319,7 +1233,7 @@ static bool pseudo_field_value(gen_t* g, ast_node_t* n, gen_val_t* out) {
     if (!len && !ptr) {
         return false;
     }
-    // D6.7, D6.10: the pointer's target for `->`, the operand for `.`
+    // the pointer's target for `->`, the operand for `.`
     const gen_val_t base = arrow ? gen_expr_value(g, n->a) : gen_expr_place(g, n->a).addr;
     if (g->failed) {
         *out = gen_literal(g, str_from_cstr("i64"), "0");
@@ -1331,7 +1245,6 @@ static bool pseudo_field_value(gen_t* g, ast_node_t* n, gen_val_t* out) {
 
 static gen_val_t gen_unary_value(gen_t* g, ast_node_t* n) {
     if (n->op == TOK_AMP) {
-        // D6.7
         gen_place_t p = gen_expr_place(g, n->a);
         p.addr.ty = str_from_cstr("ptr");
         return p.addr;
@@ -1347,10 +1260,10 @@ static gen_val_t gen_unary_value(gen_t* g, ast_node_t* n) {
         return gen_binary(g, "xor", v, gen_literal(g, str_from_cstr("i1"), "true"));
     }
     if (n->op == TOK_TILDE) {
-        // D6.2: `~x` is `x ^ -1` and never overflows
+        // `~x` is `x ^ -1` and never overflows
         return gen_binary(g, "xor", v, gen_const_signed(g, v.ty, -1));
     }
-    // Unary `-` is `0 - x` and uses the same intrinsics as `-` (item 15).
+    // Unary `-` is `0 - x` and uses the same intrinsics as `-`.
     return gen_arith(g, n->loc, TOK_MINUS, n->type, zero_of(g, n->type), n->type, v);
 }
 
@@ -1382,13 +1295,13 @@ gen_val_t gen_expr_value(gen_t* g, ast_node_t* n) {
         return gen_literal(g, str_from_cstr("i32"), "0");
     }
     if (folded_scalar(g, n)) {
-        // D4.6: a constant expression has no side effects
+        // a constant expression has no side effects
         return gen_const_value(g, n->type, check_node_value(g->ck, n));
     }
     switch (n->kind) {
     case AST_IDENT: {
         gen_val_t fn;
-        // D3.10: a function name has no storage to load from
+        // a function name has no storage to load from
         if (function_ref(g, n, &fn)) {
             return fn;
         }
@@ -1398,7 +1311,6 @@ gen_val_t gen_expr_value(gen_t* g, ast_node_t* n) {
         return gen_load_place(g, gen_expr_place(g, n));
     case AST_ARROW: {
         gen_val_t v;
-        // D6.10
         if (pseudo_field_value(g, n, &v)) {
             return v;
         }
@@ -1406,7 +1318,7 @@ gen_val_t gen_expr_value(gen_t* g, ast_node_t* n) {
     }
     case AST_FIELD: {
         gen_val_t v;
-        // D3.10, D9.4: `m.f` is the function's address, not a field
+        // `m.f` is the function's address, not a field
         if (function_ref(g, n, &v)) {
             return v;
         }
@@ -1422,7 +1334,7 @@ gen_val_t gen_expr_value(gen_t* g, ast_node_t* n) {
     case AST_CAST:
         return gen_cast(g, n);
     case AST_CALL: {
-        // D12.2: the one universe function with a value (item 18)
+        // the one universe function with a value
         if (gen_is_move(n)) {
             return gen_move(g, n, NULL);
         }
@@ -1432,13 +1344,13 @@ gen_val_t gen_expr_value(gen_t* g, ast_node_t* n) {
         return gen_call(g, n, NULL);
     }
     case AST_BRACE_INIT:
-        // D3.9, D6.5: a zeroed enum holds 0 even when 0 is not a member
+        // a zeroed enum holds 0 even when 0 is not a member
         if (ast_len(n) == 0) {
             return zero_of(g, n->type);
         }
         break;
     case AST_NEW:
-        // D10.2: `new(T)` is a scalar; `new(T, n)` is written into a place
+        // `new(T)` is a scalar; `new(T, n)` is written into a place
         return gen_new_object(g, n);
     default:
         break;
@@ -1448,15 +1360,12 @@ gen_val_t gen_expr_value(gen_t* g, ast_node_t* n) {
 }
 
 // ---- values written into a place ---------------------------------------------------
-// D19.3
 
 // A `{... }` initializer: `{}` zeroes the place with `llvm.memset` and every
 // other form writes member by member.
-// D6.5
 static void gen_brace_init(gen_t* g, ast_node_t* n, gen_place_t dst) {
     const type_t* t = dst.type;
     if (ast_len(n) == 0) {
-        // D6.5
         gen_memset_zero(g, dst.addr, type_alignof(t), type_sizeof(t));
         return;
     }
@@ -1478,7 +1387,7 @@ static void gen_brace_init(gen_t* g, ast_node_t* n, gen_place_t dst) {
         return;
     }
     if ((n->flags & AST_FLAG_DESIGNATED) != 0) {
-        // D6.5: the designated form zeroes first, omitted fields being zero
+        // the designated form zeroes first, omitted fields being zero
         gen_memset_zero(g, dst.addr, type_alignof(t), type_sizeof(t));
         for (uint64_t i = 0; i < ast_len(n); i++) {
             ast_node_t* d = ast_child(n, i);
@@ -1535,7 +1444,7 @@ void gen_expr_into(gen_t* g, ast_node_t* n, gen_place_t dst) {
         gen_brace_init(g, n->b, dst);
         return;
     case AST_STRING: {
-        // D3.7: the bytes and the length the trailing NUL excludes
+        // the bytes and the length the trailing NUL excludes
         gen_val_t ptr;
         gen_val_t len;
         string_operand(g, n, &ptr, &len);
@@ -1545,7 +1454,7 @@ void gen_expr_into(gen_t* g, ast_node_t* n, gen_place_t dst) {
     case AST_CALL:
         if (gen_is_move(n)) {
             // A span, a `string` or an owning aggregate is copied into the
-            // destination and the operand is then zeroed (item 18).
+            // destination and the operand is then zeroed.
             (void)gen_move(g, n, &dst);
             return;
         }
@@ -1554,7 +1463,7 @@ void gen_expr_into(gen_t* g, ast_node_t* n, gen_place_t dst) {
         }
         return;
     case AST_CAST:
-        // D5.4, D17.4: a cast between aggregates only drops marks
+        // a cast between aggregates only drops marks
         gen_expr_into(g, n->a, dst);
         return;
     case AST_NEW:
@@ -1573,7 +1482,7 @@ void gen_expr_into(gen_t* g, ast_node_t* n, gen_place_t dst) {
         gen_span_init(g, dst.addr, ptr, len);
         return;
     }
-    // D19.3: every other aggregate is an lvalue, so the value is a copy
+    // every other aggregate is an lvalue, so the value is a copy
     const gen_place_t src = gen_expr_place(g, n);
     if (g->failed) {
         return;
@@ -1592,7 +1501,6 @@ void gen_expr_discard(gen_t* g, ast_node_t* n) {
         }
         if (gen_is_aggregate(n->type)) {
             // An aggregate result still needs a place, which nothing reads
-            // (item 7).
             const gen_place_t sink = gen_temp_place(g, n->type);
             (void)gen_call(g, n, &sink);
             return;

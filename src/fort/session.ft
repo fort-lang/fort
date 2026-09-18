@@ -1,55 +1,26 @@
-// session: everything one analysis owns, and the one place a source file's
-// bytes come from.
-//
-// A language server is a planned consumer of these modules, so the compiler
-// keeps no module-level mutable state: the pool the analysis interns into, the
-// diagnostic sink, the source table and the configuration table are fields of
-// this value. The driver creates, passes down and frees it. Two analyses in one
-// process are two sessions. Freeing a session frees all its allocations, so a
-// document analysed a thousand times does not grow the heap.
-// D20.5
-//
-// read_source is the only function that reads a source file. A server hands
-// its editor buffers to set_source first, and every module above reads through
-// read_source, so the unsaved text is what the analysis sees; nothing else in
-// the compiler opens a file. A file read once is remembered, so the same path
-// gives the same bytes for the life of the session.
-//
-// Dispatch: none. The module is one value with accessors; the case analysis a
-// dispatch table would replace is in the passes above it.
-// D3.10
+/// Holds source text, configuration, diagnostics, and shared storage for one analysis.
+
 import containers;
 import diag;
 import std.io;
 import std.strbuf;
 import std.strmap;
 
-/// Everything one analysis owns. session{} is a valid empty session, which is
-/// what create returns, and no field of it is a pointer into another, so a
-/// session is a value like any other.
 struct session {
     containers.pool pool;
     diag.sink diags;
-    /// The source table: an interned path to its index in `texts`. The map
-    /// borrows its keys (stdlib.md 2.8), and a key interned in this session's
-    /// pool lives exactly as long as the map does.
+    // Maps each path to its index in `texts`.
     strmap.str_map sources;
     containers.str_vec texts;
-    /// One map applies to the complete module closure. The map stores each
-    /// key's position in `config_values`. Both strings live in the pool.
+    // Maps each configuration key to its index in `config_values`.
     strmap.str_map config;
     containers.str_vec config_values;
 }
 
-/// The empty session; allocates nothing. A call result needs no move.
-/// D17.5
 fn create() session {
     return session{};
 }
 
-/// Releases the pool, sink, both tables, source texts and configuration value
-/// slots. All session allocations die here. All returned strings become
-/// dangling, so an analysis outlives nothing of its session.
 fn free(session mut* s) void {
     diag.free(&s->diags);
     strmap.free(&s->sources);
@@ -59,8 +30,7 @@ fn free(session mut* s) void {
     containers.pool_free(&s->pool);
 }
 
-/// Adds one configuration pair. The caller must not add the same key twice.
-/// The session copies both strings because command arguments need not outlive it.
+// Adds one configuration pair. Panics when the key already exists.
 fn config_set(session mut* s, string key, string value) void {
     if (strmap.has(&s->config, key)) {
         panic("session.config_set: duplicate key");
@@ -71,8 +41,8 @@ fn config_set(session mut* s, string key, string value) void {
     strmap.put(&s->config, kept_key, cast(s->config_values.len - 1, i64));
 }
 
-/// Returns one configured value. False distinguishes an absent key from an
-/// empty configured value and leaves *out unchanged.
+// Returns one configured value. False distinguishes an absent key from an
+// empty configured value and leaves *out unchanged.
 fn config_get(session* s, string key, string mut* out) bool {
     i64 mut at = 0;
     if (!strmap.get(&s->config, key, &at)) {
@@ -82,39 +52,25 @@ fn config_get(session* s, string key, string mut* out) bool {
     return true;
 }
 
-/// The pool an analysis interns names into, whose storage dies with the
-/// session. Ownership: a view of the session's field.
-/// D17.3
 fn pool(session mut* s) containers.pool mut* {
     return &s->pool;
 }
 
-/// The sink every diagnostic of this analysis is reported to.
 fn diags(session mut* s) diag.sink mut* {
     return &s->diags;
 }
 
-/// The errors reported through this session so far, which is what a driver asks
-/// to learn whether a file is usable.
-/// D14.2
+// The errors reported through this session so far, which is what a driver asks
+// to learn whether a file is usable.
 fn error_count(session* s) u64 {
     return diag.count(&s->diags);
 }
 
-/// Installs `text` as the contents of `path`, replacing what an earlier
-/// set_source or read_source left there: the editor buffer a server analyses
-/// instead of the file on disk. Both arguments are copied into the session's
-/// pool, so the caller may free its own buffer at once. Replacing a text leaves
-/// the older copy in the pool until the session is freed, which is why a server
-/// analysing a document a thousand times creates a session per analysis.
+// Sets the text for `path` without reading the file. A later call replaces that text.
 fn set_source(session mut* s, string path, string text) void {
     string kept = containers.pool_intern(&s->pool, text);
     i64 mut idx = 0;
-    // The path is looked up with the caller's bytes and interned only when it
-    // is new: the map keeps the key of the insert that created the entry
-    // (stdlib.md 2.8), so interning on a hit would leave a copy in the pool
-    // that nothing ever reads and a session updated at every keystroke would
-    // grow by one path per stroke.
+    // Intern the path only for a new entry. Repeated updates then allocate no path copy.
     if (strmap.get(&s->sources, path, &idx)) {
         containers.str_set(&s->texts, cast(idx, u64), kept);
         return;
@@ -123,16 +79,11 @@ fn set_source(session mut* s, string path, string text) void {
     strmap.put(&s->sources, containers.pool_intern(&s->pool, path), cast(s->texts.len - 1, i64));
 }
 
-/// The contents of `path`: the text a set_source installed, the text an earlier
-/// read_source read, or the file read from disk and remembered. False when the
-/// file cannot be read, with *out unchanged and sys.errno() describing the failing
-/// call; nothing here reports a diagnostic, since the caller knows what the file
-/// was wanted for. On success *out is a view of storage the session owns, valid
-/// until the session is freed.
-/// D13.3, D17.3
+// Returns cached text or reads and caches `path`. On failure, `out` is unchanged.
+// sys.errno() identifies the failed file operation. This function reports no diagnostic.
 fn read_source(session mut* s, string path, string mut* out) bool {
     i64 mut idx = 0;
-    // D20.5: re-reading one file allocates nothing after the first read
+    // re-reading one file allocates nothing after the first read
     if (strmap.get(&s->sources, path, &idx)) {
         *out = containers.str_at(&s->texts, cast(idx, u64));
         return true;
@@ -142,8 +93,6 @@ fn read_source(session mut* s, string path, string mut* out) bool {
     if (!io.read_file(path, &buf)) {
         return false;
     }
-    // The bytes are copied out of the buffer, which is released on return,
-    // into storage that lives as long as the session.
     string kept = containers.pool_intern(&s->pool, strbuf.view(&buf));
     containers.str_push(&s->texts, kept);
     strmap.put(&s->sources, containers.pool_intern(&s->pool, path), cast(s->texts.len - 1, i64));
@@ -151,13 +100,13 @@ fn read_source(session mut* s, string path, string mut* out) bool {
     return true;
 }
 
-/// Whether the session already holds the contents of `path`, from set_source or
-/// from an earlier read_source; it opens nothing.
+// Whether the session already holds the contents of `path`, from set_source or
+// from an earlier read_source; it opens nothing.
 fn has_source(session* s, string path) bool {
     return strmap.has(&s->sources, path);
 }
 
-/// The number of files the session holds the contents of.
+// The number of files the session holds the contents of.
 fn source_count(session* s) u64 {
     return strmap.count(&s->sources);
 }

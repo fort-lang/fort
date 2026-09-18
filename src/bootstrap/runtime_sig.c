@@ -1,6 +1,4 @@
-// The table of runtime entry points (toolchain.md 5.1) and the maps over it:
-// the IR text of a form, the form a fort type takes as a value, and the call
-// shape of a fort signature; see runtime_sig.h.
+// Implements canonical LLVM IR signatures for std.rt entry points.
 #include "runtime_sig.h"
 
 #include <stdbool.h>
@@ -11,8 +9,8 @@
 #include "str.h"
 #include "types.h"
 
-// One entry point: its mangled fort name, its result form, whether section
-// 5.1 declares it `fn noreturn`, and its parameter forms in order, padded
+// One entry point: its mangled fort name, its result form, its `noreturn` state,
+// and its parameter forms in order, padded
 // with IR_NONE. The list ends at the first IR_NONE, so the arity is read off
 // the row rather than counted by hand beside it.
 typedef struct {
@@ -22,25 +20,13 @@ typedef struct {
     ir_form_t params[RT_MAX_PARAMS];
 } rt_sig_t;
 
-// The fort signatures of toolchain.md 5.1, in that section's order, mapped to IR
-// forms by item 7: `u64` and `i64` are both `i64`, `u32` is `i32`, `char` is `i8
-// zeroext`, `bool` is `i1 zeroext`, every pointer is `ptr` and `loc` is the three
-// parameters `ptr, i32, i32`. `args` returns a `string@`, an aggregate, so it is
-// a `void` function with a leading `ptr` (item 7). Every `fail_*` function,
-// `panic`, `assert_fail` and `exit` is `fn noreturn`, which is stated per row
-// rather than as a range over the enum, so an entry point added in the middle of
-// the order cannot inherit the attribute by position. The two float printers
-// stand in `std.rt_float` and not in `std.rt`, because a compiler without floats
-// cannot compile them.
-// D9.9, D18.1
-//
-// That last sentence is true of the library this compiler reads and of no
-// other. The fold put the float module into `std.rt`, and the table of
-// `src/fort/runtime_sig.ft` names `std.rt.print_f32` and `std.rt.print_f64`
-// from that commit on. This compiler builds pin 0 alone, whose library still
-// holds the split (notes/compiler.md 8, invariant 5), so these two rows name
-// pin 0's modules and must keep the old names.
-// D18.1
+// Maps fort signatures to IR forms in table order. Both `u64` and `i64` use `i64`. `u32` uses
+// `i32`. `char` uses `i8 zeroext`, and `bool` uses `i1 zeroext`. Each pointer uses `ptr`. A `loc`
+// expands to `ptr, i32, i32`. `args` returns a `string@`, an aggregate, so it is a `void` function
+// with a leading `ptr`. Each `fail_*` function, `panic`, `assert_fail`, and `exit` is `fn
+// noreturn`. Each row states this attribute. Thus, insertion order cannot add the attribute to
+// another entry point. The standard library at `tools/bootstrap.ref` pin 0 defines the float
+// printers in `std.rt_float`. The current `std/rt.ft` defines both in `std.rt`.
 static const rt_sig_t RT_SIG[RT_COUNT] = {
     {"std.rt.alloc", IR_PTR, false, {IR_I64, IR_I64, IR_PTR, IR_I32, IR_I32, IR_NONE}},
     {"std.rt.free", IR_VOID, false, {IR_PTR, IR_NONE, IR_NONE, IR_NONE, IR_NONE, IR_NONE}},
@@ -141,15 +127,14 @@ const char* ir_param_text(ir_form_t t) {
     case IR_NONE:
         break;
     }
-    // A type with no IR form has no text either: the spelling is deliberately
-    // not IR so that a form that escaped a check fails a tool rather than
-    // emitting a plausible call.
+    // A type with no IR form also has no text. Its invalid spelling makes an escaped form fail
+    // instead of emitting a plausible call.
     return "<none>";
 }
 
 const char* ir_result_text(ir_form_t t) {
     // A narrow result carries its extension attribute before the type
-    // (`call zeroext i1 @"std.rt.str_eq"(...)`, item 7).
+    // (`call zeroext i1 @"std.rt.str_eq"(...)`, LLVM IR).
     switch (t) {
     case IR_BOOL:
         return "zeroext i1";
@@ -167,9 +152,8 @@ const char* ir_result_text(ir_form_t t) {
     return ir_param_text(t);
 }
 
-// The IR form of a primitive: the value type of item 7 and the extension
+// The IR form of a primitive: the value type and the extension
 // attribute, which `bool`, `char`, `u8`, `u16`, `i8` and `i16` carry.
-// D9.9
 static ir_form_t ir_of_prim(prim_kind_t k) {
     switch (k) {
     case PRIM_BOOL:
@@ -211,19 +195,17 @@ ir_form_t ir_form_of_type(const type_t* t) {
     case TYPE_PTR:
     case TYPE_VOIDPTR:
     case TYPE_FN:
-        // D3.10, D3.11
         return IR_PTR;
     case TYPE_ENUM:
-        // D3.9, D9.8
         return IR_I32;
     default:
         break;
     }
-    // D19.3: an aggregate lives in memory and travels as a pointer
+    // an aggregate lives in memory and travels as a pointer
     return IR_NONE;
 }
 
-// Whether a fort type is one of the aggregates of item 7, which travel as a
+// Whether a fort type is one of the aggregates, which travel as a
 // plain `ptr`.
 static bool form_is_aggregate(const type_t* t) {
     if (t == NULL) {
@@ -240,7 +222,7 @@ bool rt_signature_of_type(const type_t* fn, ir_form_t* result, ir_form_t* params
     uint32_t count = 0;
     if (form_is_aggregate(fn->elem)) {
         // An aggregate result is a leading `ptr sret(%T)` parameter on a
-        // function whose result type is `void` (item 7).
+        // function whose result type is `void`.
         *result = IR_VOID;
         params[count] = IR_PTR;
         count++;
@@ -251,7 +233,7 @@ bool rt_signature_of_type(const type_t* fn, ir_form_t* result, ir_form_t* params
         if (count >= (uint32_t)RT_MAX_PARAMS) {
             return false;
         }
-        // An aggregate argument is a plain `ptr` parameter (item 7); no entry
+        // An aggregate argument is a plain `ptr` parameter. No entry
         // point takes one, so this keeps the map total rather than covering a
         // row.
         params[count] = form_is_aggregate(fn->params[i]) ? IR_PTR : ir_form_of_type(fn->params[i]);

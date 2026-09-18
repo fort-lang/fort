@@ -1,4 +1,4 @@
-// Entry point of the bootstrap compiler (toolchain.md 1).
+// Starts the bootstrap fort compiler.
 #include <stdio.h>
 
 #include "driver.h"

@@ -1,43 +1,11 @@
-// runtime_sig: the runtime entry points of toolchain.md 5.1, the one table of
-// their canonical signatures, which the emitter reads.
-//
-// This is src/bootstrap/runtime_sig.c transliterated. The runtime is `std.rt`,
-// an ordinary fort module, so a row carries the mangled name and the emitter
-// writes it quoted. It emits no declaration for any of them: the module that
-// holds the call holds the definition too (item 8).
-// D9.7, D13.1
-//
-// The alphabet is the IR parameter forms of toolchain.md 6 item 7, attribute
-// included, and not the fort types: what a reader of this table asks is what
-// the call the emitter writes is made of, which is a question about IR types.
-// `test/fort/runtime_sig_test.ft` holds every row against the fort signature
-// in `std/rt.ft`, which is the one thing that defines the entry point.
-//
-// Two things differ from the C and neither is behaviour. The C's table is a
-// static array of rows whose `params` is an array of RT_MAX_PARAMS forms; a
-// row here is the return value of one function, one `return` per entry point
-// in the order of section 5.1, and its parameter forms are six fields rather
-// than an array, so that reading the `i`-th one is a switch and no index. And
-// the C's RT_COUNT, one past the last entry point, is `rt_none` here: a fort
-// switch over an enum names every member, so the sentinel is a member like any
-// other and answers "this name is not an entry point".
-// D7.6
-//
-// Re-entrancy: nothing here is state at all. Every function is a pure map from
-// an entry point to a fact about it, so a thousand analyses in one process
-// share nothing. An index past the end of a row is a violated precondition and
-// panics.
-// D20.5, D13.3
-//
-// Dispatch: none. The rows are switches over the entry enum, not a table of
-// function pointers.
-// D3.10
+/// Defines canonical LLVM IR signatures for `std.rt` entry points.
+
 import prim;
 import types;
 
-/// The runtime entry points of toolchain.md 5.1, in the order that section
-/// lists them. `rt_none` is the C's RT_COUNT: no entry point, which is what a
-/// name that is not one denotes.
+// The runtime entry points, in the order the table
+// lists them. `rt_none` is the C's RT_COUNT: no entry point, which is what a
+// name that is not one denotes.
 enum rt_entry {
     rt_alloc,
     rt_free,
@@ -70,38 +38,36 @@ enum rt_entry {
     rt_none,
 }
 
-/// An IR parameter or result form of item 7: the type text together with the
-/// extension attribute a narrow value carries on both sides of the boundary.
-/// `bool` is a form of its own because it is `i1` as a value and `i8` in memory,
-/// so a `bool` argument is not a `u8` argument.
-/// D9.9, D19.2
+// An IR parameter or result form: the type text together with the extension attribute a narrow
+// value carries on both sides of the boundary. `bool` has its own form. It is `i1` as a value and
+// `i8` in memory. Thus, a `bool` argument differs from `u8`.
 enum ir_form {
     ir_void, // `void`, a result only
-    ir_ptr, // D3.10, D3.11: `ptr`: every pointer, `void*` and function pointer
+    ir_ptr, // `ptr`: every pointer, `void*` and function pointer
     ir_bool, // `i1 zeroext`
     ir_i8,   // `i8 signext`
-    ir_u8, // D3.2: `i8 zeroext`: `u8` and `char`, C's `unsigned char`
+    ir_u8, // `i8 zeroext`: `u8` and `char`, C's `unsigned char`
     ir_i16,  // `i16 signext`
     ir_u16,  // `i16 zeroext`
-    ir_i32, // D9.8: `i32`, `u32` and every enum, which is passed as `i32`
+    ir_i32, // `i32`, `u32` and every enum, which is passed as `i32`
     ir_i64,  // `i64`: `i64` and `u64`
     ir_f32,  // `float`
     ir_f64,  // `double`
-    ir_none, // D9.8: no IR form: a type an extern signature may not use
+    ir_none, // no IR form: a type an extern signature may not use
 }
 
-/// The entry points of section 5.1, which is what rt_entry_of walks.
+// The entry points, which is what rt_entry_of walks.
 u64 RT_ENTRY_COUNT = 28;
 
-/// The widest parameter list of toolchain.md 5.1, which is
-/// `fail_span(i64, i64, i64, ptr, i32, i32)`.
+// The widest parameter list, which is
+// `fail_span(i64, i64, i64, ptr, i32, i32)`.
 u64 RT_MAX_PARAMS = 6;
 
-/// One entry point: its mangled fort name, its result form, whether section
-/// 5.1 declares it `fn noreturn`, and its parameter forms in order, padded
-/// with ir_none. The
-/// list ends at the first ir_none, so the arity is read off the row rather
-/// than counted by hand beside it.
+// One entry point: its mangled fort name, its result form, its `noreturn` state,
+// and its parameter forms in order, padded
+// with ir_none. The
+// list ends at the first ir_none, so the arity is read off the row rather
+// than counted by hand beside it.
 struct rt_sig {
     string name;
     ir_form result;
@@ -114,8 +80,8 @@ struct rt_sig {
     ir_form p5;
 }
 
-/// A row with no parameter, which every row below starts from: the six slots
-/// an entry point does not use are ir_none, as the C pads its array.
+// Creates a row with no parameters. Each row below starts from it. Unused parameter slots contain
+// ir_none, as in the C table.
 fn row(string name, ir_form result, bool is_noreturn) rt_sig {
     return rt_sig{name, result, is_noreturn, ir_form.ir_none, ir_form.ir_none, ir_form.ir_none,
                   ir_form.ir_none, ir_form.ir_none, ir_form.ir_none};
@@ -160,17 +126,13 @@ fn row6(string name, ir_form result, bool is_noreturn, ir_form p0, ir_form p1, i
     return r;
 }
 
-/// The fort signatures of toolchain.md 5.1, in that section's order, mapped to IR
-/// forms by item 7: `u64` and `i64` are `i64`, `u32` is `i32`, `char` is `i8
-/// zeroext`, `bool` is `i1 zeroext`, every pointer is `ptr` and `loc` is the three
-/// parameters `ptr, i32, i32`. `args` returns a `string@`, an aggregate, so it is
-/// a `void` function with a leading `ptr` (item 7). Every `fail_*` function,
-/// `panic`, `assert_fail` and `exit` is `fn noreturn`, which is stated per row
-/// rather than as a range over the enum, so an entry point added in the middle of
-/// the order cannot inherit the attribute by position. The two float printers are
-/// rows of `std.rt` like every other one: the separate float module is folded into
-/// the runtime.
-/// D9.9, D18.1
+// Maps fort signatures to IR forms in table order. Both `u64` and `i64` use `i64`. `u32` uses
+// `i32`. `char` uses `i8 zeroext`, and `bool` uses `i1 zeroext`. Each pointer uses `ptr`. A `loc`
+// expands to `ptr, i32, i32`. `args` returns a `string@`, an aggregate, so it is a `void` function
+// with a leading `ptr`. Each `fail_*` function, `panic`, `assert_fail`, and `exit` is `fn
+// noreturn`. Each row states this attribute. Thus, insertion order cannot add the attribute to
+// another entry point. The two float printers are rows of `std.rt` like every other one: the
+// separate float module is folded into the runtime.
 fn rt_sig_of(rt_entry rt) rt_sig {
     switch (rt) {
     case rt_entry.rt_alloc:
@@ -251,10 +213,9 @@ fn rt_sig_of(rt_entry rt) rt_sig {
     }
 }
 
-/// The `i`-th entry point in the order of section 5.1, which is what rt_entry_of
-/// walks; an index at or past RT_ENTRY_COUNT is a violated precondition and
-/// panics. The C indexes its table instead.
-/// D13.3
+// The `i`-th entry point in the order, which is what rt_entry_of
+// walks. An index at or past RT_ENTRY_COUNT is a violated precondition and
+// panics. The C indexes its table instead.
 fn rt_at(u64 i) rt_entry {
     if (i >= RT_ENTRY_COUNT) {
         panic("runtime_sig.rt_at: index out of range");
@@ -262,10 +223,9 @@ fn rt_at(u64 i) rt_entry {
     return cast(cast(i, i32), rt_entry);
 }
 
-/// The entry point a mangled symbol name denotes, or rt_none. The name is the
-/// mangled one, `std.rt.print_i64`, since that is what the emitter writes and what
-/// the definitions in `std/rt.ft` carry.
-/// D9.7
+// The entry point a mangled symbol name denotes, or rt_none. The name is the
+// mangled one, `std.rt.print_i64`, since that is what the emitter writes and what
+// the definitions in `std/rt.ft` carry.
 fn rt_entry_of(string name) rt_entry {
     u64 mut i = 0;
     while (i < RT_ENTRY_COUNT) {
@@ -278,27 +238,24 @@ fn rt_entry_of(string name) rt_entry {
     return rt_entry.rt_none;
 }
 
-/// The mangled fort name of an entry point. It is written `@"..."`, quoted like
-/// every other dotted name (item 4).
-/// D9.7
+// The mangled fort name of an entry point. It is written `@"..."`, quoted like
+// every other dotted name.
 fn rt_entry_name(rt_entry rt) string {
     return rt_sig_of(rt).name;
 }
 
-/// Whether toolchain.md 5.1 declares the entry point `fn noreturn`, which is
-/// what puts the attribute group `#8` of item 14 on its definition.
+// Whether the entry point is `noreturn`. Its definition uses attribute group `#8`.
 fn rt_entry_noreturn(rt_entry rt) bool {
     return rt_sig_of(rt).is_noreturn;
 }
 
-/// Its result form.
+// Its result form.
 fn rt_entry_result(rt_entry rt) ir_form {
     return rt_sig_of(rt).result;
 }
 
-/// The form of the `i`-th parameter, ir_none at or past the arity; an index
-/// past the widest row is a violated precondition and panics.
-/// D13.3
+// The form of the `i`-th parameter, ir_none at or past the arity. An index
+// past the widest row is a violated precondition and panics.
 fn rt_entry_param(rt_entry rt, u64 i) ir_form {
     rt_sig sig = rt_sig_of(rt);
     if (i == 0) {
@@ -317,7 +274,7 @@ fn rt_entry_param(rt_entry rt, u64 i) ir_form {
     panic("runtime_sig.rt_entry_param: index out of range");
 }
 
-/// The number of parameters it takes: the row ends at its first ir_none.
+// The number of parameters it takes: the row ends at its first ir_none.
 fn rt_entry_param_count(rt_entry rt) u64 {
     u64 mut n = 0;
     while (n < RT_MAX_PARAMS && rt_entry_param(rt, n) != ir_form.ir_none) {
@@ -326,7 +283,7 @@ fn rt_entry_param_count(rt_entry rt) u64 {
     return n;
 }
 
-/// The text of a form in a parameter list (`i8 zeroext`), as item 7 spells it.
+// The text of a form in a parameter list (`i8 zeroext`), as LLVM IR spells it.
 fn ir_param_text(ir_form t) string {
     switch (t) {
     case ir_form.ir_ptr:
@@ -352,18 +309,17 @@ fn ir_param_text(ir_form t) string {
     case ir_form.ir_void:
         return "void";
     case ir_form.ir_none:
-        // A type with no IR form has no text either: the spelling is
-        // deliberately not IR so that a form that escaped a check fails a tool
-        // rather than emitting a plausible declaration.
+        // A type with no IR form also has no text. Its invalid spelling makes an escaped form fail
+        // instead of emitting a plausible declaration.
         return "<none>";
     }
 }
 
-/// The text of a form in the result position of a `declare` or a `call`, where
-/// the attribute precedes the type (`zeroext i8`), as item 7 spells it.
+// Returns a form's result text for `declare` or `call`. The attribute precedes the type, as in
+// `zeroext i8`.
 fn ir_result_text(ir_form t) string {
     // A narrow result carries its extension attribute before the type
-    // (`call zeroext i1 @"std.rt.str_eq"(...)`, item 7).
+    // (`call zeroext i1 @"std.rt.str_eq"(...)`, LLVM IR).
     if (t == ir_form.ir_bool) {
         return "zeroext i1";
     } else if (t == ir_form.ir_i8) {
@@ -378,9 +334,8 @@ fn ir_result_text(ir_form t) string {
     return ir_param_text(t);
 }
 
-/// The IR form of a primitive: the value type of item 7 and the extension
-/// attribute, which `bool`, `char`, `u8`, `u16`, `i8` and `i16` carry.
-/// D9.9
+// The IR form of a primitive: the value type and the extension
+// attribute, which `bool`, `char`, `u8`, `u16`, `i8` and `i16` carry.
 fn ir_of_prim(prim.prim_kind k) ir_form {
     switch (k) {
     case prim.prim_kind.prim_bool:
@@ -406,9 +361,8 @@ fn ir_of_prim(prim.prim_kind k) ir_form {
     }
 }
 
-/// The IR form a fort type takes as a scalar value, or ir_none for an
-/// aggregate: the value type of item 7 with its extension attribute.
-/// D9.9
+// The IR form a fort type takes as a scalar value, or ir_none for an
+// aggregate: the value type with its extension attribute.
 fn ir_form_of_type(types.node* t) ir_form {
     if (t == null) {
         return ir_form.ir_none;
@@ -419,10 +373,8 @@ fn ir_form_of_type(types.node* t) ir_form {
     case types.type_kind.k_prim:
         return ir_of_prim(t->prim);
     case types.type_kind.k_ptr, types.type_kind.k_voidptr, types.type_kind.k_fn:
-        // D3.10, D3.11
         return ir_form.ir_ptr;
     case types.type_kind.k_enum:
-        // D9.8, D3.9
         return ir_form.ir_i32;
     case types.type_kind.k_array, types.type_kind.k_span, types.type_kind.k_string,
          types.type_kind.k_struct, types.type_kind.k_null, types.type_kind.k_error:
@@ -430,8 +382,8 @@ fn ir_form_of_type(types.node* t) ir_form {
     }
 }
 
-/// Whether a fort type is one of the aggregates of item 7, which travel as a
-/// plain `ptr`.
+// Whether a fort type is one of the aggregates, which travel as a
+// plain `ptr`.
 fn form_is_aggregate(types.node* t) bool {
     if (t == null) {
         return false;
@@ -440,8 +392,8 @@ fn form_is_aggregate(types.node* t) bool {
            t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string;
 }
 
-/// The form of one parameter of a fort signature: an aggregate argument is a
-/// plain `ptr` parameter (item 7), and every other type takes its value form.
+// The form of one parameter of a fort signature: an aggregate argument is a
+// plain `ptr` parameter, and every other type takes its value form.
 fn param_form(types.node* t) ir_form {
     if (form_is_aggregate(t)) {
         return ir_form.ir_ptr;
@@ -449,17 +401,9 @@ fn param_form(types.node* t) ir_form {
     return ir_form_of_type(t);
 }
 
-/// The IR call shape of a fort function type, by item 7, as a row: an aggregate
-/// result becomes a leading `ptr` parameter and a `void` result. `name` is copied
-/// into the row so that a caller compares it with `rt_sig_of` field by field. This
-/// is how a row is held against the fort signature that defines it, which nothing
-/// below the compiler does: opaque pointers make a call site's types independent
-/// of its callee's, so a call that disagrees with the definition it reaches
-/// verifies, links, and then reads a register the caller never set.
-///
-/// A signature with more parameters than a row holds is a violated precondition
-/// and panics.
-/// D13.3
+// Builds the IR call shape of a fort function type. An aggregate result adds a leading `ptr`
+// parameter and uses a `void` result. The row copies `name` for later comparison with `rt_sig_of`.
+// A signature with too many parameters violates the precondition and causes a panic.
 fn rt_signature_of_type(string name, types.node* sig) rt_sig {
     if (sig == null || sig->kind != types.type_kind.k_fn) {
         panic("runtime_sig.rt_signature_of_type: not a function type");
@@ -476,7 +420,7 @@ fn rt_signature_of_type(string name, types.node* sig) rt_sig {
     }
     rt_sig mut r = row(name, result, sig->is_noreturn);
     if (lead == 1) {
-        // The hidden result pointer of item 7, a plain `ptr` at the call site.
+        // The hidden result pointer, a plain `ptr` at the call site.
         r.p0 = ir_form.ir_ptr;
     }
     u64 mut i = 0;

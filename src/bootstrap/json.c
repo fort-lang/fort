@@ -1,4 +1,4 @@
-// The JSON writer; see json.h.
+// Implements the compact JSON writer.
 #include "json.h"
 
 #include <stddef.h>
@@ -11,10 +11,9 @@ enum { HEX_SHIFT = 4, HEX_MASK = 0xFU };
 // The last control byte: a byte at or below it is escaped.
 enum { CONTROL_MAX = 0x1F };
 
-// The last ASCII byte, and the byte ranges of a well-formed UTF-8 sequence
-// (RFC 3629): a lead byte of two, three or four bytes, the continuation bytes
-// that follow it, and the four second-byte ranges that rule out an overlong
-// form, a UTF-16 surrogate and a value past U+10FFFF.
+// Defines the last ASCII byte and valid UTF-8 byte ranges (RFC 3629). The ranges cover two-byte,
+// three-byte, and four-byte sequences. The second-byte limits exclude overlong forms, UTF-16
+// surrogates, and values above U+10FFFF.
 enum {
     ASCII_MAX = 0x7F,
     UTF8_CONT_MIN = 0x80,
@@ -35,9 +34,8 @@ enum {
     UTF8_F4_MAX = 0x8F,
 };
 
-// The bytes of U+FFFD, the replacement character a byte that is not part of a
-// well-formed sequence is written as, so that the document is valid UTF-8
-// whatever the message held.
+// Defines the UTF-8 bytes of U+FFFD. The writer uses this replacement for each invalid byte, so
+// every document is valid UTF-8.
 static const char REPLACEMENT[] = "\xEF\xBF\xBD";
 
 void json_init(json_t* j, sb_t* out) {
@@ -101,10 +99,9 @@ void json_array_end(json_t* j) {
     json_end(j, ']');
 }
 
-// The number of bytes of the well-formed UTF-8 sequence that starts at `i`,
-// or 0 when the bytes there are not one: a truncated sequence, a stray
-// continuation byte, an overlong form, a UTF-16 surrogate and a value past
-// U+10FFFF are all rejected (RFC 3629).
+// Returns the valid UTF-8 sequence length at `i`, or 0 for invalid bytes. It rejects truncated
+// sequences, stray continuation bytes, overlong forms, UTF-16 surrogates, and values above U+10FFFF
+// (RFC 3629).
 static uint64_t utf8_sequence_len(str_t s, uint64_t i) {
     const uint8_t lead = (uint8_t)s.ptr[i];
     uint64_t len = 0;
@@ -147,13 +144,10 @@ static uint64_t utf8_sequence_len(str_t s, uint64_t i) {
     return len;
 }
 
-// The quoted form of `s`: the quote and the backslash escaped, a control byte as
-// \n, \t or \r, the control bytes fort itself spells out, or as the
-// \u00XX JSON has in place of fort's \xHH. A multi-byte UTF-8 sequence goes
-// through verbatim, and a byte that is not part of a well-formed one is written
-// as U+FFFD, so the document is valid UTF-8 even though fort source is never
-// validated.
-// D2.1, D2.8, D3.7
+// Writes the quoted form of `s`. It escapes quotes and backslashes. It writes control bytes as \n,
+// \t, \r, a fort escape, or JSON \u00XX. A valid multi-byte UTF-8 sequence passes through
+// unchanged. An invalid byte becomes U+FFFD. Thus, the document remains valid when fort source is
+// not validated.
 static void json_quoted(json_t* j, str_t s) {
     sb_push(j->out, '"');
     uint64_t i = 0;
@@ -189,7 +183,7 @@ static void json_quoted(json_t* j, str_t s) {
     sb_push(j->out, '"');
 }
 
-// A member name is a string followed by a colon; the value that follows is
+// A member name is a string followed by a colon. The value that follows is
 // the member's own, so the level is marked empty again and the value's
 // separator writes no comma.
 void json_key(json_t* j, const char* name) {
