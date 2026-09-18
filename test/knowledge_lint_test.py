@@ -305,8 +305,8 @@ class HistoryTest(unittest.TestCase):
 
     def test_the_past_tense_of_the_note_is_not_what_silences_the_rule(self):
         # `until then the rule read:` is past, but the clause after the colon is present.
-        # The clause after the colon is a sentence of its own and still present. Thus,
-        # the quotation is the silencer and the note's own tense is not
+        # The clause after the colon is a sentence of its own and still present.
+        # The quotation is the silencer, not the note's tense.
         _, by_entry = self.problems_of(HISTORY_LOG)
         self.assertEqual(len(by_entry["D1.8"]), 1)
         self.assertEqual(by_entry.get("D1.4", []), [])
