@@ -1,6 +1,5 @@
-// Unit tests of containers.h: the vectors of stdlib.md 2.7 and the string
-// map of stdlib.md 2.8, including the scenario of
-// test/lang/programs/hashmap.ft.
+// Tests the containers.h vectors and string map.
+// The string map tests include the scenario from test/lang/programs/hashmap.ft.
 #include "containers.h"
 
 #include <stddef.h>
@@ -634,8 +633,7 @@ TEST(zero_initialized_strmap_is_valid, {
 })
 
 TEST(strmap_entry_layout_matches_stdlib, {
-    // StrMapEntry: key 0, val 16, hash 24, state 32, 40 bytes (stdlib.md
-    // 2.8); StrMap is 32 bytes.
+    // StrMapEntry has offsets 0, 16, 24, and 32. Its size is 40 bytes. StrMap is 32 bytes.
     TEST_ASSERT_EQ_SIZE(sizeof(strmap_entry_t), (size_t)40);
     TEST_ASSERT_EQ_SIZE(offsetof(strmap_entry_t, val), (size_t)16);
     TEST_ASSERT_EQ_SIZE(offsetof(strmap_entry_t, hash), (size_t)24);
@@ -716,9 +714,9 @@ TEST(strmap_remove_every_key_leaves_only_tombstones, {
 })
 
 TEST(strmap_rebuild_drops_tombstones, {
-    // Ten keys inserted and removed leave used = 10 in a table of 16. The
-    // third further insert sees (12 + 1) * 4 > 16 * 3 and rebuilds: the
-    // capacity stays 16 because (2 + 1) * 2 <= 16, and used drops to live.
+    // Ten removed keys leave used = 10 in a table of 16.
+    // The third new insert triggers a rebuild without increasing the capacity.
+    // The rebuild reduces used to the live count.
     strmap_t m;
     strmap_init(&m);
     char bufs[13][KEY_MAX];
@@ -774,8 +772,7 @@ TEST(strmap_replace_runs_the_load_check_first, {
         TEST_ASSERT_TRUE(strmap_put(&m, key_of(bufs[i], KEY_MAX, i), i));
     }
     TEST_ASSERT_EQ_UINT64(m.used, (uint64_t)12);
-    // A replace at used = 12 still runs the load check first, which
-    // rebuilds at the same capacity (stdlib.md 2.8: before an insert).
+    // A replace at used = 12 still runs the load check first, which rebuilds at the same capacity.
     TEST_ASSERT_FALSE(strmap_put(&m, key_of(bufs[0], KEY_MAX, 0), 100));
     TEST_ASSERT_EQ_UINT64(m.cap, (uint64_t)32);
     TEST_ASSERT_EQ_UINT64(m.live, (uint64_t)12);

@@ -1,7 +1,5 @@
-// Unit tests of consts.h, part three: giving a constant a type. The prim.h
-// queries, cv_fits and cv_default_kind. The casts and the typed folding are
-// in consts_typed_test.c, the untyped folding in consts_fold_test.c.
-// D3.1, D4.2, D4.3, D4.5
+// Tests constant type selection, fit checks, and primitive queries.
+// Other suites test casts and folding.
 #include <stdint.h>
 
 #include "consts.h"
@@ -11,7 +9,7 @@
 #include "test.h"
 
 // The sample values below are the test data: the edges of every integer
-// type and the examples of type-system.md 10 and core-language.md 5.9.
+// type and the examples of the type rules and the language rules.
 // NOLINTBEGIN(readability-magic-numbers)
 
 static const uint64_t TWO63 = UINT64_C(1) << 63U; // 2^63
@@ -123,7 +121,6 @@ TEST(prim_name_spells_every_type, {
 })
 
 // ---- cv_fits: every integer kind at both edges -------------------------------------
-// D4.2
 
 TEST(fits_i8_at_its_edges, {
     TEST_ASSERT_TRUE(fits_exactly(i(-128), F_SIGNED | F_FLOATS));
@@ -201,7 +198,6 @@ TEST(fits_examples_of_type_system_10_4, {
     TEST_ASSERT_TRUE(cv_shl(i(1), i(40), &r));
     TEST_ASSERT_FALSE(cv_fits(r, PRIM_I32)); // i32 n = 1 << 40
     TEST_ASSERT_TRUE(cv_shl(i(1), i(31), &r));
-    // D4.4
     TEST_ASSERT_FALSE(cv_fits(r, PRIM_I32)); // i32 x = 1 << 31
     TEST_ASSERT_TRUE(cv_fits(r, PRIM_U32));
     TEST_ASSERT_FALSE(cv_shl(i(1), i(64), &r)); // u64 big = 1 << 64
@@ -209,7 +205,6 @@ TEST(fits_examples_of_type_system_10_4, {
 })
 
 // ---- cv_fits: chars, bools and the rest ----------------------------------------------
-// D4.3
 
 TEST(fits_char_literal_in_char_and_integer_contexts, {
     // u8 b = 'a' is 97; 'a' also fits i8 and every wider integer.
@@ -245,7 +240,6 @@ TEST(fits_nothing_for_null_strings_none_and_void, {
 })
 
 // ---- cv_default_kind --------------------------------------------------------------
-// D4.5
 
 TEST(default_kind_of_a_small_integer_is_i32, {
     prim_kind_t k = PRIM_VOID;

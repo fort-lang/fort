@@ -1,9 +1,4 @@
-// Whole-module tests of the LLVM IR emitter: the two worked examples of
-// toolchain.md 6 reproduced from their fort sources, the determinism the
-// emitter owes the text, the locals and blocks of item 10, the print family
-// of item 19, fort_entry (item 22), and the LLVM verifier over every module
-// the suites emit.
-// D19.5, D19.1
+// Tests complete module emission and stable output.
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -14,14 +9,13 @@
 
 #include "test.h"
 
-// The program of toolchain.md 6.1, whose module that section shows.
+// Source for the complete hello-world module golden.
 static const char HELLO_SOURCE[] = "fn main() i32 { println(\"hello, world!\"); return 0; }\n";
 
-// The program of toolchain.md 6.2, whose module that section shows. It fixes
-// the `[` of `a[i]` at line 12, column 13, so the seven comment lines put the
-// statement on line 12 and its four spaces of indentation put the `[` on
-// column 13; nothing else about the source is free, since every instruction
-// of the expected module comes from it.
+// Source for the complete bounds-failure module golden.
+// The `[` in `a[i]` must stay at line 12, column 13.
+// Seven comment lines and four indentation spaces fix that position.
+// The expected module depends on every instruction from this source.
 static const char ABORT_SOURCE[] = "// The program of toolchain.md 6.2, whose bounds check fails\n"
                                    "// at run time. The lines above the body put the indexing on\n"
                                    "// line 12 and its indentation puts the `[` on column 13,\n"
@@ -36,7 +30,7 @@ static const char ABORT_SOURCE[] = "// The program of toolchain.md 6.2, whose bo
                                    "    return a[i];\n"
                                    "}\n";
 
-// ---- the worked examples (toolchain.md 6.1, 6.2) -----------------------------------
+// ---- the worked examples -----------------------------------
 
 TEST(the_program_of_section_6_1_is_emitted_as_that_section_shows, {
     TEST_ASSERT_TRUE(emit(HELLO_SOURCE));
@@ -79,8 +73,8 @@ TEST(the_program_of_section_6_1_is_emitted_as_that_section_shows, {
 
 TEST(the_program_of_section_6_2_is_emitted_as_that_section_shows, {
     TEST_ASSERT_TRUE(emit_as("abort.ft", ABORT_SOURCE));
-    // The whole module, the file constant and the 12:13 of the bounds check
-    // included, which is why the source above is not free to change.
+    // The whole module, the file constant and the 12:13 of the bounds check included. It is why the
+    // source above is not free to change.
     TEST_ASSERT_EQ_STR(
         ir(),
         "target triple = \"x86_64-unknown-linux-gnu\"\n"
@@ -239,7 +233,6 @@ TEST(the_release_counterpart_of_that_fragment_is_a_plain_add, {
 })
 
 // ---- determinism -------------------------------------------------------------------
-// D19.5
 
 // A program that exercises every counter the emitter keeps: locals,
 // temporaries, blocks, compiler-made places, string and file constants and an
@@ -276,7 +269,6 @@ TEST(two_runs_on_the_same_input_produce_byte_identical_text, {
     TEST_ASSERT_TRUE(emit(BUSY_SOURCE));
     // The emitted text is a function of the program alone, which is what lets
     // stage2 and stage3 reach a fixpoint.
-    // D19.5
     TEST_ASSERT_EQ_STR(ir(), sb_cstr(&first));
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
@@ -296,7 +288,6 @@ TEST(the_counters_are_reset_at_each_definition, {
                           "fn two() i32 { i32 b = 2; return b; }\n"
                           "fn main() i32 { return one() + two(); }\n"));
     // Every counter is per function and reset at each definition.
-    // D19.5
     TEST_ASSERT_EQ_STR(found("@\"main.one\"() #0 {\nentry:\n  %a.0 = alloca i32, align 4\n"
                              "  store i32 1, ptr %a.0, align 4\n  %t0 = load i32, ptr %a.0"),
                        "@\"main.one\"() #0 {\nentry:\n  %a.0 = alloca i32, align 4\n"
@@ -307,15 +298,13 @@ TEST(the_counters_are_reset_at_each_definition, {
                        "  store i32 2, ptr %b.0, align 4\n  %t0 = load i32, ptr %b.0");
 })
 
-// ---- locals, parameters and blocks (item 10) ---------------------------------------
-// D19.4
+// ---- locals, parameters and blocks ---------------------------------------
 
 TEST(every_local_is_an_entry_block_alloca_in_declaration_order, {
     TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32 a = 1;\n    { i64 b = 2; }\n"
                           "    i16 c = 3;\n    return a;\n}\n"));
     // A local of a nested block is an entry-block alloca too, because LLVM's
     // promotion passes look only there.
-    // D19.4
     TEST_ASSERT_EQ_STR(found("entry:\n  %a.0 = alloca i32, align 4\n"
                              "  %b.1 = alloca i64, align 8\n  %c.2 = alloca i16, align 2\n"),
                        "entry:\n  %a.0 = alloca i32, align 4\n"
@@ -327,7 +316,6 @@ TEST(a_local_named_tmp_cannot_collide_with_a_compiler_made_place, {
                           "    bool t = tmp > 0 && b > 0;\n    println(t);\n    return 0;\n}\n"));
     // A name that embeds a fort identifier always contains a dot and an
     // invented one never does.
-    // D19.5
     TEST_ASSERT_EQ_STR(found("%tmp.0 = alloca i32, align 4"), "%tmp.0 = alloca i32, align 4");
     TEST_ASSERT_EQ_STR(found("%tmp0 = alloca i8, align 1"), "%tmp0 = alloca i8, align 1");
 })
@@ -351,8 +339,7 @@ TEST(a_scalar_parameter_is_stored_into_its_slot_immediately, {
 TEST(an_aggregate_parameter_is_not_copied_again, {
     TEST_ASSERT_TRUE(emit("fn size(string s) u64 { return s.len; }\n"
                           "fn main() i32 { string s = \"hi\"; println(size(s)); return 0; }\n"));
-    // Its place is the caller-made copy the incoming pointer designates
-    // (item 10).
+    // Its place is the caller-made copy the incoming pointer designates.
     TEST_ASSERT_EQ_STR(
         found("@\"main.size\"(ptr %s.in) #0 {\nentry:\n"
               "  %t0 = getelementptr inbounds %fort.span, ptr %s.in, i32 0, i32 1\n"),
@@ -363,9 +350,8 @@ TEST(an_aggregate_parameter_is_not_copied_again, {
 TEST(a_fresh_block_opens_after_a_terminating_statement, {
     TEST_ASSERT_TRUE(emit("fn main() i32 {\n    { return 1; println(\"after\"); }\n"
                           "    return 0;\n}\n"));
-    // The parser allows the statements after a terminating one, so the
-    // emitter opens a block for them (item 10).
-    // D14.2
+    // The parser allows the statements after a terminating one, so the emitter opens a block for
+    // them.
     TEST_ASSERT_EQ_STR(found("  ret i32 1\n\nL0:\n  call void @\"std.rt.print_str\""),
                        "  ret i32 1\n\nL0:\n  call void @\"std.rt.print_str\"");
     TEST_ASSERT_EQ_STR(verified(), "verified");
@@ -377,8 +363,7 @@ TEST(a_void_body_that_falls_off_the_end_returns_void, {
                        "@\"main.noop\"() #0 {\nentry:\n  ret void\n}");
 })
 
-// ---- fort_entry (item 22) ----------------------------------------------------------
-// D11.6
+// ---- fort_entry ----------------------------------------------------------
 
 TEST(fort_entry_calls_main_directly_when_it_takes_no_parameter, {
     TEST_ASSERT_TRUE(emit(HELLO_SOURCE));
@@ -396,8 +381,7 @@ TEST(fort_entry_calls_main_directly_when_it_takes_no_parameter, {
 
 TEST(fort_entry_copies_the_argument_span_when_main_declares_it, {
     TEST_ASSERT_TRUE(emit("fn main(string@ args) i32 { return cast(args.len, i32); }\n"));
-    // Its caller is the `main` of item 22 rather than the body of a fort
-    // function, so the span is copied into its own frame.
+    // `fort_entry` calls `main` and copies the argument span into its own frame.
     TEST_ASSERT_EQ_STR(
         found("define dso_local i32 @fort_entry(ptr %args.in) #0 {\n"
               "entry:\n"
@@ -424,14 +408,12 @@ TEST(fort_entry_is_the_last_definition_of_the_module, {
     TEST_ASSERT_TRUE(before("@\"main.main\"() #0 {", "@fort_entry"));
 })
 
-// ---- the print family (item 19) ----------------------------------------------------
-// D12.2
+// ---- the print family ----------------------------------------------------
 
 TEST(each_integer_type_reaches_its_own_printer, {
     TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i8 a = 1;\n    u8 b = 2;\n    i64 c = 3;\n"
                           "    u64 d = 4;\n    println(a, b, c, d);\n    return 0;\n}\n"));
-    // i8 i16 i32 i64 are sign-extended to i64 and u8 u16 u32 u64
-    // zero-extended to it (item 19).
+    // i8 i16 i32 i64 are sign-extended to i64 and u8 u16 u32 u64 zero-extended to it.
     TEST_ASSERT_EQ_STR(found("sext i8 %t0 to i64"), "sext i8 %t0 to i64");
     TEST_ASSERT_EQ_STR(found("@\"std.rt.print_i64\"(i32 1, i64 %t1)"),
                        "@\"std.rt.print_i64\"(i32 1, i64 %t1)");
@@ -460,7 +442,6 @@ TEST(a_string_literal_prints_as_its_constant_and_length, {
     TEST_ASSERT_EQ_STR(found("call void @\"std.rt.print_str\"(i32 1, ptr @.str.0, i64 2)"),
                        "call void @\"std.rt.print_str\"(i32 1, ptr @.str.0, i64 2)");
     // print writes no newline.
-    // D12.2
     TEST_ASSERT_EQ_STR(absent("i8 zeroext 10"), "absent");
 })
 
@@ -482,7 +463,6 @@ TEST(fprint_evaluates_its_descriptor_once, {
     TEST_ASSERT_TRUE(emit("fn fd() i32 { return 1; }\n"
                           "fn main() i32 { fprintln(fd(), \"a\", \"b\"); return 0; }\n"));
     // `fd` is evaluated once and then each argument left to right.
-    // D6.3, D12.2
     TEST_ASSERT_EQ_STR(found("  %t0 = call i32 @\"main.fd\"()\n"
                              "  call void @\"std.rt.print_str\"(i32 %t0, ptr @.str.0, i64 1)\n"
                              "  call void @\"std.rt.print_str\"(i32 %t0, ptr @.str.1, i64 1)\n"
@@ -516,10 +496,9 @@ TEST(an_enum_prints_with_its_table_and_member_count, {
 })
 
 // ---- the verifier over a corpus ----------------------------------------------------
-// D19.1
 
-// One program per area the emitter covers; every module it produces must pass
-// opt -passes=verify, which is the one property the whole contract rests on.
+// One program per area the emitter covers; every module it produces must pass opt -passes=verify.
+// It is the one property the whole contract rests on.
 static const char* const CORPUS[] = {
     "fn main() i32 { return 0; }\n",
     "fn main() i32 { println(); return 0; }\n",
@@ -601,8 +580,7 @@ TEST(all_16_linux_target_modules_keep_the_default_bytes, {
     sb_free(&default_ir);
 })
 
-// ---- several modules in one program (item 1) ---------------------------------------
-// D9.10
+// ---- several modules in one program ---------------------------------------
 
 // The imported module: a struct, a function and an `extern` the importer
 // declares as well.
@@ -625,7 +603,6 @@ TEST(the_modules_of_a_closure_are_emitted_in_dependency_order, {
     TEST_ASSERT_TRUE(emit_two("app.ft", APP_SOURCE, "util.ft", UTIL_SOURCE));
     // An imported module stands before its importer, and each symbol is its
     // own module path plus its name.
-    // D9.10, D19.5, D9.7
     TEST_ASSERT_TRUE(
         before("define dso_local i32 @\"util.shout\"", "define dso_local i32 @\"app.main\""));
     TEST_ASSERT_TRUE(before("define dso_local i32 @\"app.main\"", "@fort_entry"));
@@ -638,9 +615,8 @@ TEST(the_modules_of_a_closure_are_emitted_in_dependency_order, {
 
 TEST(a_c_function_two_modules_declare_is_declared_once, {
     TEST_ASSERT_TRUE(emit_two("app.ft", APP_SOURCE, "util.ft", UTIL_SOURCE));
-    // A symbol is declared exactly once (item 8): the two `extern fn puts`
-    // are two symbols and one ELF symbol, and a second declaration is a
-    // redefinition the verifier rejects.
+    // A symbol is declared exactly once: the two `extern fn puts` are two symbols and one ELF
+    // symbol. A second declaration is a redefinition the verifier rejects.
     const char* decl = "declare i32 @puts(ptr) nobuiltin\n";
     TEST_ASSERT_EQ_STR(found(decl), decl);
     TEST_ASSERT_NULL(strstr(strstr(ir(), decl) + 1, decl));
@@ -648,9 +624,8 @@ TEST(a_c_function_two_modules_declare_is_declared_once, {
 })
 
 TEST(two_declarations_of_one_c_name_never_reach_the_emitter_disagreeing, {
-    // The dedup above keeps the first symbol of a C name, which is only safe
-    // because the loader refuses two declarations of one extern that disagree
-    // (module-system.md 13); the emitter never chooses between them.
+    // Deduplication keeps the first symbol for a C name. The loader refuses conflicting extern
+    // declarations before emission.
     TEST_ASSERT_FALSE(emit_two("app.ft",
                                "import util;\n"
                                "extern fn puts(i32 n) i64;\n"
@@ -661,13 +636,11 @@ TEST(two_declarations_of_one_c_name_never_reach_the_emitter_disagreeing, {
     TEST_ASSERT_NONNULL(strstr(gen_said(), "conflicting declarations of extern 'puts'"));
 })
 
-// ---- the runtime in the closure (item 14, item 22) ---------------------------------
-// D9.10, D13.1
+// ---- the runtime in the closure ---------------------------------
 
-// A runtime for the tests below: the entry points these programs reach, with
-// bodies that do nothing. A program the compiler builds holds the whole of
-// `std/rt.ft`; what these tests ask about is the shape the emitter gives a
-// definition of `std.rt`, which does not depend on the body.
+// A runtime for the tests below: the entry points these programs reach, with bodies that do
+// nothing. A program the compiler builds holds the whole of `std/rt.ft`. What these tests ask about
+// is the shape the emitter gives a definition of `std.rt`, which does not depend on the body.
 static const char RUNTIME_SOURCE[] =
     "struct enum_member { i32 value; char* name; }\n"
     "string mut@ own mut args_store = {};\n"
@@ -684,8 +657,8 @@ static const char RUNTIME_SOURCE[] =
 TEST(a_noreturn_entry_point_of_section_5_1_carries_the_attribute_group_8, {
     TEST_ASSERT_TRUE(emit_with_runtime(
         RUNTIME_SOURCE, "fn main() i32 {\n    i32 a = 7;\n    i32 b = 0;\n    return a / b;\n}\n"));
-    // `#8` is `#1` plus `cold`, on the definitions of the `noreturn` entry
-    // points of section 5.1 and on no other fort function (item 14).
+    // `#8` is `#1` plus `cold`.
+    // Only `noreturn` runtime entry points use it.
     TEST_ASSERT_EQ_STR(
         found("define dso_local void @\"std.rt.fail_div_zero\"(ptr %file.in, i32 %line.in,"
               " i32 %col.in) #8 {"),
@@ -695,13 +668,9 @@ TEST(a_noreturn_entry_point_of_section_5_1_carries_the_attribute_group_8, {
                              " \"probe-stack\"=\"inline-asm\" }"),
                        "attributes #8 = { cold noreturn nounwind \"frame-pointer\"=\"all\""
                        " \"probe-stack\"=\"inline-asm\" }");
-    // `#2` held that set on the C runtime's declarations and is never
-    // emitted; its index stays so that `#3` to `#7` keep their numbers (item
-    // 14).
-    // D19.5
+    // Attribute group `#2` stays reserved. This keeps the numbers of `#3` through `#7` stable.
     TEST_ASSERT_EQ_STR(absent("attributes #2 ="), "absent");
-    // The module that holds the call holds the definition, so nothing is
-    // declared (item 8).
+    // The module that holds the call holds the definition, so nothing is declared.
     TEST_ASSERT_EQ_STR(absent("declare void @\"std.rt."), "absent");
     TEST_ASSERT_EQ_STR(found("  call void @\"std.rt.fail_div_zero\"(ptr @.file.0,"),
                        "  call void @\"std.rt.fail_div_zero\"(ptr @.file.0,");
@@ -714,12 +683,11 @@ TEST(an_entry_point_that_returns_carries_the_ordinary_group, {
                              " i8 zeroext %c.in) #0 {"),
                        "define dso_local void @\"std.rt.print_char\"(i32 %fd.in,"
                        " i8 zeroext %c.in) #0 {");
-    // An entry point that returns takes `#0` like any fort definition
-    // (item 7), which is what the `#8` of the `noreturn` ones beside it in
-    // the same module is held against (item 14).
+    // A returning entry point uses `#0`, like each fort definition. The adjacent `noreturn` entries
+    // use `#8`.
     TEST_ASSERT_EQ_STR(absent("@\"std.rt.print_char\"(i32 %fd.in, i8 zeroext %c.in) #8"), "absent");
-    // An aggregate result is the leading `ptr sret(%T)` of item 7, which is
-    // what `main` passes its own place to (item 22).
+    // An aggregate result uses a leading `ptr sret(%T)` parameter.
+    // `main` passes its result place through that parameter.
     TEST_ASSERT_EQ_STR(
         found("define dso_local void @\"std.rt.args\"(ptr sret(%fort.span) %ret.sret) #0 {"),
         "define dso_local void @\"std.rt.args\"(ptr sret(%fort.span) %ret.sret) #0 {");
@@ -741,9 +709,8 @@ TEST(darwin_main_and_runtime_definitions_use_the_linux_form, {
 })
 
 TEST(a_noreturn_function_outside_the_runtime_keeps_the_group_of_item_20, {
-    // The emitter matches the mangled name, so a function of another module
-    // whose short name is an entry point's takes `#1` and not `#8`.
-    // D9.7
+    // The emitter matches the mangled name. A function of another module whose short name is an
+    // entry point's takes `#1` and not `#8`.
     TEST_ASSERT_TRUE(emit_with_runtime(
         RUNTIME_SOURCE,
         "fn fail_div_zero(char* file, u32 line, u32 col) noreturn { while (true) { } }\n"
@@ -760,9 +727,6 @@ TEST(a_noreturn_function_outside_the_runtime_keeps_the_group_of_item_20, {
 })
 
 TEST(the_enum_member_of_std_rt_is_the_named_type_every_module_carries, {
-    // `%fort.enum_member` is the IR of `std.rt`'s own `struct enum_member`
-    // and is emitted under that name rather than as a `%struct.` of its own:
-    // one named type for one layout (item 2, item 21).
     TEST_ASSERT_TRUE(emit_with_runtime(RUNTIME_SOURCE,
                                        "enum color { red, green }\n"
                                        "fn main() i32 { println(color.green); return 0; }\n"));
@@ -775,7 +739,6 @@ TEST(the_enum_member_of_std_rt_is_the_named_type_every_module_carries, {
 TEST(the_runtime_stands_before_the_program_in_the_module, {
     // `std.rt` is a root of the closure and the program imports nothing, so
     // the dependency order puts the runtime first.
-    // D9.10, D19.5
     TEST_ASSERT_TRUE(emit_with_runtime(RUNTIME_SOURCE, HELLO_SOURCE));
     TEST_ASSERT_TRUE(before("define dso_local void @\"std.rt.args_init\"",
                             "define dso_local i32 @\"main.main\""));
@@ -786,15 +749,8 @@ TEST(the_runtime_stands_before_the_program_in_the_module, {
 // ---- unfinished constructs are refused, never miscompiled --------------------------
 
 TEST(no_construct_the_front_end_admits_reaches_the_emitters_refusal, {
-    // The tickets that followed removed the emitter's `gen_todo` paths one by
-    // one, and the one that lowered the module-level variable this test used
-    // to be refused for removed the last one a program could reach: every
-    // feature the bootstrap subset lacks is refused by the parser or the
-    // checker first (floats, `?:`, do-while, multi-dimensional arrays), so a
-    // program that checks is a program that is lowered. What the remaining
-    // paths stand for is unchanged -- an unfinished path is a diagnostic and
-    // never wrong code -- so a ticket that adds one puts its case here.
-    // T-015, T-024: the tickets that emptied the `gen_todo` paths
+    // The parser or checker refuses each feature outside the bootstrap subset. Therefore, the
+    // emitter must lower each accepted program without a `gen_todo` diagnostic.
     TEST_ASSERT_TRUE(emit("i32 mut counter = 0;\nfn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_NULL(strstr(gen_said(), "cannot generate code yet"));
     TEST_ASSERT_EQ_STR(verified(), "verified");

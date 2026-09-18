@@ -1,8 +1,7 @@
-// Unit tests of consts.h, part one: values, queries, ordering and equality,
+// Tests constant values, queries, ordering, equality,
 // the comparison and logical operators, and cv_to_str. The exact untyped
 // arithmetic is in consts_fold_test.c and the typed side (cv_fits,
 // cv_default_kind, cv_cast, cv_typed_*, cv_wrap_*) in consts_typed_test.c.
-// D4.4
 #include "consts.h"
 
 #include <stdint.h>
@@ -14,7 +13,7 @@
 #include "test.h"
 
 // The sample values below are the test data: the boundaries of the constant
-// range and the examples of type-system.md 10.
+// range and the examples of the type rules.
 // NOLINTBEGIN(readability-magic-numbers)
 
 enum { ERR_MAX = 256 };
@@ -47,7 +46,8 @@ static bool is_bool(cval_t v, bool expect) {
     return v.kind == CV_BOOL && v.mag == (expect ? 1U : 0U);
 }
 
-// The text cv_to_str writes for `v`, in a static buffer.
+// The text `cv_to_str` writes for `v`.
+// The next call invalidates the returned shared-buffer result.
 static const char* text_of(cval_t v) {
     static sb_t buf;
     sb_clear(&buf);
@@ -372,7 +372,6 @@ static void compare_lt_of_bools(void) {
 TEST(ordering_nulls_strings_and_bools_is_an_internal_error, {
     // `< <= > >=` order integers and chars only: the checker has rejected the
     // others before folding.
-    // D6.2, D3.2
     char err[ERR_MAX];
     const int status = run_forked(compare_lt_of_nulls, err, sizeof err);
     TEST_ASSERT_EQ_INT32(status, FATAL_EXIT_STATUS);
@@ -448,11 +447,9 @@ TEST(to_str_writes_the_other_kinds, {
 })
 
 TEST(to_str_escapes_a_string_as_a_literal_d2_8, {
-    // A quote, a newline or a NUL byte in a string constant must not break the
-    // diagnostic line, so the bytes are written with the escapes. The nine
-    // bytes a " \n NUL \\ \t \r ' 0xFF (a brace initializer would split the
-    // TEST body at its commas, so they come from a literal).
-    // D2.8
+    // A quote, a newline or a NUL byte in a string constant must not break the diagnostic line. The
+    // bytes are written with the escapes. The nine bytes a " \n NUL \\ \t \r ' 0xFF (a brace
+    // initializer would split the TEST body at its commas. They come from a literal).
     const str_t s = str_from_range("a\"\n\0\\\t\r'\xFF", 9);
     TEST_ASSERT_EQ_STR(text_of(cv_from_str(s)), "\"a\\\"\\n\\0\\\\\\t\\r'\\xFF\"");
     TEST_ASSERT_EQ_STR(text_of(cv_from_str(str_from_range(NULL, 0))), "\"\"");

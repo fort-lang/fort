@@ -1,15 +1,6 @@
-// Unit tests of `--ast` (toolchain.md 1): the option that lexes and parses
-// the entry file alone -- resolving no import, checking nothing -- and writes
-// its syntax tree to stdout as one S-expression.
-// D14.1
-//
-// The suite holds the parser output contract: the tree is
-// the whole of stdout and ends in one newline, a syntax error is reported on
-// stderr and still leaves the file's tree written whole, and nothing else of
-// the pipeline runs -- no `--cc` is spawned, no temporary is created, no
-// import is opened. The sandbox is driver_helpers.h and test/fake_cc.sh is
-// the `--cc` that must never run.
-// D14.2
+// Tests `--ast` output and front-end isolation.
+// The mode parses only the entry file and writes one S-expression.
+// It resolves no import and starts no compiler.
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -29,17 +20,14 @@ static const char SANDBOX_ENTRY_TREE[] =
     "(module (fn (type (prim i32)) main (params) (block (return (int 0)))))\n";
 
 // ---- the command line -------------------------------------------------------------
-// D14.1
 
-// `fort --ast main.ft`, parsed without running anything. A brace initializer
-// inside a TEST body would split the body into two macro arguments, so the
-// argument list stands here; driver_parse takes `char**`, so it is a variable
-// and lower_case rather than a constant.
+// `fort --ast main.ft`, parsed without running anything. A brace initializer inside a TEST body
+// would split the body into two macro arguments. The argument list stands here; driver_parse takes
+// `char**`, so it is a variable and lower_case rather than a constant.
 static char* ast_argv[] = {"fort", "--ast", "main.ft", NULL};
 
 // The options --ast refuses to stand beside, and the line it refuses them
 // with.
-// D14.1
 static const char* const REJECTED_WITH_AST[] = {"--tokens", "--check", "--json", "--index"};
 static const char AST_CONFLICT[] =
     "fort: error: --ast does not combine with --tokens, --check, --json or --index\n"
@@ -59,7 +47,6 @@ TEST(ast_is_parsed_as_a_flag, {
     TEST_ASSERT_EQ_INT32(driver_parse(&opts, argc, ast_argv, out, err), DRIVER_PARSE_OK);
     TEST_ASSERT_TRUE(opts.ast);
     // It implies nothing: neither the lexer dump nor the front end is run.
-    // D14.1
     TEST_ASSERT_FALSE(opts.tokens);
     TEST_ASSERT_FALSE(opts.check);
     TEST_ASSERT_FALSE(opts.json);
@@ -77,9 +64,8 @@ TEST(ast_is_off_by_default, {
     driver_options_free(&opts);
 })
 
-// --ast stops before the checker and after the lexer, so there is no front
-// end for --check to run and no token dump for --tokens to write.
-// D14.1
+// --ast stops before the checker and after the lexer. There is no front end for --check to run and
+// no token dump for --tokens to write.
 TEST(ast_with_tokens_check_json_or_index_is_a_usage_error, {
     for (size_t i = 0; i < sizeof REJECTED_WITH_AST / sizeof REJECTED_WITH_AST[0]; i++) {
         char* option = (char*)REJECTED_WITH_AST[i];
@@ -110,7 +96,7 @@ TEST(help_names_ast_with_the_other_options, {
     TEST_ASSERT_NONNULL(strstr(run.out, "--ast"));
 })
 
-// ---- the tree (toolchain.md 1) ----------------------------------------------------
+// ---- the tree ----------------------------------------------------
 
 TEST(ast_writes_the_tree_and_nothing_else, {
     sandbox_t box = sandbox_open();
@@ -123,8 +109,8 @@ TEST(ast_writes_the_tree_and_nothing_else, {
     sandbox_close(&box);
 })
 
-// An empty file is a module with no declaration, which is the shortest tree
-// there is; the newline is the dump's and makes the output one line.
+// An empty file is a module with no declaration, which is the shortest tree there is. The newline
+// is the dump's and makes the output one line.
 TEST(an_empty_file_is_an_empty_module, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
@@ -135,10 +121,8 @@ TEST(an_empty_file_is_an_empty_module, {
     sandbox_close(&box);
 })
 
-// A syntax error is reported and the parser skips to the next boundary, so
-// the tree still covers the file -- the error node standing for the skipped
-// region -- and the status is the compile error.
-// D14.2, D14.1
+// A syntax error is reported and the parser skips to the next boundary. The tree still covers the
+// file -- the error node standing for the skipped region -- and the status is the compile error.
 TEST(a_syntax_error_is_reported_and_the_file_is_still_dumped, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
@@ -157,10 +141,8 @@ TEST(a_syntax_error_is_reported_and_the_file_is_still_dumped, {
     sandbox_close(&box);
 })
 
-// A lexical error costs the lexer its line and the parser recovers from
-// whatever that missing line broke, so a file with one is dumped as well; the
-// status is again 1.
-// D14.2
+// A lexical error costs the lexer its line and the parser recovers from whatever that missing line
+// broke. A file with one is dumped as well; the status is again 1.
 TEST(a_lexical_error_leaves_a_tree_of_the_rest, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
@@ -174,9 +156,8 @@ TEST(a_lexical_error_leaves_a_tree_of_the_rest, {
     sandbox_close(&box);
 })
 
-// No import is resolved, so a module that no root reaches is not an error
-// here: the import is a node of the tree like any other.
-// D14.1
+// This mode does not resolve imports.
+// An unreachable imported module remains a normal syntax-tree node.
 TEST(an_unresolvable_import_is_just_a_node, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
@@ -188,8 +169,8 @@ TEST(an_unresolvable_import_is_just_a_node, {
     sandbox_close(&box);
 })
 
-// An unreadable entry file is exit 2 with the `cannot read` line of
-// toolchain.md 1, as it is for a build.
+// An unreadable entry file is exit 2 with the `cannot read` line of the command-line contract, as
+// it is for a build.
 TEST(an_unreadable_entry_file_is_a_toolchain_error, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
@@ -209,10 +190,8 @@ TEST(an_unreadable_entry_file_is_a_toolchain_error, {
 
 // ---- what --ast does not do -------------------------------------------------------
 
-// It stops after the parser: no `--cc` is spawned, no output file is written
-// and no temporary directory is created, so the options that name them are
-// unused, as they are under --check.
-// D14.1, D20.1
+// It stops after the parser: no `--cc` is spawned, no output file is written and no temporary
+// directory is created. The options that name them are unused, as they are under --check.
 TEST(ast_spawns_no_cc_and_leaves_no_file_behind, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
@@ -249,10 +228,8 @@ TEST(the_other_options_are_accepted_and_unused, {
     sandbox_close(&box);
 })
 
-// The checker never runs, so a program the checker would refuse -- an
-// undeclared name, a type error -- is dumped with no diagnostic at all: what
-// --ast answers for is the syntax alone.
-// D14.1
+// The checker never runs, so a program the checker would refuse -- an undeclared name, a type
+// error. Is dumped with no diagnostic at all: what --ast answers for is the syntax alone.
 TEST(a_program_the_checker_would_refuse_still_dumps, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);

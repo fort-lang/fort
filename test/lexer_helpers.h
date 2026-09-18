@@ -1,6 +1,5 @@
-// Helpers shared by the lexer suites (lexer_test.c, lexer_literals_test.c):
-// lexing a text with diagnostics captured, and assertions on the tokens
-// and the diagnostic produced.
+// Provides shared lexer helpers.
+// They lex text, capture diagnostics, and assert token and diagnostic results.
 #ifndef FORT_TEST_LEXER_HELPERS_H
 #define FORT_TEST_LEXER_HELPERS_H
 
@@ -12,15 +11,15 @@
 
 #include "test.h"
 
-/// The results of the last lex() call: tokens, the pool the strings were
-/// decoded into, and the captured diagnostics.
+// The results of the last lex() call: tokens, the pool the strings were decoded into, and the
+// captured diagnostics.
 static tokvec_t toks;
 static str_pool_t pool;
 static sb_t sink;
 static bool capturing = false;
 
-/// Lexes `len` bytes of `src` as file t.ft with diagnostics captured; the
-/// previous results are released first.
+// Lexes `len` bytes of `src` as file t.ft with diagnostics captured; the previous results are
+// released first.
 static inline bool lex_bytes(const char* src, uint64_t len) {
     if (!capturing) {
         sb_init(&sink);
@@ -40,7 +39,7 @@ static inline bool lex(const char* src) {
     return lex_bytes(src, strlen(src));
 }
 
-/// Releases the results of the last lex() call and restores stderr.
+// Releases the results of the last lex() call and restores stderr.
 static inline void lex_done(void) {
     if (capturing) {
         diag_capture(NULL);
@@ -58,6 +57,8 @@ static inline const token_t* tok(uint64_t i) {
     return &toks.items[i];
 }
 
+// Returns the captured diagnostics.
+// The next lex or `lex_done` invalidates the result.
 static inline const char* captured(void) {
     return sb_cstr(&sink);
 }
@@ -82,7 +83,6 @@ static inline bool text_is(uint64_t i, const char* expected) {
 
 // lex() failed with exactly the diagnostic `line` (with its newline) and
 // still lexed the file whole, so the tokens end in TOK_EOF.
-// D14.2
 #define ASSERT_LEX_ERROR(src, line)                                                                \
     do {                                                                                           \
         TEST_ASSERT_FALSE(lex(src));                                                               \
@@ -93,7 +93,6 @@ static inline bool text_is(uint64_t i, const char* expected) {
 
 // lex() failed with exactly the diagnostics `lines` (each with its newline),
 // `n` of them, one per line of the source at most.
-// D14.2
 #define ASSERT_LEX_ERRORS(src, n, lines)                                                           \
     do {                                                                                           \
         TEST_ASSERT_FALSE(lex(src));                                                               \
@@ -110,7 +109,6 @@ static inline bool text_is(uint64_t i, const char* expected) {
     } while (0)
 
 // The last lex() left `n` tokens before its TOK_EOF: what a resync kept.
-// D14.2
 #define ASSERT_TOK_COUNT(n)                                                                        \
     do {                                                                                           \
         ASSERT_ENDS_IN_EOF();                                                                      \

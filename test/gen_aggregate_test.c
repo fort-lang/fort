@@ -1,9 +1,6 @@
-// Unit tests of the memory model the emitter works in
-// (toolchain.md 6 item 3): places, assignment, literals, copies and the
-// evaluation order the walk keeps. A struct, fixed array, span or `string`
-// always occupies a place, so every one of these is a getelementptr, a memcpy
-// or a memset and never an SSA aggregate.
-// D19.3, D6.3
+// Tests the emitter memory model: places, assignment, literals, copies, and evaluation
+// order the walk keeps. A struct, fixed array, span or `string` always occupies a place. Every one
+// of these is a getelementptr, a memcpy or a memset and never an SSA aggregate.
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -21,14 +18,15 @@ static const char TYPES[] = "struct point { i32 x; i32 y; }\n"
 
 static char with_types[4096];
 
-// `TYPES` followed by a `fn main() i32` whose body is `body`.
+// Returns `TYPES` followed by a `fn main() i32` whose body is `body`.
+// The next call invalidates the returned shared-buffer result.
 static const char* in_typed_main(const char* body) {
     TEST_UNUSED(snprintf(
         with_types, sizeof with_types, "%sfn main() i32 {\n%s    return 0;\n}\n", TYPES, body));
     return with_types;
 }
 
-// ---- places (item 3) ---------------------------------------------------------------
+// ---- places ---------------------------------------------------------------
 
 TEST(a_local_place_is_its_entry_block_alloca, {
     TEST_ASSERT_TRUE(emit(in_main("    i32 mut a = 1;\n    a = 2;\n")));
@@ -100,7 +98,6 @@ TEST(an_array_inside_a_struct_is_reached_through_two_shapes, {
 })
 
 // ---- assignment --------------------------------------------------------------------
-// D7.2, D6.3
 
 TEST(an_aggregate_assignment_is_a_memcpy_into_the_targets_place, {
     TEST_ASSERT_TRUE(emit(in_typed_main("    point p = {1, 2};\n    line mut l = {};\n"
@@ -130,7 +127,6 @@ TEST(the_target_of_an_assignment_is_evaluated_before_its_value, {
                           "fn main() i32 {\n    i32[3] mut a = {};\n"
                           "    a[idx()] = val();\n    return 0;\n}\n"));
     // The walk emits calls, loads and stores in source order.
-    // D6.3
     TEST_ASSERT_TRUE(before("call i64 @\"main.idx\"()", "call i32 @\"main.val\"()"));
     TEST_ASSERT_TRUE(before("call i32 @\"main.val\"()", "store i32 %t"));
 })
@@ -163,7 +159,6 @@ TEST(a_string_copied_from_a_variable_is_a_sixteen_byte_memcpy, {
 })
 
 // ---- literals ----------------------------------------------------------------------
-// D6.5
 
 TEST(a_positional_struct_literal_writes_its_fields_in_order, {
     TEST_ASSERT_TRUE(emit(in_typed_main("    point p = {1, 2};\n")));
@@ -183,7 +178,6 @@ TEST(a_positional_struct_literal_writes_its_fields_in_order, {
 TEST(a_designated_literal_zeroes_the_place_first, {
     TEST_ASSERT_TRUE(emit(in_typed_main("    point q = {.y = 7};\n")));
     // Omitted fields are zeroed.
-    // D6.5
     TEST_ASSERT_EQ_STR(
         found("  call void @llvm.memset.p0.i64(ptr align 4 %q.0, i8 0, i64 8, i1 false)\n"
               "  %t0 = getelementptr inbounds %struct.main.point, ptr %q.0, i32 0, i32 1\n"
@@ -246,14 +240,13 @@ TEST(an_array_length_from_sizeof_is_a_constant, {
                        "%a.0 = alloca [8 x i32], align 4");
     // `.len` of a fixed array is an untyped constant and its operand is not
     // evaluated, so nothing loads the array.
-    // D3.4, D4.6
     TEST_ASSERT_EQ_STR(found("  %t0 = sext i32 8 to i64\n"
                              "  call void @\"std.rt.print_i64\"(i32 1, i64 %t0)\n"),
                        "  %t0 = sext i32 8 to i64\n"
                        "  call void @\"std.rt.print_i64\"(i32 1, i64 %t0)\n");
 })
 
-// ---- aggregates across calls (item 7) ----------------------------------------------
+// ---- aggregates across calls ----------------------------------------------
 
 TEST(an_aggregate_argument_gets_one_temporary_per_argument, {
     TEST_ASSERT_TRUE(emit("struct point { i32 x; i32 y; }\n"
@@ -272,8 +265,7 @@ TEST(a_callee_may_write_to_its_aggregate_parameter, {
     TEST_ASSERT_TRUE(emit("struct point { i32 x; i32 y; }\n"
                           "fn bump(point mut p) i32 { p.x = 9; return p.x; }\n"
                           "fn main() i32 { point q = {1, 2}; return bump(q); }\n"));
-    // The by-value rule is satisfied by the caller's copy (item 10).
-    // D8.2
+    // The by-value rule is satisfied by the caller's copy.
     TEST_ASSERT_EQ_STR(found("getelementptr inbounds %struct.main.point, ptr %p.in, i32 0, i32 0"),
                        "getelementptr inbounds %struct.main.point, ptr %p.in, i32 0, i32 0");
 })
@@ -351,7 +343,6 @@ TEST(an_aggregate_never_becomes_an_ssa_value, {
 TEST(a_struct_literal_read_for_one_field_is_built_in_a_temporary, {
     // Field access on an rvalue struct is allowed and copies it through a
     // temporary, which is the `%tmp<K>` counter.
-    // D6.7, D19.5
     TEST_ASSERT_TRUE(emit(in_typed_main("    println(point{3, 4}.x);\n")));
     TEST_ASSERT_EQ_STR(found("  %tmp0 = alloca %struct.main.point, align 4\n"),
                        "  %tmp0 = alloca %struct.main.point, align 4\n");
@@ -372,9 +363,8 @@ TEST(a_struct_literal_read_for_one_field_is_built_in_a_temporary, {
 })
 
 TEST(an_array_literal_indexed_is_built_in_a_temporary_too, {
-    // The same rule for an index on an rvalue array: the literal is the
-    // array's place and the element is read out of it.
-    // D6.7
+    // An rvalue array literal gets a temporary place before indexing.
+    // The index reads the element from that place.
     TEST_ASSERT_TRUE(emit(in_main("    println(i32[2]{7, 8}[1]);\n")));
     TEST_ASSERT_EQ_STR(found("  %tmp0 = alloca [2 x i32], align 4\n"),
                        "  %tmp0 = alloca [2 x i32], align 4\n");
@@ -384,10 +374,8 @@ TEST(an_array_literal_indexed_is_built_in_a_temporary_too, {
 })
 
 TEST(a_cast_of_an_aggregate_reaches_its_field_through_a_temporary, {
-    // A cast between aggregates only drops marks and emits nothing of its
-    // own, but its result is an rvalue, so a field of it is read out of a
-    // copy.
-    // D3.14, D5.4, D6.7
+    // A cast between aggregates only drops marks and emits nothing of its own. However, its result
+    // is an rvalue, so a field of it is read out of a copy.
     TEST_ASSERT_TRUE(emit(in_typed_main("    point p = {1, 2};\n"
                                         "    println(cast(p, point).y);\n")));
     TEST_ASSERT_EQ_STR(found("  %tmp0 = alloca %struct.main.point, align 4\n"),
@@ -401,10 +389,8 @@ TEST(a_cast_of_an_aggregate_reaches_its_field_through_a_temporary, {
 })
 
 TEST(an_arrow_reaches_the_pseudo_fields_of_a_string, {
-    // Through a pointer to a span or string, `->` reaches `.len` and `.ptr`,
-    // since `p->f` is `(*p).f`: the pointer is loaded and the header field is
-    // read at it, with no place of its own.
-    // D6.10
+    // For a span or string pointer, `p->f` is `(*p).f`.
+    // The emitter loads the pointer and then reads the header field.
     TEST_ASSERT_TRUE(emit(in_main("    string s = \"hi\";\n    string* p = &s;\n"
                                   "    println(p->len);\n")));
     TEST_ASSERT_EQ_STR(found("  %t2 = load ptr, ptr %p.1, align 8\n"
@@ -417,21 +403,8 @@ TEST(an_arrow_reaches_the_pseudo_fields_of_a_string, {
 })
 
 TEST(a_named_struct_type_holds_the_memory_type_of_every_field_in_order, {
-    // Fields in declaration order and never packed, each as its memory type:
-    // `i8` for `bool`, one `%fort.span` for a `string`, `i32` for an enum and
-    // `ptr` for every pointer and function pointer.
-    // D3.8, D19.2, D3.9, D3.10, D9.9
-    //
-    // This one string is the whole check, and it has to be: under opaque
-    // pointers a field's IR type is observable only through the offsets it
-    // moves, so a substitution that keeps every later offset and the size --
-    // `i32` for an enum, `i64` for a `ptr`, a wider type in padding the field
-    // already had -- is invisible to every run test and to `opt`. It is also
-    // unreachable: gen_mem_type is the one fort-type-to-memory-type map and
-    // every path goes through it, so a wrong mapping is wrong in the stores
-    // as well, where it is observable. A second map (a packed path, an ABI
-    // classification table) would break that, and this assertion is what
-    // would catch it.
+    // Fields keep declaration order and use their memory types.
+    // The test also rejects packed layouts and incorrect pointer widths.
     TEST_ASSERT_TRUE(emit("enum color { red, green }\n"
                           "struct point { i32 x; i32 y; }\n"
                           "struct rec { u8 tag; i32 n; u16 k; i64 big; bool on; string s;"
@@ -444,12 +417,10 @@ TEST(a_named_struct_type_holds_the_memory_type_of_every_field_in_order, {
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
-// The two declaration orders of a pair of mutually recursive structs, and the
-// buffers their modules are held against each other in. LLVM's type
-// definitions follow the order the file declares the structs in, so what the
-// two modules must agree on byte for byte is each definition on its own and
+// The two declaration orders of a pair of mutually recursive structs, and the buffers their modules
+// are held against each other in. LLVM's type definitions follow the order the file declares the
+// structs in. What the two modules must agree on byte for byte is each definition on its own and
 // the whole of the rest of the module.
-// D7.10
 static const char RECURSIVE_SPAN_FIRST[] =
     "struct vec { node mut* mut@ own items; }\n"
     "struct node { vec list; i32 tag; }\n"
@@ -465,12 +436,9 @@ enum { LINES_CAP = 8192 };
 static char first_order[LINES_CAP];
 static char second_order[LINES_CAP];
 
-// Copies into `dst` the lines of the emitted module that begin with `prefix`
-// when `keep`, and the lines that do not otherwise, in order. It returns
-// whether they fitted rather than the text, so that a caller that saves one
-// module and compares the next against it asserts the overflow of both: a
-// truncation would otherwise show up as a difference between two modules,
-// which is the finding this test exists to report.
+// Copies matching lines when `keep` is true and nonmatching lines otherwise.
+// Returns "the module fitted" on success and a truncation status otherwise.
+// The status lets the test distinguish truncation from unexpected module text.
 static const char* module_lines(char* dst, size_t cap, const char* prefix, bool keep) {
     size_t used = 0;
     const char* p = ir();
@@ -494,13 +462,9 @@ static const char* module_lines(char* dst, size_t cap, const char* prefix, bool 
 }
 
 TEST(mutually_recursive_structs_emit_one_module_in_either_order, {
-    // A span of pointers to a struct that holds the span by value: neither
-    // size depends on the other, so neither declaration order is special. The
-    // span is the two words of `%fort.span` whichever order the file is
-    // written in, which is the assertion that makes the two layouts the same
-    // one: under opaque pointers a field's IR type is observable only through
-    // the offsets it moves.
-    // D7.10, D3.5, D3.11
+    // A span of pointers to a struct that holds the span by value: neither size depends on the
+    // other, so neither declaration order is special. The span is the two words of `%fort.span`
+    // whichever order the file is written in.
     TEST_ASSERT_TRUE(emit(RECURSIVE_SPAN_FIRST));
     TEST_ASSERT_EQ_STR(found("%struct.main.vec = type { %fort.span }\n"),
                        "%struct.main.vec = type { %fort.span }\n");
@@ -517,19 +481,15 @@ TEST(mutually_recursive_structs_emit_one_module_in_either_order, {
     TEST_ASSERT_EQ_STR(found("%struct.main.node = type { %struct.main.vec, i32 }\n"),
                        "%struct.main.node = type { %struct.main.vec, i32 }\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
-    // Everything but the two type definitions is the same text: the same
-    // offsets in the same getelementptrs, the same memset width, the same
-    // order of definitions.
+    // Only the two type definitions can differ.
+    // Offsets, getelementptrs, memset width, and definition order must match.
     TEST_ASSERT_EQ_STR(module_lines(second_order, sizeof second_order, "%struct.", false),
                        "the module fitted");
     TEST_ASSERT_EQ_STR(second_order, first_order);
 })
 
 TEST(an_enum_field_is_four_bytes_and_moves_the_fields_after_it, {
-    // An enum's underlying type is `i32` and its size 4, so a field of one
-    // pads like an `i32`: `i64 big` lands at 8 and the struct is 16 bytes,
-    // where an enum laid out as `i64` would make it 24.
-    // D3.9
+    // An enum's underlying type is `i32` and its size 4.
     TEST_ASSERT_TRUE(emit("enum color { red, green }\n"
                           "struct tagged { u8 t; color c; i64 big; }\n"
                           "fn main() i32 { tagged mut v = {}; v.big = 1;"
@@ -543,11 +503,7 @@ TEST(an_enum_field_is_four_bytes_and_moves_the_fields_after_it, {
 })
 
 TEST(a_struct_wider_than_two_words_is_returned_and_copied_whole, {
-    // Every aggregate is passed by a hidden pointer to a caller-made copy and
-    // returned through a hidden result pointer, whatever its size: there is
-    // no size at which a struct starts travelling in registers, so a struct
-    // wider than the two words the other tests use is asserted here.
-    // D9.9
+    // A struct wider than the two words the other tests use is asserted here.
     TEST_ASSERT_TRUE(emit("struct big { i64 a; i64 b; i64 c; i64 d; }\n"
                           "fn make() big { big b = {1, 2, 3, 4}; return b; }\n"
                           "fn last(big b) i64 { return b.d; }\n"
@@ -585,7 +541,6 @@ TEST(a_copy_and_a_zero_move_the_padded_size_of_the_struct, {
     // `struct wide { i64 big; u8 tail; }` is nine bytes of fields and sixteen
     // of storage: the size C rounds up to the alignment. A memcpy or a memset
     // of anything less would leave the tail of the destination behind.
-    // D3.8
     TEST_ASSERT_TRUE(emit("struct wide { i64 big; u8 tail; }\n"
                           "fn main() i32 { wide mut w = {}; wide v = w; w.tail = 1;"
                           " return cast(v.tail, i32); }\n"));
@@ -603,23 +558,17 @@ TEST(a_copy_and_a_zero_move_the_padded_size_of_the_struct, {
 TEST(the_alignment_of_every_place_comes_from_its_type, {
     TEST_ASSERT_TRUE(emit(in_typed_main("    holder h = {};\n    i8 a = 1;\n    i16 b = 2;\n"
                                         "    i64 c = 3;\n    println(h.tag, a, b, c);\n")));
-    // Every global, alloca, load and store carries an explicit alignment
-    // (item 5).
+    // Every global, alloca, load and store carries an explicit alignment.
     TEST_ASSERT_EQ_STR(found("%a.1 = alloca i8, align 1"), "%a.1 = alloca i8, align 1");
     TEST_ASSERT_EQ_STR(found("%b.2 = alloca i16, align 2"), "%b.2 = alloca i16, align 2");
     TEST_ASSERT_EQ_STR(found("%c.3 = alloca i64, align 8"), "%c.3 = alloca i64, align 8");
     TEST_ASSERT_EQ_STR(found("load i8, ptr %t0, align 1"), "load i8, ptr %t0, align 1");
 })
 
-// ---- the element classes of a fixed array (item 2) ---------------------------------
-// D3.4
+// ---- the element classes of a fixed array ---------------------------------
 
 TEST(an_array_of_a_padded_struct_strides_by_the_padded_size, {
-    // `pixel` is five bytes of fields and eight of storage, so the array type
-    // carries the stride and the zero of the whole array moves 24 bytes: an
-    // element type whose size is rounded up to its alignment is the class a
-    // stride computed from the fields alone would get wrong.
-    // D3.4, D3.8
+    // `pixel` is five bytes of fields and eight of storage.
     TEST_ASSERT_TRUE(emit("struct pixel { i32 code; char tag; }\n"
                           "fn main() i32 {\n    pixel[3] mut ps = {};\n"
                           "    ps[2] = pixel{3, 'c'};\n    return ps[2].code;\n}\n"));
@@ -635,27 +584,23 @@ TEST(an_array_of_a_padded_struct_strides_by_the_padded_size, {
 })
 
 TEST(a_single_element_array_is_still_an_array_type, {
-    // `N` is greater than 0 and 1 is the smallest it may be: the element is
-    // reached by the array shape and not as a bare scalar.
-    // D3.4
+    // An array length is positive, and 1 is the smallest value.
+    // The emitter must still use the array shape to reach its element.
     TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i32[1] one = {7};\n"
                           "    i64 i = 0;\n    return one[i] +% cast(one.len, i32);\n}\n"));
     TEST_ASSERT_EQ_STR(found("  %one.0 = alloca [1 x i32], align 4\n"),
                        "  %one.0 = alloca [1 x i32], align 4\n");
     TEST_ASSERT_EQ_STR(found("getelementptr inbounds [1 x i32], ptr %one.0, i64 0, i64 0\n"),
                        "getelementptr inbounds [1 x i32], ptr %one.0, i64 0, i64 0\n");
-    // `.len` is a constant, so the bounds check of the read compares against
-    // the literal 1 (item 16).
-    // D3.4
+    // `.len` is a constant, so the bounds check of the read compares against the literal 1.
     TEST_ASSERT_EQ_STR(found("  %t2 = icmp uge i64 %t1, 1\n"), "  %t2 = icmp uge i64 %t1, 1\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
 TEST(an_array_of_function_pointers_is_an_array_of_ptr, {
-    // A function type carries no suffix of its own, so an array of function
-    // pointers is an array of a struct that holds one; every pointer is the
-    // opaque `ptr`, so the struct is one word and the array strides by it.
-    // D3.6, D3.10, D8.1, D19.2
+    // A function type carries no suffix of its own. An array of function pointers is an array of a
+    // struct that holds one. Every pointer is the opaque `ptr`, so the struct is one word and the
+    // array strides by it.
     TEST_ASSERT_TRUE(emit("struct slot { fn (i32) i32 f; }\n"
                           "fn twice(i32 n) i32 { return n *% 2; }\n"
                           "fn main() i32 {\n    slot[2] table = {{twice}, {twice}};\n"
@@ -664,19 +609,15 @@ TEST(an_array_of_function_pointers_is_an_array_of_ptr, {
                        "  %table.0 = alloca [2 x %struct.main.slot], align 8\n");
     const char* want = "%struct.main.slot = type { ptr }\n";
     TEST_ASSERT_EQ_STR(found(want), want);
-    // The element is loaded as a `ptr` and called with the function type
-    // written out, since an opaque pointer carries none (item 7).
-    // D19.2
+    // The element is loaded as a `ptr` and called with the function type written out, since an
+    // opaque pointer carries none.
     TEST_ASSERT_EQ_STR(found("  %t9 = call i32 (i32) %t8(i32 5)\n"),
                        "  %t9 = call i32 (i32) %t8(i32 5)\n");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
 TEST(an_array_of_strings_strides_by_the_span_header, {
-    // A `string` is the sixteen-byte `%fort.span`, so an array of them is an
-    // array of that named type and each element's header is reached through
-    // the array shape and then the field shape (item 3).
-    // D3.7
+    // A `string` is the sixteen-byte `%fort.span`.
     TEST_ASSERT_TRUE(emit("fn main() i32 {\n    string[2] names = {\"a\", \"bc\"};\n"
                           "    i64 i = 1;\n    return cast(names[i].len, i32);\n}\n"));
     TEST_ASSERT_EQ_STR(found("  %names.0 = alloca [2 x %fort.span], align 8\n"),
@@ -689,7 +630,6 @@ TEST(an_array_of_strings_strides_by_the_span_header, {
 TEST(a_one_byte_element_and_an_eight_byte_one_keep_their_own_alignments, {
     // The array's alignment is its element's, so a `char[4]` is one-byte
     // aligned and an `i64[2]` eight.
-    // D3.4, D3.8
     TEST_ASSERT_TRUE(emit("fn main() i32 {\n    char[4] mut cs = {};\n    i64[2] longs = {2, 1};\n"
                           "    cs[0] = 'a';\n    return cast(longs[0], i32);\n}\n"));
     TEST_ASSERT_EQ_STR(found("  %cs.0 = alloca [4 x i8], align 1\n"),
@@ -705,7 +645,6 @@ TEST(a_one_byte_element_and_an_eight_byte_one_keep_their_own_alignments, {
 TEST(an_array_copy_moves_every_element_at_once, {
     // A fixed array is a value type: assignment copies every element, which
     // is one `llvm.memcpy` of the whole array.
-    // D3.4, D19.3
     TEST_ASSERT_TRUE(emit("fn main() i32 {\n    i64[3] a = {1, 2, 3};\n    i64[3] b = a;\n"
                           "    return cast(b[0], i32);\n}\n"));
     TEST_ASSERT_EQ_STR(

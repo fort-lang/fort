@@ -1,7 +1,4 @@
-// C11 helpers linked into test/lang/run/stdlib/065 and 066: they hand std.io
-// two descriptors whose behaviour a fort program cannot produce on its own but
-// which stdlib.md 2.4 gives rules for -- one that accepts a short write and one
-// that yields bytes and then fails.
+// Provides file descriptors that test short writes and partial reads.
 #include <fcntl.h>
 #include <signal.h>
 #include <stdint.h>
@@ -9,18 +6,17 @@
 
 #include <sys/resource.h>
 
-// A file whose size is capped at std_io_write_cap() bytes. Linux truncates a
-// write that crosses RLIMIT_FSIZE to the room that is left and delivers the
-// short count, then fails the next one with EFBIG and SIGXFSZ, which is
-// ignored here so that the program lives to see the error. That is the one
-// portable way to make write(2) transfer less than it was given without a
-// second process draining the other end.
+// `std_io_capped_file` sets the process file-size limit and ignores `SIGXFSZ`.
+// When both setup calls succeed, both global effects remain after the function returns.
+// If `signal` fails after `setrlimit` succeeds, the limit persists and `SIGXFSZ` stays unchanged.
 enum { WRITE_CAP = 4096, FILE_MODE = 0644 };
 
 int64_t std_io_write_cap(void) {
     return (int64_t)WRITE_CAP;
 }
 
+// Returns -1 on failure.
+// On success, the caller owns the returned descriptor and must close it.
 int32_t std_io_capped_file(const char* path) {
     struct rlimit limit;
     limit.rlim_cur = (rlim_t)WRITE_CAP;
@@ -34,10 +30,9 @@ int32_t std_io_capped_file(const char* path) {
     return open(path, O_WRONLY | O_CREAT | O_TRUNC, FILE_MODE);
 }
 
-// The read end of a pipe holding n bytes, open for reading without blocking
-// and with its write end still open: the first read returns the bytes, the
-// second finds the pipe empty and fails with EAGAIN rather than reporting end
-// of file, which is a read error arriving after a read has succeeded.
+// Returns -1 on failure and closes both descriptors.
+// On success, the caller owns the nonblocking read descriptor and must close it.
+// `n` must fit in the pipe before any read starts.
 int32_t std_io_pipe_with_bytes(int64_t n) {
     int fds[2];
     if (pipe(fds) != 0) {
@@ -56,8 +51,7 @@ int32_t std_io_pipe_with_bytes(int64_t n) {
         (void)close(fds[1]);
         return -1;
     }
-    // The write end is deliberately left open: closing it would turn the
-    // second read into end of file, which is a success and not the error this
-    // helper exists to produce.
+    // Keep the write descriptor open until process exit.
+    // This makes the read after the buffered bytes fail with EAGAIN instead of returning EOF.
     return fds[0];
 }

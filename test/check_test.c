@@ -1,9 +1,4 @@
-// Unit tests of the checker's symbols and declarations (core-language.md 3):
-// the symbol record of every kind, the two-phase resolution and its cycles,
-// the marker refusals the type table delegates, and the poisoning that keeps
-// one error one error. The expressions and the statements are the other
-// halves, in check_expr_test.c and check_stmt_test.c.
-// D3.4, D3.8, D3.9, D5.5, D7.10, D8.6, D9.4, D14.2
+// Tests declaration checking, module checking, and error suppression.
 #include "check.h"
 
 #include <stdbool.h>
@@ -43,7 +38,6 @@ TEST(a_function_declaration_is_its_own_symbol, {
     TEST_ASSERT_TRUE(s->node == node_in_main(AST_FN_DECL, "main"));
     TEST_ASSERT_TRUE(s->node->sym == s);
     // The record is found at the name token, not at the `fn`.
-    // D20.4
     TEST_ASSERT_EQ_UINT64((uint64_t)s->decl.line, (uint64_t)1);
     TEST_ASSERT_EQ_UINT64((uint64_t)s->decl.col, (uint64_t)4);
     TEST_ASSERT_EQ_STR(type_text(s->type), "fn () i32");
@@ -68,7 +62,6 @@ TEST(a_parameter_is_a_symbol_owned_by_its_function, {
     TEST_ASSERT_TRUE(s->node == p);
     TEST_ASSERT_TRUE(s->owner == sym_main("twice"));
     // `mut` in the outermost position makes the callee's copy assignable.
-    // D5.6
     TEST_ASSERT_TRUE(s->mut0);
     TEST_ASSERT_EQ_STR(sym_type_text(s), "i32 mut");
 })
@@ -84,7 +77,6 @@ TEST(a_struct_and_its_fields_are_symbols, {
     TEST_ASSERT_EQ_STR(sym_kind_name(f->sym->kind), "field");
     TEST_ASSERT_TRUE(f->sym->owner == s);
     // The C layout puts the second i32 at offset 4.
-    // D3.8
     TEST_ASSERT_EQ_UINT64(f->aux, (uint64_t)4);
 })
 
@@ -99,7 +91,6 @@ TEST(an_enum_and_its_members_are_symbols, {
     TEST_ASSERT_TRUE(m->sym->owner == s);
     TEST_ASSERT_TRUE(m->sym->type == s->type);
     // Values start at 0 and increment from the last explicit one.
-    // D3.9
     int64_t v = 0;
     TEST_ASSERT_TRUE(cv_to_i64(check_node_value(&checker, m), &v));
     TEST_ASSERT_EQ_INT64(v, (int64_t)6);
@@ -109,7 +100,6 @@ TEST(a_module_declaration_is_a_constant_or_a_global, {
     TEST_ASSERT_TRUE(check_src("i32 MAX = 64;\ni32 mut counter = 0;\n"
                                "fn main() i32 {\n    counter = MAX;\n    return counter;\n}\n"));
     // `Type NAME = init;` is a compile-time constant, `mut Type g` a global.
-    // D7.10
     TEST_ASSERT_EQ_STR(sym_kind_name(sym_main("MAX")->kind), "constant");
     TEST_ASSERT_FALSE(sym_main("MAX")->mut0);
     TEST_ASSERT_EQ_STR(sym_kind_name(sym_main("counter")->kind), "global");
@@ -133,7 +123,6 @@ TEST(a_builtin_is_a_symbol_with_no_node, {
     TEST_ASSERT_NONNULL(callee->sym);
     TEST_ASSERT_EQ_STR(sym_kind_name(callee->sym->kind), "builtin");
     // A builtin is declared by no source, so it has no node and no type.
-    // D12.2
     TEST_ASSERT_NULL(callee->sym->node);
     TEST_ASSERT_NULL(callee->sym->type);
 })
@@ -287,7 +276,6 @@ TEST(an_unqualified_enum_member_says_how_it_is_written, {
     TEST_ASSERT_FALSE(check_src("enum color {\n    red,\n}\n"
                                 "fn main() i32 {\n    color c = red;\n    return 0;\n}\n"));
     // An enum member is scoped to its enum.
-    // D3.9
     TEST_ASSERT_TRUE(said("color.red"));
 })
 
@@ -330,7 +318,6 @@ TEST(the_declarations_after_a_failed_one_are_still_checked, {
                                 "fn main() i32 {\n    return third_nope;\n}\n"));
     // Checking does not stop at the first error: a module reports every one
     // of its own.
-    // D14.2
     TEST_ASSERT_TRUE(said("unknown name 'nope'"));
     TEST_ASSERT_TRUE(said("unknown name 'also_nope'"));
     TEST_ASSERT_TRUE(said("unknown name 'third_nope'"));
@@ -344,7 +331,6 @@ TEST(a_module_may_be_checked_twice, {
     const module_t* m = module_at("main");
     // The pass clears the slots it owns, so a second check of one tree starts
     // from the tree the parser left.
-    // D20.2
     TEST_ASSERT_TRUE(check_module(&checker, m));
     TEST_ASSERT_EQ_STR(decl_type("a"), "i32[2]");
     TEST_ASSERT_NULL(untyped_expr(m->ast));
@@ -366,7 +352,6 @@ TEST(a_chain_of_pointers_keeps_every_level, {
 })
 
 // ---- imports ------------------------------------------------------------------------
-// D9.3, D9.4
 
 TEST(an_import_carries_the_module_it_binds, {
     begin();
@@ -378,7 +363,6 @@ TEST(an_import_carries_the_module_it_binds, {
     TEST_ASSERT_NONNULL(imp);
     // The import, its `as` alias and the last path segment all denote the
     // module.
-    // D9.3
     TEST_ASSERT_TRUE(imp->sym == util);
     TEST_ASSERT_TRUE(imp->b->sym == util);
     TEST_ASSERT_TRUE(ast_child(imp->a, 0)->sym == util);
@@ -407,13 +391,11 @@ TEST(a_qualified_type_name_carries_the_module_and_the_type, {
     TEST_ASSERT_NONNULL(t);
     // The type name denotes the module and its child holds the type (the
     // symbol contract).
-    // D9.4
     TEST_ASSERT_TRUE(t->sym == module_at("geom")->ast->sym);
     TEST_ASSERT_TRUE(t->a->sym == sym_of("geom", "point"));
 })
 
 // ---- two-phase resolution -----------------------------------------------------------
-// D7.10
 
 TEST(declarations_are_order_independent, {
     TEST_ASSERT_TRUE(check_src("fn main() i32 {\n    point p = {SIZE};\n    return p.x;\n}\n"
@@ -444,7 +426,6 @@ TEST(a_struct_may_contain_itself_through_a_pointer, {
         check_src("struct node {\n    i32 value;\n    node mut* next;\n}\n"
                   "fn main() i32 {\n    node n = {1, null};\n    return n.value;\n}\n"));
     // A pointer field is one word, so the struct is 16 bytes with padding.
-    // D3.8
     TEST_ASSERT_EQ_UINT64(type_sizeof(sym_main("node")->type), (uint64_t)16);
 })
 
@@ -453,7 +434,6 @@ TEST(a_value_containment_cycle_is_an_infinite_size_error, {
                                 "fn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_TRUE(said("struct loop has infinite size"));
     // Reported at the `struct` keyword, which is line 1 column 1.
-    // D14.2
     TEST_ASSERT_TRUE(said("main.ft:1:1: error:"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
     TEST_ASSERT_TRUE(sym_main("loop")->error);
@@ -471,17 +451,12 @@ TEST(a_constant_initializer_cycle_is_an_error, {
     TEST_ASSERT_FALSE(check_src("i32 A = B;\ni32 B = A;\n"
                                 "fn main() i32 {\n    return A;\n}\n"));
     // Constant references are evaluated lazily with cycle detection.
-    // D4.6
     TEST_ASSERT_TRUE(said("is defined in terms of itself"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
 })
 
 TEST(a_declaration_may_hold_its_own_address, {
-    // `&` of a module-level declaration from any module is an initializer,
-    // this one included: the value of `N` does not depend on the value of
-    // `N`, only its address does, so the lazy resolution closes no cycle. A
-    // self-pointing sentinel is the shape that needs it.
-    // D7.10, D4.6
+    // The lazy resolution closes no cycle. A self-pointing sentinel is the shape that needs it.
     TEST_ASSERT_TRUE(check_src("struct node {\n    i32 v;\n    node* next;\n}\n"
                                "node N = node{7, &N};\n"
                                "fn main() i32 {\n    return N.next->v;\n}\n"));
@@ -497,10 +472,8 @@ TEST(two_declarations_may_hold_each_others_addresses, {
 })
 
 TEST(a_declaration_that_needs_its_own_value_is_still_a_cycle, {
-    // The address is the carve-out and nothing else is: naming the
-    // declaration itself, or reading through the pointer that names it, still
-    // asks for the value.
-    // D4.6
+    // Only taking the address avoids reading the declaration's value.
+    // Naming the declaration or reading through its pointer still creates a cycle.
     TEST_ASSERT_FALSE(check_src("struct node {\n    i32 v;\n    node* next;\n}\n"
                                 "node C = C;\n"
                                 "fn main() i32 {\n    return C.v;\n}\n"));
@@ -514,7 +487,6 @@ TEST(an_enum_value_may_not_refer_to_its_own_enum, {
 })
 
 // ---- poisoning ----------------------------------------------------------------------
-// D14.2
 
 TEST(a_failed_declaration_gets_the_error_type, {
     TEST_ASSERT_FALSE(check_src("i32 A = nope;\nfn main() i32 {\n    return 0;\n}\n"));
@@ -527,7 +499,6 @@ TEST(a_failed_declaration_gets_the_error_type, {
 TEST(a_failed_declaration_silences_its_uses, {
     TEST_ASSERT_FALSE(check_src("i32 A = nope;\nfn main() i32 {\n    return A + 1;\n}\n"));
     // One unknown name is one diagnostic: the error type silences the uses.
-    // D14.2
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
 })
 
@@ -547,7 +518,6 @@ TEST(an_importer_is_checked_in_full_after_its_import_failed, {
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     // Every module of the closure is checked in dependency order, and the
     // importer sees its own errors and no cascade of the import's.
-    // D14.2
     TEST_ASSERT_TRUE(said("util.ft:1:9: error: unknown name 'nope'"));
     TEST_ASSERT_TRUE(said("main.ft:3:13: error: the initializer expects i32, not string"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)2);
@@ -559,7 +529,6 @@ TEST(a_mut_on_a_field_is_refused, {
     TEST_ASSERT_FALSE(check_src("struct counter {\n    i32 mut hits;\n}\n"
                                 "fn main() i32 {\n    return 0;\n}\n"));
     // A field's own storage follows its struct.
-    // D5.5
     TEST_ASSERT_TRUE(said("a field's own storage follows its struct"));
     TEST_ASSERT_TRUE(said("main.ft:2:5:"));
 })
@@ -568,7 +537,6 @@ TEST(a_mut_on_a_return_type_is_refused, {
     TEST_ASSERT_FALSE(check_src("fn f() i32 mut {\n    return 1;\n}\n"
                                 "fn main() i32 {\n    return f();\n}\n"));
     // A return type has no binding.
-    // D5.5
     TEST_ASSERT_TRUE(said("a return type has no binding"));
 })
 
@@ -576,7 +544,6 @@ TEST(a_mut_on_a_cast_target_is_refused, {
     TEST_ASSERT_FALSE(check_body("    string s = \"ab\";\n    u8@ b = cast(s, u8@ mut);\n"
                                  "    println(b.len);"));
     // A cast result has no binding.
-    // D3.14
     TEST_ASSERT_TRUE(said("a cast result has no binding"));
 })
 
@@ -588,7 +555,6 @@ TEST(a_mut_on_a_pointee_or_a_binding_is_kept, {
 })
 
 // ---- sizes --------------------------------------------------------------------------
-// D3.4
 
 TEST(a_type_that_is_too_large_is_refused, {
     TEST_ASSERT_FALSE(check_src("i32[4611686018427387904] BIG = {};\n"
@@ -620,12 +586,10 @@ TEST(sizeof_lays_out_a_struct_on_demand, {
     int64_t v = 0;
     TEST_ASSERT_TRUE(cv_to_i64(check_node_value(&checker, n), &v));
     // C layout: an i32, four bytes of padding and an i64.
-    // D3.8
     TEST_ASSERT_EQ_INT64(v, (int64_t)16);
 })
 
 // ---- enums and extern signatures ----------------------------------------------------
-// D3.9, D9.8
 
 TEST(duplicate_enum_values_are_refused, {
     TEST_ASSERT_FALSE(check_src("enum color {\n    red = 1,\n    green = 1,\n}\n"
@@ -642,20 +606,16 @@ TEST(an_enum_value_must_fit_i32, {
 TEST(an_extern_signature_cannot_use_a_string, {
     TEST_ASSERT_FALSE(check_src("extern fn puts(string s) i32;\n"
                                 "fn main() i32 {\n    return 0;\n}\n"));
-    // An extern signature may use only scalars, pointers and function
-    // pointers. The diagnostic of module-system.md 13.
-    // D9.8
+    // An extern signature may use only scalars, pointers and function pointers. The diagnostic of
+    // the module contract.
     TEST_ASSERT_TRUE(said("extern signature cannot use type 'string'"));
 })
 
 // ---- the entry point ----------------------------------------------------------------
-// D8.6
 
 TEST(an_entry_module_without_main_is_reported_at_one_one, {
     TEST_ASSERT_FALSE(check_src("i32 A = 1;\n"));
-    // The diagnostic of module-system.md 13, at 1:1 since it has no position
-    // in the file.
-    // D8.6, D14.2
+    // The diagnostic of the module contract, at 1:1 since it has no position in the file.
     TEST_ASSERT_TRUE(said("main.ft:1:1: error: entry module 'main' must define 'fn main() i32' "
                           "or 'fn main(string@ args) i32'"));
 })
@@ -664,16 +624,11 @@ TEST(a_main_returning_void_is_refused, {
     TEST_ASSERT_FALSE(check_src("fn main() void {\n}\n"));
     TEST_ASSERT_TRUE(said("must define"));
     // The diagnostic stands at the declaration when one is there.
-    // D14.2
     TEST_ASSERT_TRUE(said("main.ft:1:4:"));
 })
 
 TEST(the_entry_rule_does_not_apply_to_a_module_checked_on_its_own, {
-    // A file checked on its own is a module under inspection and not a
-    // program, so the `main` rule is not applied to it at all: neither the
-    // missing `main` nor the `fn main() void` a library may legally declare
-    // is an error there, and a compilation reports both.
-    // D8.6, D20.1
+    // A file checked on its own is a module under inspection and not a program.
     begin();
     add("main.ft", "i32 A = 1;\n");
     want_main = false;
@@ -712,7 +667,6 @@ TEST(the_mute_flag_counts_without_reporting, {
     want_mute = true;
     TEST_ASSERT_FALSE(check_entry("main.ft"));
     // A muted checker annotates the file without emitting semantic noise.
-    // D20.2
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)0);
     TEST_ASSERT_EQ_UINT64(checker.errors, (uint64_t)1);
 })

@@ -1,8 +1,4 @@
-// The expression grammar of the parser (grammar.md 6): literals, the
-// precedence and associativity, the postfix forms, `cast`, `sizeof`, `new`,
-// the struct and array literals and the expressions the C bootstrap does not
-// support. Types are parser_type_test.c and statements parser_stmt_test.c.
-// D6.1, D6.5
+// Tests parser setup and common module forms.
 #include "parser.h"
 
 #include <stdint.h>
@@ -15,7 +11,7 @@
 // NOLINTBEGIN(readability-magic-numbers) the sources and the trees they parse
 // to are the test data.
 
-// ---- literals (grammar.md 6, primary_expr) --------------------------------
+// ---- literals --------------------------------
 
 TEST(int_literals_carry_their_magnitude, {
     TEST_ASSERT_EQ_STR(dump_expr("0"), "(int 0)");
@@ -36,7 +32,6 @@ TEST(char_string_bool_and_null_literals, {
 })
 
 // ---- precedence and associativity -----------------------------------------
-// D6.1
 
 TEST(multiplication_binds_tighter_than_addition, {
     TEST_ASSERT_EQ_STR(dump_expr("1 + 2 * 3"), "(binary + (int 1) (binary * (int 2) (int 3)))");
@@ -81,7 +76,7 @@ TEST(parentheses_override_precedence, {
     TEST_ASSERT_EQ_STR(dump_expr("((x))"), "(ident x)");
 })
 
-// ---- unary and postfix (grammar.md 6) -------------------------------------
+// ---- unary and postfix -------------------------------------
 
 TEST(the_five_unary_operators, {
     TEST_ASSERT_EQ_STR(dump_expr("-x"), "(unary - (ident x))");
@@ -142,7 +137,6 @@ TEST(sizeof_takes_a_type_only, {
 })
 
 // new(T) allocates one T and new(T, n) a span of n.
-// D10.2
 TEST(new_with_and_without_a_count, {
     TEST_ASSERT_EQ_STR(dump_expr("new(node)"), "(new (type (name node)) nil)");
     TEST_ASSERT_EQ_STR(dump_expr("new(i32, n)"), "(new (type (prim i32)) (ident n))");
@@ -152,7 +146,6 @@ TEST(new_with_and_without_a_count, {
 })
 
 // Inside new an own follows a `*` of the element type.
-// D17.3
 TEST(new_of_owning_pointers, {
     TEST_ASSERT_EQ_STR(dump_expr("new(node* own, n)"),
                        "(new (type (name node) (ptr own)) (ident n))");
@@ -160,7 +153,6 @@ TEST(new_of_owning_pointers, {
 })
 
 // ---- literals -------------------------------------------------------------
-// D6.5
 
 TEST(struct_literals_are_positional_or_designated, {
     TEST_ASSERT_EQ_STR(dump_expr("point{1, 2}"),
@@ -224,7 +216,7 @@ TEST(positional_and_designated_initializers_do_not_mix, {
                        "t.ft:1:23: error: positional and designated initializers do not mix\n");
 })
 
-// Features the C bootstrap deliberately lacks (toolchain.md 7.3).
+// Features the C bootstrap deliberately lacks.
 TEST(float_literals_are_not_supported, {
     TEST_ASSERT_EQ_STR(
         expr_fails("1.5"),
@@ -244,7 +236,6 @@ TEST(the_conditional_operator_is_not_supported, {
 // ---- every operator token -------------------------------------------------
 
 // Each binary operator builds its own node with its own spelling.
-// D6.1
 TEST(every_binary_operator_parses, {
     TEST_ASSERT_EQ_STR(dump_expr("a + b"), "(binary + (ident a) (ident b))");
     TEST_ASSERT_EQ_STR(dump_expr("a - b"), "(binary - (ident a) (ident b))");
@@ -269,8 +260,7 @@ TEST(every_binary_operator_parses, {
     TEST_ASSERT_EQ_STR(dump_expr("a || b"), "(binary || (ident a) (ident b))");
 })
 
-// Comparisons do not chain into one node: `a < b < c` parses and is a type
-// error later (grammar.md 6).
+// Comparisons do not chain into one node: `a < b < c` parses and is a type error later.
 TEST(comparisons_parse_but_do_not_chain, {
     TEST_ASSERT_EQ_STR(dump_expr("a < b < c"),
                        "(binary < (binary < (ident a) (ident b)) (ident c))");

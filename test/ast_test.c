@@ -1,6 +1,5 @@
-// The syntax tree and its S-expression printer (ast.h, ast_dump.h): the
-// arena, the children of a node, the kind names and the printed form of a
-// hand-built tree. The parser suites cover the trees the parser builds.
+// Tests syntax trees and the S-expression printer.
+// Covers arenas, child access, kind names, and hand-built trees.
 #include "ast.h"
 
 #include <stdbool.h>
@@ -178,12 +177,7 @@ TEST(marks_are_read_from_the_flags, {
     TEST_ASSERT_TRUE(ast_is_mut(both));
 })
 
-// The kind names `fort --ast` writes, in the order of the enum, as the list
-// in toolchain.md 1 spells them: a dump is a documented form now that the
-// option ships, so a rename that nobody meant fails here rather than
-// silently changing what an editor reads. `none` is in the enum and in no
-// dump, and the three suffix spellings (`ptr`, `span`, `array`) are written
-// by dump_suffix rather than by this table.
+// A rename that nobody meant fails here rather than silently changing what an editor reads.
 static const char KIND_NAMES[] =
     "none module import path item fn param struct field-decl enum member var "
     "type prim string void noreturn name fn-type suffix "
@@ -224,7 +218,6 @@ TEST(dump_of_null_is_nil, {
 
 // The node that stands for a region the parser skipped after a syntax error
 // prints without children, whatever was left in it.
-// D14.2
 TEST(dump_of_an_error_node_has_no_children, {
     reset();
     ast_node_t* err = node(AST_ERROR);
@@ -291,7 +284,6 @@ TEST(dump_of_operators_uses_the_token_spelling, {
 
 // A type prints its base, then the marks of the base position, then its
 // suffixes in source order: `u8 mut@ own`.
-// D5.3, D17.2
 TEST(dump_of_a_type_with_marks_and_suffixes, {
     reset();
     ast_node_t* t = prim_type(PRIM_U8, AST_FLAG_MUT);

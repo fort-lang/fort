@@ -1,9 +1,5 @@
-// C11 helper linked into test/lang/run/stdlib/005_libc_file.ft: it reports the
-// open(2), lseek(2) and errno constants from the system headers, so that the
-// literal values std.libc states for them (stdlib.md 2.2) are held against
-// the platform rather than against themselves. One function per constant,
-// because several of them share a value and a single switch over an index
-// would be a pile of identical branches.
+// Reports file and errno constants from the target system headers.
+// One function returns each constant because several constants share a value.
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>

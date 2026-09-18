@@ -1,20 +1,16 @@
-// C11 helpers linked into test/lang/run/ffi/013_sockaddr_layout.ft, which holds
-// std.net's sockaddr_in against the one in <netinet/in.h> on the target itself.
-// D3.8, D9.9
+// Compares std.net sockaddr_in layout with target system headers.
 //
-// The reason this file exists is that nothing inside fort can see a wrong field
-// offset. Under opaque pointers a struct laid out wrongly but used consistently
-// agrees with itself, so every fort-only test of std.net passes over a family
-// field that overlaps the port. C is the second opinion: these helpers read and
-// write the platform's own `struct sockaddr_in` through offsetof, and the fort
-// side reads and writes its own declaration of the same memory.
+// The reason this file exists is that nothing inside fort can see a wrong field offset. Under
+// opaque pointers a struct laid out wrongly but used consistently agrees with itself. Every
+// fort-only test of std.net passes over a family field that overlaps the port. C is the second
+// opinion: these helpers read and write the platform's own `struct sockaddr_in` through offsetof.
+// The fort side reads and writes its own declaration of the same memory.
 //
-// The helpers also report the five socket constants and the two byte-order
-// macros from the system headers. htons and htonl are macros as well as
-// functions in glibc, and a macro has no symbol an `extern fn` could declare, so
-// std.net writes the swap in fort and this file wraps the macros in real
-// functions that fort can call.
-// D9.8
+// The helpers also report the five socket constants and the two byte-order macros from the system
+// headers. `htons` and `htonl` are macros as well as functions in glibc.
+// A macro has no symbol that an `extern fn` can declare.
+// `std.net` writes byte swaps in fort.
+// This file wraps the macros in C functions that fort can call.
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -22,11 +18,10 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
-// The values net_fill_sockaddr_in writes, one distinct value per field, so that
-// a field read at the wrong offset cannot come back right by accident. The port
-// is above 32767, where a signed 16-bit swap differs from an unsigned one, and
-// the address is 127.0.0.1. The eight bytes C names sin_zero carry a pattern
-// here rather than the zeros a real call needs, because a length that stops
+// The values net_fill_sockaddr_in writes, one distinct value per field, so that a field read at the
+// wrong offset cannot come back right by accident. The port is above 32767, where a signed 16-bit
+// swap differs from an unsigned one, and the address is 127.0.0.1. The eight bytes C names sin_zero
+// carry a pattern here rather than the zeros a real call needs. This is because a length that stops
 // short of them is the mistake this checks for.
 enum {
     FILL_PORT = 40000,
@@ -42,8 +37,8 @@ uint64_t net_alignof_sockaddr_in(void) {
     return _Alignof(struct sockaddr_in);
 }
 
-// 0 is sin_family, 1 sin_port, 2 sin_addr and 3 sin_zero; any other index is
-// SIZE_MAX, which no offset equals, so a miscounted index fails the test.
+// 0 is sin_family, 1 sin_port, 2 sin_addr and 3 sin_zero; any other index is SIZE_MAX, which no
+// offset equals. A miscounted index fails the test.
 uint64_t net_offsetof_sockaddr_in(int32_t field) {
     switch (field) {
     case 0:
@@ -76,8 +71,8 @@ void net_fill_sockaddr_in(struct sockaddr_in* a) {
     }
 }
 
-// And the other way round: fort writes the same values through std.net's
-// declaration and C reads them through the platform's.
+// For the reverse direction, fort writes through `std.net`.
+// C reads the same values through the platform declaration.
 bool net_check_sockaddr_in(const struct sockaddr_in* a) {
     const unsigned char* zero = (const unsigned char*)a->sin_zero;
     if (a->sin_family != AF_INET || a->sin_port != htons(FILL_PORT)) {

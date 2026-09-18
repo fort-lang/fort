@@ -1,17 +1,10 @@
-// Unit tests of lexer.h's token dump, the output of `fort --tokens` whose
-// form spec/toolchain.md 1 documents:
-// D14.1
+// Tests `lexer.h` token dumps from `fort --tokens`:
 //
 //     <line>:<col>-<end_line>:<end_col> <value> "<spelling>" <kind>
 //
-// one token per line, the range 1-based with its end exclusive, the value of
-// an integer or char literal and 0 elsewhere, the spelling escaped so that a
-// token holding a newline, a tab, a quote or a byte outside printable ASCII
-// still occupies one line, and the kind last because it is the only field
-// that may hold a space.
-// D20.4, D2.5, D2.7
+// The kind is last because only that field can contain a space.
 //
-// This suite pins the dump format. test/fort/lexer_dump_test.ft pins the fort
+// This suite pins the dump format. `test/fort/lexer_dump_test.ft` pins the fort
 // implementation directly.
 #include <stdint.h>
 #include <string.h>
@@ -26,6 +19,7 @@
 // NOLINTBEGIN(readability-magic-numbers)
 
 // The dump of the last lex, as one string.
+// `dump_of` and `dump_of_bytes` share this buffer, so either call invalidates prior results.
 static sb_t dump;
 static bool dumping = false;
 
@@ -61,7 +55,7 @@ static void dump_done(void) {
 
 // ---- the form of a line ---------------------------------------------------------
 
-// The worked example of toolchain.md 1, byte for byte.
+// The worked example of the command-line contract, byte for byte.
 TEST(the_worked_example_of_toolchain_section_1, {
     TEST_ASSERT_EQ_STR(dump_of("x = 0x10;\n"),
                        "1:1-1:2 0 \"x\" identifier\n"
@@ -84,7 +78,6 @@ TEST(the_range_is_the_tokens_own, {
 })
 
 // A tab is one column, not a stop.
-// D14.2
 TEST(a_tab_moves_the_range_by_one_column, {
     TEST_ASSERT_EQ_STR(dump_of("\ta"),
                        "1:2-1:3 0 \"a\" identifier\n"
@@ -101,7 +94,6 @@ TEST(each_line_of_a_file_dumps_its_own_number, {
 })
 
 // ---- the value field ------------------------------------------------------------
-// D2.5, D2.7
 
 TEST(an_integer_literal_dumps_its_magnitude, {
     TEST_ASSERT_EQ_STR(dump_of("0xFF_F 0b10 0o17 18446744073709551615"),
@@ -124,7 +116,6 @@ TEST(a_char_literal_dumps_its_byte_and_its_spelling, {
 
 // Every other kind leaves the value at 0, a float literal included: the lexer
 // computes no float value.
-// D2.6
 TEST(every_other_kind_dumps_a_zero_value, {
     TEST_ASSERT_EQ_STR(dump_of("1.5e2 \"ab\" own"),
                        "1:1-1:6 0 \"1.5e2\" float literal\n"
@@ -137,7 +128,6 @@ TEST(every_other_kind_dumps_a_zero_value, {
 
 // A string literal's spelling is its decoded bytes, so what the dump escapes
 // is what the literal means and not what was typed.
-// D2.9
 TEST(a_decoded_newline_tab_and_return_are_escaped, {
     TEST_ASSERT_EQ_STR(dump_of("\"a\\nb\\tc\\rd\""),
                        "1:1-1:13 0 \"a\\nb\\tc\\rd\" string literal\n"
@@ -160,9 +150,8 @@ TEST(a_byte_outside_printable_ascii_is_written_in_hex, {
                        "1:19-1:19 0 \"\" end of file\n");
 })
 
-// A raw tab inside a string literal is a byte of it and is escaped like a
-// decoded one, so one token is still one line.
-// D2.9
+// A raw tab inside a string literal is a byte of it and is escaped like a decoded one. One token is
+// still one line.
 TEST(a_raw_tab_inside_a_literal_is_escaped, {
     TEST_ASSERT_EQ_STR(dump_of("\"a\tb\""),
                        "1:1-1:6 0 \"a\\tb\" string literal\n"
@@ -177,9 +166,8 @@ TEST(printable_bytes_stand_for_themselves, {
                        "1:16-1:16 0 \"\" end of file\n");
 })
 
-// The dump of a file that itself holds a NUL byte outside a literal: the byte
-// is a lexical error, so the line is dropped, and nothing of it reaches
-// stdout to break the one-token-per-line rule.
+// The dump of a file that itself holds a NUL byte outside a literal: the byte is a lexical error.
+// The line is dropped, and nothing of it reaches stdout to break the one-token-per-line rule.
 TEST(a_nul_byte_in_the_source_costs_its_line, {
     TEST_ASSERT_EQ_STR(dump_of_bytes("a\n\0\nb\n", 6),
                        "1:1-1:2 0 \"a\" identifier\n"
@@ -191,7 +179,6 @@ TEST(a_nul_byte_in_the_source_costs_its_line, {
 
 // The dump covers the file whatever was reported: the broken line is dropped
 // and the lines around it are there.
-// D14.2
 TEST(a_broken_line_is_missing_from_the_dump, {
     TEST_ASSERT_EQ_STR(dump_of("a\n#\nb\n"),
                        "1:1-1:2 0 \"a\" identifier\n"

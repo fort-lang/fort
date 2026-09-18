@@ -1,12 +1,9 @@
-// The environment the driver suites share: one run of driver_main with its
-// captured stdout and stderr, the file-system sandbox a run that touches the
-// disk needs (the entry file, the fake cc's log and its own $TMPDIR), the
-// capture of the compile-time diagnostics, and the two formatters that fill a
-// sandbox path into an expected text.
-// D14.2
+// Provides the shared driver test environment.
+// It captures driver_main output and provides a file-system sandbox.
+// It also formats sandbox paths for expected output.
 //
-// The helpers are static inline and every path the sandbox holds is per
-// suite, so a suite that uses only some of them still builds under -Werror.
+// The helpers are static inline and every path the sandbox holds is per suite. A suite that uses
+// only some of them still builds under -Werror.
 #ifndef FORT_TEST_DRIVER_HELPERS_H
 #define FORT_TEST_DRIVER_HELPERS_H
 
@@ -29,21 +26,21 @@ enum { CAPTURE_MAX = 8192, PATH_CAP = 512 };
 
 // ---- running the driver ---------------------------------------------------------
 
-/// One driver run with its captured stdout and stderr.
+// One driver run with its captured stdout and stderr.
 typedef struct {
     int status;
     char out[CAPTURE_MAX];
     char err[CAPTURE_MAX];
 } run_t;
 
-/// Reads the whole of a temporary stream into buf as a NUL-terminated string.
+// Reads the whole of a temporary stream into buf as a NUL-terminated string.
 static inline void slurp(FILE* stream, char* buf, size_t size) {
     TEST_UNUSED(fseek(stream, 0, SEEK_SET));
     const size_t got = fread(buf, 1, size - 1, stream);
     buf[got] = '\0';
 }
 
-/// Runs driver_main on the NULL-terminated argument list, argv[0] included.
+// Runs driver_main on the NULL-terminated argument list, argv[0] included.
 static inline run_t run_driver(char** argv) {
     run_t run;
     run.status = -1;
@@ -70,12 +67,12 @@ static inline run_t run_driver(char** argv) {
 
 // ---- the file-system sandbox of one run ------------------------------------------
 
-/// Joins a directory and a name into `dst`.
+// Joins a directory and a name into `dst`.
 static inline void join(char* dst, size_t size, const char* dir, const char* name) {
     TEST_UNUSED(snprintf(dst, size, "%s/%s", dir, name));
 }
 
-/// Removes a directory and everything below it: the sandbox of one run.
+// Removes a directory and everything below it: the sandbox of one run.
 static inline void remove_tree(const char* path) {
     DIR* dir = opendir(path);
     if (dir == NULL) {
@@ -95,8 +92,7 @@ static inline void remove_tree(const char* path) {
     TEST_UNUSED(rmdir(path));
 }
 
-/// The number of entries in a directory, `.` and `..` apart, or -1 when it
-/// cannot be read.
+// The number of entries in a directory, `.` and `..` apart, or -1 when it cannot be read.
 static inline int count_entries(const char* path) {
     DIR* dir = opendir(path);
     if (dir == NULL) {
@@ -114,8 +110,8 @@ static inline int count_entries(const char* path) {
     return count;
 }
 
-/// A private directory for one driver run: the entry file, the fake cc's log
-/// and the $TMPDIR the driver must leave empty (toolchain.md 2).
+// A private directory for one driver run: the entry file, the fake cc's log and the $TMPDIR the
+// driver must leave empty.
 typedef struct {
     bool ok;
     char dir[PATH_CAP];
@@ -127,18 +123,15 @@ typedef struct {
     char rt[PATH_CAP];    // <dir>/std/rt.ft, the runtime every closure holds
 } sandbox_t;
 
-/// The runtime file of the sandbox. Every closure holds `std.rt`, so a run
-/// that reads a program reads this file too and lists it first in the
-/// document. It is deliberately empty: these suites drive the driver, and a
-/// `--check` needs the file to parse while a build with fake_cc.sh never
-/// compiles the module, so an empty runtime keeps every expected document
-/// short and adds no index record of its own.
-/// D9.10, D20.2, D20.3
+// The runtime file of the sandbox. Every closure holds `std.rt`, so a run that reads a program
+// reads this file too and lists it first in the document. It is deliberately empty: these suites
+// drive the driver. A `--check` needs the file to parse while a build with fake_cc.sh never
+// compiles the module. An empty runtime keeps every expected document short and adds no index
+// record of its own.
 static const char SANDBOX_RUNTIME[] = "// The empty runtime of a driver test.\n";
 
-/// Clears every variable these tests and the driver read (toolchain.md 1),
-/// so that a test which returns early on a failed assertion cannot leave one
-/// behind for the next: each test establishes its own environment first.
+// Clears every variable that these tests and the driver read.
+// Each test starts with a clean environment, including after an early assertion failure.
 static inline void env_reset(void) {
     TEST_UNUSED(unsetenv("TMPDIR"));
     TEST_UNUSED(unsetenv("FORT_STD_DIR"));
@@ -178,9 +171,8 @@ static inline sandbox_t sandbox_open(void) {
     }
     TEST_UNUSED(fputs(SANDBOX_RUNTIME, runtime));
     TEST_UNUSED(fclose(runtime));
-    // The driver reads TMPDIR and FORT_STD_DIR (toolchain.md 1) and
-    // fake_cc.sh reads the FORT_FAKE_CC variables; env_reset above cleared
-    // everything else.
+    // The driver reads TMPDIR and FORT_STD_DIR and fake_cc.sh reads the FORT_FAKE_CC variables;
+    // env_reset above cleared everything else.
     TEST_UNUSED(setenv("TMPDIR", box.tmp, 1));
     TEST_UNUSED(setenv("FORT_STD_DIR", box.std, 1));
     TEST_UNUSED(setenv("FORT_FAKE_CC_LOG", box.log, 1));
@@ -188,9 +180,8 @@ static inline sandbox_t sandbox_open(void) {
     return box;
 }
 
-/// Removes the sandbox. A test that fails an assertion returns before this,
-/// which is why the next sandbox_open resets the environment rather than
-/// trusting this one to have run.
+// Removes the sandbox. A test that fails an assertion returns before this. It is why the next
+// sandbox_open resets the environment rather than trusting this one to have run.
 static inline void sandbox_close(sandbox_t* box) {
     env_reset();
     if (box->dir[0] != '\0') {
@@ -200,8 +191,8 @@ static inline void sandbox_close(sandbox_t* box) {
 
 // ---- the expected texts ----------------------------------------------------------
 
-/// The expected command lines and messages hold paths the sandbox chose, so
-/// they are written as a format taking one or two of them.
+// The expected command lines and messages hold paths the sandbox chose, so they are written as a
+// format taking one or two of them.
 static inline void expect1(char* dst, size_t size, const char* format, const char* a) {
     TEST_UNUSED(snprintf(dst, size, format, a));
 }
@@ -217,12 +208,10 @@ static inline void expect3(
 }
 
 // ---- the diagnostics of a run ----------------------------------------------------
-// D14.2
 
-/// The compile-time diagnostics go to stderr, not to the stream driver_main
-/// writes its `fort: error:` lines to, so a test that wants them captures them
-/// with diag_capture; the run is otherwise an ordinary one.
-/// D14.2
+// The compile-time diagnostics go to stderr, not to the stream driver_main writes its `fort:
+// error:` lines to. A test that wants them captures them with diag_capture; the run is otherwise an
+// ordinary one. Each `run_and_capture` call replaces `last_diags`.
 static char last_diags[CAPTURE_MAX];
 
 static inline run_t run_and_capture(char** argv) {
@@ -238,7 +227,7 @@ static inline run_t run_and_capture(char** argv) {
 
 #define RUN_CAPTURED(...) run_and_capture((char*[]){"fort", __VA_ARGS__, NULL})
 
-/// Writes a source file, replacing what the sandbox put there.
+// Writes a source file, replacing what the sandbox put there.
 static inline bool write_source(const char* path, const char* text) {
     FILE* file = fopen(path, "wb");
     if (file == NULL) {

@@ -1,10 +1,5 @@
-// Unit tests of the LLVM IR emitter: the module skeleton, the type mapping,
-// symbols, private data, locals, calls and the print family (toolchain.md 6
-// items 1 to 13 and 19). The runtime checks are the other half, in
-// gen_check_test.c, the cast matrix is in gen_cast_test.c, the module-level
-// data in gen_global_test.c, and the whole-module goldens are in
-// gen_module_test.c.
-// D19.1 to D19.5, D3.14, D7.10
+// Tests the emitter module skeleton and shared expression emission.
+// Focused suites test checks, casts, globals, and complete modules.
 #include "gen.h"
 
 #include <stdbool.h>
@@ -17,7 +12,7 @@
 
 #include "test.h"
 
-// ---- the module skeleton (item 1) --------------------------------------------------
+// ---- the module skeleton --------------------------------------------------
 
 TEST(the_module_begins_with_the_normalized_triple, {
     TEST_ASSERT_TRUE(emit(in_main("")));
@@ -44,7 +39,6 @@ TEST(the_explicit_linux_target_keeps_the_default_module_bytes, {
 TEST(the_module_carries_no_datalayout_or_module_flags, {
     TEST_ASSERT_TRUE(emit(in_main("")));
     // No datalayout, module flags, ident or source_filename.
-    // D19.1
     TEST_ASSERT_EQ_STR(absent("target datalayout"), "absent");
     TEST_ASSERT_EQ_STR(absent("!llvm.module.flags"), "absent");
     TEST_ASSERT_EQ_STR(absent("!llvm.ident"), "absent");
@@ -64,9 +58,8 @@ TEST(both_named_types_are_emitted_used_or_not, {
 })
 
 TEST(the_sections_appear_in_the_order_of_item_1, {
-    // The declarations section holds the externs and the intrinsics and
-    // nothing else: the runtime is defined in the module rather than declared
-    // (item 8), so the program below declares a C function to fill it.
+    // The declarations section holds only externs and intrinsics. The runtime is defined in the
+    // module. This program adds one C declaration.
     TEST_ASSERT_TRUE(emit("struct point { i32 x; i32 y; }\n"
                           "extern fn puts(char* s) i32;\n"
                           "fn main() i32 {\n"
@@ -87,8 +80,7 @@ TEST(a_blank_line_stands_between_two_definitions, {
                        "}\n\ndefine dso_local i32 @\"main.main\"");
 })
 
-// ---- the type mapping (item 2) -----------------------------------------------------
-// D19.2
+// ---- the type mapping -----------------------------------------------------
 
 TEST(the_integer_types_map_to_their_widths, {
     TEST_ASSERT_TRUE(
@@ -110,9 +102,7 @@ TEST(the_unsigned_types_share_the_signed_ones_ir_types, {
 
 TEST(a_bool_is_i8_in_memory_and_i1_as_a_value, {
     TEST_ASSERT_TRUE(emit(in_main("    bool b = true;\n    bool c = b;\n")));
-    // Every store of a bool place is a zext and a store i8, a constant one
-    // included, so the rule has no exception to get wrong.
-    // D19.2
+    // Every bool-place store uses a `zext` and an `i8` store, including constant stores.
     TEST_ASSERT_EQ_STR(found("%b.0 = alloca i8, align 1"), "%b.0 = alloca i8, align 1");
     TEST_ASSERT_EQ_STR(found("%t0 = zext i1 true to i8"), "%t0 = zext i1 true to i8");
     TEST_ASSERT_EQ_STR(found("store i8 %t0, ptr %b.0, align 1"), "store i8 %t0, ptr %b.0, align 1");
@@ -162,7 +152,6 @@ TEST(a_struct_is_a_named_type_with_its_fields_in_order, {
     TEST_ASSERT_EQ_STR(found("%struct.main.mixed = type { i8, i64 }"),
                        "%struct.main.mixed = type { i8, i64 }");
     // The struct is never packed, so LLVM lays it out exactly as C does.
-    // D3.8
     TEST_ASSERT_EQ_STR(absent("<{"), "absent");
     TEST_ASSERT_EQ_STR(found("%m.0 = alloca %struct.main.mixed, align 8"),
                        "%m.0 = alloca %struct.main.mixed, align 8");
@@ -176,7 +165,7 @@ TEST(a_void_function_has_the_void_result_type, {
     TEST_ASSERT_EQ_STR(found("  ret void"), "  ret void");
 })
 
-// ---- aggregates and the three getelementptr shapes (item 3) -----------------------
+// ---- aggregates and the three getelementptr shapes -----------------------
 
 TEST(an_array_element_uses_the_array_gep_shape, {
     TEST_ASSERT_TRUE(emit(in_main("    i32[3] a = {};\n    i64 i = 1;\n    println(a[i]);\n")));
@@ -238,13 +227,11 @@ TEST(the_emitter_never_writes_insertvalue_on_an_aggregate, {
                           "fn main() i32 {\n    point p = {1, 2};\n    point q = p;\n"
                           "    return q.y;\n}\n"));
     // Only scalars are SSA values.
-    // D19.3
     TEST_ASSERT_EQ_STR(absent("insertvalue"), "absent");
     TEST_ASSERT_EQ_STR(absent("extractvalue"), "absent");
 })
 
-// ---- symbols, linkage and visibility (item 4) -------------------------------------
-// D9.7
+// ---- symbols, linkage and visibility -------------------------------------
 
 TEST(a_fort_function_is_a_quoted_dotted_name, {
     TEST_ASSERT_TRUE(emit("fn add(i32 a, i32 b) i32 { return a +% b; }\n"
@@ -269,7 +256,7 @@ TEST(fort_entry_is_a_c_name_and_unquoted, {
                        "define dso_local i32 @fort_entry(ptr %args.in) #0");
 })
 
-// ---- private data (item 5) ---------------------------------------------------------
+// ---- private data ---------------------------------------------------------
 
 TEST(a_string_literal_holds_the_trailing_nul_the_length_excludes, {
     TEST_ASSERT_TRUE(emit(in_main("    println(\"before\");\n")));
@@ -294,7 +281,6 @@ TEST(a_string_constant_is_not_deduplicated_by_content, {
     TEST_ASSERT_TRUE(emit(in_main("    println(\"x\", \"x\");\n")));
     // Module-level counters are assigned on first use and never deduplicated
     // by content.
-    // D19.5
     TEST_ASSERT_EQ_STR(found("@.str.0 = private unnamed_addr constant [2 x i8] c\"x\\00\""),
                        "@.str.0 = private unnamed_addr constant [2 x i8] c\"x\\00\"");
     TEST_ASSERT_EQ_STR(found("@.str.1 = private unnamed_addr constant [2 x i8] c\"x\\00\""),
@@ -345,8 +331,7 @@ TEST(an_enum_table_has_one_entry_per_member_in_declaration_order, {
     TEST_ASSERT_TRUE(before("@.str.2 = ", "@.enum.main.color = "));
 })
 
-// ---- the calling convention (item 7) ----------------------------------------------
-// D9.9
+// ---- the calling convention ----------------------------------------------
 
 TEST(a_narrow_parameter_and_result_carry_the_extension_attribute, {
     TEST_ASSERT_TRUE(emit("fn narrow(i8 a, i16 b, u8 c, u16 d, bool e, char f) i8 { return a; }\n"
@@ -373,7 +358,7 @@ TEST(an_i32_parameter_carries_no_extension_attribute, {
 TEST(an_aggregate_argument_is_a_pointer_to_a_caller_made_copy, {
     TEST_ASSERT_TRUE(emit("fn size(string s) u64 { return s.len; }\n"
                           "fn main() i32 { string s = \"hi\"; println(size(s)); return 0; }\n"));
-    // byval is never used: the pointer goes in the integer slot (item 7).
+    // byval is never used: the pointer goes in the integer slot.
     TEST_ASSERT_EQ_STR(absent("byval"), "absent");
     TEST_ASSERT_EQ_STR(found("define dso_local i64 @\"main.size\"(ptr %s.in) #0"),
                        "define dso_local i64 @\"main.size\"(ptr %s.in) #0");
@@ -414,7 +399,7 @@ TEST(every_fort_definition_carries_the_attribute_group_of_item_7, {
         found("attributes #0 = { nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\" "
               "}"),
         "attributes #0 = { nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\" }");
-    // mustprogress is deliberately absent everywhere (toolchain.md 6).
+    // mustprogress is deliberately absent everywhere.
     TEST_ASSERT_EQ_STR(absent("mustprogress"), "absent");
 })
 
@@ -428,7 +413,6 @@ TEST(a_noreturn_definition_carries_its_own_group_and_ends_in_a_trap, {
                        "attributes #1 = { noreturn nounwind \"frame-pointer\"=\"all\" "
                        "\"probe-stack\"=\"inline-asm\" }");
     // Every call site of a noreturn function traps too.
-    // D8.5, D19.7
     TEST_ASSERT_EQ_STR(found("call void @\"main.stop\"()\n  call void @llvm.trap()\n  unreachable"),
                        "call void @\"main.stop\"()\n  call void @llvm.trap()\n  unreachable");
     TEST_ASSERT_EQ_STR(
@@ -453,16 +437,15 @@ TEST(darwin_fort_definitions_use_the_inline_stack_probe_of_linux, {
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
-// ---- normalization (item 9) ---------------------------------------------------------
+// ---- normalization ---------------------------------------------------------
 
 TEST(a_narrow_value_keeps_its_own_width, {
     TEST_ASSERT_TRUE(emit(in_main("    i8 a = 1;\n    i8 b = 2;\n    println(a +% b);\n")));
-    // A narrow value is not widened to 32 bits: its width is in its type
-    // (item 9).
+    // A narrow value is not widened to 32 bits: its width is in its type.
     TEST_ASSERT_EQ_STR(found("add i8 %t0, %t1"), "add i8 %t0, %t1");
 })
 
-// ---- one terminator per block (item 10) --------------------------------------------
+// ---- one terminator per block --------------------------------------------
 
 TEST(the_blocks_of_a_short_circuit_and_a_check_each_end_in_one_terminator, {
     TEST_ASSERT_TRUE(emit("enum color { red, green }\n"
@@ -472,9 +455,8 @@ TEST(the_blocks_of_a_short_circuit_and_a_check_each_end_in_one_terminator, {
                           "    point p = {a, b};\n    a /= b;\n    assert(a != 0);\n"
                           "    println(t, \" \", arr[1], \" \", p.x, \" \", color.green);\n"
                           "    return 0;\n}\n"));
-    // Every block of every definition ends in exactly one terminator (item
-    // 10), which `verified` checks before it runs `opt`, because `opt` exits
-    // 0 on a block that holds two.
+    // Every block of every definition ends in exactly one terminator. `verified`
+    // checks before it runs `opt`. This is because `opt` exits 0 on a block that holds two.
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -513,9 +495,8 @@ static const char* module_with_a_very_long_label(char* text, size_t cap) {
 }
 
 TEST(a_block_report_too_long_to_write_is_reported_where_it_is_written, {
-    // The two call sites that write a report are held by this, not by the
-    // helper's own test: dropping their wrapping leaves the scan naming a
-    // block by a truncated label, which no other test would see.
+    // This test covers both report-writing call sites.
+    // Without their bounds checks, the scan would report a truncated block label.
     char text[GEN_PATH_CAP * 2];
     TEST_ASSERT_EQ_STR(gen_block_terminators_of(module_with_a_very_long_label(text, sizeof text)),
                        "the block report did not fit its buffer");

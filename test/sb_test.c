@@ -1,5 +1,5 @@
-// Unit tests of the byte buffer sb_t of str.h, which mirrors std.strbuf
-// (stdlib.md 2.6): growth, appends, decimal formatting, views and copies.
+// Tests the `sb_t` byte buffer in `str.h`. It mirrors `std.strbuf`. Tests cover growth, appends,
+// decimal formatting, views, and copies.
 #include <stdint.h>
 #include <stdlib.h>
 

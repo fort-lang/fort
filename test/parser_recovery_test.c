@@ -1,17 +1,5 @@
-// The parser's error recovery (toolchain.md 4): a file reports every syntax
-// error it has, one diagnostic per mistake and none for a region already
-// reported on.
-// D14.2
-//
-// Two things are checked here that no other suite can check: that a broken
-// construct costs exactly one diagnostic, which is what "no cascade" means,
-// and that the tree the parser hands back after an error still holds the whole
-// file, with an error node over each skipped region. The last suite walks
-// test/lang/fail, the corpus of programs that must not compile, and fails on a
-// diagnostic reported for a line that carries no `//! error:` annotation, so
-// every cascade the corpus can produce is caught here rather than in the
-// harness, which only judges the tests it is allowed to run.
-// D14.5
+// Tests parser recovery and diagnostic counts.
+// Each broken construct reports once, and parsing continues at the next recovery point.
 #include <dirent.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -54,8 +42,8 @@ TEST(two_broken_declarations_report_two_lines, {
                        "t.ft:3:18: error: a mut appears once in a type position\n");
 })
 
-// A statement whose `;` is missing is skipped to the next boundary, and what
-// follows it parses: the statements after a mistake are read, not abandoned.
+// The parser skips a statement with a missing `;` at the next boundary.
+// It then reads the statements after the mistake.
 TEST(a_missing_semicolon_does_not_cascade, {
     TEST_ASSERT_EQ_STR(parse_fails("fn f() i32 {\n"
                                    "    i32 a = 1\n"
@@ -109,10 +97,8 @@ TEST(a_broken_statement_in_a_case_does_not_cascade, {
                        "t.ft:4:13: error: expected an expression, found ';'\n");
 })
 
-// A clause that does not parse is skipped to the next one: the clauses of a
-// switch are a recovery point of their own, so the clauses after a broken one
-// are read.
-// D14.2
+// A clause that does not parse is skipped to the next one: the clauses of a switch are a recovery
+// point of their own. The clauses after a broken one are read.
 TEST(a_broken_case_clause_does_not_cascade, {
     TEST_ASSERT_EQ_STR(parse_fails("fn main() i32 {\n"
                                    "    switch (c) {\n"
@@ -135,9 +121,8 @@ TEST(a_broken_case_clause_does_not_cascade, {
                        "(case default (block (call-stmt (call (ident h)))))))))");
 })
 
-// A skip inside a switch stops before the next clause, so a statement that
-// runs off the end of its clause costs that clause and not the one after it.
-// D14.2
+// A skip inside a switch stops before the next clause. A statement that runs off the end of its
+// clause costs that clause and not the one after it.
 TEST(a_skip_inside_a_case_stops_before_the_next_clause, {
     TEST_ASSERT_EQ_STR(parse_fails("fn f() void {\n"
                                    "    switch (c) {\n"
@@ -161,10 +146,8 @@ TEST(a_skip_inside_a_case_stops_before_the_next_clause, {
                        "(case default (block (call-stmt (call (ident g)))))))))");
 })
 
-// The `}` of a brace initializer that a `;` follows is consumed with it: no
-// block is followed by a `;`, so the pair ends the statement the skip is
-// dropping and the statements after it are read.
-// D7.3, D14.2
+// The `}` of a brace initializer that a `;` follows is consumed with it: no block is followed by a
+// `;`. The pair ends the statement the skip is dropping and the statements after it are read.
 TEST(a_skip_ends_at_the_brace_and_semicolon_of_an_initializer, {
     TEST_ASSERT_EQ_STR(parse_fails("fn main() i32 {\n"
                                    "    point p = {.x = 1, 2};\n"
@@ -181,10 +164,8 @@ TEST(a_skip_ends_at_the_brace_and_semicolon_of_an_initializer, {
 
 // ---- the missing brace every edit passes through --------------------------
 
-// The `{` of a function body may be missing without the body being read as
-// declarations: the header before it is complete, so it is reported once and
-// the statements are read as statements.
-// D14.2
+// The `{` of a function body may be missing without the body being read as declarations: the header
+// before it is complete. It is reported once and the statements are read as statements.
 TEST(a_body_without_its_opening_brace_is_read_as_a_body, {
     TEST_ASSERT_EQ_STR(parse_fails("fn main() i32\n"
                                    "    i32 mut n = 1;\n"
@@ -204,7 +185,6 @@ TEST(a_body_without_its_opening_brace_is_read_as_a_body, {
 
 // A block that runs to a top-level declaration is reported once, there, and
 // the declarations after it are parsed as declarations.
-// D14.2
 TEST(an_unclosed_block_reports_at_the_next_declaration, {
     TEST_ASSERT_EQ_STR(parse_fails("fn f() void {\n"
                                    "    g();\n"
@@ -223,9 +203,8 @@ TEST(an_unclosed_block_reports_at_the_next_declaration, {
                        "(fn (type (void)) h (params) (block (call-stmt (call (ident i))))))");
 })
 
-// A `fn` at statement level is the base of a function type, so it ends no
-// block: the two are told apart by the speculative parse of grammar.md 7.
-// D3.10
+// A `fn` at statement level is the base of a function type. It ends no block: the two are told
+// apart by the speculative parse of the grammar.
 TEST(a_function_type_at_statement_level_is_not_a_declaration, {
     TEST_ASSERT_EQ_STR(parse_dump("fn f() void {\n"
                                   "    fn (i32) i32 op = add;\n"
@@ -253,10 +232,8 @@ TEST(an_unclosed_struct_or_enum_reports_at_the_next_declaration, {
                        "t.ft:3:1: error: expected '}', found 'fn'\n");
 })
 
-// The chain an unclosed block ends in at the end of the file is one
-// diagnostic: every enclosing construct reports the same missing `}` at the
-// same position, and only the first is written.
-// D14.2
+// Nested unclosed blocks at file end report one missing `}`.
+// Each enclosing construct reaches the same position.
 TEST(an_unclosed_block_at_the_end_of_the_file_reports_once, {
     TEST_ASSERT_EQ_STR(parse_fails("fn main() i32 {\n"
                                    "    if (c) {\n"
@@ -264,11 +241,8 @@ TEST(an_unclosed_block_at_the_end_of_the_file_reports_once, {
                        "t.ft:4:1: error: expected '}', found end of file\n");
 })
 
-// A declaration or a body that ends where the next declaration starts leaves
-// that declaration to be parsed as one: the speculative `fn` test is made
-// while a construct is unwinding, so it answers about the tokens ahead and not
-// about the unwind. The tree is what says the declaration survived.
-// D14.2
+// It answers about the tokens ahead and not about the unwind. The tree is what says the declaration
+// survived.
 TEST(a_declaration_that_follows_a_failed_one_is_still_a_declaration, {
     TEST_ASSERT_EQ_STR(parse_fails("i32 x =\n"
                                    "fn h() void { g(); }\n"),
@@ -293,10 +267,7 @@ TEST(a_declaration_that_follows_a_failed_one_is_still_a_declaration, {
                        "(fn (type (prim i32)) main (params) (block (return (int 0)))))");
 })
 
-// The statements of a body whose `{` is missing are parsed as statements, the
-// ones that need a speculative parse included: a declaration with a brace
-// initializer, a call with a `new`, an array literal (grammar.md 7). Losing
-// one of them would be silent, so the tree is what this test reads.
+// Losing one of them would be silent, so the tree is what this test reads.
 TEST(a_body_without_its_brace_keeps_every_statement, {
     TEST_ASSERT_EQ_STR(parse_fails("fn main() i32\n"
                                    "    point p = {};\n"
@@ -355,12 +326,10 @@ TEST(a_half_typed_construct_reports_once, {
                        "t.ft:3:12: error: expected ':', found identifier 'f'\n");
 })
 
-// A `}` inside a bracket the construct left open closes nothing, so it is
-// skipped with the statement and the block keeps its own `}`; a `}` that
-// closes the block is left to it, even though the construct has a bracket
-// open, because a half-typed call followed by the block's real brace is what
-// an edit in progress looks like.
-// D14.2
+// A `}` inside a bracket the construct left open closes nothing. It is skipped with the statement
+// and the block keeps its own `}`. A `}` that closes the block is left to it, even though the
+// construct has a bracket open. This is because a half-typed call followed by the block's real
+// brace is what an edit in progress looks like.
 TEST(a_brace_inside_an_unclosed_call_goes_with_the_statement, {
     TEST_ASSERT_EQ_STR(parse_fails("fn f() void {\n"
                                    "    g(});\n"
@@ -388,10 +357,9 @@ TEST(a_brace_inside_an_unclosed_call_goes_with_the_statement, {
                        "(fn (type (void)) h (params) (block)))");
 })
 
-// A switch body holds clauses and nothing else, so a token that is no clause
-// is reported and skipped there rather than handed to the block around it,
-// which would read the clauses after it as statements.
-// D7.6, D14.2
+// A switch body holds clauses and nothing else. A token that is no clause is reported and skipped
+// there rather than handed to the block around it. It would read the clauses after it as
+// statements.
 TEST(a_switch_body_holds_clauses_only, {
     TEST_ASSERT_EQ_STR(parse_fails("fn main() i32 {\n"
                                    "    switch (n) {\n"
@@ -418,9 +386,6 @@ TEST(a_switch_body_holds_clauses_only, {
 
 // ---- speculation ----------------------------------------------------------
 
-// A speculative parse reports nothing, so the branch the parser commits to
-// reports the mistake once (grammar.md 7.1), whether the speculation succeeded
-// or failed on a misplaced marker.
 TEST(an_error_under_a_speculation_is_reported_once, {
     TEST_ASSERT_EQ_STR(parse_fails("fn f() void {\n"
                                    "    foo* p 1;\n"
@@ -464,7 +429,6 @@ static uint64_t diag_lines(const char* src) {
 
 // Twenty errors are reported per file and the rest are silent, but the parse
 // goes on, so the tree still holds every declaration that parsed.
-// D14.2
 TEST(the_twenty_first_error_is_not_reported, {
     sb_t src;
     sb_init(&src);
@@ -483,7 +447,6 @@ TEST(the_twenty_first_error_is_not_reported, {
 
 // Two errors that start at the same token are one mistake, so the second is
 // dropped; two that start at different tokens are both reported.
-// D14.2
 TEST(two_errors_at_one_position_are_reported_once, {
     TEST_ASSERT_EQ_UINT64(diag_lines("fn f() i32 {\n    switch (c) {\n    case 1:\n"), (uint64_t)1);
     TEST_ASSERT_EQ_UINT64(diag_lines("i32 a = ;\ni32 b = ;\n"), (uint64_t)2);
@@ -493,7 +456,6 @@ TEST(two_errors_at_one_position_are_reported_once, {
 
 // The tree is never NULL, whatever was reported: a caller asks whether the
 // file parsed by comparing diag_count().
-// D14.2
 TEST(a_file_with_errors_still_yields_a_tree, {
     const ast_node_t* mod = parse_text("fn void f( {\n"
                                        "}\n"
@@ -506,10 +468,7 @@ TEST(a_file_with_errors_still_yields_a_tree, {
                        "(fn (type (void)) g (params) (block (call-stmt (call (ident h)))))");
 })
 
-// The error node covers the tokens the skip dropped, from the first token of
-// the failed construct to the last one skipped, and has no children, so a
-// later pass reads it as "nothing was understood here".
-// D14.2
+// A later pass reads it as "nothing was understood here".
 TEST(an_error_node_covers_the_skipped_region_and_has_no_children, {
     const ast_node_t* mod = parse_text("fn f() void {\n"
                                        "    i32 a = ;\n"
@@ -530,11 +489,9 @@ TEST(an_error_node_covers_the_skipped_region_and_has_no_children, {
 
 // ---- the boundaries ------------------------------------------------------
 
-// A lexical error costs its line and lexing resumes at the next one, so the
-// parser runs on the rest of the file and reports the mistake after the bad
-// literal; the line the lexer dropped yields no syntax error, since none of
-// its tokens reached the parser.
-// D14.2
+// A lexical error costs its line and lexing resumes at the next one. The parser runs on the rest of
+// the file and reports the mistake after the bad literal. The line the lexer dropped yields no
+// syntax error, since none of its tokens reached the parser.
 TEST(a_lexical_error_costs_its_line_and_the_parser_sees_the_rest, {
     TEST_ASSERT_EQ_STR(parse_fails("fn main() i32 {\n"
                                    "    i32 a = 0xZ;\n"
@@ -546,7 +503,6 @@ TEST(a_lexical_error_costs_its_line_and_the_parser_sees_the_rest, {
 
 // An unclosed string literal on line 3 leaves the declarations after it
 // parsed: what an editor needs while a literal is half typed.
-// D14.2
 TEST(a_file_with_an_unclosed_string_still_parses_the_lines_after_it, {
     const ast_node_t* mod = parse_text("fn one() i32 {\n"
                                        "    string s = \"abc;\n"
@@ -562,10 +518,8 @@ TEST(a_file_with_an_unclosed_string_still_parses_the_lines_after_it, {
                        "(fn (type (prim i32)) two (params) (block (return (int 2)))))");
 })
 
-// The empty file and the file that is one stray token: the first reports
-// nothing and the second reports once, since a recovery that consumed nothing
-// would spin at the end of the file.
-// D14.2
+// An empty file reports nothing, while one stray token reports once.
+// Recovery must consume the stray token before file end.
 TEST(an_empty_file_and_a_one_token_file, {
     TEST_ASSERT_EQ_STR(parse_dump(""), "(module)");
     TEST_ASSERT_EQ_STR(parse_fails("}"), "t.ft:1:1: error: expected a type, found '}'\n");
@@ -574,10 +528,8 @@ TEST(an_empty_file_and_a_one_token_file, {
                        "t.ft:1:4: error: expected an identifier, found end of file\n");
 })
 
-// The nesting limit is reported once: the construct that broke it unwinds to
-// the nearest recovery point, which skips over the whole nest instead of
-// walking back into it.
-// D2.11
+// A nesting-limit error unwinds to the nearest recovery point.
+// Recovery skips the complete nest and reports once.
 TEST(nesting_past_the_limit_is_reported_once, {
     sb_t src;
     sb_init(&src);
@@ -609,7 +561,6 @@ TEST(the_cap_is_twenty_errors, {
 
 // The budget of twenty is the file's, not the parser's: what the lexer
 // reported is already spent when the parse begins.
-// D14.2
 TEST(the_cap_is_shared_with_the_lexer, {
     sb_t src;
     sb_init(&src);
@@ -633,7 +584,6 @@ TEST(the_cap_is_shared_with_the_lexer, {
 
 // Past the cap the file is still lexed and parsed whole, so the tree covers
 // the declarations after the twentieth diagnostic.
-// D14.2
 TEST(a_declaration_after_the_cap_is_still_in_the_tree, {
     sb_t src;
     sb_init(&src);
@@ -650,8 +600,8 @@ TEST(a_declaration_after_the_cap_is_still_in_the_tree, {
 
 // ---- where a skip stops ---------------------------------------------------
 
-// The `}` of a block the failed construct opened is consumed with it, so the
-// statement after that block is read as a statement and not as a leftover.
+// The `}` of a block the failed construct opened is consumed with it. The statement after that
+// block is read as a statement and not as a leftover.
 TEST(a_skip_consumes_the_block_of_the_failed_statement, {
     TEST_ASSERT_EQ_STR(parse_fails("fn f() i32 {\n"
                                    "    if c) { g(); }\n"
@@ -670,7 +620,6 @@ TEST(a_skip_consumes_the_block_of_the_failed_statement, {
 
 // An import that does not parse is skipped like any declaration, and the
 // imports and declarations after it are read.
-// D9.3
 TEST(a_broken_import_does_not_stop_the_imports, {
     TEST_ASSERT_EQ_STR(parse_fails("import ;\n"
                                    "import std.io;\n"
@@ -683,10 +632,8 @@ TEST(a_broken_import_does_not_stop_the_imports, {
                        "(fn (type (prim i32)) main (params) (block (return (int 0)))))");
 })
 
-// An import after a declaration is reported before a token is consumed, so the
-// recovery consumes one itself and the declaration after it is read: the rule
-// that keeps parse_module from spinning.
-// D14.2
+// A late import reports before the parser consumes a token.
+// Recovery then consumes one token and continues with the next declaration.
 TEST(a_late_import_is_reported_once_and_skipped, {
     TEST_ASSERT_EQ_STR(parse_fails("fn main() i32 { return 0; }\n"
                                    "import std.io;\n"
@@ -699,11 +646,8 @@ TEST(a_late_import_is_reported_once_and_skipped, {
                        "(error) (fn (type (prim i32)) g (params) (block (return (int 1)))))");
 })
 
-// The `{` of a brace initializer that is never closed is dropped with the
-// statement it belongs to: a skip counts only the braces it sees opened, so
-// the `}` of the enclosing block stays that block's and the statements after
-// the broken one are read.
-// D14.2
+// The `}` of the enclosing block stays that block's and the statements after the broken one are
+// read.
 TEST(an_unclosed_brace_initializer_costs_one_statement, {
     TEST_ASSERT_EQ_STR(parse_fails("fn main() i32 {\n"
                                    "    point p = {1, ;\n"
@@ -732,12 +676,8 @@ TEST(every_recovery_point_records_what_it_skipped, {
     TEST_ASSERT_EQ_STR(text_of(ast_child(clause->a, 0)), "x = ;");
 })
 
-// A bracket a construct leaves open costs that construct and the statements up
-// to the next boundary, and nothing else: an unclosed `(` ends at the next
-// statement keyword, an unclosed `{` at the `;` of the declaration it is in,
-// and a `}` that closes nothing at the top level is one diagnostic, not a
-// second file.
-// D14.2
+// A bracket a construct leaves open costs that construct and the statements up to the next
+// boundary.
 TEST(an_unclosed_bracket_costs_its_construct_and_no_more, {
     TEST_ASSERT_EQ_STR(parse_fails("fn main() i32 {\n"
                                    "    g(1, 2;\n"
@@ -766,7 +706,6 @@ TEST(an_unclosed_bracket_costs_its_construct_and_no_more, {
 })
 
 // ---- the fail corpus ------------------------------------------------------
-// D14.4
 
 enum { CORPUS_PATH_CAP = 512, CORPUS_CHUNK = 4096, CORPUS_FILES = 262 };
 
@@ -796,8 +735,8 @@ static bool line_has(const char* src, uint32_t line, const char* needle) {
     return false;
 }
 
-// The line of a diagnostic line `t.ft:<line>:<col>: error: ...`, 0 when it has
-// no position, and the start of the next diagnostic line in `*next`.
+// Returns a diagnostic line number, or 0 when no position exists.
+// Writes the next diagnostic offset to `*next`.
 static uint32_t diag_line_of(const char* text, uint64_t* next) {
     uint64_t i = 0;
     while (text[i] != '\0' && text[i] != ':' && text[i] != '\n') {
@@ -836,10 +775,8 @@ static bool read_source(const char* path, sb_t* out) {
     return true;
 }
 
-// Parses one file of the corpus and records every diagnostic it reports for a
-// line that carries no `//! error:` annotation. A file that carries an `//!
-// error-any:` annotation, which names no line, accepts any position.
-// D14.5
+// Parses one corpus file and records diagnostics without `//! error:` annotations.
+// An `//! error-any:` annotation accepts any source position.
 static void check_corpus_file(const char* path) {
     if (!read_source(path, &corpus_src)) {
         sb_append(&corpus_report, path);
@@ -855,9 +792,8 @@ static void check_corpus_file(const char* path) {
     while (diags[i] != '\0') {
         uint64_t next = 0;
         const uint32_t line = diag_line_of(&diags[i], &next);
-        // A feature the bootstrap lacks is reported wherever the test writes
-        // it and is not a cascade, which is how the harness judges those tests
-        // too (toolchain.md 7.3).
+        // A feature the bootstrap lacks is reported wherever the test writes it and is not a
+        // cascade. It is how the harness judges those tests too.
         const char* hit = strstr(&diags[i], "not supported by the bootstrap compiler");
         const bool unsupported = hit != NULL && hit < &diags[i + next];
         if (!any && !unsupported && !line_has(src, line, "//! error:")) {
@@ -873,7 +809,6 @@ static void check_corpus_file(const char* path) {
 }
 
 // Walks `dir` and checks every `.ft` file below it, directory tests included.
-// D14.4
 static void walk_corpus(const char* dir) {
     DIR* open = opendir(dir);
     if (open == NULL) {
@@ -906,25 +841,21 @@ static void walk_corpus(const char* dir) {
 // so a recovery that cascades over the corpus fails here. The converse does
 // not hold yet: most annotations name semantic errors, which wait for the
 // checker.
-// D14.2, D14.5
 TEST(the_fail_corpus_reports_only_on_annotated_lines, {
     corpus_files = 0;
     sb_clear(&corpus_report);
     walk_corpus(FORT_LANG_DIR "/fail");
     TEST_ASSERT_EQ_STR(sb_cstr(&corpus_report), "");
-    // The exact count, so that a file that stops being walked is noticed. It
-    // is a literal on purpose: deriving it with this walker would be
-    // circular, so the name of the operand carries what to do about it, since
-    // `#val` is what the failing assertion prints.
+    // The exact count, so that a file that stops being walked is noticed. It is a literal on
+    // purpose: deriving it with this walker would be circular. The name of the operand carries what
+    // to do about it, since `#val` is what the failing assertion prints.
     const uint64_t raise_corpus_files_when_you_add_a_fail_test = corpus_files;
     TEST_ASSERT_EQ_UINT64(raise_corpus_files_when_you_add_a_fail_test, (uint64_t)CORPUS_FILES);
 })
 
-// The corpus files whose syntax errors are all reported, with the number of
-// diagnostics each must produce. The walk above says only that nothing
-// unannotated was reported, which a parser that gave up after the first error
-// would also satisfy; these counts say that recovery happens.
-// D14.2
+// The corpus files whose syntax errors are all reported, with the number of diagnostics each must
+// produce. The walk above says only that nothing unannotated was reported, which a parser that gave
+// up after the first error would also satisfy. These counts say that recovery happens.
 static const char* const MULTI_ERROR_FILES[] = {
     "/fail/mutability/004_doubled_mut_marker.ft",
     "/fail/mutability/006_marker_before_base_type.ft",

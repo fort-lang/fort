@@ -1,7 +1,4 @@
-// Unit tests of lexer.h: the literal forms (integer, float, char and string
-// literals), their separator rules, the escapes and their errors with the
-// wording of core-language.md 2.
-// D2.5 to D2.9
+// Tests integer, float, character, and string literals.
 #include <stdint.h>
 #include <string.h>
 
@@ -15,7 +12,6 @@
 // NOLINTBEGIN(readability-magic-numbers)
 
 // ---- integer literals -------------------------------------------------------
-// D2.5
 
 TEST(decimal_literals, {
     ASSERT_LEX_OK("0 7 123 4294967296", 4);
@@ -172,7 +168,6 @@ TEST(integer_directly_followed_by_punctuation, {
 })
 
 // ---- float literals ----------------------------------------------------------
-// D2.6
 
 TEST(float_literal_with_a_fraction, {
     ASSERT_LEX_OK("1.0 0.5 123.456", 3);
@@ -250,7 +245,6 @@ TEST(hex_literal_is_never_a_float, {
 })
 
 // ---- char literals -------------------------------------------------------------
-// D2.7, D2.8
 
 TEST(plain_char_literals, {
     ASSERT_LEX_OK("'x' ' ' '~' '\"'", 4);
@@ -330,7 +324,6 @@ TEST(control_character_in_a_char_literal, {
     ASSERT_LEX_ERROR("'\t'", "t.ft:1:2: error: control character in char literal; use an escape\n");
     // A lone `\r` is whitespace, so a resync ends the line there and the `'`
     // left after it opens a literal of its own.
-    // D2.1
     ASSERT_LEX_ERRORS("'\r'",
                       2,
                       "t.ft:1:2: error: control character in char literal; use an escape\n"
@@ -343,7 +336,6 @@ TEST(unterminated_char_literal, {
     ASSERT_LEX_ERROR("'a", "t.ft:1:1: error: unterminated char literal\n");
     // The `'` left on the next line is a second unterminated literal, on its
     // own line, so it is reported as well.
-    // D14.2
     ASSERT_LEX_ERRORS("x = 'a\n'",
                       2,
                       "t.ft:1:5: error: unterminated char literal\n"
@@ -359,7 +351,6 @@ TEST(unterminated_char_literal, {
 })
 
 // ---- string literals -----------------------------------------------------------
-// D2.8, D2.9
 
 TEST(string_literal_is_decoded_into_the_pool, {
     const char* src = "\"hello\"";
@@ -422,7 +413,6 @@ TEST(string_literal_may_hold_comment_markers_and_quotes, {
 TEST(raw_newline_in_a_string_is_an_error, {
     // The rest of the literal stands on the next line, where its closing
     // quote opens an unterminated literal of its own.
-    // D14.2
     ASSERT_LEX_ERRORS("s = \"ab\ncd\"",
                       2,
                       "t.ft:1:5: error: unterminated string literal\n"

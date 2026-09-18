@@ -1,12 +1,7 @@
-// The tree invariants of a parsed range, checked over a corpus that covers
-// every node kind the bootstrap builds: every node ends at or after it
-// starts, a name range sits inside the node that carries it, and a child's
-// range sits inside its parent's, the one exception being the left operand of
-// a node named after the operator that follows it (toolchain.md 4).
-// D20.4
+// Tests source ranges and their nesting invariants.
 //
-// A missed end shows up here as a child that leaves its parent, which is what
-// makes this suite the safety net for the parser's `finish` calls.
+// A missed end shows up here as a child that leaves its parent. It is what makes this suite the
+// safety net for the parser's `finish` calls.
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -18,9 +13,7 @@
 #include "common.h"
 #include "test.h"
 
-// The types, expressions, statements and whole modules the parser suites
-// parse, one of each shape they cover, and the broken modules the parser
-// recovers in, one of each recovery point.
+// Covers each parsed type, expression, statement, module, and recovery point.
 static const char* const TYPES[] = {"i32",
                                     "u8",
                                     "bool",
@@ -185,10 +178,9 @@ static const char* const MODULES[] = {"",
                                       "bool ready = true;\n"
                                       "node* root = null;\n"};
 
-// Modules the parser recovers in: every one reports at least one syntax error
-// and still yields a tree, whose error nodes cover the skipped regions, so
-// the invariants below are checked on a recovered tree too.
-// D14.2
+// Modules the parser recovers in: every one reports at least one syntax error and still yields a
+// tree, whose error nodes cover the skipped regions. The invariants below are checked on a
+// recovered tree too.
 static const char* const RECOVERED[] = {"i32 a = ;\ni32 b = 1;\n",
                                         "fn f() i32 {\n    x = ;\n    return 0;\n}\n",
                                         "fn f() i32 {\n    if (c) {\n        x = ;\n    }\n"
@@ -231,10 +223,7 @@ static void note(const char* what, const ast_node_t* n, const ast_node_t* parent
     sb_push(&report, '\n');
 }
 
-// The nodes named after the operator that follows their first child (binary,
-// assignment, increment, call, index, span, field, arrow): the child starts
-// before the operator the node is anchored at, so it is the one child that
-// may begin before its parent (toolchain.md 4).
+// It is the one child that may begin before its parent.
 static bool is_infix_kind(ast_kind_t k) {
     return k == AST_BINARY || k == AST_ASSIGN || k == AST_INCDEC || k == AST_CALL ||
            k == AST_INDEX || k == AST_SPAN || k == AST_FIELD || k == AST_ARROW;
@@ -266,7 +255,6 @@ static void check_node(const ast_node_t* n, const ast_node_t* parent) {
     }
     if (n->name_loc.line != 0) {
         // A name range is a token inside the node that carries it.
-        // D20.4
         if (!loc_is_ordered(n->name_loc) || !loc_starts_at_or_before(n->loc, n->name_loc) ||
             !loc_ends_at_or_before(n->name_loc, n->loc)) {
             note("has a name range outside itself", n, parent);
@@ -283,11 +271,8 @@ static void check_node(const ast_node_t* n, const ast_node_t* parent) {
     }
 }
 
-// Parses `src` and reports every invariant it breaks, the empty string when
-// it breaks none; a source that yields no tree is reported as such, since the
-// parser returns one whatever it reported and a lexical error resynchronises
-// at the next line rather than stopping the file.
-// D14.2
+// Parses `src` and reports each broken invariant, or an empty string when none are broken.
+// The next call invalidates the returned shared-buffer result.
 static const char* violations(const char* src) {
     const ast_node_t* mod = parse_text(src);
     sb_clear(&report);
@@ -328,9 +313,8 @@ TEST(every_module_of_the_corpus_holds_the_invariants, {
     }
 })
 
-// A recovered tree holds them too: an error node lies inside the block or the
-// module that holds it and ends at the last token the skip dropped.
-// D14.2
+// Recovered trees keep error nodes inside their blocks and modules.
+// Each error range ends at the last skipped token.
 TEST(every_recovered_module_holds_the_invariants, {
     for (uint64_t i = 0; i < sizeof(RECOVERED) / sizeof(RECOVERED[0]); i++) {
         TEST_ASSERT_EQ_STR(violations(RECOVERED[i]), "");
@@ -374,8 +358,8 @@ static void walk_corpus(void) {
     }
 }
 
-// The kinds the C bootstrap rejects (toolchain.md 7.3) never reach a tree:
-// the parse that builds them reports and fails.
+// The kinds the C bootstrap rejects never reach a tree: the parse that builds them reports and
+// fails.
 static bool is_unsupported_kind(ast_kind_t k) {
     return k == AST_FLOAT || k == AST_DO_WHILE || k == AST_TERNARY;
 }

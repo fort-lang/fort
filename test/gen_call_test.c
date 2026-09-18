@@ -1,9 +1,4 @@
-// Unit tests of the calls the emitter writes (toolchain.md 6 items 7, 8, 10
-// and 20): the signature of a definition, the call of a name and the call of
-// a function pointer, the aggregate convention on both sides of the boundary,
-// the extension attributes of narrow parameters and results, recursion,
-// `noreturn` and the identity of a function pointer.
-// D3.10, D3.13, D6.11, D8.2, D8.5, D9.9, D19.7
+// Tests calls, function pointers, and call ABI emission.
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -44,14 +39,12 @@ static const char BUSY_SOURCE[] =
     "}\n";
 
 // ---- a function name as a value ----------------------------------------------------
-// D3.10
 
 TEST(a_function_name_used_as_a_value_is_its_address, {
     TEST_ASSERT_TRUE(emit("fn five() i32 { return 5; }\n"
                           "fn main() i32 { fn () i32 f = five; return f(); }\n"));
     // The name denotes the function's address and has no storage to load
     // from, so nothing is dereferenced to reach it.
-    // D3.10
     TEST_ASSERT_EQ_STR(found("store ptr @\"main.five\", ptr %f.0, align 8"),
                        "store ptr @\"main.five\", ptr %f.0, align 8");
     TEST_ASSERT_EQ_STR(verified(), "verified");
@@ -60,15 +53,13 @@ TEST(a_function_name_used_as_a_value_is_its_address, {
 TEST(a_function_pointer_local_is_a_pointer_sized_slot, {
     TEST_ASSERT_TRUE(emit("fn five() i32 { return 5; }\n"
                           "fn main() i32 { fn () i32 f = five; return f(); }\n"));
-    // A function pointer is an ordinary `ptr` value (item 2).
-    // D3.10
+    // A function pointer is an ordinary `ptr` value.
     TEST_ASSERT_EQ_STR(found("%f.0 = alloca ptr, align 8"), "%f.0 = alloca ptr, align 8");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
 // A function type carries no suffix of its own, so an array of function
 // pointers is an array of a struct that holds one.
-// D8.1
 TEST(a_function_name_in_an_array_literal_is_stored_element_by_element, {
     TEST_ASSERT_TRUE(emit("struct slot { fn (i32) i32 f; }\n"
                           "fn a(i32 x) i32 { return x; }\n"
@@ -88,7 +79,6 @@ TEST(a_function_name_in_an_array_literal_is_stored_element_by_element, {
 TEST(a_null_function_pointer_is_the_null_constant, {
     TEST_ASSERT_TRUE(emit("fn main() i32 { fn () void f = null; return 0; }\n"));
     // `null` is a valid function-pointer value.
-    // D3.10
     TEST_ASSERT_EQ_STR(found("store ptr null, ptr %f.0, align 8"),
                        "store ptr null, ptr %f.0, align 8");
     TEST_ASSERT_EQ_STR(verified(), "verified");
@@ -98,10 +88,8 @@ TEST(an_extern_reaches_a_function_pointer_through_a_fort_wrapper, {
     TEST_ASSERT_TRUE(emit("extern fn abs(i32 n) i32;\n"
                           "fn magnitude(i32 n) i32 { return abs(n); }\n"
                           "fn main() i32 { fn (i32) i32 f = magnitude; return f(-1); }\n"));
-    // An `extern fn` in value position is a checker error, so the pointer is
-    // the wrapper's and the extern is still called through the fixed type
-    // its declaration supplies (item 8).
-    // D3.10, D9.8
+    // An `extern fn` in value position is a checker error. The pointer is the wrapper's and the
+    // extern is still called through the fixed type its declaration supplies.
     TEST_ASSERT_EQ_STR(found("declare i32 @abs(i32) nobuiltin\n"),
                        "declare i32 @abs(i32) nobuiltin\n");
     TEST_ASSERT_EQ_STR(absent("ptr @abs"), "absent");
@@ -119,7 +107,6 @@ TEST(a_qualified_function_name_of_another_module_is_its_address, {
                               "fn twice(i32 x) i32 { return x +% x; }\n"));
     // A qualified name `m.f` is the function's address and not a field of a
     // value.
-    // D3.10, D9.4
     TEST_ASSERT_EQ_STR(found("store ptr @\"util.twice\", ptr %f.0, align 8"),
                        "store ptr @\"util.twice\", ptr %f.0, align 8");
     TEST_ASSERT_EQ_STR(verified(), "verified");
@@ -131,9 +118,8 @@ TEST(a_main_in_another_module_is_an_ordinary_function, {
                               "fn main() i32 { fn () i32 f = util.main; return f() -% 7; }\n",
                               "util.ft",
                               "fn main() i32 { return 7; }\n"));
-    // `fort_entry` is emitted for the entry module alone; a `main` in any
-    // other module is an ordinary function (item 22).
-    // D8.6
+    // `fort_entry` is emitted for the entry module alone; a `main` in any other module is an
+    // ordinary function.
     TEST_ASSERT_EQ_STR(found("define dso_local i32 @\"util.main\"() #0"),
                        "define dso_local i32 @\"util.main\"() #0");
     TEST_ASSERT_EQ_STR(found("  %t0 = call i32 @\"app.main\"()\n"),
@@ -143,15 +129,13 @@ TEST(a_main_in_another_module_is_an_ordinary_function, {
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
-// ---- the call of a function pointer (item 7) ---------------------------------------
-// D6.11
+// ---- the call of a function pointer ---------------------------------------
 
 TEST(an_indirect_call_carries_the_function_type_of_its_callee, {
     TEST_ASSERT_TRUE(emit("fn add(i32 a, i32 b) i32 { return a +% b; }\n"
                           "fn main() i32 { fn (i32, i32) i32 f = add; return f(1, 2); }\n"));
     // An opaque pointer carries no signature, so the call site names the
     // function type.
-    // D3.10, D19.2
     const char* want = "  %t0 = load ptr, ptr %f.0, align 8\n"
                        "  %t1 = call i32 (i32, i32) %t0(i32 1, i32 2)\n";
     TEST_ASSERT_EQ_STR(found(want), want);
@@ -179,7 +163,6 @@ TEST(the_callee_of_an_indirect_call_is_evaluated_before_the_arguments, {
              "fn main() i32 { fn (i32, i32) i32 f = add; return f(five(), five()); }\n"));
     // The walk emits calls and loads in source order, and the callee stands
     // before its arguments.
-    // D6.3
     const char* want = "  %t0 = load ptr, ptr %f.0, align 8\n"
                        "  %t1 = call i32 @\"main.five\"()\n"
                        "  %t2 = call i32 @\"main.five\"()\n"
@@ -215,7 +198,6 @@ TEST(a_function_pointer_parameter_and_result_are_plain_pointers, {
                           "fn main() i32 { return pick(add)(1, 2); }\n"));
     // A function pointer is passed and returned in a register like any other
     // pointer.
-    // D9.9
     TEST_ASSERT_EQ_STR(found("define dso_local ptr @\"main.pick\"(ptr %f.in) #0"),
                        "define dso_local ptr @\"main.pick\"(ptr %f.in) #0");
     TEST_ASSERT_EQ_STR(found("call ptr @\"main.pick\"(ptr @\"main.add\")"),
@@ -228,9 +210,8 @@ TEST(an_indirect_call_normalizes_its_narrow_arguments_and_result, {
                           "    if (c) { return a; }\n    return cast(d, i8);\n}\n"
                           "fn main() i32 { fn (i8, u16, bool, char) i8 f = narrow;\n"
                           "    return cast(f(1, 2, true, 'x'), i32); }\n"));
-    // `bool`, `char`, `u8` and `u16` carry `zeroext` and `i8` and `i16`
-    // `signext`, at an indirect call site as at a definition (item 7).
-    // D9.9
+    // `bool`, `char`, `u8` and `u16` carry `zeroext` and `i8` and `i16` `signext`, at an indirect
+    // call site as at a definition.
     const char* want = "call signext i8 (i8, i16, i1, i8) %t0"
                        "(i8 signext 1, i16 zeroext 2, i1 zeroext true, i8 zeroext 120)";
     TEST_ASSERT_EQ_STR(found(want), want);
@@ -240,24 +221,22 @@ TEST(an_indirect_call_normalizes_its_narrow_arguments_and_result, {
 TEST(an_indirect_call_is_not_variadic_and_carries_no_nobuiltin, {
     TEST_ASSERT_TRUE(emit("fn add(i32 a, i32 b) i32 { return a +% b; }\n"
                           "fn main() i32 { fn (i32, i32) i32 f = add; return f(1, 2); }\n"));
-    // A function type has no variadic form, so the call site names no
-    // variadic tail, and `nobuiltin` belongs to extern call sites (item 8).
-    // D3.10
+    // A function type has no variadic form, so the call site names no variadic tail, and
+    // `nobuiltin` belongs to extern call sites.
     TEST_ASSERT_EQ_STR(absent("..."), "absent");
     TEST_ASSERT_EQ_STR(absent(" #3"), "absent");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
-// ---- the aggregate convention through a pointer (item 7) ---------------------------
-// D9.9
+// ---- the aggregate convention through a pointer ---------------------------
 
 TEST(an_indirect_call_passes_an_aggregate_as_a_pointer_to_a_copy, {
     TEST_ASSERT_TRUE(emit("struct point { i32 x; i32 y; }\n"
                           "fn first(point p) i32 { return p.x; }\n"
                           "fn main() i32 { fn (point) i32 f = first; point p = {1, 2};\n"
                           "    return f(p); }\n"));
-    // The caller allocates the copy in its entry block and passes its
-    // address; `byval` is never used (item 7).
+    // The caller allocates the copy in its entry block and passes its address; `byval` is never
+    // used.
     TEST_ASSERT_EQ_STR(absent("byval"), "absent");
     TEST_ASSERT_EQ_STR(found("%tmp0 = alloca %struct.main.point, align 4"),
                        "%tmp0 = alloca %struct.main.point, align 4");
@@ -274,8 +253,8 @@ TEST(an_indirect_call_writes_an_aggregate_result_through_the_leading_pointer, {
                           "fn make(i32 v) point { point q = {v, v}; return q; }\n"
                           "fn main() i32 { fn (i32) point f = make; point r = f(3);\n"
                           "    return r.x; }\n"));
-    // An aggregate result is a leading pointer on a `void` function, and the
-    // call-site type lists it first (item 7).
+    // An aggregate result is a leading pointer on a `void` function, and the call-site type lists
+    // it first.
     TEST_ASSERT_EQ_STR(found("define dso_local void @\"main.make\"(ptr sret(%struct.main.point) "
                              "%ret.sret, i32 %v.in) #0"),
                        "define dso_local void @\"main.make\"(ptr sret(%struct.main.point) "
@@ -302,11 +281,9 @@ TEST(a_callee_may_write_to_the_aggregate_parameter_the_caller_copied, {
                           "fn clobber(point mut p) i32 { p.x = 100; return p.x; }\n"
                           "fn main() i32 { fn (point) i32 f = clobber; point p = {1, 2};\n"
                           "    return f(p) +% p.x; }\n"));
-    // An aggregate parameter is not copied again: its place is the
-    // caller-made copy the incoming pointer designates, which the callee may
-    // write to (item 10). Binding-level `mut` is not part of the function's
-    // type, so the pointer's type still matches.
-    // D8.2, D3.10, D5.6
+    // An aggregate parameter is not copied again: its place is the caller-made copy the incoming
+    // pointer designates, which the callee may write to. Binding-level `mut` is not part of the
+    // function's type, so the pointer's type still matches.
     TEST_ASSERT_EQ_STR(absent("%p.0 = alloca"), "absent");
     const char* want =
         "  %t0 = getelementptr inbounds %struct.main.point, ptr %p.in, i32 0, i32 0\n"
@@ -316,7 +293,6 @@ TEST(a_callee_may_write_to_the_aggregate_parameter_the_caller_copied, {
 })
 
 // ---- many arguments ----------------------------------------------------------------
-// D8.2
 
 TEST(nine_arguments_are_written_in_source_order, {
     TEST_ASSERT_TRUE(
@@ -325,7 +301,6 @@ TEST(nine_arguments_are_written_in_source_order, {
              "fn main() i32 { return nine(1, 2, 3, 4, 5, 6, 7, 8, 9); }\n"));
     // LLVM places the arguments by System V; the compiler only fixes the
     // signature and the order.
-    // D9.9
     TEST_ASSERT_EQ_STR(
         found("define dso_local i32 @\"main.nine\"(i32 %a.in, i32 %b.in, i32 %c.in, i32 %d.in, "
               "i32 %e.in, i32 %f.in, i32 %g.in, i32 %h.in, i32 %i.in) #0"),
@@ -366,7 +341,6 @@ TEST(the_arguments_of_a_call_are_evaluated_left_to_right, {
 })
 
 // ---- recursion ---------------------------------------------------------------------
-// D8.3
 
 TEST(a_recursive_call_names_the_function_being_defined, {
     TEST_ASSERT_TRUE(emit("fn depth(i32 n) i32 { if (n == 0) { return 0; }\n"
@@ -384,21 +358,19 @@ TEST(two_functions_may_call_each_other, {
                           "fn odd(i32 n) bool { if (n == 0) { return false; }\n"
                           "    return even(n -% 1); }\n"
                           "fn main() i32 { if (even(2)) { return 0; } return 1; }\n"));
-    // Forward references are legal in `.ll`, so one pass emits a call to a
-    // definition that follows it (item 1).
+    // Forward references are legal in `.ll`, so one pass emits a call to a definition that follows
+    // it.
     TEST_ASSERT_TRUE(before("@\"main.even\"(", "call zeroext i1 @\"main.even\""));
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
 // ---- identity ----------------------------------------------------------------------
-// D3.13
 
 TEST(comparing_two_function_pointers_is_an_icmp_on_ptr, {
     TEST_ASSERT_TRUE(emit("fn a(i32 x) i32 { return x; }\n"
                           "fn main() i32 { fn (i32) i32 f = a; if (f == a) { return 0; }\n"
                           "    return 1; }\n"));
     // `==` on function pointers compares identity.
-    // D3.13
     TEST_ASSERT_EQ_STR(found("icmp eq ptr %t0, @\"main.a\""), "icmp eq ptr %t0, @\"main.a\"");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
@@ -413,21 +385,19 @@ TEST(comparing_a_function_pointer_with_null_names_the_null_constant, {
 TEST(printing_a_function_pointer_reaches_the_pointer_printer, {
     TEST_ASSERT_TRUE(emit("fn a(i32 x) i32 { return x; }\n"
                           "fn main() i32 { fn (i32) i32 f = a; println(f); return 0; }\n"));
-    // A pointer, `void*` or function pointer goes to `_ptr` (item 19).
+    // A pointer, `void*` or function pointer goes to `_ptr`.
     TEST_ASSERT_EQ_STR(found("call void @\"std.rt.print_ptr\"(i32 1, ptr %t0)"),
                        "call void @\"std.rt.print_ptr\"(i32 1, ptr %t0)");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
 // ---- noreturn ----------------------------------------------------------------------
-// D8.5, D19.7
 
 TEST(an_indirect_call_of_a_noreturn_pointer_traps_at_the_call_site, {
     TEST_ASSERT_TRUE(emit("fn stop(string m) noreturn { panic(m); }\n"
                           "fn main() i32 { fn (string) noreturn f = stop; f(\"bye\"); }\n"));
-    // Every call site of a `noreturn` function ends with the trap the rules
-    // require, a call through a pointer included (item 20).
-    // D8.5, D19.7
+    // Every call site of a `noreturn` function ends with the trap the rules require, a call through
+    // a pointer included.
     const char* want = "  call void (ptr) %t0(ptr %tmp0)\n"
                        "  call void @llvm.trap()\n"
                        "  unreachable\n";
@@ -438,9 +408,8 @@ TEST(an_indirect_call_of_a_noreturn_pointer_traps_at_the_call_site, {
 TEST(a_statement_after_a_noreturn_call_stands_in_a_block_of_its_own, {
     TEST_ASSERT_TRUE(emit("fn stop() noreturn { panic(\"x\"); }\n"
                           "fn main() i32 { stop(); println(1); return 0; }\n"));
-    // After a terminating statement the emitter opens a fresh block for the
-    // unreachable statements the parser allows (item 10).
-    // D14.2
+    // After a terminating statement the emitter opens a fresh block for the unreachable statements
+    // the parser allows.
     const char* want = "  call void @\"main.stop\"()\n"
                        "  call void @llvm.trap()\n"
                        "  unreachable\n"
@@ -452,7 +421,7 @@ TEST(a_statement_after_a_noreturn_call_stands_in_a_block_of_its_own, {
 TEST(a_noreturn_call_in_a_branch_leaves_the_edge_to_the_continuation_out, {
     TEST_ASSERT_TRUE(emit("fn stop() noreturn { panic(\"x\"); }\n"
                           "fn main() i32 { i32 n = 1; if (n == 0) { stop(); } return n; }\n"));
-    // The branch terminated, so no `br` follows its trap (item 10).
+    // The branch terminated, so no `br` follows its trap.
     const char* want = "  call void @llvm.trap()\n"
                        "  unreachable\n"
                        "\nL1:\n";
@@ -461,19 +430,16 @@ TEST(a_noreturn_call_in_a_branch_leaves_the_edge_to_the_continuation_out, {
 })
 
 TEST(a_noreturn_body_that_falls_off_its_end_traps, {
-    // `spin` is never called, so the only trap the module can hold is the one
-    // after its body, which stands there as well as at every call site
-    // because an optimizer that believed the callee could delete that one
-    // (item 20).
-    // D8.5
+    // `spin` is never called, so the only trap the module can hold is the one after its body. It
+    // stands there as well as at every call site because an optimizer that believed the callee
+    // could delete that one.
     TEST_ASSERT_TRUE(emit("fn spin() noreturn { while (true) { } }\n"
                           "fn main() i32 { return 0; }\n"));
     TEST_ASSERT_EQ_STR(found("define dso_local void @\"main.spin\"() #1"),
                        "define dso_local void @\"main.spin\"() #1");
-    // The call and not the `unreachable` alone is the trap the emitter owes,
-    // since LLVM may let control fall through an `unreachable`; `verified()`
-    // accepts a bare one, so the text is asserted here.
-    // D19.7
+    // The call and not the `unreachable` alone is the trap the emitter owes, since LLVM may let
+    // control fall through an `unreachable`. `verified()` accepts a bare one, so the text is
+    // asserted here.
     const char* want = "  call void @llvm.trap()\n  unreachable\n";
     TEST_ASSERT_EQ_STR(found(want), want);
     TEST_ASSERT_EQ_STR(verified(), "verified");
@@ -482,9 +448,8 @@ TEST(a_noreturn_body_that_falls_off_its_end_traps, {
 TEST(an_extern_noreturn_declaration_stays_unadorned, {
     TEST_ASSERT_TRUE(emit("extern fn die(i32 code) noreturn;\n"
                           "fn main() i32 { die(1); }\n"));
-    // `noreturn` is never put on the declaration of a C function, so the
-    // optimizer cannot delete the trap that catches an extern returning
-    // anyway (item 20). The declaration carries `nobuiltin` alone.
+    // `noreturn` is never put on the declaration of a C function, so the optimizer cannot delete
+    // the trap that catches an extern returning anyway. The declaration carries `nobuiltin` alone.
     TEST_ASSERT_EQ_STR(found("declare void @die(i32) nobuiltin\n"),
                        "declare void @die(i32) nobuiltin\n");
     const char* want = "  call void @die(i32 1) #3\n"
@@ -510,7 +475,6 @@ TEST(a_call_module_verifies_in_release_mode_too, {
 TEST(two_runs_over_a_call_module_produce_byte_identical_text, {
     TEST_ASSERT_TRUE(emit(BUSY_SOURCE));
     // The text is a function of the program alone.
-    // D19.5
     static char first[32768];
     TEST_ASSERT_TRUE(strlen(ir()) < sizeof first);
     TEST_UNUSED(snprintf(first, sizeof first, "%s", ir()));
@@ -519,10 +483,8 @@ TEST(two_runs_over_a_call_module_produce_byte_identical_text, {
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
-// The same module twice, with `void mut*` in the place of every `void*`: an
-// extern declaration, a parameter, a result, a span element, a local and the
-// target of an out-parameter. The two sources differ in nothing else.
-// D3.11
+// Two modules differ only by `void*` versus `void mut*`.
+// Each module uses the type in every supported position.
 static const char VOID_PTR_SOURCE[] = "extern fn blit(i32 fd, void* buf, u64 n) i64;\n"
                                       "fn give(void* p) void { }\n"
                                       "fn pass(void* p, void*@ s, void* mut* out) void* {\n"
@@ -567,10 +529,8 @@ static const char VOID_MUT_PTR_SOURCE[] =
     "}\n";
 
 TEST(a_void_mut_pointer_emits_the_text_a_void_pointer_emits, {
-    // Every pointer is one machine word, so the mark a `void*` carries is a
-    // rule of the type system and reaches no instruction, no signature and no
-    // size. The two modules are one text, byte for byte.
-    // D3.1, D3.11, D19.2
+    // Every pointer is one machine word. The type system tracks the mark on a `void*`.
+    // The mark reaches no instruction, signature, or size. The two modules are byte-identical.
     TEST_ASSERT_TRUE(strcmp(VOID_PTR_SOURCE, VOID_MUT_PTR_SOURCE) != 0);
     TEST_ASSERT_TRUE(emit(VOID_PTR_SOURCE));
     static char plain[32768];

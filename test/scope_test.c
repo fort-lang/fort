@@ -1,8 +1,4 @@
-// Unit tests of the namespaces and scopes of module-system.md 5: one
-// namespace per module, collisions whatever the kinds, the block scopes a
-// local may shadow through, the enclosing locals it may not, and the universe
-// scope.
-// D7.9, D12.2
+// Tests declarations, imports, nested scopes, and built-in names.
 #include "scope.h"
 
 #include <stdbool.h>
@@ -84,7 +80,6 @@ TEST(the_declaring_node_is_kept_on_the_binding, {
 })
 
 // ---- collisions ---------------------------------------------------------------------
-// D7.9
 
 TEST(a_second_binding_of_one_name_is_refused, {
     scope_t s;
@@ -135,7 +130,6 @@ TEST(sibling_scopes_may_reuse_a_name, {
 })
 
 // ---- lookup and shadowing -----------------------------------------------------------
-// D7.9
 
 TEST(lookup_finds_a_module_level_name_from_a_block, {
     scope_t module;
@@ -221,7 +215,6 @@ TEST(a_module_namespace_searched_for_blocks_alone_yields_nothing, {
 })
 
 // ---- import bindings ----------------------------------------------------------------
-// D9.3
 
 TEST(a_module_binding_carries_the_module_it_denotes, {
     scope_t s;
@@ -263,12 +256,9 @@ TEST(only_declarations_are_importable, {
 })
 
 // ---- the universe -------------------------------------------------------------------
-// D12.2
 
-// The builtins the universe scope lists, in its order: a brace initializer
-// cannot sit in a TEST body, since a comma outside parentheses splits the
-// macro argument.
-// D12.2
+// Lists universe builtins in their required order.
+// A separate array avoids commas in the TEST macro body.
 static const char* const EXPECTED_UNIVERSE[] = {
     "del",
     "move",

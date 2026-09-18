@@ -1,8 +1,5 @@
-// Unit tests of the diagnostic records of diag.h: what diag_error and
-// diag_note keep, what diag_set_text turns off, and the JSON document
-// diag_write_json writes. The text form itself is tested in diag_test.c,
-// which is a separate suite because one suite's main may not run many more
-// tests than it already does.
+// Tests diagnostic record ownership, text mode, and JSON output.
+// `diag_test.c` tests the text form.
 #include <stdint.h>
 #include <string.h>
 
@@ -15,8 +12,7 @@
 
 enum { ERR_MAX = 1024 };
 
-// The positions of the toolchain.md section 4 example: the use of 'x' and the
-// declaration it shadows, each one byte wide.
+// Positions for a one-byte use of `x` and its shadowed declaration.
 enum { USE_LINE = 7, USE_COL = 5, DECL_LINE = 3, DECL_COL = 9 };
 
 // The capture buffer of every test, so that no test writes to stderr, and the
@@ -41,12 +37,12 @@ static void end(void) {
 }
 
 // The range of a one-byte token at `line`:`col`.
-// D20.4
 static loc_t one_byte(uint32_t line, uint32_t col) {
     return loc_range("main.ft", line, col, line, col + 1);
 }
 
 // The document of the records reported so far.
+// The next call or `end` invalidates the returned shared-buffer result.
 static const char* written_json(void) {
     json_t j;
     sb_clear(&doc);
@@ -87,9 +83,9 @@ TEST(an_error_is_recorded_as_an_error_and_a_note_as_a_note, {
     end();
 })
 
-// The record owns its message, so a builder that is reused or released
-// afterwards leaves it intact, and the record is a copy, so a diagnostic
-// reported after it, which moves the sink's array, leaves it intact too.
+// The record owns its message, so a builder that is reused or released afterwards leaves it intact.
+// The record is a copy, so a diagnostic reported after it, which moves the sink's array, leaves it
+// intact too.
 TEST(the_message_is_copied_into_the_sink, {
     enum { GROWTH = 64 };
     sb_t m;
@@ -113,10 +109,7 @@ TEST(the_message_is_copied_into_the_sink, {
     end();
 })
 
-// The record owns its file name as it owns its message: the front end
-// releases the names it read before the check mode writes the document, so a
-// name the caller lent out would dangle.
-// D20.2
+// A name the caller lent out would dangle.
 TEST(the_file_name_is_copied_into_the_sink, {
     sb_t name;
     sb_init(&name);
@@ -149,7 +142,6 @@ TEST(every_record_keeps_its_own_file_name, {
 
 // An error without a position in the file has no file name either; the copy
 // must not turn that into a name.
-// D14.2
 TEST(a_record_without_a_file_keeps_none, {
     begin();
     diag_error(loc_make(NULL, 1, 1), "no file at all");
@@ -191,8 +183,7 @@ TEST(diag_reset_clears_the_records, {
     end();
 })
 
-// A muted diagnostic is not reported at all, so it is not recorded either
-// (module-system.md 3).
+// A muted diagnostic is not reported at all, so it is not recorded either.
 TEST(a_muted_diagnostic_is_not_recorded, {
     begin();
     diag_mute();
@@ -250,9 +241,7 @@ TEST(each_record_keeps_its_own_file, {
     end();
 })
 
-// The array of records grows by copying, so every record must survive every
-// growth: enough diagnostics to reallocate several times, then each one read
-// back in order with its position, its severity and its message.
+// The array of records grows by copying.
 TEST(every_record_survives_many_growths, {
     enum { PAIRS = 400 };
     sb_t m;
@@ -290,8 +279,8 @@ TEST(every_record_survives_many_growths, {
     end();
 })
 
-// A message longer than a pool block gets a block of its own, and the short
-// messages around it are packed elsewhere: all of them must read back whole.
+// A message longer than a pool block gets a block of its own. The short messages around it are
+// packed elsewhere: all of them must read back whole.
 TEST(a_message_longer_than_a_pool_block_is_kept_whole, {
     enum { LONG = 9000 };
     enum { ROUNDS = 5 };
@@ -336,7 +325,6 @@ TEST(a_record_past_the_end_is_an_internal_error, {
 
 // Text output is on until it is turned off: every existing caller writes its
 // line as it always did.
-// D14.2
 TEST(the_text_line_is_written_by_default, {
     begin();
     diag_error(one_byte(USE_LINE, USE_COL), "to the sink");
@@ -396,7 +384,6 @@ TEST(an_error_is_one_object_with_an_empty_notes_array, {
 
 // The golden document of the worked example: the two notes that follow the
 // error are nested under it.
-// D14.2
 TEST(the_notes_that_follow_an_error_are_nested_under_it, {
     begin();
     diag_error(one_byte(USE_LINE, USE_COL), "cannot assign to immutable 'x'");
@@ -446,7 +433,6 @@ TEST(a_note_without_an_error_stands_alone, {
 
 // The whole range is written, including one that spans lines, and a
 // positionless error is the empty range at 1:1.
-// D14.2, D20.4
 TEST(the_document_holds_both_ends_of_the_range, {
     begin();
     diag_error(loc_range("util.ft", 12, 23, 14, 2), "infinite size");
@@ -547,10 +533,8 @@ TEST(the_document_is_empty_again_after_a_reset, {
     end();
 })
 
-// A message can quote any bytes of a source file, which is UTF-8 only by
-// convention, so the writer replaces what is not well-formed and the document
-// stays valid UTF-8.
-// D2.1, D3.7
+// A message can quote any bytes of a source file, which is UTF-8 only by convention. The writer
+// replaces what is not well-formed and the document stays valid UTF-8.
 TEST(a_message_of_arbitrary_bytes_gives_a_valid_document, {
     sb_t m;
     sb_init(&m);

@@ -1,7 +1,6 @@
 // test/darwin/net_probe.c measures Darwin IPv4 constants and address layout.
 // The host darwin network gate compares these results with std/darwin/net.ft.
 // The gate also reads a fort address through Darwin C fields.
-// D3.8, D13.2
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>

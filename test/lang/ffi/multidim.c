@@ -1,23 +1,17 @@
-// C11 helpers linked into test/lang/run/ffi/012_multidim_layout.ft, which
-// holds fort's layout of a nested array against the C ABI's on the target.
+// Compares fort nested-array layout with the target C ABI.
 //
-// A wrong element stride is invisible to a fort-only program and to the LLVM
-// verifier: under opaque pointers the type of a field is observable only
-// through the offsets it moves, and a stride that is wrong on both sides of an
-// access agrees with itself. These helpers are the boundary that sees it.
-// Every array below is the C spelling of one the fort side declares, and each
-// helper reads or writes it through C's own indexing while fort reads or
-// writes it through its GEPs.
+// A stride that is wrong on both sides of an access agrees with itself. These helpers are the
+// boundary that sees it. Every array below is the C spelling of one the fort side declares. Each
+// helper reads or writes it through C's own indexing while fort reads or writes it through its
+// GEPs.
 //
 // The signatures take pointers and integers only, which is what an extern
 // signature may use.
-// D9.8
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
 // The dimensions the fort side writes: i32[2][3] is two rows of three.
-// D3.6
 enum { ROWS = 2, COLS = 3, PLANES = 2 };
 
 // The base a digest mixes one element per digit in.
@@ -37,7 +31,6 @@ struct block {
 
 // The fat pointer: a span is { ptr, len } and an array of spans strides by
 // this struct's size.
-// D19.2
 struct span {
     void* ptr;
     uint64_t len;
@@ -71,8 +64,8 @@ uint64_t multidim_sizeof_span(void) {
     return sizeof(struct span);
 }
 
-// Writes 10 * i + j into every element, through C's own indexing, so that a
-// row read at the wrong stride comes back with another row's values.
+// Writes 10 * i + j into each element through C indexing.
+// An incorrect row stride returns another row's values.
 void multidim_fill(int32_t* grid) {
     int32_t(*rows)[COLS] = (int32_t(*)[COLS])grid;
     for (int32_t i = 0; i < ROWS; i++) {
@@ -82,8 +75,8 @@ void multidim_fill(int32_t* grid) {
     }
 }
 
-// Every element mixed into one digit each, in row-major order: a wrong stride,
-// a transposed pair of dimensions or a lost element all change the number.
+// Mixes each element into one row-major digit.
+// A wrong stride, transposed dimensions, or a lost element changes the result.
 int64_t multidim_digest(const int32_t* grid) {
     const int32_t(*rows)[COLS] = (const int32_t(*)[COLS])grid;
     int64_t digest = 0;
@@ -109,15 +102,13 @@ int32_t multidim_at(const int32_t* grid, int32_t i, int32_t j) {
 
 // The `n` field of one cell of a cell[2][3], which strides by the padded size
 // of the struct in both dimensions.
-// D3.4, D3.8
 int32_t multidim_cell_at(const struct cell* cells, int32_t i, int32_t j) {
     const struct cell(*rows)[COLS] = (const struct cell(*)[COLS])cells;
     return rows[i][j].n;
 }
 
-// The sum of the elements of the `k`-th row of a span of rows: the span's
-// element is an int32_t[3], so this strides by 12 bytes from the pointer fort
-// handed over.
+// The sum of the elements of the `k`-th row of a span of rows: the span's element is an int32_t[3].
+// This strides by 12 bytes from the pointer fort handed over.
 int64_t multidim_span_row_sum(const int32_t* rows, uint64_t len, uint64_t k) {
     if (k >= len) {
         return -1;

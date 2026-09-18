@@ -1,18 +1,6 @@
-// C11 helpers for test/lang/run/ffi/011_rt_enum_member.ft. That test holds
-// std.rt's `struct enum_member` against the layout of the table a print of an
-// enum reads.
-//
-// The compiler emits that table as `[N x %fort.enum_member]`, and
-// `%fort.enum_member = type { i32, ptr }` (toolchain.md 6 items 2 and 21;
-// test/gen_enum_test.c pins that text). The struct below is that type. The C
-// runtime read those tables through this declaration for as long as the
-// runtime was C.
-//
-// No fort program can name `@.enum.<path>`, so this file is the only boundary
-// that can see std.rt's two fields disagree with it. C writes the table
-// through C's offsets and fort reads it through fort's offsets, and then the
-// two swap jobs. One language alone cannot see a swap, a widening or a
-// reorder that leaves every later offset where it was. This file can.
+// Checks the std.rt enum table layout against an independent C layout.
+// C and fort take turns writing and reading the same table.
+// This detects a field swap, width change, or offset error.
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

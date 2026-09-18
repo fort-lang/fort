@@ -1,5 +1,4 @@
-// Unit tests of json.h: the shape of the written document, the escapes of a
-// string, the numbers, and the internal errors of a misused writer.
+// Tests JSON document shape, string escapes, numbers, and writer errors.
 #include "json.h"
 
 #include <stdint.h>
@@ -23,11 +22,8 @@ enum {
     BYTE_MAX = 0xFF,
 };
 
-// The JSON form of every byte from 0x00 to CONTROL_MAX, written out here so
-// that the table is a golden and not a second copy of the writer's rule: the
-// control bytes fort spells out are spelled out, every other one is \u00XX
-// with uppercase hex digits.
-// D2.8
+// Golden JSON forms for bytes from 0x00 through CONTROL_MAX.
+// Named escapes use their short forms, and other bytes use uppercase `\u00XX`.
 static const char* const CONTROL_FORMS[] = {
     "\\u0000", "\\u0001", "\\u0002", "\\u0003", "\\u0004", "\\u0005", "\\u0006", "\\u0007",
     "\\u0008", "\\t",     "\\n",     "\\u000B", "\\u000C", "\\r",     "\\u000E", "\\u000F",
@@ -54,6 +50,8 @@ static void end(void) {
     sb_free(&out);
 }
 
+// Returns the current document in the shared output buffer.
+// A writer call or `end` invalidates the result.
 static const char* written(void) {
     return sb_cstr(&out);
 }
@@ -66,7 +64,9 @@ static void write_one_byte(int byte) {
     json_str(&w, str_from_range(text, 1));
 }
 
-// `form` between two quotes: the document a one-byte string produces.
+// The three expected-document helpers share `expected`.
+// Any sibling call invalidates a returned view.
+// Returns `form` between two quotes.
 static const char* quoted(const char* form) {
     sb_clear(&expected);
     sb_push(&expected, '"');
@@ -75,7 +75,7 @@ static const char* quoted(const char* form) {
     return sb_cstr(&expected);
 }
 
-// The same for a byte that needs no escape.
+// Returns one unescaped byte between two quotes.
 static const char* quoted_byte(int byte) {
     sb_clear(&expected);
     sb_push(&expected, '"');
@@ -86,10 +86,7 @@ static const char* quoted_byte(int byte) {
 
 // ---- the UTF-8 corpus ----------------------------------------------------------------
 
-// One case of the corpus: the bytes that may or may not form one sequence,
-// how many they are, the text the document must hold for them, whether they
-// are well-formed UTF-8 (RFC 3629), and a name, so that a failing case says
-// which one it is.
+// Names each UTF-8 case in failure reports.
 typedef struct {
     const char* bytes;
     uint64_t len;
@@ -98,12 +95,8 @@ typedef struct {
     const char* what;
 } utf8_case_t;
 
-// Both edges of every range of every sequence length, and the five ways a
-// sequence is rejected: a stray continuation byte, a lead byte no sequence
-// starts with, an overlong form, a UTF-16 surrogate and a value past
-// U+10FFFF, plus sequences cut short and continuation bytes one step out of
-// range. A byte that is part of no well-formed sequence costs one U+FFFD and
-// no more, so the ASCII byte after a broken lead is still itself.
+// Both edges of every range of every sequence length. A byte that is part of no well-formed
+// sequence costs one U+FFFD and no more. The ASCII byte after a broken lead is still itself.
 static const utf8_case_t UTF8_CASES[] = {
     {"\xC2\x80", 2, "\xC2\x80", true, "U+0080, the lowest two-byte sequence"},
     {"\xC2\xBF", 2, "\xC2\xBF", true, "U+00BF, the last of the lowest lead byte"},
@@ -223,8 +216,8 @@ enum { UTF8_CASE_COUNT = (int)(sizeof UTF8_CASES / sizeof UTF8_CASES[0]) };
 static sb_t label_actual;
 static sb_t label_expected;
 
-// `what` and `text`, so that an assertion over a table names the case that
-// failed instead of printing two runs of bytes.
+// Returns `what` and `text` in `b`.
+// The next mutation of `b` invalidates the result.
 static const char* labelled(sb_t* b, const char* what, str_t text) {
     sb_clear(b);
     sb_append(b, what);
@@ -233,7 +226,8 @@ static const char* labelled(sb_t* b, const char* what, str_t text) {
     return sb_cstr(b);
 }
 
-// The document `c` must produce: its own text between two quotes.
+// Returns the expected document for `c` as a view of `expected`.
+// The next expected-document helper call invalidates the view.
 static str_t expected_document(const utf8_case_t* c) {
     sb_clear(&expected);
     sb_push(&expected, '"');
@@ -416,7 +410,6 @@ TEST(the_quote_and_the_backslash_are_escaped, {
 })
 
 // The control bytes fort spells out are spelled out here too.
-// D2.8
 TEST(newline_tab_and_return_are_spelled_out, {
     begin();
     json_cstr(&w, "\n\t\r");
@@ -436,7 +429,6 @@ TEST(a_key_is_escaped_like_a_string, {
 
 // Every byte of the control range, the NUL that the `\0` escape names
 // included, has the form the golden table gives.
-// D2.8
 TEST(every_control_byte_is_escaped, {
     for (int byte = 0; byte <= CONTROL_MAX; byte++) {
         write_one_byte(byte);
@@ -465,8 +457,7 @@ TEST(a_utf8_sequence_goes_through_verbatim, {
     end();
 })
 
-// One sequence of each length, at the edges of their ranges: U+0080, U+07FF,
-// U+0800, U+D7FF, U+E000, U+FFFD, U+10000 and U+10FFFF.
+// Covers each UTF-8 length at its range edges.
 TEST(a_sequence_of_every_length_goes_through_verbatim, {
     begin();
     json_cstr(&w,
@@ -478,10 +469,8 @@ TEST(a_sequence_of_every_length_goes_through_verbatim, {
     end();
 })
 
-// The document is valid UTF-8 whatever the message held, so a byte that is
-// not part of a well-formed sequence becomes U+FFFD; fort source is
-// unvalidated, so a diagnostic can quote any bytes.
-// D2.1, D3.7
+// The document is valid UTF-8 whatever the message held. A byte that is not part of a well-formed
+// sequence becomes U+FFFD; fort source is unvalidated, so a diagnostic can quote any bytes.
 TEST(a_byte_that_starts_no_sequence_becomes_the_replacement_character, {
     for (int byte = HIGH_MIN; byte <= BYTE_MAX; byte++) {
         write_one_byte(byte);
@@ -517,8 +506,7 @@ TEST(a_surrogate_and_a_value_past_the_last_code_point_are_replaced, {
     sb_free(&expected);
 })
 
-// A sequence cut short by the end of the string is not well-formed, and
-// neither is a lead byte followed by something that is not a continuation.
+// Rejects truncated sequences and lead bytes without valid continuation bytes.
 TEST(a_truncated_sequence_is_replaced_byte_by_byte, {
     begin();
     json_str(&w, str_from_range("\xE2\x82", 2)); // the first two bytes of U+20AC
@@ -576,8 +564,8 @@ TEST(a_member_may_follow_a_nested_container, {
     end();
 })
 
-// One document of the shape the check mode writes, so the pieces are seen
-// together: an array of objects, each with a nested array of objects.
+// One document of the shape the check mode writes. The pieces are seen together: an array of
+// objects, each with a nested array of objects.
 TEST(a_document_of_diagnostics_is_written_whole, {
     begin();
     json_array_begin(&w);
@@ -668,9 +656,8 @@ TEST(every_ill_formed_sequence_of_the_corpus_is_replaced, {
     free_labels();
 })
 
-// The same corpus between two ASCII letters: a case that is well-formed on
-// its own is still well-formed in a sentence, and one that is not still
-// costs exactly its own bytes.
+// The same corpus between two ASCII letters: a case that is well-formed on its own is still
+// well-formed in a sentence. One that is not still costs exactly its own bytes.
 TEST(the_corpus_reads_the_same_inside_a_message, {
     sb_t text;
     sb_init(&text);
@@ -697,9 +684,8 @@ TEST(the_corpus_reads_the_same_inside_a_message, {
     free_labels();
 })
 
-// Every byte of the ASCII range in one pass: a control byte takes the form
-// the golden table gives, the quote and the backslash are escaped, and the
-// 0x20 boundary falls between the last escaped byte and the first kept one.
+// Covers every ASCII byte in one pass.
+// It checks controls, quote, backslash, and the 0x20 escape boundary.
 TEST(every_ascii_byte_takes_its_form, {
     for (int byte = 0; byte <= ASCII_MAX; byte++) {
         write_one_byte(byte);
@@ -735,8 +721,7 @@ TEST(only_the_quote_and_the_backslash_are_escaped_above_the_controls, {
     sb_free(&expected);
 })
 
-// One message with a byte of every kind: two escapes, a control byte, an
-// ASCII run, a well-formed sequence and a byte that is part of none.
+// One message combines escapes, a control byte, ASCII, valid UTF-8, and an invalid byte.
 TEST(a_message_of_every_kind_of_byte_is_written_once, {
     begin();
     json_str(&w,

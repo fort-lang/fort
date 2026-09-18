@@ -1,8 +1,6 @@
-// Unit tests of the checker's expressions (core-language.md 5.2, 5.5 to 5.10):
-// the operand rules, the lvalues and their mutability, the postfix forms, the
-// calls and the universe functions. The constants are in check_const_test.c
-// and the statements in check_stmt_test.c.
-// D3.2, D3.3, D3.13, D5.7, D5.8, D6.2, D6.7 to D6.11, D10.2, D12.2
+// Tests checker expressions: operand rules, lvalues and mutability, the
+// postfix forms, the calls and the universe functions. The constants are in check_const_test.c and
+// the statements in check_stmt_test.c.
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -15,20 +13,17 @@
 // NOLINTBEGIN(readability-magic-numbers) the sources below are the test data.
 
 // ---- operand rules ------------------------------------------------------------------
-// D6.2
 
 TEST(mixed_integer_types_are_refused, {
     TEST_ASSERT_FALSE(check_body("    i32 a = 1;\n    i64 b = 2;\n    i64 s = a + b;\n"
                                  "    println(s);"));
     // There is no promotion, not even for u8 and i8.
-    // D6.2
     TEST_ASSERT_TRUE(said("'+' takes two operands of the same type, not i32 and i64"));
 })
 
 TEST(char_has_no_arithmetic_and_no_bitwise, {
     TEST_ASSERT_FALSE(check_body("    char c = 'a';\n    char d = c + 1;\n    println(d);"));
     // `char` supports comparisons, switch and cast, and nothing else.
-    // D3.2
     TEST_ASSERT_TRUE(said("'+' takes numeric operands, not char"));
     TEST_ASSERT_FALSE(check_body("    char c = 'a';\n    char e = c & 'b';\n    println(e);"));
     TEST_ASSERT_TRUE(said("'&' takes integer operands, not char"));
@@ -47,7 +42,6 @@ TEST(equality_is_refused_on_aggregates, {
                                 "fn main() i32 {\n    point a = {1};\n    point b = {1};\n"
                                 "    bool p = a == b;\n    println(p);\n    return 0;\n}\n"));
     // Equality is an error on structs, fixed arrays and spans.
-    // D3.13
     TEST_ASSERT_TRUE(said("'==' takes comparable operands, not point"));
     TEST_ASSERT_FALSE(check_body("    i32[2] c = {1, 2};\n    i32[2] d = {1, 2};\n"
                                  "    bool q = c == d;\n    println(q);"));
@@ -61,27 +55,20 @@ TEST(comparison_needs_identical_mutability, {
     TEST_ASSERT_FALSE(check_body("    i32 mut x = 1;\n    i32 mut* p = &x;\n    i32* q = &x;\n"
                                  "    bool same = p == q;\n    println(same);"));
     // "Same type" means identical, mutability levels included.
-    // D6.2
     TEST_ASSERT_TRUE(said("not i32 mut* and i32*"));
 })
 
 TEST(a_void_pointer_compares_only_with_its_own_mutability, {
-    // The level a `void*` reaches is part of its type, so `==` holds the two
-    // operands to it as it holds a typed pointer's. The implicit drop does not
-    // reach comparison, which is the last sentence of the decision that states
-    // the drop, so a program that holds both casts one of them. This refusal is
-    // new: before `void mut*` every `void*` compared with every other.
-    // D3.11, D5.4, D6.2
+    // Pointer comparison requires the same mutability at each level.
+    // An explicit cast can drop the extra mutability.
     TEST_ASSERT_FALSE(check_body("    i32 mut x = 1;\n"
                                  "    void mut* w = cast(&x, void mut*);\n"
                                  "    void* r = cast(&x, void*);\n"
                                  "    bool same = w == r;\n    println(same);"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
     TEST_ASSERT_TRUE(said("not void mut* and void*"));
-    // Each compares with itself, with `null` and with the other one lent: the
-    // cast that drops the mark is the way across, and it is the only way,
-    // because no cast puts the mark back.
-    // D3.14, D10.5
+    // Each compares with itself, with `null` and with the other one lent: the cast that drops the
+    // mark is the way across. It is the only way, because no cast puts the mark back.
     TEST_ASSERT_TRUE(check_body("    i32 mut x = 1;\n"
                                 "    void mut* w = cast(&x, void mut*);\n"
                                 "    void* r = cast(&x, void*);\n"
@@ -110,7 +97,6 @@ TEST(logical_operators_need_bool, {
 TEST(unary_minus_needs_a_signed_operand, {
     TEST_ASSERT_FALSE(check_body("    u32 c = 1;\n    u32 n = -c;\n    println(n);"));
     // Unary `-` takes signed integers and floats only.
-    // D6.2
     TEST_ASSERT_TRUE(said("'-' takes a signed operand, not u32"));
 })
 
@@ -119,7 +105,6 @@ TEST(there_is_no_pointer_arithmetic, {
                                  "    println(q);"));
     // The only ways to obtain a pointer are null, &, new, .ptr, cast, a
     // function name and calls.
-    // D10.4
     TEST_ASSERT_TRUE(said("there is no pointer arithmetic: '+' does not apply to i32*"));
 })
 
@@ -133,7 +118,6 @@ TEST(an_enum_compares_but_does_not_order, {
                   "fn main() i32 {\n    color c = color.red;\n"
                   "    bool b = c < color.green;\n    println(b);\n    return 0;\n}\n"));
     // Enums support `== !=`, switch and cast, with no ordering.
-    // D3.9
     TEST_ASSERT_TRUE(said("'<' takes ordered operands, not color"));
 })
 
@@ -143,13 +127,11 @@ TEST(strings_compare_by_contents, {
 })
 
 // ---- lvalues and mutability ---------------------------------------------------------
-// D5.7, D5.8, D6.7
 
 TEST(address_of_takes_the_mutability_of_its_operand, {
     TEST_ASSERT_TRUE(check_body("    i32 mut x = 1;\n    i32 y = 2;\n    i32 mut* p = &x;\n"
                                 "    i32* q = &y;\n    println(p, q);"));
     // `&e` yields `T*` whose level 1 is the mutability of `e`.
-    // D5.8
     TEST_ASSERT_EQ_STR(init_type("p"), "i32 mut*");
     TEST_ASSERT_EQ_STR(init_type("q"), "i32*");
 })
@@ -169,7 +151,6 @@ TEST(address_of_a_function_is_refused, {
         check_src("fn inc(i32 n) i32 {\n    return n + 1;\n}\n"
                   "fn main() i32 {\n    fn (i32) i32 c = &inc;\n    return c(1);\n}\n"));
     // A function name is already a value.
-    // D3.10
     TEST_ASSERT_TRUE(said("'&' on a function"));
 })
 
@@ -179,7 +160,6 @@ TEST(a_dereference_yields_the_pointee_and_its_mutability, {
     TEST_ASSERT_FALSE(check_body("    i32 mut x = 1;\n    i32* p = &x;\n    *p = 2;\n"
                                  "    println(*p);"));
     // `*p` has level 1 of `p`'s type.
-    // D5.7
     TEST_ASSERT_TRUE(said("cannot assign to immutable"));
 })
 
@@ -187,7 +167,6 @@ TEST(a_void_pointer_cannot_be_dereferenced, {
     TEST_ASSERT_FALSE(check_body("    void* v = null;\n    i32 d = *v;\n    println(d);"));
     // `void*` has no pointee type, and `void mut*` has none either: the mark
     // says the storage may be written and no expression reaches it.
-    // D3.11
     TEST_ASSERT_TRUE(said("cannot dereference void*"));
 })
 
@@ -196,7 +175,6 @@ TEST(a_field_of_an_immutable_struct_is_immutable, {
                                 "fn main() i32 {\n    point p = {1};\n    p.x = 2;\n"
                                 "    return p.x;\n}\n"));
     // Level 0 of a field comes from the access path.
-    // D5.5, D5.7
     TEST_ASSERT_TRUE(said("cannot assign to immutable field 'x'"));
     TEST_ASSERT_TRUE(check_src("struct point {\n    i32 x;\n}\n"
                                "fn main() i32 {\n    point mut p = {1};\n    p.x = 2;\n"
@@ -214,7 +192,6 @@ TEST(a_span_element_has_level_one_mutability, {
 TEST(a_string_character_is_immutable, {
     TEST_ASSERT_FALSE(check_body("    string s = \"ab\";\n    s[0] = 'x';\n    println(s);"));
     // `str[i]` is never mutable.
-    // D5.7
     TEST_ASSERT_TRUE(said("cannot assign to immutable"));
 })
 
@@ -227,7 +204,6 @@ TEST(a_span_ptr_carries_the_element_mutability, {
     TEST_ASSERT_TRUE(check_body("    u8 mut@ own b = new(u8, 2);\n    u8 mut* p = b.ptr;\n"
                                 "    println(p);\n    del(b);"));
     // `.ptr` carries the element level's mutability and is never own.
-    // D3.5, D17.3
     TEST_ASSERT_EQ_STR(init_type("p"), "u8 mut*");
 })
 
@@ -237,7 +213,6 @@ TEST(a_fixed_array_has_no_ptr, {
 })
 
 // ---- indexing and span expressions --------------------------------------------------
-// D6.8, D6.9
 
 TEST(a_constant_index_out_of_range_is_refused, {
     TEST_ASSERT_FALSE(check_body("    i32[4] a = {};\n    i32 x = a[4];\n    println(x);"));
@@ -247,7 +222,6 @@ TEST(a_constant_index_out_of_range_is_refused, {
 TEST(an_index_of_an_rvalue_array_is_not_an_lvalue, {
     // `e[i]` is an lvalue where `e` is an lvalue fixed array: the elements of
     // a returned array live in a temporary.
-    // D6.7
     TEST_ASSERT_FALSE(check_src("fn make() i32[3] {\n    return i32[3]{1, 2, 3};\n}\n"
                                 "fn main() i32 {\n    i32* p = &make()[0];\n"
                                 "    return *p;\n}\n"));
@@ -275,7 +249,6 @@ TEST(a_pointer_cannot_be_indexed, {
     TEST_ASSERT_FALSE(check_body("    i32 mut x = 1;\n    i32* p = &x;\n    i32 v = p[0];\n"
                                  "    println(v);"));
     // Pointers cannot be indexed, not even pointers to arrays.
-    // D6.8, D10.4
     TEST_ASSERT_TRUE(said("i32* cannot be indexed: write '(*p)[i]'"));
 })
 
@@ -292,7 +265,6 @@ TEST(a_span_of_an_array_takes_its_element_mutability, {
     TEST_ASSERT_FALSE(check_body("    i32[4] a = {};\n    i32 mut@ s = a[1..3];\n"
                                  "    println(s.len);"));
     // A span of an immutable array cannot add mutability.
-    // D6.9
     TEST_ASSERT_TRUE(said("expects i32 mut@, not i32@"));
 })
 
@@ -303,7 +275,6 @@ TEST(a_span_of_a_pointer_needs_both_bounds, {
     TEST_ASSERT_FALSE(check_body("    i32 mut x = 1;\n    i32* p = &x;\n    i32@ s = p[0..];\n"
                                  "    println(s.len);"));
     // A pointer has no length, so only the two-bound form exists.
-    // D6.9
     TEST_ASSERT_TRUE(said("a pointer has no length"));
 })
 
@@ -314,7 +285,6 @@ TEST(a_span_of_a_void_pointer_is_refused, {
 })
 
 // ---- field access -------------------------------------------------------------------
-// D6.10
 
 TEST(a_dot_on_a_pointer_says_to_use_an_arrow, {
     TEST_ASSERT_FALSE(check_src("struct point {\n    i32 x;\n}\n"
@@ -342,7 +312,6 @@ TEST(an_unknown_field_is_reported_at_its_name, {
 })
 
 // ---- calls and the universe functions -----------------------------------------------
-// D6.11, D12.2
 
 TEST(a_call_checks_its_arity, {
     TEST_ASSERT_FALSE(check_src("fn add(i32 a, i32 b) i32 {\n    return a + b;\n}\n"
@@ -364,10 +333,8 @@ TEST(a_function_name_is_a_value_of_its_type, {
 })
 
 TEST(an_extern_function_is_callable_and_not_a_value, {
-    // An `extern fn` in value position is an error: an extern is called
-    // through the LLVM type its declaration supplies, which an
-    // indirect call site has no callee to take.
-    // D3.10, D9.8
+    // An `extern fn` is not a value.
+    // Its direct call uses the fixed LLVM type from the declaration.
     TEST_ASSERT_TRUE(check_src("extern fn abs(i32 n) i32;\n"
                                "fn main() i32 {\n    return abs(-1);\n}\n"));
     TEST_ASSERT_FALSE(check_src("extern fn abs(i32 n) i32;\n"
@@ -401,7 +368,6 @@ TEST(a_value_that_is_not_callable_is_refused, {
 TEST(a_builtin_cannot_be_used_as_a_value, {
     TEST_ASSERT_FALSE(check_body("    fn (i32* own) void f = del;\n    println(f);"));
     // A universe function is callable and nothing else.
-    // D12.2
     TEST_ASSERT_TRUE(said("'del' cannot be used as a value"));
 })
 
@@ -421,7 +387,6 @@ TEST(a_local_shadows_a_builtin, {
     TEST_ASSERT_FALSE(check_body("    i32 print = 0;\n    print(1);"));
     // A module-level or local declaration shadows a universe name, which is
     // then inaccessible.
-    // D7.9
     TEST_ASSERT_TRUE(said("cannot call a value of type i32"));
 })
 
@@ -430,7 +395,6 @@ TEST(print_refuses_an_unprintable_value, {
                                 "fn main() i32 {\n    point p = {1};\n    println(p);\n"
                                 "    return 0;\n}\n"));
     // Structs, arrays and spans are not printable.
-    // D12.2
     TEST_ASSERT_TRUE(said("cannot print a value of type point"));
 })
 
@@ -455,14 +419,12 @@ TEST(assert_takes_a_bool_and_panic_a_string, {
 })
 
 // ---- new and del --------------------------------------------------------------------
-// D10.2, D12.2
 
 TEST(new_yields_an_owning_pointer_or_span, {
     TEST_ASSERT_TRUE(
         check_body("    i32 mut* own p = new(i32);\n    i32 mut@ own s = new(i32, 4);\n"
                    "    println(s.len);\n    del(p);\n    del(s);"));
     // `new(T)` is `T mut* own` and `new(T, n)` is `T mut@ own`.
-    // D10.2, D17.3
     TEST_ASSERT_EQ_STR(init_type("p"), "i32 mut* own");
     TEST_ASSERT_EQ_STR(init_type("s"), "i32 mut@ own");
 })
@@ -475,20 +437,16 @@ TEST(new_marks_the_storage_it_allocates_and_no_position_below_it, {
                                 "    del(pp);\n    del(qq);\n    del(r);"));
     // The slot `new` allocates is writable; what the slot reaches is the
     // program's to write, and a fresh slot reaches nothing.
-    // D5.8, D10.2
     TEST_ASSERT_EQ_STR(init_type("pp"), "i32* mut* own");
     TEST_ASSERT_EQ_STR(init_type("qq"), "i32 mut* mut* own");
     // The elements of a fixed array share its storage, so one mark covers
     // both and the array is the outermost position.
-    // D5.2, D5.3
     TEST_ASSERT_EQ_STR(init_type("r"), "i32[4] mut* own");
 })
 
 TEST(new_of_a_borrowed_element_needs_no_cast_to_reach_a_borrowed_span, {
-    // A span of slots that borrow, which `src/fort/gen.ft` reached with a cast
-    // until this rule changed. `new` answers it directly now, and each
-    // spelling refuses the conversion to the other.
-    // D5.4, D10.2
+    // `new` directly returns an owning span of borrowed slots. Each spelling refuses conversion to
+    // the other.
     TEST_ASSERT_TRUE(check_body("    i32* mut@ own s = new(i32*, 2);\n"
                                 "    println(s.len);\n    del(s);"));
     TEST_ASSERT_EQ_STR(init_type("s"), "i32* mut@ own");
@@ -517,13 +475,11 @@ TEST(new_of_a_void_pointer_allocates_a_slot, {
     // `new(void*)` is legal, one pointer slot. The slot is writable because
     // `new` allocates it; the level a `void*` reaches is the program's to
     // mark, and both spellings are types.
-    // D3.11, D5.8, D10.2, D17.3
     TEST_ASSERT_EQ_STR(init_type("p"), "void mut* mut* own");
     TEST_ASSERT_EQ_STR(init_type("s"), "void mut* mut@ own");
     TEST_ASSERT_EQ_STR(init_type("b"), "void* mut@ own");
     // The slot takes a writable pointer and refuses a read-only one, as a
     // `node mut*` slot does.
-    // D5.4
     TEST_ASSERT_FALSE(check_body("    i32 x = 1;\n"
                                  "    void mut* mut@ own s = new(void mut*, 1);\n"
                                  "    s[0] = cast(&x, void*);\n    del(s);"));
@@ -532,7 +488,6 @@ TEST(new_of_a_void_pointer_allocates_a_slot, {
 
 TEST(new_of_void_is_refused, {
     // It is `new(void)` that the new builtin rejects, `void` having no size.
-    // D10.2
     TEST_ASSERT_FALSE(check_body("    void* own p = new(void);\n    del(p);"));
     TEST_ASSERT_TRUE(said("'new' needs a sized type, not void"));
 })
@@ -544,7 +499,6 @@ TEST(del_needs_an_owning_operand, {
                                 "fn main() i32 {\n    point p = {1};\n    del(p);\n"
                                 "    return 0;\n}\n"));
     // `del` of a struct or array is an error.
-    // D12.2
     TEST_ASSERT_TRUE(said("'del' takes a reference, not point"));
 })
 

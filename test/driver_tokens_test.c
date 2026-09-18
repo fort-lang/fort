@@ -1,15 +1,6 @@
-// Unit tests of `--tokens` (toolchain.md 1): the option that lexes the entry
-// file alone -- resolving no import, parsing nothing -- and writes one line
-// per token to stdout.
-// D14.1
-//
-// The suite holds the lexer output contract: the dump
-// is the whole of stdout, a lexical error is reported on stderr and still
-// leaves the file dumped whole, and nothing else of the pipeline runs -- no
-// `--cc` is spawned, no temporary is created, no import is opened. The
-// sandbox is driver_helpers.h and test/fake_cc.sh is the `--cc` that must
-// never run.
-// D14.2
+// Tests `--tokens` output and lexer isolation.
+// The mode lexes only the entry file and writes one line per token.
+// It parses nothing, resolves no import, and starts no compiler.
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -38,17 +29,14 @@ static const char SANDBOX_ENTRY_DUMP[] = "1:1-1:3 0 \"fn\" fn\n"
                                          "2:1-2:1 0 \"\" end of file\n";
 
 // ---- the command line -------------------------------------------------------------
-// D14.1
 
-// `fort --tokens main.ft`, parsed without running anything. A brace
-// initializer inside a TEST body would split the body into two macro
-// arguments, so the argument list stands here; driver_parse takes `char**`,
-// so it is a variable and lower_case rather than a constant.
+// `fort --tokens main.ft`, parsed without running anything. A brace initializer inside a TEST body
+// would split the body into two macro arguments. The argument list stands here; driver_parse takes
+// `char**`, so it is a variable and lower_case rather than a constant.
 static char* tokens_argv[] = {"fort", "--tokens", "main.ft", NULL};
 
 // The options --tokens refuses to stand beside, and the line it refuses them
 // with.
-// D14.1
 static const char* const REJECTED_WITH_TOKENS[] = {"--check", "--json", "--index"};
 static const char TOKENS_CONFLICT[] =
     "fort: error: --tokens does not combine with --check, --json or --index\n"
@@ -68,7 +56,6 @@ TEST(tokens_is_parsed_as_a_flag, {
     TEST_ASSERT_EQ_INT32(driver_parse(&opts, argc, tokens_argv, out, err), DRIVER_PARSE_OK);
     TEST_ASSERT_TRUE(opts.tokens);
     // It implies nothing: the front end is not run.
-    // D14.1
     TEST_ASSERT_FALSE(opts.check);
     TEST_ASSERT_FALSE(opts.json);
     TEST_ASSERT_FALSE(opts.index);
@@ -87,7 +74,6 @@ TEST(tokens_is_off_by_default, {
 
 // --tokens stops before the parser, so there is no front end for --check to
 // run and no document for --json to write.
-// D14.1
 TEST(tokens_with_check_json_or_index_is_a_usage_error, {
     for (size_t i = 0; i < sizeof REJECTED_WITH_TOKENS / sizeof REJECTED_WITH_TOKENS[0]; i++) {
         char* option = (char*)REJECTED_WITH_TOKENS[i];
@@ -118,7 +104,7 @@ TEST(help_names_tokens_with_the_other_options, {
     TEST_ASSERT_NONNULL(strstr(run.out, "--tokens"));
 })
 
-// ---- the dump (toolchain.md 1) ----------------------------------------------------
+// ---- the dump ----------------------------------------------------
 
 TEST(tokens_writes_the_dump_and_nothing_else, {
     sandbox_t box = sandbox_open();
@@ -141,9 +127,8 @@ TEST(an_empty_file_dumps_its_end_of_file_token, {
     sandbox_close(&box);
 })
 
-// A lexical error is reported and lexing resumes at the next line, so the
-// dump still covers the file and the status is the compile error.
-// D14.2, D14.1
+// A lexical error is reported and lexing resumes at the next line. The dump still covers the file
+// and the status is the compile error.
 TEST(a_lexical_error_is_reported_and_the_file_is_still_dumped, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
@@ -179,7 +164,6 @@ TEST(a_file_that_would_not_parse_still_dumps, {
 
 // No import is resolved, so a module that no root reaches is not an error
 // here: the import is four tokens like any other.
-// D14.1
 TEST(an_unresolvable_import_is_just_tokens, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
@@ -195,8 +179,8 @@ TEST(an_unresolvable_import_is_just_tokens, {
     sandbox_close(&box);
 })
 
-// An unreadable entry file is exit 2 with the `cannot read` line of
-// toolchain.md 1, as it is for a build.
+// An unreadable entry file is exit 2 with the `cannot read` line of the command-line contract, as
+// it is for a build.
 TEST(an_unreadable_entry_file_is_a_toolchain_error, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
@@ -216,10 +200,8 @@ TEST(an_unreadable_entry_file_is_a_toolchain_error, {
 
 // ---- what --tokens does not do ----------------------------------------------------
 
-// It stops after the lexer: no `--cc` is spawned, no output file is written
-// and no temporary directory is created, so the options that name them are
-// unused, as they are under --check.
-// D14.1, D20.1
+// It stops after the lexer: no `--cc` is spawned, no output file is written and no temporary
+// directory is created. The options that name them are unused, as they are under --check.
 TEST(tokens_spawns_no_cc_and_leaves_no_file_behind, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);

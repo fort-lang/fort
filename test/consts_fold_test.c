@@ -1,8 +1,4 @@
-// Unit tests of consts.h, part two: the exact untyped folding of the
-// operators type-system.md 10.4 lists (`+ - * / % - ~ & | ^ << >>`) over
-// the whole constant range [-2^63, 2^64 - 1], with its boundaries and one
-// past each.
-// D4.4
+// Tests constant folding and arithmetic limits.
 #include <stdint.h>
 
 #include "consts.h"
@@ -11,7 +7,7 @@
 #include "test.h"
 
 // The sample values below are the test data: the boundaries of the constant
-// range and the examples of type-system.md 10.4.
+// range and the examples of the type rules.
 // NOLINTBEGIN(readability-magic-numbers)
 
 static const uint64_t TWO63 = UINT64_C(1) << 63U; // 2^63
@@ -172,7 +168,6 @@ TEST(mul_outside_the_range_is_an_error, {
 })
 
 // ---- division and remainder ------------------------------------------------------
-// D6.13
 
 TEST(div_truncates_toward_zero, {
     cval_t r = cv_none();
@@ -354,8 +349,8 @@ TEST(and_of_two_negatives_is_negative, {
 })
 
 TEST(and_never_leaves_the_range, {
-    // A negative in-range operand has bit 63 set in its pattern, so the
-    // result of `&` with a negative operand is at least -2^63.
+    // A negative in-range operand has bit 63 set in its pattern. The result of `&` with a negative
+    // operand is at least -2^63.
     cval_t r = cv_none();
     TEST_ASSERT_TRUE(cv_and(neg_two63(), i(-2), &r));
     TEST_ASSERT_TRUE(cv_eq(r, neg_two63()));

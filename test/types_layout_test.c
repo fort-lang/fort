@@ -1,12 +1,5 @@
-// Sizes, alignment and C/System V struct layout: the sizes, the layout of type-system.md 4.1,
-// the ceiling on the size of a type and the value-containment cycles. The internal errors the
-// module reports when a caller breaks one of its preconditions are at the end, each in a forked
-// child.
-// D3.1, D3.15, D3.4, D3.8
-//
-// The representation and identity of a type are tested in types_test.c, its
-// conversions in types_convert_test.c, the builder and the spelling in
-// types_build_test.c.
+// Tests type sizes, alignments, struct layout, and layout failures.
+// Fatal precondition tests run in forked children.
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -57,7 +50,6 @@ TEST(sizeof_and_alignof_of_every_type_form, {
     TEST_ASSERT_EQ_UINT64(align_of(&e, "i32"), (uint64_t)4);
     TEST_ASSERT_EQ_UINT64(align_of(&e, "f64"), (uint64_t)8);
     // A function pointer is 8, and `own` changes no size.
-    // D17.1
     TEST_ASSERT_EQ_UINT64(type_sizeof(tenv_fn(&e, type_prim(&e.tt, PRIM_I32), e.point, NULL)),
                           (uint64_t)8);
     TEST_ASSERT_EQ_UINT64(type_alignof(tenv_fn(&e, type_void(&e.tt), NULL, NULL)), (uint64_t)8);
@@ -86,7 +78,6 @@ TEST(sizeof_of_the_suffix_shapes_of_d3_6, {
     TEST_ASSERT_EQ_UINT64(size_of(&e, "u8 mut@ own mut*"), (uint64_t)8);
     TEST_ASSERT_EQ_UINT64(size_of(&e, "node* own[4]"), (uint64_t)32);
     // Alignment of an array is its element's.
-    // D3.1
     TEST_ASSERT_EQ_UINT64(align_of(&e, "i32[3][4]"), (uint64_t)4);
     TEST_ASSERT_EQ_UINT64(align_of(&e, "node*[16]"), (uint64_t)8);
     TEST_ASSERT_EQ_UINT64(align_of(&e, "u8[3]"), (uint64_t)1);
@@ -99,7 +90,6 @@ TEST(sizeof_of_function_types_with_suffixes, {
     const type_t* i32 = type_prim(&e.tt, PRIM_I32);
     const type_t* f = tenv_fn(&e, i32, i32, NULL);
     // `fn i32(i32)[4]` is an array of four function pointers.
-    // D3.6
     TEST_ASSERT_EQ_UINT64(type_sizeof(type_array(&e.tt, f, 4)), (uint64_t)32);
     // `fn i32[4](i32)` is one function pointer returning an `i32[4]`.
     TEST_ASSERT_EQ_UINT64(type_sizeof(tenv_fn(&e, type_array(&e.tt, i32, 4), i32, NULL)),
@@ -117,8 +107,7 @@ TEST(sizeof_of_the_error_type_is_zero, {
     tenv_free(&e);
 })
 
-// ---- struct layout (type-system.md 4.1) ------------------------------------------
-// D3.8, D9.9
+// ---- struct layout ------------------------------------------
 
 TEST(layout_of_rec_matches_the_c_abi, {
     tenv_t e;
@@ -242,7 +231,6 @@ TEST(owning_aggregates_are_recognised_through_fields_and_elements, {
     tenv_t e;
     tenv_init(&e);
     // struct vec { i32 mut@ own data; u64 len; } is owning.
-    // D17.7
     TEST_ASSERT_TRUE(type_is_owning_aggregate(e.vec));
     TEST_ASSERT_EQ_UINT64(type_sizeof(e.vec), (uint64_t)24);
     TEST_ASSERT_FALSE(type_is_owning_aggregate(e.point));
@@ -259,7 +247,6 @@ TEST(owning_aggregates_are_recognised_through_fields_and_elements, {
     TEST_ASSERT_EQ_UINT64(type_sizeof(pair), (uint64_t)48);
     // A fixed array of `own` pointers is owning; a span of them is not, since its elements are
     // not held by value.
-    // D17.7
     TEST_ASSERT_TRUE(type_is_owning_aggregate(tenv_type(&e, "node* own[4]")));
     TEST_ASSERT_FALSE(type_is_owning_aggregate(tenv_type(&e, "node*[4]")));
     TEST_ASSERT_FALSE(type_is_owning_aggregate(tenv_type(&e, "node* own@")));
@@ -267,7 +254,6 @@ TEST(owning_aggregates_are_recognised_through_fields_and_elements, {
     // An array of owning arrays is owning too.
     TEST_ASSERT_TRUE(type_is_owning_aggregate(type_array(&e.tt, tenv_type(&e, "node* own[4]"), 2)));
     // A struct holding an `own string` is owning.
-    // D17.12
     const type_t* named = type_struct(&e.tt, str_from_cstr("named"), "named");
     const type_t* named_fields[1];
     uint64_t named_offsets[1];
@@ -282,7 +268,6 @@ TEST(owning_reaches_through_arrays_of_structs_and_struct_fields, {
     tenv_t e;
     tenv_init(&e);
     // An array of owning structs is owning, and so is a struct whose field is an owning array.
-    // D17.7
     TEST_ASSERT_TRUE(type_is_owning_aggregate(type_array(&e.tt, e.vec, 2)));
     TEST_ASSERT_FALSE(type_is_owning_aggregate(type_array(&e.tt, e.point, 2)));
     const type_t* slots = type_struct(&e.tt, str_from_cstr("slots"), "slots");
@@ -304,7 +289,6 @@ TEST(owning_reaches_through_arrays_of_structs_and_struct_fields, {
     TEST_ASSERT_TRUE(type_is_owning_aggregate(nest));
     TEST_ASSERT_EQ_UINT64(type_sizeof(nest), (uint64_t)80);
     // A borrowed span of owned pointers is not owning: its elements are not held by value.
-    // D17.7
     const type_t* view = type_struct(&e.tt, str_from_cstr("view"), "view");
     const type_t* view_fields[1];
     uint64_t view_offsets[1];
@@ -341,7 +325,6 @@ TEST(a_value_containment_cycle_is_reported_once, {
     tenv_init(&e);
     // struct a { b x; } and struct b { a y; }: laying out `a` reaches `b`, which reaches `a`
     // again ("infinite size").
-    // D3.8
     const type_t* a = type_struct(&e.tt, str_from_cstr("a"), "a");
     const type_t* b = type_struct(&e.tt, str_from_cstr("b"), "b");
     TEST_ASSERT_TRUE(type_layout_begin(a));
@@ -372,7 +355,6 @@ TEST(a_struct_containing_itself_by_value_is_a_cycle, {
     type_layout_fail(loop);
     TEST_ASSERT_EQ_UINT64(type_sizeof(loop), (uint64_t)0);
     // A self-reference through a pointer or a span is not a cycle: `node` and `tree` lay out.
-    // D3.8
     const type_t* tree = type_struct(&e.tt, str_from_cstr("tree"), "tree");
     const type_t* fields[2];
     uint64_t offsets[2];
@@ -389,9 +371,8 @@ TEST(a_struct_containing_itself_by_value_is_a_cycle, {
 TEST(a_cycle_through_an_array_field_is_found_too, {
     tenv_t e;
     tenv_init(&e);
-    // struct a { b[2] x; } and struct b { a y; }: an array adds no level, so the containment is
-    // by value and the size is infinite.
-    // D3.4, D3.8
+    // struct a { b[2] x; } and struct b { a y; }: an array adds no level. The containment is by
+    // value and the size is infinite.
     const type_t* a = type_struct(&e.tt, str_from_cstr("a"), "a");
     const type_t* b = type_struct(&e.tt, str_from_cstr("b"), "b");
     const type_t* pair = type_array(&e.tt, b, 2);
@@ -437,13 +418,11 @@ TEST(a_failed_struct_can_be_a_field_of_another, {
 })
 
 // ---- the size ceiling -----------------------------------------------------------
-// D3.4
 
 TEST(a_type_at_the_ceiling_still_fits, {
     tenv_t e;
     tenv_init(&e);
     // 2^63 - 1 bytes is the largest object the compiler admits.
-    // D3.4
     const uint64_t max = (uint64_t)INT64_MAX;
     const type_t* u8 = tenv_type(&e, "u8");
     const type_t* biggest = type_array(&e.tt, u8, max);
@@ -475,7 +454,6 @@ TEST(a_type_past_the_ceiling_does_not_fit, {
     TEST_ASSERT_TRUE(type_size_fits(type_array(&e.tt, row, (uint64_t)1U << 29U)));
     // A reference to an object that could never exist is 8 or 16 bytes and fits: only the
     // object itself is too large.
-    // D3.4, D3.5
     TEST_ASSERT_TRUE(type_size_fits(type_ptr(&e.tt, type_array(&e.tt, u8, max), false, false)));
     TEST_ASSERT_TRUE(type_size_fits(type_span(&e.tt, u8, false, false)));
     tenv_free(&e);
@@ -488,7 +466,6 @@ TEST(a_struct_past_the_ceiling_is_reported_like_a_cycle, {
     const type_t* half = type_array(&e.tt, tenv_type(&e, "u8"), (max >> 1U) + 1U);
     TEST_ASSERT_TRUE(type_size_fits(half));
     // struct twice { u8[2^62] a; u8[2^62] b; }: each field fits, the two together do not.
-    // D3.4
     const type_t* twice = type_struct(&e.tt, str_from_cstr("twice"), "twice");
     const type_t* fields[2];
     uint64_t offsets[2];
@@ -528,9 +505,8 @@ TEST(rounding_the_size_up_cannot_push_a_struct_past_the_ceiling, {
     tenv_t e;
     tenv_init(&e);
     const uint64_t max = (uint64_t)INT64_MAX;
-    // struct edge { i64 a; u8[2^63 - 9] b; }: every field fits and so does their sum, which is
-    // the ceiling exactly, but rounding the size up to the alignment of `i64` passes it.
-    // D3.4, D3.8
+    // struct edge { i64 a; u8[2^63 - 9] b; }: every field fits and so does their sum. It is the
+    // ceiling exactly, but rounding the size up to the alignment of `i64` passes it.
     const type_t* edge = type_struct(&e.tt, str_from_cstr("edge"), "edge");
     const type_t* fields[2];
     uint64_t offsets[2];
@@ -944,7 +920,6 @@ TEST(the_size_of_a_type_too_large_is_an_internal_error, {
     char err[ERR_MAX];
     // The checker asks type_size_fits at the declaration and reports "type is too large" there;
     // reaching sizeof anyway is a compiler bug.
-    // D3.4
     TEST_ASSERT_EQ_INT32(run_forked(sizeof_of_a_type_too_large, err, sizeof err), 2);
     TEST_ASSERT_EQ_STR(err, "fort: error: internal error: sizeof of a type that is too large\n");
 })
@@ -952,8 +927,7 @@ TEST(the_size_of_a_type_too_large_is_an_internal_error, {
 TEST(a_base_type_is_never_an_owned_one, {
     char err[ERR_MAX];
     // No source can write `own` on a base type that already owns: the base of a written type is
-    // never an owned type, so the builder treats it as a compiler bug rather than a diagnostic.
-    // D17.2
+    // never an owned type. The builder treats it as a compiler bug rather than a diagnostic.
     TEST_ASSERT_EQ_INT32(run_forked(own_on_an_owned_base, err, sizeof err), 2);
     TEST_ASSERT_EQ_STR(err,
                        "fort: error: internal error: own on a base type that is already owned\n");

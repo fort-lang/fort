@@ -1,9 +1,7 @@
-// The unit-test framework of the bootstrap compiler (toolchain.md 7.5).
-//
-// A suite defines tests with TEST(name, body), registers them with TEST_RUN in
-// main after TEST_INIT, and exits through TEST_EXIT with 0 (every test ok),
-// 1 (an assertion failed) or 2 (a test error). The first command-line argument,
-// when present, is a name prefix selecting the tests to run.
+// Defines and runs bootstrap compiler unit tests.
+// TEST_EXIT returns 0 for success and 1 for an assertion failure.
+// It returns 2 for a test error.
+// The first command-line argument selects tests by a name prefix.
 #ifndef FORT_TEST_H
 #define FORT_TEST_H
 
@@ -40,7 +38,7 @@ typedef enum {
         }                                                                                          \
     } while (0)
 
-/// The process exit status of a suite result: 0 ok, 1 fail, 2 error.
+// The process exit status of a suite result: 0 ok, 1 fail, 2 error.
 static inline int test_exit_status(test_result_t final_result) {
     switch (final_result) {
     case TEST_RESULT_OK:
@@ -59,7 +57,7 @@ static inline int test_exit_status(test_result_t final_result) {
 
 #define TEST_EXIT() TEST_EXIT_(TEST_FINAL_RESULT_)
 
-/// The name of a test result as printed by TEST_RUN.
+// The name of a test result as printed by TEST_RUN.
 static inline const char* test_result_name(test_result_t result) {
     switch (result) {
     case TEST_RESULT_OK:

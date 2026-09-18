@@ -1,8 +1,5 @@
-// The environment the index suites share: the module sandbox and the checker
-// of check_helpers.h, an index_t built over the closure they leave, and one
-// spelling of a record so that a test compares a whole record in one
-// assertion.
-// D20.3
+// Provides the shared index test environment.
+// It includes a module sandbox, checker, index, and complete record formatter.
 //
 // The helpers are static inline and the state is per suite, so a suite that
 // uses only some of them still builds under -Werror.
@@ -24,8 +21,8 @@
 static index_t ix;
 static bool index_live = false;
 
-/// Releases the index of the previous test. It borrows the names and the file
-/// names of the modules, so it never outlives the sandbox that holds them.
+// Releases the index of the previous test. It borrows the names and the file names of the modules,
+// so it never outlives the sandbox that holds them.
 static inline void index_reset(void) {
     if (index_live) {
         index_free(&ix);
@@ -33,8 +30,7 @@ static inline void index_reset(void) {
     }
 }
 
-/// Indexes the closure the last check left.
-/// D20.3
+// Indexes the closure the last check left.
 static inline void index_closure(void) {
     index_reset();
     index_init(&ix);
@@ -42,15 +38,15 @@ static inline void index_closure(void) {
     index_build(&ix, &set);
 }
 
-/// Checks the entry module `main.ft` of one source and indexes the closure.
+// Checks the entry module `main.ft` of one source and indexes the closure.
 static inline bool index_src(const char* text) {
     const bool ok = check_src(text);
     index_closure();
     return ok;
 }
 
-/// A file name without the sandbox directory, so that a test names
-/// `main.ft` and not the temporary directory of the run.
+// A file name without the sandbox directory, so that a test names `main.ft` and not the temporary
+// directory of the run.
 static inline const char* rel_file(const char* file) {
     if (file == NULL) {
         return "<none>";
@@ -70,11 +66,7 @@ static inline void append_pos(sb_t* out, loc_t loc) {
     sb_append_u64(out, loc.col);
 }
 
-/// One record as a line: the range of the occurrence, the kind, the name, the
-/// type in quotes or a bare `null` when the declaration failed to check,
-/// `decl` or `use`, and the declaration's position or `null`. Valid until the
-/// next call.
-/// D20.3
+// Valid until the next call.
 static inline const char* entry_text(const index_entry_t* e) {
     static sb_t out;
     static bool ready = false;
@@ -114,8 +106,8 @@ static inline const char* entry_text(const index_entry_t* e) {
     return sb_cstr(&out);
 }
 
-/// The record whose occurrence begins at `line`:`col` of the file `rel`, or
-/// NULL; `rel` NULL takes the first file that has one.
+// The record whose occurrence begins at `line`:`col` of the file `rel`, or NULL; `rel` NULL takes
+// the first file that has one.
 static inline const index_entry_t* entry_in(const char* rel, uint32_t line, uint32_t col) {
     for (uint64_t i = 0; i < index_count(&ix); i++) {
         const index_entry_t* e = index_at(&ix, i);
@@ -131,19 +123,17 @@ static inline const index_entry_t* entry_at(uint32_t line, uint32_t col) {
     return entry_in(NULL, line, col);
 }
 
-/// The spelling of the record at `line`:`col`, or "<none>".
+// The spelling of the record at `line`:`col`, or "<none>".
 static inline const char* text_at(uint32_t line, uint32_t col) {
     return entry_text(entry_at(line, col));
 }
 
-/// The same in one named file, which is what a test over two modules asks.
+// The same in one named file, which is what a test over two modules asks.
 static inline const char* text_in(const char* rel, uint32_t line, uint32_t col) {
     return entry_text(entry_in(rel, line, col));
 }
 
-/// Every record of the file `rel`, one per line, in the order the index holds
-/// them: what a test asserts when the order is the point. Valid until the next
-/// call.
+// Valid until the next call.
 static inline const char* file_text(const char* rel) {
     static sb_t out;
     static bool ready = false;
@@ -169,7 +159,7 @@ static inline const char* file_text(const char* rel) {
     return sb_cstr(&out);
 }
 
-/// The records of the file `rel`.
+// The records of the file `rel`.
 static inline uint64_t file_count(const char* rel) {
     uint64_t n = 0;
     for (uint64_t i = 0; i < index_count(&ix); i++) {

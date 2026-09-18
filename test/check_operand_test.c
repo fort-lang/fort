@@ -1,10 +1,5 @@
-// Unit tests of the operand of an operator that gives it no context and drops
-// it when it is poisoned (core-language.md 5.3): `*e`, `e.f`, `e[i]`, `e()`,
-// `&e`, `del(e)`, `move(e)`, an assignment target and a range `for`
-// collection. Each of those accepted a constant with no default type in
-// silence until 2026-09-14. The rest of the constants are in
-// check_const_test.c and the operators in check_expr_test.c.
-// D4.1, D4.5, D14.2
+// Tests operands that give a constant no type context.
+// Each form must report a constant that has no default type.
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -17,27 +12,19 @@
 
 // NOLINTBEGIN(readability-magic-numbers) the sources below are the test data.
 
-// Every operator that drops a poisoned operand, which is every position that
-// is no context at all. A constant with no default type is poisoned and
-// unreported, so each of these accepted the program in silence until
-// 2026-09-14: the compiler exited 0 and the program printed nothing. The
-// thirteen positions are the table of check_helpers.h, which check_poison_test.c
-// reads as well.
-// D4.1, D4.5
+// These 13 positions give no context and drop a poisoned operand. The table comes from
+// check_helpers.h, which check_poison_test.c also reads.
 
 TEST(every_operator_that_drops_its_operand_reports_a_constant_with_no_type, {
-    // `2^63` written out folds to a value that neither i32 nor i64 holds, so
-    // the rule's own tail reports it. The operand reaches the rule because
-    // none of these positions is a context; without that it is dropped with
-    // the error type and nothing is ever said.
-    // D4.1, D4.5
+    // `2^63` fits neither default integer type, so the checker reports it.
+    // None of these operand positions provides a type context.
+    // Without that it is dropped with the error type and nothing is ever said.
     for (uint64_t i = 0; i < (uint64_t)DROP_SITE_COUNT; i++) {
         const char* body = drop_site(i, "9223372036854775808");
         TEST_ASSERT_TRUE(body != NULL);
         TEST_ASSERT_FALSE(check_body(body));
         TEST_ASSERT_TRUE(said("constant expression out of range"));
-        // The other end of the range the rule has no type for, `2^64 - 1`.
-        // D4.5
+        // `2^64 - 1` also fits neither default integer type.
         body = drop_site(i, "18446744073709551615");
         TEST_ASSERT_TRUE(body != NULL);
         TEST_ASSERT_FALSE(check_body(body));
@@ -47,9 +34,8 @@ TEST(every_operator_that_drops_its_operand_reports_a_constant_with_no_type, {
 
 TEST(every_operator_that_drops_its_operand_reports_a_constant_it_carries, {
     // The same thirteen with an expression that folded to no value. The
-    // constant then meets i64, the widest type the rule offers, and the
-    // message names it. `n` is a variable, so the shift folds nothing.
-    // D4.5, D6.2
+    // The constant meets i64, the widest default type, and the message names it.
+    // `n` is a variable, so the shift does not fold.
     char source[512];
     for (uint64_t i = 0; i < (uint64_t)DROP_SITE_COUNT; i++) {
         const char* body = drop_site(i, "(9223372036854775808 << n)");
@@ -61,13 +47,11 @@ TEST(every_operator_that_drops_its_operand_reports_a_constant_it_carries, {
 })
 
 TEST(a_constant_that_folds_back_into_range_leaves_the_operator_its_own_rule, {
-    // The second outcome of the same call, and it is not an error path. The
-    // shift leaves `2^63 >> 1` poisoned and carrying the i64 2^62, and the
-    // default type accepts that value, so the operand reaches the operator
-    // **typed** and the operator answers by its own rule. Without the call the
-    // four programs below compiled, exited 0 and printed nothing, which is why
-    // they stand with the thirteen and not with the typed operands.
-    // D4.4, D4.5
+    // The second outcome of the same call, and it is not an error path. The shift leaves `2^63 >>
+    // 1` poisoned and carrying the i64 2^62. The default type accepts that value, so the operand
+    // reaches the operator **typed** and the operator answers by its own rule. Without the call the
+    // four programs below compiled, exited 0 and printed nothing. It is why they stand with the
+    // thirteen and not with the typed operands.
     TEST_ASSERT_FALSE(check_body("    println(*(9223372036854775808 >> 1));"));
     TEST_ASSERT_TRUE(said("cannot dereference i64"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
@@ -78,19 +62,16 @@ TEST(a_constant_that_folds_back_into_range_leaves_the_operator_its_own_rule, {
     TEST_ASSERT_FALSE(check_body("    del(9223372036854775808 >> 1);"));
     TEST_ASSERT_TRUE(said("'del' takes a reference, not i64"));
     // The value itself is the one the exact folding gives, and a context takes it.
-    // D4.4
     TEST_ASSERT_TRUE(check_body("    i64 w = 9223372036854775808 >> 1;\n    println(w);"));
     TEST_ASSERT_EQ_STR(init_type("w"), "i64");
 })
 
 TEST(a_dropped_operand_that_is_no_constant_keeps_its_one_diagnostic, {
-    // The guard reads the operand and not the operator, so an operand that was
-    // reported where it arose stays reported once. Every message below is the
-    // one the site gave before the guard existed, and the count is the
-    // assertion: a guard that reported for every poisoned operand would double
-    // each of them, and the corpus could not see it, because the harness
-    // judges a line and not a count.
-    // D14.2
+    // The guard reads the operand and not the operator, so an operand that was reported where it
+    // arose stays reported once. Every message below is the one the site gave before the guard
+    // existed. The count is the assertion: a guard that reported for every poisoned operand would
+    // double each of them. The corpus could not see it, because the harness judges a line and not a
+    // count.
     for (uint64_t i = 0; i < (uint64_t)DROP_SITE_COUNT; i++) {
         const char* body = drop_site(i, "nosuch");
         TEST_ASSERT_TRUE(body != NULL);
@@ -98,18 +79,15 @@ TEST(a_dropped_operand_that_is_no_constant_keeps_its_one_diagnostic, {
         TEST_ASSERT_TRUE(said("unknown name 'nosuch'"));
         // `move` adds "'move' has no value", which it added before this guard
         // too: its early return leaves the result `void`.
-        // D12.2
         TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)(i == DROP_SITE_MOVE ? 2 : 1));
     }
 })
 
 TEST(a_dropped_operand_with_a_type_keeps_the_message_of_its_operator, {
-    // The other half: an operand that is no untyped constant reaches the
-    // operator, which answers as it always did. No mutant of the guard turns
-    // this red, and that is the point of writing it down: the guard runs only
-    // for a poisoned operand, so a typed one never enters it. The test pins
-    // the seven messages, so a later change that widens the key is seen.
-    // D14.2
+    // The other half: an operand that is no untyped constant reaches the operator, which answers as
+    // it always did. No mutant of the guard turns this red. That is the point of writing it down:
+    // the guard runs only for a poisoned operand, so a typed one never enters it. The test pins the
+    // seven messages, so a later change that widens the key is seen.
     TEST_ASSERT_FALSE(check_body("    i32 v = 1;\n    println(*v);"));
     TEST_ASSERT_TRUE(said("cannot dereference i32"));
     TEST_ASSERT_FALSE(check_body("    i32 v = 1;\n    println(v.x);"));

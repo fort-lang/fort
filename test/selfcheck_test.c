@@ -1,10 +1,7 @@
-// Self-check of the unit-test framework in test.h (toolchain.md 7.5).
+// Checks the unit-test framework in `test.h`.
 //
-// The positive tests run every TEST_ASSERT_* macro on values that satisfy it.
-// The negative tests (neg_*) each violate one macro; they are registered only
-// when a prefix is given, so the plain run stays green, and the spawn_* tests
-// re-run this executable with a neg_* prefix to check the exit status, the
-// logged message and the filter.
+// The positive tests run every TEST_ASSERT_* macro on values that satisfy it. The negative tests
+// (neg_*) each violate one macro; they are registered only when a prefix is given.
 #include <stdlib.h>
 
 #include <sys/wait.h>
@@ -16,9 +13,8 @@ enum { COMMAND_MAX = 4096, OUTPUT_MAX = 8192 };
 // argv[0] of this run, set by main before any test runs.
 static const char* self_path = NULL;
 
-// Runs this executable with the given name prefix, capturing stdout and
-// stderr into out; returns the exit status, or -1 when the run could not be
-// started or ended abnormally.
+// Runs this executable with the given name prefix, capturing stdout and stderr into out. Returns
+// the exit status, or -1 when the run could not be started or ended abnormally.
 static int run_self(const char* prefix, char* out, size_t out_size) {
     char command[COMMAND_MAX];
     const int n = snprintf(command, sizeof command, "'%s' %s 2>&1", self_path, prefix);

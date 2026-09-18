@@ -1,7 +1,5 @@
-// The statements, declarations and module structure of the parser
-// (grammar.md 2, 3, 5), the three speculative points of grammar.md 7 and the
-// nesting limit.
-// D2.11
+// Tests parser statements, declarations, module structure, speculative parsing, and the nesting
+// limit.
 #include <stdint.h>
 #include <string.h>
 
@@ -15,7 +13,9 @@
 // The source of the nesting tests, kept alive while its tree is used.
 static sb_t deep;
 
-// `prefix`, `n` copies of `open`, `core`, `n` copies of `close`, `suffix`.
+// `nested` and `many_suffixes` share `deep`.
+// Either call invalidates their prior results.
+// Returns `prefix`, `n` copies of `open`, `core`, `n` copies of `close`, and `suffix`.
 static const char* nested(
     const char* prefix, char open, uint64_t n, const char* core, char close, const char* suffix) {
     sb_clear(&deep);
@@ -45,7 +45,7 @@ static const char* many_suffixes(uint64_t n) {
 // NOLINTBEGIN(readability-magic-numbers) the sources and the trees they parse
 // to are the test data.
 
-// ---- statements (grammar.md 5) --------------------------------------------
+// ---- statements --------------------------------------------
 
 TEST(declarations_and_assignments, {
     TEST_ASSERT_EQ_STR(dump_stmt("i32 mut x = 1;"), "(var x (type (prim i32) mut) (int 1))");
@@ -87,7 +87,6 @@ TEST(while_loops, {
 })
 
 // Every `for` form, including the empty one.
-// D7.5
 TEST(for_forms, {
     TEST_ASSERT_EQ_STR(dump_stmt("for (;;) { }"), "(for nil nil nil (block))");
     TEST_ASSERT_EQ_STR(dump_stmt("for (i32 mut i = 0; i < n; i++) { }"),
@@ -101,9 +100,7 @@ TEST(for_forms, {
     TEST_ASSERT_EQ_STR(dump_stmt("for (; c; ) { }"), "(for nil (ident c) nil (block))");
 })
 
-// The range loop, told from the other forms by the `:` after `type identifier`
-// (grammar.md 7.3).
-// D7.5
+// The range loop, told from the other forms by the `:` after `type identifier`.
 TEST(range_for_forms, {
     TEST_ASSERT_EQ_STR(dump_stmt("for (i32 x : xs) { }"),
                        "(range-for (type (prim i32)) x (ident xs) (block))");
@@ -135,7 +132,7 @@ TEST(defer_return_break_and_continue, {
     TEST_ASSERT_EQ_STR(dump_stmt("continue;"), "(continue)");
 })
 
-// ---- the declaration-versus-statement choice (grammar.md 7.1) -------------
+// ---- the declaration-versus-statement choice -------------
 
 TEST(the_token_after_the_type_settles_a_declaration, {
     TEST_ASSERT_EQ_STR(dump_stmt("foo[3] = x;"),
@@ -144,9 +141,8 @@ TEST(the_token_after_the_type_settles_a_declaration, {
                        "(var arr (type (name foo) (array (int 3))) (init))");
 })
 
-// Every `mut` and `own` stands after what it qualifies, so these are
-// declarations, settled by the same speculative parse (grammar.md 7.1).
-// D5.3
+// Every `mut` and `own` stands after what it qualifies, so these are declarations, settled by the
+// same speculative parse.
 TEST(a_marked_type_at_statement_level_is_a_declaration, {
     TEST_ASSERT_EQ_STR(dump_stmt("foo@ mut x = s;"),
                        "(var x (type (name foo) (span mut)) (ident s))");
@@ -163,16 +159,14 @@ TEST(a_qualified_type_and_a_function_type_at_statement_level, {
                        "(var op (type (fn-type (type (prim i32)) (type (prim i32))))"
                        " (ident add))");
     TEST_ASSERT_EQ_STR(dump_stmt("string s = \"x\";"), "(var s (type (string)) (str \"x\"))");
-    // A type admits exactly one dot (grammar.md 4: `qualified_name`), so a
-    // second one is no longer a type and the statement is read as an
-    // expression.
-    // D9.4
+    // A type admits one dot.
+    // A second dot makes the parser read the statement as an expression.
     TEST_ASSERT_EQ_STR(stmt_fails("math.vec.pair w = {};"),
                        "t.ft:2:15: error: expected an assignment, an increment or a call, "
                        "found identifier 'w'\n");
 })
 
-// A statement never begins with a marker (grammar.md 7.1).
+// A statement never begins with a marker.
 TEST(a_statement_never_begins_with_a_marker, {
     TEST_ASSERT_EQ_STR(stmt_fails("mut i32 x = 1;"),
                        "t.ft:2:1: error: a mut never precedes the base type: "
@@ -186,7 +180,6 @@ TEST(a_statement_never_begins_with_a_marker, {
 })
 
 // Expression statements are calls only, and `IDENT {` is never a block.
-// D7.3, D6.5
 TEST(an_expression_statement_that_is_not_a_call, {
     TEST_ASSERT_EQ_STR(stmt_fails("x;"),
                        "t.ft:2:2: error: expected an assignment, an increment or a call, "
@@ -207,13 +200,13 @@ TEST(the_syntax_errors_of_a_declaration_and_a_condition, {
                        "t.ft:2:12: error: expected '{', found 'return'\n");
 })
 
-// `do`-`while` is outside the C bootstrap's subset (toolchain.md 7.3).
+// `do`-`while` is outside the C bootstrap's subset.
 TEST(do_while_is_not_supported, {
     TEST_ASSERT_EQ_STR(stmt_fails("do { } while (c);"),
                        "t.ft:2:1: error: not supported by the bootstrap compiler: do-while\n");
 })
 
-// ---- a rewind leaves no diagnostics (grammar.md 7) ------------------------
+// ---- a rewind leaves no diagnostics ------------------------
 
 TEST(rewinds_leave_no_diagnostics, {
     const char* src = "fn f() void {\n"
@@ -229,8 +222,7 @@ TEST(rewinds_leave_no_diagnostics, {
     TEST_ASSERT_EQ_STR(parse_diags(), "");
 })
 
-// An error inside a speculative parse is reported once, by the branch the
-// decision committed to.
+// A speculative parse reports an error once after it selects a branch.
 TEST(an_error_inside_a_speculation_is_reported_once, {
     TEST_ASSERT_EQ_STR(stmt_fails("foo[3 +] = x;"),
                        "t.ft:2:8: error: expected an expression, found ']'\n");
@@ -238,9 +230,8 @@ TEST(an_error_inside_a_speculation_is_reported_once, {
                        "t.ft:2:14: error: expected an expression, found ')'\n");
 })
 
-// A speculative parse skips the unsupported-feature checks, so the shape is
-// still decided and the committed parse reports the feature
-// (toolchain.md 7.3).
+// A speculative parse skips the unsupported-feature checks, so the shape is still decided and the
+// committed parse reports the feature.
 TEST(an_unsupported_feature_survives_a_rewind, {
     TEST_ASSERT_EQ_STR(
         stmt_fails("foo[3][4] arr = {};"),
@@ -253,8 +244,8 @@ TEST(an_unsupported_feature_survives_a_rewind, {
         "t.ft:2:11: error: not supported by the bootstrap compiler: multi-dimensional arrays\n");
 })
 
-// The struct-literal lookahead of grammar.md 7.2 does not disturb an
-// ordinary expression that starts the same way.
+// The struct-literal lookahead of the grammar does not disturb an ordinary expression that starts
+// the same way.
 TEST(literals_and_expressions_that_start_alike, {
     TEST_ASSERT_EQ_STR(dump_stmt("x = point{1, 2};"),
                        "(assign = (ident x) (struct-lit (name point) (init (int 1) (int 2))))");
@@ -265,7 +256,7 @@ TEST(literals_and_expressions_that_start_alike, {
                        "(assign = (ident x) (index (field (ident m) f) (int 1)))");
 })
 
-// ---- declarations and modules (grammar.md 2, 3) --------------------------
+// ---- declarations and modules --------------------------
 
 TEST(function_declarations, {
     TEST_ASSERT_EQ_STR(parse_dump("fn main() i32 { return 0; }"),
@@ -294,7 +285,6 @@ TEST(extern_struct_and_enum_declarations, {
 
 // A module-level declaration is a var_decl whose initializer is constant; a
 // function type is a type like any other there.
-// D7.10
 TEST(global_declarations, {
     TEST_ASSERT_EQ_STR(parse_dump("i32 N = 4;"), "(module (var N (type (prim i32)) (int 4)))");
     TEST_ASSERT_EQ_STR(parse_dump("point[2] mut cells = {};"),
@@ -334,14 +324,12 @@ TEST(empty_aggregates_are_errors, {
 })
 
 // A parameter list takes no trailing comma.
-// D6.5
 TEST(parameter_lists_take_no_trailing_comma, {
     TEST_ASSERT_EQ_STR(parse_fails("fn f(i32 a,) void { }"),
                        "t.ft:1:12: error: expected a type, found ')'\n");
 })
 
 // ---- the nesting limit ---------------------------------------------------
-// D2.11
 
 TEST(nesting_of_256_is_accepted, {
     TEST_ASSERT_NONNULL(parse_text(nested("i32 x = ", '(', 256, "1", ')', ";")));
@@ -382,7 +370,6 @@ TEST(unterminated_constructs_end_at_the_end_of_the_file, {
 
 // An `else if` chain is a chain, not nesting: it costs no depth and no
 // recursion, so a long one parses.
-// D7.4
 TEST(a_long_else_if_chain_is_not_nesting, {
     sb_clear(&deep);
     sb_append(&deep, "fn f() void {\n    if (c) { }");
@@ -404,7 +391,6 @@ TEST(a_long_else_if_chain_is_not_nesting, {
 
 // One diagnostic per broken statement, and the statements and declarations
 // after it are parsed and reported too.
-// D14.2
 TEST(every_broken_statement_is_reported, {
     TEST_ASSERT_EQ_STR(parse_fails("fn f() void {\n    x;\n    y;\n}\ni32 = 1;\n"),
                        "t.ft:2:6: error: expected an assignment, an increment or a call, "
@@ -417,7 +403,6 @@ TEST(every_broken_statement_is_reported, {
 // ---- statements in every context ------------------------------------------
 
 // Every compound assignment is a statement of its own.
-// D7.2
 TEST(every_assignment_operator_is_a_statement, {
     TEST_ASSERT_EQ_STR(dump_stmt("x -= 1;"), "(assign -= (ident x) (int 1))");
     TEST_ASSERT_EQ_STR(dump_stmt("x *= 1;"), "(assign *= (ident x) (int 1))");
@@ -432,7 +417,7 @@ TEST(every_assignment_operator_is_a_statement, {
     TEST_ASSERT_EQ_STR(dump_stmt("i--;"), "(incdec -- (ident i))");
 })
 
-// An assignment target is any postfix form or a unary `*` (grammar.md 5).
+// An assignment target is any postfix form or a unary `*`.
 TEST(every_assignment_target_shape, {
     TEST_ASSERT_EQ_STR(dump_stmt("**pp = 1;"), "(assign = (unary * (unary * (ident pp))) (int 1))");
     TEST_ASSERT_EQ_STR(dump_stmt("(*p).f = 1;"),
@@ -448,7 +433,6 @@ TEST(every_assignment_target_shape, {
 
 // A declaration is a statement wherever a statement is, and its initializer is
 // an expression or a brace list.
-// D6.5, D7.1
 TEST(declarations_in_every_body, {
     TEST_ASSERT_EQ_STR(dump_stmt("if (c) { i32 x = 1; }"),
                        "(if (ident c) (block (var x (type (prim i32)) (int 1))) nil)");
@@ -462,7 +446,6 @@ TEST(declarations_in_every_body, {
 })
 
 // Loops and conditionals nest, and `break` and `continue` sit in them.
-// D7.5, D7.6
 TEST(nested_control_flow, {
     TEST_ASSERT_EQ_STR(dump_stmt("while (a) { while (b) { break; } continue; }"),
                        "(while (ident a) (block (while (ident b) (block (break))) (continue)))");
@@ -478,7 +461,6 @@ TEST(nested_control_flow, {
 })
 
 // A case body is an implicit block that holds any statement.
-// D7.6
 TEST(case_bodies_hold_statements, {
     TEST_ASSERT_EQ_STR(dump_stmt("switch (c) { case 1: i32 x = 1; f(x); }"),
                        "(switch (ident c) (case (labels (int 1))"
@@ -492,7 +474,6 @@ TEST(case_bodies_hold_statements, {
 })
 
 // `defer` takes an assignment, an increment, a call or a block.
-// D7.8
 TEST(every_defer_form, {
     TEST_ASSERT_EQ_STR(dump_stmt("defer i++;"), "(defer (incdec ++ (ident i)))");
     TEST_ASSERT_EQ_STR(dump_stmt("defer *p = 0;"),
@@ -510,7 +491,6 @@ TEST(every_defer_form, {
 
 // The `for` parts are a declaration, an assignment, an increment or a call,
 // and any of them may be missing.
-// D7.5
 TEST(every_for_part_shape, {
     TEST_ASSERT_EQ_STR(dump_stmt("for (f(); ; g()) { }"),
                        "(for (call-stmt (call (ident f))) nil"
@@ -528,7 +508,6 @@ TEST(every_for_part_shape, {
 })
 
 // A range loop takes any expression as its collection.
-// D7.5
 TEST(range_for_collections, {
     TEST_ASSERT_EQ_STR(dump_stmt("for (u8 b : buf[..]) { }"),
                        "(range-for (type (prim u8)) b (span (ident buf) nil nil) (block))");
@@ -540,7 +519,7 @@ TEST(range_for_collections, {
                        "(range-for (type (prim i32) (array (int 4))) row (ident rows) (block))");
 })
 
-// ---- the disambiguation matrix (grammar.md 7.1) ---------------------------
+// ---- the disambiguation matrix ---------------------------
 
 // A statement that starts with a type-looking prefix is a declaration
 // exactly when an identifier follows the type.
@@ -574,10 +553,7 @@ TEST(a_type_prefix_followed_by_anything_else_is_a_statement, {
                        "(assign = (field (index (field (ident foo) bar) (int 2)) baz) (int 1))");
 })
 
-// A type embeds in an expression, in `cast`, `sizeof`, `new` and the length of
-// an array literal (grammar.md 6), so a `mut` or an `own` inside a bracket
-// belongs to that type and says nothing about the statement: only a marker
-// outside every bracket makes the statement a declaration (grammar.md 7.1).
+// A type embeds in an expression, in `cast`, `sizeof`, `new` and the length of an array literal.
 TEST(a_marker_inside_a_bracket_leaves_the_statement_alone, {
     TEST_ASSERT_EQ_STR(dump_stmt("a[sizeof(i32 mut*)..2] = b;"),
                        "(assign = (span (ident a) "
@@ -593,8 +569,7 @@ TEST(a_marker_inside_a_bracket_leaves_the_statement_alone, {
                        "(new (type (name node) (ptr own)) (int 4))))");
 })
 
-// A primitive, `string`, `void` or `fn` starts a declaration with no
-// speculation at all (grammar.md 7.1).
+// A primitive, `string`, `void` or `fn` starts a declaration with no speculation at all.
 TEST(a_keyword_type_starts_a_declaration_at_once, {
     TEST_ASSERT_EQ_STR(dump_stmt("u8 b = 0;"), "(var b (type (prim u8)) (int 0))");
     TEST_ASSERT_EQ_STR(dump_stmt("bool ok = true;"), "(var ok (type (prim bool)) (bool true))");

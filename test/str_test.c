@@ -1,6 +1,6 @@
-// Unit tests of str.h: views, the FNV-1a hash of stdlib.md 2.5, owned
-// copies and the string pool. The fatal exits and the allocation helpers
-// have their own suite, mem_test.c, and the byte buffer sb_test.c.
+// Tests `str.h` views, the FNV-1a hash, owned copies, and the string
+// pool. The fatal exits and the allocation helpers have their own suite, mem_test.c, and the byte
+// buffer sb_test.c.
 #include "str.h"
 
 #include <stdint.h>
@@ -12,7 +12,7 @@
 
 enum { ERR_MAX = 256 };
 
-// The FNV-1a vectors of stdlib.md 2.5 and test/lang/programs/hashmap.ft.
+// The FNV-1a vectors of the library contract and test/lang/programs/hashmap.ft.
 static const uint64_t FNV_EMPTY = 14695981039346656037ULL;
 static const uint64_t FNV_A = 12638187200555641996ULL;
 static const uint64_t FNV_AB = 620445648566982762ULL;

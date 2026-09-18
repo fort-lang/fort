@@ -1,9 +1,4 @@
-// Unit tests of the fatal exits of toolchain.md 1 and the allocation
-// helpers of str.h: mem_alloc, mem_free, and the checked size arithmetic
-// mem_add, mem_mul and mem_grown_cap that every container's growth goes
-// through. Views, the pool and the byte buffer have their own suites,
-// str_test.c and sb_test.c.
-// D14.1
+// Tests allocation helpers and fatal memory errors.
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>

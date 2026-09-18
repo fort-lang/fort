@@ -1,12 +1,6 @@
-// Unit tests of the driver: the command line of toolchain.md 1, the pipeline
-// of toolchain.md 2 (the temporary directory and the clang invocation) and
-// the exit statuses.
-// D14.3, D14.1
+// Tests command-line behavior and compiler invocations.
 //
-// The invocation is asserted through test/fake_cc.sh, which records the whole
-// command line the driver spawned instead of compiling it (FORT_FAKE_CC is
-// its path, from CMake), so the tests read the argv the compiler would hand
-// to clang, argument for argument.
+// The tests read the argv the compiler would hand to clang, argument for argument.
 #include "driver.h"
 
 #include <signal.h>
@@ -64,9 +58,8 @@ typedef struct {
     char mask[PATH_CAP];      // what the module argument was replaced by
 } cc_log_t;
 
-// The name a temporary module gets for an entry called main.ft, and the text
-// its directory is replaced by, since the directory mkdtemp chose is not
-// known in advance.
+// The name a temporary module gets for an entry called main.ft. The text its directory is replaced
+// by, since the directory mkdtemp chose is not known in advance.
 static const char MODULE_NAME[] = "/main.ll";
 static const char MODULE_MASK_DIR[] = "<tmp>";
 
@@ -102,9 +95,9 @@ static bool ends_with(const char* s, const char* suffix) {
     return len >= tail && strcmp(s + len - tail, suffix) == 0;
 }
 
-// Replaces the argument naming the temporary module by `<tmp>/<name>` and
-// keeps the directory it named, so that the rest of the command line is one
-// string comparison. False when no argument ends in `name`.
+// Replaces the temporary module argument with `<tmp>/<name>`.
+// It preserves the directory for one whole-command comparison.
+// Returns false when no argument ends in `name`.
 static bool cc_log_mask_module(cc_log_t* log, const char* name) {
     for (size_t i = 0; i < log->count; i++) {
         if (ends_with(log->args[i], name)) {
@@ -151,7 +144,7 @@ static bool cc_log_load(const char* path, cc_log_t* log) {
     return cc_log_load_named(path, log, MODULE_NAME);
 }
 
-// ---- the command line (toolchain.md 1) --------------------------------------------
+// ---- the command line --------------------------------------------
 
 TEST(usage_line_is_the_one_of_toolchain_section_1,
      { TEST_ASSERT_EQ_STR(driver_usage_line(), "usage: fort [options] entry.ft"); })
@@ -172,7 +165,7 @@ TEST(help_prints_the_usage_line_first_and_exits_0, {
     TEST_ASSERT_EQ_SIZE(strlen(run.err), (size_t)0);
 })
 
-// Every option of toolchain.md 1; --help lists them all.
+// Every option of the command-line contract; --help lists them all.
 static const char* const EVERY_OPTION[] = {"-o <file>",
                                            "-S",
                                            "-c",
@@ -240,7 +233,7 @@ TEST(bare_l_is_not_an_option, {
     TEST_ASSERT_NONNULL(strstr(run.err, "fort: error: unknown option '-l'\n"));
 })
 
-// The options of toolchain.md 1 that take the following argument.
+// The options of the command-line contract that take the following argument.
 static const char* const OPTIONS_WITH_ARGUMENT[] = {
     "-o", "-I", "--std-dir", "--cc", "--target", "-Xcc"};
 
@@ -269,7 +262,7 @@ TEST(options_without_an_entry_file_are_a_usage_error, {
                        "usage: fort [options] entry.ft\n");
 })
 
-// ---- parsing (toolchain.md 1) ------------------------------------------------------
+// ---- parsing ------------------------------------------------------
 
 TEST(defaults_are_clang_the_x86_64_triple_and_checked_mode, {
     driver_options_t opts;
@@ -410,7 +403,7 @@ TEST(help_and_version_stop_the_parse, {
     driver_options_free(&opts);
 })
 
-// ---- paths (toolchain.md 1) ---------------------------------------------------------
+// ---- paths ---------------------------------------------------------
 
 TEST(the_entry_base_drops_the_directory_and_the_ft_suffix, {
     TEST_ASSERT_TRUE(str_eq(driver_entry_base("main.ft"), str_from_cstr("main")));
@@ -483,7 +476,6 @@ TEST(the_std_dir_option_beats_the_environment_which_beats_the_binary, {
     TEST_UNUSED(unsetenv("FORT_STD_DIR"));
     // With neither, the directory containing the binary, which /proc/self/exe
     // names whatever argv[0] is.
-    // D14.1
     char expected[PATH_CAP];
     TEST_ASSERT_TRUE(std_beside_this_test(expected, sizeof expected));
     TEST_ASSERT_EQ_STR(driver_std_dir(&opts, "fort", &pool).ptr, expected);
@@ -492,8 +484,7 @@ TEST(the_std_dir_option_beats_the_environment_which_beats_the_binary, {
     str_pool_free(&pool);
 })
 
-// ---- the clang invocation (toolchain.md 2) -------------------------------------------
-// D14.3
+// ---- the clang invocation -------------------------------------------
 
 // The command line driver_cc_argv built, one argument per line.
 static void argv_lines(const ptrvec_t* argv, char* buf, size_t size) {
@@ -599,7 +590,7 @@ TEST(the_module_is_never_introduced_by_x_ir, {
     TEST_ASSERT_NULL(strstr(line, "\n-x\n"));
 })
 
-// ---- the pipeline end to end (toolchain.md 2) ----------------------------------------
+// ---- the pipeline end to end ----------------------------------------
 
 TEST(a_checked_build_spawns_the_invocation_and_removes_the_temporary, {
     sandbox_t box = sandbox_open();
@@ -623,8 +614,8 @@ TEST(a_checked_build_spawns_the_invocation_and_removes_the_temporary, {
             FORT_FAKE_CC,
             box.out);
     TEST_ASSERT_EQ_STR(log.joined, expected);
-    // The module lived in a directory of its own under $TMPDIR, and both are
-    // gone once the driver returns (toolchain.md 2).
+    // The module lived in a directory of its own under $TMPDIR, and both are gone once the driver
+    // returns.
     TEST_ASSERT_TRUE(strncmp(log.tmp_dir, box.tmp, strlen(box.tmp)) == 0);
     TEST_ASSERT_EQ_INT32(access(log.tmp_dir, F_OK), -1);
     TEST_ASSERT_EQ_INT32(count_entries(box.tmp), 0);
@@ -698,10 +689,8 @@ TEST(compile_only_stops_at_the_object_and_names_it_after_the_entry, {
 })
 
 TEST(the_std_dir_environment_variable_locates_the_runtime_source, {
-    // The standard library directory is where the compiler reads `std.rt`
-    // from, and every closure holds it, so a directory with no `rt.ft` in it
-    // stops the compilation before `--cc` runs.
-    // D9.10, D13.1
+    // The standard library directory is where the compiler reads `std.rt` from, and every closure
+    // holds it. A directory with no `rt.ft` in it stops the compilation before `--cc` runs.
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
     TEST_UNUSED(setenv("FORT_STD_DIR", "/env/std", 1));
@@ -721,7 +710,7 @@ TEST(emitting_the_module_stops_before_the_compiler, {
     const run_t run = RUN("-S", "--cc", FORT_FAKE_CC, "-o", module, box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     TEST_ASSERT_EQ_INT32(access(module, F_OK), 0);
-    // -S needs no temporary and runs no compiler (toolchain.md 2).
+    // -S needs no temporary and runs no compiler.
     TEST_ASSERT_EQ_INT32(access(box.log, F_OK), -1);
     TEST_ASSERT_EQ_INT32(count_entries(box.tmp), 0);
     sandbox_close(&box);
@@ -896,10 +885,8 @@ TEST(an_entry_without_the_ft_suffix_keeps_its_whole_name, {
     TEST_ASSERT_NONNULL(source);
     TEST_UNUSED(fputs("fn main() i32 { return 0; }\n", source));
     TEST_UNUSED(fclose(source));
-    // A base name with no suffix at all keeps its whole self
-    // (toolchain.md 2); that only a `.ft` suffix is dropped is the test
-    // above, since every other suffix carries a `.`, which an entry may not.
-    // D9.1
+    // A base name without a suffix stays unchanged. The test above confirms that only a `.ft`
+    // suffix is removed.
     const run_t run = RUN("--cc", FORT_FAKE_CC, "-o", box.out, entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     cc_log_t log;
@@ -928,11 +915,7 @@ TEST(only_the_ft_suffix_is_dropped_from_the_base_name, {
     char entry[PATH_CAP];
     join(entry, sizeof entry, box.dir, "prog.src");
     TEST_ASSERT_TRUE(write_source(entry, "fn main() i32 { return 0; }\n"));
-    // A suffix other than `.ft` stays in the base name (toolchain.md 2), so
-    // the name still holds the `.` an entry may not and the message quotes
-    // the whole of it: a compiler that stripped `.src` would report `'prog'`
-    // and read the file instead.
-    // D9.1
+    // A suffix other than `.ft` stays in the base name.
     const run_t run = RUN_CAPTURED("--cc", FORT_FAKE_CC, "-o", box.out, entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
     TEST_ASSERT_NONNULL(strstr(last_diags, "entry file name 'prog.src' cannot contain '.'"));
@@ -995,8 +978,8 @@ TEST(an_unreadable_entry_file_is_exit_2_and_removes_the_temporary, {
 TEST(the_object_of_c_is_named_after_the_entry_in_the_current_directory, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    // The entry lives in the sandbox, but the default output is placed in the
-    // current directory as cc does (toolchain.md 1).
+    // The entry lives in the sandbox, but the default output is placed in the current directory as
+    // cc does.
     const run_t run = RUN("-c", "--cc", FORT_FAKE_CC, box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     cc_log_t log;
@@ -1106,7 +1089,7 @@ TEST(exit_status_constants_match_d14_1, {
     TEST_ASSERT_EQ_INT32(FORT_EXIT_USAGE, 2);
 })
 
-// ---- the front end (toolchain.md 2, steps 1 and 2) -------------------------------
+// ---- the front end -------------------------------
 
 TEST(an_import_no_root_reaches_is_a_compile_error, {
     sandbox_t box = sandbox_open();
@@ -1126,9 +1109,7 @@ TEST(a_dotted_entry_base_name_is_a_compile_error_with_no_output, {
     char entry[PATH_CAP];
     join(entry, sizeof entry, box.dir, "my.app.ft");
     TEST_ASSERT_TRUE(write_source(entry, "fn main() i32 { return 0; }\n"));
-    // The entry base name may not contain a `.`: the compilation stops at
-    // step 1 of toolchain.md 2, before any file is written.
-    // D9.1
+    // A dotted entry base name fails before the driver writes output or starts the compiler.
     const run_t run = RUN_CAPTURED("--cc", FORT_FAKE_CC, "-o", box.out, entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_COMPILE_ERROR);
     TEST_ASSERT_NONNULL(strstr(last_diags, "entry file name 'my.app' cannot contain '.'"));
@@ -1146,7 +1127,6 @@ TEST(a_module_beside_the_entry_file_is_reached_without_any_option, {
     join(util, sizeof util, box.dir, "util.ft");
     TEST_ASSERT_TRUE(write_source(util, "fn add(i32 a, i32 b) i32 { return a + b; }\n"));
     // The entry file's directory is always a search root.
-    // D9.2
     const run_t run = RUN_CAPTURED("--cc", FORT_FAKE_CC, "-o", box.out, box.entry);
     TEST_ASSERT_EQ_STR(last_diags, "");
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
@@ -1165,7 +1145,6 @@ TEST(an_include_root_reaches_a_module_the_entry_directory_lacks, {
     join(util, sizeof util, lib, "util.ft");
     TEST_ASSERT_TRUE(write_source(util, "fn add(i32 a, i32 b) i32 { return a + b; }\n"));
     // A `-I` root is searched after the entry file's directory.
-    // D9.2
     const run_t run = RUN_CAPTURED("--cc", FORT_FAKE_CC, "-I", lib, "-o", box.out, box.entry);
     TEST_ASSERT_EQ_STR(last_diags, "");
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
