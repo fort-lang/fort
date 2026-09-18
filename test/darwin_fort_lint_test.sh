@@ -1,6 +1,6 @@
 #!/bin/bash
-# Test D1.4 names in the darwin standard root with stage2.
-# T-144: the linux standard root conflicts with darwin libc declarations.
+# Test names in the Darwin standard root with stage2.
+# The Linux standard root conflicts with Darwin libc declarations.
 set -eu
 
 if [ "$#" -ne 1 ]; then

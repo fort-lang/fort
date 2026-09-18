@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 project(fort LANGUAGES C)
 
 # ---- toolchain --------------------------------------------------------------
-# C11 without extensions and with POSIX.1-2008 visible (notes/style.md 2).
+# Use C11 without extensions. Make POSIX.1-2008 visible.
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
@@ -398,9 +398,8 @@ set_tests_properties(fixpoint PROPERTIES LABELS lang)
 # target. The linux binary is x86-64 ELF. The darwin binary is arm64 Mach-O.
 #
 # The search roots are src, so that a server module is `lsp.<name>` and never
-# `<name>` (D9.1, D9.7, T-063), and src/fort, which is where `flt` stands.
-# The entry file's own directory is the first root (D9.2) and holds no module
-# any import names.
+# `<name>`. The other root is src/fort, which contains `flt`.
+# The entry file's directory is the first root. No import names a module there.
 set(FORT_LSP_SRC_DIR "${CMAKE_SOURCE_DIR}/src/lsp")
 file(GLOB FORT_LSP_SOURCES CONFIGURE_DEPENDS "${FORT_LSP_SRC_DIR}/*.ft")
 # The binary is `fort-lsp` and the target is `fort_lsp`: ninja refuses a target
@@ -414,9 +413,8 @@ add_custom_command(
             "${FORT_STD_DIR}" "${FORT_TARGET_CC_PATH}" "${FORT_LSP_BINARY}"
             "${FORT_LSP_SRC_DIR}/main.ft"
             "${CMAKE_SOURCE_DIR}/src" "${FORT_FORT_SRC_DIR}"
-    # The file inputs and not the target alone: a
-    # DEPENDS on a custom target is an order-only edge, so an edit to a module
-    # of src/lsp would otherwise leave this binary as it was.
+    # Depend on the input files and the target. A custom target creates only an
+    # order edge. Without the file inputs, a module edit would not rebuild this binary.
     DEPENDS fort "${FORT_COMPILER_BINARY}"
             "${CMAKE_SOURCE_DIR}/tools/build_lsp.sh"
             ${FORT_LSP_SOURCES} ${FORT_STD_OUTPUTS}
@@ -441,14 +439,10 @@ endif()
 
 # ---- unit tests ----------------------------------------------------------------
 if(FORT_ENABLE_BOOTSTRAP)
-# The test-only helpers that are compiled rather than included: every
-# test/*.c that is not a suite. They are linked into every suite so that
-# -Werror and clang-tidy cover them once. The list is empty today -- the
-# syntax tree's S-expression printer, which used to be the one member, became
-# what `fort --ast` writes and moved into src/bootstrap (D14.1) -- so the
-# target is created only when the glob finds something, since a library with
-# no source is a configure error. The glob and the link below stay: the next
-# test/*.c that is not a suite is built and linked with no CMake edit.
+# Compile test-only helpers that a suite does not include. Link each helper into
+# each suite so that -Werror and clang-tidy inspect it once. The list is empty.
+# Create the target only when the glob finds a helper. CMake rejects a library
+# with no source. A new helper then needs no CMake edit.
 file(GLOB FORT_TEST_SUPPORT_SOURCES CONFIGURE_DEPENDS "${FORT_TEST_DIR}/*.c")
 list(FILTER FORT_TEST_SUPPORT_SOURCES EXCLUDE REGEX "_test\\.c$")
 set(FORT_TEST_SUPPORT_LIB "")
@@ -459,8 +453,8 @@ if(FORT_TEST_SUPPORT_SOURCES)
     set(FORT_TEST_SUPPORT_LIB fort_test_support)
 endif()
 
-# One executable and one ctest, labelled unit, per test/<component>_test.c
-# (toolchain.md 7.5). The ctest is named unit-<component>.
+# Each test/<component>_test.c gets one executable and one unit test.
+# The test name is unit-<component>.
 file(GLOB FORT_UNIT_TEST_SOURCES CONFIGURE_DEPENDS "${FORT_TEST_DIR}/*_test.c")
 set(FORT_UNIT_TEST_TARGETS "")
 foreach(test_source IN LISTS FORT_UNIT_TEST_SOURCES)
@@ -479,9 +473,8 @@ foreach(test_source IN LISTS FORT_UNIT_TEST_SOURCES)
 endforeach()
 
 # The driver tests spawn test/fake_cc.sh as their --cc: it records the command
-# line the driver built (D14.3) instead of compiling it, so they need its path;
-# the check suite needs it to assert that `--check` spawns nothing (D20.1) and
-# the conformance suite to assert the same of the runs that stop before it.
+# line that the driver built. The check suite asserts that `--check` does not start it.
+# The conformance suite makes the same assertion for runs that stop before it.
 foreach(driver_suite driver_test driver_check_test driver_conformance_test driver_tokens_test
                      driver_ast_test)
     if(TARGET "${driver_suite}")
@@ -490,8 +483,8 @@ foreach(driver_suite driver_test driver_check_test driver_conformance_test drive
     endif()
 endforeach()
 
-# The emitter suites run the LLVM verifier over every module they emit (D19.1)
-# so they need the verifier's path. Every test/gen*_test.c gets it, so a new
+# The emitter suites run the LLVM verifier over each emitted module.
+# Each suite needs the verifier path. Every test/gen*_test.c gets it, so a new
 # suite is covered by adding the file, and `opt` is a default rather than a
 # configure-time requirement of every preset, as it is for the pipeline test
 # and for the language harness.
@@ -502,10 +495,10 @@ foreach(gen_suite IN LISTS FORT_UNIT_TEST_TARGETS)
     endif()
 endforeach()
 
-# runtime_sig_test reads std/rt.ft and check_conv_test std/libc.ft: the first
-# holds every row of the entry-point table against the fort signature that
-# defines it (toolchain.md 5.1), the second holds D9.8's closure-wide rule
-# against the library's own declarations (D9.10). Both need the sources.
+# runtime_sig_test reads std/rt.ft. It checks each entry-point row against its
+# fort signature. check_conv_test reads std/libc.ft and checks imported calls
+# against the library declarations.
+# Both suites need the sources.
 #
 # Both suites parse the standard root that bootstrap-0 uses. This makes them
 # contracts between the C implementation and its bootstrap library.
@@ -521,11 +514,9 @@ endforeach()
 endif()
 
 # The cross pipeline: the hand-written LLVM IR modules under test/ir, which
-# are in the form of toolchain.md 6 (D19.1), are verified with opt, compiled
-# and linked on their own and run under qemu (toolchain.md 2). A module holds
-# the whole program, the runtime included (D9.10, D13.1), so the link takes no
-# object beside it. It is a unit test so that check covers it; it needs the
-# target clang, not the compiler.
+# are complete modules. The pipeline verifies and compiles each module.
+# It links each module alone and runs it under qemu. A module contains the runtime.
+# The link takes no other object. This unit test needs the target clang, not fort.
 add_test(NAME pipeline
     COMMAND bash "${FORT_TEST_DIR}/pipeline_test.sh"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
@@ -534,7 +525,7 @@ set_tests_properties(pipeline PROPERTIES
     ENVIRONMENT "FORT_TARGET_CC=${FORT_TARGET_CC_PATH};FORT_TARGET_TRIPLE=${FORT_TARGET_TRIPLE}")
 
 # The linux compiler emits darwin IR with a caller-selected standard root.
-# The verifier checks its form. T-142 owns darwin ABI and stack probes.
+# The verifier checks its form. Separate tests check the Darwin ABI and stack.
 add_test(NAME target-ir
     COMMAND bash "${FORT_TEST_DIR}/target_ir_test.sh" "${FORT_COMPILER_BINARY}"
             "${FORT_STD_DIR}" "${FORT_OPT_PATH}"
@@ -562,13 +553,13 @@ if(FORT_ENABLE_BOOTSTRAP)
     endif()
 endif()
 
-# The language tests (toolchain.md 7, D14.4, D14.5): test/lang/run_tests.py
-# drives the compiler over test/lang. The ctests `lang` and `lang-json` use
+# The language test harness drives the compiler over test/lang.
+# The ctests `lang` and `lang-json` use
 # the product compiler. `lang_lint` validates the directives, and
 # `lang_selftest` runs the harness's own unit tests (both label unit).
 set(FORT_LANG_DIR "${FORT_TEST_DIR}/lang")
 
-# The parser's recovery suite walks the fail corpus (D14.4) and asserts that
+# The parser recovery suite walks the fail corpus and asserts that
 # every diagnostic lands on an annotated line, so it needs the corpus's path.
 if(TARGET parser_recovery_test)
     target_compile_definitions(parser_recovery_test PRIVATE FORT_LANG_DIR="${FORT_LANG_DIR}")
@@ -580,11 +571,10 @@ if(FORT_LANG_JOBS EQUAL 0)
     set(FORT_LANG_JOBS 1)
 endif()
 # --verify-ir runs opt -passes=verify over the `-S` output of every test that
-# compiles, so every module the emitter writes is verified from here on
-# (D19.1, toolchain.md 6).
+# compiles. Thus, it verifies each module that the emitter writes.
 #
 # The compiler's own modules: test/fort/<x>_test.ft is a run test in the
-# directives of D14.5 that imports a module of src/fort with `-I` and asserts
+# directive format. Each test imports a src/fort module with `-I` and asserts
 # what its comments promise. The harness takes the corpus root, so the same
 # run_tests.py judges both.
 #
@@ -607,7 +597,7 @@ set_tests_properties(fort-modules PROPERTIES
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
 
 # The product language test uses the current compiler and standard library.
-# It verifies each module that the compiler emits (D19.1).
+# It verifies each module that the compiler emits.
 set(FORT_LANG_COMMAND
     "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}"
     --fort "${FORT_COMPILER_BINARY}"
@@ -621,10 +611,9 @@ set(FORT_LANG_COMMAND
 add_test(NAME lang COMMAND ${FORT_LANG_COMMAND})
 set_tests_properties(lang PROPERTIES LABELS lang)
 
-# The product check mode runs over the same corpus. It uses `fort --check --json` on every
-# fail test, held against the text form of D14.2, and `--index` on every test
-# with a golden index.json beside it, held against that file byte for byte
-# (D20.2, D20.3). The harness reports the current measured count.
+# Product check mode runs over the same corpus. It compares JSON and text diagnostics.
+# It runs `--index` on each test with a golden index.json file.
+# The harness compares the index byte for byte and reports the measured count.
 add_test(NAME lang-json COMMAND ${FORT_LANG_COMMAND} --check-json)
 set_tests_properties(lang-json PROPERTIES LABELS lang)
 
@@ -651,12 +640,10 @@ add_test(NAME stage2-import-if
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(stage2-import-if PROPERTIES LABELS unit)
 
-# The interactive half of D11.5 (toolchain.md 5.3): a program whose stdout is
-# a terminal flushes each line as it writes it. No language test can see that,
-# because run_tests.py captures stdout through a pipe and every test therefore
-# takes the non-interactive path, so test/tty_test.py compiles one program and
-# drives it on a real pty and on a pipe. It is a unit test like `pipeline`, and
-# it needs the compiler and the runtime object this build made.
+# The interactive test checks line flushing when stdout is a terminal.
+# Language tests capture stdout through a pipe and take the non-interactive path.
+# test/tty_test.py drives one program through a real pty and a pipe.
+# It needs the compiler and the standard root from this build.
 add_test(NAME tty
     COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/tty_test.py"
             --fort "${FORT_COMPILER_BINARY}"
@@ -685,9 +672,8 @@ set_tests_properties(check_comments_selftest PROPERTIES
     LABELS unit
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
-# The unit tests of tools/lines.py (label unit): the glob matcher, which the
-# guest's Python 3.12 cannot delegate to pathlib, and the --since mode that
-# measures a branch's own diff (notes/testing.md 9).
+# The tools/lines.py unit tests cover the custom glob matcher.
+# They also cover --since measurement of a branch diff.
 add_test(NAME lines_selftest
     COMMAND "${FORT_PYTHON3}" -m unittest lines_test
     WORKING_DIRECTORY "${FORT_TEST_DIR}")
@@ -695,13 +681,9 @@ set_tests_properties(lines_selftest PROPERTIES
     LABELS unit
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
-# The unit tests of tools/mutate.py (label unit): the parts of a mutation round
-# that fail silently -- the ctest failure parser, the anchor that must match
-# once, the stale-binary guard, the restore, the timeout verdict, the exit
-# status, the round loop and the guard that keeps this suite from judging a
-# round -- and the anchors of tools/mutations/emitter_bootstrap.json against the
-# sources they name, which is the one way a table of textual anchors rots
-# (T-078). It runs no round: a round rebuilds the compiler.
+# The tools/mutate.py unit tests cover parsers, anchors, guards, restore, and timeouts.
+# They also check the shipped table against its source anchors.
+# The unit tests run no mutation round because a round rebuilds the compiler.
 if(FORT_ENABLE_BOOTSTRAP)
     add_test(NAME mutate_selftest
         COMMAND "${FORT_PYTHON3}" -m unittest mutate_test
@@ -712,18 +694,17 @@ if(FORT_ENABLE_BOOTSTRAP)
 endif()
 
 # The shape of the decision log (label unit): every entry is `### Dn.m Title`
-# with an owner field and a rule field, and no line is over 100 columns
-# (T-100). The log is normative, so a malformed entry is a defect the gate
-# must see; test/highlight_test.py and test/fort_lint_test.py read rules out
-# of it through the same parser.
+# with an owner field and a rule field. It also limits lines to 100 columns.
+# The log is normative, so the gate must detect a malformed entry.
+# Two other tests read rules through the same parser.
 add_test(NAME check_decisions
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/check_decisions.py"
             "${CMAKE_SOURCE_DIR}/spec/decisions.md" --expect 148
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(check_decisions PROPERTIES LABELS unit)
 
-# Its own unit tests (label unit): the two readers, every problem the lint
-# reports, and the before-and-after comparison that T-100 was accepted on.
+# Its unit tests cover both readers and each reported problem.
+# They also compare two log revisions.
 add_test(NAME check_decisions_selftest
     COMMAND "${FORT_PYTHON3}" -m unittest check_decisions_test
     WORKING_DIRECTORY "${FORT_TEST_DIR}")
@@ -750,14 +731,13 @@ set_tests_properties(knowledge_lint_selftest PROPERTIES
     LABELS unit
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
-# The VM gate manifest must detect ignored fort files and symlinks; skip build outputs (T-148).
+# The VM gate manifest detects ignored fort files and symlinks. It skips build outputs.
 add_test(NAME gate_ft_manifest
     COMMAND bash "${FORT_TEST_DIR}/gate_ft_manifest_test.sh")
 set_tests_properties(gate_ft_manifest PROPERTIES LABELS unit)
 
-# The D1.4 identifier check over the project's own fort sources: it reads
-# `fort --index` (D20.3) rather than tokenizing fort a second time, so it needs
-# a compiler.
+# The identifier check reads `fort --index` instead of tokenizing fort again.
+# Thus, it needs a compiler.
 #
 # The product compiler reads all fort sources in the repository. The test has
 # label lang because it runs an x86-64 binary under qemu. It names --std-dir
@@ -769,7 +749,7 @@ add_test(NAME fort_lint
 set_tests_properties(fort_lint PROPERTIES LABELS lang)
 
 # darwin declarations need a darwin standard root. The linux compiler checks
-# their names (T-144).
+# their names.
 add_test(NAME fort_lint_darwin
     COMMAND bash "${FORT_TEST_DIR}/darwin_fort_lint_test.sh" "${FORT_COMPILER_BINARY}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
@@ -786,7 +766,7 @@ set_tests_properties(fort_lint_selftest PROPERTIES
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1;FORT_BINARY=${FORT_COMPILER_BINARY};FORT_STD_DIR=${FORT_STD_DIR}")
 
 # The unit tests of the TextMate grammar in editors/vscode (label unit): they
-# compare its keyword and operator lists with D2.4 and D2.10 and assert the
+# compare its keyword and operator lists with the language lists. They also assert the
 # scopes it gives the fixtures in test/highlight.
 add_test(NAME highlight_selftest
     COMMAND "${FORT_PYTHON3}" -m unittest highlight_test
@@ -795,12 +775,10 @@ set_tests_properties(highlight_selftest PROPERTIES
     LABELS unit
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
-# The unit tests of the VS Code extension in editors/vscode (label unit), under
-# Node's built-in runner: the check document of D20.2 turned into editor shapes,
-# the conversion of its 1-based byte columns to character offsets, and the
-# activation script itself driven against a fake editor
-# (editors/vscode/test/fake_vscode.js), which leaves only what needs a real one
-# to the manual smoke test in editors/README.md.
+# Node's built-in runner tests the VS Code extension in editors/vscode.
+# It converts diagnostic documents into editor shapes.
+# It also converts 1-based byte columns to character offsets.
+# A fake editor drives activation. The manual smoke test covers real editor behavior.
 find_program(FORT_NODE NAMES node nodejs REQUIRED)
 add_test(NAME extension_selftest
     COMMAND "${FORT_NODE}" --test
@@ -832,8 +810,8 @@ file(GLOB_RECURSE FORT_LINT_SOURCES CONFIGURE_DEPENDS
     "${FORT_TEST_DIR}/*.c" "${FORT_TEST_DIR}/*.h"
 )
 
-# Block comments are not a comment form (D2.2), in fort or in the project's C
-# sources; format-check depends on the check so a `/* */` fails the gate.
+# Fort and project C sources do not permit block comments.
+# format-check depends on this target, so a `/* */` fails the gate.
 add_custom_target(check-comments
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/check_comments.py"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"

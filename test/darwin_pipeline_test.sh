@@ -1,6 +1,5 @@
 #!/bin/bash
-# test/darwin_pipeline_test.sh: prove the Apple arm64 IR pipeline on a darwin host.
-# D9.7, D14.3, D19.1, D19.7
+# Test the Apple arm64 pipeline, symbols, driver output, and traps on Darwin.
 set -eu
 
 if [ "$#" -ne 0 ] || [ "$(uname -s)" != "Darwin" ]; then

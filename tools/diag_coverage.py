@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 """Which diagnostics of a ported pass does no test/fort suite assert?
 
-Phase B ports a C file of src/bootstrap into src/fort, and its test suite is
-written beside it rather than translated from the C one: T-035's review found
-22 diagnostics of src/fort/check.ft with no fort test, 11 of them asserted by
-the C suites the ticket was porting, because only 6 of its 85 test-function
-names matched a C TEST name. Nothing mechanical had held the two together.
-This is that mechanism, and it is meant to be run before a ticket claims any
-coverage universal.
+The report compares diagnostics in one bootstrap C pass with a fort module.
+It then shows diagnostics that no test/fort suite asserts.
+Use the report before a change claims complete diagnostic coverage.
 
 A diagnostic is one `check_error(ck, loc, "...")` or one run of `msg_str`
 pieces between `check_msg_begin` and `check_msg_end`/`check_note_end`; two
@@ -19,8 +15,8 @@ shared by two messages and is evidence for neither.
 The result is a list of candidates and not a verdict: a message composed from
 pieces the suites assert only in combination ("<what> expects <T>, not <U>")
 is a false positive, because the finished text exists nowhere in the source.
-Verify what it reports by hand and write the measured list into the ticket.
-This is why it is a tool a ticket runs and not a ctest.
+Verify each reported candidate by hand. The tool is not a ctest because its
+output needs this review.
 
 Usage: diag_coverage.py [src/fort/<module>.ft], from the top of the worktree.
 """

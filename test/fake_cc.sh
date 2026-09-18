@@ -1,12 +1,9 @@
 #!/bin/bash
-# test/fake_cc.sh: the --cc of the driver unit tests (test/driver_test.c). It
-# records the whole command line the driver spawned, one argument per line
-# and its own path first, in $FORT_FAKE_CC_LOG, then exits with
-# $FORT_FAKE_CC_STATUS (0 by default), or kills itself with
-# $FORT_FAKE_CC_SIGNAL when that is set, so that both failure paths of D14.3
-# ("fort: error: cc failed with status N" and "... with signal N") are
-# exercised too. It compiles nothing: the driver's contract is the argv it
-# builds, not what clang makes of it.
+# test/fake_cc.sh: the --cc program for driver unit tests.
+# Record the spawned command in $FORT_FAKE_CC_LOG, one argument per line.
+# Then exit with $FORT_FAKE_CC_STATUS, which defaults to 0.
+# If set, $FORT_FAKE_CC_SIGNAL makes the script kill itself.
+# The script compiles nothing. Driver tests inspect the recorded arguments and failure status.
 set -eu
 
 log=${FORT_FAKE_CC_LOG:?fake_cc.sh: FORT_FAKE_CC_LOG is not set}

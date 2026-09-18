@@ -1,5 +1,5 @@
 #!/bin/bash
-# D11.4, D19.7: a returning noreturn extern reaches llvm.trap on darwin.
+# A returning noreturn extern reaches llvm.trap on Darwin.
 set -eu
 
 if [ "$#" -ne 1 ] || [ "$(uname -s)" != "Darwin" ]; then

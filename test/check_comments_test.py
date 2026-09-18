@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Unit tests of tools/check_comments.py: the scan and the command line.
 
-`//` is the only comment form (D2.2), so the tool reports every `/*` that is
-really a comment opener and must not be fooled by one inside a string
-literal, inside a character literal or inside a `//` comment. Run with
+The tool reports each real `/*` opener. It ignores openers inside strings, characters, and
+`//` comments. Run with
 `python3 -m unittest check_comments_test` from this directory.
 """
 

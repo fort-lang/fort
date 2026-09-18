@@ -1,5 +1,5 @@
 #!/bin/bash
-# T-147: record the Darwin host, tools, target, and fort input paths.
+# Record the Darwin host, tools, target, and fort input paths.
 set -euo pipefail
 
 if [ "$#" -ne 0 ] || [ "$(uname -s)" != "Darwin" ]; then

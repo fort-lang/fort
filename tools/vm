@@ -1,8 +1,7 @@
 #!/bin/bash
-# tools/vm: the only way to drive the fort development VM (see
-# notes/environment.md 1). Every worktree shares the VM defined by the main
-# checkout's Vagrantfile; commands run in the guest directory that matches the
-# host cwd.
+# tools/vm: drive the fort development VM.
+# Each worktree shares the VM from the main checkout.
+# Commands run in the guest directory that matches the host working directory.
 set -eu
 
 usage() {
@@ -97,13 +96,9 @@ esac
 VM_DIR=$(find_vm_dir) || exit 1
 [ -f "$VM_DIR/Vagrantfile" ] || die "no Vagrantfile in $VM_DIR"
 
-# FORT_VM_SLOT selects one of several VMs brought up from the same directory.
-# Both mount the same directory at /vagrant, so each sees every worktree and
-# git works in each; what differs is only vagrant's state directory and the
-# VirtualBox machine name (fort-dev-<dir>-<slot>). Slot 1, the default, is the
-# original layout, so nothing changes for a caller that never sets it. A
-# second slot exists to use the host cores one 6-vCPU guest cannot reach, and
-# the gate hold below keeps two slots from ever driving one worktree at once.
+# FORT_VM_SLOT selects a VM from the same checkout.
+# Each VM mounts the checkout at /vagrant and has separate Vagrant state.
+# Slot 1 is the default. The build hold prevents two slots from building one worktree.
 VM_SLOT=${FORT_VM_SLOT:-1}
 case "$VM_SLOT" in
 [1-9]) ;;
@@ -116,8 +111,8 @@ else
     VM_STATE="$VM_DIR/.vagrant-$VM_SLOT"
     export VAGRANT_DOTFILE_PATH="$VM_STATE"
     export FORT_VM_SLOT="$VM_SLOT"
-    # 6 + 4 fits the host's 10 physical cores exactly; 6 + 6 oversubscribes by two
-    # and is the contention the second slot exists to remove.
+    # Slots 1 and 2 default to 6 and 4 CPUs, for a total of 10.
+    # FORT_VM_CPUS can override the default for this slot.
     export FORT_VM_CPUS="${FORT_VM_CPUS:-4}"
 fi
 SSH_CONFIG="$VM_STATE/ssh-config"
@@ -161,11 +156,8 @@ guest_run() {
     if [ -f "$SSH_CONFIG" ]; then
         status=0
         if [ "$1" = -T ]; then
-            # A trap cannot run while a foreground child is running: bash
-            # defers it until the child returns, which for a gate step is
-            # minutes. `wait` is interruptible, so ssh runs as a waited job
-            # and the gate's trap can end it (measured 2026-09-13: INT sent
-            # to the script during a step left the gate alive 13 minutes).
+            # Bash defers a trap while a foreground child runs.
+            # Run ssh as a waited job so that a trap can stop it.
             ssh -T -o ConnectTimeout=10 -F "$SSH_CONFIG" default -- "$script" 0<&0 &
             GUEST_CHILD=$!
             wait "$GUEST_CHILD" || status=$?
@@ -218,18 +210,14 @@ cmake_target() {
 # Every subcommand that drives build/<preset> takes it (run_top, cmake_target);
 # `tools/vm run` does not, since it runs whatever it is given.
 #
-# One worktree has one build/<preset>, so two gates in it make two ninja
-# processes rewrite each other's objects, and the log then names whichever test
-# lost. The collision reads as a test failure and not as contention, which is
-# what makes it expensive (T-087, and again on 2026-09-13 in fort-t064, where an
-# orphan at ppid 1 drove the build for 23 minutes beside the live gate).
+# One worktree has one build/<preset>. Two builds can replace the same objects
+# and report a false test failure.
 #
 # An orphan appears because a gate is usually started in the background of a
 # wrapper shell; when that wrapper dies the gate is reparented to init and a
 # kill aimed at the wrapper never reaches it. This hold does not stop the
 # leftover -- it makes it harmless, by refusing the second gate rather than
-# letting the two share a directory. notes/environment.md 1 says how to find and
-# kill one.
+# letting the two share a directory.
 #
 # The file build/vm-hold.pid holds the pid and belongs to tools/vm; nothing
 # else writes it. A hold whose process is gone is stale and is taken, which is
@@ -278,19 +266,8 @@ gate_acquire() {
     top=$(worktree_top)
     mkdir -p "$top/build"
     hold="$top/build/vm-hold.pid"
-    # noclobber makes the test and the write one step, which is what stops two
-    # live builds sharing a worktree. **Taking over a stale hold is not atomic**
-    # and two commands can both take it: the `rm` below acts on a file this
-    # process verified a moment earlier, so a second process that removed it and
-    # created its own loses the file to this `rm`. Measured 2026-09-13: 1 double
-    # take in 6 trials at a 1 ms skew, 0 in 60 at natural skew. Closing it needs
-    # an atomic create-or-break, which POSIX shell has not got; /usr/bin/shlock
-    # is the obvious candidate and refuses a stale lock on this host rather than
-    # breaking it (exit 1 for a lock it wrote itself whose pid had died), which
-    # would wedge a worktree instead. The window needs two builds started in one
-    # worktree within milliseconds **and** a stale hold; the case this exists to
-    # stop -- an orphan left behind and a second build started minutes later --
-    # is not that case. T-113 records it as a ratified deviation.
+    # noclobber makes the test and write one step for live holds.
+    # Replacing a stale hold is not atomic. Two commands can race after its removal.
     while ! (set -o noclobber; echo $$ > "$hold") 2>/dev/null; do
         holder=$(cat "$hold" 2>/dev/null || true)
         if hold_alive "$holder"; then
@@ -312,13 +289,8 @@ gate_acquire() {
     [ "$(cat "$hold" 2>/dev/null)" = "$$" ] || die "lost the race for $hold"
     GATE_HOLD="$hold"
     trap 'gate_release' EXIT
-    # TERM and HUP end the guest step, release the hold and re-raise. INT is
-    # listed for a command run from a terminal, and only there: a script
-    # started with `&` from a non-interactive shell -- which is how every agent
-    # starts a gate -- has SIGINT ignored on entry, and an ignored signal cannot
-    # be trapped (POSIX; measured 2026-09-13: INT to a backgrounded gate did
-    # nothing, TERM released the hold in under a second). Stop a build with
-    # TERM, never INT.
+    # TERM and HUP stop the guest step, release the hold, and raise the signal again.
+    # INT supports commands from a terminal. Use TERM for background commands.
     trap 'gate_interrupt INT' INT
     trap 'gate_interrupt TERM' TERM
     trap 'gate_interrupt HUP' HUP

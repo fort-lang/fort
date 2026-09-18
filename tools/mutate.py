@@ -1,51 +1,20 @@
 #!/usr/bin/env python3
-"""Mutation runner: break one rule in the compiler, rebuild, and see what fails.
+"""Run compiler mutation tables and report the first failing test stage.
 
-A coverage audit asks, for every rule a source file cites, whether a test in the
-repository fails when that rule is broken (T-078). The question is answered one
-rule at a time: restore the sources, apply one textual substitution, rebuild, run
-the suites from the cheapest to the widest, and stop at the first red one. A rule
-no suite catches gets a test or a recorded reason.
+Each round restores the sources, applies one substitution, and rebuilds the compiler.
+It then runs stages from narrowest to widest. The input table supplies sources, commands, and mutations.
 
-The table is data, so a second audit writes a table and not a program; the one
-`tools/mutations/emitter_bootstrap.json` holds is T-078's, over the four files of
-the C emitter. The shape is:
+Commands run from the worktree root through `tools/vm run`.
+`--runner` selects another command runner. A timeout ends the run because the guest command can continue.
 
-    {"sources": [path, ...],          the files the runner saves and restores
-     "binary": path,                  what the build produces, compared by md5
-     "build": "<shell command>",
-     "stages": [{"name": ..., "command": "<shell command>"}, ...],
-     "mutations": [{"decision": "D3.3", "file": path, "old": ..., "new": ...,
-                    "what": "what the mutant does"}, ...]}
+The built binary must differ from the baseline, or the round reports STALE.
+After all rounds, the tool restores sources and rebuilds the baseline.
+It restores saved bytes and does not use `git checkout`.
 
-Every command runs in the guest through `tools/vm run`, from the top of the
-worktree. `--runner` names another way in for a machine that needs none. A
-timeout is a host-side answer only: `ssh -T` allocates no pty, so the guest
-keeps building after the host gives up (notes/environment.md 1). A round that
-times out therefore ends the run, and the run says what may still be running.
+The gate does not run mutation rounds. `--check` only verifies that each anchor matches once.
 
-Two guards, because a mutation experiment lies quietly when a step is skipped.
-The binary the build produced must differ from the baseline's md5, or the round
-reports STALE rather than a verdict: the shared folder hands ninja a stale mtime
-often enough that "no work to do" and a green suite look like a survivor
-(notes/environment.md 2). And the run ends by restoring the sources, rebuilding
-and comparing the md5 with the baseline again, so a restore that did not compile
-is visible at once. Restoring reads a copy this program saved, never
-`git checkout`, which would also throw away uncommitted work in the same file.
-
-Nothing runs this program in the gate: it rebuilds the compiler once per row and
-takes minutes per round. `--check` is the cheap half -- it reads no build and
-asserts that every anchor still matches its file exactly once -- and it is what
-says whether a table has rotted since the sources moved. Run it before a table.
-
-**A stage must not run a test that reads the table.** A round rewrites a source,
-so a test that asserts the table's anchors against the live sources fails inside
-the round and the row reads `caught` when nothing of the compiler saw the
-mutation. `test/mutate_test.py` therefore skips that class on a mutated tree
-(`mutated_rows` below says so), and the stage of a table excludes it by name as
-well. T-078 shipped the hole and the round-2 review found it: the three
-survivors, `--only D3.7`, `--only D10.5b` and `--only D17.8`, each reproduced as
-`caught` at stage 2.
+A stage must not run tests that validate the mutation table.
+Such tests would observe the active substitution and report a false catch.
 """
 import argparse
 import json
@@ -56,13 +25,11 @@ import sys
 
 # The runner's own timeout, which is not a status a shell can return (0 to 255).
 # A stage that hangs is neither a catch nor a survivor, so it gets its own
-# verdict and the run goes on (T-078: a loop rule such as D7.5 or D17.10 can
-# hang a mutant, and a traceback would lose the other 75 rows).
+# verdict. The run then continues with the next row.
 TIMEOUT_STATUS = -1
 
-# A verdict that answers the audit's question. Every other verdict says that the
-# round did not run, and `main` exits 1 on one, because a table that stops
-# compiling must not report success (T-078: 4 of 83 rounds failed to build).
+# A verdict answers the audit question only after a complete round.
+# `main` exits 1 for another verdict. A table that stops compiling cannot report success.
 ANSWERS = ("caught", "survived")
 
 
@@ -72,8 +39,7 @@ class AnchorError(Exception):
 
 # The summary block of ctest names every test that failed, whatever its label:
 # `        3 - unit-gen_cast (Failed)`. The per-test lines above it do not, so
-# this is the one pattern to read (T-078: a narrower one dropped six names and
-# left a claim in the notes with no evidence behind it).
+# read this summary pattern instead of the incomplete per-test lines.
 CTEST_FAILURE = re.compile(r"^\s*\d+ - (\S+) \((Failed|Timeout|Subprocess aborted)\)")
 
 
@@ -105,7 +71,7 @@ def write(path, data):
     with open(path, "wb") as handle:
         handle.write(data)
     # The shared folder hands ninja the mtime, so a restored file that keeps its
-    # old timestamp is not rebuilt (notes/environment.md 2).
+    # old timestamp is not rebuilt.
     os.utime(path, None)
 
 
@@ -162,10 +128,7 @@ def mutated_rows(table, root):
 
     The test is "`old` is absent and `new` is present", and **not** "`new` occurs
     once": a replacement often repeats text the file already had, so `new` occurs
-    twice or three times after the substitution. 3 of the 88 rows of the emitter
-    table do that -- D3.14, D8.5 and D20.4, whose replacements are `, false);`,
-    an `unreachable` line and `str_from_range(NULL, 0)` -- and a count of 1 made
-    this guard and `undo_applied` dead for them (T-078, round 3).
+    twice or three times after the substitution. Some table rows have this shape.
     """
     applied = []
     for mutation in table["mutations"]:
@@ -199,7 +162,7 @@ def undo_applied(table, root, applied):
       text it writes is one row's `old` and a second row with that same anchor in
       the same file would already fail `--check` on a clean tree with `2
       matches`. So the failure mode is a stale row and exit 1, and never a silent
-      pass (T-078, round 3).
+      pass.
     """
     text = {}
     for name in {m["file"] for m in table["mutations"]}:
@@ -299,13 +262,10 @@ def run_round(table, guest, root, saved, mutation, baseline, log_dir):
 def run_table(table, guest, root, saved, baseline, log_dir, wanted=()):
     """The rows of the table, or the rows `wanted` names, in order.
 
-    A timeout ends the run. The guest command outlives the timeout: `tools/vm`
-    waits on an `ssh` that runs without a pty, so killing the host side leaves
-    the build or the ctest running in the guest (measured on 2026-09-13, after
-    T-113 made `guest_run` a waited background job). A second runner in one
-    build directory is the collision notes/testing.md 1 describes, so the run
+    A timeout ends the run. The guest command can outlive the host timeout.
+    A second runner in one build directory causes a collision, so the run
     stops and says so. It does not kill anything: no tool of this project runs
-    `pkill` in the VM (notes/environment.md 1).
+    `pkill` in the VM.
     """
     rows = []
     for mutation in table["mutations"]:
@@ -315,9 +275,8 @@ def run_table(table, guest, root, saved, baseline, log_dir, wanted=()):
         rows.append(row)
         print(json.dumps(row), flush=True)
         if row["verdict"] == "timeout":
-            # The `pgrep` pattern is quoted inside the command, because
-            # `tools/vm` interpolates its argument into the guest script raw:
-            # an unquoted `|` is then a pipe in the guest shell (T-078, round 3).
+            # Quote the `pgrep` pattern. tools/vm inserts its argument into the guest script.
+            # An unquoted `|` becomes a guest shell pipe.
             print("mutate: %s timed out at stage '%s'. Its command may still run "
                   "in the guest, so the run stops here: a second runner in one "
                   "build directory reads as a finding. Look with: "
@@ -333,10 +292,9 @@ def restore_and_check(table, guest, root, saved, rows, baseline):
     The restore runs whatever ended the loop, an interrupt included, so the
     worktree never keeps a mutation. The rebuild is different. After a timeout
     the guest still holds the build directory, and a second `ninja` there is the
-    collision notes/testing.md 1 describes -- which is what the run stopped to
-    avoid, so it must not start one itself (T-078, round 3). The md5 is then not
-    measured, and the run says so rather than printing a comparison it cannot
-    support. The `timeout` row already makes the exit status 1.
+    same collision that the run stopped to avoid. Thus, it must not start one.
+    The md5 is then not measured. The run does not print an unsupported comparison.
+    The `timeout` row already makes the exit status 1.
     """
     restore_all(table, saved, root)
     hung = [row["decision"] for row in rows if row["verdict"] == "timeout"]
@@ -359,8 +317,7 @@ def exit_status(rows, unknown, restored, baseline):
     Only `caught` and `survived` are answers. A build that failed, a binary
     equal to the baseline, a stage that hung and a rotted anchor each say that
     the round did not run, and a run of no rows says the `--only` named nothing.
-    A table that stops compiling must not report success (T-078: 4 of 83 rounds
-    failed to build, under an exit status that was 0 for all four).
+    A table that stops compiling must not report success.
     """
     if restored != baseline:
         return 1

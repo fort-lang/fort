@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
-"""Reject block comments in the project's C sources (decision D2.2).
+"""Reject block comments in the project's C sources.
 
-`//` to the end of the line is the only comment form in fort, and
-`notes/style.md` 2 extends the rule to the C sources so the bootstrap
-compiler stays transliterable into fort. This tool scans src/ and test/
-(the same files the format and tidy targets cover) character by character,
-tracking string literals, character literals, escapes and `//` comments,
-and reports every `/*` that is really a comment opener as
-`<file>:<line>: block comment`. It exits 1 when it reported anything, 0
-otherwise.
+Fort and project C use `//` comments. This keeps the bootstrap transliterable into fort.
+The tool scans C files under src/ and test/. It tracks strings, characters, escapes, and
+`//` comments. It reports each real `/*` opener as `<file>:<line>: block comment`.
+It exits 1 for a problem and 0 otherwise.
 """
 
 import argparse

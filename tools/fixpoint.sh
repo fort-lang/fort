@@ -1,59 +1,14 @@
 #!/bin/bash
-# tools/fixpoint.sh <build-dir>: the compiler must reproduce itself, in both
-# build modes (D19.5).
+# tools/fixpoint.sh <build-dir>: verify compiler reproduction in both build modes.
 #
-# CMake supplies build/fort. Stage3 uses build/fort, and stage4 uses stage3.
+# CMake supplies stage2. Stage2 builds stage3, and stage3 builds stage4.
+# Each mode compares the stage2 and stage3 modules, then the stage3 and stage4 binaries.
+# The script verifies each module before it compares output bytes.
+# Checked and release modes emit different overflow behavior, so both modes run.
 #
-# Which pair D19.5 compares, and why it is not the pair it used to be. The last
-# pin and HEAD are different programs, so their `-S` texts differ on any commit
-# that touches the emitter, and a comparison of the pin's module with stage2's
-# would go red on every such commit. The two comparisons D19.5 asks for must
-# both hold two things that embody HEAD's sources. stage2 and stage3 are the
-# first such pair: HEAD's sources through two different compilers. stage3 and
-# stage4 are the second. So this script compares the module stage2 and stage3
-# emit, and the stage3 and stage4 binaries, and it runs `-S` twice and not
-# three times, which is what D19.5's last sentence forbids.
-#
-# The check runs twice, once in each build mode. Checked mode traps on an
-# overflow and release mode does not (D11.1), so the two modes emit different
-# code and a fixed point in one mode does not prove the other.
-#
-# Each mode compares two things, in this order.
-#
-# 1. The LLVM IR module. stage2 emits the module of src/fort, and stage3
-#    emits it again. D19.5 makes that text a function of the program alone,
-#    and stage2 and stage3 are one program, so the two texts must be the same
-#    bytes. Both modules pass `opt -passes=verify` first (D19.1): a module that
-#    the verifier refuses is a broken compiler even when the two texts agree.
-# 2. The two binaries. stage3 is clang over stage2's module and stage4 is
-#    clang over stage3's module, so equal modules give equal binaries while
-#    clang is deterministic. The binary comparison is what removes that
-#    assumption: it compares the artefacts and not a reading of them.
-#
-# The module comparison comes first because it names the part that failed.
-# Two identical modules that link to different bytes are clang or the linker
-# and not the compiler, and the two failures have different causes.
-#
-# CMake supplies build/fort. This script builds stage3 and stage4 under
-# <build-dir>/fixpoint/<mode>. The three stages of a mode differ in nothing
-# that reaches the module except the compiler and the `-o` path. The module
-# does not hold the output path. The darwin target uses one link path for
-# stage3 and stage4, as D19.5 requires.
-#
-# Everything that does reach the module must be spelled the same way for the
-# two stages, and the file paths are what reach it. The compiler names
-# each file the path it opened it by (D14.2) and writes that path into the
-# module as the file constant of a failure block (D19.6, D11.4). So
-# `--std-dir build/debug/std` and `--std-dir /vagrant/build/debug/std` give
-# two different programs. The measurement: the CMake target fort
-# compiles `src/fort/main.ft` by its absolute path, the same compile from the
-# top of the worktree gives it a relative path, and the two binaries differ in
-# 27233 of 480088 bytes. Both binaries run.
-#
-# It also writes no file that another test reads. <build-dir>/fort belongs to
-# CMake. Product tests judge that binary.
-#
-# ctest runs it as the test `fixpoint`, label lang.
+# The script writes temporary output below <build-dir>/fixpoint/<mode>.
+# Each stage uses identical source paths because those paths can enter failure blocks.
+# The script does not change <build-dir>/fort or other product-test inputs.
 set -eu
 
 usage() {
@@ -63,11 +18,9 @@ usage() {
     echo "                   [--std <dir>] [--source-root <dir>]" >&2
 }
 
-# The compiler drives a clang over the LLVM IR it emits (D14.3), and the guest
-# `cc` is a native gcc, so the target compiler is named. Each tool is an
-# option, because the build knows which one it configured: CMake passes the
-# same three in the ctest and in the check-lang command, so the gate and the
-# test measure one toolchain. The environment is the fallback for a hand run.
+# The compiler drives clang over its emitted LLVM IR.
+# The guest `cc` is gcc, so the command names the target compiler.
+# CMake passes the configured compiler and verifier. Environment variables support hand runs.
 cc=${FORT_TARGET_CC:-clang}
 opt=${FORT_OPT:-opt-18}
 target=${FORT_TARGET_TRIPLE:-x86_64-linux-gnu}
@@ -143,8 +96,7 @@ if [ ! -f "$entry" ] || [ ! -d "$std" ] || [ ! -d "$source_root" ]; then
     exit 2
 fi
 
-# A missing tool is a broken environment and not a compiler that failed to
-# reproduce itself, so it exits 2 as test/pipeline_test.sh does.
+# A missing tool is an environment error. Exit 2 before a compiler comparison.
 for tool in "$opt" "$cc"; do
     command -v "$tool" >/dev/null || {
         echo "fixpoint.sh: $tool not found (llvm-18 and clang, see tools/provision.sh)" >&2
@@ -157,10 +109,8 @@ mkdir -p "$work"
 
 status=0
 
-# compile <compiler> <mode-flags> <output> -- src/fort through one compiler.
-# The previous run's binary may not stand here: a compiler that exits 0 and
-# writes nothing would otherwise make cmp compare two stale files and report
-# agreement. It is the guard the two modules carry below, for the same reason.
+# compile <compiler> <mode-flags> <output>: compile src/fort with one compiler.
+# Remove stale output before the compile. A successful compiler must write new output.
 compile() {
     local compiler=$1
     local flags=$2
@@ -180,10 +130,8 @@ compile() {
     fi
 }
 
-# is_module <file> -- the file holds a module of D19.1 and not nothing. Two
-# empty files compare equal and opt accepts an empty module, so a compiler
-# that exits 0 and writes nothing would otherwise read as a fixed point.
-# This guard makes an empty output a failure.
+# is_module <file>: require a non-empty module.
+# Empty files compare equal, and opt accepts them. Reject them before comparison.
 is_module() {
     if [ ! -s "$1" ]; then
         echo "fixpoint.sh: $1 is empty" >&2
@@ -200,8 +148,8 @@ emit() {
     local compiler=$1
     local flags=$2
     local output=$3
-    # `-S` stops before --cc (toolchain.md 2), so it names no target compiler.
-    # It keeps --target, which names the triple the module carries (D14.1).
+    # `-S` stops before --cc, so it names no target compiler.
+    # It keeps --target, which names the triple that the module carries.
     # shellcheck disable=SC2086
     "$compiler" $flags -S --std-dir "$std" -I "$source_root" --target "$target" \
         -o "$output" "$entry"
@@ -266,8 +214,7 @@ check_mode() {
     if cmp -s "$two_ll" "$three_ll"; then
         echo "$mode: the emitted modules are identical and both verify"
     else
-        # D19.5 asks for cmp with diff as the debugging output. The module is
-        # about 3 MB, so the first 40 lines of the diff stand for it.
+        # Use cmp for the result and diff for details. Limit the large module diff.
         echo "fixpoint.sh: $mode: the modules stage2 and stage3 emit differ" >&2
         echo "fixpoint.sh:   diff $two_ll $three_ll" >&2
         diff -u "$two_ll" "$three_ll" >"$work/$mode/module.diff" || true

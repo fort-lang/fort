@@ -1,6 +1,6 @@
 #!/bin/bash
 # Test core fort library programs on the Darwin host.
-# T-144: std/darwin/libc.ft supplies the target C calls and constants.
+# std/darwin/libc.ft supplies the target C calls and constants.
 set -eu
 
 if [ "$#" -ne 0 ] || [ "$(uname -s)" != "Darwin" ]; then

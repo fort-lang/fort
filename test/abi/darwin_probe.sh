@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run the Apple ABI probes on the Darwin host.
-# T-144 owns the darwin library update. This probe uses a local errno bridge.
+# Use a local errno bridge for these probes.
 set -eu
 
 probe_root=$(git rev-parse --show-toplevel)

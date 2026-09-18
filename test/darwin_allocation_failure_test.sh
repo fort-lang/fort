@@ -1,9 +1,9 @@
 #!/bin/bash
-# darwin_allocation_failure_test.sh: test allocation failures in darwin code.
+# Test allocation failures in Darwin code.
 #
 # Apple clang -O1 must keep a failed allocation even when code reads no storage.
-# The test also covers three OOM, three size-overflow, and one successful fixture.
-# D10.2, D11.4, D19.1
+# The test covers three OOM, three size-overflow, and one successful fixture.
+# It also verifies runtime errors and emitted modules.
 set -eu
 
 if [ "$#" -ne 3 ] || [ "$(uname -s)" != "Darwin" ]; then

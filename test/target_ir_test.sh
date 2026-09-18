@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Verify the Mac IR form that a Linux stage2 emits with a caller standard root.
+# Verify the Darwin IR form that a Linux stage2 emits with a caller standard root.
 # The VM standard root is Linux. This test does not check the Mac C ABI.
-# D14.1, D19.1
 set -euo pipefail
 
 stage2=$1

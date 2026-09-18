@@ -1,49 +1,29 @@
 #!/bin/bash
-# No program that the checker accepts may die inside LLVM.
+# Check untyped expression programs against their expected result classes.
 #
-# This is the sweep of T-127's third criterion. It compiles one program per
-# line of a program list, with one compiler, and puts each program in one of
-# six classes. A row names the class it must reach, and these are the six a
-# row may name:
+# Compile one program for each list row. Each row names one of six classes:
 #
-#   REPORTED  the checker refused the row and named a reason: it exited 1 and
-#             wrote a diagnostic at the row's own line or below it. The author
-#             learns something, so this is a good outcome.
+#   REPORTED  the checker exited 1 and reported the row or a later line.
 #   FRAME     the checker refused before it reached the row: it exited 1 and
 #             its first diagnostic points at a line above the row's own. The
 #             row itself is then unmeasured, and the class says so.
 #   RAN       the checker accepted it, clang built it and the program printed
 #             something. The answer is in the list beside the program, so a
 #             wrong answer is a failure here and not a pass.
-#   CC-FAIL   the checker accepted it and the build failed. This is the class
-#             the criterion forbids: the author learns nothing about their
-#             program from a parse error inside LLVM.
-#   SILENT    the checker accepted it, the program ran and printed nothing.
-#             The author learns nothing either, and T-117 and T-125 each fixed
-#             a family of this shape.
+#   CC-FAIL   the checker accepted it, but the target build failed.
+#   SILENT    the checker accepted it, and the program printed nothing.
 #   TRAP      the checker accepted it, clang built it and the program exited
-#             non-zero. Checked arithmetic traps at run time (D11.1), so this
-#             is a good outcome as well, and the sweep needs it to reach the
-#             overflow and bounds paths the emitter writes by width.
+#             non-zero. Checked arithmetic traps at run time, so this is valid.
+#             The sweep needs this class to reach overflow and bounds paths.
 #
 # Two more classes name a broken compiler and not a program. No row may expect
 # either, and each one fails the run:
 #
-#   BAD-STATUS:<n>  the checker exited <n>, which is neither 0 nor 1. D14.1
-#                   gives a compiler those two statuses and no others, while a
-#                   crash is 139 and a usage error is 2. Until 2026-09-14 this
-#                   script read every non-zero status as a diagnostic, so a
-#                   compiler that died on every row would have reported
-#                   `152 reported, 0 refused by clang, 0 silent` and exited 0.
+#   BAD-STATUS:<n>  the checker exited with a status other than 0 or 1.
 #   NO-DIAGNOSTIC   the checker exited 1 and wrote no `error:` line. A refusal
 #                   that names nothing teaches the author nothing.
 #
-# T-128 built the first version of this script under build/probe/, which is
-# gitignored, and the worktree took it at the merge. This one lives in tools/
-# so that the next ticket can run it. It keeps T-128's four classes and its two
-# command lines, and it adds the expectation column, which T-128's version did
-# not have: a row that changes class, or a RAN row that changes its answer, now
-# fails the run instead of moving a summary count that only a reader compares.
+# A changed class or RAN answer fails the run.
 #
 # Usage, from the top of the worktree, after `tools/vm build <preset>`:
 #
@@ -83,9 +63,7 @@
 #          `r(z(1))`. This is the one frame that puts the row in a return
 #          position.
 #
-# Every value the frames declare comes through a call, so every expression
-# built from one folds to no value. That is the state the rule of the default
-# type answers for (D4.5).
+# Every frame value comes through a call, so expressions cannot fold its value.
 #
 # What the sweep covers and what it cannot reach is in the header of
 # tools/sweep_untyped.txt.
@@ -262,7 +240,7 @@ while IFS= read -r line; do
     check_status=$?
     set -e
     if [ "$check_status" -gt 1 ]; then
-        # D14.1 gives a compiler two statuses, 0 and 1. Anything else is a
+        # The compiler uses result statuses 0 and 1. Anything else is a
         # crash or a usage error and not a diagnostic, and reading it as one
         # would let a compiler that dies on every row pass the sweep.
         actual=BAD-STATUS:$check_status

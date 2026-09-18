@@ -1,4 +1,4 @@
-"""Unit tests for tools/lines.py (D14.6, notes/testing.md 9).
+"""Unit tests for tools/lines.py.
 
 The glob matcher is the part worth pinning: the guest runs Python 3.12, where
 pathlib.Path.full_match does not exist, so lines.py compiles the globs itself
@@ -54,19 +54,19 @@ class GlobMatching(unittest.TestCase):
             self.assertFalse(lines.path_matches(path, tests), path)
 
     def test_the_runtime_counts_with_the_standard_library(self):
-        """The runtime is std.rt, so no glob names a runtime directory (D13.1, D14.6)."""
+        """The runtime is std.rt, so no glob names a runtime directory."""
         source = [lines.glob_to_regex(g) for g in lines.SOURCE_GLOBS]
         tests = [lines.glob_to_regex(g) for g in lines.TEST_GLOBS]
         self.assertTrue(lines.path_matches("std/rt.ft", source))
         self.assertFalse(lines.path_matches("std/rt.ft", tests))
-        # The C runtime is gone with T-091, and so is the glob that named it:
+        # No glob names the removed C runtime.
         # a file put back there would count on neither side.
         for path in ("runtime/fort_rt.c", "runtime/fort_rt.h"):
             self.assertFalse(lines.path_matches(path, source), path)
             self.assertFalse(lines.path_matches(path, tests), path)
 
     def test_the_standard_library_is_source_and_not_test(self):
-        """The project ships common and darwin standard files as source (D14.6)."""
+        """The project ships common and Darwin standard files as source."""
         source = [lines.glob_to_regex(g) for g in lines.SOURCE_GLOBS]
         tests = [lines.glob_to_regex(g) for g in lines.TEST_GLOBS]
         for path in ("std/io.ft", "std/strbuf.ft", "std/darwin/libc.ft"):

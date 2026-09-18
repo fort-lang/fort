@@ -1,6 +1,5 @@
 #!/bin/bash
-# Test the darwin IPv4 module against Darwin C and darwin sockets.
-# D3.8, D9.8, D13.2
+# Test the Darwin IPv4 module, sockets, and imported platform library.
 set -eu
 
 if [ "$#" -ne 0 ] || [ "$(uname -s)" != "Darwin" ]; then

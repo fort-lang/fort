@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
-"""Unit tests of tools/fort_lint.py, the D1.4 identifier check (notes/testing.md 8).
+"""Unit tests for tools/fort_lint.py.
 
-Two halves. The rules themselves are pure functions over the index records of
-D20.3 and are tested here directly, one case per clause of the decision; the
-plumbing that runs the compiler is tested against a fake `fort` written for
-the occasion, so a document the real one never produces (no output, a crash, a
-diagnostic) is covered too.
+Pure tests cover index records. A fake compiler covers missing output, crashes, and diagnostics.
 
 The second half runs the real compiler when the environment names one in
 FORT_BINARY, as the ctest does: it lints test/fort_lint/bad_names.ft, which
@@ -36,12 +32,7 @@ FIXTURE_DIR = TEST_DIR / "fort_lint"
 SOURCE_GLOBS = fort_lint.SOURCE_GLOBS
 
 # The whole verdict over test/fort_lint/bad_names.ft, in the order the tool
-# prints it. Every line is one rule of D1.4 (the last one is the width check).
-# Each line number is one higher than T-079 wrote it, and the wide line is one
-# column wider: T-103 gave the fixture's header its own citation line and its
-# declarations the `///` of notes/style.md 1.3, which a fixture of code carries
-# like any other source. Every position below was read against the fixture
-# after the sweep.
+# prints it. Each line checks one name rule. The last line checks width.
 BAD_NAMES_PROBLEMS = [
     "test/fort_lint/bad_names.ft:6:19: module 'Mem' is not lower_case (D1.4)",
     "test/fort_lint/bad_names.ft:9:5: constant 'max_nodes' is not UPPER_CASE (D1.4)",
@@ -72,7 +63,7 @@ BROKEN_PROBLEMS = [
 
 
 def record(kind, name, type_text="", is_decl=True, file="a.ft", line=1, col=1):
-    """One index record of D20.3, with only the members the lint reads."""
+    """Return one index record with the fields that the lint reads."""
     return {
         "file": file,
         "line": line,
@@ -85,7 +76,7 @@ def record(kind, name, type_text="", is_decl=True, file="a.ft", line=1, col=1):
 
 
 class CaseRules(unittest.TestCase):
-    """D1.4: everything lower_case, module-level constants UPPER_CASE."""
+    """Test lower_case names and UPPER_CASE module constants."""
 
     def test_every_kind_the_project_names_must_be_lower_case(self):
         for kind in fort_lint.LOWER_KINDS:
@@ -127,7 +118,7 @@ class CaseRules(unittest.TestCase):
 
 
 class TypeBaseName(unittest.TestCase):
-    """The name of the type a declaration spells (D5.2, D5.3)."""
+    """Test extraction of a declaration's type name."""
 
     def test_a_plain_type_is_its_own_name(self):
         self.assertEqual(fort_lint.type_base_name("i32"), "i32")
@@ -141,7 +132,7 @@ class TypeBaseName(unittest.TestCase):
         self.assertEqual(fort_lint.type_base_name(" i32 "), "i32")
 
     def test_a_qualified_type_keeps_its_last_component(self):
-        """The module qualifier is a binding a local may shadow (D7.9)."""
+        """A local can use the module qualifier as its name."""
         self.assertEqual(fort_lint.type_base_name("strbuf.str_buf"), "str_buf")
         self.assertEqual(fort_lint.type_base_name("strbuf.str_buf mut*"), "str_buf")
 
@@ -156,7 +147,7 @@ class TypeBaseName(unittest.TestCase):
 
 
 class ShadowRule(unittest.TestCase):
-    """D1.4: a variable never takes its type's name, a field may (D7.9)."""
+    """A variable cannot use its type name, but a field can."""
 
     def test_a_variable_named_after_its_type_is_a_violation(self):
         for kind in fort_lint.SHADOW_KINDS:
@@ -179,7 +170,7 @@ class ShadowRule(unittest.TestCase):
         self.assertIsNone(fort_lint.shadow_problem("parameter", "bx", "box"))
 
     def test_a_variable_may_take_the_module_qualifier(self):
-        """import std.io forbids no parameter named io (D7.9)."""
+        """An import does not reserve its qualifier as a variable name."""
         self.assertIsNone(fort_lint.shadow_problem("local", "strbuf", "strbuf.str_buf"))
 
     def test_a_variable_of_function_type_is_not_compared(self):
@@ -207,7 +198,7 @@ class RecordProblems(unittest.TestCase):
 
 
 class ModuleName(unittest.TestCase):
-    """A module is named by its file (D9.1), so the stem carries D1.4."""
+    """Test module names through filename stems."""
 
     def test_a_lower_case_stem_passes(self):
         self.assertIsNone(fort_lint.module_name_problem("std/io.ft"))
@@ -221,7 +212,7 @@ class ModuleName(unittest.TestCase):
 
 
 class Width(unittest.TestCase):
-    """The 100 columns of the house style, the one rule not from D1.4."""
+    """Test the 100-column limit."""
 
     def test_a_line_at_the_limit_passes(self):
         self.assertEqual(fort_lint.width_problems("x" * fort_lint.MAX_COLUMNS + "\n"), [])
@@ -288,7 +279,7 @@ class DocumentProblems(unittest.TestCase):
         self.assertEqual(len(self.problems(document)), 1)
 
     def test_a_rejected_file_is_still_judged_on_what_resolved(self):
-        """D20.3 indexes everything that resolved, so the rules still run."""
+        """Check resolved records even when the compiler rejects the file."""
         document = {
             "diagnostics": [{"file": "b.ft", "line": 2, "col": 3, "message": "unknown name 'q'"}],
             "symbols": [record("local", "Bad", "i32", line=5, col=9)],
@@ -328,7 +319,7 @@ class DocumentProblems(unittest.TestCase):
         self.assertIn("no identifier", problems[0][2])
 
     def test_the_empty_index_guard_is_off_when_a_diagnostic_explains_it(self):
-        """A syntax error stops the file before the checker (D14.2): no records."""
+        """A syntax error before checking produces no records."""
         document = {
             "diagnostics": [{"file": "a.ft", "line": 1, "col": 1, "message": "expected ';'"}],
             "symbols": [],
@@ -347,7 +338,7 @@ class DocumentProblems(unittest.TestCase):
 
 
 class SourceText(unittest.TestCase):
-    """Whether a file holds anything a declaration could be in (D2.2)."""
+    """Test detection of fort source text."""
 
     def test_blank_and_comment_lines_are_not_source(self):
         self.assertFalse(fort_lint.has_source_text(""))
@@ -360,12 +351,9 @@ class SourceText(unittest.TestCase):
 
 
 class KindTables(unittest.TestCase):
-    """The tables of fort_lint.py against the kind list of D20.3 itself.
+    """Compare the lint tables with the identifier index kind list.
 
-    The repository's pattern for a list that lives in two places: read the
-    decision log, so the two cannot drift (test/highlight_test.py does it for
-    the D2.4 keywords). A thirteenth kind added to the index would otherwise be
-    exempt from D1.4 for ever, silently.
+    This test prevents a new kind from gaining a silent exemption.
     """
 
     def decision_kinds(self):
@@ -461,7 +449,7 @@ class FakeCompiler(unittest.TestCase):
         self.assertIn("wrote no document", got.stdout)
 
     def test_a_compiler_that_fails_without_a_diagnostic_is_an_error(self):
-        """Status 1 means "reported a diagnostic" (D20.2); a sanitizer report is not one."""
+        """Status 1 without a diagnostic is an environment failure."""
         fort = self.fake_fort(
             "sys.stderr.write('LeakSanitizer\\n')\n"
             'print(\'{"diagnostics":[],"symbols":[]}\')\nsys.exit(1)\n'
@@ -485,7 +473,7 @@ class FakeCompiler(unittest.TestCase):
         self.assertIn("fort exited with status 3", got.stdout)
 
     def test_the_search_roots_are_passed_to_the_compiler(self):
-        """One `-I` per root, before the file (D9.2)."""
+        """Pass one `-I` per root before the file."""
         fort = self.fake_fort(
             'print(\'{"diagnostics":[],"symbols":[]}\' if sys.argv[1:] == '
             "['--index', '-I', 'x', '-I', 'y', 'a.ft'] else "
@@ -511,13 +499,9 @@ class FakeCompiler(unittest.TestCase):
 
 
 class RunPerClosure(unittest.TestCase):
-    """One `fort --index` run judges every file of the closure it indexed.
+    """Test one `fort --index` run for each required import closure.
 
-    The tool ran one `fort --index` per file until T-095. Each run re-checked
-    the whole import closure of its file, so the checker did O(n^2) work and
-    the ctest took 48.9 s under the debug preset for 166 files. A run now
-    judges every file of the set that its document names (D20.3), and the
-    fake compiler here counts the runs.
+    The fake compiler counts runs and names each file that a run covers.
     """
 
     def setUp(self):
@@ -591,7 +575,7 @@ class RunPerClosure(unittest.TestCase):
         self.assertEqual(reports[2], [])
 
     def test_a_file_with_other_search_roots_takes_a_run_of_its_own(self):
-        """A file keeps the roots its own set gives it (D9.2), so the roots must agree."""
+        """A file with different roots needs a separate run."""
         document = self.document(
             self.declaration("a.ft", "ok"), self.declaration("b.ft", "Bad", line=3, col=2)
         )
@@ -613,11 +597,9 @@ class RunPerClosure(unittest.TestCase):
         self.assertEqual(reports[1], ["c.ft:7:8: fn 'Bad' is not lower_case (D1.4)"])
 
     def test_a_file_that_fails_to_compile_is_judged_by_nothing(self):
-        """D20.3 gives a file the checker never reached no record, so no rule runs on it.
+        """Report only the diagnostic when the checker produced no records.
 
-        b.ft holds a name D1.4 forbids. The compiler reports a diagnostic and
-        indexes nothing, so the run reports the diagnostic and no D1.4
-        problem. The lint must not widen: it judges records, not text.
+        The lint checks index records, not source text.
         """
         broken = (
             '{"diagnostics":[{"file":"b.ft","line":2,"col":1,"message":"expected \';\'"}],'
@@ -636,14 +618,7 @@ class RunPerClosure(unittest.TestCase):
         self.assertNotIn("D1.4", reports[1][0])
 
     def test_a_run_gives_its_diagnostics_to_every_file_it_judges(self):
-        """The one behaviour T-095 changed, and the shape no other test has.
-
-        The run holds a diagnostic and judges two files. Both hear about it.
-        One run per file gave a file the diagnostics of its own closure; a run
-        now gives them to every file of the closure it indexed, which reports
-        more and never less. A rule that sent them to the entry alone, or to
-        the wrong file, would pass every other test of this class.
-        """
+        """Give a closure diagnostic to each file that the run judges."""
         document = (
             '{"diagnostics":[{"file":"c.ft","line":4,"col":2,"message":"unknown name \'q\'"}],'
             '"symbols":[%s,%s]}'
@@ -741,7 +716,7 @@ class DefaultFileSet(unittest.TestCase):
 
 
 class IncludeRoots(unittest.TestCase):
-    """The module search roots the default file set carries (D9.2, T-079)."""
+    """Test module search roots in the default file set."""
 
     def roots(self, name):
         for path, includes in fort_lint.default_file_set(ROOT):
@@ -762,7 +737,7 @@ class IncludeRoots(unittest.TestCase):
 
         The third root reaches the language server, whose modules are
         `lsp.<name>` under `src` so that none of them is the compiler's
-        `json` (D9.1, D9.7).
+        `json`.
         """
         self.assertEqual(
             self.roots("test/fort/containers_test.ft"), ("src", "src/fort", "test/fort/support")
@@ -792,13 +767,7 @@ class IncludeRoots(unittest.TestCase):
             self.assertTrue(matched <= set(paths), glob)
 
     def test_no_source_is_left_out_of_the_default_set(self):
-        """SKIPPED is empty since T-131. std/math.ft and the float module stood
-        there because they hold floats and the C bootstrap rejects them (D18.1,
-        T-042), and a second ctest linted them with stage2; the one ctest runs
-        stage2 now and reads every source. T-132 folded the float module into
-        std/rt.ft and deleted it, so the two float-holding sources of the
-        library are named here, and the deleted one is named too, so that a
-        tuple that fills up again is seen."""
+        """Require the default set to include each maintained fort source."""
         files = {path.relative_to(ROOT).as_posix() for path, _ in fort_lint.default_file_set(ROOT)}
         self.assertEqual(fort_lint.SKIPPED, ())
         for name in ("std/math.ft", "std/rt.ft"):
@@ -867,7 +836,7 @@ class RealCompiler(unittest.TestCase):
     def test_the_product_standard_library_conforms(self):
         """Every module of the library the compiler this test runs compiles.
 
-        The ctest fort_lint holds the same library against D1.4.
+        The fort_lint test checks names in the same library.
         """
         files = sorted(Path(os.environ["FORT_STD_DIR"]).glob("*.ft"))
         self.assertGreaterEqual(len(files), 12)
@@ -877,13 +846,13 @@ class RealCompiler(unittest.TestCase):
         self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
 
     def test_a_rejected_file_is_reported_and_still_judged(self):
-        """The record the checker did resolve is judged beside the error (D20.3)."""
+        """Check a resolved record beside the compiler error."""
         got = self.run_lint("test/fort_lint/broken.ft")
         self.assertEqual(got.returncode, 1)
         self.assertEqual(got.stdout.strip().split("\n"), BROKEN_PROBLEMS)
 
     def test_a_module_test_without_its_roots_cannot_resolve_its_imports(self):
-        """The hole T-079 closed: no -I meant no index and no D1.4 at all."""
+        """Missing search roots prevent index checks."""
         got = self.run_lint("test/fort/containers_test.ft")
         self.assertEqual(got.returncode, 1)
         self.assertIn("module 'containers' not found", got.stdout)
@@ -902,7 +871,7 @@ class RealCompiler(unittest.TestCase):
         self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
 
     def test_a_file_outside_the_repository_is_linted_too(self):
-        """The scratch file goes under build/, gitignored (notes/environment.md 2, T-022)."""
+        """Create the scratch file under ignored build/."""
         scratch = ROOT / "build"
         scratch.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=str(scratch)) as tmp:

@@ -1,29 +1,8 @@
 #!/usr/bin/env python3
-"""Unit tests of the TextMate grammar in editors/vscode/syntaxes/fort.tmLanguage.json.
+"""Test the fort TextMate grammar without a VS Code process.
 
-Two things are checked. First, drift: the keyword and reserved lists of D2.4
-and the operator list of D2.10 are read out of the rule field of each entry
-of spec/decisions.md, through tools/check_decisions.py, and compared
-with the sets the grammar names, so an amendment to the decision log that the
-grammar does not follow fails the build. The grammar writes keywords as one
-word group, `\\b(?:a|b)\\b`, and operators as one alternation of literals,
-`(?:\\+|-)`; a rule whose scope is in a keyword or operator family but which
-matches neither shape is an error, so a rule cannot hide from the comparison.
-
-Second, scopes: a small line-oriented TextMate engine (patterns, repository,
-include, match, begin/end, captures) tokenizes the fixtures in test/highlight,
-every marker declaration of the D5.3 and D17.2 tables, and every fort source
-the project itself writes -- the language tests under test/lang/run, the whole
-programs beside them, the standard library, the self-hosted compiler under
-src/fort, its own tests under test/fort, the fixtures of tools/fort_lint.py and
-the program test/tty_test.py drives on a pseudo terminal
--- and the tests assert the
-scopes the grammar hands out. CORPUS_DIRS is that list and CORPUS_FILES its
-size, and a partition test holds every other `.ft` in the repository against
-EXCLUDED_DIRS, so a new directory of fort cannot be missed in silence.
-
-Run with `python3 -m unittest highlight_test` from this directory. Standard
-library only; Python 3.12.
+The tests compare grammar tokens with the language lists. A small TextMate engine also checks
+fixtures, declaration tables, and maintained fort sources.
 """
 
 import dataclasses
@@ -76,12 +55,11 @@ CORPUS_DIRS = (
 CORPUS_FILES = 705
 # The least number of `.ft` each of those directories holds. A directory grows,
 # so its own test asserts a floor and CORPUS_FILES asserts the exact total. A
-# floor of 1 says only that the directory exists, so each one here is near the
-# count of the day: 432, 22, 12, 23, 7, 184, 3 and 2 on 2026-09-14, `std` being
-# one file smaller since T-132 deleted std/rt_float.ft. The
+# A floor of 1 only proves that the directory exists.
+# Each floor stays near its measured count. The
 # table has one entry for each directory of CORPUS_DIRS, and
 # test_every_corpus_directory_is_checked_by_a_test holds the two against each
-# other, so a directory that no test checks is a red test (T-104).
+# other. Thus, an unchecked directory fails the test.
 CORPUS_MINIMUMS = {
     LANG_RUN_DIR: 200,
     LANG_PROGRAMS_DIR: 20,
@@ -139,7 +117,7 @@ class Token:
 
 
 def decision_lexicon(text):
-    """Read the D2.4 keyword and reserved lists and the D2.10 operator list."""
+    """Read keyword, reserved-word, and operator lists from the decision log."""
     spans = re.findall(r"`([^`]*)`", check_decisions.rule_of(text, "D2.4"), re.DOTALL)
     operators = re.search(r"`([^`]*)`", check_decisions.rule_of(text, "D2.10"), re.DOTALL)
     return Lexicon(
@@ -234,7 +212,7 @@ NO_PATTERNS = ()
 # puts a group in front of each rule, so a rule that spells one of the three
 # would count a group of another rule. The grammar spells none of them, and
 # test_every_rule_of_the_grammar_can_be_combined holds that over all 57
-# patterns (T-104).
+# patterns.
 RENUMBERING = re.compile(r"\\[1-9]|\(\?P=|\(\?\(")
 
 
@@ -254,8 +232,7 @@ class Scanner:
     regex engine finds the leftmost position at which an alternative matches,
     and at that position it takes the first alternative in the order they are
     written. That is the rule this engine already had -- the end pattern
-    first, then rule order -- so the end pattern is the first alternative
-    (T-104).
+    first, then rule order. Thus, the end pattern is the first alternative.
 
     `lastindex` names the group that closed last. The groups of a rule close
     inside the group that wraps the rule, so that group is the wrapper, and
@@ -306,11 +283,8 @@ class Scanner:
 class SlowScanner:
     """One search for each rule of the list, which is what Scanner replaces.
 
-    It is the oracle of ScannerTest and of
-    test_the_engine_answers_what_one_search_for_each_rule_answers. It states
-    the rule the alternation must keep -- the leftmost match wins, the end
-    pattern and then rule order win a tie -- in the shape that needs no
-    reasoning about a combined pattern (T-104).
+    It is the oracle of ScannerTest and the full-engine comparison.
+    The leftmost match wins. The end pattern and then rule order break a tie.
     """
 
     def __init__(self, engine, rules, end):
@@ -475,7 +449,7 @@ def load_grammar():
 
 
 class LexiconTest(unittest.TestCase):
-    """The grammar names exactly the tokens D2.4 and D2.10 list."""
+    """Compare grammar tokens with the language token lists."""
 
     def setUp(self):
         self.grammar = load_grammar()
@@ -583,7 +557,7 @@ class ScopeFixtureTest(unittest.TestCase):
 
 
 class MarkerTableTest(unittest.TestCase):
-    """Every declaration of the D5.3 and D17.2 tables spells correctly."""
+    """Check each declaration marker in the language tables."""
 
     def setUp(self):
         self.engine = Engine(load_grammar())
@@ -634,7 +608,7 @@ class MarkerTableTest(unittest.TestCase):
 
 
 class ScannerTest(unittest.TestCase):
-    """Scanner answers what one search for each rule answered (T-104).
+    """Compare Scanner with one search for each rule.
 
     SlowScanner is that oracle. The cases below name each rule of the search
     on a grammar of two or three patterns, because a case that names the rule
@@ -747,10 +721,8 @@ class ScannerTest(unittest.TestCase):
     def test_the_engine_answers_what_one_search_for_each_rule_answers(self):
         """The whole engine over real fort, against the oracle.
 
-        The sample is the fixture and every 25th file of the corpus walk, so a
-        rule the fixture does not spell is still met. T-104 held the two
-        engines against all 685 files by hand and their token dumps were
-        byte-identical; this test keeps a sample of that in the gate.
+        The sample includes the fixture and each 25th corpus file.
+        Thus, it covers rules that the fixture does not spell.
         """
         walked = sorted({path for d in CORPUS_DIRS for path in d.rglob("*.ft")})
         paths = [FIXTURE_DIR / "scopes.ft"] + walked[::25]
@@ -765,18 +737,10 @@ class ScannerTest(unittest.TestCase):
 class CorpusTest(unittest.TestCase):
     """Real fort is covered by the grammar and holds no lexical error.
 
-    One test checks one directory of CORPUS_DIRS, so each of the 687 files is
-    tokenized once for its scope check. The test that counts the walk checked
-    every file of it a second time until T-104, which took a run of this
-    module to 1396 calls of Engine.tokenize over 7575844 bytes; it counts now
-    and tokenizes nothing.
+    One test checks one CORPUS_DIRS entry. Thus, each file gets one scope check.
+    The count test counts paths and does not tokenize them.
 
-    A run makes 775 calls over the corpus: the 687 scope checks, 58 of
-    ScannerTest.test_the_engine_answers_what_one_search_for_each_rule_answers,
-    which tokenizes the fixture and every 25th file of the walk once with each
-    of the two engines, and 30 of the fixture and the marker tables. So 28
-    corpus files are tokenized three times, and that is the oracle and not a
-    second scope check.
+    Scanner comparisons sample every 25th corpus file. Other tests use small fixtures.
     """
 
     def setUp(self):
@@ -802,47 +766,33 @@ class CorpusTest(unittest.TestCase):
         self.check_directory(LANG_RUN_DIR)
 
     def test_every_whole_program_spells_correctly(self):
-        """test/lang/programs/*.ft, the corpus of whole programs (T-079)."""
+        """Check the corpus of whole programs."""
         self.check_directory(LANG_PROGRAMS_DIR)
 
     def test_every_standard_library_module_spells_correctly(self):
-        """std/*.ft is real fort the grammar must cover too (T-076)."""
+        """Check standard library sources."""
         self.check_directory(STD_DIR)
 
     def test_every_compiler_source_in_fort_spells_correctly(self):
-        """src/fort/*.ft, the self-hosted compiler.
-
-        The directory did not exist before the first ported module landed, and
-        rglob over a missing directory yields nothing without error, so this
-        test skipped out loud until Phase B created it. The floor of
-        CORPUS_MINIMUMS says the same thing now and needs no branch (T-104).
-        """
+        """Check compiler sources and require the configured minimum count."""
         self.check_directory(FORT_SRC_DIR)
 
     def test_every_language_server_source_spells_correctly(self):
-        """src/lsp/*.ft, the language server (T-063).
-
-        It stood in CORPUS_DIRS with no test of its own until T-104, so the
-        second walk of test_the_corpus_is_the_size_it_says_it_is was the only
-        thing that tokenized it.
-        """
+        """Check language server sources."""
         self.check_directory(LSP_SRC_DIR)
 
     def test_every_module_test_of_the_compiler_spells_correctly(self):
         """test/fort/**/*.ft: the tests of the self-hosted modules and their
-        shared fixtures under support/, which rglob reaches (T-079)."""
+        shared fixtures under support/, which rglob reaches."""
         paths = self.check_directory(FORT_TESTS_DIR)
         self.assertTrue(any(p.parent.name == "support" for p in paths), "support/ not walked")
 
     def test_every_fort_lint_fixture_spells_correctly(self):
-        """test/fort_lint/*.ft is wrong semantically and clean lexically, which
-        is the stress this test wants: bad_names.ft violates every rule of D1.4
-        and broken.ft fails the checker, yet both must tokenize (T-079)."""
+        """Check that semantic lint fixtures remain lexically valid."""
         self.check_directory(FORT_LINT_DIR)
 
     def test_every_terminal_program_spells_correctly(self):
-        """test/tty/*.ft, the two programs test/tty_test.py drives on a pseudo
-        terminal. They were in the same position as src/lsp before T-104."""
+        """Check the terminal test programs."""
         self.check_directory(TTY_DIR)
 
     def test_every_darwin_program_spells_correctly(self):
@@ -862,10 +812,8 @@ class CorpusTest(unittest.TestCase):
     def test_every_corpus_directory_is_checked_by_a_test(self):
         """A directory of CORPUS_DIRS that no test checks is caught here.
 
-        The walk of test_the_corpus_is_the_size_it_says_it_is checked every
-        file, so it covered a new directory whatever else it did, and it cost
-        one tokenization of the whole corpus (T-104). This test takes that
-        duty and tokenizes nothing. It runs each test of this class with
+        This test records directory checks and tokenizes nothing.
+        It runs each test of this class with
         check_directory recording its directory rather than checking it, so it
         reads what the run does and not what the source says: a method renamed
         out of the suite, a method the class skips and a call commented out

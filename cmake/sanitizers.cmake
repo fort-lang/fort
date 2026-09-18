@@ -1,13 +1,9 @@
-# Sanitizer selection for the native build (notes/environment.md 5).
+# Select the sanitizer for the native build.
 #
-# FORT_SANITIZER names the sanitizer, or is empty. The flags are applied with
-# add_compile_options/add_link_options so that every native target (the
-# compiler and the unit tests) is instrumented; the program the compiler
-# builds is cross-compiled outside CMake's compiler settings and is
-# never affected. FORT_SANITIZER_TEST_ENV is the environment the unit tests
-# run with under ctest: every sanitizer allocator returns null on an impossible
-# request instead of reporting, because a suite that tests an out-of-memory
-# path asks for an impossible allocation.
+# FORT_SANITIZER names the sanitizer, or it is empty. Its flags instrument each
+# native target. They do not affect cross-compiled programs.
+# FORT_SANITIZER_TEST_ENV sets the ctest environment. Each sanitizer allocator
+# returns null for an impossible request. This permits out-of-memory tests.
 
 set(FORT_SANITIZER "" CACHE STRING
     "Sanitizer for the native build: address, memory, thread, undefined or empty")

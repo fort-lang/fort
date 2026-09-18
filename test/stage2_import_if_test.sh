@@ -1,6 +1,5 @@
 #!/bin/bash
-# The source compiler selects module imports before any import path operation.
-# D21.3
+# Test stage2 conditional imports before path operations.
 set -eu
 
 if [ "$#" -ne 2 ]; then

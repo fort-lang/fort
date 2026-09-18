@@ -1,17 +1,9 @@
 #!/usr/bin/env python3
 """Unit tests of tools/check_decisions.py.
 
-The tool has two jobs and this file tests both. It lints the shape of the
-decision log, so every problem it reports is asserted here over a small
-synthetic log. And it holds two revisions of the log together, which is the
-acceptance criterion of T-100: the words of an entry must survive an edit that
-only moves them between the fields. The tests therefore include an edit that
-moves a sentence (reported, not a failure) and an edit that changes a word
-(reported as a failure), because a comparison that only accepts the good case
-proves nothing.
-
-The last class runs the tool over the real spec/decisions.md, so the file in
-the repository answers for its own shape.
+The tests cover shape problems with a small synthetic log. They also compare two revisions.
+A field move must preserve each word. A word change must fail.
+The final class checks the repository decision log.
 
 Run with `python3 -m unittest check_decisions_test` from this directory.
 Standard library only; Python 3.12.
@@ -86,7 +78,7 @@ def write(directory, name, text):
 
 
 class ReadFielded(unittest.TestCase):
-    """The reader of the form T-100 gave the log."""
+    """Test the current fielded form."""
 
     def setUp(self):
         self.entries, self.lines = check_decisions.read_fielded(GOOD)
@@ -113,7 +105,7 @@ class ReadFielded(unittest.TestCase):
 
 
 class ReadBullets(unittest.TestCase):
-    """The reader of the form that came before T-100."""
+    """Test the legacy bullet form."""
 
     def test_every_entry_is_found(self):
         entries = check_decisions.read_bullets(BULLETS)
@@ -215,7 +207,7 @@ class Lint(unittest.TestCase):
 
 
 class Compare(unittest.TestCase):
-    """The before-and-after comparison, the criterion of T-100."""
+    """Test comparison of two revisions."""
 
     def changed(self, old, new, allowed=()):
         return check_decisions.compare(old, new, set(allowed))[0]
@@ -243,9 +235,10 @@ class Compare(unittest.TestCase):
         self.assertEqual(names, ["D1.1", "D1.9"])
 
     def test_a_permutation_that_inverts_a_rule_is_a_move(self):
-        """The case the review built: two words swapped inside one rule keep
-        the multiset and invert the rule, so the comparison must report it and
-        main() must exit 1 unless --allow-move names the entry."""
+        """Report a word permutation that reverses a rule.
+
+        The multiset stays equal. main() must exit 1 unless --allow-move names the entry.
+        """
         inverted = GOOD.replace(
             "- rule: The first rule says one thing.",
             "- rule: The first says one rule thing.")
@@ -423,11 +416,7 @@ class RealLog(unittest.TestCase):
     def test_no_dated_note_stands_outside_a_history_field(self):
         """Every dated note stands in a history field and none in a rule.
 
-        D3.14 carried `amended 2026-09-10 from the T-011 review` inside a
-        sentence of its own rule until T-085, which removed the sentence: the
-        rule it described, a span cast that adds mutability, no longer exists,
-        and a history note whose subject is gone says nothing. So the list is
-        empty, and a note written into a rule fails this test.
+        The list is empty. A dated note written into a rule fails this test.
 
         The pattern is case-insensitive and takes any whitespace between the
         word and the date, because a rule wraps at 100 columns and such a note

@@ -649,7 +649,7 @@ class Discovery(TempRoot):
         )
 
     def test_a_test_below_the_root_is_reported(self):
-        """A `*_test.ft` in a directory discovery does not walk (T-079).
+        """Report a `*_test.ft` below a directory that discovery does not walk.
 
         `test/fort/support` holds the code several module tests share and is
         invisible to `discover`, so a test misfiled there would otherwise run
@@ -1732,14 +1732,14 @@ class EndToEnd(TempRoot):
         self.assertEqual((status, lines[0]), (0, "PASS run/control/001_prefix.ft"))
 
 
-# ---- the check document (D20.1, D20.2) -------------------------------------------------
+# ---- check document ----------------------------------------------------------
 
 
 class CheckJson(EndToEnd):
     """`--check-json`: the document of `fort --check --json` against the text form."""
 
     def document(self, files, diagnostics, **rest):
-        """A document of D20.2, before the `//@ json` override writes it out."""
+        """Build a diagnostic document before the `//@ json` override."""
         doc = {
             "version": 1,
             "files": list(files),
@@ -1750,7 +1750,7 @@ class CheckJson(EndToEnd):
         return doc
 
     def diagnostic(self, file, line, col, end_col, message, notes=()):
-        """One error of a document, a range on one line (D20.2, D20.4)."""
+        """Build one document error with a one-line range."""
         return {
             "file": file,
             "line": line,
@@ -1808,7 +1808,7 @@ class CheckJson(EndToEnd):
     def test_a_test_with_nothing_to_compare_is_not_selected(self):
         self.write_corpus()
         # A run test with no golden index has neither diagnostics nor an index
-        # to hold the document against (D20.2, D20.3).
+        # to compare with the document.
         status, lines = self.run_main("--check-json", "run/control")
         self.assertEqual(status, 1)
         self.assertEqual(lines, ["run_tests.py: error: no document test matches run/control"])
@@ -1817,7 +1817,7 @@ class CheckJson(EndToEnd):
         self.write_corpus()
         xfail = write(self.root, "xpass.txt", "fail/mutability/001_annotated.ft\n")
         # xfail.txt says the compiler cannot pass the test yet; the two forms
-        # of one run must agree anyway (D20.2).
+        # of one run must still agree.
         status, lines = self.run_main("--check-json", "--xfail", str(xfail), "001_annotated")
         self.assertEqual((status, lines[0]), (0, "PASS fail/mutability/001_annotated.ft"))
 
@@ -1903,7 +1903,7 @@ class CheckJson(EndToEnd):
     def test_an_empty_range_is_reported(self):
         path = "fail/mutability/001_empty.ft"
         # A diagnostic that is not the lexer's covers the tokens it is about,
-        # so its range is never empty (D20.4).
+        # so its range is never empty.
         doc = self.document([path], [self.diagnostic(path, 3, 4, 4, "expected ';'")])
         directives = [
             "//@ exit 1",
@@ -1918,7 +1918,7 @@ class CheckJson(EndToEnd):
     def test_an_empty_range_of_a_lexical_error_is_allowed(self):
         path = "fail/mutability/001_lexical.ft"
         # The lexer reports the position of bytes that are not a token, so its
-        # range is empty (D14.2, D20.4); the message is what says so.
+        # range is empty. The message identifies this case.
         message = "unterminated string literal"
         doc = self.document([path], [self.diagnostic(path, 3, 4, 4, message)])
         directives = [
@@ -1946,7 +1946,7 @@ class CheckJson(EndToEnd):
 
     def test_a_note_beside_its_error_is_not_nested(self):
         path = "fail/mutability/001_hoisted.ft"
-        # D20.2 nests a note in the "notes" of the error it follows; a note
+        # The document nests a note in the "notes" of its error. A note
         # listed beside it is the same text with the structure lost.
         hoisted = self.diagnostic(path, 2, 1, 2, "declared here")
         hoisted["severity"] = "note"
@@ -2066,7 +2066,7 @@ class CheckJson(EndToEnd):
     def test_a_text_diagnostic_under_json_is_reported(self):
         path = "fail/mutability/001_chatty.ft"
         doc = self.document([path], [self.diagnostic(path, 3, 1, 2, "chatty")])
-        # --json writes no text diagnostic (D20.2); the fake's `//@ stderr`
+        # --json writes no text diagnostic. The fake's `//@ stderr`
         # lines reach stderr only because this document is scripted.
         directives = [
             "//@ exit 1",
@@ -2080,14 +2080,14 @@ class CheckJson(EndToEnd):
         self.assertIn("--json wrote to stderr: noise", lines[0])
 
 
-# ---- the identifier index (D20.3) ------------------------------------------------------
+# ---- identifier index ---------------------------------------------------------
 
 
 class GoldenIndex(EndToEnd):
-    """`--check-json` over a test with an `index.json` beside it (D20.3)."""
+    """Test `--check-json` with a neighboring `index.json`."""
 
     def symbol(self, file, line, col, end_col, name, kind, type_, is_decl, decl=None):
-        """One record of the index, a range on one line (D20.3, D20.4)."""
+        """Build one index record with a one-line range."""
         return {
             "file": file,
             "line": line,
@@ -2144,7 +2144,7 @@ class GoldenIndex(EndToEnd):
         symbols = [self.record(entry)]
         status, lines, _ = self.run_indexed(symbols)
         # A run test has no diagnostics to compare, so only its golden index
-        # selects it (D20.3).
+        # selects it.
         self.assertEqual(status, 0)
         self.assertIn("PASS run/modules/indexed", lines)
 
@@ -2177,7 +2177,7 @@ class GoldenIndex(EndToEnd):
         symbols = [self.record(entry, kind="local", type_="i32", is_decl=False)]
         symbols[0]["decl"] = None
         # The golden is well formed, so what fails is the document's own
-        # record and not the lint of the file (D20.3).
+        # record and not the file lint.
         status, lines, _ = self.run_indexed(symbols, [self.record(entry)])
         self.assertEqual(status, 1)
         self.assertIn('symbols[0]: only a builtin has a null "decl"', lines[0])
@@ -2208,8 +2208,7 @@ class GoldenIndex(EndToEnd):
             "end_col": 1,
         }
         write(self.corpus, "run/modules/indexed/other.ft", "fn f() i32 { return 0; }\n")
-        # An `as` alias is the one declaration whose "decl" is in another file
-        # (D9.3, D20.3), so the harness accepts it and nothing else.
+        # An `as` alias can have its "decl" in another file.
         status, lines, _ = self.run_indexed(
             symbols, extra=["//@ json-file run/modules/indexed/other.ft"]
         )
@@ -2237,7 +2236,7 @@ class GoldenIndex(EndToEnd):
 
     def test_symbols_must_be_empty_without_the_golden(self):
         # The fake writes the records only under --index, so a fail test whose
-        # document holds any is one the harness never asked for (D20.3).
+        # document has records that the harness did not request.
         path = "fail/mutability/001_extra.ft"
         doc = self.document([path], [], symbols=[self.record(path)])
         self.script("001_extra.ft", ["//@ exit 1", "//@ json " + json.dumps(doc)], "scripted")
@@ -2263,7 +2262,7 @@ class GoldenIndex(EndToEnd):
 
 
 class GoldenIndexLint(unittest.TestCase):
-    """The lint of a golden index file, which runs without a compiler (D20.3)."""
+    """Test golden index lint without a compiler."""
 
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -2323,7 +2322,7 @@ class GoldenIndexLint(unittest.TestCase):
         )
 
     def test_the_golden_holds_the_records_of_the_test_and_not_the_library(self):
-        # Every closure holds std.rt and what it imports (D9.10), so an
+        # Each closure contains std.rt and its imports. Thus, an
         # --index run over any test answers with the standard library's
         # records too. Their file names are the --std-dir the run was given,
         # which is a build directory and differs between machines, so the

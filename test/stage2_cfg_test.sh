@@ -1,6 +1,5 @@
 #!/bin/bash
-# The source compiler owns compile-time configuration. The C bootstrap stays frozen.
-# D14.1, D21.1
+# Test stage2 compile-time configuration output. The C bootstrap stays frozen.
 set -eu
 
 if [ "$#" -ne 2 ]; then

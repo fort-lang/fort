@@ -1,22 +1,12 @@
 #!/usr/bin/env python3
-"""Lint the knowledge rules of notes/style.md and AGENTS.md.
+"""Lint knowledge files for structure, stale claims, and broken paths.
 
-This tool holds four rules. Each rule returns `path:line: message` problems and
-a one-line count. Use `--rule NAME` to run one rule.
+The budget rule limits AGENTS.md. The decisions rule requires owner and rule fields.
+The history rule rejects undated present-tense reports about other rules.
+The paths rule requires existing document paths and rejects line-number citations.
 
-  budget    AGENTS.md is at most BUDGET_LIMIT lines (its own target is 150,
-            AGENTS.md, "Self-Updating Context", last paragraph).
-  decisions every entry of spec/decisions.md has an owner and a rule field
-            (notes/style.md 4), read through tools/check_decisions.py so that
-            one parser answers for both tools.
-  history   no history note of spec/decisions.md reports a rule of the log in
-            the present tense with no date on the claim (notes/style.md 4,
-            T-109, T-121).
-  paths     a document is cited by a path that exists and by its section, never
-            by a line number (notes/style.md 4, T-105).
-
-`--root DIR` points the whole tool at another tree, which is how
-test/knowledge_lint_test.py seeds a broken tree and watches each rule go red.
+Each rule returns `path:line: message` problems and one count line. Use `--rule NAME` to select
+one rule. Use `--root DIR` to check another tree.
 
 What this lint does not see:
 
@@ -52,15 +42,10 @@ DOC_GLOBS = (
 AGENTS_FILE = "AGENTS.md"
 DECISIONS_FILE = "spec/decisions.md"
 
-# The line budget of AGENTS.md in force: the measured value, `wc -l AGENTS.md`.
-# The limit carries no headroom on purpose, so a line added to AGENTS.md fails
-# this rule and the ticket that wants it says what it moved out, which is the
-# behaviour a budget exists to cause (T-103, round 2: a limit 10 lines above the
-# file blocks a new section and nothing smaller). AGENTS.md states 150 as its
-# target and says that number stands as a target and not as a rule until the
-# user rules between the two readings ("Self-Updating Context", last paragraph),
-# so the target stands here beside the limit and no rule reads it. Lower the
-# limit when a ticket moves text out; raise it only with what moved in.
+# The line budget of AGENTS.md uses the measured `wc -l AGENTS.md` value.
+# The limit has no headroom. A new AGENTS.md line fails this rule.
+# BUDGET_TARGET is display-only. Lower the limit when text moves out.
+# Raise the limit only when approved text moves in.
 BUDGET_LIMIT = 252
 BUDGET_TARGET = 150
 
@@ -95,32 +80,16 @@ def rule_decisions(root):
                      f"{' and '.join(check_decisions.REQUIRED)}"
 
 
-# ---- the tense of a history note (notes/style.md 4) -------------------------
+# ---- tense of a history note -----------------------------------------------
 
-# What a history note may report and what it may not. A note is dated by its own
-# `Amended YYYY-MM-DD` marker; the statement it reports is not. So a note that
-# says what another statement *says*, in the present tense, makes a claim with no
-# date on it, and the claim goes false the next time that statement moves. Three
-# entries went wrong this way: D20.5's note said D19.5's rule "still says" a
-# sentence that T-109 then replaced; D19.5's note called the stage1-against-stage2
-# comparison one "which this decision does not ask for", which T-109's rewrite
-# made the rule ask for; and T-109's own round-2 fix wrote `nothing compares two
-# runs of one compiler`, a present-tense claim about the repository, into
-# D19.5's rule field, which no rule here reads. What silences the rule is the tense of the
-# *reported* verb, not the tense of the note around it: "the rule read X" is a
-# report in the past and no verb of HISTORY_VERBS stands in it, while "until
-# then the rule read: this decision requires two runs" is still red, because
-# SENTENCE_BREAK cuts at the colon and the clause after it is present-tense. A
-# note that reports an old rule quotes it, and unquoted() then hides the words
-# (notes/style.md 4, T-109, T-121 round 2).
+# An amendment date does not date a present-tense claim inside its note.
+# Such a claim becomes stale when the reported rule changes.
+# The reported verb controls the result. Quoted old text does not make a current claim.
 
 # A bare decision tag is a subject at the head of a sentence and nowhere else.
-# At the head is where a note that reports another entry puts it: D17.4 carried
-# `D3.10 decides function types and function pointers` and D20.5 at 8a1eb48
-# carried `D19.5 requires the emitted text to be a function of the program`,
-# and both stand there. Inside a sentence a tag is as often a relative clause
-# that reports nothing, as in D9.1's `every test file D14.4 names NNN_name.ft`,
-# which names a file and not a rule. The lookbehind reads "no character stands
+# A note places a reported entry tag at the sentence head.
+# Inside a sentence, a tag often belongs to a relative clause and reports nothing.
+# The lookbehind reads "no character stands
 # before this one", and it is the head of the *sentence* because
 # history_problems matches one sentence at a time.
 HISTORY_HEAD_TAG = r"(?<![\s\S])D\d+(?:\.\d+)?"
@@ -133,22 +102,15 @@ HISTORY_SUBJECT = (r"(?:th(?:is|at|e) (?:decision|rule|rationale)|its rule"
                    r"|" + HISTORY_HEAD_TAG + r")")
 
 # An adverb may stand between the subject and the verb. "still" is the one that
-# made D20.5 wrong, because it claims the statement has not moved since; "now"
+# can make a note stale because it claims that the statement did not move. "now"
 # is the opposite and the house style of an amendment, and HISTORY_ANCHOR
 # excuses the sentence it stands in.
 HISTORY_ADVERB = (r"(?:\s+(?:still|now|also|already|only|therefore|again|then"
                   r"|no longer))?")
 
 # Up to HISTORY_RUN words may stand between the subject and the verb, with an
-# optional comma against the subject, so that `the rule of D19.5 says` and `this
-# decision, after T-109, says` are reports and not prose. Without it a
-# paraphrase of D20.5's real defect, built only from words both closed lists
-# hold, went green (T-121, round 2). The bound is what stops the run bridging a
-# relative clause on to a later verb: at 3 words `the rule of the other entry,
-# which nobody has touched since, requires two runs` stays green. Widening the
-# run from 0 to 3 words costs 0 problems over the tree and adds 1 sentence to
-# the sweep that drops the dated-note escape, `the rule itself requires` in
-# D19.5's own T-109 note.
+# optional comma after the subject. The bound prevents a match from crossing
+# a relative clause to a later verb.
 HISTORY_RUN = 3
 HISTORY_BETWEEN = HISTORY_ADVERB + r"(?:,?(?:\s+\S+){0," + str(HISTORY_RUN) + r"})?\s+"
 
@@ -174,10 +136,8 @@ HISTORY_REPORT = re.compile(
 HISTORY_ANCHOR = re.compile(r"\bnow\b|20\d\d-\d\d-\d\d|as it stood"
                             r"|from th(?:is|at) date")
 
-# The repair notes/style.md 4 prescribes, which is to append a dated note rather
-# than to edit the words of the old one: a sentence that carries a date and says
-# what the note describes. T-109 wrote one into D19.5 and one into D20.5. A field
-# that holds one excuses every report in it.
+# A dated repair adds a note instead of changing the old words.
+# One dated repair excuses each report in its field.
 HISTORY_DATE = re.compile(r"20\d\d-\d\d-\d\d")
 HISTORY_DATING = re.compile(r"as it stood|from th(?:is|at) date")
 
@@ -186,11 +146,8 @@ HISTORY_DATING = re.compile(r"as it stood|from th(?:is|at) date")
 # one sentence does not excuse the next.
 SENTENCE_BREAK = re.compile(r"(?<=[.;:])\s")
 
-# What this rule cannot see. Each line names the gap and the entry that stands in
-# it, so a reader of a green report knows what the green covers. Every number was
-# measured over the 49 history fields of the 144 entries on 2026-09-13, and each
-# is pinned by a test of HistoryLimitTest in test/knowledge_lint_test.py rather
-# than left in this prose, so a gap that closes fails a test.
+# Each row names one known gap and the text that demonstrates it.
+# HistoryLimitTest verifies the row count and measured limits.
 HISTORY_LIMITS = (
     ("a bare decision tag is a subject only at the head of a sentence",
      "the gap that refused a bare tag everywhere closed on 2026-09-13 (T-122), "
@@ -264,9 +221,7 @@ HISTORY_LABEL = re.compile(r"^- history: ?(.*)$")
 def history_fields(text):
     """Every history field of the decision log, as (tag, body, line of each character).
 
-    The body is the field with its line wrapping removed, because the sentence
-    that repairs D19.5 wraps between "describe the log as" and "it stood on
-    2026-09-12" and a line-at-a-time reader sees neither half (T-121).
+    The body has no line wrapping. Character positions retain their source lines.
     """
     found = []
     tag, pieces = None, None
@@ -324,15 +279,13 @@ QUOTED = re.compile(r"\"[^\"]*\"|`[^`]*`")
 def unquoted(text):
     """The text with every quotation and code span replaced by filler of the same length.
 
-    A note that quotes the sentence it replaces does the thing notes/style.md 4
-    asks for, so the words inside the quotation marks are the old statement and
-    not this note's claim about it.
+    Quoted text is an old statement, not the current note's claim.
     """
     return QUOTED.sub(lambda m: "x" * len(m.group(0)), text)
 
 
 def field_is_dated(body):
-    """Whether this history field carries the dated note notes/style.md 4 prescribes."""
+    """Return whether this history field contains a dated repair."""
     for _, sentence in sentences_of(body):
         text = unquoted(sentence)
         if HISTORY_DATE.search(text) and HISTORY_DATING.search(text):
@@ -380,14 +333,12 @@ def rule_history(root):
     return problems, f"history: {fields} history fields, {dated} with a dated note"
 
 
-# A reference to a document of the repository: a path with a directory, which is
-# what notes/style.md 4 asks a citation to carry after T-099 moved three sections
-# out of AGENTS.md.
+# A document reference contains a repository directory and a Markdown filename.
 DOC_PATH = re.compile(r"(?<![\w/.-])((?:notes|spec|editors|tools|test|src|std)/"
                       r"[A-Za-z0-9_./-]*[A-Za-z0-9_-]\.md)(:\d+)?")
 
-# The one place a line number may follow a document path: the sentence of
-# notes/style.md 4 that refuses the shape has to quote it. The lint reports an
+# One line number can follow a document path because the rule quotes its rejected form.
+# The lint reports an
 # exemption that matches nothing, so a rewritten sentence does not leave a hole.
 EXEMPT_LINE_NUMBERS = (
     ("notes/style.md", "`notes/style.md:158` is not",

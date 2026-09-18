@@ -1,5 +1,5 @@
 #!/bin/bash
-# T-147: count the shipped darwin compiler, corpus, runtime, network, and LSP.
+# Test the shipped Darwin compiler, corpus, runtime, network, and LSP.
 set -euo pipefail
 
 if [ "$#" -ne 0 ] || [ "$(uname -s)" != "Darwin" ]; then

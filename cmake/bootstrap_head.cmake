@@ -10,8 +10,7 @@ file(REMOVE_RECURSE "${OUTPUT}")
 file(MAKE_DIRECTORY "${OUTPUT}")
 file(COPY "${SOURCE}/" DESTINATION "${OUTPUT}")
 
-# Bridge commit B asks for this module when it sees a float. HEAD defines all
-# float runtime functions in std.rt. The empty compatibility module exists only
-# while B builds HEAD. The published standard root does not contain this file.
-file(WRITE "${OUTPUT}/rt_float.ft" "// T-155 bootstrap compatibility module.\n")
+# Some predecessors require rt_float.ft. HEAD defines its functions in std.rt.
+# Create an empty compatibility module only while a predecessor builds HEAD.
+file(WRITE "${OUTPUT}/rt_float.ft" "")
 file(WRITE "${OUTPUT}/.assembled" "HEAD\n")

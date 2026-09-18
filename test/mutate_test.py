@@ -4,8 +4,7 @@
 The runner answers one question for each row of a table: does a test in the
 repository fail when this rule is broken? A wrong answer is silent, so the
 parts that can give one are what this file tests. The failure parser must name
-every test ctest reports, because T-078 shipped a narrower one that dropped six
-names and left a claim in the notes with no evidence behind it. The anchor must
+each test that ctest reports. The anchor must
 match its file exactly once, or the round mutates the wrong line or no line.
 The stale guard must refuse a verdict when the build gave back the baseline's
 binary. And the restore must bring the sources back byte for byte.
@@ -177,7 +176,7 @@ class TestApplyAndRestore(unittest.TestCase):
 
     def test_a_restored_file_gets_a_new_mtime(self):
         # The shared folder hands ninja the mtime, so a restore that kept the
-        # old one is not rebuilt (notes/environment.md 2).
+        # old one is not rebuilt.
         with tempfile.TemporaryDirectory() as root:
             saved = make_tree(root)
             old = os.stat(Path(root) / "a.c").st_mtime_ns
@@ -228,7 +227,7 @@ class TestRunRound(unittest.TestCase):
         self.assertIn("unused parameter", kept)
 
     def test_a_stage_that_hangs_is_a_timeout_and_not_a_catch(self):
-        # A loop rule (D7.5, D17.10) can hang its mutant. The run must record
+        # A loop mutation can hang. The run must record
         # the row and go on, not end 75 rows early with a traceback.
         row, guest, kept = self.round_with(
             {"ctest -R gen": (mutate.TIMEOUT_STATUS, "mutate: the command ran longer")},
@@ -284,7 +283,7 @@ class TestMutatedRows(unittest.TestCase):
     A round rewrites a source. A test that reads the table against the live
     sources then fails inside the round, and the round records the compiler as
     caught when no test of the compiler saw the mutation. `mutated_rows` is what
-    the test and `--check` ask before they report (T-078, round 2, must-fix 1).
+    the test and `--check` ask before they report.
     """
 
     def test_a_clean_tree_carries_no_round(self):
@@ -321,8 +320,8 @@ class TestMutatedRows(unittest.TestCase):
             self.assertIn("1 rows, 0 stale", out.getvalue())
 
     def test_a_second_row_on_the_mutated_lines_is_not_stale(self):
-        # Two rows of the shipped table anchor the same lines (D17.8 and its
-        # probe D17.8b). Applying one leaves the other with no anchor, and that
+        # Two rows of the shipped table anchor the same lines.
+        # Applying one leaves the other with no anchor, and that
         # is the round talking: `--check` reads the text with the applied row
         # put back, so it reports 0 stale.
         with tempfile.TemporaryDirectory() as root:
@@ -549,7 +548,7 @@ class TestTheRealTable(unittest.TestCase):
     These tests read the **live** sources, so they must not run during a round:
     a round rewrites one of them, and a red test here would be recorded as the
     compiler's catch. The class skips on such a tree, and the table's second
-    stage excludes this suite by name as well (T-078, round 2, must-fix 1). A
+    stage excludes this suite by name as well. A
     skip is visible: `unittest` prints `OK (skipped=...)`.
     """
 
@@ -576,11 +575,7 @@ class TestTheRealTable(unittest.TestCase):
     def test_every_row_of_the_table_leaves_no_row_stale_and_names_itself(self):
         """Every row, one at a time, applied the way a round applies it.
 
-        Two rows are not a measurement of 88. T-078 review round 3 applied its
-        76 rows and found the guard dead for D3.14, D8.5 and D20.4,
-        whose replacement text already stood in the file, so `mutated_rows`
-        counted two or three and reported no round at all. The whole sweep runs
-        in about a second, which is the price of a universal that is measured.
+        Apply each row because a sample does not prove the complete table.
         """
         root = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, root)

@@ -1,10 +1,6 @@
 #!/bin/bash
-# test/lsp_binary_test.sh: the language server binary itself, driven by a
-# recorded script on stdin. Every other test of src/lsp drives the modules
-# inside one program; this one runs the artefact the CMake target `fort_lsp`
-# writes, so the entry file src/lsp/main.ft and the wiring around it -- stdin
-# and stdout as the descriptors, the exit status as the process status -- are
-# covered as well. Five tickets depend on that binary.
+# Drive the built language server with recorded input sessions.
+# The test covers src/lsp/main.ft, standard input, standard output, and process status.
 #
 # Four sessions: an orderly one, whose answers are compared byte for byte and
 # whose status is 0; `exit` without a shutdown, whose status is 1; an empty

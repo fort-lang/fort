@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the fort language tests (spec/toolchain.md 7, decisions D14.4 and D14.5).
+"""Run the fort language test corpus.
 
 Every test is a `.ft` file whose expected behavior is encoded in `//!`
 directives; a directory containing `main.ft` is one multi-file test. Each test
@@ -9,10 +9,10 @@ lists the tests the compiler cannot pass yet. A listed test that passes is an
 XPASS and fails the run. `--lint` validates the directives without a compiler, and
 `--verify-ir` runs the LLVM verifier over the module of every test that
 compiles. `--check-json` is a mode of its own: it runs `fort --check --json`
-over every fail test and holds the document of D20.2 against the text form of
-D14.2 instead of judging the test; a test with an `index.json` beside it is
+over each fail test and compares JSON diagnostics with text diagnostics.
+A test with an `index.json` file is
 selected too, and its golden identifier index is held against the `"symbols"`
-of a `--index` run (D20.3).
+of a `--index` run.
 
 Standard library only; Python 3.12.
 """
@@ -33,7 +33,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 
-# The areas of D14.4, in the order the decision lists them.
+# Keep corpus areas in their specified order.
 AREAS = (
     "lexical constants operators casts mutability ownership declarations control switch "
     "defer functions structs enums arrays spans strings pointers globals builtins errors "
@@ -44,14 +44,14 @@ KINDS = ("run", "fail")
 RUN_ONLY = ("args", "link", "stdin", "stdout", "exit", "abort", "signal")
 FAIL_ONLY = ("error", "error-any")
 # Directives that take no text, the ones that take text, and the ones that
-# may be repeated (D14.5).
+# can be repeated.
 BLOCKS = ("stdin", "stdout")
 WITH_TEXT = ("flags", "args", "link", "exit", "signal", "stderr", "error", "error-any")
 REPEATABLE = ("link", "stderr", "error-any")
 HEADER_MARKERS = ("//!", "//<", "//|")
 
 XFAIL_NAME = "xfail.txt"
-# `--cc` must be a clang and its target is named on the command line (D14.1).
+# `--cc` must be clang. The command line names its target.
 DEFAULT_CC = "clang"
 DEFAULT_TARGET = "x86_64-linux-gnu"
 DEFAULT_OPT = "opt-18"
@@ -63,7 +63,7 @@ QEMU_NOTICE_PREFIX = b"qemu: uncaught target signal"
 MAX_EXIT = 255
 # The signals `//! signal:` may name, by their POSIX name without the `SIG`
 # prefix; `//! abort` is the older spelling of `signal: ABRT`. A number is not
-# accepted, since the set is normative (toolchain.md 7.3).
+# accepted because the set is fixed.
 SIGNALS = {
     "ABRT": signal.SIGABRT,
     "BUS": signal.SIGBUS,
@@ -74,12 +74,12 @@ SIGNALS = {
 }
 VERDICTS = ("PASS", "FAIL", "XFAIL", "XPASS", "ERROR")
 
-# The document of `fort --check --json` (D20.2): its keys, the keys of a
+# The `fort --check --json` document keys, the keys of a
 # diagnostic and of a note, and the version this harness reads.
 DOCUMENT_KEYS = ("version", "files", "diagnostics", "symbols")
 DIAGNOSTIC_KEYS = ("file", "line", "col", "end_line", "end_col", "severity", "message", "notes")
 NOTE_KEYS = ("file", "line", "col", "end_line", "end_col", "message")
-# One record of the identifier index and the range nested in its "decl" (D20.3).
+# One identifier index record and its nested declaration range.
 SYMBOL_KEYS = (
     "file",
     "line",
@@ -93,7 +93,7 @@ SYMBOL_KEYS = (
     "decl",
 )
 RANGE_KEYS = ("file", "line", "col", "end_line", "end_col")
-# The kinds of D20.3, spelled as a diagnostic spells them.
+# Identifier index kinds use the same spelling as diagnostics.
 SYMBOL_KINDS = (
     "module",
     "fn",
@@ -110,7 +110,7 @@ SYMBOL_KINDS = (
 )
 DOCUMENT_VERSION = 1
 # The golden identifier index of a test: the "symbols" of its `--index` run,
-# one record per line, beside the test it is about (D20.3).
+# one record per line, beside its test.
 INDEX_NAME = "index.json"
 
 DIRECTIVE_RE = re.compile(r"^//! ([a-z][a-z-]*)(:(.*))?$")
@@ -118,9 +118,8 @@ ANNOTATION_RE = re.compile(r"^(.*?\S)\s*//! error:(.*)$")
 DIAGNOSTIC_RE = re.compile(r"^(.+):(\d+):(\d+): error: (.*)$")
 REPORT_RE = re.compile(r"^(.+):(\d+):(\d+): (error|note): (.*)$")
 
-# The lexer reports a position rather than a range, since the bytes it
-# rejected are not a token (D14.2, D20.4), so its diagnostics are the ones
-# whose range may be empty. These are the messages of `fail` and `fail_text`
+# The lexer reports a position because rejected bytes are not a token.
+# Thus, lexer diagnostic ranges can be empty. These are the messages of `fail` and `fail_text`
 # in src/bootstrap/lexer.c, by the part of each that never varies; a lexer
 # message that is not here fails the range check of a fail test, which is the
 # reminder to add it or to give the diagnostic a range.
@@ -158,9 +157,8 @@ NAME_RE = re.compile(r"^[a-z0-9_]+$")
 class Test:
     """One language test: a single `.ft` file or a directory with `main.ft`.
 
-    Paths are relative to the corpus root (test/lang) with forward slashes;
-    `path` names the directory for a multi-file test and `entry` the file
-    handed to the compiler (D14.4).
+    Paths are relative to test/lang and use forward slashes.
+    `path` names a multi-file directory. `entry` names the compiler input.
     """
 
     path: str
@@ -179,7 +177,7 @@ class Test:
     errors: list = dataclasses.field(default_factory=list)  # (file, line, substring)
     error_any: list = dataclasses.field(default_factory=list)
     problems: list = dataclasses.field(default_factory=list)
-    golden_index: bool = False  # an index.json beside it: the golden of D20.3
+    golden_index: bool = False  # an index.json file contains its golden index
 
     @property
     def multi(self):
@@ -200,7 +198,7 @@ class Proc:
 
 @dataclasses.dataclass
 class Diagnostic:
-    """One `error:` or `note:` line of D14.2, or one record of a document."""
+    """One text diagnostic or one diagnostic document record."""
 
     file: str
     line: int
@@ -209,7 +207,7 @@ class Diagnostic:
     severity: str = "error"
 
     def text(self):
-        """The line D14.2 prints for it."""
+        """Return the text form of this diagnostic."""
         return "%s:%d:%d: %s: %s" % (self.file, self.line, self.column, self.severity, self.message)
 
 
@@ -226,7 +224,7 @@ class Result:
         return "%s %s%s" % (self.verdict, self.test.path, suffix)
 
 
-# ---- directives (D14.5) -------------------------------------------------------------
+# ---- directives --------------------------------------------------------------
 
 
 def parse_main(root, test, text):
@@ -344,7 +342,7 @@ def _apply_text_directive(root, test, name, value, problem, lineno):
         else:
             test.exit = int(value)
     elif name == "signal":
-        # The set of toolchain.md 7.3, and nothing else: a number is not portable
+        # Accept only fixed POSIX names. Signal numbers are not portable
         # across the harness's native and qemu paths.
         if value not in SIGNALS:
             problem(lineno, "signal: expected one of %s" % ", ".join(sorted(SIGNALS)))
@@ -359,9 +357,8 @@ def _apply_text_directive(root, test, name, value, problem, lineno):
 def parse_body(test, file, lines, first_lineno):
     """Collect the `//! error:` annotations from the code lines of `file`.
 
-    `file` is relative to the corpus root. Sibling modules of a multi-file test
-    carry no directives (D14.5), so a `//!` at the start of a line is a problem
-    there; in the entry file it is a directive after the header.
+    `file` is relative to the corpus root. Sibling modules cannot contain directives.
+    In the entry file, a later `//!` is a directive after the header.
     """
     sibling = file != test.entry
 
@@ -407,7 +404,7 @@ def load_test(root, test):
     return test
 
 
-# ---- discovery (D14.4) ----------------------------------------------------------------
+# ---- discovery ---------------------------------------------------------------
 
 
 def numbering_problems(where, names):
@@ -434,7 +431,7 @@ def numbering_problems(where, names):
 def _discover_dir(root, directory, expected_kind, numbered, tests, problems):
     """Register the tests directly under `directory` (an area or programs/).
 
-    Directory tests (`<name>/main.ft`) exist only under `modules` (D14.4).
+    Directory tests (`<name>/main.ft`) exist only under `modules`.
     """
     names = []
     for entry in sorted(directory.iterdir()):
@@ -449,7 +446,7 @@ def _discover_dir(root, directory, expected_kind, numbered, tests, problems):
             else:
                 names.append(entry.name)
                 test = Test(rel, rel + "/main.ft", expected_kind)
-                # The golden identifier index of D20.3 lives beside the test's
+                # The golden identifier index lives beside the test's
                 # sources, so it is the one file there that is not fort.
                 test.golden_index = (entry / INDEX_NAME).is_file()
                 tests.append(test)
@@ -505,11 +502,8 @@ WALKED_TOPS = ("run", "fail", "programs")
 def _report_misplaced_tests(root, problems):
     """Report a `<x>_test.ft` in a directory discovery does not walk.
 
-    Everything below `root` other than `run`, `fail` and `programs` is invisible
-    to discovery -- `test/fort/support`, which holds the code several module
-    tests share, is the only such directory today -- so a test dropped there
-    would run nowhere and say nothing, which is the hole the root's `bad test
-    name` rule closes one directory up (T-079).
+    Discovery ignores roots other than `run`, `fail`, and `programs`.
+    This check reports a test placed in another directory.
     """
     for entry in sorted(root.rglob("*.ft")):
         rel = entry.relative_to(root)
@@ -522,11 +516,10 @@ def _report_misplaced_tests(root, problems):
 def _discover_module_tests(root, tests, problems):
     """Register the `<x>_test.ft` files directly under `root` as run tests.
 
-    That is the shape of `test/fort`, where a test is a program importing a
-    module of the self-hosted compiler with `-I` rather than an area of the
-    language corpus (D14.4 areas do not describe the compiler's own modules),
-    so a test is named after the module it exercises instead of numbered.
-    `test/lang` holds no such file, so nothing there changes.
+    test/fort uses unnumbered programs that import compiler modules with `-I`.
+    Each test takes the name of the module that it tests.
+    These tests do not belong to the numbered language corpus areas.
+    `test/lang` contains no root-level module test.
     """
     for entry in sorted(root.glob("*.ft")):
         rel = entry.relative_to(root).as_posix()
@@ -581,7 +574,7 @@ def exclude_exact(tests, paths):
 
 
 def parse_diagnostics(stderr, root):
-    """The D14.2 error lines of a compiler's stderr, in order."""
+    """Return compiler error lines in order."""
     diagnostics = []
     for raw in stderr.decode("utf-8", errors="replace").split("\n"):
         match = DIAGNOSTIC_RE.match(raw)
@@ -594,10 +587,10 @@ def parse_diagnostics(stderr, root):
 
 
 def parse_reports(stderr, root):
-    """Every `error:` and `note:` line of a compiler's stderr, in order (D14.2).
+    """Return each compiler error and note in order.
 
     A note belongs to the error before it, which is what the document nests
-    (D20.2), so the two forms are compared as one sequence.
+    so the two forms are compared as one sequence.
     """
     reports = []
     for raw in stderr.decode("utf-8", errors="replace").split("\n"):
@@ -616,7 +609,7 @@ def parse_reports(stderr, root):
 
 
 def _normalize_file(file, root):
-    """Diagnostic paths are relative to the corpus root (D14.4); absolute ones are mapped back."""
+    """Map an absolute diagnostic path back to the corpus root."""
     path = Path(file)
     if path.is_absolute():
         try:
@@ -645,9 +638,8 @@ def _describe_status(returncode):
 def judge_compile(proc, expect_success):
     """Return (verdict, reason) for the compiler step, or (None, "") when it is as expected.
 
-    Exit 0 and 1 are the compiler's answer about the test (D14.1); 2 (usage,
-    toolchain or internal error), a signal or a timeout are not, so they are
-    reported as ERROR.
+    Exit 0 and 1 are compiler results. Exit 2, a signal, or a timeout
+    indicates a harness ERROR.
     """
     if proc.timed_out:
         return "ERROR", "compiler timed out"
@@ -703,7 +695,7 @@ def _stdout_problems(expected, actual):
 
 
 def judge_fail(test, compile_proc, root=ROOT):
-    """Judge a fail test: exit 1 and only annotated diagnostics (D14.5)."""
+    """Judge a fail test: exit 1 with only annotated diagnostics."""
     verdict, reason = judge_compile(compile_proc, False)
     if verdict:
         return verdict, reason
@@ -733,11 +725,9 @@ def judge_fail(test, compile_proc, root=ROOT):
 
 
 def judge_run(test, compile_proc, link_proc, run_proc):
-    """Judge a run test: compiler exit 0, then stdout, status and stderr (D14.5).
+    """Judge a run test through compile status, stdout, run status, and stderr.
 
-    A failure of the harness's own link step or of launching the program is
-    the toolchain's, not the test's, so it is an ERROR like a compiler exit 2
-    (D14.1); a program that times out is a FAIL.
+    A harness link or launch failure is an ERROR. A program timeout is a FAIL.
 
     The `stderr:` substrings are looked for after dropping the notice qemu-user
     appends when a signal kills the program, so an `abort` or `signal:` test
@@ -755,7 +745,7 @@ def judge_run(test, compile_proc, link_proc, run_proc):
     if run_proc.timed_out:
         return "FAIL", "program timed out"
     problems = _stdout_problems(test.stdout, run_proc.stdout)
-    # `abort` is the spelling of `signal: ABRT` (toolchain.md 7.3).
+    # `abort` is the spelling of `signal: ABRT`.
     wanted = "ABRT" if test.abort else test.signal_name
     if wanted:
         if run_proc.returncode != -SIGNALS[wanted]:
@@ -772,13 +762,13 @@ def judge_run(test, compile_proc, link_proc, run_proc):
     return "PASS", ""
 
 
-# ---- the check document (D20.2) -------------------------------------------------------
+# ---- check document ---------------------------------------------------------
 
 
 def source_lines(root, file, cache):
     """The lines of a file of the closure as byte strings, or None.
 
-    Columns are byte columns (D14.2), so the file is read as bytes; a file
+    Columns count bytes, so the file is read as bytes. A file
     ending in a newline yields a last, empty line, which is where the end of
     the file is.
     """
@@ -793,23 +783,20 @@ def source_lines(root, file, cache):
 def empty_range_is_allowed(record, lines):
     """Whether an empty range is a position the compiler has no extent for.
 
-    Three are: the 1:1 of an error without a position in the file (D14.2), the
-    end of the file, where the token has no bytes, and a lexical error, whose
-    message says so, since the lexer reports the position of bytes that are
-    not a token (D14.2, D20.4). Every other diagnostic covers the tokens it is
-    about, so its range is non-empty.
+    Three cases qualify. An error can lack a file position and use 1:1.
+    The position can be at file end. A lexical error can point at non-token bytes.
     """
     if (record["line"], record["col"]) == (1, 1):
         return True
     if record["line"] == len(lines) and record["col"] == len(lines[-1]) + 1:
         return True
     # A record of the index has no message and no other empty range: a name
-    # token has bytes (D20.3).
+    # token has bytes.
     return any(text in record.get("message", "") for text in LEXICAL_MESSAGES)
 
 
 def range_problems(where, record, lines):
-    """The problems of one range of D20.4: ordered, inside its file, non-empty.
+    """Return problems for one ordered, in-file, non-empty range.
 
     The start is inclusive and the end exclusive, so a column one past the last
     byte of its line is in range.
@@ -836,7 +823,7 @@ def _keys_problem(where, record, keys):
 
 
 def _record_problems(where, record, keys, root, files, cache):
-    """The shape and the range of one diagnostic or note (D20.2, D20.4)."""
+    """Return shape and range problems for one diagnostic or note."""
     problems = _keys_problem(where, record, keys)
     if problems:
         return problems
@@ -844,7 +831,7 @@ def _record_problems(where, record, keys, root, files, cache):
 
 
 def render_index(symbols):
-    """The golden form of the `"symbols"` array: one record per line (D20.3).
+    """Render a golden `"symbols"` array with one record per line.
 
     The keys keep the document's order, so a golden file is a diff of the index
     and never of a formatter.
@@ -853,7 +840,7 @@ def render_index(symbols):
 
 
 def golden_index_problems(root, path):
-    """The lint of a golden index: one record per line, each of the shape of D20.3.
+    """Return lint problems for a golden index file.
 
     A record is also held against `render_index`, so a golden file that was
     hand-edited into another spelling of the same records fails here rather
@@ -888,7 +875,7 @@ def golden_index_problems(root, path):
 
 
 def _range_problems(where, record, root, files, cache):
-    """One range of D20.4: in a file of the closure, inside it and ordered."""
+    """Return problems for one ordered range inside a closure file."""
     problems = []
     file = _normalize_file(record["file"], root)
     if file not in files:
@@ -902,13 +889,11 @@ def _range_problems(where, record, root, files, cache):
 
 
 def symbol_problems(where, record, root, files, cache):
-    """The problems of one record of the identifier index (D20.3).
+    """Return problems for one identifier index record.
 
-    Its shape, its kind, its type, its own range, and its declaration:
-    `"type"` is a string or null, `"decl"` is a range in the closure, it is
-    null only for a builtin, and on an occurrence that declares the name it is
-    that occurrence's own range -- except on an `as` alias, which declares a
-    name here for a declaration that stands in another file (D9.3).
+    Check the shape, kind, type, range, and declaration.
+    `"type"` is a string or null. `"decl"` is a closure range or null for a builtin.
+    A declaration points to its own range. An `as` alias can point into another file.
     """
     problems = _keys_problem(where, record, SYMBOL_KEYS)
     if problems:
@@ -918,13 +903,13 @@ def symbol_problems(where, record, root, files, cache):
     if not isinstance(record["is_decl"], bool):
         problems.append("%s: is_decl is %r" % (where, record["is_decl"]))
     if record["type"] is not None and not isinstance(record["type"], str):
-        # The type is absent only when the declaration failed to check (D20.3).
+        # The type is absent only when the declaration failed to check.
         problems.append("%s: type is %r" % (where, record["type"]))
     problems.extend(_range_problems(where, record, root, files, cache))
     decl = record["decl"]
     if decl is None:
         # No source declares a builtin, and everything else is declared
-        # somewhere (D12.2, D20.3).
+        # somewhere.
         if record["kind"] != "builtin":
             problems.append('%s: only a builtin has a null "decl"' % where)
         return problems
@@ -936,13 +921,13 @@ def symbol_problems(where, record, root, files, cache):
     elsewhere = _normalize_file(decl["file"], root) != _normalize_file(record["file"], root)
     if record["is_decl"] and not same_range and not elsewhere:
         # A declaration is its own "decl"; only an alias declares a name here
-        # for something declared in another file (D9.3, D20.3).
+        # for something declared in another file.
         problems.append('%s: the declaration\'s "decl" is not its own range' % where)
     return problems
 
 
 def document_problems(doc, root, cache, indexed=False):
-    """The problems of one document of D20.2: its shape, its files and its ranges."""
+    """Return shape, file, and range problems for one diagnostic document."""
     if not isinstance(doc, dict):
         return ["the document is not an object"]
     problems = _keys_problem("document", doc, DOCUMENT_KEYS)
@@ -956,7 +941,7 @@ def document_problems(doc, root, cache, indexed=False):
             problems.append("files: '%s' cannot be read" % file)
     if not indexed:
         # The index is filled by --index alone and is a member of every
-        # document either way (D20.2, D20.3).
+        # document either way.
         if doc["symbols"] != []:
             problems.append("symbols is not empty: %r" % (doc["symbols"],))
     else:
@@ -973,7 +958,7 @@ def document_problems(doc, root, cache, indexed=False):
             problems.append("%s: severity is %r" % (where, diagnostic["severity"]))
         if diagnostic["severity"] == "note" and after_error:
             # A note belongs to the error before it and is nested in its
-            # "notes", never listed beside it (D20.2, D14.2).
+            # "notes", never listed beside it.
             problems.append('%s: a note after an error must be nested in its "notes"' % where)
         after_error = after_error or diagnostic["severity"] == "error"
         for j, note in enumerate(diagnostic["notes"]):
@@ -994,10 +979,10 @@ def _report_of(record, root, severity):
 
 
 def document_reports(doc, root):
-    """The document's records in the order the text form prints them (D20.2).
+    """Return document records in text-output order.
 
     Each diagnostic comes first and the notes nested in it follow, which is
-    where the text form of D14.2 puts them.
+    where the text form puts them.
     """
     reports = []
     for diagnostic in doc["diagnostics"]:
@@ -1008,7 +993,7 @@ def document_reports(doc, root):
 
 
 def sequence_problems(from_text, from_json):
-    """Where the document and the text form differ, as sequences (D20.2).
+    """Return sequence differences between text and document records.
 
     The document lists its diagnostics in the order they were reported, which
     is the order of the text form, so a reordered or a duplicated record is a
@@ -1030,7 +1015,7 @@ def sequence_problems(from_text, from_json):
 
 
 def _answer_problem(proc, label):
-    """(verdict, reason) when `proc` is not an answer of D14.1: exit 0 or 1."""
+    """Return a verdict when `proc` is not compiler result 0 or 1."""
     if proc.timed_out:
         return "ERROR", "%s: compiler timed out" % label
     if not proc.started:
@@ -1048,7 +1033,7 @@ def _answer_problem(proc, label):
 
 
 def files_problems(test, files):
-    """What `"files"` must hold whatever the run reported (D20.2).
+    """Return missing required entries from `"files"`.
 
     It lists every file the compiler read, so the entry file is always among
     them; every other file a diagnostic is about is checked with that
@@ -1062,10 +1047,10 @@ def files_problems(test, files):
 
 
 def index_of_the_test(test, symbols):
-    """The records of `symbols` that are about the test's own files (D20.3).
+    """Return symbol records for the test's own files.
 
     The index covers every module of the closure that was checked, and every
-    closure holds `std.rt` and what it imports (D9.10), so a run over any test
+    closure holds `std.rt` and its imports. Thus, a run over any test
     answers with the whole standard library's records too. Those cannot stand
     in a golden: their file names are the `--std-dir` the run was given, which
     is a build directory and differs between machines. The golden therefore
@@ -1077,7 +1062,7 @@ def index_of_the_test(test, symbols):
 
 
 def golden_index_diff(test, symbols, root):
-    """The first line on which the index differs from the test's golden (D20.3).
+    """Return the first difference from the test's golden index.
 
     The golden is the `"symbols"` of the run over the test's own files, one
     record per line, so a mismatch names the line and shows both spellings of
@@ -1103,20 +1088,16 @@ def golden_index_diff(test, symbols, root):
 def judge_check_json(test, text_proc, json_proc, root=ROOT):
     """Judge one test's `--check --json` run against its own text form.
 
-    The document must be the only thing on stdout and have the shape of D20.2,
-    every range of D20.4 must lie inside its file, `"files"` must name the
-    entry and every file a diagnostic is about, and the two
-    runs must agree on the exit status and, record for record and in order, on
-    the errors and notes the text form of D14.2 prints. A run that exits 2 is
-    not an answer (D14.1) and must leave stdout empty, which is how a client
-    tells a crash from a verdict (D20.2). A test with a golden index was run
-    with `--index`, so its `"symbols"` must match that file byte for byte
-    (D20.3).
+    The document must be the only stdout content and must have the required shape.
+    Each range must lie inside its file. `"files"` must name each relevant file.
+    Both runs must agree on status and ordered diagnostics.
+    Exit 2 must leave stdout empty, so clients can distinguish a crash from a verdict.
+    For `--index`, `"symbols"` must match the golden file byte for byte.
     """
     document_verdict, document_reason = _answer_problem(json_proc, "--json")
     if document_verdict and json_proc.stdout:
         # Exit 2 with a document on stdout is the one contract a client cannot
-        # work around, so it is a failure and not an error (D20.2).
+        # work around, so it is a failure and not an error.
         return "FAIL", "stdout is not empty after %s" % _describe_status(json_proc.returncode)
     for proc, label in ((text_proc, "text"), (json_proc, "--json")):
         verdict, reason = _answer_problem(proc, label)
@@ -1222,9 +1203,9 @@ def run_process(argv, cwd, env, timeout, stdin=b""):
 
 
 def compile_command(config, test, output, compile_only=False, emit_ir=False):
-    """`fort --cc CC --std-dir D <flags> [-c|-S] -o <output> <entry>` (toolchain.md 7.3).
+    """Build a fort compile command.
 
-    `-S` stops after the LLVM IR module (D14.1, D19.1).
+    `-S` stops after the LLVM IR module.
     """
     argv = [config.fort, "--cc", config.cc, "--std-dir", config.std_dir]
     argv.extend(test.flags)
@@ -1237,12 +1218,10 @@ def compile_command(config, test, output, compile_only=False, emit_ir=False):
 
 
 def check_command(config, test, as_json, indexed=False):
-    """`fort --check [--json] [--index] <flags> <entry>`: the front end alone (D20.1).
+    """Build a fort front-end check command.
 
-    `-o`, `-c`, `-S` and `--cc` are unused under `--check`, so the command
-    carries neither an output nor a compiler; `--json` turns the text
-    diagnostics into the one document of D20.2 on stdout, and `--index` fills
-    that document's identifier index (D20.3).
+    `--check` does not use `-o`, `-c`, `-S`, or `--cc`.
+    `--json` writes one document to stdout. `--index` fills its identifier index.
     """
     argv = [config.fort, "--check", "--std-dir", config.std_dir]
     if as_json:
@@ -1257,17 +1236,13 @@ def check_command(config, test, as_json, indexed=False):
 def link_command(config, test, prog, obj):
     """`<cc> --target=<triple> -o prog prog.o <link: files>` for a test with helpers.
 
-    The object holds the whole program, the runtime included (D9.10, D13.1),
-    so the link takes no object beside the helpers.
-    `--cc` is a clang and names its target on the command line (D14.1, D14.3),
-    so the harness spells the triple here exactly as the compiler does, and
-    `-O1` as well: the compiler builds the fort side at `-O1` (toolchain.md 2),
-    and a helper built at `-O0` cannot see a wrong `zeroext`/`signext` on the
-    fort side, because an unoptimised callee spills its narrow parameter to a
-    stack slot and re-narrows it. At `-O1` the callee keeps the argument under
-    the assertion its parameter attribute states and folds the re-narrowing
-    away, so the caller's wrong extension reaches the arithmetic and the
-    mirror reports it (D9.8, D9.9).
+    The object contains the whole program, including std.rt.
+    Thus, the link takes no object beside the helpers.
+    `--cc` is clang and names its target on the command line.
+    The harness uses the same target triple as the compiler.
+    Use `-O1` because the compiler builds the fort side at `-O1`.
+    An `-O0` helper can hide an incorrect `zeroext` or `signext` on fort code.
+    At `-O1`, the wrong extension reaches the arithmetic and the mirror reports it.
     """
     argv = [config.cc, "--target=" + config.target, "-O1", "-o", prog, obj]
     argv.extend(str(config.root / link) for link in test.links)
@@ -1275,7 +1250,7 @@ def link_command(config, test, prog, obj):
 
 
 def verify_command(config, module):
-    """`<opt> -passes=verify -disable-output <module>`: the module must verify (D19.1)."""
+    """Build the opt command that verifies one module."""
     return [config.opt, "-passes=verify", "-disable-output", module]
 
 
@@ -1283,11 +1258,9 @@ def verify_module(config, test, workdir, env, procs):
     """Emit the test's LLVM IR with `-S` and verify it (`--verify-ir`).
 
     Every emitted module must pass `opt -passes=verify`, and this harness is
-    where that is checked (D19.1). Returns (verdict, reason), or (None, "")
+    where that is checked. Return (verdict, reason), or (None, "")
     when the module verifies. A module the verifier rejects is the compiler's
-    fault, hence a FAIL; a verifier that cannot be launched, times out or dies
-    by a signal is the toolchain's, hence an ERROR, like a compiler exit 2
-    (D14.1).
+    fault, hence a FAIL. A verifier launch failure, timeout, or signal is an ERROR.
     """
     module = os.path.join(workdir, "prog.ll")
     argv = compile_command(config, test, module, emit_ir=True)
@@ -1313,7 +1286,7 @@ def execute_check_json(config, test):
     """Run one test twice under `--check`, once with `--json`, and compare.
 
     The two runs are the same mode with one option between them, so what they
-    report must be the same; `judge_check_json` says how (D20.1, D20.2).
+    report must be the same. `judge_check_json` defines the comparison.
     """
     if test.problems:
         return Result(test, "ERROR", "invalid directives: " + test.problems[0])
@@ -1336,7 +1309,7 @@ def execute_check_json(config, test):
 def execute(config, test):
     """Compile, link and run one test in a fresh temporary directory; return its Result.
 
-    The compiler runs with the corpus root as working directory (D14.4) and
+    The compiler runs with the corpus root as its working directory and
     `TMPDIR` pointed at the temporary directory; the program runs inside it.
     """
     if config.check_json:
@@ -1505,8 +1478,7 @@ def main(argv=None):
     selected = exclude_exact(selected, args.exclude_exact)
     if args.check_json:
         # The document is compared on the tests that have something to compare:
-        # every fail test, which has diagnostics (D20.2), and every test with a
-        # golden identifier index beside it (D20.3).
+        # each fail test, which has diagnostics, and each test with a golden index.
         selected = [t for t in selected if t.kind == "fail" or t.golden_index]
     if args.list:
         for test in selected:

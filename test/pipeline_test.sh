@@ -1,17 +1,12 @@
 #!/bin/bash
-# test/pipeline_test.sh: the cross pipeline of toolchain.md 2 on
-# the hand-written LLVM IR modules under test/ir, which are the reference for
-# the form of a module (D19.1). Every emitted module must pass the verifier
-# (D19.1), so each one is verified with `opt -passes=verify` first, then
-# compiled and linked by the target clang, exactly as the compiler does it
-# (D14.3), and run under qemu through binfmt_misc. The link takes the module
-# alone: a module holds the whole program, the runtime included (D9.10,
-# D13.1), so each file here defines the handful of `std.rt` entry points it
-# calls. hello must print its line and exit 0; abort must print its line,
-# then the runtime error of D11.4 on stderr, and die with SIGABRT (status
-# 134); colons must print its line and exit 0 with a `:` inside its one fort
-# symbol. Every binary must be position independent (D14.3). ctest runs it as
-# the unit test `pipeline`.
+# Run the cross pipeline on the hand-written LLVM IR modules under test/ir.
+# Verify each module before the target clang compiles and links it.
+# Run each binary under qemu through binfmt_misc.
+# Each module contains its required `std.rt` entry points and links alone.
+# The hello fixture prints one line and exits 0.
+# The abort fixture reports a runtime error and exits on SIGABRT.
+# The colons fixture keeps a `:` in its fort symbol.
+# Each binary must be position independent.
 set -eu
 
 if [ $# -ne 0 ]; then
@@ -79,8 +74,8 @@ drop_qemu_notice() {
     mv "$1.clean" "$1"
 }
 
-# abort: the buffered line reaches stdout before the failure, the D11.4 line
-# is on stderr, and the process dies with SIGABRT.
+# abort: the buffered line reaches stdout before the runtime error.
+# The error is on stderr, and the process dies with SIGABRT.
 status=0
 "$work/abort" >"$work/abort.out" 2>"$work/abort.err" || status=$?
 [ "$status" -eq 134 ] || fail "abort: exit status $status, expected 134 (SIGABRT)"
@@ -92,18 +87,16 @@ expect_file abort.stderr "$work/abort.err" \
 '
 
 # With both descriptors on one pipe the stdout line is flushed before the
-# error line is written (D11.4).
+# error line is written.
 "$work/abort" >"$work/abort.both" 2>&1 || true
 drop_qemu_notice "$work/abort.both"
 expect_file abort.order "$work/abort.both" 'before
 abort.ft:12:13: runtime error: index 5 out of range for length 3
 '
 
-# colons: an entry base name may hold any byte but `.` (D9.1), so the module
-# path and every symbol of it may hold a `:`. LLVM quotes such a name, the
-# assembler quotes the label in turn and the ELF symbol is the name itself
-# (D9.7), which nothing before the link can check: this is the witness that
-# the toolchain carries the byte end to end.
+# colons: an entry base name can contain any byte except `.`.
+# The module path and its symbols can contain `:`. Only the link checks that
+# LLVM, the assembler, and ELF preserve this byte.
 status=0
 "$work/colons" >"$work/colons.out" 2>"$work/colons.err" || status=$?
 [ "$status" -eq 0 ] || fail "colons: exit status $status, expected 0"

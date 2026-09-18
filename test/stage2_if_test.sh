@@ -1,6 +1,5 @@
 #!/bin/bash
-# The source compiler selects `$if` branches before semantic analysis.
-# D21.2
+# Test stage2 `$if` selection before semantic analysis.
 set -eu
 
 if [ "$#" -ne 2 ]; then
@@ -364,7 +363,7 @@ write_source "$work/shift_char.ft" \
     '$if ((ONE << '\''\0'\'') == 1) { fn main() i32 { return 0; } }'
 expect_check_error "$work/shift_char.ft" "a shift count in a \$if condition must be an integer"
 
-# D4.6 permits numeric and char casts in constant expressions. It does not
+# Constant expressions permit numeric and character casts. They do not
 # permit a cast from or to bool.
 write_source "$work/bool_cast.ft" \
     '$if (cast(true, i32) == 1) { i32 A = 1; }' \

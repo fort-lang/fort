@@ -1,49 +1,11 @@
 #!/usr/bin/env python3
-"""Check the identifier conventions of D1.4 in the project's fort sources.
+"""Check names and line widths in project fort sources.
 
-The names are not the compiler's business (D1.4 says so: "not enforced by the
-compiler"), but they are the project's, and until now nothing but review held
-`std/*.ft` and `src/fort/*.ft` to them. This tool reuses the compiler's own
-front end rather than tokenizing fort a second time: `fort --index file.ft`
-emits one record per resolved identifier occurrence with its kind, its type
-and whether it is the declaration (D20.2, D20.3), so the lint reads the
-checker's answer about what a name denotes instead of guessing it from text.
-A second tokenizer is a second thing that can disagree with the language.
+The tool reads `fort --index` output instead of parsing fort again. It checks each imported
+file once and reports problems as `<file>:<line>:<col>: <message>`.
 
-The rules, all from D1.4:
-  * a module-level constant is UPPER_CASE;
-  * every other name the project chooses -- module, function, struct, enum,
-    enum member, field, global, local, parameter and the `as` alias of an
-    import -- is lower_case with underscores;
-  * a variable never takes its type's name (`point p`, never `point point`),
-    while a field may (`node* node;`), since fields live in no namespace a
-    type could occupy (D7.9).
-An `extern fn` is exempt from the first two: its name is the C symbol's, fixed
-by the library it binds, and renaming it would break the link.
-
-It also holds a line to 100 columns, which is the house style of every other
-language in the repository (D1.3 for markdown, ColumnLimit in .clang-format,
-ruff for Python) rather than a decision about fort; MAX_COLUMNS is the one
-place to change if that reading is wrong.
-
-A file that imports a module of the compiler's own tree needs the search
-roots that module lives under, which `fort` takes as `-I` (D9.2): a
-`test/fort/<x>_test.ft` imports `containers` from `src/fort` and its fixtures
-from `test/fort/support`, so without them every such file reports `module
-'containers' not found` and its names go unchecked. SOURCE_SETS pairs each
-default glob with the roots its files need, and `-I` on the command line adds
-roots for the files named there.
-
-One run of `fort --index` indexes the whole import closure of the file it
-names, and each record carries the file it came from, so one run judges every
-file of the set that the closure holds. The tool takes the first file it has
-not judged as the next entry. A file that no closure reaches becomes an entry
-itself, so every file of the set is judged.
-
-Usage: fort_lint.py --fort build/<preset>/fort [-I dir ...] [file.ft ...].
-With no file it checks the globs of SOURCE_SETS, less SKIPPED. Problems print as
-<file>:<line>:<col>: <message> and the exit status is 1 when it reported
-anything.
+Use `fort_lint.py --fort build/<preset>/fort [-I dir ...] [file.ft ...]`.
+Without file arguments, the tool checks SOURCE_SETS except SKIPPED.
 """
 
 import argparse
@@ -54,19 +16,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-# The default file set: one glob per group of sources, with the module search
-# roots (`-I`, D9.2) a file of that group needs to resolve its imports. The
-# standard library resolves through the copy beside the compiler and needs
-# none; a `test/fort` test imports the compiler's modules from `src/fort` and
-# its shared fixtures from `test/fort/support` (the `-I ../../src/fort -I
-# support` its own directives carry, spelled from the repository root, which is
-# this tool's working directory). `test/fort/support/*.ft` is in the set too:
-# it is fort the project wrote and D1.4 reaches it like any other.
-#
-# A module of the language server is reached through the root `src`, so that
-# its module path is `lsp.json` and not `json`, which is the compiler's
-# (D9.1, D9.7 and the header of src/lsp/json.ft say why). Every set that holds
-# a file importing one therefore carries `src` beside `src/fort`.
+# Pair each source group with the search roots that resolve its imports.
+# Language server modules use the `src` root, so their paths keep the `lsp.` prefix.
 SOURCE_SETS = (
     ("std/*.ft", ()),
     ("std/linux/*.ft", ()),
@@ -77,25 +28,17 @@ SOURCE_SETS = (
 )
 SOURCE_GLOBS = tuple(glob for glob, _ in SOURCE_SETS)
 
-# The sources the default set leaves out. It is empty, and T-131 emptied it.
-# Until then `std/math.ft` and the float module of D18.1 stood here because they
-# hold floats, which the C bootstrap rejects (T-042), and the ctest `fort_lint`
-# ran this tool with that compiler; a second ctest, `fort_lint_float`, ran
-# stage2 over exactly those two files. stage2 runs the one ctest now and reads
-# every source, so nothing is left out and nothing needs a second command.
-# T-132 then folded the float module into `std/rt.ft`. A file named on the
-# command line is linted whatever this tuple says.
+# A file named on the command line is checked even when this tuple excludes it.
 SKIPPED = ()
 MAX_COLUMNS = 100
 
 LOWER_CASE = re.compile(r"\A[a-z_][a-z0-9_]*\Z")
 UPPER_CASE = re.compile(r"\A[A-Z_][A-Z0-9_]*\Z")
-# The head of a type as a declaration spells it (D5.2, D5.3): a possibly
+# The head of a declared type is a possibly
 # qualified name, before any `mut`, `own`, `*`, `@` or `[`.
 TYPE_HEAD = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 
-# The kinds of D20.3 whose spelling the project chooses, and the case each one
-# takes. `constant` is a module-level constant and nothing else (D7.10), so it
+# These identifier index kinds use project names. `constant` is a module constant, so it
 # is the only UPPER_CASE kind; `extern fn` and `builtin` are named elsewhere
 # and appear in neither table.
 LOWER_KINDS = (
@@ -110,13 +53,9 @@ LOWER_KINDS = (
     "parameter",
 )
 UPPER_KINDS = ("constant",)
-# The kinds D1.4 does not reach. An `extern fn` carries the name of the C
-# symbol the foreign library chose, which renaming would unlink; a `builtin` is
-# named by the language (D12). Together with the two tables above these are
-# every kind of D20.3, which test/fort_lint_test.py holds against the decision
-# log so a thirteenth kind cannot be exempted by being forgotten.
+# An `extern fn` keeps the foreign C symbol. A builtin keeps its language-defined name.
 EXEMPT_KINDS = ("extern fn", "builtin")
-# A variable never takes its type's name; a field may (D1.4, D7.9).
+# A variable cannot use its type name. A field can use it.
 SHADOW_KINDS = ("global", "local", "parameter")
 
 
@@ -147,7 +86,7 @@ def default_file_set(root, sets=SOURCE_SETS):
 
 
 def name_problem(kind, name):
-    """The case violation of one declared name, or None (D1.4)."""
+    """Return a declared name's case problem, or None."""
     if kind in UPPER_KINDS:
         if not UPPER_CASE.match(name):
             return "%s '%s' is not UPPER_CASE (D1.4)" % (kind, name)
@@ -158,18 +97,15 @@ def name_problem(kind, name):
         return None
     if kind in EXEMPT_KINDS:
         return None
-    # A kind the tables do not know is reported rather than exempted: the index
-    # gained one (D20.3) and this file has not caught up.
+    # Report an unknown kind instead of silently exempting it.
     return "kind '%s' of '%s' is in no table of tools/fort_lint.py" % (kind, name)
 
 
 def type_base_name(text):
     """The name of the type a declaration spells, or None when it names none.
 
-    `str_buf mut*` is `str_buf` and `strbuf.str_buf` is `str_buf`, since what
-    D1.4 forbids is the type's own name and the module qualifier is a binding
-    a local may shadow (D7.9). A function type (`fn (i32) i32`) names nothing,
-    and neither does the empty type of a module or a struct name.
+    `str_buf mut*` and `strbuf.str_buf` both name `str_buf`.
+    A function type, module, or struct declaration names no variable type here.
     """
     if not text:
         return None
@@ -208,7 +144,7 @@ def record_problems(record):
 
 
 def module_name_problem(path):
-    """A module is named by its file, so the stem carries the rule (D9.1, D1.4)."""
+    """Return a module filename problem, or None."""
     stem = Path(path).stem
     if LOWER_CASE.match(stem):
         return None
@@ -231,7 +167,7 @@ def width_problems(text):
 
 
 def has_source_text(text):
-    """Whether the file holds anything but blank lines and `//` comments (D2.2)."""
+    """Return whether the file contains fort source text."""
     for line in text.split("\n"):
         stripped = line.strip()
         if stripped and not stripped.startswith("//"):
@@ -260,9 +196,7 @@ def real_path(root, recorded, cache):
 def same_file(root, recorded, wanted):
     """Whether an index record's file is the file being linted.
 
-    No production path calls this since T-095, which reads the records of a
-    whole closure through group_records instead. It stays as the one-pair form
-    of the comparison, and test/fort_lint_test.py tests it.
+    Production code groups a complete closure through `group_records`.
     """
     cache = {}
     return real_path(root, recorded, cache) == real_path(root, wanted, cache)
@@ -289,10 +223,7 @@ def diagnostic_problems(document):
 def group_records(document, root, cache):
     """The document's records, in a dict keyed by the real path of their file.
 
-    One run indexes the whole import closure (D20.3) and every record names the
-    file it came from, so one pass over the records serves every file of the
-    closure. The lint reads the dict once per file instead of reading the whole
-    record list once per file.
+    One run indexes a full import closure. Each record names its source file.
     """
     buckets = {}
     for record in document.get("symbols", []):
@@ -303,12 +234,8 @@ def group_records(document, root, cache):
 def file_problems(records, diagnostics, has_source_text=True):
     """The problems one run reports about one file, sorted by position.
 
-    A file the checker rejected is still indexed for everything that resolved
-    (D20.3), so the rules run over those records too: one broken module must
-    not blind the lint for itself or for every module that imports it. What the
-    diagnostics do switch off is the empty-index guard, since a syntax or
-    lexical error stops the file before the checker (D14.2) and leaves no
-    record at all.
+    A rejected file can still contain resolved index records. Check those records.
+    Diagnostics disable the empty-index guard because an early error can produce no records.
     """
     problems = list(diagnostics)
     seen = set()
@@ -320,7 +247,7 @@ def file_problems(records, diagnostics, has_source_text=True):
                 continue
             seen.add(key)
             found.append(key)
-    # The index is already in position order within a file (D20.3), but the
+    # The index already uses position order within a file, but the
     # tool must not depend on that to report in it.
     found.sort(key=lambda problem: (problem[0], problem[1]))
     problems.extend(found)
@@ -347,17 +274,15 @@ def document_problems(document, root, relative, has_source_text=True):
 def index_document(fort, root, relative, includes=(), std_dir=None):
     """Run `fort --index` over one file and return (document, error).
 
-    The compiler exits 0 with an empty diagnostics array on a clean file and 1
-    when it reported one (D20.2); any other status, or output that is not a
-    document, is a broken environment rather than a lint verdict.
+    The compiler exits 0 for a clean file and 1 for reported diagnostics.
+    Another status or malformed output indicates a broken environment.
     """
     command = [str(fort), "--index"]
     if std_dir is not None:
-        # A compiler that is not the one the build put the library beside needs
-        # the directory named, as the driver's --std-dir does (toolchain.md 1).
+        # A compiler outside the build tree needs an explicit standard directory.
         command.extend(["--std-dir", str(std_dir)])
     for include in includes:
-        # The compiler takes one search root per `-I` (D9.2); they are spelled
+        # The compiler takes one search root per `-I`. They are spelled
         # relative to the working directory, which is the repository root.
         command.extend(["-I", str(include)])
     command.append(str(relative))
@@ -375,7 +300,7 @@ def index_document(fort, root, relative, includes=(), std_dir=None):
     except json.JSONDecodeError as error:
         return None, "fort --index wrote no document (%s)" % error
     if proc.returncode == 1 and not document.get("diagnostics"):
-        # Status 1 means "reported a diagnostic" (D20.2). Without one the run
+        # Status 1 means "reported a diagnostic". Without one the run
         # died of something else -- a sanitizer report, say -- and its index
         # says nothing about the file.
         return (
@@ -404,14 +329,11 @@ def lint_files(fort, root, files, std_dir=None):
     the same for every entry and cannot change the rule below, which compares
     the search roots of two files.
 
-    One `fort --index` run indexes the whole import closure of its entry and
-    names the file of every record (D20.3), so the run judges every file of the
+    One `fort --index` run indexes the full import closure and names each record's file.
+    Thus, the run judges each file of the
     set that its closure holds. The loop takes the first file it has not judged
-    as the next entry and judges the closure with it. One run per file instead
-    re-checks each closure once per member, which is O(n^2) checker work: the
-    default set of 166 files took 166 runs and 46.9 s under the debug preset,
-    and took 141 runs and 14.9 s this way (T-095, which measured it). The set
-    is 175 files and 149 runs today, since T-041 added two sources.
+    as the next entry and judges the closure with it. This avoids checking the
+    same closure once for each member.
 
     A run that fails costs its entry the index, not the checks that read only
     the text, and leaves every other file of the set for a run of its own. The
@@ -447,7 +369,7 @@ def lint_files(fort, root, files, std_dir=None):
                 # that file's own import closure and on nothing wider, so the
                 # records of a file in this document are the records its own run
                 # would give. The search roots are the one thing that can change
-                # that closure (D9.2), so a run judges a file only when the roots
+                # that closure. Thus, a run judges a file only when the roots
                 # agree. The default set loses no run to the rule: std/ resolves
                 # through the copy beside the compiler, which is another file,
                 # and the test/fort tests carry the roots of test/fort/support.

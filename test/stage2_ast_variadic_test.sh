@@ -1,6 +1,5 @@
 #!/bin/bash
-# Stage2 prints the C variable-tail mark after the fixed parameter.
-# D9.8, D14.1
+# Test the C variable-tail mark in stage2 AST output through an imported module.
 set -eu
 
 if [ "$#" -ne 1 ]; then

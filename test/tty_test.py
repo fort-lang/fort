@@ -1,22 +1,11 @@
 #!/usr/bin/env python3
-"""test/tty_test.py: the interactive half of D11.5, witnessed on a real pseudo terminal.
+"""Test interactive flushing on a real pseudo terminal.
 
-No language test can see this rule. `test/lang/run_tests.py` captures a program's stdout through
-a pipe, so every language test takes the *non*-interactive path and would stay green with line
-buffering deleted. So this harness compiles `test/tty/print_then_wait.ft` once and runs it twice,
-with its output on a pseudo terminal and with its output on a pipe, and asks what has arrived
-while the program is still blocked in a read of stdin and its exit flush has not happened yet:
+The test observes output while each fixture waits for input. A terminal must
+flush stdout by line. A pipe must keep stdout buffered while stderr remains visible.
+One fixture uses print functions, and one calls std.rt directly.
 
-  on a terminal  both of its lines, in the order it printed them (stdout is line-buffered),
-  on a pipe      the stderr line alone, the stdout line waiting for the flush at exit.
-
-It does that for two programs. `print_then_wait.ft` writes through the print family, which the
-compiler lowers to std.rt (D12.2). `rt_print_then_wait.ft` calls the same entry points itself.
-Both programs must behave the same way -- a lowering that reached a wrong entry point would show
-here -- and no language test can see either one.
-
-ctest runs it as the unit test `tty` (toolchain.md 5.3). Exit status: 0 when both runs behave,
-1 when either does not, 2 when the environment cannot be measured at all.
+Exit 0 when both fixtures pass, 1 for a behavior failure, or 2 for an environment failure.
 """
 
 import argparse
@@ -30,10 +19,10 @@ import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# One program for each runtime, named after the runtime whose buffers it writes through.
+# Both programs use std.rt. The labels distinguish compiler-lowered print calls from direct calls.
 SOURCES = (
-    ("C runtime", "print_then_wait"),
-    ("fort runtime", "rt_print_then_wait"),
+    ("print functions", "print_then_wait"),
+    ("direct std.rt", "rt_print_then_wait"),
 )
 
 # Seconds to wait for output the program has already written; generous, because it is only
@@ -118,7 +107,7 @@ def run_on_pipe(program, env):
 
 
 def compile_program(args, work, stem):
-    """Compile one fort program for the target, as the language harness does (toolchain.md 2)."""
+    """Compile one fort program for the selected target."""
     source = os.path.join(HERE, "tty", stem + ".ft")
     program = os.path.join(work, stem)
     argv = [args.fort, "--cc", args.cc, "--std-dir", args.std_dir, "-o", program, source]
@@ -156,14 +145,14 @@ def main():
                 return 1
             running, rest, status = run_on_terminal(program, env)
             # On a terminal the runtime flushes each line as the program writes it. Both lines
-            # are there while the program still runs, in the order it printed them (D11.5).
+            # are present while the program still runs, in print order.
             check(failures, label + ", terminal, while running", running, "out\nerr\n")
             check(failures, label + ", terminal, after the read", "bye\n" in rest, True)
             check(failures, label + ", terminal, exit status", status, 0)
 
             err, running, out, status = run_on_pipe(program, env)
             # On a pipe the runtime still does not buffer stderr, and stdout still waits for a
-            # flush. A redirected program gives the same bytes in the same few writes (D11.5).
+            # flush. A redirected program gives the same bytes in the same few writes.
             check(failures, label + ", pipe, stderr", err, "err\n")
             check(failures, label + ", pipe, stdout while running", running, "")
             check(failures, label + ", pipe, stdout after exit", out, "out\nbye\n")

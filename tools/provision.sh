@@ -77,9 +77,8 @@ test "$status" = 42
 file "$tmp/x" | grep -q 'x86-64'
 grep -q enabled /proc/sys/fs/binfmt_misc/qemu-x86_64
 
-# The LLVM IR pipeline of toolchain.md 2: opt verifies a module, as every
-# emitted module must (D19.1), clang compiles and links it for x86-64 with
-# the line of D14.3 and qemu runs it.
+# Test the LLVM IR pipeline. opt verifies the module.
+# clang compiles and links it for x86-64. qemu runs it.
 cat > "$tmp/ir.ll" <<'LL'
 target triple = "x86_64-unknown-linux-gnu"
 

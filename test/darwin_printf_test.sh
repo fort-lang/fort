@@ -1,5 +1,5 @@
 #!/bin/bash
-# T-147: test the darwin C variadic call type and darwin printf values.
+# Test the Darwin C variadic call type and printf values.
 set -eu
 
 if [ "$#" -ne 1 ] || [ "$(uname -s)" != "Darwin" ]; then

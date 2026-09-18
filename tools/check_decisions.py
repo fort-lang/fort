@@ -5,21 +5,19 @@ The decision log is the normative source, so the risk of an edit to it is a
 changed meaning that no build and no test can see. This tool answers two
 questions.
 
-With one file it lints the shape (T-100): every entry is `### Dn.m Title` with
-an `owner` field, a `rule` field, and an optional `rationale` and `history`
-field in that order. It prints one line for each problem and exits 1.
+With one file, it checks the field order for each `### Dn.m Title` entry.
+It prints one line for each problem and exits 1.
 
-With `--against OLD` it reads the older revision too, in this form or in the
-`- **Dn.m**` bullet form that came before it, and compares the text of each
-entry. The comparison is the acceptance criterion of T-100: the rule sentences
-move between the fields unchanged. An entry whose words changed is a failure.
+With `--against OLD` it reads the older revision too. It accepts the current
+form and the legacy `- **Dn.m**` bullet form. It compares the text of each
+entry. Rule sentences can move between fields only when their words stay unchanged.
+An entry whose words changed is a failure.
 An entry whose words only moved is a failure too, unless the caller names it
 with `--allow-move Dn.m`: a permutation keeps the words of an entry and can
 still invert its rule, so "widening extends, narrowing truncates" and
-"narrowing extends, widening truncates" are one multiset and two rules. Each
-move a ticket makes on purpose is one flag, which is also the record of it.
-`--allow Dn.m` excuses one entry from both reports, for an amendment the ticket
-carries on purpose; the tool prints the difference it excused, so an excused
+"narrowing extends, widening truncates" are one multiset and two rules.
+Each permitted move needs one flag. `--allow Dn.m` excuses one entry from both reports.
+The tool prints the difference it excused, so an excused
 entry is still read and never silently dropped. Both flags fail when they name
 an entry that is not in both revisions.
 
@@ -71,7 +69,7 @@ def read_fielded(text):
 
 
 def read_bullets(text):
-    """Return {id: text} for the `- **Dn.m**` form that came before T-100."""
+    """Return {id: text} for the legacy `- **Dn.m**` form."""
     entries, current = {}, None
     for line in text.split("\n"):
         match = BULLET.match(line)
